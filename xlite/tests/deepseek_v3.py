@@ -1,3 +1,12 @@
+#!/usr/bin/python3
+# coding=utf-8
+#
+# Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# ===============================================================================
 import math
 from dataclasses import dataclass
 from typing import Tuple, Optional, Literal
@@ -7,13 +16,13 @@ from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from kernel import act_quant, weight_dequant, fp8_gemm
+from tests.deepseek_kernel import weight_dequant
 
 
 world_size = 1
 rank = 0
 block_size = 128
-gemm_impl: Literal["bf16", "fp8"] = "bf16"
+gemm_impl = "bf16"
 attn_impl: Literal["naive", "absorb"] = "absorb"
 
 @dataclass
@@ -29,7 +38,7 @@ class ModelArgs:
         dim (int): Model dimension.
         inter_dim (int): Intermediate dimension for MLP layers.
         moe_inter_dim (int): Intermediate dimension for MoE layers.
-        n_layers (int): Number of transformer layers.
+        n_layers (int): Number of DeepSeek_V3 layers.
         n_dense_layers (int): Number of dense layers in the model.
         n_heads (int): Number of attention heads.
         n_routed_experts (int): Number of routed experts for MoE layers.
@@ -143,22 +152,15 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
         quantization-aware computations depending on the input parameters.
 
     Notes:
-        - If `weight` is quantized (e.g., `element_size() == 1`), a dequantized version 
-          is used for computation.
-        - If `gemm_impl == "bf16"`, dequantization and a `bf16` GEMM operation are applied.
-        - For other cases, the function applies quantization to `x` and uses `fp8_gemm` for computation.
+        - If `weight` is quantized (e.g., `element_size() == 1`), dequantization and a `bf16` GEMM operation are applied.
+        - If `gemm_impl == "bf16"`, a `bf16` GEMM operation are applied.
     """
+    assert gemm_impl == "bf16"
     if weight.element_size() > 1:
         return F.linear(x, weight, bias)
-    elif gemm_impl == "bf16":
+    else:
         weight = weight_dequant(weight, weight.scale)
         return F.linear(x, weight, bias)
-    else:
-        x, scale = act_quant(x, block_size)
-        y = fp8_gemm(x, scale, weight, weight.scale)
-        if bias is not None:
-            y += bias
-        return y
 
 
 class Linear(nn.Module):
@@ -585,8 +587,8 @@ class Gate(nn.Module):
             else:
                 group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1)
             indices = group_scores.topk(self.topk_groups, dim=-1)[1]
-            mask = scores.new_ones(x.size(0), self.n_groups, dtype=bool).scatter_(1, indices, False)
-            scores = scores.masked_fill_(mask.unsqueeze(-1), float("-inf")).flatten(1)
+            mask = torch.zeros_like(scores[...,0]).scatter_(1, indices, True)
+            scores = (scores * mask.unsqueeze(-1)).flatten(1)
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
         if self.score_func == "sigmoid":
@@ -692,7 +694,7 @@ class MoE(nn.Module):
 
 class Block(nn.Module):
     """
-    Transformer block combining attention and feed-forward layers.
+    DeepSeek_V3 block combining attention and feed-forward layers.
 
     Attributes:
         attn (nn.Module): Attention layer (MLA).
@@ -702,10 +704,10 @@ class Block(nn.Module):
     """
     def __init__(self, layer_id: int, args: ModelArgs):
         """
-        Initializes the Transformer block.
+        Initializes the DeepSeek_V3 block.
 
         Args:
-            layer_id (int): Layer index in the transformer.
+            layer_id (int): Layer index in the DeepSeek_V3.
             args (ModelArgs): Model arguments containing block parameters.
         """
         super().__init__()
@@ -716,7 +718,7 @@ class Block(nn.Module):
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
         """
-        Forward pass for the Transformer block.
+        Forward pass for the DeepSeek_V3 block.
 
         Args:
             x (torch.Tensor): Input tensor.
@@ -732,24 +734,24 @@ class Block(nn.Module):
         return x
 
 
-class Transformer(nn.Module):
+class DeepSeek_V3(nn.Module):
     """
-    Transformer model with positional embeddings, multiple layers, and output projection.
+    DeepSeek_V3 model with positional embeddings, multiple layers, and output projection.
 
     Attributes:
-        max_seq_len (int): Maximum sequence length for the transformer.
+        max_seq_len (int): Maximum sequence length for the DeepSeek_V3.
         embed (nn.Module): Embedding layer for input tokens.
-        layers (torch.nn.ModuleList): List of transformer blocks.
+        layers (torch.nn.ModuleList): List of DeepSeek_V3 blocks.
         norm (nn.Module): Layer normalization applied after all blocks.
         head (nn.Module): Output projection layer mapping to vocabulary size.
         freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
     """
     def __init__(self, args: ModelArgs):
         """
-        Initializes the Transformer model.
+        Initializes the DeepSeek_V3 model.
 
         Args:
-            args (ModelArgs): Model arguments containing transformer parameters.
+            args (ModelArgs): Model arguments containing DeepSeek_V3 parameters.
         """
         global world_size, rank
         world_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -768,7 +770,7 @@ class Transformer(nn.Module):
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         """
-        Forward pass for the Transformer model.
+        Forward pass for the DeepSeek_V3 model.
 
         Args:
             tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
@@ -800,5 +802,5 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     args = ModelArgs()
     x = torch.randint(0, args.vocab_size, (2, 128))
-    model = Transformer(args)
+    model = DeepSeek_V3(args)
     print(model(x).size())
