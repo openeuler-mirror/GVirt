@@ -7,7 +7,7 @@
 # ===============================================================================
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False
 
-cd ./tools/quantization/
+cd xlite/tools/quantization/
 
 MODEL_PATH=${1:-"/mnt/nvme2n1/models/deepseek-R1/"}
 QMODEL_PATH=${2:-"/mnt/nvme1n1/models/deepseek-R1-w8a8-rotquant/"}
