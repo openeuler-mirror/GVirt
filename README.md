@@ -1,7 +1,9 @@
 # GVirt
 
 #### 介绍
-A front-end and back-end virtualization framework for the collaborative computing power
+GVirt是一个轻量级的XPU虚拟化前后端推理运行时。提供极简高效的异构运行环境，支持多样性算力协同。
+
+Xlite (GVirt前端)：轻量级DeepSeek-R1模型运行时，支持多样性算力协同，当前支持在昇腾硬件上高效运行。Xlite公开了DeepSeek-R1运行所需的模型构图以及算子，所有算子基于昇腾AscendC开发。Xlite提供了详细的使用和开发文档，见[README](xlite/README.md)。
 
 #### 软件架构
 软件架构说明
