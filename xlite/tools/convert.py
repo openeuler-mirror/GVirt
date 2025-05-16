@@ -86,6 +86,23 @@ def main(hf_ckpt_path, save_path, n_layers, n_experts, mp):
                         new_param = param.narrow(dim, i * shard_size, shard_size).contiguous()
                     state_dicts[i][name] = new_param
 
+                    if "ffn" in name and "w1" in name:
+                        name_w13 = name.replace("w1", "w13")
+                        if name_w13 not in state_dicts[i].keys():
+                            shape = list(new_param.size())
+                            shape[dim] *= 2
+                            state_dicts[i][name_w13] = torch.zeros(*shape, dtype=new_param.dtype, device=new_param.device)
+                        state_dicts[i][name_w13].narrow(dim, 0, new_param.size(dim)).copy_(new_param).contiguous()
+                        del state_dicts[i][name]
+                    elif "ffn" in name and "w3" in name:
+                        name_w13 = name.replace("w3", "w13")
+                        if name_w13 not in state_dicts[i].keys():
+                            shape = list(new_param.size())
+                            shape[dim] *= 2
+                            state_dicts[i][name_w13] = torch.zeros(*shape, dtype=new_param.dtype, device=new_param.device)
+                        state_dicts[i][name_w13].narrow(dim, new_param.size(dim), new_param.size(dim)).copy_(new_param).contiguous()
+                        del state_dicts[i][name]
+
     os.makedirs(save_path, exist_ok=True)
 
     for i in trange(mp):

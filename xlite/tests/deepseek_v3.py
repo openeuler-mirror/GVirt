@@ -514,9 +514,8 @@ class MLP(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        self.w1 = ColumnParallelLinear(dim, inter_dim)
+        self.w13 = ColumnParallelLinear(dim, inter_dim * 2)
         self.w2 = RowParallelLinear(inter_dim, dim)
-        self.w3 = ColumnParallelLinear(dim, inter_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -528,7 +527,9 @@ class MLP(nn.Module):
         Returns:
             torch.Tensor: Output tensor after MLP computation.
         """
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        y = self.w13(x)
+        y1, y3 = torch.split(y, y.shape[-1] // 2, dim=-1)
+        return self.w2(F.silu(y1) * y3)
 
 
 class Gate(nn.Module):
@@ -615,9 +616,8 @@ class Expert(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        self.w1 = Linear(dim, inter_dim)
+        self.w13 = Linear(dim, inter_dim * 2)
         self.w2 = Linear(inter_dim, dim)
-        self.w3 = Linear(dim, inter_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -629,7 +629,9 @@ class Expert(nn.Module):
         Returns:
             torch.Tensor: Output tensor after expert computation.
         """
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        y = self.w13(x)
+        y1, y3 = torch.split(y, y.shape[-1] // 2, dim=-1)
+        return self.w2(F.silu(y1) * y3)
 
 
 class MoE(nn.Module):
