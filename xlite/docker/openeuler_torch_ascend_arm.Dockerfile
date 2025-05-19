@@ -59,11 +59,10 @@ RUN source /opt/openEuler/llvm-toolset-17/enable && clang -v && \
 ENV PATH=/root/Python-3.11/bin:$PATH
 ENV LD_LIBRARY_PATH=/root/Python-3.11/lib:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/root/Python-3.11/lib/python3.11/site-packages:$PYTHONPATH
-RUN pip config set global.index-url 'https://pypi.tuna.tsinghua.edu.cn/simple' && \
-    pip config set global.extra-index-url 'https://mirrors.tools.huawei.com/pypi/simple' && \
-    pip config set global.trusted-host 'pypi.tuna.tsinghua.edu.cn mirrors.tools.huawei.com'
+RUN pip config set global.index-url 'https://mirrors.huaweicloud.com/repository/pypi/simple' && \
+    pip config set global.trusted-host 'mirrors.huaweicloud.com'
 
-RUN pip install pybind11 && pip install pyyaml && pip install transformers && pip install decorator && pip install scipy && pip install attrs && pip install psutil
+RUN pip install pybind11 && pip install pyyaml && pip install transformers && pip install decorator && pip install scipy && pip install attrs && pip install psutil && pip install wheel
 
 ####################### CANN #######################
 WORKDIR /root
@@ -85,6 +84,7 @@ RUN curl -s -k "https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%20
     bash /root/Ascend-cann-kernels-910b.run --install -q && \
     rm /root/*.run
 RUN echo "source /usr/local/Ascend/ascend-toolkit/set_env.sh" >> /root/.bashrc
+RUN echo "source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash" >> /root/.bashrc
 
 ####################### torch npu #######################
 RUN pip install 'numpy<2.0.0' && pip install torchvision==0.16.0
