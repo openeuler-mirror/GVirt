@@ -1,3 +1,12 @@
+#!/usr/bin/python3
+# coding=utf-8
+#
+# Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# ===============================================================================
 import os
 import shutil
 from argparse import ArgumentParser
@@ -30,7 +39,7 @@ mapping = {
 }
 
 
-def main(hf_ckpt_path, save_path, n_experts, mp):
+def main(hf_ckpt_path, save_path, n_layers, n_experts, mp):
     """
     Converts and saves model checkpoint files into a specified format.
 
@@ -50,8 +59,10 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
     for file_path in tqdm(glob(os.path.join(hf_ckpt_path, "*.safetensors"))):
         with safe_open(file_path, framework="pt", device="cpu") as f:
             for name in f.keys():
-                if "model.layers.61" in name:
-                    continue
+                if name.startswith("model.layers."):
+                    layer_num = int(name.split(".")[2])
+                    if layer_num >= n_layers:
+                        continue
                 param: torch.Tensor = f.get_tensor(name)
                 if name.startswith("model."):
                     name = name[len("model."):]
@@ -75,6 +86,23 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                         new_param = param.narrow(dim, i * shard_size, shard_size).contiguous()
                     state_dicts[i][name] = new_param
 
+                    if "ffn" in name and "w1" in name:
+                        name_w13 = name.replace("w1", "w13")
+                        if name_w13 not in state_dicts[i].keys():
+                            shape = list(new_param.size())
+                            shape[dim] *= 2
+                            state_dicts[i][name_w13] = torch.zeros(*shape, dtype=new_param.dtype, device=new_param.device)
+                        state_dicts[i][name_w13].narrow(dim, 0, new_param.size(dim)).copy_(new_param).contiguous()
+                        del state_dicts[i][name]
+                    elif "ffn" in name and "w3" in name:
+                        name_w13 = name.replace("w3", "w13")
+                        if name_w13 not in state_dicts[i].keys():
+                            shape = list(new_param.size())
+                            shape[dim] *= 2
+                            state_dicts[i][name_w13] = torch.zeros(*shape, dtype=new_param.dtype, device=new_param.device)
+                        state_dicts[i][name_w13].narrow(dim, new_param.size(dim), new_param.size(dim)).copy_(new_param).contiguous()
+                        del state_dicts[i][name]
+
     os.makedirs(save_path, exist_ok=True)
 
     for i in trange(mp):
@@ -89,8 +117,9 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--hf-ckpt-path", type=str, required=True)
     parser.add_argument("--save-path", type=str, required=True)
-    parser.add_argument("--n-experts", type=int, required=True)
+    parser.add_argument("--n-layers", type=int, default=61)
+    parser.add_argument("--n-experts", type=int, default=256)
     parser.add_argument("--model-parallel", type=int, required=True)
     args = parser.parse_args()
     assert args.n_experts % args.model_parallel == 0, "Number of experts must be divisible by model parallelism"
-    main(args.hf_ckpt_path, args.save_path, args.n_experts, args.model_parallel)
+    main(args.hf_ckpt_path, args.save_path, args.n_layers, args.n_experts, args.model_parallel)

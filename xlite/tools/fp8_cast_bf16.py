@@ -1,5 +1,15 @@
+#!/usr/bin/python3
+# coding=utf-8
+#
+# Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# ===============================================================================
 import os
 import json
+import shutil
 from argparse import ArgumentParser
 from glob import glob
 from tqdm import tqdm
@@ -7,7 +17,7 @@ from tqdm import tqdm
 import torch
 from safetensors.torch import load_file, save_file
 
-from kernel import weight_dequant
+from tests.deepseek_kernel import weight_dequant_preblock
 
 def main(fp8_path, bf16_path):
     """
@@ -57,14 +67,14 @@ def main(fp8_path, bf16_path):
         file_name = weight_map[tensor_name]
         if file_name not in loaded_files:
             file_path = os.path.join(fp8_path, file_name)
-            loaded_files[file_name] = load_file(file_path, device="cuda")
+            loaded_files[file_name] = load_file(file_path, device="cpu")
         return loaded_files[file_name][tensor_name]
 
     safetensor_files = list(glob(os.path.join(fp8_path, "*.safetensors")))
     safetensor_files.sort()
     for safetensor_file in tqdm(safetensor_files):
         file_name = os.path.basename(safetensor_file)
-        current_state_dict = load_file(safetensor_file, device="cuda")
+        current_state_dict = load_file(safetensor_file, device="cpu")
         loaded_files[file_name] = current_state_dict
         
         new_state_dict = {}
@@ -77,7 +87,7 @@ def main(fp8_path, bf16_path):
                     # Get scale_inv from the correct file
                     scale_inv = get_tensor(scale_inv_name)
                     fp8_weight_names.append(weight_name)
-                    new_state_dict[weight_name] = weight_dequant(weight, scale_inv)
+                    new_state_dict[weight_name] = weight_dequant_preblock(weight, scale_inv)
                 except KeyError:
                     print(f"Warning: Missing scale_inv tensor for {weight_name}, skipping conversion")
                     new_state_dict[weight_name] = weight
@@ -91,8 +101,11 @@ def main(fp8_path, bf16_path):
         if len(loaded_files) > 2:
             oldest_file = next(iter(loaded_files))
             del loaded_files[oldest_file]
-            torch.cuda.empty_cache()
-    
+
+    for file_path in glob(os.path.join(fp8_path, "*token*")):
+        new_file_path = os.path.join(bf16_path, os.path.basename(file_path))
+        shutil.copyfile(file_path, new_file_path)
+
     # Update model index
     new_model_index_file = os.path.join(bf16_path, "model.safetensors.index.json")
     for weight_name in fp8_weight_names:

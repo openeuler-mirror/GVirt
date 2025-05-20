@@ -1,14 +1,24 @@
+#!/usr/bin/python3
+# coding=utf-8
+#
+# Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# ===============================================================================
 import os
 import json
 from argparse import ArgumentParser
 from typing import List
 
 import torch
+import torch_npu
 import torch.distributed as dist
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
-from model import Transformer, ModelArgs
+from tests.deepseek_v3 import DeepSeek_V3, ModelArgs
 
 
 def sample(logits, temperature: float = 1.0):
@@ -29,7 +39,7 @@ def sample(logits, temperature: float = 1.0):
 
 @torch.inference_mode()
 def generate(
-    model: Transformer,
+    model: DeepSeek_V3,
     prompt_tokens: List[List[int]],
     max_new_tokens: int,
     eos_id: int,
@@ -39,7 +49,7 @@ def generate(
     Generates new tokens based on the given prompt tokens using the specified model.
 
     Args:
-        model (Transformer): The transformer model used for token generation.
+        model (DeepSeek_V3): The DeepSeek_V3 model used for token generation.
         prompt_tokens (List[List[int]]): A list of lists containing the prompt tokens for each sequence.
         max_new_tokens (int): The maximum number of new tokens to generate.
         eos_id (int): The end-of-sequence token ID.
@@ -51,11 +61,11 @@ def generate(
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
     total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
-    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
+    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="npu")
     for i, t in enumerate(prompt_tokens):
-        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="npu")
     prev_pos = 0
-    finished = torch.tensor([False] * len(prompt_tokens), device="cuda")
+    finished = torch.tensor([False] * len(prompt_tokens), device="npu")
     prompt_mask = tokens != -1
     for cur_pos in range(min(prompt_lens), total_len):
         logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
@@ -101,19 +111,19 @@ def main(
     rank = int(os.getenv("RANK", "0"))
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
     if world_size > 1:
-        dist.init_process_group("nccl")
+        dist.init_process_group("hccl")
     global print
     if rank != 0:
         print = lambda *_, **__: None
-    torch.cuda.set_device(local_rank)
+    torch.npu.set_device(local_rank)
     torch.set_default_dtype(torch.bfloat16)
     torch.set_num_threads(8)
     torch.manual_seed(965)
     with open(config) as f:
         args = ModelArgs(**json.load(f))
     print(args)
-    with torch.device("cuda"):
-        model = Transformer(args)
+    with torch.device("npu"):
+        model = DeepSeek_V3(args)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
     load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
@@ -143,16 +153,32 @@ def main(
             print(completion)
             messages.append({"role": "assistant", "content": completion})
     else:
-        with open(input_file) as f:
-            prompts = [line.strip() for line in f.readlines()]
-        assert len(prompts) <= args.max_batch_size, f"Number of prompts exceeds maximum batch size ({args.max_batch_size})"
-        prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
-        completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
-        completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
-        for prompt, completion in zip(prompts, completions):
-            print("Prompt:", prompt)
-            print("Completion:", completion)
-            print()
+        print("start to run")
+        with open(input_file, 'r', encoding='utf-8') as file:
+            data = json.load(file)
+
+        def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature):
+            prompts_tokens_batch = [
+                tokenizer.apply_chat_template([{"role": "user", "content": item['query']}], add_generation_prompt=True)
+                for item in batch
+            ]
+            completion_tokens_batch = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
+            completions_batch = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
+
+            for idx, item in enumerate(batch):
+                item['response'] = completions_batch[idx]
+                print(f"Query: {item['query']}")
+                print(f"Completion: {item['response']}")
+
+        batch_size = args.max_batch_size
+
+        for i in range(0, len(data), batch_size):
+            batch = data[i:i + batch_size]
+            process_batch(batch, tokenizer, model, max_new_tokens, tokenizer.eos_token_id, temperature)
+        
+        with open(input_file, 'w', encoding='utf-8') as file:
+            json.dump(data, file, ensure_ascii=False, indent=4)
+        print("The results have been written into the input_file.")
 
     if world_size > 1:
         dist.destroy_process_group()
@@ -179,7 +205,7 @@ if __name__ == "__main__":
     parser.add_argument("--input-file", type=str, default="")
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=200)
-    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--temperature", type=float, default=0.0)
     args = parser.parse_args()
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
     main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)
