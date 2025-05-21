@@ -49,7 +49,7 @@ def main(model_path, num_tp, save_path):
     torch.save(rotate_dict, save_path)
 
 
-if __name__ == "main":
+if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
