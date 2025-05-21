@@ -349,7 +349,7 @@ def main(model_path, rot_model_path,
                         # ===== remove mean =====
                         ln = ln.float() / torch.mean(ln.float().abs())
                         W_ = weight.to(device=device, dtype=dtype)
-                        W_ = (W_ * ln.to(W_)).unsqueeze(0)
+                        W_ = (W_ * ln.to(W_).unsqueeze(0))
                         W_ = torch.matmul(W_, Q.to(W_))
                         new_state_dict[name] = W_  # keep the fp32 to maximize the accuracy
                         ori_weight_names.append(name)
@@ -415,7 +415,7 @@ def main(model_path, rot_model_path,
                         # ========= special complenents for MTP ========
                         elif "eh_proj" in name:
                             # cannot ignore the output_trans here as we need to
-                            # use the lm_head in the original model whch is rotated
+                            # use the lm_head in the original model which is rotated
                             input_trans = torch.block_diag(Q, Q)
                             output_trans = Q
                             ln = torch.cat([
