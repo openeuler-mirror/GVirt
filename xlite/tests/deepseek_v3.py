@@ -59,6 +59,7 @@ class ModelArgs:
         beta_fast (int): Fast beta correction factor.
         beta_slow (int): Slow beta correction factor.
         mscale (float): Scaling factor for extended attention.
+        quantization (str): Quantization policy.
     """
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
@@ -91,6 +92,7 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.
+    quantization: str = "none"
 
 
 class ParallelEmbedding(nn.Module):
@@ -605,7 +607,7 @@ class Expert(nn.Module):
         w2 (nn.Module): Linear layer for hidden-to-output transformation.
         w3 (nn.Module): Additional linear layer for feature transformation.
     """
-    def __init__(self, dim: int, inter_dim: int, quantization: str):
+    def __init__(self, dim: int, inter_dim: int, args: ModelArgs):
         """
         Initializes the Expert layer.
 
@@ -614,7 +616,7 @@ class Expert(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        if quantization == "routed_experts_rotation_int8":
+        if args.quantization == "experts_int8":
             self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
         else:
@@ -649,7 +651,7 @@ class MoE(nn.Module):
         experts (nn.ModuleList): List of expert modules.
         shared_experts (nn.Module): Shared experts applied to all inputs.
     """
-    def __init__(self, args: ModelArgs, quantization: str):
+    def __init__(self, args: ModelArgs):
         """
         Initializes the MoE module.
 
@@ -665,7 +667,7 @@ class MoE(nn.Module):
         self.experts_start_idx = rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
-        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, quantization) if self.experts_start_idx <= i < self.experts_end_idx else None
+        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args) if self.experts_start_idx <= i < self.experts_end_idx else None
                                       for i in range(self.n_routed_experts)])
         self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
 
@@ -706,7 +708,7 @@ class Block(nn.Module):
         attn_norm (nn.Module): Layer normalization for attention.
         ffn_norm (nn.Module): Layer normalization for feed-forward network.
     """
-    def __init__(self, layer_id: int, args: ModelArgs, quantization: str):
+    def __init__(self, layer_id: int, args: ModelArgs):
         """
         Initializes the DeepSeek_V3 block.
 
@@ -716,7 +718,7 @@ class Block(nn.Module):
         """
         super().__init__()
         self.attn = MLA(args)
-        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args, quantization)
+        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
 
@@ -750,7 +752,7 @@ class DeepSeek_V3(nn.Module):
         head (nn.Module): Output projection layer mapping to vocabulary size.
         freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
     """
-    def __init__(self, args: ModelArgs, quantization: str):
+    def __init__(self, args: ModelArgs):
         """
         Initializes the DeepSeek_V3 model.
 
@@ -766,7 +768,7 @@ class DeepSeek_V3(nn.Module):
         self.embed = ParallelEmbedding(args.vocab_size, args.dim)
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
-            self.layers.append(Block(layer_id, args, quantization))
+            self.layers.append(Block(layer_id, args))
         self.norm = RMSNorm(args.dim)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)

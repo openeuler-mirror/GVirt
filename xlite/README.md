@@ -48,7 +48,7 @@ scp -r /mnt/nvme0n1/models/deepseek-R1-bf16-61layers-16d x.x.x.x:/mnt/nvme0n1/mo
 
 # nproc_per_node：每个服务器上的进程数; nnodes：共几个服务器; node_rank：第一台服务器的node为0，第二台服务器的node为1，以此类推; master_addr：配置为0号node的ip。
 torchrun --nproc_per_node=8 --nnodes=2 --node_rank=${node} --master_addr=x.x.x.x tests/deepseek_generate.py --ckpt-path /mnt/nvme0n1/models/deepseek-R1-bf16-61layers-16d --config tests/deepseek_config_671B.json --interactive
-# 注：用户如使用int8模型，需传入入参"--quantization routed_experts_rotation_int8"
+# 注：用户如使用int8模型，需将config文件tests/deepseek_config_671B.json中参数"quantization"的值修改为"experts_int8"。
 ```
 
 #### 编译

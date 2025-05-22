@@ -95,7 +95,6 @@ def main(
     interactive: bool = True,
     max_new_tokens: int = 100,
     temperature: float = 1.0,
-    quantization: str = "",
 ) -> None:
     """
     Main function to load the model and perform interactive or batch text generation.
@@ -124,7 +123,7 @@ def main(
         args = ModelArgs(**json.load(f))
     print(args)
     with torch.device("npu"):
-        model = DeepSeek_V3(args, quantization)
+        model = DeepSeek_V3(args)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
     load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
@@ -207,7 +206,6 @@ if __name__ == "__main__":
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--quantization", type=str, default="")
     args = parser.parse_args()
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.quantization)
+    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)
