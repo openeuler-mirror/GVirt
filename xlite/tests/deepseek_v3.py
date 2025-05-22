@@ -179,11 +179,9 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
         if self.weight.element_size() == 1:
-            scale_out_features = (out_features + block_size - 1) // block_size
-            scale_in_features = (in_features + block_size - 1) // block_size
-            self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
+            self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32))
         else:
             self.register_parameter("scale", None)
         if bias:
@@ -607,7 +605,7 @@ class Expert(nn.Module):
         w2 (nn.Module): Linear layer for hidden-to-output transformation.
         w3 (nn.Module): Additional linear layer for feature transformation.
     """
-    def __init__(self, dim: int, inter_dim: int):
+    def __init__(self, dim: int, inter_dim: int, quantization: str):
         """
         Initializes the Expert layer.
 
@@ -616,8 +614,12 @@ class Expert(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        self.w13 = Linear(dim, inter_dim * 2)
-        self.w2 = Linear(inter_dim, dim)
+        if quantization == "routed_experts_rotation_int8":
+            self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
+            self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
+        else:
+            self.w13 = Linear(dim, inter_dim * 2)
+            self.w2 = Linear(inter_dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -647,7 +649,7 @@ class MoE(nn.Module):
         experts (nn.ModuleList): List of expert modules.
         shared_experts (nn.Module): Shared experts applied to all inputs.
     """
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, quantization: str):
         """
         Initializes the MoE module.
 
@@ -663,7 +665,7 @@ class MoE(nn.Module):
         self.experts_start_idx = rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
-        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim) if self.experts_start_idx <= i < self.experts_end_idx else None
+        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, quantization) if self.experts_start_idx <= i < self.experts_end_idx else None
                                       for i in range(self.n_routed_experts)])
         self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
 
@@ -704,7 +706,7 @@ class Block(nn.Module):
         attn_norm (nn.Module): Layer normalization for attention.
         ffn_norm (nn.Module): Layer normalization for feed-forward network.
     """
-    def __init__(self, layer_id: int, args: ModelArgs):
+    def __init__(self, layer_id: int, args: ModelArgs, quantization: str):
         """
         Initializes the DeepSeek_V3 block.
 
@@ -714,7 +716,7 @@ class Block(nn.Module):
         """
         super().__init__()
         self.attn = MLA(args)
-        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
+        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args, quantization)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
 
@@ -748,7 +750,7 @@ class DeepSeek_V3(nn.Module):
         head (nn.Module): Output projection layer mapping to vocabulary size.
         freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
     """
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, quantization: str):
         """
         Initializes the DeepSeek_V3 model.
 
@@ -764,7 +766,7 @@ class DeepSeek_V3(nn.Module):
         self.embed = ParallelEmbedding(args.vocab_size, args.dim)
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
-            self.layers.append(Block(layer_id, args))
+            self.layers.append(Block(layer_id, args, quantization))
         self.norm = RMSNorm(args.dim)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)

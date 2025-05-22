@@ -5,8 +5,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:./:./kernels/:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=./:./kernels/:$LD_LIBRARY_PATH
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False
 
 cd ./tools/quantization/
