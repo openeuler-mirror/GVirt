@@ -59,6 +59,7 @@ class ModelArgs:
         beta_fast (int): Fast beta correction factor.
         beta_slow (int): Slow beta correction factor.
         mscale (float): Scaling factor for extended attention.
+        quantization (str): Quantization policy.
     """
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
@@ -91,6 +92,7 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.
+    quantization: str = "none"
 
 
 class ParallelEmbedding(nn.Module):
@@ -179,11 +181,9 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
         if self.weight.element_size() == 1:
-            scale_out_features = (out_features + block_size - 1) // block_size
-            scale_in_features = (in_features + block_size - 1) // block_size
-            self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
+            self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32))
         else:
             self.register_parameter("scale", None)
         if bias:
@@ -607,7 +607,7 @@ class Expert(nn.Module):
         w2 (nn.Module): Linear layer for hidden-to-output transformation.
         w3 (nn.Module): Additional linear layer for feature transformation.
     """
-    def __init__(self, dim: int, inter_dim: int):
+    def __init__(self, dim: int, inter_dim: int, args: ModelArgs):
         """
         Initializes the Expert layer.
 
@@ -616,8 +616,12 @@ class Expert(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        self.w13 = Linear(dim, inter_dim * 2)
-        self.w2 = Linear(inter_dim, dim)
+        if args.quantization == "experts_int8":
+            self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
+            self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
+        else:
+            self.w13 = Linear(dim, inter_dim * 2)
+            self.w2 = Linear(inter_dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -663,7 +667,7 @@ class MoE(nn.Module):
         self.experts_start_idx = rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
-        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim) if self.experts_start_idx <= i < self.experts_end_idx else None
+        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args) if self.experts_start_idx <= i < self.experts_end_idx else None
                                       for i in range(self.n_routed_experts)])
         self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
 

@@ -70,9 +70,19 @@ def main(hf_ckpt_path, save_path, n_layers, n_experts, mp):
                 name = name.replace("mlp", "ffn")
                 name = name.replace("weight_scale_inv", "scale")
                 name = name.replace("e_score_correction_bias", "bias")
+                name = name.replace("qweight", "weight")
+                name = name.replace("scales", "scale")
                 key = name.split(".")[-2]
                 assert key in mapping, f"Key {key} not found in mapping"
                 new_key, dim = mapping[key]
+                # ===== fix the tp for MOE quantization scales =====
+                if name.endswith(".scale"):
+                    if "gate_proj" in name or "up_proj" in name:
+                        dim = 0
+                    elif "down_proj" in name:
+                        dim = None
+                    else:
+                        raise ValueError(f"Unknown name {name}")
                 name = name.replace(key, new_key)
                 for i in range(mp):
                     new_param = param

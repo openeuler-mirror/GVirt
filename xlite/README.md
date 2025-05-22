@@ -27,8 +27,13 @@ docker run --name xlite -it --rm --privileged -v /usr/local/Ascend/driver:/usr/l
 ```
 # 从huggingface下载原始模型，并完成参数转换和切分。模型下载地址：https://huggingface.co/deepseek-ai/DeepSeek-R1
 
-# 模型参数从fp8转换为bf16
+# （选择一）：模型参数从fp8转换为bf16
 python tools/fp8_cast_bf16.py --input-fp8-hf-path /mnt/nvme0n1/models/deepseek-R1 --output-bf16-hf-path /mnt/nvme0n1/models/deepseek-R1-bf16
+
+# （选择二）：模型参数从fp8转换为int8（仅量化MOE，其他参数转化为bf16）
+bash tools/w8a8.sh <FP8_MODEL_PATH> <INT8_MODEL_PATH> <NUM_PROCESSES>
+# 注1：<NUM_PROCESSES>表示并行使用NPU的数目。脚本会并行运行多个进程，每个进程各在一个NPU上执行量化。
+# 注2: bf16与int8二选一即可。之后的例子默认用户使用bf16，用户如使用int8模型，只需按提示修改参数即可。
 
 # 模型按照并行策略进行切分，model-parallel代表在几张卡上运行，默认MOE路由专家按照EP方式切分，其他参数按照TP方式切分
 python tools/convert.py --hf-ckpt-path /mnt/nvme0n1/models/deepseek-R1-bf16 --save-path /mnt/nvme0n1/models/deepseek-R1-bf16-61layers-16d --model-parallel 16
@@ -43,6 +48,7 @@ scp -r /mnt/nvme0n1/models/deepseek-R1-bf16-61layers-16d x.x.x.x:/mnt/nvme0n1/mo
 
 # nproc_per_node：每个服务器上的进程数; nnodes：共几个服务器; node_rank：第一台服务器的node为0，第二台服务器的node为1，以此类推; master_addr：配置为0号node的ip。
 torchrun --nproc_per_node=8 --nnodes=2 --node_rank=${node} --master_addr=x.x.x.x tests/deepseek_generate.py --ckpt-path /mnt/nvme0n1/models/deepseek-R1-bf16-61layers-16d --config tests/deepseek_config_671B.json --interactive
+# 注：用户如使用int8模型，需将config文件tests/deepseek_config_671B.json中参数"quantization"的值修改为"experts_int8"。
 ```
 
 #### 编译
