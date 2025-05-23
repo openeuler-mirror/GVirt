@@ -54,6 +54,8 @@ RUN source /opt/openEuler/llvm-toolset-17/enable && clang -v && \
 	make -j && make install  && \
 	ln -s /root/Python-3.11/bin/pip3 /root/Python-3.11/bin/pip && \
 	ln -s /root/Python-3.11/bin/python3 /root/Python-3.11/bin/python && \
+    ln -sf /root/Python-3.11/bin/python3.11 /usr/bin/python && \
+    ln -sf /root/Python-3.11/bin/python3.11 /usr/bin/python3 && \
 	rm -rf /root/Python-3.11.11/
 
 ENV PATH=/root/Python-3.11/bin:$PATH
@@ -63,6 +65,8 @@ RUN pip config set global.index-url 'https://mirrors.huaweicloud.com/repository/
     pip config set global.trusted-host 'mirrors.huaweicloud.com'
 
 RUN pip install pybind11 && pip install pyyaml && pip install transformers && pip install decorator && pip install scipy && pip install attrs && pip install psutil && pip install wheel
+RUN pip install --upgrade build setuptools
+RUN sed -i '1s|/usr/bin/python3|/usr/bin/python3.9|' /usr/bin/dnf && sed -i '1s|/usr/bin/python3|/usr/bin/python3.9|' /usr/bin/dnf-3
 
 ####################### CANN #######################
 WORKDIR /root
@@ -88,4 +92,4 @@ RUN echo "source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash" >> /ro
 
 ####################### torch npu #######################
 RUN pip install 'numpy<2.0.0' && pip install torchvision==0.16.0
-RUN pip install torch==2.4.0 && pip install torch-npu==2.4.0
+RUN pip install torch==2.6.0 && pip install torch-npu==2.6.0rc1
