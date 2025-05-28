@@ -1,0 +1,75 @@
+/*
+ * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ */
+#ifndef _XLITE_BASE_H_
+#define _XLITE_BASE_H_
+
+#include <cstdio>
+#include <iostream>
+#include <vector>
+#include <list>
+#include <cstdint>
+
+#define ROUND_UP(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
+#define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
+#define ROUND_DOWN(x, y) (((x) / (y)) * (y))
+
+#define MB_BIT 20
+#define XLITE_MAX_NUM_DYNAMIC_TENSOR 128
+#define XLITE_TENSOR_ALIGN 1024
+
+enum XDtype {
+    FP16,
+    MAX_XDTYPE,
+};
+
+enum XTensorType {
+    TORCH_NPU,
+    XLITE_DYNAMIC,
+    MAX_XTENSOR_TYPE,
+};
+
+size_t inline XDtypeSize(enum XDtype dtype)
+{
+    switch (dtype) {
+        case FP16:
+            return 2;
+        default:
+            std::cerr << __FILE__ << ":" << __LINE__ << "unknown data type " << dtype << std::endl;
+            return 0;
+    }
+}
+
+class XTensorPool;
+class XTensor {
+public:
+    XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr);
+    std::vector<long> shape;
+    size_t numel;
+    enum XDtype dtype;
+    void *ptr;
+
+private:
+    XTensor() {};
+    void Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
+    enum XTensorType type;
+    friend class XTensorPool;
+};
+
+class XTensorPool {
+public:
+    XTensorPool(size_t size) : _size(size) {};
+    ~XTensorPool(void);
+    int Init(void);
+    XTensor *GetTensor(std::vector<long> shape, enum XDtype dtype);
+    void PutTensor(XTensor *t);
+
+private:
+    void *_ptr;
+    size_t _size;
+    XTensor _t[XLITE_MAX_NUM_DYNAMIC_TENSOR];
+    std::list<XTensor *> _free;
+    std::list<XTensor *> _used;
+};
+
+#endif
