@@ -7,8 +7,6 @@
 # ===============================================================================
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False
 
-cd xlite/tools/quantization/
-
 MODEL_PATH=${1:-"/mnt/nvme2n1/models/deepseek-R1/"}
 QMODEL_PATH=${2:-"/mnt/nvme1n1/models/deepseek-R1-w8a8-rotquant/"}
 NUM_PROCESSES=${3:-8}
@@ -19,7 +17,7 @@ echo "QMODEL_PATH: $QMODEL_PATH"
 echo "NUM_PROCESSES: $NUM_PROCESSES"
 
 # 1. Generate the rotation matrix
-python preprocess.py --model_path $MODEL_PATH
+python xlite/tools/quantization/preprocess.py --model_path $MODEL_PATH
 
 # 2. Perform the quantizatin using multiple processes (on multiple NPUs)
 id_npu=0
@@ -28,7 +26,7 @@ end_idx=$NUM_PARTS_PER_PROCESS
 
 for ((i = 0; i < NUM_PROCESSES; i++)); do
     echo "npu id $id_npu, start $start_idx, end $end_idx"
-    python ./w8a8.py \
+    python xlite/tools/quantization/w8a8.py \
         --model_path $MODEL_PATH \
         --rot_model_path $QMODEL_PATH \
         --post_opt \
@@ -48,6 +46,6 @@ echo "Quantization done"
 
 # 3. Rebuild the index json
 echo "Rebuild index json"
-python build_index.py --model_path $QMODEL_PATH
+python xlite/tools/quantization/build_index.py --model_path $QMODEL_PATH
 
 echo "Done"

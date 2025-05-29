@@ -19,11 +19,11 @@ import torch
 import transformers
 
 import utils
-from algorithms.rotation import (
+from xlite.tools.quantization.algorithms.rotation import (
     get_orthogonal_matrix,
 )
 
-from algorithms.quantizers import (
+from xlite.tools.quantization.algorithms.quantizers import (
     WeightQuantizer, sym_quant, sym_dequant, asym_quant, asym_dequant
 )
 
