@@ -28,6 +28,11 @@ XTensor::XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr)
     Init(shape, dtype, ptr, TORCH_NPU);
 }
 
+void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr)
+{
+    Init(shape, dtype, ptr, TORCH_NPU);
+}
+
 int XTensorPool::Init(void)
 {
     CHECK_ACL_RET(aclrtMalloc(&_ptr, _size, ACL_MEM_MALLOC_HUGE_FIRST), -ENOMEM);

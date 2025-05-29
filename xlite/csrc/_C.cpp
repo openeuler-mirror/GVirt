@@ -9,12 +9,59 @@
 
 namespace py = pybind11;
 
+class _CModel {
+public:
+    _CModel() {};
+    ~_CModel();
+    void Init(struct XModelConfig &c, uint32_t rankId);
+    void Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output);
+
+    // weights
+    at::Tensor embed;
+    at::Tensor norm;
+    at::Tensor head;
+
+    std::vector<at::Tensor> attnNorm;
+    std::vector<at::Tensor> attnOut;
+    std::vector<at::Tensor> mlaQA;
+    std::vector<at::Tensor> mlaQB;
+    std::vector<at::Tensor> mlaQNorm;
+    std::vector<at::Tensor> mlaKVA;
+    std::vector<at::Tensor> mlaKVB;
+    std::vector<at::Tensor> mlaKVNorm;
+
+    std::vector<at::Tensor> mlpNorm;
+    std::vector<at::Tensor> mlpUpGate;
+    std::vector<at::Tensor> mlpDown;
+
+    std::vector<at::Tensor> Gate;
+    std::vector<at::Tensor> GateBias;
+    std::vector<at::Tensor> SEUpGate;
+    std::vector<at::Tensor> SEDown;
+    std::vector<at::Tensor> REUpGate;
+    std::vector<at::Tensor> REUpGateScale;
+    std::vector<at::Tensor> REDown;
+    std::vector<at::Tensor> REDownScale;
+
+private:
+    XModel *_model;
+};
+
 static inline enum XDtype XDtype(at::Tensor &t)
 {
     switch (t.scalar_type()) {
-        case at::kHalf:
+        case at::ScalarType::Char:
+            return INT8;
+        case at::ScalarType::Int:
+            return INT32;
+        case at::ScalarType::Half:
             return FP16;
+        case at::ScalarType::BFloat16:
+            return BF16;
+        case at::ScalarType::Float:
+            return FP32;
         default:
+            std::cerr << __FILE__ << ":" << __LINE__ << "unknown data type " << t.scalar_type() << std::endl;
             return MAX_XDTYPE;
     }
 }
@@ -23,6 +70,84 @@ static inline void *TensorPtr(at::Tensor &t)
 {
     return reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(t.storage().data_ptr().get()) +
         t.storage_offset() * t.dtype().itemsize());
+}
+
+static inline void InitXTensor(XTensor &out, at::Tensor &in)
+{
+    out.Init(in.sizes().vec(), XDtype(in), TensorPtr(in));
+}
+
+void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
+{
+    uint32_t idx = 0, moe_idx = 0;
+    uint32_t nLocalRoutedExperts = c.nRoutedExperts / c.moeEpSize;
+    uint32_t expertsStartIdx = c.moeEpSize == 1 ? 0 : rankId * nLocalRoutedExperts;
+    uint32_t expertsEndIdx = expertsStartIdx + nLocalRoutedExperts;
+    uint32_t nRE = (c.nLayers - c.nDenseLayers) * nLocalRoutedExperts;
+
+    if (REUpGate.size() != nRE || REDown.size() != nRE) {
+        std::cerr << __FILE__ << ":" << __LINE__ << " num of routed experts: " << REUpGate.size() << std::endl;
+        return;
+    }
+
+    _model = new XModel(c, rankId);
+
+    InitXTensor(_model->embed, embed);
+    InitXTensor(_model->norm, norm);
+    InitXTensor(_model->head, head);
+
+    for (uint32_t i = 0; i < c.nLayers; i++) {
+        InitXTensor(_model->attnNorm[i], attnNorm[i]);
+        InitXTensor(_model->attnOut[i], attnOut[i]);
+        InitXTensor(_model->mlaQA[i], mlaQA[i]);
+        InitXTensor(_model->mlaQB[i], mlaQB[i]);
+        InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+        InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
+        InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
+        InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+        InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
+    }
+
+    for (uint32_t i = 0; i < c.nDenseLayers; i++) {
+        InitXTensor(_model->mlpUpGate[i], mlpUpGate[i]);
+        InitXTensor(_model->mlpDown[i], mlpDown[i]);
+    }
+
+    for (uint32_t i = c.nDenseLayers; i < c.nLayers; i++) {
+        InitXTensor(_model->Gate[i], Gate[moe_idx]);
+        InitXTensor(_model->GateBias[i], GateBias[moe_idx]);
+        InitXTensor(_model->SEUpGate[i], SEUpGate[moe_idx]);
+        InitXTensor(_model->SEDown[i], SEDown[moe_idx]);
+        for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
+            InitXTensor(_model->REUpGate[i][j], REUpGate[idx]);
+            if (REUpGate[idx].scalar_type() == at::ScalarType::Char) {
+                InitXTensor(_model->REUpGateScale[i][j], REUpGateScale[idx]);
+            }
+            InitXTensor(_model->REDown[i][j], REDown[idx]);
+            if (REDown[idx].scalar_type() == at::ScalarType::Char) {
+                InitXTensor(_model->REDownScale[i][j], REDownScale[idx]);
+            }
+            idx++;
+        }
+        moe_idx++;
+    }
+
+    if (rankId == 0) {
+        std::cout << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize <<
+            "), data parallel(" << c.defDpSize << "), expert parallel (" << c.moeEpSize << ")]" << std::endl;
+    }
+}
+
+_CModel::~_CModel(void)
+{
+    delete _model;
+}
+
+void _CModel::Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output)
+{
+    XTensor _input(input.sizes().vec(), XDtype(input), TensorPtr(input));
+    XTensor _output(output.sizes().vec(), XDtype(output), TensorPtr(output));
+    _model->Forward(rt, &_input, &_output);
 }
 
 void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
@@ -36,5 +161,61 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "runtime")
         .def(py::init<uint32_t, size_t>());
+
+    py::class_<XModelConfig>(m, "model_config")
+        .def(py::init<>())
+        .def_readwrite("vocab_size", &XModelConfig::vocabSize)
+        .def_readwrite("hidden_size", &XModelConfig::hiddenSize)
+        .def_readwrite("n_layers", &XModelConfig::nLayers)
+        .def_readwrite("n_heads", &XModelConfig::nHeads)
+        .def_readwrite("nope_head_dim", &XModelConfig::nopeHeadDim)
+        .def_readwrite("rope_head_dim", &XModelConfig::ropeHeadDim)
+        .def_readwrite("v_head_dim", &XModelConfig::vHeadDim)
+        .def_readwrite("q_lora_rank", &XModelConfig::qLoraRank)
+        .def_readwrite("kv_lora_rank", &XModelConfig::kvLoraRank)
+        .def_readwrite("norm_eps", &XModelConfig::normEps)
+        .def_readwrite("rope_theta", &XModelConfig::ropeTheta)
+        .def_readwrite("softmax_scale", &XModelConfig::softmaxScale)
+        .def_readwrite("n_dense_layers", &XModelConfig::nDenseLayers)
+        .def_readwrite("n_routed_experts", &XModelConfig::nRoutedExperts)
+        .def_readwrite("n_shared_experts", &XModelConfig::nSharedExperts)
+        .def_readwrite("n_expert_groups", &XModelConfig::nExpertGroups)
+        .def_readwrite("n_limited_groups", &XModelConfig::nLimitedGroups)
+        .def_readwrite("n_act_experts", &XModelConfig::nActExperts)
+        .def_readwrite("intermediate_size", &XModelConfig::intermediateSize)
+        .def_readwrite("moe_intermediate_size", &XModelConfig::moeIntermediateSize)
+        .def_readwrite("route_scale", &XModelConfig::routeScale)
+        .def_readwrite("def_tp_size", &XModelConfig::defTpSize)
+        .def_readwrite("def_dp_size", &XModelConfig::defDpSize)
+        .def_readwrite("moe_ep_size", &XModelConfig::moeEpSize)
+        .def_readwrite("moe_tp_size", &XModelConfig::moeTPSize);
+
+    py::class_<_CModel>(m, "model")
+        .def(py::init<>())
+        .def_readwrite("embed", &_CModel::embed)
+        .def_readwrite("norm", &_CModel::norm)
+        .def_readwrite("head", &_CModel::head)
+        .def_readwrite("attn_norm", &_CModel::attnNorm)
+        .def_readwrite("attn_out", &_CModel::attnOut)
+        .def_readwrite("mla_q_a", &_CModel::mlaQA)
+        .def_readwrite("mla_q_b", &_CModel::mlaQB)
+        .def_readwrite("mla_q_norm", &_CModel::mlaQNorm)
+        .def_readwrite("mla_kv_a", &_CModel::mlaKVA)
+        .def_readwrite("mla_kv_b", &_CModel::mlaKVB)
+        .def_readwrite("mla_kv_norm", &_CModel::mlaKVNorm)
+        .def_readwrite("mlp_norm", &_CModel::mlpNorm)
+        .def_readwrite("mlp_up_gate", &_CModel::mlpUpGate)
+        .def_readwrite("mlp_down", &_CModel::mlpDown)
+        .def_readwrite("gate", &_CModel::Gate)
+        .def_readwrite("gate_bias", &_CModel::GateBias)
+        .def_readwrite("se_up_gate", &_CModel::SEUpGate)
+        .def_readwrite("se_down", &_CModel::SEDown)
+        .def_readwrite("re_up_gate", &_CModel::REUpGate)
+        .def_readwrite("re_up_gate_scale", &_CModel::REUpGateScale)
+        .def_readwrite("re_down", &_CModel::REDown)
+        .def_readwrite("re_down_scale", &_CModel::REDownScale)
+        .def("init", &_CModel::Init)
+        .def("forward", &_CModel::Forward);
+
     m.def("add", &Add);
 }

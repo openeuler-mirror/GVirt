@@ -16,6 +16,78 @@ public:
     XTensorPool *pool;
 };
 
+struct XModelConfig {
+    // global config
+    uint32_t vocabSize;
+    uint32_t hiddenSize;
+    uint32_t nLayers;
+
+    // attention config
+    uint32_t nHeads;
+    uint32_t nopeHeadDim;
+    uint32_t ropeHeadDim;
+    uint32_t vHeadDim;
+    uint32_t qLoraRank;
+    uint32_t kvLoraRank;
+    float normEps;
+    float ropeTheta;
+    float softmaxScale;
+
+    // mlp
+    uint32_t nDenseLayers;
+    uint32_t nRoutedExperts;
+    uint32_t nSharedExperts;
+    uint32_t nExpertGroups;
+    uint32_t nLimitedGroups;
+    uint32_t nActExperts;
+    uint32_t intermediateSize;
+    uint32_t moeIntermediateSize;
+    float routeScale;
+
+    // parallel config
+    uint32_t defTpSize;
+    uint32_t defDpSize;
+    uint32_t moeEpSize;
+    uint32_t moeTPSize;
+};
+
+class XModel {
+public:
+    XModel(struct XModelConfig &c, uint32_t rankId);
+    void Forward(XRuntime &rt, XTensor *input, XTensor *output);
+
+    // weights
+    XTensor embed;
+    XTensor norm;
+    XTensor head;
+
+    std::vector<XTensor> attnNorm;
+    std::vector<XTensor> attnOut;
+    std::vector<XTensor> mlaQA;
+    std::vector<XTensor> mlaQB;
+    std::vector<XTensor> mlaQNorm;
+    std::vector<XTensor> mlaKVA;
+    std::vector<XTensor> mlaKVB;
+    std::vector<XTensor> mlaKVNorm;
+
+    std::vector<XTensor> mlpNorm;
+    std::vector<XTensor> mlpUpGate;
+    std::vector<XTensor> mlpDown;
+
+    std::vector<XTensor> Gate;
+    std::vector<XTensor> GateBias;
+    std::vector<XTensor> SEUpGate;
+    std::vector<XTensor> SEDown;
+    std::vector<std::vector<XTensor>> REUpGate;
+    std::vector<std::vector<XTensor>> REUpGateScale;
+    std::vector<std::vector<XTensor>> REDown;
+    std::vector<std::vector<XTensor>> REDownScale;
+
+private:
+    struct XModelConfig _c;
+    uint32_t _rankId;
+};
+
 void XliteOpAdd(XRuntime &rt, XTensor *x, XTensor *y, XTensor *z);
 
 #endif
