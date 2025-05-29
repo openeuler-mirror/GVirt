@@ -7,7 +7,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from algorithms.rotation import (
+from xlite.tools.quantization.algorithms.rotation import (
     get_orthogonal_matrix,
 )
 import torch
