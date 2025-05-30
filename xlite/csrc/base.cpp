@@ -1,8 +1,8 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include "xlite_base.h"
-#include "xlite_acl.h"
+#include "base.h"
+#include "acl.h"
 
 void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum XTensorType type)
 {

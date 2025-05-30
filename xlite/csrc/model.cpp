@@ -1,11 +1,11 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include "xlite_acl.h"
-#include "xlite_base.h"
-#include "xlite_runtime.h"
-#include "xlite_op.h"
-#include "xlite_model.h"
+#include "acl.h"
+#include "base.h"
+#include "runtime.h"
+#include "op.h"
+#include "model.h"
 
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {

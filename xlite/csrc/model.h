@@ -4,7 +4,7 @@
 #ifndef _XLITE_MODEL_H_
 #define _XLITE_MODEL_H_
 
-#include "xlite_base.h"
+#include "base.h"
 
 struct XModelConfig {
     // global config

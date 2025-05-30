@@ -1,9 +1,9 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include "xlite_acl.h"
-#include "xlite_base.h"
-#include "xlite_runtime.h"
+#include "acl.h"
+#include "base.h"
+#include "runtime.h"
 
 XRuntime::XRuntime(uint32_t devid, size_t sizeMB) : devid(devid)
 {

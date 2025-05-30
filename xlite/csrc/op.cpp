@@ -1,10 +1,10 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include "xlite_base.h"
-#include "xlite_acl.h"
-#include "xlite_runtime.h"
-#include "xlite_op.h"
+#include "base.h"
+#include "acl.h"
+#include "runtime.h"
+#include "op.h"
 #include "kernels/kernel_entry.h"
 
 void XliteOpAdd(XRuntime &rt, XTensor *x, XTensor *y, XTensor *z)

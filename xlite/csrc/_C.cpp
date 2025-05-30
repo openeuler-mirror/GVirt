@@ -5,10 +5,10 @@
 #include <pybind11/stl.h>
 #include <torch/torch.h>
 #include <torch/extension.h>
-#include "xlite_base.h"
-#include "xlite_op.h"
-#include "xlite_runtime.h"
-#include "xlite_model.h"
+#include "base.h"
+#include "op.h"
+#include "runtime.h"
+#include "model.h"
 
 namespace py = pybind11;
 
