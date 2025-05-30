@@ -74,14 +74,14 @@ private:
     AscendC::GlobalTensor<half> zGm;
 };
 
-extern "C" __global__ __aicore__ void add_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z)
+extern "C" __global__ __aicore__ void add(GM_ADDR x, GM_ADDR y, GM_ADDR z)
 {
     KernelAdd op;
     op.Init(x, y, z);
     op.Process();
 }
 
-void add_custom_do(uint32_t blockDim, void *stream, uint8_t *x, uint8_t *y, uint8_t *z)
+void add_do(uint32_t blockDim, void *stream, void *x, void *y, void *z)
 {
-    add_custom<<<blockDim, nullptr, stream>>>(x, y, z);
+    add<<<blockDim, nullptr, stream>>>(x, y, z);
 }

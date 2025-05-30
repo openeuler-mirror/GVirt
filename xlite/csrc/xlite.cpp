@@ -1,57 +1,53 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include <cstdio>
-#include <iostream>
-#include "acl/acl.h"
-#define CHECK_ACL(x)                                                                        \
-    do {                                                                                    \
-        aclError __ret = x;                                                                 \
-        if (__ret != ACL_ERROR_NONE) {                                                      \
-            std::cerr << __FILE__ << ":" << __LINE__ << " aclError:" << __ret << std::endl; \
-        }                                                                                   \
-    } while (0);
-extern void add_custom_do(uint32_t blockDim, void *stream, uint8_t *x, uint8_t *y, uint8_t *z);
+#include "xlite_base.h"
+#include "xlite_acl.h"
+#include "xlite.h"
+#include "kernels/kernel_entry.h"
 
-int32_t main(int32_t __attribute__((unused)) argc, char * __attribute__((unused)) argv[])
+XRuntime::XRuntime(uint32_t devid, size_t sizeMB) : devid(devid)
 {
-    uint32_t blockDim = 8;
-    size_t inputByteSize = 8 * 2048 * sizeof(uint16_t);
-    size_t outputByteSize = 8 * 2048 * sizeof(uint16_t);
-
     CHECK_ACL(aclInit(nullptr));
-    int32_t deviceId = 0;
-    CHECK_ACL(aclrtSetDevice(deviceId));
-    aclrtStream stream = nullptr;
+    CHECK_ACL(aclrtSetDevice(devid));
     CHECK_ACL(aclrtCreateStream(&stream));
 
-    uint8_t *xHost, *yHost, *zHost;
-    uint8_t *xDevice, *yDevice, *zDevice;
+    pool = new XTensorPool(sizeMB << MB_BIT);
+    if (pool->Init()) {
+        return;
+    }
+}
 
-    CHECK_ACL(aclrtMallocHost((void **)(&xHost), inputByteSize));
-    CHECK_ACL(aclrtMallocHost((void **)(&yHost), inputByteSize));
-    CHECK_ACL(aclrtMallocHost((void **)(&zHost), outputByteSize));
-    CHECK_ACL(aclrtMalloc((void **)&xDevice, inputByteSize, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&yDevice, inputByteSize, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&zDevice, outputByteSize, ACL_MEM_MALLOC_HUGE_FIRST));
-
-    CHECK_ACL(aclrtMemcpy(xDevice, inputByteSize, xHost, inputByteSize, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(yDevice, inputByteSize, yHost, inputByteSize, ACL_MEMCPY_HOST_TO_DEVICE));
-
-    add_custom_do(blockDim, stream, xDevice, yDevice, zDevice);
-    CHECK_ACL(aclrtSynchronizeStream(stream));
-
-    CHECK_ACL(aclrtMemcpy(zHost, outputByteSize, zDevice, outputByteSize, ACL_MEMCPY_DEVICE_TO_HOST));
-
-    CHECK_ACL(aclrtFree(xDevice));
-    CHECK_ACL(aclrtFree(yDevice));
-    CHECK_ACL(aclrtFree(zDevice));
-    CHECK_ACL(aclrtFreeHost(xHost));
-    CHECK_ACL(aclrtFreeHost(yHost));
-    CHECK_ACL(aclrtFreeHost(zHost));
-
+XRuntime::~XRuntime(void)
+{
+    delete pool;
     CHECK_ACL(aclrtDestroyStream(stream));
-    CHECK_ACL(aclrtResetDevice(deviceId));
+    CHECK_ACL(aclrtResetDevice(devid));
     CHECK_ACL(aclFinalize());
-    return 0;
+}
+
+void XliteOpAdd(XRuntime &rt, XTensor *x, XTensor *y, XTensor *z)
+{
+    uint32_t blockDim = 8;
+    std::vector<long> shape = {8, 2048};
+
+    if (x->dtype != FP16 || y->dtype != FP16 || z->dtype != FP16) {
+        std::cerr << __FILE__ << ":" << __LINE__ << "unsupport dtype" << std::endl;
+        return;
+    }
+    if (x->shape != shape || y->shape != shape || z->shape != shape) {
+        std::cerr << __FILE__ << ":" << __LINE__ << "unsupport shape" << std::endl;
+        return;
+    }
+    add_do(blockDim, rt.stream, x->ptr, y->ptr, z->ptr);
+    CHECK_ACL(aclrtSynchronizeStream(rt.stream));
+
+    XTensor *a = rt.pool->GetTensor(shape, FP16);
+    XTensor *b = rt.pool->GetTensor(shape, FP16);
+    XTensor *c = rt.pool->GetTensor(shape, FP16);
+    add_do(blockDim, rt.stream, a->ptr, b->ptr, c->ptr);
+    CHECK_ACL(aclrtSynchronizeStream(rt.stream));
+    rt.pool->PutTensor(a);
+    rt.pool->PutTensor(b);
+    rt.pool->PutTensor(c);
 }

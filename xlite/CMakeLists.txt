@@ -15,7 +15,7 @@ endif()
 
 # xlite_kernels_${RUN_MODE}
 file(GLOB KERNEL_FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_custom.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add.cpp
 )
 
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
@@ -32,6 +32,7 @@ ascendc_library(xlite_kernels_${RUN_MODE} SHARED ${KERNEL_FILES})
 
 # xlite
 add_library(xlite SHARED
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/xlite_base.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/xlite.cpp
 )
 
