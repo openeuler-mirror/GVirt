@@ -38,5 +38,9 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 
 void XModel::Forward(XRuntime &rt, XTensor *input, XTensor *output)
 {
+    if (rt.rankId != _rankId) {
+        std::cerr << __FILE__ << ":" << __LINE__ << "check rank id failed" << std::endl;
+        return;
+    }
     std::cout << "rank" << _rankId << " : xlite model forward, layers: " << _c.nLayers << std::endl;
 }

@@ -5,7 +5,7 @@
 #include "base.h"
 #include "runtime.h"
 
-XRuntime::XRuntime(uint32_t devid, size_t sizeMB) : devid(devid)
+XRuntime::XRuntime(uint32_t devid, uint32_t rankId, size_t sizeMB) : devid(devid), rankId(rankId)
 {
     CHECK_ACL(aclInit(nullptr));
     CHECK_ACL(aclrtSetDevice(devid));

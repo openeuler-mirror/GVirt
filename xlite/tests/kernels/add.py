@@ -12,7 +12,7 @@ import torch_npu
 from xlite._C import runtime, add
 
 
-rt = runtime(0, 500)
+rt = runtime(0, 0, 500)
 torch.npu.set_device(0)
 
 x = torch.randn(8, 2048, dtype=torch.float16, device="npu:0")

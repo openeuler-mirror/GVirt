@@ -163,7 +163,7 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
 
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "runtime")
-        .def(py::init<uint32_t, size_t>());
+        .def(py::init<uint32_t, uint32_t, size_t>());
 
     py::class_<XModelConfig>(m, "model_config")
         .def(py::init<>())
