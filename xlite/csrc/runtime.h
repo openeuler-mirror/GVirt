@@ -1,12 +1,13 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#ifndef _XLITE_H_
-#define _XLITE_H_
+#ifndef _XLITE_RUNTIME_H_
+#define _XLITE_RUNTIME_H_
 
-#include "xlite_base.h"
+#include <cstdint>
 
 typedef void *aclrtStream;
+class XTensorPool;
 class XRuntime {
 public:
     XRuntime(uint32_t devid, size_t sizeMB);
@@ -15,7 +16,5 @@ public:
     aclrtStream stream;
     XTensorPool *pool;
 };
-
-void XliteOpAdd(XRuntime &rt, XTensor *x, XTensor *y, XTensor *z);
 
 #endif

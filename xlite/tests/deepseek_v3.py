@@ -7,6 +7,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
+import os
 import math
 from dataclasses import dataclass
 from typing import Tuple, Optional, Literal
@@ -24,6 +25,10 @@ rank = 0
 block_size = 128
 gemm_impl = "bf16"
 attn_impl: Literal["naive", "absorb"] = "absorb"
+
+forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
+if forward_backend == "xlite":
+    from xlite._C import model_config, model
 
 @dataclass
 class ModelArgs:
@@ -773,6 +778,9 @@ class DeepSeek_V3(nn.Module):
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
+        if forward_backend == "xlite":
+            self.init_xlite_model(args)
+
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         """
@@ -801,6 +809,69 @@ class DeepSeek_V3(nn.Module):
             logits = torch.cat(all_logits, dim=-1)
         return logits
 
+    def init_xlite_model(self, args: ModelArgs):
+        config = model_config()
+        config.vocab_size = args.vocab_size
+        config.hidden_size = args.dim
+        config.n_layers = args.n_layers
+        config.n_heads = args.n_heads
+        config.nope_head_dim = args.qk_nope_head_dim
+        config.rope_head_dim = args.qk_rope_head_dim
+        config.v_head_dim = args.v_head_dim
+        config.q_lora_rank = args.q_lora_rank
+        config.kv_lora_rank = args.kv_lora_rank
+        config.norm_eps = 1e-6
+        config.rope_theta = args.rope_theta
+        config.softmax_scale = self.layers[0].attn.softmax_scale
+        config.n_dense_layers = args.n_dense_layers
+        config.n_routed_experts = args.n_routed_experts
+        config.n_shared_experts = args.n_shared_experts
+        config.n_expert_groups = args.n_expert_groups
+        config.n_limited_groups = args.n_limited_groups
+        config.n_act_experts = args.n_activated_experts
+        config.intermediate_size = args.inter_dim
+        config.moe_intermediate_size = args.moe_inter_dim
+        config.route_scale = args.route_scale
+        config.def_tp_size = world_size
+        config.def_dp_size = 1
+        config.moe_ep_size = world_size
+        config.moe_tp_size = 1
+
+        self.xlite_model = model()
+        self.xlite_model.embed = self.embed.weight
+        self.xlite_model.norm = self.norm.weight
+        self.xlite_model.head = self.head.weight
+        self.xlite_model.attn_norm = [layer.attn_norm.weight for layer in self.layers]
+        self.xlite_model.attn_out = [layer.attn.wo.weight for layer in self.layers]
+        self.xlite_model.mla_q_a = [layer.attn.wq_a.weight for layer in self.layers]
+        self.xlite_model.mla_q_b = [layer.attn.wq_b.weight for layer in self.layers]
+        self.xlite_model.mla_q_norm = [layer.attn.q_norm.weight for layer in self.layers]
+        self.xlite_model.mla_kv_a = [layer.attn.wkv_a.weight for layer in self.layers]
+        self.xlite_model.mla_kv_b = [layer.attn.wkv_b.weight for layer in self.layers]
+        self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
+        self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
+        self.xlite_model.mlp_up_gate = [self.layers[i].ffn.w13.weight for i in range(args.n_dense_layers)]
+        self.xlite_model.mlp_down = [self.layers[i].ffn.w2.weight for i in range(args.n_dense_layers)]
+        self.xlite_model.gate = [self.layers[i].ffn.gate.weight for i in range(args.n_dense_layers, args.n_layers)]
+        self.xlite_model.gate_bias = [self.layers[i].ffn.gate.bias for i in range(args.n_dense_layers, args.n_layers)]
+        self.xlite_model.se_up_gate = [self.layers[i].ffn.shared_experts.w13.weight
+                                       for i in range(args.n_dense_layers, args.n_layers)]
+        self.xlite_model.se_down = [self.layers[i].ffn.shared_experts.w2.weight
+                                    for i in range(args.n_dense_layers, args.n_layers)]
+        self.xlite_model.re_up_gate = [self.layers[i].ffn.experts[j].w13.weight
+                                       for i in range(args.n_dense_layers, args.n_layers)
+                                       for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+        self.xlite_model.re_down = [self.layers[i].ffn.experts[j].w2.weight
+                                    for i in range(args.n_dense_layers, args.n_layers)
+                                    for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+        if args.quantization == "experts_int8":
+            self.xlite_model.re_up_gate_scale = [self.layers[i].ffn.experts[j].w13.weight.scale
+                                                 for i in range(args.n_dense_layers, args.n_layers)
+                                                 for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+            self.xlite_model.re_down_scale = [self.layers[i].ffn.experts[j].w2.weight.scale
+                                              for i in range(args.n_dense_layers, args.n_layers)
+                                              for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+        self.xlite_model.init(config, rank)
 
 if __name__ == "__main__":
     torch.set_default_dtype(torch.bfloat16)

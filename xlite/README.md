@@ -47,8 +47,13 @@ scp -r /mnt/nvme0n1/models/deepseek-R1-${dtype}-61layers-${num_npu}d x.x.x.x:/mn
 
 3. **运行DeepSeek-R1推理**
 ```
-# 切换为xlite运行时（待补充）
+# 1) 切换为xlite运行时（可选）
+# 1.1） 源码编译，参考"编译"章节
 
+# 1.2） 切换xlite运行时
+export FORWARD_BACKEND=xlite
+
+# 2) 运行DeepSeek-R1推理
 torchrun --nproc_per_node=8 --nnodes=${nnodes} --node_rank=${node} --master_addr=x.x.x.x tests/deepseek_generate.py --ckpt-path /mnt/nvme0n1/models/deepseek-R1-${dtype}-61layers-${num_npu}d --config tests/deepseek_config_671B.json --interactive
 # 注1：nproc_per_node：每个服务器上的进程数; nnodes：共几个服务器; node_rank：第一台服务器的node为0，第二台服务器的node为1，以此类推; master_addr：配置为0号node的ip。
 # 注2：用户如使用int8模型，需将config文件tests/deepseek_config_671B.json中参数"quantization"的值修改为"experts_int8"。
@@ -63,10 +68,12 @@ rm -rf build && mkdir -p build
 cmake -B build && cmake --build build -j
 # 安装
 cmake --install build
+# 测试验证：可使用算子测试，也可使用完整模型测试
+python tests/kernels/add.py
 ```
 
-#### 构建出包
-当前支持rpm和whl，可选择合适的方式构建出包，用于不同场景的安装部署
+#### 构建安装包
+当前支持rpm和whl，可选择合适的方式构建出包，用于不同场景的二进制发布和安装部署，开发场景可忽略。
 ##### 方法1：rpm
 ```
 # 拷贝源码至/root/rpmbuild/SOURCES/xlite-1.0.tar.gz，执行以下命令

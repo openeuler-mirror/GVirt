@@ -24,6 +24,7 @@ standard = x + y
 torch.npu.synchronize()
 add(rt, x, y, z)
 torch.npu.synchronize()
+print('add success!')
 
 try:
     torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)

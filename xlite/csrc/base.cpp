@@ -1,8 +1,8 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include "xlite_base.h"
-#include "xlite_acl.h"
+#include "base.h"
+#include "acl.h"
 
 void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum XTensorType type)
 {
@@ -24,6 +24,11 @@ void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum X
 }
 
 XTensor::XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr)
+{
+    Init(shape, dtype, ptr, TORCH_NPU);
+}
+
+void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr)
 {
     Init(shape, dtype, ptr, TORCH_NPU);
 }

@@ -19,7 +19,11 @@
 #define XLITE_TENSOR_ALIGN 1024
 
 enum XDtype {
+    INT8,
+    INT32,
     FP16,
+    BF16,
+    FP32,
     MAX_XDTYPE,
 };
 
@@ -32,8 +36,14 @@ enum XTensorType {
 size_t inline XDtypeSize(enum XDtype dtype)
 {
     switch (dtype) {
+        case INT8:
+            return 1;
         case FP16:
+        case BF16:
             return 2;
+        case INT32:
+        case FP32:
+            return 4;
         default:
             std::cerr << __FILE__ << ":" << __LINE__ << "unknown data type " << dtype << std::endl;
             return 0;
@@ -43,14 +53,15 @@ size_t inline XDtypeSize(enum XDtype dtype)
 class XTensorPool;
 class XTensor {
 public:
+    XTensor() {};
     XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr);
+    void Init(std::vector<long> shape, enum XDtype dtype, void *ptr);
     std::vector<long> shape;
     size_t numel;
     enum XDtype dtype;
     void *ptr;
 
 private:
-    XTensor() {};
     void Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
     enum XTensorType type;
     friend class XTensorPool;
