@@ -8,7 +8,6 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-import torch_npu
 from xlite._C import runtime, add
 
 
@@ -24,7 +23,7 @@ standard = x + y
 torch.npu.synchronize()
 add(rt, x, y, z)
 torch.npu.synchronize()
-print('add success!')
+print('add executed!')
 
 try:
     torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)

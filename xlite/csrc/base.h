@@ -21,6 +21,7 @@
 enum XDtype {
     INT8,
     INT32,
+    INT64,
     FP16,
     BF16,
     FP32,
@@ -44,6 +45,8 @@ size_t inline XDtypeSize(enum XDtype dtype)
         case INT32:
         case FP32:
             return 4;
+        case INT64:
+            return 8;
         default:
             std::cerr << __FILE__ << ":" << __LINE__ << "unknown data type " << dtype << std::endl;
             return 0;

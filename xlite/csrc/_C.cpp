@@ -57,6 +57,8 @@ static inline enum XDtype XDtype(at::Tensor &t)
             return INT8;
         case at::ScalarType::Int:
             return INT32;
+        case at::ScalarType::Long:
+            return INT64;
         case at::ScalarType::Half:
             return FP16;
         case at::ScalarType::BFloat16:
@@ -159,6 +161,7 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
     XTensor _y(y.sizes().vec(), XDtype(y), TensorPtr(y));
     XTensor _z(z.sizes().vec(), XDtype(z), TensorPtr(z));
     XliteOpAdd(rt, &_x, &_y, &_z);
+    rt.Synchronize();
 }
 
 PYBIND11_MODULE(_C, m) {
