@@ -50,17 +50,17 @@ RUN source /opt/openEuler/llvm-toolset-17/enable && clang -v && \
     tar -zxvf Python-3.11.11.tgz -C /root/ && \
 	rm Python-3.11.11.tgz && \
 	cd /root/Python-3.11.11/ && \
-	./configure --prefix=/root/Python-3.11 --with-lto --enable-optimizations && \
+	./configure --prefix=/usr/local/Python-3.11 --with-lto --enable-optimizations && \
 	make -j && make install  && \
-	ln -s /root/Python-3.11/bin/pip3 /root/Python-3.11/bin/pip && \
-	ln -s /root/Python-3.11/bin/python3 /root/Python-3.11/bin/python && \
-    ln -sf /root/Python-3.11/bin/python3.11 /usr/bin/python && \
-    ln -sf /root/Python-3.11/bin/python3.11 /usr/bin/python3 && \
+	ln -s /usr/local/Python-3.11/bin/pip3 /usr/local/Python-3.11/bin/pip && \
+	ln -s /usr/local/Python-3.11/bin/python3 /usr/local/Python-3.11/bin/python && \
+    ln -sf /usr/local/Python-3.11/bin/python3.11 /usr/bin/python && \
+    ln -sf /usr/local/Python-3.11/bin/python3.11 /usr/bin/python3 && \
 	rm -rf /root/Python-3.11.11/
 
-ENV PATH=/root/Python-3.11/bin:$PATH
-ENV LD_LIBRARY_PATH=/root/Python-3.11/lib:$LD_LIBRARY_PATH
-ENV PYTHONPATH=/root/Python-3.11/lib/python3.11/site-packages:$PYTHONPATH
+ENV PATH=/usr/local/Python-3.11/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/Python-3.11/lib:$LD_LIBRARY_PATH
+ENV PYTHONPATH=/usr/local/Python-3.11/lib/python3.11/site-packages:$PYTHONPATH
 RUN pip config set global.index-url 'https://mirrors.huaweicloud.com/repository/pypi/simple' && \
     pip config set global.trusted-host 'mirrors.huaweicloud.com'
 
@@ -89,7 +89,3 @@ RUN curl -s -k "https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%20
     rm /root/*.run
 RUN echo "source /usr/local/Ascend/ascend-toolkit/set_env.sh" >> /root/.bashrc
 RUN echo "source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash" >> /root/.bashrc
-
-####################### torch npu #######################
-RUN pip install 'numpy<2.0.0' && pip install torchvision==0.16.0
-RUN pip install torch==2.6.0 && pip install torch-npu==2.6.0rc1
