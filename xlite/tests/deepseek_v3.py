@@ -28,7 +28,8 @@ attn_impl: Literal["naive", "absorb"] = "absorb"
 
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
-    from xlite._C import model_config, model
+    xlite_memory_mb = 500
+    from xlite._C import runtime, model_config, model
 
 @dataclass
 class ModelArgs:
@@ -779,10 +780,13 @@ class DeepSeek_V3(nn.Module):
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
         if forward_backend == "xlite":
+            self.args = args
+            local_rank = int(os.getenv("LOCAL_RANK", "0"))
+            self.xlite_rt = runtime(local_rank, rank, xlite_memory_mb)
             self.init_xlite_model(args)
 
     @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+    def forward_naive(self, tokens: torch.Tensor, start_pos: int = 0):
         """
         Forward pass for the DeepSeek_V3 model.
 
@@ -808,6 +812,38 @@ class DeepSeek_V3(nn.Module):
             dist.all_gather(all_logits, logits)
             logits = torch.cat(all_logits, dim=-1)
         return logits
+
+    @torch.inference_mode()
+    def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
+        """
+        Forward pass for the DeepSeek_V3 model.
+
+        Args:
+            tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
+            start_pos (int, optional): Starting position in the sequence for rotary embeddings. Defaults to 0.
+
+        Returns:
+            torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
+        """
+        logits = torch.empty(tokens.size(0), self.args.vocab_size, device=tokens.device)
+        torch.npu.synchronize()
+        self.xlite_model.forward(self.xlite_rt, tokens, logits)
+        torch.npu.synchronize()
+        return logits
+
+    @torch.inference_mode()
+    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+        """
+        Forward pass for the DeepSeek_V3 model.
+
+        Args:
+            tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
+            start_pos (int, optional): Starting position in the sequence for rotary embeddings. Defaults to 0.
+
+        Returns:
+            torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
+        """
+        return self.forward_naive(tokens, start_pos)
 
     def init_xlite_model(self, args: ModelArgs):
         config = model_config()

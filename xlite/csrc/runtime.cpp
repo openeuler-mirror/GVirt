@@ -5,9 +5,14 @@
 #include "base.h"
 #include "runtime.h"
 
-XRuntime::XRuntime(uint32_t devid, size_t sizeMB) : devid(devid)
+XRuntime::XRuntime(uint32_t devid, uint32_t rankId, size_t sizeMB) : rankId(rankId), devid(devid)
 {
-    CHECK_ACL(aclInit(nullptr));
+    aclError init_ret = aclInit(nullptr);
+    if (init_ret == ACL_ERROR_REPEAT_INITIALIZE) {
+        _init_outside = true;
+    } else {
+        CHECK_ACL(init_ret);
+    }
     CHECK_ACL(aclrtSetDevice(devid));
     CHECK_ACL(aclrtCreateStream(&stream));
 
@@ -22,5 +27,12 @@ XRuntime::~XRuntime(void)
     delete pool;
     CHECK_ACL(aclrtDestroyStream(stream));
     CHECK_ACL(aclrtResetDevice(devid));
-    CHECK_ACL(aclFinalize());
+    if (!_init_outside) {
+        CHECK_ACL(aclFinalize());
+    }
+}
+
+void XRuntime::Synchronize(void)
+{
+    CHECK_ACL(aclrtSynchronizeStream(stream));
 }
