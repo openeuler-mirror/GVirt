@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include "acl.h"
+#include "ascend.h"
 #include "base.h"
 #include "runtime.h"
 #include "op.h"
@@ -70,8 +70,8 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XTensor &output)
     uint32_t seqLen = input.shape[1];
     uint32_t m = batch * seqLen;
 
-    if (rt.rankId != _rankId) {
-        std::cerr << __FILE__ << ":" << __LINE__ << "check rank id failed" << std::endl;
+    if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
+        std::cerr << __FILE__ << ":" << __LINE__ << "check runtime communication setting failed" << std::endl;
         return;
     }
 

@@ -58,6 +58,18 @@ inline const char * XDtypeStr(enum XDtype dtype)
     }
 }
 
+inline const char * XTensorTypeStr(enum XTensorType type)
+{
+    switch (type) {
+        case XTENSOR_STATIC:
+            return "static";
+        case XTENSOR_DYNAMIC:
+            return "dynamic";
+        default:
+            return "unknown";
+    }
+}
+
 size_t inline XDtypeBit(enum XDtype dtype)
 {
     switch (dtype) {
@@ -86,6 +98,7 @@ public:
     XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Init(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Print(uint32_t nRow = 6, uint32_t nCol = 6);
+    friend std::ostream& operator<<(std::ostream& os, const XTensor& p);
     std::vector<long> shape;
     size_t numel;
     enum XDtype dtype;

@@ -782,7 +782,7 @@ class DeepSeek_V3(nn.Module):
         if forward_backend == "xlite":
             self.args = args
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = runtime(local_rank, rank, xlite_memory_mb)
+            self.xlite_rt = runtime(local_rank, xlite_memory_mb, rank, world_size)
             self.init_xlite_model(args)
 
     @torch.inference_mode()

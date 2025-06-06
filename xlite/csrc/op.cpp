@@ -2,24 +2,66 @@
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include "base.h"
-#include "acl.h"
+#include "ascend.h"
 #include "runtime.h"
 #include "op.h"
 #include "kernels/kernel_entry.h"
 
+static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
+{
+    switch (dtype) {
+        case INT8:
+            return HCCL_DATA_TYPE_INT8;
+        case INT32:
+            return HCCL_DATA_TYPE_INT32;
+        case INT64:
+            return HCCL_DATA_TYPE_INT64;
+        case FP16:
+            return HCCL_DATA_TYPE_FP16;
+        case BF16:
+            return HCCL_DATA_TYPE_BFP16;
+        case FP32:
+            return HCCL_DATA_TYPE_FP32;
+        default:
+            std::cerr << "unknown data type " << XDtypeStr(dtype) << std::endl;
+            return HCCL_DATA_TYPE_RESERVED;
+    }
+}
+
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
+    if (in.dtype != out.dtype || in.numel * rankSize != out.numel) {
+        std::cerr << __func__ << ": check tensor failed! input: " << in << " output: " << out << std::endl;
+        return;
+    }
+    if ((in.numel * XDtypeBit(in.dtype)) % XDtypeBit(INT8)) {
+        std::cerr << __func__ << ": all gather 8bit align check failed!" << std::endl;
+        return;
+    }
+    CHECK_HCCL(HcclAllGather(in.ptr, out.ptr, in.numel * XDtypeBit(in.dtype) / XDtypeBit(INT8), HCCL_DATA_TYPE_INT8,
+                   type == TP ? rt._tpComm : rt._dpComm, rt.stream));
 }
 
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
+    if (in.dtype != out.dtype || in.numel != out.numel * rankSize ) {
+        std::cerr << __func__ << ": check tensor failed! input: " << in << " output: " << out << std::endl;
+        return;
+    }
+    CHECK_HCCL(HcclReduceScatter(in.ptr, out.ptr, out.numel, XDtype2HcclDtype(in.dtype), HCCL_REDUCE_SUM,
+                   type == TP ? rt._tpComm : rt._dpComm, rt.stream));
 }
 
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (in.dtype != out.dtype || in.numel != out.numel) {
+        std::cerr << __func__ << ": check tensor failed! input: " << in << " output: " << out << std::endl;
+        return;
+    }
+    CHECK_HCCL(HcclAllReduce(in.ptr, out.ptr, in.numel, XDtype2HcclDtype(in.dtype), HCCL_REDUCE_SUM,
+                   type == TP ? rt._tpComm : rt._dpComm, rt.stream));
 }
 
 

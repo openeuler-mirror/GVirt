@@ -45,6 +45,7 @@ target_compile_options(xlite PRIVATE
 
 target_link_libraries(xlite PRIVATE
     xlite_kernels_${RUN_MODE}
+    hccl
 )
 
 # _C

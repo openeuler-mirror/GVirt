@@ -155,6 +155,27 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output)
     _model->Forward(rt, _input, _output);
 }
 
+void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
+{
+    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
+    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XliteOpAllGather(rt, _in, _out, TP);
+}
+
+void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in)
+{
+    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
+    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XliteOpReduceScatter(rt, _in, _out, TP);
+}
+
+void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in)
+{
+    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
+    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XliteOpAllReduceSum(rt, _in, _out, TP);
+}
+
 void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
 {
     XTensor _x(x.sizes().vec(), XDtype(x), TensorPtr(x));
@@ -172,7 +193,8 @@ void Print(at::Tensor &x)
 
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "runtime")
-        .def(py::init<uint32_t, uint32_t, size_t>());
+        .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
+            py::arg("devid"), py::arg("size"), py::arg("rank") = 0, py::arg("tp_size") = 1, py::arg("dp_size") = 1);
 
     py::class_<XModelConfig>(m, "model_config")
         .def(py::init<>())
@@ -230,6 +252,9 @@ PYBIND11_MODULE(_C, m) {
         .def("forward", &_CModel::Forward);
 
     // kernels
+    m.def("all_gather", &AllGather);
+    m.def("reduce_scatter", &ReduceScatter);
+    m.def("all_reduce", &AllReduce);
     m.def("add", &Add);
 
     // funcs

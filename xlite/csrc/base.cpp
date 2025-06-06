@@ -4,7 +4,7 @@
 #include <cstring>
 #include <iomanip>
 #include "base.h"
-#include "acl.h"
+#include "ascend.h"
 
 void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum XTensorType type)
 {
@@ -208,6 +208,19 @@ void XTensor::Print(uint32_t nRow, uint32_t nCol)
     }
     std::cout << "), dtype=" << XDtypeStr(dtype) << ")" << std::endl;
     free(p);
+}
+
+std::ostream& operator<<(std::ostream& os, const XTensor& p)
+{
+    os << "[(";
+    for (size_t i = 0; i < p.shape.size(); i++) {
+        os << p.shape[i];
+        if (i != p.shape.size() - 1) {
+            os << ", ";
+        }
+    }
+    os << ") " << XDtypeStr(p.dtype) << " (" << XTensorTypeStr(p.type) << ")]";
+    return os;
 }
 
 int XTensorPool::Init(void)

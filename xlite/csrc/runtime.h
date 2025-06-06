@@ -6,7 +6,11 @@
 
 #include <cstdint>
 
+#define XLITE_DEFAULT_DEVS_PER_NODE 8
+#define XLITE_DEFAULT_PORT 10266
+
 typedef void *aclrtStream;
+typedef void *HcclComm;
 class XTensorPool;
 
 enum commType {
@@ -17,15 +21,29 @@ enum commType {
 
 class XRuntime {
 public:
-    XRuntime(uint32_t devid, uint32_t rankId, size_t sizeMB);
+    XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId = 0, uint32_t tpSize = 1, uint32_t dpSize = 1);
     ~XRuntime(void);
     void Synchronize(void);
-    uint32_t rankId;
+    uint32_t rankId(void) { return _rankId; };
+    uint32_t tpSize(void) { return _tpSize; };
+    uint32_t dpSize(void) { return _dpSize; };
     aclrtStream stream;
     XTensorPool *pool;
+    HcclComm _tpComm = nullptr;
+    HcclComm _dpComm = nullptr;
+
 private:
-    uint32_t devid;
+    int GetNodeIps(void);
+    int InitComm(void);
+    uint32_t _devid;
     bool _init_outside = false;
+    uint32_t _rankId;
+    uint32_t _tpSize;
+    uint32_t _dpSize;
+    uint32_t _rankSize;
+    uint32_t _nDevPerNode = XLITE_DEFAULT_DEVS_PER_NODE;
+    uint32_t _port = XLITE_DEFAULT_PORT;
+    std::vector<std::string> _ips;
 };
 
 #endif
