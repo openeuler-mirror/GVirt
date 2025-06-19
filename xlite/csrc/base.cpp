@@ -67,7 +67,7 @@ XTensor *XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
     for (int i = 0; i < shape.size(); i++) {
         numel *= shape[i];
     }
-    size = ROUND_UP(numel * XDtypeSize(dtype), XLITE_TENSOR_ALIGN);
+    size = ROUND_UP(numel * XDtypeBit(dtype) / 8, XLITE_TENSOR_ALIGN);
 
     for (auto it = _used.begin(); it != _used.end(); it++) {
         use = (*it);
@@ -78,7 +78,7 @@ XTensor *XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
             _used.insert(it, t);
             return t;
         }
-        ptr = (void *)((uint64_t)use->ptr + ROUND_UP(use->numel * XDtypeSize(use->dtype), XLITE_TENSOR_ALIGN));
+        ptr = (void *)((uint64_t)use->ptr + ROUND_UP(use->numel * XDtypeBit(use->dtype) / 8, XLITE_TENSOR_ALIGN));
     }
     if ((uint64_t)_ptr + _size - (uint64_t)ptr >= size) {
         t->Init(shape, dtype, ptr, XLITE_DYNAMIC);
