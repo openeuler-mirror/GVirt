@@ -62,6 +62,7 @@ public:
     XTensor() {};
     XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Init(std::vector<long> shape, enum XDtype dtype, void *ptr);
+    void Print(uint32_t nRow = 6, uint32_t nCol = 6);
     std::vector<long> shape;
     size_t numel;
     enum XDtype dtype;
@@ -69,6 +70,7 @@ public:
 
 private:
     void Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
+    void PrintMemoryVal(void *p, uint64_t off, XDtype dtype);
     enum XTensorType type;
     friend class XTensorPool;
 };

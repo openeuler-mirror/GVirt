@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#include <cstring>
+#include <iomanip>
 #include "base.h"
 #include "acl.h"
 
@@ -31,6 +33,181 @@ XTensor::XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr)
 void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr)
 {
     Init(shape, dtype, ptr, TORCH_NPU);
+}
+
+void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
+{
+    switch (dtype) {
+        case BIT1: {
+            uint64_t *raw = (uint64_t *)p + off / 64;
+            uint32_t val = ((*raw) & (1ull << (off % 64))) ? 1 : 0;
+            std::cout << val;
+            break;
+        } case INT8: {
+            int32_t val = ((int8_t *)p)[off];
+            if (val >= 0) {
+                std::cout << " ";
+            }
+            std::cout << val;
+            break;
+        } case INT32: {
+            int32_t val = ((int32_t *)p)[off];
+            if (val >= 0) {
+                std::cout << " ";
+            }
+            std::cout << val;
+            break;
+        } case INT64: {
+            int64_t val = ((int64_t *)p)[off];
+            if (val >= 0) {
+                std::cout << " ";
+            }
+            std::cout << val;
+            break;
+        } case FP16: {
+            __fp16 val = ((__fp16 *)p)[off];
+            if (val >= 0) {
+                std::cout << " ";
+            }
+            std::cout << std::fixed << std::setprecision(4);
+            std::cout << val;
+            std::cout.unsetf(std::ios::fixed);
+            break;
+        } case BF16: {
+            uint16_t data = ((uint16_t *)p)[off];
+            uint32_t float32Data = (static_cast<uint32_t>(data) << 16);
+            float val;
+            std::memcpy(&val, &float32Data, sizeof(float));
+            if (val >= 0) {
+                std::cout << " ";
+            }
+            std::cout << std::fixed << std::setprecision(4);
+            std::cout << val;
+            std::cout.unsetf(std::ios::fixed);
+            break;
+        } case FP32: {
+            float val = ((float *)p)[off];
+            if (val >= 0) {
+                std::cout << " ";
+            }
+            std::cout << std::fixed << std::setprecision(4);
+            std::cout << val;
+            std::cout.unsetf(std::ios::fixed);
+            break;
+        } default:
+            break;
+    }
+}
+
+void XTensor::Print(uint32_t nRow, uint32_t nCol)
+{
+    uint32_t i, j;
+    uint32_t hRow = DIV_ROUND_UP(nRow, 2);
+    uint32_t hCol = DIV_ROUND_UP(nCol, 2);
+    size_t size = numel * XDtypeBit(dtype) / 8;
+    aclError err;
+
+    if (size == 0) {
+        return;
+    }
+
+    void *p = malloc(size);
+    if (!p) {
+        return;
+    }
+
+    err = aclrtMemcpy(p, size, ptr, size, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (err != ACL_ERROR_NONE) {
+        free(p);
+        return;
+    }
+
+    std::cout << "XTensor(";
+    for (uint32_t i = 0; i < shape.size(); i++) {
+        std::cout << "[";
+    }
+
+    size_t col = shape[shape.size() - 1];
+    size_t row = numel / col;
+    for (j = 0; j < row && j < hRow; j++) {
+        for (i = 0; i < col && i < hCol; i++) {
+            PrintMemoryVal(p, j * col + i, dtype);
+            if (i != col - 1) {
+                std::cout << ", ";
+            }
+        }
+
+        if (col > hCol && i < col - hCol) {
+            std::cout << " ..., ";
+            i = col - hCol;
+        }
+
+        for (; i < col; i++) {
+            PrintMemoryVal(p, j * col + i, dtype);
+            if (i != col - 1) {
+                std::cout << ", ";
+            }
+        }
+        if (j != row - 1) {
+            std::cout << "]," << std::endl << "        ";
+            for (uint32_t i = 0; i < shape.size() - 1; i++) {
+                std::cout << " ";
+            }
+            if (j != hRow - 1 || j >= row - hRow - 1) {
+                std::cout << "[";
+            }
+        }
+    }
+
+    if (row > hRow && j < row - hRow) {
+        std::cout << "...," << std::endl << "        ";
+        for (uint32_t i = 0; i < shape.size() - 1; i++) {
+            std::cout << " ";
+        }
+        std::cout << "[";
+        j = row - hRow;
+    }
+
+    for (; j < row; j++) {
+        for (i = 0; i < col && i < hCol; i++) {
+            PrintMemoryVal(p, j * col + i, dtype);
+            if (i != col - 1) {
+                std::cout << ", ";
+            }
+        }
+
+        if (col > hCol && i < col - hCol) {
+            std::cout << " ..., ";
+            i = col - hCol;
+        }
+
+        for (; i < col; i++) {
+            PrintMemoryVal(p, j * col + i, dtype);
+            if (i != col - 1) {
+                std::cout << ", ";
+            }
+        }
+        if (j != row - 1) {
+            std::cout << "]," << std::endl << "        ";
+            for (uint32_t i = 0; i < shape.size() - 1; i++) {
+                std::cout << " ";
+            }
+            std::cout << "[";
+        }
+    }
+
+    for (uint32_t i = 0; i < shape.size(); i++) {
+        std::cout << "]";
+    }
+    std::cout << ", shape=(";
+    for (uint32_t i = 0; i < shape.size(); i++) {
+        std::cout << shape[i];
+        if (i != shape.size() - 1) {
+            std::cout << ", ";
+        }
+    }
+    std::cout << "), dtype=" << XDtypeStr(dtype) << ")" << std::endl;
+    free(p);
 }
 
 int XTensorPool::Init(void)
