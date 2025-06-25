@@ -161,8 +161,8 @@ def main(
                 tokenizer.apply_chat_template([{"role": "user", "content": item['query']}], add_generation_prompt=True)
                 for item in batch
             ]
-            completion_tokens_batch = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
-            completions_batch = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
+            completion_tokens_batch = generate(model, prompts_tokens_batch, max_new_tokens, tokenizer.eos_token_id, temperature)
+            completions_batch = tokenizer.batch_decode(completion_tokens_batch, skip_special_tokens=True)
 
             for idx, item in enumerate(batch):
                 item['response'] = completions_batch[idx]
