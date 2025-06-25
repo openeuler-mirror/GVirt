@@ -164,6 +164,12 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
     rt.Synchronize();
 }
 
+void Print(at::Tensor &x)
+{
+    XTensor _x(x.sizes().vec(), XDtype(x), TensorPtr(x));
+    _x.Print();
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "runtime")
         .def(py::init<uint32_t, uint32_t, size_t>());
@@ -223,5 +229,9 @@ PYBIND11_MODULE(_C, m) {
         .def("init", &_CModel::Init)
         .def("forward", &_CModel::Forward);
 
+    // kernels
     m.def("add", &Add);
+
+    // funcs
+    m.def("print", &Print);
 }
