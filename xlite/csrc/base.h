@@ -35,6 +35,28 @@ enum XTensorType {
     MAX_XTENSOR_TYPE,
 };
 
+inline const char * XDtypeStr(enum XDtype dtype)
+{
+    switch (dtype) {
+        case BIT1:
+            return "BIT1";
+        case INT8:
+            return "INT8";
+        case INT32:
+            return "INT32";
+        case INT64:
+            return "INT64";
+        case FP16:
+            return "FP16";
+        case BF16:
+            return "BF16";
+        case FP32:
+            return "FP32";
+        default:
+            return "unknown";
+    }
+}
+
 size_t inline XDtypeBit(enum XDtype dtype)
 {
     switch (dtype) {
