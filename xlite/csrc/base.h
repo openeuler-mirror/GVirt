@@ -31,8 +31,8 @@ enum XDtype {
 };
 
 enum XTensorType {
-    TORCH_NPU,
-    XLITE_DYNAMIC,
+    XTENSOR_STATIC,
+    XTENSOR_DYNAMIC,
     MAX_XTENSOR_TYPE,
 };
 

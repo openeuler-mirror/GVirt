@@ -27,12 +27,12 @@ void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum X
 
 XTensor::XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr)
 {
-    Init(shape, dtype, ptr, TORCH_NPU);
+    Init(shape, dtype, ptr, XTENSOR_STATIC);
 }
 
 void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr)
 {
-    Init(shape, dtype, ptr, TORCH_NPU);
+    Init(shape, dtype, ptr, XTENSOR_STATIC);
 }
 
 void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
@@ -249,7 +249,7 @@ XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
         XTensor &use = it->get();
         free = reinterpret_cast<uintptr_t>(use.ptr) - reinterpret_cast<uintptr_t>(ptr);
         if (free >= size) {
-            t.Init(shape, dtype, ptr, XLITE_DYNAMIC);
+            t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
             _free.pop_front();
             _used.insert(it, t);
             return t;
@@ -257,7 +257,7 @@ XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
         ptr = (void *)((uint64_t)use.ptr + ROUND_UP(use.numel * XDtypeBit(use.dtype) / 8, XLITE_TENSOR_ALIGN));
     }
     if ((uint64_t)_ptr + _size - (uint64_t)ptr >= size) {
-        t.Init(shape, dtype, ptr, XLITE_DYNAMIC);
+        t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
         _free.pop_front();
         _used.push_back(t);
         return t;
@@ -269,7 +269,7 @@ XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
 
 void XTensorPool::PutTensor(XTensor &t)
 {
-    if (t.type != XLITE_DYNAMIC) {
+    if (t.type != XTENSOR_DYNAMIC) {
         return;
     }
     for (auto it = _used.begin(); it != _used.end(); ++it) {
