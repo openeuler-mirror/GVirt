@@ -29,7 +29,7 @@ attn_impl: Literal["naive", "absorb"] = "absorb"
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     xlite_memory_mb = 500
-    from xlite._C import runtime, model_config, model
+    from xlite._C import Runtime, ModelConfig, Model
 
 @dataclass
 class ModelArgs:
@@ -782,7 +782,7 @@ class DeepSeek_V3(nn.Module):
         if forward_backend == "xlite":
             self.args = args
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = runtime(local_rank, xlite_memory_mb, rank, world_size)
+            self.xlite_rt = Runtime(local_rank, xlite_memory_mb, rank, world_size)
             self.init_xlite_model(args)
 
     @torch.inference_mode()
@@ -846,7 +846,7 @@ class DeepSeek_V3(nn.Module):
         return self.forward_naive(tokens, start_pos)
 
     def init_xlite_model(self, args: ModelArgs):
-        config = model_config()
+        config = ModelConfig()
         config.vocab_size = args.vocab_size
         config.hidden_size = args.dim
         config.n_layers = args.n_layers
@@ -873,7 +873,7 @@ class DeepSeek_V3(nn.Module):
         config.moe_ep_size = world_size
         config.moe_tp_size = 1
 
-        self.xlite_model = model()
+        self.xlite_model = Model()
         self.xlite_model.embed = self.embed.weight
         self.xlite_model.norm = self.norm.weight
         self.xlite_model.head = self.head.weight

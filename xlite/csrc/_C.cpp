@@ -192,11 +192,11 @@ void Print(at::Tensor &x)
 }
 
 PYBIND11_MODULE(_C, m) {
-    py::class_<XRuntime>(m, "runtime")
+    py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
             py::arg("devid"), py::arg("size"), py::arg("rank") = 0, py::arg("tp_size") = 1, py::arg("dp_size") = 1);
 
-    py::class_<XModelConfig>(m, "model_config")
+    py::class_<XModelConfig>(m, "ModelConfig")
         .def(py::init<>())
         .def_readwrite("vocab_size", &XModelConfig::vocabSize)
         .def_readwrite("hidden_size", &XModelConfig::hiddenSize)
@@ -224,7 +224,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("moe_ep_size", &XModelConfig::moeEpSize)
         .def_readwrite("moe_tp_size", &XModelConfig::moeTPSize);
 
-    py::class_<_CModel>(m, "model")
+    py::class_<_CModel>(m, "Model")
         .def(py::init<>())
         .def_readwrite("embed", &_CModel::embed)
         .def_readwrite("norm", &_CModel::norm)

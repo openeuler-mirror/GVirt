@@ -8,10 +8,10 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-from xlite._C import runtime, add
+from xlite._C import Runtime, add
 
 
-rt = runtime(0, 500)
+rt = Runtime(0, 500)
 torch.npu.set_device(0)
 
 x = torch.randn(8, 2048, dtype=torch.float16, device="npu:0")

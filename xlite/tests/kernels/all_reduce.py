@@ -10,7 +10,7 @@
 import os
 import torch
 import torch.distributed as dist
-from xlite._C import runtime, all_reduce
+from xlite._C import Runtime, all_reduce
 
 
 world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -18,7 +18,7 @@ rank = int(os.getenv("RANK", "0"))
 local_rank = int(os.getenv("LOCAL_RANK", "0"))
 dist.init_process_group("hccl")
 
-rt = runtime(local_rank, 500, rank, world_size)
+rt = Runtime(local_rank, 500, rank, world_size)
 torch.npu.set_device(local_rank)
 
 with torch.device("npu"):
