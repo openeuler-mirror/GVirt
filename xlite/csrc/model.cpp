@@ -20,19 +20,19 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mlpNorm.resize(c.nLayers);
     mlpUpGate.resize(c.nDenseLayers);
     mlpDown.resize(c.nDenseLayers);
-    Gate.resize(c.nLayers);
-    GateBias.resize(c.nLayers);
-    SEUpGate.resize(c.nLayers);
-    SEDown.resize(c.nLayers);
-    REUpGate.resize(c.nLayers);
-    REUpGateScale.resize(c.nLayers);
-    REDown.resize(c.nLayers);
-    REDownScale.resize(c.nLayers);
+    moeGate.resize(c.nLayers);
+    moeGateBias.resize(c.nLayers);
+    moeSEUpGate.resize(c.nLayers);
+    moeSEDown.resize(c.nLayers);
+    moeREUpGate.resize(c.nLayers);
+    moeREUpGateScale.resize(c.nLayers);
+    moeREDown.resize(c.nLayers);
+    moeREDownScale.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
-        REUpGate[i].resize(c.nRoutedExperts);
-        REUpGateScale[i].resize(c.nRoutedExperts);
-        REDown[i].resize(c.nRoutedExperts);
-        REDownScale[i].resize(c.nRoutedExperts);
+        moeREUpGate[i].resize(c.nRoutedExperts);
+        moeREUpGateScale[i].resize(c.nRoutedExperts);
+        moeREDown[i].resize(c.nRoutedExperts);
+        moeREDownScale[i].resize(c.nRoutedExperts);
     }
 }
 
