@@ -153,6 +153,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output)
     XTensor _input(input.sizes().vec(), XDtype(input), TensorPtr(input));
     XTensor _output(output.sizes().vec(), XDtype(output), TensorPtr(output));
     _model->Forward(rt, _input, _output);
+    rt.Synchronize();
 }
 
 void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
@@ -160,6 +161,7 @@ void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
     XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
     XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
     XliteOpAllGather(rt, _in, _out, TP);
+    rt.Synchronize();
 }
 
 void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in)
@@ -167,6 +169,7 @@ void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in)
     XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
     XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
     XliteOpReduceScatter(rt, _in, _out, TP);
+    rt.Synchronize();
 }
 
 void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in)
@@ -174,6 +177,7 @@ void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in)
     XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
     XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
     XliteOpAllReduceSum(rt, _in, _out, TP);
+    rt.Synchronize();
 }
 
 void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)

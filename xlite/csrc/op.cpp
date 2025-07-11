@@ -91,7 +91,7 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
     add_do(blockDim, rt.stream, in1.ptr, in2.ptr, out.ptr);
 }
 
-void XliteOpMatmul(XRuntime &rt, XTensor &in1, XTensor &weight, XTensor &out)
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out)
 {
     std::cout << __func__ << ": TODO" << std::endl;
 }
@@ -131,7 +131,8 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
 }
 
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
-                        XTensor &counts, long outDim, long inDim, XTensor &output)
+                        XTensor &counts, uint32_t start, uint32_t end,
+                        long outDim, long inDim, XTensor &output)
 {
     std::cout << __func__ << ": TODO" << std::endl;
 }

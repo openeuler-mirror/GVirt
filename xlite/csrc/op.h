@@ -14,7 +14,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end, XTensor &out);
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, float normEps, XTensor &out);
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out);
-void XliteOpMatmul(XRuntime &rt, XTensor &in1, XTensor &weight, XTensor &out);
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out);
 
 void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out);
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale);
@@ -27,6 +27,7 @@ void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t st
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing, XTensor &weights,
                           uint32_t start, uint32_t end, XTensor &out);
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
-                        XTensor &counts, long outDim, long inDim, XTensor &output);
+                        XTensor &counts, uint32_t start, uint32_t end,
+                        long outDim, long inDim, XTensor &output);
 
 #endif
