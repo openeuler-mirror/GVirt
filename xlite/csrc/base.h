@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <iostream>
 #include <vector>
+#include <functional>
 #include <list>
 #include <cstdint>
 
@@ -102,15 +103,15 @@ public:
     XTensorPool(size_t size) : _size(size) {};
     ~XTensorPool(void);
     int Init(void);
-    XTensor *GetTensor(std::vector<long> shape, enum XDtype dtype);
-    void PutTensor(XTensor *t);
+    XTensor &GetTensor(std::vector<long> shape, enum XDtype dtype);
+    void PutTensor(XTensor &t);
 
 private:
     void *_ptr;
     size_t _size;
     XTensor _t[XLITE_MAX_NUM_DYNAMIC_TENSOR];
-    std::list<XTensor *> _free;
-    std::list<XTensor *> _used;
+    std::list<std::reference_wrapper<XTensor>> _free;
+    std::list<std::reference_wrapper<XTensor>> _used;
 };
 
 #endif

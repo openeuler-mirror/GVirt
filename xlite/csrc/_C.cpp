@@ -152,7 +152,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output)
 {
     XTensor _input(input.sizes().vec(), XDtype(input), TensorPtr(input));
     XTensor _output(output.sizes().vec(), XDtype(output), TensorPtr(output));
-    _model->Forward(rt, &_input, &_output);
+    _model->Forward(rt, _input, _output);
 }
 
 void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
@@ -160,7 +160,7 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
     XTensor _x(x.sizes().vec(), XDtype(x), TensorPtr(x));
     XTensor _y(y.sizes().vec(), XDtype(y), TensorPtr(y));
     XTensor _z(z.sizes().vec(), XDtype(z), TensorPtr(z));
-    XliteOpAdd(rt, &_x, &_y, &_z);
+    XliteOpAdd(rt, _x, _y, _z);
     rt.Synchronize();
 }
 
