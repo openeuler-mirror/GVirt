@@ -1,0 +1,7 @@
+build
+dist
+xlite.egg-info
+*__pycache__*
+*so
+tags
+cscope.out
