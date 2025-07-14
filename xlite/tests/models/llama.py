@@ -9,6 +9,7 @@
 # ===============================================================================
 from dataclasses import dataclass
 from typing import Optional, Literal
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,6 +21,13 @@ from tests.models.weight_utils import (hf_model_weights_iterator,
 
 world_size = 1
 rank = 0
+
+forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
+if forward_backend == "xlite":
+    xlite_memory_mb = 500
+    block_size = 128
+    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMHA, Model
+    import numpy as np
 
 
 @dataclass
@@ -281,7 +289,8 @@ class Llama(nn.Module):
         self.freqs_cis = precompute_freqs_cis(args.head_dim, args.max_seq_len, args.rope_theta)
 
 
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+    @torch.inference_mode()
+    def forward_naive(self, tokens: torch.Tensor, start_pos: int = 0):
         _bsz, seqlen = tokens.shape
         h = self.embed_tokens(tokens)
 
@@ -298,6 +307,21 @@ class Llama(nn.Module):
             dist.all_gather(all_logits, logits)
             logits = torch.cat(all_logits, dim=-1)
         return logits
+
+
+    @torch.inference_mode()
+    def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
+        logits = torch.empty(tokens.size(0), self.args.vocab_size, device=tokens.device)
+        attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
+        torch.npu.synchronize()
+        self.xlite_model.forward(self.xlite_rt, tokens, attn_meta, self.xlite_kv_cache, self.freqs_cis, logits)
+        torch.npu.synchronize()
+        return logits
+
+
+    @torch.inference_mode()
+    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+        return self.forward_naive(tokens, start_pos)
 
 
     def load_weights(
@@ -412,3 +436,71 @@ class Llama(nn.Module):
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
             param.copy_(loaded_weight)
+
+        if forward_backend == "xlite":
+            local_rank = int(os.getenv("LOCAL_RANK", "0"))
+            self.xlite_rt = Runtime(local_rank, xlite_memory_mb, rank, world_size)
+            self.init_xlite_model(self.args)
+            kv_size = self.init_xlite_kvcache(self.args)
+
+            total_model_memory = 0
+            for _, param in self.named_parameters():
+                memory_usage = param.element_size() * param.numel()
+                total_model_memory += memory_usage
+            if rank == 0:
+                print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
+                      f" KV Cache: {kv_size // 1024 // 1024} MB")
+
+    def init_xlite_model(self, args: ModelArgs):
+        config = ModelConfig()
+        config.vocab_size = args.vocab_size
+        config.hidden_size = args.dim
+        config.n_layers = args.n_layers
+        config.n_heads = args.n_heads
+        config.head_dim = args.head_dim
+        config.rope_head_dim = args.head_dim
+        config.norm_eps = args.norm_eps
+        config.rope_theta = args.rope_theta
+        config.softmax_scale = args.head_dim ** -0.5
+        config.n_dense_layers = args.n_layers
+        config.intermediate_size = args.inter_dim
+        config.def_tp_size = world_size
+        config.def_dp_size = 1
+        config.moe_ep_size = 1
+        config.moe_tp_size = 1
+
+        self.xlite_model = Model()
+        self.xlite_model.embed = self.embed_tokens.weight
+        self.xlite_model.norm = self.norm.weight
+        self.xlite_model.head = self.lm_head.weight
+        self.xlite_model.attn_norm = [layer.input_layernorm.weight for layer in self.layers]
+        self.xlite_model.attn_out = [layer.self_attn.o_proj.weight for layer in self.layers]
+        self.xlite_model.mha_qkv = [layer.self_attn.qkv_proj.weight for layer in self.layers]
+        self.xlite_model.mlp_norm = [layer.post_attention_layernorm.weight for layer in self.layers]
+        self.xlite_model.mlp_up_gate = [self.layers[i].mlp.gate_up_proj.weight for i in range(args.n_layers)]
+        self.xlite_model.mlp_down = [self.layers[i].mlp.down_proj.weight for i in range(args.n_layers)]
+        self.xlite_model.init(config, rank, AttnMHA)
+
+    def init_xlite_kvcache(self, args: ModelArgs):
+        block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
+        head_num = 1
+        self.xlite_kv_cache = [(torch.zeros(block_num, head_num, block_size, args.head_dim, dtype=torch.get_default_dtype()),
+                                torch.zeros(block_num, head_num, block_size, args.head_dim, dtype=torch.get_default_dtype()))
+                               for _ in range(args.n_layers)]
+        kv_size = (block_num * head_num * block_size * (args.head_dim + args.head_dim) *
+                   self.xlite_kv_cache[0][0].element_size() * args.n_layers)
+        return kv_size
+
+    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
+        batch = tokens.size(0)
+        seqlen = tokens.size(1)
+        step = (self.args.max_seq_len + block_size - 1) // block_size
+        block_num = (seqlen + start_pos + block_size - 1) // block_size
+        attn_meta = ModelAttnMeta()
+        attn_meta.lens = [seqlen] * batch
+        attn_meta.cached_lens = [start_pos] * batch
+        attn_meta.is_prefills = [True if seqlen != 1 else False] * batch
+        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
+        block_indices = np.arange(block_num, dtype=np.uint32)
+        attn_meta.block_tables = batch_indices * step + block_indices
+        return attn_meta

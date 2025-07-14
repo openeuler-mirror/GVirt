@@ -20,8 +20,9 @@ struct XModelConfig {
 
     // attention config
     uint32_t nHeads;
-    uint32_t nopeHeadDim;
+    uint32_t headDim;
     uint32_t ropeHeadDim;
+    uint32_t nopeHeadDim;
     uint32_t vHeadDim;
     uint32_t qLoraRank;
     uint32_t kvLoraRank;
@@ -69,6 +70,7 @@ public:
 
     std::vector<XTensor> attnNorm;
     std::vector<XTensor> attnOut;
+    std::vector<XTensor> mhaQKV;
     std::vector<XTensor> mlaQA;
     std::vector<XTensor> mlaQB;
     std::vector<XTensor> mlaQNorm;
@@ -91,6 +93,7 @@ public:
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
+    void prepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta);
     void ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                         XModelAttnMeta& attnMeta,
                         std::vector<std::pair<XTensor, XTensor>>& kvCache,

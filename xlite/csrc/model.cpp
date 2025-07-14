@@ -11,6 +11,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aTyp
 {
     attnNorm.resize(c.nLayers);
     attnOut.resize(c.nLayers);
+    mhaQKV.resize(c.nLayers);
     mlaQA.resize(c.nLayers);
     mlaQB.resize(c.nLayers);
     mlaQNorm.resize(c.nLayers);
@@ -48,6 +49,11 @@ void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, 
         XliteOpAllReduceSum(rt, output, output, TP);
     }
 }
+
+void XModel::prepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
+{
+}
+
 void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                             XModelAttnMeta& attnMeta,
                             std::vector<std::pair<XTensor, XTensor>>& kvCache,
@@ -55,6 +61,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
 {
     std::cout << __func__ << ": TODO" << std::endl;
 }
+
 void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                             XModelAttnMeta& attnMeta,
                             std::vector<std::pair<XTensor, XTensor>>& kvCache,

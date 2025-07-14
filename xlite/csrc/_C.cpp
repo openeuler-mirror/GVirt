@@ -29,6 +29,7 @@ public:
 
     std::vector<at::Tensor> attnNorm;
     std::vector<at::Tensor> attnOut;
+    std::vector<at::Tensor> mhaQKV;
     std::vector<at::Tensor> mlaQA;
     std::vector<at::Tensor> mlaQB;
     std::vector<at::Tensor> mlaQNorm;
@@ -115,6 +116,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType 
             InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
             InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+        } else if (aType == XMODEL_ATTN_MHA) {
+            InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
         }
         InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
     }
@@ -229,6 +232,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("hidden_size", &XModelConfig::hiddenSize)
         .def_readwrite("n_layers", &XModelConfig::nLayers)
         .def_readwrite("n_heads", &XModelConfig::nHeads)
+        .def_readwrite("head_dim", &XModelConfig::headDim)
         .def_readwrite("nope_head_dim", &XModelConfig::nopeHeadDim)
         .def_readwrite("rope_head_dim", &XModelConfig::ropeHeadDim)
         .def_readwrite("v_head_dim", &XModelConfig::vHeadDim)
@@ -270,6 +274,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("head", &_CModel::head)
         .def_readwrite("attn_norm", &_CModel::attnNorm)
         .def_readwrite("attn_out", &_CModel::attnOut)
+        .def_readwrite("mha_qkv", &_CModel::mhaQKV)
         .def_readwrite("mla_q_a", &_CModel::mlaQA)
         .def_readwrite("mla_q_b", &_CModel::mlaQB)
         .def_readwrite("mla_q_norm", &_CModel::mlaQNorm)
