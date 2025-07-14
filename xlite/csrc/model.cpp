@@ -49,7 +49,10 @@ void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, 
     }
 }
 
-void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
+void XModel::ForwardAttn(XRuntime &rt, uint32_t layer,
+                         XModelAttnMeta& attnMeta,
+                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                         XTensor &freqsCis, XTensor &hiddenState)
 {
     std::cout << __func__ << ": TODO" << std::endl;
 }
@@ -64,7 +67,10 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output)
     std::cout << __func__ << ": TODO" << std::endl;
 }
 
-void XModel::Forward(XRuntime &rt, XTensor &input, XTensor &output)
+void XModel::Forward(XRuntime &rt, XTensor &input,
+                     XModelAttnMeta& attnMeta,
+                     std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                     XTensor &freqsCis, XTensor &output)
 {
     uint32_t batch = input.shape[0];
     uint32_t seqLen = input.shape[1];
@@ -81,7 +87,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XTensor &output)
     ForwardParallelEmbed(rt, input, embed, x);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         XliteOpRmsNorm(rt, x, attnNorm[i], _c.normEps, h);
-        ForwardAttn(rt, i, h);
+        ForwardAttn(rt, i, attnMeta, kvCache, freqsCis, h);
         XliteOpAdd(rt, x, h, x);
         XliteOpRmsNorm(rt, x, mlpNorm[i], _c.normEps, h);
         ForwardFFN(rt, i, h);

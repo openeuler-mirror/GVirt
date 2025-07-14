@@ -41,10 +41,20 @@ struct XModelConfig {
     uint32_t moeTPSize;
 };
 
+struct XModelAttnMeta {
+    std::vector<uint32_t> lens;
+    std::vector<uint32_t> cachedLens;
+    std::vector<bool> isPrefills;
+    std::vector<std::vector<uint32_t>> blockTables;
+};
+
 class XModel {
 public:
     XModel(struct XModelConfig &c, uint32_t rankId);
-    void Forward(XRuntime &rt, XTensor &input, XTensor &output);
+    void Forward(XRuntime &rt, XTensor &input,
+                 XModelAttnMeta& attnMeta,
+                 std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                 XTensor &freqsCis, XTensor &output);
 
     // weights
     XTensor embed;
@@ -75,7 +85,10 @@ public:
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
-    void ForwardAttn(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
+    void ForwardAttn(XRuntime &rt, uint32_t layer,
+                     XModelAttnMeta& attnMeta,
+                     std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                     XTensor &freqsCis, XTensor &hiddenState);
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     struct XModelConfig _c;

@@ -17,7 +17,10 @@ public:
     _CModel() {};
     ~_CModel();
     void Init(struct XModelConfig &c, uint32_t rankId);
-    void Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output);
+    void Forward(XRuntime &rt, at::Tensor &input,
+                 XModelAttnMeta& attnMeta,
+                 std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                 at::Tensor &freqsCis, at::Tensor &output);
 
     // weights
     at::Tensor embed;
@@ -48,6 +51,7 @@ public:
 
 private:
     XModel *_model;
+    std::vector<std::pair<XTensor, XTensor>> _kv;
 };
 
 static inline enum XDtype XDtype(at::Tensor &t)
@@ -141,6 +145,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         std::cout << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize <<
             "), data parallel(" << c.defDpSize << "), expert parallel (" << c.moeEpSize << ")]" << std::endl;
     }
+
+    _kv.resize(c.nLayers);
 }
 
 _CModel::~_CModel(void)
@@ -148,11 +154,26 @@ _CModel::~_CModel(void)
     delete _model;
 }
 
-void _CModel::Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output)
+void _CModel::Forward(XRuntime &rt, at::Tensor &input,
+                      XModelAttnMeta& attnMeta,
+                      std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                      at::Tensor &freqsCis, at::Tensor &output)
 {
     XTensor _input(input.sizes().vec(), XDtype(input), TensorPtr(input));
     XTensor _output(output.sizes().vec(), XDtype(output), TensorPtr(output));
-    _model->Forward(rt, _input, _output);
+    XTensor _freqsCis(freqsCis.sizes().vec(), XDtype(freqsCis), TensorPtr(freqsCis));
+
+    if (kvCache.size() != _kv.size()) {
+        std::cerr << __func__ << "check kv cache failed!" << std::endl;
+        return;
+    }
+
+    for (int i = 0; i < _kv.size(); i++) {
+        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first), TensorPtr(kvCache[i].first));
+        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
+    }
+
+    _model->Forward(rt, _input, attnMeta, _kv, _freqsCis, _output);
     rt.Synchronize();
 }
 
@@ -227,6 +248,13 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("def_dp_size", &XModelConfig::defDpSize)
         .def_readwrite("moe_ep_size", &XModelConfig::moeEpSize)
         .def_readwrite("moe_tp_size", &XModelConfig::moeTPSize);
+
+    py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
+        .def(py::init<>())
+        .def_readwrite("lens", &XModelAttnMeta::lens)
+        .def_readwrite("cached_lens", &XModelAttnMeta::cachedLens)
+        .def_readwrite("is_prefills", &XModelAttnMeta::isPrefills)
+        .def_readwrite("block_tables", &XModelAttnMeta::blockTables);
 
     py::class_<_CModel>(m, "Model")
         .def(py::init<>())
