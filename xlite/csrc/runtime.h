@@ -28,6 +28,8 @@ public:
     uint32_t tpSize(void) { return _tpSize; };
     uint32_t dpSize(void) { return _dpSize; };
     aclrtStream stream;
+    uint32_t aicNum;
+    uint32_t aivNum;
     XTensorPool *pool;
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;

@@ -32,6 +32,12 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
         delete pool;
         return;
     }
+
+    int64_t val;
+    CHECK_ACL(aclGetDeviceCapability(devid, ACL_DEVICE_INFO_AI_CORE_NUM, &val));
+    aicNum = (uint32_t)val;
+    CHECK_ACL(aclGetDeviceCapability(devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
+    aivNum = (uint32_t)val;
 }
 
 XRuntime::~XRuntime(void)
