@@ -16,8 +16,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from safetensors.torch import load_model
 
-from tests.deepseek_kernel import weight_dequant
+from tests.models.deepseek_kernel import weight_dequant
 
 
 world_size = 1
@@ -770,6 +771,7 @@ class DeepSeek_V3(nn.Module):
         rank = dist.get_rank() if dist.is_initialized() else 0
         Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
         super().__init__()
+        self.args = args
         self.max_seq_len = args.max_seq_len
         self.embed = ParallelEmbedding(args.vocab_size, args.dim)
         self.layers = torch.nn.ModuleList()
@@ -778,12 +780,6 @@ class DeepSeek_V3(nn.Module):
         self.norm = RMSNorm(args.dim)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
-
-        if forward_backend == "xlite":
-            self.args = args
-            local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = Runtime(local_rank, xlite_memory_mb, rank, world_size)
-            self.init_xlite_model(args)
 
     @torch.inference_mode()
     def forward_naive(self, tokens: torch.Tensor, start_pos: int = 0):
@@ -844,6 +840,14 @@ class DeepSeek_V3(nn.Module):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         return self.forward_naive(tokens, start_pos)
+
+    def load_weights(self, ckpt_path: str):
+        load_model(self, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+
+        if forward_backend == "xlite":
+            local_rank = int(os.getenv("LOCAL_RANK", "0"))
+            self.xlite_rt = Runtime(local_rank, xlite_memory_mb, rank, world_size)
+            self.init_xlite_model(self.args)
 
     def init_xlite_model(self, args: ModelArgs):
         config = ModelConfig()

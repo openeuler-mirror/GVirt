@@ -1,0 +1,414 @@
+#!/usr/bin/python3
+# coding=utf-8
+#
+# Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# ===============================================================================
+from dataclasses import dataclass
+from typing import Optional, Literal
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist
+from tests.models.weight_utils import (hf_model_weights_iterator,
+                                       convert_pyslice_to_tensor,
+                                       load_tensor_parallel_weights, logger)
+
+
+world_size = 1
+rank = 0
+
+
+@dataclass
+class ModelArgs:
+    max_batch_size: int = 8
+    max_seq_len: int = 4096
+    dim: int = 4096
+    head_dim: int = None
+    inter_dim: int = 11008
+    vocab_size: int = 32000
+    n_layers: int = 32
+    n_heads: int = 32
+    n_kv_heads: int = 32
+    norm_eps: float = 1e-5
+    rope_theta: float = 10000.0
+    dtype: Literal["bfloat16", "float16"] = "float16"
+    qkv_bias: bool = False
+
+    def __post_init__(self):
+        if self.head_dim is None:
+            self.head_dim = self.dim // self.n_heads
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        input_dtype = x.dtype
+        x = x.to(torch.float32)
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
+        return (self.weight.float() * x).to(input_dtype)
+
+
+class ParallelEmbedding(nn.Module):
+    """
+    Embedding layer with parallelism support across distributed processes.
+
+    Args:
+        vocab_size (int): Vocabulary size.
+        dim (int): Embedding dimension.
+    """
+    def __init__(self, vocab_size: int, dim: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.dim = dim
+        assert vocab_size % world_size == 0, f"Vocabulary size must be divisible by world size (world_size={world_size})"
+        self.part_vocab_size = (vocab_size // world_size)
+        self.vocab_start_idx = rank * self.part_vocab_size
+        self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
+        self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for parallel embedding layer.
+
+        Args:
+            x (torch.Tensor): Input tensor containing token indices.
+
+        Returns:
+            torch.Tensor: Embedded representations.
+
+        Raises:
+            ValueError: If `world_size` is not defined.
+        """
+        if world_size > 1:
+            mask = (x < self.vocab_start_idx) | (x >= self.vocab_end_idx)
+            x = x - self.vocab_start_idx
+            x[mask] = 0
+        y = F.embedding(x, self.weight)
+        if world_size > 1:
+            y[mask] = 0
+            dist.all_reduce(y)
+        return y
+
+
+def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return F.linear(x, weight, bias)
+
+
+class Linear(nn.Module):
+    dtype = torch.bfloat16
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features))
+        else:
+            self.register_parameter("bias", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return linear(x, self.weight, self.bias)
+
+
+class ColumnParallelLinear(Linear):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+        assert out_features % world_size == 0, f"Output features must be divisible by world size (world_size={world_size})"
+        self.part_out_features = out_features // world_size
+        super().__init__(in_features, self.part_out_features, bias, dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = linear(x, self.weight, self.bias)
+        return y
+
+
+class RowParallelLinear(Linear):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+        assert in_features % world_size == 0, f"Input features must be divisible by world size (world_size={world_size})"
+        self.part_in_features = in_features // world_size
+        super().__init__(self.part_in_features, out_features, bias, dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = linear(x, self.weight)
+        if world_size > 1:
+            dist.all_reduce(y)
+        if self.bias is not None:
+            y += self.bias
+        return y
+
+
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32)[: (dim // 2)] / dim))
+    t = torch.arange(end, device=freqs.device)  # type: ignore
+    freqs = torch.outer(t, freqs).float()  # type: ignore
+    cos_cache = freqs.cos().to(torch.get_default_dtype())
+    sin_cache = freqs.sin().to(torch.get_default_dtype())
+    freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
+    return freq_cis
+
+
+def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor) -> torch.Tensor:
+    seqlen = x.size(2) # [bsz, n_local_heads, seqlen, head_dim]
+    cos, sin = freqs_cis[start_pos:start_pos + seqlen, :].chunk(2, dim=-1)
+    cos = cos.repeat(1, 2) # [seqlen, head_dim]
+    sin = sin.repeat(1, 2)
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    x_rot = torch.cat((-x2, x1), dim=-1)
+    return (x * cos) + (x_rot * sin)
+
+
+class MHA(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.n_heads = args.n_heads
+        self.n_kv_heads = args.n_kv_heads
+        self.dim = args.dim
+        self.head_dim = args.head_dim
+        self.n_local_heads = args.n_heads // world_size
+        self.n_local_kv_heads = max(1, args.n_kv_heads // world_size)
+        self.qkv_proj = ColumnParallelLinear(args.dim, (self.n_heads + 2 * self.n_local_kv_heads * world_size) * self.head_dim, bias=args.qkv_bias)
+        self.o_proj = RowParallelLinear(self.n_heads * self.head_dim, args.dim, bias=False)
+        self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
+        self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
+
+    def forward(self, x, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+        bsz, seqlen, _ = x.shape
+
+        qkv = self.qkv_proj(x)
+        q, k, v = qkv.split([
+            self.n_local_heads * self.head_dim,
+            self.n_local_kv_heads * self.head_dim,
+            self.n_local_kv_heads * self.head_dim
+        ], dim=2)
+
+        q = q.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        k = k.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        v = v.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        q = apply_rotary_emb(q, start_pos, freqs_cis=freqs_cis)
+        k = apply_rotary_emb(k, start_pos, freqs_cis=freqs_cis)
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+
+        q = q * self.head_dim ** -0.5
+
+        self.k_cache[:bsz, start_pos:start_pos + seqlen] = k
+        self.v_cache[:bsz, start_pos:start_pos + seqlen] = v
+
+        keys = self.k_cache[:bsz, :start_pos + seqlen]
+        values = self.v_cache[:bsz, :start_pos + seqlen]
+
+        keys = keys.repeat_interleave(self.n_local_heads // self.n_local_kv_heads, dim=2)
+        values = values.repeat_interleave(self.n_local_heads // self.n_local_kv_heads, dim=2)
+
+        scores = torch.matmul(
+            q.transpose(1, 2),  # [bsz, n_local_heads, seqlen, head_dim]
+            keys.permute(0, 2, 3, 1)  # [bsz, n_local_heads, head_dim, seqlen+start_pos]
+        ) # [bsz, n_local_heads, seqlen, seqlen+start_pos]
+
+        if mask is not None:
+            scores = scores.float() + mask.float()
+
+        scores = torch.softmax(scores, dim=-1, dtype=torch.float).to(x.dtype)
+
+        output = torch.matmul(
+            scores,  # [bsz, n_local_heads, seqlen, seqlen+start_pos]
+            values.transpose(1, 2)  # [bsz, n_local_heads, seqlen+start_pos, head_dim]
+        ).transpose(1, 2).contiguous()  # [bsz, seqlen, n_local_heads, head_dim]
+
+        output = output.reshape(bsz, seqlen, -1)
+        return self.o_proj(output)
+
+
+class MLP(nn.Module):
+    def __init__(self, dim: int, inter_dim: int):
+        super().__init__()
+        self.gate_up_proj = ColumnParallelLinear(dim, inter_dim * 2)
+        self.down_proj = RowParallelLinear(inter_dim, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.gate_up_proj(x)
+        y1, y3 = torch.split(y, y.shape[-1] // 2, dim=-1)
+        out = y1 * F.sigmoid(y1) * y3
+        return self.down_proj(out)
+
+
+class Block(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.self_attn = MHA(args)
+        self.mlp = MLP(dim=args.dim, inter_dim=args.inter_dim)
+        self.input_layernorm = RMSNorm(args.dim, args.norm_eps)
+        self.post_attention_layernorm = RMSNorm(args.dim, args.norm_eps)
+
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = x + self.self_attn(self.input_layernorm(x), start_pos, freqs_cis, mask)
+        x = x + self.mlp(self.post_attention_layernorm(x))
+        return x
+
+
+class Llama(nn.Module):
+    def __init__(self, args: ModelArgs):
+        global world_size, rank
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        Linear.dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
+        super().__init__()
+        self.args = args
+        self.max_seq_len = args.max_seq_len
+        self.vocab_size = args.vocab_size
+        self.n_layers = args.n_layers
+        self.dim = args.dim
+        self.embed_tokens = ParallelEmbedding(args.vocab_size, args.dim)
+        self.layers = nn.ModuleList()
+        for _ in range(args.n_layers):
+            self.layers.append(Block(args))
+        self.norm = RMSNorm(args.dim, args.norm_eps)
+        self.lm_head = ColumnParallelLinear(args.dim, args.vocab_size, bias=False)
+        self.freqs_cis = precompute_freqs_cis(args.head_dim, args.max_seq_len, args.rope_theta)
+
+
+    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+        _bsz, seqlen = tokens.shape
+        h = self.embed_tokens(tokens)
+
+        mask = None
+        if seqlen > 1:
+            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+
+        for layer in self.layers:
+            h = layer(h, start_pos, self.freqs_cis, mask)
+        h = self.norm(h)[:, -1]
+        logits = self.lm_head(h)
+        if world_size > 1:
+            all_logits = [torch.empty_like(logits) for _ in range(world_size)]
+            dist.all_gather(all_logits, logits)
+            logits = torch.cat(all_logits, dim=-1)
+        return logits
+
+
+    def load_weights(
+        self,
+        model_path : str,
+    ) -> None:
+        """ load llama weight """
+        assert self.args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
+        assert self.args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
+        assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
+        assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+
+        q_proj_shard_size = (self.args.dim // world_size)
+        n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
+        n_local_kv_heads = max(1, self.args.n_kv_heads // world_size)
+        kv_proj_shard_size = (self.args.dim // self.args.n_heads * n_local_kv_heads)
+        attention_weight_specs = [
+            ("q_proj", q_proj_shard_size, 0),
+            ("k_proj", kv_proj_shard_size, q_proj_shard_size),
+            ("v_proj", kv_proj_shard_size, q_proj_shard_size + kv_proj_shard_size),
+        ]
+        intermediate_size = self.args.inter_dim
+
+        param_dict = {name if "lm_head" in name else "model." + name: param for name, param in self.named_parameters()}
+        for _, param in self.named_parameters():
+            param.requires_grad = False
+        for name, loaded_weight in hf_model_weights_iterator(model_path):
+            if "rotary_emb.inv_freq" in name or "g_idx" in name:
+                continue
+
+            is_attention_weight = False
+            for weight_name, shard_size, offset in attention_weight_specs:
+                if weight_name not in name:
+                    continue
+
+                param_name = name.replace(weight_name, "qkv_proj")
+                if param_name not in param_dict:
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    continue
+
+                param = param_dict[param_name]
+                if weight_name in ["k_proj", "v_proj"]:
+                    shard_id = rank // n_kv_heads_replicas
+                else:
+                    shard_id = rank
+
+                loaded_weight = loaded_weight[shard_size * shard_id: shard_size * (shard_id + 1)]
+                param_slice = param.data[offset:offset + shard_size]
+
+                if param_slice.shape != loaded_weight.shape:
+                    raise ValueError(f"{param_name} model shape({param_slice.shape}) mismatch"
+                                     f" checkpoint shape({loaded_weight.shape})")
+
+                param_slice.copy_(loaded_weight)
+                is_attention_weight = True
+                break
+
+            if is_attention_weight:
+                continue
+
+            is_gate_up_weight = False
+            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+                if weight_name not in name:
+                    continue
+
+                param_name = name.replace(weight_name, "gate_up_proj")
+                if param_name not in param_dict:
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    continue
+                param = param_dict[param_name]
+                shard_size = param.shape[0] // 2
+
+                loaded_weight = loaded_weight[shard_size * rank:shard_size * (rank + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
+
+                param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+                is_gate_up_weight = True
+                break
+            if is_gate_up_weight:
+                continue
+
+            if name not in param_dict:
+                logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                continue
+            param = param_dict[name]
+
+            if "embed_tokens" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.vocab_size,
+                                             self.args.dim,
+                                             name, True, False, rank, world_size)
+                continue
+
+            if "lm_head" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.dim,
+                                             self.args.vocab_size,
+                                             name, False, True, rank, world_size)
+                continue
+
+            if "o_proj" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.head_dim * self.args.n_heads, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
+            if "down_proj" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             intermediate_size, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
+            loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+            param.copy_(loaded_weight)
