@@ -13,11 +13,9 @@ from argparse import ArgumentParser
 from typing import List
 
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 from transformers import AutoTokenizer
-from safetensors.torch import load_model
-
-from tests.deepseek_v3 import DeepSeek_V3, ModelArgs
 
 
 def sample(logits, temperature: float = 1.0):
@@ -38,7 +36,7 @@ def sample(logits, temperature: float = 1.0):
 
 @torch.inference_mode()
 def generate(
-    model: DeepSeek_V3,
+    model: nn.Module,
     prompt_tokens: List[List[int]],
     max_new_tokens: int,
     eos_id: int,
@@ -48,7 +46,7 @@ def generate(
     Generates new tokens based on the given prompt tokens using the specified model.
 
     Args:
-        model (DeepSeek_V3): The DeepSeek_V3 model used for token generation.
+        model (nn.Module): The model used for token generation.
         prompt_tokens (List[List[int]]): A list of lists containing the prompt tokens for each sequence.
         max_new_tokens (int): The maximum number of new tokens to generate.
         eos_id (int): The end-of-sequence token ID.
@@ -88,6 +86,7 @@ def generate(
 
 
 def main(
+    model_type: str,
     ckpt_path: str,
     config: str,
     input_file: str = "",
@@ -106,6 +105,18 @@ def main(
         max_new_tokens (int, optional): Maximum number of new tokens to generate. Defaults to 100.
         temperature (float, optional): Temperature for sampling. Defaults to 1.0.
     """
+    if model_type == "deepseek":
+        from tests.models.deepseek_v3 import ModelArgs
+        from tests.models.deepseek_v3 import DeepSeek_V3 as Transformer
+    elif model_type == "llama":
+        from tests.models.llama import ModelArgs
+        from tests.models.llama import Llama as Transformer
+    elif model_type == "qwen":
+        from tests.models.qwen2 import ModelArgs
+        from tests.models.llama import Llama as Transformer
+    else:
+        return
+
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -115,17 +126,18 @@ def main(
     if rank != 0:
         print = lambda *_, **__: None
     torch.npu.set_device(local_rank)
-    torch.set_default_dtype(torch.bfloat16)
     torch.set_num_threads(8)
     torch.manual_seed(965)
     with open(config) as f:
         args = ModelArgs(**json.load(f))
     print(args)
+    dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
+    torch.set_default_dtype(dtype)
     with torch.device("npu"):
-        model = DeepSeek_V3(args)
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-    tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
-    load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+        model = Transformer(args)
+    tokenizer = AutoTokenizer.from_pretrained(ckpt_path, trust_remote_code=True)
+    tokenizer.decode(generate(model, [tokenizer.encode("  ")], 2, -1, 1.)[0])
+    model.load_weights(ckpt_path)
 
     if interactive:
         messages = []
@@ -146,7 +158,29 @@ def main(
                 messages.clear()
                 continue
             messages.append({"role": "user", "content": prompt})
-            prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            if model_type == "deepseek":
+                prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            elif model_type == "llama":
+                formatted_prompt = ""
+                for message in messages:
+                    if message["role"] == "user":
+                        formatted_prompt += f"<s>[INST] {message['content']} [/INST]"
+                    elif message["role"] == "assistant":
+                        formatted_prompt += f" {message['content']} </s><s>[INST] "
+                if formatted_prompt.endswith("<s>[INST] "):
+                    formatted_prompt = formatted_prompt[:-8]
+                formatted_prompt += " "
+                prompt_tokens = tokenizer.encode(formatted_prompt)
+            elif model_type == "qwen":
+                formatted_prompt = ""
+                for message in messages:
+                    if message["role"] == "user":
+                        formatted_prompt += f"<|im_start|>user {message['content']}<|im_end|>"
+                    elif message["role"] == "assistant":
+                        formatted_prompt += f"<|im_start|>assistant {message['content']}<|im_end|>"
+                prompt_tokens = tokenizer.encode(formatted_prompt)
+            else:
+                prompt_tokens = tokenizer.encode(prompt)
             completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
             completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
             print(completion)
@@ -157,10 +191,23 @@ def main(
             data = json.load(file)
 
         def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature):
-            prompts_tokens_batch = [
-                tokenizer.apply_chat_template([{"role": "user", "content": item['query']}], add_generation_prompt=True)
-                for item in batch
-            ]
+            if model_type == "deepseek":
+                prompts_tokens_batch = [
+                    tokenizer.apply_chat_template([{"role": "user", "content": item['query']}], add_generation_prompt=True)
+                    for item in batch
+                ]
+            elif model_type == "llama":
+                prompts_tokens_batch = [
+                    tokenizer.encode(f"<s>[INST] {item['query']} [/INST] ")
+                    for item in batch
+                ]
+            elif model_type == "qwen":
+                prompts_tokens_batch = [
+                    tokenizer.encode(f"<|im_start|>user {item['query']}<|im_end|>")
+                    for item in batch
+                ]
+            else:
+                prompts_tokens_batch = [tokenizer.encode(item['query']) for item in batch]
             completion_tokens_batch = generate(model, prompts_tokens_batch, max_new_tokens, tokenizer.eos_token_id, temperature)
             completions_batch = tokenizer.batch_decode(completion_tokens_batch, skip_special_tokens=True)
 
@@ -199,6 +246,7 @@ if __name__ == "__main__":
         AssertionError: If neither input-file nor interactive mode is specified.
     """
     parser = ArgumentParser()
+    parser.add_argument("--model", type=str, default="deepseek")
     parser.add_argument("--ckpt-path", type=str, required=True)
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--input-file", type=str, default="")
@@ -206,5 +254,6 @@ if __name__ == "__main__":
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.0)
     args = parser.parse_args()
+    assert args.model in ["deepseek", "llama", "qwen"], f"{args.model} not supported!"
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)
+    main(args.model, args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)

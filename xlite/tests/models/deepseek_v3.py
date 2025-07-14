@@ -16,8 +16,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from safetensors.torch import load_model
 
-from tests.deepseek_kernel import weight_dequant
+from tests.models.deepseek_kernel import weight_dequant
 
 
 world_size = 1
@@ -29,7 +30,9 @@ attn_impl: Literal["naive", "absorb"] = "absorb"
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     xlite_memory_mb = 500
-    from xlite._C import Runtime, ModelConfig, Model
+    block_size = 64
+    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMLA, Model
+    import numpy as np
 
 @dataclass
 class ModelArgs:
@@ -770,6 +773,7 @@ class DeepSeek_V3(nn.Module):
         rank = dist.get_rank() if dist.is_initialized() else 0
         Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
         super().__init__()
+        self.args = args
         self.max_seq_len = args.max_seq_len
         self.embed = ParallelEmbedding(args.vocab_size, args.dim)
         self.layers = torch.nn.ModuleList()
@@ -778,12 +782,6 @@ class DeepSeek_V3(nn.Module):
         self.norm = RMSNorm(args.dim)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
-
-        if forward_backend == "xlite":
-            self.args = args
-            local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = Runtime(local_rank, xlite_memory_mb, rank, world_size)
-            self.init_xlite_model(args)
 
     @torch.inference_mode()
     def forward_naive(self, tokens: torch.Tensor, start_pos: int = 0):
@@ -826,8 +824,9 @@ class DeepSeek_V3(nn.Module):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         logits = torch.empty(tokens.size(0), self.args.vocab_size, device=tokens.device)
+        attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
         torch.npu.synchronize()
-        self.xlite_model.forward(self.xlite_rt, tokens, logits)
+        self.xlite_model.forward(self.xlite_rt, tokens, attn_meta, self.xlite_kv_cache, self.freqs_cis, logits)
         torch.npu.synchronize()
         return logits
 
@@ -844,6 +843,23 @@ class DeepSeek_V3(nn.Module):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         return self.forward_naive(tokens, start_pos)
+
+    def load_weights(self, ckpt_path: str):
+        load_model(self, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+
+        if forward_backend == "xlite":
+            local_rank = int(os.getenv("LOCAL_RANK", "0"))
+            self.xlite_rt = Runtime(local_rank, xlite_memory_mb, rank, world_size)
+            self.init_xlite_model(self.args)
+            kv_size = self.init_xlite_kvcache(self.args)
+
+            total_model_memory = 0
+            for _, param in self.named_parameters():
+                memory_usage = param.element_size() * param.numel()
+                total_model_memory += memory_usage
+            if rank == 0:
+                print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
+                      f" KV Cache: {kv_size // 1024 // 1024} MB")
 
     def init_xlite_model(self, args: ModelArgs):
         config = ModelConfig()
@@ -907,7 +923,32 @@ class DeepSeek_V3(nn.Module):
             self.xlite_model.re_down_scale = [self.layers[i].ffn.experts[j].w2.weight.scale
                                               for i in range(args.n_dense_layers, args.n_layers)
                                               for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-        self.xlite_model.init(config, rank)
+        self.xlite_model.init(config, rank, AttnMLA)
+
+    def init_xlite_kvcache(self, args: ModelArgs):
+        block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
+        head_num = 1
+        self.xlite_kv_cache = [(torch.zeros(block_num, head_num, block_size, args.kv_lora_rank, dtype=torch.get_default_dtype()),
+                                torch.zeros(block_num, head_num, block_size, args.qk_rope_head_dim, dtype=torch.get_default_dtype()))
+                               for _ in range(args.n_layers)]
+        kv_size = (block_num * head_num * block_size * (args.kv_lora_rank + args.qk_rope_head_dim) *
+                   self.xlite_kv_cache[0][0].element_size() * args.n_layers)
+        return kv_size
+
+    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
+        batch = tokens.size(0)
+        seqlen = tokens.size(1)
+        step = (self.args.max_seq_len + block_size - 1) // block_size
+        block_num = (seqlen + start_pos + block_size - 1) // block_size
+        attn_meta = ModelAttnMeta()
+        attn_meta.lens = [seqlen] * batch
+        attn_meta.cached_lens = [start_pos] * batch
+        attn_meta.is_prefills = [True if seqlen != 1 else False] * batch
+        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
+        block_indices = np.arange(block_num, dtype=np.uint32)
+        attn_meta.block_tables = batch_indices * step + block_indices
+        return attn_meta
+
 
 if __name__ == "__main__":
     torch.set_default_dtype(torch.bfloat16)

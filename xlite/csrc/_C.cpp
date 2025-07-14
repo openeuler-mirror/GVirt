@@ -16,8 +16,11 @@ class _CModel {
 public:
     _CModel() {};
     ~_CModel();
-    void Init(struct XModelConfig &c, uint32_t rankId);
-    void Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output);
+    void Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType);
+    void Forward(XRuntime &rt, at::Tensor &input,
+                 XModelAttnMeta& attnMeta,
+                 std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                 at::Tensor &freqsCis, at::Tensor &output);
 
     // weights
     at::Tensor embed;
@@ -26,6 +29,7 @@ public:
 
     std::vector<at::Tensor> attnNorm;
     std::vector<at::Tensor> attnOut;
+    std::vector<at::Tensor> mhaQKV;
     std::vector<at::Tensor> mlaQA;
     std::vector<at::Tensor> mlaQB;
     std::vector<at::Tensor> mlaQNorm;
@@ -48,6 +52,7 @@ public:
 
 private:
     XModel *_model;
+    std::vector<std::pair<XTensor, XTensor>> _kv;
 };
 
 static inline enum XDtype XDtype(at::Tensor &t)
@@ -82,7 +87,7 @@ static inline void InitXTensor(XTensor &out, at::Tensor &in)
     out.Init(in.sizes().vec(), XDtype(in), TensorPtr(in));
 }
 
-void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
+void _CModel::Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType)
 {
     uint32_t idx = 0, moe_idx = 0;
     uint32_t nLocalRoutedExperts = c.nRoutedExperts / c.moeEpSize;
@@ -95,7 +100,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         return;
     }
 
-    _model = new XModel(c, rankId);
+    _model = new XModel(c, rankId, aType);
 
     InitXTensor(_model->embed, embed);
     InitXTensor(_model->norm, norm);
@@ -104,12 +109,16 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
         InitXTensor(_model->attnOut[i], attnOut[i]);
-        InitXTensor(_model->mlaQA[i], mlaQA[i]);
-        InitXTensor(_model->mlaQB[i], mlaQB[i]);
-        InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
-        InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
-        InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
-        InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+        if (aType == XMODEL_ATTN_MLA) {
+            InitXTensor(_model->mlaQA[i], mlaQA[i]);
+            InitXTensor(_model->mlaQB[i], mlaQB[i]);
+            InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+            InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
+            InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
+            InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+        } else if (aType == XMODEL_ATTN_MHA) {
+            InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
+        }
         InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
     }
 
@@ -141,6 +150,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         std::cout << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize <<
             "), data parallel(" << c.defDpSize << "), expert parallel (" << c.moeEpSize << ")]" << std::endl;
     }
+
+    _kv.resize(c.nLayers);
 }
 
 _CModel::~_CModel(void)
@@ -148,11 +159,26 @@ _CModel::~_CModel(void)
     delete _model;
 }
 
-void _CModel::Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output)
+void _CModel::Forward(XRuntime &rt, at::Tensor &input,
+                      XModelAttnMeta& attnMeta,
+                      std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                      at::Tensor &freqsCis, at::Tensor &output)
 {
     XTensor _input(input.sizes().vec(), XDtype(input), TensorPtr(input));
     XTensor _output(output.sizes().vec(), XDtype(output), TensorPtr(output));
-    _model->Forward(rt, _input, _output);
+    XTensor _freqsCis(freqsCis.sizes().vec(), XDtype(freqsCis), TensorPtr(freqsCis));
+
+    if (kvCache.size() != _kv.size()) {
+        std::cerr << __func__ << "check kv cache failed!" << std::endl;
+        return;
+    }
+
+    for (int i = 0; i < _kv.size(); i++) {
+        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first), TensorPtr(kvCache[i].first));
+        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
+    }
+
+    _model->Forward(rt, _input, attnMeta, _kv, _freqsCis, _output);
     rt.Synchronize();
 }
 
@@ -206,6 +232,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("hidden_size", &XModelConfig::hiddenSize)
         .def_readwrite("n_layers", &XModelConfig::nLayers)
         .def_readwrite("n_heads", &XModelConfig::nHeads)
+        .def_readwrite("head_dim", &XModelConfig::headDim)
         .def_readwrite("nope_head_dim", &XModelConfig::nopeHeadDim)
         .def_readwrite("rope_head_dim", &XModelConfig::ropeHeadDim)
         .def_readwrite("v_head_dim", &XModelConfig::vHeadDim)
@@ -228,6 +255,18 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("moe_ep_size", &XModelConfig::moeEpSize)
         .def_readwrite("moe_tp_size", &XModelConfig::moeTPSize);
 
+    py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
+        .def(py::init<>())
+        .def_readwrite("lens", &XModelAttnMeta::lens)
+        .def_readwrite("cached_lens", &XModelAttnMeta::cachedLens)
+        .def_readwrite("is_prefills", &XModelAttnMeta::isPrefills)
+        .def_readwrite("block_tables", &XModelAttnMeta::blockTables);
+
+    py::enum_<XModelAttnType>(m, "AttnType")
+        .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
+        .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
+        .export_values();
+
     py::class_<_CModel>(m, "Model")
         .def(py::init<>())
         .def_readwrite("embed", &_CModel::embed)
@@ -235,6 +274,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("head", &_CModel::head)
         .def_readwrite("attn_norm", &_CModel::attnNorm)
         .def_readwrite("attn_out", &_CModel::attnOut)
+        .def_readwrite("mha_qkv", &_CModel::mhaQKV)
         .def_readwrite("mla_q_a", &_CModel::mlaQA)
         .def_readwrite("mla_q_b", &_CModel::mlaQB)
         .def_readwrite("mla_q_norm", &_CModel::mlaQNorm)
@@ -252,7 +292,8 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("re_up_gate_scale", &_CModel::moeREUpGateScale)
         .def_readwrite("re_down", &_CModel::moeREDown)
         .def_readwrite("re_down_scale", &_CModel::moeREDownScale)
-        .def("init", &_CModel::Init)
+        .def("init", &_CModel::Init, "model init",
+            py::arg("config"), py::arg("rank") = 0, py::arg("attn_type") = XMODEL_ATTN_MHA)
         .def("forward", &_CModel::Forward);
 
     // kernels

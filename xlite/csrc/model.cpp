@@ -7,10 +7,11 @@
 #include "op.h"
 #include "model.h"
 
-XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
+XModel::XModel(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType) : _c(c), _rankId(rankId), _aType(aType)
 {
     attnNorm.resize(c.nLayers);
     attnOut.resize(c.nLayers);
+    mhaQKV.resize(c.nLayers);
     mlaQA.resize(c.nLayers);
     mlaQB.resize(c.nLayers);
     mlaQNorm.resize(c.nLayers);
@@ -49,9 +50,38 @@ void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, 
     }
 }
 
-void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
+void XModel::prepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
+{
+}
+
+void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
+                            XModelAttnMeta& attnMeta,
+                            std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                            XTensor &freqsCis, XTensor &hiddenState)
 {
     std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
+                            XModelAttnMeta& attnMeta,
+                            std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                            XTensor &freqsCis, XTensor &hiddenState)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XModel::ForwardAttn(XRuntime &rt, uint32_t layer,
+                         XModelAttnMeta& attnMeta,
+                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                         XTensor &freqsCis, XTensor &hiddenState)
+{
+    if (_aType == XMODEL_ATTN_MLA) {
+        ForwardAttnMLA(rt, layer, attnMeta, kvCache, freqsCis, hiddenState);
+    } else if (_aType == XMODEL_ATTN_MHA) {
+        ForwardAttnMHA(rt, layer, attnMeta, kvCache, freqsCis, hiddenState);
+    } else {
+        std::cout << __func__ << ": TODO" << std::endl;
+    }
 }
 
 void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
@@ -64,7 +94,10 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output)
     std::cout << __func__ << ": TODO" << std::endl;
 }
 
-void XModel::Forward(XRuntime &rt, XTensor &input, XTensor &output)
+void XModel::Forward(XRuntime &rt, XTensor &input,
+                     XModelAttnMeta& attnMeta,
+                     std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                     XTensor &freqsCis, XTensor &output)
 {
     uint32_t batch = input.shape[0];
     uint32_t seqLen = input.shape[1];
@@ -81,7 +114,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XTensor &output)
     ForwardParallelEmbed(rt, input, embed, x);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         XliteOpRmsNorm(rt, x, attnNorm[i], _c.normEps, h);
-        ForwardAttn(rt, i, h);
+        ForwardAttn(rt, i, attnMeta, kvCache, freqsCis, h);
         XliteOpAdd(rt, x, h, x);
         XliteOpRmsNorm(rt, x, mlpNorm[i], _c.normEps, h);
         ForwardFFN(rt, i, h);
