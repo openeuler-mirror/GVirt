@@ -16,7 +16,7 @@ class _CModel {
 public:
     _CModel() {};
     ~_CModel();
-    void Init(struct XModelConfig &c, uint32_t rankId);
+    void Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType);
     void Forward(XRuntime &rt, at::Tensor &input,
                  XModelAttnMeta& attnMeta,
                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
@@ -86,7 +86,7 @@ static inline void InitXTensor(XTensor &out, at::Tensor &in)
     out.Init(in.sizes().vec(), XDtype(in), TensorPtr(in));
 }
 
-void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
+void _CModel::Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType)
 {
     uint32_t idx = 0, moe_idx = 0;
     uint32_t nLocalRoutedExperts = c.nRoutedExperts / c.moeEpSize;
@@ -99,7 +99,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         return;
     }
 
-    _model = new XModel(c, rankId);
+    _model = new XModel(c, rankId, aType);
 
     InitXTensor(_model->embed, embed);
     InitXTensor(_model->norm, norm);
@@ -108,12 +108,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
         InitXTensor(_model->attnOut[i], attnOut[i]);
-        InitXTensor(_model->mlaQA[i], mlaQA[i]);
-        InitXTensor(_model->mlaQB[i], mlaQB[i]);
-        InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
-        InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
-        InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
-        InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+        if (aType == XMODEL_ATTN_MLA) {
+            InitXTensor(_model->mlaQA[i], mlaQA[i]);
+            InitXTensor(_model->mlaQB[i], mlaQB[i]);
+            InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+            InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
+            InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
+            InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+        }
         InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
     }
 
@@ -256,6 +258,11 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("is_prefills", &XModelAttnMeta::isPrefills)
         .def_readwrite("block_tables", &XModelAttnMeta::blockTables);
 
+    py::enum_<XModelAttnType>(m, "AttnType")
+        .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
+        .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
+        .export_values();
+
     py::class_<_CModel>(m, "Model")
         .def(py::init<>())
         .def_readwrite("embed", &_CModel::embed)
@@ -280,7 +287,8 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("re_up_gate_scale", &_CModel::moeREUpGateScale)
         .def_readwrite("re_down", &_CModel::moeREDown)
         .def_readwrite("re_down_scale", &_CModel::moeREDownScale)
-        .def("init", &_CModel::Init)
+        .def("init", &_CModel::Init, "model init",
+            py::arg("config"), py::arg("rank") = 0, py::arg("attn_type") = XMODEL_ATTN_MHA)
         .def("forward", &_CModel::Forward);
 
     // kernels

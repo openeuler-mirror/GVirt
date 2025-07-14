@@ -6,6 +6,12 @@
 
 #include "base.h"
 
+enum XModelAttnType {
+    XMODEL_ATTN_MHA,
+    XMODEL_ATTN_MLA,
+    XMODEL_ATTN_MAX_TYPE,
+};
+
 struct XModelConfig {
     // global config
     uint32_t vocabSize;
@@ -50,7 +56,7 @@ struct XModelAttnMeta {
 
 class XModel {
 public:
-    XModel(struct XModelConfig &c, uint32_t rankId);
+    XModel(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType);
     void Forward(XRuntime &rt, XTensor &input,
                  XModelAttnMeta& attnMeta,
                  std::vector<std::pair<XTensor, XTensor>>& kvCache,
@@ -85,6 +91,14 @@ public:
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
+    void ForwardAttnMLA(XRuntime &rt, uint32_t layer,
+                        XModelAttnMeta& attnMeta,
+                        std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                        XTensor &freqsCis, XTensor &hiddenState);
+    void ForwardAttnMHA(XRuntime &rt, uint32_t layer,
+                        XModelAttnMeta& attnMeta,
+                        std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                        XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttn(XRuntime &rt, uint32_t layer,
                      XModelAttnMeta& attnMeta,
                      std::vector<std::pair<XTensor, XTensor>>& kvCache,
@@ -93,6 +107,7 @@ private:
     void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     struct XModelConfig _c;
     uint32_t _rankId;
+    enum XModelAttnType _aType;
 };
 
 #endif

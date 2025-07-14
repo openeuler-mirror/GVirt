@@ -31,7 +31,7 @@ forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     xlite_memory_mb = 500
     block_size = 64
-    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, Model
+    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMLA, Model
     import numpy as np
 
 @dataclass
@@ -923,7 +923,7 @@ class DeepSeek_V3(nn.Module):
             self.xlite_model.re_down_scale = [self.layers[i].ffn.experts[j].w2.weight.scale
                                               for i in range(args.n_dense_layers, args.n_layers)
                                               for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-        self.xlite_model.init(config, rank)
+        self.xlite_model.init(config, rank, AttnMLA)
 
     def init_xlite_kvcache(self, args: ModelArgs):
         block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size

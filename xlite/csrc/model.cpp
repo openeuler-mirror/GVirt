@@ -7,7 +7,7 @@
 #include "op.h"
 #include "model.h"
 
-XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
+XModel::XModel(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType) : _c(c), _rankId(rankId), _aType(aType)
 {
     attnNorm.resize(c.nLayers);
     attnOut.resize(c.nLayers);
@@ -48,13 +48,33 @@ void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, 
         XliteOpAllReduceSum(rt, output, output, TP);
     }
 }
+void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
+                            XModelAttnMeta& attnMeta,
+                            std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                            XTensor &freqsCis, XTensor &hiddenState)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
+                            XModelAttnMeta& attnMeta,
+                            std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                            XTensor &freqsCis, XTensor &hiddenState)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
 
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer,
                          XModelAttnMeta& attnMeta,
                          std::vector<std::pair<XTensor, XTensor>>& kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (_aType == XMODEL_ATTN_MLA) {
+        ForwardAttnMLA(rt, layer, attnMeta, kvCache, freqsCis, hiddenState);
+    } else if (_aType == XMODEL_ATTN_MHA) {
+        ForwardAttnMHA(rt, layer, attnMeta, kvCache, freqsCis, hiddenState);
+    } else {
+        std::cout << __func__ << ": TODO" << std::endl;
+    }
 }
 
 void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
