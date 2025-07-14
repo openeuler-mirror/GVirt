@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include "acl.h"
+#include "ascend.h"
 #include "base.h"
 #include "runtime.h"
 #include "op.h"
@@ -20,23 +20,23 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mlpNorm.resize(c.nLayers);
     mlpUpGate.resize(c.nDenseLayers);
     mlpDown.resize(c.nDenseLayers);
-    Gate.resize(c.nLayers);
-    GateBias.resize(c.nLayers);
-    SEUpGate.resize(c.nLayers);
-    SEDown.resize(c.nLayers);
-    REUpGate.resize(c.nLayers);
-    REUpGateScale.resize(c.nLayers);
-    REDown.resize(c.nLayers);
-    REDownScale.resize(c.nLayers);
+    moeGate.resize(c.nLayers);
+    moeGateBias.resize(c.nLayers);
+    moeSEUpGate.resize(c.nLayers);
+    moeSEDown.resize(c.nLayers);
+    moeREUpGate.resize(c.nLayers);
+    moeREUpGateScale.resize(c.nLayers);
+    moeREDown.resize(c.nLayers);
+    moeREDownScale.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
-        REUpGate[i].resize(c.nRoutedExperts);
-        REUpGateScale[i].resize(c.nRoutedExperts);
-        REDown[i].resize(c.nRoutedExperts);
-        REDownScale[i].resize(c.nRoutedExperts);
+        moeREUpGate[i].resize(c.nRoutedExperts);
+        moeREUpGateScale[i].resize(c.nRoutedExperts);
+        moeREDown[i].resize(c.nRoutedExperts);
+        moeREDownScale[i].resize(c.nRoutedExperts);
     }
 }
 
-void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor *input, XTensor *embed, XTensor *output)
+void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output)
 {
     uint32_t vocabPerTp = DIV_ROUND_UP(_c.vocabSize, _c.defTpSize);
     uint32_t id = _rankId % _c.defTpSize;
@@ -49,46 +49,45 @@ void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor *input, XTensor *embed, 
     }
 }
 
-void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, XTensor *hiddenState)
+void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 {
     std::cout << __func__ << ": TODO" << std::endl;
 }
 
-void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor *hiddenState)
+void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 {
     std::cout << __func__ << ": TODO" << std::endl;
 }
 
-void XModel::ForwardGetLogits(XRuntime &rt, XTensor *input, XTensor *output)
+void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output)
 {
     std::cout << __func__ << ": TODO" << std::endl;
 }
 
-void XModel::Forward(XRuntime &rt, XTensor *input, XTensor *output)
+void XModel::Forward(XRuntime &rt, XTensor &input, XTensor &output)
 {
-    uint32_t batch = input->shape[0];
-    uint32_t seqLen = input->shape[1];
+    uint32_t batch = input.shape[0];
+    uint32_t seqLen = input.shape[1];
     uint32_t m = batch * seqLen;
-    XTensor *x, *h;
 
-    if (rt.rankId != _rankId) {
-        std::cerr << __FILE__ << ":" << __LINE__ << "check rank id failed" << std::endl;
+    if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
+        std::cerr << __FILE__ << ":" << __LINE__ << "check runtime communication setting failed" << std::endl;
         return;
     }
 
-    x = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype);
-    h = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype);
+    XTensor &x = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype);
+    XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype);
 
-    ForwardParallelEmbed(rt, input, &embed, x);
+    ForwardParallelEmbed(rt, input, embed, x);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
-        XliteOpRmsNorm(rt, x, &attnNorm[i], _c.normEps, h);
+        XliteOpRmsNorm(rt, x, attnNorm[i], _c.normEps, h);
         ForwardAttn(rt, i, h);
         XliteOpAdd(rt, x, h, x);
-        XliteOpRmsNorm(rt, x, &mlpNorm[i], _c.normEps, h);
+        XliteOpRmsNorm(rt, x, mlpNorm[i], _c.normEps, h);
         ForwardFFN(rt, i, h);
         XliteOpAdd(rt, x, h, x);
     }
-    XliteOpRmsNorm(rt, x, &norm, _c.normEps, h);
+    XliteOpRmsNorm(rt, x, norm, _c.normEps, h);
     ForwardGetLogits(rt, h, output);
 
     rt.pool->PutTensor(h);

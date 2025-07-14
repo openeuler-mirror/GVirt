@@ -44,7 +44,7 @@ struct XModelConfig {
 class XModel {
 public:
     XModel(struct XModelConfig &c, uint32_t rankId);
-    void Forward(XRuntime &rt, XTensor *input, XTensor *output);
+    void Forward(XRuntime &rt, XTensor &input, XTensor &output);
 
     // weights
     XTensor embed;
@@ -64,20 +64,20 @@ public:
     std::vector<XTensor> mlpUpGate;
     std::vector<XTensor> mlpDown;
 
-    std::vector<XTensor> Gate;
-    std::vector<XTensor> GateBias;
-    std::vector<XTensor> SEUpGate;
-    std::vector<XTensor> SEDown;
-    std::vector<std::vector<XTensor>> REUpGate;
-    std::vector<std::vector<XTensor>> REUpGateScale;
-    std::vector<std::vector<XTensor>> REDown;
-    std::vector<std::vector<XTensor>> REDownScale;
+    std::vector<XTensor> moeGate;
+    std::vector<XTensor> moeGateBias;
+    std::vector<XTensor> moeSEUpGate;
+    std::vector<XTensor> moeSEDown;
+    std::vector<std::vector<XTensor>> moeREUpGate;
+    std::vector<std::vector<XTensor>> moeREUpGateScale;
+    std::vector<std::vector<XTensor>> moeREDown;
+    std::vector<std::vector<XTensor>> moeREDownScale;
 
 private:
-    void ForwardParallelEmbed(XRuntime &rt, XTensor *input, XTensor *embed, XTensor *output);
-    void ForwardAttn(XRuntime &rt, uint32_t layer, XTensor *hiddenState);
-    void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor *hiddenState);
-    void ForwardGetLogits(XRuntime &rt, XTensor *input, XTensor *output);
+    void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
+    void ForwardAttn(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
+    void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
+    void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     struct XModelConfig _c;
     uint32_t _rankId;
 };

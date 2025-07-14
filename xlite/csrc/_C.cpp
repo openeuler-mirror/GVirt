@@ -37,14 +37,14 @@ public:
     std::vector<at::Tensor> mlpUpGate;
     std::vector<at::Tensor> mlpDown;
 
-    std::vector<at::Tensor> Gate;
-    std::vector<at::Tensor> GateBias;
-    std::vector<at::Tensor> SEUpGate;
-    std::vector<at::Tensor> SEDown;
-    std::vector<at::Tensor> REUpGate;
-    std::vector<at::Tensor> REUpGateScale;
-    std::vector<at::Tensor> REDown;
-    std::vector<at::Tensor> REDownScale;
+    std::vector<at::Tensor> moeGate;
+    std::vector<at::Tensor> moeGateBias;
+    std::vector<at::Tensor> moeSEUpGate;
+    std::vector<at::Tensor> moeSEDown;
+    std::vector<at::Tensor> moeREUpGate;
+    std::vector<at::Tensor> moeREUpGateScale;
+    std::vector<at::Tensor> moeREDown;
+    std::vector<at::Tensor> moeREDownScale;
 
 private:
     XModel *_model;
@@ -90,8 +90,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     uint32_t expertsEndIdx = expertsStartIdx + nLocalRoutedExperts;
     uint32_t nRE = (c.nLayers - c.nDenseLayers) * nLocalRoutedExperts;
 
-    if (REUpGate.size() != nRE || REDown.size() != nRE) {
-        std::cerr << __FILE__ << ":" << __LINE__ << " num of routed experts: " << REUpGate.size() << std::endl;
+    if (moeREUpGate.size() != nRE || moeREDown.size() != nRE) {
+        std::cerr << __FILE__ << ":" << __LINE__ << " num of routed experts: " << moeREUpGate.size() << std::endl;
         return;
     }
 
@@ -119,18 +119,18 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     }
 
     for (uint32_t i = c.nDenseLayers; i < c.nLayers; i++) {
-        InitXTensor(_model->Gate[i], Gate[moe_idx]);
-        InitXTensor(_model->GateBias[i], GateBias[moe_idx]);
-        InitXTensor(_model->SEUpGate[i], SEUpGate[moe_idx]);
-        InitXTensor(_model->SEDown[i], SEDown[moe_idx]);
+        InitXTensor(_model->moeGate[i], moeGate[moe_idx]);
+        InitXTensor(_model->moeGateBias[i], moeGateBias[moe_idx]);
+        InitXTensor(_model->moeSEUpGate[i], moeSEUpGate[moe_idx]);
+        InitXTensor(_model->moeSEDown[i], moeSEDown[moe_idx]);
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
-            InitXTensor(_model->REUpGate[i][j], REUpGate[idx]);
-            if (REUpGate[idx].scalar_type() == at::ScalarType::Char) {
-                InitXTensor(_model->REUpGateScale[i][j], REUpGateScale[idx]);
+            InitXTensor(_model->moeREUpGate[i][j], moeREUpGate[idx]);
+            if (moeREUpGate[idx].scalar_type() == at::ScalarType::Char) {
+                InitXTensor(_model->moeREUpGateScale[i][j], moeREUpGateScale[idx]);
             }
-            InitXTensor(_model->REDown[i][j], REDown[idx]);
-            if (REDown[idx].scalar_type() == at::ScalarType::Char) {
-                InitXTensor(_model->REDownScale[i][j], REDownScale[idx]);
+            InitXTensor(_model->moeREDown[i][j], moeREDown[idx]);
+            if (moeREDown[idx].scalar_type() == at::ScalarType::Char) {
+                InitXTensor(_model->moeREDownScale[i][j], moeREDownScale[idx]);
             }
             idx++;
         }
@@ -152,7 +152,32 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, at::Tensor &output)
 {
     XTensor _input(input.sizes().vec(), XDtype(input), TensorPtr(input));
     XTensor _output(output.sizes().vec(), XDtype(output), TensorPtr(output));
-    _model->Forward(rt, &_input, &_output);
+    _model->Forward(rt, _input, _output);
+    rt.Synchronize();
+}
+
+void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
+{
+    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
+    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XliteOpAllGather(rt, _in, _out, TP);
+    rt.Synchronize();
+}
+
+void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in)
+{
+    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
+    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XliteOpReduceScatter(rt, _in, _out, TP);
+    rt.Synchronize();
+}
+
+void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in)
+{
+    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
+    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XliteOpAllReduceSum(rt, _in, _out, TP);
+    rt.Synchronize();
 }
 
 void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
@@ -160,7 +185,7 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
     XTensor _x(x.sizes().vec(), XDtype(x), TensorPtr(x));
     XTensor _y(y.sizes().vec(), XDtype(y), TensorPtr(y));
     XTensor _z(z.sizes().vec(), XDtype(z), TensorPtr(z));
-    XliteOpAdd(rt, &_x, &_y, &_z);
+    XliteOpAdd(rt, _x, _y, _z);
     rt.Synchronize();
 }
 
@@ -171,10 +196,11 @@ void Print(at::Tensor &x)
 }
 
 PYBIND11_MODULE(_C, m) {
-    py::class_<XRuntime>(m, "runtime")
-        .def(py::init<uint32_t, uint32_t, size_t>());
+    py::class_<XRuntime>(m, "Runtime")
+        .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
+            py::arg("devid"), py::arg("size"), py::arg("rank") = 0, py::arg("tp_size") = 1, py::arg("dp_size") = 1);
 
-    py::class_<XModelConfig>(m, "model_config")
+    py::class_<XModelConfig>(m, "ModelConfig")
         .def(py::init<>())
         .def_readwrite("vocab_size", &XModelConfig::vocabSize)
         .def_readwrite("hidden_size", &XModelConfig::hiddenSize)
@@ -202,7 +228,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("moe_ep_size", &XModelConfig::moeEpSize)
         .def_readwrite("moe_tp_size", &XModelConfig::moeTPSize);
 
-    py::class_<_CModel>(m, "model")
+    py::class_<_CModel>(m, "Model")
         .def(py::init<>())
         .def_readwrite("embed", &_CModel::embed)
         .def_readwrite("norm", &_CModel::norm)
@@ -218,18 +244,21 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("mlp_norm", &_CModel::mlpNorm)
         .def_readwrite("mlp_up_gate", &_CModel::mlpUpGate)
         .def_readwrite("mlp_down", &_CModel::mlpDown)
-        .def_readwrite("gate", &_CModel::Gate)
-        .def_readwrite("gate_bias", &_CModel::GateBias)
-        .def_readwrite("se_up_gate", &_CModel::SEUpGate)
-        .def_readwrite("se_down", &_CModel::SEDown)
-        .def_readwrite("re_up_gate", &_CModel::REUpGate)
-        .def_readwrite("re_up_gate_scale", &_CModel::REUpGateScale)
-        .def_readwrite("re_down", &_CModel::REDown)
-        .def_readwrite("re_down_scale", &_CModel::REDownScale)
+        .def_readwrite("gate", &_CModel::moeGate)
+        .def_readwrite("gate_bias", &_CModel::moeGateBias)
+        .def_readwrite("se_up_gate", &_CModel::moeSEUpGate)
+        .def_readwrite("se_down", &_CModel::moeSEDown)
+        .def_readwrite("re_up_gate", &_CModel::moeREUpGate)
+        .def_readwrite("re_up_gate_scale", &_CModel::moeREUpGateScale)
+        .def_readwrite("re_down", &_CModel::moeREDown)
+        .def_readwrite("re_down_scale", &_CModel::moeREDownScale)
         .def("init", &_CModel::Init)
         .def("forward", &_CModel::Forward);
 
     // kernels
+    m.def("all_gather", &AllGather);
+    m.def("reduce_scatter", &ReduceScatter);
+    m.def("all_reduce", &AllReduce);
     m.def("add", &Add);
 
     // funcs

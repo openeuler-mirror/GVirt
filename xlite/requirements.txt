@@ -1,9 +1,9 @@
 pybind11
 numpy<2.0.0
-torch==2.6.0
+torch==2.5.1
 
 # tools & tests
 tqdm
 safetensors
 transformers
-torch-npu==2.6.0rc1
+torch-npu==2.5.1

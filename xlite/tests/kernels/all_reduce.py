@@ -7,23 +7,32 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
+import os
 import torch
-from xlite._C import Runtime, add
+import torch.distributed as dist
+from xlite._C import Runtime, all_reduce
 
 
-rt = Runtime(0, 500)
-torch.npu.set_device(0)
+world_size = int(os.getenv("WORLD_SIZE", "1"))
+rank = int(os.getenv("RANK", "0"))
+local_rank = int(os.getenv("LOCAL_RANK", "0"))
+dist.init_process_group("hccl")
 
-x = torch.randn(8, 2048, dtype=torch.float16, device="npu:0")
-y = torch.randn(8, 2048, dtype=torch.float16, device="npu:0")
-z = torch.empty(8, 2048, dtype=torch.float16, device="npu:0")
+rt = Runtime(local_rank, 500, rank, world_size)
+torch.npu.set_device(local_rank)
 
-standard = x + y
+with torch.device("npu"):
+    x = torch.randn(8, 7168, dtype=torch.float16)
+    standard = x.clone()
+    z = torch.empty_like(standard)
+
+dist.all_reduce(standard, op=dist.ReduceOp.SUM)
 
 torch.npu.synchronize()
-add(rt, x, y, z)
+all_reduce(rt, z, x)
 torch.npu.synchronize()
-print('add executed!')
+if rank == 0:
+    print('all reduce executed!')
 
 try:
     torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <iostream>
 #include <vector>
+#include <functional>
 #include <list>
 #include <cstdint>
 
@@ -30,8 +31,8 @@ enum XDtype {
 };
 
 enum XTensorType {
-    TORCH_NPU,
-    XLITE_DYNAMIC,
+    XTENSOR_STATIC,
+    XTENSOR_DYNAMIC,
     MAX_XTENSOR_TYPE,
 };
 
@@ -52,6 +53,18 @@ inline const char * XDtypeStr(enum XDtype dtype)
             return "BF16";
         case FP32:
             return "FP32";
+        default:
+            return "unknown";
+    }
+}
+
+inline const char * XTensorTypeStr(enum XTensorType type)
+{
+    switch (type) {
+        case XTENSOR_STATIC:
+            return "static";
+        case XTENSOR_DYNAMIC:
+            return "dynamic";
         default:
             return "unknown";
     }
@@ -85,6 +98,7 @@ public:
     XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Init(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Print(uint32_t nRow = 6, uint32_t nCol = 6);
+    friend std::ostream& operator<<(std::ostream& os, const XTensor& p);
     std::vector<long> shape;
     size_t numel;
     enum XDtype dtype;
@@ -102,15 +116,15 @@ public:
     XTensorPool(size_t size) : _size(size) {};
     ~XTensorPool(void);
     int Init(void);
-    XTensor *GetTensor(std::vector<long> shape, enum XDtype dtype);
-    void PutTensor(XTensor *t);
+    XTensor &GetTensor(std::vector<long> shape, enum XDtype dtype);
+    void PutTensor(XTensor &t);
 
 private:
     void *_ptr;
     size_t _size;
     XTensor _t[XLITE_MAX_NUM_DYNAMIC_TENSOR];
-    std::list<XTensor *> _free;
-    std::list<XTensor *> _used;
+    std::list<std::reference_wrapper<XTensor>> _free;
+    std::list<std::reference_wrapper<XTensor>> _used;
 };
 
 #endif

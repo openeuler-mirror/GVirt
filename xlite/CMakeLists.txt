@@ -33,6 +33,7 @@ ascendc_library(xlite_kernels_${RUN_MODE} SHARED ${KERNEL_FILES})
 # xlite
 add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/sock.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/op.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/model.cpp
@@ -44,6 +45,7 @@ target_compile_options(xlite PRIVATE
 
 target_link_libraries(xlite PRIVATE
     xlite_kernels_${RUN_MODE}
+    hccl
 )
 
 # _C
