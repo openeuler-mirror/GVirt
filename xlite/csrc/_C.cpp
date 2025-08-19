@@ -16,7 +16,7 @@ class _CModel {
 public:
     _CModel() {};
     ~_CModel();
-    void Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType);
+    void Init(struct XModelConfig &c, uint32_t rankId);
     void Forward(XRuntime &rt, at::Tensor &input,
                  XModelAttnMeta& attnMeta,
                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
@@ -89,7 +89,7 @@ static inline void InitXTensor(XTensor &out, at::Tensor &in)
     out.Init(in.sizes().vec(), XDtype(in), TensorPtr(in));
 }
 
-void _CModel::Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType)
+void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 {
     uint32_t idx = 0, moe_idx = 0;
     uint32_t nLocalRoutedExperts = c.nRoutedExperts / c.moeEpSize;
@@ -102,7 +102,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType 
         return;
     }
 
-    _model = new XModel(c, rankId, aType);
+    _model = new XModel(c, rankId);
 
     InitXTensor(_model->embed, embed);
     InitXTensor(_model->norm, norm);
@@ -111,14 +111,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType 
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
         InitXTensor(_model->attnOut[i], attnOut[i]);
-        if (aType == XMODEL_ATTN_MLA) {
+        if (c.attnType == XMODEL_ATTN_MLA) {
             InitXTensor(_model->mlaQA[i], mlaQA[i]);
             InitXTensor(_model->mlaQB[i], mlaQB[i]);
             InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
             InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
             InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
-        } else if (aType == XMODEL_ATTN_MHA) {
+        } else if (c.attnType == XMODEL_ATTN_MHA) {
             InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
         }
         InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
@@ -147,6 +147,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType 
         }
         moe_idx++;
     }
+
+    _model->Init();
 
     if (rankId == 0) {
         std::cout << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize <<
@@ -233,7 +235,9 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("vocab_size", &XModelConfig::vocabSize)
         .def_readwrite("hidden_size", &XModelConfig::hiddenSize)
         .def_readwrite("n_layers", &XModelConfig::nLayers)
+        .def_readwrite("attn_type", &XModelConfig::attnType)
         .def_readwrite("n_heads", &XModelConfig::nHeads)
+        .def_readwrite("n_kv_heads", &XModelConfig::nKvHeads)
         .def_readwrite("head_dim", &XModelConfig::headDim)
         .def_readwrite("nope_head_dim", &XModelConfig::nopeHeadDim)
         .def_readwrite("rope_head_dim", &XModelConfig::ropeHeadDim)
@@ -255,7 +259,11 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("def_tp_size", &XModelConfig::defTpSize)
         .def_readwrite("def_dp_size", &XModelConfig::defDpSize)
         .def_readwrite("moe_ep_size", &XModelConfig::moeEpSize)
-        .def_readwrite("moe_tp_size", &XModelConfig::moeTPSize);
+        .def_readwrite("moe_tp_size", &XModelConfig::moeTPSize)
+        .def_readwrite("max_seq_len", &XModelConfig::maxSeqLen)
+        .def_readwrite("max_batch_size", &XModelConfig::maxBatch)
+        .def_readwrite("max_m", &XModelConfig::maxM)
+        .def_readwrite("block_size", &XModelConfig::blockSize);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
         .def(py::init<>())
@@ -295,7 +303,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("re_down", &_CModel::moeREDown)
         .def_readwrite("re_down_scale", &_CModel::moeREDownScale)
         .def("init", &_CModel::Init, "model init",
-            py::arg("config"), py::arg("rank") = 0, py::arg("attn_type") = XMODEL_ATTN_MHA)
+            py::arg("config"), py::arg("rank") = 0)
         .def("forward", &_CModel::Forward);
 
     // kernels

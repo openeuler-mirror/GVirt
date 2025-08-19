@@ -19,13 +19,19 @@ struct XModelConfig {
     uint32_t nLayers;
 
     // attention config
+    enum XModelAttnType attnType = XMODEL_ATTN_MHA;
     uint32_t nHeads;
+    uint32_t nKvHeads;
     uint32_t headDim;
     uint32_t ropeHeadDim;
     uint32_t nopeHeadDim;
     uint32_t vHeadDim;
     uint32_t qLoraRank;
     uint32_t kvLoraRank;
+    uint32_t maxM;
+    uint32_t blockSize;
+    uint32_t maxBatch;
+    uint32_t maxSeqLen;
     float normEps;
     float ropeTheta;
     float softmaxScale;
@@ -57,7 +63,9 @@ struct XModelAttnMeta {
 
 class XModel {
 public:
-    XModel(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType);
+    XModel(struct XModelConfig &c, uint32_t rankId);
+    void Init(void);
+    ~XModel(void);
     void Forward(XRuntime &rt, XTensor &input,
                  XModelAttnMeta& attnMeta,
                  std::vector<std::pair<XTensor, XTensor>>& kvCache,
@@ -110,7 +118,6 @@ private:
     void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     struct XModelConfig _c;
     uint32_t _rankId;
-    enum XModelAttnType _aType;
 };
 
 #endif

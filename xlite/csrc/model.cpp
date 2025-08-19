@@ -7,7 +7,7 @@
 #include "op.h"
 #include "model.h"
 
-XModel::XModel(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aType) : _c(c), _rankId(rankId), _aType(aType)
+XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
     attnNorm.resize(c.nLayers);
     attnOut.resize(c.nLayers);
@@ -35,6 +35,16 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId, enum XModelAttnType aTyp
         moeREDown[i].resize(c.nRoutedExperts);
         moeREDownScale[i].resize(c.nRoutedExperts);
     }
+}
+
+void XModel::Init(void)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+XModel::~XModel(void)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
 }
 
 void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output)
