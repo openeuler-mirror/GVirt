@@ -111,6 +111,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
         InitXTensor(_model->attnOut[i], attnOut[i]);
+        InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
         if (c.attnType == XMODEL_ATTN_MLA) {
             InitXTensor(_model->mlaQA[i], mlaQA[i]);
             InitXTensor(_model->mlaQB[i], mlaQB[i]);
@@ -121,7 +122,6 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         } else if (c.attnType == XMODEL_ATTN_MHA) {
             InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
         }
-        InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
     }
 
     for (uint32_t i = 0; i < c.nDenseLayers; i++) {

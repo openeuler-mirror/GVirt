@@ -114,10 +114,26 @@ private:
                      XModelAttnMeta& attnMeta,
                      std::vector<std::pair<XTensor, XTensor>>& kvCache,
                      XTensor &freqsCis, XTensor &hiddenState);
+    void ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &hiddenState, bool withAllReduce);
+    std::tuple<XTensor &, XTensor &> ForwardMoEGate(XRuntime &rt, uint32_t layer, XTensor &input);
+    std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> ForwardMoEDispatch(XRuntime &rt,
+                                                                                         XTensor &tokenSorted,
+                                                                                         XTensor &weights,
+                                                                                         XTensor &routing);
+    void ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weights, XTensor &routing, XTensor &unpIdx,
+                           XTensor &expertsSorted, XTensor &expertsCounts);
+    void ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     struct XModelConfig _c;
     uint32_t _rankId;
+
+    // FFN
+    XTensor _gateIndicts;
+    std::vector<XTensor> _moeREUpGate;
+    std::vector<XTensor> _moeREUpGateScale;
+    std::vector<XTensor> _moeREDown;
+    std::vector<XTensor> _moeREDownScale;
 };
 
 #endif

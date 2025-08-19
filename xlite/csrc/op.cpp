@@ -132,7 +132,7 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
 
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
                         XTensor &counts, uint32_t start, uint32_t end,
-                        long outDim, long inDim, XTensor &output)
+                        XDtype weightDtype, long outDim, long inDim, XTensor &output)
 {
     std::cout << __func__ << ": TODO" << std::endl;
 }
