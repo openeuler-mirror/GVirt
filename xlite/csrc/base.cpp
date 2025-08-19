@@ -94,6 +94,21 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             std::cout << val;
             std::cout.unsetf(std::ios::fixed);
             break;
+        } case CPLXF: {
+            std::complex<float> val = ((std::complex<float> *)p)[off];
+            if (val.real() >= 0 && val.imag() >= 0) {
+                std::cout << " ";
+            }
+            std::cout << std::scientific << std::setprecision(4);
+            std::cout << val.real();
+            if (val.imag() >= 0) {
+                std::cout << " + ";
+            } else {
+                std::cout << " - ";
+            }
+            std::cout << std::abs(val.imag()) << "j";
+            std::cout.unsetf(std::ios::scientific);
+            break;
         } default:
             break;
     }

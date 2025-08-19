@@ -70,6 +70,8 @@ static inline enum XDtype XDtype(at::Tensor &t)
             return BF16;
         case at::ScalarType::Float:
             return FP32;
+        case at::ScalarType::ComplexFloat:
+            return CPLXF;
         default:
             std::cerr << __FILE__ << ":" << __LINE__ << "unknown data type " << t.scalar_type() << std::endl;
             return MAX_XDTYPE;

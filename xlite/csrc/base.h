@@ -10,6 +10,7 @@
 #include <functional>
 #include <list>
 #include <cstdint>
+#include <complex>
 
 #define ROUND_UP(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
 #define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
@@ -27,6 +28,7 @@ enum XDtype {
     FP16,
     BF16,
     FP32,
+    CPLXF,
     MAX_XDTYPE,
 };
 
@@ -53,6 +55,8 @@ inline const char * XDtypeStr(enum XDtype dtype)
             return "BF16";
         case FP32:
             return "FP32";
+        case CPLXF:
+            return "CPLXF";
         default:
             return "unknown";
     }
@@ -84,6 +88,7 @@ size_t inline XDtypeBit(enum XDtype dtype)
         case FP32:
             return 32;
         case INT64:
+        case CPLXF:
             return 64;
         default:
             std::cerr << __FILE__ << ":" << __LINE__ << "unknown data type " << dtype << std::endl;
