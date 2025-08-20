@@ -101,7 +101,7 @@ public:
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
-    void prepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta);
+    void PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta);
     void ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                         XModelAttnMeta& attnMeta,
                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
@@ -134,6 +134,24 @@ private:
     std::vector<XTensor> _moeREUpGateScale;
     std::vector<XTensor> _moeREDown;
     std::vector<XTensor> _moeREDownScale;
+
+    // ATTN
+    uint32_t _realM;
+    uint32_t _maxNumBlocks;
+    int _prefillBatch;
+    int _decodeBatch;
+    int _prefillLen;
+    int _prefillLenPad;
+    XTensor _position;
+    XTensor _slotMapping;
+    XTensor _prefillIdx;
+    XTensor _prefillLastIdx;
+    XTensor _decodeIdx;
+    XTensor _cachedLens;
+    XTensor _lens;
+    XTensor _padding;
+    XTensor _cumPromptLens;
+    XTensor _blockTables;
 };
 
 #endif

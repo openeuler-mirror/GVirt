@@ -91,6 +91,39 @@ void XModel::Init(void)
         CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
         _moeREDownScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
     }
+
+    size = _c.maxM * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _position.Init({_c.maxM}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _slotMapping.Init({_c.maxM}, INT32, ptr);
+
+    size = _c.maxBatch * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _cachedLens.Init({_c.maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _lens.Init({_c.maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _cumPromptLens.Init({_c.maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _padding.Init({_c.maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _prefillIdx.Init({_c.maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _prefillLastIdx.Init({_c.maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _decodeIdx.Init({_c.maxBatch}, INT32, ptr);
+
+    size = _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize) *XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _blockTables.Init({_c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize)}, INT32, ptr);
 }
 
 XModel::~XModel(void)
@@ -104,6 +137,16 @@ XModel::~XModel(void)
         CHECK_ACL(aclrtFree(_moeREDown[i].ptr));
         CHECK_ACL(aclrtFree(_moeREDownScale[i].ptr));
     }
+    CHECK_ACL(aclrtFree(_position.ptr));
+    CHECK_ACL(aclrtFree(_slotMapping.ptr));
+    CHECK_ACL(aclrtFree(_cachedLens.ptr));
+    CHECK_ACL(aclrtFree(_lens.ptr));
+    CHECK_ACL(aclrtFree(_cumPromptLens.ptr));
+    CHECK_ACL(aclrtFree(_padding.ptr));
+    CHECK_ACL(aclrtFree(_prefillIdx.ptr));
+    CHECK_ACL(aclrtFree(_prefillLastIdx.ptr));
+    CHECK_ACL(aclrtFree(_decodeIdx.ptr));
+    CHECK_ACL(aclrtFree(_blockTables.ptr));
 }
 
 void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output)
@@ -119,8 +162,80 @@ void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, 
     }
 }
 
-void XModel::prepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
+void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
 {
+    uint32_t batch = attnMeta.lens.size();
+    std::vector<uint32_t> lens(batch);
+    std::vector<uint32_t> cachedLens(batch);
+    std::vector<uint32_t> isPrefills(batch);
+    std::vector<uint32_t> prefillLastIdx(batch);
+    std::vector<uint32_t> cumPromptLens(batch);
+    std::vector<uint32_t> padding(batch);
+    std::vector<uint32_t> position, slotMapping, blockTables;
+    uint32_t blockNum, cumPromptLen, blockId, id, k;
+    size_t size;
+
+    _realM = 0;
+    _maxNumBlocks = 0;
+    _prefillBatch = 0;
+    _decodeBatch = 0;
+    cumPromptLen = 0;
+    for (uint32_t i = 0; i < batch; i++) {
+        lens[i] = attnMeta.lens[i];
+        cachedLens[i] = attnMeta.cachedLens[i];
+        isPrefills[i] = i;
+        cumPromptLens[i] = cumPromptLen;
+        cumPromptLen += lens[i];
+        padding[i] = ROUND_UP(lens[i] + cachedLens[i], _c.blockSize);
+        blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], _c.blockSize);
+        _maxNumBlocks = blockNum > _maxNumBlocks ? blockNum : _maxNumBlocks;
+        _realM += lens[i];
+        prefillLastIdx[i] = _realM - 1;
+        if (attnMeta.isPrefills[i]) {
+            _prefillBatch++;
+            _prefillLen = lens[i];
+            _prefillLenPad = ROUND_UP(_prefillLen, _c.blockSize);
+        } else if (lens[i] <= 2) {
+            _decodeBatch++;
+        } else {
+            std::cerr << __FILE__ << ":" << __LINE__ << "invalid inputMeta" << i << ", decode len too long" << lens[i] << std::endl;
+            return;
+        }
+    }
+    size = batch * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMemcpy(_lens.ptr, size, lens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpy(_cachedLens.ptr, size, cachedLens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpy(_cumPromptLens.ptr, size, cumPromptLens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpy(_padding.ptr, size, padding.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpy(_decodeBatch > 0 ? _decodeIdx.ptr : _prefillIdx.ptr, size, isPrefills.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    if (_prefillBatch > 0) {
+        CHECK_ACL(aclrtMemcpy(_prefillLastIdx.ptr, size, prefillLastIdx.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    }
+
+    position.resize(_realM);
+    slotMapping.resize(_realM);
+    k = 0;
+    for (uint32_t i = 0; i < batch; i++) {
+        for (uint32_t j = 0; j < lens[i]; j++) {
+            position[k] = cachedLens[i] + j;
+            blockId = position[k] / _c.blockSize;
+            id = position[k] % _c.blockSize;
+            slotMapping[k++] = attnMeta.blockTables[i][blockId] * _c.blockSize + id;
+        }
+    }
+    size = _realM * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMemcpy(_position.ptr, size, position.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpy(_slotMapping.ptr, size, slotMapping.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+
+    blockTables.resize(batch * _maxNumBlocks);
+    for (uint32_t i = 0; i < batch; i++) {
+        blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], _c.blockSize);
+        for (uint32_t j = 0; j < blockNum; j++) {
+            blockTables[i * _maxNumBlocks + j] = attnMeta.blockTables[i][j];
+        }
+    }
+    size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMemcpy(_blockTables.ptr, size, blockTables.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
 }
 
 void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
@@ -310,6 +425,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input,
     XTensor &x = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype);
     XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype);
 
+    PrepareAttn(rt, attnMeta);
     ForwardParallelEmbed(rt, input, embed, x);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         XliteOpRmsNorm(rt, x, attnNorm[i], _c.normEps, h);
