@@ -58,13 +58,18 @@ def generate(
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
     total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
-    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="npu")
+    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.int32, device="npu")
     for i, t in enumerate(prompt_tokens):
-        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="npu")
+        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.int32, device="npu")
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens), device="npu")
     prompt_mask = tokens != -1
-    for cur_pos in range(min(prompt_lens), total_len):
+
+    start = min(prompt_lens)
+    if model.args.model_type == "deepseek":
+        # prefill ops only support single batch in deepseek
+        start = min(prompt_lens) if len(prompt_tokens) == 1 else 1
+    for cur_pos in range(start, total_len):
         logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
         if temperature > 0:
             next_token = sample(logits, temperature)
@@ -136,8 +141,8 @@ def main(
     with torch.device("npu"):
         model = Transformer(args)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path, trust_remote_code=True)
-    tokenizer.decode(generate(model, [tokenizer.encode("  ")], 2, -1, 1.)[0])
     model.load_weights(ckpt_path)
+    tokenizer.decode(generate(model, [tokenizer.encode("  ")], 2, -1, 1.)[0])
 
     if interactive:
         messages = []

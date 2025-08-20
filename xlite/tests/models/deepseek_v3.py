@@ -29,6 +29,8 @@ attn_impl: Literal["naive", "absorb"] = "absorb"
 
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
+    xlite_rt = None
+    xlite_model = None
     xlite_memory_mb = 500
     block_size = 64
     from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMLA, Model
@@ -42,6 +44,7 @@ class ModelArgs:
     Attributes:
         max_batch_size (int): Maximum batch size.
         max_seq_len (int): Maximum sequence length.
+        max_m (int): Maximum number of tokens.
         dtype (Literal["bf16", "fp8"]): Data type for computations.
         vocab_size (int): Vocabulary size.
         dim (int): Model dimension.
@@ -71,7 +74,8 @@ class ModelArgs:
         quantization (str): Quantization policy.
     """
     max_batch_size: int = 8
-    max_seq_len: int = 4096 * 4
+    max_seq_len: int = 4096
+    max_m: int = 4096
     dtype: Literal["bf16", "fp8"] = "bf16"
     vocab_size: int = 102400
     dim: int = 2048
@@ -80,6 +84,7 @@ class ModelArgs:
     n_layers: int = 27
     n_dense_layers: int = 1
     n_heads: int = 16
+    norm_eps: float = 1e-6
     # moe
     n_routed_experts: int = 64
     n_shared_experts: int = 2
@@ -102,6 +107,10 @@ class ModelArgs:
     beta_slow: int = 1
     mscale: float = 1.
     quantization: str = "none"
+    model_type: str = "deepseek"
+
+    def __post_init__(self):
+        self.max_m = self.max_seq_len if self.max_seq_len > self.max_batch_size else self.max_batch_size
 
 
 class ParallelEmbedding(nn.Module):
@@ -569,8 +578,8 @@ class Gate(nn.Module):
         self.topk_groups = args.n_limited_groups
         self.score_func = args.score_func
         self.route_scale = args.route_scale
-        self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
-        self.bias = nn.Parameter(torch.empty(args.n_routed_experts)) if self.dim == 7168 else None
+        self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim, dtype=torch.float32))
+        self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32)) if self.dim == 7168 else None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -730,8 +739,9 @@ class Block(nn.Module):
         self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
+        self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward_naive(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
         """
         Forward pass for the DeepSeek_V3 block.
 
@@ -748,6 +758,20 @@ class Block(nn.Module):
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        Forward pass for the DeepSeek_V3 block.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+            start_pos (int): Starting position in the sequence.
+            freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
+            mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
+
+        Returns:
+            torch.Tensor: Output tensor after block computation.
+        """
+        return self.forward_naive(x, start_pos, freqs_cis, mask)
 
 class DeepSeek_V3(nn.Module):
     """
@@ -823,11 +847,13 @@ class DeepSeek_V3(nn.Module):
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        logits = torch.empty(tokens.size(0), self.args.vocab_size, device=tokens.device)
+        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device)
+        tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
         attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
         torch.npu.synchronize()
-        self.xlite_model.forward(self.xlite_rt, tokens, attn_meta, self.xlite_kv_cache, self.freqs_cis, logits)
+        self.xlite_model.forward(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, self.freqs_cis, logits)
         torch.npu.synchronize()
+        logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
     @torch.inference_mode()
@@ -842,7 +868,10 @@ class DeepSeek_V3(nn.Module):
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        return self.forward_naive(tokens, start_pos)
+        if forward_backend == "xlite":
+            return self.forward_xlite(tokens, start_pos)
+        else:
+            return self.forward_naive(tokens, start_pos)
 
     def load_weights(self, ckpt_path: str):
         load_model(self, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
@@ -872,7 +901,7 @@ class DeepSeek_V3(nn.Module):
         config.v_head_dim = args.v_head_dim
         config.q_lora_rank = args.q_lora_rank
         config.kv_lora_rank = args.kv_lora_rank
-        config.norm_eps = 1e-6
+        config.norm_eps = args.norm_eps
         config.rope_theta = args.rope_theta
         config.softmax_scale = self.layers[0].attn.softmax_scale
         config.n_dense_layers = args.n_dense_layers
@@ -888,8 +917,14 @@ class DeepSeek_V3(nn.Module):
         config.def_dp_size = 1
         config.moe_ep_size = world_size
         config.moe_tp_size = 1
+        config.block_size = block_size
+        config.max_seq_len = args.max_seq_len
+        config.max_batch_size = args.max_batch_size
+        config.max_m = args.max_m
+        config.attn_type = AttnMLA
 
-        self.xlite_model = Model()
+        global xlite_model
+        xlite_model = self.xlite_model = Model()
         self.xlite_model.embed = self.embed.weight
         self.xlite_model.norm = self.norm.weight
         self.xlite_model.head = self.head.weight
@@ -923,13 +958,13 @@ class DeepSeek_V3(nn.Module):
             self.xlite_model.re_down_scale = [self.layers[i].ffn.experts[j].w2.weight.scale
                                               for i in range(args.n_dense_layers, args.n_layers)
                                               for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-        self.xlite_model.init(config, rank, AttnMLA)
+        self.xlite_model.init(config, rank)
 
     def init_xlite_kvcache(self, args: ModelArgs):
         block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
         head_num = 1
-        self.xlite_kv_cache = [(torch.zeros(block_num, head_num, block_size, args.kv_lora_rank, dtype=torch.get_default_dtype()),
-                                torch.zeros(block_num, head_num, block_size, args.qk_rope_head_dim, dtype=torch.get_default_dtype()))
+        self.xlite_kv_cache = [(torch.zeros(block_num, head_num, block_size, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
+                                torch.zeros(block_num, head_num, block_size, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'))
                                for _ in range(args.n_layers)]
         kv_size = (block_num * head_num * block_size * (args.kv_lora_rank + args.qk_rope_head_dim) *
                    self.xlite_kv_cache[0][0].element_size() * args.n_layers)
