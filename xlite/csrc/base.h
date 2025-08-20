@@ -38,6 +38,12 @@ enum XTensorType {
     MAX_XTENSOR_TYPE,
 };
 
+enum XRopeType {
+    NORMAL,
+    INPLACE,
+    MIX,
+};
+
 inline const char * XDtypeStr(enum XDtype dtype)
 {
     switch (dtype) {

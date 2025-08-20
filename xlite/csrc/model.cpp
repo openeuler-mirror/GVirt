@@ -8,6 +8,9 @@
 #include "op.h"
 #include "model.h"
 
+#define TILESIZE_OF_QUERY 128       // the tile size of query
+#define KVOFFSET_OF_QKBUFFER 4096   // the kv offset of qk buffer in different cycles of mla prefill
+
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
     attnNorm.resize(c.nLayers);
@@ -44,7 +47,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 
 void XModel::Init(void)
 {
-    std::vector<uint32_t> gateIdx;
+    std::vector<uint32_t> gateIdx, vgatherIndices;
     std::vector<uint64_t> weights;
     long size;
     void *ptr;
@@ -124,6 +127,18 @@ void XModel::Init(void)
     size = _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize) *XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _blockTables.Init({_c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize)}, INT32, ptr);
+
+    if (_c.attnType == XMODEL_ATTN_MLA) {
+        size = _c.ropeHeadDim * XDtypeBit(INT32) / 8;
+        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+        vgatherIndices.resize(_c.ropeHeadDim);
+        for (uint32_t i = 0; i < _c.ropeHeadDim / 2; i++) {
+            vgatherIndices[i * 2] = i * 4;
+            vgatherIndices[i * 2 + 1] = i * 4 + 1024;
+        }
+        CHECK_ACL(aclrtMemcpy(ptr, size, vgatherIndices.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+        _vGather.Init({_c.ropeHeadDim}, INT32, ptr);
+    }
 }
 
 XModel::~XModel(void)
@@ -147,6 +162,10 @@ XModel::~XModel(void)
     CHECK_ACL(aclrtFree(_prefillLastIdx.ptr));
     CHECK_ACL(aclrtFree(_decodeIdx.ptr));
     CHECK_ACL(aclrtFree(_blockTables.ptr));
+
+    if (_c.attnType == XMODEL_ATTN_MLA) {
+        CHECK_ACL(aclrtFree(_vGather.ptr));
+    }
 }
 
 void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output)
@@ -238,12 +257,141 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
     CHECK_ACL(aclrtMemcpy(_blockTables.ptr, size, blockTables.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
 }
 
+std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(XRuntime &rt, uint32_t layer,
+                                                                    std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                                                    XTensor &freqsCis, XTensor &hiddenState)
+{
+    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+    XTensor &kCache = kvCache[layer].first;
+    XTensor &vCache = kvCache[layer].second;
+    XTensor &attnQc = rt.pool->GetTensor({_realM, _c.qLoraRank}, hiddenState.dtype);
+    XTensor &attnNormQc = rt.pool->GetTensor({_realM, _c.qLoraRank}, hiddenState.dtype);
+    XTensor &attnQWithQr = rt.pool->GetTensor({_realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim}, hiddenState.dtype);
+    XTensor &attnKvc = rt.pool->GetTensor({_realM, _c.kvLoraRank + _c.ropeHeadDim}, hiddenState.dtype);
+    XTensor &attnNormKvc = rt.pool->GetTensor({_realM, _c.kvLoraRank}, hiddenState.dtype);
+    XTensor &attnKPe = rt.pool->GetTensor({_realM, _c.ropeHeadDim}, hiddenState.dtype);
+    XTensor &attnQPe = rt.pool->GetTensor({_realM, nLocalHeads, _c.ropeHeadDim}, hiddenState.dtype);
+
+    XliteOpMatmul(rt, hiddenState, mlaQA[layer], attnQc);
+    XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], _c.normEps, attnNormQc);
+    XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr);
+    XliteDsOpRopeBatch(rt, _realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
+                       attnQWithQr, freqsCis, _position, _vGather, attnQPe, _prefillBatch > 0 ? MIX : NORMAL);
+    XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc);
+    XliteDsOpStridedRmsnorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _realM, _c.kvLoraRank,
+                            _c.kvLoraRank + _c.ropeHeadDim, _c.normEps);
+    XliteDsOpRopeBatch(rt, _realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
+                       attnKvc, freqsCis, _position, _vGather, attnKPe, NORMAL);
+    XliteDsOpReshapeAndCache(rt, attnNormKvc, attnKPe, kCache, vCache, _slotMapping, _realM, _c.kvLoraRank,
+                             _c.ropeHeadDim, 1, _c.kvLoraRank, _c.ropeHeadDim, _c.blockSize, kCache.shape[0]);
+
+    rt.pool->PutTensor(attnQc);
+    rt.pool->PutTensor(attnNormQc);
+    rt.pool->PutTensor(attnKvc);
+    rt.pool->PutTensor(attnNormKvc);
+
+    return {attnQWithQr, attnKPe, attnQPe};
+}
+
+XTensor& XModel::ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
+                                       std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                       XTensor &freqsCis, XTensor &hiddenState,
+                                       XTensor &attnQWithQr, XTensor &attnKPe, XTensor &attnQPe)
+{
+    XTensor &kCache = kvCache[layer].first;
+    XTensor &vCache = kvCache[layer].second;
+    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+    uint32_t mlaPaddingLen = ROUND_UP(_realM, _c.blockSize);
+    uint32_t mlaPmSize = TILESIZE_OF_QUERY, mlaPerKvlen = KVOFFSET_OF_QKBUFFER, coreNum = rt.aicNum;
+    XTensor &attnQkcAbsorb = rt.pool->GetTensor({_realM, nLocalHeads, _c.vHeadDim}, hiddenState.dtype);
+    XTensor &attnKRes = rt.pool->GetTensor({mlaPaddingLen, nLocalHeads * (_c.nopeHeadDim + _c.vHeadDim)}, hiddenState.dtype);
+    XTensor &attnKvFull = rt.pool->GetTensor({mlaPaddingLen, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim}, hiddenState.dtype);
+    XTensor &attnV = rt.pool->GetTensor({mlaPaddingLen, nLocalHeads, _c.vHeadDim}, hiddenState.dtype);
+    XTensor &attnPrefillOut = rt.pool->GetTensor({_realM, nLocalHeads, _c.vHeadDim}, hiddenState.dtype);
+    XTensor &attnMlaOut = rt.pool->GetTensor({coreNum * mlaPmSize * _c.vHeadDim * 2}, FP32);
+    XTensor &attnMlaMax = rt.pool->GetTensor({coreNum * mlaPmSize * 8}, FP32);
+    XTensor &attnMlaSum = rt.pool->GetTensor({coreNum * mlaPmSize * 8 * 2}, FP32);
+    XTensor &attnMlaAlpha = rt.pool->GetTensor({coreNum * mlaPmSize * 8 * 2}, FP32);
+    XTensor &attnMlaQK = rt.pool->GetTensor({2, coreNum, mlaPmSize, mlaPerKvlen}, BF16);
+    XTensor &attnMlaTmp = rt.pool->GetTensor({1}, INT32);
+
+    XliteDsOpKvMatmul(rt, kCache, mlaKVB[layer], attnKRes, _prefillLenPad, nLocalHeads * (_c.nopeHeadDim + _c.vHeadDim),
+                      _c.kvLoraRank, _blockTables, true, _c.blockSize, _c.kvLoraRank);
+    XliteDsOpPrefillKvSplit(rt, attnKRes, attnKPe, vCache, _blockTables, attnKvFull, attnV, _prefillLen,
+                            _prefillLenPad, nLocalHeads, 0, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.blockSize);
+    XliteDsOpPrefillMix(rt, attnMlaOut, attnMlaAlpha, attnMlaMax, attnMlaSum, attnQWithQr, attnKvFull,
+                        attnMlaQK, attnMlaTmp, _padding, _cachedLens, attnV, attnPrefillOut, attnQkcAbsorb,
+                        _lens, attnMlaTmp, attnMlaTmp, attnMlaTmp, _prefillIdx, _cumPromptLens,
+                        _c.vHeadDim, nLocalHeads, nLocalHeads, _c.blockSize, _prefillBatch, 0, 0, 0, 0, _c.softmaxScale);
+
+    rt.pool->PutTensor(attnQWithQr);
+    rt.pool->PutTensor(attnKPe);
+    rt.pool->PutTensor(attnQPe);
+    rt.pool->PutTensor(attnKRes);
+    rt.pool->PutTensor(attnKvFull);
+    rt.pool->PutTensor(attnV);
+    rt.pool->PutTensor(attnPrefillOut);
+    rt.pool->PutTensor(attnMlaOut);
+    rt.pool->PutTensor(attnMlaMax);
+    rt.pool->PutTensor(attnMlaSum);
+    rt.pool->PutTensor(attnMlaAlpha);
+    rt.pool->PutTensor(attnMlaQK);
+    rt.pool->PutTensor(attnMlaTmp);
+    return attnQkcAbsorb;
+}
+
+XTensor& XModel::ForwardAttnMLADecode(XRuntime &rt, uint32_t layer,
+                                      std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                      XTensor &freqsCis, XTensor &hiddenState,
+                                      XTensor &attnQWithQr, XTensor &attnKPe, XTensor &attnQPe)
+{
+    uint32_t batch = hiddenState.shape[0];
+    XTensor &kCache = kvCache[layer].first;
+    XTensor &vCache = kvCache[layer].second;
+    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+    XTensor &attnQkcAbsorb = rt.pool->GetTensor({_realM, nLocalHeads, _c.vHeadDim}, hiddenState.dtype);
+    XTensor &attnQAbsorb = rt.pool->GetTensor({_realM, nLocalHeads, _c.kvLoraRank}, hiddenState.dtype);
+    XTensor &attnQk = rt.pool->GetTensor({batch, nLocalHeads, _c.maxSeqLen}, hiddenState.dtype);
+    XTensor &attnQkc = rt.pool->GetTensor({_realM, nLocalHeads, _c.kvLoraRank}, hiddenState.dtype);
+
+    XliteDsOpEinsumShdHdcShc(rt, _realM, _c.nopeHeadDim, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim,
+                             2 * _c.nopeHeadDim, _c.kvLoraRank, attnQWithQr, mlaKVB[layer], attnQAbsorb);
+    XliteDsOpDecodeAttn(rt, attnQAbsorb, kCache, attnQk, _cachedLens, _blockTables, _lens, _cumPromptLens, batch,
+                        nLocalHeads, 1, _c.kvLoraRank, _c.blockSize, _maxNumBlocks, _c.maxSeqLen, false);
+    XliteDsOpDecodeAttn(rt, attnQPe, vCache, attnQk, _cachedLens, _blockTables, _lens, _cumPromptLens, batch,
+                        nLocalHeads, 1, _c.ropeHeadDim, _c.blockSize, _maxNumBlocks, _c.maxSeqLen, true);
+    XliteDsOpSoftmax(rt, attnQk, _cachedLens, _lens, _cumPromptLens, _c.softmaxScale, batch, nLocalHeads,
+                     _c.blockSize, _c.maxSeqLen);
+    XliteDsOpEinsumShtTcShc(rt, batch, nLocalHeads, _c.maxSeqLen, _maxNumBlocks, kCache.shape[0], _c.blockSize,
+                            _c.kvLoraRank, attnQk, _cachedLens, _lens, _cumPromptLens, _blockTables, kCache, attnQkc);
+    XliteDsOpEinsumShcHdcShd(rt, _realM, nLocalHeads, _c.kvLoraRank, 2 * _c.nopeHeadDim, _c.vHeadDim, attnQkc,
+                             mlaKVB[layer], attnQkcAbsorb);
+
+    rt.pool->PutTensor(attnQWithQr);
+    rt.pool->PutTensor(attnKPe);
+    rt.pool->PutTensor(attnQPe);
+    rt.pool->PutTensor(attnQAbsorb);
+    rt.pool->PutTensor(attnQk);
+    rt.pool->PutTensor(attnQkc);
+    return attnQkcAbsorb;
+}
+
 void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
-                            XModelAttnMeta& attnMeta,
                             std::vector<std::pair<XTensor, XTensor>>& kvCache,
                             XTensor &freqsCis, XTensor &hiddenState)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    auto [attnQWithQr, attnKPe, attnQPe] = ForwardAttnMLACommon(rt, layer, kvCache, freqsCis, hiddenState);
+
+    XTensor &attnOutput = (_prefillBatch > 0
+                           ? ForwardAttnMLAPrefill(rt, layer, kvCache, freqsCis, hiddenState, attnQWithQr, attnKPe, attnQPe)
+                           : ForwardAttnMLADecode(rt, layer, kvCache, freqsCis, hiddenState, attnQWithQr, attnKPe, attnQPe));
+
+    XliteOpMatmul(rt, attnOutput, attnOut[layer], hiddenState);
+
+    if (_c.defTpSize > 1) {
+        XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+    }
+    rt.pool->PutTensor(attnOutput);
 }
 
 void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
@@ -259,9 +407,9 @@ void XModel::ForwardAttn(XRuntime &rt, uint32_t layer,
                          std::vector<std::pair<XTensor, XTensor>>& kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
-    if (_aType == XMODEL_ATTN_MLA) {
-        ForwardAttnMLA(rt, layer, attnMeta, kvCache, freqsCis, hiddenState);
-    } else if (_aType == XMODEL_ATTN_MHA) {
+    if (_c.attnType == XMODEL_ATTN_MLA) {
+        ForwardAttnMLA(rt, layer, kvCache, freqsCis, hiddenState);
+    } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, attnMeta, kvCache, freqsCis, hiddenState);
     } else {
         std::cout << __func__ << ": TODO" << std::endl;
@@ -413,9 +561,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input,
                      std::vector<std::pair<XTensor, XTensor>>& kvCache,
                      XTensor &freqsCis, XTensor &output)
 {
-    uint32_t batch = input.shape[0];
-    uint32_t seqLen = input.shape[1];
-    uint32_t m = batch * seqLen;
+    uint32_t m = input.shape[0];
 
     if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
         std::cerr << __FILE__ << ":" << __LINE__ << "check runtime communication setting failed" << std::endl;

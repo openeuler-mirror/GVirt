@@ -102,8 +102,18 @@ public:
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
     void PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta);
+    std::tuple<XTensor &, XTensor &, XTensor &> ForwardAttnMLACommon(XRuntime &rt, uint32_t layer,
+                                                                     std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                                                     XTensor &freqsCis, XTensor &hiddenState);
+    XTensor& ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
+                                   std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                   XTensor &freqsCis, XTensor &hiddenState,
+                                   XTensor &attnQWithQr, XTensor &attnKPe, XTensor &attnQPe);
+    XTensor& ForwardAttnMLADecode(XRuntime &rt, uint32_t layer,
+                                  std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                  XTensor &freqsCis, XTensor &hiddenState,
+                                  XTensor &attnQWithQr, XTensor &attnKPe, XTensor &attnQPe);
     void ForwardAttnMLA(XRuntime &rt, uint32_t layer,
-                        XModelAttnMeta& attnMeta,
                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttnMHA(XRuntime &rt, uint32_t layer,
@@ -152,6 +162,7 @@ private:
     XTensor _padding;
     XTensor _cumPromptLens;
     XTensor _blockTables;
+    XTensor _vGather;
 };
 
 #endif

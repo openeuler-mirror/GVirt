@@ -136,3 +136,83 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &sc
 {
     std::cout << __func__ << ": TODO" << std::endl;
 }
+
+void XliteDsOpRopeBatch(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads,
+                        uint32_t stepDim, uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs,
+                        XTensor &position, XTensor &vGather, XTensor &outputPe, enum XRopeType ropeType)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpStridedRmsnorm(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output,
+                            uint32_t numTokens, uint32_t normDim, uint32_t stepDim, float normEps)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpReshapeAndCache(XRuntime &rt, XTensor &key, XTensor &value, XTensor &kCache, XTensor &vCache,
+                              XTensor &slotMapping, int32_t numTokens, int32_t keyStride, int32_t valueStride,
+                              int32_t numKvHeads, int32_t kHeadSize, int32_t vHeadSize, int32_t blockSize, int32_t blockNum)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpKvMatmul(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output, int m, int n, int k,
+                       XTensor &blockTable, bool nt, int blockSize, int headSize)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &cache,
+                             XTensor &blockTable, XTensor &kvFull, XTensor &v, int nTokens, int nTokensPad,
+                             int nLocalHeads, int kvLoraRank, int rotDim, int headSize, int vDim, uint32_t blockSize)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpPrefillMix(XRuntime &rt, XTensor &out, XTensor &alpha, XTensor &max, XTensor &sum,
+                         XTensor &q, XTensor &k, XTensor &qk, XTensor &blockTables, XTensor &paddingN, XTensor &cachedLens,
+                         XTensor &v, XTensor &mixOut, XTensor &mixOutFinal, XTensor &promptLens,
+                         XTensor &attnMask, XTensor &attnMaskAddr, XTensor &speculateLens, XTensor &prefillIndex,
+                         XTensor &cumPromptLens, uint32_t headSize, uint32_t numHeads, uint32_t numKVHeads,
+                         uint32_t blockSize, uint32_t batchSize, uint32_t mappingLen, uint32_t doTreeAttnMask,
+                         uint32_t offsetM, uint32_t mSlice, float scale)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpEinsumShdHdcShc(XRuntime &rt, int numTokens, int headSize,
+                              int nLocalHeads, int qStepDim, int kvUpWeightStepDim,
+                              int kvLoraRank, XTensor &qWithQr, XTensor &kvUpWeight, XTensor &qAbsorb)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpDecodeAttn(XRuntime &rt, XTensor &q, XTensor &k, XTensor &o, XTensor &cachedLens,
+                         XTensor &mapping, XTensor &promptLens, XTensor &promptLensCum, uint32_t numTokens,
+                         uint32_t numHeads, uint32_t numKvHeads, uint32_t headSize, uint32_t blockSize,
+                         uint32_t mappingLen, uint32_t maxContextLen, bool add)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpSoftmax(XRuntime &rt, XTensor &qk, XTensor &cachedLens, XTensor &promptLens,
+                      XTensor &promptLensCum, float scale, uint32_t numTokens, uint32_t numHeads,
+                      uint32_t blockSize, uint32_t maxContextLen)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpEinsumShtTcShc(XRuntime &rt, int numTokens, int nLocalHeads, int maxTokens,
+                             int maxBlocksPerQuery, int numBlocks, int blockSize, int kvLoraRank, XTensor &scores,
+                             XTensor &cachedLens, XTensor &promptLens, XTensor &promptLensCum, XTensor &blockTables,
+                             XTensor &cCache, XTensor &result)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteDsOpEinsumShcHdcShd(XRuntime &rt, int numTokens, int nLocalHeads, int kvLoraRank,
+                              int wkvbStep, int vDim, XTensor &scores, XTensor &kvUpWeight, XTensor &result)
+{
+    std::cout << __func__ << ": TODO" << std::endl;
+}
