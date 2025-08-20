@@ -12,6 +12,12 @@ enum XModelAttnType {
     XMODEL_ATTN_MAX_TYPE,
 };
 
+enum XModelRopeType {
+    XMODEL_ROPE_NEOX,
+    XMODEL_ROPE_GPTJ,
+    XMODEL_ROPE_MAX_TYPE,
+};
+
 struct XModelConfig {
     // global config
     uint32_t vocabSize;
@@ -20,6 +26,7 @@ struct XModelConfig {
 
     // attention config
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
+    enum XModelRopeType ropeType = XMODEL_ROPE_NEOX;
     uint32_t nHeads;
     uint32_t nKvHeads;
     uint32_t headDim;
@@ -116,8 +123,9 @@ private:
     void ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
+    void XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTensor &vCache,
+                          XTensor &input, XTensor &output);
     void ForwardAttnMHA(XRuntime &rt, uint32_t layer,
-                        XModelAttnMeta& attnMeta,
                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttn(XRuntime &rt, uint32_t layer,
@@ -163,6 +171,8 @@ private:
     XTensor _cumPromptLens;
     XTensor _blockTables;
     XTensor _vGather;
+    XTensor _a2v;
+    XTensor _v2a;
 };
 
 #endif

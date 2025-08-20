@@ -66,4 +66,20 @@ void XliteDsOpEinsumShtTcShc(XRuntime &rt, int numTokens, int nLocalHeads, int m
                              XTensor &cCache, XTensor &result);
 void XliteDsOpEinsumShcHdcShd(XRuntime &rt, int numTokens, int nLocalHeads, int kvLoraRank,
                               int wkvbStep, int vDim, XTensor &scores, XTensor &kvUpWeight, XTensor &result);
+void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
+                      XTensor &position, XTensor &cossin, XTensor &slotMapping,
+                      uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t maxM,
+                      uint32_t rotDim, uint32_t blockSize, bool isNeox);
+void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &qk,
+                             XTensor &blockTables, XTensor &paddingN, XTensor &cachedLens,
+                             XTensor &vCache, XTensor &output, XTensor &lens,
+                             XTensor &prefillIndex, XTensor &cumPromptLens, uint32_t headDim,
+                             uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize,
+                             uint32_t batch, uint32_t maxNumBlock);
+void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &qkv,
+                            XTensor &kCache, XTensor &vCache, XTensor &cachedLens, XTensor &lens,
+                            XTensor &blockTables, XTensor &qk, XTensor &output, XTensor &decodeIdx,
+                            XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
+                            uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
+                            uint32_t nKvHeads, uint32_t maxM);
 #endif
