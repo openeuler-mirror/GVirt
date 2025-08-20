@@ -601,7 +601,22 @@ void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
 void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    uint32_t batch = _prefillBatch + _decodeBatch;
+    XTensor localOutput({output.shape[1], output.shape[2]}, output.dtype, output.ptr);
+
+    if (batch < input.shape[0]) {
+        XTensor &x = rt.pool->GetTensor({batch, _c.hiddenSize}, input.dtype);
+        XliteOpEmbed(rt, _prefillLastIdx, input, 0, _realM, x);
+        XliteOpMatmul(rt, x, head, localOutput);
+        rt.pool->PutTensor(x);
+    } else
+    {
+        XliteOpMatmul(rt, input, head, localOutput);
+    }
+
+    if (_c.defTpSize > 1) {
+        XliteOpAllGather(rt, localOutput, output, TP);
+    }
 }
 
 void XModel::Forward(XRuntime &rt, XTensor &input,
