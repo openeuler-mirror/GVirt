@@ -34,6 +34,7 @@ if forward_backend == "xlite":
 class ModelArgs:
     max_batch_size: int = 8
     max_seq_len: int = 4096
+    max_m: int = 4096
     dim: int = 4096
     head_dim: int = None
     inter_dim: int = 11008
@@ -45,8 +46,10 @@ class ModelArgs:
     rope_theta: float = 10000.0
     dtype: Literal["bfloat16", "float16"] = "float16"
     qkv_bias: bool = False
+    model_type: str = "llama"
 
     def __post_init__(self):
+        self.max_m = self.max_seq_len if self.max_seq_len > self.max_batch_size else self.max_batch_size
         if self.head_dim is None:
             self.head_dim = self.dim // self.n_heads
 
@@ -311,17 +314,22 @@ class Llama(nn.Module):
 
     @torch.inference_mode()
     def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
-        logits = torch.empty(tokens.size(0), self.args.vocab_size, device=tokens.device)
+        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device)
+        tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
         attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
         torch.npu.synchronize()
-        self.xlite_model.forward(self.xlite_rt, tokens, attn_meta, self.xlite_kv_cache, self.freqs_cis, logits)
+        self.xlite_model.forward(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, self.freqs_cis, logits)
         torch.npu.synchronize()
+        logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
-        return self.forward_naive(tokens, start_pos)
+        if forward_backend == "xlite":
+            return self.forward_xlite(tokens, start_pos)
+        else:
+            return self.forward_naive(tokens, start_pos)
 
 
     def load_weights(
@@ -457,6 +465,7 @@ class Llama(nn.Module):
         config.hidden_size = args.dim
         config.n_layers = args.n_layers
         config.n_heads = args.n_heads
+        config.n_kv_heads = args.n_kv_heads
         config.head_dim = args.head_dim
         config.rope_head_dim = args.head_dim
         config.norm_eps = args.norm_eps
@@ -468,6 +477,11 @@ class Llama(nn.Module):
         config.def_dp_size = 1
         config.moe_ep_size = 1
         config.moe_tp_size = 1
+        config.block_size = 128
+        config.max_seq_len = args.max_seq_len
+        config.max_batch_size = args.max_batch_size
+        config.max_m = args.max_m
+        config.attn_type = AttnMHA
 
         self.xlite_model = Model()
         self.xlite_model.embed = self.embed_tokens.weight
@@ -479,13 +493,13 @@ class Llama(nn.Module):
         self.xlite_model.mlp_norm = [layer.post_attention_layernorm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [self.layers[i].mlp.gate_up_proj.weight for i in range(args.n_layers)]
         self.xlite_model.mlp_down = [self.layers[i].mlp.down_proj.weight for i in range(args.n_layers)]
-        self.xlite_model.init(config, rank, AttnMHA)
+        self.xlite_model.init(config, rank)
 
     def init_xlite_kvcache(self, args: ModelArgs):
         block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
-        head_num = 1
-        self.xlite_kv_cache = [(torch.zeros(block_num, head_num, block_size, args.head_dim, dtype=torch.get_default_dtype()),
-                                torch.zeros(block_num, head_num, block_size, args.head_dim, dtype=torch.get_default_dtype()))
+        head_num = args.n_kv_heads
+        self.xlite_kv_cache = [(torch.zeros(block_num, head_num, block_size, args.head_dim, dtype=torch.get_default_dtype(), device='npu'),
+                                torch.zeros(block_num, head_num, block_size, args.head_dim, dtype=torch.get_default_dtype(), device='npu'))
                                for _ in range(args.n_layers)]
         kv_size = (block_num * head_num * block_size * (args.head_dim + args.head_dim) *
                    self.xlite_kv_cache[0][0].element_size() * args.n_layers)
