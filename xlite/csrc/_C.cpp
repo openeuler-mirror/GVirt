@@ -73,7 +73,7 @@ static inline enum XDtype XDtype(at::Tensor &t)
         case at::ScalarType::ComplexFloat:
             return CPLXF;
         default:
-            std::cerr << __FILE__ << ":" << __LINE__ << "unknown data type " << t.scalar_type() << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << ": unknown data type " << t.scalar_type() << std::endl;
             return MAX_XDTYPE;
     }
 }
@@ -98,7 +98,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     uint32_t nRE = (c.nLayers - c.nDenseLayers) * nLocalRoutedExperts;
 
     if (moeREUpGate.size() != nRE || moeREDown.size() != nRE) {
-        std::cerr << __FILE__ << ":" << __LINE__ << " num of routed experts: " << moeREUpGate.size() << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of routed experts: " << moeREUpGate.size() << std::endl;
         return;
     }
 
@@ -173,7 +173,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input,
     XTensor _freqsCis(freqsCis.sizes().vec(), XDtype(freqsCis), TensorPtr(freqsCis));
 
     if (kvCache.size() != _kv.size()) {
-        std::cerr << __func__ << "check kv cache failed!" << std::endl;
+        std::cerr << __func__ << ": check kv cache failed!" << std::endl;
         return;
     }
 

@@ -258,12 +258,12 @@ XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
     void *ptr = _ptr;
 
     if (shape.size() == 0) {
-        std::cerr << __FILE__ << ":" << __LINE__ << "size is 0" << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << ": size is 0" << std::endl;
         throw std::invalid_argument("get tensor shape size is 0");
     }
 
     if (_free.empty()) {
-        std::cerr << __FILE__ << ":" << __LINE__ << "dynamic tensor too many, please put after use" << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << ": dynamic tensor too many, please put after use" << std::endl;
         throw std::runtime_error("dynamic tensor too many, please put after use");
     }
     XTensor &t = _free.front();
@@ -291,7 +291,7 @@ XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
         return t;
     }
 
-    std::cerr << __FILE__ << ":" << __LINE__ << "get " << size << " B failed, no free tensor" << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << ": get " << size << " B failed, no free tensor" << std::endl;
     throw std::runtime_error("no free tensor");
 }
 

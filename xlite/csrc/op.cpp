@@ -78,7 +78,7 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
         aclrtlaunch_embed_kernel_bfloat16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr, embed.shape[1], in.shape[0],
                                             start, end, rt.tpSize());
     } else {
-        std::cerr << __func__ << "unsupported!" << std::endl;
+        std::cerr << __func__ << ": unsupported!" << std::endl;
     }
 }
 
@@ -89,7 +89,7 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, float normEps, XTe
     } else if (in.dtype == BF16 && out.dtype == BF16) {
         aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, norm.ptr, out.ptr, in.shape[0], in.shape[1], normEps);
     } else {
-        std::cerr << __func__ << "unsupported!" << std::endl;
+        std::cerr << __func__ << ": unsupported!" << std::endl;
     }
 }
 
@@ -99,11 +99,11 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
     std::vector<long> shape = {8, 2048};
 
     if (in1.dtype != FP16 || in2.dtype != FP16 || out.dtype != FP16) {
-        std::cerr << __FILE__ << ":" << __LINE__ << "unsupport dtype" << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << ": unsupport dtype" << std::endl;
         return;
     }
     if (in1.shape != shape || in2.shape != shape || out.shape != shape) {
-        std::cerr << __FILE__ << ":" << __LINE__ << "unsupport shape" << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << ": unsupport shape" << std::endl;
         return;
     }
     add_do(blockDim, rt.stream, in1.ptr, in2.ptr, out.ptr);

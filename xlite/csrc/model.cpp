@@ -233,7 +233,7 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
         } else if (lens[i] <= 2) {
             _decodeBatch++;
         } else {
-            std::cerr << __FILE__ << ":" << __LINE__ << "invalid inputMeta" << i << ", decode len too long" << lens[i] << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << ": invalid inputMeta" << i << ", decode len too long" << lens[i] << std::endl;
             return;
         }
     }
@@ -627,7 +627,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input,
     uint32_t m = input.shape[0];
 
     if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
-        std::cerr << __FILE__ << ":" << __LINE__ << "check runtime communication setting failed" << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << ": check runtime communication setting failed" << std::endl;
         return;
     }
 
