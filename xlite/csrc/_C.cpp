@@ -168,9 +168,11 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input,
                       std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
                       at::Tensor &freqsCis, at::Tensor &output)
 {
-    XTensor _input(input.sizes().vec(), XDtype(input), TensorPtr(input));
-    XTensor _output(output.sizes().vec(), XDtype(output), TensorPtr(output));
-    XTensor _freqsCis(freqsCis.sizes().vec(), XDtype(freqsCis), TensorPtr(freqsCis));
+    XTensor _input, _output, _freqsCis;
+
+    InitXTensor(_input, input);
+    InitXTensor(_output, output);
+    InitXTensor(_freqsCis, freqsCis);
 
     if (kvCache.size() != _kv.size()) {
         std::cerr << __func__ << ": check kv cache failed!" << std::endl;
@@ -188,59 +190,71 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input,
 
 void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
 {
-    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
-    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XTensor _in, _out;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
     XliteOpAllGather(rt, _in, _out, TP);
     rt.Synchronize();
 }
 
 void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in)
 {
-    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
-    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XTensor _in, _out;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
     XliteOpReduceScatter(rt, _in, _out, TP);
     rt.Synchronize();
 }
 
 void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in)
 {
-    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
-    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XTensor _in, _out;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
     XliteOpAllReduceSum(rt, _in, _out, TP);
     rt.Synchronize();
 }
 
 void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
 {
-    XTensor _x(x.sizes().vec(), XDtype(x), TensorPtr(x));
-    XTensor _y(y.sizes().vec(), XDtype(y), TensorPtr(y));
-    XTensor _z(z.sizes().vec(), XDtype(z), TensorPtr(z));
+    XTensor _x, _y, _z;
+
+    InitXTensor(_x, x);
+    InitXTensor(_y, y);
+    InitXTensor(_z, z);
     XliteOpAdd(rt, _x, _y, _z);
     rt.Synchronize();
 }
 
 void Print(at::Tensor &x)
 {
-    XTensor _x(x.sizes().vec(), XDtype(x), TensorPtr(x));
+    XTensor _x;
+
+    InitXTensor(_x, x);
     _x.Print();
 }
 
 void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, uint32_t start, uint32_t end)
 {
-    XTensor _weight(weight.sizes().vec(), XDtype(weight), TensorPtr(weight));
-    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
-    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XTensor _in, _out, _weight;
 
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    InitXTensor(_weight, weight);
     XliteOpEmbed(rt, _in, _weight, start, end, _out);
     rt.Synchronize();
 }
 
 void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, float normEps)
 {
-    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
-    XTensor _norm(norm.sizes().vec(), XDtype(norm), TensorPtr(norm));
-    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+    XTensor _in, _out, _norm;
 
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    InitXTensor(_norm, norm);
     XliteOpRmsNorm(rt, _in, _norm, normEps, _out);
     rt.Synchronize();
 }
