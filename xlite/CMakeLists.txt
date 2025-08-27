@@ -16,6 +16,7 @@ endif()
 # xlite_kernels_${RUN_MODE}
 file(GLOB KERNEL_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel.cpp
 )
 
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)

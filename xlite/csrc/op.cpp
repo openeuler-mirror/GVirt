@@ -6,6 +6,8 @@
 #include "runtime.h"
 #include "op.h"
 #include "kernels/kernel_entry.h"
+#include "aclrtlaunch_embed_kernel_float16_t.h"
+#include "aclrtlaunch_embed_kernel_bfloat16_t.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -67,7 +69,15 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end, XTensor &out)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (embed.dtype == FP16 && out.dtype == FP16) {
+        aclrtlaunch_embed_kernel_float16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr, embed.shape[1], in.shape[0],
+                                           start, end, rt.tpSize());
+    } else if (embed.dtype == BF16 && out.dtype == BF16) {
+        aclrtlaunch_embed_kernel_bfloat16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr, embed.shape[1], in.shape[0],
+                                            start, end, rt.tpSize());
+    } else {
+        std::cerr << __func__ << "unsupported!" << std::endl;
+    }
 }
 
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, float normEps, XTensor &out)

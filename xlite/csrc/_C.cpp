@@ -225,6 +225,16 @@ void Print(at::Tensor &x)
     _x.Print();
 }
 
+void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, uint32_t start, uint32_t end)
+{
+    XTensor _weight(weight.sizes().vec(), XDtype(weight), TensorPtr(weight));
+    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
+    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+
+    XliteOpEmbed(rt, _in, _weight, start, end, _out);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
@@ -311,6 +321,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("reduce_scatter", &ReduceScatter);
     m.def("all_reduce", &AllReduce);
     m.def("add", &Add);
+    m.def("embed", &Embed);
 
     // funcs
     m.def("print", &Print);
