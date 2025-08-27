@@ -235,6 +235,16 @@ void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, ui
     rt.Synchronize();
 }
 
+void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, float normEps)
+{
+    XTensor _in(in.sizes().vec(), XDtype(in), TensorPtr(in));
+    XTensor _norm(norm.sizes().vec(), XDtype(norm), TensorPtr(norm));
+    XTensor _out(out.sizes().vec(), XDtype(out), TensorPtr(out));
+
+    XliteOpRmsNorm(rt, _in, _norm, normEps, _out);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
@@ -322,6 +332,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("all_reduce", &AllReduce);
     m.def("add", &Add);
     m.def("embed", &Embed);
+    m.def("rmsnorm", &RMSNorm);
 
     // funcs
     m.def("print", &Print);
