@@ -237,6 +237,17 @@ void Print(at::Tensor &x)
     _x.Print();
 }
 
+void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weightNZ)
+{
+    XTensor _x, _y, _z;
+
+    InitXTensor(_x, x);
+    InitXTensor(_y, y);
+    InitXTensor(_z, z);
+    XliteOpMatmul(rt, _x, _y, _z, weightNZ);
+    rt.Synchronize();
+}
+
 void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, uint32_t start, uint32_t end)
 {
     XTensor _in, _out, _weight;
@@ -297,7 +308,8 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("max_seq_len", &XModelConfig::maxSeqLen)
         .def_readwrite("max_batch_size", &XModelConfig::maxBatch)
         .def_readwrite("max_m", &XModelConfig::maxM)
-        .def_readwrite("block_size", &XModelConfig::blockSize);
+        .def_readwrite("block_size", &XModelConfig::blockSize)
+        .def_readwrite("weight_nz", &XModelConfig::weightNZ);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
         .def(py::init<>())
@@ -345,6 +357,8 @@ PYBIND11_MODULE(_C, m) {
     m.def("reduce_scatter", &ReduceScatter);
     m.def("all_reduce", &AllReduce);
     m.def("add", &Add);
+    m.def("matmul", &Matmul, "matmul",
+          py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"), py::arg("weight_nz") = false);
     m.def("embed", &Embed);
     m.def("rmsnorm", &RMSNorm);
 

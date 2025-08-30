@@ -14,7 +14,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end, XTensor &out);
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, float normEps, XTensor &out);
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out);
-void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out);
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false);
 
 void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out);
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale);

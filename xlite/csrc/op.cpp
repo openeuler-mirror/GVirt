@@ -10,6 +10,9 @@
 #include "aclrtlaunch_embed_kernel_bfloat16_t.h"
 #include "aclrtlaunch_rmsnorm_float16_t.h"
 #include "aclrtlaunch_rmsnorm_bfloat16_t.h"
+#include "aclrtlaunch_matmul_float16_t.h"
+#include "aclrtlaunch_matmul_bfloat16_t.h"
+#include "aclrtlaunch_matmul_float.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -109,9 +112,17 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
     add_do(blockDim, rt.stream, in1.ptr, in2.ptr, out.ptr);
 }
 
-void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out)
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
+        aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0], weight.shape[1], weightNZ);
+    } else if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16) {
+        aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0], weight.shape[1], weightNZ);
+    } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32) {
+        aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0], weight.shape[1], weightNZ);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
 }
 
 void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out)

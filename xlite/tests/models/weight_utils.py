@@ -19,9 +19,39 @@ from safetensors.torch import load_file, save_file, safe_open
 from tqdm.auto import tqdm
 
 
-MATMUL_PADDING_N = 128
-MATMUL_PADDING_K = 64
-COC_PADDING_K = 256
+def rearrange_matrix(matrix, n0, k_block_size=16):
+    """nd2nz"""
+    assert matrix.size(0) % n0 == 0, f"matrix.size0: {matrix.size(0)} n0: {n0}"
+    assert matrix.size(1) % k_block_size == 0, f"matrix.size1: {matrix.size(1)} k_block_size: {k_block_size}"
+
+    reshaped = matrix.view(matrix.size(0) // n0, n0, matrix.size(1) // k_block_size, k_block_size)
+    final_reshaped = reshaped.permute(0, 2, 1, 3).contiguous()
+    return final_reshaped.view(matrix.size(0), matrix.size(1))
+
+
+def matrix_nd2nz(matrix):
+    """nd2nz"""
+    # same logic with csrc/kernels/matmul.cpp 's n0 size */
+    n0 = 256
+    if matrix.dtype == torch.float:
+        k_block_size = 8
+    elif matrix.dtype == torch.bfloat16 or torch.float16:
+        k_block_size = 16
+    elif matrix.dtype == torch.int8:
+        k_block_size = 32
+
+    n, _ = matrix.size()
+    if n % n0 == 0:
+        return rearrange_matrix(matrix, n0, k_block_size=k_block_size)
+
+    n_down = n // n0 * n0
+    part2_n0 = n - n_down
+    assert part2_n0 % 16 == 0
+    part1 = matrix[:n_down, :]
+    part2 = matrix[n_down:, :]
+    rearrange_part1 = rearrange_matrix(part1, n0, k_block_size=k_block_size)
+    rearrange_part2 = rearrange_matrix(part2, part2_n0, k_block_size=k_block_size)
+    return torch.cat((rearrange_part1, rearrange_part2), dim = 0)
 
 
 def setup_logger():
