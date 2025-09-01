@@ -124,7 +124,7 @@ void XModel::Init(void)
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _decodeIdx.Init({_c.maxBatch}, INT32, ptr);
 
-    size = _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize) *XDtypeBit(INT32) / 8;
+    size = _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize) * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _blockTables.Init({_c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize)}, INT32, ptr);
 
@@ -288,12 +288,12 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(XRuntim
     XTensor &attnKPe = rt.pool->GetTensor({_realM, _c.ropeHeadDim}, hiddenState.dtype);
     XTensor &attnQPe = rt.pool->GetTensor({_realM, nLocalHeads, _c.ropeHeadDim}, hiddenState.dtype);
 
-    XliteOpMatmul(rt, hiddenState, mlaQA[layer], attnQc);
+    XliteOpMatmul(rt, hiddenState, mlaQA[layer], attnQc, _c.weightNZ);
     XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], _c.normEps, attnNormQc);
-    XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr);
+    XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr, _c.weightNZ);
     XliteDsOpRopeBatch(rt, _realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
                        attnQWithQr, freqsCis, _position, _vGather, attnQPe, _prefillBatch > 0 ? MIX : NORMAL);
-    XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc);
+    XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc, _c.weightNZ);
     XliteDsOpStridedRmsnorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _realM, _c.kvLoraRank,
                             _c.kvLoraRank + _c.ropeHeadDim, _c.normEps);
     XliteDsOpRopeBatch(rt, _realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
@@ -402,7 +402,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                            ? ForwardAttnMLAPrefill(rt, layer, kvCache, freqsCis, hiddenState, attnQWithQr, attnKPe, attnQPe)
                            : ForwardAttnMLADecode(rt, layer, kvCache, freqsCis, hiddenState, attnQWithQr, attnKPe, attnQPe));
 
-    XliteOpMatmul(rt, attnOutput, attnOut[layer], hiddenState);
+    XliteOpMatmul(rt, attnOutput, attnOut[layer], hiddenState, _c.weightNZ);
 
     if (_c.defTpSize > 1) {
         XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
@@ -435,14 +435,14 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                             XTensor &freqsCis, XTensor &hiddenState)
 {
     XTensor &qkv = rt.pool->GetTensor({_realM, mhaQKV[layer].shape[0]}, hiddenState.dtype);
-    XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv);
+    XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ);
     XliteOpRopeCache(rt, qkv, kvCache[layer].first, kvCache[layer].second, _position, freqsCis,
                      _slotMapping, _c.nHeads, _c.nKvHeads, _c.headDim, _c.maxM,
                      _c.ropeHeadDim, _c.blockSize, _c.ropeType == XMODEL_ROPE_NEOX);
 
-    XTensor &attn = rt.pool->GetTensor(hiddenState.shape, hiddenState.dtype);
+    XTensor &attn = rt.pool->GetTensor({hiddenState.shape[0], attnOut[layer].shape[1]}, hiddenState.dtype);
     XliteOpAttention(rt, layer, kvCache[layer].first, kvCache[layer].second, qkv, attn);
-    XliteOpMatmul(rt, attn, attnOut[layer], hiddenState);
+    XliteOpMatmul(rt, attn, attnOut[layer], hiddenState, _c.weightNZ);
     if (_c.defTpSize > 1) {
         XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
     }
@@ -470,9 +470,9 @@ void XModel::ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &h
     XTensor &h13 = rt.pool->GetTensor({m, upGate.shape[0]}, hiddenState.dtype);
     XTensor &h2 = rt.pool->GetTensor({m, down.shape[1]}, hiddenState.dtype);
 
-    XliteOpMatmul(rt, hiddenState, upGate, h13);
+    XliteOpMatmul(rt, hiddenState, upGate, h13, _c.weightNZ);
     XliteOpSiluAndMul(rt, h13, h2);
-    XliteOpMatmul(rt, h2, down, hiddenState);
+    XliteOpMatmul(rt, h2, down, hiddenState, _c.weightNZ);
 
     if (withAllReduce && _c.defTpSize > 1) {
         XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
@@ -488,7 +488,7 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
     XTensor &routing = rt.pool->GetTensor({m, _c.nRoutedExperts}, BIT1);
     XTensor &scores = rt.pool->GetTensor({input.shape[0], _c.nRoutedExperts}, moeGate[layer].dtype);
 
-    XliteOpMatmul(rt, input, moeGate[layer], scores);
+    XliteOpMatmul(rt, input, moeGate[layer], scores, _c.weightNZ);
     XliteOpSigmoidTopK(rt, scores, moeGateBias[layer], _gateIndicts, _c.nExpertGroups, _c.nLimitedGroups,
                        _c.nActExperts, _c.routeScale, weights, routing);
 
@@ -607,11 +607,10 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output)
     if (batch < input.shape[0]) {
         XTensor &x = rt.pool->GetTensor({batch, _c.hiddenSize}, input.dtype);
         XliteOpEmbed(rt, _prefillLastIdx, input, 0, _realM, x);
-        XliteOpMatmul(rt, x, head, localOutput);
+        XliteOpMatmul(rt, x, head, localOutput, _c.weightNZ);
         rt.pool->PutTensor(x);
-    } else
-    {
-        XliteOpMatmul(rt, input, head, localOutput);
+    } else {
+        XliteOpMatmul(rt, input, head, localOutput, _c.weightNZ);
     }
 
     if (_c.defTpSize > 1) {

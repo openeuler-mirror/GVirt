@@ -59,6 +59,8 @@ struct XModelConfig {
     uint32_t defDpSize;
     uint32_t moeEpSize;
     uint32_t moeTPSize;
+
+    bool weightNZ = false;
 };
 
 struct XModelAttnMeta {

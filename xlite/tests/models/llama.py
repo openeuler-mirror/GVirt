@@ -16,7 +16,8 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from tests.models.weight_utils import (hf_model_weights_iterator,
                                        convert_pyslice_to_tensor,
-                                       load_tensor_parallel_weights, logger)
+                                       load_tensor_parallel_weights,
+                                       matrix_nd2nz, logger)
 
 
 world_size = 1
@@ -342,6 +343,8 @@ class Llama(nn.Module):
         assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
         assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
 
+        self.xlite_weight_nz = True
+
         q_proj_shard_size = (self.args.dim // world_size)
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
         n_local_kv_heads = max(1, self.args.n_kv_heads // world_size)
@@ -445,6 +448,14 @@ class Llama(nn.Module):
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
             param.copy_(loaded_weight)
 
+        if self.xlite_weight_nz:
+            self.lm_head.weight.copy_(matrix_nd2nz(self.lm_head.weight))
+            for layer in self.layers:
+                layer.self_attn.qkv_proj.weight.copy_(matrix_nd2nz(layer.self_attn.qkv_proj.weight))
+                layer.self_attn.o_proj.weight.copy_(matrix_nd2nz(layer.self_attn.o_proj.weight))
+                layer.mlp.gate_up_proj.weight.copy_(matrix_nd2nz(layer.mlp.gate_up_proj.weight))
+                layer.mlp.down_proj.weight.copy_(matrix_nd2nz(layer.mlp.down_proj.weight))
+
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
             self.xlite_rt = Runtime(local_rank, xlite_memory_mb, rank, world_size)
@@ -482,6 +493,7 @@ class Llama(nn.Module):
         config.max_batch_size = args.max_batch_size
         config.max_m = args.max_m
         config.attn_type = AttnMHA
+        config.weight_nz = self.xlite_weight_nz
 
         self.xlite_model = Model()
         self.xlite_model.embed = self.embed_tokens.weight
