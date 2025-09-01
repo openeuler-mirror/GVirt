@@ -8,6 +8,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  */
 #include "kernel_operator.h"
+#include "kernel_macro.h"
+
 using namespace AscendC;
 
 constexpr int32_t BUFFER_NUM = 3;                                     // tensor num for each queue
@@ -53,15 +55,29 @@ private:
     {
         uint32_t row = yGm.GetValue(index);
         if ((row >= embEndIdx) || (row < embStartIdx)) {
-            DataCopy(zGm[index * embDim], xLocalZero, embDim);
+            if (((embDim * sizeof(T)) & (BLOCK_SIZE - 1)) == 0) {
+                DataCopy<T>(zGm[index * embDim], xLocalZero, embDim);
+            } else {
+                DataCopyParams copyParams;
+                copyParams.blockLen = embDim * sizeof(T);
+                copyParams.blockCount = 1;
+                DataCopyPad(zGm[index * embDim], xLocalZero, copyParams);
+            }
             queBind.EnQue(xLocalZero);
             xLocalZero = queBind.DeQue<T>();
         } else {
             LocalTensor<T> xLocal = queBind.AllocTensor<T>();
-            DataCopy(xLocal, xGm[(row - embStartIdx) * embDim], embDim);
+            DataCopy(xLocal, xGm[(row - embStartIdx) * embDim], ROUND_UP(embDim * sizeof(T), BLOCK_SIZE) / sizeof(T));
             queBind.EnQue(xLocal);
             xLocal = queBind.DeQue<T>();
-            DataCopy(zGm[index * embDim], xLocal, embDim);
+            if (((embDim * sizeof(T)) & (BLOCK_SIZE - 1)) == 0) {
+                DataCopy<T>(zGm[index * embDim], xLocal, embDim);
+            } else {
+                DataCopyParams copyParams;
+                copyParams.blockLen = embDim * sizeof(T);
+                copyParams.blockCount = 1;
+                DataCopyPad(zGm[index * embDim], xLocal, copyParams);
+            }
             queBind.FreeTensor(xLocal);
         }
     }

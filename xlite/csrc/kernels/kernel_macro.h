@@ -14,4 +14,6 @@
 #define ROUND_UP(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
 #define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
 
+#define BLOCK_SIZE 32
+
 #endif

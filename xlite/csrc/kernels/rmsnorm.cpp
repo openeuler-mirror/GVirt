@@ -2,6 +2,7 @@
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include "kernel_operator.h"
+#include "kernel_macro.h"
 
 using namespace AscendC;
 
@@ -80,7 +81,7 @@ public:
     __aicore__ inline void Process()
     {
         LocalTensor<T> weightLocal = weight_buf.Get<T>();
-        DataCopy(weightLocal, weightGm, rmsnormHiddenSize);
+        DataCopy(weightLocal, weightGm, ROUND_UP(rmsnormHiddenSize * sizeof(T), BLOCK_SIZE) / sizeof(T));
         PipeBarrier<PIPE_ALL>();
         // Cast weight: f16/bf16 -> f32
         LocalTensor<float> weightFp32Local = weight_fp32_buf.Get<float>();
@@ -98,7 +99,7 @@ private:
     __aicore__ inline void CopyIn(uint32_t loop)
     {
         LocalTensor<T> xLocal = queIn.AllocTensor<T>();
-        DataCopy(xLocal, inoutGm[loop * rmsnormHiddenSize], rmsnormHiddenSize);
+        DataCopy(xLocal, inoutGm[loop * rmsnormHiddenSize], ROUND_UP(rmsnormHiddenSize * sizeof(T), BLOCK_SIZE) / sizeof(T));
         queIn.EnQue(xLocal);
     }
 
@@ -141,7 +142,16 @@ private:
     __aicore__ inline void CopyOut(uint32_t loop)
     {
         LocalTensor<T> yLocal = queOut.DeQue<T>();
-        DataCopy<T>(outGm[loop * rmsnormHiddenSize], yLocal, rmsnormHiddenSize);
+
+        if (((rmsnormHiddenSize * sizeof(T)) & (BLOCK_SIZE - 1)) == 0) {
+            DataCopy<T>(outGm[loop * rmsnormHiddenSize], yLocal, rmsnormHiddenSize);
+        } else {
+            DataCopyParams copyParams;
+            copyParams.blockLen = rmsnormHiddenSize * sizeof(T);
+            copyParams.blockCount = 1;
+            DataCopyPad(outGm[loop * rmsnormHiddenSize], yLocal, copyParams);
+        }
+
         queOut.FreeTensor(yLocal);
     }
 

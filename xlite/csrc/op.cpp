@@ -13,6 +13,9 @@
 #include "aclrtlaunch_matmul_float16_t.h"
 #include "aclrtlaunch_matmul_bfloat16_t.h"
 #include "aclrtlaunch_matmul_float.h"
+#include "aclrtlaunch_add_bias_float.h"
+#include "aclrtlaunch_add_bias_float16_t.h"
+#include "aclrtlaunch_add_bias_bfloat16_t.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -272,4 +275,17 @@ void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &q
                             uint32_t nKvHeads, uint32_t maxM)
 {
     std::cout << __func__ << ": TODO" << std::endl;
+}
+
+void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)
+{
+    if (input.dtype == FP32 && weight.dtype == FP32 && output.dtype == FP32) {
+        aclrtlaunch_add_bias_float(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr, output.shape[0] * output.shape[1], output.shape[1]);
+    } else if (input.dtype == FP16 && weight.dtype == FP16 && output.dtype == FP16) {
+        aclrtlaunch_add_bias_float16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr, output.shape[0] * output.shape[1], output.shape[1]);
+    } else if (input.dtype == BF16 && weight.dtype == BF16 && output.dtype == BF16) {
+        aclrtlaunch_add_bias_bfloat16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr, output.shape[0] * output.shape[1], output.shape[1]);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
 }

@@ -27,6 +27,7 @@ struct XModelConfig {
     // attention config
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
     enum XModelRopeType ropeType = XMODEL_ROPE_NEOX;
+    bool addBias = false;
     uint32_t nHeads;
     uint32_t nKvHeads;
     uint32_t headDim;
@@ -88,6 +89,7 @@ public:
     std::vector<XTensor> attnNorm;
     std::vector<XTensor> attnOut;
     std::vector<XTensor> mhaQKV;
+    std::vector<XTensor> mhaQKVBias;
     std::vector<XTensor> mlaQA;
     std::vector<XTensor> mlaQB;
     std::vector<XTensor> mlaQNorm;
