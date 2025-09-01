@@ -270,6 +270,17 @@ void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, fl
     rt.Synchronize();
 }
 
+void AddBias(XRuntime &rt, at::Tensor &in, at::Tensor &weight, at::Tensor &out)
+{
+    XTensor _in, _out, _weight;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    InitXTensor(_weight, weight);
+    XliteOpAddBias(rt, _in, _weight, _out);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
@@ -361,6 +372,7 @@ PYBIND11_MODULE(_C, m) {
           py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"), py::arg("weight_nz") = false);
     m.def("embed", &Embed);
     m.def("rmsnorm", &RMSNorm);
+    m.def("add_bias", &AddBias);
 
     // funcs
     m.def("print", &Print);

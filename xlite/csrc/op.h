@@ -82,4 +82,5 @@ void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &q
                             XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
                             uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
                             uint32_t nKvHeads, uint32_t maxM);
+void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 #endif
