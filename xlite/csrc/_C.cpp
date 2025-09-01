@@ -30,6 +30,7 @@ public:
     std::vector<at::Tensor> attnNorm;
     std::vector<at::Tensor> attnOut;
     std::vector<at::Tensor> mhaQKV;
+    std::vector<at::Tensor> mhaQKVBias;
     std::vector<at::Tensor> mlaQA;
     std::vector<at::Tensor> mlaQB;
     std::vector<at::Tensor> mlaQNorm;
@@ -121,6 +122,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
         } else if (c.attnType == XMODEL_ATTN_MHA) {
             InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
+            if (c.addBias) {
+                InitXTensor(_model->mhaQKVBias[i], mhaQKVBias[i]);
+            }
         }
     }
 
@@ -320,7 +324,8 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("max_batch_size", &XModelConfig::maxBatch)
         .def_readwrite("max_m", &XModelConfig::maxM)
         .def_readwrite("block_size", &XModelConfig::blockSize)
-        .def_readwrite("weight_nz", &XModelConfig::weightNZ);
+        .def_readwrite("weight_nz", &XModelConfig::weightNZ)
+        .def_readwrite("qkv_bias", &XModelConfig::addBias);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
         .def(py::init<>())
@@ -342,6 +347,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("attn_norm", &_CModel::attnNorm)
         .def_readwrite("attn_out", &_CModel::attnOut)
         .def_readwrite("mha_qkv", &_CModel::mhaQKV)
+        .def_readwrite("mha_qkv_bias", &_CModel::mhaQKVBias)
         .def_readwrite("mla_q_a", &_CModel::mlaQA)
         .def_readwrite("mla_q_b", &_CModel::mlaQB)
         .def_readwrite("mla_q_norm", &_CModel::mlaQNorm)

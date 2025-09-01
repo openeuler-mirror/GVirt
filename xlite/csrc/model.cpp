@@ -16,6 +16,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     attnNorm.resize(c.nLayers);
     attnOut.resize(c.nLayers);
     mhaQKV.resize(c.nLayers);
+    mhaQKVBias.resize(c.nLayers);
     mlaQA.resize(c.nLayers);
     mlaQB.resize(c.nLayers);
     mlaQNorm.resize(c.nLayers);
@@ -436,6 +437,9 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 {
     XTensor &qkv = rt.pool->GetTensor({_realM, mhaQKV[layer].shape[0]}, hiddenState.dtype);
     XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ);
+    if (_c.addBias) {
+        XliteOpAddBias(rt, qkv, mhaQKVBias[layer], qkv);
+    }
     XliteOpRopeCache(rt, qkv, kvCache[layer].first, kvCache[layer].second, _position, freqsCis,
                      _slotMapping, _c.nHeads, _c.nKvHeads, _c.headDim, _c.maxM,
                      _c.ropeHeadDim, _c.blockSize, _c.ropeType == XMODEL_ROPE_NEOX);

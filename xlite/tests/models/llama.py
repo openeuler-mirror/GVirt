@@ -494,6 +494,7 @@ class Llama(nn.Module):
         config.max_m = args.max_m
         config.attn_type = AttnMHA
         config.weight_nz = self.xlite_weight_nz
+        config.qkv_bias = args.qkv_bias
 
         self.xlite_model = Model()
         self.xlite_model.embed = self.embed_tokens.weight
@@ -505,6 +506,8 @@ class Llama(nn.Module):
         self.xlite_model.mlp_norm = [layer.post_attention_layernorm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [self.layers[i].mlp.gate_up_proj.weight for i in range(args.n_layers)]
         self.xlite_model.mlp_down = [self.layers[i].mlp.down_proj.weight for i in range(args.n_layers)]
+        if args.qkv_bias:
+            self.xlite_model.mha_qkv_bias = [layer.self_attn.qkv_proj.bias for layer in self.layers]
         self.xlite_model.init(config, rank)
 
     def init_xlite_kvcache(self, args: ModelArgs):
