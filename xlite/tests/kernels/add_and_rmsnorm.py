@@ -10,11 +10,9 @@
 from __future__ import absolute_import
 import logging
 import os
-import random
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
-from xlite._C import Runtime, embed, all_reduce
+from xlite._C import Runtime, add_and_rmsnorm
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -27,40 +25,42 @@ rt = Runtime(local_rank, 500, rank, world_size)
 torch.npu.set_device(local_rank)
 
 BATCH_SIZE = 64
-VOCAB_SIZE = 32000
 DIM = 4096
-rank_id = local_rank % world_size
-emb_start_idx = VOCAB_SIZE // world_size * rank_id
-emb_end_idx = emb_start_idx + VOCAB_SIZE // world_size
-x_base = [random.randint(0, VOCAB_SIZE - 1) for _ in range(BATCH_SIZE)]
+NORMEPS = 1e-6
 dtype_list = [torch.float16, torch.bfloat16]
 
 for test_dtype in dtype_list:
     with torch.device("npu"):
-        x = torch.tensor(x_base, dtype=torch.int32)
+        x = torch.randn(BATCH_SIZE, DIM, dtype=test_dtype) / 10
         x_standard = x.clone()
-        weight = torch.randn(VOCAB_SIZE, DIM, dtype=test_dtype)
-        y = torch.empty(BATCH_SIZE, DIM, dtype=test_dtype)
+        weight = torch.randn(DIM, dtype=test_dtype) / 10
+        y = torch.randn(BATCH_SIZE, DIM, dtype=test_dtype) / 10
+        y_standard = y.clone()
 
     # standard
-    if world_size > 1:
-        mask = (x_standard < emb_start_idx) | (x_standard >= emb_end_idx)
-        x_standard = x_standard - emb_start_idx
-        x_standard[mask] = 0
-    standard = F.embedding(x_standard, weight)
-    if world_size > 1:
-        standard[mask] = 0
-        dist.all_reduce(standard)
+    x_standard = x_standard.to(torch.float32)
+    y_standard = y_standard.to(torch.float32)
+    x_standard = x_standard + y_standard
+    x_add_standard = x_standard
+    variance = x_standard.pow(2).mean(-1, keepdim=True)
+    x_standard = x_standard * torch.rsqrt(variance + NORMEPS)
+    standard = (weight.float() * x_standard).to(test_dtype)
+    x_add_standard = x_add_standard.to(test_dtype)
 
     # xlite
     torch.npu.synchronize()
-    embed(rt, weight, x, y, emb_start_idx, emb_end_idx)
-    if world_size > 1:
-        all_reduce(rt, y, y)
+    add_and_rmsnorm(rt, x, y, weight, y, NORMEPS)
     torch.npu.synchronize()
 
     if rank == 0:
-        logging.info(f'embed({test_dtype}) executed!')
+        logging.info(f'rmsnorm({test_dtype}) executed!')
+
+    try:
+        torch.testing.assert_close(x_add_standard, x, atol=1e-5, rtol=1e-3)
+    except AssertionError as e:
+        logging.error(f'{e}')
+        logging.error(f'torch_npu: {x_add_standard}')
+        logging.error(f'xlite: {x}')
 
     try:
         torch.testing.assert_close(standard, y, atol=1e-5, rtol=1e-3)

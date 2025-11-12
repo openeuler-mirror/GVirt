@@ -28,6 +28,7 @@ struct XModelConfig {
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
     enum XModelRopeType ropeType = XMODEL_ROPE_NEOX;
     bool addBias = false;
+    bool qkNorm = false;
     uint32_t nHeads;
     uint32_t nKvHeads;
     uint32_t headDim;
@@ -71,6 +72,8 @@ struct XModelAttnMeta {
     std::vector<std::vector<uint32_t>> blockTables;
 };
 
+#define TILESIZE_OF_QUERY 128 // the tile size of query
+
 class XModel {
 public:
     XModel(struct XModelConfig &c, uint32_t rankId);
@@ -80,6 +83,12 @@ public:
                  XModelAttnMeta& attnMeta,
                  std::vector<std::pair<XTensor, XTensor>>& kvCache,
                  XTensor &freqsCis, XTensor &output);
+    void ComputeLogits(XRuntime &rt, XTensor &input,
+                       XTensor &output);
+    void ForwardAndGetLogits(XRuntime &rt, XTensor &input,
+                             XModelAttnMeta& attnMeta,
+                             std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                             XTensor &freqsCis, XTensor &output);
 
     // weights
     XTensor embed;
@@ -90,6 +99,8 @@ public:
     std::vector<XTensor> attnOut;
     std::vector<XTensor> mhaQKV;
     std::vector<XTensor> mhaQKVBias;
+    std::vector<XTensor> mhaQNorm;
+    std::vector<XTensor> mhaKNorm;
     std::vector<XTensor> mlaQA;
     std::vector<XTensor> mlaQB;
     std::vector<XTensor> mlaQNorm;
@@ -127,6 +138,7 @@ private:
     void ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
+    void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);
     void XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTensor &vCache,
                           XTensor &input, XTensor &output);
     void ForwardAttnMHA(XRuntime &rt, uint32_t layer,
@@ -147,6 +159,10 @@ private:
     void ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
+    void ForwardLayers(XRuntime &rt, XTensor &input,
+                       XModelAttnMeta& attnMeta,
+                       std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                       XTensor &freqsCis, XTensor &output);
     struct XModelConfig _c;
     uint32_t _rankId;
 
@@ -166,9 +182,7 @@ private:
     int _prefillLenPad;
     XTensor _position;
     XTensor _slotMapping;
-    XTensor _prefillIdx;
     XTensor _prefillLastIdx;
-    XTensor _decodeIdx;
     XTensor _cachedLens;
     XTensor _lens;
     XTensor _padding;

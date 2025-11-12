@@ -47,6 +47,7 @@ class ModelArgs:
     rope_theta: float = 10000.0
     dtype: Literal["bfloat16", "float16"] = "float16"
     qkv_bias: bool = False
+    qk_norm: bool = False
     model_type: str = "llama"
 
     def __post_init__(self):
@@ -160,13 +161,13 @@ class RowParallelLinear(Linear):
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32)[: (dim // 2)] / dim))
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu")[: (dim // 2)] / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
     cos_cache = freqs.cos().to(torch.get_default_dtype())
     sin_cache = freqs.sin().to(torch.get_default_dtype())
     freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
-    return freq_cis
+    return freq_cis.to("npu")
 
 
 def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor) -> torch.Tensor:
@@ -187,10 +188,14 @@ class MHA(nn.Module):
         self.n_kv_heads = args.n_kv_heads
         self.dim = args.dim
         self.head_dim = args.head_dim
+        self.qk_norm = args.qk_norm
         self.n_local_heads = args.n_heads // world_size
         self.n_local_kv_heads = max(1, args.n_kv_heads // world_size)
         self.qkv_proj = ColumnParallelLinear(args.dim, (self.n_heads + 2 * self.n_local_kv_heads * world_size) * self.head_dim, bias=args.qkv_bias)
         self.o_proj = RowParallelLinear(self.n_heads * self.head_dim, args.dim, bias=False)
+        if args.qk_norm:
+            self.q_norm = RMSNorm(args.head_dim, args.norm_eps)
+            self.k_norm = RMSNorm(args.head_dim, args.norm_eps)
         self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
         self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
 
@@ -207,6 +212,10 @@ class MHA(nn.Module):
         q = q.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         k = k.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         v = v.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
@@ -304,7 +313,7 @@ class Llama(nn.Module):
 
         for layer in self.layers:
             h = layer(h, start_pos, self.freqs_cis, mask)
-        h = self.norm(h)[:, -1]
+        h = self.norm(h)[:, 0]
         logits = self.lm_head(h)
         if world_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(world_size)]
@@ -319,7 +328,7 @@ class Llama(nn.Module):
         tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
         attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
         torch.npu.synchronize()
-        self.xlite_model.forward(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, self.freqs_cis, logits)
+        self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, self.freqs_cis, logits)
         torch.npu.synchronize()
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
@@ -343,12 +352,12 @@ class Llama(nn.Module):
         assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
         assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
 
-        self.xlite_weight_nz = True
+        self.xlite_weight_nz = forward_backend == "xlite"
 
-        q_proj_shard_size = (self.args.dim // world_size)
+        q_proj_shard_size = (self.args.head_dim * self.args.n_heads // world_size)
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
         n_local_kv_heads = max(1, self.args.n_kv_heads // world_size)
-        kv_proj_shard_size = (self.args.dim // self.args.n_heads * n_local_kv_heads)
+        kv_proj_shard_size = (self.args.head_dim * n_local_kv_heads)
         attention_weight_specs = [
             ("q_proj", q_proj_shard_size, 0),
             ("k_proj", kv_proj_shard_size, q_proj_shard_size),
@@ -495,6 +504,7 @@ class Llama(nn.Module):
         config.attn_type = AttnMHA
         config.weight_nz = self.xlite_weight_nz
         config.qkv_bias = args.qkv_bias
+        config.qk_norm = args.qk_norm
 
         self.xlite_model = Model()
         self.xlite_model.embed = self.embed_tokens.weight
@@ -506,6 +516,9 @@ class Llama(nn.Module):
         self.xlite_model.mlp_norm = [layer.post_attention_layernorm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [self.layers[i].mlp.gate_up_proj.weight for i in range(args.n_layers)]
         self.xlite_model.mlp_down = [self.layers[i].mlp.down_proj.weight for i in range(args.n_layers)]
+        if args.qk_norm:
+            self.xlite_model.mha_q_norm = [self.layers[i].self_attn.q_norm.weight for i in range(args.n_layers)]
+            self.xlite_model.mha_k_norm = [self.layers[i].self_attn.k_norm.weight for i in range(args.n_layers)]
         if args.qkv_bias:
             self.xlite_model.mha_qkv_bias = [layer.self_attn.qkv_proj.bias for layer in self.layers]
         self.xlite_model.init(config, rank)

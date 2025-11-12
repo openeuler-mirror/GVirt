@@ -38,6 +38,9 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     aicNum = (uint32_t)val;
     CHECK_ACL(aclGetDeviceCapability(devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
     aivNum = (uint32_t)val;
+    originAicNum = aicNum;
+    originAivNum = aivNum;
+
 }
 
 XRuntime::~XRuntime(void)
@@ -138,4 +141,15 @@ int XRuntime::InitComm(void)
 void XRuntime::Synchronize(void)
 {
     CHECK_ACL(aclrtSynchronizeStream(stream));
+}
+
+void XRuntime::MemcpyH2D(void *dst, void *src, size_t size)
+{
+    CHECK_ACL(aclrtMemcpy(dst, size, src, size, ACL_MEMCPY_HOST_TO_DEVICE));
+}
+
+void XRuntime::UpdateCoreNum(float blockDimUtilization)
+{
+    aicNum = static_cast<uint32_t>(std::round(static_cast<float>(originAicNum) * blockDimUtilization));
+    aivNum = static_cast<uint32_t>(std::round(static_cast<float>(originAivNum) * blockDimUtilization));
 }

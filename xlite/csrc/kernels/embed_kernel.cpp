@@ -56,7 +56,7 @@ private:
         uint32_t row = yGm.GetValue(index);
         if ((row >= embEndIdx) || (row < embStartIdx)) {
             if (((embDim * sizeof(T)) & (BLOCK_SIZE - 1)) == 0) {
-                DataCopy<T>(zGm[index * embDim], xLocalZero, embDim);
+                DataCopy(zGm[index * embDim], xLocalZero, embDim);
             } else {
                 DataCopyParams copyParams;
                 copyParams.blockLen = embDim * sizeof(T);
@@ -71,7 +71,7 @@ private:
             queBind.EnQue(xLocal);
             xLocal = queBind.DeQue<T>();
             if (((embDim * sizeof(T)) & (BLOCK_SIZE - 1)) == 0) {
-                DataCopy<T>(zGm[index * embDim], xLocal, embDim);
+                DataCopy(zGm[index * embDim], xLocal, embDim);
             } else {
                 DataCopyParams copyParams;
                 copyParams.blockLen = embDim * sizeof(T);

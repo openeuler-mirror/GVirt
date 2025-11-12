@@ -1,0 +1,109 @@
+#!/usr/bin/python3
+# coding=utf-8
+#
+# Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# ===============================================================================
+from __future__ import absolute_import
+import logging
+import torch
+from xlite._C import Runtime, rope_and_cache
+
+logging.getLogger().setLevel(logging.INFO)
+
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu")[: (dim // 2)] / dim))
+    t = torch.arange(end, device=freqs.device)  # type: ignore
+    freqs = torch.outer(t, freqs).float()  # type: ignore
+    cos_cache = freqs.cos().to(torch.get_default_dtype())
+    sin_cache = freqs.sin().to(torch.get_default_dtype())
+    freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
+    return freq_cis.to("npu")
+
+
+def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor) -> torch.Tensor:
+    seqlen = x.size(2) # [bsz, n_local_heads, seqlen, head_dim]
+    cos, sin = freqs_cis[start_pos:start_pos + seqlen, :].chunk(2, dim=-1)
+    cos = cos.repeat(1, 2) # [seqlen, head_dim]
+    sin = sin.repeat(1, 2)
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    x_rot = torch.cat((-x2, x1), dim=-1)
+    return (x * cos) + (x_rot * sin)
+
+rt = Runtime(0, 500)
+torch.npu.set_device(0)
+
+ROPE_THETA = 10000.0
+HEAD_DIM = 128
+N_HEADS = 32
+N_KV_HEADS = 32
+
+MAX_SEQ_LEN = 1024
+MAX_BATCH_SIZE = 8
+BATCH_SIZE = 8
+SEQ_LEN = 10
+
+START_POS = 0
+BLOCK_SIZE = 128
+BLOCK_NUM = 1
+out_features = (N_HEADS + 2 * N_KV_HEADS) * HEAD_DIM
+dtype_list = [torch.float16, torch.bfloat16]
+
+for test_dtype in dtype_list:
+    torch.set_default_dtype(test_dtype)
+    with torch.device("npu"):
+        qkv_standard = torch.randn(BATCH_SIZE, SEQ_LEN, out_features)
+        freqs_cis_standard = precompute_freqs_cis(HEAD_DIM, MAX_SEQ_LEN, ROPE_THETA)
+
+        k_cache = torch.zeros(MAX_BATCH_SIZE, MAX_SEQ_LEN, N_KV_HEADS, HEAD_DIM)
+        v_cache = torch.zeros(MAX_BATCH_SIZE, MAX_SEQ_LEN, N_KV_HEADS, HEAD_DIM)
+
+        qkv_xlite = qkv_standard.clone().view(BATCH_SIZE * SEQ_LEN, out_features)
+        freqs_cis_xlite = freqs_cis_standard.clone()
+
+        k_cache_xlite = torch.zeros(BLOCK_NUM, N_KV_HEADS, BLOCK_SIZE, HEAD_DIM)
+        v_cache_xlite = torch.zeros(BLOCK_NUM, N_KV_HEADS, BLOCK_SIZE, HEAD_DIM)
+
+        len = torch.arange(SEQ_LEN, dtype=torch.int32)
+        position = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
+        slot_mapping = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
+
+    # standard
+    q, k, v = qkv_standard.split([N_HEADS * HEAD_DIM, N_KV_HEADS * HEAD_DIM, N_KV_HEADS * HEAD_DIM], dim=2)
+
+    q = q.view(BATCH_SIZE, SEQ_LEN, N_HEADS, HEAD_DIM)
+    k = k.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, HEAD_DIM)
+    v = v.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, HEAD_DIM)
+
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    q = apply_rotary_emb(q, START_POS, freqs_cis=freqs_cis_standard)
+    k = apply_rotary_emb(k, START_POS, freqs_cis=freqs_cis_standard)
+    q = q.transpose(1, 2).contiguous()
+    k = k.transpose(1, 2).contiguous()
+
+    q = q * HEAD_DIM ** -0.5
+
+    q = q.view(BATCH_SIZE * SEQ_LEN, N_HEADS * HEAD_DIM)
+    k = k.view(BATCH_SIZE * SEQ_LEN, N_KV_HEADS * HEAD_DIM)
+    v = v.view(BATCH_SIZE * SEQ_LEN, N_KV_HEADS * HEAD_DIM)
+    qkv_standard_out = torch.cat([q, k, v], dim=1)
+
+    # xlite
+    torch.npu.synchronize()
+    rope_and_cache(rt, qkv_xlite, k_cache_xlite, v_cache_xlite, position, freqs_cis_xlite, slot_mapping,
+                   N_HEADS, N_KV_HEADS, HEAD_DIM, BLOCK_SIZE, True)
+    torch.npu.synchronize()
+
+    logging.info(f'rope and cache ({test_dtype}) executed!')
+
+    try:
+        torch.testing.assert_close(qkv_standard_out, qkv_xlite, atol=1e-5, rtol=1e-3)
+    except AssertionError as e:
+        logging.error(f'{e}')
+        logging.error(f'torch_npu: {qkv_standard_out}')
+        logging.error(f'xlite: {qkv_xlite}')

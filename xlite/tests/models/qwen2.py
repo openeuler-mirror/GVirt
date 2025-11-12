@@ -12,7 +12,7 @@ from typing import Literal
 
 
 @dataclass
-class ModelArgs:
+class Qwen2ModelArgs:
     max_batch_size: int = 8
     max_seq_len: int = 4096
     max_m: int = 4096
@@ -27,7 +27,8 @@ class ModelArgs:
     rope_theta: float = 1000000.0
     dtype: Literal["bfloat16", "float16"] = "bfloat16"
     qkv_bias: bool = True
-    model_type: str = "qwen"
+    qk_norm: bool = False
+    model_type: str = "qwen2"
 
     def __post_init__(self):
         self.max_m = self.max_seq_len if self.max_seq_len > self.max_batch_size else self.max_batch_size

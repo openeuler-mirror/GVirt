@@ -6,6 +6,7 @@
 #include <torch/torch.h>
 #include <torch/extension.h>
 #include "base.h"
+#include "core_assigner.h"
 #include "op.h"
 #include "runtime.h"
 #include "model.h"
@@ -21,6 +22,11 @@ public:
                  XModelAttnMeta& attnMeta,
                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
                  at::Tensor &freqsCis, at::Tensor &output);
+    void ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output);
+    void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
+                             XModelAttnMeta& attnMeta,
+                             std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                             at::Tensor &freqsCis, at::Tensor &output);
 
     // weights
     at::Tensor embed;
@@ -31,6 +37,8 @@ public:
     std::vector<at::Tensor> attnOut;
     std::vector<at::Tensor> mhaQKV;
     std::vector<at::Tensor> mhaQKVBias;
+    std::vector<at::Tensor> mhaQNorm;
+    std::vector<at::Tensor> mhaKNorm;
     std::vector<at::Tensor> mlaQA;
     std::vector<at::Tensor> mlaQB;
     std::vector<at::Tensor> mlaQNorm;
@@ -125,6 +133,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             if (c.addBias) {
                 InitXTensor(_model->mhaQKVBias[i], mhaQKVBias[i]);
             }
+            if (c.qkNorm) {
+                InitXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
+                InitXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
+            }
         }
     }
 
@@ -183,7 +195,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input,
         return;
     }
 
-    for (int i = 0; i < _kv.size(); i++) {
+    for (uint64_t i = 0; i < _kv.size(); i++) {
         _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first), TensorPtr(kvCache[i].first));
         _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
     }
@@ -191,6 +203,42 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input,
     _model->Forward(rt, _input, attnMeta, _kv, _freqsCis, _output);
     rt.Synchronize();
 }
+
+void _CModel::ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output)
+{
+    XTensor _input, _output;
+
+    InitXTensor(_input, input);
+    InitXTensor(_output, output);
+
+    _model->ComputeLogits(rt, _input, _output);
+    rt.Synchronize();
+}
+
+void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
+                                  XModelAttnMeta& attnMeta,
+                                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                                  at::Tensor &freqsCis, at::Tensor &output)
+{
+    XTensor _input, _output, _freqsCis;
+
+    InitXTensor(_input, input);
+    InitXTensor(_output, output);
+    InitXTensor(_freqsCis, freqsCis);
+
+    if (kvCache.size() != _kv.size()) {
+        std::cerr << __func__ << ": check kv cache failed!" << std::endl;
+        return;
+    }
+
+    for (uint64_t i = 0; i < _kv.size(); i++) {
+        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first), TensorPtr(kvCache[i].first));
+        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
+    }
+
+    _model->ForwardAndGetLogits(rt, _input, attnMeta, _kv, _freqsCis, _output);
+    rt.Synchronize();
+} 
 
 void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
 {
@@ -270,7 +318,7 @@ void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, fl
     InitXTensor(_in, in);
     InitXTensor(_out, out);
     InitXTensor(_norm, norm);
-    XliteOpRmsNorm(rt, _in, _norm, normEps, _out);
+    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, _in.shape[0], _in.shape[1]);
     rt.Synchronize();
 }
 
@@ -285,10 +333,102 @@ void AddBias(XRuntime &rt, at::Tensor &in, at::Tensor &weight, at::Tensor &out)
     rt.Synchronize();
 }
 
+void SiluAndMul(XRuntime &rt, at::Tensor &in, at::Tensor &out)
+{
+    XTensor _in, _out;
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+
+    XliteOpSiluAndMul(rt, _in, _out);
+    rt.Synchronize();
+}
+
+void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tensor &vCache,
+                  at::Tensor &position, at::Tensor &cossin, at::Tensor &slotMapping,
+                  uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
+                  uint32_t rotDim, uint32_t blockSize, bool isNeox)
+{
+    XTensor _inout, _kCache, _vCache, _position, _cossin, _slotMapping;
+
+    InitXTensor(_inout, inout);
+    InitXTensor(_kCache, kCache);
+    InitXTensor(_vCache, vCache);
+    InitXTensor(_position, position);
+    InitXTensor(_cossin, cossin);
+    InitXTensor(_slotMapping, slotMapping);
+    XliteOpRopeCache(rt, _inout, _kCache, _vCache, _position, _cossin, _slotMapping,
+                     nHeads, nKvHeads, headDim, rotDim, blockSize, isNeox);
+    rt.Synchronize();
+}
+
+void AttentionPrefill(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &qk, at::Tensor &blockTables,
+                      at::Tensor &paddingN, at::Tensor &cachedLens, at::Tensor &vCache, at::Tensor &output,
+                      at::Tensor &lens, at::Tensor &cumPromptLens, uint32_t headDim,
+                      uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
+{
+    XTensor _qkv, _kCache, _qk, _blockTables, _paddingN, _cachedLens, _vCache, _output, _lens, _cumPromptLens;
+
+    InitXTensor(_qkv, qkv);
+    InitXTensor(_kCache, kCache);
+    InitXTensor(_qk, qk);
+    InitXTensor(_blockTables, blockTables);
+    InitXTensor(_paddingN, paddingN);
+    InitXTensor(_cachedLens, cachedLens);
+    InitXTensor(_vCache, vCache);
+    InitXTensor(_output, output);
+    InitXTensor(_lens, lens);
+    InitXTensor(_cumPromptLens, cumPromptLens);
+    XliteOpPrefillAttention(rt, _qkv, _kCache, _qk, _blockTables, _paddingN, _cachedLens,
+                            _vCache, _output, _lens, _cumPromptLens,
+                            headDim, nHeads, nKvHeads, blockSize, batch, maxNumBlock);
+    rt.Synchronize();
+}
+
+void DecodeAttentionMix(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tensor &qkv,
+                        at::Tensor &kCache, at::Tensor &vCache, at::Tensor &cachedLens,
+                        at::Tensor &blockTables, at::Tensor &output,
+                        at::Tensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
+                        uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
+                        uint32_t nKvHeads, uint32_t maxM)
+{
+    XTensor _a2v, _v2a, _qkv, _kCache, _vCache, _cachedLens,
+            _blockTables, _output, _decodeIdx, _cumPromptLens;
+    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2 * maxM}, XDtype(qkv));
+
+    InitXTensor(_a2v, a2v);
+    InitXTensor(_v2a, v2a);
+    InitXTensor(_qkv, qkv);
+    InitXTensor(_kCache, kCache);
+    InitXTensor(_vCache, vCache);
+    InitXTensor(_cachedLens, cachedLens);
+    InitXTensor(_blockTables, blockTables);
+    InitXTensor(_output, output);
+    InitXTensor(_cumPromptLens, cumPromptLens);
+
+    XliteOpDecodeAttention(rt, _a2v, _v2a, _qkv, _kCache, _vCache, _cachedLens,
+                           _blockTables, qk, _output, _cumPromptLens, batch, nHeads,
+                           headDim, blockSize, maxNumBlock, nKvHeads, maxM);
+    rt.Synchronize();
+}
+
+void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &norm, at::Tensor &out, float normEps)
+{
+    XTensor _in1, _in2, _out, _norm;
+
+    InitXTensor(_in1, in1);
+    InitXTensor(_in2, in2);
+    InitXTensor(_out, out);
+    InitXTensor(_norm, norm);
+    XliteOpAddAndRmsNorm(rt, _in1, _in2, _norm, normEps, _out);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
-            py::arg("devid"), py::arg("size"), py::arg("rank") = 0, py::arg("tp_size") = 1, py::arg("dp_size") = 1);
+            py::arg("devid"), py::arg("size"), py::arg("rank") = 0,
+            py::arg("tp_size") = 1, py::arg("dp_size") = 1)
+        .def("update_core_num", &XRuntime::UpdateCoreNum);
 
     py::class_<XModelConfig>(m, "ModelConfig")
         .def(py::init<>())
@@ -325,7 +465,8 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("max_m", &XModelConfig::maxM)
         .def_readwrite("block_size", &XModelConfig::blockSize)
         .def_readwrite("weight_nz", &XModelConfig::weightNZ)
-        .def_readwrite("qkv_bias", &XModelConfig::addBias);
+        .def_readwrite("qkv_bias", &XModelConfig::addBias)
+        .def_readwrite("qk_norm", &XModelConfig::qkNorm);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
         .def(py::init<>())
@@ -348,6 +489,8 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("attn_out", &_CModel::attnOut)
         .def_readwrite("mha_qkv", &_CModel::mhaQKV)
         .def_readwrite("mha_qkv_bias", &_CModel::mhaQKVBias)
+        .def_readwrite("mha_q_norm", &_CModel::mhaQNorm)
+        .def_readwrite("mha_k_norm", &_CModel::mhaKNorm)
         .def_readwrite("mla_q_a", &_CModel::mlaQA)
         .def_readwrite("mla_q_b", &_CModel::mlaQB)
         .def_readwrite("mla_q_norm", &_CModel::mlaQNorm)
@@ -367,7 +510,14 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("re_down_scale", &_CModel::moeREDownScale)
         .def("init", &_CModel::Init, "model init",
             py::arg("config"), py::arg("rank") = 0)
-        .def("forward", &_CModel::Forward);
+        .def("forward", &_CModel::Forward, py::call_guard<py::gil_scoped_release>())
+        .def("compute_logits", &_CModel::ComputeLogits, py::call_guard<py::gil_scoped_release>())
+        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogits, py::call_guard<py::gil_scoped_release>());
+
+    py::class_<XCoreAssigner>(m, "CoreAssigner")
+        .def(py::init<float>(), py::arg("prefillRatio"))
+        .def("assign_core", &XCoreAssigner::AssignCore, py::call_guard<py::gil_scoped_release>())
+        .def("release_core", &XCoreAssigner::ReleaseCore, py::call_guard<py::gil_scoped_release>());
 
     // kernels
     m.def("all_gather", &AllGather);
@@ -379,6 +529,11 @@ PYBIND11_MODULE(_C, m) {
     m.def("embed", &Embed);
     m.def("rmsnorm", &RMSNorm);
     m.def("add_bias", &AddBias);
+    m.def("silu_and_mul", &SiluAndMul);
+    m.def("rope_and_cache", &RopeAndCache);
+    m.def("attention_prefill", &AttentionPrefill);
+    m.def("decode_attention_mix", &DecodeAttentionMix);
+    m.def("add_and_rmsnorm", &AddAndRMSNorm);
 
     // funcs
     m.def("print", &Print);

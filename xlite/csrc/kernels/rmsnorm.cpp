@@ -63,34 +63,38 @@ class KernelRMSNorm {
 public:
     __aicore__ inline KernelRMSNorm() {}
     __aicore__ inline void Init(GM_ADDR inout, GM_ADDR weight, GM_ADDR out,
-                                uint32_t tokenNum, uint32_t hiddenSize, float normEps)
+                                uint32_t tokenNum, uint32_t normDim, float normEps,
+                                uint32_t cntPerToken, uint32_t step, uint32_t startOffset)
     {
         inoutGm.SetGlobalBuffer((__gm__ T *)inout);
         weightGm.SetGlobalBuffer((__gm__ T *)weight);
         outGm.SetGlobalBuffer((__gm__ T *)out);
-        pipe.InitBuffer(queIn, BUFFER_NUM, hiddenSize * sizeof(T));
-        pipe.InitBuffer(queOut, BUFFER_NUM, hiddenSize * sizeof(T));
-        pipe.InitBuffer(weight_buf, hiddenSize * sizeof(T));
-        pipe.InitBuffer(weight_fp32_buf, hiddenSize * sizeof(float));
-        pipe.InitBuffer(inout_fp32_buf, hiddenSize * sizeof(float));
-        pipe.InitBuffer(sqx_buf, hiddenSize * sizeof(float));
-        rmsnormTokenNum = tokenNum;
-        rmsnormHiddenSize = hiddenSize;
-        rmsnormEps = normEps;
+        pipe.InitBuffer(queIn, BUFFER_NUM, normDim * sizeof(T));
+        pipe.InitBuffer(queOut, BUFFER_NUM, normDim * sizeof(T));
+        pipe.InitBuffer(weight_buf, normDim * sizeof(T));
+        pipe.InitBuffer(weight_fp32_buf, normDim * sizeof(float));
+        pipe.InitBuffer(inout_fp32_buf, normDim * sizeof(float));
+        pipe.InitBuffer(sqx_buf, normDim * sizeof(float));
+        this->tokenNum = tokenNum;
+        this->normDim = normDim;
+        this->normEps = normEps;
+        this->cntPerToken = cntPerToken;
+        this->step = step;
+        this->startOffset = startOffset;
     }
     __aicore__ inline void Process()
     {
         LocalTensor<T> weightLocal = weight_buf.Get<T>();
-        DataCopy(weightLocal, weightGm, ROUND_UP(rmsnormHiddenSize * sizeof(T), BLOCK_SIZE) / sizeof(T));
+        DataCopy(weightLocal, weightGm, ROUND_UP(normDim * sizeof(T), BLOCK_SIZE) / sizeof(T));
         PipeBarrier<PIPE_ALL>();
         // Cast weight: f16/bf16 -> f32
         LocalTensor<float> weightFp32Local = weight_fp32_buf.Get<float>();
-        Cast(weightFp32Local, weightLocal, RoundMode::CAST_NONE, rmsnormHiddenSize);
+        Cast(weightFp32Local, weightLocal, RoundMode::CAST_NONE, normDim);
         PipeBarrier<PIPE_V>();
-
-        for (uint32_t loop = GetBlockIdx(); loop < rmsnormTokenNum; loop += GetBlockNum()) {
+        uint32_t loopCount = tokenNum * cntPerToken;
+        for (uint32_t loop = GetBlockIdx(); loop < loopCount; loop += GetBlockNum()) {
             CopyIn(loop);
-            Compute(loop, weightFp32Local);
+            Compute(weightFp32Local);
             CopyOut(loop);
         }
     }
@@ -99,11 +103,12 @@ private:
     __aicore__ inline void CopyIn(uint32_t loop)
     {
         LocalTensor<T> xLocal = queIn.AllocTensor<T>();
-        DataCopy(xLocal, inoutGm[loop * rmsnormHiddenSize], ROUND_UP(rmsnormHiddenSize * sizeof(T), BLOCK_SIZE) / sizeof(T));
+        uint32_t offset = startOffset + loop / cntPerToken * step + loop % cntPerToken * normDim;
+        DataCopy(xLocal, inoutGm[offset], ROUND_UP(normDim * sizeof(T), BLOCK_SIZE) / sizeof(T));
         queIn.EnQue(xLocal);
     }
 
-    __aicore__ inline void Compute(uint32_t loop, LocalTensor<float> weightFp32)
+    __aicore__ inline void Compute(LocalTensor<float> weightFp32)
     {
         event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
         event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
@@ -111,45 +116,46 @@ private:
         LocalTensor<T> yLocal = queOut.AllocTensor<T>();
         LocalTensor<float> sqx = sqx_buf.Get<float>();
         LocalTensor<float> xBufFp32 = inout_fp32_buf.Get<float>();
-        float n = (float)1.0 / rmsnormHiddenSize;
+        float n = (float)1.0 / normDim;
 
         // 1. Cast x : f16/bf16 -> f32
-        Cast(xBufFp32, xLocal, RoundMode::CAST_NONE, rmsnormHiddenSize);
+        Cast(xBufFp32, xLocal, RoundMode::CAST_NONE, normDim);
         PipeBarrier<PIPE_V>();
         queIn.FreeTensor(xLocal);
         // 2. Cal x^2
-        Mul(sqx, xBufFp32, xBufFp32, rmsnormHiddenSize);
+        Mul(sqx, xBufFp32, xBufFp32, normDim);
         PipeBarrier<PIPE_V>();
         // 3. Cal sum(x^2)
-        float reduceOut = ReduceSumHalfInterval(sqx, rmsnormHiddenSize);
+        float reduceOut = ReduceSumHalfInterval(sqx, normDim);
         SetFlag<HardEvent::V_S>(eventVS);
         WaitFlag<HardEvent::V_S>(eventVS);
         // 4. Cal rstd = 1 / sqrt(1 / sum(x^2) + eps)
-        float rstdValue = 1 / sqrt(reduceOut * n + rmsnormEps);
+        float rstdValue = 1 / sqrt(reduceOut * n + normEps);
         SetFlag<HardEvent::S_V>(eventSV);
         WaitFlag<HardEvent::S_V>(eventSV);
         // 5. Cal x * rstd
-        Muls(sqx, xBufFp32, rstdValue, rmsnormHiddenSize);
+        Muls(sqx, xBufFp32, rstdValue, normDim);
         PipeBarrier<PIPE_V>();
         // 6. Cal weight * x * rstd
-        Mul(sqx, sqx, weightFp32, rmsnormHiddenSize);
+        Mul(sqx, sqx, weightFp32, normDim);
         PipeBarrier<PIPE_V>();
         // 7. Cast y: f32 -> f16/bf16
-        Cast(yLocal, sqx, RoundMode::CAST_RINT, rmsnormHiddenSize);
+        Cast(yLocal, sqx, RoundMode::CAST_RINT, normDim);
         queOut.EnQue<T>(yLocal);
     }
 
     __aicore__ inline void CopyOut(uint32_t loop)
     {
         LocalTensor<T> yLocal = queOut.DeQue<T>();
+        uint32_t offset = startOffset + loop / cntPerToken * step + loop % cntPerToken * normDim;
 
-        if (((rmsnormHiddenSize * sizeof(T)) & (BLOCK_SIZE - 1)) == 0) {
-            DataCopy<T>(outGm[loop * rmsnormHiddenSize], yLocal, rmsnormHiddenSize);
+        if (((normDim * sizeof(T)) & (BLOCK_SIZE - 1)) == 0) {
+            DataCopy<T>(outGm[offset], yLocal, normDim);
         } else {
             DataCopyParams copyParams;
-            copyParams.blockLen = rmsnormHiddenSize * sizeof(T);
+            copyParams.blockLen = normDim * sizeof(T);
             copyParams.blockCount = 1;
-            DataCopyPad(outGm[loop * rmsnormHiddenSize], yLocal, copyParams);
+            DataCopyPad(outGm[offset], yLocal, copyParams);
         }
 
         queOut.FreeTensor(yLocal);
@@ -166,17 +172,21 @@ private:
     TBuf<TPosition::VECCALC> sqx_buf;
     TBuf<TPosition::VECCALC> weight_buf;
     TBuf<TPosition::VECCALC> weight_fp32_buf;
-    uint32_t rmsnormTokenNum;
-    uint32_t rmsnormHiddenSize;
-    float rmsnormEps;
+    uint32_t tokenNum;
+    uint32_t normDim;
+    uint32_t cntPerToken;
+    uint32_t step;
+    uint32_t startOffset;
+    float normEps;
 };
 
 #define RMSNORM_FUNC_DEFINE(dtype) \
-extern "C" __global__ __aicore__ void rmsnorm_##dtype(GM_ADDR inout, GM_ADDR weight, GM_ADDR out, uint32_t tokenNum, \
-                                                      uint32_t hiddenSize, float normEps) \
+extern "C" __global__ __aicore__ void rmsnorm_##dtype(GM_ADDR inout, GM_ADDR weight, GM_ADDR out, \
+                                                      uint32_t tokenNum, uint32_t normDim, float normEps, \
+                                                      uint32_t cntPerToken, uint32_t step, uint32_t startOffset) \
 { \
     KernelRMSNorm<dtype> op; \
-    op.Init(inout, weight, out, tokenNum, hiddenSize, normEps); \
+    op.Init(inout, weight, out, tokenNum, normDim, normEps, cntPerToken, step, startOffset); \
     op.Process(); \
 }
 

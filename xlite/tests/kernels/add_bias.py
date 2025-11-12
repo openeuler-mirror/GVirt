@@ -34,7 +34,7 @@ for test_dtype in dtype_list:
     add_bias(rt, z, bias, z)
     torch.npu.synchronize()
 
-    logging.info(f'add_bias ({test_dtype}) executed!')
+    logging.info(f'add bias ({test_dtype}) executed!')
 
     try:
         torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
