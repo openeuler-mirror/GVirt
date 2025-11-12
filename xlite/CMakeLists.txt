@@ -6,6 +6,7 @@ set(SOC_VERSION "Ascend910B3" CACHE STRING "system on chip type")
 set(ASCEND_CANN_PACKAGE_PATH "/usr/local/Ascend/ascend-toolkit/latest"
     CACHE STRING "ASCEND CANN package installation directory"
 )
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type Release/Debug (default Release)" FORCE)
 endif()
@@ -15,14 +16,24 @@ endif()
 
 # xlite_kernels_${RUN_MODE}
 file(GLOB KERNEL_FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add.cpp
 )
+
+file(GLOB ASCENDC_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_and_rmsnorm.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache.cpp
+)
+list(APPEND KERNEL_FILES ${ASCENDC_FILES})
+
 
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
     set(ASCENDC_CMAKE_DIR ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
@@ -43,10 +54,11 @@ add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/op.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/model.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/core_assigner.cpp
 )
 
 target_compile_options(xlite PRIVATE
-    -O3 -Wall -Werror
+    -std=c++17 -O3 -Wall -Werror
 )
 
 target_link_libraries(xlite PRIVATE

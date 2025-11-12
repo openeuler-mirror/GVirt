@@ -21,15 +21,20 @@ enum commType {
 
 class XRuntime {
 public:
-    XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId = 0, uint32_t tpSize = 1, uint32_t dpSize = 1);
+    XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId = 0,
+             uint32_t tpSize = 1, uint32_t dpSize = 1);
     ~XRuntime(void);
     void Synchronize(void);
+    void MemcpyH2D(void *dst, void *src, size_t size);
+    void UpdateCoreNum(float blockDimUtilization);
     uint32_t rankId(void) { return _rankId; };
     uint32_t tpSize(void) { return _tpSize; };
     uint32_t dpSize(void) { return _dpSize; };
     aclrtStream stream;
     uint32_t aicNum;
     uint32_t aivNum;
+    uint32_t originAicNum;
+    uint32_t originAivNum;
     XTensorPool *pool;
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;

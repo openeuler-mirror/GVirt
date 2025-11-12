@@ -268,7 +268,7 @@ XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
     }
     XTensor &t = _free.front();
 
-    for (int i = 0; i < shape.size(); i++) {
+    for (uint64_t i = 0; i < shape.size(); i++) {
         numel *= shape[i];
     }
     size = ROUND_UP(numel * XDtypeBit(dtype) / 8, XLITE_TENSOR_ALIGN);
@@ -291,7 +291,15 @@ XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
         return t;
     }
 
-    std::cerr << __FILE__ << ":" << __LINE__ << ": get " << size << " B failed, no free tensor" << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << ": get " << size << " B failed, no free tensor";
+    std::cerr << ", shape=(";
+    for (uint32_t i = 0; i < shape.size(); i++) {
+        std::cerr << shape[i];
+        if (i != shape.size() - 1) {
+            std::cerr << ", ";
+        }
+    }
+    std::cerr << "), dtype=" << XDtypeStr(dtype) << std::endl;
     throw std::runtime_error("no free tensor");
 }
 

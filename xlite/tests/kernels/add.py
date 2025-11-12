@@ -14,20 +14,25 @@ from xlite._C import Runtime, add
 rt = Runtime(0, 500)
 torch.npu.set_device(0)
 
-x = torch.randn(8, 2048, dtype=torch.float16, device="npu:0")
-y = torch.randn(8, 2048, dtype=torch.float16, device="npu:0")
-z = torch.empty(8, 2048, dtype=torch.float16, device="npu:0")
+supported_dtype_list = [torch.float16, torch.bfloat16]
 
-standard = x + y
+for dtype in supported_dtype_list:
+    x = torch.randn(8, 2048, dtype=dtype, device="npu:0")
+    y = torch.randn(8, 2048, dtype=dtype, device="npu:0")
+    z = torch.empty(8, 2048, dtype=dtype, device="npu:0")
 
-torch.npu.synchronize()
-add(rt, x, y, z)
-torch.npu.synchronize()
-print('add executed!')
+    standard = x + y
 
-try:
-    torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
-except AssertionError as e:
-    print(f'{e}')
-    print(f'torch_npu: {standard}')
-    print(f'xlite: {z}')
+    torch.npu.synchronize()
+    add(rt, x, y, z)
+    torch.npu.synchronize()
+    print(f'add {dtype} executed!')
+
+    try:
+        torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
+    except AssertionError as e:
+        print(f'{e}')
+        print(f'x: {x}')
+        print(f'y: {y}')
+        print(f'torch_npu: {standard}')
+        print(f'xlite: {z}')

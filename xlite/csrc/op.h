@@ -7,14 +7,21 @@
 #include "base.h"
 #include "runtime.h"
 
+#define MATMUL_M0_N0_K0_DEFAULT_VALUE (-1)
+#define MATMUL_SWIZZLE_DEFAULT_VALUE (257)
+
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type);
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type);
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type);
 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end, XTensor &out);
-void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, float normEps, XTensor &out);
+void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
+                    uint32_t numTokens, uint32_t normDim, uint32_t cntPerToken = 1,
+                    uint32_t step = 0, uint32_t startOffset = 0);
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out);
-void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false);
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false,
+                   uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE, uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
+                   uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE, uint64_t swizzle = MATMUL_SWIZZLE_DEFAULT_VALUE);
 
 void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out);
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale);
@@ -29,6 +36,23 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
                         XTensor &counts, uint32_t start, uint32_t end,
                         XDtype weightDtype, long outDim, long inDim, XTensor &output);
+void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
+                      XTensor &position, XTensor &cossin, XTensor &slotMapping,
+                      uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
+                      uint32_t rotDim, uint32_t blockSize, bool isNeox);
+void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &qk,
+                             XTensor &blockTables, XTensor &paddingN, XTensor &cachedLens,
+                             XTensor &vCache, XTensor &output, XTensor &lens,
+                             XTensor &cumPromptLens, uint32_t headDim,
+                             uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize,
+                             uint32_t batch, uint32_t maxNumBlock);
+void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &qkv,
+                            XTensor &kCache, XTensor &vCache, XTensor &cachedLens,
+                            XTensor &blockTables, XTensor &qk, XTensor &output,
+                            XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
+                            uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
+                            uint32_t nKvHeads, uint32_t maxM);
+
 void XliteDsOpRopeBatch(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads,
                         uint32_t stepDim, uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs,
                         XTensor &position, XTensor &vGather, XTensor &outputPe, enum XRopeType ropeType);
@@ -46,7 +70,7 @@ void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &c
 void XliteDsOpPrefillMix(XRuntime &rt, XTensor &out, XTensor &alpha, XTensor &max, XTensor &sum,
                          XTensor &q, XTensor &k, XTensor &qk, XTensor &blockTables, XTensor &paddingN,
                          XTensor &cachedLens, XTensor &v, XTensor &mixOut, XTensor &mixOutFinal, XTensor &promptLens,
-                         XTensor &attnMask, XTensor &attnMaskAddr, XTensor &speculateLens, XTensor &prefillIndex,
+                         XTensor &attnMask, XTensor &attnMaskAddr, XTensor &speculateLens,
                          XTensor &cumPromptLens, uint32_t headSize, uint32_t numHeads, uint32_t numKVHeads,
                          uint32_t blockSize, uint32_t batchSize, uint32_t mappingLen, uint32_t doTreeAttnMask,
                          uint32_t offsetM, uint32_t mSlice, float scale);
@@ -66,21 +90,6 @@ void XliteDsOpEinsumShtTcShc(XRuntime &rt, int numTokens, int nLocalHeads, int m
                              XTensor &cCache, XTensor &result);
 void XliteDsOpEinsumShcHdcShd(XRuntime &rt, int numTokens, int nLocalHeads, int kvLoraRank,
                               int wkvbStep, int vDim, XTensor &scores, XTensor &kvUpWeight, XTensor &result);
-void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
-                      XTensor &position, XTensor &cossin, XTensor &slotMapping,
-                      uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t maxM,
-                      uint32_t rotDim, uint32_t blockSize, bool isNeox);
-void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &qk,
-                             XTensor &blockTables, XTensor &paddingN, XTensor &cachedLens,
-                             XTensor &vCache, XTensor &output, XTensor &lens,
-                             XTensor &prefillIndex, XTensor &cumPromptLens, uint32_t headDim,
-                             uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize,
-                             uint32_t batch, uint32_t maxNumBlock);
-void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &qkv,
-                            XTensor &kCache, XTensor &vCache, XTensor &cachedLens, XTensor &lens,
-                            XTensor &blockTables, XTensor &qk, XTensor &output, XTensor &decodeIdx,
-                            XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
-                            uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
-                            uint32_t nKvHeads, uint32_t maxM);
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
+void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &norm, float normEps, XTensor &out);
 #endif

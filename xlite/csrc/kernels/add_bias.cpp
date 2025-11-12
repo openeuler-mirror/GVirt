@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include "kernel_operator.h"
@@ -23,8 +23,8 @@ public:
         pipe.InitBuffer(queOutZ, BUFFER_NUM, yNumel * sizeof(T));
         pipe.InitBuffer(yBuf, yNumel * sizeof(T));
         if constexpr (!std::is_same<T, float>::value) {
-            pipe.InitBuffer(xFp32Buf, yNumel * sizeof(float));
             pipe.InitBuffer(yFp32Buf, yNumel * sizeof(float));
+            pipe.InitBuffer(xFp32Buf, yNumel * sizeof(float));
             pipe.InitBuffer(zFp32Buf, yNumel * sizeof(float));
         }
     }
@@ -99,7 +99,7 @@ private:
     GlobalTensor<T> xGm;
     GlobalTensor<T> yGm;
     GlobalTensor<T> zGm;
-    TBuf<TPosition::VECCALC> yBuf, xFp32Buf, yFp32Buf, zFp32Buf;
+    TBuf<TPosition::VECCALC> yBuf, yFp32Buf, xFp32Buf, zFp32Buf;
     uint32_t rowNum;
     uint32_t yNumel;
 };

@@ -168,7 +168,7 @@ int XSock::Recv(int fd, void *buf, uint32_t size)
     } else if (ret < 0) {
         std::cerr << __func__ << ": rank" << _rankId << " recv failed: " << strerror(errno) << std::endl;
         return -errno;
-    } else if (ret != size) {
+    } else if ((uint32_t)ret != size) {
         std::cerr << __func__ << ": rank" << _rankId << " recv failed: size not match" << std::endl;
         return -EFAULT;
     }
@@ -188,7 +188,7 @@ int XSock::Send(int fd, void *buf, uint32_t size)
     } else if (ret < 0) {
         std::cerr << __func__ << ": rank" << _rankId << " send failed: " << strerror(errno) << std::endl;
         return -errno;
-    } else if (ret != size) {
+    } else if ((uint32_t)ret != size) {
         std::cerr << __func__ << ": rank" << _rankId << " send failed: size not match" << std::endl;
         return -EFAULT;
     }

@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import os
+import time
 import json
 from argparse import ArgumentParser
 from typing import List
@@ -41,7 +42,7 @@ def generate(
     max_new_tokens: int,
     eos_id: int,
     temperature: float = 1.0
-) -> List[List[int]]:
+) -> (List[List[int]], int):
     """
     Generates new tokens based on the given prompt tokens using the specified model.
 
@@ -58,13 +59,16 @@ def generate(
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
     total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
-    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.int32, device="npu")
+    tokens_cpu = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.int32, device="cpu")
     for i, t in enumerate(prompt_tokens):
-        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.int32, device="npu")
+        tokens_cpu[i, :len(t)] = torch.tensor(t, dtype=torch.int32, device="cpu")
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens), device="npu")
-    prompt_mask = tokens != -1
+    prompt_mask = tokens_cpu != -1
+    prompt_mask = prompt_mask.to("npu")
+    tokens = tokens_cpu.to("npu")
 
+    step = 0
     start = min(prompt_lens)
     if model.args.model_type == "deepseek":
         # prefill ops only support single batch in deepseek
@@ -79,6 +83,7 @@ def generate(
         tokens[:, cur_pos] = next_token
         finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
         prev_pos = cur_pos
+        step = step + 1
         if finished.all():
             break
     completion_tokens = []
@@ -87,7 +92,7 @@ def generate(
         if eos_id in toks:
             toks = toks[:toks.index(eos_id)]
         completion_tokens.append(toks)
-    return completion_tokens
+    return (completion_tokens, step)
 
 
 def main(
@@ -116,9 +121,15 @@ def main(
     elif model_type == "llama":
         from tests.models.llama import ModelArgs
         from tests.models.llama import Llama as Transformer
-    elif model_type == "qwen":
-        from tests.models.qwen2 import ModelArgs
+    elif model_type == "qwen2":
+        from tests.models.qwen2 import Qwen2ModelArgs as ModelArgs
         from tests.models.llama import Llama as Transformer
+    elif model_type == "qwen3":
+        from tests.models.qwen3 import Qwen3ModelArgs as ModelArgs
+        from tests.models.llama import Llama as Transformer
+    elif model_type == "qwen3_moe":
+        from tests.models.qwen3_moe import ModelArgs
+        from tests.models.qwen3_moe import Qwen3Moe as Transformer
     else:
         return
 
@@ -142,7 +153,8 @@ def main(
         model = Transformer(args)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path, trust_remote_code=True)
     model.load_weights(ckpt_path)
-    tokenizer.decode(generate(model, [tokenizer.encode("  ")], 2, -1, 1.)[0])
+    completion_tokens, _ = generate(model, [tokenizer.encode("  ")], 2, -1, 1.)
+    tokenizer.decode(completion_tokens[0])
 
     if interactive:
         messages = []
@@ -176,7 +188,7 @@ def main(
                     formatted_prompt = formatted_prompt[:-8]
                 formatted_prompt += " "
                 prompt_tokens = tokenizer.encode(formatted_prompt)
-            elif model_type == "qwen":
+            elif model_type in {"qwen2", "qwen3", "qwen3_moe"}:
                 formatted_prompt = ""
                 for message in messages:
                     if message["role"] == "user":
@@ -186,7 +198,7 @@ def main(
                 prompt_tokens = tokenizer.encode(formatted_prompt)
             else:
                 prompt_tokens = tokenizer.encode(prompt)
-            completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
+            completion_tokens, _ = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
             completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
             print(completion)
             messages.append({"role": "assistant", "content": completion})
@@ -206,20 +218,27 @@ def main(
                     tokenizer.encode(f"<s>[INST] {item['query']} [/INST] ")
                     for item in batch
                 ]
-            elif model_type == "qwen":
+            elif model_type in {"qwen2", "qwen3", "qwen3_moe"}:
                 prompts_tokens_batch = [
                     tokenizer.encode(f"<|im_start|>user {item['query']}<|im_end|>")
                     for item in batch
                 ]
             else:
                 prompts_tokens_batch = [tokenizer.encode(item['query']) for item in batch]
-            completion_tokens_batch = generate(model, prompts_tokens_batch, max_new_tokens, tokenizer.eos_token_id, temperature)
-            completions_batch = tokenizer.batch_decode(completion_tokens_batch, skip_special_tokens=True)
 
+            s = time.monotonic_ns()
+            completion_tokens_batch, step = generate(model, prompts_tokens_batch, max_new_tokens, tokenizer.eos_token_id, temperature)
+            c = time.monotonic_ns()
+            d = (c - s) / 1e6
+
+            completions_batch = tokenizer.batch_decode(completion_tokens_batch, skip_special_tokens=True)
+            num = 0
             for idx, item in enumerate(batch):
                 item['response'] = completions_batch[idx]
+                num += len(completion_tokens_batch[idx]) + len(prompts_tokens_batch[idx]) - 1
                 print(f"Query: {item['query']}")
                 print(f"Completion: {item['response']}")
+            print(f"generate {num} tokens take {d:.2f} ms. avg: {num/d*1e3:.2f} tokens/s @ {d/step:.2f} ms bs: {len(batch)}")
 
         batch_size = args.max_batch_size
 
@@ -259,6 +278,6 @@ if __name__ == "__main__":
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.0)
     args = parser.parse_args()
-    assert args.model in ["deepseek", "llama", "qwen"], f"{args.model} not supported!"
+    assert args.model in ["deepseek", "llama", "qwen2", "qwen3", "qwen3_moe"], f"{args.model} not supported!"
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
     main(args.model, args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)

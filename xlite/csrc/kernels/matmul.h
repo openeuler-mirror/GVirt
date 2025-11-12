@@ -22,7 +22,7 @@ public:
     __aicore__ inline Matmul() {}
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
                                 uint64_t m, uint64_t n, uint64_t k, uint64_t nz,
-                                uint64_t m0, uint64_t n0, uint64_t k0)
+                                uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 
@@ -30,6 +30,8 @@ public:
         SetMaskNorm();
         SetAtomicNone();
 
+        this->swizzlCount = (swizzl >> 8);
+        this->swizzleDirection = (swizzl & 0xFF);
         this->aGmBuf.SetGlobalBuffer((__gm__ Dtype *)x);
         this->bGmBuf.SetGlobalBuffer((__gm__ Dtype *)y);
         this->cGmBuf.SetGlobalBuffer((__gm__ Dtype *)z);
@@ -158,6 +160,44 @@ public:
         DataCopy(dst, src, param);
     }
 
+    __aicore__ inline void GetMNBlockIdx(int32_t loopIdx, int32_t mLoop, int32_t nLoop, int32_t swizzlDirection,
+        int32_t swizzlCount, int64_t &mIdx, int64_t &nIdx)
+    {
+        // Adjust the traversal order of matmul block by setting swizzlCount(upper 8 bits) and swizzleDirection(lower 8 bits).
+        // Adjusting the swizzle strategy helps improve cache hit rate and reduce data read overhead, thereby enhancing the overall computational efficiency of matmul.
+        uint32_t tileBlockLoop, tileBlockIdx, inTileBlockIdx;
+        uint32_t inBatchIdx = loopIdx % (mLoop * nLoop);
+        if (swizzlDirection == 0) { // Zn
+            tileBlockLoop = (mLoop + swizzlCount - 1) / swizzlCount;
+            tileBlockIdx = inBatchIdx / (swizzlCount * nLoop);
+            inTileBlockIdx = inBatchIdx % (swizzlCount * nLoop);
+
+            uint32_t nRow = swizzlCount;
+            if (tileBlockIdx == tileBlockLoop - 1) {
+                nRow = mLoop - swizzlCount * tileBlockIdx;
+            }
+            mIdx = tileBlockIdx * swizzlCount + inTileBlockIdx % nRow;
+            nIdx = inTileBlockIdx / nRow;
+            if (tileBlockIdx % 2 != 0) {
+                nIdx = nLoop - nIdx - 1;
+            }
+        } else if (swizzlDirection == 1) { // Nz
+            tileBlockLoop = (nLoop + swizzlCount - 1) / swizzlCount;
+            tileBlockIdx = inBatchIdx / (swizzlCount * mLoop);
+            inTileBlockIdx = inBatchIdx % (swizzlCount * mLoop);
+
+            uint32_t nCol = swizzlCount;
+            if (tileBlockIdx == tileBlockLoop - 1) {
+                nCol = nLoop - swizzlCount * tileBlockIdx;
+            }
+            mIdx = inTileBlockIdx / nCol;
+            nIdx = tileBlockIdx * swizzlCount + inTileBlockIdx % nCol;
+            if (tileBlockIdx % 2 != 0) {
+                mIdx = mLoop - mIdx - 1;
+            }
+        }
+    }
+
     __aicore__ inline void Run()
     {
         int kQtileBlockNum = kQtileSize / kBlockSize;
@@ -184,6 +224,7 @@ public:
             }
             int64_t midx = loopIdx / nLoop;
             int64_t nidx = loopIdx % nLoop;
+            GetMNBlockIdx(loopIdx, mLoop, nLoop, swizzleDirection, swizzlCount, midx, nidx);
             int nOffset = nidx * n0;
             int mOffset = midx * m0;
 
@@ -320,15 +361,17 @@ private:
     uint64_t cubeBlockSize;
     int kDtileSize;
     int kQtileSize;
+    int32_t swizzlCount;
+    int32_t swizzleDirection;
 };
 
 #define MATMUL_FUNC_DEFINE(dtype) \
 extern "C" __global__ __aicore__ void matmul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR z, \
                                                      uint64_t m, uint64_t n, uint64_t k, uint64_t nz, \
-                                                     uint64_t m0 = -1, uint64_t n0 = -1, uint64_t k0 = -1) \
+                                                     uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl) \
 { \
     Matmul<dtype> op; \
-    op.Init(x, y, z, m, n, k, nz, m0, n0, k0); \
+    op.Init(x, y, z, m, n, k, nz, m0, n0, k0, swizzl); \
     op.Run(); \
 }
 
