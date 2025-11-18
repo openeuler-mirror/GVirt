@@ -11,7 +11,10 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type Release/Debug (default Release)" FORCE)
 endif()
 if(CMAKE_INSTALL_PREFIX STREQUAL /usr/local)
+    set(CMAKE_INSTALL_PATH ${CMAKE_CURRENT_LIST_DIR})
     set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/out" CACHE STRING "path for install()" FORCE)
+else()
+    set(CMAKE_INSTALL_PATH ${CMAKE_INSTALL_PREFIX})
 endif()
 
 # xlite_kernels_${RUN_MODE}
@@ -74,6 +77,10 @@ execute_process(
 )
 set(CMAKE_PREFIX_PATH ${PYTHON_SYS_DIR} CACHE STRING "python sys path")
 
+if(NOT DEFINED CMAKE_ABS_PYTHON_PATH)
+    set(CMAKE_ABS_PYTHON_PATH ${PYTHON_SYS_DIR} CACHE STRING "python sys path")
+endif()
+
 find_package(pybind11 REQUIRED)
 find_package(Torch COMPONENTS Development REQUIRED)
 
@@ -108,13 +115,13 @@ target_link_libraries(_C PRIVATE
 )
 
 target_link_options(_C PRIVATE
-    -Wl,-rpath,xlite/lib:${PYTHON_SYS_DIR}/xlite/lib:${TORCH_INSTALL_PREFIX}/lib
+    -Wl,-rpath,xlite/lib:${PYTHON_SYS_DIR}/xlite/lib:${TORCH_INSTALL_PREFIX}/lib:${CMAKE_ABS_PYTHON_PATH}/xlite/lib
 )
 
 install(TARGETS xlite_kernels_${RUN_MODE} xlite
-    LIBRARY DESTINATION ${CMAKE_CURRENT_LIST_DIR}/xlite/lib
+    LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
 )
 
 install(TARGETS _C
-    LIBRARY DESTINATION ${CMAKE_CURRENT_LIST_DIR}/xlite
+    LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite
 )

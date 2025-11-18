@@ -60,10 +60,29 @@ functions_module=Extension(
 
 class CMakeBuild(build_ext):
     def build_extension(self, ext):
+        install_prefix = self.build_lib
+        python_command = "python3 -m pip show torch | grep '^Location:' | awk '{print $2}'"
+        try:
+            pybind11_cmake_path = (subprocess.check_output(
+                                   [sys.executable, "-m", "pybind11",
+                                    "--cmakedir"]).decode().strip())
+            abs_python_path = subprocess.check_output(
+                              python_command, shell=True).decode().strip()
+            torch_cmake_path = os.path.join(abs_python_path, "torch", "share", "cmake", "Torch")
+            cmake_prefix_paths = ";".join([pybind11_cmake_path, torch_cmake_path])
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"CMake configuration failed: {e}")
+        cmake_args = [f"-DCMAKE_PREFIX_PATH={cmake_prefix_paths}"]
+
         subprocess.check_call(['rm', '-rf', 'cmake_build'])
         if not os.path.exists('cmake_build'):
             os.makedirs('cmake_build')
-        subprocess.check_call(['cmake', '-B', 'cmake_build'])
+        subprocess.check_call(['cmake',
+                               '-B',
+                               'cmake_build',
+                               f"-DCMAKE_ABS_PYTHON_PATH={abs_python_path}",
+                               f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
+                               *cmake_args])
         subprocess.check_call(['cmake', '--build', 'cmake_build', '-j'])
         subprocess.check_call(['cmake', '--install', 'cmake_build'])
 
@@ -83,9 +102,9 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     install_requires=get_requirements(),
-    packages=find_packages(),
+    packages=find_packages(exclude=["*.tools", "*.tools.*"]),
     ext_modules=[functions_module],
     python_requires='>=3.9',
     cmdclass=dict(build_ext=CMakeBuild, clean=CleanCommand),
-    package_data={"xlite": ['*.so', 'lib/*.so', 'tools/*.sh', 'tools/quantization/algorithms/hadamard_matrices/*.txt']},
+    package_data={"xlite": ['*.so', 'lib/*.so']},
 )

@@ -1,0 +1,7 @@
+[build-system]
+# Should be mirrored in requirements.txt
+requires = [
+    "pybind11",
+    "torch>=2.5.1",
+]
+build-backend = "setuptools.build_meta"
