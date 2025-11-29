@@ -15,6 +15,7 @@
 #include "aclrtlaunch_silu_and_mul_float16_t.h"
 #include "aclrtlaunch_silu_and_mul_bfloat16_t.h"
 #include "aclrtlaunch_rope_and_cache_float16_t.h"
+#include "aclrtlaunch_rope_and_cache_bfloat16_t.h"
 #include "aclrtlaunch_prefill_att.h"
 #include "aclrtlaunch_decode_att.h"
 #include "aclrtlaunch_matmul_float16_t.h"
@@ -23,7 +24,6 @@
 #include "aclrtlaunch_add_bias_float.h"
 #include "aclrtlaunch_add_bias_float16_t.h"
 #include "aclrtlaunch_add_bias_bfloat16_t.h"
-#include "aclrtlaunch_rope_and_cache_bfloat16_t.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
