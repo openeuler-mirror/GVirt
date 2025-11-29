@@ -25,7 +25,7 @@ file(GLOB KERNEL_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_cce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm_cce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_cce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_cce.cpp
