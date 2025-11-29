@@ -15,6 +15,7 @@ rt = Runtime(0, 500)
 torch.npu.set_device(0)
 
 supported_dtype_list = [
+    (torch.float, 2e-5, 2e-3),
     (torch.float16, 2e-5, 2e-3),
     (torch.bfloat16, 2e-2, 2e-4)
 ]

@@ -11,6 +11,7 @@
 #include "aclrtlaunch_embed_kernel_bfloat16_t.h"
 #include "aclrtlaunch_rmsnorm_float16_t.h"
 #include "aclrtlaunch_rmsnorm_bfloat16_t.h"
+#include "aclrtlaunch_silu_and_mul_float.h"
 #include "aclrtlaunch_silu_and_mul_float16_t.h"
 #include "aclrtlaunch_silu_and_mul_bfloat16_t.h"
 #include "aclrtlaunch_rope_and_cache_float16_t.h"
@@ -162,6 +163,8 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out)
         aclrtlaunch_silu_and_mul_float16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0], out.shape[1]);
     } else if (in.dtype == BF16 && out.dtype == BF16) {
         aclrtlaunch_silu_and_mul_bfloat16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0], out.shape[1]);
+    } else if (in.dtype == FP32 && out.dtype == FP32) {
+        aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0], out.shape[1]);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
