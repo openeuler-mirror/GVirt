@@ -25,17 +25,12 @@ file(GLOB KERNEL_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_cce.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm_cce.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_cce.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_cce.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_cce.cpp
 )
-
-file(GLOB ASCENDC_FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_and_rmsnorm.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache.cpp
-)
-list(APPEND KERNEL_FILES ${ASCENDC_FILES})
 
 
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)

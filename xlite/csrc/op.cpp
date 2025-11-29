@@ -11,9 +11,11 @@
 #include "aclrtlaunch_embed_kernel_bfloat16_t.h"
 #include "aclrtlaunch_rmsnorm_float16_t.h"
 #include "aclrtlaunch_rmsnorm_bfloat16_t.h"
+#include "aclrtlaunch_silu_and_mul_float.h"
 #include "aclrtlaunch_silu_and_mul_float16_t.h"
 #include "aclrtlaunch_silu_and_mul_bfloat16_t.h"
 #include "aclrtlaunch_rope_and_cache_float16_t.h"
+#include "aclrtlaunch_rope_and_cache_bfloat16_t.h"
 #include "aclrtlaunch_prefill_att.h"
 #include "aclrtlaunch_decode_att.h"
 #include "aclrtlaunch_matmul_float16_t.h"
@@ -22,9 +24,6 @@
 #include "aclrtlaunch_add_bias_float.h"
 #include "aclrtlaunch_add_bias_float16_t.h"
 #include "aclrtlaunch_add_bias_bfloat16_t.h"
-#include "aclrtlaunch_add_and_rmsnorm_float16_t.h"
-#include "aclrtlaunch_add_and_rmsnorm_bfloat16_t.h"
-#include "aclrtlaunch_rope_and_cache_bfloat16_t.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -105,10 +104,10 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
         step = normDim;
     }
     if (in.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in.ptr, norm.ptr, out.ptr,
+        aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
                                       numTokens, normDim, normEps, cntPerToken, step, startOffset);
     } else if (in.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, norm.ptr, out.ptr,
+        aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
                                       numTokens, normDim, normEps, cntPerToken, step, startOffset);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
@@ -129,9 +128,11 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &norm, float normEps, XTensor &out)
 {
     if (in1.dtype == FP16 && in2.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_add_and_rmsnorm_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr, in1.shape[0], in1.shape[1], normEps);
+        aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
+                                      in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1], 0);
     } else if (in1.dtype == BF16 && in2.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_add_and_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr, in1.shape[0], in1.shape[1], normEps);
+        aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
+                                       in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1], 0);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
@@ -162,6 +163,8 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out)
         aclrtlaunch_silu_and_mul_float16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0], out.shape[1]);
     } else if (in.dtype == BF16 && out.dtype == BF16) {
         aclrtlaunch_silu_and_mul_bfloat16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0], out.shape[1]);
+    } else if (in.dtype == FP32 && out.dtype == FP32) {
+        aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0], out.shape[1]);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
