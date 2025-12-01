@@ -52,8 +52,8 @@ for test_dtype in dtype_list:
         max_num_block = math.ceil((SEQ_LEN + START_POS) / BLOCK_SIZE)
 
         kvcache_block_num = (MAX_SEQ_LEN + BLOCK_SIZE - 1) // BLOCK_SIZE * MAX_BATCH_SIZE
-        k_cache_xlite = torch.zeros(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
-        v_cache_xlite = torch.zeros(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
+        k_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
+        v_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
 
         prefill_index = torch.arange(BATCH_SIZE, dtype=torch.int32)
 
