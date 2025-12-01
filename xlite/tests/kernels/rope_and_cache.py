@@ -65,8 +65,8 @@ for test_dtype in dtype_list:
         qkv_xlite = qkv_standard.clone().view(BATCH_SIZE * SEQ_LEN, out_features)
         freqs_cis_xlite = freqs_cis_standard.clone()
 
-        k_cache_xlite = torch.zeros(BLOCK_NUM, N_KV_HEADS, BLOCK_SIZE, HEAD_DIM)
-        v_cache_xlite = torch.zeros(BLOCK_NUM, N_KV_HEADS, BLOCK_SIZE, HEAD_DIM)
+        k_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
+        v_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
 
         len = torch.arange(SEQ_LEN, dtype=torch.int32)
         position = len.unsqueeze(0).repeat(BATCH_SIZE, 1)

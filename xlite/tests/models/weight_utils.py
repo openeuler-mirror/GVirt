@@ -32,7 +32,10 @@ def rearrange_matrix(matrix, n0, k_block_size=16):
 def matrix_nd2nz(matrix):
     """nd2nz"""
     # same logic with csrc/kernels/matmul.cpp 's n0 size */
-    n0 = 256
+    if matrix.size(0) <= 1280:
+        n0 = 64
+    else:
+        n0 = 256
     if matrix.dtype == torch.float:
         k_block_size = 8
     elif matrix.dtype == torch.bfloat16 or torch.float16:

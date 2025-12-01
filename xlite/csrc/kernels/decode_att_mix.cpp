@@ -41,7 +41,6 @@ struct decode_att_mix_context {
     uint32_t m_slice;
     uint32_t head_num_in_group;
     uint32_t block_mem_size;
-    uint32_t kv_head_offset;
 };
 
 inline __aicore__ void init_decode_att_mix_context(decode_att_mix_context *ctx,
@@ -86,7 +85,6 @@ inline __aicore__ void init_decode_att_mix_context(decode_att_mix_context *ctx,
     ctx->m_slice = m_slice;
     ctx->head_num_in_group = num_heads / num_kv_heads;
     ctx->block_mem_size = num_kv_heads * block_size * head_size;
-    ctx->kv_head_offset = block_size * head_size;
 }
 
 inline __aicore__ void wait_aic_aiv_flag(__gm__ uint32_t *flag_gm, uint32_t head_num_in_group,
@@ -281,7 +279,7 @@ inline __aicore__ void decode_mix_pre_copy_in_for_qk(decode_att_mix_context *ctx
     uint32_t block_table_id = (uint32_t)*(ctx->mapping + token_idx * ctx->mapping_len);
     __gm__ half *k_gm_addr = ctx->k + block_table_id * ctx->block_mem_size + head_offset_len;
 
-    copy_to_l1_2d(ctx->cbuf_addr_b[0], k_gm_addr, 0, 0, ctx->block_size, head_size, head_size);
+    copy_to_l1_2d(ctx->cbuf_addr_b[0], k_gm_addr, 0, 0, ctx->block_size, head_size, head_size  * ctx->num_kv_heads);
     set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1);
 
     set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
@@ -308,7 +306,7 @@ inline __aicore__ void decode_mix_compute_qk(decode_att_mix_context *ctx,
         if (k_idx + 1 < num_iters) {
             uint32_t loc_block_table_id = (uint32_t)*(ctx->mapping + token_idx * ctx->mapping_len + k_idx + 1);
             __gm__ half *loc_k_gm_addr = ctx->k + loc_block_table_id * ctx->block_mem_size + head_offset_len;
-            copy_to_l1_2d(ctx->cbuf_addr_b[next_idx], loc_k_gm_addr, 0, 0, block_size, head_size, head_size);
+            copy_to_l1_2d(ctx->cbuf_addr_b[next_idx], loc_k_gm_addr, 0, 0, block_size, head_size, head_size * ctx->num_kv_heads);
             set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + next_idx);
         }
 
@@ -368,7 +366,7 @@ inline __aicore__ void decode_mix_process_qk(decode_att_mix_context *ctx)
             continue;
         }
 
-        uint32_t head_offset_len = kv_head_idx * ctx->kv_head_offset;
+        uint32_t head_offset_len = kv_head_idx * ctx->head_size;
         decode_mix_pre_copy_in_for_qk(ctx, gqa_head_idx, cumM, token_idx, q_head_idx_start, head_offset_len);
         decode_mix_compute_qk(ctx, token_idx, head_offset_len, q_head_idx_start);
 
@@ -396,7 +394,7 @@ inline __aicore__ void decode_mix_pre_copy_in_for_pv(decode_att_mix_context *ctx
 
     uint32_t block_table_id = (uint32_t)*(ctx->mapping + token_idx * ctx->mapping_len);
     __gm__ half *v_gm_addr = ctx->v + block_table_id * ctx->block_mem_size + head_offset_len;
-    copy_to_l1_2d(ctx->cbuf_addr_b[0], v_gm_addr, 0, 0, ctx->block_size, ctx->head_size, ctx->head_size);
+    copy_to_l1_2d(ctx->cbuf_addr_b[0], v_gm_addr, 0, 0, ctx->block_size, ctx->head_size, ctx->head_size * ctx->num_kv_heads);
     set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1);
 }
 
@@ -428,7 +426,7 @@ inline __aicore__ void decode_mix_compute_pv(decode_att_mix_context *ctx,
         if (iter + 1 < num_iters) {
             uint32_t block_table_id = (uint32_t)*(block_table_map + iter + 1);
             __gm__ half *v_gm_addr = ctx->v + block_table_id * ctx->block_mem_size + head_offset_len;
-            copy_to_l1_2d(ctx->cbuf_addr_b[next_idx], v_gm_addr, 0, 0, block_size, head_size, head_size);
+            copy_to_l1_2d(ctx->cbuf_addr_b[next_idx], v_gm_addr, 0, 0, block_size, head_size, head_size * ctx->num_kv_heads);
             set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + next_idx);
         }
 
@@ -505,7 +503,7 @@ inline __aicore__ void decode_mix_process_pv(decode_att_mix_context *ctx)
             continue;
         }
         uint32_t q_offset = i * head_num_in_group;
-        uint32_t head_offset_len = kv_head_idx * ctx->block_size * head_size;
+        uint32_t head_offset_len = kv_head_idx * head_size;
         wait_aic_aiv_flag(ctx->v2a_gm, head_num_in_group, q_offset, head_size);
 
         decode_mix_pre_copy_in_for_pv(ctx, token_idx, head_offset_len, q_offset);

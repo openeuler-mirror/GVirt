@@ -36,26 +36,26 @@ block_tables = torch.tensor([i * max_batch_size for i in range(batch_size)] + [0
                             dtype=torch.int32, device="npu:0")
 
 q_xlite = torch.randn(batch_size, q_size + 2 * kv_size, dtype=torch.float16, device="npu:0").clamp(-5.0, 5.0)
-k_cache_xlite = torch.zeros(max_block_num, num_heads, block_size, head_size, dtype=torch.float16, device="npu:0")
-v_cache_xlite = torch.zeros(max_block_num, num_heads, block_size, head_size, dtype=torch.float16, device="npu:0")
+k_cache_xlite = torch.zeros(max_block_num, block_size, num_heads, head_size, dtype=torch.float16, device="npu:0")
+v_cache_xlite = torch.zeros(max_block_num, block_size, num_heads, head_size, dtype=torch.float16, device="npu:0")
 output = torch.empty(batch_size, hidden_size, dtype=torch.float16, device="npu:0")
 
 q_standard = q_xlite[:, :q_size].clone().view(batch_size, 1, num_heads, head_size)
-k_cache_standard = torch.randn(batch_size, num_heads, seq_len, head_size,
+k_cache_standard = torch.randn(batch_size, seq_len, num_heads, head_size,
                                dtype=torch.float16, device="npu:0").clamp(-5.0, 5.0)
-v_cache_standard = torch.randn(batch_size, num_heads, seq_len, head_size,
+v_cache_standard = torch.randn(batch_size, seq_len, num_heads, head_size,
                                dtype=torch.float16, device="npu:0").clamp(-5.0, 5.0)
 for i in range(batch_size):
-    k_cache_xlite[i * max_batch_size, :, :seq_len] = k_cache_standard[i]
-    v_cache_xlite[i * max_batch_size, :, :seq_len] = v_cache_standard[i]
+    k_cache_xlite[i * max_batch_size, :seq_len] = k_cache_standard[i]
+    v_cache_xlite[i * max_batch_size, :seq_len] = v_cache_standard[i]
 
 scores = torch.matmul(
     q_standard.transpose(1, 2),  # [bsz, n_local_heads, seqlen, head_dim]
-    k_cache_standard.transpose(-2, -1)  # [bsz, n_local_heads, head_dim, seqlen+start_pos]
+    k_cache_standard.permute(0, 2, 3, 1),  # [bsz, n_local_heads, head_dim, seqlen+start_pos]
 )
 
 attn_weights = torch.nn.functional.softmax(scores, dim=-1)
-standard = torch.matmul(attn_weights, v_cache_standard).reshape(batch_size, hidden_size)
+standard = torch.matmul(attn_weights, v_cache_standard.transpose(1, 2)).reshape(batch_size, hidden_size)
 
 torch.npu.synchronize()
 decode_attention_mix(rt, a2v, v2a, q_xlite, k_cache_xlite, v_cache_xlite, cached_lens, block_tables,

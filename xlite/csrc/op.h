@@ -41,7 +41,7 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t rotDim, uint32_t blockSize, bool isNeox);
 void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &qk,
-                             XTensor &blockTables, XTensor &paddingN, XTensor &cachedLens,
+                             XTensor &blockTables, XTensor &cachedLens,
                              XTensor &vCache, XTensor &output, XTensor &lens,
                              XTensor &cumPromptLens, uint32_t headDim,
                              uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize,
@@ -68,7 +68,7 @@ void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &c
                              XTensor &blockTable, XTensor &kvFull, XTensor &v, int nTokens, int nTokensPad,
                              int nLocalHeads, int kvLoraRank, int rotDim, int headSize, int vDim, uint32_t blockSize);
 void XliteDsOpPrefillMix(XRuntime &rt, XTensor &out, XTensor &alpha, XTensor &max, XTensor &sum,
-                         XTensor &q, XTensor &k, XTensor &qk, XTensor &blockTables, XTensor &paddingN,
+                         XTensor &q, XTensor &k, XTensor &qk, XTensor &blockTables,
                          XTensor &cachedLens, XTensor &v, XTensor &mixOut, XTensor &mixOutFinal, XTensor &promptLens,
                          XTensor &attnMask, XTensor &attnMaskAddr, XTensor &speculateLens,
                          XTensor &cumPromptLens, uint32_t headSize, uint32_t numHeads, uint32_t numKVHeads,

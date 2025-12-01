@@ -115,9 +115,6 @@ void XModel::Init(void)
     _cumPromptLens.Init({_c.maxBatch}, INT32, ptr);
 
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _padding.Init({_c.maxBatch}, INT32, ptr);
-
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _prefillLastIdx.Init({_c.maxBatch}, INT32, ptr);
 
     size = _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize) * XDtypeBit(INT32) / 8;
@@ -164,7 +161,6 @@ XModel::~XModel(void)
     CHECK_ACL(aclrtFree(_cachedLens.ptr));
     CHECK_ACL(aclrtFree(_lens.ptr));
     CHECK_ACL(aclrtFree(_cumPromptLens.ptr));
-    CHECK_ACL(aclrtFree(_padding.ptr));
     CHECK_ACL(aclrtFree(_prefillLastIdx.ptr));
     CHECK_ACL(aclrtFree(_blockTables.ptr));
 
@@ -198,7 +194,6 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
     std::vector<uint32_t> cachedLens(batch);
     std::vector<uint32_t> prefillLastIdx(batch);
     std::vector<uint32_t> cumPromptLens(batch);
-    std::vector<uint32_t> padding(batch);
     std::vector<uint32_t> position, slotMapping, blockTables;
     uint32_t blockNum, cumPromptLen, blockId, id, k;
     size_t size;
@@ -213,7 +208,6 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
         cachedLens[i] = attnMeta.cachedLens[i];
         cumPromptLens[i] = cumPromptLen;
         cumPromptLen += lens[i];
-        padding[i] = ROUND_UP(lens[i] + cachedLens[i], _c.blockSize);
         blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], _c.blockSize);
         _maxNumBlocks = blockNum > _maxNumBlocks ? blockNum : _maxNumBlocks;
         _realM += lens[i];
@@ -233,7 +227,6 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
     CHECK_ACL(aclrtMemcpy(_lens.ptr, size, lens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     CHECK_ACL(aclrtMemcpy(_cachedLens.ptr, size, cachedLens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     CHECK_ACL(aclrtMemcpy(_cumPromptLens.ptr, size, cumPromptLens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(_padding.ptr, size, padding.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     if (_prefillBatch > 0) {
         CHECK_ACL(aclrtMemcpy(_prefillLastIdx.ptr, size, prefillLastIdx.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     }
@@ -327,7 +320,7 @@ XTensor& XModel::ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
     XliteDsOpPrefillKvSplit(rt, attnKRes, attnKPe, vCache, _blockTables, attnKvFull, attnV, _prefillLen,
                             _prefillLenPad, nLocalHeads, 0, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.blockSize);
     XliteDsOpPrefillMix(rt, attnMlaOut, attnMlaAlpha, attnMlaMax, attnMlaSum, attnQWithQr, attnKvFull,
-                        attnMlaQK, attnMlaTmp, _padding, _cachedLens, attnV, attnPrefillOut, attnQkcAbsorb,
+                        attnMlaQK, attnMlaTmp, _cachedLens, attnV, attnPrefillOut, attnQkcAbsorb,
                         _lens, attnMlaTmp, attnMlaTmp, attnMlaTmp, _cumPromptLens,
                         _c.vHeadDim, nLocalHeads, nLocalHeads, _c.blockSize, _prefillBatch, 0, 0, 0, 0, _c.softmaxScale);
 
@@ -420,7 +413,7 @@ void XModel::XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTe
 {
     if (_prefillBatch > 0) {
         XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2 * _c.maxM}, input.dtype);
-        XliteOpPrefillAttention(rt, input, kCache, qk, _blockTables, _padding, _cachedLens,
+        XliteOpPrefillAttention(rt, input, kCache, qk, _blockTables, _cachedLens,
                                 vCache, output, _lens, _cumPromptLens,
                                 _c.headDim, _c.nHeads, _c.nKvHeads, _c.blockSize,
                                 _prefillBatch, _maxNumBlocks);

@@ -184,12 +184,12 @@ inline __aicore__ void att_QK(__gm__ half * x, __gm__ uint8_t * k, __gm__ int32_
         set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0 + pingpong_M * 2);
 
         int kv_head_idx = head_idx / (num_heads / num_kv_heads);
-        uint32_t head_offset_len = kv_head_idx * block_size * head_size;
+        uint32_t head_offset_len = kv_head_idx * head_size;
         uint32_t block_table_id = (uint32_t)(*((__gm__ int32_t *)mapping));
         __gm__ half *K_gm_addr = ((__gm__ half *)k) + block_table_id * block_memsize + head_offset_len;
 
         wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1 + pingpong_N * 2);
-        copy_to_l12d(B_cbuf_addr[pingpong_N], K_gm_addr, 0, 0, block_size, head_size, head_size, 1);
+        copy_to_l12d(B_cbuf_addr[pingpong_N], K_gm_addr, 0, 0, block_size, head_size, head_size, num_kv_heads);
         set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + pingpong_N * 2);
         set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
         set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1 + (1 - pingpong_N) * 2);
@@ -204,7 +204,7 @@ inline __aicore__ void att_QK(__gm__ half * x, __gm__ uint8_t * k, __gm__ int32_
             if (nidx + 1 < n_iters) {
                 uint32_t block_table_id = (uint32_t)(*((__gm__ int32_t *)mapping + nidx + 1));
                 __gm__ half *K_gm_addr = ((__gm__ half *)k) + block_table_id * block_memsize + head_offset_len;
-                copy_to_l12d(B_cbuf_addr[1 - pingpong_N], K_gm_addr, 0, 0, block_size, head_size, head_size, 1);
+                copy_to_l12d(B_cbuf_addr[1 - pingpong_N], K_gm_addr, 0, 0, block_size, head_size, head_size, num_kv_heads);
                 set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + (1 - pingpong_N) * 2);
             }
 
@@ -240,7 +240,7 @@ inline __aicore__ void att_QK(__gm__ half * x, __gm__ uint8_t * k, __gm__ int32_
     pipe_barrier(PIPE_ALL);
 }
 
-inline __aicore__ void att_SV(__gm__ half *x, __gm__ uint8_t * v, __gm__ int32_t *mapping, __gm__ half *z, int kM, int ori_kM, int head_size, int block_size, int kK,
+inline __aicore__ void att_SV(__gm__ half *x, __gm__ uint8_t * v, __gm__ int32_t *mapping, __gm__ half *z, int kM, int head_size, int block_size, int kK,
     int num_heads, int num_kv_heads, int head_idx, int M, int realK, int offsetM)
 {
     set_atomic_none();
@@ -313,11 +313,11 @@ inline __aicore__ void att_SV(__gm__ half *x, __gm__ uint8_t * v, __gm__ int32_t
             set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0 + pingpong_K * 2);
 
             int kv_head_idx = head_idx / (num_heads / num_kv_heads);
-            uint32_t head_offset_len = kv_head_idx * block_size * head_size;
+            uint32_t head_offset_len = kv_head_idx * head_size;
 
             uint32_t block_table_id = (uint32_t)(*((__gm__ int32_t *)mapping));
-            __gm__ half *K_gm_addr = ((__gm__ half *)v) + block_table_id * block_memsize + head_offset_len;
-            copy_to_l12d(B_cbuf_addr[pingpong_K], K_gm_addr, 0, 0, block_size, head_size, head_size, 1);
+            __gm__ half *V_gm_addr = ((__gm__ half *)v) + block_table_id * block_memsize + head_offset_len;
+            copy_to_l12d(B_cbuf_addr[pingpong_K], V_gm_addr, 0, 0, block_size, head_size, head_size, num_kv_heads);
 
             set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + pingpong_K * 2);
             set_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
@@ -337,8 +337,8 @@ inline __aicore__ void att_SV(__gm__ half *x, __gm__ uint8_t * v, __gm__ int32_t
                     set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0 + (1 - pingpong_K) * 2);
 
                     uint32_t block_table_id = (uint32_t)(*((__gm__ int32_t *)mapping + kidx + 1));
-                    __gm__ half *K_gm_addr = ((__gm__ half *)v) + block_table_id * block_memsize + head_offset_len;
-                    copy_to_l12d(B_cbuf_addr[1 - pingpong_K], K_gm_addr, 0, 0, block_size, head_size, head_size, 1);
+                    __gm__ half *V_gm_addr = ((__gm__ half *)v) + block_table_id * block_memsize + head_offset_len;
+                    copy_to_l12d(B_cbuf_addr[1 - pingpong_K], V_gm_addr, 0, 0, block_size, head_size, head_size, num_kv_heads);
 
                     set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + (1 - pingpong_K) * 2);
                 }
@@ -385,7 +385,7 @@ inline __aicore__ void att_SV(__gm__ half *x, __gm__ uint8_t * v, __gm__ int32_t
 
 inline __aicore__ void prefill_att_mix_aic(
     __gm__ uint8_t* q, __gm__ uint8_t* k, __gm__ uint8_t* qk, __gm__ uint8_t* block_table,
-    __gm__ uint8_t* padding_N, __gm__ uint8_t* prefix_lens,
+    __gm__ uint8_t* prefix_lens,
     __gm__ uint8_t* v, __gm__ uint8_t* out, __gm__ uint8_t* prompt_lens,
     __gm__ uint8_t* __restrict__ cum_prompt_len,
     uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks)
@@ -404,7 +404,9 @@ inline __aicore__ void prefill_att_mix_aic(
         uint32_t M = (uint32_t)(*((__gm__ int32_t *)prompt_lens + batch_idx));
 
         uint32_t kM = ROUND_UP(M, M <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
-        uint32_t kN = (uint32_t)(*((__gm__ int32_t *)padding_N + batch_idx));
+        uint32_t cached_tokens = (uint32_t)(*((__gm__ int32_t *)prefix_lens + batch_idx));
+        uint32_t kN = ROUND_UP(M + cached_tokens, block_size);
+        uint32_t kK = kN;
 
         uint32_t pM = TILESIZE_128;
         // 根据序列长度动态调整query的切分粒度pM，保证数据通过L2传递
@@ -422,8 +424,6 @@ inline __aicore__ void prefill_att_mix_aic(
         uint32_t qk_offset = block_num * pM * kN;
         uint32_t seq_num = kM / pM;
         __gm__ int32_t *blockTable_addr = ((__gm__ int32_t *)block_table) + max_num_blocks * batch_idx;
-        uint32_t cached_tokens = (uint32_t)(*((__gm__ int32_t *)prefix_lens + batch_idx));
-        uint32_t kK = (uint32_t)(*((__gm__ int32_t *)padding_N + batch_idx));
         int total_task_num = num_heads * seq_num;
         uint32_t query_addr_offset = cum_M * head_size * num_qkv_heads;
         pipe_barrier(PIPE_ALL);
@@ -479,7 +479,7 @@ inline __aicore__ void prefill_att_mix_aic(
             if (qk_idx % 2 == 0) {
                 qk_gm_addr = qk_gm_addr + qk_offset;
             }
-            att_SV(qk_gm_addr, v, blockTable_addr, out_gm_addr, pM, kM, head_size, block_size, kK, num_heads, num_kv_heads, head_idx, M, seq_idx * pM + cached_tokens + pM, seq_idx * pM);
+            att_SV(qk_gm_addr, v, blockTable_addr, out_gm_addr, pM, head_size, block_size, kK, num_heads, num_kv_heads, head_idx, M, seq_idx * pM + cached_tokens + pM, seq_idx * pM);
             qk_idx++;
         }
         pipe_barrier(PIPE_ALL);
@@ -653,7 +653,7 @@ inline __aicore__ void att_softmax_vector_kernel(__gm__ half *attn_weight_in, __
 
 inline __aicore__ void prefill_att_mix_aiv(
     __gm__ uint8_t* q, __gm__ uint8_t* k, __gm__ uint8_t* qk, __gm__ uint8_t* block_table,
-    __gm__ uint8_t* padding_N, __gm__ uint8_t* prefix_lens,
+    __gm__ uint8_t* prefix_lens,
     __gm__ uint8_t* v, __gm__ uint8_t* out, __gm__ uint8_t* prompt_lens,
     __gm__ uint8_t* __restrict__ cum_prompt_len,
     uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks)
@@ -670,8 +670,8 @@ inline __aicore__ void prefill_att_mix_aiv(
         uint32_t cur_prompt_len = (uint32_t)(*((__gm__ int32_t *)prompt_lens + batch_idx));
 
         uint32_t new_tokens = ROUND_UP(cur_prompt_len, cur_prompt_len <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
-        uint32_t num_tokens = (uint32_t)(*((__gm__ int32_t *)padding_N + batch_idx));
         uint32_t cached_tokens = (uint32_t)(*((__gm__ int32_t *)prefix_lens + batch_idx));
+        uint32_t num_tokens = ROUND_UP(cur_prompt_len + cached_tokens, block_size);
 
         uint32_t pM = TILESIZE_128;
         // 根据序列长度动态调整query的切分粒度pM，保证数据通过L2传递
@@ -728,16 +728,16 @@ inline __aicore__ void prefill_att_mix_aiv(
 
 extern "C" __global__ __aicore__ void prefill_att(
     __gm__ uint8_t* q, __gm__ uint8_t* k, __gm__ uint8_t* qk, __gm__ uint8_t* block_table,
-    __gm__ uint8_t* padding_N, __gm__ uint8_t* prefix_lens,
+    __gm__ uint8_t* prefix_lens,
     __gm__ uint8_t* v, __gm__ uint8_t* out, __gm__ uint8_t* prompt_lens,
     __gm__ uint8_t* __restrict__ cum_prompt_len,
     uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks)
 {
 #ifdef __DAV_C220_CUBE__
-    prefill_att_mix_aic(q, k, qk, block_table, padding_N, prefix_lens, v, out, prompt_lens,
+    prefill_att_mix_aic(q, k, qk, block_table, prefix_lens, v, out, prompt_lens,
                         cum_prompt_len, head_size, num_heads, num_kv_heads, block_size, batchSize, max_num_blocks);
 #elif __DAV_C220_VEC__
-    prefill_att_mix_aiv(q, k, qk, block_table, padding_N, prefix_lens, v, out, prompt_lens,
+    prefill_att_mix_aiv(q, k, qk, block_table, prefix_lens, v, out, prompt_lens,
                         cum_prompt_len, head_size, num_heads, num_kv_heads, block_size, batchSize, max_num_blocks);
 #endif
 }

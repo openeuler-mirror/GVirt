@@ -185,7 +185,6 @@ private:
     XTensor _prefillLastIdx;
     XTensor _cachedLens;
     XTensor _lens;
-    XTensor _padding;
     XTensor _cumPromptLens;
     XTensor _blockTables;
     XTensor _vGather;
