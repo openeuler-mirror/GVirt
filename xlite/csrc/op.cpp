@@ -19,6 +19,7 @@
 #include "aclrtlaunch_prefill_att_float16_t.h"
 #include "aclrtlaunch_prefill_att_bfloat16_t.h"
 #include "aclrtlaunch_decode_att.h"
+#include "aclrtlaunch_decode_att_bf16.h"
 #include "aclrtlaunch_matmul_float16_t.h"
 #include "aclrtlaunch_matmul_bfloat16_t.h"
 #include "aclrtlaunch_matmul_float.h"
@@ -275,11 +276,21 @@ void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &q
     uint32_t localHeads = nHeads / rt.tpSize();
     uint32_t localKvHeads = nKvHeads / rt.tpSize();
     localKvHeads = localKvHeads == 0 ? 1 : localKvHeads;
-    aclrtlaunch_decode_att(rt.aicNum, rt.stream, a2v.ptr, v2a.ptr, qkv.ptr, kCache.ptr,
-                           vCache.ptr, cachedLens.ptr, blockTables.ptr, qk.ptr, output.ptr,
-                           decodeIdx.ptr, cumPromptLens.ptr, batch, localHeads, headDim,
-                           blockSize, maxNumBlock, localKvHeads, maxM, localHeads + 2 * localKvHeads,
-                           0, 0);
+    if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 && output.dtype == FP16) {
+        aclrtlaunch_decode_att(rt.aicNum, rt.stream, a2v.ptr, v2a.ptr, qkv.ptr, kCache.ptr,
+                               vCache.ptr, cachedLens.ptr, blockTables.ptr, qk.ptr, output.ptr,
+                               decodeIdx.ptr, cumPromptLens.ptr, batch, localHeads, headDim,
+                               blockSize, maxNumBlock, localKvHeads, maxM, localHeads + 2 * localKvHeads,
+                               0, 0);
+    } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 && output.dtype == BF16) {
+        aclrtlaunch_decode_att_bf16(rt.aicNum, rt.stream, a2v.ptr, v2a.ptr, qkv.ptr, kCache.ptr,
+                                    vCache.ptr, cachedLens.ptr, blockTables.ptr, qk.ptr, output.ptr,
+                                    decodeIdx.ptr, cumPromptLens.ptr, batch, localHeads, headDim,
+                                    blockSize, maxNumBlock, localKvHeads, maxM, localHeads + 2 * localKvHeads,
+                                    0, 0);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
 }
 
 void XliteDsOpRopeBatch(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads,
