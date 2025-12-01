@@ -115,7 +115,13 @@ void XModel::Init(void)
     _cumPromptLens.Init({_c.maxBatch}, INT32, ptr);
 
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _prefillIdx.Init({_c.maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _prefillLastIdx.Init({_c.maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _decodeIdx.Init({_c.maxBatch}, INT32, ptr);
 
     size = _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize) * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
@@ -161,7 +167,9 @@ XModel::~XModel(void)
     CHECK_ACL(aclrtFree(_cachedLens.ptr));
     CHECK_ACL(aclrtFree(_lens.ptr));
     CHECK_ACL(aclrtFree(_cumPromptLens.ptr));
+    CHECK_ACL(aclrtFree(_prefillIdx.ptr));
     CHECK_ACL(aclrtFree(_prefillLastIdx.ptr));
+    CHECK_ACL(aclrtFree(_decodeIdx.ptr));
     CHECK_ACL(aclrtFree(_blockTables.ptr));
 
     if (_c.attnType == XMODEL_ATTN_MLA) {
@@ -192,6 +200,8 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
     uint32_t batch = attnMeta.lens.size();
     std::vector<uint32_t> lens(batch);
     std::vector<uint32_t> cachedLens(batch);
+    std::vector<uint32_t> prefillIdx(batch);
+    std::vector<uint32_t> decodeIdx(batch);
     std::vector<uint32_t> prefillLastIdx(batch);
     std::vector<uint32_t> cumPromptLens(batch);
     std::vector<uint32_t> position, slotMapping, blockTables;
@@ -213,22 +223,35 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
         _realM += lens[i];
         prefillLastIdx[i] = _realM - 1;
         if (attnMeta.isPrefills[i]) {
+            prefillIdx[_prefillBatch] = i;
             _prefillBatch++;
             _prefillLen = lens[i];
             _prefillLenPad = ROUND_UP(_prefillLen, _c.blockSize);
         } else if (lens[i] <= 2) {
+            decodeIdx[_decodeBatch] = i;
             _decodeBatch++;
         } else {
             std::cerr << __FILE__ << ":" << __LINE__ << ": invalid inputMeta" << i << ", decode len too long" << lens[i] << std::endl;
             return;
         }
     }
+
+    if (_realM > _c.maxM) {
+        std::cerr << __FILE__ << ":" << __LINE__ <<
+            ": invalid attnMeta realM(" << _realM << ") > maxM(" << _c.maxM << ")" << std::endl;
+        return;
+    }
+
     size = batch * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMemcpy(_lens.ptr, size, lens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     CHECK_ACL(aclrtMemcpy(_cachedLens.ptr, size, cachedLens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     CHECK_ACL(aclrtMemcpy(_cumPromptLens.ptr, size, cumPromptLens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     if (_prefillBatch > 0) {
+        CHECK_ACL(aclrtMemcpy(_prefillIdx.ptr, size, prefillIdx.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
         CHECK_ACL(aclrtMemcpy(_prefillLastIdx.ptr, size, prefillLastIdx.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    }
+    if (_decodeBatch > 0) {
+        CHECK_ACL(aclrtMemcpy(_decodeIdx.ptr, size, decodeIdx.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     }
 
     position.resize(_realM);
@@ -321,7 +344,7 @@ XTensor& XModel::ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
                             _prefillLenPad, nLocalHeads, 0, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.blockSize);
     XliteDsOpPrefillMix(rt, attnMlaOut, attnMlaAlpha, attnMlaMax, attnMlaSum, attnQWithQr, attnKvFull,
                         attnMlaQK, attnMlaTmp, _cachedLens, attnV, attnPrefillOut, attnQkcAbsorb,
-                        _lens, attnMlaTmp, attnMlaTmp, attnMlaTmp, _cumPromptLens,
+                        _lens, attnMlaTmp, attnMlaTmp, attnMlaTmp, _prefillIdx, _cumPromptLens,
                         _c.vHeadDim, nLocalHeads, nLocalHeads, _c.blockSize, _prefillBatch, 0, 0, 0, 0, _c.softmaxScale);
 
     rt.pool->PutTensor(attnQWithQr);
@@ -414,7 +437,7 @@ void XModel::XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTe
     if (_prefillBatch > 0) {
         XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2 * _c.maxM}, input.dtype);
         XliteOpPrefillAttention(rt, input, kCache, qk, _blockTables, _cachedLens,
-                                vCache, output, _lens, _cumPromptLens,
+                                vCache, output, _lens, _prefillIdx, _cumPromptLens,
                                 _c.headDim, _c.nHeads, _c.nKvHeads, _c.blockSize,
                                 _prefillBatch, _maxNumBlocks);
         rt.pool->PutTensor(qk);
@@ -422,7 +445,7 @@ void XModel::XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTe
     if (_decodeBatch > 0) {
         XTensor &qk = rt.pool->GetTensor({_realM, _c.nHeads / _c.defTpSize, _c.maxSeqLen}, input.dtype);
         XliteOpDecodeAttention(rt, _a2v, _v2a, input, kCache, vCache, _cachedLens, _blockTables, qk,
-                               output, _cumPromptLens, _decodeBatch, _c.nHeads, _c.headDim,
+                               output, _decodeIdx, _cumPromptLens, _decodeBatch, _c.nHeads, _c.headDim,
                                _c.blockSize, _maxNumBlocks, _c.nKvHeads, _c.maxM);
         rt.pool->PutTensor(qk);
     }
@@ -455,7 +478,6 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 }
 
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer,
-                         XModelAttnMeta& attnMeta,
                          std::vector<std::pair<XTensor, XTensor>>& kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
@@ -603,29 +625,18 @@ void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     }
 }
 
-void XModel::ForwardLayers(XRuntime &rt, XTensor &input,
-                     XModelAttnMeta& attnMeta,
-                     std::vector<std::pair<XTensor, XTensor>>& kvCache,
-                     XTensor &freqsCis, XTensor &h)
+void XModel::ForwardLayersWithInputsEmbeds(XRuntime &rt, XTensor &x,
+                                           std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                           XTensor &freqsCis, XTensor &h)
 {
-    uint32_t m = input.shape[0];
     bool fuseAddNorm = embed.dtype == FP16 ? true : false;
 
-    if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": check runtime communication setting failed" << std::endl;
-        return;
-    }
-
-    XTensor &x = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype);
-
-    PrepareAttn(rt, attnMeta);
-    ForwardParallelEmbed(rt, input, embed, x);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (!fuseAddNorm || i == 0) {
             XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[0], x.shape[1]);
         }
 
-        ForwardAttn(rt, i, attnMeta, kvCache, freqsCis, h);
+        ForwardAttn(rt, i, kvCache, freqsCis, h);
 
         if (!fuseAddNorm) {
             XliteOpAdd(rt, x, h, x);
@@ -648,7 +659,15 @@ void XModel::ForwardLayers(XRuntime &rt, XTensor &input,
     } else {
         XliteOpAddAndRmsNorm(rt, x, h, norm, _c.normEps, h);
     }
-    
+}
+
+void XModel::ForwardLayers(XRuntime &rt, XTensor &input,
+                     std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                     XTensor &freqsCis, XTensor &h)
+{
+    XTensor &x = rt.pool->GetTensor({input.shape[0], _c.hiddenSize}, embed.dtype);
+    ForwardParallelEmbed(rt, input, embed, x);
+    ForwardLayersWithInputsEmbeds(rt, x, kvCache, freqsCis, h);
     rt.pool->PutTensor(x);
 }
 
@@ -671,6 +690,24 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output)
     }
 }
 
+void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input,
+                                     XModelAttnMeta& attnMeta,
+                                     std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                     XTensor &freqsCis, XTensor &output)
+{
+    if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": check runtime communication setting failed" << std::endl;
+        return;
+    }
+    if (!rt.pool) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": xlite runtime's tensor pool not inited" << std::endl;
+        return;
+    }
+
+    PrepareAttn(rt, attnMeta);
+    ForwardLayersWithInputsEmbeds(rt, input, kvCache, freqsCis, output);
+}
+
 void XModel::Forward(XRuntime &rt, XTensor &input,
                      XModelAttnMeta& attnMeta,
                      std::vector<std::pair<XTensor, XTensor>>& kvCache,
@@ -680,12 +717,21 @@ void XModel::Forward(XRuntime &rt, XTensor &input,
         std::cerr << __FILE__ << ":" << __LINE__ << ": check runtime communication setting failed" << std::endl;
         return;
     }
+    if (!rt.pool) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": xlite runtime's tensor pool not inited" << std::endl;
+        return;
+    }
 
-    ForwardLayers(rt, input, attnMeta, kvCache, freqsCis, output);
+    PrepareAttn(rt, attnMeta);
+    ForwardLayers(rt, input, kvCache, freqsCis, output);
 }
 
 void XModel::ComputeLogits(XRuntime &rt, XTensor &input, XTensor &output)
 {
+    if (!rt.pool) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": xlite runtime's tensor pool not inited" << std::endl;
+        return;
+    }
 
     XTensor localOutput({input.shape[0], head.shape[0]}, head.dtype, output.ptr);
     XliteOpMatmul(rt, input, head, localOutput, _c.weightNZ);
@@ -705,9 +751,36 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input,
         std::cerr << __FILE__ << ":" << __LINE__ << ": check runtime communication setting failed" << std::endl;
         return;
     }
+    if (!rt.pool) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": xlite runtime's tensor pool not inited" << std::endl;
+        return;
+    }
 
     XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype);
-    ForwardLayers(rt, input, attnMeta, kvCache, freqsCis, h);
+    PrepareAttn(rt, attnMeta);
+    ForwardLayers(rt, input, kvCache, freqsCis, h);
     ForwardGetLogits(rt, h, output);
     rt.pool->PutTensor(h);
+}
+
+size_t XModel::GetTensorPoolSize(void)
+{
+    int dtypeSize = XDtypeBit(embed.dtype) / 8;
+    size_t attnSize, ffnSize;
+    size_t size = 0;
+
+    // TODO
+    if (_c.attnType != XMODEL_ATTN_MHA ||
+        _c.nDenseLayers != _c.nLayers) {
+        return 1024;
+    }
+
+    size = _c.maxM * _c.hiddenSize * 2 * dtypeSize;
+    attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
+    attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
+    ffnSize = _c.maxM * mlpUpGate[0].shape[0] * dtypeSize;
+    ffnSize += _c.maxM * mlpDown[0].shape[1] * dtypeSize;
+    size += attnSize > ffnSize ? attnSize : ffnSize;
+
+    return (size >> MB_BIT) + 128;
 }

@@ -43,12 +43,12 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
 void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &qk,
                              XTensor &blockTables, XTensor &cachedLens,
                              XTensor &vCache, XTensor &output, XTensor &lens,
-                             XTensor &cumPromptLens, uint32_t headDim,
+                             XTensor &prefillIndex, XTensor &cumPromptLens, uint32_t headDim,
                              uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize,
                              uint32_t batch, uint32_t maxNumBlock);
 void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &qkv,
                             XTensor &kCache, XTensor &vCache, XTensor &cachedLens,
-                            XTensor &blockTables, XTensor &qk, XTensor &output,
+                            XTensor &blockTables, XTensor &qk, XTensor &output, XTensor &decodeIdx,
                             XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
                             uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
                             uint32_t nKvHeads, uint32_t maxM);
@@ -70,7 +70,7 @@ void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &c
 void XliteDsOpPrefillMix(XRuntime &rt, XTensor &out, XTensor &alpha, XTensor &max, XTensor &sum,
                          XTensor &q, XTensor &k, XTensor &qk, XTensor &blockTables,
                          XTensor &cachedLens, XTensor &v, XTensor &mixOut, XTensor &mixOutFinal, XTensor &promptLens,
-                         XTensor &attnMask, XTensor &attnMaskAddr, XTensor &speculateLens,
+                         XTensor &attnMask, XTensor &attnMaskAddr, XTensor &speculateLens, XTensor &prefillIndex,
                          XTensor &cumPromptLens, uint32_t headSize, uint32_t numHeads, uint32_t numKVHeads,
                          uint32_t blockSize, uint32_t batchSize, uint32_t mappingLen, uint32_t doTreeAttnMask,
                          uint32_t offsetM, uint32_t mSlice, float scale);

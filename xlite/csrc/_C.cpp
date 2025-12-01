@@ -27,6 +27,11 @@ public:
                              XModelAttnMeta& attnMeta,
                              std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
                              at::Tensor &freqsCis, at::Tensor &output);
+    void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
+                                 XModelAttnMeta& attnMeta,
+                                 std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                                 at::Tensor &freqsCis, at::Tensor &output);
+    size_t GetTensorPoolSize(void);
 
     // weights
     at::Tensor embed;
@@ -238,7 +243,37 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
 
     _model->ForwardAndGetLogits(rt, _input, attnMeta, _kv, _freqsCis, _output);
     rt.Synchronize();
-} 
+}
+
+void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
+                                      XModelAttnMeta& attnMeta,
+                                      std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                                      at::Tensor &freqsCis, at::Tensor &output)
+{
+    XTensor _input, _output, _freqsCis;
+
+    InitXTensor(_input, input);
+    InitXTensor(_output, output);
+    InitXTensor(_freqsCis, freqsCis);
+
+    if (kvCache.size() != _kv.size()) {
+        std::cerr << __func__ << ": check kv cache failed!" << std::endl;
+        return;
+    }
+
+    for (uint64_t i = 0; i < _kv.size(); i++) {
+        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first), TensorPtr(kvCache[i].first));
+        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
+    }
+
+    _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _freqsCis, _output);
+    rt.Synchronize();
+}
+
+size_t _CModel::GetTensorPoolSize(void)
+{
+    return _model->GetTensorPoolSize();
+}
 
 void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
 {
@@ -363,10 +398,10 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
 
 void AttentionPrefill(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &qk, at::Tensor &blockTables,
                       at::Tensor &cachedLens, at::Tensor &vCache, at::Tensor &output,
-                      at::Tensor &lens, at::Tensor &cumPromptLens, uint32_t headDim,
+                      at::Tensor &lens, at::Tensor &prefillIndex, at::Tensor &cumPromptLens, uint32_t headDim,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
 {
-    XTensor _qkv, _kCache, _qk, _blockTables, _cachedLens, _vCache, _output, _lens, _cumPromptLens;
+    XTensor _qkv, _kCache, _qk, _blockTables, _cachedLens, _vCache, _output, _lens, _prefillIndex, _cumPromptLens;
 
     InitXTensor(_qkv, qkv);
     InitXTensor(_kCache, kCache);
@@ -376,16 +411,17 @@ void AttentionPrefill(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Ten
     InitXTensor(_vCache, vCache);
     InitXTensor(_output, output);
     InitXTensor(_lens, lens);
+    InitXTensor(_prefillIndex, prefillIndex);
     InitXTensor(_cumPromptLens, cumPromptLens);
     XliteOpPrefillAttention(rt, _qkv, _kCache, _qk, _blockTables, _cachedLens,
-                            _vCache, _output, _lens, _cumPromptLens,
+                            _vCache, _output, _lens, _prefillIndex, _cumPromptLens,
                             headDim, nHeads, nKvHeads, blockSize, batch, maxNumBlock);
     rt.Synchronize();
 }
 
 void DecodeAttentionMix(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tensor &qkv,
                         at::Tensor &kCache, at::Tensor &vCache, at::Tensor &cachedLens,
-                        at::Tensor &blockTables, at::Tensor &output,
+                        at::Tensor &blockTables, at::Tensor &output, at::Tensor &decodeIdx,
                         at::Tensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
                         uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
                         uint32_t nKvHeads, uint32_t maxM)
@@ -402,10 +438,11 @@ void DecodeAttentionMix(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tens
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
     InitXTensor(_output, output);
+    InitXTensor(_decodeIdx, decodeIdx);
     InitXTensor(_cumPromptLens, cumPromptLens);
 
     XliteOpDecodeAttention(rt, _a2v, _v2a, _qkv, _kCache, _vCache, _cachedLens,
-                           _blockTables, qk, _output, _cumPromptLens, batch, nHeads,
+                           _blockTables, qk, _output, _decodeIdx, _cumPromptLens, batch, nHeads,
                            headDim, blockSize, maxNumBlock, nKvHeads, maxM);
     rt.Synchronize();
 }
@@ -425,9 +462,10 @@ void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &n
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
-            py::arg("devid"), py::arg("size"), py::arg("rank") = 0,
+            py::arg("devid"), py::arg("size") = 0, py::arg("rank") = 0,
             py::arg("tp_size") = 1, py::arg("dp_size") = 1)
-        .def("update_core_num", &XRuntime::UpdateCoreNum);
+        .def("update_core_num", &XRuntime::UpdateCoreNum)
+        .def("init_tensor_pool", &XRuntime::InitTensorPool);
 
     py::class_<XModelConfig>(m, "ModelConfig")
         .def(py::init<>())
@@ -511,7 +549,9 @@ PYBIND11_MODULE(_C, m) {
             py::arg("config"), py::arg("rank") = 0)
         .def("forward", &_CModel::Forward, py::call_guard<py::gil_scoped_release>())
         .def("compute_logits", &_CModel::ComputeLogits, py::call_guard<py::gil_scoped_release>())
-        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogits, py::call_guard<py::gil_scoped_release>());
+        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogits, py::call_guard<py::gil_scoped_release>())
+        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbeds, py::call_guard<py::gil_scoped_release>())
+        .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize);
 
     py::class_<XCoreAssigner>(m, "CoreAssigner")
         .def(py::init<float>(), py::arg("prefillRatio"))

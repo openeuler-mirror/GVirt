@@ -28,7 +28,7 @@ public:
     __aicore__ inline PrefillAttn() {}
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR qk, GM_ADDR blockTable,
                                 GM_ADDR prefixLens, GM_ADDR v, GM_ADDR out,
-                                GM_ADDR promptLens, GM_ADDR cumPromptLen,
+                                GM_ADDR promptLens, GM_ADDR prefillIndex, GM_ADDR cumPromptLen,
                                 uint32_t headSize, uint32_t nHeads, uint32_t nKVHeads,
                                 uint32_t blockSize, uint32_t batchSize, uint32_t maxNumBlocks)
     {
@@ -42,6 +42,7 @@ public:
         this->promptLens = (__gm__ int32_t *)promptLens;
         this->prefixLens = (__gm__ int32_t *)prefixLens;
         this->blockTable = (__gm__ int32_t *)blockTable;
+        this->prefillIndex = (__gm__ int32_t *)prefillIndex;
 
         this->headSize = headSize;
         this->nHeads = nHeads;
@@ -284,10 +285,11 @@ public:
         uint32_t nQKVHeads = nHeads + nKVHeads * 2;
 
         for (int batch = 0; batch < batchSize; batch++) {
-            uint32_t cumM = (uint32_t)(*(cumPromptLen + batch));
-            uint32_t m = (uint32_t)(*(promptLens + batch));
+            uint32_t realBatch = (uint32_t)(*(prefillIndex + batch));
+            uint32_t cumM = (uint32_t)(*(cumPromptLen + realBatch));
+            uint32_t m = (uint32_t)(*(promptLens + realBatch));
             uint32_t padM = ROUND_UP(m, m <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
-            uint32_t cachedTokens = (uint32_t)(*(prefixLens + batch));
+            uint32_t cachedTokens = (uint32_t)(*(prefixLens + realBatch));
             uint32_t padN = ROUND_UP(m + cachedTokens, blockSize);
 
             uint32_t m0 = TILESIZE_128;
@@ -305,7 +307,7 @@ public:
             }
             uint32_t qkOffset = block_num * m0 * padN;
             uint32_t seqNum = padM / m0;
-            __gm__ int32_t *curBlockTable = blockTable + maxNumBlocks * batch;
+            __gm__ int32_t *curBlockTable = blockTable + maxNumBlocks * realBatch;
             int taskNum = nHeads * seqNum;
             uint32_t qOffset = cumM * headSize * nQKVHeads;
             pipe_barrier(PIPE_ALL);
@@ -500,9 +502,10 @@ public:
         int qkIdx = 0;
 
         for (int batch = 0; batch < batchSize; batch++) {
-            uint32_t m = (uint32_t)(*(promptLens + batch));
+            uint32_t realBatch = (uint32_t)(*(prefillIndex + batch));
+            uint32_t m = (uint32_t)(*(promptLens + realBatch));
             uint32_t padM = ROUND_UP(m, m <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
-            uint32_t cachedTokens = (uint32_t)(*(prefixLens + batch));
+            uint32_t cachedTokens = (uint32_t)(*(prefixLens + realBatch));
             uint32_t padN = ROUND_UP(m + cachedTokens, blockSize);
 
             uint32_t m0 = TILESIZE_128;
@@ -569,6 +572,7 @@ private:
     __gm__ int32_t *promptLens;
     __gm__ int32_t *prefixLens;
     __gm__ int32_t *blockTable;
+    __gm__ int32_t *prefillIndex;
     uint32_t headSize;
     uint32_t nHeads;
     uint32_t nKVHeads;
@@ -582,13 +586,13 @@ extern "C" __global__ __aicore__ void prefill_att_##dtype( \
     GM_ADDR q, GM_ADDR k, GM_ADDR qk, GM_ADDR block_table, \
     GM_ADDR prefix_lens, \
     GM_ADDR v, GM_ADDR out, GM_ADDR prompt_lens, \
-    GM_ADDR __restrict__ cum_prompt_len, \
+    GM_ADDR __restrict__ prefill_index, GM_ADDR __restrict__ cum_prompt_len, \
     uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks) \
 { \
     PrefillAttn<dtype, calcDtype> op; \
     op.Init(q, k, qk, block_table, \
             prefix_lens, v, out, \
-            prompt_lens, cum_prompt_len, \
+            prompt_lens, prefill_index, cum_prompt_len, \
             head_size, num_heads, num_kv_heads, \
             block_size, batchSize, max_num_blocks); \
     op.Run(); \

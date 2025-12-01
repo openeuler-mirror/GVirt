@@ -15,6 +15,7 @@ struct decode_att_mix_context {
     __gm__ uint32_t *a2v_gm;
     __gm__ int32_t *cum_prompt_len;
     __gm__ int32_t *mapping;
+    __gm__ int32_t *decode_index;
     __gm__ int32_t *cached_lens;
     __gm__ half *q;
     __gm__ half *k;
@@ -48,7 +49,7 @@ inline __aicore__ void init_decode_att_mix_context(decode_att_mix_context *ctx,
                                                    __gm__ uint8_t *q, __gm__ uint8_t *k, __gm__ uint8_t *v,
                                                    __gm__ uint8_t *cached_lens, __gm__ uint8_t *mapping,
                                                    __gm__ uint8_t *qk, __gm__ uint8_t *o,
-                                                   __gm__ uint8_t *cum_prompt_len,
+                                                   __gm__ uint8_t *decode_index, __gm__ uint8_t *cum_prompt_len,
                                                    uint32_t num_tokens, uint32_t num_heads, uint32_t head_size,
                                                    uint32_t block_size, uint32_t mapping_len, uint32_t num_kv_heads,
                                                    uint32_t max_context_len, uint32_t num_qkv_heads, uint32_t m_offset,
@@ -57,6 +58,7 @@ inline __aicore__ void init_decode_att_mix_context(decode_att_mix_context *ctx,
     ctx->a2v_gm = (__gm__ uint32_t*)a2v;
     ctx->v2a_gm = (__gm__ uint32_t*)v2a;
     ctx->cum_prompt_len = (__gm__ int32_t*)cum_prompt_len;
+    ctx->decode_index = (__gm__ int32_t*)decode_index;
     ctx->cached_lens = (__gm__ int32_t*)cached_lens;
     ctx->mapping = (__gm__ int32_t*)mapping;
 
@@ -498,7 +500,8 @@ inline __aicore__ void decode_mix_process_pv(decode_att_mix_context *ctx)
         }
         uint32_t kv_head_idx = i % ctx->num_kv_heads;
         uint32_t token_idx = i / ctx->num_kv_heads;
-        uint32_t cumM = (uint32_t)*(ctx->cum_prompt_len + token_idx);
+        uint32_t real_token_idx = (uint32_t)*(ctx->decode_index + token_idx);
+        uint32_t cumM = (uint32_t)*(ctx->cum_prompt_len + real_token_idx);
         if (ctx->m_slice > 0 && (cumM >= ctx->m_offset + ctx->m_slice || cumM < ctx->m_offset)) {
             continue;
         }
@@ -506,8 +509,8 @@ inline __aicore__ void decode_mix_process_pv(decode_att_mix_context *ctx)
         uint32_t head_offset_len = kv_head_idx * head_size;
         wait_aic_aiv_flag(ctx->v2a_gm, head_num_in_group, q_offset, head_size);
 
-        decode_mix_pre_copy_in_for_pv(ctx, token_idx, head_offset_len, q_offset);
-        decode_mix_compute_pv(ctx, token_idx, head_offset_len, q_offset);
+        decode_mix_pre_copy_in_for_pv(ctx, real_token_idx, head_offset_len, q_offset);
+        decode_mix_compute_pv(ctx, real_token_idx, head_offset_len, q_offset);
 
         set_flag(PIPE_FIX, PIPE_S, EVENT_ID1);
         wait_flag(PIPE_FIX, PIPE_S, EVENT_ID1);
@@ -602,11 +605,12 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
     for (process = id; process < process_num; process += uint32_t(block_num * 2)) {
         uint32_t token_idx = process / ctx->num_heads;
 
-        uint32_t cumM = (uint32_t)*(ctx->cum_prompt_len + token_idx);
+        uint32_t real_token_idx = (uint32_t)*(ctx->decode_index + token_idx);
+        uint32_t cumM = (uint32_t)*(ctx->cum_prompt_len + real_token_idx);
         if (ctx->m_slice > 0 && (cumM >= ctx->m_offset + ctx->m_slice || cumM < ctx->m_offset)) {
             continue;
         }
-        uint32_t context_len = (uint32_t)*(ctx->cached_lens + token_idx) + 1;
+        uint32_t context_len = (uint32_t)*(ctx->cached_lens + real_token_idx) + 1;
 
         __gm__ half *qk_gm_addr = ctx->qk + process * ctx->max_context_len;
 
@@ -866,7 +870,7 @@ extern "C" __global__ __aicore__ void decode_att(__gm__ uint8_t* a2v, __gm__ uin
                                                  __gm__ uint8_t* q, __gm__ uint8_t* k, __gm__ uint8_t* v,
                                                  __gm__ uint8_t* cached_lens, __gm__ uint8_t* mapping,
                                                  __gm__ uint8_t* qk, __gm__ uint8_t* o,
-                                                 __gm__ uint8_t* cum_prompt_len,
+                                                 __gm__ uint8_t* decode_index, __gm__ uint8_t* cum_prompt_len,
                                                  uint32_t num_tokens, uint32_t num_heads, uint32_t head_size,
                                                  uint32_t block_size, uint32_t mapping_len, uint32_t num_kv_heads,
                                                  uint32_t max_context_len, uint32_t num_qkv_heads, uint32_t m_offset,
@@ -874,7 +878,7 @@ extern "C" __global__ __aicore__ void decode_att(__gm__ uint8_t* a2v, __gm__ uin
 {
     decode_att_mix_context ctx{};
     init_decode_att_mix_context(&ctx, a2v, v2a, q, k, v, cached_lens, mapping, qk,
-                                o, cum_prompt_len, num_tokens, num_heads, head_size,
+                                o, decode_index, cum_prompt_len, num_tokens, num_heads, head_size,
                                 block_size, mapping_len, num_kv_heads, max_context_len, num_qkv_heads,
                                 m_offset, m_slice);
 #ifdef __DAV_C220_CUBE__

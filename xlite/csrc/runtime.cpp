@@ -22,9 +22,11 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     CHECK_ACL(aclrtSetDevice(devid));
     CHECK_ACL(aclrtCreateStream(&stream));
 
-    pool = new XTensorPool(sizeMB << MB_BIT);
-    if (pool->Init()) {
-        return;
+    if (sizeMB != 0) {
+        pool = new XTensorPool(sizeMB << MB_BIT);
+        if (pool->Init()) {
+            return;
+        }
     }
 
     _rankSize = tpSize * dpSize;
@@ -152,4 +154,14 @@ void XRuntime::UpdateCoreNum(float blockDimUtilization)
 {
     aicNum = static_cast<uint32_t>(std::round(static_cast<float>(originAicNum) * blockDimUtilization));
     aivNum = static_cast<uint32_t>(std::round(static_cast<float>(originAivNum) * blockDimUtilization));
+}
+
+int XRuntime::InitTensorPool(size_t sizeMB)
+{
+    if (pool) {
+        std::cout << "pool already inited!" << std::endl;
+        return 0;
+    }
+    pool = new XTensorPool(sizeMB << MB_BIT);
+    return pool->Init();
 }
