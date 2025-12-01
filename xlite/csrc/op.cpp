@@ -16,7 +16,8 @@
 #include "aclrtlaunch_silu_and_mul_bfloat16_t.h"
 #include "aclrtlaunch_rope_and_cache_float16_t.h"
 #include "aclrtlaunch_rope_and_cache_bfloat16_t.h"
-#include "aclrtlaunch_prefill_att.h"
+#include "aclrtlaunch_prefill_att_float16_t.h"
+#include "aclrtlaunch_prefill_att_bfloat16_t.h"
 #include "aclrtlaunch_decode_att.h"
 #include "aclrtlaunch_matmul_float16_t.h"
 #include "aclrtlaunch_matmul_bfloat16_t.h"
@@ -252,9 +253,13 @@ void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
     uint32_t localKvHeads = nKvHeads / rt.tpSize();
     localKvHeads = localKvHeads == 0 ? 1 : localKvHeads;
     if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 && output.dtype == FP16) {
-        aclrtlaunch_prefill_att(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, qk.ptr, blockTables.ptr,
-                                cachedLens.ptr, vCache.ptr, output.ptr, lens.ptr, cumPromptLens.ptr,
-                                headDim, localHeads, localKvHeads, blockSize, batch, maxNumBlock);
+        aclrtlaunch_prefill_att_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, qk.ptr, blockTables.ptr,
+                                          cachedLens.ptr, vCache.ptr, output.ptr, lens.ptr, cumPromptLens.ptr,
+                                          headDim, localHeads, localKvHeads, blockSize, batch, maxNumBlock);
+    } else if(qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 && output.dtype == BF16) {
+        aclrtlaunch_prefill_att_bfloat16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, qk.ptr, blockTables.ptr,
+                                          cachedLens.ptr, vCache.ptr, output.ptr, lens.ptr, cumPromptLens.ptr,
+                                          headDim, localHeads, localKvHeads, blockSize, batch, maxNumBlock);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

@@ -34,7 +34,7 @@ TILESIZE_OF_QUERY = 128
 AICNUM = 20
 max_m = MAX_SEQ_LEN if MAX_SEQ_LEN > MAX_BATCH_SIZE else MAX_BATCH_SIZE
 out_features = (N_HEADS + 2 * N_KV_HEADS) * HEAD_DIM
-dtype_list = [torch.float16]
+dtype_list = [torch.float16, torch.bfloat16]
 
 for test_dtype in dtype_list:
     torch.set_default_dtype(test_dtype)

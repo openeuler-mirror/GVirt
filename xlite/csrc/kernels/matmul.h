@@ -70,7 +70,6 @@ public:
         } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
             this->kBlockSize = 16;
         }
-        this->cubeBlockSize = mBlockSize * kBlockSize;
 
         kDtileSize = k0 << 1;
         kQtileSize = k0 >> 2;
@@ -106,58 +105,6 @@ public:
         off = 0;
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-    }
-
-    __aicore__ inline void CopyGmToL1Nd2Nz(LocalTensor<Dtype> dst, GlobalTensor<Dtype> src, int nValue, int dValue, int srcDValue, int dstNzC0Stride)
-    {
-        Nd2NzParams nd2nzParams(1 /* NdNum */, nValue, dValue, 0 /* srcNdMatrixStride */, srcDValue, dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
-        DataCopy(dst, src, nd2nzParams);
-    }
-
-    __aicore__ inline void CopyGmToL1(LocalTensor<Dtype> dst, GlobalTensor<Dtype> src, int nElem)
-    {
-        int burstLen = DIV_ROUND_UP(nElem * sizeof(Dtype), 32);
-        DataCopyParams repeatParams(1, burstLen, 0, 0);
-        DataCopy(dst, src, repeatParams);
-    }
-
-    __aicore__ inline void CopyToL0ACol(LocalTensor<Dtype> dst, LocalTensor<Dtype> src, int mBlockNum, int kBlockStart, int kBlockNum)
-    {
-        LoadData2dParams params(0 /* startIndex */, mBlockNum /* repeatTimes */, 1 /* srcStride */, 0 /* sid */, kBlockNum - 1 /* dstGap */, 0, inc);
-        for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
-            LoadData(dst[(k - kBlockStart) * cubeBlockSize], src[k * mBlockNum * cubeBlockSize], params);
-        }
-    }
-
-    __aicore__ inline void CopyToL0BTCol(LocalTensor<Dtype> dst, LocalTensor<Dtype> src, int nBlockNum, int kBlockStart, int kBlockNum)
-    {
-        LoadData2dParams params(0, kBlockNum * nBlockNum, 1, 0, 0, 0, inc);
-        LoadData(dst, src[kBlockStart * nBlockNum * cubeBlockSize], params);
-    }
-
-    __aicore__ inline void CalMmad(LocalTensor<float> c, LocalTensor<Dtype> a, LocalTensor<Dtype> b, int m, int n, int k, bool init)
-    {
-        MmadParams params;
-        params.m = m;
-        params.n = n;
-        params.k = k;
-        params.cmatrixInitVal = init;
-        Mmad(c, a, b, params);
-    }
-
-    __aicore__ inline void CopyToGm(GlobalTensor<Dtype> dst, LocalTensor<float> src, int mSize, int nSize, int srcStride, int dstStride)
-    {
-        QuantMode_t mode;
-        if constexpr (std::is_same<Dtype, float>::value) {
-            mode = NoQuant;
-        } else if constexpr (std::is_same<Dtype, float16_t>::value) {
-            mode = F322F16;
-        } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            mode = F322BF16;
-        }
-        DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
-        SetFixpipeNz2ndFlag(1, 1, 1);
-        DataCopy(dst, src, param);
     }
 
     __aicore__ inline void GetMNBlockIdx(int32_t loopIdx, int32_t mLoop, int32_t nLoop, int32_t swizzlDirection,
@@ -301,7 +248,7 @@ public:
                 if (kIdx4 == 0) {
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                 }
-                CopyToL0BTCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum, kIdx4 * kQtileBlockNum, kActualBlockNum);
+                CopyToL0BCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum, kIdx4 * kQtileBlockNum, kActualBlockNum);
                 if (kIdx4 == 3) {
                     SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
                     pingpongL1B ^= 1;
@@ -358,7 +305,6 @@ private:
     uint64_t mBlockSize;
     uint64_t nBlockSize;
     uint64_t kBlockSize;
-    uint64_t cubeBlockSize;
     int kDtileSize;
     int kQtileSize;
     int32_t swizzlCount;

@@ -10,6 +10,9 @@
 #ifndef _XLITE_KERNEL_MACRO_H_
 #define _XLITE_KERNEL_MACRO_H_
 
+#include "kernel_operator.h"
+using namespace AscendC;
+
 #define ROUND_DOWN(x, y) (((x) / (y)) * (y))
 #define ROUND_UP(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
 #define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
@@ -80,4 +83,223 @@ inline __aicore__ uint64_t set_vector_1src_xt(uint64_t repeatDestStride, uint64_
 
     return config;
 }
+
+template <typename Dtype>
+__aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src, int nValue, int dValue, int srcDValue, int dstNzC0Stride)
+{
+    Nd2NzParams nd2nzParams(1 /* NdNum */, nValue, dValue, 0 /* srcNdMatrixStride */, srcDValue, dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
+    DataCopy(dst, src, nd2nzParams);
+}
+
+template <typename Dtype>
+__aicore__ inline void CopyGmToL1(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src, int nElem)
+{
+    int burstLen = DIV_ROUND_UP(nElem * sizeof(Dtype), 32);
+    DataCopyParams repeatParams(1, burstLen, 0, 0);
+    DataCopy(dst, src, repeatParams);
+}
+
+template <typename Dtype>
+__aicore__ inline void CopyToL0ACol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src, int mBlockNum, int kBlockStart, int kBlockNum)
+{
+    int cubeSize = 512 / sizeof(Dtype);
+    LoadData2dParams params(0 /* startIndex */, mBlockNum /* repeatTimes */, 1 /* srcStride */, 0 /* sid */, kBlockNum - 1 /* dstGap */, 0, inc);
+    for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
+        LoadData(dst[(k - kBlockStart) * cubeSize], src[k * mBlockNum * cubeSize], params);
+    }
+}
+
+template <typename Dtype>
+__aicore__ inline void CopyToL0BCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src, int nBlockNum, int kBlockStart, int kBlockNum)
+{
+    int cubeSize = 512 / sizeof(Dtype);
+    LoadData2dParams params(0, kBlockNum * nBlockNum, 1, 0, 0, 0, inc);
+    LoadData(dst, src[kBlockStart * nBlockNum * cubeSize], params);
+}
+
+template <typename Dtype>
+__aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src, int nBlockNum, int kBlockStart, int kBlockNum)
+{
+    int cubeSize = 512 / sizeof(Dtype);
+    LoadData2dParams params(0, nBlockNum, kBlockNum, 0, 0, 1, inc);
+    for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
+        LoadData(dst[k * nBlockNum * cubeSize], src[k * cubeSize], params);
+    }
+}
+
+template <typename Dtype>
+__aicore__ inline void CalMmad(const LocalTensor<float> &c, const LocalTensor<Dtype> &a, const LocalTensor<Dtype> &b, int m, int n, int k, bool init, int unit = 0)
+{
+    MmadParams params;
+    params.m = m;
+    params.n = n;
+    params.k = k;
+    params.cmatrixInitVal = init;
+    params.unitFlag = unit;
+    Mmad(c, a, b, params);
+}
+
+template <typename Dtype>
+inline __aicore__ void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTensor<float> &src, int mSize, int nSize, int srcStride, int dstStride, uint8_t unitFlag)
+{
+    QuantMode_t mode;
+    if constexpr (std::is_same<Dtype, float>::value) {
+        mode = NoQuant;
+    } else if constexpr (std::is_same<Dtype, float16_t>::value) {
+        mode = F322F16;
+    } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+        mode = F322BF16;
+    }
+#ifdef __DAV_C220_CUBE__
+    set_nd_para(0x1);
+    copy_matrix_cc_to_gm((__gm__ Dtype*)dst.GetPhyAddr(), (__cc__ float*)src.GetPhyAddr(),
+        0 /* fixpipeInfo.sid */, nSize, mSize, dstStride,
+        srcStride, unitFlag, mode,
+        0 /* static_cast<uint8_t>(fixpipeInfo.reluEn) */,
+        0 /* fixpipeInfo.channelSplit */,
+        1 /* fixpipeInfo.nz2ndEn */);
+#endif
+}
+
+template <typename Dtype>
+__aicore__ inline void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTensor<float> &src, int mSize, int nSize, int srcStride, int dstStride)
+{
+    QuantMode_t mode;
+    if constexpr (std::is_same<Dtype, float>::value) {
+        mode = NoQuant;
+    } else if constexpr (std::is_same<Dtype, float16_t>::value) {
+        mode = F322F16;
+    } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+        mode = F322BF16;
+    }
+    DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
+    SetFixpipeNz2ndFlag(1, 1, 1);
+    DataCopy(dst, src, param);
+}
+
+#if __DAV_C220_VEC__
+inline __aicore__ void SetMask(int32_t len)
+{
+    uint64_t mask = 0;
+    uint64_t one = 1;
+    uint64_t temp = len % 64;
+    for (int64_t i = 0; i < temp; i++) {
+        mask |= one << i;
+    }
+
+    if (len == 128) {
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+    } else if (len >= 64) {
+        set_vector_mask(mask, (uint64_t)-1);
+    } else {
+        set_vector_mask(0x0, mask);
+    }
+}
+
+const uint64_t ONE_IN_HIGHBIT = 1L << 63;
+inline __aicore__ void SetMaskFromHighBit(int32_t high, int32_t len)
+{
+    uint64_t mask = 0;
+    uint64_t temp = len % 64;
+    for (int64_t i = 0; i < temp; i++) {
+        mask |= ONE_IN_HIGHBIT >> i;
+    }
+
+    if (high == 128) {
+        if (len == 128) {
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        } else if (len >= 64) {
+            set_vector_mask((uint64_t)-1, mask);
+        } else {
+            set_vector_mask(mask, 0x0);
+        }
+    } else if (high == 64) {
+        if (len == 64) {
+            set_vector_mask(0, (uint64_t)-1);
+        } else {
+            set_vector_mask(0, mask);
+        }
+    }
+}
+
+template <typename Dtype>
+__inline__ __aicore__ void ReduceMax(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
+{
+    Dtype min;
+    uint32_t remain = dim;
+    __ubuf__ Dtype *calc = src;
+
+    int pad = 256 / sizeof(Dtype);
+    if constexpr (std::is_same<Dtype, half>::value) {
+        min = half(-65504);
+    } else if constexpr (std::is_same<Dtype, float>::value) {
+        min = -3.4028235e+38;
+    }
+
+    uint32_t repeat = DIV_ROUND_UP(remain, pad);
+    set_mask_norm();
+    if (remain == 1) {
+        SetMask(remain);
+        vcmax(dst, calc, repeat, 1, 1, 8, Order_t::ONLY_VALUE);
+        pipe_barrier(PIPE_V);
+    }
+
+    while (remain != 1) {
+        if (repeat == 1) {
+            SetMask(remain);
+        } else {
+            if (remain % pad != 0) {
+                SetMaskFromHighBit(pad, pad - remain % pad);
+                vector_dup(calc + ROUND_DOWN(remain, pad), min, 1, 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
+            }
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
+
+        vcmax(dst, calc, repeat, 1, 1, 8, Order_t::ONLY_VALUE);
+        calc = dst;
+        pipe_barrier(PIPE_V);
+        remain = repeat;
+        repeat = DIV_ROUND_UP(remain, pad);
+    }
+    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+}
+
+template <typename Dtype>
+__inline__ __aicore__ void ReduceSum(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
+{
+    uint32_t remain = dim;
+    __ubuf__ Dtype *calc = src;
+    int pad = 256 / sizeof(Dtype);
+
+    uint32_t repeat = DIV_ROUND_UP(remain, pad);
+    set_mask_norm();
+    if (remain == 1) {
+        SetMask(remain);
+        vcadd(dst, calc, repeat, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+    }
+
+    while (remain != 1) {
+        if (repeat == 1) {
+            SetMask(remain);
+        } else {
+            if (remain % pad != 0) {
+                SetMaskFromHighBit(pad, pad - remain % pad);
+                vector_dup(calc + ROUND_DOWN(remain, pad), Dtype(0), 1, 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
+            }
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
+
+        vcadd(dst, calc, repeat, 1, 1, 8, 0);
+        calc = dst;
+        pipe_barrier(PIPE_V);
+        remain = repeat;
+        repeat = DIV_ROUND_UP(remain, pad);
+    }
+    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+}
+#endif
+
 #endif
