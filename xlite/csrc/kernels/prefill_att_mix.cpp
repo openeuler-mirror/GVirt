@@ -476,12 +476,20 @@ public:
                 vdiv(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
                 pipe_barrier(PIPE_V);
                 vconv_f322bf16r(out, cal, repeat, 1, 1, 4, 8);
+                pipe_barrier(PIPE_V);
             }
 
-            if (padN > padCachedTokens) {
-                pipe_barrier(PIPE_V);
-                vector_dup(out + padCachedTokens, Dtype(0),
-                    (padN - padCachedTokens) / pad, 1, 1, 8, 0);
+            if (padN > actualCachedTokens) {
+                if (actualCachedTokens % pad != 0) {
+                    SetMaskFromHighBit(pad, pad - actualCachedTokens % pad);
+                    vector_dup(out + ROUND_DOWN(actualCachedTokens, pad), Dtype(0), 1, 1, 1, 8, 0);
+                    pipe_barrier(PIPE_V);
+                    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                }
+                int last = ROUND_UP(actualCachedTokens, pad);
+                if (padN > last) {
+                    vector_dup(out + last, Dtype(0), (padN - last) / pad, 1, 1, 8, 0);
+                }
             }
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
