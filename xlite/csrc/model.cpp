@@ -97,10 +97,11 @@ void XModel::Init(void)
         _moeREDownScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
     }
 
-    size = _c.maxM * XDtypeBit(INT32) / 8;
+    size = _c.maxM * XDtypeBit(INT64) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _position.Init({_c.maxM}, INT32, ptr);
+    _position.Init({_c.maxM}, INT64, ptr);
 
+    size = _c.maxM * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _slotMapping.Init({_c.maxM}, INT32, ptr);
 
@@ -204,7 +205,8 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
     std::vector<uint32_t> decodeIdx(batch);
     std::vector<uint32_t> prefillLastIdx(batch);
     std::vector<uint32_t> cumPromptLens(batch);
-    std::vector<uint32_t> position, slotMapping, blockTables;
+    std::vector<uint32_t> slotMapping, blockTables;
+    std::vector<uint64_t> position;
     uint32_t blockNum, cumPromptLen, blockId, id, k;
     size_t size;
 
@@ -265,8 +267,9 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
             slotMapping[k++] = attnMeta.blockTables[i][blockId] * _c.blockSize + id;
         }
     }
-    size = _realM * XDtypeBit(INT32) / 8;
+    size = _realM * XDtypeBit(INT64) / 8;
     CHECK_ACL(aclrtMemcpy(_position.ptr, size, position.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    size = _realM * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMemcpy(_slotMapping.ptr, size, slotMapping.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
 
     blockTables.resize(batch * _maxNumBlocks);

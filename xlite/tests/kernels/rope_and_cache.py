@@ -68,8 +68,9 @@ for test_dtype in dtype_list:
         k_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
         v_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
 
-        len = torch.arange(SEQ_LEN, dtype=torch.int32)
+        len = torch.arange(SEQ_LEN, dtype=torch.int64)
         position = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
+        len = torch.arange(SEQ_LEN, dtype=torch.int32)
         slot_mapping = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
 
     # standard
@@ -96,7 +97,7 @@ for test_dtype in dtype_list:
     # xlite
     torch.npu.synchronize()
     rope_and_cache(rt, qkv_xlite, k_cache_xlite, v_cache_xlite, position, freqs_cis_xlite, slot_mapping,
-                   N_HEADS, N_KV_HEADS, HEAD_DIM, BLOCK_SIZE, True)
+                   N_HEADS, N_KV_HEADS, HEAD_DIM, HEAD_DIM, BLOCK_SIZE, True)
     torch.npu.synchronize()
 
     logging.info(f'rope and cache ({test_dtype}) executed!')
