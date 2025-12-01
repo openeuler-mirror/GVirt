@@ -52,8 +52,8 @@ for test_dtype in dtype_list:
         max_num_block = math.ceil((SEQ_LEN + START_POS) / BLOCK_SIZE)
 
         kvcache_block_num = (MAX_SEQ_LEN + BLOCK_SIZE - 1) // BLOCK_SIZE * MAX_BATCH_SIZE
-        k_cache_xlite = torch.zeros(kvcache_block_num, N_KV_HEADS, BLOCK_SIZE, HEAD_DIM)
-        v_cache_xlite = torch.zeros(kvcache_block_num, N_KV_HEADS, BLOCK_SIZE, HEAD_DIM)
+        k_cache_xlite = torch.zeros(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
+        v_cache_xlite = torch.zeros(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
 
         lens_list = [SEQ_LEN] * BATCH_SIZE
         lens = torch.tensor(lens_list, dtype=torch.int32).flatten()
@@ -64,9 +64,6 @@ for test_dtype in dtype_list:
 
         cached_lens_list = [START_POS] * BATCH_SIZE
         cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
-
-        padding_list = [math.ceil((SEQ_LEN + START_POS) / BLOCK_SIZE) * BLOCK_SIZE] * BATCH_SIZE
-        padding = torch.tensor(padding_list, dtype=torch.int32).flatten()
 
         step = (MAX_SEQ_LEN + BLOCK_SIZE - 1) // BLOCK_SIZE
         block_num = (SEQ_LEN + START_POS + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -113,14 +110,12 @@ for test_dtype in dtype_list:
     batch_block_num = kvcache_block_num // MAX_BATCH_SIZE
     k_xlite = k_xlite.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, HEAD_DIM)
     v_xlite = v_xlite.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, HEAD_DIM)
-    k_xlite = k_xlite.transpose(1, 2)
-    v_xlite = v_xlite.transpose(1, 2)
     for i in range(BATCH_SIZE):
-        k_cache_xlite[i * batch_block_num : ((i + 1) * batch_block_num), :, :SEQ_LEN] = k_xlite[i : i + 1]
-        v_cache_xlite[i * batch_block_num : ((i + 1) * batch_block_num), :, :SEQ_LEN] = v_xlite[i : i + 1]
+        k_cache_xlite[i * batch_block_num : ((i + 1) * batch_block_num), :SEQ_LEN] = k_xlite[i : i + 1]
+        v_cache_xlite[i * batch_block_num : ((i + 1) * batch_block_num), :SEQ_LEN] = v_xlite[i : i + 1]
 
     torch.npu.synchronize()
-    attention_prefill(rt, qkv_xlite, k_cache_xlite, qk, block_tables, padding, cached_lens,
+    attention_prefill(rt, qkv_xlite, k_cache_xlite, qk, block_tables, cached_lens,
                       v_cache_xlite, output_xlite, lens, cum_prompt_lens,
                       HEAD_DIM, N_HEADS, N_KV_HEADS, BLOCK_SIZE, BATCH_SIZE, max_num_block)
     torch.npu.synchronize()

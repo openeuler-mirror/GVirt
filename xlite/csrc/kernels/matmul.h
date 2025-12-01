@@ -53,7 +53,7 @@ public:
         if (nz) {
             /* same n0 value with tests/models/weight_utils.py 's matrix_nd2nz func */
             m0 = 128;
-            n0 = 256;
+            n0 = n <= 1280 ? 64 : 256;
             k0 = 512 / sizeof(Dtype);
         }
 

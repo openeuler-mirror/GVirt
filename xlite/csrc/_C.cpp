@@ -362,23 +362,22 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
 }
 
 void AttentionPrefill(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &qk, at::Tensor &blockTables,
-                      at::Tensor &paddingN, at::Tensor &cachedLens, at::Tensor &vCache, at::Tensor &output,
+                      at::Tensor &cachedLens, at::Tensor &vCache, at::Tensor &output,
                       at::Tensor &lens, at::Tensor &cumPromptLens, uint32_t headDim,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
 {
-    XTensor _qkv, _kCache, _qk, _blockTables, _paddingN, _cachedLens, _vCache, _output, _lens, _cumPromptLens;
+    XTensor _qkv, _kCache, _qk, _blockTables, _cachedLens, _vCache, _output, _lens, _cumPromptLens;
 
     InitXTensor(_qkv, qkv);
     InitXTensor(_kCache, kCache);
     InitXTensor(_qk, qk);
     InitXTensor(_blockTables, blockTables);
-    InitXTensor(_paddingN, paddingN);
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_vCache, vCache);
     InitXTensor(_output, output);
     InitXTensor(_lens, lens);
     InitXTensor(_cumPromptLens, cumPromptLens);
-    XliteOpPrefillAttention(rt, _qkv, _kCache, _qk, _blockTables, _paddingN, _cachedLens,
+    XliteOpPrefillAttention(rt, _qkv, _kCache, _qk, _blockTables, _cachedLens,
                             _vCache, _output, _lens, _cumPromptLens,
                             headDim, nHeads, nKvHeads, blockSize, batch, maxNumBlock);
     rt.Synchronize();
