@@ -80,7 +80,6 @@ class CMakeBuild(build_ext):
         subprocess.check_call(['cmake',
                                '-B',
                                'cmake_build',
-                               f"-DCMAKE_ABS_PYTHON_PATH={abs_python_path}",
                                f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
                                *cmake_args])
         subprocess.check_call(['cmake', '--build', 'cmake_build', '-j'])

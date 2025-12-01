@@ -72,10 +72,6 @@ execute_process(
 )
 set(CMAKE_PREFIX_PATH ${PYTHON_SYS_DIR} CACHE STRING "python sys path")
 
-if(NOT DEFINED CMAKE_ABS_PYTHON_PATH)
-    set(CMAKE_ABS_PYTHON_PATH ${PYTHON_SYS_DIR} CACHE STRING "python sys path")
-endif()
-
 find_package(pybind11 REQUIRED)
 find_package(Torch COMPONENTS Development REQUIRED)
 
@@ -109,9 +105,7 @@ target_link_libraries(_C PRIVATE
     torch_cpu
 )
 
-target_link_options(_C PRIVATE
-    -Wl,-rpath,xlite/lib:${PYTHON_SYS_DIR}/xlite/lib:${TORCH_INSTALL_PREFIX}/lib:${CMAKE_ABS_PYTHON_PATH}/xlite/lib
-)
+target_link_options(_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/../torch/lib")
 
 install(TARGETS xlite_kernels_${RUN_MODE} xlite
     LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
