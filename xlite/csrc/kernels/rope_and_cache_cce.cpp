@@ -29,7 +29,7 @@ __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtyp
     vmul(calc_fp32_buf + embed_dim, local_fp32_buf + embed_dim, sin_fp32_buf + embed_dim, vector_2src_cossin_param);
     pipe_barrier(PIPE_V);
 
-    // q * cos (q : numHeads * headDim  cos: 1 * headDim (headDim = 128))
+    // q * cos (q : numHeads * headDim  cos: 1 * headDim)
     vmul(local_fp32_buf, local_fp32_buf, cos_fp32_buf, vector_2src_cossin_param);
     vmul(local_fp32_buf + embed_dim, local_fp32_buf + embed_dim, cos_fp32_buf + embed_dim, vector_2src_cossin_param);
     pipe_barrier(PIPE_V);
@@ -190,13 +190,14 @@ __aicore__ void rope_and_cache(
 
     // pos and slot
     uint32_t params_start = calcbuf_start;
-    uint32_t iter_posslot_num = (UB_SIZE - params_start) / (sizeof(uint32_t) * 2);
+    uint32_t iter_posslot_num = (UB_SIZE - params_start) / (sizeof(uint64_t) + sizeof(uint32_t));
     iter_posslot_num = MIN(num_tokens, iter_posslot_num);
     uint32_t posslot_iters = DIV_ROUND_UP(num_tokens, iter_posslot_num);
 
-    uint32_t posslot_blocksize = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int32_t);
-    auto pos_int_ubuf_addr0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)(params_start));
-    auto slot_int_ubuf_addr0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)(params_start + posslot_blocksize));
+    uint32_t pos_size = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int64_t);
+    uint32_t slot_size = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int32_t);
+    auto pos_int_ubuf_addr0 = reinterpret_cast<__ubuf__ int64_t *>((uintptr_t)(params_start));
+    auto slot_int_ubuf_addr0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)(params_start + pos_size));
 
     // query config
     uint64_t vector_2src_cossin_16bitcfg_q, vector_2src_16bitcfg_q, vector_1src_16bitcfg_q;
@@ -234,7 +235,8 @@ __aicore__ void rope_and_cache(
     uint64_t lenBurst_q = DIV_ROUND_UP(q_bytesize, BLOCK_SIZE);
     uint64_t lenBurst_kv = DIV_ROUND_UP(kv_bytesize, BLOCK_SIZE);
     uint64_t lenBurst_cossin = DIV_ROUND_UP(rot_dim, BLOCK_SIZE); // d/2
-    uint64_t lenBurst_param = DIV_ROUND_UP(posslot_blocksize, BLOCK_SIZE);
+    uint64_t lenBurst_pos = DIV_ROUND_UP(pos_size, BLOCK_SIZE);
+    uint64_t lenBurst_slot = DIV_ROUND_UP(slot_size, BLOCK_SIZE);
     constexpr uint8_t sid = 0;
     constexpr uint16_t n_burst = 1;
     constexpr uint16_t src_gap = 0;
@@ -244,7 +246,8 @@ __aicore__ void rope_and_cache(
     uint64_t dmi_cfg_q = __set_dmi_config(sid, n_burst, lenBurst_q, src_gap, dst_gap);
     uint64_t dmi_cfg_kv = __set_dmi_config(sid, n_burst, lenBurst_kv, src_gap, dst_gap);
     uint64_t dmi_cfg_cossin = __set_dmi_config(sid, n_burst, lenBurst_cossin, src_gap, dst_gap);
-    uint64_t dmi_cfg_param = __set_dmi_config(sid, n_burst, lenBurst_param, src_gap, dst_gap);
+    uint64_t dmi_cfg_pos = __set_dmi_config(sid, n_burst, lenBurst_pos, src_gap, dst_gap);
+    uint64_t dmi_cfg_slot = __set_dmi_config(sid, n_burst, lenBurst_slot, src_gap, dst_gap);
 
     uint32_t cos_shift;
     uint32_t sin_shift;
@@ -255,17 +258,20 @@ __aicore__ void rope_and_cache(
     for (uint32_t loop0 = 0; loop0 < posslot_iters; loop0 += 1)
     {
         uint32_t processed_num_tokens = loop0 * iter_posslot_num;
-        auto gm_pos = (__gm__ int32_t *) positions + processed_num_tokens;
+        auto gm_pos = (__gm__ int64_t *) positions + processed_num_tokens;
         auto gm_slot = (__gm__ int32_t *) slot_mapping + processed_num_tokens;
         if (loop0 == posslot_iters - 1){
             iter_posslot_num = num_tokens - processed_num_tokens;
-            posslot_blocksize = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int32_t);
-            lenBurst_param = DIV_ROUND_UP(posslot_blocksize, BLOCK_SIZE);
-            dmi_cfg_param = __set_dmi_config(sid, n_burst, lenBurst_param, src_gap, dst_gap);
+            pos_size = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int64_t);
+            slot_size = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int32_t);
+            lenBurst_pos = DIV_ROUND_UP(pos_size, BLOCK_SIZE);
+            lenBurst_slot = DIV_ROUND_UP(slot_size, BLOCK_SIZE);
+            dmi_cfg_pos = __set_dmi_config(sid, n_burst, lenBurst_pos, src_gap, dst_gap);
+            dmi_cfg_slot = __set_dmi_config(sid, n_burst, lenBurst_slot, src_gap, dst_gap);
         }
         // copy positions and slotmapping
-        copy_gm_to_ubuf(pos_int_ubuf_addr0, gm_pos, dmi_cfg_param);
-        copy_gm_to_ubuf(slot_int_ubuf_addr0, gm_slot, dmi_cfg_param);
+        copy_gm_to_ubuf(pos_int_ubuf_addr0, gm_pos, dmi_cfg_pos);
+        copy_gm_to_ubuf(slot_int_ubuf_addr0, gm_slot, dmi_cfg_slot);
         pipe_barrier(PIPE_ALL);
 
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
