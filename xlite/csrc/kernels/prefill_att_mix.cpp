@@ -1,5 +1,13 @@
+/*
+ * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ */
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+using namespace AscendC;
 
 #define TILESIZE_16 16
 #define TILESIZE_32 32
@@ -11,733 +19,580 @@
 #define SEQLEN_8K 8192
 #define SEQLEN_19K 19456
 
-#ifdef __DAV_C220_CUBE__
 #define PINGPONG_BUF_NUM 2
-#define CUBE_SIZE 256
 #define CUBE_BLOCK_SIZE 16
 
-inline __aicore__ void copy_to_l12d(__cbuf__ half *L1, __gm__ half *gm, int row, int col, int height, int width, int step,
-    int num_heads)
-{
-    // Copy L1
-    step = step * num_heads;
-    auto offset = (row * step + col);
-    copy_gm_to_cbuf_multi_nd2nz_b16(L1, gm + offset, 0, 1 /* nd2nzParams.ndNum */, height /* nd2nzParams.nValue */,
-        width /* nd2nzParams.dValue */, 0 /* nd2nzParams.srcNdMatrixStride */, step /* nd2nzParams.srcDValue */,
-        height /* nd2nzParams.dstNzC0Stride */, 1 /* nd2nzParams.dstNzNStride */,
-        0 /* nd2nzParams.dstNzMatrixStride */);
-}
+template <typename Dtype, typename CalcDtype>
+class PrefillAttn {
+public:
+    __aicore__ inline PrefillAttn() {}
+    __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR qk, GM_ADDR blockTable,
+                                GM_ADDR prefixLens, GM_ADDR v, GM_ADDR out,
+                                GM_ADDR promptLens, GM_ADDR cumPromptLen,
+                                uint32_t headSize, uint32_t nHeads, uint32_t nKVHeads,
+                                uint32_t blockSize, uint32_t batchSize, uint32_t maxNumBlocks)
+    {
+        qGmBuf.SetGlobalBuffer((__gm__ Dtype *)q);
+        kGmBuf.SetGlobalBuffer((__gm__ Dtype *)k);
+        vGmBuf.SetGlobalBuffer((__gm__ Dtype *)v);
+        qkGmBuf.SetGlobalBuffer((__gm__ Dtype *)qk);
+        outGmBuf.SetGlobalBuffer((__gm__ Dtype *)out);
 
-// num_row可以是任意值，不用padding
-inline __aicore__ void copy_to_l12d(__cbuf__ __fp16 *L1, __gm__ __fp16 *gm, int row, int col, int height, int width, int step, int num_heads, int num_row)
-{
-    // Copy L1
-    step = step * num_heads;
-    auto offset = (row * step + col);
-    copy_gm_to_cbuf_multi_nd2nz_b16(L1, gm + offset, 0, 1 /* nd2nzParams.ndNum */, num_row /* nd2nzParams.nValue */,
-        width /* nd2nzParams.dValue */, 0 /* nd2nzParams.srcNdMatrixStride */, step /* nd2nzParams.srcDValue */,
-        height /* nd2nzParams.dstNzC0Stride */, 1 /* nd2nzParams.dstNzNStride */,
-        0 /* nd2nzParams.dstNzMatrixStride */);
-}
+        this->cumPromptLen = (__gm__ int32_t *)cumPromptLen;
+        this->promptLens = (__gm__ int32_t *)promptLens;
+        this->prefixLens = (__gm__ int32_t *)prefixLens;
+        this->blockTable = (__gm__ int32_t *)blockTable;
 
-inline __aicore__ void copy_to_l0a(__ca__ half *l0, __cbuf__ half *cbuf, int m_factor, int k_factor)
-{
-    for (int k = 0; k < m_factor; ++k) {
-        int dst_offset = CUBE_SIZE * k_factor;
-        int src_offset = CUBE_SIZE;
-        load_cbuf_to_ca(l0 + k * dst_offset, cbuf + k * src_offset, 0 /* loadDataParams.startIndex */,
-            k_factor /* loadDataParams.repeatTimes */, m_factor /* loadDataParams.srcStride */, 0 /* loadDataParams.dstGap */, 0 /* loadDataParams.sid */,
-            0 /* transpose */, inc);
-    }
-}
-
-inline __aicore__ void copy_to_l0b(__cb__ half *l0, __cbuf__ half *cbuf, int n_factor, int k_factor)
-{
-    for (int k = 0; k < k_factor; ++k) {
-        int dst_offset = CUBE_SIZE * n_factor;
-        int src_offset = CUBE_SIZE * n_factor;
-        load_cbuf_to_cb(l0 + k * dst_offset, cbuf + k * src_offset, 0 /* loadDataParams.startIndex */,
-            n_factor /* loadDataParams.repeatTimes */, 1 /* loadDataParams.srcStride */, 0 /* loadDataParams.dstGap */, 0 /* loadDataParams.sid */,
-            0 /* transpose */, inc);
-    }
-}
-
-inline __aicore__ void copy_to_l0b_transpose(__cb__ half *l0, __cbuf__ half *cbuf, int n_factor, int k_factor)
-{
-    for (int k = 0; k < k_factor; ++k) {
-        int dst_offset = n_factor * CUBE_SIZE;
-        constexpr int src_offset = CUBE_SIZE;
-        load_cbuf_to_cb(l0 + k * dst_offset, cbuf + k * src_offset, 0 /* loadDataParams.startIndex */,
-            n_factor /* loadDataParams.repeatTimes */, k_factor /* loadDataParams.srcStride */, 0 /* loadDataParams.dstGap */, 0 /* loadDataParams.sid */,
-            1 /* transpose */, inc);
-    }
-}
-inline __aicore__ void mmad(__cc__ float *cc, __ca__ half *ca, __cb__ half *cb, int m, int n, int k, bool init_val,
-    uint8_t unit_flag = 0)
-{
-    mad(cc, ca, cb, m, k, n, unit_flag /* unit flag */, false /* kDirection Align */, 0, init_val);
-}
-
-inline __aicore__ void copy_to_gm(__gm__ half *z, __cc__ float *cc, int m_offset, int n_offset, int m, int n, int kN, uint8_t unit_flag = 0)
-{
-    uint64_t config = 0x1;
-    set_nd_para(config);
-    int c_offset = m_offset * kN + n_offset;
-    copy_matrix_cc_to_gm(z + c_offset, cc, 0 /* fixpipeInfo.sid */, n, m, kN /* fixpipeInfo.dstStride */,
-        m /* fixpipeInfo.srcStride */, unit_flag /* fixpipeInfo.unit_flag */, QuantMode_t::F322F16,
-        0 /* static_cast<uint8_t>(fixpipeInfo.reluEn) */, 0 /* fixpipeInfo.channelSplit */,
-        1 /* fixpipeInfo.nz2ndEn */);
-}
-
-inline __aicore__ void copy_to_gm(__gm__ half *z, __cc__ float *cc, int m_offset, int n_offset, int m, int n, int kN, int m_size, int num_heads)
-{
-    uint64_t config = 0x1;
-    set_nd_para(config);
-    kN = kN * num_heads;
-    int c_offset = m_offset * kN + n_offset;
-    copy_matrix_cc_to_gm(z + c_offset, cc, 0 /* fixpipeInfo.sid */, n, m_size, kN /* fixpipeInfo.dstStride */,
-        m /* fixpipeInfo.srcStride */, 0 /* fixpipeInfo.unit_flag */, QuantMode_t::F322F16,
-        0 /* static_cast<uint8_t>(fixpipeInfo.reluEn) */, 0 /* fixpipeInfo.channelSplit */,
-        1 /* fixpipeInfo.nz2ndEn */);
-}
-
-inline __aicore__ void att_QK(__gm__ half * x, __gm__ uint8_t * k, __gm__ int32_t * mapping, __gm__ half * z, int kM, int real_m, int kN,
-    int head_size, int block_size, int num_heads, int num_kv_heads, int head_idx, int offsetM, int offsetM_without_cachedtokens, int num_qkv_heads)
-{
-    int kK = head_size;
-    constexpr int k_tilesize = TILESIZE_128; // kTileSize必须小于等于headSize
-    constexpr int k_tilefactor = k_tilesize / CUBE_BLOCK_SIZE;
-    int k_iters = kK / k_tilesize;
-
-    int n_tilesize = block_size;
-    int n_tilefactor = n_tilesize / CUBE_BLOCK_SIZE;
-    int n_iters = kN / n_tilesize;
-
-    int m_tilesize = block_size;
-    if (m_tilesize == TILESIZE_256 && n_tilesize == TILESIZE_256) {
-        m_tilesize = TILESIZE_128;
-    }
-    if (kM <= TILESIZE_16) {
-        m_tilesize = TILESIZE_16;
-    } else if (kM <= TILESIZE_32) {
-        m_tilesize = TILESIZE_32;
-    } else if (kM <= TILESIZE_48) {
-        m_tilesize = TILESIZE_48;
-    } else if (kM <= TILESIZE_64) {
-        m_tilesize = TILESIZE_64;
-    }
-    int m_tilefactor = m_tilesize / CUBE_BLOCK_SIZE;
-    int m_iters = kM / m_tilesize;
-
-    int num_row = m_tilesize;
-    if (m_tilesize + offsetM_without_cachedtokens > real_m) {
-        num_row = real_m - offsetM_without_cachedtokens;
+        this->headSize = headSize;
+        this->nHeads = nHeads;
+        this->nKVHeads = nKVHeads;
+        this->blockSize = blockSize;
+        this->batchSize = batchSize;
+        this->maxNumBlocks = maxNumBlocks;
     }
 
-    __cb__ half *cb_addr = reinterpret_cast<__cb__ half *>((uintptr_t)0);
-    __ca__ half *ca_addr = reinterpret_cast<__ca__ half *>((uintptr_t)0);
-    __cc__ float *cc_addr = reinterpret_cast<__cc__ float *>((uintptr_t)0);
+    /*
+     * m: tokens
+     * n: cachedTokens
+     * k: headSize
+     */
+    inline __aicore__ void RunAicQK(GlobalTensor<Dtype> aGmBuf, GlobalTensor<Dtype> bGmBuf, __gm__ int32_t *mapping,
+                                    GlobalTensor<Dtype> cGmBuf,
+                                    int m, int padN, int headSize, int blockSize,
+                                    int nHeads, int nKVHeads, int headIdx, int maskLen, int nQKVHeads)
+    {
+        int kK = headSize;
+        int k0 = headSize;
+        int k_tilefactor = k0 / CUBE_BLOCK_SIZE;
+        
+        int n0 = blockSize;
+        int n_tilefactor = n0 / CUBE_BLOCK_SIZE;
+        int n_iters = padN / n0;
 
-    int cb_tilesize = n_tilesize * k_tilesize;
-    int cb_tilebytes = cb_tilesize * sizeof(half);
-    __cbuf__ half *B_cbuf_addr0 = reinterpret_cast<__cbuf__ half *>((uintptr_t)0);
-    __cbuf__ half *B_cbuf_addr1 = reinterpret_cast<__cbuf__ half *>((uintptr_t)cb_tilebytes);
-    __cbuf__ half *B_cbuf_addr[PINGPONG_BUF_NUM] = {B_cbuf_addr0, B_cbuf_addr1};
+        int m0 = ROUND_UP(m, CUBE_BLOCK_SIZE);
+        int m_tilefactor = m0 / CUBE_BLOCK_SIZE;
 
-    int ca_tilestart = ROUND_UP(cb_tilebytes * PINGPONG_BUF_NUM, 1024); // 最小访问粒度 512B/128B, 选择1024B对齐
-    int ca_tilesize = m_tilesize * k_tilesize;
-    int ca_tilebytes = ca_tilesize * sizeof(half);
-    __cbuf__ half *A_cbuf_addr0 = reinterpret_cast<__cbuf__ half *>((uintptr_t)ca_tilestart);
-    __cbuf__ half *A_cbuf_addr1 = reinterpret_cast<__cbuf__ half *>((uintptr_t)(ca_tilestart + ca_tilebytes));
-    __cbuf__ half *A_cbuf_addr[PINGPONG_BUF_NUM] = {A_cbuf_addr0, A_cbuf_addr1};
+        LocalTensor<Dtype> l1aBuf;
+        LocalTensor<Dtype> l1bBuf[PINGPONG_BUF_NUM];
+        LocalTensor<Dtype> l0aBuf;
+        LocalTensor<Dtype> l0bBuf;
+        LocalTensor<float> l0cBuf;
 
-    uint32_t block_memsize = num_kv_heads * block_size * head_size;
-    bool init_val = true;
-    int n_start = 0;
-    int m_start = 0;
-    int n_stride = n_tilesize;
-    int m_stride = m_tilesize;
-    int k_offset = 0;
-    int m_offset = m_start;
-    int pingpong_M = 0;
-    int pingpong_N = 0;
-    __gm__ half *x_gm_addr = ((__gm__ half *)x) + head_idx * kK;
-    __gm__ half *z_gm_addr = ((__gm__ half *)z);
+        int l1BTileBytes = n0 * k0 * sizeof(Dtype);
 
-    copy_to_l12d(A_cbuf_addr[pingpong_M], x_gm_addr, 0, k_offset, m_tilesize, k_tilesize, kK, num_qkv_heads, num_row);
-    set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0 + pingpong_M * 2);
-    set_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
-    set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0 + (1 - pingpong_M) * 2);
-    set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1);
-    for (int midx = 0; midx < m_iters; ++midx) {
-        int n_offset = n_start;
-        wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0 + (1 - pingpong_M) * 2);
-        if (midx + 1 < m_iters) {
-            copy_to_l12d(A_cbuf_addr[1 - pingpong_M], x_gm_addr, m_offset + m_tilesize, k_offset, m_tilesize, k_tilesize, kK, num_qkv_heads);
-            set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0 + (1 - pingpong_M) * 2);
+        uint64_t off = 0;
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            l1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B1);
+            l1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += l1BTileBytes;
         }
+        off = ROUND_UP(off, 1024);
+        l1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+        l1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off = 0;
+        l0aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A2);
+        l0aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        l0bBuf.address_.logicPos = static_cast<uint8_t>(TPosition::B2);
+        l0bBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
+        l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
 
-        wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0 + pingpong_M * 2);
-        wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
-        copy_to_l0a(ca_addr, A_cbuf_addr[pingpong_M], m_tilefactor, k_tilefactor);
-        set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0 + pingpong_M * 2);
-        set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0 + pingpong_M * 2);
+        uint32_t block_memsize = nKVHeads * blockSize * headSize;
+        int n_offset = 0;
+        int k_offset = 0;
+        int m_offset = 0;
+        int pingpong_N = 0;
 
-        int kv_head_idx = head_idx / (num_heads / num_kv_heads);
-        uint32_t head_offset_len = kv_head_idx * head_size;
-        uint32_t block_table_id = (uint32_t)(*((__gm__ int32_t *)mapping));
-        __gm__ half *K_gm_addr = ((__gm__ half *)k) + block_table_id * block_memsize + head_offset_len;
+        CopyGmToL1Nd2Nz(l1aBuf, aGmBuf, m, k0, kK * nQKVHeads, m0);
+        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
 
-        wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1 + pingpong_N * 2);
-        copy_to_l12d(B_cbuf_addr[pingpong_N], K_gm_addr, 0, 0, block_size, head_size, head_size, num_kv_heads);
-        set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + pingpong_N * 2);
-        set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1 + (1 - pingpong_N) * 2);
+        WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+        CopyToL0ACol(l0aBuf, l1aBuf, m_tilefactor, 0, k_tilefactor);
+        SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+
+        int kv_headIdx = headIdx / (nHeads / nKVHeads);
+        uint32_t head_offset_len = kv_headIdx * headSize;
+        uint32_t blockTable_id = (uint32_t)(*mapping);
+        CopyGmToL1Nd2Nz(l1bBuf[0], bGmBuf[blockTable_id * block_memsize + head_offset_len],
+                        n0, k0, nKVHeads * headSize, n0);
+        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1);
+
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + (1 - pingpong_N) * 2);
         for (int nidx = 0; nidx < n_iters; ++nidx) {
-            if (nidx * n_tilesize >= (midx + 1) * m_tilesize + offsetM) {
-                wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + pingpong_N * 2);
-                set_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
+            if (nidx * n0 >= maskLen) {
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_N * 2);
                 break;
             }
-        
-            wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1 + (1 - pingpong_N) * 2);
+
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + (1 - pingpong_N) * 2);
             if (nidx + 1 < n_iters) {
-                uint32_t block_table_id = (uint32_t)(*((__gm__ int32_t *)mapping + nidx + 1));
-                __gm__ half *K_gm_addr = ((__gm__ half *)k) + block_table_id * block_memsize + head_offset_len;
-                copy_to_l12d(B_cbuf_addr[1 - pingpong_N], K_gm_addr, 0, 0, block_size, head_size, head_size, num_kv_heads);
-                set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + (1 - pingpong_N) * 2);
+                uint32_t blockTable_id = (uint32_t)(*(mapping + nidx + 1));
+                CopyGmToL1Nd2Nz(l1bBuf[1 - pingpong_N], bGmBuf[blockTable_id * block_memsize + head_offset_len],
+                                n0, k0, nKVHeads * headSize, n0);
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + (1 - pingpong_N) * 2);
             }
 
-            wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + pingpong_N * 2);
-            wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-            copy_to_l0b(cb_addr, B_cbuf_addr[nidx & 0x1], n_tilefactor, k_tilefactor);
-            set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1 + pingpong_N * 2);
-            set_flag(PIPE_MTE1, PIPE_M, EVENT_ID1 + pingpong_N * 2);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_N * 2);
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+            CopyToL0BCol(l0bBuf, l1bBuf[nidx & 0x1], n_tilefactor, 0, k_tilefactor);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + pingpong_N * 2);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_N * 2);
 
             if (nidx == 0)
-                wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0 + pingpong_M * 2); // wait for L0A
-            wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID1 + pingpong_N * 2); // wait for L0B
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_N * 2);
+            CalMmad(l0cBuf, l0aBuf, l0bBuf, m0, n0, k0, true, 3);
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
 
-            mmad(cc_addr, ca_addr, cb_addr, m_tilesize, n_tilesize, k_tilesize, init_val, 3);
-            set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-            if (nidx == n_iters - 1)
-                set_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
+            CopyToGm(cGmBuf[n_offset], l0cBuf, m0, n0, m0, padN, 3);
 
-            copy_to_gm(z_gm_addr, cc_addr, m_offset, n_offset, m_tilesize, n_tilesize, kN, 3);
-
-            n_offset += n_stride;
+            n_offset += n0;
             pingpong_N ^= 1;
         }
 
-        wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        m_offset += m_stride;
-        pingpong_M ^= 1;
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + (1 - pingpong_N) * 2);
+        pipe_barrier(PIPE_ALL);
     }
-    wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID1 + (1 - pingpong_N) * 2);
-    wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0 + (1 - pingpong_M) * 2);
-    wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
 
-    pipe_barrier(PIPE_ALL);
-}
+    /*
+     * m: tokens
+     * n: headSize
+     * k: cachedTokens
+     */
+    inline __aicore__ void RunAicSV(GlobalTensor<Dtype> aGmBuf, GlobalTensor<Dtype> bGmBuf, __gm__ int32_t *mapping,
+                                    GlobalTensor<Dtype> cGmBuf,
+                                    int m, int headSize, int blockSize, int kK,
+                                    int nHeads, int nKVHeads, int headIdx, int maskLen)
+    {
+        set_atomic_none();
+        set_mask_norm();
 
-inline __aicore__ void att_SV(__gm__ half *x, __gm__ uint8_t * v, __gm__ int32_t *mapping, __gm__ half *z, int kM, int head_size, int block_size, int kK,
-    int num_heads, int num_kv_heads, int head_idx, int M, int realK, int offsetM)
-{
-    set_atomic_none();
-    set_mask_norm();
+        int k0 = blockSize;
+        int k_tilefactor = k0 / CUBE_BLOCK_SIZE;
+        int k_iters = kK / k0;
 
-    if (offsetM >= M) // att的M切得粒度可能小于外部M切分粒度，这里保证进来的数据M维度还在有效范围内
-        return;
+        int padN = headSize;
+        int n0 = headSize;
+        int n_tilefactor = n0 / CUBE_BLOCK_SIZE;
 
-    int k_tilesize = block_size; // 256
-    int k_tilefactor = k_tilesize / CUBE_BLOCK_SIZE;
-    int k_iters = kK / k_tilesize;
+        int m0 = ROUND_UP(m, CUBE_BLOCK_SIZE);
+        int m_tilefactor = m0 / CUBE_BLOCK_SIZE;
 
-    int kN = head_size;
-    constexpr int n_tilesize = TILESIZE_128; // 这里nTileSize必须小于等于headSize
-    constexpr int n_tilefactor = n_tilesize / CUBE_BLOCK_SIZE;
-    int n_iters = kN / n_tilesize;
+        LocalTensor<Dtype> l1aBuf[PINGPONG_BUF_NUM];
+        LocalTensor<Dtype> l1bBuf[PINGPONG_BUF_NUM];
+        LocalTensor<Dtype> l0aBuf;
+        LocalTensor<Dtype> l0bBuf;
+        LocalTensor<float> l0cBuf;
 
-    int m_tilesize = block_size;
-    if (m_tilesize == TILESIZE_256 && k_tilesize == TILESIZE_256) {
-        m_tilesize = TILESIZE_128;
-    }
-    if (kM <= TILESIZE_16) {
-        m_tilesize = TILESIZE_16;
-    } else if (kM <= TILESIZE_32) {
-        m_tilesize = TILESIZE_32;
-    } else if (kM <= TILESIZE_48) {
-        m_tilesize = TILESIZE_48;
-    } else if (kM <= TILESIZE_64) {
-        m_tilesize = TILESIZE_64;
-    }
-    int m_tilefactor = m_tilesize / CUBE_BLOCK_SIZE;
-    int m_iters = kM / m_tilesize;
+        int l1ATileBytes = m0 * k0 * sizeof(Dtype);
+        int l1BTileBytes = n0 * k0 * sizeof(Dtype);
 
-    __cb__ half *cb_addr = reinterpret_cast<__cb__ half *>((uintptr_t)0);
-    __ca__ half *ca_addr = reinterpret_cast<__ca__ half *>((uintptr_t)0);
-    __cc__ float *cc_addr = reinterpret_cast<__cc__ float *>((uintptr_t)0);
+        uint64_t off = 0;
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            l1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B1);
+            l1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += l1BTileBytes;
+        }
+        off = ROUND_UP(off, 1024);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            l1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+            l1aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += l1ATileBytes;
+        }
+        off = 0;
+        l0aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A2);
+        l0aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        l0bBuf.address_.logicPos = static_cast<uint8_t>(TPosition::B2);
+        l0bBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
+        l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
 
-    int cb_tilesize = n_tilesize * k_tilesize;
-    int cb_tilebytes = cb_tilesize * sizeof(half);
-    __cbuf__ half *B_cbuf_addr0 = reinterpret_cast<__cbuf__ half *>((uintptr_t)0);
-    __cbuf__ half *B_cbuf_addr1 = reinterpret_cast<__cbuf__ half *>((uintptr_t)cb_tilebytes);
-    __cbuf__ half *B_cbuf_addr[PINGPONG_BUF_NUM] = {B_cbuf_addr0, B_cbuf_addr1};
-
-    int ca_tilestart = ROUND_UP(cb_tilebytes * PINGPONG_BUF_NUM, 1024);
-    int ca_tilesize = m_tilesize * k_tilesize;
-    int ca_tilebytes = ca_tilesize * sizeof(half);
-    __cbuf__ half *A_cbuf_addr0 = reinterpret_cast<__cbuf__ half *>((uintptr_t)ca_tilestart);
-    __cbuf__ half *A_cbuf_addr1 = reinterpret_cast<__cbuf__ half *>((uintptr_t)(ca_tilestart + ca_tilebytes));
-    __cbuf__ half *A_cbuf_addr[PINGPONG_BUF_NUM] = {A_cbuf_addr0, A_cbuf_addr1};
-
-    int n_start = 0;
-    int m_start = 0;
-    int n_stride = n_tilesize;
-    int m_stride = m_tilesize;
-    int m_offset = m_start;
-    uint32_t block_memsize = num_kv_heads * block_size * head_size;
-    __gm__ half *x_gm_addr = ((__gm__ half *)x);
-    __gm__ half *z_gm_addr = ((__gm__ half *)z);
-    for (int midx = 0; midx < m_iters; ++midx) {
-        int n_offset = n_start;
-        set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-        set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
+        int m_offset = 0;
+        int n_offset = 0;
+        uint32_t block_memsize = nKVHeads * blockSize * headSize;
         int pingpong_K = 0;
-        for (int nidx = 0; nidx < n_iters; ++nidx) {
-            int k_offset = 0;
-            bool init_val = true;
+        int k_offset = 0;
 
-            wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0 + pingpong_K * 2);
-            copy_to_l12d(A_cbuf_addr[pingpong_K], x_gm_addr, m_offset, k_offset, m_tilesize, k_tilesize, kK, 1);
-            set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0 + pingpong_K * 2);
+        CopyGmToL1Nd2Nz(l1aBuf[pingpong_K], aGmBuf, m, k0, kK, m0);
+        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpong_K * 2);
 
-            int kv_head_idx = head_idx / (num_heads / num_kv_heads);
-            uint32_t head_offset_len = kv_head_idx * head_size;
+        int kv_headIdx = headIdx / (nHeads / nKVHeads);
+        uint32_t head_offset_len = kv_headIdx * headSize;
 
-            uint32_t block_table_id = (uint32_t)(*((__gm__ int32_t *)mapping));
-            __gm__ half *V_gm_addr = ((__gm__ half *)v) + block_table_id * block_memsize + head_offset_len;
-            copy_to_l12d(B_cbuf_addr[pingpong_K], V_gm_addr, 0, 0, block_size, head_size, head_size, num_kv_heads);
+        uint32_t blockTable_id = (uint32_t)(*(mapping));
+        CopyGmToL1Nd2Nz(l1bBuf[pingpong_K], bGmBuf[blockTable_id * block_memsize + head_offset_len],
+                        n0, k0, nKVHeads * headSize, n0);
 
-            set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + pingpong_K * 2);
-            set_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
-            set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0 + (1 - pingpong_K) * 2);
-            for (int kidx = 0; kidx < k_iters; ++kidx) {
-                if (kidx * k_tilesize >= realK) {
-                    wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0 + pingpong_K * 2);
-                    wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + pingpong_K * 2);
-                    wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-                    set_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-                    break;
-                }
-                wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0 + (1 - pingpong_K) * 2);
-                if (kidx + 1 < k_iters) {
-                    copy_to_l12d(A_cbuf_addr[1 - pingpong_K], x_gm_addr, m_offset, k_offset + k_tilesize, m_tilesize,
-                        k_tilesize, kK, 1);
-                    set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0 + (1 - pingpong_K) * 2);
-
-                    uint32_t block_table_id = (uint32_t)(*((__gm__ int32_t *)mapping + kidx + 1));
-                    __gm__ half *V_gm_addr = ((__gm__ half *)v) + block_table_id * block_memsize + head_offset_len;
-                    copy_to_l12d(B_cbuf_addr[1 - pingpong_K], V_gm_addr, 0, 0, block_size, head_size, head_size, num_kv_heads);
-
-                    set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + (1 - pingpong_K) * 2);
-                }
-                wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0 + pingpong_K * 2);
-                wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
-                copy_to_l0a(ca_addr, A_cbuf_addr[pingpong_K], m_tilefactor, k_tilefactor);
-                set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0 + pingpong_K * 2);
-
-                wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + pingpong_K * 2);
-                copy_to_l0b_transpose(cb_addr, B_cbuf_addr[pingpong_K], n_tilefactor, k_tilefactor);
-                set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0 + pingpong_K * 2);
-                set_flag(PIPE_MTE1, PIPE_M, EVENT_ID1 + pingpong_K * 2);
-
-                wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0 + pingpong_K * 2); // wait for L0A
-                if (kidx == k_iters - 1)
-                    wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-                wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID1 + pingpong_K * 2); // wait for L0B
-                mmad(cc_addr, ca_addr, cb_addr, m_tilesize, n_tilesize, k_tilesize, init_val);
-                set_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
-
-                if (kidx == k_iters - 1)
-                    set_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-                init_val = false;
-                k_offset += k_tilesize;
-                pingpong_K ^= 1;
+        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_K * 2);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + (1 - pingpong_K) * 2);
+        for (int kidx = 0; kidx < k_iters; ++kidx) {
+            if (kidx * k0 >= maskLen) {
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpong_K * 2);
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_K * 2);
+                SetFlag<HardEvent::M_FIX>(EVENT_ID0);
+                break;
             }
 
-            wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID1);
-            wait_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-            if (m_offset + m_tilesize + offsetM <= M) {
-                copy_to_gm(z_gm_addr, cc_addr, m_offset, n_offset, m_tilesize, n_tilesize, kN, m_tilesize, num_heads);
-            } else {
-                copy_to_gm(z_gm_addr, cc_addr, m_offset, n_offset, m_tilesize, n_tilesize, kN, M - m_offset - offsetM, num_heads);
-            }
-            set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-            n_offset += n_stride;
-        }
-        wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0 + (1 - pingpong_K) * 2);
-        wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-        m_offset += m_stride;
-    }
-    pipe_barrier(PIPE_ALL);
-}
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + (1 - pingpong_K) * 2);
+            if (kidx + 1 < k_iters) {
+                CopyGmToL1Nd2Nz(l1aBuf[1 - pingpong_K], aGmBuf[m_offset * kK + k_offset + k0], m0, k0, kK, m0);
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + (1 - pingpong_K) * 2);
 
-inline __aicore__ void prefill_att_mix_aic(
-    __gm__ uint8_t* q, __gm__ uint8_t* k, __gm__ uint8_t* qk, __gm__ uint8_t* block_table,
-    __gm__ uint8_t* prefix_lens,
-    __gm__ uint8_t* v, __gm__ uint8_t* out, __gm__ uint8_t* prompt_lens,
-    __gm__ uint8_t* __restrict__ cum_prompt_len,
-    uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks)
-{
-    set_padding(0);
-    set_atomic_none();
-    set_nd_para((uint64_t)1);
-
-    uint32_t num_qkv_heads = num_heads + num_kv_heads * 2;
-    pipe_barrier(PIPE_ALL);
-
-    int qk_idx = 0;
-    for (int batch_idx = 0; batch_idx < batchSize; batch_idx++) {
-        pipe_barrier(PIPE_ALL);
-        uint32_t cum_M = (uint32_t)(*((__gm__ int32_t *)cum_prompt_len + batch_idx));
-        uint32_t M = (uint32_t)(*((__gm__ int32_t *)prompt_lens + batch_idx));
-
-        uint32_t kM = ROUND_UP(M, M <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
-        uint32_t cached_tokens = (uint32_t)(*((__gm__ int32_t *)prefix_lens + batch_idx));
-        uint32_t kN = ROUND_UP(M + cached_tokens, block_size);
-        uint32_t kK = kN;
-
-        uint32_t pM = TILESIZE_128;
-        // 根据序列长度动态调整query的切分粒度pM，保证数据通过L2传递
-        if (kN > SEQLEN_19K) {
-            pM = TILESIZE_32;
-            kM = ROUND_UP(M, TILESIZE_32);
-        } else if (kN > SEQLEN_8K) {
-            pM = TILESIZE_64;
-            kM = ROUND_UP(M, TILESIZE_64);
-        }
-        if (kM <= SEQLEN_64) {
-            pM = TILESIZE_16;  // 避免kM很小的情况（小于128），切的粒度是16，也保证可以整除
-        }
-        // 偏移根据pM动态生成，不用外部传递了，外部可以申请一个大的buffer，但是实际使用的保证小于L2
-        uint32_t qk_offset = block_num * pM * kN;
-        uint32_t seq_num = kM / pM;
-        __gm__ int32_t *blockTable_addr = ((__gm__ int32_t *)block_table) + max_num_blocks * batch_idx;
-        int total_task_num = num_heads * seq_num;
-        uint32_t query_addr_offset = cum_M * head_size * num_qkv_heads;
-        pipe_barrier(PIPE_ALL);
-        // 第一轮，事先准备好QK，只计算一部分QK。cube计算完该部分QK后，通过核间同步通知vector计算该部分的softmax
-        for (int i = block_idx; i < total_task_num && i < block_num; i += block_num) {
-            int seq_idx = i % seq_num;
-            int head_idx = i / seq_num;
-
-            __gm__ half *q_gm_addr = ((__gm__ half *)q) + query_addr_offset + seq_idx * pM * head_size * num_qkv_heads;
-            // do 1st QK
-            __gm__ half *qk_gm_addr = ((__gm__ half *)qk) + block_idx * pM * kN;
-            if (qk_idx % 2 == 0) {
-                qk_gm_addr += qk_offset;
-            }
-            att_QK(q_gm_addr, k, blockTable_addr, qk_gm_addr, pM, M, kN, head_size, block_size, num_heads, num_kv_heads, head_idx, seq_idx * pM + cached_tokens, seq_idx * pM, num_qkv_heads);
-            
-            uint64_t flag_id = 0;
-            uint64_t mode = 2; // inner-group aic/aiv sync
-            uint64_t config = 1 | (mode << 4) | (flag_id << 8);
-            ffts_cross_core_sync(PIPE_FIX, config);
-        }
-
-        for (int i = block_idx; i < total_task_num; i += block_num) {
-            // 利用类似double buffer的思想来优化，在vector计算上一部分的softmax时，cube计算QK，准备下一块数据
-            int next_i = i + block_num;
-            if (next_i < total_task_num) {
-                int seq_idx = next_i % seq_num;
-                int head_idx = next_i / seq_num;
-
-                __gm__ half *q_gm_addr = ((__gm__ half *)q) + query_addr_offset + seq_idx * pM * head_size * num_qkv_heads;
-                __gm__ half *qk_gm_addr = ((__gm__ half *)qk) + block_idx * pM * kN;
-                if ((qk_idx + 1) % 2 == 0) {
-                    qk_gm_addr = qk_gm_addr + qk_offset;
-                }
-                att_QK(q_gm_addr, k, blockTable_addr, qk_gm_addr, pM, M, kN, head_size, block_size, num_heads, num_kv_heads, head_idx, seq_idx * pM + cached_tokens, seq_idx * pM, num_qkv_heads);
-
-                uint64_t flag_id = 0;
-                uint64_t mode = 2; // inner-group aic/aiv sync
-                uint64_t config = 1 | (mode << 4) | (flag_id << 8);
-                ffts_cross_core_sync(PIPE_FIX, config);
+                uint32_t blockTable_id = (uint32_t)(*(mapping + kidx + 1));
+                CopyGmToL1Nd2Nz(l1bBuf[1 - pingpong_K], bGmBuf[blockTable_id * block_memsize + head_offset_len],
+                                      n0, k0, nKVHeads * headSize, n0);
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + (1 - pingpong_K) * 2);
             }
 
-            // 正常的处理逻辑
-            int seq_idx = i % seq_num;
-            int head_idx = i / seq_num;
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpong_K * 2);
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
+            CopyToL0ACol(l0aBuf, l1aBuf[pingpong_K], m_tilefactor, 0, k_tilefactor);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + pingpong_K * 2);
 
-            // 等待vector的softmax计算完成后，cube计算softmax*V
-            uint64_t flag_id = 1;
-            wait_flag_dev(flag_id);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_K * 2);
+            CopyToL0BTCol(l0bBuf, l1bBuf[pingpong_K], n_tilefactor, 0, k_tilefactor);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpong_K * 2);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_K * 2);
 
-            __gm__ half *out_gm_addr = ((__gm__ half *)out) + (cum_M + seq_idx * pM) * num_heads * head_size + head_idx * head_size;
-            __gm__ half *qk_gm_addr = ((__gm__ half *)qk) + block_idx * pM * kN;
-            if (qk_idx % 2 == 0) {
-                qk_gm_addr = qk_gm_addr + qk_offset;
-            }
-            att_SV(qk_gm_addr, v, blockTable_addr, out_gm_addr, pM, head_size, block_size, kK, num_heads, num_kv_heads, head_idx, M, seq_idx * pM + cached_tokens + pM, seq_idx * pM);
-            qk_idx++;
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + pingpong_K * 2);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_K * 2);
+            CalMmad(l0cBuf, l0aBuf, l0bBuf, m0, n0, k0, kidx == 0);
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+
+            if (kidx == k_iters - 1)
+                SetFlag<HardEvent::M_FIX>(EVENT_ID0);
+            k_offset += k0;
+            pingpong_K ^= 1;
         }
+
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+        CopyToGm(cGmBuf, l0cBuf, m, n0, m0, padN * nHeads);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + (1 - pingpong_K) * 2);
         pipe_barrier(PIPE_ALL);
     }
 
-}
+    inline __aicore__ void RunAic()
+    {
+        set_padding(0);
+        set_atomic_none();
+        set_nd_para((uint64_t)1);
+        int qkIdx = 0;
+        uint32_t nQKVHeads = nHeads + nKVHeads * 2;
 
-#elif __DAV_C220_VEC__
-#define NUMELEMENT_OF_TEMPBUF 256
-#define ONE_IN_HIGHBIT (1L << 63)
+        for (int batch = 0; batch < batchSize; batch++) {
+            uint32_t cumM = (uint32_t)(*(cumPromptLen + batch));
+            uint32_t m = (uint32_t)(*(promptLens + batch));
+            uint32_t padM = ROUND_UP(m, m <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
+            uint32_t cachedTokens = (uint32_t)(*(prefixLens + batch));
+            uint32_t padN = ROUND_UP(m + cachedTokens, blockSize);
 
-inline __aicore__ void __set_mask(int32_t len)
-{
-    uint64_t mask = 0;
-    uint64_t one = 1;
-    uint64_t temp = len % 64;
-    for (int64_t i = 0; i < temp; i++) {
-        mask |= one << i;
-    }
+            uint32_t m0 = TILESIZE_128;
 
-    if (len == VECTOR_MAX_NUM_OF_FP16) {
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-    } else if (len >= (VECTOR_MAX_NUM_OF_FP16 / 2)) {
-        set_vector_mask(mask, (uint64_t)-1);
-    } else {
-        set_vector_mask(0x0, mask);
-    }
-}
+            // 根据序列长度动态调整query的切分粒度m0，保证数据通过L2传递
+            if (padN > SEQLEN_19K) {
+                m0 = TILESIZE_32;
+                padM = ROUND_UP(m, TILESIZE_32);
+            } else if (padN > SEQLEN_8K) {
+                m0 = TILESIZE_64;
+                padM = ROUND_UP(m, TILESIZE_64);
+            }
+            if (padM <= SEQLEN_64) {
+                m0 = TILESIZE_16;
+            }
+            uint32_t qkOffset = block_num * m0 * padN;
+            uint32_t seqNum = padM / m0;
+            __gm__ int32_t *curBlockTable = blockTable + maxNumBlocks * batch;
+            int taskNum = nHeads * seqNum;
+            uint32_t qOffset = cumM * headSize * nQKVHeads;
+            pipe_barrier(PIPE_ALL);
 
-inline __aicore__ void __set_mask_from_highbit(int32_t len)
-{
-    uint64_t mask = 0;
-    uint64_t temp = len % 64;
-    for (int64_t i = 0; i < temp; i++) {
-        mask |= ONE_IN_HIGHBIT >> i;
-    }
+            for (int i = block_idx; i < taskNum; i += block_num) {
+                int seqIdx = i % seqNum;
+                int headIdx = i / seqNum;
+                int mActual = m0;
+                int mOffset = seqIdx * m0;
+                if (mOffset + mActual > m) {
+                    mActual = m - mOffset;
+                }
+                int maskLen = mOffset + cachedTokens + mActual;
 
-    if (len == VECTOR_MAX_NUM_OF_FP16) {
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-    } else if (len >= (VECTOR_MAX_NUM_OF_FP16 / 2)) {
-        set_vector_mask((uint64_t)-1, mask);
-    } else {
-        set_vector_mask(mask, 0x0);
-    }
-}
+                // do 1st QK
+                if (i == block_idx) {
+                    RunAicQK(qGmBuf[qOffset + seqIdx * m0 * headSize * nQKVHeads + headIdx * headSize],
+                             kGmBuf, curBlockTable, qkGmBuf[block_idx * m0 * padN + (qkIdx % 2 == 0 ? qkOffset : 0)],
+                             mActual, padN, headSize, blockSize,
+                             nHeads, nKVHeads, headIdx, maskLen, nQKVHeads);
 
-// 最多处理32000长度的片段
-inline __aicore__ void att_softmax_vector_kernel(__gm__ half *attn_weight_in, __gm__ half *attn_weight_out,
-                                                 uint16_t num_tokens, uint16_t len_chunk, uint16_t new_tokens,
-                                                 uint32_t cached_tokens, uint32_t cur_seq, uint32_t cur_prompt_len)
-{
-    set_mask_norm();
-    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                    uint64_t flagIdx = 0;
+                    uint64_t mode = 2; // inner-group aic/aiv sync
+                    uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
+                    ffts_cross_core_sync(PIPE_FIX, config);
+                }
 
-    int weight_size = len_chunk * 2;
-    int tempInUbAddrSize = NUMELEMENT_OF_TEMPBUF * sizeof(half);
-    auto *weight_in_ub_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t)0);
-    auto *weight_out_ub_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t)(weight_size * 1));
-    auto *temp_in_ub_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t)weight_size * 2); // 256个half，该buf决定最多处理256*128 = 32k的片段
-    auto *cal_weight_in_ub_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t)weight_size * 2 + tempInUbAddrSize);
+                // 利用类似double buffer的思想来优化，在vector计算上一部分的softmax时，cube计算QK，准备下一块数据
+                int next_i = i + block_num;
+                if (next_i < taskNum) {
+                    int seqIdx = next_i % seqNum;
+                    int headIdx = next_i / seqNum;
+                    int mActual = m0;
+                    int mOffset = seqIdx * m0;
+                    if (mOffset + mActual > m) {
+                        mActual = m - mOffset;
+                    }
+                    int maskLen = mOffset + cachedTokens + mActual;
 
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-    for (int idx = 0; idx < new_tokens; ++idx) {
-        // softmax计算跳过padding的部分
-        if(cur_seq + idx >= cur_prompt_len) {
-            break;
+                    RunAicQK(qGmBuf[qOffset + mOffset * headSize * nQKVHeads + headIdx * headSize],
+                             kGmBuf, curBlockTable, qkGmBuf[block_idx * m0 * padN + ((qkIdx + 1) % 2 == 0 ? qkOffset : 0)],
+                             mActual, padN, headSize, blockSize,
+                             nHeads, nKVHeads, headIdx, maskLen, nQKVHeads);
+
+                    uint64_t flagIdx = 0;
+                    uint64_t mode = 2; // inner-group aic/aiv sync
+                    uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
+                    ffts_cross_core_sync(PIPE_FIX, config);
+                }
+
+                // 等待vector的softmax计算完成后，cube计算softmax*V
+                uint64_t flagIdx = 1;
+                wait_flag_dev(flagIdx);
+
+                RunAicSV(qkGmBuf[block_idx * m0 * padN + (qkIdx % 2 == 0 ? qkOffset : 0)],
+                         vGmBuf, curBlockTable, outGmBuf[(cumM + mOffset) * nHeads * headSize + headIdx * headSize],
+                         mActual, headSize, blockSize, padN,
+                         nHeads, nKVHeads, headIdx, maskLen);
+                qkIdx++;
+            }
+            pipe_barrier(PIPE_ALL);
         }
-        int effective_tokens = 1 + cached_tokens + idx; // 每一行开始mask的位置
-        int padding_effective_tokens = ROUND_UP(effective_tokens, VECTOR_MAX_NUM_OF_FP16);
+    }
 
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-
-        copy_gm_to_ubuf(weight_in_ub_addr, ((__gm__ half *)attn_weight_in) + idx * num_tokens, 0, 1, padding_effective_tokens / 16, 0, 0);
-
-        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-
-
-        if (effective_tokens % VECTOR_MAX_NUM_OF_FP16 != 0) {
-            pipe_barrier(PIPE_V);
-            // 计算最后一段的起始位置和padding的大小
-            int last_padding_start = int(effective_tokens / VECTOR_MAX_NUM_OF_FP16) * VECTOR_MAX_NUM_OF_FP16;
-            int padding_size = padding_effective_tokens - effective_tokens;
-            __set_mask_from_highbit(padding_size);
-            vector_dup(weight_in_ub_addr + last_padding_start, half(-65504), 1, 1, 1, 8, 0);
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        }
-
-        pipe_barrier(PIPE_V);
-
-        // max = MAX(QK)
-        // weightInUbAddr存储的是paddingEffectiveTokens个token的其中一个head的QK计算结果
-        // tempInUbAddr存储的是paddingEffectiveTokens / VECTOR_MAX_NUM_OF_FP16 个最大值
-        vcmax(temp_in_ub_addr, weight_in_ub_addr, padding_effective_tokens / VECTOR_MAX_NUM_OF_FP16, 1, 1, 8, ONLY_VALUE);
-        pipe_barrier(PIPE_V);
-        // numRepeat个最大值再比较一次，得到最大值
-        int num_blocks = padding_effective_tokens / VECTOR_MAX_NUM_OF_FP16;
-        if (num_blocks <= VECTOR_MAX_NUM_OF_FP16) {
-            __set_mask(num_blocks);
-            vcmax(temp_in_ub_addr, temp_in_ub_addr, 1, 1, 1, 8, ONLY_VALUE);
+#if __DAV_C220_VEC__
+    inline __aicore__ void RunAivSoftmax(__gm__ Dtype *qk, uint16_t padN, uint16_t tokens,
+                                         uint32_t cachedTokens, uint32_t curSeq, uint32_t curPromptLen)
+    {
+        CalcDtype min;
+        if constexpr (std::is_same<CalcDtype, half>::value) {
+            min = half(-65504);
         } else {
-            __set_mask_from_highbit(NUMELEMENT_OF_TEMPBUF - num_blocks);
-            vector_dup(temp_in_ub_addr + VECTOR_MAX_NUM_OF_FP16, half(-65504), 1, 1, 1, 8, 0);
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
-            pipe_barrier(PIPE_V);
-            vcmax(temp_in_ub_addr, temp_in_ub_addr, 2, 1, 1, 8, ONLY_VALUE);
-            pipe_barrier(PIPE_V);
-            __set_mask(2);
-            vcmax(temp_in_ub_addr, temp_in_ub_addr, 1, 1, 1, 8, ONLY_VALUE);
-            pipe_barrier(PIPE_V);
+            min = -3.4028235e+38;
         }
 
+        set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        pipe_barrier(PIPE_V);
-        // broadcast一个max标量为一个block大小的向量，避免使用scalar运算
-        vbrcb((__ubuf__ uint16_t*)temp_in_ub_addr, (__ubuf__ uint16_t*)temp_in_ub_addr, 0, 0, 1);
-        pipe_barrier(PIPE_V);
 
-        // QK - max
-        vsub(cal_weight_in_ub_addr, weight_in_ub_addr, temp_in_ub_addr, padding_effective_tokens / VECTOR_MAX_NUM_OF_FP16, 1, 1, 0, 8, 8, 0);
+        uint64_t off = 0;
+        __ubuf__ Dtype *in = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += padN * sizeof(Dtype);
+        __ubuf__ Dtype *out = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += padN * sizeof(Dtype);
+        __ubuf__ CalcDtype *cal = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
+        off += padN * sizeof(Dtype);
+        __ubuf__ CalcDtype *temp = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
+        __ubuf__ CalcDtype *ptr;
+
+        int calPad = 256 / sizeof(CalcDtype);
+        int pad = 256 / sizeof(Dtype);
+
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-        pipe_barrier(PIPE_V);
-        // EXP = exp(QK-max)
-        vexp(cal_weight_in_ub_addr, cal_weight_in_ub_addr, padding_effective_tokens / VECTOR_MAX_NUM_OF_FP16, 1, 1, 8, 8);
-        pipe_barrier(PIPE_V);
-
-        // s = reduce_sum(EXP)
-        vcadd(temp_in_ub_addr, cal_weight_in_ub_addr, padding_effective_tokens / VECTOR_MAX_NUM_OF_FP16, 1, 1, 8, 0);
-        pipe_barrier(PIPE_V);
-        if (num_blocks <= VECTOR_MAX_NUM_OF_FP16) {
-            __set_mask(num_blocks);
-            vcadd(temp_in_ub_addr, temp_in_ub_addr, 1, 1, 1, 8, 0);
-        } else {
-            __set_mask_from_highbit(NUMELEMENT_OF_TEMPBUF - num_blocks);
-            vector_dup(temp_in_ub_addr + VECTOR_MAX_NUM_OF_FP16, half(0), 1, 1, 1, 8, 0);
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
-            pipe_barrier(PIPE_V);
-            vcadd(temp_in_ub_addr, temp_in_ub_addr, 2, 1, 1, 8, 0);
-            pipe_barrier(PIPE_V);
-            __set_mask(2);
-            vcadd(temp_in_ub_addr, temp_in_ub_addr, 1, 1, 1, 8, 0);
-            pipe_barrier(PIPE_V);
-        }
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        pipe_barrier(PIPE_V);
-        // broadcast一个s = reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算
-        vbrcb((__ubuf__ uint16_t*)temp_in_ub_addr, (__ubuf__ uint16_t*)temp_in_ub_addr, 0, 0, 1);
-        pipe_barrier(PIPE_V);
-
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-        vdiv(weight_out_ub_addr, cal_weight_in_ub_addr, temp_in_ub_addr, padding_effective_tokens / VECTOR_MAX_NUM_OF_FP16, 1, 1, 0, 8, 8, 0);
-        if (len_chunk > padding_effective_tokens) {
-            pipe_barrier(PIPE_V);
-            vector_dup(weight_out_ub_addr + padding_effective_tokens, half(0),
-                (len_chunk - padding_effective_tokens) / VECTOR_MAX_NUM_OF_FP16, 1, 1, 8, 0);
-        }
-
-        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-
-        copy_ubuf_to_gm(((__gm__ half *)attn_weight_out) + idx * num_tokens, weight_out_ub_addr, 0, 1, len_chunk / 16, 0, 0);
-
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-    }
-    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-
-    pipe_barrier(PIPE_ALL);
-}
-
-inline __aicore__ void prefill_att_mix_aiv(
-    __gm__ uint8_t* q, __gm__ uint8_t* k, __gm__ uint8_t* qk, __gm__ uint8_t* block_table,
-    __gm__ uint8_t* prefix_lens,
-    __gm__ uint8_t* v, __gm__ uint8_t* out, __gm__ uint8_t* prompt_lens,
-    __gm__ uint8_t* __restrict__ cum_prompt_len,
-    uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks)
-{
-    set_atomic_none();
-    set_vector_mask((uint64_t)-1, (uint64_t)-1);
-
-    uint32_t num_qkv_heads = num_heads + num_kv_heads * 2;
-    pipe_barrier(PIPE_ALL);
-
-    int qk_idx = 0;
-    for (int batch_idx = 0; batch_idx < batchSize; batch_idx++) {
-        pipe_barrier(PIPE_ALL);
-        uint32_t cur_prompt_len = (uint32_t)(*((__gm__ int32_t *)prompt_lens + batch_idx));
-
-        uint32_t new_tokens = ROUND_UP(cur_prompt_len, cur_prompt_len <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
-        uint32_t cached_tokens = (uint32_t)(*((__gm__ int32_t *)prefix_lens + batch_idx));
-        uint32_t num_tokens = ROUND_UP(cur_prompt_len + cached_tokens, block_size);
-
-        uint32_t pM = TILESIZE_128;
-        // 根据序列长度动态调整query的切分粒度pM，保证数据通过L2传递
-        if (num_tokens > SEQLEN_19K) {
-            pM = TILESIZE_32;
-            new_tokens = ROUND_UP(cur_prompt_len, TILESIZE_32);
-        } else if (num_tokens > SEQLEN_8K) {
-            pM = TILESIZE_64;
-            new_tokens = ROUND_UP(cur_prompt_len, TILESIZE_64);
-        }
-        if (new_tokens <= SEQLEN_64) {
-            pM = TILESIZE_16; // 避免new_tokens很小的情况（小于128），切分粒度是16，也保证可以整除
-        }
-        // qk为外部申请的一块GM内存，用于存储cube计算QK的输出，作为vector计算softmax的输入，并存储vector计算softmax的输出
-        // qk用于double buffer，该处计算的是两个buffer之间的offset
-        uint32_t qk_offset = block_num * pM * num_tokens;
-
-        // 单个batch的计算总量：每个token计算numHeads个不同head的attention，共newTokens个token，即newTokens * numHeads次attention
-        // 单个core的计算总量：每个token计算其中一个head的attention，共pM个token，即pM次attention
-        // 单个batch的总迭代次数为 newTokens * numHeads / pM 次attention
-        int seq_num = new_tokens / pM;
-        int total_task_num = num_heads * seq_num;
-        pipe_barrier(PIPE_ALL);
-        for (int i = block_idx; i < total_task_num; i += block_num) {
-            int seq_idx = i % seq_num;
-            int head_idx = i / seq_num;
-
-            // 等待cube的QK计算完成
-            uint64_t flag_id = 0;
-            wait_flag_dev(flag_id);
-
-            // 一个AI Core分组可包含1个AIC和2个AIV
-            uint32_t sub_id = get_subblockid();
-            int new_cached_tokens = seq_idx * pM + sub_id * pM / 2 + cached_tokens;
-            uint32_t cur_seq = seq_idx * pM + sub_id * pM / 2;
-            __gm__ half *attn_weight_in_one_iter = ((__gm__ half *)qk) + block_idx * pM * num_tokens + sub_id * pM / 2*num_tokens;
-            if (qk_idx % 2 == 0) {
-                attn_weight_in_one_iter = attn_weight_in_one_iter + qk_offset;
+        for (int idx = 0; idx < tokens; ++idx) {
+            // softmax计算跳过padding的部分
+            if (curSeq + idx >= curPromptLen) {
+                break;
             }
 
-            att_softmax_vector_kernel(attn_weight_in_one_iter, attn_weight_in_one_iter,
-                                      num_tokens, num_tokens, pM / 2, new_cached_tokens, cur_seq, cur_prompt_len);
-            flag_id = 1;
-            uint64_t mode = 2; // inner-group aic/aiv sync
-            uint64_t config = 1 | (mode << 4) | (flag_id << 8);
-            ffts_cross_core_sync(PIPE_MTE3, config);
-            qk_idx++;
+            int actualCachedTokens = 1 + cachedTokens + idx; // 每一行开始mask的位置
+            int padCachedTokens = ROUND_UP(actualCachedTokens, calPad);
+            int repeat = padCachedTokens / calPad;
+
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            copy_gm_to_ubuf(in, qk + idx * padN, 0, 1,
+                            DIV_ROUND_UP(actualCachedTokens * sizeof(Dtype), 32), 0, 0);
+
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+            if constexpr (std::is_same<CalcDtype, half>::value) {
+                ptr = in;
+            } else {
+                vconv_bf162f32((__ubuf__ float *)cal, (__ubuf__ Dtype *)in, repeat, 1, 1, 8, 4);
+                pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+                ptr = cal;
+            }
+
+            // dup calPad
+            if (actualCachedTokens % calPad != 0) {
+                SetMaskFromHighBit(calPad, calPad - actualCachedTokens % calPad);
+                vector_dup(ptr + ROUND_DOWN(actualCachedTokens, calPad), min, 1, 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
+                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+            }
+
+            // max
+            ReduceMax(temp, ptr, actualCachedTokens);
+
+            // broadcast一个max标量为一个block大小的向量，避免使用scalar运算
+            if constexpr (std::is_same<CalcDtype, half>::value) {
+                vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
+            } else {
+                vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
+            }
+            pipe_barrier(PIPE_V);
+
+            // QK - max
+            vsub(cal, ptr, temp, repeat, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
+            if constexpr (std::is_same<CalcDtype, half>::value) {
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            }
+
+            // EXP = exp(QK-max)
+            vexp(cal, cal, repeat, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+
+            // s = Reduce_sum(EXP)
+            ReduceSum(temp, cal, actualCachedTokens);
+
+            // broadcast一个s = Reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算
+            if constexpr (std::is_same<CalcDtype, half>::value) {
+                vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
+            } else {
+                vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
+            }
+            pipe_barrier(PIPE_V);
+
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+            if constexpr (std::is_same<CalcDtype, half>::value) {
+                vdiv(out, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
+                pipe_barrier(PIPE_V);
+            } else {
+                vdiv(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
+                pipe_barrier(PIPE_V);
+                vconv_f322bf16r(out, cal, repeat, 1, 1, 4, 8);
+            }
+
+            if (padN > padCachedTokens) {
+                pipe_barrier(PIPE_V);
+                vector_dup(out + padCachedTokens, Dtype(0),
+                    (padN - padCachedTokens) / pad, 1, 1, 8, 0);
+            }
+
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            copy_ubuf_to_gm(qk + idx * padN, out, 0, 1, padN / 16, 0, 0);
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
         }
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
         pipe_barrier(PIPE_ALL);
     }
-}
-
 #endif
 
-extern "C" __global__ __aicore__ void prefill_att(
-    __gm__ uint8_t* q, __gm__ uint8_t* k, __gm__ uint8_t* qk, __gm__ uint8_t* block_table,
-    __gm__ uint8_t* prefix_lens,
-    __gm__ uint8_t* v, __gm__ uint8_t* out, __gm__ uint8_t* prompt_lens,
-    __gm__ uint8_t* __restrict__ cum_prompt_len,
-    uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks)
-{
+    inline __aicore__ void RunAiv()
+    {
+        set_atomic_none();
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        int qkIdx = 0;
+
+        for (int batch = 0; batch < batchSize; batch++) {
+            uint32_t m = (uint32_t)(*(promptLens + batch));
+            uint32_t padM = ROUND_UP(m, m <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
+            uint32_t cachedTokens = (uint32_t)(*(prefixLens + batch));
+            uint32_t padN = ROUND_UP(m + cachedTokens, blockSize);
+
+            uint32_t m0 = TILESIZE_128;
+
+            // 根据序列长度动态调整query的切分粒度m0，保证数据通过L2传递
+            if (padN > SEQLEN_19K) {
+                m0 = TILESIZE_32;
+                padM = ROUND_UP(m, TILESIZE_32);
+            } else if (padN > SEQLEN_8K) {
+                m0 = TILESIZE_64;
+                padM = ROUND_UP(m, TILESIZE_64);
+            }
+            if (padM <= SEQLEN_64) {
+                m0 = TILESIZE_16;
+            }
+            uint32_t qkOffset = block_num * m0 * padN;
+
+            int seqNum = padM / m0;
+            int taskNum = nHeads * seqNum;
+            pipe_barrier(PIPE_ALL);
+
+            for (int i = block_idx; i < taskNum; i += block_num) {
+                int seqIdx = i % seqNum;
+                int headIdx = i / seqNum;
+
+                uint64_t flagIdx = 0;
+                wait_flag_dev(flagIdx);
+
+                uint32_t subIdx = get_subblockid();
+                int newCachedTokens = seqIdx * m0 + subIdx * m0 / 2 + cachedTokens;
+                uint32_t curSeq = seqIdx * m0 + subIdx * m0 / 2;
+                __gm__ Dtype *qk = ((__gm__ Dtype *)qkGmBuf.GetPhyAddr()) + block_idx * m0 * padN + subIdx * m0 / 2 * padN;
+                if (qkIdx % 2 == 0) {
+                    qk = qk + qkOffset;
+                }
+
+                RunAivSoftmax(qk, padN, m0 / 2, newCachedTokens, curSeq, m);
+                flagIdx = 1;
+                uint64_t mode = 2; // inner-group aic/aiv sync
+                uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
+                ffts_cross_core_sync(PIPE_MTE3, config);
+                qkIdx++;
+            }
+            pipe_barrier(PIPE_ALL);
+        }
+    }
+
+    inline __aicore__ void Run()
+    {
 #ifdef __DAV_C220_CUBE__
-    prefill_att_mix_aic(q, k, qk, block_table, prefix_lens, v, out, prompt_lens,
-                        cum_prompt_len, head_size, num_heads, num_kv_heads, block_size, batchSize, max_num_blocks);
+        RunAic();
 #elif __DAV_C220_VEC__
-    prefill_att_mix_aiv(q, k, qk, block_table, prefix_lens, v, out, prompt_lens,
-                        cum_prompt_len, head_size, num_heads, num_kv_heads, block_size, batchSize, max_num_blocks);
+        RunAiv();
 #endif
+    }
+
+private:
+    GlobalTensor<Dtype> qGmBuf;
+    GlobalTensor<Dtype> kGmBuf;
+    GlobalTensor<Dtype> vGmBuf;
+    GlobalTensor<Dtype> qkGmBuf;
+    GlobalTensor<Dtype> outGmBuf;
+    __gm__ int32_t *cumPromptLen;
+    __gm__ int32_t *promptLens;
+    __gm__ int32_t *prefixLens;
+    __gm__ int32_t *blockTable;
+    uint32_t headSize;
+    uint32_t nHeads;
+    uint32_t nKVHeads;
+    uint32_t blockSize;
+    uint32_t batchSize;
+    uint32_t maxNumBlocks;
+};
+
+#define PREFILL_ATTN_FUNC_DEFINE(dtype, calcDtype) \
+extern "C" __global__ __aicore__ void prefill_att_##dtype( \
+    GM_ADDR q, GM_ADDR k, GM_ADDR qk, GM_ADDR block_table, \
+    GM_ADDR prefix_lens, \
+    GM_ADDR v, GM_ADDR out, GM_ADDR prompt_lens, \
+    GM_ADDR __restrict__ cum_prompt_len, \
+    uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks) \
+{ \
+    PrefillAttn<dtype, calcDtype> op; \
+    op.Init(q, k, qk, block_table, \
+            prefix_lens, v, out, \
+            prompt_lens, cum_prompt_len, \
+            head_size, num_heads, num_kv_heads, \
+            block_size, batchSize, max_num_blocks); \
+    op.Run(); \
 }
+
+PREFILL_ATTN_FUNC_DEFINE(float16_t, float16_t);
+PREFILL_ATTN_FUNC_DEFINE(bfloat16_t, float);
