@@ -51,7 +51,7 @@ class ModelArgs:
     model_type: str = "llama"
 
     def __post_init__(self):
-        self.max_m = self.max_seq_len if self.max_seq_len > self.max_batch_size else self.max_batch_size
+        self.max_m = self.max_seq_len * self.max_batch_size
         if self.head_dim is None:
             self.head_dim = self.dim // self.n_heads
 

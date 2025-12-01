@@ -29,6 +29,7 @@ kv_size = num_kv_heads * head_size
 
 a2v = torch.empty(int(num_heads * max_batch_size * 512 / 4), dtype=torch.int32, device="npu:0")
 v2a = torch.empty(int(num_heads * max_batch_size * 512 / 4), dtype=torch.int32, device="npu:0")
+decode_idx = torch.tensor([0, 1, 2, 3, 0, 0, 0, 0], dtype=torch.int32, device="npu:0")
 cum_prompt_lens = torch.tensor([0, 1, 2, 3, 0, 0, 0, 0], dtype=torch.int32, device="npu:0")
 cached_lens = torch.tensor([seq_len - 1] * batch_size + [0] * (max_batch_size - batch_size),
                            dtype=torch.int32, device="npu:0")
@@ -59,7 +60,7 @@ standard = torch.matmul(attn_weights, v_cache_standard.transpose(1, 2)).reshape(
 
 torch.npu.synchronize()
 decode_attention_mix(rt, a2v, v2a, q_xlite, k_cache_xlite, v_cache_xlite, cached_lens, block_tables,
-                     output, cum_prompt_lens,
+                     output, decode_idx, cum_prompt_lens,
                      batch_size, num_heads, head_size, block_size, 1, num_kv_heads, max_seq_len)
 torch.npu.synchronize()
 print(f'decode attention mix executed!')

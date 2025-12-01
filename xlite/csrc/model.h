@@ -89,6 +89,11 @@ public:
                              XModelAttnMeta& attnMeta,
                              std::vector<std::pair<XTensor, XTensor>>& kvCache,
                              XTensor &freqsCis, XTensor &output);
+    void ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input,
+                                 XModelAttnMeta& attnMeta,
+                                 std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                 XTensor &freqsCis, XTensor &output);
+    size_t GetTensorPoolSize(void);
 
     // weights
     XTensor embed;
@@ -145,7 +150,6 @@ private:
                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttn(XRuntime &rt, uint32_t layer,
-                     XModelAttnMeta& attnMeta,
                      std::vector<std::pair<XTensor, XTensor>>& kvCache,
                      XTensor &freqsCis, XTensor &hiddenState);
     void ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &hiddenState, bool withAllReduce);
@@ -160,9 +164,11 @@ private:
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     void ForwardLayers(XRuntime &rt, XTensor &input,
-                       XModelAttnMeta& attnMeta,
                        std::vector<std::pair<XTensor, XTensor>>& kvCache,
                        XTensor &freqsCis, XTensor &output);
+    void ForwardLayersWithInputsEmbeds(XRuntime &rt, XTensor &x,
+                                       std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                       XTensor &freqsCis, XTensor &h);
     struct XModelConfig _c;
     uint32_t _rankId;
 
@@ -182,7 +188,9 @@ private:
     int _prefillLenPad;
     XTensor _position;
     XTensor _slotMapping;
+    XTensor _prefillIdx;
     XTensor _prefillLastIdx;
+    XTensor _decodeIdx;
     XTensor _cachedLens;
     XTensor _lens;
     XTensor _cumPromptLens;

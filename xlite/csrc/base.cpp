@@ -114,7 +114,7 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
     }
 }
 
-void XTensor::Print(uint32_t nRow, uint32_t nCol)
+void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol)
 {
     uint32_t i, j;
     uint32_t hRow = DIV_ROUND_UP(nRow, 2);
@@ -137,7 +137,7 @@ void XTensor::Print(uint32_t nRow, uint32_t nCol)
         return;
     }
 
-    std::cout << "XTensor(";
+    std::cout << name << ": XTensor(";
     for (uint32_t i = 0; i < shape.size(); i++) {
         std::cout << "[";
     }

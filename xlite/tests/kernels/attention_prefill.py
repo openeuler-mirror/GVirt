@@ -55,6 +55,8 @@ for test_dtype in dtype_list:
         k_cache_xlite = torch.zeros(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
         v_cache_xlite = torch.zeros(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
 
+        prefill_index = torch.arange(BATCH_SIZE, dtype=torch.int32)
+
         lens_list = [SEQ_LEN] * BATCH_SIZE
         lens = torch.tensor(lens_list, dtype=torch.int32).flatten()
 
@@ -116,7 +118,7 @@ for test_dtype in dtype_list:
 
     torch.npu.synchronize()
     attention_prefill(rt, qkv_xlite, k_cache_xlite, qk, block_tables, cached_lens,
-                      v_cache_xlite, output_xlite, lens, cum_prompt_lens,
+                      v_cache_xlite, output_xlite, lens, prefill_index, cum_prompt_lens,
                       HEAD_DIM, N_HEADS, N_KV_HEADS, BLOCK_SIZE, BATCH_SIZE, max_num_block)
     torch.npu.synchronize()
 

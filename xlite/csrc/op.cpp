@@ -245,7 +245,7 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
 void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &qk,
                              XTensor &blockTables, XTensor &cachedLens,
                              XTensor &vCache, XTensor &output, XTensor &lens,
-                             XTensor &cumPromptLens, uint32_t headDim,
+                             XTensor &prefillIndex, XTensor &cumPromptLens, uint32_t headDim,
                              uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize,
                              uint32_t batch, uint32_t maxNumBlock)
 {
@@ -254,11 +254,11 @@ void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
     localKvHeads = localKvHeads == 0 ? 1 : localKvHeads;
     if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 && output.dtype == FP16) {
         aclrtlaunch_prefill_att_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, qk.ptr, blockTables.ptr,
-                                          cachedLens.ptr, vCache.ptr, output.ptr, lens.ptr, cumPromptLens.ptr,
+                                          cachedLens.ptr, vCache.ptr, output.ptr, lens.ptr, prefillIndex.ptr, cumPromptLens.ptr,
                                           headDim, localHeads, localKvHeads, blockSize, batch, maxNumBlock);
-    } else if(qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 && output.dtype == BF16) {
+    } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_prefill_att_bfloat16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, qk.ptr, blockTables.ptr,
-                                          cachedLens.ptr, vCache.ptr, output.ptr, lens.ptr, cumPromptLens.ptr,
+                                          cachedLens.ptr, vCache.ptr, output.ptr, lens.ptr, prefillIndex.ptr, cumPromptLens.ptr,
                                           headDim, localHeads, localKvHeads, blockSize, batch, maxNumBlock);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
@@ -267,7 +267,7 @@ void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
 
 void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &qkv,
                             XTensor &kCache, XTensor &vCache, XTensor &cachedLens,
-                            XTensor &blockTables, XTensor &qk, XTensor &output,
+                            XTensor &blockTables, XTensor &qk, XTensor &output, XTensor &decodeIdx,
                             XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
                             uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
                             uint32_t nKvHeads, uint32_t maxM)
@@ -277,7 +277,7 @@ void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &q
     localKvHeads = localKvHeads == 0 ? 1 : localKvHeads;
     aclrtlaunch_decode_att(rt.aicNum, rt.stream, a2v.ptr, v2a.ptr, qkv.ptr, kCache.ptr,
                            vCache.ptr, cachedLens.ptr, blockTables.ptr, qk.ptr, output.ptr,
-                           cumPromptLens.ptr, batch, localHeads, headDim,
+                           decodeIdx.ptr, cumPromptLens.ptr, batch, localHeads, headDim,
                            blockSize, maxNumBlock, localKvHeads, maxM, localHeads + 2 * localKvHeads,
                            0, 0);
 }
@@ -319,7 +319,7 @@ void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &c
 void XliteDsOpPrefillMix(XRuntime &rt, XTensor &out, XTensor &alpha, XTensor &max, XTensor &sum,
                          XTensor &q, XTensor &k, XTensor &qk, XTensor &blockTables, XTensor &cachedLens,
                          XTensor &v, XTensor &mixOut, XTensor &mixOutFinal, XTensor &promptLens,
-                         XTensor &attnMask, XTensor &attnMaskAddr, XTensor &speculateLens,
+                         XTensor &attnMask, XTensor &attnMaskAddr, XTensor &speculateLens, XTensor &prefillIndex,
                          XTensor &cumPromptLens, uint32_t headSize, uint32_t numHeads, uint32_t numKVHeads,
                          uint32_t blockSize, uint32_t batchSize, uint32_t mappingLen, uint32_t doTreeAttnMask,
                          uint32_t offsetM, uint32_t mSlice, float scale)
