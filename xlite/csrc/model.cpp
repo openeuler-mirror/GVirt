@@ -647,36 +647,18 @@ void XModel::ForwardLayersWithInputsEmbeds(XRuntime &rt, XTensor &x,
                                            std::vector<std::pair<XTensor, XTensor>>& kvCache,
                                            XTensor &freqsCis, XTensor &h)
 {
-    bool fuseAddNorm = embed.dtype == FP16 ? true : false;
-
     for (uint32_t i = 0; i < _c.nLayers; i++) {
-        if (!fuseAddNorm || i == 0) {
+        if (i == 0) {
             XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[0], x.shape[1]);
         }
-
         ForwardAttn(rt, i, kvCache, freqsCis, h);
-
-        if (!fuseAddNorm) {
-            XliteOpAdd(rt, x, h, x);
-            XliteOpRmsNorm(rt, x, mlpNorm[i], h, _c.normEps, x.shape[0], x.shape[1]);
-        } else {
-            XliteOpAddAndRmsNorm(rt, x, h, mlpNorm[i], _c.normEps, h);
-        }
-
+        XliteOpAddAndRmsNorm(rt, x, h, mlpNorm[i], _c.normEps, h);
         ForwardFFN(rt, i, h);
-
-        if (!fuseAddNorm) {
-            XliteOpAdd(rt, x, h, x);
-        } else if (i < (_c.nLayers - 1)) {
+        if (i < (_c.nLayers - 1)) {
             XliteOpAddAndRmsNorm(rt, x, h, attnNorm[i + 1], _c.normEps, h);
         }  
     }
-
-    if (!fuseAddNorm) {
-        XliteOpRmsNorm(rt, x, norm, h, _c.normEps, x.shape[0], x.shape[1]);
-    } else {
-        XliteOpAddAndRmsNorm(rt, x, h, norm, _c.normEps, h);
-    }
+    XliteOpAddAndRmsNorm(rt, x, h, norm, _c.normEps, h);
 }
 
 void XModel::ForwardLayers(XRuntime &rt, XTensor &input,
