@@ -2,6 +2,25 @@ export FORWARD_BACKEND=xlite
 export HCCL_DETERMINISTIC=true
 export LCCL_DETERMINISTIC=true
 
+function run_qwen2.5_0.5B()
+{
+    echo '{
+        "vocab_size": 151936,
+        "dim": 896,
+        "inter_dim": 4864,
+        "n_layers": 24,
+        "n_heads": 14,
+        "n_kv_heads": 2,
+        "norm_eps": 1e-06,
+        "rope_theta": 1000000.0,
+        "dtype": "bfloat16",
+        "tie_word_embeddings": true,
+        "max_batch_size": 1,
+        "max_seq_len": 1024
+    }' > tests/test_config.json
+    python tests/generate.py --model qwen2 --ckpt-path /mnt/nvme0n1/models/Qwen2.5-0.5B-Instruct/ --config tests/test_config.json --interactive
+}
+
 function run_qwen2_32B()
 {
     echo '{
@@ -157,6 +176,7 @@ function run_deepseek()
     # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-expert-int8-8layers-8d/ --config tests/test_config.json --input tests/test.json
 }
 
+#run_qwen2.5_0.5B
 run_qwen2_32B
 run_qwen3_32B
 #run_qwen3_moe_30B

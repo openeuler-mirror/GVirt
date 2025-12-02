@@ -46,6 +46,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
     rope_theta: float = 10000.0
     dtype: Literal["bfloat16", "float16"] = "float16"
+    tie_word_embeddings: bool = False,
     qkv_bias: bool = False
     qk_norm: bool = False
     model_type: str = "llama"
@@ -352,7 +353,7 @@ class Llama(nn.Module):
         assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
         assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
 
-        self.xlite_weight_nz = forward_backend == "xlite"
+        self.xlite_weight_nz = forward_backend == "xlite" and not self.args.tie_word_embeddings
 
         q_proj_shard_size = (self.args.head_dim * self.args.n_heads // world_size)
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
@@ -457,6 +458,9 @@ class Llama(nn.Module):
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
             param.copy_(loaded_weight)
             torch.npu.empty_cache()
+
+        if self.args.tie_word_embeddings:
+            self.lm_head.weight.data = self.embed_tokens.weight.data
 
         if self.xlite_weight_nz:
             self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
