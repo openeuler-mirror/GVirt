@@ -616,7 +616,7 @@ const uint32_t QK_RESULT_SIZE = 4 * VECTOR_MAX_BYTESIZE;
 const uint32_t MAX_SUB_CONTEXT_SIZE = (MAX_UB_SIZE - 3 * QK_RESULT_SIZE) / 6;
 const uint32_t MAX_SUB_CONTEXT_SIZE_F32 = MAX_SUB_CONTEXT_SIZE * 2;
 
-const uint32_t MAX_BLOCK_NUM_ITER = MAX_SUB_CONTEXT_SIZE / VECTOR_MAX_BYTESIZE;
+const uint32_t MAX_BLOCK_NUM_ITER = MAX_SUB_CONTEXT_SIZE_F32 / VECTOR_MAX_BYTESIZE;
 const uint32_t MAX_BLOCK_CONTEXT_LEN = MAX_SUB_CONTEXT_SIZE / sizeof(bfloat16_t);
 
 
@@ -659,7 +659,7 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
         wait_aic_aiv_flag(ctx->a2v_gm, 1, process, ctx->head_size);
         
         uint32_t num_iters = DIV_ROUND_UP(context_len, VECTOR_MAX_NUM_OF_FP32);
-        uint32_t sub_block_number = DIV_ROUND_UP(context_len * sizeof(float), MAX_SUB_CONTEXT_SIZE);
+        uint32_t sub_block_number = DIV_ROUND_UP(context_len * sizeof(bfloat16_t), MAX_SUB_CONTEXT_SIZE);
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
@@ -702,30 +702,13 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
                 uint32_t start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP32);
                 set_mask0_from_highbit(VECTOR_MAX_NUM_OF_FP32 - rest);
                 vector_dup(qk_reduce_ub_f32 + start, float_min, 1, 1, 1, 8, 0);
-                reset_mask();
                 pipe_barrier(PIPE_V);
+                reset_mask();
             }
 
             // max = MAX(QK)
-            vcmax(qk_ub_addr, qk_reduce_ub_f32, cur_num_iters, 1, 1, 8, ONLY_VALUE);
-            pipe_barrier(PIPE_V);
-            if (cur_num_iters < VECTOR_MAX_NUM_OF_FP32) {
-                set_mask0(cur_num_iters);
-                vcmax(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, ONLY_VALUE);
-                reset_mask();
-                pipe_barrier(PIPE_V);
-            } else {
-                set_mask0_from_highbit(VECTOR_MAX_NUM_OF_FP32 - cur_num_iters % VECTOR_MAX_NUM_OF_FP32);
-                vector_dup(qk_ub_addr + VECTOR_MAX_NUM_OF_FP32, float_min, 1, 1, 1, 8, 0);
-                reset_mask();
-                pipe_barrier(PIPE_V);
-                vcmax(qk_ub_addr, qk_ub_addr, 2, 1, 1, 8, ONLY_VALUE);
-                pipe_barrier(PIPE_V);
-                set_mask0(2);
-                vcmax(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, ONLY_VALUE);
-                pipe_barrier(PIPE_V);
-                reset_mask();
-            }
+            ReduceMax(qk_ub_addr, qk_reduce_ub_f32, cur_qk_context_len);
+            
             vbrcb((__ubuf__ uint32_t *) qk_ub_addr, (__ubuf__ uint32_t *) qk_ub_addr, 1, 8, 1);
             pipe_barrier(PIPE_V);
 
@@ -750,25 +733,7 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
             pipe_barrier(PIPE_V);
 
             // s = reduce_sum(EXP)
-            vcadd(qk_ub_addr, qk_reduce_ub_f32, cur_num_iters, 1, 1, 8, 0);
-            pipe_barrier(PIPE_V);
-            if (cur_num_iters < VECTOR_MAX_NUM_OF_FP32) {
-                set_mask0(cur_num_iters);
-                vcadd(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, 0);
-                reset_mask();
-                pipe_barrier(PIPE_V);
-            } else {
-                set_mask0_from_highbit(VECTOR_MAX_NUM_OF_FP32 - cur_num_iters % VECTOR_MAX_NUM_OF_FP32);
-                vector_dup(qk_ub_addr + VECTOR_MAX_NUM_OF_FP32, float(0), 1, 1, 1, 8, 0);
-                reset_mask();
-                pipe_barrier(PIPE_V);
-                vcadd(qk_ub_addr, qk_ub_addr, 2, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
-                set_mask0(2);
-                vcadd(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
-                reset_mask();
-            }
+            ReduceSum(qk_ub_addr, qk_reduce_ub_f32, cur_qk_context_len);
 
             vbrcb((__ubuf__ uint32_t *) qk_ub_addr, (__ubuf__ uint32_t *) qk_ub_addr, 1, 8, 1);
             pipe_barrier(PIPE_V);
@@ -851,7 +816,6 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
             pipe_barrier(PIPE_V);
             
             rest = cur_qk_context_len % VECTOR_MAX_NUM_OF_FP16;
-
             if (rest > 0) {
                 uint32_t start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP16);
                 set_mask_from_highbit(VECTOR_MAX_NUM_OF_FP16 - rest);
