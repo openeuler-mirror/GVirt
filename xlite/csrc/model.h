@@ -82,6 +82,7 @@ struct XModelAttnMeta {
 };
 
 #define TILESIZE_OF_QUERY 128 // the tile size of query
+#define AIC_MAX_NUM 25
 
 class XModel {
 public:
