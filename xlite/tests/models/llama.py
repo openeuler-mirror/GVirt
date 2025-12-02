@@ -46,7 +46,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
     rope_theta: float = 10000.0
     dtype: Literal["bfloat16", "float16"] = "float16"
-    tie_word_embeddings: bool = False,
+    tie_word_embeddings: bool = False
     qkv_bias: bool = False
     qk_norm: bool = False
     model_type: str = "llama"
