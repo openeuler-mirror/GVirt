@@ -328,9 +328,8 @@ class Llama(nn.Module):
         logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device)
         tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
         attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
-        torch.npu.synchronize()
-        self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, self.freqs_cis, logits)
-        torch.npu.synchronize()
+        stream = torch.npu.current_stream().npu_stream
+        self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, self.freqs_cis, logits, stream)
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 

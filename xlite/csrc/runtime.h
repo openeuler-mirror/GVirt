@@ -10,6 +10,7 @@
 #define XLITE_DEFAULT_PORT 10266
 
 typedef void *aclrtStream;
+typedef void *aclrtEvent;
 typedef void *HcclComm;
 class XTensorPool;
 
@@ -25,6 +26,8 @@ public:
              uint32_t tpSize = 1, uint32_t dpSize = 1);
     ~XRuntime(void);
     void Synchronize(void);
+    void EventWaitCurrStream(aclrtStream currStream);
+    void EventRecordCurrStream(aclrtStream currStream);
     void MemcpyH2D(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
     int InitTensorPool(size_t sizeMB);
@@ -44,6 +47,7 @@ private:
     int GetNodeIps(void);
     int InitComm(void);
     uint32_t _devid;
+    aclrtEvent _event;
     bool _init_outside = false;
     uint32_t _rankId;
     uint32_t _tpSize;

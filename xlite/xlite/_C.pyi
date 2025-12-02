@@ -111,13 +111,15 @@ class Model:
         attn_meta: ModelAttnMeta | AttnMeta,
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]],
         freqs_cis: torch.Tensor,
-        output: torch.Tensor) -> None: ...
+        output: torch.Tensor,
+        curr_stream: int) -> None: ...
 
     def compute_logits(
         self,
         rt: Runtime,
         input: torch.Tensor,
-        output: torch.Tensor) -> None: ...
+        output: torch.Tensor,
+        curr_stream: int) -> None: ...
 
     def forward_and_get_logits(
         self,
@@ -126,7 +128,8 @@ class Model:
         attn_meta: ModelAttnMeta | AttnMeta,
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]],
         freqs_cis: torch.Tensor,
-        output: torch.Tensor) -> None: ...
+        output: torch.Tensor,
+        curr_stream: int) -> None: ...
 
     def forward_with_inputs_embeds(
         self,
@@ -135,7 +138,8 @@ class Model:
         attn_meta: ModelAttnMeta | AttnMeta,
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]],
         freqs_cis: torch.Tensor,
-        output: torch.Tensor) -> None: ...
+        output: torch.Tensor,
+        curr_stream: int) -> None: ...
 
     def get_tensor_pool_size(self) -> int: ...
 
