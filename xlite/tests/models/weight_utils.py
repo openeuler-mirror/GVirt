@@ -14,9 +14,13 @@ from typing import Any, Iterator, List, Optional, Tuple
 import filelock
 import numpy as np
 import torch
+import torch_npu
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file, safe_open
 from tqdm.auto import tqdm
+
+
+ACL_FORMAT_FRACTAL_NZ = 29
 
 
 def rearrange_matrix(matrix, n0, k_block_size=16):
@@ -31,30 +35,7 @@ def rearrange_matrix(matrix, n0, k_block_size=16):
 
 def matrix_nd2nz(matrix):
     """nd2nz"""
-    # same logic with csrc/kernels/matmul.cpp 's n0 size */
-    if matrix.size(0) <= 1280:
-        n0 = 64
-    else:
-        n0 = 256
-    if matrix.dtype == torch.float:
-        k_block_size = 8
-    elif matrix.dtype == torch.bfloat16 or torch.float16:
-        k_block_size = 16
-    elif matrix.dtype == torch.int8:
-        k_block_size = 32
-
-    n, _ = matrix.size()
-    if n % n0 == 0:
-        return rearrange_matrix(matrix, n0, k_block_size=k_block_size)
-
-    n_down = n // n0 * n0
-    part2_n0 = n - n_down
-    assert part2_n0 % 16 == 0
-    part1 = matrix[:n_down, :]
-    part2 = matrix[n_down:, :]
-    rearrange_part1 = rearrange_matrix(part1, n0, k_block_size=k_block_size)
-    rearrange_part2 = rearrange_matrix(part2, part2_n0, k_block_size=k_block_size)
-    return torch.cat((rearrange_part1, rearrange_part2), dim = 0)
+    return torch_npu.npu_format_cast(matrix, ACL_FORMAT_FRACTAL_NZ)
 
 
 def setup_logger():
