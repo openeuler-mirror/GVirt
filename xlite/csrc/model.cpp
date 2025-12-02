@@ -233,7 +233,7 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
             decodeIdx[_decodeBatch] = i;
             _decodeBatch++;
         } else {
-            std::cerr << __FILE__ << ":" << __LINE__ << ": invalid inputMeta" << i << ", decode len too long" << lens[i] << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attnMeta" << i << ", decode len too long" << lens[i] << std::endl;
             return;
         }
     }
@@ -256,31 +256,47 @@ void XModel::PrepareAttn(XRuntime &rt, XModelAttnMeta& attnMeta)
         CHECK_ACL(aclrtMemcpy(_decodeIdx.ptr, size, decodeIdx.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     }
 
-    position.resize(_realM);
-    slotMapping.resize(_realM);
-    k = 0;
-    for (uint32_t i = 0; i < batch; i++) {
-        for (uint32_t j = 0; j < lens[i]; j++) {
-            position[k] = cachedLens[i] + j;
-            blockId = position[k] / _c.blockSize;
-            id = position[k] % _c.blockSize;
-            slotMapping[k++] = attnMeta.blockTables[i][blockId] * _c.blockSize + id;
-        }
-    }
-    size = _realM * XDtypeBit(INT64) / 8;
-    CHECK_ACL(aclrtMemcpy(_position.ptr, size, position.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-    size = _realM * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMemcpy(_slotMapping.ptr, size, slotMapping.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    switch (attnMeta.version) {
+        case 0:
+            position.resize(_realM);
+            slotMapping.resize(_realM);
+            k = 0;
+            for (uint32_t i = 0; i < batch; i++) {
+                for (uint32_t j = 0; j < lens[i]; j++) {
+                    position[k] = cachedLens[i] + j;
+                    blockId = position[k] / _c.blockSize;
+                    id = position[k] % _c.blockSize;
+                    slotMapping[k++] = attnMeta.blockTables[i][blockId] * _c.blockSize + id;
+                }
+            }
+            size = _realM * XDtypeBit(INT64) / 8;
+            CHECK_ACL(aclrtMemcpy(_position.ptr, size, position.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+            size = _realM * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMemcpy(_slotMapping.ptr, size, slotMapping.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
 
-    blockTables.resize(batch * _maxNumBlocks);
-    for (uint32_t i = 0; i < batch; i++) {
-        blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], _c.blockSize);
-        for (uint32_t j = 0; j < blockNum; j++) {
-            blockTables[i * _maxNumBlocks + j] = attnMeta.blockTables[i][j];
-        }
+            blockTables.resize(batch * _maxNumBlocks);
+            for (uint32_t i = 0; i < batch; i++) {
+                blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], _c.blockSize);
+                for (uint32_t j = 0; j < blockNum; j++) {
+                    blockTables[i * _maxNumBlocks + j] = attnMeta.blockTables[i][j];
+                }
+            }
+            size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMemcpy(_blockTables.ptr, size, blockTables.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+            _attnPosition = _position;
+            _attnBlockTables = _blockTables;
+            _attnSlotMapping = _slotMapping;
+            break;
+        case 1:
+            _maxNumBlocks = attnMeta.vllmBlockTables.shape[1];
+            _attnPosition = attnMeta.vllmPosition;
+            _attnBlockTables = attnMeta.vllmBlockTables;
+            _attnSlotMapping = attnMeta.vllmSlotMapping;
+            break;
+        default:
+            std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attnMeta version: " << attnMeta.version << std::endl;
+            return;
     }
-    size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMemcpy(_blockTables.ptr, size, blockTables.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
 }
 
 std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(XRuntime &rt, uint32_t layer,
@@ -302,13 +318,13 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(XRuntim
     XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], attnNormQc, _c.normEps, attnQc.shape[0], attnQc.shape[1]);
     XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr, _c.weightNZ);
     XliteDsOpRopeBatch(rt, _realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
-                       attnQWithQr, freqsCis, _position, _vGather, attnQPe, _prefillBatch > 0 ? MIX : NORMAL);
+                       attnQWithQr, freqsCis, _attnPosition, _vGather, attnQPe, _prefillBatch > 0 ? MIX : NORMAL);
     XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc, _c.weightNZ);
     XliteDsOpStridedRmsnorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _realM, _c.kvLoraRank,
                             _c.kvLoraRank + _c.ropeHeadDim, _c.normEps);
     XliteDsOpRopeBatch(rt, _realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
-                       attnKvc, freqsCis, _position, _vGather, attnKPe, NORMAL);
-    XliteDsOpReshapeAndCache(rt, attnNormKvc, attnKPe, kCache, vCache, _slotMapping, _realM, _c.kvLoraRank,
+                       attnKvc, freqsCis, _attnPosition, _vGather, attnKPe, NORMAL);
+    XliteDsOpReshapeAndCache(rt, attnNormKvc, attnKPe, kCache, vCache, _attnSlotMapping, _realM, _c.kvLoraRank,
                              _c.ropeHeadDim, 1, _c.kvLoraRank, _c.ropeHeadDim, _c.blockSize, kCache.shape[0]);
 
     rt.pool->PutTensor(attnQc);
@@ -342,8 +358,8 @@ XTensor& XModel::ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
     XTensor &attnMlaTmp = rt.pool->GetTensor({1}, INT32);
 
     XliteDsOpKvMatmul(rt, kCache, mlaKVB[layer], attnKRes, _prefillLenPad, nLocalHeads * (_c.nopeHeadDim + _c.vHeadDim),
-                      _c.kvLoraRank, _blockTables, true, _c.blockSize, _c.kvLoraRank);
-    XliteDsOpPrefillKvSplit(rt, attnKRes, attnKPe, vCache, _blockTables, attnKvFull, attnV, _prefillLen,
+                      _c.kvLoraRank, _attnBlockTables, true, _c.blockSize, _c.kvLoraRank);
+    XliteDsOpPrefillKvSplit(rt, attnKRes, attnKPe, vCache, _attnBlockTables, attnKvFull, attnV, _prefillLen,
                             _prefillLenPad, nLocalHeads, 0, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.blockSize);
     XliteDsOpPrefillMix(rt, attnMlaOut, attnMlaAlpha, attnMlaMax, attnMlaSum, attnQWithQr, attnKvFull,
                         attnMlaQK, attnMlaTmp, _cachedLens, attnV, attnPrefillOut, attnQkcAbsorb,
@@ -382,14 +398,14 @@ XTensor& XModel::ForwardAttnMLADecode(XRuntime &rt, uint32_t layer,
 
     XliteDsOpEinsumShdHdcShc(rt, _realM, _c.nopeHeadDim, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim,
                              2 * _c.nopeHeadDim, _c.kvLoraRank, attnQWithQr, mlaKVB[layer], attnQAbsorb);
-    XliteDsOpDecodeAttn(rt, attnQAbsorb, kCache, attnQk, _cachedLens, _blockTables, _lens, _cumPromptLens, batch,
+    XliteDsOpDecodeAttn(rt, attnQAbsorb, kCache, attnQk, _cachedLens, _attnBlockTables, _lens, _cumPromptLens, batch,
                         nLocalHeads, 1, _c.kvLoraRank, _c.blockSize, _maxNumBlocks, _c.maxSeqLen, false);
-    XliteDsOpDecodeAttn(rt, attnQPe, vCache, attnQk, _cachedLens, _blockTables, _lens, _cumPromptLens, batch,
+    XliteDsOpDecodeAttn(rt, attnQPe, vCache, attnQk, _cachedLens, _attnBlockTables, _lens, _cumPromptLens, batch,
                         nLocalHeads, 1, _c.ropeHeadDim, _c.blockSize, _maxNumBlocks, _c.maxSeqLen, true);
     XliteDsOpSoftmax(rt, attnQk, _cachedLens, _lens, _cumPromptLens, _c.softmaxScale, batch, nLocalHeads,
                      _c.blockSize, _c.maxSeqLen);
     XliteDsOpEinsumShtTcShc(rt, batch, nLocalHeads, _c.maxSeqLen, _maxNumBlocks, kCache.shape[0], _c.blockSize,
-                            _c.kvLoraRank, attnQk, _cachedLens, _lens, _cumPromptLens, _blockTables, kCache, attnQkc);
+                            _c.kvLoraRank, attnQk, _cachedLens, _lens, _cumPromptLens, _attnBlockTables, kCache, attnQkc);
     XliteDsOpEinsumShcHdcShd(rt, _realM, nLocalHeads, _c.kvLoraRank, 2 * _c.nopeHeadDim, _c.vHeadDim, attnQkc,
                              mlaKVB[layer], attnQkcAbsorb);
 
@@ -439,7 +455,7 @@ void XModel::XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTe
 {
     if (_prefillBatch > 0) {
         XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2 * _c.maxM}, input.dtype);
-        XliteOpPrefillAttention(rt, input, kCache, qk, _blockTables, _cachedLens,
+        XliteOpPrefillAttention(rt, input, kCache, qk, _attnBlockTables, _cachedLens,
                                 vCache, output, _lens, _prefillIdx, _cumPromptLens,
                                 _c.headDim, _c.nHeads, _c.nKvHeads, _c.blockSize,
                                 _prefillBatch, _maxNumBlocks);
@@ -447,7 +463,7 @@ void XModel::XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTe
     }
     if (_decodeBatch > 0) {
         XTensor &qk = rt.pool->GetTensor({_realM, _c.nHeads / _c.defTpSize, _c.maxSeqLen}, input.dtype);
-        XliteOpDecodeAttention(rt, _a2v, _v2a, input, kCache, vCache, _cachedLens, _blockTables, qk,
+        XliteOpDecodeAttention(rt, _a2v, _v2a, input, kCache, vCache, _cachedLens, _attnBlockTables, qk,
                                output, _decodeIdx, _cumPromptLens, _decodeBatch, _c.nHeads, _c.headDim,
                                _c.blockSize, _maxNumBlocks, _c.nKvHeads, _c.maxM);
         rt.pool->PutTensor(qk);
@@ -466,10 +482,9 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     if (_c.qkNorm) {
         XliteOpQKNorm(rt, layer, qkv);
     }
-    XliteOpRopeCache(rt, qkv, kvCache[layer].first, kvCache[layer].second, _position, freqsCis,
-                     _slotMapping, _c.nHeads, _c.nKvHeads, _c.headDim,
+    XliteOpRopeCache(rt, qkv, kvCache[layer].first, kvCache[layer].second, _attnPosition, freqsCis,
+                     _attnSlotMapping, _c.nHeads, _c.nKvHeads, _c.headDim,
                      _c.ropeHeadDim, _c.blockSize, _c.ropeType == XMODEL_ROPE_NEOX);
-
     XTensor &attn = rt.pool->GetTensor({hiddenState.shape[0], attnOut[layer].shape[1]}, hiddenState.dtype);
     XliteOpAttention(rt, layer, kvCache[layer].first, kvCache[layer].second, qkv, attn);
     XliteOpMatmul(rt, attn, attnOut[layer], hiddenState, _c.weightNZ);

@@ -66,10 +66,19 @@ struct XModelConfig {
 };
 
 struct XModelAttnMeta {
+    int version = 0;
+
     std::vector<uint32_t> lens;
     std::vector<uint32_t> cachedLens;
     std::vector<bool> isPrefills;
+
+    /* only for version 0 */
     std::vector<std::vector<uint32_t>> blockTables;
+
+    /* only for version 1 */
+    XTensor vllmBlockTables;
+    XTensor vllmSlotMapping;
+    XTensor vllmPosition;
 };
 
 #define TILESIZE_OF_QUERY 128 // the tile size of query
@@ -186,7 +195,11 @@ private:
     int _decodeBatch;
     int _prefillLen;
     int _prefillLenPad;
+    XTensor _attnPosition;
+    XTensor _attnBlockTables;
+    XTensor _attnSlotMapping;
     XTensor _position;
+    XTensor _blockTables;
     XTensor _slotMapping;
     XTensor _prefillIdx;
     XTensor _prefillLastIdx;
@@ -194,7 +207,6 @@ private:
     XTensor _cachedLens;
     XTensor _lens;
     XTensor _cumPromptLens;
-    XTensor _blockTables;
     XTensor _vGather;
     XTensor _a2v;
     XTensor _v2a;

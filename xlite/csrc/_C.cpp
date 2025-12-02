@@ -13,6 +13,16 @@
 
 namespace py = pybind11;
 
+struct CModelAttnMeta {
+    std::vector<uint32_t> lens;
+    std::vector<uint32_t> cachedLens;
+    std::vector<bool> isPrefills;
+    std::vector<std::vector<uint32_t>> blockTablesList;
+    at::Tensor blockTables;
+    at::Tensor slotMapping;
+    at::Tensor positions;
+};
+
 class _CModel {
 public:
     _CModel() {};
@@ -22,15 +32,27 @@ public:
                  XModelAttnMeta& attnMeta,
                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
                  at::Tensor &freqsCis, at::Tensor &output);
+    void ForwardV1(XRuntime &rt, at::Tensor &input,
+                 CModelAttnMeta& attnMeta,
+                 std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                 at::Tensor &freqsCis, at::Tensor &output);
     void ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output);
     void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
                              XModelAttnMeta& attnMeta,
+                             std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                             at::Tensor &freqsCis, at::Tensor &output);
+    void ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input,
+                             CModelAttnMeta& attnMeta,
                              std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
                              at::Tensor &freqsCis, at::Tensor &output);
     void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
                                  XModelAttnMeta& attnMeta,
                                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
                                  at::Tensor &freqsCis, at::Tensor &output);
+    void ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
+                                   CModelAttnMeta& attnMeta,
+                                   std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                                   at::Tensor &freqsCis, at::Tensor &output);
     size_t GetTensorPoolSize(void);
 
     // weights
@@ -209,6 +231,22 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input,
     rt.Synchronize();
 }
 
+void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input,
+                        CModelAttnMeta& attnMeta,
+                        std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                        at::Tensor &freqsCis, at::Tensor &output)
+{
+    XModelAttnMeta _attnMeta;
+    _attnMeta.version = 1;
+    _attnMeta.lens = attnMeta.lens;
+    _attnMeta.cachedLens = attnMeta.cachedLens;
+    _attnMeta.isPrefills = attnMeta.isPrefills;
+    InitXTensor(_attnMeta.vllmBlockTables, attnMeta.blockTables);
+    InitXTensor(_attnMeta.vllmSlotMapping, attnMeta.slotMapping);
+    InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
+    Forward(rt, input, _attnMeta, kvCache, freqsCis, output);
+}
+
 void _CModel::ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output)
 {
     XTensor _input, _output;
@@ -245,11 +283,28 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
     rt.Synchronize();
 }
 
+void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input,
+                                    CModelAttnMeta& attnMeta,
+                                    std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                                    at::Tensor &freqsCis, at::Tensor &output)
+{
+    XModelAttnMeta _attnMeta;
+    _attnMeta.version = 1;
+    _attnMeta.lens = attnMeta.lens;
+    _attnMeta.cachedLens = attnMeta.cachedLens;
+    _attnMeta.isPrefills = attnMeta.isPrefills;
+    InitXTensor(_attnMeta.vllmBlockTables, attnMeta.blockTables);
+    InitXTensor(_attnMeta.vllmSlotMapping, attnMeta.slotMapping);
+    InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
+    ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCis, output);
+}
+
 void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
                                       XModelAttnMeta& attnMeta,
                                       std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
                                       at::Tensor &freqsCis, at::Tensor &output)
 {
+    XModelAttnMeta _attnMeta;
     XTensor _input, _output, _freqsCis;
 
     InitXTensor(_input, input);
@@ -268,6 +323,22 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
 
     _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _freqsCis, _output);
     rt.Synchronize();
+}
+
+void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
+                                        CModelAttnMeta& attnMeta,
+                                        std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+                                        at::Tensor &freqsCis, at::Tensor &output)
+{
+    XModelAttnMeta _attnMeta;
+    _attnMeta.version = 1;
+    _attnMeta.lens = attnMeta.lens;
+    _attnMeta.cachedLens = attnMeta.cachedLens;
+    _attnMeta.isPrefills = attnMeta.isPrefills;
+    InitXTensor(_attnMeta.vllmBlockTables, attnMeta.blockTables);
+    InitXTensor(_attnMeta.vllmSlotMapping, attnMeta.slotMapping);
+    InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
+    ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output);
 }
 
 size_t _CModel::GetTensorPoolSize(void)
@@ -514,6 +585,16 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("is_prefills", &XModelAttnMeta::isPrefills)
         .def_readwrite("block_tables", &XModelAttnMeta::blockTables);
 
+    py::class_<CModelAttnMeta>(m, "AttnMeta")
+        .def(py::init<>())
+        .def_readwrite("lens", &CModelAttnMeta::lens)
+        .def_readwrite("cached_lens", &CModelAttnMeta::cachedLens)
+        .def_readwrite("is_prefills", &CModelAttnMeta::isPrefills)
+        .def_readwrite("block_tables_cpu", &CModelAttnMeta::blockTablesList)
+        .def_readwrite("block_tables", &CModelAttnMeta::blockTables)
+        .def_readwrite("slot_mapping", &CModelAttnMeta::slotMapping)
+        .def_readwrite("positions", &CModelAttnMeta::positions);
+
     py::enum_<XModelAttnType>(m, "AttnType")
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
         .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
@@ -550,9 +631,12 @@ PYBIND11_MODULE(_C, m) {
         .def("init", &_CModel::Init, "model init",
             py::arg("config"), py::arg("rank") = 0)
         .def("forward", &_CModel::Forward, py::call_guard<py::gil_scoped_release>())
+        .def("forward", &_CModel::ForwardV1, py::call_guard<py::gil_scoped_release>())
         .def("compute_logits", &_CModel::ComputeLogits, py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits", &_CModel::ForwardAndGetLogits, py::call_guard<py::gil_scoped_release>())
+        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV1, py::call_guard<py::gil_scoped_release>())
         .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbeds, py::call_guard<py::gil_scoped_release>())
+        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbedsV1, py::call_guard<py::gil_scoped_release>())
         .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize);
 
     py::class_<XCoreAssigner>(m, "CoreAssigner")
