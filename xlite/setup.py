@@ -105,5 +105,5 @@ setup(
     ext_modules=[functions_module],
     python_requires='>=3.9',
     cmdclass=dict(build_ext=CMakeBuild, clean=CleanCommand),
-    package_data={"xlite": ['*.so', 'lib/*.so']},
+    package_data={"xlite": ['py.typed', '*.pyi', '*.so', 'lib/*.so']},
 )
