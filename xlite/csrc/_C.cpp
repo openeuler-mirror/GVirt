@@ -31,28 +31,28 @@ public:
     void Forward(XRuntime &rt, at::Tensor &input,
                  XModelAttnMeta& attnMeta,
                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                 at::Tensor &freqsCis, at::Tensor &output);
+                 at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
     void ForwardV1(XRuntime &rt, at::Tensor &input,
                  CModelAttnMeta& attnMeta,
                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                 at::Tensor &freqsCis, at::Tensor &output);
-    void ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output);
+                 at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
+    void ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint64_t currStream);
     void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
                              XModelAttnMeta& attnMeta,
                              std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                             at::Tensor &freqsCis, at::Tensor &output);
+                             at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
     void ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input,
                              CModelAttnMeta& attnMeta,
                              std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                             at::Tensor &freqsCis, at::Tensor &output);
+                             at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
     void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
                                  XModelAttnMeta& attnMeta,
                                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                                 at::Tensor &freqsCis, at::Tensor &output);
+                                 at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
     void ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
                                    CModelAttnMeta& attnMeta,
                                    std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                                   at::Tensor &freqsCis, at::Tensor &output);
+                                   at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
     size_t GetTensorPoolSize(void);
 
     // weights
@@ -209,9 +209,10 @@ _CModel::~_CModel(void)
 void _CModel::Forward(XRuntime &rt, at::Tensor &input,
                       XModelAttnMeta& attnMeta,
                       std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                      at::Tensor &freqsCis, at::Tensor &output)
+                      at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XTensor _input, _output, _freqsCis;
+    aclrtStream currAclStream = nullptr;
 
     InitXTensor(_input, input);
     InitXTensor(_output, output);
@@ -227,14 +228,24 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input,
         _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
     }
 
+    if (currStream != 0) {
+        currAclStream = reinterpret_cast<aclrtStream>(currStream);
+        rt.EventWaitCurrStream(currAclStream);
+    }
+
     _model->Forward(rt, _input, attnMeta, _kv, _freqsCis, _output);
-    rt.Synchronize();
+
+    if (currStream != 0) {
+        rt.EventRecordCurrStream(currAclStream);
+    } else {
+        rt.Synchronize();
+    }
 }
 
 void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input,
                         CModelAttnMeta& attnMeta,
                         std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                        at::Tensor &freqsCis, at::Tensor &output)
+                        at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 1;
@@ -244,26 +255,38 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input,
     InitXTensor(_attnMeta.vllmBlockTables, attnMeta.blockTables);
     InitXTensor(_attnMeta.vllmSlotMapping, attnMeta.slotMapping);
     InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
-    Forward(rt, input, _attnMeta, kvCache, freqsCis, output);
+    Forward(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
-void _CModel::ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output)
+void _CModel::ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint64_t currStream)
 {
     XTensor _input, _output;
+    aclrtStream currAclStream = nullptr;
 
     InitXTensor(_input, input);
     InitXTensor(_output, output);
 
+    if (currStream != 0) {
+        currAclStream = reinterpret_cast<aclrtStream>(currStream);
+        rt.EventWaitCurrStream(currAclStream);
+    }
+
     _model->ComputeLogits(rt, _input, _output);
-    rt.Synchronize();
+
+    if (currStream != 0) {
+        rt.EventRecordCurrStream(currAclStream);
+    } else {
+        rt.Synchronize();
+    }
 }
 
 void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
                                   XModelAttnMeta& attnMeta,
                                   std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                                  at::Tensor &freqsCis, at::Tensor &output)
+                                  at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XTensor _input, _output, _freqsCis;
+    aclrtStream currAclStream = nullptr;
 
     InitXTensor(_input, input);
     InitXTensor(_output, output);
@@ -279,14 +302,24 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
         _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
     }
 
+    if (currStream != 0) {
+        currAclStream = reinterpret_cast<aclrtStream>(currStream);
+        rt.EventWaitCurrStream(currAclStream);
+    }
+
     _model->ForwardAndGetLogits(rt, _input, attnMeta, _kv, _freqsCis, _output);
-    rt.Synchronize();
+
+    if (currStream != 0) {
+        rt.EventRecordCurrStream(currAclStream);
+    } else {
+        rt.Synchronize();
+    }
 }
 
 void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input,
                                     CModelAttnMeta& attnMeta,
                                     std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                                    at::Tensor &freqsCis, at::Tensor &output)
+                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 1;
@@ -296,16 +329,17 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input,
     InitXTensor(_attnMeta.vllmBlockTables, attnMeta.blockTables);
     InitXTensor(_attnMeta.vllmSlotMapping, attnMeta.slotMapping);
     InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
-    ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCis, output);
+    ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
 void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
                                       XModelAttnMeta& attnMeta,
                                       std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                                      at::Tensor &freqsCis, at::Tensor &output)
+                                      at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
     XTensor _input, _output, _freqsCis;
+    aclrtStream currAclStream = nullptr;
 
     InitXTensor(_input, input);
     InitXTensor(_output, output);
@@ -321,14 +355,24 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
         _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
     }
 
+    if (currStream != 0) {
+        currAclStream = reinterpret_cast<aclrtStream>(currStream);
+        rt.EventWaitCurrStream(currAclStream);
+    }
+
     _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _freqsCis, _output);
-    rt.Synchronize();
+
+    if (currStream != 0) {
+        rt.EventRecordCurrStream(currAclStream);
+    } else {
+        rt.Synchronize();
+    }
 }
 
 void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
                                         CModelAttnMeta& attnMeta,
                                         std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                                        at::Tensor &freqsCis, at::Tensor &output)
+                                        at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 1;
@@ -338,7 +382,7 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
     InitXTensor(_attnMeta.vllmBlockTables, attnMeta.blockTables);
     InitXTensor(_attnMeta.vllmSlotMapping, attnMeta.slotMapping);
     InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
-    ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output);
+    ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
 size_t _CModel::GetTensorPoolSize(void)
@@ -630,13 +674,33 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("re_down_scale", &_CModel::moeREDownScale)
         .def("init", &_CModel::Init, "model init",
             py::arg("config"), py::arg("rank") = 0)
-        .def("forward", &_CModel::Forward, py::call_guard<py::gil_scoped_release>())
-        .def("forward", &_CModel::ForwardV1, py::call_guard<py::gil_scoped_release>())
-        .def("compute_logits", &_CModel::ComputeLogits, py::call_guard<py::gil_scoped_release>())
-        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogits, py::call_guard<py::gil_scoped_release>())
-        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV1, py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbeds, py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbedsV1, py::call_guard<py::gil_scoped_release>())
+        .def("forward", &_CModel::Forward, "forward",
+            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+        py::call_guard<py::gil_scoped_release>())
+        .def("forward", &_CModel::ForwardV1, "forward",
+            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+        py::call_guard<py::gil_scoped_release>())
+        .def("compute_logits", &_CModel::ComputeLogits, "compute_logits",
+            py::arg("rt"), py::arg("input"), py::arg("output"), py::arg("curr_stream") = 0,
+        py::call_guard<py::gil_scoped_release>())
+        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogits, "forward_and_get_logits",
+            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+        py::call_guard<py::gil_scoped_release>())
+        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV1, "forward_and_get_logits",
+            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+        py::call_guard<py::gil_scoped_release>())
+        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbeds, "forward_with_inputs_embeds",
+            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+        py::call_guard<py::gil_scoped_release>())
+        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbedsV1, "forward_with_inputs_embeds",
+            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+        py::call_guard<py::gil_scoped_release>())
         .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize);
 
     py::class_<XCoreAssigner>(m, "CoreAssigner")

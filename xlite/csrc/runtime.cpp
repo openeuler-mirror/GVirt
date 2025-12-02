@@ -43,6 +43,7 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     originAicNum = aicNum;
     originAivNum = aivNum;
 
+    CHECK_ACL(aclrtCreateEvent(&_event));
 }
 
 XRuntime::~XRuntime(void)
@@ -55,6 +56,7 @@ XRuntime::~XRuntime(void)
     }
 
     delete pool;
+    CHECK_ACL(aclrtDestroyEvent(_event));
     CHECK_ACL(aclrtDestroyStream(stream));
     CHECK_ACL(aclrtResetDevice(_devid));
     if (!_init_outside) {
@@ -143,6 +145,20 @@ int XRuntime::InitComm(void)
 void XRuntime::Synchronize(void)
 {
     CHECK_ACL(aclrtSynchronizeStream(stream));
+}
+
+void XRuntime::EventWaitCurrStream(aclrtStream currStream)
+{
+    CHECK_ACL(aclrtRecordEvent(_event, currStream));
+    CHECK_ACL(aclrtStreamWaitEvent(stream, _event));
+    CHECK_ACL(aclrtResetEvent(_event, stream));
+}
+
+void XRuntime::EventRecordCurrStream(aclrtStream currStream)
+{
+    CHECK_ACL(aclrtRecordEvent(_event, stream));
+    CHECK_ACL(aclrtStreamWaitEvent(currStream, _event));
+    CHECK_ACL(aclrtResetEvent(_event, currStream));
 }
 
 void XRuntime::MemcpyH2D(void *dst, void *src, size_t size)
