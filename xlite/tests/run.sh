@@ -13,7 +13,7 @@ function run_qwen2_32B()
         "n_kv_heads": 8,
         "norm_eps": 1e-05,
         "rope_theta": 1000000.0,
-        "dtype": "float16",
+        "dtype": "bfloat16",
         "max_batch_size": 8,
         "max_seq_len": 1024
     }' > tests/test_config.json
@@ -35,7 +35,7 @@ function run_qwen3_32B()
         "n_kv_heads": 8,
         "norm_eps": 1e-06,
         "rope_theta": 1000000.0,
-        "dtype": "float16",
+        "dtype": "bfloat16",
         "max_batch_size": 8,
         "max_seq_len": 1024
     }' > tests/test_config.json
@@ -113,7 +113,7 @@ function run_llama_34B()
         "n_heads": 64,
         "n_kv_heads": 8,
         "norm_eps": 1e-05,
-        "dtype": "float16",
+        "dtype": "bfloat16",
         "max_batch_size": 8,
         "max_seq_len": 1024
     }' > tests/test_config.json
