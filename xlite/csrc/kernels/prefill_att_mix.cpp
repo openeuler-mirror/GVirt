@@ -392,7 +392,7 @@ public:
         __ubuf__ Dtype *out = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
         off += padN * sizeof(Dtype);
         __ubuf__ CalcDtype *cal = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
-        off += padN * sizeof(Dtype);
+        off += padN * sizeof(CalcDtype);
         __ubuf__ CalcDtype *temp = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
         __ubuf__ CalcDtype *ptr;
 
