@@ -659,7 +659,7 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
         wait_aic_aiv_flag(ctx->a2v_gm, 1, process, ctx->head_size);
         
         uint32_t num_iters = DIV_ROUND_UP(context_len, VECTOR_MAX_NUM_OF_FP32);
-        uint32_t sub_block_number = DIV_ROUND_UP(context_len * sizeof(bfloat16_t), MAX_SUB_CONTEXT_SIZE);
+        uint32_t sub_block_number = DIV_ROUND_UP(context_len * sizeof(float), MAX_SUB_CONTEXT_SIZE);
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
@@ -697,9 +697,9 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
 
             // 将多拷贝进来的数据进行置位
-            uint32_t start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP32);
             uint32_t rest = cur_qk_context_len % VECTOR_MAX_NUM_OF_FP32;
             if (rest > 0) {
+                uint32_t start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP32);
                 set_mask0_from_highbit(VECTOR_MAX_NUM_OF_FP32 - rest);
                 vector_dup(qk_reduce_ub_f32 + start, float_min, 1, 1, 1, 8, 0);
                 reset_mask();
@@ -825,10 +825,11 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
                            1, 1, 8, 4);
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
 
-            uint32_t start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP32);
             uint32_t rest = cur_qk_context_len % VECTOR_MAX_NUM_OF_FP32;
             if (rest) {
+                uint32_t start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP32);
                 set_mask0_from_highbit(VECTOR_MAX_NUM_OF_FP32 - rest);
                 vector_dup(qk_reduce_ub_f32 + start, float_min, 1, 1, 1, 8, 0);
                 pipe_barrier(PIPE_V);
@@ -849,20 +850,18 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
             vconv_f322bf16r(qk_out_ub_bf16, qk_out_ub_f32, cur_num_iters, 1, 1, 4, 8);
             pipe_barrier(PIPE_V);
             
-            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-
-            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-
-            start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP16);
-            rest = VECTOR_MAX_NUM_OF_FP16 - cur_qk_context_len % VECTOR_MAX_NUM_OF_FP16;
+            rest = cur_qk_context_len % VECTOR_MAX_NUM_OF_FP16;
 
             if (rest > 0) {
-                set_mask_from_highbit(rest);
+                uint32_t start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP16);
+                set_mask_from_highbit(VECTOR_MAX_NUM_OF_FP16 - rest);
                 vector_dup(qk_out_ub_bf16 + start, bfloat16_t(0), 1, 1, 1, 8, 0);
                 reset_mask();
                 pipe_barrier(PIPE_V);
             }
+
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
 
             uint32_t offset = ROUND_UP(cur_qk_context_len * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) / BLOCK_SIZE;
             copy_ubuf_to_gm(qk_gm_addr + cur_qk_offset, qk_out_ub_bf16, 0, 1, offset, 0, 0);
