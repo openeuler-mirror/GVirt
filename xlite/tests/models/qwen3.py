@@ -25,6 +25,7 @@ class Qwen3ModelArgs:
     norm_eps: float = 1e-6
     rope_theta: float = 1000000.0
     dtype: Literal["bfloat16", "float16"] = "bfloat16"
+    tie_word_embeddings: bool = False,
     qkv_bias: bool = False
     qk_norm: bool = True
     model_type: str = "qwen3"
