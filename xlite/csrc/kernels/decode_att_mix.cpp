@@ -1,4 +1,11 @@
-#include "config_macro.h"
+/*
+ * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ */
+#include "kernel_macro.h"
 #include "kernel_operator.h"
 
 #define __aicore__ [aicore]
@@ -281,7 +288,7 @@ inline __aicore__ void decode_mix_pre_copy_in_for_qk(decode_att_mix_context *ctx
     uint32_t block_table_id = (uint32_t)*(ctx->mapping + token_idx * ctx->mapping_len);
     __gm__ half *k_gm_addr = ctx->k + block_table_id * ctx->block_mem_size + head_offset_len;
 
-    copy_to_l1_2d(ctx->cbuf_addr_b[0], k_gm_addr, 0, 0, ctx->block_size, head_size, head_size  * ctx->num_kv_heads);
+    copy_to_l1_2d(ctx->cbuf_addr_b[0], k_gm_addr, 0, 0, ctx->block_size, head_size, head_size * ctx->num_kv_heads);
     set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1);
 
     set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
@@ -547,7 +554,7 @@ const uint32_t DIVIDED_MASK_BIT = 64;
 const uint64_t MASK_ALL = -1;
 const uint64_t MASK_NONE = 0;
 
-inline __aicore__ void set_mask(int32_t len)
+inline __aicore__ void set_mask(uint32_t len)
 {
     if (len == MAX_MASK_BIT) {
         set_vector_mask(MASK_ALL, MASK_ALL);
@@ -566,7 +573,7 @@ inline __aicore__ void set_mask(int32_t len)
     set_vector_mask(MASK_NONE, mask);
 }
 
-inline __aicore__ void set_mask_from_highbit(int32_t len) {
+inline __aicore__ void set_mask_from_highbit(uint32_t len) {
     if (len == 128) {
         set_vector_mask(MASK_ALL, MASK_ALL);
         return;
@@ -800,8 +807,6 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
             uint32_t cur_num_iters = (sub_block < sub_block_number - 1) ? max_block_num_iter : (num_iters - cur_iter_idx);
             uint32_t cur_qk_context_len = (sub_block < sub_block_number - 1) ? max_block_num_iter * 128 : (context_len - cur_iter_idx * 128);
 
-            vector_dup(qk_reduce_ub_addr, half(0), 255, 1, 1, 8, 0);
-            vector_dup(qk_reduce_ub_addr + 255 * 128, half(0), max_block_num_iter - 255, 1, 1, 8, 0);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
@@ -809,12 +814,12 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-            uint32_t start = cur_qk_context_len * sizeof(half) / 32 * 32;
-            uint32_t rest = cur_qk_context_len * sizeof(half) % 32 / sizeof(half);
-            if (rest) {
-                set_mask_from_highbit(128 - rest);
-                vector_dup(qk_reduce_ub_addr + start / sizeof(half), half(0), 1, 1, 1, 8, 0);
-                set_vector_mask((uint64_t) -1, (uint64_t) -1);
+            uint32_t start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP16);
+            uint32_t rest = cur_qk_context_len % VECTOR_MAX_NUM_OF_FP16;
+            if (rest > 0) {
+                set_mask_from_highbit(VECTOR_MAX_NUM_OF_FP16 - rest);
+                vector_dup(qk_reduce_ub_addr + start, half(0), 1, 1, 1, 8, 0);
+                set_vector_mask(MASK_ALL, MASK_ALL);
                 pipe_barrier(PIPE_V);
             }
 
@@ -842,6 +847,13 @@ inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
             }
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+
+            if (rest > 0) {
+                set_mask_from_highbit(VECTOR_MAX_NUM_OF_FP16 - rest);
+                vector_dup(qk_out_ub_addr + start, half(0), 1, 1, 1, 8, 0);
+                set_vector_mask(MASK_ALL, MASK_ALL);
+                pipe_barrier(PIPE_V);
+            }
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
