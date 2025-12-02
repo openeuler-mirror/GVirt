@@ -428,7 +428,7 @@ void DecodeAttentionMix(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tens
 {
     XTensor _a2v, _v2a, _qkv, _kCache, _vCache, _cachedLens,
             _blockTables, _output, _decodeIdx, _cumPromptLens;
-    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2 * maxM}, XDtype(qkv));
+    XTensor &qk = rt.pool->GetTensor({batch, nHeads / rt.tpSize(), maxM}, XDtype(qkv));
 
     InitXTensor(_a2v, a2v);
     InitXTensor(_v2a, v2a);
@@ -445,6 +445,8 @@ void DecodeAttentionMix(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tens
                            _blockTables, qk, _output, _decodeIdx, _cumPromptLens, batch, nHeads,
                            headDim, blockSize, maxNumBlock, nKvHeads, maxM);
     rt.Synchronize();
+
+    rt.pool->PutTensor(qk);
 }
 
 void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &norm, at::Tensor &out, float normEps)
