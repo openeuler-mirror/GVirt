@@ -27,11 +27,11 @@ for dtype in [torch.float16, torch.bfloat16, torch.float]:
 
                 standard = F.linear(x, y, None)
 
-                if weight_nz:
-                    y.copy_(matrix_nd2nz(y))
+                if weight_nz and dtype != torch.float:
+                    y = matrix_nd2nz(y)
 
                 torch.npu.synchronize()
-                matmul(rt, x, y, z, weight_nz)
+                matmul(rt, x, y, z, weight_nz and dtype != torch.float)
                 torch.npu.synchronize()
                 print(f'[{m}, {k}] x [{n}, {k}] {dtype} matmul executed!')
 

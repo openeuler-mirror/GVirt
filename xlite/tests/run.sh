@@ -14,7 +14,7 @@ function run_qwen2_32B()
         "norm_eps": 1e-05,
         "rope_theta": 1000000.0,
         "dtype": "bfloat16",
-        "max_batch_size": 8,
+        "max_batch_size": 1,
         "max_seq_len": 1024
     }' > tests/test_config.json
     torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen2 --ckpt-path /mnt/nvme0n1/models/qwen32b/ --config tests/test_config.json --interactive
@@ -36,7 +36,7 @@ function run_qwen3_32B()
         "norm_eps": 1e-06,
         "rope_theta": 1000000.0,
         "dtype": "bfloat16",
-        "max_batch_size": 8,
+        "max_batch_size": 1,
         "max_seq_len": 1024
     }' > tests/test_config.json
     torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-32B/ --config tests/test_config.json --interactive
@@ -63,7 +63,7 @@ function run_qwen3_moe_30B()
         "norm_eps": 1e-06,
         "rope_theta": 10000000.0,
         "dtype": "bfloat16",
-        "max_batch_size": 8,
+        "max_batch_size": 1,
         "max_seq_len": 1024
     }' > tests/test_config.json
     torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path /mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507/ --config tests/test_config.json --interactive
@@ -80,7 +80,7 @@ function run_llama_7B()
         "n_kv_heads": 32,
         "norm_eps": 1e-05,
         "dtype": "float16",
-        "max_batch_size": 8,
+        "max_batch_size": 1,
         "max_seq_len": 1024
     }' > tests/test_config.json
     python tests/generate.py --model llama --ckpt-path /mnt/nvme0n1/models/Llama-2-7b-chat-hf/ --config tests/test_config.json --interactive
@@ -97,7 +97,7 @@ function run_llama_13B()
         "n_kv_heads": 40,
         "norm_eps": 1e-05,
         "dtype": "float16",
-        "max_batch_size": 8,
+        "max_batch_size": 1,
         "max_seq_len": 1024
     }' > tests/test_config.json
     torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path /mnt/nvme0n1/models/Llama2-Chinese-13b-Chat/ --config tests/test_config.json --interactive
@@ -114,7 +114,7 @@ function run_llama_34B()
         "n_kv_heads": 8,
         "norm_eps": 1e-05,
         "dtype": "bfloat16",
-        "max_batch_size": 8,
+        "max_batch_size": 1,
         "max_seq_len": 1024
     }' > tests/test_config.json
     torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path /mnt/nvme0n1/models/codellama34B/ --config tests/test_config.json --interactive

@@ -51,7 +51,6 @@ public:
         }
 
         if (nz) {
-            /* same n0 value with tests/models/weight_utils.py 's matrix_nd2nz func */
             m0 = 128;
             n0 = n <= 1280 ? 64 : 256;
             k0 = 512 / sizeof(Dtype);
@@ -149,6 +148,7 @@ public:
     {
         int kQtileBlockNum = kQtileSize / kBlockSize;
         int kLoop = DIV_ROUND_UP(k, kQtileSize);
+        int nStride = ROUND_UP(n, nBlockSize);
 
         int pingpongL1A = 0;
         int pingpongL1B = 0;
@@ -220,7 +220,8 @@ public:
                     if (nz == 0) {
                         CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual, kRemSize, k, nActualBlockPad);
                     } else {
-                        CopyGmToL1(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + nActualBlockPad * kOffset], nActual * kRemSize);
+                        CopyGmToL1(l1bBuf[pingpongL1B], bGmBuf[kOffset * nStride + nOffset * kBlockSize], 
+                                   nActual, DIV_ROUND_UP(kRemSize, kBlockSize), nStride);
                     }
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                 }

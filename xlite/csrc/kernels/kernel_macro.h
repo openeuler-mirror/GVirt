@@ -92,10 +92,9 @@ __aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst, const Glob
 }
 
 template <typename Dtype>
-__aicore__ inline void CopyGmToL1(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src, int nElem)
+__aicore__ inline void CopyGmToL1(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src, int nValue, int kBlockNum, int nStride)
 {
-    int burstLen = DIV_ROUND_UP(nElem * sizeof(Dtype), 32);
-    DataCopyParams repeatParams(1, burstLen, 0, 0);
+    DataCopyParams repeatParams(kBlockNum, nValue, nStride - nValue, 0);
     DataCopy(dst, src, repeatParams);
 }
 

@@ -456,14 +456,16 @@ class Llama(nn.Module):
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
             param.copy_(loaded_weight)
+            torch.npu.empty_cache()
 
         if self.xlite_weight_nz:
-            self.lm_head.weight.copy_(matrix_nd2nz(self.lm_head.weight))
+            self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
             for layer in self.layers:
-                layer.self_attn.qkv_proj.weight.copy_(matrix_nd2nz(layer.self_attn.qkv_proj.weight))
-                layer.self_attn.o_proj.weight.copy_(matrix_nd2nz(layer.self_attn.o_proj.weight))
-                layer.mlp.gate_up_proj.weight.copy_(matrix_nd2nz(layer.mlp.gate_up_proj.weight))
-                layer.mlp.down_proj.weight.copy_(matrix_nd2nz(layer.mlp.down_proj.weight))
+                layer.self_attn.qkv_proj.weight.data = matrix_nd2nz(layer.self_attn.qkv_proj.weight)
+                layer.self_attn.o_proj.weight.data = matrix_nd2nz(layer.self_attn.o_proj.weight)
+                layer.mlp.gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.gate_up_proj.weight)
+                layer.mlp.down_proj.weight.data = matrix_nd2nz(layer.mlp.down_proj.weight)
+            torch.npu.empty_cache()
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
