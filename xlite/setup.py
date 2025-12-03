@@ -85,6 +85,13 @@ class CMakeBuild(build_ext):
         subprocess.check_call(['cmake', '--build', 'cmake_build', '-j'])
         subprocess.check_call(['cmake', '--install', 'cmake_build'])
 
+        include_dir = os.path.join(install_prefix, "include")
+        if os.path.exists(include_dir):
+            shutil.rmtree(include_dir)
+        lib64_dir = os.path.join(install_prefix, "lib64")
+        if os.path.exists(lib64_dir):
+            shutil.rmtree(lib64_dir)
+
 setup(
     name='xlite',
     version=find_version(get_path("xlite", "__init__.py")),
@@ -101,7 +108,7 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     install_requires=get_requirements(),
-    packages=find_packages(exclude=["*.tools", "*.tools.*"]),
+    packages=find_packages(exclude=["*.tools", "*.tools.*", "tests"]),
     ext_modules=[functions_module],
     python_requires='>=3.9',
     cmdclass=dict(build_ext=CMakeBuild, clean=CleanCommand),
