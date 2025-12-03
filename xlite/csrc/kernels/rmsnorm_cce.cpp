@@ -5,6 +5,7 @@
 
 #define PINGPONG_BUF_NUM 2
 
+// 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
 inline __aicore__ void reduce_sum(__ubuf__ float *x, uint64_t repeat)
 {
     uint64_t shift;

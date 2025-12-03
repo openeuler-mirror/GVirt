@@ -6,6 +6,7 @@
 #define UB_SIZE 196608
 #define PINGPONG_BUF_NUM 2
 
+// 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
 template <typename Dtype>
 __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *local_buf, __ubuf__ Dtype *sin_buf,
                                         __ubuf__ Dtype *cos_buf, __ubuf__ Dtype *tmp_buf, __ubuf__ float *local_fp32_buf,

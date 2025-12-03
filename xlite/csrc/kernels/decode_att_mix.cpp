@@ -10,6 +10,7 @@
 
 #define __aicore__ [aicore]
 
+// 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
 inline __aicore__ void data_cache_clean_and_invalid(__gm__ void * __restrict__ gm)
 {
     __asm__ __volatile__("");
