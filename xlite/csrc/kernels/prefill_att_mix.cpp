@@ -22,6 +22,7 @@ using namespace AscendC;
 #define PINGPONG_BUF_NUM 2
 #define CUBE_BLOCK_SIZE 16
 
+// 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
 template <typename Dtype, typename CalcDtype>
 class PrefillAttn {
 public:
