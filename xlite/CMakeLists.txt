@@ -106,7 +106,7 @@ target_link_libraries(_C PRIVATE
     torch_cpu
 )
 
-target_link_options(_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/../torch/lib")
+set_target_properties(_C PROPERTIES LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:\$ORIGIN/../torch/lib")
 
 install(TARGETS xlite_kernels_${RUN_MODE} xlite
     LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
