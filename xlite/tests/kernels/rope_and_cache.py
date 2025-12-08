@@ -38,7 +38,6 @@ rt = Runtime(0, 500)
 torch.npu.set_device(0)
 
 ROPE_THETA = 10000.0
-HEAD_DIM = 128
 N_HEADS = 32
 N_KV_HEADS = 32
 
@@ -50,61 +49,63 @@ SEQ_LEN = 10
 START_POS = 0
 BLOCK_SIZE = 128
 BLOCK_NUM = 1
-out_features = (N_HEADS + 2 * N_KV_HEADS) * HEAD_DIM
 dtype_list = [torch.float16, torch.bfloat16]
+head_dim_list = [64, 128]
 
 for test_dtype in dtype_list:
-    torch.set_default_dtype(test_dtype)
-    with torch.device("npu"):
-        qkv_standard = torch.randn(BATCH_SIZE, SEQ_LEN, out_features)
-        freqs_cis_standard = precompute_freqs_cis(HEAD_DIM, MAX_SEQ_LEN, ROPE_THETA)
+    for head_dim in head_dim_list:
+        out_features = (N_HEADS + 2 * N_KV_HEADS) * head_dim
+        torch.set_default_dtype(test_dtype)
+        with torch.device("npu"):
+            qkv_standard = torch.randn(BATCH_SIZE, SEQ_LEN, out_features)
+            freqs_cis_standard = precompute_freqs_cis(head_dim, MAX_SEQ_LEN, ROPE_THETA)
 
-        k_cache = torch.zeros(MAX_BATCH_SIZE, MAX_SEQ_LEN, N_KV_HEADS, HEAD_DIM)
-        v_cache = torch.zeros(MAX_BATCH_SIZE, MAX_SEQ_LEN, N_KV_HEADS, HEAD_DIM)
+            k_cache = torch.zeros(MAX_BATCH_SIZE, MAX_SEQ_LEN, N_KV_HEADS, head_dim)
+            v_cache = torch.zeros(MAX_BATCH_SIZE, MAX_SEQ_LEN, N_KV_HEADS, head_dim)
 
-        qkv_xlite = qkv_standard.clone().view(BATCH_SIZE * SEQ_LEN, out_features)
-        freqs_cis_xlite = freqs_cis_standard.clone()
+            qkv_xlite = qkv_standard.clone().view(BATCH_SIZE * SEQ_LEN, out_features)
+            freqs_cis_xlite = freqs_cis_standard.clone()
 
-        k_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
-        v_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, HEAD_DIM)
+            k_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, head_dim)
+            v_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, head_dim)
 
-        len = torch.arange(SEQ_LEN, dtype=torch.int64)
-        position = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
-        len = torch.arange(SEQ_LEN, dtype=torch.int32)
-        slot_mapping = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
+            len = torch.arange(SEQ_LEN, dtype=torch.int64)
+            position = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
+            len = torch.arange(SEQ_LEN, dtype=torch.int32)
+            slot_mapping = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
 
-    # standard
-    q, k, v = qkv_standard.split([N_HEADS * HEAD_DIM, N_KV_HEADS * HEAD_DIM, N_KV_HEADS * HEAD_DIM], dim=2)
+        # standard
+        q, k, v = qkv_standard.split([N_HEADS * head_dim, N_KV_HEADS * head_dim, N_KV_HEADS * head_dim], dim=2)
 
-    q = q.view(BATCH_SIZE, SEQ_LEN, N_HEADS, HEAD_DIM)
-    k = k.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, HEAD_DIM)
-    v = v.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, HEAD_DIM)
+        q = q.view(BATCH_SIZE, SEQ_LEN, N_HEADS, head_dim)
+        k = k.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, head_dim)
+        v = v.view(BATCH_SIZE, SEQ_LEN, N_KV_HEADS, head_dim)
 
-    q = q.transpose(1, 2)
-    k = k.transpose(1, 2)
-    q = apply_rotary_emb(q, START_POS, freqs_cis=freqs_cis_standard)
-    k = apply_rotary_emb(k, START_POS, freqs_cis=freqs_cis_standard)
-    q = q.transpose(1, 2).contiguous()
-    k = k.transpose(1, 2).contiguous()
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        q = apply_rotary_emb(q, START_POS, freqs_cis=freqs_cis_standard)
+        k = apply_rotary_emb(k, START_POS, freqs_cis=freqs_cis_standard)
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
 
-    q = q * HEAD_DIM ** -0.5
+        q = q * head_dim ** -0.5
 
-    q = q.view(BATCH_SIZE * SEQ_LEN, N_HEADS * HEAD_DIM)
-    k = k.view(BATCH_SIZE * SEQ_LEN, N_KV_HEADS * HEAD_DIM)
-    v = v.view(BATCH_SIZE * SEQ_LEN, N_KV_HEADS * HEAD_DIM)
-    qkv_standard_out = torch.cat([q, k, v], dim=1)
+        q = q.view(BATCH_SIZE * SEQ_LEN, N_HEADS * head_dim)
+        k = k.view(BATCH_SIZE * SEQ_LEN, N_KV_HEADS * head_dim)
+        v = v.view(BATCH_SIZE * SEQ_LEN, N_KV_HEADS * head_dim)
+        qkv_standard_out = torch.cat([q, k, v], dim=1)
 
-    # xlite
-    torch.npu.synchronize()
-    rope_and_cache(rt, qkv_xlite, k_cache_xlite, v_cache_xlite, position, freqs_cis_xlite, slot_mapping,
-                   N_HEADS, N_KV_HEADS, HEAD_DIM, HEAD_DIM, BLOCK_SIZE, True)
-    torch.npu.synchronize()
+        # xlite
+        torch.npu.synchronize()
+        rope_and_cache(rt, qkv_xlite, k_cache_xlite, v_cache_xlite, position, freqs_cis_xlite, slot_mapping,
+                    N_HEADS, N_KV_HEADS, head_dim, head_dim, BLOCK_SIZE, True)
+        torch.npu.synchronize()
 
-    logging.info(f'rope and cache ({test_dtype}) executed!')
+        logging.info(f'rope and cache (head_dim={head_dim}, {test_dtype}) executed!')
 
-    try:
-        torch.testing.assert_close(qkv_standard_out, qkv_xlite, atol=1e-5, rtol=1e-3)
-    except AssertionError as e:
-        logging.error(f'{e}')
-        logging.error(f'torch_npu: {qkv_standard_out}')
-        logging.error(f'xlite: {qkv_xlite}')
+        try:
+            torch.testing.assert_close(qkv_standard_out, qkv_xlite, atol=1e-5, rtol=1e-3)
+        except AssertionError as e:
+            logging.error(f'{e}')
+            logging.error(f'torch_npu: {qkv_standard_out}')
+            logging.error(f'xlite: {qkv_xlite}')
