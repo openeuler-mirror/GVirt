@@ -5,13 +5,15 @@
 
 #define UB_SIZE 196608
 #define PINGPONG_BUF_NUM 2
+#define HEAD_SIZE_64 64
+#define HEAD_SIZE_128 128
 
 // 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
 template <typename Dtype>
 __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *local_buf, __ubuf__ Dtype *sin_buf,
                                         __ubuf__ Dtype *cos_buf, __ubuf__ Dtype *tmp_buf, __ubuf__ float *local_fp32_buf,
                                         __ubuf__ float *calc_fp32_buf, __ubuf__ float *sin_fp32_buf, __ubuf__ float *cos_fp32_buf,
-                                        uint32_t embed_dim, uint32_t rot_dim, uint32_t calc_size, int event_id,
+                                        uint32_t embed_dim, uint32_t rot_dim, uint32_t calc_size, int event_id, uint32_t head_size,
                                         uint64_t copy_param, uint64_t vector_2src_cossin_param, uint64_t vector_2src_param)
 {
     copy_gm_to_ubuf(local_buf, gm_buf_loop, copy_param);
@@ -23,17 +25,27 @@ __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtyp
     vconv_bf162f32(cos_fp32_buf, cos_buf, DIV_ROUND_UP(rot_dim * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
     pipe_barrier(PIPE_V);
 
-    // q * sin (q : numHeads * headDim  sin: 1 * headDim (headDim = 128))
-    // fp32时，需计算的sin大小为 headDim(128) * 4 Byte = 512 Byte, 为VECTOR_MAX_BYTESIZE(256 Byte)的2倍, 所以计算时分两次计算
-    // 相邻两次执行，目的操作数相同block地址步长为 512 / 32 (1个datablock长度为32Byte) = 16
-    vmul(calc_fp32_buf, local_fp32_buf, sin_fp32_buf, vector_2src_cossin_param);
-    vmul(calc_fp32_buf + embed_dim, local_fp32_buf + embed_dim, sin_fp32_buf + embed_dim, vector_2src_cossin_param);
-    pipe_barrier(PIPE_V);
+    if (head_size == HEAD_SIZE_128) {
+        // q * sin (q : numHeads * headDim  sin: 1 * headDim (headDim = 128))
+        // fp32时，需计算的sin大小为 headDim(128) * 4 Byte = 512 Byte, 为VECTOR_MAX_BYTESIZE(256 Byte)的2倍, 所以计算时分两次计算
+        // 相邻两次执行，目的操作数相同block地址步长为 512 / 32 (1个datablock长度为32Byte) = 16
+        vmul(calc_fp32_buf, local_fp32_buf, sin_fp32_buf, vector_2src_cossin_param);
+        vmul(calc_fp32_buf + embed_dim, local_fp32_buf + embed_dim, sin_fp32_buf + embed_dim, vector_2src_cossin_param);
+        pipe_barrier(PIPE_V);
 
-    // q * cos (q : numHeads * headDim  cos: 1 * headDim)
-    vmul(local_fp32_buf, local_fp32_buf, cos_fp32_buf, vector_2src_cossin_param);
-    vmul(local_fp32_buf + embed_dim, local_fp32_buf + embed_dim, cos_fp32_buf + embed_dim, vector_2src_cossin_param);
-    pipe_barrier(PIPE_V);
+        // q * cos (q : numHeads * headDim  cos: 1 * headDim)
+        vmul(local_fp32_buf, local_fp32_buf, cos_fp32_buf, vector_2src_cossin_param);
+        vmul(local_fp32_buf + embed_dim, local_fp32_buf + embed_dim, cos_fp32_buf + embed_dim, vector_2src_cossin_param);
+        pipe_barrier(PIPE_V);
+    } else {
+        // q * sin (q : numHeads * headDim  sin: 1 * headDim (headDim = 64))
+        vmul(calc_fp32_buf, local_fp32_buf, sin_fp32_buf, vector_2src_cossin_param);
+        pipe_barrier(PIPE_V);
+
+        // q * cos (q : numHeads * headDim  cos: 1 * headDim)
+        vmul(local_fp32_buf, local_fp32_buf, cos_fp32_buf, vector_2src_cossin_param);
+        pipe_barrier(PIPE_V);
+    }
 
     // 为了保证与torch_npu计算结果一致
     vconv_f322bf16r(local_buf, local_fp32_buf, DIV_ROUND_UP(calc_size * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 4, 8);
@@ -45,6 +57,11 @@ __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtyp
     vconv_bf162f32(calc_fp32_buf, tmp_buf, DIV_ROUND_UP(calc_size * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
     pipe_barrier(PIPE_V);
 
+    if (head_size == HEAD_SIZE_64) {
+        set_mask_norm();
+        set_vector_mask((uint64_t)0, (uint64_t)0x00000000FFFFFFFF);
+    }
+
     // q * cos - q * sin > q[:half] * cos - q[half:] * sin
     vsub(local_fp32_buf, local_fp32_buf, calc_fp32_buf + embed_dim, vector_2src_param);
     pipe_barrier(PIPE_V);
@@ -53,6 +70,11 @@ __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtyp
     vadd(local_fp32_buf + embed_dim, local_fp32_buf + embed_dim, calc_fp32_buf, vector_2src_param);
     pipe_barrier(PIPE_V);
 
+    if (head_size == HEAD_SIZE_64) {
+        set_mask_norm();
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+    }
+
     vconv_f322bf16r(local_buf, local_fp32_buf, DIV_ROUND_UP(calc_size * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 4, 8);
     pipe_barrier(PIPE_V);
 }
@@ -60,7 +82,7 @@ __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtyp
 template <typename Dtype>
 __aicore__ inline void calc_cossin(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *local_buf,
                                    __ubuf__ Dtype *calc_buf, __ubuf__ Dtype *sin_buf, __ubuf__ Dtype *cos_buf,
-                                   uint32_t embed_dim, int event_id,
+                                   uint32_t embed_dim, int event_id, uint32_t head_size,
                                    uint64_t copy_param, uint64_t vector_2src_cossin_param, uint64_t vector_2src_param)
 {
     copy_gm_to_ubuf(local_buf, gm_buf_loop, copy_param);
@@ -76,7 +98,11 @@ __aicore__ inline void calc_cossin(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *lo
     pipe_barrier(PIPE_V);
 
     set_mask_norm();
-    set_vector_mask((uint64_t)0, (uint64_t)-1);
+    if (head_size == HEAD_SIZE_128) {
+        set_vector_mask((uint64_t)0, (uint64_t)-1);
+    } else {
+        set_vector_mask((uint64_t)0x00000000FFFFFFFF, (uint64_t)0x00000000FFFFFFFF);
+    }
 
     // k * cos - k * sin > k[:half] * cos - k[half:] * sin
     vsub(local_buf, local_buf, calc_buf + embed_dim, vector_2src_param);
@@ -128,7 +154,7 @@ __aicore__ void rope_and_cache(
     __ubuf__ Dtype *value_dtype_ubuf_addr[PINGPONG_BUF_NUM] = {value_dtype_ubuf_addr0, value_dtype_ubuf_addr1};
     // cossin_cache
     uint32_t cossin_start = kv_start + ubuf_num * kv_blocksize;
-    uint32_t cossin_blocksize = rot_dim * sizeof(Dtype);
+    uint32_t cossin_blocksize = ((head_size == HEAD_SIZE_64) && (std::is_same_v<Dtype, float16_t>)) ? 2 * rot_dim * sizeof(Dtype): rot_dim * sizeof(Dtype);
     ubuf_num = 0;
     auto cos_dtype_ubuf_addr0 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
     auto cos_dtype_ubuf_addr1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
@@ -215,14 +241,21 @@ __aicore__ void rope_and_cache(
     if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
         uint64_t q_repeat_32bit = DIV_ROUND_UP(q_size, VECTOR_MAX_NUM_OF_FP32);
         uint64_t kv_repeat_32bit = DIV_ROUND_UP(kv_size, VECTOR_MAX_NUM_OF_FP32);
-        constexpr uint64_t dst_repeat_stride_fp32 = 16;
-        constexpr uint64_t src0_repeat_stride_fp32 = 16;
-        constexpr uint64_t src1_repeat_stride_fp32 = 16;
-        vector_2src_cossin_32bitcfg_q = set_vector_xt(dst_repeat_stride_fp32, src0_repeat_stride_fp32, 0, dst_stride, src0_stride, src1_stride, q_repeat_32bit / 2);
-        vector_2src_32bitcfg_q = set_vector_xt(dst_repeat_stride_fp32, src0_repeat_stride_fp32, src1_repeat_stride_fp32, dst_stride, src0_stride, src1_stride, q_repeat_32bit / 2);
         vector_1src_32bitcfg_q = set_vector_1src_xt(dst_repeat_stride, src0_repeat_stride, dst_stride, src0_stride, q_repeat_32bit);
-        vector_2src_cossin_32bitcfg_k = set_vector_xt(dst_repeat_stride_fp32, src0_repeat_stride_fp32, 0, dst_stride, src0_stride, src1_stride, kv_repeat_32bit / 2);
-        vector_2src_32bitcfg_k = set_vector_xt(dst_repeat_stride_fp32, src0_repeat_stride_fp32, src1_repeat_stride_fp32, dst_stride, src0_stride, src1_stride, kv_repeat_32bit / 2);
+        if (head_size == HEAD_SIZE_64) {
+            vector_2src_cossin_32bitcfg_q = set_vector_xt(dst_repeat_stride, src0_repeat_stride, 0, dst_stride, src0_stride, src1_stride, q_repeat_32bit);
+            vector_2src_32bitcfg_q = set_vector_xt(dst_repeat_stride, src0_repeat_stride, src1_repeat_stride, dst_stride, src0_stride, src1_stride, q_repeat_32bit);
+            vector_2src_cossin_32bitcfg_k = set_vector_xt(dst_repeat_stride, src0_repeat_stride, 0, dst_stride, src0_stride, src1_stride, kv_repeat_32bit);
+            vector_2src_32bitcfg_k = set_vector_xt(dst_repeat_stride, src0_repeat_stride, src1_repeat_stride, dst_stride, src0_stride, src1_stride, kv_repeat_32bit);
+        } else {
+            constexpr uint64_t dst_repeat_stride_fp32 = 16;
+            constexpr uint64_t src0_repeat_stride_fp32 = 16;
+            constexpr uint64_t src1_repeat_stride_fp32 = 16;
+            vector_2src_cossin_32bitcfg_q = set_vector_xt(dst_repeat_stride_fp32, src0_repeat_stride_fp32, 0, dst_stride, src0_stride, src1_stride, q_repeat_32bit / 2);
+            vector_2src_32bitcfg_q = set_vector_xt(dst_repeat_stride_fp32, src0_repeat_stride_fp32, src1_repeat_stride_fp32, dst_stride, src0_stride, src1_stride, q_repeat_32bit / 2);
+            vector_2src_cossin_32bitcfg_k = set_vector_xt(dst_repeat_stride_fp32, src0_repeat_stride_fp32, 0, dst_stride, src0_stride, src1_stride, kv_repeat_32bit / 2);
+            vector_2src_32bitcfg_k = set_vector_xt(dst_repeat_stride_fp32, src0_repeat_stride_fp32, src1_repeat_stride_fp32, dst_stride, src0_stride, src1_stride, kv_repeat_32bit / 2);
+        }
     } else {
         uint64_t q_repeat_16bit = DIV_ROUND_UP(q_size, VECTOR_MAX_NUM_OF_FP16);
         uint64_t kv_repeat_16bit = DIV_ROUND_UP(kv_size, VECTOR_MAX_NUM_OF_FP16);
@@ -235,7 +268,7 @@ __aicore__ void rope_and_cache(
 
     uint64_t lenBurst_q = DIV_ROUND_UP(q_bytesize, BLOCK_SIZE);
     uint64_t lenBurst_kv = DIV_ROUND_UP(kv_bytesize, BLOCK_SIZE);
-    uint64_t lenBurst_cossin = DIV_ROUND_UP(rot_dim, BLOCK_SIZE); // d/2
+    uint64_t lenBurst_cossin = DIV_ROUND_UP(embed_dim * sizeof(Dtype), BLOCK_SIZE); // d/2
     uint64_t lenBurst_pos = DIV_ROUND_UP(pos_size, BLOCK_SIZE);
     uint64_t lenBurst_slot = DIV_ROUND_UP(slot_size, BLOCK_SIZE);
     constexpr uint8_t sid = 0;
@@ -314,6 +347,12 @@ __aicore__ void rope_and_cache(
             copy_gm_to_ubuf(cos_dtype_ubuf_addr[event_id] + embed_dim, gm_cos, dmi_cfg_cossin);
             copy_gm_to_ubuf(sin_dtype_ubuf_addr[event_id], gm_sin, dmi_cfg_cossin);
             copy_gm_to_ubuf(sin_dtype_ubuf_addr[event_id] + embed_dim, gm_sin, dmi_cfg_cossin);
+            if ((head_size == HEAD_SIZE_64) && (std::is_same_v<Dtype, float16_t>)) {
+                copy_gm_to_ubuf(cos_dtype_ubuf_addr[event_id] + embed_dim * 2, gm_cos, dmi_cfg_cossin);
+                copy_gm_to_ubuf(cos_dtype_ubuf_addr[event_id] + embed_dim * 3, gm_cos, dmi_cfg_cossin);
+                copy_gm_to_ubuf(sin_dtype_ubuf_addr[event_id] + embed_dim * 2, gm_sin, dmi_cfg_cossin);
+                copy_gm_to_ubuf(sin_dtype_ubuf_addr[event_id] + embed_dim * 3, gm_sin, dmi_cfg_cossin);
+            }
             set_flag(PIPE_MTE2, PIPE_V, event_id);
             wait_flag(PIPE_MTE2, PIPE_V, event_id);
 
@@ -321,12 +360,12 @@ __aicore__ void rope_and_cache(
                 calc_cossin_cast(gm_key, key_dtype_ubuf_addr[event_id], sin_dtype_ubuf_addr[event_id],
                                  cos_dtype_ubuf_addr[event_id], query_calc_dtype_ubuf_addr,
                                  key_fp32_ubuf_addr[event_id], key_calc_fp32_ubuf, sin_fp32_ubuf_addr[event_id],
-                                 cos_fp32_ubuf_addr[event_id], embed_dim, rot_dim, kv_size, event_id, dmi_cfg_kv,
+                                 cos_fp32_ubuf_addr[event_id], embed_dim, rot_dim, kv_size, event_id, head_size, dmi_cfg_kv,
                                  vector_2src_cossin_32bitcfg_k, vector_2src_32bitcfg_k);
             } else {
                 calc_cossin(gm_key, key_dtype_ubuf_addr[event_id], key_calc_dtype_ubuf_addr,
                             sin_dtype_ubuf_addr[event_id], cos_dtype_ubuf_addr[event_id],
-                            embed_dim, event_id, dmi_cfg_kv, vector_2src_cossin_16bitcfg_k, vector_2src_16bitcfg_k);
+                            embed_dim, event_id, head_size, dmi_cfg_kv, vector_2src_cossin_16bitcfg_k, vector_2src_16bitcfg_k);
             }
             set_flag(PIPE_V, PIPE_MTE3, event_id);
             wait_flag(PIPE_V, PIPE_MTE3, event_id);
@@ -339,7 +378,7 @@ __aicore__ void rope_and_cache(
                 calc_cossin_cast(gm_query, query_dtype_ubuf_addr[event_id], sin_dtype_ubuf_addr[event_id],
                                  cos_dtype_ubuf_addr[event_id], query_calc_dtype_ubuf_addr,
                                  query_fp32_ubuf_addr[event_id], query_calc_fp32_ubuf, sin_fp32_ubuf_addr[event_id],
-                                 cos_fp32_ubuf_addr[event_id], embed_dim, rot_dim, q_size, event_id, dmi_cfg_q,
+                                 cos_fp32_ubuf_addr[event_id], embed_dim, rot_dim, q_size, event_id, head_size, dmi_cfg_q,
                                  vector_2src_cossin_32bitcfg_q, vector_2src_32bitcfg_q);
                 vconv_bf162f32(query_fp32_ubuf_addr[event_id], query_dtype_ubuf_addr[event_id], DIV_ROUND_UP(q_size * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
                 pipe_barrier(PIPE_V);
@@ -350,7 +389,7 @@ __aicore__ void rope_and_cache(
             } else {
                 calc_cossin(gm_query, query_dtype_ubuf_addr[event_id], query_calc_dtype_ubuf_addr,
                             sin_dtype_ubuf_addr[event_id], cos_dtype_ubuf_addr[event_id],
-                            embed_dim, event_id, dmi_cfg_q, vector_2src_cossin_16bitcfg_q, vector_2src_16bitcfg_q);
+                            embed_dim, event_id, head_size, dmi_cfg_q, vector_2src_cossin_16bitcfg_q, vector_2src_16bitcfg_q);
                 vmuls(query_dtype_ubuf_addr[event_id], query_dtype_ubuf_addr[event_id], scale, vector_1src_16bitcfg_q);
                 pipe_barrier(PIPE_V);
             }
