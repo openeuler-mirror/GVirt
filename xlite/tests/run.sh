@@ -183,4 +183,4 @@ run_qwen3_32B
 run_llama_7B
 run_llama_13B
 run_llama_34B
-run_deepseek
+#run_deepseek
