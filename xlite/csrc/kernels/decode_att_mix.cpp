@@ -8,895 +8,784 @@
 #include "kernel_macro.h"
 #include "kernel_operator.h"
 
-#define __aicore__ [aicore]
+constexpr uint32_t PINGPONG_BUF_NUM = 2;
+constexpr int CUBE_BLOCK_SIZE = 16;
+constexpr uint32_t MAX_CONTEXT_BLOCK_LEN = 8192;
+constexpr uint32_t MAX_CONTEXT_REPEAT_TIMES = MAX_CONTEXT_BLOCK_LEN / CUBE_BLOCK_SIZE;
+constexpr uint32_t QK_RESULT_TEMP_NUM = 4; // 1-3 for subBlock, 4 for whole
+constexpr uint32_t QK_RESULT_TEMP_SIZE = QK_RESULT_TEMP_NUM * VECTOR_MAX_BYTESIZE;
+constexpr uint32_t MAX_UB_SIZE = 192 * 1024;
 
 // 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
-inline __aicore__ void data_cache_clean_and_invalid(__gm__ void * __restrict__ gm)
-{
-    __asm__ __volatile__("");
-    dcci(gm, 0 /*SINGLE_CACHE_LINE*/);
-    __asm__ __volatile__("");
-}
+template<typename Dtype, typename CalcDtype>
+class DecodeAttn {
+public:
+    __aicore__ inline DecodeAttn()
+    {
+    }
 
-struct decode_att_mix_context {
-    __gm__ uint32_t *v2a_gm;
-    __gm__ uint32_t *a2v_gm;
-    __gm__ int32_t *cum_prompt_len;
-    __gm__ int32_t *mapping;
-    __gm__ int32_t *decode_index;
-    __gm__ int32_t *cached_lens;
-    __gm__ half *q;
-    __gm__ half *k;
-    __gm__ half *v;
-    __gm__ half *qk;
-    __gm__ half *o;
+    __aicore__ inline void Init(GM_ADDR a2v, GM_ADDR v2a, GM_ADDR q, GM_ADDR k, GM_ADDR v,
+                                GM_ADDR cachedLens, GM_ADDR mapping, GM_ADDR qk, GM_ADDR o,
+                                GM_ADDR decodeIndex, GM_ADDR cumPromptLen,
+                                uint32_t numTokens, uint32_t numHeads, uint32_t headSize,
+                                uint32_t blockSize, uint32_t mappingLen, uint32_t numKVHeads,
+                                uint32_t maxContextLen, uint32_t numQKVHeads,
+                                uint32_t mOffset, uint32_t mSlice)
+    {
+        qGmBuf.SetGlobalBuffer((__gm__ Dtype*)q);
+        kGmBuf.SetGlobalBuffer((__gm__ Dtype*)k);
+        vGmBuf.SetGlobalBuffer((__gm__ Dtype*)v);
+        qkGmBuf.SetGlobalBuffer((__gm__ Dtype*)qk);
+        outGmBuf.SetGlobalBuffer((__gm__ Dtype*)o);
 
+        this->a2v = (__gm__ uint32_t*)a2v;
+        this->v2a = (__gm__ uint32_t*)v2a;
+        this->cumPromptLen = (__gm__ int32_t*)cumPromptLen;
+        this->mapping = (__gm__ int32_t*)mapping;
+        this->decodeIndex = (__gm__ int32_t*)decodeIndex;
+        this->cachedLens = (__gm__ int32_t*)cachedLens;
+
+        this->headSize = headSize;
+        this->nHeads = numHeads;
+        this->nTokens = numTokens;
+        this->nKVHeads = numKVHeads;
+        this->blockSize = blockSize;
+        this->mappingLen = mappingLen;
+        this->maxContextLen = maxContextLen;
+        this->nQKVHeads = numQKVHeads;
+        this->mOffset = mOffset;
+        this->mSlice = mSlice;
+        this->headNumInGroup = numHeads / numKVHeads;
+        this->blockMemSize = numKVHeads * blockSize * headSize;
+    }
+
+    inline __aicore__ void Run()
+    {
 #ifdef __DAV_C220_CUBE__
-    __cbuf__ half *cbuf_addr_a;
-    __cbuf__ half *cbuf_addr_b[2];
-    __ca__ half *ca_addr;
-    __cb__ half *cb_addr[2];
-    __cc__ float *cc_addr;
-#endif
-    uint32_t num_tokens;
-    uint32_t num_heads;
-    uint32_t head_size;
-    uint32_t block_size;
-    uint32_t mapping_len;
-    uint32_t num_kv_heads;
-    uint32_t max_context_len;
-    uint32_t num_qkv_heads;
-    uint32_t m_offset;
-    uint32_t m_slice;
-    uint32_t head_num_in_group;
-    uint32_t block_mem_size;
-};
-
-inline __aicore__ void init_decode_att_mix_context(decode_att_mix_context *ctx,
-                                                   __gm__ uint8_t *a2v, __gm__ uint8_t *v2a,
-                                                   __gm__ uint8_t *q, __gm__ uint8_t *k, __gm__ uint8_t *v,
-                                                   __gm__ uint8_t *cached_lens, __gm__ uint8_t *mapping,
-                                                   __gm__ uint8_t *qk, __gm__ uint8_t *o,
-                                                   __gm__ uint8_t *decode_index, __gm__ uint8_t *cum_prompt_len,
-                                                   uint32_t num_tokens, uint32_t num_heads, uint32_t head_size,
-                                                   uint32_t block_size, uint32_t mapping_len, uint32_t num_kv_heads,
-                                                   uint32_t max_context_len, uint32_t num_qkv_heads, uint32_t m_offset,
-                                                   uint32_t m_slice)
-{
-    ctx->a2v_gm = (__gm__ uint32_t*)a2v;
-    ctx->v2a_gm = (__gm__ uint32_t*)v2a;
-    ctx->cum_prompt_len = (__gm__ int32_t*)cum_prompt_len;
-    ctx->decode_index = (__gm__ int32_t*)decode_index;
-    ctx->cached_lens = (__gm__ int32_t*)cached_lens;
-    ctx->mapping = (__gm__ int32_t*)mapping;
-
-    ctx->q = (__gm__ half*)q;
-    ctx->k = (__gm__ half*)k;
-    ctx->v = (__gm__ half*)v;
-    ctx->qk = (__gm__ half*)qk;
-    ctx->o = (__gm__ half*)o;
-
-#ifdef __DAV_C220_CUBE__
-    ctx->cbuf_addr_a = reinterpret_cast<__cbuf__ half*>((uintptr_t)0);
-    ctx->ca_addr = reinterpret_cast<__ca__ half*>((uintptr_t)0);
-    ctx->cb_addr[0] = reinterpret_cast<__cb__ half*>((uintptr_t)0);
-    ctx->cc_addr = reinterpret_cast<__cc__ float*>((uintptr_t)0);
-#endif
-
-    ctx->num_tokens = num_tokens;
-    ctx->num_heads = num_heads;
-    ctx->head_size = head_size;
-    ctx->block_size = block_size;
-    ctx->mapping_len = mapping_len;
-    ctx->num_kv_heads = num_kv_heads;
-    ctx->max_context_len = max_context_len;
-    ctx->num_qkv_heads = num_qkv_heads;
-    ctx->m_offset = m_offset;
-    ctx->m_slice = m_slice;
-    ctx->head_num_in_group = num_heads / num_kv_heads;
-    ctx->block_mem_size = num_kv_heads * block_size * head_size;
-}
-
-inline __aicore__ void wait_aic_aiv_flag(__gm__ uint32_t *flag_gm, uint32_t head_num_in_group,
-                                         uint32_t q_offset, uint32_t head_size)
-{
-    for (uint32_t sub_idx = 0; sub_idx < head_num_in_group; sub_idx++) {
-        uint32_t head_idx = q_offset + sub_idx;
-        __gm__ uint32_t *curr_addr = flag_gm + head_idx * head_size;
-        data_cache_clean_and_invalid(curr_addr);
-        uint32_t flag = *curr_addr;
-        while (flag != head_idx + 1) {
-            data_cache_clean_and_invalid(curr_addr);
-            flag = *curr_addr;
-        }
-    }
-}
-
-inline __aicore__ void set_aic_aiv_flag(__gm__ uint32_t *flag_gm,
-                                        uint32_t head_num_in_group, uint32_t q_offset, uint32_t head_size)
-{
-    for (int sub_idx = 0; sub_idx < head_num_in_group; sub_idx++) {
-        uint32_t head_idx = q_offset + sub_idx;
-        __gm__ uint32_t *curr_addr = flag_gm + head_idx * head_size;
-        *curr_addr = head_idx + 1;
-        data_cache_clean_and_invalid(curr_addr);
-    }
-}
-
-inline __aicore__ void reset_aic_aiv_flag(__gm__ uint32_t *flag_gm,
-                                          uint32_t head_num_in_group, uint32_t q_offset, uint32_t head_size)
-{
-    for (int sub_idx = 0; sub_idx < head_num_in_group; sub_idx++) {
-        uint32_t head_idx = q_offset + sub_idx;
-        __gm__ uint32_t *curr_addr = flag_gm + head_idx * head_size;
-        *curr_addr = 0;
-        data_cache_clean_and_invalid(curr_addr);
-    }
-}
-
-// 256*128 64K * 128*256 64K = 256*256, 128k
-#ifdef __DAV_C220_CUBE__
-
-#define CUBE_SIZE 256 // 16 * 16 = 256
-#define CUBE_BLOCK_SIZE 16 // 行列16
-#define M_TILE_SIZE 16
-const uint32_t MAX_CONTEXT_BLOCK_LEN = 8192;
-
-inline __aicore__ void copy_to_l0a(__ca__ half *l0, __cbuf__ half *cbuf, uint32_t head_size, uint32_t offset = 0)
-{
-    load_cbuf_to_ca(l0,
-                    cbuf + offset,
-                    0 /* loadDataParams.startIndex */,
-                    head_size / CUBE_BLOCK_SIZE /* loadDataParams.repeatTimes */,
-                    1 /* loadDataParams.srcStride */,
-                    0 /* loadDataParams.dstGap */,
-                    0 /* loadDataParams.sid */,
-                    0 /* transpose */,
-                    inc);
-}
-
-inline __aicore__ void copy_to_l0b(__cb__ half *l0, __cbuf__ half *cbuf, uint32_t n_factor, uint32_t k_factor)
-{
-    for (int k = 0; k < k_factor; ++k) {
-        int dst_offset = CUBE_SIZE * n_factor;
-        int src_offset = CUBE_SIZE * n_factor;
-        load_cbuf_to_cb(l0 + k * dst_offset,
-                        cbuf + k * src_offset,
-                        0 /* loadDataParams.startIndex */,
-                        n_factor /* loadDataParams.repeatTimes */,
-                        1 /* loadDataParams.srcStride */,
-                        0 /* loadDataParams.dstGap */,
-                        0 /* loadDataParams.sid */,
-                        0 /* transpose */,
-                        inc);
-    }
-}
-
-inline __aicore__ void copy_to_l0b_gqa(__cb__ half *l0, __cbuf__ half *cbuf, uint32_t k_factor, uint32_t n_factor)
-{
-    if (n_factor == 1) {
-        // LoadData2dParams loadDataParams;
-        load_cbuf_to_cb(l0,
-                        cbuf,
-                        0 /* loadDataParams.startIndex */,
-                        k_factor /* loadDataParams.repeatTimes */,
-                        1 /* loadDataParams.srcStride */,
-                        0 /* loadDataParams.dstGap */,
-                        0 /* loadDataParams.sid */,
-                        1 /* transpose */,
-                        inc);
-        return;
-    }
-    for (int k = 0; k < k_factor; ++k) {
-        uint32_t dst_offset = n_factor * CUBE_SIZE;
-        constexpr int src_offset = CUBE_SIZE;
-        load_cbuf_to_cb(l0 + k * dst_offset,
-                        cbuf + k * src_offset,
-                        0 /* loadDataParams.startIndex */,
-                        n_factor /* loadDataParams.repeatTimes */,
-                        k_factor /* loadDataParams.srcStride */,
-                        0 /* loadDataParams.dstGap */,
-                        0 /* loadDataParams.sid */,
-                        1 /* transpose */,
-                        inc);
-    }
-}
-
-inline __aicore__ void mmad(__cc__ float *cc, __ca__ half *ca, __cb__ half *cb,
-                            uint32_t m, uint32_t n, uint32_t k, bool init_val, uint8_t unit_flag = 0)
-{
-    mad(cc, ca, cb, m, k, n, unit_flag, false /* kDirection Align */, 0, init_val);
-}
-
-inline __aicore__ void copy_to_l1_2d(__cbuf__ half *l1, __gm__ half *gm,
-                                     uint32_t row, uint32_t col, uint32_t height, uint32_t width, uint32_t step)
-{
-    uint32_t offset = row * step + col;
-    copy_gm_to_cbuf_multi_nd2nz_b16(l1,
-                                    gm + offset,
-                                    0,
-                                    1 /* nd2nzParams.ndNum */,
-                                    height /* nd2nzParams.nValue */,
-                                    width /* nd2nzParams.dValue */,
-                                    0 /* nd2nzParams.srcNdMatrixStride */,
-                                    step /* nd2nzParams.srcDValue */,
-                                    height /* nd2nzParams.dstNzC0Stride */,
-                                    1 /* nd2nzParams.dstNzNStride */,
-                                    0 /* nd2nzParams.dstNzMatrixStride */);
-}
-
-inline __aicore__ void copy_to_l1_gqa(__cbuf__ half *l1, __gm__ half *gm,
-                                     uint32_t head_num_in_group, uint32_t sub_block_length, uint32_t blockLength)
-{
-#pragma unroll
-    for (int i = 0; i < head_num_in_group; i++) {
-        uint32_t offset = i * blockLength;
-        copy_gm_to_cbuf(l1 + i * CUBE_BLOCK_SIZE, gm + offset,
-                        0, sub_block_length / CUBE_BLOCK_SIZE, 1, 0, 16 - 1, (pad_t)0);
-    }
-}
-
-inline __aicore__ void copy_out_to_gm(__gm__ half *gm, __cc__ float *cc,
-                                      uint32_t n, uint32_t m, uint32_t kn, uint8_t unit_flag = 0)
-{
-    copy_matrix_cc_to_gm(gm,
-                         cc,
-                         0 /* fixpipeInfo.sid */,
-                         n,
-                         m,
-                         kn /* fixpipeInfo.dstStride */,
-                         M_TILE_SIZE /* fixpipeInfo.srcStride */,
-                         unit_flag /* fixpipeInfo.unit_flag */,
-                         QuantMode_t::F322F16,
-                         0 /* static_cast<uint8_t>(fixpipeInfo.reluEn) */,
-                         0 /* fixpipeInfo.channelSplit */,
-                         1 /* fixpipeInfo.nz2ndEn */);
-}
-
-inline __aicore__ void decode_mix_pre_copy_in_for_qk(decode_att_mix_context *ctx,
-                                                     uint32_t gqa_head_idx,
-                                                     uint32_t cumM,
-                                                     uint32_t token_idx,
-                                                     uint32_t q_head_idx_start,
-                                                     uint32_t head_offset_len)
-{
-    wait_flag(PIPE_M, PIPE_MTE2, EVENT_ID0);
-    wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
-    uint32_t head_size = ctx->head_size;
-    uint32_t head_num_in_group = ctx->head_num_in_group;
-    __gm__ half *q_gm_addr =
-        ctx->q + cumM * ctx->num_qkv_heads * head_size + (q_head_idx_start % ctx->num_heads) * head_size;
-    copy_gm_to_cbuf_multi_nd2nz_b16(ctx->cbuf_addr_a,
-                                    q_gm_addr,
-                                    0,
-                                    1 /* nd2nzParams.ndNum */,
-                                    head_num_in_group /* nd2nzParams.nValue */,
-                                    head_size /* nd2nzParams.dValue */,
-                                    0 /* nd2nzParams.srcNdMatrixStride */,
-                                    head_size /* nd2nzParams.srcDValue */,
-                                    CUBE_BLOCK_SIZE /* nd2nzParams.dstNzC0Stride */,
-                                    1 /* nd2nzParams.dstNzNStride */,
-                                    0 /* nd2nzParams.dstNzMatrixStride */);
-
-    if (gqa_head_idx >= block_num) {
-        set_aic_aiv_flag(ctx->a2v_gm, head_num_in_group, (gqa_head_idx - block_num) * head_num_in_group, head_size);
-    }
-
-    set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID2);
-
-    wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID2);
-
-    uint32_t block_table_id = (uint32_t)*(ctx->mapping + token_idx * ctx->mapping_len);
-    __gm__ half *k_gm_addr = ctx->k + block_table_id * ctx->block_mem_size + head_offset_len;
-
-    copy_to_l1_2d(ctx->cbuf_addr_b[0], k_gm_addr, 0, 0, ctx->block_size, head_size, head_size * ctx->num_kv_heads);
-    set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1);
-
-    set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-    copy_to_l0a(ctx->ca_addr, ctx->cbuf_addr_a, head_size);
-    set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-}
-
-inline __aicore__ void decode_mix_compute_qk(decode_att_mix_context *ctx,
-                                             uint32_t token_idx,
-                                             uint32_t head_offset_len,
-                                             uint32_t q_head_idx_start)
-{
-    wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-    set_flag(PIPE_FIX, PIPE_S, EVENT_ID1);
-
-    uint32_t context_len = (uint32_t)*(ctx->cached_lens + token_idx) + 1;
-    int num_iters = DIV_ROUND_UP(context_len, ctx->block_size);
-    uint32_t curr_idx = 0;
-    uint32_t block_size = ctx->block_size;
-    uint32_t head_size = ctx->head_size;
-    for (int k_idx = 0; k_idx < num_iters; ++k_idx) {
-        uint32_t next_idx = 1 - curr_idx;
-        wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-        if (k_idx + 1 < num_iters) {
-            uint32_t loc_block_table_id = (uint32_t)*(ctx->mapping + token_idx * ctx->mapping_len + k_idx + 1);
-            __gm__ half *loc_k_gm_addr = ctx->k + loc_block_table_id * ctx->block_mem_size + head_offset_len;
-            copy_to_l1_2d(ctx->cbuf_addr_b[next_idx], loc_k_gm_addr, 0, 0, block_size, head_size, head_size * ctx->num_kv_heads);
-            set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + next_idx);
-        }
-
-        wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + curr_idx);
-        copy_to_l0b(ctx->cb_addr[curr_idx], ctx->cbuf_addr_b[curr_idx], block_size / CUBE_BLOCK_SIZE,
-                    block_size / CUBE_BLOCK_SIZE);
-        set_flag(PIPE_MTE1, PIPE_M, EVENT_ID1);
-        set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-        wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID1);
-        wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-
-        mmad(ctx->cc_addr, ctx->ca_addr, ctx->cb_addr[curr_idx], M_TILE_SIZE, head_size, block_size, true, 0);
-
-        if (k_idx == num_iters - 1) {
-            set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
-            set_flag(PIPE_M, PIPE_MTE2, EVENT_ID0);
-        }
-
-        set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        set_flag(PIPE_M, PIPE_FIX, EVENT_ID1);
-        wait_flag(PIPE_M, PIPE_FIX, EVENT_ID1);
-        __gm__ half *kv_gm_addr = ctx->qk + q_head_idx_start * ctx->max_context_len + k_idx * block_size;
-
-        wait_flag(PIPE_FIX, PIPE_S, EVENT_ID1);
-        uint64_t config = 0x1;
-        set_nd_para(config);
-        copy_out_to_gm(kv_gm_addr, ctx->cc_addr, head_size, ctx->head_num_in_group, ctx->max_context_len);
-        set_flag(PIPE_FIX, PIPE_S, EVENT_ID1);
-        set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-        curr_idx = 1 - curr_idx;
-    }
-    wait_flag(PIPE_FIX, PIPE_S, EVENT_ID1);
-}
-
-inline __aicore__ void decode_mix_process_qk(decode_att_mix_context *ctx)
-{
-    uint32_t kSize = ctx->block_size * ctx->head_size * sizeof(half);
-    uint32_t qSize = ctx->head_size * sizeof(half);
-
-    ctx->cbuf_addr_b[0] = reinterpret_cast<__cbuf__ half*>((uintptr_t)qSize * CUBE_BLOCK_SIZE);
-    ctx->cbuf_addr_b[1] = reinterpret_cast<__cbuf__ half*>((uintptr_t)(qSize * CUBE_BLOCK_SIZE + kSize));
-    ctx->cb_addr[1] = reinterpret_cast<__cb__ half*>((uintptr_t)kSize);
-
-    int total_task_num = ctx->num_tokens * ctx->num_kv_heads; // 按kvhead分配计算任务
-    uint32_t head_num_in_group = ctx->head_num_in_group;
-    set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-    set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-    set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
-    set_flag(PIPE_M, PIPE_MTE2, EVENT_ID0);
-    for (int gqa_head_idx = block_idx; gqa_head_idx < total_task_num; gqa_head_idx += block_num) {
-        uint32_t q_head_idx_start = gqa_head_idx * head_num_in_group;
-        uint32_t kv_head_idx = q_head_idx_start % ctx->num_heads / head_num_in_group;
-        uint32_t token_idx = q_head_idx_start / ctx->num_heads;
-        uint32_t cumM = (uint32_t)*(ctx->cum_prompt_len + token_idx);
-        if (ctx->m_slice > 0 && (cumM >= ctx->m_offset + ctx->m_slice || cumM < ctx->m_offset)) {
-            continue;
-        }
-
-        uint32_t head_offset_len = kv_head_idx * ctx->head_size;
-        decode_mix_pre_copy_in_for_qk(ctx, gqa_head_idx, cumM, token_idx, q_head_idx_start, head_offset_len);
-        decode_mix_compute_qk(ctx, token_idx, head_offset_len, q_head_idx_start);
-
-        if (gqa_head_idx + block_num >= total_task_num) {
-            set_aic_aiv_flag(ctx->a2v_gm, head_num_in_group, q_head_idx_start, ctx->head_size);
-        }
-        wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-    }
-    wait_flag(PIPE_M, PIPE_MTE2, EVENT_ID0);
-    wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-    wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-    wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
-    pipe_barrier(PIPE_ALL);
-}
-
-inline __aicore__ void decode_mix_pre_copy_in_for_pv(decode_att_mix_context *ctx,
-                                                     uint32_t token_idx,
-                                                     uint32_t head_offset_len,
-                                                     uint32_t q_offset)
-{
-    wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
-    __gm__ half *qk_gm_addr = ctx->qk + q_offset * ctx->max_context_len;
-    copy_to_l1_gqa(ctx->cbuf_addr_a, qk_gm_addr, ctx->head_num_in_group, MAX_CONTEXT_BLOCK_LEN, ctx->max_context_len);
-    set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0);
-
-    uint32_t block_table_id = (uint32_t)*(ctx->mapping + token_idx * ctx->mapping_len);
-    __gm__ half *v_gm_addr = ctx->v + block_table_id * ctx->block_mem_size + head_offset_len;
-    copy_to_l1_2d(ctx->cbuf_addr_b[0], v_gm_addr, 0, 0, ctx->block_size, ctx->head_size, ctx->head_size * ctx->num_kv_heads);
-    set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1);
-}
-
-inline __aicore__ void decode_mix_compute_pv(decode_att_mix_context *ctx,
-                                             uint32_t token_idx,
-                                             uint32_t head_offset_len,
-                                             uint32_t q_offset)
-{
-    __gm__ int32_t *block_table_map = ctx->mapping + token_idx * ctx->mapping_len;
-    __gm__ half *qk_gm_addr = ctx->qk + q_offset * ctx->max_context_len;
-
-    uint32_t block_size = ctx->block_size;
-    uint32_t head_size = ctx->head_size;
-    uint32_t context_len = (uint32_t)*(ctx->cached_lens + token_idx) + 1;
-    uint32_t cur_idx_max_context_block = 0;
-    uint32_t max_context_block_len_iter_num = MAX_CONTEXT_BLOCK_LEN / block_size;
-    uint32_t b_tile_factor = block_size / CUBE_BLOCK_SIZE;
-    uint32_t h_tile_factor = head_size / CUBE_BLOCK_SIZE;
-
-    uint32_t curr_idx = 0;
-    uint8_t unit_flag = 2;
-    bool init_val = true;
-
-    int num_iters = DIV_ROUND_UP(context_len, block_size);
-    set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-    for (int iter = 0; iter < num_iters; ++iter) {
-        uint32_t next_idx = 1 - curr_idx;
-        wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-        if (iter + 1 < num_iters) {
-            uint32_t block_table_id = (uint32_t)*(block_table_map + iter + 1);
-            __gm__ half *v_gm_addr = ctx->v + block_table_id * ctx->block_mem_size + head_offset_len;
-            copy_to_l1_2d(ctx->cbuf_addr_b[next_idx], v_gm_addr, 0, 0, block_size, head_size, head_size * ctx->num_kv_heads);
-            set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + next_idx);
-        }
-
-        if (iter == 0) {
-            wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID0);
-        }
-        wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        copy_to_l0a(ctx->ca_addr, ctx->cbuf_addr_a, head_size,
-                    CUBE_BLOCK_SIZE * (iter % max_context_block_len_iter_num) * block_size);
-        set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-        if (iter + 1 < num_iters) {
-            uint32_t next_iter_max_block = (iter + 1) * block_size / MAX_CONTEXT_BLOCK_LEN;
-            if (next_iter_max_block != cur_idx_max_context_block) {
-                cur_idx_max_context_block = next_iter_max_block;
-                wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + next_idx);
-
-                set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-                wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-                copy_to_l1_gqa(ctx->cbuf_addr_a, qk_gm_addr + MAX_CONTEXT_BLOCK_LEN * next_iter_max_block,
-                               ctx->head_num_in_group, MAX_CONTEXT_BLOCK_LEN, ctx->max_context_len);
-                set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + next_idx);
-
-                set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID3);
-                wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID3);
-            }
-        }
-
-        wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID1 + curr_idx);
-        copy_to_l0b_gqa(ctx->cb_addr[curr_idx], ctx->cbuf_addr_b[curr_idx], b_tile_factor, h_tile_factor);
-        set_flag(PIPE_MTE1, PIPE_M, EVENT_ID1);
-        set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-
-        wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-
-        wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID1);
-        if (iter == num_iters - 1) {
-            set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
-            wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-            unit_flag = 3;
-        }
-        mmad(ctx->cc_addr, ctx->ca_addr, ctx->cb_addr[curr_idx],
-             M_TILE_SIZE, head_size, block_size, init_val, unit_flag);
-        set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        init_val = false;
-        curr_idx = 1 - curr_idx;
-    }
-}
-
-inline __aicore__ void decode_mix_process_pv(decode_att_mix_context *ctx)
-{
-    set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-    set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-
-    uint32_t head_num_in_group = ctx->head_num_in_group;
-    uint32_t head_size = ctx->head_size;
-    uint32_t qk_size = MAX_CONTEXT_BLOCK_LEN * sizeof(half) * CUBE_BLOCK_SIZE; // 1,572,864
-    uint32_t v_tile_size = ctx->block_size * head_size * sizeof(half);
-    ctx->cbuf_addr_b[0] = reinterpret_cast<__cbuf__ half*>((uintptr_t)qk_size);
-    ctx->cbuf_addr_b[1] = reinterpret_cast<__cbuf__ half*>((uintptr_t)(qk_size + v_tile_size));
-    ctx->cb_addr[1] = reinterpret_cast<__cb__ half*>((uintptr_t)v_tile_size);
-
-    int total_task_num = ctx->num_tokens * ctx->num_kv_heads;
-    int start_offset = total_task_num % block_num;
-
-    set_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
-    for (int i = block_idx - start_offset; i < total_task_num; i += block_num) {
-        if (i < 0) {
-            continue;
-        }
-        uint32_t kv_head_idx = i % ctx->num_kv_heads;
-        uint32_t token_idx = i / ctx->num_kv_heads;
-        uint32_t real_token_idx = (uint32_t)*(ctx->decode_index + token_idx);
-        uint32_t cumM = (uint32_t)*(ctx->cum_prompt_len + real_token_idx);
-        if (ctx->m_slice > 0 && (cumM >= ctx->m_offset + ctx->m_slice || cumM < ctx->m_offset)) {
-            continue;
-        }
-        uint32_t q_offset = i * head_num_in_group;
-        uint32_t head_offset_len = kv_head_idx * head_size;
-        wait_aic_aiv_flag(ctx->v2a_gm, head_num_in_group, q_offset, head_size);
-
-        decode_mix_pre_copy_in_for_pv(ctx, real_token_idx, head_offset_len, q_offset);
-        decode_mix_compute_pv(ctx, real_token_idx, head_offset_len, q_offset);
-
-        set_flag(PIPE_FIX, PIPE_S, EVENT_ID1);
-        wait_flag(PIPE_FIX, PIPE_S, EVENT_ID1);
-        uint8_t unit_flag = 3;
-        __gm__ half *qkv_gm_addr = ctx->o + cumM * ctx->num_heads * head_size +
-            kv_head_idx * head_num_in_group * head_size;
-        copy_out_to_gm(qkv_gm_addr, ctx->cc_addr, head_size, head_num_in_group, head_size, unit_flag);
-
-        set_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-        wait_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
-        reset_aic_aiv_flag(ctx->v2a_gm, head_num_in_group, q_offset, head_size);
-    }
-    wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID3);
-    wait_flag(PIPE_FIX, PIPE_M, EVENT_ID0);
-    wait_flag(PIPE_MTE1, PIPE_MTE2, EVENT_ID0);
-
-    pipe_barrier(PIPE_ALL);
-}
-
-inline __aicore__ void decode_att_mix_aic(decode_att_mix_context *ctx)
-{
-    if (ctx == NULL) {
-        return;
-    }
-    decode_mix_process_qk(ctx);
-    decode_mix_process_pv(ctx);
-}
+        RunAic();
 #elif __DAV_C220_VEC__
-
-const uint64_t BASE_IN_HIGH_BIT = 1L << 63;
-const uint64_t BASE_IN_LOW_BIT = 1;
-const uint32_t MAX_MASK_BIT = 128;
-const uint32_t DIVIDED_MASK_BIT = 64;
-const uint64_t MASK_ALL = -1;
-const uint64_t MASK_NONE = 0;
-
-inline __aicore__ void set_mask(uint32_t len)
-{
-    if (len == MAX_MASK_BIT) {
-        set_vector_mask(MASK_ALL, MASK_ALL);
-        return;
+        RunAiv();
+#endif
     }
-    uint64_t mask = 0;
-    uint64_t base = BASE_IN_LOW_BIT;
-    uint64_t temp = len % DIVIDED_MASK_BIT;
-    for (int64_t i = 0; i < temp; i++) {
-        mask |= base << i;
+
+private:
+    inline __aicore__ void RunAic()
+    {
+        InitAicBuf();
+
+        RunAicQK();
+        RunAicSV();
     }
-    if (len >= DIVIDED_MASK_BIT) {
-        set_vector_mask(mask, MASK_ALL);
-        return;
-    }
-    set_vector_mask(MASK_NONE, mask);
-}
 
-inline __aicore__ void set_mask_from_highbit(uint32_t len) {
-    if (len == 128) {
-        set_vector_mask(MASK_ALL, MASK_ALL);
-        return;
-    }
-    uint64_t mask = 0;
-    uint64_t base = BASE_IN_HIGH_BIT;
-    uint64_t temp = len % DIVIDED_MASK_BIT;
-    for (int64_t i = 0; i < temp; i++) {
-        mask |= base >> i;
-    }
-    if (len >= DIVIDED_MASK_BIT) {
-        set_vector_mask(MASK_ALL, mask);
-        return;
-    }
-    set_vector_mask(mask, MASK_NONE);
-}
+    inline __aicore__ void InitAicBuf()
+    {
+        uint64_t off = 0;
+        l1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+        l1aBuf.address_.bufferAddr = off;
+        l0aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A2);
+        l0aBuf.address_.bufferAddr = off;
+        l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
+        l0cBuf.address_.bufferAddr = off;
 
-//128 * 4 * sizeof(half) for qk_ub_addr, need 3 * 128 * sizeof(half) for (48 * 1024 - 2 * 128) * sizeof(half) qk_result
-const uint32_t MAX_SUB_CONTEXT_SIZE = (192 * 1024 - 128 * 12 * sizeof(half)) / 2;
-
-inline __aicore__ void decode_att_mix_aiv(decode_att_mix_context *ctx)
-{
-    set_mask_norm();
-    set_vector_mask((uint64_t) -1, (uint64_t) -1);
-
-    auto *qk_reduce_ub_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t) 0);
-    auto *qk_out_ub_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t) MAX_SUB_CONTEXT_SIZE);
-    auto *qk_ub_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t) MAX_SUB_CONTEXT_SIZE * 2);
-    auto *qk_reduce_sum_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t) MAX_SUB_CONTEXT_SIZE * 2 + 128 * 4 * sizeof(half));
-    auto *qk_max_qk_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t) MAX_SUB_CONTEXT_SIZE * 2 + 128 * 8 * sizeof(half));
-
-    int process_num = ctx->num_tokens * ctx->num_heads;
-    int id = get_block_idx() * 2 + get_subblockid();
-    int process = 0;
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-    for (process = id; process < process_num; process += uint32_t(block_num * 2)) {
-        uint32_t token_idx = process / ctx->num_heads;
-
-        uint32_t real_token_idx = (uint32_t)*(ctx->decode_index + token_idx);
-        uint32_t cumM = (uint32_t)*(ctx->cum_prompt_len + real_token_idx);
-        if (ctx->m_slice > 0 && (cumM >= ctx->m_offset + ctx->m_slice || cumM < ctx->m_offset)) {
-            continue;
+        for (uint32_t i = 0; i < PINGPONG_BUF_NUM; i++) {
+            l0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
+            l0bBuf[i].address_.bufferAddr = off;
+            off += blockSize * headSize * sizeof(Dtype);
         }
-        uint32_t context_len = (uint32_t)*(ctx->cached_lens + real_token_idx) + 1;
+    }
 
-        __gm__ half *qk_gm_addr = ctx->qk + process * ctx->max_context_len;
+    inline __aicore__ void RunAicQK()
+    {
+        uint64_t off = headSize * sizeof(Dtype) * CUBE_BLOCK_SIZE;
+        for (uint32_t i = 0; i < PINGPONG_BUF_NUM; ++i) {
+            l1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B1);
+            l1bBuf[i].address_.bufferAddr = off;
+            off += blockSize * headSize * sizeof(Dtype);
+        }
 
-        wait_aic_aiv_flag(ctx->a2v_gm, 1, process, ctx->head_size);
-        
-        uint32_t num_iters = DIV_ROUND_UP(context_len, ctx->block_size);
-        uint32_t max_block_num_iter = MAX_SUB_CONTEXT_SIZE / 256;
-        int sub_block_number = (context_len * sizeof(half) + MAX_SUB_CONTEXT_SIZE - 1) / MAX_SUB_CONTEXT_SIZE;
+        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        SetFlag<HardEvent::M_MTE2>(EVENT_ID0);
+        uint32_t totalTaskNum = nTokens * nKVHeads;
+        uint32_t blockNum = GetBlockNum();
+        for (uint32_t gqaHeadIdx = GetBlockIdx(); gqaHeadIdx < totalTaskNum; gqaHeadIdx += blockNum) {
+            uint32_t qHeadIdxStart = gqaHeadIdx * headNumInGroup;
+            uint32_t kvHeadIdx = qHeadIdxStart % nHeads / headNumInGroup;
+            uint32_t tokenIdx = qHeadIdxStart / nHeads;
+            uint32_t cumM = (uint32_t)*(cumPromptLen + tokenIdx);
+            if (mSlice > 0 && (cumM >= mOffset + mSlice || cumM < mOffset)) {
+                continue;
+            }
+            uint32_t headOffset = kvHeadIdx * headSize;
+            WaitFlag<HardEvent::M_MTE2>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+            CopyGmToL1Nd2Nz(l1aBuf, qGmBuf[(cumM * nQKVHeads + qHeadIdxStart % nHeads) * headSize],
+                            headNumInGroup, headSize, headSize, CUBE_BLOCK_SIZE);
 
+            if (gqaHeadIdx >= blockNum) {
+                SetAicAivFlag(a2v, headNumInGroup, (gqaHeadIdx - blockNum) * headNumInGroup);
+            }
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2);
+
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2);
+            uint32_t blockTableId = (uint32_t)*(mapping + tokenIdx * mappingLen);
+            CopyGmToL1Nd2Nz(l1bBuf[0], kGmBuf[blockTableId * blockMemSize + headOffset],
+                            blockSize, headSize, headSize * nKVHeads, blockSize);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1);
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+            uint8_t repeat = headSize / CUBE_BLOCK_SIZE;
+            LoadData2dParams params(0, repeat, 1, 0, 0, 0, inc);
+            LoadData(l0aBuf, l1aBuf, params);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+
+            ComputeQK(tokenIdx, headOffset, qHeadIdxStart);
+
+            if (gqaHeadIdx + blockNum >= totalTaskNum) {
+                SetAicAivFlag(a2v, headNumInGroup, qHeadIdxStart);
+            }
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        }
+        WaitFlag<HardEvent::M_MTE2>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        PipeBarrier<PIPE_ALL>();
+    }
+
+    inline __aicore__ void ComputeQK(uint32_t tokenIdx, uint32_t headOffset, uint32_t qHeadIdxStart)
+    {
+        WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+        SetFlag<HardEvent::FIX_S>(EVENT_ID1);
+
+        uint32_t contextLen = (uint32_t)*(cachedLens + tokenIdx) + 1;
+        uint32_t numIters = DIV_ROUND_UP(contextLen, blockSize);
+        uint32_t curIdx = 0;
+        for (uint32_t kIdx = 0; kIdx < numIters; kIdx++) {
+            uint32_t nextIdx = 1 - curIdx;
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+            if (kIdx + 1 < numIters) {
+                uint32_t blockTableId = (uint32_t)*(mapping + tokenIdx * mappingLen + kIdx + 1);
+                CopyGmToL1Nd2Nz(l1bBuf[nextIdx], kGmBuf[blockTableId * blockMemSize + headOffset],
+                                blockSize, headSize, nKVHeads * headSize, blockSize);
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + nextIdx);
+            }
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + curIdx);
+            uint32_t cubeSize = 512 / sizeof(Dtype);
+            uint32_t nBlockNum = headSize / CUBE_BLOCK_SIZE;
+            uint32_t kBlockNum = blockSize / CUBE_BLOCK_SIZE;
+            LoadData2dParams params(0, static_cast<uint8_t>(nBlockNum), 1, 0, 0, 0, inc);
+            for (int k = 0; k < kBlockNum; k++) {
+                LoadData(l0bBuf[curIdx][k * nBlockNum * cubeSize], l1bBuf[curIdx][k * nBlockNum * cubeSize], params);
+            }
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID1);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID1);
+            WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+
+            CalMmad(l0cBuf, l0aBuf, l0bBuf[curIdx], CUBE_BLOCK_SIZE, blockSize, headSize, true, 0);
+
+            if (kIdx == numIters - 1) {
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+                SetFlag<HardEvent::M_MTE2>(EVENT_ID0);
+            }
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+            SetFlag<HardEvent::M_FIX>(EVENT_ID1);
+            WaitFlag<HardEvent::M_FIX>(EVENT_ID1);
+
+            WaitFlag<HardEvent::FIX_S>(EVENT_ID1);
+            uint64_t config = 0x1;
+            set_nd_para(config);
+            int nSize = (kIdx + 1) * blockSize > maxContextLen ? contextLen % blockSize : blockSize;
+            CopyToGm(qkGmBuf[qHeadIdxStart * maxContextLen + kIdx * blockSize], l0cBuf,
+                     headNumInGroup, nSize, CUBE_BLOCK_SIZE, maxContextLen);
+            SetFlag<HardEvent::FIX_S>(EVENT_ID1);
+            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+            curIdx = 1 - curIdx;
+        }
+        WaitFlag<HardEvent::FIX_S>(EVENT_ID1);
+    }
+
+
+    inline __aicore__ void RunAicSV()
+    {
+        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+
+        uint32_t off = MAX_CONTEXT_BLOCK_LEN * sizeof(Dtype) * CUBE_BLOCK_SIZE;
+        for (uint32_t i = 0; i < PINGPONG_BUF_NUM; ++i) {
+            l1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B1);
+            l1bBuf[i].address_.bufferAddr = off;
+            off += blockSize * headSize * sizeof(Dtype);
+        }
+
+        int blockNum = static_cast<int>(GetBlockNum());
+        int totalTaskNum = nTokens * nKVHeads;
+        int startOffset = totalTaskNum % blockNum;
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        for (int idx = static_cast<int>(GetBlockIdx()) - startOffset; idx < totalTaskNum; idx += blockNum) {
+            if (idx < 0) {
+                continue;
+            }
+            uint32_t kvHeadIdx = idx % nKVHeads;
+            uint32_t tokenIdx = idx / nKVHeads;
+            uint32_t realTokenIdx = (uint32_t)*(decodeIndex + tokenIdx);
+            uint32_t cumM = (uint32_t)*(cumPromptLen + realTokenIdx);
+            if (mSlice > 0 && (cumM >= mOffset + mSlice || cumM < mOffset)) {
+                continue;
+            }
+            uint32_t qOffset = idx * headNumInGroup;
+            uint32_t headOffset = kvHeadIdx * headSize;
+            WaitAicAivFlag(v2a, headNumInGroup, qOffset);
+
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+            DataCopyParams repeatParams(MAX_CONTEXT_REPEAT_TIMES, 1, 0, 16 - 1);
+            for (uint32_t i = 0; i < headNumInGroup; i++) {
+                DataCopy(l1aBuf[i * CUBE_BLOCK_SIZE], qkGmBuf[(qOffset + i) * maxContextLen], repeatParams);
+            }
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+
+            uint32_t blockTableId = (uint32_t)*(mapping + tokenIdx * mappingLen);
+            CopyGmToL1Nd2Nz(l1bBuf[0], vGmBuf[blockTableId * blockMemSize + headOffset],
+                            blockSize, headSize, nKVHeads * headSize, blockSize);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1);
+
+            ComputeSV(realTokenIdx, headOffset, qOffset);
+
+            SetFlag<HardEvent::FIX_S>(EVENT_ID1);
+            WaitFlag<HardEvent::FIX_S>(EVENT_ID1);
+            CopyToGm(outGmBuf[cumM * nHeads * headSize + kvHeadIdx * headNumInGroup * headSize], l0cBuf,
+                     headNumInGroup, headSize, CUBE_BLOCK_SIZE, headSize, 3);
+
+            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+            ResetAicAivFlag(v2a, headNumInGroup, qOffset);
+        }
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+
+        PipeBarrier<PIPE_ALL>();
+    }
+
+
+    inline __aicore__ void ComputeSV(uint32_t tokenIdx, uint32_t headOffset, uint32_t qOffset)
+    {
+        __gm__ int32_t *blockTableMap = mapping + tokenIdx * mappingLen;
+
+        uint32_t contextLen = (uint32_t)*(cachedLens + tokenIdx) + 1;
+        uint32_t curCtxBlock = 0;
+        uint32_t maxCtxBlockNum = MAX_CONTEXT_BLOCK_LEN / blockSize;
+        uint32_t kTileFactor = blockSize / CUBE_BLOCK_SIZE;
+        uint32_t nTileFactor = headSize / CUBE_BLOCK_SIZE;
+
+        uint32_t curIdx = 0;
+        uint32_t unitFlag = 2;
+        int numIters = DIV_ROUND_UP(contextLen, blockSize);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        for (int iter = 0; iter < numIters; iter++) {
+            uint32_t nextIdx = 1 - curIdx;
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+            if (iter + 1 < numIters) {
+                uint32_t blockTableId = (uint32_t)*(blockTableMap + iter + 1);
+                CopyGmToL1Nd2Nz(l1bBuf[nextIdx], vGmBuf[blockTableId * blockMemSize + headOffset],
+                                blockSize, headSize, nKVHeads * headSize, blockSize);
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + nextIdx);
+            }
+            if (iter == 0) {
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+            }
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+            CopyToL0ACol(l0aBuf, l1aBuf[CUBE_BLOCK_SIZE * (iter % maxCtxBlockNum) * blockSize],
+                         headSize / CUBE_BLOCK_SIZE, 0, 1);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+            if (iter + 1 < numIters) {
+                uint32_t nextCtxBlock = (iter + 1) * blockSize / MAX_CONTEXT_BLOCK_LEN;
+                if (nextCtxBlock != curCtxBlock) {
+                    curCtxBlock = nextCtxBlock;
+                    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + nextIdx);
+
+                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+                    WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+                    DataCopyParams repeatParams(MAX_CONTEXT_REPEAT_TIMES, 1, 0, 16 - 1);
+                    uint32_t qkOffset = qOffset * maxContextLen + MAX_CONTEXT_BLOCK_LEN * nextCtxBlock;
+                    for (int i = 0; i < headNumInGroup; i++) {
+                        DataCopy(l1aBuf[i * CUBE_BLOCK_SIZE], qkGmBuf[qkOffset + i * maxContextLen], repeatParams);
+                    }
+                    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + nextIdx);
+
+                    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID3);
+                    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID3);
+                }
+            }
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + curIdx);
+            CopyToL0BTCol(l0bBuf[curIdx], l1bBuf[curIdx], nTileFactor, 0, kTileFactor);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID1);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID1);
+            if (iter == numIters - 1) {
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+                WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+                unitFlag = 3;
+            }
+            int kSize = (iter + 1) * blockSize > maxContextLen ? contextLen % blockSize : blockSize;
+            CalMmad(l0cBuf, l0aBuf, l0bBuf[curIdx], CUBE_BLOCK_SIZE, headSize, kSize, iter == 0, unitFlag);
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+            curIdx = 1 - curIdx;
+        }
+    }
+
+#ifdef __DAV_C220_VEC__
+    inline __aicore__ void RunAiv()
+    {
+        set_mask_norm();
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+
+        PrepareAivCalcData();
+
+        uint32_t processNum = nTokens * nHeads;
+        uint32_t aivBlockNum = block_num * 2;
+        uint32_t id = get_block_idx() * 2 + get_subblockid();
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+        for (uint32_t process = id; process < processNum; process += aivBlockNum) {
+            uint32_t tokenIdx = process / nHeads;
+            uint32_t realTokenIdx = (uint32_t)*(decodeIndex + tokenIdx);
+            uint32_t cumM = (uint32_t)*(cumPromptLen + realTokenIdx);
+            if (mSlice > 0 && (cumM >= mOffset + mSlice || cumM < mOffset)) {
+                continue;
+            }
+            __gm__ Dtype *qk = (__gm__ Dtype*)qkGmBuf.GetPhyAddr() + process * maxContextLen;
+            uint32_t contextLen = (uint32_t)*(cachedLens + realTokenIdx) + 1;
+            uint32_t numIters = DIV_ROUND_UP(contextLen, calcPad);
+            uint32_t subBlockNum = DIV_ROUND_UP(contextLen*sizeof(Dtype), maxSubCtxSize);
+
+            WaitAicAivFlag(a2v, 1, process);
+
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+
+            int maxQKFlag[4] = {0, 0, 0, 0};
+            vector_dup(maxQK, calcMin, 4, 1, 1, 8, 0);
+            vector_dup(reduceSum, CalcDtype(0), 4, 1, 1, 8, 0);
+            pipe_barrier(PIPE_V);
+
+            // max_qk and sum(exp(qk_i-qk_max))
+            CalcIntermediateData(qk, maxQKFlag, subBlockNum, numIters, contextLen);
+
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
+
+            // exp(qk_i-qk_max) / sum(exp(qk_i-qk_max))
+            CalcSoftMax(qk, maxQKFlag, subBlockNum, numIters, contextLen);
+
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+
+            ResetAicAivFlag(a2v, 1, process);
+            SetAicAivFlag(v2a, 1, process);
+        }
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+        pipe_barrier(PIPE_ALL);
+    }
+
+    inline __aicore__ void PrepareAivCalcData()
+    {
+        if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+            maxSubCtxSize = (MAX_UB_SIZE - 3 * QK_RESULT_TEMP_SIZE) / 2;
+        } else {
+            maxSubCtxSize = (MAX_UB_SIZE - 3 * QK_RESULT_TEMP_SIZE) / 4;
+        }
+        uint64_t off = 0;
+        in = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
+        off += maxSubCtxSize;
+        out = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
+        off += maxSubCtxSize;
+        qkTemp = reinterpret_cast<__ubuf__ CalcDtype*>((uintptr_t)off);
+        off += QK_RESULT_TEMP_SIZE;
+        reduceSum = reinterpret_cast<__ubuf__ CalcDtype*>((uintptr_t)off);
+        off += QK_RESULT_TEMP_SIZE;
+        maxQK = reinterpret_cast<__ubuf__ CalcDtype*>((uintptr_t)off);
+        if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+            calc = in;
+            calcMin = Dtype(-65504);
+        } else {
+            off += QK_RESULT_TEMP_SIZE;
+            calc = reinterpret_cast<__ubuf__ CalcDtype*>((uintptr_t)off);
+            calcMin = CalcDtype(-3.40282353e+38);
+        }
+
+        calcPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
+        srcPad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+        maxSubBlockIter = maxSubCtxSize / VECTOR_MAX_BYTESIZE;
+        maxSubCtxLen = maxSubCtxSize / sizeof(Dtype);
+    }
+
+    inline __aicore__ void CalcIntermediateData(__gm__ Dtype *qk, int *maxQKFlag,
+                                               uint32_t subBlockNum, uint32_t numIters, uint32_t contextLen)
+    {
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-        __ubuf__ half *max_qk[4] = {qk_max_qk_addr, qk_max_qk_addr + 128, qk_max_qk_addr + 256, qk_max_qk_addr + 384}; // 0~2 for sub_block`max_qk 3 for whole`max_qk
-        int max_qk_flag[4] = {0, 0, 0, 0};
-        __ubuf__ half *reduce_sum[4] = {qk_reduce_sum_addr, qk_reduce_sum_addr + 128, qk_reduce_sum_addr + 256, qk_reduce_sum_addr + 384};
-        vector_dup(qk_max_qk_addr, half(-65504), 4, 1, 1, 8, 0);
-        vector_dup(qk_reduce_sum_addr, half(0), 4, 1, 1, 8, 0);
-        pipe_barrier(PIPE_V);
-        for (int sub_block = 0; sub_block < sub_block_number; sub_block++) {
-            uint32_t cur_iter_idx = sub_block * max_block_num_iter;
-            uint32_t cur_num_iters = (sub_block < sub_block_number - 1) ? max_block_num_iter : (num_iters - cur_iter_idx);
-            uint32_t cur_qk_context_len = (sub_block < sub_block_number - 1) ? max_block_num_iter * 128 : (context_len - cur_iter_idx * 128);
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+        for (int subBlock = 0; subBlock < subBlockNum; subBlock++) {
+            uint32_t curIter = subBlock * maxSubBlockIter;
+            uint32_t qkOffsetLen = subBlock * maxSubCtxLen;
+            uint32_t repeat = (subBlock < subBlockNum - 1) ? maxSubBlockIter : (numIters - curIter);
+            uint32_t curCtxLen = (subBlock < subBlockNum - 1) ? maxSubCtxLen : (contextLen - qkOffsetLen);
 
-            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-            vector_dup(qk_reduce_ub_addr, half(-65504), 255, 1, 1, 8, 0);
-            vector_dup(qk_reduce_ub_addr + 255 * 128, half(-65504), max_block_num_iter - 255, 1, 1, 8, 0);
-            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
-            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0); // 只用了一半空间，也许可以做pingpong
-            copy_gm_to_ubuf_align_b16(qk_reduce_ub_addr, qk_gm_addr + cur_iter_idx * 128, 0, 1, cur_qk_context_len * 2, 0, 0, 0, 0);
+            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+            copy_gm_to_ubuf(in, qk + qkOffsetLen, 0, 1,
+                            DIV_ROUND_UP(curCtxLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-
+            if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+            } else {
+                vconv_bf162f32(calc, in, repeat, 1, 1, 8, 4);
+                pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+            }
             // 将多拷贝进来的数据进行置位
-            uint32_t start = cur_qk_context_len * sizeof(half) / 32 * 32;
-            uint32_t rest = cur_qk_context_len * sizeof(half) % 32 / sizeof(half);
-            if (rest) {
-                set_mask_from_highbit(128 - rest);
-                vector_dup(qk_reduce_ub_addr + start / sizeof(half), half(-65504), 1, 1, 1, 8, 0);
-                set_vector_mask((uint64_t) -1, (uint64_t) -1);
-                pipe_barrier(PIPE_V);
-            }
+            SetPaddedCtxValue(calc, curCtxLen, calcPad, calcMin);
 
-            // max = MAX(QK)
-            if (cur_num_iters <= 255) {
-                vcmax(qk_ub_addr, qk_reduce_ub_addr, cur_num_iters, 1, 1, 8, ONLY_VALUE);
-                pipe_barrier(PIPE_V);
-                if (cur_num_iters <= 128) {
-                    set_mask(cur_num_iters);
-                    vcmax(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, ONLY_VALUE);
-                    set_vector_mask((uint64_t) -1, (uint64_t) -1);
-                    pipe_barrier(PIPE_V);
-                } else {
-                    set_mask_from_highbit(256 - cur_num_iters);
-                    vector_dup(qk_ub_addr + 128, half(-65504), 1, 1, 1, 8, 0);
-                    set_vector_mask((uint64_t) -1, (uint64_t) -1);
-                    pipe_barrier(PIPE_V);
-                    vcmax(qk_ub_addr, qk_ub_addr, 2, 1, 1, 8, ONLY_VALUE);
-                    pipe_barrier(PIPE_V);
-                    set_mask(2);
-                    vcmax(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, ONLY_VALUE);
-                    pipe_barrier(PIPE_V);
-                    set_vector_mask((uint64_t) -1, (uint64_t) -1);
-                }
-            } else {
-                vcmax(qk_ub_addr, qk_reduce_ub_addr, 128, 1, 1, 8, ONLY_VALUE);
-                vcmax(qk_ub_addr + 128, qk_reduce_ub_addr + 128 * 128, cur_num_iters - 128, 1, 1, 8, ONLY_VALUE);
-                pipe_barrier(PIPE_V);
-
-                set_mask_from_highbit(384 - cur_num_iters);
-                vector_dup(qk_ub_addr + 256, half(-65504), 1, 1, 1, 8, 0);
-                set_vector_mask((uint64_t) -1, (uint64_t) -1);
-                pipe_barrier(PIPE_V);
-                vcmax(qk_ub_addr, qk_ub_addr, 3, 1, 1, 8, ONLY_VALUE);
-                pipe_barrier(PIPE_V);
-                set_mask(3);
-                vcmax(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, ONLY_VALUE);
-                pipe_barrier(PIPE_V);
-                set_vector_mask((uint64_t) -1, (uint64_t) -1);
-            }
-            vbrcb((__ubuf__ uint16_t *) qk_ub_addr, (__ubuf__ uint16_t *) qk_ub_addr, 1, 8, 1);
-            pipe_barrier(PIPE_V);
-
+            // 计算当前分块的max_qk
+            CalcReduceMax(repeat, curCtxLen);
             set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+            // 获取当前计算和预存的max_qk
             wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
-            float tmp_1 = (float)*qk_ub_addr;
-            float tmp_2 = (float)*max_qk[3];
-            if (tmp_1 > tmp_2) {
-                for (int max_qk_idx = 0; max_qk_idx < sub_block; max_qk_idx++) {
-                    max_qk_flag[max_qk_idx] = 1;
-                }
-                copy_ubuf_to_ubuf(max_qk[3], qk_ub_addr, 0, 1, 8, 1, 1);
-                pipe_barrier(PIPE_V);
-            }
-            copy_ubuf_to_ubuf(max_qk[sub_block], max_qk[3], 0, 1, 8, 1, 1);
-            copy_ubuf_to_ubuf(qk_ub_addr, max_qk[3], 0, 1, 8, 1, 1);
-            pipe_barrier(PIPE_V);
+            float curMaxQK = (float)*qkTemp;
+            float prevMaxQK = (float)*(maxQK + 3 * calcPad);
+            // 更新总的max_qk
+            UpdateReduceMax(subBlock, maxQKFlag, curMaxQK, prevMaxQK);
+            // 计算当前分块的sum(exp(qk_i - max_qk))
+            CalcReduceSum(repeat, curCtxLen);
+            // 更新总的sum
+            UpdateReduceSum(subBlock, curMaxQK, prevMaxQK);
 
-            if (cur_num_iters <= 255) {
-                vsub(qk_reduce_ub_addr, qk_reduce_ub_addr, qk_ub_addr, cur_num_iters, 1, 1, 0, 8, 8, 0);
-                pipe_barrier(PIPE_V);
-                vexp(qk_reduce_ub_addr, qk_reduce_ub_addr, cur_num_iters, 1, 1, 8, 8);
-                pipe_barrier(PIPE_V);
-
-                // s = reduce_sum(EXP)
-                vcadd(qk_ub_addr, qk_reduce_ub_addr, cur_num_iters, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
-                if (cur_num_iters <= 128) {
-                    set_mask(cur_num_iters); // 可以支持到128*128 = 16K
-                    vcadd(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, 0);
-                    set_vector_mask((uint64_t) -1, (uint64_t) -1);
-                    pipe_barrier(PIPE_V);
-                } else {
-                    set_mask_from_highbit(256 - cur_num_iters);
-                    vector_dup(qk_ub_addr + 128, half(0), 1, 1, 1, 8, 0);
-                    set_vector_mask(MASK_ALL, MASK_ALL);
-                    pipe_barrier(PIPE_V);
-                    vcadd(qk_ub_addr, qk_ub_addr, 2, 1, 1, 8, 0);
-                    pipe_barrier(PIPE_V);
-                    set_mask(2);
-                    vcadd(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, 0);
-                    pipe_barrier(PIPE_V);
-                    set_vector_mask(MASK_ALL, MASK_ALL);
-                }
+            if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
             } else {
-                vsub(qk_reduce_ub_addr, qk_reduce_ub_addr, qk_ub_addr, 255, 1, 1, 0, 8, 8, 0); // 与上面不同，因为上面ub+255不对齐
-                vsub(qk_reduce_ub_addr + 255 * 128, qk_reduce_ub_addr + 255 * 128, qk_ub_addr, cur_num_iters - 255, 1, 1, 0, 8, 8, 0);
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+                vconv_f322bf16r(in, calc, repeat, 1, 1, 4, 8);
                 pipe_barrier(PIPE_V);
-                vexp(qk_reduce_ub_addr, qk_reduce_ub_addr, 255, 1, 1, 8, 8);
-                vexp(qk_reduce_ub_addr + 255 * 128, qk_reduce_ub_addr + 255 * 128, cur_num_iters - 255, 1, 1, 8, 8);
-                pipe_barrier(PIPE_V);
-
-                // s = reduce_sum(EXP);
-                vcadd(qk_ub_addr, qk_reduce_ub_addr, 128, 1, 1, 8, 0);
-                vcadd(qk_ub_addr + 128, qk_reduce_ub_addr + 128 * 128, cur_num_iters - 128, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
-
-                set_mask_from_highbit(384 - cur_num_iters);
-                vector_dup(qk_ub_addr + 256, half(0), 1, 1, 1, 8, 0);
-                set_vector_mask(MASK_ALL, MASK_ALL);
-                pipe_barrier(PIPE_V);
-                vcadd(qk_ub_addr, qk_ub_addr, 3, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
-                set_mask(3);
-                vcadd(qk_ub_addr, qk_ub_addr, 1, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
-                set_vector_mask(MASK_ALL, MASK_ALL);
             }
-
-            vbrcb((__ubuf__ uint16_t *) qk_ub_addr, (__ubuf__ uint16_t *) qk_ub_addr, 1, 8, 1);
-            pipe_barrier(PIPE_V);
-            // update reduce_sum
-            if (sub_block) {
-                if (tmp_1 > tmp_2) {
-                    vsub(qk_ub_addr + 128 * 3, max_qk[sub_block - 1], max_qk[sub_block], 1, 1, 1, 1, 8, 8, 1);
-                    pipe_barrier(PIPE_V);
-                    vexp(qk_ub_addr + 128 * 3, qk_ub_addr + 128 * 3, 1, 1, 1, 8, 8);
-                    pipe_barrier(PIPE_V);
-                    vmul(qk_ub_addr + 128 * 3, qk_ub_addr + 128 * 3, reduce_sum[sub_block - 1], 1, 1, 1, 1, 8, 8, 8);
-                    pipe_barrier(PIPE_V);
-                    vadd(qk_ub_addr, qk_ub_addr, qk_ub_addr + 128 * 3, 1, 1, 1, 1, 8, 8, 8);
-                    pipe_barrier(PIPE_V);
-                } else {
-                    vadd(qk_ub_addr, qk_ub_addr, reduce_sum[sub_block - 1], 1, 1, 1, 1, 8, 8, 8);
-                    pipe_barrier(PIPE_V);
-                }
-            }
-            copy_ubuf_to_ubuf(reduce_sum[sub_block], qk_ub_addr, 0, 1, 8, 1, 1);
-            copy_ubuf_to_ubuf(reduce_sum[3], qk_ub_addr, 0, 1, 8, 1, 1);
-            pipe_barrier(PIPE_V);
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            copy_ubuf_to_gm((qk_gm_addr + cur_iter_idx * 128), qk_reduce_ub_addr, 0, 1, 8 * cur_num_iters, 0, 0);
+            copy_ubuf_to_gm(qk + qkOffsetLen, in, 0, 1,
+                            DIV_ROUND_UP(curCtxLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         }
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
+    }
 
-        for (int sub_block = 0; sub_block < sub_block_number; sub_block++) {
-            int cur_iter_idx = sub_block * max_block_num_iter;
-            uint32_t cur_num_iters = (sub_block < sub_block_number - 1) ? max_block_num_iter : (num_iters - cur_iter_idx);
-            uint32_t cur_qk_context_len = (sub_block < sub_block_number - 1) ? max_block_num_iter * 128 : (context_len - cur_iter_idx * 128);
+    inline __aicore__ void CalcReduceMax(uint32_t count, uint32_t ctxLen)
+    {
+        if (count <= MAX_REPEAT_TIMES) {
+            ReduceMax(qkTemp, calc, ctxLen);
+            BrcbQKTemp();
+            return;
+        }
+        vcmax(qkTemp, calc, MAX_REPEAT_TIMES, 1, 1, 8, ONLY_VALUE);
+        vcmax(qkTemp + MAX_REPEAT_TIMES, calc + MAX_REPEAT_TIMES * calcPad, count - MAX_REPEAT_TIMES, 1, 1, 8, ONLY_VALUE);
+        pipe_barrier(PIPE_V);
 
-            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
-            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
-            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-            copy_gm_to_ubuf_align_b16(qk_reduce_ub_addr, qk_gm_addr + cur_iter_idx * 128, 0, 1, cur_qk_context_len * 2, 0, 0, 0, 0);
-            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        ReduceMax(qkTemp, qkTemp, count);
+        BrcbQKTemp();
+    }
 
-            uint32_t start = ROUND_DOWN(cur_qk_context_len, VECTOR_MAX_NUM_OF_FP16);
-            uint32_t rest = cur_qk_context_len % VECTOR_MAX_NUM_OF_FP16;
-            if (rest > 0) {
-                set_mask_from_highbit(VECTOR_MAX_NUM_OF_FP16 - rest);
-                vector_dup(qk_reduce_ub_addr + start, half(0), 1, 1, 1, 8, 0);
-                set_vector_mask(MASK_ALL, MASK_ALL);
-                pipe_barrier(PIPE_V);
+    inline __aicore__ void UpdateReduceMax(uint32_t subBlock, int *maxQKFlag, float curMaxQK, float prevMaxQK)
+    {
+        if (curMaxQK > prevMaxQK) {
+            for (int i = 0; i < subBlock; i++) {
+                maxQKFlag[i] = 1;
             }
-
-            if (max_qk_flag[sub_block]) {
-                vsub(qk_ub_addr + 128 * 3, max_qk[sub_block], max_qk[3], 1, 1, 1, 1, 8, 8, 1);
-                pipe_barrier(PIPE_V);
-                vexp(qk_ub_addr + 128 * 3, qk_ub_addr + 128 * 3, 1, 1, 1, 8, 8);
-                pipe_barrier(PIPE_V);
-                if (cur_num_iters <= 255) {
-                    vmul(qk_reduce_ub_addr, qk_reduce_ub_addr, qk_ub_addr + 3 * 128, cur_num_iters, 1, 1, 0, 8, 8, 0);
-                    pipe_barrier(PIPE_V);
-                } else {
-                    vmul(qk_reduce_ub_addr, qk_reduce_ub_addr, qk_ub_addr + 3 * 128, 255, 1, 1, 0, 8, 8, 0);
-                    vmul(qk_reduce_ub_addr + 255 * 128, qk_reduce_ub_addr + 255 * 128, qk_ub_addr + 3 * 128, cur_num_iters - 255, 1, 1, 0, 8, 8, 0);
-                    pipe_barrier(PIPE_V);
-                }
-            }
-            if (cur_num_iters <= 255) {
-                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-                vdiv(qk_out_ub_addr, qk_reduce_ub_addr, reduce_sum[3], cur_num_iters, 1, 1, 0, 8, 8, 0);
-            } else {
-                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-                vdiv(qk_out_ub_addr, qk_reduce_ub_addr, reduce_sum[3], 255, 1, 1, 0, 8, 8, 0);
-                vdiv(qk_out_ub_addr + 255 * 128, qk_reduce_ub_addr + 255 * 128, reduce_sum[3], cur_num_iters - 255, 1, 1, 0, 8, 8, 0);
-            }
+            copy_ubuf_to_ubuf(maxQK + 3 * calcPad, qkTemp, 0, 1, 8, 1, 1);
             pipe_barrier(PIPE_V);
-            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+        }
+        copy_ubuf_to_ubuf(maxQK + subBlock * calcPad, maxQK + 3 * calcPad, 0, 1, 8, 1, 1);
+        copy_ubuf_to_ubuf(qkTemp, maxQK + 3 * calcPad, 0, 1, 8, 1, 1);
+        pipe_barrier(PIPE_V);
+    }
 
-            if (rest > 0) {
-                set_mask_from_highbit(VECTOR_MAX_NUM_OF_FP16 - rest);
-                vector_dup(qk_out_ub_addr + start, half(0), 1, 1, 1, 8, 0);
-                set_vector_mask(MASK_ALL, MASK_ALL);
+    inline __aicore__ void CalcReduceSum(uint32_t count, uint32_t ctxLen)
+    {
+        uint32_t taskNum = DIV_ROUND_UP(count, MAX_REPEAT_TIMES);
+        for (uint32_t i = 0; i < taskNum; ++i) {
+            uint32_t repeat = (i != taskNum - 1) ? MAX_REPEAT_TIMES : count % MAX_REPEAT_TIMES;
+            uint32_t offset = i * MAX_REPEAT_TIMES * calcPad;
+            vsub(calc + offset, calc + offset, qkTemp, repeat, 1, 1, 0, 8, 8, 0);
+        }
+        pipe_barrier(PIPE_V);
+
+        for (uint32_t i = 0; i < taskNum; ++i) {
+            uint32_t repeat = (i != taskNum - 1) ? MAX_REPEAT_TIMES : count % MAX_REPEAT_TIMES;
+            uint32_t offset = i * MAX_REPEAT_TIMES * calcPad;
+            vexp(calc + offset, calc + offset, repeat, 1, 1, 8, 8);
+        }
+        pipe_barrier(PIPE_V);
+        if (count <= MAX_REPEAT_TIMES) {
+            ReduceSum(qkTemp, calc, ctxLen);
+            BrcbQKTemp();
+            return;
+        }
+        vcadd(qkTemp, calc, MAX_REPEAT_TIMES, 1, 1, 8, 0);
+        vcadd(qkTemp + MAX_REPEAT_TIMES, calc + MAX_REPEAT_TIMES * calcPad, count - MAX_REPEAT_TIMES, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+
+        ReduceSum(qkTemp, calc, count);
+        BrcbQKTemp();
+    }
+
+    inline __aicore__ void UpdateReduceSum(uint32_t subBlock, float curMaxQK, float prevMaxQK)
+    {
+        if (subBlock == 0) {
+            copy_ubuf_to_ubuf(reduceSum + subBlock * calcPad, qkTemp, 0, 1, 8, 1, 1);
+            copy_ubuf_to_ubuf(reduceSum + 3 * calcPad, qkTemp, 0, 1, 8, 1, 1);
+            pipe_barrier(PIPE_V);
+            return;
+        }
+        __ubuf__ CalcDtype *prevReduceSum = reduceSum + (subBlock - 1) * calcPad;
+        if (curMaxQK > prevMaxQK) {
+            __ubuf__ CalcDtype *calcTemp = qkTemp + 3 * calcPad;
+            vsub(calcTemp, maxQK + (subBlock - 1) * calcPad, maxQK + subBlock * calcPad, 1, 1, 1, 1, 8, 8, 1);
+            pipe_barrier(PIPE_V);
+            vexp(calcTemp, calcTemp, 1, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+            vmul(calcTemp, calcTemp, prevReduceSum, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vadd(qkTemp, qkTemp, calcTemp, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+        } else {
+            vadd(qkTemp, qkTemp, prevReduceSum, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+        copy_ubuf_to_ubuf(reduceSum + subBlock * calcPad, qkTemp, 0, 1, 8, 1, 1);
+        copy_ubuf_to_ubuf(reduceSum + 3 * calcPad, qkTemp, 0, 1, 8, 1, 1);
+        pipe_barrier(PIPE_V);
+    }
+
+    inline __aicore__ void CalcSoftMax(__gm__ Dtype *qk, int *maxQKFlag,
+                                       uint32_t subBlockNum, uint32_t numIters, uint32_t contextLen)
+    {
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+        for (int subBlock = 0; subBlock < subBlockNum; subBlock++) {
+            uint32_t curIter = subBlock * maxSubBlockIter;
+            uint32_t qkOffsetLen = subBlock * maxSubCtxLen;
+            uint32_t repeat = (subBlock < subBlockNum - 1) ? maxSubBlockIter : (numIters - curIter);
+            uint32_t curCtxLen = (subBlock < subBlockNum - 1) ? maxSubCtxLen : (contextLen - qkOffsetLen);
+
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            copy_gm_to_ubuf(in, qk + qkOffsetLen, 0, 1,
+                            DIV_ROUND_UP(curCtxLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            if constexpr (!std::is_same_v<CalcDtype, Dtype>) {
+                vconv_bf162f32(calc, in, repeat, 1, 1, 8, 4);
+                pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            }
+
+            SetPaddedCtxValue(calc, curCtxLen, calcPad, static_cast<CalcDtype>(0));
+
+            if (maxQKFlag[subBlock]) {
+                UpdateExpQK(subBlock, calcPad, repeat);
+            }
+
+            if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+                CalcDiv(out, calcPad, repeat);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            } else {
+                CalcDiv(calc, calcPad, repeat);
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+                vconv_f322bf16r(out, calc, repeat, 1, 1, 4, 8);
                 pipe_barrier(PIPE_V);
             }
+            // 尾部填0避免产生脏数据
+            SetPaddedCtxValue(out, curCtxLen, srcPad, static_cast<Dtype>(0));
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
 
-            copy_ubuf_to_gm((qk_gm_addr + cur_iter_idx * 128), qk_out_ub_addr, 0, 1, 8 * cur_num_iters, 0, 0);
+            uint32_t outLen = ROUND_UP(curCtxLen, srcPad);
+            outLen = MIN(outLen, maxContextLen);
+            copy_ubuf_to_gm(qk + qkOffsetLen, out, 0, 1, outLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
         }
         pipe_barrier(PIPE_ALL); // 此处的PIPE_ALL必须要，是用于核间同步的，保证结果写入到GM，如果用硬件同步可能可以去掉
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-
-        reset_aic_aiv_flag(ctx->a2v_gm, 1, process, ctx->head_size);
-        set_aic_aiv_flag(ctx->v2a_gm, 1, process, ctx->head_size);
-
     }
-    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-    pipe_barrier(PIPE_ALL);
-}
 
+    inline __aicore__ void UpdateExpQK(uint32_t subBlock, uint32_t pad, uint32_t count)
+    {
+        __ubuf__ CalcDtype *calcTemp = qkTemp + 3 * pad;
 
+        vsub(calcTemp, maxQK + subBlock * pad, maxQK + 3 * pad, 1, 1, 1, 1, 8, 8, 1);
+        pipe_barrier(PIPE_V);
 
+        vexp(calcTemp, calcTemp, 1, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        uint32_t taskNum = DIV_ROUND_UP(count, MAX_REPEAT_TIMES);
+        for (uint32_t i = 0; i < taskNum; ++i) {
+            uint32_t repeat = (i != taskNum - 1) ? MAX_REPEAT_TIMES : count % MAX_REPEAT_TIMES;
+            uint32_t offset = i * MAX_REPEAT_TIMES * pad;
+            vmul(calc + offset, calc + offset, calcTemp, repeat, 1, 1, 0, 8, 8, 0);
+        }
+    }
+
+    inline __aicore__ void CalcDiv(__ubuf__ CalcDtype *dst, uint32_t pad, uint32_t count)
+    {
+        __ubuf__ CalcDtype *sum = reduceSum + 3 * pad;
+        uint32_t taskNum = DIV_ROUND_UP(count, MAX_REPEAT_TIMES);
+        for (uint32_t i = 0; i < taskNum; ++i) {
+            uint32_t repeat = (i != taskNum - 1) ? MAX_REPEAT_TIMES : count % MAX_REPEAT_TIMES;
+            uint32_t offset = i * MAX_REPEAT_TIMES * pad;
+            vdiv(dst + offset, calc + offset, sum, repeat, 1, 1, 0, 8, 8, 0);
+        }
+        pipe_barrier(PIPE_V);
+    }
+
+    template<typename PaddedDtype>
+    inline __aicore__ void SetPaddedCtxValue(__ubuf__ PaddedDtype *dst, int32_t ctxLen, int32_t pad, PaddedDtype value)
+    {
+        int32_t rest = ctxLen % pad;
+        if (rest > 0) {
+            SetMaskFromHighBit(pad, pad - rest);
+            vector_dup(dst + ROUND_DOWN(ctxLen, pad), value, 1, 1, 1, 8, 0);
+            pipe_barrier(PIPE_V);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
+    }
+
+    inline __aicore__ void BrcbQKTemp()
+    {
+        // 把maxQK/sum填充满32KB，用于计算
+        if constexpr (std::is_same_v<CalcDtype, half>) {
+            vbrcb((__ubuf__ uint16_t*)qkTemp, (__ubuf__ uint16_t*)qkTemp, 0, 0, 1);
+        } else {
+            vbrcb((__ubuf__ uint32_t*)qkTemp, (__ubuf__ uint32_t*)qkTemp, 0, 0, 1);
+        }
+        pipe_barrier(PIPE_V);
+    }
 #endif
 
-extern "C" __global__ __aicore__ void decode_att(__gm__ uint8_t* a2v, __gm__ uint8_t* v2a,
-                                                 __gm__ uint8_t* q, __gm__ uint8_t* k, __gm__ uint8_t* v,
-                                                 __gm__ uint8_t* cached_lens, __gm__ uint8_t* mapping,
-                                                 __gm__ uint8_t* qk, __gm__ uint8_t* o,
-                                                 __gm__ uint8_t* decode_index, __gm__ uint8_t* cum_prompt_len,
-                                                 uint32_t num_tokens, uint32_t num_heads, uint32_t head_size,
-                                                 uint32_t block_size, uint32_t mapping_len, uint32_t num_kv_heads,
-                                                 uint32_t max_context_len, uint32_t num_qkv_heads, uint32_t m_offset,
-                                                 uint32_t m_slice)
-{
-    decode_att_mix_context ctx{};
-    init_decode_att_mix_context(&ctx, a2v, v2a, q, k, v, cached_lens, mapping, qk,
-                                o, decode_index, cum_prompt_len, num_tokens, num_heads, head_size,
-                                block_size, mapping_len, num_kv_heads, max_context_len, num_qkv_heads,
-                                m_offset, m_slice);
-#ifdef __DAV_C220_CUBE__
-    decode_att_mix_aic(&ctx);
-#elif __DAV_C220_VEC__
-    decode_att_mix_aiv(&ctx);
+private:
+    inline __aicore__ void DataCacheCleanAndInvalid(__gm__ void *__restrict__ gm)
+    {
+        __asm__ __volatile__("");
+        dcci(gm, 0 /*SINGLE_CACHE_LINE*/);
+        __asm__ __volatile__("");
+    }
+
+    inline __aicore__ void WaitAicAivFlag(__gm__ uint32_t *flagGm, uint32_t headNum, uint32_t qOffset)
+    {
+        for (int subIdx = 0; subIdx < headNum; subIdx++) {
+            uint32_t headIdx = qOffset + subIdx;
+            __gm__ uint32_t *currAddr = flagGm + headIdx * headSize;
+            DataCacheCleanAndInvalid(currAddr);
+            uint32_t flag = *currAddr;
+            while (flag != headIdx + 1) {
+                DataCacheCleanAndInvalid(currAddr);
+                flag = *currAddr;
+            }
+        }
+    }
+
+    inline __aicore__ void SetAicAivFlag(__gm__ uint32_t *flagGm, uint32_t headNum, uint32_t qOffset)
+    {
+        for (int subIdx = 0; subIdx < headNum; subIdx++) {
+            uint32_t headIdx = qOffset + subIdx;
+            __gm__ uint32_t *currAddr = flagGm + headIdx * headSize;
+            *currAddr = headIdx + 1;
+            DataCacheCleanAndInvalid(currAddr);
+        }
+    }
+
+    inline __aicore__ void ResetAicAivFlag(__gm__ uint32_t *flagGm, uint32_t headNum, uint32_t qOffset)
+    {
+        for (int subIdx = 0; subIdx < headNum; subIdx++) {
+            uint32_t headIdx = qOffset + subIdx;
+            __gm__ uint32_t *currAddr = flagGm + headIdx * headSize;
+            *currAddr = 0;
+            DataCacheCleanAndInvalid(currAddr);
+        }
+    }
+
+private:
+    GlobalTensor<Dtype> qGmBuf;
+    GlobalTensor<Dtype> kGmBuf;
+    GlobalTensor<Dtype> vGmBuf;
+    GlobalTensor<Dtype> qkGmBuf;
+    GlobalTensor<Dtype> outGmBuf;
+    __gm__ uint32_t *v2a;
+    __gm__ uint32_t *a2v;
+    __gm__ int32_t *cumPromptLen;
+    __gm__ int32_t *mapping;
+    __gm__ int32_t *decodeIndex;
+    __gm__ int32_t *cachedLens;
+
+    uint32_t headSize;
+    uint32_t nHeads;
+    uint32_t nTokens;
+    uint32_t nKVHeads;
+    uint32_t blockSize;
+    uint32_t mappingLen;
+    uint32_t maxContextLen;
+    uint32_t nQKVHeads;
+    uint32_t mOffset;
+    uint32_t mSlice;
+    uint32_t headNumInGroup;
+    uint32_t blockMemSize;
+
+private:
+    LocalTensor<Dtype> l1aBuf;
+    LocalTensor<Dtype> l1bBuf[PINGPONG_BUF_NUM];
+    LocalTensor<Dtype> l0aBuf;
+    LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];
+    LocalTensor<float> l0cBuf;
+#ifdef __DAV_C220_VEC__
+    __ubuf__ Dtype *in;
+    __ubuf__ Dtype *out;
+    __ubuf__ CalcDtype *qkTemp;
+    __ubuf__ CalcDtype *reduceSum;
+    __ubuf__ CalcDtype *maxQK;
+    __ubuf__ CalcDtype *calc;
+
+    uint32_t maxSubCtxSize;
+    uint32_t maxSubBlockIter;
+    uint32_t maxSubCtxLen;
+    CalcDtype calcMin;
+    int32_t calcPad;
+    int32_t srcPad;
+
 #endif
+};
+
+#define DECODE_ATTN_FUNC_DEFINE(dtype, calcDtype) \
+extern "C" __global__ __aicore__ void decode_att_##dtype(GM_ADDR a2v, GM_ADDR v2a, GM_ADDR q, GM_ADDR k, GM_ADDR v, \
+                                                         GM_ADDR cachedLens, GM_ADDR mapping, GM_ADDR qk, GM_ADDR o, \
+                                                         GM_ADDR decodeIndex, GM_ADDR cumPromptLen, \
+                                                         uint32_t numTokens, uint32_t numHeads, uint32_t headSize, \
+                                                         uint32_t blockSize, uint32_t mappingLen, uint32_t numKVHeads, \
+                                                         uint32_t maxContextLen, uint32_t numQKVHeads, \
+                                                         int32_t mOffset, uint32_t mSlice) \
+{ \
+    DecodeAttn<dtype, calcDtype> op; \
+    op.Init(a2v, v2a, q, k, v, cachedLens, mapping, qk, o, decodeIndex, cumPromptLen, \
+            numTokens, numHeads, headSize, blockSize, mappingLen, numKVHeads, maxContextLen, \
+            numQKVHeads, mOffset, mSlice); \
+    op.Run(); \
 }
+
+DECODE_ATTN_FUNC_DEFINE(float16_t, float16_t);
+DECODE_ATTN_FUNC_DEFINE(bfloat16_t, float);
