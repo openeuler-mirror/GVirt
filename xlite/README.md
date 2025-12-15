@@ -48,8 +48,8 @@ echo '{
 torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-32B/ --config tests/test_config.json --interactive
 ```
 
-#### vllm_ascend + xlite 在线服务
-1. **快速开始**
+#### vllm + vllm_ascend + xlite 在线服务
+1. **安装xlite**
 ```
 # 安装vllm_ascend, 可参考https://github.com/vllm-project/vllm-ascend/blob/main/README.md
 
@@ -74,7 +74,7 @@ vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xli
 
 4. **性能测试**
 
-vllm_ascend + xlite在线服务的性能测试及性能对比分析，请参考https://gitee.com/openeuler/GVirt/blob/master/xlite/doc/e2e_test.md
+vllm_ascend + xlite在线服务的性能测试及性能对比分析，请参考[e2e_test.md](doc/e2e_test.md)
 
 #### 编译
 ```
