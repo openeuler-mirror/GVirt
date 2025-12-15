@@ -48,6 +48,34 @@ echo '{
 torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-32B/ --config tests/test_config.json --interactive
 ```
 
+#### vllm_ascend + xlite 在线服务
+1. **快速开始**
+```
+# 安装vllm_ascend, 可参考https://github.com/vllm-project/vllm-ascend/blob/main/README.md
+
+# 安装xlite
+pip install xlite
+```
+
+2. **离线示例**
+```
+import os
+from vllm import LLM
+
+# xlite默认支持decode-only模式, 可通过设置 "full_mode": True 使能full模式
+model = LLM(model="path/to/Qwen3-32B", tensor_parallel_size=8, additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}})
+outputs = model.generate("Hello, how are you?")
+```
+
+3. **在线示例**
+```
+vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xlite_graph_config": {"enabled": true, "full_mode": true}}'
+```
+
+4. **性能测试**
+
+vllm_ascend + xlite在线服务的性能测试及性能对比分析，请参考https://gitee.com/openeuler/GVirt/blob/master/xlite/doc/e2e_test.md
+
 #### 编译
 ```
 # 准备
