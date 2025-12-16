@@ -143,6 +143,42 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &nor
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
                    uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzle)
 {
+    if (m0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
+        n0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
+        k0 == MATMUL_M0_N0_K0_DEFAULT_VALUE) {
+        uint64_t m = in.shape[0];
+        uint64_t n = weight.shape[0];
+        m0 = ROUND_UP(m, 32);
+        if (m0 > 128) {
+            m0 = 128;
+        }
+        n0 = 256;
+        k0 = 512 / (XDtypeBit(weight.dtype) / 8);
+
+        uint64_t mLoop = DIV_ROUND_UP(m, m0);
+        uint64_t nLoop = DIV_ROUND_UP(n, n0);
+        uint64_t totalLoops = mLoop * nLoop;
+        uint64_t lastLoops = totalLoops % rt.aicNum;
+
+        if (totalLoops < 3 * rt.aicNum &&
+            (lastLoops != 0 && lastLoops < rt.aicNum / 2)) {
+            if (n <= 32 * rt.aicNum) {
+                m0 = m0 > 64 ? 64 : m0;
+                n0 = 64;
+            } else if (n <= 64 * rt.aicNum) {
+                n0 = 64;
+            } else if (n <= 128 * rt.aicNum) {
+                n0 = 128;
+            } else if (n <= 256 * rt.aicNum) {
+                n0 = 256;
+            } else {
+                m0 = m0 > 64 ? 64 : m0;
+                n0 = 384;
+                k0 /= 2;
+            }
+        }
+    }
+
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0],
                                      weight.shape[1], weightNZ, m0, n0, k0, swizzle);
