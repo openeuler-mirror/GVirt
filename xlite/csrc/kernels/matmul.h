@@ -41,23 +41,12 @@ public:
         this->nz = nz;
 
         if (m0 == (uint64_t)-1) {
-            m0 = 128;
+            m0 = ROUND_UP(m, 32);
+            if (m0 > 128) {
+                m0 = 128;
+            }
             n0 = 256;
             k0 = 512 / sizeof(Dtype);
-            if (n < 1024) {
-                m0 = 64;
-                n0 = 64;
-            } else if (n <= 64 * GetBlockNum()) {
-                n0 = 64;
-            } else if (n <= 128 * GetBlockNum()) {
-                n0 = 128;
-            } else if (n <= 256 * GetBlockNum()) {
-                n0 = 256;
-            } else if (m <= 128) {
-                m0 = 64;
-                n0 = 384;
-                k0 /= 2;
-            }
         }
 
         this->m0 = m0;
