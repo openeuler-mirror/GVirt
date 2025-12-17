@@ -32,7 +32,7 @@ bash online_server_test.sh
 ```
 # 用户可以直接运行性能对比脚本，进行aclgraph、xlite_full和xlite_decode_only三种模式下在线服务的性能对比
 cd ./tests/e2e/
-bash online_sever_compare.sh
+bash online_server_compare.sh
 
 # 解析性能对比数据
 # 入参为aclgraph、xlite_full和xlite_decode_only的压测结果保存路径，对比结果保存在./benchmark_comparison.log
