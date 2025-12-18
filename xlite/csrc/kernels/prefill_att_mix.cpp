@@ -225,7 +225,7 @@ public:
 
         uint32_t blockTable_id = (uint32_t)(*(mapping));
         CopyGmToL1Nd2Nz(l1bBuf[pingpong_K], bGmBuf[blockTable_id * block_memsize + head_offset_len],
-                        n0, k0, nKVHeads * headSize, n0);
+                        k0, n0, nKVHeads * headSize, k0);
 
         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_K * 2);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
@@ -245,7 +245,7 @@ public:
 
                 uint32_t blockTable_id = (uint32_t)(*(mapping + kidx + 1));
                 CopyGmToL1Nd2Nz(l1bBuf[1 - pingpong_K], bGmBuf[blockTable_id * block_memsize + head_offset_len],
-                                      n0, k0, nKVHeads * headSize, n0);
+                                k0, n0, nKVHeads * headSize, k0);
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + (1 - pingpong_K) * 2);
             }
 
