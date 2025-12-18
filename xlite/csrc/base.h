@@ -130,6 +130,8 @@ public:
     int Init(void);
     XTensor &GetTensor(std::vector<long> shape, enum XDtype dtype);
     void PutTensor(XTensor &t);
+    void *Ptr() { return _ptr; };
+    size_t Size() { return _size; };
 
 private:
     void *_ptr;

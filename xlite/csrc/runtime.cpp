@@ -6,9 +6,11 @@
 #include "base.h"
 #include "runtime.h"
 #include "sock.h"
+#include "ccl.h"
 
 #define XLITE_DEFAULT_IP "127.0.0.1"
 #define XLITE_DP_PORT_OFFSET 200
+#define XLITE_CCL_PORT_OFFSET 400
 
 XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize)
     : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize)
@@ -30,9 +32,16 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     }
 
     _rankSize = tpSize * dpSize;
-    if (InitComm()) {
+    if (InitHcclComm()) {
         delete pool;
         return;
+    }
+
+    if (sizeMB != 0) {
+        if (InitXcclComm()) {
+            delete pool;
+            return;
+        }
     }
 
     int64_t val;
@@ -53,6 +62,8 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
 
 XRuntime::~XRuntime(void)
 {
+    FiniXcclComm();
+
     if (_tpSize > 1 && _tpComm) {
         HcclCommDestroy(_tpComm);
     }
@@ -107,7 +118,80 @@ int XRuntime::GetNodeIps(void)
     return 0;
 }
 
-int XRuntime::InitComm(void)
+void XRuntime::FiniXcclComm(void)
+{
+    if (_tpXcclComm) {
+        delete _tpXcclComm;
+    }
+    if (_dpXcclComm) {
+        delete _dpXcclComm;
+    }
+    for (uint32_t rank = 0; rank < _rankSize; rank++) {
+        if (_ipcXTensorMems[rank] == nullptr) {
+            continue;
+        }
+        CHECK_ACL(aclrtIpcMemClose(_ipcXTensorKeys[rank]));
+    }
+}
+
+int XRuntime::InitXcclComm(void)
+{
+    std::string ip;
+    uint32_t port;
+    const char* envEnableXccl = std::getenv("XLITE_ENABLE_XCCL");
+
+    if (_rankSize == 1 || _rankSize > _nDevPerNode ||
+        _rankSize > XLITE_CCL_MAX_RANK_SIZE) {
+        return 0;
+    }
+
+    if (!envEnableXccl || atoi(envEnableXccl) == 0) {
+        return 0;
+    }
+
+    XSock *sock = new XSock(_rankId, _rankSize, _ips[0], _port + XLITE_CCL_PORT_OFFSET);
+
+    _ipcXTensorMems[_rankId] = pool->Ptr();
+    CHECK_ACL_RET(aclrtIpcMemGetExportKey(pool->Ptr(), pool->Size(), _ipcXTensorKeys[_rankId],
+        EXPORT_KEY_LEN, ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION), -EFAULT);
+    sock->AllGather(&_ipcXTensorKeys[_rankId], EXPORT_KEY_LEN, _ipcXTensorKeys);
+    for (uint32_t rank = 0; rank < _rankSize; rank++) {
+        if (rank == _rankId) {
+            continue;
+        }
+        CHECK_ACL_RET(aclrtIpcMemImportByKey(&_ipcXTensorMems[rank], _ipcXTensorKeys[rank],
+            ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS), -EFAULT);
+    }
+    delete sock;
+
+    if (_tpSize > 1) {
+        ip = _ips[ROUND_DOWN(_rankId, _tpSize) / _nDevPerNode];
+        port = _port + _rankId / _tpSize;
+        _tpXcclComm = new XcclComm(_rankId % _tpSize, _tpSize);
+        if (_tpXcclComm->Init(ip, port)) {
+            return -EFAULT;
+        }
+        for (uint32_t rank = 0; rank < _tpSize; rank++) {
+            _tpXcclComm->ipcXTensorMems[rank] = _ipcXTensorMems[ROUND_DOWN(_rankId, _tpSize) + rank];
+        }
+    }
+
+    if (_dpSize > 1) {
+        ip = _ips[_rankId % _tpSize / _nDevPerNode];
+        port = _port + XLITE_DP_PORT_OFFSET + _rankId % _tpSize;
+        _dpXcclComm = new XcclComm(_rankId / _tpSize, _dpSize);
+        if (_dpXcclComm->Init(ip, port)) {
+            return -EFAULT;
+        }
+        for (uint32_t rank = 0; rank < _dpSize; rank++) {
+            _tpXcclComm->ipcXTensorMems[rank] = _ipcXTensorMems[rank * _tpSize + _rankId % _tpSize];
+        }
+    }
+
+    return 0;
+}
+
+int XRuntime::InitHcclComm(void)
 {
     std::string ip;
     uint32_t port;
@@ -184,5 +268,8 @@ int XRuntime::InitTensorPool(size_t sizeMB)
         return 0;
     }
     pool = new XTensorPool(sizeMB << MB_BIT);
-    return pool->Init();
+    if (pool->Init()) {
+        return -EFAULT;
+    }
+    return InitXcclComm();
 }
