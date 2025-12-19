@@ -31,6 +31,8 @@ using namespace AscendC;
 #define UB_BUF_ALIGN_SIZE 32               // The align size of UB buffer address
 #define PINGPONG_BUF_NUM 2
 
+#define UB_BUF_ALIGN_SIZE 32               // The align size of UB buffer address
+
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst, uint16_t srcGap, uint16_t dstGap)
 {
