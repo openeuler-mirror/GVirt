@@ -373,13 +373,6 @@ private:
 #endif
 
 private:
-    inline __aicore__ void DataCacheCleanAndInvalid(__gm__ void *__restrict__ gm)
-    {
-        __asm__ __volatile__("");
-        dcci(gm, 0 /*SINGLE_CACHE_LINE*/);
-        __asm__ __volatile__("");
-    }
-
     inline __aicore__ void WaitAicAivFlag(__gm__ uint32_t *flagGm, uint32_t headNum, uint32_t qOffset)
     {
         for (int subIdx = 0; subIdx < headNum; subIdx++) {

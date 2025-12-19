@@ -39,6 +39,11 @@
 #include "aclrtlaunch_softmax_bfloat16_t.h"
 #include "aclrtlaunch_softmax_long_float16_t.h"
 #include "aclrtlaunch_softmax_long_bfloat16_t.h"
+#include "aclrtlaunch_allreduce_int8_t.h"
+#include "aclrtlaunch_allreduce_int32_t.h"
+#include "aclrtlaunch_allreduce_float16_t.h"
+#include "aclrtlaunch_allreduce_bfloat16_t.h"
+#include "aclrtlaunch_allreduce_float.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -93,8 +98,70 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
         std::cerr << __func__ << ": check tensor failed! input: " << in << " output: " << out << std::endl;
         return;
     }
+
+    auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
+    auto hcclComm = (type == TP) ? rt._tpComm : rt._dpComm;
+    uint32_t rank = type == TP ? rt.tpSize() : rt.dpSize();
+    size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
+
+    if (xcclComm && in.dtype != INT64) {
+        bool needCopy = (in.GetType() != XTENSOR_DYNAMIC || out.GetType() != XTENSOR_DYNAMIC);
+        void *inPtr = in.ptr;
+        void *outPtr = out.ptr;
+        XTensor *tmpIn = nullptr;
+        XTensor *tmpOut = nullptr;
+
+        if (needCopy) {
+            tmpIn = &rt.pool->GetTensor(in.shape, in.dtype);   // tmp to ensure not from pool
+            tmpOut = &rt.pool->GetTensor(out.shape, out.dtype);
+            CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, bytes, in.ptr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            inPtr = tmpIn->ptr;
+            outPtr = tmpOut->ptr;
+        }
+
+        // call correct allreduce kernel
+        switch (in.dtype) {
+            case FP16:
+                aclrtlaunch_allreduce_float16_t(
+                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                break;
+            case BF16:
+                aclrtlaunch_allreduce_bfloat16_t(
+                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                break;
+            case INT8:
+                aclrtlaunch_allreduce_int8_t(
+                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                break;
+            case INT32:
+                aclrtlaunch_allreduce_int32_t(
+                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                break;
+            case FP32:
+                aclrtlaunch_allreduce_float(
+                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                break;
+            default:
+                std::cerr << __func__ << ": unsupported dtype for xccl func" << std::endl;
+                break;
+        }
+
+        if (needCopy) {
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, outPtr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            rt.pool->PutTensor(*tmpIn);
+            rt.pool->PutTensor(*tmpOut);
+        }
+        return;
+    }
+
+    // fallback to HCCL path
     CHECK_HCCL(HcclAllReduce(in.ptr, out.ptr, in.numel, XDtype2HcclDtype(in.dtype), HCCL_REDUCE_SUM,
-                   type == TP ? rt._tpComm : rt._dpComm, rt.stream));
+                hcclComm, rt.stream));
 }
 
 

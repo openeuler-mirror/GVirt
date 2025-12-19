@@ -139,6 +139,7 @@ int XRuntime::InitXcclComm(void)
     std::string ip;
     uint32_t port;
     const char* envEnableXccl = std::getenv("XLITE_ENABLE_XCCL");
+    void *ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE];
 
     if (_rankSize == 1 || _rankSize > _nDevPerNode ||
         _rankSize > XLITE_CCL_MAX_RANK_SIZE) {
@@ -168,11 +169,11 @@ int XRuntime::InitXcclComm(void)
         ip = _ips[ROUND_DOWN(_rankId, _tpSize) / _nDevPerNode];
         port = _port + _rankId / _tpSize;
         _tpXcclComm = new XcclComm(_rankId % _tpSize, _tpSize);
-        if (_tpXcclComm->Init(ip, port)) {
-            return -EFAULT;
-        }
         for (uint32_t rank = 0; rank < _tpSize; rank++) {
-            _tpXcclComm->ipcXTensorMems[rank] = _ipcXTensorMems[ROUND_DOWN(_rankId, _tpSize) + rank];
+            ipcXTensorMems[rank] = _ipcXTensorMems[ROUND_DOWN(_rankId, _tpSize) + rank];
+        }
+        if (_tpXcclComm->Init(ip, port, ipcXTensorMems)) {
+            return -EFAULT;
         }
     }
 
@@ -180,11 +181,11 @@ int XRuntime::InitXcclComm(void)
         ip = _ips[_rankId % _tpSize / _nDevPerNode];
         port = _port + XLITE_DP_PORT_OFFSET + _rankId % _tpSize;
         _dpXcclComm = new XcclComm(_rankId / _tpSize, _dpSize);
-        if (_dpXcclComm->Init(ip, port)) {
-            return -EFAULT;
-        }
         for (uint32_t rank = 0; rank < _dpSize; rank++) {
-            _tpXcclComm->ipcXTensorMems[rank] = _ipcXTensorMems[rank * _tpSize + _rankId % _tpSize];
+            ipcXTensorMems[rank] = _ipcXTensorMems[rank * _tpSize + _rankId % _tpSize];
+        }
+        if (_dpXcclComm->Init(ip, port, ipcXTensorMems)) {
+            return -EFAULT;
         }
     }
 
