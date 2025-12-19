@@ -43,14 +43,14 @@ for dtype, atol, rtol in supported_dtype_list:
                                 dtype=torch.int32, device="npu:0")
 
     q_xlite = torch.randn(batch_size, q_size + 2 * kv_size, dtype=dtype, device="npu:0").clamp(-5.0, 5.0)
-    k_cache_xlite = torch.randn(max_block_num, block_size, num_heads, head_size, dtype=dtype, device="npu:0")
-    v_cache_xlite = torch.randn(max_block_num, block_size, num_heads, head_size, dtype=dtype, device="npu:0")
+    k_cache_xlite = torch.randn(max_block_num, block_size, num_kv_heads, head_size, dtype=dtype, device="npu:0")
+    v_cache_xlite = torch.randn(max_block_num, block_size, num_kv_heads, head_size, dtype=dtype, device="npu:0")
     output = torch.empty(batch_size, hidden_size, dtype=dtype, device="npu:0")
 
     q_standard = q_xlite[:, :q_size].clone().view(batch_size, 1, num_heads, head_size)
-    k_cache_standard = torch.randn(batch_size, seq_len, num_heads, head_size,
+    k_cache_standard = torch.randn(batch_size, seq_len, num_kv_heads, head_size,
                                    dtype=dtype, device="npu:0").clamp(-5.0, 5.0)
-    v_cache_standard = torch.randn(batch_size, seq_len, num_heads, head_size,
+    v_cache_standard = torch.randn(batch_size, seq_len, num_kv_heads, head_size,
                                    dtype=dtype, device="npu:0").clamp(-5.0, 5.0)
     for i in range(batch_size):
         iter_num = int((seq_len + 127) / 128)
