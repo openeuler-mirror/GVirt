@@ -591,6 +591,18 @@ void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices,
     rt.Synchronize();
 }
 
+void CastUp(XRuntime &rt, at::Tensor &in, at::Tensor &out)
+{
+    XTensor _in, _out;
+    XTensor &inScale = rt.pool->GetTensor({1}, XDtype(in));
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    XliteOpCastUp(rt, _in, inScale, _out);
+    rt.Synchronize();
+    rt.pool->PutTensor(inScale);
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
@@ -739,6 +751,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("decode_attention_mix", &DecodeAttentionMix);
     m.def("add_and_rmsnorm", &AddAndRMSNorm);
     m.def("softmax_topk", &SoftmaxTopK);
+    m.def("cast_up", &CastUp);
 
     // funcs
     m.def("print", &Print);

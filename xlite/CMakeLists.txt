@@ -31,6 +31,7 @@ file(GLOB KERNEL_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_cce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_cce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_cce.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/cast.cpp
 )
 
 

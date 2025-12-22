@@ -27,6 +27,7 @@
 #include "aclrtlaunch_add_bias_float16_t.h"
 #include "aclrtlaunch_add_bias_bfloat16_t.h"
 #include "aclrtlaunch_softmax_topk_float.h"
+#include "aclrtlaunch_cast_bfloat16_t_float.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -190,7 +191,11 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0],
                                  weight.shape[1], weightNZ, m0, n0, k0, swizzle);
     } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32) {
-        std::cout << __func__ << ": TODO" << std::endl;
+        XTensor &tmp = rt.pool->GetTensor(in.shape, FP32);
+        aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, tmp.ptr, in.numel);
+        aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0],
+                                 weight.shape[1], weightNZ, m0, n0, k0, swizzle);
+        rt.pool->PutTensor(tmp);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
@@ -216,7 +221,9 @@ void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale)
 
 void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (in.dtype == BF16 && out.dtype == FP32) {
+        aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, out.ptr, in.numel);
+    }
 }
 
 void XliteOpSigmoidTopK(XRuntime &rt, XTensor &in, XTensor &inbias, XTensor &indicts,
