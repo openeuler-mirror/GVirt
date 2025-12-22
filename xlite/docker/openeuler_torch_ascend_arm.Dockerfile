@@ -65,7 +65,7 @@ RUN pip config set global.index-url 'https://mirrors.huaweicloud.com/repository/
     pip config set global.trusted-host 'mirrors.huaweicloud.com'
 
 RUN pip install pybind11 && pip install pyyaml && pip install transformers && pip install decorator && pip install scipy && pip install attrs && pip install psutil && pip install wheel
-RUN pip install --upgrade build setuptools
+RUN pip install --upgrade build setuptools setuptools-scm
 RUN sed -i '1s|/usr/bin/python3|/usr/bin/python3.9|' /usr/bin/dnf && sed -i '1s|/usr/bin/python3|/usr/bin/python3.9|' /usr/bin/dnf-3
 
 ####################### CANN #######################
@@ -79,11 +79,11 @@ RUN echo "UserName=HwHiAiUser" >> /etc/ascend_install.info && \
     echo "Driver_Install_For_All=no" >> /etc/ascend_install.info && \
     echo "Driver_Install_Mode=normal" >> /etc/ascend_install.info && \
     echo "Driver_Install_Status=complete" >> /etc/ascend_install.info
-RUN curl -s -k "https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-toolkit_8.0.0_linux-aarch64.run" -o Ascend-cann-toolkit.run && \
+RUN curl -s -k "https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-toolkit_8.3.RC2_linux-aarch64.run" -o Ascend-cann-toolkit.run && \
     chmod a+x *.run && \
     bash /root/Ascend-cann-toolkit.run --install -q && \
     rm /root/*.run
-RUN curl -s -k "https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run" -o Ascend-cann-kernels-910b.run && \
+RUN curl -s -k "https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-kernels-910b_8.3.RC2_linux-aarch64.run" -o Ascend-cann-kernels-910b.run && \
     chmod a+x *.run && \
     bash /root/Ascend-cann-kernels-910b.run --install -q && \
     rm /root/*.run
