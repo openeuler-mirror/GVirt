@@ -603,6 +603,20 @@ void CastUp(XRuntime &rt, at::Tensor &in, at::Tensor &out)
     rt.pool->PutTensor(inScale);
 }
 
+void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t start, uint32_t end,
+                 at::Tensor &out, at::Tensor &unpIdx, at::Tensor &counts)
+{
+    XTensor _in, _routing, _out, _unpIdx, _counts;
+
+    InitXTensor(_in, in);
+    InitXTensor(_routing, routing);
+    InitXTensor(_out, out);
+    InitXTensor(_unpIdx, unpIdx);
+    InitXTensor(_counts, counts);
+    XliteOpPermutation(rt, _in, _routing, start, end, _out, _unpIdx, _counts);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
@@ -752,6 +766,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("add_and_rmsnorm", &AddAndRMSNorm);
     m.def("softmax_topk", &SoftmaxTopK);
     m.def("cast_up", &CastUp);
+    m.def("permutation", &Permutation);
 
     // funcs
     m.def("print", &Print);

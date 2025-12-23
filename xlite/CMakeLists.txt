@@ -35,6 +35,8 @@ file(GLOB KERNEL_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/permutation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpermutation.cpp
 )
 
 

@@ -31,6 +31,8 @@
 #include "aclrtlaunch_group_matmul_bfloat16_t.h"
 #include "aclrtlaunch_group_matmul_float16_t.h"
 #include "aclrtlaunch_group_matmul_float.h"
+#include "aclrtlaunch_permutation.h"
+#include "aclrtlaunch_unpermutation.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -239,13 +241,19 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &in, XTensor &inbias, XTensor &ind
 void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t start, uint32_t end,
                         XTensor &out, XTensor &unpIdx, XTensor &counts)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    aclrtlaunch_permutation(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr, counts.ptr, in.shape[0],
+                            in.shape[1], counts.shape[0], start, end);
 }
 
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing, XTensor &weights,
                           uint32_t start, uint32_t end, XTensor &out)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (in.dtype == BF16 && out.dtype == BF16) {
+        aclrtlaunch_unpermutation(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr, weights.ptr,
+                                  out.shape[0], in.shape[1], weights.shape[1], start, end);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
 }
 
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
