@@ -28,6 +28,9 @@
 #include "aclrtlaunch_add_bias_bfloat16_t.h"
 #include "aclrtlaunch_softmax_topk_float.h"
 #include "aclrtlaunch_cast_bfloat16_t_float.h"
+#include "aclrtlaunch_group_matmul_bfloat16_t.h"
+#include "aclrtlaunch_group_matmul_float16_t.h"
+#include "aclrtlaunch_group_matmul_float.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -249,7 +252,18 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &sc
                         XTensor &counts, uint32_t start, uint32_t end,
                         XDtype weightDtype, long outDim, long inDim, XTensor &output)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (in.dtype == BF16 && weightDtype == BF16 && output.dtype == BF16) {
+        aclrtlaunch_group_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
+                                            counts.shape[0], outDim, inDim, -1, -1, -1, start, end);
+    } else if (in.dtype == FP16 && weightDtype == FP16 && output.dtype == FP16) {
+        aclrtlaunch_group_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
+                                           counts.shape[0], outDim, inDim, -1, -1, -1, start, end);
+    } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32) {
+        aclrtlaunch_group_matmul_float(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
+                                       counts.shape[0], outDim, inDim, -1, -1, -1, start, end);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
 }
 
 void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,

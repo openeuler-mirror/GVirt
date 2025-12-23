@@ -32,6 +32,9 @@ file(GLOB KERNEL_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_cce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_cce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/cast.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float.cpp
 )
 
 
