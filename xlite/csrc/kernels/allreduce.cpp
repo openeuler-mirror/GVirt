@@ -13,7 +13,6 @@
 using namespace AscendC;
 
 #define PINGPONG_BUF_NUM 2
-#define COPY_SIZE 5120
 
 template<typename Dtype>
 class AllReduce {
@@ -33,8 +32,8 @@ public:
         this->count = count;
         this->myRankId = rankId;
         this->rankSize = rankSize;
-        this->CoreIdx = block_idx;
-        this->CoreNum = block_num;
+        this->coreIdx = block_idx;
+        this->coreNum = block_num;
         uint64_t countPerRank = DIV_ROUND_UP(count, rankSize);
         this->countPerBlock = DIV_ROUND_UP(countPerRank, rankSize - 1);
         this->offsetCurrRank = countPerRank * myRankId;
@@ -55,7 +54,7 @@ public:
             this->ipcFlagBuf[r].SetGlobalBuffer((__gm__ uint32_t *)(this->param.ipcMems[r] + XLITE_IPC_MEM_FLAG_OFFSET));
         }
 
-        if (CoreIdx == 0) {
+        if (coreIdx == 0) {
             __gm__ uint64_t *inputOffset = (__gm__ uint64_t *)(this->param.ipcMems[myRankId]);
             __gm__ uint64_t *outputOffset = (__gm__ uint64_t *)(this->param.ipcMems[myRankId] + sizeof(uint64_t));
             *inputOffset = (uint64_t)input - (uint64_t)this->param.ipcXTensorMems[myRankId];
@@ -133,13 +132,13 @@ public:
     // split work among cores
     __aicore__ inline void WorkSplit(uint32_t workNum, uint32_t *start, uint32_t *end)
     {
-        uint32_t remain = workNum % CoreNum;
-        uint32_t avg = workNum / CoreNum;
-        if (CoreIdx < remain) {
-            *start = CoreIdx * avg + CoreIdx;
+        uint32_t remain = workNum % coreNum;
+        uint32_t avg = workNum / coreNum;
+        if (coreIdx < remain) {
+            *start = coreIdx * avg + coreIdx;
             *end = *start + avg + 1;
         } else {
-            *start = CoreIdx * avg + remain;
+            *start = coreIdx * avg + remain;
             *end = *start + avg;
         }
         if (*end > workNum) {
@@ -180,7 +179,7 @@ public:
         for  (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
         }
-        if (CoreNum < rankSize - 1) {
+        if (coreNum < rankSize - 1) {
             uint32_t blockStart = 0;
             uint32_t blockEnd = 0;
             WorkSplit(rankSize - 1, &blockStart, &blockEnd);
@@ -217,8 +216,8 @@ public:
         } else {
             uint32_t workStart = 0;
             uint32_t workEnd = 0;
-            uint32_t corePerBlock = CoreNum / (rankSize - 1);
-            uint32_t workNum = ROUND_DOWN(CoreNum, rankSize - 1);
+            uint32_t corePerBlock = coreNum / (rankSize - 1);
+            uint32_t workNum = ROUND_DOWN(coreNum, rankSize - 1);
             WorkSplit(workNum, &workStart, &workEnd);
             uint32_t countPerCore = DIV_ROUND_UP(countCurrRank, workNum);
             for (uint32_t r = 0; r < rankSize; r++) {
@@ -260,7 +259,7 @@ public:
 
         // allgather phase
         curr = 0;
-        if (CoreNum < rankSize - 1) {
+        if (coreNum < rankSize - 1) {
             uint32_t blockStart = 0;
             uint32_t blockEnd = 0;
             WorkSplit(rankSize - 1, &blockStart, &blockEnd);
@@ -293,8 +292,8 @@ public:
         } else {
             uint32_t workStart = 0;
             uint32_t workEnd = 0;
-            uint32_t corePerBlock = CoreNum / (rankSize - 1);
-            uint32_t workNum = ROUND_DOWN(CoreNum, rankSize - 1);
+            uint32_t corePerBlock = coreNum / (rankSize - 1);
+            uint32_t workNum = ROUND_DOWN(coreNum, rankSize - 1);
             WorkSplit(workNum, &workStart, &workEnd);
             uint32_t countPerCore = DIV_ROUND_UP(countCurrRank, workNum);
             for (uint32_t r = 0; r < rankSize - 1; r++) {
@@ -334,7 +333,7 @@ public:
         CrossCoreWaitFlag(1);
 
         // outer-rank sync
-        if (CoreIdx == 0) {
+        if (coreIdx == 0) {
             SetIpcFlag(1, generation);
             for (uint32_t r = 0; r < rankSize; r++) {
                 if (r == myRankId) {
@@ -360,8 +359,8 @@ private:
     uint64_t generation;
     uint32_t myRankId;
     uint32_t rankSize;
-    uint32_t CoreIdx;
-    uint32_t CoreNum;
+    uint32_t coreIdx;
+    uint32_t coreNum;
     uint32_t rankIdxMapping[XLITE_CCL_MAX_RANK_SIZE];
     struct XcclParam param;
 };
