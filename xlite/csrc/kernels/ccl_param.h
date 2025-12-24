@@ -3,6 +3,7 @@
 
 #define XLITE_CCL_MAX_RANK_SIZE 32
 #define XLITE_IPC_MEM_FLAG_OFFSET 4096
+#define COPY_SIZE 5120
 
 // ipc mem layout
 struct XcclIpcMemData {

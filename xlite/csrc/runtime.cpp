@@ -12,6 +12,24 @@
 #define XLITE_DP_PORT_OFFSET 200
 #define XLITE_CCL_PORT_OFFSET 400
 
+bool isEnvironmentVariableTrue(const char *env_value_cstr)
+{
+    if (env_value_cstr == nullptr) {
+        return false;
+    }
+
+    std::string env_value = env_value_cstr;
+    for (size_t i = 0; i < env_value.size(); ++i) {
+        env_value[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(env_value[i])));
+    }
+
+    if (env_value == "true" || env_value == "1" || env_value == "yes" || env_value == "on") {
+        return true;
+    } else {
+        return false;
+    }
+}
+
 XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize)
     : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize)
 {
@@ -139,6 +157,7 @@ int XRuntime::InitXcclComm(void)
     std::string ip;
     uint32_t port;
     const char* envEnableXccl = std::getenv("XLITE_ENABLE_XCCL");
+    const char* envDeterministic = std::getenv("HCCL_DETERMINISTIC");
     void *ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE];
 
     if (_rankSize == 1 || _rankSize > _nDevPerNode ||
@@ -146,7 +165,8 @@ int XRuntime::InitXcclComm(void)
         return 0;
     }
 
-    if (!envEnableXccl || atoi(envEnableXccl) == 0) {
+    if (!isEnvironmentVariableTrue(envEnableXccl) ||
+        isEnvironmentVariableTrue(envDeterministic)) {
         return 0;
     }
 

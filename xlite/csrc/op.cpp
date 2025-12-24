@@ -44,6 +44,7 @@
 #include "aclrtlaunch_allreduce_float16_t.h"
 #include "aclrtlaunch_allreduce_bfloat16_t.h"
 #include "aclrtlaunch_allreduce_float.h"
+#include "kernels/ccl_param.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -119,31 +120,39 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
             outPtr = tmpOut->ptr;
         }
 
+        // prevents the size of each copy from being too small.
+        uint64_t countPerRank = DIV_ROUND_UP(in.numel, rank);
+        uint64_t maxCoreNum = DIV_ROUND_UP(countPerRank * XDtypeBit(in.dtype) / 8, (rank - 1) * COPY_SIZE) * (rank - 1);
+        uint32_t coreNum = rt.aivNum;
+        if (coreNum > maxCoreNum) {
+            coreNum = maxCoreNum;
+        }
+
         // call correct allreduce kernel
         switch (in.dtype) {
             case FP16:
                 aclrtlaunch_allreduce_float16_t(
-                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    coreNum, rt.stream, inPtr, outPtr,
                     in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case BF16:
                 aclrtlaunch_allreduce_bfloat16_t(
-                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    coreNum, rt.stream, inPtr, outPtr,
                     in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case INT8:
                 aclrtlaunch_allreduce_int8_t(
-                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    coreNum, rt.stream, inPtr, outPtr,
                     in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case INT32:
                 aclrtlaunch_allreduce_int32_t(
-                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    coreNum, rt.stream, inPtr, outPtr,
                     in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case FP32:
                 aclrtlaunch_allreduce_float(
-                    rt.aivNum, rt.stream, inPtr, outPtr,
+                    coreNum, rt.stream, inPtr, outPtr,
                     in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             default:
