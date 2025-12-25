@@ -174,81 +174,45 @@ public:
 
     __aicore__ inline void Run()
     {
+        uint32_t corePerBlock = coreNum / (rankSize - 1);
         int curr = 0;
         // reduce-scatter phase
         for  (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
         }
-        if (coreNum < rankSize - 1) {
-            uint32_t blockStart = 0;
-            uint32_t blockEnd = 0;
-            WorkSplit(rankSize - 1, &blockStart, &blockEnd);
-            for (uint32_t r = 0; r < rankSize; r++) {
-                if (r == 1) {
-                    SetAtomicAdd<Dtype>();
-                    PipeBarrier<PIPE_ALL>();
-                }
-                for (uint32_t blockIdx = blockStart; blockIdx < blockEnd; blockIdx++) {
-                    uint32_t processRankIdx = r == 0 ? myRankId : rankIdxMapping[(blockIdx + (r - 1)) % (rankSize - 1)];
-                    uint64_t blockOffset = blockIdx * countPerBlock;
-                    uint64_t blockCount = countPerBlock;
-                    if (blockOffset + blockCount > countCurrRank) {
-                        blockCount = countCurrRank - blockOffset;
-                    }
-                    uint32_t copyCount = COPY_SIZE / sizeof(Dtype);
-                    uint32_t copyNum = DIV_ROUND_UP(blockCount, copyCount);
-                    for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
-                        uint64_t copyOffset = copyIdx * copyCount;
-                        uint64_t currCopyCount = copyCount;
-                        if (copyOffset + currCopyCount > blockCount) {
-                            currCopyCount = blockCount - copyOffset;
-                        }
-                        WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
-                        CopyGMtoUbuf(ubBuf[curr], inputBuf[processRankIdx][offsetCurrRank + blockOffset + copyOffset], currCopyCount);
-                        SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
-                        WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
-                        CopyUbufToGM(outputBuf[myRankId][offsetCurrRank + blockOffset + copyOffset], ubBuf[curr], currCopyCount);
-                        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
-                        curr = (curr + 1) % PINGPONG_BUF_NUM;
-                    }
-                }
+        uint32_t workStart = 0;
+        uint32_t workEnd = 0;
+        uint32_t workNum = coreNum <= rankSize - 1 ? rankSize - 1 : ROUND_DOWN(coreNum, rankSize - 1);
+        WorkSplit(workNum, &workStart, &workEnd);
+        uint32_t countPerWork = coreNum <= rankSize - 1 ? countPerBlock : DIV_ROUND_UP(countCurrRank, workNum);
+        for (uint32_t r = 0; r < rankSize; r++) {
+            if (r == 1) {
+                SetAtomicAdd<Dtype>();
+                PipeBarrier<PIPE_ALL>();
             }
-        } else {
-            uint32_t workStart = 0;
-            uint32_t workEnd = 0;
-            uint32_t corePerBlock = coreNum / (rankSize - 1);
-            uint32_t workNum = ROUND_DOWN(coreNum, rankSize - 1);
-            WorkSplit(workNum, &workStart, &workEnd);
-            uint32_t countPerCore = DIV_ROUND_UP(countCurrRank, workNum);
-            for (uint32_t r = 0; r < rankSize; r++) {
-                if (r == 1) {
-                    SetAtomicAdd<Dtype>();
-                    PipeBarrier<PIPE_ALL>();
+            for (uint32_t workIdx = workStart; workIdx < workEnd; workIdx++) {
+                uint32_t blockIdx = coreNum <= rankSize - 1 ? workIdx : workIdx / corePerBlock;
+                uint32_t processRankIdx = r == 0 ? myRankId : rankIdxMapping[(blockIdx + (r - 1)) % (rankSize - 1)];
+                uint64_t workOffset = workIdx * countPerWork;
+                uint64_t workCount = countPerWork;
+                if (workOffset + workCount > countCurrRank) {
+                    workCount = countCurrRank - workOffset;
                 }
-                for (uint32_t workIdx = workStart; workIdx < workEnd; workIdx++) {
-                    uint32_t blockIdx = workIdx / corePerBlock;
-                    uint32_t processRankIdx = r == 0 ? myRankId : rankIdxMapping[(blockIdx + (r - 1)) % (rankSize - 1)];
-                    uint64_t workOffset = workIdx * countPerCore;
-                    uint64_t workCount = countPerCore;
-                    if (workOffset + workCount > countCurrRank) {
-                        workCount = countCurrRank - workOffset;
+                uint32_t copyCount = COPY_SIZE / sizeof(Dtype);
+                uint32_t copyNum = DIV_ROUND_UP(workCount, copyCount);
+                for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
+                    uint64_t copyOffset = copyIdx * copyCount;
+                    uint64_t currCopyCount = copyCount;
+                    if (copyOffset + currCopyCount > workCount) {
+                        currCopyCount = workCount - copyOffset;
                     }
-                    uint32_t copyCount = COPY_SIZE / sizeof(Dtype);
-                    uint32_t copyNum = DIV_ROUND_UP(workCount, copyCount);
-                    for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
-                        uint64_t copyOffset = copyIdx * copyCount;
-                        uint64_t currCopyCount = copyCount;
-                        if (copyOffset + currCopyCount > workCount) {
-                            currCopyCount = workCount - copyOffset;
-                        }
-                        WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
-                        CopyGMtoUbuf(ubBuf[curr], inputBuf[processRankIdx][offsetCurrRank + workOffset + copyOffset], currCopyCount);
-                        SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
-                        WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
-                        CopyUbufToGM(outputBuf[myRankId][offsetCurrRank + workOffset + copyOffset], ubBuf[curr], currCopyCount);
-                        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
-                        curr = (curr + 1) % PINGPONG_BUF_NUM;
-                    }
+                    WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
+                    CopyGMtoUbuf(ubBuf[curr], inputBuf[processRankIdx][offsetCurrRank + workOffset + copyOffset], currCopyCount);
+                    SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
+                    WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
+                    CopyUbufToGM(outputBuf[myRankId][offsetCurrRank + workOffset + copyOffset], ubBuf[curr], currCopyCount);
+                    SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
+                    curr = (curr + 1) % PINGPONG_BUF_NUM;
                 }
             }
         }
@@ -259,68 +223,30 @@ public:
 
         // allgather phase
         curr = 0;
-        if (coreNum < rankSize - 1) {
-            uint32_t blockStart = 0;
-            uint32_t blockEnd = 0;
-            WorkSplit(rankSize - 1, &blockStart, &blockEnd);
-            for (uint32_t r = 0; r < rankSize - 1; r++) {
-                for (uint32_t blockIdx = blockStart; blockIdx < blockEnd; blockIdx++) {
-                    uint32_t processRankIdx = rankIdxMapping[(blockIdx + r) % (rankSize - 1)];
-                    uint64_t blockOffset = blockIdx * countPerBlock;
-                    uint64_t blockCount = countPerBlock;
-                    if (blockOffset + blockCount > countCurrRank) {
-                        blockCount = countCurrRank - blockOffset;
-                    }
-                    uint32_t copyCount = COPY_SIZE / sizeof(Dtype);
-                    uint32_t copyNum = DIV_ROUND_UP(blockCount, copyCount);
-                    for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
-                        uint64_t copyOffset = copyIdx * copyCount;
-                        uint64_t currCopyCount = copyCount;
-                        if (copyOffset + currCopyCount > blockCount) {
-                            currCopyCount = blockCount - copyOffset;
-                        }
-                        WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
-                        CopyGMtoUbuf(ubBuf[curr], outputBuf[myRankId][offsetCurrRank + blockOffset + copyOffset], currCopyCount);
-                        SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
-                        WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
-                        CopyUbufToGM(outputBuf[processRankIdx][offsetCurrRank + blockOffset + copyOffset], ubBuf[curr], currCopyCount);
-                        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
-                        curr = (curr + 1) % PINGPONG_BUF_NUM;
-                    }
+        for (uint32_t r = 0; r < rankSize - 1; r++) {
+            for (uint32_t workIdx = workStart; workIdx < workEnd; workIdx++) {
+                uint32_t blockIdx = coreNum <= rankSize - 1 ? workIdx : workIdx / corePerBlock;
+                uint32_t processRankIdx = rankIdxMapping[(blockIdx + r) % (rankSize - 1)];
+                uint64_t workOffset = workIdx * countPerWork;
+                uint64_t workCount = countPerWork;
+                if (workOffset + workCount > countCurrRank) {
+                    workCount = countCurrRank - workOffset;
                 }
-            }
-        } else {
-            uint32_t workStart = 0;
-            uint32_t workEnd = 0;
-            uint32_t corePerBlock = coreNum / (rankSize - 1);
-            uint32_t workNum = ROUND_DOWN(coreNum, rankSize - 1);
-            WorkSplit(workNum, &workStart, &workEnd);
-            uint32_t countPerCore = DIV_ROUND_UP(countCurrRank, workNum);
-            for (uint32_t r = 0; r < rankSize - 1; r++) {
-                for (uint32_t workIdx = workStart; workIdx < workEnd; workIdx++) {
-                    uint32_t blockIdx = workIdx / corePerBlock;
-                    uint32_t processRankIdx = rankIdxMapping[(blockIdx + r) % (rankSize - 1)];
-                    uint64_t workOffset = workIdx * countPerCore;
-                    uint64_t workCount = countPerCore;
-                    if (workOffset + workCount > countCurrRank) {
-                        workCount = countCurrRank - workOffset;
+                uint32_t copyCount = COPY_SIZE / sizeof(Dtype);
+                uint32_t copyNum = DIV_ROUND_UP(workCount, copyCount);
+                for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
+                    uint64_t copyOffset = copyIdx * copyCount;
+                    uint64_t currCopyCount = copyCount;
+                    if (copyOffset + currCopyCount > workCount) {
+                        currCopyCount = workCount - copyOffset;
                     }
-                    uint32_t copyCount = COPY_SIZE / sizeof(Dtype);
-                    uint32_t copyNum = DIV_ROUND_UP(workCount, copyCount);
-                    for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
-                        uint64_t copyOffset = copyIdx * copyCount;
-                        uint64_t currCopyCount = copyCount;
-                        if (copyOffset + currCopyCount > workCount) {
-                            currCopyCount = workCount - copyOffset;
-                        }
-                        WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
-                        CopyGMtoUbuf(ubBuf[curr], outputBuf[myRankId][offsetCurrRank + workOffset + copyOffset], currCopyCount);
-                        SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
-                        WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
-                        CopyUbufToGM(outputBuf[processRankIdx][offsetCurrRank + workOffset + copyOffset], ubBuf[curr], currCopyCount);
-                        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
-                        curr = (curr + 1) % PINGPONG_BUF_NUM;
-                    }
+                    WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
+                    CopyGMtoUbuf(ubBuf[curr], outputBuf[myRankId][offsetCurrRank + workOffset + copyOffset], currCopyCount);
+                    SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
+                    WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0 + curr);
+                    CopyUbufToGM(outputBuf[processRankIdx][offsetCurrRank + workOffset + copyOffset], ubBuf[curr], currCopyCount);
+                    SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
+                    curr = (curr + 1) % PINGPONG_BUF_NUM;
                 }
             }
         }
