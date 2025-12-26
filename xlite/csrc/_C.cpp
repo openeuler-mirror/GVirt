@@ -617,6 +617,38 @@ void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t sta
     rt.Synchronize();
 }
 
+void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights, std::vector<at::Tensor> &scales,
+                 at::Tensor &counts, uint32_t start, uint32_t end, long outDim, long inDim, at::Tensor &output)
+{
+    XTensor _in, _counts, _output;
+    std::vector<void *> p;
+    uint32_t num = counts.size(0);
+
+    InitXTensor(_in, in);
+    InitXTensor(_counts, counts);
+    InitXTensor(_output, output);
+    XTensor &_weights = rt.pool->GetTensor({counts.size(0)}, INT64);
+    XTensor &_scales = rt.pool->GetTensor({counts.size(0)}, INT64);
+
+    p.resize(num);
+    for (int i = 0; i < num; i++) {
+        p[i] = TensorPtr(weights[i]);
+    }
+    rt.MemcpyH2D(_weights.ptr, p.data(), num * sizeof(void *));
+
+    if (scales.size() == num) {
+        for (int i = 0; i < num; i++) {
+            p[i] = TensorPtr(scales[i]);
+        }
+        rt.MemcpyH2D(_scales.ptr, p.data(), num * sizeof(void *));
+    }
+
+    XliteOpGroupMatmul(rt, _in, _weights, _scales, _counts, start, end, XDtype(weights[0]), outDim, inDim, _output);
+    rt.Synchronize();
+    rt.pool->PutTensor(_weights);
+    rt.pool->PutTensor(_scales);
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
@@ -767,6 +799,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("softmax_topk", &SoftmaxTopK);
     m.def("cast_up", &CastUp);
     m.def("permutation", &Permutation);
+    m.def("group_matmul", &GroupMatmul);
 
     // funcs
     m.def("print", &Print);
