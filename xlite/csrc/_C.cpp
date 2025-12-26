@@ -576,6 +576,21 @@ void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &n
     rt.Synchronize();
 }
 
+void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices,
+                 at::Tensor &outWeights, at::Tensor &outRouting,
+                 uint32_t topK, bool normTopKProb)
+{
+    XTensor _scores, _indices, _outWeights, _outRouting;
+
+    InitXTensor(_scores, scores);
+    InitXTensor(_indices, indices);
+    InitXTensor(_outWeights, outWeights);
+    _outRouting.Init({static_cast<long>(scores.size(0)), static_cast<long>(scores.size(1))},
+                     BIT1, TensorPtr(outRouting));
+    XliteOpSoftmaxTopK(rt, _scores, _indices, _outWeights, _outRouting, topK, normTopKProb);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
@@ -723,6 +738,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("attention_prefill", &AttentionPrefill);
     m.def("decode_attention_mix", &DecodeAttentionMix);
     m.def("add_and_rmsnorm", &AddAndRMSNorm);
+    m.def("softmax_topk", &SoftmaxTopK);
 
     // funcs
     m.def("print", &Print);
