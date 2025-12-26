@@ -26,6 +26,7 @@
 #include "aclrtlaunch_add_bias_float.h"
 #include "aclrtlaunch_add_bias_float16_t.h"
 #include "aclrtlaunch_add_bias_bfloat16_t.h"
+#include "aclrtlaunch_softmax_topk_float.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -418,6 +419,17 @@ void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &outp
         aclrtlaunch_add_bias_float16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr, output.shape[0] * output.shape[1], output.shape[1]);
     } else if (input.dtype == BF16 && weight.dtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_add_bias_bfloat16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr, output.shape[0] * output.shape[1], output.shape[1]);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
+}
+
+void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &socres, XTensor &indices,
+                        XTensor &outWeights, XTensor &outRouting, uint32_t topK, bool normTopKProb)
+{
+    if (socres.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 && outRouting.dtype == BIT1) {
+        aclrtlaunch_softmax_topk_float(rt.aivNum, rt.stream, socres.ptr, indices.ptr, outWeights.ptr, outRouting.ptr,
+                                       socres.shape[0], indices.shape[0], topK, normTopKProb);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

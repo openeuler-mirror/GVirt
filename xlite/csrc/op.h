@@ -92,4 +92,8 @@ void XliteDsOpEinsumShcHdcShd(XRuntime &rt, int numTokens, int nLocalHeads, int 
                               int wkvbStep, int vDim, XTensor &scores, XTensor &kvUpWeight, XTensor &result);
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &norm, float normEps, XTensor &out);
+
+void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &in, XTensor &indices,
+                        XTensor &outWeights, XTensor &outRouting,
+                        uint32_t topK, bool normTopKProb);
 #endif

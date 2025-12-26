@@ -299,6 +299,15 @@ __inline__ __aicore__ void ReduceSum(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
     }
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 }
+
+#define BITS_PER_DWORD  64
+#define BIT_DWORD(nr)   ((nr) / BITS_PER_DWORD)
+
+inline __aicore__ void bitmapSet(__ubuf__ uint64_t *addr, uint32_t id)
+{
+    __ubuf__ uint64_t *p = addr + BIT_DWORD(id);
+    *p |= (1ULL << (id % BITS_PER_DWORD));
+}
 #endif
 
 #endif
