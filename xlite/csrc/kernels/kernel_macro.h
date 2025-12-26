@@ -308,6 +308,13 @@ inline __aicore__ void bitmapSet(__ubuf__ uint64_t *addr, uint32_t id)
     __ubuf__ uint64_t *p = addr + BIT_DWORD(id);
     *p |= (1ULL << (id % BITS_PER_DWORD));
 }
+
+inline __aicore__ int bitmapTest(__ubuf__ uint64_t *addr, uint32_t id)
+{
+    __ubuf__ uint64_t *p = addr + BIT_DWORD(id);
+    return ((*p) & (1ULL << (id % BITS_PER_DWORD))) ? 1 : 0;
+}
+
 #endif
 
 #endif

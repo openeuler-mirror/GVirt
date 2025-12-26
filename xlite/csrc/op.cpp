@@ -27,6 +27,12 @@
 #include "aclrtlaunch_add_bias_float16_t.h"
 #include "aclrtlaunch_add_bias_bfloat16_t.h"
 #include "aclrtlaunch_softmax_topk_float.h"
+#include "aclrtlaunch_cast_bfloat16_t_float.h"
+#include "aclrtlaunch_group_matmul_bfloat16_t.h"
+#include "aclrtlaunch_group_matmul_float16_t.h"
+#include "aclrtlaunch_group_matmul_float.h"
+#include "aclrtlaunch_permutation.h"
+#include "aclrtlaunch_unpermutation.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -190,7 +196,11 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0],
                                  weight.shape[1], weightNZ, m0, n0, k0, swizzle);
     } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32) {
-        std::cout << __func__ << ": TODO" << std::endl;
+        XTensor &tmp = rt.pool->GetTensor(in.shape, FP32);
+        aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, tmp.ptr, in.numel);
+        aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0],
+                                 weight.shape[1], weightNZ, m0, n0, k0, swizzle);
+        rt.pool->PutTensor(tmp);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
@@ -216,7 +226,9 @@ void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale)
 
 void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (in.dtype == BF16 && out.dtype == FP32) {
+        aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, out.ptr, in.numel);
+    }
 }
 
 void XliteOpSigmoidTopK(XRuntime &rt, XTensor &in, XTensor &inbias, XTensor &indicts,
@@ -229,20 +241,37 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &in, XTensor &inbias, XTensor &ind
 void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t start, uint32_t end,
                         XTensor &out, XTensor &unpIdx, XTensor &counts)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    aclrtlaunch_permutation(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr, counts.ptr, in.shape[0],
+                            in.shape[1], counts.shape[0], start, end);
 }
 
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing, XTensor &weights,
                           uint32_t start, uint32_t end, XTensor &out)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (in.dtype == BF16 && out.dtype == BF16) {
+        aclrtlaunch_unpermutation(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr, weights.ptr,
+                                  out.shape[0], in.shape[1], weights.shape[1], start, end);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
 }
 
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
                         XTensor &counts, uint32_t start, uint32_t end,
                         XDtype weightDtype, long outDim, long inDim, XTensor &output)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    if (in.dtype == BF16 && weightDtype == BF16 && output.dtype == BF16) {
+        aclrtlaunch_group_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
+                                            counts.shape[0], outDim, inDim, -1, -1, -1, start, end);
+    } else if (in.dtype == FP16 && weightDtype == FP16 && output.dtype == FP16) {
+        aclrtlaunch_group_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
+                                           counts.shape[0], outDim, inDim, -1, -1, -1, start, end);
+    } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32) {
+        aclrtlaunch_group_matmul_float(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
+                                       counts.shape[0], outDim, inDim, -1, -1, -1, start, end);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
 }
 
 void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
