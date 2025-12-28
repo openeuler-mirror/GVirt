@@ -39,6 +39,7 @@ public:
         this->offsetCurrRank = countPerRank * myRankId;
         this->generation = generation;
         this->reduceScatterSkipMyRank = input == output ? true : false;
+        this->copyCount = COPY_SIZE / sizeof(Dtype);
 
         uint64_t off = 0;
         flagBuf.address_.logicPos = static_cast<uint8_t>(TPosition::VECIN);
@@ -189,6 +190,7 @@ public:
         uint32_t workNum = coreNum <= rankSize - 1 ? rankSize - 1 : ROUND_DOWN(coreNum, rankSize - 1);
         WorkSplit(workNum, &workStart, &workEnd);
         uint32_t countPerWork = coreNum <= rankSize - 1 ? countPerBlock : DIV_ROUND_UP(countCurrRank, workNum);
+        uint32_t copyNumOneWork = DIV_ROUND_UP(countPerWork, copyCount);
         for (uint32_t r = 0; r < rankSize; r++) {
             if (reduceScatterSkipMyRank && r == 0) {
                 continue;
@@ -197,19 +199,19 @@ public:
                 SetAtomicAdd<Dtype>();
                 PipeBarrier<PIPE_ALL>();
             }
+            uint64_t workCount = countPerWork;
+            uint32_t copyNum = copyNumOneWork;
             for (uint32_t workIdx = workStart; workIdx < workEnd; workIdx++) {
                 uint32_t blockIdx = coreNum <= rankSize - 1 ? workIdx : workIdx / corePerBlock;
                 uint32_t processRankIdx = r == 0 ? myRankId : rankIdxMapping[(blockIdx + (r - 1)) % (rankSize - 1)];
                 uint64_t workOffset = workIdx * countPerWork;
-                uint64_t workCount = countPerWork;
                 if (workOffset + workCount > countCurrRank) {
                     workCount = countCurrRank - workOffset;
+                    copyNum = DIV_ROUND_UP(workCount, copyCount);
                 }
-                uint32_t copyCount = COPY_SIZE / sizeof(Dtype);
-                uint32_t copyNum = DIV_ROUND_UP(workCount, copyCount);
+                uint64_t currCopyCount = copyCount;
                 for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
                     uint64_t copyOffset = copyIdx * copyCount;
-                    uint64_t currCopyCount = copyCount;
                     if (copyOffset + currCopyCount > workCount) {
                         currCopyCount = workCount - copyOffset;
                     }
@@ -229,19 +231,18 @@ public:
         PipeBarrier<PIPE_ALL>();
 
         // allgather phase
-        curr = 0;
+        uint64_t workCount = countPerWork;
+        uint32_t copyNum = copyNumOneWork;
         for (uint32_t workIdx = workStart; workIdx < workEnd; workIdx++) {
             uint32_t blockIdx = coreNum <= rankSize - 1 ? workIdx : workIdx / corePerBlock;
             uint64_t workOffset = workIdx * countPerWork;
-            uint64_t workCount = countPerWork;
             if (workOffset + workCount > countCurrRank) {
                 workCount = countCurrRank - workOffset;
+                copyNum = DIV_ROUND_UP(workCount, copyCount);
             }
-            uint32_t copyCount = COPY_SIZE / sizeof(Dtype);
-            uint32_t copyNum = DIV_ROUND_UP(workCount, copyCount);
+            uint64_t currCopyCount = copyCount;
             for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
                 uint64_t copyOffset = copyIdx * copyCount;
-                uint64_t currCopyCount = copyCount;
                 if (copyOffset + currCopyCount > workCount) {
                     currCopyCount = workCount - copyOffset;
                 }
@@ -294,6 +295,7 @@ private:
     uint32_t rankIdxMapping[XLITE_CCL_MAX_RANK_SIZE];
     uint32_t syncWorkStart;
     uint32_t syncWorkEnd;
+    uint32_t copyCount;
     struct XcclParam param;
     bool reduceScatterSkipMyRank;
 };
