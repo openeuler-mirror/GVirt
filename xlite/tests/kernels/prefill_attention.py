@@ -12,7 +12,7 @@ import logging
 import torch
 import math
 import numpy as np
-from xlite._C import Runtime, attention_prefill
+from xlite._C import Runtime, prefill_attention
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -142,7 +142,7 @@ for test_dtype in dtype_list:
                     v_cache_xlite[cache_block_idx, :current_seq_len] = current_v[:, seq_start:seq_end]
 
             torch.npu.synchronize()
-            attention_prefill(rt, qkv_xlite, k_cache_xlite, qk, block_tables, cached_lens,
+            prefill_attention(rt, qkv_xlite, k_cache_xlite, qk, block_tables, cached_lens,
                             v_cache_xlite, output_xlite, lens, prefill_index, cum_prompt_lens,
                             head_dim, N_HEADS, N_KV_HEADS, BLOCK_SIZE, BATCH_SIZE, max_num_block)
 
