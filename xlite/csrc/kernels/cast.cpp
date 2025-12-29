@@ -11,7 +11,7 @@ __aicore__ void cast_kernel(GM_ADDR x, GM_ADDR y, uint32_t length)
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    uint32_t max_num = UB_SIZE / (sizeof(float) + sizeof(__bf16));
+    uint32_t max_num = MAX_REPEAT_TIMES * VECTOR_MAX_BYTESIZE / sizeof(float);
     __ubuf__ uint8_t *t1 = (__ubuf__ uint8_t *)get_imm(0);
     __ubuf__ uint8_t *t2 = (__ubuf__ uint8_t *)get_imm(max_num * ((std::is_same<SrcType, bfloat16_t>::value) ? sizeof(__bf16) : sizeof(float)));
 
