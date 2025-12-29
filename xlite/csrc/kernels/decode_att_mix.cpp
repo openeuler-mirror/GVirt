@@ -7,6 +7,7 @@
  */
 #include "kernel_macro.h"
 #include "kernel_operator.h"
+#include "softmax_attn_aiv.h"
 
 constexpr uint32_t PINGPONG_BUF_NUM = 2;
 constexpr int CUBE_BLOCK_SIZE = 16;
@@ -344,6 +345,13 @@ private:
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
+        uint64_t maxNOneLoop = 0;
+        if constexpr (std::is_same<Dtype, float16_t>::value) {
+            maxNOneLoop = 32640;
+        } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+            maxNOneLoop = 24320;
+        }
+
         PrepareAivCalcData();
 
         uint32_t processNum = nTokens * nHeads;
@@ -364,23 +372,29 @@ private:
 
             WaitAicAivFlag(a2v, 1, process);
 
-            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+            if (contextLen <= maxNOneLoop) {
+                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+                RunAivSoftmax<Dtype, CalcDtype>(qk, 1, ROUND_UP(contextLen, blockSize), contextLen);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+            } else {
+                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
 
-            int maxQKFlag[4] = {0, 0, 0, 0};
-            vector_dup(maxQK, calcMin, 4, 1, 1, 8, 0);
-            vector_dup(reduceSum, CalcDtype(0), 4, 1, 1, 8, 0);
-            pipe_barrier(PIPE_V);
+                int maxQKFlag[4] = {0, 0, 0, 0};
+                vector_dup(maxQK, calcMin, 4, 1, 1, 8, 0);
+                vector_dup(reduceSum, CalcDtype(0), 4, 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
 
-            // max_qk and sum(exp(qk_i-qk_max))
-            CalcIntermediateData(qk, maxQKFlag, subBlockNum, numIters, contextLen);
+                // max_qk and sum(exp(qk_i-qk_max))
+                CalcIntermediateData(qk, maxQKFlag, subBlockNum, numIters, contextLen);
 
-            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
-            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
+                set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
 
-            // exp(qk_i-qk_max) / sum(exp(qk_i-qk_max))
-            CalcSoftMax(qk, maxQKFlag, subBlockNum, numIters, contextLen);
+                // exp(qk_i-qk_max) / sum(exp(qk_i-qk_max))
+                CalcSoftMax(qk, maxQKFlag, subBlockNum, numIters, contextLen);
 
-            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+            }
 
             ResetAicAivFlag(a2v, 1, process);
             SetAicAivFlag(v2a, 1, process);
