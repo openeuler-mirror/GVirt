@@ -1,3 +1,6 @@
+/*
+ * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ */
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 

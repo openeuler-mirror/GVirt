@@ -511,7 +511,7 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
     rt.Synchronize();
 }
 
-void AttentionPrefill(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &qk, at::Tensor &blockTables,
+void PrefillAttention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &qk, at::Tensor &blockTables,
                       at::Tensor &cachedLens, at::Tensor &vCache, at::Tensor &output,
                       at::Tensor &lens, at::Tensor &prefillIndex, at::Tensor &cumPromptLens, uint32_t headDim,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
@@ -534,7 +534,7 @@ void AttentionPrefill(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Ten
     rt.Synchronize();
 }
 
-void DecodeAttentionMix(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tensor &qkv,
+void DecodeAttention(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tensor &qkv,
                         at::Tensor &kCache, at::Tensor &vCache, at::Tensor &cachedLens,
                         at::Tensor &blockTables, at::Tensor &output, at::Tensor &decodeIdx,
                         at::Tensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
@@ -793,8 +793,8 @@ PYBIND11_MODULE(_C, m) {
     m.def("add_bias", &AddBias);
     m.def("silu_and_mul", &SiluAndMul);
     m.def("rope_and_cache", &RopeAndCache);
-    m.def("attention_prefill", &AttentionPrefill);
-    m.def("decode_attention_mix", &DecodeAttentionMix);
+    m.def("prefill_attention", &PrefillAttention);
+    m.def("decode_attention", &DecodeAttention);
     m.def("add_and_rmsnorm", &AddAndRMSNorm);
     m.def("softmax_topk", &SoftmaxTopK);
     m.def("cast_up", &CastUp);

@@ -374,6 +374,12 @@ public:
     }
 
 #if __DAV_C220_VEC__
+    /* ROUND_UP(padN * sizeof(Dtype), VECTOR_MAX_BYTESIZE) * 2 +
+     *     ROUND_UP(padN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) +
+     *     DIV_ROUND_UP(padN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) * sizeof(CalcDtype) <= ub size(196608B)
+     * float16_t: padN <= 32640
+     * bfloat16_t: padN <= 24320
+     */
     inline __aicore__ void RunAivSoftmax(__gm__ Dtype *qk, uint16_t padN, uint16_t tokens,
                                          uint32_t cachedTokens, uint32_t curSeq, uint32_t curPromptLen)
     {
@@ -389,16 +395,16 @@ public:
 
         uint64_t off = 0;
         __ubuf__ Dtype *in = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += padN * sizeof(Dtype);
+        off += ROUND_UP(padN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
         __ubuf__ Dtype *out = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += padN * sizeof(Dtype);
+        off += ROUND_UP(padN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
         __ubuf__ CalcDtype *cal = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
-        off += padN * sizeof(CalcDtype);
+        off += ROUND_UP(padN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE);
         __ubuf__ CalcDtype *temp = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
         __ubuf__ CalcDtype *ptr;
 
-        int calPad = 256 / sizeof(CalcDtype);
-        int pad = 256 / sizeof(Dtype);
+        int calPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
+        int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
 
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);

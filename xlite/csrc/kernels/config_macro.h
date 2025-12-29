@@ -1,7 +1,6 @@
-/**
+/*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
-
  #ifndef __aicore__
  #define __aicore__ [aicore]
  #endif // __aicore__
