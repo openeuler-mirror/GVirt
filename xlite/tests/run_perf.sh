@@ -49,6 +49,37 @@ function run_qwen3_32B()
     torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-32B/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${output_tokens} | tee tests/${file}.log
 }
 
+function run_qwen3_moe_30B()
+{
+    tp=$1
+    bs=$2
+    input_tokens=$3
+    output_tokens=$4
+    max_seq_len=$(($input_tokens + $output_tokens))
+    file=$5
+    dtype=$6
+    echo '{
+        "vocab_size": 151936,
+        "dim": 2048,
+        "head_dim": 128,
+        "inter_dim": 6144,
+        "moe_inter_dim": 768,
+        "decoder_sparse_step": 1,
+        "mlp_only_layers": [],
+        "n_routed_experts": 128,
+        "n_activated_experts": 8,
+        "n_layers": 48,
+        "n_heads": 32,
+        "n_kv_heads": 4,
+        "norm_eps": 1e-06,
+        "rope_theta": 10000000.0,
+        "dtype": "'${dtype}'",
+        "max_seq_len": '${max_seq_len}',
+        "max_batch_size": '${bs}'
+    }' > tests/test_config.json
+    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path /mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${output_tokens} | tee tests/${file}.log
+}
+
 function run_llama_7B()
 {
     tp=$1
@@ -189,6 +220,8 @@ function test_perf_decode {
         run_qwen2_32B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
     elif [[ "${model}" == "qwen3_32B" ]]; then
         run_qwen3_32B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
+    elif [[ "${model}" == "qwen3_moe_30B" ]]; then
+        run_qwen3_moe_30B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
     elif [[ "${model}" == "llama_7B" ]]; then
         run_llama_7B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
     elif [[ "${model}" == "llama_13B" ]]; then
@@ -222,6 +255,8 @@ function test_perf_prefill {
         run_qwen2_32B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
     elif [[ "${model}" == "qwen3_32B" ]]; then
         run_qwen3_32B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
+    elif [[ "${model}" == "qwen3_moe_30B" ]]; then
+        run_qwen3_moe_30B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
     elif [[ "${model}" == "llama_7B" ]]; then
         run_llama_7B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
     elif [[ "${model}" == "llama_13B" ]]; then
@@ -298,6 +333,15 @@ do
     done
 done
 
+model=qwen3_moe_30B
+tp=8
+output_tokens=1024
+dtype=bfloat16
+for bs in 1 16
+do
+    test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
+done
+
 #model=deepseek_8layer
 #tp=8
 #output_tokens=1024
@@ -337,6 +381,11 @@ do
     tp=8
     test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
 done
+
+model=qwen3_moe_30B
+tp=8
+dtype=bfloat16
+test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
 
 #model=deepseek_8layer
 #tp=8

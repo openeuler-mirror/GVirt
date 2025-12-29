@@ -179,7 +179,7 @@ function run_deepseek()
 #run_qwen2.5_0.5B
 run_qwen2_32B
 run_qwen3_32B
-#run_qwen3_moe_30B
+run_qwen3_moe_30B
 run_llama_7B
 run_llama_13B
 run_llama_34B

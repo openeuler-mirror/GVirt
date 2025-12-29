@@ -439,7 +439,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
 void XModel::XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv)
 {
     uint32_t qHeads = _c.nHeads / _c.defTpSize;
-    uint32_t kHeads = _c.nKvHeads / _c.defTpSize;
+    uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, uint32_t(1));
     uint32_t qSize = _c.headDim * qHeads;
     uint32_t kvSize = _c.headDim * kHeads;
     uint32_t qkvSize = qSize + 2 * kvSize;
@@ -532,9 +532,14 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
     XTensor &routing = rt.pool->GetTensor({m, _c.nRoutedExperts}, BIT1);
     XTensor &scores = rt.pool->GetTensor({input.shape[0], _c.nRoutedExperts}, moeGate[layer].dtype);
 
-    XliteOpMatmul(rt, input, moeGate[layer], scores, _c.weightNZ);
-    XliteOpSigmoidTopK(rt, scores, moeGateBias[layer], _gateIndicts, _c.nExpertGroups, _c.nLimitedGroups,
-                       _c.nActExperts, _c.routeScale, weights, routing);
+    XliteOpMatmul(rt, input, moeGate[layer], scores, false);
+
+    if (_c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
+        XliteOpSigmoidTopK(rt, scores, moeGateBias[layer], _gateIndicts, _c.nExpertGroups, _c.nLimitedGroups,
+                           _c.nActExperts, _c.routeScale, weights, routing);
+    } else {
+        XliteOpSoftmaxTopK(rt, scores, _gateIndicts, weights, routing, _c.nActExperts, _c.normTopKProb);
+    }
 
     rt.pool->PutTensor(scores);
     return {weights, routing};
@@ -621,13 +626,16 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     rt.pool->PutTensor(h13);
     rt.pool->PutTensor(h2);
 
-    XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, hiddenState.dtype);
-    ForwardMOECombine(rt, h, weights, routing, unpIdx, expertsSorted, expertsCounts);
-
-    // share experts
-    ForwardMLP(rt, moeSEUpGate[layer], moeSEDown[layer], hiddenState, false);
-    XliteOpAdd(rt, hiddenState, h, hiddenState);
-    rt.pool->PutTensor(h);
+    if (_c.nSharedExperts != 0) {
+        XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, hiddenState.dtype);
+        ForwardMOECombine(rt, h, weights, routing, unpIdx, expertsSorted, expertsCounts);
+        // share experts
+        ForwardMLP(rt, moeSEUpGate[layer], moeSEDown[layer], hiddenState, false);
+        XliteOpAdd(rt, hiddenState, h, hiddenState);
+        rt.pool->PutTensor(h);
+    } else {
+        ForwardMOECombine(rt, hiddenState, weights, routing, unpIdx, expertsSorted, expertsCounts);
+    }
 
     if (_c.defTpSize > 1) {
         XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
