@@ -378,21 +378,7 @@ private:
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
             } else {
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-
-                int maxQKFlag[4] = {0, 0, 0, 0};
-                vector_dup(maxQK, calcMin, 4, 1, 1, 8, 0);
-                vector_dup(reduceSum, CalcDtype(0), 4, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
-
-                // max_qk and sum(exp(qk_i-qk_max))
-                CalcIntermediateData(qk, maxQKFlag, subBlockNum, numIters, contextLen);
-
-                set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
-                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
-
-                // exp(qk_i-qk_max) / sum(exp(qk_i-qk_max))
-                CalcSoftMax(qk, maxQKFlag, subBlockNum, numIters, contextLen);
-
+                RunAivSoftmaxLong<Dtype, CalcDtype>(qk, contextLen);
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
             }
 
