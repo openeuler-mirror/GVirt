@@ -204,13 +204,10 @@ inline __aicore__ void RunAivSoftmaxLongFP16(__gm__ float16_t *qk_gm_addr, uint3
     auto *qk_max_qk_addr = reinterpret_cast<__ubuf__ half *>((uintptr_t) MAX_SUB_CONTEXT_SIZE * 2 + 128 * 8 * sizeof(half));
 
     int id = get_block_idx() * 2 + get_subblockid();
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-
     uint32_t num_iters = DIV_ROUND_UP(context_len, VECTOR_MAX_NUM_OF_FP16);
     uint32_t max_block_num_iter = MAX_SUB_CONTEXT_SIZE / 256;
     int sub_block_number = (context_len * sizeof(half) + MAX_SUB_CONTEXT_SIZE - 1) / MAX_SUB_CONTEXT_SIZE;
 
-    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
@@ -447,9 +444,6 @@ inline __aicore__ void RunAivSoftmaxLongFP16(__gm__ float16_t *qk_gm_addr, uint3
     pipe_barrier(PIPE_ALL); // 此处的PIPE_ALL必须要，是用于核间同步的，保证结果写入到GM，如果用硬件同步可能可以去掉
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-
-    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     pipe_barrier(PIPE_ALL);
 }
 
@@ -500,11 +494,9 @@ inline __aicore__ void RunAivSoftmaxLongBF16(__gm__ bfloat16_t *qk_gm_addr, uint
     float float_min = -3.4028235e+38;
     uint32_t aiv_block_num = block_num * 2;
     uint32_t id = get_block_idx() * 2 + get_subblockid();
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     uint32_t num_iters = DIV_ROUND_UP(context_len, VECTOR_MAX_NUM_OF_FP32);
     uint32_t sub_block_number = DIV_ROUND_UP(context_len * sizeof(bfloat16_t), MAX_SUB_CONTEXT_SIZE);
 
-    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
@@ -674,13 +666,9 @@ inline __aicore__ void RunAivSoftmaxLongBF16(__gm__ bfloat16_t *qk_gm_addr, uint
         copy_ubuf_to_gm(qk_gm_addr + cur_qk_offset, qk_out_ub_bf16, 0, 1, offset, 0, 0);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
     }
-    pipe_barrier(PIPE_ALL); // 此处的PIPE_ALL必须要，是用于核间同步的，保证结果写入到GM，如果用硬件同步可能可以去掉
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-
-    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     pipe_barrier(PIPE_ALL);
 }
 
