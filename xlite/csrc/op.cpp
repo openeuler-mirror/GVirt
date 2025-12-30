@@ -33,6 +33,10 @@
 #include "aclrtlaunch_group_matmul_float.h"
 #include "aclrtlaunch_permutation.h"
 #include "aclrtlaunch_unpermutation.h"
+#include "aclrtlaunch_softmax_float16_t.h"
+#include "aclrtlaunch_softmax_bfloat16_t.h"
+#include "aclrtlaunch_softmax_long_float16_t.h"
+#include "aclrtlaunch_softmax_long_bfloat16_t.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -459,6 +463,34 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &socres, XTensor &indices,
     if (socres.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 && outRouting.dtype == BIT1) {
         aclrtlaunch_softmax_topk_float(rt.aivNum, rt.stream, socres.ptr, indices.ptr, outWeights.ptr, outRouting.ptr,
                                        socres.shape[0], indices.shape[0], topK, normTopKProb);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
+}
+
+void XliteOpSoftmax(XRuntime &rt, XTensor &x)
+{
+    if (x.shape[0] != 1) {
+        std::cerr << __func__ << "tensor's size 0 mast 1" << std::endl;
+    }
+    if (x.dtype == FP16) {
+        aclrtlaunch_softmax_float16_t(1, rt.stream, x.ptr, x.shape[1]);
+    } else if (x.dtype == BF16) {
+        aclrtlaunch_softmax_bfloat16_t(1, rt.stream, x.ptr, x.shape[1]);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
+}
+
+void XliteOpSoftmaxLong(XRuntime &rt, XTensor &x)
+{
+    if (x.shape[0] != 1) {
+        std::cerr << __func__ << "tensor's size 0 mast 1" << std::endl;
+    }
+    if (x.dtype == FP16) {
+        aclrtlaunch_softmax_long_float16_t(1, rt.stream, x.ptr, x.shape[1]);
+    } else if (x.dtype == BF16) {
+        aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, x.shape[1]);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

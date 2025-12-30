@@ -681,5 +681,14 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *qk, uint32_t contextLen)
         RunAivSoftmaxLongBF16(qk, contextLen);
     }
 }
+#else
+template<typename Dtype, typename CalcDtype>
+inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen)
+{
+}
+template<typename Dtype, typename CalcDtype>
+inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *qk, uint32_t contextLen)
+{
+}
 #endif
 #endif

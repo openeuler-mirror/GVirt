@@ -649,6 +649,18 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     rt.pool->PutTensor(_scales);
 }
 
+void Softmax(XRuntime &rt, at::Tensor &x, bool isLong)
+{
+    XTensor _x;
+    InitXTensor(_x, x);
+    if (isLong) {
+        XliteOpSoftmaxLong(rt, _x);
+    } else {
+        XliteOpSoftmax(rt, _x);
+    }
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m) {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
@@ -800,6 +812,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("cast_up", &CastUp);
     m.def("permutation", &Permutation);
     m.def("group_matmul", &GroupMatmul);
+    m.def("softmax", &Softmax);
 
     // funcs
     m.def("print", &Print);
