@@ -40,6 +40,8 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, 
 
     int calPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
     int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    int calInstPad = VECTOR_MAX_REPEAT * calPad;
+    int instPad = VECTOR_MAX_REPEAT * pad;
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
@@ -50,6 +52,7 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, 
         }
         int padCachedTokens = ROUND_UP(actualCalcLen, calPad);
         int repeat = padCachedTokens / calPad;
+        int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
         copy_gm_to_ubuf(in, buf + idx * n, 0, 1,
@@ -61,7 +64,13 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, 
         if constexpr (std::is_same<CalcDtype, half>::value) {
             ptr = in;
         } else {
-            vconv_bf162f32((__ubuf__ float *)cal, (__ubuf__ Dtype *)in, repeat, 1, 1, 8, 4);
+            for (int i = 0; i < instNum; i++) {
+                int currRepeat = VECTOR_MAX_REPEAT;
+                if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                    currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+                }
+                vconv_bf162f32(cal + i * calInstPad, in + i * calInstPad, currRepeat, 1, 1, 8, 4);
+            }
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
             ptr = cal;
@@ -87,14 +96,26 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, 
         pipe_barrier(PIPE_V);
 
         // QK - max
-        vsub(cal, ptr, temp, repeat, 1, 1, 0, 8, 8, 0);
+        for (int i = 0; i < instNum; i++) {
+            int currRepeat = VECTOR_MAX_REPEAT;
+            if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+            }
+            vsub(cal + i * calInstPad, ptr + i * calInstPad, temp, currRepeat, 1, 1, 0, 8, 8, 0);
+        }
         pipe_barrier(PIPE_V);
         if constexpr (std::is_same<CalcDtype, half>::value) {
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
         }
 
         // EXP = exp(QK-max)
-        vexp(cal, cal, repeat, 1, 1, 8, 8);
+        for (int i = 0; i < instNum; i++) {
+            int currRepeat = VECTOR_MAX_REPEAT;
+            if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+            }
+            vexp(cal + i * calInstPad, cal + i * calInstPad, currRepeat, 1, 1, 8, 8);
+        }
         pipe_barrier(PIPE_V);
 
         // s = Reduce_sum(EXP)
@@ -110,13 +131,25 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, 
 
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
         if constexpr (std::is_same<CalcDtype, half>::value) {
-            vdiv(out, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
+            for (int i = 0; i < instNum; i++) {
+                int currRepeat = VECTOR_MAX_REPEAT;
+                if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                    currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+                }
+                vdiv(out + i * instPad, cal + i * calInstPad, temp, currRepeat, 1, 1, 0, 8, 8, 0);
+            }
             pipe_barrier(PIPE_V);
         } else {
-            vdiv(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
-            pipe_barrier(PIPE_V);
-            vconv_f322bf16r(out, cal, repeat, 1, 1, 4, 8);
-            pipe_barrier(PIPE_V);
+            for (int i = 0; i < instNum; i++) {
+                int currRepeat = VECTOR_MAX_REPEAT;
+                if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                    currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+                }
+                vdiv(cal + i * calInstPad, cal + i * calInstPad, temp, currRepeat, 1, 1, 0, 8, 8, 0);
+                pipe_barrier(PIPE_V);
+                vconv_f322bf16r(out + i * calInstPad, cal + i * calInstPad, currRepeat, 1, 1, 4, 8);
+                pipe_barrier(PIPE_V);
+            }
         }
 
         if (n > actualCalcLen) {

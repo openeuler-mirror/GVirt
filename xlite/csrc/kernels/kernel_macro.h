@@ -20,6 +20,7 @@ using namespace AscendC;
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 #define BLOCK_SIZE 32
+#define VECTOR_MAX_REPEAT 255
 #define VECTOR_MAX_BYTESIZE 256               // The maximum byte size of one repeat in vector
 #define VECTOR_MAX_NUM_OF_FP32 64             // The maximum num of float32 dtype in one vector repeat
 #define VECTOR_MAX_NUM_OF_FP16 128            // The maximum num of float16 dtype in one vector repeat
@@ -228,7 +229,8 @@ __inline__ __aicore__ void ReduceMax(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
     uint32_t remain = dim;
     __ubuf__ Dtype *calc = src;
 
-    int pad = 256 / sizeof(Dtype);
+    int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    int instPad = VECTOR_MAX_REPEAT * pad;
     if constexpr (std::is_same<Dtype, half>::value) {
         min = half(-65504);
     } else if constexpr (std::is_same<Dtype, float>::value) {
@@ -255,7 +257,14 @@ __inline__ __aicore__ void ReduceMax(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
         }
 
-        vcmax(dst, calc, repeat, 1, 1, 8, Order_t::ONLY_VALUE);
+        int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
+        for (int i = 0; i < instNum; i++) {
+            int currRepeat = VECTOR_MAX_REPEAT;
+            if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+            }
+            vcmax(dst + i * VECTOR_MAX_REPEAT, calc + i * instPad, currRepeat, 1, 1, 8, Order_t::ONLY_VALUE);
+        }
         calc = dst;
         pipe_barrier(PIPE_V);
         remain = repeat;
@@ -269,7 +278,8 @@ __inline__ __aicore__ void ReduceSum(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
 {
     uint32_t remain = dim;
     __ubuf__ Dtype *calc = src;
-    int pad = 256 / sizeof(Dtype);
+    int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    int instPad = VECTOR_MAX_REPEAT * pad;
 
     uint32_t repeat = DIV_ROUND_UP(remain, pad);
     set_mask_norm();
@@ -291,7 +301,14 @@ __inline__ __aicore__ void ReduceSum(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
         }
 
-        vcadd(dst, calc, repeat, 1, 1, 8, 0);
+        int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
+        for (int i = 0; i < instNum; i++) {
+            int currRepeat = VECTOR_MAX_REPEAT;
+            if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+            }
+            vcadd(dst + i * VECTOR_MAX_REPEAT, calc + i * instPad, currRepeat, 1, 1, 8, 0);
+        }
         calc = dst;
         pipe_barrier(PIPE_V);
         remain = repeat;
