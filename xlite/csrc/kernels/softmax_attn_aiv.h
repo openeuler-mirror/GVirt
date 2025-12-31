@@ -223,6 +223,9 @@ inline __aicore__ void set_mask_from_highbit(uint32_t len) {
     set_vector_mask(mask, MASK_NONE);
 }
 
+/* 3 block * MAX_SUB_CONTEXT_SIZE
+ * float16_t: n <= 145152
+ */
 inline __aicore__ void RunAivSoftmaxLongFP16(__gm__ float16_t *qk_gm_addr, uint32_t context_len)
 {
     //128 * 4 * sizeof(half) for qk_ub_addr, need 3 * 128 * sizeof(half) for (48 * 1024 - 2 * 128) * sizeof(half) qk_result
@@ -497,6 +500,9 @@ inline __aicore__ void set_mask0_from_highbit(uint32_t len) {
     set_vector_mask(MASK_NONE, mask);
 }
 
+/* 3 block * MAX_SUB_CONTEXT_SIZE
+ * bfloat16_t: n <= 48384
+ */
 inline __aicore__ void RunAivSoftmaxLongBF16(__gm__ bfloat16_t *qk_gm_addr, uint32_t context_len)
 {
     //128 * 4 * sizeof(float) for qk_ub_addr, need 3 * 128 * sizeof(float) for (48 * 1024 - 2 * 128) * sizeof(float) qk_result

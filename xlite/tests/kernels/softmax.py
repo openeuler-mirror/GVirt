@@ -37,11 +37,11 @@ for dtype in supported_dtype_list:
             print(f'torch_npu: {standard}')
             print(f'xlite: {y}')
 
-size_list = [3, 78, 1035, 10489, 65250, 200000]
+size_list = [3, 78, 1035, 10489, 48384, 64525, 129050, 145152]
 
 for dtype in supported_dtype_list:
     for size in  size_list:
-        if dtype == torch.bfloat16 and size > 65250:
+        if dtype == torch.bfloat16 and size > 48384:
             continue
         x = torch.randn(1, size, dtype=dtype, device="npu:0")
         y = x.clone()
