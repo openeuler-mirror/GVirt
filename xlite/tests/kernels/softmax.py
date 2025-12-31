@@ -50,7 +50,7 @@ for dtype in supported_dtype_list:
         torch.npu.synchronize()
         softmax(rt, y, True)
 
-        print(f'softmax size={size} {dtype} executed!')
+        print(f'long softmax size={size} {dtype} executed!')
 
         try:
             torch.testing.assert_close(standard, y, atol=1e-5, rtol=1e-3)

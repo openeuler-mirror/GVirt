@@ -714,6 +714,350 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *qk, uint32_t contextLen)
         RunAivSoftmaxLongBF16(qk, contextLen);
     }
 }
+
+template<typename Dtype, typename CalcDtype>
+class SoftmaxLong {
+public:
+    __aicore__ inline SoftmaxLong() {}
+
+    inline __aicore__ void Run(__gm__ Dtype *qk, uint32_t contextLen)
+    {
+        set_mask_norm();
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+
+        PrepareAivCalcData();
+
+        uint32_t numIters = DIV_ROUND_UP(contextLen, calcPad);
+        uint32_t subBlockNum = DIV_ROUND_UP(contextLen*sizeof(Dtype), maxSubCtxSize);
+
+        int maxQKFlag[4] = {0, 0, 0, 0};
+        vector_dup(maxQK, calcMin, 4, 1, 1, 8, 0);
+        vector_dup(reduceSum, CalcDtype(0), 4, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+
+        // max_qk and sum(exp(qk_i-qk_max))
+        CalcIntermediateData(qk, maxQKFlag, subBlockNum, numIters, contextLen);
+
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
+
+        // exp(qk_i-qk_max) / sum(exp(qk_i-qk_max))
+        CalcSoftMax(qk, maxQKFlag, subBlockNum, numIters, contextLen);
+        pipe_barrier(PIPE_ALL);
+    }
+
+    inline __aicore__ void PrepareAivCalcData()
+    {
+        if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+            maxSubCtxSize = (MAX_UB_SIZE - 3 * QK_RESULT_TEMP_SIZE) / 2;
+        } else {
+            maxSubCtxSize = (MAX_UB_SIZE - 3 * QK_RESULT_TEMP_SIZE) / 4;
+        }
+        uint64_t off = 0;
+        in = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
+        off += maxSubCtxSize;
+        out = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
+        off += maxSubCtxSize;
+        qkTemp = reinterpret_cast<__ubuf__ CalcDtype*>((uintptr_t)off);
+        off += QK_RESULT_TEMP_SIZE;
+        reduceSum = reinterpret_cast<__ubuf__ CalcDtype*>((uintptr_t)off);
+        off += QK_RESULT_TEMP_SIZE;
+        maxQK = reinterpret_cast<__ubuf__ CalcDtype*>((uintptr_t)off);
+        if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+            calc = in;
+            calcMin = Dtype(-65504);
+        } else {
+            off += QK_RESULT_TEMP_SIZE;
+            calc = reinterpret_cast<__ubuf__ CalcDtype*>((uintptr_t)off);
+            calcMin = CalcDtype(-3.40282353e+38);
+        }
+
+        calcPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
+        srcPad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+        maxSubBlockIter = maxSubCtxSize / VECTOR_MAX_BYTESIZE;
+        maxSubCtxLen = maxSubCtxSize / sizeof(Dtype);
+    }
+
+    inline __aicore__ void CalcIntermediateData(__gm__ Dtype *qk, int *maxQKFlag,
+                                                uint32_t subBlockNum, uint32_t numIters, uint32_t contextLen)
+    {
+        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+        for (int subBlock = 0; subBlock < subBlockNum; subBlock++) {
+            uint32_t curIter = subBlock * maxSubBlockIter;
+            uint32_t qkOffsetLen = subBlock * maxSubCtxLen;
+            uint32_t repeat = (subBlock < subBlockNum - 1) ? maxSubBlockIter : (numIters - curIter);
+            uint32_t curCtxLen = (subBlock < subBlockNum - 1) ? maxSubCtxLen : (contextLen - qkOffsetLen);
+
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+            copy_gm_to_ubuf(in, qk + qkOffsetLen, 0, 1,
+                            DIV_ROUND_UP(curCtxLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+            } else {
+                vconv_bf162f32(calc, in, repeat, 1, 1, 8, 4);
+                pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+            }
+            // 将多拷贝进来的数据进行置位
+            SetPaddedCtxValue(calc, curCtxLen, calcPad, calcMin);
+
+            // 计算当前分块的max_qk
+            CalcReduceMax(repeat, curCtxLen);
+            set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+            // 获取当前计算和预存的max_qk
+            wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+            float curMaxQK = (float)*qkTemp;
+            float prevMaxQK = (float)*(maxQK + 3 * calcPad);
+            // 更新总的max_qk
+            UpdateReduceMax(subBlock, maxQKFlag, curMaxQK, prevMaxQK);
+            // 计算当前分块的sum(exp(qk_i - max_qk))
+            CalcReduceSum(repeat, curCtxLen);
+            // 更新总的sum
+            UpdateReduceSum(subBlock, curMaxQK, prevMaxQK);
+
+            if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+            } else {
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+                vconv_f322bf16r(in, calc, repeat, 1, 1, 4, 8);
+                pipe_barrier(PIPE_V);
+            }
+
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            copy_ubuf_to_gm(qk + qkOffsetLen, in, 0, 1,
+                            DIV_ROUND_UP(curCtxLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        }
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    }
+
+    inline __aicore__ void CalcReduceMax(uint32_t count, uint32_t ctxLen)
+    {
+        if (count <= MAX_REPEAT_TIMES) {
+            ReduceMax(qkTemp, calc, ctxLen);
+            BrcbQKTemp();
+            return;
+        }
+        vcmax(qkTemp, calc, MAX_REPEAT_TIMES, 1, 1, 8, ONLY_VALUE);
+        vcmax(qkTemp + MAX_REPEAT_TIMES, calc + MAX_REPEAT_TIMES * calcPad, count - MAX_REPEAT_TIMES, 1, 1, 8, ONLY_VALUE);
+        pipe_barrier(PIPE_V);
+
+        ReduceMax(qkTemp, qkTemp, count);
+        BrcbQKTemp();
+    }
+
+    inline __aicore__ void UpdateReduceMax(uint32_t subBlock, int *maxQKFlag, float curMaxQK, float prevMaxQK)
+    {
+        if (curMaxQK > prevMaxQK) {
+            for (int i = 0; i < subBlock; i++) {
+                maxQKFlag[i] = 1;
+            }
+            copy_ubuf_to_ubuf(maxQK + 3 * calcPad, qkTemp, 0, 1, 8, 1, 1);
+            pipe_barrier(PIPE_V);
+        }
+        copy_ubuf_to_ubuf(maxQK + subBlock * calcPad, maxQK + 3 * calcPad, 0, 1, 8, 1, 1);
+        copy_ubuf_to_ubuf(qkTemp, maxQK + 3 * calcPad, 0, 1, 8, 1, 1);
+        pipe_barrier(PIPE_V);
+    }
+
+    inline __aicore__ void CalcReduceSum(uint32_t count, uint32_t ctxLen)
+    {
+        uint32_t taskNum = DIV_ROUND_UP(count, MAX_REPEAT_TIMES);
+        for (uint32_t i = 0; i < taskNum; ++i) {
+            uint32_t repeat = (i != taskNum - 1) ? MAX_REPEAT_TIMES : count % MAX_REPEAT_TIMES;
+            uint32_t offset = i * MAX_REPEAT_TIMES * calcPad;
+            vsub(calc + offset, calc + offset, qkTemp, repeat, 1, 1, 0, 8, 8, 0);
+        }
+        pipe_barrier(PIPE_V);
+
+        for (uint32_t i = 0; i < taskNum; ++i) {
+            uint32_t repeat = (i != taskNum - 1) ? MAX_REPEAT_TIMES : count % MAX_REPEAT_TIMES;
+            uint32_t offset = i * MAX_REPEAT_TIMES * calcPad;
+            vexp(calc + offset, calc + offset, repeat, 1, 1, 8, 8);
+        }
+        pipe_barrier(PIPE_V);
+        if (count <= MAX_REPEAT_TIMES) {
+            ReduceSum(qkTemp, calc, ctxLen);
+            BrcbQKTemp();
+            return;
+        }
+        vcadd(qkTemp, calc, MAX_REPEAT_TIMES, 1, 1, 8, 0);
+        vcadd(qkTemp + MAX_REPEAT_TIMES, calc + MAX_REPEAT_TIMES * calcPad, count - MAX_REPEAT_TIMES, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+
+        ReduceSum(qkTemp, calc, count);
+        BrcbQKTemp();
+    }
+
+    inline __aicore__ void UpdateReduceSum(uint32_t subBlock, float curMaxQK, float prevMaxQK)
+    {
+        if (subBlock == 0) {
+            copy_ubuf_to_ubuf(reduceSum + subBlock * calcPad, qkTemp, 0, 1, 8, 1, 1);
+            copy_ubuf_to_ubuf(reduceSum + 3 * calcPad, qkTemp, 0, 1, 8, 1, 1);
+            pipe_barrier(PIPE_V);
+            return;
+        }
+        __ubuf__ CalcDtype *prevReduceSum = reduceSum + (subBlock - 1) * calcPad;
+        if (curMaxQK > prevMaxQK) {
+            __ubuf__ CalcDtype *calcTemp = qkTemp + 3 * calcPad;
+            vsub(calcTemp, maxQK + (subBlock - 1) * calcPad, maxQK + subBlock * calcPad, 1, 1, 1, 1, 8, 8, 1);
+            pipe_barrier(PIPE_V);
+            vexp(calcTemp, calcTemp, 1, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+            vmul(calcTemp, calcTemp, prevReduceSum, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vadd(qkTemp, qkTemp, calcTemp, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+        } else {
+            vadd(qkTemp, qkTemp, prevReduceSum, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+        copy_ubuf_to_ubuf(reduceSum + subBlock * calcPad, qkTemp, 0, 1, 8, 1, 1);
+        copy_ubuf_to_ubuf(reduceSum + 3 * calcPad, qkTemp, 0, 1, 8, 1, 1);
+        pipe_barrier(PIPE_V);
+    }
+
+    inline __aicore__ void CalcSoftMax(__gm__ Dtype *qk, int *maxQKFlag,
+                                        uint32_t subBlockNum, uint32_t numIters, uint32_t contextLen)
+    {
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+        for (int subBlock = 0; subBlock < subBlockNum; subBlock++) {
+            uint32_t curIter = subBlock * maxSubBlockIter;
+            uint32_t qkOffsetLen = subBlock * maxSubCtxLen;
+            uint32_t repeat = (subBlock < subBlockNum - 1) ? maxSubBlockIter : (numIters - curIter);
+            uint32_t curCtxLen = (subBlock < subBlockNum - 1) ? maxSubCtxLen : (contextLen - qkOffsetLen);
+
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            copy_gm_to_ubuf(in, qk + qkOffsetLen, 0, 1,
+                            DIV_ROUND_UP(curCtxLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            if constexpr (!std::is_same_v<CalcDtype, Dtype>) {
+                vconv_bf162f32(calc, in, repeat, 1, 1, 8, 4);
+                pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            }
+
+            SetPaddedCtxValue(calc, curCtxLen, calcPad, static_cast<CalcDtype>(0));
+
+            if (maxQKFlag[subBlock]) {
+                UpdateExpQK(subBlock, calcPad, repeat);
+            }
+
+            if constexpr (std::is_same_v<CalcDtype, Dtype>) {
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+                CalcDiv(out, calcPad, repeat);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            } else {
+                CalcDiv(calc, calcPad, repeat);
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+                vconv_f322bf16r(out, calc, repeat, 1, 1, 4, 8);
+                pipe_barrier(PIPE_V);
+            }
+            // 尾部填0避免产生脏数据
+            SetPaddedCtxValue(out, curCtxLen, srcPad, static_cast<Dtype>(0));
+
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+
+            uint32_t outLen = ROUND_UP(curCtxLen, srcPad);
+            outLen = MIN(outLen, contextLen);
+            copy_ubuf_to_gm(qk + qkOffsetLen, out, 0, 1, outLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+        }
+        pipe_barrier(PIPE_ALL); // 此处的PIPE_ALL必须要，是用于核间同步的，保证结果写入到GM，如果用硬件同步可能可以去掉
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+    }
+
+    inline __aicore__ void UpdateExpQK(uint32_t subBlock, uint32_t pad, uint32_t count)
+    {
+        __ubuf__ CalcDtype *calcTemp = qkTemp + 3 * pad;
+
+        vsub(calcTemp, maxQK + subBlock * pad, maxQK + 3 * pad, 1, 1, 1, 1, 8, 8, 1);
+        pipe_barrier(PIPE_V);
+
+        vexp(calcTemp, calcTemp, 1, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        uint32_t taskNum = DIV_ROUND_UP(count, MAX_REPEAT_TIMES);
+        for (uint32_t i = 0; i < taskNum; ++i) {
+            uint32_t repeat = (i != taskNum - 1) ? MAX_REPEAT_TIMES : count % MAX_REPEAT_TIMES;
+            uint32_t offset = i * MAX_REPEAT_TIMES * pad;
+            vmul(calc + offset, calc + offset, calcTemp, repeat, 1, 1, 0, 8, 8, 0);
+        }
+    }
+
+    inline __aicore__ void CalcDiv(__ubuf__ CalcDtype *dst, uint32_t pad, uint32_t count)
+    {
+        __ubuf__ CalcDtype *sum = reduceSum + 3 * pad;
+        uint32_t taskNum = DIV_ROUND_UP(count, MAX_REPEAT_TIMES);
+        for (uint32_t i = 0; i < taskNum; ++i) {
+            uint32_t repeat = (i != taskNum - 1) ? MAX_REPEAT_TIMES : count % MAX_REPEAT_TIMES;
+            uint32_t offset = i * MAX_REPEAT_TIMES * pad;
+            vdiv(dst + offset, calc + offset, sum, repeat, 1, 1, 0, 8, 8, 0);
+        }
+        pipe_barrier(PIPE_V);
+    }
+
+    template<typename PaddedDtype>
+    inline __aicore__ void SetPaddedCtxValue(__ubuf__ PaddedDtype *dst, int32_t ctxLen, int32_t pad, PaddedDtype value)
+    {
+        int32_t rest = ctxLen % pad;
+        if (rest > 0) {
+            SetMaskFromHighBit(pad, pad - rest);
+            vector_dup(dst + ROUND_DOWN(ctxLen, pad), value, 1, 1, 1, 8, 0);
+            pipe_barrier(PIPE_V);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
+    }
+
+    inline __aicore__ void BrcbQKTemp()
+    {
+        // 把maxQK/sum填充满32KB，用于计算
+        if constexpr (std::is_same_v<CalcDtype, half>) {
+            vbrcb((__ubuf__ uint16_t*)qkTemp, (__ubuf__ uint16_t*)qkTemp, 0, 0, 1);
+        } else {
+            vbrcb((__ubuf__ uint32_t*)qkTemp, (__ubuf__ uint32_t*)qkTemp, 0, 0, 1);
+        }
+        pipe_barrier(PIPE_V);
+    }
+private:
+    uint32_t QK_RESULT_TEMP_NUM = 4; // 1-3 for subBlock, 4 for whole
+    uint32_t QK_RESULT_TEMP_SIZE = QK_RESULT_TEMP_NUM * VECTOR_MAX_BYTESIZE;
+    uint32_t MAX_UB_SIZE = 192 * 1024;
+    __ubuf__ Dtype *in;
+    __ubuf__ Dtype *out;
+    __ubuf__ CalcDtype *qkTemp;
+    __ubuf__ CalcDtype *reduceSum;
+    __ubuf__ CalcDtype *maxQK;
+    __ubuf__ CalcDtype *calc;
+    uint32_t maxSubCtxSize;
+    uint32_t maxSubBlockIter;
+    uint32_t maxSubCtxLen;
+    CalcDtype calcMin;
+    int32_t calcPad;
+    int32_t srcPad;      
+};
+
+template<typename Dtype, typename CalcDtype>
+inline __aicore__ void RunAivSoftmaxLongV2(__gm__ Dtype *qk, uint32_t contextLen)
+{
+    SoftmaxLong<Dtype, CalcDtype> op;
+    op.Run(qk, contextLen);
+}
 #else
 template<typename Dtype, typename CalcDtype>
 inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen)
@@ -721,6 +1065,10 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, 
 }
 template<typename Dtype, typename CalcDtype>
 inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *qk, uint32_t contextLen)
+{
+}
+template<typename Dtype, typename CalcDtype>
+inline __aicore__ void RunAivSoftmaxLongV2(__gm__ Dtype *qk, uint32_t contextLen)
 {
 }
 #endif
