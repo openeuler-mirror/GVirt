@@ -369,7 +369,7 @@ private:
             if (contextLen <= maxNOneLoop) {
                 RunAivSoftmax<Dtype, CalcDtype>(qk, 1, ROUND_UP(contextLen, blockSize), contextLen);
             } else {
-                RunAivSoftmaxLong<Dtype, CalcDtype>(qk, contextLen);
+                RunAivSoftmaxLong<Dtype, CalcDtype>(qk, 1, ROUND_UP(contextLen, blockSize), contextLen);
             }
             pipe_barrier(PIPE_ALL); // 此处的PIPE_ALL必须要，是用于核间同步的，保证结果写入到GM，如果用硬件同步可能可以去掉
 
