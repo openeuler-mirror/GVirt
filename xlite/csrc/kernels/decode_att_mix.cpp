@@ -345,13 +345,6 @@ private:
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-        uint64_t maxNOneLoop = 0;
-        if constexpr (std::is_same<Dtype, float16_t>::value) {
-            maxNOneLoop = 32640;
-        } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            maxNOneLoop = 24320;
-        }
-
         uint32_t processNum = nTokens * nHeads;
         uint32_t aivBlockNum = block_num * 2;
         uint32_t id = get_block_idx() * 2 + get_subblockid();
@@ -366,11 +359,7 @@ private:
             uint32_t contextLen = (uint32_t)*(cachedLens + realTokenIdx) + 1;
 
             WaitAicAivFlag(a2v, 1, process);
-            if (contextLen <= maxNOneLoop) {
-                RunAivSoftmax<Dtype, CalcDtype>(qk, 1, ROUND_UP(contextLen, blockSize), contextLen);
-            } else {
-                RunAivSoftmaxLong<Dtype, CalcDtype>(qk, 1, ROUND_UP(contextLen, blockSize), contextLen);
-            }
+            RunAivSoftmax<Dtype, CalcDtype>(qk, 1, ROUND_UP(contextLen, blockSize), contextLen);
             pipe_barrier(PIPE_ALL); // 此处的PIPE_ALL必须要，是用于核间同步的，保证结果写入到GM，如果用硬件同步可能可以去掉
 
             ResetAicAivFlag(a2v, 1, process);

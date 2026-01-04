@@ -20,12 +20,13 @@ for dtype in supported_dtype_list:
     for size in  size_list:
         if dtype == torch.bfloat16 and size > 24320:
             continue
-        x = torch.randn(1, size, dtype=dtype, device="npu:0")
+        x = torch.randn(1, (size + 127) // 128 * 128, dtype=dtype, device="npu:0")
+        x[0][size:] = float("-inf")
         y = x.clone()
         standard = torch.nn.functional.softmax(x, dim=-1)
 
         torch.npu.synchronize()
-        softmax(rt, y, False)
+        softmax(rt, y, size, False)
 
         print(f'softmax size={size} {dtype} executed!')
 
@@ -37,18 +38,19 @@ for dtype in supported_dtype_list:
             print(f'torch_npu: {standard}')
             print(f'xlite: {y}')
 
-size_list = [3, 78, 1035, 10489, 32640, 48384, 64525, 129050, 145152, 2056320, 4145280]
+size_list = [3, 78, 1035, 10489, 24322, 32640, 48384, 64525, 129050, 145152, 2056320, 4145280]
 
 for dtype in supported_dtype_list:
     for size in  size_list:
         if dtype == torch.bfloat16 and size > 2056320:
             continue
-        x = torch.randn(1, size, dtype=dtype, device="npu:0")
+        x = torch.randn(1, (size + 127) // 128 * 128, dtype=dtype, device="npu:0")
+        x[0][size:] = float("-inf")
         y = x.clone()
         standard = torch.nn.functional.softmax(x, dim=-1)
 
         torch.npu.synchronize()
-        softmax(rt, y, True)
+        softmax(rt, y, size, True)
 
         print(f'long softmax size={size} {dtype} executed!')
 

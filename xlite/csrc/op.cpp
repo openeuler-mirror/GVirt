@@ -468,29 +468,23 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &socres, XTensor &indices,
     }
 }
 
-void XliteOpSoftmax(XRuntime &rt, XTensor &x)
+void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)
 {
-    if (x.shape[0] != 1) {
-        std::cerr << __func__ << "tensor's size 0 mast 1" << std::endl;
-    }
     if (x.dtype == FP16) {
-        aclrtlaunch_softmax_float16_t(1, rt.stream, x.ptr, x.shape[1]);
+        aclrtlaunch_softmax_float16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
     } else if (x.dtype == BF16) {
-        aclrtlaunch_softmax_bfloat16_t(1, rt.stream, x.ptr, x.shape[1]);
+        aclrtlaunch_softmax_bfloat16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
 }
 
-void XliteOpSoftmaxLong(XRuntime &rt, XTensor &x)
+void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x)
 {
-    if (x.shape[0] != 1) {
-        std::cerr << __func__ << "tensor's size 0 mast 1" << std::endl;
-    }
     if (x.dtype == FP16) {
-        aclrtlaunch_softmax_long_float16_t(1, rt.stream, x.ptr, x.shape[1]);
+        aclrtlaunch_softmax_long_float16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
     } else if (x.dtype == BF16) {
-        aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, x.shape[1]);
+        aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

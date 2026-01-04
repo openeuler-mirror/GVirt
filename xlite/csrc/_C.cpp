@@ -649,14 +649,14 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     rt.pool->PutTensor(_scales);
 }
 
-void Softmax(XRuntime &rt, at::Tensor &x, bool isLong)
+void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
 {
     XTensor _x;
     InitXTensor(_x, x);
     if (isLong) {
-        XliteOpSoftmaxLong(rt, _x);
+        XliteOpSoftmaxLong(rt, calcLen, _x);
     } else {
-        XliteOpSoftmax(rt, _x);
+        XliteOpSoftmax(rt, calcLen, _x);
     }
     rt.Synchronize();
 }
