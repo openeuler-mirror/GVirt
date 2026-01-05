@@ -37,6 +37,7 @@ file(GLOB KERNEL_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/permutation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpermutation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax.cpp
 )
 
 

@@ -22,7 +22,7 @@ torch.npu.set_device(0)
 N_HEADS = 32
 N_KV_HEADS = 32
 
-MAX_SEQ_LEN = 32768
+MAX_SEQ_LEN = 32770
 MAX_BATCH_SIZE = 8
 BATCH_SIZE = 8
 
@@ -32,11 +32,21 @@ TILESIZE_OF_QUERY = 128
 AICNUM = 25
 dtype_list = [torch.float16, torch.bfloat16]
 head_dim_list = [64, 128]
-seq_len_list = [30, 77, 1800]
+seq_len_list = [30, 77, 1800, 24322, 32769]
 
 for test_dtype in dtype_list:
     for head_dim in head_dim_list:
         for seq_len in seq_len_list:
+            if seq_len >= 24322:
+                N_HEADS = 1
+                N_KV_HEADS = 1
+                MAX_BATCH_SIZE = 1
+                BATCH_SIZE = 1
+            else:
+                N_HEADS = 32
+                N_KV_HEADS = 32
+                MAX_BATCH_SIZE = 8
+                BATCH_SIZE = 8
             torch.set_default_dtype(test_dtype)
             out_features = (N_HEADS + 2 * N_KV_HEADS) * head_dim
             with torch.device("npu"):
@@ -146,7 +156,7 @@ for test_dtype in dtype_list:
                             v_cache_xlite, output_xlite, lens, prefill_index, cum_prompt_lens,
                             head_dim, N_HEADS, N_KV_HEADS, BLOCK_SIZE, BATCH_SIZE, max_num_block)
 
-            logging.info(f'attention_preifll (head_dim={head_dim}, seq_len={seq_len}, {test_dtype}) executed!')
+            logging.info(f'attention_prefill (head_dim={head_dim}, seq_len={seq_len}, {test_dtype}) executed!')
 
             try:
                 torch.testing.assert_close(output_standard, output_xlite, atol=1e-5, rtol=1e-3)

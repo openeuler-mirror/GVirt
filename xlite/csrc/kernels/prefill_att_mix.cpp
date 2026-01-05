@@ -7,6 +7,7 @@
  */
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+#include "softmax_attn_aiv.h"
 using namespace AscendC;
 
 #define TILESIZE_16 16
@@ -373,143 +374,6 @@ public:
         }
     }
 
-#if __DAV_C220_VEC__
-    /* ROUND_UP(padN * sizeof(Dtype), VECTOR_MAX_BYTESIZE) * 2 +
-     *     ROUND_UP(padN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) +
-     *     DIV_ROUND_UP(padN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) * sizeof(CalcDtype) <= ub size(196608B)
-     * float16_t: padN <= 32640
-     * bfloat16_t: padN <= 24320
-     */
-    inline __aicore__ void RunAivSoftmax(__gm__ Dtype *qk, uint16_t padN, uint16_t tokens,
-                                         uint32_t cachedTokens, uint32_t curSeq, uint32_t curPromptLen)
-    {
-        CalcDtype min;
-        if constexpr (std::is_same<CalcDtype, half>::value) {
-            min = half(-65504);
-        } else {
-            min = -3.4028235e+38;
-        }
-
-        set_mask_norm();
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-
-        uint64_t off = 0;
-        __ubuf__ Dtype *in = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += ROUND_UP(padN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-        __ubuf__ Dtype *out = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += ROUND_UP(padN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-        __ubuf__ CalcDtype *cal = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
-        off += ROUND_UP(padN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE);
-        __ubuf__ CalcDtype *temp = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
-        __ubuf__ CalcDtype *ptr;
-
-        int calPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
-        int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
-
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-        for (int idx = 0; idx < tokens; ++idx) {
-            // softmax计算跳过padding的部分
-            if (curSeq + idx >= curPromptLen) {
-                break;
-            }
-
-            int actualCachedTokens = 1 + cachedTokens + idx; // 每一行开始mask的位置
-            int padCachedTokens = ROUND_UP(actualCachedTokens, calPad);
-            int repeat = padCachedTokens / calPad;
-
-            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-            copy_gm_to_ubuf(in, qk + idx * padN, 0, 1,
-                            DIV_ROUND_UP(actualCachedTokens * sizeof(Dtype), 32), 0, 0);
-
-            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-
-            if constexpr (std::is_same<CalcDtype, half>::value) {
-                ptr = in;
-            } else {
-                vconv_bf162f32((__ubuf__ float *)cal, (__ubuf__ Dtype *)in, repeat, 1, 1, 8, 4);
-                pipe_barrier(PIPE_V);
-                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-                ptr = cal;
-            }
-
-            // dup calPad
-            if (actualCachedTokens % calPad != 0) {
-                SetMaskFromHighBit(calPad, calPad - actualCachedTokens % calPad);
-                vector_dup(ptr + ROUND_DOWN(actualCachedTokens, calPad), min, 1, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
-                set_vector_mask((uint64_t)-1, (uint64_t)-1);
-            }
-
-            // max
-            ReduceMax(temp, ptr, actualCachedTokens);
-
-            // broadcast一个max标量为一个block大小的向量，避免使用scalar运算
-            if constexpr (std::is_same<CalcDtype, half>::value) {
-                vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
-            } else {
-                vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
-            }
-            pipe_barrier(PIPE_V);
-
-            // QK - max
-            vsub(cal, ptr, temp, repeat, 1, 1, 0, 8, 8, 0);
-            pipe_barrier(PIPE_V);
-            if constexpr (std::is_same<CalcDtype, half>::value) {
-                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-            }
-
-            // EXP = exp(QK-max)
-            vexp(cal, cal, repeat, 1, 1, 8, 8);
-            pipe_barrier(PIPE_V);
-
-            // s = Reduce_sum(EXP)
-            ReduceSum(temp, cal, actualCachedTokens);
-
-            // broadcast一个s = Reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算
-            if constexpr (std::is_same<CalcDtype, half>::value) {
-                vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
-            } else {
-                vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
-            }
-            pipe_barrier(PIPE_V);
-
-            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-            if constexpr (std::is_same<CalcDtype, half>::value) {
-                vdiv(out, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
-                pipe_barrier(PIPE_V);
-            } else {
-                vdiv(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
-                pipe_barrier(PIPE_V);
-                vconv_f322bf16r(out, cal, repeat, 1, 1, 4, 8);
-                pipe_barrier(PIPE_V);
-            }
-
-            if (padN > actualCachedTokens) {
-                if (actualCachedTokens % pad != 0) {
-                    SetMaskFromHighBit(pad, pad - actualCachedTokens % pad);
-                    vector_dup(out + ROUND_DOWN(actualCachedTokens, pad), Dtype(0), 1, 1, 1, 8, 0);
-                    pipe_barrier(PIPE_V);
-                    set_vector_mask((uint64_t)-1, (uint64_t)-1);
-                }
-                int last = ROUND_UP(actualCachedTokens, pad);
-                if (padN > last) {
-                    vector_dup(out + last, Dtype(0), (padN - last) / pad, 1, 1, 8, 0);
-                }
-            }
-
-            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            copy_ubuf_to_gm(qk + idx * padN, out, 0, 1, padN / 16, 0, 0);
-            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-        }
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-        pipe_barrier(PIPE_ALL);
-    }
-#endif
-
     inline __aicore__ void RunAiv()
     {
         set_atomic_none();
@@ -550,14 +414,20 @@ public:
                 wait_flag_dev(flagIdx);
 
                 uint32_t subIdx = get_subblockid();
-                int newCachedTokens = seqIdx * m0 + subIdx * m0 / 2 + cachedTokens;
+                uint32_t calcLen = seqIdx * m0 + subIdx * m0 / 2 + cachedTokens + 1;
                 uint32_t curSeq = seqIdx * m0 + subIdx * m0 / 2;
                 __gm__ Dtype *qk = ((__gm__ Dtype *)qkGmBuf.GetPhyAddr()) + block_idx * m0 * padN + subIdx * m0 / 2 * padN;
                 if (qkIdx % 2 == 0) {
                     qk = qk + qkOffset;
                 }
 
-                RunAivSoftmax(qk, padN, m0 / 2, newCachedTokens, curSeq, m);
+                uint32_t tokens = m0 / 2;
+                if (tokens + curSeq > m) {
+                    tokens = m > curSeq ? m - curSeq : 0;
+                }
+                if (tokens > 0) {
+                    RunAivSoftmax<Dtype, CalcDtype>(qk, tokens, padN, calcLen);
+                }
                 flagIdx = 1;
                 uint64_t mode = 2; // inner-group aic/aiv sync
                 uint64_t config = 1 | (mode << 4) | (flagIdx << 8);

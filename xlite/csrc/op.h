@@ -96,4 +96,6 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &nor
 void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &in, XTensor &indices,
                         XTensor &outWeights, XTensor &outRouting,
                         uint32_t topK, bool normTopKProb);
+void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x);
+void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x);
 #endif
