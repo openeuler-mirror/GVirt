@@ -60,7 +60,7 @@ for dtype, atol, rtol in supported_dtype_list:
                 if j + 1 != iter_num:
                     end_offset = block_size
                 else:
-                    end_offset = seq_len % block_size
+                    end_offset = seq_len - j * block_size
                 k_cache_xlite[i * iter_num + j, :end_offset] = k_cache_standard[i, start_offset:start_offset + end_offset]
                 v_cache_xlite[i * iter_num + j, :end_offset] = v_cache_standard[i, start_offset:start_offset + end_offset]
 
