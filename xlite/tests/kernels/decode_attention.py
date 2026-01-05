@@ -13,15 +13,15 @@ from xlite._C import Runtime, decode_attention
 rt = Runtime(0, 500)
 torch.npu.set_device(0)
 
-num_heads = 32
-num_kv_heads = 32
-max_batch_size = 8
-batch_size = 4
-max_seq_len = 32768
+num_heads = 4
+num_kv_heads = 4
+max_batch_size = 2
+batch_size = 2
+max_seq_len = 150000
 head_size = 128
 block_size = 128
 max_block_num = batch_size * ((max_seq_len + block_size - 1) // block_size)
-hidden_size = 4096
+hidden_size = 512
 
 q_size = num_heads * head_size
 kv_size = num_kv_heads * head_size
@@ -30,12 +30,12 @@ supported_dtype_list = [
     (torch.float16, 2e-4, 2e-3),
     (torch.bfloat16, 2e-3, 2e-2)
 ]
-seq_len_list = [4000, 6000]
+seq_len_list = [4000, 6000, 16000, 24000, 33000, 60000, 120000, 140000]
 
+a2v = torch.zeros(int(num_heads * max_batch_size * 512 / 4), dtype=torch.int32, device="npu:0")
+v2a = torch.zeros(int(num_heads * max_batch_size * 512 / 4), dtype=torch.int32, device="npu:0")
 for dtype, atol, rtol in supported_dtype_list:
     for seq_len in seq_len_list:
-        a2v = torch.empty(int(num_heads * max_batch_size * 512 / 4), dtype=torch.int32, device="npu:0")
-        v2a = torch.empty(int(num_heads * max_batch_size * 512 / 4), dtype=torch.int32, device="npu:0")
         decode_idx = torch.tensor([0, 1, 2, 3, 0, 0, 0, 0], dtype=torch.int32, device="npu:0")
         cum_prompt_lens = torch.tensor([0, 1, 2, 3, 0, 0, 0, 0], dtype=torch.int32, device="npu:0")
         cached_lens = torch.tensor([seq_len - 1] * batch_size + [0] * (max_batch_size - batch_size),

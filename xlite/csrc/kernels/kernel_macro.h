@@ -24,6 +24,7 @@ using namespace AscendC;
 #define VECTOR_MAX_BYTESIZE 256               // The maximum byte size of one repeat in vector
 #define VECTOR_MAX_NUM_OF_FP32 64             // The maximum num of float32 dtype in one vector repeat
 #define VECTOR_MAX_NUM_OF_FP16 128            // The maximum num of float16 dtype in one vector repeat
+#define AIC_CACHE_LINE_SIZE 512
 
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst, uint16_t srcGap, uint16_t dstGap)

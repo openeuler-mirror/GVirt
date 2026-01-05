@@ -359,9 +359,11 @@ private:
             uint32_t contextLen = (uint32_t)*(cachedLens + realTokenIdx) + 1;
 
             WaitAicAivFlag(a2v, 1, process);
+            SetFlag<HardEvent::S_MTE2>(EVENT_ID0);
+            WaitFlag<HardEvent::S_MTE2>(EVENT_ID0);
             RunAivSoftmax<Dtype, CalcDtype>(qk, 1, ROUND_UP(contextLen, blockSize), contextLen);
-            pipe_barrier(PIPE_ALL); // 此处的PIPE_ALL必须要，是用于核间同步的，保证结果写入到GM，如果用硬件同步可能可以去掉
-
+            SetFlag<HardEvent::MTE3_S>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE3_S>(EVENT_ID0);
             ResetAicAivFlag(a2v, 1, process);
             SetAicAivFlag(v2a, 1, process);
         }
@@ -382,7 +384,7 @@ private:
     {
         for (int subIdx = 0; subIdx < headNum; subIdx++) {
             uint32_t headIdx = qOffset + subIdx;
-            __gm__ uint32_t *currAddr = flagGm + headIdx * headSize;
+            __gm__ uint32_t *currAddr = flagGm + headIdx * AIC_CACHE_LINE_SIZE / sizeof(uint32_t);
             DataCacheCleanAndInvalid(currAddr);
             uint32_t flag = *currAddr;
             while (flag != headIdx + 1) {
@@ -396,7 +398,7 @@ private:
     {
         for (int subIdx = 0; subIdx < headNum; subIdx++) {
             uint32_t headIdx = qOffset + subIdx;
-            __gm__ uint32_t *currAddr = flagGm + headIdx * headSize;
+            __gm__ uint32_t *currAddr = flagGm + headIdx * AIC_CACHE_LINE_SIZE / sizeof(uint32_t);
             *currAddr = headIdx + 1;
             DataCacheCleanAndInvalid(currAddr);
         }
@@ -406,7 +408,7 @@ private:
     {
         for (int subIdx = 0; subIdx < headNum; subIdx++) {
             uint32_t headIdx = qOffset + subIdx;
-            __gm__ uint32_t *currAddr = flagGm + headIdx * headSize;
+            __gm__ uint32_t *currAddr = flagGm + headIdx * AIC_CACHE_LINE_SIZE / sizeof(uint32_t);
             *currAddr = 0;
             DataCacheCleanAndInvalid(currAddr);
         }
