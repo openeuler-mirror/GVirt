@@ -129,7 +129,7 @@ def main(
         from tests.models.llama import Llama as Transformer
     elif model_type == "qwen3_moe":
         from tests.models.qwen3_moe import ModelArgs
-        from tests.models.qwen3_moe import Qwen3Moe as Transformer
+        from tests.models.qwen3_moe import Qwen3MoE as Transformer
     else:
         return
 

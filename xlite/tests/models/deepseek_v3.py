@@ -33,7 +33,7 @@ if forward_backend == "xlite":
     xlite_model = None
     xlite_memory_mb = 500
     block_size = 64
-    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMLA, Model
+    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMLA, Model, ScoringFuncSigmoid
     import numpy as np
 
 @dataclass
@@ -921,6 +921,9 @@ class DeepSeek_V3(nn.Module):
         config.max_batch_size = args.max_batch_size
         config.max_m = args.max_m
         config.attn_type = AttnMLA
+
+        if args.score_func == "sigmoid":
+            config.scoring_func = ScoringFuncSigmoid
 
         global xlite_model
         xlite_model = self.xlite_model = Model()

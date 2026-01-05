@@ -439,7 +439,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
 void XModel::XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv)
 {
     uint32_t qHeads = _c.nHeads / _c.defTpSize;
-    uint32_t kHeads = _c.nKvHeads / _c.defTpSize;
+    uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, uint32_t(1));
     uint32_t qSize = _c.headDim * qHeads;
     uint32_t kvSize = _c.headDim * kHeads;
     uint32_t qkvSize = qSize + 2 * kvSize;
@@ -533,8 +533,13 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
     XTensor &scores = rt.pool->GetTensor({input.shape[0], _c.nRoutedExperts}, moeGate[layer].dtype);
 
     XliteOpMatmul(rt, input, moeGate[layer], scores, _c.weightNZ);
-    XliteOpSigmoidTopK(rt, scores, moeGateBias[layer], _gateIndicts, _c.nExpertGroups, _c.nLimitedGroups,
-                       _c.nActExperts, _c.routeScale, weights, routing);
+
+    if (_c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
+        XliteOpSigmoidTopK(rt, scores, moeGateBias[layer], _gateIndicts, _c.nExpertGroups, _c.nLimitedGroups,
+                           _c.nActExperts, _c.routeScale, weights, routing);
+    } else {
+        XliteOpSoftmaxTopK(rt, scores, _gateIndicts, weights, routing, _c.nActExperts, _c.normTopKProb);
+    }
 
     rt.pool->PutTensor(scores);
     return {weights, routing};
@@ -546,7 +551,7 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
     uint32_t m = tokenSorted.shape[0];
     uint32_t mAllDp = m * _c.defDpSize;
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
-    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId * nLocalRoutedExperts;
+    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
     XTensor &inputPerDp = tokenSorted, &weightsPerDp = weights, &routingPerDp = routing;
 
@@ -579,7 +584,7 @@ void XModel::ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weig
     uint32_t m = tokenSorted.shape[0];
     uint32_t mAllDp = m * _c.defDpSize;
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
-    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId * nLocalRoutedExperts;
+    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
     XTensor &tokenSortedAllDp = tokenSorted;
 
@@ -604,7 +609,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     uint32_t mAllDp = m * _c.defDpSize;
     uint32_t intermediateSize = _c.moeIntermediateSize / _c.moeTPSize;
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
-    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId * nLocalRoutedExperts;
+    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
 
     auto [w, r] = ForwardMoEGate(rt, layer, hiddenState);
@@ -621,13 +626,16 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     rt.pool->PutTensor(h13);
     rt.pool->PutTensor(h2);
 
-    XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, hiddenState.dtype);
-    ForwardMOECombine(rt, h, weights, routing, unpIdx, expertsSorted, expertsCounts);
-
-    // share experts
-    ForwardMLP(rt, moeSEUpGate[layer], moeSEDown[layer], hiddenState, false);
-    XliteOpAdd(rt, hiddenState, h, hiddenState);
-    rt.pool->PutTensor(h);
+    if (_c.nSharedExperts != 0) {
+        XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, hiddenState.dtype);
+        ForwardMOECombine(rt, h, weights, routing, unpIdx, expertsSorted, expertsCounts);
+        // share experts
+        ForwardMLP(rt, moeSEUpGate[layer], moeSEDown[layer], hiddenState, false);
+        XliteOpAdd(rt, hiddenState, h, hiddenState);
+        rt.pool->PutTensor(h);
+    } else {
+        ForwardMOECombine(rt, hiddenState, weights, routing, unpIdx, expertsSorted, expertsCounts);
+    }
 
     if (_c.defTpSize > 1) {
         XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);

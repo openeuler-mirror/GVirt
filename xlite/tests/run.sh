@@ -81,6 +81,8 @@ function run_qwen3_moe_30B()
         "n_kv_heads": 4,
         "norm_eps": 1e-06,
         "rope_theta": 10000000.0,
+        "moe_ep_size": 8,
+        "moe_tp_size": 1,
         "dtype": "bfloat16",
         "max_batch_size": 1,
         "max_seq_len": 1024
@@ -179,7 +181,7 @@ function run_deepseek()
 #run_qwen2.5_0.5B
 run_qwen2_32B
 run_qwen3_32B
-#run_qwen3_moe_30B
+run_qwen3_moe_30B
 run_llama_7B
 run_llama_13B
 run_llama_34B

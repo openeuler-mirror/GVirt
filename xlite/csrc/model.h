@@ -18,6 +18,12 @@ enum XModelRopeType {
     XMODEL_ROPE_MAX_TYPE,
 };
 
+enum XModelScoringFuncType {
+    XMODEL_SCORING_FUNC_SOFTMAX,
+    XMODEL_SCORING_FUNC_SIGMOID,
+    XMODEL_SCORING_FUNC_MAX_TYPE,
+};
+
 struct XModelConfig {
     // global config
     uint32_t vocabSize;
@@ -54,7 +60,9 @@ struct XModelConfig {
     uint32_t nActExperts;
     uint32_t intermediateSize;
     uint32_t moeIntermediateSize;
+    enum XModelScoringFuncType scoringFunc = XMODEL_SCORING_FUNC_SOFTMAX;
     float routeScale;
+    bool normTopKProb;
 
     // parallel config
     uint32_t defTpSize;

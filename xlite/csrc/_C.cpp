@@ -129,7 +129,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 {
     uint32_t idx = 0, moe_idx = 0;
     uint32_t nLocalRoutedExperts = c.nRoutedExperts / c.moeEpSize;
-    uint32_t expertsStartIdx = c.moeEpSize == 1 ? 0 : rankId * nLocalRoutedExperts;
+    uint32_t expertsStartIdx = c.moeEpSize == 1 ? 0 : rankId / c.moeTPSize * nLocalRoutedExperts;
     uint32_t expertsEndIdx = expertsStartIdx + nLocalRoutedExperts;
     uint32_t nRE = (c.nLayers - c.nDenseLayers) * nLocalRoutedExperts;
 
@@ -174,9 +174,12 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
     for (uint32_t i = c.nDenseLayers; i < c.nLayers; i++) {
         InitXTensor(_model->moeGate[i], moeGate[moe_idx]);
-        InitXTensor(_model->moeGateBias[i], moeGateBias[moe_idx]);
-        InitXTensor(_model->moeSEUpGate[i], moeSEUpGate[moe_idx]);
-        InitXTensor(_model->moeSEDown[i], moeSEDown[moe_idx]);
+        if (c.nSharedExperts != 0) {
+            InitXTensor(_model->moeGateBias[i], moeGateBias[moe_idx]);
+            InitXTensor(_model->moeSEUpGate[i], moeSEUpGate[moe_idx]);
+            InitXTensor(_model->moeSEDown[i], moeSEDown[moe_idx]);
+        }
+
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
             InitXTensor(_model->moeREUpGate[i][j], moeREUpGate[idx]);
             if (moeREUpGate[idx].scalar_type() == at::ScalarType::Char) {
@@ -705,7 +708,9 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("block_size", &XModelConfig::blockSize)
         .def_readwrite("weight_nz", &XModelConfig::weightNZ)
         .def_readwrite("qkv_bias", &XModelConfig::addBias)
-        .def_readwrite("qk_norm", &XModelConfig::qkNorm);
+        .def_readwrite("qk_norm", &XModelConfig::qkNorm)
+        .def_readwrite("scoring_func", &XModelConfig::scoringFunc)
+        .def_readwrite("norm_topk_prob", &XModelConfig::normTopKProb);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
         .def(py::init<>())
@@ -727,6 +732,11 @@ PYBIND11_MODULE(_C, m) {
     py::enum_<XModelAttnType>(m, "AttnType")
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
         .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
+        .export_values();
+
+    py::enum_<XModelScoringFuncType>(m, "ScoringFuncType")
+        .value("ScoringFuncSoftmax", XModelScoringFuncType::XMODEL_SCORING_FUNC_SOFTMAX)
+        .value("ScoringFuncSigmoid", XModelScoringFuncType::XMODEL_SCORING_FUNC_SIGMOID)
         .export_values();
 
     py::class_<_CModel>(m, "Model")
