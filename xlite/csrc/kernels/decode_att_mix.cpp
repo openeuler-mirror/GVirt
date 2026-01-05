@@ -197,7 +197,7 @@ private:
             WaitFlag<HardEvent::FIX_S>(EVENT_ID1);
             uint64_t config = 0x1;
             set_nd_para(config);
-            int nSize = (kIdx + 1) * blockSize > maxContextLen ? contextLen % blockSize : blockSize;
+            int nSize = (kIdx + 1) == numIters ? contextLen - kIdx * blockSize : blockSize;
             CopyToGm(qkGmBuf[qHeadIdxStart * maxContextLen + kIdx * blockSize], l0cBuf,
                      headNumInGroup, nSize, CUBE_BLOCK_SIZE, maxContextLen);
             SetFlag<HardEvent::FIX_S>(EVENT_ID1);
@@ -331,7 +331,7 @@ private:
                 WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
                 unitFlag = 3;
             }
-            int kSize = (iter + 1) * blockSize > maxContextLen ? contextLen % blockSize : blockSize;
+            int kSize = (iter + 1) == numIters ? contextLen - iter * blockSize : blockSize;
             CalMmad(l0cBuf, l0aBuf, l0bBuf[curIdx], CUBE_BLOCK_SIZE, headSize, kSize, iter == 0, unitFlag);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
             curIdx = 1 - curIdx;
