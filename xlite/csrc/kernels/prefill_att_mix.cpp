@@ -256,7 +256,7 @@ public:
             SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + pingpong_K * 2);
 
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_K * 2);
-            CopyToL0BTCol(l0bBuf, l1bBuf[pingpong_K], n_tilefactor, 0, k_tilefactor);
+            CopyToL0BTCol(l0bBuf, l1bBuf[pingpong_K], n_tilefactor, 0, k_tilefactor, k_tilefactor);
             SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpong_K * 2);
             SetFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_K * 2);
 

@@ -19,7 +19,7 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
                     uint32_t numTokens, uint32_t normDim, uint32_t cntPerToken = 1,
                     uint32_t step = 0, uint32_t startOffset = 0);
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out);
-void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false,
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false, bool transpose = false,
                    uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE, uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE, uint64_t swizzle = MATMUL_SWIZZLE_DEFAULT_VALUE);
 
@@ -35,7 +35,8 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
                           uint32_t start, uint32_t end, XTensor &out);
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
                         XTensor &counts, uint32_t start, uint32_t end,
-                        XDtype weightDtype, long outDim, long inDim, XTensor &output);
+                        XDtype weightDtype, long outDim, long inDim, XTensor &output,
+                        bool weightNZ = false, bool transpose = false);
 void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
                       XTensor &position, XTensor &cossin, XTensor &slotMapping,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
