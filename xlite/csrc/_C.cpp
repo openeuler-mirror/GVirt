@@ -129,7 +129,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 {
     uint32_t idx = 0, moe_idx = 0;
     uint32_t nLocalRoutedExperts = c.nRoutedExperts / c.moeEpSize;
-    uint32_t expertsStartIdx = c.moeEpSize == 1 ? 0 : rankId * nLocalRoutedExperts;
+    uint32_t expertsStartIdx = c.moeEpSize == 1 ? 0 : rankId / c.moeTPSize * nLocalRoutedExperts;
     uint32_t expertsEndIdx = expertsStartIdx + nLocalRoutedExperts;
     uint32_t nRE = (c.nLayers - c.nDenseLayers) * nLocalRoutedExperts;
 

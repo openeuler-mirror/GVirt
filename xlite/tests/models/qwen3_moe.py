@@ -39,12 +39,12 @@ class ModelArgs:
     dim: int = 2048
     head_dim: int = 128
     inter_dim: int = 6144
-    moe_inter_dim: int= 768
+    moe_inter_dim: int = 768
     norm_topk_prob: bool = True
     decoder_sparse_step: int = 1
-    mlp_only_layers:list = None
-    n_routed_experts:int =128
-    n_activated_experts:int =8
+    mlp_only_layers: list = None
+    n_routed_experts: int = 128
+    n_activated_experts: int = 8
     vocab_size: int = 151936
     n_layers: int = 48
     n_heads: int = 32
@@ -54,6 +54,8 @@ class ModelArgs:
     dtype: Literal["bfloat16", "float16"] = "bfloat16"
     qkv_bias: bool = False
     qk_norm: bool = True
+    moe_ep_size: int = 1
+    moe_tp_size: int = 1
     model_type: str = "qwen3_moe"
 
     def __post_init__(self):
@@ -326,8 +328,8 @@ class Expert(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        self.gate_up_proj = Linear(dim, inter_dim * 2)
-        self.down_proj = Linear(inter_dim, dim)
+        self.gate_up_proj = Linear(dim, inter_dim * 2 // args.moe_tp_size)
+        self.down_proj = Linear(inter_dim // args.moe_tp_size, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -365,12 +367,13 @@ class MoE(nn.Module):
             args (ModelArgs): Model arguments containing MoE parameters.
         """
         super().__init__()
+        assert args.n_routed_experts % args.moe_ep_size == 0, f"Number of experts must be divisible by moe ep size (moe_ep_size={args.moe_ep_size})"
+        moe_ep_id = rank // args.moe_tp_size
         self.dim = args.dim
-        assert args.n_routed_experts % world_size == 0, f"Number of experts must be divisible by world size (world_size={world_size})"
         self.n_routed_experts = args.n_routed_experts
-        self.n_local_experts = args.n_routed_experts // world_size
+        self.n_local_experts = args.n_routed_experts // args.moe_ep_size
         self.n_activated_experts = args.n_activated_experts
-        self.experts_start_idx = rank * self.n_local_experts
+        self.experts_start_idx = moe_ep_id * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
         self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args) if self.experts_start_idx <= i < self.experts_end_idx else None
@@ -427,6 +430,8 @@ class Qwen3MoE(nn.Module):
         global world_size, rank
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
+        assert args.moe_ep_size * args.moe_tp_size == world_size, (f"moe parallel size(moe_ep_size={args.moe_ep_size}, moe_tp_size={args.moe_tp_size}) "
+                                                                   f"must be same with word size(world_size={world_size})")
         Linear.dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
         super().__init__()
         self.args = args
@@ -492,7 +497,7 @@ class Qwen3MoE(nn.Module):
         assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
         assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
 
-        self.xlite_weight_nz = forward_backend == "xlite"
+        self.xlite_weight_nz = False
 
         q_proj_shard_size = (self.args.head_dim * self.args.n_heads // world_size)
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
@@ -503,7 +508,9 @@ class Qwen3MoE(nn.Module):
             ("k_proj", kv_proj_shard_size, q_proj_shard_size),
             ("v_proj", kv_proj_shard_size, q_proj_shard_size + kv_proj_shard_size),
         ]
-        n_local_experts = self.args.n_routed_experts // world_size
+        n_local_experts = self.args.n_routed_experts // self.args.moe_ep_size
+        moe_tp_id = rank % self.args.moe_tp_size
+        moe_ep_id = rank // self.args.moe_tp_size
         param_dict = {name if "lm_head" in name else "model." + name: param for name, param in self.named_parameters()}
         for _, param in self.named_parameters():
             param.requires_grad = False
@@ -513,7 +520,7 @@ class Qwen3MoE(nn.Module):
 
             if "experts" in name:
                 idx = int(name.split(".")[-3])
-                if idx < rank * n_local_experts or idx >= (rank + 1) * n_local_experts:
+                if idx < moe_ep_id * n_local_experts or idx >= (moe_ep_id + 1) * n_local_experts:
                     continue
 
             is_attention_weight = False
@@ -557,14 +564,11 @@ class Qwen3MoE(nn.Module):
                     continue
                 param = param_dict[param_name]
                 shard_size = param.shape[0] // 2
+                gate_up_idx = moe_tp_id if "experts" in name else rank
 
-                if "experts" in name:
-                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                    param.data[shard_size * stride_id:shard_size*(stride_id +1)].copy_(loaded_weight)
-                else:
-                    loaded_weight = loaded_weight[shard_size * rank:shard_size * (rank + 1)]
-                    param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
-                    param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+                loaded_weight = loaded_weight[shard_size * gate_up_idx:shard_size * (gate_up_idx + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
+                param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
 
                 is_gate_up_weight = True
                 break
@@ -596,6 +600,11 @@ class Qwen3MoE(nn.Module):
                                              name, True, True, rank, world_size)
                 continue
 
+            if "down_proj" in name and "experts" in name:
+                shard_size = param.shape[1]
+                loaded_weight = loaded_weight[:, shard_size * moe_tp_id:shard_size * (moe_tp_id + 1)]
+                param.data[:,:loaded_weight.shape[1]].copy_(loaded_weight)
+                continue
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
             param.copy_(loaded_weight)
@@ -645,8 +654,8 @@ class Qwen3MoE(nn.Module):
         config.moe_intermediate_size = args.moe_inter_dim
         config.def_tp_size = world_size
         config.def_dp_size = 1
-        config.moe_ep_size = world_size
-        config.moe_tp_size = 1
+        config.moe_ep_size = args.moe_ep_size
+        config.moe_tp_size = args.moe_tp_size
         config.block_size = 128
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size

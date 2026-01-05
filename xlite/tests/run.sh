@@ -81,6 +81,8 @@ function run_qwen3_moe_30B()
         "n_kv_heads": 4,
         "norm_eps": 1e-06,
         "rope_theta": 10000000.0,
+        "moe_ep_size": 8,
+        "moe_tp_size": 1,
         "dtype": "bfloat16",
         "max_batch_size": 1,
         "max_seq_len": 1024
