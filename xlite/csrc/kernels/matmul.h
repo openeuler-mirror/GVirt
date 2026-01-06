@@ -21,7 +21,7 @@ class Matmul {
 public:
     __aicore__ inline Matmul() {}
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
-                                uint64_t m, uint64_t n, uint64_t k, uint64_t nz,
+                                uint64_t m, uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose,
                                 uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
@@ -39,6 +39,7 @@ public:
         this->n = n;
         this->k = k;
         this->nz = nz;
+        this->transpose = transpose;
 
         if (m0 == (uint64_t)-1) {
             m0 = ROUND_UP(m, 32);
@@ -142,6 +143,7 @@ public:
         int kQtileBlockNum = kQtileSize / kBlockSize;
         int kLoop = DIV_ROUND_UP(k, kQtileSize);
         int nStride = ROUND_UP(n, nBlockSize);
+        int kStride = ROUND_UP(k, kBlockSize);
 
         int pingpongL1A = 0;
         int pingpongL1B = 0;
@@ -204,17 +206,24 @@ public:
                 }
 
                 /* B GM -> L1 */
+                int k0ActualBlockNum;
                 if (kIdx4 == 0) {
                     int kRemSize = k0;
                     if (kOffset + kRemSize > k) {
                         kRemSize = k - kOffset;
                     }
+                    k0ActualBlockNum = DIV_ROUND_UP(kRemSize, kBlockSize);
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
-                    if (nz == 0) {
+                    if (transpose == 0 && nz == 0) {
                         CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual, kRemSize, k, nActualBlockPad);
-                    } else {
+                    } else if (transpose == 0 && nz == 1) {
                         CopyGmToL1(l1bBuf[pingpongL1B], bGmBuf[kOffset * nStride + nOffset * kBlockSize], 
-                                   nActual, DIV_ROUND_UP(kRemSize, kBlockSize), nStride);
+                                   nActual, k0ActualBlockNum, nStride);
+                    } else if (transpose == 1 && nz == 0) {
+                        CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[kOffset * n + nOffset], kRemSize, nActual, n, ROUND_UP(kRemSize, kBlockSize));
+                    } else if (transpose == 1 && nz == 1) {
+                        CopyGmToL1(l1bBuf[pingpongL1B], bGmBuf[nOffset * kStride + kOffset * nBlockSize],
+                                   kRemSize, DIV_ROUND_UP(nActual, nBlockSize), kStride);
                     }
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                 }
@@ -242,7 +251,13 @@ public:
                 if (kIdx4 == 0) {
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                 }
-                CopyToL0BCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum, kIdx4 * kQtileBlockNum, kActualBlockNum);
+                if (transpose) {
+                    CopyToL0BTCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum, kIdx4 * kQtileBlockNum,
+                                  kActualBlockNum, k0ActualBlockNum);
+                } else {
+                    CopyToL0BCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum, kIdx4 * kQtileBlockNum,
+                                 kActualBlockNum);
+                }
                 if (kIdx4 == 3) {
                     SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
                     pingpongL1B ^= 1;
@@ -293,6 +308,7 @@ private:
     uint64_t n;
     uint64_t k;
     uint64_t nz;
+    uint64_t transpose;
     uint64_t m0;
     uint64_t n0;
     uint64_t k0;
@@ -307,11 +323,11 @@ private:
 
 #define MATMUL_FUNC_DEFINE(dtype) \
 extern "C" __global__ __aicore__ void matmul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR z, \
-                                                     uint64_t m, uint64_t n, uint64_t k, uint64_t nz, \
+                                                     uint64_t m, uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose, \
                                                      uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl) \
 { \
     Matmul<dtype> op; \
-    op.Init(x, y, z, m, n, k, nz, m0, n0, k0, swizzl); \
+    op.Init(x, y, z, m, n, k, nz, transpose, m0, n0, k0, swizzl); \
     op.Run(); \
 }
 

@@ -32,36 +32,48 @@ if remaining > 0:
         random_vals[0] += diff
     counts += random_vals
 
-for dtype in [torch.float16, torch.bfloat16, torch.float]:
-    x = torch.randn(m, in_dim, dtype=dtype, device="npu:0")
-    weights = []
-    for i in range(group_num):
-        weight = torch.randn(out_dim, in_dim, dtype=dtype, device="npu:0")
-        weights.append(weight)
-    
-    # standard
-    start = 0
-    results = []
-    for i in range(group_num):
-        end = start + counts[i].item()
-        x_slice = x[start:end, :]
-        result = F.linear(x_slice, weights[i], None)
-        results.append(result)
-        start = end
-    result = torch.cat(results, dim=0)
+for transpose in [False, True]:
+    for dtype in [torch.float16, torch.bfloat16, torch.float]:
+        if transpose and dtype == torch.float:
+            continue
+        n = out_dim if not transpose else in_dim
+        k = in_dim if not transpose else out_dim
+        x = torch.randn(m, k, dtype=dtype, device="npu:0")
+        weights = []
+        weights_standard = []
+        for i in range(group_num):
+            if transpose:
+                weight = torch.randn(k, n, dtype=dtype, device="npu:0")
+                weight_standard = weight.transpose(0, 1).contiguous().reshape(n, k)
+            else:
+                weight = torch.randn(n, k, dtype=dtype, device="npu:0")
+                weight_standard = weight.clone()
+            weights.append(weight)
+            weights_standard.append(weight_standard)
+        
+        # standard
+        start = 0
+        results = []
+        for i in range(group_num):
+            end = start + counts[i].item()
+            x_slice = x[start:end, :]
+            result = F.linear(x_slice, weights_standard[i], None)
+            results.append(result)
+            start = end
+        result = torch.cat(results, dim=0)
 
-    # xlite
-    z = torch.zeros(m, out_dim, dtype=dtype, device="npu:0")
+        # xlite
+        z = torch.zeros(m, n, dtype=dtype, device="npu:0")
 
-    torch.npu.synchronize()
-    group_matmul(rt, x, weights, [], counts, 0, group_num, out_dim, in_dim, z)
-    torch.npu.synchronize()
+        torch.npu.synchronize()
+        group_matmul(rt, x, weights, [], counts, 0, group_num, n, k, z, False, transpose)
+        torch.npu.synchronize()
 
-    print(f'group_matmul {dtype} executed!')
+        print(f'group_matmul ({dtype}, transpose={transpose}) executed!')
 
-    try:
-        torch.testing.assert_close(result, z, atol=1e-5, rtol=1e-3)
-    except AssertionError as e:
-        print(f'{e}')
-        print(f'torch_npu: {result}')
-        print(f'xlite: {z}')
+        try:
+            torch.testing.assert_close(result, z, atol=1e-5, rtol=1e-3)
+        except AssertionError as e:
+            print(f'{e}')
+            print(f'torch_npu: {result}')
+            print(f'xlite: {z}')

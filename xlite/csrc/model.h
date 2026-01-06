@@ -63,6 +63,7 @@ struct XModelConfig {
     enum XModelScoringFuncType scoringFunc = XMODEL_SCORING_FUNC_SOFTMAX;
     float routeScale;
     bool normTopKProb;
+    bool expertsWeightTrans = false;
 
     // parallel config
     uint32_t defTpSize;

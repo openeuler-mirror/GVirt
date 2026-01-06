@@ -619,10 +619,10 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     XTensor &h13 = rt.pool->GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, hiddenState.dtype);
     XTensor &h2 = rt.pool->GetTensor({mAllDp * _c.nActExperts, intermediateSize}, hiddenState.dtype);
     XliteOpGroupMatmul(rt, expertsSorted, _moeREUpGate[layer], _moeREUpGateScale[layer], expertsCounts,
-        start, end, moeREUpGate[layer][start].dtype, intermediateSize * 2, _c.hiddenSize, h13);
+        start, end, moeREUpGate[layer][start].dtype, intermediateSize * 2, _c.hiddenSize, h13, _c.weightNZ, _c.expertsWeightTrans);
     XliteOpSiluAndMul(rt, h13, h2);
     XliteOpGroupMatmul(rt, h2, _moeREDown[layer], _moeREDownScale[layer], expertsCounts,
-        start, end, moeREDown[layer][start].dtype, _c.hiddenSize, intermediateSize, expertsSorted);
+        start, end, moeREDown[layer][start].dtype, _c.hiddenSize, intermediateSize, expertsSorted, _c.weightNZ, _c.expertsWeightTrans);
     rt.pool->PutTensor(h13);
     rt.pool->PutTensor(h2);
 

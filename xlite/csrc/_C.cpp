@@ -442,14 +442,14 @@ void Print(at::Tensor &x)
     _x.Print();
 }
 
-void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weightNZ)
+void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weightNZ, bool transpose)
 {
     XTensor _x, _y, _z;
 
     InitXTensor(_x, x);
     InitXTensor(_y, y);
     InitXTensor(_z, z);
-    XliteOpMatmul(rt, _x, _y, _z, weightNZ);
+    XliteOpMatmul(rt, _x, _y, _z, weightNZ, transpose);
     rt.Synchronize();
 }
 
@@ -621,7 +621,8 @@ void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t sta
 }
 
 void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights, std::vector<at::Tensor> &scales,
-                 at::Tensor &counts, uint32_t start, uint32_t end, long outDim, long inDim, at::Tensor &output)
+                 at::Tensor &counts, uint32_t start, uint32_t end, long outDim, long inDim, at::Tensor &output,
+                 bool weightNZ, bool transpose)
 {
     XTensor _in, _counts, _output;
     std::vector<void *> p;
@@ -646,7 +647,7 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
         rt.MemcpyH2D(_scales.ptr, p.data(), num * sizeof(void *));
     }
 
-    XliteOpGroupMatmul(rt, _in, _weights, _scales, _counts, start, end, XDtype(weights[0]), outDim, inDim, _output);
+    XliteOpGroupMatmul(rt, _in, _weights, _scales, _counts, start, end, XDtype(weights[0]), outDim, inDim, _output, weightNZ, transpose);
     rt.Synchronize();
     rt.pool->PutTensor(_weights);
     rt.pool->PutTensor(_scales);
@@ -707,6 +708,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("max_m", &XModelConfig::maxM)
         .def_readwrite("block_size", &XModelConfig::blockSize)
         .def_readwrite("weight_nz", &XModelConfig::weightNZ)
+        .def_readwrite("experts_weight_transpose", &XModelConfig::expertsWeightTrans)
         .def_readwrite("qkv_bias", &XModelConfig::addBias)
         .def_readwrite("qk_norm", &XModelConfig::qkNorm)
         .def_readwrite("scoring_func", &XModelConfig::scoringFunc)
@@ -809,7 +811,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("all_reduce", &AllReduce);
     m.def("add", &Add);
     m.def("matmul", &Matmul, "matmul",
-          py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"), py::arg("weight_nz") = false);
+          py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"), py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("embed", &Embed);
     m.def("rmsnorm", &RMSNorm);
     m.def("add_bias", &AddBias);

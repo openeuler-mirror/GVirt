@@ -25,6 +25,8 @@ using namespace AscendC;
 #define VECTOR_MAX_NUM_OF_FP32 64             // The maximum num of float32 dtype in one vector repeat
 #define VECTOR_MAX_NUM_OF_FP16 128            // The maximum num of float16 dtype in one vector repeat
 #define AIC_CACHE_LINE_SIZE 512
+#define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
+#define MATMUL_SWIZZLE_DEFAULT_VALUE (257)
 
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst, uint16_t srcGap, uint16_t dstGap)
@@ -119,12 +121,13 @@ __aicore__ inline void CopyToL0BCol(const LocalTensor<Dtype> &dst, const LocalTe
 }
 
 template <typename Dtype>
-__aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src, int nBlockNum, int kBlockStart, int kBlockNum)
+__aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src, int nBlockNum,
+                                     int kBlockStart, int kBlockNum, int srcStride)
 {
     int cubeSize = 512 / sizeof(Dtype);
-    LoadData2dParams params(0, nBlockNum, kBlockNum, 0, 0, 1, inc);
+    LoadData2dParams params(0, nBlockNum, srcStride, 0, 0, 1, inc);
     for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
-        LoadData(dst[k * nBlockNum * cubeSize], src[k * cubeSize], params);
+        LoadData(dst[(k - kBlockStart) * nBlockNum * cubeSize], src[k * cubeSize], params);
     }
 }
 

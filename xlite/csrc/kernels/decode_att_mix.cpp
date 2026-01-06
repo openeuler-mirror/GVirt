@@ -321,7 +321,7 @@ private:
                 }
             }
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + curIdx);
-            CopyToL0BTCol(l0bBuf[curIdx], l1bBuf[curIdx], nTileFactor, 0, kTileFactor);
+            CopyToL0BTCol(l0bBuf[curIdx], l1bBuf[curIdx], nTileFactor, 0, kTileFactor, kTileFactor);
             SetFlag<HardEvent::MTE1_M>(EVENT_ID1);
             SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
 

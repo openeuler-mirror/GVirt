@@ -151,14 +151,15 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &nor
     }
 }
 
-void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ, bool transpose,
                    uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzle)
 {
+    uint64_t m = in.shape[0];
+    uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
+    uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
     if (m0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
         n0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
         k0 == MATMUL_M0_N0_K0_DEFAULT_VALUE) {
-        uint64_t m = in.shape[0];
-        uint64_t n = weight.shape[0];
         m0 = ROUND_UP(m, 32);
         if (m0 > 128) {
             m0 = 128;
@@ -191,19 +192,19 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     }
 
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0],
-                                     weight.shape[1], weightNZ, m0, n0, k0, swizzle);
+        aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
+                                     weightNZ, transpose, m0, n0, k0, swizzle);
     } else if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0],
-                                      weight.shape[1], weightNZ, m0, n0, k0, swizzle);
-    } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32) {
-        aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0],
-                                 weight.shape[1], weightNZ, m0, n0, k0, swizzle);
-    } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32) {
+        aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
+                                      weightNZ, transpose, m0, n0, k0, swizzle);
+    } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32 && transpose == false) {
+        aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
+                                 weightNZ, transpose, m0, n0, k0, swizzle);
+    } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && transpose == false) {
         XTensor &tmp = rt.pool->GetTensor(in.shape, FP32);
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, tmp.ptr, in.numel);
-        aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, in.shape[0], weight.shape[0],
-                                 weight.shape[1], weightNZ, m0, n0, k0, swizzle);
+        aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k,
+                                 weightNZ, transpose, m0, n0, k0, swizzle);
         rt.pool->PutTensor(tmp);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
@@ -262,17 +263,18 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
 
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
                         XTensor &counts, uint32_t start, uint32_t end,
-                        XDtype weightDtype, long outDim, long inDim, XTensor &output)
+                        XDtype weightDtype, long outDim, long inDim, XTensor &output,
+                        bool weightNZ, bool transpose)
 {
     if (in.dtype == BF16 && weightDtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_group_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
-                                            counts.shape[0], outDim, inDim, -1, -1, -1, start, end);
+                                            counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose);
     } else if (in.dtype == FP16 && weightDtype == FP16 && output.dtype == FP16) {
         aclrtlaunch_group_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
-                                           counts.shape[0], outDim, inDim, -1, -1, -1, start, end);
-    } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32) {
+                                           counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose);
+    } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32 && transpose == false) {
         aclrtlaunch_group_matmul_float(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
-                                       counts.shape[0], outDim, inDim, -1, -1, -1, start, end);
+                                       counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
