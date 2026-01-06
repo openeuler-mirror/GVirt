@@ -21,11 +21,16 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
 
     bool has_bias = (residual != nullptr);
     float n = (float)1.0 / norm_dim;
-    uint64_t len_burst = DIV_ROUND_UP(norm_dim * sizeof(Dtype), BLOCK_SIZE);
-    uint32_t inout_blocksize = ROUND_UP(norm_dim * sizeof(Dtype), BLOCK_SIZE);
-    uint32_t calc_blocksize = ROUND_UP(norm_dim * sizeof(float), BLOCK_SIZE);
+    uint32_t total_dim = norm_dim * cnt_per_token;
+    uint64_t len_burst = DIV_ROUND_UP(total_dim * sizeof(Dtype), BLOCK_SIZE);
+    uint64_t len_burst_per_norm = DIV_ROUND_UP(norm_dim * sizeof(Dtype), BLOCK_SIZE);
+    uint32_t inout_blocksize = ROUND_UP(total_dim * sizeof(Dtype), BLOCK_SIZE);
+    uint32_t calc_blocksize = ROUND_UP(total_dim * sizeof(float), BLOCK_SIZE);
     int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
-    uint64_t repeat = DIV_ROUND_UP(norm_dim, calcPad);
+    uint64_t repeat = DIV_ROUND_UP(total_dim, calcPad);
+    uint64_t repeat_per_norm = DIV_ROUND_UP(norm_dim, calcPad);
+    uint64_t len_burst_float_per_norm = DIV_ROUND_UP(norm_dim * sizeof(float), BLOCK_SIZE);
+    uint64_t repeat_stride = DIV_ROUND_UP(norm_dim * sizeof(float), BLOCK_SIZE);
     float dupnum;
 
     uint32_t off = 0;
@@ -52,24 +57,31 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
     off += calc_blocksize;
     auto weight_calc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
 
-    copy_gm_to_ubuf(weight_addr, (__gm__ Dtype *)weight, 0, 1, len_burst, 0, 0);
+    copy_gm_to_ubuf(weight_addr, (__gm__ Dtype *)weight, 0, 1, len_burst_per_norm, 0, 0);
     set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     if constexpr (std::is_same_v<Dtype, float16_t>) {
-        vconv_f162f32(weight_calc, weight_addr, repeat, 1, 1, 8, 4);
+        vconv_f162f32(weight_calc, weight_addr, repeat_per_norm, 1, 1, 8, 4);
     } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-        vconv_bf162f32(weight_calc, weight_addr, repeat, 1, 1, 8, 4);
+        vconv_bf162f32(weight_calc, weight_addr, repeat_per_norm, 1, 1, 8, 4);
     }
     pipe_barrier(PIPE_V);
+
+    for (uint32_t norm_idx = 1; norm_idx < cnt_per_token; norm_idx++) {
+        auto weight_norm = weight_calc + norm_idx * norm_dim;
+        copy_ubuf_to_ubuf(weight_norm, weight_calc, 0, 1, len_burst_float_per_norm, 0, 0);
+        if (norm_idx == cnt_per_token - 1) {
+            pipe_barrier(PIPE_V);
+        }
+    }
 
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID2);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID3);
-    uint32_t loop_count = token_num * cnt_per_token;
-    for (uint32_t loop = block_idx, ping = 1; loop < loop_count; loop += block_num)
-    {
-        uint32_t offset = start_offset + loop / cnt_per_token * step + loop % cnt_per_token * norm_dim;
+    uint32_t loop_count = token_num;
+    for (uint32_t loop = block_idx, ping = 1; loop < loop_count; loop += block_num) {
+        uint32_t offset = start_offset + loop * step;
         auto event_id = ping == 1 ? EVENT_ID0 : EVENT_ID1;
         auto gm_inout = (__gm__ Dtype *)inout + offset;
         auto gm_out = (__gm__ Dtype *)out + offset;
@@ -127,26 +139,42 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
         pipe_barrier(PIPE_V);
 
         // sum(x ^ 2)
-        ReduceSum(calc1, calc1, norm_dim);
+        if (norm_dim == 128) {
+            vadd(calc1, calc1, calc1 + 64, cnt_per_token, 1, 1, 1, 16, 16, 16);
+            pipe_barrier(PIPE_V);
+            for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
+                auto calc_norm = calc1 + norm_idx * norm_dim;
+                vcadd(calc_norm, calc_norm, 1, 1, 1, 8, 0);
+            }
+        } else {
+            for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
+                auto calc_norm = calc1 + norm_idx * norm_dim;
+                ReduceSum(calc_norm, calc_norm, norm_dim);
+            }
+        }
         pipe_barrier(PIPE_V);
 
+        SetMask(1);
         // sum(x ^ 2) + eps
-        vadds(calc1, calc1, norm_eps, 1, 1, 1, 1, 1);
+        vadds(calc1, calc1, norm_eps, cnt_per_token, 1, 1, repeat_stride, repeat_stride);
         pipe_barrier(PIPE_V);
 
         // sqrt(sum(x ^ 2) + eps)
-        vsqrt(calc1, calc1, 1, 1, 1, 1, 1);
+        vsqrt(calc1, calc1, cnt_per_token, 1, 1, repeat_stride, repeat_stride);
         pipe_barrier(PIPE_V);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
         set_flag(PIPE_V, PIPE_S, event_id);
         wait_flag(PIPE_V, PIPE_S, event_id);
 
         // duplicate item
-        dupnum = *calc1;
-        set_flag(PIPE_S, PIPE_V, event_id);
-        wait_flag(PIPE_S, PIPE_V, event_id);
-
-        vector_dup(calc1, dupnum, repeat, 1, 1, 8, 1);
+        for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
+            auto calc_norm = calc1 + norm_idx * norm_dim;
+            dupnum = *calc_norm;
+            set_flag(PIPE_S, PIPE_V, event_id);
+            wait_flag(PIPE_S, PIPE_V, event_id);
+            vector_dup(calc_norm, dupnum, repeat_per_norm, 1, 1, 8, 1);
+        }
         pipe_barrier(PIPE_V);
 
         // x / sqrt(sum(x ^ 2) + eps)
