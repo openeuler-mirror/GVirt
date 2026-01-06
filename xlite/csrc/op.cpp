@@ -110,18 +110,15 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
 }
 
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
-                    uint32_t numTokens, uint32_t normDim, uint32_t cntPerToken,
-                    uint32_t step, uint32_t startOffset)
+                    uint32_t normDim, uint32_t cntPerToken, uint32_t startOffset)
 {
-    if (step == 0) {
-        step = normDim;
-    }
+
     if (in.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
-                                      numTokens, normDim, normEps, cntPerToken, step, startOffset);
+                                      in.shape[0], normDim, normEps, cntPerToken, in.shape[1], startOffset);
     } else if (in.dtype == BF16 && out.dtype == BF16) {
         aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
-                                      numTokens, normDim, normEps, cntPerToken, step, startOffset);
+                                      in.shape[0], normDim, normEps, cntPerToken, in.shape[1], startOffset);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

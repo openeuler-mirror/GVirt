@@ -315,7 +315,7 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(XRuntim
     XTensor &attnQPe = rt.pool->GetTensor({_realM, nLocalHeads, _c.ropeHeadDim}, hiddenState.dtype);
 
     XliteOpMatmul(rt, hiddenState, mlaQA[layer], attnQc, _c.weightNZ);
-    XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], attnNormQc, _c.normEps, attnQc.shape[0], attnQc.shape[1]);
+    XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], attnNormQc, _c.normEps, attnQc.shape[1]);
     XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr, _c.weightNZ);
     XliteDsOpRopeBatch(rt, _realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
                        attnQWithQr, freqsCis, _attnPosition, _vGather, attnQPe, _prefillBatch > 0 ? MIX : NORMAL);
@@ -436,20 +436,6 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     rt.pool->PutTensor(attnOutput);
 }
 
-void XModel::XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv)
-{
-    uint32_t qHeads = _c.nHeads / _c.defTpSize;
-    uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, uint32_t(1));
-    uint32_t qSize = _c.headDim * qHeads;
-    uint32_t kvSize = _c.headDim * kHeads;
-    uint32_t qkvSize = qSize + 2 * kvSize;
-
-    XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv,
-                   _c.normEps, qkv.shape[0], _c.headDim, qHeads, qkvSize);
-    XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv,
-                   _c.normEps, qkv.shape[0], _c.headDim, kHeads, qkvSize, qSize);
-}
-
 void XModel::XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTensor &vCache,
                                 XTensor &input, XTensor &output)
 {
@@ -480,7 +466,10 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XliteOpAddBias(rt, qkv, mhaQKVBias[layer], qkv);
     }
     if (_c.qkNorm) {
-        XliteOpQKNorm(rt, layer, qkv);
+        uint32_t qHeads = _c.nHeads / _c.defTpSize;
+        uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, uint32_t(1));
+        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, qHeads);
+        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim, kHeads, qHeads * _c.headDim);
     }
     XliteOpRopeCache(rt, qkv, kvCache[layer].first, kvCache[layer].second, _attnPosition, freqsCis,
                      _attnSlotMapping, _c.nHeads, _c.nKvHeads, _c.headDim,
@@ -657,7 +646,7 @@ void XModel::ForwardLayersWithInputsEmbeds(XRuntime &rt, XTensor &x,
 {
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (i == 0) {
-            XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[0], x.shape[1]);
+            XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1]);
         }
         ForwardAttn(rt, i, kvCache, freqsCis, h);
         XliteOpAddAndRmsNorm(rt, x, h, mlpNorm[i], _c.normEps, h);
