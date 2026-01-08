@@ -11,6 +11,7 @@
 #include <list>
 #include <cstdint>
 #include <complex>
+#include <algorithm>
 
 #define ROUND_UP(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
 #define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))

@@ -22,7 +22,8 @@ public:
     __aicore__ inline Matmul() {}
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
                                 uint64_t m, uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose,
-                                uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl)
+                                uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl,
+                                uint32_t curBlock = 0, uint32_t curCount = 0, uint32_t remain = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 
@@ -53,6 +54,9 @@ public:
         this->m0 = m0;
         this->n0 = n0;
         this->k0 = k0;
+        this->curBlock = curBlock;
+        this->curCount = curCount;
+        this->remain = remain;
 
         this->mBlockSize = 16;
         this->nBlockSize = 16;
@@ -159,13 +163,14 @@ public:
         int nLoop = DIV_ROUND_UP(n, n0);
         int mLoop = DIV_ROUND_UP(m, m0);
         int coreLoop = nLoop * mLoop;
+        curCount = (curCount == 0) ? coreLoop : curCount;
 
-        for (int32_t loopIdx = 0; loopIdx < coreLoop; loopIdx++) {
+        for (int32_t loopIdx = curBlock; loopIdx < curCount; loopIdx++) {
             if (loopIdx % GetBlockNum() != GetBlockIdx()) {
                 continue;
             }
-            int64_t midx = loopIdx / nLoop;
-            int64_t nidx = loopIdx % nLoop;
+            int64_t midx = (loopIdx - remain) / nLoop;
+            int64_t nidx = (loopIdx - remain) % nLoop;
             GetMNBlockIdx(loopIdx, mLoop, nLoop, swizzleDirection, swizzlCount, midx, nidx);
             int nOffset = nidx * n0;
             int mOffset = midx * m0;
@@ -319,6 +324,9 @@ private:
     int kQtileSize;
     int32_t swizzlCount;
     int32_t swizzleDirection;
+    uint32_t curBlock;
+    uint32_t curCount;
+    uint32_t remain;
 };
 
 #define MATMUL_FUNC_DEFINE(dtype) \

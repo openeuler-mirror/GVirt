@@ -11,53 +11,32 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR co
 {
     Matmul<Dtype> matmul_op;
 
+    if (m0 == (uint64_t)-1) {
+        m0 = 128;
+        n0 = 256;
+        k0 = 512 / sizeof(Dtype);
+    }
+
+    uint32_t nLoop = DIV_ROUND_UP(kN, n0);
     uint32_t off = 0;
+    uint32_t remain = 0;
     for (uint32_t i = startIdx; i < endIdx && i < n; i++) {
         uint32_t kM = *((__gm__ uint32_t *)(counts + i * sizeof(uint32_t)));
         if (kM <= 0) {
             continue;
         }
 
-        if (m0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
-            n0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
-            k0 == MATMUL_M0_N0_K0_DEFAULT_VALUE) {
-            m0 = ROUND_UP(kM, 32);
-            if (m0 > 128) {
-                m0 = 128;
-            }
-            n0 = 256;
-            k0 = 512 / sizeof(Dtype);
-
-            uint64_t mLoop = DIV_ROUND_UP(kM, m0);
-            uint64_t nLoop = DIV_ROUND_UP(kN, n0);
-            uint64_t totalLoops = mLoop * nLoop;
-            uint64_t lastLoops = totalLoops % get_block_num();
-
-            if (totalLoops < 3 * get_block_num() &&
-                (lastLoops != 0 && lastLoops < get_block_num() / 2)) {
-                if (n <= 32 * get_block_num()) {
-                    m0 = m0 > 64 ? 64 : m0;
-                    n0 = 64;
-                } else if (n <= 64 * get_block_num()) {
-                    n0 = 64;
-                } else if (n <= 128 * get_block_num()) {
-                    n0 = 128;
-                } else if (n <= 256 * get_block_num()) {
-                    n0 = 256;
-                } else {
-                    m0 = m0 > 64 ? 64 : m0;
-                    n0 = 384;
-                    k0 /= 2;
-                }
-            }
-        }
-
+        int mLoop = DIV_ROUND_UP(kM, m0);
+        uint32_t curCount = remain + mLoop * nLoop;
+        uint32_t curBlock = get_block_idx() >= remain ? get_block_idx() : get_block_idx() + get_block_num();
         uint64_t w_addr = *((__gm__ uint64_t *)(ws + i * sizeof(void *)));
         __gm__ uint8_t *w = (__gm__ uint8_t *)w_addr;
         matmul_op.Init(x + off * kK * sizeof(Dtype), w, z + off * kN * sizeof(Dtype),
-                       kM, kN, kK, weightNZ, transpose, m0, n0, k0, MATMUL_SWIZZLE_DEFAULT_VALUE);
+                       kM, kN, kK, weightNZ, transpose, m0, n0, k0, MATMUL_SWIZZLE_DEFAULT_VALUE,
+                       curBlock, curCount, remain);
         matmul_op.Run();
         off += kM;
+        remain = curCount % get_block_num();
     }
 }
 

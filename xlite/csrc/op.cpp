@@ -27,12 +27,14 @@
 #include "aclrtlaunch_add_bias_float16_t.h"
 #include "aclrtlaunch_add_bias_bfloat16_t.h"
 #include "aclrtlaunch_softmax_topk_float.h"
+#include "aclrtlaunch_softmax_topk_bfloat16_t.h"
 #include "aclrtlaunch_cast_bfloat16_t_float.h"
 #include "aclrtlaunch_group_matmul_bfloat16_t.h"
 #include "aclrtlaunch_group_matmul_float16_t.h"
 #include "aclrtlaunch_group_matmul_float.h"
 #include "aclrtlaunch_permutation.h"
-#include "aclrtlaunch_unpermutation.h"
+#include "aclrtlaunch_unpermutation_bfloat16_t.h"
+#include "aclrtlaunch_unpermutation_float.h"
 #include "aclrtlaunch_softmax_float16_t.h"
 #include "aclrtlaunch_softmax_bfloat16_t.h"
 #include "aclrtlaunch_softmax_long_float16_t.h"
@@ -250,9 +252,12 @@ void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t st
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing, XTensor &weights,
                           uint32_t start, uint32_t end, XTensor &out)
 {
-    if (in.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_unpermutation(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr, weights.ptr,
-                                  out.shape[0], in.shape[1], weights.shape[1], start, end);
+    if (in.dtype == BF16 && out.dtype == BF16 && weights.dtype == BF16) {
+        aclrtlaunch_unpermutation_bfloat16_t(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr, weights.ptr,
+                                             out.shape[0], in.shape[1], weights.shape[1], start, end);
+    } else if (in.dtype == BF16 && out.dtype == BF16 && weights.dtype == FP32) {
+        aclrtlaunch_unpermutation_float(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr, weights.ptr,
+                                        out.shape[0], in.shape[1], weights.shape[1], start, end);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
@@ -462,6 +467,9 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &socres, XTensor &indices,
     if (socres.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 && outRouting.dtype == BIT1) {
         aclrtlaunch_softmax_topk_float(rt.aivNum, rt.stream, socres.ptr, indices.ptr, outWeights.ptr, outRouting.ptr,
                                        socres.shape[0], indices.shape[0], topK, normTopKProb);
+    } else if (socres.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 && outRouting.dtype == BIT1) {
+        aclrtlaunch_softmax_topk_bfloat16_t(rt.aivNum, rt.stream, socres.ptr, indices.ptr, outWeights.ptr, outRouting.ptr,
+                                            socres.shape[0], indices.shape[0], topK, normTopKProb);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

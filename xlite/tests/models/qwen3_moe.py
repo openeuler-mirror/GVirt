@@ -293,7 +293,7 @@ class Gate(nn.Module):
         super().__init__()
         self.dim = args.dim
         self.topk = args.n_activated_experts
-        self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim, dtype=torch.float32))
+        self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
         self.norm_topk_prob = args.norm_topk_prob
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -307,7 +307,7 @@ class Gate(nn.Module):
             Tuple[torch.Tensor, torch.Tensor]: Routing weights and selected expert indices.
         """
         scores = linear(x, self.weight)
-        scores = scores.softmax(dim=-1, dtype=torch.float32)
+        scores = scores.softmax(dim=-1)
         weights, indices = torch.topk(scores, self.topk, dim=-1)
         if self.norm_topk_prob:
             weights /= weights.sum(dim=-1, keepdim=True)
