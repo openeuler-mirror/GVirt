@@ -775,23 +775,64 @@ size_t XModel::GetTensorPoolSize(void)
 {
     int dtypeSize = XDtypeBit(embed.dtype) / 8;
     size_t attnSize, ffnSize, prefillBufSize, decodeBufSize;
+    size_t mlpBufSize = 0;
+    size_t moeBufSize = 0;
+    size_t scoresBufSize = 0;
+    size_t moeDispatchDpBufSize = 0;
+    size_t routedExpertsBufSize = 0;
+    size_t shareExpertsBufSize = 0;
     size_t size = 0;
 
     // TODO
-    if (_c.attnType != XMODEL_ATTN_MHA ||
-        _c.nDenseLayers != _c.nLayers) {
+    if (_c.attnType != XMODEL_ATTN_MHA) {
         return 1024;
     }
 
     size = _c.maxM * _c.hiddenSize * 2 * dtypeSize;
+
+    // Attention
     attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
     attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
     prefillBufSize = AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxM * dtypeSize;
     decodeBufSize = _c.maxBatch * _c.nHeads / _c.defTpSize * _c.maxSeqLen * dtypeSize;
-    attnSize += prefillBufSize > decodeBufSize ? prefillBufSize : decodeBufSize;
-    ffnSize = _c.maxM * mlpUpGate[0].shape[0] * dtypeSize;
-    ffnSize += _c.maxM * mlpDown[0].shape[1] * dtypeSize;
-    size += attnSize > ffnSize ? attnSize : ffnSize;
+    attnSize += std::max(prefillBufSize, decodeBufSize);
+
+    // FFN MLP
+    if (_c.nDenseLayers > 0) {
+        mlpBufSize += _c.maxM * mlpUpGate[0].shape[0] * dtypeSize;
+        mlpBufSize += _c.maxM * mlpDown[0].shape[1] * dtypeSize;
+    }
+    // FFN MoE
+    if (_c.nDenseLayers < _c.nLayers) {
+        // MoE gate
+        moeBufSize += _c.maxM * _c.nRoutedExperts * dtypeSize;
+        moeBufSize += _c.maxM * _c.nRoutedExperts / 8;
+        scoresBufSize += _c.maxM * _c.nRoutedExperts * dtypeSize;
+        // MoE dispatch
+        moeBufSize += (_c.maxM * _c.defDpSize + 1) * _c.nRoutedExperts * sizeof(int32_t);
+        moeBufSize += _c.maxM * _c.defDpSize * _c.nActExperts * _c.hiddenSize * dtypeSize;
+        moeBufSize += _c.nRoutedExperts * sizeof(int32_t);
+        if (_c.defDpSize > 1) {
+            moeDispatchDpBufSize += _c.maxM * _c.defDpSize * _c.hiddenSize * dtypeSize;
+            moeDispatchDpBufSize += _c.maxM * _c.defDpSize * _c.nRoutedExperts * dtypeSize * 2;
+        }
+        // MoE routed experts
+        uint32_t intermediateSize = _c.moeIntermediateSize / _c.moeTPSize;
+        routedExpertsBufSize = _c.maxM * _c.defDpSize * _c.nActExperts * intermediateSize * 3 * dtypeSize;
+        // MoE share experts
+        if (_c.nSharedExperts != 0) {
+            shareExpertsBufSize += _c.maxM * _c.hiddenSize * dtypeSize;
+            shareExpertsBufSize += _c.maxM * moeSEUpGate[0].shape[0] * dtypeSize;
+            shareExpertsBufSize += _c.maxM * moeSEDown[0].shape[1] * dtypeSize;
+        }
+        if (_c.defDpSize > 1) {
+            shareExpertsBufSize += _c.maxM * _c.defDpSize * _c.hiddenSize * dtypeSize;
+        }
+        moeBufSize += std::max({scoresBufSize, moeDispatchDpBufSize, routedExpertsBufSize, shareExpertsBufSize});
+    }
+    ffnSize = std::max(mlpBufSize, moeBufSize);
+
+    size += std::max(attnSize, ffnSize);
 
     return (size >> MB_BIT) + 128;
 }
