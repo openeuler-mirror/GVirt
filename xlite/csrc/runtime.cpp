@@ -44,6 +44,11 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     originAivNum = aivNum;
 
     CHECK_ACL(aclrtCreateEvent(&_event));
+
+    const char* envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
+    if (envCommOptimizeLen) {
+        commOptimizeLen = atoi(envCommOptimizeLen);
+    }
 }
 
 XRuntime::~XRuntime(void)
