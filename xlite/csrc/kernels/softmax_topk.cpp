@@ -15,6 +15,7 @@ constexpr uint64_t SORT_RESULT_BLOCK_SIZE = SORT_BLOCK_SIZE * 2;
 constexpr uint64_t MGR_SORT_VALID_BITS_OFFSET = 8;
 constexpr uint64_t MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET = 12;
 
+template<typename Dtype>
 class SoftmaxTopK {
 public:
     __aicore__ inline SoftmaxTopK() = default;
@@ -25,8 +26,8 @@ public:
                                 uint32_t topK, bool normTopKProb)
     {
         set_mask_norm();
-        this->socresGm = (__gm__ float*)socres;
-        this->weightsMapGm = (__gm__ float*)weightsMap;
+        this->socresGm = (__gm__ Dtype*)socres;
+        this->weightsMapGm = (__gm__ Dtype*)weightsMap;
         this->indicesGm = (__gm__ uint32_t*)indices;
         this->routingMapGm = (__gm__ uint32_t*)routingMap;
 
@@ -36,6 +37,7 @@ public:
         this->normTopKProb = normTopKProb;
 
         uint32_t pad = ROUND_UP(numRoutedExperts, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
+        uint32_t padDtype = ROUND_UP(numRoutedExperts, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
         uint64_t off = 0;
         socresIn = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
         off += pad;
@@ -56,6 +58,12 @@ public:
         weightsTopK = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
         off += VECTOR_MAX_BYTESIZE;
         indicesTopK = reinterpret_cast<__ubuf__ uint32_t*>((uintptr_t)off);
+        if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+            off += pad;
+            socresInTmp = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
+            off += padDtype;
+            weightsOutTmp = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
+        }
     }
 
     __aicore__ inline void Run()
@@ -63,7 +71,7 @@ public:
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
         // 准备indices，所有token通用
-        copy_gm_to_ubuf_align_b32(indicesIn, indicesGm, 0, 1, nRoutedExperts * sizeof(float), 0, 0, 0, 0);
+        copy_gm_to_ubuf_align_b32(indicesIn, indicesGm, 0, 1, nRoutedExperts * sizeof(uint32_t), 0, 0, 0, 0);
         pipe_barrier(PIPE_ALL);
         // 根据token数切分任务
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
@@ -104,8 +112,13 @@ public:
     __aicore__ inline void CopyInScores(int tokenIdx)
     {
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
-        copy_gm_to_ubuf_align_b32(socresIn, socresGm + tokenIdx * nRoutedExperts,
-                                  0, 1, nRoutedExperts * sizeof(float), 0, 0, 0, 0);
+        if constexpr (std::is_same<Dtype, float>::value) {
+            copy_gm_to_ubuf_align_b32(socresIn, socresGm + tokenIdx * nRoutedExperts,
+                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+        } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+            copy_gm_to_ubuf_align_b32(socresInTmp, socresGm + tokenIdx * nRoutedExperts,
+                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+        }
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     }
 
@@ -113,6 +126,13 @@ public:
     __aicore__ inline void CalcSoftmax()
     {
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+        if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+            uint64_t repeatf32 = DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32);
+            uint64_t vector_bf162fp32_config = set_vector_1src_xt(8, 4, 1, 1, repeatf32);
+            vconv_bf162f32(socresIn, socresInTmp, vector_bf162fp32_config);
+            pipe_barrier(PIPE_V);
+        }
 
         int repeat = DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32);
         // max_socres
@@ -184,19 +204,38 @@ public:
             bitmapSet((__ubuf__ uint64_t*)routingMapOut, idx);
             *(weightsOut + idx) = *(weightsTopK + i);
         }
-        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+            uint64_t repeatf32 = DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32);
+            uint64_t vector_fp322bf16_config = set_vector_1src_xt(4, 8, 1, 1, repeatf32);
+            set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+            vconv_f322bf16r(weightsOutTmp, weightsOut, vector_fp322bf16_config);
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        } else if constexpr (std::is_same<Dtype, float>::value) {
+            set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        }
     }
 
     __aicore__ inline void CopyOutMap(int tokenIdx)
     {
-        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        } else if constexpr (std::is_same<Dtype, float>::value) {
+            wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        }
+
         // copy out indices map
         copy_ubuf_to_gm_align_b32(routingMapGm + tokenIdx * nRoutedExperts / BIT_SIZE_OF_U32, routingMapOut,
-                                  0, 1, nRoutedExperts * sizeof(float) / BIT_SIZE_OF_U32, 0, 0, 0, 0);
+                                  0, 1, nRoutedExperts * sizeof(uint32_t) / BIT_SIZE_OF_U32, 0, 0, 0, 0);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         // copy out weight map
-        copy_ubuf_to_gm_align_b32(weightsMapGm + tokenIdx * nRoutedExperts, weightsOut,
-                                  0, 1, nRoutedExperts * sizeof(float), 0, 0, 0, 0);
+        if constexpr (std::is_same<Dtype, float>::value) {
+            copy_ubuf_to_gm_align_b32(weightsMapGm + tokenIdx * nRoutedExperts, weightsOut,
+                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+        } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+            copy_ubuf_to_gm_align_b32(weightsMapGm + tokenIdx * nRoutedExperts, weightsOutTmp,
+                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+        }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     }
 
@@ -206,8 +245,8 @@ private:
     uint32_t topK;
     bool normTopKProb;
 
-    __gm__ float *socresGm;
-    __gm__ float *weightsMapGm;
+    __gm__ Dtype *socresGm;
+    __gm__ Dtype *weightsMapGm;
     __gm__ uint32_t *indicesGm;
     __gm__ uint32_t *routingMapGm;
 
@@ -221,17 +260,22 @@ private:
     __ubuf__ float *sortMrgTmp;
     __ubuf__ float *weightsTopK;
     __ubuf__ uint32_t *indicesTopK;
+    __ubuf__ Dtype *socresInTmp;
+    __ubuf__ Dtype *weightsOutTmp;
 };
 
-extern "C" __global__ __aicore__ void softmax_topk_float(GM_ADDR socres, GM_ADDR indices,
-                                                         GM_ADDR weightsMap, GM_ADDR routingMap,
-                                                         uint32_t numTokens, uint32_t numRoutedExperts,
-                                                         uint32_t topK, bool normTopKProb)
-{
-    SoftmaxTopK op;
-    op.Init(socres, indices, weightsMap, routingMap,
-            numTokens, numRoutedExperts, topK, normTopKProb);
-    op.Run();
+#define SOFTMAX_TOPK_FUNC_DEFINE(dtype) \
+extern "C" __global__ __aicore__ void softmax_topk_##dtype(GM_ADDR socres, GM_ADDR indices, \
+                                                           GM_ADDR weightsMap, GM_ADDR routingMap, \
+                                                           uint32_t numTokens, uint32_t numRoutedExperts, \
+                                                           uint32_t topK, bool normTopKProb) \
+{ \
+    SoftmaxTopK<dtype> op; \
+    op.Init(socres, indices, weightsMap, routingMap, \
+            numTokens, numRoutedExperts, topK, normTopKProb); \
+    op.Run(); \
 }
 
+SOFTMAX_TOPK_FUNC_DEFINE(float);
+SOFTMAX_TOPK_FUNC_DEFINE(bfloat16_t);
 #endif

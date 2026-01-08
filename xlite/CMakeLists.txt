@@ -24,7 +24,7 @@ file(GLOB KERNEL_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax_topk_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax_topk.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_cce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm_cce.cpp
