@@ -91,7 +91,9 @@ extern "C" __global__ __aicore__ void add_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR 
 { \
     add<dtype>(x, y, z, x_numel, y_numel); \
 }
-
-ADD_FUNC_DEFINE(float16_t);
-ADD_FUNC_DEFINE(bfloat16_t);
+#else
+#define ADD_FUNC_DEFINE(dtype) \
+extern "C" __global__ __aicore__ void add_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t x_numel, uint32_t y_numel) \
+{ \
+}
 #endif

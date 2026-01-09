@@ -482,6 +482,3 @@ extern "C" __global__ __aicore__ void prefill_att_##dtype( \
             block_size, batchSize, max_num_blocks); \
     op.Run(); \
 }
-
-PREFILL_ATTN_FUNC_DEFINE(float16_t, float16_t);
-PREFILL_ATTN_FUNC_DEFINE(bfloat16_t, float);

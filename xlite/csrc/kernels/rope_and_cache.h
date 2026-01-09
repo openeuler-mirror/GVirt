@@ -420,7 +420,13 @@ extern "C" __global__ __aicore__ void rope_and_cache_##dtype( \
     rope_and_cache<dtype>(positions, query, key, value, cossinCache, keyCache, valueCache, slotMapping, numTokens, \
                           rotDim, queryStride, keyStride, valueStride, numHeads, numKVHeads, headDim, blockSize, scaleIn); \
 }
-
-ROPEANDCACHE_FUNC_DEFINE(float16_t);
-ROPEANDCACHE_FUNC_DEFINE(bfloat16_t);
+#else
+#define ROPEANDCACHE_FUNC_DEFINE(dtype) \
+extern "C" __global__ __aicore__ void rope_and_cache_##dtype( \
+                GM_ADDR positions, GM_ADDR query, GM_ADDR key, GM_ADDR value, \
+                GM_ADDR cossinCache, GM_ADDR keyCache, GM_ADDR valueCache, GM_ADDR slotMapping, \
+                uint32_t numTokens, uint32_t rotDim, uint32_t queryStride, uint32_t keyStride, uint32_t valueStride, \
+                uint32_t numHeads, uint32_t numKVHeads, uint32_t headDim, uint32_t blockSize, float scaleIn) \
+{ \
+}
 #endif
