@@ -8,6 +8,7 @@
 
 #define XLITE_DEFAULT_DEVS_PER_NODE 8
 #define XLITE_DEFAULT_PORT 10266
+#define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 1024
 
 typedef void *aclrtStream;
 typedef void *aclrtEvent;
@@ -42,6 +43,9 @@ public:
     XTensorPool *pool = nullptr;
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;
+    uint32_t commOptimizeLen = XLITE_DEFAULT_COMM_OPTIMIZE_LEN;
+    bool enableCommOptimize;
+    XTensor hiddenStateSlice;
 
 private:
     int GetNodeIps(void);

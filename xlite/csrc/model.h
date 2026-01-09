@@ -182,12 +182,18 @@ private:
     void ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
-    void ForwardLayers(XRuntime &rt, XTensor &input,
+    void ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
+                               std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                               XTensor &freqsCis, XTensor &output);
+    void ForwardLayers(XRuntime &rt, XTensor &x,
                        std::vector<std::pair<XTensor, XTensor>>& kvCache,
-                       XTensor &freqsCis, XTensor &output);
-    void ForwardLayersWithInputsEmbeds(XRuntime &rt, XTensor &x,
-                                       std::vector<std::pair<XTensor, XTensor>>& kvCache,
-                                       XTensor &freqsCis, XTensor &h);
+                       XTensor &freqsCis, XTensor &h);
+    void ForwardLayersNaive(XRuntime &rt, XTensor &x,
+                            std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                            XTensor &freqsCis, XTensor &h);
+    void ForwardLayersCommOptimize(XRuntime &rt, XTensor &x,
+                                   std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                   XTensor &freqsCis, XTensor &h);
     struct XModelConfig _c;
     uint32_t _rankId;
 

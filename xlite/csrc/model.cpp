@@ -431,7 +431,11 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     XliteOpMatmul(rt, attnOutput, attnOut[layer], hiddenState, _c.weightNZ);
 
     if (_c.defTpSize > 1) {
-        XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        if (rt.enableCommOptimize) {
+            XliteOpReduceScatter(rt, hiddenState, rt.hiddenStateSlice, TP);
+        } else {
+            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        }
     }
     rt.pool->PutTensor(attnOutput);
 }
@@ -478,7 +482,11 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     XliteOpAttention(rt, layer, kvCache[layer].first, kvCache[layer].second, qkv, attn);
     XliteOpMatmul(rt, attn, attnOut[layer], hiddenState, _c.weightNZ);
     if (_c.defTpSize > 1) {
-        XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        if (rt.enableCommOptimize) {
+            XliteOpReduceScatter(rt, hiddenState, rt.hiddenStateSlice, TP);
+        } else {
+            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        }
     }
     rt.pool->PutTensor(qkv);
     rt.pool->PutTensor(attn);
@@ -508,7 +516,11 @@ void XModel::ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &h
     XliteOpMatmul(rt, h2, down, hiddenState, _c.weightNZ);
 
     if (withAllReduce && _c.defTpSize > 1) {
-        XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        if (rt.enableCommOptimize) {
+            XliteOpReduceScatter(rt, hiddenState, rt.hiddenStateSlice, TP);
+        } else {
+            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        }
     }
     rt.pool->PutTensor(h2);
     rt.pool->PutTensor(h13);
@@ -627,7 +639,11 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     }
 
     if (_c.defTpSize > 1) {
-        XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        if (rt.enableCommOptimize) {
+            XliteOpReduceScatter(rt, hiddenState, rt.hiddenStateSlice, TP);
+        } else {
+            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        }
     }
 }
 
@@ -640,9 +656,35 @@ void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     }
 }
 
-void XModel::ForwardLayersWithInputsEmbeds(XRuntime &rt, XTensor &x,
-                                           std::vector<std::pair<XTensor, XTensor>>& kvCache,
-                                           XTensor &freqsCis, XTensor &h)
+void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &x,
+                                       std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                       XTensor &freqsCis, XTensor &h)
+{
+    XTensor xSlice;
+    void *slicePtr = (void *)((uint64_t)h.ptr + rt.rankId() * h.numel / _c.defTpSize * XDtypeBit(h.dtype) / 8);
+    rt.hiddenStateSlice.Init({h.shape[0] / _c.defTpSize, h.shape[1]}, h.dtype, slicePtr);
+    slicePtr = (void *)((uint64_t)x.ptr + rt.rankId() * x.numel / _c.defTpSize * XDtypeBit(x.dtype) / 8);
+    xSlice.Init({x.shape[0] / _c.defTpSize, x.shape[1]}, x.dtype, slicePtr);
+    for (uint32_t i = 0; i < _c.nLayers; i++) {
+        if (i == 0) {
+            XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1]);
+        }
+        ForwardAttn(rt, i, kvCache, freqsCis, h);
+        XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, mlpNorm[i], _c.normEps, rt.hiddenStateSlice);
+        XliteOpAllGather(rt, rt.hiddenStateSlice, h, TP);
+        ForwardFFN(rt, i, h);
+        if (i < (_c.nLayers - 1)) {
+            XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, attnNorm[i + 1], _c.normEps, rt.hiddenStateSlice);
+            XliteOpAllGather(rt, rt.hiddenStateSlice, h, TP);
+        }  
+    }
+    XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, norm, _c.normEps, rt.hiddenStateSlice);
+    XliteOpAllGather(rt, rt.hiddenStateSlice, h, TP);
+}
+
+void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
+                                std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                XTensor &freqsCis, XTensor &h)
 {
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (i == 0) {
@@ -658,13 +700,27 @@ void XModel::ForwardLayersWithInputsEmbeds(XRuntime &rt, XTensor &x,
     XliteOpAddAndRmsNorm(rt, x, h, norm, _c.normEps, h);
 }
 
-void XModel::ForwardLayers(XRuntime &rt, XTensor &input,
-                     std::vector<std::pair<XTensor, XTensor>>& kvCache,
-                     XTensor &freqsCis, XTensor &h)
+void XModel::ForwardLayers(XRuntime &rt, XTensor &x,
+                           std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                           XTensor &freqsCis, XTensor &h)
+{
+    if (_c.defTpSize > 1 && h.shape[0] >= rt.commOptimizeLen &&
+        h.shape[0] % _c.defTpSize == 0) {
+        rt.enableCommOptimize = true;
+        ForwardLayersCommOptimize(rt, x, kvCache, freqsCis, h);
+    } else {
+        rt.enableCommOptimize = false;
+        ForwardLayersNaive(rt, x, kvCache, freqsCis, h);
+    }
+}
+
+void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
+                                   std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                   XTensor &freqsCis, XTensor &h)
 {
     XTensor &x = rt.pool->GetTensor({input.shape[0], _c.hiddenSize}, embed.dtype);
     ForwardParallelEmbed(rt, input, embed, x);
-    ForwardLayersWithInputsEmbeds(rt, x, kvCache, freqsCis, h);
+    ForwardLayers(rt, x, kvCache, freqsCis, h);
     rt.pool->PutTensor(x);
 }
 
@@ -702,7 +758,7 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input,
     }
 
     PrepareAttn(rt, attnMeta);
-    ForwardLayersWithInputsEmbeds(rt, input, kvCache, freqsCis, output);
+    ForwardLayers(rt, input, kvCache, freqsCis, output);
 }
 
 void XModel::Forward(XRuntime &rt, XTensor &input,
@@ -720,7 +776,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input,
     }
 
     PrepareAttn(rt, attnMeta);
-    ForwardLayers(rt, input, kvCache, freqsCis, output);
+    ForwardEmbedAndLayers(rt, input, kvCache, freqsCis, output);
 }
 
 void XModel::ComputeLogits(XRuntime &rt, XTensor &input, XTensor &output)
@@ -755,7 +811,7 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input,
 
     XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype);
     PrepareAttn(rt, attnMeta);
-    ForwardLayers(rt, input, kvCache, freqsCis, h);
+    ForwardEmbedAndLayers(rt, input, kvCache, freqsCis, h);
     ForwardGetLogits(rt, h, output);
     rt.pool->PutTensor(h);
 }
