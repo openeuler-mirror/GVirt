@@ -120,7 +120,7 @@ __aicore__ inline void calc_cossin(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *lo
 }
 
 template <typename Dtype>
-__aicore__ void rope_and_cache(
+__aicore__ inline void rope_and_cache(
     GM_ADDR positions, GM_ADDR query, GM_ADDR key, GM_ADDR value,
     GM_ADDR cos_sin_cache, GM_ADDR key_cache, GM_ADDR value_cache, GM_ADDR slot_mapping,
     uint32_t num_tokens, uint32_t rot_dim, uint32_t query_stride, uint32_t key_stride, uint32_t value_stride,
