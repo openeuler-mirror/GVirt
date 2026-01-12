@@ -275,7 +275,12 @@ extern "C" __global__ __aicore__ void softmax_topk_##dtype(GM_ADDR socres, GM_AD
             numTokens, numRoutedExperts, topK, normTopKProb); \
     op.Run(); \
 }
-
-SOFTMAX_TOPK_FUNC_DEFINE(float);
-SOFTMAX_TOPK_FUNC_DEFINE(bfloat16_t);
+#else
+#define SOFTMAX_TOPK_FUNC_DEFINE(dtype) \
+extern "C" __global__ __aicore__ void softmax_topk_##dtype(GM_ADDR socres, GM_ADDR indices, \
+                                                           GM_ADDR weightsMap, GM_ADDR routingMap, \
+                                                           uint32_t numTokens, uint32_t numRoutedExperts, \
+                                                           uint32_t topK, bool normTopKProb) \
+{ \
+}
 #endif

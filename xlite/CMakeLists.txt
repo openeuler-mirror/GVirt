@@ -17,29 +17,49 @@ else()
     set(CMAKE_INSTALL_PATH ${CMAKE_INSTALL_PREFIX})
 endif()
 
-# xlite_kernels_${RUN_MODE}
-file(GLOB KERNEL_FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_bfloat16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax_topk.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_cce.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm_cce.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_cce.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_cce.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_cce.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/cast.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_bfloat16_t.cpp
+# xlite_kernels_common_${RUN_MODE}
+file(GLOB KERNEL_FILES_COMMON
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/permutation.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpermutation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax_topk_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/cast_bfloat16_t_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/permutation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpermutation_float.cpp
 )
 
+# xlite_kernels_bf16_${RUN_MODE}
+file(GLOB KERNEL_FILES_BF16
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/cast_float_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax_topk_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpermutation_bfloat16_t.cpp
+)
+
+# xlite_kernels_f16_${RUN_MODE}
+file(GLOB KERNEL_FILES_F16
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_float16_t.cpp
+)
 
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
     set(ASCENDC_CMAKE_DIR ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
@@ -51,7 +71,9 @@ endif()
 include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 
 # ascendc_library use to add kernel file to generate ascendc library
-ascendc_library(xlite_kernels_${RUN_MODE} SHARED ${KERNEL_FILES})
+ascendc_library(xlite_kernels_common_${RUN_MODE} SHARED ${KERNEL_FILES_COMMON})
+ascendc_library(xlite_kernels_bf16_${RUN_MODE} SHARED ${KERNEL_FILES_BF16})
+ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
 
 # xlite
 add_library(xlite SHARED
@@ -68,7 +90,9 @@ target_compile_options(xlite PRIVATE
 )
 
 target_link_libraries(xlite PRIVATE
-    xlite_kernels_${RUN_MODE}
+    xlite_kernels_common_${RUN_MODE}
+    xlite_kernels_bf16_${RUN_MODE}
+    xlite_kernels_f16_${RUN_MODE}
     hccl
 )
 
@@ -115,7 +139,7 @@ target_link_libraries(_C PRIVATE
 
 set_target_properties(_C PROPERTIES LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:\$ORIGIN/../torch/lib")
 
-install(TARGETS xlite_kernels_${RUN_MODE} xlite
+install(TARGETS xlite_kernels_common_${RUN_MODE} xlite_kernels_bf16_${RUN_MODE} xlite_kernels_f16_${RUN_MODE} xlite
     LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
 )
 

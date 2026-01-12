@@ -215,8 +215,11 @@ extern "C" __global__ __aicore__ void rmsnorm_##dtype(GM_ADDR inout, GM_ADDR res
 { \
     rmsnorm<dtype>(inout, residual, weight, out, token_num, norm_dim, norm_eps, cnt_per_token, step, start_offset); \
 }
-
-RMSNORM_FUNC_DEFINE(float16_t);
-RMSNORM_FUNC_DEFINE(bfloat16_t);
-
+#else
+#define RMSNORM_FUNC_DEFINE(dtype) \
+extern "C" __global__ __aicore__ void rmsnorm_##dtype(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out, \
+                                                      uint32_t token_num, uint32_t norm_dim, float norm_eps, \
+                                                      uint32_t cnt_per_token, uint32_t step, uint32_t start_offset) \
+{ \
+}
 #endif

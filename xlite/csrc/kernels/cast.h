@@ -71,7 +71,9 @@ extern "C" __global__ __aicore__ void cast_##SrcType##_##TarType(GM_ADDR x, GM_A
 { \
     cast_kernel<SrcType, TarType>(x, y, length); \
 }
-
-CAST_FUNC_DEFINE(float, bfloat16_t);
-CAST_FUNC_DEFINE(bfloat16_t, float);
+#else
+#define CAST_FUNC_DEFINE(SrcType, TarType) \
+extern "C" __global__ __aicore__ void cast_##SrcType##_##TarType(GM_ADDR x, GM_ADDR y, uint32_t length) \
+{ \
+}
 #endif

@@ -107,7 +107,12 @@ extern "C" __global__ __aicore__ void unpermutation_##dtype(GM_ADDR input, GM_AD
     unpermutation<dtype>(input, routing_map, output, unp_idx, weights_map, n_tokens, dim, \
                          n_routed_experts, experts_start_idx, experts_end_idx); \
 }
-
-UNPERMUTATION_FUNC_DEFINE(float);
-UNPERMUTATION_FUNC_DEFINE(bfloat16_t);
+#else
+#define UNPERMUTATION_FUNC_DEFINE(dtype) \
+extern "C" __global__ __aicore__ void unpermutation_##dtype(GM_ADDR input, GM_ADDR routing_map, GM_ADDR output, \
+                                                            GM_ADDR unp_idx, GM_ADDR weights_map, \
+                                                            uint32_t n_tokens, uint32_t dim, uint32_t n_routed_experts, \
+                                                            uint32_t experts_start_idx, uint32_t experts_end_idx) \
+{ \
+}
 #endif

@@ -112,7 +112,3 @@ extern "C" __global__ __aicore__ void add_bias_##dtype(GM_ADDR x, GM_ADDR y, GM_
     op.Init(x, y, z, xNumel, yNumel); \
     op.Process(); \
 }
-
-ADDBIAS_FUNC_DEFINE(float);
-ADDBIAS_FUNC_DEFINE(float16_t);
-ADDBIAS_FUNC_DEFINE(bfloat16_t);

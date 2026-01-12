@@ -479,6 +479,3 @@ extern "C" __global__ __aicore__ void decode_att_##dtype(GM_ADDR a2v, GM_ADDR v2
             numQKVHeads, mOffset, mSlice); \
     op.Run(); \
 }
-
-DECODE_ATTN_FUNC_DEFINE(float16_t, float16_t);
-DECODE_ATTN_FUNC_DEFINE(bfloat16_t, float);

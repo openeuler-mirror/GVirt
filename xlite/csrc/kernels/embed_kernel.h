@@ -46,8 +46,10 @@ extern "C" __global__ __aicore__ void embed_kernel_##dtype(GM_ADDR x, GM_ADDR y,
 { \
     embed_kernel<dtype>(x, y, z, dim, batch_size, emb_start_idx, emb_end_idx, tp_size); \
 }
-
-EMBED_FUNC_DEFINE(float16_t);
-EMBED_FUNC_DEFINE(bfloat16_t);
-
+#else
+#define EMBED_FUNC_DEFINE(dtype) \
+extern "C" __global__ __aicore__ void embed_kernel_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR z, int dim, int batch_size, \
+                                                           int emb_start_idx, int emb_end_idx, int tp_size) \
+{ \
+}
 #endif
