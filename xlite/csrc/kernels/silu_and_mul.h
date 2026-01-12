@@ -8,7 +8,6 @@
 
 #define GMA(T) (__gm__ T*)
 #define UBA(T) (__ubuf__ T*)
-#define UB_SIZE 196608
 #define MAX_HIDDENSIZE_PER_PIECE 38912 // MAX_HIDDENSIZE_PER_PIECE = UB_SIZE(196608) / buffer_num(5)
 
 // 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
