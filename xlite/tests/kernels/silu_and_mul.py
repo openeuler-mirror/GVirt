@@ -21,21 +21,22 @@ supported_dtype_list = [
 ]
 
 for dtype, atol, rtol in supported_dtype_list:
-    input = torch.randn(41, 4608, dtype=dtype, device="npu:0")
-    output = torch.empty(41, 2304, dtype=dtype, device="npu:0")
+    for dim in [2304, 6400]:
+        input = torch.randn(41, dim * 2, dtype=dtype, device="npu:0")
+        output = torch.empty(41, dim, dtype=dtype, device="npu:0")
 
-    d = input.shape[-1] // 2
-    standard = torch.nn.functional.silu(input[..., :d]) * input[..., d:]
+        d = input.shape[-1] // 2
+        standard = torch.nn.functional.silu(input[..., :d]) * input[..., d:]
 
-    torch.npu.synchronize()
-    silu_and_mul(rt, input, output)
-    torch.npu.synchronize()
+        torch.npu.synchronize()
+        silu_and_mul(rt, input, output)
+        torch.npu.synchronize()
 
-    print(f'silu and mul {dtype} executed!')
+        print(f'silu and mul {dtype} executed!')
 
-    try:
-        torch.testing.assert_close(standard, output, atol=atol, rtol=rtol)
-    except AssertionError as e:
-        print(f'{e}')
-        print(f'torch_npu: {standard}')
-        print(f'xlite: {output}')
+        try:
+            torch.testing.assert_close(standard, output, atol=atol, rtol=rtol)
+        except AssertionError as e:
+            print(f'{e}')
+            print(f'torch_npu: {standard}')
+            print(f'xlite: {output}')
