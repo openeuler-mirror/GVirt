@@ -220,12 +220,14 @@ __aicore__ inline void rope_and_cache(
 
     // pos and slot
     uint32_t params_start = calcbuf_start;
-    uint32_t iter_posslot_num = (UB_SIZE - params_start) / (sizeof(uint64_t) + sizeof(uint32_t));
-    iter_posslot_num = MIN(num_tokens, iter_posslot_num);
+    uint32_t iter_posslot_num = ROUND_DOWN(UB_SIZE - params_start, 3 * BLOCK_SIZE) / (sizeof(uint64_t) + sizeof(uint32_t));
+    if (iter_posslot_num > num_tokens) {
+        iter_posslot_num = num_tokens;
+    }
     uint32_t posslot_iters = DIV_ROUND_UP(num_tokens, iter_posslot_num);
 
-    uint32_t pos_size = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int64_t);
-    uint32_t slot_size = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int32_t);
+    uint32_t pos_size = ROUND_UP(iter_posslot_num * sizeof(uint64_t), BLOCK_SIZE);
+    uint32_t slot_size = ROUND_UP(iter_posslot_num * sizeof(uint32_t), BLOCK_SIZE);
     auto pos_int_ubuf_addr0 = reinterpret_cast<__ubuf__ int64_t *>((uintptr_t)(params_start));
     auto slot_int_ubuf_addr0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)(params_start + pos_size));
 
