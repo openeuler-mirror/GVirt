@@ -301,10 +301,8 @@ __aicore__ inline void rope_and_cache(
         auto gm_slot = (__gm__ int32_t *) slot_mapping + processed_num_tokens;
         if (loop0 == posslot_iters - 1){
             iter_posslot_num = num_tokens - processed_num_tokens;
-            pos_size = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int64_t);
-            slot_size = BLOCK_SIZE * DIV_ROUND_UP(iter_posslot_num, BLOCK_SIZE) * sizeof(int32_t);
-            lenBurst_pos = DIV_ROUND_UP(pos_size, BLOCK_SIZE);
-            lenBurst_slot = DIV_ROUND_UP(slot_size, BLOCK_SIZE);
+            lenBurst_pos = DIV_ROUND_UP(iter_posslot_num * sizeof(uint64_t), BLOCK_SIZE);
+            lenBurst_slot = DIV_ROUND_UP(iter_posslot_num * sizeof(uint32_t), BLOCK_SIZE);
             dmi_cfg_pos = __set_dmi_config(sid, n_burst, lenBurst_pos, src_gap, dst_gap);
             dmi_cfg_slot = __set_dmi_config(sid, n_burst, lenBurst_slot, src_gap, dst_gap);
         }
