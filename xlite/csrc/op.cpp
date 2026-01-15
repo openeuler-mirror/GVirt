@@ -111,8 +111,11 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         }
 
         // prevents the size of each copy from being too small.
-        uint64_t countPerRank = DIV_ROUND_UP(in.numel, rank);
-        uint64_t maxCoreNum = DIV_ROUND_UP(countPerRank * XDtypeBit(in.dtype) / 8, (rank - 1) * COPY_SIZE) * (rank - 1);
+        uint64_t sizePerRank = DIV_ROUND_UP(in.numel * XDtypeBit(in.dtype) / 8, rank);
+        uint64_t maxCoreNum = rank;
+        if (sizePerRank >= DOUBLE_AIVNUM_SIZE_BOUND) {
+            maxCoreNum = rank * 2;
+        }
         uint32_t coreNum = rt.aivNum;
         if (coreNum > maxCoreNum) {
             coreNum = maxCoreNum;
@@ -193,8 +196,11 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
         }
 
         // prevents the size of each copy from being too small.
-        uint64_t countPerRank = DIV_ROUND_UP(in.numel, rank);
-        uint64_t maxCoreNum = DIV_ROUND_UP(countPerRank * XDtypeBit(in.dtype) / 8, (rank - 1) * COPY_SIZE) * (rank - 1);
+        uint64_t sizePerRank = DIV_ROUND_UP(in.numel * XDtypeBit(in.dtype) / 8, rank);
+        uint64_t maxCoreNum = rank;
+        if (sizePerRank >= DOUBLE_AIVNUM_SIZE_BOUND) {
+            maxCoreNum = rank * 2;
+        }
         uint32_t coreNum = rt.aivNum;
         if (coreNum > maxCoreNum) {
             coreNum = maxCoreNum;
@@ -261,20 +267,21 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
         bool needCopy = (in.GetType() != XTENSOR_DYNAMIC || out.GetType() != XTENSOR_DYNAMIC);
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
-        XTensor *tmpIn = nullptr;
-        XTensor *tmpOut = nullptr;
+        XTensor *tmpBuff = nullptr;
 
         if (needCopy) {
-            tmpIn = &rt.pool->GetTensor(in.shape, in.dtype, DBG_LOC);   // tmp to ensure not from pool
-            tmpOut = &rt.pool->GetTensor(out.shape, out.dtype, DBG_LOC);
-            CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, bytes, in.ptr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            inPtr = tmpIn->ptr;
-            outPtr = tmpOut->ptr;
+            tmpBuff = &rt.pool->GetTensor(in.shape, in.dtype, DBG_LOC);   // tmp to ensure not from pool
+            CHECK_ACL(aclrtMemcpyAsync(tmpBuff->ptr, bytes, in.ptr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            inPtr = tmpBuff->ptr;
+            outPtr = tmpBuff->ptr;
         }
 
         // prevents the size of each copy from being too small.
-        uint64_t countPerRank = DIV_ROUND_UP(in.numel, rank);
-        uint64_t maxCoreNum = DIV_ROUND_UP(countPerRank * XDtypeBit(in.dtype) / 8, (rank - 1) * COPY_SIZE) * (rank - 1);
+        uint64_t sizePerRank = DIV_ROUND_UP(in.numel * XDtypeBit(in.dtype) / 8, rank);
+        uint64_t maxCoreNum = rank;
+        if (sizePerRank >= DOUBLE_AIVNUM_SIZE_BOUND) {
+            maxCoreNum = rank * 2;
+        }
         uint32_t coreNum = rt.aivNum;
         if (coreNum > maxCoreNum) {
             coreNum = maxCoreNum;
@@ -314,8 +321,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, outPtr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            rt.pool->PutTensor(*tmpIn);
-            rt.pool->PutTensor(*tmpOut);
+            rt.pool->PutTensor(*tmpBuff);
         }
         return;
     }
