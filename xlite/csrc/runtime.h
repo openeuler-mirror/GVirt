@@ -8,7 +8,7 @@
 
 #define XLITE_DEFAULT_DEVS_PER_NODE 8
 #define XLITE_DEFAULT_PORT 10266
-#define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 1024
+#define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144
 
 typedef void *aclrtStream;
 typedef void *aclrtEvent;
