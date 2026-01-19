@@ -14,8 +14,6 @@
 #include "kernel_macro.h"
 using namespace AscendC;
 
-#define PINGPONG_BUF_NUM 2
-
 template<typename Dtype>
 class Matmul {
 public:

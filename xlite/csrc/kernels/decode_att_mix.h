@@ -9,13 +9,11 @@
 #include "kernel_operator.h"
 #include "softmax_attn_aiv.h"
 
-constexpr uint32_t PINGPONG_BUF_NUM = 2;
 constexpr int CUBE_BLOCK_SIZE = 16;
 constexpr uint32_t MAX_CONTEXT_BLOCK_LEN = 8192;
 constexpr uint32_t MAX_CONTEXT_REPEAT_TIMES = MAX_CONTEXT_BLOCK_LEN / CUBE_BLOCK_SIZE;
 constexpr uint32_t QK_RESULT_TEMP_NUM = 4; // 1-3 for subBlock, 4 for whole
 constexpr uint32_t QK_RESULT_TEMP_SIZE = QK_RESULT_TEMP_NUM * VECTOR_MAX_BYTESIZE;
-constexpr uint32_t MAX_UB_SIZE = 192 * 1024;
 
 // 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
 template<typename Dtype, typename CalcDtype>

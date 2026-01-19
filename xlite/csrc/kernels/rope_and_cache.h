@@ -6,8 +6,6 @@
 
 #ifdef __DAV_C220_VEC__
 
-#define UB_SIZE 196608
-#define PINGPONG_BUF_NUM 2
 #define HEAD_SIZE_64 64
 #define HEAD_SIZE_128 128
 

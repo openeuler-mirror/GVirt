@@ -28,8 +28,8 @@ using namespace AscendC;
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 #define MATMUL_SWIZZLE_DEFAULT_VALUE (257)
 #define UB_SIZE 196608
-
 #define UB_BUF_ALIGN_SIZE 32               // The align size of UB buffer address
+#define PINGPONG_BUF_NUM 2
 
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst, uint16_t srcGap, uint16_t dstGap)
@@ -271,13 +271,17 @@ __inline__ __aicore__ void ReduceMax(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
         }
 
-        int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
-        for (int i = 0; i < instNum; i++) {
-            int currRepeat = VECTOR_MAX_REPEAT;
-            if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
-                currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+        if (repeat > VECTOR_MAX_REPEAT) {
+            int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
+            for (int i = 0; i < instNum; i++) {
+                int currRepeat = VECTOR_MAX_REPEAT;
+                if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                    currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+                }
+                vcmax(dst + i * VECTOR_MAX_REPEAT, calc + i * instPad, currRepeat, 1, 1, 8, Order_t::ONLY_VALUE);
             }
-            vcmax(dst + i * VECTOR_MAX_REPEAT, calc + i * instPad, currRepeat, 1, 1, 8, Order_t::ONLY_VALUE);
+        } else {
+            vcmax(dst, calc, repeat, 1, 1, 8, Order_t::ONLY_VALUE);
         }
         calc = dst;
         pipe_barrier(PIPE_V);
@@ -315,13 +319,17 @@ __inline__ __aicore__ void ReduceSum(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
         }
 
-        int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
-        for (int i = 0; i < instNum; i++) {
-            int currRepeat = VECTOR_MAX_REPEAT;
-            if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
-                currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+        if (repeat > VECTOR_MAX_REPEAT) {
+            int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
+            for (int i = 0; i < instNum; i++) {
+                int currRepeat = VECTOR_MAX_REPEAT;
+                if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                    currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+                }
+                vcadd(dst + i * VECTOR_MAX_REPEAT, calc + i * instPad, currRepeat, 1, 1, 8, 0);
             }
-            vcadd(dst + i * VECTOR_MAX_REPEAT, calc + i * instPad, currRepeat, 1, 1, 8, 0);
+        } else {
+            vcadd(dst, calc, repeat, 1, 1, 8, 0);
         }
         calc = dst;
         pipe_barrier(PIPE_V);
