@@ -658,9 +658,10 @@ void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
 void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &x,
                                        std::vector<std::pair<XTensor, XTensor>>& kvCache,
-                                       XTensor &freqsCis, XTensor &h)
+                                       XTensor &freqsCis, XTensor &output)
 {
     XTensor xSlice;
+    XTensor &h = rt.pool->GetTensor({x.shape[0], _c.hiddenSize}, embed.dtype);
     void *slicePtr = (void *)((uint64_t)h.ptr + rt.rankId() * h.numel / _c.defTpSize * XDtypeBit(h.dtype) / 8);
     rt.hiddenStateSlice.Init({h.shape[0] / _c.defTpSize, h.shape[1]}, h.dtype, slicePtr);
     slicePtr = (void *)((uint64_t)x.ptr + rt.rankId() * x.numel / _c.defTpSize * XDtypeBit(x.dtype) / 8);
@@ -679,13 +680,15 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &x,
         }  
     }
     XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, norm, _c.normEps, rt.hiddenStateSlice);
-    XliteOpAllGather(rt, rt.hiddenStateSlice, h, TP);
+    XliteOpAllGather(rt, rt.hiddenStateSlice, output, TP);
+    rt.pool->PutTensor(h);
 }
 
 void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
                                 std::vector<std::pair<XTensor, XTensor>>& kvCache,
-                                XTensor &freqsCis, XTensor &h)
+                                XTensor &freqsCis, XTensor &output)
 {
+    XTensor &h = rt.pool->GetTensor({x.shape[0], _c.hiddenSize}, embed.dtype);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (i == 0) {
             XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1]);
@@ -697,7 +700,8 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
             XliteOpAddAndRmsNorm(rt, x, h, attnNorm[i + 1], _c.normEps, h);
         }  
     }
-    XliteOpAddAndRmsNorm(rt, x, h, norm, _c.normEps, h);
+    XliteOpAddAndRmsNorm(rt, x, h, norm, _c.normEps, output);
+    rt.pool->PutTensor(h);
 }
 
 void XModel::ForwardLayers(XRuntime &rt, XTensor &x,
@@ -833,9 +837,7 @@ size_t XModel::GetTensorPoolSize(void)
         return 1024;
     }
 
-    size = _c.maxM * _c.hiddenSize * 2 * dtypeSize;
-
-    // Attention
+    size = _c.maxM * _c.hiddenSize * 3 * dtypeSize;
     attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
     attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
     prefillBufSize = AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxM * dtypeSize;

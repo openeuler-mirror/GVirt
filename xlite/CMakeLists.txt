@@ -28,6 +28,9 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/permutation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpermutation_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/all_reduce.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reduce_scatter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/all_gather.cpp
 )
 
 # xlite_kernels_bf16_${RUN_MODE}
@@ -83,6 +86,7 @@ add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/model.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/core_assigner.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/ccl.cpp
 )
 
 target_compile_options(xlite PRIVATE

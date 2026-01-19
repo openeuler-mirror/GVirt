@@ -5,6 +5,7 @@
 #define _XLITE_RUNTIME_H_
 
 #include <cstdint>
+#include "ccl.h"
 
 #define XLITE_DEFAULT_DEVS_PER_NODE 8
 #define XLITE_DEFAULT_PORT 10266
@@ -14,6 +15,7 @@ typedef void *aclrtStream;
 typedef void *aclrtEvent;
 typedef void *HcclComm;
 class XTensorPool;
+class XcclComm;
 
 enum commType {
     TP,
@@ -47,9 +49,14 @@ public:
     bool enableCommOptimize;
     XTensor hiddenStateSlice;
 
+    XcclComm *_tpXcclComm = nullptr;
+    XcclComm *_dpXcclComm = nullptr;
+
 private:
     int GetNodeIps(void);
-    int InitComm(void);
+    int InitHcclComm(void);
+    int InitXcclComm(void);
+    void FiniXcclComm(void);
     uint32_t _devid;
     aclrtEvent _event;
     bool _init_outside = false;
@@ -60,6 +67,9 @@ private:
     uint32_t _nDevPerNode = XLITE_DEFAULT_DEVS_PER_NODE;
     uint32_t _port = XLITE_DEFAULT_PORT;
     std::vector<std::string> _ips;
+
+    char _ipcXTensorKeys[XLITE_CCL_MAX_RANK_SIZE][EXPORT_KEY_LEN];
+    void *_ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE] = {nullptr};
 };
 
 #endif

@@ -111,6 +111,7 @@ public:
     void Init(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6);
     friend std::ostream& operator<<(std::ostream& os, const XTensor& p);
+    enum XTensorType GetType() { return type; };
     std::vector<long> shape;
     size_t numel;
     enum XDtype dtype;
@@ -130,6 +131,8 @@ public:
     int Init(void);
     XTensor &GetTensor(std::vector<long> shape, enum XDtype dtype);
     void PutTensor(XTensor &t);
+    void *Ptr() { return _ptr; };
+    size_t Size() { return _size; };
 
 private:
     void *_ptr;

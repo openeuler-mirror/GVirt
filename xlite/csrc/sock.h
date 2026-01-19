@@ -13,6 +13,7 @@ public:
         : _rankId(rankId), _rankSize(rankSize), _ip(ip), _port(port) {};
     ~XSock(void);
     int Broadcast(void *buf, uint32_t size);
+    int AllGather(void *buf, uint32_t size, void *allBuf);
 
 private:
     int InitServer(void);

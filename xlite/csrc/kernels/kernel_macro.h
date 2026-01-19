@@ -29,6 +29,8 @@ using namespace AscendC;
 #define MATMUL_SWIZZLE_DEFAULT_VALUE (257)
 #define UB_SIZE 196608
 
+#define UB_BUF_ALIGN_SIZE 32               // The align size of UB buffer address
+
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst, uint16_t srcGap, uint16_t dstGap)
 {
@@ -180,6 +182,13 @@ __aicore__ inline void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTenso
     DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
     SetFixpipeNz2ndFlag(1, 1, 1);
     DataCopy(dst, src, param);
+}
+
+inline __aicore__ void DataCacheCleanAndInvalid(__gm__ void *__restrict__ gm)
+{
+    __asm__ __volatile__("");
+    dcci(gm, 0 /*SINGLE_CACHE_LINE*/);
+    __asm__ __volatile__("");
 }
 
 #if __DAV_C220_VEC__
