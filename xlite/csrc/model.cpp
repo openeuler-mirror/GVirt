@@ -554,29 +554,27 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
-    XTensor &inputPerDp = tokenSorted, &weightsPerDp = weights, &routingPerDp = routing;
-
-    if (_c.defDpSize > 1) {
-        tokenSorted = rt.pool->GetTensor({mAllDp, _c.hiddenSize}, inputPerDp.dtype);
-        weights = rt.pool->GetTensor({mAllDp, _c.nRoutedExperts}, weightsPerDp.dtype);
-        routing = rt.pool->GetTensor({mAllDp, _c.nRoutedExperts}, routingPerDp.dtype);
-        XliteOpAllGather(rt, inputPerDp, tokenSorted, DP);
-        XliteOpAllGather(rt, weightsPerDp, weights, DP);
-        XliteOpAllGather(rt, routingPerDp, routing, DP);
-        rt.pool->PutTensor(weightsPerDp);
-        rt.pool->PutTensor(routingPerDp);
-    }
-
     XTensor &unpIdx = rt.pool->GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32);
     XTensor &expertsSorted = rt.pool->GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype);
     XTensor &expertsCounts = rt.pool->GetTensor({_c.nRoutedExperts, 1}, INT32);
-    XliteOpPermutation(rt, tokenSorted, routing, start, end, expertsSorted, unpIdx, expertsCounts);
 
     if (_c.defDpSize > 1) {
-        rt.pool->PutTensor(tokenSorted);
+        XTensor &inputPerDp = tokenSorted, &weightsPerDp = weights, &routingPerDp = routing;
+        XTensor &inputAllDp = rt.pool->GetTensor({mAllDp, _c.hiddenSize}, inputPerDp.dtype);
+        XTensor &weightsAllDp = rt.pool->GetTensor({mAllDp, _c.nRoutedExperts}, weightsPerDp.dtype);
+        XTensor &routingAllDp = rt.pool->GetTensor({mAllDp, _c.nRoutedExperts}, routingPerDp.dtype);
+        XliteOpAllGather(rt, inputPerDp, inputAllDp, DP);
+        XliteOpAllGather(rt, weightsPerDp, weightsAllDp, DP);
+        XliteOpAllGather(rt, routingPerDp, routingAllDp, DP);
+        XliteOpPermutation(rt, inputAllDp, routingAllDp, start, end, expertsSorted, unpIdx, expertsCounts);
+        rt.pool->PutTensor(routingPerDp);
+        rt.pool->PutTensor(weightsPerDp);
+        rt.pool->PutTensor(inputAllDp);
+        return {weightsAllDp, routingAllDp, unpIdx, expertsSorted, expertsCounts};
+    } else {
+        XliteOpPermutation(rt, tokenSorted, routing, start, end, expertsSorted, unpIdx, expertsCounts);
+        return {weights, routing, unpIdx, expertsSorted, expertsCounts};
     }
-
-    return {weights, routing, unpIdx, expertsSorted, expertsCounts};
 }
 
 void XModel::ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weights, XTensor &routing, XTensor &unpIdx,
@@ -587,16 +585,17 @@ void XModel::ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weig
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
-    XTensor &tokenSortedAllDp = tokenSorted;
+    
 
     if (_c.defDpSize > 1) {
-        tokenSortedAllDp = rt.pool->GetTensor({mAllDp, _c.hiddenSize}, tokenSorted.dtype);
-    }
-    XliteOpUnpermutation(rt, expertsSorted, unpIdx, routing, weights, start, end, tokenSortedAllDp);
-    if (_c.defDpSize > 1) {
+        XTensor &tokenSortedAllDp = rt.pool->GetTensor({mAllDp, _c.hiddenSize}, tokenSorted.dtype);
+        XliteOpUnpermutation(rt, expertsSorted, unpIdx, routing, weights, start, end, tokenSortedAllDp);
         XliteOpReduceScatter(rt, tokenSortedAllDp, tokenSorted, DP);
         rt.pool->PutTensor(tokenSortedAllDp);
+    } else {
+        XliteOpUnpermutation(rt, expertsSorted, unpIdx, routing, weights, start, end, tokenSorted);
     }
+
     rt.pool->PutTensor(expertsCounts);
     rt.pool->PutTensor(expertsSorted);
     rt.pool->PutTensor(unpIdx);
