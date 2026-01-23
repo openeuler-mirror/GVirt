@@ -45,13 +45,13 @@ void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTenso
                              XTensor &vCache, XTensor &output, XTensor &lens,
                              XTensor &prefillIndex, XTensor &cumPromptLens, uint32_t headDim,
                              uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize,
-                             uint32_t batch, uint32_t maxNumBlock);
+                             uint32_t batch, uint32_t maxNumBlock, uint32_t maxSeqLen);
 void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &qkv,
                             XTensor &kCache, XTensor &vCache, XTensor &cachedLens,
                             XTensor &blockTables, XTensor &qk, XTensor &output, XTensor &decodeIdx,
                             XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
                             uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
-                            uint32_t nKvHeads, uint32_t maxM);
+                            uint32_t nKvHeads, uint32_t maxSeqLen);
 
 void XliteDsOpRopeBatch(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads,
                         uint32_t stepDim, uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs,

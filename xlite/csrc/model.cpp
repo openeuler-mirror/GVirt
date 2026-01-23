@@ -444,18 +444,18 @@ void XModel::XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTe
                                 XTensor &input, XTensor &output)
 {
     if (_prefillBatch > 0) {
-        XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2 * _c.maxM}, input.dtype);
+        XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen}, input.dtype);
         XliteOpPrefillAttention(rt, input, kCache, qk, _attnBlockTables, _cachedLens,
                                 vCache, output, _lens, _prefillIdx, _cumPromptLens,
                                 _c.headDim, _c.nHeads, _c.nKvHeads, _c.blockSize,
-                                _prefillBatch, _maxNumBlocks);
+                                _prefillBatch, _maxNumBlocks, _c.maxSeqLen);
         rt.pool->PutTensor(qk);
     }
     if (_decodeBatch > 0) {
         XTensor &qk = rt.pool->GetTensor({_decodeBatch, _c.nHeads / _c.defTpSize, _c.maxSeqLen}, input.dtype);
         XliteOpDecodeAttention(rt, _a2v, _v2a, input, kCache, vCache, _cachedLens, _attnBlockTables, qk,
                                output, _decodeIdx, _cumPromptLens, _decodeBatch, _c.nHeads, _c.headDim,
-                               _c.blockSize, _maxNumBlocks, _c.nKvHeads, _c.maxM);
+                               _c.blockSize, _maxNumBlocks, _c.nKvHeads, _c.maxSeqLen);
         rt.pool->PutTensor(qk);
     }
 }
@@ -840,7 +840,7 @@ size_t XModel::GetTensorPoolSize(void)
     size = _c.maxM * _c.hiddenSize * 3 * dtypeSize;
     attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
     attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
-    prefillBufSize = AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxM * dtypeSize;
+    prefillBufSize = AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen * dtypeSize;
     decodeBufSize = _c.maxBatch * _c.nHeads / _c.defTpSize * _c.maxSeqLen * dtypeSize;
     attnSize += std::max(prefillBufSize, decodeBufSize);
 

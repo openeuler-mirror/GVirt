@@ -31,7 +31,7 @@ public:
                                 GM_ADDR prefixLens, GM_ADDR v, GM_ADDR out,
                                 GM_ADDR promptLens, GM_ADDR prefillIndex, GM_ADDR cumPromptLen,
                                 uint32_t headSize, uint32_t nHeads, uint32_t nKVHeads,
-                                uint32_t blockSize, uint32_t batchSize, uint32_t maxNumBlocks)
+                                uint32_t blockSize, uint32_t batchSize, uint32_t maxNumBlocks, uint32_t maxSeqLen)
     {
         qGmBuf.SetGlobalBuffer((__gm__ Dtype *)q);
         kGmBuf.SetGlobalBuffer((__gm__ Dtype *)k);
@@ -51,6 +51,7 @@ public:
         this->blockSize = blockSize;
         this->batchSize = batchSize;
         this->maxNumBlocks = maxNumBlocks;
+        this->maxSeqLen = maxSeqLen;
     }
 
     /*
@@ -306,7 +307,7 @@ public:
             if (padM <= SEQLEN_64) {
                 m0 = TILESIZE_16;
             }
-            uint32_t qkOffset = block_num * m0 * padN;
+            uint32_t qkOffset = block_num * m0 * maxSeqLen;
             uint32_t seqNum = padM / m0;
             __gm__ int32_t *curBlockTable = blockTable + maxNumBlocks * realBatch;
             int taskNum = nHeads * seqNum;
@@ -326,7 +327,7 @@ public:
                 // do 1st QK
                 if (i == block_idx) {
                     RunAicQK(qGmBuf[qOffset + seqIdx * m0 * headSize * nQKVHeads + headIdx * headSize],
-                             kGmBuf, curBlockTable, qkGmBuf[block_idx * m0 * padN + (qkIdx % 2 == 0 ? qkOffset : 0)],
+                             kGmBuf, curBlockTable, qkGmBuf[block_idx * m0 * maxSeqLen + (qkIdx % 2 == 0 ? qkOffset : 0)],
                              mActual, padN, headSize, blockSize,
                              nHeads, nKVHeads, headIdx, maskLen, nQKVHeads);
 
@@ -349,7 +350,7 @@ public:
                     int maskLen = mOffset + cachedTokens + mActual;
 
                     RunAicQK(qGmBuf[qOffset + mOffset * headSize * nQKVHeads + headIdx * headSize],
-                             kGmBuf, curBlockTable, qkGmBuf[block_idx * m0 * padN + ((qkIdx + 1) % 2 == 0 ? qkOffset : 0)],
+                             kGmBuf, curBlockTable, qkGmBuf[block_idx * m0 * maxSeqLen + ((qkIdx + 1) % 2 == 0 ? qkOffset : 0)],
                              mActual, padN, headSize, blockSize,
                              nHeads, nKVHeads, headIdx, maskLen, nQKVHeads);
 
@@ -363,7 +364,7 @@ public:
                 uint64_t flagIdx = 1;
                 wait_flag_dev(flagIdx);
 
-                RunAicSV(qkGmBuf[block_idx * m0 * padN + (qkIdx % 2 == 0 ? qkOffset : 0)],
+                RunAicSV(qkGmBuf[block_idx * m0 * maxSeqLen + (qkIdx % 2 == 0 ? qkOffset : 0)],
                          vGmBuf, curBlockTable, outGmBuf[(cumM + mOffset) * nHeads * headSize + headIdx * headSize],
                          mActual, headSize, blockSize, padN,
                          nHeads, nKVHeads, headIdx, maskLen);
@@ -399,7 +400,7 @@ public:
             if (padM <= SEQLEN_64) {
                 m0 = TILESIZE_16;
             }
-            uint32_t qkOffset = block_num * m0 * padN;
+            uint32_t qkOffset = block_num * m0 * maxSeqLen;
 
             int seqNum = padM / m0;
             int taskNum = nHeads * seqNum;
@@ -415,7 +416,7 @@ public:
                 uint32_t subIdx = get_subblockid();
                 uint32_t calcLen = seqIdx * m0 + subIdx * m0 / 2 + cachedTokens + 1;
                 uint32_t curSeq = seqIdx * m0 + subIdx * m0 / 2;
-                __gm__ Dtype *qk = ((__gm__ Dtype *)qkGmBuf.GetPhyAddr()) + block_idx * m0 * padN + subIdx * m0 / 2 * padN;
+                __gm__ Dtype *qk = ((__gm__ Dtype *)qkGmBuf.GetPhyAddr()) + block_idx * m0 * maxSeqLen + subIdx * m0 / 2 * maxSeqLen;
                 if (qkIdx % 2 == 0) {
                     qk = qk + qkOffset;
                 }
@@ -463,6 +464,7 @@ private:
     uint32_t blockSize;
     uint32_t batchSize;
     uint32_t maxNumBlocks;
+    uint32_t maxSeqLen;
 };
 
 #define PREFILL_ATTN_FUNC_DEFINE(dtype, calcDtype) \
@@ -471,13 +473,13 @@ extern "C" __global__ __aicore__ void prefill_att_##dtype( \
     GM_ADDR prefix_lens, \
     GM_ADDR v, GM_ADDR out, GM_ADDR prompt_lens, \
     GM_ADDR __restrict__ prefill_index, GM_ADDR __restrict__ cum_prompt_len, \
-    uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks) \
+    uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks, uint32_t max_seq_len) \
 { \
     PrefillAttn<dtype, calcDtype> op; \
     op.Init(q, k, qk, block_table, \
             prefix_lens, v, out, \
             prompt_lens, prefill_index, cum_prompt_len, \
             head_size, num_heads, num_kv_heads, \
-            block_size, batchSize, max_num_blocks); \
+            block_size, batchSize, max_num_blocks, max_seq_len); \
     op.Run(); \
 }
