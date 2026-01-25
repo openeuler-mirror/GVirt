@@ -154,7 +154,7 @@ for test_dtype in dtype_list:
             torch.npu.synchronize()
             prefill_attention(rt, qkv_xlite, k_cache_xlite, qk, block_tables, cached_lens,
                             v_cache_xlite, output_xlite, lens, prefill_index, cum_prompt_lens,
-                            head_dim, N_HEADS, N_KV_HEADS, BLOCK_SIZE, BATCH_SIZE, max_num_block, MAX_SEQ_LEN)
+                            head_dim, N_HEADS, N_KV_HEADS, BLOCK_SIZE, BATCH_SIZE, max_num_block)
 
             logging.info(f'attention_prefill (head_dim={head_dim}, seq_len={seq_len}, {test_dtype}) executed!')
 

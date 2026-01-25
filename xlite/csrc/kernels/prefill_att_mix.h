@@ -31,7 +31,7 @@ public:
                                 GM_ADDR prefixLens, GM_ADDR v, GM_ADDR out,
                                 GM_ADDR promptLens, GM_ADDR prefillIndex, GM_ADDR cumPromptLen,
                                 uint32_t headSize, uint32_t nHeads, uint32_t nKVHeads,
-                                uint32_t blockSize, uint32_t batchSize, uint32_t maxNumBlocks, uint32_t maxSeqLen)
+                                uint32_t blockSize, uint32_t batchSize, uint32_t maxNumBlocks)
     {
         qGmBuf.SetGlobalBuffer((__gm__ Dtype *)q);
         kGmBuf.SetGlobalBuffer((__gm__ Dtype *)k);
@@ -51,7 +51,7 @@ public:
         this->blockSize = blockSize;
         this->batchSize = batchSize;
         this->maxNumBlocks = maxNumBlocks;
-        this->maxSeqLen = maxSeqLen;
+        this->maxSeqLen = maxNumBlocks * blockSize;
     }
 
     /*
@@ -473,13 +473,13 @@ extern "C" __global__ __aicore__ void prefill_att_##dtype( \
     GM_ADDR prefix_lens, \
     GM_ADDR v, GM_ADDR out, GM_ADDR prompt_lens, \
     GM_ADDR __restrict__ prefill_index, GM_ADDR __restrict__ cum_prompt_len, \
-    uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks, uint32_t max_seq_len) \
+    uint32_t head_size, uint32_t num_heads, uint32_t num_kv_heads, uint32_t block_size, uint32_t batchSize, uint32_t max_num_blocks) \
 { \
     PrefillAttn<dtype, calcDtype> op; \
     op.Init(q, k, qk, block_table, \
             prefix_lens, v, out, \
             prompt_lens, prefill_index, cum_prompt_len, \
             head_size, num_heads, num_kv_heads, \
-            block_size, batchSize, max_num_blocks, max_seq_len); \
+            block_size, batchSize, max_num_blocks); \
     op.Run(); \
 }
