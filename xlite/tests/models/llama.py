@@ -25,7 +25,6 @@ rank = 0
 
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
-    xlite_memory_mb = 500
     block_size = 128
     from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMHA, Model
     import numpy as np
@@ -197,8 +196,9 @@ class MHA(nn.Module):
         if args.qk_norm:
             self.q_norm = RMSNorm(args.head_dim, args.norm_eps)
             self.k_norm = RMSNorm(args.head_dim, args.norm_eps)
-        self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
-        self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
+        if forward_backend != "xlite":
+            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
+            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
 
     def forward(self, x, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         bsz, seqlen, _ = x.shape
@@ -472,9 +472,11 @@ class Llama(nn.Module):
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = Runtime(local_rank, xlite_memory_mb, rank, world_size)
+            self.xlite_rt = Runtime(local_rank, 0, rank, world_size)
             self.init_xlite_model(self.args)
             kv_size = self.init_xlite_kvcache(self.args)
+            pool_size = self.xlite_model.get_tensor_pool_size()
+            self.xlite_rt.init_tensor_pool(pool_size)
 
             total_model_memory = 0
             for _, param in self.named_parameters():
@@ -482,7 +484,8 @@ class Llama(nn.Module):
                 total_model_memory += memory_usage
             if rank == 0:
                 print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
-                      f" KV Cache: {kv_size // 1024 // 1024} MB")
+                      f" KV Cache: {kv_size // 1024 // 1024} MB" +
+                      f" Tensor pool: {pool_size} MB")
 
     def init_xlite_model(self, args: ModelArgs):
         config = ModelConfig()
