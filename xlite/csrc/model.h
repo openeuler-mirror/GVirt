@@ -43,10 +43,10 @@ struct XModelConfig {
     uint32_t vHeadDim;
     uint32_t qLoraRank;
     uint32_t kvLoraRank;
-    uint32_t maxM;
     uint32_t blockSize;
-    uint32_t maxBatch;
-    uint32_t maxSeqLen;
+    int64_t maxM;
+    int64_t maxBatch;
+    int64_t maxSeqLen;
     float normEps;
     float ropeTheta;
     float softmaxScale;

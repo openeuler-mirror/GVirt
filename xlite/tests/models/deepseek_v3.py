@@ -31,7 +31,6 @@ forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     xlite_rt = None
     xlite_model = None
-    xlite_memory_mb = 500
     block_size = 64
     from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMLA, Model, ScoringFuncSigmoid
     import numpy as np
@@ -453,12 +452,13 @@ class MLA(nn.Module):
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        if attn_impl == "naive":
-            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
-            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
-        else:
-            self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
-            self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
+        if forward_backend != "xlite":
+            if attn_impl == "naive":
+                self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
+                self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
+            else:
+                self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
+                self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         """
@@ -877,9 +877,11 @@ class DeepSeek_V3(nn.Module):
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = Runtime(local_rank, xlite_memory_mb, rank, world_size)
+            self.xlite_rt = Runtime(local_rank, 0, rank, world_size)
             self.init_xlite_model(self.args)
             kv_size = self.init_xlite_kvcache(self.args)
+            pool_size = self.xlite_model.get_tensor_pool_size()
+            self.xlite_rt.init_tensor_pool(pool_size)
 
             total_model_memory = 0
             for _, param in self.named_parameters():
@@ -887,7 +889,8 @@ class DeepSeek_V3(nn.Module):
                 total_model_memory += memory_usage
             if rank == 0:
                 print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
-                      f" KV Cache: {kv_size // 1024 // 1024} MB")
+                      f" KV Cache: {kv_size // 1024 // 1024} MB" +
+                      f" Tensor pool: {pool_size} MB")
 
     def init_xlite_model(self, args: ModelArgs):
         config = ModelConfig()
