@@ -75,7 +75,7 @@ for dtype, atol, rtol in supported_dtype_list:
         torch.npu.synchronize()
         decode_attention(rt, a2v, v2a, q_xlite, k_cache_xlite, v_cache_xlite, cached_lens, block_tables,
                             output, decode_idx, cum_prompt_lens,
-                            batch_size, num_heads, head_size, block_size, iter_num, num_kv_heads, max_seq_len)
+                            batch_size, num_heads, head_size, block_size, iter_num, num_kv_heads)
         torch.npu.synchronize()
         print(f'decode attention mix (seq_len={seq_len}, {dtype}) executed!')
 

@@ -544,11 +544,11 @@ void DecodeAttention(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tensor 
                         at::Tensor &blockTables, at::Tensor &output, at::Tensor &decodeIdx,
                         at::Tensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
                         uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
-                        uint32_t nKvHeads, uint32_t maxM)
+                        uint32_t nKvHeads)
 {
     XTensor _a2v, _v2a, _qkv, _kCache, _vCache, _cachedLens,
             _blockTables, _output, _decodeIdx, _cumPromptLens;
-    XTensor &qk = rt.pool->GetTensor({batch, nHeads / rt.tpSize(), maxM}, XDtype(qkv));
+    XTensor &qk = rt.pool->GetTensor({batch, nHeads / rt.tpSize(), maxNumBlock * blockSize}, XDtype(qkv));
 
     InitXTensor(_a2v, a2v);
     InitXTensor(_v2a, v2a);
@@ -563,7 +563,7 @@ void DecodeAttention(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tensor 
 
     XliteOpDecodeAttention(rt, _a2v, _v2a, _qkv, _kCache, _vCache, _cachedLens,
                            _blockTables, qk, _output, _decodeIdx, _cumPromptLens, batch, nHeads,
-                           headDim, blockSize, maxNumBlock, nKvHeads, maxM);
+                           headDim, blockSize, maxNumBlock, nKvHeads);
     rt.Synchronize();
 
     rt.pool->PutTensor(qk);

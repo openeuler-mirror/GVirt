@@ -573,7 +573,7 @@ void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &q
                             XTensor &blockTables, XTensor &qk, XTensor &output, XTensor &decodeIdx,
                             XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
                             uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
-                            uint32_t nKvHeads, uint32_t maxM)
+                            uint32_t nKvHeads)
 {
     uint32_t localHeads = nHeads / rt.tpSize();
     uint32_t localKvHeads = nKvHeads / rt.tpSize();
@@ -582,14 +582,12 @@ void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &q
         aclrtlaunch_decode_att_float16_t(rt.aicNum, rt.stream, a2v.ptr, v2a.ptr, qkv.ptr, kCache.ptr,
                                          vCache.ptr, cachedLens.ptr, blockTables.ptr, qk.ptr, output.ptr,
                                          decodeIdx.ptr, cumPromptLens.ptr, batch, localHeads, headDim,
-                                         blockSize, maxNumBlock, localKvHeads, maxM, localHeads + 2 * localKvHeads,
-                                         0, 0);
+                                         blockSize, maxNumBlock, localKvHeads);
     } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_decode_att_bfloat16_t(rt.aicNum, rt.stream, a2v.ptr, v2a.ptr, qkv.ptr, kCache.ptr,
                                           vCache.ptr, cachedLens.ptr, blockTables.ptr, qk.ptr, output.ptr,
                                           decodeIdx.ptr, cumPromptLens.ptr, batch, localHeads, headDim,
-                                          blockSize, maxNumBlock, localKvHeads, maxM, localHeads + 2 * localKvHeads,
-                                          0, 0);
+                                          blockSize, maxNumBlock, localKvHeads);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

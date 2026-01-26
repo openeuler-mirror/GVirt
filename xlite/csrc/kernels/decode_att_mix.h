@@ -9,13 +9,11 @@
 #include "kernel_operator.h"
 #include "softmax_attn_aiv.h"
 
-constexpr uint32_t PINGPONG_BUF_NUM = 2;
 constexpr int CUBE_BLOCK_SIZE = 16;
 constexpr uint32_t MAX_CONTEXT_BLOCK_LEN = 8192;
 constexpr uint32_t MAX_CONTEXT_REPEAT_TIMES = MAX_CONTEXT_BLOCK_LEN / CUBE_BLOCK_SIZE;
 constexpr uint32_t QK_RESULT_TEMP_NUM = 4; // 1-3 for subBlock, 4 for whole
 constexpr uint32_t QK_RESULT_TEMP_SIZE = QK_RESULT_TEMP_NUM * VECTOR_MAX_BYTESIZE;
-constexpr uint32_t MAX_UB_SIZE = 192 * 1024;
 
 // 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
 template<typename Dtype, typename CalcDtype>
@@ -29,9 +27,7 @@ public:
                                 GM_ADDR cachedLens, GM_ADDR mapping, GM_ADDR qk, GM_ADDR o,
                                 GM_ADDR decodeIndex, GM_ADDR cumPromptLen,
                                 uint32_t numTokens, uint32_t numHeads, uint32_t headSize,
-                                uint32_t blockSize, uint32_t mappingLen, uint32_t numKVHeads,
-                                uint32_t maxContextLen, uint32_t numQKVHeads,
-                                uint32_t mOffset, uint32_t mSlice)
+                                uint32_t blockSize, uint32_t maxNumBlock, uint32_t numKVHeads)
     {
         qGmBuf.SetGlobalBuffer((__gm__ Dtype*)q);
         kGmBuf.SetGlobalBuffer((__gm__ Dtype*)k);
@@ -51,11 +47,9 @@ public:
         this->nTokens = numTokens;
         this->nKVHeads = numKVHeads;
         this->blockSize = blockSize;
-        this->mappingLen = mappingLen;
-        this->maxContextLen = maxContextLen;
-        this->nQKVHeads = numQKVHeads;
-        this->mOffset = mOffset;
-        this->mSlice = mSlice;
+        this->maxNumBlock = maxNumBlock;
+        this->maxSeqLen = maxNumBlock * blockSize;
+        this->nQKVHeads = numHeads + 2 * numKVHeads;
         this->headNumInGroup = numHeads / numKVHeads;
         this->blockMemSize = numKVHeads * blockSize * headSize;
     }
@@ -115,9 +109,6 @@ private:
             uint32_t kvHeadIdx = qHeadIdxStart % nHeads / headNumInGroup;
             uint32_t tokenIdx = qHeadIdxStart / nHeads;
             uint32_t cumM = (uint32_t)*(cumPromptLen + tokenIdx);
-            if (mSlice > 0 && (cumM >= mOffset + mSlice || cumM < mOffset)) {
-                continue;
-            }
             uint32_t headOffset = kvHeadIdx * headSize;
             WaitFlag<HardEvent::M_MTE2>(EVENT_ID0);
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
@@ -130,7 +121,7 @@ private:
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2);
 
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2);
-            uint32_t blockTableId = (uint32_t)*(mapping + tokenIdx * mappingLen);
+            uint32_t blockTableId = (uint32_t)*(mapping + tokenIdx * maxNumBlock);
             CopyGmToL1Nd2Nz(l1bBuf[0], kGmBuf[blockTableId * blockMemSize + headOffset],
                             blockSize, headSize, headSize * nKVHeads, blockSize);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1);
@@ -166,7 +157,7 @@ private:
             uint32_t nextIdx = 1 - curIdx;
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
             if (kIdx + 1 < numIters) {
-                uint32_t blockTableId = (uint32_t)*(mapping + tokenIdx * mappingLen + kIdx + 1);
+                uint32_t blockTableId = (uint32_t)*(mapping + tokenIdx * maxNumBlock + kIdx + 1);
                 CopyGmToL1Nd2Nz(l1bBuf[nextIdx], kGmBuf[blockTableId * blockMemSize + headOffset],
                                 blockSize, headSize, nKVHeads * headSize, blockSize);
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + nextIdx);
@@ -199,8 +190,8 @@ private:
             uint64_t config = 0x1;
             set_nd_para(config);
             int nSize = (kIdx + 1) == numIters ? contextLen - kIdx * blockSize : blockSize;
-            CopyToGm(qkGmBuf[qHeadIdxStart * maxContextLen + kIdx * blockSize], l0cBuf,
-                     headNumInGroup, nSize, CUBE_BLOCK_SIZE, maxContextLen);
+            CopyToGm(qkGmBuf[qHeadIdxStart * maxSeqLen + kIdx * blockSize], l0cBuf,
+                     headNumInGroup, nSize, CUBE_BLOCK_SIZE, maxSeqLen);
             SetFlag<HardEvent::FIX_S>(EVENT_ID1);
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
             curIdx = 1 - curIdx;
@@ -233,9 +224,6 @@ private:
             uint32_t tokenIdx = idx / nKVHeads;
             uint32_t realTokenIdx = (uint32_t)*(decodeIndex + tokenIdx);
             uint32_t cumM = (uint32_t)*(cumPromptLen + realTokenIdx);
-            if (mSlice > 0 && (cumM >= mOffset + mSlice || cumM < mOffset)) {
-                continue;
-            }
             uint32_t qOffset = idx * headNumInGroup;
             uint32_t headOffset = kvHeadIdx * headSize;
             WaitAicAivFlag(v2a, headNumInGroup, qOffset);
@@ -243,11 +231,11 @@ private:
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
             DataCopyParams repeatParams(MAX_CONTEXT_REPEAT_TIMES, 1, 0, 16 - 1);
             for (uint32_t i = 0; i < headNumInGroup; i++) {
-                DataCopy(l1aBuf[i * CUBE_BLOCK_SIZE], qkGmBuf[(qOffset + i) * maxContextLen], repeatParams);
+                DataCopy(l1aBuf[i * CUBE_BLOCK_SIZE], qkGmBuf[(qOffset + i) * maxSeqLen], repeatParams);
             }
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
 
-            uint32_t blockTableId = (uint32_t)*(mapping + tokenIdx * mappingLen);
+            uint32_t blockTableId = (uint32_t)*(mapping + tokenIdx * maxNumBlock);
             CopyGmToL1Nd2Nz(l1bBuf[0], vGmBuf[blockTableId * blockMemSize + headOffset],
                             blockSize, headSize, nKVHeads * headSize, blockSize);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1);
@@ -273,7 +261,7 @@ private:
 
     inline __aicore__ void ComputeSV(uint32_t tokenIdx, uint32_t headOffset, uint32_t qOffset)
     {
-        __gm__ int32_t *blockTableMap = mapping + tokenIdx * mappingLen;
+        __gm__ int32_t *blockTableMap = mapping + tokenIdx * maxNumBlock;
 
         uint32_t contextLen = (uint32_t)*(cachedLens + tokenIdx) + 1;
         uint32_t curCtxBlock = 0;
@@ -310,9 +298,9 @@ private:
                     SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
                     DataCopyParams repeatParams(MAX_CONTEXT_REPEAT_TIMES, 1, 0, 16 - 1);
-                    uint32_t qkOffset = qOffset * maxContextLen + MAX_CONTEXT_BLOCK_LEN * nextCtxBlock;
+                    uint32_t qkOffset = qOffset * maxSeqLen + MAX_CONTEXT_BLOCK_LEN * nextCtxBlock;
                     for (int i = 0; i < headNumInGroup; i++) {
-                        DataCopy(l1aBuf[i * CUBE_BLOCK_SIZE], qkGmBuf[qkOffset + i * maxContextLen], repeatParams);
+                        DataCopy(l1aBuf[i * CUBE_BLOCK_SIZE], qkGmBuf[qkOffset + i * maxSeqLen], repeatParams);
                     }
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + nextIdx);
 
@@ -352,10 +340,7 @@ private:
             uint32_t tokenIdx = process / nHeads;
             uint32_t realTokenIdx = (uint32_t)*(decodeIndex + tokenIdx);
             uint32_t cumM = (uint32_t)*(cumPromptLen + realTokenIdx);
-            if (mSlice > 0 && (cumM >= mOffset + mSlice || cumM < mOffset)) {
-                continue;
-            }
-            __gm__ Dtype *qk = (__gm__ Dtype*)qkGmBuf.GetPhyAddr() + process * maxContextLen;
+            __gm__ Dtype *qk = (__gm__ Dtype*)qkGmBuf.GetPhyAddr() + process * maxSeqLen;
             uint32_t contextLen = (uint32_t)*(cachedLens + realTokenIdx) + 1;
 
             WaitAicAivFlag(a2v, 1, process);
@@ -425,11 +410,9 @@ private:
     uint32_t nTokens;
     uint32_t nKVHeads;
     uint32_t blockSize;
-    uint32_t mappingLen;
-    uint32_t maxContextLen;
+    uint32_t maxNumBlock;
+    uint32_t maxSeqLen;
     uint32_t nQKVHeads;
-    uint32_t mOffset;
-    uint32_t mSlice;
     uint32_t headNumInGroup;
     uint32_t blockMemSize;
 
@@ -462,13 +445,10 @@ extern "C" __global__ __aicore__ void decode_att_##dtype(GM_ADDR a2v, GM_ADDR v2
                                                          GM_ADDR cachedLens, GM_ADDR mapping, GM_ADDR qk, GM_ADDR o, \
                                                          GM_ADDR decodeIndex, GM_ADDR cumPromptLen, \
                                                          uint32_t numTokens, uint32_t numHeads, uint32_t headSize, \
-                                                         uint32_t blockSize, uint32_t mappingLen, uint32_t numKVHeads, \
-                                                         uint32_t maxContextLen, uint32_t numQKVHeads, \
-                                                         int32_t mOffset, uint32_t mSlice) \
+                                                         uint32_t blockSize, uint32_t maxNumBlock, uint32_t numKVHeads) \
 { \
     DecodeAttn<dtype, calcDtype> op; \
     op.Init(a2v, v2a, q, k, v, cachedLens, mapping, qk, o, decodeIndex, cumPromptLen, \
-            numTokens, numHeads, headSize, blockSize, mappingLen, numKVHeads, maxContextLen, \
-            numQKVHeads, mOffset, mSlice); \
+            numTokens, numHeads, headSize, blockSize, maxNumBlock, numKVHeads); \
     op.Run(); \
 }

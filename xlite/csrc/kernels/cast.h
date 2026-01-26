@@ -7,7 +7,6 @@
 #define GMA(T) (__gm__ T*)
 
 #ifdef __DAV_C220_VEC__
-#define UB_SIZE 196608
 template<typename SrcType, typename TarType>
 __aicore__ void cast_kernel(GM_ADDR x, GM_ADDR y, uint32_t length)
 {

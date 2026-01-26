@@ -12,8 +12,6 @@
 
 using namespace AscendC;
 
-#define PINGPONG_BUF_NUM 2
-
 template<typename Dtype>
 class ReduceScatter {
 public:
