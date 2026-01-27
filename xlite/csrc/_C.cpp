@@ -628,7 +628,7 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
 {
     XTensor _in, _counts, _output;
     std::vector<void *> p;
-    uint32_t num = counts.size(0);
+    uint32_t i, num = counts.size(0);
 
     InitXTensor(_in, in);
     InitXTensor(_counts, counts);
@@ -637,13 +637,13 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     XTensor &_scales = rt.pool->GetTensor({counts.size(0)}, INT64);
 
     p.resize(num);
-    for (int i = 0; i < num; i++) {
+    for (i = 0; i < num; i++) {
         p[i] = TensorPtr(weights[i]);
     }
     rt.MemcpyH2D(_weights.ptr, p.data(), num * sizeof(void *));
 
     if (scales.size() == num) {
-        for (int i = 0; i < num; i++) {
+        for (i = 0; i < num; i++) {
             p[i] = TensorPtr(scales[i]);
         }
         rt.MemcpyH2D(_scales.ptr, p.data(), num * sizeof(void *));
