@@ -94,8 +94,16 @@ inline __aicore__ uint64_t set_vector_1src_xt(uint64_t repeatDestStride, uint64_
 template <typename Dtype>
 __aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src, int nValue, int dValue, int srcDValue, int dstNzC0Stride)
 {
-    Nd2NzParams nd2nzParams(1 /* NdNum */, nValue, dValue, 0 /* srcNdMatrixStride */, srcDValue, dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
-    DataCopy(dst, src, nd2nzParams);
+    if (srcDValue <= 65535) {
+        Nd2NzParams nd2nzParams(1 /* NdNum */, nValue, dValue, 0 /* srcNdMatrixStride */, srcDValue, dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
+        DataCopy(dst, src, nd2nzParams);
+    } else {
+        constexpr int kBlockSize = 32 / sizeof(Dtype);
+        Nd2NzParams nd2nzParams(1 /* NdNum */, 1, dValue, 0 /* srcNdMatrixStride */, srcDValue, dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
+        for (int i = 0; i < nValue; i++) {
+            DataCopy(dst[i * kBlockSize], src[i * srcDValue], nd2nzParams);
+        }
+    }
 }
 
 template <typename Dtype>

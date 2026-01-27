@@ -22,7 +22,6 @@ torch.npu.set_device(0)
 N_HEADS = 32
 N_KV_HEADS = 32
 
-MAX_SEQ_LEN = 32770
 MAX_BATCH_SIZE = 8
 BATCH_SIZE = 8
 
@@ -47,6 +46,7 @@ for test_dtype in dtype_list:
                 N_KV_HEADS = 32
                 MAX_BATCH_SIZE = 8
                 BATCH_SIZE = 8
+            MAX_SEQ_LEN = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE * BLOCK_SIZE
             torch.set_default_dtype(test_dtype)
             out_features = (N_HEADS + 2 * N_KV_HEADS) * head_dim
             with torch.device("npu"):
@@ -62,7 +62,7 @@ for test_dtype in dtype_list:
                 output_xlite = torch.zeros(BATCH_SIZE * seq_len, N_HEADS * head_dim)
                 max_num_block = math.ceil((seq_len + START_POS) / BLOCK_SIZE)
 
-                kvcache_block_num = (MAX_SEQ_LEN + BLOCK_SIZE - 1) // BLOCK_SIZE * MAX_BATCH_SIZE
+                kvcache_block_num = MAX_SEQ_LEN // BLOCK_SIZE * MAX_BATCH_SIZE
                 k_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, head_dim)
                 v_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, N_KV_HEADS, head_dim)
 
@@ -78,7 +78,7 @@ for test_dtype in dtype_list:
                 cached_lens_list = [START_POS] * BATCH_SIZE
                 cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
 
-                step = (MAX_SEQ_LEN + BLOCK_SIZE - 1) // BLOCK_SIZE
+                step = MAX_SEQ_LEN // BLOCK_SIZE
                 block_num = (seq_len + START_POS + BLOCK_SIZE - 1) // BLOCK_SIZE
                 batch_indices = np.arange(BATCH_SIZE, dtype=np.uint32).reshape(-1, 1)
                 block_indices = np.arange(block_num, dtype=np.uint32)
@@ -107,9 +107,9 @@ for test_dtype in dtype_list:
             ) # [BATCH_SIZE, N_HEADS, seq_len, seq_len+START_POS]
 
             if mask is not None:
-                scores = scores.float() + mask.float()
+                scores = scores + mask
 
-            scores = torch.softmax(scores, dim=-1, dtype=torch.float).to(test_dtype)
+            scores = torch.softmax(scores, dim=-1)
 
             output = torch.matmul(
                 scores,  # [BATCH_SIZE, N_HEADS, seq_len, seq_len+START_POS]
