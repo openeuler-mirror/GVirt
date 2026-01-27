@@ -425,7 +425,7 @@ public:
                     tokens = m > curSeq ? m - curSeq : 0;
                 }
                 if (tokens > 0) {
-                    RunAivSoftmax<Dtype, CalcDtype>(qk, tokens, padN, calcLen);
+                    RunAivSoftmax<Dtype, CalcDtype>(qk, tokens, padN, calcLen, ROUND_UP(calcLen + tokens - 1, blockSize));
                 }
                 flagIdx = 1;
                 uint64_t mode = 2; // inner-group aic/aiv sync
