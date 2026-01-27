@@ -548,7 +548,7 @@ void DecodeAttention(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tensor 
 {
     XTensor _a2v, _v2a, _qkv, _kCache, _vCache, _cachedLens,
             _blockTables, _output, _decodeIdx, _cumPromptLens;
-    XTensor &qk = rt.pool->GetTensor({batch, nHeads / rt.tpSize(), maxNumBlock * blockSize}, XDtype(qkv));
+    XTensor &qk = rt.pool->GetTensor({batch, nHeads / rt.tpSize(), maxNumBlock * blockSize}, XDtype(qkv), DBG_LOC);
 
     InitXTensor(_a2v, a2v);
     InitXTensor(_v2a, v2a);
@@ -599,7 +599,7 @@ void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices,
 void CastUp(XRuntime &rt, at::Tensor &in, at::Tensor &out)
 {
     XTensor _in, _out;
-    XTensor &inScale = rt.pool->GetTensor({1}, XDtype(in));
+    XTensor &inScale = rt.pool->GetTensor({1}, XDtype(in), DBG_LOC);
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
@@ -633,8 +633,8 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     InitXTensor(_in, in);
     InitXTensor(_counts, counts);
     InitXTensor(_output, output);
-    XTensor &_weights = rt.pool->GetTensor({counts.size(0)}, INT64);
-    XTensor &_scales = rt.pool->GetTensor({counts.size(0)}, INT64);
+    XTensor &_weights = rt.pool->GetTensor({counts.size(0)}, INT64, DBG_LOC);
+    XTensor &_scales = rt.pool->GetTensor({counts.size(0)}, INT64, DBG_LOC);
 
     p.resize(num);
     for (i = 0; i < num; i++) {

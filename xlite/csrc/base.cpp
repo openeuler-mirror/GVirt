@@ -252,18 +252,18 @@ XTensorPool::~XTensorPool(void)
     CHECK_ACL(aclrtFree(_ptr));
 }
 
-XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
+XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype, DebugSrcLoc loc)
 {
     size_t numel = 1, size, free = _size;
     void *ptr = _ptr;
 
     if (shape.size() == 0) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": size is 0" << std::endl;
+        std::cerr << loc.file << ":" << loc.line << ": size is 0" << std::endl;
         throw std::invalid_argument("get tensor shape size is 0");
     }
 
     if (_free.empty()) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": dynamic tensor too many, please put after use" << std::endl;
+        std::cerr << loc.file << ":" << loc.line << ": dynamic tensor too many, please put after use" << std::endl;
         throw std::runtime_error("dynamic tensor too many, please put after use");
     }
     XTensor &t = _free.front();
@@ -291,7 +291,7 @@ XTensor& XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype)
         return t;
     }
 
-    std::cerr << __FILE__ << ":" << __LINE__ << ": get " << size << " B failed, no free tensor";
+    std::cerr << loc.file << ":" << loc.line << ": get " << size << " B failed, no free tensor";
     std::cerr << ", shape=(";
     for (uint32_t i = 0; i < shape.size(); i++) {
         std::cerr << shape[i];

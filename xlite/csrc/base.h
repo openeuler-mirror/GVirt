@@ -21,6 +21,8 @@
 #define XLITE_MAX_NUM_DYNAMIC_TENSOR 128
 #define XLITE_TENSOR_ALIGN 1024
 
+#define DBG_LOC DebugSrcLoc{__FILE__, __LINE__}
+
 enum XDtype {
     BIT1,
     INT8,
@@ -44,6 +46,11 @@ enum XRopeType {
     INPLACE,
     MIX,
 };
+
+typedef struct DebugSrcLoc {
+    const char* file;
+    int line;
+} DebugSrcLoc;
 
 inline const char * XDtypeStr(enum XDtype dtype)
 {
@@ -129,7 +136,7 @@ public:
     XTensorPool(size_t size) : _size(size) {};
     ~XTensorPool(void);
     int Init(void);
-    XTensor &GetTensor(std::vector<long> shape, enum XDtype dtype);
+    XTensor &GetTensor(std::vector<long> shape, enum XDtype dtype, DebugSrcLoc loc);
     void PutTensor(XTensor &t);
     void *Ptr() { return _ptr; };
     size_t Size() { return _size; };
