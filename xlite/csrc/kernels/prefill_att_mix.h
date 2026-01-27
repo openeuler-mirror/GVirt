@@ -176,7 +176,6 @@ public:
         int k_tilefactor = k0 / CUBE_BLOCK_SIZE;
         int k_iters = kK / k0;
 
-        int padN = headSize;
         int n0 = headSize;
         int n_tilefactor = n0 / CUBE_BLOCK_SIZE;
 
@@ -273,7 +272,7 @@ public:
 
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
         WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-        CopyToGm(cGmBuf, l0cBuf, m, n0, m0, padN * nHeads);
+        CopyToGm(cGmBuf, l0cBuf, m, n0, m0, headSize * nHeads);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + (1 - pingpong_K) * 2);
         pipe_barrier(PIPE_ALL);
     }

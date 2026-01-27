@@ -188,19 +188,20 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
 }
 
 /*
- * VECTOR_MAX_REPEAT * VECTOR_MAX_BYTESIZE * 2 + VECTOR_MAX_BYTESIZE * DIV_ROUND_UP(VECTOR_MAX_REPEAT, calcPad) + VECTOR_MAX_BYTESIZE * (subBlockNum + 1) * 2 < UB SIZE(196608)
- * float16_t: subBlockNum <= 127
- * float16_t: n <= 4145280
- * bfloat16_t: subBlockNum <= 126
- * bfloat16_t: n <= 2056320
+ * (VECTOR_MAX_REPEAT - 1) * VECTOR_MAX_BYTESIZE * 2 + VECTOR_MAX_BYTESIZE * DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) + VECTOR_MAX_BYTESIZE * (subBlockNum + 1) * 2 < UB SIZE(196608)
+ * float16_t: subBlockNum <= 128
+ * float16_t: n <= 4161536
+ * bfloat16_t: subBlockNum <= 127
+ * bfloat16_t: n <= 2064512
  */
 template<typename Dtype, typename CalcDtype>
 inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t n, uint32_t calcLen)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
-    const uint32_t MAX_SUB_CONTEXT_SIZE = VECTOR_MAX_REPEAT * VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
-    uint32_t subBlockNum = DIV_ROUND_UP(n, MAX_SUB_CONTEXT_SIZE);
+    // VECTOR_MAX_REPEAT - 1 for Dtype size 2, CalcDtype size 4
+    const uint32_t MAX_SUB_CONTEXT_SIZE = (VECTOR_MAX_REPEAT - 1) * VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
+    uint32_t totalSubBlockNum = DIV_ROUND_UP(n, MAX_SUB_CONTEXT_SIZE);
     int calcPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
     int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
 
@@ -217,19 +218,22 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
         calc = in;
     }
     __ubuf__ CalcDtype *calcDst = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
-    off += DIV_ROUND_UP(VECTOR_MAX_REPEAT, calcPad) * VECTOR_MAX_BYTESIZE;
+    off += DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) * VECTOR_MAX_BYTESIZE;
     auto *max = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
-    off += (subBlockNum + 1) * VECTOR_MAX_BYTESIZE;
+    off += (totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE;
     auto *sum = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
-    off += (subBlockNum + 1) * VECTOR_MAX_BYTESIZE;
-    bool maxFlag[128] = {false};
+    off += (totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE;
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-    for (int idx = 0; idx < m; ++idx) {
+    for (int idx = 0; idx < m; idx++) {
         int actualCalcLen = calcLen + idx; // 每一行开始mask的位置
         if (actualCalcLen > n) {
             actualCalcLen = n;
+        }
+        uint64_t calcOutLen = ROUND_UP(actualCalcLen, MAX_SUB_CONTEXT_SIZE);
+        if (calcOutLen > n) {
+            calcOutLen = n;
         }
 
         // stage1: max(x) & sum(exp(x - max(x)))
@@ -239,11 +243,13 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
         } else {
             min = CalcDtype(-65504);
         }
-        subBlockNum = DIV_ROUND_UP(actualCalcLen, MAX_SUB_CONTEXT_SIZE);
+        uint32_t subBlockNum = DIV_ROUND_UP(actualCalcLen, MAX_SUB_CONTEXT_SIZE);
         auto *totalMax = max + subBlockNum * VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
         auto *totalSum = sum + subBlockNum * VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
         __gm__ Dtype *curBuf = buf + idx * n;
-        for (int block = 0; block < subBlockNum; block++) {
+        bool maxFlag[129] = {false};
+        int block;
+        for (block = 0; block < subBlockNum; block++) {
             uint32_t offset = block * MAX_SUB_CONTEXT_SIZE;
             uint32_t curLen = MAX_SUB_CONTEXT_SIZE;
             uint32_t curRepeat = VECTOR_MAX_REPEAT;
@@ -375,7 +381,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
         wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
         
         // stage2: exp(x - max(x)) / sum(exp(x - max(x)))
-        for (int block = 0; block < subBlockNum; block++) {
+        for (block = 0; block < subBlockNum; block++) {
             uint32_t offset = block * MAX_SUB_CONTEXT_SIZE;
             uint32_t curLen = MAX_SUB_CONTEXT_SIZE;
             uint32_t curRepeat = VECTOR_MAX_REPEAT;
@@ -441,7 +447,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
             }
 
-            if (block == subBlockNum - 1 && n > actualCalcLen) {
+            if (block == subBlockNum - 1 && calcOutLen > actualCalcLen) {
                 if (curLen % pad != 0) {
                     SetMaskFromHighBit(pad, pad - curLen % pad);
                     vector_dup(out + ROUND_DOWN(curLen, pad), Dtype(0), 1, 1, 1, 8, 0);
@@ -449,21 +455,44 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                     set_vector_mask((uint64_t)-1, (uint64_t)-1);
                 }
                 int last = ROUND_UP(curLen, pad);
-                if (n - offset > last) {
-                    vector_dup(out + last, Dtype(0), DIV_ROUND_UP(n - offset - last, pad), 1, 1, 8, 0);
+                if (calcOutLen - offset > last) {
+                    vector_dup(out + last, Dtype(0), DIV_ROUND_UP(calcOutLen - offset - last, pad), 1, 1, 8, 0);
                     pipe_barrier(PIPE_V);
                 }
-                curLen = n - offset;
+                curLen = calcOutLen - offset;
             }
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
-            if (curLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
+            if ((curLen * sizeof(Dtype)) % BLOCK_SIZE == 0) {
                 copy_ubuf_to_gm(curBuf + offset, out, 0, 1, DIV_ROUND_UP(curLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
             } else {
                 copy_ubuf_to_gm_align_b16(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype), 0, 0, 0, 0);
             }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+        }
+
+        if (block < totalSubBlockNum) {
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+            vector_dup(out, Dtype(0), DIV_ROUND_UP(MAX_SUB_CONTEXT_SIZE, pad), 1, 1, 8, 0);
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
+        }
+
+        for (; block < totalSubBlockNum; block++) {
+            uint32_t offset = block * MAX_SUB_CONTEXT_SIZE;
+            uint32_t curLen = MAX_SUB_CONTEXT_SIZE;
+            if (block == totalSubBlockNum - 1) {
+                curLen = n - offset;
+            }
+            if ((curLen * sizeof(Dtype)) % BLOCK_SIZE == 0) {
+                copy_ubuf_to_gm(curBuf + offset, out, 0, 1, DIV_ROUND_UP(curLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+            } else {
+                copy_ubuf_to_gm_align_b16(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype), 0, 0, 0, 0);
+            }
+            if (block == totalSubBlockNum - 1) {
+                set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+            }
         }
     }
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
