@@ -2,5 +2,8 @@
 numpy<2.0.0
 tqdm
 safetensors
+tiktoken
+sentencepiece
+protobuf
 transformers
 torch-npu>=2.5.1
