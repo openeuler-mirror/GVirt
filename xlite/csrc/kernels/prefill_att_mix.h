@@ -70,7 +70,7 @@ public:
         
         int n0 = blockSize;
         int n_tilefactor = n0 / CUBE_BLOCK_SIZE;
-        int n_iters = padN / n0;
+        int n_iters = DIV_ROUND_UP(maskLen, n0);
 
         int m0 = ROUND_UP(m, CUBE_BLOCK_SIZE);
         int m_tilefactor = m0 / CUBE_BLOCK_SIZE;
@@ -112,39 +112,28 @@ public:
         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
         CopyToL0ACol(l0aBuf, l1aBuf, m_tilefactor, 0, k_tilefactor);
         SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
 
         int kv_headIdx = headIdx / (nHeads / nKVHeads);
         uint32_t head_offset_len = kv_headIdx * headSize;
-        uint32_t blockTable_id = (uint32_t)(*mapping);
-        CopyGmToL1Nd2Nz(l1bBuf[0], bGmBuf[blockTable_id * block_memsize + head_offset_len],
-                        n0, k0, nKVHeads * headSize, n0);
-        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1);
 
         SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
-        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + (1 - pingpong_N) * 2);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
         for (int nidx = 0; nidx < n_iters; ++nidx) {
-            if (nidx * n0 >= maskLen) {
-                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_N * 2);
-                break;
-            }
+            uint32_t blockTable_id = (uint32_t)(*(mapping + nidx));
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + pingpong_N);
+            CopyGmToL1Nd2Nz(l1bBuf[pingpong_N], bGmBuf[blockTable_id * block_memsize + head_offset_len],
+                            n0, k0, nKVHeads * headSize, n0);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_N);
 
-            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + (1 - pingpong_N) * 2);
-            if (nidx + 1 < n_iters) {
-                uint32_t blockTable_id = (uint32_t)(*(mapping + nidx + 1));
-                CopyGmToL1Nd2Nz(l1bBuf[1 - pingpong_N], bGmBuf[blockTable_id * block_memsize + head_offset_len],
-                                n0, k0, nKVHeads * headSize, n0);
-                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + (1 - pingpong_N) * 2);
-            }
-
-            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_N * 2);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_N);
             WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
-            CopyToL0BCol(l0bBuf, l1bBuf[nidx & 0x1], n_tilefactor, 0, k_tilefactor);
-            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + pingpong_N * 2);
-            SetFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_N * 2);
+            CopyToL0BCol(l0bBuf, l1bBuf[pingpong_N], n_tilefactor, 0, k_tilefactor);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + pingpong_N);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_N);
 
-            if (nidx == 0)
-                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
-            WaitFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_N * 2);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_N);
             CalMmad(l0cBuf, l0aBuf, l0bBuf, m0, n0, k0, true, 3);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
 
@@ -154,8 +143,9 @@ public:
             pingpong_N ^= 1;
         }
 
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
-        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1 + (1 - pingpong_N) * 2);
         pipe_barrier(PIPE_ALL);
     }
 
@@ -174,7 +164,7 @@ public:
 
         int k0 = blockSize;
         int k_tilefactor = k0 / CUBE_BLOCK_SIZE;
-        int k_iters = kK / k0;
+        int k_iters = DIV_ROUND_UP(maskLen, k0);
 
         int n0 = headSize;
         int n_tilefactor = n0 / CUBE_BLOCK_SIZE;
@@ -217,63 +207,52 @@ public:
         int pingpong_K = 0;
         int k_offset = 0;
 
-        CopyGmToL1Nd2Nz(l1aBuf[pingpong_K], aGmBuf, m, k0, kK, m0);
-        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpong_K * 2);
-
         int kv_headIdx = headIdx / (nHeads / nKVHeads);
         uint32_t head_offset_len = kv_headIdx * headSize;
 
-        uint32_t blockTable_id = (uint32_t)(*(mapping));
-        CopyGmToL1Nd2Nz(l1bBuf[pingpong_K], bGmBuf[blockTable_id * block_memsize + head_offset_len],
-                        k0, n0, nKVHeads * headSize, k0);
-
-        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_K * 2);
-        SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
-        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + (1 - pingpong_K) * 2);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID5);
         for (int kidx = 0; kidx < k_iters; ++kidx) {
-            if (kidx * k0 >= maskLen) {
-                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpong_K * 2);
-                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_K * 2);
-                SetFlag<HardEvent::M_FIX>(EVENT_ID0);
-                break;
-            }
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpong_K);
+            CopyGmToL1Nd2Nz(l1aBuf[pingpong_K], aGmBuf[m_offset * kK + k_offset], m, k0, kK, m0);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpong_K);
 
-            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + (1 - pingpong_K) * 2);
-            if (kidx + 1 < k_iters) {
-                CopyGmToL1Nd2Nz(l1aBuf[1 - pingpong_K], aGmBuf[m_offset * kK + k_offset + k0], m0, k0, kK, m0);
-                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + (1 - pingpong_K) * 2);
+            uint32_t blockTable_id = (uint32_t)(*(mapping + kidx));
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpong_K);
+            CopyGmToL1Nd2Nz(l1bBuf[pingpong_K], bGmBuf[blockTable_id * block_memsize + head_offset_len],
+                            k0, n0, nKVHeads * headSize, k0);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpong_K);
 
-                uint32_t blockTable_id = (uint32_t)(*(mapping + kidx + 1));
-                CopyGmToL1Nd2Nz(l1bBuf[1 - pingpong_K], bGmBuf[blockTable_id * block_memsize + head_offset_len],
-                                k0, n0, nKVHeads * headSize, k0);
-                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + (1 - pingpong_K) * 2);
-            }
-
-            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpong_K * 2);
-            WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID5);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpong_K);
             CopyToL0ACol(l0aBuf, l1aBuf[pingpong_K], m_tilefactor, 0, k_tilefactor);
-            SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + pingpong_K * 2);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpong_K);
 
-            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID1 + pingpong_K * 2);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpong_K);
             CopyToL0BTCol(l0bBuf, l1bBuf[pingpong_K], n_tilefactor, 0, k_tilefactor, k_tilefactor);
-            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpong_K * 2);
-            SetFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_K * 2);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpong_K);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
 
-            WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + pingpong_K * 2);
-            WaitFlag<HardEvent::MTE1_M>(EVENT_ID1 + pingpong_K * 2);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
             CalMmad(l0cBuf, l0aBuf, l0bBuf, m0, n0, k0, kidx == 0);
-            SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID5);
 
-            if (kidx == k_iters - 1)
-                SetFlag<HardEvent::M_FIX>(EVENT_ID0);
             k_offset += k0;
             pingpong_K ^= 1;
         }
 
-        WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
-        WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID5);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+
+        SetFlag<HardEvent::M_FIX>(EVENT_ID6);
+        WaitFlag<HardEvent::M_FIX>(EVENT_ID6);
         CopyToGm(cGmBuf, l0cBuf, m, n0, m0, headSize * nHeads);
-        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + (1 - pingpong_K) * 2);
         pipe_barrier(PIPE_ALL);
     }
 
@@ -289,7 +268,6 @@ public:
             uint32_t realBatch = (uint32_t)(*(prefillIndex + batch));
             uint32_t cumM = (uint32_t)(*(cumPromptLen + realBatch));
             uint32_t m = (uint32_t)(*(promptLens + realBatch));
-            uint32_t padM = ROUND_UP(m, m <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
             uint32_t cachedTokens = (uint32_t)(*(prefixLens + realBatch));
             uint32_t padN = ROUND_UP(m + cachedTokens, blockSize);
 
@@ -298,14 +276,13 @@ public:
             // 根据序列长度动态调整query的切分粒度m0，保证数据通过L2传递
             if (padN > SEQLEN_19K) {
                 m0 = TILESIZE_32;
-                padM = ROUND_UP(m, TILESIZE_32);
             } else if (padN > SEQLEN_8K) {
                 m0 = TILESIZE_64;
-                padM = ROUND_UP(m, TILESIZE_64);
             }
-            if (padM <= SEQLEN_64) {
+            if (m <= SEQLEN_64) {
                 m0 = TILESIZE_16;
             }
+            uint32_t padM = ROUND_UP(m, m0);
             uint32_t qkOffset = block_num * m0 * maxSeqLen;
             uint32_t seqNum = padM / m0;
             __gm__ int32_t *curBlockTable = blockTable + maxNumBlocks * realBatch;
@@ -382,7 +359,6 @@ public:
         for (int batch = 0; batch < batchSize; batch++) {
             uint32_t realBatch = (uint32_t)(*(prefillIndex + batch));
             uint32_t m = (uint32_t)(*(promptLens + realBatch));
-            uint32_t padM = ROUND_UP(m, m <= SEQLEN_64 ? TILESIZE_16 : TILESIZE_128);
             uint32_t cachedTokens = (uint32_t)(*(prefixLens + realBatch));
             uint32_t padN = ROUND_UP(m + cachedTokens, blockSize);
 
@@ -391,14 +367,13 @@ public:
             // 根据序列长度动态调整query的切分粒度m0，保证数据通过L2传递
             if (padN > SEQLEN_19K) {
                 m0 = TILESIZE_32;
-                padM = ROUND_UP(m, TILESIZE_32);
             } else if (padN > SEQLEN_8K) {
                 m0 = TILESIZE_64;
-                padM = ROUND_UP(m, TILESIZE_64);
             }
-            if (padM <= SEQLEN_64) {
+            if (m <= SEQLEN_64) {
                 m0 = TILESIZE_16;
             }
+            uint32_t padM = ROUND_UP(m, m0);
             uint32_t qkOffset = block_num * m0 * maxSeqLen;
 
             int seqNum = padM / m0;
