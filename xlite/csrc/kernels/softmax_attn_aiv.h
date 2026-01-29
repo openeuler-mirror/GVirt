@@ -47,6 +47,15 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
     int calInstPad = VECTOR_MAX_REPEAT * calPad;
     int instPad = VECTOR_MAX_REPEAT * pad;
 
+    int v3DstNeedSize = (DIV_ROUND_UP(outN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE;
+    if (v3DstNeedSize < VECTOR_MAX_BYTESIZE) {
+        v3DstNeedSize = VECTOR_MAX_BYTESIZE;
+    }
+    int useV3 = 0;
+    if (UB_SIZE - (uint64_t)temp >= v3DstNeedSize) {
+        useV3 = 1;
+    }
+
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
     for (int idx = 0; idx < m; ++idx) {
@@ -85,7 +94,12 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
         }
 
         // max
-        ReduceMax(temp, ptr, actualCalcLen);
+        if (useV3) {
+            ReduceMaxV3(temp, ptr, actualCalcLen);
+            pipe_barrier(PIPE_V);
+        } else {
+            ReduceMax(temp, ptr, actualCalcLen);
+        }
 
         // broadcast一个max标量为一个block大小的向量，避免使用scalar运算
         if constexpr (std::is_same<CalcDtype, half>::value) {
@@ -119,7 +133,12 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
         pipe_barrier(PIPE_V);
 
         // s = Reduce_sum(EXP)
-        ReduceSum(temp, cal, actualCalcLen);
+        if (useV3) {
+            ReduceSumV3(temp, cal, actualCalcLen);
+            pipe_barrier(PIPE_V);
+        } else {
+            ReduceSum(temp, cal, actualCalcLen);
+        }
 
         // broadcast一个s = Reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算
         if constexpr (std::is_same<CalcDtype, half>::value) {
