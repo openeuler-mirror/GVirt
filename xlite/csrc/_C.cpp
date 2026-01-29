@@ -53,7 +53,7 @@ public:
                                    CModelAttnMeta& attnMeta,
                                    std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
-    size_t GetTensorPoolSize(void);
+    size_t GetTensorPoolSize(int dbg);
 
     // weights
     at::Tensor embed;
@@ -388,9 +388,9 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
-size_t _CModel::GetTensorPoolSize(void)
+size_t _CModel::GetTensorPoolSize(int dbg)
 {
-    return _model->GetTensorPoolSize();
+    return _model->GetTensorPoolSize(dbg);
 }
 
 void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
@@ -800,7 +800,8 @@ PYBIND11_MODULE(_C, m) {
             py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
             py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
         py::call_guard<py::gil_scoped_release>())
-        .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize);
+        .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize, "get_tensor_pool_size",
+            py::arg("dbg") = 0);
 
     py::class_<XCoreAssigner>(m, "CoreAssigner")
         .def(py::init<float>(), py::arg("prefillRatio"))
