@@ -253,7 +253,13 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
         calc = in;
     }
     __ubuf__ CalcDtype *calcDst = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
-    off += DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) * VECTOR_MAX_BYTESIZE;
+    int useV2 = 0;
+    if (totalSubBlockNum <= 65) {
+        useV2 = 1;
+        off += (VECTOR_MAX_REPEAT - 1) / 2 * VECTOR_MAX_BYTESIZE;;
+    } else {
+        off += DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) * VECTOR_MAX_BYTESIZE;
+    }
     auto *max = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
     off += (totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE;
     auto *sum = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
@@ -307,7 +313,12 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
             }
 
-            ReduceMax(calcDst, calc, curLen);
+            if (useV2) {
+                ReduceMaxV2(calcDst, calc, curLen);
+                pipe_barrier(PIPE_V);
+            } else {
+                ReduceMax(calcDst, calc, curLen);
+            }
 
             if constexpr (std::is_same<CalcDtype, float16_t>::value) {
                 vbrcb((__ubuf__ uint16_t*)calcDst, (__ubuf__ uint16_t*)calcDst, 0, 0, 1);
@@ -346,7 +357,12 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 if (subBlockNum == 1) {
                     vexp(calc, calc, curRepeat, 1, 1, 8, 8);
                     pipe_barrier(PIPE_V);
-                    ReduceSum(calcDst, calc, curLen);
+                    if (useV2) {
+                        ReduceSumV2(calcDst, calc, curLen);
+                        pipe_barrier(PIPE_V);
+                    } else {
+                        ReduceSum(calcDst, calc, curLen);
+                    }
                 } else {
                     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
                     vexp(out, calc, curRepeat, 1, 1, 8, 8);
@@ -354,12 +370,22 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
                     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
                     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
-                    ReduceSum(calcDst, out, curLen);
+                    if (useV2) {
+                        ReduceSumV2(calcDst, out, curLen);
+                        pipe_barrier(PIPE_V);
+                    } else {
+                        ReduceSum(calcDst, out, curLen);
+                    }
                 }
             } else {
                 vexp(calc, calc, curRepeat, 1, 1, 8, 8);
                 pipe_barrier(PIPE_V);
-                ReduceSum(calcDst, calc, curLen);
+                if (useV2) {
+                    ReduceSumV2(calcDst, calc, curLen);
+                    pipe_barrier(PIPE_V);
+                } else {
+                    ReduceSum(calcDst, calc, curLen);
+                }
             }
 
             if constexpr (std::is_same_v<CalcDtype, half>) {

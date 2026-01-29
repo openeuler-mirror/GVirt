@@ -40,7 +40,7 @@ for dtype in supported_dtype_list:
             print(f'torch_npu: {standard}')
             print(f'xlite: {y}')
 
-size_list = [3, 78, 1035, 10489, 24322, 32640, 48384, 64525, 129050, 145152, 2064512, 4161536]
+size_list = [3, 78, 1035, 10489, 24322, 32640, 48384, 64525, 129050, 145152, 1056640, 2064512, 2113280, 4161536]
 
 for dtype in supported_dtype_list:
     for size in  size_list:
