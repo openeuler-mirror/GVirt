@@ -819,24 +819,27 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input,
     rt.pool->PutTensor(h);
 }
 
-size_t XModel::GetTensorPoolSize(void)
+size_t XModel::GetTensorPoolSize(int dbg)
 {
     int dtypeSize = XDtypeBit(embed.dtype) / 8;
     size_t attnSize, ffnSize, prefillBufSize, decodeBufSize;
     size_t mlpBufSize = 0;
     size_t moeBufSize = 0;
+    size_t moeGateSize = 0;
+    size_t moeDispatchSize = 0;
     size_t scoresBufSize = 0;
     size_t moeDispatchDpBufSize = 0;
     size_t routedExpertsBufSize = 0;
     size_t shareExpertsBufSize = 0;
     size_t size = 0;
+    size_t base = 0;
 
     // TODO
     if (_c.attnType != XMODEL_ATTN_MHA) {
         return 1024;
     }
 
-    size = _c.maxM * _c.hiddenSize * 3 * dtypeSize;
+    base = _c.maxM * _c.hiddenSize * 3 * dtypeSize;
     attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
     attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
     prefillBufSize = AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen * dtypeSize;
@@ -851,13 +854,13 @@ size_t XModel::GetTensorPoolSize(void)
     // FFN MoE
     if (_c.nDenseLayers < _c.nLayers) {
         // MoE gate
-        moeBufSize += _c.maxM * _c.nRoutedExperts * dtypeSize;
-        moeBufSize += _c.maxM * _c.nRoutedExperts / 8;
+        moeGateSize += _c.maxM * _c.nRoutedExperts * dtypeSize;
+        moeGateSize += _c.maxM * _c.nRoutedExperts / 8;
         scoresBufSize += _c.maxM * _c.nRoutedExperts * dtypeSize;
         // MoE dispatch
-        moeBufSize += (_c.maxM * _c.defDpSize + 1) * _c.nRoutedExperts * sizeof(int32_t);
-        moeBufSize += _c.maxM * _c.defDpSize * _c.nActExperts * _c.hiddenSize * dtypeSize;
-        moeBufSize += _c.nRoutedExperts * sizeof(int32_t);
+        moeDispatchSize += (_c.maxM * _c.defDpSize + 1) * _c.nRoutedExperts * sizeof(int32_t);
+        moeDispatchSize += _c.maxM * _c.defDpSize * _c.nActExperts * _c.hiddenSize * dtypeSize;
+        moeDispatchSize += _c.nRoutedExperts * sizeof(int32_t);
         if (_c.defDpSize > 1) {
             moeDispatchDpBufSize += _c.maxM * _c.defDpSize * _c.hiddenSize * dtypeSize;
             moeDispatchDpBufSize += _c.maxM * _c.defDpSize * _c.nRoutedExperts * dtypeSize * 2;
@@ -874,11 +877,20 @@ size_t XModel::GetTensorPoolSize(void)
         if (_c.defDpSize > 1) {
             shareExpertsBufSize += _c.maxM * _c.defDpSize * _c.hiddenSize * dtypeSize;
         }
-        moeBufSize += std::max({scoresBufSize, moeDispatchDpBufSize, routedExpertsBufSize, shareExpertsBufSize});
+        moeBufSize = moeGateSize + moeDispatchSize +
+            std::max({scoresBufSize, moeDispatchDpBufSize, routedExpertsBufSize, shareExpertsBufSize});
     }
     ffnSize = std::max(mlpBufSize, moeBufSize);
+    size = base + std::max(attnSize, ffnSize);
 
-    size += std::max(attnSize, ffnSize);
-
+    if (_rankId == 0 && dbg) {
+        std::cout << "[Tensor pool] base: " << base << " B, attn: " << attnSize << " B, ffn: " << ffnSize << " B "
+                  << "{mlp: " << mlpBufSize << " B, moe: " << moeBufSize << " B "
+                  << "(gate: " << moeGateSize << " B, dispatch: " << moeDispatchSize << " B"
+                  << ", scores: " << scoresBufSize << " B, dpBuf: " << moeDispatchDpBufSize << " B"
+                  << ", routed experts: " << routedExpertsBufSize << " B"
+                  << ", share experts: " << shareExpertsBufSize << " B)}"
+                  << std::endl;
+    }
     return (size >> MB_BIT) + 128;
 }

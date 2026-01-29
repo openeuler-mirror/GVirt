@@ -112,7 +112,7 @@ public:
                                  XModelAttnMeta& attnMeta,
                                  std::vector<std::pair<XTensor, XTensor>>& kvCache,
                                  XTensor &freqsCis, XTensor &output);
-    size_t GetTensorPoolSize(void);
+    size_t GetTensorPoolSize(int dbg);
 
     // weights
     XTensor embed;
