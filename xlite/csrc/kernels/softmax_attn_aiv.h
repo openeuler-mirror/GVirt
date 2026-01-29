@@ -9,6 +9,162 @@
 using namespace AscendC;
 
 #if __DAV_C220_VEC__
+/* ROUND_UP(n * sizeof(Dtype), VECTOR_MAX_BYTESIZE) * 4 +
+ *     ROUND_UP(n * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) +
+ *     (DIV_ROUND_UP(n * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE <= ub size(196608B)
+ * float16_t: n <= 17792
+ * bfloat16_t: n <= 13952
+ */
+template<typename Dtype, typename CalcDtype>
+inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
+{
+    CalcDtype min;
+    if constexpr (std::is_same<CalcDtype, half>::value) {
+        min = half(-65504);
+    } else {
+        min = -3.4028235e+38;
+    }
+
+    if (outN == 0 || outN > n) {
+        outN = n;
+    }
+
+    set_mask_norm();
+    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+
+    uint64_t off = 0;
+    __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+    off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    __ubuf__ Dtype *in2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+    off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    __ubuf__ Dtype *in[PINGPONG_BUF_NUM] = {in1, in2};
+    __ubuf__ Dtype *out1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+    off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    __ubuf__ Dtype *out2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+    off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    __ubuf__ Dtype *out[PINGPONG_BUF_NUM] = {out1, out2};
+    __ubuf__ CalcDtype *cal = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
+    off += ROUND_UP(outN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE);
+    __ubuf__ CalcDtype *temp = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
+    __ubuf__ CalcDtype *ptr;
+
+    int calPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
+    int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    int curr = 0;
+
+    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
+    for (int idx = 0; idx < m; ++idx) {
+        int actualCalcLen = calcLen + (idx + maskOff) / maskStride; // 每一行开始mask的位置
+        if (actualCalcLen > outN) {
+            actualCalcLen = outN;
+        }
+        int padCachedTokens = ROUND_UP(actualCalcLen, calPad);
+        int repeat = padCachedTokens / calPad;
+
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+        copy_gm_to_ubuf(in[curr], buf + idx * n, 0, 1,
+                        DIV_ROUND_UP(actualCalcLen * sizeof(Dtype), 32), 0, 0);
+
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+        if constexpr (std::is_same<CalcDtype, Dtype>::value) {
+            ptr = in[curr];
+        } else {
+            if constexpr (std::is_same<Dtype, half>::value) {
+                vconv_f162f32(cal, in[curr], repeat, 1, 1, 8, 4);
+            } else {
+                vconv_bf162f32(cal, in[curr], repeat, 1, 1, 8, 4);
+            }
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+            ptr = cal;
+        }
+
+        // max
+        ReduceMaxV2(temp, ptr, actualCalcLen);
+        pipe_barrier(PIPE_V);
+
+        // broadcast一个max标量为一个block大小的向量，避免使用scalar运算
+        if constexpr (std::is_same<CalcDtype, half>::value) {
+            vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
+        } else {
+            vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
+        }
+        pipe_barrier(PIPE_V);
+
+        // QK - max
+        vsub(cal, ptr, temp, repeat, 1, 1, 0, 8, 8, 0);
+        pipe_barrier(PIPE_V);
+        if constexpr (std::is_same<CalcDtype, half>::value) {
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+        }
+
+        // EXP = exp(QK-max)
+        vexp(cal, cal, repeat, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        // s = Reduce_sum(EXP)
+        ReduceSumV2(temp, cal, actualCalcLen);
+        pipe_barrier(PIPE_V);
+
+        // broadcast一个s = Reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算
+        if constexpr (std::is_same<CalcDtype, half>::value) {
+            vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
+        } else {
+            vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
+        }
+        pipe_barrier(PIPE_V);
+
+        if constexpr (std::is_same<CalcDtype, Dtype>::value) {
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
+            vdiv(out[curr], cal, temp, repeat, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
+        } else {
+            vdiv(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
+            if constexpr (std::is_same<Dtype, half>::value) {
+                vconv_f322f16r(out[curr], cal, repeat, 1, 1, 4, 8);
+            } else {
+                vconv_f322bf16r(out[curr], cal, repeat, 1, 1, 4, 8);
+            }
+            pipe_barrier(PIPE_V);
+        }
+
+        if (outN > actualCalcLen) {
+            if (actualCalcLen % pad != 0) {
+                SetMaskFromHighBit(pad, pad - actualCalcLen % pad);
+                vector_dup(out[curr] + ROUND_DOWN(actualCalcLen, pad), Dtype(0), 1, 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
+                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+            }
+            int last = ROUND_UP(actualCalcLen, pad);
+            if (outN > last) {
+                vector_dup(out[curr] + last, Dtype(0), DIV_ROUND_UP(outN - last, pad), 1, 1, 8, 0);
+            }
+        }
+
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        if ((outN * sizeof(Dtype)) % BLOCK_SIZE == 0) {
+            copy_ubuf_to_gm(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+        } else {
+            copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype), 0, 0, 0, 0);
+        }
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
+        curr = 1 - curr;
+    }
+    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
+    pipe_barrier(PIPE_ALL);
+}
+
 /* ROUND_UP(n * sizeof(Dtype), VECTOR_MAX_BYTESIZE) * 2 +
  *     ROUND_UP(n * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) +
  *     DIV_ROUND_UP(n * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) * sizeof(CalcDtype) <= ub size(196608B)
@@ -576,6 +732,10 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, 
 }
 
 #else
+template<typename Dtype, typename CalcDtype>
+inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
+{
+}
 template<typename Dtype, typename CalcDtype>
 inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
