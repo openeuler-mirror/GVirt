@@ -147,7 +147,7 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
         } else {
             for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
                 auto calc_norm = calc1 + norm_idx * norm_dim;
-                ReduceSum(calc_norm, calc_norm, norm_dim);
+                ReduceSumV2(calc_norm, calc_norm, norm_dim);
             }
         }
         pipe_barrier(PIPE_V);

@@ -245,6 +245,138 @@ inline __aicore__ void SetMaskFromHighBit(int32_t high, int32_t len)
 }
 
 template <typename Dtype>
+__inline__ __aicore__ void ReduceMaxV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
+{
+    Dtype min;
+    constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    constexpr int instPad = VECTOR_MAX_REPEAT * pad;
+    if constexpr (std::is_same<Dtype, half>::value) {
+        min = half(-65504);
+    } else if constexpr (std::is_same<Dtype, float>::value) {
+        min = -3.4028235e+38;
+    }
+    set_mask_norm();
+
+    uint32_t repeat = DIV_ROUND_UP(dim, pad);
+    if (repeat == 1) {
+        SetMask(dim);
+        vcmax(dst, src, 1, 1, 1, 8, Order_t::ONLY_VALUE);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        return;
+    }
+
+    if (dim % pad != 0) {
+        SetMaskFromHighBit(pad, pad - dim % pad);
+        vector_dup(src + ROUND_DOWN(dim, pad), min, 1, 1, 1, 8, 0);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        pipe_barrier(PIPE_V);
+    }
+
+    __ubuf__ Dtype *last;
+    int lastValid = 0;
+    int remain;
+    uint32_t total = repeat;
+    while (total > 1) {
+        remain = total % 2;
+        repeat = total / 2;
+        if (lastValid != 0 && remain == 0) {
+            repeat = repeat - 1;
+        }
+        if (repeat > VECTOR_MAX_REPEAT) {
+            int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
+            for (int i = 0; i < instNum; i++) {
+                int currRepeat = VECTOR_MAX_REPEAT;
+                if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                    currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+                }
+                vmax(dst + i * instPad, src + i * instPad, src + repeat * pad + i * instPad, currRepeat, 1, 1, 1, 8, 8, 8);
+            }
+        } else {
+            vmax(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
+        }
+        pipe_barrier(PIPE_V);
+
+        if ((lastValid ^ remain) != 0) {
+            if (lastValid != 0) {
+                vmax(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
+                pipe_barrier(PIPE_V);
+                repeat = repeat + 1;
+                lastValid = 0;
+            } else {
+                last = src + ROUND_DOWN(total, 2) * pad;
+                lastValid = 1;
+            }
+        }
+        total = repeat + remain;
+        src = dst;
+    }
+    vcmax(dst, src, 1, 8, 1, 8, Order_t::ONLY_VALUE);
+}
+
+template <typename Dtype>
+__inline__ __aicore__ void ReduceSumV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
+{
+    constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    constexpr int instPad = VECTOR_MAX_REPEAT * pad;
+    set_mask_norm();
+
+    uint32_t repeat = DIV_ROUND_UP(dim, pad);
+    if (repeat == 1) {
+        SetMask(dim);
+        vcadd(dst, src, 1, 1, 1, 8, 0);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        return;
+    }
+
+    if (dim % pad != 0) {
+        SetMaskFromHighBit(pad, pad - dim % pad);
+        vector_dup(src + ROUND_DOWN(dim, pad), Dtype(0), 1, 1, 1, 8, 0);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        pipe_barrier(PIPE_V);
+    }
+
+    __ubuf__ Dtype *last;
+    int lastValid = 0;
+    int remain;
+    uint32_t total = repeat;
+    while (total > 1) {
+        remain = total % 2;
+        repeat = total / 2;
+        if (lastValid != 0 && remain == 0) {
+            repeat = repeat - 1;
+        }
+        if (repeat > VECTOR_MAX_REPEAT) {
+            int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
+            for (int i = 0; i < instNum; i++) {
+                int currRepeat = VECTOR_MAX_REPEAT;
+                if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                    currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+                }
+                vadd(dst + i * instPad, src + i * instPad, src + repeat * pad + i * instPad, currRepeat, 1, 1, 1, 8, 8, 8);
+            }
+        } else {
+            vadd(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
+        }
+        pipe_barrier(PIPE_V);
+
+        if ((lastValid ^ remain) != 0) {
+            if (lastValid != 0) {
+                vadd(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
+                pipe_barrier(PIPE_V);
+                repeat = repeat + 1;
+                lastValid = 0;
+            } else {
+                last = src + ROUND_DOWN(total, 2) * pad;
+                lastValid = 1;
+            }
+        }
+        total = repeat + remain;
+        src = dst;
+    }
+    vcadd(dst, src, 1, 1, 1, 8, 0);
+}
+
+template <typename Dtype>
 __inline__ __aicore__ void ReduceMax(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
 {
     Dtype min;
