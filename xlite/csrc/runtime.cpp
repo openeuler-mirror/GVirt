@@ -156,7 +156,7 @@ int XRuntime::InitXcclComm(void)
 {
     std::string ip;
     uint32_t port;
-    const char* envEnableXccl = std::getenv("XLITE_ENABLE_XCCL");
+    const char* envDisableXccl = std::getenv("XLITE_DISABLE_XCCL");
     const char* envDeterministic = std::getenv("HCCL_DETERMINISTIC");
     void *ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE];
 
@@ -165,7 +165,7 @@ int XRuntime::InitXcclComm(void)
         return 0;
     }
 
-    if (!isEnvironmentVariableTrue(envEnableXccl) ||
+    if (isEnvironmentVariableTrue(envDisableXccl) ||
         isEnvironmentVariableTrue(envDeterministic)) {
         return 0;
     }
