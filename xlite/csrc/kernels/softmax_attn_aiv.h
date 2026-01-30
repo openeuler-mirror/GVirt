@@ -84,14 +84,6 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
             ptr = cal;
         }
 
-        // dup calPad
-        if (actualCalcLen % calPad != 0) {
-            SetMaskFromHighBit(calPad, calPad - actualCalcLen % calPad);
-            vector_dup(ptr + ROUND_DOWN(actualCalcLen, calPad), min, 1, 1, 1, 8, 0);
-            pipe_barrier(PIPE_V);
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        }
-
         // max
         ReduceMax(temp, ptr, actualCalcLen);
 
@@ -137,8 +129,8 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
         }
         pipe_barrier(PIPE_V);
 
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
         if constexpr (std::is_same<CalcDtype, Dtype>::value) {
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
             for (int i = 0; i < instNum; i++) {
                 int currRepeat = VECTOR_MAX_REPEAT;
                 if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
@@ -154,14 +146,21 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
                     currRepeat = repeat - i * VECTOR_MAX_REPEAT;
                 }
                 vdiv(cal + i * calInstPad, cal + i * calInstPad, temp, currRepeat, 1, 1, 0, 8, 8, 0);
-                pipe_barrier(PIPE_V);
+            }
+            pipe_barrier(PIPE_V);
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+            for (int i = 0; i < instNum; i++) {
+                int currRepeat = VECTOR_MAX_REPEAT;
+                if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
+                    currRepeat = repeat - i * VECTOR_MAX_REPEAT;
+                }
                 if constexpr (std::is_same<Dtype, half>::value) {
                     vconv_f322f16r(out + i * calInstPad, cal + i * calInstPad, currRepeat, 1, 1, 4, 8);
                 } else {
                     vconv_f322bf16r(out + i * calInstPad, cal + i * calInstPad, currRepeat, 1, 1, 4, 8);
                 }
-                pipe_barrier(PIPE_V);
             }
+            pipe_barrier(PIPE_V);
         }
 
         if (outN > actualCalcLen) {
@@ -518,6 +517,7 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, 
     } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
         maxNOneLoop = 24320;
     }
+
     if (n <= maxNOneLoop) {
         RunAivSoftmaxOneLoop<Dtype, CalcDtype>(buf, m, n, calcLen, outN);
     } else {

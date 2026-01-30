@@ -14,8 +14,9 @@ rt = Runtime(0, 500)
 torch.npu.set_device(0)
 
 supported_dtype_list = [torch.float16, torch.bfloat16]
-size_list = [3, 78, 1035, 10489, 16321, 24320, 32640]
+size_list = [3, 78, 1035, 10489, 16321, 19584, 24320, 28032, 32640]
 tokens = 1
+
 for dtype in supported_dtype_list:
     for size in  size_list:
         if dtype == torch.bfloat16 and size > 24320:
