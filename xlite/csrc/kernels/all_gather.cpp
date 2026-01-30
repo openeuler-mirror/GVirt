@@ -36,7 +36,6 @@ public:
         this->coreNum = block_num;
         uint64_t countPerRank = count;
         this->blockNum = rankSize;
-        this->countPerBlock = DIV_ROUND_UP(countPerRank, blockNum);
         this->offsetCurrRank = countPerRank * myRankId;
         this->generation = generation;
         this->copySize = COPY_SIZE;
@@ -110,6 +109,7 @@ public:
 
         // each rank process countPerRank elements
         countCurrRank = countPerRank;
+        this->countPerBlock = DIV_ROUND_UP(countCurrRank, blockNum);
     }
 
     __aicore__ inline void SetIpcFlag(uint32_t flagId, uint32_t value)

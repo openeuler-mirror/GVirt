@@ -22,9 +22,9 @@ rt = Runtime(local_rank, 500, rank, world_size)
 torch.npu.set_device(local_rank)
 
 with torch.device("npu"):
-    x = [torch.randn(8, 7168, dtype=torch.float16) for _ in range(world_size)]
+    x = [torch.randn(8, 7168, dtype=torch.float) for _ in range(world_size)]
     y = torch.cat(x, dim=0)
-    standard = torch.empty(8, 7168, dtype=torch.float16)
+    standard = torch.empty(8, 7168, dtype=torch.float)
     z = torch.empty_like(standard)
 
 dist.reduce_scatter(standard, x, op=dist.ReduceOp.SUM)
@@ -32,12 +32,11 @@ dist.reduce_scatter(standard, x, op=dist.ReduceOp.SUM)
 torch.npu.synchronize()
 reduce_scatter(rt, z, y)
 torch.npu.synchronize()
-if rank == 0:
+if rank == 1:
     print('reduce scatter executed!')
-
-try:
-    torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
-except AssertionError as e:
-    print(f'{e}')
-    print(f'torch_npu: {standard}')
-    print(f'xlite: {z}')
+    try:
+        torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
+    except AssertionError as e:
+        print(f'{e}')
+        print(f'torch_npu: {standard}')
+        print(f'xlite: {z}')
