@@ -22,7 +22,7 @@ rt = Runtime(local_rank, 500, rank, world_size)
 torch.npu.set_device(local_rank)
 
 with torch.device("npu"):
-    x = torch.randn(8, 7168, dtype=torch.float16)
+    x = torch.randn(8, 7168, dtype=torch.float)
     standard = x.clone()
     z = torch.empty_like(standard)
 
@@ -31,12 +31,11 @@ dist.all_reduce(standard, op=dist.ReduceOp.SUM)
 torch.npu.synchronize()
 all_reduce(rt, z, x)
 torch.npu.synchronize()
-if rank == 0:
+if rank == 1:
     print('all reduce executed!')
-
-try:
-    torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
-except AssertionError as e:
-    print(f'{e}')
-    print(f'torch_npu: {standard}')
-    print(f'xlite: {z}')
+    try:
+        torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
+    except AssertionError as e:
+        print(f'{e}')
+        print(f'torch_npu: {standard}')
+        print(f'xlite: {z}')

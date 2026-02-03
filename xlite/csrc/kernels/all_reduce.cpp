@@ -36,7 +36,6 @@ public:
         this->coreNum = block_num;
         uint64_t countPerRank = DIV_ROUND_UP(count, rankSize);
         this->blockNum = rankSize;
-        this->countPerBlock = DIV_ROUND_UP(countPerRank, blockNum);
         this->offsetCurrRank = countPerRank * myRankId;
         this->generation = generation;
         this->reduceScatterSkipMyRank = input == output ? true : false;
@@ -114,6 +113,7 @@ public:
         if (myRankId * countPerRank + countCurrRank > count) {
             countCurrRank = count - myRankId * countPerRank;
         }
+        this->countPerBlock = DIV_ROUND_UP(countCurrRank, blockNum);
     }
 
     __aicore__ inline void SetIpcFlag(uint32_t flagId, uint32_t value)
@@ -337,7 +337,6 @@ public:
         SetAtomicAdd<Dtype>();
         uint32_t corePerRank = coreNum / rankSize;
         uint32_t processRankIdx = coreIdx / corePerRank;
-        uint64_t countPerBlock = DIV_ROUND_UP(countCurrRank, blockNum);
         uint32_t taskIdx = coreIdx % corePerRank;
 
         uint64_t countPerTask = DIV_ROUND_UP(countCurrRank, corePerRank);
