@@ -269,6 +269,7 @@ public:
                 /* Mmad L0A L0B -> L0C */
                 SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+                PipeBarrier<PIPE_M>();
                 CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], m0, nActualBlockPad, kActualBlockPad, kIdx == 0);
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + kIdx2);
                 kOffset += kActual;
