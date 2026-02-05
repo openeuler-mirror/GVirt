@@ -569,6 +569,30 @@ void DecodeAttention(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tensor 
     rt.pool->PutTensor(qk);
 }
 
+void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vCache,
+               at::Tensor &output, at::Tensor &cumPromptLens, at::Tensor &lens, at::Tensor &cachedLens,
+               at::Tensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
+               uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
+{
+    XTensor _qkv, _kCache, _vCache, _qk, _output, _cumPromptLens, _lens, _cachedLens, _blockTables;
+    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize}, XDtype(qkv), DBG_LOC);
+
+    InitXTensor(_qkv, qkv);
+    InitXTensor(_kCache, kCache);
+    InitXTensor(_vCache, vCache);
+    InitXTensor(_output, output);
+    InitXTensor(_cumPromptLens, cumPromptLens);
+    InitXTensor(_lens, lens);
+    InitXTensor(_cachedLens, cachedLens);
+    InitXTensor(_blockTables, blockTables);
+
+    XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _cumPromptLens, _lens, _cachedLens, _blockTables,
+                     nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlock);
+    rt.Synchronize();
+
+    rt.pool->PutTensor(qk);
+}
+
 void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &norm, at::Tensor &out, float normEps)
 {
     XTensor _in1, _in2, _out, _norm;
@@ -825,6 +849,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("rope_and_cache", &RopeAndCache);
     m.def("prefill_attention", &PrefillAttention);
     m.def("decode_attention", &DecodeAttention);
+    m.def("attention", &Attention);
     m.def("add_and_rmsnorm", &AddAndRMSNorm);
     m.def("softmax_topk", &SoftmaxTopK);
     m.def("cast_up", &CastUp);
