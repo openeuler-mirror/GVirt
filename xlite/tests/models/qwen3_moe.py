@@ -497,7 +497,7 @@ class Qwen3MoE(nn.Module):
         assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
         assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
 
-        self.xlite_weight_nz = False
+        self.xlite_weight_nz = True if forward_backend == "xlite" else False
 
         q_proj_shard_size = (self.args.head_dim * self.args.n_heads // world_size)
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
@@ -610,6 +610,12 @@ class Qwen3MoE(nn.Module):
             param.copy_(loaded_weight)
             torch.npu.empty_cache()
 
+        # transpose
+        for layer_id, layer in enumerate(self.layers):
+            for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
+                layer.mlp.experts[i].gate_up_proj.weight.data = layer.mlp.experts[i].gate_up_proj.weight.data.transpose(0,1).contiguous()
+                layer.mlp.experts[i].down_proj.weight.data = layer.mlp.experts[i].down_proj.weight.data.transpose(0,1).contiguous()
+
         if self.xlite_weight_nz:
             self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
             for layer_id, layer in enumerate(self.layers):
@@ -618,6 +624,10 @@ class Qwen3MoE(nn.Module):
                 if not is_layer_moe(self.args, layer_id):
                     layer.mlp.gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.gate_up_proj.weight)
                     layer.mlp.down_proj.weight.data = matrix_nd2nz(layer.mlp.down_proj.weight)
+                layer.mlp.gate.weight.data = matrix_nd2nz(layer.mlp.gate.weight)
+                for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
+                    layer.mlp.experts[i].gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].gate_up_proj.weight)
+                    layer.mlp.experts[i].down_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].down_proj.weight)
             torch.npu.empty_cache()
 
         if forward_backend == "xlite":
@@ -669,6 +679,7 @@ class Qwen3MoE(nn.Module):
         config.qk_norm = args.qk_norm
         config.norm_topk_prob = args.norm_topk_prob
         config.scoring_func = ScoringFuncSoftmax
+        config.experts_weight_transpose = True
 
         self.xlite_model = Model()
         self.xlite_model.embed = self.embed_tokens.weight
