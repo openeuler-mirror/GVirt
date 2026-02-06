@@ -31,18 +31,20 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/all_reduce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reduce_scatter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/all_gather.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix_float16_t.cpp
 )
 
 # xlite_kernels_bf16_${RUN_MODE}
 file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_bfloat16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/cast_float_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_bfloat16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_bfloat16_t.cpp
@@ -55,11 +57,9 @@ file(GLOB KERNEL_FILES_BF16
 file(GLOB KERNEL_FILES_F16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_float16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_float16_t.cpp

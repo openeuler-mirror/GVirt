@@ -163,8 +163,6 @@ private:
                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
     void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);
-    void XliteOpAttention(XRuntime &rt, uint32_t layer, XTensor &kCache, XTensor &vCache,
-                          XTensor &input, XTensor &output);
     void ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                         std::vector<std::pair<XTensor, XTensor>>& kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
@@ -208,7 +206,7 @@ private:
     uint32_t _realM;
     uint32_t _maxNumBlocks;
     int _prefillBatch;
-    int _decodeBatch;
+    int _batch;
     int _prefillLen;
     int _prefillLenPad;
     XTensor _attnPosition;
@@ -219,7 +217,6 @@ private:
     XTensor _slotMapping;
     XTensor _prefillIdx;
     XTensor _prefillLastIdx;
-    XTensor _decodeIdx;
     XTensor _cachedLens;
     XTensor _lens;
     XTensor _cumPromptLens;
