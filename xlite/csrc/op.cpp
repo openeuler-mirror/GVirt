@@ -54,6 +54,8 @@
 #include "aclrtlaunch_allgather_float16_t.h"
 #include "aclrtlaunch_allgather_bfloat16_t.h"
 #include "aclrtlaunch_allgather_float.h"
+#include "aclrtlaunch_attention_float16_t.h"
+#include "aclrtlaunch_attention_bfloat16_t.h"
 #include "kernels/ccl_param.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
@@ -594,6 +596,24 @@ void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &q
                                           vCache.ptr, cachedLens.ptr, blockTables.ptr, qk.ptr, output.ptr,
                                           decodeIdx.ptr, cumPromptLens.ptr, batch, localHeads, headDim,
                                           blockSize, maxNumBlock, localKvHeads);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
+}
+
+void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk, XTensor &output,
+                      XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
+                      uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
+                      uint32_t batch, uint32_t maxNumBlock)
+{
+    if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 && output.dtype == FP16) {
+        aclrtlaunch_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, output.ptr,
+                                        cumPromptLens.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
+                                        nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlock);
+    } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 && output.dtype == BF16) {
+        aclrtlaunch_attention_bfloat16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, output.ptr,
+                                         cumPromptLens.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
+                                         nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlock);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

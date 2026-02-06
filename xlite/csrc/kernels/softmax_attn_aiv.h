@@ -16,7 +16,7 @@ using namespace AscendC;
  * bfloat16_t: n <= 24320
  */
 template<typename Dtype, typename CalcDtype>
-inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0)
+inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
     CalcDtype min;
     if constexpr (std::is_same<CalcDtype, half>::value) {
@@ -50,7 +50,7 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
     for (int idx = 0; idx < m; ++idx) {
-        int actualCalcLen = calcLen + idx; // 每一行开始mask的位置
+        int actualCalcLen = calcLen + (idx + maskOff) / maskStride; // 每一行开始mask的位置
         if (actualCalcLen > outN) {
             actualCalcLen = outN;
         }
@@ -198,7 +198,7 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
  * bfloat16_t: n <= 2064512
  */
 template<typename Dtype, typename CalcDtype>
-inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0)
+inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -235,7 +235,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     for (int idx = 0; idx < m; idx++) {
-        int actualCalcLen = calcLen + idx; // 每一行开始mask的位置
+        int actualCalcLen = calcLen + (idx + maskOff) / maskStride; // 每一行开始mask的位置
         if (actualCalcLen > outN) {
             actualCalcLen = outN;
         }
@@ -509,7 +509,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
 }
 
 template<typename Dtype, typename CalcDtype>
-inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0)
+inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
     uint64_t maxNOneLoop = 0;
     if constexpr (std::is_same<Dtype, float16_t>::value) {
@@ -519,19 +519,19 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, 
     }
 
     if (n <= maxNOneLoop) {
-        RunAivSoftmaxOneLoop<Dtype, CalcDtype>(buf, m, n, calcLen, outN);
+        RunAivSoftmaxOneLoop<Dtype, CalcDtype>(buf, m, n, calcLen, outN, maskOff, maskStride);
     } else {
-        RunAivSoftmaxLong<Dtype, CalcDtype>(buf, m, n, calcLen, outN);
+        RunAivSoftmaxLong<Dtype, CalcDtype>(buf, m, n, calcLen, outN, maskOff, maskStride);
     }
 }
 
 #else
 template<typename Dtype, typename CalcDtype>
-inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0)
+inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
 }
 template<typename Dtype, typename CalcDtype>
-inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0)
+inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
 }
 #endif
