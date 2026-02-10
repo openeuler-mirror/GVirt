@@ -284,12 +284,10 @@ __inline__ __aicore__ void ReduceMaxV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         } else {
             vmax(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
         }
-        pipe_barrier(PIPE_V);
 
         if ((lastValid ^ remain) != 0) {
             if (lastValid != 0) {
                 vmax(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
                 repeat = repeat + 1;
                 lastValid = 0;
             } else {
@@ -297,6 +295,7 @@ __inline__ __aicore__ void ReduceMaxV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
                 lastValid = 1;
             }
         }
+        pipe_barrier(PIPE_V);
         total = repeat + remain;
         src = dst;
     }
@@ -305,12 +304,12 @@ __inline__ __aicore__ void ReduceMaxV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         if (src == orgSrc) {
             copy_ubuf_to_ubuf(dst, src, 0, 1, 8, 1, 1);
             pipe_barrier(PIPE_V);
+            src = dst;
         }
         SetMask(remain);
-        vmax(dst, dst, tail, 1, 1, 1, 1, 8, 8, 8);
+        vmax(dst, src, tail, 1, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        src = dst;
     }
     vcmax(dst, src, 1, 8, 1, 8, Order_t::ONLY_VALUE);
 }
@@ -355,12 +354,10 @@ __inline__ __aicore__ void ReduceSumV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         } else {
             vadd(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
         }
-        pipe_barrier(PIPE_V);
 
         if ((lastValid ^ remain) != 0) {
             if (lastValid != 0) {
                 vadd(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
                 repeat = repeat + 1;
                 lastValid = 0;
             } else {
@@ -368,6 +365,7 @@ __inline__ __aicore__ void ReduceSumV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
                 lastValid = 1;
             }
         }
+        pipe_barrier(PIPE_V);
         total = repeat + remain;
         src = dst;
     }
@@ -376,12 +374,12 @@ __inline__ __aicore__ void ReduceSumV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         if (src == orgSrc) {
             copy_ubuf_to_ubuf(dst, src, 0, 1, 8, 1, 1);
             pipe_barrier(PIPE_V);
+            src = dst;
         }
         SetMask(remain);
-        vadd(dst, dst, tail, 1, 1, 1, 1, 8, 8, 8);
+        vadd(dst, src, tail, 1, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        src = dst;
     }
     vcadd(dst, src, 1, 1, 1, 8, 0);
 }
@@ -415,12 +413,10 @@ __inline__ __aicore__ void ReduceMaxV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
             repeat = repeat - 1;
         }
         vmax(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
-        pipe_barrier(PIPE_V);
 
         if ((lastValid ^ remain) != 0) {
             if (lastValid != 0) {
                 vmax(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
                 repeat = repeat + 1;
                 lastValid = 0;
             } else {
@@ -428,6 +424,7 @@ __inline__ __aicore__ void ReduceMaxV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
                 lastValid = 1;
             }
         }
+        pipe_barrier(PIPE_V);
         total = repeat + remain;
         src = dst;
     }
@@ -436,12 +433,12 @@ __inline__ __aicore__ void ReduceMaxV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         if (src == orgSrc) {
             copy_ubuf_to_ubuf(dst, src, 0, 1, 8, 1, 1);
             pipe_barrier(PIPE_V);
+            src = dst;
         }
         SetMask(remain);
-        vmax(dst, dst, tail, 1, 1, 1, 1, 8, 8, 8);
+        vmax(dst, src, tail, 1, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        src = dst;
     }
     vcmax(dst, src, 1, 8, 1, 8, Order_t::ONLY_VALUE);
 }
@@ -475,12 +472,10 @@ __inline__ __aicore__ void ReduceSumV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
             repeat = repeat - 1;
         }
         vadd(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
-        pipe_barrier(PIPE_V);
 
         if ((lastValid ^ remain) != 0) {
             if (lastValid != 0) {
                 vadd(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
                 repeat = repeat + 1;
                 lastValid = 0;
             } else {
@@ -488,6 +483,7 @@ __inline__ __aicore__ void ReduceSumV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
                 lastValid = 1;
             }
         }
+        pipe_barrier(PIPE_V);
         total = repeat + remain;
         src = dst;
     }
@@ -496,12 +492,12 @@ __inline__ __aicore__ void ReduceSumV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         if (src == orgSrc) {
             copy_ubuf_to_ubuf(dst, src, 0, 1, 8, 1, 1);
             pipe_barrier(PIPE_V);
+            src = dst;
         }
         SetMask(remain);
-        vadd(dst, dst, tail, 1, 1, 1, 1, 8, 8, 8);
+        vadd(dst, src, tail, 1, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        src = dst;
     }
     vcadd(dst, src, 1, 1, 1, 8, 0);
 }
