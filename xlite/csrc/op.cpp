@@ -93,7 +93,8 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
 
     auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
     auto hcclComm = (type == TP) ? rt._tpComm : rt._dpComm;
-    uint32_t rank = type == TP ? rt.tpSize() : rt.dpSize();
+    uint32_t rank = (type == TP) ? rt.tpSize() : rt.dpSize();
+    uint32_t localRank = (type == TP) ? (rt.rankId() % rt.tpSize()) : (rt.rankId() / rt.tpSize());
     size_t inBytes = in.numel * XDtypeBit(in.dtype) / 8;
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
@@ -128,27 +129,34 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
             case FP16:
                 aclrtlaunch_allgather_float16_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case BF16:
                 aclrtlaunch_allgather_bfloat16_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
+                break;
+            // BIT1 is packed, so count is in.numel / 8.
+            case BIT1:
+                aclrtlaunch_allgather_int8_t(
+                    coreNum, rt.stream, inPtr, outPtr,
+                    in.numel * XDtypeBit(in.dtype) / XDtypeBit(INT8),
+                    localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case INT8:
                 aclrtlaunch_allgather_int8_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case INT32:
                 aclrtlaunch_allgather_int32_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case FP32:
                 aclrtlaunch_allgather_float(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             default:
                 std::cerr << __func__ << ": unsupported dtype for xccl func" << std::endl;
@@ -178,7 +186,8 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
 
     auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
     auto hcclComm = (type == TP) ? rt._tpComm : rt._dpComm;
-    uint32_t rank = type == TP ? rt.tpSize() : rt.dpSize();
+    uint32_t rank = (type == TP) ? rt.tpSize() : rt.dpSize();
+    uint32_t localRank = (type == TP) ? (rt.rankId() % rt.tpSize()) : (rt.rankId() / rt.tpSize());
     size_t inBytes = in.numel * XDtypeBit(in.dtype) / 8;
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
@@ -213,27 +222,27 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
             case FP16:
                 aclrtlaunch_reduce_scatter_float16_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case BF16:
                 aclrtlaunch_reduce_scatter_bfloat16_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case INT8:
                 aclrtlaunch_reduce_scatter_int8_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case INT32:
                 aclrtlaunch_reduce_scatter_int32_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case FP32:
                 aclrtlaunch_reduce_scatter_float(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             default:
                 std::cerr << __func__ << ": unsupported dtype for xccl func" << std::endl;
@@ -262,7 +271,8 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 
     auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
     auto hcclComm = (type == TP) ? rt._tpComm : rt._dpComm;
-    uint32_t rank = type == TP ? rt.tpSize() : rt.dpSize();
+    uint32_t rank = (type == TP) ? rt.tpSize() : rt.dpSize();
+    uint32_t localRank = (type == TP) ? (rt.rankId() % rt.tpSize()) : (rt.rankId() / rt.tpSize());
     size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
@@ -294,27 +304,27 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
             case FP16:
                 aclrtlaunch_allreduce_float16_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case BF16:
                 aclrtlaunch_allreduce_bfloat16_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case INT8:
                 aclrtlaunch_allreduce_int8_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case INT32:
                 aclrtlaunch_allreduce_int32_t(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             case FP32:
                 aclrtlaunch_allreduce_float(
                     coreNum, rt.stream, inPtr, outPtr,
-                    in.numel, rt.rankId(), rank, xcclComm->generation++, xcclComm->dParam);
+                    in.numel, localRank, rank, xcclComm->generation++, xcclComm->dParam);
                 break;
             default:
                 std::cerr << __func__ << ": unsupported dtype for xccl func" << std::endl;
