@@ -245,16 +245,10 @@ inline __aicore__ void SetMaskFromHighBit(int32_t high, int32_t len)
 }
 
 template <typename Dtype>
-__inline__ __aicore__ void ReduceMaxV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
+__inline__ __aicore__ void ReduceMaxV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
 {
-    Dtype min;
     constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
     constexpr int instPad = VECTOR_MAX_REPEAT * pad;
-    if constexpr (std::is_same<Dtype, half>::value) {
-        min = half(-65504);
-    } else if constexpr (std::is_same<Dtype, float>::value) {
-        min = -3.4028235e+38;
-    }
     set_mask_norm();
 
     uint32_t repeat = DIV_ROUND_UP(dim, pad);
@@ -265,13 +259,9 @@ __inline__ __aicore__ void ReduceMaxV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         return;
     }
 
-    if (dim % pad != 0) {
-        SetMaskFromHighBit(pad, pad - dim % pad);
-        vector_dup(src + ROUND_DOWN(dim, pad), min, 1, 1, 1, 8, 0);
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        pipe_barrier(PIPE_V);
-    }
-
+    repeat = dim / pad;
+    __ubuf__ Dtype *orgSrc = src;
+    __ubuf__ Dtype *tail = src + repeat * pad;
     __ubuf__ Dtype *last;
     int lastValid = 0;
     int remain;
@@ -294,12 +284,10 @@ __inline__ __aicore__ void ReduceMaxV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         } else {
             vmax(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
         }
-        pipe_barrier(PIPE_V);
 
         if ((lastValid ^ remain) != 0) {
             if (lastValid != 0) {
                 vmax(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
                 repeat = repeat + 1;
                 lastValid = 0;
             } else {
@@ -307,14 +295,27 @@ __inline__ __aicore__ void ReduceMaxV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
                 lastValid = 1;
             }
         }
+        pipe_barrier(PIPE_V);
         total = repeat + remain;
         src = dst;
+    }
+    remain = dim % pad;
+    if (remain != 0) {
+        if (src == orgSrc) {
+            copy_ubuf_to_ubuf(dst, src, 0, 1, 8, 1, 1);
+            pipe_barrier(PIPE_V);
+            src = dst;
+        }
+        SetMask(remain);
+        vmax(dst, src, tail, 1, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
     }
     vcmax(dst, src, 1, 8, 1, 8, Order_t::ONLY_VALUE);
 }
 
 template <typename Dtype>
-__inline__ __aicore__ void ReduceSumV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
+__inline__ __aicore__ void ReduceSumV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
 {
     constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
     constexpr int instPad = VECTOR_MAX_REPEAT * pad;
@@ -328,13 +329,9 @@ __inline__ __aicore__ void ReduceSumV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         return;
     }
 
-    if (dim % pad != 0) {
-        SetMaskFromHighBit(pad, pad - dim % pad);
-        vector_dup(src + ROUND_DOWN(dim, pad), Dtype(0), 1, 1, 1, 8, 0);
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        pipe_barrier(PIPE_V);
-    }
-
+    repeat = dim / pad;
+    __ubuf__ Dtype *orgSrc = src;
+    __ubuf__ Dtype *tail = src + repeat * pad;
     __ubuf__ Dtype *last;
     int lastValid = 0;
     int remain;
@@ -357,12 +354,10 @@ __inline__ __aicore__ void ReduceSumV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
         } else {
             vadd(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
         }
-        pipe_barrier(PIPE_V);
 
         if ((lastValid ^ remain) != 0) {
             if (lastValid != 0) {
                 vadd(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
                 repeat = repeat + 1;
                 lastValid = 0;
             } else {
@@ -370,8 +365,139 @@ __inline__ __aicore__ void ReduceSumV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
                 lastValid = 1;
             }
         }
+        pipe_barrier(PIPE_V);
         total = repeat + remain;
         src = dst;
+    }
+    remain = dim % pad;
+    if (remain != 0) {
+        if (src == orgSrc) {
+            copy_ubuf_to_ubuf(dst, src, 0, 1, 8, 1, 1);
+            pipe_barrier(PIPE_V);
+            src = dst;
+        }
+        SetMask(remain);
+        vadd(dst, src, tail, 1, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+    }
+    vcadd(dst, src, 1, 1, 1, 8, 0);
+}
+
+// float16_t: dim <= 32640 (255 * 128), float: dim <= 16320 (255 * 64)
+template <typename Dtype>
+__inline__ __aicore__ void ReduceMaxV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
+{
+    constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    set_mask_norm();
+
+    uint32_t repeat = DIV_ROUND_UP(dim, pad);
+    if (repeat == 1) {
+        SetMask(dim);
+        vcmax(dst, src, 1, 1, 1, 8, Order_t::ONLY_VALUE);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        return;
+    }
+
+    repeat = dim / pad;
+    __ubuf__ Dtype *orgSrc = src;
+    __ubuf__ Dtype *tail = src + repeat * pad;
+    __ubuf__ Dtype *last;
+    int lastValid = 0;
+    int remain;
+    uint32_t total = repeat;
+    while (total > 1) {
+        remain = total % 2;
+        repeat = total / 2;
+        if (lastValid != 0 && remain == 0) {
+            repeat = repeat - 1;
+        }
+        vmax(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
+
+        if ((lastValid ^ remain) != 0) {
+            if (lastValid != 0) {
+                vmax(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
+                repeat = repeat + 1;
+                lastValid = 0;
+            } else {
+                last = src + ROUND_DOWN(total, 2) * pad;
+                lastValid = 1;
+            }
+        }
+        pipe_barrier(PIPE_V);
+        total = repeat + remain;
+        src = dst;
+    }
+    remain = dim % pad;
+    if (remain != 0) {
+        if (src == orgSrc) {
+            copy_ubuf_to_ubuf(dst, src, 0, 1, 8, 1, 1);
+            pipe_barrier(PIPE_V);
+            src = dst;
+        }
+        SetMask(remain);
+        vmax(dst, src, tail, 1, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+    }
+    vcmax(dst, src, 1, 8, 1, 8, Order_t::ONLY_VALUE);
+}
+
+// float16_t: dim <= 32640 (255 * 128), float: dim <= 16320 (255 * 64)
+template <typename Dtype>
+__inline__ __aicore__ void ReduceSumV2(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
+{
+    constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    set_mask_norm();
+
+    uint32_t repeat = DIV_ROUND_UP(dim, pad);
+    if (repeat == 1) {
+        SetMask(dim);
+        vcadd(dst, src, 1, 1, 1, 8, 0);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        return;
+    }
+
+    repeat = dim / pad;
+    __ubuf__ Dtype *orgSrc = src;
+    __ubuf__ Dtype *tail = src + repeat * pad;
+    __ubuf__ Dtype *last;
+    int lastValid = 0;
+    int remain;
+    uint32_t total = repeat;
+    while (total > 1) {
+        remain = total % 2;
+        repeat = total / 2;
+        if (lastValid != 0 && remain == 0) {
+            repeat = repeat - 1;
+        }
+        vadd(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
+
+        if ((lastValid ^ remain) != 0) {
+            if (lastValid != 0) {
+                vadd(dst + repeat * pad, src + repeat * 2 * pad, last, 1, 1, 1, 1, 8, 8, 8);
+                repeat = repeat + 1;
+                lastValid = 0;
+            } else {
+                last = src + ROUND_DOWN(total, 2) * pad;
+                lastValid = 1;
+            }
+        }
+        pipe_barrier(PIPE_V);
+        total = repeat + remain;
+        src = dst;
+    }
+    remain = dim % pad;
+    if (remain != 0) {
+        if (src == orgSrc) {
+            copy_ubuf_to_ubuf(dst, src, 0, 1, 8, 1, 1);
+            pipe_barrier(PIPE_V);
+            src = dst;
+        }
+        SetMask(remain);
+        vadd(dst, src, tail, 1, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
     }
     vcadd(dst, src, 1, 1, 1, 8, 0);
 }
