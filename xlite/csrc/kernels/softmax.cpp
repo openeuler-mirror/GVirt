@@ -6,7 +6,7 @@
 #define SOFTMAX_FUNC_DEFINE(Dtype, CalcDtype) \
 extern "C" __global__ __aicore__ void softmax_##Dtype(GM_ADDR x, uint32_t m, uint32_t n, uint32_t contextLen) \
 { \
-    RunAivSoftmaxOneLoop<Dtype, CalcDtype>((__gm__ Dtype *)x, m, n, contextLen); \
+    RunAivSoftmaxPingPong<Dtype, CalcDtype>((__gm__ Dtype *)x, m, n, contextLen); \
 }
 
 SOFTMAX_FUNC_DEFINE(float16_t, float16_t);

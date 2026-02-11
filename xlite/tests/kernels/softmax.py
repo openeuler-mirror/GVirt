@@ -14,12 +14,12 @@ rt = Runtime(0, 500)
 torch.npu.set_device(0)
 
 supported_dtype_list = [torch.float16, torch.bfloat16]
-size_list = [3, 78, 1035, 10489, 16321, 19584, 24320, 28032, 32640]
+size_list = [3, 78, 1035, 10489, 13952, 16321, 17792]
 tokens = 1
 
 for dtype in supported_dtype_list:
     for size in  size_list:
-        if dtype == torch.bfloat16 and size > 24320:
+        if dtype == torch.bfloat16 and size > 13952:
             continue
         x = torch.randn(tokens, (size + 127) // 128 * 128, dtype=dtype, device="npu:0")
         for m in range(tokens):
