@@ -84,6 +84,7 @@ ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
 add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/sock.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/swizzle.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/op.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/model.cpp

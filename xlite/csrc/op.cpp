@@ -5,6 +5,7 @@
 #include "ascend.h"
 #include "runtime.h"
 #include "op.h"
+#include "swizzle.h"
 #include "aclrtlaunch_add_float16_t.h"
 #include "aclrtlaunch_add_bfloat16_t.h"
 #include "aclrtlaunch_embed_kernel_float16_t.h"
@@ -435,6 +436,8 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
             }
         }
     }
+
+    XlitePickSwizzle(m, n, k, swizzle);
 
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
