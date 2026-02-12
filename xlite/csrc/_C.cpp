@@ -516,59 +516,6 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
     rt.Synchronize();
 }
 
-void PrefillAttention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &qk, at::Tensor &blockTables,
-                      at::Tensor &cachedLens, at::Tensor &vCache, at::Tensor &output,
-                      at::Tensor &lens, at::Tensor &prefillIndex, at::Tensor &cumPromptLens, uint32_t headDim,
-                      uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
-{
-    XTensor _qkv, _kCache, _qk, _blockTables, _cachedLens, _vCache, _output, _lens, _prefillIndex, _cumPromptLens;
-
-    InitXTensor(_qkv, qkv);
-    InitXTensor(_kCache, kCache);
-    InitXTensor(_qk, qk);
-    InitXTensor(_blockTables, blockTables);
-    InitXTensor(_cachedLens, cachedLens);
-    InitXTensor(_vCache, vCache);
-    InitXTensor(_output, output);
-    InitXTensor(_lens, lens);
-    InitXTensor(_prefillIndex, prefillIndex);
-    InitXTensor(_cumPromptLens, cumPromptLens);
-    XliteOpPrefillAttention(rt, _qkv, _kCache, _qk, _blockTables, _cachedLens,
-                            _vCache, _output, _lens, _prefillIndex, _cumPromptLens,
-                            headDim, nHeads, nKvHeads, blockSize, batch, maxNumBlock);
-    rt.Synchronize();
-}
-
-void DecodeAttention(XRuntime &rt, at::Tensor &a2v, at::Tensor &v2a, at::Tensor &qkv,
-                        at::Tensor &kCache, at::Tensor &vCache, at::Tensor &cachedLens,
-                        at::Tensor &blockTables, at::Tensor &output, at::Tensor &decodeIdx,
-                        at::Tensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
-                        uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
-                        uint32_t nKvHeads)
-{
-    XTensor _a2v, _v2a, _qkv, _kCache, _vCache, _cachedLens,
-            _blockTables, _output, _decodeIdx, _cumPromptLens;
-    XTensor &qk = rt.pool->GetTensor({batch, nHeads / rt.tpSize(), maxNumBlock * blockSize}, XDtype(qkv), DBG_LOC);
-
-    InitXTensor(_a2v, a2v);
-    InitXTensor(_v2a, v2a);
-    InitXTensor(_qkv, qkv);
-    InitXTensor(_kCache, kCache);
-    InitXTensor(_vCache, vCache);
-    InitXTensor(_cachedLens, cachedLens);
-    InitXTensor(_blockTables, blockTables);
-    InitXTensor(_output, output);
-    InitXTensor(_decodeIdx, decodeIdx);
-    InitXTensor(_cumPromptLens, cumPromptLens);
-
-    XliteOpDecodeAttention(rt, _a2v, _v2a, _qkv, _kCache, _vCache, _cachedLens,
-                           _blockTables, qk, _output, _decodeIdx, _cumPromptLens, batch, nHeads,
-                           headDim, blockSize, maxNumBlock, nKvHeads);
-    rt.Synchronize();
-
-    rt.pool->PutTensor(qk);
-}
-
 void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vCache,
                at::Tensor &output, at::Tensor &cumPromptLens, at::Tensor &lens, at::Tensor &cachedLens,
                at::Tensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
@@ -847,8 +794,6 @@ PYBIND11_MODULE(_C, m) {
     m.def("add_bias", &AddBias);
     m.def("silu_and_mul", &SiluAndMul);
     m.def("rope_and_cache", &RopeAndCache);
-    m.def("prefill_attention", &PrefillAttention);
-    m.def("decode_attention", &DecodeAttention);
     m.def("attention", &Attention);
     m.def("add_and_rmsnorm", &AddAndRMSNorm);
     m.def("softmax_topk", &SoftmaxTopK);

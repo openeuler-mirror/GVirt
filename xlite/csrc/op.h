@@ -40,18 +40,6 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
                       XTensor &position, XTensor &cossin, XTensor &slotMapping,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t rotDim, uint32_t blockSize, bool isNeox);
-void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &qk,
-                             XTensor &blockTables, XTensor &cachedLens,
-                             XTensor &vCache, XTensor &output, XTensor &lens,
-                             XTensor &prefillIndex, XTensor &cumPromptLens, uint32_t headDim,
-                             uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize,
-                             uint32_t batch, uint32_t maxNumBlock);
-void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &qkv,
-                            XTensor &kCache, XTensor &vCache, XTensor &cachedLens,
-                            XTensor &blockTables, XTensor &qk, XTensor &output, XTensor &decodeIdx,
-                            XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
-                            uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
-                            uint32_t nKvHeads);
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk, XTensor &output,
                       XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
