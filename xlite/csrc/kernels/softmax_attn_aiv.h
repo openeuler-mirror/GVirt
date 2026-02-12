@@ -65,8 +65,13 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
         int repeat = padCachedTokens / calPad;
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
-        copy_gm_to_ubuf(in[curr], buf + idx * n, 0, 1,
-                        DIV_ROUND_UP(actualCalcLen * sizeof(Dtype), 32), 0, 0);
+        if (actualCalcLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
+            copy_gm_to_ubuf(in[curr], buf + idx * n, 0, 1,
+                            actualCalcLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+        } else {
+            copy_gm_to_ubuf_align_b16(in[curr], buf + idx * n, 0, 1,
+                                      actualCalcLen * sizeof(Dtype), 0, 0, 0, 0);
+        }
 
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
@@ -139,13 +144,13 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
             if (actualCalcLen % pad != 0) {
                 SetMaskFromHighBit(pad, pad - actualCalcLen % pad);
                 vector_dup(out[curr] + ROUND_DOWN(actualCalcLen, pad), Dtype(0), 1, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
                 set_vector_mask((uint64_t)-1, (uint64_t)-1);
             }
             int last = ROUND_UP(actualCalcLen, pad);
             if (outN > last) {
                 vector_dup(out[curr] + last, Dtype(0), DIV_ROUND_UP(outN - last, pad), 1, 1, 8, 0);
             }
+            pipe_barrier(PIPE_V);
         }
 
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
@@ -224,8 +229,13 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
         int instNum = DIV_ROUND_UP(repeat, VECTOR_MAX_REPEAT);
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-        copy_gm_to_ubuf(in, buf + idx * n, 0, 1,
-                        DIV_ROUND_UP(actualCalcLen * sizeof(Dtype), 32), 0, 0);
+        if (actualCalcLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
+            copy_gm_to_ubuf(in, buf + idx * n, 0, 1,
+                            actualCalcLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+        } else {
+            copy_gm_to_ubuf_align_b16(in, buf + idx * n, 0, 1,
+                                      actualCalcLen * sizeof(Dtype), 0, 0, 0, 0);
+        }
 
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
@@ -342,13 +352,13 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
             if (actualCalcLen % pad != 0) {
                 SetMaskFromHighBit(pad, pad - actualCalcLen % pad);
                 vector_dup(out + ROUND_DOWN(actualCalcLen, pad), Dtype(0), 1, 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
                 set_vector_mask((uint64_t)-1, (uint64_t)-1);
             }
             int last = ROUND_UP(actualCalcLen, pad);
             if (outN > last) {
                 vector_dup(out + last, Dtype(0), DIV_ROUND_UP(outN - last, pad), 1, 1, 8, 0);
             }
+            pipe_barrier(PIPE_V);
         }
 
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
@@ -452,7 +462,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
 
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
             if (curLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(in, curBuf + offset, 0, 1, DIV_ROUND_UP(curLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+                copy_gm_to_ubuf(in, curBuf + offset, 0, 1, curLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
                 copy_gm_to_ubuf_align_b16(in, curBuf + offset, 0, 1, curLen * sizeof(Dtype), 0, 0, 0, 0);
             }
@@ -590,7 +600,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 }
 
                 if (curLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                    copy_ubuf_to_gm(curBuf + offset, out, 0, 1, DIV_ROUND_UP(curLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+                    copy_ubuf_to_gm(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
                 } else {
                     copy_ubuf_to_gm_align_b16(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype), 0, 0, 0, 0);
                 }
@@ -616,7 +626,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
             if (subBlockNum != 1) {
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
                 if (curLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                    copy_gm_to_ubuf(in, curBuf + offset, 0, 1, DIV_ROUND_UP(curLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+                    copy_gm_to_ubuf(in, curBuf + offset, 0, 1, curLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
                 } else {
                     copy_gm_to_ubuf_align_b16(in, curBuf + offset, 0, 1, curLen * sizeof(Dtype), 0, 0, 0, 0);
                 }
@@ -679,7 +689,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
             if ((curLen * sizeof(Dtype)) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(curBuf + offset, out, 0, 1, DIV_ROUND_UP(curLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+                copy_ubuf_to_gm(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
                 copy_ubuf_to_gm_align_b16(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype), 0, 0, 0, 0);
             }
@@ -700,7 +710,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 curLen = outN - offset;
             }
             if ((curLen * sizeof(Dtype)) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(curBuf + offset, out, 0, 1, DIV_ROUND_UP(curLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+                copy_ubuf_to_gm(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
                 copy_ubuf_to_gm_align_b16(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype), 0, 0, 0, 0);
             }
