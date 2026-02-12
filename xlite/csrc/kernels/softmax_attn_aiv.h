@@ -10,12 +10,11 @@ using namespace AscendC;
 
 #if __DAV_C220_VEC__
 /* ROUND_UP(n * sizeof(Dtype), VECTOR_MAX_BYTESIZE) * 4 +
- *     ROUND_UP(n * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) +
- *     (DIV_ROUND_UP(n * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE <= ub size(196608B)
- * float16_t: n <= 17792
- * bfloat16_t: n <= 13952
+ *     ROUND_UP(n * sizeof(float), VECTOR_MAX_BYTESIZE) +
+ *     (DIV_ROUND_UP(n * sizeof(float), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE <= ub size(196608B)
+ * float16_t or bfloat16_t: n <= 13952
  */
-template<typename Dtype, typename CalcDtype>
+template<typename Dtype>
 inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
     if (outN == 0 || outN > n) {
@@ -36,13 +35,13 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
     __ubuf__ Dtype *out2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
     off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
     __ubuf__ Dtype *out[PINGPONG_BUF_NUM] = {out1, out2};
-    __ubuf__ CalcDtype *cal = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
-    off += ROUND_UP(outN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE);
-    __ubuf__ CalcDtype *temp = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
-    __ubuf__ CalcDtype *ptr;
+    __ubuf__ float *cal = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+    off += ROUND_UP(outN * sizeof(float), VECTOR_MAX_BYTESIZE);
+    __ubuf__ float *temp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+    __ubuf__ float *ptr;
 
-    int calPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
-    int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    constexpr int calPad = VECTOR_MAX_BYTESIZE / sizeof(float);
+    constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
     int curr = 0;
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
@@ -69,7 +68,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-        if constexpr (std::is_same<CalcDtype, Dtype>::value) {
+        if constexpr (std::is_same<Dtype, float>::value) {
             ptr = in[curr];
         } else {
             if constexpr (std::is_same<Dtype, half>::value) {
@@ -87,17 +86,13 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
         pipe_barrier(PIPE_V);
 
         // broadcast一个max标量为一个block大小的向量，避免使用scalar运算
-        if constexpr (std::is_same<CalcDtype, half>::value) {
-            vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
-        } else {
-            vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
-        }
+        vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
         pipe_barrier(PIPE_V);
 
         // QK - max
         vsub(cal, ptr, temp, repeat, 1, 1, 0, 8, 8, 0);
         pipe_barrier(PIPE_V);
-        if constexpr (std::is_same<CalcDtype, half>::value) {
+        if constexpr (std::is_same<Dtype, float>::value) {
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
         }
 
@@ -110,14 +105,10 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
         pipe_barrier(PIPE_V);
 
         // broadcast一个s = Reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算
-        if constexpr (std::is_same<CalcDtype, half>::value) {
-            vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
-        } else {
-            vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
-        }
+        vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
         pipe_barrier(PIPE_V);
 
-        if constexpr (std::is_same<CalcDtype, Dtype>::value) {
+        if constexpr (std::is_same<Dtype, float>::value) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
             vdiv(out[curr], cal, temp, repeat, 1, 1, 0, 8, 8, 0);
             pipe_barrier(PIPE_V);
@@ -163,12 +154,11 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
 }
 
 /* ROUND_UP(n * sizeof(Dtype), VECTOR_MAX_BYTESIZE) * 2 +
- *     ROUND_UP(n * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) +
- *     DIV_ROUND_UP(n * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) * sizeof(CalcDtype) <= ub size(196608B)
- * float16_t: n <= 32640
- * bfloat16_t: n <= 24320
+ *     ROUND_UP(n * sizeof(float), VECTOR_MAX_BYTESIZE) +
+ *     DIV_ROUND_UP(n * sizeof(float), VECTOR_MAX_BYTESIZE) * sizeof(float) <= ub size(196608B)
+ * float16_t or bfloat16_t: n <= 24320
  */
-template<typename Dtype, typename CalcDtype>
+template<typename Dtype>
 inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
     set_mask_norm();
@@ -183,17 +173,17 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
     off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
     __ubuf__ Dtype *out = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
     off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-    __ubuf__ CalcDtype *cal = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
-    off += ROUND_UP(outN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE);
-    __ubuf__ CalcDtype *temp = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t)off);
-    __ubuf__ CalcDtype *ptr;
+    __ubuf__ float *cal = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+    off += ROUND_UP(outN * sizeof(float), VECTOR_MAX_BYTESIZE);
+    __ubuf__ float *temp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+    __ubuf__ float *ptr;
 
-    int calPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
-    int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
-    int calInstPad = VECTOR_MAX_REPEAT * calPad;
-    int instPad = VECTOR_MAX_REPEAT * pad;
+    constexpr int calPad = VECTOR_MAX_BYTESIZE / sizeof(float);
+    constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    constexpr int calInstPad = VECTOR_MAX_REPEAT * calPad;
+    constexpr int instPad = VECTOR_MAX_REPEAT * pad;
 
-    int v3DstNeedSize = (DIV_ROUND_UP(outN * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE;
+    int v3DstNeedSize = (DIV_ROUND_UP(outN * sizeof(float), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE;
     if (v3DstNeedSize < VECTOR_MAX_BYTESIZE) {
         v3DstNeedSize = VECTOR_MAX_BYTESIZE;
     }
@@ -225,7 +215,7 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-        if constexpr (std::is_same<CalcDtype, Dtype>::value) {
+        if constexpr (std::is_same<Dtype, float>::value) {
             ptr = in;
         } else {
             for (int i = 0; i < instNum; i++) {
@@ -252,12 +242,8 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
             ReduceMax(temp, ptr, actualCalcLen);
         }
 
-        // broadcast一个max标量为一个block大小的向量，避免使用scalar运算
-        if constexpr (std::is_same<CalcDtype, half>::value) {
-            vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
-        } else {
-            vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
-        }
+        // broadcast一个max标量为一个block大小的向量，避免使用scalar运
+        vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
         pipe_barrier(PIPE_V);
 
         // QK - max
@@ -269,7 +255,7 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
             vsub(cal + i * calInstPad, ptr + i * calInstPad, temp, currRepeat, 1, 1, 0, 8, 8, 0);
         }
         pipe_barrier(PIPE_V);
-        if constexpr (std::is_same<CalcDtype, half>::value) {
+        if constexpr (std::is_same<Dtype, float>::value) {
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
         }
 
@@ -292,14 +278,10 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
         }
 
         // broadcast一个s = Reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算
-        if constexpr (std::is_same<CalcDtype, half>::value) {
-            vbrcb((__ubuf__ uint16_t*)temp, (__ubuf__ uint16_t*)temp, 0, 0, 1);
-        } else {
-            vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
-        }
+        vbrcb((__ubuf__ uint32_t*)temp, (__ubuf__ uint32_t*)temp, 0, 0, 1);
         pipe_barrier(PIPE_V);
 
-        if constexpr (std::is_same<CalcDtype, Dtype>::value) {
+        if constexpr (std::is_same<Dtype, float>::value) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
             for (int i = 0; i < instNum; i++) {
                 int currRepeat = VECTOR_MAX_REPEAT;
@@ -361,31 +343,24 @@ inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint3
 
 /*
  * (VECTOR_MAX_REPEAT - 1) * VECTOR_MAX_BYTESIZE * 2 + VECTOR_MAX_BYTESIZE * DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) + VECTOR_MAX_BYTESIZE * (subBlockNum + 1) * 2 < UB SIZE(196608)
- * float16_t: subBlockNum <= 128
- * float16_t: n <= 4161536
- * bfloat16_t: subBlockNum <= 127
- * bfloat16_t: n <= 2064512
+ * float16_t or bfloat16_t: subBlockNum <= 127
+ * float16_t or bfloat16_t: n <= 2064512
  */
-template<typename Dtype, typename CalcDtype>
+template<typename Dtype>
 inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    CalcDtype min;
-    if constexpr (std::is_same<CalcDtype, float>::value) {
-        min = -3.4028235e+38;
-    } else {
-        min = CalcDtype(-65504);
-    }
-    int calcPad = VECTOR_MAX_BYTESIZE / sizeof(CalcDtype);
-    int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    float min = -3.4028235e+38;
+    constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
+    constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
 
     if (outN == 0 || outN > n) {
         outN = n;
     }
 
-    // VECTOR_MAX_REPEAT - 1 for Dtype size 2, CalcDtype size 4
+    // VECTOR_MAX_REPEAT - 1 for Dtype size 2, float size 4
     uint32_t maxRepeat = VECTOR_MAX_REPEAT - 1;
     const uint32_t MAX_SUB_CONTEXT_SIZE = maxRepeat * calcPad;
     uint32_t totalSubBlockNum = DIV_ROUND_UP(outN, MAX_SUB_CONTEXT_SIZE);
@@ -395,14 +370,14 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
     off += MAX_SUB_CONTEXT_SIZE * sizeof(Dtype);
     auto *out = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t) off);
     off += MAX_SUB_CONTEXT_SIZE * sizeof(Dtype);
-    __ubuf__ CalcDtype *calc;
-    if constexpr (!std::is_same<Dtype, CalcDtype>::value) {
-        calc = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
-        off += MAX_SUB_CONTEXT_SIZE * sizeof(CalcDtype);
+    __ubuf__ float *calc;
+    if constexpr (!std::is_same<Dtype, float>::value) {
+        calc = reinterpret_cast<__ubuf__ float *>((uintptr_t) off);
+        off += MAX_SUB_CONTEXT_SIZE * sizeof(float);
     } else {
         calc = in;
     }
-    __ubuf__ CalcDtype *calcDst = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
+    __ubuf__ float *calcDst = reinterpret_cast<__ubuf__ float *>((uintptr_t) off);
     int useV2 = 0;
     if (totalSubBlockNum <= 65) {
         useV2 = 1;
@@ -410,9 +385,9 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
     } else {
         off += DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) * VECTOR_MAX_BYTESIZE;
     }
-    auto *max = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
+    auto *max = reinterpret_cast<__ubuf__ float *>((uintptr_t) off);
     off += (totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE;
-    auto *sum = reinterpret_cast<__ubuf__ CalcDtype *>((uintptr_t) off);
+    auto *sum = reinterpret_cast<__ubuf__ float *>((uintptr_t) off);
     off += (totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE;
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
@@ -440,7 +415,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
             uint32_t curRepeat = maxRepeat;
             if (block == subBlockNum - 1) {
                 curLen = actualCalcLen - offset;
-                curRepeat = DIV_ROUND_UP(curLen * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE);
+                curRepeat = DIV_ROUND_UP(curLen * sizeof(float), VECTOR_MAX_BYTESIZE);
             }
             float curMaxVal, totalMaxVal;
 
@@ -453,7 +428,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID3);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID3);
 
-            if constexpr (!std::is_same<CalcDtype, Dtype>::value) {
+            if constexpr (!std::is_same<Dtype, float>::value) {
                 if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                     vconv_bf162f32(calc, in, curRepeat, 1, 1, 8, 4);
                 } else {
@@ -470,15 +445,11 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 ReduceMax(calcDst, calc, curLen);
             }
 
-            if constexpr (std::is_same<CalcDtype, float16_t>::value) {
-                vbrcb((__ubuf__ uint16_t*)calcDst, (__ubuf__ uint16_t*)calcDst, 0, 0, 1);
-            } else {
-                vbrcb((__ubuf__ uint32_t*)calcDst, (__ubuf__ uint32_t*)calcDst, 0, 0, 1);
-            }
+            vbrcb((__ubuf__ uint32_t*)calcDst, (__ubuf__ uint32_t*)calcDst, 0, 0, 1);
 
             if (subBlockNum > 1 && block == 0) {
                 vector_dup(max, min, subBlockNum + 1, 1, 1, 8, 0);
-                vector_dup(sum, CalcDtype(0), subBlockNum + 1, 1, 1, 8, 0);
+                vector_dup(sum, float(0), subBlockNum + 1, 1, 1, 8, 0);
             }
             pipe_barrier(PIPE_V);
 
@@ -503,7 +474,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
 
             vsub(calc, calc, calcDst, curRepeat, 1, 1, 0, 8, 8, 0);
             pipe_barrier(PIPE_V);
-            if constexpr (std::is_same<Dtype, CalcDtype>::value) {
+            if constexpr (std::is_same<Dtype, float>::value) {
                 if (subBlockNum == 1) {
                     vexp(calc, calc, curRepeat, 1, 1, 8, 8);
                     pipe_barrier(PIPE_V);
@@ -538,11 +509,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 }
             }
 
-            if constexpr (std::is_same_v<CalcDtype, half>) {
-                vbrcb((__ubuf__ uint16_t*)calcDst, (__ubuf__ uint16_t*)calcDst, 0, 0, 1);
-            } else {
-                vbrcb((__ubuf__ uint32_t*)calcDst, (__ubuf__ uint32_t*)calcDst, 0, 0, 1);
-            }
+            vbrcb((__ubuf__ uint32_t*)calcDst, (__ubuf__ uint32_t*)calcDst, 0, 0, 1);
             pipe_barrier(PIPE_V);
 
             if (subBlockNum > 1) {
@@ -567,7 +534,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 auto *curSum = sum + block * calcPad;
                 copy_ubuf_to_ubuf(curSum, calcDst, 0, 1, 8, 1, 1);
 
-                if constexpr (!std::is_same<CalcDtype, Dtype>::value) {
+                if constexpr (!std::is_same<Dtype, float>::value) {
                     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
                     if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                         vconv_f322bf16r(out, calc, curRepeat, 1, 1, 4, 8);
@@ -602,7 +569,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
             uint32_t curRepeat = maxRepeat;
             if (block == subBlockNum - 1) {
                 curLen = actualCalcLen - offset;
-                curRepeat = DIV_ROUND_UP(curLen * sizeof(CalcDtype), VECTOR_MAX_BYTESIZE);
+                curRepeat = DIV_ROUND_UP(curLen * sizeof(float), VECTOR_MAX_BYTESIZE);
             }
 
             if (subBlockNum > 1) {
@@ -615,7 +582,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID3);
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID3);
 
-                if constexpr (!std::is_same<CalcDtype, Dtype>::value) {
+                if constexpr (!std::is_same<Dtype, float>::value) {
                     if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                         vconv_bf162f32(calc, in, curRepeat, 1, 1, 8, 4);
                     } else {
@@ -637,7 +604,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
                 }
             }
 
-            if constexpr (!std::is_same<CalcDtype, Dtype>::value) {
+            if constexpr (!std::is_same<Dtype, float>::value) {
                 vdiv(calc, calc, totalSum, curRepeat, 1, 1, 0, 8, 8, 0);
                 pipe_barrier(PIPE_V);
                 wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
@@ -705,33 +672,27 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, int32_t m, uint32_t 
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
 }
 
-template<typename Dtype, typename CalcDtype>
+template<typename Dtype>
 inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
-    uint64_t maxNOneLoop = 0;
-    if constexpr (std::is_same<Dtype, float16_t>::value) {
-        maxNOneLoop = 32640;
-    } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-        maxNOneLoop = 24320;
-    }
-
+    uint64_t maxNOneLoop = 24320;
     if (n <= maxNOneLoop) {
-        RunAivSoftmaxOneLoop<Dtype, CalcDtype>(buf, m, n, calcLen, outN, maskOff, maskStride);
+        RunAivSoftmaxOneLoop<Dtype>(buf, m, n, calcLen, outN, maskOff, maskStride);
     } else {
-        RunAivSoftmaxLong<Dtype, CalcDtype>(buf, m, n, calcLen, outN, maskOff, maskStride);
+        RunAivSoftmaxLong<Dtype>(buf, m, n, calcLen, outN, maskOff, maskStride);
     }
 }
 
 #else
-template<typename Dtype, typename CalcDtype>
+template<typename Dtype>
 inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
 }
-template<typename Dtype, typename CalcDtype>
+template<typename Dtype>
 inline __aicore__ void RunAivSoftmaxOneLoop(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
 }
-template<typename Dtype, typename CalcDtype>
+template<typename Dtype>
 inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
 }
