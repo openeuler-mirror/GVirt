@@ -696,12 +696,12 @@ void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)
     }
 }
 
-void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x)
+void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &expBuf)
 {
     if (x.dtype == FP16) {
-        aclrtlaunch_softmax_long_float16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
+        aclrtlaunch_softmax_long_float16_t(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1], calcLen);
     } else if (x.dtype == BF16) {
-        aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
+        aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1], calcLen);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

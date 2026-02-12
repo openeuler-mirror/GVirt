@@ -631,7 +631,9 @@ void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
     XTensor _x;
     InitXTensor(_x, x);
     if (isLong) {
-        XliteOpSoftmaxLong(rt, calcLen, _x);
+        XTensor &expBuf = rt.pool->GetTensor({1, _x.shape[1]}, FP32, DBG_LOC);
+        XliteOpSoftmaxLong(rt, calcLen, _x, expBuf);
+        rt.pool->PutTensor(expBuf);
     } else {
         XliteOpSoftmax(rt, calcLen, _x);
     }

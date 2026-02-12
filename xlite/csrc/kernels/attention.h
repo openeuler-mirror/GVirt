@@ -443,6 +443,7 @@ public:
                     dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nSoftmaxCurCore, calcLen, outN, nSoftmaxStart % headNumInGroup, currQkIdx);
 #endif
                 RunAivSoftmax<Dtype>((__gm__ Dtype*)qk[currQkIdx][qkOffset].GetPhyAddr(),
+                    m0 == MAX_M0 ? 0 : (__gm__ float*)qk[currQkIdx][(m0 + subIdx) * maxSeqLen * 2].GetPhyAddr(),
                     nSoftmaxCurCore, maxSeqLen, calcLen, outN,
                     nSoftmaxStart % headNumInGroup, headNumInGroup);
 
