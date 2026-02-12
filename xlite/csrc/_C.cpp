@@ -679,6 +679,21 @@ void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
     rt.Synchronize();
 }
 
+void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &bias, float scale,
+                 at::Tensor &outWeights, at::Tensor &outRouting, uint32_t topK, bool normTopKProb)
+{
+    XTensor _scores, _indices, _bias, _outWeights, _outRouting;
+
+    InitXTensor(_scores, scores);
+    InitXTensor(_bias, bias);
+    InitXTensor(_indices, indices);
+    InitXTensor(_outWeights, outWeights);
+    _outRouting.Init({static_cast<long>(scores.size(0)), static_cast<long>(scores.size(1))},
+                     BIT1, TensorPtr(outRouting));
+    XliteOpSigmoidTopK(rt, _scores, _indices, _bias, scale, _outWeights, _outRouting, topK, normTopKProb);
+    rt.Synchronize();
+}
+
 void CastUp(XRuntime &rt, at::Tensor &in, at::Tensor &out)
 {
     XTensor _in, _out;
@@ -921,6 +936,7 @@ PYBIND11_MODULE(_C, m)
     m.def("attention", &Attention);
     m.def("add_and_rmsnorm", &AddAndRMSNorm);
     m.def("softmax_topk", &SoftmaxTopK);
+    m.def("sigmoid_topk", &SigmoidTopK);
     m.def("cast_up", &CastUp);
     m.def("permutation", &Permutation);
     m.def("group_matmul", &GroupMatmul);

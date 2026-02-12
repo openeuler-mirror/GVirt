@@ -29,6 +29,7 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax_topk_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sigmoid_topk_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/cast_bfloat16_t_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/permutation.cpp
@@ -50,6 +51,7 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax_topk_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sigmoid_topk_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpermutation_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/attention_bfloat16_t.cpp
 )
