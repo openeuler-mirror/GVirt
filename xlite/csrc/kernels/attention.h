@@ -303,7 +303,7 @@ public:
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum * nKVHeads;
             for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != block_idx) {
+                if (totalIdx % block_num != ((totalIdx / block_num) % 2 == 0 ? block_idx : block_num - 1 - block_idx)) {
                     continue;
                 }
                 int kvHeadIdx = idx % nKVHeads;
@@ -407,7 +407,7 @@ public:
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum * nKVHeads;
             for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != block_idx) {
+                if (totalIdx % block_num != ((totalIdx / block_num) % 2 == 0 ? block_idx : block_num - 1 - block_idx)) {
                     continue;
                 }
                 int kvHeadIdx = idx % nKVHeads;
