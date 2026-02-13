@@ -17,7 +17,7 @@
 #define SEQLEN_19K 19456
 //#define XLITE_KERNEL_DEBUG
 
-template<typename Dtype, typename CalcDtype>
+template<typename Dtype>
 class Attention {
 public:
     __aicore__ inline Attention() {}
@@ -442,7 +442,8 @@ public:
                 printf("block%d subblock%u: batch %d do softmax kvHeadIdx %u m %d calcLen %u outN %u mask off %u, use %d qk buf\n",
                     dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nSoftmaxCurCore, calcLen, outN, nSoftmaxStart % headNumInGroup, currQkIdx);
 #endif
-                RunAivSoftmax<Dtype, CalcDtype>((__gm__ Dtype*)qk[currQkIdx][qkOffset].GetPhyAddr(),
+                RunAivSoftmax<Dtype>((__gm__ Dtype*)qk[currQkIdx][qkOffset].GetPhyAddr(),
+                    m0 == MAX_M0 ? 0 : (__gm__ float*)qk[currQkIdx][(m0 + subIdx) * maxSeqLen * 2].GetPhyAddr(),
                     nSoftmaxCurCore, maxSeqLen, calcLen, outN,
                     nSoftmaxStart % headNumInGroup, headNumInGroup);
 
@@ -496,7 +497,7 @@ private:
     LocalTensor<float> l0cBuf;
 };
 
-#define ATTN_FUNC_DEFINE(dtype, calcDtype) \
+#define ATTN_FUNC_DEFINE(dtype) \
 extern "C" __global__ __aicore__ void attention_##dtype( \
     GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output, \
     GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables, \
@@ -504,7 +505,7 @@ extern "C" __global__ __aicore__ void attention_##dtype( \
     uint32_t headSize, uint32_t blockSize, uint32_t batch, \
     uint32_t maxNumBlocks) \
 { \
-    Attention<dtype, calcDtype> op; \
+    Attention<dtype> op; \
     op.Init(input, kCache, vCache, qk, output, \
         queryStartLoc, queryLens, cachedLens, blockTables, \
         nHeads, nKVHeads, \

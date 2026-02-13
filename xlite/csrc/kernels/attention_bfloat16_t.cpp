@@ -7,4 +7,4 @@
  */
 #include "attention.h"
 
-ATTN_FUNC_DEFINE(bfloat16_t, float);
+ATTN_FUNC_DEFINE(bfloat16_t);

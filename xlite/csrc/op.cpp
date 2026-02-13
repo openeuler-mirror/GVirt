@@ -16,10 +16,6 @@
 #include "aclrtlaunch_silu_and_mul_bfloat16_t.h"
 #include "aclrtlaunch_rope_and_cache_float16_t.h"
 #include "aclrtlaunch_rope_and_cache_bfloat16_t.h"
-#include "aclrtlaunch_prefill_att_float16_t.h"
-#include "aclrtlaunch_prefill_att_bfloat16_t.h"
-#include "aclrtlaunch_decode_att_float16_t.h"
-#include "aclrtlaunch_decode_att_bfloat16_t.h"
 #include "aclrtlaunch_matmul_float16_t.h"
 #include "aclrtlaunch_matmul_bfloat16_t.h"
 #include "aclrtlaunch_matmul_float.h"
@@ -563,54 +559,6 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
     }
 }
 
-void XliteOpPrefillAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &qk,
-                             XTensor &blockTables, XTensor &cachedLens,
-                             XTensor &vCache, XTensor &output, XTensor &lens,
-                             XTensor &prefillIndex, XTensor &cumPromptLens, uint32_t headDim,
-                             uint32_t nHeads, uint32_t nKvHeads, uint32_t blockSize,
-                             uint32_t batch, uint32_t maxNumBlock)
-{
-    uint32_t localHeads = nHeads / rt.tpSize();
-    uint32_t localKvHeads = nKvHeads / rt.tpSize();
-    localKvHeads = localKvHeads == 0 ? 1 : localKvHeads;
-    if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 && output.dtype == FP16) {
-        aclrtlaunch_prefill_att_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, qk.ptr, blockTables.ptr,
-                                          cachedLens.ptr, vCache.ptr, output.ptr, lens.ptr, prefillIndex.ptr, cumPromptLens.ptr,
-                                          headDim, localHeads, localKvHeads, blockSize, batch, maxNumBlock);
-    } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 && output.dtype == BF16) {
-        aclrtlaunch_prefill_att_bfloat16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, qk.ptr, blockTables.ptr,
-                                          cachedLens.ptr, vCache.ptr, output.ptr, lens.ptr, prefillIndex.ptr, cumPromptLens.ptr,
-                                          headDim, localHeads, localKvHeads, blockSize, batch, maxNumBlock);
-    } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
-    }
-}
-
-void XliteOpDecodeAttention(XRuntime &rt, XTensor &a2v, XTensor &v2a, XTensor &qkv,
-                            XTensor &kCache, XTensor &vCache, XTensor &cachedLens,
-                            XTensor &blockTables, XTensor &qk, XTensor &output, XTensor &decodeIdx,
-                            XTensor &cumPromptLens, uint32_t batch, uint32_t nHeads,
-                            uint32_t headDim, uint32_t blockSize, uint32_t maxNumBlock,
-                            uint32_t nKvHeads)
-{
-    uint32_t localHeads = nHeads / rt.tpSize();
-    uint32_t localKvHeads = nKvHeads / rt.tpSize();
-    localKvHeads = localKvHeads == 0 ? 1 : localKvHeads;
-    if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 && output.dtype == FP16) {
-        aclrtlaunch_decode_att_float16_t(rt.aicNum, rt.stream, a2v.ptr, v2a.ptr, qkv.ptr, kCache.ptr,
-                                         vCache.ptr, cachedLens.ptr, blockTables.ptr, qk.ptr, output.ptr,
-                                         decodeIdx.ptr, cumPromptLens.ptr, batch, localHeads, headDim,
-                                         blockSize, maxNumBlock, localKvHeads);
-    } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 && output.dtype == BF16) {
-        aclrtlaunch_decode_att_bfloat16_t(rt.aicNum, rt.stream, a2v.ptr, v2a.ptr, qkv.ptr, kCache.ptr,
-                                          vCache.ptr, cachedLens.ptr, blockTables.ptr, qk.ptr, output.ptr,
-                                          decodeIdx.ptr, cumPromptLens.ptr, batch, localHeads, headDim,
-                                          blockSize, maxNumBlock, localKvHeads);
-    } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
-    }
-}
-
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk, XTensor &output,
                       XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
@@ -748,12 +696,12 @@ void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)
     }
 }
 
-void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x)
+void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &expBuf)
 {
     if (x.dtype == FP16) {
-        aclrtlaunch_softmax_long_float16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
+        aclrtlaunch_softmax_long_float16_t(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1], calcLen);
     } else if (x.dtype == BF16) {
-        aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
+        aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1], calcLen);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

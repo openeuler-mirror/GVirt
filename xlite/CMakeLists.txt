@@ -31,10 +31,6 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/all_reduce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reduce_scatter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/all_gather.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix_bfloat16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix_bfloat16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/decode_att_mix_float16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/prefill_att_mix_float16_t.cpp
 )
 
 # xlite_kernels_bf16_${RUN_MODE}
