@@ -527,7 +527,8 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &sc
 void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
                       XTensor &position, XTensor &cossin, XTensor &slotMapping,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
-                      uint32_t rotDim, uint32_t blockSize, bool isNeox)
+                      uint32_t rotDim, uint32_t blockSize, bool isNeox,
+                      uint64_t mropeMaskH, uint64_t mropeMaskW)
 {
     uint32_t localHeads = nHeads / rt.tpSize();
     uint32_t localKvHeads = nKvHeads / rt.tpSize();
@@ -548,12 +549,12 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
         aclrtlaunch_rope_and_cache_float16_t(rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr,
                                              kCache.ptr, vCache.ptr, slotMapping.ptr, inout.shape[0], rotDim,
                                              inout.shape[1], inout.shape[1], inout.shape[1], localHeads,
-                                             localKvHeads, headDim, blockSize, scale);
+                                             localKvHeads, headDim, blockSize, scale, mropeMaskH, mropeMaskW);
     } else if (inout.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 && cossin.dtype == BF16) {
         aclrtlaunch_rope_and_cache_bfloat16_t(rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr,
                                              kCache.ptr, vCache.ptr, slotMapping.ptr, inout.shape[0], rotDim,
                                              inout.shape[1], inout.shape[1], inout.shape[1], localHeads,
-                                             localKvHeads, headDim, blockSize, scale);
+                                             localKvHeads, headDim, blockSize, scale, mropeMaskH, mropeMaskW);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

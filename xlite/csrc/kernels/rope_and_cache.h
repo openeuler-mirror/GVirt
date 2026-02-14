@@ -14,7 +14,10 @@ template <typename Dtype>
 __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *local_buf, __ubuf__ Dtype *sin_buf,
                                         __ubuf__ Dtype *cos_buf, __ubuf__ Dtype *tmp_buf, __ubuf__ float *local_fp32_buf,
                                         __ubuf__ float *calc_fp32_buf, __ubuf__ float *sin_fp32_buf, __ubuf__ float *cos_fp32_buf,
+                                        __ubuf__ float *sin_h_buf, __ubuf__ float *cos_h_buf,
+                                        __ubuf__ float *sin_w_buf, __ubuf__ float *cos_w_buf,
                                         uint32_t embed_dim, uint32_t rot_dim, uint32_t calc_size, int event_id, uint32_t head_size,
+                                        uint32_t pos_dim, uint64_t mrope_mask_h, uint64_t mrope_mask_w,
                                         uint64_t copy_param, uint64_t vector_2src_cossin_param, uint64_t vector_2src_param)
 {
     copy_gm_to_ubuf(local_buf, gm_buf_loop, copy_param);
@@ -25,6 +28,28 @@ __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtyp
     vconv_bf162f32(sin_fp32_buf, sin_buf, DIV_ROUND_UP(rot_dim * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
     vconv_bf162f32(cos_fp32_buf, cos_buf, DIV_ROUND_UP(rot_dim * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
     pipe_barrier(PIPE_V);
+
+    if (pos_dim > 1) {
+        set_vector_mask(0x0, mrope_mask_h + mrope_mask_w);
+        vector_dup(sin_fp32_buf, float(0), 1, 1, 1, 8, 0);
+        vector_dup(cos_fp32_buf, float(0), 1, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+
+        set_vector_mask(0x0, mrope_mask_h);
+        vadd(sin_fp32_buf, sin_fp32_buf, sin_h_buf, 1, 1, 1, 1, 8, 8, 8);
+        vadd(cos_fp32_buf, cos_fp32_buf, cos_h_buf, 1, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        set_vector_mask(0x0, mrope_mask_w);
+        vadd(sin_fp32_buf, sin_fp32_buf, sin_w_buf, 1, 1, 1, 1, 8, 8, 8);
+        vadd(cos_fp32_buf, cos_fp32_buf, cos_w_buf, 1, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        copy_ubuf_to_ubuf(sin_fp32_buf + embed_dim, sin_fp32_buf, 0, 1,DIV_ROUND_UP(embed_dim * sizeof(float), BLOCK_SIZE), 1, 1);
+        copy_ubuf_to_ubuf(cos_fp32_buf + embed_dim, cos_fp32_buf, 0, 1,DIV_ROUND_UP(embed_dim * sizeof(float), BLOCK_SIZE), 1, 1);
+        pipe_barrier(PIPE_V);
+    }
 
     if (head_size == HEAD_SIZE_128) {
         // q * sin (q : numHeads * headDim  sin: 1 * headDim (headDim = 128))
@@ -83,12 +108,37 @@ __aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtyp
 template <typename Dtype>
 __aicore__ inline void calc_cossin(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *local_buf,
                                    __ubuf__ Dtype *calc_buf, __ubuf__ Dtype *sin_buf, __ubuf__ Dtype *cos_buf,
+                                   __ubuf__ Dtype *sin_h_buf, __ubuf__ Dtype *cos_h_buf,
+                                   __ubuf__ Dtype *sin_w_buf, __ubuf__ Dtype *cos_w_buf,
                                    uint32_t embed_dim, int event_id, uint32_t head_size,
+                                   uint32_t pos_dim, uint64_t mrope_mask_h, uint64_t mrope_mask_w,
                                    uint64_t copy_param, uint64_t vector_2src_cossin_param, uint64_t vector_2src_param)
 {
     copy_gm_to_ubuf(local_buf, gm_buf_loop, copy_param);
     set_flag(PIPE_MTE2, PIPE_V, event_id);
     wait_flag(PIPE_MTE2, PIPE_V, event_id);
+
+    if (pos_dim > 1) {
+        set_vector_mask(0x0, mrope_mask_h + mrope_mask_w);
+        vector_dup(sin_buf, Dtype(0), 1, 1, 1, 8, 0);
+        vector_dup(cos_buf, Dtype(0), 1, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+
+        set_vector_mask(0x0, mrope_mask_h);
+        vadd(sin_buf, sin_buf, sin_h_buf, 1, 1, 1, 1, 8, 8, 8);
+        vadd(cos_buf, cos_buf, cos_h_buf, 1, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        set_vector_mask(0x0, mrope_mask_w);
+        vadd(sin_buf, sin_buf, sin_w_buf, 1, 1, 1, 1, 8, 8, 8);
+        vadd(cos_buf, cos_buf, cos_w_buf, 1, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        copy_ubuf_to_ubuf(sin_buf + embed_dim, sin_buf, 0, 1,DIV_ROUND_UP(embed_dim*sizeof(Dtype), BLOCK_SIZE), 1, 1);
+        copy_ubuf_to_ubuf(cos_buf + embed_dim, cos_buf, 0, 1,DIV_ROUND_UP(embed_dim*sizeof(Dtype), BLOCK_SIZE), 1, 1);
+        pipe_barrier(PIPE_V);
+    }
 
     // k * sin
     vmul(calc_buf, local_buf, sin_buf, vector_2src_cossin_param);
@@ -122,7 +172,8 @@ __aicore__ inline void rope_and_cache(
     GM_ADDR positions, GM_ADDR query, GM_ADDR key, GM_ADDR value,
     GM_ADDR cos_sin_cache, GM_ADDR key_cache, GM_ADDR value_cache, GM_ADDR slot_mapping,
     uint32_t num_tokens, uint32_t rot_dim, uint32_t query_stride, uint32_t key_stride, uint32_t value_stride,
-    uint32_t num_heads, uint32_t num_kv_heads, uint32_t head_size, uint32_t block_size, float scale_)
+    uint32_t num_heads, uint32_t num_kv_heads, uint32_t head_size, uint32_t block_size, float scale_,
+    uint64_t mrope_mask_h, uint64_t mrope_mask_w)
 {
     set_atomic_none();
     set_mask_norm();
@@ -133,6 +184,7 @@ __aicore__ inline void rope_and_cache(
     uint32_t q_size = num_heads * head_size;
     uint32_t kv_size = num_kv_heads * head_size;
     uint32_t slot_blocksize = kv_size * block_size;
+    uint32_t pos_dim = (mrope_mask_h != 0 || mrope_mask_w != 0) ? 3 : 1;
 
     // input
     int ubuf_num = 0;
@@ -164,9 +216,32 @@ __aicore__ inline void rope_and_cache(
     auto sin_dtype_ubuf_addr1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
     __ubuf__ Dtype *sin_dtype_ubuf_addr[PINGPONG_BUF_NUM] = {sin_dtype_ubuf_addr0, sin_dtype_ubuf_addr1};
 
+    __ubuf__ Dtype *cos_mrope_h_ubuf_addr[PINGPONG_BUF_NUM], *cos_mrope_w_ubuf_addr[PINGPONG_BUF_NUM];
+    __ubuf__ Dtype *sin_mrope_h_ubuf_addr[PINGPONG_BUF_NUM], *sin_mrope_w_ubuf_addr[PINGPONG_BUF_NUM];
+    if (pos_dim > 1) {
+        auto cos_h_ubuf_addr0 = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
+        auto cos_h_ubuf_addr1 = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
+        auto cos_w_ubuf_addr0 = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
+        auto cos_w_ubuf_addr1 = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
+        cos_mrope_h_ubuf_addr[0] = cos_h_ubuf_addr0;
+        cos_mrope_h_ubuf_addr[1] = cos_h_ubuf_addr1;
+        cos_mrope_w_ubuf_addr[0] = cos_w_ubuf_addr0;
+        cos_mrope_w_ubuf_addr[1] = cos_w_ubuf_addr1;
+        auto sin_h_ubuf_addr0 = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
+        auto sin_h_ubuf_addr1 = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
+        auto sin_w_ubuf_addr0 = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
+        auto sin_w_ubuf_addr1 = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)(cossin_start + cossin_blocksize * (ubuf_num++)));
+        sin_mrope_h_ubuf_addr[0] = sin_h_ubuf_addr0;
+        sin_mrope_h_ubuf_addr[1] = sin_h_ubuf_addr1;
+        sin_mrope_w_ubuf_addr[0] = sin_w_ubuf_addr0;
+        sin_mrope_w_ubuf_addr[1] = sin_w_ubuf_addr1;
+    }
+
     __ubuf__ Dtype *query_calc_dtype_ubuf_addr, *key_calc_dtype_ubuf_addr;
     __ubuf__ float *query_fp32_ubuf_addr[PINGPONG_BUF_NUM], *key_fp32_ubuf_addr[PINGPONG_BUF_NUM];
     __ubuf__ float *cos_fp32_ubuf_addr[PINGPONG_BUF_NUM], *sin_fp32_ubuf_addr[PINGPONG_BUF_NUM];
+    __ubuf__ float *cos_fp32_mrope_h_ubuf_addr[PINGPONG_BUF_NUM], *cos_fp32_mrope_w_ubuf_addr[PINGPONG_BUF_NUM];
+    __ubuf__ float *sin_fp32_mrope_h_ubuf_addr[PINGPONG_BUF_NUM], *sin_fp32_mrope_w_ubuf_addr[PINGPONG_BUF_NUM];
     __ubuf__ float *query_calc_fp32_ubuf, *key_calc_fp32_ubuf;
 
     uint32_t calcbuf_start = ROUND_UP(cossin_start + ubuf_num * cossin_blocksize, BLOCK_SIZE);
@@ -207,6 +282,29 @@ __aicore__ inline void rope_and_cache(
         sin_fp32_ubuf_addr[1] = sin_fp32_ubuf_addr1;
         calcbuf_start += ubuf_num * cossin_fp32_blocksize;
 
+        if (pos_dim > 1) {
+            ubuf_num = 0;
+            auto cos_fp32_mrope_h_ubuf_addr0 = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + cossin_fp32_blocksize * (ubuf_num++)));
+            auto cos_fp32_mrope_h_ubuf_addr1 = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + cossin_fp32_blocksize * (ubuf_num++)));
+            auto cos_fp32_mrope_w_ubuf_addr0 = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + cossin_fp32_blocksize * (ubuf_num++)));
+            auto cos_fp32_mrope_w_ubuf_addr1 = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + cossin_fp32_blocksize * (ubuf_num++)));
+            cos_fp32_mrope_h_ubuf_addr[0] = cos_fp32_mrope_h_ubuf_addr0;
+            cos_fp32_mrope_h_ubuf_addr[1] = cos_fp32_mrope_h_ubuf_addr1;
+            cos_fp32_mrope_w_ubuf_addr[0] = cos_fp32_mrope_w_ubuf_addr0;
+            cos_fp32_mrope_w_ubuf_addr[1] = cos_fp32_mrope_w_ubuf_addr1;
+
+            auto sin_fp32_mrope_h_ubuf_addr0 = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + cossin_fp32_blocksize * (ubuf_num++)));
+            auto sin_fp32_mrope_h_ubuf_addr1 = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + cossin_fp32_blocksize * (ubuf_num++)));
+            auto sin_fp32_mrope_w_ubuf_addr0 = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + cossin_fp32_blocksize * (ubuf_num++)));
+            auto sin_fp32_mrope_w_ubuf_addr1 = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + cossin_fp32_blocksize * (ubuf_num++)));
+            sin_fp32_mrope_h_ubuf_addr[0] = sin_fp32_mrope_h_ubuf_addr0;
+            sin_fp32_mrope_h_ubuf_addr[1] = sin_fp32_mrope_h_ubuf_addr1;
+            sin_fp32_mrope_w_ubuf_addr[0] = sin_fp32_mrope_w_ubuf_addr0;
+            sin_fp32_mrope_w_ubuf_addr[1] = sin_fp32_mrope_w_ubuf_addr1;
+
+            calcbuf_start += ubuf_num * cossin_fp32_blocksize;
+        }
+
         query_calc_fp32_ubuf = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start));
         key_calc_fp32_ubuf = reinterpret_cast<__ubuf__ float *>((uintptr_t)(calcbuf_start + q_fp32_blocksize));
         calcbuf_start += (q_fp32_blocksize + kv_fp32_blocksize);
@@ -218,7 +316,7 @@ __aicore__ inline void rope_and_cache(
 
     // pos and slot
     uint32_t params_start = calcbuf_start;
-    uint32_t iter_posslot_num = ROUND_DOWN(UB_SIZE - params_start, 3 * BLOCK_SIZE) / (sizeof(uint64_t) + sizeof(uint32_t));
+    uint32_t iter_posslot_num = ROUND_DOWN(UB_SIZE - params_start, 3 * BLOCK_SIZE) / (sizeof(uint64_t) * pos_dim + sizeof(uint32_t));
     if (iter_posslot_num > num_tokens) {
         iter_posslot_num = num_tokens;
     }
@@ -227,7 +325,12 @@ __aicore__ inline void rope_and_cache(
     uint32_t pos_size = ROUND_UP(iter_posslot_num * sizeof(uint64_t), BLOCK_SIZE);
     uint32_t slot_size = ROUND_UP(iter_posslot_num * sizeof(uint32_t), BLOCK_SIZE);
     auto pos_int_ubuf_addr0 = reinterpret_cast<__ubuf__ int64_t *>((uintptr_t)(params_start));
-    auto slot_int_ubuf_addr0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)(params_start + pos_size));
+    __ubuf__ int64_t *pos_h_ubuf_addr0, *pos_w_ubuf_addr0;
+    if (pos_dim > 1) {
+        pos_h_ubuf_addr0 = reinterpret_cast<__ubuf__ int64_t *>((uintptr_t)(params_start + pos_size));
+        pos_w_ubuf_addr0 = reinterpret_cast<__ubuf__ int64_t *>((uintptr_t)(params_start + 2 * pos_size));
+    }
+    auto slot_int_ubuf_addr0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)(params_start + pos_dim * pos_size));
 
     // query config
     uint64_t vector_2src_cossin_16bitcfg_q, vector_2src_16bitcfg_q, vector_1src_16bitcfg_q;
@@ -297,7 +400,7 @@ __aicore__ inline void rope_and_cache(
         uint32_t processed_num_tokens = loop0 * iter_posslot_num;
         auto gm_pos = (__gm__ int64_t *) positions + processed_num_tokens;
         auto gm_slot = (__gm__ int32_t *) slot_mapping + processed_num_tokens;
-        if (loop0 == posslot_iters - 1){
+        if (loop0 == posslot_iters - 1) {
             iter_posslot_num = num_tokens - processed_num_tokens;
             lenBurst_pos = DIV_ROUND_UP(iter_posslot_num * sizeof(uint64_t), BLOCK_SIZE);
             lenBurst_slot = DIV_ROUND_UP(iter_posslot_num * sizeof(uint32_t), BLOCK_SIZE);
@@ -306,6 +409,11 @@ __aicore__ inline void rope_and_cache(
         }
         // copy positions and slotmapping
         copy_gm_to_ubuf(pos_int_ubuf_addr0, gm_pos, dmi_cfg_pos);
+        if (pos_dim > 1) {
+            copy_gm_to_ubuf(pos_h_ubuf_addr0, gm_pos + num_tokens, dmi_cfg_pos);
+            copy_gm_to_ubuf(pos_w_ubuf_addr0, gm_pos + 2 * num_tokens, dmi_cfg_pos);
+
+        }
         copy_gm_to_ubuf(slot_int_ubuf_addr0, gm_slot, dmi_cfg_slot);
         pipe_barrier(PIPE_ALL);
 
@@ -356,17 +464,48 @@ __aicore__ inline void rope_and_cache(
             }
             set_flag(PIPE_MTE2, PIPE_V, event_id);
             wait_flag(PIPE_MTE2, PIPE_V, event_id);
+            if (pos_dim > 1) {
+                uint32_t cos_h_shift = *(pos_h_ubuf_addr0 + poslot_idx) * rot_dim;
+                uint32_t sin_h_shift = cos_h_shift + embed_dim;
+                uint32_t cos_w_shift = *(pos_w_ubuf_addr0 + poslot_idx) * rot_dim;
+                uint32_t sin_w_shift = cos_w_shift + embed_dim;
+                copy_gm_to_ubuf(cos_mrope_h_ubuf_addr[event_id], (__gm__ Dtype *)cos_sin_cache + cos_h_shift, dmi_cfg_cossin);
+                copy_gm_to_ubuf(sin_mrope_h_ubuf_addr[event_id], (__gm__ Dtype *)cos_sin_cache + sin_h_shift, dmi_cfg_cossin);
+                copy_gm_to_ubuf(cos_mrope_w_ubuf_addr[event_id], (__gm__ Dtype *)cos_sin_cache + cos_w_shift, dmi_cfg_cossin);
+                copy_gm_to_ubuf(sin_mrope_w_ubuf_addr[event_id], (__gm__ Dtype *)cos_sin_cache + sin_w_shift, dmi_cfg_cossin);
+                if ((head_size == HEAD_SIZE_64) && (std::is_same_v<Dtype, float16_t>)) {
+                    copy_gm_to_ubuf(cos_mrope_h_ubuf_addr[event_id] + embed_dim * 2, (__gm__ Dtype *)cos_sin_cache + cos_h_shift, dmi_cfg_cossin);
+                    copy_gm_to_ubuf(sin_mrope_h_ubuf_addr[event_id] + embed_dim * 2, (__gm__ Dtype *)cos_sin_cache + sin_h_shift, dmi_cfg_cossin);
+                    copy_gm_to_ubuf(cos_mrope_w_ubuf_addr[event_id] + embed_dim * 2, (__gm__ Dtype *)cos_sin_cache + cos_h_shift, dmi_cfg_cossin);
+                    copy_gm_to_ubuf(sin_mrope_w_ubuf_addr[event_id] + embed_dim * 2, (__gm__ Dtype *)cos_sin_cache + sin_h_shift, dmi_cfg_cossin);
+                }
+                set_flag(PIPE_MTE2, PIPE_V, event_id);
+                wait_flag(PIPE_MTE2, PIPE_V, event_id);
+                if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+                    vconv_bf162f32(cos_fp32_mrope_h_ubuf_addr[event_id], cos_mrope_h_ubuf_addr[event_id], DIV_ROUND_UP(embed_dim * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
+                    vconv_bf162f32(sin_fp32_mrope_h_ubuf_addr[event_id], sin_mrope_h_ubuf_addr[event_id], DIV_ROUND_UP(embed_dim * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
+                    vconv_bf162f32(cos_fp32_mrope_w_ubuf_addr[event_id], cos_mrope_w_ubuf_addr[event_id], DIV_ROUND_UP(embed_dim * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
+                    vconv_bf162f32(sin_fp32_mrope_w_ubuf_addr[event_id], sin_mrope_w_ubuf_addr[event_id], DIV_ROUND_UP(embed_dim * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
+                }
+                pipe_barrier(PIPE_V);
+            }
 
             if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                 calc_cossin_cast(gm_key, key_dtype_ubuf_addr[event_id], sin_dtype_ubuf_addr[event_id],
                                  cos_dtype_ubuf_addr[event_id], query_calc_dtype_ubuf_addr,
-                                 key_fp32_ubuf_addr[event_id], key_calc_fp32_ubuf, sin_fp32_ubuf_addr[event_id],
-                                 cos_fp32_ubuf_addr[event_id], embed_dim, rot_dim, kv_size, event_id, head_size, dmi_cfg_kv,
-                                 vector_2src_cossin_32bitcfg_k, vector_2src_32bitcfg_k);
+                                 key_fp32_ubuf_addr[event_id], key_calc_fp32_ubuf,
+                                 sin_fp32_ubuf_addr[event_id], cos_fp32_ubuf_addr[event_id],
+                                 sin_fp32_mrope_h_ubuf_addr[event_id], cos_fp32_mrope_h_ubuf_addr[event_id],
+                                 sin_fp32_mrope_w_ubuf_addr[event_id], cos_fp32_mrope_w_ubuf_addr[event_id],
+                                 embed_dim, rot_dim, kv_size, event_id, head_size, pos_dim, mrope_mask_h, mrope_mask_w,
+                                 dmi_cfg_kv, vector_2src_cossin_32bitcfg_k, vector_2src_32bitcfg_k);
             } else {
                 calc_cossin(gm_key, key_dtype_ubuf_addr[event_id], key_calc_dtype_ubuf_addr,
                             sin_dtype_ubuf_addr[event_id], cos_dtype_ubuf_addr[event_id],
-                            embed_dim, event_id, head_size, dmi_cfg_kv, vector_2src_cossin_16bitcfg_k, vector_2src_16bitcfg_k);
+                            sin_mrope_h_ubuf_addr[event_id], cos_mrope_h_ubuf_addr[event_id],
+                            sin_mrope_w_ubuf_addr[event_id], cos_mrope_w_ubuf_addr[event_id],
+                            embed_dim, event_id, head_size, pos_dim, mrope_mask_h, mrope_mask_w,
+                            dmi_cfg_kv, vector_2src_cossin_16bitcfg_k, vector_2src_16bitcfg_k);
             }
             set_flag(PIPE_V, PIPE_MTE3, event_id);
             wait_flag(PIPE_V, PIPE_MTE3, event_id);
@@ -378,9 +517,12 @@ __aicore__ inline void rope_and_cache(
             if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                 calc_cossin_cast(gm_query, query_dtype_ubuf_addr[event_id], sin_dtype_ubuf_addr[event_id],
                                  cos_dtype_ubuf_addr[event_id], query_calc_dtype_ubuf_addr,
-                                 query_fp32_ubuf_addr[event_id], query_calc_fp32_ubuf, sin_fp32_ubuf_addr[event_id],
-                                 cos_fp32_ubuf_addr[event_id], embed_dim, rot_dim, q_size, event_id, head_size, dmi_cfg_q,
-                                 vector_2src_cossin_32bitcfg_q, vector_2src_32bitcfg_q);
+                                 query_fp32_ubuf_addr[event_id], query_calc_fp32_ubuf,
+                                 sin_fp32_ubuf_addr[event_id], cos_fp32_ubuf_addr[event_id],
+                                 sin_fp32_mrope_h_ubuf_addr[event_id], cos_fp32_mrope_h_ubuf_addr[event_id],
+                                 sin_fp32_mrope_w_ubuf_addr[event_id], cos_fp32_mrope_w_ubuf_addr[event_id],
+                                 embed_dim, rot_dim, q_size, event_id, head_size, pos_dim, mrope_mask_h, mrope_mask_w,
+                                 dmi_cfg_q, vector_2src_cossin_32bitcfg_q, vector_2src_32bitcfg_q);
                 vconv_bf162f32(query_fp32_ubuf_addr[event_id], query_dtype_ubuf_addr[event_id], DIV_ROUND_UP(q_size * sizeof(float), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
                 pipe_barrier(PIPE_V);
                 vmuls(query_fp32_ubuf_addr[event_id], query_fp32_ubuf_addr[event_id], scale_fp32, vector_1src_32bitcfg_q);
@@ -390,7 +532,10 @@ __aicore__ inline void rope_and_cache(
             } else {
                 calc_cossin(gm_query, query_dtype_ubuf_addr[event_id], query_calc_dtype_ubuf_addr,
                             sin_dtype_ubuf_addr[event_id], cos_dtype_ubuf_addr[event_id],
-                            embed_dim, event_id, head_size, dmi_cfg_q, vector_2src_cossin_16bitcfg_q, vector_2src_16bitcfg_q);
+                            sin_mrope_h_ubuf_addr[event_id], cos_mrope_h_ubuf_addr[event_id],
+                            sin_mrope_w_ubuf_addr[event_id], cos_mrope_w_ubuf_addr[event_id],
+                            embed_dim, event_id, head_size, pos_dim, mrope_mask_h, mrope_mask_w,
+                            dmi_cfg_q, vector_2src_cossin_16bitcfg_q, vector_2src_16bitcfg_q);
                 vmuls(query_dtype_ubuf_addr[event_id], query_dtype_ubuf_addr[event_id], scale, vector_1src_16bitcfg_q);
                 pipe_barrier(PIPE_V);
             }
@@ -413,10 +558,12 @@ extern "C" __global__ __aicore__ void rope_and_cache_##dtype( \
                 GM_ADDR positions, GM_ADDR query, GM_ADDR key, GM_ADDR value, \
                 GM_ADDR cossinCache, GM_ADDR keyCache, GM_ADDR valueCache, GM_ADDR slotMapping, \
                 uint32_t numTokens, uint32_t rotDim, uint32_t queryStride, uint32_t keyStride, uint32_t valueStride, \
-                uint32_t numHeads, uint32_t numKVHeads, uint32_t headDim, uint32_t blockSize, float scaleIn) \
+                uint32_t numHeads, uint32_t numKVHeads, uint32_t headDim, uint32_t blockSize, float scaleIn, \
+                uint64_t mropeMaskH, uint64_t mropeMaskW) \
 { \
     rope_and_cache<dtype>(positions, query, key, value, cossinCache, keyCache, valueCache, slotMapping, numTokens, \
-                          rotDim, queryStride, keyStride, valueStride, numHeads, numKVHeads, headDim, blockSize, scaleIn); \
+                          rotDim, queryStride, keyStride, valueStride, numHeads, numKVHeads, headDim, blockSize, scaleIn, \
+                          mropeMaskH, mropeMaskW); \
 }
 #else
 #define ROPEANDCACHE_FUNC_DEFINE(dtype) \
@@ -424,7 +571,8 @@ extern "C" __global__ __aicore__ void rope_and_cache_##dtype( \
                 GM_ADDR positions, GM_ADDR query, GM_ADDR key, GM_ADDR value, \
                 GM_ADDR cossinCache, GM_ADDR keyCache, GM_ADDR valueCache, GM_ADDR slotMapping, \
                 uint32_t numTokens, uint32_t rotDim, uint32_t queryStride, uint32_t keyStride, uint32_t valueStride, \
-                uint32_t numHeads, uint32_t numKVHeads, uint32_t headDim, uint32_t blockSize, float scaleIn) \
+                uint32_t numHeads, uint32_t numKVHeads, uint32_t headDim, uint32_t blockSize, float scaleIn, \
+                uint64_t mropeMaskH, uint64_t mropeMaskW) \
 { \
 }
 #endif
