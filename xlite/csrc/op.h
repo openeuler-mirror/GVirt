@@ -39,7 +39,8 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &sc
 void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
                       XTensor &position, XTensor &cossin, XTensor &slotMapping,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
-                      uint32_t rotDim, uint32_t blockSize, bool isNeox);
+                      uint32_t rotDim, uint32_t blockSize, bool isNeox,
+                      uint64_t mropeMaskH, uint64_t mropeMaskW);
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk, XTensor &output,
                       XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                       uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,

@@ -44,12 +44,15 @@ struct XModelConfig {
     uint32_t qLoraRank;
     uint32_t kvLoraRank;
     uint32_t blockSize;
+    uint32_t deepstackNumLevel;
     int64_t maxM;
     int64_t maxBatch;
     int64_t maxSeqLen;
     float normEps;
     float ropeTheta;
     float softmaxScale;
+    std::vector<uint32_t> mropeSection;
+    bool mropeInterleaved = false;
 
     // mlp
     uint32_t nDenseLayers;
@@ -101,16 +104,19 @@ public:
     void Forward(XRuntime &rt, XTensor &input,
                  XModelAttnMeta& attnMeta,
                  std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                 std::vector<XTensor> &deepstackInputEmbeds,
                  XTensor &freqsCis, XTensor &output);
     void ComputeLogits(XRuntime &rt, XTensor &input,
                        XTensor &output);
     void ForwardAndGetLogits(XRuntime &rt, XTensor &input,
                              XModelAttnMeta& attnMeta,
                              std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                             std::vector<XTensor> &deepstackInputEmbeds,
                              XTensor &freqsCis, XTensor &output);
     void ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input,
                                  XModelAttnMeta& attnMeta,
                                  std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                 std::vector<XTensor> &deepstackInputEmbeds,
                                  XTensor &freqsCis, XTensor &output);
     size_t GetTensorPoolSize(int dbg);
 
@@ -125,6 +131,7 @@ public:
     std::vector<XTensor> mhaQKVBias;
     std::vector<XTensor> mhaQNorm;
     std::vector<XTensor> mhaKNorm;
+
     std::vector<XTensor> mlaQA;
     std::vector<XTensor> mlaQB;
     std::vector<XTensor> mlaQNorm;
@@ -182,15 +189,19 @@ private:
     void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     void ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                               std::vector<XTensor> &deepstackInputEmbeds,
                                XTensor &freqsCis, XTensor &output);
     void ForwardLayers(XRuntime &rt, XTensor &x,
                        std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                       std::vector<XTensor> &deepstackInputEmbeds,
                        XTensor &freqsCis, XTensor &h);
     void ForwardLayersNaive(XRuntime &rt, XTensor &x,
                             std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                            std::vector<XTensor> &deepstackInputEmbeds,
                             XTensor &freqsCis, XTensor &h);
     void ForwardLayersCommOptimize(XRuntime &rt, XTensor &x,
                                    std::vector<std::pair<XTensor, XTensor>>& kvCache,
+                                   std::vector<XTensor> &deepstackInputEmbeds,
                                    XTensor &freqsCis, XTensor &h);
     struct XModelConfig _c;
     uint32_t _rankId;
@@ -209,6 +220,8 @@ private:
     int _batch;
     int _prefillLen;
     int _prefillLenPad;
+    uint64_t _mropeMaskH;
+    uint64_t _mropeMaskW;
     XTensor _attnPosition;
     XTensor _attnBlockTables;
     XTensor _attnSlotMapping;
