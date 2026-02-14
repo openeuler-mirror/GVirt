@@ -443,7 +443,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
 
     if (_c.defTpSize > 1) {
         if (rt.enableCommOptimize) {
-            XliteOpReduceScatter(rt, hiddenState, rt.hiddenStateSlice, TP);
+            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
         } else {
             XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
         }
@@ -481,7 +481,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     XliteOpMatmul(rt, attn, attnOut[layer], hiddenState, _c.weightNZ);
     if (_c.defTpSize > 1) {
         if (rt.enableCommOptimize) {
-            XliteOpReduceScatter(rt, hiddenState, rt.hiddenStateSlice, TP);
+            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
         } else {
             XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
         }
@@ -515,7 +515,7 @@ void XModel::ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &h
 
     if (withAllReduce && _c.defTpSize > 1) {
         if (rt.enableCommOptimize) {
-            XliteOpReduceScatter(rt, hiddenState, rt.hiddenStateSlice, TP);
+            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
         } else {
             XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
         }
@@ -637,7 +637,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
     if (_c.defTpSize > 1) {
         if (rt.enableCommOptimize) {
-            XliteOpReduceScatter(rt, hiddenState, rt.hiddenStateSlice, TP);
+            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
         } else {
             XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
         }
@@ -653,36 +653,52 @@ void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     }
 }
 
-void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &x,
+void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
                                        std::vector<std::pair<XTensor, XTensor>>& kvCache,
                                        std::vector<XTensor> &deepstackInputEmbeds,
                                        XTensor &freqsCis, XTensor &output)
 {
     XTensor xSlice;
-    XTensor &h = rt.pool->GetTensor({x.shape[0], _c.hiddenSize}, embed.dtype, DBG_LOC);
-    void *slicePtr = (void *)((uint64_t)h.ptr + rt.rankId() * h.numel / _c.defTpSize * XDtypeBit(h.dtype) / 8);
-    rt.hiddenStateSlice.Init({h.shape[0] / _c.defTpSize, h.shape[1]}, h.dtype, slicePtr);
-    slicePtr = (void *)((uint64_t)x.ptr + rt.rankId() * x.numel / _c.defTpSize * XDtypeBit(x.dtype) / 8);
-    xSlice.Init({x.shape[0] / _c.defTpSize, x.shape[1]}, x.dtype, slicePtr);
+    long actualM = output.shape[0];
+    long mPad = xPad.shape[0];
+    long mPadPerTp = mPad / _c.defTpSize;
+    size_t sizePerTp = mPad * _c.hiddenSize / _c.defTpSize * XDtypeBit(embed.dtype) / 8;
+    XTensor &hiddenStatePad = rt.pool->GetTensor({mPad, _c.hiddenSize}, embed.dtype, DBG_LOC);
+    XTensor x, h;
+    x.Init({actualM, _c.hiddenSize}, embed.dtype, xPad.ptr);
+    h.Init({actualM, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
+    rt.hiddenStatePad.Init({mPad, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
+    void *slicePtr = (void *)((uint64_t)hiddenStatePad.ptr + (rt.rankId() % _c.defTpSize) * sizePerTp);
+    rt.hiddenStateSlice.Init({mPadPerTp, hiddenStatePad.shape[1]}, hiddenStatePad.dtype, slicePtr);
+    slicePtr = (void *)((uint64_t)xPad.ptr + (rt.rankId() % _c.defTpSize) * sizePerTp);
+    xSlice.Init({mPadPerTp, xPad.shape[1]}, xPad.dtype, slicePtr);
+
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (i == 0) {
             XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1]);
         }
         ForwardAttn(rt, i, kvCache, freqsCis, h);
         XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, mlpNorm[i], _c.normEps, rt.hiddenStateSlice);
-        XliteOpAllGather(rt, rt.hiddenStateSlice, h, TP);
+        XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP);
         ForwardFFN(rt, i, h);
         if (i < _c.deepstackNumLevel) {
             XliteOpAdd(rt, h, deepstackInputEmbeds[i], h);
         }
         if (i < (_c.nLayers - 1)) {
             XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, attnNorm[i + 1], _c.normEps, rt.hiddenStateSlice);
-            XliteOpAllGather(rt, rt.hiddenStateSlice, h, TP);
+            XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP);
         }
     }
     XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, norm, _c.normEps, rt.hiddenStateSlice);
-    XliteOpAllGather(rt, rt.hiddenStateSlice, output, TP);
-    rt.pool->PutTensor(h);
+    if (actualM == mPad) {
+        XliteOpAllGather(rt, rt.hiddenStateSlice, output, TP);
+    } else {
+        XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP);
+        aclrtMemcpyAsync(output.ptr, actualM * _c.hiddenSize * XDtypeBit(embed.dtype) / 8,
+                         rt.hiddenStatePad.ptr, actualM * _c.hiddenSize * XDtypeBit(embed.dtype) / 8,
+                         ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream);
+    }
+    rt.pool->PutTensor(hiddenStatePad);
 }
 
 void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
@@ -709,30 +725,26 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
     rt.pool->PutTensor(h);
 }
 
-void XModel::ForwardLayers(XRuntime &rt, XTensor &x,
-                           std::vector<std::pair<XTensor, XTensor>>& kvCache,
-                           std::vector<XTensor> &deepstackInputEmbeds,
-                           XTensor &freqsCis, XTensor &h)
-{
-    if (_c.defTpSize > 1 && h.shape[0] >= rt.commOptimizeLen &&
-        h.shape[0] % _c.defTpSize == 0) {
-        rt.enableCommOptimize = true;
-        ForwardLayersCommOptimize(rt, x, kvCache, deepstackInputEmbeds, freqsCis, h);
-    } else {
-        rt.enableCommOptimize = false;
-        ForwardLayersNaive(rt, x, kvCache, deepstackInputEmbeds, freqsCis, h);
-    }
-}
-
 void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                    std::vector<std::pair<XTensor, XTensor>>& kvCache,
                                    std::vector<XTensor> &deepstackInputEmbeds,
                                    XTensor &freqsCis, XTensor &h)
 {
-    XTensor &x = rt.pool->GetTensor({input.shape[0], _c.hiddenSize}, embed.dtype, DBG_LOC);
-    ForwardParallelEmbed(rt, input, embed, x);
-    ForwardLayers(rt, x, kvCache, deepstackInputEmbeds, freqsCis, h);
-    rt.pool->PutTensor(x);
+    if (_c.defTpSize > 1 && h.shape[0] >= rt.commOptimizeLen) {
+        XTensor &xPad = rt.pool->GetTensor({ROUND_UP(h.shape[0], _c.defTpSize), _c.hiddenSize}, embed.dtype, DBG_LOC);
+        XTensor x;
+        x.Init({h.shape[0], _c.hiddenSize}, embed.dtype, xPad.ptr);
+        ForwardParallelEmbed(rt, input, embed, x);
+        rt.enableCommOptimize = true;
+        ForwardLayersCommOptimize(rt, xPad, kvCache, deepstackInputEmbeds, freqsCis, h);
+        rt.pool->PutTensor(xPad);
+    } else {
+        XTensor &x = rt.pool->GetTensor({input.shape[0], _c.hiddenSize}, embed.dtype, DBG_LOC);
+        ForwardParallelEmbed(rt, input, embed, x);
+        rt.enableCommOptimize = false;
+        ForwardLayersNaive(rt, x, kvCache, deepstackInputEmbeds, freqsCis, h);
+        rt.pool->PutTensor(x);
+    }
 }
 
 void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output)
@@ -770,7 +782,22 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input,
     }
 
     PrepareAttn(rt, attnMeta);
-    ForwardLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
+    if (_c.defTpSize > 1 && output.shape[0] >= rt.commOptimizeLen) {
+        rt.enableCommOptimize = true;
+        if (output.shape[0] % _c.defTpSize != 0) {
+            XTensor &xPad = rt.pool->GetTensor({ROUND_UP(output.shape[0], _c.defTpSize), _c.hiddenSize}, embed.dtype, DBG_LOC);
+            size_t copySize = output.shape[0] * _c.hiddenSize * XDtypeBit(embed.dtype) / 8;
+            aclrtMemcpyAsync(xPad.ptr, copySize, input.ptr, copySize,
+                             ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream);
+            ForwardLayersCommOptimize(rt, xPad, kvCache, deepstackInputEmbeds, freqsCis, output);
+            rt.pool->PutTensor(xPad);
+        } else {
+            ForwardLayersCommOptimize(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
+        }
+    } else {
+        rt.enableCommOptimize = false;
+        ForwardLayersNaive(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
+    }
 }
 
 void XModel::Forward(XRuntime &rt, XTensor &input,
@@ -850,7 +877,7 @@ size_t XModel::GetTensorPoolSize(int dbg)
         return 1024;
     }
 
-    base = _c.maxM * _c.hiddenSize * 3 * dtypeSize;
+    base = ROUND_UP(_c.maxM, _c.defTpSize) * _c.hiddenSize * 3 * dtypeSize;
     attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
     attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
     attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen * dtypeSize;
