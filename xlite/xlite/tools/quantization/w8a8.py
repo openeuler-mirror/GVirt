@@ -43,7 +43,7 @@ def post_opt_scale(w, w_quant, zero, H=None, b_bias=None):
         b_bias = b_bias.to(w.dtype)
     if H is not None and H.dtype != w.dtype:
         H = H.to(w.dtype)
-    
+
     # Scale to avoid the overflow when fp16 is used.
     # this can also iumport the numerical accuracy as well
     scale_temp = w_quant.max()
@@ -220,7 +220,7 @@ def main(model_path, rot_model_path,
          num_tp=1, post_opt=False,
          quant_shared=False, quant_mtp=False,
          verbose=False, save_dequant=False):
-    
+
     os.makedirs(rot_model_path, exist_ok=True)
     model_index_file = os.path.join(model_path, "model.safetensors.index.json")
     with open(model_index_file, "r") as f:
@@ -253,14 +253,14 @@ def main(model_path, rot_model_path,
     else:
         Q_head = None
         kv_out_trans = None
-    
+
     if down_kron:
         Q_kron = rotate_dict["Q_kron"]
         Q_kron[0] = Q_kron[0].to(device=device, dtype=dtype)
         Q_kron[1] = Q_kron[1].to(device=device, dtype=dtype)
     else:
         Q_kron = None
-    
+
     Q_q = None
     Q_kv = None
     Q_kv_with_mqa = None
@@ -300,7 +300,7 @@ def main(model_path, rot_model_path,
                         scale_inv = None
                 else:
                     scale_inv = None
-                
+
                 if "weight" not in name:
                     # REMARK: this part will be buggy for other models
                     # especially when there are bias, dsv3 only has bias in gate
@@ -444,7 +444,7 @@ def main(model_path, rot_model_path,
                 ori_weight_names.append("model.down_kron.kron_right")
                 ori_weight_names.append("model.down_kron.kron_left")
                 SAVE_KRON = False
-            
+
             new_safetensor_file = os.path.join(rot_model_path, file_name)
             save_file(new_state_dict, new_safetensor_file)
 
@@ -453,7 +453,7 @@ def main(model_path, rot_model_path,
                 oldest_file = next(iter(loaded_files))
                 del loaded_files[oldest_file]
                 utils.cleanup_memory(device)
-    
+
     # Update model index
     print("saving the new index file")
     new_model_index_file = os.path.join(rot_model_path, "model.safetensors.index.json")
@@ -467,7 +467,7 @@ def main(model_path, rot_model_path,
             weight_map.pop(weight_name)
     with open(new_model_index_file, "w") as f:
         json.dump({"metadata": {}, "weight_map": weight_map}, f, indent=2)
-    
+
     # copy the necessary tokenizer
     for file_path in glob(os.path.join(model_path, "*token*")):
         new_file_path = os.path.join(rot_model_path, os.path.basename(file_path))

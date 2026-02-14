@@ -81,7 +81,7 @@ def generate_hadamard(n):
     else:
         assert (is_pow2(n)), "Dimension not compatible for generating Hadamard matrix yet!"
         K = 1
-    
+
     return hadamard, K
 
 

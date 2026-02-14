@@ -162,12 +162,12 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
 
     Args:
         x (torch.Tensor): The input tensor.
-        weight (torch.Tensor): The weight tensor. It may be quantized and 
+        weight (torch.Tensor): The weight tensor. It may be quantized and
             requires dequantization for certain cases.
         bias (Optional[torch.Tensor]): The bias tensor to be added. Default is None.
 
     Returns:
-        torch.Tensor: The result of the linear transformation, which may involve 
+        torch.Tensor: The result of the linear transformation, which may involve
         quantization-aware computations depending on the input parameters.
 
     Notes:
@@ -495,7 +495,7 @@ class MLA(nn.Module):
             self.v_cache[:bsz, start_pos:end_pos] = v
             scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
         else:
-            wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
+            wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size)
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
             self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)

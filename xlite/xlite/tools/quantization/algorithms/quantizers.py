@@ -70,7 +70,7 @@ class WeightQuantizer(torch.nn.Module):
             self.maxq = torch.tensor(2 ** (bits - 1) - 1)
         else:
             self.maxq = torch.tensor(2 ** bits - 1)
-    
+
 
     def find_params(self, x):
         if self.bits == 16:
@@ -84,7 +84,7 @@ class WeightQuantizer(torch.nn.Module):
         else:
             # per-tensor quantization
             x = x.flatten().unsqueeze(0)
-        
+
         tmp = torch.zeros(x.shape[0], device=dev)
         xmin = torch.minimum(x.min(1)[0], tmp)
         xmax = torch.maximum(x.max(1)[0], tmp)
@@ -99,7 +99,7 @@ class WeightQuantizer(torch.nn.Module):
             xmax[tmp] = +1
             self.scale = (xmax - xmin).clamp(min=1e-5) / self.maxq
             self.zero = torch.round(-xmin / self.scale)
-        
+
         if self.mse:
             best = torch.full([x.shape[0]], float('inf'), device=dev)
             for i in range(int(self.maxshrink * self.grid)):
@@ -115,7 +115,7 @@ class WeightQuantizer(torch.nn.Module):
                     scale1 = (xmax1 - xmin1) / self.maxq
                     zero1 = torch.round(-xmin1 / scale1)
                     q = asym_quant_dequant(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
-                
+
                 q -= x
                 q.abs_()
                 q.pow_(self.norm)
@@ -125,18 +125,18 @@ class WeightQuantizer(torch.nn.Module):
                     best[tmp] = err[tmp]
                     self.scale[tmp] = scale1[tmp]
                     self.zero[tmp] = zero1[tmp]
-        
+
         if not self.perchannel:
             tmp = shape[0]
             self.scale = self.scale.repeat(tmp)
             self.zero = self.zero.repeat(tmp)
-        
+
         shape = [-1] + [1] * (len(shape) - 1)
         self.scale = self.scale.reshape(shape)
         self.zero = self.zero.reshape(shape)
         return
-    
-    
+
+
     def quantize(self, x):
         x_dtype = x.dtype
         self.maxq = self.maxq.to(x.device)
@@ -145,11 +145,11 @@ class WeightQuantizer(torch.nn.Module):
                 return sym_quant_dequant(x, self.scale, self.maxq).to(x_dtype)
             return asym_quant_dequant(x, self.scale, self.zero, self.maxq).to(x_dtype)
         return x
-    
+
 
     def enabled(self):
         return self.maxq > 0
-    
+
 
     def ready(self):
         return torch.all(self.scale != 0)

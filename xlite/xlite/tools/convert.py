@@ -48,7 +48,7 @@ def main(hf_ckpt_path, save_path, n_layers, n_experts, mp):
         save_path (str): Path to the directory where the converted checkpoint files will be saved.
         n_experts (int): Total number of experts in the model.
         mp (int): Model parallelism factor.
-        
+
     Returns:
         None
     """

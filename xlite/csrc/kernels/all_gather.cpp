@@ -225,7 +225,7 @@ public:
                 curr = (curr + 1) % PINGPONG_BUF_NUM;
             }
         }
-        
+
         for  (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
         }
@@ -286,7 +286,7 @@ public:
             SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + curr);
             curr = (curr + 1) % PINGPONG_BUF_NUM;
         }
-        
+
         for  (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
         }
