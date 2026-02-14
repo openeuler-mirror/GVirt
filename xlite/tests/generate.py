@@ -245,7 +245,7 @@ def main(
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
             process_batch(batch, tokenizer, model, max_new_tokens, tokenizer.eos_token_id, temperature)
-        
+
         with open(input_file, 'w', encoding='utf-8') as file:
             json.dump(data, file, ensure_ascii=False, indent=4)
         print("The results have been written into the input_file.")

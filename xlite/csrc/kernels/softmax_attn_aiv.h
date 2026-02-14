@@ -321,7 +321,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
         }
-        
+
         // stage2: exp(x - max(x)) / sum(exp(x - max(x)))
         for (block = 0; block < subBlockNum; block++) {
             uint32_t offset = block * MAX_SUB_CONTEXT_SIZE;

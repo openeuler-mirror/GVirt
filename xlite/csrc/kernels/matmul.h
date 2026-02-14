@@ -220,7 +220,7 @@ public:
                     if (transpose == 0 && nz == 0) {
                         CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual, kRemSize, k, nActualBlockPad);
                     } else if (transpose == 0 && nz == 1) {
-                        CopyGmToL1(l1bBuf[pingpongL1B], bGmBuf[kOffset * nStride + nOffset * kBlockSize], 
+                        CopyGmToL1(l1bBuf[pingpongL1B], bGmBuf[kOffset * nStride + nOffset * kBlockSize],
                                    nActual, k0ActualBlockNum, nStride);
                     } else if (transpose == 1 && nz == 0) {
                         CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[kOffset * n + nOffset], kRemSize, nActual, n, ROUND_UP(kRemSize, kBlockSize));

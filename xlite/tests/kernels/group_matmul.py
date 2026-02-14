@@ -50,7 +50,7 @@ for transpose in [False, True]:
                 weight_standard = weight.clone()
             weights.append(weight)
             weights_standard.append(weight_standard)
-        
+
         # standard
         start = 0
         results = []

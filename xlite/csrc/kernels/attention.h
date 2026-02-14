@@ -334,7 +334,7 @@ public:
                 ffts_cross_core_sync(PIPE_FIX, config);
 
                 if (needDoSV != 0) {
-                    // wait vector softmax done                
+                    // wait vector softmax done
                     wait_flag_dev(1);
                     // do softmax * V
 #ifdef XLITE_KERNEL_DEBUG
@@ -373,7 +373,7 @@ public:
     {
         set_atomic_none();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-    
+
         uint64_t flagIdx = 1;
         uint64_t mode = 2; // inner-group aic/aiv sync
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);

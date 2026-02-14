@@ -563,7 +563,7 @@ void XModel::ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weig
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
-    
+
 
     if (_c.defDpSize > 1) {
         XTensor &tokenSortedAllDp = rt.pool->GetTensor({mAllDp, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
@@ -654,7 +654,7 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &x,
         if (i < (_c.nLayers - 1)) {
             XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, attnNorm[i + 1], _c.normEps, rt.hiddenStateSlice);
             XliteOpAllGather(rt, rt.hiddenStateSlice, h, TP);
-        }  
+        }
     }
     XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, norm, _c.normEps, rt.hiddenStateSlice);
     XliteOpAllGather(rt, rt.hiddenStateSlice, output, TP);
@@ -675,7 +675,7 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
         ForwardFFN(rt, i, h);
         if (i < (_c.nLayers - 1)) {
             XliteOpAddAndRmsNorm(rt, x, h, attnNorm[i + 1], _c.normEps, h);
-        }  
+        }
     }
     XliteOpAddAndRmsNorm(rt, x, h, norm, _c.normEps, output);
     rt.pool->PutTensor(h);
