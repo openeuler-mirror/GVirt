@@ -5,6 +5,7 @@
 #include "ascend.h"
 #include "runtime.h"
 #include "op.h"
+#include "swizzle.h"
 #include "aclrtlaunch_add_float16_t.h"
 #include "aclrtlaunch_add_bfloat16_t.h"
 #include "aclrtlaunch_embed_kernel_float16_t.h"
@@ -432,6 +433,8 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         }
     }
 
+    XlitePickSwizzle(m, n, k, swizzle);
+
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                      weightNZ, transpose, m0, n0, k0, swizzle);
@@ -512,13 +515,16 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &sc
 {
     if (in.dtype == BF16 && weightDtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_group_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
-                                            counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose);
+                                            counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose,
+                                            MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else if (in.dtype == FP16 && weightDtype == FP16 && output.dtype == FP16) {
         aclrtlaunch_group_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
-                                           counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose);
+                                           counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose,
+                                           MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32 && transpose == false) {
         aclrtlaunch_group_matmul_float(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, counts.ptr,
-                                       counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose);
+                                       counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose,
+                                       MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

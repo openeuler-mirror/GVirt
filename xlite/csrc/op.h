@@ -8,7 +8,7 @@
 #include "runtime.h"
 
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
-#define MATMUL_SWIZZLE_DEFAULT_VALUE (257)
+#define MATMUL_SWIZZLE_DEFAULT_VALUE (0x600)
 
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type);
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type);

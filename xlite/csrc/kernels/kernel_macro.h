@@ -26,7 +26,6 @@ using namespace AscendC;
 #define VECTOR_MAX_NUM_OF_FP16 128            // The maximum num of float16 dtype in one vector repeat
 #define AIC_CACHE_LINE_SIZE 512
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
-#define MATMUL_SWIZZLE_DEFAULT_VALUE (257)
 #define UB_SIZE 196608
 #define UB_BUF_ALIGN_SIZE 32               // The align size of UB buffer address
 #define PINGPONG_BUF_NUM 2
