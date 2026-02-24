@@ -7,7 +7,8 @@
 #include <cstdint>
 #include <vector>
 
-class XSock {
+class XSock
+{
 public:
     XSock(uint32_t rankId, uint32_t rankSize, const std::string &ip, uint32_t port)
         : _rankId(rankId), _rankSize(rankSize), _ip(ip), _port(port) {};

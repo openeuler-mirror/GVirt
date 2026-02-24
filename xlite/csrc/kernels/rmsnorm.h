@@ -1,12 +1,14 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 
 #ifdef __DAV_C220_VEC__
 
-// 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
+// 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM
+// Workloads》 [ASPLOS 2026]
 
 template <typename Dtype>
 __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out,
@@ -205,19 +207,21 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
     pipe_barrier(PIPE_ALL);
 }
 
-
-#define RMSNORM_FUNC_DEFINE(dtype) \
-extern "C" __global__ __aicore__ void rmsnorm_##dtype(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out, \
-                                                      uint32_t token_num, uint32_t norm_dim, float norm_eps, \
-                                                      uint32_t cnt_per_token, uint32_t step, uint32_t start_offset) \
-{ \
-    rmsnorm<dtype>(inout, residual, weight, out, token_num, norm_dim, norm_eps, cnt_per_token, step, start_offset); \
-}
+#define RMSNORM_FUNC_DEFINE(dtype)                                                                 \
+    extern "C" __global__ __aicore__ void rmsnorm_##dtype(                                         \
+        GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out, uint32_t token_num,          \
+        uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token, uint32_t step,                  \
+        uint32_t start_offset)                                                                     \
+    {                                                                                              \
+        rmsnorm<dtype>(inout, residual, weight, out, token_num, norm_dim, norm_eps, cnt_per_token, \
+                       step, start_offset);                                                        \
+    }
 #else
-#define RMSNORM_FUNC_DEFINE(dtype) \
-extern "C" __global__ __aicore__ void rmsnorm_##dtype(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out, \
-                                                      uint32_t token_num, uint32_t norm_dim, float norm_eps, \
-                                                      uint32_t cnt_per_token, uint32_t step, uint32_t start_offset) \
-{ \
-}
+#define RMSNORM_FUNC_DEFINE(dtype)                                                        \
+    extern "C" __global__ __aicore__ void rmsnorm_##dtype(                                \
+        GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out, uint32_t token_num, \
+        uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token, uint32_t step,         \
+        uint32_t start_offset)                                                            \
+    {                                                                                     \
+    }
 #endif

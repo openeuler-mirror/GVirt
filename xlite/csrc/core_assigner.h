@@ -10,7 +10,8 @@
 const float XLITE_MAX_CORE_RATIO = 1.0;
 const float XLITE_UTILIZATION_EPSILON = 1e-5f;
 
-class XCoreAssigner {
+class XCoreAssigner
+{
 public:
     XCoreAssigner(float prefillRatio) : _prefillConfigRatio(prefillRatio)
     {
@@ -35,5 +36,4 @@ private:
     std::condition_variable _cv;
 };
 
-
-#endif //_XLITE_CORE_ASSIGNER_H
+#endif  //_XLITE_CORE_ASSIGNER_H

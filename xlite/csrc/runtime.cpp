@@ -72,7 +72,7 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
 
     CHECK_ACL(aclrtCreateEvent(&_event));
 
-    const char* envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
+    const char *envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
     if (envCommOptimizeLen) {
         commOptimizeLen = atoi(envCommOptimizeLen);
     }
@@ -100,9 +100,9 @@ XRuntime::~XRuntime(void)
 
 int XRuntime::GetNodeIps(void)
 {
-    const char* envDevs = std::getenv("XLITE_DEVS_PER_NODE");
-    const char* envIps = std::getenv("XLITE_NODE_IPS");
-    const char* envPort = std::getenv("XLITE_PORT");
+    const char *envDevs = std::getenv("XLITE_DEVS_PER_NODE");
+    const char *envIps = std::getenv("XLITE_NODE_IPS");
+    const char *envPort = std::getenv("XLITE_PORT");
 
     if (envDevs) {
         _nDevPerNode = atoi(envDevs);
@@ -118,7 +118,8 @@ int XRuntime::GetNodeIps(void)
     }
 
     if (!envIps) {
-        std::cerr << __func__ << ": please set XLITE_NODE_IPS in multi-node environment." << std::endl;
+        std::cerr << __func__ << ": please set XLITE_NODE_IPS in multi-node environment."
+                  << std::endl;
         return -EINVAL;
     }
 
@@ -130,7 +131,8 @@ int XRuntime::GetNodeIps(void)
     }
 
     if (_ips.size() != DIV_ROUND_UP(_rankSize, _nDevPerNode)) {
-        std::cerr << __func__ << ": XLITE_NODE_IPS not match " << _rankSize << " / " << _nDevPerNode << std::endl;
+        std::cerr << __func__ << ": XLITE_NODE_IPS not match " << _rankSize << " / " << _nDevPerNode
+                  << std::endl;
         return -EFAULT;
     }
     return 0;
@@ -156,32 +158,33 @@ int XRuntime::InitXcclComm(void)
 {
     std::string ip;
     uint32_t port;
-    const char* envDisableXccl = std::getenv("XLITE_DISABLE_XCCL");
-    const char* envDeterministic = std::getenv("HCCL_DETERMINISTIC");
+    const char *envDisableXccl = std::getenv("XLITE_DISABLE_XCCL");
+    const char *envDeterministic = std::getenv("HCCL_DETERMINISTIC");
     void *ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE];
 
-    if (_rankSize == 1 || _rankSize > _nDevPerNode ||
-        _rankSize > XLITE_CCL_MAX_RANK_SIZE) {
+    if (_rankSize == 1 || _rankSize > _nDevPerNode || _rankSize > XLITE_CCL_MAX_RANK_SIZE) {
         return 0;
     }
 
-    if (isEnvironmentVariableTrue(envDisableXccl) ||
-        isEnvironmentVariableTrue(envDeterministic)) {
+    if (isEnvironmentVariableTrue(envDisableXccl) || isEnvironmentVariableTrue(envDeterministic)) {
         return 0;
     }
 
     XSock *sock = new XSock(_rankId, _rankSize, _ips[0], _port + XLITE_CCL_PORT_OFFSET);
 
     _ipcXTensorMems[_rankId] = pool->Ptr();
-    CHECK_ACL_RET(aclrtIpcMemGetExportKey(pool->Ptr(), pool->Size(), _ipcXTensorKeys[_rankId],
-        EXPORT_KEY_LEN, ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION), -EFAULT);
+    CHECK_ACL_RET(
+        aclrtIpcMemGetExportKey(pool->Ptr(), pool->Size(), _ipcXTensorKeys[_rankId], EXPORT_KEY_LEN,
+                                ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION),
+        -EFAULT);
     sock->AllGather(&_ipcXTensorKeys[_rankId], EXPORT_KEY_LEN, _ipcXTensorKeys);
     for (uint32_t rank = 0; rank < _rankSize; rank++) {
         if (rank == _rankId) {
             continue;
         }
         CHECK_ACL_RET(aclrtIpcMemImportByKey(&_ipcXTensorMems[rank], _ipcXTensorKeys[rank],
-            ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS), -EFAULT);
+                                             ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS),
+                      -EFAULT);
     }
     delete sock;
 
@@ -233,7 +236,8 @@ int XRuntime::InitHcclComm(void)
         XSock *sock = new XSock(_rankId % _tpSize, _tpSize, ip, port);
         sock->Broadcast(&rootInfo, sizeof(rootInfo));
         delete sock;
-        CHECK_HCCL_RET(HcclCommInitRootInfo(_tpSize, &rootInfo, _rankId % _tpSize, &_tpComm), -EFAULT);
+        CHECK_HCCL_RET(HcclCommInitRootInfo(_tpSize, &rootInfo, _rankId % _tpSize, &_tpComm),
+                       -EFAULT);
     }
 
     if (_dpSize > 1) {
@@ -246,7 +250,8 @@ int XRuntime::InitHcclComm(void)
         XSock *sock = new XSock(_rankId / _tpSize, _dpSize, ip, port);
         sock->Broadcast(&rootInfo, sizeof(rootInfo));
         delete sock;
-        CHECK_HCCL_RET(HcclCommInitRootInfo(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm), -EFAULT);
+        CHECK_HCCL_RET(HcclCommInitRootInfo(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm),
+                       -EFAULT);
     }
 
     return 0;
@@ -278,8 +283,10 @@ void XRuntime::MemcpyH2D(void *dst, void *src, size_t size)
 
 void XRuntime::UpdateCoreNum(float blockDimUtilization)
 {
-    aicNum = static_cast<uint32_t>(std::round(static_cast<float>(originAicNum) * blockDimUtilization));
-    aivNum = static_cast<uint32_t>(std::round(static_cast<float>(originAivNum) * blockDimUtilization));
+    aicNum =
+        static_cast<uint32_t>(std::round(static_cast<float>(originAicNum) * blockDimUtilization));
+    aivNum =
+        static_cast<uint32_t>(std::round(static_cast<float>(originAivNum) * blockDimUtilization));
 }
 
 int XRuntime::InitTensorPool(size_t sizeMB)

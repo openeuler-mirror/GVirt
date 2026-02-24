@@ -21,17 +21,18 @@ using namespace AscendC;
 
 #define BLOCK_SIZE 32
 #define VECTOR_MAX_REPEAT 255
-#define VECTOR_MAX_BYTESIZE 256               // The maximum byte size of one repeat in vector
-#define VECTOR_MAX_NUM_OF_FP32 64             // The maximum num of float32 dtype in one vector repeat
-#define VECTOR_MAX_NUM_OF_FP16 128            // The maximum num of float16 dtype in one vector repeat
+#define VECTOR_MAX_BYTESIZE 256     // The maximum byte size of one repeat in vector
+#define VECTOR_MAX_NUM_OF_FP32 64   // The maximum num of float32 dtype in one vector repeat
+#define VECTOR_MAX_NUM_OF_FP16 128  // The maximum num of float16 dtype in one vector repeat
 #define AIC_CACHE_LINE_SIZE 512
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 #define UB_SIZE 196608
-#define UB_BUF_ALIGN_SIZE 32               // The align size of UB buffer address
+#define UB_BUF_ALIGN_SIZE 32  // The align size of UB buffer address
 #define PINGPONG_BUF_NUM 2
 
 // 设置拷贝数据的config
-inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst, uint16_t srcGap, uint16_t dstGap)
+inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst,
+                                            uint16_t srcGap, uint16_t dstGap)
 {
     uint64_t config = 0;
     const uint64_t _DST_GAP = 48;
@@ -49,7 +50,9 @@ inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16
 }
 
 // 设置vector运算xt（双操作数）
-inline __aicore__ uint64_t set_vector_xt(uint64_t repeatDestStride, uint64_t repeatSrc0Stride, uint64_t repeatSrc1Stride, uint64_t destStride, uint64_t src0Stride, uint64_t src1Stride, uint64_t repeat)
+inline __aicore__ uint64_t set_vector_xt(uint64_t repeatDestStride, uint64_t repeatSrc0Stride,
+                                         uint64_t repeatSrc1Stride, uint64_t destStride,
+                                         uint64_t src0Stride, uint64_t src1Stride, uint64_t repeat)
 {
     uint64_t config = 0;
     const uint64_t _DST_STRIDE = 0;
@@ -72,7 +75,9 @@ inline __aicore__ uint64_t set_vector_xt(uint64_t repeatDestStride, uint64_t rep
 }
 
 // 设置vector运算xt（单操作数）
-inline __aicore__ uint64_t set_vector_1src_xt(uint64_t repeatDestStride, uint64_t repeatSrcStride, uint64_t destStride, uint64_t srcStride, uint64_t repeat)
+inline __aicore__ uint64_t set_vector_1src_xt(uint64_t repeatDestStride, uint64_t repeatSrcStride,
+                                              uint64_t destStride, uint64_t srcStride,
+                                              uint64_t repeat)
 {
     uint64_t config = 0;
     const uint64_t _DST_STRIDE = 0;
@@ -91,14 +96,18 @@ inline __aicore__ uint64_t set_vector_1src_xt(uint64_t repeatDestStride, uint64_
 }
 
 template <typename Dtype>
-__aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src, int nValue, int dValue, int srcDValue, int dstNzC0Stride)
+__aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst,
+                                       const GlobalTensor<Dtype> &src, int nValue, int dValue,
+                                       int srcDValue, int dstNzC0Stride)
 {
     if (srcDValue <= 65535) {
-        Nd2NzParams nd2nzParams(1 /* NdNum */, nValue, dValue, 0 /* srcNdMatrixStride */, srcDValue, dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
+        Nd2NzParams nd2nzParams(1 /* NdNum */, nValue, dValue, 0 /* srcNdMatrixStride */, srcDValue,
+                                dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
         DataCopy(dst, src, nd2nzParams);
     } else {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
-        Nd2NzParams nd2nzParams(1 /* NdNum */, 1, dValue, 0 /* srcNdMatrixStride */, srcDValue, dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
+        Nd2NzParams nd2nzParams(1 /* NdNum */, 1, dValue, 0 /* srcNdMatrixStride */, srcDValue,
+                                dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
         for (int i = 0; i < nValue; i++) {
             DataCopy(dst[i * kBlockSize], src[i * srcDValue], nd2nzParams);
         }
@@ -106,24 +115,28 @@ __aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst, const Glob
 }
 
 template <typename Dtype>
-__aicore__ inline void CopyGmToL1(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src, int nValue, int kBlockNum, int nStride)
+__aicore__ inline void CopyGmToL1(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src,
+                                  int nValue, int kBlockNum, int nStride)
 {
     DataCopyParams repeatParams(kBlockNum, nValue, nStride - nValue, 0);
     DataCopy(dst, src, repeatParams);
 }
 
 template <typename Dtype>
-__aicore__ inline void CopyToL0ACol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src, int mBlockNum, int kBlockStart, int kBlockNum)
+__aicore__ inline void CopyToL0ACol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src,
+                                    int mBlockNum, int kBlockStart, int kBlockNum)
 {
     int cubeSize = 512 / sizeof(Dtype);
-    LoadData2dParams params(0 /* startIndex */, mBlockNum /* repeatTimes */, 1 /* srcStride */, 0 /* sid */, kBlockNum - 1 /* dstGap */, 0, inc);
+    LoadData2dParams params(0 /* startIndex */, mBlockNum /* repeatTimes */, 1 /* srcStride */,
+                            0 /* sid */, kBlockNum - 1 /* dstGap */, 0, inc);
     for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
         LoadData(dst[(k - kBlockStart) * cubeSize], src[k * mBlockNum * cubeSize], params);
     }
 }
 
 template <typename Dtype>
-__aicore__ inline void CopyToL0BCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src, int nBlockNum, int kBlockStart, int kBlockNum)
+__aicore__ inline void CopyToL0BCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src,
+                                    int nBlockNum, int kBlockStart, int kBlockNum)
 {
     int cubeSize = 512 / sizeof(Dtype);
     LoadData2dParams params(0, kBlockNum * nBlockNum, 1, 0, 0, 0, inc);
@@ -131,8 +144,8 @@ __aicore__ inline void CopyToL0BCol(const LocalTensor<Dtype> &dst, const LocalTe
 }
 
 template <typename Dtype>
-__aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src, int nBlockNum,
-                                     int kBlockStart, int kBlockNum, int srcStride)
+__aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src,
+                                     int nBlockNum, int kBlockStart, int kBlockNum, int srcStride)
 {
     int cubeSize = 512 / sizeof(Dtype);
     LoadData2dParams params(0, nBlockNum, srcStride, 0, 0, 1, inc);
@@ -142,7 +155,9 @@ __aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalT
 }
 
 template <typename Dtype>
-__aicore__ inline void CalMmad(const LocalTensor<float> &c, const LocalTensor<Dtype> &a, const LocalTensor<Dtype> &b, int m, int n, int k, bool init, int unit = 0)
+__aicore__ inline void CalMmad(const LocalTensor<float> &c, const LocalTensor<Dtype> &a,
+                               const LocalTensor<Dtype> &b, int m, int n, int k, bool init,
+                               int unit = 0)
 {
     MmadParams params;
     params.m = m;
@@ -154,7 +169,9 @@ __aicore__ inline void CalMmad(const LocalTensor<float> &c, const LocalTensor<Dt
 }
 
 template <typename Dtype>
-inline __aicore__ void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTensor<float> &src, int mSize, int nSize, int srcStride, int dstStride, uint8_t unitFlag)
+inline __aicore__ void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTensor<float> &src,
+                                int mSize, int nSize, int srcStride, int dstStride,
+                                uint8_t unitFlag)
 {
     QuantMode_t mode;
     if constexpr (std::is_same<Dtype, float>::value) {
@@ -166,17 +183,16 @@ inline __aicore__ void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTenso
     }
 #ifdef __DAV_C220_CUBE__
     set_nd_para(0x1);
-    copy_matrix_cc_to_gm((__gm__ Dtype*)dst.GetPhyAddr(), (__cc__ float*)src.GetPhyAddr(),
-        0 /* fixpipeInfo.sid */, nSize, mSize, dstStride,
-        srcStride, unitFlag, mode,
-        0 /* static_cast<uint8_t>(fixpipeInfo.reluEn) */,
-        0 /* fixpipeInfo.channelSplit */,
-        1 /* fixpipeInfo.nz2ndEn */);
+    copy_matrix_cc_to_gm((__gm__ Dtype *)dst.GetPhyAddr(), (__cc__ float *)src.GetPhyAddr(),
+                         0 /* fixpipeInfo.sid */, nSize, mSize, dstStride, srcStride, unitFlag,
+                         mode, 0 /* static_cast<uint8_t>(fixpipeInfo.reluEn) */,
+                         0 /* fixpipeInfo.channelSplit */, 1 /* fixpipeInfo.nz2ndEn */);
 #endif
 }
 
 template <typename Dtype>
-__aicore__ inline void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTensor<float> &src, int mSize, int nSize, int srcStride, int dstStride)
+__aicore__ inline void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTensor<float> &src,
+                                int mSize, int nSize, int srcStride, int dstStride)
 {
     QuantMode_t mode;
     if constexpr (std::is_same<Dtype, float>::value) {
@@ -278,7 +294,8 @@ __inline__ __aicore__ void ReduceMaxV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
                 if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
                     currRepeat = repeat - i * VECTOR_MAX_REPEAT;
                 }
-                vmax(dst + i * instPad, src + i * instPad, src + repeat * pad + i * instPad, currRepeat, 1, 1, 1, 8, 8, 8);
+                vmax(dst + i * instPad, src + i * instPad, src + repeat * pad + i * instPad,
+                     currRepeat, 1, 1, 1, 8, 8, 8);
             }
         } else {
             vmax(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
@@ -348,7 +365,8 @@ __inline__ __aicore__ void ReduceSumV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src,
                 if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
                     currRepeat = repeat - i * VECTOR_MAX_REPEAT;
                 }
-                vadd(dst + i * instPad, src + i * instPad, src + repeat * pad + i * instPad, currRepeat, 1, 1, 1, 8, 8, 8);
+                vadd(dst + i * instPad, src + i * instPad, src + repeat * pad + i * instPad,
+                     currRepeat, 1, 1, 1, 8, 8, 8);
             }
         } else {
             vadd(dst, src, src + repeat * pad, repeat, 1, 1, 1, 8, 8, 8);
@@ -543,7 +561,8 @@ __inline__ __aicore__ void ReduceMax(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
                 if (currRepeat + i * VECTOR_MAX_REPEAT > repeat) {
                     currRepeat = repeat - i * VECTOR_MAX_REPEAT;
                 }
-                vcmax(dst + i * VECTOR_MAX_REPEAT, calc + i * instPad, currRepeat, 1, 1, 8, Order_t::ONLY_VALUE);
+                vcmax(dst + i * VECTOR_MAX_REPEAT, calc + i * instPad, currRepeat, 1, 1, 8,
+                      Order_t::ONLY_VALUE);
             }
         } else {
             vcmax(dst, calc, repeat, 1, 1, 8, Order_t::ONLY_VALUE);
@@ -604,8 +623,8 @@ __inline__ __aicore__ void ReduceSum(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 }
 
-#define BITS_PER_DWORD  64
-#define BIT_DWORD(nr)   ((nr) / BITS_PER_DWORD)
+#define BITS_PER_DWORD 64
+#define BIT_DWORD(nr) ((nr) / BITS_PER_DWORD)
 
 inline __aicore__ void bitmapSet(__ubuf__ uint64_t *addr, uint32_t id)
 {

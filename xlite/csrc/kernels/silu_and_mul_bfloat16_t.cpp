@@ -6,7 +6,8 @@
 
 #ifdef __DAV_C220_VEC__
 
-extern "C" __global__ __aicore__ void silu_and_mul_bfloat16_t(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int n_tokens, int dim)
+extern "C" __global__ __aicore__ void silu_and_mul_bfloat16_t(GM_ADDR x, GM_ADDR y, GM_ADDR pm,
+                                                              int n_tokens, int dim)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -26,12 +27,14 @@ extern "C" __global__ __aicore__ void silu_and_mul_bfloat16_t(GM_ADDR x, GM_ADDR
         split = split * 2;
     }
     int padded_dim = ROUND_UP(dim_split, calc_pad);
-    __ubuf__ float* x32_ub0 = reinterpret_cast<__ubuf__ float*>((uintptr_t)0);
-    __ubuf__ float* x32_ub1 = reinterpret_cast<__ubuf__ float*>(x32_ub0 + 2 * padded_dim);
-    __ubuf__ float* tmp = reinterpret_cast<__ubuf__ float*>(x32_ub0 + 4 * padded_dim);
-    __ubuf__ bfloat16_t* output_ub = reinterpret_cast<__ubuf__ bfloat16_t*>(tmp + padded_dim);
-    __ubuf__ bfloat16_t* x32_ub0_bf16 = reinterpret_cast<__ubuf__ bfloat16_t*>(output_ub + padded_dim);
-    __ubuf__ bfloat16_t* x32_ub1_bf16 = reinterpret_cast<__ubuf__ bfloat16_t*>(x32_ub0_bf16 + 2 * padded_dim);
+    __ubuf__ float *x32_ub0 = reinterpret_cast<__ubuf__ float *>((uintptr_t)0);
+    __ubuf__ float *x32_ub1 = reinterpret_cast<__ubuf__ float *>(x32_ub0 + 2 * padded_dim);
+    __ubuf__ float *tmp = reinterpret_cast<__ubuf__ float *>(x32_ub0 + 4 * padded_dim);
+    __ubuf__ bfloat16_t *output_ub = reinterpret_cast<__ubuf__ bfloat16_t *>(tmp + padded_dim);
+    __ubuf__ bfloat16_t *x32_ub0_bf16 =
+        reinterpret_cast<__ubuf__ bfloat16_t *>(output_ub + padded_dim);
+    __ubuf__ bfloat16_t *x32_ub1_bf16 =
+        reinterpret_cast<__ubuf__ bfloat16_t *>(x32_ub0_bf16 + 2 * padded_dim);
 
     int burst_copy = DIV_ROUND_UP(dim_split * sizeof(bfloat16_t), BLOCK_SIZE);
     int repeat_cal = DIV_ROUND_UP(dim_split, calc_pad);
@@ -43,9 +46,11 @@ extern "C" __global__ __aicore__ void silu_and_mul_bfloat16_t(GM_ADDR x, GM_ADDR
     for (int index = block_idx; index < n_tokens * split; index += block_num) {
         int row = index / split;
         int line = index % split;
-        __gm__ bfloat16_t* gm_x_first_half = (__gm__ bfloat16_t*)(x) + row * step + line * dim_split;
-        __gm__ bfloat16_t* gm_x_second_half = (__gm__ bfloat16_t*)(x) + row * step + line * dim_split + dim;
-        __gm__ bfloat16_t* gm_y = (__gm__ bfloat16_t*)(y) + row * dim + line * dim_split;
+        __gm__ bfloat16_t *gm_x_first_half =
+            (__gm__ bfloat16_t *)(x) + row * step + line * dim_split;
+        __gm__ bfloat16_t *gm_x_second_half =
+            (__gm__ bfloat16_t *)(x) + row * step + line * dim_split + dim;
+        __gm__ bfloat16_t *gm_y = (__gm__ bfloat16_t *)(y) + row * dim + line * dim_split;
         auto x32_ub = event_id == 0 ? x32_ub0 : x32_ub1;
         auto x32_ub_bf16 = event_id == 0 ? x32_ub0_bf16 : x32_ub1_bf16;
 
@@ -62,13 +67,15 @@ extern "C" __global__ __aicore__ void silu_and_mul_bfloat16_t(GM_ADDR x, GM_ADDR
         if (dim_split % calc_pad != 0) {
             SetMaskFromHighBit(calc_pad, calc_pad - dim_split % calc_pad);
             vector_dup(x32_ub + ROUND_DOWN(dim_split, calc_pad), float(0), 1, 1, 1, 8, 0);
-            vector_dup(x32_ub + padded_dim + ROUND_DOWN(dim_split, calc_pad), float(0), 1, 1, 1, 8, 0);
+            vector_dup(x32_ub + padded_dim + ROUND_DOWN(dim_split, calc_pad), float(0), 1, 1, 1, 8,
+                       0);
             pipe_barrier(PIPE_V);
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
         }
 
         // -x
-        vmuls(tmp, x32_ub, float(-1.0000000000000000e+00f), repeat_cal, 1, 1, 8, 8); // 处理前dim个数
+        vmuls(tmp, x32_ub, float(-1.0000000000000000e+00f), repeat_cal, 1, 1, 8,
+              8);  // 处理前dim个数
         pipe_barrier(PIPE_V);
 
         // exp(-x)

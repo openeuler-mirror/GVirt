@@ -1,18 +1,23 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 
 using namespace AscendC;
 
-constexpr int32_t BUFFER_NUM = 2;                                     // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;  // tensor num for each queue
 
 template <typename T>
-class KernelAddBias {
+class KernelAddBias
+{
 public:
-    __aicore__ inline KernelAddBias() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t xNumelIn, uint32_t yNumelIn)
+    __aicore__ inline KernelAddBias()
+    {
+    }
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t xNumelIn,
+                                uint32_t yNumelIn)
     {
         xGm.SetGlobalBuffer((__gm__ T *)x);
         yGm.SetGlobalBuffer((__gm__ T *)y);
@@ -104,11 +109,11 @@ private:
     uint32_t yNumel;
 };
 
-#define ADDBIAS_FUNC_DEFINE(dtype) \
-extern "C" __global__ __aicore__ void add_bias_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR z, \
-                                                       uint32_t xNumel, uint32_t yNumel) \
-{ \
-    KernelAddBias<dtype> op; \
-    op.Init(x, y, z, xNumel, yNumel); \
-    op.Process(); \
-}
+#define ADDBIAS_FUNC_DEFINE(dtype)                                                           \
+    extern "C" __global__ __aicore__ void add_bias_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR z,  \
+                                                           uint32_t xNumel, uint32_t yNumel) \
+    {                                                                                        \
+        KernelAddBias<dtype> op;                                                             \
+        op.Init(x, y, z, xNumel, yNumel);                                                    \
+        op.Process();                                                                        \
+    }

@@ -21,35 +21,33 @@ struct CModelAttnMeta {
     at::Tensor positions;
 };
 
-class _CModel {
+class _CModel
+{
 public:
     _CModel() {};
     ~_CModel();
     void Init(struct XModelConfig &c, uint32_t rankId);
-    void Forward(XRuntime &rt, at::Tensor &input,
-                 XModelAttnMeta& attnMeta,
-                 std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                 at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
-    void ForwardV1(XRuntime &rt, at::Tensor &input,
-                 CModelAttnMeta& attnMeta,
-                 std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                 at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
+    void Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
+                 std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                 at::Tensor &output, uint64_t currStream);
+    void ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                   std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                   at::Tensor &output, uint64_t currStream);
     void ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint64_t currStream);
-    void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
-                             XModelAttnMeta& attnMeta,
-                             std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+    void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
+                             std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                              at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
-    void ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input,
-                             CModelAttnMeta& attnMeta,
-                             std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                             at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
-    void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, std::vector<at::Tensor> &deepstackInput,
-                                 XModelAttnMeta& attnMeta,
-                                 std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+    void ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                               std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
+                               at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
+    void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
+                                 std::vector<at::Tensor> &deepstackInput, XModelAttnMeta &attnMeta,
+                                 std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                                  at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
-    void ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, std::vector<at::Tensor> &deepstackInput,
-                                   CModelAttnMeta& attnMeta,
-                                   std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+    void ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
+                                   std::vector<at::Tensor> &deepstackInput,
+                                   CModelAttnMeta &attnMeta,
+                                   std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
     size_t GetTensorPoolSize(int dbg);
 
@@ -108,7 +106,8 @@ static inline enum XDtype XDtype(at::Tensor &t)
         case at::ScalarType::ComplexFloat:
             return CPLXF;
         default:
-            std::cerr << __FILE__ << ":" << __LINE__ << ": unknown data type " << t.scalar_type() << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << ": unknown data type " << t.scalar_type()
+                      << std::endl;
             return MAX_XDTYPE;
     }
 }
@@ -116,7 +115,7 @@ static inline enum XDtype XDtype(at::Tensor &t)
 static inline void *TensorPtr(at::Tensor &t)
 {
     return reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(t.storage().data_ptr().get()) +
-        t.storage_offset() * t.dtype().itemsize());
+                                    t.storage_offset() * t.dtype().itemsize());
 }
 
 static inline void InitXTensor(XTensor &out, at::Tensor &in)
@@ -133,7 +132,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     uint32_t nRE = (c.nLayers - c.nDenseLayers) * nLocalRoutedExperts;
 
     if (moeREUpGate.size() != nRE || moeREDown.size() != nRE) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": num of routed experts: " << moeREUpGate.size() << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__
+                  << ": num of routed experts: " << moeREUpGate.size() << std::endl;
         return;
     }
 
@@ -196,8 +196,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     _model->Init();
 
     if (rankId == 0) {
-        std::cout << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize <<
-            "), data parallel(" << c.defDpSize << "), expert parallel (" << c.moeEpSize << ")]" << std::endl;
+        std::cout << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize
+                  << "), data parallel(" << c.defDpSize << "), expert parallel (" << c.moeEpSize
+                  << ")]" << std::endl;
     }
 
     _kv.resize(c.nLayers);
@@ -209,10 +210,9 @@ _CModel::~_CModel(void)
     delete _model;
 }
 
-void _CModel::Forward(XRuntime &rt, at::Tensor &input,
-                      XModelAttnMeta& attnMeta,
-                      std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                      at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
+void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
+                      std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                      at::Tensor &output, uint64_t currStream)
 {
     XTensor _input, _output, _freqsCis;
     aclrtStream currAclStream = nullptr;
@@ -227,8 +227,10 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input,
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
-        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first), TensorPtr(kvCache[i].first));
-        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
+        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first),
+                          TensorPtr(kvCache[i].first));
+        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second),
+                           TensorPtr(kvCache[i].second));
     }
 
     if (currStream != 0) {
@@ -245,9 +247,8 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input,
     }
 }
 
-void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input,
-                        CModelAttnMeta& attnMeta,
-                        std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                        std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                         at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
@@ -260,7 +261,8 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input,
     Forward(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
-void _CModel::ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint64_t currStream)
+void _CModel::ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output,
+                            uint64_t currStream)
 {
     XTensor _input, _output;
     aclrtStream currAclStream = nullptr;
@@ -282,9 +284,8 @@ void _CModel::ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output,
     }
 }
 
-void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
-                                  XModelAttnMeta& attnMeta,
-                                  std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
+                                  std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                                   at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XTensor _input, _output, _freqsCis;
@@ -300,8 +301,10 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
-        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first), TensorPtr(kvCache[i].first));
-        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
+        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first),
+                          TensorPtr(kvCache[i].first));
+        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second),
+                           TensorPtr(kvCache[i].second));
     }
 
     if (currStream != 0) {
@@ -309,7 +312,8 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
         rt.EventWaitCurrStream(currAclStream);
     }
 
-    _model->ForwardAndGetLogits(rt, _input, attnMeta, _kv, _deepstackInputEmbeds,_freqsCis, _output);
+    _model->ForwardAndGetLogits(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis,
+                                _output);
 
     if (currStream != 0) {
         rt.EventRecordCurrStream(currAclStream);
@@ -318,9 +322,8 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input,
     }
 }
 
-void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input,
-                                    CModelAttnMeta& attnMeta,
-                                    std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                                    std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                                     at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
@@ -333,9 +336,10 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input,
     ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
-void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, std::vector<at::Tensor> &deepstackInput,
-                                      XModelAttnMeta& attnMeta,
-                                      std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
+void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
+                                      std::vector<at::Tensor> &deepstackInput,
+                                      XModelAttnMeta &attnMeta,
+                                      std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                                       at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
@@ -357,8 +361,10 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, std::vect
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
-        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first), TensorPtr(kvCache[i].first));
-        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second), TensorPtr(kvCache[i].second));
+        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first),
+                          TensorPtr(kvCache[i].first));
+        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second),
+                           TensorPtr(kvCache[i].second));
     }
 
     for (uint32_t i = 0; i < deepstackInput.size(); i++) {
@@ -370,7 +376,8 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, std::vect
         rt.EventWaitCurrStream(currAclStream);
     }
 
-    _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis, _output);
+    _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis,
+                                    _output);
 
     if (currStream != 0) {
         rt.EventRecordCurrStream(currAclStream);
@@ -379,10 +386,12 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, std::vect
     }
 }
 
-void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, std::vector<at::Tensor> &deepstackInput,
-                                        CModelAttnMeta& attnMeta,
-                                        std::vector<std::pair<at::Tensor, at::Tensor>>& kvCache,
-                                        at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
+void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
+                                        std::vector<at::Tensor> &deepstackInput,
+                                        CModelAttnMeta &attnMeta,
+                                        std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
+                                        at::Tensor &freqsCis, at::Tensor &output,
+                                        uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 1;
@@ -391,7 +400,8 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, std::ve
     _attnMeta.isPrefills = attnMeta.isPrefills;
     _attnMeta.blockTables = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
-    ForwardWithInputsEmbeds(rt, input, deepstackInput, _attnMeta, kvCache, freqsCis, output, currStream);
+    ForwardWithInputsEmbeds(rt, input, deepstackInput, _attnMeta, kvCache, freqsCis, output,
+                            currStream);
 }
 
 size_t _CModel::GetTensorPoolSize(int dbg)
@@ -448,7 +458,8 @@ void Print(at::Tensor &x)
     _x.Print();
 }
 
-void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weightNZ, bool transpose)
+void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weightNZ,
+            bool transpose)
 {
     XTensor _x, _y, _z;
 
@@ -459,7 +470,8 @@ void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weig
     rt.Synchronize();
 }
 
-void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, uint32_t start, uint32_t end)
+void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, uint32_t start,
+           uint32_t end)
 {
     XTensor _in, _out, _weight;
 
@@ -506,9 +518,8 @@ void SiluAndMul(XRuntime &rt, at::Tensor &in, at::Tensor &out)
 
 void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tensor &vCache,
                   at::Tensor &position, at::Tensor &cossin, at::Tensor &slotMapping,
-                  uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
-                  uint32_t rotDim, uint32_t blockSize, bool isNeox,
-                  uint64_t mropeMaskH, uint64_t mropeMaskW)
+                  uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t rotDim,
+                  uint32_t blockSize, bool isNeox, uint64_t mropeMaskH, uint64_t mropeMaskW)
 {
     XTensor _inout, _kCache, _vCache, _position, _cossin, _slotMapping;
 
@@ -518,18 +529,19 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
     InitXTensor(_position, position);
     InitXTensor(_cossin, cossin);
     InitXTensor(_slotMapping, slotMapping);
-    XliteOpRopeCache(rt, _inout, _kCache, _vCache, _position, _cossin, _slotMapping,
-                     nHeads, nKvHeads, headDim, rotDim, blockSize, isNeox, mropeMaskH, mropeMaskW);
+    XliteOpRopeCache(rt, _inout, _kCache, _vCache, _position, _cossin, _slotMapping, nHeads,
+                     nKvHeads, headDim, rotDim, blockSize, isNeox, mropeMaskH, mropeMaskW);
     rt.Synchronize();
 }
 
 void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vCache,
-               at::Tensor &output, at::Tensor &cumPromptLens, at::Tensor &lens, at::Tensor &cachedLens,
-               at::Tensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
-               uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
+               at::Tensor &output, at::Tensor &cumPromptLens, at::Tensor &lens,
+               at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t nKvHeads,
+               uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
 {
     XTensor _qkv, _kCache, _vCache, _qk, _output, _cumPromptLens, _lens, _cachedLens, _blockTables;
-    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize}, XDtype(qkv), DBG_LOC);
+    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
+                                     XDtype(qkv), DBG_LOC);
 
     InitXTensor(_qkv, qkv);
     InitXTensor(_kCache, kCache);
@@ -540,14 +552,15 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
 
-    XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _cumPromptLens, _lens, _cachedLens, _blockTables,
-                     nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlock);
+    XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _cumPromptLens, _lens, _cachedLens,
+                     _blockTables, nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlock);
     rt.Synchronize();
 
     rt.pool->PutTensor(qk);
 }
 
-void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &norm, at::Tensor &out, float normEps)
+void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &norm,
+                   at::Tensor &out, float normEps)
 {
     XTensor _in1, _in2, _out, _norm;
 
@@ -559,17 +572,16 @@ void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &n
     rt.Synchronize();
 }
 
-void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices,
-                 at::Tensor &outWeights, at::Tensor &outRouting,
-                 uint32_t topK, bool normTopKProb)
+void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &outWeights,
+                 at::Tensor &outRouting, uint32_t topK, bool normTopKProb)
 {
     XTensor _scores, _indices, _outWeights, _outRouting;
 
     InitXTensor(_scores, scores);
     InitXTensor(_indices, indices);
     InitXTensor(_outWeights, outWeights);
-    _outRouting.Init({static_cast<long>(scores.size(0)), static_cast<long>(scores.size(1))},
-                     BIT1, TensorPtr(outRouting));
+    _outRouting.Init({static_cast<long>(scores.size(0)), static_cast<long>(scores.size(1))}, BIT1,
+                     TensorPtr(outRouting));
     XliteOpSoftmaxTopK(rt, _scores, _indices, _outWeights, _outRouting, topK, normTopKProb);
     rt.Synchronize();
 }
@@ -600,9 +612,9 @@ void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t sta
     rt.Synchronize();
 }
 
-void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights, std::vector<at::Tensor> &scales,
-                 at::Tensor &counts, uint32_t start, uint32_t end, long outDim, long inDim, at::Tensor &output,
-                 bool weightNZ, bool transpose)
+void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
+                 std::vector<at::Tensor> &scales, at::Tensor &counts, uint32_t start, uint32_t end,
+                 long outDim, long inDim, at::Tensor &output, bool weightNZ, bool transpose)
 {
     XTensor _in, _counts, _output;
     std::vector<void *> p;
@@ -627,7 +639,8 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
         rt.MemcpyH2D(_scales.ptr, p.data(), num * sizeof(void *));
     }
 
-    XliteOpGroupMatmul(rt, _in, _weights, _scales, _counts, start, end, XDtype(weights[0]), outDim, inDim, _output, weightNZ, transpose);
+    XliteOpGroupMatmul(rt, _in, _weights, _scales, _counts, start, end, XDtype(weights[0]), outDim,
+                       inDim, _output, weightNZ, transpose);
     rt.Synchronize();
     rt.pool->PutTensor(_weights);
     rt.pool->PutTensor(_scales);
@@ -647,11 +660,12 @@ void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
     rt.Synchronize();
 }
 
-PYBIND11_MODULE(_C, m) {
+PYBIND11_MODULE(_C, m)
+{
     py::class_<XRuntime>(m, "Runtime")
-        .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(),
-            py::arg("devid"), py::arg("size") = 0, py::arg("rank") = 0,
-            py::arg("tp_size") = 1, py::arg("dp_size") = 1)
+        .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(), py::arg("devid"),
+             py::arg("size") = 0, py::arg("rank") = 0, py::arg("tp_size") = 1,
+             py::arg("dp_size") = 1)
         .def("update_core_num", &XRuntime::UpdateCoreNum)
         .def("init_tensor_pool", &XRuntime::InitTensorPool);
 
@@ -752,37 +766,36 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("re_up_gate_scale", &_CModel::moeREUpGateScale)
         .def_readwrite("re_down", &_CModel::moeREDown)
         .def_readwrite("re_down_scale", &_CModel::moeREDownScale)
-        .def("init", &_CModel::Init, "model init",
-            py::arg("config"), py::arg("rank") = 0)
-        .def("forward", &_CModel::Forward, "forward",
-            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
-            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
-        py::call_guard<py::gil_scoped_release>())
-        .def("forward", &_CModel::ForwardV1, "forward",
-            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
-            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
-        py::call_guard<py::gil_scoped_release>())
-        .def("compute_logits", &_CModel::ComputeLogits, "compute_logits",
-            py::arg("rt"), py::arg("input"), py::arg("output"), py::arg("curr_stream") = 0,
-        py::call_guard<py::gil_scoped_release>())
+        .def("init", &_CModel::Init, "model init", py::arg("config"), py::arg("rank") = 0)
+        .def("forward", &_CModel::Forward, "forward", py::arg("rt"), py::arg("input"),
+             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("forward", &_CModel::ForwardV1, "forward", py::arg("rt"), py::arg("input"),
+             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("compute_logits", &_CModel::ComputeLogits, "compute_logits", py::arg("rt"),
+             py::arg("input"), py::arg("output"), py::arg("curr_stream") = 0,
+             py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits", &_CModel::ForwardAndGetLogits, "forward_and_get_logits",
-            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
-            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
-        py::call_guard<py::gil_scoped_release>())
+             py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+             py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+             py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV1, "forward_and_get_logits",
-            py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
-            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
-        py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbeds, "forward_with_inputs_embeds",
-            py::arg("rt"), py::arg("input"), py::arg("deepstack_input"), py::arg("attn_meta"), py::arg("kv_cache"),
-            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
-        py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbedsV1, "forward_with_inputs_embeds",
-            py::arg("rt"), py::arg("input"), py::arg("deepstack_input"), py::arg("attn_meta"), py::arg("kv_cache"),
-            py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
-        py::call_guard<py::gil_scoped_release>())
+             py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+             py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+             py::call_guard<py::gil_scoped_release>())
+        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbeds,
+             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"),
+             py::arg("deepstack_input"), py::arg("attn_meta"), py::arg("kv_cache"),
+             py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+             py::call_guard<py::gil_scoped_release>())
+        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbedsV1,
+             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"),
+             py::arg("deepstack_input"), py::arg("attn_meta"), py::arg("kv_cache"),
+             py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+             py::call_guard<py::gil_scoped_release>())
         .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize, "get_tensor_pool_size",
-            py::arg("dbg") = 0);
+             py::arg("dbg") = 0);
 
     py::class_<XCoreAssigner>(m, "CoreAssigner")
         .def(py::init<float>(), py::arg("prefillRatio"))
@@ -794,12 +807,11 @@ PYBIND11_MODULE(_C, m) {
     m.def("reduce_scatter", &ReduceScatter);
     m.def("all_reduce", &AllReduce);
     m.def("add", &Add);
-    m.def("matmul", &Matmul, "matmul",
-          py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"), py::arg("weight_nz") = false, py::arg("transpose") = false);
+    m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
+          py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("embed", &Embed);
-    m.def("rmsnorm", &RMSNorm, "rmsnorm",
-          py::arg("rt"), py::arg("in"), py::arg("norm"), py::arg("out"),
-          py::arg("norm_eps"), py::arg("norm_dim") = 0,
+    m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in"), py::arg("norm"),
+          py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
           py::arg("cnt_per_token") = 1, py::arg("start_offset") = 0);
     m.def("add_bias", &AddBias);
     m.def("silu_and_mul", &SiluAndMul);

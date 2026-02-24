@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
  *
+#pragma once
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -15,18 +16,21 @@
 #define SEQLEN_64 64
 #define SEQLEN_8K 8192
 #define SEQLEN_19K 19456
-//#define XLITE_KERNEL_DEBUG
+// #define XLITE_KERNEL_DEBUG
 
-template<typename Dtype>
-class Attention {
+template <typename Dtype>
+class Attention
+{
 public:
-    __aicore__ inline Attention() {}
+    __aicore__ inline Attention()
+    {
+    }
 
-    __aicore__ inline void Init(GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output,
-        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,
-        uint32_t nHeads, uint32_t nKVHeads,
-        uint32_t headSize, uint32_t blockSize, uint32_t batch,
-        uint32_t maxNumBlocks)
+    __aicore__ inline void Init(GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk,
+                                GM_ADDR output, GM_ADDR queryStartLoc, GM_ADDR queryLens,
+                                GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads,
+                                uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize,
+                                uint32_t batch, uint32_t maxNumBlocks)
     {
         this->input.SetGlobalBuffer((__gm__ Dtype *)input);
         this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
@@ -54,10 +58,12 @@ public:
         this->blockMemSize = blockSize * kvMemSize;
 
         this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * maxSeqLen);
-        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * maxSeqLen + block_num * MAX_M0 * maxSeqLen);
+        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * maxSeqLen +
+                                    block_num * MAX_M0 * maxSeqLen);
 
         // 分配L1/L0
-        uint64_t l1ATileBytes = MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
+        uint64_t l1ATileBytes =
+            MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
         uint64_t l1BTileBytes = blockSize * headSize * sizeof(Dtype);
         uint64_t off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
@@ -107,8 +113,9 @@ public:
         int kvHeadOffset = kvHeadIdx * headSize;
 
         Nd2NzParams nd2nzParams(1 /* NdNum */, queryLen /* nValue */, headSize /* dValue */,
-            0 /* srcNdMatrixStride */, qkvMemSize /* srcDValue */, mBlockPad /* dstNzC0Stride */,
-            headNumInGroup /* dstNzNStride */, 0 /* dstNzMatrixStride */);
+                                0 /* srcNdMatrixStride */, qkvMemSize /* srcDValue */,
+                                mBlockPad /* dstNzC0Stride */, headNumInGroup /* dstNzNStride */,
+                                0 /* dstNzMatrixStride */);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
         for (int h = 0; h < headNumInGroup; h++) {
@@ -139,8 +146,8 @@ public:
             }
 
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
-            CopyGmToL1Nd2Nz(l1bBuf[curIdx], kCache[blockIdx * blockMemSize + kvHeadOffset],
-                            nSize, headSize, kvMemSize, nBlockPad);
+            CopyGmToL1Nd2Nz(l1bBuf[curIdx], kCache[blockIdx * blockMemSize + kvHeadOffset], nSize,
+                            headSize, kvMemSize, nBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
 
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
@@ -207,14 +214,14 @@ public:
             }
 
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curIdx);
-            CopyGmToL1Nd2Nz(l1aBuf[curIdx], qk[kIdx * blockSize],
-                            mActual, kSize, maxSeqLen, mBlockPad);
+            CopyGmToL1Nd2Nz(l1aBuf[curIdx], qk[kIdx * blockSize], mActual, kSize, maxSeqLen,
+                            mBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curIdx);
 
             uint32_t blockIdx = blockTable[kIdx];
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
-            CopyGmToL1Nd2Nz(l1bBuf[curIdx], vCache[blockIdx * blockMemSize + kvHeadOffset],
-                            kSize, headSize, kvMemSize, kBlockPad);
+            CopyGmToL1Nd2Nz(l1bBuf[curIdx], vCache[blockIdx * blockMemSize + kvHeadOffset], kSize,
+                            headSize, kvMemSize, kBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
 
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curIdx);
@@ -231,7 +238,8 @@ public:
 
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curIdx);
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID2 + curIdx);
-            CalMmad(l0cBuf, l0aBuf[curIdx], l0bBuf[curIdx], mBlockPad, headSize, kBlockPad, kIdx == 0);
+            CalMmad(l0cBuf, l0aBuf[curIdx], l0bBuf[curIdx], mBlockPad, headSize, kBlockPad,
+                    kIdx == 0);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curIdx);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID2 + curIdx);
             PipeBarrier<PIPE_M>();
@@ -253,7 +261,8 @@ public:
         } else {
             int l0cOffset = headNumInGroup * kBlockSize;
             for (int i = 0; i < queryLen; i++) {
-                CopyToGm(output[i * qMemSize], l0cBuf[i * l0cOffset], headNumInGroup, headSize, mBlockPad, headSize);
+                CopyToGm(output[i * qMemSize], l0cBuf[i * l0cOffset], headNumInGroup, headSize,
+                         mBlockPad, headSize);
             }
         }
     }
@@ -265,7 +274,7 @@ public:
         set_nd_para((uint64_t)1);
 
         uint64_t flagIdx = 0;
-        uint64_t mode = 2; // inner-group aic/aiv sync
+        uint64_t mode = 2;  // inner-group aic/aiv sync
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
 
         uint32_t lastOutOffset, lastCalcLen;
@@ -279,7 +288,9 @@ public:
         int cachedLen = -1;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
-            __gm__ uint32_t *blockTable = (__gm__ uint32_t *)((uint64_t)blockTables + batchIdx * maxNumBlocks * sizeof(uint32_t));
+            __gm__ uint32_t *blockTable =
+                (__gm__ uint32_t *)((uint64_t)blockTables +
+                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
 
             uint32_t m0 = MAX_M0;
             if (queryLen <= SEQLEN_64) {
@@ -303,7 +314,8 @@ public:
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum * nKVHeads;
             for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != ((totalIdx / block_num) % 2 == 0 ? block_idx : block_num - 1 - block_idx)) {
+                if (totalIdx % block_num !=
+                    ((totalIdx / block_num) % 2 == 0 ? block_idx : block_num - 1 - block_idx)) {
                     continue;
                 }
                 int kvHeadIdx = idx % nKVHeads;
@@ -326,11 +338,13 @@ public:
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
 #ifdef XLITE_KERNEL_DEBUG
-                printf("block%d: batch %d query start %u query [%u - %u) do QK kvHeadIdx %u calcLen %u, use %d qk buf\n",
-                    GetBlockIdx(), batchIdx, queryStart, queryTaskOffset,
-                    queryTaskOffset + queryTaskLen, kvHeadIdx, calcLen, currQkIdx);
+                printf("block%d: batch %d query start %u query [%u - %u) do QK kvHeadIdx %u "
+                       "calcLen %u, use %d qk buf\n",
+                       GetBlockIdx(), batchIdx, queryStart, queryTaskOffset,
+                       queryTaskOffset + queryTaskLen, kvHeadIdx, calcLen, currQkIdx);
 #endif
-                RunAicQK(input[qOffset], queryTaskLen, kvHeadIdx, blockTable, calcLen, qk[currQkIdx]);
+                RunAicQK(input[qOffset], queryTaskLen, kvHeadIdx, blockTable, calcLen,
+                         qk[currQkIdx]);
                 ffts_cross_core_sync(PIPE_FIX, config);
 
                 if (needDoSV != 0) {
@@ -338,10 +352,11 @@ public:
                     wait_flag_dev(1);
                     // do softmax * V
 #ifdef XLITE_KERNEL_DEBUG
-                    printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n",
-                        GetBlockIdx(), lastkvHeadIdx, lastCalcLen, lastQkIdx);
+                    printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n", GetBlockIdx(),
+                           lastkvHeadIdx, lastCalcLen, lastQkIdx);
 #endif
-                    RunAicSV(qk[lastQkIdx], lastQueryTaskLen, lastkvHeadIdx, lastBlockTable, lastCalcLen, output[lastOutOffset]);
+                    RunAicSV(qk[lastQkIdx], lastQueryTaskLen, lastkvHeadIdx, lastBlockTable,
+                             lastCalcLen, output[lastOutOffset]);
                 }
 
                 lastOutOffset = queryTaskOffset * headSize * nHeads + kvHeadOffset;
@@ -362,10 +377,11 @@ public:
         if (needDoSV != 0) {
             wait_flag_dev(1);
 #ifdef XLITE_KERNEL_DEBUG
-            printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n",
-                GetBlockIdx(), lastkvHeadIdx, lastCalcLen, lastQkIdx);
+            printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n", GetBlockIdx(),
+                   lastkvHeadIdx, lastCalcLen, lastQkIdx);
 #endif
-            RunAicSV(qk[lastQkIdx], lastQueryTaskLen, lastkvHeadIdx, lastBlockTable, lastCalcLen, output[lastOutOffset]);
+            RunAicSV(qk[lastQkIdx], lastQueryTaskLen, lastkvHeadIdx, lastBlockTable, lastCalcLen,
+                     output[lastOutOffset]);
         }
     }
 
@@ -375,7 +391,7 @@ public:
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
         uint64_t flagIdx = 1;
-        uint64_t mode = 2; // inner-group aic/aiv sync
+        uint64_t mode = 2;  // inner-group aic/aiv sync
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
 
         int totalIdx = 0;
@@ -383,7 +399,9 @@ public:
         int cachedLen = -1;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
-            __gm__ uint32_t *blockTable = (__gm__ uint32_t *)((uint64_t)blockTables + batchIdx * maxNumBlocks * sizeof(uint32_t));
+            __gm__ uint32_t *blockTable =
+                (__gm__ uint32_t *)((uint64_t)blockTables +
+                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
 
             uint32_t m0 = MAX_M0;
             if (queryLen <= SEQLEN_64) {
@@ -407,7 +425,8 @@ public:
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum * nKVHeads;
             for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != ((totalIdx / block_num) % 2 == 0 ? block_idx : block_num - 1 - block_idx)) {
+                if (totalIdx % block_num !=
+                    ((totalIdx / block_num) % 2 == 0 ? block_idx : block_num - 1 - block_idx)) {
                     continue;
                 }
                 int kvHeadIdx = idx % nKVHeads;
@@ -439,13 +458,18 @@ public:
                 // do softmax
 #ifdef XLITE_KERNEL_DEBUG
                 int dbgBlockIdx = block_idx;
-                printf("block%d subblock%u: batch %d do softmax kvHeadIdx %u m %d calcLen %u outN %u mask off %u, use %d qk buf\n",
-                    dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nSoftmaxCurCore, calcLen, outN, nSoftmaxStart % headNumInGroup, currQkIdx);
+                printf("block%d subblock%u: batch %d do softmax kvHeadIdx %u m %d calcLen %u outN "
+                       "%u mask off %u, use %d qk buf\n",
+                       dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nSoftmaxCurCore, calcLen, outN,
+                       nSoftmaxStart % headNumInGroup, currQkIdx);
 #endif
-                RunAivSoftmax<Dtype>((__gm__ Dtype*)qk[currQkIdx][qkOffset].GetPhyAddr(),
-                    m0 == MAX_M0 ? 0 : (__gm__ float*)qk[currQkIdx][(m0 + subIdx) * maxSeqLen * 2].GetPhyAddr(),
-                    nSoftmaxCurCore, maxSeqLen, calcLen, outN,
-                    nSoftmaxStart % headNumInGroup, headNumInGroup);
+                RunAivSoftmax<Dtype>(
+                    (__gm__ Dtype *)qk[currQkIdx][qkOffset].GetPhyAddr(),
+                    m0 == MAX_M0
+                        ? 0
+                        : (__gm__ float *)qk[currQkIdx][(m0 + subIdx) * maxSeqLen * 2].GetPhyAddr(),
+                    nSoftmaxCurCore, maxSeqLen, calcLen, outN, nSoftmaxStart % headNumInGroup,
+                    headNumInGroup);
 
                 ffts_cross_core_sync(PIPE_MTE3, config);
                 currQkIdx = 1 - currQkIdx;
@@ -497,19 +521,15 @@ private:
     LocalTensor<float> l0cBuf;
 };
 
-#define ATTN_FUNC_DEFINE(dtype) \
-extern "C" __global__ __aicore__ void attention_##dtype( \
-    GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output, \
-    GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables, \
-    uint32_t nHeads, uint32_t nKVHeads, \
-    uint32_t headSize, uint32_t blockSize, uint32_t batch, \
-    uint32_t maxNumBlocks) \
-{ \
-    Attention<dtype> op; \
-    op.Init(input, kCache, vCache, qk, output, \
-        queryStartLoc, queryLens, cachedLens, blockTables, \
-        nHeads, nKVHeads, \
-        headSize, blockSize, batch, \
-        maxNumBlocks); \
-    op.Run(); \
-}
+#define ATTN_FUNC_DEFINE(dtype)                                                                    \
+    extern "C" __global__ __aicore__ void attention_##dtype(                                       \
+        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output,                 \
+        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,         \
+        uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize, uint32_t batch, \
+        uint32_t maxNumBlocks)                                                                     \
+    {                                                                                              \
+        Attention<dtype> op;                                                                       \
+        op.Init(input, kCache, vCache, qk, output, queryStartLoc, queryLens, cachedLens,           \
+                blockTables, nHeads, nKVHeads, headSize, blockSize, batch, maxNumBlocks);          \
+        op.Run();                                                                                  \
+    }
