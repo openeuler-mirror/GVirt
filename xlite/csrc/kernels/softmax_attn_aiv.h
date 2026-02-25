@@ -423,12 +423,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
 template<typename Dtype>
 inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, __gm__ float *expBuf, uint32_t m, uint32_t n, uint32_t calcLen, uint32_t outN = 0, uint32_t maskOff = 0, uint32_t maskStride = 1)
 {
-    uint64_t maxNPingpong = 13952;
-    if (n <= maxNPingpong) {
-        RunAivSoftmaxPingPong<Dtype>(buf, m, n, calcLen, outN, maskOff, maskStride);
-    } else {
-        RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, maskOff, maskStride);
-    }
+    RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, maskOff, maskStride);
 }
 
 #else
