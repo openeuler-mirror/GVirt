@@ -47,6 +47,7 @@ public:
     HcclComm _dpComm = nullptr;
     uint32_t commOptimizeLen = XLITE_DEFAULT_COMM_OPTIMIZE_LEN;
     bool enableCommOptimize;
+    XTensor hiddenStatePad;
     XTensor hiddenStateSlice;
 
     XcclComm *_tpXcclComm = nullptr;
