@@ -7,3 +7,5 @@ sentencepiece
 protobuf
 transformers
 torch-npu>=2.5.1
+flake8
+mypy

@@ -1,3 +1,6 @@
+/*
+ * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ */
 #ifndef _XLITE_CCL_PARAM_H_
 #define _XLITE_CCL_PARAM_H_
 

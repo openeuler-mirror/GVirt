@@ -12,13 +12,16 @@
 
 using namespace AscendC;
 
-template<typename Dtype>
-class AllReduce {
+template <typename Dtype>
+class AllReduce
+{
 public:
-    __aicore__ inline AllReduce() {}
+    __aicore__ inline AllReduce()
+    {
+    }
 
-    __aicore__ inline void Init(GM_ADDR input, GM_ADDR output, uint64_t count,
-        uint32_t rankId, uint32_t rankSize, uint64_t generation, GM_ADDR param)
+    __aicore__ inline void Init(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId,
+                                uint32_t rankSize, uint64_t generation, GM_ADDR param)
     {
         __gm__ struct XcclParam *xcclParam = (__gm__ struct XcclParam *)param;
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
@@ -59,14 +62,16 @@ public:
         }
 
         for (uint32_t r = 0; r < rankSize; r++) {
-            this->ipcFlagBuf[r].SetGlobalBuffer((__gm__ uint32_t *)(this->param.ipcMems[r] + XLITE_IPC_MEM_FLAG_OFFSET));
+            this->ipcFlagBuf[r].SetGlobalBuffer(
+                (__gm__ uint32_t *)(this->param.ipcMems[r] + XLITE_IPC_MEM_FLAG_OFFSET));
         }
 
         if (coreIdx == 0) {
             // __gm__ uint64_t *inputOffset = (__gm__ uint64_t *)(this->param.ipcMems[myRankId]);
-            // __gm__ uint64_t *outputOffset = (__gm__ uint64_t *)(this->param.ipcMems[myRankId] + sizeof(uint64_t));
-            // *inputOffset = (uint64_t)input - (uint64_t)this->param.ipcXTensorMems[myRankId];
-            // *outputOffset = (uint64_t)output - (uint64_t)this->param.ipcXTensorMems[myRankId];
+            // __gm__ uint64_t *outputOffset = (__gm__ uint64_t *)(this->param.ipcMems[myRankId] +
+            // sizeof(uint64_t)); *inputOffset = (uint64_t)input -
+            // (uint64_t)this->param.ipcXTensorMems[myRankId]; *outputOffset = (uint64_t)output -
+            // (uint64_t)this->param.ipcXTensorMems[myRankId];
             // DataCacheCleanAndInvalid(inputOffset);
             // DataCacheCleanAndInvalid(outputOffset);
             SetIpcFlag(0, generation);
@@ -96,16 +101,21 @@ public:
                 continue;
             }
             // __gm__ uint64_t *inputOffset = (__gm__ uint64_t *)(this->param.ipcMems[r]);
-            // __gm__ uint64_t *outputOffset = (__gm__ uint64_t *)(this->param.ipcMems[r] + sizeof(uint64_t));
+            // __gm__ uint64_t *outputOffset = (__gm__ uint64_t *)(this->param.ipcMems[r] +
+            // sizeof(uint64_t));
             struct XcclIpcMemData localIpcMemData;
             // DataCacheCleanAndInvalid(inputOffset);
             // DataCacheCleanAndInvalid(outputOffset);
             // localIpcMemData.inputOffset = *inputOffset;
             // localIpcMemData.outputOffset = *outputOffset;
-            localIpcMemData.inputOffset = (uint64_t)input - (uint64_t)this->param.ipcXTensorMems[myRankId];
-            localIpcMemData.outputOffset = (uint64_t)output - (uint64_t)this->param.ipcXTensorMems[myRankId];
-            inputBuf[r].SetGlobalBuffer((__gm__ Dtype *)(this->param.ipcXTensorMems[r] + localIpcMemData.inputOffset));
-            outputBuf[r].SetGlobalBuffer((__gm__ Dtype *)(this->param.ipcXTensorMems[r] + localIpcMemData.outputOffset));
+            localIpcMemData.inputOffset =
+                (uint64_t)input - (uint64_t)this->param.ipcXTensorMems[myRankId];
+            localIpcMemData.outputOffset =
+                (uint64_t)output - (uint64_t)this->param.ipcXTensorMems[myRankId];
+            inputBuf[r].SetGlobalBuffer(
+                (__gm__ Dtype *)(this->param.ipcXTensorMems[r] + localIpcMemData.inputOffset));
+            outputBuf[r].SetGlobalBuffer(
+                (__gm__ Dtype *)(this->param.ipcXTensorMems[r] + localIpcMemData.outputOffset));
         }
 
         // each rank process countPerRank elements
@@ -160,7 +170,8 @@ public:
         }
     }
 
-    __aicore__ inline void CopyGMtoUbuf(LocalTensor<Dtype> dst, GlobalTensor<Dtype> src, uint64_t count)
+    __aicore__ inline void CopyGMtoUbuf(LocalTensor<Dtype> dst, GlobalTensor<Dtype> src,
+                                        uint64_t count)
     {
         if (count * sizeof(Dtype) % BLOCK_SIZE == 0) {
             DataCopy(dst, src, count);
@@ -174,7 +185,8 @@ public:
         }
     }
 
-    __aicore__ inline void CopyUbufToGM(GlobalTensor<Dtype> dst, LocalTensor<Dtype> src, uint64_t count)
+    __aicore__ inline void CopyUbufToGM(GlobalTensor<Dtype> dst, LocalTensor<Dtype> src,
+                                        uint64_t count)
     {
         if (count * sizeof(Dtype) % BLOCK_SIZE == 0) {
             DataCopy(dst, src, count);
@@ -191,7 +203,7 @@ public:
         uint32_t corePerBlock = coreNum / (blockNum);
         int curr = 0;
         // reduce-scatter phase
-        for  (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
         }
 
@@ -199,7 +211,8 @@ public:
         uint32_t workEnd = 0;
         uint32_t workNum = coreNum <= blockNum ? blockNum : ROUND_DOWN(coreNum, blockNum);
         WorkSplit(workNum, &workStart, &workEnd);
-        uint32_t countPerWork = coreNum <= blockNum ? countPerBlock : DIV_ROUND_UP(countCurrRank, workNum);
+        uint32_t countPerWork =
+            coreNum <= blockNum ? countPerBlock : DIV_ROUND_UP(countCurrRank, workNum);
         uint32_t copyNumOneWork = DIV_ROUND_UP(countPerWork, copyCount);
 
         for (uint32_t r = 0; r < rankSize; r++) {
@@ -275,7 +288,7 @@ public:
                 curr = (curr + 1) % PINGPONG_BUF_NUM;
             }
         }
-        for  (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
         }
 
@@ -303,7 +316,7 @@ public:
         uint32_t corePerBlock = coreNum / blockNum;
         int curr = 0;
         // reduce-scatter phase
-        for  (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
         }
 
@@ -398,7 +411,7 @@ public:
             curr = (curr + 1) % PINGPONG_BUF_NUM;
         }
 
-        for  (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
         }
 
@@ -430,14 +443,15 @@ private:
     bool reduceScatterSkipMyRank;
 };
 
-#define ALLREDUCE_FUNC_DEFINE(dtype) \
-extern "C" __global__ __aicore__ void allreduce_##dtype(GM_ADDR input, GM_ADDR output, uint64_t count, \
-    uint32_t rankId, uint32_t rankSize, uint64_t generation, GM_ADDR param) \
-{ \
-    AllReduce<dtype> op; \
-    op.Init(input, output, count, rankId, rankSize, generation, param); \
-    op.Run(); \
-}
+#define ALLREDUCE_FUNC_DEFINE(dtype)                                                       \
+    extern "C" __global__ __aicore__ void allreduce_##dtype(                               \
+        GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId, uint32_t rankSize, \
+        uint64_t generation, GM_ADDR param)                                                \
+    {                                                                                      \
+        AllReduce<dtype> op;                                                               \
+        op.Init(input, output, count, rankId, rankSize, generation, param);                \
+        op.Run();                                                                          \
+    }
 
 ALLREDUCE_FUNC_DEFINE(int8_t);
 ALLREDUCE_FUNC_DEFINE(int16_t);

@@ -36,15 +36,15 @@ int XSock::InitServer(void)
     _clientFds.resize(_rankSize, -1);
     _fd = socket(AF_INET, SOCK_STREAM, 0);
     if (_fd < 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " server socket create failed: " <<
-            strerror(errno) << std::endl;
+        std::cerr << __func__ << ": rank" << _rankId
+                  << " server socket create failed: " << strerror(errno) << std::endl;
         return -errno;
     }
 
     int reuse = 1;
     if (setsockopt(_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " failed to set socket option: " <<
-            strerror(errno) << std::endl;
+        std::cerr << __func__ << ": rank" << _rankId
+                  << " failed to set socket option: " << strerror(errno) << std::endl;
         return -errno;
     }
 
@@ -52,15 +52,15 @@ int XSock::InitServer(void)
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = inet_addr(_ip.c_str());
     addr.sin_port = htons(_port);
-    if (bind(_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(sockaddr)) < 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " failed to bind server socket: " <<
-            strerror(errno) << std::endl;
+    if (bind(_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(sockaddr)) < 0) {
+        std::cerr << __func__ << ": rank" << _rankId
+                  << " failed to bind server socket: " << strerror(errno) << std::endl;
         return -errno;
     }
 
     if (listen(_fd, _rankSize - 1) == -1) {
-        std::cerr << __func__ << ": rank" << _rankId << " failed to listen on server socket: " <<
-            strerror(errno) << std::endl;
+        std::cerr << __func__ << ": rank" << _rankId
+                  << " failed to listen on server socket: " << strerror(errno) << std::endl;
         return -errno;
     }
 
@@ -70,12 +70,13 @@ int XSock::InitServer(void)
         do {
             sockaddr_in clientAddr{};
             socklen_t clientAddrLen = sizeof(clientAddr);
-            clientFd = accept(_fd, reinterpret_cast<sockaddr*>(&clientAddr), &clientAddrLen);
+            clientFd = accept(_fd, reinterpret_cast<sockaddr *>(&clientAddr), &clientAddrLen);
             ret = errno;
         } while (clientFd < 0 && ERRNO_NEED_RETYR(ret));
 
         if (clientFd < 0) {
-            std::cerr << __func__ << ": rank" << _rankId << " accept failed: " << strerror(errno) << std::endl;
+            std::cerr << __func__ << ": rank" << _rankId << " accept failed: " << strerror(errno)
+                      << std::endl;
             return -ret;
         }
 
@@ -104,8 +105,8 @@ int XSock::InitClient(void)
 {
     _fd = socket(AF_INET, SOCK_STREAM, 0);
     if (_fd < 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " client socket create failed: " <<
-            strerror(errno) << std::endl;
+        std::cerr << __func__ << ": rank" << _rankId
+                  << " client socket create failed: " << strerror(errno) << std::endl;
         return -errno;
     }
 
@@ -116,7 +117,7 @@ int XSock::InitClient(void)
     int retry = 0;
     bool success = false;
     while (retry < 10) {
-        if (connect(_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(sockaddr)) < 0) {
+        if (connect(_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(sockaddr)) < 0) {
             if (errno == ECONNREFUSED) {
                 retry++;
                 sleep(1);
@@ -125,7 +126,8 @@ int XSock::InitClient(void)
             if (errno == EINTR) {
                 continue;
             }
-            std::cerr << __func__ << ": rank" << _rankId << " client connect failed: " << strerror(errno) << std::endl;
+            std::cerr << __func__ << ": rank" << _rankId
+                      << " client connect failed: " << strerror(errno) << std::endl;
             break;
         }
         success = true;
@@ -163,10 +165,12 @@ int XSock::Recv(int fd, void *buf, uint32_t size)
     } while (ret < 0 && ERRNO_NEED_RETYR(errno));
 
     if (ret == 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " recv failed, connect reset by peer" << std::endl;
+        std::cerr << __func__ << ": rank" << _rankId << " recv failed, connect reset by peer"
+                  << std::endl;
         return -ECONNRESET;
     } else if (ret < 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " recv failed: " << strerror(errno) << std::endl;
+        std::cerr << __func__ << ": rank" << _rankId << " recv failed: " << strerror(errno)
+                  << std::endl;
         return -errno;
     } else if ((uint32_t)ret != size) {
         std::cerr << __func__ << ": rank" << _rankId << " recv failed: size not match" << std::endl;
@@ -183,10 +187,12 @@ int XSock::Send(int fd, void *buf, uint32_t size)
     } while (ret < 0 && ERRNO_NEED_RETYR(errno));
 
     if (ret == 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " send failed, connect reset by peer" << std::endl;
+        std::cerr << __func__ << ": rank" << _rankId << " send failed, connect reset by peer"
+                  << std::endl;
         return -ECONNRESET;
     } else if (ret < 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " send failed: " << strerror(errno) << std::endl;
+        std::cerr << __func__ << ": rank" << _rankId << " send failed: " << strerror(errno)
+                  << std::endl;
         return -errno;
     } else if ((uint32_t)ret != size) {
         std::cerr << __func__ << ": rank" << _rankId << " send failed: size not match" << std::endl;

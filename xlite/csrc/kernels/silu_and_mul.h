@@ -1,17 +1,20 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 
 #ifdef __DAV_C220_VEC__
 
-#define GMA(T) (__gm__ T*)
-#define UBA(T) (__ubuf__ T*)
-#define MAX_HIDDENSIZE_PER_PIECE 38912 // MAX_HIDDENSIZE_PER_PIECE = UB_SIZE(196608) / buffer_num(5)
+#define GMA(T) (__gm__ T *)
+#define UBA(T) (__ubuf__ T *)
+#define MAX_HIDDENSIZE_PER_PIECE \
+    38912  // MAX_HIDDENSIZE_PER_PIECE = UB_SIZE(196608) / buffer_num(5)
 
-// 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM Workloads》 [ASPLOS 2026]
-template<typename SrcType, typename CalType>
+// 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM
+// Workloads》 [ASPLOS 2026]
+template <typename SrcType, typename CalType>
 __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int32_t num_tokens, int32_t dim)
 {
     set_atomic_none();
@@ -23,7 +26,8 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int32_t num_token
         num_tokens = pm_val < num_tokens ? pm_val : num_tokens;
     }
 
-    // split the matrix in a row-major manner such that each row (2 * dim elements) is contained in a single block
+    // split the matrix in a row-major manner such that each row (2 * dim elements) is contained in
+    // a single block
     int32_t block_dims = get_block_num();
     int32_t tokens_per_block = DIV_ROUND_UP(num_tokens, block_dims);
 
@@ -61,9 +65,13 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int32_t num_token
     constexpr uint64_t dst_repeat_stride = VECTOR_MAX_BYTESIZE / BLOCK_SIZE;
     constexpr uint64_t src0_repeat_stride = VECTOR_MAX_BYTESIZE / BLOCK_SIZE;
     constexpr uint64_t src1_repeat_stride = VECTOR_MAX_BYTESIZE / BLOCK_SIZE;
-    uint64_t repeat_dtype = DIV_ROUND_UP(tokens_per_tile * dim, VECTOR_MAX_BYTESIZE / sizeof(CalType));
-    uint64_t vector_config3ops = set_vector_xt(dst_repeat_stride, src0_repeat_stride, src1_repeat_stride, dst_stride, src0_stride, src1_stride, repeat_dtype);
-    uint64_t vector_config2ops = set_vector_1src_xt(dst_repeat_stride, src0_repeat_stride, dst_stride, src0_stride, repeat_dtype);
+    uint64_t repeat_dtype =
+        DIV_ROUND_UP(tokens_per_tile * dim, VECTOR_MAX_BYTESIZE / sizeof(CalType));
+    uint64_t vector_config3ops =
+        set_vector_xt(dst_repeat_stride, src0_repeat_stride, src1_repeat_stride, dst_stride,
+                      src0_stride, src1_stride, repeat_dtype);
+    uint64_t vector_config2ops = set_vector_1src_xt(dst_repeat_stride, src0_repeat_stride,
+                                                    dst_stride, src0_stride, repeat_dtype);
 
     // Config for copy operation
     constexpr uint8_t sid = 0;
@@ -73,7 +81,8 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int32_t num_token
     uint64_t len_burst = DIV_ROUND_UP(tokens_per_tile * token_len, BLOCK_SIZE);
     uint64_t out_copy_config = __set_dmi_config(sid, n_burst, len_burst, src_gap, dst_gap);
     uint64_t token_len_burst = DIV_ROUND_UP(token_len, BLOCK_SIZE);
-    uint64_t token_copy_config = __set_dmi_config(sid, tokens_per_tile, token_len_burst, token_len_burst, dst_gap);
+    uint64_t token_copy_config =
+        __set_dmi_config(sid, tokens_per_tile, token_len_burst, token_len_burst, dst_gap);
 
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
@@ -87,7 +96,8 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int32_t num_token
             to_copy = tokens_to_copy - copied;
             len_burst = DIV_ROUND_UP(to_copy * token_len, BLOCK_SIZE);
             out_copy_config = __set_dmi_config(sid, n_burst, len_burst, src_gap, dst_gap);
-            token_copy_config = __set_dmi_config(sid, to_copy, token_len_burst, token_len_burst, dst_gap);
+            token_copy_config =
+                __set_dmi_config(sid, to_copy, token_len_burst, token_len_burst, dst_gap);
         }
 
         wait_flag(PIPE_MTE3, PIPE_MTE2, event_id);
@@ -133,15 +143,17 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int32_t num_token
     pipe_barrier(PIPE_ALL);
 }
 
-#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type) \
-extern "C" __global__ __aicore__ void silu_and_mul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int n_tokens, int dim) \
-{ \
-    silu_and_mul<dtype, cast_type>(x, y, pm, n_tokens, dim); \
-}
+#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                               \
+    extern "C" __global__ __aicore__ void silu_and_mul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR pm, \
+                                                               int n_tokens, int dim)            \
+    {                                                                                            \
+        silu_and_mul<dtype, cast_type>(x, y, pm, n_tokens, dim);                                 \
+    }
 
 #else
-#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type) \
-extern "C" __global__ __aicore__ void silu_and_mul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int n_tokens, int dim) \
-{ \
-}
+#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                               \
+    extern "C" __global__ __aicore__ void silu_and_mul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR pm, \
+                                                               int n_tokens, int dim)            \
+    {                                                                                            \
+    }
 #endif

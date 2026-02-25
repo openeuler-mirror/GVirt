@@ -21,7 +21,11 @@
 #define XLITE_MAX_NUM_DYNAMIC_TENSOR 128
 #define XLITE_TENSOR_ALIGN 1024
 
-#define DBG_LOC DebugSrcLoc{__FILE__, __LINE__}
+#define DBG_LOC            \
+    DebugSrcLoc            \
+    {                      \
+        __FILE__, __LINE__ \
+    }
 
 enum XDtype {
     BIT1,
@@ -48,11 +52,11 @@ enum XRopeType {
 };
 
 typedef struct DebugSrcLoc {
-    const char* file;
+    const char *file;
     int line;
 } DebugSrcLoc;
 
-inline const char * XDtypeStr(enum XDtype dtype)
+inline const char *XDtypeStr(enum XDtype dtype)
 {
     switch (dtype) {
         case BIT1:
@@ -76,7 +80,7 @@ inline const char * XDtypeStr(enum XDtype dtype)
     }
 }
 
-inline const char * XTensorTypeStr(enum XTensorType type)
+inline const char *XTensorTypeStr(enum XTensorType type)
 {
     switch (type) {
         case XTENSOR_STATIC:
@@ -111,14 +115,18 @@ size_t inline XDtypeBit(enum XDtype dtype)
 }
 
 class XTensorPool;
-class XTensor {
+class XTensor
+{
 public:
     XTensor() {};
     XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Init(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6);
-    friend std::ostream& operator<<(std::ostream& os, const XTensor& p);
-    enum XTensorType GetType() { return type; };
+    friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
+    enum XTensorType GetType()
+    {
+        return type;
+    };
     std::vector<long> shape;
     size_t numel;
     enum XDtype dtype;
@@ -131,15 +139,22 @@ private:
     friend class XTensorPool;
 };
 
-class XTensorPool {
+class XTensorPool
+{
 public:
     XTensorPool(size_t size) : _size(size) {};
     ~XTensorPool(void);
     int Init(void);
     XTensor &GetTensor(std::vector<long> shape, enum XDtype dtype, DebugSrcLoc loc);
     void PutTensor(XTensor &t);
-    void *Ptr() { return _ptr; };
-    size_t Size() { return _size; };
+    void *Ptr()
+    {
+        return _ptr;
+    };
+    size_t Size()
+    {
+        return _size;
+    };
 
 private:
     void *_ptr;

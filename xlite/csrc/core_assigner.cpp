@@ -19,18 +19,17 @@ float XCoreAssigner::AssignCoreForPrefill()
     _prefillOccupied = _isDecodeRunning ? _prefillConfigRatio : XLITE_MAX_CORE_RATIO;
 
     // 保证分配核数不超过总核数
-    _cv.wait(lock, [this]()-> bool
-    {
+    _cv.wait(lock, [this]() -> bool {
         if (!_isDecodeRunning) {
             return true;
         }
 
-        return std::abs(XLITE_MAX_CORE_RATIO - _prefillOccupied - _decodeOccupied) < XLITE_UTILIZATION_EPSILON;
+        return std::abs(XLITE_MAX_CORE_RATIO - _prefillOccupied - _decodeOccupied) <
+               XLITE_UTILIZATION_EPSILON;
     });
 
     return _prefillOccupied;
 }
-
 
 float XCoreAssigner::AssignCoreForDecode()
 {
@@ -39,13 +38,13 @@ float XCoreAssigner::AssignCoreForDecode()
     _decodeOccupied = _isPrefillRunning ? _decodeConfigRatio : XLITE_MAX_CORE_RATIO;
 
     // 保证分配核数不超过总核数
-    _cv.wait(lock, [this]()-> bool
-    {
+    _cv.wait(lock, [this]() -> bool {
         if (!_isPrefillRunning) {
             return true;
         }
 
-        return std::abs(XLITE_MAX_CORE_RATIO - _prefillOccupied - _decodeOccupied) < XLITE_UTILIZATION_EPSILON;
+        return std::abs(XLITE_MAX_CORE_RATIO - _prefillOccupied - _decodeOccupied) <
+               XLITE_UTILIZATION_EPSILON;
     });
 
     return _decodeOccupied;

@@ -23,10 +23,11 @@ enum commType {
     MAX_COMM_TYPE,
 };
 
-class XRuntime {
+class XRuntime
+{
 public:
-    XRuntime(uint32_t devid, size_t sizeMB = 0, uint32_t rankId = 0,
-             uint32_t tpSize = 1, uint32_t dpSize = 1);
+    XRuntime(uint32_t devid, size_t sizeMB = 0, uint32_t rankId = 0, uint32_t tpSize = 1,
+             uint32_t dpSize = 1);
     ~XRuntime(void);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
@@ -34,9 +35,18 @@ public:
     void MemcpyH2D(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
     int InitTensorPool(size_t sizeMB);
-    uint32_t rankId(void) { return _rankId; };
-    uint32_t tpSize(void) { return _tpSize; };
-    uint32_t dpSize(void) { return _dpSize; };
+    uint32_t rankId(void)
+    {
+        return _rankId;
+    };
+    uint32_t tpSize(void)
+    {
+        return _tpSize;
+    };
+    uint32_t dpSize(void)
+    {
+        return _dpSize;
+    };
     aclrtStream stream;
     uint32_t aicNum;
     uint32_t aivNum;

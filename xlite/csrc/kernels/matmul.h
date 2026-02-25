@@ -14,14 +14,17 @@
 #include "kernel_macro.h"
 using namespace AscendC;
 
-template<typename Dtype>
-class Matmul {
+template <typename Dtype>
+class Matmul
+{
 public:
-    __aicore__ inline Matmul() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
-                                uint64_t m, uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose,
-                                uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl,
-                                uint32_t curBlock = 0, uint32_t curCount = 0, uint32_t remain = 0)
+    __aicore__ inline Matmul()
+    {
+    }
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k,
+                                uint64_t nz, uint64_t transpose, uint64_t m0, uint64_t n0,
+                                uint64_t k0, uint64_t swizzl, uint32_t curBlock = 0,
+                                uint32_t curCount = 0, uint32_t remain = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 
@@ -102,14 +105,17 @@ public:
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
     }
 
-    __aicore__ inline void GetMNBlockIdx(int32_t loopIdx, int32_t mLoop, int32_t nLoop, int32_t swizzlDirection,
-        int32_t swizzlCount, int64_t &mIdx, int64_t &nIdx)
+    __aicore__ inline void GetMNBlockIdx(int32_t loopIdx, int32_t mLoop, int32_t nLoop,
+                                         int32_t swizzlDirection, int32_t swizzlCount,
+                                         int64_t &mIdx, int64_t &nIdx)
     {
-        // Adjust the traversal order of matmul block by setting swizzlCount(upper 8 bits) and swizzleDirection(lower 8 bits).
-        // Adjusting the swizzle strategy helps improve cache hit rate and reduce data read overhead, thereby enhancing the overall computational efficiency of matmul.
+        // Adjust the traversal order of matmul block by setting swizzlCount(upper 8 bits) and
+        // swizzleDirection(lower 8 bits). Adjusting the swizzle strategy helps improve cache hit
+        // rate and reduce data read overhead, thereby enhancing the overall computational
+        // efficiency of matmul.
         uint32_t tileBlockLoop, tileBlockIdx, inTileBlockIdx;
         uint32_t inBatchIdx = loopIdx % (mLoop * nLoop);
-        if (swizzlDirection == 0) { // Zn
+        if (swizzlDirection == 0) {  // Zn
             tileBlockLoop = (mLoop + swizzlCount - 1) / swizzlCount;
             tileBlockIdx = inBatchIdx / (swizzlCount * nLoop);
             inTileBlockIdx = inBatchIdx % (swizzlCount * nLoop);
@@ -123,7 +129,7 @@ public:
             if (tileBlockIdx % 2 != 0) {
                 nIdx = nLoop - nIdx - 1;
             }
-        } else if (swizzlDirection == 1) { // Nz
+        } else if (swizzlDirection == 1) {  // Nz
             tileBlockLoop = (nLoop + swizzlCount - 1) / swizzlCount;
             tileBlockIdx = inBatchIdx / (swizzlCount * mLoop);
             inTileBlockIdx = inBatchIdx % (swizzlCount * mLoop);
@@ -204,7 +210,8 @@ public:
                         kRemSize = k - kOffset;
                     }
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
-                    CopyGmToL1Nd2Nz(l1aBuf[pingpongL1A], aGmBuf[mOffset * k + kOffset], mActual, kRemSize, k, mActualBlockPad);
+                    CopyGmToL1Nd2Nz(l1aBuf[pingpongL1A], aGmBuf[mOffset * k + kOffset], mActual,
+                                    kRemSize, k, mActualBlockPad);
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
                 }
 
@@ -218,15 +225,19 @@ public:
                     k0ActualBlockNum = DIV_ROUND_UP(kRemSize, kBlockSize);
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
                     if (transpose == 0 && nz == 0) {
-                        CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual, kRemSize, k, nActualBlockPad);
+                        CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual,
+                                        kRemSize, k, nActualBlockPad);
                     } else if (transpose == 0 && nz == 1) {
-                        CopyGmToL1(l1bBuf[pingpongL1B], bGmBuf[kOffset * nStride + nOffset * kBlockSize],
-                                   nActual, k0ActualBlockNum, nStride);
+                        CopyGmToL1(l1bBuf[pingpongL1B],
+                                   bGmBuf[kOffset * nStride + nOffset * kBlockSize], nActual,
+                                   k0ActualBlockNum, nStride);
                     } else if (transpose == 1 && nz == 0) {
-                        CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[kOffset * n + nOffset], kRemSize, nActual, n, ROUND_UP(kRemSize, kBlockSize));
+                        CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[kOffset * n + nOffset],
+                                        kRemSize, nActual, n, ROUND_UP(kRemSize, kBlockSize));
                     } else if (transpose == 1 && nz == 1) {
-                        CopyGmToL1(l1bBuf[pingpongL1B], bGmBuf[nOffset * kStride + kOffset * nBlockSize],
-                                   kRemSize, DIV_ROUND_UP(nActual, nBlockSize), kStride);
+                        CopyGmToL1(l1bBuf[pingpongL1B],
+                                   bGmBuf[nOffset * kStride + kOffset * nBlockSize], kRemSize,
+                                   DIV_ROUND_UP(nActual, nBlockSize), kStride);
                     }
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                 }
@@ -244,7 +255,8 @@ public:
                 if (kIdx8 == 0) {
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
                 }
-                CopyToL0ACol(l0aBuf[kIdx2], l1aBuf[pingpongL1A], mActualBlockNum, kIdx8 * kQtileBlockNum, kActualBlockNum);
+                CopyToL0ACol(l0aBuf[kIdx2], l1aBuf[pingpongL1A], mActualBlockNum,
+                             kIdx8 * kQtileBlockNum, kActualBlockNum);
                 if (kIdx8 == 7) {
                     SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
                     pingpongL1A ^= 1;
@@ -255,11 +267,11 @@ public:
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                 }
                 if (transpose) {
-                    CopyToL0BTCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum, kIdx4 * kQtileBlockNum,
-                                  kActualBlockNum, k0ActualBlockNum);
+                    CopyToL0BTCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum,
+                                  kIdx4 * kQtileBlockNum, kActualBlockNum, k0ActualBlockNum);
                 } else {
-                    CopyToL0BCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum, kIdx4 * kQtileBlockNum,
-                                 kActualBlockNum);
+                    CopyToL0BCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum,
+                                 kIdx4 * kQtileBlockNum, kActualBlockNum);
                 }
                 if (kIdx4 == 3) {
                     SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
@@ -270,7 +282,8 @@ public:
                 SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
                 PipeBarrier<PIPE_M>();
-                CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], m0, nActualBlockPad, kActualBlockPad, kIdx == 0);
+                CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], m0, nActualBlockPad, kActualBlockPad,
+                        kIdx == 0);
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + kIdx2);
                 kOffset += kActual;
             }
@@ -287,7 +300,7 @@ public:
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
             CopyToGm(outGm, l0cBuf, mActual, nActual, m0, n);
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
-        } // M * N
+        }  // M * N
 
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
@@ -328,14 +341,14 @@ private:
     uint32_t remain;
 };
 
-#define MATMUL_FUNC_DEFINE(dtype) \
-extern "C" __global__ __aicore__ void matmul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR z, \
-                                                     uint64_t m, uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose, \
-                                                     uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl) \
-{ \
-    Matmul<dtype> op; \
-    op.Init(x, y, z, m, n, k, nz, transpose, m0, n0, k0, swizzl); \
-    op.Run(); \
-}
+#define MATMUL_FUNC_DEFINE(dtype)                                                         \
+    extern "C" __global__ __aicore__ void matmul_##dtype(                                 \
+        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz, \
+        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl)       \
+    {                                                                                     \
+        Matmul<dtype> op;                                                                 \
+        op.Init(x, y, z, m, n, k, nz, transpose, m0, n0, k0, swizzl);                     \
+        op.Run();                                                                         \
+    }
 
 #endif
