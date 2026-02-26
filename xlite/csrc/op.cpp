@@ -97,7 +97,7 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
-        bool needCopy = (in.GetType() != XTENSOR_DYNAMIC || out.GetType() != XTENSOR_DYNAMIC);
+        bool needCopy = (!rt.pool->TensorInPool(in) || !rt.pool->TensorInPool(out));
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
         XTensor *tmpIn = nullptr;
@@ -192,7 +192,7 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
-        bool needCopy = (in.GetType() != XTENSOR_DYNAMIC || out.GetType() != XTENSOR_DYNAMIC);
+        bool needCopy = (!rt.pool->TensorInPool(in) || !rt.pool->TensorInPool(out));
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
         XTensor *tmpIn = nullptr;
@@ -280,7 +280,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
     size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
-        bool needCopy = (in.GetType() != XTENSOR_DYNAMIC || out.GetType() != XTENSOR_DYNAMIC);
+        bool needCopy = (!rt.pool->TensorInPool(in) || !rt.pool->TensorInPool(out));
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
         XTensor *tmpBuff = nullptr;
