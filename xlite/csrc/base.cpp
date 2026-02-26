@@ -326,3 +326,11 @@ void XTensorPool::PutTensor(XTensor &t)
         }
     }
 }
+
+bool XTensorPool::TensorInPool(XTensor &t)
+{
+    if (t.ptr < _ptr || t.ptr >= (void *)((uint64_t)_ptr + _size)) {
+        return false;
+    }
+    return true;
+}

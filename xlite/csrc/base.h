@@ -147,6 +147,7 @@ public:
     int Init(void);
     XTensor &GetTensor(std::vector<long> shape, enum XDtype dtype, DebugSrcLoc loc);
     void PutTensor(XTensor &t);
+    bool TensorInPool(XTensor &t);
     void *Ptr()
     {
         return _ptr;
