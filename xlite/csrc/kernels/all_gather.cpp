@@ -41,6 +41,7 @@ public:
         this->blockNum = rankSize;
         this->offsetCurrRank = countPerRank * myRankId;
         this->generation = generation;
+        this->skipMyRank = input == (output + offsetCurrRank * sizeof(Dtype)) ? true : false;
         this->copySize = COPY_SIZE;
         uint32_t corePerBlock = coreNum / blockNum;
         if (corePerBlock > 1 && this->copySize * corePerBlock > MAX_TOTAL_COPY_SIZE) {
@@ -266,7 +267,6 @@ public:
             RunLimited();
             return;
         }
-        uint32_t corePerBlock = coreNum / blockNum;
         int curr = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
@@ -286,6 +286,9 @@ public:
         uint32_t copyNum = DIV_ROUND_UP(taskCount, copyCount);
 
         for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
+            if (skipMyRank && processRankIdx == myRankId) {
+                continue;
+            }
             uint64_t copyOffset = copyIdx * copyCount;
             uint64_t inGmOffset = taskOffset + copyOffset;
             uint64_t outGmOffset = outOffset + copyOffset;
@@ -343,6 +346,7 @@ private:
     uint32_t copyCount;
     uint32_t copySize;
     struct XcclParam param;
+    bool skipMyRank;
 };
 
 #define ALLGATHER_FUNC_DEFINE(dtype)                                                       \

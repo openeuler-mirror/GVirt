@@ -41,7 +41,7 @@ public:
         this->blockNum = rankSize;
         this->offsetCurrRank = countPerRank * myRankId;
         this->generation = generation;
-        this->reduceScatterSkipMyRank = input == output ? true : false;
+        this->skipMyRank = input == output ? true : false;
         this->copySize = COPY_SIZE;
         uint32_t corePerBlock = coreNum / blockNum;
         if (corePerBlock > 1 && this->copySize * corePerBlock > MAX_TOTAL_COPY_SIZE) {
@@ -216,7 +216,7 @@ public:
         uint32_t copyNumOneWork = DIV_ROUND_UP(countPerWork, copyCount);
 
         for (uint32_t r = 0; r < rankSize; r++) {
-            if ((reduceScatterSkipMyRank && r == 0) || (!reduceScatterSkipMyRank && r == 1)) {
+            if ((skipMyRank && r == 0) || (!skipMyRank && r == 1)) {
                 SetAtomicAdd<Dtype>();
                 PipeBarrier<PIPE_ALL>();
             }
@@ -231,7 +231,7 @@ public:
                     workCount = countCurrRank - workOffset;
                     copyNum = DIV_ROUND_UP(workCount, copyCount);
                 }
-                if (reduceScatterSkipMyRank && processRankIdx == myRankId) {
+                if (skipMyRank && processRankIdx == myRankId) {
                     continue;
                 }
                 uint64_t currCopyCount = copyCount;
@@ -313,14 +313,13 @@ public:
             RunLimited();
             return;
         }
-        uint32_t corePerBlock = coreNum / blockNum;
         int curr = 0;
         // reduce-scatter phase
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0 + i);
         }
 
-        if (!reduceScatterSkipMyRank) {
+        if (!skipMyRank) {
             uint64_t countPerCore = DIV_ROUND_UP(countCurrRank, coreNum);
             uint64_t offset = countPerCore * coreIdx;
             uint64_t count = countPerCore;
@@ -440,7 +439,7 @@ private:
     uint32_t copyCount;
     uint32_t copySize;
     struct XcclParam param;
-    bool reduceScatterSkipMyRank;
+    bool skipMyRank;
 };
 
 #define ALLREDUCE_FUNC_DEFINE(dtype)                                                       \
