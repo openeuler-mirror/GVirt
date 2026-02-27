@@ -690,12 +690,14 @@ class Qwen3MoE(nn.Module):
         self.xlite_model.mha_qkv = [layer.self_attn.qkv_proj.weight for layer in self.layers]
         self.xlite_model.mlp_norm = [layer.post_attention_layernorm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [
-            self.layers[i].mlp.gate_up_proj.weight if not is_layer_moe(self.args, i) else torch.empty(0)
+            self.layers[i].mlp.gate_up_proj.weight
             for i in range(args.n_layers)
+            if not is_layer_moe(self.args, i)
         ]
         self.xlite_model.mlp_down = [
-            self.layers[i].mlp.down_proj.weight if not is_layer_moe(self.args, i) else torch.empty(0)
+            self.layers[i].mlp.down_proj.weight
             for i in range(args.n_layers)
+            if not is_layer_moe(self.args, i)
         ]
         if args.qk_norm:
             self.xlite_model.mha_q_norm = [self.layers[i].self_attn.q_norm.weight for i in range(args.n_layers)]
@@ -704,17 +706,20 @@ class Qwen3MoE(nn.Module):
             self.xlite_model.mha_qkv_bias = [layer.self_attn.qkv_proj.bias for layer in self.layers]
 
         self.xlite_model.gate = [
-            self.layers[i].mlp.gate.weight if is_layer_moe(self.args, i) else torch.empty(0)
+            self.layers[i].mlp.gate.weight
             for i in range(args.n_layers)
+            if is_layer_moe(self.args, i)
         ]
         self.xlite_model.re_up_gate = [
-            self.layers[i].mlp.experts[j].gate_up_proj.weight if is_layer_moe(self.args, i) else torch.empty(0)
+            self.layers[i].mlp.experts[j].gate_up_proj.weight
             for i in range(args.n_layers)
+            if is_layer_moe(self.args, i)
             for j in range(self.layers[i].mlp.experts_start_idx, self.layers[i].mlp.experts_end_idx)
         ]
         self.xlite_model.re_down = [
-            self.layers[i].mlp.experts[j].down_proj.weight if is_layer_moe(self.args, i) else torch.empty(0)
+            self.layers[i].mlp.experts[j].down_proj.weight
             for i in range(args.n_layers)
+            if is_layer_moe(self.args, i)
             for j in range(self.layers[i].mlp.experts_start_idx, self.layers[i].mlp.experts_end_idx)
         ]
         self.xlite_model.init(config, rank)

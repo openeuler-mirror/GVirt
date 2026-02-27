@@ -130,7 +130,7 @@ public:
     std::vector<long> shape;
     size_t numel;
     enum XDtype dtype;
-    void *ptr;
+    void *ptr = nullptr;
 
 private:
     void Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
@@ -158,7 +158,7 @@ public:
     };
 
 private:
-    void *_ptr;
+    void *_ptr = nullptr;
     size_t _size;
     XTensor _t[XLITE_MAX_NUM_DYNAMIC_TENSOR];
     std::list<std::reference_wrapper<XTensor>> _free;
