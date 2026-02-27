@@ -445,8 +445,8 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
     XliteOpMatmul(rt, input, moeGate[layer], scores, _c.weightNZ);
 
     if (_c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
-        XliteOpSigmoidTopK(rt, scores, moeGateBias[layer], _gateIndicts, _c.nExpertGroups,
-                           _c.nLimitedGroups, _c.nActExperts, _c.routeScale, weights, routing);
+        XliteOpSigmoidTopK(rt, scores, _gateIndicts, moeGateBias[layer], _c.routeScale, weights,
+                            routing, _c.nActExperts, true);
     } else {
         XliteOpSoftmaxTopK(rt, scores, _gateIndicts, weights, routing, _c.nActExperts,
                            _c.normTopKProb);

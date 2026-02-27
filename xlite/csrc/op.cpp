@@ -522,13 +522,6 @@ void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out)
     }
 }
 
-void XliteOpSigmoidTopK(XRuntime &rt, XTensor &in, XTensor &inbias, XTensor &indicts,
-                        uint32_t nGroups, uint32_t nTopkGroups, uint32_t nTopk, float scale,
-                        XTensor &outWeights, XTensor &outRouting)
-{
-    throw std::runtime_error(std::string(__func__) + ": TODO");
-}
-
 void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t start, uint32_t end,
                         XTensor &out, XTensor &unpIdx, XTensor &counts)
 {
@@ -753,6 +746,22 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &socres, XTensor &indices, XTensor
                                             indices.shape[0], topK, normTopKProb);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
+    }
+}
+
+void XliteOpSigmoidTopK(XRuntime &rt, XTensor &socres, XTensor &indices, XTensor &bias, float scale,
+                        XTensor &outWeights, XTensor &outRouting, uint32_t topK, bool normTopKProb)
+{
+    if (socres.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 && outRouting.dtype == BIT1) {
+        aclrtlaunch_sigmoid_topk_float(rt.aivNum, rt.stream, socres.ptr, indices.ptr, bias.ptr,
+                                       scale, outWeights.ptr, outRouting.ptr,
+                                       socres.shape[0], indices.shape[0], topK, normTopKProb);
+    } else if (socres.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 && outRouting.dtype == BIT1) {
+        aclrtlaunch_sigmoid_topk_bfloat16_t(rt.aivNum, rt.stream, socres.ptr, indices.ptr, bias.ptr,
+                                           scale, outWeights.ptr, outRouting.ptr,
+                                           socres.shape[0], indices.shape[0], topK, normTopKProb);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
     }
 }
 
