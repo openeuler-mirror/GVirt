@@ -534,7 +534,7 @@ void XModel::ForwardAttn(XRuntime &rt, uint32_t layer,
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
     } else {
-        std::cout << __func__ << ": TODO" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": TODO");
     }
 }
 
@@ -830,14 +830,12 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                                      XTensor &output)
 {
     if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": check runtime communication setting failed"
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": check runtime communication setting failed");
     }
     if (!rt.pool) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": xlite runtime's tensor pool not inited"
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": xlite runtime's tensor pool not inited");
     }
 
     PrepareAttn(rt, attnMeta);
@@ -865,14 +863,12 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                      std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output)
 {
     if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": check runtime communication setting failed"
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": check runtime communication setting failed");
     }
     if (!rt.pool) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": xlite runtime's tensor pool not inited"
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": xlite runtime's tensor pool not inited");
     }
 
     PrepareAttn(rt, attnMeta);
@@ -882,9 +878,8 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
 void XModel::ComputeLogits(XRuntime &rt, XTensor &input, XTensor &output)
 {
     if (!rt.pool) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": xlite runtime's tensor pool not inited"
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": xlite runtime's tensor pool not inited");
     }
 
     XTensor localOutput({input.shape[0], head.shape[0]}, head.dtype, output.ptr);
@@ -902,14 +897,12 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
     uint32_t m = input.shape[0];
 
     if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": check runtime communication setting failed"
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": check runtime communication setting failed");
     }
     if (!rt.pool) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": xlite runtime's tensor pool not inited"
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": xlite runtime's tensor pool not inited");
     }
 
     XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype, DBG_LOC);

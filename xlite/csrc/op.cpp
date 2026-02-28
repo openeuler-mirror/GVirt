@@ -71,8 +71,7 @@ static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
         case FP32:
             return HCCL_DATA_TYPE_FP32;
         default:
-            std::cerr << "unknown data type " << XDtypeStr(dtype) << std::endl;
-            return HCCL_DATA_TYPE_RESERVED;
+            throw std::runtime_error(std::string("unknown data type ") + XDtypeStr(dtype));
     }
 }
 
@@ -80,13 +79,12 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
 {
     uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
     if (in.dtype != out.dtype || in.numel * rankSize != out.numel) {
-        std::cerr << __func__ << ": check tensor failed! input: " << in << " output: " << out
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) +
+                                 ": check tensor failed! input: " + std::to_string(in.dtype) +
+                                 " output: " + std::to_string(out.dtype));
     }
     if ((in.numel * XDtypeBit(in.dtype)) % XDtypeBit(INT8)) {
-        std::cerr << __func__ << ": all gather 8bit align check failed!" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": all gather 8bit align check failed!");
     }
 
     auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
@@ -179,9 +177,7 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
 {
     uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
     if (in.dtype != out.dtype || in.numel != out.numel * rankSize) {
-        std::cerr << __func__ << ": check tensor failed! input: " << in << " output: " << out
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check tensor failed!");
     }
 
     auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
@@ -268,9 +264,7 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type)
 {
     if (in.dtype != out.dtype || in.numel != out.numel) {
-        std::cerr << __func__ << ": check tensor failed! input: " << in << " output: " << out
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check tensor failed!");
     }
 
     auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
@@ -358,7 +352,7 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
         aclrtlaunch_embed_kernel_bfloat16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr,
                                             embed.shape[1], in.shape[0], start, end, rt.tpSize());
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -374,7 +368,7 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
                                        in.shape[0], normDim, normEps, cntPerToken, in.shape[1],
                                        startOffset);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -387,7 +381,7 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
         aclrtlaunch_add_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, out.ptr, in1.shape[0],
                                    in1.shape[1]);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -401,7 +395,7 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &nor
         aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
                                        in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1], 0);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -463,7 +457,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                                  weightNZ, transpose, m0, n0, k0, swizzle);
         rt.pool->PutTensor(tmp);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -479,19 +473,21 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out)
         aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0],
                                        out.shape[1]);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out)
 {
     if (in.dtype == BF16 && out.dtype == FP32) {
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, out.ptr, in.numel);
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -499,7 +495,7 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &in, XTensor &inbias, XTensor &ind
                         uint32_t nGroups, uint32_t nTopkGroups, uint32_t nTopk, float scale,
                         XTensor &outWeights, XTensor &outRouting)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t start, uint32_t end,
@@ -521,7 +517,7 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
                                         unpIdx.ptr, weights.ptr, out.shape[0], in.shape[1],
                                         weights.shape[1], start, end);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -546,7 +542,7 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &sc
                                        start, end, weightNZ, transpose,
                                        MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -566,8 +562,7 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
     float scale = 1 / sqrt(headDim);
 
     if (!isNeox) {
-        std::cerr << __func__ << ": unsupported rope type gptj" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": unsupported rope type gptj");
     }
 
     if (inout.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 &&
@@ -583,7 +578,7 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
             slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1], inout.shape[1], inout.shape[1],
             localHeads, localKvHeads, headDim, blockSize, scale, mropeMaskH, mropeMaskW);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -605,7 +600,7 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                                          cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
                                          blockSize, batch, maxNumBlock);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -613,13 +608,13 @@ void XliteDsOpRopeBatch(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, 
                         uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs, XTensor &position,
                         XTensor &vGather, XTensor &outputPe, enum XRopeType ropeType)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpStridedRmsnorm(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output,
                              uint32_t numTokens, uint32_t normDim, uint32_t stepDim, float normEps)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpReshapeAndCache(XRuntime &rt, XTensor &key, XTensor &value, XTensor &kCache,
@@ -628,13 +623,13 @@ void XliteDsOpReshapeAndCache(XRuntime &rt, XTensor &key, XTensor &value, XTenso
                               int32_t kHeadSize, int32_t vHeadSize, int32_t blockSize,
                               int32_t blockNum)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpKvMatmul(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output, int m, int n,
                        int k, XTensor &blockTable, bool nt, int blockSize, int headSize)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &cache,
@@ -642,7 +637,7 @@ void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &c
                              int nTokensPad, int nLocalHeads, int kvLoraRank, int rotDim,
                              int headSize, int vDim, uint32_t blockSize)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpPrefillMix(XRuntime &rt, XTensor &out, XTensor &alpha, XTensor &max, XTensor &sum,
@@ -654,14 +649,14 @@ void XliteDsOpPrefillMix(XRuntime &rt, XTensor &out, XTensor &alpha, XTensor &ma
                          uint32_t blockSize, uint32_t batchSize, uint32_t mappingLen,
                          uint32_t doTreeAttnMask, uint32_t offsetM, uint32_t mSlice, float scale)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpEinsumShdHdcShc(XRuntime &rt, int numTokens, int headSize, int nLocalHeads,
                               int qStepDim, int kvUpWeightStepDim, int kvLoraRank, XTensor &qWithQr,
                               XTensor &kvUpWeight, XTensor &qAbsorb)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpDecodeAttn(XRuntime &rt, XTensor &q, XTensor &k, XTensor &o, XTensor &cachedLens,
@@ -670,14 +665,14 @@ void XliteDsOpDecodeAttn(XRuntime &rt, XTensor &q, XTensor &k, XTensor &o, XTens
                          uint32_t headSize, uint32_t blockSize, uint32_t mappingLen,
                          uint32_t maxContextLen, bool add)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpSoftmax(XRuntime &rt, XTensor &qk, XTensor &cachedLens, XTensor &promptLens,
                       XTensor &promptLensCum, float scale, uint32_t numTokens, uint32_t numHeads,
                       uint32_t blockSize, uint32_t maxContextLen)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpEinsumShtTcShc(XRuntime &rt, int numTokens, int nLocalHeads, int maxTokens,
@@ -686,14 +681,14 @@ void XliteDsOpEinsumShtTcShc(XRuntime &rt, int numTokens, int nLocalHeads, int m
                              XTensor &promptLensCum, XTensor &blockTables, XTensor &cCache,
                              XTensor &result)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpEinsumShcHdcShd(XRuntime &rt, int numTokens, int nLocalHeads, int kvLoraRank,
                               int wkvbStep, int vdim, XTensor &scores, XTensor &kvUpWeight,
                               XTensor &result)
 {
-    std::cout << __func__ << ": TODO" << std::endl;
+    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)
@@ -708,7 +703,7 @@ void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &outp
         aclrtlaunch_add_bias_bfloat16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
                                         output.shape[0] * output.shape[1], output.shape[1]);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -726,7 +721,7 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &socres, XTensor &indices, XTensor
                                             outWeights.ptr, outRouting.ptr, socres.shape[0],
                                             indices.shape[0], topK, normTopKProb);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -737,7 +732,7 @@ void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)
     } else if (x.dtype == BF16) {
         aclrtlaunch_softmax_bfloat16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 

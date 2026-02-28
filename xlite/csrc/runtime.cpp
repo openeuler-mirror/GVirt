@@ -118,9 +118,8 @@ int XRuntime::GetNodeIps(void)
     }
 
     if (!envIps) {
-        std::cerr << __func__ << ": please set XLITE_NODE_IPS in multi-node environment."
-                  << std::endl;
-        return -EINVAL;
+        throw std::runtime_error(std::string(__func__) +
+                                 ": please set XLITE_NODE_IPS in multi-node environment.");
     }
 
     std::string ipsStr(envIps);
@@ -131,9 +130,8 @@ int XRuntime::GetNodeIps(void)
     }
 
     if (_ips.size() != DIV_ROUND_UP(_rankSize, _nDevPerNode)) {
-        std::cerr << __func__ << ": XLITE_NODE_IPS not match " << _rankSize << " / " << _nDevPerNode
-                  << std::endl;
-        return -EFAULT;
+        throw std::runtime_error(std::string(__func__) + ": XLITE_NODE_IPS not match " +
+                                 std::to_string(_rankSize) + " / " + std::to_string(_nDevPerNode));
     }
     return 0;
 }

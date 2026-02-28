@@ -106,9 +106,9 @@ static inline enum XDtype XDtype(at::Tensor &t)
         case at::ScalarType::ComplexFloat:
             return CPLXF;
         default:
-            std::cerr << __FILE__ << ":" << __LINE__ << ": unknown data type " << t.scalar_type()
-                      << std::endl;
-            return MAX_XDTYPE;
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": unknown data type " +
+                                     std::to_string(static_cast<int>(t.scalar_type())));
     }
 }
 
@@ -307,8 +307,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     InitXTensor(_freqsCis, freqsCis);
 
     if (kvCache.size() != _kv.size()) {
-        std::cerr << __func__ << ": check kv cache failed!" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
@@ -381,8 +380,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
     InitXTensor(_freqsCis, freqsCis);
 
     if (kvCache.size() != _kv.size()) {
-        std::cerr << __func__ << ": check kv cache failed!" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
@@ -436,13 +434,11 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
     InitXTensor(_freqsCis, freqsCis);
 
     if (kvCache.size() != _kv.size()) {
-        std::cerr << __func__ << ": check kv cache failed!" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
     }
 
     if (deepstackInput.size() != _deepstackInputEmbeds.size()) {
-        std::cerr << __func__ << ": check deepstack input failed" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check deepstack input failed");
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
