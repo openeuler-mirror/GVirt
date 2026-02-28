@@ -17,6 +17,28 @@ typedef void *HcclComm;
 class XTensorPool;
 class XcclComm;
 
+enum XModelAttnType {
+    XMODEL_ATTN_MHA,
+    XMODEL_ATTN_MLA,
+    XMODEL_ATTN_MAX_TYPE,
+};
+
+struct XModelAttnMeta {
+    int version = 0;
+
+    std::vector<uint32_t> lens;
+    std::vector<uint32_t> cachedLens;
+    std::vector<bool> isPrefills;
+
+    /* only for version 0 */
+    std::vector<std::vector<uint32_t>> blockTables;
+
+    /* only for version 1 */
+    XTensor vllmBlockTables;
+    XTensor vllmSlotMapping;
+    XTensor vllmPosition;
+};
+
 enum commType {
     TP,
     DP,
@@ -29,6 +51,9 @@ public:
     XRuntime(uint32_t devid, size_t sizeMB = 0, uint32_t rankId = 0, uint32_t tpSize = 1,
              uint32_t dpSize = 1);
     ~XRuntime(void);
+    void InitAttn(int64_t maxM, int64_t maxBatch, int64_t maxSeqLen, uint32_t blockSize);
+    void PrepareAttn(XModelAttnMeta &attnMeta, int64_t maxM, int64_t maxBatch, int64_t maxSeqLen,
+                     uint32_t blockSize, XModelAttnType attnType);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -62,6 +87,26 @@ public:
 
     XcclComm *_tpXcclComm = nullptr;
     XcclComm *_dpXcclComm = nullptr;
+
+    // ATTN
+    bool _attnInitialized = false;
+    uint32_t _realM;
+    uint32_t _maxNumBlocks;
+    int _prefillBatch;
+    int _batch;
+    int _prefillLen;
+    int _prefillLenPad;
+    XTensor _attnPosition;
+    XTensor _attnBlockTables;
+    XTensor _attnSlotMapping;
+    XTensor _position;
+    XTensor _blockTables;
+    XTensor _slotMapping;
+    XTensor _prefillIdx;
+    XTensor _prefillLastIdx;
+    XTensor _cachedLens;
+    XTensor _lens;
+    XTensor _cumPromptLens;
 
 private:
     int GetNodeIps(void);

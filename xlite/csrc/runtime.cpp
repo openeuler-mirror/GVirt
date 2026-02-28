@@ -96,6 +96,17 @@ XRuntime::~XRuntime(void)
     if (!_init_outside) {
         CHECK_ACL(aclFinalize());
     }
+
+    if (_attnInitialized) {
+        CHECK_ACL(aclrtFree(_position.ptr));
+        CHECK_ACL(aclrtFree(_slotMapping.ptr));
+        CHECK_ACL(aclrtFree(_cachedLens.ptr));
+        CHECK_ACL(aclrtFree(_lens.ptr));
+        CHECK_ACL(aclrtFree(_cumPromptLens.ptr));
+        CHECK_ACL(aclrtFree(_prefillIdx.ptr));
+        CHECK_ACL(aclrtFree(_prefillLastIdx.ptr));
+        CHECK_ACL(aclrtFree(_blockTables.ptr));
+    }
 }
 
 int XRuntime::GetNodeIps(void)
@@ -253,6 +264,148 @@ int XRuntime::InitHcclComm(void)
     }
 
     return 0;
+}
+
+void XRuntime::InitAttn(int64_t maxM, int64_t maxBatch, int64_t maxSeqLen, uint32_t blockSize)
+{
+    std::vector<uint32_t> vgatherIndices;
+    long size;
+    void *ptr;
+
+    size = maxM * XDtypeBit(INT64) / 8;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _position.Init({maxM}, INT64, ptr);
+
+    size = maxM * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _slotMapping.Init({maxM}, INT32, ptr);
+
+    size = maxBatch * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _cachedLens.Init({maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _lens.Init({maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _cumPromptLens.Init({maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _prefillIdx.Init({maxBatch}, INT32, ptr);
+
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _prefillLastIdx.Init({maxBatch}, INT32, ptr);
+
+    size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _blockTables.Init({maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32, ptr);
+}
+
+void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, int64_t maxM, int64_t maxBatch,
+                           int64_t maxSeqLen, uint32_t blockSize, XModelAttnType attnType)
+{
+    if (!_attnInitialized) {
+        InitAttn(maxM, maxBatch, maxSeqLen, blockSize);
+    }
+    uint32_t batch = attnMeta.lens.size();
+    std::vector<uint32_t> lens(batch);
+    std::vector<uint32_t> cachedLens(batch);
+    std::vector<uint32_t> prefillIdx(batch);
+    std::vector<uint32_t> prefillLastIdx(batch);
+    std::vector<uint32_t> cumPromptLens(batch);
+    std::vector<uint32_t> slotMapping, blockTables;
+    std::vector<uint64_t> position;
+    uint32_t blockNum, cumPromptLen, blockId, id, k;
+    size_t size;
+
+    _realM = 0;
+    _maxNumBlocks = 0;
+    _prefillBatch = 0;
+    _batch = batch;
+    cumPromptLen = 0;
+    for (uint32_t i = 0; i < batch; i++) {
+        lens[i] = attnMeta.lens[i];
+        cachedLens[i] = attnMeta.cachedLens[i];
+        cumPromptLens[i] = cumPromptLen;
+        cumPromptLen += lens[i];
+        blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
+        _maxNumBlocks = blockNum > _maxNumBlocks ? blockNum : _maxNumBlocks;
+        _realM += lens[i];
+        prefillLastIdx[i] = _realM - 1;
+        if (attnMeta.isPrefills[i]) {
+            prefillIdx[_prefillBatch] = i;
+            _prefillBatch++;
+            _prefillLen = lens[i];
+            _prefillLenPad = ROUND_UP(_prefillLen, blockSize);
+        } else if (lens[i] > 2) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attnMeta" << i
+                      << ", decode len too long" << lens[i] << std::endl;
+            return;
+        }
+    }
+
+    if (_realM > maxM) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attnMeta realM(" << _realM
+                  << ") > maxM(" << maxM << ")" << std::endl;
+        return;
+    }
+
+    size = batch * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMemcpy(_lens.ptr, size, lens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(
+        aclrtMemcpy(_cachedLens.ptr, size, cachedLens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpy(_cumPromptLens.ptr, size, cumPromptLens.data(), size,
+                          ACL_MEMCPY_HOST_TO_DEVICE));
+    if (_prefillBatch > 0) {
+        if (attnType == XMODEL_ATTN_MLA) {
+            CHECK_ACL(aclrtMemcpy(_prefillIdx.ptr, size, prefillIdx.data(), size,
+                                  ACL_MEMCPY_HOST_TO_DEVICE));
+        }
+        CHECK_ACL(aclrtMemcpy(_prefillLastIdx.ptr, size, prefillLastIdx.data(), size,
+                              ACL_MEMCPY_HOST_TO_DEVICE));
+    }
+
+    position.resize(_realM);
+    slotMapping.resize(_realM);
+    k = 0;
+    for (uint32_t i = 0; i < batch; i++) {
+        for (uint32_t j = 0; j < lens[i]; j++) {
+            position[k] = cachedLens[i] + j;
+            blockId = position[k] / blockSize;
+            id = position[k] % blockSize;
+            slotMapping[k++] = attnMeta.blockTables[i][blockId] * blockSize + id;
+        }
+    }
+    size = _realM * XDtypeBit(INT64) / 8;
+    CHECK_ACL(aclrtMemcpy(_position.ptr, size, position.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    size = _realM * XDtypeBit(INT32) / 8;
+    CHECK_ACL(
+        aclrtMemcpy(_slotMapping.ptr, size, slotMapping.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+
+    blockTables.resize(batch * _maxNumBlocks);
+    for (uint32_t i = 0; i < batch; i++) {
+        blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
+        for (uint32_t j = 0; j < blockNum; j++) {
+            blockTables[i * _maxNumBlocks + j] = attnMeta.blockTables[i][j];
+        }
+    }
+    size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
+    CHECK_ACL(
+        aclrtMemcpy(_blockTables.ptr, size, blockTables.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    _attnBlockTables = _blockTables;
+    _attnSlotMapping = _slotMapping;
+    switch (attnMeta.version) {
+        case 0:
+            _attnPosition = _position;
+            break;
+        case 1:
+            _attnPosition = attnMeta.vllmPosition;
+            break;
+        default:
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": invalid attnMeta version: " << attnMeta.version << std::endl;
+            return;
+    }
 }
 
 void XRuntime::Synchronize(void)
