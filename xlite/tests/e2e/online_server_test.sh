@@ -13,12 +13,20 @@ TOKENIZER_PATH=${5:-/mnt/nvme0n1/models/Qwen3-32B}
 HOST=${6:-127.0.0.1}
 PORT=${7:-8080}
 # 并发数列表
-CONCURRENCY_LIST=${8:-1 16 32 48 64 100 150 200}
+CONCURRENCY_LIST=${8:-1 16 32 48 64 100}
+# NUM_PROMPTS_MULTIPLIER参数（默认值10）
+NUM_PROMPTS_MULTIPLIER=${9:-10}
+# 主输出目录（可选参数）
+MAIN_OUTPUT_DIR=${10:-}
 # 其他配置
 RANDOM_RANGE_RATIO=0.2
-PROMPT_MULTIPLIER=10  # num_prompts = maxconcurrency * 10
 
-dir=result_input_${INPUT_LEN}_output_${OUTPUT_LEN}_${TYPE}
+# 构建输出目录
+if [ -n "${MAIN_OUTPUT_DIR}" ]; then
+    dir="${MAIN_OUTPUT_DIR}/result_input_${INPUT_LEN}_output_${OUTPUT_LEN}_${TYPE}"
+else
+    dir=result_input_${INPUT_LEN}_output_${OUTPUT_LEN}_${TYPE}
+fi
 mkdir -p ${dir}
 
 # 遍历并发数
@@ -26,7 +34,7 @@ for maxconcurrency in ${CONCURRENCY_LIST}
 do
     # 构建文件名
     file=input_${INPUT_LEN}_output_${OUTPUT_LEN}_concurrency${maxconcurrency}
-    num_prompts=$((maxconcurrency * PROMPT_MULTIPLIER))
+    num_prompts=$((maxconcurrency * NUM_PROMPTS_MULTIPLIER))
     
     # 执行vllm bench命令
     vllm bench serve \
