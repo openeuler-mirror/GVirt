@@ -2,6 +2,7 @@ import os
 import re
 import argparse
 from collections import defaultdict
+from datetime import datetime
 
 def extract_metrics_from_log(log_path):
     """从单个log文件中提取关键指标"""
@@ -88,6 +89,13 @@ def main():
         help="输出对比结果的log文件路径（默认：./benchmark_comparison.log）"
     )
 
+    # 可选参数：模型名称（默认：Qwen3 32B）
+    parser.add_argument(
+        "-m", "--model",
+        default="Qwen3 32B",
+        help="模型名称（默认：Qwen3 32B）"
+    )
+
     # 解析参数
     args = parser.parse_args()
 
@@ -96,6 +104,7 @@ def main():
     FOLDER2 = args.folder2
     FOLDER3 = args.folder3
     OUTPUT_LOG = args.output
+    MODEL_NAME = args.model
     # --------------------------------------------------------------------------------
 
     # 文件夹名称映射（用于表格中的item列，固定对应关系）
@@ -202,7 +211,11 @@ def main():
 
     # 写入输出log文件
     with open(OUTPUT_LOG, 'w', encoding='utf-8') as f:
-        f.write("## Qwen3 32B TPS 910B3(A2) Online Inference Performance Comparison\n")
+        # 获取当前时间
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        f.write(f"## {MODEL_NAME} TPS 910B3(A2) Online Inference Performance Comparison\n")
+        f.write(f"- Report Generated Time: {current_time}\n")
         f.write("- aclgraph: main\n")
         f.write("- xlite-full: main + xlite-full\n")
         f.write("- xlite-decode-only: main + xlite-decode-only\n")

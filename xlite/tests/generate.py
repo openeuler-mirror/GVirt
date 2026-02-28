@@ -103,6 +103,7 @@ def main(
     interactive: bool = True,
     max_new_tokens: int = 100,
     temperature: float = 1.0,
+    no_prefix: bool = False,
 ) -> None:
     """
     Main function to load the model and perform interactive or batch text generation.
@@ -114,6 +115,7 @@ def main(
         interactive (bool, optional): Whether to run in interactive mode. Defaults to True.
         max_new_tokens (int, optional): Maximum number of new tokens to generate. Defaults to 100.
         temperature (float, optional): Temperature for sampling. Defaults to 1.0.
+        no_prefix (bool, optional): Whether to skip adding prefix/suffix to prompts. Defaults to False.
     """
     if model_type == "deepseek":
         from tests.models.deepseek_v3 import ModelArgs
@@ -207,8 +209,10 @@ def main(
         with open(input_file, 'r', encoding='utf-8') as file:
             data = json.load(file)
 
-        def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature):
-            if model_type == "deepseek":
+        def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature, no_prefix):
+            if no_prefix:
+                prompts_tokens_batch = [tokenizer.encode(item['query']) for item in batch]
+            elif model_type == "deepseek":
                 prompts_tokens_batch = [
                     tokenizer.apply_chat_template([{"role": "user", "content": item['query']}], add_generation_prompt=True)
                     for item in batch
@@ -244,7 +248,7 @@ def main(
 
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
-            process_batch(batch, tokenizer, model, max_new_tokens, tokenizer.eos_token_id, temperature)
+            process_batch(batch, tokenizer, model, max_new_tokens, tokenizer.eos_token_id, temperature, no_prefix)
 
         with open(input_file, 'w', encoding='utf-8') as file:
             json.dump(data, file, ensure_ascii=False, indent=4)
@@ -277,7 +281,8 @@ if __name__ == "__main__":
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--no-prefix", action="store_true")
     args = parser.parse_args()
     assert args.model in ["deepseek", "llama", "qwen2", "qwen3", "qwen3_moe"], f"{args.model} not supported!"
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    main(args.model, args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)
+    main(args.model, args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.no_prefix)
