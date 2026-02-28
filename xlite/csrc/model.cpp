@@ -963,8 +963,7 @@ size_t XModel::GetTensorPoolSize(int dbg)
         // MoE share experts
         if (_c.nSharedExperts != 0) {
             shareExpertsBufSize += _c.maxM * _c.hiddenSize * dtypeSize;
-            shareExpertsBufSize += _c.maxM * moeSEUpGate[0].shape[0] * dtypeSize;
-            shareExpertsBufSize += _c.maxM * moeSEDown[0].shape[1] * dtypeSize;
+            shareExpertsBufSize += _c.maxM * intermediateSize * 3 * dtypeSize;
         }
         if (_c.defDpSize > 1) {
             shareExpertsBufSize += _c.maxM * _c.defDpSize * _c.hiddenSize * dtypeSize;
