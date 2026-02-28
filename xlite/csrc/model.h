@@ -28,15 +28,15 @@ struct XModelConfig {
     // global config
     uint32_t vocabSize;
     uint32_t hiddenSize;
-    uint32_t nLayers;
+    uint32_t nLayers = 0;
 
     // attention config
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
     enum XModelRopeType ropeType = XMODEL_ROPE_NEOX;
     bool addBias = false;
     bool qkNorm = false;
-    uint32_t nHeads;
-    uint32_t nKvHeads;
+    uint32_t nHeads = 0;
+    uint32_t nKvHeads = 0;
     uint32_t headDim;
     uint32_t ropeHeadDim;
     uint32_t nopeHeadDim;
@@ -44,7 +44,7 @@ struct XModelConfig {
     uint32_t qLoraRank;
     uint32_t kvLoraRank;
     uint32_t blockSize;
-    uint32_t deepstackNumLevel;
+    uint32_t deepstackNumLevel = 0;
     int64_t maxM;
     int64_t maxBatch;
     int64_t maxSeqLen;
@@ -55,12 +55,12 @@ struct XModelConfig {
     bool mropeInterleaved = false;
 
     // mlp
-    uint32_t nDenseLayers;
-    uint32_t nRoutedExperts;
-    uint32_t nSharedExperts;
-    uint32_t nExpertGroups;
-    uint32_t nLimitedGroups;
-    uint32_t nActExperts;
+    uint32_t nDenseLayers = 0;
+    uint32_t nRoutedExperts = 0;
+    uint32_t nSharedExperts = 0;
+    uint32_t nExpertGroups = 1;
+    uint32_t nLimitedGroups = 1;
+    uint32_t nActExperts = 0;
     uint32_t intermediateSize;
     uint32_t moeIntermediateSize;
     enum XModelScoringFuncType scoringFunc = XMODEL_SCORING_FUNC_SOFTMAX;
