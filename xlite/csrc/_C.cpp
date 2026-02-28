@@ -83,7 +83,7 @@ public:
     std::vector<at::Tensor> moeREDownScale;
 
 private:
-    XModel *_model;
+    XModel *_model = nullptr;
     std::vector<std::pair<XTensor, XTensor>> _kv;
     std::vector<XTensor> _deepstackInputEmbeds;
 };
@@ -106,9 +106,9 @@ static inline enum XDtype XDtype(at::Tensor &t)
         case at::ScalarType::ComplexFloat:
             return CPLXF;
         default:
-            std::cerr << __FILE__ << ":" << __LINE__ << ": unknown data type " << t.scalar_type()
-                      << std::endl;
-            return MAX_XDTYPE;
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": unknown data type " +
+                                     std::to_string(static_cast<int>(t.scalar_type())));
     }
 }
 
@@ -131,10 +131,90 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     uint32_t expertsEndIdx = expertsStartIdx + nLocalRoutedExperts;
     uint32_t nRE = (c.nLayers - c.nDenseLayers) * nLocalRoutedExperts;
 
+    if (c.nRoutedExperts % c.moeEpSize != 0) {
+        std::cerr << __FILE__ << ":" << __LINE__
+                  << ": num of routed experts per expert parallel group: " << nLocalRoutedExperts
+                  << std::endl;
+        throw std::invalid_argument(
+            "num of routed experts must be divisible by moe expert parallel size");
+    }
+
+    if (c.nLayers < c.nDenseLayers) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << c.nLayers
+                  << ", num of dense layers: " << c.nDenseLayers << std::endl;
+        throw std::invalid_argument(
+            "num of layers must be greater than or equal to num of dense layers");
+    }
+
+    if (attnNorm.size() != c.nLayers || attnOut.size() != c.nLayers ||
+        mlpNorm.size() != c.nLayers) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << attnNorm.size()
+                  << std::endl;
+        throw std::invalid_argument(
+            "Mismatched number of layers attention norm or attention out or mlp norm parameters");
+    }
+
+    if (c.attnType == XMODEL_ATTN_MLA) {
+        if (mlaQA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
+            mlaQNorm.size() != c.nLayers || mlaKVA.size() != c.nLayers ||
+            mlaKVB.size() != c.nLayers || mlaKVNorm.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQA.size()
+                      << std::endl;
+            throw std::invalid_argument("Mismatched number of layers MLA attention QA/QB/QA "
+                                        "norm/KVA/KVB/KV norm parameters");
+        }
+    } else if (c.attnType == XMODEL_ATTN_MHA) {
+        if (mhaQKV.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQKV.size()
+                      << std::endl;
+            throw std::invalid_argument("Mismatched number of layers MHA attention QKV parameters");
+        }
+        if (c.addBias && mhaQKVBias.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQKVBias.size()
+                      << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA attention QKV bias parameters");
+        }
+        if (c.qkNorm && (mhaQNorm.size() != c.nLayers || mhaKNorm.size() != c.nLayers)) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQNorm.size()
+                      << ", " << mhaKNorm.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA attention Q/K norm parameters");
+        }
+    }
+
+    if (mlpUpGate.size() != c.nDenseLayers || mlpDown.size() != c.nDenseLayers) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of dense layers: " << mlpUpGate.size()
+                  << std::endl;
+        throw std::invalid_argument("Mismatched number of dense layers up gate or down parameters");
+    }
+
     if (moeREUpGate.size() != nRE || moeREDown.size() != nRE) {
         std::cerr << __FILE__ << ":" << __LINE__
                   << ": num of routed experts: " << moeREUpGate.size() << std::endl;
-        return;
+        throw std::invalid_argument(
+            "Mismatched number of routed experts up gate or down parameters");
+    }
+
+    if (moeGate.size() != (c.nLayers - c.nDenseLayers)) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of moe layers: " << moeGate.size()
+                  << std::endl;
+        throw std::invalid_argument("Mismatched number of moe layers gate parameters");
+    }
+
+    if (c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID &&
+        moeGateBias.size() != (c.nLayers - c.nDenseLayers)) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of moe layers: " << moeGateBias.size()
+                  << std::endl;
+        throw std::invalid_argument("Mismatched number of moe layers gate bias parameters");
+    }
+
+    if (c.nSharedExperts != 0 && (moeSEUpGate.size() != (c.nLayers - c.nDenseLayers) ||
+                                  moeSEDown.size() != (c.nLayers - c.nDenseLayers))) {
+        std::cerr << __FILE__ << ":" << __LINE__
+                  << ": num of moe layers with shared experts: " << moeSEUpGate.size() << std::endl;
+        throw std::invalid_argument(
+            "Mismatched number of moe layers with shared experts parameters");
     }
 
     _model = new XModel(c, rankId);
@@ -173,8 +253,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
     for (uint32_t i = c.nDenseLayers; i < c.nLayers; i++) {
         InitXTensor(_model->moeGate[i], moeGate[moe_idx]);
-        if (c.nSharedExperts != 0) {
+        if (c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
             InitXTensor(_model->moeGateBias[i], moeGateBias[moe_idx]);
+        }
+        if (c.nSharedExperts != 0) {
             InitXTensor(_model->moeSEUpGate[i], moeSEUpGate[moe_idx]);
             InitXTensor(_model->moeSEDown[i], moeSEDown[moe_idx]);
         }
@@ -207,7 +289,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
 _CModel::~_CModel(void)
 {
-    delete _model;
+    if (_model != nullptr) {
+        delete _model;
+        _model = nullptr;
+    }
 }
 
 void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
@@ -222,8 +307,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     InitXTensor(_freqsCis, freqsCis);
 
     if (kvCache.size() != _kv.size()) {
-        std::cerr << __func__ << ": check kv cache failed!" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
@@ -296,8 +380,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
     InitXTensor(_freqsCis, freqsCis);
 
     if (kvCache.size() != _kv.size()) {
-        std::cerr << __func__ << ": check kv cache failed!" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
@@ -351,13 +434,11 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
     InitXTensor(_freqsCis, freqsCis);
 
     if (kvCache.size() != _kv.size()) {
-        std::cerr << __func__ << ": check kv cache failed!" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
     }
 
     if (deepstackInput.size() != _deepstackInputEmbeds.size()) {
-        std::cerr << __func__ << ": check deepstack input failed" << std::endl;
-        return;
+        throw std::runtime_error(std::string(__func__) + ": check deepstack input failed");
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
