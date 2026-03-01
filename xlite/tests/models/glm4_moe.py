@@ -27,7 +27,7 @@ rank = 0
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     block_size = 128
-    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMHA, Model, ScoringFuncSoftmax
+    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMHA, Model, ScoringFuncSigmoid
     import numpy as np
 
 @dataclass
@@ -35,27 +35,31 @@ class ModelArgs:
     max_batch_size: int = 8
     max_seq_len: int = 4096
     max_m: int = 4096
-    dim: int = 2048
+    dim: int = 5120
     head_dim: int = 128
-    inter_dim: int = 6144
-    moe_inter_dim: int = 768
+    inter_dim: int = 12288
+    moe_inter_dim: int = 1536
     norm_topk_prob: bool = True
-    decoder_sparse_step: int = 1
-    mlp_only_layers: list = None
-    n_routed_experts: int = 128
+    first_k_dense_replace: int = 3
+    n_routed_experts: int = 160
+    n_shared_experts: int = 1
     n_activated_experts: int = 8
-    vocab_size: int = 151936
-    n_layers: int = 48
-    n_heads: int = 32
-    n_kv_heads: int = 4
-    norm_eps: float = 1e-6
-    rope_theta: float = 10000000.0
+    n_group: int = 1
+    topk_group: int = 1
+    routed_scaling_factor: float = 2.5
+    vocab_size: int = 151552
+    n_layers: int = 92
+    n_heads: int = 96
+    n_kv_heads: int = 8
+    norm_eps: float = 1e-5
+    rope_theta: float = 1000000.0
+    partial_rotary_factor: float = 0.5
     dtype: Literal["bfloat16", "float16"] = "bfloat16"
-    qkv_bias: bool = False
+    qkv_bias: bool = True
     qk_norm: bool = True
     moe_ep_size: int = 1
     moe_tp_size: int = 1
-    model_type: str = "qwen3_moe"
+    model_type: str = "glm4moe"
 
     def __post_init__(self):
         self.max_m = self.max_seq_len * self.max_batch_size
@@ -181,10 +185,16 @@ def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor) -
     cos, sin = freqs_cis[start_pos:start_pos + seqlen, :].chunk(2, dim=-1)
     cos = cos.repeat(1, 2) # [seqlen, head_dim]
     sin = sin.repeat(1, 2)
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
-    x_rot = torch.cat((-x2, x1), dim=-1)
-    return (x * cos) + (x_rot * sin)
+
+    rotary_dim = cos.shape[-1]
+    x_rot, x_pass = x[..., :rotary_dim], x[..., rotary_dim:]
+
+    x1 = x_rot[..., :x_rot.shape[-1] // 2]
+    x2 = x_rot[..., x_rot.shape[-1] // 2:]
+    x_rot_half = torch.cat((-x2, x1), dim=-1)
+
+    x_rot_embedded = (x_rot * cos) + (x_rot_half * sin)
+    return torch.cat([x_rot_embedded, x_pass], dim=-1)
 
 
 class MHA(nn.Module):
@@ -292,9 +302,33 @@ class Gate(nn.Module):
         super().__init__()
         self.dim = args.dim
         self.topk = args.n_activated_experts
+        self.n_group = args.n_group
+        self.topk_group = args.topk_group
+        self.routed_scaling_factor = args.routed_scaling_factor
+        self.n_routed_experts = args.n_routed_experts
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
+        self.e_score_correction_bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32))
         self.norm_topk_prob = args.norm_topk_prob
 
+    def get_topk_indices(self, scores):
+        scores_for_choice = scores.view(-1, self.n_routed_experts) + self.e_score_correction_bias.unsqueeze(0)
+        group_scores = (
+            scores_for_choice.view(-1, self.n_group, self.n_routed_experts // self.n_group)
+            .topk(2, dim=-1)[0]
+            .sum(dim=-1)
+        )
+        group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+            .reshape(-1, self.n_routed_experts)
+        )
+        scores_for_choice = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)
+        topk_indices = torch.topk(scores_for_choice, k=self.topk, dim=-1, sorted=False)[1]
+        return topk_indices
+    
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for the gating mechanism.
@@ -305,12 +339,15 @@ class Gate(nn.Module):
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: Routing weights and selected expert indices.
         """
-        scores = linear(x, self.weight)
-        scores = scores.softmax(dim=-1)
-        weights, indices = torch.topk(scores, self.topk, dim=-1)
+        scores = linear(x.type(torch.float32), self.weight.type(torch.float32))
+        scores = scores.sigmoid()
+        topk_indices = self.get_topk_indices(scores)
+        topk_weights = scores.gather(1, topk_indices)
         if self.norm_topk_prob:
-            weights /= weights.sum(dim=-1, keepdim=True)
-        return weights.type_as(x), indices
+            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weights /= denominator
+        topk_weights = topk_weights * self.routed_scaling_factor
+        return topk_weights.type_as(x), topk_indices
 
 
 class Expert(nn.Module):
@@ -372,11 +409,14 @@ class MoE(nn.Module):
         self.n_routed_experts = args.n_routed_experts
         self.n_local_experts = args.n_routed_experts // args.moe_ep_size
         self.n_activated_experts = args.n_activated_experts
+        self.n_shared_experts = args.n_shared_experts
         self.experts_start_idx = moe_ep_id * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
         self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args) if self.experts_start_idx <= i < self.experts_end_idx else None
                                       for i in range(self.n_routed_experts)])
+        if args.n_shared_experts != 0:
+            self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -399,13 +439,17 @@ class MoE(nn.Module):
             expert = self.experts[i]
             idx, top = torch.where(indices == i)
             y[idx] += expert(x[idx]) * weights[idx, top, None]
+        if self.n_shared_experts != 0:
+            z = self.shared_experts(x)
         if world_size > 1:
             dist.all_reduce(y)
-        return y.view(shape)
+        if self.n_shared_experts != 0:
+            return (y + z).view(shape)
+        else:
+            return y.view(shape)
 
 def is_layer_moe(args: ModelArgs, layer_id: int):
-    return (layer_id not in args.mlp_only_layers) and (
-            args.n_routed_experts > 0 and (layer_id + 1) % args.decoder_sparse_step == 0)
+    return (layer_id >= args.first_k_dense_replace)
 
 class Block(nn.Module):
     def __init__(self, args: ModelArgs, layer_id: int):
@@ -424,7 +468,7 @@ class Block(nn.Module):
         return x
 
 
-class Qwen3MoE(nn.Module):
+class GLM4MoE(nn.Module):
     def __init__(self, args: ModelArgs):
         global world_size, rank
         world_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -444,7 +488,7 @@ class Qwen3MoE(nn.Module):
             self.layers.append(Block(args, i))
         self.norm = RMSNorm(args.dim, args.norm_eps)
         self.lm_head = ColumnParallelLinear(args.dim, args.vocab_size, bias=False)
-        self.freqs_cis = precompute_freqs_cis(args.head_dim, args.max_seq_len, args.rope_theta)
+        self.freqs_cis = precompute_freqs_cis(int(args.head_dim * args.partial_rotary_factor), args.max_seq_len, args.rope_theta)
 
 
     @torch.inference_mode()
@@ -490,7 +534,7 @@ class Qwen3MoE(nn.Module):
             self,
             model_path : str,
     ) -> None:
-        """ load qwen3 moe weight """
+        """ load glm4 moe weight """
         assert self.args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
         assert self.args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
         assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
@@ -517,7 +561,13 @@ class Qwen3MoE(nn.Module):
             if "rotary_emb.inv_freq" in name or "g_idx" in name:
                 continue
 
-            if "experts" in name:
+            # skip mtp layer
+            if name.startswith("model.layers."):
+                layer_id = int(name.split(".")[2])
+                if layer_id >= self.args.n_layers:
+                    continue
+
+            if "experts" in name and "shared_experts" not in name:
                 idx = int(name.split(".")[-3])
                 if idx < moe_ep_id * n_local_experts or idx >= (moe_ep_id + 1) * n_local_experts:
                     continue
@@ -563,7 +613,7 @@ class Qwen3MoE(nn.Module):
                     continue
                 param = param_dict[param_name]
                 shard_size = param.shape[0] // 2
-                gate_up_idx = moe_tp_id if "experts" in name else rank
+                gate_up_idx = moe_tp_id if ("experts" in name and "shared_experts" not in name) else rank
 
                 loaded_weight = loaded_weight[shard_size * gate_up_idx:shard_size * (gate_up_idx + 1)]
                 param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
@@ -599,6 +649,18 @@ class Qwen3MoE(nn.Module):
                                              name, True, True, rank, world_size)
                 continue
 
+            if "down_proj" in name and not is_layer_moe(self.args, int(name.split(".")[2])):
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.inter_dim, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
+            if "down_proj" in name and "shared_experts" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.n_shared_experts * self.args.moe_inter_dim, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
             if "down_proj" in name and "experts" in name:
                 shard_size = param.shape[1]
                 loaded_weight = loaded_weight[:, shard_size * moe_tp_id:shard_size * (moe_tp_id + 1)]
@@ -612,9 +674,13 @@ class Qwen3MoE(nn.Module):
         # transpose
         if forward_backend == "xlite":
             for layer_id, layer in enumerate(self.layers):
-                for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
-                    layer.mlp.experts[i].gate_up_proj.weight.data = layer.mlp.experts[i].gate_up_proj.weight.data.transpose(0,1).contiguous()
-                    layer.mlp.experts[i].down_proj.weight.data = layer.mlp.experts[i].down_proj.weight.data.transpose(0,1).contiguous()
+                if is_layer_moe(self.args, layer_id):
+                    for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
+                        layer.mlp.experts[i].gate_up_proj.weight.data = layer.mlp.experts[i].gate_up_proj.weight.data.transpose(0,1).contiguous()
+                        layer.mlp.experts[i].down_proj.weight.data = layer.mlp.experts[i].down_proj.weight.data.transpose(0,1).contiguous()
+                    if self.args.n_shared_experts != 0:
+                        layer.mlp.shared_experts.gate_up_proj.weight.data = layer.mlp.shared_experts.gate_up_proj.weight.data.transpose(0,1).contiguous()
+                        layer.mlp.shared_experts.down_proj.weight.data = layer.mlp.shared_experts.down_proj.weight.data.transpose(0,1).contiguous()
 
         if self.xlite_weight_nz:
             self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
@@ -624,10 +690,14 @@ class Qwen3MoE(nn.Module):
                 if not is_layer_moe(self.args, layer_id):
                     layer.mlp.gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.gate_up_proj.weight)
                     layer.mlp.down_proj.weight.data = matrix_nd2nz(layer.mlp.down_proj.weight)
-                layer.mlp.gate.weight.data = matrix_nd2nz(layer.mlp.gate.weight)
-                for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
-                    layer.mlp.experts[i].gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].gate_up_proj.weight)
-                    layer.mlp.experts[i].down_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].down_proj.weight)
+                else:
+                    layer.mlp.gate.weight.data = matrix_nd2nz(layer.mlp.gate.weight)
+                    for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
+                        layer.mlp.experts[i].gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].gate_up_proj.weight)
+                        layer.mlp.experts[i].down_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].down_proj.weight)
+                    if self.args.n_shared_experts != 0:
+                        layer.mlp.shared_experts.gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.shared_experts.gate_up_proj.weight)
+                        layer.mlp.shared_experts.down_proj.weight.data = matrix_nd2nz(layer.mlp.shared_experts.down_proj.weight)
             torch.npu.empty_cache()
 
         if forward_backend == "xlite":
@@ -655,14 +725,16 @@ class Qwen3MoE(nn.Module):
         config.n_heads = args.n_heads
         config.n_kv_heads = args.n_kv_heads
         config.head_dim = args.head_dim
-        config.rope_head_dim = args.head_dim
+        config.rope_head_dim = int(args.head_dim * args.partial_rotary_factor)
         config.norm_eps = args.norm_eps
         config.rope_theta = args.rope_theta
         config.softmax_scale = args.head_dim ** -0.5
-        config.n_dense_layers = 0
+        config.n_dense_layers = args.first_k_dense_replace
         config.n_routed_experts = args.n_routed_experts
-        config.n_shared_experts = 0
+        config.n_shared_experts = args.n_shared_experts
         config.n_act_experts = args.n_activated_experts
+        config.n_expert_groups = args.n_group
+        config.n_limited_groups = args.topk_group
         config.intermediate_size = args.inter_dim
         config.moe_intermediate_size = args.moe_inter_dim
         config.def_tp_size = world_size
@@ -678,7 +750,8 @@ class Qwen3MoE(nn.Module):
         config.qkv_bias = args.qkv_bias
         config.qk_norm = args.qk_norm
         config.norm_topk_prob = args.norm_topk_prob
-        config.scoring_func = ScoringFuncSoftmax
+        config.scoring_func = ScoringFuncSigmoid
+        config.route_scale = args.routed_scaling_factor
         config.experts_weight_transpose = True
 
         self.xlite_model = Model()
@@ -710,6 +783,11 @@ class Qwen3MoE(nn.Module):
             for i in range(args.n_layers)
             if is_layer_moe(self.args, i)
         ]
+        self.xlite_model.gate_bias = [
+            self.layers[i].mlp.gate.e_score_correction_bias
+            for i in range(args.n_layers)
+            if is_layer_moe(self.args, i)
+        ]
         self.xlite_model.re_up_gate = [
             self.layers[i].mlp.experts[j].gate_up_proj.weight
             for i in range(args.n_layers)
@@ -721,6 +799,16 @@ class Qwen3MoE(nn.Module):
             for i in range(args.n_layers)
             if is_layer_moe(self.args, i)
             for j in range(self.layers[i].mlp.experts_start_idx, self.layers[i].mlp.experts_end_idx)
+        ]
+        self.xlite_model.se_up_gate = [
+            self.layers[i].mlp.shared_experts.gate_up_proj.weight
+            for i in range(args.n_layers)
+            if is_layer_moe(self.args, i)
+        ]
+        self.xlite_model.se_down = [
+            self.layers[i].mlp.shared_experts.down_proj.weight
+            for i in range(args.n_layers)
+            if is_layer_moe(self.args, i)
         ]
         self.xlite_model.init(config, rank)
 

@@ -178,6 +178,19 @@ function run_deepseek()
     # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-expert-int8-8layers-8d/ --config tests/test_config.json --input tests/test.json
 }
 
+function run_glm4_moe_30B()
+{
+    echo '{
+        "moe_ep_size": 16,
+        "moe_tp_size": 1,
+        "dtype": "bfloat16",
+        "max_batch_size": 1,
+        "max_seq_len": 1024
+    }' > tests/test_config.json
+    # modify master_addr, node_rank in node1
+    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path /mnt/nvme0n1/models/GLM-4.7/ --config tests/test_config.json --interactive
+}
+
 #run_qwen2.5_0.5B
 run_qwen2_32B
 run_qwen3_32B
@@ -185,4 +198,5 @@ run_qwen3_moe_30B
 run_llama_7B
 run_llama_13B
 run_llama_34B
+run_glm4_moe_30B
 #run_deepseek
