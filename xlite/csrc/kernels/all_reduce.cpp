@@ -21,7 +21,7 @@ public:
     }
 
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId,
-                                uint32_t rankSize, uint64_t generation, GM_ADDR param)
+                                uint32_t rankSize, uint64_t generation, GM_ADDR param, uint32_t copySize)
     {
         __gm__ struct XcclParam *xcclParam = (__gm__ struct XcclParam *)param;
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
@@ -42,13 +42,8 @@ public:
         this->offsetCurrRank = countPerRank * myRankId;
         this->generation = generation;
         this->skipMyRank = input == output ? true : false;
-        this->copySize = COPY_SIZE;
-        uint32_t corePerRank = coreNum / rankSize;
-        if (corePerRank > 1 && this->copySize * corePerRank > MAX_TOTAL_COPY_SIZE) {
-            this->copySize = MAX_TOTAL_COPY_SIZE / corePerRank;
-            this->copySize = ROUND_DOWN(this->copySize, UB_BUF_ALIGN_SIZE);
-        }
-        this->copyCount = this->copySize / sizeof(Dtype);
+        copySize = ROUND_DOWN(copySize, UB_BUF_ALIGN_SIZE);
+        this->copyCount = copySize / sizeof(Dtype);
 
         uint64_t off = 0;
         flagBuf.address_.logicPos = static_cast<uint8_t>(TPosition::VECIN);
@@ -355,7 +350,6 @@ private:
     uint32_t syncWorkStart;
     uint32_t syncWorkEnd;
     uint32_t copyCount;
-    uint32_t copySize;
     struct XcclParam param;
     bool skipMyRank;
 };
@@ -363,10 +357,10 @@ private:
 #define ALLREDUCE_FUNC_DEFINE(dtype)                                                       \
     extern "C" __global__ __aicore__ void allreduce_##dtype(                               \
         GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId, uint32_t rankSize, \
-        uint64_t generation, GM_ADDR param)                                                \
+        uint64_t generation, GM_ADDR param, uint32_t copySize)                             \
     {                                                                                      \
         AllReduce<dtype> op;                                                               \
-        op.Init(input, output, count, rankId, rankSize, generation, param);                \
+        op.Init(input, output, count, rankId, rankSize, generation, param, copySize);      \
         op.Run();                                                                          \
     }
 
