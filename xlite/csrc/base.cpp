@@ -73,9 +73,9 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             if (val >= 0) {
                 std::cout << " ";
             }
-            std::cout << std::fixed << std::setprecision(4);
+            std::cout << std::scientific << std::setprecision(4);
             std::cout << val;
-            std::cout.unsetf(std::ios::fixed);
+            std::cout.unsetf(std::ios::scientific);
             break;
         }
         case BF16: {
@@ -86,9 +86,9 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             if (val >= 0) {
                 std::cout << " ";
             }
-            std::cout << std::fixed << std::setprecision(4);
+            std::cout << std::scientific << std::setprecision(4);
             std::cout << val;
-            std::cout.unsetf(std::ios::fixed);
+            std::cout.unsetf(std::ios::scientific);
             break;
         }
         case FP32: {
@@ -96,9 +96,9 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             if (val >= 0) {
                 std::cout << " ";
             }
-            std::cout << std::fixed << std::setprecision(4);
+            std::cout << std::scientific << std::setprecision(4);
             std::cout << val;
-            std::cout.unsetf(std::ios::fixed);
+            std::cout.unsetf(std::ios::scientific);
             break;
         }
         case CPLXF: {
