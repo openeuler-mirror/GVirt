@@ -142,9 +142,9 @@ class Model:
         self,
         rt: Runtime,
         input: torch.Tensor,
+        deepstack_input: List[torch.Tensor],
         attn_meta: ModelAttnMeta | AttnMeta,
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]],
-        deepstack_input: List[torch.Tensor],
         freqs_cis: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int) -> None: ...
