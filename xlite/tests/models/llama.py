@@ -264,8 +264,7 @@ class MLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.gate_up_proj(x)
         y1, y3 = torch.split(y, y.shape[-1] // 2, dim=-1)
-        out = y1 * F.sigmoid(y1) * y3
-        return self.down_proj(out)
+        return self.down_proj(F.silu(y1) * y3)
 
 
 class Block(nn.Module):
