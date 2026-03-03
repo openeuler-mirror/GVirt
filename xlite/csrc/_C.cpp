@@ -418,8 +418,7 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnM
     ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
-void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
-                                      XModelAttnMeta &attnMeta,
+void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                       std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                                       at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
                                       std::vector<at::Tensor> &deepstackInput)
@@ -466,8 +465,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input,
     }
 }
 
-void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
-                                        CModelAttnMeta &attnMeta,
+void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                                         std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                                         at::Tensor &freqsCis, at::Tensor &output,
                                         uint64_t currStream,
@@ -480,8 +478,8 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input,
     _attnMeta.isPrefills = attnMeta.isPrefills;
     _attnMeta.blockTables = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
-    ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output,
-                            currStream, deepstackInput);
+    ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
+                            deepstackInput);
 }
 
 size_t _CModel::GetTensorPoolSize(int dbg)
@@ -865,16 +863,14 @@ PYBIND11_MODULE(_C, m)
              py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbeds,
-             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"),
-             py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
-             py::arg("deepstack_input") = std::vector<at::Tensor>{},
+             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
              py::call_guard<py::gil_scoped_release>())
         .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbedsV1,
-             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"),
-             py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
-             py::arg("deepstack_input") = std::vector<at::Tensor>{},
+             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
              py::call_guard<py::gil_scoped_release>())
         .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize, "get_tensor_pool_size",
              py::arg("dbg") = 0);
@@ -899,8 +895,8 @@ PYBIND11_MODULE(_C, m)
     m.def("silu_and_mul", &SiluAndMul);
     m.def("rope_and_cache", &RopeAndCache, "rope_and_cache", py::arg("rt"), py::arg("inout"),
           py::arg("k_cache"), py::arg("v_cache"), py::arg("position"), py::arg("cosin"),
-          py::arg("slot_mapping"), py::arg("n_heads"), py::arg("n_kv_heads"),
-          py::arg("head_dim"), py::arg("rot_dim"), py::arg("block_size"), py::arg("is_neox"),
+          py::arg("slot_mapping"), py::arg("n_heads"), py::arg("n_kv_heads"), py::arg("head_dim"),
+          py::arg("rot_dim"), py::arg("block_size"), py::arg("is_neox"),
           py::arg("mrope_mask_h") = 0, py::arg("mrope_mask_w") = 0);
     m.def("attention", &Attention);
     m.def("add_and_rmsnorm", &AddAndRMSNorm);
