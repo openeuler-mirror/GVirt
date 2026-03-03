@@ -112,6 +112,10 @@ public:
                 (uint64_t)input - (uint64_t)this->param.ipcXTensorMems[myRankId];
             localIpcMemData.outputOffset =
                 (uint64_t)output - (uint64_t)this->param.ipcXTensorMems[myRankId];
+            if (this->skipMyRank) {
+                localIpcMemData.inputOffset =
+                    localIpcMemData.outputOffset + r * countPerRank * sizeof(Dtype);
+            }
             inputBuf[r].SetGlobalBuffer(
                 (__gm__ Dtype *)(this->param.ipcXTensorMems[r] + localIpcMemData.inputOffset));
             outputBuf[r].SetGlobalBuffer(
