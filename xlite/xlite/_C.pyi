@@ -142,12 +142,12 @@ class Model:
         self,
         rt: Runtime,
         input: torch.Tensor,
-        deepstack_input: List[torch.Tensor],
         attn_meta: ModelAttnMeta | AttnMeta,
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]],
         freqs_cis: torch.Tensor,
         output: torch.Tensor,
-        curr_stream: int) -> None: ...
+        curr_stream: int,
+        deepstack_input: List[torch.Tensor] = []) -> None: ...
 
     def get_tensor_pool_size(
         self,
