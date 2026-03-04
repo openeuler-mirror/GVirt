@@ -6,12 +6,6 @@
 
 #include "base.h"
 
-enum XModelAttnType {
-    XMODEL_ATTN_MHA,
-    XMODEL_ATTN_MLA,
-    XMODEL_ATTN_MAX_TYPE,
-};
-
 enum XModelRopeType {
     XMODEL_ROPE_NEOX,
     XMODEL_ROPE_GPTJ,
@@ -77,22 +71,6 @@ struct XModelConfig {
     bool weightNZ = false;
 };
 
-struct XModelAttnMeta {
-    int version = 0;
-
-    std::vector<uint32_t> lens;
-    std::vector<uint32_t> cachedLens;
-    std::vector<bool> isPrefills;
-
-    /* only for version 0 */
-    std::vector<std::vector<uint32_t>> blockTables;
-
-    /* only for version 1 */
-    XTensor vllmBlockTables;
-    XTensor vllmSlotMapping;
-    XTensor vllmPosition;
-};
-
 #define TILESIZE_OF_QUERY 128  // the tile size of query
 #define AIC_MAX_NUM 25
 
@@ -150,7 +128,6 @@ public:
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
-    void PrepareAttn(XRuntime &rt, XModelAttnMeta &attnMeta);
     std::tuple<XTensor &, XTensor &, XTensor &> ForwardAttnMLACommon(
         XRuntime &rt, uint32_t layer, std::vector<std::pair<XTensor, XTensor>> &kvCache,
         XTensor &freqsCis, XTensor &hiddenState);
@@ -207,25 +184,8 @@ private:
     std::vector<XTensor> _moeREDownScale;
 
     // ATTN
-    uint32_t _realM;
-    uint32_t _maxNumBlocks;
-    int _prefillBatch;
-    int _batch;
-    int _prefillLen;
-    int _prefillLenPad;
     uint64_t _mropeMaskH;
     uint64_t _mropeMaskW;
-    XTensor _attnPosition;
-    XTensor _attnBlockTables;
-    XTensor _attnSlotMapping;
-    XTensor _position;
-    XTensor _blockTables;
-    XTensor _slotMapping;
-    XTensor _prefillIdx;
-    XTensor _prefillLastIdx;
-    XTensor _cachedLens;
-    XTensor _lens;
-    XTensor _cumPromptLens;
     XTensor _vGather;
     XTensor _a2v;
     XTensor _v2a;
