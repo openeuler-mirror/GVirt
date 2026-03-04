@@ -43,6 +43,10 @@ def run_python_checks(root_dir, args):
         cmd.append('--no-flake8')
     if args.no_python_mypy:
         cmd.append('--no-mypy')
+    if args.use_cache:
+        cmd.append('--use-cache')
+    if args.clear_cache:
+        cmd.append('--clear-cache')
     
     result = subprocess.run(cmd)
     return result.returncode == 0
@@ -94,6 +98,10 @@ Examples:
                        help='Skip Python flake8 check')
     parser.add_argument('--no-python-mypy', action='store_true',
                        help='Skip Python mypy check')
+    parser.add_argument('--use-cache', action='store_true',
+                       help='Enable caching for Python checks')
+    parser.add_argument('--clear-cache', action='store_true',
+                       help='Clear cache before running Python checks')
     
     args = parser.parse_args()
     
