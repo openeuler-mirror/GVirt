@@ -306,6 +306,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, int64_t maxM, int64_t maxBa
 {
     if (!_attnInitialized) {
         InitAttn(maxM, maxBatch, maxSeqLen, blockSize);
+        _attnInitialized = true;
     }
     uint32_t batch = attnMeta.lens.size();
     std::vector<uint32_t> lens(batch);
