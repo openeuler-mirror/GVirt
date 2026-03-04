@@ -14,8 +14,13 @@
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
 #define SEQLEN_64 64
-#define SEQLEN_8K 8192
-#define SEQLEN_19K 19456
+#define SEQLEN_12K 12288
+#define SEQLEN_20K 20480
+#define SEQLEN_24K 24576
+#define SEQLEN_30K 30720
+#define SEQLEN_48K 49152
+#define SEQLEN_60K 61440
+#define SEQLEN_96K 98304
 // #define XLITE_KERNEL_DEBUG
 
 template <typename Dtype>
@@ -267,6 +272,32 @@ public:
         }
     }
 
+    __aicore__ inline uint32_t GetOptimalM0(int queryLen, int cachedLen)
+    {
+        if (queryLen <= SEQLEN_64) {
+            return 16;
+        } else {
+            int totalLen = queryLen + cachedLen;
+            if (totalLen <= SEQLEN_12K) {
+                return 128;
+            } else if (totalLen <= SEQLEN_20K) {
+                return 112;
+            } else if (totalLen <= SEQLEN_24K) {
+                return 96;
+            } else if (totalLen <= SEQLEN_30K) {
+                return 80;
+            } else if (totalLen <= SEQLEN_48K) {
+                return 64;
+            } else if (totalLen <= SEQLEN_60K) {
+                return 48;
+            } else if (totalLen <= SEQLEN_96K) {
+                return 32;
+            } else {
+                return 16;
+            }
+        }
+    }
+
     __aicore__ inline void RunAic()
     {
         set_padding(0);
@@ -292,20 +323,11 @@ public:
                 (__gm__ uint32_t *)((uint64_t)blockTables +
                                     batchIdx * maxNumBlocks * sizeof(uint32_t));
 
-            uint32_t m0 = MAX_M0;
-            if (queryLen <= SEQLEN_64) {
-                m0 = 16;
-            } else {
-                if (cachedLen < 0) {
-                    cachedLen = cachedLens[batchIdx];
-                }
-                int totalLen = queryLen + cachedLen;
-                if (totalLen > SEQLEN_19K) {
-                    m0 = 32;
-                } else if (totalLen > SEQLEN_8K) {
-                    m0 = 64;
-                }
+            if (cachedLen < 0) {
+                cachedLen = cachedLens[batchIdx];
             }
+
+            uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
             int queryTileSize = m0 / headNumInGroup;
             if (queryTileSize == 0) {
                 queryTileSize = 1;
@@ -403,20 +425,11 @@ public:
                 (__gm__ uint32_t *)((uint64_t)blockTables +
                                     batchIdx * maxNumBlocks * sizeof(uint32_t));
 
-            uint32_t m0 = MAX_M0;
-            if (queryLen <= SEQLEN_64) {
-                m0 = 16;
-            } else {
-                if (cachedLen < 0) {
-                    cachedLen = cachedLens[batchIdx];
-                }
-                int totalLen = queryLen + cachedLen;
-                if (totalLen > SEQLEN_19K) {
-                    m0 = 32;
-                } else if (totalLen > SEQLEN_8K) {
-                    m0 = 64;
-                }
+            if (cachedLen < 0) {
+                cachedLen = cachedLens[batchIdx];
             }
+
+            uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
             int queryTileSize = m0 / headNumInGroup;
             if (queryTileSize == 0) {
                 queryTileSize = 1;
