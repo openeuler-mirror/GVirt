@@ -13,14 +13,16 @@
 // 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM
 // Workloads》 [ASPLOS 2026]
 template <typename Dtype>
-__aicore__ inline void calc_cossin_cast(
-    __gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *local_buf, __ubuf__ Dtype *sin_buf,
-    __ubuf__ Dtype *cos_buf, __ubuf__ Dtype *tmp_buf, __ubuf__ float *local_fp32_buf,
-    __ubuf__ float *calc_fp32_buf, __ubuf__ float *sin_fp32_buf, __ubuf__ float *cos_fp32_buf,
-    __ubuf__ float *sin_h_buf, __ubuf__ float *cos_h_buf, __ubuf__ float *sin_w_buf,
-    __ubuf__ float *cos_w_buf, uint32_t embed_dim, uint32_t rot_dim,
-    int event_id, uint32_t n_head, uint32_t head_size, uint32_t pos_dim, uint64_t mrope_mask_h,
-    uint64_t mrope_mask_w, uint64_t copy_param)
+__aicore__ inline void calc_cossin_cast(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *local_buf,
+                                        __ubuf__ Dtype *sin_buf, __ubuf__ Dtype *cos_buf,
+                                        __ubuf__ Dtype *tmp_buf, __ubuf__ float *local_fp32_buf,
+                                        __ubuf__ float *calc_fp32_buf, __ubuf__ float *sin_fp32_buf,
+                                        __ubuf__ float *cos_fp32_buf, __ubuf__ float *sin_h_buf,
+                                        __ubuf__ float *cos_h_buf, __ubuf__ float *sin_w_buf,
+                                        __ubuf__ float *cos_w_buf, uint32_t embed_dim,
+                                        uint32_t rot_dim, int event_id, uint32_t n_head,
+                                        uint32_t head_size, uint32_t pos_dim, uint64_t mrope_mask_h,
+                                        uint64_t mrope_mask_w, uint64_t copy_param)
 {
     uint64_t calc_size = n_head * head_size;
     uint64_t head_stride = DIV_ROUND_UP(head_size * sizeof(float), BLOCK_SIZE);
@@ -65,20 +67,26 @@ __aicore__ inline void calc_cossin_cast(
         // fp32时，需计算的sin大小为 headDim(128) * 4 Byte = 512 Byte, 为VECTOR_MAX_BYTESIZE(256
         // Byte)的2倍, 所以计算时分两次计算 相邻两次执行，目的操作数相同block地址步长为 512 / 32
         // (1个datablock长度为32Byte) = 16
-        vmul(calc_fp32_buf, local_fp32_buf, sin_fp32_buf, n_head, 1, 1, 1, head_stride, head_stride, 0);
-        vmul(calc_fp32_buf + embed_dim, local_fp32_buf + embed_dim, sin_fp32_buf, n_head, 1, 1, 1, head_stride, head_stride, 0);
+        vmul(calc_fp32_buf, local_fp32_buf, sin_fp32_buf, n_head, 1, 1, 1, head_stride, head_stride,
+             0);
+        vmul(calc_fp32_buf + embed_dim, local_fp32_buf + embed_dim, sin_fp32_buf, n_head, 1, 1, 1,
+             head_stride, head_stride, 0);
         pipe_barrier(PIPE_V);
         // q * cos (q : numHeads * headDim  cos: 1 * headDim)
-        vmul(local_fp32_buf, local_fp32_buf, cos_fp32_buf, n_head, 1, 1, 1, head_stride, head_stride, 0);
-        vmul(local_fp32_buf + embed_dim, local_fp32_buf + embed_dim, cos_fp32_buf, n_head, 1, 1, 1, head_stride, head_stride, 0);
+        vmul(local_fp32_buf, local_fp32_buf, cos_fp32_buf, n_head, 1, 1, 1, head_stride,
+             head_stride, 0);
+        vmul(local_fp32_buf + embed_dim, local_fp32_buf + embed_dim, cos_fp32_buf, n_head, 1, 1, 1,
+             head_stride, head_stride, 0);
         pipe_barrier(PIPE_V);
     } else {
         // q * sin (q : numHeads * headDim  sin: 1 * headDim (headDim = 64))
-        vmul(calc_fp32_buf, local_fp32_buf, sin_fp32_buf, n_head, 1, 1, 1, head_stride, head_stride, 0);
+        vmul(calc_fp32_buf, local_fp32_buf, sin_fp32_buf, n_head, 1, 1, 1, head_stride, head_stride,
+             0);
         pipe_barrier(PIPE_V);
 
         // q * cos (q : numHeads * headDim  cos: 1 * headDim)
-        vmul(local_fp32_buf, local_fp32_buf, cos_fp32_buf, n_head, 1, 1, 1, head_stride, head_stride, 0);
+        vmul(local_fp32_buf, local_fp32_buf, cos_fp32_buf, n_head, 1, 1, 1, head_stride,
+             head_stride, 0);
         pipe_barrier(PIPE_V);
     }
 
@@ -102,11 +110,13 @@ __aicore__ inline void calc_cossin_cast(
     }
 
     // q * cos - q * sin > q[:half] * cos - q[half:] * sin
-    vsub(local_fp32_buf, local_fp32_buf, calc_fp32_buf + embed_dim, n_head, 1, 1, 1, head_stride, head_stride, head_stride);
+    vsub(local_fp32_buf, local_fp32_buf, calc_fp32_buf + embed_dim, n_head, 1, 1, 1, head_stride,
+         head_stride, head_stride);
     pipe_barrier(PIPE_V);
 
     // q * cos + q * sin > q[half:] * cos + q[:half] * sin
-    vadd(local_fp32_buf + embed_dim, local_fp32_buf + embed_dim, calc_fp32_buf, n_head, 1, 1, 1, head_stride, head_stride, head_stride);
+    vadd(local_fp32_buf + embed_dim, local_fp32_buf + embed_dim, calc_fp32_buf, n_head, 1, 1, 1,
+         head_stride, head_stride, head_stride);
     pipe_barrier(PIPE_V);
 
     if (rot_dim == HEAD_SIZE_64) {
@@ -124,9 +134,10 @@ __aicore__ inline void calc_cossin(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *lo
                                    __ubuf__ Dtype *calc_buf, __ubuf__ Dtype *sin_buf,
                                    __ubuf__ Dtype *cos_buf, __ubuf__ Dtype *sin_h_buf,
                                    __ubuf__ Dtype *cos_h_buf, __ubuf__ Dtype *sin_w_buf,
-                                   __ubuf__ Dtype *cos_w_buf, uint32_t embed_dim, uint32_t rot_dim, int event_id,
-                                   uint32_t n_head, uint32_t head_size, uint32_t pos_dim, uint64_t mrope_mask_h,
-                                   uint64_t mrope_mask_w, uint64_t copy_param)
+                                   __ubuf__ Dtype *cos_w_buf, uint32_t embed_dim, uint32_t rot_dim,
+                                   int event_id, uint32_t n_head, uint32_t head_size,
+                                   uint32_t pos_dim, uint64_t mrope_mask_h, uint64_t mrope_mask_w,
+                                   uint64_t copy_param)
 {
     uint64_t head_stride = DIV_ROUND_UP(head_size * sizeof(float16_t), BLOCK_SIZE);
     copy_gm_to_ubuf(local_buf, gm_buf_loop, copy_param);
@@ -179,11 +190,13 @@ __aicore__ inline void calc_cossin(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *lo
     }
 
     // k * cos - k * sin > k[:half] * cos - k[half:] * sin
-    vsub(local_buf, local_buf, calc_buf + embed_dim, n_head, 1, 1, 1, head_stride, head_stride, head_stride);
+    vsub(local_buf, local_buf, calc_buf + embed_dim, n_head, 1, 1, 1, head_stride, head_stride,
+         head_stride);
     pipe_barrier(PIPE_V);
 
     // k * cos + k * sin > k[half:] * cos + k[:half] * sin
-    vadd(local_buf + embed_dim, local_buf + embed_dim, calc_buf, n_head, 1, 1, 1, head_stride, head_stride, head_stride);
+    vadd(local_buf + embed_dim, local_buf + embed_dim, calc_buf, n_head, 1, 1, 1, head_stride,
+         head_stride, head_stride);
     pipe_barrier(PIPE_V);
 
     set_mask_norm();
@@ -296,10 +309,8 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
     uint32_t calcbuf_start = ROUND_UP(cossin_start + ubuf_num * cossin_blocksize, BLOCK_SIZE);
     if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
         uint64_t offset = 0;
-        uint32_t q_fp32_blocksize =
-            ROUND_UP(q_size * sizeof(float), BLOCK_SIZE);
-        uint32_t kv_fp32_blocksize =
-            ROUND_UP(kv_size * sizeof(float), BLOCK_SIZE);
+        uint32_t q_fp32_blocksize = ROUND_UP(q_size * sizeof(float), BLOCK_SIZE);
+        uint32_t kv_fp32_blocksize = ROUND_UP(kv_size * sizeof(float), BLOCK_SIZE);
         uint32_t cossin_fp32_blocksize = ROUND_UP(rot_dim * sizeof(float), BLOCK_SIZE);
 
         query_calc_dtype_ubuf_addr = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)calcbuf_start);
@@ -542,8 +553,8 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
                             sin_dtype_ubuf_addr[event_id], cos_dtype_ubuf_addr[event_id],
                             sin_mrope_h_ubuf_addr[event_id], cos_mrope_h_ubuf_addr[event_id],
                             sin_mrope_w_ubuf_addr[event_id], cos_mrope_w_ubuf_addr[event_id],
-                            embed_dim, rot_dim, event_id, num_kv_heads, head_size, pos_dim, mrope_mask_h, mrope_mask_w,
-                            dmi_cfg_kv);
+                            embed_dim, rot_dim, event_id, num_kv_heads, head_size, pos_dim,
+                            mrope_mask_h, mrope_mask_w, dmi_cfg_kv);
             }
             set_flag(PIPE_V, PIPE_MTE3, event_id);
             wait_flag(PIPE_V, PIPE_MTE3, event_id);
@@ -578,8 +589,8 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
                             sin_dtype_ubuf_addr[event_id], cos_dtype_ubuf_addr[event_id],
                             sin_mrope_h_ubuf_addr[event_id], cos_mrope_h_ubuf_addr[event_id],
                             sin_mrope_w_ubuf_addr[event_id], cos_mrope_w_ubuf_addr[event_id],
-                            embed_dim, rot_dim, event_id, num_heads, head_size, pos_dim, mrope_mask_h, mrope_mask_w,
-                            dmi_cfg_q);
+                            embed_dim, rot_dim, event_id, num_heads, head_size, pos_dim,
+                            mrope_mask_h, mrope_mask_w, dmi_cfg_q);
                 vmuls(query_dtype_ubuf_addr[event_id], query_dtype_ubuf_addr[event_id], scale,
                       q_repeat, 1, 1, 8, 8);
                 pipe_barrier(PIPE_V);
