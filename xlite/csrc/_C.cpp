@@ -389,13 +389,28 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
                            TensorPtr(kvCache[i].second));
     }
 
-    if (currStream != 0) {
+    if (currStream != 0 && rt.taskId == 0) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
     }
 
+    if (rt.multiTaskParallel && rt.taskId == 1) {
+        rt.NotifyWaitPeerStream();
+    }
+
     _model->ForwardAndGetLogits(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis,
                                 _output);
+
+    if (rt.multiTaskParallel) {
+        if (rt.taskId == 0) {
+            rt.NotifyRecordPeerStream();
+            rt.NotifyWaitPeerStream();
+        }
+        if (rt.taskId == 1) {
+            rt.NotifyRecordPeerStream();
+            return;
+        }
+    }
 
     if (currStream != 0) {
         rt.EventRecordCurrStream(currAclStream);
@@ -744,8 +759,13 @@ PYBIND11_MODULE(_C, m)
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(), py::arg("devid"),
              py::arg("size") = 0, py::arg("rank") = 0, py::arg("tp_size") = 1,
              py::arg("dp_size") = 1)
+        .def_readwrite("task_id", &XRuntime::taskId)
+        .def_readwrite("notify", &XRuntime::notify)
+        .def_readwrite("peer_notify", &XRuntime::peerNotify)
+        .def_readwrite("multi_task_parallel", &XRuntime::multiTaskParallel)
         .def("update_core_num", &XRuntime::UpdateCoreNum)
-        .def("init_tensor_pool", &XRuntime::InitTensorPool);
+        .def("init_tensor_pool", &XRuntime::InitTensorPool)
+        .def("set_current_context", &XRuntime::SetCurrentContext);
 
     py::class_<XModelConfig>(m, "ModelConfig")
         .def(py::init<>())

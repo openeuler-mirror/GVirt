@@ -336,6 +336,9 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     XliteOpMatmul(rt, attnOutput, attnOut[layer], hiddenState, _c.weightNZ);
 
     if (_c.defTpSize > 1) {
+        if (rt.multiTaskParallel) {
+            rt.NotifyRecordPeerStream();
+        }
         if (rt.enableCommOptimize) {
             XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
         } else {
@@ -379,6 +382,9 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 
     XliteOpMatmul(rt, attn, attnOut[layer], hiddenState, _c.weightNZ);
     if (_c.defTpSize > 1) {
+        if (rt.multiTaskParallel) {
+            rt.NotifyRecordPeerStream();
+        }
         if (rt.enableCommOptimize) {
             XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
         } else {
@@ -414,6 +420,9 @@ void XModel::ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &h
     XliteOpMatmul(rt, h2, down, hiddenState, _c.weightNZ);
 
     if (withAllReduce && _c.defTpSize > 1) {
+        if (rt.multiTaskParallel) {
+            rt.NotifyRecordPeerStream();
+        }
         if (rt.enableCommOptimize) {
             XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
         } else {
@@ -553,6 +562,9 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     }
 
     if (_c.defTpSize > 1) {
+        if (rt.multiTaskParallel) {
+            rt.NotifyRecordPeerStream();
+        }
         if (rt.enableCommOptimize) {
             XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
         } else {
@@ -599,6 +611,9 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, mlpNorm[i], _c.normEps,
                              rt.hiddenStateSlice);
         XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP);
+        if (rt.multiTaskParallel) {
+            rt.NotifyWaitPeerStream();
+        }
         ForwardFFN(rt, i, h);
         if (i < _c.deepstackNumLevel) {
             XliteOpAdd(rt, h, deepstackInputEmbeds[i], h);
@@ -607,6 +622,9 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
             XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, attnNorm[i + 1], _c.normEps,
                                  rt.hiddenStateSlice);
             XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP);
+        }
+        if (rt.multiTaskParallel) {
+            rt.NotifyWaitPeerStream();
         }
     }
     XliteOpAddAndRmsNorm(rt, xSlice, rt.hiddenStateSlice, norm, _c.normEps, rt.hiddenStateSlice);
@@ -651,7 +669,7 @@ void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                    std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                    XTensor &h)
 {
-    if (_c.defTpSize > 1 && h.shape[0] >= rt.commOptimizeLen) {
+    if (_c.defTpSize > 1 && (h.shape[0] >= rt.commOptimizeLen || rt.multiTaskParallel)) {
         XTensor &xPad = rt.pool->GetTensor({ROUND_UP(h.shape[0], _c.defTpSize), _c.hiddenSize},
                                            embed.dtype, DBG_LOC);
         XTensor x;

@@ -14,6 +14,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
+import threading
+import queue
+from concurrent.futures import Future
 from tests.models.weight_utils import (hf_model_weights_iterator,
                                        convert_pyslice_to_tensor,
                                        load_tensor_parallel_weights,
@@ -300,6 +303,7 @@ class Llama(nn.Module):
         self.norm = RMSNorm(args.dim, args.norm_eps)
         self.lm_head = ColumnParallelLinear(args.dim, args.vocab_size, bias=False)
         self.freqs_cis = precompute_freqs_cis(args.head_dim, args.max_seq_len, args.rope_theta)
+        self.multi_task_parallel = (os.getenv("MULTI_TASK_PARALLEL", "0") == "1")
 
 
     @torch.inference_mode()
@@ -332,11 +336,59 @@ class Llama(nn.Module):
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
+    class PersistentThread(threading.Thread):
+        def __init__(self, model, task_id):
+            super().__init__(daemon=True)
+            self.xlite_model = model.xlite_model
+            self.task_queue = queue.Queue()
+            self.xlite_rt = model.xlite_rt_list[task_id]
+            self.xlite_rt.task_id = task_id
+
+        def add_task(self, args):
+            event = threading.Event()
+            self.task_queue.put((args, event))
+            return event
+
+        @torch.inference_mode()
+        def run(self) -> None:
+            self.xlite_rt.set_current_context()
+            while True:
+                task = self.task_queue.get()
+                args, event = task
+                tokens, attn_meta, xlite_kv_cache, freqs_cis, logits, stream = args
+                self.xlite_rt.multi_task_parallel = True
+                self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, freqs_cis, logits, stream)
+                event.set()
+
+    @torch.inference_mode()
+    def forward_xlite_parallel(self, tokens: torch.Tensor, block_num_offset: int, task_id: int, start_pos: int = 0):
+        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device)
+        tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
+        attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
+        attn_meta.block_tables = attn_meta.block_tables + np.int32(block_num_offset)
+        stream = torch.npu.current_stream().npu_stream
+        event = self.thread_pool[task_id].add_task(args = (tokens.flatten(), attn_meta, self.xlite_kv_cache, self.freqs_cis, logits, stream))
+        return logits, event
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         if forward_backend == "xlite":
-            return self.forward_xlite(tokens, start_pos)
+            if not self.multi_task_parallel or tokens.size(0) == 1 or tokens.size(0) * tokens.size(1) < 1024:
+                self.xlite_rt.multi_task_parallel = False
+                return self.forward_xlite(tokens, start_pos)
+
+            mid = tokens.size(0) // 2
+            block_num_offset = (self.args.max_seq_len + block_size - 1) // block_size * mid
+            tokens0 = tokens[:mid]
+            tokens1 = tokens[mid:]
+            logits0, event0 = self.forward_xlite_parallel(tokens0, 0, 0, start_pos)
+            logits1, event1 = self.forward_xlite_parallel(tokens1, block_num_offset, 1, start_pos)
+            event0.wait()
+            event1.wait()
+            logits0 = logits0.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
+            logits1 = logits1.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
+            logits = torch.cat([logits0, logits1], dim = 0)
+            return logits
         else:
             return self.forward_naive(tokens, start_pos)
 
@@ -485,6 +537,15 @@ class Llama(nn.Module):
                 print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
                       f" KV Cache: {kv_size // 1024 // 1024} MB" +
                       f" Tensor pool: {pool_size} MB")
+
+            if self.multi_task_parallel:
+                self.xlite_rt_list = [self.xlite_rt, Runtime(local_rank, 0, rank, world_size)]
+                self.xlite_rt_list[1].init_tensor_pool(pool_size)
+                self.xlite_rt_list[0].peer_notify = self.xlite_rt_list[1].notify
+                self.xlite_rt_list[1].peer_notify = self.xlite_rt_list[0].notify
+                self.thread_pool = [self.PersistentThread(model = self, task_id = i) for i in range(2)]
+                for thread in self.thread_pool:
+                    thread.start()
 
     def init_xlite_model(self, args: ModelArgs):
         config = ModelConfig()

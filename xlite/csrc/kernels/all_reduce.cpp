@@ -21,7 +21,8 @@ public:
     }
 
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId,
-                                uint32_t rankSize, uint64_t generation, GM_ADDR param, uint32_t copySize)
+                                uint32_t rankSize, uint64_t generation, GM_ADDR param,
+                                uint32_t copySize)
     {
         __gm__ struct XcclParam *xcclParam = (__gm__ struct XcclParam *)param;
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);

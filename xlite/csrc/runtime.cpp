@@ -71,6 +71,8 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     originAivNum = aivNum;
 
     CHECK_ACL(aclrtCreateEvent(&_event));
+    CHECK_ACL(aclrtCreateNotify(&notify, 0));
+    CHECK_ACL(aclrtGetCurrentContext(&context));
 
     const char *envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
     if (envCommOptimizeLen) {
@@ -91,6 +93,7 @@ XRuntime::~XRuntime(void)
 
     delete pool;
     CHECK_ACL(aclrtDestroyEvent(_event));
+    CHECK_ACL(aclrtDestroyNotify(notify));
     CHECK_ACL(aclrtDestroyStream(stream));
     CHECK_ACL(aclrtResetDevice(_devid));
     if (!_init_outside) {
@@ -197,9 +200,10 @@ int XRuntime::InitXcclComm(void)
     }
     delete sock;
 
+    static uint32_t portOffset = 0;
     if (_tpSize > 1) {
         ip = _ips[ROUND_DOWN(_rankId, _tpSize) / _nDevPerNode];
-        port = _port + _rankId / _tpSize;
+        port = _port + _rankId / _tpSize + portOffset;
         _tpXcclComm = new XcclComm(_rankId % _tpSize, _tpSize);
         for (uint32_t rank = 0; rank < _tpSize; rank++) {
             ipcXTensorMems[rank] = _ipcXTensorMems[ROUND_DOWN(_rankId, _tpSize) + rank];
@@ -211,7 +215,7 @@ int XRuntime::InitXcclComm(void)
 
     if (_dpSize > 1) {
         ip = _ips[_rankId % _tpSize / _nDevPerNode];
-        port = _port + XLITE_DP_PORT_OFFSET + _rankId % _tpSize;
+        port = _port + XLITE_DP_PORT_OFFSET + _rankId % _tpSize + portOffset;
         _dpXcclComm = new XcclComm(_rankId / _tpSize, _dpSize);
         for (uint32_t rank = 0; rank < _dpSize; rank++) {
             ipcXTensorMems[rank] = _ipcXTensorMems[rank * _tpSize + _rankId % _tpSize];
@@ -220,6 +224,7 @@ int XRuntime::InitXcclComm(void)
             return -EFAULT;
         }
     }
+    portOffset += 500;
 
     return 0;
 }
@@ -235,9 +240,10 @@ int XRuntime::InitHcclComm(void)
         return ret;
     }
 
+    static uint32_t portOffset = 0;
     if (_tpSize > 1) {
         ip = _ips[ROUND_DOWN(_rankId, _tpSize) / _nDevPerNode];
-        port = _port + _rankId / _tpSize;
+        port = _port + _rankId / _tpSize + portOffset;
 
         if (_rankId % _tpSize == 0) {
             CHECK_HCCL_RET(HcclGetRootInfo(&rootInfo), -EFAULT);
@@ -251,7 +257,7 @@ int XRuntime::InitHcclComm(void)
 
     if (_dpSize > 1) {
         ip = _ips[_rankId % _tpSize / _nDevPerNode];
-        port = _port + XLITE_DP_PORT_OFFSET + _rankId % _tpSize;
+        port = _port + XLITE_DP_PORT_OFFSET + _rankId % _tpSize + portOffset;
 
         if (_rankId / _tpSize == 0) {
             CHECK_HCCL_RET(HcclGetRootInfo(&rootInfo), -EFAULT);
@@ -262,6 +268,7 @@ int XRuntime::InitHcclComm(void)
         CHECK_HCCL_RET(HcclCommInitRootInfo(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm),
                        -EFAULT);
     }
+    portOffset += 500;
 
     return 0;
 }
@@ -439,6 +446,21 @@ void XRuntime::UpdateCoreNum(float blockDimUtilization)
         static_cast<uint32_t>(std::round(static_cast<float>(originAicNum) * blockDimUtilization));
     aivNum =
         static_cast<uint32_t>(std::round(static_cast<float>(originAivNum) * blockDimUtilization));
+}
+
+void XRuntime::SetCurrentContext()
+{
+    CHECK_ACL(aclrtSetCurrentContext(context));
+}
+
+void XRuntime::NotifyWaitPeerStream()
+{
+    CHECK_ACL(aclrtWaitAndResetNotify(notify, stream, 0));
+}
+
+void XRuntime::NotifyRecordPeerStream()
+{
+    CHECK_ACL(aclrtRecordNotify(peerNotify, stream));
 }
 
 int XRuntime::InitTensorPool(size_t sizeMB)
