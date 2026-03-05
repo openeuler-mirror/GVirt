@@ -11,6 +11,8 @@
 #define XLITE_DEFAULT_PORT 10266
 #define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144
 
+typedef void *aclrtContext;
+typedef void *aclrtNotify;
 typedef void *aclrtStream;
 typedef void *aclrtEvent;
 typedef void *HcclComm;
@@ -59,6 +61,11 @@ public:
     void EventRecordCurrStream(aclrtStream currStream);
     void MemcpyH2D(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
+
+    void SetCurrentContext();
+    void NotifyWaitPeerStream();
+    void NotifyRecordPeerStream();
+
     int InitTensorPool(size_t sizeMB);
     uint32_t rankId(void)
     {
@@ -88,6 +95,12 @@ public:
     XcclComm *_tpXcclComm = nullptr;
     XcclComm *_dpXcclComm = nullptr;
 
+    // for multi-task parallel
+    bool multiTaskParallel = false;
+    uint32_t taskId = 0;
+    aclrtNotify peerNotify;
+    aclrtNotify notify;
+
     // ATTN
     bool _attnInitialized = false;
     uint32_t _realM;
@@ -115,6 +128,7 @@ private:
     void FiniXcclComm(void);
     uint32_t _devid;
     aclrtEvent _event;
+    aclrtContext context;
     bool _init_outside = false;
     uint32_t _rankId;
     uint32_t _tpSize;
