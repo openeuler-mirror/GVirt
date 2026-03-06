@@ -5,6 +5,7 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  */
+#pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
 
@@ -17,11 +18,11 @@ constexpr uint64_t MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET = 12;
 
 template <typename T>
 static __aicore__ inline void DumpBuffer(__ubuf__ T *buf, const __gm__ char *name, int size,
-                                         int step=1, int offset=0, bool toInt=false)
+                                         int step = 1, int offset = 0, bool toInt = false)
 {
 #ifdef XLITE_KERNEL_DEBUG
     printf("%s: [", name);
-    for (int i = 0; i < size; i ++) {
+    for (int i = 0; i < size; i++) {
         if (i % 10 == 0) {
             printf("\n");
         }
@@ -35,27 +36,28 @@ static __aicore__ inline void DumpBuffer(__ubuf__ T *buf, const __gm__ char *nam
 #endif
 }
 
-static __aicore__ inline void DumpBufferIndex(__ubuf__ float *buf, const __gm__ char *name, int size, int step=1)
+static __aicore__ inline void DumpBufferIndex(__ubuf__ float *buf, const __gm__ char *name,
+                                              int size, int step = 1)
 {
     DumpBuffer(buf, name, size, step, 1, true);
 }
 
-template<typename Dtype>
-class SigmoidTopK {
+template <typename Dtype>
+class SigmoidTopK
+{
 public:
     __aicore__ inline SigmoidTopK() = default;
 
-    __aicore__ inline void Init(GM_ADDR socres, GM_ADDR indices, GM_ADDR bias,
-                                float scale, GM_ADDR weightsMap, GM_ADDR routingMap,
-                                uint32_t numTokens, uint32_t numRoutedExperts,
-                                uint32_t topK, bool normTopKProb)
+    __aicore__ inline void Init(GM_ADDR socres, GM_ADDR indices, GM_ADDR bias, float scale,
+                                GM_ADDR weightsMap, GM_ADDR routingMap, uint32_t numTokens,
+                                uint32_t numRoutedExperts, uint32_t topK, bool normTopKProb)
     {
         set_mask_norm();
-        this->socresGm = (__gm__ Dtype*)socres;
-        this->biasGm = (__gm__ float*)bias;
-        this->weightsMapGm = (__gm__ Dtype*)weightsMap;
-        this->indicesGm = (__gm__ uint32_t*)indices;
-        this->routingMapGm = (__gm__ uint32_t*)routingMap;
+        this->socresGm = (__gm__ Dtype *)socres;
+        this->biasGm = (__gm__ float *)bias;
+        this->weightsMapGm = (__gm__ Dtype *)weightsMap;
+        this->indicesGm = (__gm__ uint32_t *)indices;
+        this->routingMapGm = (__gm__ uint32_t *)routingMap;
 
         this->nTokens = numTokens;
         this->nRoutedExperts = numRoutedExperts;
@@ -64,36 +66,37 @@ public:
         this->scale = scale;
 
         uint32_t pad = ROUND_UP(numRoutedExperts, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
-        uint32_t padDtype = ROUND_UP(numRoutedExperts, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
+        uint32_t padDtype =
+            ROUND_UP(numRoutedExperts, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
         uint64_t off = 0;
-        socresIn = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        socresIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += pad;
-        biasIn = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        biasIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += pad;
-        indicesIn = reinterpret_cast<__ubuf__ uint32_t*>((uintptr_t)off);
+        indicesIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
         off += pad;
-        routingMapOut = reinterpret_cast<__ubuf__ uint32_t*>((uintptr_t)off);
+        routingMapOut = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
         off += pad;
-        weightsOut = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        weightsOut = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += pad;
-        calc_unbiased = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        calc_unbiased = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += pad;
-        calc = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        calc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += pad;
-        reduceTmp = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        reduceTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += VECTOR_MAX_BYTESIZE;
-        sortTmp = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        sortTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += 2 * pad;
-        sortMrgTmp = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        sortMrgTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += 2 * pad;
-        weightsTopK = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        weightsTopK = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += VECTOR_MAX_BYTESIZE;
-        indicesTopK = reinterpret_cast<__ubuf__ uint32_t*>((uintptr_t)off);
+        indicesTopK = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
         if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
             off += pad;
-            socresInTmp = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
+            socresInTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
             off += padDtype;
-            weightsOutTmp = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
+            weightsOutTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
         }
     }
 
@@ -101,7 +104,8 @@ public:
     {
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        copy_gm_to_ubuf_align_b32(indicesIn, indicesGm, 0, 1, nRoutedExperts * sizeof(uint32_t), 0, 0, 0, 0);
+        copy_gm_to_ubuf_align_b32(indicesIn, indicesGm, 0, 1, nRoutedExperts * sizeof(uint32_t), 0,
+                                  0, 0, 0);
         pipe_barrier(PIPE_ALL);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
@@ -127,7 +131,8 @@ public:
         DumpBuffer(routingMapOut, "routingMapOut [clean]", 5, 1, 0, true);
         pipe_barrier(PIPE_V);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-        vector_dup(weightsOut, float(0), DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32), 1, 0, 8, 0);
+        vector_dup(weightsOut, float(0), DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32), 1, 0,
+                   8, 0);
         pipe_barrier(PIPE_V);
     }
 
@@ -135,16 +140,15 @@ public:
     {
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         if constexpr (std::is_same<Dtype, float>::value) {
-            copy_gm_to_ubuf_align_b32(socresIn, socresGm + tokenIdx * nRoutedExperts,
-                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+            copy_gm_to_ubuf_align_b32(socresIn, socresGm + tokenIdx * nRoutedExperts, 0, 1,
+                                      nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
             pipe_barrier(PIPE_V);
         } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            copy_gm_to_ubuf_align_b32(socresInTmp, socresGm + tokenIdx * nRoutedExperts,
-                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+            copy_gm_to_ubuf_align_b32(socresInTmp, socresGm + tokenIdx * nRoutedExperts, 0, 1,
+                                      nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
             pipe_barrier(PIPE_V);
         }
-        copy_gm_to_ubuf_align_b32(biasIn, biasGm,
-                                  0, 1, nRoutedExperts * sizeof(float), 0, 0, 0, 0);
+        copy_gm_to_ubuf_align_b32(biasIn, biasGm, 0, 1, nRoutedExperts * sizeof(float), 0, 0, 0, 0);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     }
 
@@ -202,14 +206,11 @@ public:
         uint64_t ifExhaustedSuspension = 0;
         uint64_t config = mrgRepeat | validBits << MGR_SORT_VALID_BITS_OFFSET |
                           ifExhaustedSuspension << MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET;
-        uint64_t lengths = SORT_BLOCK_SIZE | SORT_BLOCK_SIZE << 16 |
-                           SORT_BLOCK_SIZE << 32 | SORT_BLOCK_SIZE << 48;
-        __ubuf__ float *addrArray[4] = {
-            sortTmp,
-            sortTmp + SORT_RESULT_BLOCK_SIZE,
-            sortTmp + 2 * SORT_RESULT_BLOCK_SIZE,
-            sortTmp + 3 * SORT_RESULT_BLOCK_SIZE
-        };
+        uint64_t lengths =
+            SORT_BLOCK_SIZE | SORT_BLOCK_SIZE << 16 | SORT_BLOCK_SIZE << 32 | SORT_BLOCK_SIZE << 48;
+        __ubuf__ float *addrArray[4] = {sortTmp, sortTmp + SORT_RESULT_BLOCK_SIZE,
+                                        sortTmp + 2 * SORT_RESULT_BLOCK_SIZE,
+                                        sortTmp + 3 * SORT_RESULT_BLOCK_SIZE};
         vmrgsort4(sortMrgTmp, addrArray, lengths, config);
         pipe_barrier(PIPE_V);
 
@@ -221,7 +222,7 @@ public:
         pipe_barrier(PIPE_V);
         DumpBuffer(sortMrgTmp, "sortMrgTmp 1", 160, 2);
 
-        for (int i = 4; i <  4 + tailLen; i ++) {
+        for (int i = 4; i < 4 + tailLen; i++) {
             DumpBuffer(sortTmp, "sortTmp i", 160, 2);
             copy_ubuf_to_ubuf(addrArray[3], sortTmp + i * SORT_RESULT_BLOCK_SIZE, 0, 1, 2, 0, 0);
             pipe_barrier(PIPE_V);
@@ -233,17 +234,19 @@ public:
             DumpBuffer(sortMrgTmp, "sortMrgTmp 3", 160, 2, 1, true);
         }
 
-        vreducev2(indicesTopK, (__ubuf__ uint32_t*)sortMrgTmp, (__ubuf__ uint32_t*)sortMrgTmp, 1, 1, 2, 8, 0);
+        vreducev2(indicesTopK, (__ubuf__ uint32_t *)sortMrgTmp, (__ubuf__ uint32_t *)sortMrgTmp, 1,
+                  1, 2, 8, 0);
         pipe_barrier(PIPE_V);
         DumpBuffer(indicesTopK, "indicesTopK 4", 160, 1, 0, true);
 
-        vmuls((__ubuf__ int32_t *)sortMrgTmp, (__ubuf__ int32_t *)indicesTopK, 4, 1,1,0,0,0);
+        vmuls((__ubuf__ int32_t *)sortMrgTmp, (__ubuf__ int32_t *)indicesTopK, 4, 1, 1, 0, 0, 0);
         pipe_barrier(PIPE_V);
-        vgather((__ubuf__ uint32_t *) weightsTopK, (__ubuf__ uint32_t *) sortMrgTmp, (uint64_t)calc_unbiased, 0, 1);
+        vgather((__ubuf__ uint32_t *)weightsTopK, (__ubuf__ uint32_t *)sortMrgTmp,
+                (uint64_t)calc_unbiased, 0, 1);
         pipe_barrier(PIPE_V);
 
         ReduceSum(reduceTmp, weightsTopK, topK);
-        vbrcb((__ubuf__ uint32_t*)reduceTmp, (__ubuf__ uint32_t*)reduceTmp, 0, 0, 1);
+        vbrcb((__ubuf__ uint32_t *)reduceTmp, (__ubuf__ uint32_t *)reduceTmp, 0, 0, 1);
         pipe_barrier(PIPE_V);
         if (normTopKProb) {
             vdiv(weightsTopK, weightsTopK, reduceTmp, 1, 1, 1, 0, 8, 8, 0);
@@ -258,7 +261,7 @@ public:
         wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
         for (int i = 0; i < topK; ++i) {
             uint32_t idx = *(indicesTopK + i);
-            bitmapSet((__ubuf__ uint64_t*)routingMapOut, idx);
+            bitmapSet((__ubuf__ uint64_t *)routingMapOut, idx);
             *(weightsOut + idx) = *(weightsTopK + i);
         }
         if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
@@ -282,15 +285,16 @@ public:
         }
 
         DumpBuffer(routingMapOut, "routingMapOut [final]", 5, 1, 0, true);
-        copy_ubuf_to_gm_align_b32(routingMapGm + tokenIdx * nRoutedExperts / BIT_SIZE_OF_U32, routingMapOut,
-                                  0, 1, nRoutedExperts * sizeof(uint32_t) / BIT_SIZE_OF_U32, 0, 0, 0, 0);
+        copy_ubuf_to_gm_align_b32(routingMapGm + tokenIdx * nRoutedExperts / BIT_SIZE_OF_U32,
+                                  routingMapOut, 0, 1,
+                                  nRoutedExperts * sizeof(uint32_t) / BIT_SIZE_OF_U32, 0, 0, 0, 0);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         if constexpr (std::is_same<Dtype, float>::value) {
-            copy_ubuf_to_gm_align_b32(weightsMapGm + tokenIdx * nRoutedExperts, weightsOut,
-                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+            copy_ubuf_to_gm_align_b32(weightsMapGm + tokenIdx * nRoutedExperts, weightsOut, 0, 1,
+                                      nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
         } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            copy_ubuf_to_gm_align_b32(weightsMapGm + tokenIdx * nRoutedExperts, weightsOutTmp,
-                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+            copy_ubuf_to_gm_align_b32(weightsMapGm + tokenIdx * nRoutedExperts, weightsOutTmp, 0, 1,
+                                      nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
         }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     }
@@ -324,25 +328,23 @@ private:
     __ubuf__ Dtype *weightsOutTmp;
 };
 
-#define SIGMOID_TOPK_FUNC_DEFINE(dtype) \
-extern "C" __global__ __aicore__ void sigmoid_topk_##dtype(GM_ADDR socres, GM_ADDR indices, \
-                                                           GM_ADDR bias, float scale, \
-                                                           GM_ADDR weightsMap, GM_ADDR routingMap, \
-                                                           uint32_t numTokens, uint32_t numRoutedExperts, \
-                                                           uint32_t topK, bool normTopKProb) \
-{ \
-    SigmoidTopK<dtype> op; \
-    op.Init(socres, indices, bias, scale, weightsMap, routingMap, \
-            numTokens, numRoutedExperts, topK, normTopKProb); \
-    op.Run(); \
-}
+#define SIGMOID_TOPK_FUNC_DEFINE(dtype)                                                            \
+    extern "C" __global__ __aicore__ void sigmoid_topk_##dtype(                                    \
+        GM_ADDR socres, GM_ADDR indices, GM_ADDR bias, float scale, GM_ADDR weightsMap,            \
+        GM_ADDR routingMap, uint32_t numTokens, uint32_t numRoutedExperts, uint32_t topK,          \
+        bool normTopKProb)                                                                         \
+    {                                                                                              \
+        SigmoidTopK<dtype> op;                                                                     \
+        op.Init(socres, indices, bias, scale, weightsMap, routingMap, numTokens, numRoutedExperts, \
+                topK, normTopKProb);                                                               \
+        op.Run();                                                                                  \
+    }
 #else
-#define SIGMOID_TOPK_FUNC_DEFINE(dtype) \
-extern "C" __global__ __aicore__ void sigmoid_topk_##dtype(GM_ADDR socres, GM_ADDR indices, \
-                                                           GM_ADDR bias, float scale, \
-                                                           GM_ADDR weightsMap, GM_ADDR routingMap, \
-                                                           uint32_t numTokens, uint32_t numRoutedExperts, \
-                                                           uint32_t topK, bool normTopKProb) \
-{ \
-}
+#define SIGMOID_TOPK_FUNC_DEFINE(dtype)                                                   \
+    extern "C" __global__ __aicore__ void sigmoid_topk_##dtype(                           \
+        GM_ADDR socres, GM_ADDR indices, GM_ADDR bias, float scale, GM_ADDR weightsMap,   \
+        GM_ADDR routingMap, uint32_t numTokens, uint32_t numRoutedExperts, uint32_t topK, \
+        bool normTopKProb)                                                                \
+    {                                                                                     \
+    }
 #endif
