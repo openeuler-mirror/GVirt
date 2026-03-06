@@ -554,12 +554,25 @@ void Print(at::Tensor &x)
 void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weightNZ,
             bool transpose)
 {
-    XTensor _x, _y, _z;
+    XTensor _x, _y, _z, _bias;
 
     InitXTensor(_x, x);
     InitXTensor(_y, y);
     InitXTensor(_z, z);
-    XliteOpMatmul(rt, _x, _y, _z, weightNZ, transpose);
+    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, transpose);
+    rt.Synchronize();
+}
+
+void MatmulWithBias(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, at::Tensor &bias,
+                    bool weightNZ)
+{
+    XTensor _x, _y, _z, _bias;
+
+    InitXTensor(_x, x);
+    InitXTensor(_y, y);
+    InitXTensor(_z, z);
+    InitXTensor(_bias, bias);
+    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias);
     rt.Synchronize();
 }
 
@@ -907,6 +920,8 @@ PYBIND11_MODULE(_C, m)
     m.def("add", &Add);
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
+    m.def("matmul_with_bias", &MatmulWithBias, "matmul_with_bias", py::arg("rt"), py::arg("x"),
+          py::arg("y"), py::arg("z"), py::arg("bias"), py::arg("weight_nz") = false);
     m.def("embed", &Embed);
     m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in"), py::arg("norm"),
           py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,

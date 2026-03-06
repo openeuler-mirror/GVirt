@@ -34,8 +34,9 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR co
             get_block_idx() >= remain ? get_block_idx() : get_block_idx() + get_block_num();
         uint64_t w_addr = *((__gm__ uint64_t *)(ws + i * sizeof(void *)));
         __gm__ uint8_t *w = (__gm__ uint8_t *)w_addr;
-        matmul_op.Init(x + off * kK * sizeof(Dtype), w, z + off * kN * sizeof(Dtype), kM, kN, kK,
-                       weightNZ, transpose, m0, n0, k0, swizzle, curBlock, curCount, remain);
+        matmul_op.Init(x + off * kK * sizeof(Dtype), w, z + off * kN * sizeof(Dtype), nullptr, kM,
+                       kN, kK, weightNZ, transpose, m0, n0, k0, swizzle, curBlock, curCount,
+                       remain);
         matmul_op.Run();
         off += kM;
         remain = curCount % get_block_num();

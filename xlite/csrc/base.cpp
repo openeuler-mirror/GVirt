@@ -25,6 +25,14 @@ void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum X
     this->type = type;
 }
 
+XTensor::XTensor()
+{
+    this->numel = 0;
+    this->dtype = INT8;
+    this->ptr = nullptr;
+    this->type = XTENSOR_STATIC;
+}
+
 XTensor::XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr)
 {
     Init(shape, dtype, ptr, XTENSOR_STATIC);

@@ -24,7 +24,8 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
                     uint32_t normDim, uint32_t cntPerToken = 1, uint32_t startOffset = 0);
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out);
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false,
-                   bool transpose = false, uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
+                   const XTensor &bias = XTensor(), bool transpose = false,
+                   uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t swizzle = MATMUL_SWIZZLE_DEFAULT_VALUE);

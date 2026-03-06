@@ -29,6 +29,7 @@ using namespace AscendC;
 #define UB_SIZE 196608
 #define UB_BUF_ALIGN_SIZE 32  // The align size of UB buffer address
 #define PINGPONG_BUF_NUM 2
+#define C2_DATABLOCK 64  // The data block size of C2
 
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst,
@@ -166,6 +167,19 @@ __aicore__ inline void CalMmad(const LocalTensor<float> &c, const LocalTensor<Dt
     params.cmatrixInitVal = init;
     params.unitFlag = unit;
     Mmad(c, a, b, params);
+}
+
+template <typename Dtype>
+__aicore__ inline void CalMmadWithBias(const LocalTensor<float> &c, const LocalTensor<Dtype> &a,
+                                       const LocalTensor<Dtype> &b, const LocalTensor<float> &bias,
+                                       int m, int n, int k)
+{
+    MmadParams params;
+    params.m = m;
+    params.n = n;
+    params.k = k;
+    params.cmatrixInitVal = false;
+    Mmad(c, a, b, bias, params);
 }
 
 template <typename Dtype>

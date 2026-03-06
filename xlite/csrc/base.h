@@ -118,7 +118,7 @@ class XTensorPool;
 class XTensor
 {
 public:
-    XTensor() {};
+    XTensor();
     XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Init(std::vector<long> shape, enum XDtype dtype, void *ptr);
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6);
