@@ -53,6 +53,8 @@
 #include "aclrtlaunch_allgather_float.h"
 #include "aclrtlaunch_attention_float16_t.h"
 #include "aclrtlaunch_attention_bfloat16_t.h"
+#include "aclrtlaunch_sigmoid_topk_float.h"
+#include "aclrtlaunch_sigmoid_topk_bfloat16_t.h"
 #include "kernels/ccl_param.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)

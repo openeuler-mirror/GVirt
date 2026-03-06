@@ -24,7 +24,7 @@ n_indices_map = math.ceil(n_routed_experts / 32)
 for dtype in [torch.bfloat16, torch.float32]:
     scale = 2.5
     scores = torch.randn(n_tokens, n_routed_experts, dtype=dtype, device="npu:0")
-    bias = torch.randn(n_routed_experts, dtype=dtype, device="npu:0")
+    bias = torch.randn(n_routed_experts, dtype=torch.float32, device="npu:0")
     indices = torch.arange(n_routed_experts, dtype=torch.int32, device="npu:0")
     xlite_indices_out = torch.empty(n_tokens, n_indices_map, dtype=torch.int32, device="npu:0")
     xlite_weights_out = torch.empty(n_tokens, n_routed_experts, dtype=dtype, device="npu:0")
@@ -33,6 +33,7 @@ for dtype in [torch.bfloat16, torch.float32]:
     standard_weights, standard_indices = torch.topk(standard_sigmoid, topK, dim=-1)
     standard_weights = standard_weights / standard_weights.sum(dim=-1, keepdim=True)
     standard_weights = standard_weights * scale
+    standard_weights = standard_weights.to(dtype)
 
     torch.npu.synchronize()
     sigmoid_topk(rt, scores, indices, bias, scale, xlite_weights_out, xlite_indices_out, topK, True)

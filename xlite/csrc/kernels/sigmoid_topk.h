@@ -52,7 +52,7 @@ public:
     {
         set_mask_norm();
         this->socresGm = (__gm__ Dtype*)socres;
-        this->biasGm = (__gm__ Dtype*)bias;
+        this->biasGm = (__gm__ float*)bias;
         this->weightsMapGm = (__gm__ Dtype*)weightsMap;
         this->indicesGm = (__gm__ uint32_t*)indices;
         this->routingMapGm = (__gm__ uint32_t*)routingMap;
@@ -92,8 +92,6 @@ public:
             socresInTmp = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
             off += padDtype;
             weightsOutTmp = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
-            off += padDtype;
-            biasInTmp = reinterpret_cast<__ubuf__ Dtype*>((uintptr_t)off);
         }
     }
 
@@ -138,15 +136,13 @@ public:
             copy_gm_to_ubuf_align_b32(socresIn, socresGm + tokenIdx * nRoutedExperts,
                                       0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
             pipe_barrier(PIPE_V);
-            copy_gm_to_ubuf_align_b32(biasIn, biasGm,
-                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
         } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
             copy_gm_to_ubuf_align_b32(socresInTmp, socresGm + tokenIdx * nRoutedExperts,
                                       0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
             pipe_barrier(PIPE_V);
-            copy_gm_to_ubuf_align_b32(biasInTmp, biasGm,
-                                      0, 1, nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
         }
+        copy_gm_to_ubuf_align_b32(biasIn, biasGm,
+                                  0, 1, nRoutedExperts * sizeof(float), 0, 0, 0, 0);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     }
 
@@ -158,8 +154,6 @@ public:
             uint64_t repeatf32 = DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32);
             uint64_t vector_bf162fp32_config = set_vector_1src_xt(8, 4, 1, 1, repeatf32);
             vconv_bf162f32(socresIn, socresInTmp, vector_bf162fp32_config);
-            pipe_barrier(PIPE_V);
-            vconv_bf162f32(biasIn, biasInTmp, vector_bf162fp32_config);
             pipe_barrier(PIPE_V);
         }
 
@@ -301,7 +295,7 @@ private:
     float scale;
 
     __gm__ Dtype *socresGm;
-    __gm__ Dtype *biasGm;
+    __gm__ float *biasGm;
     __gm__ Dtype *weightsMapGm;
     __gm__ uint32_t *indicesGm;
     __gm__ uint32_t *routingMapGm;
@@ -318,7 +312,6 @@ private:
     __ubuf__ float *weightsTopK;
     __ubuf__ uint32_t *indicesTopK;
     __ubuf__ Dtype *socresInTmp;
-    __ubuf__ Dtype *biasInTmp;
     __ubuf__ Dtype *weightsOutTmp;
 };
 
