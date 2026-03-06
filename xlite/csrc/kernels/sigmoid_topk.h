@@ -76,6 +76,8 @@ public:
         off += pad;
         weightsOut = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
         off += pad;
+        calc_unbiased = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
+        off += pad;
         calc = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
         off += pad;
         reduceTmp = reinterpret_cast<__ubuf__ float*>((uintptr_t)off);
@@ -180,12 +182,15 @@ public:
         pipe_barrier(PIPE_V);
 
         // 1 / (1 + exp(-x)) —— 复用 reduceTmp（仍为 1），无需再次填充
-        vdiv(calc, reduceTmp, calc, repeat, 1, 1, 1, 8, 8, 8);
+        vdiv(calc_unbiased, reduceTmp, calc, repeat, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
 
+        DumpBuffer(calc_unbiased, "calc_unbiased", 160, 1, 0, false);
+
         // Add bias
-        vadd(calc, calc, biasIn, repeat, 1, 1, 1, 8, 8, 8);
+        vadd(calc, calc_unbiased, biasIn, repeat, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
+        DumpBuffer(calc, "calc", 160, 1, 0, false);
     }
 
     __aicore__ inline void SelectTopK()
@@ -232,8 +237,11 @@ public:
         pipe_barrier(PIPE_V);
         DumpBuffer(indicesTopK, "indicesTopK 4", 160, 1, 0, true);
 
-        vreducev2((__ubuf__ uint32_t*)weightsTopK, (__ubuf__ uint32_t*)sortMrgTmp, (__ubuf__ uint32_t*)sortMrgTmp, 1, 1, 1, 8, 0);
+        vmuls((__ubuf__ int32_t *)sortMrgTmp, (__ubuf__ int32_t *)indicesTopK, 4, 1,1,0,0,0);
         pipe_barrier(PIPE_V);
+        vgather((__ubuf__ uint32_t *) weightsTopK, (__ubuf__ uint32_t *) sortMrgTmp, (uint64_t)calc_unbiased, 0, 1);
+        pipe_barrier(PIPE_V);
+
         ReduceSum(reduceTmp, weightsTopK, topK);
         vbrcb((__ubuf__ uint32_t*)reduceTmp, (__ubuf__ uint32_t*)reduceTmp, 0, 0, 1);
         pipe_barrier(PIPE_V);
@@ -306,6 +314,7 @@ private:
     __ubuf__ uint32_t *routingMapOut;
     __ubuf__ float *weightsOut;
     __ubuf__ float *calc;
+    __ubuf__ float *calc_unbiased;
     __ubuf__ float *reduceTmp;
     __ubuf__ float *sortTmp;
     __ubuf__ float *sortMrgTmp;
