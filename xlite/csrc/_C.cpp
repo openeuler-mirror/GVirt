@@ -705,6 +705,20 @@ void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t sta
     rt.Synchronize();
 }
 
+void UnPermutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, at::Tensor &weights,
+                   uint32_t start, uint32_t end, at::Tensor &out, at::Tensor &unpIdx)
+{
+    XTensor _in, _routing, _weights, _out, _unpIdx;
+    InitXTensor(_in, in);
+    InitXTensor(_routing, routing);
+    InitXTensor(_weights, weights);
+    InitXTensor(_out, out);
+    InitXTensor(_unpIdx, unpIdx);
+
+    XliteOpUnpermutation(rt, _in, _unpIdx, _routing, _weights, start, end, _out);
+    rt.Synchronize();
+}
+
 void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
                  std::vector<at::Tensor> &scales, at::Tensor &counts, uint32_t start, uint32_t end,
                  long outDim, long inDim, at::Tensor &output, bool weightNZ, bool transpose)
@@ -923,6 +937,7 @@ PYBIND11_MODULE(_C, m)
     m.def("softmax_topk", &SoftmaxTopK);
     m.def("cast_up", &CastUp);
     m.def("permutation", &Permutation);
+    m.def("unpermutation", &UnPermutation);
     m.def("group_matmul", &GroupMatmul);
     m.def("softmax", &Softmax);
 
