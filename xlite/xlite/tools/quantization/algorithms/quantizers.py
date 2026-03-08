@@ -9,6 +9,7 @@
 # ===============================================================================
 import torch
 
+
 @torch.no_grad()
 def asym_quant(x, scale, zero, maxq):
     scale = scale.to(x.device)
@@ -16,23 +17,28 @@ def asym_quant(x, scale, zero, maxq):
     q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
     return q, scale, zero
 
+
 @torch.no_grad()
 def asym_dequant(q, scale, zero):
     return scale * (q - zero)
+
 
 @torch.no_grad()
 def asym_quant_dequant(x, scale, zero, maxq):
     return asym_dequant(*asym_quant(x, scale, zero, maxq))
 
+
 @torch.no_grad()
 def sym_quant(x, scale, maxq):
     scale = scale.to(x.device)
-    q = torch.clamp(torch.round(x / scale), -(maxq+1), maxq)
+    q = torch.clamp(torch.round(x / scale), -(maxq + 1), maxq)
     return q, scale
+
 
 @torch.no_grad()
 def sym_dequant(q, scale):
     return scale * q
+
 
 @torch.no_grad()
 def sym_quant_dequant(x, scale, maxq):
@@ -70,7 +76,6 @@ class WeightQuantizer(torch.nn.Module):
             self.maxq = torch.tensor(2 ** (bits - 1) - 1)
         else:
             self.maxq = torch.tensor(2 ** bits - 1)
-
 
     def find_params(self, x):
         if self.bits == 16:
@@ -136,7 +141,6 @@ class WeightQuantizer(torch.nn.Module):
         self.zero = self.zero.reshape(shape)
         return
 
-
     def quantize(self, x):
         x_dtype = x.dtype
         self.maxq = self.maxq.to(x.device)
@@ -146,10 +150,8 @@ class WeightQuantizer(torch.nn.Module):
             return asym_quant_dequant(x, self.scale, self.zero, self.maxq).to(x_dtype)
         return x
 
-
     def enabled(self):
         return self.maxq > 0
-
 
     def ready(self):
         return torch.all(self.scale != 0)
