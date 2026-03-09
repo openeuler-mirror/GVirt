@@ -21,10 +21,10 @@ public:
     __aicore__ inline Matmul()
     {
     }
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k,
-                                uint64_t nz, uint64_t transpose, uint64_t m0, uint64_t n0,
-                                uint64_t k0, uint64_t swizzl, uint32_t curBlock = 0,
-                                uint32_t curCount = 0, uint32_t remain = 0)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR bias, uint64_t m,
+                                uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose,
+                                uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl,
+                                uint32_t curBlock = 0, uint32_t curCount = 0, uint32_t remain = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 
@@ -48,7 +48,7 @@ public:
             if (m0 > 128) {
                 m0 = 128;
             }
-            n0 = 256;
+            n0 = (bias != nullptr) ? 128 : 256;
             k0 = 512 / sizeof(Dtype);
         }
 
@@ -87,6 +87,21 @@ public:
             l1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B1);
             l1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += l1BTileBytes;
+        }
+        if (bias != nullptr) {
+            hasBias = true;
+            if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+                this->biasGmBufFp32.SetGlobalBuffer((__gm__ float *)bias);
+                l1BiasBufFp32.address_.logicPos = static_cast<uint8_t>(TPosition::C1);
+                l1BiasBufFp32.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            } else {
+                this->biasGmBuf.SetGlobalBuffer((__gm__ Dtype *)bias);
+                l1BiasBuf.address_.logicPos = static_cast<uint8_t>(TPosition::C1);
+                l1BiasBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            }
+            off = 0;
+            l0BiasBuf.address_.logicPos = static_cast<uint8_t>(TPosition::C2);
+            l0BiasBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         }
         off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
@@ -158,10 +173,12 @@ public:
 
         SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
 
         int nLoop = DIV_ROUND_UP(n, n0);
@@ -194,6 +211,30 @@ public:
             int nActualBlockNum = DIV_ROUND_UP(nActual, nBlockSize);
 
             GlobalTensor<Dtype> outGm = cGmBuf[mOffset * n + nOffset];
+
+            if (hasBias) {
+                // Bias GM -> L1
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+                if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+                    DataCopy(l1BiasBufFp32, biasGmBufFp32[nOffset], nActualBlockPad);
+                } else {
+                    DataCopy(l1BiasBuf, biasGmBuf[nOffset], nActualBlockPad);
+                }
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID4);
+                // Bias L1 -> L0
+                // C2(Bias Table Buffer) Size is 1KB
+                // If dst is in C2(Bias Table Buffer), the size of DataBlock is 64B
+                if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+                    DataCopy(l0BiasBuf, l1BiasBufFp32,
+                             {1, (uint16_t)(nActualBlockPad * sizeof(float) / C2_DATABLOCK), 0, 0});
+                } else {
+                    DataCopy(l0BiasBuf, l1BiasBuf,
+                             {1, (uint16_t)(nActualBlockPad * sizeof(Dtype) / C2_DATABLOCK), 0, 0});
+                }
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+            }
 
             WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
             int kOffset = 0;
@@ -281,13 +322,22 @@ public:
                 /* Mmad L0A L0B -> L0C */
                 SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
                 PipeBarrier<PIPE_M>();
-                CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], m0, nActualBlockPad, kActualBlockPad,
-                        kIdx == 0);
+                if (hasBias && kIdx == 0) {
+                    CalMmadWithBias(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], l0BiasBuf, m0,
+                                    nActualBlockPad, kActualBlockPad);
+                } else {
+                    CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], m0, nActualBlockPad,
+                            kActualBlockPad, kIdx == 0);
+                }
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + kIdx2);
                 kOffset += kActual;
             }
-
+            if (hasBias) {
+                SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
+            }
             if (kIdx % 8 != 0) {
                 SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
             }
@@ -303,10 +353,12 @@ public:
         }  // M * N
 
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID4);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
     }
@@ -315,11 +367,16 @@ private:
     GlobalTensor<Dtype> aGmBuf;
     GlobalTensor<Dtype> bGmBuf;
     GlobalTensor<Dtype> cGmBuf;
+    GlobalTensor<Dtype> biasGmBuf;
+    GlobalTensor<float> biasGmBufFp32;
     LocalTensor<Dtype> l1aBuf[PINGPONG_BUF_NUM];
     LocalTensor<Dtype> l1bBuf[PINGPONG_BUF_NUM];
     LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];
     LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];
     LocalTensor<float> l0cBuf;
+    LocalTensor<Dtype> l1BiasBuf;
+    LocalTensor<float> l1BiasBufFp32;
+    LocalTensor<float> l0BiasBuf;
 
     uint64_t m;
     uint64_t n;
@@ -339,16 +396,17 @@ private:
     uint32_t curBlock;
     uint32_t curCount;
     uint32_t remain;
+    bool hasBias = false;
 };
 
-#define MATMUL_FUNC_DEFINE(dtype)                                                         \
-    extern "C" __global__ __aicore__ void matmul_##dtype(                                 \
-        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz, \
-        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl)       \
-    {                                                                                     \
-        Matmul<dtype> op;                                                                 \
-        op.Init(x, y, z, m, n, k, nz, transpose, m0, n0, k0, swizzl);                     \
-        op.Run();                                                                         \
+#define MATMUL_FUNC_DEFINE(dtype)                                                                 \
+    extern "C" __global__ __aicore__ void matmul_##dtype(                                         \
+        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,         \
+        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl, GM_ADDR bias) \
+    {                                                                                             \
+        Matmul<dtype> op;                                                                         \
+        op.Init(x, y, z, bias, m, n, k, nz, transpose, m0, n0, k0, swizzl);                       \
+        op.Run();                                                                                 \
     }
 
 #endif

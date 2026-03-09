@@ -431,7 +431,8 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &nor
 }
 
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
-                   bool transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzle)
+                   const XTensor &bias, bool transpose, uint64_t m0, uint64_t n0, uint64_t k0,
+                   uint64_t swizzle)
 {
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
@@ -442,7 +443,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         if (m0 > 128) {
             m0 = 128;
         }
-        n0 = 256;
+        n0 = (bias.ptr != nullptr) ? 128 : 256;
         k0 = 512 / (XDtypeBit(weight.dtype) / 8);
 
         uint64_t mLoop = DIV_ROUND_UP(m, m0);
@@ -472,20 +473,30 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
 
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
-                                     weightNZ, transpose, m0, n0, k0, swizzle);
+                                     weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
     } else if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
-                                      weightNZ, transpose, m0, n0, k0, swizzle);
+        if (bias.ptr != nullptr) {
+            XTensor &biasFp32 = rt.pool->GetTensor(bias.shape, FP32, DBG_LOC);
+            aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, bias.ptr, biasFp32.ptr,
+                                              bias.numel);
+            aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
+                                          k, weightNZ, transpose, m0, n0, k0, swizzle,
+                                          biasFp32.ptr);
+            rt.pool->PutTensor(biasFp32);
+        } else {
+            aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
+                                          k, weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
+        }
     } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32 &&
                transpose == false) {
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
-                                 weightNZ, transpose, m0, n0, k0, swizzle);
+                                 weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
     } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 &&
                transpose == false) {
         XTensor &tmp = rt.pool->GetTensor(in.shape, FP32, DBG_LOC);
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, tmp.ptr, in.numel);
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k,
-                                 weightNZ, transpose, m0, n0, k0, swizzle);
+                                 weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
         rt.pool->PutTensor(tmp);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");

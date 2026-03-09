@@ -356,9 +356,10 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, uint32_t(1));
     XTensor &qkv =
         rt.pool->GetTensor({rt._realM, mhaQKV[layer].shape[0]}, hiddenState.dtype, DBG_LOC);
-    XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ);
     if (_c.addBias) {
-        XliteOpAddBias(rt, qkv, mhaQKVBias[layer], qkv);
+        XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ, mhaQKVBias[layer]);
+    } else {
+        XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ);
     }
     if (_c.qkNorm) {
         XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, qHeads);
