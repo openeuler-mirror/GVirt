@@ -172,7 +172,7 @@ int XSock::Recv(int fd, void *buf, uint32_t size)
         std::cerr << __func__ << ": rank" << _rankId << " recv failed: " << strerror(errno)
                   << std::endl;
         return -errno;
-    } else if ((uint32_t)ret != size) {
+    } else if (static_cast<uint32_t>(ret) != size) {
         std::cerr << __func__ << ": rank" << _rankId << " recv failed: size not match" << std::endl;
         return -EFAULT;
     }
@@ -194,7 +194,7 @@ int XSock::Send(int fd, void *buf, uint32_t size)
         std::cerr << __func__ << ": rank" << _rankId << " send failed: " << strerror(errno)
                   << std::endl;
         return -errno;
-    } else if ((uint32_t)ret != size) {
+    } else if (static_cast<uint32_t>(ret) != size) {
         std::cerr << __func__ << ": rank" << _rankId << " send failed: size not match" << std::endl;
         return -EFAULT;
     }
@@ -228,7 +228,8 @@ int XSock::AllGather(void *buf, uint32_t size, void *allBuf)
         Recv(_fd, allBuf, size * _rankSize);
     } else {
         for (uint32_t rank = 1; rank < _rankSize; rank++) {
-            Recv(_clientFds[rank], (void *)((uint64_t)allBuf + size * rank), size);
+            Recv(_clientFds[rank],
+                 reinterpret_cast<void *>(reinterpret_cast<uint64_t>(allBuf) + size * rank), size);
         }
         for (uint32_t rank = 1; rank < _rankSize; rank++) {
             Send(_clientFds[rank], allBuf, size * _rankSize);

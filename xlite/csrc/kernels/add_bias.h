@@ -97,7 +97,6 @@ private:
         queOutZ.FreeTensor(zLocal);
     }
 
-private:
     TPipe pipe;
     TQue<QuePosition::VECIN, BUFFER_NUM> queInX;
     TQue<QuePosition::VECOUT, BUFFER_NUM> queOutZ;

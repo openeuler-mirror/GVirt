@@ -103,7 +103,15 @@ class PythonChecker:
             if result.returncode != 0:
                 for line in result.stdout.split('\n'):
                     if line.strip():
-                        self.warnings.append(line)
+                        parts = line.split(':')
+                        if len(parts) >= 4:
+                            error_code = parts[3].strip().split()[0]
+                            if error_code.startswith('W'):
+                                self.errors.append(line)
+                            else:
+                                self.warnings.append(line)
+                        else:
+                            self.warnings.append(line)
                 return False
             return True
         except FileNotFoundError:
@@ -130,7 +138,7 @@ class PythonChecker:
             if result.returncode != 0:
                 for line in result.stdout.split('\n'):
                     if line.strip() and 'Success' not in line:
-                        self.warnings.append(line)
+                        self.errors.append(line)
                 return False
             return True
         except FileNotFoundError:

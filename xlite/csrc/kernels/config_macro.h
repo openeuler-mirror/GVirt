@@ -6,7 +6,7 @@
 #endif  // __aicore__
 
 #ifndef GM_ADDR
-#define GM_ADDR __gm__ uint8_t *__restrict__
+#define GM_ADDR (__gm__ uint8_t *__restrict__)
 #endif
 
 #define BLOCK_SIZE 32  // UB中一个Block的单位大小

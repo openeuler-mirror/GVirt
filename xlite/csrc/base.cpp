@@ -10,7 +10,7 @@ void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum X
 {
     size_t numel = 1;
 
-    if (shape.size() == 0) {
+    if (shape.empty()) {
         numel = 0;
     }
 
@@ -27,25 +27,25 @@ void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum X
 
 XTensor::XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr)
 {
-    Init(shape, dtype, ptr, XTENSOR_STATIC);
+    Init(std::move(shape), dtype, ptr, XTENSOR_STATIC);
 }
 
 void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr)
 {
-    Init(shape, dtype, ptr, XTENSOR_STATIC);
+    Init(std::move(shape), dtype, ptr, XTENSOR_STATIC);
 }
 
 void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
 {
     switch (dtype) {
         case BIT1: {
-            uint64_t *raw = (uint64_t *)p + off / 64;
+            uint64_t *raw = static_cast<uint64_t *>(p) + off / 64;
             uint32_t val = ((*raw) & (1ull << (off % 64))) ? 1 : 0;
             std::cout << val;
             break;
         }
         case INT8: {
-            int32_t val = ((int8_t *)p)[off];
+            int32_t val = (static_cast<int8_t *>(p))[off];
             if (val >= 0) {
                 std::cout << " ";
             }
@@ -53,7 +53,7 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             break;
         }
         case INT32: {
-            int32_t val = ((int32_t *)p)[off];
+            int32_t val = (static_cast<int32_t *>(p))[off];
             if (val >= 0) {
                 std::cout << " ";
             }
@@ -61,7 +61,7 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             break;
         }
         case INT64: {
-            int64_t val = ((int64_t *)p)[off];
+            int64_t val = (static_cast<int64_t *>(p))[off];
             if (val >= 0) {
                 std::cout << " ";
             }
@@ -69,7 +69,7 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             break;
         }
         case FP16: {
-            __fp16 val = ((__fp16 *)p)[off];
+            __fp16 val = (static_cast<__fp16 *>(p))[off];
             if (val >= 0) {
                 std::cout << " ";
             }
@@ -79,7 +79,7 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             break;
         }
         case BF16: {
-            uint16_t data = ((uint16_t *)p)[off];
+            uint16_t data = (static_cast<uint16_t *>(p))[off];
             uint32_t float32Data = (static_cast<uint32_t>(data) << 16);
             float val;
             std::memcpy(&val, &float32Data, sizeof(float));
@@ -92,7 +92,7 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             break;
         }
         case FP32: {
-            float val = ((float *)p)[off];
+            float val = (static_cast<float *>(p))[off];
             if (val >= 0) {
                 std::cout << " ";
             }
@@ -102,7 +102,7 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
             break;
         }
         case CPLXF: {
-            std::complex<float> val = ((std::complex<float> *)p)[off];
+            std::complex<float> val = (static_cast<std::complex<float> *>(p))[off];
             if (val.real() >= 0 && val.imag() >= 0) {
                 std::cout << " ";
             }
@@ -265,7 +265,7 @@ XTensor &XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype, Debu
     size_t numel = 1, size, free;
     void *ptr = _ptr;
 
-    if (shape.size() == 0) {
+    if (shape.empty()) {
         std::cerr << loc.file << ":" << loc.line << ": size is 0" << std::endl;
         throw std::invalid_argument("get tensor shape size is 0");
     }
@@ -291,10 +291,11 @@ XTensor &XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype, Debu
             _used.insert(it, t);
             return t;
         }
-        ptr = (void *)((uint64_t)use.ptr +
-                       ROUND_UP(use.numel * XDtypeBit(use.dtype) / 8, XLITE_TENSOR_ALIGN));
+        ptr = reinterpret_cast<void *>(
+            reinterpret_cast<uint64_t>(use.ptr) +
+            ROUND_UP(use.numel * XDtypeBit(use.dtype) / 8, XLITE_TENSOR_ALIGN));
     }
-    if ((uint64_t)_ptr + _size - (uint64_t)ptr >= size) {
+    if (reinterpret_cast<uint64_t>(_ptr) + _size - reinterpret_cast<uint64_t>(ptr) >= size) {
         t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
         _free.pop_front();
         _used.push_back(t);
@@ -329,8 +330,6 @@ void XTensorPool::PutTensor(XTensor &t)
 
 bool XTensorPool::TensorInPool(XTensor &t)
 {
-    if (t.ptr < _ptr || t.ptr >= (void *)((uint64_t)_ptr + _size)) {
-        return false;
-    }
-    return true;
+    return t.ptr >= _ptr &&
+           t.ptr < reinterpret_cast<void *>(reinterpret_cast<uint64_t>(_ptr) + _size);
 }

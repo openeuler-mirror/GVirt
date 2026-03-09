@@ -80,7 +80,8 @@ def weight_dequant(weight: torch.Tensor, scale: torch.Tensor,
     # Compute the effective block dimensions for scale
     scale_m, scale_n = scale.shape
     assert scale_m == (M + block_size - 1) // block_size, "Mismatch in scale rows and weight rows."
-    assert scale_n == (N + block_size - 1) // block_size, "Mismatch in scale columns and weight columns."
+    assert scale_n == (
+        N + block_size - 1) // block_size, "Mismatch in scale columns and weight columns."
 
     # Convert weight to float32 for calculations
     weight = weight.to(device=device, dtype=torch.float32)
@@ -119,7 +120,8 @@ def rtn_quant(W, w_bits=8, num_groups=1, sym=True, post_opt=False, **kwargs):
             else:
                 W_quant, _, _ = asym_quant(Q, scale, quantizer.zero, quantizer.maxq.to(W.device))
             if post_opt:
-                scale_temp = post_opt_scale(W[:, idx_start:idx_end], W_quant, quantizer.zero, H=None)
+                scale_temp = post_opt_scale(W[:, idx_start:idx_end],
+                                            W_quant, quantizer.zero, H=None)
                 quantizer.scale = scale_temp
             if sym:
                 Q_dequant = sym_dequant(W_quant, scale_temp)
@@ -183,7 +185,8 @@ def rot_linear(weight, name, state_dict, device, dtype, scale_inv=None, input_tr
         else:
             assert name.endswith(".weight")
             basename = name.rsplit(".", 1)[0]
-            assert qweight.min() >= -128 and qweight.max() <= 127, f"overflow in quant range: {name}"
+            assert qweight.min() >= - \
+                128 and qweight.max() <= 127, f"overflow in quant range: {name}"
             state_dict[basename + ".qweight"] = qweight.to(torch.int8).cpu()
             state_dict[basename + ".scales"] = scale.cpu()
     else:
@@ -200,7 +203,7 @@ def is_run_quant(name, run_quant, quant_shared, quant_mtp=False):
     if not run_quant:
         return False
     elif "down_proj" in name or "up_proj" in name\
-        or "gate_proj" in name:
+            or "gate_proj" in name:
         if "experts" in name:
             if "shared_experts" in name:
                 return quant_shared
@@ -208,7 +211,7 @@ def is_run_quant(name, run_quant, quant_shared, quant_mtp=False):
                 return True
     else:
         if "q_a_proj" in name or "q_b_proj" in name or "o_proj" in name\
-            or "kv_a_proj_with_mqa" in name or "kv_b_proj" in name:
+                or "kv_a_proj_with_mqa" in name or "kv_b_proj" in name:
             return False
 
 
@@ -232,6 +235,7 @@ def main(model_path, rot_model_path,
     # The list of name saved for the model
     ori_weight_names = []
     # Helper function to get tensor from the correct file
+
     def get_tensor(tensor_name):
         file_name = weight_map[tensor_name]
         if file_name not in loaded_files:
@@ -246,7 +250,7 @@ def main(model_path, rot_model_path,
         Q = Q.to(device=device, dtype=dtype)
     if head_rotate:
         Q_head = get_orthogonal_matrix(config.v_head_dim,
-                    mode="hadamard", device=device)
+                                       mode="hadamard", device=device)
         kv_out_trans = torch.kron(torch.eye(config.num_attention_heads).to(Q_head),
                                   torch.block_diag(torch.eye(config.qk_nope_head_dim).to(Q_head),
                                                    Q_head))
@@ -290,7 +294,7 @@ def main(model_path, rot_model_path,
 
                 if name.endswith("_scale_inv"):
                     continue
-                elif weight.element_size() == 1: #FP8 weight
+                elif weight.element_size() == 1:  # FP8 weight
                     scale_inv_name = f"{name}_scale_inv"
                     try:
                         # Get scale_inv from the correct file
@@ -318,19 +322,20 @@ def main(model_path, rot_model_path,
                         ln = get_tensor("model.norm.weight")
                         ln = ln.float() / torch.mean(ln.float().abs())
                         rot_linear(weight=weight, name=name,
-                            state_dict=new_state_dict, device=device, dtype=dtype,
-                            input_trans=input_trans, output_trans=output_trans, ln=ln,
-                            verbose=verbose)
+                                   state_dict=new_state_dict, device=device, dtype=dtype,
+                                   input_trans=input_trans, output_trans=output_trans, ln=ln,
+                                   verbose=verbose)
                         ori_weight_names.append(name)
                     elif "model.norm" in name or "layernorm" in name or \
                         "61.enorm" in name or "61.hnorm" in name or \
-                        "shared_head.norm" in name:
+                            "shared_head.norm" in name:
                         assert scale_inv is None, "the weight is not dequanted"
                         # Reset prehead norm and layernorm
                         if "a_layernorm" in name:
                             new_state_dict[name] = weight.to(torch.bfloat16)
                         else:
-                            new_state_dict[name] = (torch.ones_like(weight).to(weight) * torch.mean(weight.float().abs())).to(torch.bfloat16)
+                            new_state_dict[name] = (torch.ones_like(weight).to(
+                                weight) * torch.mean(weight.float().abs())).to(torch.bfloat16)
                         ori_weight_names.append(name)
                     # ===== related to embedding =====
                     elif "embed_tokens" in name:
@@ -400,7 +405,8 @@ def main(model_path, rot_model_path,
                         elif "gate_proj" in name or "up_proj" in name:
                             input_trans = Q
                             output_trans = None
-                            ln = get_tensor(f"model.layers.{layer_idx}.post_attention_layernorm.weight")
+                            ln = get_tensor(
+                                f"model.layers.{layer_idx}.post_attention_layernorm.weight")
                             # ===== remove mean =====
                             ln = ln.float() / torch.mean(ln.float().abs())
                         # rotate mlp down
@@ -419,25 +425,27 @@ def main(model_path, rot_model_path,
                             input_trans = torch.block_diag(Q, Q)
                             output_trans = Q
                             ln = torch.cat([
-                                    get_tensor(f"model.layers.{layer_idx}.enorm.weight"),
-                                    get_tensor(f"model.layers.{layer_idx}.hnorm.weight")
-                                ]).flatten()
+                                get_tensor(f"model.layers.{layer_idx}.enorm.weight"),
+                                get_tensor(f"model.layers.{layer_idx}.hnorm.weight")
+                            ]).flatten()
                             # ===== remove mean =====
                             ln = ln.float() / torch.mean(ln.float().abs())
                         else:
                             raise ValueError(f"Unknown object{name}")
                         rot_linear(weight=weight, name=name, state_dict=new_state_dict,
-                            device=device, dtype=dtype, scale_inv=scale_inv,
-                            input_trans=input_trans,
-                            output_trans=output_trans, ln=ln, verbose=verbose,
-                            **{"quantized": is_run_quant(name, run_quant, quant_shared, quant_mtp),
-                            "w_bits": 8, "sym": True, "num_groups": num_groups,
-                            "post_opt": post_opt, "save_dequant": save_dequant})
+                                   device=device, dtype=dtype, scale_inv=scale_inv,
+                                   input_trans=input_trans,
+                                   output_trans=output_trans, ln=ln, verbose=verbose,
+                                   **{"quantized": is_run_quant(name, run_quant, quant_shared, quant_mtp),
+                                      "w_bits": 8, "sym": True, "num_groups": num_groups,
+                                      "post_opt": post_opt, "save_dequant": save_dequant})
 
             if down_kron and SAVE_KRON:
                 # save the kron down matrices in the first file
-                new_state_dict["model.down_kron.kron_left"] = rotate_dict["Q_kron"][0].to(torch.bfloat16)
-                new_state_dict["model.down_kron.kron_right"] = rotate_dict["Q_kron"][1].to(torch.bfloat16)
+                new_state_dict["model.down_kron.kron_left"] = rotate_dict["Q_kron"][0].to(
+                    torch.bfloat16)
+                new_state_dict["model.down_kron.kron_right"] = rotate_dict["Q_kron"][1].to(
+                    torch.bfloat16)
                 # modification to update index.json
                 weight_map["model.down_kron.kron_right"] = file_name
                 weight_map["model.down_kron.kron_left"] = file_name
@@ -483,7 +491,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--rot_model_path", type=str, required=True)
-    parser.add_argument("--num_tp", type=int, choices=[1,2,4,8], default=1,
+    parser.add_argument("--num_tp", type=int, choices=[1, 2, 4, 8], default=1,
                         help="number of cars to deploy tensor parallelalization, mainly related o_proj and down_proj.")
     parser.add_argument("--post_opt", action=argparse.BooleanOptionalAction, default=False,
                         help="Whether run post_opt in RTN algorithm (default: False)")

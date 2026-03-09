@@ -14,6 +14,7 @@ import torch
 import transformers
 import math
 
+
 def get_decompose_dim(n):
     a = int(math.sqrt(n))
     if a * a < n:
@@ -28,20 +29,20 @@ def get_decompose_dim(n):
 
 
 def main(model_path, num_tp, save_path):
-    config = transformers.AutoConfig.from_pretrained(model_path, trust_remote_code = True)
+    config = transformers.AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     Q = get_orthogonal_matrix(
-            config.hidden_size,
-            mode = "hadamard",
-            device = "cpu").to(torch.float32)
+        config.hidden_size,
+        mode="hadamard",
+        device="cpu").to(torch.float32)
     dim_left, dim_right = get_decompose_dim(config.moe_intermediate_size // num_tp)
     kron_left = get_orthogonal_matrix(
-                    dim_left,
-                    mode = "hadamard",
-                    device = "cpu").to(torch.float32)
+        dim_left,
+        mode="hadamard",
+        device="cpu").to(torch.float32)
     kron_right = get_orthogonal_matrix(
-                    dim_right,
-                    mode = "hadamard",
-                    device = "cpu").to(torch.float32)
+        dim_right,
+        mode="hadamard",
+        device="cpu").to(torch.float32)
 
     rotate_dict = {}
     rotate_dict["Q"] = Q

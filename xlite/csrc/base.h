@@ -152,7 +152,7 @@ public:
     {
         return _ptr;
     };
-    size_t Size()
+    size_t Size() const
     {
         return _size;
     };

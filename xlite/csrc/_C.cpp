@@ -633,7 +633,8 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
                uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
 {
     XTensor _qkv, _kCache, _vCache, _qk, _output, _cumPromptLens, _lens, _cachedLens, _blockTables;
-    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
+    XTensor &qk = rt.pool->GetTensor({static_cast<long>(rt.aicNum * TILESIZE_OF_QUERY * 2),
+                                      static_cast<long>(maxNumBlock * blockSize)},
                                      XDtype(qkv), DBG_LOC);
 
     InitXTensor(_qkv, qkv);
@@ -737,13 +738,13 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     for (i = 0; i < num; i++) {
         p[i] = TensorPtr(weights[i]);
     }
-    rt.MemcpyH2D(_weights.ptr, p.data(), num * sizeof(void *));
+    rt.MemcpyH2D(_weights.ptr, reinterpret_cast<void *>(p.data()), num * sizeof(void *));
 
     if (scales.size() == num) {
         for (i = 0; i < num; i++) {
             p[i] = TensorPtr(scales[i]);
         }
-        rt.MemcpyH2D(_scales.ptr, p.data(), num * sizeof(void *));
+        rt.MemcpyH2D(_scales.ptr, reinterpret_cast<void *>(p.data()), num * sizeof(void *));
     }
 
     XliteOpGroupMatmul(rt, _in, _weights, _scales, _counts, start, end, XDtype(weights[0]), outDim,
