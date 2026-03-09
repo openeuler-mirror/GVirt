@@ -1,11 +1,11 @@
 /*
  * Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
  *
-#pragma once
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  */
+#pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
 #include "softmax_attn_aiv.h"
