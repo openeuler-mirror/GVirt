@@ -443,7 +443,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         if (m0 > 128) {
             m0 = 128;
         }
-        n0 = 256;
+        n0 = (bias.ptr != nullptr) ? 128 : 256;
         k0 = 512 / (XDtypeBit(weight.dtype) / 8);
 
         uint64_t mLoop = DIV_ROUND_UP(m, m0);

@@ -48,7 +48,7 @@ public:
             if (m0 > 128) {
                 m0 = 128;
             }
-            n0 = 256;
+            n0 = (bias != nullptr) ? 128 : 256;
             k0 = 512 / sizeof(Dtype);
         }
 
