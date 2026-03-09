@@ -102,8 +102,12 @@ class CppChecker:
     def run_clang_tidy(self, file_path):
         """Run clang-tidy static analysis"""
         try:
+            config_file = '.clang-tidy'
+            if 'kernels' in str(file_path):
+                config_file = 'csrc/kernels/.clang-tidy'
+
             result = subprocess.run(
-                ['clang-tidy', str(file_path), '--config-file=.clang-tidy'],
+                ['clang-tidy', str(file_path), f'--config-file={config_file}'],
                 capture_output=True,
                 text=True,
                 cwd=self.root_dir

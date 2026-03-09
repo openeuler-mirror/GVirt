@@ -62,8 +62,8 @@ int XcclComm::Init(const std::string &ip, uint32_t port,
 
     struct XcclParam hParam;
     for (uint32_t rank = 0; rank < _rankSize; rank++) {
-        hParam.ipcMems[rank] = (uint64_t)_ipcMems[rank];
-        hParam.ipcXTensorMems[rank] = (uint64_t)ipcXTensorMems[rank];
+        hParam.ipcMems[rank] = reinterpret_cast<uint64_t>(_ipcMems[rank]);
+        hParam.ipcXTensorMems[rank] = reinterpret_cast<uint64_t>(ipcXTensorMems[rank]);
     }
     CHECK_ACL_RET(
         aclrtMalloc((void **)&dParam, sizeof(struct XcclParam), ACL_MEM_MALLOC_NORMAL_ONLY),
