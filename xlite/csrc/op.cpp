@@ -738,18 +738,18 @@ void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &outp
     }
 }
 
-void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &socres, XTensor &indices, XTensor &outWeights,
+void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outWeights,
                         XTensor &outRouting, uint32_t topK, bool normTopKProb)
 {
-    if (socres.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
+    if (scores.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
         outRouting.dtype == BIT1) {
-        aclrtlaunch_softmax_topk_float(rt.aivNum, rt.stream, socres.ptr, indices.ptr,
-                                       outWeights.ptr, outRouting.ptr, socres.shape[0],
+        aclrtlaunch_softmax_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr,
+                                       outWeights.ptr, outRouting.ptr, scores.shape[0],
                                        indices.shape[0], topK, normTopKProb);
-    } else if (socres.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 &&
+    } else if (scores.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 &&
                outRouting.dtype == BIT1) {
-        aclrtlaunch_softmax_topk_bfloat16_t(rt.aivNum, rt.stream, socres.ptr, indices.ptr,
-                                            outWeights.ptr, outRouting.ptr, socres.shape[0],
+        aclrtlaunch_softmax_topk_bfloat16_t(rt.aivNum, rt.stream, scores.ptr, indices.ptr,
+                                            outWeights.ptr, outRouting.ptr, scores.shape[0],
                                             indices.shape[0], topK, normTopKProb);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
