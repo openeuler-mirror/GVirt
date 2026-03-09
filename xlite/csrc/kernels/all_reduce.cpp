@@ -42,7 +42,7 @@ public:
         this->blockNum = rankSize;
         this->offsetCurrRank = countPerRank * myRankId;
         this->generation = generation;
-        this->skipMyRank = input == output ? true : false;
+        this->skipMyRank = input == output;
         copySize = ROUND_DOWN(copySize, UB_BUF_ALIGN_SIZE);
         this->copyCount = copySize / sizeof(Dtype);
 

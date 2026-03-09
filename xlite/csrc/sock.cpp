@@ -58,7 +58,7 @@ int XSock::InitServer(void)
         return -errno;
     }
 
-    if (listen(_fd, _rankSize - 1) == -1) {
+    if (listen(_fd, static_cast<int>(_rankSize - 1)) == -1) {
         std::cerr << __func__ << ": rank" << _rankId
                   << " failed to listen on server socket: " << strerror(errno) << std::endl;
         return -errno;
@@ -161,7 +161,7 @@ int XSock::Recv(int fd, void *buf, uint32_t size)
 {
     int ret = 0;
     do {
-        ret = recv(fd, buf, size, 0);
+        ret = static_cast<int>(recv(fd, buf, size, 0));
     } while (ret < 0 && ERRNO_NEED_RETYR(errno));
 
     if (ret == 0) {
@@ -183,7 +183,7 @@ int XSock::Send(int fd, void *buf, uint32_t size)
 {
     int ret = 0;
     do {
-        ret = send(fd, buf, size, 0);
+        ret = static_cast<int>(send(fd, buf, size, 0));
     } while (ret < 0 && ERRNO_NEED_RETYR(errno));
 
     if (ret == 0) {
@@ -228,8 +228,9 @@ int XSock::AllGather(void *buf, uint32_t size, void *allBuf)
         Recv(_fd, allBuf, size * _rankSize);
     } else {
         for (uint32_t rank = 1; rank < _rankSize; rank++) {
+            uint64_t offset = static_cast<uint64_t>(size) * rank;
             Recv(_clientFds[rank],
-                 reinterpret_cast<void *>(reinterpret_cast<uint64_t>(allBuf) + size * rank), size);
+                 reinterpret_cast<void *>(reinterpret_cast<uint64_t>(allBuf) + offset), size);
         }
         for (uint32_t rank = 1; rank < _rankSize; rank++) {
             Send(_clientFds[rank], allBuf, size * _rankSize);

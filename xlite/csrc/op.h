@@ -100,7 +100,7 @@ void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &outp
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &norm, float normEps,
                           XTensor &out);
 
-void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &in, XTensor &indices, XTensor &outWeights,
+void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outWeights,
                         XTensor &outRouting, uint32_t topK, bool normTopKProb);
 void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x);
 void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &expBuf);

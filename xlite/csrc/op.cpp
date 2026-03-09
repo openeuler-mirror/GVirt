@@ -116,7 +116,7 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         uint64_t sizePerRank = DIV_ROUND_UP(in.numel * XDtypeBit(in.dtype) / 8, rank);
         uint64_t maxCoreNum = rank;
         if (sizePerRank >= DOUBLE_AIVNUM_SIZE_BOUND) {
-            maxCoreNum = rank * 2;
+            maxCoreNum = static_cast<uint64_t>(rank) * 2;
         }
         uint32_t coreNum = rt.aivNum;
         if (coreNum > maxCoreNum) {
@@ -220,7 +220,7 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
         uint64_t sizePerRank = DIV_ROUND_UP(in.numel * XDtypeBit(in.dtype) / 8, rank);
         uint64_t maxCoreNum = rank;
         if (sizePerRank >= DOUBLE_AIVNUM_SIZE_BOUND) {
-            maxCoreNum = rank * 2;
+            maxCoreNum = static_cast<uint64_t>(rank) * 2;
         }
         uint32_t coreNum = rt.aivNum;
         if (coreNum > maxCoreNum) {
@@ -313,7 +313,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
         uint64_t sizePerRank = DIV_ROUND_UP(in.numel * XDtypeBit(in.dtype) / 8, rank);
         uint64_t maxCoreNum = rank;
         if (sizePerRank >= DOUBLE_AIVNUM_SIZE_BOUND) {
-            maxCoreNum = rank * 2;
+            maxCoreNum = static_cast<uint64_t>(rank) * 2;
         }
         uint32_t coreNum = rt.aivNum;
         if (coreNum > maxCoreNum) {
@@ -451,15 +451,16 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         uint64_t totalLoops = mLoop * nLoop;
         uint64_t lastLoops = totalLoops % rt.aicNum;
 
-        if (totalLoops < 3 * rt.aicNum && (lastLoops != 0 && lastLoops < rt.aicNum / 2)) {
-            if (n <= 32 * rt.aicNum) {
+        if (totalLoops < static_cast<uint64_t>(3) * rt.aicNum &&
+            (lastLoops != 0 && lastLoops < rt.aicNum / 2)) {
+            if (n <= static_cast<uint64_t>(32) * rt.aicNum) {
                 m0 = m0 > 64 ? 64 : m0;
                 n0 = 64;
-            } else if (n <= 64 * rt.aicNum) {
+            } else if (n <= static_cast<uint64_t>(64) * rt.aicNum) {
                 n0 = 64;
-            } else if (n <= 128 * rt.aicNum) {
+            } else if (n <= static_cast<uint64_t>(128) * rt.aicNum) {
                 n0 = 128;
-            } else if (n <= 256 * rt.aicNum) {
+            } else if (n <= static_cast<uint64_t>(256) * rt.aicNum) {
                 n0 = 256;
             } else {
                 m0 = m0 > 64 ? 64 : m0;
@@ -487,12 +488,10 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
             aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
                                           k, weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
         }
-    } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32 &&
-               transpose == false) {
+    } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
-    } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 &&
-               transpose == false) {
+    } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
         XTensor &tmp = rt.pool->GetTensor(in.shape, FP32, DBG_LOC);
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, tmp.ptr, in.numel);
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k,
@@ -577,8 +576,7 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &sc
                                            counts.ptr, counts.shape[0], outDim, inDim, -1, -1, -1,
                                            start, end, weightNZ, transpose,
                                            MATMUL_SWIZZLE_DEFAULT_VALUE);
-    } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32 &&
-               transpose == false) {
+    } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32 && !transpose) {
         aclrtlaunch_group_matmul_float(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
                                        counts.ptr, counts.shape[0], outDim, inDim, -1, -1, -1,
                                        start, end, weightNZ, transpose,
@@ -597,11 +595,13 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
     uint32_t localKvHeads = nKvHeads / rt.tpSize();
     localKvHeads = localKvHeads == 0 ? 1 : localKvHeads;
     uintptr_t qPtr = reinterpret_cast<uintptr_t>(inout.ptr);
-    uintptr_t kPtr = qPtr + localHeads * headDim * XDtypeBit(inout.dtype) / 8;
-    uintptr_t vPtr = kPtr + localKvHeads * headDim * XDtypeBit(inout.dtype) / 8;
+    uintptr_t kPtr =
+        qPtr + static_cast<uint64_t>(localHeads) * headDim * XDtypeBit(inout.dtype) / 8;
+    uintptr_t vPtr =
+        kPtr + static_cast<uint64_t>(localKvHeads) * headDim * XDtypeBit(inout.dtype) / 8;
     void *k = reinterpret_cast<void *>(kPtr);
     void *v = reinterpret_cast<void *>(vPtr);
-    float scale = 1 / sqrt(headDim);
+    float scale = 1.0f / sqrtf(static_cast<float>(headDim));
 
     if (!isNeox) {
         throw std::runtime_error(std::string(__func__) + ": unsupported rope type gptj");

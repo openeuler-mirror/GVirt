@@ -353,7 +353,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                             XTensor &hiddenState)
 {
     uint32_t qHeads = _c.nHeads / _c.defTpSize;
-    uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, uint32_t(1));
+    uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
     XTensor &qkv =
         rt.pool->GetTensor({rt._realM, mhaQKV[layer].shape[0]}, hiddenState.dtype, DBG_LOC);
     if (_c.addBias) {
@@ -796,7 +796,7 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
     rt.pool->PutTensor(h);
 }
 
-size_t XModel::GetTensorPoolSize(int dbg)
+size_t XModel::GetTensorPoolSize(int dbg) const
 {
     int dtypeSize = XDtypeBit(embed.dtype) / 8;
     size_t attnSize, ffnSize;

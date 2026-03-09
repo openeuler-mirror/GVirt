@@ -92,7 +92,7 @@ public:
                                  std::vector<std::pair<XTensor, XTensor>> &kvCache,
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                  XTensor &output);
-    size_t GetTensorPoolSize(int dbg);
+    size_t GetTensorPoolSize(int dbg) const;
 
     // weights
     XTensor embed;
