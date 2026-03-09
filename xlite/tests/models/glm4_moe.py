@@ -678,9 +678,6 @@ class GLM4MoE(nn.Module):
                     for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
                         layer.mlp.experts[i].gate_up_proj.weight.data = layer.mlp.experts[i].gate_up_proj.weight.data.transpose(0,1).contiguous()
                         layer.mlp.experts[i].down_proj.weight.data = layer.mlp.experts[i].down_proj.weight.data.transpose(0,1).contiguous()
-                    if self.args.n_shared_experts != 0:
-                        layer.mlp.shared_experts.gate_up_proj.weight.data = layer.mlp.shared_experts.gate_up_proj.weight.data.transpose(0,1).contiguous()
-                        layer.mlp.shared_experts.down_proj.weight.data = layer.mlp.shared_experts.down_proj.weight.data.transpose(0,1).contiguous()
 
         if self.xlite_weight_nz:
             self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
