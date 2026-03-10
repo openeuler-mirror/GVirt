@@ -446,8 +446,8 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
     XliteOpMatmul(rt, input, moeGate[layer], scores, _c.weightNZ);
 
     if (_c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
-        XliteOpSigmoidTopK(rt, scores, moeGateBias[layer], _gateIndicts, _c.nExpertGroups,
-                           _c.nLimitedGroups, _c.nActExperts, _c.routeScale, weights, routing);
+        XliteOpSigmoidTopK(rt, scores, _gateIndicts, moeGateBias[layer], _c.routeScale, weights,
+                           routing, _c.nActExperts, true);
     } else {
         XliteOpSoftmaxTopK(rt, scores, _gateIndicts, weights, routing, _c.nActExperts,
                            _c.normTopKProb);
@@ -861,10 +861,10 @@ size_t XModel::GetTensorPoolSize(int dbg) const
 
     if (_rankId == 0 && dbg) {
         std::cout << "[Tensor pool] base: " << base << " B, attn: " << attnSize
-                  << " B, ffn: " << ffnSize << " B "
-                  << "{mlp: " << mlpBufSize << " B, moe: " << moeBufSize << " B "
-                  << "(gate: " << moeGateSize << " B, dispatch: " << moeDispatchSize << " B"
-                  << ", scores: " << scoresBufSize << " B, dpBuf: " << moeDispatchDpBufSize << " B"
+                  << " B, ffn: " << ffnSize << " B " << "{mlp: " << mlpBufSize
+                  << " B, moe: " << moeBufSize << " B " << "(gate: " << moeGateSize
+                  << " B, dispatch: " << moeDispatchSize << " B" << ", scores: " << scoresBufSize
+                  << " B, dpBuf: " << moeDispatchDpBufSize << " B"
                   << ", routed experts: " << routedExpertsBufSize << " B"
                   << ", share experts: " << shareExpertsBufSize << " B)}" << std::endl;
     }

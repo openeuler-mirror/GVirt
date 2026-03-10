@@ -33,9 +33,6 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
 void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out);
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale);
 void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out);
-void XliteOpSigmoidTopK(XRuntime &rt, XTensor &in, XTensor &inbias, XTensor &indicts,
-                        uint32_t nGroups, uint32_t nTopkGroups, uint32_t nTopk, float scale,
-                        XTensor &outWeights, XTensor &outRouting);
 void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t start, uint32_t end,
                         XTensor &out, XTensor &unpIdx, XTensor &counts);
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing,
@@ -102,6 +99,8 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &nor
 
 void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outWeights,
                         XTensor &outRouting, uint32_t topK, bool normTopKProb);
+void XliteOpSigmoidTopK(XRuntime &rt, XTensor &in, XTensor &indices, XTensor &bias, float scale,
+                        XTensor &outWeights, XTensor &outRouting, uint32_t topK, bool normTopKProb);
 void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x);
 void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &expBuf);
 #endif
