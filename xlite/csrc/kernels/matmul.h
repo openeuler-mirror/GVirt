@@ -326,10 +326,10 @@ public:
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
                 PipeBarrier<PIPE_M>();
                 if (hasBias && kIdx == 0) {
-                    CalMmadWithBias(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], l0BiasBuf, m0,
-                                    nActualBlockPad, kActualBlockPad);
+                    CalMmadWithBias(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], l0BiasBuf,
+                                    mActualBlockPad, nActualBlockPad, kActualBlockPad);
                 } else {
-                    CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], m0, nActualBlockPad,
+                    CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], mActualBlockPad, nActualBlockPad,
                             kActualBlockPad, kIdx == 0);
                 }
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + kIdx2);
@@ -348,7 +348,7 @@ public:
             /* C L0C -> GM */
             SetFlag<HardEvent::M_FIX>(EVENT_ID0);
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-            CopyToGm(outGm, l0cBuf, mActual, nActual, m0, n);
+            CopyToGm(outGm, l0cBuf, mActual, nActual, mActualBlockPad, n);
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         }  // M * N
 
