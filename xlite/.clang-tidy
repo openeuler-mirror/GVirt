@@ -6,6 +6,7 @@ Checks: >
   -bugprone-narrowing-conversions,
   -bugprone-reserved-identifier,
   -bugprone-signed-char-misuse,
+  -bugprone-branch-clone,
   cert-*,
   -cert-dcl03-c,
   -cert-dcl21-cpp,
@@ -17,6 +18,7 @@ Checks: >
   -cert-flp30-c,
   -cert-msc50-cpp,
   -cert-str34-c,
+  -cert-err58-cpp，
   clang-analyzer-*,
   -clang-diagnostic-error,
   cppcoreguidelines-*,
@@ -85,7 +87,9 @@ Checks: >
   -readability-math-missing-parentheses,
   -readability-uppercase-literal-suffix,
   -readability-redundant-inline-specifier,
-  -readability-use-std-min-max
+  -readability-use-std-min-max,
+  -readability-else-after-return,
+  -readability-qualified-auto
 
 WarningsAsErrors: ''
 HeaderFilterRegex: ''

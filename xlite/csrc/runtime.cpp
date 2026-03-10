@@ -23,11 +23,7 @@ bool isEnvironmentVariableTrue(const char *env_value_cstr)
         env_value[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(env_value[i])));
     }
 
-    if (env_value == "true" || env_value == "1" || env_value == "yes" || env_value == "on") {
-        return true;
-    } else {
-        return false;
-    }
+    return env_value == "true" || env_value == "1" || env_value == "yes" || env_value == "on";
 }
 
 XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize)
@@ -76,7 +72,11 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
 
     const char *envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
     if (envCommOptimizeLen) {
-        commOptimizeLen = atoi(envCommOptimizeLen);
+        char *endPtr = nullptr;
+        long val = strtol(envCommOptimizeLen, &endPtr, 10);
+        if (endPtr != envCommOptimizeLen && *endPtr == '\0' && val >= 0) {
+            commOptimizeLen = static_cast<uint32_t>(val);
+        }
     }
 }
 
@@ -119,11 +119,19 @@ int XRuntime::GetNodeIps(void)
     const char *envPort = std::getenv("XLITE_PORT");
 
     if (envDevs) {
-        _nDevPerNode = atoi(envDevs);
+        char *endPtr = nullptr;
+        long val = strtol(envDevs, &endPtr, 10);
+        if (endPtr != envDevs && *endPtr == '\0' && val >= 0) {
+            _nDevPerNode = static_cast<uint32_t>(val);
+        }
     }
 
     if (envPort) {
-        _port = atoi(envPort);
+        char *endPtr = nullptr;
+        long val = strtol(envPort, &endPtr, 10);
+        if (endPtr != envPort && *endPtr == '\0' && val >= 0) {
+            _port = static_cast<uint32_t>(val);
+        }
     }
 
     if (_rankSize <= _nDevPerNode) {
@@ -152,12 +160,8 @@ int XRuntime::GetNodeIps(void)
 
 void XRuntime::FiniXcclComm(void)
 {
-    if (_tpXcclComm) {
-        delete _tpXcclComm;
-    }
-    if (_dpXcclComm) {
-        delete _dpXcclComm;
-    }
+    delete _tpXcclComm;
+    delete _dpXcclComm;
     for (uint32_t rank = 0; rank < _rankSize; rank++) {
         if (_ipcXTensorMems[rank] == nullptr) {
             continue;
@@ -279,15 +283,15 @@ void XRuntime::InitAttn(int64_t maxM, int64_t maxBatch, int64_t maxSeqLen, uint3
     long size;
     void *ptr;
 
-    size = maxM * XDtypeBit(INT64) / 8;
+    size = static_cast<long>(maxM * XDtypeBit(INT64) / 8);
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _position.Init({maxM}, INT64, ptr);
 
-    size = maxM * XDtypeBit(INT32) / 8;
+    size = static_cast<long>(maxM * XDtypeBit(INT32) / 8);
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _slotMapping.Init({maxM}, INT32, ptr);
 
-    size = maxBatch * XDtypeBit(INT32) / 8;
+    size = static_cast<long>(maxBatch * XDtypeBit(INT32) / 8);
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _cachedLens.Init({maxBatch}, INT32, ptr);
 
@@ -303,7 +307,7 @@ void XRuntime::InitAttn(int64_t maxM, int64_t maxBatch, int64_t maxSeqLen, uint3
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _prefillLastIdx.Init({maxBatch}, INT32, ptr);
 
-    size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8;
+    size = static_cast<long>(maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8);
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _blockTables.Init({maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32, ptr);
 }
@@ -329,7 +333,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, int64_t maxM, int64_t maxBa
     _realM = 0;
     _maxNumBlocks = 0;
     _prefillBatch = 0;
-    _batch = batch;
+    _batch = static_cast<int>(batch);
     cumPromptLen = 0;
     for (uint32_t i = 0; i < batch; i++) {
         lens[i] = attnMeta.lens[i];
