@@ -122,6 +122,7 @@ public:
     XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6);
+    void Memset(int value);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
     enum XTensorType GetType()
     {

@@ -705,11 +705,12 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
                                         XDtype(qkv), DBG_LOC);
         XTensor &max = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
         XTensor &sum = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-        XTensor &sync = rt.pool->GetTensor({2, rt.aivNum}, INT32, DBG_LOC);
+        XTensor &sync = rt.pool->GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
+        sync.Memset(0);
         XliteOpFlashAttention(rt, _qkv, _kCache, _vCache, qk, sv, max, sum, sync, _output, _cumPromptLens, _lens, _cachedLens,
                         _blockTables, nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlock);
         rt.Synchronize();
-        sync.Print("Flash Attention Sync");
+        sync.Print("Flash Attention Sync", 1, rt.aivNum);
         rt.pool->PutTensor(sync);
         rt.pool->PutTensor(sum);
         rt.pool->PutTensor(max);

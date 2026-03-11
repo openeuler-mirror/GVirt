@@ -50,6 +50,12 @@ public:
         this->qkvMemSize = nQKVHeads * headSize;
         this->groupMemSize = headNumInGroup * headSize;
         this->blockMemSize = blockSize * kvMemSize;
+        this->blockIdx = block_idx;
+        this->subBlockIdx = get_subblockid();
+        this->nextBlockIdx = (blockIdx + 1) % block_num;
+        this->prevBlockIdx = blockIdx == 0 ? (block_num - 1) : (blockIdx - 1);
+        this->setNextGeneration = 1;
+        this->waitPrevGeneration = 1;
 
         this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * TILESIZE_OF_CACHED_KV);
         this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * TILESIZE_OF_CACHED_KV +
@@ -61,8 +67,8 @@ public:
         this->max[1].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0 + block_num * MAX_M0);
         this->sum[0].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0);
         this->sum[1].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 + block_num * MAX_M0);
-        this->sync1.SetGlobalBuffer((__gm__ int32_t *)sync);
-        this->sync2.SetGlobalBuffer((__gm__ int32_t *)sync + block_num * 2);
+        this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
+        this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * 2 + subBlockIdx;
 
         // 分配L1/L0
         uint64_t l1ATileBytes =
@@ -94,6 +100,48 @@ public:
         off = 0;
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+    }
+
+    __aicore__ inline void SetNextCore()
+    {
+        __ubuf__ uint32_t *val = (__ubuf__ uint32_t *)(0ull);
+#ifdef XLITE_KERNEL_DEBUG
+        printf("block%d subblock%u set block%d subblock%u %u\n",
+            blockIdx, subBlockIdx, nextBlockIdx, subBlockIdx, setNextGeneration);
+#endif
+        *val = setNextGeneration;
+        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        copy_ubuf_to_gm_align_b16(setNextSync, val, 0, 1, sizeof(int32_t), 0, 0, 0, 0);
+        setNextGeneration++;
+    }
+
+    __aicore__ inline void WaitPrevCore()
+    {
+        __ubuf__ uint32_t *val = (__ubuf__ uint32_t *)(0ull);
+#ifdef XLITE_KERNEL_DEBUG
+        printf("block%d subblock%u wait block%d subblock%u %u\n",
+            blockIdx, subBlockIdx, prevBlockIdx, subBlockIdx, waitPrevGeneration);
+#endif
+        do {
+            copy_gm_to_ubuf_align_b16(val, waitPrevSync, 0, 1, sizeof(int32_t), 0, 0, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+            wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+        } while (*val < waitPrevGeneration);
+        waitPrevGeneration++;
+    }
+
+    __aicore__ inline void ResetPrevCore()
+    {
+        __ubuf__ uint32_t *val = (__ubuf__ uint32_t *)(0ull);
+#ifdef XLITE_KERNEL_DEBUG
+        printf("block%d subblock%u reset block%d subblock%u\n",
+            blockIdx, subBlockIdx, prevBlockIdx, subBlockIdx);
+#endif
+        *val = 0;
+        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        copy_ubuf_to_gm_align_b16(waitPrevSync, val, 0, 1, sizeof(int32_t), 0, 0, 0, 0);
     }
 
     /*
@@ -155,7 +203,7 @@ public:
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
-            int kvNum = DIV_ROUND_UP(cachedLen + queryTileSize, TILESIZE_OF_CACHED_KV);
+            int kvNum = DIV_ROUND_UP(cachedLen + queryLen, TILESIZE_OF_CACHED_KV);
             int taskNum = queryNum * nKVHeads * kvNum;
             for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
                 if (totalIdx % block_num != block_idx) {
@@ -252,6 +300,7 @@ public:
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
 
         int lastBatchIdx, lastQueryTaskLen, lastkvHeadIdx, last, lastKvOffset, lastKvLen, lastQueryTaskOffset, lastWorkStart, lastWorkCurCore;
+        int lastIsLastKvTile;
         __gm__ uint32_t *lastBlockTable;
 
         int needDoUpdate = 0;
@@ -259,8 +308,9 @@ public:
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
-        int dbgBlockIdx = block_idx;
-        uint32_t subIdx = get_subblockid();
+        int generation = 0;
+        int resetNextCore = 0;
+        int resetPrevCore = 0;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
             __gm__ uint32_t *blockTable =
@@ -278,7 +328,7 @@ public:
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
-            int kvNum = DIV_ROUND_UP(cachedLen + queryTileSize, TILESIZE_OF_CACHED_KV);
+            int kvNum = DIV_ROUND_UP(cachedLen + queryLen, TILESIZE_OF_CACHED_KV);
             int taskNum = queryNum * nKVHeads * kvNum;
             for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
                 if (totalIdx % block_num != block_idx) {
@@ -308,11 +358,12 @@ public:
                 if (kvOffset + kvLen > calcLen) {
                     kvLen = calcLen - kvOffset;
                 }
+                int isLastKvTile = (kvOffset + kvLen == calcLen) ? 1 : 0;
 
                 int nWork = queryTaskLen * headNumInGroup;
                 int nWorkPerCore = DIV_ROUND_UP(nWork, 2);
                 int nWorkCurCore = nWorkPerCore;
-                int nWorkStart = subIdx * nWorkPerCore;
+                int nWorkStart = subBlockIdx * nWorkPerCore;
                 if (nWorkStart + nWorkCurCore > nWork) {
                     nWorkCurCore = nWork - nWorkStart;
                 }
@@ -323,22 +374,33 @@ public:
 #ifdef XLITE_KERNEL_DEBUG
                 printf("block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u - %u), kvHeadIdx %u "
                        "kv [%u - %u)} use %d temp buf: SOFTMAX\n",
-                       dbgBlockIdx, subIdx, batchIdx, queryTaskOffset,
+                       blockIdx, subBlockIdx, batchIdx, queryTaskOffset,
                        queryTaskOffset + queryTaskLen, nWorkStart, nWorkStart + nWorkCurCore, kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
 #endif
+                // TODO save max[curr] & sum[curr]
+                RunAivSoftmaxPingPong<Dtype>(
+                    (__gm__ Dtype *)qk[curr][nWorkStart * TILESIZE_OF_CACHED_KV].GetPhyAddr(),
+                    nWorkCurCore, TILESIZE_OF_CACHED_KV, kvLen);
                 ffts_cross_core_sync(PIPE_MTE3, config);
 
                 if (needDoUpdate != 0) {
                     // wait aic sv done
                     wait_flag_dev(1);
-                    // do update
+                    if (lastKvOffset != 0) {
+                        WaitPrevCore();
+                        resetPrevCore = 1;
+                    }
 #ifdef XLITE_KERNEL_DEBUG
                     printf("block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u - %u), kvHeadIdx %u "
-                           "kv [%u - %u)} use %d temp buf: UPDATE\n", dbgBlockIdx, subIdx,
+                           "kv [%u - %u)} use %d temp buf: UPDATE\n", blockIdx, subBlockIdx,
                            lastBatchIdx, lastQueryTaskOffset, lastQueryTaskOffset + lastQueryTaskLen,
                            lastWorkStart, lastWorkStart + lastWorkCurCore,
                            lastkvHeadIdx, lastKvOffset, lastKvOffset + lastKvLen, last);
 #endif
+                    // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] & max[last]
+                    if (!lastIsLastKvTile) {
+                        SetNextCore();
+                    }
                 }
 
                 lastBatchIdx = batchIdx;
@@ -350,6 +412,7 @@ public:
                 lastBlockTable = blockTable;
                 lastKvOffset = kvOffset;
                 lastKvLen = kvLen;
+                lastIsLastKvTile = isLastKvTile;
                 last = curr;
                 needDoUpdate = 1;
 
@@ -362,13 +425,24 @@ public:
         // do last update
         if (needDoUpdate != 0) {
             wait_flag_dev(1);
+            if (lastKvOffset != 0) {
+                WaitPrevCore();
+                resetPrevCore = 1;
+            }
 #ifdef XLITE_KERNEL_DEBUG
             printf("block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u - %u), kvHeadIdx %u "
-                   "kv [%u - %u)} use %d temp buf: UPDATE\n", dbgBlockIdx, subIdx,
+                   "kv [%u - %u)} use %d temp buf: UPDATE\n", blockIdx, subBlockIdx,
                    lastBatchIdx, lastQueryTaskOffset, lastQueryTaskOffset + lastQueryTaskLen,
                    lastWorkStart, lastWorkStart + lastWorkCurCore,
                    lastkvHeadIdx, lastKvOffset, lastKvOffset + lastKvLen, last);
 #endif
+            // do update
+            if (!lastIsLastKvTile) {
+                SetNextCore();
+            }
+        }
+        if (resetPrevCore) {
+            ResetPrevCore();
         }
     }
 
@@ -389,9 +463,9 @@ private:
     GlobalTensor<Dtype> sv[PINGPONG_BUF_NUM];
     GlobalTensor<float> max[PINGPONG_BUF_NUM];
     GlobalTensor<float> sum[PINGPONG_BUF_NUM];
-    GlobalTensor<int32_t> sync1;
-    GlobalTensor<int32_t> sync2;
     GlobalTensor<Dtype> output;
+    __gm__ int32_t *setNextSync;
+    __gm__ int32_t *waitPrevSync;
 
     __gm__ int32_t *queryStartLoc;
     __gm__ int32_t *queryLens;
@@ -412,6 +486,12 @@ private:
     uint32_t qkvMemSize;
     uint32_t groupMemSize;
     uint32_t blockMemSize;
+    int blockIdx;
+    int subBlockIdx;
+    int nextBlockIdx;
+    int prevBlockIdx;
+    uint32_t setNextGeneration;
+    uint32_t waitPrevGeneration;
 
     LocalTensor<Dtype> l1aBuf[PINGPONG_BUF_NUM];
     LocalTensor<Dtype> l1bBuf[PINGPONG_BUF_NUM];
