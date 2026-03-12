@@ -205,10 +205,7 @@ public:
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int kvNum = DIV_ROUND_UP(cachedLen + queryLen, TILESIZE_OF_CACHED_KV);
             int taskNum = queryNum * nKVHeads * kvNum;
-            for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != block_idx) {
-                    continue;
-                }
+            for (int idx = 0; idx < taskNum; idx++) {
                 int kvIdx = idx % kvNum;
                 int kvHeadIdx = (idx / kvNum) % nKVHeads;
                 int queryIdx = idx / (kvNum * nKVHeads);
@@ -217,6 +214,25 @@ public:
                 if (queryTaskStart + queryTaskLen > queryLen) {
                     queryTaskLen = queryLen - queryTaskStart;
                 }
+                if (cachedLen < 0) {
+                    cachedLen = cachedLens[batchIdx];
+                }
+                uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
+                int kvOffset = kvIdx * TILESIZE_OF_CACHED_KV;
+                if (calcLen <= kvOffset) {
+                    continue;
+                }
+                if (totalIdx % block_num != block_idx) {
+                    totalIdx++;
+                    continue;
+                }
+                totalIdx++;
+
+                int kvLen = TILESIZE_OF_CACHED_KV;
+                if (kvOffset + kvLen > calcLen) {
+                    kvLen = calcLen - kvOffset;
+                }
+
                 if (queryStart < 0) {
                     queryStart = queryStartLoc[batchIdx];
                 }
@@ -225,15 +241,7 @@ public:
 
                 // do queryIdx & kvHeadIdx & kvIdx's QK
                 uint32_t qOffset = queryTaskOffset * headSize * nQKVHeads + kvHeadOffset;
-                if (cachedLen < 0) {
-                    cachedLen = cachedLens[batchIdx];
-                }
-                uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
-                int kvOffset = kvIdx * TILESIZE_OF_CACHED_KV;
-                int kvLen = TILESIZE_OF_CACHED_KV;
-                if (kvOffset + kvLen > calcLen) {
-                    kvLen = calcLen - kvOffset;
-                }
+
 #ifdef XLITE_KERNEL_DEBUG
                 printf("block%d: {batch %d, query [%u - %u), kvHeadIdx %u, "
                        "kv [%u - %u)} use %d temp buf: QK\n",
@@ -330,10 +338,7 @@ public:
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int kvNum = DIV_ROUND_UP(cachedLen + queryLen, TILESIZE_OF_CACHED_KV);
             int taskNum = queryNum * nKVHeads * kvNum;
-            for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != block_idx) {
-                    continue;
-                }
+            for (int idx = 0; idx < taskNum; idx++) {
                 int kvIdx = idx % kvNum;
                 int kvHeadIdx = (idx / kvNum) % nKVHeads;
                 int queryIdx = idx / (kvNum * nKVHeads);
@@ -342,6 +347,25 @@ public:
                 if (queryTaskStart + queryTaskLen > queryLen) {
                     queryTaskLen = queryLen - queryTaskStart;
                 }
+                if (cachedLen < 0) {
+                    cachedLen = cachedLens[batchIdx];
+                }
+                uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
+                int kvOffset = kvIdx * TILESIZE_OF_CACHED_KV;
+                if (calcLen <= kvOffset) {
+                    continue;
+                }
+                if (totalIdx % block_num != block_idx) {
+                    totalIdx++;
+                    continue;
+                }
+                totalIdx++;
+
+                int kvLen = TILESIZE_OF_CACHED_KV;
+                if (kvOffset + kvLen > calcLen) {
+                    kvLen = calcLen - kvOffset;
+                }
+
                 if (queryStart < 0) {
                     queryStart = queryStartLoc[batchIdx];
                 }
@@ -349,15 +373,7 @@ public:
                 int kvHeadOffset = kvHeadIdx * groupMemSize;
 
                 uint32_t qOffset = queryTaskOffset * headSize * nQKVHeads + kvHeadOffset;
-                if (cachedLen < 0) {
-                    cachedLen = cachedLens[batchIdx];
-                }
-                uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
-                int kvOffset = kvIdx * TILESIZE_OF_CACHED_KV;
-                int kvLen = TILESIZE_OF_CACHED_KV;
-                if (kvOffset + kvLen > calcLen) {
-                    kvLen = calcLen - kvOffset;
-                }
+
                 int isLastKvTile = (kvOffset + kvLen == calcLen) ? 1 : 0;
 
                 int nWork = queryTaskLen * headNumInGroup;
