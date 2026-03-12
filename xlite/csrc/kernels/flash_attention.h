@@ -8,6 +8,8 @@
 #include "softmax_attn_aiv.h"
 
 #define MAX_M0 128
+#define MBLOCKSIZE 16
+#define NBLOCKSIZE 16
 #define XLITE_KERNEL_DEBUG
 
 template <typename Dtype>
@@ -104,7 +106,7 @@ public:
 
     __aicore__ inline void SetNextCore()
     {
-        __ubuf__ uint32_t *val = (__ubuf__ uint32_t *)(0ull);
+        __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
 #ifdef XLITE_KERNEL_DEBUG
         printf("block%d subblock%u set block%d subblock%u %u\n",
             blockIdx, subBlockIdx, nextBlockIdx, subBlockIdx, setNextGeneration);
@@ -113,12 +115,13 @@ public:
         set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
         copy_ubuf_to_gm_align_b16(setNextSync, val, 0, 1, sizeof(int32_t), 0, 0, 0, 0);
+        PipeBarrier<PIPE_ALL>();
         setNextGeneration++;
     }
 
     __aicore__ inline void WaitPrevCore()
     {
-        __ubuf__ uint32_t *val = (__ubuf__ uint32_t *)(0ull);
+        __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
 #ifdef XLITE_KERNEL_DEBUG
         printf("block%d subblock%u wait block%d subblock%u %u\n",
             blockIdx, subBlockIdx, prevBlockIdx, subBlockIdx, waitPrevGeneration);
@@ -133,7 +136,7 @@ public:
 
     __aicore__ inline void ResetPrevCore()
     {
-        __ubuf__ uint32_t *val = (__ubuf__ uint32_t *)(0ull);
+        __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
 #ifdef XLITE_KERNEL_DEBUG
         printf("block%d subblock%u reset block%d subblock%u\n",
             blockIdx, subBlockIdx, prevBlockIdx, subBlockIdx);
@@ -153,6 +156,78 @@ public:
                                     __gm__ uint32_t *blockTable, int kvOffset, int kvLen,
                                     GlobalTensor<Dtype> qk)
     {
+        constexpr int kBlockSize = 32 / sizeof(Dtype);
+        int mActual = queryLen * headNumInGroup;
+        int nIdxStart = kvOffset / blockSize;
+        int nLoop = DIV_ROUND_UP(kvLen, blockSize);
+        int mBlockPad = ROUND_UP(mActual, MBLOCKSIZE);
+        int mBlockNum = mBlockPad / MBLOCKSIZE;
+        int nBlockPad = ROUND_UP(blockSize, NBLOCKSIZE);
+        int nBlockNum = nBlockPad / NBLOCKSIZE;
+        int kBlockNum = DIV_ROUND_UP(headSize, kBlockSize);
+        int kvHeadOffset = kvHeadIdx * headSize;
+
+        Nd2NzParams nd2nzParams(1 /* NdNum */, queryLen /* nValue */, headSize /* dValue */,
+                                0 /* srcNdMatrixStride */, qkvMemSize /* srcDValue */,
+                                mBlockPad /* dstNzC0Stride */, headNumInGroup /* dstNzNStride */,
+                                0 /* dstNzMatrixStride */);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        for (int h = 0; h < headNumInGroup; h++) {
+            DataCopy(l1aBuf[0][MBLOCKSIZE * h], query[headSize * h], nd2nzParams);
+        }
+        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+
+        WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+        CopyToL0ACol(l0aBuf[0], l1aBuf[0], mBlockNum, 0, kBlockNum);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+
+        int curIdx = 0;
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID2);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID3);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        for (int nIdx = 0; nIdx < nLoop; nIdx++) {
+            uint32_t blockIdx = blockTable[nIdx + nIdxStart];
+            int nSize = blockSize;
+            if (nIdx * blockSize + nSize > kvLen) {
+                nSize = kvLen - nIdx * blockSize;
+                nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+                nBlockNum = nBlockPad / NBLOCKSIZE;
+            }
+
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
+            CopyGmToL1Nd2Nz(l1bBuf[curIdx], kCache[blockIdx * blockMemSize + kvHeadOffset], nSize,
+                            headSize, kvMemSize, nBlockPad);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
+
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID2 + curIdx);
+            CopyToL0BCol(l0bBuf[curIdx], l1bBuf[curIdx], nBlockNum, 0, kBlockNum);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID2 + curIdx);
+
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID2 + curIdx);
+            WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+            CalMmad(l0cBuf, l0aBuf[0], l0bBuf[curIdx], mBlockPad, nBlockPad, headSize, true);
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID2 + curIdx);
+            SetFlag<HardEvent::M_FIX>(EVENT_ID0);
+
+            WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+            CopyToGm(qk[nIdx * blockSize], l0cBuf, mActual, nSize, mBlockPad, TILESIZE_OF_CACHED_KV);
+            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+            PipeBarrier<PIPE_M>();
+            curIdx = 1 - curIdx;
+        }
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID3);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID2);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
     }
 
     /*
@@ -164,6 +239,80 @@ public:
                                     __gm__ uint32_t *blockTable, int kvOffset, int kvLen,
                                     GlobalTensor<Dtype> sv)
     {
+        constexpr int kBlockSize = 32 / sizeof(Dtype);
+        int mActual = queryLen * headNumInGroup;
+        int kIdxStart = kvOffset / blockSize;
+        int kLoop = DIV_ROUND_UP(kvLen, blockSize);
+        int mBlockPad = ROUND_UP(mActual, MBLOCKSIZE);
+        int mBlockNum = mBlockPad / MBLOCKSIZE;
+        int nBlockNum = DIV_ROUND_UP(headSize, NBLOCKSIZE);
+        int kBlockPad = ROUND_UP(blockSize, kBlockSize);
+        int kBlockNum = kBlockPad / kBlockSize;
+        int kvHeadOffset = kvHeadIdx * headSize;
+
+        int curIdx = 0;
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID2);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID3);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        for (int kIdx = 0; kIdx < kLoop; kIdx++) {
+            int kSize = blockSize;
+            if (kIdx * blockSize + kSize > kvLen) {
+                kSize = kvLen - kIdx * blockSize;
+                kBlockPad = ROUND_UP(kSize, kBlockSize);
+                kBlockNum = kBlockPad / kBlockSize;
+            }
+
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curIdx);
+            CopyGmToL1Nd2Nz(l1aBuf[curIdx], qk[kIdx * blockSize], mActual, kSize, TILESIZE_OF_CACHED_KV,
+                            mBlockPad);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curIdx);
+
+            uint32_t blockIdx = blockTable[kIdx + kIdxStart];
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
+            CopyGmToL1Nd2Nz(l1bBuf[curIdx], vCache[blockIdx * blockMemSize + kvHeadOffset], kSize,
+                            headSize, kvMemSize, kBlockPad);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
+
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curIdx);
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curIdx);
+            CopyToL0ACol(l0aBuf[curIdx], l1aBuf[curIdx], mBlockNum, 0, kBlockNum);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curIdx);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curIdx);
+
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID2 + curIdx);
+            CopyToL0BTCol(l0bBuf[curIdx], l1bBuf[curIdx], nBlockNum, 0, kBlockNum, kBlockNum);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID2 + curIdx);
+
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curIdx);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID2 + curIdx);
+            CalMmad(l0cBuf, l0aBuf[curIdx], l0bBuf[curIdx], mBlockPad, headSize, kBlockPad,
+                    kIdx == 0);
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curIdx);
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID2 + curIdx);
+            PipeBarrier<PIPE_M>();
+            curIdx = 1 - curIdx;
+        }
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID3);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID2);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+
+        SetFlag<HardEvent::M_FIX>(EVENT_ID0);
+        WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+        CopyToGm(sv, l0cBuf, mActual, headSize, mBlockPad, headSize);
     }
 
     __aicore__ inline void RunAic()
@@ -457,6 +606,7 @@ public:
                 SetNextCore();
             }
         }
+        PipeBarrier<PIPE_ALL>();
         if (resetPrevCore) {
             ResetPrevCore();
         }
