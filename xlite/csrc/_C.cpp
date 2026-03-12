@@ -316,12 +316,27 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                            TensorPtr(kvCache[i].second));
     }
 
-    if (currStream != 0) {
+    if (currStream != 0 && rt.taskId == 0) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
     }
 
+    if (rt.multiTaskParallel && rt.taskId == 1) {
+        rt.NotifyWaitPeerStream();
+    }
+
     _model->Forward(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis, _output);
+
+    if (rt.multiTaskParallel) {
+        if (rt.taskId == 0) {
+            rt.NotifyRecordPeerStream();
+            rt.NotifyWaitPeerStream();
+        }
+        if (rt.taskId == 1) {
+            rt.NotifyRecordPeerStream();
+            return;
+        }
+    }
 
     if (currStream != 0) {
         rt.EventRecordCurrStream(currAclStream);
@@ -465,13 +480,28 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         InitXTensor(_deepstackInputEmbeds[i], deepstackInput[i]);
     }
 
-    if (currStream != 0) {
+    if (currStream != 0 && rt.taskId == 0) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
     }
 
+    if (rt.multiTaskParallel && rt.taskId == 1) {
+        rt.NotifyWaitPeerStream();
+    }
+
     _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis,
                                     _output);
+
+    if (rt.multiTaskParallel) {
+        if (rt.taskId == 0) {
+            rt.NotifyRecordPeerStream();
+            rt.NotifyWaitPeerStream();
+        }
+        if (rt.taskId == 1) {
+            rt.NotifyRecordPeerStream();
+            return;
+        }
+    }
 
     if (currStream != 0) {
         rt.EventRecordCurrStream(currAclStream);

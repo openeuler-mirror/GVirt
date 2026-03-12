@@ -361,34 +361,33 @@ class Llama(nn.Module):
                 event.set()
 
     @torch.inference_mode()
-    def forward_xlite_parallel(self, tokens: torch.Tensor, block_num_offset: int, task_id: int, start_pos: int = 0):
-        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device)
-        tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
-        attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
-        attn_meta.block_tables = attn_meta.block_tables + np.int32(block_num_offset)
+    def forward_xlite_parallel(self, tokens: torch.Tensor, start_pos: int = 0):
+        mid = tokens.size(1) // 2
+        tokens0 = tokens[:, :mid]
+        tokens1 = tokens[:, mid:]
+        tokens0 = tokens0.contiguous().view(tokens0.size(0), tokens0.size(1))
+        tokens1 = tokens1.contiguous().view(tokens1.size(0), tokens1.size(1))
+        attn_meta0 = self.prepare_xlite_attnmeta(tokens0, start_pos)
+        attn_meta1 = self.prepare_xlite_attnmeta(tokens1, start_pos + mid)
         stream = torch.npu.current_stream().npu_stream
-        event = self.thread_pool[task_id].add_task(args = (tokens.flatten(), attn_meta, self.xlite_kv_cache, self.freqs_cis, logits, stream))
-        return logits, event
+        logits0 = torch.empty(world_size, tokens0.size(0), self.args.vocab_size // world_size, device=tokens.device)
+        logits1 = torch.empty(world_size, tokens1.size(0), self.args.vocab_size // world_size, device=tokens.device)
+        event0 = self.thread_pool[0].add_task(args = (tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits0, stream))
+        event1 = self.thread_pool[1].add_task(args = (tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits1, stream))
+        event0.wait()
+        event1.wait()
+        logits0 = logits0.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
+        logits1 = logits1.permute(1, 0, 2).reshape(tokens1.size(0), self.args.vocab_size)
+        return logits1
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         if forward_backend == "xlite":
-            if not self.multi_task_parallel or tokens.size(0) == 1 or tokens.size(0) * tokens.size(1) < 1024:
+            if not self.multi_task_parallel or tokens.size(0) * tokens.size(1) < 1024:
                 self.xlite_rt.multi_task_parallel = False
                 return self.forward_xlite(tokens, start_pos)
 
-            mid = tokens.size(0) // 2
-            block_num_offset = (self.args.max_seq_len + block_size - 1) // block_size * mid
-            tokens0 = tokens[:mid]
-            tokens1 = tokens[mid:]
-            logits0, event0 = self.forward_xlite_parallel(tokens0, 0, 0, start_pos)
-            logits1, event1 = self.forward_xlite_parallel(tokens1, block_num_offset, 1, start_pos)
-            event0.wait()
-            event1.wait()
-            logits0 = logits0.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
-            logits1 = logits1.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
-            logits = torch.cat([logits0, logits1], dim = 0)
-            return logits
+            return self.forward_xlite_parallel(tokens, start_pos)
         else:
             return self.forward_naive(tokens, start_pos)
 
