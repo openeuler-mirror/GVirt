@@ -92,23 +92,24 @@ XRuntime::~XRuntime(void)
     }
 
     delete pool;
-    CHECK_ACL(aclrtDestroyEvent(_event));
-    CHECK_ACL(aclrtDestroyNotify(notify));
-    CHECK_ACL(aclrtDestroyStream(stream));
-    CHECK_ACL(aclrtResetDevice(_devid));
-    if (!_init_outside) {
-        CHECK_ACL(aclFinalize());
-    }
+    (void)aclrtDestroyEvent(_event);
+    (void)aclrtDestroyNotify(notify);
+    (void)aclrtDestroyStream(stream);
+    (void)aclrtResetDevice(_devid);
 
     if (_attnInitialized) {
-        CHECK_ACL(aclrtFree(_position.ptr));
-        CHECK_ACL(aclrtFree(_slotMapping.ptr));
-        CHECK_ACL(aclrtFree(_cachedLens.ptr));
-        CHECK_ACL(aclrtFree(_lens.ptr));
-        CHECK_ACL(aclrtFree(_cumPromptLens.ptr));
-        CHECK_ACL(aclrtFree(_prefillIdx.ptr));
-        CHECK_ACL(aclrtFree(_prefillLastIdx.ptr));
-        CHECK_ACL(aclrtFree(_blockTables.ptr));
+        (void)aclrtFree(_position.ptr);
+        (void)aclrtFree(_slotMapping.ptr);
+        (void)aclrtFree(_cachedLens.ptr);
+        (void)aclrtFree(_lens.ptr);
+        (void)aclrtFree(_cumPromptLens.ptr);
+        (void)aclrtFree(_prefillIdx.ptr);
+        (void)aclrtFree(_prefillLastIdx.ptr);
+        (void)aclrtFree(_blockTables.ptr);
+    }
+
+    if (!_init_outside) {
+        (void)aclFinalize();
     }
 }
 
@@ -166,7 +167,7 @@ void XRuntime::FiniXcclComm(void)
         if (_ipcXTensorMems[rank] == nullptr) {
             continue;
         }
-        CHECK_ACL(aclrtIpcMemClose(_ipcXTensorKeys[rank]));
+        (void)aclrtIpcMemClose(_ipcXTensorKeys[rank]);
     }
 }
 
@@ -189,18 +190,16 @@ int XRuntime::InitXcclComm(void)
     XSock *sock = new XSock(_rankId, _rankSize, _ips[0], _port + XLITE_CCL_PORT_OFFSET);
 
     _ipcXTensorMems[_rankId] = pool->Ptr();
-    CHECK_ACL_RET(
-        aclrtIpcMemGetExportKey(pool->Ptr(), pool->Size(), _ipcXTensorKeys[_rankId], EXPORT_KEY_LEN,
-                                ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION),
-        -EFAULT);
+    CHECK_ACL(aclrtIpcMemGetExportKey(pool->Ptr(), pool->Size(), _ipcXTensorKeys[_rankId],
+                                      EXPORT_KEY_LEN,
+                                      ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION));
     sock->AllGather(&_ipcXTensorKeys[_rankId], EXPORT_KEY_LEN, _ipcXTensorKeys);
     for (uint32_t rank = 0; rank < _rankSize; rank++) {
         if (rank == _rankId) {
             continue;
         }
-        CHECK_ACL_RET(aclrtIpcMemImportByKey(&_ipcXTensorMems[rank], _ipcXTensorKeys[rank],
-                                             ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS),
-                      -EFAULT);
+        CHECK_ACL(aclrtIpcMemImportByKey(&_ipcXTensorMems[rank], _ipcXTensorKeys[rank],
+                                         ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS));
     }
     delete sock;
 
@@ -250,13 +249,12 @@ int XRuntime::InitHcclComm(void)
         port = _port + _rankId / _tpSize + portOffset;
 
         if (_rankId % _tpSize == 0) {
-            CHECK_HCCL_RET(HcclGetRootInfo(&rootInfo), -EFAULT);
+            CHECK_HCCL(HcclGetRootInfo(&rootInfo));
         }
         XSock *sock = new XSock(_rankId % _tpSize, _tpSize, ip, port);
         sock->Broadcast(&rootInfo, sizeof(rootInfo));
         delete sock;
-        CHECK_HCCL_RET(HcclCommInitRootInfo(_tpSize, &rootInfo, _rankId % _tpSize, &_tpComm),
-                       -EFAULT);
+        CHECK_HCCL(HcclCommInitRootInfo(_tpSize, &rootInfo, _rankId % _tpSize, &_tpComm));
     }
 
     if (_dpSize > 1) {
@@ -264,13 +262,12 @@ int XRuntime::InitHcclComm(void)
         port = _port + XLITE_DP_PORT_OFFSET + _rankId % _tpSize + portOffset;
 
         if (_rankId / _tpSize == 0) {
-            CHECK_HCCL_RET(HcclGetRootInfo(&rootInfo), -EFAULT);
+            CHECK_HCCL(HcclGetRootInfo(&rootInfo));
         }
         XSock *sock = new XSock(_rankId / _tpSize, _dpSize, ip, port);
         sock->Broadcast(&rootInfo, sizeof(rootInfo));
         delete sock;
-        CHECK_HCCL_RET(HcclCommInitRootInfo(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm),
-                       -EFAULT);
+        CHECK_HCCL(HcclCommInitRootInfo(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm));
     }
     portOffset += 500;
 

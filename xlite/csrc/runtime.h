@@ -5,6 +5,7 @@
 #define _XLITE_RUNTIME_H_
 
 #include <cstdint>
+#include "base.h"
 #include "ccl.h"
 
 #define XLITE_DEFAULT_DEVS_PER_NODE 8

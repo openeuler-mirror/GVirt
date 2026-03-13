@@ -132,7 +132,7 @@ void XModel::Init(void)
             _mropeMaskW |= 1ULL << i;
         }
     } else {
-        int sectionStartH = _c.mropeSection.size() > 0 ? _c.mropeSection[0] : 0;
+        int sectionStartH = !_c.mropeSection.empty() ? _c.mropeSection[0] : 0;
         int sectionStartW = sectionStartH + mropeSectionH;
         for (int i = sectionStartH; i < sectionStartW; i++) {
             _mropeMaskH |= 1ULL << i;
@@ -146,22 +146,22 @@ void XModel::Init(void)
 XModel::~XModel(void)
 {
     if (_c.nDenseLayers != _c.nLayers) {
-        CHECK_ACL(aclrtFree(_gateIndicts.ptr));
+        (void)aclrtFree(_gateIndicts.ptr);
     }
     for (uint32_t i = _c.nDenseLayers; i < _c.nLayers; i++) {
-        CHECK_ACL(aclrtFree(_moeREUpGate[i].ptr));
-        CHECK_ACL(aclrtFree(_moeREUpGateScale[i].ptr));
-        CHECK_ACL(aclrtFree(_moeREDown[i].ptr));
-        CHECK_ACL(aclrtFree(_moeREDownScale[i].ptr));
+        (void)aclrtFree(_moeREUpGate[i].ptr);
+        (void)aclrtFree(_moeREUpGateScale[i].ptr);
+        (void)aclrtFree(_moeREDown[i].ptr);
+        (void)aclrtFree(_moeREDownScale[i].ptr);
     }
 
     if (_c.attnType == XMODEL_ATTN_MLA) {
-        CHECK_ACL(aclrtFree(_vGather.ptr));
+        (void)aclrtFree(_vGather.ptr);
     }
 
     if (_c.attnType == XMODEL_ATTN_MHA) {
-        CHECK_ACL(aclrtFree(_a2v.ptr));
-        CHECK_ACL(aclrtFree(_v2a.ptr));
+        (void)aclrtFree(_a2v.ptr);
+        (void)aclrtFree(_v2a.ptr);
     }
 }
 
@@ -801,7 +801,7 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
     rt.pool->PutTensor(h);
 }
 
-size_t XModel::GetTensorPoolSize(int dbg) const
+size_t XModel::GetTensorPoolSize(int dbg)
 {
     int dtypeSize = XDtypeBit(embed.dtype) / 8;
     size_t attnSize, ffnSize;

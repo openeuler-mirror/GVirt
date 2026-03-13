@@ -248,7 +248,7 @@ std::ostream &operator<<(std::ostream &os, const XTensor &p)
 
 int XTensorPool::Init(void)
 {
-    CHECK_ACL_RET(aclrtMalloc(&_ptr, _size, ACL_MEM_MALLOC_HUGE_FIRST), -ENOMEM);
+    CHECK_ACL(aclrtMalloc(&_ptr, _size, ACL_MEM_MALLOC_HUGE_FIRST));
     for (int i = 0; i < XLITE_MAX_NUM_DYNAMIC_TENSOR; i++) {
         _free.push_back(this->_t[i]);
     }
@@ -257,7 +257,7 @@ int XTensorPool::Init(void)
 
 XTensorPool::~XTensorPool(void)
 {
-    CHECK_ACL(aclrtFree(_ptr));
+    (void)aclrtFree(_ptr);
 }
 
 XTensor &XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype, DebugSrcLoc loc)

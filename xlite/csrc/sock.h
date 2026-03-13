@@ -6,12 +6,13 @@
 
 #include <cstdint>
 #include <vector>
+#include <string>
 
 class XSock
 {
 public:
-    XSock(uint32_t rankId, uint32_t rankSize, const std::string &ip, uint32_t port)
-        : _rankId(rankId), _rankSize(rankSize), _ip(ip), _port(port) {};
+    XSock(uint32_t rankId, uint32_t rankSize, std::string ip, uint32_t port)
+        : _rankId(rankId), _rankSize(rankSize), _ip(std::move(ip)), _port(port) {};
     ~XSock(void);
     int Broadcast(void *buf, uint32_t size);
     int AllGather(void *buf, uint32_t size, void *allBuf);
