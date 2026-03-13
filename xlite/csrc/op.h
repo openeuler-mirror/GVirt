@@ -52,7 +52,7 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
-                           XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &sync,
+                           XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &lastMax, XTensor &lastSum, XTensor &sync,
                            XTensor &output, XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
                            XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                            uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);

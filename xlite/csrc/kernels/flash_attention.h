@@ -13,6 +13,14 @@
 #define XLITE_KERNEL_DEBUG
 
 template <typename Dtype>
+__aicore__ inline void RunAivSoftmaxUpdate(GlobalTensor<Dtype> sv, GlobalTensor<float> max, GlobalTensor<float> sum,
+                                           GlobalTensor<Dtype> prevSv, GlobalTensor<float> prevMax, GlobalTensor<float> prevSum,
+                                           GlobalTensor<Dtype> output, GlobalTensor<float> lastMax, GlobalTensor<float> lastSum,
+                                           uint32_t m, uint32_t subHeadOffset, uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize)
+{
+}
+
+template <typename Dtype>
 class FlashAttention
 {
 public:
@@ -21,7 +29,7 @@ public:
     }
 
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk,
-                                GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR sync,
+                                GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync,
                                 GM_ADDR output, GM_ADDR queryStartLoc, GM_ADDR queryLens,
                                 GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads,
                                 uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize,
@@ -69,6 +77,14 @@ public:
         this->max[1].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0 + block_num * MAX_M0);
         this->sum[0].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0);
         this->sum[1].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 + block_num * MAX_M0);
+        this->prevSv[0].SetGlobalBuffer(((__gm__ Dtype *)sv) + prevBlockIdx * MAX_M0 * headSize);
+        this->prevSv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) + prevBlockIdx * MAX_M0 * headSize + block_num * MAX_M0 * headSize);
+        this->prevMax[0].SetGlobalBuffer(((__gm__ float *)max) + prevBlockIdx * MAX_M0);
+        this->prevMax[1].SetGlobalBuffer(((__gm__ float *)max) + prevBlockIdx * MAX_M0 + block_num * MAX_M0);
+        this->prevSum[0].SetGlobalBuffer(((__gm__ float *)sum) + prevBlockIdx * MAX_M0);
+        this->prevSum[1].SetGlobalBuffer(((__gm__ float *)sum) + prevBlockIdx * MAX_M0 + block_num * MAX_M0);
+        this->lastMax.SetGlobalBuffer((__gm__ float *)lastMax);
+        this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
         this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * 2 + subBlockIdx;
 
@@ -457,7 +473,8 @@ public:
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
 
         int lastBatchIdx, lastQueryTaskLen, lastkvHeadIdx, last, lastKvOffset, lastKvLen, lastQueryTaskOffset, lastWorkStart, lastWorkCurCore;
-        int lastIsLastKvTile;
+        int lastIsLastKvTile, lastSubHeadOffset;
+        uint32_t lastOutOffset;
         __gm__ uint32_t *lastBlockTable;
 
         int needDoUpdate = 0;
@@ -532,6 +549,9 @@ public:
                 if (nWorkStart + nWorkCurCore > nWork) {
                     nWorkCurCore = nWork - nWorkStart;
                 }
+                int subQOffset = nWorkStart / headNumInGroup;
+                int subHeadOffset = nWorkStart % headNumInGroup;
+                uint32_t outOffset = (queryTaskOffset + subQOffset) * nHeads + kvHeadIdx * headNumInGroup;
 
                 // wait aic qk done
                 wait_flag_dev(0);
@@ -542,7 +562,7 @@ public:
                        blockIdx, subBlockIdx, batchIdx, queryTaskOffset,
                        queryTaskOffset + queryTaskLen, nWorkStart, nWorkStart + nWorkCurCore, kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
 #endif
-                // TODO save max[curr] & sum[curr]
+                // TODO save max[curr][nWorkStart], sum[curr][nWorkStart]
                 RunAivSoftmaxPingPong<Dtype>(
                     (__gm__ Dtype *)qk[curr][nWorkStart * TILESIZE_OF_CACHED_KV].GetPhyAddr(),
                     nWorkCurCore, TILESIZE_OF_CACHED_KV, kvLen);
@@ -563,6 +583,10 @@ public:
                            lastkvHeadIdx, lastKvOffset, lastKvOffset + lastKvLen, last);
 #endif
                     // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] & max[last]
+                    RunAivSoftmaxUpdate(sv[last][nWorkStart * headSize], max[last][nWorkStart], sum[last][nWorkStart],
+                                        prevSv[last][nWorkStart * headSize], prevMax[last][nWorkStart], prevSum[last][nWorkStart],
+                                        output[lastOutOffset * headSize], lastMax[lastOutOffset], lastMax[lastOutOffset],
+                                        lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize);
                     if (!lastIsLastKvTile) {
                         SetNextCore();
                     }
@@ -574,6 +598,8 @@ public:
                 lastWorkStart = nWorkStart;
                 lastWorkCurCore = nWorkCurCore;
                 lastkvHeadIdx = kvHeadIdx;
+                lastOutOffset = outOffset;
+                lastSubHeadOffset = subHeadOffset;
                 lastBlockTable = blockTable;
                 lastKvOffset = kvOffset;
                 lastKvLen = kvLen;
@@ -629,6 +655,11 @@ private:
     GlobalTensor<Dtype> sv[PINGPONG_BUF_NUM];
     GlobalTensor<float> max[PINGPONG_BUF_NUM];
     GlobalTensor<float> sum[PINGPONG_BUF_NUM];
+    GlobalTensor<Dtype> prevSv[PINGPONG_BUF_NUM];
+    GlobalTensor<float> prevMax[PINGPONG_BUF_NUM];
+    GlobalTensor<float> prevSum[PINGPONG_BUF_NUM];
+    GlobalTensor<float> lastMax;
+    GlobalTensor<float> lastSum;
     GlobalTensor<Dtype> output;
     __gm__ int32_t *setNextSync;
     __gm__ int32_t *waitPrevSync;
@@ -669,13 +700,14 @@ private:
 #define FLASH_ATTN_FUNC_DEFINE(dtype)                                                              \
     extern "C" __global__ __aicore__ void flash_attention_##dtype(                                 \
         GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache,                                             \
-        GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR sync, GM_ADDR output,            \
+        GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum,        \
+        GM_ADDR sync, GM_ADDR output,                                                              \
         GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,         \
         uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize, uint32_t batch, \
         uint32_t maxNumBlocks)                                                                     \
     {                                                                                              \
         FlashAttention<dtype> op;                                                                  \
-        op.Init(input, kCache, vCache, qk, sv, max, sum, sync,                                     \
+        op.Init(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, sync,                                     \
                 output, queryStartLoc, queryLens, cachedLens,                                      \
                 blockTables, nHeads, nKVHeads, headSize, blockSize, batch, maxNumBlocks);          \
         op.Run();                                                                                  \
