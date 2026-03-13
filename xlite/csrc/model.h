@@ -4,6 +4,7 @@
 #ifndef _XLITE_MODEL_H_
 #define _XLITE_MODEL_H_
 
+#include "runtime.h"
 #include "base.h"
 
 enum XModelRopeType {
@@ -92,7 +93,7 @@ public:
                                  std::vector<std::pair<XTensor, XTensor>> &kvCache,
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                  XTensor &output);
-    size_t GetTensorPoolSize(int dbg) const;
+    size_t GetTensorPoolSize(int dbg);
 
     // weights
     XTensor embed;
@@ -162,17 +163,17 @@ private:
     void ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                std::vector<std::pair<XTensor, XTensor>> &kvCache,
                                std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                               XTensor &output);
+                               XTensor &h);
     void ForwardLayers(XRuntime &rt, XTensor &x, std::vector<std::pair<XTensor, XTensor>> &kvCache,
                        std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &h);
     void ForwardLayersNaive(XRuntime &rt, XTensor &x,
                             std::vector<std::pair<XTensor, XTensor>> &kvCache,
                             std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                            XTensor &h);
+                            XTensor &output);
     void ForwardLayersCommOptimize(XRuntime &rt, XTensor &x,
                                    std::vector<std::pair<XTensor, XTensor>> &kvCache,
                                    std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                                   XTensor &h);
+                                   XTensor &output);
     struct XModelConfig _c;
     uint32_t _rankId;
 

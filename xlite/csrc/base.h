@@ -109,8 +109,8 @@ size_t inline XDtypeBit(enum XDtype dtype)
         case CPLXF:
             return 64;
         default:
-            std::cerr << __FILE__ << ":" << __LINE__ << "unknown data type " << dtype << std::endl;
-            return 0;
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": unknown data type " + std::to_string(dtype));
     }
 }
 
@@ -152,7 +152,7 @@ public:
     {
         return _ptr;
     };
-    size_t Size() const
+    size_t Size()
     {
         return _size;
     };

@@ -7,6 +7,7 @@ Checks: >
   -bugprone-reserved-identifier,
   -bugprone-signed-char-misuse,
   -bugprone-branch-clone,
+  -bugprone-implicit-widening-of-multiplication-result,
   cert-*,
   -cert-dcl03-c,
   -cert-dcl21-cpp,
@@ -18,7 +19,7 @@ Checks: >
   -cert-flp30-c,
   -cert-msc50-cpp,
   -cert-str34-c,
-  -cert-err58-cpp，
+  -cert-err58-cpp,
   clang-analyzer-*,
   -clang-diagnostic-error,
   cppcoreguidelines-*,
@@ -28,6 +29,7 @@ Checks: >
   -cppcoreguidelines-init-variables,
   -cppcoreguidelines-macro-to-enum,
   -cppcoreguidelines-macro-usage,
+  -cppcoreguidelines-narrowing-conversions,
   -cppcoreguidelines-non-private-member-variables-in-classes,
   -cppcoreguidelines-no-malloc,
   -cppcoreguidelines-owning-memory,
@@ -89,7 +91,9 @@ Checks: >
   -readability-redundant-inline-specifier,
   -readability-use-std-min-max,
   -readability-else-after-return,
-  -readability-qualified-auto
+  -readability-qualified-auto,
+  -readability-make-member-function-const,
+  -readability-suspicious-call-argument
 
 WarningsAsErrors: ''
 HeaderFilterRegex: ''

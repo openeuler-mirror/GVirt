@@ -5,8 +5,8 @@
 #ifndef _XLITE_CCL_H_
 #define _XLITE_CCL_H_
 
-#include <cstring>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 #define XLITE_CCL_MAX_RANK_SIZE 32

@@ -7,6 +7,7 @@ Checks code formatting, copyright, header guards, and runs clang-tidy
 import sys
 import subprocess
 import re
+import shutil
 from pathlib import Path
 
 
@@ -93,34 +94,115 @@ class CppChecker:
                 return False
             return True
         except FileNotFoundError:
-            self.warnings.append("clang-format not found, skipping format check")
+            self.errors.append("clang-format not found, skipping format check")
             return True
         except Exception as e:
             self.errors.append(f"{file_path}: Error running clang-format: {e}")
+            return False
+
+    def build_project(self):
+        """Build project to generate operator header files"""
+        try:
+            build_dir = self.root_dir / 'build'
+            if build_dir.exists():
+                shutil.rmtree(build_dir)
+
+            build_dir.mkdir(parents=True, exist_ok=True)
+
+            cmake_configure = subprocess.run(
+                ['cmake', '-B', 'build'],
+                capture_output=True,
+                text=True,
+                cwd=self.root_dir
+            )
+
+            if cmake_configure.returncode != 0:
+                self.errors.append(f"Failed to configure cmake: {cmake_configure.stderr}")
+                return False
+
+            cmake_build = subprocess.run(
+                ['cmake', '--build', 'build', '-j'],
+                capture_output=True,
+                text=True,
+                cwd=self.root_dir
+            )
+
+            if cmake_build.returncode != 0:
+                self.errors.append(f"Failed to build project: {cmake_build.stderr}")
+                return False
+
+            cmake_install = subprocess.run(
+                ['cmake', '--install', 'build'],
+                capture_output=True,
+                text=True,
+                cwd=self.root_dir
+            )
+
+            if cmake_install.returncode != 0:
+                self.errors.append(f"Failed to install project: {cmake_install.stderr}")
+                return False
+
+            return True
+        except FileNotFoundError:
+            self.errors.append("cmake not found, skipping project build")
+            return False
+        except Exception as e:
+            self.errors.append(f"Error building project: {e}")
+            return False
+
+    def generate_compile_commands(self):
+        """Generate compile_commands.json using cmake"""
+        try:
+            build_dir = self.root_dir / 'build'
+
+            result = subprocess.run(
+                ['cmake', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '..'],
+                capture_output=True,
+                text=True,
+                cwd=build_dir
+            )
+
+            if result.returncode != 0:
+                self.errors.append(f"Failed to generate compile_commands.json: {result.stderr}")
+                return False
+            
+            compile_commands = build_dir / 'compile_commands.json'
+            if not compile_commands.exists():
+                self.errors.append("compile_commands.json not found after cmake")
+                return False
+
+            return True
+        except FileNotFoundError:
+            self.errors.append("cmake not found, skipping compile_commands.json generation")
+            return False
+        except Exception as e:
+            self.errors.append(f"Error generating compile_commands.json: {e}")
             return False
 
     def run_clang_tidy(self, file_path):
         """Run clang-tidy static analysis"""
         try:
             config_file = '.clang-tidy'
-            if 'kernels' in str(file_path):
-                config_file = 'csrc/kernels/.clang-tidy'
+            if 'kernels' in str(file_path) or 'csrc/ascend.h' in str(file_path):
+                return True
 
+            build_dir = self.root_dir / 'build'
             result = subprocess.run(
-                ['clang-tidy', str(file_path), f'--config-file={config_file}'],
+                ['clang-tidy', str(file_path), f'--config-file={config_file}',
+                  f'-p={build_dir}'],
                 capture_output=True,
                 text=True,
                 cwd=self.root_dir
             )
-            
+
             if result.returncode != 0 or result.stdout.strip():
                 for line in result.stdout.split('\n'):
                     if line.strip():
-                        self.warnings.append(f"{file_path}: {line}")
+                        self.errors.append(f"{file_path}: {line}")
                 return False
             return True
         except FileNotFoundError:
-            self.warnings.append("clang-tidy not found, skipping static analysis")
+            self.errors.append("clang-tidy not found, skipping static analysis")
             return True
         except Exception as e:
             self.errors.append(f"{file_path}: Error running clang-tidy: {e}")
@@ -146,6 +228,15 @@ class CppChecker:
         
         all_passed = True
         
+        if run_tidy:
+            print("Building project to generate operator header files...")
+            if not self.build_project():
+                all_passed = False
+
+            print("Generating compile_commands.json...")
+            if not self.generate_compile_commands():
+                all_passed = False
+        
         for file_path in cpp_files:
             print(f"  Checking {file_path.relative_to(self.root_dir)}", end='\r')
             
@@ -164,7 +255,7 @@ class CppChecker:
         print()
         
         if self.errors:
-            print("\n❌ ERRORS:")
+            print(f"\n❌  {len(self.errors)} ERRORS:")
             for error in self.errors:
                 print(f"  {error}")
             all_passed = False

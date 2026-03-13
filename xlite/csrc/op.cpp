@@ -446,7 +446,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
             m0 = 128;
         }
         n0 = (bias.ptr != nullptr) ? 128 : 256;
-        k0 = 512 / (XDtypeBit(weight.dtype) / 8);
+        k0 = 4096 / XDtypeBit(weight.dtype);
 
         uint64_t mLoop = DIV_ROUND_UP(m, m0);
         uint64_t nLoop = DIV_ROUND_UP(n, n0);
@@ -472,7 +472,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         }
     }
 
-    XlitePickSwizzle(m, n, k, swizzle);
+    XlitePickSwizzle(m, n, k, &swizzle);
 
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
@@ -762,18 +762,18 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
     }
 }
 
-void XliteOpSigmoidTopK(XRuntime &rt, XTensor &socres, XTensor &indices, XTensor &bias, float scale,
+void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias, float scale,
                         XTensor &outWeights, XTensor &outRouting, uint32_t topK, bool normTopKProb)
 {
-    if (socres.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
+    if (scores.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
         outRouting.dtype == BIT1) {
-        aclrtlaunch_sigmoid_topk_float(rt.aivNum, rt.stream, socres.ptr, indices.ptr, bias.ptr,
-                                       scale, outWeights.ptr, outRouting.ptr, socres.shape[0],
+        aclrtlaunch_sigmoid_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr, bias.ptr,
+                                       scale, outWeights.ptr, outRouting.ptr, scores.shape[0],
                                        indices.shape[0], topK, normTopKProb);
-    } else if (socres.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 &&
+    } else if (scores.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 &&
                outRouting.dtype == BIT1) {
-        aclrtlaunch_sigmoid_topk_bfloat16_t(rt.aivNum, rt.stream, socres.ptr, indices.ptr, bias.ptr,
-                                            scale, outWeights.ptr, outRouting.ptr, socres.shape[0],
+        aclrtlaunch_sigmoid_topk_bfloat16_t(rt.aivNum, rt.stream, scores.ptr, indices.ptr, bias.ptr,
+                                            scale, outWeights.ptr, outRouting.ptr, scores.shape[0],
                                             indices.shape[0], topK, normTopKProb);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;

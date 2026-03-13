@@ -68,10 +68,10 @@ static const std::map<Dimennsions, uint64_t> BestSwizzles = {
     {{65536, 12800, 5120}, 0x500}, {{65536, 25600, 5120}, 0x800},
 };
 
-void XlitePickSwizzle(uint64_t m, uint64_t n, uint64_t k, uint64_t &swizzle)
+void XlitePickSwizzle(uint64_t m, uint64_t n, uint64_t k, uint64_t *swizzle)
 {
     const auto best = BestSwizzles.find({m, n, k});
     if (best != BestSwizzles.end()) {
-        swizzle = best->second;
+        *swizzle = best->second;
     }
 }

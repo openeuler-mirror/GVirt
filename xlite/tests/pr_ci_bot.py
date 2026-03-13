@@ -179,14 +179,6 @@ def parse_vllm_ascend_static_check_results(output, returncode):
 def run_ut_test():
     try:
         xlite_path = f"{XLITE_DIR}/xlite"
-        print(f"Building xlite {xlite_path}...")
-        build_cmd = ["bash", "-c", "rm -rf build && mkdir -p build && cmake -B build && cmake --build build -j && cmake --install build"]
-        build_result = subprocess.run(build_cmd, capture_output=True, text=True, cwd=xlite_path, timeout=1200)
-        if build_result.returncode != 0:
-            print(f"Failed to build xlite: {build_result.stderr}")
-            return f"Error building: {build_result.stderr}", 1
-        print("xlite built and installed successfully")
-        
         print(f"Running command: {UT_TEST_CMD}")
         cmd = ["bash", "-c", UT_TEST_CMD]
         print("Starting UT test (timeout: 20 minutes)...")
