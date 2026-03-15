@@ -51,7 +51,7 @@ void XModel::Init(void)
 {
     std::vector<uint32_t> gateIdx, vgatherIndices;
     std::vector<uint64_t> weights;
-    long size;
+    size_t size;
     void *ptr;
 
     if (_c.nDenseLayers != _c.nLayers) {
@@ -122,22 +122,22 @@ void XModel::Init(void)
 
     _mropeMaskH = 0;
     _mropeMaskW = 0;
-    int mropeSectionH = _c.mropeSection.size() > 1 ? _c.mropeSection[1] : 0;
-    int mropeSectionW = _c.mropeSection.size() > 2 ? _c.mropeSection[2] : 0;
+    uint32_t mropeSectionH = _c.mropeSection.size() > 1 ? _c.mropeSection[1] : 0;
+    uint32_t mropeSectionW = _c.mropeSection.size() > 2 ? _c.mropeSection[2] : 0;
     if (_c.mropeInterleaved) {
-        for (int i = 1; i < mropeSectionH * 3; i += 3) {
+        for (uint32_t i = 1; i < mropeSectionH * 3; i += 3) {
             _mropeMaskH |= 1ULL << i;
         }
-        for (int i = 2; i < mropeSectionW * 3; i += 3) {
+        for (uint32_t i = 2; i < mropeSectionW * 3; i += 3) {
             _mropeMaskW |= 1ULL << i;
         }
     } else {
-        int sectionStartH = !_c.mropeSection.empty() ? _c.mropeSection[0] : 0;
-        int sectionStartW = sectionStartH + mropeSectionH;
-        for (int i = sectionStartH; i < sectionStartW; i++) {
+        uint32_t sectionStartH = !_c.mropeSection.empty() ? _c.mropeSection[0] : 0;
+        uint32_t sectionStartW = sectionStartH + mropeSectionH;
+        for (uint32_t i = sectionStartH; i < sectionStartW; i++) {
             _mropeMaskH |= 1ULL << i;
         }
-        for (int i = sectionStartW; i < sectionStartW + mropeSectionW; i++) {
+        for (uint32_t i = sectionStartW; i < sectionStartW + mropeSectionW; i++) {
             _mropeMaskW |= 1ULL << i;
         }
     }
@@ -209,8 +209,10 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     XliteDsOpRopeBatch(rt, rt._realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim, attnKvc,
                        freqsCis, rt._attnPosition, _vGather, attnKPe, NORMAL);
     XliteDsOpReshapeAndCache(rt, attnNormKvc, attnKPe, kCache, vCache, rt._attnSlotMapping,
-                             rt._realM, _c.kvLoraRank, _c.ropeHeadDim, 1, _c.kvLoraRank,
-                             _c.ropeHeadDim, _c.blockSize, kCache.shape[0]);
+                             static_cast<int>(rt._realM), static_cast<int>(_c.kvLoraRank),
+                             static_cast<int>(_c.ropeHeadDim), 1, static_cast<int>(_c.kvLoraRank),
+                             static_cast<int>(_c.ropeHeadDim), static_cast<int>(_c.blockSize),
+                             static_cast<int>(kCache.shape[0]));
 
     rt.pool->PutTensor(attnQc);
     rt.pool->PutTensor(attnNormQc);
@@ -248,12 +250,15 @@ XTensor &XModel::ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
     XTensor &attnMlaQK = rt.pool->GetTensor({2, coreNum, mlaPmSize, mlaPerKvlen}, BF16, DBG_LOC);
     XTensor &attnMlaTmp = rt.pool->GetTensor({1}, INT32, DBG_LOC);
 
-    XliteDsOpKvMatmul(rt, kCache, mlaKVB[layer], attnKRes, rt._prefillLenPad,
-                      nLocalHeads * (_c.nopeHeadDim + _c.vHeadDim), _c.kvLoraRank,
-                      rt._attnBlockTables, true, _c.blockSize, _c.kvLoraRank);
+    XliteDsOpKvMatmul(rt, kCache, mlaKVB[layer], attnKRes, static_cast<int>(rt._prefillLenPad),
+                      static_cast<int>(nLocalHeads * (_c.nopeHeadDim + _c.vHeadDim)),
+                      static_cast<int>(_c.kvLoraRank), rt._attnBlockTables, true,
+                      static_cast<int>(_c.blockSize), static_cast<int>(_c.kvLoraRank));
     XliteDsOpPrefillKvSplit(rt, attnKRes, attnKPe, vCache, rt._attnBlockTables, attnKvFull, attnV,
-                            rt._prefillLen, rt._prefillLenPad, nLocalHeads, 0, _c.ropeHeadDim,
-                            _c.nopeHeadDim, _c.vHeadDim, _c.blockSize);
+                            static_cast<int>(rt._prefillLen), static_cast<int>(rt._prefillLenPad),
+                            static_cast<int>(nLocalHeads), 0, static_cast<int>(_c.ropeHeadDim),
+                            static_cast<int>(_c.nopeHeadDim), static_cast<int>(_c.vHeadDim),
+                            _c.blockSize);
     XliteDsOpPrefillMix(rt, attnMlaOut, attnMlaAlpha, attnMlaMax, attnMlaSum, attnQWithQr,
                         attnKvFull, attnMlaQK, attnMlaTmp, rt._cachedLens, attnV, attnPrefillOut,
                         attnQkcAbsorb, rt._lens, attnMlaTmp, attnMlaTmp, attnMlaTmp, rt._prefillIdx,
@@ -294,8 +299,10 @@ XTensor &XModel::ForwardAttnMLADecode(XRuntime &rt, uint32_t layer,
     XTensor &attnQkc =
         rt.pool->GetTensor({rt._realM, nLocalHeads, _c.kvLoraRank}, hiddenState.dtype, DBG_LOC);
 
-    XliteDsOpEinsumShdHdcShc(rt, rt._realM, _c.nopeHeadDim, nLocalHeads,
-                             _c.nopeHeadDim + _c.ropeHeadDim, 2 * _c.nopeHeadDim, _c.kvLoraRank,
+    XliteDsOpEinsumShdHdcShc(rt, static_cast<int>(rt._realM), static_cast<int>(_c.nopeHeadDim),
+                             static_cast<int>(nLocalHeads),
+                             static_cast<int>(_c.nopeHeadDim + _c.ropeHeadDim),
+                             static_cast<int>(2 * _c.nopeHeadDim), static_cast<int>(_c.kvLoraRank),
                              attnQWithQr, mlaKVB[layer], attnQAbsorb);
     XliteDsOpDecodeAttn(rt, attnQAbsorb, kCache, attnQk, rt._cachedLens, rt._attnBlockTables,
                         rt._lens, rt._cumPromptLens, batch, nLocalHeads, 1, _c.kvLoraRank,
@@ -305,11 +312,14 @@ XTensor &XModel::ForwardAttnMLADecode(XRuntime &rt, uint32_t layer,
                         rt._maxNumBlocks, _c.maxSeqLen, true);
     XliteDsOpSoftmax(rt, attnQk, rt._cachedLens, rt._lens, rt._cumPromptLens, _c.softmaxScale,
                      batch, nLocalHeads, _c.blockSize, _c.maxSeqLen);
-    XliteDsOpEinsumShtTcShc(rt, batch, nLocalHeads, _c.maxSeqLen, rt._maxNumBlocks, kCache.shape[0],
-                            _c.blockSize, _c.kvLoraRank, attnQk, rt._cachedLens, rt._lens,
+    XliteDsOpEinsumShtTcShc(rt, static_cast<int>(batch), static_cast<int>(nLocalHeads),
+                            static_cast<int>(_c.maxSeqLen), static_cast<int>(rt._maxNumBlocks),
+                            static_cast<int>(kCache.shape[0]), static_cast<int>(_c.blockSize),
+                            static_cast<int>(_c.kvLoraRank), attnQk, rt._cachedLens, rt._lens,
                             rt._cumPromptLens, rt._attnBlockTables, kCache, attnQkc);
-    XliteDsOpEinsumShcHdcShd(rt, rt._realM, nLocalHeads, _c.kvLoraRank, 2 * _c.nopeHeadDim,
-                             _c.vHeadDim, attnQkc, mlaKVB[layer], attnQkcAbsorb);
+    XliteDsOpEinsumShcHdcShd(rt, static_cast<int>(rt._realM), static_cast<int>(nLocalHeads),
+                             static_cast<int>(_c.kvLoraRank), static_cast<int>(2 * _c.nopeHeadDim),
+                             static_cast<int>(_c.vHeadDim), attnQkc, mlaKVB[layer], attnQkcAbsorb);
 
     rt.pool->PutTensor(attnQWithQr);
     rt.pool->PutTensor(attnKPe);
@@ -589,9 +599,9 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
                                        XTensor &freqsCis, XTensor &output)
 {
     XTensor xSlice;
-    long actualM = output.shape[0];
-    long mPad = xPad.shape[0];
-    long mPadPerTp = mPad / _c.defTpSize;
+    size_t actualM = output.shape[0];
+    size_t mPad = xPad.shape[0];
+    size_t mPadPerTp = mPad / _c.defTpSize;
     size_t sizePerTp = mPad * _c.hiddenSize / _c.defTpSize * XDtypeBit(embed.dtype) / 8;
     XTensor &hiddenStatePad = rt.pool->GetTensor({mPad, _c.hiddenSize}, embed.dtype, DBG_LOC);
     XTensor x, h;
@@ -803,7 +813,7 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
 
 size_t XModel::GetTensorPoolSize(int dbg)
 {
-    int dtypeSize = XDtypeBit(embed.dtype) / 8;
+    size_t dtypeSize = XDtypeBit(embed.dtype) / 8;
     size_t attnSize, ffnSize;
     size_t mlpBufSize = 0;
     size_t moeBufSize = 0;

@@ -119,7 +119,18 @@ static inline void *TensorPtr(at::Tensor &t)
 
 static inline void InitXTensor(XTensor &out, at::Tensor &in)
 {
-    out.Init(in.sizes().vec(), XDtype(in), TensorPtr(in));
+    auto sizesVec = in.sizes().vec();
+    std::vector<size_t> sizes;
+    sizes.reserve(sizesVec.size());
+
+    for (auto s : sizesVec) {
+        if (s < 0) {
+            throw std::runtime_error("Negative size detected: " + std::to_string(s));
+        }
+        sizes.push_back(static_cast<size_t>(s));
+    }
+
+    out.Init(sizes, XDtype(in), TensorPtr(in));
 }
 
 void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
@@ -310,10 +321,8 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
-        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first),
-                          TensorPtr(kvCache[i].first));
-        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second),
-                           TensorPtr(kvCache[i].second));
+        InitXTensor(_kv[i].first, kvCache[i].first);
+        InitXTensor(_kv[i].second, kvCache[i].second);
     }
 
     if (currStream != 0 && rt.taskId == 0) {
@@ -398,10 +407,8 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
-        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first),
-                          TensorPtr(kvCache[i].first));
-        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second),
-                           TensorPtr(kvCache[i].second));
+        InitXTensor(_kv[i].first, kvCache[i].first);
+        InitXTensor(_kv[i].second, kvCache[i].second);
     }
 
     if (currStream != 0 && rt.taskId == 0) {
@@ -470,10 +477,8 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
-        _kv[i].first.Init(kvCache[i].first.sizes().vec(), XDtype(kvCache[i].first),
-                          TensorPtr(kvCache[i].first));
-        _kv[i].second.Init(kvCache[i].second.sizes().vec(), XDtype(kvCache[i].second),
-                           TensorPtr(kvCache[i].second));
+        InitXTensor(_kv[i].first, kvCache[i].first);
+        InitXTensor(_kv[i].second, kvCache[i].second);
     }
 
     for (uint32_t i = 0; i < deepstackInput.size(); i++) {
@@ -676,8 +681,7 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
                uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
 {
     XTensor _qkv, _kCache, _vCache, _qk, _output, _cumPromptLens, _lens, _cachedLens, _blockTables;
-    XTensor &qk = rt.pool->GetTensor({static_cast<long>(rt.aicNum * TILESIZE_OF_QUERY * 2),
-                                      static_cast<long>(maxNumBlock * blockSize)},
+    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
                                      XDtype(qkv), DBG_LOC);
 
     InitXTensor(_qkv, qkv);
@@ -717,8 +721,8 @@ void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
     InitXTensor(_scores, scores);
     InitXTensor(_indices, indices);
     InitXTensor(_outWeights, outWeights);
-    _outRouting.Init({static_cast<long>(scores.size(0)), static_cast<long>(scores.size(1))}, BIT1,
-                     TensorPtr(outRouting));
+    std::vector<size_t> sizes(scores.sizes().vec().begin(), scores.sizes().vec().end());
+    _outRouting.Init(sizes, BIT1, TensorPtr(outRouting));
     XliteOpSoftmaxTopK(rt, _scores, _indices, _outWeights, _outRouting, topK, normTopKProb);
     rt.Synchronize();
 }
@@ -733,8 +737,8 @@ void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
     InitXTensor(_bias, bias);
     InitXTensor(_indices, indices);
     InitXTensor(_outWeights, outWeights);
-    _outRouting.Init({static_cast<long>(scores.size(0)), static_cast<long>(scores.size(1))}, BIT1,
-                     TensorPtr(outRouting));
+    std::vector<size_t> sizes(scores.sizes().vec().begin(), scores.sizes().vec().end());
+    _outRouting.Init(sizes, BIT1, TensorPtr(outRouting));
     XliteOpSigmoidTopK(rt, _scores, _indices, _bias, scale, _outWeights, _outRouting, topK,
                        normTopKProb);
     rt.Synchronize();
@@ -791,8 +795,8 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     InitXTensor(_in, in);
     InitXTensor(_counts, counts);
     InitXTensor(_output, output);
-    XTensor &_weights = rt.pool->GetTensor({counts.size(0)}, INT64, DBG_LOC);
-    XTensor &_scales = rt.pool->GetTensor({counts.size(0)}, INT64, DBG_LOC);
+    XTensor &_weights = rt.pool->GetTensor({num}, INT64, DBG_LOC);
+    XTensor &_scales = rt.pool->GetTensor({num}, INT64, DBG_LOC);
 
     p.resize(num);
     for (i = 0; i < num; i++) {

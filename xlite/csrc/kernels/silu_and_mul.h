@@ -15,7 +15,7 @@
 // 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM
 // Workloads》 [ASPLOS 2026]
 template <typename SrcType, typename CalType>
-__aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int32_t num_tokens, int32_t dim)
+__aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, uint32_t num_tokens, uint32_t dim)
 {
     set_atomic_none();
     set_mask_norm();
@@ -145,7 +145,7 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int32_t num_token
 
 #define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                               \
     extern "C" __global__ __aicore__ void silu_and_mul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR pm, \
-                                                               int n_tokens, int dim)            \
+                                                               uint32_t n_tokens, uint32_t dim)  \
     {                                                                                            \
         silu_and_mul<dtype, cast_type>(x, y, pm, n_tokens, dim);                                 \
     }
@@ -153,7 +153,7 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, int32_t num_token
 #else
 #define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                               \
     extern "C" __global__ __aicore__ void silu_and_mul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR pm, \
-                                                               int n_tokens, int dim)            \
+                                                               uint32_t n_tokens, uint32_t dim)  \
     {                                                                                            \
     }
 #endif
