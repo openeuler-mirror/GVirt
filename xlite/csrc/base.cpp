@@ -6,7 +6,7 @@
 #include "base.h"
 #include "ascend.h"
 
-void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum XTensorType type)
+void XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type)
 {
     size_t numel = 1;
 
@@ -25,12 +25,12 @@ void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum X
     this->type = type;
 }
 
-XTensor::XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr)
+XTensor::XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr)
 {
     Init(std::move(shape), dtype, ptr, XTENSOR_STATIC);
 }
 
-void XTensor::Init(std::vector<long> shape, enum XDtype dtype, void *ptr)
+void XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr)
 {
     Init(std::move(shape), dtype, ptr, XTENSOR_STATIC);
 }
@@ -260,7 +260,7 @@ XTensorPool::~XTensorPool(void)
     (void)aclrtFree(_ptr);
 }
 
-XTensor &XTensorPool::GetTensor(std::vector<long> shape, enum XDtype dtype, DebugSrcLoc loc)
+XTensor &XTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc)
 {
     size_t numel = 1, size, free;
     void *ptr = _ptr;

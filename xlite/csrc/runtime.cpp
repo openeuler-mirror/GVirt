@@ -95,7 +95,7 @@ XRuntime::~XRuntime(void)
     (void)aclrtDestroyEvent(_event);
     (void)aclrtDestroyNotify(notify);
     (void)aclrtDestroyStream(stream);
-    (void)aclrtResetDevice(_devid);
+    (void)aclrtResetDevice(static_cast<int>(_devid));
 
     if (_attnInitialized) {
         (void)aclrtFree(_position.ptr);
@@ -274,21 +274,21 @@ int XRuntime::InitHcclComm(void)
     return 0;
 }
 
-void XRuntime::InitAttn(int64_t maxM, int64_t maxBatch, int64_t maxSeqLen, uint32_t blockSize)
+void XRuntime::InitAttn(uint64_t maxM, uint64_t maxBatch, uint64_t maxSeqLen, uint32_t blockSize)
 {
     std::vector<uint32_t> vgatherIndices;
-    long size;
+    size_t size;
     void *ptr;
 
-    size = static_cast<long>(maxM * XDtypeBit(INT64) / 8);
+    size = maxM * XDtypeBit(INT64) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _position.Init({maxM}, INT64, ptr);
 
-    size = static_cast<long>(maxM * XDtypeBit(INT32) / 8);
+    size = maxM * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _slotMapping.Init({maxM}, INT32, ptr);
 
-    size = static_cast<long>(maxBatch * XDtypeBit(INT32) / 8);
+    size = maxBatch * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _cachedLens.Init({maxBatch}, INT32, ptr);
 
@@ -304,13 +304,13 @@ void XRuntime::InitAttn(int64_t maxM, int64_t maxBatch, int64_t maxSeqLen, uint3
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _prefillLastIdx.Init({maxBatch}, INT32, ptr);
 
-    size = static_cast<long>(maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8);
+    size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _blockTables.Init({maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32, ptr);
 }
 
-void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, int64_t maxM, int64_t maxBatch,
-                           int64_t maxSeqLen, uint32_t blockSize, XModelAttnType attnType)
+void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxM, uint64_t maxBatch,
+                           uint64_t maxSeqLen, uint32_t blockSize, XModelAttnType attnType)
 {
     if (!_attnInitialized) {
         InitAttn(maxM, maxBatch, maxSeqLen, blockSize);

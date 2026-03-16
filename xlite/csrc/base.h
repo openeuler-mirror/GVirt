@@ -119,21 +119,21 @@ class XTensor
 {
 public:
     XTensor() {};
-    XTensor(std::vector<long> shape, enum XDtype dtype, void *ptr);
-    void Init(std::vector<long> shape, enum XDtype dtype, void *ptr);
+    XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
+    void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
     enum XTensorType GetType()
     {
         return type;
     };
-    std::vector<long> shape;
+    std::vector<size_t> shape;
     size_t numel;
     enum XDtype dtype;
     void *ptr = nullptr;
 
 private:
-    void Init(std::vector<long> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
+    void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
     void PrintMemoryVal(void *p, uint64_t off, XDtype dtype);
     enum XTensorType type;
     friend class XTensorPool;
@@ -145,7 +145,7 @@ public:
     XTensorPool(size_t size) : _size(size) {};
     ~XTensorPool(void);
     int Init(void);
-    XTensor &GetTensor(std::vector<long> shape, enum XDtype dtype, DebugSrcLoc loc);
+    XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
     void PutTensor(XTensor &t);
     bool TensorInPool(XTensor &t);
     void *Ptr()

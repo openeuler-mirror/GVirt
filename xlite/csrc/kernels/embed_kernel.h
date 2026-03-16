@@ -7,8 +7,8 @@
 
 #ifdef __DAV_C220_VEC__
 template <typename Dtype>
-__aicore__ void embed_kernel(GM_ADDR x, GM_ADDR y, GM_ADDR z, int dim, int batch_size,
-                             int emb_start_idx, int emb_end_idx, int tp_size)
+__aicore__ void embed_kernel(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t dim, uint32_t batch_size,
+                             uint32_t emb_start_idx, uint32_t emb_end_idx, uint32_t tp_size)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -42,16 +42,16 @@ __aicore__ void embed_kernel(GM_ADDR x, GM_ADDR y, GM_ADDR z, int dim, int batch
 
 #define EMBED_FUNC_DEFINE(dtype)                                                            \
     extern "C" __global__ __aicore__ void embed_kernel_##dtype(                             \
-        GM_ADDR x, GM_ADDR y, GM_ADDR z, int dim, int batch_size, int emb_start_idx,        \
-        int emb_end_idx, int tp_size)                                                       \
+        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t dim, uint32_t batch_size,                 \
+        uint32_t emb_start_idx, uint32_t emb_end_idx, uint32_t tp_size)                     \
     {                                                                                       \
         embed_kernel<dtype>(x, y, z, dim, batch_size, emb_start_idx, emb_end_idx, tp_size); \
     }
 #else
-#define EMBED_FUNC_DEFINE(dtype)                                                     \
-    extern "C" __global__ __aicore__ void embed_kernel_##dtype(                      \
-        GM_ADDR x, GM_ADDR y, GM_ADDR z, int dim, int batch_size, int emb_start_idx, \
-        int emb_end_idx, int tp_size)                                                \
-    {                                                                                \
+#define EMBED_FUNC_DEFINE(dtype)                                            \
+    extern "C" __global__ __aicore__ void embed_kernel_##dtype(             \
+        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t dim, uint32_t batch_size, \
+        uint32_t emb_start_idx, uint32_t emb_end_idx, uint32_t tp_size)     \
+    {                                                                       \
     }
 #endif

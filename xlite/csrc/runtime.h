@@ -54,8 +54,8 @@ public:
     XRuntime(uint32_t devid, size_t sizeMB = 0, uint32_t rankId = 0, uint32_t tpSize = 1,
              uint32_t dpSize = 1);
     ~XRuntime(void);
-    void InitAttn(int64_t maxM, int64_t maxBatch, int64_t maxSeqLen, uint32_t blockSize);
-    void PrepareAttn(XModelAttnMeta &attnMeta, int64_t maxM, int64_t maxBatch, int64_t maxSeqLen,
+    void InitAttn(uint64_t maxM, uint64_t maxBatch, uint64_t maxSeqLen, uint32_t blockSize);
+    void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxM, uint64_t maxBatch, uint64_t maxSeqLen,
                      uint32_t blockSize, XModelAttnType attnType);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
@@ -108,8 +108,8 @@ public:
     uint32_t _maxNumBlocks;
     int _prefillBatch;
     int _batch;
-    int _prefillLen;
-    int _prefillLenPad;
+    uint32_t _prefillLen;
+    uint32_t _prefillLenPad;
     XTensor _attnPosition;
     XTensor _attnBlockTables;
     XTensor _attnSlotMapping;

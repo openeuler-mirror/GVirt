@@ -7,7 +7,7 @@
 #ifdef __DAV_C220_VEC__
 
 extern "C" __global__ __aicore__ void silu_and_mul_bfloat16_t(GM_ADDR x, GM_ADDR y, GM_ADDR pm,
-                                                              int n_tokens, int dim)
+                                                              uint32_t n_tokens, uint32_t dim)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);

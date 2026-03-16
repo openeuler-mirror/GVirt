@@ -40,9 +40,9 @@ struct XModelConfig {
     uint32_t kvLoraRank;
     uint32_t blockSize;
     uint32_t deepstackNumLevel = 0;
-    int64_t maxM;
-    int64_t maxBatch;
-    int64_t maxSeqLen;
+    uint64_t maxM;
+    uint64_t maxBatch;
+    uint64_t maxSeqLen;
     float normEps;
     float ropeTheta;
     float softmaxScale;
