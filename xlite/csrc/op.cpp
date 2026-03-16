@@ -763,18 +763,20 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
 }
 
 void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias, float scale,
-                        XTensor &outWeights, XTensor &outRouting, uint32_t topK, bool normTopKProb)
+                        XTensor &outWeights, XTensor &outRouting, uint32_t nGroup,
+                        uint32_t nTopkGroup, uint32_t topK, bool normTopKProb)
 {
     if (scores.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
         outRouting.dtype == BIT1) {
         aclrtlaunch_sigmoid_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr, bias.ptr,
                                        scale, outWeights.ptr, outRouting.ptr, scores.shape[0],
-                                       indices.shape[0], topK, normTopKProb);
+                                       indices.shape[0], nGroup, nTopkGroup, topK, normTopKProb);
     } else if (scores.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 &&
                outRouting.dtype == BIT1) {
         aclrtlaunch_sigmoid_topk_bfloat16_t(rt.aivNum, rt.stream, scores.ptr, indices.ptr, bias.ptr,
                                             scale, outWeights.ptr, outRouting.ptr, scores.shape[0],
-                                            indices.shape[0], topK, normTopKProb);
+                                            indices.shape[0], nGroup, nTopkGroup, topK,
+                                            normTopKProb);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
