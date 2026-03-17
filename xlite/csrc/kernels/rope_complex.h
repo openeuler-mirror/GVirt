@@ -132,8 +132,6 @@ __aicore__ __inline__ void rope_complex(uint32_t nTokens, uint32_t nLocalHeads, 
             copy_ubuf_to_gm(q_q_pe, ouput, 0, 1, rope_blocks, 0, 0);
         }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-        // We can drop this later.
-        pipe_barrier(PIPE_ALL);
     }
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
