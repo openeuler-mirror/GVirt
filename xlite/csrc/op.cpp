@@ -675,13 +675,6 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, 
     }
 }
 
-void XliteDsOpRopeBatch(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_t stepDim,
-                        uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs, XTensor &position,
-                        XTensor &vGather, XTensor &outputPe, enum XRopeType ropeType)
-{
-    throw std::runtime_error(std::string(__func__) + ": TODO");
-}
-
 void XliteDsOpStridedRmsnorm(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output,
                              uint32_t numTokens, uint32_t normDim, uint32_t stepDim, float normEps)
 {

@@ -49,10 +49,6 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                       XTensor &output, XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);
-
-void XliteDsOpRopeBatch(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_t stepDim,
-                        uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs, XTensor &position,
-                        XTensor &vGather, XTensor &outputPe, enum XRopeType ropeType);
 void XliteDsOpStridedRmsnorm(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output,
                              uint32_t numTokens, uint32_t normDim, uint32_t stepDim, float normEps);
 void XliteDsOpReshapeAndCache(XRuntime &rt, XTensor &key, XTensor &value, XTensor &kCache,
