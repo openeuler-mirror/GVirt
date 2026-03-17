@@ -728,8 +728,8 @@ void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
 }
 
 void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &bias,
-                 float scale, at::Tensor &outWeights, at::Tensor &outRouting, uint32_t topK,
-                 bool normTopKProb)
+                 float scale, at::Tensor &outWeights, at::Tensor &outRouting, uint32_t nGroup,
+                 uint32_t nTopkGroup, uint32_t topK, bool normTopKProb)
 {
     XTensor _scores, _indices, _bias, _outWeights, _outRouting;
 
@@ -739,8 +739,8 @@ void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
     InitXTensor(_outWeights, outWeights);
     std::vector<size_t> sizes(scores.sizes().vec().begin(), scores.sizes().vec().end());
     _outRouting.Init(sizes, BIT1, TensorPtr(outRouting));
-    XliteOpSigmoidTopK(rt, _scores, _indices, _bias, scale, _outWeights, _outRouting, topK,
-                       normTopKProb);
+    XliteOpSigmoidTopK(rt, _scores, _indices, _bias, scale, _outWeights, _outRouting, nGroup,
+                       nTopkGroup, topK, normTopKProb);
     rt.Synchronize();
 }
 
