@@ -12,9 +12,10 @@
  * type: 0x3 output new q_pe & inplace write of q
  */
 template <typename Dtype>
-__aicore__ __inline__ void rope_complex(int nTokens, int nLocalHeads, int qDim, int qkRopeHeadDim,
-                                        GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position,
-                                        GM_ADDR q_pe_ptr, GM_ADDR indices, uint32_t type)
+__aicore__ __inline__ void rope_complex(uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim,
+                                        uint32_t qkRopeHeadDim, GM_ADDR q_ptr, GM_ADDR freqs_ptr,
+                                        GM_ADDR position, GM_ADDR q_pe_ptr, GM_ADDR indices,
+                                        uint32_t type)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -145,8 +146,9 @@ __aicore__ __inline__ void rope_complex(int nTokens, int nLocalHeads, int qDim, 
 
 #define ROPE_COMPLEX_FUNC_DEFINE(dtype)                                                            \
     extern "C" __global__ __aicore__ void rope_complex_##dtype(                                    \
-        int nTokens, int nLocalHeads, int qDim, int qkRopeHeadDim, GM_ADDR q_ptr,                  \
-        GM_ADDR freqs_ptr, GM_ADDR position, GM_ADDR q_pe_ptr, GM_ADDR indices, uint32_t type)     \
+        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,             \
+        GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position, GM_ADDR q_pe_ptr, GM_ADDR indices,     \
+        uint32_t type)                                                                             \
     {                                                                                              \
         rope_complex<dtype>(nTokens, nLocalHeads, qDim, qkRopeHeadDim, q_ptr, freqs_ptr, position, \
                             q_pe_ptr, indices, type);                                              \
@@ -154,8 +156,9 @@ __aicore__ __inline__ void rope_complex(int nTokens, int nLocalHeads, int qDim, 
 #else
 #define ROPE_COMPLEX_FUNC_DEFINE(dtype)                                                        \
     extern "C" __global__ __aicore__ void rope_complex_##dtype(                                \
-        int nTokens, int nLocalHeads, int qDim, int qkRopeHeadDim, GM_ADDR q_ptr,              \
-        GM_ADDR freqs_ptr, GM_ADDR position, GM_ADDR q_pe_ptr, GM_ADDR indices, uint32_t type) \
+        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,         \
+        GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position, GM_ADDR q_pe_ptr, GM_ADDR indices, \
+        uint32_t type)                                                                         \
     {                                                                                          \
     }
 #endif
