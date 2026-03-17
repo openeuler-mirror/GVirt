@@ -50,11 +50,6 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                       XTensor &output, XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);
-void XliteDsOpReshapeAndCache(XRuntime &rt, XTensor &key, XTensor &value, XTensor &kCache,
-                              XTensor &vCache, XTensor &slotMapping, int32_t numTokens,
-                              int32_t keyStride, int32_t valueStride, int32_t numKvHeads,
-                              int32_t kHeadSize, int32_t vHeadSize, int32_t blockSize,
-                              int32_t blockNum);
 void XliteDsOpKvMatmul(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output, int m, int n,
                        int k, XTensor &blockTable, bool nt, int blockSize, int headSize);
 void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &cache,
@@ -102,4 +97,10 @@ void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &exp
 void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_t stepDim,
                         uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs, XTensor &position,
                         XTensor &vGather, XTensor &outputPe, enum XRopeType ropeType);
+void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads,
+                                uint32_t stepDim, uint32_t ropeDim, XTensor &inputWithR,
+                                XTensor &freqs, XTensor &position, XTensor &vGather,
+                                XTensor &outputPe, enum XRopeType ropeType, uint32_t blockSize,
+                                XTensor &key, XTensor &kCache, XTensor &vCache,
+                                XTensor &slotMapping);
 #endif

@@ -55,8 +55,8 @@
 #include "aclrtlaunch_attention_bfloat16_t.h"
 #include "aclrtlaunch_sigmoid_topk_float.h"
 #include "aclrtlaunch_sigmoid_topk_bfloat16_t.h"
-#include "aclrtlaunch_rope_complex_float16_t.h"
-#include "aclrtlaunch_rope_complex_bfloat16_t.h"
+#include "aclrtlaunch_rope_complex_and_cache_float16_t.h"
+#include "aclrtlaunch_rope_complex_and_cache_bfloat16_t.h"
 #include "kernels/ccl_param.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
@@ -666,25 +666,55 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, 
     }
 
     if (inputWithR.dtype == FP16) {
-        aclrtlaunch_rope_complex_float16_t(rt.aivNum, rt.stream, numTokens, nLocalHeads, stepDim,
-                                           ropeDim, inputWithR.ptr, freqs.ptr, position.ptr,
-                                           outputPe.ptr, vGather.ptr, type);
+        aclrtlaunch_rope_complex_and_cache_float16_t(rt.aivNum, rt.stream, numTokens, nLocalHeads,
+                                                     stepDim, ropeDim, inputWithR.ptr, freqs.ptr,
+                                                     position.ptr, outputPe.ptr, vGather.ptr, type,
+                                                     0, nullptr, nullptr, nullptr, nullptr);
     } else if (inputWithR.dtype == BF16) {
-        aclrtlaunch_rope_complex_bfloat16_t(rt.aivNum, rt.stream, numTokens, nLocalHeads, stepDim,
-                                            ropeDim, inputWithR.ptr, freqs.ptr, position.ptr,
-                                            outputPe.ptr, vGather.ptr, type);
+        aclrtlaunch_rope_complex_and_cache_bfloat16_t(rt.aivNum, rt.stream, numTokens, nLocalHeads,
+                                                      stepDim, ropeDim, inputWithR.ptr, freqs.ptr,
+                                                      position.ptr, outputPe.ptr, vGather.ptr, type,
+                                                      0, nullptr, nullptr, nullptr, nullptr);
     } else {
         throw std::runtime_error(std::string(__func__) + ": TODO");
     }
 }
 
-void XliteDsOpReshapeAndCache(XRuntime &rt, XTensor &key, XTensor &value, XTensor &kCache,
-                              XTensor &vCache, XTensor &slotMapping, int32_t numTokens,
-                              int32_t keyStride, int32_t valueStride, int32_t numKvHeads,
-                              int32_t kHeadSize, int32_t vHeadSize, int32_t blockSize,
-                              int32_t blockNum)
+void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads,
+                                uint32_t stepDim, uint32_t ropeDim, XTensor &inputWithR,
+                                XTensor &freqs, XTensor &position, XTensor &vGather,
+                                XTensor &outputPe, enum XRopeType ropeType, uint32_t blockSize,
+                                XTensor &key, XTensor &kCache, XTensor &vCache,
+                                XTensor &slotMapping)
 {
-    throw std::runtime_error(std::string(__func__) + ": TODO");
+    uint32_t type = 0;
+    switch (ropeType) {
+        case NORMAL:
+            type = 0x1;
+            break;
+        case INPLACE:
+            type = 0x2;
+            break;
+        case MIX:
+            type = 0x3;
+            break;
+        default:
+            throw std::runtime_error(std::string(__func__) + ": unknown rope type");
+    }
+
+    if (inputWithR.dtype == FP16) {
+        aclrtlaunch_rope_complex_and_cache_float16_t(
+            rt.aivNum, rt.stream, numTokens, nLocalHeads, stepDim, ropeDim, inputWithR.ptr,
+            freqs.ptr, position.ptr, outputPe.ptr, vGather.ptr, type, blockSize, key.ptr,
+            kCache.ptr, vCache.ptr, slotMapping.ptr);
+    } else if (inputWithR.dtype == BF16) {
+        aclrtlaunch_rope_complex_and_cache_bfloat16_t(
+            rt.aivNum, rt.stream, numTokens, nLocalHeads, stepDim, ropeDim, inputWithR.ptr,
+            freqs.ptr, position.ptr, outputPe.ptr, vGather.ptr, type, blockSize, key.ptr,
+            kCache.ptr, vCache.ptr, slotMapping.ptr);
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": TODO");
+    }
 }
 
 void XliteDsOpKvMatmul(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output, int m, int n,
