@@ -204,15 +204,10 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
                        attnQWithQr, freqsCis, rt._attnPosition, _vGather, attnQPe,
                        rt._prefillBatch > 0 ? MIX : NORMAL);
     XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc, _c.weightNZ);
-    XliteDsOpStridedRmsnorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, rt._realM, _c.kvLoraRank,
-                            _c.kvLoraRank + _c.ropeHeadDim, _c.normEps);
-    XliteOpRopeComplex(rt, rt._realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim, attnKvc,
-                       freqsCis, rt._attnPosition, _vGather, attnKPe, NORMAL);
-    XliteDsOpReshapeAndCache(rt, attnNormKvc, attnKPe, kCache, vCache, rt._attnSlotMapping,
-                             static_cast<int>(rt._realM), static_cast<int>(_c.kvLoraRank),
-                             static_cast<int>(_c.ropeHeadDim), 1, static_cast<int>(_c.kvLoraRank),
-                             static_cast<int>(_c.ropeHeadDim), static_cast<int>(_c.blockSize),
-                             static_cast<int>(kCache.shape[0]));
+    XliteOpRmsNorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank);
+    XliteOpRopeComplexAndCache(rt, rt._realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
+                               attnKvc, freqsCis, rt._attnPosition, _vGather, attnKPe, NORMAL,
+                               _c.blockSize, attnNormKvc, kCache, vCache, rt._attnSlotMapping);
 
     rt.pool->PutTensor(attnQc);
     rt.pool->PutTensor(attnNormQc);
@@ -374,7 +369,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     if (_c.qkNorm) {
         XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, qHeads);
         XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim, kHeads,
-                       qHeads * _c.headDim);
+                       qHeads * _c.headDim, qHeads * _c.headDim);
     }
     XliteOpRopeCache(rt, qkv, kvCache[layer].first, kvCache[layer].second, rt._attnPosition,
                      freqsCis, rt._attnSlotMapping, _c.nHeads, _c.nKvHeads, _c.headDim,
