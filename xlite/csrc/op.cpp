@@ -55,6 +55,8 @@
 #include "aclrtlaunch_attention_bfloat16_t.h"
 #include "aclrtlaunch_sigmoid_topk_float.h"
 #include "aclrtlaunch_sigmoid_topk_bfloat16_t.h"
+#include "aclrtlaunch_rope_complex_float16_t.h"
+#include "aclrtlaunch_rope_complex_bfloat16_t.h"
 #include "kernels/ccl_param.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
@@ -638,6 +640,38 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                                          blockSize, batch, maxNumBlock);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
+    }
+}
+
+void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_t stepDim,
+                        uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs, XTensor &position,
+                        XTensor &vGather, XTensor &outputPe, enum XRopeType ropeType)
+{
+    uint32_t type = 0;
+    switch (ropeType) {
+        case NORMAL:
+            type = 0x1;
+            break;
+        case INPLACE:
+            type = 0x2;
+            break;
+        case MIX:
+            type = 0x3;
+            break;
+        default:
+            throw std::runtime_error(std::string(__func__) + ": unknown rope type");
+    }
+
+    if (inputWithR.dtype == FP16) {
+        aclrtlaunch_rope_complex_float16_t(rt.aivNum, rt.stream, numTokens, nLocalHeads, stepDim,
+                                           ropeDim, inputWithR.ptr, freqs.ptr, position.ptr,
+                                           outputPe.ptr, vGather.ptr, type);
+    } else if (inputWithR.dtype == BF16) {
+        aclrtlaunch_rope_complex_bfloat16_t(rt.aivNum, rt.stream, numTokens, nLocalHeads, stepDim,
+                                            ropeDim, inputWithR.ptr, freqs.ptr, position.ptr,
+                                            outputPe.ptr, vGather.ptr, type);
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": TODO");
     }
 }
 
