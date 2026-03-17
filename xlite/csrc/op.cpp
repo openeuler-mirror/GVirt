@@ -392,16 +392,17 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
 }
 
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
-                    uint32_t normDim, uint32_t cntPerToken, uint32_t startOffset)
+                    uint32_t normDim, uint32_t cntPerToken, uint32_t inStartOffset,
+                    uint32_t outStartOffset)
 {
     if (in.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
                                       in.shape[0], normDim, normEps, cntPerToken, in.shape[1],
-                                      startOffset);
+                                      out.shape[1], inStartOffset, outStartOffset);
     } else if (in.dtype == BF16 && out.dtype == BF16) {
         aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
                                        in.shape[0], normDim, normEps, cntPerToken, in.shape[1],
-                                       startOffset);
+                                       out.shape[1], inStartOffset, outStartOffset);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
@@ -425,10 +426,12 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &nor
 {
     if (in1.dtype == FP16 && in2.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
-                                      in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1], 0);
+                                      in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1],
+                                      out.shape[1], 0, 0);
     } else if (in1.dtype == BF16 && in2.dtype == BF16 && out.dtype == BF16) {
         aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
-                                       in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1], 0);
+                                       in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1],
+                                       out.shape[1], 0, 0);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
@@ -673,12 +676,6 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, 
     } else {
         throw std::runtime_error(std::string(__func__) + ": TODO");
     }
-}
-
-void XliteDsOpStridedRmsnorm(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output,
-                             uint32_t numTokens, uint32_t normDim, uint32_t stepDim, float normEps)
-{
-    throw std::runtime_error(std::string(__func__) + ": TODO");
 }
 
 void XliteDsOpReshapeAndCache(XRuntime &rt, XTensor &key, XTensor &value, XTensor &kCache,

@@ -204,8 +204,7 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
                        attnQWithQr, freqsCis, rt._attnPosition, _vGather, attnQPe,
                        rt._prefillBatch > 0 ? MIX : NORMAL);
     XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc, _c.weightNZ);
-    XliteDsOpStridedRmsnorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, rt._realM, _c.kvLoraRank,
-                            _c.kvLoraRank + _c.ropeHeadDim, _c.normEps);
+    XliteOpRmsNorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank);
     XliteOpRopeComplex(rt, rt._realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim, attnKvc,
                        freqsCis, rt._attnPosition, _vGather, attnKPe, NORMAL);
     XliteDsOpReshapeAndCache(rt, attnNormKvc, attnKPe, kCache, vCache, rt._attnSlotMapping,
@@ -374,7 +373,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     if (_c.qkNorm) {
         XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, qHeads);
         XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim, kHeads,
-                       qHeads * _c.headDim);
+                       qHeads * _c.headDim, qHeads * _c.headDim);
     }
     XliteOpRopeCache(rt, qkv, kvCache[layer].first, kvCache[layer].second, rt._attnPosition,
                      freqsCis, rt._attnSlotMapping, _c.nHeads, _c.nKvHeads, _c.headDim,

@@ -13,7 +13,8 @@
 template <typename Dtype>
 __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out,
                                uint32_t token_num, uint32_t norm_dim, float norm_eps,
-                               uint32_t cnt_per_token, uint32_t step, uint32_t start_offset)
+                               uint32_t cnt_per_token, uint32_t in_step, uint32_t out_step,
+                               uint32_t in_start_offset, uint32_t out_start_offset)
 {
     set_atomic_none();
     set_mask_norm();
@@ -81,10 +82,11 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID3);
     uint32_t loop_count = token_num;
     for (uint32_t loop = block_idx, ping = 1; loop < loop_count; loop += block_num) {
-        uint32_t offset = start_offset + loop * step;
+        uint32_t in_offset = in_start_offset + loop * in_step;
+        uint32_t out_offset = out_start_offset + loop * out_step;
         auto event_id = ping == 1 ? EVENT_ID0 : EVENT_ID1;
-        auto gm_inout = (__gm__ Dtype *)inout + offset;
-        auto gm_out = (__gm__ Dtype *)out + offset;
+        auto gm_inout = (__gm__ Dtype *)inout + in_offset;
+        auto gm_out = (__gm__ Dtype *)out + out_offset;
 
         wait_flag(PIPE_MTE3, PIPE_MTE2, event_id);
         copy_gm_to_ubuf(inout_addr[event_id], gm_inout, 0, 1, len_burst, 0, 0);
@@ -100,7 +102,7 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
         pipe_barrier(PIPE_V);
 
         if (has_bias) {
-            auto gm_residual = (__gm__ Dtype *)residual + offset;
+            auto gm_residual = (__gm__ Dtype *)residual + in_offset;
             auto inter_event_id = ping == 1 ? EVENT_ID2 : EVENT_ID3;
             wait_flag(PIPE_MTE3, PIPE_MTE2, inter_event_id);
             copy_gm_to_ubuf(residual_addr[event_id], gm_residual, 0, 1, len_burst, 0, 0);
@@ -210,18 +212,18 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
 #define RMSNORM_FUNC_DEFINE(dtype)                                                                 \
     extern "C" __global__ __aicore__ void rmsnorm_##dtype(                                         \
         GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out, uint32_t token_num,          \
-        uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token, uint32_t step,                  \
-        uint32_t start_offset)                                                                     \
+        uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token, uint32_t in_step,               \
+        uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset)                    \
     {                                                                                              \
         rmsnorm<dtype>(inout, residual, weight, out, token_num, norm_dim, norm_eps, cnt_per_token, \
-                       step, start_offset);                                                        \
+                       in_step, out_step, in_start_offset, out_start_offset);                      \
     }
 #else
 #define RMSNORM_FUNC_DEFINE(dtype)                                                        \
     extern "C" __global__ __aicore__ void rmsnorm_##dtype(                                \
         GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out, uint32_t token_num, \
-        uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token, uint32_t step,         \
-        uint32_t start_offset)                                                            \
+        uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token, uint32_t in_step,      \
+        uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset)           \
     {                                                                                     \
     }
 #endif

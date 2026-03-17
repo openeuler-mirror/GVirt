@@ -21,7 +21,8 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
                   XTensor &out);
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
-                    uint32_t normDim, uint32_t cntPerToken = 1, uint32_t startOffset = 0);
+                    uint32_t normDim, uint32_t cntPerToken = 1, uint32_t inStartOffset = 0,
+                    uint32_t outStartOffset = 0);
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out);
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false,
                    const XTensor &bias = XTensor(), bool transpose = false,
@@ -49,8 +50,6 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                       XTensor &output, XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);
-void XliteDsOpStridedRmsnorm(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output,
-                             uint32_t numTokens, uint32_t normDim, uint32_t stepDim, float normEps);
 void XliteDsOpReshapeAndCache(XRuntime &rt, XTensor &key, XTensor &value, XTensor &kCache,
                               XTensor &vCache, XTensor &slotMapping, int32_t numTokens,
                               int32_t keyStride, int32_t valueStride, int32_t numKvHeads,
