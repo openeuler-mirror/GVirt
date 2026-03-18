@@ -7,6 +7,7 @@
 #include "base.h"
 #include "runtime.h"
 #include "kernels/ccl_param.h"
+#include "kernels/flash_attention_param.h"
 
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 #define MATMUL_SWIZZLE_DEFAULT_VALUE (0x600)
@@ -50,6 +51,12 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                       XTensor &output, XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);
+void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
+                           XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &lastMax,
+                           XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &cumPromptLens,
+                           XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
+                           uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
+                           uint32_t batch, uint32_t maxNumBlock);
 void XliteDsOpKvMatmul(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output, int m, int n,
                        int k, XTensor &blockTable, bool nt, int blockSize, int headSize);
 void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &cache,

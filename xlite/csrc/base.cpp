@@ -233,6 +233,15 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol)
     free(p);
 }
 
+void XTensor::Memset(int value)
+{
+    size_t size = numel * XDtypeBit(dtype) / 8;
+    if (size == 0) {
+        return;
+    }
+    CHECK_ACL(aclrtMemset(ptr, size, value, size));
+}
+
 std::ostream &operator<<(std::ostream &os, const XTensor &p)
 {
     os << "[(";
