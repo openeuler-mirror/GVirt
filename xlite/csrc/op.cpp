@@ -649,25 +649,26 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
 }
 
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
-                           XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &lastMax, XTensor &lastSum, XTensor &sync,
-                           XTensor &output, XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
-                           XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
-                           uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
+                           XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &lastMax,
+                           XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &cumPromptLens,
+                           XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
+                           uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
+                           uint32_t batch, uint32_t maxNumBlock)
 {
     if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 &&
         output.dtype == FP16) {
         aclrtlaunch_flash_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
-                                              qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr,
-                                              output.ptr, cumPromptLens.ptr, lens.ptr,
-                                              cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
-                                              blockSize, batch, maxNumBlock);
+                                              qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr,
+                                              lastSum.ptr, sync.ptr, output.ptr, cumPromptLens.ptr,
+                                              lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads,
+                                              nKvHeads, headDim, blockSize, batch, maxNumBlock);
     } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 &&
                vCache.dtype == BF16 && output.dtype == BF16) {
-        aclrtlaunch_flash_attention_bfloat16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
-                                               qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr,
-                                               output.ptr, cumPromptLens.ptr, lens.ptr,
-                                               cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
-                                               blockSize, batch, maxNumBlock);
+        aclrtlaunch_flash_attention_bfloat16_t(
+            rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr, sum.ptr,
+            lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, cumPromptLens.ptr, lens.ptr,
+            cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize, batch,
+            maxNumBlock);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }

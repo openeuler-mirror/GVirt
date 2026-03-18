@@ -52,10 +52,11 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
-                           XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &lastMax, XTensor &lastSum, XTensor &sync,
-                           XTensor &output, XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
-                           XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
-                           uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);
+                           XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &lastMax,
+                           XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &cumPromptLens,
+                           XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
+                           uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
+                           uint32_t batch, uint32_t maxNumBlock);
 void XliteDsOpKvMatmul(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output, int m, int n,
                        int k, XTensor &blockTable, bool nt, int blockSize, int headSize);
 void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &cache,

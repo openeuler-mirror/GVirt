@@ -692,25 +692,27 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     InitXTensor(_blockTables, blockTables);
 
     if (!std::getenv("FA_TEST")) {
-        XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
-                                         XDtype(qkv), DBG_LOC);
-        XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _cumPromptLens, _lens, _cachedLens,
-                        _blockTables, nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlock);
+        XTensor &qk = rt.pool->GetTensor(
+            {rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize}, XDtype(qkv), DBG_LOC);
+        XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _cumPromptLens, _lens,
+                         _cachedLens, _blockTables, nHeads, nKvHeads, headDim, blockSize, batch,
+                         maxNumBlock);
         rt.Synchronize();
         rt.pool->PutTensor(qk);
     } else {
         XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
-                                        XDtype(qkv), DBG_LOC);
-        XTensor &sv = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, headDim},
-                                        XDtype(qkv), DBG_LOC);
+                                         XDtype(qkv), DBG_LOC);
+        XTensor &sv =
+            rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, headDim}, XDtype(qkv), DBG_LOC);
         XTensor &max = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
         XTensor &sum = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.pool->GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.pool->GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &sync = rt.pool->GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
         sync.Memset(0);
-        XliteOpFlashAttention(rt, _qkv, _kCache, _vCache, qk, sv, max, sum, lastMax, lastSum, sync, _output, _cumPromptLens, _lens, _cachedLens,
-                        _blockTables, nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlock);
+        XliteOpFlashAttention(rt, _qkv, _kCache, _vCache, qk, sv, max, sum, lastMax, lastSum, sync,
+                              _output, _cumPromptLens, _lens, _cachedLens, _blockTables, nHeads,
+                              nKvHeads, headDim, blockSize, batch, maxNumBlock);
         rt.Synchronize();
         sync.Print("Flash Attention Sync", 1, rt.aivNum);
         rt.pool->PutTensor(sync);
