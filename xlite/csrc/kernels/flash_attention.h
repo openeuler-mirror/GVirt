@@ -6,22 +6,11 @@
 #include "kernel_operator.h"
 #include "flash_attention_param.h"
 #include "softmax_attn_aiv.h"
+#include "softmax_flash_attention_aiv.h"
 
 #define MAX_M0 128
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
-#define XLITE_KERNEL_DEBUG
-
-template <typename Dtype>
-__aicore__ inline void RunAivSoftmaxUpdate(GlobalTensor<Dtype> sv, GlobalTensor<float> max,
-                                           GlobalTensor<float> sum, GlobalTensor<Dtype> prevSv,
-                                           GlobalTensor<float> prevMax, GlobalTensor<float> prevSum,
-                                           GlobalTensor<Dtype> output, GlobalTensor<float> lastMax,
-                                           GlobalTensor<float> lastSum, uint32_t m,
-                                           uint32_t subHeadOffset, uint32_t nHeads,
-                                           uint32_t nKVHeads, uint32_t headSize)
-{
-}
 
 template <typename Dtype>
 class FlashAttention
@@ -571,9 +560,9 @@ public:
                 }
                 int subQOffset = nWorkStart / headNumInGroup;
                 int subHeadOffset = nWorkStart % headNumInGroup;
-                uint32_t outOffset =
-                    (queryTaskOffset + subQOffset) * nHeads + kvHeadIdx * headNumInGroup;
-
+                uint32_t outOffset = (queryTaskOffset + subQOffset) * nHeads + kvHeadIdx * headNumInGroup;
+                uint32_t calcSoftmaxLen = cachedLen + queryTaskStart + nWorkStart / headNumInGroup + 1;
+                int actualCalcSoftmaxLen = calcSoftmaxLen - kvOffset;
                 // wait aic qk done
                 wait_flag_dev(0);
 
@@ -588,7 +577,10 @@ public:
                 // TODO save max[curr][nWorkStart], sum[curr][nWorkStart]
                 RunAivSoftmaxPingPong<Dtype>(
                     (__gm__ Dtype *)qk[curr][nWorkStart * TILESIZE_OF_CACHED_KV].GetPhyAddr(),
-                    nWorkCurCore, TILESIZE_OF_CACHED_KV, kvLen);
+                    nWorkCurCore, TILESIZE_OF_CACHED_KV, actualCalcSoftmaxLen, TILESIZE_OF_CACHED_KV,
+                    nWorkStart % headNumInGroup, headNumInGroup,
+                    (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
+                    (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr());
                 ffts_cross_core_sync(PIPE_MTE3, config);
 
                 if (needDoUpdate != 0) {
@@ -607,14 +599,15 @@ public:
                            lastWorkStart + lastWorkCurCore, lastkvHeadIdx, lastKvOffset,
                            lastKvOffset + lastKvLen, last);
 #endif
-                    // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] &
-                    // max[last]
-                    RunAivSoftmaxUpdate(sv[last][nWorkStart * headSize], max[last][nWorkStart],
-                                        sum[last][nWorkStart], prevSv[last][nWorkStart * headSize],
-                                        prevMax[last][nWorkStart], prevSum[last][nWorkStart],
-                                        output[lastOutOffset * headSize], lastMax[lastOutOffset],
-                                        lastMax[lastOutOffset], lastWorkCurCore, lastSubHeadOffset,
-                                        nHeads, nKVHeads, headSize);
+                    // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] & max[last]
+                    RunAivSoftmaxUpdate<Dtype>((__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
+                                        (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
+                                        (__gm__ float *)sum[last][lastWorkStart].GetPhyAddr(),
+                                        (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
+                                        (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
+                                        (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
+                                        lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize,
+                                        lastKvOffset == 0, lastIsLastKvTile);
                     if (!lastIsLastKvTile) {
                         SetNextCore();
                     }
@@ -657,7 +650,15 @@ public:
                    lastWorkStart + lastWorkCurCore, lastkvHeadIdx, lastKvOffset,
                    lastKvOffset + lastKvLen, last);
 #endif
-            // do update
+            // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] & max[last]
+            RunAivSoftmaxUpdate<Dtype>((__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
+                                        (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
+                                        (__gm__ float *)sum[last][lastWorkStart].GetPhyAddr(),
+                                        (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
+                                        (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
+                                        (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
+                                        lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize,
+                                        lastKvOffset == 0, lastIsLastKvTile);
             if (!lastIsLastKvTile) {
                 SetNextCore();
             }

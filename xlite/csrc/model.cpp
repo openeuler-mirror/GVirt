@@ -118,6 +118,11 @@ void XModel::Init(void)
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
         CHECK_ACL(aclrtMemset(ptr, size, 0, size));
         _v2a.Init({size / 4}, INT32, ptr);
+
+        size = AIC_MAX_NUM;
+        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+        CHECK_ACL(aclrtMemset(ptr, size, 0, size));
+        _sync.Init({AIC_MAX_NUM}, INT32, ptr);
     }
 
     _mropeMaskH = 0;
@@ -162,6 +167,7 @@ XModel::~XModel(void)
     if (_c.attnType == XMODEL_ATTN_MHA) {
         (void)aclrtFree(_a2v.ptr);
         (void)aclrtFree(_v2a.ptr);
+        (void)aclrtFree(_sync.ptr);
     }
 }
 
@@ -378,13 +384,34 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 
     XTensor &attn = rt.pool->GetTensor({hiddenState.shape[0], attnOut[layer].shape[1]},
                                        hiddenState.dtype, DBG_LOC);
-    XTensor &qk =
-        rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
-                           hiddenState.dtype, DBG_LOC);
-    XliteOpAttention(rt, qkv, kvCache[layer].first, kvCache[layer].second, qk, attn,
-                     rt._cumPromptLens, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
-                     kHeads, _c.headDim, _c.blockSize, rt._batch, rt._maxNumBlocks);
-    rt.pool->PutTensor(qk);
+    if (!std::getenv("FA_TEST")) {
+        XTensor &qk =
+            rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
+                               hiddenState.dtype, DBG_LOC);
+        XliteOpAttention(rt, qkv, kvCache[layer].first, kvCache[layer].second, qk, attn,
+                         rt._cumPromptLens, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
+                         kHeads, _c.headDim, _c.blockSize, rt._batch, rt._maxNumBlocks);
+        rt.pool->PutTensor(qk);
+    } else {
+        XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+                                        hiddenState.dtype, DBG_LOC);
+        XTensor &sv = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.headDim},
+                                        hiddenState.dtype, DBG_LOC);
+        XTensor &max = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &lastMax = rt.pool->GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
+        XTensor &lastSum = rt.pool->GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
+        XliteOpFlashAttention(rt, qkv, kvCache[layer].first, kvCache[layer].second, qk, sv, max, sum,
+                              lastMax, lastSum, _sync, attn, rt._cumPromptLens, rt._lens, rt._cachedLens,
+                              rt._attnBlockTables, qHeads, kHeads, _c.headDim, _c.blockSize, rt._batch,
+                              rt._maxNumBlocks);
+        rt.pool->PutTensor(lastSum);
+        rt.pool->PutTensor(lastMax);
+        rt.pool->PutTensor(sum);
+        rt.pool->PutTensor(max);
+        rt.pool->PutTensor(sv);
+        rt.pool->PutTensor(qk);
+    }
 
     XliteOpMatmul(rt, attn, attnOut[layer], hiddenState, _c.weightNZ);
     if (_c.defTpSize > 1) {
@@ -606,8 +633,8 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         h.Init({actualM, _c.hiddenSize}, embed.dtype, output.ptr);
         rt.hiddenStatePad.Init({mPad, _c.hiddenSize}, embed.dtype, output.ptr);
     } else {
-        h.Init({actualM, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
-        rt.hiddenStatePad.Init({mPad, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
+    h.Init({actualM, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
+    rt.hiddenStatePad.Init({mPad, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
     }
     void *slicePtr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(rt.hiddenStatePad.ptr) +
                                               (rt.rankId() % _c.defTpSize) * sizePerTp);
@@ -830,7 +857,17 @@ size_t XModel::GetTensorPoolSize(int dbg)
     base = ROUND_UP(_c.maxM, _c.defTpSize) * _c.hiddenSize * 3 * dtypeSize;
     attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
     attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
-    attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen * dtypeSize;
+    if (!std::getenv("FA_TEST")) {
+        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen * dtypeSize;
+    } else {
+        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * TILESIZE_OF_CACHED_KV * dtypeSize;
+        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.headDim * dtypeSize;
+        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
+        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
+        attnSize += _c.maxM * _c.nHeads * sizeof(float);
+        attnSize += _c.maxM * _c.nHeads * sizeof(float);
+        attnSize += 2 * 2 * AIC_MAX_NUM * sizeof(int32_t);
+    }
 
     // FFN MLP
     if (_c.nDenseLayers > 0) {

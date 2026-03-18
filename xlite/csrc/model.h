@@ -190,6 +190,7 @@ private:
     XTensor _vGather;
     XTensor _a2v;
     XTensor _v2a;
+    XTensor _sync;
 };
 
 #endif

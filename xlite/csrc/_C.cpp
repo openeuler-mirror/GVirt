@@ -291,6 +291,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         std::cout << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize
                   << "), data parallel(" << c.defDpSize << "), expert parallel (" << c.moeEpSize
                   << ")]" << std::endl;
+        if (std::getenv("FA_TEST")) {
+            std::cout << "Flash Attention Enabled!" << std::endl;
+        }
     }
 
     _kv.resize(c.nLayers);

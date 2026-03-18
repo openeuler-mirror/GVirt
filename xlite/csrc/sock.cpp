@@ -116,7 +116,7 @@ int XSock::InitClient(void)
     addr.sin_port = htons(_port);
     int retry = 0;
     bool success = false;
-    while (retry < 10) {
+    while (retry < 100) {
         if (connect(_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(sockaddr)) < 0) {
             if (errno == ECONNREFUSED) {
                 retry++;
