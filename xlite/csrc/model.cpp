@@ -633,8 +633,8 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         h.Init({actualM, _c.hiddenSize}, embed.dtype, output.ptr);
         rt.hiddenStatePad.Init({mPad, _c.hiddenSize}, embed.dtype, output.ptr);
     } else {
-    h.Init({actualM, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
-    rt.hiddenStatePad.Init({mPad, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
+        h.Init({actualM, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
+        rt.hiddenStatePad.Init({mPad, _c.hiddenSize}, embed.dtype, hiddenStatePad.ptr);
     }
     void *slicePtr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(rt.hiddenStatePad.ptr) +
                                               (rt.rankId() % _c.defTpSize) * sizePerTp);
