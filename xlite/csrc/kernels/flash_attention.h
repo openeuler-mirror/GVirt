@@ -12,36 +12,60 @@
 #define NBLOCKSIZE 16
 
 /*
- * Online Softmax Update Function - For incremental computation of attention softmax
+ * Online Softmax Update Function - Incremental computation for Flash Attention
  *
- * Algorithm:
- * When the KV sequence is too long to compute the full softmax at once, chunked processing is required.
- * The online softmax algorithm maintains two statistics (max and sum) for incremental updates:
+ * Background:
+ * In Flash Attention, when the KV sequence length exceeds the capacity for single-pass softmax
+ * computation, the sequence must be processed in chunks. This function implements the online
+ * softmax algorithm to incrementally merge results from multiple KV chunks.
  *
- * 1. New max: new_max = max(max_prev, max_curr)
- * 2. Scale factors: scale_prev = exp(max_prev - new_max), scale_curr = exp(max_curr - new_max)
- * 3. New sum: new_sum = sum_prev * scale_prev + sum_curr * scale_curr
- * 4. Updated sv: new_sv = sv_prev * scale_prev + sv_curr * scale_curr
+ * Online Softmax Algorithm:
+ * The algorithm maintains running statistics (max and sum) across chunks to enable numerically
+ * stable incremental updates. For each new chunk:
+ *
+ *   1. new_max = max(max_prev, max_curr)
+ *   2. scale_prev = exp(max_prev - new_max)
+ *   3. scale_curr = exp(max_curr - new_max)
+ *   4. new_sum = sum_prev * scale_prev + sum_curr * scale_curr
+ *   5. new_sv = sv_prev * scale_prev + sv_curr * scale_curr
+ *
+ * When processing the final chunk, the accumulated result is normalized by dividing by new_sum.
  *
  * Parameters:
- *   currSv, currMax, currSum: Current chunk computation results
- *     - currSv = softmax * v_curr
- *     - currMax = local_max_curr
- *     - currSum = sum(exp(x_curr - local_max_curr))
- *   output: Accumulated result output, also serves as previous chunk data for next merge
- *     - First chunk: directly write currSv
- *     - Non-first chunk: write merged sv_prev * scale_prev + sv_curr * scale_curr
- *     - Last chunk: write normalized result (divided by new_sum)
- *   lastMax, lastSum: Global statistics output
- *     - First chunk: directly write currMax, currSum
- *     - Non-first chunk: write merged new_max, new_sum
- *   m: Batch size (number of softmax rows to process)
- *   subHeadOffset: Causal mask offset, starting row offset within query group
- *   nHeads: Number of query heads
- *   nKVHeads: Number of KV heads
- *   headSize: Head dimension
- *   isFirstKvTile: Whether this is the first KV chunk
- *   isLastKvTile: Whether this is the last KV chunk (normalize sv when true)
+ *   @param currSv      GM pointer to current chunk's softmax-weighted values (softmax * v_curr)
+ *   @param currMax     GM pointer to current chunk's local maximum values
+ *   @param currSum     GM pointer to current chunk's sum of exponentials
+ *                      sum(exp(x_curr - local_max_curr))
+ *   @param output      GM pointer to accumulated output (also serves as sv_prev for next merge)
+ *   @param lastMax     GM pointer to global maximum statistics across all processed chunks
+ *   @param lastSum     GM pointer to global sum statistics across all processed chunks
+ *   @param m           Number of query rows to process in this batch
+ *   @param subHeadOffset Starting row offset within the query group (for causal masking)
+ *   @param nHeads      Number of query attention heads
+ *   @param nKVHeads    Number of key-value attention heads (for GQA/MQA support)
+ *   @param headSize    Dimension of each attention head
+ *   @param isFirstKvTile Flag indicating if this is the first KV chunk
+ *   @param actualCalcSoftmaxLen Base length for softmax computation (adjusted by causal mask)
+ *   @param maskOff     Offset for causal mask calculation
+ *   @param maskStride  Stride for causal mask calculation
+ *
+ * Implementation Details:
+ *   - Uses Ping-Pong buffering (double buffering) for pipeline parallelism
+ *   - Allocates UB buffers for: sv_prev, sv_curr, sv_out, max/sum statistics, scale factors
+ *   - Employs event-based synchronization between pipeline stages (MTE2, V, MTE3)
+ *   - Converts Dtype (half/bfloat16) to float32 for numerical precision in computation
+ *   - Supports both aligned and unaligned memory access patterns
+ *
+ * Pipeline Stages:
+ *   - MTE2: Memory transfer from GM to UB (load data)
+ *   - V: Vector computation (softmax update operations)
+ *   - MTE3: Memory transfer from UB to GM (store results)
+ *
+ * Event IDs Usage:
+ *   - EVENT_ID0/1: Ping-Pong sync for input buffer loads
+ *   - EVENT_ID2/3: Ping-Pong sync for output buffer stores
+ *   - EVENT_ID4/5: GM read/write synchronization for first chunk path
+ *   - EVENT_ID6/7: Additional synchronization for merge path
  */
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *currMax, __gm__ float *currSum,
@@ -61,14 +85,17 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
     uint32_t nBytes = ROUND_UP(headSize * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
     uint32_t nFloatBytes = ROUND_UP(headSize * sizeof(float), VECTOR_MAX_BYTESIZE);
 
-    // UB buffer allocation using pointer arrays for Ping-Pong buffering
+    // UB buffer allocation for Ping-Pong buffering strategy
+    // Ping-Pong buffering enables overlapping of computation and memory transfers
+    // by using two sets of buffers that alternate between processing and I/O
     uint64_t off = 0;
     __ubuf__ Dtype *svPrevUb[2], *svCurrUb[2], *svOutUb[2];
     __ubuf__ float *newMaxUb[2], *newSumUb[2];
     __ubuf__ float *maxPrevUb[2], *sumPrevUb[2], *maxCurrUb[2], *sumCurrUb[2];
     __ubuf__ float *scalePrevUb, *scaleCurrUb, *tempUb, *svPrevFloatUb, *svCurrFloatUb, *svOutFloatUb;
 
-    // SV data buffers (Dtype)
+    // Allocate SV (softmax-weighted value) data buffers in Dtype precision
+    // Each Ping-Pong set contains: previous sv, current sv, and output sv
     for (int i = 0; i < 2; ++i) {
         svPrevUb[i] = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
         off += nBytes;
@@ -77,7 +104,8 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
         svOutUb[i] = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
         off += nBytes;
     }
-    // Statistics buffers (max, sum, scale factors)
+    // Allocate statistics buffers: max values, sum values, scale factors
+    // Each buffer is one VECTOR_MAX_BYTESIZE to hold a single scalar broadcast value
     for (int i = 0; i < 2; ++i) {
         maxPrevUb[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += VECTOR_MAX_BYTESIZE;
@@ -92,12 +120,14 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
         newSumUb[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += VECTOR_MAX_BYTESIZE;
     }
+    // Single buffers for scale factors and temporary computation
     scalePrevUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
     off += VECTOR_MAX_BYTESIZE;
     scaleCurrUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
     off += VECTOR_MAX_BYTESIZE;
     tempUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
     off += VECTOR_MAX_BYTESIZE;
+    // Float32 buffers for high-precision computation of sv values
     svPrevFloatUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
     off += nFloatBytes;
     svCurrFloatUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
@@ -105,10 +135,12 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
     svOutFloatUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
     off += nFloatBytes;
 
-    // Pipeline synchronization initialization
-    // EVENT_ID0/1: Ping-Pong sync for input buffers (wait for previous computation)
-    // EVENT_ID2/3: Ping-Pong sync for output buffers (wait for previous writeback)
-    // EVENT_ID4/5: GM read/write sync
+    // Pipeline synchronization initialization using event flags
+    // These flags coordinate between different pipeline stages to ensure correct execution order
+    // EVENT_ID0/1: Ping-Pong sync for input buffer loads (MTE2 waits for V to finish)
+    // EVENT_ID2/3: Ping-Pong sync for output buffer stores (V waits for MTE3 to finish)
+    // EVENT_ID4/5: GM read/write synchronization for first chunk fast path
+    // EVENT_ID6/7: Additional synchronization for non-first chunk merge path
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
@@ -120,15 +152,20 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
     
     int curr = 0;
     for (uint32_t mIdx = 0; mIdx < m; ++mIdx) {
+        // Calculate memory offsets for Grouped Query Attention (GQA)
+        // mOffset: offset to the correct KV head group in the output tensor
+        // nOffset: offset within the query head group
         uint32_t mOffset = ((mIdx + subHeadOffset) / headNumInGroup) * nHeads;
         uint32_t nOffset = ((mIdx + subHeadOffset) % headNumInGroup);
+        // Adjust actual calculation length based on causal mask position
         int actualCalcLen = actualCalcSoftmaxLen + (mIdx + maskOff) / maskStride;
         if (actualCalcLen < 0) {
            continue;
         }
-        int isLastKvTileOfIdx = actualCalcLen < TILESIZE_OF_CACHED_KV;
-        if (isFirstKvTile && !isLastKvTileOfIdx) {
-            // First chunk (not last): Copy currSv to output, currMax/currSum to lastMax/lastSum
+        if (isFirstKvTile) {
+            // First chunk fast path: directly copy current results to output
+            // No merge needed since there's no previous data to combine with
+            // Load current chunk data from GM to UB
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
             if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
                 copy_gm_to_ubuf(svCurrUb[curr], currSv + mIdx * headSize, 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
@@ -141,7 +178,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID4 + curr);
             wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID4 + curr);
 
-            // Write output
+            // Store current results directly to output (first chunk initialization)
             if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
                 copy_ubuf_to_gm(output + (mOffset + nOffset) * headSize, svCurrUb[curr], 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
@@ -150,72 +187,15 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             copy_ubuf_to_gm_align_b16(lastMax + mOffset + nOffset, maxCurrUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
             copy_ubuf_to_gm_align_b16(lastSum + mOffset + nOffset, sumCurrUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-        } else if (isFirstKvTile && isLastKvTileOfIdx) {
-            // First and last chunk: Normalize and output directly
-            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
-            if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(svCurrUb[curr], currSv + mIdx * headSize, 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-            } else {
-                copy_gm_to_ubuf_align_b16(svCurrUb[curr], currSv + mIdx * headSize, 0, 1, headSize * sizeof(Dtype), 0, 0, 0, 0);
-            }
-            copy_gm_to_ubuf_align_b16(maxCurrUb[curr], currMax + mIdx, 0, 1, sizeof(float), 0, 0, 0, 0);
-            copy_gm_to_ubuf_align_b16(sumCurrUb[curr], currSum + mIdx, 0, 1, sizeof(float), 0, 0, 0, 0);
-
-            set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID4 + curr);
-
-            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
-            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
-
-            // Convert to float32
-            if constexpr (std::is_same<Dtype, half>::value) {
-                vconv_f162f32(svCurrFloatUb, svCurrUb[curr], repeat, 1, 1, 8, 4);
-            } else {
-                vconv_bf162f32(svCurrFloatUb, svCurrUb[curr], repeat, 1, 1, 8, 4);
-            }
-            pipe_barrier(PIPE_V);
-
-            // Broadcast sum for normalization
-            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
-            vbrcb((__ubuf__ uint32_t *)newSumUb[curr], (__ubuf__ uint32_t *)sumCurrUb[curr], 0, 0, 1);
-            pipe_barrier(PIPE_V);
-            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
-
-            // Normalize: sv_out = sv_curr / sum
-            vdiv(svOutFloatUb, svCurrFloatUb, newSumUb[curr], repeat, 1, 1, 0, 8, 8, 0);
-            pipe_barrier(PIPE_V);
-
-            // Convert back to Dtype
-            if constexpr (std::is_same<Dtype, half>::value) {
-                vconv_f322f16r(svOutUb[curr], svOutFloatUb, repeat, 1, 1, 4, 8);
-            } else {
-                vconv_f322bf16r(svOutUb[curr], svOutFloatUb, repeat, 1, 1, 4, 8);
-            }
-            pipe_barrier(PIPE_V);
-
-            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2 + curr);
-            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID2 + curr);
-
-            // Write output
-            if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(output + (mOffset + nOffset) * headSize, svOutUb[curr], 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-            } else {
-                copy_ubuf_to_gm_align_b16(output + (mOffset + nOffset) * headSize, svOutUb[curr], 0, 1, headSize * sizeof(Dtype), 0, 0, 0, 0);
-            }
-            wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID4 + curr);
-            copy_ubuf_to_gm_align_b16(lastMax + mOffset + nOffset, maxCurrUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
-            copy_ubuf_to_gm_align_b16(lastSum + mOffset + nOffset, newSumUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
-            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
-            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
         } else {
-            // Non-first chunk: Merge with previous results using online softmax
-            // Load previous and current statistics
+            // Non-first chunk: merge with previous results using online softmax algorithm
+            // Step 1: Load previous and current statistics from GM
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
             copy_gm_to_ubuf_align_b16(maxPrevUb[curr], lastMax + mOffset + nOffset, 0, 1, sizeof(float), 0, 0, 0, 0);
             copy_gm_to_ubuf_align_b16(sumPrevUb[curr], lastSum + mOffset + nOffset, 0, 1, sizeof(float), 0, 0, 0, 0);
             copy_gm_to_ubuf_align_b16(maxCurrUb[curr], currMax + mIdx, 0, 1, sizeof(float), 0, 0, 0, 0);
             copy_gm_to_ubuf_align_b16(sumCurrUb[curr], currSum + mIdx, 0, 1, sizeof(float), 0, 0, 0, 0);
-            // Load previous and current sv
+            // Step 2: Load previous and current sv values
             if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
                 copy_gm_to_ubuf(svPrevUb[curr], output + (mOffset + nOffset) * headSize, 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
                 copy_gm_to_ubuf(svCurrUb[curr], currSv + mIdx * headSize, 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
@@ -226,24 +206,24 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
 
-            // Compute new_max = max(max_prev, max_curr)
+            // Step 3: Compute new_max = max(max_prev, max_curr)
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID6 + curr);
             vmax(newMaxUb[curr], maxPrevUb[curr], maxCurrUb[curr], 1, 1, 1, 1, 8, 8, 1);
             pipe_barrier(PIPE_V);
 
-            // Compute scale_prev = exp(max_prev - new_max)
+            // Step 4: Compute scale_prev = exp(max_prev - new_max)
             vsub(scalePrevUb, maxPrevUb[curr], newMaxUb[curr], 1, 1, 1, 1, 8, 8, 1);
             pipe_barrier(PIPE_V);
             vexp(scalePrevUb, scalePrevUb, 1, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
 
-            // Compute scale_curr = exp(max_curr - new_max)
+            // Step 5: Compute scale_curr = exp(max_curr - new_max)
             vsub(scaleCurrUb, maxCurrUb[curr], newMaxUb[curr], 1, 1, 1, 1, 8, 8, 1);
             pipe_barrier(PIPE_V);
             vexp(scaleCurrUb, scaleCurrUb, 1, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
 
-            // Compute new_sum = sum_prev * scale_prev + sum_curr * scale_curr
+            // Step 6: Compute new_sum = sum_prev * scale_prev + sum_curr * scale_curr
             vmul(tempUb, sumPrevUb[curr], scalePrevUb, 1, 1, 1, 1, 8, 8, 1);
             pipe_barrier(PIPE_V);
             vmul(newSumUb[curr], sumCurrUb[curr], scaleCurrUb, 1, 1, 1, 1, 8, 8, 1);
@@ -251,7 +231,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             vadd(newSumUb[curr], newSumUb[curr], tempUb, 1, 1, 1, 1, 8, 8, 1);
             pipe_barrier(PIPE_V);
 
-            // Convert sv to float32
+            // Step 7: Convert sv from Dtype (half/bfloat16) to float32 for precision
             if constexpr (std::is_same<Dtype, half>::value) {
                 vconv_f162f32(svPrevFloatUb, svPrevUb[curr], repeat, 1, 1, 8, 4);
                 vconv_f162f32(svCurrFloatUb, svCurrUb[curr], repeat, 1, 1, 8, 4);
@@ -260,34 +240,46 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
                 vconv_bf162f32(svCurrFloatUb, svCurrUb[curr], repeat, 1, 1, 8, 4);
             }
             pipe_barrier(PIPE_V);
+
+            // sv_prev = sv_prev * sum_prev, sv_curr *= sum_curr
+            vbrcb((__ubuf__ uint32_t *)sumPrevUb[curr], (__ubuf__ uint32_t *)sumPrevUb[curr], 0, 0, 1);
+            pipe_barrier(PIPE_V);
+            vbrcb((__ubuf__ uint32_t *)sumCurrUb[curr], (__ubuf__ uint32_t *)sumCurrUb[curr], 0, 0, 1);
+            pipe_barrier(PIPE_V);
+            vmul(svPrevFloatUb, svPrevFloatUb, sumPrevUb[curr], repeat, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
+            vmul(svCurrFloatUb, svCurrFloatUb, sumCurrUb[curr], repeat, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
 
-            // Broadcast scale factors for vector multiplication
+            // Step 8: Broadcast scalar scale factors for vector multiplication
+            // vbrcb replicates a single value across the entire vector register
             vbrcb((__ubuf__ uint32_t *)scalePrevUb, (__ubuf__ uint32_t *)scalePrevUb, 0, 0, 1);
+            pipe_barrier(PIPE_V);
             vbrcb((__ubuf__ uint32_t *)scaleCurrUb, (__ubuf__ uint32_t *)scaleCurrUb, 0, 0, 1);
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_S, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
-            // Apply scale factors: sv_prev *= scale_prev, sv_curr *= scale_curr
+            // Step 9: Apply scale factors to sv values
+            // sv_prev *= scale_prev, sv_curr *= scale_curr
             vmul(svPrevFloatUb, svPrevFloatUb, scalePrevUb, repeat, 1, 1, 0, 8, 8, 0);
             pipe_barrier(PIPE_V);
+
             vmul(svCurrFloatUb, svCurrFloatUb, scaleCurrUb, repeat, 1, 1, 0, 8, 8, 0);
             pipe_barrier(PIPE_V);
 
-            // Merge: sv_out = sv_prev + sv_curr
+            // Step 10: Merge scaled values: sv_out = sv_prev + sv_curr
             vadd(svOutFloatUb, svPrevFloatUb, svCurrFloatUb, repeat, 1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
 
-            // Normalize if last chunk: sv_out /= new_sum
-            if (isLastKvTileOfIdx) {
-                vbrcb((__ubuf__ uint32_t *)newSumUb[curr], (__ubuf__ uint32_t *)newSumUb[curr], 0, 0, 1);
-                pipe_barrier(PIPE_V);
-                vdiv(svOutFloatUb, svOutFloatUb, newSumUb[curr], repeat, 1, 1, 0, 8, 8, 0);
-                pipe_barrier(PIPE_V);
-            }
+            // Step 11: Normalize by new_sum (always performed for numerical stability)
+            vbrcb((__ubuf__ uint32_t *)newSumUb[curr], (__ubuf__ uint32_t *)newSumUb[curr], 0, 0, 1);
+            pipe_barrier(PIPE_V);
+            vdiv(svOutFloatUb, svOutFloatUb, newSumUb[curr], repeat, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
 
-            // Convert back to Dtype
+            // Step 12: Convert result back from float32 to Dtype
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
             if constexpr (std::is_same<Dtype, half>::value) {
                 vconv_f322f16r(svOutUb[curr], svOutFloatUb, repeat, 1, 1, 4, 8);
@@ -296,7 +288,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             }
             pipe_barrier(PIPE_V);
 
-            // Write output
+            // Step 13: Write merged output to GM
             if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
                 copy_ubuf_to_gm(output + (mOffset + nOffset) * headSize, svOutUb[curr], 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
@@ -304,17 +296,17 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
 
-            // Write updated statistics
+            // Step 14: Write updated statistics to GM for next chunk
             copy_ubuf_to_gm_align_b16(lastMax + mOffset + nOffset, newMaxUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
             copy_ubuf_to_gm_align_b16(lastSum + mOffset + nOffset, newSumUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID6 + curr);
         }
 
-        // Switch Ping-Pong buffer
+        // Toggle Ping-Pong buffer index for next iteration
         curr = 1 - curr;
     }
 
-    // Wait for all pipeline operations to complete
+    // Final synchronization: wait for all pending pipeline operations to complete
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);

@@ -147,6 +147,13 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
                 pipe_barrier(PIPE_V);
             }
 
+            // broadcast一个s = Reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算 
+            vbrcb((__ubuf__ uint32_t *)temp, (__ubuf__ uint32_t *)temp, 0, 0, 1); 
+            pipe_barrier(PIPE_V); 
+
+            vdiv(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0); 
+            pipe_barrier(PIPE_V);
+
             if constexpr (std::is_same<Dtype, half>::value) {
                 vconv_f322f16r(out[curr], cal, repeat, 1, 1, 4, 8);
             } else {
