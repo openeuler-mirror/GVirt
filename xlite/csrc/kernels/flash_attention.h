@@ -159,7 +159,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
         uint32_t nOffset = ((mIdx + subHeadOffset) % headNumInGroup);
         // Adjust actual calculation length based on causal mask position
         int actualCalcLen = actualCalcSoftmaxLen + (mIdx + maskOff) / maskStride;
-        if (actualCalcLen < 0) {
+        if (actualCalcLen <= 0) {
            continue;
         }
         if (isFirstKvTile) {
@@ -212,24 +212,19 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             pipe_barrier(PIPE_V);
 
             // Step 4: Compute scale_prev = exp(max_prev - new_max)
-            vsub(scalePrevUb, maxPrevUb[curr], newMaxUb[curr], 1, 1, 1, 1, 8, 8, 1);
-            pipe_barrier(PIPE_V);
-            vexp(scalePrevUb, scalePrevUb, 1, 1, 1, 8, 8);
-            pipe_barrier(PIPE_V);
-
             // Step 5: Compute scale_curr = exp(max_curr - new_max)
+            vsub(scalePrevUb, maxPrevUb[curr], newMaxUb[curr], 1, 1, 1, 1, 8, 8, 1);
             vsub(scaleCurrUb, maxCurrUb[curr], newMaxUb[curr], 1, 1, 1, 1, 8, 8, 1);
             pipe_barrier(PIPE_V);
+            vexp(scalePrevUb, scalePrevUb, 1, 1, 1, 8, 8);
             vexp(scaleCurrUb, scaleCurrUb, 1, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
 
             // Step 6: Compute new_sum = sum_prev * scale_prev + sum_curr * scale_curr
             vmul(tempUb, sumPrevUb[curr], scalePrevUb, 1, 1, 1, 1, 8, 8, 1);
-            pipe_barrier(PIPE_V);
             vmul(newSumUb[curr], sumCurrUb[curr], scaleCurrUb, 1, 1, 1, 1, 8, 8, 1);
             pipe_barrier(PIPE_V);
             vadd(newSumUb[curr], newSumUb[curr], tempUb, 1, 1, 1, 1, 8, 8, 1);
-            pipe_barrier(PIPE_V);
 
             // Step 7: Convert sv from Dtype (half/bfloat16) to float32 for precision
             if constexpr (std::is_same<Dtype, half>::value) {
@@ -239,33 +234,27 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
                 vconv_bf162f32(svPrevFloatUb, svPrevUb[curr], repeat, 1, 1, 8, 4);
                 vconv_bf162f32(svCurrFloatUb, svCurrUb[curr], repeat, 1, 1, 8, 4);
             }
-            pipe_barrier(PIPE_V);
 
             // sv_prev = sv_prev * sum_prev, sv_curr *= sum_curr
             vbrcb((__ubuf__ uint32_t *)sumPrevUb[curr], (__ubuf__ uint32_t *)sumPrevUb[curr], 0, 0, 1);
-            pipe_barrier(PIPE_V);
             vbrcb((__ubuf__ uint32_t *)sumCurrUb[curr], (__ubuf__ uint32_t *)sumCurrUb[curr], 0, 0, 1);
+            vbrcb((__ubuf__ uint32_t *)scalePrevUb, (__ubuf__ uint32_t *)scalePrevUb, 0, 0, 1);
+            vbrcb((__ubuf__ uint32_t *)scaleCurrUb, (__ubuf__ uint32_t *)scaleCurrUb, 0, 0, 1);
             pipe_barrier(PIPE_V);
             vmul(svPrevFloatUb, svPrevFloatUb, sumPrevUb[curr], repeat, 1, 1, 0, 8, 8, 0);
-            pipe_barrier(PIPE_V);
             vmul(svCurrFloatUb, svCurrFloatUb, sumCurrUb[curr], repeat, 1, 1, 0, 8, 8, 0);
+            vbrcb((__ubuf__ uint32_t *)newSumUb[curr], (__ubuf__ uint32_t *)newSumUb[curr], 0, 0, 1);
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
 
             // Step 8: Broadcast scalar scale factors for vector multiplication
             // vbrcb replicates a single value across the entire vector register
-            vbrcb((__ubuf__ uint32_t *)scalePrevUb, (__ubuf__ uint32_t *)scalePrevUb, 0, 0, 1);
-            pipe_barrier(PIPE_V);
-            vbrcb((__ubuf__ uint32_t *)scaleCurrUb, (__ubuf__ uint32_t *)scaleCurrUb, 0, 0, 1);
-            pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_S, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
             // Step 9: Apply scale factors to sv values
             // sv_prev *= scale_prev, sv_curr *= scale_curr
             vmul(svPrevFloatUb, svPrevFloatUb, scalePrevUb, repeat, 1, 1, 0, 8, 8, 0);
-            pipe_barrier(PIPE_V);
-
             vmul(svCurrFloatUb, svCurrFloatUb, scaleCurrUb, repeat, 1, 1, 0, 8, 8, 0);
             pipe_barrier(PIPE_V);
 
@@ -274,8 +263,6 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             pipe_barrier(PIPE_V);
 
             // Step 11: Normalize by new_sum (always performed for numerical stability)
-            vbrcb((__ubuf__ uint32_t *)newSumUb[curr], (__ubuf__ uint32_t *)newSumUb[curr], 0, 0, 1);
-            pipe_barrier(PIPE_V);
             vdiv(svOutFloatUb, svOutFloatUb, newSumUb[curr], repeat, 1, 1, 0, 8, 8, 0);
             pipe_barrier(PIPE_V);
 

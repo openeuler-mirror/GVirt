@@ -58,7 +58,6 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
     constexpr int calPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
     int curr = 0;
-    union {float f; unsigned int i; } float_neg_inf = { .i = 0xFF800000 }; // 32位单精度浮点数负无穷，对应十六进制0xFF800000
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
@@ -69,10 +68,6 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
         if (actualCalcLen <= 0) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
             vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(outN, pad), 1, 1, 8, 0);
-            if (actualCalcLen == 0) {
-                vector_dup(maxOut[curr], float_neg_inf.f, 1, 1, 1, 8, 0);
-                vector_dup(sumOut[curr], float(0), 1, 1, 1, 8, 0);
-            }
             pipe_barrier(PIPE_V);
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
@@ -83,10 +78,6 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
             } else {
                 copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype), 0, 0, 0,
                                         0);
-            }
-            if (actualCalcLen == 0) {
-                copy_ubuf_to_gm_align_b16(maxBuf + idx, maxOut[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
-                copy_ubuf_to_gm_align_b16(sumBuf + idx, sumOut[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
             }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
         } else {
