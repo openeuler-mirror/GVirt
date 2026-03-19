@@ -47,10 +47,10 @@ template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *currMax, __gm__ float *currSum,
                                            __gm__ Dtype *output, __gm__ float *lastMax, __gm__ float *lastSum,
                                            uint32_t m, uint32_t subHeadOffset, uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize,
-                                           int isFirstKvTile, int isLastKvTile)
+                                           int isFirstKvTile, int actualCalcSoftmaxLen, uint32_t maskOff, uint32_t maskStride)
 {
 #ifdef XLITE_KERNEL_DEBUG
-    printf("RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, isLastKvTile=%d\n", m, headSize, isFirstKvTile, isLastKvTile);
+    printf("RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, actualCalcSoftmaxLen=%d\n", m, headSize, isFirstKvTile, actualCalcSoftmaxLen);
 #endif
     uint32_t headNumInGroup = nHeads / nKVHeads;
     set_mask_norm();
@@ -122,8 +122,12 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
     for (uint32_t mIdx = 0; mIdx < m; ++mIdx) {
         uint32_t mOffset = ((mIdx + subHeadOffset) / headNumInGroup) * nHeads;
         uint32_t nOffset = ((mIdx + subHeadOffset) % headNumInGroup);
-
-        if (isFirstKvTile && !isLastKvTile) {
+        int actualCalcLen = actualCalcSoftmaxLen + (mIdx + maskOff) / maskStride;
+        if (actualCalcLen < 0) {
+           continue;
+        }
+        int isLastKvTileOfIdx = actualCalcLen < TILESIZE_OF_CACHED_KV;
+        if (isFirstKvTile && !isLastKvTileOfIdx) {
             // First chunk (not last): Copy currSv to output, currMax/currSum to lastMax/lastSum
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
             if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
@@ -146,7 +150,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             copy_ubuf_to_gm_align_b16(lastMax + mOffset + nOffset, maxCurrUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
             copy_ubuf_to_gm_align_b16(lastSum + mOffset + nOffset, sumCurrUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-        } else if (isFirstKvTile && isLastKvTile) {
+        } else if (isFirstKvTile && isLastKvTileOfIdx) {
             // First and last chunk: Normalize and output directly
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
@@ -276,7 +280,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             pipe_barrier(PIPE_V);
 
             // Normalize if last chunk: sv_out /= new_sum
-            if (isLastKvTile) {
+            if (isLastKvTileOfIdx) {
                 vbrcb((__ubuf__ uint32_t *)newSumUb[curr], (__ubuf__ uint32_t *)newSumUb[curr], 0, 0, 1);
                 pipe_barrier(PIPE_V);
                 vdiv(svOutFloatUb, svOutFloatUb, newSumUb[curr], repeat, 1, 1, 0, 8, 8, 0);
@@ -790,7 +794,7 @@ public:
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
 
         int lastBatchIdx, lastQueryTaskLen, lastkvHeadIdx, last, lastKvOffset, lastKvLen,
-            lastQueryTaskOffset, lastWorkStart, lastWorkCurCore;
+            lastQueryTaskOffset, lastWorkStart, lastWorkCurCore, lastActualCalcSoftmaxLen;
         int lastIsLastKvTile, lastSubHeadOffset;
         uint32_t lastOutOffset;
         __gm__ uint32_t *lastBlockTable;
@@ -916,7 +920,8 @@ public:
                                         (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
                                         (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
                                         lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize,
-                                        lastKvOffset == 0, lastIsLastKvTile);
+                                        lastKvOffset == 0, lastActualCalcSoftmaxLen,
+                                        lastWorkStart % headNumInGroup, headNumInGroup);
                     if (!lastIsLastKvTile) {
                         SetNextCore();
                     }
@@ -934,6 +939,7 @@ public:
                 lastKvOffset = kvOffset;
                 lastKvLen = kvLen;
                 lastIsLastKvTile = isLastKvTile;
+                lastActualCalcSoftmaxLen = actualCalcSoftmaxLen;
                 last = curr;
                 needDoUpdate = 1;
 
@@ -967,7 +973,8 @@ public:
                                         (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
                                         (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
                                         lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize,
-                                        lastKvOffset == 0, lastIsLastKvTile);
+                                        lastKvOffset == 0, lastActualCalcSoftmaxLen,
+                                        lastWorkStart % headNumInGroup, headNumInGroup);
             if (!lastIsLastKvTile) {
                 SetNextCore();
             }
