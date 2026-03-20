@@ -704,8 +704,8 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
                                          XDtype(qkv), DBG_LOC);
         XTensor &sv =
             rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, headDim}, XDtype(qkv), DBG_LOC);
-        XTensor &max = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &max = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.pool->GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.pool->GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &sync = rt.pool->GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
