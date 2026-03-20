@@ -79,21 +79,25 @@ public:
         this->sv[0].SetGlobalBuffer(((__gm__ Dtype *)sv) + block_idx * MAX_M0 * headSize);
         this->sv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) + block_idx * MAX_M0 * headSize +
                                     block_num * MAX_M0 * headSize);
-        this->max[0].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0);
-        this->max[1].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0 +
-                                     block_num * MAX_M0);
-        this->sum[0].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0);
-        this->sum[1].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 +
-                                     block_num * MAX_M0);
+        this->max[0].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0 * 2 +
+                                     subBlockIdx * MAX_M0);
+        this->max[1].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0 * 2 +
+                                     subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
+        this->sum[0].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 * 2 +
+                                     subBlockIdx * MAX_M0);
+        this->sum[1].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 * 2 +
+                                     subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
         this->prevSv[0].SetGlobalBuffer(((__gm__ Dtype *)sv) + prevBlockIdx * MAX_M0 * headSize);
         this->prevSv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) + prevBlockIdx * MAX_M0 * headSize +
                                         block_num * MAX_M0 * headSize);
-        this->prevMax[0].SetGlobalBuffer(((__gm__ float *)max) + prevBlockIdx * MAX_M0);
-        this->prevMax[1].SetGlobalBuffer(((__gm__ float *)max) + prevBlockIdx * MAX_M0 +
-                                         block_num * MAX_M0);
-        this->prevSum[0].SetGlobalBuffer(((__gm__ float *)sum) + prevBlockIdx * MAX_M0);
-        this->prevSum[1].SetGlobalBuffer(((__gm__ float *)sum) + prevBlockIdx * MAX_M0 +
-                                         block_num * MAX_M0);
+        this->prevMax[0].SetGlobalBuffer(((__gm__ float *)max) + prevBlockIdx * MAX_M0 * 2 +
+                                         subBlockIdx * MAX_M0);
+        this->prevMax[1].SetGlobalBuffer(((__gm__ float *)max) + prevBlockIdx * MAX_M0 * 2 +
+                                         subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
+        this->prevSum[0].SetGlobalBuffer(((__gm__ float *)sum) + prevBlockIdx * MAX_M0 * 2 +
+                                         subBlockIdx * MAX_M0);
+        this->prevSum[1].SetGlobalBuffer(((__gm__ float *)sum) + prevBlockIdx * MAX_M0 * 2 +
+                                         subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
         this->lastMax.SetGlobalBuffer((__gm__ float *)lastMax);
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
