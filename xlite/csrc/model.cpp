@@ -118,6 +118,11 @@ void XModel::Init(void)
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
         CHECK_ACL(aclrtMemset(ptr, size, 0, size));
         _v2a.Init({size / 4}, INT32, ptr);
+
+        size = AIC_MAX_NUM;
+        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+        CHECK_ACL(aclrtMemset(ptr, size, 0, size));
+        _sync.Init({AIC_MAX_NUM}, INT32, ptr);
     }
 
     _mropeMaskH = 0;
@@ -162,6 +167,7 @@ XModel::~XModel(void)
     if (_c.attnType == XMODEL_ATTN_MHA) {
         (void)aclrtFree(_a2v.ptr);
         (void)aclrtFree(_v2a.ptr);
+        (void)aclrtFree(_sync.ptr);
     }
 }
 
@@ -378,13 +384,34 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 
     XTensor &attn = rt.pool->GetTensor({hiddenState.shape[0], attnOut[layer].shape[1]},
                                        hiddenState.dtype, DBG_LOC);
-    XTensor &qk =
-        rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
-                           hiddenState.dtype, DBG_LOC);
-    XliteOpAttention(rt, qkv, kvCache[layer].first, kvCache[layer].second, qk, attn,
-                     rt._cumPromptLens, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
-                     kHeads, _c.headDim, _c.blockSize, rt._batch, rt._maxNumBlocks);
-    rt.pool->PutTensor(qk);
+    if (!rt.enableFlashAttention) {
+        XTensor &qk =
+            rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
+                               hiddenState.dtype, DBG_LOC);
+        XliteOpAttention(rt, qkv, kvCache[layer].first, kvCache[layer].second, qk, attn,
+                         rt._cumPromptLens, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
+                         kHeads, _c.headDim, _c.blockSize, rt._batch, rt._maxNumBlocks);
+        rt.pool->PutTensor(qk);
+    } else {
+        XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+                                         hiddenState.dtype, DBG_LOC);
+        XTensor &sv = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.headDim},
+                                         hiddenState.dtype, DBG_LOC);
+        XTensor &max = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &lastMax = rt.pool->GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
+        XTensor &lastSum = rt.pool->GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
+        XliteOpFlashAttention(rt, qkv, kvCache[layer].first, kvCache[layer].second, qk, sv, max,
+                              sum, lastMax, lastSum, _sync, attn, rt._cumPromptLens, rt._lens,
+                              rt._cachedLens, rt._attnBlockTables, qHeads, kHeads, _c.headDim,
+                              _c.blockSize, rt._batch, rt._maxNumBlocks);
+        rt.pool->PutTensor(lastSum);
+        rt.pool->PutTensor(lastMax);
+        rt.pool->PutTensor(sum);
+        rt.pool->PutTensor(max);
+        rt.pool->PutTensor(sv);
+        rt.pool->PutTensor(qk);
+    }
 
     XliteOpMatmul(rt, attn, attnOut[layer], hiddenState, _c.weightNZ);
     if (_c.defTpSize > 1) {
@@ -821,6 +848,7 @@ size_t XModel::GetTensorPoolSize(int dbg)
     size_t shareExpertsBufSize = 0;
     size_t size = 0;
     size_t base = 0;
+    const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
 
     // TODO
     if (_c.attnType != XMODEL_ATTN_MHA) {
@@ -830,7 +858,16 @@ size_t XModel::GetTensorPoolSize(int dbg)
     base = ROUND_UP(_c.maxM, _c.defTpSize) * _c.hiddenSize * 3 * dtypeSize;
     attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
     attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
-    attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen * dtypeSize;
+    if (!isEnvironmentVariableTrue(envFlashAttentionEnable)) {
+        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen * dtypeSize;
+    } else {
+        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * TILESIZE_OF_CACHED_KV * dtypeSize;
+        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.headDim * dtypeSize;
+        attnSize += AIV_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
+        attnSize += AIV_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
+        attnSize += _c.maxM * _c.nHeads * sizeof(float);
+        attnSize += _c.maxM * _c.nHeads * sizeof(float);
+    }
 
     // FFN MLP
     if (_c.nDenseLayers > 0) {
