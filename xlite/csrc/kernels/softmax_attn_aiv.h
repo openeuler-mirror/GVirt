@@ -15,10 +15,11 @@ using namespace AscendC;
  * size(196608B) float16_t or bfloat16_t: n <= 13952
  */
 template <typename Dtype>
-inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n,
-                                             int calcLen, uint32_t outN = 0,
-                                             uint32_t maskOff = 0, uint32_t maskStride = 1,
-                                             __gm__ float *maxBuf = nullptr, __gm__ float *sumBuf = nullptr)
+inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n, int calcLen,
+                                             uint32_t outN = 0, uint32_t maskOff = 0,
+                                             uint32_t maskStride = 1,
+                                             __gm__ float *maxBuf = nullptr,
+                                             __gm__ float *sumBuf = nullptr)
 {
     if (outN == 0 || outN > n) {
         outN = n;
@@ -73,11 +74,11 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             if ((outN * sizeof(Dtype)) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype) / BLOCK_SIZE, 0,
-                                0);
+                copy_ubuf_to_gm(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype) / BLOCK_SIZE,
+                                0, 0);
             } else {
-                copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype), 0, 0, 0,
-                                        0);
+                copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype), 0,
+                                          0, 0, 0);
             }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
         } else {
@@ -92,8 +93,8 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
                 copy_gm_to_ubuf(in[curr], buf + idx * n, 0, 1,
                                 actualCalcLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
-                copy_gm_to_ubuf_align_b16(in[curr], buf + idx * n, 0, 1, actualCalcLen * sizeof(Dtype),
-                                        0, 0, 0, 0);
+                copy_gm_to_ubuf_align_b16(in[curr], buf + idx * n, 0, 1,
+                                          actualCalcLen * sizeof(Dtype), 0, 0, 0, 0);
             }
 
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
@@ -138,11 +139,11 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
                 pipe_barrier(PIPE_V);
             }
 
-            // broadcast一个s = Reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算 
-            vbrcb((__ubuf__ uint32_t *)temp, (__ubuf__ uint32_t *)temp, 0, 0, 1); 
-            pipe_barrier(PIPE_V); 
+            // broadcast一个s = Reduce_sum(EXP)标量为一个block大小的向量，避免使用scalar运算
+            vbrcb((__ubuf__ uint32_t *)temp, (__ubuf__ uint32_t *)temp, 0, 0, 1);
+            pipe_barrier(PIPE_V);
 
-            vdiv(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0); 
+            vdiv(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
             pipe_barrier(PIPE_V);
 
             if constexpr (std::is_same<Dtype, half>::value) {
@@ -160,7 +161,8 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
                 }
                 int last = ROUND_UP(actualCalcLen, pad);
                 if (outN > last) {
-                    vector_dup(out[curr] + last, Dtype(0), DIV_ROUND_UP(outN - last, pad), 1, 1, 8, 0);
+                    vector_dup(out[curr] + last, Dtype(0), DIV_ROUND_UP(outN - last, pad), 1, 1, 8,
+                               0);
                 }
                 pipe_barrier(PIPE_V);
             }
@@ -168,15 +170,17 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             if ((outN * sizeof(Dtype)) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype) / BLOCK_SIZE, 0,
-                                0);
+                copy_ubuf_to_gm(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype) / BLOCK_SIZE,
+                                0, 0);
             } else {
-                copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype), 0, 0, 0,
-                                        0);
+                copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype), 0,
+                                          0, 0, 0);
             }
             if (saveMaxSum) {
-                copy_ubuf_to_gm_align_b16(maxBuf + idx, maxOut[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
-                copy_ubuf_to_gm_align_b16(sumBuf + idx, sumOut[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
+                copy_ubuf_to_gm_align_b16(maxBuf + idx, maxOut[curr], 0, 1, sizeof(float), 0, 0, 0,
+                                          0);
+                copy_ubuf_to_gm_align_b16(sumBuf + idx, sumOut[curr], 0, 1, sizeof(float), 0, 0, 0,
+                                          0);
             }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
         }
@@ -494,10 +498,11 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, __gm__ float *expBuf, ui
 
 #else
 template <typename Dtype>
-inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n,
-                                             int calcLen, uint32_t outN = 0,
-                                             uint32_t maskOff = 0, uint32_t maskStride = 1,
-                                             __gm__ float *maxBuf = nullptr, __gm__ float *sumBuf = nullptr)
+inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n, int calcLen,
+                                             uint32_t outN = 0, uint32_t maskOff = 0,
+                                             uint32_t maskStride = 1,
+                                             __gm__ float *maxBuf = nullptr,
+                                             __gm__ float *sumBuf = nullptr)
 {
 }
 template <typename Dtype>

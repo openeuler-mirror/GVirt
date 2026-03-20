@@ -394,17 +394,17 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         rt.pool->PutTensor(qk);
     } else {
         XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
-                                        hiddenState.dtype, DBG_LOC);
+                                         hiddenState.dtype, DBG_LOC);
         XTensor &sv = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.headDim},
-                                        hiddenState.dtype, DBG_LOC);
+                                         hiddenState.dtype, DBG_LOC);
         XTensor &max = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
         XTensor &sum = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.pool->GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.pool->GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
-        XliteOpFlashAttention(rt, qkv, kvCache[layer].first, kvCache[layer].second, qk, sv, max, sum,
-                              lastMax, lastSum, _sync, attn, rt._cumPromptLens, rt._lens, rt._cachedLens,
-                              rt._attnBlockTables, qHeads, kHeads, _c.headDim, _c.blockSize, rt._batch,
-                              rt._maxNumBlocks);
+        XliteOpFlashAttention(rt, qkv, kvCache[layer].first, kvCache[layer].second, qk, sv, max,
+                              sum, lastMax, lastSum, _sync, attn, rt._cumPromptLens, rt._lens,
+                              rt._cachedLens, rt._attnBlockTables, qHeads, kHeads, _c.headDim,
+                              _c.blockSize, rt._batch, rt._maxNumBlocks);
         rt.pool->PutTensor(lastSum);
         rt.pool->PutTensor(lastMax);
         rt.pool->PutTensor(sum);

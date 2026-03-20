@@ -68,13 +68,17 @@
  *   - EVENT_ID6/7: Additional synchronization for merge path
  */
 template <typename Dtype>
-inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *currMax, __gm__ float *currSum,
-                                           __gm__ Dtype *output, __gm__ float *lastMax, __gm__ float *lastSum,
-                                           uint32_t m, uint32_t subHeadOffset, uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize,
-                                           int isFirstKvTile, int actualCalcSoftmaxLen, uint32_t maskOff, uint32_t maskStride)
+inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *currMax,
+                                           __gm__ float *currSum, __gm__ Dtype *output,
+                                           __gm__ float *lastMax, __gm__ float *lastSum, uint32_t m,
+                                           uint32_t subHeadOffset, uint32_t nHeads,
+                                           uint32_t nKVHeads, uint32_t headSize, int isFirstKvTile,
+                                           int actualCalcSoftmaxLen, uint32_t maskOff,
+                                           uint32_t maskStride)
 {
 #ifdef XLITE_KERNEL_DEBUG
-    printf("RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, actualCalcSoftmaxLen=%d\n", m, headSize, isFirstKvTile, actualCalcSoftmaxLen);
+    printf("RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, actualCalcSoftmaxLen=%d\n", m,
+           headSize, isFirstKvTile, actualCalcSoftmaxLen);
 #endif
     uint32_t headNumInGroup = nHeads / nKVHeads;
     set_mask_norm();
@@ -92,7 +96,8 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
     __ubuf__ Dtype *svPrevUb[2], *svCurrUb[2], *svOutUb[2];
     __ubuf__ float *newMaxUb[2], *newSumUb[2];
     __ubuf__ float *maxPrevUb[2], *sumPrevUb[2], *maxCurrUb[2], *sumCurrUb[2];
-    __ubuf__ float *scalePrevUb, *scaleCurrUb, *tempUb, *svPrevFloatUb, *svCurrFloatUb, *svOutFloatUb;
+    __ubuf__ float *scalePrevUb, *scaleCurrUb, *tempUb, *svPrevFloatUb, *svCurrFloatUb,
+        *svOutFloatUb;
 
     // Allocate SV (softmax-weighted value) data buffers in Dtype precision
     // Each Ping-Pong set contains: previous sv, current sv, and output sv
@@ -149,7 +154,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID6);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID7);
-    
+
     int curr = 0;
     for (uint32_t mIdx = 0; mIdx < m; ++mIdx) {
         // Calculate memory offsets for Grouped Query Attention (GQA)
@@ -160,7 +165,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
         // Adjust actual calculation length based on causal mask position
         int actualCalcLen = actualCalcSoftmaxLen + (mIdx + maskOff) / maskStride;
         if (actualCalcLen <= 0) {
-           continue;
+            continue;
         }
         if (isFirstKvTile) {
             // First chunk fast path: directly copy current results to output
@@ -168,40 +173,56 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             // Load current chunk data from GM to UB
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
             if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(svCurrUb[curr], currSv + mIdx * headSize, 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+                copy_gm_to_ubuf(svCurrUb[curr], currSv + mIdx * headSize, 0, 1,
+                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
-                copy_gm_to_ubuf_align_b16(svCurrUb[curr], currSv + mIdx * headSize, 0, 1, headSize * sizeof(Dtype), 0, 0, 0, 0);
+                copy_gm_to_ubuf_align_b16(svCurrUb[curr], currSv + mIdx * headSize, 0, 1,
+                                          headSize * sizeof(Dtype), 0, 0, 0, 0);
             }
-            copy_gm_to_ubuf_align_b16(maxCurrUb[curr], currMax + mIdx, 0, 1, sizeof(float), 0, 0, 0, 0);
-            copy_gm_to_ubuf_align_b16(sumCurrUb[curr], currSum + mIdx, 0, 1, sizeof(float), 0, 0, 0, 0);
+            copy_gm_to_ubuf_align_b16(maxCurrUb[curr], currMax + mIdx, 0, 1, sizeof(float), 0, 0, 0,
+                                      0);
+            copy_gm_to_ubuf_align_b16(sumCurrUb[curr], currSum + mIdx, 0, 1, sizeof(float), 0, 0, 0,
+                                      0);
 
             set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID4 + curr);
             wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID4 + curr);
 
             // Store current results directly to output (first chunk initialization)
             if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(output + (mOffset + nOffset) * headSize, svCurrUb[curr], 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+                copy_ubuf_to_gm(output + (mOffset + nOffset) * headSize, svCurrUb[curr], 0, 1,
+                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
-                copy_ubuf_to_gm_align_b16(output + (mOffset + nOffset) * headSize, svCurrUb[curr], 0, 1, headSize * sizeof(Dtype), 0, 0, 0, 0);
+                copy_ubuf_to_gm_align_b16(output + (mOffset + nOffset) * headSize, svCurrUb[curr],
+                                          0, 1, headSize * sizeof(Dtype), 0, 0, 0, 0);
             }
-            copy_ubuf_to_gm_align_b16(lastMax + mOffset + nOffset, maxCurrUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
-            copy_ubuf_to_gm_align_b16(lastSum + mOffset + nOffset, sumCurrUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
+            copy_ubuf_to_gm_align_b16(lastMax + mOffset + nOffset, maxCurrUb[curr], 0, 1,
+                                      sizeof(float), 0, 0, 0, 0);
+            copy_ubuf_to_gm_align_b16(lastSum + mOffset + nOffset, sumCurrUb[curr], 0, 1,
+                                      sizeof(float), 0, 0, 0, 0);
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
         } else {
             // Non-first chunk: merge with previous results using online softmax algorithm
             // Step 1: Load previous and current statistics from GM
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
-            copy_gm_to_ubuf_align_b16(maxPrevUb[curr], lastMax + mOffset + nOffset, 0, 1, sizeof(float), 0, 0, 0, 0);
-            copy_gm_to_ubuf_align_b16(sumPrevUb[curr], lastSum + mOffset + nOffset, 0, 1, sizeof(float), 0, 0, 0, 0);
-            copy_gm_to_ubuf_align_b16(maxCurrUb[curr], currMax + mIdx, 0, 1, sizeof(float), 0, 0, 0, 0);
-            copy_gm_to_ubuf_align_b16(sumCurrUb[curr], currSum + mIdx, 0, 1, sizeof(float), 0, 0, 0, 0);
+            copy_gm_to_ubuf_align_b16(maxPrevUb[curr], lastMax + mOffset + nOffset, 0, 1,
+                                      sizeof(float), 0, 0, 0, 0);
+            copy_gm_to_ubuf_align_b16(sumPrevUb[curr], lastSum + mOffset + nOffset, 0, 1,
+                                      sizeof(float), 0, 0, 0, 0);
+            copy_gm_to_ubuf_align_b16(maxCurrUb[curr], currMax + mIdx, 0, 1, sizeof(float), 0, 0, 0,
+                                      0);
+            copy_gm_to_ubuf_align_b16(sumCurrUb[curr], currSum + mIdx, 0, 1, sizeof(float), 0, 0, 0,
+                                      0);
             // Step 2: Load previous and current sv values
             if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(svPrevUb[curr], output + (mOffset + nOffset) * headSize, 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-                copy_gm_to_ubuf(svCurrUb[curr], currSv + mIdx * headSize, 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+                copy_gm_to_ubuf(svPrevUb[curr], output + (mOffset + nOffset) * headSize, 0, 1,
+                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+                copy_gm_to_ubuf(svCurrUb[curr], currSv + mIdx * headSize, 0, 1,
+                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
-                copy_gm_to_ubuf_align_b16(svPrevUb[curr], output + (mOffset + nOffset) * headSize, 0, 1, headSize * sizeof(Dtype), 0, 0, 0, 0);
-                copy_gm_to_ubuf_align_b16(svCurrUb[curr], currSv + mIdx * headSize, 0, 1, headSize * sizeof(Dtype), 0, 0, 0, 0);
+                copy_gm_to_ubuf_align_b16(svPrevUb[curr], output + (mOffset + nOffset) * headSize,
+                                          0, 1, headSize * sizeof(Dtype), 0, 0, 0, 0);
+                copy_gm_to_ubuf_align_b16(svCurrUb[curr], currSv + mIdx * headSize, 0, 1,
+                                          headSize * sizeof(Dtype), 0, 0, 0, 0);
             }
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
@@ -236,14 +257,17 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             }
 
             // sv_prev = sv_prev * sum_prev, sv_curr *= sum_curr
-            vbrcb((__ubuf__ uint32_t *)sumPrevUb[curr], (__ubuf__ uint32_t *)sumPrevUb[curr], 0, 0, 1);
-            vbrcb((__ubuf__ uint32_t *)sumCurrUb[curr], (__ubuf__ uint32_t *)sumCurrUb[curr], 0, 0, 1);
+            vbrcb((__ubuf__ uint32_t *)sumPrevUb[curr], (__ubuf__ uint32_t *)sumPrevUb[curr], 0, 0,
+                  1);
+            vbrcb((__ubuf__ uint32_t *)sumCurrUb[curr], (__ubuf__ uint32_t *)sumCurrUb[curr], 0, 0,
+                  1);
             vbrcb((__ubuf__ uint32_t *)scalePrevUb, (__ubuf__ uint32_t *)scalePrevUb, 0, 0, 1);
             vbrcb((__ubuf__ uint32_t *)scaleCurrUb, (__ubuf__ uint32_t *)scaleCurrUb, 0, 0, 1);
             pipe_barrier(PIPE_V);
             vmul(svPrevFloatUb, svPrevFloatUb, sumPrevUb[curr], repeat, 1, 1, 0, 8, 8, 0);
             vmul(svCurrFloatUb, svCurrFloatUb, sumCurrUb[curr], repeat, 1, 1, 0, 8, 8, 0);
-            vbrcb((__ubuf__ uint32_t *)newSumUb[curr], (__ubuf__ uint32_t *)newSumUb[curr], 0, 0, 1);
+            vbrcb((__ubuf__ uint32_t *)newSumUb[curr], (__ubuf__ uint32_t *)newSumUb[curr], 0, 0,
+                  1);
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
 
@@ -277,15 +301,19 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
 
             // Step 13: Write merged output to GM
             if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(output + (mOffset + nOffset) * headSize, svOutUb[curr], 0, 1, headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+                copy_ubuf_to_gm(output + (mOffset + nOffset) * headSize, svOutUb[curr], 0, 1,
+                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
             } else {
-                copy_ubuf_to_gm_align_b16(output + (mOffset + nOffset) * headSize, svOutUb[curr], 0, 1, headSize * sizeof(Dtype), 0, 0, 0, 0);
+                copy_ubuf_to_gm_align_b16(output + (mOffset + nOffset) * headSize, svOutUb[curr], 0,
+                                          1, headSize * sizeof(Dtype), 0, 0, 0, 0);
             }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
 
             // Step 14: Write updated statistics to GM for next chunk
-            copy_ubuf_to_gm_align_b16(lastMax + mOffset + nOffset, newMaxUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
-            copy_ubuf_to_gm_align_b16(lastSum + mOffset + nOffset, newSumUb[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
+            copy_ubuf_to_gm_align_b16(lastMax + mOffset + nOffset, newMaxUb[curr], 0, 1,
+                                      sizeof(float), 0, 0, 0, 0);
+            copy_ubuf_to_gm_align_b16(lastSum + mOffset + nOffset, newSumUb[curr], 0, 1,
+                                      sizeof(float), 0, 0, 0, 0);
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID6 + curr);
         }
 
@@ -852,8 +880,10 @@ public:
                 }
                 int subQOffset = nWorkStart / headNumInGroup;
                 int subHeadOffset = nWorkStart % headNumInGroup;
-                uint32_t outOffset = (queryTaskOffset + subQOffset) * nHeads + kvHeadIdx * headNumInGroup;
-                uint32_t calcSoftmaxLen = cachedLen + queryTaskStart + nWorkStart / headNumInGroup + 1;
+                uint32_t outOffset =
+                    (queryTaskOffset + subQOffset) * nHeads + kvHeadIdx * headNumInGroup;
+                uint32_t calcSoftmaxLen =
+                    cachedLen + queryTaskStart + nWorkStart / headNumInGroup + 1;
                 int actualCalcSoftmaxLen = calcSoftmaxLen - kvOffset;
                 // wait aic qk done
                 wait_flag_dev(0);
@@ -869,8 +899,8 @@ public:
                 // TODO save max[curr][nWorkStart], sum[curr][nWorkStart]
                 RunAivSoftmaxPingPong<Dtype>(
                     (__gm__ Dtype *)qk[curr][nWorkStart * TILESIZE_OF_CACHED_KV].GetPhyAddr(),
-                    nWorkCurCore, TILESIZE_OF_CACHED_KV, actualCalcSoftmaxLen, TILESIZE_OF_CACHED_KV,
-                    nWorkStart % headNumInGroup, headNumInGroup,
+                    nWorkCurCore, TILESIZE_OF_CACHED_KV, actualCalcSoftmaxLen,
+                    TILESIZE_OF_CACHED_KV, nWorkStart % headNumInGroup, headNumInGroup,
                     (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
                     (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr());
                 ffts_cross_core_sync(PIPE_MTE3, config);
@@ -891,16 +921,17 @@ public:
                            lastWorkStart + lastWorkCurCore, lastkvHeadIdx, lastKvOffset,
                            lastKvOffset + lastKvLen, last);
 #endif
-                    // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] & max[last]
-                    RunAivSoftmaxUpdate<Dtype>((__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
-                                        (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
-                                        (__gm__ float *)sum[last][lastWorkStart].GetPhyAddr(),
-                                        (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
-                                        (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
-                                        (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
-                                        lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize,
-                                        lastKvOffset == 0, lastActualCalcSoftmaxLen,
-                                        lastWorkStart % headNumInGroup, headNumInGroup);
+                    // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] &
+                    // max[last]
+                    RunAivSoftmaxUpdate<Dtype>(
+                        (__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
+                        (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
+                        (__gm__ float *)sum[last][lastWorkStart].GetPhyAddr(),
+                        (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
+                        (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
+                        (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(), lastWorkCurCore,
+                        lastSubHeadOffset, nHeads, nKVHeads, headSize, lastKvOffset == 0,
+                        lastActualCalcSoftmaxLen, lastWorkStart % headNumInGroup, headNumInGroup);
                     if (!lastIsLastKvTile) {
                         SetNextCore();
                     }
@@ -945,15 +976,15 @@ public:
                    lastKvOffset + lastKvLen, last);
 #endif
             // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] & max[last]
-            RunAivSoftmaxUpdate<Dtype>((__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
-                                        (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
-                                        (__gm__ float *)sum[last][lastWorkStart].GetPhyAddr(),
-                                        (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
-                                        (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
-                                        (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
-                                        lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize,
-                                        lastKvOffset == 0, lastActualCalcSoftmaxLen,
-                                        lastWorkStart % headNumInGroup, headNumInGroup);
+            RunAivSoftmaxUpdate<Dtype>(
+                (__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
+                (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
+                (__gm__ float *)sum[last][lastWorkStart].GetPhyAddr(),
+                (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
+                (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
+                (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(), lastWorkCurCore,
+                lastSubHeadOffset, nHeads, nKVHeads, headSize, lastKvOffset == 0,
+                lastActualCalcSoftmaxLen, lastWorkStart % headNumInGroup, headNumInGroup);
             if (!lastIsLastKvTile) {
                 SetNextCore();
             }
