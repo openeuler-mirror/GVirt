@@ -291,9 +291,6 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         std::cout << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize
                   << "), data parallel(" << c.defDpSize << "), expert parallel (" << c.moeEpSize
                   << ")]" << std::endl;
-        if (std::getenv("FA_TEST")) {
-            std::cout << "Flash Attention Enabled!" << std::endl;
-        }
     }
 
     _kv.resize(c.nLayers);
@@ -694,7 +691,7 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
 
-    if (!std::getenv("FA_TEST")) {
+    if (!rt.enableFlashAttention) {
         XTensor &qk = rt.pool->GetTensor(
             {rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize}, XDtype(qkv), DBG_LOC);
         XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _cumPromptLens, _lens,

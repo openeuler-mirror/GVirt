@@ -384,7 +384,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 
     XTensor &attn = rt.pool->GetTensor({hiddenState.shape[0], attnOut[layer].shape[1]},
                                        hiddenState.dtype, DBG_LOC);
-    if (!std::getenv("FA_TEST")) {
+    if (!rt.enableFlashAttention) {
         XTensor &qk =
             rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
                                hiddenState.dtype, DBG_LOC);
@@ -397,8 +397,8 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                                         hiddenState.dtype, DBG_LOC);
         XTensor &sv = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.headDim},
                                         hiddenState.dtype, DBG_LOC);
-        XTensor &max = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &max = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.pool->GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.pool->GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XliteOpFlashAttention(rt, qkv, kvCache[layer].first, kvCache[layer].second, qk, sv, max, sum,
@@ -848,6 +848,7 @@ size_t XModel::GetTensorPoolSize(int dbg)
     size_t shareExpertsBufSize = 0;
     size_t size = 0;
     size_t base = 0;
+    const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
 
     // TODO
     if (_c.attnType != XMODEL_ATTN_MHA) {
@@ -857,16 +858,15 @@ size_t XModel::GetTensorPoolSize(int dbg)
     base = ROUND_UP(_c.maxM, _c.defTpSize) * _c.hiddenSize * 3 * dtypeSize;
     attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
     attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
-    if (!std::getenv("FA_TEST")) {
+    if (!isEnvironmentVariableTrue(envFlashAttentionEnable)) {
         attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen * dtypeSize;
     } else {
         attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * TILESIZE_OF_CACHED_KV * dtypeSize;
         attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.headDim * dtypeSize;
-        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
-        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
+        attnSize += AIV_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
+        attnSize += AIV_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
         attnSize += _c.maxM * _c.nHeads * sizeof(float);
         attnSize += _c.maxM * _c.nHeads * sizeof(float);
-        attnSize += 2 * 2 * AIC_MAX_NUM * sizeof(int32_t);
     }
 
     // FFN MLP
