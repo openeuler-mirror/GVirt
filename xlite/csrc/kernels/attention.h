@@ -272,6 +272,11 @@ public:
         }
     }
 
+    /*
+     * When the totalLen exceeds MAX_SUB_CONTEXT_SIZE in the RunAivSoftmaxLong function,
+     * 4 rows must be reserved for the exp buffer (float type) used in softmax.
+     * Therefore, m0 must be less than or equal to MAX_M0 - 4.
+     */
     __aicore__ inline uint32_t GetOptimalM0(int queryLen, int cachedLen)
     {
         if (queryLen <= SEQLEN_64) {
@@ -478,9 +483,9 @@ public:
 #endif
                 RunAivSoftmax<Dtype>(
                     (__gm__ Dtype *)qk[currQkIdx][qkOffset].GetPhyAddr(),
-                    m0 == MAX_M0
+                    m0 > (MAX_M0 - 4)
                         ? 0
-                        : (__gm__ float *)qk[currQkIdx][(m0 + subIdx) * maxSeqLen * 2].GetPhyAddr(),
+                        : (__gm__ float *)qk[currQkIdx][(m0 + subIdx * 2) * maxSeqLen].GetPhyAddr(),
                     nSoftmaxCurCore, maxSeqLen, calcLen, outN, nSoftmaxStart % headNumInGroup,
                     headNumInGroup);
 
