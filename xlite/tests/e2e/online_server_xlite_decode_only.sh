@@ -38,7 +38,6 @@ python -m vllm.entrypoints.openai.api_server \
 	--block-size 128 \
 	--max-model-len ${max_model_len} \
 	--trust-remote-code \
-	--disable-log-requests \
 	--served-model-name qwen \
 	--no-enable-prefix-caching \
 	--additional-config '{"xlite_graph_config": {"enabled": true}, "enable_cpu_binding": true}' \
