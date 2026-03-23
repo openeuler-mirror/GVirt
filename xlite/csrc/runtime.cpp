@@ -80,9 +80,11 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     }
 
     const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
-    if (rankId == 0 && isEnvironmentVariableTrue(envFlashAttentionEnable)) {
+    if (isEnvironmentVariableTrue(envFlashAttentionEnable)) {
         enableFlashAttention = true;
-        std::cout << "Xlite Flash Attention Enabled!" << std::endl;
+        if (rankId == 0) {
+            std::cout << "Xlite Flash Attention Enabled!" << std::endl;
+        }
     }
 }
 
