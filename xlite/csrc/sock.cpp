@@ -160,20 +160,31 @@ int XSock::Init(void)
 int XSock::Recv(int fd, void *buf, uint32_t size)
 {
     int ret = 0;
-    do {
-        ret = static_cast<int>(recv(fd, buf, size, 0));
-    } while (ret < 0 && ERRNO_NEED_RETYR(errno));
+    uint32_t len = 0;
+    uint32_t need_len = size;
+    char *temp = static_cast<char *>(buf);
 
-    if (ret == 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " recv failed, connect reset by peer"
-                  << std::endl;
-        return -ECONNRESET;
-    } else if (ret < 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " recv failed: " << strerror(errno)
-                  << std::endl;
-        return -errno;
-    } else if (static_cast<uint32_t>(ret) != size) {
-        std::cerr << __func__ << ": rank" << _rankId << " recv failed: size not match" << std::endl;
+    while (len < size) {
+        ret = static_cast<int>(recv(fd, temp + len, need_len, 0));
+        if (ret < 0) {
+            if (ERRNO_NEED_RETYR(errno)) {
+                continue;
+            }
+            std::cerr << __func__ << ": rank" << _rankId << " recv failed: " << strerror(errno)
+                      << std::endl;
+            return -errno;
+        } else if (ret == 0) {
+            std::cerr << __func__ << ": rank" << _rankId << " recv failed, connect reset by peer"
+                      << std::endl;
+            return -ECONNRESET;
+        }
+        len += static_cast<uint32_t>(ret);
+        need_len -= static_cast<uint32_t>(ret);
+    }
+
+    if (len != size) {
+        std::cerr << __func__ << ": rank" << _rankId << " recv failed: size not match, got " << len
+                  << ", expected " << size << std::endl;
         return -EFAULT;
     }
     return 0;
@@ -182,20 +193,31 @@ int XSock::Recv(int fd, void *buf, uint32_t size)
 int XSock::Send(int fd, void *buf, uint32_t size)
 {
     int ret = 0;
-    do {
-        ret = static_cast<int>(send(fd, buf, size, 0));
-    } while (ret < 0 && ERRNO_NEED_RETYR(errno));
+    uint32_t len = 0;
+    uint32_t need_len = size;
+    char *temp = static_cast<char *>(buf);
 
-    if (ret == 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " send failed, connect reset by peer"
-                  << std::endl;
-        return -ECONNRESET;
-    } else if (ret < 0) {
-        std::cerr << __func__ << ": rank" << _rankId << " send failed: " << strerror(errno)
-                  << std::endl;
-        return -errno;
-    } else if (static_cast<uint32_t>(ret) != size) {
-        std::cerr << __func__ << ": rank" << _rankId << " send failed: size not match" << std::endl;
+    while (len < size) {
+        ret = static_cast<int>(send(fd, temp + len, need_len, 0));
+        if (ret < 0) {
+            if (ERRNO_NEED_RETYR(errno)) {
+                continue;
+            }
+            std::cerr << __func__ << ": rank" << _rankId << " send failed: " << strerror(errno)
+                      << std::endl;
+            return -errno;
+        } else if (ret == 0) {
+            std::cerr << __func__ << ": rank" << _rankId << " send failed, connect reset by peer"
+                      << std::endl;
+            return -ECONNRESET;
+        }
+        len += static_cast<uint32_t>(ret);
+        need_len -= static_cast<uint32_t>(ret);
+    }
+
+    if (len != size) {
+        std::cerr << __func__ << ": rank" << _rankId << " send failed: size not match, got " << len
+                  << ", expected " << size << std::endl;
         return -EFAULT;
     }
     return 0;
