@@ -3,4 +3,4 @@
  */
 #include "quant.h"
 
-QUANT_FUNC_DEFINE(bfloat16_t);
+QUANT_FUNC_DEFINE(bfloat16_t);

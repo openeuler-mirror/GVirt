@@ -3,4 +3,4 @@
  */
 #include "dequant.h"
 
-DEQUANT_FUNC_DEFINE(float16_t);
+DEQUANT_FUNC_DEFINE(float16_t);

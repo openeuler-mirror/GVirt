@@ -238,7 +238,7 @@ class CppChecker:
                 all_passed = False
         
         for file_path in cpp_files:
-            print(f"  Checking {file_path.relative_to(self.root_dir)}", end='\r')
+            print(f"\033[K  Checking {file_path.relative_to(self.root_dir)}", end='\r')
             
             if check_copyright_flag:
                 self.check_copyright(file_path)

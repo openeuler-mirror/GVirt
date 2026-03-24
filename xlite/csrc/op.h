@@ -25,10 +25,9 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
                     uint32_t normDim, uint32_t cntPerToken = 1, uint32_t inStartOffset = 0,
                     uint32_t outStartOffset = 0);
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out);
-void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
-                   bool weightNZ = false, const XTensor &bias = XTensor(),
-                   const XTensor &deqScale = XTensor(), bool transpose = false,
-                   uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false,
+                   const XTensor &bias = XTensor(), const XTensor &deqScale = XTensor(),
+                   bool transpose = false, uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t swizzle = MATMUL_SWIZZLE_DEFAULT_VALUE);
@@ -112,10 +111,11 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLoca
                                 XTensor &key, XTensor &kCache, XTensor &vCache,
                                 XTensor &slotMapping);
 
-void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset, XTensor &out);
+void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
+                  XTensor &out);
 
 void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out);
 
-void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out,
-                    uint32_t m, uint32_t n, bool hasScale);
+void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, uint32_t m, uint32_t n,
+                    bool hasScale);
 #endif

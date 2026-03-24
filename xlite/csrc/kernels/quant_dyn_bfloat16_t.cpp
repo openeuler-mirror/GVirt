@@ -3,4 +3,4 @@
  */
 #include "quant_dyn.h"
 
-QUANT_DYN_FUNC_DEFINE(bfloat16_t);
+QUANT_DYN_FUNC_DEFINE(bfloat16_t);

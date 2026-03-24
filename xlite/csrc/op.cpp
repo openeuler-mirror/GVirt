@@ -444,8 +444,8 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &nor
 }
 
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
-                   const XTensor &bias, const XTensor &deqScale, bool transpose,
-                   uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzle)
+                   const XTensor &bias, const XTensor &deqScale, bool transpose, uint64_t m0,
+                   uint64_t n0, uint64_t k0, uint64_t swizzle)
 {
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
@@ -498,10 +498,12 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
 
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
-                                     weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
+                                     weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr,
+                                     deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
-                                      k, weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
+        aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
+                                      weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr,
+                                      deqScale.ptr);
     } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
@@ -897,7 +899,8 @@ void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &exp
 }
 
 // out = int8(x / scale + offset), turn scale to 1/scale before calculation
-void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset, XTensor &out)
+void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
+                  XTensor &out)
 {
     uint32_t m = x.shape[0];
     uint32_t n = x.shape[1];
@@ -914,19 +917,18 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out)
     uint64_t m = x.shape[0];
     uint64_t n = x.shape[1];
     if (x.dtype == BF16) {
-        aclrtlaunch_quant_bf16_to_i8_dynamic(rt.aivNum, rt.stream, x.ptr,
-                                             scale.ptr, out.ptr, m, n);
+        aclrtlaunch_quant_bf16_to_i8_dynamic(rt.aivNum, rt.stream, x.ptr, scale.ptr, out.ptr, m, n);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
 }
 
-void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out,
-                    uint32_t m, uint32_t n, bool hasScale)
+void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, uint32_t m, uint32_t n,
+                    bool hasScale)
 {
     if (in.dtype == FP16) {
-        aclrtlaunch_dequant_float16_t(rt.aivNum, rt.stream, in.ptr, scale.ptr,
-                                      out.ptr, m, n, hasScale);
+        aclrtlaunch_dequant_float16_t(rt.aivNum, rt.stream, in.ptr, scale.ptr, out.ptr, m, n,
+                                      hasScale);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

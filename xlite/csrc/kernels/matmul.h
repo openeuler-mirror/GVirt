@@ -233,8 +233,11 @@ public:
                 // Bias L1 -> L0
                 // C2(Bias Table Buffer) Size is 1KB
                 // If dst is in C2(Bias Table Buffer), the size of DataBlock is 64B
-                DataCopy(l0BiasBuf, l1BiasBuf,
-                         {1, (uint16_t)(nActualBlockPad * sizeof(MatDtype) / C2_DATABLOCK), 0, 0});
+                DataCopy(
+                    l0BiasBuf, l1BiasBuf,
+                    {1,
+                     (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(MatDtype)), C2_DATABLOCK)),
+                     0, 0});
 
                 SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
             }
@@ -250,7 +253,10 @@ public:
                 // fixpipe硬件要求：以uint64_t存储fp32，高位为0，低位为fp32格式的二进制值
                 // Notice: DataCopy from L1 to fbuf is belong to fixpipe barrier
                 DataCopy(fixpipeBuf, l1DeqScaleBuf,
-                         {1, (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)), FIXPIPE_DATABLOCK)), 0, 0});
+                         {1,
+                          (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)),
+                                                  FIXPIPE_DATABLOCK)),
+                          0, 0});
             }
 
             WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
@@ -368,7 +374,8 @@ public:
             /* C L0C -> GM */
             SetFlag<HardEvent::M_FIX>(EVENT_ID0);
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-            CopyToGmMatmul(outGm, l0cBuf, mActual, nActual, mActualBlockPad, n, hasDeqScale, fixpipeBuf);
+            CopyToGmMatmul(outGm, l0cBuf, mActual, nActual, mActualBlockPad, n, hasDeqScale,
+                           fixpipeBuf);
             if (hasDeqScale) {
                 SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
             }
@@ -425,22 +432,21 @@ private:
     bool hasDeqScale = false;
 };
 
-#define MATMUL_FUNC_DEFINE(dtype)                                                               \
-    extern "C" __global__ __aicore__ void matmul_##dtype(                                       \
-        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,       \
-        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl,             \
-        GM_ADDR bias, GM_ADDR deqScale)                                                         \
-    {                                                                                           \
-        if constexpr (std::is_same<dtype, int8_t>::value) {                                     \
-            Matmul<dtype, int32_t, half> op;                                               \
-            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);       \
-            op.Run();                                                                           \
-        } else {                                                                                \
-            Matmul<dtype, float, dtype> op;                                                     \
-            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);       \
-            op.Run();                                                                           \
-        }                                                                                       \
-    }                                                                                           \
-
+#define MATMUL_FUNC_DEFINE(dtype)                                                                 \
+    extern "C" __global__ __aicore__ void matmul_##dtype(                                         \
+        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,         \
+        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl, GM_ADDR bias, \
+        GM_ADDR deqScale)                                                                         \
+    {                                                                                             \
+        if constexpr (std::is_same<dtype, int8_t>::value) {                                       \
+            Matmul<dtype, int32_t, half> op;                                                      \
+            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);         \
+            op.Run();                                                                             \
+        } else {                                                                                  \
+            Matmul<dtype, float, dtype> op;                                                       \
+            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);         \
+            op.Run();                                                                             \
+        }                                                                                         \
+    }
 
 #endif

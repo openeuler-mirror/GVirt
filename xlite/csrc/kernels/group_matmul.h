@@ -34,9 +34,9 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR co
             get_block_idx() >= remain ? get_block_idx() : get_block_idx() + get_block_num();
         uint64_t w_addr = *((__gm__ uint64_t *)(ws + i * sizeof(void *)));
         __gm__ uint8_t *w = (__gm__ uint8_t *)w_addr;
-        matmul_op.Init(x + off * kK * sizeof(Dtype), w, z + off * kN * sizeof(Dtype), nullptr, nullptr, kM,
-                       kN, kK, weightNZ, transpose, m0, n0, k0, swizzle, curBlock, curCount,
-                       remain);
+        matmul_op.Init(x + off * kK * sizeof(Dtype), w, z + off * kN * sizeof(Dtype), nullptr,
+                       nullptr, kM, kN, kK, weightNZ, transpose, m0, n0, k0, swizzle, curBlock,
+                       curCount, remain);
         matmul_op.Run();
         off += kM;
         remain = curCount % get_block_num();
@@ -50,11 +50,13 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR co
         bool transpose, uint64_t swizzle)                                                         \
     {                                                                                             \
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);                                           \
-        if constexpr (std::is_same<dtype, int8_t>::value) {                                     \
-            group_matmul_kernel<dtype, int32_t, float16_t>(x, ws, z, counts, n, kN, kK,         \
-                m0, n0, k0, startIdx, endIdx, weightNZ, transpose, swizzle);                    \
-        } else {                                                                                \
-            group_matmul_kernel<dtype, float, dtype>(x, ws, z, counts, n, kN, kK,               \
-                m0, n0, k0, startIdx, endIdx, weightNZ, transpose, swizzle);                    \
-        }                                                                                       \
+        if constexpr (std::is_same<dtype, int8_t>::value) {                                       \
+            group_matmul_kernel<dtype, int32_t, float16_t>(x, ws, z, counts, n, kN, kK, m0, n0,   \
+                                                           k0, startIdx, endIdx, weightNZ,        \
+                                                           transpose, swizzle);                   \
+        } else {                                                                                  \
+            group_matmul_kernel<dtype, float, dtype>(x, ws, z, counts, n, kN, kK, m0, n0, k0,     \
+                                                     startIdx, endIdx, weightNZ, transpose,       \
+                                                     swizzle);                                    \
+        }                                                                                         \
     }

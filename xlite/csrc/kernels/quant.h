@@ -5,14 +5,13 @@
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 
-
 #ifdef __DAV_C220_VEC__
 
 // out = int8(in * scale_reciprocal + offset)
 // per-token quantion
 // [m, k], activation
-__aicore__ inline void quant_bf16_to_i8(
-    GM_ADDR in, GM_ADDR scale_reciprocal, GM_ADDR offset, GM_ADDR out, uint32_t m, uint32_t k)
+__aicore__ inline void quant_bf16_to_i8(GM_ADDR in, GM_ADDR scale_reciprocal, GM_ADDR offset,
+                                        GM_ADDR out, uint32_t m, uint32_t k)
 {
     set_atomic_none();
     set_mask_norm();
@@ -28,7 +27,7 @@ __aicore__ inline void quant_bf16_to_i8(
 
     auto *xf32_ping = reinterpret_cast<__ubuf__ float *>(x_pong + k);
     auto *xf32_pong = reinterpret_cast<__ubuf__ float *>(xf32_ping + k);
-    
+
     // need align with 256B
     auto *xf16_ping = reinterpret_cast<__ubuf__ half *>(xf32_pong + k);
     auto *xf16_pong = reinterpret_cast<__ubuf__ half *>(xf16_ping + k);
@@ -74,14 +73,17 @@ __aicore__ inline void quant_bf16_to_i8(
         set_flag(PIPE_V, PIPE_MTE2, eventId);
 
         // dst = src * scale_reciprocal + offset
-        vmul(xf32_bufs[eventId], xf32_bufs[eventId], scale_buf, k / VECTOR_MAX_NUM_OF_FP32, 1, 1, 1, 8, 8, 8);
+        vmul(xf32_bufs[eventId], xf32_bufs[eventId], scale_buf, k / VECTOR_MAX_NUM_OF_FP32, 1, 1, 1,
+             8, 8, 8);
         pipe_barrier(PIPE_V);
 
-        vadd(xf32_bufs[eventId], xf32_bufs[eventId], offset_buf, k / VECTOR_MAX_NUM_OF_FP32, 1, 1, 1, 8, 8, 8);
+        vadd(xf32_bufs[eventId], xf32_bufs[eventId], offset_buf, k / VECTOR_MAX_NUM_OF_FP32, 1, 1,
+             1, 8, 8, 8);
         pipe_barrier(PIPE_V);
 
         // FP32 -> FP16
-        vconv_f322f16a(xf16_bufs[eventId], xf32_bufs[eventId], k / VECTOR_MAX_NUM_OF_FP32, 1, 1, 4, 8);
+        vconv_f322f16a(xf16_bufs[eventId], xf32_bufs[eventId], k / VECTOR_MAX_NUM_OF_FP32, 1, 1, 4,
+                       8);
         pipe_barrier(PIPE_V);
 
         // // FP16 -> Int8
@@ -106,17 +108,17 @@ __aicore__ inline void quant_bf16_to_i8(
     pipe_barrier(PIPE_ALL);
 }
 
-#define QUANT_FUNC_DEFINE(dtype)                                                            \
-extern "C" __global__ __aicore__ void quant_bf16_to_i8_static(GM_ADDR in,                   \
-    GM_ADDR scale_reciprocal, GM_ADDR offset, GM_ADDR out, uint32_t m, uint32_t k)          \
-{                                                                                           \
-    quant_bf16_to_i8(in, scale_reciprocal, offset, out, m, k);                              \
-}
+#define QUANT_FUNC_DEFINE(dtype)                                                                   \
+    extern "C" __global__ __aicore__ void quant_bf16_to_i8_static(                                 \
+        GM_ADDR in, GM_ADDR scale_reciprocal, GM_ADDR offset, GM_ADDR out, uint32_t m, uint32_t k) \
+    {                                                                                              \
+        quant_bf16_to_i8(in, scale_reciprocal, offset, out, m, k);                                 \
+    }
 #else
-#define QUANT_FUNC_DEFINE(dtype)                                                            \
-extern "C" __global__ __aicore__ void quant_bf16_to_i8_static(GM_ADDR in,                   \
-    GM_ADDR scale_reciprocal, GM_ADDR offset, GM_ADDR out, uint32_t m, uint32_t k)          \
-{                                                                                           \
-}
+#define QUANT_FUNC_DEFINE(dtype)                                                                   \
+    extern "C" __global__ __aicore__ void quant_bf16_to_i8_static(                                 \
+        GM_ADDR in, GM_ADDR scale_reciprocal, GM_ADDR offset, GM_ADDR out, uint32_t m, uint32_t k) \
+    {                                                                                              \
+    }
 
-#endif
+#endif

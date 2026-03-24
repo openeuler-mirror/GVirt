@@ -31,7 +31,7 @@ using namespace AscendC;
 #define UB_SIZE 196608
 #define UB_BUF_ALIGN_SIZE 32  // The align size of UB buffer address
 #define PINGPONG_BUF_NUM 2
-#define C2_DATABLOCK 64  // The data block size of C2
+#define C2_DATABLOCK 64        // The data block size of C2
 #define FIXPIPE_DATABLOCK 128  // The data block size of fixpipe
 #define FLOAT_MIN -3.4028235e+38
 
@@ -175,8 +175,8 @@ __aicore__ inline void CalMmad(const LocalTensor<MatDtype> &c, const LocalTensor
 
 template <typename Dtype, typename MatDtype>
 __aicore__ inline void CalMmadWithBias(const LocalTensor<MatDtype> &c, const LocalTensor<Dtype> &a,
-                                       const LocalTensor<Dtype> &b, const LocalTensor<MatDtype> &bias,
-                                       int m, int n, int k)
+                                       const LocalTensor<Dtype> &b,
+                                       const LocalTensor<MatDtype> &bias, int m, int n, int k)
 {
     MmadParams params;
     params.m = m;
@@ -233,7 +233,7 @@ __aicore__ inline void CopyToGm(const GlobalTensor<OutDtype> &dst, const LocalTe
     if constexpr (std::is_same<OutDtype, float16_t>::value) {
         mode = DEQF16;
         float quant = 1;
-        uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<int32_t*>(&quant));
+        uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<int32_t *>(&quant));
         SetFixpipePreQuantFlag(deqScalar);
     }
     DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
@@ -243,19 +243,10 @@ __aicore__ inline void CopyToGm(const GlobalTensor<OutDtype> &dst, const LocalTe
 
 template <typename MatDtype, typename OutDtype>
 __aicore__ inline void CopyToGmMatmul(const GlobalTensor<OutDtype> &dst,
-                                      const LocalTensor<MatDtype> &src,
-                                      int mSize, int nSize, int srcStride, int dstStride,
-                                      bool use_dequant, const LocalTensor<uint64_t> &deqScale)
+                                      const LocalTensor<MatDtype> &src, int mSize, int nSize,
+                                      int srcStride, int dstStride, bool use_dequant,
+                                      const LocalTensor<uint64_t> &deqScale)
 {
-    // QuantMode_t mode = DEQF16;
-    // float quant = 0.25;
-    // uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<int32_t*>(&quant));
-    // SetFixpipePreQuantFlag(deqScalar);
-    // DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
-    // SetFixpipeNz2ndFlag(1, 1, 1);
-    // PipeBarrier<PIPE_FIX>();
-    // DataCopy(dst, src, param);
-
     if (!use_dequant) {
         CopyToGm(dst, src, mSize, nSize, srcStride, dstStride);
         return;

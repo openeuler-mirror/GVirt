@@ -11,8 +11,8 @@
 #ifdef __DAV_C220_VEC__
 
 template <typename dtype>
-__aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out,
-                               uint32_t m, uint32_t n, bool hasScale)
+__aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t m, uint32_t n,
+                               bool hasScale)
 {
     set_atomic_none();
     set_mask_norm();
@@ -38,10 +38,10 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out,
 
     UBA(float32_t) scale_ub_buf = reinterpret_cast<UBA(float32_t)>((uintptr_t)(out_ub_buf1 + n));
 
-    UBA(dtype) in_ub_buf[PINGPONG] = { in_ub_buf0, in_ub_buf1 };
-    UBA(float32_t) tmp_ub_buf[PINGPONG] = { tmp_ub_buf0, tmp_ub_buf1 };
-    UBA(float32_t) mul_ub_buf[PINGPONG] = { mul_ub_buf0, mul_ub_buf1 };
-    UBA(bfloat16_t) out_ub_buf[PINGPONG] = { out_ub_buf0, out_ub_buf1 };
+    UBA(dtype) in_ub_buf[PINGPONG] = {in_ub_buf0, in_ub_buf1};
+    UBA(float32_t) tmp_ub_buf[PINGPONG] = {tmp_ub_buf0, tmp_ub_buf1};
+    UBA(float32_t) mul_ub_buf[PINGPONG] = {mul_ub_buf0, mul_ub_buf1};
+    UBA(bfloat16_t) out_ub_buf[PINGPONG] = {out_ub_buf0, out_ub_buf1};
 
     UBA(float32_t) tmp_ptr;
 
@@ -72,8 +72,7 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out,
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + event_id);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + event_id);
         vconv_f162f32(tmp_ub_buf[event_id], in_ub_buf[event_id],
-                       DIV_ROUND_UP(n * sizeof(float32_t), VECTOR_MAX_BYTESIZE), 1, 1, 8,
-                       4);
+                      DIV_ROUND_UP(n * sizeof(float32_t), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
         pipe_barrier(PIPE_V);
 
         // VMUL, tmp_ub_buf -> VMUL(in * scale) -> tmp_ub_buf
@@ -93,8 +92,7 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out,
 
         // F32 -> BF16
         vconv_f322bf16r(out_ub_buf[event_id], tmp_ptr,
-                       DIV_ROUND_UP(n * sizeof(float32_t), VECTOR_MAX_BYTESIZE), 1, 1,
-                       4, 8);
+                        DIV_ROUND_UP(n * sizeof(float32_t), VECTOR_MAX_BYTESIZE), 1, 1, 4, 8);
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + event_id);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
 
@@ -117,16 +115,16 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out,
     pipe_barrier(PIPE_ALL);
 }
 
-#define DEQUANT_FUNC_DEFINE(dtype)                                                 \
+#define DEQUANT_FUNC_DEFINE(dtype)                                                                \
     extern "C" __global__ __aicore__ void dequant_##dtype(GM_ADDR in, GM_ADDR scale, GM_ADDR out, \
-                                                          uint32_t m, uint32_t n, bool has_scale)  \
-    {                                                                                      \
-        dequant<dtype>(in, scale, out, m, n, has_scale);                                       \
+                                                          uint32_t m, uint32_t n, bool has_scale) \
+    {                                                                                             \
+        dequant<dtype>(in, scale, out, m, n, has_scale);                                          \
     }
 #else
-#define DEQUANT_FUNC_DEFINE(dtype)                                                 \
+#define DEQUANT_FUNC_DEFINE(dtype)                                                                \
     extern "C" __global__ __aicore__ void dequant_##dtype(GM_ADDR in, GM_ADDR scale, GM_ADDR out, \
-                                                          uint32_t m, uint32_t n, bool has_scale)  \
-    {                                                                                      \
+                                                          uint32_t m, uint32_t n, bool has_scale) \
+    {                                                                                             \
     }
-#endif
+#endif
