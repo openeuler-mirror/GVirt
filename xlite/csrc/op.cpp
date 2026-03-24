@@ -51,6 +51,10 @@
 #include "aclrtlaunch_allgather_float16_t.h"
 #include "aclrtlaunch_allgather_bfloat16_t.h"
 #include "aclrtlaunch_allgather_float.h"
+#include "aclrtlaunch_quant_bf16_to_i8_static.h"
+#include "aclrtlaunch_quant_bf16_to_i8_dynamic.h"
+#include "aclrtlaunch_matmul_int8_t.h"
+#include "aclrtlaunch_dequant_float16_t.h"
 #include "aclrtlaunch_attention_float16_t.h"
 #include "aclrtlaunch_attention_bfloat16_t.h"
 #include "aclrtlaunch_sigmoid_topk_float.h"
@@ -440,19 +444,21 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &nor
 }
 
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
-                   const XTensor &bias, bool transpose, uint64_t m0, uint64_t n0, uint64_t k0,
-                   uint64_t swizzle)
+                   const XTensor &bias, const XTensor &deqScale, bool transpose,
+                   uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzle)
 {
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
+    bool needExtraSpace = (bias.ptr != nullptr || deqScale.ptr != nullptr);
+
     if (m0 == MATMUL_M0_N0_K0_DEFAULT_VALUE || n0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
         k0 == MATMUL_M0_N0_K0_DEFAULT_VALUE) {
         m0 = ROUND_UP(m, 32);
         if (m0 > 128) {
             m0 = 128;
         }
-        n0 = (bias.ptr != nullptr) ? 128 : 256;
+        n0 = needExtraSpace ? 128 : 256;
         k0 = 4096 / XDtypeBit(weight.dtype);
 
         uint64_t mLoop = DIV_ROUND_UP(m, m0);
@@ -460,6 +466,8 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         uint64_t totalLoops = mLoop * nLoop;
         uint64_t lastLoops = totalLoops % rt.aicNum;
 
+        // If the data size is small, we should make a data tiling mode
+        // to ensure even loads on each AICore.
         if (totalLoops < static_cast<uint64_t>(3) * rt.aicNum &&
             (lastLoops != 0 && lastLoops < rt.aicNum / 2)) {
             if (n <= static_cast<uint64_t>(32) * rt.aicNum) {
@@ -479,33 +487,33 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         }
     }
 
+    // Ensure that no overflow occurs
+    // size of bias table: 1KB, size = n0 * sizeof(float/int32_t) = 4 * n0
+    // size of fixpipe: 2KB, size = n0 * sizeof(uint64_t) = 8 * n0
+    if (needExtraSpace && n0 > 256) {
+        n0 = 256;
+    }
+
     XlitePickSwizzle(m, n, k, &swizzle);
 
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
-                                     weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
+                                     weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16) {
-        if (bias.ptr != nullptr) {
-            XTensor &biasFp32 = rt.pool->GetTensor(bias.shape, FP32, DBG_LOC);
-            aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, bias.ptr, biasFp32.ptr,
-                                              bias.numel);
-            aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
-                                          k, weightNZ, transpose, m0, n0, k0, swizzle,
-                                          biasFp32.ptr);
-            rt.pool->PutTensor(biasFp32);
-        } else {
-            aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
-                                          k, weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
-        }
+        aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
+                                      k, weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
-                                 weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
+                                 weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
         XTensor &tmp = rt.pool->GetTensor(in.shape, FP32, DBG_LOC);
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, tmp.ptr, in.numel);
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k,
-                                 weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr);
+                                 weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
         rt.pool->PutTensor(tmp);
+    } else if (in.dtype == INT8 && weight.dtype == INT8) {
+        aclrtlaunch_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
+                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
@@ -883,6 +891,42 @@ void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &exp
     } else if (x.dtype == BF16) {
         aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1],
                                             calcLen);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
+}
+
+// out = int8(x / scale + offset), turn scale to 1/scale before calculation
+void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset, XTensor &out)
+{
+    uint32_t m = x.shape[0];
+    uint32_t n = x.shape[1];
+    if (x.dtype == BF16) {
+        aclrtlaunch_quant_bf16_to_i8_static(rt.aivNum, rt.stream, x.ptr, scale_reciprocal.ptr,
+                                            offset.ptr, out.ptr, m, n);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
+}
+
+void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out)
+{
+    uint64_t m = x.shape[0];
+    uint64_t n = x.shape[1];
+    if (x.dtype == BF16) {
+        aclrtlaunch_quant_bf16_to_i8_dynamic(rt.aivNum, rt.stream, x.ptr,
+                                             scale.ptr, out.ptr, m, n);
+    } else {
+        std::cerr << __func__ << ": unsupported!" << std::endl;
+    }
+}
+
+void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out,
+                    uint32_t m, uint32_t n, bool hasScale)
+{
+    if (in.dtype == FP16) {
+        aclrtlaunch_dequant_float16_t(rt.aivNum, rt.stream, in.ptr, scale.ptr,
+                                      out.ptr, m, n, hasScale);
     } else {
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }

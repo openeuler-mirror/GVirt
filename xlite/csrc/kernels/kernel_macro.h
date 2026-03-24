@@ -24,12 +24,16 @@ using namespace AscendC;
 #define VECTOR_MAX_BYTESIZE 256     // The maximum byte size of one repeat in vector
 #define VECTOR_MAX_NUM_OF_FP32 64   // The maximum num of float32 dtype in one vector repeat
 #define VECTOR_MAX_NUM_OF_FP16 128  // The maximum num of float16 dtype in one vector repeat
+#define VECTOR_MAX_NUM_OF_BF16 128  // The maximum num of bfloat16 dtype in one vector repeat
+#define VECTOR_MAX_NUM_OF_INT8 256  // The maximum num of int8 dtype in one vector repeat
 #define AIC_CACHE_LINE_SIZE 512
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 #define UB_SIZE 196608
 #define UB_BUF_ALIGN_SIZE 32  // The align size of UB buffer address
 #define PINGPONG_BUF_NUM 2
 #define C2_DATABLOCK 64  // The data block size of C2
+#define FIXPIPE_DATABLOCK 128  // The data block size of fixpipe
+#define FLOAT_MIN -3.4028235e+38
 
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst,
@@ -155,8 +159,8 @@ __aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalT
     }
 }
 
-template <typename Dtype>
-__aicore__ inline void CalMmad(const LocalTensor<float> &c, const LocalTensor<Dtype> &a,
+template <typename Dtype, typename MatDtype>
+__aicore__ inline void CalMmad(const LocalTensor<MatDtype> &c, const LocalTensor<Dtype> &a,
                                const LocalTensor<Dtype> &b, int m, int n, int k, bool init,
                                int unit = 0)
 {
@@ -169,9 +173,9 @@ __aicore__ inline void CalMmad(const LocalTensor<float> &c, const LocalTensor<Dt
     Mmad(c, a, b, params);
 }
 
-template <typename Dtype>
-__aicore__ inline void CalMmadWithBias(const LocalTensor<float> &c, const LocalTensor<Dtype> &a,
-                                       const LocalTensor<Dtype> &b, const LocalTensor<float> &bias,
+template <typename Dtype, typename MatDtype>
+__aicore__ inline void CalMmadWithBias(const LocalTensor<MatDtype> &c, const LocalTensor<Dtype> &a,
+                                       const LocalTensor<Dtype> &b, const LocalTensor<MatDtype> &bias,
                                        int m, int n, int k)
 {
     MmadParams params;
@@ -216,6 +220,61 @@ __aicore__ inline void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTenso
     } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
         mode = F322BF16;
     }
+    DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
+    SetFixpipeNz2ndFlag(1, 1, 1);
+    DataCopy(dst, src, param);
+}
+
+template <typename OutDtype>
+__aicore__ inline void CopyToGm(const GlobalTensor<OutDtype> &dst, const LocalTensor<int32_t> &src,
+                                int mSize, int nSize, int srcStride, int dstStride)
+{
+    QuantMode_t mode = NoQuant;
+    if constexpr (std::is_same<OutDtype, float16_t>::value) {
+        mode = DEQF16;
+        float quant = 1;
+        uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<int32_t*>(&quant));
+        SetFixpipePreQuantFlag(deqScalar);
+    }
+    DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
+    SetFixpipeNz2ndFlag(1, 1, 1);
+    DataCopy(dst, src, param);
+}
+
+template <typename MatDtype, typename OutDtype>
+__aicore__ inline void CopyToGmMatmul(const GlobalTensor<OutDtype> &dst,
+                                      const LocalTensor<MatDtype> &src,
+                                      int mSize, int nSize, int srcStride, int dstStride,
+                                      bool use_dequant, const LocalTensor<uint64_t> &deqScale)
+{
+    // QuantMode_t mode = DEQF16;
+    // float quant = 0.25;
+    // uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<int32_t*>(&quant));
+    // SetFixpipePreQuantFlag(deqScalar);
+    // DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
+    // SetFixpipeNz2ndFlag(1, 1, 1);
+    // PipeBarrier<PIPE_FIX>();
+    // DataCopy(dst, src, param);
+
+    if (!use_dequant) {
+        CopyToGm(dst, src, mSize, nSize, srcStride, dstStride);
+        return;
+    }
+
+    QuantMode_t mode = NoQuant;
+    if constexpr (std::is_same<MatDtype, float>::value) {
+        if constexpr (std::is_same<OutDtype, float16_t>::value) {
+            mode = F322F16;
+        } else if constexpr (std::is_same<OutDtype, bfloat16_t>::value) {
+            mode = F322BF16;
+        }
+    } else if constexpr (std::is_same<MatDtype, int32_t>::value) {
+        if constexpr (std::is_same<OutDtype, half>::value) {
+            mode = VDEQF16;
+        }
+    }
+    PipeBarrier<PIPE_FIX>();
+    SetFixPipeConfig(deqScale);
     DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
     SetFixpipeNz2ndFlag(1, 1, 1);
     DataCopy(dst, src, param);

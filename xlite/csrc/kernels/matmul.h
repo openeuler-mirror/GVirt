@@ -14,15 +14,18 @@
 #include "kernel_macro.h"
 using namespace AscendC;
 
-template <typename Dtype>
+// out = ((A * B) + bias) * deqScale
+// bias: int32 or float
+// deqScale: TF32 格式, 1 符号位, 8 指数位, 10 尾数位, 后 13 位不参与计算
+template <typename Dtype, typename MatDtype, typename OutDtype>
 class Matmul
 {
 public:
     __aicore__ inline Matmul()
     {
     }
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR bias, uint64_t m,
-                                uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose,
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR bias, GM_ADDR deqScale,
+                                uint64_t m, uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose,
                                 uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl,
                                 uint32_t curBlock = 0, uint32_t curCount = 0, uint32_t remain = 0)
     {
@@ -36,19 +39,24 @@ public:
         this->swizzleDirection = (swizzl & 0xFF);
         this->aGmBuf.SetGlobalBuffer((__gm__ Dtype *)x);
         this->bGmBuf.SetGlobalBuffer((__gm__ Dtype *)y);
-        this->cGmBuf.SetGlobalBuffer((__gm__ Dtype *)z);
+        this->biasGmBuf.SetGlobalBuffer((__gm__ MatDtype *)bias);
+        this->deqScaleGmBuf.SetGlobalBuffer((__gm__ uint64_t *)deqScale);
+        this->cGmBuf.SetGlobalBuffer((__gm__ OutDtype *)z);
         this->m = m;
         this->n = n;
         this->k = k;
         this->nz = nz;
         this->transpose = transpose;
 
+        hasBias = (bias != nullptr);
+        hasDeqScale = (deqScale != nullptr);
+
         if (m0 == (uint64_t)-1) {
             m0 = ROUND_UP(m, 32);
             if (m0 > 128) {
                 m0 = 128;
             }
-            n0 = (bias != nullptr) ? 128 : 256;
+            n0 = (hasBias || hasDeqScale) ? 128 : 256;
             k0 = 512 / sizeof(Dtype);
         }
 
@@ -61,21 +69,18 @@ public:
 
         this->mBlockSize = 16;
         this->nBlockSize = 16;
-        if constexpr (std::is_same<Dtype, float>::value) {
-            this->kBlockSize = 8;
-        } else if constexpr (std::is_same<Dtype, float16_t>::value) {
-            this->kBlockSize = 16;
-        } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            this->kBlockSize = 16;
-        }
+        this->kBlockSize = 32 / sizeof(Dtype);
 
         kDtileSize = k0 << 1;
         kQtileSize = k0 >> 2;
 
         int l1ATileBytes = m0 * kDtileSize * sizeof(Dtype);
         int l1BTileBytes = n0 * k0 * sizeof(Dtype);
+        int l1BiasTileBytes = n0 * sizeof(MatDtype);
+        int l1DeqScaleTileBytes = n0 * sizeof(uint64_t);
         int l0ATileBytes = m0 * kQtileSize * sizeof(Dtype);
         int l0BTileBytes = n0 * kQtileSize * sizeof(Dtype);
+        int l0BiasTileBytes = n0 * sizeof(MatDtype);
         int l0CTileBytes = m0 * n0 * sizeof(Dtype);
         uint64_t off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
@@ -88,20 +93,15 @@ public:
             l1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += l1BTileBytes;
         }
-        if (bias != nullptr) {
-            hasBias = true;
-            if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-                this->biasGmBufFp32.SetGlobalBuffer((__gm__ float *)bias);
-                l1BiasBufFp32.address_.logicPos = static_cast<uint8_t>(TPosition::C1);
-                l1BiasBufFp32.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            } else {
-                this->biasGmBuf.SetGlobalBuffer((__gm__ Dtype *)bias);
-                l1BiasBuf.address_.logicPos = static_cast<uint8_t>(TPosition::C1);
-                l1BiasBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            }
-            off = 0;
-            l0BiasBuf.address_.logicPos = static_cast<uint8_t>(TPosition::C2);
-            l0BiasBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        if (hasBias) {
+            l1BiasBuf.address_.logicPos = static_cast<uint8_t>(TPosition::C1);
+            l1BiasBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += l1BiasTileBytes;
+        }
+        if (hasDeqScale) {
+            l1DeqScaleBuf.address_.logicPos = static_cast<uint8_t>(TPosition::C1);
+            l1DeqScaleBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += l1DeqScaleTileBytes;
         }
         off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
@@ -116,6 +116,16 @@ public:
             off += l0BTileBytes;
         }
         off = 0;
+        if (hasBias) {
+            l0BiasBuf.address_.logicPos = static_cast<uint8_t>(TPosition::C2);
+            l0BiasBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off = 0;
+        }
+        if (hasDeqScale) {
+            fixpipeBuf.address_.logicPos = static_cast<uint8_t>(TPosition::C2PIPE2GM);
+            fixpipeBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off = 0;
+        }
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
     }
@@ -179,6 +189,7 @@ public:
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+        SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
 
         int nLoop = DIV_ROUND_UP(n, n0);
@@ -210,30 +221,36 @@ public:
             int nActualBlockPad = ROUND_UP(nActual, nBlockSize);
             int nActualBlockNum = DIV_ROUND_UP(nActual, nBlockSize);
 
-            GlobalTensor<Dtype> outGm = cGmBuf[mOffset * n + nOffset];
+            GlobalTensor<OutDtype> outGm = cGmBuf[mOffset * n + nOffset];
 
             if (hasBias) {
                 // Bias GM -> L1
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
-                if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-                    DataCopy(l1BiasBufFp32, biasGmBufFp32[nOffset], nActualBlockPad);
-                } else {
-                    DataCopy(l1BiasBuf, biasGmBuf[nOffset], nActualBlockPad);
-                }
+                DataCopy(l1BiasBuf, biasGmBuf[nOffset], nActualBlockPad);
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
                 WaitFlag<HardEvent::M_MTE1>(EVENT_ID4);
                 // Bias L1 -> L0
                 // C2(Bias Table Buffer) Size is 1KB
                 // If dst is in C2(Bias Table Buffer), the size of DataBlock is 64B
-                if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-                    DataCopy(l0BiasBuf, l1BiasBufFp32,
-                             {1, (uint16_t)(nActualBlockPad * sizeof(float) / C2_DATABLOCK), 0, 0});
-                } else {
-                    DataCopy(l0BiasBuf, l1BiasBuf,
-                             {1, (uint16_t)(nActualBlockPad * sizeof(Dtype) / C2_DATABLOCK), 0, 0});
-                }
+                DataCopy(l0BiasBuf, l1BiasBuf,
+                         {1, (uint16_t)(nActualBlockPad * sizeof(MatDtype) / C2_DATABLOCK), 0, 0});
+
                 SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+            }
+            if (hasDeqScale) {
+                // DeqScale GM -> L1
+                WaitFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
+                DataCopy(l1DeqScaleBuf, deqScaleGmBuf[nOffset], nActualBlockPad);
+                SetFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
+
+                // DeqScale L1 -> fbuf
+                WaitFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
+                // If dst is in C2PIPE2GM(fixpipe Buffer), the size of DataBlock is 128B
+                // fixpipe硬件要求：以uint64_t存储fp32，高位为0，低位为fp32格式的二进制值
+                // Notice: DataCopy from L1 to fbuf is belong to fixpipe barrier
+                DataCopy(fixpipeBuf, l1DeqScaleBuf,
+                         {1, (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)), FIXPIPE_DATABLOCK)), 0, 0});
             }
 
             WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
@@ -322,8 +339,11 @@ public:
                 /* Mmad L0A L0B -> L0C */
                 SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
-                SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
-                WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
+                if (hasBias) {
+                    SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
+                    WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
+                }
+
                 PipeBarrier<PIPE_M>();
                 if (hasBias && kIdx == 0) {
                     CalMmadWithBias(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], l0BiasBuf,
@@ -348,11 +368,15 @@ public:
             /* C L0C -> GM */
             SetFlag<HardEvent::M_FIX>(EVENT_ID0);
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-            CopyToGm(outGm, l0cBuf, mActual, nActual, mActualBlockPad, n);
+            CopyToGmMatmul(outGm, l0cBuf, mActual, nActual, mActualBlockPad, n, hasDeqScale, fixpipeBuf);
+            if (hasDeqScale) {
+                SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
+            }
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         }  // M * N
 
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
@@ -366,17 +390,18 @@ public:
 private:
     GlobalTensor<Dtype> aGmBuf;
     GlobalTensor<Dtype> bGmBuf;
-    GlobalTensor<Dtype> cGmBuf;
-    GlobalTensor<Dtype> biasGmBuf;
-    GlobalTensor<float> biasGmBufFp32;
+    GlobalTensor<OutDtype> cGmBuf;
+    GlobalTensor<MatDtype> biasGmBuf;
+    GlobalTensor<uint64_t> deqScaleGmBuf;
     LocalTensor<Dtype> l1aBuf[PINGPONG_BUF_NUM];
     LocalTensor<Dtype> l1bBuf[PINGPONG_BUF_NUM];
+    LocalTensor<MatDtype> l1BiasBuf;
+    LocalTensor<uint64_t> l1DeqScaleBuf;
     LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];
     LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];
-    LocalTensor<float> l0cBuf;
-    LocalTensor<Dtype> l1BiasBuf;
-    LocalTensor<float> l1BiasBufFp32;
-    LocalTensor<float> l0BiasBuf;
+    LocalTensor<MatDtype> l0BiasBuf;
+    LocalTensor<uint64_t> fixpipeBuf;
+    LocalTensor<MatDtype> l0cBuf;
 
     uint64_t m;
     uint64_t n;
@@ -397,16 +422,25 @@ private:
     uint32_t curCount;
     uint32_t remain;
     bool hasBias = false;
+    bool hasDeqScale = false;
 };
 
-#define MATMUL_FUNC_DEFINE(dtype)                                                                 \
-    extern "C" __global__ __aicore__ void matmul_##dtype(                                         \
-        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,         \
-        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl, GM_ADDR bias) \
-    {                                                                                             \
-        Matmul<dtype> op;                                                                         \
-        op.Init(x, y, z, bias, m, n, k, nz, transpose, m0, n0, k0, swizzl);                       \
-        op.Run();                                                                                 \
-    }
+#define MATMUL_FUNC_DEFINE(dtype)                                                               \
+    extern "C" __global__ __aicore__ void matmul_##dtype(                                       \
+        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,       \
+        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl,             \
+        GM_ADDR bias, GM_ADDR deqScale)                                                         \
+    {                                                                                           \
+        if constexpr (std::is_same<dtype, int8_t>::value) {                                     \
+            Matmul<dtype, int32_t, half> op;                                               \
+            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);       \
+            op.Run();                                                                           \
+        } else {                                                                                \
+            Matmul<dtype, float, dtype> op;                                                     \
+            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);       \
+            op.Run();                                                                           \
+        }                                                                                       \
+    }                                                                                           \
+
 
 #endif

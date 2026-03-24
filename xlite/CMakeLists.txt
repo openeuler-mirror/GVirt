@@ -47,6 +47,7 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rmsnorm_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_and_cache_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_and_mul_bfloat16_t.cpp
@@ -56,6 +57,8 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/attention_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_complex_and_cache_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/flash_attention_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/quant_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/quant_dyn_bfloat16_t.cpp
 )
 
 # xlite_kernels_f16_${RUN_MODE}
@@ -71,6 +74,7 @@ file(GLOB KERNEL_FILES_F16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/attention_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/rope_complex_and_cache_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/flash_attention_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/dequant_float16_t.cpp
 )
 
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
