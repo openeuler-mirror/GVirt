@@ -889,7 +889,6 @@ public:
                        queryTaskOffset + queryTaskLen, nWorkStart, nWorkStart + nWorkCurCore,
                        kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
 #endif
-                // TODO save max[curr][nWorkStart], sum[curr][nWorkStart]
                 RunAivSoftmaxPingPong<Dtype>(
                     (__gm__ Dtype *)qk[curr][nWorkStart * TILESIZE_OF_CACHED_KV].GetPhyAddr(),
                     nWorkCurCore, TILESIZE_OF_CACHED_KV, actualCalcSoftmaxLen, outN,
