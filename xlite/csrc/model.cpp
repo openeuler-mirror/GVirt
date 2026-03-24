@@ -751,15 +751,7 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                                      std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                      XTensor &output)
 {
-    if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": check runtime communication setting failed");
-    }
-    if (!rt.pool) {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": xlite runtime's tensor pool not inited");
-    }
-
+    CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxM, _c.maxBatch, _c.maxSeqLen, _c.blockSize, _c.attnType);
     if (_c.defTpSize > 1 && output.shape[0] >= rt.commOptimizeLen) {
         rt.enableCommOptimize = true;
@@ -784,15 +776,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                      std::vector<std::pair<XTensor, XTensor>> &kvCache,
                      std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output)
 {
-    if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": check runtime communication setting failed");
-    }
-    if (!rt.pool) {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": xlite runtime's tensor pool not inited");
-    }
-
+    CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxM, _c.maxBatch, _c.maxSeqLen, _c.blockSize, _c.attnType);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
 }
@@ -817,21 +801,36 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
                                  XTensor &output)
 {
     uint32_t m = input.shape[0];
-
-    if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": check runtime communication setting failed");
-    }
-    if (!rt.pool) {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": xlite runtime's tensor pool not inited");
-    }
+    CheckForwardParam(rt, kvCache);
 
     XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, embed.dtype, DBG_LOC);
     rt.PrepareAttn(attnMeta, _c.maxM, _c.maxBatch, _c.maxSeqLen, _c.blockSize, _c.attnType);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, h);
     ForwardGetLogits(rt, h, output);
     rt.pool->PutTensor(h);
+}
+
+void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::pair<XTensor, XTensor>> &kvCache)
+{
+    if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": check runtime communication setting failed");
+    }
+
+    if (!rt.pool) {
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": xlite runtime's tensor pool not inited");
+    }
+
+    if (kvCache[0].first.shape[1] != _c.blockSize || kvCache[0].second.shape[1] != _c.blockSize ||
+        kvCache[0].first.shape[2] != _c.nKvHeads || kvCache[0].second.shape[2] != _c.nKvHeads ||
+        (_c.attnType == XMODEL_ATTN_MHA && kvCache[0].first.shape[3] != _c.headDim) ||
+        (_c.attnType == XMODEL_ATTN_MLA && (kvCache[0].first.shape[3] != _c.kvLoraRank ||
+                                            kvCache[0].second.shape[3] != _c.ropeHeadDim))) {
+        throw std::runtime_error(
+            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+            ": kv cache's shape not match [block_num, block_size, kv_head_num, head_size]");
+    }
 }
 
 size_t XModel::GetTensorPoolSize(int dbg)

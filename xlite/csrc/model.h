@@ -175,6 +175,7 @@ private:
                                    std::vector<std::pair<XTensor, XTensor>> &kvCache,
                                    std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                    XTensor &output);
+    void CheckForwardParam(XRuntime &rt, std::vector<std::pair<XTensor, XTensor>> &kvCache);
     struct XModelConfig _c;
     uint32_t _rankId;
 

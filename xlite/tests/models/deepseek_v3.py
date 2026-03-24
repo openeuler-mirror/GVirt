@@ -898,6 +898,7 @@ class DeepSeek_V3(nn.Module):
         config.hidden_size = args.dim
         config.n_layers = args.n_layers
         config.n_heads = args.n_heads
+        config.n_kv_heads = 1
         config.nope_head_dim = args.qk_nope_head_dim
         config.rope_head_dim = args.qk_rope_head_dim
         config.v_head_dim = args.v_head_dim
@@ -969,8 +970,8 @@ class DeepSeek_V3(nn.Module):
     def init_xlite_kvcache(self, args: ModelArgs):
         block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
         head_num = 1
-        self.xlite_kv_cache = [(torch.zeros(block_num, head_num, block_size, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
-                                torch.zeros(block_num, head_num, block_size, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'))
+        self.xlite_kv_cache = [(torch.zeros(block_num, block_size, head_num, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
+                                torch.zeros(block_num, block_size, head_num, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'))
                                for _ in range(args.n_layers)]
         kv_size = (block_num * head_num * block_size * (args.kv_lora_rank + args.qk_rope_head_dim) *
                    self.xlite_kv_cache[0][0].element_size() * args.n_layers)
