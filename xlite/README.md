@@ -31,9 +31,15 @@ docker run --name xlite -it --rm --privileged -v /usr/local/Ascend/driver:/usr/l
 # 安装依赖
 pip install -r requirements-dev.txt
 ```
-该容器可用于编译和运行xlite。
-arm容器使用[openeuler_torch_ascend_arm.Dockerfile](docker/openeuler_torch_ascend_arm.Dockerfile)创建。
-x86容器使用[openeuler_torch_ascend_x86.Dockerfile](docker/openeuler_torch_ascend_x86.Dockerfile)创建。
+该容器可用于编译和运行xlite，详细镜像见下表：
+
+| 硬件型号 | CPU架构 | 容器镜像 | Dockerfile |
+|---------|---------|---------|-----------|
+| Atlas 800I/T A2 | aarch64 | hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20251219 | [openeuler_torch_ascend_arm.Dockerfile](docker/openeuler_torch_ascend_arm.Dockerfile) |
+| Atlas 800I/T A2 | x86_64 | hub.oepkgs.net/oedeploy/openeuler/x86_64/gvirt:20251219 | [openeuler_torch_ascend_x86.Dockerfile](docker/openeuler_torch_ascend_x86.Dockerfile) |
+| Atlas 800I/T A3 | aarch64 | hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20260324 | [openeuler_torch_ascend_a3_arm.Dockerfile](docker/openeuler_torch_ascend_a3_arm.Dockerfile) |
+| Atlas 800I/T A3 | x86_64 | hub.oepkgs.net/oedeploy/openeuler/x86_64/gvirt:20260324 | [openeuler_torch_ascend_a3_x86.Dockerfile](docker/openeuler_torch_ascend_a3_x86.Dockerfile) |
+
 
 2. **运行推理**
 ```
