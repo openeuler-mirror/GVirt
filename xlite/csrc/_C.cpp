@@ -714,7 +714,6 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
                               _output, _cumPromptLens, _lens, _cachedLens, _blockTables, nHeads,
                               nKvHeads, headDim, blockSize, batch, maxNumBlock);
         rt.Synchronize();
-        sync.Print("Flash Attention Sync", 1, rt.aivNum);
         rt.pool->PutTensor(sync);
         rt.pool->PutTensor(lastSum);
         rt.pool->PutTensor(lastMax);
