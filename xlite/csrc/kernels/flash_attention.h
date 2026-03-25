@@ -388,48 +388,37 @@ public:
                                      subBlockIdx * MAX_M0);
         this->sum[1].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 * 2 +
                                      subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
-        this->prevSv[0].SetGlobalBuffer(((__gm__ Dtype *)sv) + prevBlockIdx * MAX_M0 * headSize);
-        this->prevSv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) + prevBlockIdx * MAX_M0 * headSize +
-                                        block_num * MAX_M0 * headSize);
-        this->prevMax[0].SetGlobalBuffer(((__gm__ float *)max) + prevBlockIdx * MAX_M0 * 2 +
-                                         subBlockIdx * MAX_M0);
-        this->prevMax[1].SetGlobalBuffer(((__gm__ float *)max) + prevBlockIdx * MAX_M0 * 2 +
-                                         subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
-        this->prevSum[0].SetGlobalBuffer(((__gm__ float *)sum) + prevBlockIdx * MAX_M0 * 2 +
-                                         subBlockIdx * MAX_M0);
-        this->prevSum[1].SetGlobalBuffer(((__gm__ float *)sum) + prevBlockIdx * MAX_M0 * 2 +
-                                         subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
         this->lastMax.SetGlobalBuffer((__gm__ float *)lastMax);
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
         this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * 2 + subBlockIdx;
 
         // 分配L1/L0
-        uint64_t l1ATileBytes =
+        uint64_t aTileBytes =
             MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
-        uint64_t l1BTileBytes = blockSize * headSize * sizeof(Dtype);
+        uint64_t bTileBytes = blockSize * headSize * sizeof(Dtype);
         uint64_t off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             l1aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l1ATileBytes;
+            off += aTileBytes;
         }
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B1);
             l1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l1BTileBytes;
+            off += bTileBytes;
         }
         off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
             l0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l1ATileBytes;
+            off += aTileBytes;
         }
         off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
             l0bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l1BTileBytes;
+            off += bTileBytes;
         }
         off = 0;
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
@@ -1008,9 +997,6 @@ private:
     GlobalTensor<Dtype> sv[PINGPONG_BUF_NUM];
     GlobalTensor<float> max[PINGPONG_BUF_NUM];
     GlobalTensor<float> sum[PINGPONG_BUF_NUM];
-    GlobalTensor<Dtype> prevSv[PINGPONG_BUF_NUM];
-    GlobalTensor<float> prevMax[PINGPONG_BUF_NUM];
-    GlobalTensor<float> prevSum[PINGPONG_BUF_NUM];
     GlobalTensor<float> lastMax;
     GlobalTensor<float> lastSum;
     GlobalTensor<Dtype> output;
