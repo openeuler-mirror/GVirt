@@ -1,9 +1,10 @@
 /*
- * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#ifndef _XLITE_CCL_PARAM_H_
-#define _XLITE_CCL_PARAM_H_
+#ifndef _XLITE_KERNEL_PARAM_H_
+#define _XLITE_KERNEL_PARAM_H_
 
+// ccl kernel param
 #define XLITE_CCL_MAX_RANK_SIZE 32
 #define XLITE_IPC_MEM_FLAG_OFFSET 4096
 #define COPY_SIZE 32768
@@ -20,5 +21,8 @@ struct XcclParam {
     uint64_t ipcMems[XLITE_CCL_MAX_RANK_SIZE];
     uint64_t ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE];
 };
+
+// flash attention kernel param
+#define TILESIZE_OF_CACHED_KV 8192
 
 #endif

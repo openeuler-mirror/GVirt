@@ -6,8 +6,7 @@
 
 #include "base.h"
 #include "runtime.h"
-#include "kernels/ccl_param.h"
-#include "kernels/flash_attention_param.h"
+#include "kernels/kernel_param.h"
 
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 #define MATMUL_SWIZZLE_DEFAULT_VALUE (0x600)

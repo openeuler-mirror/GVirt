@@ -8,7 +8,7 @@
 #include <memory>
 #include "ascend.h"
 #include "ccl.h"
-#include "kernels/ccl_param.h"
+#include "kernels/kernel_param.h"
 #include "sock.h"
 
 #define XLITE_CCL_IPC_MEM_SIZE 2465792  // 2M

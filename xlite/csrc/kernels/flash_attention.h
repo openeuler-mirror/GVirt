@@ -4,7 +4,7 @@
 #pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
-#include "flash_attention_param.h"
+#include "kernel_param.h"
 #include "softmax_attn_aiv.h"
 
 #define MAX_M0 128
