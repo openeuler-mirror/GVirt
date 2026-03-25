@@ -176,7 +176,7 @@ class PythonChecker:
         
         # Check syntax for all files
         for file_path in python_files:
-            print(f"  Checking {file_path.relative_to(self.root_dir)}", end='\r')
+            print(f"\033[K  Checking {file_path.relative_to(self.root_dir)}", end='\r')
             if not self.check_syntax(file_path):
                 all_passed = False
 

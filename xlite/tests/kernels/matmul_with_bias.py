@@ -25,7 +25,7 @@ for weight_nz in [False, True]:
                     y = torch.randn(n, k, dtype=dtype, device="npu:0")
                     y_standard = y.clone()
                     z = torch.zeros(m, n, dtype=dtype, device="npu:0")
-                    bias = torch.randn(n, dtype=dtype, device="npu:0")
+                    bias = torch.randn(n, dtype=torch.float, device="npu:0")
 
                     standard = F.linear(x, y_standard, bias)
 

@@ -589,25 +589,25 @@ void Print(at::Tensor &x)
 void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weightNZ,
             bool transpose)
 {
-    XTensor _x, _y, _z, _bias;
+    XTensor _x, _y, _z, _bias, _deqScale;
 
     InitXTensor(_x, x);
     InitXTensor(_y, y);
     InitXTensor(_z, z);
-    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, transpose);
+    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
     rt.Synchronize();
 }
 
 void MatmulWithBias(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, at::Tensor &bias,
                     bool weightNZ)
 {
-    XTensor _x, _y, _z, _bias;
+    XTensor _x, _y, _z, _bias, _deqSacle;
 
     InitXTensor(_x, x);
     InitXTensor(_y, y);
     InitXTensor(_z, z);
     InitXTensor(_bias, bias);
-    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias);
+    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqSacle);
     rt.Synchronize();
 }
 
@@ -871,6 +871,52 @@ void RopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_
     rt.Synchronize();
 }
 
+void Quant(XRuntime &rt, at::Tensor &x, at::Tensor &scaleReciprocal, at::Tensor &offset,
+           at::Tensor &out)
+{
+    XTensor _x, _scaleRec, _offset, _out;
+    InitXTensor(_x, x);
+    InitXTensor(_scaleRec, scaleReciprocal);
+    InitXTensor(_offset, offset);
+    InitXTensor(_out, out);
+    XliteOpQuant(rt, _x, _scaleRec, _offset, _out);
+    rt.Synchronize();
+}
+
+void QuantDyn(XRuntime &rt, at::Tensor &x, at::Tensor &scale, at::Tensor &out)
+{
+    XTensor _x, _scale, _out;
+    InitXTensor(_x, x);
+    InitXTensor(_scale, scale);
+    InitXTensor(_out, out);
+    XliteOpQuantDyn(rt, _x, _scale, _out);
+    rt.Synchronize();
+}
+
+void MatmulDeQuant(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &bias,
+                   at::Tensor &deqScale, at::Tensor &z, bool weightNZ, bool transpose)
+{
+    XTensor _x, _y, _z, _bias, _deqScale;
+
+    InitXTensor(_x, x);
+    InitXTensor(_y, y);
+    InitXTensor(_bias, bias);
+    InitXTensor(_deqScale, deqScale);
+    InitXTensor(_z, z);
+    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
+    rt.Synchronize();
+}
+
+void DeQuant(XRuntime &rt, at::Tensor &in, at::Tensor &scale, at::Tensor &out, bool hasScale)
+{
+    XTensor _in, _scale, _out;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    XliteOpDeQuant(rt, _in, _scale, _out, hasScale);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -1051,6 +1097,12 @@ PYBIND11_MODULE(_C, m)
           py::arg("n_local_heads"), py::arg("step_dim"), py::arg("rope_dim"),
           py::arg("input_with_r"), py::arg("freqs"), py::arg("position"), py::arg("v_gather"),
           py::arg("output_pe"), py::arg("rope_type"));
+    m.def("quant", &Quant);
+    m.def("quant_dynamic", &QuantDyn);
+    m.def("matmul_dequant", &MatmulDeQuant, "matmul_dequant", py::arg("rt"), py::arg("x"),
+          py::arg("y"), py::arg("bias"), py::arg("deqScale"), py::arg("z"),
+          py::arg("weight_nz") = false, py::arg("transpose") = false);
+    m.def("dequant", &DeQuant);
 
     // funcs
     m.def("print", &Print);

@@ -1,7 +1,7 @@
 /*
  * @file kernel_macro.h
  *
- * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (C) 2025-2026. Huawei Technologies Co., Ltd. All rights reserved.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,12 +24,16 @@ using namespace AscendC;
 #define VECTOR_MAX_BYTESIZE 256     // The maximum byte size of one repeat in vector
 #define VECTOR_MAX_NUM_OF_FP32 64   // The maximum num of float32 dtype in one vector repeat
 #define VECTOR_MAX_NUM_OF_FP16 128  // The maximum num of float16 dtype in one vector repeat
+#define VECTOR_MAX_NUM_OF_BF16 128  // The maximum num of bfloat16 dtype in one vector repeat
+#define VECTOR_MAX_NUM_OF_INT8 256  // The maximum num of int8 dtype in one vector repeat
 #define AIC_CACHE_LINE_SIZE 512
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 #define UB_SIZE 196608
 #define UB_BUF_ALIGN_SIZE 32  // The align size of UB buffer address
 #define PINGPONG_BUF_NUM 2
-#define C2_DATABLOCK 64  // The data block size of C2
+#define C2_DATABLOCK 64        // The data block size of C2
+#define FIXPIPE_DATABLOCK 128  // The data block size of fixpipe
+#define FLOAT_MIN -3.4028235e+38
 
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst,
@@ -155,8 +159,8 @@ __aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalT
     }
 }
 
-template <typename Dtype>
-__aicore__ inline void CalMmad(const LocalTensor<float> &c, const LocalTensor<Dtype> &a,
+template <typename Dtype, typename MatDtype>
+__aicore__ inline void CalMmad(const LocalTensor<MatDtype> &c, const LocalTensor<Dtype> &a,
                                const LocalTensor<Dtype> &b, int m, int n, int k, bool init,
                                int unit = 0)
 {
@@ -169,10 +173,10 @@ __aicore__ inline void CalMmad(const LocalTensor<float> &c, const LocalTensor<Dt
     Mmad(c, a, b, params);
 }
 
-template <typename Dtype>
-__aicore__ inline void CalMmadWithBias(const LocalTensor<float> &c, const LocalTensor<Dtype> &a,
-                                       const LocalTensor<Dtype> &b, const LocalTensor<float> &bias,
-                                       int m, int n, int k)
+template <typename Dtype, typename MatDtype>
+__aicore__ inline void CalMmadWithBias(const LocalTensor<MatDtype> &c, const LocalTensor<Dtype> &a,
+                                       const LocalTensor<Dtype> &b,
+                                       const LocalTensor<MatDtype> &bias, int m, int n, int k)
 {
     MmadParams params;
     params.m = m;
@@ -221,6 +225,51 @@ __aicore__ inline void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTenso
     DataCopy(dst, src, param);
 }
 
+template <typename OutDtype>
+__aicore__ inline void CopyToGm(const GlobalTensor<OutDtype> &dst, const LocalTensor<int32_t> &src,
+                                int mSize, int nSize, int srcStride, int dstStride)
+{
+    QuantMode_t mode = NoQuant;
+    if constexpr (std::is_same<OutDtype, float16_t>::value) {
+        mode = DEQF16;
+        float quant = 1;
+        uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<int32_t *>(&quant));
+        SetFixpipePreQuantFlag(deqScalar);
+    }
+    DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
+    SetFixpipeNz2ndFlag(1, 1, 1);
+    DataCopy(dst, src, param);
+}
+
+template <typename MatDtype, typename OutDtype>
+__aicore__ inline void CopyToGmWithDequant(const GlobalTensor<OutDtype> &dst,
+                                           const LocalTensor<MatDtype> &src, int mSize, int nSize,
+                                           int srcStride, int dstStride, bool use_dequant,
+                                           const LocalTensor<uint64_t> &deqScale)
+{
+    if (!use_dequant) {
+        CopyToGm(dst, src, mSize, nSize, srcStride, dstStride);
+        return;
+    }
+
+    QuantMode_t mode = NoQuant;
+    if constexpr (std::is_same<MatDtype, float>::value) {
+        if constexpr (std::is_same<OutDtype, float16_t>::value) {
+            mode = F322F16;
+        } else if constexpr (std::is_same<OutDtype, bfloat16_t>::value) {
+            mode = F322BF16;
+        }
+    } else if constexpr (std::is_same<MatDtype, int32_t>::value) {
+        if constexpr (std::is_same<OutDtype, half>::value) {
+            mode = VDEQF16;
+        }
+    }
+    SetFixPipeConfig(deqScale);
+    DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
+    SetFixpipeNz2ndFlag(1, 1, 1);
+    DataCopy(dst, src, param);
+}
+
 inline __aicore__ void DataCacheCleanAndInvalid(__gm__ void *__restrict__ gm)
 {
     __asm__ __volatile__("");
@@ -229,14 +278,11 @@ inline __aicore__ void DataCacheCleanAndInvalid(__gm__ void *__restrict__ gm)
 }
 
 #if __DAV_C220_VEC__
+// make sure that: len != 0
 inline __aicore__ void SetMask(int32_t len)
 {
-    uint64_t mask = 0;
-    uint64_t one = 1;
     uint64_t temp = len % 64;
-    for (int64_t i = 0; i < temp; i++) {
-        mask |= one << i;
-    }
+    uint64_t mask = ((uint64_t)1 << temp) - 1;
 
     if (len == 128) {
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -247,29 +293,22 @@ inline __aicore__ void SetMask(int32_t len)
     }
 }
 
-const uint64_t ONE_IN_HIGHBIT = 1L << 63;
+// make sure that: len != 0
 inline __aicore__ void SetMaskFromHighBit(int32_t high, int32_t len)
 {
-    uint64_t mask = 0;
     uint64_t temp = len % 64;
-    for (int64_t i = 0; i < temp; i++) {
-        mask |= ONE_IN_HIGHBIT >> i;
-    }
+    uint64_t mask = ~(((uint64_t)1 << (64 - temp)) - 1);
 
     if (high == 128) {
-        if (len == 128) {
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        } else if (len >= 64) {
+        // If dtype size is 2 bytes, all 128 bits of mask take effect.
+        if (len > 64) {
             set_vector_mask((uint64_t)-1, mask);
         } else {
             set_vector_mask(mask, 0x0);
         }
     } else if (high == 64) {
-        if (len == 64) {
-            set_vector_mask(0, (uint64_t)-1);
-        } else {
-            set_vector_mask(0, mask);
-        }
+        // If dtype size is 4 bytes, only lower 64 bits take effect.
+        set_vector_mask(0, mask);
     }
 }
 
