@@ -1,6 +1,8 @@
 export FORWARD_BACKEND=xlite
 export HCCL_DETERMINISTIC=true
 export LCCL_DETERMINISTIC=true
+models_base_path=/mnt/nvme1n1/models
+test_config_path=tests/test_config.json
 
 function run_qwen2.5_0.5B()
 {
@@ -17,8 +19,10 @@ function run_qwen2.5_0.5B()
         "tie_word_embeddings": true,
         "max_batch_size": 1,
         "max_seq_len": 1024
-    }' > tests/test_config.json
-    python tests/generate.py --model qwen2 --ckpt-path /mnt/nvme0n1/models/Qwen2.5-0.5B-Instruct/ --config tests/test_config.json --interactive
+    }' > $test_config_path
+    python tests/generate.py --model qwen2 --ckpt-path $models_base_path/Qwen2.5-0.5B-Instruct/ --config $test_config_path --interactive
+
+    rm $test_config_path
 }
 
 function run_qwen2_32B()
@@ -35,11 +39,13 @@ function run_qwen2_32B()
         "dtype": "bfloat16",
         "max_batch_size": 1,
         "max_seq_len": 1024
-    }' > tests/test_config.json
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen2 --ckpt-path /mnt/nvme0n1/models/qwen32b/ --config tests/test_config.json --interactive
+    }' > $test_config_path
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen2 --ckpt-path $models_base_path/qwen32b/ --config $test_config_path --interactive
 
     # batch input
-    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen --ckpt-path /mnt/nvme0n1/models/qwen32b/ --config tests/test_config.json --input tests/test.json
+    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen --ckpt-path $models_base_path/qwen32b/ --config $test_config_path --input tests/test.json
+
+    rm $test_config_path
 }
 
 function run_qwen3_32B()
@@ -57,11 +63,13 @@ function run_qwen3_32B()
         "dtype": "bfloat16",
         "max_batch_size": 1,
         "max_seq_len": 1024
-    }' > tests/test_config.json
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-32B/ --config tests/test_config.json --interactive
+    }' > $test_config_path
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path $models_base_path/Qwen3-32B/ --config $test_config_path --interactive
 
     # batch input
-    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-32B/ --config tests/test_config.json --input tests/test.json
+    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path $models_base_path/Qwen3-32B/ --config $test_config_path --input tests/test.json
+
+    rm $test_config_path
 }
 
 function run_qwen3_moe_30B()
@@ -86,8 +94,9 @@ function run_qwen3_moe_30B()
         "dtype": "bfloat16",
         "max_batch_size": 1,
         "max_seq_len": 1024
-    }' > tests/test_config.json
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path /mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507/ --config tests/test_config.json --interactive
+    }' > $test_config_path
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path $models_base_path/Qwen3-30B-A3B-Instruct-2507/ --config $test_config_path --interactive
+    rm $test_config_path
 }
 
 function run_llama_7B()
@@ -103,8 +112,9 @@ function run_llama_7B()
         "dtype": "float16",
         "max_batch_size": 1,
         "max_seq_len": 1024
-    }' > tests/test_config.json
-    python tests/generate.py --model llama --ckpt-path /mnt/nvme0n1/models/Llama-2-7b-chat-hf/ --config tests/test_config.json --interactive
+    }' > $test_config_path
+    python tests/generate.py --model llama --ckpt-path $models_base_path/Llama-2-7b-chat-hf/ --config $test_config_path --interactive
+    rm $test_config_path
 }
 
 function run_llama_13B()
@@ -120,8 +130,9 @@ function run_llama_13B()
         "dtype": "float16",
         "max_batch_size": 1,
         "max_seq_len": 1024
-    }' > tests/test_config.json
-    torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path /mnt/nvme0n1/models/Llama2-Chinese-13b-Chat/ --config tests/test_config.json --interactive
+    }' > $test_config_path
+    torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/Llama2-Chinese-13b-Chat/ --config $test_config_path --interactive
+    rm $test_config_path
 }
 
 function run_llama_34B()
@@ -137,8 +148,9 @@ function run_llama_34B()
         "dtype": "bfloat16",
         "max_batch_size": 1,
         "max_seq_len": 1024
-    }' > tests/test_config.json
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path /mnt/nvme0n1/models/codellama34B/ --config tests/test_config.json --interactive
+    }' > $test_config_path
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/codellama34B/ --config $test_config_path --interactive
+    rm $test_config_path
 }
 
 function run_deepseek()
@@ -167,15 +179,17 @@ function run_deepseek()
         "v_head_dim": 128,
         "dtype": "bf16",
         "quantization": "experts_int8"
-    }' > tests/test_config.json
+    }' > $test_config_path
     # bf16
-    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-bf16-8layers-8d/ --config tests/test_config.json --interactive
+    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-bf16-8layers-8d/ --config $test_config_path --interactive
 
     # w8a8
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-expert-int8-8layers-8d/ --config tests/test_config.json --interactive
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-expert-int8-8layers-8d/ --config $test_config_path --interactive
 
     # batch input
-    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-expert-int8-8layers-8d/ --config tests/test_config.json --input tests/test.json
+    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-expert-int8-8layers-8d/ --config $test_config_path --input tests/test.json
+
+    rm $test_config_path
 }
 
 function run_glm4_moe_30B()
@@ -186,9 +200,10 @@ function run_glm4_moe_30B()
         "dtype": "bfloat16",
         "max_batch_size": 1,
         "max_seq_len": 1024
-    }' > tests/test_config.json
+    }' > $test_config_path
     # modify master_addr, node_rank in node1
-    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path /mnt/nvme0n1/models/GLM-4.7/ --config tests/test_config.json --interactive
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path $models_base_path/GLM-4.7/ --config $test_config_path --interactive
+    rm $test_config_path
 }
 
 #run_qwen2.5_0.5B

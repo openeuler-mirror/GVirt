@@ -1,64 +1,11 @@
 /*
- * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 
 #ifdef __DAV_C220_VEC__
-
-inline __aicore__ void __set_mask(int32_t len)
-{
-    uint64_t mask = (1 << (len % 64)) - 1;
-
-    if (len == 128) {
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-    } else if (len >= 64) {
-        set_vector_mask(mask, (uint64_t)-1);
-    } else {
-        set_vector_mask(0x0, mask);
-    }
-}
-
-inline __aicore__ void __set_mask_from_highbit(int32_t len)
-{
-    uint64_t temp = len % 64;
-    uint64_t mask = ~((1 << (64 - temp)) - 1);
-
-    if (len == 128) {
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-    } else if (len >= 64) {
-        set_vector_mask((uint64_t)-1, mask);
-    } else {
-        set_vector_mask(mask, 0x0);
-    }
-}
-
-__inline__ __aicore__ void reduce_max(__ubuf__ float *x, uint32_t dim)
-{
-    float float_min = FLOAT_MIN;
-    uint32_t remain = dim;
-    uint32_t repeat = DIV_ROUND_UP(remain, VECTOR_MAX_NUM_OF_FP32);
-    set_mask_norm();
-    while (remain != 1) {
-        if (repeat == 1) {
-            __set_mask(remain);
-        } else {
-            if (remain % VECTOR_MAX_NUM_OF_FP32 != 0) {
-                __set_mask_from_highbit(VECTOR_MAX_NUM_OF_FP32 - remain % VECTOR_MAX_NUM_OF_FP32);
-                vector_dup(x + ROUND_DOWN(remain, VECTOR_MAX_NUM_OF_FP32), float_min, 1, 1, 1, 8,
-                           8);
-                pipe_barrier(PIPE_V);
-            }
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        }
-        vcmax(x, x, repeat, 1, 1, 8, Order_t::ONLY_VALUE);
-        pipe_barrier(PIPE_V);
-        remain = repeat;
-        repeat = DIV_ROUND_UP(remain, VECTOR_MAX_NUM_OF_FP32);
-    }
-    set_vector_mask((uint64_t)-1, (uint64_t)-1);
-}
 
 __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, uint32_t m,
                                         uint32_t k)
@@ -104,7 +51,7 @@ __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, ui
         vabs(xAbs, xf32, k / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8, 8);
         pipe_barrier(PIPE_V);
 
-        reduce_max(xAbs, k);
+        ReduceMax(xAbs, xAbs, k);
         set_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
         wait_flag(PIPE_V, PIPE_S, EVENT_ID0);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #pragma once
 #include "kernel_operator.h"

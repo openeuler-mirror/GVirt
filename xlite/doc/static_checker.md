@@ -67,6 +67,14 @@ python tests/run_static_checks.py --cpp-only
 python tests/run_static_checks.py --python-only
 ```
 
+### Fix Code Style
+
+```bash
+clang-format -i xxx.cpp
+# or you can use git plugin
+git clang-format
+```
+
 ### Advanced Options
 
 #### Skip Specific C++ Checks

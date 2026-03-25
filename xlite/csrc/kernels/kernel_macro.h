@@ -1,7 +1,7 @@
 /*
  * @file kernel_macro.h
  *
- * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (C) 2025-2026. Huawei Technologies Co., Ltd. All rights reserved.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -242,10 +242,10 @@ __aicore__ inline void CopyToGm(const GlobalTensor<OutDtype> &dst, const LocalTe
 }
 
 template <typename MatDtype, typename OutDtype>
-__aicore__ inline void CopyToGmMatmul(const GlobalTensor<OutDtype> &dst,
-                                      const LocalTensor<MatDtype> &src, int mSize, int nSize,
-                                      int srcStride, int dstStride, bool use_dequant,
-                                      const LocalTensor<uint64_t> &deqScale)
+__aicore__ inline void CopyToGmWithDequant(const GlobalTensor<OutDtype> &dst,
+                                           const LocalTensor<MatDtype> &src, int mSize, int nSize,
+                                           int srcStride, int dstStride, bool use_dequant,
+                                           const LocalTensor<uint64_t> &deqScale)
 {
     if (!use_dequant) {
         CopyToGm(dst, src, mSize, nSize, srcStride, dstStride);
@@ -264,7 +264,6 @@ __aicore__ inline void CopyToGmMatmul(const GlobalTensor<OutDtype> &dst,
             mode = VDEQF16;
         }
     }
-    PipeBarrier<PIPE_FIX>();
     SetFixPipeConfig(deqScale);
     DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
     SetFixpipeNz2ndFlag(1, 1, 1);
@@ -279,14 +278,11 @@ inline __aicore__ void DataCacheCleanAndInvalid(__gm__ void *__restrict__ gm)
 }
 
 #if __DAV_C220_VEC__
+// make sure that: len != 0
 inline __aicore__ void SetMask(int32_t len)
 {
-    uint64_t mask = 0;
-    uint64_t one = 1;
     uint64_t temp = len % 64;
-    for (int64_t i = 0; i < temp; i++) {
-        mask |= one << i;
-    }
+    uint64_t mask = ((uint64_t)1 << temp) - 1;
 
     if (len == 128) {
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -297,29 +293,22 @@ inline __aicore__ void SetMask(int32_t len)
     }
 }
 
-const uint64_t ONE_IN_HIGHBIT = 1L << 63;
+// make sure that: len != 0
 inline __aicore__ void SetMaskFromHighBit(int32_t high, int32_t len)
 {
-    uint64_t mask = 0;
     uint64_t temp = len % 64;
-    for (int64_t i = 0; i < temp; i++) {
-        mask |= ONE_IN_HIGHBIT >> i;
-    }
+    uint64_t mask = ~(((uint64_t)1 << (64 - temp)) - 1);
 
     if (high == 128) {
-        if (len == 128) {
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        } else if (len >= 64) {
+        // If dtype size is 2 bytes, all 128 bits of mask take effect.
+        if (len > 64) {
             set_vector_mask((uint64_t)-1, mask);
         } else {
             set_vector_mask(mask, 0x0);
         }
     } else if (high == 64) {
-        if (len == 64) {
-            set_vector_mask(0, (uint64_t)-1);
-        } else {
-            set_vector_mask(0, mask);
-        }
+        // If dtype size is 4 bytes, only lower 64 bits take effect.
+        set_vector_mask(0, mask);
     }
 }
 

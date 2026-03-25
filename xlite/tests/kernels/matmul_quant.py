@@ -8,7 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-from xlite._C import Runtime, matmul_quant
+from xlite._C import Runtime, matmul_dequant
 
 dev_id=0
 debug = False
@@ -85,7 +85,7 @@ torch.npu.synchronize()
 scale = torch.zeros(n * 2, dtype=torch.float32, device=f"npu:{dev_id}")
 scale[0::2] = deqScale[0::1]
 scale[1::2] = 0
-matmul_quant(rt, x, y_in, bias, scale, z, weight_nz and dtype != torch.float, transpose)
+matmul_dequant(rt, x, y_in, bias, scale, z, weight_nz and dtype != torch.float, transpose)
 torch.npu.synchronize()
 
 if transpose:

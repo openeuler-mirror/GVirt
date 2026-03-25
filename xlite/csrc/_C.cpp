@@ -872,15 +872,15 @@ void RopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_
     rt.Synchronize();
 }
 
-void Quant(XRuntime &rt, at::Tensor &x, at::Tensor &scale_reciprocal, at::Tensor &offset,
+void Quant(XRuntime &rt, at::Tensor &x, at::Tensor &scaleReciprocal, at::Tensor &offset,
            at::Tensor &out)
 {
-    XTensor _x, _scale_rec, _offset, _out;
+    XTensor _x, _scaleRec, _offset, _out;
     InitXTensor(_x, x);
-    InitXTensor(_scale_rec, scale_reciprocal);
+    InitXTensor(_scaleRec, scaleReciprocal);
     InitXTensor(_offset, offset);
     InitXTensor(_out, out);
-    XliteOpQuant(rt, _x, _scale_rec, _offset, _out);
+    XliteOpQuant(rt, _x, _scaleRec, _offset, _out);
     rt.Synchronize();
 }
 
@@ -894,8 +894,8 @@ void QuantDyn(XRuntime &rt, at::Tensor &x, at::Tensor &scale, at::Tensor &out)
     rt.Synchronize();
 }
 
-void MatmulQuant(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &bias, at::Tensor &deqScale,
-                 at::Tensor &z, bool weightNZ, bool transpose)
+void MatmulDeQuant(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &bias,
+                   at::Tensor &deqScale, at::Tensor &z, bool weightNZ, bool transpose)
 {
     XTensor _x, _y, _z, _bias, _deqScale;
 
@@ -914,9 +914,7 @@ void DeQuant(XRuntime &rt, at::Tensor &in, at::Tensor &scale, at::Tensor &out, b
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
-    uint32_t m = in.size(0);
-    uint32_t n = in.size(1);
-    XliteOpDeQuant(rt, _in, _scale, _out, m, n, hasScale);
+    XliteOpDeQuant(rt, _in, _scale, _out, hasScale);
     rt.Synchronize();
 }
 
@@ -1102,9 +1100,9 @@ PYBIND11_MODULE(_C, m)
           py::arg("output_pe"), py::arg("rope_type"));
     m.def("quant", &Quant);
     m.def("quant_dynamic", &QuantDyn);
-    m.def("matmul_quant", &MatmulQuant, "matmul_quant", py::arg("rt"), py::arg("x"), py::arg("y"),
-          py::arg("bias"), py::arg("deqScale"), py::arg("z"), py::arg("weight_nz") = false,
-          py::arg("transpose") = false);
+    m.def("matmul_dequant", &MatmulDeQuant, "matmul_dequant", py::arg("rt"), py::arg("x"),
+          py::arg("y"), py::arg("bias"), py::arg("deqScale"), py::arg("z"),
+          py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("dequant", &DeQuant);
 
     // funcs

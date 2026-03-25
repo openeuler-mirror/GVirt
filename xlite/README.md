@@ -114,18 +114,8 @@ python -m build
 构建后生成的whl包在dist目录下
 
 #### 代码提交
-参考：[静态检查说明](doc/static_checker.md)
 代码提交前请本地容器环境内执行格式检查
-```
-# 安装依赖
-pip install clang-format==22.1.0 clang-tidy flake8 mypy
-
-# 执行代码检查
-python tests/run_static_checks.py
-
-# 修正文件
-clang-format -i xxx.cpp
-```
+代码检查及修正方法参考：[静态检查说明](doc/static_checker.md)
 
 #### 目录结构
 csrc：轻量化运行时的核心代码

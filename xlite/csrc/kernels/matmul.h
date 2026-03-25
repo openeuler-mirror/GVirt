@@ -1,7 +1,7 @@
 /*
  * @file matmul.h
  *
- * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (C) 2025-2026. Huawei Technologies Co., Ltd. All rights reserved.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -257,6 +257,8 @@ public:
                           (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)),
                                                   FIXPIPE_DATABLOCK)),
                           0, 0});
+                PipeBarrier<PIPE_FIX>();
+                SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
             }
 
             WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
@@ -374,10 +376,10 @@ public:
             /* C L0C -> GM */
             SetFlag<HardEvent::M_FIX>(EVENT_ID0);
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-            CopyToGmMatmul(outGm, l0cBuf, mActual, nActual, mActualBlockPad, n, hasDeqScale,
-                           fixpipeBuf);
+            CopyToGmWithDequant(outGm, l0cBuf, mActual, nActual, mActualBlockPad, n, hasDeqScale,
+                                fixpipeBuf);
             if (hasDeqScale) {
-                SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
+                PipeBarrier<PIPE_FIX>();
             }
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         }  // M * N

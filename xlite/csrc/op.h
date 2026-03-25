@@ -116,6 +116,5 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
 
 void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out);
 
-void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, uint32_t m, uint32_t n,
-                    bool hasScale);
+void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, bool hasScale);
 #endif
