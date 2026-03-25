@@ -5,3 +5,6 @@ xlite.egg-info
 *so
 tags
 cscope.out
+cmake_build
+kernel_meta
+fusion_result.json
