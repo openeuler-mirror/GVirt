@@ -8,7 +8,7 @@
 
 #include "kernel_operator.h"
 #include "kernel_macro.h"
-#include "ccl_param.h"
+#include "kernel_param.h"
 
 using namespace AscendC;
 
