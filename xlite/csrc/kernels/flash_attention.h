@@ -200,7 +200,7 @@ public:
         SetFlag<HardEvent::M_MTE1>(EVENT_ID3);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         for (int nIdx = 0; nIdx < nLoop; nIdx++) {
-            uint32_t blockIdx = blockTable[nIdx + nIdxStart];
+            uint32_t block = blockTable[nIdx + nIdxStart];
             int nSize = blockSize;
             if (nIdx * blockSize + nSize > kvLen) {
                 nSize = kvLen - nIdx * blockSize;
@@ -209,7 +209,7 @@ public:
             }
 
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
-            CopyGmToL1Nd2Nz(l1bBuf[curIdx], kCache[blockIdx * blockMemSize + kvHeadOffset], nSize,
+            CopyGmToL1Nd2Nz(l1bBuf[curIdx], kCache[block * blockMemSize + kvHeadOffset], nSize,
                             headSize, kvMemSize, nBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
 
@@ -283,9 +283,9 @@ public:
                             TILESIZE_OF_CACHED_KV, mBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curIdx);
 
-            uint32_t blockIdx = blockTable[kIdx + kIdxStart];
+            uint32_t block = blockTable[kIdx + kIdxStart];
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
-            CopyGmToL1Nd2Nz(l1bBuf[curIdx], vCache[blockIdx * blockMemSize + kvHeadOffset], kSize,
+            CopyGmToL1Nd2Nz(l1bBuf[curIdx], vCache[block * blockMemSize + kvHeadOffset], kSize,
                             headSize, kvMemSize, kBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
 

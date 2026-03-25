@@ -229,6 +229,36 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     return {attnQWithQr, attnKPe, attnQPe};
 }
 
+XTensor &XModel::ForwardAttnMLAPrefillV2(XRuntime &rt, uint32_t layer,
+                                         std::vector<std::pair<XTensor, XTensor>> &kvCache,
+                                         XTensor &freqsCis, XTensor &attnQWithQr)
+{
+    XTensor &kCache = kvCache[layer].first;
+    XTensor &vCache = kvCache[layer].second;
+    uint32_t qHeads = _c.nHeads / _c.defTpSize;
+    XTensor &output =
+        rt.pool->GetTensor({attnQWithQr.shape[0], qHeads, _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
+    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+                                     attnQWithQr.dtype, DBG_LOC);
+    XTensor &sv = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.vHeadDim},
+                                     attnQWithQr.dtype, DBG_LOC);
+    XTensor &max = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+    XTensor &sum = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+    XTensor &lastMax = rt.pool->GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+    XTensor &lastSum = rt.pool->GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+    XliteOpFlashMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
+                    lastSum, _sync, output, rt._cumPromptLens, rt._lens, rt._cachedLens,
+                    rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
+                    _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale);
+    rt.pool->PutTensor(lastSum);
+    rt.pool->PutTensor(lastMax);
+    rt.pool->PutTensor(sum);
+    rt.pool->PutTensor(max);
+    rt.pool->PutTensor(sv);
+    rt.pool->PutTensor(qk);
+    return output;
+}
+
 XTensor &XModel::ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
                                        std::vector<std::pair<XTensor, XTensor>> &kvCache,
                                        XTensor &freqsCis, XTensor &hiddenState,

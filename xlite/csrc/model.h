@@ -133,6 +133,9 @@ private:
     std::tuple<XTensor &, XTensor &, XTensor &> ForwardAttnMLACommon(
         XRuntime &rt, uint32_t layer, std::vector<std::pair<XTensor, XTensor>> &kvCache,
         XTensor &freqsCis, XTensor &hiddenState);
+    XTensor &ForwardAttnMLAPrefillV2(XRuntime &rt, uint32_t layer,
+                                     std::vector<std::pair<XTensor, XTensor>> &kvCache,
+                                     XTensor &freqsCis, XTensor &attnQWithQr);
     XTensor &ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
                                    std::vector<std::pair<XTensor, XTensor>> &kvCache,
                                    XTensor &freqsCis, XTensor &hiddenState, XTensor &attnQWithQr,
