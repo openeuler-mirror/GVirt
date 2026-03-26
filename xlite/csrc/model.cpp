@@ -146,6 +146,12 @@ void XModel::Init(void)
             _mropeMaskW |= 1ULL << i;
         }
     }
+
+    _isSharedExpertWeightFull =
+        (_c.nSharedExperts != 0 && !moeSEUpGate[_c.nDenseLayers].shape.empty() &&
+         moeSEUpGate[_c.nDenseLayers].shape[0] == _c.moeIntermediateSize * 2 &&
+         moeSEDown[_c.nDenseLayers].shape.size() >= 2 &&
+         moeSEDown[_c.nDenseLayers].shape[1] == _c.moeIntermediateSize);
 }
 
 XModel::~XModel(void)
@@ -584,7 +590,13 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     rt.pool->PutTensor(h13);
     rt.pool->PutTensor(h2);
 
-    if (_c.nSharedExperts != 0) {
+    // Check if shared experts should be processed on this rank:
+    // 1. Shared experts are enabled (nSharedExperts != 0)
+    // 2. Either the weight is not full (all ranks process), or only rank 0 processes when weight is
+    // full
+    if (_c.nSharedExperts != 0 &&
+        ((_isSharedExpertWeightFull && ((rt.rankId() % rt.tpSize()) == 0)) ||
+         !_isSharedExpertWeightFull)) {
         XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, hiddenState.dtype, DBG_LOC);
         ForwardMOECombine(rt, h, weights, routing, unpIdx, expertsSorted, expertsCounts);
         // share experts
