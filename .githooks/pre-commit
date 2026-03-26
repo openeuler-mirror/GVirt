@@ -1,0 +1,20 @@
+#!/bin/bash
+# turn on auto-format: git config core.hooksPath .githooks
+# turn off auto-format: git config --unset core.hooksPath
+
+if ! pip show clang-format >/dev/null 2>&1; then
+    echo "git clang-format not found, skipping format check."
+    exit 0
+fi
+
+echo "---------------- Clang Format -------------------"
+echo "Running git clang-format..."
+
+if ! git clang-format 2>&1 ; then
+    echo ""
+    echo "Please git add and commit again!"
+    echo "-------------------------------------------------"
+    exit 1
+fi
+
+echo "-------------------------------------------------"
