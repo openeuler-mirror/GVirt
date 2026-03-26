@@ -185,6 +185,7 @@ private:
     std::vector<XTensor> _moeREUpGateScale;
     std::vector<XTensor> _moeREDown;
     std::vector<XTensor> _moeREDownScale;
+    bool _isSharedExpertWeightFull = false;
 
     // ATTN
     uint64_t _mropeMaskH;

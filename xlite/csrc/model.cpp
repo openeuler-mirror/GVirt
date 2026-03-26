@@ -146,6 +146,12 @@ void XModel::Init(void)
             _mropeMaskW |= 1ULL << i;
         }
     }
+
+    _isSharedExpertWeightFull =
+        (_c.nSharedExperts != 0 && !moeSEUpGate[_c.nDenseLayers].shape.empty() &&
+         moeSEUpGate[_c.nDenseLayers].shape[0] == _c.moeIntermediateSize * 2 &&
+         moeSEDown[_c.nDenseLayers].shape.size() >= 2 &&
+         moeSEDown[_c.nDenseLayers].shape[1] == _c.moeIntermediateSize);
 }
 
 XModel::~XModel(void)
@@ -584,7 +590,13 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     rt.pool->PutTensor(h13);
     rt.pool->PutTensor(h2);
 
-    if (_c.nSharedExperts != 0) {
+    // Check if shared experts should be processed on this rank:
+    // 1. Shared experts are enabled (nSharedExperts != 0)
+    // 2. Either the weight is not full (all ranks process), or only rank 0 processes when weight is
+    // full
+    if (_c.nSharedExperts != 0 &&
+        ((_isSharedExpertWeightFull && ((rt.rankId() % rt.tpSize()) == 0)) ||
+         !_isSharedExpertWeightFull)) {
         XTensor &h = rt.pool->GetTensor({m, _c.hiddenSize}, hiddenState.dtype, DBG_LOC);
         ForwardMOECombine(rt, h, weights, routing, unpIdx, expertsSorted, expertsCounts);
         // share experts
@@ -822,8 +834,10 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::pair<XTensor, XTen
                                  ": xlite runtime's tensor pool not inited");
     }
 
+    uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
     if (kvCache[0].first.shape[1] != _c.blockSize || kvCache[0].second.shape[1] != _c.blockSize ||
-        kvCache[0].first.shape[2] != _c.nKvHeads || kvCache[0].second.shape[2] != _c.nKvHeads ||
+        kvCache[0].first.shape[2] != expectedKvHeads ||
+        kvCache[0].second.shape[2] != expectedKvHeads ||
         (_c.attnType == XMODEL_ATTN_MHA && kvCache[0].first.shape[3] != _c.headDim) ||
         (_c.attnType == XMODEL_ATTN_MLA && (kvCache[0].first.shape[3] != _c.kvLoraRank ||
                                             kvCache[0].second.shape[3] != _c.ropeHeadDim))) {
