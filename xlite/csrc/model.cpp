@@ -822,8 +822,10 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::pair<XTensor, XTen
                                  ": xlite runtime's tensor pool not inited");
     }
 
+    uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
     if (kvCache[0].first.shape[1] != _c.blockSize || kvCache[0].second.shape[1] != _c.blockSize ||
-        kvCache[0].first.shape[2] != _c.nKvHeads || kvCache[0].second.shape[2] != _c.nKvHeads ||
+        kvCache[0].first.shape[2] != expectedKvHeads ||
+        kvCache[0].second.shape[2] != expectedKvHeads ||
         (_c.attnType == XMODEL_ATTN_MHA && kvCache[0].first.shape[3] != _c.headDim) ||
         (_c.attnType == XMODEL_ATTN_MLA && (kvCache[0].first.shape[3] != _c.kvLoraRank ||
                                             kvCache[0].second.shape[3] != _c.ropeHeadDim))) {
