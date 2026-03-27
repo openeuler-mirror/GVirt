@@ -29,6 +29,7 @@
 #include "aclrtlaunch_group_matmul_bfloat16_t.h"
 #include "aclrtlaunch_group_matmul_float16_t.h"
 #include "aclrtlaunch_group_matmul_float.h"
+#include "aclrtlaunch_group_matmul_int8_t.h"
 #include "aclrtlaunch_permutation.h"
 #include "aclrtlaunch_unpermutation_bfloat16_t.h"
 #include "aclrtlaunch_unpermutation_float.h"
@@ -526,7 +527,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k,
                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
         rt.pool->PutTensor(tmp);
-    } else if (in.dtype == INT8 && weight.dtype == INT8) {
+    } else if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == FP16 && !transpose) {
         aclrtlaunch_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                   weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else {
@@ -587,25 +588,31 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
     }
 }
 
-void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
+// deqScales: uint64_t, 低 32 位 TF32 格式有效, 1 符号位, 8 指数位, 10 尾数位, 后 13 位不参与计算
+void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                         long outDim, long inDim, XTensor &output, bool weightNZ, bool transpose)
 {
     if (in.dtype == BF16 && weightDtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_group_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
-                                            counts.ptr, counts.shape[0], outDim, inDim, -1, -1, -1,
-                                            start, end, weightNZ, transpose,
+                                            deqScales.ptr, counts.ptr, counts.shape[0], outDim,
+                                            inDim, -1, -1, -1, start, end, weightNZ, transpose,
                                             MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else if (in.dtype == FP16 && weightDtype == FP16 && output.dtype == FP16) {
         aclrtlaunch_group_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
-                                           counts.ptr, counts.shape[0], outDim, inDim, -1, -1, -1,
-                                           start, end, weightNZ, transpose,
+                                           deqScales.ptr, counts.ptr, counts.shape[0], outDim,
+                                           inDim, -1, -1, -1, start, end, weightNZ, transpose,
                                            MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32 && !transpose) {
         aclrtlaunch_group_matmul_float(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
-                                       counts.ptr, counts.shape[0], outDim, inDim, -1, -1, -1,
-                                       start, end, weightNZ, transpose,
+                                       deqScales.ptr, counts.ptr, counts.shape[0], outDim, inDim,
+                                       -1, -1, -1, start, end, weightNZ, transpose,
                                        MATMUL_SWIZZLE_DEFAULT_VALUE);
+    } else if (in.dtype == INT8 && weightDtype == INT8 && output.dtype == FP16) {
+        aclrtlaunch_group_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
+                                        deqScales.ptr, counts.ptr, counts.shape[0], outDim, inDim,
+                                        -1, -1, -1, start, end, weightNZ, transpose,
+                                        MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
