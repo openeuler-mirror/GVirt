@@ -38,7 +38,7 @@ void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t st
                         XTensor &out, XTensor &unpIdx, XTensor &counts);
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing,
                           XTensor &weights, uint32_t start, uint32_t end, XTensor &out);
-void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &scales,
+void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                         long outDim, long inDim, XTensor &output, bool weightNZ = false,
                         bool transpose = false);
