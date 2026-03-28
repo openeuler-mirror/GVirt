@@ -1,12 +1,12 @@
 Name:           xlite
-Version:        1.0
+Version:        0.1.0
 Release:        1%{?dist}
 Summary:        A lightweight, effective and easy-to-extend inference runtime
 
-License:        MulanPSL2
+License:        MulanPSL-2.0
 Source0:        %{name}-%{version}.tar.gz
 
-BuildRequires:  gcc-c++, cmake, make
+BuildRequires:  gcc-c++, cmake >= 3.16, make
 BuildRequires:  pciutils
 BuildRequires:  zlib-devel
 BuildRequires:  openssl-devel
@@ -17,9 +17,6 @@ BuildRequires:  sqlite, sqlite-devel
 BuildRequires:  dpkg-devel
 BuildRequires:  libdb-devel
 BuildRequires:  gdbm-devel
-BuildRequires:  python3-devel
-BuildRequires:  python3-pip
-BuildRequires:  python3-setuptools
 
 %description
 Xlite is A lightweight, effective and easy-to-extend inference runtime.
@@ -39,13 +36,13 @@ echo "Please install python packages in requirements.txt before building xlite"
 rm -rf build out
 
 %build
+export SETUPTOOLS_SCM_PRETEND_VERSION=%{version}
 %py3_build
 
 %install
 rm -rf %{buildroot}
 %py3_install
-cp -r xlite/*.so %{buildroot}/%{python3_sitearch}/xlite
-cp -r xlite/lib/*.so %{buildroot}/%{python3_sitearch}/xlite
+rm -rf %{buildroot}/%{python3_sitearch}/csrc
 cp -r tests %{buildroot}/%{python3_sitearch}/xlite
 
 %post
@@ -72,7 +69,7 @@ fi
 %exclude %{python3_sitearch}/xlite/tools/__pycache__
 
 %changelog
-* Tue Oct 16 2025 wangxiaoran <wangxiaoran11@huawei.com> - 1.0-1
+* Thu Oct 16 2025 wangxiaoran <wangxiaoran11@huawei.com> - 1.0-1
 - Adapt rpm spec for building.
 * Mon May 19 2025 lulina <lina.lulina@huawei.com> - 1.0-1
 - Initial package for xlite.

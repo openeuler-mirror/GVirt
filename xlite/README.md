@@ -115,7 +115,15 @@ python tests/kernels/add.py
 当前支持rpm和whl，可选择合适的方式构建出包，用于不同场景的二进制发布和安装部署，开发场景可忽略。
 ##### 方法1：rpm
 ```bash
-# 拷贝源码至/root/rpmbuild/SOURCES/xlite-1.0.tar.gz，执行以下命令
+# 切换到xlite目录下，执行以下命令准备rpm构建环境
+cd {xlite_source_dir}
+pip install -r requirements-dev.txt # 安装构建依赖
+mkdir -p /root/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SOPES,SPECS,SRPMS}
+# 拷贝源码至/root/rpmbuild/SOURCES/xlite-${VERSION}.tar.gz，执行以下命令
+VERSION=0.1.0 # 替换为当前版本号
+git archive --format=tar.gz --prefix=xlite-${VERSION}/ -o /root/rpmbuild/SOURCES/xlite-${VERSION}.tar.gz HEAD
+cp xlite.spec /root/rpmbuild/SPECS/
+cd /root/rpmbuild/SPECS
 rpmbuild -bb xlite.spec --nodebuginfo
 ```
 构建后生成的rpm包在/root/rpmbuild/RPMS/目录下
