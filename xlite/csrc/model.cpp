@@ -213,8 +213,7 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], attnNormQc, _c.normEps, attnQc.shape[1]);
     XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr, _c.weightNZ);
     XliteOpRopeComplex(rt, rt._realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
-                       attnQWithQr, freqsCis, rt._attnPosition, _vGather, attnQPe,
-                       rt._prefillBatch > 0 ? MIX : NORMAL);
+                       attnQWithQr, freqsCis, rt._attnPosition, _vGather, attnQPe, MIX);
     XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc, _c.weightNZ);
     XliteOpRmsNorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank);
     XliteOpRopeComplexAndCache(rt, rt._realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
@@ -229,14 +228,21 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     return {attnQWithQr, attnKPe, attnQPe};
 }
 
-XTensor &XModel::ForwardAttnMLAPrefillV2(XRuntime &rt, uint32_t layer,
-                                         std::vector<std::pair<XTensor, XTensor>> &kvCache,
-                                         XTensor &freqsCis, XTensor &attnQWithQr)
+void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
+                              std::vector<std::pair<XTensor, XTensor>> &kvCache, XTensor &freqsCis,
+                              XTensor &hiddenState)
 {
     XTensor &kCache = kvCache[layer].first;
     XTensor &vCache = kvCache[layer].second;
     uint32_t qHeads = _c.nHeads / _c.defTpSize;
-    XTensor &output =
+
+    auto [attnQWithQr, attnKPe, attnQPe] =
+        ForwardAttnMLACommon(rt, layer, kvCache, freqsCis, hiddenState);
+
+    rt.pool->PutTensor(attnKPe);
+    rt.pool->PutTensor(attnQPe);
+
+    XTensor &attnOutput =
         rt.pool->GetTensor({attnQWithQr.shape[0], qHeads, _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
     XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
                                      attnQWithQr.dtype, DBG_LOC);
@@ -246,17 +252,32 @@ XTensor &XModel::ForwardAttnMLAPrefillV2(XRuntime &rt, uint32_t layer,
     XTensor &sum = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
     XTensor &lastMax = rt.pool->GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
     XTensor &lastSum = rt.pool->GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+    // TODO add absrob version: better performance for decode
     XliteOpFlashMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
-                    lastSum, _sync, output, rt._cumPromptLens, rt._lens, rt._cachedLens,
+                    lastSum, _sync, attnOutput, rt._cumPromptLens, rt._lens, rt._cachedLens,
                     rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
                     _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale);
+    rt.pool->PutTensor(attnQWithQr);
     rt.pool->PutTensor(lastSum);
     rt.pool->PutTensor(lastMax);
     rt.pool->PutTensor(sum);
     rt.pool->PutTensor(max);
     rt.pool->PutTensor(sv);
     rt.pool->PutTensor(qk);
-    return output;
+
+    XliteOpMatmul(rt, attnOutput, attnOut[layer], hiddenState, _c.weightNZ);
+
+    if (_c.defTpSize > 1) {
+        if (rt.multiTaskParallel) {
+            rt.NotifyRecordPeerStream();
+        }
+        if (rt.enableCommOptimize) {
+            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
+        } else {
+            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        }
+    }
+    rt.pool->PutTensor(attnOutput);
 }
 
 XTensor &XModel::ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
@@ -469,7 +490,7 @@ void XModel::ForwardAttn(XRuntime &rt, uint32_t layer,
                          XTensor &hiddenState)
 {
     if (_c.attnType == XMODEL_ATTN_MLA) {
-        ForwardAttnMLA(rt, layer, kvCache, freqsCis, hiddenState);
+        ForwardAttnMLAV2(rt, layer, kvCache, freqsCis, hiddenState);
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
     } else {
