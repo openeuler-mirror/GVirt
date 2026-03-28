@@ -19,7 +19,8 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
                                              uint32_t outN = 0, uint32_t maskOff = 0,
                                              uint32_t maskStride = 1,
                                              __gm__ float *maxBuf = nullptr,
-                                             __gm__ float *sumBuf = nullptr)
+                                             __gm__ float *sumBuf = nullptr, bool hasScale = false,
+                                             float scale = 1.0f)
 {
     if (outN == 0 || outN > n) {
         outN = n;
@@ -107,6 +108,11 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
             }
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+
+            if (hasScale) {
+                vmuls(cal, cal, scale, repeat, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+            }
 
             // max
             ReduceMaxV2(temp, cal, actualCalcLen);
@@ -815,7 +821,8 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
                                              uint32_t outN = 0, uint32_t maskOff = 0,
                                              uint32_t maskStride = 1,
                                              __gm__ float *maxBuf = nullptr,
-                                             __gm__ float *sumBuf = nullptr)
+                                             __gm__ float *sumBuf = nullptr, bool hasScale = false,
+                                             float scale = 1.0f)
 {
 }
 template <typename Dtype>

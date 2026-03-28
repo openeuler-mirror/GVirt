@@ -56,6 +56,13 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                            XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                            uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
                            uint32_t batch, uint32_t maxNumBlock);
+void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache,
+                     XTensor &wkvb, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
+                     XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &output,
+                     XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
+                     XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
+                     uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
+                     uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale);
 void XliteDsOpKvMatmul(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output, int m, int n,
                        int k, XTensor &blockTable, bool nt, int blockSize, int headSize);
 void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &cache,

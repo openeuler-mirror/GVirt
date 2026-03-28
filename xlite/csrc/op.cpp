@@ -64,6 +64,7 @@
 #include "aclrtlaunch_rope_complex_and_cache_bfloat16_t.h"
 #include "aclrtlaunch_flash_attention_float16_t.h"
 #include "aclrtlaunch_flash_attention_bfloat16_t.h"
+#include "aclrtlaunch_flash_mla_bfloat16_t.h"
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
@@ -699,6 +700,26 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
             lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, cumPromptLens.ptr, lens.ptr,
             cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize, batch,
             maxNumBlock);
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+    }
+}
+
+void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache,
+                     XTensor &wkvb, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
+                     XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &output,
+                     XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
+                     XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
+                     uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
+                     uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale)
+{
+    if (qWithQr.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 &&
+        wkvb.dtype == BF16 && output.dtype == BF16) {
+        aclrtlaunch_flash_mla_bfloat16_t(
+            rt.aicNum, rt.stream, qWithQr.ptr, kCache.ptr, vCache.ptr, wkvb.ptr, qk.ptr, sv.ptr,
+            max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, cumPromptLens.ptr,
+            lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim, nopeHeadDim, vHeadDim,
+            kvLoraRank, blockSize, batch, maxNumBlock, scale);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }

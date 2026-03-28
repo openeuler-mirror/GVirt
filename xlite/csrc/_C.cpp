@@ -724,6 +724,51 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     }
 }
 
+void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCache,
+         at::Tensor &wkvb, at::Tensor &output, at::Tensor &cumPromptLens, at::Tensor &lens,
+         at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
+         uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
+         uint32_t batch, uint32_t maxNumBlock, float scale)
+{
+    XTensor _qWithQr, _kCache, _vCache, _wkvb, _output, _cumPromptLens, _lens, _cachedLens,
+        _blockTables;
+    uint32_t qHeads = nHeads;
+
+    InitXTensor(_qWithQr, qWithQr);
+    InitXTensor(_kCache, kCache);
+    InitXTensor(_vCache, vCache);
+    InitXTensor(_wkvb, wkvb);
+    InitXTensor(_output, output);
+    InitXTensor(_cumPromptLens, cumPromptLens);
+    InitXTensor(_lens, lens);
+    InitXTensor(_cachedLens, cachedLens);
+    InitXTensor(_blockTables, blockTables);
+
+    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+                                     XDtype(qWithQr), DBG_LOC);
+    XTensor &sv =
+        rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, vHeadDim}, XDtype(qWithQr), DBG_LOC);
+    XTensor &max = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+    XTensor &sum = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+    XTensor &lastMax = rt.pool->GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+    XTensor &lastSum = rt.pool->GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+    XTensor &sync = rt.pool->GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
+    sync.Memset(0);
+
+    XliteOpFlashMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, sv, max, sum, lastMax, lastSum, sync,
+                    _output, _cumPromptLens, _lens, _cachedLens, _blockTables, qHeads, ropeHeadDim,
+                    nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlock, scale);
+
+    rt.Synchronize();
+    rt.pool->PutTensor(sync);
+    rt.pool->PutTensor(lastSum);
+    rt.pool->PutTensor(lastMax);
+    rt.pool->PutTensor(sum);
+    rt.pool->PutTensor(max);
+    rt.pool->PutTensor(sv);
+    rt.pool->PutTensor(qk);
+}
+
 void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &norm,
                    at::Tensor &out, float normEps)
 {
@@ -1103,6 +1148,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("y"), py::arg("bias"), py::arg("deqScale"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("dequant", &DeQuant);
+    m.def("mla", &MLA);
 
     // funcs
     m.def("print", &Print);

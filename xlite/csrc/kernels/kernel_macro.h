@@ -187,6 +187,22 @@ __aicore__ inline void CalMmadWithBias(const LocalTensor<MatDtype> &c, const Loc
 }
 
 template <typename Dtype>
+__aicore__ inline void CopyL0CToL1(const LocalTensor<Dtype> &dst, const LocalTensor<float> &src,
+                                   int mSize, int nSize, int srcStride, int dstStride)
+{
+    QuantMode_t mode;
+    if constexpr (std::is_same<Dtype, float>::value) {
+        mode = NoQuant;
+    } else if constexpr (std::is_same<Dtype, float16_t>::value) {
+        mode = F322F16;
+    } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+        mode = F322BF16;
+    }
+    DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 0);
+    DataCopy(dst, src, param);
+}
+
+template <typename Dtype>
 inline __aicore__ void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTensor<float> &src,
                                 int mSize, int nSize, int srcStride, int dstStride,
                                 uint8_t unitFlag)
