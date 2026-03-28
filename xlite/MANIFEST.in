@@ -1,0 +1,6 @@
+include CMakeLists.txt
+include LICENSE
+include requirements.txt
+include requirements-dev.txt
+
+recursive-include csrc *
