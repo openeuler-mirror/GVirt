@@ -1,4 +1,5 @@
 [build-system]
+# synchronize with requirements-build.txt when updating build dependencies
 requires = [
     "setuptools>=69",
     "wheel",

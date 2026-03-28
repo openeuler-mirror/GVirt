@@ -1,0 +1,11 @@
+# Build dependencies for xlite
+# The canonical package metadata lives in pyproject.toml.
+# Synchronize with pyproject.toml when updating build dependencies.
+setuptools>=69
+wheel
+cmake>=3.16
+pybind11
+numpy<2.0.0
+torch>=2.5.1
+torch-npu>=2.5.1
+PyYAML
