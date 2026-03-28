@@ -11,6 +11,6 @@ protobuf
 transformers
 torch-npu>=2.5.1
 clang-format==22.1.0
-clang-tidy
+clang-tidy==22.1.0
 flake8
 mypy
