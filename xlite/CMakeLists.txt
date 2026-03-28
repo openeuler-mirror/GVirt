@@ -121,7 +121,10 @@ execute_process(
     OUTPUT_VARIABLE PYTHON_SYS_DIR
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
-set(CMAKE_PREFIX_PATH ${PYTHON_SYS_DIR} CACHE STRING "python sys path")
+if(PYTHON_SYS_DIR)
+  # prepend so Python sys dir is searched first; use APPEND if you want it last
+  list(PREPEND CMAKE_PREFIX_PATH "${PYTHON_SYS_DIR}")
+endif()
 
 find_package(pybind11 REQUIRED)
 find_package(Torch COMPONENTS Development REQUIRED)
