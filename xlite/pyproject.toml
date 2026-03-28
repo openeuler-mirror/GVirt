@@ -1,10 +1,65 @@
 [build-system]
-# Should be mirrored in requirements.txt
 requires = [
+    "setuptools>=69",
+    "wheel",
+    "cmake>=3.16",
     "pybind11",
+    "numpy<2.0.0",
     "torch>=2.5.1",
+    "torch-npu>=2.5.1",
+    "PyYAML",
 ]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "xlite"
+dynamic = ["version"]
+description = "A lightweight, effective and easy-to-extend inference runtime"
+readme = "README.md"
+requires-python = ">=3.9,<3.12"
+license = "MulanPSL-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Huawei Euler OS Team" }]
+classifiers = [
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# synchronize with requirements.txt when updating dependencies
+dependencies = ["pybind11", "torch>=2.5.1"]
+
+[project.optional-dependencies]
+# synchronize with requirements-dev.txt when updating dev dependencies
+dev = [
+    "numpy<2.0.0",
+    "tqdm",
+    "safetensors",
+    "tiktoken",
+    "sentencepiece",
+    "protobuf",
+    "transformers",
+    "torch-npu>=2.5.1",
+    "clang-format==22.1.0",
+    "clang-tidy==22.1.0",
+    "flake8",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://atomgit.com/openeuler/GVirt"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "xlite.__version__" }
+
+[tool.setuptools.packages.find]
+exclude = ["*.tools", "*.tools.*", "tests", "tests.*"]
+
+[tool.setuptools.package-data]
+xlite = ["py.typed", "*.pyi", "*.so", "lib/*.so"]
+
 [tool.mypy]
-pythonpath = ["xlite"]
+mypy_path = "xlite"

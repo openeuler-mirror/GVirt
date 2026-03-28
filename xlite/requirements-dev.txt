@@ -1,3 +1,6 @@
+# Runtime dependencies for local/dev environments.
+# The canonical package metadata lives in pyproject.toml.
+# Synchronize with pyproject.toml when updating dev dependencies.
 -r requirements.txt
 numpy<2.0.0
 tqdm

@@ -1,2 +1,5 @@
+# Runtime dependencies for local/dev environments.
+# The canonical package metadata lives in pyproject.toml.
+# Synchronize with pyproject.toml when updating dependencies.
 pybind11
 torch>=2.5.1
