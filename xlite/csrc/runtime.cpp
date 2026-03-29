@@ -30,6 +30,7 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize)
 {
     aclError init_ret = aclInit(nullptr);
+    uint32_t count;
     if (init_ret == ACL_ERROR_REPEAT_INITIALIZE) {
         _init_outside = true;
     } else {
@@ -37,24 +38,26 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     }
     CHECK_ACL(aclrtSetDevice(devid));
     CHECK_ACL(aclrtCreateStream(&stream));
+    CHECK_ACL(aclrtGetDeviceCount(&count));
+    _nDevPerNode = count;
 
     if (sizeMB != 0) {
         pool = new XTensorPool(sizeMB << MB_BIT);
         if (pool->Init()) {
-            return;
+            throw std::runtime_error("XRuntime: tensor pool initialization failed");
         }
     }
 
     _rankSize = tpSize * dpSize;
     if (InitHcclComm()) {
         delete pool;
-        return;
+        throw std::runtime_error("XRuntime: HCCL initialization failed");
     }
 
     if (sizeMB != 0) {
         if (InitXcclComm()) {
             delete pool;
-            return;
+            throw std::runtime_error("XRuntime: XCCL initialization failed");
         }
     }
 

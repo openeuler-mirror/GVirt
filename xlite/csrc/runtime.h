@@ -8,9 +8,15 @@
 #include "base.h"
 #include "ccl.h"
 
-#define XLITE_DEFAULT_DEVS_PER_NODE 8
 #define XLITE_DEFAULT_PORT 10266
 #define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144
+
+static bool gDebugOn = false;
+#define XLITE_DEBUG_POINT(condition, rt, h, str) \
+    if (gDebugOn && (condition)) {               \
+        (rt).Synchronize();                      \
+        (h).Print((str));                        \
+    }
 
 typedef void *aclrtContext;
 typedef void *aclrtNotify;
@@ -138,7 +144,7 @@ private:
     uint32_t _tpSize;
     uint32_t _dpSize;
     uint32_t _rankSize;
-    uint32_t _nDevPerNode = XLITE_DEFAULT_DEVS_PER_NODE;
+    uint32_t _nDevPerNode = 0;
     uint32_t _port = XLITE_DEFAULT_PORT;
     std::vector<std::string> _ips;
 

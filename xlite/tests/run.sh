@@ -192,7 +192,7 @@ function run_deepseek()
     rm $test_config_path
 }
 
-function run_glm4_moe_30B()
+function run_glm4_moe()
 {
     echo '{
         "moe_ep_size": 16,
@@ -213,5 +213,5 @@ run_qwen3_moe_30B
 run_llama_7B
 run_llama_13B
 run_llama_34B
-run_glm4_moe_30B
+run_glm4_moe
 #run_deepseek

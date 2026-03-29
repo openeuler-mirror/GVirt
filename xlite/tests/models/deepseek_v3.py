@@ -21,6 +21,7 @@ from safetensors.torch import load_model
 from tests.models.deepseek_kernel import weight_dequant
 
 
+debug = False
 world_size = 1
 rank = 0
 block_size = 128
@@ -739,6 +740,7 @@ class Block(nn.Module):
         self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
+        self.n_dense_layers = args.n_dense_layers
         self.layer_id = layer_id
 
     def forward_naive(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
@@ -754,7 +756,13 @@ class Block(nn.Module):
         Returns:
             torch.Tensor: Output tensor after block computation.
         """
+        if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.n_dense_layers):
+            print(f"layer{self.layer_id} in: {self.attn_norm(x)}")
+        if debug and rank == 0 and (self.layer_id == 1 or self.layer_id == self.n_dense_layers + 1):
+            print(f"layer{self.layer_id} iafter ffn: {self.attn_norm(x)}")
         x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
+        if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.n_dense_layers):
+            print(f"layer{self.layer_id} iafter attn: {self.ffn_norm(x)}")
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
