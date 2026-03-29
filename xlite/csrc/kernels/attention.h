@@ -481,7 +481,7 @@ public:
                        dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nSoftmaxCurCore, calcLen, outN,
                        nSoftmaxStart % headNumInGroup, currQkIdx);
 #endif
-                RunAivSoftmax<Dtype>(
+                RunAivSoftmax(
                     (__gm__ Dtype *)qk[currQkIdx][qkOffset].GetPhyAddr(),
                     m0 > (MAX_M0 - 4)
                         ? 0
