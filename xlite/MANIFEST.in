@@ -1,6 +1,8 @@
+include pyproject.toml
+include setup.py
 include CMakeLists.txt
 include LICENSE
-include requirements.txt
-include requirements-dev.txt
+include README.md
+include requirements*.txt
 
 recursive-include csrc *

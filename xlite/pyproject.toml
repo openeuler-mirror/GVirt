@@ -52,7 +52,7 @@ dev = [
 Homepage = "https://atomgit.com/openeuler/GVirt"
 
 [tool.setuptools]
-include-package-data = true
+include-package-data = false
 
 [tool.setuptools.dynamic]
 version = { attr = "xlite.__version__" }

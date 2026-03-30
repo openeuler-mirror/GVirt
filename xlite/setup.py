@@ -80,7 +80,8 @@ class CMakeBuild(build_ext):
         subprocess.check_call(install_cmd)
 
         # Remove headers and lib64 staging outputs from wheel contents.
-        for artifact_dir in (install_prefix / "include", install_prefix / "lib64"):
+        for artifact_dir_sub in ("include", "lib64", "csrc"):
+            artifact_dir = install_prefix / artifact_dir_sub
             if artifact_dir.exists():
                 shutil.rmtree(artifact_dir)
 
