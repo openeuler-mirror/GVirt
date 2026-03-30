@@ -565,7 +565,7 @@ public:
                        queryTaskOffset + queryTaskLen, nWorkStart, nWorkStart + nWorkCurCore,
                        kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
 #endif
-                RunAivSoftmaxPingPong<Dtype>(
+                RunAivSoftmaxPingPong(
                     (__gm__ Dtype *)qk[curr][nWorkStart * TILESIZE_OF_CACHED_KV].GetPhyAddr(),
                     nWorkCurCore, TILESIZE_OF_CACHED_KV, actualCalcSoftmaxLen, outN,
                     nWorkStart % headNumInGroup, headNumInGroup,
@@ -591,7 +591,7 @@ public:
 #endif
                     // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] &
                     // max[last]
-                    RunAivSoftmaxUpdate<Dtype>(
+                    RunAivSoftmaxUpdate(
                         (__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
                         (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
                         (__gm__ float *)sum[last][lastWorkStart].GetPhyAddr(),
@@ -646,15 +646,15 @@ public:
                    lastKvOffset + lastKvLen, last);
 #endif
             // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] & max[last]
-            RunAivSoftmaxUpdate<Dtype>(
-                (__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
-                (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
-                (__gm__ float *)sum[last][lastWorkStart].GetPhyAddr(),
-                (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
-                (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
-                (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(), lastWorkCurCore,
-                lastSubHeadOffset, nHeads, nKVHeads, headSize, lastKvOffset == 0,
-                lastActualCalcSoftmaxLen, lastWorkStart % headNumInGroup, headNumInGroup);
+            RunAivSoftmaxUpdate((__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
+                                (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
+                                (__gm__ float *)sum[last][lastWorkStart].GetPhyAddr(),
+                                (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
+                                (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
+                                (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
+                                lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize,
+                                lastKvOffset == 0, lastActualCalcSoftmaxLen,
+                                lastWorkStart % headNumInGroup, headNumInGroup);
             if (!lastIsLastKvTile) {
                 set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);

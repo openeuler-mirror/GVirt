@@ -21,6 +21,7 @@ from tests.models.weight_utils import (hf_model_weights_iterator,
                                        load_tensor_parallel_weights,
                                        matrix_nd2nz, logger)
 
+debug = False
 world_size = 1
 rank = 0
 
@@ -461,9 +462,17 @@ class Block(nn.Module):
             self.mlp = MLP(dim=args.dim, inter_dim=args.inter_dim)
         self.input_layernorm = RMSNorm(args.dim, args.norm_eps)
         self.post_attention_layernorm = RMSNorm(args.dim, args.norm_eps)
+        self.first_k_dense_replace = args.first_k_dense_replace
+        self.layer_id = layer_id
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.first_k_dense_replace):
+            print(f"layer{self.layer_id} in: {self.input_layernorm(x)}")
+        if debug and rank == 0 and (self.layer_id == 1 or self.layer_id == self.first_k_dense_replace + 1):
+            print(f"layer{self.layer_id} after ffn: {self.input_layernorm(x)}")
         x = x + self.self_attn(self.input_layernorm(x), start_pos, freqs_cis, mask)
+        if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.first_k_dense_replace):
+            print(f"layer{self.layer_id} after attn: {self.post_attention_layernorm(x)}")
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
 

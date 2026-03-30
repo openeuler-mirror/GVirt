@@ -21,6 +21,7 @@ from tests.models.weight_utils import (hf_model_weights_iterator,
                                        load_tensor_parallel_weights,
                                        matrix_nd2nz, logger)
 
+debug = False
 world_size = 1
 rank = 0
 
@@ -417,9 +418,16 @@ class Block(nn.Module):
             self.mlp = MLP(dim=args.dim, inter_dim=args.inter_dim)
         self.input_layernorm = RMSNorm(args.dim, args.norm_eps)
         self.post_attention_layernorm = RMSNorm(args.dim, args.norm_eps)
+        self.layer_id = layer_id
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if debug and rank == 0 and self.layer_id == 0:
+            print(f"in: {self.input_layernorm(x)}")
+        if debug and rank == 0 and self.layer_id == 1:
+            print(f"after ffn: {self.input_layernorm(x)}")
         x = x + self.self_attn(self.input_layernorm(x), start_pos, freqs_cis, mask)
+        if debug and rank == 0 and self.layer_id == 0:
+            print(f"after attn: {self.post_attention_layernorm(x)}")
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
 

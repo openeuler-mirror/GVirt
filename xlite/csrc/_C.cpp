@@ -578,12 +578,12 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
     rt.Synchronize();
 }
 
-void Print(at::Tensor &x)
+void Print(at::Tensor &x, const char *name, uint32_t nRow, uint32_t nCol)
 {
     XTensor _x;
 
     InitXTensor(_x, x);
-    _x.Print();
+    _x.Print(name, nRow, nCol);
 }
 
 void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weightNZ,
@@ -1152,5 +1152,6 @@ PYBIND11_MODULE(_C, m)
     m.def("mla", &MLA);
 
     // funcs
-    m.def("print", &Print);
+    m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,
+          py::arg("col") = 6);
 }

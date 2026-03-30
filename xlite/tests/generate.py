@@ -147,6 +147,7 @@ def main(
     if rank != 0:
         print = lambda *_, **__: None
     torch.npu.set_device(local_rank)
+    torch.npu.config.allow_internal_format = True
     torch.set_num_threads(8)
     torch.manual_seed(965)
     with open(config) as f:
@@ -181,7 +182,7 @@ def main(
                 continue
             messages.append({"role": "user", "content": prompt})
             if model_type in {"deepseek", "glm4_moe"}:
-                prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+                prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
             elif model_type == "llama":
                 formatted_prompt = ""
                 for message in messages:
@@ -217,7 +218,8 @@ def main(
                 prompts_tokens_batch = [tokenizer.encode(item['query']) for item in batch]
             elif model_type in {"deepseek", "glm4_moe"}:
                 prompts_tokens_batch = [
-                    tokenizer.apply_chat_template([{"role": "user", "content": item['query']}], add_generation_prompt=True)
+                    tokenizer.apply_chat_template([{"role": "user", "content": item['query']}],
+                                                  add_generation_prompt=True, return_dict=False)
                     for item in batch
                 ]
             elif model_type == "llama":
