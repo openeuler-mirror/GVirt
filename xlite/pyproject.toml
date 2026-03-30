@@ -1,7 +1,7 @@
 [build-system]
 # synchronize with requirements-build.txt when updating build dependencies
 requires = [
-    "setuptools>=80.0.0",
+    "setuptools>=64.0.0,<82.0.0",
     "cmake>=3.22.0",
     "pybind11>=3.0.0",
     "torch>=2.5.1,<=2.9.0", # use torch+cpu; make sure (torch: build version <= runtime version)
@@ -31,7 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 # synchronize with requirements-dev.txt when updating dev dependencies
 dev = [
-    "setuptools>=80.0.0",
+    "setuptools>=64.0.0,<82.0.0",
     "cmake>=3.22.0",
     "numpy<2.0.0",
     "tqdm",

@@ -4,6 +4,6 @@
 
 # Note: the torch version for building xlite should not be higher than the torch version during runtime/dev
 
-setuptools>=80.0.0
+setuptools>=64.0.0,<82.0.0
 cmake>=3.22.0
 -r requirements.txt
