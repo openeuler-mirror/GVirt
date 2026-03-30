@@ -116,8 +116,10 @@ target_link_libraries(xlite PRIVATE
 )
 
 # _C
+find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
+
 execute_process(
-    COMMAND python -c "import sysconfig; print(sysconfig.get_path('purelib'))"
+    COMMAND ${Python3_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_path('purelib'))"
     OUTPUT_VARIABLE PYTHON_SYS_DIR
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
@@ -129,6 +131,7 @@ endif()
 find_package(pybind11 REQUIRED)
 find_package(Torch COMPONENTS Development REQUIRED)
 
+message(STATUS "Python3 executable: ${Python3_EXECUTABLE}")
 message(STATUS "pybind11 include: ${pybind11_INCLUDE_DIRS}")
 message(STATUS "torch cpp_extension include: ${TORCH_INCLUDE_DIRS}")
 message(STATUS "torch cpp_extension lib: ${TORCH_INSTALL_PREFIX}/lib")
