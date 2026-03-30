@@ -1,14 +1,10 @@
 [build-system]
 # synchronize with requirements-build.txt when updating build dependencies
 requires = [
-    "setuptools>=69",
-    "wheel",
-    "cmake>=3.16",
-    "pybind11",
-    "numpy<2.0.0",
-    "torch>=2.5.1",
-    "torch-npu>=2.5.1",
-    "PyYAML",
+    "setuptools>=80.0.0",
+    "cmake>=3.22.0",
+    "pybind11>=3.0.0",
+    "torch>=2.5.1,<=2.9.0", # use torch+cpu; make sure (torch: build version <= runtime version)
 ]
 build-backend = "setuptools.build_meta"
 
@@ -28,11 +24,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # synchronize with requirements.txt when updating dependencies
-dependencies = ["pybind11", "torch>=2.5.1"]
+dependencies = [
+    "torch>=2.5.1,<=2.9.0", # ake sure (torch: build version <= runtime version)
+]
 
 [project.optional-dependencies]
 # synchronize with requirements-dev.txt when updating dev dependencies
 dev = [
+    "setuptools>=80.0.0",
+    "cmake>=3.22.0",
     "numpy<2.0.0",
     "tqdm",
     "safetensors",
@@ -40,7 +40,8 @@ dev = [
     "sentencepiece",
     "protobuf",
     "transformers",
-    "torch-npu>=2.5.1",
+    "pyyaml>=6.0",
+    "torch-npu>=2.5.1",     # make sure (torch: build version <= runtime version)
     "clang-format==22.1.0",
     "clang-tidy==22.1.0",
     "flake8",

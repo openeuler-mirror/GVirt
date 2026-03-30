@@ -1,15 +1,19 @@
 # Runtime dependencies for local/dev environments.
 # The canonical package metadata lives in pyproject.toml.
 # Synchronize with pyproject.toml when updating dev dependencies.
--r requirements-build.txt
+
+# Note: the torch version during runtime should NOT be lower than the torch version during building xlite
+
 -r requirements.txt
-numpy<2.0.0
+setuptools>=80.0.0
+cmake>=3.22.0
 tqdm
 safetensors
 tiktoken
 sentencepiece
 protobuf
 transformers
+pyyaml>=6.0
 torch-npu>=2.5.1
 clang-format==22.1.0
 clang-tidy==22.1.0
