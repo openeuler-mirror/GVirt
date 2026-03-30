@@ -34,12 +34,9 @@ pip install xlite # 安装最新发布的版本
 # 或者使用源码编译安装最新的开发版本
 git clone https://atomgit.com/openeuler/GVirt.git
 cd GVirt/xlite
-pip install . # 安装当前目录下的xlite包
-
-# 若开发环境安装，建议使用开发模式安装（源码修改后可直接生效；仅限于开发环境无需重编译的修改）
-pip install -r requirements-build.txt # 安装构建依赖，推荐先行安装，确保构建环境准备就绪；也可在编译前安装
-pip install -r requirements-dev.txt # 可跳过，但是推荐先行安装开发依赖
-pip install -v -e .[dev] # 如需重复安装，可加上--no-build-isolation跳过构建隔离，但需确保构建依赖已安装
+pip install . --no-build-isolation # 安装当前目录下的xlite包
+# 若开发环境安装，建议使用"-v .[dev]"（py源码修改后可直接在开发环境中生效）
+pip install -v -e .[dev] --no-build-isolation
 ```
 该容器可用于编译和运行xlite，详细镜像见下表：
 
@@ -99,6 +96,14 @@ vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xli
 
 vllm_ascend + xlite在线服务的性能测试及性能对比分析，请参考[e2e_test.md](doc/e2e_test.md)
 
+构建/编译/分发准备过程请参考[创建容器](#快速上手qwen3-dense模型为例)部分。需提前安装构建依赖：
+```bash
+...
+cd GVirt/xlite
+pip install -r requirements-build.txt
+pip install -r requirements-dev.txt # 进一步安装开发依赖（可选）
+```
+
 #### 编译
 ```bash
 # 准备
@@ -116,9 +121,6 @@ python tests/kernels/add.py
 ##### 方法1：rpm
 ```bash
 # 切换到xlite目录下，执行以下命令准备rpm构建环境
-cd {xlite_source_dir}
-pip install -r requirements-build.txt # 安装构建依赖
-pip install -r requirements-dev.txt # 可选择进一步安装开发依赖
 mkdir -p /root/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SOPES,SPECS,SRPMS}
 # 拷贝源码至/root/rpmbuild/SOURCES/xlite-${VERSION}.tar.gz，执行以下命令
 VERSION=0.1.0 # 替换为当前版本号
@@ -130,14 +132,11 @@ rpmbuild -bb xlite.spec --nodebuginfo
 构建后生成的rpm包在/root/rpmbuild/RPMS/目录下
 ##### 方法2：whl
 ```bash
-python -m pip install build # 安装构建工具
-python -m build --wheel # 构建whl包；如需.tar.gz包可去掉--wheel参数
+python -m build --wheel --no-isolation # 构建whl包；如需.tar.gz包可去掉--wheel参数
 ```
 推荐使用上面命令，完整遵循`pyproject.toml`中的构建配置（含`[build-system]`）。
 也可以使用下面的方法通过`setup.py`进行编译和whl包构建（传统方式，可能不会自动安装`[build-system]`依赖；构建后执行清理）：
 ```bash
-pip install -r requirements-build.txt # 安装构建依赖
-pip install -r requirements-dev.txt # 可选择进一步安装开发依赖
 python setup.py bdist_wheel && python setup.py clean # 构建whl包并清理构建产物
 ```
 构建后生成的whl包在dist目录下
