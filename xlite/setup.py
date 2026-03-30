@@ -3,7 +3,6 @@
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 
-import os
 from pathlib import Path
 import shutil
 import subprocess
