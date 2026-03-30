@@ -6,6 +6,9 @@ Summary:        A lightweight, effective and easy-to-extend inference runtime
 License:        MulanPSL-2.0
 Source0:        %{name}-%{version}.tar.gz
 
+# Disable automatic dependency generation; equivalent to `rpm --nodeps` for the generated package.
+AutoReq:        no
+
 BuildRequires:  gcc-c++, cmake >= 3.16, make
 BuildRequires:  pciutils
 BuildRequires:  zlib-devel
@@ -43,6 +46,9 @@ export SETUPTOOLS_SCM_PRETEND_VERSION=%{version}
 rm -rf %{buildroot}
 %py3_install
 rm -rf %{buildroot}/%{python3_sitearch}/csrc
+# Drop Python bytecode caches so they do not need per-path %exclude entries.
+find %{buildroot}/%{python3_sitearch}/xlite -type d -name __pycache__ -prune -exec rm -rf {} +
+find %{buildroot}/%{python3_sitearch}/xlite -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 cp -r tests %{buildroot}/%{python3_sitearch}/xlite
 
 %post
@@ -59,14 +65,9 @@ fi
 %{python3_sitearch}/xlite/
 %{python3_sitearch}/xlite*.egg-info/
 %exclude %{python3_sitearch}/tests
-%exclude %{python3_sitearch}/xlite/__pycache__
-%exclude %{python3_sitearch}/xlite/tests/kernels/__pycache__
-%exclude %{python3_sitearch}/xlite/tests/funcs/__pycache__
-%exclude %{python3_sitearch}/xlite/tests/models/__pycache__
-%exclude %{python3_sitearch}/xlite/tests/__pycache__
-%exclude %{python3_sitearch}/xlite/tools/quantization/algorithms/__pycache__
-%exclude %{python3_sitearch}/xlite/tools/quantization/__pycache__
-%exclude %{python3_sitearch}/xlite/tools/__pycache__
+%exclude %{python3_sitearch}/**/__pycache__
+%exclude %{python3_sitearch}/**/*.pyc
+%exclude %{python3_sitearch}/**/*.pyo
 
 %changelog
 * Thu Oct 16 2025 wangxiaoran <wangxiaoran11@huawei.com> - 1.0-1
