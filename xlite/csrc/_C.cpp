@@ -957,6 +957,7 @@ void DeQuant(XRuntime &rt, at::Tensor &in, at::Tensor &scale, at::Tensor &out, b
     XTensor _in, _scale, _out;
 
     InitXTensor(_in, in);
+    InitXTensor(_scale, scale);
     InitXTensor(_out, out);
     XliteOpDeQuant(rt, _in, _scale, _out, hasScale);
     rt.Synchronize();

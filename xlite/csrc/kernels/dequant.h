@@ -44,6 +44,7 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t 
     UBA(bfloat16_t) out_ub_buf[PINGPONG] = {out_ub_buf0, out_ub_buf1};
 
     UBA(float32_t) tmp_ptr;
+    UBA(float32_t) scale_val = scale_ub_buf;
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
@@ -52,13 +53,12 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t 
 
     int event_id = 0;
 
-    // GM -> UB, scale_gm_buf -> scale_ub_buf
     if (hasScale) {
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-        copy_gm_to_ubuf(scale_ub_buf, scale_gm_buf, 0, 1,
-                        DIV_ROUND_UP(n * sizeof(float32_t), BLOCK_SIZE), 0, 0);
-        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+        // GM -> UB, scale_gm_buf -> scale_ub_buf
+        copy_gm_to_ubuf_align_b16(scale_ub_buf, scale_gm_buf, 0, 1, m * sizeof(float32_t), 0, 0, 0,
+                                  0);
+        set_flag(PIPE_MTE2, PIPE_S, EVENT_ID2);
+        wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID2);
     }
 
     for (uint32_t process = block_idx; process < m; process += uint32_t(block_num)) {
@@ -74,18 +74,14 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t 
         vconv_f162f32(tmp_ub_buf[event_id], in_ub_buf[event_id],
                       DIV_ROUND_UP(n * sizeof(float32_t), VECTOR_MAX_BYTESIZE), 1, 1, 8, 4);
         pipe_barrier(PIPE_V);
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
 
-        // VMUL, tmp_ub_buf -> VMUL(in * scale) -> tmp_ub_buf
+        // VMULS, tmp_ub_buf -> VMULS(in * scale_val) -> tmp_ub_buf
         if (hasScale) {
-            if (process < uint32_t(block_num)) {
-                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
-            }
-            vmul(mul_ub_buf[event_id], tmp_ub_buf[event_id], scale_ub_buf,
-                 DIV_ROUND_UP(n * sizeof(float32_t), VECTOR_MAX_BYTESIZE), 1, 1, 1, 8, 8, 8);
+            scale_val = scale_ub_buf + process;
+            vmuls(mul_ub_buf[event_id], tmp_ub_buf[event_id], float(*scale_val),
+                  DIV_ROUND_UP(n * sizeof(float32_t), VECTOR_MAX_BYTESIZE), 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
-            if (process < uint32_t(block_num)) {
-                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-            }
             tmp_ptr = mul_ub_buf[event_id];
         }
         tmp_ptr = hasScale ? mul_ub_buf[event_id] : tmp_ub_buf[event_id];
@@ -94,7 +90,6 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t 
         vconv_f322bf16r(out_ub_buf[event_id], tmp_ptr,
                         DIV_ROUND_UP(n * sizeof(float32_t), VECTOR_MAX_BYTESIZE), 1, 1, 4, 8);
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + event_id);
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
 
         // UB -> GM, out_ub_buf -> out_gm_buf
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + event_id);
@@ -107,9 +102,6 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t 
 
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-    if (hasScale) {
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-    }
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     pipe_barrier(PIPE_ALL);
