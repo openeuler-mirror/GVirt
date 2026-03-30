@@ -1,2 +1,11 @@
-pybind11
-torch>=2.5.1
+# Runtime dependencies for local/dev environments.
+# The canonical package metadata lives in pyproject.toml.
+# Synchronize with pyproject.toml when updating dependencies.
+
+# to install torch with CPU support only, you may need to add the following flag to pip install:
+# --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Note: the torch version during runtime should NOT be lower than the torch version during building xlite
+
+pybind11>=3.0.0
+torch>=2.5.1,<=2.9.0

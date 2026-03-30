@@ -1,0 +1,9 @@
+# Build dependencies for xlite
+# The canonical package metadata lives in pyproject.toml.
+# Synchronize with pyproject.toml when updating build dependencies.
+
+# Note: the torch version for building xlite should not be higher than the torch version during runtime/dev
+
+setuptools>=64.0.0,<82.0.0
+cmake>=3.22.0
+-r requirements.txt
