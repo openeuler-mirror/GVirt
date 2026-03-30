@@ -123,4 +123,8 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
 void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out);
 
 void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, bool hasScale);
+
+void XliteOpConcat3(XRuntime &rt, XTensor &in0, XTensor &in1, XTensor &in2, XTensor &out);
+void XliteOpSplit3(XRuntime &rt, XTensor &in, XTensor &out0, XTensor &out1, XTensor &out2,
+                   size_t size0, size_t size1, size_t size2, uint32_t numPackets);
 #endif

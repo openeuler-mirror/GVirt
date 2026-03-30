@@ -975,3 +975,38 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, boo
         std::cerr << __func__ << ": unsupported!" << std::endl;
     }
 }
+
+void XliteOpConcat3(XRuntime &rt, XTensor &in0, XTensor &in1, XTensor &in2, XTensor &out)
+{
+    // 计算各部分字节大小
+    size_t bytes0 = in0.numel * XDtypeBit(in0.dtype) / 8;
+    size_t bytes1 = in1.numel * XDtypeBit(in1.dtype) / 8;
+    size_t bytes2 = in2.numel * XDtypeBit(in2.dtype) / 8;
+
+    // 拼接三个tensor到输出缓冲区
+    CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(out.ptr), bytes0, in0.ptr, bytes0,
+                               ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(out.ptr) + bytes0, bytes1, in1.ptr, bytes1,
+                               ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+    CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(out.ptr) + bytes0 + bytes1, bytes2, in2.ptr,
+                               bytes2, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+}
+
+void XliteOpSplit3(XRuntime &rt, XTensor &in, XTensor &out0, XTensor &out1, XTensor &out2,
+                   size_t size0, size_t size1, size_t size2, uint32_t numPackets)
+{
+    // 从输入缓冲区解开为3个tensor
+    for (uint32_t i = 0; i < numPackets; i++) {
+        uint8_t *srcBase = static_cast<uint8_t *>(in.ptr) + i * (size0 + size1 + size2);
+        // 解第1个数据
+        CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(out0.ptr) + i * size0, size0, srcBase,
+                                   size0, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        // 解第2个数据
+        CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(out1.ptr) + i * size1, size1,
+                                   srcBase + size0, size1, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        // 解第3个数据
+        CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(out2.ptr) + i * size2, size2,
+                                   srcBase + size0 + size1, size2, ACL_MEMCPY_DEVICE_TO_DEVICE,
+                                   rt.stream));
+    }
+}

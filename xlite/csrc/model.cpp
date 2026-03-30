@@ -562,15 +562,39 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
 
     if (_c.defDpSize > 1) {
         XTensor &inputPerDp = tokenSorted, &weightsPerDp = weights, &routingPerDp = routing;
+        // 计算字节大小
+        size_t bytesInput = m * _c.hiddenSize * XDtypeBit(inputPerDp.dtype) / 8;
+        size_t bytesWeights = m * _c.nRoutedExperts * XDtypeBit(weightsPerDp.dtype) / 8;
+        size_t bytesRouting = m * _c.nRoutedExperts / 8;
+        size_t totalBytes = bytesInput + bytesWeights + bytesRouting;
+        size_t allTotalBytes = totalBytes * _c.defDpSize;
+
+        // 获取最终输出用的tensor
         XTensor &inputAllDp =
             rt.pool->GetTensor({mAllDp, _c.hiddenSize}, inputPerDp.dtype, DBG_LOC);
         XTensor &weightsAllDp =
             rt.pool->GetTensor({mAllDp, _c.nRoutedExperts}, weightsPerDp.dtype, DBG_LOC);
         XTensor &routingAllDp =
             rt.pool->GetTensor({mAllDp, _c.nRoutedExperts}, routingPerDp.dtype, DBG_LOC);
-        XliteOpAllGather(rt, inputPerDp, inputAllDp, DP);
-        XliteOpAllGather(rt, weightsPerDp, weightsAllDp, DP);
-        XliteOpAllGather(rt, routingPerDp, routingAllDp, DP);
+
+        // 获取临时buffer
+        XTensor &packedSend =
+            rt.pool->GetTensor({static_cast<uint32_t>(totalBytes)}, INT8, DBG_LOC);
+        XTensor &packedRecv =
+            rt.pool->GetTensor({static_cast<uint32_t>(allTotalBytes)}, INT8, DBG_LOC);
+
+        // 打包三个tensor
+        XliteOpConcat3(rt, inputPerDp, weightsPerDp, routingPerDp, packedSend);
+
+        // 一次AllGather
+        XliteOpAllGather(rt, packedSend, packedRecv, DP);
+        rt.pool->PutTensor(packedSend);
+
+        // 拆包为3个Tensor
+        XliteOpSplit3(rt, packedRecv, inputAllDp, weightsAllDp, routingAllDp, bytesInput,
+                      bytesWeights, bytesRouting, _c.defDpSize);
+        rt.pool->PutTensor(packedRecv);
+
         XliteOpPermutation(rt, inputAllDp, routingAllDp, start, end, expertsSorted, unpIdx,
                            expertsCounts);
         rt.pool->PutTensor(routingPerDp);
@@ -920,6 +944,7 @@ size_t XModel::GetTensorPoolSize(int dbg)
     size_t moeDispatchSize = 0;
     size_t scoresBufSize = 0;
     size_t moeDispatchDpBufSize = 0;
+    size_t moeDispatchDpAllGatherBufSize = 0;
     size_t routedExpertsBufSize = 0;
     size_t shareExpertsBufSize = 0;
     size_t size = 0;
@@ -963,6 +988,11 @@ size_t XModel::GetTensorPoolSize(int dbg)
         if (_c.defDpSize > 1) {
             moeDispatchDpBufSize += _c.maxM * _c.defDpSize * _c.hiddenSize * dtypeSize;
             moeDispatchDpBufSize += _c.maxM * _c.defDpSize * _c.nRoutedExperts * dtypeSize * 2;
+            moeDispatchDpAllGatherBufSize += _c.maxM * _c.hiddenSize * dtypeSize;
+            moeDispatchDpAllGatherBufSize += _c.maxM * _c.nRoutedExperts * dtypeSize;
+            moeDispatchDpAllGatherBufSize += _c.maxM * _c.nRoutedExperts / 8;
+            moeDispatchDpBufSize += moeDispatchDpAllGatherBufSize;
+            moeDispatchDpBufSize += moeDispatchDpAllGatherBufSize * _c.defDpSize;
         }
         // MoE routed experts
         uint32_t intermediateSize = _c.moeIntermediateSize / _c.moeTPSize;
