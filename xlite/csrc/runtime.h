@@ -11,12 +11,15 @@
 #define XLITE_DEFAULT_PORT 10266
 #define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144
 
-static bool gDebugOn = false;
+#ifdef XLITE_DEBUG_ON
 #define XLITE_DEBUG_POINT(condition, rt, h, str) \
-    if (gDebugOn && (condition)) {               \
+    if (condition) {                             \
         (rt).Synchronize();                      \
         (h).Print((str));                        \
     }
+#else
+#define XLITE_DEBUG_POINT(condition, rt, h, str)
+#endif
 
 typedef void *aclrtContext;
 typedef void *aclrtNotify;
