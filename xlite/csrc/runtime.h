@@ -65,6 +65,7 @@ public:
     XRuntime(uint32_t devid, size_t sizeMB = 0, uint32_t rankId = 0, uint32_t tpSize = 1,
              uint32_t dpSize = 1);
     ~XRuntime(void);
+    void Init(size_t sizeMB);
     void InitAttn(uint64_t maxM, uint64_t maxBatch, uint64_t maxSeqLen, uint32_t blockSize);
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxM, uint64_t maxBatch, uint64_t maxSeqLen,
                      uint32_t blockSize, XModelAttnType attnType);
@@ -78,7 +79,7 @@ public:
     void NotifyWaitPeerStream();
     void NotifyRecordPeerStream();
 
-    int InitTensorPool(size_t sizeMB);
+    void InitTensorPool(size_t sizeMB);
     uint32_t rankId(void)
     {
         return _rankId;
@@ -143,6 +144,7 @@ private:
     aclrtEvent _event;
     aclrtContext context;
     bool _init_outside = false;
+    bool inited = false;
     uint32_t _rankId;
     uint32_t _tpSize;
     uint32_t _dpSize;

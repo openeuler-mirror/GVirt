@@ -29,6 +29,16 @@ bool isEnvironmentVariableTrue(const char *env_value_cstr)
 XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize)
     : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize)
 {
+    if (sizeMB != 0) {
+        Init(sizeMB);
+    }
+}
+
+void XRuntime::Init(size_t sizeMB)
+{
+    if (inited) {
+        return;
+    }
     aclError init_ret = aclInit(nullptr);
     uint32_t count;
     if (init_ret == ACL_ERROR_REPEAT_INITIALIZE) {
@@ -36,7 +46,7 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     } else {
         CHECK_ACL(init_ret);
     }
-    CHECK_ACL(aclrtSetDevice(devid));
+    CHECK_ACL(aclrtSetDevice(_devid));
     CHECK_ACL(aclrtCreateStream(&stream));
     CHECK_ACL(aclrtGetDeviceCount(&count));
     _nDevPerNode = count;
@@ -48,7 +58,7 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
         }
     }
 
-    _rankSize = tpSize * dpSize;
+    _rankSize = _tpSize * _dpSize;
     if (InitHcclComm()) {
         delete pool;
         throw std::runtime_error("XRuntime: HCCL initialization failed");
@@ -62,9 +72,9 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     }
 
     int64_t val;
-    CHECK_ACL(aclGetDeviceCapability(devid, ACL_DEVICE_INFO_AI_CORE_NUM, &val));
+    CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_AI_CORE_NUM, &val));
     aicNum = static_cast<uint32_t>(val);
-    CHECK_ACL(aclGetDeviceCapability(devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
+    CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
     aivNum = static_cast<uint32_t>(val);
     originAicNum = aicNum;
     originAivNum = aivNum;
@@ -85,10 +95,12 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
     if (isEnvironmentVariableTrue(envFlashAttentionEnable)) {
         enableFlashAttention = true;
-        if (rankId == 0) {
+        if (_rankId == 0) {
             std::cout << "Xlite Flash Attention Enabled!" << std::endl;
         }
     }
+
+    inited = true;
 }
 
 XRuntime::~XRuntime(void)
@@ -475,15 +487,9 @@ void XRuntime::NotifyRecordPeerStream()
     CHECK_ACL(aclrtRecordNotify(peerNotify, stream));
 }
 
-int XRuntime::InitTensorPool(size_t sizeMB)
+void XRuntime::InitTensorPool(size_t sizeMB)
 {
-    if (pool) {
-        std::cout << "pool already inited!" << std::endl;
-        return 0;
+    if (sizeMB != 0) {
+        Init(sizeMB);
     }
-    pool = new XTensorPool(sizeMB << MB_BIT);
-    if (pool->Init()) {
-        return -EFAULT;
-    }
-    return InitXcclComm();
 }
