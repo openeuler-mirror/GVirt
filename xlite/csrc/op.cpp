@@ -107,16 +107,15 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
-        bool needCopy = (!rt.pool->TensorInPool(in) || !rt.pool->TensorInPool(out));
+        bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
         XTensor *tmpIn = nullptr;
         XTensor *tmpOut = nullptr;
 
         if (needCopy) {
-            tmpIn =
-                &rt.pool->GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
-            tmpOut = &rt.pool->GetTensor(out.shape, out.dtype, DBG_LOC);
+            tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+            tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
             CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, inBytes, in.ptr, inBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpIn->ptr;
@@ -184,8 +183,8 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, outPtr, outBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            rt.pool->PutTensor(*tmpIn);
-            rt.pool->PutTensor(*tmpOut);
+            rt.PutTensor(*tmpIn);
+            rt.PutTensor(*tmpOut);
         }
         return;
     }
@@ -211,16 +210,15 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
-        bool needCopy = (!rt.pool->TensorInPool(in) || !rt.pool->TensorInPool(out));
+        bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
         XTensor *tmpIn = nullptr;
         XTensor *tmpOut = nullptr;
 
         if (needCopy) {
-            tmpIn =
-                &rt.pool->GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
-            tmpOut = &rt.pool->GetTensor(out.shape, out.dtype, DBG_LOC);
+            tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+            tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
             CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, inBytes, in.ptr, inBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpIn->ptr;
@@ -281,8 +279,8 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, outPtr, outBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            rt.pool->PutTensor(*tmpIn);
-            rt.pool->PutTensor(*tmpOut);
+            rt.PutTensor(*tmpIn);
+            rt.PutTensor(*tmpOut);
         }
         return;
     }
@@ -306,14 +304,13 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
     size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
-        bool needCopy = (!rt.pool->TensorInPool(in) || !rt.pool->TensorInPool(out));
+        bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
         XTensor *tmpBuff = nullptr;
 
         if (needCopy) {
-            tmpBuff =
-                &rt.pool->GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+            tmpBuff = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
             CHECK_ACL(aclrtMemcpyAsync(tmpBuff->ptr, bytes, in.ptr, bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpBuff->ptr;
@@ -374,7 +371,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, outPtr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
                                        rt.stream));
-            rt.pool->PutTensor(*tmpBuff);
+            rt.PutTensor(*tmpBuff);
         }
         return;
     }
@@ -507,13 +504,13 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                                      deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16) {
         if (bias.ptr != nullptr) {
-            XTensor &biasFp32 = rt.pool->GetTensor(bias.shape, FP32, DBG_LOC);
+            XTensor &biasFp32 = rt.GetTensor(bias.shape, FP32, DBG_LOC);
             aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, bias.ptr, biasFp32.ptr,
                                               bias.numel);
             aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
                                           k, weightNZ, transpose, m0, n0, k0, swizzle, biasFp32.ptr,
                                           deqScale.ptr);
-            rt.pool->PutTensor(biasFp32);
+            rt.PutTensor(biasFp32);
         } else {
             aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
                                           k, weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr,
@@ -523,11 +520,11 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
-        XTensor &tmp = rt.pool->GetTensor(in.shape, FP32, DBG_LOC);
+        XTensor &tmp = rt.GetTensor(in.shape, FP32, DBG_LOC);
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, tmp.ptr, in.numel);
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k,
                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
-        rt.pool->PutTensor(tmp);
+        rt.PutTensor(tmp);
     } else if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == FP16 && !transpose) {
         aclrtlaunch_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                   weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);

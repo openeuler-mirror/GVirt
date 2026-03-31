@@ -36,7 +36,7 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
 
 void XRuntime::Init(size_t sizeMB)
 {
-    if (inited) {
+    if (_inited) {
         return;
     }
     aclError init_ret = aclInit(nullptr);
@@ -52,21 +52,21 @@ void XRuntime::Init(size_t sizeMB)
     _nDevPerNode = count;
 
     if (sizeMB != 0) {
-        pool = new XTensorPool(sizeMB << MB_BIT);
-        if (pool->Init()) {
-            throw std::runtime_error("XRuntime: tensor pool initialization failed");
+        _pool = new XTensorPool(sizeMB << MB_BIT);
+        if (_pool->Init()) {
+            throw std::runtime_error("XRuntime: tensor _pool initialization failed");
         }
     }
 
     _rankSize = _tpSize * _dpSize;
     if (InitHcclComm()) {
-        delete pool;
+        delete _pool;
         throw std::runtime_error("XRuntime: HCCL initialization failed");
     }
 
     if (sizeMB != 0) {
         if (InitXcclComm()) {
-            delete pool;
+            delete _pool;
             throw std::runtime_error("XRuntime: XCCL initialization failed");
         }
     }
@@ -100,7 +100,7 @@ void XRuntime::Init(size_t sizeMB)
         }
     }
 
-    inited = true;
+    _inited = true;
 }
 
 XRuntime::~XRuntime(void)
@@ -114,7 +114,7 @@ XRuntime::~XRuntime(void)
         HcclCommDestroy(_dpComm);
     }
 
-    delete pool;
+    delete _pool;
     (void)aclrtDestroyEvent(_event);
     (void)aclrtDestroyNotify(notify);
     (void)aclrtDestroyStream(stream);
@@ -212,8 +212,8 @@ int XRuntime::InitXcclComm(void)
 
     XSock *sock = new XSock(_rankId, _rankSize, _ips[0], _port + XLITE_CCL_PORT_OFFSET);
 
-    _ipcXTensorMems[_rankId] = pool->Ptr();
-    CHECK_ACL(aclrtIpcMemGetExportKey(pool->Ptr(), pool->Size(), _ipcXTensorKeys[_rankId],
+    _ipcXTensorMems[_rankId] = _pool->Ptr();
+    CHECK_ACL(aclrtIpcMemGetExportKey(_pool->Ptr(), _pool->Size(), _ipcXTensorKeys[_rankId],
                                       EXPORT_KEY_LEN,
                                       ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION));
     sock->AllGather(&_ipcXTensorKeys[_rankId], EXPORT_KEY_LEN, _ipcXTensorKeys);
@@ -492,4 +492,19 @@ void XRuntime::InitTensorPool(size_t sizeMB)
     if (sizeMB != 0) {
         Init(sizeMB);
     }
+}
+
+XTensor &XRuntime::GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc)
+{
+    return _pool->GetTensor(shape, dtype, loc);
+}
+
+void XRuntime::PutTensor(XTensor &t)
+{
+    _pool->PutTensor(t);
+}
+
+bool XRuntime::TensorInPool(XTensor &t)
+{
+    return _pool->TensorInPool(t);
 }

@@ -80,6 +80,13 @@ public:
     void NotifyRecordPeerStream();
 
     void InitTensorPool(size_t sizeMB);
+    XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
+    void PutTensor(XTensor &t);
+    bool TensorInPool(XTensor &t);
+    bool Inited(void)
+    {
+        return _inited;
+    };
     uint32_t rankId(void)
     {
         return _rankId;
@@ -97,7 +104,6 @@ public:
     uint32_t aivNum;
     uint32_t originAicNum;
     uint32_t originAivNum;
-    XTensorPool *pool = nullptr;
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;
     uint32_t commOptimizeLen = XLITE_DEFAULT_COMM_OPTIMIZE_LEN;
@@ -144,7 +150,8 @@ private:
     aclrtEvent _event;
     aclrtContext context;
     bool _init_outside = false;
-    bool inited = false;
+    bool _inited = false;
+    XTensorPool *_pool = nullptr;
     uint32_t _rankId;
     uint32_t _tpSize;
     uint32_t _dpSize;
