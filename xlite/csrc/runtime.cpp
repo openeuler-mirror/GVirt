@@ -39,12 +39,12 @@ void XRuntime::Init(size_t sizeMB)
     if (_inited) {
         return;
     }
-    aclError init_ret = aclInit(nullptr);
+    aclError initRet = aclInit(nullptr);
     uint32_t count;
-    if (init_ret == ACL_ERROR_REPEAT_INITIALIZE) {
-        _init_outside = true;
+    if (initRet == ACL_ERROR_REPEAT_INITIALIZE) {
+        _initOutside = true;
     } else {
-        CHECK_ACL(init_ret);
+        CHECK_ACL(initRet);
     }
     CHECK_ACL(aclrtSetDevice(_devid));
     CHECK_ACL(aclrtCreateStream(&stream));
@@ -54,7 +54,7 @@ void XRuntime::Init(size_t sizeMB)
     if (sizeMB != 0) {
         _pool = new XTensorPool(sizeMB << MB_BIT);
         if (_pool->Init()) {
-            throw std::runtime_error("XRuntime: tensor _pool initialization failed");
+            throw std::runtime_error("XRuntime: tensor pool initialization failed");
         }
     }
 
@@ -115,9 +115,15 @@ XRuntime::~XRuntime(void)
     }
 
     delete _pool;
-    (void)aclrtDestroyEvent(_event);
-    (void)aclrtDestroyNotify(notify);
-    (void)aclrtDestroyStream(stream);
+    if (_event) {
+        (void)aclrtDestroyEvent(_event);
+    }
+    if (notify) {
+        (void)aclrtDestroyNotify(notify);
+    }
+    if (stream) {
+        (void)aclrtDestroyStream(stream);
+    }
     (void)aclrtResetDevice(static_cast<int>(_devid));
 
     if (_attnInitialized) {
@@ -131,7 +137,7 @@ XRuntime::~XRuntime(void)
         (void)aclrtFree(_blockTables.ptr);
     }
 
-    if (!_init_outside) {
+    if (!_initOutside) {
         (void)aclFinalize();
     }
 }
@@ -487,16 +493,17 @@ void XRuntime::NotifyRecordPeerStream()
     CHECK_ACL(aclrtRecordNotify(peerNotify, stream));
 }
 
-void XRuntime::InitTensorPool(size_t sizeMB)
+int XRuntime::InitTensorPool(size_t sizeMB)
 {
     if (sizeMB != 0) {
         Init(sizeMB);
     }
+    return 0;
 }
 
 XTensor &XRuntime::GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc)
 {
-    return _pool->GetTensor(shape, dtype, loc);
+    return _pool->GetTensor(std::move(shape), dtype, loc);
 }
 
 void XRuntime::PutTensor(XTensor &t)
@@ -507,4 +514,56 @@ void XRuntime::PutTensor(XTensor &t)
 bool XRuntime::TensorInPool(XTensor &t)
 {
     return _pool->TensorInPool(t);
+}
+
+void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
+{
+    if (_inited) {
+        return;
+    }
+    aclError initRet = aclInit(nullptr);
+    uint32_t count;
+    if (initRet == ACL_ERROR_REPEAT_INITIALIZE) {
+        _initOutside = true;
+    } else {
+        CHECK_ACL(initRet);
+    }
+    CHECK_ACL(aclrtGetDeviceCount(&count));
+    _nDevPerNode = count;
+
+    _pool = new XDummyTensorPool(sizeMB << MB_BIT);
+    if (_pool->Init()) {
+        throw std::runtime_error("XDummyRuntime: tensor pool initialization failed");
+    }
+    _rankSize = _tpSize * _dpSize;
+
+    int64_t val;
+    CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_AI_CORE_NUM, &val));
+    aicNum = static_cast<uint32_t>(val);
+    CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
+    aivNum = static_cast<uint32_t>(val);
+    originAicNum = aicNum;
+    originAivNum = aivNum;
+
+    const char *envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
+    if (envCommOptimizeLen) {
+        char *endPtr = nullptr;
+        long val = strtol(envCommOptimizeLen, &endPtr, 10);
+        if (endPtr != envCommOptimizeLen && *endPtr == '\0' && val >= 0) {
+            commOptimizeLen = static_cast<uint32_t>(val);
+        }
+    }
+
+    const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
+    if (isEnvironmentVariableTrue(envFlashAttentionEnable)) {
+        enableFlashAttention = true;
+    }
+
+    _inited = true;
+}
+
+size_t XDummyRuntime::maxUsedSize(void)
+{
+    auto *dummyPool = dynamic_cast<XDummyTensorPool *>(_pool);
+    return dummyPool ? dummyPool->maxUsedSize : 0;
 }

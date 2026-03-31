@@ -929,91 +929,63 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::pair<XTensor, XTen
 
 size_t XModel::GetTensorPoolSize(int dbg)
 {
-    size_t dtypeSize = XDtypeBit(embed.dtype) / 8;
-    size_t attnSize, ffnSize;
-    size_t mlpBufSize = 0;
-    size_t moeBufSize = 0;
-    size_t moeGateSize = 0;
-    size_t moeDispatchSize = 0;
-    size_t scoresBufSize = 0;
-    size_t moeDispatchDpBufSize = 0;
-    size_t moeDispatchDpAllGatherBufSize = 0;
-    size_t routedExpertsBufSize = 0;
-    size_t shareExpertsBufSize = 0;
-    size_t size = 0;
-    size_t base = 0;
-    const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
+    XDummyRuntime rt(_rankId, 0, _rankId, _c.defTpSize, _c.defDpSize);
+    rt.InitDummyRuntime(1ull << 40);
 
-    // TODO
-    if (_c.attnType != XMODEL_ATTN_MHA) {
-        return 1024;
-    }
+    XModelAttnMeta attnMeta;
+    attnMeta.version = 0;
+    uint32_t batchSize = 1;
+    uint32_t seqLen = _c.maxM;
+    uint32_t maxNumBlocks = DIV_ROUND_UP(seqLen, _c.blockSize);
 
-    base = ROUND_UP(_c.maxM, _c.defTpSize) * _c.hiddenSize * 3 * dtypeSize;
-    attnSize = _c.maxM * mhaQKV[0].shape[0] * dtypeSize;
-    attnSize += _c.maxM * attnOut[0].shape[1] * dtypeSize;
-    if (!isEnvironmentVariableTrue(envFlashAttentionEnable)) {
-        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.maxSeqLen * dtypeSize;
-    } else {
-        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * TILESIZE_OF_CACHED_KV * dtypeSize;
-        attnSize += AIC_MAX_NUM * TILESIZE_OF_QUERY * 2 * _c.headDim * dtypeSize;
-        attnSize += AIV_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
-        attnSize += AIV_MAX_NUM * TILESIZE_OF_QUERY * 2 * sizeof(float);
-        attnSize += _c.maxM * _c.nHeads * sizeof(float);
-        attnSize += _c.maxM * _c.nHeads * sizeof(float);
+    for (uint32_t i = 0; i < batchSize; i++) {
+        attnMeta.lens.push_back(seqLen);
+        attnMeta.cachedLens.push_back(0);
+        attnMeta.isPrefills.push_back(true);
+        std::vector<uint32_t> blockTable(maxNumBlocks);
+        for (uint32_t j = 0; j < maxNumBlocks; j++) {
+            blockTable[j] = i * maxNumBlocks + j;
+        }
+        attnMeta.blockTables.push_back(blockTable);
     }
 
-    // FFN MLP
-    if (_c.nDenseLayers > 0) {
-        mlpBufSize += _c.maxM * mlpUpGate[0].shape[0] * dtypeSize;
-        mlpBufSize += _c.maxM * mlpDown[0].shape[1] * dtypeSize;
+    std::vector<std::pair<XTensor, XTensor>> kvCache(_c.nLayers);
+    for (uint32_t i = 0; i < _c.nLayers; i++) {
+        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+        if (_c.attnType == XMODEL_ATTN_MHA) {
+            XTensor kCache({_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                           embed.dtype, nullptr);
+            XTensor vCache({_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                           embed.dtype, nullptr);
+            kvCache[i] = {kCache, vCache};
+        } else if (_c.attnType == XMODEL_ATTN_MLA) {
+            XTensor kCache(
+                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.kvLoraRank},
+                embed.dtype, nullptr);
+            XTensor vCache(
+                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.ropeHeadDim},
+                embed.dtype, nullptr);
+            kvCache[i] = {kCache, vCache};
+        }
     }
-    // FFN MoE
-    if (_c.nDenseLayers < _c.nLayers) {
-        // MoE gate
-        moeGateSize += _c.maxM * _c.nRoutedExperts * dtypeSize;
-        moeGateSize += _c.maxM * _c.nRoutedExperts / 8;
-        scoresBufSize += _c.maxM * _c.nRoutedExperts * dtypeSize;
-        // MoE dispatch
-        moeDispatchSize += (_c.maxM * _c.defDpSize + 1) * _c.nRoutedExperts * sizeof(int32_t);
-        moeDispatchSize += _c.maxM * _c.defDpSize * _c.nActExperts * _c.hiddenSize * dtypeSize;
-        moeDispatchSize += _c.nRoutedExperts * sizeof(int32_t);
-        if (_c.defDpSize > 1) {
-            moeDispatchDpBufSize += _c.maxM * _c.defDpSize * _c.hiddenSize * dtypeSize;
-            moeDispatchDpBufSize += _c.maxM * _c.defDpSize * _c.nRoutedExperts * dtypeSize * 2;
-            moeDispatchDpAllGatherBufSize += _c.maxM * _c.hiddenSize * dtypeSize;
-            moeDispatchDpAllGatherBufSize += _c.maxM * _c.nRoutedExperts * dtypeSize;
-            moeDispatchDpAllGatherBufSize += _c.maxM * _c.nRoutedExperts / 8;
-            moeDispatchDpBufSize += moeDispatchDpAllGatherBufSize;
-            moeDispatchDpBufSize += moeDispatchDpAllGatherBufSize * _c.defDpSize;
-        }
-        // MoE routed experts
-        uint32_t intermediateSize = _c.moeIntermediateSize / _c.moeTPSize;
-        routedExpertsBufSize =
-            _c.maxM * _c.defDpSize * _c.nActExperts * intermediateSize * 3 * dtypeSize;
-        // MoE share experts
-        if (_c.nSharedExperts != 0) {
-            shareExpertsBufSize += _c.maxM * _c.hiddenSize * dtypeSize;
-            shareExpertsBufSize += _c.maxM * intermediateSize * 3 * dtypeSize;
-        }
-        if (_c.defDpSize > 1) {
-            shareExpertsBufSize += _c.maxM * _c.defDpSize * _c.hiddenSize * dtypeSize;
-        }
-        moeBufSize = moeGateSize + moeDispatchSize +
-                     std::max({scoresBufSize, moeDispatchDpBufSize, routedExpertsBufSize,
-                               shareExpertsBufSize});
+
+    std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
+    for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
+        XTensor deepstackEmbed({_c.maxM, _c.hiddenSize}, embed.dtype, nullptr);
+        deepstackInputEmbeds[i] = deepstackEmbed;
     }
-    ffnSize = std::max(mlpBufSize, moeBufSize);
-    size = base + std::max(attnSize, ffnSize);
+
+    XTensor freqsCis({_c.maxM, _c.ropeHeadDim}, embed.dtype, nullptr);
+    XTensor input({_c.maxM}, INT32, nullptr);
+    XTensor output({_c.maxM, _c.hiddenSize}, embed.dtype, nullptr);
+
+    rt.PrepareAttn(attnMeta, _c.maxM, _c.maxBatch, _c.maxSeqLen, _c.blockSize, _c.attnType);
+    ForwardAndGetLogits(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
+    size_t size = rt.maxUsedSize();
 
     if (_rankId == 0 && dbg) {
-        std::cout << "[Tensor pool] base: " << base << " B, attn: " << attnSize
-                  << " B, ffn: " << ffnSize << " B " << "{mlp: " << mlpBufSize
-                  << " B, moe: " << moeBufSize << " B " << "(gate: " << moeGateSize
-                  << " B, dispatch: " << moeDispatchSize << " B" << ", scores: " << scoresBufSize
-                  << " B, dpBuf: " << moeDispatchDpBufSize << " B"
-                  << ", routed experts: " << routedExpertsBufSize << " B"
-                  << ", share experts: " << shareExpertsBufSize << " B)}" << std::endl;
+        std::cout << "[Tensor pool] calculated size: " << size << " bytes (" << (size >> MB_BIT)
+                  << " MB)" << std::endl;
     }
-    return (size >> MB_BIT) + 128;
+    return DIV_ROUND_UP(size, 1ull << MB_BIT);
 }

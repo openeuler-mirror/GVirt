@@ -266,7 +266,9 @@ int XTensorPool::Init(void)
 
 XTensorPool::~XTensorPool(void)
 {
-    (void)aclrtFree(_ptr);
+    if (_ptr != nullptr) {
+        (void)aclrtFree(_ptr);
+    }
 }
 
 XTensor &XTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc)
@@ -341,4 +343,58 @@ bool XTensorPool::TensorInPool(XTensor &t)
 {
     return t.ptr >= _ptr &&
            t.ptr < reinterpret_cast<void *>(reinterpret_cast<uint64_t>(_ptr) + _size);
+}
+
+int XDummyTensorPool::Init(void)
+{
+    for (int i = 0; i < XLITE_MAX_NUM_DYNAMIC_TENSOR; i++) {
+        _free.push_back(this->_t[i]);
+    }
+    return 0;
+}
+
+XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc)
+{
+    size_t numel = 1, size;
+
+    if (shape.empty()) {
+        std::cerr << loc.file << ":" << loc.line << ": size is 0" << std::endl;
+        throw std::invalid_argument("get tensor shape size is 0");
+    }
+
+    if (_free.empty()) {
+        std::cerr << loc.file << ":" << loc.line
+                  << ": dynamic tensor too many, please put after use" << std::endl;
+        throw std::runtime_error("dynamic tensor too many, please put after use");
+    }
+
+    for (uint64_t i = 0; i < shape.size(); i++) {
+        numel *= shape[i];
+    }
+    size = ROUND_UP(numel * XDtypeBit(dtype) / 8, XLITE_TENSOR_ALIGN);
+    currUsedSize += size;
+    if (currUsedSize > maxUsedSize) {
+        maxUsedSize = currUsedSize;
+    }
+    XTensor &t = _free.front();
+    t.Init(std::move(shape), dtype, nullptr, XTENSOR_DYNAMIC);
+    _free.pop_front();
+    _used.push_back(t);
+    return t;
+}
+
+void XDummyTensorPool::PutTensor(XTensor &t)
+{
+    size_t numel = 1, size;
+    for (uint64_t i = 0; i < t.shape.size(); i++) {
+        numel *= t.shape[i];
+    }
+    size = ROUND_UP(numel * XDtypeBit(t.dtype) / 8, XLITE_TENSOR_ALIGN);
+    currUsedSize -= size;
+    XTensorPool::PutTensor(t);
+}
+
+bool XDummyTensorPool::TensorInPool(XTensor &t)
+{
+    return true;
 }
