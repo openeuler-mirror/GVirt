@@ -64,7 +64,8 @@ class XRuntime
 public:
     XRuntime(uint32_t devid, size_t sizeMB = 0, uint32_t rankId = 0, uint32_t tpSize = 1,
              uint32_t dpSize = 1);
-    ~XRuntime(void);
+    virtual ~XRuntime(void);
+    void Init(size_t sizeMB);
     void InitAttn(uint64_t maxM, uint64_t maxBatch, uint64_t maxSeqLen, uint32_t blockSize);
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxM, uint64_t maxBatch, uint64_t maxSeqLen,
                      uint32_t blockSize, XModelAttnType attnType);
@@ -79,6 +80,17 @@ public:
     void NotifyRecordPeerStream();
 
     int InitTensorPool(size_t sizeMB);
+    XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
+    void PutTensor(XTensor &t);
+    bool TensorInPool(XTensor &t);
+    [[nodiscard]] virtual bool IsDummyRuntime() const
+    {
+        return false;
+    }
+    bool Inited(void)
+    {
+        return _inited;
+    };
     uint32_t rankId(void)
     {
         return _rankId;
@@ -91,12 +103,11 @@ public:
     {
         return _dpSize;
     };
-    aclrtStream stream;
+    aclrtStream stream = nullptr;
     uint32_t aicNum;
     uint32_t aivNum;
     uint32_t originAicNum;
     uint32_t originAivNum;
-    XTensorPool *pool = nullptr;
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;
     uint32_t commOptimizeLen = XLITE_DEFAULT_COMM_OPTIMIZE_LEN;
@@ -110,8 +121,8 @@ public:
     // for multi-task parallel
     bool multiTaskParallel = false;
     uint32_t taskId = 0;
-    aclrtNotify peerNotify;
-    aclrtNotify notify;
+    aclrtNotify peerNotify = nullptr;
+    aclrtNotify notify = nullptr;
 
     // ATTN
     bool _attnInitialized = false;
@@ -134,15 +145,17 @@ public:
     XTensor _lens;
     XTensor _cumPromptLens;
 
-private:
+protected:
     int GetNodeIps(void);
     int InitHcclComm(void);
     int InitXcclComm(void);
     void FiniXcclComm(void);
     uint32_t _devid;
-    aclrtEvent _event;
-    aclrtContext context;
-    bool _init_outside = false;
+    aclrtEvent _event = nullptr;
+    aclrtContext context = nullptr;
+    bool _initOutside = false;
+    bool _inited = false;
+    XTensorPool *_pool = nullptr;
     uint32_t _rankId;
     uint32_t _tpSize;
     uint32_t _dpSize;
@@ -155,4 +168,16 @@ private:
     void *_ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE] = {nullptr};
 };
 
+class XDummyRuntime : public XRuntime
+{
+public:
+    using XRuntime::XRuntime;
+
+    [[nodiscard]] bool IsDummyRuntime() const override
+    {
+        return true;
+    }
+    void InitDummyRuntime(size_t sizeMB);
+    size_t maxUsedSize(void);
+};
 #endif

@@ -66,6 +66,11 @@
 #include "aclrtlaunch_flash_attention_bfloat16_t.h"
 #include "aclrtlaunch_flash_mla_bfloat16_t.h"
 
+static inline bool IsDummyRuntime(const XRuntime &rt)
+{
+    return rt.IsDummyRuntime();
+}
+
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
     switch (dtype) {
@@ -89,6 +94,9 @@ static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       uint32_t copySize)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
     if (in.dtype != out.dtype || in.numel * rankSize != out.numel) {
         throw std::runtime_error(std::string(__func__) +
@@ -107,16 +115,15 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
-        bool needCopy = (!rt.pool->TensorInPool(in) || !rt.pool->TensorInPool(out));
+        bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
         XTensor *tmpIn = nullptr;
         XTensor *tmpOut = nullptr;
 
         if (needCopy) {
-            tmpIn =
-                &rt.pool->GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
-            tmpOut = &rt.pool->GetTensor(out.shape, out.dtype, DBG_LOC);
+            tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+            tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
             CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, inBytes, in.ptr, inBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpIn->ptr;
@@ -184,8 +191,8 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, outPtr, outBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            rt.pool->PutTensor(*tmpIn);
-            rt.pool->PutTensor(*tmpOut);
+            rt.PutTensor(*tmpIn);
+            rt.PutTensor(*tmpOut);
         }
         return;
     }
@@ -198,6 +205,9 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                           uint32_t copySize)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
     if (in.dtype != out.dtype || in.numel != out.numel * rankSize) {
         throw std::runtime_error(std::string(__func__) + ": check tensor failed!");
@@ -211,16 +221,15 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
-        bool needCopy = (!rt.pool->TensorInPool(in) || !rt.pool->TensorInPool(out));
+        bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
         XTensor *tmpIn = nullptr;
         XTensor *tmpOut = nullptr;
 
         if (needCopy) {
-            tmpIn =
-                &rt.pool->GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
-            tmpOut = &rt.pool->GetTensor(out.shape, out.dtype, DBG_LOC);
+            tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+            tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
             CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, inBytes, in.ptr, inBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpIn->ptr;
@@ -281,8 +290,8 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, outPtr, outBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            rt.pool->PutTensor(*tmpIn);
-            rt.pool->PutTensor(*tmpOut);
+            rt.PutTensor(*tmpIn);
+            rt.PutTensor(*tmpOut);
         }
         return;
     }
@@ -295,6 +304,9 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                          uint32_t copySize)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (in.dtype != out.dtype || in.numel != out.numel) {
         throw std::runtime_error(std::string(__func__) + ": check tensor failed!");
     }
@@ -306,14 +318,13 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
     size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
 
     if (xcclComm && in.dtype != INT64) {
-        bool needCopy = (!rt.pool->TensorInPool(in) || !rt.pool->TensorInPool(out));
+        bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
         void *inPtr = in.ptr;
         void *outPtr = out.ptr;
         XTensor *tmpBuff = nullptr;
 
         if (needCopy) {
-            tmpBuff =
-                &rt.pool->GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+            tmpBuff = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
             CHECK_ACL(aclrtMemcpyAsync(tmpBuff->ptr, bytes, in.ptr, bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpBuff->ptr;
@@ -374,7 +385,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, outPtr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
                                        rt.stream));
-            rt.pool->PutTensor(*tmpBuff);
+            rt.PutTensor(*tmpBuff);
         }
         return;
     }
@@ -387,6 +398,9 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
                   XTensor &out)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (embed.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_embed_kernel_float16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr,
                                            embed.shape[1], in.shape[0], start, end, rt.tpSize());
@@ -402,6 +416,9 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
                     uint32_t normDim, uint32_t cntPerToken, uint32_t inStartOffset,
                     uint32_t outStartOffset)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (in.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
                                       in.shape[0], normDim, normEps, cntPerToken, in.shape[1],
@@ -417,6 +434,9 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
 
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (in1.dtype == FP16 && in2.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_add_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, out.ptr, in1.shape[0],
                                   in1.shape[1]);
@@ -431,6 +451,9 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &norm, float normEps,
                           XTensor &out)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (in1.dtype == FP16 && in2.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
                                       in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1],
@@ -448,6 +471,9 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                    const XTensor &bias, const XTensor &deqScale, bool transpose, uint64_t m0,
                    uint64_t n0, uint64_t k0, uint64_t swizzle)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
@@ -507,13 +533,13 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                                      deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16) {
         if (bias.ptr != nullptr) {
-            XTensor &biasFp32 = rt.pool->GetTensor(bias.shape, FP32, DBG_LOC);
+            XTensor &biasFp32 = rt.GetTensor(bias.shape, FP32, DBG_LOC);
             aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, bias.ptr, biasFp32.ptr,
                                               bias.numel);
             aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
                                           k, weightNZ, transpose, m0, n0, k0, swizzle, biasFp32.ptr,
                                           deqScale.ptr);
-            rt.pool->PutTensor(biasFp32);
+            rt.PutTensor(biasFp32);
         } else {
             aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
                                           k, weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr,
@@ -523,11 +549,11 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
-        XTensor &tmp = rt.pool->GetTensor(in.shape, FP32, DBG_LOC);
+        XTensor &tmp = rt.GetTensor(in.shape, FP32, DBG_LOC);
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, tmp.ptr, in.numel);
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k,
                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
-        rt.pool->PutTensor(tmp);
+        rt.PutTensor(tmp);
     } else if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == FP16 && !transpose) {
         aclrtlaunch_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                   weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
@@ -538,6 +564,9 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
 
 void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (in.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_silu_and_mul_float16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr,
                                            in.shape[0], out.shape[1]);
@@ -559,6 +588,9 @@ void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale)
 
 void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (in.dtype == BF16 && out.dtype == FP32) {
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, out.ptr, in.numel);
     } else {
@@ -569,6 +601,9 @@ void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out)
 void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t start, uint32_t end,
                         XTensor &out, XTensor &unpIdx, XTensor &counts)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     aclrtlaunch_permutation(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr,
                             counts.ptr, in.shape[0], in.shape[1], counts.shape[0], start, end);
 }
@@ -576,6 +611,9 @@ void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t st
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing,
                           XTensor &weights, uint32_t start, uint32_t end, XTensor &out)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (in.dtype == BF16 && out.dtype == BF16 && weights.dtype == BF16) {
         aclrtlaunch_unpermutation_bfloat16_t(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr,
                                              unpIdx.ptr, weights.ptr, out.shape[0], in.shape[1],
@@ -594,6 +632,9 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                         long outDim, long inDim, XTensor &output, bool weightNZ, bool transpose)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (in.dtype == BF16 && weightDtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_group_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
                                             deqScales.ptr, counts.ptr, counts.shape[0], outDim,
@@ -624,6 +665,9 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
                       uint32_t nKvHeads, uint32_t headDim, uint32_t rotDim, uint32_t blockSize,
                       bool isNeox, uint64_t mropeMaskH, uint64_t mropeMaskW)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     uint32_t localHeads = nHeads / rt.tpSize();
     uint32_t localKvHeads = nKvHeads / rt.tpSize();
     localKvHeads = localKvHeads == 0 ? 1 : localKvHeads;
@@ -662,6 +706,9 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 &&
         output.dtype == FP16) {
         aclrtlaunch_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
@@ -686,6 +733,9 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                            uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
                            uint32_t batch, uint32_t maxNumBlock)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 &&
         output.dtype == FP16) {
         aclrtlaunch_flash_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
@@ -713,6 +763,9 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
                      uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
                      uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (qWithQr.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 &&
         wkvb.dtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_flash_mla_bfloat16_t(
@@ -729,6 +782,9 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, 
                         uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs, XTensor &position,
                         XTensor &vGather, XTensor &outputPe, enum XRopeType ropeType)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     uint32_t type = 0;
     switch (ropeType) {
         case NORMAL:
@@ -766,6 +822,9 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLoca
                                 XTensor &key, XTensor &kCache, XTensor &vCache,
                                 XTensor &slotMapping)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     uint32_t type = 0;
     switch (ropeType) {
         case NORMAL:
@@ -863,6 +922,9 @@ void XliteDsOpEinsumShcHdcShd(XRuntime &rt, int numTokens, int nLocalHeads, int 
 
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (input.dtype == FP32 && weight.dtype == FP32 && output.dtype == FP32) {
         aclrtlaunch_add_bias_float(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
                                    output.shape[0] * output.shape[1], output.shape[1]);
@@ -880,6 +942,9 @@ void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &outp
 void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outWeights,
                         XTensor &outRouting, uint32_t topK, bool normTopKProb)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (scores.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
         outRouting.dtype == BIT1) {
         aclrtlaunch_softmax_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr,
@@ -899,6 +964,9 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
                         XTensor &outWeights, XTensor &outRouting, uint32_t nGroup,
                         uint32_t nTopkGroup, uint32_t topK, bool normTopKProb)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (scores.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
         outRouting.dtype == BIT1) {
         aclrtlaunch_sigmoid_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr, bias.ptr,
@@ -917,6 +985,9 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
 
 void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (x.dtype == FP16) {
         aclrtlaunch_softmax_float16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
     } else if (x.dtype == BF16) {
@@ -928,6 +999,9 @@ void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)
 
 void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &expBuf)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     if (x.dtype == FP16) {
         aclrtlaunch_softmax_long_float16_t(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1],
                                            calcLen);
@@ -943,6 +1017,9 @@ void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &exp
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
                   XTensor &out)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     size_t m = x.shape[0];
     size_t n = x.shape[1];
     if (x.dtype == BF16) {
@@ -955,6 +1032,9 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
 
 void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     size_t m = x.shape[0];
     size_t n = x.shape[1];
     if (x.dtype == BF16) {
@@ -966,6 +1046,9 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out)
 
 void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, bool hasScale)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     size_t m = in.shape[0];
     size_t n = in.shape[1];
     if (in.dtype == FP16) {
@@ -978,6 +1061,9 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, boo
 
 void XliteOpConcat3(XRuntime &rt, XTensor &in0, XTensor &in1, XTensor &in2, XTensor &out)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     // 计算各部分字节大小
     size_t bytes0 = in0.numel * XDtypeBit(in0.dtype) / 8;
     size_t bytes1 = in1.numel * XDtypeBit(in1.dtype) / 8;
@@ -995,6 +1081,9 @@ void XliteOpConcat3(XRuntime &rt, XTensor &in0, XTensor &in1, XTensor &in2, XTen
 void XliteOpSplit3(XRuntime &rt, XTensor &in, XTensor &out0, XTensor &out1, XTensor &out2,
                    size_t size0, size_t size1, size_t size2, uint32_t numPackets)
 {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
     // 从输入缓冲区解开为3个tensor
     for (uint32_t i = 0; i < numPackets; i++) {
         uint8_t *srcBase = static_cast<uint8_t *>(in.ptr) + i * (size0 + size1 + size2);

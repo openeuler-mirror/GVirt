@@ -29,42 +29,52 @@ bool isEnvironmentVariableTrue(const char *env_value_cstr)
 XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize)
     : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize)
 {
-    aclError init_ret = aclInit(nullptr);
-    uint32_t count;
-    if (init_ret == ACL_ERROR_REPEAT_INITIALIZE) {
-        _init_outside = true;
-    } else {
-        CHECK_ACL(init_ret);
+    if (sizeMB != 0) {
+        Init(sizeMB);
     }
-    CHECK_ACL(aclrtSetDevice(devid));
+}
+
+void XRuntime::Init(size_t sizeMB)
+{
+    if (_inited) {
+        return;
+    }
+    aclError initRet = aclInit(nullptr);
+    uint32_t count;
+    if (initRet == ACL_ERROR_REPEAT_INITIALIZE) {
+        _initOutside = true;
+    } else {
+        CHECK_ACL(initRet);
+    }
+    CHECK_ACL(aclrtSetDevice(_devid));
     CHECK_ACL(aclrtCreateStream(&stream));
     CHECK_ACL(aclrtGetDeviceCount(&count));
     _nDevPerNode = count;
 
     if (sizeMB != 0) {
-        pool = new XTensorPool(sizeMB << MB_BIT);
-        if (pool->Init()) {
+        _pool = new XTensorPool(sizeMB << MB_BIT);
+        if (_pool->Init()) {
             throw std::runtime_error("XRuntime: tensor pool initialization failed");
         }
     }
 
-    _rankSize = tpSize * dpSize;
+    _rankSize = _tpSize * _dpSize;
     if (InitHcclComm()) {
-        delete pool;
+        delete _pool;
         throw std::runtime_error("XRuntime: HCCL initialization failed");
     }
 
     if (sizeMB != 0) {
         if (InitXcclComm()) {
-            delete pool;
+            delete _pool;
             throw std::runtime_error("XRuntime: XCCL initialization failed");
         }
     }
 
     int64_t val;
-    CHECK_ACL(aclGetDeviceCapability(devid, ACL_DEVICE_INFO_AI_CORE_NUM, &val));
+    CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_AI_CORE_NUM, &val));
     aicNum = static_cast<uint32_t>(val);
-    CHECK_ACL(aclGetDeviceCapability(devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
+    CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
     aivNum = static_cast<uint32_t>(val);
     originAicNum = aicNum;
     originAivNum = aivNum;
@@ -85,10 +95,12 @@ XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSi
     const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
     if (isEnvironmentVariableTrue(envFlashAttentionEnable)) {
         enableFlashAttention = true;
-        if (rankId == 0) {
+        if (_rankId == 0) {
             std::cout << "Xlite Flash Attention Enabled!" << std::endl;
         }
     }
+
+    _inited = true;
 }
 
 XRuntime::~XRuntime(void)
@@ -102,10 +114,16 @@ XRuntime::~XRuntime(void)
         HcclCommDestroy(_dpComm);
     }
 
-    delete pool;
-    (void)aclrtDestroyEvent(_event);
-    (void)aclrtDestroyNotify(notify);
-    (void)aclrtDestroyStream(stream);
+    delete _pool;
+    if (_event) {
+        (void)aclrtDestroyEvent(_event);
+    }
+    if (notify) {
+        (void)aclrtDestroyNotify(notify);
+    }
+    if (stream) {
+        (void)aclrtDestroyStream(stream);
+    }
     (void)aclrtResetDevice(static_cast<int>(_devid));
 
     if (_attnInitialized) {
@@ -119,7 +137,7 @@ XRuntime::~XRuntime(void)
         (void)aclrtFree(_blockTables.ptr);
     }
 
-    if (!_init_outside) {
+    if (!_initOutside) {
         (void)aclFinalize();
     }
 }
@@ -200,8 +218,8 @@ int XRuntime::InitXcclComm(void)
 
     XSock *sock = new XSock(_rankId, _rankSize, _ips[0], _port + XLITE_CCL_PORT_OFFSET);
 
-    _ipcXTensorMems[_rankId] = pool->Ptr();
-    CHECK_ACL(aclrtIpcMemGetExportKey(pool->Ptr(), pool->Size(), _ipcXTensorKeys[_rankId],
+    _ipcXTensorMems[_rankId] = _pool->Ptr();
+    CHECK_ACL(aclrtIpcMemGetExportKey(_pool->Ptr(), _pool->Size(), _ipcXTensorKeys[_rankId],
                                       EXPORT_KEY_LEN,
                                       ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION));
     sock->AllGather(&_ipcXTensorKeys[_rankId], EXPORT_KEY_LEN, _ipcXTensorKeys);
@@ -477,13 +495,75 @@ void XRuntime::NotifyRecordPeerStream()
 
 int XRuntime::InitTensorPool(size_t sizeMB)
 {
-    if (pool) {
-        std::cout << "pool already inited!" << std::endl;
-        return 0;
+    if (sizeMB != 0) {
+        Init(sizeMB);
     }
-    pool = new XTensorPool(sizeMB << MB_BIT);
-    if (pool->Init()) {
-        return -EFAULT;
+    return 0;
+}
+
+XTensor &XRuntime::GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc)
+{
+    return _pool->GetTensor(std::move(shape), dtype, loc);
+}
+
+void XRuntime::PutTensor(XTensor &t)
+{
+    _pool->PutTensor(t);
+}
+
+bool XRuntime::TensorInPool(XTensor &t)
+{
+    return _pool->TensorInPool(t);
+}
+
+void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
+{
+    if (_inited) {
+        return;
     }
-    return InitXcclComm();
+    aclError initRet = aclInit(nullptr);
+    uint32_t count;
+    if (initRet == ACL_ERROR_REPEAT_INITIALIZE) {
+        _initOutside = true;
+    } else {
+        CHECK_ACL(initRet);
+    }
+    CHECK_ACL(aclrtGetDeviceCount(&count));
+    _nDevPerNode = count;
+
+    _pool = new XDummyTensorPool(sizeMB << MB_BIT);
+    if (_pool->Init()) {
+        throw std::runtime_error("XDummyRuntime: tensor pool initialization failed");
+    }
+    _rankSize = _tpSize * _dpSize;
+
+    int64_t val;
+    CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_AI_CORE_NUM, &val));
+    aicNum = static_cast<uint32_t>(val);
+    CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &val));
+    aivNum = static_cast<uint32_t>(val);
+    originAicNum = aicNum;
+    originAivNum = aivNum;
+
+    const char *envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
+    if (envCommOptimizeLen) {
+        char *endPtr = nullptr;
+        long val = strtol(envCommOptimizeLen, &endPtr, 10);
+        if (endPtr != envCommOptimizeLen && *endPtr == '\0' && val >= 0) {
+            commOptimizeLen = static_cast<uint32_t>(val);
+        }
+    }
+
+    const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
+    if (isEnvironmentVariableTrue(envFlashAttentionEnable)) {
+        enableFlashAttention = true;
+    }
+
+    _inited = true;
+}
+
+size_t XDummyRuntime::maxUsedSize(void)
+{
+    auto *dummyPool = dynamic_cast<XDummyTensorPool *>(_pool);
+    return dummyPool ? dummyPool->maxUsedSize : 0;
 }

@@ -138,17 +138,18 @@ private:
     void PrintMemoryVal(void *p, uint64_t off, XDtype dtype);
     enum XTensorType type;
     friend class XTensorPool;
+    friend class XDummyTensorPool;
 };
 
 class XTensorPool
 {
 public:
     XTensorPool(size_t size) : _size(size) {};
-    ~XTensorPool(void);
-    int Init(void);
-    XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
-    void PutTensor(XTensor &t);
-    bool TensorInPool(XTensor &t);
+    virtual ~XTensorPool(void);
+    virtual int Init(void);
+    virtual XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
+    virtual void PutTensor(XTensor &t);
+    virtual bool TensorInPool(XTensor &t);
     void *Ptr()
     {
         return _ptr;
@@ -158,12 +159,25 @@ public:
         return _size;
     };
 
-private:
+protected:
     void *_ptr = nullptr;
     size_t _size;
     XTensor _t[XLITE_MAX_NUM_DYNAMIC_TENSOR];
     std::list<std::reference_wrapper<XTensor>> _free;
     std::list<std::reference_wrapper<XTensor>> _used;
+};
+
+class XDummyTensorPool : public XTensorPool
+{
+public:
+    using XTensorPool::XTensorPool;
+
+    int Init(void) override;
+    XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc) override;
+    void PutTensor(XTensor &t) override;
+    bool TensorInPool(XTensor &t) override;
+    size_t maxUsedSize = 0;
+    size_t currUsedSize = 0;
 };
 
 #endif

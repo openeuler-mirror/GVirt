@@ -692,35 +692,35 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     InitXTensor(_blockTables, blockTables);
 
     if (!rt.enableFlashAttention) {
-        XTensor &qk = rt.pool->GetTensor(
-            {rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize}, XDtype(qkv), DBG_LOC);
+        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
+                                   XDtype(qkv), DBG_LOC);
         XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _cumPromptLens, _lens,
                          _cachedLens, _blockTables, nHeads, nKvHeads, headDim, blockSize, batch,
                          maxNumBlock);
         rt.Synchronize();
-        rt.pool->PutTensor(qk);
+        rt.PutTensor(qk);
     } else {
-        XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
-                                         XDtype(qkv), DBG_LOC);
+        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+                                   XDtype(qkv), DBG_LOC);
         XTensor &sv =
-            rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, headDim}, XDtype(qkv), DBG_LOC);
-        XTensor &max = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-        XTensor &lastMax = rt.pool->GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
-        XTensor &lastSum = rt.pool->GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
-        XTensor &sync = rt.pool->GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
+            rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, headDim}, XDtype(qkv), DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &lastMax = rt.GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
+        XTensor &lastSum = rt.GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
+        XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
         sync.Memset(0);
         XliteOpFlashAttention(rt, _qkv, _kCache, _vCache, qk, sv, max, sum, lastMax, lastSum, sync,
                               _output, _cumPromptLens, _lens, _cachedLens, _blockTables, nHeads,
                               nKvHeads, headDim, blockSize, batch, maxNumBlock);
         rt.Synchronize();
-        rt.pool->PutTensor(sync);
-        rt.pool->PutTensor(lastSum);
-        rt.pool->PutTensor(lastMax);
-        rt.pool->PutTensor(sum);
-        rt.pool->PutTensor(max);
-        rt.pool->PutTensor(sv);
-        rt.pool->PutTensor(qk);
+        rt.PutTensor(sync);
+        rt.PutTensor(lastSum);
+        rt.PutTensor(lastMax);
+        rt.PutTensor(sum);
+        rt.PutTensor(max);
+        rt.PutTensor(sv);
+        rt.PutTensor(qk);
     }
 }
 
@@ -744,15 +744,15 @@ void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCac
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
 
-    XTensor &qk = rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
-                                     XDtype(qWithQr), DBG_LOC);
+    XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+                               XDtype(qWithQr), DBG_LOC);
     XTensor &sv =
-        rt.pool->GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, vHeadDim}, XDtype(qWithQr), DBG_LOC);
-    XTensor &max = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-    XTensor &sum = rt.pool->GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-    XTensor &lastMax = rt.pool->GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
-    XTensor &lastSum = rt.pool->GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
-    XTensor &sync = rt.pool->GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
+        rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, vHeadDim}, XDtype(qWithQr), DBG_LOC);
+    XTensor &max = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+    XTensor &sum = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+    XTensor &lastMax = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+    XTensor &lastSum = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+    XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
     sync.Memset(0);
 
     XliteOpFlashMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, sv, max, sum, lastMax, lastSum, sync,
@@ -760,13 +760,13 @@ void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCac
                     nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlock, scale);
 
     rt.Synchronize();
-    rt.pool->PutTensor(sync);
-    rt.pool->PutTensor(lastSum);
-    rt.pool->PutTensor(lastMax);
-    rt.pool->PutTensor(sum);
-    rt.pool->PutTensor(max);
-    rt.pool->PutTensor(sv);
-    rt.pool->PutTensor(qk);
+    rt.PutTensor(sync);
+    rt.PutTensor(lastSum);
+    rt.PutTensor(lastMax);
+    rt.PutTensor(sum);
+    rt.PutTensor(max);
+    rt.PutTensor(sv);
+    rt.PutTensor(qk);
 }
 
 void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &norm,
@@ -816,13 +816,13 @@ void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
 void CastUp(XRuntime &rt, at::Tensor &in, at::Tensor &out)
 {
     XTensor _in, _out;
-    XTensor &inScale = rt.pool->GetTensor({1}, XDtype(in), DBG_LOC);
+    XTensor &inScale = rt.GetTensor({1}, XDtype(in), DBG_LOC);
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
     XliteOpCastUp(rt, _in, inScale, _out);
     rt.Synchronize();
-    rt.pool->PutTensor(inScale);
+    rt.PutTensor(inScale);
 }
 
 void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t start, uint32_t end,
@@ -864,8 +864,8 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     InitXTensor(_in, in);
     InitXTensor(_counts, counts);
     InitXTensor(_output, output);
-    XTensor &_weights = rt.pool->GetTensor({num}, INT64, DBG_LOC);
-    XTensor &_scales = rt.pool->GetTensor({num}, INT64, DBG_LOC);
+    XTensor &_weights = rt.GetTensor({num}, INT64, DBG_LOC);
+    XTensor &_scales = rt.GetTensor({num}, INT64, DBG_LOC);
 
     p.resize(num);
     for (i = 0; i < num; i++) {
@@ -883,8 +883,8 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     XliteOpGroupMatmul(rt, _in, _weights, _scales, _counts, start, end, XDtype(weights[0]), outDim,
                        inDim, _output, weightNZ, transpose);
     rt.Synchronize();
-    rt.pool->PutTensor(_weights);
-    rt.pool->PutTensor(_scales);
+    rt.PutTensor(_weights);
+    rt.PutTensor(_scales);
 }
 
 void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
@@ -892,9 +892,9 @@ void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
     XTensor _x;
     InitXTensor(_x, x);
     if (isLong) {
-        XTensor &expBuf = rt.pool->GetTensor({1, _x.shape[1]}, FP32, DBG_LOC);
+        XTensor &expBuf = rt.GetTensor({1, _x.shape[1]}, FP32, DBG_LOC);
         XliteOpSoftmaxLong(rt, calcLen, _x, expBuf);
-        rt.pool->PutTensor(expBuf);
+        rt.PutTensor(expBuf);
     } else {
         XliteOpSoftmax(rt, calcLen, _x);
     }
