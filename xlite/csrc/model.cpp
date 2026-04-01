@@ -647,14 +647,52 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, hiddenState.dtype, DBG_LOC);
     XTensor &h2 =
         rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize}, hiddenState.dtype, DBG_LOC);
-    XliteOpGroupMatmul(rt, expertsSorted, _moeREUpGate[layer], _moeREUpGateScale[layer],
+
+    XTensor *pExpertsSorted = &expertsSorted;
+    XTensor *ph13 = &h13;
+    XTensor *ph2 = &h2;
+    XTensor *pscale = nullptr;
+    if (moeREUpGate[layer][start].dtype != hiddenState.dtype) {
+        XTensor &quant = rt.GetTensor(expertsSorted.shape, INT8, DBG_LOC);
+        XTensor &scale = rt.GetTensor({expertsSorted.shape[0], 1}, FP32, DBG_LOC);
+        XTensor &h13FP16 = rt.GetTensor(h13.shape, FP16, DBG_LOC);
+        pExpertsSorted = &quant;
+        pscale = &scale;
+        ph13 = &h13FP16;
+        XliteOpQuantDyn(rt, expertsSorted, scale, quant);
+    }
+    XliteOpGroupMatmul(rt, *pExpertsSorted, _moeREUpGate[layer], _moeREUpGateScale[layer],
                        expertsCounts, start, end, moeREUpGate[layer][start].dtype,
-                       intermediateSize * 2, _c.hiddenSize, h13, _c.weightNZ,
+                       intermediateSize * 2, _c.hiddenSize, *ph13, _c.weightNZ,
                        _c.expertsWeightTrans);
+    if (moeREUpGate[layer][start].dtype != hiddenState.dtype) {
+        XliteOpDeQuant(rt, *ph13, *pscale, h13, true);
+        rt.PutTensor(*ph13);
+        rt.PutTensor(*pscale);
+        rt.PutTensor(*pExpertsSorted);
+    }
+
     XliteOpSiluAndMul(rt, h13, h2);
-    XliteOpGroupMatmul(rt, h2, _moeREDown[layer], _moeREDownScale[layer], expertsCounts, start, end,
-                       moeREDown[layer][start].dtype, _c.hiddenSize, intermediateSize,
-                       expertsSorted, _c.weightNZ, _c.expertsWeightTrans);
+
+    if (moeREUpGate[layer][start].dtype != hiddenState.dtype) {
+        XTensor &quant = rt.GetTensor(h2.shape, INT8, DBG_LOC);
+        XTensor &scale = rt.GetTensor({h2.shape[0], 1}, FP32, DBG_LOC);
+        XTensor &expertsSortedFP16 = rt.GetTensor(expertsSorted.shape, FP16, DBG_LOC);
+        ph2 = &quant;
+        pscale = &scale;
+        pExpertsSorted = &expertsSortedFP16;
+        XliteOpQuantDyn(rt, h2, scale, quant);
+    }
+    XliteOpGroupMatmul(rt, *ph2, _moeREDown[layer], _moeREDownScale[layer], expertsCounts, start,
+                       end, moeREDown[layer][start].dtype, _c.hiddenSize, intermediateSize,
+                       *pExpertsSorted, _c.weightNZ, _c.expertsWeightTrans);
+    if (moeREUpGate[layer][start].dtype != hiddenState.dtype) {
+        XliteOpDeQuant(rt, *pExpertsSorted, *pscale, expertsSorted, true);
+        rt.PutTensor(*pExpertsSorted);
+        rt.PutTensor(*pscale);
+        rt.PutTensor(*ph2);
+    }
+
     rt.PutTensor(h13);
     rt.PutTensor(h2);
 
@@ -972,8 +1010,8 @@ size_t XModel::GetTensorPoolSize(int dbg)
     size_t size = rt.maxUsedSize();
 
     if (_rankId == 0 && dbg) {
-        std::cout << "[Tensor pool] calculated size: " << size << " bytes (" << (size >> MB_BIT)
-                  << " MB)" << std::endl;
+        std::cout << "[Tensor pool] calculated size: " << size << " bytes ("
+                  << DIV_ROUND_UP(size, 1ull << MB_BIT) << " MB)" << std::endl;
     }
     return DIV_ROUND_UP(size, 1ull << MB_BIT);
 }

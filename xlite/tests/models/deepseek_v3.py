@@ -202,6 +202,8 @@ class Linear(nn.Module):
         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
         if self.weight.element_size() == 1:
             self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32))
+            if forward_backend == "xlite":
+                self.weight.xlite_scale = torch.zeros(out_features * 2, 1, dtype=torch.float32)
         else:
             self.register_parameter("scale", None)
         if bias:
@@ -969,10 +971,14 @@ class DeepSeek_V3(nn.Module):
                                     for i in range(args.n_dense_layers, args.n_layers)
                                     for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
         if args.quantization == "experts_int8":
-            self.xlite_model.re_up_gate_scale = [self.layers[i].ffn.experts[j].w13.weight.scale
+            for i in range(self.args.n_dense_layers, self.args.n_layers):
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx):
+                    self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
+                    self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
+            self.xlite_model.re_up_gate_scale = [self.layers[i].ffn.experts[j].w13.weight.xlite_scale
                                                  for i in range(args.n_dense_layers, args.n_layers)
                                                  for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-            self.xlite_model.re_down_scale = [self.layers[i].ffn.experts[j].w2.weight.scale
+            self.xlite_model.re_down_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
                                               for i in range(args.n_dense_layers, args.n_layers)
                                               for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
         self.xlite_model.init(config, rank)
