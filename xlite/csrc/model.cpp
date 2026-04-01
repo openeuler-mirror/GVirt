@@ -873,20 +873,6 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
 }
 
-void XModel::ComputeLogits(XRuntime &rt, XTensor &input, XTensor &output)
-{
-    if (!rt.Inited()) {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": xlite runtime not inited");
-    }
-
-    XTensor localOutput({input.shape[0], head.shape[0]}, head.dtype, output.ptr);
-    XliteOpMatmul(rt, input, head, localOutput, _c.weightNZ);
-    if (_c.defTpSize > 1) {
-        XliteOpAllGather(rt, localOutput, output, TP);
-    }
-}
-
 void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                                  std::vector<std::pair<XTensor, XTensor>> &kvCache,
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
@@ -978,9 +964,11 @@ size_t XModel::GetTensorPoolSize(int dbg)
     XTensor freqsCis({_c.maxM, _c.ropeHeadDim}, embed.dtype, nullptr);
     XTensor input({_c.maxM}, INT32, nullptr);
     XTensor output({_c.maxM, _c.hiddenSize}, embed.dtype, nullptr);
+    XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype, nullptr);
 
     rt.PrepareAttn(attnMeta, _c.maxM, _c.maxBatch, _c.maxSeqLen, _c.blockSize, _c.attnType);
-    ForwardAndGetLogits(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
+    Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
+    ForwardGetLogits(rt, output, logits);
     size_t size = rt.maxUsedSize();
 
     if (_rankId == 0 && dbg) {

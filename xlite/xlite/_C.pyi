@@ -126,7 +126,7 @@ class Model:
         output: torch.Tensor,
         curr_stream: int) -> None: ...
 
-    def compute_logits(
+    def forward_get_logits(
         self,
         rt: Runtime,
         input: torch.Tensor,
