@@ -179,5 +179,8 @@ public:
     }
     void InitDummyRuntime(size_t sizeMB);
     size_t maxUsedSize(void);
+
+private:
+    int InitDummyXcclComm(void);
 };
 #endif

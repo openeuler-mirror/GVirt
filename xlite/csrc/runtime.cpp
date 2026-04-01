@@ -537,6 +537,8 @@ void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
     }
     _rankSize = _tpSize * _dpSize;
 
+    (void)InitDummyXcclComm();
+
     int64_t val;
     CHECK_ACL(aclGetDeviceCapability(_devid, ACL_DEVICE_INFO_AI_CORE_NUM, &val));
     aicNum = static_cast<uint32_t>(val);
@@ -560,6 +562,29 @@ void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
     }
 
     _inited = true;
+}
+
+int XDummyRuntime::InitDummyXcclComm(void)
+{
+    const char *envDisableXccl = std::getenv("XLITE_DISABLE_XCCL");
+    const char *envDeterministic = std::getenv("HCCL_DETERMINISTIC");
+
+    if (_rankSize == 1 || _rankSize > _nDevPerNode || _rankSize > XLITE_CCL_MAX_RANK_SIZE) {
+        return 0;
+    }
+
+    if (isEnvironmentVariableTrue(envDisableXccl) || isEnvironmentVariableTrue(envDeterministic)) {
+        return 0;
+    }
+
+    if (_tpSize > 1) {
+        _tpXcclComm = new XcclComm(_rankId % _tpSize, _tpSize);
+    }
+
+    if (_dpSize > 1) {
+        _dpXcclComm = new XcclComm(_rankId / _tpSize, _dpSize);
+    }
+    return 0;
 }
 
 size_t XDummyRuntime::maxUsedSize(void)

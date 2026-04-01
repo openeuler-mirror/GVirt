@@ -94,9 +94,6 @@ static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       uint32_t copySize)
 {
-    if (IsDummyRuntime(rt)) {
-        return;
-    }
     uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
     if (in.dtype != out.dtype || in.numel * rankSize != out.numel) {
         throw std::runtime_error(std::string(__func__) +
@@ -113,6 +110,20 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
     uint32_t localRank = (type == TP) ? (rt.rankId() % rt.tpSize()) : (rt.rankId() / rt.tpSize());
     size_t inBytes = in.numel * XDtypeBit(in.dtype) / 8;
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
+
+    if (IsDummyRuntime(rt)) {
+        if (xcclComm && in.dtype != INT64) {
+            bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
+            if (needCopy) {
+                XTensor &tmpIn =
+                    rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+                XTensor &tmpOut = rt.GetTensor(out.shape, out.dtype, DBG_LOC);
+                rt.PutTensor(tmpIn);
+                rt.PutTensor(tmpOut);
+            }
+        }
+        return;
+    }
 
     if (xcclComm && in.dtype != INT64) {
         bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
@@ -205,9 +216,6 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                           uint32_t copySize)
 {
-    if (IsDummyRuntime(rt)) {
-        return;
-    }
     uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
     if (in.dtype != out.dtype || in.numel != out.numel * rankSize) {
         throw std::runtime_error(std::string(__func__) + ": check tensor failed!");
@@ -219,6 +227,20 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
     uint32_t localRank = (type == TP) ? (rt.rankId() % rt.tpSize()) : (rt.rankId() / rt.tpSize());
     size_t inBytes = in.numel * XDtypeBit(in.dtype) / 8;
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
+
+    if (IsDummyRuntime(rt)) {
+        if (xcclComm && in.dtype != INT64) {
+            bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
+            if (needCopy) {
+                XTensor &tmpIn =
+                    rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+                XTensor &tmpOut = rt.GetTensor(out.shape, out.dtype, DBG_LOC);
+                rt.PutTensor(tmpIn);
+                rt.PutTensor(tmpOut);
+            }
+        }
+        return;
+    }
 
     if (xcclComm && in.dtype != INT64) {
         bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
@@ -304,9 +326,6 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                          uint32_t copySize)
 {
-    if (IsDummyRuntime(rt)) {
-        return;
-    }
     if (in.dtype != out.dtype || in.numel != out.numel) {
         throw std::runtime_error(std::string(__func__) + ": check tensor failed!");
     }
@@ -317,6 +336,17 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
     uint32_t localRank = (type == TP) ? (rt.rankId() % rt.tpSize()) : (rt.rankId() / rt.tpSize());
     size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
 
+    if (IsDummyRuntime(rt)) {
+        if (xcclComm && in.dtype != INT64) {
+            bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
+            if (needCopy) {
+                XTensor &tmpBuff =
+                    rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+                rt.PutTensor(tmpBuff);
+            }
+        }
+        return;
+    }
     if (xcclComm && in.dtype != INT64) {
         bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
         void *inPtr = in.ptr;
@@ -472,8 +502,16 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                    uint64_t n0, uint64_t k0, uint64_t swizzle)
 {
     if (IsDummyRuntime(rt)) {
+        if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16 && bias.ptr != nullptr) {
+            XTensor &biasFp32 = rt.GetTensor(bias.shape, FP32, DBG_LOC);
+            rt.PutTensor(biasFp32);
+        } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
+            XTensor &tmp = rt.GetTensor(in.shape, FP32, DBG_LOC);
+            rt.PutTensor(tmp);
+        }
         return;
     }
+
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];

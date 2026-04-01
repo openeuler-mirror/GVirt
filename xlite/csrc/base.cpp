@@ -385,6 +385,9 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
 
 void XDummyTensorPool::PutTensor(XTensor &t)
 {
+    if (t.type != XTENSOR_DYNAMIC) {
+        return;
+    }
     size_t numel = 1, size;
     for (uint64_t i = 0; i < t.shape.size(); i++) {
         numel *= t.shape[i];
@@ -396,5 +399,5 @@ void XDummyTensorPool::PutTensor(XTensor &t)
 
 bool XDummyTensorPool::TensorInPool(XTensor &t)
 {
-    return true;
+    return t.type == XTENSOR_DYNAMIC;
 }
