@@ -85,7 +85,7 @@ public:
     void Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                  std::vector<std::pair<XTensor, XTensor>> &kvCache,
                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output);
-    void ComputeLogits(XRuntime &rt, XTensor &input, XTensor &output);
+    void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     void ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                              std::vector<std::pair<XTensor, XTensor>> &kvCache,
                              std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
@@ -163,7 +163,6 @@ private:
                            XTensor &unpIdx, XTensor &expertsSorted, XTensor &expertsCounts);
     void ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
-    void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     void ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                std::vector<std::pair<XTensor, XTensor>> &kvCache,
                                std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,

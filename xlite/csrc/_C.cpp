@@ -33,7 +33,7 @@ public:
     void ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                    std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache, at::Tensor &freqsCis,
                    at::Tensor &output, uint64_t currStream);
-    void ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint64_t currStream);
+    void ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint64_t currStream);
     void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                              std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
                              at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
@@ -368,8 +368,8 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
     Forward(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
-void _CModel::ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output,
-                            uint64_t currStream)
+void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output,
+                               uint64_t currStream)
 {
     XTensor _input, _output;
     aclrtStream currAclStream = nullptr;
@@ -382,7 +382,7 @@ void _CModel::ComputeLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output,
         rt.EventWaitCurrStream(currAclStream);
     }
 
-    _model->ComputeLogits(rt, _input, _output);
+    _model->ForwardGetLogits(rt, _input, _output);
 
     if (currStream != 0) {
         rt.EventRecordCurrStream(currAclStream);
@@ -1081,7 +1081,7 @@ PYBIND11_MODULE(_C, m)
         .def("forward", &_CModel::ForwardV1, "forward", py::arg("rt"), py::arg("input"),
              py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("compute_logits", &_CModel::ComputeLogits, "compute_logits", py::arg("rt"),
+        .def("forward_get_logits", &_CModel::ForwardGetLogits, "forward_get_logits", py::arg("rt"),
              py::arg("input"), py::arg("output"), py::arg("curr_stream") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits", &_CModel::ForwardAndGetLogits, "forward_and_get_logits",
