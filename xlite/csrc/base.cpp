@@ -19,6 +19,7 @@ void XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum
     }
 
     this->numel = numel;
+    this->bytes = numel * XDtypeBit(dtype) / 8;
     this->shape = shape;
     this->dtype = dtype;
     this->ptr = ptr;
@@ -240,6 +241,20 @@ void XTensor::Memset(int value)
         return;
     }
     CHECK_ACL(aclrtMemset(ptr, size, value, size));
+}
+
+void XTensor::View(std::vector<size_t> shape)
+{
+    size_t newNumel = 1;
+    for (uint64_t i = 0; i < shape.size(); i++) {
+        newNumel *= shape[i];
+    }
+    if (newNumel * XDtypeBit(dtype) / 8 > bytes) {
+        throw std::runtime_error("Does not support performing the view operation on a tensor to "
+                                 "reshape it into a larger size than the original.");
+    }
+    this->shape = shape;
+    this->numel = newNumel;
 }
 
 std::ostream &operator<<(std::ostream &os, const XTensor &p)

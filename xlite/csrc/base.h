@@ -123,6 +123,7 @@ public:
     void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6);
     void Memset(int value);
+    void View(std::vector<size_t> shape);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
     enum XTensorType GetType()
     {
@@ -137,6 +138,7 @@ private:
     void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
     void PrintMemoryVal(void *p, uint64_t off, XDtype dtype);
     enum XTensorType type;
+    size_t bytes;
     friend class XTensorPool;
     friend class XDummyTensorPool;
 };
