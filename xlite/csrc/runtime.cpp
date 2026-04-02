@@ -382,7 +382,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxM, uint64_t max
         }
     }
 
-    if (_realM > maxM) {
+    if (_realM == 0 || _realM > maxM) {
         std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attnMeta realM(" << _realM
                   << ") > maxM(" << maxM << ")" << std::endl;
         return;

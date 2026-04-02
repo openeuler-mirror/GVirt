@@ -70,9 +70,6 @@ def generate(
 
     step = 0
     start = min(prompt_lens)
-    if model.args.model_type == "deepseek":
-        # prefill ops only support single batch in deepseek
-        start = min(prompt_lens) if len(prompt_tokens) == 1 else 1
     for cur_pos in range(start, total_len):
         logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
         if temperature > 0:
@@ -159,7 +156,7 @@ def main(
         model = Transformer(args)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path, trust_remote_code=True)
     model.load_weights(ckpt_path)
-    completion_tokens, _ = generate(model, [tokenizer.encode("  ")], 2, -1, 1.)
+    completion_tokens, _ = generate(model, [tokenizer.encode("Warn up")], 2, -1, 1.)
     tokenizer.decode(completion_tokens[0])
 
     if interactive:
