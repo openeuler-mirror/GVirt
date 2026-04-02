@@ -34,6 +34,7 @@ pip install xlite # 安装最新发布的版本
 # 或者使用源码编译安装最新的开发版本
 git clone https://atomgit.com/openeuler/GVirt.git
 cd GVirt/xlite
+pip install -r requirements-build.txt # 安装构建依赖（若跳过，后续安装需移除--no-build-isolation参数）
 pip install . --no-build-isolation # 安装当前目录下的xlite包
 # 若开发环境安装，建议使用"-v .[dev]"（py源码修改后可直接在开发环境中生效）
 pip install -v -e .[dev] --no-build-isolation
