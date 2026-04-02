@@ -320,6 +320,13 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
     }
 
+    if (input.size(0) > output.size(0)) {
+        throw std::runtime_error(std::string(__func__) + ": input's size 0 > output's size 0");
+    }
+
+    // only calculate the region [_input.shape[0], _output.shape[1]]
+    _output.View({_input.shape[0], _output.shape[1]});
+
     for (uint64_t i = 0; i < _kv.size(); i++) {
         InitXTensor(_kv[i].first, kvCache[i].first);
         InitXTensor(_kv[i].second, kvCache[i].second);
@@ -471,6 +478,13 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     if (kvCache.size() != _kv.size()) {
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
     }
+
+    if (input.size(0) > output.size(0)) {
+        throw std::runtime_error(std::string(__func__) + ": input's size 0 > output's size 0");
+    }
+
+    // only calculate the region [_input.shape[0], _output.shape[1]]
+    _output.View({_input.shape[0], _output.shape[1]});
 
     if (deepstackInput.size() != _deepstackInputEmbeds.size()) {
         throw std::runtime_error(std::string(__func__) + ": check deepstack input failed");

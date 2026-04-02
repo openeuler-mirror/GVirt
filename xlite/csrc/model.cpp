@@ -551,10 +551,6 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
-    XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
-    XTensor &expertsSorted =
-        rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
-    XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts, 1}, INT32, DBG_LOC);
 
     if (_c.defDpSize > 1) {
         XTensor &inputPerDp = tokenSorted, &weightsPerDp = weights, &routingPerDp = routing;
@@ -574,12 +570,14 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
 
         // 获取临时buffer
         XTensor &packedSend = rt.GetTensor({static_cast<uint32_t>(totalBytes)}, INT8, DBG_LOC);
-        XTensor &packedRecv = rt.GetTensor({static_cast<uint32_t>(allTotalBytes)}, INT8, DBG_LOC);
 
         // 打包三个tensor
         XliteOpConcat3(rt, inputPerDp, weightsPerDp, routingPerDp, packedSend);
+        rt.PutTensor(routingPerDp);
+        rt.PutTensor(weightsPerDp);
 
         // 一次AllGather
+        XTensor &packedRecv = rt.GetTensor({static_cast<uint32_t>(allTotalBytes)}, INT8, DBG_LOC);
         XliteOpAllGather(rt, packedSend, packedRecv, DP);
         rt.PutTensor(packedSend);
 
@@ -588,13 +586,19 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
                       bytesWeights, bytesRouting, _c.defDpSize);
         rt.PutTensor(packedRecv);
 
+        XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
+        XTensor &expertsSorted =
+            rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
+        XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts, 1}, INT32, DBG_LOC);
         XliteOpPermutation(rt, inputAllDp, routingAllDp, start, end, expertsSorted, unpIdx,
                            expertsCounts);
-        rt.PutTensor(routingPerDp);
-        rt.PutTensor(weightsPerDp);
         rt.PutTensor(inputAllDp);
         return {weightsAllDp, routingAllDp, unpIdx, expertsSorted, expertsCounts};
     } else {
+        XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
+        XTensor &expertsSorted =
+            rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
+        XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts, 1}, INT32, DBG_LOC);
         XliteOpPermutation(rt, tokenSorted, routing, start, end, expertsSorted, unpIdx,
                            expertsCounts);
         return {weights, routing, unpIdx, expertsSorted, expertsCounts};
@@ -637,64 +641,72 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
+    enum XDtype dtype = hiddenState.dtype;
+    enum XDtype moeReDtype = moeREUpGate[layer][start].dtype;
+    bool dynamicQuant = moeReDtype != dtype;
 
     auto [w, r] = ForwardMoEGate(rt, layer, hiddenState);
     auto [weights, routing, unpIdx, expertsSorted, expertsCounts] =
         ForwardMoEDispatch(rt, hiddenState, w, r);
 
     // routed experts
-    XTensor &h13 =
-        rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, hiddenState.dtype, DBG_LOC);
-    XTensor &h2 =
-        rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize}, hiddenState.dtype, DBG_LOC);
-
-    XTensor *pExpertsSorted = &expertsSorted;
-    XTensor *ph13 = &h13;
-    XTensor *ph2 = &h2;
+    XTensor *in = &expertsSorted;
     XTensor *pscale = nullptr;
-    if (moeREUpGate[layer][start].dtype != hiddenState.dtype) {
-        XTensor &quant = rt.GetTensor(expertsSorted.shape, INT8, DBG_LOC);
-        XTensor &scale = rt.GetTensor({expertsSorted.shape[0], 1}, FP32, DBG_LOC);
-        XTensor &h13FP16 = rt.GetTensor(h13.shape, FP16, DBG_LOC);
-        pExpertsSorted = &quant;
+    if (dynamicQuant) {
+        XTensor &quant = rt.GetTensor((*in).shape, moeReDtype, DBG_LOC);
+        XTensor &scale = rt.GetTensor({quant.shape[0], 1}, FP32, DBG_LOC);
+        XliteOpQuantDyn(rt, *in, scale, quant);
+        rt.PutTensor(*in);
         pscale = &scale;
-        ph13 = &h13FP16;
-        XliteOpQuantDyn(rt, expertsSorted, scale, quant);
+        in = &quant;
     }
-    XliteOpGroupMatmul(rt, *pExpertsSorted, _moeREUpGate[layer], _moeREUpGateScale[layer],
-                       expertsCounts, start, end, moeREUpGate[layer][start].dtype,
-                       intermediateSize * 2, _c.hiddenSize, *ph13, _c.weightNZ,
-                       _c.expertsWeightTrans);
-    if (moeREUpGate[layer][start].dtype != hiddenState.dtype) {
-        XliteOpDeQuant(rt, *ph13, *pscale, h13, true);
+
+    XTensor &h13 = rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2},
+                                dynamicQuant ? FP16 : dtype, DBG_LOC);
+    XliteOpGroupMatmul(rt, *in, _moeREUpGate[layer], _moeREUpGateScale[layer], expertsCounts, start,
+                       end, moeREUpGate[layer][start].dtype, intermediateSize * 2, _c.hiddenSize,
+                       h13, _c.weightNZ, _c.expertsWeightTrans);
+    rt.PutTensor(*in);
+
+    XTensor *ph13 = &h13;
+    if (dynamicQuant) {
+        XTensor &dequant =
+            rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, dtype, DBG_LOC);
+        XliteOpDeQuant(rt, *ph13, *pscale, dequant, true);
         rt.PutTensor(*ph13);
         rt.PutTensor(*pscale);
-        rt.PutTensor(*pExpertsSorted);
+        ph13 = &dequant;
     }
 
-    XliteOpSiluAndMul(rt, h13, h2);
+    XTensor &h2 = rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize}, dtype, DBG_LOC);
+    XliteOpSiluAndMul(rt, *ph13, h2);
+    rt.PutTensor(*ph13);
 
-    if (moeREUpGate[layer][start].dtype != hiddenState.dtype) {
-        XTensor &quant = rt.GetTensor(h2.shape, INT8, DBG_LOC);
-        XTensor &scale = rt.GetTensor({h2.shape[0], 1}, FP32, DBG_LOC);
-        XTensor &expertsSortedFP16 = rt.GetTensor(expertsSorted.shape, FP16, DBG_LOC);
-        ph2 = &quant;
+    XTensor *ph2 = &h2;
+    if (dynamicQuant) {
+        XTensor &quant = rt.GetTensor((*ph2).shape, moeReDtype, DBG_LOC);
+        XTensor &scale = rt.GetTensor({quant.shape[0], 1}, FP32, DBG_LOC);
+        XliteOpQuantDyn(rt, *ph2, scale, quant);
+        rt.PutTensor(*ph2);
         pscale = &scale;
-        pExpertsSorted = &expertsSortedFP16;
-        XliteOpQuantDyn(rt, h2, scale, quant);
+        ph2 = &quant;
     }
+
+    XTensor &out = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize},
+                                dynamicQuant ? FP16 : dtype, DBG_LOC);
     XliteOpGroupMatmul(rt, *ph2, _moeREDown[layer], _moeREDownScale[layer], expertsCounts, start,
-                       end, moeREDown[layer][start].dtype, _c.hiddenSize, intermediateSize,
-                       *pExpertsSorted, _c.weightNZ, _c.expertsWeightTrans);
-    if (moeREUpGate[layer][start].dtype != hiddenState.dtype) {
-        XliteOpDeQuant(rt, *pExpertsSorted, *pscale, expertsSorted, true);
+                       end, moeREDown[layer][start].dtype, _c.hiddenSize, intermediateSize, out,
+                       _c.weightNZ, _c.expertsWeightTrans);
+    rt.PutTensor(*ph2);
+
+    XTensor *pExpertsSorted = &out;
+    if (dynamicQuant) {
+        XTensor &dequant = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, dtype, DBG_LOC);
+        XliteOpDeQuant(rt, *pExpertsSorted, *pscale, dequant, true);
         rt.PutTensor(*pExpertsSorted);
         rt.PutTensor(*pscale);
-        rt.PutTensor(*ph2);
+        pExpertsSorted = &dequant;
     }
-
-    rt.PutTensor(h13);
-    rt.PutTensor(h2);
 
     // Check if shared experts should be processed on this rank:
     // 1. Shared experts are enabled (nSharedExperts != 0)
@@ -703,14 +715,15 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     if (_c.nSharedExperts != 0 &&
         ((_isSharedExpertWeightFull && ((rt.rankId() % rt.tpSize()) == 0)) ||
          !_isSharedExpertWeightFull)) {
-        XTensor &h = rt.GetTensor({m, _c.hiddenSize}, hiddenState.dtype, DBG_LOC);
-        ForwardMOECombine(rt, h, weights, routing, unpIdx, expertsSorted, expertsCounts);
+        XTensor &h = rt.GetTensor({m, _c.hiddenSize}, dtype, DBG_LOC);
+        ForwardMOECombine(rt, h, weights, routing, unpIdx, *pExpertsSorted, expertsCounts);
         // share experts
         ForwardMLP(rt, moeSEUpGate[layer], moeSEDown[layer], hiddenState, false);
         XliteOpAdd(rt, hiddenState, h, hiddenState);
         rt.PutTensor(h);
     } else {
-        ForwardMOECombine(rt, hiddenState, weights, routing, unpIdx, expertsSorted, expertsCounts);
+        ForwardMOECombine(rt, hiddenState, weights, routing, unpIdx, *pExpertsSorted,
+                          expertsCounts);
     }
 
     if (_c.defTpSize > 1) {
