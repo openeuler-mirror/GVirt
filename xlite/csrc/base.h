@@ -150,7 +150,7 @@ public:
     virtual ~XTensorPool(void);
     virtual int Init(void);
     virtual XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
-    virtual void PutTensor(XTensor &t);
+    void PutTensor(XTensor &t);
     virtual bool TensorInPool(XTensor &t);
     void *Ptr()
     {
@@ -176,7 +176,6 @@ public:
 
     int Init(void) override;
     XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc) override;
-    void PutTensor(XTensor &t) override;
     bool TensorInPool(XTensor &t) override;
     size_t maxUsedSize = 0;
     size_t currUsedSize = 0;

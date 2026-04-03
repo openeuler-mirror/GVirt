@@ -1,7 +1,7 @@
 export FORWARD_BACKEND=xlite
 export HCCL_DETERMINISTIC=true
 export LCCL_DETERMINISTIC=true
-models_base_path=/mnt/nvme1n1/models
+models_base_path=${1:-/mnt/nvme0n1/models}
 test_config_path=tests/test_config.json
 
 function run_qwen2.5_0.5B()
@@ -153,16 +153,14 @@ function run_llama_34B()
     rm $test_config_path
 }
 
-function run_deepseek()
+function run_deepseek_v3()
 {
-    # n_layers: 8
-    # quantization: experts_int8
     echo '{
         "vocab_size": 129280,
         "dim": 7168,
         "inter_dim": 18432,
         "moe_inter_dim": 2048,
-        "n_layers": 8,
+        "n_layers": 61,
         "n_dense_layers": 3,
         "n_heads": 128,
         "n_routed_experts": 256,
@@ -178,16 +176,15 @@ function run_deepseek()
         "qk_rope_head_dim": 64,
         "v_head_dim": 128,
         "dtype": "bf16",
-        "quantization": "experts_int8"
+        "quantization": "experts_int8",
+        "moe_ep_size": 16,
+        "moe_tp_size": 1
     }' > $test_config_path
-    # bf16
-    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-bf16-8layers-8d/ --config $test_config_path --interactive
-
     # w8a8
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-expert-int8-8layers-8d/ --config $test_config_path --interactive
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-R1-expert-int8 --config $test_config_path --interactive
 
     # batch input
-    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-expert-int8-8layers-8d/ --config $test_config_path --input tests/test.json
+    # torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-R1-expert-int8 --config $test_config_path --input tests/test.json
 
     rm $test_config_path
 }
@@ -201,17 +198,20 @@ function run_glm4_moe()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    # modify master_addr, node_rank in node1
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path $models_base_path/GLM-4.7/ --config $test_config_path --interactive
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path $models_base_path/GLM-4.7/ --config $test_config_path --interactive
     rm $test_config_path
 }
 
 #run_qwen2.5_0.5B
-run_qwen2_32B
+#run_qwen2_32B
 run_qwen3_32B
 run_qwen3_moe_30B
 run_llama_7B
 run_llama_13B
-run_llama_34B
-run_glm4_moe
-#run_deepseek
+#run_llama_34B
+
+npu_count=$(python -c "import torch; print(torch.npu.device_count())")
+if [ $npu_count -ge 16 ]; then
+    run_glm4_moe
+    run_deepseek_v3
+fi

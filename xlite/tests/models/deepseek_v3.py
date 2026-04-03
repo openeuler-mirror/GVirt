@@ -19,7 +19,10 @@ import torch.distributed as dist
 from safetensors.torch import load_model
 
 from tests.models.deepseek_kernel import weight_dequant
-
+from tests.models.weight_utils import (hf_model_weights_iterator,
+                                       convert_pyslice_to_tensor,
+                                       load_tensor_parallel_weights,
+                                       matrix_nd2nz, logger)
 
 debug = False
 world_size = 1
@@ -107,10 +110,12 @@ class ModelArgs:
     beta_slow: int = 1
     mscale: float = 1.
     quantization: str = "none"
-    model_type: str = "deepseek"
+    moe_ep_size: int = 1
+    moe_tp_size: int = 1
+    model_type: str = "deepseek_v3"
 
     def __post_init__(self):
-        self.max_m = self.max_seq_len if self.max_seq_len > self.max_batch_size else self.max_batch_size
+        self.max_m = self.max_seq_len * self.max_batch_size
 
 
 class ParallelEmbedding(nn.Module):
@@ -884,8 +889,140 @@ class DeepSeek_V3(nn.Module):
         else:
             return self.forward_naive(tokens, start_pos)
 
-    def load_weights(self, ckpt_path: str):
-        load_model(self, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+    def load_weights(self, model_path: str):
+        """ load deepseek v3 weight """
+        assert self.args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
+        assert self.args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
+        assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
+        assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+
+        self.xlite_weight_nz = True if forward_backend == "xlite" else False
+
+        n_local_experts = self.args.n_routed_experts // self.args.moe_ep_size
+        moe_tp_id = rank % self.args.moe_tp_size
+        moe_ep_id = rank // self.args.moe_tp_size
+        param_dict = {name if "lm_head" in name else "model." + name: param for name, param in self.named_parameters()}
+        for _, param in self.named_parameters():
+            param.requires_grad = False
+        for name, loaded_weight in hf_model_weights_iterator(model_path):
+            if "rotary_emb.inv_freq" in name or "g_idx" in name:
+                continue
+
+            # skip mtp layer
+            if name.startswith("model.layers."):
+                layer_id = int(name.split(".")[2])
+                if layer_id >= self.args.n_layers:
+                    continue
+
+            if "experts" in name and "shared_experts" not in name:
+                idx = int(name.split(".")[-3])
+                if idx < moe_ep_id * n_local_experts or idx >= (moe_ep_id + 1) * n_local_experts:
+                    continue
+
+            name = name.replace("self_attn", "attn")
+            name = name.replace("mlp", "ffn")
+            name = name.replace("weight_scale_inv", "scale")
+            name = name.replace("e_score_correction_bias", "bias")
+            name = name.replace("qweight", "weight")
+            name = name.replace("scales", "scale")
+            name = name.replace("down_proj", "w2")
+            name = name.replace("embed_tokens", "embed")
+            name = name.replace("input_layernorm", "attn_norm")
+            name = name.replace("post_attention_layernorm", "ffn_norm")
+            name = name.replace("q_a_proj", "wq_a")
+            name = name.replace("q_a_layernorm", "q_norm")
+            name = name.replace("q_b_proj", "wq_b")
+            name = name.replace("kv_a_proj_with_mqa", "wkv_a")
+            name = name.replace("kv_a_layernorm", "kv_norm")
+            name = name.replace("kv_b_proj", "wkv_b")
+            name = name.replace("o_proj", "wo")
+            name = name.replace("lm_head", "head")
+            if not name.startswith("model."):
+                name = "model." + name
+
+            is_gate_up_weight = False
+            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+                if weight_name not in name:
+                    continue
+
+                param_name = name.replace(weight_name, "w13")
+                if param_name not in param_dict:
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    continue
+                param = param_dict[param_name]
+                shard_size = param.shape[0] // 2
+                gate_up_idx = moe_tp_id if ("experts" in name and "shared_experts" not in name) else rank
+
+                loaded_weight = loaded_weight[shard_size * gate_up_idx:shard_size * (gate_up_idx + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
+                param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+
+                is_gate_up_weight = True
+                break
+            if is_gate_up_weight:
+                continue
+
+            if name not in param_dict:
+                logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                continue
+
+            param = param_dict[name]
+
+            if "embed" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.vocab_size,
+                                             self.args.dim,
+                                             name, True, False, rank, world_size)
+                continue
+
+            if "head" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.dim,
+                                             self.args.vocab_size,
+                                             name, False, True, rank, world_size)
+                continue
+
+            if "wq_b" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.q_lora_rank,
+                                             self.args.n_heads * (self.args.qk_nope_head_dim + self.args.qk_rope_head_dim),
+                                             name, False, True, rank, world_size)
+                continue
+
+            if "wkv_b" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.kv_lora_rank,
+                                             self.args.n_heads * (self.args.qk_nope_head_dim + self.args.v_head_dim),
+                                             name, False, True, rank, world_size)
+                continue
+
+            if "wo" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.v_head_dim * self.args.n_heads, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
+            if "w2" in name and (int(name.split(".")[2]) < self.args.n_dense_layers):
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.inter_dim, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
+            if "w2" in name and "shared_experts" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.n_shared_experts * self.args.moe_inter_dim, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
+            if "w2" in name and "experts" in name:
+                shard_size = param.shape[1]
+                loaded_weight = loaded_weight[:, shard_size * moe_tp_id:shard_size * (moe_tp_id + 1)]
+                param.data[:,:loaded_weight.shape[1]].copy_(loaded_weight)
+                continue
+
+            loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+            param.copy_(loaded_weight)
+            torch.npu.empty_cache()
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -930,8 +1067,8 @@ class DeepSeek_V3(nn.Module):
         config.route_scale = args.route_scale
         config.def_tp_size = world_size
         config.def_dp_size = 1
-        config.moe_ep_size = world_size
-        config.moe_tp_size = 1
+        config.moe_ep_size = args.moe_ep_size
+        config.moe_tp_size = args.moe_tp_size
         config.block_size = block_size
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size

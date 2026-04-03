@@ -370,7 +370,8 @@ int XDummyTensorPool::Init(void)
 
 XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc)
 {
-    size_t numel = 1, size;
+    size_t numel = 1, size, free;
+    void *ptr = _ptr;
 
     if (shape.empty()) {
         std::cerr << loc.file << ":" << loc.line << ": size is 0" << std::endl;
@@ -382,34 +383,34 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
                   << ": dynamic tensor too many, please put after use" << std::endl;
         throw std::runtime_error("dynamic tensor too many, please put after use");
     }
+    XTensor &t = _free.front();
 
     for (uint64_t i = 0; i < shape.size(); i++) {
         numel *= shape[i];
     }
     size = ROUND_UP(numel * XDtypeBit(dtype) / 8, XLITE_TENSOR_ALIGN);
-    currUsedSize += size;
+
+    for (auto it = _used.begin(); it != _used.end(); it++) {
+        XTensor &use = it->get();
+        free = reinterpret_cast<uintptr_t>(use.ptr) - reinterpret_cast<uintptr_t>(ptr);
+        if (free >= size) {
+            t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
+            _free.pop_front();
+            _used.insert(it, t);
+            return t;
+        }
+        ptr = reinterpret_cast<void *>(
+            reinterpret_cast<uint64_t>(use.ptr) +
+            ROUND_UP(use.numel * XDtypeBit(use.dtype) / 8, XLITE_TENSOR_ALIGN));
+    }
+    t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
+    _free.pop_front();
+    _used.push_back(t);
+    currUsedSize = reinterpret_cast<uint64_t>(ptr) + size;
     if (currUsedSize > maxUsedSize) {
         maxUsedSize = currUsedSize;
     }
-    XTensor &t = _free.front();
-    t.Init(std::move(shape), dtype, nullptr, XTENSOR_DYNAMIC);
-    _free.pop_front();
-    _used.push_back(t);
     return t;
-}
-
-void XDummyTensorPool::PutTensor(XTensor &t)
-{
-    if (t.type != XTENSOR_DYNAMIC) {
-        return;
-    }
-    size_t numel = 1, size;
-    for (uint64_t i = 0; i < t.shape.size(); i++) {
-        numel *= t.shape[i];
-    }
-    size = ROUND_UP(numel * XDtypeBit(t.dtype) / 8, XLITE_TENSOR_ALIGN);
-    currUsedSize -= size;
-    XTensorPool::PutTensor(t);
 }
 
 bool XDummyTensorPool::TensorInPool(XTensor &t)

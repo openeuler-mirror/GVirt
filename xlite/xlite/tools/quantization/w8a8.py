@@ -28,6 +28,9 @@ from xlite.tools.quantization.algorithms.quantizers import (
 )
 
 
+torch.npu.config.allow_internal_format = True  # type: ignore[attr-defined]
+
+
 def post_opt_scale(w, w_quant, zero, H=None, b_bias=None):
     """
     Due to the implementation in the current quantization implementation

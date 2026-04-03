@@ -5,3 +5,5 @@ xlite.egg-info
 *so
 tags
 cscope.out
+extra-info/
+tests/test_output/
