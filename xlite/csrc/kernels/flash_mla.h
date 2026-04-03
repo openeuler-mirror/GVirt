@@ -484,7 +484,7 @@ public:
                 // copy K (kSize, k0) to L1
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
                 CopyGmToL1Nd2Nz(kl1aBuf[curr], kCache[block * blockSize * kvLoraRank + VkOffset],
-                                VmSize, VkSize, kvLoraRank, VmBlockPad);
+                                VmBlockPad, VkSize, kvLoraRank, VmBlockPad);
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
 
                 // copy WUV (vHeadDim, k0) to L1
@@ -525,7 +525,7 @@ public:
 
             // copy QK (m0, kSize) to L1
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
-            CopyGmToL1Nd2Nz(qkl1aBuf[curr], qk[kIdx * blockSize], queryLen, kSize,
+            CopyGmToL1Nd2Nz(qkl1aBuf[curr], qk[kIdx * blockSize], queryLen, kBlockPad,
                             TILESIZE_OF_CACHED_KV, mBlockPad);
 
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
