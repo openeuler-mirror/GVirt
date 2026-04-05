@@ -112,11 +112,12 @@ class ModelArgs:
     quantization: str = "none"
     moe_ep_size: int = 1
     moe_tp_size: int = 1
-    model_type: Literal["deepseek_v3", "deepseek_v32"] = "deepseek_v3"
-    # index: only used for deepseek_v32
+    model_type: Literal["deepseek_v3", "deepseek_v32", "glm5"] = "deepseek_v3"
+    # index: only used for deepseek_v32 & glm5
     index_n_heads: int = 64
     index_head_dim: int = 128
     index_topk: int = 2048
+    indexer_rope_interleave: bool = False
 
     def __post_init__(self):
         self.max_m = self.max_seq_len * self.max_batch_size
@@ -472,6 +473,7 @@ class Indexer(torch.nn.Module):
         # weights_proj in the checkpoint is stored in bf16, while the parameters here are stored in fp32 for convenient.
         self.weights_proj = Linear(self.dim, self.n_heads, dtype=torch.float32)
         self.softmax_scale = self.head_dim ** -0.5
+        self.indexer_rope_interleave = args.indexer_rope_interleave
 
         self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.get_default_dtype()), persistent=False)
 
@@ -483,13 +485,13 @@ class Indexer(torch.nn.Module):
         q = q.view(bsz, seqlen, self.n_heads, self.head_dim)
         q_pe, q_nope = torch.split(q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
         # rope in indexer is not interleaved
-        q_pe = apply_rotary_emb(q_pe, freqs_cis, False)
+        q_pe = apply_rotary_emb(q_pe, freqs_cis, self.indexer_rope_interleave)
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = self.wk(x)
         k = self.k_norm(k)
         k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
         # rope in indexer is not interleaved
-        k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis, False).squeeze(2)
+        k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis, self.indexer_rope_interleave).squeeze(2)
         k = torch.cat([k_pe, k_nope], dim=-1)
         q = rotate_activation(q)
         k = rotate_activation(k)
@@ -546,7 +548,7 @@ class MLA(nn.Module):
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.indexer = Indexer(args) if args.model_type == "deepseek_v32" else None
+        self.indexer = None if args.model_type == "deepseek_v3" else Indexer(args)
 
         if forward_backend != "xlite":
             self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
@@ -682,7 +684,7 @@ class Gate(nn.Module):
         self.score_func = args.score_func
         self.route_scale = args.route_scale
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim, dtype=torch.float32))
-        self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32)) if self.dim == 7168 else None
+        self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32)) if self.dim == 7168 or self.dim == 6144 else None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -985,7 +987,7 @@ class DeepSeek_V3(nn.Module):
             return self.forward_naive(tokens, start_pos)
 
     def load_weights(self, model_path: str):
-        """ load deepseek v3 or v3.2  weight """
+        """ load deepseek v3 or v3.2 or glm5 weight """
         assert self.args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
         assert self.args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
         assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
