@@ -202,6 +202,48 @@ function run_glm4_moe()
     rm $test_config_path
 }
 
+function run_deepseek_v32()
+{
+    echo '{
+        "vocab_size": 129280,
+        "dim": 7168,
+        "inter_dim": 18432,
+        "moe_inter_dim": 2048,
+        "n_layers": 61,
+        "n_dense_layers": 3,
+        "n_heads": 128,
+        "norm_eps": 1e-06,
+        "n_routed_experts": 256,
+        "n_shared_experts": 1,
+        "n_activated_experts": 8,
+        "n_expert_groups": 8,
+        "n_limited_groups": 4,
+        "score_func": "sigmoid",
+        "route_scale": 2.5,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "original_seq_len": 4096,
+        "rope_theta": 10000.0,
+        "rope_factor": 40,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "mscale": 1.0,
+        "index_n_heads": 64,
+        "index_head_dim": 128,
+        "index_topk": 2048,
+        "quantization": "none",
+        "model_type": "deepseek_v32",
+        "dtype": "bf16",
+        "moe_ep_size": 16,
+        "moe_tp_size": 1
+    }' > $test_config_path
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v32 --ckpt-path $models_base_path/DeepSeek-V3.2-bf16/ --config $test_config_path --interactive
+    rm $test_config_path
+}
+
 #run_qwen2.5_0.5B
 #run_qwen2_32B
 run_qwen3_32B
@@ -214,4 +256,5 @@ npu_count=$(python -c "import torch; print(torch.npu.device_count())")
 if [ $npu_count -ge 16 ]; then
     run_glm4_moe
     run_deepseek_v3
+    #run_deepseek_v32
 fi

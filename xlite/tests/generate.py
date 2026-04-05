@@ -114,7 +114,7 @@ def main(
         temperature (float, optional): Temperature for sampling. Defaults to 1.0.
         no_prefix (bool, optional): Whether to skip adding prefix/suffix to prompts. Defaults to False.
     """
-    if model_type == "deepseek_v3":
+    if model_type == "deepseek_v3" or model_type == "deepseek_v32":
         from tests.models.deepseek_v3 import ModelArgs
         from tests.models.deepseek_v3 import DeepSeek_V3 as Transformer
     elif model_type == "llama":
@@ -286,6 +286,6 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--no-prefix", action="store_true")
     args = parser.parse_args()
-    assert args.model in ["deepseek_v3", "llama", "qwen2", "qwen3", "qwen3_moe", "glm4_moe"], f"{args.model} not supported!"
+    assert args.model in ["deepseek_v3", "deepseek_v32", "llama", "qwen2", "qwen3", "qwen3_moe", "glm4_moe"], f"{args.model} not supported!"
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
     main(args.model, args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.no_prefix)
