@@ -21,6 +21,27 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 
+# 根据 NPU-SMI 版本决定是否禁用 XCCL
+# Version >= 25.3 不设置，< 25.3 设置
+npu_smi_version=$(npu-smi info 2>/dev/null | grep -oP 'Version:\s*\K[\d.]+' | head -1)
+if [[ -n "${npu_smi_version}" ]]; then
+    # 提取主版本号、次版本号
+    major=$(echo "$npu_smi_version" | cut -d. -f1)
+    minor=$(echo "$npu_smi_version" | cut -d. -f2)
+
+    # 正确比较：25.3 为分界线
+    if [[ $major -lt 25 ]] || [[ $major -eq 25 && $minor -lt 3 ]]; then
+        export XLITE_DISABLE_XCCL=True
+        echo "NPU-SMI Version ${npu_smi_version} < 25.3, enabling XLITE_DISABLE_XCCL"
+    else
+        echo "NPU-SMI Version ${npu_smi_version} >= 25.3, not setting XLITE_DISABLE_XCCL"
+    fi
+else
+    export XLITE_DISABLE_XCCL=True
+    echo "Unable to detect NPU-SMI version, enabling XLITE_DISABLE_XCCL by default"
+fi
+export XLITE_FLASH_ATTENTION_ENABLE=True
+
 ip=127.0.0.1
 
 expert_parallel_param=""

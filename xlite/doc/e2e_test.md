@@ -96,3 +96,164 @@ python process_data.py <aclgraph_dir> <xlite_full_dir> <xlite_decode_only_dir> -
 # 示例：
 python process_data.py ./result_input_512_output_512_aclgraph ./result_input_512_output_512_xlite_full ./result_input_512_output_512_xlite_decode_only -o ./benchmark_comparison.log -m "Qwen3 32B"
 ```
+
+5. **每日自动化测试机器人**
+
+每日自动化测试机器人用于定时执行性能测试、对比版本差异、检测性能劣化并发送通知。
+
+### 5.1 容器准备
+
+需要准备两个容器：编译容器和测试容器。
+
+**启动编译容器 (xlite-build):**
+```bash
+docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
+  --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi:ro \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+  -v /usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/common:ro \
+  -v /usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/driver:ro \
+  -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+  -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
+  -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
+  -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
+  --name xlite-build \
+  -v /tmp:/tmp -v /home:/home -v /mnt/sdb/:/mnt/sdb \
+  hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20260324 \
+  /bin/bash -c "while true;do echo hello;sleep 5;done"
+```
+
+**启动测试容器 (daily-test):**
+```bash
+docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
+  --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi:ro \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+  -v /usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/common:ro \
+  -v /usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/driver:ro \
+  -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+  -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
+  -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
+  -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
+  --name daily-test \
+  -v /tmp:/tmp -v /home:/home -v /mnt/sdb/:/mnt/sdb \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  quay.io/ascend/vllm-ascend:v0.17.0rc1-a3 \
+  /bin/bash -c "while true;do echo hello;sleep 5;done"
+```
+
+### 5.2 安装定时任务
+
+使用交互式脚本安装 cron 定时任务：
+
+```bash
+cd ./tests/e2e/
+bash install_cron.sh
+```
+
+脚本会引导您完成以下配置：
+- 选择执行时间（预设选项或自定义 cron 表达式）
+- 选择测试模型类型（moe/dense/all）
+- 配置接收者ID（用于发送测试结果通知）
+- 配置编译容器名称
+
+**执行时间选项：**
+- 1) 每天凌晨 2:00 执行（推荐）
+- 2) 每天凌晨 4:00 执行
+- 3) 每天晚上 22:00 执行
+- 4) 自定义时间
+- 5) 现在立即执行
+
+**模型类型选项：**
+- moe: 测试 Qwen3-30B-A3B-Instruct-2507 模型（4个场景）
+- dense: 测试 Qwen3-32B 模型（3个场景）
+- all: 测试所有模型
+
+### 5.3 手动执行测试
+
+除了定时任务，也可以手动执行测试：
+
+```bash
+cd ./tests/e2e/
+python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
+```
+
+**可选参数：**
+- `--model`: 测试模型类型（dense/moe/all），默认 moe
+- `--skip-pull`: 跳过代码拉取
+- `--skip-build`: 跳过编译
+- `--receiver`: 接收者ID，默认 927280411401503971
+- `--threshold`: 性能劣化阈值，默认 0.05（即5%）
+- `--build-container`: 编译容器名称
+- `--env-type`: 环境类型（blue/yellow），默认 yellow
+  - yellow 环境：需要执行 source /home/env.sh
+  - blue 环境：不需要 source /home/env.sh
+
+### 5.4 测试流程
+
+自动化测试机器人执行以下流程：
+
+1. **代码拉取**：在编译容器和测试容器中从远程仓库拉取最新代码
+2. **项目编译**：在编译容器中编译项目生成 wheel 包
+3. **安装部署**：在本地安装 wheel 包
+4. **基准测试**：在测试容器中执行基准测试脚本
+5. **报告解析**：解析测试报告并与上一版本的数据对比
+6. **性能检测**：检测性能劣化（超过阈值时告警）
+7. **通知发送**：发送测试结果到群组
+
+### 5.5 性能对比规则
+
+- **劣化判断**：
+  - QPS 和 Output Speed：下降超过阈值视为劣化
+  - TTFT 和 TPOT：上升超过阈值视为劣化（延迟越高越差）
+- **阈值设置**：默认为 5%，可通过 `--threshold` 参数调整
+- **对比基线**：自动查找同版本号的基线测试报告进行对比
+
+### 5.6 输出结果
+
+测试结果保存在 `/home/daily_reports/` 目录下：
+
+- **报告目录结构**：
+  - `xlite-{version}-{date}/`：当前版本测试结果（带日期）
+  - `xlite-{version}/`：基线版本测试结果（不带日期）
+
+- **报告文件**：
+  - `benchmark_comparison_*.log`：性能对比报告
+  - `metrics_*.json`：指标数据（JSON格式）
+  - `comparison_*.json`：对比结果（JSON格式）
+  - `daily_summary_*.txt`：每日测试摘要
+
+### 5.7 常用命令
+
+```bash
+# 查看定时任务
+crontab -l
+
+# 编辑定时任务
+crontab -e
+
+# 删除定时任务
+crontab -r
+
+# 查看 cron 日志
+tail -f /home/daily_reports/cron.log
+
+# 手动执行测试
+python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
+```
+
+### 5.8 NPU-SMI 版本检测
+
+脚本会自动检测 NPU-SMI 版本并决定是否禁用 XCCL：
+
+- **Version >= 25.3**：不禁用 XCCL（新版本已修复相关问题）
+- **Version < 25.3**：禁用 XCCL（旧版本需要禁用）
+- **无法获取版本**：默认禁用 XCCL
+
+### 5.9 退出码
+
+- `0`：成功，无性能劣化
+- `1`：执行失败
+- `2`：成功，但检测到性能劣化

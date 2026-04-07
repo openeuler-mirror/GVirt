@@ -238,12 +238,13 @@ run_scenario_test() {
     echo "${duration}"
 }
 
-# 清理指定类型进程（避免无进程时kill报错）
+# 清理指定类型进程（避免无进程时kill报错，排除当前进程）
 cleanup_single_process() {
     local process_name=$1
     local grep_pattern=$2
     echo -e "\n正在清理 ${process_name} 进程..."
-    PIDS=$(ps -ef | grep "${grep_pattern}" | grep -v grep | awk '{print $2}')
+    # 排除当前进程 ($$) 和父进程 ($PPID)，避免杀掉 daily_benchmark_bot.py
+    PIDS=$(ps -ef | grep "${grep_pattern}" | grep -v grep | grep -v "daily_benchmark_bot" | awk '{print $2}')
     if [ -n "${PIDS}" ]; then
         echo "找到进程PID：${PIDS}"
         echo "${PIDS}" | xargs kill -9
@@ -327,8 +328,12 @@ echo -e "\n清理代理环境变量..."
 unset https_proxy && unset http_proxy && unset HTTPS_PROXY && unset HTTP_PROXY
 echo "代理环境变量已清理"
 
-# 创建带日期的主输出文件夹
-MAIN_OUTPUT_DIR="benchmark_results_$(date +%Y%m%d_%H%M%S)"
+# 创建带日期的主输出文件夹（支持环境变量覆盖）
+if [[ -n "${MAIN_OUTPUT_DIR_OVERRIDE}" ]]; then
+    MAIN_OUTPUT_DIR="${MAIN_OUTPUT_DIR_OVERRIDE}"
+else
+    MAIN_OUTPUT_DIR="benchmark_results_$(date +%Y%m%d_%H%M%S)"
+fi
 mkdir -p "${MAIN_OUTPUT_DIR}"
 echo -e "\n======================================"
 echo "主输出目录：${MAIN_OUTPUT_DIR}"
