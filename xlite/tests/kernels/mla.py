@@ -27,6 +27,7 @@ BLOCK_SIZE = 128
 # model configurations: name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, dtype
 models = [
     ("deepseek_v3", 16, 64, 128, 128, 512, torch.bfloat16),
+    ("glm5", 16, 64, 192, 256, 512, torch.bfloat16),
 ]
 
 # work configurations: batch_size, cached_lens, query_lens
