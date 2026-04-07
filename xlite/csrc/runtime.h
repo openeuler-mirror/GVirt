@@ -13,7 +13,7 @@
 
 #ifdef XLITE_DEBUG_ON
 #define XLITE_DEBUG_POINT(condition, rt, h, str) \
-    if (condition) {                             \
+    if (condition && !(rt).IsDummyRuntime()) {   \
         (rt).Synchronize();                      \
         (h).Print((str));                        \
     }
