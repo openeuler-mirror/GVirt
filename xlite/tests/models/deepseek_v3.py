@@ -36,7 +36,7 @@ if forward_backend == "xlite":
     xlite_rt = None
     xlite_model = None
     block_size = 64
-    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMLA, Model, ScoringFuncSigmoid
+    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMLA, AttnDSA, Model, ScoringFuncSigmoid
     import numpy as np
 
 @dataclass
@@ -475,7 +475,8 @@ class Indexer(torch.nn.Module):
         self.softmax_scale = self.head_dim ** -0.5
         self.indexer_rope_interleave = args.indexer_rope_interleave
 
-        self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.get_default_dtype()), persistent=False)
+        if forward_backend != "xlite":
+            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.get_default_dtype()), persistent=False)
 
 
     def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
@@ -1176,6 +1177,14 @@ class DeepSeek_V3(nn.Module):
             config.scoring_func = ScoringFuncSigmoid
             config.norm_topk_prob = True
 
+        if args.model_type != "deepseek_v3":
+            config.index_head_dim = args.index_head_dim
+            config.index_n_heads = args.index_n_heads
+            config.index_topk = args.index_topk
+            config.index_softmax_scale = self.layers[0].attn.indexer.softmax_scale
+            config.index_rope_interleaved = args.indexer_rope_interleave
+            config.attn_type = AttnDSA
+
         global xlite_model
         xlite_model = self.xlite_model = Model()
         self.xlite_model.embed = self.embed.weight
@@ -1189,6 +1198,10 @@ class DeepSeek_V3(nn.Module):
         self.xlite_model.mla_kv_a = [layer.attn.wkv_a.weight for layer in self.layers]
         self.xlite_model.mla_kv_b = [layer.attn.wkv_b.weight for layer in self.layers]
         self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
+        self.xlite_model.index_q_b = [layer.attn.indexer.wq_b.weight for layer in self.layers if layer.attn.indexer is not None]
+        self.xlite_model.index_k = [layer.attn.indexer.wk.weight for layer in self.layers if layer.attn.indexer is not None]
+        self.xlite_model.index_k_norm = [layer.attn.indexer.k_norm.weight for layer in self.layers if layer.attn.indexer is not None]
+        self.xlite_model.index_weight = [layer.attn.indexer.weights_proj.weight for layer in self.layers if layer.attn.indexer is not None]
         self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [self.layers[i].ffn.w13.weight for i in range(args.n_dense_layers)]
         self.xlite_model.mlp_down = [self.layers[i].ffn.w2.weight for i in range(args.n_dense_layers)]
@@ -1220,11 +1233,19 @@ class DeepSeek_V3(nn.Module):
     def init_xlite_kvcache(self, args: ModelArgs):
         block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
         head_num = 1
-        self.xlite_kv_cache = [(torch.zeros(block_num, block_size, head_num, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
-                                torch.zeros(block_num, block_size, head_num, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'))
-                               for _ in range(args.n_layers)]
-        kv_size = (block_num * head_num * block_size * (args.kv_lora_rank + args.qk_rope_head_dim) *
-                   self.xlite_kv_cache[0][0].element_size() * args.n_layers)
+        if args.model_type == "deepseek_v3":
+            self.xlite_kv_cache = [(torch.zeros(block_num, block_size, head_num, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
+                                    torch.zeros(block_num, block_size, head_num, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'))
+                                for _ in range(args.n_layers)]
+            kv_size = (block_num * head_num * block_size * (args.kv_lora_rank + args.qk_rope_head_dim) *
+                    self.xlite_kv_cache[0][0].element_size() * args.n_layers)
+        else:
+            self.xlite_kv_cache = [(torch.zeros(block_num, block_size, head_num, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
+                                    torch.zeros(block_num, block_size, head_num, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'),
+                                    torch.zeros(block_num, block_size, head_num, args.index_head_dim, dtype=torch.get_default_dtype(), device='npu'))
+                                for _ in range(args.n_layers)]
+            kv_size = (block_num * head_num * block_size * (args.kv_lora_rank + args.qk_rope_head_dim + args.index_head_dim) *
+                    self.xlite_kv_cache[0][0].element_size() * args.n_layers)
         return kv_size
 
     def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):

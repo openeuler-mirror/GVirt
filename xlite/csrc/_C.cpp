@@ -28,24 +28,24 @@ public:
     ~_CModel();
     void Init(struct XModelConfig &c, uint32_t rankId);
     void Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                 std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                 std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                  at::Tensor &output, uint64_t currStream);
     void ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
-                   std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                   std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                    at::Tensor &output, uint64_t currStream);
     void ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint64_t currStream);
     void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                             std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
-                             at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
+                             std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                             at::Tensor &output, uint64_t currStream);
     void ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
-                               std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
-                               at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream);
+                               std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                               at::Tensor &output, uint64_t currStream);
     void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                                 std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
+                                 std::vector<std::vector<at::Tensor>> &kvCache,
                                  at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
                                  std::vector<at::Tensor> &deepstackInput);
     void ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
-                                   std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
+                                   std::vector<std::vector<at::Tensor>> &kvCache,
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
                                    std::vector<at::Tensor> &deepstackInput);
     size_t GetTensorPoolSize(int dbg);
@@ -67,6 +67,10 @@ public:
     std::vector<at::Tensor> mlaKVA;
     std::vector<at::Tensor> mlaKVB;
     std::vector<at::Tensor> mlaKVNorm;
+    std::vector<at::Tensor> indexQB;
+    std::vector<at::Tensor> indexK;
+    std::vector<at::Tensor> indexKNorm;
+    std::vector<at::Tensor> indexWeight;
 
     std::vector<at::Tensor> mlpNorm;
     std::vector<at::Tensor> mlpUpGate;
@@ -83,7 +87,7 @@ public:
 
 private:
     XModel *_model = nullptr;
-    std::vector<std::pair<XTensor, XTensor>> _kv;
+    std::vector<std::vector<XTensor>> _kv;
     std::vector<XTensor> _deepstackInputEmbeds;
 };
 
@@ -191,6 +195,26 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             throw std::invalid_argument(
                 "Mismatched number of layers MHA attention Q/K norm parameters");
         }
+    } else if (c.attnType == XMODEL_ATTN_DSA) {
+        if (mlaQA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
+            mlaQNorm.size() != c.nLayers || mlaKVA.size() != c.nLayers ||
+            mlaKVB.size() != c.nLayers || mlaKVNorm.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQA.size()
+                      << std::endl;
+            throw std::invalid_argument("Mismatched number of layers DSA attention QA/QB/QA "
+                                        "norm/KVA/KVB/KV norm parameters");
+        }
+        if (indexQB.size() != c.nLayers || indexK.size() != c.nLayers ||
+            indexKNorm.size() != c.nLayers || indexWeight.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << indexQB.size()
+                      << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers DSA attention index QB/K/KNorm/Weight parameters");
+        }
+    } else {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attention type: " << c.attnType
+                  << std::endl;
+        throw std::invalid_argument("Invalid attention type");
     }
 
     if (mlpUpGate.size() != c.nDenseLayers || mlpDown.size() != c.nDenseLayers) {
@@ -253,6 +277,17 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
                 InitXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
             }
+        } else if (c.attnType == XMODEL_ATTN_DSA) {
+            InitXTensor(_model->mlaQA[i], mlaQA[i]);
+            InitXTensor(_model->mlaQB[i], mlaQB[i]);
+            InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+            InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
+            InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
+            InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+            InitXTensor(_model->indexQB[i], indexQB[i]);
+            InitXTensor(_model->indexK[i], indexK[i]);
+            InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
+            InitXTensor(_model->indexWeight[i], indexWeight[i]);
         }
     }
 
@@ -294,6 +329,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     }
 
     _kv.resize(c.nLayers);
+    for (uint32_t i = 0; i < c.nLayers; i++) {
+        _kv[i].resize(c.attnType == XMODEL_ATTN_DSA ? 3 : 2);
+    }
     _deepstackInputEmbeds.resize(c.deepstackNumLevel);
 }
 
@@ -306,7 +344,7 @@ _CModel::~_CModel(void)
 }
 
 void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                      std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                      std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                       at::Tensor &output, uint64_t currStream)
 {
     XTensor _input, _output, _freqsCis;
@@ -332,8 +370,13 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     _output.View({_input.shape[0], _output.shape[1]});
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
-        InitXTensor(_kv[i].first, kvCache[i].first);
-        InitXTensor(_kv[i].second, kvCache[i].second);
+        if (kvCache[i].size() != _kv[i].size()) {
+            throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
+                                     std::to_string(i));
+        }
+        for (int j = 0; j < _kv[i].size(); j++) {
+            InitXTensor(_kv[i][j], kvCache[i][j]);
+        }
     }
 
     if (currStream != 0 && rt.taskId == 0) {
@@ -366,8 +409,8 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
 }
 
 void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
-                        std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
-                        at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
+                        std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                        at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 1;
@@ -403,7 +446,7 @@ void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &outp
 }
 
 void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                                  std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
+                                  std::vector<std::vector<at::Tensor>> &kvCache,
                                   at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XTensor _input, _output, _freqsCis;
@@ -422,8 +465,13 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
-        InitXTensor(_kv[i].first, kvCache[i].first);
-        InitXTensor(_kv[i].second, kvCache[i].second);
+        if (kvCache[i].size() != _kv[i].size()) {
+            throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
+                                     std::to_string(i));
+        }
+        for (int j = 0; j < _kv[i].size(); j++) {
+            InitXTensor(_kv[i][j], kvCache[i][j]);
+        }
     }
 
     if (currStream != 0 && rt.taskId == 0) {
@@ -457,7 +505,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
 }
 
 void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
-                                    std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
+                                    std::vector<std::vector<at::Tensor>> &kvCache,
                                     at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
@@ -471,7 +519,7 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnM
 }
 
 void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                                      std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
+                                      std::vector<std::vector<at::Tensor>> &kvCache,
                                       at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
                                       std::vector<at::Tensor> &deepstackInput)
 {
@@ -503,8 +551,13 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
-        InitXTensor(_kv[i].first, kvCache[i].first);
-        InitXTensor(_kv[i].second, kvCache[i].second);
+        if (kvCache[i].size() != _kv[i].size()) {
+            throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
+                                     std::to_string(i));
+        }
+        for (int j = 0; j < _kv[i].size(); j++) {
+            InitXTensor(_kv[i][j], kvCache[i][j]);
+        }
     }
 
     for (uint32_t i = 0; i < deepstackInput.size(); i++) {
@@ -542,7 +595,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
 }
 
 void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
-                                        std::vector<std::pair<at::Tensor, at::Tensor>> &kvCache,
+                                        std::vector<std::vector<at::Tensor>> &kvCache,
                                         at::Tensor &freqsCis, at::Tensor &output,
                                         uint64_t currStream,
                                         std::vector<at::Tensor> &deepstackInput)
@@ -1045,7 +1098,12 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("norm_topk_prob", &XModelConfig::normTopKProb)
         .def_readwrite("mrope_section", &XModelConfig::mropeSection)
         .def_readwrite("mrope_interleaved", &XModelConfig::mropeInterleaved)
-        .def_readwrite("deepstack_num_level", &XModelConfig::deepstackNumLevel);
+        .def_readwrite("deepstack_num_level", &XModelConfig::deepstackNumLevel)
+        .def_readwrite("index_head_dim", &XModelConfig::indexHeadDim)
+        .def_readwrite("index_n_heads", &XModelConfig::indexNHeads)
+        .def_readwrite("index_topk", &XModelConfig::indexTopK)
+        .def_readwrite("index_softmax_scale", &XModelConfig::indexSoftmaxScale)
+        .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
         .def(py::init<>())
@@ -1065,6 +1123,7 @@ PYBIND11_MODULE(_C, m)
     py::enum_<XModelAttnType>(m, "AttnType")
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
         .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
+        .value("AttnDSA", XModelAttnType::XMODEL_ATTN_DSA)
         .export_values();
 
     py::enum_<XModelScoringFuncType>(m, "ScoringFuncType")
@@ -1089,6 +1148,10 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("mla_kv_a", &_CModel::mlaKVA)
         .def_readwrite("mla_kv_b", &_CModel::mlaKVB)
         .def_readwrite("mla_kv_norm", &_CModel::mlaKVNorm)
+        .def_readwrite("index_q_b", &_CModel::indexQB)
+        .def_readwrite("index_k", &_CModel::indexK)
+        .def_readwrite("index_k_norm", &_CModel::indexKNorm)
+        .def_readwrite("index_weight", &_CModel::indexWeight)
         .def_readwrite("mlp_norm", &_CModel::mlpNorm)
         .def_readwrite("mlp_up_gate", &_CModel::mlpUpGate)
         .def_readwrite("mlp_down", &_CModel::mlpDown)
