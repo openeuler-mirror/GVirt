@@ -12,7 +12,7 @@ safetensors
 tiktoken
 sentencepiece
 protobuf
-transformers
+transformers>=5.0.0,<=5.2.0
 pyyaml>=6.0
 torch-npu>=2.5.1
 clang-format==22.1.0

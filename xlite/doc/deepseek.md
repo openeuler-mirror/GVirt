@@ -22,17 +22,14 @@ pip install -r requirements.txt
 # 2）参数类型转换
 # （选择一）：模型参数从fp8转换为bf16
 export dtype=bf16
-python xlite/tools/fp8_cast_bf16.py --input-fp8-hf-path /mnt/nvme0n1/models/deepseek-R1 --output-bf16-hf-path /mnt/nvme0n1/models/deepseek-R1-${dtype}
+python xlite/tools/fp8_cast_bf16.py --input-fp8-hf-path /mnt/nvme0n1/models/DeepSeek-R1 --output-bf16-hf-path /mnt/nvme0n1/models/DeepSeek-R1-${dtype}
 
 # （选择二）：模型参数从fp8转换为int8（仅量化路由专家，其他参数转化为bf16）
 export dtype=expert-int8
-bash xlite/tools/w8a8.sh /mnt/nvme0n1/models/deepseek-R1 /mnt/nvme0n1/models/deepseek-R1-${dtype}
+bash xlite/tools/w8a8.sh /mnt/nvme0n1/models/DeepSeek-R1 /mnt/nvme0n1/models/DeepSeek-R1-${dtype}
 
-# 3）模型按照并行策略进行切分，model-parallel代表在几张卡上运行，默认MOE路由专家按照EP方式切分，其他参数按照TP方式切分
-python xlite/tools/convert.py --hf-ckpt-path /mnt/nvme0n1/models/deepseek-R1-${dtype} --save-path /mnt/nvme0n1/models/deepseek-R1-${dtype}-61layers-${num_npu}d --model-parallel ${num_npu}
-
-# 4）拷贝参数到每个服务器
-scp -r /mnt/nvme0n1/models/deepseek-R1-${dtype}-61layers-${num_npu}d x.x.x.x:/mnt/nvme0n1/models/
+# 3）拷贝参数到每个服务器
+scp -r /mnt/nvme0n1/models/DeepSeek-R1-${dtype} x.x.x.x:/mnt/nvme0n1/models/
 ```
 
 3. **运行DeepSeek-R1推理**
@@ -46,7 +43,7 @@ export XLITE_NODE_IPS="ip0,ip1"
 # 注1：XLITE_NODE_IPS用于配置多台服务器的ip列表，使用","作为分隔符，要求按node顺序排列，即与下一步命令中的node_rank对应。
 
 # 2) 运行DeepSeek-R1推理
-torchrun --nproc_per_node=8 --nnodes=${nnodes} --node_rank=${node} --master_addr=x.x.x.x tests/generate.py --ckpt-path /mnt/nvme0n1/models/deepseek-R1-${dtype}-61layers-${num_npu}d --config tests/deepseek_config_671B.json --interactive
+torchrun --nproc_per_node=8 --nnodes=${nnodes} --node_rank=${node} --master_addr=x.x.x.x tests/generate.py --ckpt-path /mnt/nvme0n1/models/DeepSeek-R1-${dtype}-61layers-${num_npu}d --config tests/deepseek_config_671B.json --interactive
 # 注1：nproc_per_node：每个服务器上的进程数; nnodes：共几个服务器; node_rank：第一台服务器的node为0，第二台服务器的node为1，以此类推; master_addr：配置为0号node的ip。
 # 注2：用户如使用int8模型，需将config文件tests/deepseek_config_671B.json中参数"quantization"的值修改为"experts_int8"。
 # 注3：用户如使用8层模型，需将config文件tests/deepseek_config_671B.json中参数"n_layers"的值修改为"8"。

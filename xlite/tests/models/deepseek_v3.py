@@ -19,6 +19,10 @@ import torch.distributed as dist
 from safetensors.torch import load_model
 
 from tests.models.deepseek_kernel import weight_dequant
+from tests.models.weight_utils import (hf_model_weights_iterator,
+                                       convert_pyslice_to_tensor,
+                                       load_tensor_parallel_weights,
+                                       matrix_nd2nz, logger)
 
 
 debug = False
@@ -26,7 +30,6 @@ world_size = 1
 rank = 0
 block_size = 128
 gemm_impl = "bf16"
-attn_impl: Literal["naive", "absorb"] = "absorb"
 
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
@@ -107,10 +110,17 @@ class ModelArgs:
     beta_slow: int = 1
     mscale: float = 1.
     quantization: str = "none"
-    model_type: str = "deepseek"
+    moe_ep_size: int = 1
+    moe_tp_size: int = 1
+    model_type: Literal["deepseek_v3", "deepseek_v32", "glm5"] = "deepseek_v3"
+    # index: only used for deepseek_v32 & glm5
+    index_n_heads: int = 64
+    index_head_dim: int = 128
+    index_topk: int = 2048
+    indexer_rope_interleave: bool = False
 
     def __post_init__(self):
-        self.max_m = self.max_seq_len if self.max_seq_len > self.max_batch_size else self.max_batch_size
+        self.max_m = self.max_seq_len * self.max_batch_size
 
 
 class ParallelEmbedding(nn.Module):
@@ -278,12 +288,13 @@ class RowParallelLinear(Linear):
         Returns:
             torch.Tensor: Transformed tensor with row-parallel computation.
         """
-        y = linear(x, self.weight)
+        y = linear(x, self.weight, None)
         if world_size > 1:
+            y = y.float()
             dist.all_reduce(y)
         if self.bias is not None:
             y += self.bias
-        return y
+        return y.type_as(x)
 
 
 class RMSNorm(nn.Module):
@@ -394,7 +405,7 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
     return freqs_cis
 
 
-def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, interleaved: bool = True) -> torch.Tensor:
     """
     Applies rotary positional embeddings to the input tensor.
 
@@ -406,10 +417,95 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
         torch.Tensor: Tensor with rotary embeddings applied.
     """
     dtype = x.dtype
-    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
+    shape = x.shape
+    if not interleaved:
+        x = x.view(*shape[:-1], 2, -1).transpose(-1, -2).contiguous()
+    x = torch.view_as_complex(x.float().view(*shape[:-1], -1, 2))
     freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
     y = torch.view_as_real(x * freqs_cis).flatten(3)
+    if not interleaved:
+        y = torch.cat([y[..., 0::2], y[..., 1::2]], dim=-1)
     return y.to(dtype)
+
+
+def rotate_activation(x: torch.Tensor) -> torch.Tensor:
+    """
+    Rotate activation using Hadamard transform.
+    Simplified implementation for compatibility when fast_hadamard_transform is not available.
+    """
+    assert x.dtype == torch.bfloat16
+    hidden_size = x.size(-1)
+    scale = hidden_size ** -0.5
+
+    # Simple identity transformation as fallback
+    # In production, this should use fast_hadamard_transform for better performance
+    return x * scale
+
+
+class LayerNorm(nn.Module):
+    """
+    Layer Normalization.
+    """
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor):
+        return F.layer_norm(x.float(), (self.dim,), self.weight, self.bias, self.eps).type_as(x)
+
+
+class Indexer(torch.nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.dim: int = args.dim
+        self.n_heads: int = args.index_n_heads
+        self.n_local_heads = args.index_n_heads // world_size
+        self.head_dim: int = args.index_head_dim
+        self.rope_head_dim: int = args.qk_rope_head_dim
+        self.index_topk: int = args.index_topk
+        self.q_lora_rank: int = args.q_lora_rank
+        self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim)
+        self.wk = Linear(self.dim, self.head_dim)
+        self.k_norm = LayerNorm(self.head_dim)
+        # weights_proj in the checkpoint is stored in bf16, while the parameters here are stored in fp32 for convenient.
+        self.weights_proj = Linear(self.dim, self.n_heads, dtype=torch.float32)
+        self.softmax_scale = self.head_dim ** -0.5
+        self.indexer_rope_interleave = args.indexer_rope_interleave
+
+        self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.get_default_dtype()), persistent=False)
+
+
+    def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+        bsz, seqlen, _ = x.size()
+        end_pos = start_pos + seqlen
+        q = self.wq_b(qr)
+        q = q.view(bsz, seqlen, self.n_heads, self.head_dim)
+        q_pe, q_nope = torch.split(q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
+        # rope in indexer is not interleaved
+        q_pe = apply_rotary_emb(q_pe, freqs_cis, self.indexer_rope_interleave)
+        q = torch.cat([q_pe, q_nope], dim=-1)
+        k = self.wk(x)
+        k = self.k_norm(k)
+        k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
+        # rope in indexer is not interleaved
+        k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis, self.indexer_rope_interleave).squeeze(2)
+        k = torch.cat([k_pe, k_nope], dim=-1)
+        q = rotate_activation(q)
+        k = rotate_activation(k)
+        self.k_cache[:bsz, start_pos:end_pos] = k
+        weights = self.weights_proj(x.float()) * self.n_heads ** -0.5
+        scores = torch.einsum("bshd, btd -> bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
+        index_score = torch.einsum("bsht,bsh->bst", scores, weights)
+        if mask is not None:
+            index_score += mask
+        topk_indices = index_score.topk(min(self.index_topk, end_pos), dim=-1)[1]
+        topk_indices_ = topk_indices.clone()
+        dist.broadcast(topk_indices_, src=0)
+        assert torch.all(topk_indices == topk_indices_), f"{topk_indices=} {topk_indices_=}"
+        return topk_indices
 
 
 class MLA(nn.Module):
@@ -440,12 +536,9 @@ class MLA(nn.Module):
         self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
         self.v_head_dim = args.v_head_dim
 
-        if self.q_lora_rank == 0:
-            self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim)
-        else:
-            self.wq_a = Linear(self.dim, self.q_lora_rank)
-            self.q_norm = RMSNorm(self.q_lora_rank)
-            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
+        self.wq_a = Linear(self.dim, self.q_lora_rank)
+        self.q_norm = RMSNorm(self.q_lora_rank)
+        self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
         self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
         self.kv_norm = RMSNorm(self.kv_lora_rank)
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
@@ -455,13 +548,11 @@ class MLA(nn.Module):
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
+        self.indexer = None if args.model_type == "deepseek_v3" else Indexer(args)
+
         if forward_backend != "xlite":
-            if attn_impl == "naive":
-                self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
-                self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
-            else:
-                self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
-                self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
+            self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
+            self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         """
@@ -478,39 +569,50 @@ class MLA(nn.Module):
         """
         bsz, seqlen, _ = x.size()
         end_pos = start_pos + seqlen
-        if self.q_lora_rank == 0:
-            q = self.wq(x)
-        else:
-            q = self.wq_b(self.q_norm(self.wq_a(x)))
+        qr = self.q_norm(self.wq_a(x))
+        q = self.wq_b(qr)
         q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim)
         q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_pe = apply_rotary_emb(q_pe, freqs_cis)
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv = self.kv_norm(kv)
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
-        if attn_impl == "naive":
+        self.kv_cache[:bsz, start_pos:end_pos] = kv
+        self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
+        if mask is not None:    # MHA prefill
             q = torch.cat([q_nope, q_pe], dim=-1)
-            kv = self.wkv_b(self.kv_norm(kv))
+            kv = self.wkv_b(kv)
             kv = kv.view(bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
-            self.k_cache[:bsz, start_pos:end_pos] = k
-            self.v_cache[:bsz, start_pos:end_pos] = v
-            scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
-        else:
-            wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size)
+            scores = torch.einsum("bshd,bthd->bsht", q, k).mul_(self.softmax_scale)
+
+            if self.indexer == None:
+                scores += mask.unsqueeze(1)
+            else:
+                # indexer
+                topk_indices = self.indexer(x, qr, start_pos, freqs_cis, mask)
+                index_mask = torch.full((bsz, seqlen, seqlen), float("-inf"), device=x.device).scatter_(-1, topk_indices, 0)
+                index_mask += mask
+                scores += index_mask.unsqueeze(2)
+
+            scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
+            x = torch.einsum("bsht,bthd->bshd", scores, v)
+        else:                   # MQA decode
+            wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale)
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
-            self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)
-            self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
             scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
                       torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
-        if mask is not None:
-            scores += mask.unsqueeze(1)
-        scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
-        if attn_impl == "naive":
-            x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
-        else:
+
+            if self.indexer != None:
+                # indexer
+                topk_indices = self.indexer(x, qr, start_pos, freqs_cis, mask)
+                index_mask = torch.full((bsz, 1, end_pos), float("-inf"), device=x.device).scatter_(-1, topk_indices, 0)
+                scores += index_mask.unsqueeze(2)
+
+            scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
             x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
             x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
         x = self.wo(x.flatten(2))
@@ -582,7 +684,7 @@ class Gate(nn.Module):
         self.score_func = args.score_func
         self.route_scale = args.route_scale
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim, dtype=torch.float32))
-        self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32)) if self.dim == 7168 else None
+        self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32)) if self.dim == 7168 or self.dim == 6144 else None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -884,8 +986,140 @@ class DeepSeek_V3(nn.Module):
         else:
             return self.forward_naive(tokens, start_pos)
 
-    def load_weights(self, ckpt_path: str):
-        load_model(self, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+    def load_weights(self, model_path: str):
+        """ load deepseek v3 or v3.2 or glm5 weight """
+        assert self.args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
+        assert self.args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
+        assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
+        assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+
+        self.xlite_weight_nz = True if forward_backend == "xlite" else False
+
+        n_local_experts = self.args.n_routed_experts // self.args.moe_ep_size
+        moe_tp_id = rank % self.args.moe_tp_size
+        moe_ep_id = rank // self.args.moe_tp_size
+        param_dict = {name if "lm_head" in name else "model." + name: param for name, param in self.named_parameters()}
+        for _, param in self.named_parameters():
+            param.requires_grad = False
+        for name, loaded_weight in hf_model_weights_iterator(model_path):
+            if "rotary_emb.inv_freq" in name or "g_idx" in name:
+                continue
+
+            # skip mtp layer
+            if name.startswith("model.layers."):
+                layer_id = int(name.split(".")[2])
+                if layer_id >= self.args.n_layers:
+                    continue
+
+            if "experts" in name and "shared_experts" not in name:
+                idx = int(name.split(".")[-3])
+                if idx < moe_ep_id * n_local_experts or idx >= (moe_ep_id + 1) * n_local_experts:
+                    continue
+
+            name = name.replace("self_attn", "attn")
+            name = name.replace("mlp", "ffn")
+            name = name.replace("weight_scale_inv", "scale")
+            name = name.replace("e_score_correction_bias", "bias")
+            name = name.replace("qweight", "weight")
+            name = name.replace("scales", "scale")
+            name = name.replace("down_proj", "w2")
+            name = name.replace("embed_tokens", "embed")
+            name = name.replace("input_layernorm", "attn_norm")
+            name = name.replace("post_attention_layernorm", "ffn_norm")
+            name = name.replace("q_a_proj", "wq_a")
+            name = name.replace("q_a_layernorm", "q_norm")
+            name = name.replace("q_b_proj", "wq_b")
+            name = name.replace("kv_a_proj_with_mqa", "wkv_a")
+            name = name.replace("kv_a_layernorm", "kv_norm")
+            name = name.replace("kv_b_proj", "wkv_b")
+            name = name.replace("o_proj", "wo")
+            name = name.replace("lm_head", "head")
+            if not name.startswith("model."):
+                name = "model." + name
+
+            is_gate_up_weight = False
+            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+                if weight_name not in name:
+                    continue
+
+                param_name = name.replace(weight_name, "w13")
+                if param_name not in param_dict:
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    continue
+                param = param_dict[param_name]
+                shard_size = param.shape[0] // 2
+                gate_up_idx = moe_tp_id if ("experts" in name and "shared_experts" not in name) else rank
+
+                loaded_weight = loaded_weight[shard_size * gate_up_idx:shard_size * (gate_up_idx + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
+                param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+
+                is_gate_up_weight = True
+                break
+            if is_gate_up_weight:
+                continue
+
+            if name not in param_dict:
+                logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                continue
+
+            param = param_dict[name]
+
+            if "embed" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.vocab_size,
+                                             self.args.dim,
+                                             name, True, False, rank, world_size)
+                continue
+
+            if "head" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.dim,
+                                             self.args.vocab_size,
+                                             name, False, True, rank, world_size)
+                continue
+
+            if "wq_b" in name and "indexer" not in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.q_lora_rank,
+                                             self.args.n_heads * (self.args.qk_nope_head_dim + self.args.qk_rope_head_dim),
+                                             name, False, True, rank, world_size)
+                continue
+
+            if "wkv_b" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.kv_lora_rank,
+                                             self.args.n_heads * (self.args.qk_nope_head_dim + self.args.v_head_dim),
+                                             name, False, True, rank, world_size)
+                continue
+
+            if "wo" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.v_head_dim * self.args.n_heads, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
+            if "w2" in name and (int(name.split(".")[2]) < self.args.n_dense_layers):
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.inter_dim, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
+            if "w2" in name and "shared_experts" in name:
+                load_tensor_parallel_weights(param, loaded_weight,
+                                             self.args.n_shared_experts * self.args.moe_inter_dim, self.args.dim,
+                                             name, True, True, rank, world_size)
+                continue
+
+            if "w2" in name and "experts" in name:
+                shard_size = param.shape[1]
+                loaded_weight = loaded_weight[:, shard_size * moe_tp_id:shard_size * (moe_tp_id + 1)]
+                param.data[:,:loaded_weight.shape[1]].copy_(loaded_weight)
+                continue
+
+            loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+            param.copy_(loaded_weight)
+            torch.npu.empty_cache()
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -930,8 +1164,8 @@ class DeepSeek_V3(nn.Module):
         config.route_scale = args.route_scale
         config.def_tp_size = world_size
         config.def_dp_size = 1
-        config.moe_ep_size = world_size
-        config.moe_tp_size = 1
+        config.moe_ep_size = args.moe_ep_size
+        config.moe_tp_size = args.moe_tp_size
         config.block_size = block_size
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size

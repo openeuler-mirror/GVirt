@@ -114,7 +114,7 @@ def main(
         temperature (float, optional): Temperature for sampling. Defaults to 1.0.
         no_prefix (bool, optional): Whether to skip adding prefix/suffix to prompts. Defaults to False.
     """
-    if model_type == "deepseek":
+    if model_type == "deepseek_v3" or model_type == "deepseek_v32" or model_type == "glm5":
         from tests.models.deepseek_v3 import ModelArgs
         from tests.models.deepseek_v3 import DeepSeek_V3 as Transformer
     elif model_type == "llama":
@@ -178,7 +178,7 @@ def main(
                 messages.clear()
                 continue
             messages.append({"role": "user", "content": prompt})
-            if model_type in {"deepseek", "glm4_moe"}:
+            if model_type in {"deepseek_v3", "glm4_moe", "glm5"}:
                 prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
             elif model_type == "llama":
                 formatted_prompt = ""
@@ -203,6 +203,7 @@ def main(
                 prompt_tokens = tokenizer.encode(prompt)
             completion_tokens, _ = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
             completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
+            completion = completion.replace("Ġ", " ").replace("Ċ", "\n").replace("▁", " ")
             print(completion)
             messages.append({"role": "assistant", "content": completion})
     else:
@@ -213,7 +214,7 @@ def main(
         def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature, no_prefix):
             if no_prefix:
                 prompts_tokens_batch = [tokenizer.encode(item['query']) for item in batch]
-            elif model_type in {"deepseek", "glm4_moe"}:
+            elif model_type in {"deepseek_v3", "glm4_moe", "glm5"}:
                 prompts_tokens_batch = [
                     tokenizer.apply_chat_template([{"role": "user", "content": item['query']}],
                                                   add_generation_prompt=True, return_dict=False)
@@ -240,7 +241,7 @@ def main(
             completions_batch = tokenizer.batch_decode(completion_tokens_batch, skip_special_tokens=True)
             num = 0
             for idx, item in enumerate(batch):
-                item['response'] = completions_batch[idx]
+                item['response'] = completions_batch[idx].replace("Ġ", " ").replace("Ċ", "\n").replace("▁", " ")
                 num += len(completion_tokens_batch[idx]) + len(prompts_tokens_batch[idx]) - 1
                 print(f"Query: {item['query']}")
                 print(f"Completion: {item['response']}")
@@ -276,7 +277,7 @@ if __name__ == "__main__":
         AssertionError: If neither input-file nor interactive mode is specified.
     """
     parser = ArgumentParser()
-    parser.add_argument("--model", type=str, default="deepseek")
+    parser.add_argument("--model", type=str, default="deepseek_v3")
     parser.add_argument("--ckpt-path", type=str, required=True)
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--input-file", type=str, default="")
@@ -285,6 +286,6 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--no-prefix", action="store_true")
     args = parser.parse_args()
-    assert args.model in ["deepseek", "llama", "qwen2", "qwen3", "qwen3_moe", "glm4_moe"], f"{args.model} not supported!"
+    assert args.model in ["deepseek_v3", "deepseek_v32", "glm5", "llama", "qwen2", "qwen3", "qwen3_moe", "glm4_moe"], f"{args.model} not supported!"
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
     main(args.model, args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.no_prefix)

@@ -1,3 +1,4 @@
+models_base_path=${1:-/mnt/nvme0n1/models}
 function run_qwen2_32B()
 {
     tp=$1
@@ -20,7 +21,7 @@ function run_qwen2_32B()
         "max_seq_len": '${max_seq_len}',
         "max_batch_size": '${bs}'
     }' > tests/test_config.json
-    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen2 --ckpt-path /mnt/nvme0n1/models/qwen32b/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${output_tokens} | tee tests/${file}.log
+    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen2 --ckpt-path $models_base_path/qwen32b/ --config tests/test_config.json --input-file tests/test_output/${file}.json --max-new-tokens ${output_tokens} | tee tests/test_output/${file}.log
 }
 
 function run_qwen3_32B()
@@ -46,7 +47,7 @@ function run_qwen3_32B()
         "max_seq_len": '${max_seq_len}',
         "max_batch_size": '${bs}'
     }' > tests/test_config.json
-    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-32B/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${output_tokens} | tee tests/${file}.log
+    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path $models_base_path/Qwen3-32B/ --config tests/test_config.json --input-file tests/test_output/${file}.json --max-new-tokens ${output_tokens} | tee tests/test_output/${file}.log
 }
 
 function run_qwen3_moe_30B()
@@ -79,7 +80,7 @@ function run_qwen3_moe_30B()
         "max_seq_len": '${max_seq_len}',
         "max_batch_size": '${bs}'
     }' > tests/test_config.json
-    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path /mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${output_tokens} | tee tests/${file}.log
+    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path $models_base_path/Qwen3-30B-A3B-Instruct-2507/ --config tests/test_config.json --input-file tests/test_output/${file}.json --max-new-tokens ${output_tokens} | tee tests/test_output/${file}.log
 }
 
 function run_llama_7B()
@@ -103,7 +104,7 @@ function run_llama_7B()
         "max_seq_len": '${max_seq_len}',
         "max_batch_size": '${bs}'
     }' > tests/test_config.json
-    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path /mnt/nvme0n1/models/Llama-2-7b-chat-hf/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${output_tokens} | tee tests/${file}.log
+    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/Llama-2-7b-chat-hf/ --config tests/test_config.json --input-file tests/test_output/${file}.json --max-new-tokens ${output_tokens} | tee tests/test_output/${file}.log
 }
 
 function run_llama_13B()
@@ -127,7 +128,7 @@ function run_llama_13B()
         "max_seq_len": '${max_seq_len}',
         "max_batch_size": '${bs}'
     }' > tests/test_config.json
-    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path /mnt/nvme0n1/models/Llama2-Chinese-13b-Chat/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${output_tokens} | tee tests/${file}.log
+    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/Llama2-Chinese-13b-Chat/ --config tests/test_config.json --input-file tests/test_output/${file}.json --max-new-tokens ${output_tokens} | tee tests/test_output/${file}.log
 }
 
 function run_llama_34B()
@@ -151,10 +152,10 @@ function run_llama_34B()
         "max_seq_len": '${max_seq_len}',
         "max_batch_size": '${bs}'
     }' > tests/test_config.json
-    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path /mnt/nvme0n1/models/codellama34B/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${output_tokens} | tee tests/${file}.log
+    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/codellama34B/ --config tests/test_config.json --input-file tests/test_output/${file}.json --max-new-tokens ${output_tokens} | tee tests/test_output/${file}.log
 }
 
-function run_deepseek()
+function run_glm4_moe()
 {
     tp=$1
     bs=$2
@@ -162,14 +163,30 @@ function run_deepseek()
     output_tokens=$4
     max_seq_len=$(($input_tokens + $output_tokens))
     file=$5
-    # n_layers: 8
-    # quantization: experts_int8
+    echo '{
+        "moe_ep_size": '${tp}',
+        "moe_tp_size": 1,
+        "dtype": "bfloat16",
+        "max_seq_len": '${max_seq_len}',
+        "max_batch_size": '${bs}'
+    }' > tests/test_config.json
+    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path $models_base_path/GLM-4.7/ --config tests/test_config.json --input-file tests/test_output/${file}.json --max-new-tokens ${output_tokens} | tee tests/test_output/${file}.log
+}
+
+function run_deepseek_v3()
+{
+    tp=$1
+    bs=$2
+    input_tokens=$3
+    output_tokens=$4
+    max_seq_len=$(($input_tokens + $output_tokens))
+    file=$5
     echo '{
         "vocab_size": 129280,
         "dim": 7168,
         "inter_dim": 18432,
         "moe_inter_dim": 2048,
-        "n_layers": 8,
+        "n_layers": 61,
         "n_dense_layers": 3,
         "n_heads": 128,
         "n_routed_experts": 256,
@@ -186,11 +203,13 @@ function run_deepseek()
         "v_head_dim": 128,
         "dtype": "bf16",
         "quantization": "experts_int8",
+        "moe_ep_size": 16,
+        "moe_tp_size": 1,
         "max_seq_len": '${max_seq_len}',
         "max_batch_size": '${bs}'
     }' > tests/test_config.json
 
-    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --ckpt-path /mnt/nvme1n1/models/deepseek-R1-expert-int8-8layers-8d/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${output_tokens} | tee tests/${file}.log
+    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-R1-expert-int8 --config tests/test_config.json --input-file tests/test_output/${file}.json --max-new-tokens ${output_tokens} | tee tests/test_output/${file}.log
 }
 
 function test_perf_decode {
@@ -201,21 +220,21 @@ function test_perf_decode {
     backend=$5
     dtype=$6
     file=${backend}_${model}_${dtype}_bs${bs}len${output_tokens}
-    echo '[' > tests/${file}.json
+    echo '[' > tests/test_output/${file}.json
     for ((i=1; i<=${bs}; i++)); do
         if [ $i -ne ${bs} ]; then
             echo '   {
                 "query": "小明从家走到学校需要13分钟，早上上学他出发了6分钟之后，发现本子还在家里需要回去拿，请问他还需要多久才能到学校",
                 "response": ""
-            },' >> tests/${file}.json
+            },' >> tests/test_output/${file}.json
         else
             echo '   {
                 "query": "小明从家走到学校需要13分钟，早上上学他出发了6分钟之后，发现本子还在家里需要回去拿，请问他还需要多久才能到学校",
                 "response": ""
-            }' >> tests/${file}.json
+            }' >> tests/test_output/${file}.json
         fi
     done
-    echo ']' >> tests/${file}.json
+    echo ']' >> tests/test_output/${file}.json
 
     input_tokens=100
     if [[ "${model}" == "qwen2_32B" ]]; then
@@ -230,11 +249,13 @@ function test_perf_decode {
         run_llama_13B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
     elif [[ "${model}" == "llama_34B" ]]; then
         run_llama_34B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
-    else
-        run_deepseek ${tp} ${bs} ${input_tokens} ${output_tokens} ${file}
+    elif [[ "${model}" == "glm4_moe" ]]; then
+        run_glm4_moe ${tp} ${bs} ${input_tokens} ${output_tokens} ${file}
+    elif [[ "${model}" == "deepseek_v3" ]]; then
+        run_deepseek_v3 ${tp} ${bs} ${input_tokens} ${output_tokens} ${file}
     fi
-    perf_stat=$(cat "tests/${file}.log" | grep "tokens\/s @ " | grep "generate" | head -n 1)
-    if [[ "${model}" == "deepseek_8layer" ]]; then
+    perf_stat=$(cat "tests/test_output/${file}.log" | grep "tokens\/s @ " | grep "generate" | head -n 1)
+    if [[ "${model}" == "deepseek_v3" || "${model}" == "qwen3_moe_30B" || "${model}" == "glm4_moe" ]]; then
         echo $perf_stat | awk -v bs="$bs" '{print "| '${model}' | '${dtype}' | TP'${tp}'moeEP'${tp}' | " $2 / bs " | " $14 " | " $11 " | " $8 " |"}' >> ${perf_log_file}
     else
         echo $perf_stat | awk -v bs="$bs" '{print "| '${model}' | '${dtype}' | TP'${tp}' | " $2 / bs " | " $14 " | " $11 " | " $8 " |"}' >> ${perf_log_file}
@@ -250,7 +271,7 @@ function test_perf_prefill {
     backend=$5
     dtype=$6
     file=${backend}_${model}_${dtype}_bs${bs}len${output_tokens}
-    cp tests/test_prefill.json tests/${file}.json
+    cp tests/test_prefill.json tests/test_output/${file}.json
 
     input_tokens=3456
     if [[ "${model}" == "qwen2_32B" ]]; then
@@ -265,11 +286,13 @@ function test_perf_prefill {
         run_llama_13B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
     elif [[ "${model}" == "llama_34B" ]]; then
         run_llama_34B ${tp} ${bs} ${input_tokens} ${output_tokens} ${file} ${dtype}
-    else
-        run_deepseek ${tp} ${bs} ${input_tokens} ${output_tokens} ${file}
+    elif [[ "${model}" == "glm4_moe" ]]; then
+        run_glm4_moe ${tp} ${bs} ${input_tokens} ${output_tokens} ${file}
+    elif [[ "${model}" == "deepseek_v3" ]]; then
+        run_deepseek_v3 ${tp} ${bs} ${input_tokens} ${output_tokens} ${file}
     fi
-    perf_stat=$(cat "tests/${file}.log" | grep "tokens\/s @ " | grep "generate" | head -n 1)
-    if [[ "${model}" == "deepseek_8layer" ]]; then
+    perf_stat=$(cat "tests/test_output/${file}.log" | grep "tokens\/s @ " | grep "generate" | head -n 1)
+    if [[ "${model}" == "deepseek_v3" || "${model}" == "qwen3_moe_30B" || "${model}" == "glm4_moe" ]]; then
         echo $perf_stat | awk -v bs="$bs" '{print "| '${model}' | '${dtype}' | TP'${tp}'moeEP'${tp}' | " $2 / bs " | " $14 " | " $11 " |"}' >> ${perf_log_file}
     else
         echo $perf_stat | awk -v bs="$bs" '{print "| '${model}' | '${dtype}' | TP'${tp}' | " $2 / bs " | " $14 " | " $11 " |"}' >> ${perf_log_file}
@@ -283,8 +306,9 @@ export HCCL_RDMA_PCIE_DIRECT_POST_NOSTRICT=TRUE
 backend=xlite
 export FORWARD_BACKEND=${backend}
 
-perf_log_file=tests/${backend}_perf.log
-echo "| 模型 | 并行策略 | 并行策略 | 输入输出长度 | batch size | 平均decode时延 | 平均decode吞吐 |" > ${perf_log_file}
+mkdir -p tests/test_output
+perf_log_file=tests/test_output/${backend}_perf.log
+echo "| 模型 | 类型 | 并行策略 | 输入输出长度 | batch size | 平均decode时延 | 平均decode吞吐 |" > ${perf_log_file}
 echo "|--|--|--|--|--|--|--|" >> ${perf_log_file}
 
 
@@ -306,23 +330,23 @@ do
     test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
 done
 
-model=llama_34B
-tp=8
-output_tokens=1024
-dtype=bfloat16
-for bs in 1 16
-do
-    test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
-done
+#model=llama_34B
+#tp=8
+#output_tokens=1024
+#dtype=bfloat16
+#for bs in 1 16
+#do
+#    test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
+#done
 
-model=qwen2_32B
-tp=8
-output_tokens=1024
-dtype=bfloat16
-for bs in 1 16
-do
-    test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
-done
+#model=qwen2_32B
+#tp=8
+#output_tokens=1024
+#dtype=bfloat16
+#for bs in 1 16
+#do
+#    test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
+#done
 
 for dtype in float16 bfloat16
 do
@@ -344,16 +368,29 @@ do
     test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
 done
 
-#model=deepseek_8layer
-#tp=8
-#output_tokens=1024
-#dtype=bfloat16
-#for bs in 1 16 64 128 192 256
-#do
-#    test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
-#done
+npu_count=$(python -c "import torch; print(torch.npu.device_count())")
+if [ $npu_count -ge 16 ]; then
+    model=glm4_moe
+    tp=16
+    output_tokens=1024
+    dtype=bfloat16
+    for bs in 1 16 64
+    do
+        test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
+    done
 
-echo "| 模型 | 并行策略 | 并行策略 | 输入输出长度 | batch size | prefill时延 |" >> ${perf_log_file}
+    model=deepseek_v3
+    tp=16
+    output_tokens=1024
+    dtype=bfloat16
+    for bs in 1 16
+    do
+        test_perf_decode ${model} ${tp} ${bs} ${output_tokens} ${backend} ${dtype}
+    done
+fi
+
+echo "" >> ${perf_log_file}
+echo "| 模型 | 类型 | 并行策略 | 输入输出长度 | batch size | prefill时延 |" >> ${perf_log_file}
 echo "|--|--|--|--|--|--|" >> ${perf_log_file}
 
 
@@ -367,15 +404,15 @@ tp=4
 dtype=float16
 test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
 
-model=llama_34B
-tp=8
-dtype=bfloat16
-test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
+#model=llama_34B
+#tp=8
+#dtype=bfloat16
+#test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
 
-model=qwen2_32B
-tp=8
-dtype=bfloat16
-test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
+#model=qwen2_32B
+#tp=8
+#dtype=bfloat16
+#test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
 
 for dtype in float16 bfloat16
 do
@@ -389,7 +426,15 @@ tp=8
 dtype=bfloat16
 test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
 
-#model=deepseek_8layer
-#tp=8
-#dtype=bfloat16
-#test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
+npu_count=$(python -c "import torch; print(torch.npu.device_count())")
+if [ $npu_count -ge 16 ]; then
+    model=glm4_moe
+    tp=16
+    dtype=bfloat16
+    test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
+
+    model=deepseek_v3
+    tp=16
+    dtype=bfloat16
+    test_perf_prefill ${model} ${tp} 1 1 ${backend} ${dtype}
+fi
