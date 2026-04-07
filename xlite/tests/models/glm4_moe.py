@@ -469,7 +469,7 @@ class Block(nn.Module):
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.first_k_dense_replace):
             print(f"layer{self.layer_id} in: {self.input_layernorm(x)}")
         if debug and rank == 0 and (self.layer_id == 1 or self.layer_id == self.first_k_dense_replace + 1):
-            print(f"layer{self.layer_id} after ffn: {self.input_layernorm(x)}")
+            print(f"layer{self.layer_id - 1} after ffn: {self.input_layernorm(x)}")
         x = x + self.self_attn(self.input_layernorm(x), start_pos, freqs_cis, mask)
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.first_k_dense_replace):
             print(f"layer{self.layer_id} after attn: {self.post_attention_layernorm(x)}")

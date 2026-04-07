@@ -863,10 +863,10 @@ class Block(nn.Module):
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.n_dense_layers):
             print(f"layer{self.layer_id} in: {self.attn_norm(x)}")
         if debug and rank == 0 and (self.layer_id == 1 or self.layer_id == self.n_dense_layers + 1):
-            print(f"layer{self.layer_id} iafter ffn: {self.attn_norm(x)}")
+            print(f"layer{self.layer_id - 1} after ffn: {self.attn_norm(x)}")
         x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.n_dense_layers):
-            print(f"layer{self.layer_id} iafter attn: {self.ffn_norm(x)}")
+            print(f"layer{self.layer_id} after attn: {self.ffn_norm(x)}")
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
