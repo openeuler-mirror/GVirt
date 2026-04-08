@@ -32,6 +32,7 @@ class XcclComm;
 enum XModelAttnType {
     XMODEL_ATTN_MHA,
     XMODEL_ATTN_MLA,
+    XMODEL_ATTN_DSA,
     XMODEL_ATTN_MAX_TYPE,
 };
 

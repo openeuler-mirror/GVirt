@@ -48,6 +48,11 @@ struct XModelConfig {
     float softmaxScale;
     std::vector<uint32_t> mropeSection;
     bool mropeInterleaved = false;
+    uint32_t indexHeadDim;
+    uint32_t indexNHeads;
+    uint32_t indexTopK;
+    float indexSoftmaxScale;
+    bool indexRopeInterleaved = false;
 
     // mlp
     uint32_t nDenseLayers = 0;
@@ -83,15 +88,15 @@ public:
     void Init(void);
     ~XModel(void);
     void Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
-                 std::vector<std::pair<XTensor, XTensor>> &kvCache,
+                 std::vector<std::vector<XTensor>> &kvCache,
                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output);
     void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
     void ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
-                             std::vector<std::pair<XTensor, XTensor>> &kvCache,
+                             std::vector<std::vector<XTensor>> &kvCache,
                              std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                              XTensor &output);
     void ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
-                                 std::vector<std::pair<XTensor, XTensor>> &kvCache,
+                                 std::vector<std::vector<XTensor>> &kvCache,
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                  XTensor &output);
     size_t GetTensorPoolSize(int dbg);
@@ -115,6 +120,11 @@ public:
     std::vector<XTensor> mlaKVB;
     std::vector<XTensor> mlaKVNorm;
 
+    std::vector<XTensor> indexQB;
+    std::vector<XTensor> indexK;
+    std::vector<XTensor> indexKNorm;
+    std::vector<XTensor> indexWeight;
+
     std::vector<XTensor> mlpNorm;
     std::vector<XTensor> mlpUpGate;
     std::vector<XTensor> mlpDown;
@@ -130,30 +140,18 @@ public:
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
-    std::tuple<XTensor &, XTensor &, XTensor &> ForwardAttnMLACommon(
-        XRuntime &rt, uint32_t layer, std::vector<std::pair<XTensor, XTensor>> &kvCache,
-        XTensor &freqsCis, XTensor &hiddenState);
-    XTensor &ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
-                                   std::vector<std::pair<XTensor, XTensor>> &kvCache,
-                                   XTensor &freqsCis, XTensor &hiddenState, XTensor &attnQWithQr,
-                                   XTensor &attnKPe, XTensor &attnQPe);
-    XTensor &ForwardAttnMLADecode(XRuntime &rt, uint32_t layer,
-                                  std::vector<std::pair<XTensor, XTensor>> &kvCache,
-                                  XTensor &freqsCis, XTensor &hiddenState, XTensor &attnQWithQr,
-                                  XTensor &attnKPe, XTensor &attnQPe);
-    void ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
-                          std::vector<std::pair<XTensor, XTensor>> &kvCache, XTensor &freqsCis,
-                          XTensor &hiddenState);
-    void ForwardAttnMLA(XRuntime &rt, uint32_t layer,
-                        std::vector<std::pair<XTensor, XTensor>> &kvCache, XTensor &freqsCis,
-                        XTensor &hiddenState);
+    std::tuple<XTensor &, XTensor &> ForwardAttnMLACommon(
+        XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
+        XTensor &hiddenState);
+    XTensor &ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                                XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis);
+    void ForwardAttnMLA(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
+                        XTensor &freqsCis, XTensor &hiddenState);
     void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);
-    void ForwardAttnMHA(XRuntime &rt, uint32_t layer,
-                        std::vector<std::pair<XTensor, XTensor>> &kvCache, XTensor &freqsCis,
-                        XTensor &hiddenState);
-    void ForwardAttn(XRuntime &rt, uint32_t layer,
-                     std::vector<std::pair<XTensor, XTensor>> &kvCache, XTensor &freqsCis,
-                     XTensor &hiddenState);
+    void ForwardAttnMHA(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
+                        XTensor &freqsCis, XTensor &hiddenState);
+    void ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
+                     XTensor &freqsCis, XTensor &hiddenState);
     void ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &hiddenState,
                     bool withAllReduce);
     std::tuple<XTensor &, XTensor &> ForwardMoEGate(XRuntime &rt, uint32_t layer, XTensor &input);
@@ -164,20 +162,19 @@ private:
     void ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
-                               std::vector<std::pair<XTensor, XTensor>> &kvCache,
+                               std::vector<std::vector<XTensor>> &kvCache,
                                std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                XTensor &h);
-    void ForwardLayers(XRuntime &rt, XTensor &x, std::vector<std::pair<XTensor, XTensor>> &kvCache,
+    void ForwardLayers(XRuntime &rt, XTensor &x, std::vector<std::vector<XTensor>> &kvCache,
                        std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &h);
-    void ForwardLayersNaive(XRuntime &rt, XTensor &x,
-                            std::vector<std::pair<XTensor, XTensor>> &kvCache,
+    void ForwardLayersNaive(XRuntime &rt, XTensor &x, std::vector<std::vector<XTensor>> &kvCache,
                             std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                             XTensor &output);
     void ForwardLayersCommOptimize(XRuntime &rt, XTensor &x,
-                                   std::vector<std::pair<XTensor, XTensor>> &kvCache,
+                                   std::vector<std::vector<XTensor>> &kvCache,
                                    std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                    XTensor &output);
-    void CheckForwardParam(XRuntime &rt, std::vector<std::pair<XTensor, XTensor>> &kvCache);
+    void CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &kvCache);
     struct XModelConfig _c;
     uint32_t _rankId;
 
