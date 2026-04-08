@@ -63,39 +63,6 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
                      XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                      uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
                      uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale);
-void XliteDsOpKvMatmul(XRuntime &rt, XTensor &input, XTensor &w, XTensor &output, int m, int n,
-                       int k, XTensor &blockTable, bool nt, int blockSize, int headSize);
-void XliteDsOpPrefillKvSplit(XRuntime &rt, XTensor &kv, XTensor &kPe, XTensor &cache,
-                             XTensor &blockTable, XTensor &kvFull, XTensor &v, int nTokens,
-                             int nTokensPad, int nLocalHeads, int kvLoraRank, int rotDim,
-                             int headSize, int vDim, uint32_t blockSize);
-void XliteDsOpPrefillMix(XRuntime &rt, XTensor &out, XTensor &alpha, XTensor &max, XTensor &sum,
-                         XTensor &q, XTensor &k, XTensor &qk, XTensor &blockTables,
-                         XTensor &cachedLens, XTensor &v, XTensor &mixOut, XTensor &mixOutFinal,
-                         XTensor &promptLens, XTensor &attnMask, XTensor &attnMaskAddr,
-                         XTensor &speculateLens, XTensor &prefillIndex, XTensor &cumPromptLens,
-                         uint32_t headSize, uint32_t numHeads, uint32_t numKVHeads,
-                         uint32_t blockSize, uint32_t batchSize, uint32_t mappingLen,
-                         uint32_t doTreeAttnMask, uint32_t offsetM, uint32_t mSlice, float scale);
-void XliteDsOpEinsumShdHdcShc(XRuntime &rt, int numTokens, int headSize, int nLocalHeads,
-                              int qStepDim, int kvUpWeightStepDim, int kvLoraRank, XTensor &qWithQr,
-                              XTensor &kvUpWeight, XTensor &qAbsorb);
-void XliteDsOpDecodeAttn(XRuntime &rt, XTensor &q, XTensor &k, XTensor &o, XTensor &cachedLens,
-                         XTensor &mapping, XTensor &promptLens, XTensor &promptLensCum,
-                         uint32_t numTokens, uint32_t numHeads, uint32_t numKvHeads,
-                         uint32_t headSize, uint32_t blockSize, uint32_t mappingLen,
-                         uint32_t maxContextLen, bool add);
-void XliteDsOpSoftmax(XRuntime &rt, XTensor &qk, XTensor &cachedLens, XTensor &promptLens,
-                      XTensor &promptLensCum, float scale, uint32_t numTokens, uint32_t numHeads,
-                      uint32_t blockSize, uint32_t maxContextLen);
-void XliteDsOpEinsumShtTcShc(XRuntime &rt, int numTokens, int nLocalHeads, int maxTokens,
-                             int maxBlocksPerQuery, int numBlocks, int blockSize, int kvLoraRank,
-                             XTensor &scores, XTensor &cachedLens, XTensor &promptLens,
-                             XTensor &promptLensCum, XTensor &blockTables, XTensor &cCache,
-                             XTensor &result);
-void XliteDsOpEinsumShcHdcShd(XRuntime &rt, int numTokens, int nLocalHeads, int kvLoraRank,
-                              int wkvbStep, int vDim, XTensor &scores, XTensor &kvUpWeight,
-                              XTensor &result);
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &norm, float normEps,
                           XTensor &out);

@@ -140,19 +140,9 @@ public:
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
-    std::tuple<XTensor &, XTensor &, XTensor &> ForwardAttnMLACommon(
+    std::tuple<XTensor &, XTensor &> ForwardAttnMLACommon(
         XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
         XTensor &hiddenState);
-    XTensor &ForwardAttnMLAPrefill(XRuntime &rt, uint32_t layer,
-                                   std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
-                                   XTensor &hiddenState, XTensor &attnQWithQr, XTensor &attnKPe,
-                                   XTensor &attnQPe);
-    XTensor &ForwardAttnMLADecode(XRuntime &rt, uint32_t layer,
-                                  std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
-                                  XTensor &hiddenState, XTensor &attnQWithQr, XTensor &attnKPe,
-                                  XTensor &attnQPe);
-    void ForwardAttnMLAV2(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
-                          XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttnMLA(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
     void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);
