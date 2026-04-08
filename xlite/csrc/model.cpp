@@ -227,6 +227,36 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     return {attnQWithQr, attnNormQc};
 }
 
+XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                                    XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
+{
+    XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads, _c.indexHeadDim},
+                              hiddenState.dtype, DBG_LOC);
+    XTensor &k = rt.GetTensor({hiddenState.shape[0], _c.indexHeadDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &weights =
+        rt.GetTensor({hiddenState.shape[0], _c.indexNHeads}, hiddenState.dtype, DBG_LOC);
+    XliteOpMatmul(rt, attnNormQc, indexQB[layer], q, _c.weightNZ);
+    XliteOpMatmul(rt, hiddenState, indexK[layer], k, _c.weightNZ);
+    XliteOpRmsNorm(rt, k, indexKNorm[layer], k, _c.normEps, _c.indexHeadDim);
+    if (_c.indexRopeInterleaved) {
+        // 1.1 TODO add interleaved rope for indexer
+    } else {
+        // 1.2 TODO
+    }
+    XliteOpMatmul(rt, hiddenState, indexWeight[layer], weights, _c.weightNZ);
+    XTensor &scores =
+        rt.GetTensor({hiddenState.shape[0], _c.maxSeqLen}, hiddenState.dtype, DBG_LOC);
+    // 1.3 TODO do scores = softmax(Q, KT) * weight
+    rt.PutTensor(weights);
+    rt.PutTensor(k);
+    rt.PutTensor(q);
+    XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
+    // 1.4 TODO do topk on the result and return the indices
+    // XliteOpTopK(rt, scores, topkIndices, _c.indexTopK);
+    rt.PutTensor(scores);
+    return topkIndices;
+}
+
 void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                             std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
                             XTensor &hiddenState)
@@ -238,8 +268,10 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     auto [attnQWithQr, attnNormQc] =
         ForwardAttnMLACommon(rt, layer, kvCache, freqsCis, hiddenState);
 
+    XTensor *topkIndices = nullptr;
     if (_c.attnType == XMODEL_ATTN_DSA) {
-        // TODO
+        topkIndices =
+            &ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
     }
     rt.PutTensor(attnNormQc);
 
@@ -265,6 +297,9 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     rt.PutTensor(max);
     rt.PutTensor(sv);
     rt.PutTensor(qk);
+    if (_c.attnType == XMODEL_ATTN_DSA) {
+        rt.PutTensor(*topkIndices);
+    }
 
     XliteOpMatmul(rt, attnOutput, attnOut[layer], hiddenState, _c.weightNZ);
 

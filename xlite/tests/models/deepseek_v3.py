@@ -1201,7 +1201,7 @@ class DeepSeek_V3(nn.Module):
         self.xlite_model.index_q_b = [layer.attn.indexer.wq_b.weight for layer in self.layers if layer.attn.indexer is not None]
         self.xlite_model.index_k = [layer.attn.indexer.wk.weight for layer in self.layers if layer.attn.indexer is not None]
         self.xlite_model.index_k_norm = [layer.attn.indexer.k_norm.weight for layer in self.layers if layer.attn.indexer is not None]
-        self.xlite_model.index_weight = [layer.attn.indexer.weights_proj.weight for layer in self.layers if layer.attn.indexer is not None]
+        self.xlite_model.index_weight = [layer.attn.indexer.weights_proj.weight.to(dtype=torch.get_default_dtype()) for layer in self.layers if layer.attn.indexer is not None]
         self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [self.layers[i].ffn.w13.weight for i in range(args.n_dense_layers)]
         self.xlite_model.mlp_down = [self.layers[i].ffn.w2.weight for i in range(args.n_dense_layers)]

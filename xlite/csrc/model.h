@@ -143,6 +143,8 @@ private:
     std::tuple<XTensor &, XTensor &> ForwardAttnMLACommon(
         XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
         XTensor &hiddenState);
+    XTensor &ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                                XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis);
     void ForwardAttnMLA(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
     void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);
