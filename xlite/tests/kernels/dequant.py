@@ -14,7 +14,8 @@ rt = Runtime(0, 500)
 torch.npu.set_device(0)
 cases = [
     [8192, 768],
-    [16, 2048]
+    [16, 2048],
+    [20000, 5120]
 ]
 
 for m, n in cases:
