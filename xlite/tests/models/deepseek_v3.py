@@ -537,10 +537,10 @@ class MLA(nn.Module):
         self.v_head_dim = args.v_head_dim
 
         self.wq_a = Linear(self.dim, self.q_lora_rank)
-        self.q_norm = RMSNorm(self.q_lora_rank)
+        self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps)
         self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
         self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
-        self.kv_norm = RMSNorm(self.kv_lora_rank)
+        self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps)
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
         self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
         self.softmax_scale = self.qk_head_dim ** -0.5
@@ -842,8 +842,8 @@ class Block(nn.Module):
         super().__init__()
         self.attn = MLA(args)
         self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
-        self.attn_norm = RMSNorm(args.dim)
-        self.ffn_norm = RMSNorm(args.dim)
+        self.attn_norm = RMSNorm(args.dim, args.norm_eps)
+        self.ffn_norm = RMSNorm(args.dim, args.norm_eps)
         self.n_dense_layers = args.n_dense_layers
         self.layer_id = layer_id
 
@@ -915,7 +915,7 @@ class DeepSeek_V3(nn.Module):
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
-        self.norm = RMSNorm(args.dim)
+        self.norm = RMSNorm(args.dim, args.norm_eps)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
