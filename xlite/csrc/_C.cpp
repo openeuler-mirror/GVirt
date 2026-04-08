@@ -982,16 +982,15 @@ void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
 
 void RopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_t stepDim,
                  uint32_t ropeDim, at::Tensor &inputWithR, at::Tensor &freqs, at::Tensor &position,
-                 at::Tensor &vGather, at::Tensor &outputPe, uint32_t ropeType)
+                 at::Tensor &vGather)
 {
     XTensor _inputWithR, _freqs, _position, _vGather, _outputPe;
     InitXTensor(_inputWithR, inputWithR);
     InitXTensor(_freqs, freqs);
     InitXTensor(_position, position);
     InitXTensor(_vGather, vGather);
-    InitXTensor(_outputPe, outputPe);
     XliteOpRopeComplex(rt, numTokens, nLocalHeads, stepDim, ropeDim, _inputWithR, _freqs, _position,
-                       _vGather, _outputPe, static_cast<enum XRopeType>(ropeType));
+                       _vGather);
     rt.Synchronize();
 }
 
@@ -1228,10 +1227,7 @@ PYBIND11_MODULE(_C, m)
     m.def("unpermutation", &UnPermutation);
     m.def("group_matmul", &GroupMatmul);
     m.def("softmax", &Softmax);
-    m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("num_tokens"),
-          py::arg("n_local_heads"), py::arg("step_dim"), py::arg("rope_dim"),
-          py::arg("input_with_r"), py::arg("freqs"), py::arg("position"), py::arg("v_gather"),
-          py::arg("output_pe"), py::arg("rope_type"));
+    m.def("rope_complex", &RopeComplex, "rope_complex");
     m.def("quant", &Quant);
     m.def("quant_dynamic", &QuantDyn);
     m.def("matmul_dequant", &MatmulDeQuant, "matmul_dequant", py::arg("rt"), py::arg("x"),

@@ -88,18 +88,19 @@ for test_dtype, rope_dim, q_dim in test_cases:
     q_pe_standard = apply_rotary_emb(q_pe_input, freqs_cis)
     # Reshape back to (num_tokens, n_local_heads, rope_dim)
     q_pe_standard = q_pe_standard.view(num_tokens, n_local_heads, rope_dim)
+    q_standard = torch.cat([attnQWithQr[..., :q_dim - rope_dim], q_pe_standard], dim=-1).view(num_tokens, n_local_heads, q_dim)
 
     # xlite
     torch.npu.synchronize()
     rope_complex(rt, num_tokens, n_local_heads, q_dim, rope_dim, attnQWithQr_xlite,
-                freqs_cis_xlite, position, vGatherIndices, output_pe, 0)
+                freqs_cis_xlite, position, vGatherIndices)
     torch.npu.synchronize()
 
     logging.info(f'rope_complex (rope_dim={rope_dim}, q_dim={q_dim}, {test_dtype}) executed!')
 
     try:
-        torch.testing.assert_close(q_pe_standard, output_pe, atol=1e-5, rtol=1e-3)
+        torch.testing.assert_close(q_standard, attnQWithQr_xlite, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
         logging.error(f'{e}')
-        logging.error(f'torch_npu: {q_pe_standard}')
-        logging.error(f'xlite: {output_pe}')
+        logging.error(f'torch_npu: {q_standard}')
+        logging.error(f'xlite: {attnQWithQr_xlite}')

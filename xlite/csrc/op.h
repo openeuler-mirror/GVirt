@@ -76,12 +76,11 @@ void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x);
 void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &expBuf);
 void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_t stepDim,
                         uint32_t ropeDim, XTensor &inputWithR, XTensor &freqs, XTensor &position,
-                        XTensor &vGather, XTensor &outputPe, enum XRopeType ropeType);
+                        XTensor &vGather);
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads,
                                 uint32_t stepDim, uint32_t ropeDim, XTensor &inputWithR,
                                 XTensor &freqs, XTensor &position, XTensor &vGather,
-                                XTensor &outputPe, enum XRopeType ropeType, uint32_t blockSize,
-                                XTensor &key, XTensor &kCache, XTensor &vCache,
+                                uint32_t blockSize, XTensor &key, XTensor &kCache, XTensor &vCache,
                                 XTensor &slotMapping);
 
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,

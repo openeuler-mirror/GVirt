@@ -208,26 +208,21 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     XTensor &attnKvc =
         rt.GetTensor({rt._realM, _c.kvLoraRank + _c.ropeHeadDim}, hiddenState.dtype, DBG_LOC);
     XTensor &attnNormKvc = rt.GetTensor({rt._realM, _c.kvLoraRank}, hiddenState.dtype, DBG_LOC);
-    XTensor &attnKPe = rt.GetTensor({rt._realM, _c.ropeHeadDim}, hiddenState.dtype, DBG_LOC);
-    XTensor &attnQPe =
-        rt.GetTensor({rt._realM, nLocalHeads, _c.ropeHeadDim}, hiddenState.dtype, DBG_LOC);
 
     XliteOpMatmul(rt, hiddenState, mlaQA[layer], attnQc, _c.weightNZ);
     XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], attnNormQc, _c.normEps, attnQc.shape[1]);
     XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr, _c.weightNZ);
     XliteOpRopeComplex(rt, rt._realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
-                       attnQWithQr, freqsCis, rt._attnPosition, _vGather, attnQPe, MIX);
+                       attnQWithQr, freqsCis, rt._attnPosition, _vGather);
     XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc, _c.weightNZ);
     XliteOpRmsNorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank);
     XliteOpRopeComplexAndCache(rt, rt._realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
-                               attnKvc, freqsCis, rt._attnPosition, _vGather, attnKPe, NORMAL,
-                               _c.blockSize, attnNormKvc, kCache, vCache, rt._attnSlotMapping);
+                               attnKvc, freqsCis, rt._attnPosition, _vGather, _c.blockSize,
+                               attnNormKvc, kCache, vCache, rt._attnSlotMapping);
 
     rt.PutTensor(attnQc);
     rt.PutTensor(attnKvc);
     rt.PutTensor(attnNormKvc);
-    rt.PutTensor(attnKPe);
-    rt.PutTensor(attnQPe);
 
     return {attnQWithQr, attnNormQc};
 }
