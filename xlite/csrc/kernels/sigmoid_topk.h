@@ -143,8 +143,8 @@ public:
     {
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         vector_dup(routingMapOut, uint32_t(0), 1, 1, 0, 8, 0);
-        DumpBuffer(routingMapOut, "routingMapOut [clean]", 5, 1, 0, true);
         pipe_barrier(PIPE_V);
+        DumpBuffer(routingMapOut, "routingMapOut [clean]", 5, 1, 0, true);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
         vector_dup(weightsOut, float(0), calcRepeat, 1, 0, 8, 0);
         pipe_barrier(PIPE_V);
