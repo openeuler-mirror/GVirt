@@ -30,6 +30,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     indexQB.resize(c.nLayers);
     indexK.resize(c.nLayers);
     indexKNorm.resize(c.nLayers);
+    indexKNormBias.resize(c.nLayers);
     indexWeight.resize(c.nLayers);
     moeGate.resize(c.nLayers);
     moeGateBias.resize(c.nLayers);
@@ -230,14 +231,15 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
 XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
                                     XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
 {
-    XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads, _c.indexHeadDim},
+    XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
                               hiddenState.dtype, DBG_LOC);
     XTensor &k = rt.GetTensor({hiddenState.shape[0], _c.indexHeadDim}, hiddenState.dtype, DBG_LOC);
     XTensor &weights =
         rt.GetTensor({hiddenState.shape[0], _c.indexNHeads}, hiddenState.dtype, DBG_LOC);
     XliteOpMatmul(rt, attnNormQc, indexQB[layer], q, _c.weightNZ);
     XliteOpMatmul(rt, hiddenState, indexK[layer], k, _c.weightNZ);
-    XliteOpRmsNorm(rt, k, indexKNorm[layer], k, _c.normEps, _c.indexHeadDim);
+    XliteOpLayerNorm(rt, k, indexKNorm[layer], indexKNormBias[layer], k, _c.normEps,
+                     _c.indexHeadDim);
     if (_c.indexRopeInterleaved) {
         // 1.1 TODO add interleaved rope for indexer
     } else {

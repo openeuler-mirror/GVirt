@@ -23,6 +23,9 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
                     uint32_t normDim, uint32_t cntPerToken = 1, uint32_t inStartOffset = 0,
                     uint32_t outStartOffset = 0);
+void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
+                      float normEps, uint32_t normDim, uint32_t cntPerToken = 1,
+                      uint32_t inStartOffset = 0, uint32_t outStartOffset = 0);
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out);
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false,
                    const XTensor &bias = XTensor(), const XTensor &deqScale = XTensor(),

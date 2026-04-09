@@ -70,6 +70,7 @@ public:
     std::vector<at::Tensor> indexQB;
     std::vector<at::Tensor> indexK;
     std::vector<at::Tensor> indexKNorm;
+    std::vector<at::Tensor> indexKNormBias;
     std::vector<at::Tensor> indexWeight;
 
     std::vector<at::Tensor> mlpNorm;
@@ -205,7 +206,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                                         "norm/KVA/KVB/KV norm parameters");
         }
         if (indexQB.size() != c.nLayers || indexK.size() != c.nLayers ||
-            indexKNorm.size() != c.nLayers || indexWeight.size() != c.nLayers) {
+            indexKNorm.size() != c.nLayers || indexKNormBias.size() != c.nLayers ||
+            indexWeight.size() != c.nLayers) {
             std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << indexQB.size()
                       << std::endl;
             throw std::invalid_argument(
@@ -287,6 +289,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->indexQB[i], indexQB[i]);
             InitXTensor(_model->indexK[i], indexK[i]);
             InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
+            InitXTensor(_model->indexKNormBias[i], indexKNormBias[i]);
             InitXTensor(_model->indexWeight[i], indexWeight[i]);
         }
     }
@@ -712,6 +715,19 @@ void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, fl
     InitXTensor(_norm, norm);
     XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim,
                    cntPerToken, startOffset);
+    rt.Synchronize();
+}
+
+void LayerNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &normBias,
+               at::Tensor &out, float normEps, uint32_t normDim)
+{
+    XTensor _in, _out, _norm, _normBias;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    InitXTensor(_norm, norm);
+    InitXTensor(_normBias, normBias);
+    XliteOpLayerNorm(rt, _in, _norm, _normBias, _out, normEps, normDim);
     rt.Synchronize();
 }
 
@@ -1150,6 +1166,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_q_b", &_CModel::indexQB)
         .def_readwrite("index_k", &_CModel::indexK)
         .def_readwrite("index_k_norm", &_CModel::indexKNorm)
+        .def_readwrite("index_k_norm_bias", &_CModel::indexKNormBias)
         .def_readwrite("index_weight", &_CModel::indexWeight)
         .def_readwrite("mlp_norm", &_CModel::mlpNorm)
         .def_readwrite("mlp_up_gate", &_CModel::mlpUpGate)
@@ -1211,6 +1228,7 @@ PYBIND11_MODULE(_C, m)
     m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in"), py::arg("norm"),
           py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
           py::arg("cnt_per_token") = 1, py::arg("start_offset") = 0);
+    m.def("layernorm", &LayerNorm);
     m.def("add_bias", &AddBias);
     m.def("silu_and_mul", &SiluAndMul);
     m.def("rope_and_cache", &RopeAndCache, "rope_and_cache", py::arg("rt"), py::arg("inout"),

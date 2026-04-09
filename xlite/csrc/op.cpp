@@ -65,6 +65,8 @@
 #include "aclrtlaunch_flash_attention_float16_t.h"
 #include "aclrtlaunch_flash_attention_bfloat16_t.h"
 #include "aclrtlaunch_flash_mla_bfloat16_t.h"
+#include "aclrtlaunch_layernorm_float16_t.h"
+#include "aclrtlaunch_layernorm_bfloat16_t.h"
 
 static inline bool IsDummyRuntime(const XRuntime &rt)
 {
@@ -457,6 +459,26 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
         aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
                                        in.shape[0], normDim, normEps, cntPerToken, in.shape[1],
                                        out.shape[1], inStartOffset, outStartOffset);
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+    }
+}
+
+void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
+                      float normEps, uint32_t normDim, uint32_t cntPerToken, uint32_t inStartOffset,
+                      uint32_t outStartOffset)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (in.dtype == FP16 && out.dtype == FP16) {
+        aclrtlaunch_layernorm_float16_t(rt.aivNum, rt.stream, in.ptr, norm.ptr, normBias.ptr,
+                                        out.ptr, in.shape[0], normDim, normEps, cntPerToken,
+                                        in.shape[1], out.shape[1], inStartOffset, outStartOffset);
+    } else if (in.dtype == BF16 && out.dtype == BF16) {
+        aclrtlaunch_layernorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, norm.ptr, normBias.ptr,
+                                         out.ptr, in.shape[0], normDim, normEps, cntPerToken,
+                                         in.shape[1], out.shape[1], inStartOffset, outStartOffset);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
