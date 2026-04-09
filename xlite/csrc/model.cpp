@@ -214,12 +214,12 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], attnNormQc, _c.normEps, attnQc.shape[1]);
     XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr, _c.weightNZ);
     XliteOpRopeComplex(rt, rt._realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
-                       attnQWithQr, freqsCis, rt._attnPosition, _vGather);
+                       _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition, _vGather);
     XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc, _c.weightNZ);
     XliteOpRmsNorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank);
     XliteOpRopeComplexAndCache(rt, rt._realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
-                               attnKvc, freqsCis, rt._attnPosition, _vGather, _c.blockSize,
-                               attnNormKvc, kCache, vCache, rt._attnSlotMapping);
+                               _c.kvLoraRank, attnKvc, freqsCis, rt._attnPosition, _vGather,
+                               _c.blockSize, attnNormKvc, kCache, vCache, rt._attnSlotMapping);
 
     rt.PutTensor(attnQc);
     rt.PutTensor(attnKvc);
@@ -241,7 +241,12 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XliteOpLayerNorm(rt, k, indexKNorm[layer], indexKNormBias[layer], k, _c.normEps,
                      _c.indexHeadDim);
     if (_c.indexRopeInterleaved) {
-        // 1.1 TODO add interleaved rope for indexer
+        XliteOpRopeComplex(rt, q.shape[0], _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q,
+                           freqsCis, rt._attnPosition, _vGather);
+        XTensor key, kCache;
+        XliteOpRopeComplexAndCache(rt, k.shape[0], 1, _c.indexHeadDim, _c.ropeHeadDim, 0, k,
+                                   freqsCis, rt._attnPosition, _vGather, _c.blockSize, key, kCache,
+                                   indexKCache, rt._attnSlotMapping);
     } else {
         // 1.2 TODO
     }

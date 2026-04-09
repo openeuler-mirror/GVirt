@@ -9,7 +9,7 @@
 template <typename Dtype>
 __aicore__ __inline__ void rope_complex_and_cache(uint32_t nTokens, uint32_t nLocalHeads,
                                                   uint32_t qDim, uint32_t qkRopeHeadDim,
-                                                  GM_ADDR q_ptr, GM_ADDR freqs_ptr,
+                                                  uint32_t offset, GM_ADDR q_ptr, GM_ADDR freqs_ptr,
                                                   GM_ADDR position, GM_ADDR indices,
                                                   uint32_t block_size, GM_ADDR key, GM_ADDR kcache,
                                                   GM_ADDR vcache, GM_ADDR slot_mapping)
@@ -40,8 +40,6 @@ __aicore__ __inline__ void rope_complex_and_cache(uint32_t nTokens, uint32_t nLo
 
     copy_gm_to_ubuf(vgather_indices, indices, 0, 1, 8, 0, 0);
     pipe_barrier(PIPE_ALL);
-
-    int offset = qDim - qkRopeHeadDim;
 
     int rope_bytes = qkRopeHeadDim * sizeof(Dtype);
     int rope_blocks = rope_bytes >> 5;
@@ -172,22 +170,22 @@ __aicore__ __inline__ void rope_complex_and_cache(uint32_t nTokens, uint32_t nLo
     pipe_barrier(PIPE_ALL);
 }
 
-#define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                      \
-    extern "C" __global__ __aicore__ void rope_complex_and_cache_##dtype(                          \
-        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,             \
-        GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position, GM_ADDR indices, uint32_t block_size,  \
-        GM_ADDR key, GM_ADDR kcache, GM_ADDR vcache, GM_ADDR slot_mapping)                         \
-    {                                                                                              \
-        rope_complex_and_cache<dtype>(nTokens, nLocalHeads, qDim, qkRopeHeadDim, q_ptr, freqs_ptr, \
-                                      position, indices, block_size, key, kcache, vcache,          \
-                                      slot_mapping);                                               \
+#define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                   \
+    extern "C" __global__ __aicore__ void rope_complex_and_cache_##dtype(                       \
+        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,          \
+        uint32_t offset, GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position, GM_ADDR indices,   \
+        uint32_t block_size, GM_ADDR key, GM_ADDR kcache, GM_ADDR vcache, GM_ADDR slot_mapping) \
+    {                                                                                           \
+        rope_complex_and_cache<dtype>(nTokens, nLocalHeads, qDim, qkRopeHeadDim, offset, q_ptr, \
+                                      freqs_ptr, position, indices, block_size, key, kcache,    \
+                                      vcache, slot_mapping);                                    \
     }
 #else
-#define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                     \
-    extern "C" __global__ __aicore__ void rope_complex_##dtype(                                   \
-        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,            \
-        GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position, GM_ADDR indices, uint32_t block_size, \
-        GM_ADDR key, GM_ADDR kcache, GM_ADDR vcache, GM_ADDR slot_mapping)                        \
-    {                                                                                             \
+#define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                   \
+    extern "C" __global__ __aicore__ void rope_complex_##dtype(                                 \
+        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,          \
+        uint32_t offset, GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position, GM_ADDR indices,   \
+        uint32_t block_size, GM_ADDR key, GM_ADDR kcache, GM_ADDR vcache, GM_ADDR slot_mapping) \
+    {                                                                                           \
     }
 #endif

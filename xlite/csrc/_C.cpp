@@ -1005,8 +1005,8 @@ void RopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_
     InitXTensor(_freqs, freqs);
     InitXTensor(_position, position);
     InitXTensor(_vGather, vGather);
-    XliteOpRopeComplex(rt, numTokens, nLocalHeads, stepDim, ropeDim, _inputWithR, _freqs, _position,
-                       _vGather);
+    XliteOpRopeComplex(rt, numTokens, nLocalHeads, stepDim, ropeDim, stepDim - ropeDim, _inputWithR,
+                       _freqs, _position, _vGather);
     rt.Synchronize();
 }
 
