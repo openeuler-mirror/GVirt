@@ -882,7 +882,7 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
 
 size_t XModel::GetTensorPoolSize(int dbg)
 {
-    XDummyRuntime rt(_rankId, 0, _rankId, _c.defTpSize, _c.defDpSize);
+    XDummyRuntime rt(0, 0, _rankId, _c.defTpSize, _c.defDpSize);
     rt.InitDummyRuntime(1ull << 40);
 
     XModelAttnMeta attnMeta;
