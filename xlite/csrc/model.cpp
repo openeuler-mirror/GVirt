@@ -891,11 +891,11 @@ size_t XModel::GetTensorPoolSize(int dbg)
     attnMeta.version = 0;
     uint32_t batchSize = 1;
     uint32_t seqLen = _c.maxM;
-    uint32_t maxNumBlocks = DIV_ROUND_UP(seqLen, _c.blockSize);
+    uint32_t maxNumBlocks = DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize);
 
     for (uint32_t i = 0; i < batchSize; i++) {
         attnMeta.lens.push_back(seqLen);
-        attnMeta.cachedLens.push_back(0);
+        attnMeta.cachedLens.push_back(_c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0);
         attnMeta.isPrefills.push_back(true);
         std::vector<uint32_t> blockTable(maxNumBlocks);
         for (uint32_t j = 0; j < maxNumBlocks; j++) {
