@@ -146,30 +146,45 @@ docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE 
 
 ### 5.2 安装定时任务
 
-使用交互式脚本安装 cron 定时任务：
+使用 Python 原生的 `schedule` 库实现定时任务，适合容器环境和宿主机环境：
 
+**安装依赖：**
 ```bash
-cd ./tests/e2e/
-bash install_cron.sh
+pip install schedule
 ```
 
-脚本会引导您完成以下配置：
-- 选择执行时间（预设选项或自定义 cron 表达式）
-- 选择测试模型类型（moe/dense/all）
-- 配置接收者ID（用于发送测试结果通知）
-- 配置编译容器名称
+**运行调度器：**
+```bash
+cd ./tests/e2e/
 
-**执行时间选项：**
-- 1) 每天凌晨 2:00 执行（推荐）
-- 2) 每天凌晨 4:00 执行
-- 3) 每天晚上 22:00 执行
-- 4) 自定义时间
-- 5) 现在立即执行
+# 基本用法（每天晚上 8:00 执行）
+python3 run_benchmark_scheduler.py
 
-**模型类型选项：**
-- moe: 测试 Qwen3-30B-A3B-Instruct-2507 模型（4个场景）
-- dense: 测试 Qwen3-32B 模型（3个场景）
-- all: 测试所有模型
+# 自定义执行时间（每天凌晨 2:00）
+python3 run_benchmark_scheduler.py --run-time 02:00
+
+# 立即执行一次，然后启动调度器
+python3 run_benchmark_scheduler.py --run-now
+
+# 自定义所有参数
+python3 run_benchmark_scheduler.py \
+    --model moe \
+    --receiver "927280411401503971" \
+    --build-container xlite-build \
+    --run-time 02:00
+```
+
+**后台运行：**
+```bash
+# 使用 nohup 后台运行
+nohup python3 run_benchmark_scheduler.py > scheduler.log 2>&1 &
+
+# 记录 PID
+echo $! > .scheduler.pid
+
+# 停止调度器
+kill $(cat .scheduler.pid)
+```
 
 ### 5.3 手动执行测试
 
@@ -220,27 +235,38 @@ python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
   - `xlite-{version}/`：基线版本测试结果（不带日期）
 
 - **报告文件**：
+  - `daily_benchmark_YYYYMMDD_HHMMSS.log`：测试执行日志（包含所有输出信息）
   - `benchmark_comparison_*.log`：性能对比报告
   - `metrics_*.json`：指标数据（JSON格式）
   - `comparison_*.json`：对比结果（JSON格式）
   - `daily_summary_*.txt`：每日测试摘要
 
+**日志说明**：
+- 测试执行日志会同时输出到终端和文件
+- 日志文件命名格式：`daily_benchmark_YYYYMMDD_HHMMSS.log`
+- 日志文件保存在版本报告目录中：`/home/daily_reports/xlite-{version}-{date}/daily_benchmark_YYYYMMDD_HHMMSS.log`
+- 日志文件与测试报告（benchmark_comparison_*.log 等）保存在同一目录
+
 ### 5.7 常用命令
 
+**调度器管理：**
 ```bash
-# 查看定时任务
-crontab -l
+# 启动调度器（前台运行）
+python3 run_benchmark_scheduler.py
 
-# 编辑定时任务
-crontab -e
+# 启动调度器（后台运行）
+nohup python3 run_benchmark_scheduler.py > scheduler.log 2>&1 &
 
-# 删除定时任务
-crontab -r
+# 查看调度器日志
+tail -f scheduler.log
 
-# 查看 cron 日志
-tail -f /home/daily_reports/cron.log
+# 停止调度器
+ps aux | grep run_benchmark_scheduler.py
+kill <PID>
+```
 
-# 手动执行测试
+**手动执行测试：**
+```bash
 python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
 ```
 
