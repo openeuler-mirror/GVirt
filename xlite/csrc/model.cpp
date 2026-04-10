@@ -251,12 +251,14 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     } else {
         // 1.2 TODO
     }
-    XliteOpMatmul(rt, hiddenState, indexWeight[layer], weights, _c.weightNZ);
-    XTensor &scores =
-        rt.GetTensor({hiddenState.shape[0], _c.maxSeqLen}, hiddenState.dtype, DBG_LOC);
-    // 1.3 TODO do scores = softmax(Q, KT) * weight
-    rt.PutTensor(weights);
     rt.PutTensor(k);
+    XliteOpMatmul(rt, hiddenState, indexWeight[layer], weights, _c.weightNZ);
+    XTensor &scores = rt.GetTensor({hiddenState.shape[0], rt._maxNumBlocks * _c.blockSize},
+                                   hiddenState.dtype, DBG_LOC);
+    XliteOpIndexerScores(rt, q, indexKCache, weights, scores, rt._cumPromptLens, rt._lens,
+                         rt._cachedLens, rt._attnBlockTables, _c.indexNHeads, _c.indexHeadDim,
+                         _c.blockSize, rt._batch, rt._maxNumBlocks);
+    rt.PutTensor(weights);
     rt.PutTensor(q);
     XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
     // 1.4 TODO do topk on the result and return the indices
