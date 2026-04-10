@@ -58,6 +58,7 @@ class ModelArgs:
     dtype: Literal["bfloat16", "float16"] = "bfloat16"
     qkv_bias: bool = True
     qk_norm: bool = True
+    qk_norm_full: bool = False
     moe_ep_size: int = 1
     moe_tp_size: int = 1
     model_type: str = "glm4moe"
@@ -80,6 +81,25 @@ class RMSNorm(nn.Module):
         variance = x.pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
         return (self.weight.float() * x).to(input_dtype)
+
+
+class MiniMaxM2RMSNorm(nn.Module):
+    def __init__(self, head: int, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(head * dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        input_dtype = x.dtype
+        input_shape = x.shape
+        x = x.to(torch.float32)
+        variance = x.pow(2).mean(-1, keepdim=True)
+        if world_size > 1:
+            dist.all_reduce(variance)
+        variance = variance / world_size
+        x = x * torch.rsqrt(variance + self.eps)
+        return (self.weight.float() * x.reshape(*x.shape[:-2], -1)).reshape(input_shape).to(input_dtype)
 
 
 class ParallelEmbedding(nn.Module):
@@ -211,8 +231,8 @@ class MHA(nn.Module):
         self.qkv_proj = ColumnParallelLinear(args.dim, (self.n_heads + 2 * self.n_local_kv_heads * world_size) * self.head_dim, bias=args.qkv_bias)
         self.o_proj = RowParallelLinear(self.n_heads * self.head_dim, args.dim, bias=False)
         if args.qk_norm:
-            self.q_norm = RMSNorm(args.head_dim, args.norm_eps)
-            self.k_norm = RMSNorm(args.head_dim, args.norm_eps)
+            self.q_norm = RMSNorm(args.head_dim, args.norm_eps) if not args.qk_norm_full else MiniMaxM2RMSNorm(self.n_local_heads, args.head_dim, args.norm_eps)
+            self.k_norm = RMSNorm(args.head_dim, args.norm_eps) if not args.qk_norm_full else MiniMaxM2RMSNorm(self.n_local_kv_heads, args.head_dim, args.norm_eps)
         if forward_backend != "xlite":
             self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
             self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
@@ -308,11 +328,11 @@ class Gate(nn.Module):
         self.routed_scaling_factor = args.routed_scaling_factor
         self.n_routed_experts = args.n_routed_experts
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
-        self.e_score_correction_bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32))
+        self.e_score_correction_bias = nn.Parameter(torch.empty(args.n_routed_experts))
         self.norm_topk_prob = args.norm_topk_prob
 
     def get_topk_indices(self, scores):
-        scores_for_choice = scores.view(-1, self.n_routed_experts) + self.e_score_correction_bias.unsqueeze(0)
+        scores_for_choice = scores.view(-1, self.n_routed_experts) + self.e_score_correction_bias.to(scores.dtype).unsqueeze(0)
         group_scores = (
             scores_for_choice.view(-1, self.n_group, self.n_routed_experts // self.n_group)
             .topk(2, dim=-1)[0]
@@ -583,6 +603,12 @@ class GLM4MoE(nn.Module):
                 if idx < moe_ep_id * n_local_experts or idx >= (moe_ep_id + 1) * n_local_experts:
                     continue
 
+            name = name.replace("block_sparse_moe", "mlp")
+            name = name.replace("w2", "down_proj")
+            name = name.replace("w1", "gate_proj")
+            name = name.replace("w3", "up_proj")
+            name = name.replace("mlp.e_score_correction_bias", "mlp.gate.e_score_correction_bias")
+
             is_attention_weight = False
             for weight_name, shard_size, offset in attention_weight_specs:
                 if weight_name not in name:
@@ -652,6 +678,20 @@ class GLM4MoE(nn.Module):
                                              self.args.dim,
                                              self.args.vocab_size,
                                              name, False, True, rank, world_size)
+                continue
+
+            if self.args.qk_norm_full and "q_norm" in name:
+                shard_size = param.shape[0]
+                shard_id = rank
+                loaded_weight = loaded_weight[shard_id * shard_size : (shard_id + 1) * shard_size]
+                param.data.copy_(loaded_weight)
+                continue
+
+            if self.args.qk_norm_full and "k_norm" in name:
+                shard_size = param.shape[0]
+                shard_id = rank // n_kv_heads_replicas
+                loaded_weight = loaded_weight[shard_id * shard_size : (shard_id + 1) * shard_size]
+                param.data.copy_(loaded_weight)
                 continue
 
             if "o_proj" in name:
@@ -792,7 +832,7 @@ class GLM4MoE(nn.Module):
             if is_layer_moe(self.args, i)
         ]
         self.xlite_model.gate_bias = [
-            self.layers[i].mlp.gate.e_score_correction_bias
+            self.layers[i].mlp.gate.e_score_correction_bias.to(torch.float32)
             for i in range(args.n_layers)
             if is_layer_moe(self.args, i)
         ]
@@ -808,16 +848,17 @@ class GLM4MoE(nn.Module):
             if is_layer_moe(self.args, i)
             for j in range(self.layers[i].mlp.experts_start_idx, self.layers[i].mlp.experts_end_idx)
         ]
-        self.xlite_model.se_up_gate = [
-            self.layers[i].mlp.shared_experts.gate_up_proj.weight
-            for i in range(args.n_layers)
-            if is_layer_moe(self.args, i)
-        ]
-        self.xlite_model.se_down = [
-            self.layers[i].mlp.shared_experts.down_proj.weight
-            for i in range(args.n_layers)
-            if is_layer_moe(self.args, i)
-        ]
+        if args.n_shared_experts != 0:
+            self.xlite_model.se_up_gate = [
+                self.layers[i].mlp.shared_experts.gate_up_proj.weight
+                for i in range(args.n_layers)
+                if is_layer_moe(self.args, i)
+            ]
+            self.xlite_model.se_down = [
+                self.layers[i].mlp.shared_experts.down_proj.weight
+                for i in range(args.n_layers)
+                if is_layer_moe(self.args, i)
+            ]
         self.xlite_model.init(config, rank)
 
     def init_xlite_kvcache(self, args: ModelArgs):

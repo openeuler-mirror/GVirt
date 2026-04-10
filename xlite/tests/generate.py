@@ -132,6 +132,9 @@ def main(
     elif model_type == "glm4_moe":
         from tests.models.glm4_moe import ModelArgs
         from tests.models.glm4_moe import GLM4MoE as Transformer
+    elif model_type == "minimax_m2":
+        from tests.models.minimax_m2 import ModelArgs
+        from tests.models.glm4_moe import GLM4MoE as Transformer
     else:
         return
 
@@ -178,7 +181,7 @@ def main(
                 messages.clear()
                 continue
             messages.append({"role": "user", "content": prompt})
-            if model_type in {"deepseek_v3", "glm4_moe", "glm5"}:
+            if model_type in {"deepseek_v3", "glm4_moe", "glm5", "minimax_m2"}:
                 prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
             elif model_type == "llama":
                 formatted_prompt = ""
@@ -214,7 +217,7 @@ def main(
         def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature, no_prefix):
             if no_prefix:
                 prompts_tokens_batch = [tokenizer.encode(item['query']) for item in batch]
-            elif model_type in {"deepseek_v3", "glm4_moe", "glm5"}:
+            elif model_type in {"deepseek_v3", "glm4_moe", "glm5", "minimax_m2"}:
                 prompts_tokens_batch = [
                     tokenizer.apply_chat_template([{"role": "user", "content": item['query']}],
                                                   add_generation_prompt=True, return_dict=False)
@@ -286,6 +289,6 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--no-prefix", action="store_true")
     args = parser.parse_args()
-    assert args.model in ["deepseek_v3", "deepseek_v32", "glm5", "llama", "qwen2", "qwen3", "qwen3_moe", "glm4_moe"], f"{args.model} not supported!"
+    assert args.model in ["deepseek_v3", "deepseek_v32", "glm5", "minimax_m2", "llama", "qwen2", "qwen3", "qwen3_moe", "glm4_moe"], f"{args.model} not supported!"
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
     main(args.model, args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.no_prefix)
