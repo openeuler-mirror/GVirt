@@ -127,25 +127,70 @@ class Colors:
     BLUE = '\033[94m'
     RESET = '\033[0m'
 
+# 日志文件路径
+LOG_FILE = None
+
+
+def setup_logging(report_dir: Optional[Path] = None):
+    """
+    设置日志文件路径
+    
+    参数:
+        report_dir: 报告目录，如果为 None 则使用默认的 REPORT_DIR
+    """
+    global LOG_FILE
+    if report_dir is None:
+        report_dir = REPORT_DIR
+    
+    # 确保报告目录存在
+    report_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 创建日志文件路径
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    LOG_FILE = report_dir / f"daily_benchmark_{timestamp}.log"
+
+
+def _write_to_file(msg: str):
+    """
+    将消息写入日志文件
+    
+    参数:
+        msg: 要写入的消息
+    """
+    if LOG_FILE:
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception as e:
+            print(f"写入日志文件失败: {e}")
+
 
 def log_info(msg: str):
     """输出信息级别日志 (蓝色)"""
-    print(f"{Colors.BLUE}[INFO]{Colors.RESET} {msg}")
+    formatted_msg = f"[INFO] {msg}"
+    print(f"{Colors.BLUE}{formatted_msg}{Colors.RESET}")
+    _write_to_file(formatted_msg)
 
 
 def log_success(msg: str):
     """输出成功日志 (绿色)"""
-    print(f"{Colors.GREEN}[SUCCESS]{Colors.RESET} {msg}")
+    formatted_msg = f"[SUCCESS] {msg}"
+    print(f"{Colors.GREEN}{formatted_msg}{Colors.RESET}")
+    _write_to_file(formatted_msg)
 
 
 def log_warning(msg: str):
     """输出警告日志 (黄色)"""
-    print(f"{Colors.YELLOW}[WARNING]{Colors.RESET} {msg}")
+    formatted_msg = f"[WARNING] {msg}"
+    print(f"{Colors.YELLOW}{formatted_msg}{Colors.RESET}")
+    _write_to_file(formatted_msg)
 
 
 def log_error(msg: str):
     """输出错误日志 (红色)"""
-    print(f"{Colors.RED}[ERROR]{Colors.RESET} {msg}")
+    formatted_msg = f"[ERROR] {msg}"
+    print(f"{Colors.RED}{formatted_msg}{Colors.RESET}")
+    _write_to_file(formatted_msg)
 
 
 # ====================== 命令执行工具函数 ======================
@@ -606,6 +651,19 @@ def run_benchmark(model_type: str = "moe") -> Optional[Path]:
     report_subdir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
     report_subdir.mkdir(parents=True, exist_ok=True)
     
+    # 将日志文件移动到报告目录
+    global LOG_FILE
+    if LOG_FILE and LOG_FILE.exists():
+        old_log_file = LOG_FILE
+        new_log_file = report_subdir / old_log_file.name
+        try:
+            import shutil
+            shutil.move(str(old_log_file), str(new_log_file))
+            LOG_FILE = new_log_file
+            log_info(f"日志文件已移动到: {LOG_FILE}")
+        except Exception as e:
+            log_warning(f"移动日志文件失败: {e}")
+    
     try:
         # 设置环境变量，用于覆盖脚本中的输出目录
         env = os.environ.copy()
@@ -965,20 +1023,19 @@ def generate_model_report(model_name: str, model_comparisons: List[Dict], report
     # 收集详细数据内容
     detail_lines = []
     for idx, comparison in enumerate(sorted_comparisons, 1):
-        input_len = comparison.get("input_len", "N/A")
-        output_len = comparison.get("output_len", "N/A")
-        
-        detail_lines.append(f"{idx}. input={input_len}, output={output_len}")
-        detail_lines.append("")
-        
-        if comparison.get("error"):
-            detail_lines.append(f"  ⚠️  {comparison['error']}")
-            detail_lines.append("")
-            continue
-        
         row_changes = comparison.get("row_changes", [])
-        
         if row_changes:
+            input_len = comparison.get("input_len", "N/A")
+            output_len = comparison.get("output_len", "N/A")
+            
+            detail_lines.append(f"{idx}. input={input_len}, output={output_len}")
+            detail_lines.append("")
+            
+            if comparison.get("error"):
+                detail_lines.append(f"  ⚠️  {comparison['error']}")
+                detail_lines.append("")
+                continue
+
             # 显示表格头
             detail_lines.append("  | 并发 | 服务 | TTFT Avg(ms) | TTFT P99(ms) | TPOT Avg(ms) | TPOT P99(ms) | Output Speed(tokens/s) |")
             detail_lines.append("  |------|------|-------------|-------------|-------------|-------------|----------------------|")
@@ -1388,6 +1445,10 @@ def main():
     # 更新容器配置
     if args.build_container:
         BUILD_CONTAINER = args.build_container
+    
+    # 设置日志文件到默认目录（确保所有日志都能被保存）
+    setup_logging(REPORT_DIR)
+    log_info(f"日志文件: {LOG_FILE}")
     
     # 打印启动信息
     log_info("=" * 60)
