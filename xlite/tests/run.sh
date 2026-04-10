@@ -289,6 +289,19 @@ function run_glm5()
     rm $test_config_path
 }
 
+function run_minimax_m2()
+{
+    echo '{
+        "moe_ep_size": 16,
+        "moe_tp_size": 1,
+        "dtype": "bfloat16",
+        "max_batch_size": 1,
+        "max_seq_len": 1024
+    }' > $test_config_path
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model minimax_m2 --ckpt-path $models_base_path/MiniMax-M2.5-bf16/ --config $test_config_path --interactive
+    rm $test_config_path
+}
+
 #run_qwen2.5_0.5B
 #run_qwen2_32B
 run_qwen3_32B
@@ -301,6 +314,7 @@ npu_count=$(python -c "import torch; print(torch.npu.device_count())")
 if [ $npu_count -ge 16 ]; then
     run_glm4_moe
     run_deepseek_v3
+    run_minimax_m2
     #run_deepseek_v32
     #run_glm5
 fi
