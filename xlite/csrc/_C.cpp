@@ -377,7 +377,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
-        for (int j = 0; j < _kv[i].size(); j++) {
+        for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j]);
         }
     }
@@ -472,7 +472,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
-        for (int j = 0; j < _kv[i].size(); j++) {
+        for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j]);
         }
     }
@@ -558,7 +558,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
-        for (int j = 0; j < _kv[i].size(); j++) {
+        for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j]);
         }
     }
@@ -708,12 +708,27 @@ void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, ui
 void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, float normEps,
              uint32_t normDim, uint32_t cntPerToken, uint32_t startOffset)
 {
-    XTensor _in, _out, _norm;
+    XTensor _in, _out, _norm, _bias;
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
     InitXTensor(_norm, norm);
-    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim,
+    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, _bias,
+                   cntPerToken, startOffset);
+    rt.Synchronize();
+}
+
+void RMSNormWithBias(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &bias,
+                     at::Tensor &out, float normEps, uint32_t normDim, uint32_t cntPerToken,
+                     uint32_t startOffset)
+{
+    XTensor _in, _out, _norm, _bias;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    InitXTensor(_norm, norm);
+    InitXTensor(_bias, bias);
+    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, _bias,
                    cntPerToken, startOffset);
     rt.Synchronize();
 }
@@ -1053,7 +1068,7 @@ void DeQuant(XRuntime &rt, at::Tensor &in, at::Tensor &scale, at::Tensor &out, b
     InitXTensor(_in, in);
     InitXTensor(_scale, scale);
     InitXTensor(_out, out);
-    XliteOpDeQuant(rt, _in, _scale, _out, hasScale);
+    XliteOpDeQuant(rt, _in, _out, hasScale, _scale);
     rt.Synchronize();
 }
 
@@ -1227,6 +1242,9 @@ PYBIND11_MODULE(_C, m)
     m.def("embed", &Embed);
     m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in"), py::arg("norm"),
           py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
+          py::arg("cnt_per_token") = 1, py::arg("start_offset") = 0);
+    m.def("rmsnorm", &RMSNormWithBias, "rmsnorm", py::arg("rt"), py::arg("in"), py::arg("norm"),
+          py::arg("bias"), py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
           py::arg("cnt_per_token") = 1, py::arg("start_offset") = 0);
     m.def("layernorm", &LayerNorm);
     m.def("add_bias", &AddBias);
