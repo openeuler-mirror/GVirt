@@ -1078,6 +1078,15 @@ void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &
     rt.Synchronize();
 }
 
+void Muls(XRuntime &rt, at::Tensor &input, float scale, at::Tensor &output)
+{
+    XTensor _input, _output;
+    InitXTensor(_input, input);
+    InitXTensor(_output, output);
+    XliteOpMuls(rt, _input, scale, _output);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -1276,6 +1285,7 @@ PYBIND11_MODULE(_C, m)
     m.def("dequant", &DeQuant);
     m.def("mla", &MLA);
     m.def("indexer_scores", &IndexerScores);
+    m.def("muls", &Muls);
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,

@@ -67,6 +67,8 @@
 #include "aclrtlaunch_norm_bfloat16_t.h"
 #include "aclrtlaunch_indexer_scores_float16_t.h"
 #include "aclrtlaunch_indexer_scores_bfloat16_t.h"
+#include "aclrtlaunch_muls_float16_t.h"
+#include "aclrtlaunch_muls_bfloat16_t.h"
 
 static inline bool IsDummyRuntime(const XRuntime &rt)
 {
@@ -1086,6 +1088,21 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
                                               scores.ptr, cumPromptLens.ptr, lens.ptr,
                                               cachedLens.ptr, blockTables.ptr, nHeads, headDim,
                                               blockSize, batch, maxNumBlock);
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+    }
+}
+
+void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (input.dtype == FP16 && output.dtype == FP16) {
+        aclrtlaunch_muls_float16_t(rt.aivNum, rt.stream, input.ptr, scale, output.ptr, input.numel);
+    } else if (input.dtype == BF16 && output.dtype == BF16) {
+        aclrtlaunch_muls_bfloat16_t(rt.aivNum, rt.stream, input.ptr, scale, output.ptr,
+                                    input.numel);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }

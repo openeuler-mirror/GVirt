@@ -101,4 +101,5 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
                           XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,
                           uint32_t headDim, uint32_t blockSize, uint32_t batch,
                           uint32_t maxNumBlock);
+void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output);
 #endif
