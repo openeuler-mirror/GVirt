@@ -81,7 +81,7 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, 
                         uint32_t ropeDim, uint32_t offset, XTensor &inputWithR, XTensor &freqs,
                         XTensor &position, XTensor &vGather);
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads,
-                                uint32_t stepDim, uint32_t ropeDim, uint32_t offset,
+                                uint32_t stepDim, uint32_t ropeDim, uint32_t offset, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
                                 XTensor &vGather, uint32_t blockSize, XTensor &key, XTensor &kCache,
                                 XTensor &vCache, XTensor &slotMapping);
