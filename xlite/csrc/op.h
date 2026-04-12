@@ -67,8 +67,8 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
                      uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
                      uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale);
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
-void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &norm, float normEps,
-                          XTensor &out);
+void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
+                          float normEps, XTensor &out);
 
 void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outWeights,
                         XTensor &outRouting, uint32_t topK, bool normTopKProb);

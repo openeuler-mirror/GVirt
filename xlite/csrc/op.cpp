@@ -500,20 +500,20 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
     }
 }
 
-void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &norm, float normEps,
-                          XTensor &out)
+void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
+                          float normEps, XTensor &out)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (in1.dtype == FP16 && in2.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
-                                      in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1],
-                                      out.shape[1], 0, 0);
-    } else if (in1.dtype == BF16 && in2.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
-                                       in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1],
-                                       out.shape[1], 0, 0);
+    if (in.dtype == FP16 && addInOut.dtype == FP16 && out.dtype == FP16) {
+        aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
+                                      out.ptr, in.shape[0], in.shape[1], normEps, 1,
+                                      in.shape[1], out.shape[1], 0, 0);
+    } else if (in.dtype == BF16 && addInOut.dtype == BF16 && out.dtype == BF16) {
+        aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
+                                       out.ptr, in.shape[0], in.shape[1], normEps, 1,
+                                       in.shape[1], out.shape[1], 0, 0);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }

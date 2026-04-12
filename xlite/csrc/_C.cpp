@@ -864,16 +864,16 @@ void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCac
     rt.PutTensor(qk);
 }
 
-void AddAndRMSNorm(XRuntime &rt, at::Tensor &in1, at::Tensor &in2, at::Tensor &norm,
+void AddAndRMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &addInOut, at::Tensor &norm,
                    at::Tensor &out, float normEps)
 {
-    XTensor _in1, _in2, _out, _norm;
+    XTensor _in, _addInOut, _out, _norm;
 
-    InitXTensor(_in1, in1);
-    InitXTensor(_in2, in2);
+    InitXTensor(_in, in);
+    InitXTensor(_addInOut, addInOut);
     InitXTensor(_out, out);
     InitXTensor(_norm, norm);
-    XliteOpAddAndRmsNorm(rt, _in1, _in2, _norm, normEps, _out);
+    XliteOpAddAndRmsNorm(rt, _in, _addInOut, _norm, normEps, _out);
     rt.Synchronize();
 }
 

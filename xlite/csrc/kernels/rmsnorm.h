@@ -11,7 +11,7 @@
 // Workloads》 [ASPLOS 2026]
 
 template <typename Dtype>
-__aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out,
+__aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR out,
                                uint32_t token_num, uint32_t norm_dim, float norm_eps,
                                uint32_t cnt_per_token, uint32_t in_step, uint32_t out_step,
                                uint32_t in_start_offset, uint32_t out_start_offset)
@@ -20,7 +20,7 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    bool has_bias = (residual != nullptr);
+    bool has_addInOut = (addInOut != nullptr);
     float n = (float)1.0 / norm_dim;
     uint32_t total_dim = norm_dim * cnt_per_token;
     uint64_t len_burst = DIV_ROUND_UP(total_dim * sizeof(Dtype), BLOCK_SIZE);
@@ -42,11 +42,11 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
     off += inout_blocksize;
     __ubuf__ Dtype *inout_addr[PINGPONG_BUF_NUM] = {inout_addr0, inout_addr1};
 
-    auto residual_addr0 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+    auto addInOut_addr0 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
     off += inout_blocksize;
-    auto residual_addr1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+    auto addInOut_addr1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
     off += inout_blocksize;
-    __ubuf__ Dtype *residual_addr[PINGPONG_BUF_NUM] = {residual_addr0, residual_addr1};
+    __ubuf__ Dtype *addInOut_addr[PINGPONG_BUF_NUM] = {addInOut_addr0, addInOut_addr1};
 
     auto weight_addr = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
     off += inout_blocksize;
@@ -101,33 +101,33 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
         }
         pipe_barrier(PIPE_V);
 
-        if (has_bias) {
-            auto gm_residual = (__gm__ Dtype *)residual + in_offset;
-            auto inter_event_id = ping == 1 ? EVENT_ID2 : EVENT_ID3;
+        if (has_addInOut) {
+            auto gm_addInOut = (__gm__ Dtype *)addInOut + in_offset;
+            auto inter_event_id = event_id + 2;
             wait_flag(PIPE_MTE3, PIPE_MTE2, inter_event_id);
-            copy_gm_to_ubuf(residual_addr[event_id], gm_residual, 0, 1, len_burst, 0, 0);
+            copy_gm_to_ubuf(addInOut_addr[event_id], gm_addInOut, 0, 1, len_burst, 0, 0);
             set_flag(PIPE_MTE2, PIPE_V, inter_event_id);
             wait_flag(PIPE_MTE2, PIPE_V, inter_event_id);
 
-            // cast data type && input = input + residual
+            // cast data type && input = input + addInOut
             if constexpr (std::is_same_v<Dtype, float16_t>) {
-                vconv_f162f32(calc1, residual_addr[event_id], repeat, 1, 1, 8, 4);
+                vconv_f162f32(calc1, addInOut_addr[event_id], repeat, 1, 1, 8, 4);
                 pipe_barrier(PIPE_V);
                 vadd(calc0, calc1, calc0, repeat, 1, 1, 1, 8, 8, 8);
                 pipe_barrier(PIPE_V);
-                vconv_f322f16(residual_addr[event_id], calc0, repeat, 1, 1, 4, 8);
+                vconv_f322f16(addInOut_addr[event_id], calc0, repeat, 1, 1, 4, 8);
             } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-                vconv_bf162f32(calc1, residual_addr[event_id], repeat, 1, 1, 8, 4);
+                vconv_bf162f32(calc1, addInOut_addr[event_id], repeat, 1, 1, 8, 4);
                 pipe_barrier(PIPE_V);
                 vadd(calc0, calc1, calc0, repeat, 1, 1, 1, 8, 8, 8);
                 pipe_barrier(PIPE_V);
-                vconv_f322bf16r(residual_addr[event_id], calc0, repeat, 1, 1, 4, 8);
+                vconv_f322bf16r(addInOut_addr[event_id], calc0, repeat, 1, 1, 4, 8);
             }
             pipe_barrier(PIPE_V);
 
             set_flag(PIPE_V, PIPE_MTE3, inter_event_id);
             wait_flag(PIPE_V, PIPE_MTE3, inter_event_id);
-            copy_ubuf_to_gm(gm_inout, residual_addr[event_id], 0, 1, len_burst, 0, 0);
+            copy_ubuf_to_gm(gm_addInOut, addInOut_addr[event_id], 0, 1, len_burst, 0, 0);
             set_flag(PIPE_MTE3, PIPE_MTE2, inter_event_id);
         }
 
@@ -211,17 +211,17 @@ __aicore__ inline void rmsnorm(GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, 
 
 #define RMSNORM_FUNC_DEFINE(dtype)                                                                 \
     extern "C" __global__ __aicore__ void rmsnorm_##dtype(                                         \
-        GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out, uint32_t token_num,          \
+        GM_ADDR inout, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR out, uint32_t token_num,          \
         uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token, uint32_t in_step,               \
         uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset)                    \
     {                                                                                              \
-        rmsnorm<dtype>(inout, residual, weight, out, token_num, norm_dim, norm_eps, cnt_per_token, \
+        rmsnorm<dtype>(inout, addInOut, weight, out, token_num, norm_dim, norm_eps, cnt_per_token, \
                        in_step, out_step, in_start_offset, out_start_offset);                      \
     }
 #else
 #define RMSNORM_FUNC_DEFINE(dtype)                                                        \
     extern "C" __global__ __aicore__ void rmsnorm_##dtype(                                \
-        GM_ADDR inout, GM_ADDR residual, GM_ADDR weight, GM_ADDR out, uint32_t token_num, \
+        GM_ADDR inout, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR out, uint32_t token_num, \
         uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token, uint32_t in_step,      \
         uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset)           \
     {                                                                                     \
