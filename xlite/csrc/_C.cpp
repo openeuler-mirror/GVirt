@@ -706,7 +706,7 @@ void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, ui
 }
 
 void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, float normEps,
-             uint32_t normDim, uint32_t cntPerToken, uint32_t startOffset)
+             uint32_t normDim, uint32_t cntPerToken, uint32_t inStartOffset, uint32_t outStartOffset)
 {
     XTensor _in, _out, _norm;
 
@@ -714,7 +714,7 @@ void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, fl
     InitXTensor(_out, out);
     InitXTensor(_norm, norm);
     XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim,
-                   cntPerToken, startOffset);
+                   cntPerToken, inStartOffset, outStartOffset);
     rt.Synchronize();
 }
 
@@ -1227,7 +1227,7 @@ PYBIND11_MODULE(_C, m)
     m.def("embed", &Embed);
     m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in"), py::arg("norm"),
           py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
-          py::arg("cnt_per_token") = 1, py::arg("start_offset") = 0);
+          py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0, py::arg("out_start_offset") = 0);
     m.def("layernorm", &LayerNorm);
     m.def("add_bias", &AddBias);
     m.def("silu_and_mul", &SiluAndMul);

@@ -82,7 +82,7 @@ for test_dtype in dtype_list:
     # xlite
     torch.npu.synchronize()
     rmsnorm(rt, x, weight, y, NORMEPS, DIM, CNT)
-    rmsnorm(rt, x, weight, y, NORMEPS, DIM, 1, DIM * CNT)
+    rmsnorm(rt, x, weight, y, NORMEPS, DIM, 1, DIM * CNT, DIM * CNT)
     torch.npu.synchronize()
 
     logging.info(f'rmsnorm with stride ({test_dtype}) executed!')
