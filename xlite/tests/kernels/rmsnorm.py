@@ -27,7 +27,7 @@ def stand_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> t
     return (weight.float() * x).to(input_dtype)
 
 BATCH_SIZE = 64
-DIM = 4096
+DIM = 8192
 NORMEPS = 1e-6
 dtype_list = [torch.float16, torch.bfloat16]
 
