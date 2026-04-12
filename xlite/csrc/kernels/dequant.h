@@ -18,7 +18,7 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t 
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    assert((n % (32 / sizeof(dtype))) == 0);
+    assert((n % (256 / sizeof(dtype))) == 0);
 
     GMA(dtype) in_gm_buf = reinterpret_cast<GMA(dtype)>(in);
     GMA(float32_t) scale_gm_buf = reinterpret_cast<GMA(float32_t)>(scale);
