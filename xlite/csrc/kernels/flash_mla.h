@@ -183,8 +183,8 @@ public:
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += l0cSize;
-        svl0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
-        svl0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        qksvl0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
+        qksvl0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
     }
 
     __aicore__ inline void SetNextCore()
@@ -278,6 +278,7 @@ public:
         SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID1);
         for (int nIdx = 0; nIdx < nLoop; nIdx++) {
             uint32_t block = blockTable[nIdx + nIdxStart];
             int nSize = blockSize;
@@ -287,7 +288,7 @@ public:
                 nBlockNum = nBlockPad / NBLOCKSIZE;
             }
 
-            WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+            WaitFlag<HardEvent::FIX_M>(EVENT_ID1);
 
             // calc KC = K * WUK
             int KCmSize = nSize;
@@ -313,6 +314,8 @@ public:
                 }
                 int KCkBlockPad = ROUND_UP(k0, kBlockSize);
                 int KCkBlockNum = KCkBlockPad / kBlockSize;
+
+                WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
                 for (int KCkIdx = 0; KCkIdx < KCkLoop; KCkIdx++) {
                     int KCkSize = k0;
                     int KCkOffset = KCkIdx * k0;
@@ -379,8 +382,7 @@ public:
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
 
                 // do matmul QC * KC to L0C
-                WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
-                CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad,
+                CalMmad(qksvl0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad,
                         KCnIdx == 0);
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
                 PipeBarrier<PIPE_M>();
@@ -407,19 +409,20 @@ public:
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
 
             // do matmul QR * KR to L0C
-            CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad, false);
+            CalMmad(qksvl0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad, false);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
             PipeBarrier<PIPE_M>();
 
-            SetFlag<HardEvent::M_FIX>(EVENT_ID0);
-            WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+            SetFlag<HardEvent::M_FIX>(EVENT_ID1);
+            WaitFlag<HardEvent::M_FIX>(EVENT_ID1);
 
             // copy final QK(m0, nSize) from L0C to GM
-            CopyToGm(qk[nIdx * blockSize], l0cBuf, queryLen, nSize, mBlockPad,
+            CopyToGm(qk[nIdx * blockSize], qksvl0cBuf, queryLen, nSize, mBlockPad,
                      TILESIZE_OF_CACHED_KV);
-            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+            SetFlag<HardEvent::FIX_M>(EVENT_ID1);
             curr = 1 - curr;
         }
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID1);
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
@@ -577,7 +580,7 @@ public:
                 if (kIdx == 0) {
                     WaitFlag<HardEvent::FIX_M>(EVENT_ID1);
                 }
-                CalMmad(svl0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad,
+                CalMmad(qksvl0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad,
                         kIdx == 0);
                 PipeBarrier<PIPE_M>();
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
@@ -586,7 +589,7 @@ public:
             // copy final SV(m0, VnSize) from L0C to GM
             SetFlag<HardEvent::M_FIX>(EVENT_ID1);
             WaitFlag<HardEvent::M_FIX>(EVENT_ID1);
-            CopyToGm(sv[VnOffset], svl0cBuf, queryLen, VnSize, mBlockPad, vHeadDim);
+            CopyToGm(sv[VnOffset], qksvl0cBuf, queryLen, VnSize, mBlockPad, vHeadDim);
             SetFlag<HardEvent::FIX_M>(EVENT_ID1);
         }
         WaitFlag<HardEvent::FIX_M>(EVENT_ID1);
@@ -980,6 +983,7 @@ private:
     LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];      // event 0/1
     LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];      // event 0/1
     LocalTensor<float> l0cBuf;                        // event 0
+    LocalTensor<float> qksvl0cBuf;                    // event 1
 
     // QK
     LocalTensor<Dtype> qcl1aBuf;                    // event 0
@@ -990,7 +994,6 @@ private:
     // SV
     LocalTensor<Dtype> qkl1aBuf[PINGPONG_BUF_NUM];  // event 0/1
     LocalTensor<Dtype> vl1bBuf[PINGPONG_BUF_NUM];   // event 2/3
-    LocalTensor<float> svl0cBuf;                    // event 1
 };
 
 #define FLASH_MLA_FUNC_DEFINE(dtype)                                                              \
