@@ -83,7 +83,40 @@ public:
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
         this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * 2 + subBlockIdx;
 
-        // 分配L1/L0
+        k0 = 256 / sizeof(Dtype);
+        uint64_t off = 0;
+
+        off = 0;
+        uint64_t l0aSize = MAX_M0 * k0 * sizeof(Dtype);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            l0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
+            l0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += l0aSize;
+        }
+
+        off = 0;
+        uint64_t l0bSize = MAX_N0 * k0 * sizeof(Dtype);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            l0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
+            l0bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += l0bSize;
+        }
+
+        off = 0;
+        uint64_t l0cSize = MAX_M0 * MAX_N0 * sizeof(float);
+        l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
+        l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off += l0cSize;
+        qksvl0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
+        qksvl0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+
+        // 分配L1
+        InitBuf();
+        InitAbsorbBuf();
+    }
+
+    __aicore__ inline void InitBuf()
+    {
         /*
          * KC = K * WUK:
          *     m: cachedTokens, n: nopeHeadDim, k: kvLoraRank
@@ -102,9 +135,8 @@ public:
          *     m: queryTokens, n: vHeadDim, k: cachedTokens
          *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
          */
-        uint32_t k0 = 256 / sizeof(Dtype);
-        uint64_t off = 0;
 
+        uint64_t off = 0;
         uint64_t kl1aSize = blockSize * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             kl1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
@@ -165,30 +197,89 @@ public:
             vl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += vSize;
         }
+    }
 
-        off = 0;
-        uint64_t l0aSize = MAX_M0 * k0 * sizeof(Dtype);
+    __aicore__ inline void InitAbsorbBuf()
+    {
+        /* (absorb)
+         * Absorb = QC * WUK(T)
+         *     m: queryTokens, n: kvLoraRank, k: nopeHeadDim
+         *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+         * C = Absorb * K
+         *     m: queryTokens, n: cachedTokens, k: kvLoraRank
+         *     m0: MAX_M0, n0: blockSize, k0: MAX_K0
+         * R = QR * KR
+         *     m: queryTokens, n: cachedTokens, k: ropeHeadDim
+         *     m0: MAX_M0, n0: blockSize, k0: MAX_K0
+         *
+         * Absorb = QK * K（T）
+         *     m: queryTokens, n: kvLoraRank, k: cachedTokens
+         *     m0: MAX_M0, n0: MAX_N0, k0: blockSize
+         * Absorb * WUV
+         *     m: queryTokens, n: vHeadDim, k: kvLoraRank
+         *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+         */
+        uint64_t off = 0;
+        uint64_t absorbSize = MAX_M0 * kvLoraRank * sizeof(Dtype);
+        absorbl1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+        absorbl1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off += absorbSize;
+        uint64_t sharel1Size = off;
+
+        // QK (absorb)
+        uint64_t qcSize = MAX_M0 * nopeHeadDim * sizeof(Dtype);
+        aqcl1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+        aqcl1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off += qcSize;
+
+        uint64_t wukSize = MAX_N0 * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
-            l0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
-            l0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l0aSize;
+            awukl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+            awukl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += wukSize;
         }
 
-        off = 0;
-        uint64_t l0bSize = MAX_N0 * k0 * sizeof(Dtype);
+        uint64_t kSize = blockSize * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
-            l0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
-            l0bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l0bSize;
+            akl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+            akl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += kSize;
         }
 
-        off = 0;
-        uint64_t l0cSize = MAX_M0 * MAX_N0 * sizeof(float);
-        l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
-        l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-        off += l0cSize;
-        qksvl0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
-        qksvl0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        uint64_t qrSize = MAX_M0 * ropeHeadDim * sizeof(Dtype);
+        aqrl1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+        aqrl1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off += qrSize;
+
+        uint64_t krSize = blockSize * ropeHeadDim * sizeof(Dtype);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            akrl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+            akrl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += krSize;
+        }
+
+        // SV (absorb)
+        off = sharel1Size;
+        uint64_t ktSize = MAX_N0 * blockSize * sizeof(Dtype);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            aktl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+            aktl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += ktSize;
+        }
+
+        uint64_t qkSize = MAX_M0 * blockSize * sizeof(Dtype);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            aqkl1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+            aqkl1aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += qkSize;
+        }
+
+        uint64_t wuvSize = MAX_N0 * k0 * sizeof(Dtype);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            awuvl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+            awuvl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += wuvSize;
+        }
     }
 
     __aicore__ inline void SetNextCore()
@@ -256,7 +347,6 @@ public:
         int nLoop = DIV_ROUND_UP(kvLen, blockSize);
         int nBlockPad = ROUND_UP(blockSize, NBLOCKSIZE);
         int nBlockNum = nBlockPad / NBLOCKSIZE;
-        int k0 = 256 / sizeof(Dtype);
         int KCkLoop = DIV_ROUND_UP(kvLoraRank, k0);
 
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
@@ -451,7 +541,6 @@ public:
         int kLoop = DIV_ROUND_UP(kvLen, blockSize);
         int mBlockPad = ROUND_UP(queryLen, MBLOCKSIZE);
         int mBlockNum = mBlockPad / MBLOCKSIZE;
-        int k0 = 256 / sizeof(Dtype);
         int VkLoop = DIV_ROUND_UP(kvLoraRank, k0);
 
         int curr = 0;
@@ -613,6 +702,406 @@ public:
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
     }
 
+    /* (absorb)
+     * Absorb = QC * WUK(T)
+     *     m: queryTokens, n: kvLoraRank, k: nopeHeadDim
+     *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+     * C = Absorb * K
+     *     m: queryTokens, n: cachedTokens, k: kvLoraRank
+     *     m0: MAX_M0, n0: blockSize, k0: MAX_K0
+     * R = QR * KR
+     *     m: queryTokens, n: cachedTokens, k: ropeHeadDim
+     *     m0: MAX_M0, n0: blockSize, k0: MAX_K0
+     */
+    __aicore__ inline void RunAicQKAbsorb(GlobalTensor<Dtype> query, int queryLen, int headIdx,
+                                          __gm__ uint32_t *blockTable, int kvOffset, int kvLen,
+                                          GlobalTensor<Dtype> qk)
+    {
+        constexpr int kBlockSize = 32 / sizeof(Dtype);
+
+        // Absorb = QC * WUK(T)
+        int mBlockPad = ROUND_UP(queryLen, MBLOCKSIZE);
+        int mBlockNum = mBlockPad / MBLOCKSIZE;
+        int nIdxStart = kvOffset / blockSize;
+        int nSize = MAX_N0;
+        int nLoop = DIV_ROUND_UP(kvLoraRank, MAX_N0);
+        int nBlockPad = MAX_N0;
+        int nBlockNum = MAX_N0 / NBLOCKSIZE;
+        int kSize = k0;
+        int kLoop = DIV_ROUND_UP(nopeHeadDim, k0);
+        int kBlockPad = k0;
+        int kBlockNum = k0 / kBlockSize;
+
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        // copy QC (queryTokens, nopeHeadDim) to L1
+        CopyGmToL1Nd2Nz(aqcl1aBuf, query, queryLen, nopeHeadDim,
+                        nHeads * (nopeHeadDim + ropeHeadDim), mBlockPad);
+        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+
+        SetFlag<HardEvent::MTE1_FIX>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID0);
+
+        int curr = 0;
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID7);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // kvLoraRank
+            int nOffset = nIdx * MAX_N0;
+            if (nOffset + nSize > kvLoraRank) {
+                nSize = kvLoraRank - nOffset;
+                nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+                nBlockNum = nBlockPad / NBLOCKSIZE;
+            }
+
+            kSize = k0;
+            kBlockPad = k0;
+            kBlockNum = k0 / kBlockSize;
+            WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+            for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // nopeHeadDim
+                int kOffset = kIdx * k0;
+                if (kOffset + kSize > nopeHeadDim) {
+                    kSize = nopeHeadDim - kOffset;
+                    kBlockPad = ROUND_UP(kSize, kBlockSize);
+                    kBlockNum = kBlockPad / kBlockSize;
+                }
+
+                // copy WUK(T) (nSize, k0) to L1
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
+                CopyGmToL1Nd2Nz(awukl1bBuf[curr],
+                                wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
+                                     kOffset * kvLoraRank + nOffset],
+                                kSize, nSize, kvLoraRank, kBlockPad);
+
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
+
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                CopyToL0ACol(l0aBuf[curr], aqcl1aBuf[kOffset * mBlockPad], mBlockNum, 0, kBlockNum);
+
+                CopyToL0BTCol(l0bBuf[curr], awukl1bBuf[curr], nBlockNum, 0, kBlockNum, kBlockNum);
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
+
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+
+                // mmad Absorb (queryTokens, nSize) = QC * WUK(T)
+                CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad,
+                        kIdx == 0);
+                SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                PipeBarrier<PIPE_M>();
+                curr = 1 - curr;
+            }
+            SetFlag<HardEvent::M_FIX>(EVENT_ID0);
+            WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+            // copy Absorb (queryTokens, nSize) to L1
+            CopyL0CToL1(absorbl1aBuf[nOffset * mBlockPad], l0cBuf, mBlockPad, nBlockPad, mBlockPad,
+                        mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE);
+            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        }
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID7);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6);
+
+        // C = Absorb * K
+        nSize = blockSize;
+        nLoop = DIV_ROUND_UP(kvLen, blockSize);
+        nBlockPad = blockSize;
+        nBlockNum = blockSize / NBLOCKSIZE;
+        kLoop = DIV_ROUND_UP(kvLoraRank, k0);
+
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        // copy QR (queryTokens, ropeHeadDim) to L1
+        CopyGmToL1Nd2Nz(aqrl1aBuf, query[nopeHeadDim], queryLen, ropeHeadDim,
+                        nHeads * (nopeHeadDim + ropeHeadDim), mBlockPad);
+        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+
+        SetFlag<HardEvent::FIX_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::FIX_MTE1>(EVENT_ID0);
+
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID5);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // kvLen
+            uint32_t block = blockTable[nIdx + nIdxStart];
+            int nOffset = nIdx * blockSize;
+            if (nOffset + nSize > kvLen) {
+                nSize = kvLen - nOffset;
+                nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+                nBlockNum = nBlockPad / NBLOCKSIZE;
+            }
+
+            WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+
+            kSize = k0;
+            kBlockPad = k0;
+            kBlockNum = k0 / kBlockSize;
+            for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // kvLoraRank
+                int kOffset = kIdx * k0;
+                if (kOffset + kSize > kvLoraRank) {
+                    kSize = kvLoraRank - kOffset;
+                    kBlockPad = ROUND_UP(kSize, kBlockSize);
+                    kBlockNum = kBlockPad / kBlockSize;
+                }
+
+                // copy K (blockSize, k0) to L1
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
+                CopyGmToL1Nd2Nz(akl1bBuf[curr], kCache[block * blockSize * kvLoraRank + kOffset],
+                                nSize, kSize, kvLoraRank, nBlockPad);
+
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
+
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                CopyToL0BCol(l0bBuf[curr], akl1bBuf[curr], nBlockNum, 0, kBlockNum);
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
+                CopyToL0ACol(l0aBuf[curr], absorbl1aBuf[kOffset * mBlockPad], mBlockNum, 0,
+                             kBlockNum);
+
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+
+                // mmad C (queryTokens, blockSize) = Absorb * K
+                CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad,
+                        kIdx == 0);
+                SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                PipeBarrier<PIPE_M>();
+                curr = 1 - curr;
+            }
+
+            kSize = ropeHeadDim;
+            int kBlockPad = ROUND_UP(kSize, kBlockSize);
+            int kBlockNum = kBlockPad / kBlockSize;
+            // copy KR (blockSize, ropeHeadDim) to L1
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
+            CopyGmToL1Nd2Nz(akrl1bBuf[curr], vCache[block * blockSize * ropeHeadDim], nSize,
+                            ropeHeadDim, ropeHeadDim, nBlockPad);
+
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curr);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curr);
+
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+            CopyToL0ACol(l0aBuf[curr], aqrl1aBuf, mBlockNum, 0, kBlockNum);
+            CopyToL0BCol(l0bBuf[curr], akrl1bBuf[curr], nBlockNum, 0, kBlockNum);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
+
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+
+            // mmad R (queryTokens, blockSize) = QR * KR
+            CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad, false);
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+            PipeBarrier<PIPE_M>();
+
+            SetFlag<HardEvent::M_FIX>(EVENT_ID0);
+            WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+
+            // copy final QK(queryTokens, nSize) from L0C to GM
+            CopyToGm(qk[nIdx * blockSize], l0cBuf, queryLen, nSize, mBlockPad,
+                     TILESIZE_OF_CACHED_KV);
+            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+            curr = 1 - curr;
+        }
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID5);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+    }
+
+    /* (absorb)
+     * Absorb = QK * K（T）
+     *     m: queryTokens, n: kvLoraRank, k: cachedTokens
+     *     m0: MAX_M0, n0: MAX_N0, k0: blockSize
+     * Absorb * WUV
+     *     m: queryTokens, n: vHeadDim, k: kvLoraRank
+     *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+     */
+    __aicore__ inline void RunAicSVAbsorb(GlobalTensor<Dtype> qk, int queryLen, int headIdx,
+                                          __gm__ uint32_t *blockTable, int kvOffset, int kvLen,
+                                          GlobalTensor<Dtype> sv)
+    {
+        constexpr int kBlockSize = 32 / sizeof(Dtype);
+        int kIdxStart = kvOffset / blockSize;
+
+        // Absorb = QK * K（T）
+        int mBlockPad = ROUND_UP(queryLen, MBLOCKSIZE);
+        int mBlockNum = mBlockPad / MBLOCKSIZE;
+        int nSize = MAX_N0;
+        int nLoop = DIV_ROUND_UP(kvLoraRank, MAX_N0);
+        int nBlockPad = MAX_N0;
+        int nBlockNum = MAX_N0 / NBLOCKSIZE;
+        int kSize = blockSize;
+        int kLoop = DIV_ROUND_UP(kvLen, blockSize);
+        int kBlockPad = blockSize;
+        int kBlockNum = blockSize / kBlockSize;
+
+        SetFlag<HardEvent::MTE1_FIX>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID0);
+
+        int curr = 0;
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID5);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // kvLoraRank
+            int nOffset = nIdx * MAX_N0;
+            if (nOffset + nSize > kvLoraRank) {
+                nSize = kvLoraRank - nOffset;
+                nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+                nBlockNum = nBlockPad / NBLOCKSIZE;
+            }
+
+            WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+
+            kSize = blockSize;
+            kBlockPad = blockSize;
+            kBlockNum = blockSize / kBlockSize;
+            for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // kvLen
+                uint32_t block = blockTable[kIdx + kIdxStart];
+                int kOffset = kIdx * blockSize;
+                if (kOffset + kSize > kvLen) {
+                    kSize = kvLen - kOffset;
+                    kBlockPad = ROUND_UP(kSize, kBlockSize);
+                    kBlockNum = kBlockPad / kBlockSize;
+                }
+
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
+                // copy QK (queryTokens, blockSize) to L1
+                CopyGmToL1Nd2Nz(aqkl1aBuf[curr], qk[kOffset], queryLen, kBlockPad,
+                                TILESIZE_OF_CACHED_KV, mBlockPad);
+
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
+                // copy K(T) (nSize, blockSize) to L1
+                CopyGmToL1Nd2Nz(aktl1bBuf[curr], kCache[block * blockSize * kvLoraRank + nOffset],
+                                kSize, nSize, kvLoraRank, kBlockPad);
+
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
+
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                CopyToL0ACol(l0aBuf[curr], aqkl1aBuf[curr], mBlockNum, 0, kBlockNum);
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
+
+                CopyToL0BTCol(l0bBuf[curr], aktl1bBuf[curr], nBlockNum, 0, kBlockNum, kBlockNum);
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
+
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+
+                // mmad Absorb (queryTokens, nSize) = QK * K（T）
+                CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad,
+                        kIdx == 0);
+                SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                PipeBarrier<PIPE_M>();
+                curr = 1 - curr;
+            }
+            SetFlag<HardEvent::M_FIX>(EVENT_ID0);
+            WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+
+            // copy Absorb (queryTokens, nSize) to L1
+            CopyL0CToL1(absorbl1aBuf[nOffset * mBlockPad], l0cBuf, mBlockPad, nBlockPad, mBlockPad,
+                        mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE);
+            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        }
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID5);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+
+        SetFlag<HardEvent::FIX_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::FIX_MTE1>(EVENT_ID0);
+
+        // Absorb * WUV
+        nSize = MAX_N0;
+        nLoop = DIV_ROUND_UP(vHeadDim, MAX_N0);
+        nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+        nBlockNum = nBlockPad / NBLOCKSIZE;
+        kSize = k0;
+        kLoop = DIV_ROUND_UP(kvLoraRank, k0);
+        kBlockPad = k0;
+        kBlockNum = k0 / kBlockSize;
+
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID7);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // vHeadDim
+            int nOffset = nIdx * MAX_N0;
+            if (nOffset + nSize > vHeadDim) {
+                nSize = vHeadDim - nOffset;
+                nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+                nBlockNum = nBlockPad / NBLOCKSIZE;
+            }
+
+            WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+
+            for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // kvLoraRank
+                int kOffset = kIdx * k0;
+                if (kOffset + kSize > kvLoraRank) {
+                    kSize = kvLoraRank - kOffset;
+                    kBlockPad = ROUND_UP(kSize, kBlockSize);
+                    kBlockNum = kBlockPad / kBlockSize;
+                }
+
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
+                // copy WUV (nSize, kSize) to L1
+                CopyGmToL1Nd2Nz(awuvl1bBuf[curr],
+                                wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
+                                     (nopeHeadDim + nOffset) * kvLoraRank + kOffset],
+                                nSize, kSize, kvLoraRank, nBlockPad);
+
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + curr);
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + curr);
+
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                CopyToL0BCol(l0bBuf[curr], awuvl1bBuf[curr], nBlockNum, 0, kBlockNum);
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
+                CopyToL0ACol(l0aBuf[curr], absorbl1aBuf[kOffset * mBlockPad], mBlockNum, 0,
+                             kBlockNum);
+
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+
+                CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, kBlockPad,
+                        kIdx == 0);
+                SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                PipeBarrier<PIPE_M>();
+                curr = 1 - curr;
+            }
+            SetFlag<HardEvent::M_FIX>(EVENT_ID0);
+            WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+
+            CopyToGm(sv[nOffset], l0cBuf, queryLen, nSize, mBlockPad, vHeadDim);
+            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+        }
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID7);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6);
+    }
+
     __aicore__ inline void RunAic()
     {
         set_padding(0);
@@ -690,8 +1179,8 @@ public:
                        GetBlockIdx(), batchIdx, queryTaskOffset, queryTaskOffset + queryTaskLen,
                        headIdx, kvOffset, kvOffset + kvLen, curr);
 #endif
-                RunAicQK(qWithQr[qOffset], queryTaskLen, headIdx, blockTable, kvOffset, kvLen,
-                         qk[curr]);
+                RunAicQKAbsorb(qWithQr[qOffset], queryTaskLen, headIdx, blockTable, kvOffset, kvLen,
+                               qk[curr]);
                 ffts_cross_core_sync(PIPE_FIX, softmaxConfig);
 
                 if (needDoSV != 0) {
@@ -705,8 +1194,8 @@ public:
                            lastQueryTaskOffset + lastQueryTaskLen, lastHeadIdx, lastKvOffset,
                            lastKvOffset + lastKvLen, last);
 #endif
-                    RunAicSV(qk[last], lastQueryTaskLen, lastHeadIdx, lastBlockTable, lastKvOffset,
-                             lastKvLen, sv[last]);
+                    RunAicSVAbsorb(qk[last], lastQueryTaskLen, lastHeadIdx, lastBlockTable,
+                                   lastKvOffset, lastKvLen, sv[last]);
                     ffts_cross_core_sync(PIPE_FIX, updateConfig);
                 }
 
@@ -984,12 +1473,14 @@ private:
     uint32_t setNextGeneration;
     uint32_t waitPrevGeneration;
 
+    int k0;
+    LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];  // event 0/1
+    LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];  // event 0/1
+    LocalTensor<float> l0cBuf;                    // event 0
+    LocalTensor<float> qksvl0cBuf;                // event 1
+
     // QK & SV share
     LocalTensor<Dtype> kl1aBuf[PINGPONG_BUF_NUM];  // event 4/5
-    LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];   // event 0/1
-    LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];   // event 0/1
-    LocalTensor<float> l0cBuf;                     // event 0
-    LocalTensor<float> qksvl0cBuf;                 // event 1
 
     // QK
     LocalTensor<Dtype> wukl1bBuf;                   // event 0
@@ -1002,6 +1493,21 @@ private:
     LocalTensor<Dtype> wuvl1bBuf[PINGPONG_BUF_NUM];  // event 6/7
     LocalTensor<Dtype> qkl1aBuf[PINGPONG_BUF_NUM];   // event 0/1
     LocalTensor<Dtype> vl1bBuf[PINGPONG_BUF_NUM];    // event 2/3
+
+    // QK & SV (absorb) share
+    LocalTensor<Dtype> absorbl1aBuf;  // event 0
+
+    // QK (absorb)
+    LocalTensor<Dtype> aqcl1aBuf;                     // event 0
+    LocalTensor<Dtype> awukl1bBuf[PINGPONG_BUF_NUM];  // event 6/7
+    LocalTensor<Dtype> aqrl1aBuf;                     // event 0
+    LocalTensor<Dtype> akrl1bBuf[PINGPONG_BUF_NUM];   // event 2/3
+    LocalTensor<Dtype> akl1bBuf[PINGPONG_BUF_NUM];    // event 4/5
+
+    // SV (absorb)
+    LocalTensor<Dtype> aqkl1aBuf[PINGPONG_BUF_NUM];   // event 0/1
+    LocalTensor<Dtype> aktl1bBuf[PINGPONG_BUF_NUM];   // event 4/5
+    LocalTensor<Dtype> awuvl1bBuf[PINGPONG_BUF_NUM];  // event 6/7
 };
 
 #define FLASH_MLA_FUNC_DEFINE(dtype)                                                              \

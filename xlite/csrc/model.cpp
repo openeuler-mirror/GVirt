@@ -307,7 +307,6 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     XTensor &sum = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
     XTensor &lastMax = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
     XTensor &lastSum = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
-    // TODO add absrob version: better performance for decode
     XliteOpFlashMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
                     lastSum, _sync, attnOutput, rt._cumPromptLens, rt._lens, rt._cachedLens,
                     rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
