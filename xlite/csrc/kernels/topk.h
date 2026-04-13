@@ -16,7 +16,7 @@ constexpr uint64_t SORT_RESULT_BLOCK_SIZE = SORT_BLOCK_SIZE * 2;
 constexpr uint64_t MGR_SORT_VALID_BITS_OFFSET = 8;
 constexpr uint64_t MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET = 12;
 
-#define XLITE_KERNEL_DEBUG
+//#define XLITE_KERNEL_DEBUG
 
 template <typename T>
 static __aicore__ inline void DumpBuffer(__ubuf__ T *buf, const __gm__ char *name, int size,
@@ -128,14 +128,13 @@ public:
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         for (int tokenIdx = block_idx; tokenIdx < nTokens; tokenIdx += block_num) {
             CopyInScores(tokenIdx);
             ConvertInput();
             Sort();
             FillOutScores(tokenIdx);
+            pipe_barrier(PIPE_ALL);
         }
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
 
         pipe_barrier(PIPE_ALL);
     }
@@ -159,7 +158,7 @@ public:
         if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
             uint64_t vector_bf162fp32_config = set_vector_1src_xt(8, 4, 1, 1, calcRepeat);
             vconv_bf162f32(scoresIn, scoresInTmp, vector_bf162fp32_config);
-            DumpBuffer(scoresIn, "scoresIn", nRoutedExperts);
+            DumpBuffer(scoresIn, "scoresIn", 10);
         }
     }
 
@@ -168,6 +167,7 @@ public:
             // Assume no remainder
             auto repeat = nRoutedExperts / SORT_BLOCK_SIZE;
             vbitsort(sortTmp, scoresIn, indicesIn, repeat);
+            DumpBuffer(indicesIn, "indicesIn", 10, 1, 0, true);
 
             // Sorted arrays of 128 elements
             uint64_t mrgRepeat = nRoutedExperts / 128;
@@ -185,19 +185,15 @@ public:
             mrgRepeat = 1;
             Merge3(sortTmp, sortMrgTmp, mrgRepeat, 2048);
 
-            // Make sure that indices from previous iteration are not used
-            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-
             vreducev2(indices, (__ubuf__ uint32_t *)sortTmp, (__ubuf__ uint32_t *)sortTmp, topK / 32, 1, 2, 8, 0);
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            DumpBuffer(indices, "indices", nRoutedExperts);
+            DumpBuffer(indices, "indices", 10, 1, 0, true);
     }
 
     __aicore__ inline void FillOutScores(int tokenIdx) {
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            copy_ubuf_to_gm_align_b32(outIndicesGm + tokenIdx * nRoutedExperts / BIT_SIZE_OF_U32,
-                    indices, 0, 1, nRoutedExperts * sizeof(uint32_t), 0,0,0,0);
-            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+            copy_ubuf_to_gm_align_b32(outIndicesGm + tokenIdx * topK,
+                    indices, 0, 1, topK * sizeof(uint32_t), 0,0,0,0);
     }
 
 private:

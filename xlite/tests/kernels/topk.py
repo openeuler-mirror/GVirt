@@ -18,7 +18,7 @@ torch.npu.set_device(0)
 torch.set_default_device("npu:0")
 torch.set_default_dtype(torch.bfloat16)
 
-n_tokens = 1
+n_tokens = 3000
 K = 2048
 n_routed_experts = 6144
 
@@ -27,15 +27,22 @@ scores = torch.randn(n_tokens, n_routed_experts)
 values, torch_indices = scores.topk(K)
 
 indices = torch.arange(n_routed_experts, dtype=torch.int32)
-xlite_indices = torch.empty(1, K, dtype=torch.int32)
+xlite_indices = torch.empty(n_tokens, K, dtype=torch.int32)
 
-print(scores.shape)
 torch.npu.synchronize()
 xlite_topk(rt, scores, indices, xlite_indices, K)
 torch.npu.synchronize()
 
 torch_indices = torch_indices.to(dtype=torch.int32)
 
-print(xlite_indices)
+
+# torch.set_printoptions(threshold=1000000)
+for i in range(n_tokens):
+    try:
+        torch.testing.assert_close(torch_indices[i], xlite_indices[i])
+    except Exception as e:
+        print(f'row {i}: {e}')
 print(torch_indices)
+print(xlite_indices)
+
 torch.testing.assert_close(torch_indices, xlite_indices)
