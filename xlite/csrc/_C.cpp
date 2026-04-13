@@ -1058,6 +1058,35 @@ void DeQuant(XRuntime &rt, at::Tensor &in, at::Tensor &scale, at::Tensor &out, b
     rt.Synchronize();
 }
 
+void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &weight,
+                   at::Tensor &scores, at::Tensor &cumPromptLens, at::Tensor &lens,
+                   at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads,
+                   uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
+{
+    XTensor _q, _kCache, _weight, _scores, _cumPromptLens, _lens, _cachedLens, _blockTables;
+
+    InitXTensor(_q, q);
+    InitXTensor(_kCache, kCache);
+    InitXTensor(_weight, weight);
+    InitXTensor(_scores, scores);
+    InitXTensor(_cumPromptLens, cumPromptLens);
+    InitXTensor(_lens, lens);
+    InitXTensor(_cachedLens, cachedLens);
+    InitXTensor(_blockTables, blockTables);
+    XliteOpIndexerScores(rt, _q, _kCache, _weight, _scores, _cumPromptLens, _lens, _cachedLens,
+                         _blockTables, nHeads, headDim, blockSize, batch, maxNumBlock);
+    rt.Synchronize();
+}
+
+void Muls(XRuntime &rt, at::Tensor &input, float scale, at::Tensor &output)
+{
+    XTensor _input, _output;
+    InitXTensor(_input, input);
+    InitXTensor(_output, output);
+    XliteOpMuls(rt, _input, scale, _output);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -1255,6 +1284,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("dequant", &DeQuant);
     m.def("mla", &MLA);
+    m.def("indexer_scores", &IndexerScores);
+    m.def("muls", &Muls);
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,

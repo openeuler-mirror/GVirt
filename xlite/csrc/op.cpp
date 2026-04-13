@@ -65,6 +65,10 @@
 #include "aclrtlaunch_flash_mla_bfloat16_t.h"
 #include "aclrtlaunch_norm_float16_t.h"
 #include "aclrtlaunch_norm_bfloat16_t.h"
+#include "aclrtlaunch_indexer_scores_float16_t.h"
+#include "aclrtlaunch_indexer_scores_bfloat16_t.h"
+#include "aclrtlaunch_muls_float16_t.h"
+#include "aclrtlaunch_muls_bfloat16_t.h"
 
 static inline bool IsDummyRuntime(const XRuntime &rt)
 {
@@ -1061,5 +1065,45 @@ void XliteOpSplit3(XRuntime &rt, XTensor &in, XTensor &out0, XTensor &out1, XTen
         CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(out2.ptr) + i * size2, size2,
                                    srcBase + size0 + size1, size2, ACL_MEMCPY_DEVICE_TO_DEVICE,
                                    rt.stream));
+    }
+}
+
+void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight,
+                          XTensor &scores, XTensor &cumPromptLens, XTensor &lens,
+                          XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,
+                          uint32_t headDim, uint32_t blockSize, uint32_t batch,
+                          uint32_t maxNumBlock)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (q.dtype == FP16 && kCache.dtype == FP16 && weight.dtype == FP16 && scores.dtype == FP16) {
+        aclrtlaunch_indexer_scores_float16_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
+                                             scores.ptr, cumPromptLens.ptr, lens.ptr,
+                                             cachedLens.ptr, blockTables.ptr, nHeads, headDim,
+                                             blockSize, batch, maxNumBlock);
+    } else if (q.dtype == BF16 && kCache.dtype == BF16 && weight.dtype == BF16 &&
+               scores.dtype == BF16) {
+        aclrtlaunch_indexer_scores_bfloat16_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
+                                              scores.ptr, cumPromptLens.ptr, lens.ptr,
+                                              cachedLens.ptr, blockTables.ptr, nHeads, headDim,
+                                              blockSize, batch, maxNumBlock);
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+    }
+}
+
+void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (input.dtype == FP16 && output.dtype == FP16) {
+        aclrtlaunch_muls_float16_t(rt.aivNum, rt.stream, input.ptr, scale, output.ptr, input.numel);
+    } else if (input.dtype == BF16 && output.dtype == BF16) {
+        aclrtlaunch_muls_bfloat16_t(rt.aivNum, rt.stream, input.ptr, scale, output.ptr,
+                                    input.numel);
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }

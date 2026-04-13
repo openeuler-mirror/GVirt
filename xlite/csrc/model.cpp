@@ -237,7 +237,12 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XTensor &k = rt.GetTensor({hiddenState.shape[0], _c.indexHeadDim}, hiddenState.dtype, DBG_LOC);
     XTensor &weights =
         rt.GetTensor({hiddenState.shape[0], _c.indexNHeads}, hiddenState.dtype, DBG_LOC);
-    XliteOpMatmul(rt, attnNormQc, indexQB[layer], q, _c.weightNZ);
+
+    XTensor &indexQBScaled = rt.GetTensor(indexQB[layer].shape, indexQB[layer].dtype, DBG_LOC);
+    XliteOpMuls(rt, indexQB[layer], _c.indexSoftmaxScale, indexQBScaled);
+    XliteOpMatmul(rt, attnNormQc, indexQBScaled, q, _c.weightNZ);
+    rt.PutTensor(indexQBScaled);
+
     XliteOpMatmul(rt, hiddenState, indexK[layer], k, _c.weightNZ);
     XliteOpLayerNorm(rt, k, indexKNorm[layer], indexKNormBias[layer], k, _c.normEps,
                      _c.indexHeadDim);
@@ -251,12 +256,21 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     } else {
         // 1.2 TODO
     }
-    XliteOpMatmul(rt, hiddenState, indexWeight[layer], weights, _c.weightNZ);
-    XTensor &scores =
-        rt.GetTensor({hiddenState.shape[0], _c.maxSeqLen}, hiddenState.dtype, DBG_LOC);
-    // 1.3 TODO do scores = softmax(Q, KT) * weight
-    rt.PutTensor(weights);
     rt.PutTensor(k);
+
+    XTensor &indexWeightScaled =
+        rt.GetTensor(indexWeight[layer].shape, indexWeight[layer].dtype, DBG_LOC);
+    float weightScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
+    XliteOpMuls(rt, indexWeight[layer], weightScale, indexWeightScaled);
+    XliteOpMatmul(rt, hiddenState, indexWeightScaled, weights, _c.weightNZ);
+    rt.PutTensor(indexWeightScaled);
+
+    XTensor &scores = rt.GetTensor({hiddenState.shape[0], rt._maxNumBlocks * _c.blockSize},
+                                   hiddenState.dtype, DBG_LOC);
+    XliteOpIndexerScores(rt, q, indexKCache, weights, scores, rt._cumPromptLens, rt._lens,
+                         rt._cachedLens, rt._attnBlockTables, _c.indexNHeads, _c.indexHeadDim,
+                         _c.blockSize, rt._batch, rt._maxNumBlocks);
+    rt.PutTensor(weights);
     rt.PutTensor(q);
     XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
     // 1.4 TODO do topk on the result and return the indices

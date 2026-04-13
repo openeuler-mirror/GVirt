@@ -96,4 +96,10 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, boo
 void XliteOpConcat3(XRuntime &rt, XTensor &in0, XTensor &in1, XTensor &in2, XTensor &out);
 void XliteOpSplit3(XRuntime &rt, XTensor &in, XTensor &out0, XTensor &out1, XTensor &out2,
                    size_t size0, size_t size1, size_t size2, uint32_t numPackets);
+void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight,
+                          XTensor &scores, XTensor &cumPromptLens, XTensor &lens,
+                          XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,
+                          uint32_t headDim, uint32_t blockSize, uint32_t batch,
+                          uint32_t maxNumBlock);
+void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output);
 #endif
