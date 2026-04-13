@@ -283,7 +283,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     rt.PutTensor(attnNormQc);
 
     XTensor &attnOutput =
-        rt.GetTensor({attnQWithQr.shape[0], qHeads, _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
+        rt.GetTensor({attnQWithQr.shape[0], qHeads * _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
     XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
                                attnQWithQr.dtype, DBG_LOC);
     XTensor &sv =
