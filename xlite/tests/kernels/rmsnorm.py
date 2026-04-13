@@ -27,7 +27,7 @@ def stand_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> t
     return (weight.float() * x).to(input_dtype)
 
 BATCH_SIZE = 64
-DIM = 4096
+DIM = 8192
 NORMEPS = 1e-6
 dtype_list = [torch.float16, torch.bfloat16]
 
@@ -82,7 +82,7 @@ for test_dtype in dtype_list:
     # xlite
     torch.npu.synchronize()
     rmsnorm(rt, x, weight, y, NORMEPS, DIM, CNT)
-    rmsnorm(rt, x, weight, y, NORMEPS, DIM, 1, DIM * CNT)
+    rmsnorm(rt, x, weight, y, NORMEPS, DIM, 1, DIM * CNT, DIM * CNT)
     torch.npu.synchronize()
 
     logging.info(f'rmsnorm with stride ({test_dtype}) executed!')
