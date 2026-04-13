@@ -445,20 +445,20 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
 }
 
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
-                    uint32_t normDim, const XTensor &bias, uint32_t cntPerToken,
-                    uint32_t inStartOffset, uint32_t outStartOffset)
+                    uint32_t normDim, uint32_t cntPerToken, uint32_t inStartOffset,
+                    uint32_t outStartOffset)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
     if (in.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, bias.ptr,
-                                      out.ptr, in.shape[0], normDim, normEps, cntPerToken,
-                                      in.shape[1], out.shape[1], inStartOffset, outStartOffset);
+        aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
+                                      in.shape[0], normDim, normEps, cntPerToken, in.shape[1],
+                                      out.shape[1], inStartOffset, outStartOffset);
     } else if (in.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, bias.ptr,
-                                       out.ptr, in.shape[0], normDim, normEps, cntPerToken,
-                                       in.shape[1], out.shape[1], inStartOffset, outStartOffset);
+        aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, out.ptr,
+                                       in.shape[0], normDim, normEps, cntPerToken, in.shape[1],
+                                       out.shape[1], inStartOffset, outStartOffset);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
@@ -501,19 +501,19 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
 }
 
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &norm, float normEps,
-                          XTensor &out, const XTensor &bias)
+                          XTensor &out)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
     if (in1.dtype == FP16 && in2.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, bias.ptr,
-                                      out.ptr, in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1],
+        aclrtlaunch_rmsnorm_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
+                                      in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1],
                                       out.shape[1], 0, 0);
     } else if (in1.dtype == BF16 && in2.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, bias.ptr,
-                                       out.ptr, in1.shape[0], in1.shape[1], normEps, 1,
-                                       in1.shape[1], out.shape[1], 0, 0);
+        aclrtlaunch_rmsnorm_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, norm.ptr, out.ptr,
+                                       in1.shape[0], in1.shape[1], normEps, 1, in1.shape[1],
+                                       out.shape[1], 0, 0);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
@@ -538,14 +538,6 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
     bool needExtraSpace = (bias.ptr != nullptr || deqScale.ptr != nullptr);
-
-    if (k != in.shape[1]) {
-        throw std::runtime_error(std::string(__func__) + ": shape not match, input shape: [" +
-                                 std::to_string(in.shape[0]) + ", " + std::to_string(in.shape[1]) +
-                                 "], weight shape: [" + std::to_string(weight.shape[0]) + ", " +
-                                 std::to_string(weight.shape[1]) +
-                                 (transpose ? "](transpose)" : "]"));
-    }
 
     // Notice: Ensure that no overflow occurs
     // L1(512K): PINGPONG * (sizeof(x) * m0 * 2k0 + sizeof(y) * n0 * k0) + BiasSize(Optional)] +
@@ -626,11 +618,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aclrtlaunch_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                   weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else {
-        std::string err_str = std::string(__func__);
-        err_str += std::string(XDtypeStr(in.dtype)) + std::string(", ");
-        err_str += std::string(XDtypeStr(weight.dtype)) + std::string(", ");
-        err_str += std::string(XDtypeStr(out.dtype)) + std::string(": unsupported!");
-        throw std::runtime_error(err_str);
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -728,11 +716,7 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
                                         -1, -1, -1, start, end, weightNZ, transpose,
                                         MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else {
-        std::string err_str = std::string(__func__) + std::string(": ");
-        err_str += std::string(XDtypeStr(in.dtype)) + std::string(", ");
-        err_str += std::string(XDtypeStr(weightDtype)) + std::string(", ");
-        err_str += std::string(XDtypeStr(output.dtype)) + std::string(": unsupported!");
-        throw std::runtime_error(err_str);
+        throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
 }
 
@@ -1024,7 +1008,7 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out)
     }
 }
 
-void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, bool hasScale, const XTensor &scale)
+void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, bool hasScale)
 {
     if (IsDummyRuntime(rt)) {
         return;
