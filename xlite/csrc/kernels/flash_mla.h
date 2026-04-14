@@ -114,12 +114,10 @@ public:
         uint64_t sharel1Size = off;
 
         // QK
-        uint64_t wukSize = MAX_N0 * k0 * sizeof(Dtype);
-        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
-            wukl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
-            wukl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += wukSize;
-        }
+        uint64_t wukSize = nopeHeadDim * kvLoraRank * sizeof(Dtype);
+        wukl1bBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+        wukl1bBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off += wukSize;
 
         uint64_t qcSize = MAX_M0 * nopeHeadDim * sizeof(Dtype);
         qcl1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
@@ -269,6 +267,9 @@ public:
         // copy QR (m0, ropeHeadDim) to L1
         CopyGmToL1Nd2Nz(qrl1aBuf, query[nopeHeadDim], queryLen, ropeHeadDim,
                         nHeads * (nopeHeadDim + ropeHeadDim), mBlockPad);
+        // copy WUK (nopeHeadDim, kvLoraRank) to L1
+        CopyGmToL1Nd2Nz(wukl1bBuf, wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank],
+                        nopeHeadDim, kvLoraRank, kvLoraRank, nopeHeadDim);
         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
 
@@ -279,8 +280,6 @@ public:
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID5);
-        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6);
-        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID7);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
@@ -337,22 +336,18 @@ public:
                                     KCkSize, kvLoraRank, KCmBlockPad);
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
 
-                    // copy WUK (KCnSize, k0) to L1
-                    WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
-                    CopyGmToL1Nd2Nz(wukl1bBuf[curr],
-                                    wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
-                                         KCnOffset * kvLoraRank + KCkOffset],
-                                    KCnSize, KCkSize, kvLoraRank, KCnBlockPad);
-                    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + curr);
-
                     WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
                     CopyToL0ACol(l0aBuf[curr], kl1aBuf[curr], KCmBlockNum, 0, KCkBlockNum);
                     SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
 
-                    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + curr);
-                    CopyToL0BCol(l0bBuf[curr], wukl1bBuf[curr], KCnBlockNum, 0, KCkBlockNum);
-                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
+                    LoadData2dParams params(0, KCnBlockNum, 1, 0, 0, 0, inc);
+                    for (int k = 0; k < KCkBlockNum; k++) {
+                        uint64_t srcOffset =
+                            (KCkOffset + k * kBlockSize) * nopeHeadDim + KCnOffset * kBlockSize;
+                        uint64_t dstOffset = k * KCnBlockNum * (512 / sizeof(Dtype));
+                        LoadData(l0bBuf[curr][dstOffset], wukl1bBuf[srcOffset], params);
+                    }
 
                     SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
                     WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
@@ -432,8 +427,6 @@ public:
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
-        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID7);
-        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID5);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
@@ -999,11 +992,11 @@ private:
     LocalTensor<float> qksvl0cBuf;                 // event 1
 
     // QK
-    LocalTensor<Dtype> wukl1bBuf[PINGPONG_BUF_NUM];  // event 6/7
-    LocalTensor<Dtype> qcl1aBuf;                     // event 0
-    LocalTensor<Dtype> qrl1aBuf;                     // event 0
-    LocalTensor<Dtype> kcl1bBuf[PINGPONG_BUF_NUM];   // event 0/1
-    LocalTensor<Dtype> krl1bBuf[PINGPONG_BUF_NUM];   // event 2/3
+    LocalTensor<Dtype> wukl1bBuf;                   // event 0
+    LocalTensor<Dtype> qcl1aBuf;                    // event 0
+    LocalTensor<Dtype> qrl1aBuf;                    // event 0
+    LocalTensor<Dtype> kcl1bBuf[PINGPONG_BUF_NUM];  // event 0/1
+    LocalTensor<Dtype> krl1bBuf[PINGPONG_BUF_NUM];  // event 2/3
 
     // SV
     LocalTensor<Dtype> wuvl1bBuf[PINGPONG_BUF_NUM];  // event 6/7
