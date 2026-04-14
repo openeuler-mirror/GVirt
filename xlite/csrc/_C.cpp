@@ -1083,15 +1083,17 @@ void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
     rt.Synchronize();
 }
 
-void TopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &outIndices, size_t k)
+void TopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &outIndices, 
+        at::Tensor &lens, size_t k, size_t maxLen)
 {
-    XTensor _scores, _indices, _outIndices;
+    XTensor _scores, _indices, _outIndices, _lens;
 
     InitXTensor(_scores, scores);
     InitXTensor(_indices, indices);
     InitXTensor(_outIndices, outIndices);
+    InitXTensor(_lens, lens);
 
-    XliteOpTopK(rt, _scores, _indices, _outIndices, k);
+    XliteOpTopK(rt, _scores, _indices, _outIndices, _lens, k, maxLen);
 
     rt.Synchronize();
 }

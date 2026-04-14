@@ -39,6 +39,12 @@ static __aicore__ inline void DumpBuffer(__ubuf__ T *buf, const __gm__ char *nam
 #endif
 }
 
+#ifdef XLITE_KERNEL_DEBUG
+#define dbg_printf(args...) printf(args)
+#else
+#define dbg_printf(args...)
+#endif
+
 static __aicore__ inline void DumpBufferIndex(__ubuf__ float *buf, const __gm__ char *name,
                                               int size, int step = 1)
 {
@@ -51,18 +57,21 @@ class XliteTopK
 public:
     __aicore__ inline XliteTopK() = default;
 
-    __aicore__ inline void Init(GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices,
-            uint32_t numTokens, uint32_t numRoutedExperts, uint32_t topK)
+    __aicore__ inline void Init(GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens,
+            uint32_t numTokens, uint32_t numRoutedExperts, uint32_t numBatches, uint32_t topK)
     {
         set_mask_norm();
         this->scoresGm = (__gm__ Dtype *)scores;
         this->indicesGm = (__gm__ uint32_t *)indices;
         this->outIndicesGm = (__gm__ uint32_t *)outIndices;
+        this->lensGm = (__gm__ uint32_t *)lens;
 
         this->nTokens = numTokens;
         this->nRoutedExperts = numRoutedExperts;
         this->topK = topK;
+        this->nBatches = numBatches;
         this->calcRepeat = DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32);
+        this->batchSize = nTokens / nBatches;
 
         uint32_t pad = ROUND_UP(numRoutedExperts, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
         uint32_t padDtype =
@@ -82,6 +91,8 @@ public:
             scoresInTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
             off += pad / 2;
         }
+        this->lensIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += numBatches * sizeof(uint32_t);
     }
 
     __aicore__ inline void Merge4(__ubuf__ float *dst, __ubuf__ float *src,
@@ -125,28 +136,50 @@ public:
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
         copy_gm_to_ubuf_align_b32(indicesIn, indicesGm, 0, 1, nRoutedExperts * sizeof(uint32_t), 0,
                                   0, 0, 0);
+        copy_gm_to_ubuf_align_b32(lensIn, lensGm, 0, 1, nBatches * sizeof(uint32_t), 0,
+                                  0, 0, 0);
+        pipe_barrier(PIPE_MTE2);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-        for (int tokenIdx = block_idx; tokenIdx < nTokens; tokenIdx += block_num) {
-            CopyInScores(tokenIdx);
-            ConvertInput();
-            Sort();
-            FillOutScores(tokenIdx);
+        dbg_printf("Run: %u batches, %u RoutedExperts, %u Tokens\n", nBatches, nRoutedExperts, nTokens);
+        for (int  i = 0; i < nBatches; i++) {
+            dbg_printf("batch[%d] -> %u elements\n", i, lensIn[i]);
+        }
+
+        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+        uint32_t outOffset = 0;
+        for (int tokenIdx = block_idx, batch = 0; batch < nBatches; batch++) {
+            for (; tokenIdx < lensIn[batch]; tokenIdx += block_num) {
+                //printf("BATCH: %d, TOKEN: %d\n", batch, tokenIdx);
+                wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+                CopyInScores(batch, tokenIdx);
+                ConvertInput();
+                Sort();
+                FillOutScores(outOffset, tokenIdx);
+                set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+            }
+            tokenIdx = tokenIdx - lensIn[batch];
+            outOffset += lensIn[batch];
             pipe_barrier(PIPE_ALL);
         }
+        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
 
         pipe_barrier(PIPE_ALL);
     }
 
-    __aicore__ inline void CopyInScores(int tokenIdx)
+    __aicore__ inline void CopyInScores(int batch, int tokenIdx)
     {
+        uint32_t offset = batch * batchSize * nRoutedExperts + tokenIdx * nRoutedExperts;
+        //dbg_printf("IN[%u,%u] offset = %u\n", batch, tokenIdx, offset);
         if constexpr (std::is_same<Dtype, float>::value) {
-            copy_gm_to_ubuf_align_b32(scoresIn, scoresGm + tokenIdx * nRoutedExperts, 0, 1,
+            copy_gm_to_ubuf_align_b32(scoresIn, scoresGm + offset, 0, 1,
                                       nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+            pipe_barrier(PIPE_MTE2);
         } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            copy_gm_to_ubuf_align_b32(scoresInTmp, scoresGm + tokenIdx * nRoutedExperts, 0, 1,
+            copy_gm_to_ubuf_align_b32(scoresInTmp, scoresGm + offset, 0, 1,
                                       nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
+            pipe_barrier(PIPE_MTE2);
         }
 
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
@@ -158,7 +191,8 @@ public:
         if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
             uint64_t vector_bf162fp32_config = set_vector_1src_xt(8, 4, 1, 1, calcRepeat);
             vconv_bf162f32(scoresIn, scoresInTmp, vector_bf162fp32_config);
-            DumpBuffer(scoresIn, "scoresIn", 10);
+            pipe_barrier(PIPE_V);
+            //DumpBuffer(scoresIn, "scoresIn", 10);
         }
     }
 
@@ -167,7 +201,8 @@ public:
             // Assume no remainder
             auto repeat = nRoutedExperts / SORT_BLOCK_SIZE;
             vbitsort(sortTmp, scoresIn, indicesIn, repeat);
-            DumpBuffer(indicesIn, "indicesIn", 10, 1, 0, true);
+            pipe_barrier(PIPE_V);
+            //DumpBuffer(indicesIn, "indicesIn", 10, 1, 0, true);
 
             // Sorted arrays of 128 elements
             uint64_t mrgRepeat = nRoutedExperts / 128;
@@ -186,23 +221,24 @@ public:
             Merge3(sortTmp, sortMrgTmp, mrgRepeat, 2048);
 
             vreducev2(indices, (__ubuf__ uint32_t *)sortTmp, (__ubuf__ uint32_t *)sortTmp, topK / 32, 1, 2, 8, 0);
+            pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            DumpBuffer(indices, "indices", 10, 1, 0, true);
+            //DumpBuffer(indices, "indices", 10, 1, 0, true);
     }
 
-    __aicore__ inline void FillOutScores(int tokenIdx) {
+    __aicore__ inline void FillOutScores(int batchOffset, int tokenIdx) {
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            copy_ubuf_to_gm_align_b32(outIndicesGm + tokenIdx * topK,
+            auto offset = batchOffset * topK + tokenIdx * topK;
+            copy_ubuf_to_gm_align_b32(outIndicesGm + offset,
                     indices, 0, 1, topK * sizeof(uint32_t), 0,0,0,0);
+            pipe_barrier(PIPE_MTE3);
     }
 
 private:
     uint32_t nTokens;
     uint32_t nRoutedExperts;
-    uint32_t nGroup;
-    uint32_t nTopkGroup;
-    uint32_t nExpertsPerGroup;
-    uint32_t nScores;
+    uint32_t nBatches;
+    uint32_t batchSize;
     uint32_t topK;
     bool normTopKProb;
     float scale;
@@ -211,11 +247,12 @@ private:
     __gm__ Dtype *scoresGm;
     __gm__ uint32_t *indicesGm;
     __gm__ uint32_t *outIndicesGm;
-    __gm__ uint32_t *routingMapGm;
+    __gm__ uint32_t *lensGm;
 
     __ubuf__ float *scoresIn;
     __ubuf__ uint32_t *indicesIn;
     __ubuf__ uint32_t *indices;
+    __ubuf__ uint32_t *lensIn;
     __ubuf__ float *sortTmp;
     __ubuf__ float *sortMrgTmp;
     __ubuf__ Dtype *scoresInTmp;
@@ -223,17 +260,20 @@ private:
 
 #define TOPK_FUNC_DEFINE(dtype)                                                             \
     extern "C" __global__ __aicore__ void topk_##dtype(                                     \
-        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, uint32_t numTokens, uint32_t numRoutedExperts,     \
+        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens,                  \
+            uint32_t numTokens, uint32_t numRoutedExperts, uint32_t numBatches,             \
         uint32_t topK)                                                                      \
     {                                                                                       \
-        XliteTopK<dtype> op;                                                                     \
-        op.Init(scores, indices, outIndices, numTokens, numRoutedExperts, topK);                        \
-        op.Run();                                                                            \
+        XliteTopK<dtype> op;                                                                \
+        op.Init(scores, indices, outIndices, lens, numTokens, numRoutedExperts,             \
+                numBatches, topK);                                                          \
+        op.Run();                                                                           \
     }
 #else
 #define TOPK_FUNC_DEFINE(dtype)                                                             \
     extern "C" __global__ __aicore__ void topk_##dtype(                                     \
-        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, uint32_t numTokens, uint32_t numRoutedExperts,     \
+        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens,                  \
+            uint32_t numTokens, uint32_t numRoutedExperts, uint32_t numBatches,             \
         uint32_t topK)                                                                      \
     {                                                                                       \
     }
