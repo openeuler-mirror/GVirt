@@ -67,6 +67,8 @@ xlite 每日自动化测试机器人
     --env-type: 环境类型 (blue/yellow)，默认 yellow
                - yellow 环境: 需要执行 source /home/env.sh
                - blue 环境: 不需要 source /home/env.sh
+    --compare-ttft: 启用TTFT指标作为对比指标（默认不比较TTFT）
+    --compare-tpot-p99: 启用TPOT P99指标作为对比指标（默认不比较TPOT P99）
 
 退出码:
     0 - 成功，无性能劣化
@@ -109,6 +111,10 @@ CONTAINER_WHEEL_DIR = "/workspaces/code/opencode/GVirt/xlite/dist"
 # ====================== 全局配置 ======================
 # 性能劣化阈值，超过此比例视为性能下降
 DEGRADATION_THRESHOLD = 0.05
+# TTFT指标是否作为对比指标（ttft_avg 和 ttft_p99）
+COMPARE_TTFT_METRICS = False
+# TPOT P99指标是否作为对比指标
+COMPARE_TPOT_P99_METRICS = False
 # Webhook URL
 WEBHOOK_URL = "http://cid-service.huawei.com/service-ldap/msg/espace"
 # 机器IP地址
@@ -877,7 +883,7 @@ def compare_metrics(current: Dict, baseline: Dict) -> Dict:
             has_significant_change = False
             changes = {}
             
-            # 对比所有指标
+            # 对比所有指标（始终计算所有指标，但TTFT和TPOT P99的劣化判断受配置控制）
             all_metrics = ["ttft_avg", "ttft_p99", "tpot_avg", "tpot_p99", "output_speed"]
             for metric in all_metrics:
                 current_val = current_data.get(metric)
@@ -900,9 +906,21 @@ def compare_metrics(current: Dict, baseline: Dict) -> Dict:
                 # 判断是否为劣化或提升
                 # 对于 QPS 和 Output Speed: 下降为劣化，上升为提升
                 # 对于 TTFT 和 TPOT: 上升为劣化，下降为提升
+                # TTFT指标的判断受COMPARE_TTFT_METRICS配置控制
+                # TPOT P99指标的判断受COMPARE_TPOT_P99_METRICS配置控制
+                is_ttft_metric = metric in ["ttft_avg", "ttft_p99"]
+                is_tpot_p99_metric = metric == "tpot_p99"
                 if metric in ["qps", "output_speed"]:
                     is_degradation = change_ratio < -DEGRADATION_THRESHOLD
                     is_improvement = change_ratio > DEGRADATION_THRESHOLD
+                elif is_ttft_metric and not COMPARE_TTFT_METRICS:
+                    # TTFT指标不参与对比判断时，始终为False
+                    is_degradation = False
+                    is_improvement = False
+                elif is_tpot_p99_metric and not COMPARE_TPOT_P99_METRICS:
+                    # TPOT P99指标不参与对比判断时，始终为False
+                    is_degradation = False
+                    is_improvement = False
                 else:
                     is_degradation = change_ratio > DEGRADATION_THRESHOLD
                     is_improvement = change_ratio < -DEGRADATION_THRESHOLD
@@ -1022,13 +1040,15 @@ def generate_model_report(model_name: str, model_comparisons: List[Dict], report
     
     # 收集详细数据内容
     detail_lines = []
-    for idx, comparison in enumerate(sorted_comparisons, 1):
+    scenario_idx = 0
+    for comparison in sorted_comparisons:
         row_changes = comparison.get("row_changes", [])
         if row_changes:
+            scenario_idx += 1
             input_len = comparison.get("input_len", "N/A")
             output_len = comparison.get("output_len", "N/A")
             
-            detail_lines.append(f"{idx}. input={input_len}, output={output_len}")
+            detail_lines.append(f"{scenario_idx}. input={input_len}, output={output_len}")
             detail_lines.append("")
             
             if comparison.get("error"):
@@ -1105,9 +1125,7 @@ def generate_model_report(model_name: str, model_comparisons: List[Dict], report
                 
                 row_str = f"  | {concurrency} | {service} | {' | '.join(formatted_parts)} |"
                 detail_lines.append(row_str)
-            
-
-        detail_lines.append("")
+                detail_lines.append("")
     
     # 汇总摘要（作为折叠标题）
     status_icon = "⚠️" if total_degradations > 0 else "✅"
@@ -1127,8 +1145,8 @@ def generate_model_report(model_name: str, model_comparisons: List[Dict], report
         lines.append(f"报告保存路径: {report_path}")
         lines.append("")
     
-    # 添加详细数据（仅在性能异常时显示）
-    if total_degradations > 0:
+    # 添加详细数据（仅在性能异常或提升时显示）
+    if total_degradations > 0 or total_improvements > 0:
         lines.extend(detail_lines)
     
     return "\n".join(lines)
@@ -1434,13 +1452,19 @@ def main():
                         help="指定已有的报告目录（调试模式，跳过拉取、编译、测试步骤）")
     parser.add_argument("--env-type", type=str, default="yellow", choices=["blue", "yellow"],
                         help="环境类型 (default: yellow)")
+    parser.add_argument("--compare-ttft", action="store_true",
+                        help="启用TTFT指标作为对比指标（默认不比较TTFT）")
+    parser.add_argument("--compare-tpot-p99", action="store_true",
+                        help="启用TPOT P99指标作为对比指标（默认不比较TPOT P99）")
     
     args = parser.parse_args()
     
     # 更新全局配置
-    global DEGRADATION_THRESHOLD, BUILD_CONTAINER, ENV_TYPE
+    global DEGRADATION_THRESHOLD, BUILD_CONTAINER, ENV_TYPE, COMPARE_TTFT_METRICS, COMPARE_TPOT_P99_METRICS
     DEGRADATION_THRESHOLD = args.threshold
     ENV_TYPE = args.env_type
+    COMPARE_TTFT_METRICS = args.compare_ttft
+    COMPARE_TPOT_P99_METRICS = args.compare_tpot_p99
     
     # 更新容器配置
     if args.build_container:
