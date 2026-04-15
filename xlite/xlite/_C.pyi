@@ -840,6 +840,36 @@ def rmsnorm(
     norm_dim: int = 0,
     cnt_per_token: int = 1,
     in_start_offset: int = 0,
+    out_start_offset: int = 0
+) -> None:
+    """Apply RMSNorm with optional offsets.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        in_ (torch.Tensor): Input tensor.
+        norm (torch.Tensor): RMSNorm weight tensor.
+        out (torch.Tensor): Output tensor.
+        norm_eps (float): Numerical epsilon used in normalization.
+        norm_dim (int): Normalization width. `0` lets native code infer it.
+        cnt_per_token (int): Number of contiguous segments per token.
+        in_start_offset (int): Input offset for segmented normalization.
+        out_start_offset (int): Output offset for segmented normalization.
+
+    Returns:
+        None: `out` is written in place.
+    """
+    ...
+
+def rmsnorm_with_bias(
+    rt: Runtime,
+    in_: torch.Tensor,
+    norm: torch.Tensor,
+    norm_bias: torch.Tensor,
+    out: torch.Tensor,
+    norm_eps: float,
+    norm_dim: int = 0,
+    cnt_per_token: int = 1,
+    in_start_offset: int = 0,
     out_start_offset: int = 0,
 ) -> None:
     """Apply RMSNorm with optional offsets.
@@ -848,6 +878,7 @@ def rmsnorm(
         rt (Runtime): Native runtime handle.
         in_ (torch.Tensor): Input tensor.
         norm (torch.Tensor): RMSNorm weight tensor.
+        norm_bias (torch.Tensor): RMSNorm Bias tensor.
         out (torch.Tensor): Output tensor.
         norm_eps (float): Numerical epsilon used in normalization.
         norm_dim (int): Normalization width. `0` lets native code infer it.

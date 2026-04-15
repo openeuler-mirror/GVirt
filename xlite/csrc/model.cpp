@@ -353,8 +353,8 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ);
     }
     if (_c.qkNorm) {
-        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, qHeads);
-        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim, kHeads,
+        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, XTensor(), qHeads);
+        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim, XTensor(), kHeads,
                        qHeads * _c.headDim, qHeads * _c.headDim);
     }
     XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis, rt._attnSlotMapping,
@@ -600,7 +600,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     if (dynamicQuant) {
         XTensor &dequant =
             rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, dtype, DBG_LOC);
-        XliteOpDeQuant(rt, *ph13, *pscale, dequant, true);
+        XliteOpDeQuant(rt, *ph13, dequant, true, *pscale);
         rt.PutTensor(*ph13);
         rt.PutTensor(*pscale);
         ph13 = &dequant;
@@ -630,7 +630,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     XTensor *pExpertsSorted = &out;
     if (dynamicQuant) {
         XTensor &dequant = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, dtype, DBG_LOC);
-        XliteOpDeQuant(rt, *pExpertsSorted, *pscale, dequant, true);
+        XliteOpDeQuant(rt, *pExpertsSorted, dequant, true, *pscale);
         rt.PutTensor(*pExpertsSorted);
         rt.PutTensor(*pscale);
         pExpertsSorted = &dequant;

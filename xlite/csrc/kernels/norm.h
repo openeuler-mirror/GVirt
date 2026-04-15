@@ -51,6 +51,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     off += calc_blocksize;
     __ubuf__ float *bias_calc = reinterpret_cast<__ubuf__ float *>(off);
     off += calc_blocksize;
+    assert(off <= UB_SIZE);
 
     int inCurr = 0;
     int outCurr = 0;
