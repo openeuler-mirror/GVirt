@@ -75,8 +75,8 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
 void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias, float scale,
                         XTensor &outWeights, XTensor &outRouting, uint32_t nGroup,
                         uint32_t nTopkGroup, uint32_t topK, bool normTopKProb);
-void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIndices, XTensor &lens,
-                 size_t k, size_t maxLen);
+void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIndices,
+                 XTensor &lens, size_t k, size_t maxLen);
 void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x);
 void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &expBuf);
 void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,

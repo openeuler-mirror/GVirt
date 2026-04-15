@@ -4,5 +4,3 @@
 #include "topk.h"
 
 TOPK_FUNC_DEFINE(float);
-
-
