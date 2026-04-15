@@ -123,6 +123,53 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype)
     }
 }
 
+void XTensor::PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDtype subDtype,
+                       uint32_t nRow, uint32_t nCol)
+{
+    aclError err;
+    std::vector<XTensor> tensorVec;
+    uint32_t printRows = nRow > numel ? numel : nRow;
+    uint32_t hRow = DIV_ROUND_UP(printRows, 2);
+
+    if (XDtypeBit(dtype) / 8 != sizeof(void *)) {
+        std::cout << name << "is not ptr size" << std::endl;
+        return;
+    }
+
+    size_t size = numel * sizeof(void *);
+    if (size == 0) {
+        return;
+    }
+
+    void *p = malloc(size);
+    if (!p) {
+        return;
+    }
+
+    err = aclrtMemcpy(p, size, ptr, size, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (err != ACL_ERROR_NONE) {
+        free(p);
+        return;
+    }
+
+    uint64_t addr;
+    for (size_t i = 0; i < hRow; i++) {
+        std::string subName = std::string(name) + "[" + std::to_string(i) + "]";
+        addr = *(static_cast<uint64_t *>(p) + i);
+        XTensor(subShape, subDtype, reinterpret_cast<void *>(addr))
+            .Print(subName.c_str(), nRow, nCol);
+    }
+
+    for (size_t i = numel - hRow; i < numel; i++) {
+        std::string subName = std::string(name) + "[" + std::to_string(i) + "]";
+        addr = *(static_cast<uint64_t *>(p) + i);
+        XTensor(subShape, subDtype, reinterpret_cast<void *>(addr))
+            .Print(subName.c_str(), nRow, nCol);
+    }
+
+    free(p);
+}
+
 void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol)
 {
     uint32_t i, j;

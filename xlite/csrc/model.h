@@ -19,6 +19,11 @@ enum XModelScoringFuncType {
     XMODEL_SCORING_FUNC_MAX_TYPE,
 };
 
+enum XModelQuantType {
+    XMODEL_NO_QUANT,
+    XMODEL_QUANT_ASCEND,
+};
+
 struct XModelConfig {
     // global config
     uint32_t vocabSize;
@@ -74,6 +79,7 @@ struct XModelConfig {
     uint32_t moeEpSize;
     uint32_t moeTPSize;
 
+    enum XModelQuantType quantization;
     bool weightNZ = false;
 };
 
@@ -104,14 +110,26 @@ public:
     // weights
     XTensor embed;
     XTensor norm;
+    XTensor normBias;
     XTensor head;
 
     std::vector<XTensor> attnNorm;
+    std::vector<XTensor> attnNormBias;
     std::vector<XTensor> attnOut;
+    std::vector<XTensor> attnOutInputScale;
+    std::vector<XTensor> attnOutInputOffset;
+    std::vector<XTensor> attnOutQuantBias;
+    std::vector<XTensor> attnOutDeqScale;
     std::vector<XTensor> mhaQKV;
     std::vector<XTensor> mhaQKVBias;
+    std::vector<XTensor> mhaQKVInputScale;
+    std::vector<XTensor> mhaQKVInputOffset;
+    std::vector<XTensor> mhaQKVQuantBias;
+    std::vector<XTensor> mhaQKVDeqScale;
     std::vector<XTensor> mhaQNorm;
+    std::vector<XTensor> mhaQNormBias;
     std::vector<XTensor> mhaKNorm;
+    std::vector<XTensor> mhaKNormBias;
 
     std::vector<XTensor> mlaQA;
     std::vector<XTensor> mlaQB;
@@ -127,6 +145,7 @@ public:
     std::vector<XTensor> indexWeight;
 
     std::vector<XTensor> mlpNorm;
+    std::vector<XTensor> mlpNormBias;
     std::vector<XTensor> mlpUpGate;
     std::vector<XTensor> mlpDown;
 
