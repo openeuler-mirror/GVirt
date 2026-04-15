@@ -447,18 +447,18 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
 }
 
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
-                    uint32_t normDim, uint32_t cntPerToken, uint32_t inStartOffset,
-                    uint32_t outStartOffset)
+                    uint32_t normDim, const XTensor &normBias, uint32_t cntPerToken,
+                    uint32_t inStartOffset, uint32_t outStartOffset)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
     if (in.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, nullptr,
+        aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
                                    out.ptr, in.shape[0], normDim, normEps, false, cntPerToken,
                                    in.shape[1], out.shape[1], inStartOffset, outStartOffset);
     } else if (in.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, nullptr,
+        aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
                                     out.ptr, in.shape[0], normDim, normEps, false, cntPerToken,
                                     in.shape[1], out.shape[1], inStartOffset, outStartOffset);
     } else {
@@ -503,19 +503,19 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
 }
 
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
-                          float normEps, XTensor &out)
+                          float normEps, XTensor &out, const XTensor &normBias)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
     if (in.dtype == FP16 && addInOut.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr, nullptr,
-                                   out.ptr, in.shape[0], in.shape[1], normEps, false, 1,
-                                   in.shape[1], out.shape[1], 0, 0);
+        aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
+                                   normBias.ptr, out.ptr, in.shape[0], in.shape[1], normEps, false,
+                                   1, in.shape[1], out.shape[1], 0, 0);
     } else if (in.dtype == BF16 && addInOut.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr, nullptr,
-                                    out.ptr, in.shape[0], in.shape[1], normEps, false, 1,
-                                    in.shape[1], out.shape[1], 0, 0);
+        aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
+                                    normBias.ptr, out.ptr, in.shape[0], in.shape[1], normEps, false,
+                                    1, in.shape[1], out.shape[1], 0, 0);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!");
     }
@@ -620,7 +620,11 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aclrtlaunch_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                   weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = std::string(__func__);
+        err_str += std::string(XDtypeStr(in.dtype)) + std::string(", ");
+        err_str += std::string(XDtypeStr(weight.dtype)) + std::string(", ");
+        err_str += std::string(XDtypeStr(out.dtype)) + std::string(": unsupported!");
+        throw std::runtime_error(err_str);
     }
 }
 
@@ -718,7 +722,11 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
                                         -1, -1, -1, start, end, weightNZ, transpose,
                                         MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = std::string(__func__) + std::string(": ");
+        err_str += std::string(XDtypeStr(in.dtype)) + std::string(", ");
+        err_str += std::string(XDtypeStr(weightDtype)) + std::string(", ");
+        err_str += std::string(XDtypeStr(output.dtype)) + std::string(": unsupported!");
+        throw std::runtime_error(err_str);
     }
 }
 
@@ -1012,7 +1020,7 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out)
     }
 }
 
-void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, bool hasScale)
+void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, bool hasScale, const XTensor &scale)
 {
     if (IsDummyRuntime(rt)) {
         return;

@@ -21,8 +21,8 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
                   XTensor &out);
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
-                    uint32_t normDim, uint32_t cntPerToken = 1, uint32_t inStartOffset = 0,
-                    uint32_t outStartOffset = 0);
+                    uint32_t normDim, const XTensor &normBias = XTensor(), uint32_t cntPerToken = 1,
+                    uint32_t inStartOffset = 0, uint32_t outStartOffset = 0);
 void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
                       float normEps, uint32_t normDim, uint32_t cntPerToken = 1,
                       uint32_t inStartOffset = 0, uint32_t outStartOffset = 0);
@@ -68,8 +68,7 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
                      uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale);
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
-                          float normEps, XTensor &out);
-
+                          float normEps, XTensor &out, const XTensor &normBias = XTensor());
 void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outWeights,
                         XTensor &outRouting, uint32_t topK, bool normTopKProb);
 void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias, float scale,
@@ -88,10 +87,9 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLoca
 
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
                   XTensor &out);
-
 void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out);
-
-void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &scale, XTensor &out, bool hasScale);
+void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, bool hasScale,
+                    const XTensor &scale = XTensor());
 
 void XliteOpConcat3(XRuntime &rt, XTensor &in0, XTensor &in1, XTensor &in2, XTensor &out);
 void XliteOpSplit3(XRuntime &rt, XTensor &in, XTensor &out0, XTensor &out1, XTensor &out2,
