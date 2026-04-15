@@ -243,6 +243,21 @@ void XTensor::Memset(int value)
     CHECK_ACL(aclrtMemset(ptr, size, value, size));
 }
 
+std::string XTensor::ToStr(const char *name) const
+{
+    size_t dims = shape.size();
+    if (dims <= 0) {
+        return std::string(name) + "(empty)";
+    }
+    std::ostringstream oss;
+    oss << name << "(" << XDtypeStr(dtype) << "): [";
+    for (size_t i = 0; i < dims; i++) {
+        oss << (i ? ", " : "") << shape[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
 void XTensor::View(std::vector<size_t> shape)
 {
     size_t newNumel = 1;

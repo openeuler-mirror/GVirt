@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <iostream>
 #include <vector>
+#include <string>
 #include <functional>
 #include <list>
 #include <cstdint>
@@ -26,6 +27,9 @@
     {                      \
         __FILE__, __LINE__ \
     }
+
+#define DBG_PREFIX (std::string(__func__) + ": ")
+#define XT_STR(x) ((x).ToStr(#x) + ", ")
 
 enum XDtype {
     BIT1,
@@ -123,6 +127,7 @@ public:
     void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6);
     void Memset(int value);
+    std::string ToStr(const char *name = "") const;
     void View(std::vector<size_t> shape);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
     enum XTensorType GetType()

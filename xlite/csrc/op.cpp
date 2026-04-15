@@ -199,7 +199,8 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
                                             copySize);
                 break;
             default:
-                std::cerr << __func__ << ": unsupported dtype for xccl func" << std::endl;
+                std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
+                throw std::runtime_error(err_str + " unsupported dtype for xccl func");
                 break;
         }
 
@@ -309,7 +310,8 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
                                                  xcclComm->dParam, copySize);
                 break;
             default:
-                std::cerr << __func__ << ": unsupported dtype for xccl func" << std::endl;
+                std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
+                throw std::runtime_error(err_str + " unsupported dtype for xccl func");
                 break;
         }
 
@@ -412,7 +414,8 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
                                             copySize);
                 break;
             default:
-                std::cerr << __func__ << ": unsupported dtype for xccl func" << std::endl;
+                std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
+                throw std::runtime_error(err_str + " unsupported dtype for xccl func");
                 break;
         }
 
@@ -442,7 +445,8 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
         aclrtlaunch_embed_kernel_bfloat16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr,
                                             embed.shape[1], in.shape[0], start, end, rt.tpSize());
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(embed) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -462,7 +466,9 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
                                     out.ptr, in.shape[0], normDim, normEps, false, cntPerToken,
                                     in.shape[1], out.shape[1], inStartOffset, outStartOffset);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str =
+            DBG_PREFIX + XT_STR(in) + XT_STR(norm) + XT_STR(out) + XT_STR(normBias);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -482,7 +488,9 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
                                     out.ptr, in.shape[0], normDim, normEps, true, cntPerToken,
                                     in.shape[1], out.shape[1], inStartOffset, outStartOffset);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str =
+            DBG_PREFIX + XT_STR(in) + XT_STR(norm) + XT_STR(normBias) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -498,7 +506,8 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
         aclrtlaunch_add_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, out.ptr, in1.shape[0],
                                    in1.shape[1]);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(in1) + XT_STR(in2) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -517,7 +526,9 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
                                     normBias.ptr, out.ptr, in.shape[0], in.shape[1], normEps, false,
                                     1, in.shape[1], out.shape[1], 0, 0);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str =
+            DBG_PREFIX + XT_STR(in) + XT_STR(addInOut) + XT_STR(norm) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -620,11 +631,8 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aclrtlaunch_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                   weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else {
-        std::string err_str = std::string(__func__);
-        err_str += std::string(XDtypeStr(in.dtype)) + std::string(", ");
-        err_str += std::string(XDtypeStr(weight.dtype)) + std::string(", ");
-        err_str += std::string(XDtypeStr(out.dtype)) + std::string(": unsupported!");
-        throw std::runtime_error(err_str);
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(weight) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -643,7 +651,8 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out)
         aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0],
                                        out.shape[1]);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -660,7 +669,8 @@ void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out)
     if (in.dtype == BF16 && out.dtype == FP32) {
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, out.ptr, in.numel);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(inScale) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -689,7 +699,9 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
                                         unpIdx.ptr, weights.ptr, out.shape[0], in.shape[1],
                                         weights.shape[1], start, end);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(unpIdx) + XT_STR(routing) +
+                              XT_STR(weights) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -722,11 +734,9 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
                                         -1, -1, -1, start, end, weightNZ, transpose,
                                         MATMUL_SWIZZLE_DEFAULT_VALUE);
     } else {
-        std::string err_str = std::string(__func__) + std::string(": ");
-        err_str += std::string(XDtypeStr(in.dtype)) + std::string(", ");
-        err_str += std::string(XDtypeStr(weightDtype)) + std::string(", ");
-        err_str += std::string(XDtypeStr(output.dtype)) + std::string(": unsupported!");
-        throw std::runtime_error(err_str);
+        std::string err_str = DBG_PREFIX;
+        err_str += XT_STR(in) + XT_STR(output) + ", weight dtype:" + XDtypeStr(weightDtype);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -767,7 +777,9 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
             slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1], inout.shape[1], inout.shape[1],
             localHeads, localKvHeads, headDim, blockSize, scale, mropeMaskH, mropeMaskW);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(inout) + XT_STR(kCache) + XT_STR(vCache) +
+                              XT_STR(position) + XT_STR(cossin) + XT_STR(slotMapping);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -792,7 +804,9 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                                          cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
                                          blockSize, batch, maxNumBlock);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(qkv) + XT_STR(kCache) + XT_STR(vCache) +
+                              XT_STR(qk) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -821,7 +835,9 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
             cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize, batch,
             maxNumBlock);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(qkv) + XT_STR(kCache) + XT_STR(vCache) +
+                              XT_STR(qk) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -844,7 +860,9 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
             lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim, nopeHeadDim, vHeadDim,
             kvLoraRank, blockSize, batch, maxNumBlock, scale);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(qWithQr) + XT_STR(kCache) + XT_STR(vCache) +
+                              XT_STR(wkvb) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -867,7 +885,8 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, 
                                                       freqs.ptr, position.ptr, vGather.ptr, 0,
                                                       nullptr, nullptr, nullptr, nullptr);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": TODO");
+        std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
+        throw std::runtime_error(err_str + " TODO");
     }
 }
 
@@ -892,7 +911,8 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLoca
             inputWithR.ptr, freqs.ptr, position.ptr, vGather.ptr, blockSize, key.ptr, kCache.ptr,
             vCache.ptr, slotMapping.ptr);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": TODO");
+        std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
+        throw std::runtime_error(err_str + " TODO");
     }
 }
 
@@ -911,7 +931,8 @@ void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &outp
         aclrtlaunch_add_bias_bfloat16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
                                         output.shape[0] * output.shape[1], output.shape[1]);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(weight) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -932,7 +953,9 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
                                             outWeights.ptr, outRouting.ptr, scores.shape[0],
                                             indices.shape[0], topK, normTopKProb);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str =
+            DBG_PREFIX + XT_STR(scores) + XT_STR(indices) + XT_STR(outWeights) + XT_STR(outRouting);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -955,7 +978,9 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
                                             indices.shape[0], nGroup, nTopkGroup, topK,
                                             normTopKProb);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        std::string err_str =
+            DBG_PREFIX + XT_STR(scores) + XT_STR(indices) + XT_STR(outWeights) + XT_STR(outRouting);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -969,7 +994,8 @@ void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)
     } else if (x.dtype == BF16) {
         aclrtlaunch_softmax_bfloat16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(x);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -985,7 +1011,8 @@ void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &exp
         aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1],
                                             calcLen);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        std::string err_str = DBG_PREFIX + XT_STR(x);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -1002,7 +1029,8 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
         aclrtlaunch_quant_bf16_to_i8_static(rt.aivNum, rt.stream, x.ptr, scale_reciprocal.ptr,
                                             offset.ptr, out.ptr, m, n);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        std::string err_str = DBG_PREFIX + XT_STR(x);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -1016,7 +1044,8 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out)
     if (x.dtype == BF16) {
         aclrtlaunch_quant_bf16_to_i8_dynamic(rt.aivNum, rt.stream, x.ptr, scale.ptr, out.ptr, m, n);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        std::string err_str = DBG_PREFIX + XT_STR(x);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -1031,7 +1060,8 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, bool hasScale, cons
         aclrtlaunch_dequant_float16_t(rt.aivNum, rt.stream, in.ptr, scale.ptr, out.ptr, m, n,
                                       hasScale);
     } else {
-        std::cerr << __func__ << ": unsupported!" << std::endl;
+        std::string err_str = DBG_PREFIX + XT_STR(in);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -1097,7 +1127,9 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
                                               cachedLens.ptr, blockTables.ptr, nHeads, headDim,
                                               blockSize, batch, maxNumBlock);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str =
+            DBG_PREFIX + XT_STR(q) + XT_STR(kCache) + XT_STR(weight) + XT_STR(scores);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
@@ -1112,6 +1144,7 @@ void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)
         aclrtlaunch_muls_bfloat16_t(rt.aivNum, rt.stream, input.ptr, scale, output.ptr,
                                     input.numel);
     } else {
-        throw std::runtime_error(std::string(__func__) + ": unsupported!");
+        std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
     }
 }
