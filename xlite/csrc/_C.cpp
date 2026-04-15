@@ -1097,8 +1097,8 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("notify", &XRuntime::notify)
         .def_readwrite("peer_notify", &XRuntime::peerNotify)
         .def_readwrite("multi_task_parallel", &XRuntime::multiTaskParallel)
-        .def("update_core_num", &XRuntime::UpdateCoreNum)
-        .def("init_tensor_pool", &XRuntime::InitTensorPool)
+        .def("update_core_num", &XRuntime::UpdateCoreNum, py::arg("util"))
+        .def("init_tensor_pool", &XRuntime::InitTensorPool, py::arg("size"))
         .def("set_current_context", &XRuntime::SetCurrentContext);
 
     py::class_<XModelConfig>(m, "ModelConfig")
@@ -1241,51 +1241,84 @@ PYBIND11_MODULE(_C, m)
              py::arg("dbg") = 0);
 
     py::class_<XCoreAssigner>(m, "CoreAssigner")
-        .def(py::init<float>(), py::arg("prefillRatio"))
-        .def("assign_core", &XCoreAssigner::AssignCore, py::call_guard<py::gil_scoped_release>())
-        .def("release_core", &XCoreAssigner::ReleaseCore, py::call_guard<py::gil_scoped_release>());
+        .def(py::init<float>(), py::arg("prefill_ratio"))
+        .def("assign_core", &XCoreAssigner::AssignCore, py::arg("is_decode"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("release_core", &XCoreAssigner::ReleaseCore, py::arg("is_decode"),
+             py::call_guard<py::gil_scoped_release>());
 
     // kernels
-    m.def("all_gather", &AllGather);
-    m.def("reduce_scatter", &ReduceScatter);
-    m.def("all_reduce", &AllReduce);
-    m.def("add", &Add);
+    m.def("all_gather", &AllGather, py::arg("rt"), py::arg("out"), py::arg("in_"));
+    m.def("reduce_scatter", &ReduceScatter, py::arg("rt"), py::arg("out"), py::arg("in_"));
+    m.def("all_reduce", &AllReduce, py::arg("rt"), py::arg("out"), py::arg("in_"));
+    m.def("add", &Add, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"));
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("matmul_with_bias", &MatmulWithBias, "matmul_with_bias", py::arg("rt"), py::arg("x"),
           py::arg("y"), py::arg("z"), py::arg("bias"), py::arg("weight_nz") = false);
-    m.def("embed", &Embed);
-    m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in"), py::arg("norm"),
+    m.def("embed", &Embed, py::arg("rt"), py::arg("weight"), py::arg("in_"), py::arg("out"),
+          py::arg("start"), py::arg("end"));
+    m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in_"), py::arg("norm"),
           py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
           py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
           py::arg("out_start_offset") = 0);
-    m.def("layernorm", &LayerNorm);
-    m.def("add_bias", &AddBias);
-    m.def("silu_and_mul", &SiluAndMul);
+    m.def("layernorm", &LayerNorm, py::arg("rt"), py::arg("in_"), py::arg("norm"),
+          py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim"));
+    m.def("add_bias", &AddBias, py::arg("rt"), py::arg("in_"), py::arg("weight"), py::arg("out"));
+    m.def("silu_and_mul", &SiluAndMul, py::arg("rt"), py::arg("in_"), py::arg("out"));
     m.def("rope_and_cache", &RopeAndCache, "rope_and_cache", py::arg("rt"), py::arg("inout"),
           py::arg("k_cache"), py::arg("v_cache"), py::arg("position"), py::arg("cosin"),
           py::arg("slot_mapping"), py::arg("n_heads"), py::arg("n_kv_heads"), py::arg("head_dim"),
           py::arg("rot_dim"), py::arg("block_size"), py::arg("is_neox"),
           py::arg("mrope_mask_h") = 0, py::arg("mrope_mask_w") = 0);
-    m.def("attention", &Attention);
-    m.def("add_and_rmsnorm", &AddAndRMSNorm);
-    m.def("softmax_topk", &SoftmaxTopK);
-    m.def("sigmoid_topk", &SigmoidTopK);
-    m.def("cast_up", &CastUp);
-    m.def("permutation", &Permutation);
-    m.def("unpermutation", &UnPermutation);
-    m.def("group_matmul", &GroupMatmul);
-    m.def("softmax", &Softmax);
-    m.def("rope_complex", &RopeComplex, "rope_complex");
-    m.def("quant", &Quant);
-    m.def("quant_dynamic", &QuantDyn);
+    m.def("attention", &Attention, py::arg("rt"), py::arg("qkv"), py::arg("k_cache"),
+          py::arg("v_cache"), py::arg("output"), py::arg("cum_prompt_lens"), py::arg("lens"),
+          py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"),
+          py::arg("n_kv_heads"), py::arg("head_dim"), py::arg("block_size"), py::arg("batch"),
+          py::arg("max_num_block"));
+    m.def("add_and_rmsnorm", &AddAndRMSNorm, py::arg("rt"), py::arg("in_"), py::arg("add_in_out"),
+          py::arg("norm"), py::arg("out"), py::arg("norm_eps"));
+    m.def("softmax_topk", &SoftmaxTopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
+          py::arg("out_weights"), py::arg("out_routing"), py::arg("top_k"),
+          py::arg("norm_top_k_prob"));
+    m.def("sigmoid_topk", &SigmoidTopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
+          py::arg("bias"), py::arg("scale"), py::arg("out_weights"), py::arg("out_routing"),
+          py::arg("n_group"), py::arg("n_topk_group"), py::arg("top_k"),
+          py::arg("norm_top_k_prob"));
+    m.def("cast_up", &CastUp, py::arg("rt"), py::arg("in_"), py::arg("out"));
+    m.def("permutation", &Permutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
+          py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"), py::arg("counts"));
+    m.def("unpermutation", &UnPermutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
+          py::arg("weights"), py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"));
+    m.def("group_matmul", &GroupMatmul, py::arg("rt"), py::arg("in_"), py::arg("weights"),
+          py::arg("scales"), py::arg("counts"), py::arg("start"), py::arg("end"),
+          py::arg("out_dim"), py::arg("in_dim"), py::arg("output"), py::arg("weight_nz"),
+          py::arg("transpose"));
+    m.def("softmax", &Softmax, py::arg("rt"), py::arg("x"), py::arg("calc_len"),
+          py::arg("is_long"));
+    m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("num_tokens"),
+          py::arg("n_local_heads"), py::arg("step_dim"), py::arg("rope_dim"),
+          py::arg("input_with_r"), py::arg("freqs"), py::arg("position"), py::arg("v_gather"));
+    m.def("quant", &Quant, py::arg("rt"), py::arg("x"), py::arg("scale_reciprocal"),
+          py::arg("offset"), py::arg("out"));
+    m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),
+          py::arg("out"));
     m.def("matmul_dequant", &MatmulDeQuant, "matmul_dequant", py::arg("rt"), py::arg("x"),
-          py::arg("y"), py::arg("bias"), py::arg("deqScale"), py::arg("z"),
+          py::arg("y"), py::arg("bias"), py::arg("deq_scale"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
-    m.def("dequant", &DeQuant);
-    m.def("mla", &MLA);
-    m.def("indexer_scores", &IndexerScores);
-    m.def("muls", &Muls);
+    m.def("dequant", &DeQuant, py::arg("rt"), py::arg("in_"), py::arg("scale"), py::arg("out"),
+          py::arg("has_scale"));
+    m.def("mla", &MLA, py::arg("rt"), py::arg("q_with_qr"), py::arg("k_cache"), py::arg("v_cache"),
+          py::arg("wkvb"), py::arg("output"), py::arg("cum_prompt_lens"), py::arg("lens"),
+          py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"),
+          py::arg("rope_head_dim"), py::arg("nope_head_dim"), py::arg("v_head_dim"),
+          py::arg("kv_lora_rank"), py::arg("block_size"), py::arg("batch"),
+          py::arg("max_num_block"), py::arg("scale"));
+    m.def("indexer_scores", &IndexerScores, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
+          py::arg("weight"), py::arg("scores"), py::arg("cum_prompt_lens"), py::arg("lens"),
+          py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
+          py::arg("block_size"), py::arg("batch"), py::arg("max_num_block"));
+    m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"));
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,
