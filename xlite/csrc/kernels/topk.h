@@ -1,13 +1,31 @@
 /*
- * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  */
+
+/**
+ * @brief Select topK elements from a batch of sequences.
+ *
+ * Constraints:
+ *  - Only topK equals 2048 is supported
+ *  - Input length must be a multiple of 16
+ *
+ * @param[in] scores Scores values for each batch padded up to maxSeqLen [numBatches X maxSeqLen]
+ * @param[in] indices torch.arange-like array [0..maxSeqLen] repeated numBatches time
+ * @param[out] outIndices computed topK indices [numBatches X topK]
+ * @param[in] lens Number of tokens in each batch [numBatches]
+ * @param[in] maxSeqLen Maximal possible number of tokens in a batch
+ * @param[in] numBatches Number of batches
+ * @param[in] topK How many top elements to find
+ */
+
 #pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
+#include <limits>
 
 #ifdef __DAV_C220_VEC__
 constexpr uint32_t BIT_SIZE_OF_U32 = 32;
@@ -15,16 +33,15 @@ constexpr uint64_t SORT_BLOCK_SIZE = 32;
 constexpr uint64_t SORT_RESULT_BLOCK_SIZE = SORT_BLOCK_SIZE * 2;
 constexpr uint64_t MGR_SORT_VALID_BITS_OFFSET = 8;
 constexpr uint64_t MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET = 12;
-
-// #define XLITE_KERNEL_DEBUG
+constexpr uint32_t CHUNK_SIZE = 2048;
 
 template <typename T>
 static __aicore__ inline void DumpBuffer(__ubuf__ T *buf, const __gm__ char *name, int size,
                                          int step = 1, int offset = 0, bool toInt = false)
 {
 #ifdef XLITE_KERNEL_DEBUG
-    pipe_barrier(PIPE_V);
-    printf("%s: [", name);
+    pipe_barrier(PIPE_ALL);
+    printf("%s (%lx): \n[", name, (unsigned long)buf);
     for (int i = 0; i < size; i++) {
         if (i % 10 == 0) {
             printf("\n");
@@ -36,6 +53,7 @@ static __aicore__ inline void DumpBuffer(__ubuf__ T *buf, const __gm__ char *nam
         }
     }
     printf("]\n");
+    pipe_barrier(PIPE_ALL);
 #endif
 }
 
@@ -58,8 +76,7 @@ public:
     __aicore__ inline XliteTopK() = default;
 
     __aicore__ inline void Init(GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens,
-                                uint32_t numTokens, uint32_t numRoutedExperts, uint32_t numBatches,
-                                uint32_t topK)
+                                uint32_t maxSeqLen, uint32_t numBatches, uint32_t topK)
     {
         set_mask_norm();
         this->scoresGm = (__gm__ Dtype *)scores;
@@ -67,33 +84,46 @@ public:
         this->outIndicesGm = (__gm__ uint32_t *)outIndices;
         this->lensGm = (__gm__ uint32_t *)lens;
 
-        this->nTokens = numTokens;
-        this->nRoutedExperts = numRoutedExperts;
         this->topK = topK;
         this->nBatches = numBatches;
-        this->calcRepeat = DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32);
-        this->batchSize = nTokens / nBatches;
+        this->maxSeqLen = maxSeqLen;
 
-        uint32_t pad = ROUND_UP(numRoutedExperts, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
-        uint32_t padDtype =
-            ROUND_UP(numRoutedExperts, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
+        uint32_t pad = ROUND_UP(topK, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
+        uint32_t padDtype = ROUND_UP(topK, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
         uint64_t off = 0;
+
         scoresIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        dbg_printf("scoresIn: %lx\n", off);
         off += pad;
         indicesIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        dbg_printf("indicesIn: %lx\n", off);
         off += pad;
         this->indices = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        dbg_printf("indices: %lx\n", off);
         off += pad;
-        sortTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+
+        this->topkBuf[0] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        dbg_printf("topk0: %lx\n", off);
+        off += 4 * pad;
+        this->topkBuf[1] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        dbg_printf("topk1: %lx\n", off);
+        off += 4 * pad;
+        this->scratch[0] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        dbg_printf("scratch0: %lx\n", off);
         off += 2 * pad;
-        sortMrgTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        this->scratch[1] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        dbg_printf("scratch1: %lx\n", off);
         off += 2 * pad;
+
         if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
             scoresInTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+            dbg_printf("scoresInTmp: %lx\n", off);
             off += pad / 2;
         }
         this->lensIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        dbg_printf("lensIn: %lx\n", off);
         off += numBatches * sizeof(uint32_t);
+        dbg_printf("Allocated in UB: %lu\n", off);
     }
 
     __aicore__ inline void Merge4(__ubuf__ float *dst, __ubuf__ float *src, uint64_t mrgRepeat,
@@ -112,17 +142,17 @@ public:
         pipe_barrier(PIPE_V);
     }
 
-    __aicore__ inline void Merge3(__ubuf__ float *dst, __ubuf__ float *src, uint64_t mrgRepeat,
-                                  uint64_t blockSize)
+    __aicore__ inline void Merge2(__ubuf__ float *dst, __ubuf__ float *src0, __ubuf__ float *src1,
+                                  uint64_t mrgRepeat, uint64_t blockSize)
     {
         auto resultBlockSize = 2 * blockSize;
-        uint64_t validBits = 0b111;
+        uint64_t validBits = 0b11;
         uint64_t ifExhaustedSuspension = 0;
         uint64_t config = mrgRepeat | validBits << MGR_SORT_VALID_BITS_OFFSET |
                           ifExhaustedSuspension << MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET;
-        __ubuf__ float *addrArray[4] = {src, src + resultBlockSize, src + 2 * resultBlockSize};
+        __ubuf__ float *addrArray[4] = {src0, src1};
 
-        uint64_t lengths = blockSize | blockSize << 16 | blockSize << 32;
+        uint64_t lengths = blockSize | blockSize << 16;
         vmrgsort4(dst, addrArray, lengths, config);
         pipe_barrier(PIPE_V);
     }
@@ -131,117 +161,152 @@ public:
     {
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        copy_gm_to_ubuf_align_b32(indicesIn, indicesGm, 0, 1, nRoutedExperts * sizeof(uint32_t), 0,
-                                  0, 0, 0);
         copy_gm_to_ubuf_align_b32(lensIn, lensGm, 0, 1, nBatches * sizeof(uint32_t), 0, 0, 0, 0);
         pipe_barrier(PIPE_MTE2);
+
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-        dbg_printf("Run: %u batches, %u RoutedExperts, %u Tokens\n", nBatches, nRoutedExperts,
-                   nTokens);
-        for (int i = 0; i < nBatches; i++) {
-            dbg_printf("batch[%d] -> %u elements\n", i, lensIn[i]);
-        }
+        set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+        wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
 
-        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-        uint32_t outOffset = 0;
-        for (int tokenIdx = block_idx, batch = 0; batch < nBatches; batch++) {
-            for (; tokenIdx < lensIn[batch]; tokenIdx += block_num) {
-                // printf("BATCH: %d, TOKEN: %d\n", batch, tokenIdx);
-                wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-                CopyInScores(batch, tokenIdx);
-                ConvertInput();
-                Sort();
-                FillOutScores(outOffset, tokenIdx);
-                set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-            }
-            tokenIdx = tokenIdx - lensIn[batch];
-            outOffset += lensIn[batch];
+        for (int batchIdx = block_idx; batchIdx < nBatches; batchIdx += block_num) {
+            uint32_t len = lensIn[batchIdx];
+            int current = 0;
+            uint32_t offset = 0;
+            uint32_t batchOffset = batchIdx * maxSeqLen;
+
             pipe_barrier(PIPE_ALL);
+
+            initTopk();
+
+            for (uint32_t processed = 0; processed < len;) {
+                uint32_t length = min(len - processed, CHUNK_SIZE);
+
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+
+                set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+                wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+
+                CopyInIndices(batchIdx, batchOffset + offset, length);
+                CopyInScores(batchIdx, batchOffset + offset, length);
+
+                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+                ConvertInput(batchIdx, CHUNK_SIZE);
+
+                Sort(CHUNK_SIZE, current);
+
+                processed += length;
+                current = 1 - current;
+                offset += length;
+            }
+
+            set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+
+            FillOutScores(batchIdx, current);
         }
-        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
 
         pipe_barrier(PIPE_ALL);
     }
 
-    __aicore__ inline void CopyInScores(int batch, int tokenIdx)
+    __aicore__ inline void CopyInIndices(int batch, int offset, uint32_t len)
     {
-        uint32_t offset = batch * batchSize * nRoutedExperts + tokenIdx * nRoutedExperts;
-        // dbg_printf("IN[%u,%u] offset = %u\n", batch, tokenIdx, offset);
+        copy_gm_to_ubuf_align_b32(indicesIn, indicesGm + offset, 0, 1, len * sizeof(uint32_t), 0, 0,
+                                  0, 0);
+        DumpBuffer(indicesIn, "indicesIn", 10, 1, 0, true);
+    }
+
+    __aicore__ inline void CopyInScores(int batch, int offset, uint32_t len)
+    {
+        __ubuf__ Dtype *buf;
+        Dtype min;
+        uint8_t repeat;
+
         if constexpr (std::is_same<Dtype, float>::value) {
-            copy_gm_to_ubuf_align_b32(scoresIn, scoresGm + offset, 0, 1,
-                                      nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
-            pipe_barrier(PIPE_MTE2);
+            buf = scoresIn;
+            min = -std::numeric_limits<float>::infinity();
+            repeat = CHUNK_SIZE / (8 * 8);
+
         } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            copy_gm_to_ubuf_align_b32(scoresInTmp, scoresGm + offset, 0, 1,
-                                      nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
-            pipe_barrier(PIPE_MTE2);
+            buf = scoresInTmp;
+            min = -3.4028235e+38;
+            repeat = CHUNK_SIZE / (16 * 8);
         }
 
-        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-    }
-
-    __aicore__ inline void ConvertInput()
-    {
-        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-        if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            uint64_t vector_bf162fp32_config = set_vector_1src_xt(8, 4, 1, 1, calcRepeat);
-            vconv_bf162f32(scoresIn, scoresInTmp, vector_bf162fp32_config);
+        if (len < CHUNK_SIZE) {
+            vector_dup(buf, min, repeat, 1, 1, 8, 0);
             pipe_barrier(PIPE_V);
-            // DumpBuffer(scoresIn, "scoresIn", 10);
+        }
+
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+
+        copy_gm_to_ubuf_align_b32(buf, scoresGm + offset, 0, 1, len * sizeof(Dtype), 0, 0, 0, 0);
+    }
+
+    __aicore__ inline void ConvertInput(int batch, uint32_t len)
+    {
+        if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+            int calcRepeat = DIV_ROUND_UP(len, VECTOR_MAX_NUM_OF_FP32);
+            uint64_t vconvConfig = set_vector_1src_xt(8, 4, 1, 1, calcRepeat);
+            vconv_bf162f32(scoresIn, scoresInTmp, vconvConfig);
+            DumpBuffer(scoresInTmp, "scoresInTmp", 10);
+            pipe_barrier(PIPE_V);
         }
     }
 
-    __aicore__ inline void Sort()
+    __aicore__ inline void Sort(uint32_t len, int current)
     {
-        // Assume no remainder
-        auto repeat = nRoutedExperts / SORT_BLOCK_SIZE;
-        vbitsort(sortTmp, scoresIn, indicesIn, repeat);
+        __ubuf__ float *scratch0 = scratch[current];
+        __ubuf__ float *scratch1 = scratch[1 - current];
+
+        __ubuf__ float *topk0 = topkBuf[current];
+        __ubuf__ float *topk1 = topkBuf[1 - current];
+
+        auto repeat = len / SORT_BLOCK_SIZE;
+        vbitsort(scratch0, scoresIn, indicesIn, repeat);
         pipe_barrier(PIPE_V);
-        // DumpBuffer(indicesIn, "indicesIn", 10, 1, 0, true);
 
-        // Sorted arrays of 128 elements
-        uint64_t mrgRepeat = nRoutedExperts / 128;
-        Merge4(sortMrgTmp, sortTmp, mrgRepeat, 32);
+        uint64_t mrgRepeat = len / 128;
+        Merge4(scratch1, scratch0, mrgRepeat, 32);
 
-        // Sorted arrays of 512 elements
-        mrgRepeat = nRoutedExperts / (128 * 4);
-        Merge4(sortTmp, sortMrgTmp, mrgRepeat, 128);
+        mrgRepeat = len / 512;
+        Merge4(scratch0, scratch1, mrgRepeat, 128);
 
-        // Sorted arrays of 2048 elements
-        mrgRepeat = nRoutedExperts / (512 * 4);
-        Merge4(sortMrgTmp, sortTmp, mrgRepeat, 512);
+        mrgRepeat = len / 2048;
+        Merge4(scratch1, scratch0, mrgRepeat, 512);
 
-        // Sorted array of 6144 elements
-        mrgRepeat = 1;
-        Merge3(sortTmp, sortMrgTmp, mrgRepeat, 2048);
-
-        vreducev2(indices, (__ubuf__ uint32_t *)sortTmp, (__ubuf__ uint32_t *)sortTmp, topK / 32, 1,
-                  2, 8, 0);
-        pipe_barrier(PIPE_V);
-        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-        // DumpBuffer(indices, "indices", 10, 1, 0, true);
+        Merge2(topk1, topk0, scratch1, 1, 2048);
     }
 
-    __aicore__ inline void FillOutScores(int batchOffset, int tokenIdx)
+    __aicore__ inline void initTopk()
     {
+        float min = -std::numeric_limits<float>::infinity();
+        vector_dup(topkBuf[0], min, topK * 2 / 64, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+    }
+
+    __aicore__ inline void FillOutScores(int batchIdx, int current)
+    {
+        __ubuf__ uint32_t *src = (__ubuf__ uint32_t *)topkBuf[current];
+        __ubuf__ uint32_t *dst = (__ubuf__ uint32_t *)topkBuf[1 - current];
+        // DumpBuffer(src, "Result", 10, 2, 1, true);
+
+        vreducev2(dst, src, src, topK / 32, 1, 2, 8, 0);
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-        auto offset = batchOffset * topK + tokenIdx * topK;
-        copy_ubuf_to_gm_align_b32(outIndicesGm + offset, indices, 0, 1, topK * sizeof(uint32_t), 0,
-                                  0, 0, 0);
-        pipe_barrier(PIPE_MTE3);
+        copy_ubuf_to_gm_align_b32(outIndicesGm + batchIdx * topK, dst, 0, 1,
+                                  topK * sizeof(uint32_t), 0, 0, 0, 0);
     }
 
 private:
-    uint32_t nTokens;
-    uint32_t nRoutedExperts;
     uint32_t nBatches;
-    uint32_t batchSize;
     uint32_t topK;
-    bool normTopKProb;
-    float scale;
-    int calcRepeat;
+    uint32_t maxSeqLen;
 
     __gm__ Dtype *scoresGm;
     __gm__ uint32_t *indicesGm;
@@ -252,25 +317,27 @@ private:
     __ubuf__ uint32_t *indicesIn;
     __ubuf__ uint32_t *indices;
     __ubuf__ uint32_t *lensIn;
-    __ubuf__ float *sortTmp;
-    __ubuf__ float *sortMrgTmp;
+    //__ubuf__ float *sortTmp;
+    //__ubuf__ float *sortMrgTmp;
+    __ubuf__ float *topkBuf[2];
+    __ubuf__ float *scratch[2];
     __ubuf__ Dtype *scoresInTmp;
 };
 
-#define TOPK_FUNC_DEFINE(dtype)                                                                    \
-    extern "C" __global__ __aicore__ void topk_##dtype(                                            \
-        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens, uint32_t numTokens,     \
-        uint32_t numRoutedExperts, uint32_t numBatches, uint32_t topK)                             \
-    {                                                                                              \
-        XliteTopK<dtype> op;                                                                       \
-        op.Init(scores, indices, outIndices, lens, numTokens, numRoutedExperts, numBatches, topK); \
-        op.Run();                                                                                  \
+#define TOPK_FUNC_DEFINE(dtype)                                                                \
+    extern "C" __global__ __aicore__ void topk_##dtype(                                        \
+        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens, uint32_t maxSeqLen, \
+        uint32_t numBatches, uint32_t topK)                                                    \
+    {                                                                                          \
+        XliteTopK<dtype> op;                                                                   \
+        op.Init(scores, indices, outIndices, lens, maxSeqLen, numBatches, topK);               \
+        op.Run();                                                                              \
     }
 #else
 #define TOPK_FUNC_DEFINE(dtype)                                                                \
     extern "C" __global__ __aicore__ void topk_##dtype(                                        \
-        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens, uint32_t numTokens, \
-        uint32_t numRoutedExperts, uint32_t numBatches, uint32_t topK)                         \
+        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens, uint32_t maxSeqLen, \
+        uint32_t numBatches, uint32_t topK)                                                    \
     {                                                                                          \
     }
 #endif
