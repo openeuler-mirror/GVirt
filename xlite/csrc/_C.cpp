@@ -199,7 +199,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                       << std::endl;
             throw std::invalid_argument("Mismatched number of layers MHA attention QKV parameters");
         }
-        if (c.quantization == XMODEL_QUANT_ASCEND) {
+        if (c.quantization & XMODEL_QUANT_STAGE_ATTN) {
             if (mhaQKVInputScale.size() != c.nLayers || mhaQKVInputOffset.size() != c.nLayers ||
                 mhaQKVQuantBias.size() != c.nLayers || mhaQKVDeqScale.size() != c.nLayers) {
                 std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQKV.size()
@@ -262,15 +262,19 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         throw std::invalid_argument("Mismatched number of moe layers gate parameters");
     }
 
-    if (c.quantization == XMODEL_QUANT_ASCEND) {
-        if (mhaQKVInputScale.size() != c.nLayers || mhaQKVInputOffset.size() != c.nLayers ||
-            mhaQKVQuantBias.size() != c.nLayers || mhaQKVDeqScale.size() != c.nLayers) {
-            std::cerr << __FILE__ << ":" << __LINE__
-                      << ": num of layers: " << mhaQKVInputScale.size() << std::endl;
-            throw std::invalid_argument(
-                "Mismatched number of layers attention out quant parameters");
+    if (c.quantization & XMODEL_QUANT_STAGE_ATTN) {
+        if (c.attnType == XMODEL_ATTN_MHA) {
+            if (mhaQKVInputScale.size() != c.nLayers || mhaQKVInputOffset.size() != c.nLayers ||
+                mhaQKVQuantBias.size() != c.nLayers || mhaQKVDeqScale.size() != c.nLayers) {
+                std::cerr << __FILE__ << ":" << __LINE__
+                          << ": num of layers: " << mhaQKVInputScale.size() << std::endl;
+                throw std::invalid_argument(
+                    "Mismatched number of layers attention out quant parameters");
+            }
         }
+    }
 
+    if (c.quantization & XMODEL_QUANT_STAGE_MOE) {
         if (moeREUpGateScale.size() != nRE || moeREDownScale.size() != nRE) {
             std::cerr << __FILE__ << ":" << __LINE__
                       << ": size of moe scales: up_gate_scale:" << moeREUpGateScale.size()
@@ -299,14 +303,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     InitXTensor(_model->embed, embed);
     InitXTensor(_model->norm, norm);
     InitXTensor(_model->head, head);
-    if (c.quantization == XMODEL_QUANT_ASCEND) {
+    if (c.quantization & XMODEL_QUANT_STAGE_NORM) {
         InitXTensor(_model->normBias, normBias);
     }
 
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
         InitXTensor(_model->attnOut[i], attnOut[i]);
-        if (c.quantization == XMODEL_QUANT_ASCEND) {
+        if (c.quantization & XMODEL_QUANT_STAGE_ATTN) {
             InitXTensor(_model->attnOutInputScale[i], attnOutInputScale[i]);
             InitXTensor(_model->attnOutInputOffset[i], attnOutInputOffset[i]);
             // Notice: only tp_rank == 0 in RowParallelLinear need to add quant_bias
@@ -327,7 +331,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
         } else if (c.attnType == XMODEL_ATTN_MHA) {
             InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
-            if (c.quantization == XMODEL_QUANT_ASCEND) {
+            if (c.quantization & XMODEL_QUANT_STAGE_ATTN) {
                 InitXTensor(_model->mhaQKVInputScale[i], mhaQKVInputScale[i]);
                 InitXTensor(_model->mhaQKVInputOffset[i], mhaQKVInputOffset[i]);
                 InitXTensor(_model->mhaQKVQuantBias[i], mhaQKVQuantBias[i]);
@@ -339,7 +343,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             if (c.qkNorm) {
                 InitXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
                 InitXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
-                if (c.quantization == XMODEL_QUANT_ASCEND) {
+                if (c.quantization & XMODEL_QUANT_STAGE_MOE) {
                     InitXTensor(_model->mhaQNormBias[i], mhaQNormBias[i]);
                     InitXTensor(_model->mhaKNormBias[i], mhaKNormBias[i]);
                 }
@@ -377,7 +381,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
             InitXTensor(_model->moeREUpGate[i][j], moeREUpGate[idx]);
             InitXTensor(_model->moeREDown[i][j], moeREDown[idx]);
-            if (c.quantization == XMODEL_QUANT_ASCEND) {
+            if (c.quantization & XMODEL_QUANT_STAGE_MOE) {
                 InitXTensor(_model->moeREUpGateScale[i][j], moeREUpGateScale[idx]);
                 InitXTensor(_model->moeREDownScale[i][j], moeREDownScale[idx]);
             }
@@ -1257,6 +1261,7 @@ PYBIND11_MODULE(_C, m)
 
     py::enum_<XModelQuantType>(m, "QuantType")
         .value("NoQuant", XModelQuantType::XMODEL_NO_QUANT)
+        .value("QuantXiaoYi", XModelQuantType::XMODEL_QUANT_XIAOYI)
         .value("QuantAscend", XModelQuantType::XMODEL_QUANT_ASCEND)
         .export_values();
 
