@@ -365,34 +365,28 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
     XTensor &qkv = rt.GetTensor({rt._realM, mhaQKV[layer].shape[0]}, hiddenState.dtype, DBG_LOC);
     if (mhaQKV[layer].dtype == INT8) {
-        XTensor &x_quant = rt.GetTensor(hiddenState.shape, INT8, DBG_LOC);
-        XTensor &qkv_fp16 = rt.GetTensor(qkv.shape, FP16, DBG_LOC);
-        XliteOpQuant(rt, hiddenState, mhaQKVInputScale[layer], mhaQKVInputOffset[layer], x_quant);
-        XliteOpMatmul(rt, x_quant, mhaQKV[layer], qkv_fp16, _c.weightNZ, mhaQKVQuantBias[layer],
+        XTensor &xQuanted = rt.GetTensor(hiddenState.shape, INT8, DBG_LOC);
+        XTensor &qkvFp16 = rt.GetTensor(qkv.shape, FP16, DBG_LOC);
+        XliteOpQuant(rt, hiddenState, mhaQKVInputScale[layer], mhaQKVInputOffset[layer], xQuanted);
+        XliteOpMatmul(rt, xQuanted, mhaQKV[layer], qkvFp16, _c.weightNZ, mhaQKVQuantBias[layer],
                       mhaQKVDeqScale[layer]);
-        XliteOpDeQuant(rt, qkv_fp16, qkv, false);
-        rt.PutTensor(x_quant);
-        rt.PutTensor(qkv_fp16);
+        XliteOpDeQuant(rt, qkvFp16, qkv, false);
+        rt.PutTensor(xQuanted);
+        rt.PutTensor(qkvFp16);
     } else if (_c.addBias) {
         XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ, mhaQKVBias[layer]);
     } else {
         XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ);
     }
-    XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, qkv,
-                      ("layer" + std::to_string(layer) + " qkv after matmul").c_str());
     if (_c.qkNorm) {
         XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, mhaQNormBias[layer],
                        qHeads);
         XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim, mhaKNormBias[layer],
                        kHeads, qHeads * _c.headDim, qHeads * _c.headDim);
     }
-    XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, qkv,
-                      ("layer" + std::to_string(layer) + " qkv after rmsnorm").c_str());
     XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis, rt._attnSlotMapping,
                      _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim, _c.blockSize,
                      _c.ropeType == XMODEL_ROPE_NEOX, _mropeMaskH, _mropeMaskW);
-    XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, qkv,
-                      ("layer" + std::to_string(layer) + " qkv after rope").c_str());
 
     XTensor &attn =
         rt.GetTensor({hiddenState.shape[0], attnOut[layer].shape[1]}, hiddenState.dtype, DBG_LOC);
@@ -425,17 +419,15 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         rt.PutTensor(qk);
     }
 
-    XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, attn,
-                      ("layer" + std::to_string(layer) + " before o_proj").c_str());
     if (attnOut[layer].dtype == INT8) {
-        XTensor &attn_quant = rt.GetTensor(attn.shape, INT8, DBG_LOC);
-        XTensor &tmp_state = rt.GetTensor(hiddenState.shape, FP16, DBG_LOC);
-        XliteOpQuant(rt, attn, attnOutInputScale[layer], attnOutInputOffset[layer], attn_quant);
-        XliteOpMatmul(rt, attn_quant, attnOut[layer], tmp_state, _c.weightNZ,
-                      attnOutQuantBias[layer], attnOutDeqScale[layer]);
-        XliteOpDeQuant(rt, tmp_state, hiddenState, false);
-        rt.PutTensor(attn_quant);
-        rt.PutTensor(tmp_state);
+        XTensor &attnQuant = rt.GetTensor(attn.shape, INT8, DBG_LOC);
+        XTensor &tmpState = rt.GetTensor(hiddenState.shape, FP16, DBG_LOC);
+        XliteOpQuant(rt, attn, attnOutInputScale[layer], attnOutInputOffset[layer], attnQuant);
+        XliteOpMatmul(rt, attnQuant, attnOut[layer], tmpState, _c.weightNZ, attnOutQuantBias[layer],
+                      attnOutDeqScale[layer]);
+        XliteOpDeQuant(rt, tmpState, hiddenState, false);
+        rt.PutTensor(attnQuant);
+        rt.PutTensor(tmpState);
     } else {
         XliteOpMatmul(rt, attn, attnOut[layer], hiddenState, _c.weightNZ);
     }
@@ -503,9 +495,6 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
         rt.GetTensor({input.shape[0], _c.nRoutedExperts}, moeGate[layer].dtype, DBG_LOC);
 
     XliteOpMatmul(rt, input, moeGate[layer], scores, _c.weightNZ);
-
-    XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, scores,
-                      ("layer" + std::to_string(layer) + " scores").c_str());
 
     if (_c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
         XliteOpSigmoidTopK(rt, scores, _gateIndicts, moeGateBias[layer], _c.routeScale, weights,
@@ -622,77 +611,56 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     enum XDtype moeReDtype = moeREUpGate[layer][start].dtype;
     bool useQuant = moeReDtype != dtype;
 
-#ifdef XLITE_DEBUG_ON
-    std::vector<size_t> w13Shape = {(size_t)intermediateSize * 2, (size_t)_c.hiddenSize};
-    if (_c.expertsWeightTrans) {
-        std::reverse(w13Shape.begin(), w13Shape.end());
-    }
-#endif
-
     auto [w, r] = ForwardMoEGate(rt, layer, hiddenState);
     auto [weights, routing, unpIdx, expertsSorted, expertsCounts] =
         ForwardMoEDispatch(rt, hiddenState, w, r);
 
-    XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, expertsSorted,
-                      ("layer" + std::to_string(layer) + " expertsSorted").c_str());
-    XLITE_DEBUG_POINT_ROWS_COLS(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt,
-                                expertsCounts, " expertsCounts", 1, _c.nRoutedExperts);
     // routed experts
-    XTensor &h13 = rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, dtype, DBG_LOC);
+    XTensor *h13Ptr;
     if (useQuant) {
         // quant(x) -> xQuanted, perChannelScale
         XTensor &xQuanted = rt.GetTensor(expertsSorted.shape, moeReDtype, DBG_LOC);
         XTensor &scale = rt.GetTensor({expertsSorted.shape[0]}, FP32, DBG_LOC);
         XliteOpQuantDyn(rt, expertsSorted, scale, xQuanted);
         rt.PutTensor(expertsSorted);
-        XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, xQuanted,
-                          ("layer" + std::to_string(layer) + " h13_quanted").c_str());
-        XLITE_DEBUG_PTR_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt,
-                              _moeREUpGate[layer],
-                              ("layer" + std::to_string(layer) + " h13_weight").c_str(), w13Shape,
-                              moeREUpGate[layer][start].dtype);
 
-        // group_matmul(xQuanted * w13 * w13Scale) -> h13_quanted
-        XTensor &h13_quanted = rt.GetTensor(h13.shape, FP16, DBG_LOC);
+        // group_matmul(xQuanted * w13 * w13Scale) -> h13Quanted
+        XTensor &h13Quanted =
+            rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, FP16, DBG_LOC);
         XliteOpGroupMatmul(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateScale[layer],
                            expertsCounts, start, end, moeREUpGate[layer][start].dtype,
-                           intermediateSize * 2, _c.hiddenSize, h13_quanted, _c.weightNZ,
+                           intermediateSize * 2, _c.hiddenSize, h13Quanted, _c.weightNZ,
                            _c.expertsWeightTrans);
         rt.PutTensor(xQuanted);
-        XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, h13_quanted,
-                          ("layer" + std::to_string(layer) + " h13 quanted states").c_str());
 
-        // dequant(h13_quanted, perChannelScale) -> h13
-        XliteOpDeQuant(rt, h13_quanted, h13, true, scale);
-        rt.PutTensor(h13_quanted);
+        // dequant(h13Quanted, perChannelScale) -> h13
+        XTensor &h13 = rt.GetTensor(h13Quanted.shape, dtype, DBG_LOC);
+        XliteOpDeQuant(rt, h13Quanted, h13, true, scale);
+        rt.PutTensor(h13Quanted);
         rt.PutTensor(scale);
+        h13Ptr = &h13;
     } else {
+        XTensor &h13 =
+            rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, dtype, DBG_LOC);
         XliteOpGroupMatmul(rt, expertsSorted, _moeREUpGate[layer], _moeREUpGateScale[layer],
                            expertsCounts, start, end, moeREUpGate[layer][start].dtype,
                            intermediateSize * 2, _c.hiddenSize, h13, _c.weightNZ,
                            _c.expertsWeightTrans);
         rt.PutTensor(expertsSorted);
+        h13Ptr = &h13;
     }
-    XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, h13,
-                      ("layer" + std::to_string(layer) + " h13 states").c_str());
 
     XTensor &h2 = rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize}, dtype, DBG_LOC);
-    XliteOpSiluAndMul(rt, h13, h2);
-    rt.PutTensor(h13);
-    XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, h2,
-                      ("layer" + std::to_string(layer) + " after silu&mul").c_str());
+    XliteOpSiluAndMul(rt, *h13Ptr, h2);
+    rt.PutTensor(*h13Ptr);
 
-    XTensor &out = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, dtype, DBG_LOC);
+    XTensor *outPtr;
     if (useQuant) {
         // quant(x) -> xQuanted, perChannelScale
         XTensor &xQuanted = rt.GetTensor(h2.shape, moeReDtype, DBG_LOC);
         XTensor &scale = rt.GetTensor({h2.shape[0]}, FP32, DBG_LOC);
         XliteOpQuantDyn(rt, h2, scale, xQuanted);
         rt.PutTensor(h2);
-        XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, xQuanted,
-                          ("layer" + std::to_string(layer) + " h2_quanted").c_str());
-        XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, scale,
-                          ("layer" + std::to_string(layer) + " h2_scale").c_str());
 
         // group_matmul(xQuanted * w2 * w2Scale) -> outQuanted
         XTensor &outQuanted = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, FP16, DBG_LOC);
@@ -700,21 +668,21 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
                            start, end, moeREDown[layer][start].dtype, _c.hiddenSize,
                            intermediateSize, outQuanted, _c.weightNZ, _c.expertsWeightTrans);
         rt.PutTensor(xQuanted);
-        XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, outQuanted,
-                          ("layer" + std::to_string(layer) + " h2 quanted states").c_str());
 
         // dequant(outQuanted, perChannelScale) -> out
+        XTensor &out = rt.GetTensor(outQuanted.shape, dtype, DBG_LOC);
         XliteOpDeQuant(rt, outQuanted, out, true, scale);
         rt.PutTensor(outQuanted);
         rt.PutTensor(scale);
+        outPtr = &out;
     } else {
+        XTensor &out = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, dtype, DBG_LOC);
         XliteOpGroupMatmul(rt, h2, _moeREDown[layer], _moeREDownScale[layer], expertsCounts, start,
                            end, moeREDown[layer][start].dtype, _c.hiddenSize, intermediateSize, out,
                            _c.weightNZ, _c.expertsWeightTrans);
         rt.PutTensor(h2);
+        outPtr = &out;
     }
-    XLITE_DEBUG_POINT(_rankId == 0 && (layer == 0 || layer == _c.nDenseLayers), rt, out,
-                      ("layer" + std::to_string(layer) + " h2 states").c_str());
 
     // Check if shared experts should be processed on this rank:
     // 1. Shared experts are enabled (nSharedExperts != 0)
@@ -724,13 +692,13 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         ((_isSharedExpertWeightFull && ((rt.rankId() % rt.tpSize()) == 0)) ||
          !_isSharedExpertWeightFull)) {
         XTensor &h = rt.GetTensor({m, _c.hiddenSize}, dtype, DBG_LOC);
-        ForwardMOECombine(rt, h, weights, routing, unpIdx, out, expertsCounts);
+        ForwardMOECombine(rt, h, weights, routing, unpIdx, *outPtr, expertsCounts);
         // share experts
         ForwardMLP(rt, moeSEUpGate[layer], moeSEDown[layer], hiddenState, false);
         XliteOpAdd(rt, hiddenState, h, hiddenState);
         rt.PutTensor(h);
     } else {
-        ForwardMOECombine(rt, hiddenState, weights, routing, unpIdx, out, expertsCounts);
+        ForwardMOECombine(rt, hiddenState, weights, routing, unpIdx, *outPtr, expertsCounts);
     }
 
     if (_c.defTpSize > 1) {
@@ -842,8 +810,6 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
         XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
                           ("layer" + std::to_string(i) + " after attn").c_str());
         ForwardFFN(rt, i, h);
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " after moe").c_str());
         if (i < _c.deepstackNumLevel) {
             XliteOpAdd(rt, h, deepstackInputEmbeds[i], h);
         }
@@ -873,9 +839,7 @@ void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
         rt.PutTensor(xPad);
     } else {
         XTensor &x = rt.GetTensor({input.shape[0], _c.hiddenSize}, embed.dtype, DBG_LOC);
-        XLITE_DEBUG_POINT(_rankId == 0, rt, input, "input_ids");
         ForwardParallelEmbed(rt, input, embed, x);
-        XLITE_DEBUG_POINT(_rankId == 0, rt, x, "x");
         rt.enableCommOptimize = false;
         ForwardLayersNaive(rt, x, kvCache, deepstackInputEmbeds, freqsCis, h);
         rt.PutTensor(x);

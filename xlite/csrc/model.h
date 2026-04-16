@@ -19,19 +19,6 @@ enum XModelScoringFuncType {
     XMODEL_SCORING_FUNC_MAX_TYPE,
 };
 
-enum XModelQuantStage {
-    XMODEL_QUANT_STAGE_NORM = 1,
-    XMODEL_QUANT_STAGE_ATTN = (1 << 1),
-    XMODEL_QUANT_STAGE_MOE = (1 << 2),
-};
-
-enum XModelQuantType {
-    XMODEL_NO_QUANT,
-    XMODEL_QUANT_XIAOYI = XMODEL_QUANT_STAGE_MOE,
-    XMODEL_QUANT_ASCEND =
-        XMODEL_QUANT_STAGE_NORM | XMODEL_QUANT_STAGE_ATTN | XMODEL_QUANT_STAGE_MOE,
-};
-
 struct XModelConfig {
     // global config
     uint32_t vocabSize;
@@ -87,7 +74,6 @@ struct XModelConfig {
     uint32_t moeEpSize;
     uint32_t moeTPSize;
 
-    enum XModelQuantType quantization;
     bool weightNZ = false;
 };
 

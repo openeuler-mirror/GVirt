@@ -184,6 +184,68 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             "Mismatched number of layers attention norm or attention out or mlp norm parameters");
     }
 
+    if (!attnNormBias.empty() && attnNormBias.size() != c.nLayers) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << attnNormBias.size()
+                  << std::endl;
+        throw std::invalid_argument("Mismatched number of layers attention norm bias parameters");
+    }
+    if (!mlpNormBias.empty() && mlpNormBias.size() != c.nLayers) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlpNormBias.size()
+                  << std::endl;
+        throw std::invalid_argument("Mismatched number of layers MLP norm bias parameters");
+    }
+
+    if (c.attnType == XMODEL_ATTN_MHA) {
+        if (!attnOutInputScale.empty() && attnOutInputScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << attnOutInputScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers attention out input scale parameters");
+        }
+        if (!attnOutInputOffset.empty() && attnOutInputOffset.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << attnOutInputOffset.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers attention out input offset parameters");
+        }
+        if (!attnOutQuantBias.empty() && attnOutQuantBias.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << attnOutQuantBias.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers attention out quant bias parameters");
+        }
+        if (!attnOutDeqScale.empty() && attnOutDeqScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << attnOutDeqScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers attention out dequant scale parameters");
+        }
+        if (!mhaQKVInputScale.empty() && mhaQKVInputScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mhaQKVInputScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA QKV input scale parameters");
+        }
+        if (!mhaQKVInputOffset.empty() && mhaQKVInputOffset.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mhaQKVInputOffset.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA QKV input offset parameters");
+        }
+        if (!mhaQKVQuantBias.empty() && mhaQKVQuantBias.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mhaQKVQuantBias.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA QKV quant bias parameters");
+        }
+        if (!mhaQKVDeqScale.empty() && mhaQKVDeqScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQKVDeqScale.size()
+                      << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA QKV dequant scale parameters");
+        }
+    }
+
     if (c.attnType == XMODEL_ATTN_MLA) {
         if (mlaQA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
             mlaQNorm.size() != c.nLayers || mlaKVA.size() != c.nLayers ||
@@ -199,15 +261,6 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                       << std::endl;
             throw std::invalid_argument("Mismatched number of layers MHA attention QKV parameters");
         }
-        if (c.quantization & XMODEL_QUANT_STAGE_ATTN) {
-            if (mhaQKVInputScale.size() != c.nLayers || mhaQKVInputOffset.size() != c.nLayers ||
-                mhaQKVQuantBias.size() != c.nLayers || mhaQKVDeqScale.size() != c.nLayers) {
-                std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQKV.size()
-                          << std::endl;
-                throw std::invalid_argument(
-                    "Mismatched number of layers MHA attention QKV quant parameters");
-            }
-        }
         if (c.addBias && mhaQKVBias.size() != c.nLayers) {
             std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQKVBias.size()
                       << std::endl;
@@ -219,6 +272,13 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                       << ", " << mhaKNorm.size() << std::endl;
             throw std::invalid_argument(
                 "Mismatched number of layers MHA attention Q/K norm parameters");
+        }
+        if (c.qkNorm && ((!mhaQNormBias.empty() && mhaQNormBias.size() != c.nLayers) ||
+                         (!mhaKNormBias.empty() && mhaKNormBias.size() != c.nLayers))) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQNormBias.size()
+                      << ", " << mhaKNormBias.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA attention Q/K norm bias parameters");
         }
     } else if (c.attnType == XMODEL_ATTN_DSA) {
         if (mlaQA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
@@ -262,27 +322,6 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         throw std::invalid_argument("Mismatched number of moe layers gate parameters");
     }
 
-    if (c.quantization & XMODEL_QUANT_STAGE_ATTN) {
-        if (c.attnType == XMODEL_ATTN_MHA) {
-            if (mhaQKVInputScale.size() != c.nLayers || mhaQKVInputOffset.size() != c.nLayers ||
-                mhaQKVQuantBias.size() != c.nLayers || mhaQKVDeqScale.size() != c.nLayers) {
-                std::cerr << __FILE__ << ":" << __LINE__
-                          << ": num of layers: " << mhaQKVInputScale.size() << std::endl;
-                throw std::invalid_argument(
-                    "Mismatched number of layers attention out quant parameters");
-            }
-        }
-    }
-
-    if (c.quantization & XMODEL_QUANT_STAGE_MOE) {
-        if (moeREUpGateScale.size() != nRE || moeREDownScale.size() != nRE) {
-            std::cerr << __FILE__ << ":" << __LINE__
-                      << ": size of moe scales: up_gate_scale:" << moeREUpGateScale.size()
-                      << ", down scale: " << moeREDownScale.size() << std::endl;
-            throw std::invalid_argument("Mismatched size of moe scale parameters");
-        }
-    }
-
     if (c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID &&
         moeGateBias.size() != (c.nLayers - c.nDenseLayers)) {
         std::cerr << __FILE__ << ":" << __LINE__ << ": num of moe layers: " << moeGateBias.size()
@@ -303,14 +342,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     InitXTensor(_model->embed, embed);
     InitXTensor(_model->norm, norm);
     InitXTensor(_model->head, head);
-    if (c.quantization & XMODEL_QUANT_STAGE_NORM) {
+    if (normBias.defined()) {
         InitXTensor(_model->normBias, normBias);
     }
 
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
         InitXTensor(_model->attnOut[i], attnOut[i]);
-        if (c.quantization & XMODEL_QUANT_STAGE_ATTN) {
+        if (!attnOutInputScale.empty()) {
             InitXTensor(_model->attnOutInputScale[i], attnOutInputScale[i]);
             InitXTensor(_model->attnOutInputOffset[i], attnOutInputOffset[i]);
             // Notice: only tp_rank == 0 in RowParallelLinear need to add quant_bias
@@ -318,7 +357,11 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitXTensor(_model->attnOutQuantBias[i], attnOutQuantBias[i]);
             }
             InitXTensor(_model->attnOutDeqScale[i], attnOutDeqScale[i]);
+        }
+        if (!attnNormBias.empty()) {
             InitXTensor(_model->attnNormBias[i], attnNormBias[i]);
+        }
+        if (!mlpNormBias.empty()) {
             InitXTensor(_model->mlpNormBias[i], mlpNormBias[i]);
         }
         InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
@@ -331,7 +374,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
         } else if (c.attnType == XMODEL_ATTN_MHA) {
             InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
-            if (c.quantization & XMODEL_QUANT_STAGE_ATTN) {
+            if (!mhaQKVInputScale.empty()) {
                 InitXTensor(_model->mhaQKVInputScale[i], mhaQKVInputScale[i]);
                 InitXTensor(_model->mhaQKVInputOffset[i], mhaQKVInputOffset[i]);
                 InitXTensor(_model->mhaQKVQuantBias[i], mhaQKVQuantBias[i]);
@@ -343,8 +386,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             if (c.qkNorm) {
                 InitXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
                 InitXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
-                if (c.quantization & XMODEL_QUANT_STAGE_MOE) {
+                if (!mhaQNormBias.empty()) {
                     InitXTensor(_model->mhaQNormBias[i], mhaQNormBias[i]);
+                }
+                if (!mhaKNormBias.empty()) {
                     InitXTensor(_model->mhaKNormBias[i], mhaKNormBias[i]);
                 }
             }
@@ -381,8 +426,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
             InitXTensor(_model->moeREUpGate[i][j], moeREUpGate[idx]);
             InitXTensor(_model->moeREDown[i][j], moeREDown[idx]);
-            if (c.quantization & XMODEL_QUANT_STAGE_MOE) {
+            if (!moeREUpGateScale.empty()) {
                 InitXTensor(_model->moeREUpGateScale[i][j], moeREUpGateScale[idx]);
+            }
+            if (!moeREDownScale.empty()) {
                 InitXTensor(_model->moeREDownScale[i][j], moeREDownScale[idx]);
             }
             idx++;
@@ -1230,8 +1277,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_n_heads", &XModelConfig::indexNHeads)
         .def_readwrite("index_topk", &XModelConfig::indexTopK)
         .def_readwrite("index_softmax_scale", &XModelConfig::indexSoftmaxScale)
-        .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved)
-        .def_readwrite("quantization", &XModelConfig::quantization);
+        .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
         .def(py::init<>())
@@ -1257,12 +1303,6 @@ PYBIND11_MODULE(_C, m)
     py::enum_<XModelScoringFuncType>(m, "ScoringFuncType")
         .value("ScoringFuncSoftmax", XModelScoringFuncType::XMODEL_SCORING_FUNC_SOFTMAX)
         .value("ScoringFuncSigmoid", XModelScoringFuncType::XMODEL_SCORING_FUNC_SIGMOID)
-        .export_values();
-
-    py::enum_<XModelQuantType>(m, "QuantType")
-        .value("NoQuant", XModelQuantType::XMODEL_NO_QUANT)
-        .value("QuantXiaoYi", XModelQuantType::XMODEL_QUANT_XIAOYI)
-        .value("QuantAscend", XModelQuantType::XMODEL_QUANT_ASCEND)
         .export_values();
 
     py::class_<_CModel>(m, "Model")
