@@ -45,30 +45,33 @@ def quantize_cpu(
 
 m = 8192
 n = 2048
-in_type = torch.bfloat16
-out_type = torch.int8
-x = torch.rand(m, n, dtype=in_type, device=f"npu:{npu_devid}")
-z = torch.empty(m, n, dtype=out_type, device=f"npu:{npu_devid}")
-input_scale_reciprocal = torch.randn(n, dtype=torch.bfloat16, device=f"npu:{npu_devid}")
-input_offset = torch.randn(n, dtype=in_type, device=f"npu:{npu_devid}")
+test_cases = [
+    [8192, 2048],
+    [20000, 96]
+]
+for m, n in test_cases:
+    in_type = torch.bfloat16
+    out_type = torch.int8
+    x = torch.rand(m, n, dtype=in_type, device=f"npu:{npu_devid}")
+    z = torch.empty(m, n, dtype=out_type, device=f"npu:{npu_devid}")
+    scale = torch.randn(n, dtype=torch.bfloat16, device=f"npu:{npu_devid}")
+    offset = torch.randn(n, dtype=in_type, device=f"npu:{npu_devid}")
 
-scale = input_scale_reciprocal.to(torch.float)
-offset = input_offset.to(torch.float)
+    expected_z = quantize_cpu(x.to("cpu"), scale.to("cpu"), offset.to("cpu"))
 
-expected_z = quantize_cpu(x.to("cpu"), scale.to("cpu"), offset.to("cpu"))
+    torch.npu.synchronize()
+    quant(rt, x, scale, offset, z)
+    torch.npu.synchronize()
 
-torch.npu.synchronize()
-quant(rt, x, scale, offset, z)
-torch.npu.synchronize()
+    # torch.set_printoptions(threshold=1000000)
 
-# torch.set_printoptions(threshold=1000000)
-
-try:
-    torch.testing.assert_close(expected_z, z.to("cpu"), atol=1, rtol=1/128)
-except AssertionError as e:
-    print(f'{e}')
-    print(f'x: {x}, shape: {x.shape}')
-    print(f'scale: {scale}')
-    print(f'offset: {offset}')
-    print(f'expected: {expected_z}, shape:{expected_z.shape}')
-    print(f'xlite: {z}, shape: {z.shape}')
+    try:
+        torch.testing.assert_close(expected_z, z.to("cpu"), atol=1, rtol=1/128)
+        print(f'Quant(bf16 -> i8) [{m}, {n}] executed!')
+    except AssertionError as e:
+        print(f'{e}')
+        print(f'x: {x}, shape: {x.shape}')
+        print(f'scale: {scale}')
+        print(f'offset: {offset}')
+        print(f'expected: {expected_z}, shape:{expected_z.shape}')
+        print(f'xlite: {z}, shape: {z.shape}')
