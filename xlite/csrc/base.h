@@ -126,6 +126,8 @@ public:
     XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6);
+    void PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDtype subDtype,
+                  uint32_t nRow = 6, uint32_t nCol = 6);
     void Memset(int value);
     std::string ToStr(const char *name = "") const;
     void View(std::vector<size_t> shape);

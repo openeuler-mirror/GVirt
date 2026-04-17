@@ -53,14 +53,26 @@ public:
     // weights
     at::Tensor embed;
     at::Tensor norm;
+    at::Tensor normBias;
     at::Tensor head;
 
     std::vector<at::Tensor> attnNorm;
+    std::vector<at::Tensor> attnNormBias;
     std::vector<at::Tensor> attnOut;
+    std::vector<at::Tensor> attnOutInputScale;
+    std::vector<at::Tensor> attnOutInputOffset;
+    std::vector<at::Tensor> attnOutQuantBias;
+    std::vector<at::Tensor> attnOutDeqScale;
     std::vector<at::Tensor> mhaQKV;
     std::vector<at::Tensor> mhaQKVBias;
+    std::vector<at::Tensor> mhaQKVInputScale;
+    std::vector<at::Tensor> mhaQKVInputOffset;
+    std::vector<at::Tensor> mhaQKVQuantBias;
+    std::vector<at::Tensor> mhaQKVDeqScale;
     std::vector<at::Tensor> mhaQNorm;
+    std::vector<at::Tensor> mhaQNormBias;
     std::vector<at::Tensor> mhaKNorm;
+    std::vector<at::Tensor> mhaKNormBias;
     std::vector<at::Tensor> mlaQA;
     std::vector<at::Tensor> mlaQB;
     std::vector<at::Tensor> mlaQNorm;
@@ -74,6 +86,7 @@ public:
     std::vector<at::Tensor> indexWeight;
 
     std::vector<at::Tensor> mlpNorm;
+    std::vector<at::Tensor> mlpNormBias;
     std::vector<at::Tensor> mlpUpGate;
     std::vector<at::Tensor> mlpDown;
 
@@ -144,7 +157,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     uint32_t nLocalRoutedExperts = c.nRoutedExperts / c.moeEpSize;
     uint32_t expertsStartIdx = c.moeEpSize == 1 ? 0 : rankId / c.moeTPSize * nLocalRoutedExperts;
     uint32_t expertsEndIdx = expertsStartIdx + nLocalRoutedExperts;
-    uint32_t nRE = (c.nLayers - c.nDenseLayers) * nLocalRoutedExperts;
+    uint32_t numMoeLayers = c.nLayers - c.nDenseLayers;
+    uint32_t nRE = numMoeLayers * nLocalRoutedExperts;
+    uint32_t tp_rank = rankId % c.defTpSize;
 
     if (c.nRoutedExperts % c.moeEpSize != 0) {
         std::cerr << __FILE__ << ":" << __LINE__
@@ -167,6 +182,68 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                   << std::endl;
         throw std::invalid_argument(
             "Mismatched number of layers attention norm or attention out or mlp norm parameters");
+    }
+
+    if (!attnNormBias.empty() && attnNormBias.size() != c.nLayers) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << attnNormBias.size()
+                  << std::endl;
+        throw std::invalid_argument("Mismatched number of layers attention norm bias parameters");
+    }
+    if (!mlpNormBias.empty() && mlpNormBias.size() != c.nLayers) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlpNormBias.size()
+                  << std::endl;
+        throw std::invalid_argument("Mismatched number of layers MLP norm bias parameters");
+    }
+
+    if (c.attnType == XMODEL_ATTN_MHA) {
+        if (!attnOutInputScale.empty() && attnOutInputScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << attnOutInputScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers attention out input scale parameters");
+        }
+        if (!attnOutInputOffset.empty() && attnOutInputOffset.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << attnOutInputOffset.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers attention out input offset parameters");
+        }
+        if (!attnOutQuantBias.empty() && attnOutQuantBias.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << attnOutQuantBias.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers attention out quant bias parameters");
+        }
+        if (!attnOutDeqScale.empty() && attnOutDeqScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << attnOutDeqScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers attention out dequant scale parameters");
+        }
+        if (!mhaQKVInputScale.empty() && mhaQKVInputScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mhaQKVInputScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA QKV input scale parameters");
+        }
+        if (!mhaQKVInputOffset.empty() && mhaQKVInputOffset.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mhaQKVInputOffset.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA QKV input offset parameters");
+        }
+        if (!mhaQKVQuantBias.empty() && mhaQKVQuantBias.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mhaQKVQuantBias.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA QKV quant bias parameters");
+        }
+        if (!mhaQKVDeqScale.empty() && mhaQKVDeqScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQKVDeqScale.size()
+                      << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA QKV dequant scale parameters");
+        }
     }
 
     if (c.attnType == XMODEL_ATTN_MLA) {
@@ -195,6 +272,13 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                       << ", " << mhaKNorm.size() << std::endl;
             throw std::invalid_argument(
                 "Mismatched number of layers MHA attention Q/K norm parameters");
+        }
+        if (c.qkNorm && ((!mhaQNormBias.empty() && mhaQNormBias.size() != c.nLayers) ||
+                         (!mhaKNormBias.empty() && mhaKNormBias.size() != c.nLayers))) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQNormBias.size()
+                      << ", " << mhaKNormBias.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA attention Q/K norm bias parameters");
         }
     } else if (c.attnType == XMODEL_ATTN_DSA) {
         if (mlaQA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
@@ -258,10 +342,28 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     InitXTensor(_model->embed, embed);
     InitXTensor(_model->norm, norm);
     InitXTensor(_model->head, head);
+    if (normBias.defined()) {
+        InitXTensor(_model->normBias, normBias);
+    }
 
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
         InitXTensor(_model->attnOut[i], attnOut[i]);
+        if (!attnOutInputScale.empty()) {
+            InitXTensor(_model->attnOutInputScale[i], attnOutInputScale[i]);
+            InitXTensor(_model->attnOutInputOffset[i], attnOutInputOffset[i]);
+            // Notice: only tp_rank == 0 in RowParallelLinear need to add quant_bias
+            if (tp_rank % c.defTpSize == 0) {
+                InitXTensor(_model->attnOutQuantBias[i], attnOutQuantBias[i]);
+            }
+            InitXTensor(_model->attnOutDeqScale[i], attnOutDeqScale[i]);
+        }
+        if (!attnNormBias.empty()) {
+            InitXTensor(_model->attnNormBias[i], attnNormBias[i]);
+        }
+        if (!mlpNormBias.empty()) {
+            InitXTensor(_model->mlpNormBias[i], mlpNormBias[i]);
+        }
         InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
         if (c.attnType == XMODEL_ATTN_MLA) {
             InitXTensor(_model->mlaQA[i], mlaQA[i]);
@@ -272,12 +374,24 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
         } else if (c.attnType == XMODEL_ATTN_MHA) {
             InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
+            if (!mhaQKVInputScale.empty()) {
+                InitXTensor(_model->mhaQKVInputScale[i], mhaQKVInputScale[i]);
+                InitXTensor(_model->mhaQKVInputOffset[i], mhaQKVInputOffset[i]);
+                InitXTensor(_model->mhaQKVQuantBias[i], mhaQKVQuantBias[i]);
+                InitXTensor(_model->mhaQKVDeqScale[i], mhaQKVDeqScale[i]);
+            }
             if (c.addBias) {
                 InitXTensor(_model->mhaQKVBias[i], mhaQKVBias[i]);
             }
             if (c.qkNorm) {
                 InitXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
                 InitXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
+                if (!mhaQNormBias.empty()) {
+                    InitXTensor(_model->mhaQNormBias[i], mhaQNormBias[i]);
+                }
+                if (!mhaKNormBias.empty()) {
+                    InitXTensor(_model->mhaKNormBias[i], mhaKNormBias[i]);
+                }
             }
         } else if (c.attnType == XMODEL_ATTN_DSA) {
             InitXTensor(_model->mlaQA[i], mlaQA[i]);
@@ -311,11 +425,11 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
             InitXTensor(_model->moeREUpGate[i][j], moeREUpGate[idx]);
-            if (moeREUpGate[idx].scalar_type() == at::ScalarType::Char) {
+            InitXTensor(_model->moeREDown[i][j], moeREDown[idx]);
+            if (!moeREUpGateScale.empty()) {
                 InitXTensor(_model->moeREUpGateScale[i][j], moeREUpGateScale[idx]);
             }
-            InitXTensor(_model->moeREDown[i][j], moeREDown[idx]);
-            if (moeREDown[idx].scalar_type() == at::ScalarType::Char) {
+            if (!moeREDownScale.empty()) {
                 InitXTensor(_model->moeREDownScale[i][j], moeREDownScale[idx]);
             }
             idx++;
@@ -1195,13 +1309,25 @@ PYBIND11_MODULE(_C, m)
         .def(py::init<>())
         .def_readwrite("embed", &_CModel::embed)
         .def_readwrite("norm", &_CModel::norm)
+        .def_readwrite("norm_bias", &_CModel::normBias)
         .def_readwrite("head", &_CModel::head)
         .def_readwrite("attn_norm", &_CModel::attnNorm)
+        .def_readwrite("attn_norm_bias", &_CModel::attnNormBias)
         .def_readwrite("attn_out", &_CModel::attnOut)
+        .def_readwrite("attn_out_input_scale", &_CModel::attnOutInputScale)
+        .def_readwrite("attn_out_input_offset", &_CModel::attnOutInputOffset)
+        .def_readwrite("attn_out_quant_bias", &_CModel::attnOutQuantBias)
+        .def_readwrite("attn_out_deq_scale", &_CModel::attnOutDeqScale)
         .def_readwrite("mha_qkv", &_CModel::mhaQKV)
         .def_readwrite("mha_qkv_bias", &_CModel::mhaQKVBias)
+        .def_readwrite("mha_qkv_input_scale", &_CModel::mhaQKVInputScale)
+        .def_readwrite("mha_qkv_input_offset", &_CModel::mhaQKVInputOffset)
+        .def_readwrite("mha_qkv_quant_bias", &_CModel::mhaQKVQuantBias)
+        .def_readwrite("mha_qkv_deq_scale", &_CModel::mhaQKVDeqScale)
         .def_readwrite("mha_q_norm", &_CModel::mhaQNorm)
+        .def_readwrite("mha_q_norm_bias", &_CModel::mhaQNormBias)
         .def_readwrite("mha_k_norm", &_CModel::mhaKNorm)
+        .def_readwrite("mha_k_norm_bias", &_CModel::mhaKNormBias)
         .def_readwrite("mla_q_a", &_CModel::mlaQA)
         .def_readwrite("mla_q_b", &_CModel::mlaQB)
         .def_readwrite("mla_q_norm", &_CModel::mlaQNorm)
@@ -1214,6 +1340,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_k_norm_bias", &_CModel::indexKNormBias)
         .def_readwrite("index_weight", &_CModel::indexWeight)
         .def_readwrite("mlp_norm", &_CModel::mlpNorm)
+        .def_readwrite("mlp_norm_bias", &_CModel::mlpNormBias)
         .def_readwrite("mlp_up_gate", &_CModel::mlpUpGate)
         .def_readwrite("mlp_down", &_CModel::mlpDown)
         .def_readwrite("gate", &_CModel::moeGate)

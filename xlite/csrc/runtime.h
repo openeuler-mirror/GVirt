@@ -17,8 +17,23 @@
         (rt).Synchronize();                      \
         (h).Print((str));                        \
     }
+
+#define XLITE_DEBUG_POINT_ROWS_COLS(condition, rt, h, str, rows, cols) \
+    if (condition && !(rt).IsDummyRuntime()) {                         \
+        (rt).Synchronize();                                            \
+        (h).Print(str, rows, cols);                                    \
+    }
+
+#define XLITE_DEBUG_PTR_POINT(condition, rt, h, str, subShape, subDtype) \
+    if (condition && !(rt).IsDummyRuntime()) {                           \
+        (rt).Synchronize();                                              \
+        (h).PrintPtr(str, subShape, subDtype);                           \
+    }
+
 #else
 #define XLITE_DEBUG_POINT(condition, rt, h, str)
+#define XLITE_DEBUG_POINT_ROWS_COLS(condition, rt, h, str, rows, cols)
+#define XLITE_DEBUG_PTR_POINT(condition, rt, h, str, subShape, subDtype)
 #endif
 
 typedef void *aclrtContext;
