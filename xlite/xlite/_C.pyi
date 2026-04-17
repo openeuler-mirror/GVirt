@@ -46,9 +46,6 @@ class Runtime:
             rank (int): Global rank in the distributed group.
             tp_size (int): Tensor-parallel group size.
             dp_size (int): Data-parallel group size.
-
-        Returns:
-            None: The runtime is initialized in place.
         """
 
     def update_core_num(self, util: float) -> None:
@@ -226,13 +223,6 @@ class ModelConfig:
     index_rope_interleaved: bool = ...
     """Whether indexer RoPE is interleaved."""
 
-    def __init__(self) -> None:
-        """Create an empty configuration object.
-
-        Returns:
-            None: Fields are populated by Python assignment.
-        """
-
 class ModelAttnMeta:
     """Device-side attention metadata for the legacy forward path.
 
@@ -254,13 +244,6 @@ class ModelAttnMeta:
     """Prefill/decode flags per sample."""
     block_tables: List[List[int]] = ...
     """Per-sample block tables."""
-
-    def __init__(self) -> None:
-        """Create an empty metadata object.
-
-        Returns:
-            None: Container is initialized empty.
-        """
 
 class AttnMeta:
     """Host-side attention metadata for the version-1 vLLM-compatible path.
@@ -286,13 +269,6 @@ class AttnMeta:
     """Per-sample block tables on host."""
     positions: torch.Tensor = ...
     """Position tensor for version-1 attention metadata."""
-
-    def __init__(self) -> None:
-        """Create an empty metadata object.
-
-        Returns:
-            None: Container is initialized empty.
-        """
 
 class AttnType(Enum):
     """Attention type enum exported by the native extension."""
@@ -423,13 +399,6 @@ class Model:
     """Routed-expert down weights."""
     re_down_scale: List[torch.Tensor] = ...
     """Routed-expert down scales."""
-
-    def __init__(self) -> None:
-        """Create an empty model container.
-
-        Returns:
-            None: Fields are populated by Python before `init`.
-        """
 
     def init(self, config: ModelConfig, rank: int = 0) -> None:
         """Initialize native model state from Python-provided weights.
@@ -664,9 +633,6 @@ class CoreAssigner:
 
         Args:
             prefill_ratio (float): Prefill-to-decode core split ratio.
-
-        Returns:
-            None: Assigner is initialized in place.
         """
 
     def assign_core(self, is_decode: bool) -> float:
@@ -840,7 +806,7 @@ def rmsnorm(
     norm_dim: int = 0,
     cnt_per_token: int = 1,
     in_start_offset: int = 0,
-    out_start_offset: int = 0
+    out_start_offset: int = 0,
 ) -> None:
     """Apply RMSNorm with optional offsets.
 
