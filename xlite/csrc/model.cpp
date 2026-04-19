@@ -536,8 +536,9 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
         // 获取临时buffer
         XTensor &packedSend = rt.GetTensor({static_cast<uint32_t>(totalBytes)}, INT8, DBG_LOC);
 
-        // 打包三个tensor
-        XliteOpConcat3(rt, inputPerDp, weightsPerDp, routingPerDp, packedSend);
+        // 打包tensor
+        std::vector<XTensor> inputs = {inputPerDp, weightsPerDp, routingPerDp};
+        XliteOpConcat(rt, inputs, packedSend);
         rt.PutTensor(routingPerDp);
         rt.PutTensor(weightsPerDp);
 
@@ -546,9 +547,10 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
         XliteOpAllGather(rt, packedSend, packedRecv, DP);
         rt.PutTensor(packedSend);
 
-        // 拆包为3个Tensor
-        XliteOpSplit3(rt, packedRecv, inputAllDp, weightsAllDp, routingAllDp, bytesInput,
-                      bytesWeights, bytesRouting, _c.defDpSize);
+        // 拆包为多个Tensor
+        std::vector<XTensor> outputs = {inputAllDp, weightsAllDp, routingAllDp};
+        std::vector<size_t> sizes = {bytesInput, bytesWeights, bytesRouting};
+        XliteOpSplit(rt, packedRecv, outputs, sizes, _c.defDpSize);
         rt.PutTensor(packedRecv);
 
         XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
