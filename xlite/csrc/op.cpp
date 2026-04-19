@@ -451,20 +451,22 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
 }
 
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
-                    uint32_t normDim, const XTensor &normBias, uint32_t cntPerToken,
-                    uint32_t inStartOffset, uint32_t outStartOffset)
+                    uint32_t normDim, bool useNorm, const XTensor &normBias, uint32_t cntPerToken,
+                    uint32_t inStartOffset, uint32_t outStartOffset, const XTensor &variance)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (in.dtype == FP16 && out.dtype == FP16) {
+    if (in.dtype == FP16 && (out.dtype == FP16 || out.dtype == FP32)) {
         aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
                                    out.ptr, in.shape[0], normDim, normEps, false, cntPerToken,
-                                   in.shape[1], out.shape[1], inStartOffset, outStartOffset);
-    } else if (in.dtype == BF16 && out.dtype == BF16) {
+                                   in.shape[1], out.shape[1], inStartOffset, outStartOffset,
+                                   useNorm, variance.ptr, rt.tpSize());
+    } else if (in.dtype == BF16 && (out.dtype == BF16 || out.dtype == FP32)) {
         aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
                                     out.ptr, in.shape[0], normDim, normEps, false, cntPerToken,
-                                    in.shape[1], out.shape[1], inStartOffset, outStartOffset);
+                                    in.shape[1], out.shape[1], inStartOffset, outStartOffset,
+                                    useNorm, variance.ptr, rt.tpSize());
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(in) + XT_STR(norm) + XT_STR(out) + XT_STR(normBias);
@@ -482,11 +484,13 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
     if (in.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
                                    out.ptr, in.shape[0], normDim, normEps, true, cntPerToken,
-                                   in.shape[1], out.shape[1], inStartOffset, outStartOffset);
+                                   in.shape[1], out.shape[1], inStartOffset, outStartOffset, true,
+                                   nullptr, rt.tpSize());
     } else if (in.dtype == BF16 && out.dtype == BF16) {
         aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
                                     out.ptr, in.shape[0], normDim, normEps, true, cntPerToken,
-                                    in.shape[1], out.shape[1], inStartOffset, outStartOffset);
+                                    in.shape[1], out.shape[1], inStartOffset, outStartOffset, true,
+                                    nullptr, rt.tpSize());
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(in) + XT_STR(norm) + XT_STR(normBias) + XT_STR(out);
@@ -520,11 +524,11 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
     if (in.dtype == FP16 && addInOut.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
                                    normBias.ptr, out.ptr, in.shape[0], in.shape[1], normEps, false,
-                                   1, in.shape[1], out.shape[1], 0, 0);
+                                   1, in.shape[1], out.shape[1], 0, 0, true, nullptr, rt.tpSize());
     } else if (in.dtype == BF16 && addInOut.dtype == BF16 && out.dtype == BF16) {
         aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
                                     normBias.ptr, out.ptr, in.shape[0], in.shape[1], normEps, false,
-                                    1, in.shape[1], out.shape[1], 0, 0);
+                                    1, in.shape[1], out.shape[1], 0, 0, true, nullptr, rt.tpSize());
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(in) + XT_STR(addInOut) + XT_STR(norm) + XT_STR(out);

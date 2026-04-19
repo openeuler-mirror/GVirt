@@ -5,6 +5,7 @@
 #include <pybind11/stl.h>
 #include <torch/torch.h>
 #include <torch/extension.h>
+#include <optional>
 #include "base.h"
 #include "core_assigner.h"
 #include "op.h"
@@ -821,15 +822,19 @@ void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, ui
 
 void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, float normEps,
              uint32_t normDim, uint32_t cntPerToken, uint32_t inStartOffset,
-             uint32_t outStartOffset)
+             uint32_t outStartOffset, bool useNorm, std::optional<at::Tensor> variance)
 {
-    XTensor _in, _out, _norm, _normBias;
+    XTensor _in, _out, _norm, _normBias, _variance;
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
     InitXTensor(_norm, norm);
-    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, _normBias,
-                   cntPerToken, inStartOffset, outStartOffset);
+    if (variance.has_value()) {
+        std::cout << "variance: " << variance.value() << std::endl;
+        InitXTensor(_variance, variance.value());
+    }
+    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, useNorm,
+                   _normBias, cntPerToken, inStartOffset, outStartOffset, _variance);
     rt.Synchronize();
 }
 
@@ -843,8 +848,8 @@ void RMSNormWithBias(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor 
     InitXTensor(_out, out);
     InitXTensor(_norm, norm);
     InitXTensor(_normBias, normBias);
-    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, _normBias,
-                   cntPerToken, inStartOffset, outStartOffset);
+    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, true,
+                   _normBias, cntPerToken, inStartOffset, outStartOffset);
     rt.Synchronize();
 }
 
@@ -1268,6 +1273,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("experts_weight_transpose", &XModelConfig::expertsWeightTrans)
         .def_readwrite("qkv_bias", &XModelConfig::addBias)
         .def_readwrite("qk_norm", &XModelConfig::qkNorm)
+        .def_readwrite("qk_norm_full", &XModelConfig::qkNormFull)
         .def_readwrite("scoring_func", &XModelConfig::scoringFunc)
         .def_readwrite("norm_topk_prob", &XModelConfig::normTopKProb)
         .def_readwrite("mrope_section", &XModelConfig::mropeSection)
@@ -1403,7 +1409,8 @@ PYBIND11_MODULE(_C, m)
     m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in_"), py::arg("norm"),
           py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
           py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
-          py::arg("out_start_offset") = 0);
+          py::arg("out_start_offset") = 0, py::arg("use_norm") = true,
+          py::arg("variance") = std::nullopt);
     m.def("rmsnorm_with_bias", &RMSNormWithBias, "rmsnorm_with_bias", py::arg("rt"), py::arg("in_"),
           py::arg("norm"), py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"),
           py::arg("norm_dim") = 0, py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,

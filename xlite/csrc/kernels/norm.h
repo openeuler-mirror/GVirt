@@ -11,18 +11,22 @@ template <typename Dtype>
 __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR bias,
                             GM_ADDR output, uint32_t token_num, uint32_t norm_dim, float norm_eps,
                             bool mean, uint32_t cnt_per_token, uint32_t in_step, uint32_t out_step,
-                            uint32_t in_start_offset, uint32_t out_start_offset)
+                            uint32_t in_start_offset, uint32_t out_start_offset, bool useNorm,
+                            GM_ADDR variance, uint32_t tpSize)
 {
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
     bool has_addInOut = (addInOut != nullptr);
+    bool has_variance = (variance != nullptr);
     float n = (float)1.0 / norm_dim;
+    float divTpSize = (float)1.0 / tpSize;
     uint32_t total_dim = norm_dim * cnt_per_token;
     uint64_t len_burst = DIV_ROUND_UP(total_dim * sizeof(Dtype), BLOCK_SIZE);
     uint64_t len_burst_per_norm = DIV_ROUND_UP(norm_dim * sizeof(Dtype), BLOCK_SIZE);
     uint32_t inout_blocksize = ROUND_UP(total_dim * sizeof(Dtype), BLOCK_SIZE);
+    uint32_t inout_blocksize_float = ROUND_UP(total_dim * sizeof(float), BLOCK_SIZE);
     uint32_t calc_blocksize = ROUND_UP(total_dim * sizeof(float), BLOCK_SIZE);
     int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     uint64_t repeat = DIV_ROUND_UP(total_dim, calcPad);
@@ -36,12 +40,29 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     off += inout_blocksize;
     __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>(off);
     off += inout_blocksize;
-    __ubuf__ Dtype *in[2] = {in0, in1};  // event 0/1
-    __ubuf__ Dtype *out0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += inout_blocksize;
-    __ubuf__ Dtype *out1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += inout_blocksize;
-    __ubuf__ Dtype *out[2] = {out0, out1};  // event 0/1
+    __ubuf__ Dtype *in[2] = {in0, in1};
+
+    __ubuf__ Dtype *out[2];
+    __ubuf__ float *out_float[2];
+    __ubuf__ float *in_variance_float[2];
+
+    if (useNorm) {
+        out[0] = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += inout_blocksize;
+        out[1] = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += inout_blocksize;
+    } else {
+        out_float[0] = reinterpret_cast<__ubuf__ float *>(off);
+        off += inout_blocksize_float;
+        out_float[1] = reinterpret_cast<__ubuf__ float *>(off);
+        off += inout_blocksize_float;
+    }
+    if (has_variance) {
+        in_variance_float[0] = reinterpret_cast<__ubuf__ float *>(off);
+        off += inout_blocksize_float;
+        in_variance_float[1] = reinterpret_cast<__ubuf__ float *>(off);
+        off += inout_blocksize_float;
+    }
 
     __ubuf__ float *calc0 = reinterpret_cast<__ubuf__ float *>(off);
     off += calc_blocksize;
@@ -55,41 +76,47 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
 
     int inCurr = 0;
     int outCurr = 0;
-    copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)weight, 0, 1, len_burst_per_norm, 0, 0);
-    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
-    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
-    if constexpr (std::is_same_v<Dtype, float16_t>) {
-        vconv_f162f32(weight_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
-    } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-        vconv_bf162f32(weight_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
-    }
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
-    inCurr = 1 - inCurr;
 
-    if (bias != nullptr) {
-        copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)bias, 0, 1, len_burst_per_norm, 0, 0);
+    if (useNorm) {
+        copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)weight, 0, 1, len_burst_per_norm, 0, 0);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
         if constexpr (std::is_same_v<Dtype, float16_t>) {
-            vconv_f162f32(bias_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
+            vconv_f162f32(weight_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
         } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-            vconv_bf162f32(bias_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
+            vconv_bf162f32(weight_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
         }
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         inCurr = 1 - inCurr;
-    }
-    pipe_barrier(PIPE_V);
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
 
-    for (uint32_t norm_idx = 1; norm_idx < cnt_per_token; norm_idx++) {
-        auto weight_norm = weight_calc + norm_idx * norm_dim;
-        copy_ubuf_to_ubuf(weight_norm, weight_calc, 0, 1, len_burst_float_per_norm, 0, 0);
         if (bias != nullptr) {
-            auto bias_norm = bias_calc + norm_idx * norm_dim;
-            copy_ubuf_to_ubuf(bias_norm, bias_calc, 0, 1, len_burst_float_per_norm, 0, 0);
+            copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)bias, 0, 1, len_burst_per_norm, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
+            if constexpr (std::is_same_v<Dtype, float16_t>) {
+                vconv_f162f32(bias_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
+            } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+                vconv_bf162f32(bias_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
+            }
+            inCurr = 1 - inCurr;
         }
-        if (norm_idx == cnt_per_token - 1) {
-            pipe_barrier(PIPE_V);
+        pipe_barrier(PIPE_V);
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+
+        for (uint32_t norm_idx = 1; norm_idx < cnt_per_token; norm_idx++) {
+            auto weight_norm = weight_calc + norm_idx * norm_dim;
+            copy_ubuf_to_ubuf(weight_norm, weight_calc, 0, 1, len_burst_float_per_norm, 0, 0);
+            if (bias != nullptr) {
+                auto bias_norm = bias_calc + norm_idx * norm_dim;
+                copy_ubuf_to_ubuf(bias_norm, bias_calc, 0, 1, len_burst_float_per_norm, 0, 0);
+            }
+            if (norm_idx == cnt_per_token - 1) {
+                pipe_barrier(PIPE_V);
+            }
         }
+    } else {
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     }
 
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
@@ -98,7 +125,8 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
         uint32_t in_offset = in_start_offset + loop * in_step;
         uint32_t out_offset = out_start_offset + loop * out_step;
         auto gm_in = (__gm__ Dtype *)input + in_offset;
-        auto gm_out = (__gm__ Dtype *)output + out_offset;
+        auto gm_out_dtype = (__gm__ Dtype *)output + out_offset;
+        auto gm_out_float = (__gm__ float *)output + out_offset;
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + inCurr);
         copy_gm_to_ubuf(in[inCurr], gm_in, 0, 1, len_burst, 0, 0);
@@ -191,79 +219,103 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             vsub(calc0, calc0, calc1, repeat, 1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
         }
-        // x ^ 2
-        vmul(calc1, calc0, calc0, repeat, 1, 1, 1, 8, 8, 8);
-        pipe_barrier(PIPE_V);
 
-        // x ^ 2 / n
-        vmuls(calc1, calc1, n, repeat, 1, 1, 8, 8);
-        pipe_barrier(PIPE_V);
-
-        // sum(x ^ 2)
-        if (norm_dim == 128) {
-            vadd(calc1, calc1, calc1 + 64, cnt_per_token, 1, 1, 1, 16, 16, 16);
+        if (has_variance) {
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + inCurr);
+            auto gm_variance_float = (__gm__ float *)variance + loop;
+            copy_gm_to_ubuf_align_b16(in_variance_float[inCurr], gm_variance_float, 0, 1,
+                                      sizeof(float), 0, 0, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
+            vmuls(calc1, in_variance_float[inCurr], divTpSize, 1, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
-            for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
-                auto calc_norm = calc1 + norm_idx * norm_dim;
-                vcadd(calc_norm, calc_norm, 1, 1, 1, 8, 0);
-            }
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + inCurr);
         } else {
-            for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
-                auto calc_norm = calc1 + norm_idx * norm_dim;
-                ReduceSum(calc_norm, calc_norm, norm_dim);
+            // x ^ 2
+            vmul(calc1, calc0, calc0, repeat, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+
+            // x ^ 2 / n
+            vmuls(calc1, calc1, n, repeat, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+
+            // sum(x ^ 2)
+            if (norm_dim == 128) {
+                vadd(calc1, calc1, calc1 + 64, cnt_per_token, 1, 1, 1, 16, 16, 16);
+                pipe_barrier(PIPE_V);
+                for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
+                    auto calc_norm = calc1 + norm_idx * norm_dim;
+                    vcadd(calc_norm, calc_norm, 1, 1, 1, 8, 0);
+                }
+            } else {
+                for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
+                    auto calc_norm = calc1 + norm_idx * norm_dim;
+                    ReduceSum(calc_norm, calc_norm, norm_dim);
+                }
             }
-        }
-        pipe_barrier(PIPE_V);
-
-        SetMask(1);
-        // sum(x ^ 2) + eps
-        vadds(calc1, calc1, norm_eps, cnt_per_token, 1, 1, repeat_stride, repeat_stride);
-        pipe_barrier(PIPE_V);
-
-        // sqrt(sum(x ^ 2) + eps)
-        vsqrt(calc1, calc1, cnt_per_token, 1, 1, repeat_stride, repeat_stride);
-        pipe_barrier(PIPE_V);
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-
-        set_flag(PIPE_V, PIPE_S, EVENT_ID0);
-        wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
-
-        // duplicate item
-        for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
-            auto calc_norm = calc1 + norm_idx * norm_dim;
-            dupnum = *calc_norm;
-            set_flag(PIPE_S, PIPE_V, EVENT_ID0);
-            wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
-            vector_dup(calc_norm, dupnum, repeat_per_norm, 1, 1, 8, 1);
-        }
-        pipe_barrier(PIPE_V);
-
-        // x / sqrt(sum(x ^ 2) + eps)
-        vdiv(calc1, calc0, calc1, repeat, 1, 1, 1, 8, 8, 8);
-        pipe_barrier(PIPE_V);
-
-        // x / sqrt(sum(x ^ 2) + eps) * weight
-        vmul(calc1, weight_calc, calc1, repeat, 1, 1, 1, 8, 8, 8);
-        pipe_barrier(PIPE_V);
-
-        if (bias != nullptr) {
-            vadd(calc1, bias_calc, calc1, repeat, 1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
         }
 
-        // cast data type
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
-        if constexpr (std::is_same_v<Dtype, float16_t>) {
-            vconv_f322f16(out[outCurr], calc1, repeat, 1, 1, 4, 8);
-        } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-            vconv_f322bf16r(out[outCurr], calc1, repeat, 1, 1, 4, 8);
+        if (useNorm) {
+            SetMask(1);
+            // sum(x ^ 2) + eps
+            vadds(calc1, calc1, norm_eps, cnt_per_token, 1, 1, repeat_stride, repeat_stride);
+            pipe_barrier(PIPE_V);
+
+            // sqrt(sum(x ^ 2) + eps)
+            vsqrt(calc1, calc1, cnt_per_token, 1, 1, repeat_stride, repeat_stride);
+            pipe_barrier(PIPE_V);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+
+            set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+
+            // duplicate item
+            for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
+                auto calc_norm = calc1 + norm_idx * norm_dim;
+                dupnum = *calc_norm;
+                set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                vector_dup(calc_norm, dupnum, repeat_per_norm, 1, 1, 8, 1);
+            }
+            pipe_barrier(PIPE_V);
+
+            // x / sqrt(sum(x ^ 2) + eps)
+            vdiv(calc1, calc0, calc1, repeat, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+
+            // x / sqrt(sum(x ^ 2) + eps) * weight
+            vmul(calc1, weight_calc, calc1, repeat, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+
+            if (bias != nullptr) {
+                vadd(calc1, bias_calc, calc1, repeat, 1, 1, 1, 8, 8, 8);
+                pipe_barrier(PIPE_V);
+            }
+
+            // cast data type
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
+            if constexpr (std::is_same_v<Dtype, float16_t>) {
+                vconv_f322f16(out[outCurr], calc1, repeat, 1, 1, 4, 8);
+            } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+                vconv_f322bf16r(out[outCurr], calc1, repeat, 1, 1, 4, 8);
+            }
+            pipe_barrier(PIPE_V);
+        } else {
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
+            copy_ubuf_to_ubuf(out_float[outCurr], calc1, 0, 1, len_burst_float_per_norm, 0, 0);
+            pipe_barrier(PIPE_V);
         }
-        pipe_barrier(PIPE_V);
 
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + outCurr);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + outCurr);
 
-        copy_ubuf_to_gm(gm_out, out[outCurr], 0, 1, len_burst, 0, 0);
+        if (useNorm) {
+            copy_ubuf_to_gm(gm_out_dtype, out[outCurr], 0, 1, len_burst, 0, 0);
+        } else {
+            copy_ubuf_to_gm_align_b16(gm_out_float, out_float[outCurr], 0, 1, sizeof(float), 0, 0,
+                                      0, 0);
+        }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
         outCurr = 1 - outCurr;
     }
@@ -278,17 +330,20 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     extern "C" __global__ __aicore__ void norm_##dtype(                                           \
         GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR bias, GM_ADDR out,               \
         uint32_t token_num, uint32_t norm_dim, float norm_eps, bool mean, uint32_t cnt_per_token, \
-        uint32_t in_step, uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset) \
+        uint32_t in_step, uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset, \
+        bool useNorm, GM_ADDR variance, uint32_t tpSize)                                          \
     {                                                                                             \
         norm<dtype>(input, addInOut, weight, bias, out, token_num, norm_dim, norm_eps, mean,      \
-                    cnt_per_token, in_step, out_step, in_start_offset, out_start_offset);         \
+                    cnt_per_token, in_step, out_step, in_start_offset, out_start_offset, useNorm, \
+                    variance, tpSize);                                                            \
     }
 #else
 #define NORM_FUNC_DEFINE(dtype)                                                                   \
     extern "C" __global__ __aicore__ void norm_##dtype(                                           \
         GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR bias, GM_ADDR out,               \
         uint32_t token_num, uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token,            \
-        uint32_t in_step, uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset) \
+        uint32_t in_step, uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset, \
+        bool useNorm, GM_ADDR variance, uint32_t tpSize)                                          \
     {                                                                                             \
     }
 #endif

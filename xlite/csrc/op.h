@@ -21,8 +21,9 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
                   XTensor &out);
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
-                    uint32_t normDim, const XTensor &normBias = XTensor(), uint32_t cntPerToken = 1,
-                    uint32_t inStartOffset = 0, uint32_t outStartOffset = 0);
+                    uint32_t normDim, bool useNorm = true, const XTensor &normBias = XTensor(),
+                    uint32_t cntPerToken = 1, uint32_t inStartOffset = 0,
+                    uint32_t outStartOffset = 0, const XTensor &variance = XTensor());
 void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
                       float normEps, uint32_t normDim, uint32_t cntPerToken = 1,
                       uint32_t inStartOffset = 0, uint32_t outStartOffset = 0);
