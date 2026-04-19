@@ -21,6 +21,7 @@ n_tokens = 9
 models = [
     (160, 1, 1, 8),
     (256, 8, 4, 8),
+    (256, 1, 1, 8),
 ]
 
 for dtype in [torch.bfloat16, torch.float32]:
