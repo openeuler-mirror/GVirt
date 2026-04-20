@@ -7,6 +7,10 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
+# Usage:
+#   2 cards: torchrun --nproc_per_node=2 --master_port=29500 all_gather.py
+#   4 cards: torchrun --nproc_per_node=4 --master_port=29500 all_gather.py
+# ===============================================================================
 import os
 import torch
 import torch.distributed as dist

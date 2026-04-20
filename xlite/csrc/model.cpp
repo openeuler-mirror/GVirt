@@ -377,11 +377,44 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     } else {
         XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ);
     }
-    if (_c.qkNorm) {
-        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, mhaQNormBias[layer],
-                       qHeads);
-        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim, mhaKNormBias[layer],
-                       kHeads, qHeads * _c.headDim, qHeads * _c.headDim);
+    if (_c.qkNorm && !_c.qkNormFull) {
+        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, true,
+                       mhaQNormBias[layer], qHeads);
+        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim, true,
+                       mhaKNormBias[layer], kHeads, qHeads * _c.headDim, qHeads * _c.headDim);
+    }
+    if (_c.qkNormFull) {
+        XTensor &qLocalVariance = rt.GetTensor({rt._realM, 1}, FP32, DBG_LOC);
+        XTensor &kLocalVariance = rt.GetTensor({rt._realM, 1}, FP32, DBG_LOC);
+        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qLocalVariance, _c.normEps, _c.headDim * qHeads,
+                       false, XTensor());
+        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], kLocalVariance, _c.normEps, _c.headDim * kHeads,
+                       false, XTensor(), 1, qHeads * _c.headDim);
+        if (_c.defTpSize > 1) {
+            // Merge two variance tensors into a single AllReduceSum
+            size_t bytesPerVar = rt._realM * 1 * XDtypeBit(FP32) / 8;
+            XTensor &packedVar = rt.GetTensor({rt._realM, 2}, FP32, DBG_LOC);
+
+            // Concatenate two tensors
+            std::vector<XTensor> inputs = {qLocalVariance, kLocalVariance};
+            XliteOpConcat(rt, inputs, packedVar);
+
+            // Single AllReduceSum operation
+            XliteOpAllReduceSum(rt, packedVar, packedVar, TP);
+
+            // Split back into two tensors
+            std::vector<XTensor> outputs = {qLocalVariance, kLocalVariance};
+            std::vector<size_t> sizes = {bytesPerVar, bytesPerVar};
+            XliteOpSplit(rt, packedVar, outputs, sizes, 1);
+
+            rt.PutTensor(packedVar);
+        }
+        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim * qHeads, true,
+                       XTensor(), 1, 0, 0, qLocalVariance);
+        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim * kHeads, true,
+                       XTensor(), 1, qHeads * _c.headDim, qHeads * _c.headDim, kLocalVariance);
+        rt.PutTensor(qLocalVariance);
+        rt.PutTensor(kLocalVariance);
     }
     XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis, rt._attnSlotMapping,
                      _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim, _c.blockSize,
@@ -536,8 +569,9 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
         // 获取临时buffer
         XTensor &packedSend = rt.GetTensor({static_cast<uint32_t>(totalBytes)}, INT8, DBG_LOC);
 
-        // 打包三个tensor
-        XliteOpConcat3(rt, inputPerDp, weightsPerDp, routingPerDp, packedSend);
+        // 打包tensor
+        std::vector<XTensor> inputs = {inputPerDp, weightsPerDp, routingPerDp};
+        XliteOpConcat(rt, inputs, packedSend);
         rt.PutTensor(routingPerDp);
         rt.PutTensor(weightsPerDp);
 
@@ -546,9 +580,10 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
         XliteOpAllGather(rt, packedSend, packedRecv, DP);
         rt.PutTensor(packedSend);
 
-        // 拆包为3个Tensor
-        XliteOpSplit3(rt, packedRecv, inputAllDp, weightsAllDp, routingAllDp, bytesInput,
-                      bytesWeights, bytesRouting, _c.defDpSize);
+        // 拆包为多个Tensor
+        std::vector<XTensor> outputs = {inputAllDp, weightsAllDp, routingAllDp};
+        std::vector<size_t> sizes = {bytesInput, bytesWeights, bytesRouting};
+        XliteOpSplit(rt, packedRecv, outputs, sizes, _c.defDpSize);
         rt.PutTensor(packedRecv);
 
         XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
@@ -750,7 +785,7 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
 
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (i == 0) {
-            XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], attnNormBias[i]);
+            XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], true, attnNormBias[i]);
         }
         XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
                           ("layer" + std::to_string(i) + " in").c_str());
@@ -800,7 +835,7 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
     XTensor &h = rt.GetTensor({x.shape[0], _c.hiddenSize}, embed.dtype, DBG_LOC);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (i == 0) {
-            XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], attnNormBias[i]);
+            XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], true, attnNormBias[i]);
         }
         XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
                           ("layer" + std::to_string(i) + " in").c_str());

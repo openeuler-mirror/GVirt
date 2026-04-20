@@ -7,7 +7,7 @@ The typing and docstrings are designed for Python 3.9 to 3.11.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Sequence, overload
+from typing import List, Optional, Sequence, overload
 
 import torch
 
@@ -118,6 +118,7 @@ class ModelConfig:
         experts_weight_transpose (bool): Whether expert weights are transposed.
         qkv_bias (bool): Whether MHA QKV has bias.
         qk_norm (bool): Whether MHA applies Q/K norm.
+        qk_norm_full (bool): Whether MHA applies Q/K norm full.
         scoring_func (ScoringFuncType): MoE scoring function.
         norm_topk_prob (bool): Whether top-k probabilities are normalized.
         mrope_section (List[int]): mRoPE section layout values.
@@ -202,6 +203,8 @@ class ModelConfig:
     """Whether MHA QKV has bias."""
     qk_norm: bool = ...
     """Whether MHA applies Q/K norm."""
+    qk_norm_full: bool = ...
+    """Whether MHA applies Q/K norm full."""
     scoring_func: ScoringFuncType = ...
     """MoE scoring function."""
     norm_topk_prob: bool = ...
@@ -846,6 +849,8 @@ def rmsnorm(
     cnt_per_token: int = 1,
     in_start_offset: int = 0,
     out_start_offset: int = 0,
+    use_norm: bool = True,
+    variance: Optional[torch.Tensor] = None
 ) -> None:
     """Apply RMSNorm with optional offsets.
 
@@ -859,6 +864,8 @@ def rmsnorm(
         cnt_per_token (int): Number of contiguous segments per token.
         in_start_offset (int): Input offset for segmented normalization.
         out_start_offset (int): Output offset for segmented normalization.
+        use_norm (bool): Whether to apply normalization.
+        variance (Optional[torch.Tensor]): Optional output tensor for variance values.
 
     Returns:
         None: `out` is written in place.

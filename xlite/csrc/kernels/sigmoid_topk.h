@@ -277,17 +277,25 @@ public:
 
         DumpBuffer(sortTmp, "sortTmp 0", 160, 2);
 
-        copy_ubuf_to_ubuf(sortTmp, sortMrgTmp, 0, 1, 32, 0, 0);
+        copy_ubuf_to_ubuf(sortTmp, sortMrgTmp, 0, 1,
+                          DIV_ROUND_UP(4 * SORT_RESULT_BLOCK_SIZE * sizeof(uint32_t), BLOCK_SIZE),
+                          0, 0);
         pipe_barrier(PIPE_V);
         DumpBuffer(sortMrgTmp, "sortMrgTmp 1", 160, 2);
 
         for (int i = 4; i < 4 + tailLen; i++) {
-            DumpBuffer(sortTmp, "sortTmp i", 160, 2);
-            copy_ubuf_to_ubuf(addrArray[3], sortTmp + i * SORT_RESULT_BLOCK_SIZE, 0, 1, 2, 0, 0);
-            pipe_barrier(PIPE_V);
-            DumpBuffer(sortTmp, "sortTmp 2", 160, 2);
+            validBits = 3;  // The first two queues are valid.
+            addrArray[1] = sortTmp + i * SORT_RESULT_BLOCK_SIZE;
+            lengths = SORT_BLOCK_SIZE * i | SORT_BLOCK_SIZE << 16;
+            config = mrgRepeat | validBits << MGR_SORT_VALID_BITS_OFFSET |
+                     ifExhaustedSuspension << MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET;
 
             vmrgsort4(sortMrgTmp, addrArray, lengths, config);
+            pipe_barrier(PIPE_V);
+            copy_ubuf_to_ubuf(
+                sortTmp, sortMrgTmp, 0, 1,
+                DIV_ROUND_UP((i + 1) * SORT_RESULT_BLOCK_SIZE * sizeof(uint32_t), BLOCK_SIZE), 0,
+                0);
             pipe_barrier(PIPE_V);
             DumpBuffer(sortMrgTmp, "sortMrgTmp 3", 160, 2);
             DumpBuffer(sortMrgTmp, "sortMrgTmp 3", 160, 2, 1, true);

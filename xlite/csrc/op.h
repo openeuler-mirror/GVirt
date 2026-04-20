@@ -21,8 +21,9 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
                   XTensor &out);
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
-                    uint32_t normDim, const XTensor &normBias = XTensor(), uint32_t cntPerToken = 1,
-                    uint32_t inStartOffset = 0, uint32_t outStartOffset = 0);
+                    uint32_t normDim, bool useNorm = true, const XTensor &normBias = XTensor(),
+                    uint32_t cntPerToken = 1, uint32_t inStartOffset = 0,
+                    uint32_t outStartOffset = 0, const XTensor &variance = XTensor());
 void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
                       float normEps, uint32_t normDim, uint32_t cntPerToken = 1,
                       uint32_t inStartOffset = 0, uint32_t outStartOffset = 0);
@@ -90,10 +91,9 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
 void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out);
 void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, bool hasScale,
                     const XTensor &scale = XTensor());
-
-void XliteOpConcat3(XRuntime &rt, XTensor &in0, XTensor &in1, XTensor &in2, XTensor &out);
-void XliteOpSplit3(XRuntime &rt, XTensor &in, XTensor &out0, XTensor &out1, XTensor &out2,
-                   size_t size0, size_t size1, size_t size2, uint32_t numPackets);
+void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out);
+void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs,
+                  const std::vector<size_t> &sizes, uint32_t numPackets);
 void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight,
                           XTensor &scores, XTensor &cumPromptLens, XTensor &lens,
                           XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,
