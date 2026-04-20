@@ -99,7 +99,7 @@ class MiniMaxM2RMSNorm(nn.Module):
             dist.all_reduce(variance)
         variance = variance / world_size
         x = x * torch.rsqrt(variance + self.eps)
-        return (self.weight.float() * x.reshape(*x.shape[:-2], -1)).reshape(input_shape).to(input_dtype)
+        return (self.weight.float() * x.reshape(*x.shape[:-1], -1)).reshape(input_shape).to(input_dtype)
 
 
 class ParallelEmbedding(nn.Module):
@@ -226,6 +226,7 @@ class MHA(nn.Module):
         self.dim = args.dim
         self.head_dim = args.head_dim
         self.qk_norm = args.qk_norm
+        self.qk_norm_full = args.qk_norm_full
         self.n_local_heads = args.n_heads // world_size
         self.n_local_kv_heads = max(1, args.n_kv_heads // world_size)
         self.qkv_proj = ColumnParallelLinear(args.dim, (self.n_heads + 2 * self.n_local_kv_heads * world_size) * self.head_dim, bias=args.qkv_bias)
@@ -247,13 +248,23 @@ class MHA(nn.Module):
             self.n_local_kv_heads * self.head_dim
         ], dim=2)
 
-        q = q.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        k = k.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        v = v.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        if self.qk_norm_full:
+            q = q.view(bsz, seqlen, self.n_local_heads * self.head_dim)
+            k = k.view(bsz, seqlen, self.n_local_kv_heads * self.head_dim)
+            v = v.view(bsz, seqlen, self.n_local_kv_heads * self.head_dim)
+        else:
+            q = q.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            k = k.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            v = v.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
         if self.qk_norm:
             q = self.q_norm(q)
             k = self.k_norm(k)
+
+        if self.qk_norm_full:
+            q = q.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            k = k.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            v = v.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
@@ -731,21 +742,33 @@ class GLM4MoE(nn.Module):
                         layer.mlp.experts[i].down_proj.weight.data = layer.mlp.experts[i].down_proj.weight.data.transpose(0,1).contiguous()
 
         if self.xlite_weight_nz:
-            self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
+            def pad_and_nd2nz(weight, name=""):
+                rows, cols = weight.shape
+                padded_rows = (rows + 15) // 16 * 16
+                padded_cols = (cols + 15) // 16 * 16
+                if rows != padded_rows or cols != padded_cols:
+                    padded_weight = torch.zeros(padded_rows, padded_cols, dtype=weight.dtype, device=weight.device)
+                    padded_weight[:rows, :cols] = weight
+                    if debug and rank == 0:
+                        print(f"[DEBUG] {name} padded from {weight.shape} to {padded_weight.shape}")
+                    weight = padded_weight
+                return matrix_nd2nz(weight)
+
+            self.lm_head.weight.data = pad_and_nd2nz(self.lm_head.weight.data, "lm_head.weight")
             for layer_id, layer in enumerate(self.layers):
-                layer.self_attn.qkv_proj.weight.data = matrix_nd2nz(layer.self_attn.qkv_proj.weight)
-                layer.self_attn.o_proj.weight.data = matrix_nd2nz(layer.self_attn.o_proj.weight)
+                layer.self_attn.qkv_proj.weight.data = pad_and_nd2nz(layer.self_attn.qkv_proj.weight.data, f"layer{layer_id}.qkv_proj.weight")
+                layer.self_attn.o_proj.weight.data = pad_and_nd2nz(layer.self_attn.o_proj.weight.data, f"layer{layer_id}.o_proj.weight")
                 if not is_layer_moe(self.args, layer_id):
-                    layer.mlp.gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.gate_up_proj.weight)
-                    layer.mlp.down_proj.weight.data = matrix_nd2nz(layer.mlp.down_proj.weight)
+                    layer.mlp.gate_up_proj.weight.data = pad_and_nd2nz(layer.mlp.gate_up_proj.weight.data, f"layer{layer_id}.gate_up_proj.weight")
+                    layer.mlp.down_proj.weight.data = pad_and_nd2nz(layer.mlp.down_proj.weight.data, f"layer{layer_id}.down_proj.weight")
                 else:
-                    layer.mlp.gate.weight.data = matrix_nd2nz(layer.mlp.gate.weight)
+                    layer.mlp.gate.weight.data = pad_and_nd2nz(layer.mlp.gate.weight.data, f"layer{layer_id}.gate.weight")
                     for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
-                        layer.mlp.experts[i].gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].gate_up_proj.weight)
-                        layer.mlp.experts[i].down_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].down_proj.weight)
+                        layer.mlp.experts[i].gate_up_proj.weight.data = pad_and_nd2nz(layer.mlp.experts[i].gate_up_proj.weight.data, f"layer{layer_id}.experts[{i}].gate_up_proj.weight")
+                        layer.mlp.experts[i].down_proj.weight.data = pad_and_nd2nz(layer.mlp.experts[i].down_proj.weight.data, f"layer{layer_id}.experts[{i}].down_proj.weight")
                     if self.args.n_shared_experts != 0:
-                        layer.mlp.shared_experts.gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.shared_experts.gate_up_proj.weight)
-                        layer.mlp.shared_experts.down_proj.weight.data = matrix_nd2nz(layer.mlp.shared_experts.down_proj.weight)
+                        layer.mlp.shared_experts.gate_up_proj.weight.data = pad_and_nd2nz(layer.mlp.shared_experts.gate_up_proj.weight.data, f"layer{layer_id}.shared_experts.gate_up_proj.weight")
+                        layer.mlp.shared_experts.down_proj.weight.data = pad_and_nd2nz(layer.mlp.shared_experts.down_proj.weight.data, f"layer{layer_id}.shared_experts.down_proj.weight")
             torch.npu.empty_cache()
 
         if forward_backend == "xlite":
@@ -797,6 +820,7 @@ class GLM4MoE(nn.Module):
         config.weight_nz = self.xlite_weight_nz
         config.qkv_bias = args.qkv_bias
         config.qk_norm = args.qk_norm
+        config.qk_norm_full = args.qk_norm_full
         config.norm_topk_prob = args.norm_topk_prob
         config.scoring_func = ScoringFuncSigmoid
         config.route_scale = args.routed_scaling_factor

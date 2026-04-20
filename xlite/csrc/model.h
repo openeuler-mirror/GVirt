@@ -30,6 +30,7 @@ struct XModelConfig {
     enum XModelRopeType ropeType = XMODEL_ROPE_NEOX;
     bool addBias = false;
     bool qkNorm = false;
+    bool qkNormFull = false;
     uint32_t nHeads = 0;
     uint32_t nKvHeads = 0;
     uint32_t headDim;
@@ -64,7 +65,7 @@ struct XModelConfig {
     uint32_t intermediateSize;
     uint32_t moeIntermediateSize;
     enum XModelScoringFuncType scoringFunc = XMODEL_SCORING_FUNC_SOFTMAX;
-    float routeScale;
+    float routeScale = 1.0f;
     bool normTopKProb;
     bool expertsWeightTrans = false;
 
