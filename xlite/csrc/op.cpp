@@ -870,32 +870,32 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
     }
 }
 
-void XliteOpRopeComplex(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads, uint32_t stepDim,
-                        uint32_t ropeDim, uint32_t offset, XTensor &inputWithR, XTensor &freqs,
-                        XTensor &position, XTensor &vGather)
+void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
+                        uint32_t offset, XTensor &inputWithR, XTensor &freqs, XTensor &position,
+                        XTensor &vGather)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
 
     if (inputWithR.dtype == FP16) {
-        aclrtlaunch_rope_complex_and_cache_float16_t(rt.aivNum, rt.stream, numTokens, nLocalHeads,
-                                                     stepDim, ropeDim, offset, 0, inputWithR.ptr,
-                                                     freqs.ptr, position.ptr, vGather.ptr, 0,
-                                                     nullptr, nullptr, nullptr, nullptr);
+        aclrtlaunch_rope_complex_and_cache_float16_t(
+            rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, 0,
+            inputWithR.ptr, freqs.ptr, position.ptr, vGather.ptr, 0, nullptr, nullptr, nullptr,
+            nullptr);
     } else if (inputWithR.dtype == BF16) {
-        aclrtlaunch_rope_complex_and_cache_bfloat16_t(rt.aivNum, rt.stream, numTokens, nLocalHeads,
-                                                      stepDim, ropeDim, offset, 0, inputWithR.ptr,
-                                                      freqs.ptr, position.ptr, vGather.ptr, 0,
-                                                      nullptr, nullptr, nullptr, nullptr);
+        aclrtlaunch_rope_complex_and_cache_bfloat16_t(
+            rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, 0,
+            inputWithR.ptr, freqs.ptr, position.ptr, vGather.ptr, 0, nullptr, nullptr, nullptr,
+            nullptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
         throw std::runtime_error(err_str + " TODO");
     }
 }
 
-void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLocalHeads,
-                                uint32_t stepDim, uint32_t ropeDim, uint32_t offset, uint32_t vdim,
+void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
+                                uint32_t ropeDim, uint32_t offset, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
                                 XTensor &vGather, uint32_t blockSize, XTensor &key, XTensor &kCache,
                                 XTensor &vCache, XTensor &slotMapping)
@@ -906,12 +906,12 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t numTokens, uint32_t nLoca
 
     if (inputWithR.dtype == FP16) {
         aclrtlaunch_rope_complex_and_cache_float16_t(
-            rt.aivNum, rt.stream, numTokens, nLocalHeads, stepDim, ropeDim, offset, vdim,
+            rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, vdim,
             inputWithR.ptr, freqs.ptr, position.ptr, vGather.ptr, blockSize, key.ptr, kCache.ptr,
             vCache.ptr, slotMapping.ptr);
     } else if (inputWithR.dtype == BF16) {
         aclrtlaunch_rope_complex_and_cache_bfloat16_t(
-            rt.aivNum, rt.stream, numTokens, nLocalHeads, stepDim, ropeDim, offset, vdim,
+            rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, vdim,
             inputWithR.ptr, freqs.ptr, position.ptr, vGather.ptr, blockSize, key.ptr, kCache.ptr,
             vCache.ptr, slotMapping.ptr);
     } else {

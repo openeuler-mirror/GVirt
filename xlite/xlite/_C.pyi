@@ -1242,7 +1242,6 @@ def softmax(rt: Runtime, x: torch.Tensor, calc_len: int, is_long: bool) -> None:
 
 def rope_complex(
     rt: Runtime,
-    num_tokens: int,
     n_local_heads: int,
     step_dim: int,
     rope_dim: int,
@@ -1255,7 +1254,6 @@ def rope_complex(
 
     Args:
         rt (Runtime): Native runtime handle.
-        num_tokens (int): Number of tokens.
         n_local_heads (int): Number of local heads.
         step_dim (int): Per-step hidden dimension.
         rope_dim (int): Rotary dimension.

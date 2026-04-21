@@ -85,7 +85,7 @@ public:
     void InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
                   uint32_t blockSize);
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
-                     uint64_t maxSeqLen, uint32_t blockSize, XModelAttnType attnType);
+                     uint64_t maxSeqLen, uint32_t blockSize);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -144,7 +144,6 @@ public:
     // ATTN
     bool _attnInitialized = false;
     bool enableFlashAttention = false;
-    uint32_t _realM;
     uint32_t _maxNumBlocks;
     int _prefillBatch;
     int _batch;
@@ -156,7 +155,6 @@ public:
     XTensor _position;
     XTensor _blockTables;
     XTensor _slotMapping;
-    XTensor _prefillIdx;
     XTensor _prefillLastIdx;
     XTensor _cachedLens;
     XTensor _lens;

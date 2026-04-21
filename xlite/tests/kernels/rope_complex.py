@@ -92,7 +92,7 @@ for test_dtype, rope_dim, q_dim in test_cases:
 
     # xlite
     torch.npu.synchronize()
-    rope_complex(rt, num_tokens, n_local_heads, q_dim, rope_dim, attnQWithQr_xlite,
+    rope_complex(rt, n_local_heads, q_dim, rope_dim, attnQWithQr_xlite,
                 freqs_cis_xlite, position, vGatherIndices)
     torch.npu.synchronize()
 
