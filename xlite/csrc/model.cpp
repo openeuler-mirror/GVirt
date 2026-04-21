@@ -216,26 +216,29 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
     XTensor &kCache = kvCache[layer][0];
     XTensor &vCache = kvCache[layer][1];
-    XTensor &attnQc = rt.GetTensor({rt._realM, _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
-    XTensor &attnNormQc = rt.GetTensor({rt._realM, _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
-    XTensor &attnQWithQr = rt.GetTensor({rt._realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim},
-                                        hiddenState.dtype, DBG_LOC);
-    XTensor &attnKvc =
-        rt.GetTensor({rt._realM, _c.kvLoraRank + _c.ropeHeadDim}, hiddenState.dtype, DBG_LOC);
-    XTensor &attnNormKvc = rt.GetTensor({rt._realM, _c.kvLoraRank}, hiddenState.dtype, DBG_LOC);
+    XTensor &attnQc =
+        rt.GetTensor({hiddenState.shape[0], _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
+    XTensor &attnNormQc =
+        rt.GetTensor({hiddenState.shape[0], _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
+    XTensor &attnQWithQr =
+        rt.GetTensor({hiddenState.shape[0], nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim},
+                     hiddenState.dtype, DBG_LOC);
+    XTensor &attnKvc = rt.GetTensor({hiddenState.shape[0], _c.kvLoraRank + _c.ropeHeadDim},
+                                    hiddenState.dtype, DBG_LOC);
+    XTensor &attnNormKvc =
+        rt.GetTensor({hiddenState.shape[0], _c.kvLoraRank}, hiddenState.dtype, DBG_LOC);
 
     // TODO: support MLA quantization
     XliteOpMatmul(rt, hiddenState, mlaQA[layer], attnQc, _c.weightNZ);
     XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], attnNormQc, _c.normEps, attnQc.shape[1]);
     XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr, _c.weightNZ);
-    XliteOpRopeComplex(rt, rt._realM, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
+    XliteOpRopeComplex(rt, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
                        _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition, _vGather);
     XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc, _c.weightNZ);
     XliteOpRmsNorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank);
-    XliteOpRopeComplexAndCache(rt, rt._realM, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
-                               _c.kvLoraRank, _c.ropeHeadDim, attnKvc, freqsCis, rt._attnPosition,
-                               _vGather, _c.blockSize, attnNormKvc, kCache, vCache,
-                               rt._attnSlotMapping);
+    XliteOpRopeComplexAndCache(rt, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim, _c.kvLoraRank,
+                               _c.ropeHeadDim, attnKvc, freqsCis, rt._attnPosition, _vGather,
+                               _c.blockSize, attnNormKvc, kCache, vCache, rt._attnSlotMapping);
 
     rt.PutTensor(attnQc);
     rt.PutTensor(attnKvc);
@@ -258,12 +261,12 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XliteOpLayerNorm(rt, k, indexKNorm[layer], indexKNormBias[layer], k, _c.normEps,
                      _c.indexHeadDim);
     if (_c.indexRopeInterleaved) {
-        XliteOpRopeComplex(rt, q.shape[0], _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q,
-                           freqsCis, rt._attnPosition, _vGather);
+        XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q, freqsCis,
+                           rt._attnPosition, _vGather);
         XTensor key, kCache;
-        XliteOpRopeComplexAndCache(rt, k.shape[0], 1, _c.indexHeadDim, _c.ropeHeadDim, 0,
-                                   _c.indexHeadDim, k, freqsCis, rt._attnPosition, _vGather,
-                                   _c.blockSize, key, kCache, indexKCache, rt._attnSlotMapping);
+        XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim, _c.ropeHeadDim, 0, _c.indexHeadDim, k,
+                                   freqsCis, rt._attnPosition, _vGather, _c.blockSize, key, kCache,
+                                   indexKCache, rt._attnSlotMapping);
     } else {
         // 1.2 TODO
     }
@@ -356,7 +359,8 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     XTensor &vCache = kvCache[layer][1];
     uint32_t qHeads = _c.nHeads / _c.defTpSize;
     uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-    XTensor &qkv = rt.GetTensor({rt._realM, mhaQKV[layer].shape[0]}, hiddenState.dtype, DBG_LOC);
+    XTensor &qkv =
+        rt.GetTensor({hiddenState.shape[0], mhaQKV[layer].shape[0]}, hiddenState.dtype, DBG_LOC);
     if (mhaQKV[layer].dtype == INT8) {
         XTensor &xQuanted = rt.GetTensor(hiddenState.shape, INT8, DBG_LOC);
         XTensor &qkvFp16 = rt.GetTensor(qkv.shape, FP16, DBG_LOC);
@@ -378,16 +382,16 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                        mhaKNormBias[layer], kHeads, qHeads * _c.headDim, qHeads * _c.headDim);
     }
     if (_c.qkNormFull) {
-        XTensor &qLocalVariance = rt.GetTensor({rt._realM, 1}, FP32, DBG_LOC);
-        XTensor &kLocalVariance = rt.GetTensor({rt._realM, 1}, FP32, DBG_LOC);
+        XTensor &qLocalVariance = rt.GetTensor({qkv.shape[0], 1}, FP32, DBG_LOC);
+        XTensor &kLocalVariance = rt.GetTensor({qkv.shape[0], 1}, FP32, DBG_LOC);
         XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qLocalVariance, _c.normEps, _c.headDim * qHeads,
                        false, XTensor());
         XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], kLocalVariance, _c.normEps, _c.headDim * kHeads,
                        false, XTensor(), 1, qHeads * _c.headDim);
         if (_c.defTpSize > 1) {
             // Merge two variance tensors into a single AllReduceSum
-            size_t bytesPerVar = rt._realM * 1 * XDtypeBit(FP32) / 8;
-            XTensor &packedVar = rt.GetTensor({rt._realM, 2}, FP32, DBG_LOC);
+            size_t bytesPerVar = qkv.shape[0] * 1 * XDtypeBit(FP32) / 8;
+            XTensor &packedVar = rt.GetTensor({qkv.shape[0], 2}, FP32, DBG_LOC);
 
             // Concatenate two tensors
             std::vector<XTensor> inputs = {qLocalVariance, kLocalVariance};
@@ -882,7 +886,7 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output)
 
     if (batch < input.shape[0]) {
         XTensor &x = rt.GetTensor({batch, _c.hiddenSize}, input.dtype, DBG_LOC);
-        XliteOpEmbed(rt, rt._prefillLastIdx, input, 0, rt._realM, x);
+        XliteOpEmbed(rt, rt._prefillLastIdx, input, 0, input.shape[0], x);
         XliteOpMatmul(rt, x, head, localOutput, _c.weightNZ);
         rt.PutTensor(x);
     } else {

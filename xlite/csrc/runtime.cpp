@@ -356,8 +356,8 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     std::vector<uint64_t> position;
     uint32_t blockNum, queryStart, blockId, id, k;
     size_t size;
+    uint32_t batchedTokens = 0;
 
-    _realM = 0;
     _maxNumBlocks = 0;
     _prefillBatch = 0;
     _batch = static_cast<int>(batch);
@@ -369,8 +369,8 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         queryStart += lens[i];
         blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
         _maxNumBlocks = blockNum > _maxNumBlocks ? blockNum : _maxNumBlocks;
-        _realM += lens[i];
-        prefillLastIdx[i] = _realM - 1;
+        batchedTokens += lens[i];
+        prefillLastIdx[i] = batchedTokens - 1;
         if (attnMeta.isPrefills[i]) {
             prefillIdx[_prefillBatch] = i;
             _prefillBatch++;
@@ -383,9 +383,10 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         }
     }
 
-    if (_realM == 0 || _realM > maxBatchedTokens) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attnMeta realM(" << _realM
-                  << ") > maxBatchedTokens(" << maxBatchedTokens << ")" << std::endl;
+    if (batchedTokens == 0 || batchedTokens > maxBatchedTokens) {
+        std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attnMeta batched tokens("
+                  << batchedTokens << ") > maxBatchedTokens(" << maxBatchedTokens << ")"
+                  << std::endl;
         return;
     }
 
@@ -404,8 +405,8 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                               ACL_MEMCPY_HOST_TO_DEVICE));
     }
 
-    position.resize(_realM);
-    slotMapping.resize(_realM);
+    position.resize(batchedTokens);
+    slotMapping.resize(batchedTokens);
     k = 0;
     for (uint32_t i = 0; i < batch; i++) {
         for (uint32_t j = 0; j < lens[i]; j++) {
@@ -415,11 +416,10 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             slotMapping[k++] = attnMeta.blockTables[i][blockId] * blockSize + id;
         }
     }
-    size = _realM * XDtypeBit(INT64) / 8;
-    CHECK_ACL(aclrtMemcpy(_position.ptr, size, position.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-    size = _realM * XDtypeBit(INT32) / 8;
+    size = batchedTokens * XDtypeBit(INT32) / 8;
     CHECK_ACL(
         aclrtMemcpy(_slotMapping.ptr, size, slotMapping.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    _attnSlotMapping = _slotMapping;
 
     blockTables.resize(batch * _maxNumBlocks);
     for (uint32_t i = 0; i < batch; i++) {
@@ -432,9 +432,11 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     CHECK_ACL(
         aclrtMemcpy(_blockTables.ptr, size, blockTables.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     _attnBlockTables = _blockTables;
-    _attnSlotMapping = _slotMapping;
     switch (attnMeta.version) {
         case 0:
+            size = batchedTokens * XDtypeBit(INT64) / 8;
+            CHECK_ACL(
+                aclrtMemcpy(_position.ptr, size, position.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
             _attnPosition = _position;
             break;
         case 1:
