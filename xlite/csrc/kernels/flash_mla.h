@@ -51,6 +51,7 @@ public:
         this->batch = batch;
         this->maxNumBlocks = maxNumBlocks;
         this->scale = scale;
+        this->tileSizeOfCachedKV = GetTileSizeOfCachedKV(block_num);
         this->maxSeqLen = maxNumBlocks * blockSize;
         this->blockIdx = block_idx;
         this->subBlockIdx = get_subblockid();
@@ -59,11 +60,9 @@ public:
         this->setNextGeneration = 1;
         this->waitPrevGeneration = 1;
 
-        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) +
-                                    block_idx * MAX_M0 * TILESIZE_OF_CACHED_KV);
-        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) +
-                                    block_idx * MAX_M0 * TILESIZE_OF_CACHED_KV +
-                                    block_num * MAX_M0 * TILESIZE_OF_CACHED_KV);
+        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * tileSizeOfCachedKV);
+        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * tileSizeOfCachedKV +
+                                    block_num * MAX_M0 * tileSizeOfCachedKV);
         this->sv[0].SetGlobalBuffer(((__gm__ Dtype *)sv) + block_idx * MAX_M0 * vHeadDim);
         this->sv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) + block_idx * MAX_M0 * vHeadDim +
                                     block_num * MAX_M0 * vHeadDim);
@@ -509,7 +508,7 @@ public:
 
             // copy final QK(m0, nSize) from L0C to GM
             CopyToGm(qk[nIdx * blockSize], qksvl0cBuf, queryLen, nSize, mBlockPad,
-                     TILESIZE_OF_CACHED_KV);
+                     tileSizeOfCachedKV);
             SetFlag<HardEvent::FIX_M>(EVENT_ID1);
             curr = 1 - curr;
         }
@@ -657,7 +656,7 @@ public:
                 // copy QK (m0, kSize) to L1
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
                 CopyGmToL1Nd2Nz(qkl1aBuf[curr], qk[kIdx * blockSize], queryLen, kBlockPad,
-                                TILESIZE_OF_CACHED_KV, mBlockPad);
+                                tileSizeOfCachedKV, mBlockPad);
 
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
@@ -908,8 +907,7 @@ public:
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
 
             // copy final QK(queryTokens, nSize) from L0C to GM
-            CopyToGm(qk[nIdx * blockSize], l0cBuf, queryLen, nSize, mBlockPad,
-                     TILESIZE_OF_CACHED_KV);
+            CopyToGm(qk[nIdx * blockSize], l0cBuf, queryLen, nSize, mBlockPad, tileSizeOfCachedKV);
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
             curr = 1 - curr;
         }
@@ -985,7 +983,7 @@ public:
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
                 // copy QK (queryTokens, blockSize) to L1
                 CopyGmToL1Nd2Nz(aqkl1aBuf[curr], qk[kOffset], queryLen, kBlockPad,
-                                TILESIZE_OF_CACHED_KV, mBlockPad);
+                                tileSizeOfCachedKV, mBlockPad);
 
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
                 // copy K(T) (nSize, blockSize) to L1
@@ -1134,7 +1132,7 @@ public:
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, MAX_M0);
-            int kvNum = DIV_ROUND_UP(cachedLen + queryLen, TILESIZE_OF_CACHED_KV);
+            int kvNum = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
             int taskNum = queryNum * nHeads * kvNum;
             for (int idx = 0; idx < taskNum; idx++) {
                 int kvIdx = idx % kvNum;
@@ -1149,7 +1147,7 @@ public:
                     cachedLen = cachedLens[batchIdx];
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
-                int kvOffset = kvIdx * TILESIZE_OF_CACHED_KV;
+                int kvOffset = kvIdx * tileSizeOfCachedKV;
                 if (calcLen <= kvOffset) {
                     continue;
                 }
@@ -1159,7 +1157,7 @@ public:
                 }
                 totalIdx++;
 
-                int kvLen = TILESIZE_OF_CACHED_KV;
+                int kvLen = tileSizeOfCachedKV;
                 if (kvOffset + kvLen > calcLen) {
                     kvLen = calcLen - kvOffset;
                 }
@@ -1265,7 +1263,7 @@ public:
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, MAX_M0);
-            int kvNum = DIV_ROUND_UP(cachedLen + queryLen, TILESIZE_OF_CACHED_KV);
+            int kvNum = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
             int taskNum = queryNum * nHeads * kvNum;
             for (int idx = 0; idx < taskNum; idx++) {
                 int kvIdx = idx % kvNum;
@@ -1280,7 +1278,7 @@ public:
                     cachedLen = cachedLens[batchIdx];
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
-                int kvOffset = kvIdx * TILESIZE_OF_CACHED_KV;
+                int kvOffset = kvIdx * tileSizeOfCachedKV;
                 if (calcLen <= kvOffset) {
                     continue;
                 }
@@ -1290,7 +1288,7 @@ public:
                 }
                 totalIdx++;
 
-                int kvLen = TILESIZE_OF_CACHED_KV;
+                int kvLen = tileSizeOfCachedKV;
                 if (kvOffset + kvLen > calcLen) {
                     kvLen = calcLen - kvOffset;
                 }
@@ -1328,8 +1326,8 @@ public:
                        headIdx, kvOffset, kvOffset + kvLen, curr);
 #endif
                 RunAivSoftmaxPingPong(
-                    (__gm__ Dtype *)qk[curr][nWorkStart * TILESIZE_OF_CACHED_KV].GetPhyAddr(),
-                    nWorkCurCore, TILESIZE_OF_CACHED_KV, actualCalcSoftmaxLen, outN, 0, 1,
+                    (__gm__ Dtype *)qk[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
+                    nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN, 0, 1,
                     (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
                     (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr(), true, scale);
                 ffts_cross_core_sync(PIPE_MTE3, config);
@@ -1466,6 +1464,7 @@ private:
     uint32_t maxNumBlocks;
     uint32_t maxSeqLen;
     float scale;
+    uint32_t tileSizeOfCachedKV;
     int blockIdx;
     int subBlockIdx;
     int nextBlockIdx;
