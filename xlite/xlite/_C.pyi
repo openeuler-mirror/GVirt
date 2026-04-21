@@ -117,6 +117,7 @@ class ModelConfig:
         block_size (int): KV block size.
         weight_nz (bool): Whether weights are in NZ layout.
         experts_weight_transpose (bool): Whether expert weights are transposed.
+        experts_weight_nz (bool): Whether expert weights are in NZ layout.
         qkv_bias (bool): Whether MHA QKV has bias.
         qk_norm (bool): Whether MHA applies Q/K norm.
         qk_norm_full (bool): Whether MHA applies Q/K norm full.
@@ -202,6 +203,8 @@ class ModelConfig:
     """Whether weights are in NZ layout."""
     experts_weight_transpose: bool = ...
     """Whether expert weights are transposed."""
+    experts_weight_nz: bool = ...
+    """Whether expert weights are in NZ layout."""
     qkv_bias: bool = ...
     """Whether MHA QKV has bias."""
     qk_norm: bool = ...

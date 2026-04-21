@@ -68,6 +68,7 @@ struct XModelConfig {
     float routeScale = 1.0f;
     bool normTopKProb;
     bool expertsWeightTrans = false;
+    bool expertsWeightNZ = false;
 
     // parallel config
     uint32_t defTpSize;

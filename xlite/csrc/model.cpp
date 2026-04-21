@@ -309,7 +309,8 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
 
     XTensor &attnOutput =
         rt.GetTensor({attnQWithQr.shape[0], qHeads * _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
-    XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+    uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
+    XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
                                attnQWithQr.dtype, DBG_LOC);
     XTensor &sv =
         rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
@@ -424,7 +425,8 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                          _c.blockSize, rt._batch, rt._maxNumBlocks);
         rt.PutTensor(qk);
     } else {
-        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+        uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
+        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
                                    hiddenState.dtype, DBG_LOC);
         XTensor &sv = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.headDim},
                                    hiddenState.dtype, DBG_LOC);
@@ -656,8 +658,8 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
             rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, FP16, DBG_LOC);
         XliteOpGroupMatmul(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateScale[layer],
                            expertsCounts, start, end, moeREUpGate[layer][start].dtype,
-                           intermediateSize * 2, _c.hiddenSize, h13Quanted, _c.weightNZ,
-                           _c.expertsWeightTrans);
+                           intermediateSize * 2, _c.hiddenSize, h13Quanted,
+                           _c.expertsWeightNZ || _c.weightNZ, _c.expertsWeightTrans);
         rt.PutTensor(xQuanted);
 
         // dequant(h13Quanted, perChannelScale) -> h13

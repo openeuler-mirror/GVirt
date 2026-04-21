@@ -25,4 +25,20 @@ struct XcclParam {
 // flash attention kernel param
 #define TILESIZE_OF_CACHED_KV 8192
 
+#if defined(__CCE_AICORE__) || defined(__ASCEND_AICORE__)
+#define AICORE_INLINE __aicore__ inline
+#else
+#define AICORE_INLINE inline
+#endif
+
+AICORE_INLINE uint32_t GetTileSizeOfCachedKV(uint32_t aicNum)
+{
+    if (aicNum == 20) {  // A2
+        return 8192;
+    } else if (aicNum == 24) {  // A3
+        return 6016;
+    }
+    return 8192;
+}
+
 #endif

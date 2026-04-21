@@ -930,7 +930,8 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
         rt.Synchronize();
         rt.PutTensor(qk);
     } else {
-        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+        uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
+        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
                                    XDtype(qkv), DBG_LOC);
         XTensor &sv =
             rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, headDim}, XDtype(qkv), DBG_LOC);
@@ -974,7 +975,8 @@ void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCac
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
 
-    XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, TILESIZE_OF_CACHED_KV},
+    uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
+    XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
                                XDtype(qWithQr), DBG_LOC);
     XTensor &sv =
         rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, vHeadDim}, XDtype(qWithQr), DBG_LOC);
@@ -1272,6 +1274,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("block_size", &XModelConfig::blockSize)
         .def_readwrite("weight_nz", &XModelConfig::weightNZ)
         .def_readwrite("experts_weight_transpose", &XModelConfig::expertsWeightTrans)
+        .def_readwrite("experts_weight_nz", &XModelConfig::expertsWeightNZ)
         .def_readwrite("qkv_bias", &XModelConfig::addBias)
         .def_readwrite("qk_norm", &XModelConfig::qkNorm)
         .def_readwrite("qk_norm_full", &XModelConfig::qkNormFull)
