@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#include <sstream>
 #include <tuple>
 #include "ascend.h"
 #include "base.h"
@@ -16,10 +17,9 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mhaQKVBias.resize(c.nLayers);
     mhaQNorm.resize(c.nLayers);
     mhaKNorm.resize(c.nLayers);
-    mlaQA.resize(c.nLayers);
+    mlaQKVA.resize(c.nLayers);
     mlaQB.resize(c.nLayers);
     mlaQNorm.resize(c.nLayers);
-    mlaKVA.resize(c.nLayers);
     mlaKVB.resize(c.nLayers);
     mlaKVNorm.resize(c.nLayers);
     mlpNorm.resize(c.nLayers);
@@ -234,35 +234,37 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
     XTensor &hiddenState)
 {
+    if (_c.defTpSize == 0 || _c.nHeads % _c.defTpSize != 0) {
+        throw std::invalid_argument("nHeads must be divisible by defTpSize and defTpSize > 0");
+    }
     uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+
     XTensor &kCache = kvCache[layer][0];
     XTensor &vCache = kvCache[layer][1];
-    XTensor &attnQc =
-        rt.GetTensor({hiddenState.shape[0], _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
+    XTensor &attnQkvc =
+        rt.GetTensor({hiddenState.shape[0], _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim},
+                     hiddenState.dtype, DBG_LOC);
     XTensor &attnNormQc =
         rt.GetTensor({hiddenState.shape[0], _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
     XTensor &attnQWithQr =
         rt.GetTensor({hiddenState.shape[0], nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim},
                      hiddenState.dtype, DBG_LOC);
-    XTensor &attnKvc = rt.GetTensor({hiddenState.shape[0], _c.kvLoraRank + _c.ropeHeadDim},
-                                    hiddenState.dtype, DBG_LOC);
     XTensor &attnNormKvc =
         rt.GetTensor({hiddenState.shape[0], _c.kvLoraRank}, hiddenState.dtype, DBG_LOC);
 
     // TODO: support MLA quantization
-    XliteOpMatmul(rt, hiddenState, mlaQA[layer], attnQc, _c.weightNZ);
-    XliteOpRmsNorm(rt, attnQc, mlaQNorm[layer], attnNormQc, _c.normEps, attnQc.shape[1]);
+    XliteOpMatmul(rt, hiddenState, mlaQKVA[layer], attnQkvc, _c.weightNZ);
+    XliteOpRmsNorm(rt, attnQkvc, mlaQNorm[layer], attnNormQc, _c.normEps, _c.qLoraRank);
     XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr, _c.weightNZ);
     XliteOpRopeComplex(rt, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
                        _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition, _vGather);
-    XliteOpMatmul(rt, hiddenState, mlaKVA[layer], attnKvc, _c.weightNZ);
-    XliteOpRmsNorm(rt, attnKvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank);
-    XliteOpRopeComplexAndCache(rt, 1, _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim, _c.kvLoraRank,
-                               _c.ropeHeadDim, attnKvc, freqsCis, rt._attnPosition, _vGather,
-                               _c.blockSize, attnNormKvc, kCache, vCache, rt._attnSlotMapping);
-
-    rt.PutTensor(attnQc);
-    rt.PutTensor(attnKvc);
+    XliteOpRmsNorm(rt, attnQkvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank, true,
+                   XTensor(), 1, _c.qLoraRank);
+    XliteOpRopeComplexAndCache(rt, 1, _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
+                               _c.qLoraRank + _c.kvLoraRank, _c.ropeHeadDim, attnQkvc, freqsCis,
+                               rt._attnPosition, _vGather, _c.blockSize, attnNormKvc, kCache,
+                               vCache, rt._attnSlotMapping);
+    rt.PutTensor(attnQkvc);
     rt.PutTensor(attnNormKvc);
 
     return {attnQWithQr, attnNormQc};

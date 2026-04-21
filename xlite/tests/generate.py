@@ -11,7 +11,7 @@ import os
 import time
 import json
 from argparse import ArgumentParser
-from typing import List
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
@@ -42,7 +42,7 @@ def generate(
     max_new_tokens: int,
     eos_id: int,
     temperature: float = 1.0
-) -> (List[List[int]], int):
+) -> Tuple[List[List[int]], int]:
     """
     Generates new tokens based on the given prompt tokens using the specified model.
 

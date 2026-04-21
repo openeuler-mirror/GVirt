@@ -16,13 +16,11 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from safetensors.torch import load_model
 
 from tests.models.deepseek_kernel import weight_dequant
 from tests.models.weight_utils import (hf_model_weights_iterator,
                                        convert_pyslice_to_tensor,
-                                       load_tensor_parallel_weights,
-                                       matrix_nd2nz, logger)
+                                       load_tensor_parallel_weights, logger)
 
 
 debug = False
@@ -591,7 +589,7 @@ class MLA(nn.Module):
             k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
             scores = torch.einsum("bshd,bthd->bsht", q, k).mul_(self.softmax_scale)
 
-            if self.indexer == None:
+            if self.indexer is None:
                 scores += mask.unsqueeze(1)
             else:
                 # indexer
@@ -609,7 +607,7 @@ class MLA(nn.Module):
             scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
                       torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
 
-            if self.indexer != None:
+            if self.indexer is not None:
                 # indexer
                 topk_indices = self.indexer(x, qr, start_pos, freqs_cis, mask)
                 index_mask = torch.full((bsz, 1, end_pos), float("-inf"), device=x.device).scatter_(-1, topk_indices, 0)
@@ -962,12 +960,14 @@ class DeepSeek_V3(nn.Module):
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device)
+        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size,
+                             device=tokens.device)
         tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
         attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
         stream = torch.npu.current_stream().npu_stream
         h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
-        self.xlite_model.forward(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, self.freqs_cis, h, stream)
+        self.xlite_model.forward(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache,
+                                 self.freqs_cis, h, stream)
         self.xlite_model.forward_get_logits(self.xlite_rt, h, logits)
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
@@ -991,16 +991,17 @@ class DeepSeek_V3(nn.Module):
 
     def load_weights(self, model_path: str):
         """ load deepseek v3 or v3.2 or glm5 weight """
-        assert self.args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
-        assert self.args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
-        assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
-        assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+        args = self.args
+        assert args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
+        assert args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
+        assert args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
+        assert args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
 
         self.xlite_weight_nz = True if forward_backend == "xlite" else False
 
-        n_local_experts = self.args.n_routed_experts // self.args.moe_ep_size
-        moe_tp_id = rank % self.args.moe_tp_size
-        moe_ep_id = rank // self.args.moe_tp_size
+        n_local_experts = args.n_routed_experts // args.moe_ep_size
+        moe_tp_id = rank % args.moe_tp_size
+        moe_ep_id = rank // args.moe_tp_size
         param_dict = {name if "lm_head" in name else "model." + name: param for name, param in self.named_parameters()}
         for _, param in self.named_parameters():
             param.requires_grad = False
@@ -1011,7 +1012,7 @@ class DeepSeek_V3(nn.Module):
             # skip mtp layer
             if name.startswith("model.layers."):
                 layer_id = int(name.split(".")[2])
-                if layer_id >= self.args.n_layers:
+                if layer_id >= args.n_layers:
                     continue
 
             if "experts" in name and "shared_experts" not in name:
@@ -1029,10 +1030,8 @@ class DeepSeek_V3(nn.Module):
             name = name.replace("embed_tokens", "embed")
             name = name.replace("input_layernorm", "attn_norm")
             name = name.replace("post_attention_layernorm", "ffn_norm")
-            name = name.replace("q_a_proj", "wq_a")
             name = name.replace("q_a_layernorm", "q_norm")
             name = name.replace("q_b_proj", "wq_b")
-            name = name.replace("kv_a_proj_with_mqa", "wkv_a")
             name = name.replace("kv_a_layernorm", "kv_norm")
             name = name.replace("kv_b_proj", "wkv_b")
             name = name.replace("o_proj", "wo")
@@ -1041,20 +1040,20 @@ class DeepSeek_V3(nn.Module):
                 name = "model." + name
 
             is_wqkv_a = False
-            for stride_id, weight_name in enumerate(["wq_a", "wkv_a"]):
+            for stride_id, weight_name in enumerate(["q_a_proj", "kv_a_proj_with_mqa"]):
                 if weight_name not in name:
                     continue
 
                 param_name = name.replace(weight_name, "wqkv_a")
                 if param_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.',
+                                   param_name)
                     continue
                 param = param_dict[param_name]
-                shard_offset = 0 if stride_id == 0 else self.args.q_lora_rank
-                shard_size = args.q_lora_rank if stride_id == 0 else args.kv_lora_rank + args.qk_rope_head_dim
-
-                param_slice = param.data[shard_offset:shard_offset + shard_size]
-                param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+                if stride_id == 0:
+                    param.data[:args.q_lora_rank].copy_(loaded_weight[:])
+                else:
+                    param.data[args.q_lora_rank:].copy_(loaded_weight[:])
 
                 is_wqkv_a = True
                 break
@@ -1068,7 +1067,8 @@ class DeepSeek_V3(nn.Module):
 
                 param_name = name.replace(weight_name, "w13")
                 if param_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.',
+                                   param_name)
                     continue
                 param = param_dict[param_name]
                 shard_size = param.shape[0] // 2
@@ -1090,48 +1090,40 @@ class DeepSeek_V3(nn.Module):
             param = param_dict[name]
 
             if "embed" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.vocab_size,
-                                             self.args.dim,
-                                             name, True, False, rank, world_size)
+                load_tensor_parallel_weights(param, loaded_weight, args.vocab_size, args.dim, name,
+                                             True, False, rank, world_size)
                 continue
 
             if "head" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.dim,
-                                             self.args.vocab_size,
-                                             name, False, True, rank, world_size)
+                load_tensor_parallel_weights(param, loaded_weight, args.dim, args.vocab_size, name,
+                                             False, True, rank, world_size)
                 continue
 
             if "wq_b" in name and "indexer" not in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.q_lora_rank,
-                                             self.args.n_heads * (self.args.qk_nope_head_dim + self.args.qk_rope_head_dim),
-                                             name, False, True, rank, world_size)
+                load_tensor_parallel_weights(param, loaded_weight, args.q_lora_rank,
+                                             args.n_heads * (args.qk_nope_head_dim + args.qk_rope_head_dim), name,
+                                             False, True, rank, world_size)
                 continue
 
             if "wkv_b" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.kv_lora_rank,
-                                             self.args.n_heads * (self.args.qk_nope_head_dim + self.args.v_head_dim),
+                load_tensor_parallel_weights(param, loaded_weight, args.kv_lora_rank,
+                                             args.n_heads * (args.qk_nope_head_dim + args.v_head_dim),
                                              name, False, True, rank, world_size)
                 continue
 
             if "wo" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.v_head_dim * self.args.n_heads, self.args.dim,
-                                             name, True, True, rank, world_size)
+                load_tensor_parallel_weights(param, loaded_weight, args.v_head_dim * args.n_heads,
+                                             args.dim, name, True, True, rank, world_size)
                 continue
 
-            if "w2" in name and (int(name.split(".")[2]) < self.args.n_dense_layers):
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.inter_dim, self.args.dim,
-                                             name, True, True, rank, world_size)
+            if "w2" in name and (int(name.split(".")[2]) < args.n_dense_layers):
+                load_tensor_parallel_weights(param, loaded_weight, args.inter_dim, args.dim, name,
+                                             True, True, rank, world_size)
                 continue
 
             if "w2" in name and "shared_experts" in name:
                 load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.n_shared_experts * self.args.moe_inter_dim, self.args.dim,
+                                             args.n_shared_experts * args.moe_inter_dim, args.dim,
                                              name, True, True, rank, world_size)
                 continue
 
@@ -1148,8 +1140,8 @@ class DeepSeek_V3(nn.Module):
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
             self.xlite_rt = Runtime(local_rank, 0, rank, world_size)
-            self.init_xlite_model(self.args)
-            kv_size = self.init_xlite_kvcache(self.args)
+            self.init_xlite_model(args)
+            kv_size = self.init_xlite_kvcache(args)
             pool_size = self.xlite_model.get_tensor_pool_size()
             self.xlite_rt.init_tensor_pool(pool_size)
 
@@ -1215,10 +1207,9 @@ class DeepSeek_V3(nn.Module):
         self.xlite_model.head = self.head.weight
         self.xlite_model.attn_norm = [layer.attn_norm.weight for layer in self.layers]
         self.xlite_model.attn_out = [layer.attn.wo.weight for layer in self.layers]
-        self.xlite_model.mla_q_a = [layer.attn.wq_a.weight for layer in self.layers]
+        self.xlite_model.mla_qkv_a = [layer.attn.wqkv_a.weight for layer in self.layers]
         self.xlite_model.mla_q_b = [layer.attn.wq_b.weight for layer in self.layers]
         self.xlite_model.mla_q_norm = [layer.attn.q_norm.weight for layer in self.layers]
-        self.xlite_model.mla_kv_a = [layer.attn.wkv_a.weight for layer in self.layers]
         self.xlite_model.mla_kv_b = [layer.attn.wkv_b.weight for layer in self.layers]
         self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
         self.xlite_model.index_q_b = [layer.attn.indexer.wq_b.weight for layer in self.layers if layer.attn.indexer is not None]
