@@ -152,10 +152,19 @@ template <typename Dtype>
 __aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src,
                                      int nBlockNum, int kBlockStart, int kBlockNum, int srcStride)
 {
-    int cubeSize = 512 / sizeof(Dtype);
-    LoadData2dParams params(0, nBlockNum, srcStride, 0, 0, 1, inc);
-    for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
-        LoadData(dst[(k - kBlockStart) * nBlockNum * cubeSize], src[k * cubeSize], params);
+    if constexpr (std::is_same<Dtype, int8_t>::value) {
+        int cubeSize = 32 * 32 * 1;
+        LoadData2dTransposeParams params(0, nBlockNum, srcStride, 1, 0);
+        for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
+            LoadDataWithTranspose(dst[(k - kBlockStart) * nBlockNum * cubeSize], src[k * cubeSize],
+                                  params);
+        }
+    } else {
+        int cubeSize = 512 / sizeof(Dtype);
+        LoadData2dParams params(0, nBlockNum, srcStride, 0, 0, 1, inc);
+        for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
+            LoadData(dst[(k - kBlockStart) * nBlockNum * cubeSize], src[k * cubeSize], params);
+        }
     }
 }
 

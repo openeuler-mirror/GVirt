@@ -69,6 +69,11 @@ public:
 
         this->mBlockSize = 16;
         this->nBlockSize = 16;
+        if (std::is_same<Dtype, int8_t>::value && transpose) {
+            // When the B matrix is the transpose matrix of the int8 data type, the
+            // unit of the fractal during the L1 to L0 data conversion is 32*32*1B.
+            this->nBlockSize = 32;
+        }
         this->kBlockSize = 32 / sizeof(Dtype);
 
         kDtileSize = k0 << 1;
