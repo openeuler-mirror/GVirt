@@ -41,7 +41,7 @@ struct XModelConfig {
     uint32_t kvLoraRank;
     uint32_t blockSize;
     uint32_t deepstackNumLevel = 0;
-    uint64_t maxM;
+    uint64_t maxBatchedTokens;
     uint64_t maxBatch;
     uint64_t maxSeqLen;
     float normEps;

@@ -47,7 +47,7 @@ class ModelArgs:
     Attributes:
         max_batch_size (int): Maximum batch size.
         max_seq_len (int): Maximum sequence length.
-        max_m (int): Maximum number of tokens.
+        max_num_batched_tokens (int): Maximum number of tokens.
         dtype (Literal["bf16", "fp8"]): Data type for computations.
         vocab_size (int): Vocabulary size.
         dim (int): Model dimension.
@@ -78,7 +78,7 @@ class ModelArgs:
     """
     max_batch_size: int = 8
     max_seq_len: int = 4096
-    max_m: int = 4096
+    max_num_batched_tokens: int = 4096
     dtype: Literal["bf16", "fp8"] = "bf16"
     vocab_size: int = 102400
     dim: int = 2048
@@ -120,7 +120,7 @@ class ModelArgs:
     indexer_rope_interleave: bool = False
 
     def __post_init__(self):
-        self.max_m = self.max_seq_len * self.max_batch_size
+        self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
 
 
 class ParallelEmbedding(nn.Module):
@@ -1170,7 +1170,7 @@ class DeepSeek_V3(nn.Module):
         config.block_size = block_size
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size
-        config.max_m = args.max_m
+        config.max_num_batched_tokens = args.max_num_batched_tokens
         config.attn_type = AttnMLA
 
         if args.score_func == "sigmoid":

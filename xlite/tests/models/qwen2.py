@@ -15,7 +15,7 @@ from typing import Literal
 class Qwen2ModelArgs:
     max_batch_size: int = 8
     max_seq_len: int = 4096
-    max_m: int = 4096
+    max_num_batched_tokens: int = 4096
     dim: int = 5120
     head_dim: int = None
     inter_dim: int = 27648
@@ -32,6 +32,6 @@ class Qwen2ModelArgs:
     model_type: str = "qwen2"
 
     def __post_init__(self):
-        self.max_m = self.max_seq_len * self.max_batch_size
+        self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
         if self.head_dim is None:
             self.head_dim = self.dim // self.n_heads

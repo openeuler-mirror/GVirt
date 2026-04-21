@@ -31,6 +31,6 @@ class Qwen3ModelArgs:
     model_type: str = "qwen3"
 
     def __post_init__(self):
-        self.max_m = self.max_seq_len * self.max_batch_size
+        self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
         if self.head_dim is None:
             self.head_dim = self.dim // self.n_heads

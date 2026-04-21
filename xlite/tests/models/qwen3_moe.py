@@ -35,7 +35,7 @@ if forward_backend == "xlite":
 class ModelArgs:
     max_batch_size: int = 8
     max_seq_len: int = 4096
-    max_m: int = 4096
+    max_num_batched_tokens: int = 4096
     dim: int = 2048
     head_dim: int = 128
     inter_dim: int = 6144
@@ -59,7 +59,7 @@ class ModelArgs:
     model_type: str = "qwen3_moe"
 
     def __post_init__(self):
-        self.max_m = self.max_seq_len * self.max_batch_size
+        self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
         if self.head_dim is None:
             self.head_dim = self.dim // self.n_heads
 
@@ -682,7 +682,7 @@ class Qwen3MoE(nn.Module):
         config.block_size = 128
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size
-        config.max_m = args.max_m
+        config.max_num_batched_tokens = args.max_num_batched_tokens
         config.attn_type = AttnMHA
         config.weight_nz = self.xlite_weight_nz
         config.qkv_bias = args.qkv_bias

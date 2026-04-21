@@ -112,7 +112,8 @@ class ModelConfig:
         moe_tp_size (int): tensor-parallel size in MoE.
         max_seq_len (int): Maximum sequence length.
         max_batch_size (int): Maximum batch size.
-        max_m (int): Maximum token count used by attention prep.
+        max_m (int): Maximum token count batched.
+        max_num_batched_tokens (int): Maximum token count batched.
         block_size (int): KV block size.
         weight_nz (bool): Whether weights are in NZ layout.
         experts_weight_transpose (bool): Whether expert weights are transposed.
@@ -192,7 +193,9 @@ class ModelConfig:
     max_batch_size: int = ...
     """Maximum batch size."""
     max_m: int = ...
-    """Maximum token count used by attention prep."""
+    """Maximum token count batched."""
+    max_num_batched_tokens: int = ...
+    """Maximum token count batched."""
     block_size: int = ...
     """KV block size."""
     weight_nz: bool = ...
@@ -1002,7 +1005,7 @@ def attention(
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     output: torch.Tensor,
-    cum_prompt_lens: torch.Tensor,
+    query_start_loc: torch.Tensor,
     lens: torch.Tensor,
     cached_lens: torch.Tensor,
     block_tables: torch.Tensor,
@@ -1021,7 +1024,7 @@ def attention(
         k_cache (torch.Tensor): Key cache tensor.
         v_cache (torch.Tensor): Value cache tensor.
         output (torch.Tensor): Attention output tensor.
-        cum_prompt_lens (torch.Tensor): Prefix-sum prompt lengths.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
         lens (torch.Tensor): Current token lengths.
         cached_lens (torch.Tensor): Cached token lengths.
         block_tables (torch.Tensor): Block table tensor.
@@ -1347,7 +1350,7 @@ def mla(
     v_cache: torch.Tensor,
     wkvb: torch.Tensor,
     output: torch.Tensor,
-    cum_prompt_lens: torch.Tensor,
+    query_start_loc: torch.Tensor,
     lens: torch.Tensor,
     cached_lens: torch.Tensor,
     block_tables: torch.Tensor,
@@ -1370,7 +1373,7 @@ def mla(
         v_cache (torch.Tensor): Value cache tensor.
         wkvb (torch.Tensor): MLA projection tensor.
         output (torch.Tensor): Attention output tensor.
-        cum_prompt_lens (torch.Tensor): Prefix-sum prompt lengths.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
         lens (torch.Tensor): Current token lengths.
         cached_lens (torch.Tensor): Cached token lengths.
         block_tables (torch.Tensor): Block table tensor.
@@ -1395,7 +1398,7 @@ def indexer_scores(
     k_cache: torch.Tensor,
     weight: torch.Tensor,
     scores: torch.Tensor,
-    cum_prompt_lens: torch.Tensor,
+    query_start_loc: torch.Tensor,
     lens: torch.Tensor,
     cached_lens: torch.Tensor,
     block_tables: torch.Tensor,
@@ -1413,7 +1416,7 @@ def indexer_scores(
         k_cache (torch.Tensor): Key cache tensor.
         weight (torch.Tensor): Indexer weight tensor.
         scores (torch.Tensor): Output score tensor.
-        cum_prompt_lens (torch.Tensor): Prefix-sum prompt lengths.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
         lens (torch.Tensor): Current token lengths.
         cached_lens (torch.Tensor): Cached token lengths.
         block_tables (torch.Tensor): Block table tensor.

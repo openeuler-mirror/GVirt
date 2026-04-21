@@ -35,7 +35,7 @@ if forward_backend == "xlite":
 class ModelArgs:
     max_batch_size: int = 8
     max_seq_len: int = 4096
-    max_m: int = 4096
+    max_num_batched_tokens: int = 4096
     dim: int = 5120
     head_dim: int = 128
     inter_dim: int = 12288
@@ -64,7 +64,7 @@ class ModelArgs:
     model_type: str = "glm4moe"
 
     def __post_init__(self):
-        self.max_m = self.max_seq_len * self.max_batch_size
+        self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
         if self.head_dim is None:
             self.head_dim = self.dim // self.n_heads
 
@@ -83,7 +83,7 @@ class RMSNorm(nn.Module):
         return (self.weight.float() * x).to(input_dtype)
 
 
-class MiniMaxM2RMSNorm(nn.Module):
+class MinimaxBatchedTokens2RMSNorm(nn.Module):
     def __init__(self, head: int, dim: int, eps: float = 1e-6):
         super().__init__()
         self.dim = dim
@@ -232,8 +232,8 @@ class MHA(nn.Module):
         self.qkv_proj = ColumnParallelLinear(args.dim, (self.n_heads + 2 * self.n_local_kv_heads * world_size) * self.head_dim, bias=args.qkv_bias)
         self.o_proj = RowParallelLinear(self.n_heads * self.head_dim, args.dim, bias=False)
         if args.qk_norm:
-            self.q_norm = RMSNorm(args.head_dim, args.norm_eps) if not args.qk_norm_full else MiniMaxM2RMSNorm(self.n_local_heads, args.head_dim, args.norm_eps)
-            self.k_norm = RMSNorm(args.head_dim, args.norm_eps) if not args.qk_norm_full else MiniMaxM2RMSNorm(self.n_local_kv_heads, args.head_dim, args.norm_eps)
+            self.q_norm = RMSNorm(args.head_dim, args.norm_eps) if not args.qk_norm_full else MinimaxBatchedTokens2RMSNorm(self.n_local_heads, args.head_dim, args.norm_eps)
+            self.k_norm = RMSNorm(args.head_dim, args.norm_eps) if not args.qk_norm_full else MinimaxBatchedTokens2RMSNorm(self.n_local_kv_heads, args.head_dim, args.norm_eps)
         if forward_backend != "xlite":
             self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
             self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
@@ -815,7 +815,7 @@ class GLM4MoE(nn.Module):
         config.block_size = 128
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size
-        config.max_m = args.max_m
+        config.max_num_batched_tokens = args.max_num_batched_tokens
         config.attn_type = AttnMHA
         config.weight_nz = self.xlite_weight_nz
         config.qkv_bias = args.qkv_bias

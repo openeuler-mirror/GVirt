@@ -284,7 +284,7 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
 
     XTensor &scores = rt.GetTensor({hiddenState.shape[0], rt._maxNumBlocks * _c.blockSize},
                                    hiddenState.dtype, DBG_LOC);
-    XliteOpIndexerScores(rt, q, indexKCache, weights, scores, rt._cumPromptLens, rt._lens,
+    XliteOpIndexerScores(rt, q, indexKCache, weights, scores, rt._queryStartLoc, rt._lens,
                          rt._cachedLens, rt._attnBlockTables, _c.indexNHeads, _c.indexHeadDim,
                          _c.blockSize, rt._batch, rt._maxNumBlocks);
     rt.PutTensor(weights);
@@ -325,7 +325,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     XTensor &lastMax = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
     XTensor &lastSum = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
     XliteOpFlashMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
-                    lastSum, _sync, attnOutput, rt._cumPromptLens, rt._lens, rt._cachedLens,
+                    lastSum, _sync, attnOutput, rt._queryStartLoc, rt._lens, rt._cachedLens,
                     rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
                     _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale);
     rt.PutTensor(attnQWithQr);
@@ -426,7 +426,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XTensor &qk =
             rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
                          hiddenState.dtype, DBG_LOC);
-        XliteOpAttention(rt, qkv, kCache, vCache, qk, attn, rt._cumPromptLens, rt._lens,
+        XliteOpAttention(rt, qkv, kCache, vCache, qk, attn, rt._queryStartLoc, rt._lens,
                          rt._cachedLens, rt._attnBlockTables, qHeads, kHeads, _c.headDim,
                          _c.blockSize, rt._batch, rt._maxNumBlocks);
         rt.PutTensor(qk);
@@ -440,7 +440,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XTensor &lastMax = rt.GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XliteOpFlashAttention(rt, qkv, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, _sync,
-                              attn, rt._cumPromptLens, rt._lens, rt._cachedLens,
+                              attn, rt._queryStartLoc, rt._lens, rt._cachedLens,
                               rt._attnBlockTables, qHeads, kHeads, _c.headDim, _c.blockSize,
                               rt._batch, rt._maxNumBlocks);
         rt.PutTensor(lastSum);
@@ -905,7 +905,8 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                                      XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
-    rt.PrepareAttn(attnMeta, _c.maxM, _c.maxBatch, _c.maxSeqLen, _c.blockSize, _c.attnType);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize,
+                   _c.attnType);
     if (_c.defTpSize > 1 && output.shape[0] >= rt.commOptimizeLen) {
         rt.enableCommOptimize = true;
         if (output.shape[0] % _c.defTpSize != 0) {
@@ -930,7 +931,8 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                      std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
-    rt.PrepareAttn(attnMeta, _c.maxM, _c.maxBatch, _c.maxSeqLen, _c.blockSize, _c.attnType);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize,
+                   _c.attnType);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
 }
 
@@ -943,7 +945,8 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
     CheckForwardParam(rt, kvCache);
 
     XTensor &h = rt.GetTensor({m, _c.hiddenSize}, embed.dtype, DBG_LOC);
-    rt.PrepareAttn(attnMeta, _c.maxM, _c.maxBatch, _c.maxSeqLen, _c.blockSize, _c.attnType);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize,
+                   _c.attnType);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, h);
     ForwardGetLogits(rt, h, output);
     rt.PutTensor(h);
@@ -992,7 +995,7 @@ size_t XModel::GetTensorPoolSize(int dbg)
     XModelAttnMeta attnMeta;
     attnMeta.version = 0;
     uint32_t batchSize = 1;
-    uint32_t seqLen = _c.maxM;
+    uint32_t seqLen = _c.maxBatchedTokens;
     uint32_t maxNumBlocks = DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize);
 
     for (uint32_t i = 0; i < batchSize; i++) {
@@ -1040,16 +1043,17 @@ size_t XModel::GetTensorPoolSize(int dbg)
 
     std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
     for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
-        XTensor deepstackEmbed({_c.maxM, _c.hiddenSize}, embed.dtype, nullptr);
+        XTensor deepstackEmbed({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
         deepstackInputEmbeds[i] = deepstackEmbed;
     }
 
-    XTensor freqsCis({_c.maxM, _c.ropeHeadDim}, embed.dtype, nullptr);
-    XTensor input({_c.maxM}, INT32, nullptr);
-    XTensor output({_c.maxM, _c.hiddenSize}, embed.dtype, nullptr);
+    XTensor freqsCis({_c.maxBatchedTokens, _c.ropeHeadDim}, embed.dtype, nullptr);
+    XTensor input({_c.maxBatchedTokens}, INT32, nullptr);
+    XTensor output({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
     XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype, nullptr);
 
-    rt.PrepareAttn(attnMeta, _c.maxM, _c.maxBatch, _c.maxSeqLen, _c.blockSize, _c.attnType);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize,
+                   _c.attnType);
     Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
     ForwardGetLogits(rt, output, logits);
     size_t size = rt.maxUsedSize();
