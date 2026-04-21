@@ -904,8 +904,7 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                                      XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize,
-                   _c.attnType);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
     if (_c.defTpSize > 1 && output.shape[0] >= rt.commOptimizeLen) {
         rt.enableCommOptimize = true;
         if (output.shape[0] % _c.defTpSize != 0) {
@@ -930,8 +929,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                      std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize,
-                   _c.attnType);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
 }
 
@@ -944,8 +942,7 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
     CheckForwardParam(rt, kvCache);
 
     XTensor &h = rt.GetTensor({m, _c.hiddenSize}, embed.dtype, DBG_LOC);
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize,
-                   _c.attnType);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, h);
     ForwardGetLogits(rt, h, output);
     rt.PutTensor(h);
@@ -1051,8 +1048,7 @@ size_t XModel::GetTensorPoolSize(int dbg)
     XTensor output({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
     XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype, nullptr);
 
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize,
-                   _c.attnType);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
     Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
     ForwardGetLogits(rt, output, logits);
     size_t size = rt.maxUsedSize();

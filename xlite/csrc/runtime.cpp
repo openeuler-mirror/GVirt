@@ -132,7 +132,6 @@ XRuntime::~XRuntime(void)
         (void)aclrtFree(_cachedLens.ptr);
         (void)aclrtFree(_lens.ptr);
         (void)aclrtFree(_queryStartLoc.ptr);
-        (void)aclrtFree(_prefillIdx.ptr);
         (void)aclrtFree(_prefillLastIdx.ptr);
         (void)aclrtFree(_blockTables.ptr);
     }
@@ -329,9 +328,6 @@ void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t m
     _queryStartLoc.Init({maxBatch}, INT32, ptr);
 
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _prefillIdx.Init({maxBatch}, INT32, ptr);
-
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _prefillLastIdx.Init({maxBatch}, INT32, ptr);
 
     size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8;
@@ -340,7 +336,7 @@ void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t m
 }
 
 void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
-                           uint64_t maxSeqLen, uint32_t blockSize, XModelAttnType attnType)
+                           uint64_t maxSeqLen, uint32_t blockSize)
 {
     if (!_attnInitialized) {
         InitAttn(maxBatchedTokens, maxBatch, maxSeqLen, blockSize);
@@ -397,10 +393,6 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     CHECK_ACL(aclrtMemcpy(_queryStartLoc.ptr, size, queryStartLoc.data(), size,
                           ACL_MEMCPY_HOST_TO_DEVICE));
     if (_prefillBatch > 0) {
-        if (attnType == XMODEL_ATTN_MLA) {
-            CHECK_ACL(aclrtMemcpy(_prefillIdx.ptr, size, prefillIdx.data(), size,
-                                  ACL_MEMCPY_HOST_TO_DEVICE));
-        }
         CHECK_ACL(aclrtMemcpy(_prefillLastIdx.ptr, size, prefillLastIdx.data(), size,
                               ACL_MEMCPY_HOST_TO_DEVICE));
     }
