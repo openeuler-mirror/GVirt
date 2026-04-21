@@ -788,7 +788,7 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
 }
 
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk,
-                      XTensor &output, XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
+                      XTensor &output, XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
 {
@@ -798,13 +798,13 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 &&
         output.dtype == FP16) {
         aclrtlaunch_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
-                                        qk.ptr, output.ptr, cumPromptLens.ptr, lens.ptr,
+                                        qk.ptr, output.ptr, queryStartLoc.ptr, lens.ptr,
                                         cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
                                         blockSize, batch, maxNumBlock);
     } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 &&
                vCache.dtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_attention_bfloat16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
-                                         qk.ptr, output.ptr, cumPromptLens.ptr, lens.ptr,
+                                         qk.ptr, output.ptr, queryStartLoc.ptr, lens.ptr,
                                          cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
                                          blockSize, batch, maxNumBlock);
     } else {
@@ -816,7 +816,7 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
 
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
                            XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &lastMax,
-                           XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &cumPromptLens,
+                           XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &queryStartLoc,
                            XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                            uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
                            uint32_t batch, uint32_t maxNumBlock)
@@ -828,14 +828,14 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
         output.dtype == FP16) {
         aclrtlaunch_flash_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
                                               qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr,
-                                              lastSum.ptr, sync.ptr, output.ptr, cumPromptLens.ptr,
+                                              lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
                                               lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads,
                                               nKvHeads, headDim, blockSize, batch, maxNumBlock);
     } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 &&
                vCache.dtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_flash_attention_bfloat16_t(
             rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr, sum.ptr,
-            lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, cumPromptLens.ptr, lens.ptr,
+            lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr, lens.ptr,
             cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize, batch,
             maxNumBlock);
     } else {
@@ -848,7 +848,7 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
 void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache,
                      XTensor &wkvb, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
                      XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &output,
-                     XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
+                     XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                      XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                      uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
                      uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale)
@@ -860,7 +860,7 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
         wkvb.dtype == BF16 && output.dtype == BF16) {
         aclrtlaunch_flash_mla_bfloat16_t(
             rt.aicNum, rt.stream, qWithQr.ptr, kCache.ptr, vCache.ptr, wkvb.ptr, qk.ptr, sv.ptr,
-            max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, cumPromptLens.ptr,
+            max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
             lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim, nopeHeadDim, vHeadDim,
             kvLoraRank, blockSize, batch, maxNumBlock, scale);
     } else {
@@ -1112,7 +1112,7 @@ void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs
 }
 
 void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight,
-                          XTensor &scores, XTensor &cumPromptLens, XTensor &lens,
+                          XTensor &scores, XTensor &queryStartLoc, XTensor &lens,
                           XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,
                           uint32_t headDim, uint32_t blockSize, uint32_t batch,
                           uint32_t maxNumBlock)
@@ -1122,13 +1122,13 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
     }
     if (q.dtype == FP16 && kCache.dtype == FP16 && weight.dtype == FP16 && scores.dtype == FP16) {
         aclrtlaunch_indexer_scores_float16_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
-                                             scores.ptr, cumPromptLens.ptr, lens.ptr,
+                                             scores.ptr, queryStartLoc.ptr, lens.ptr,
                                              cachedLens.ptr, blockTables.ptr, nHeads, headDim,
                                              blockSize, batch, maxNumBlock);
     } else if (q.dtype == BF16 && kCache.dtype == BF16 && weight.dtype == BF16 &&
                scores.dtype == BF16) {
         aclrtlaunch_indexer_scores_bfloat16_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
-                                              scores.ptr, cumPromptLens.ptr, lens.ptr,
+                                              scores.ptr, queryStartLoc.ptr, lens.ptr,
                                               cachedLens.ptr, blockTables.ptr, nHeads, headDim,
                                               blockSize, batch, maxNumBlock);
     } else {

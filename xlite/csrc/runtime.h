@@ -82,9 +82,10 @@ public:
              uint32_t dpSize = 1);
     virtual ~XRuntime(void);
     void Init(size_t sizeMB);
-    void InitAttn(uint64_t maxM, uint64_t maxBatch, uint64_t maxSeqLen, uint32_t blockSize);
-    void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxM, uint64_t maxBatch, uint64_t maxSeqLen,
-                     uint32_t blockSize, XModelAttnType attnType);
+    void InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
+                  uint32_t blockSize);
+    void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
+                     uint64_t maxSeqLen, uint32_t blockSize, XModelAttnType attnType);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -159,7 +160,7 @@ public:
     XTensor _prefillLastIdx;
     XTensor _cachedLens;
     XTensor _lens;
-    XTensor _cumPromptLens;
+    XTensor _queryStartLoc;
 
 protected:
     int GetNodeIps(void);

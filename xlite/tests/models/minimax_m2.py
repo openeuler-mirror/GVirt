@@ -15,7 +15,7 @@ from typing import Literal
 class ModelArgs:
     max_batch_size: int = 8
     max_seq_len: int = 4096
-    max_m: int = 4096
+    max_num_batched_tokens: int = 4096
     dim: int = 3072
     head_dim: int = 128
     inter_dim: int = 1536
@@ -44,6 +44,6 @@ class ModelArgs:
     model_type: str = "minimax_m2"
 
     def __post_init__(self):
-        self.max_m = self.max_seq_len * self.max_batch_size
+        self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
         if self.head_dim is None:
             self.head_dim = self.dim // self.n_heads

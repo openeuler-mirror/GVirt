@@ -51,19 +51,19 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
                       uint32_t nKvHeads, uint32_t headDim, uint32_t rotDim, uint32_t blockSize,
                       bool isNeox, uint64_t mropeMaskH, uint64_t mropeMaskW);
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk,
-                      XTensor &output, XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
+                      XTensor &output, XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
                            XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &lastMax,
-                           XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &cumPromptLens,
+                           XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &queryStartLoc,
                            XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                            uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
                            uint32_t batch, uint32_t maxNumBlock);
 void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache,
                      XTensor &wkvb, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
                      XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &output,
-                     XTensor &cumPromptLens, XTensor &lens, XTensor &cachedLens,
+                     XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                      XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                      uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
                      uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale);
@@ -95,7 +95,7 @@ void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &ou
 void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs,
                   const std::vector<size_t> &sizes, uint32_t numPackets);
 void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight,
-                          XTensor &scores, XTensor &cumPromptLens, XTensor &lens,
+                          XTensor &scores, XTensor &queryStartLoc, XTensor &lens,
                           XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,
                           uint32_t headDim, uint32_t blockSize, uint32_t batch,
                           uint32_t maxNumBlock);

@@ -906,17 +906,17 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
 }
 
 void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vCache,
-               at::Tensor &output, at::Tensor &cumPromptLens, at::Tensor &lens,
+               at::Tensor &output, at::Tensor &queryStartLoc, at::Tensor &lens,
                at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t nKvHeads,
                uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
 {
-    XTensor _qkv, _kCache, _vCache, _qk, _output, _cumPromptLens, _lens, _cachedLens, _blockTables;
+    XTensor _qkv, _kCache, _vCache, _qk, _output, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
     InitXTensor(_qkv, qkv);
     InitXTensor(_kCache, kCache);
     InitXTensor(_vCache, vCache);
     InitXTensor(_output, output);
-    InitXTensor(_cumPromptLens, cumPromptLens);
+    InitXTensor(_queryStartLoc, queryStartLoc);
     InitXTensor(_lens, lens);
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
@@ -924,7 +924,7 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     if (!rt.enableFlashAttention) {
         XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
                                    XDtype(qkv), DBG_LOC);
-        XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _cumPromptLens, _lens,
+        XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _queryStartLoc, _lens,
                          _cachedLens, _blockTables, nHeads, nKvHeads, headDim, blockSize, batch,
                          maxNumBlock);
         rt.Synchronize();
@@ -941,7 +941,7 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
         XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
         sync.Memset(0);
         XliteOpFlashAttention(rt, _qkv, _kCache, _vCache, qk, sv, max, sum, lastMax, lastSum, sync,
-                              _output, _cumPromptLens, _lens, _cachedLens, _blockTables, nHeads,
+                              _output, _queryStartLoc, _lens, _cachedLens, _blockTables, nHeads,
                               nKvHeads, headDim, blockSize, batch, maxNumBlock);
         rt.Synchronize();
         rt.PutTensor(sync);
@@ -955,12 +955,12 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
 }
 
 void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCache,
-         at::Tensor &wkvb, at::Tensor &output, at::Tensor &cumPromptLens, at::Tensor &lens,
+         at::Tensor &wkvb, at::Tensor &output, at::Tensor &queryStartLoc, at::Tensor &lens,
          at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
          uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
          uint32_t batch, uint32_t maxNumBlock, float scale)
 {
-    XTensor _qWithQr, _kCache, _vCache, _wkvb, _output, _cumPromptLens, _lens, _cachedLens,
+    XTensor _qWithQr, _kCache, _vCache, _wkvb, _output, _queryStartLoc, _lens, _cachedLens,
         _blockTables;
     uint32_t qHeads = nHeads;
 
@@ -969,7 +969,7 @@ void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCac
     InitXTensor(_vCache, vCache);
     InitXTensor(_wkvb, wkvb);
     InitXTensor(_output, output);
-    InitXTensor(_cumPromptLens, cumPromptLens);
+    InitXTensor(_queryStartLoc, queryStartLoc);
     InitXTensor(_lens, lens);
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
@@ -986,7 +986,7 @@ void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCac
     sync.Memset(0);
 
     XliteOpFlashMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, sv, max, sum, lastMax, lastSum, sync,
-                    _output, _cumPromptLens, _lens, _cachedLens, _blockTables, qHeads, ropeHeadDim,
+                    _output, _queryStartLoc, _lens, _cachedLens, _blockTables, qHeads, ropeHeadDim,
                     nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlock, scale);
 
     rt.Synchronize();
@@ -1193,21 +1193,21 @@ void DeQuant(XRuntime &rt, at::Tensor &in, at::Tensor &scale, at::Tensor &out, b
 }
 
 void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &weight,
-                   at::Tensor &scores, at::Tensor &cumPromptLens, at::Tensor &lens,
+                   at::Tensor &scores, at::Tensor &queryStartLoc, at::Tensor &lens,
                    at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads,
                    uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
 {
-    XTensor _q, _kCache, _weight, _scores, _cumPromptLens, _lens, _cachedLens, _blockTables;
+    XTensor _q, _kCache, _weight, _scores, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
     InitXTensor(_q, q);
     InitXTensor(_kCache, kCache);
     InitXTensor(_weight, weight);
     InitXTensor(_scores, scores);
-    InitXTensor(_cumPromptLens, cumPromptLens);
+    InitXTensor(_queryStartLoc, queryStartLoc);
     InitXTensor(_lens, lens);
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
-    XliteOpIndexerScores(rt, _q, _kCache, _weight, _scores, _cumPromptLens, _lens, _cachedLens,
+    XliteOpIndexerScores(rt, _q, _kCache, _weight, _scores, _queryStartLoc, _lens, _cachedLens,
                          _blockTables, nHeads, headDim, blockSize, batch, maxNumBlock);
     rt.Synchronize();
 }
@@ -1267,7 +1267,8 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("moe_tp_size", &XModelConfig::moeTPSize)
         .def_readwrite("max_seq_len", &XModelConfig::maxSeqLen)
         .def_readwrite("max_batch_size", &XModelConfig::maxBatch)
-        .def_readwrite("max_m", &XModelConfig::maxM)
+        .def_readwrite("max_m", &XModelConfig::maxBatchedTokens)
+        .def_readwrite("max_num_batched_tokens", &XModelConfig::maxBatchedTokens)
         .def_readwrite("block_size", &XModelConfig::blockSize)
         .def_readwrite("weight_nz", &XModelConfig::weightNZ)
         .def_readwrite("experts_weight_transpose", &XModelConfig::expertsWeightTrans)
@@ -1425,7 +1426,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("rot_dim"), py::arg("block_size"), py::arg("is_neox"),
           py::arg("mrope_mask_h") = 0, py::arg("mrope_mask_w") = 0);
     m.def("attention", &Attention, py::arg("rt"), py::arg("qkv"), py::arg("k_cache"),
-          py::arg("v_cache"), py::arg("output"), py::arg("cum_prompt_lens"), py::arg("lens"),
+          py::arg("v_cache"), py::arg("output"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"),
           py::arg("n_kv_heads"), py::arg("head_dim"), py::arg("block_size"), py::arg("batch"),
           py::arg("max_num_block"));
@@ -1462,13 +1463,13 @@ PYBIND11_MODULE(_C, m)
     m.def("dequant", &DeQuant, py::arg("rt"), py::arg("in_"), py::arg("scale"), py::arg("out"),
           py::arg("has_scale"));
     m.def("mla", &MLA, py::arg("rt"), py::arg("q_with_qr"), py::arg("k_cache"), py::arg("v_cache"),
-          py::arg("wkvb"), py::arg("output"), py::arg("cum_prompt_lens"), py::arg("lens"),
+          py::arg("wkvb"), py::arg("output"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"),
           py::arg("rope_head_dim"), py::arg("nope_head_dim"), py::arg("v_head_dim"),
           py::arg("kv_lora_rank"), py::arg("block_size"), py::arg("batch"),
           py::arg("max_num_block"), py::arg("scale"));
     m.def("indexer_scores", &IndexerScores, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
-          py::arg("weight"), py::arg("scores"), py::arg("cum_prompt_lens"), py::arg("lens"),
+          py::arg("weight"), py::arg("scores"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
           py::arg("block_size"), py::arg("batch"), py::arg("max_num_block"));
     m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"));
