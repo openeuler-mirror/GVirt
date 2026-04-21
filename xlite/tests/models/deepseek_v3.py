@@ -537,10 +537,11 @@ class MLA(nn.Module):
         self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
         self.v_head_dim = args.v_head_dim
 
-        self.wq_a = Linear(self.dim, self.q_lora_rank)
+        self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim)
+        #self.wq_a = Linear(self.dim, self.q_lora_rank)
         self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps)
         self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
-        self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
+        #self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
         self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps)
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
         self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
@@ -570,13 +571,14 @@ class MLA(nn.Module):
         """
         bsz, seqlen, _ = x.size()
         end_pos = start_pos + seqlen
-        qr = self.q_norm(self.wq_a(x))
+        qkv_lora = self.wqkv_a(x)
+        qr, kv_lora = torch.split(qkv_lora, [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1)
+        qr = self.q_norm(qr)
         q = self.wq_b(qr)
         q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim)
         q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_pe = apply_rotary_emb(q_pe, freqs_cis)
-        kv = self.wkv_a(x)
-        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv, k_pe = torch.split(kv_lora, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv = self.kv_norm(kv)
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
         self.kv_cache[:bsz, start_pos:end_pos] = kv
@@ -1037,6 +1039,27 @@ class DeepSeek_V3(nn.Module):
             name = name.replace("lm_head", "head")
             if not name.startswith("model."):
                 name = "model." + name
+
+            is_wqkv_a = False
+            for stride_id, weight_name in enumerate(["wq_a", "wkv_a"]):
+                if weight_name not in name:
+                    continue
+
+                param_name = name.replace(weight_name, "wqkv_a")
+                if param_name not in param_dict:
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    continue
+                param = param_dict[param_name]
+                shard_offset = 0 if stride_id == 0 else self.args.q_lora_rank
+                shard_size = args.q_lora_rank if stride_id == 0 else args.kv_lora_rank + args.qk_rope_head_dim
+
+                param_slice = param.data[shard_offset:shard_offset + shard_size]
+                param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+
+                is_wqkv_a = True
+                break
+            if is_wqkv_a:
+                continue
 
             is_gate_up_weight = False
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
