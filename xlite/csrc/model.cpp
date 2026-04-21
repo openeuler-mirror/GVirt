@@ -8,8 +8,6 @@
 #include "op.h"
 #include "model.h"
 
-#define KVOFFSET_OF_QKBUFFER 4096  // the kv offset of qk buffer in different cycles of mla prefill
-
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
     attnNorm.resize(c.nLayers);
@@ -252,13 +250,9 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
                               hiddenState.dtype, DBG_LOC);
     XTensor &k = rt.GetTensor({hiddenState.shape[0], _c.indexHeadDim}, hiddenState.dtype, DBG_LOC);
-    XTensor &weights =
-        rt.GetTensor({hiddenState.shape[0], _c.indexNHeads}, hiddenState.dtype, DBG_LOC);
 
-    XTensor &indexQBScaled = rt.GetTensor(indexQB[layer].shape, indexQB[layer].dtype, DBG_LOC);
-    XliteOpMuls(rt, indexQB[layer], _c.indexSoftmaxScale, indexQBScaled);
-    XliteOpMatmul(rt, attnNormQc, indexQBScaled, q, _c.weightNZ);
-    rt.PutTensor(indexQBScaled);
+    XliteOpMuls(rt, attnNormQc, _c.indexSoftmaxScale, attnNormQc);
+    XliteOpMatmul(rt, attnNormQc, indexQB[layer], q, _c.weightNZ);
 
     XliteOpMatmul(rt, hiddenState, indexK[layer], k, _c.weightNZ);
     XliteOpLayerNorm(rt, k, indexKNorm[layer], indexKNormBias[layer], k, _c.normEps,
@@ -275,12 +269,11 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     }
     rt.PutTensor(k);
 
-    XTensor &indexWeightScaled =
-        rt.GetTensor(indexWeight[layer].shape, indexWeight[layer].dtype, DBG_LOC);
+    XTensor &weights =
+        rt.GetTensor({hiddenState.shape[0], _c.indexNHeads}, hiddenState.dtype, DBG_LOC);
     float weightScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
-    XliteOpMuls(rt, indexWeight[layer], weightScale, indexWeightScaled);
-    XliteOpMatmul(rt, hiddenState, indexWeightScaled, weights, _c.weightNZ);
-    rt.PutTensor(indexWeightScaled);
+    XliteOpMatmul(rt, hiddenState, indexWeight[layer], weights, _c.weightNZ);
+    XliteOpMuls(rt, weights, weightScale, weights);
 
     XTensor &scores = rt.GetTensor({hiddenState.shape[0], rt._maxNumBlocks * _c.blockSize},
                                    hiddenState.dtype, DBG_LOC);
