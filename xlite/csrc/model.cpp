@@ -665,8 +665,8 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
             rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, FP16, DBG_LOC);
         XliteOpGroupMatmul(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateScale[layer],
                            expertsCounts, start, end, moeREUpGate[layer][start].dtype,
-                           intermediateSize * 2, _c.hiddenSize, h13Quanted, _c.weightNZ,
-                           _c.expertsWeightTrans);
+                           intermediateSize * 2, _c.hiddenSize, h13Quanted,
+                           _c.expertsWeightNZ || _c.weightNZ, _c.expertsWeightTrans);
         rt.PutTensor(xQuanted);
 
         // dequant(h13Quanted, perChannelScale) -> h13
