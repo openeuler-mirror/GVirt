@@ -631,7 +631,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k,
                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
         rt.PutTensor(tmp);
-    } else if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == FP16 && !transpose) {
+    } else if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == FP16) {
         aclrtlaunch_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                   weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else {

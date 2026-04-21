@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu
 from xlite._C import Runtime, matmul_dequant
 
 dev_id=0
@@ -60,41 +61,52 @@ def gen_tf32_rand(n, device='cpu'):
     mant = torch.randint(0, 512, (n,), dtype=torch.int32, device=device) << 13   # bits 13-22
     return (sign | exp | mant).view(torch.float32).clone()
 
-weight_nz = False
-transpose = False
-dtype = torch.int8
-m = 8192
-n = 768
-k = 2048
-x = torch.randn(m, k, dtype=dtype, device=f"npu:{dev_id}")
-y = torch.randn(k, n, dtype=dtype, device=f"npu:{dev_id}")
-y_standard = y.transpose(0, 1).contiguous().reshape(n, k)
-y_in = y_standard.clone()
-bias = torch.randn(n, dtype=torch.int32, device=f"npu:{dev_id}")
-# deqscale 从 bf16 到 tf32 可以无损转换，因此可以确保 bf16 随机数的 cpu 计算的结果与 npu 一致
-deqScale = torch.randn(n, dtype=torch.bfloat16, device=f"npu:{dev_id}").to(torch.float32)
-# print(deqScale)
-z = torch.zeros(m, n, dtype=torch.float16, device=f"npu:{dev_id}")
+test_sizes = [
+    [8192, 768, 2048],
+]
 
-torch.set_printoptions(sci_mode=False, precision=4, threshold=1000)
+for weight_nz in [True, False]:
+    for transpose in [True, False]:
+        for m, n, k in test_sizes:
+            dtype = torch.int8
 
-standard = npu_quant_matmul_cpu(x.to("cpu"), y.to("cpu"), deqScale.to("cpu"), bias.to("cpu"), torch.float16)
+            x = torch.randn(m, k, dtype=dtype, device=f"npu:{dev_id}")
+            y = torch.randn(k, n, dtype=dtype, device=f"npu:{dev_id}")
+            
+            if transpose:
+                y_in = y.clone()
+            else:
+                y_in = y.transpose(0, 1).contiguous().reshape(n, k)
+                
+            if weight_nz:
+                ACL_FORMAT_FRACTAL_NZ = 29
+                y_in = torch_npu.npu_format_cast(y_in, ACL_FORMAT_FRACTAL_NZ)
 
-torch.npu.synchronize()
-# fixpipe硬件要求：以uint64_t存储fp32，高位为0，低位为fp32格式的二进制值
-scale = torch.zeros(n * 2, dtype=torch.float32, device=f"npu:{dev_id}")
-scale[0::2] = deqScale[0::1]
-scale[1::2] = 0
-matmul_dequant(rt, x, y_in, bias, scale, z, weight_nz and dtype != torch.float, transpose)
-torch.npu.synchronize()
+            bias = torch.randn(n, dtype=torch.int32, device=f"npu:{dev_id}")
+            # deqscale 从 bf16 到 tf32 可以无损转换，因此可以确保 bf16 随机数的 cpu 计算的结果与 npu 一致
+            deqScale = torch.randn(n, dtype=torch.bfloat16, device=f"npu:{dev_id}").to(torch.float32)
+            # print(deqScale)
+            z = torch.zeros(m, n, dtype=torch.float16, device=f"npu:{dev_id}")
 
-if transpose:
-    print(f'[{m}, {k}] x [{k}, {n}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
-else:
-    print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
-try:
-    torch.testing.assert_close(standard, z.to("cpu"), atol=1e-5, rtol=1e-3)
-except AssertionError as e:
-    print(f'{e}')
-    print(f'torch_npu: {standard}')
-    print(f'xlite: {z}')
+            torch.set_printoptions(sci_mode=False, precision=4, threshold=1000)
+
+            standard = npu_quant_matmul_cpu(x.to("cpu"), y.to("cpu"), deqScale.to("cpu"), bias.to("cpu"), torch.float16)
+
+            torch.npu.synchronize()
+            # fixpipe硬件要求：以uint64_t存储fp32，高位为0，低位为fp32格式的二进制值
+            scale = torch.zeros(n * 2, dtype=torch.float32, device=f"npu:{dev_id}")
+            scale[0::2] = deqScale[0::1]
+            scale[1::2] = 0
+            matmul_dequant(rt, x, y_in, bias, scale, z, weight_nz and dtype != torch.float, transpose)
+            torch.npu.synchronize()
+
+            if transpose:
+                print(f'[{m}, {k}] x [{k}, {n}] {dtype} weight_nz:{weight_nz and dtype != torch.float} matmul executed!')
+            else:
+                print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz:{weight_nz and dtype != torch.float} matmul executed!')
+            try:
+                torch.testing.assert_close(standard, z.to("cpu"), atol=1e-5, rtol=1e-3)
+            except AssertionError as e:
+                print(f'{e}')
+                print(f'torch_npu: {standard}')
+                print(f'xlite: {z}')
