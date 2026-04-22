@@ -352,8 +352,8 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     std::vector<uint64_t> position;
     uint32_t blockNum, queryStart, blockId, id, k;
     size_t size;
-    uint32_t batchedTokens = 0;
 
+    batchedTokens = 0;
     _maxNumBlocks = 0;
     _prefillBatch = 0;
     _batch = static_cast<int>(batch);

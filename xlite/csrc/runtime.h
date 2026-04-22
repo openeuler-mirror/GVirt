@@ -131,6 +131,7 @@ public:
     bool enableCommOptimize;
     XTensor hiddenStatePad;
     XTensor hiddenStateSlice;
+    uint32_t batchedTokens;
 
     XcclComm *_tpXcclComm = nullptr;
     XcclComm *_dpXcclComm = nullptr;
