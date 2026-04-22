@@ -94,6 +94,8 @@ class ModelConfig:
         v_head_dim (int): Value projection dimension.
         q_lora_rank (int): LoRA rank for query projection.
         kv_lora_rank (int): LoRA rank for key/value projection.
+        quant_attn_weight_transpose (bool): Whether quanted attention weights are transposed.
+        quant_attn_weight_nz (bool): Whether quanted attention weights are in NZ layout.
         norm_eps (float): RMSNorm/LayerNorm epsilon.
         rope_theta (float): Rotary base frequency.
         softmax_scale (float): Attention softmax scale.
@@ -157,6 +159,10 @@ class ModelConfig:
     """LoRA rank for query projection."""
     kv_lora_rank: int = ...
     """LoRA rank for key/value projection."""
+    quant_attn_weight_transpose: bool = ...
+    """Whether quanted attention weights are transposed."""
+    quant_attn_weight_nz: bool = ...
+    """Whether quanted attention weights are in NZ layout."""
     norm_eps: float = ...
     """RMSNorm/LayerNorm epsilon."""
     rope_theta: float = ...
