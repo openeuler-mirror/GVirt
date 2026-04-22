@@ -332,7 +332,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     rt.PutTensor(max);
     rt.PutTensor(sv);
     rt.PutTensor(qk);
-    if (_c.attnType == XMODEL_ATTN_DSA) {
+    if (topkIndices != nullptr) {
         rt.PutTensor(*topkIndices);
     }
 
@@ -907,6 +907,10 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
 {
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
+    if (rt.dpSize() == 1 && rt.batchedTokens < input.shape[0]) {
+        input.View({rt.batchedTokens});
+        output.View({input.shape[0], output.shape[1]});
+    }
     if (_c.defTpSize > 1 && output.shape[0] >= rt.commOptimizeLen) {
         rt.enableCommOptimize = true;
         if (output.shape[0] % _c.defTpSize != 0) {
@@ -932,6 +936,10 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
 {
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
+    if (rt.dpSize() == 1 && rt.batchedTokens < input.shape[0]) {
+        input.View({rt.batchedTokens});
+        output.View({input.shape[0], output.shape[1]});
+    }
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
 }
 
@@ -940,11 +948,13 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                  XTensor &output)
 {
-    uint32_t m = input.shape[0];
     CheckForwardParam(rt, kvCache);
 
-    XTensor &h = rt.GetTensor({m, _c.hiddenSize}, embed.dtype, DBG_LOC);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
+    if (rt.dpSize() == 1 && rt.batchedTokens < input.shape[0]) {
+        input.View({rt.batchedTokens});
+    }
+    XTensor &h = rt.GetTensor({rt.batchedTokens, _c.hiddenSize}, embed.dtype, DBG_LOC);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, h);
     ForwardGetLogits(rt, h, output);
     rt.PutTensor(h);
