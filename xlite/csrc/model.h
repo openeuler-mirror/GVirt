@@ -44,6 +44,8 @@ struct XModelConfig {
     uint64_t maxBatchedTokens;
     uint64_t maxBatch;
     uint64_t maxSeqLen;
+    bool quantAttnWeightTrans = false;
+    bool quantAttnWeightNz = false;
     float normEps;
     float ropeTheta;
     float softmaxScale;

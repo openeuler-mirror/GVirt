@@ -1251,6 +1251,10 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("v_head_dim", &XModelConfig::vHeadDim)
         .def_readwrite("q_lora_rank", &XModelConfig::qLoraRank)
         .def_readwrite("kv_lora_rank", &XModelConfig::kvLoraRank)
+        .def_readwrite("quant_attn_weight_transpose",
+                       &XModelConfig::quantAttnWeightTrans)  // only for quantization
+        .def_readwrite("quant_attn_weight_nz",
+                       &XModelConfig::quantAttnWeightNz)  // only for quantization
         .def_readwrite("norm_eps", &XModelConfig::normEps)
         .def_readwrite("rope_theta", &XModelConfig::ropeTheta)
         .def_readwrite("softmax_scale", &XModelConfig::softmaxScale)

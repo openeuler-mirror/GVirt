@@ -359,14 +359,15 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     XTensor &vCache = kvCache[layer][1];
     uint32_t qHeads = _c.nHeads / _c.defTpSize;
     uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-    XTensor &qkv =
-        rt.GetTensor({hiddenState.shape[0], mhaQKV[layer].shape[0]}, hiddenState.dtype, DBG_LOC);
+
+    XTensor &qkv = rt.GetTensor({hiddenState.shape[0], (qHeads + 2 * kHeads) * _c.headDim},
+                                hiddenState.dtype, DBG_LOC);
     if (mhaQKV[layer].dtype == INT8) {
         XTensor &xQuanted = rt.GetTensor(hiddenState.shape, INT8, DBG_LOC);
         XTensor &qkvFp16 = rt.GetTensor(qkv.shape, FP16, DBG_LOC);
         XliteOpQuant(rt, hiddenState, mhaQKVInputScale[layer], mhaQKVInputOffset[layer], xQuanted);
-        XliteOpMatmul(rt, xQuanted, mhaQKV[layer], qkvFp16, _c.weightNZ, mhaQKVQuantBias[layer],
-                      mhaQKVDeqScale[layer]);
+        XliteOpMatmul(rt, xQuanted, mhaQKV[layer], qkvFp16, _c.weightNZ || _c.quantAttnWeightNz,
+                      mhaQKVQuantBias[layer], mhaQKVDeqScale[layer], _c.quantAttnWeightTrans);
         XliteOpDeQuant(rt, qkvFp16, qkv, false);
         rt.PutTensor(xQuanted);
         rt.PutTensor(qkvFp16);
@@ -419,7 +420,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                      _c.ropeType == XMODEL_ROPE_NEOX, _mropeMaskH, _mropeMaskW);
 
     XTensor &attn =
-        rt.GetTensor({hiddenState.shape[0], attnOut[layer].shape[1]}, hiddenState.dtype, DBG_LOC);
+        rt.GetTensor({hiddenState.shape[0], qHeads * _c.headDim}, hiddenState.dtype, DBG_LOC);
     if (!rt.enableFlashAttention) {
         XTensor &qk =
             rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
@@ -454,8 +455,8 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XTensor &attnQuant = rt.GetTensor(attn.shape, INT8, DBG_LOC);
         XTensor &tmpState = rt.GetTensor(hiddenState.shape, FP16, DBG_LOC);
         XliteOpQuant(rt, attn, attnOutInputScale[layer], attnOutInputOffset[layer], attnQuant);
-        XliteOpMatmul(rt, attnQuant, attnOut[layer], tmpState, _c.weightNZ, attnOutQuantBias[layer],
-                      attnOutDeqScale[layer]);
+        XliteOpMatmul(rt, attnQuant, attnOut[layer], tmpState, _c.weightNZ || _c.quantAttnWeightNz,
+                      attnOutQuantBias[layer], attnOutDeqScale[layer], _c.quantAttnWeightTrans);
         XliteOpDeQuant(rt, tmpState, hiddenState, false);
         rt.PutTensor(attnQuant);
         rt.PutTensor(tmpState);
@@ -663,7 +664,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         XliteOpGroupMatmul(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateScale[layer],
                            expertsCounts, start, end, moeREUpGate[layer][start].dtype,
                            intermediateSize * 2, _c.hiddenSize, h13Quanted,
-                           _c.expertsWeightNZ || _c.weightNZ, _c.expertsWeightTrans);
+                           _c.weightNZ || _c.expertsWeightNZ, _c.expertsWeightTrans);
         rt.PutTensor(xQuanted);
 
         // dequant(h13Quanted, perChannelScale) -> h13
@@ -699,7 +700,8 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         XTensor &outQuanted = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, FP16, DBG_LOC);
         XliteOpGroupMatmul(rt, xQuanted, _moeREDown[layer], _moeREDownScale[layer], expertsCounts,
                            start, end, moeREDown[layer][start].dtype, _c.hiddenSize,
-                           intermediateSize, outQuanted, _c.weightNZ, _c.expertsWeightTrans);
+                           intermediateSize, outQuanted, _c.weightNZ || _c.expertsWeightNZ,
+                           _c.expertsWeightTrans);
         rt.PutTensor(xQuanted);
 
         // dequant(outQuanted, perChannelScale) -> out
