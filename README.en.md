@@ -1,36 +1,33 @@
 # GVirt
 
-#### Description
-A front-end and back-end virtualization framework for the collaborative computing power
+#### Introduction
+GVirt is a lightweight XPU virtualization frontend and backend inference runtime. It provides a minimalist and efficient heterogeneous computing environment, supporting diverse computing power collaboration.
 
 #### Software Architecture
-Software architecture description
+![image](xlite/doc/images/architecture.png)
 
-#### Installation
+- **Xlite (GVirt Frontend)**: A lightweight Transformer model runtime that supports diverse computing power collaboration, currently supporting efficient execution on Ascend hardware. Xlite exposes the model graph construction and operators required for Transformer runtime, with all operators developed based on Ascend AscendC/CCE. Currently supports Qwen series, Llama series, and DeepSeek-R1 models. See [Xlite README](xlite/README.md) for details.
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+#### Quick Start
+Please refer to [Xlite Quick Start](xlite/README.md#快速开始)
 
-#### Instructions
+#### Build and Installation
+Please refer to [Xlite Development Guide](xlite/README.md#开发指南)
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+#### Contributing
 
-#### Contribution
-
-1.  Fork the repository
-2.  Create Feat_xxx branch
-3.  Commit your code
-4.  Create Pull Request
+1.  Fork this repository
+2.  Create a new Feat_xxx branch
+3.  Submit your code
+4.  Create a Pull Request
 
 
-#### Gitee Feature
+#### Directory Structure
 
-1.  You can use Readme\_XXX.md to support different languages, such as Readme\_en.md, Readme\_zh.md
-2.  Gitee blog [blog.gitee.com](https://blog.gitee.com)
-3.  Explore open source project [https://gitee.com/explore](https://gitee.com/explore)
-4.  The most valuable open source project [GVP](https://gitee.com/gvp)
-5.  The manual of Gitee [https://gitee.com/help](https://gitee.com/help)
-6.  The most popular members  [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+| Directory | Description |
+|------|------|
+| xlite | Lightweight inference runtime core code (Python) |
+| xlite/csrc | Lightweight runtime core code (C++/AscendC) |
+| xlite/doc | Related documentation |
+| xlite/docker | Container image Dockerfiles |
+| xlite/tests | Test cases |
