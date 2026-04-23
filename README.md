@@ -6,7 +6,7 @@ GVirt是一个轻量级的XPU虚拟化前后端推理运行时。提供极简高
 #### 软件架构
 ![image](xlite/doc/images/architecture.png)
 
-- **Xlite (GVirt前端)**：轻量级Transformer模型运行时，支持多样性算力协同，当前支持在昇腾硬件上高效运行。Xlite公开了Transformer运行所需的模型构图以及算子，所有算子基于昇腾AscendC/CCE开发。目前支持Qwen系列、Llama系列、DeepSeek-R1模型。详见 [Xlite README](xlite/README.md)。。
+- **Xlite (GVirt前端)**：轻量级Transformer模型运行时，支持多样性算力协同，当前支持在昇腾硬件上高效运行。Xlite公开了Transformer运行所需的模型构图以及算子，所有算子基于昇腾AscendC/CCE开发。目前支持Qwen系列、Llama系列、DeepSeek-R1模型。详见 [Xlite README](xlite/README.md)。
 
 #### 快速上手
 请参考 [Xlite 快速开始](xlite/README.md#快速开始)
