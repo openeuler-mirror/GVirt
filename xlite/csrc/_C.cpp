@@ -89,7 +89,15 @@ public:
     std::vector<at::Tensor> mlpNorm;
     std::vector<at::Tensor> mlpNormBias;
     std::vector<at::Tensor> mlpUpGate;
+    std::vector<at::Tensor> mlpUpGateInputScale;
+    std::vector<at::Tensor> mlpUpGateInputOffset;
+    std::vector<at::Tensor> mlpUpGateQuantBias;
+    std::vector<at::Tensor> mlpUpGateDeqScale;
     std::vector<at::Tensor> mlpDown;
+    std::vector<at::Tensor> mlpDownInputScale;
+    std::vector<at::Tensor> mlpDownInputOffset;
+    std::vector<at::Tensor> mlpDownQuantBias;
+    std::vector<at::Tensor> mlpDownDeqScale;
 
     std::vector<at::Tensor> moeGate;
     std::vector<at::Tensor> moeGateBias;
@@ -310,6 +318,24 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         throw std::invalid_argument("Mismatched number of dense layers up gate or down parameters");
     }
 
+    if ((!mlpUpGateInputScale.empty() && mlpUpGateInputScale.size() != c.nDenseLayers) ||
+        (!mlpUpGateInputOffset.empty() && mlpUpGateInputOffset.size() != c.nDenseLayers) ||
+        (!mlpUpGateQuantBias.empty() && mlpUpGateQuantBias.size() != c.nDenseLayers) ||
+        (!mlpUpGateDeqScale.empty() && mlpUpGateDeqScale.size() != c.nDenseLayers)) {
+        std::cerr << __FILE__ << ":" << __LINE__
+                  << ": num of dense layers: " << mlpUpGateInputScale.size() << std::endl;
+        throw std::invalid_argument("Mismatched number of dense layers up gate quanted parameters");
+    }
+
+    if ((!mlpDownInputScale.empty() && mlpDownInputScale.size() != c.nDenseLayers) ||
+        (!mlpDownInputOffset.empty() && mlpDownInputOffset.size() != c.nDenseLayers) ||
+        (!mlpDownQuantBias.empty() && mlpDownQuantBias.size() != c.nDenseLayers) ||
+        (!mlpDownDeqScale.empty() && mlpDownDeqScale.size() != c.nDenseLayers)) {
+        std::cerr << __FILE__ << ":" << __LINE__
+                  << ": num of dense layers: " << mlpDownInputScale.size() << std::endl;
+        throw std::invalid_argument("Mismatched number of dense layers down quanted parameters");
+    }
+
     if (moeREUpGate.size() != nRE || moeREDown.size() != nRE) {
         std::cerr << __FILE__ << ":" << __LINE__
                   << ": num of routed experts: " << moeREUpGate.size() << std::endl;
@@ -412,6 +438,21 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     for (uint32_t i = 0; i < c.nDenseLayers; i++) {
         InitXTensor(_model->mlpUpGate[i], mlpUpGate[i]);
         InitXTensor(_model->mlpDown[i], mlpDown[i]);
+        if (!mlpUpGateInputScale.empty()) {
+            InitXTensor(_model->mlpUpGateInputScale[i], mlpUpGateInputScale[i]);
+            InitXTensor(_model->mlpUpGateInputOffset[i], mlpUpGateInputOffset[i]);
+            InitXTensor(_model->mlpUpGateQuantBias[i], mlpUpGateQuantBias[i]);
+            InitXTensor(_model->mlpUpGateDeqScale[i], mlpUpGateDeqScale[i]);
+        }
+        if (!mlpDownInputScale.empty()) {
+            InitXTensor(_model->mlpDownInputScale[i], mlpDownInputScale[i]);
+            InitXTensor(_model->mlpDownInputOffset[i], mlpDownInputOffset[i]);
+            if (tp_rank % c.defTpSize == 0) {
+                // Notice: only tp_rank == 0 in RowParallelLinear need to add quant_bias
+                InitXTensor(_model->mlpDownQuantBias[i], mlpDownQuantBias[i]);
+            }
+            InitXTensor(_model->mlpDownDeqScale[i], mlpDownDeqScale[i]);
+        }
     }
 
     for (uint32_t i = c.nDenseLayers; i < c.nLayers; i++) {
@@ -1356,7 +1397,15 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("mlp_norm", &_CModel::mlpNorm)
         .def_readwrite("mlp_norm_bias", &_CModel::mlpNormBias)
         .def_readwrite("mlp_up_gate", &_CModel::mlpUpGate)
+        .def_readwrite("mlp_up_gate_input_scale", &_CModel::mlpUpGateInputScale)
+        .def_readwrite("mlp_up_gate_input_offset", &_CModel::mlpUpGateInputOffset)
+        .def_readwrite("mlp_up_gate_quant_bias", &_CModel::mlpUpGateQuantBias)
+        .def_readwrite("mlp_up_gate_deq_scale", &_CModel::mlpUpGateDeqScale)
         .def_readwrite("mlp_down", &_CModel::mlpDown)
+        .def_readwrite("mlp_down_input_scale", &_CModel::mlpDownInputScale)
+        .def_readwrite("mlp_down_input_offset", &_CModel::mlpDownInputOffset)
+        .def_readwrite("mlp_down_quant_bias", &_CModel::mlpDownQuantBias)
+        .def_readwrite("mlp_down_deq_scale", &_CModel::mlpDownDeqScale)
         .def_readwrite("gate", &_CModel::moeGate)
         .def_readwrite("gate_bias", &_CModel::moeGateBias)
         .def_readwrite("se_up_gate", &_CModel::moeSEUpGate)
