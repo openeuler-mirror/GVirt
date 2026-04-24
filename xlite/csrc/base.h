@@ -4,6 +4,7 @@
 #ifndef _XLITE_BASE_H_
 #define _XLITE_BASE_H_
 
+#include <torch/torch.h>
 #include <cstdio>
 #include <iostream>
 #include <vector>
@@ -118,6 +119,30 @@ size_t inline XDtypeBit(enum XDtype dtype)
     }
 }
 
+at::ScalarType inline ToScalarType(enum XDtype dtype)
+{
+    switch (dtype) {
+        case BIT1:
+            return at::ScalarType::Bool;
+        case INT8:
+            return at::ScalarType::Char;
+        case FP16:
+            return at::ScalarType::Half;
+        case BF16:
+            return at::ScalarType::BFloat16;
+        case FP32:
+            return at::ScalarType::Float;
+        case INT32:
+            return at::ScalarType::Int;
+        case INT64:
+        case CPLXF:
+            return at::ScalarType::Long;
+        default:
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": unknown data type " + std::to_string(dtype));
+    }
+}
+
 class XTensorPool;
 class XTensor
 {
@@ -131,6 +156,7 @@ public:
     void Memset(int value);
     std::string ToStr(const char *name = "") const;
     void View(std::vector<size_t> shape);
+    void Save(std::string &path);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
     enum XTensorType GetType()
     {

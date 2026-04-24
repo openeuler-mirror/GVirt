@@ -97,6 +97,12 @@ ascendc_library(xlite_kernels_common_${RUN_MODE} SHARED ${KERNEL_FILES_COMMON})
 ascendc_library(xlite_kernels_bf16_${RUN_MODE} SHARED ${KERNEL_FILES_BF16})
 ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
 
+option(XLITE_DEBUG "Enable xlite debug mode" OFF)
+
+if(XLITE_DEBUG)
+    target_compile_definitions(xlite_core PRIVATE XLITE_DEBUG_ON)
+endif()
+
 # xlite
 add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.cpp
@@ -118,6 +124,7 @@ target_link_libraries(xlite PRIVATE
     xlite_kernels_bf16_${RUN_MODE}
     xlite_kernels_f16_${RUN_MODE}
     hccl
+    torch
 )
 
 # _C

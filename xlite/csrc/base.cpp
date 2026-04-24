@@ -319,6 +319,13 @@ void XTensor::View(std::vector<size_t> shape)
     this->numel = newNumel;
 }
 
+void XTensor::Save(std::string &path)
+{
+    auto options = at::TensorOptions().dtype(ToScalarType(dtype)).device(at::Device("npu"));
+    at::Tensor t = at::from_blob(ptr, std::vector<int64_t>(shape.begin(), shape.end()), options);
+    torch::save(t.cpu().contiguous(), path);
+}
+
 std::ostream &operator<<(std::ostream &os, const XTensor &p)
 {
     os << "[(";
