@@ -261,9 +261,9 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     XliteOpRmsNorm(rt, attnQkvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank, true,
                    XTensor(), 1, _c.qLoraRank);
     XliteOpRopeComplexAndCache(rt, 1, _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
-                               _c.qLoraRank + _c.kvLoraRank, _c.ropeHeadDim, attnQkvc, freqsCis,
-                               rt._attnPosition, _vGather, _c.blockSize, attnNormKvc, kCache,
-                               vCache, rt._attnSlotMapping);
+                               _c.qLoraRank + _c.kvLoraRank, _c.kvLoraRank, _c.ropeHeadDim,
+                               attnQkvc, freqsCis, rt._attnPosition, _vGather, _c.blockSize,
+                               attnNormKvc, kCache, vCache, rt._attnSlotMapping);
     rt.PutTensor(attnQkvc);
     rt.PutTensor(attnNormKvc);
 
@@ -287,7 +287,7 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
         XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q, freqsCis,
                            rt._attnPosition, _vGather);
         XTensor key, kCache;
-        XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim, _c.ropeHeadDim, 0, _c.indexHeadDim, k,
+        XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim, _c.ropeHeadDim, 0, 0, _c.indexHeadDim, k,
                                    freqsCis, rt._attnPosition, _vGather, _c.blockSize, key, kCache,
                                    indexKCache, rt._attnSlotMapping);
     } else {
