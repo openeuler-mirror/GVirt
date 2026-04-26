@@ -24,7 +24,15 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mlaKVNorm.resize(c.nLayers);
     mlpNorm.resize(c.nLayers);
     mlpUpGate.resize(c.nDenseLayers);
+    mlpUpGateInputScale.resize(c.nDenseLayers);
+    mlpUpGateInputOffset.resize(c.nDenseLayers);
+    mlpUpGateQuantBias.resize(c.nDenseLayers);
+    mlpUpGateDeqScale.resize(c.nDenseLayers);
     mlpDown.resize(c.nDenseLayers);
+    mlpDownInputScale.resize(c.nDenseLayers);
+    mlpDownInputOffset.resize(c.nDenseLayers);
+    mlpDownQuantBias.resize(c.nDenseLayers);
+    mlpDownDeqScale.resize(c.nDenseLayers);
     indexQB.resize(c.nLayers);
     indexK.resize(c.nLayers);
     indexKNorm.resize(c.nLayers);
@@ -493,15 +501,51 @@ void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<X
 }
 
 void XModel::ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &hiddenState,
-                        bool withAllReduce)
+                        bool withAllReduce, const XTensor &upGateInputScale,
+                        const XTensor &upGateInputOffset, const XTensor &upGateQuantBias,
+                        const XTensor &upGateDeqScale, const XTensor &downInputScale,
+                        const XTensor &downInputOffset, const XTensor &downQuantBias,
+                        const XTensor &downDeqScale)
 {
-    uint32_t m = hiddenState.shape[0];
-    XTensor &h13 = rt.GetTensor({m, upGate.shape[0]}, hiddenState.dtype, DBG_LOC);
-    XTensor &h2 = rt.GetTensor({m, down.shape[1]}, hiddenState.dtype, DBG_LOC);
+    uint32_t m = hiddenState.shape[0], k = hiddenState.shape[1];
+    uint32_t localIntermediateSize = (down.shape[0] == k) ? down.shape[1] : down.shape[0];
+    XTensor &h13 = rt.GetTensor({m, localIntermediateSize * 2}, hiddenState.dtype, DBG_LOC);
+    XTensor &h2 = rt.GetTensor({m, localIntermediateSize}, hiddenState.dtype, DBG_LOC);
 
-    XliteOpMatmul(rt, hiddenState, upGate, h13, _c.weightNZ);
+    if (upGate.dtype == INT8) {
+        XTensor &xQuanted = rt.GetTensor(hiddenState.shape, INT8, DBG_LOC);
+        XTensor upScale = upGateInputScale, upOff = upGateInputOffset, upBias = upGateQuantBias,
+                upDeq = upGateDeqScale;
+
+        XliteOpQuant(rt, hiddenState, upScale, upOff, xQuanted);
+        XTensor &outFp16 = rt.GetTensor(h13.shape, FP16, DBG_LOC);
+        XliteOpMatmul(rt, xQuanted, upGate, outFp16, _c.weightNZ || _c.quantAttnWeightNz, upBias,
+                      upDeq, _c.quantAttnWeightTrans);
+        rt.PutTensor(xQuanted);
+        XliteOpDeQuant(rt, outFp16, h13, false);
+        rt.PutTensor(outFp16);
+    } else {
+        XliteOpMatmul(rt, hiddenState, upGate, h13, _c.weightNZ);
+    }
+
     XliteOpSiluAndMul(rt, h13, h2);
-    XliteOpMatmul(rt, h2, down, hiddenState, _c.weightNZ);
+    if (down.dtype == INT8) {
+        XTensor downScale = downInputScale, downOff = downInputOffset, downBias = downQuantBias,
+                downDeq = downDeqScale;
+
+        XTensor &xQuanted = rt.GetTensor(h2.shape, INT8, DBG_LOC);
+        XliteOpQuant(rt, h2, downScale, downOff, xQuanted);
+
+        XTensor &outFp16 = rt.GetTensor(hiddenState.shape, FP16, DBG_LOC);
+        XliteOpMatmul(rt, xQuanted, down, outFp16, _c.weightNZ || _c.quantAttnWeightNz, downBias,
+                      downDeq, _c.quantAttnWeightTrans);
+        rt.PutTensor(xQuanted);
+
+        XliteOpDeQuant(rt, outFp16, hiddenState, false);
+        rt.PutTensor(outFp16);
+    } else {
+        XliteOpMatmul(rt, h2, down, hiddenState, _c.weightNZ);
+    }
 
     if (withAllReduce && _c.defTpSize > 1) {
         if (rt.multiTaskParallel) {
@@ -751,7 +795,10 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 {
     if (layer < _c.nDenseLayers) {
-        ForwardMLP(rt, mlpUpGate[layer], mlpDown[layer], hiddenState, true);
+        ForwardMLP(rt, mlpUpGate[layer], mlpDown[layer], hiddenState, true,
+                   mlpUpGateInputScale[layer], mlpUpGateInputOffset[layer],
+                   mlpUpGateQuantBias[layer], mlpUpGateDeqScale[layer], mlpDownInputScale[layer],
+                   mlpDownInputOffset[layer], mlpDownQuantBias[layer], mlpDownDeqScale[layer]);
     } else {
         ForwardMoE(rt, layer, hiddenState);
     }

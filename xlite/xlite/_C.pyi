@@ -354,7 +354,15 @@ class Model:
         mlp_norm (List[torch.Tensor]): MLP norm weights per layer.
         mlp_norm_bias (List[torch.Tensor]): MLP norm bias per layer.
         mlp_up_gate (List[torch.Tensor]): Dense up-gate weights per layer.
+        mlp_up_gate_input_scale (List[torch.Tensor]): Dense up-gate quantization input scale per layer.
+        mlp_up_gate_input_offset (List[torch.Tensor]): Dense up-gate quantization input offset per layer.
+        mlp_up_gate_quant_bias (List[torch.Tensor]): Dense up-gate quantization bias per layer.
+        mlp_up_gate_deq_scale (List[torch.Tensor]): Dense up-gate dequantization scale per layer.
         mlp_down (List[torch.Tensor]): Dense down weights per layer.
+        mlp_down_input_scale (List[torch.Tensor]): Dense down quantization input scale per layer.
+        mlp_down_input_offset (List[torch.Tensor]): Dense down quantization input offset per layer.
+        mlp_down_quant_bias (List[torch.Tensor]): Dense down quantization bias per layer.
+        mlp_down_deq_scale (List[torch.Tensor]): Dense down dequantization scale per layer.
         gate (List[torch.Tensor]): MoE gate weights per layer.
         gate_bias (List[torch.Tensor]): MoE gate bias per layer.
         se_up_gate (List[torch.Tensor]): Shared-expert up-gate weights per layer.
@@ -435,8 +443,24 @@ class Model:
     """MLP norm bias per layer."""
     mlp_up_gate: List[torch.Tensor] = ...
     """Dense up-gate weights per layer."""
+    mlp_up_gate_input_scale: List[torch.Tensor] = ...
+    """Dense up-gate quantization input scale per layer."""
+    mlp_up_gate_input_offset: List[torch.Tensor] = ...
+    """Dense up-gate quantization input offset per layer."""
+    mlp_up_gate_quant_bias: List[torch.Tensor] = ...
+    """Dense up-gate quantization bias per layer."""
+    mlp_up_gate_deq_scale: List[torch.Tensor] = ...
+    """Dense up-gate dequantization scale per layer."""
     mlp_down: List[torch.Tensor] = ...
     """Dense down weights per layer."""
+    mlp_down_input_scale: List[torch.Tensor] = ...
+    """Dense down quantization input scale per layer."""
+    mlp_down_input_offset: List[torch.Tensor] = ...
+    """Dense down quantization input offset per layer."""
+    mlp_down_quant_bias: List[torch.Tensor] = ...
+    """Dense down quantization bias per layer."""
+    mlp_down_deq_scale: List[torch.Tensor] = ...
+    """Dense down dequantization scale per layer."""
     gate: List[torch.Tensor] = ...
     """MoE gate weights per layer."""
     gate_bias: List[torch.Tensor] = ...

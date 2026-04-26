@@ -63,6 +63,7 @@ def gen_tf32_rand(n, device='cpu'):
 
 test_sizes = [
     [8192, 768, 2048],
+    [5, 6144, 1024],
 ]
 
 for weight_nz in [True, False]:
