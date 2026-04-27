@@ -555,6 +555,9 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
     bool needExtraSpace = (bias.ptr != nullptr || deqScale.ptr != nullptr);
+    uint64_t mLoop;
+    uint64_t nLoop;
+    uint64_t totalLoops;
 
     // Notice: Ensure that no overflow occurs
     // L1(512K): PINGPONG * (sizeof(x) * m0 * 2k0 + sizeof(y) * n0 * k0) + BiasSize(Optional)] +
@@ -575,9 +578,9 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         n0 = needExtraSpace ? 128 : 256;
         k0 = 4096 / XDtypeBit(weight.dtype);
 
-        uint64_t mLoop = DIV_ROUND_UP(m, m0);
-        uint64_t nLoop = DIV_ROUND_UP(n, n0);
-        uint64_t totalLoops = mLoop * nLoop;
+        mLoop = DIV_ROUND_UP(m, m0);
+        nLoop = DIV_ROUND_UP(n, n0);
+        totalLoops = mLoop * nLoop;
         uint64_t lastLoops = totalLoops % rt.aicNum;
 
         // If the data size is small, we should make a data tiling mode
@@ -601,11 +604,15 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
             }
         }
     }
+    mLoop = DIV_ROUND_UP(m, m0);
+    nLoop = DIV_ROUND_UP(n, n0);
+    totalLoops = mLoop * nLoop;
+    uint32_t aicNum = totalLoops > rt.aicNum ? rt.aicNum : totalLoops;
 
     XlitePickSwizzle(m, n, k, &swizzle);
 
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
+        aclrtlaunch_matmul_float16_t(aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                      weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr,
                                      deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16) {
@@ -613,46 +620,46 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
             XTensor &biasFp32 = rt.GetTensor(bias.shape, FP32, DBG_LOC);
             aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, bias.ptr, biasFp32.ptr,
                                               bias.numel);
-            aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
-                                          k, weightNZ, transpose, m0, n0, k0, swizzle, biasFp32.ptr,
+            aclrtlaunch_matmul_bfloat16_t(aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
+                                          weightNZ, transpose, m0, n0, k0, swizzle, biasFp32.ptr,
                                           deqScale.ptr);
             rt.PutTensor(biasFp32);
         } else {
-            aclrtlaunch_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n,
-                                          k, weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr,
+            aclrtlaunch_matmul_bfloat16_t(aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
+                                          weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr,
                                           deqScale.ptr);
         }
     } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
-        aclrtlaunch_matmul_float(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
-                                 weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
+        aclrtlaunch_matmul_float(aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k, weightNZ,
+                                 transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
         XTensor &tmp = rt.GetTensor(in.shape, FP32, DBG_LOC);
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, tmp.ptr, in.numel);
-        aclrtlaunch_matmul_float(rt.aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k,
-                                 weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
+        aclrtlaunch_matmul_float(aicNum, rt.stream, tmp.ptr, weight.ptr, out.ptr, m, n, k, weightNZ,
+                                 transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
         rt.PutTensor(tmp);
     } else if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == FP16) {
-        aclrtlaunch_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
-                                  weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
+        aclrtlaunch_matmul_int8_t(aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k, weightNZ,
+                                  transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(weight) + XT_STR(out);
         throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
-void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out)
+void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &num)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
     if (in.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_silu_and_mul_float16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr,
+        aclrtlaunch_silu_and_mul_float16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr,
                                            in.shape[0], out.shape[1]);
     } else if (in.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_silu_and_mul_bfloat16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr,
+        aclrtlaunch_silu_and_mul_bfloat16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr,
                                             in.shape[0], out.shape[1]);
     } else if (in.dtype == FP32 && out.dtype == FP32) {
-        aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0],
+        aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr, in.shape[0],
                                        out.shape[1]);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
