@@ -37,6 +37,9 @@ def matrix_nd2nz(matrix):
     """nd2nz"""
     return torch_npu.npu_format_cast(matrix, ACL_FORMAT_FRACTAL_NZ)
 
+def load_tensor(path: str):
+    data = torch.jit.load(path)
+    return data.state_dict()['0'].to("npu")
 
 def setup_logger():
     """ init logger """
