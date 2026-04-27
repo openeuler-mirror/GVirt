@@ -15,15 +15,16 @@
 // 本算子由小艺团队贡献，参考论文《XY-Serve: End-to-End Versatile Production Serving for Dynamic LLM
 // Workloads》 [ASPLOS 2026]
 template <typename SrcType, typename CalType>
-__aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, uint32_t num_tokens, uint32_t dim)
+__aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t num_tokens,
+                             uint32_t dim)
 {
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    if (pm) {
-        uint32_t pm_val = *((__gm__ uint32_t *)pm);
-        num_tokens = pm_val < num_tokens ? pm_val : num_tokens;
+    if (pnum_tokens) {
+        uint32_t pnum_tokens_val = *((__gm__ uint32_t *)pnum_tokens);
+        num_tokens = pnum_tokens_val < num_tokens ? pnum_tokens_val : num_tokens;
     }
 
     // split the matrix in a row-major manner such that each row (2 * dim elements) is contained in
@@ -143,17 +144,17 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pm, uint32_t num_toke
     pipe_barrier(PIPE_ALL);
 }
 
-#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                               \
-    extern "C" __global__ __aicore__ void silu_and_mul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR pm, \
-                                                               uint32_t n_tokens, uint32_t dim)  \
-    {                                                                                            \
-        silu_and_mul<dtype, cast_type>(x, y, pm, n_tokens, dim);                                 \
+#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                  \
+    extern "C" __global__ __aicore__ void silu_and_mul_##dtype(                     \
+        GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t n_tokens, uint32_t dim) \
+    {                                                                               \
+        silu_and_mul<dtype, cast_type>(x, y, pnum_tokens, n_tokens, dim);           \
     }
 
 #else
-#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                               \
-    extern "C" __global__ __aicore__ void silu_and_mul_##dtype(GM_ADDR x, GM_ADDR y, GM_ADDR pm, \
-                                                               uint32_t n_tokens, uint32_t dim)  \
-    {                                                                                            \
+#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                  \
+    extern "C" __global__ __aicore__ void silu_and_mul_##dtype(                     \
+        GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t n_tokens, uint32_t dim) \
+    {                                                                               \
     }
 #endif

@@ -35,7 +35,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                    uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t swizzle = MATMUL_SWIZZLE_DEFAULT_VALUE);
 
-void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out);
+void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &num = XTensor());
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale);
 void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out);
 void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t start, uint32_t end,

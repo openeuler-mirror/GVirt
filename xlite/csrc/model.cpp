@@ -648,6 +648,8 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     auto [w, r] = ForwardMoEGate(rt, layer, hiddenState);
     auto [weights, routing, unpIdx, expertsSorted, expertsCounts] =
         ForwardMoEDispatch(rt, hiddenState, w, r);
+    // actual token num for current rank
+    XTensor num = XTensor({1}, INT32, unpIdx.ptr);
 
     // routed experts
     XTensor *h13Ptr;
@@ -685,7 +687,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     }
 
     XTensor &h2 = rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize}, dtype, DBG_LOC);
-    XliteOpSiluAndMul(rt, *h13Ptr, h2);
+    XliteOpSiluAndMul(rt, *h13Ptr, h2, num);
     rt.PutTensor(*h13Ptr);
 
     XTensor *outPtr;

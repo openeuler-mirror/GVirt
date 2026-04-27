@@ -640,19 +640,19 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     }
 }
 
-void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out)
+void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &num)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
     if (in.dtype == FP16 && out.dtype == FP16) {
-        aclrtlaunch_silu_and_mul_float16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr,
+        aclrtlaunch_silu_and_mul_float16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr,
                                            in.shape[0], out.shape[1]);
     } else if (in.dtype == BF16 && out.dtype == BF16) {
-        aclrtlaunch_silu_and_mul_bfloat16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr,
+        aclrtlaunch_silu_and_mul_bfloat16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr,
                                             in.shape[0], out.shape[1]);
     } else if (in.dtype == FP32 && out.dtype == FP32) {
-        aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, nullptr, in.shape[0],
+        aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr, in.shape[0],
                                        out.shape[1]);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
