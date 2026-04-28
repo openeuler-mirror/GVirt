@@ -4,7 +4,9 @@
 #ifndef _XLITE_BASE_H_
 #define _XLITE_BASE_H_
 
+#ifdef XLITE_DEBUG_ON
 #include <torch/torch.h>
+#endif
 #include <cstdio>
 #include <iostream>
 #include <vector>
@@ -119,6 +121,7 @@ size_t inline XDtypeBit(enum XDtype dtype)
     }
 }
 
+#ifdef XLITE_DEBUG_ON
 at::ScalarType inline ToScalarType(enum XDtype dtype)
 {
     switch (dtype) {
@@ -142,6 +145,7 @@ at::ScalarType inline ToScalarType(enum XDtype dtype)
                                      ": unknown data type " + std::to_string(dtype));
     }
 }
+#endif
 
 class XTensorPool;
 class XTensor
