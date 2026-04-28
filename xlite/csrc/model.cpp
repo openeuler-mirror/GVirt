@@ -79,6 +79,7 @@ void XModel::Init(void)
     std::vector<uint32_t> gateIdx, vgatherIndices;
     std::vector<uint64_t> weights;
     size_t size;
+    bool isWeightEmpty = false;
     void *ptr;
 
     if (_c.nDenseLayers != _c.nLayers) {
@@ -104,24 +105,36 @@ void XModel::Init(void)
 
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
         for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
-            weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScale[i][j].ptr);
-        }
-        CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-        _moeREUpGateScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
-
-        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-        for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
             weights[j] = reinterpret_cast<uint64_t>(moeREDown[i][j].ptr);
         }
         CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
         _moeREDown[i].Init({_c.nRoutedExperts}, INT64, ptr);
 
-        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+        for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
+            weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScale[i][j].ptr);
+            if (weights[j] == 0) {
+                isWeightEmpty = true;
+                break;
+            }
+        }
+        if (!isWeightEmpty) {
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+            _moeREUpGateScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
+        }
+
         for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
             weights[j] = reinterpret_cast<uint64_t>(moeREDownScale[i][j].ptr);
+            if (weights[j] == 0) {
+                isWeightEmpty = true;
+                break;
+            }
         }
-        CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-        _moeREDownScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
+        if (!isWeightEmpty) {
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+            _moeREDownScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
+        }
     }
 
     if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
