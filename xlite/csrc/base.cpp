@@ -321,9 +321,11 @@ void XTensor::View(std::vector<size_t> shape)
 
 void XTensor::Save(std::string &path)
 {
+#ifdef XLITE_DEBUG_ON
     auto options = at::TensorOptions().dtype(ToScalarType(dtype)).device(at::Device("npu"));
     at::Tensor t = at::from_blob(ptr, std::vector<int64_t>(shape.begin(), shape.end()), options);
     torch::save(t.cpu().contiguous(), path);
+#endif
 }
 
 std::ostream &operator<<(std::ostream &os, const XTensor &p)
