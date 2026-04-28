@@ -6,6 +6,9 @@ set(SOC_VERSION "Ascend910B3" CACHE STRING "system on chip type")
 set(ASCEND_CANN_PACKAGE_PATH "/usr/local/Ascend/ascend-toolkit/latest"
     CACHE STRING "ASCEND CANN package installation directory"
 )
+message(STATUS "RUN_MODE: ${RUN_MODE}")
+message(STATUS "SOC_VERSION: ${SOC_VERSION}")
+message(STATUS "ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
 
 find_program(CCACHE_FOUND ccache)
 if (CCACHE_FOUND)
@@ -21,6 +24,7 @@ if(CMAKE_INSTALL_PREFIX STREQUAL /usr/local)
 else()
     set(CMAKE_INSTALL_PATH ${CMAKE_INSTALL_PREFIX})
 endif()
+message(STATUS "CMAKE_INSTALL_PATH: ${CMAKE_INSTALL_PATH}")
 
 # xlite_kernels_common_${RUN_MODE}
 file(GLOB KERNEL_FILES_COMMON
@@ -174,7 +178,20 @@ target_link_libraries(_C PRIVATE
     torch_cpu
 )
 
-set_target_properties(_C PROPERTIES LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:\$ORIGIN/../torch/lib")
+set(XLITE_EDITABLE_BUILD "OFF" CACHE STRING "Enable editable build and include torch from source path")
+if (XLITE_EDITABLE_BUILD STREQUAL "ON")
+    set(TORCH_RPATH "\$ORIGIN/../torch/lib:${TORCH_INSTALL_PREFIX}/lib")
+else()
+    set(TORCH_RPATH "\$ORIGIN/../torch/lib")
+endif()
+message(STATUS "TORCH_RPATH: ${TORCH_RPATH}")
+
+set_target_properties(xlite PROPERTIES
+    LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:${TORCH_RPATH}"
+)
+set_target_properties(_C PROPERTIES
+    LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:${TORCH_RPATH}"
+)
 
 install(TARGETS xlite_kernels_common_${RUN_MODE} xlite_kernels_bf16_${RUN_MODE} xlite_kernels_f16_${RUN_MODE} xlite
     LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib

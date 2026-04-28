@@ -30,6 +30,12 @@ pip install . --no-build-isolation  # 安装当前目录下的xlite包
 pip install -v -e .[dev] --no-build-isolation
 ```
 
+若仅需测试正在开发的功能，可直接从主分支安装：
+
+```bash
+pip install git+https://atomgit.com/openeuler/GVirt.git@master#subdirectory=xlite
+```
+
 ## 编译
 
 需提前安装构建依赖：

@@ -58,6 +58,8 @@ class CMakeBuild(build_ext):
         build_temp = Path(self.build_temp or (ROOT_DIR / "cmake_build")).resolve()
         build_temp.mkdir(parents=True, exist_ok=True)
 
+        is_editable = self.inplace or any(x in sys.argv for x in ("develop", "editable_wheel"))
+        print(f"CMakeBuild: Building in {'editable' if is_editable else 'standard'} mode")
         install_prefix = Path(self.build_lib).resolve()
         cmake_prefix_paths = ";".join(
             [_get_pybind11_cmake_dir(), _get_torch_cmake_dir()]
@@ -71,6 +73,7 @@ class CMakeBuild(build_ext):
             str(build_temp),
             f"-DCMAKE_INSTALL_PREFIX={install_prefix}",
             f"-DCMAKE_PREFIX_PATH={cmake_prefix_paths}",
+            f"-DXLITE_EDITABLE_BUILD={'ON' if is_editable else 'OFF'}",
         ]
         build_cmd = ["cmake", "--build", str(build_temp), "-j"]
         install_cmd = ["cmake", "--install", str(build_temp)]
@@ -84,6 +87,23 @@ class CMakeBuild(build_ext):
             artifact_dir = install_prefix / artifact_dir_sub
             if artifact_dir.exists():
                 shutil.rmtree(artifact_dir)
+
+        # Manually sync auxiliary libraries for editable installs
+        if is_editable:
+            cmake_lib_dir = install_prefix / "xlite" / "lib"
+            source_tree_lib_dir = ROOT_DIR / "xlite" / "lib"
+
+            if not cmake_lib_dir.exists():
+                raise RuntimeError(f"Expected CMake install to produce {cmake_lib_dir}, but it was not found.")
+
+            if cmake_lib_dir.resolve() == source_tree_lib_dir.resolve():
+                return
+
+            # move the .so files to the source tree for editable installs
+            source_tree_lib_dir.mkdir(parents=True, exist_ok=True)
+            for so_file in cmake_lib_dir.glob("*.so"):
+                shutil.copy2(so_file, source_tree_lib_dir / so_file.name)
+                print(f"Editable install detected: Copied {so_file} to {source_tree_lib_dir}")
 
 
 setup(
