@@ -18,7 +18,10 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t 
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    uint32_t n_pad = ROUND_UP(n, (256 / sizeof(dtype)));
+    // calculate n_tile to avoid UB overflow
+    uint32_t n_tile = 7168;
+    uint32_t n_loop = DIV_ROUND_UP(n, n_tile);
+    uint32_t n_pad = ROUND_UP(n_tile, (256 / sizeof(dtype)));
 
     GMA(dtype) in_gm_buf = reinterpret_cast<GMA(dtype)>(in);
     GMA(float32_t) scale_gm_buf = reinterpret_cast<GMA(float32_t)>(scale);
@@ -58,49 +61,53 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t 
     int event_id = 0;
 
     for (uint32_t process = block_idx; process < m; process += uint32_t(block_num)) {
-        // GM -> UB, in_gm_buf -> in_ub_buf
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
-        copy_gm_to_ubuf_align_b16(in_ub_buf[event_id], in_gm_buf + process * n, 0, 1,
-                                  n * sizeof(dtype), 0, 0, 0, 0);
-        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + event_id);
+        for (uint32_t loop = 0; loop < n_loop; loop++) {
+            uint32_t n_offset = loop * n_tile;
+            uint32_t n_size = (loop == n_loop - 1) ? (n - n_offset) : n_tile;
+            uint32_t n_size_pad = ROUND_UP(n_size, (256 / sizeof(dtype)));
+            uint32_t n_repeats = DIV_ROUND_UP(n_size_pad, VECTOR_MAX_NUM_OF_FP32);
+            // GM -> UB, in_gm_buf -> in_ub_buf
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
+            copy_gm_to_ubuf_align_b16(in_ub_buf[event_id], in_gm_buf + process * n + n_offset, 0, 1,
+                                      n_size * sizeof(dtype), 0, 0, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + event_id);
 
-        if (hasScale) {
-            // GM -> UB, scale_gm_buf -> scale_ub_buf
-            copy_gm_to_ubuf_align_b16(scale_ub_buf, scale_gm_buf + process, 0, 1, sizeof(float), 0,
-                                      0, 0, 0);
-            set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-        }
+            if (hasScale) {
+                // GM -> UB, scale_gm_buf -> scale_ub_buf
+                copy_gm_to_ubuf_align_b16(scale_ub_buf, scale_gm_buf + process, 0, 1, sizeof(float),
+                                          0, 0, 0, 0);
+                set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+            }
 
-        // bf16 > fp32
-        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + event_id);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + event_id);
-        vconv_f162f32(tmp_ub_buf[event_id], in_ub_buf[event_id],
-                      DIV_ROUND_UP(n, VECTOR_MAX_NUM_OF_FP32), 1, 1, 8, 4);
-        pipe_barrier(PIPE_V);
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
-
-        // VMULS, tmp_ub_buf -> VMULS(in * scale) -> tmp_ub_buf
-        if (hasScale) {
-            wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-            vmuls(mul_ub_buf[event_id], tmp_ub_buf[event_id], float(*scale_ub_buf),
-                  DIV_ROUND_UP(n, VECTOR_MAX_NUM_OF_FP32), 1, 1, 8, 8);
+            // bf16 > fp32
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + event_id);
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + event_id);
+            vconv_f162f32(tmp_ub_buf[event_id], in_ub_buf[event_id], n_repeats, 1, 1, 8, 4);
             pipe_barrier(PIPE_V);
-            tmp_ptr = mul_ub_buf[event_id];
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
+
+            // VMULS, tmp_ub_buf -> VMULS(in * scale) -> tmp_ub_buf
+            if (hasScale) {
+                wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+                vmuls(mul_ub_buf[event_id], tmp_ub_buf[event_id], float(*scale_ub_buf), n_repeats,
+                      1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+                tmp_ptr = mul_ub_buf[event_id];
+            }
+            tmp_ptr = hasScale ? mul_ub_buf[event_id] : tmp_ub_buf[event_id];
+
+            // F32 -> BF16
+            vconv_f322bf16r(out_ub_buf[event_id], tmp_ptr, n_repeats, 1, 1, 4, 8);
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + event_id);
+
+            // UB -> GM, out_ub_buf -> out_gm_buf
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + event_id);
+            copy_ubuf_to_gm_align_b16(out_gm_buf + process * n + n_offset, out_ub_buf[event_id], 0,
+                                      1, n_size * sizeof(bfloat16_t), 0, 0, 0, 0);
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + event_id);
+
+            event_id = 1 - event_id;
         }
-        tmp_ptr = hasScale ? mul_ub_buf[event_id] : tmp_ub_buf[event_id];
-
-        // F32 -> BF16
-        vconv_f322bf16r(out_ub_buf[event_id], tmp_ptr, DIV_ROUND_UP(n, VECTOR_MAX_NUM_OF_FP32), 1,
-                        1, 4, 8);
-        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + event_id);
-
-        // UB -> GM, out_ub_buf -> out_gm_buf
-        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + event_id);
-        copy_ubuf_to_gm_align_b16(out_gm_buf + process * n, out_ub_buf[event_id], 0, 1,
-                                  n * sizeof(bfloat16_t), 0, 0, 0, 0);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + event_id);
-
-        event_id = 1 - event_id;
     }
 
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
