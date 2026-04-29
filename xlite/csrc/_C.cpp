@@ -74,10 +74,9 @@ public:
     std::vector<at::Tensor> mhaQNormBias;
     std::vector<at::Tensor> mhaKNorm;
     std::vector<at::Tensor> mhaKNormBias;
-    std::vector<at::Tensor> mlaQA;
+    std::vector<at::Tensor> mlaQKVA;
     std::vector<at::Tensor> mlaQB;
     std::vector<at::Tensor> mlaQNorm;
-    std::vector<at::Tensor> mlaKVA;
     std::vector<at::Tensor> mlaKVB;
     std::vector<at::Tensor> mlaKVNorm;
     std::vector<at::Tensor> indexQB;
@@ -256,10 +255,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     }
 
     if (c.attnType == XMODEL_ATTN_MLA) {
-        if (mlaQA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
-            mlaQNorm.size() != c.nLayers || mlaKVA.size() != c.nLayers ||
-            mlaKVB.size() != c.nLayers || mlaKVNorm.size() != c.nLayers) {
-            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQA.size()
+        if (mlaQKVA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
+            mlaQNorm.size() != c.nLayers || mlaKVB.size() != c.nLayers ||
+            mlaKVNorm.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQKVA.size()
                       << std::endl;
             throw std::invalid_argument("Mismatched number of layers MLA attention QA/QB/QA "
                                         "norm/KVA/KVB/KV norm parameters");
@@ -290,10 +289,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 "Mismatched number of layers MHA attention Q/K norm bias parameters");
         }
     } else if (c.attnType == XMODEL_ATTN_DSA) {
-        if (mlaQA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
-            mlaQNorm.size() != c.nLayers || mlaKVA.size() != c.nLayers ||
-            mlaKVB.size() != c.nLayers || mlaKVNorm.size() != c.nLayers) {
-            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQA.size()
+        if (mlaQKVA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
+            mlaQNorm.size() != c.nLayers || mlaKVB.size() != c.nLayers ||
+            mlaKVNorm.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQKVA.size()
                       << std::endl;
             throw std::invalid_argument("Mismatched number of layers DSA attention QA/QB/QA "
                                         "norm/KVA/KVB/KV norm parameters");
@@ -393,10 +392,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         }
         InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
         if (c.attnType == XMODEL_ATTN_MLA) {
-            InitXTensor(_model->mlaQA[i], mlaQA[i]);
+            InitXTensor(_model->mlaQKVA[i], mlaQKVA[i]);
             InitXTensor(_model->mlaQB[i], mlaQB[i]);
             InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
-            InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
             InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
         } else if (c.attnType == XMODEL_ATTN_MHA) {
@@ -421,10 +419,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 }
             }
         } else if (c.attnType == XMODEL_ATTN_DSA) {
-            InitXTensor(_model->mlaQA[i], mlaQA[i]);
+            InitXTensor(_model->mlaQKVA[i], mlaQKVA[i]);
             InitXTensor(_model->mlaQB[i], mlaQB[i]);
             InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
-            InitXTensor(_model->mlaKVA[i], mlaKVA[i]);
             InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
             InitXTensor(_model->indexQB[i], indexQB[i]);
@@ -1383,10 +1380,9 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("mha_q_norm_bias", &_CModel::mhaQNormBias)
         .def_readwrite("mha_k_norm", &_CModel::mhaKNorm)
         .def_readwrite("mha_k_norm_bias", &_CModel::mhaKNormBias)
-        .def_readwrite("mla_q_a", &_CModel::mlaQA)
+        .def_readwrite("mla_qkv_a", &_CModel::mlaQKVA)
         .def_readwrite("mla_q_b", &_CModel::mlaQB)
         .def_readwrite("mla_q_norm", &_CModel::mlaQNorm)
-        .def_readwrite("mla_kv_a", &_CModel::mlaKVA)
         .def_readwrite("mla_kv_b", &_CModel::mlaKVB)
         .def_readwrite("mla_kv_norm", &_CModel::mlaKVNorm)
         .def_readwrite("index_q_b", &_CModel::indexQB)

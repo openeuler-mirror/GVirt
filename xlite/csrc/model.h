@@ -129,10 +129,9 @@ public:
     std::vector<XTensor> mhaKNorm;
     std::vector<XTensor> mhaKNormBias;
 
-    std::vector<XTensor> mlaQA;
+    std::vector<XTensor> mlaQKVA;
     std::vector<XTensor> mlaQB;
     std::vector<XTensor> mlaQNorm;
-    std::vector<XTensor> mlaKVA;
     std::vector<XTensor> mlaKVB;
     std::vector<XTensor> mlaKVNorm;
 

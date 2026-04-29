@@ -7,10 +7,13 @@
 
 #ifdef __DAV_C220_VEC__
 template <typename Dtype>
-__aicore__ __inline__ void rope_complex_and_cache(
-    uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim, uint32_t offset,
-    uint32_t vdim, GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position, GM_ADDR indices,
-    uint32_t block_size, GM_ADDR key, GM_ADDR kcache, GM_ADDR vcache, GM_ADDR slot_mapping)
+__aicore__ __inline__ void rope_complex_and_cache(uint32_t nTokens, uint32_t nLocalHeads,
+                                                  uint32_t qDim, uint32_t qkRopeHeadDim,
+                                                  uint32_t offset, uint32_t kdim, uint32_t vdim,
+                                                  GM_ADDR q_ptr, GM_ADDR freqs_ptr,
+                                                  GM_ADDR position, GM_ADDR indices,
+                                                  uint32_t block_size, GM_ADDR key, GM_ADDR kcache,
+                                                  GM_ADDR vcache, GM_ADDR slot_mapping)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -60,16 +63,15 @@ __aicore__ __inline__ void rope_complex_and_cache(
             wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
         }
         if (need_k_cache) {
-            uint32_t k_dim = offset;
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-            copy_gm_to_ubuf(kinput, (__gm__ Dtype *)(key) + index * k_dim, 0, 1,
-                            DIV_ROUND_UP(k_dim * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+            copy_gm_to_ubuf(kinput, (__gm__ Dtype *)(key) + index * kdim, 0, 1,
+                            DIV_ROUND_UP(kdim * sizeof(Dtype), BLOCK_SIZE), 0, 0);
             set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
             auto *kcache_ptr = ((__gm__ Dtype *)(kcache)) +
-                               block * nLocalHeads * block_size * k_dim + block_offset * k_dim;
+                               block * nLocalHeads * block_size * kdim + block_offset * kdim;
             copy_ubuf_to_gm(kcache_ptr, kinput, 0, 1,
-                            DIV_ROUND_UP(k_dim * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+                            DIV_ROUND_UP(kdim * sizeof(Dtype), BLOCK_SIZE), 0, 0);
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
         }
 
@@ -173,24 +175,24 @@ __aicore__ __inline__ void rope_complex_and_cache(
     pipe_barrier(PIPE_ALL);
 }
 
-#define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                  \
-    extern "C" __global__ __aicore__ void rope_complex_and_cache_##dtype(                      \
-        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,         \
-        uint32_t offset, uint32_t vdim, GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position,    \
-        GM_ADDR indices, uint32_t block_size, GM_ADDR key, GM_ADDR kcache, GM_ADDR vcache,     \
-        GM_ADDR slot_mapping)                                                                  \
-    {                                                                                          \
-        rope_complex_and_cache<dtype>(nTokens, nLocalHeads, qDim, qkRopeHeadDim, offset, vdim, \
-                                      q_ptr, freqs_ptr, position, indices, block_size, key,    \
-                                      kcache, vcache, slot_mapping);                           \
+#define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                     \
+    extern "C" __global__ __aicore__ void rope_complex_and_cache_##dtype(                         \
+        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,            \
+        uint32_t offset, uint32_t kdim, uint32_t vdim, GM_ADDR q_ptr, GM_ADDR freqs_ptr,          \
+        GM_ADDR position, GM_ADDR indices, uint32_t block_size, GM_ADDR key, GM_ADDR kcache,      \
+        GM_ADDR vcache, GM_ADDR slot_mapping)                                                     \
+    {                                                                                             \
+        rope_complex_and_cache<dtype>(nTokens, nLocalHeads, qDim, qkRopeHeadDim, offset, kdim,    \
+                                      vdim, q_ptr, freqs_ptr, position, indices, block_size, key, \
+                                      kcache, vcache, slot_mapping);                              \
     }
 #else
-#define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                               \
-    extern "C" __global__ __aicore__ void rope_complex_##dtype(                             \
-        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,      \
-        uint32_t offset, uint32_t vdim, GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position, \
-        GM_ADDR indices, uint32_t block_size, GM_ADDR key, GM_ADDR kcache, GM_ADDR vcache,  \
-        GM_ADDR slot_mapping)                                                               \
-    {                                                                                       \
+#define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                \
+    extern "C" __global__ __aicore__ void rope_complex_##dtype(                              \
+        uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim,       \
+        uint32_t offset, uint32_t kdim, uint32_t vdim, GM_ADDR q_ptr, GM_ADDR freqs_ptr,     \
+        GM_ADDR position, GM_ADDR indices, uint32_t block_size, GM_ADDR key, GM_ADDR kcache, \
+        GM_ADDR vcache, GM_ADDR slot_mapping)                                                \
+    {                                                                                        \
     }
 #endif
