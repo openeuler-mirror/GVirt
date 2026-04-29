@@ -595,7 +595,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
             } else if (n <= static_cast<uint64_t>(128) * rt.aicNum) {
                 n0 = 128;
             } else if (n <= static_cast<uint64_t>(256) * rt.aicNum) {
-                n0 = 256;
+                n0 = needExtraSpace ? 128 : 256;
             } else {
                 m0 = m0 > 64 ? 64 : m0;
                 // BiasTable(1K): 4 * n0 <= 1K, so that n0 <= 256
