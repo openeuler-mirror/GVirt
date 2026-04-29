@@ -75,6 +75,10 @@ vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xli
 
 编译构建、容器镜像、源码安装等开发相关内容，请参考 [开发指南](doc/contributing.md)
 
+## 环境变量
+
+xlite使用的环境变量及其配置方法，请参考 [环境变量](doc/ENVIRONMENT_VARIABLES.md)
+
 ## 目录结构
 
 ```
