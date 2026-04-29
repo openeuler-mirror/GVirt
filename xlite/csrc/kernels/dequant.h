@@ -11,12 +11,17 @@
 #ifdef __DAV_C220_VEC__
 
 template <typename dtype>
-__aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t m, uint32_t n,
-                               bool hasScale)
+__aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens,
+                               uint32_t m, uint32_t n, bool hasScale)
 {
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
+
+    if (pnum_tokens) {
+        uint32_t pnum_tokens_val = *((__gm__ uint32_t *)pnum_tokens);
+        m = pnum_tokens_val < m ? pnum_tokens_val : m;
+    }
 
     // calculate n_tile to avoid UB overflow
     uint32_t n_tile = 7168;
@@ -119,14 +124,16 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t 
 
 #define DEQUANT_FUNC_DEFINE(dtype)                                                                \
     extern "C" __global__ __aicore__ void dequant_##dtype(GM_ADDR in, GM_ADDR scale, GM_ADDR out, \
-                                                          uint32_t m, uint32_t n, bool has_scale) \
+                                                          GM_ADDR pnum_tokens, uint32_t m,        \
+                                                          uint32_t n, bool has_scale)             \
     {                                                                                             \
-        dequant<dtype>(in, scale, out, m, n, has_scale);                                          \
+        dequant<dtype>(in, scale, out, pnum_tokens, m, n, has_scale);                             \
     }
 #else
 #define DEQUANT_FUNC_DEFINE(dtype)                                                                \
     extern "C" __global__ __aicore__ void dequant_##dtype(GM_ADDR in, GM_ADDR scale, GM_ADDR out, \
-                                                          uint32_t m, uint32_t n, bool has_scale) \
+                                                          GM_ADDR pnum_tokens, uint32_t m,        \
+                                                          uint32_t n, bool has_scale)             \
     {                                                                                             \
     }
 #endif

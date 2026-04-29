@@ -1045,7 +1045,7 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
     }
 }
 
-void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out)
+void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, const XTensor &num)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1053,14 +1053,16 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out)
     size_t m = x.shape[0];
     size_t n = x.shape[1];
     if (x.dtype == BF16) {
-        aclrtlaunch_quant_bf16_to_i8_dynamic(rt.aivNum, rt.stream, x.ptr, scale.ptr, out.ptr, m, n);
+        aclrtlaunch_quant_bf16_to_i8_dynamic(rt.aivNum, rt.stream, x.ptr, scale.ptr, out.ptr,
+                                             num.ptr, m, n);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(x);
         throw std::runtime_error(err_str + " unsupported!");
     }
 }
 
-void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, bool hasScale, const XTensor &scale)
+void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, bool hasScale, const XTensor &scale,
+                    const XTensor &num)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1068,8 +1070,8 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, bool hasScale, cons
     size_t m = in.shape[0];
     size_t n = in.shape[1];
     if (in.dtype == FP16) {
-        aclrtlaunch_dequant_float16_t(rt.aivNum, rt.stream, in.ptr, scale.ptr, out.ptr, m, n,
-                                      hasScale);
+        aclrtlaunch_dequant_float16_t(rt.aivNum, rt.stream, in.ptr, scale.ptr, out.ptr, num.ptr, m,
+                                      n, hasScale);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in);
         throw std::runtime_error(err_str + " unsupported!");

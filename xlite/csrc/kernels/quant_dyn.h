@@ -7,12 +7,17 @@
 
 #ifdef __DAV_C220_VEC__
 
-__aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, uint32_t m,
-                                        uint32_t k)
+__aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM_ADDR pnum_tokens,
+                                        uint32_t m, uint32_t k)
 {
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
+
+    if (pnum_tokens) {
+        uint32_t pnum_tokens_val = *((__gm__ uint32_t *)pnum_tokens);
+        m = pnum_tokens_val < m ? pnum_tokens_val : m;
+    }
 
     uint32_t k_pad = ROUND_UP(k, (256 / sizeof(bfloat16_t)));
 
@@ -91,17 +96,17 @@ __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, ui
     pipe_barrier(PIPE_ALL);
 }
 
-#define QUANT_DYN_FUNC_DEFINE(dtype)                                    \
-    extern "C" __global__ __aicore__ void quant_bf16_to_i8_dynamic(     \
-        GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t m, uint32_t k) \
-    {                                                                   \
-        quant_bf16_to_i8(in, scale, out, m, k);                         \
+#define QUANT_DYN_FUNC_DEFINE(dtype)                                                         \
+    extern "C" __global__ __aicore__ void quant_bf16_to_i8_dynamic(                          \
+        GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens, uint32_t m, uint32_t k) \
+    {                                                                                        \
+        quant_bf16_to_i8(in, scale, out, pnum_tokens, m, k);                                 \
     }
 #else
-#define QUANT_DYN_FUNC_DEFINE(dtype)                                    \
-    extern "C" __global__ __aicore__ void quant_bf16_to_i8_dynamic(     \
-        GM_ADDR in, GM_ADDR scale, GM_ADDR out, uint32_t m, uint32_t k) \
-    {                                                                   \
+#define QUANT_DYN_FUNC_DEFINE(dtype)                                                         \
+    extern "C" __global__ __aicore__ void quant_bf16_to_i8_dynamic(                          \
+        GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens, uint32_t m, uint32_t k) \
+    {                                                                                        \
     }
 
 #endif
