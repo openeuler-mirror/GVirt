@@ -79,8 +79,11 @@ void XModel::Init(void)
     std::vector<uint32_t> gateIdx, vgatherIndices;
     std::vector<uint64_t> weights;
     size_t size;
-    bool isWeightEmpty = false;
+    bool isWeightEmpty = true;
     void *ptr;
+    uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
+    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
+    uint32_t end = start + nLocalRoutedExperts;
 
     if (_c.nDenseLayers != _c.nLayers) {
         gateIdx.resize(_c.nRoutedExperts);
@@ -110,11 +113,15 @@ void XModel::Init(void)
         CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
         _moeREDown[i].Init({_c.nRoutedExperts}, INT64, ptr);
 
+        isWeightEmpty = true;
         for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
-            weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScale[i][j].ptr);
-            if (weights[j] == 0) {
-                isWeightEmpty = true;
-                break;
+            if (j >= start && j < end) {
+                weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScale[i][j].ptr);
+                if (weights[j] != 0) {
+                    isWeightEmpty = false;
+                }
+            } else {
+                weights[j] = 0;
             }
         }
         if (!isWeightEmpty) {
@@ -123,13 +130,18 @@ void XModel::Init(void)
             _moeREUpGateScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
         }
 
+        isWeightEmpty = true;
         for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
-            weights[j] = reinterpret_cast<uint64_t>(moeREDownScale[i][j].ptr);
-            if (weights[j] == 0) {
-                isWeightEmpty = true;
-                break;
+            if (j >= start && j < end) {
+                weights[j] = reinterpret_cast<uint64_t>(moeREDownScale[i][j].ptr);
+                if (weights[j] != 0) {
+                    isWeightEmpty = false;
+                }
+            } else {
+                weights[j] = 0;
             }
         }
+
         if (!isWeightEmpty) {
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
@@ -391,7 +403,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XliteOpQuant(rt, hiddenState, mhaQKVInputScale[layer], mhaQKVInputOffset[layer], xQuanted);
         XliteOpMatmul(rt, xQuanted, mhaQKV[layer], qkvFp16, _c.weightNZ || _c.quantAttnWeightNz,
                       mhaQKVQuantBias[layer], mhaQKVDeqScale[layer], _c.quantAttnWeightTrans);
-        XliteOpDeQuant(rt, qkvFp16, qkv, false);
+        XliteOpDeQuant(rt, qkvFp16, qkv);
         rt.PutTensor(xQuanted);
         rt.PutTensor(qkvFp16);
     } else if (_c.addBias) {
@@ -480,7 +492,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XliteOpQuant(rt, attn, attnOutInputScale[layer], attnOutInputOffset[layer], attnQuant);
         XliteOpMatmul(rt, attnQuant, attnOut[layer], tmpState, _c.weightNZ || _c.quantAttnWeightNz,
                       attnOutQuantBias[layer], attnOutDeqScale[layer], _c.quantAttnWeightTrans);
-        XliteOpDeQuant(rt, tmpState, hiddenState, false);
+        XliteOpDeQuant(rt, tmpState, hiddenState);
         rt.PutTensor(attnQuant);
         rt.PutTensor(tmpState);
     } else {
@@ -537,7 +549,7 @@ void XModel::ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &h
         XliteOpMatmul(rt, xQuanted, upGate, outFp16, _c.weightNZ || _c.quantAttnWeightNz, upBias,
                       upDeq, _c.quantAttnWeightTrans);
         rt.PutTensor(xQuanted);
-        XliteOpDeQuant(rt, outFp16, h13, false);
+        XliteOpDeQuant(rt, outFp16, h13);
         rt.PutTensor(outFp16);
     } else {
         XliteOpMatmul(rt, hiddenState, upGate, h13, _c.weightNZ);
@@ -556,7 +568,7 @@ void XModel::ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &h
                       downDeq, _c.quantAttnWeightTrans);
         rt.PutTensor(xQuanted);
 
-        XliteOpDeQuant(rt, outFp16, hiddenState, false);
+        XliteOpDeQuant(rt, outFp16, hiddenState);
         rt.PutTensor(outFp16);
     } else {
         XliteOpMatmul(rt, h2, down, hiddenState, _c.weightNZ);
@@ -716,7 +728,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         // quant(x) -> xQuanted, perChannelScale
         XTensor &xQuanted = rt.GetTensor(expertsSorted.shape, moeReDtype, DBG_LOC);
         XTensor &scale = rt.GetTensor({expertsSorted.shape[0]}, FP32, DBG_LOC);
-        XliteOpQuantDyn(rt, expertsSorted, scale, xQuanted);
+        XliteOpQuantDyn(rt, expertsSorted, scale, xQuanted, num);
         rt.PutTensor(expertsSorted);
 
         // group_matmul(xQuanted * w13 * w13Scale) -> h13Quanted
@@ -730,7 +742,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
         // dequant(h13Quanted, perChannelScale) -> h13
         XTensor &h13 = rt.GetTensor(h13Quanted.shape, dtype, DBG_LOC);
-        XliteOpDeQuant(rt, h13Quanted, h13, true, scale);
+        XliteOpDeQuant(rt, h13Quanted, h13, true, scale, num);
         rt.PutTensor(h13Quanted);
         rt.PutTensor(scale);
         h13Ptr = &h13;
@@ -754,7 +766,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         // quant(x) -> xQuanted, perChannelScale
         XTensor &xQuanted = rt.GetTensor(h2.shape, moeReDtype, DBG_LOC);
         XTensor &scale = rt.GetTensor({h2.shape[0]}, FP32, DBG_LOC);
-        XliteOpQuantDyn(rt, h2, scale, xQuanted);
+        XliteOpQuantDyn(rt, h2, scale, xQuanted, num);
         rt.PutTensor(h2);
 
         // group_matmul(xQuanted * w2 * w2Scale) -> outQuanted
@@ -767,7 +779,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
         // dequant(outQuanted, perChannelScale) -> out
         XTensor &out = rt.GetTensor(outQuanted.shape, dtype, DBG_LOC);
-        XliteOpDeQuant(rt, outQuanted, out, true, scale);
+        XliteOpDeQuant(rt, outQuanted, out, true, scale, num);
         rt.PutTensor(outQuanted);
         rt.PutTensor(scale);
         outPtr = &out;
