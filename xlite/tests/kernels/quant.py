@@ -47,7 +47,8 @@ m = 8192
 n = 2048
 test_cases = [
     [8192, 2048],
-    [20000, 96]
+    [20000, 96],
+    [20000, 12288],
 ]
 for m, n in test_cases:
     in_type = torch.bfloat16

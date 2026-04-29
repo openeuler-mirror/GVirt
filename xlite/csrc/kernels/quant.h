@@ -23,102 +23,130 @@ __aicore__ inline void quant_bf16_to_i8(GM_ADDR in, GM_ADDR scale_reciprocal, GM
     __gm__ bfloat16_t *offset_gm = reinterpret_cast<__gm__ bfloat16_t *>(offset);
     __gm__ int8_t *out_buf = reinterpret_cast<__gm__ int8_t *>(out);
 
-    uint32_t k_pad = ROUND_UP(k, (256 / sizeof(bfloat16_t)));
+    // calculate k_tile to avoid UB overflow
+    uint32_t k_tile = 4096;
+    uint32_t k_loop = DIV_ROUND_UP(k, k_tile);
 
     auto *x_ping = reinterpret_cast<__ubuf__ bfloat16_t *>((uintptr_t)0);
-    auto *x_pong = reinterpret_cast<__ubuf__ bfloat16_t *>(x_ping + k_pad);
+    auto *x_pong = reinterpret_cast<__ubuf__ bfloat16_t *>(x_ping + k_tile);
 
-    auto *xf32_ping = reinterpret_cast<__ubuf__ float *>(x_pong + k_pad);
-    auto *xf32_pong = reinterpret_cast<__ubuf__ float *>(xf32_ping + k_pad);
+    auto *xf32_ping = reinterpret_cast<__ubuf__ float *>(x_pong + k_tile);
+    auto *xf32_pong = reinterpret_cast<__ubuf__ float *>(xf32_ping + k_tile);
 
-    // need align with 256B
-    auto *xf16_ping = reinterpret_cast<__ubuf__ half *>(xf32_pong + k_pad);
-    auto *xf16_pong = reinterpret_cast<__ubuf__ half *>(xf16_ping + k_pad);
+    auto *xf16_ping = reinterpret_cast<__ubuf__ half *>(xf32_pong + k_tile);
+    auto *xf16_pong = reinterpret_cast<__ubuf__ half *>(xf16_ping + k_tile);
 
-    auto *z_ping = reinterpret_cast<__ubuf__ int8_t *>(xf16_pong + k_pad);
-    auto *z_pong = reinterpret_cast<__ubuf__ int8_t *>(z_ping + k_pad);
+    auto *z_ping = reinterpret_cast<__ubuf__ int8_t *>(xf16_pong + k_tile);
+    auto *z_pong = reinterpret_cast<__ubuf__ int8_t *>(z_ping + k_tile);
 
-    auto *scale_buf = reinterpret_cast<__ubuf__ bfloat16_t *>(z_pong + k_pad);
-    auto *offset_buf = reinterpret_cast<__ubuf__ bfloat16_t *>(scale_buf + k_pad);
-    auto *scale_fp32_buf = reinterpret_cast<__ubuf__ float *>(offset_buf + k_pad);
-    auto *offset_fp32_buf = reinterpret_cast<__ubuf__ float *>(scale_fp32_buf + k_pad);
+    auto *scale_ping = reinterpret_cast<__ubuf__ bfloat16_t *>(z_pong + k_tile);
+    auto *scale_pong = reinterpret_cast<__ubuf__ bfloat16_t *>(scale_ping + k_tile);
+    auto *offset_ping = reinterpret_cast<__ubuf__ bfloat16_t *>(scale_pong + k_tile);
+    auto *offset_pong = reinterpret_cast<__ubuf__ bfloat16_t *>(offset_ping + k_tile);
+    auto *scale_fp32_ping = reinterpret_cast<__ubuf__ float *>(offset_pong + k_tile);
+    auto *scale_fp32_pong = reinterpret_cast<__ubuf__ float *>(scale_fp32_ping + k_tile);
+    auto *offset_fp32_ping = reinterpret_cast<__ubuf__ float *>(scale_fp32_pong + k_tile);
+    auto *offset_fp32_pong = reinterpret_cast<__ubuf__ float *>(offset_fp32_ping + k_tile);
 
-    auto *end_addr = reinterpret_cast<__ubuf__ float *>(offset_fp32_buf + k_pad);
+    auto *end_addr = reinterpret_cast<__ubuf__ float *>(offset_fp32_pong + k_tile);
     assert((uint64_t)end_addr <= UB_SIZE);
 
     __ubuf__ bfloat16_t *x_bufs[2] = {x_ping, x_pong};
     __ubuf__ float32_t *xf32_bufs[2] = {xf32_ping, xf32_pong};
     __ubuf__ half *xf16_bufs[2] = {xf16_ping, xf16_pong};
     __ubuf__ int8_t *z_bufs[2] = {z_ping, z_pong};
+    __ubuf__ bfloat16_t *scale_bufs[2] = {scale_ping, scale_pong};
+    __ubuf__ bfloat16_t *offset_bufs[2] = {offset_ping, offset_pong};
+    __ubuf__ float *scale_fp32_bufs[2] = {scale_fp32_ping, scale_fp32_pong};
+    __ubuf__ float *offset_fp32_bufs[2] = {offset_fp32_ping, offset_fp32_pong};
 
-    int eventId = 0;
+    int event_id = 0;
+    int scale_offset_event_id = 0;
+
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
 
-    // scale_reciprocal GM -> UB
-    copy_gm_to_ubuf_align_b16(scale_buf, scale_reciprocal_gm, 0, 1, k * 2, 0, 0, 0, 0);
-    // offset GM -> UB
-    copy_gm_to_ubuf_align_b16(offset_buf, offset_gm, 0, 1, k * 2, 0, 0, 0, 0);
-    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
-    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+    for (uint32_t loop = 0; loop < k_loop; loop++) {
+        uint32_t k_offset = loop * k_tile;
+        bool last_loop = (loop == k_loop - 1);
+        uint32_t k_size = last_loop ? (k - k_offset) : k_tile;
+        uint32_t k_size_pad = ROUND_UP(k_size, VECTOR_MAX_NUM_OF_BF16);
+        uint32_t k_repeats = k_size_pad / VECTOR_MAX_NUM_OF_FP32;
 
-    vconv_bf162f32(scale_fp32_buf, scale_buf, k_pad / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8, 4);
-    vconv_bf162f32(offset_fp32_buf, offset_buf, k_pad / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8, 4);
-    pipe_barrier(PIPE_V);
+        wait_flag(PIPE_V, PIPE_MTE2, scale_offset_event_id + EVENT_ID2);
+        // scale_reciprocal GM -> UB
+        copy_gm_to_ubuf_align_b16(scale_bufs[scale_offset_event_id], scale_reciprocal_gm + k_offset,
+                                  0, 1, k_size * sizeof(bfloat16_t), 0, 0, 0, 0);
+        // offset GM -> UB
+        copy_gm_to_ubuf_align_b16(offset_bufs[scale_offset_event_id], offset_gm + k_offset, 0, 1,
+                                  k_size * sizeof(bfloat16_t), 0, 0, 0, 0);
+        set_flag(PIPE_MTE2, PIPE_V, scale_offset_event_id + EVENT_ID2);
 
-    for (uint32_t row = block_idx; row < m; row += block_num) {
-        uint32_t row_offset = row * k;
-
-        // GM -> UB
-        wait_flag(PIPE_V, PIPE_MTE2, eventId);
-        // lenBurst = k / (32B / sizeof(bfloat16))
-        copy_gm_to_ubuf(x_bufs[eventId], in_buf + row_offset, 0, 1, k / 16, 0, 0);
-        set_flag(PIPE_MTE2, PIPE_V, eventId);
-
-        // BF16 -> FP32
-        wait_flag(PIPE_MTE2, PIPE_V, eventId);
-        // vconv 接口的 repeat 以其中宽度较大的数据类型为准
-        vconv_bf162f32(xf32_bufs[eventId], x_bufs[eventId], k_pad / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8,
-                       4);
-        pipe_barrier(PIPE_V);
-        set_flag(PIPE_V, PIPE_MTE2, eventId);
-
-        // dst = src * scale_reciprocal + offset
-        vmul(xf32_bufs[eventId], xf32_bufs[eventId], scale_fp32_buf, k_pad / VECTOR_MAX_NUM_OF_FP32,
-             1, 1, 1, 8, 8, 8);
+        wait_flag(PIPE_MTE2, PIPE_V, scale_offset_event_id + EVENT_ID2);
+        vconv_bf162f32(scale_fp32_bufs[scale_offset_event_id], scale_bufs[scale_offset_event_id],
+                       k_repeats, 1, 1, 8, 4);
+        vconv_bf162f32(offset_fp32_bufs[scale_offset_event_id], offset_bufs[scale_offset_event_id],
+                       k_repeats, 1, 1, 8, 4);
         pipe_barrier(PIPE_V);
 
-        vadd(xf32_bufs[eventId], xf32_bufs[eventId], offset_fp32_buf,
-             k_pad / VECTOR_MAX_NUM_OF_FP32, 1, 1, 1, 8, 8, 8);
-        pipe_barrier(PIPE_V);
+        for (uint32_t row = block_idx; row < m; row += block_num) {
+            uint32_t row_offset = row * k + k_offset;
+            // GM -> UB
+            wait_flag(PIPE_V, PIPE_MTE2, event_id);
+            copy_gm_to_ubuf_align_b16(x_bufs[event_id], in_buf + row_offset, 0, 1,
+                                      k_size * sizeof(bfloat16_t), 0, 0, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, event_id);
 
-        // FP32 -> FP16
-        vconv_f322f16a(xf16_bufs[eventId], xf32_bufs[eventId], k_pad / VECTOR_MAX_NUM_OF_FP32, 1, 1,
-                       4, 8);
-        pipe_barrier(PIPE_V);
+            // BF16 -> FP32
+            wait_flag(PIPE_MTE2, PIPE_V, event_id);
+            // vconv 接口的 repeat 以其中宽度较大的数据类型为准
+            vconv_bf162f32(xf32_bufs[event_id], x_bufs[event_id], k_repeats, 1, 1, 8, 4);
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE2, event_id);
 
-        // // FP16 -> Int8
-        wait_flag(PIPE_MTE3, PIPE_V, eventId);
-        vconv_f162s8a(z_bufs[eventId], xf16_bufs[eventId], k_pad / VECTOR_MAX_NUM_OF_BF16, 1, 1, 4,
-                      8);
-        pipe_barrier(PIPE_V);
-        set_flag(PIPE_V, PIPE_MTE3, eventId);
+            // dst = src * scale_reciprocal + offset
+            vmul(xf32_bufs[event_id], xf32_bufs[event_id], scale_fp32_bufs[scale_offset_event_id],
+                 k_repeats, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
 
-        // UB -> GM
-        wait_flag(PIPE_V, PIPE_MTE3, eventId);
-        copy_ubuf_to_gm_align_b8(out_buf + row_offset, z_bufs[eventId], 0, 1, k, 0, 0, 0, 0);
-        set_flag(PIPE_MTE3, PIPE_V, eventId);
+            vadd(xf32_bufs[event_id], xf32_bufs[event_id], offset_fp32_bufs[scale_offset_event_id],
+                 k_repeats, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
 
-        eventId = 1 - eventId;
+            // FP32 -> FP16
+            vconv_f322f16a(xf16_bufs[event_id], xf32_bufs[event_id], k_repeats, 1, 1, 4, 8);
+            pipe_barrier(PIPE_V);
+
+            // FP16 -> Int8
+            wait_flag(PIPE_MTE3, PIPE_V, event_id);
+            vconv_f162s8a(z_bufs[event_id], xf16_bufs[event_id],
+                          k_size_pad / VECTOR_MAX_NUM_OF_FP16, 1, 1, 4, 8);
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE3, event_id);
+
+            // UB -> GM
+            wait_flag(PIPE_V, PIPE_MTE3, event_id);
+            copy_ubuf_to_gm_align_b8(out_buf + row_offset, z_bufs[event_id], 0, 1, k_size, 0, 0, 0,
+                                     0);
+            set_flag(PIPE_MTE3, PIPE_V, event_id);
+
+            event_id = 1 - event_id;
+        }
+
+        set_flag(PIPE_V, PIPE_MTE2, scale_offset_event_id + EVENT_ID2);
+        scale_offset_event_id = 1 - scale_offset_event_id;
     }
 
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-
+    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
     pipe_barrier(PIPE_ALL);
 }
 
