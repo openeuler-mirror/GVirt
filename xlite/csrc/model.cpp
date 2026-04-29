@@ -79,8 +79,11 @@ void XModel::Init(void)
     std::vector<uint32_t> gateIdx, vgatherIndices;
     std::vector<uint64_t> weights;
     size_t size;
-    bool isWeightEmpty = false;
+    bool isWeightEmpty = true;
     void *ptr;
+    uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
+    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
+    uint32_t end = start + nLocalRoutedExperts;
 
     if (_c.nDenseLayers != _c.nLayers) {
         gateIdx.resize(_c.nRoutedExperts);
@@ -110,11 +113,15 @@ void XModel::Init(void)
         CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
         _moeREDown[i].Init({_c.nRoutedExperts}, INT64, ptr);
 
+        isWeightEmpty = true;
         for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
-            weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScale[i][j].ptr);
-            if (weights[j] == 0) {
-                isWeightEmpty = true;
-                break;
+            if (j >= start && j < end) {
+                weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScale[i][j].ptr);
+                if (weights[j] != 0) {
+                    isWeightEmpty = false;
+                }
+            } else {
+                weights[j] = 0;
             }
         }
         if (!isWeightEmpty) {
@@ -123,13 +130,18 @@ void XModel::Init(void)
             _moeREUpGateScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
         }
 
+        isWeightEmpty = true;
         for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
-            weights[j] = reinterpret_cast<uint64_t>(moeREDownScale[i][j].ptr);
-            if (weights[j] == 0) {
-                isWeightEmpty = true;
-                break;
+            if (j >= start && j < end) {
+                weights[j] = reinterpret_cast<uint64_t>(moeREDownScale[i][j].ptr);
+                if (weights[j] != 0) {
+                    isWeightEmpty = false;
+                }
+            } else {
+                weights[j] = 0;
             }
         }
+
         if (!isWeightEmpty) {
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
