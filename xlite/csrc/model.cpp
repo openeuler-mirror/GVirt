@@ -400,10 +400,20 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     if (mhaQKV[layer].dtype == INT8) {
         XTensor &xQuanted = rt.GetTensor(hiddenState.shape, INT8, DBG_LOC);
         XTensor &qkvFp16 = rt.GetTensor(qkv.shape, FP16, DBG_LOC);
-        XliteOpQuant(rt, hiddenState, mhaQKVInputScale[layer], mhaQKVInputOffset[layer], xQuanted);
-        XliteOpMatmul(rt, xQuanted, mhaQKV[layer], qkvFp16, _c.weightNZ || _c.quantAttnWeightNz,
-                      mhaQKVQuantBias[layer], mhaQKVDeqScale[layer], _c.quantAttnWeightTrans);
-        XliteOpDeQuant(rt, qkvFp16, qkv);
+        if (mhaQKVInputScale[layer].ptr == nullptr) {
+            XTensor &scale = rt.GetTensor({hiddenState.shape[0]}, FP32, DBG_LOC);
+            XliteOpQuantDyn(rt, hiddenState, scale, xQuanted);
+            XliteOpMatmul(rt, xQuanted, mhaQKV[layer], qkvFp16, _c.weightNZ || _c.quantAttnWeightNz,
+                          mhaQKVQuantBias[layer], mhaQKVDeqScale[layer], _c.quantAttnWeightTrans);
+            XliteOpDeQuant(rt, qkvFp16, qkv, true, scale);
+            rt.PutTensor(scale);
+        } else {
+            XliteOpQuant(rt, hiddenState, mhaQKVInputScale[layer], mhaQKVInputOffset[layer],
+                         xQuanted);
+            XliteOpMatmul(rt, xQuanted, mhaQKV[layer], qkvFp16, _c.weightNZ || _c.quantAttnWeightNz,
+                          mhaQKVQuantBias[layer], mhaQKVDeqScale[layer], _c.quantAttnWeightTrans);
+            XliteOpDeQuant(rt, qkvFp16, qkv);
+        }
         rt.PutTensor(xQuanted);
         rt.PutTensor(qkvFp16);
     } else if (_c.addBias) {
@@ -489,10 +499,21 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     if (attnOut[layer].dtype == INT8) {
         XTensor &attnQuant = rt.GetTensor(attn.shape, INT8, DBG_LOC);
         XTensor &tmpState = rt.GetTensor(hiddenState.shape, FP16, DBG_LOC);
-        XliteOpQuant(rt, attn, attnOutInputScale[layer], attnOutInputOffset[layer], attnQuant);
-        XliteOpMatmul(rt, attnQuant, attnOut[layer], tmpState, _c.weightNZ || _c.quantAttnWeightNz,
-                      attnOutQuantBias[layer], attnOutDeqScale[layer], _c.quantAttnWeightTrans);
-        XliteOpDeQuant(rt, tmpState, hiddenState);
+        if (attnOutInputScale[layer].ptr == nullptr) {
+            XTensor &scale = rt.GetTensor({attn.shape[0]}, FP32, DBG_LOC);
+            XliteOpQuantDyn(rt, attn, scale, attnQuant);
+            XliteOpMatmul(rt, attnQuant, attnOut[layer], tmpState,
+                          _c.weightNZ || _c.quantAttnWeightNz, attnOutQuantBias[layer],
+                          attnOutDeqScale[layer], _c.quantAttnWeightTrans);
+            XliteOpDeQuant(rt, tmpState, hiddenState, true, scale);
+            rt.PutTensor(scale);
+        } else {
+            XliteOpQuant(rt, attn, attnOutInputScale[layer], attnOutInputOffset[layer], attnQuant);
+            XliteOpMatmul(rt, attnQuant, attnOut[layer], tmpState,
+                          _c.weightNZ || _c.quantAttnWeightNz, attnOutQuantBias[layer],
+                          attnOutDeqScale[layer], _c.quantAttnWeightTrans);
+            XliteOpDeQuant(rt, tmpState, hiddenState);
+        }
         rt.PutTensor(attnQuant);
         rt.PutTensor(tmpState);
     } else {
