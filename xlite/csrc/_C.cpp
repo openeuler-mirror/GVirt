@@ -377,11 +377,15 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         InitXTensor(_model->attnOut[i], attnOut[i]);
         if (!attnOutInputScale.empty()) {
             InitXTensor(_model->attnOutInputScale[i], attnOutInputScale[i]);
+        }
+        if (!attnOutInputOffset.empty()) {
             InitXTensor(_model->attnOutInputOffset[i], attnOutInputOffset[i]);
+        }
+        if (!attnOutQuantBias.empty() && tp_rank % c.defTpSize == 0) {
             // Notice: only tp_rank == 0 in RowParallelLinear need to add quant_bias
-            if (tp_rank % c.defTpSize == 0) {
-                InitXTensor(_model->attnOutQuantBias[i], attnOutQuantBias[i]);
-            }
+            InitXTensor(_model->attnOutQuantBias[i], attnOutQuantBias[i]);
+        }
+        if (!attnOutDeqScale.empty()) {
             InitXTensor(_model->attnOutDeqScale[i], attnOutDeqScale[i]);
         }
         if (!attnNormBias.empty()) {
@@ -401,8 +405,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
             if (!mhaQKVInputScale.empty()) {
                 InitXTensor(_model->mhaQKVInputScale[i], mhaQKVInputScale[i]);
+            }
+            if (!mhaQKVInputOffset.empty()) {
                 InitXTensor(_model->mhaQKVInputOffset[i], mhaQKVInputOffset[i]);
+            }
+            if (!mhaQKVQuantBias.empty()) {
                 InitXTensor(_model->mhaQKVQuantBias[i], mhaQKVQuantBias[i]);
+            }
+            if (!mhaQKVDeqScale.empty()) {
                 InitXTensor(_model->mhaQKVDeqScale[i], mhaQKVDeqScale[i]);
             }
             if (c.addBias) {
