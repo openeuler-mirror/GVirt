@@ -11,6 +11,9 @@ import torch
 import torch_npu
 from xlite._C import Runtime, group_matmul
 
+# allow weight_nz
+torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
+
 npu_id = 0
 npu_dev = f"npu:{npu_id}"
 rt = Runtime(npu_id, 500)

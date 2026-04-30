@@ -11,6 +11,9 @@ import torch
 import torch_npu
 from xlite._C import Runtime, matmul_dequant
 
+# allow weight_nz
+torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
+
 dev_id=0
 debug = False
 
