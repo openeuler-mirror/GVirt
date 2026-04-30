@@ -1152,6 +1152,29 @@ def sigmoid_topk(
     """
     ...
 
+def topk(
+    rt: Runtime,
+    scores: torch.Tensor,
+    indices: torch.Tensor,
+    outIndices: torch.Tensor,
+    lens: torch.Tensor,
+    k: int
+) -> None:
+    """Select top-k elements by scores in batches
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        scores (torch.Tensor): Routing score tensor.
+        indices (torch.Tensor): Tensor of indices that match scores.
+        outIndices (torch.Tensor): Output top-k index tensor.
+        lens (torch.Tensor): Vector of lengths for each batch
+        k (int): Number of experts selected per token.
+
+    Returns:
+        None: Output tensors are written in place.
+    """
+    ...
+
 def cast_up(rt: Runtime, in_: torch.Tensor, out: torch.Tensor) -> None:
     """Cast tensor values to a higher-precision type.
 

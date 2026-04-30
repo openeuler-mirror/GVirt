@@ -12,7 +12,6 @@ from xlite._C import Runtime, topk as xlite_topk
 import random
 
 K = 2048
-n_routed_experts = 6144
 max_seq_len = 5000
 batches = 100
 testIterations = 100
@@ -30,14 +29,16 @@ def generate_sequences(input_sizes):
     standard_scores = []
     standard_indices = []
 
-    def get_topk(x):
-        k = min(K, t.shape[-1])
-        return t.topk(k)[1]
-
     for n_tokens in input_sizes:
         t = torch.randn(n_tokens)
         standard_scores.append(t)
-        standard_indices.append(get_topk(K))
+        if (n_tokens >= K):
+            standard_indices.append(t.topk(K)[1])
+        else:
+            standard_indices.append(t.topk(n_tokens)[1])
+            padding = torch.zeros(K - n_tokens, dtype=torch.int32)
+            standard_indices.append(padding)
+
     standard_indices = torch.cat(standard_indices)
     return standard_scores, standard_indices.to(dtype=torch.int32)
 
@@ -52,10 +53,9 @@ def run_test(rt, input_sizes, msg):
     xlite_indices = torch.empty(K * batches, dtype=torch.int32)
 
     torch.npu.synchronize()
-    xlite_topk(rt, scores, indices, xlite_indices, batch_sizes, K, max_seq_len)
+    xlite_topk(rt, scores, indices, xlite_indices, batch_sizes, K)
     torch.npu.synchronize()
 
-    torch.set_printoptions(edgeitems=7)
     try:
         torch.testing.assert_close(standard_indices, xlite_indices)
         print(f"{msg}: PASS")
@@ -83,13 +83,16 @@ def main():
     torch.npu.set_device(0)
     torch.set_default_device("npu:0")
 
-    for dtype in [torch.bfloat16, torch.float32]:
-        torch.set_default_dtype(torch.float32)
+    for dtype in reversed([torch.float32, torch.bfloat16]):
+        torch.set_default_dtype(dtype)
         for i in range(testIterations):
-            input_sizes = random.sample(range(K, max_seq_len+1), batches)
-            input_sizes = [x // 16 * 16 for x in input_sizes]
-            msg = f'{dtype}: [{i}/{testIterations}]'
+            input_sizes = random.sample(range(1, max_seq_len+1), batches)
+            msg = f'{dtype}: [{i+1}/{testIterations}]'
             run_test(rt, input_sizes, msg)
+
+        input_sizes = list(range(1, K*2))
+        msg = f'{dtype}: input < K'
+        run_test(rt, input_sizes, msg)
 
 
 if __name__ == "__main__":

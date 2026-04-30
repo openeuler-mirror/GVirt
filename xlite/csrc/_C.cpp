@@ -1084,7 +1084,7 @@ void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
 }
 
 void TopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &outIndices,
-          at::Tensor &lens, size_t k, size_t maxLen)
+          at::Tensor &lens, size_t k)
 {
     XTensor _scores, _indices, _outIndices, _lens;
 
@@ -1093,7 +1093,7 @@ void TopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &out
     InitXTensor(_outIndices, outIndices);
     InitXTensor(_lens, lens);
 
-    XliteOpTopK(rt, _scores, _indices, _outIndices, _lens, k, maxLen);
+    XliteOpTopK(rt, _scores, _indices, _outIndices, _lens, k);
 
     rt.Synchronize();
 }
@@ -1506,7 +1506,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("bias"), py::arg("scale"), py::arg("out_weights"), py::arg("out_routing"),
           py::arg("n_group"), py::arg("n_topk_group"), py::arg("top_k"),
           py::arg("norm_top_k_prob"));
-    m.def("topk", &TopK);
+    m.def("topk", &TopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
+          py::arg("outIndices"), py::arg("lens"), py::arg("k"));
     m.def("cast_up", &CastUp, py::arg("rt"), py::arg("in_"), py::arg("out"));
     m.def("permutation", &Permutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
           py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"), py::arg("counts"));

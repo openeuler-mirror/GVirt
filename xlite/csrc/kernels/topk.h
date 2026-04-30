@@ -11,7 +11,6 @@
  *
  * Constraints:
  *  - Only topK equals 2048 is supported
- *  - Input length must be a multiple of 16
  *
  * @param[in] scores Scores values for each batch padded up to maxSeqLen [numBatches X maxSeqLen]
  * @param[in] indices torch.arange-like array [0..maxSeqLen] repeated numBatches time
@@ -34,6 +33,8 @@ constexpr uint64_t SORT_RESULT_BLOCK_SIZE = SORT_BLOCK_SIZE * 2;
 constexpr uint64_t MGR_SORT_VALID_BITS_OFFSET = 8;
 constexpr uint64_t MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET = 12;
 constexpr uint32_t CHUNK_SIZE = 2048;
+
+// #define XLITE_KERNEL_DEBUG
 
 template <typename T>
 static __aicore__ inline void DumpBuffer(__ubuf__ T *buf, const __gm__ char *name, int size,
@@ -189,13 +190,14 @@ public:
                 set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
                 wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
 
-                CopyInIndices(batchIdx, batchOffset + offset, length);
-                CopyInScores(batchIdx, batchOffset + offset, length);
+                CopyInIndices(batchOffset + offset, length);
+                CopyInScores(batchOffset + offset, length);
+                PadInputs(length);
 
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-                ConvertInput(batchIdx, CHUNK_SIZE);
+                ConvertInput(CHUNK_SIZE);
 
                 Sort(CHUNK_SIZE, current);
 
@@ -213,42 +215,83 @@ public:
         pipe_barrier(PIPE_ALL);
     }
 
-    __aicore__ inline void CopyInIndices(int batch, int offset, uint32_t len)
+    __aicore__ inline void CopyInIndices(int offset, uint32_t len)
     {
         copy_gm_to_ubuf_align_b32(indicesIn, indicesGm + offset, 0, 1, len * sizeof(uint32_t), 0, 0,
                                   0, 0);
         DumpBuffer(indicesIn, "indicesIn", 10, 1, 0, true);
     }
 
-    __aicore__ inline void CopyInScores(int batch, int offset, uint32_t len)
+    __aicore__ inline void CopyInScores(int offset, uint32_t len)
+    {
+        __ubuf__ Dtype *buf;
+        if constexpr (std::is_same<Dtype, float>::value) {
+            buf = scoresIn;
+        } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
+            buf = scoresInTmp;
+        }
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+
+        copy_gm_to_ubuf_align_b16(buf, scoresGm + offset, 0, 1, len * sizeof(Dtype), 0, 0, 0, 0);
+    }
+
+    __aicore__ inline void PadInputs(uint32_t len)
     {
         __ubuf__ Dtype *buf;
         Dtype min;
-        uint8_t repeat;
+        // Nuber of elements for vector_dup
+        uint32_t vbatch;
 
         if constexpr (std::is_same<Dtype, float>::value) {
             buf = scoresIn;
             min = -std::numeric_limits<float>::infinity();
-            repeat = CHUNK_SIZE / (8 * 8);
+            vbatch = 64;
 
         } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
             buf = scoresInTmp;
             min = -3.4028235e+38;
-            repeat = CHUNK_SIZE / (16 * 8);
+            vbatch = 128;
+        }
+        if (len >= 2048) {
+            return;
         }
 
-        if (len < CHUNK_SIZE) {
-            vector_dup(buf, min, repeat, 1, 1, 8, 0);
-            pipe_barrier(PIPE_V);
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+        uint32_t base = ROUND_DOWN(len, vbatch);
+        uint32_t tail = len % vbatch;
+        uint64_t top;
+        uint64_t bottom;
+        uint64_t chunk = DIV_ROUND_UP(len, vbatch) - 1;
+
+        if (tail == 0) {
+            top = 0;
+            bottom = 0;
+        } else if (tail < 64) {
+            top = (uint64_t)-1;
+            bottom = ((1UL << (tail)) - 1) ^ (uint64_t)-1;
+        } else if (tail == 64) {
+            top = (uint64_t)-1;
+            bottom = 0;
+        } else {
+            top = ((1UL << (tail - 64)) - 1) ^ (uint64_t)-1;
+            bottom = 0;
         }
 
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+        uint32_t repeat = (CHUNK_SIZE / vbatch) - DIV_ROUND_UP(len, vbatch);
 
-        copy_gm_to_ubuf_align_b32(buf, scoresGm + offset, 0, 1, len * sizeof(Dtype), 0, 0, 0, 0);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+        set_vector_mask(top, bottom);
+        vector_dup(buf + chunk * vbatch, min, 1, 1, 1, 8, 0);
+
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+
+        vector_dup(buf + (chunk + 1) * vbatch, min, repeat, 1, 1, 8, 0);
     }
 
-    __aicore__ inline void ConvertInput(int batch, uint32_t len)
+    __aicore__ inline void ConvertInput(uint32_t len)
     {
         if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
             int calcRepeat = DIV_ROUND_UP(len, VECTOR_MAX_NUM_OF_FP32);
@@ -285,16 +328,28 @@ public:
 
     __aicore__ inline void initTopk()
     {
+        uint64_t even = 0x5555555555555555;
+        uint64_t odd = 0xAAAAAAAAAAAAAAAA;
         float min = -std::numeric_limits<float>::infinity();
+
+        set_vector_mask(even, even);
         vector_dup(topkBuf[0], min, topK * 2 / 64, 1, 1, 8, 0);
         pipe_barrier(PIPE_V);
+
+        set_vector_mask(odd, odd);
+        vector_dup(topkBuf[0], 0, topK * 2 / 64, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+
+        DumpBuffer(topkBuf[0], "topkBuf[0]", 2048, 2, 0, false);
+        DumpBuffer(topkBuf[0], "topkBuf[0]", 2048, 2, 1, true);
     }
 
     __aicore__ inline void FillOutScores(int batchIdx, int current)
     {
         __ubuf__ uint32_t *src = (__ubuf__ uint32_t *)topkBuf[current];
         __ubuf__ uint32_t *dst = (__ubuf__ uint32_t *)topkBuf[1 - current];
-        // DumpBuffer(src, "Result", 10, 2, 1, true);
+        DumpBuffer(src, "Result", 10, 2, 1, true);
 
         vreducev2(dst, src, src, topK / 32, 1, 2, 8, 0);
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
@@ -317,8 +372,6 @@ private:
     __ubuf__ uint32_t *indicesIn;
     __ubuf__ uint32_t *indices;
     __ubuf__ uint32_t *lensIn;
-    //__ubuf__ float *sortTmp;
-    //__ubuf__ float *sortMrgTmp;
     __ubuf__ float *topkBuf[2];
     __ubuf__ float *scratch[2];
     __ubuf__ Dtype *scoresInTmp;
