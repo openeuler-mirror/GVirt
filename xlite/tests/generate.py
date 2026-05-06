@@ -129,6 +129,12 @@ def main(
     elif model_type == "qwen3_moe":
         from tests.models.qwen3_moe import ModelArgs
         from tests.models.qwen3_moe import Qwen3MoE as Transformer
+    elif model_type == "qwen3_5":
+        from tests.models.qwen3_5 import ModelArgs
+        from tests.models.qwen3_5 import Qwen3_5 as Transformer
+    elif model_type == "qwen3_5_moe":
+        from tests.models.qwen3_5_moe import ModelArgs
+        from tests.models.qwen3_5_moe import Qwen3_5MoE as Transformer
     elif model_type == "glm4_moe":
         from tests.models.glm4_moe import ModelArgs
         from tests.models.glm4_moe import GLM4MoE as Transformer
@@ -194,14 +200,9 @@ def main(
                     formatted_prompt = formatted_prompt[:-8]
                 formatted_prompt += " "
                 prompt_tokens = tokenizer.encode(formatted_prompt)
-            elif model_type in {"qwen2", "qwen3", "qwen3_moe"}:
-                formatted_prompt = ""
-                for message in messages:
-                    if message["role"] == "user":
-                        formatted_prompt += f"<|im_start|>user {message['content']}<|im_end|>"
-                    elif message["role"] == "assistant":
-                        formatted_prompt += f"<|im_start|>assistant {message['content']}<|im_end|>"
-                prompt_tokens = tokenizer.encode(formatted_prompt)
+            elif model_type in {"qwen2", "qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe"}:
+                # Use apply_chat_template for correct format
+                prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
             else:
                 prompt_tokens = tokenizer.encode(prompt)
             completion_tokens, _ = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
@@ -228,9 +229,11 @@ def main(
                     tokenizer.encode(f"<s>[INST] {item['query']} [/INST] ")
                     for item in batch
                 ]
-            elif model_type in {"qwen2", "qwen3", "qwen3_moe"}:
+            elif model_type in {"qwen2", "qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe"}:
+                # Use apply_chat_template for correct format with proper newlines
                 prompts_tokens_batch = [
-                    tokenizer.encode(f"<|im_start|>user {item['query']}<|im_end|>")
+                    tokenizer.apply_chat_template([{"role": "user", "content": item['query']}],
+                                                   add_generation_prompt=True, return_dict=False)
                     for item in batch
                 ]
             else:
@@ -289,6 +292,6 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--no-prefix", action="store_true")
     args = parser.parse_args()
-    assert args.model in ["deepseek_v3", "deepseek_v32", "glm5", "minimax_m2", "llama", "qwen2", "qwen3", "qwen3_moe", "glm4_moe"], f"{args.model} not supported!"
+    assert args.model in ["deepseek_v3", "deepseek_v32", "glm5", "minimax_m2", "llama", "qwen2", "qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe", "glm4_moe"], f"{args.model} not supported!"
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
     main(args.model, args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.no_prefix)
