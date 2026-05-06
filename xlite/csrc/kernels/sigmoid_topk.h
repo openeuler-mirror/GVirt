@@ -9,32 +9,15 @@
 #include "kernel_macro.h"
 #include "kernel_operator.h"
 
+// #define XLITE_KERNEL_DEBUG
+#include "debug.h"
+
 #ifdef __DAV_C220_VEC__
 constexpr uint32_t BIT_SIZE_OF_U32 = 32;
 constexpr uint64_t SORT_BLOCK_SIZE = 32;
 constexpr uint64_t SORT_RESULT_BLOCK_SIZE = SORT_BLOCK_SIZE * 2;
 constexpr uint64_t MGR_SORT_VALID_BITS_OFFSET = 8;
 constexpr uint64_t MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET = 12;
-
-template <typename T>
-static __aicore__ inline void DumpBuffer(__ubuf__ T *buf, const __gm__ char *name, int size,
-                                         int step = 1, int offset = 0, bool toInt = false)
-{
-#ifdef XLITE_KERNEL_DEBUG
-    printf("%s: [", name);
-    for (int i = 0; i < size; i++) {
-        if (i % 10 == 0) {
-            printf("\n");
-        }
-        if (toInt) {
-            printf("%u ", buf[i * step + offset]);
-        } else {
-            printf("%f ", buf[i * step + offset]);
-        }
-    }
-    printf("]\n");
-#endif
-}
 
 static __aicore__ inline void DumpBufferIndex(__ubuf__ float *buf, const __gm__ char *name,
                                               int size, int step = 1)

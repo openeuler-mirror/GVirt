@@ -26,6 +26,9 @@
 #include "kernel_operator.h"
 #include <limits>
 
+// #define XLITE_KERNEL_DEBUG
+#include "debug.h"
+
 #ifdef __DAV_C220_VEC__
 constexpr uint32_t BIT_SIZE_OF_U32 = 32;
 constexpr uint64_t SORT_BLOCK_SIZE = 32;
@@ -33,36 +36,6 @@ constexpr uint64_t SORT_RESULT_BLOCK_SIZE = SORT_BLOCK_SIZE * 2;
 constexpr uint64_t MGR_SORT_VALID_BITS_OFFSET = 8;
 constexpr uint64_t MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET = 12;
 constexpr uint32_t CHUNK_SIZE = 2048;
-
-// #define XLITE_KERNEL_DEBUG
-
-template <typename T>
-static __aicore__ inline void DumpBuffer(__ubuf__ T *buf, const __gm__ char *name, int size,
-                                         int step = 1, int offset = 0, bool toInt = false)
-{
-#ifdef XLITE_KERNEL_DEBUG
-    pipe_barrier(PIPE_ALL);
-    printf("%s (%lx): \n[", name, (unsigned long)buf);
-    for (int i = 0; i < size; i++) {
-        if (i % 10 == 0) {
-            printf("\n");
-        }
-        if (toInt) {
-            printf("%u ", buf[i * step + offset]);
-        } else {
-            printf("%f ", buf[i * step + offset]);
-        }
-    }
-    printf("]\n");
-    pipe_barrier(PIPE_ALL);
-#endif
-}
-
-#ifdef XLITE_KERNEL_DEBUG
-#define dbg_printf(args...) printf(args)
-#else
-#define dbg_printf(args...)
-#endif
 
 static __aicore__ inline void DumpBufferIndex(__ubuf__ float *buf, const __gm__ char *name,
                                               int size, int step = 1)

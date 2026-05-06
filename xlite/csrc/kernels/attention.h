@@ -10,6 +10,9 @@
 #include "kernel_operator.h"
 #include "softmax_attn_aiv.h"
 
+// #define XLITE_KERNEL_DEBUG
+#include "debug.h"
+
 #define MAX_M0 128
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
@@ -21,7 +24,6 @@
 #define SEQLEN_48K 49152
 #define SEQLEN_60K 61440
 #define SEQLEN_96K 98304
-// #define XLITE_KERNEL_DEBUG
 
 template <typename Dtype>
 class Attention
@@ -364,12 +366,10 @@ public:
                     cachedLen = cachedLens[batchIdx];
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
-#ifdef XLITE_KERNEL_DEBUG
-                printf("block%d: batch %d query start %u query [%u - %u) do QK kvHeadIdx %u "
-                       "calcLen %u, use %d qk buf\n",
-                       GetBlockIdx(), batchIdx, queryStart, queryTaskOffset,
-                       queryTaskOffset + queryTaskLen, kvHeadIdx, calcLen, currQkIdx);
-#endif
+                dbg_printf("block%d: batch %d query start %u query [%u - %u) do QK kvHeadIdx %u "
+                           "calcLen %u, use %d qk buf\n",
+                           GetBlockIdx(), batchIdx, queryStart, queryTaskOffset,
+                           queryTaskOffset + queryTaskLen, kvHeadIdx, calcLen, currQkIdx);
                 RunAicQK(input[qOffset], queryTaskLen, kvHeadIdx, blockTable, calcLen,
                          qk[currQkIdx]);
                 ffts_cross_core_sync(PIPE_FIX, config);
@@ -378,10 +378,8 @@ public:
                     // wait vector softmax done
                     wait_flag_dev(1);
                     // do softmax * V
-#ifdef XLITE_KERNEL_DEBUG
-                    printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n", GetBlockIdx(),
-                           lastkvHeadIdx, lastCalcLen, lastQkIdx);
-#endif
+                    dbg_printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n",
+                               GetBlockIdx(), lastkvHeadIdx, lastCalcLen, lastQkIdx);
                     RunAicSV(qk[lastQkIdx], lastQueryTaskLen, lastkvHeadIdx, lastBlockTable,
                              lastCalcLen, output[lastOutOffset]);
                 }
@@ -403,10 +401,8 @@ public:
         // do last softmax * V
         if (needDoSV != 0) {
             wait_flag_dev(1);
-#ifdef XLITE_KERNEL_DEBUG
-            printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n", GetBlockIdx(),
-                   lastkvHeadIdx, lastCalcLen, lastQkIdx);
-#endif
+            dbg_printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n", GetBlockIdx(),
+                       lastkvHeadIdx, lastCalcLen, lastQkIdx);
             RunAicSV(qk[lastQkIdx], lastQueryTaskLen, lastkvHeadIdx, lastBlockTable, lastCalcLen,
                      output[lastOutOffset]);
         }
@@ -474,13 +470,12 @@ public:
                 wait_flag_dev(0);
 
                 // do softmax
-#ifdef XLITE_KERNEL_DEBUG
                 int dbgBlockIdx = block_idx;
-                printf("block%d subblock%u: batch %d do softmax kvHeadIdx %u m %d calcLen %u outN "
-                       "%u mask off %u, use %d qk buf\n",
-                       dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nSoftmaxCurCore, calcLen, outN,
-                       nSoftmaxStart % headNumInGroup, currQkIdx);
-#endif
+                dbg_printf(
+                    "block%d subblock%u: batch %d do softmax kvHeadIdx %u m %d calcLen %u outN "
+                    "%u mask off %u, use %d qk buf\n",
+                    dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nSoftmaxCurCore, calcLen, outN,
+                    nSoftmaxStart % headNumInGroup, currQkIdx);
                 RunAivSoftmax(
                     (__gm__ Dtype *)qk[currQkIdx][qkOffset].GetPhyAddr(),
                     m0 > (MAX_M0 - 4)
