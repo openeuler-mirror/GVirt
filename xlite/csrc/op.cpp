@@ -69,6 +69,8 @@
 #include "aclrtlaunch_indexer_scores_bfloat16_t.h"
 #include "aclrtlaunch_muls_float16_t.h"
 #include "aclrtlaunch_muls_bfloat16_t.h"
+#include "aclrtlaunch_topk_float.h"
+#include "aclrtlaunch_topk_bfloat16_t.h"
 
 static inline bool IsDummyRuntime(const XRuntime &rt)
 {
@@ -992,6 +994,29 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
         std::string err_str =
             DBG_PREFIX + XT_STR(scores) + XT_STR(indices) + XT_STR(outWeights) + XT_STR(outRouting);
         throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
+void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIndices,
+                 XTensor &lens, size_t k)
+{
+    uint32_t batchNum = lens.shape[0];
+    uint32_t maxSeqLen = scores.shape[0] / batchNum;
+
+    if (k != 2048) {
+        throw std::runtime_error(std::string(__func__) + ": only K=2048 is supported, got " +
+                                 std::to_string(k));
+    }
+
+    if (scores.dtype == BF16 && indices.dtype == INT32) {
+        aclrtlaunch_topk_bfloat16_t(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outIndices.ptr,
+                                    lens.ptr, maxSeqLen, batchNum, k);
+    } else if (scores.dtype == FP32 && indices.dtype == INT32) {
+        aclrtlaunch_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outIndices.ptr,
+                               lens.ptr, maxSeqLen, batchNum, k);
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": unsupported!" +
+                                 std::to_string(scores.dtype));
     }
 }
 
