@@ -1094,16 +1094,17 @@ void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
 }
 
 void TopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &outIndices,
-          at::Tensor &lens, size_t k)
+          at::Tensor &queryLens, at::Tensor &cachedLens, size_t k)
 {
-    XTensor _scores, _indices, _outIndices, _lens;
+    XTensor _scores, _indices, _outIndices, _queryLens, _cachedLens;
 
     InitXTensor(_scores, scores);
     InitXTensor(_indices, indices);
     InitXTensor(_outIndices, outIndices);
-    InitXTensor(_lens, lens);
+    InitXTensor(_queryLens, queryLens);
+    InitXTensor(_cachedLens, cachedLens);
 
-    XliteOpTopK(rt, _scores, _indices, _outIndices, _lens, k);
+    XliteOpTopK(rt, _scores, _indices, _outIndices, _queryLens, _cachedLens, k);
 
     rt.Synchronize();
 }
@@ -1517,7 +1518,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("n_group"), py::arg("n_topk_group"), py::arg("top_k"),
           py::arg("norm_top_k_prob"));
     m.def("topk", &TopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
-          py::arg("outIndices"), py::arg("lens"), py::arg("k"));
+          py::arg("outIndices"), py::arg("query_lens"), py::arg("cached_lens"), py::arg("k"));
     m.def("cast_up", &CastUp, py::arg("rt"), py::arg("in_"), py::arg("out"));
     m.def("permutation", &Permutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
           py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"), py::arg("counts"));

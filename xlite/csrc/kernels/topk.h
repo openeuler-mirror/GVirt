@@ -13,7 +13,7 @@
  *  - Only topK equals 2048 is supported
  *
  * @param[in] scores Scores values for each batch padded up to maxSeqLen [numBatches X maxSeqLen]
- * @param[in] indices torch.arange-like array [0..maxSeqLen] repeated numBatches time
+ * @param[in] indices torch.arange-like array [0..maxSeqLen]
  * @param[out] outIndices computed topK indices [numBatches X topK]
  * @param[in] lens Number of tokens in each batch [numBatches]
  * @param[in] maxSeqLen Maximal possible number of tokens in a batch
@@ -49,14 +49,16 @@ class XliteTopK
 public:
     __aicore__ inline XliteTopK() = default;
 
-    __aicore__ inline void Init(GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens,
-                                uint32_t maxSeqLen, uint32_t numBatches, uint32_t topK)
+    __aicore__ inline void Init(GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices,
+                                GM_ADDR queryLens, GM_ADDR cachedLens, uint32_t maxSeqLen,
+                                uint32_t numBatches, uint32_t topK)
     {
         set_mask_norm();
         this->scoresGm = (__gm__ Dtype *)scores;
         this->indicesGm = (__gm__ uint32_t *)indices;
         this->outIndicesGm = (__gm__ uint32_t *)outIndices;
-        this->lensGm = (__gm__ uint32_t *)lens;
+        this->queryLensGm = (__gm__ uint32_t *)queryLens;
+        this->cachedLensGm = (__gm__ uint32_t *)cachedLens;
 
         this->topK = topK;
         this->nBatches = numBatches;
@@ -94,9 +96,12 @@ public:
             dbg_printf("scoresInTmp: %lx\n", off);
             off += pad / 2;
         }
-        this->lensIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        dbg_printf("lensIn: %lx\n", off);
-        off += numBatches * sizeof(uint32_t);
+        this->queryLensIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        dbg_printf("queryLensIn: %lx\n", off);
+        off += ROUND_UP(numBatches * sizeof(uint32_t), UB_BUF_ALIGN_SIZE);
+        this->cachedLensIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        dbg_printf("cachedLensIn: %lx\n", off);
+        off += ROUND_UP(numBatches * sizeof(uint32_t), UB_BUF_ALIGN_SIZE);
         dbg_printf("Allocated in UB: %lu\n", off);
     }
 
@@ -135,7 +140,10 @@ public:
     {
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        copy_gm_to_ubuf_align_b32(lensIn, lensGm, 0, 1, nBatches * sizeof(uint32_t), 0, 0, 0, 0);
+        copy_gm_to_ubuf_align_b32(queryLensIn, queryLensGm, 0, 1, nBatches * sizeof(uint32_t), 0, 0,
+                                  0, 0);
+        copy_gm_to_ubuf_align_b32(cachedLensIn, cachedLensGm, 0, 1, nBatches * sizeof(uint32_t), 0,
+                                  0, 0, 0);
         pipe_barrier(PIPE_MTE2);
 
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
@@ -144,45 +152,51 @@ public:
         set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
 
-        for (int batchIdx = block_idx; batchIdx < nBatches; batchIdx += block_num) {
-            uint32_t len = lensIn[batchIdx];
-            int current = 0;
-            uint32_t offset = 0;
-            uint32_t batchOffset = batchIdx * maxSeqLen;
+        uint32_t mIdx = 0;
+        for (int batchIdx = 0; batchIdx < nBatches; batchIdx++) {
+            uint32_t queryLen = queryLensIn[batchIdx];
+            uint32_t cachedLen = cachedLensIn[batchIdx];
+            uint32_t len = queryLen + cachedLen;
+            for (int queryIdx = 0; queryIdx < queryLen; queryIdx++, mIdx++) {
+                if (mIdx % block_num != block_idx) {
+                    continue;
+                }
+                pipe_barrier(PIPE_ALL);
 
-            pipe_barrier(PIPE_ALL);
+                initTopk();
 
-            initTopk();
+                int current = 0;
+                uint32_t offset = 0;
+                for (uint32_t processed = 0; processed < len;) {
+                    uint32_t length = min(len - processed, CHUNK_SIZE);
 
-            for (uint32_t processed = 0; processed < len;) {
-                uint32_t length = min(len - processed, CHUNK_SIZE);
+                    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+                    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
 
-                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
-                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+                    set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+                    wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
 
-                set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
-                wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+                    CopyInIndices(offset, length);
+                    CopyInScores(mIdx * maxSeqLen + offset, length);
+                    PadInputs(length);
 
-                CopyInIndices(batchOffset + offset, length);
-                CopyInScores(batchOffset + offset, length);
-                PadInputs(length);
+                    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+                    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+                    ConvertInput(CHUNK_SIZE);
 
-                ConvertInput(CHUNK_SIZE);
+                    Sort(CHUNK_SIZE, current);
 
-                Sort(CHUNK_SIZE, current);
+                    processed += length;
+                    current = 1 - current;
+                    offset += length;
+                }
 
-                processed += length;
-                current = 1 - current;
-                offset += length;
+                set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+
+                FillOutScores(mIdx, current);
             }
-
-            set_flag(PIPE_S, PIPE_V, EVENT_ID0);
-            wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
-
-            FillOutScores(batchIdx, current);
         }
 
         pipe_barrier(PIPE_ALL);
@@ -318,7 +332,7 @@ public:
         DumpBuffer(topkBuf[0], "topkBuf[0]", 2048, 2, 1, true);
     }
 
-    __aicore__ inline void FillOutScores(int batchIdx, int current)
+    __aicore__ inline void FillOutScores(int offset, int current)
     {
         __ubuf__ uint32_t *src = (__ubuf__ uint32_t *)topkBuf[current];
         __ubuf__ uint32_t *dst = (__ubuf__ uint32_t *)topkBuf[1 - current];
@@ -327,8 +341,8 @@ public:
         vreducev2(dst, src, src, topK / 32, 1, 2, 8, 0);
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-        copy_ubuf_to_gm_align_b32(outIndicesGm + batchIdx * topK, dst, 0, 1,
-                                  topK * sizeof(uint32_t), 0, 0, 0, 0);
+        copy_ubuf_to_gm_align_b32(outIndicesGm + offset * topK, dst, 0, 1, topK * sizeof(uint32_t),
+                                  0, 0, 0, 0);
     }
 
 private:
@@ -339,31 +353,33 @@ private:
     __gm__ Dtype *scoresGm;
     __gm__ uint32_t *indicesGm;
     __gm__ uint32_t *outIndicesGm;
-    __gm__ uint32_t *lensGm;
+    __gm__ uint32_t *queryLensGm;
+    __gm__ uint32_t *cachedLensGm;
 
     __ubuf__ float *scoresIn;
     __ubuf__ uint32_t *indicesIn;
     __ubuf__ uint32_t *indices;
-    __ubuf__ uint32_t *lensIn;
+    __ubuf__ uint32_t *queryLensIn;
+    __ubuf__ uint32_t *cachedLensIn;
     __ubuf__ float *topkBuf[2];
     __ubuf__ float *scratch[2];
     __ubuf__ Dtype *scoresInTmp;
 };
 
-#define TOPK_FUNC_DEFINE(dtype)                                                                \
-    extern "C" __global__ __aicore__ void topk_##dtype(                                        \
-        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens, uint32_t maxSeqLen, \
-        uint32_t numBatches, uint32_t topK)                                                    \
-    {                                                                                          \
-        XliteTopK<dtype> op;                                                                   \
-        op.Init(scores, indices, outIndices, lens, maxSeqLen, numBatches, topK);               \
-        op.Run();                                                                              \
+#define TOPK_FUNC_DEFINE(dtype)                                                                   \
+    extern "C" __global__ __aicore__ void topk_##dtype(                                           \
+        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR queryLens,                   \
+        GM_ADDR cachedLens, uint32_t maxSeqLen, uint32_t numBatches, uint32_t topK)               \
+    {                                                                                             \
+        XliteTopK<dtype> op;                                                                      \
+        op.Init(scores, indices, outIndices, queryLens, cachedLens, maxSeqLen, numBatches, topK); \
+        op.Run();                                                                                 \
     }
 #else
-#define TOPK_FUNC_DEFINE(dtype)                                                                \
-    extern "C" __global__ __aicore__ void topk_##dtype(                                        \
-        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR lens, uint32_t maxSeqLen, \
-        uint32_t numBatches, uint32_t topK)                                                    \
-    {                                                                                          \
+#define TOPK_FUNC_DEFINE(dtype)                                                     \
+    extern "C" __global__ __aicore__ void topk_##dtype(                             \
+        GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR queryLens,     \
+        GM_ADDR cachedLens, uint32_t maxSeqLen, uint32_t numBatches, uint32_t topK) \
+    {                                                                               \
     }
 #endif

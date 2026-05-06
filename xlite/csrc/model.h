@@ -208,7 +208,7 @@ private:
     uint32_t _rankId;
 
     // FFN
-    XTensor _gateIndicts;
+    XTensor _gateIndices;
     std::vector<XTensor> _moeREUpGate;
     std::vector<XTensor> _moeREUpGateScale;
     std::vector<XTensor> _moeREDown;
@@ -222,6 +222,7 @@ private:
     XTensor _a2v;
     XTensor _v2a;
     XTensor _sync;
+    XTensor _dsaTopkIndices;
 };
 
 #endif

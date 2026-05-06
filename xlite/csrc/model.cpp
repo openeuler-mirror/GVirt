@@ -76,7 +76,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 
 void XModel::Init(void)
 {
-    std::vector<uint32_t> gateIdx, vgatherIndices;
+    std::vector<uint32_t> vbitsortIndices, vgatherIndices;
     std::vector<uint64_t> weights;
     size_t size;
     bool isWeightEmpty = true;
@@ -85,15 +85,21 @@ void XModel::Init(void)
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
 
-    if (_c.nDenseLayers != _c.nLayers) {
-        gateIdx.resize(_c.nRoutedExperts);
-        size = _c.nRoutedExperts * XDtypeBit(INT32) / 8;
+    if (_c.nDenseLayers != _c.nLayers || _c.attnType == XMODEL_ATTN_DSA) {
+        size_t maxIndices = _c.maxSeqLen > _c.nRoutedExperts ? _c.maxSeqLen : _c.nRoutedExperts;
+        vbitsortIndices.resize(maxIndices);
+        size = maxIndices * XDtypeBit(INT32) / 8;
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-        for (uint32_t i = 0; i < _c.nRoutedExperts; i++) {
-            gateIdx[i] = i;
+        for (uint32_t i = 0; i < maxIndices; i++) {
+            vbitsortIndices[i] = i;
         }
-        CHECK_ACL(aclrtMemcpy(ptr, size, gateIdx.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-        _gateIndicts.Init({_c.nRoutedExperts}, INT32, ptr);
+        CHECK_ACL(aclrtMemcpy(ptr, size, vbitsortIndices.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+        if (_c.nDenseLayers != _c.nLayers) {
+            _gateIndices.Init({_c.nRoutedExperts}, INT32, ptr);
+        }
+        if (_c.attnType == XMODEL_ATTN_DSA) {
+            _dsaTopkIndices.Init({_c.maxSeqLen}, INT32, ptr);
+        }
     }
 
     size = _c.nRoutedExperts * XDtypeBit(INT64) / 8;
@@ -208,8 +214,12 @@ void XModel::Init(void)
 
 XModel::~XModel(void)
 {
-    if (_c.nDenseLayers != _c.nLayers) {
-        (void)aclrtFree(_gateIndicts.ptr);
+    if (_gateIndices.ptr != nullptr) {
+        (void)aclrtFree(_gateIndices.ptr);
+        _dsaTopkIndices.ptr = nullptr;
+    }
+    if (_dsaTopkIndices.ptr != nullptr) {
+        (void)aclrtFree(_dsaTopkIndices.ptr);
     }
     for (uint32_t i = _c.nDenseLayers; i < _c.nLayers; i++) {
         (void)aclrtFree(_moeREUpGate[i].ptr);
@@ -321,8 +331,7 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     rt.PutTensor(weights);
     rt.PutTensor(q);
     XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
-    // 1.4 TODO do topk on the result and return the indices
-    // XliteOpTopK(rt, scores, topkIndices, _c.indexTopK);
+    XliteOpTopK(rt, scores, _dsaTopkIndices, topkIndices, rt._lens, rt._cachedLens, _c.indexTopK);
     rt.PutTensor(scores);
     return topkIndices;
 }
@@ -621,11 +630,11 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
     XliteOpMatmul(rt, input, moeGate[layer], scores, _c.weightNZ);
 
     if (_c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
-        XliteOpSigmoidTopK(rt, scores, _gateIndicts, moeGateBias[layer], _c.routeScale, weights,
+        XliteOpSigmoidTopK(rt, scores, _gateIndices, moeGateBias[layer], _c.routeScale, weights,
                            routing, _c.nExpertGroups, _c.nLimitedGroups, _c.nActExperts,
                            _c.normTopKProb);
     } else {
-        XliteOpSoftmaxTopK(rt, scores, _gateIndicts, weights, routing, _c.nActExperts,
+        XliteOpSoftmaxTopK(rt, scores, _gateIndices, weights, routing, _c.nActExperts,
                            _c.normTopKProb);
     }
 
