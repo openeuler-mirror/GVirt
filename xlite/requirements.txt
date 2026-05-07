@@ -8,4 +8,4 @@
 # Note: the torch version during runtime should NOT be lower than the torch version during building xlite
 
 pybind11>=3.0.0
-torch>=2.5.1,<=2.9.0
+torch>=2.5.1
