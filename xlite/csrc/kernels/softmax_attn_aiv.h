@@ -522,7 +522,8 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf, int32_t m,
                                          uint32_t n, uint32_t calcLen, uint32_t outN = 0,
-                                         uint32_t maskOff = 0, uint32_t maskStride = 1)
+                                         uint32_t maskOff = 0, uint32_t maskStride = 1,
+                                         bool hasScale = false, float scale = 1.0f)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -611,6 +612,11 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
             }
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+
+            if (hasScale) {
+                vmuls(calc, calc, scale, curRepeat, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+            }
 
             if (useV2) {
                 ReduceMaxV2(calcDst, calc, curLen);
@@ -813,9 +819,11 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, __gm__ float *expBuf, uint32_t m,
                                      uint32_t n, uint32_t calcLen, uint32_t outN = 0,
-                                     uint32_t maskOff = 0, uint32_t maskStride = 1)
+                                     uint32_t maskOff = 0, uint32_t maskStride = 1,
+                                     bool hasScale = false, float scale = 1.0f)
 {
-    RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, maskOff, maskStride);
+    RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, maskOff, maskStride, hasScale,
+                             scale);
 }
 
 #else
@@ -831,7 +839,8 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf, uint32_t m,
                                          uint32_t n, uint32_t calcLen, uint32_t outN = 0,
-                                         uint32_t maskOff = 0, uint32_t maskStride = 1)
+                                         uint32_t maskOff = 0, uint32_t maskStride = 1,
+                                         bool hasScale = false, float scale = 1.0f)
 {
 }
 #endif
