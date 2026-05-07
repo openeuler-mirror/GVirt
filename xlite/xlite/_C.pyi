@@ -1157,7 +1157,8 @@ def topk(
     scores: torch.Tensor,
     indices: torch.Tensor,
     outIndices: torch.Tensor,
-    lens: torch.Tensor,
+    query_lens: torch.Tensor,
+    cached_lens: torch.Tensor,
     k: int
 ) -> None:
     """Select top-k elements by scores in batches
@@ -1167,7 +1168,8 @@ def topk(
         scores (torch.Tensor): Routing score tensor.
         indices (torch.Tensor): Tensor of indices that match scores.
         outIndices (torch.Tensor): Output top-k index tensor.
-        lens (torch.Tensor): Vector of lengths for each batch
+        query_lens (torch.Tensor): Vector of query lengths for each batch.
+        cached_lens (torch.Tensor): Vector of cached KV lengths for each batch.
         k (int): Number of experts selected per token.
 
     Returns:

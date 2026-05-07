@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (C) 2025 - 2026. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include "base.h"
 #include "ascend.h"
@@ -998,10 +998,17 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
 }
 
 void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIndices,
-                 XTensor &lens, size_t k)
+                 XTensor &queryLens, XTensor &cachedLens, size_t k)
 {
-    uint32_t batchNum = lens.shape[0];
-    uint32_t maxSeqLen = scores.shape[0] / batchNum;
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+
+    uint32_t batchNum = queryLens.shape[0];
+    uint32_t maxSeqLen = scores.shape[1];
+    if (maxSeqLen <= k) {
+        return;
+    }
 
     if (k != 2048) {
         throw std::runtime_error(std::string(__func__) + ": only K=2048 is supported, got " +
@@ -1010,10 +1017,10 @@ void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIn
 
     if (scores.dtype == BF16 && indices.dtype == INT32) {
         aclrtlaunch_topk_bfloat16_t(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outIndices.ptr,
-                                    lens.ptr, maxSeqLen, batchNum, k);
+                                    queryLens.ptr, cachedLens.ptr, maxSeqLen, batchNum, k);
     } else if (scores.dtype == FP32 && indices.dtype == INT32) {
         aclrtlaunch_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outIndices.ptr,
-                               lens.ptr, maxSeqLen, batchNum, k);
+                               queryLens.ptr, cachedLens.ptr, maxSeqLen, batchNum, k);
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!" +
                                  std::to_string(scores.dtype));

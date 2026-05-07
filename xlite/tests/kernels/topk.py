@@ -18,11 +18,11 @@ testIterations = 100
 
 
 def buildXliteInput(scores):
-    res = []
-    for s in scores:
-        pad = torch.zeros(max_seq_len - len(s))
-        res.extend([s, pad])
-    return torch.cat(res)
+    batch_size = len(scores)
+    res = torch.zeros(batch_size, max_seq_len)
+    for i, s in enumerate(scores):
+        res[i, :len(s)] = s
+    return res
 
 
 def generate_sequences(input_sizes):
@@ -37,9 +37,9 @@ def generate_sequences(input_sizes):
         else:
             standard_indices.append(t.topk(n_tokens)[1])
             padding = torch.zeros(K - n_tokens, dtype=torch.int32)
-            standard_indices.append(padding)
+            standard_indices[-1] = torch.cat([standard_indices[-1], padding])
 
-    standard_indices = torch.cat(standard_indices)
+    standard_indices = torch.stack(standard_indices)
     return standard_scores, standard_indices.to(dtype=torch.int32)
 
 
@@ -49,11 +49,15 @@ def run_test(rt, input_sizes, msg):
     standard_scores, standard_indices = generate_sequences(input_sizes)
 
     scores = buildXliteInput(standard_scores)
-    indices = torch.arange(max_seq_len, dtype=torch.int32).repeat(batches)
-    xlite_indices = torch.empty(K * batches, dtype=torch.int32)
+    indices = torch.arange(max_seq_len, dtype=torch.int32)
+    xlite_indices = torch.empty(batches, K, dtype=torch.int32)
+
+    # Construct query_lens (all 1s) and cached_lens (input_sizes - query_lens)
+    query_lens = torch.ones(batches, dtype=torch.int32)
+    cached_lens = batch_sizes - query_lens
 
     torch.npu.synchronize()
-    xlite_topk(rt, scores, indices, xlite_indices, batch_sizes, K)
+    xlite_topk(rt, scores, indices, xlite_indices, query_lens, cached_lens, K)
     torch.npu.synchronize()
 
     try:
@@ -62,7 +66,7 @@ def run_test(rt, input_sizes, msg):
     except Exception as e:
         s = ""
         first_bad = -1
-        for i, (std, xlite) in enumerate(zip(standard_indices, xlite_indices)):
+        for i, (std, xlite) in enumerate(zip(standard_indices.flatten(), xlite_indices.flatten())):
             if std != xlite and first_bad == -1:
                 first_bad = i
             c = ' ' if std == xlite else 'x'
