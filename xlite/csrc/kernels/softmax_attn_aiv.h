@@ -6,6 +6,10 @@
 
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+
+// #define XLITE_KERNEL_DEBUG
+#include "debug.h"
+
 using namespace AscendC;
 
 #if __DAV_C220_VEC__
@@ -262,10 +266,9 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
                                            int actualCalcSoftmaxLen, uint32_t maskOff,
                                            uint32_t maskStride)
 {
-#ifdef XLITE_KERNEL_DEBUG
-    printf("RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, actualCalcSoftmaxLen=%d\n", m,
-           headSize, isFirstKvTile, actualCalcSoftmaxLen);
-#endif
+    dbg_printf(
+        "RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, actualCalcSoftmaxLen=%d\n", m,
+        headSize, isFirstKvTile, actualCalcSoftmaxLen);
     uint32_t headNumInGroup = nHeads / nKVHeads;
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);

@@ -7,6 +7,9 @@
 #include "kernel_param.h"
 #include "softmax_attn_aiv.h"
 
+// #define XLITE_KERNEL_DEBUG
+#include "debug.h"
+
 #define MAX_M0 128
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
@@ -114,10 +117,8 @@ public:
     __aicore__ inline void SetNextCore()
     {
         __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
-#ifdef XLITE_KERNEL_DEBUG
-        printf("block%d subblock%u set block%d subblock%u %u\n", blockIdx, subBlockIdx,
-               nextBlockIdx, subBlockIdx, setNextGeneration);
-#endif
+        dbg_printf("block%d subblock%u set block%d subblock%u %u\n", blockIdx, subBlockIdx,
+                   nextBlockIdx, subBlockIdx, setNextGeneration);
         *val = setNextGeneration;
         set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
@@ -129,10 +130,8 @@ public:
     __aicore__ inline void WaitPrevCore()
     {
         __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
-#ifdef XLITE_KERNEL_DEBUG
-        printf("block%d subblock%u wait block%d subblock%u %u\n", blockIdx, subBlockIdx,
-               prevBlockIdx, subBlockIdx, waitPrevGeneration);
-#endif
+        dbg_printf("block%d subblock%u wait block%d subblock%u %u\n", blockIdx, subBlockIdx,
+                   prevBlockIdx, subBlockIdx, waitPrevGeneration);
         do {
             copy_gm_to_ubuf_align_b16(val, waitPrevSync, 0, 1, sizeof(int32_t), 0, 0, 0, 0);
             set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
@@ -144,10 +143,8 @@ public:
     __aicore__ inline void ResetPrevCore()
     {
         __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
-#ifdef XLITE_KERNEL_DEBUG
-        printf("block%d subblock%u reset block%d subblock%u\n", blockIdx, subBlockIdx, prevBlockIdx,
-               subBlockIdx);
-#endif
+        dbg_printf("block%d subblock%u reset block%d subblock%u\n", blockIdx, subBlockIdx,
+                   prevBlockIdx, subBlockIdx);
         *val = 0;
         set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
@@ -399,12 +396,10 @@ public:
                 // do queryIdx & kvHeadIdx & kvIdx's QK
                 uint32_t qOffset = queryTaskOffset * headSize * nQKVHeads + kvHeadOffset;
 
-#ifdef XLITE_KERNEL_DEBUG
-                printf("block%d: {batch %d, query [%u - %u), kvHeadIdx %u, "
-                       "kv [%u - %u)} use %d temp buf: QK\n",
-                       GetBlockIdx(), batchIdx, queryTaskOffset, queryTaskOffset + queryTaskLen,
-                       kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
-#endif
+                dbg_printf("block%d: {batch %d, query [%u - %u), kvHeadIdx %u, "
+                           "kv [%u - %u)} use %d temp buf: QK\n",
+                           GetBlockIdx(), batchIdx, queryTaskOffset, queryTaskOffset + queryTaskLen,
+                           kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
                 RunAicQK(input[qOffset], queryTaskLen, kvHeadIdx, blockTable, kvOffset, kvLen,
                          qk[curr]);
                 ffts_cross_core_sync(PIPE_FIX, softmaxConfig);
@@ -413,13 +408,11 @@ public:
                     // wait vector softmax done
                     wait_flag_dev(2);
                     // do softmax * V
-#ifdef XLITE_KERNEL_DEBUG
-                    printf("block%d: {batch %d, query [%u - %u), kvHeadIdx %u, "
-                           "kv [%u - %u)} use %d temp buf: SV\n",
-                           GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
-                           lastQueryTaskOffset + lastQueryTaskLen, lastkvHeadIdx, lastKvOffset,
-                           lastKvOffset + lastKvLen, last);
-#endif
+                    dbg_printf("block%d: {batch %d, query [%u - %u), kvHeadIdx %u, "
+                               "kv [%u - %u)} use %d temp buf: SV\n",
+                               GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
+                               lastQueryTaskOffset + lastQueryTaskLen, lastkvHeadIdx, lastKvOffset,
+                               lastKvOffset + lastKvLen, last);
                     RunAicSV(qk[last], lastQueryTaskLen, lastkvHeadIdx, lastBlockTable,
                              lastKvOffset, lastKvLen, sv[last]);
                     ffts_cross_core_sync(PIPE_FIX, updateConfig);
@@ -444,13 +437,11 @@ public:
         // do last softmax * V
         if (needDoSV != 0) {
             wait_flag_dev(2);
-#ifdef XLITE_KERNEL_DEBUG
-            printf("block%d: {batch %d, query [%u - %u), kvHeadIdx %u, "
-                   "kv [%u - %u)} use %d temp buf: SV\n",
-                   GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
-                   lastQueryTaskOffset + lastQueryTaskLen, lastkvHeadIdx, lastKvOffset,
-                   lastKvOffset + lastKvLen, last);
-#endif
+            dbg_printf("block%d: {batch %d, query [%u - %u), kvHeadIdx %u, "
+                       "kv [%u - %u)} use %d temp buf: SV\n",
+                       GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
+                       lastQueryTaskOffset + lastQueryTaskLen, lastkvHeadIdx, lastKvOffset,
+                       lastKvOffset + lastKvLen, last);
             RunAicSV(qk[last], lastQueryTaskLen, lastkvHeadIdx, lastBlockTable, lastKvOffset,
                      lastKvLen, sv[last]);
             ffts_cross_core_sync(PIPE_FIX, updateConfig);
@@ -555,14 +546,13 @@ public:
                 // wait aic qk done
                 wait_flag_dev(0);
 
-#ifdef XLITE_KERNEL_DEBUG
-                printf("block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u - "
-                       "%u), kvHeadIdx %u "
-                       "kv [%u - %u)} use %d temp buf: SOFTMAX\n",
-                       blockIdx, subBlockIdx, batchIdx, queryTaskOffset,
-                       queryTaskOffset + queryTaskLen, nWorkStart, nWorkStart + nWorkCurCore,
-                       kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
-#endif
+                dbg_printf(
+                    "block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u - "
+                    "%u), kvHeadIdx %u "
+                    "kv [%u - %u)} use %d temp buf: SOFTMAX\n",
+                    blockIdx, subBlockIdx, batchIdx, queryTaskOffset,
+                    queryTaskOffset + queryTaskLen, nWorkStart, nWorkStart + nWorkCurCore,
+                    kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
                 RunAivSoftmaxPingPong(
                     (__gm__ Dtype *)qk[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
                     nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN,
@@ -578,15 +568,14 @@ public:
                         WaitPrevCore();
                         resetPrevCore = 1;
                     }
-#ifdef XLITE_KERNEL_DEBUG
-                    printf("block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u "
-                           "- %u), kvHeadIdx %u "
-                           "kv [%u - %u)} use %d temp buf: UPDATE\n",
-                           blockIdx, subBlockIdx, lastBatchIdx, lastQueryTaskOffset,
-                           lastQueryTaskOffset + lastQueryTaskLen, lastWorkStart,
-                           lastWorkStart + lastWorkCurCore, lastkvHeadIdx, lastKvOffset,
-                           lastKvOffset + lastKvLen, last);
-#endif
+                    dbg_printf(
+                        "block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u "
+                        "- %u), kvHeadIdx %u "
+                        "kv [%u - %u)} use %d temp buf: UPDATE\n",
+                        blockIdx, subBlockIdx, lastBatchIdx, lastQueryTaskOffset,
+                        lastQueryTaskOffset + lastQueryTaskLen, lastWorkStart,
+                        lastWorkStart + lastWorkCurCore, lastkvHeadIdx, lastKvOffset,
+                        lastKvOffset + lastKvLen, last);
                     // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] &
                     // max[last]
                     RunAivSoftmaxUpdate(
@@ -634,15 +623,14 @@ public:
                 WaitPrevCore();
                 resetPrevCore = 1;
             }
-#ifdef XLITE_KERNEL_DEBUG
-            printf("block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u - %u), "
-                   "kvHeadIdx %u "
-                   "kv [%u - %u)} use %d temp buf: UPDATE\n",
-                   blockIdx, subBlockIdx, lastBatchIdx, lastQueryTaskOffset,
-                   lastQueryTaskOffset + lastQueryTaskLen, lastWorkStart,
-                   lastWorkStart + lastWorkCurCore, lastkvHeadIdx, lastKvOffset,
-                   lastKvOffset + lastKvLen, last);
-#endif
+            dbg_printf(
+                "block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u - %u), "
+                "kvHeadIdx %u "
+                "kv [%u - %u)} use %d temp buf: UPDATE\n",
+                blockIdx, subBlockIdx, lastBatchIdx, lastQueryTaskOffset,
+                lastQueryTaskOffset + lastQueryTaskLen, lastWorkStart,
+                lastWorkStart + lastWorkCurCore, lastkvHeadIdx, lastKvOffset,
+                lastKvOffset + lastKvLen, last);
             // do update with sv[last] & sum[last] & max[last] & prevcore's sum[last] & max[last]
             RunAivSoftmaxUpdate((__gm__ Dtype *)sv[last][lastWorkStart * headSize].GetPhyAddr(),
                                 (__gm__ float *)max[last][lastWorkStart].GetPhyAddr(),
