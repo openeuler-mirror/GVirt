@@ -356,7 +356,8 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
 
     XTensor &attnOutput =
         rt.GetTensor({attnQWithQr.shape[0], qHeads * _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
-    if (!rt.enableFlashAttention) {
+    uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
+    if (rt._maxNumBlocks * _c.blockSize <= tileSizeOfCachedKV) {
         XTensor &qk =
             rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
                          attnQWithQr.dtype, DBG_LOC);
@@ -366,7 +367,6 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                    rt._batch, rt._maxNumBlocks, _c.softmaxScale);
         rt.PutTensor(qk);
     } else {
-        uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
         XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
                                    attnQWithQr.dtype, DBG_LOC);
         XTensor &sv = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.vHeadDim},
@@ -486,7 +486,8 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 
     XTensor &attn =
         rt.GetTensor({hiddenState.shape[0], qHeads * _c.headDim}, hiddenState.dtype, DBG_LOC);
-    if (!rt.enableFlashAttention) {
+    uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
+    if (rt._maxNumBlocks * _c.blockSize <= tileSizeOfCachedKV) {
         XTensor &qk =
             rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
                          hiddenState.dtype, DBG_LOC);
@@ -495,7 +496,6 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                          _c.blockSize, rt._batch, rt._maxNumBlocks);
         rt.PutTensor(qk);
     } else {
-        uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
         XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
                                    hiddenState.dtype, DBG_LOC);
         XTensor &sv = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.headDim},

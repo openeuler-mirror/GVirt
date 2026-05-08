@@ -92,14 +92,6 @@ void XRuntime::Init(size_t sizeMB)
         }
     }
 
-    const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
-    if (isEnvironmentVariableTrue(envFlashAttentionEnable)) {
-        enableFlashAttention = true;
-        if (_rankId == 0) {
-            std::cout << "Xlite Flash Attention Enabled!" << std::endl;
-        }
-    }
-
     _inited = true;
 }
 
@@ -549,11 +541,6 @@ void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
         if (endPtr != envCommOptimizeLen && *endPtr == '\0' && val >= 0) {
             commOptimizeLen = static_cast<uint32_t>(val);
         }
-    }
-
-    const char *envFlashAttentionEnable = std::getenv("XLITE_FLASH_ATTENTION_ENABLE");
-    if (isEnvironmentVariableTrue(envFlashAttentionEnable)) {
-        enableFlashAttention = true;
     }
 
     _inited = true;

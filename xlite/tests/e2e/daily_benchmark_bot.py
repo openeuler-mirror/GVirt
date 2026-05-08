@@ -678,8 +678,6 @@ def run_benchmark(model_type: str = "moe") -> Optional[Path]:
         # 根据 NPU-SMI 版本决定是否禁用 XCCL
         if should_disable_xccl():
             env["XLITE_DISABLE_XCCL"] = "True"
-        # Flash Attention 始终启用
-        env["XLITE_FLASH_ATTENTION_ENABLE"] = "True"
         
         # 执行基准测试脚本
         result = subprocess.run(

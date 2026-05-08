@@ -1046,6 +1046,7 @@ def attention(
     block_size: int,
     batch: int,
     max_num_block: int,
+    enable_flash_attention: bool = False,
 ) -> None:
     """Run paged attention for cached KV tensors.
 
@@ -1065,6 +1066,7 @@ def attention(
         block_size (int): KV block size.
         batch (int): Batch size.
         max_num_block (int): Maximum number of blocks per request.
+        enable_flash_attention (bool): Whether to use flash attention kernels.
 
     Returns:
         None: `output` is written in place.
@@ -1417,6 +1419,7 @@ def mla(
     batch: int,
     max_num_block: int,
     scale: float,
+    enable_flash_attention: bool = False,
 ) -> None:
     """Run MLA kernel using cached KV blocks.
 
@@ -1440,6 +1443,7 @@ def mla(
         batch (int): Batch size.
         max_num_block (int): Maximum number of blocks per request.
         scale (float): Attention scaling factor.
+        enable_flash_attention (bool): Whether to use flash attention kernels.
 
     Returns:
         None: `output` is written in place.
