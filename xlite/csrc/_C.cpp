@@ -1023,30 +1023,41 @@ void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCac
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
 
-    uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
-    XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
-                               XDtype(qWithQr), DBG_LOC);
-    XTensor &sv =
-        rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, vHeadDim}, XDtype(qWithQr), DBG_LOC);
-    XTensor &max = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-    XTensor &sum = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-    XTensor &lastMax = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
-    XTensor &lastSum = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
-    XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
-    sync.Memset(0);
+    if (!rt.enableFlashAttention) {
+        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
+                                   XDtype(qWithQr), DBG_LOC);
+        XliteOpMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, _output, _queryStartLoc, _lens,
+                   _cachedLens, _blockTables, qHeads, ropeHeadDim, nopeHeadDim, vHeadDim,
+                   kvLoraRank, blockSize, batch, maxNumBlock, scale);
+        rt.Synchronize();
+        rt.PutTensor(qk);
+    } else {
+        uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
+        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
+                                   XDtype(qWithQr), DBG_LOC);
+        XTensor &sv =
+            rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, vHeadDim}, XDtype(qWithQr), DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &lastMax = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+        XTensor &lastSum = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+        XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
+        sync.Memset(0);
 
-    XliteOpFlashMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, sv, max, sum, lastMax, lastSum, sync,
-                    _output, _queryStartLoc, _lens, _cachedLens, _blockTables, qHeads, ropeHeadDim,
-                    nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlock, scale);
+        XliteOpFlashMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, sv, max, sum, lastMax, lastSum,
+                        sync, _output, _queryStartLoc, _lens, _cachedLens, _blockTables, qHeads,
+                        ropeHeadDim, nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch,
+                        maxNumBlock, scale);
 
-    rt.Synchronize();
-    rt.PutTensor(sync);
-    rt.PutTensor(lastSum);
-    rt.PutTensor(lastMax);
-    rt.PutTensor(sum);
-    rt.PutTensor(max);
-    rt.PutTensor(sv);
-    rt.PutTensor(qk);
+        rt.Synchronize();
+        rt.PutTensor(sync);
+        rt.PutTensor(lastSum);
+        rt.PutTensor(lastMax);
+        rt.PutTensor(sum);
+        rt.PutTensor(max);
+        rt.PutTensor(sv);
+        rt.PutTensor(qk);
+    }
 }
 
 void AddAndRMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &addInOut, at::Tensor &norm,
