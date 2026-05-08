@@ -151,7 +151,6 @@ public:
 
     // ATTN
     bool _attnInitialized = false;
-    bool enableFlashAttention = false;
     uint32_t _maxNumBlocks;
     int _prefillBatch;
     int _batch;

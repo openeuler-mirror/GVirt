@@ -11,7 +11,6 @@
 | `XLITE_PORT` | 整数 | `10266` | 通信基础端口号。TP 通信使用 `port + rankId/tpSize`，DP 通信使用 `port + 200 + rankId%tpSize`，XCCL 通信使用 `port + 400`。 |
 | `XLITE_COMM_OPTIMIZE_LEN` | 整数 | `6144` | 通信优化阈值长度。用于优化prefill阶段长序列的通信性能。 |
 | `XLITE_DISABLE_XCCL` | 布尔 | `false` | 是否禁用 XCCL（XLite 自定义通信算子）。设置为 `true` 时禁用，回退到 HCCL。 |
-| `XLITE_FLASH_ATTENTION_ENABLE` | 布尔 | `false` | 是否启用 Flash Attention 优化。长序列场景建议开启。设置为 `true`、`1`、`yes` 或 `on` 时启用。 |
 
 ## 布尔值解析规则
 

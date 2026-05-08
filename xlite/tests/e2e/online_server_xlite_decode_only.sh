@@ -41,7 +41,6 @@ else
     export XLITE_DISABLE_XCCL=True
     echo "Unable to detect NPU-SMI version, enabling XLITE_DISABLE_XCCL by default"
 fi
-export XLITE_FLASH_ATTENTION_ENABLE=True
 
 ip=127.0.0.1
 
