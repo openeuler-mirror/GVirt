@@ -14,7 +14,7 @@ sentencepiece
 protobuf
 transformers>=5.0.0,<=5.2.0
 pyyaml>=6.0
-torch-npu>=2.5.1
+torch-npu==2.10.0
 clang-format==22.1.0
 clang-tidy==22.1.0
 flake8

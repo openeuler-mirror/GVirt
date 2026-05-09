@@ -25,7 +25,7 @@ classifiers = [
 ]
 # synchronize with requirements.txt when updating dependencies
 dependencies = [
-    "torch>=2.5.1", # ake sure (torch: build version <= runtime version)
+    "torch==2.10.0", # make sure (torch: build version == runtime version)
 ]
 
 [project.optional-dependencies]
@@ -41,7 +41,7 @@ dev = [
     "protobuf",
     "transformers",
     "pyyaml>=6.0",
-    "torch-npu>=2.5.1",     # make sure (torch: build version <= runtime version)
+    "torch-npu==2.10.0",     # make sure (torch: build version == runtime version)
     "clang-format==22.1.0",
     "clang-tidy==22.1.0",
     "flake8",
