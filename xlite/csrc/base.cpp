@@ -319,7 +319,7 @@ void XTensor::View(std::vector<size_t> shape)
     this->numel = newNumel;
 }
 
-void XTensor::Save(std::string &path)
+void XTensor::Save(const std::string &path)
 {
 #ifdef XLITE_DEBUG_ON
     auto options = at::TensorOptions().dtype(ToScalarType(dtype)).device(at::Device("npu"));

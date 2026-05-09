@@ -15,7 +15,7 @@ import math
 import numpy as np
 import warnings
 from typing import Iterable
-from xlite._C import Runtime, mla
+from xlite._C import Runtime, mla, mla_with_indices
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -32,12 +32,14 @@ models = [
 
 # work configurations: batch_size, cached_lens, query_lens
 work = [
+    (1, [3000], [1]),
     (1, [0], [1]),
     (1, [0], [30]),
     (1, [0], [77]),
     (1, [0], [128]),
     (1, [0], [256]),
     (1, [0], [1600]),
+    (1, [0], [2528]),
     (1, [100], [30]),
     (8, [0] * 8, [789, 65, 13, 6545, 24, 190, 2432, 124]),
     (2, [4000] * 2, [1] * 2),
@@ -197,3 +199,120 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             logging.error(f'{e}')
             logging.error(f'torch_npu: {output_standard}')
             logging.error(f'xlite: {output_xlite}')
+
+        # Test MLA with topkIndices: verify that MLA with topkIndices produces the same output
+        # as standard MLA with -inf mask applied before softmax
+        # This simulates the DSA (Dual Sparse Attention) behavior used in deepseek_v32/glm5
+        top_k_test_cases = [
+            # (min(128, max_seq_len),),  # small topk
+            # (min(1024, max_seq_len),),  # medium topk
+            (min(2048, max_seq_len),),  # large topk
+        ]
+
+        for topk_value in top_k_test_cases:
+            topk = topk_value[0]
+            if topk <= 0:
+                continue
+
+            # Generate random topk_indices for each sample in the batch
+            # This simulates the indexer output that selects top-k positions
+            # topk_indices is a flattened tensor of shape (total_query_len, topk)
+            topk_indices_list = []
+            for i in range(batch):
+                qlen = query_len_list[i]
+                clen = cached_lens_list[i]
+                total_len = qlen + clen
+                # For each query position, generate topk indices
+                # Each query position q_idx can only attend to positions in [0, clen + q_idx]
+                # due to causal mask constraint
+                for q_idx in range(qlen):
+                    valid_len = clen + q_idx + 1  # +1 because q_idx can attend to itself
+                    perm = torch.randperm(valid_len, device="npu")
+                    if valid_len < topk:
+                        # Pad with the last valid index to reach topk size
+                        perm = torch.cat([perm, perm[-1:].expand(topk - valid_len)])
+                    else:
+                        perm = perm[:topk]
+                    topk_indices_list.append(perm)
+
+            if len(topk_indices_list) == 0:
+                continue
+
+            # Concatenate topk_indices into a flattened tensor
+            # Shape: (total_query_len, topk)
+            topk_indices_tensor = torch.stack(topk_indices_list)  # (total_query_len, topk)
+
+            # Standard MLA with topk mask: apply -inf mask before softmax
+            outputs_with_topk = []
+            q_offset = 0
+            indices_offset = 0
+            for i in range(batch):
+                qlen = query_len_list[i]
+                clen = cached_lens_list[i]
+
+                qWithQr_chunk = qWithQr_standard[q_offset: q_offset + qlen].unsqueeze(0)
+                q_offset += qlen
+
+                q_nope, q_rope = qWithQr_chunk.split([nope_head_dim, rope_head_dim], dim=-1)
+                q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkvb[:, :nope_head_dim])
+                qkc = torch.einsum("bshc,btc->bsht", q_nope, k_cache[i:i+1, :clen + qlen])
+                qkr = torch.einsum("bshr,btr->bsht", q_rope, v_cache[i:i+1, :clen + qlen])
+                scores = qkc + qkr
+                scores = scores * scale
+
+                # Apply topk mask: -inf for positions not in topk_indices, 0 for topk positions
+                total_len = clen + qlen
+                # Get indices for this sample: stack indices for all query positions in this sample
+                sample_indices = torch.stack(topk_indices_list[indices_offset:indices_offset + qlen])  # (qlen, topk)
+                indices_offset += qlen
+
+                # scores shape (1, qlen, heads, total_len), topk_indices shape (qlen, topk)
+                index_mask = torch.full((1, qlen, total_len), float("-inf"), device="npu")
+                topk_idx = sample_indices.unsqueeze(0)  # (1, qlen, topk)
+                index_mask.scatter_(-1, topk_idx, 0)
+
+                # add per-sample mask if present
+                if masks is not None:
+                    scores = scores + masks[i].unsqueeze(0).unsqueeze(1).permute(0, 2, 1, 3)
+
+                scores = scores + index_mask.unsqueeze(2)  # Add mask to scores
+
+                scores = torch.softmax(scores, dim=-1)
+                x = torch.einsum("bsht,btc->bshc", scores, k_cache[i:i+1, :clen + qlen])
+                x = torch.einsum("bshc,hdc->bshd", x, wkvb[:, -v_head_dim:])
+                outputs_with_topk.append(x.squeeze(0))
+
+            output_standard_with_topk = torch.cat(outputs_with_topk, dim=0)
+
+            # xlite MLA with topkIndices
+            output_xlite_with_topk = torch.zeros(total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
+
+            torch.npu.synchronize()
+            topk_indices_tensor = topk_indices_tensor.to(dtype=torch.int32)
+            mla_with_indices(rt, qWithQr_xlite, k_cache_xlite, v_cache_xlite, wkvb,
+                output_xlite_with_topk, query_start_loc, query_lens, cached_lens,
+                block_tables, n_heads, rope_head_dim, nope_head_dim,
+                v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, max_num_blocks, scale,
+                topk, topk_indices_tensor)
+
+            logging.info(
+                "mla with topkIndices %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) executed!",
+                name,
+                n_heads,
+                rope_head_dim,
+                nope_head_dim,
+                v_head_dim,
+                kv_lora_rank,
+                test_dtype,
+                batch,
+                cached_lens_list,
+                query_len_list,
+                topk,
+            )
+
+            try:
+                torch.testing.assert_close(output_xlite_with_topk, output_standard_with_topk, atol=1e-5, rtol=5e-02)
+            except AssertionError as e:
+                logging.error(f'MLA with topkIndices test failed: {e}')
+                logging.error(f'Standard MLA with topk mask: {output_standard_with_topk}')
+                logging.error(f'xlite MLA with topkIndices: {output_xlite_with_topk}')

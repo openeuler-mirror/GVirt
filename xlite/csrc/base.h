@@ -160,7 +160,7 @@ public:
     void Memset(int value);
     std::string ToStr(const char *name = "") const;
     void View(std::vector<size_t> shape);
-    void Save(std::string &path);
+    void Save(const std::string &path);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
     enum XTensorType GetType()
     {
