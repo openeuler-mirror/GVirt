@@ -597,6 +597,10 @@ void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &outp
     InitXTensor(_input, input);
     InitXTensor(_output, output);
 
+    if (input.size(0) == 0) {
+        return;
+    }
+
     if (currStream != 0) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
