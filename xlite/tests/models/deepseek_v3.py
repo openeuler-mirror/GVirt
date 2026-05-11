@@ -860,14 +860,18 @@ class Block(nn.Module):
         Returns:
             torch.Tensor: Output tensor after block computation.
         """
+        attn_norm_out = self.attn_norm(x)
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.n_dense_layers):
-            print(f"layer{self.layer_id} in: {self.attn_norm(x)}")
-        if debug and rank == 0 and (self.layer_id == 1 or self.layer_id == self.n_dense_layers + 1):
-            print(f"layer{self.layer_id - 1} after ffn: {self.attn_norm(x)}")
-        x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
+            print(f"layer{self.layer_id} in: {attn_norm_out}")
+        attn_out = self.attn(attn_norm_out, start_pos, freqs_cis, mask)
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.n_dense_layers):
-            print(f"layer{self.layer_id} after attn: {self.ffn_norm(x)}")
-        x = x + self.ffn(self.ffn_norm(x))
+            print(f"layer{self.layer_id} after attn: {attn_out}")
+        x = x + attn_out
+        ffn_norm_out = self.ffn_norm(x)
+        ffn_out = self.ffn(ffn_norm_out)
+        if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.n_dense_layers):
+            print(f"layer{self.layer_id} after ffn: {ffn_out}")
+        x = x + ffn_out
         return x
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:

@@ -914,15 +914,17 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
                           ("layer" + std::to_string(i) + " in").c_str());
         ForwardAttn(rt, i, kvCache, freqsCis, h);
+        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
+                          ("layer" + std::to_string(i) + " after attn").c_str());
         XliteOpAddAndRmsNorm(rt, rt.hiddenStateSlice, xSlice, mlpNorm[i], _c.normEps,
                              rt.hiddenStateSlice, mlpNormBias[i]);
         XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP);
         if (rt.multiTaskParallel) {
             rt.NotifyWaitPeerStream();
         }
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " after attn").c_str());
         ForwardFFN(rt, i, h);
+        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
+                          ("layer" + std::to_string(i) + " after ffn").c_str());
         if (i < _c.deepstackNumLevel) {
             XliteOpAdd(rt, h, deepstackInputEmbeds[i], h);
         }
@@ -934,8 +936,6 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         if (rt.multiTaskParallel) {
             rt.NotifyWaitPeerStream();
         }
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " after ffn").c_str());
     }
     XliteOpAddAndRmsNorm(rt, rt.hiddenStateSlice, xSlice, norm, _c.normEps, rt.hiddenStateSlice,
                          normBias);
@@ -964,18 +964,18 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
         XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
                           ("layer" + std::to_string(i) + " in").c_str());
         ForwardAttn(rt, i, kvCache, freqsCis, h);
-        XliteOpAddAndRmsNorm(rt, h, x, mlpNorm[i], _c.normEps, h, mlpNormBias[i]);
         XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
                           ("layer" + std::to_string(i) + " after attn").c_str());
+        XliteOpAddAndRmsNorm(rt, h, x, mlpNorm[i], _c.normEps, h, mlpNormBias[i]);
         ForwardFFN(rt, i, h);
+        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
+                          ("layer" + std::to_string(i) + " after ffn").c_str());
         if (i < _c.deepstackNumLevel) {
             XliteOpAdd(rt, h, deepstackInputEmbeds[i], h);
         }
         if (i < (_c.nLayers - 1)) {
             XliteOpAddAndRmsNorm(rt, h, x, attnNorm[i + 1], _c.normEps, h, attnNormBias[i + 1]);
         }
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " after ffn").c_str());
     }
     XliteOpAddAndRmsNorm(rt, h, x, norm, _c.normEps, output, normBias);
     rt.PutTensor(h);

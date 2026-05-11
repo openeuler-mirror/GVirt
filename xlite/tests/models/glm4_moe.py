@@ -497,14 +497,18 @@ class Block(nn.Module):
         self.layer_id = layer_id
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        attn_norm_out = self.input_layernorm(x)
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.first_k_dense_replace):
-            print(f"layer{self.layer_id} in: {self.input_layernorm(x)}")
-        if debug and rank == 0 and (self.layer_id == 1 or self.layer_id == self.first_k_dense_replace + 1):
-            print(f"layer{self.layer_id - 1} after ffn: {self.input_layernorm(x)}")
-        x = x + self.self_attn(self.input_layernorm(x), start_pos, freqs_cis, mask)
+            print(f"layer{self.layer_id} in: {attn_norm_out}")
+        attn_out = self.self_attn(attn_norm_out, start_pos, freqs_cis, mask)
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.first_k_dense_replace):
-            print(f"layer{self.layer_id} after attn: {self.post_attention_layernorm(x)}")
-        x = x + self.mlp(self.post_attention_layernorm(x))
+            print(f"layer{self.layer_id} after attn: {attn_out}")
+        x = x + attn_out
+        ffn_norm_out = self.post_attention_layernorm(x)
+        ffn_out = self.mlp(ffn_norm_out)
+        if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.first_k_dense_replace):
+            print(f"layer{self.layer_id} after ffn: {ffn_out}")
+        x = x + ffn_out
         return x
 
 
