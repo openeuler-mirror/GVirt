@@ -106,10 +106,6 @@ ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
 
 option(XLITE_DEBUG "Enable xlite debug mode" OFF)
 
-if(XLITE_DEBUG)
-    target_compile_definitions(xlite_core PRIVATE XLITE_DEBUG_ON)
-endif()
-
 # xlite
 add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.cpp
@@ -133,6 +129,10 @@ target_link_libraries(xlite PRIVATE
     hccl
     torch
 )
+
+if(XLITE_DEBUG)
+    target_compile_definitions(xlite PRIVATE XLITE_DEBUG_ON)
+endif()
 
 # _C
 find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
