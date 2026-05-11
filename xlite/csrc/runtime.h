@@ -13,25 +13,25 @@
 
 #ifdef XLITE_DEBUG_ON
 #define XLITE_DEBUG_POINT(condition, rt, h, str) \
-    if (condition && !(rt).IsDummyRuntime()) {   \
+    if ((condition) && !(rt).IsDummyRuntime()) { \
         (rt).Synchronize();                      \
         (h).Print((str));                        \
     }
 
 #define XLITE_DEBUG_POINT_ROWS_COLS(condition, rt, h, str, rows, cols) \
-    if (condition && !(rt).IsDummyRuntime()) {                         \
+    if ((condition) && !(rt).IsDummyRuntime()) {                       \
         (rt).Synchronize();                                            \
         (h).Print(str, rows, cols);                                    \
     }
 
 #define XLITE_DEBUG_PTR_POINT(condition, rt, h, str, subShape, subDtype) \
-    if (condition && !(rt).IsDummyRuntime()) {                           \
+    if ((condition) && !(rt).IsDummyRuntime()) {                         \
         (rt).Synchronize();                                              \
         (h).PrintPtr(str, subShape, subDtype);                           \
     }
 
 #define XLITE_DEBUG_DUMP_XTENSOR(condition, rt, h, path) \
-    if (condition && !(rt).IsDummyRuntime()) {           \
+    if ((condition) && !(rt).IsDummyRuntime()) {         \
         (rt).Synchronize();                              \
         (h).Save(path);                                  \
     }

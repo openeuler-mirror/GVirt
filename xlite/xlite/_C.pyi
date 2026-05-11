@@ -1421,7 +1421,7 @@ def mla(
     scale: float,
     enable_flash_attention: bool = False,
 ) -> None:
-    """Run MLA kernel using cached KV blocks.
+    """Run MLA kernel using cached KV blocks (full attention).
 
     Args:
         rt (Runtime): Native runtime handle.
@@ -1443,6 +1443,61 @@ def mla(
         batch (int): Batch size.
         max_num_block (int): Maximum number of blocks per request.
         scale (float): Attention scaling factor.
+        enable_flash_attention (bool): Whether to use flash attention kernels.
+
+    Returns:
+        None: `output` is written in place.
+    """
+    ...
+
+def mla_with_indices(
+    rt: Runtime,
+    q_with_qr: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    wkvb: torch.Tensor,
+    output: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    n_heads: int,
+    rope_head_dim: int,
+    nope_head_dim: int,
+    v_head_dim: int,
+    kv_lora_rank: int,
+    block_size: int,
+    batch: int,
+    max_num_block: int,
+    scale: float,
+    top_k: int,
+    topk_indices: torch.Tensor,
+    enable_flash_attention: bool = False,
+) -> None:
+    """Run MLA kernel with sparse attention using top-k indices.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        q_with_qr (torch.Tensor): Query tensor with rotary components.
+        k_cache (torch.Tensor): Key cache tensor.
+        v_cache (torch.Tensor): Value cache tensor.
+        wkvb (torch.Tensor): MLA projection tensor.
+        output (torch.Tensor): Attention output tensor.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
+        lens (torch.Tensor): Current token lengths.
+        cached_lens (torch.Tensor): Cached token lengths.
+        block_tables (torch.Tensor): Block table tensor.
+        n_heads (int): Number of query heads.
+        rope_head_dim (int): Rotary head dimension.
+        nope_head_dim (int): Non-rotary head dimension.
+        v_head_dim (int): Value head dimension.
+        kv_lora_rank (int): KV LoRA rank.
+        block_size (int): KV block size.
+        batch (int): Batch size.
+        max_num_block (int): Maximum number of blocks per request.
+        scale (float): Attention scaling factor.
+        top_k (int): Number of top-k indices for sparse attention.
+        topk_indices (torch.Tensor): Top-k indices tensor for sparse attention.
         enable_flash_attention (bool): Whether to use flash attention kernels.
 
     Returns:

@@ -884,17 +884,19 @@ void XliteOpMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache
                 XTensor &qk, XTensor &output, XTensor &queryStartLoc, XTensor &lens,
                 XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                 uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
-                uint32_t batch, uint32_t maxNumBlock, float scale)
+                uint32_t batch, uint32_t maxNumBlock, float scale, uint32_t topK,
+                const XTensor &topkIndices)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
     if (qWithQr.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 &&
         wkvb.dtype == BF16 && output.dtype == BF16) {
-        aclrtlaunch_mla_bfloat16_t(
-            rt.aicNum, rt.stream, qWithQr.ptr, kCache.ptr, vCache.ptr, wkvb.ptr, qk.ptr, output.ptr,
-            queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
-            nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlock, scale);
+        aclrtlaunch_mla_bfloat16_t(rt.aicNum, rt.stream, qWithQr.ptr, kCache.ptr, vCache.ptr,
+                                   wkvb.ptr, topkIndices.ptr, qk.ptr, output.ptr, queryStartLoc.ptr,
+                                   lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
+                                   nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlock,
+                                   scale, topK);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qWithQr) + XT_STR(kCache) + XT_STR(vCache) +
                               XT_STR(wkvb) + XT_STR(output);
