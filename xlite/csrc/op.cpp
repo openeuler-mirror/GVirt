@@ -611,6 +611,9 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     nLoop = DIV_ROUND_UP(n, n0);
     totalLoops = mLoop * nLoop;
     uint32_t aicNum = totalLoops > rt.aicNum ? rt.aicNum : totalLoops;
+    if (aicNum == 0) {
+        aicNum = 1;
+    }
 
     XlitePickSwizzle(m, n, k, &swizzle);
 

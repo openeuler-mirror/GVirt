@@ -20,7 +20,7 @@ else
     # 创建默认输入文件
     echo '[
         {
-            "query": "你好，请介绍一下自己。",
+            "query": "who are you?",
             "response": ""
         }
     ]' > $DEFAULT_INPUT_FILE
@@ -438,9 +438,11 @@ if [ $npu_count -ge 16 ]; then
     run_deepseek_v3
     run_minimax_m2
     #run_qwen3_5_moe_122B
-    #run_deepseek_v32
-    #run_glm5
 fi
+
+# bf16 need 32 NPUs
+#run_deepseek_v32
+#run_glm5
 
 # 清理默认输入文件（如果存在）
 if [ -f "$DEFAULT_INPUT_FILE" ]; then
