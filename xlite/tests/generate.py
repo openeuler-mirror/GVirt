@@ -163,8 +163,8 @@ def main(
     torch.set_default_dtype(dtype)
     with torch.device("npu"):
         model = Transformer(args)
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_path, trust_remote_code=True)
     model.load_weights(ckpt_path)
+    tokenizer = AutoTokenizer.from_pretrained(ckpt_path, trust_remote_code=True)
     completion_tokens, _ = generate(model, [tokenizer.encode("Warn up")], 2, -1, 1.)
     tokenizer.decode(completion_tokens[0])
 
