@@ -59,7 +59,7 @@ for name, n_heads, head_dim, test_dtype in models:
             # standard
             q_standard = torch.randn(total_query_len, n_heads * head_dim)
             k_cache = torch.randn(batch, max_seq_len, head_dim)
-            weight_standard = torch.randn(total_query_len, n_heads)
+            weight_standard = torch.randn(total_query_len, head_dim + n_heads)
 
             # xlite
             q_xlite = q_standard.clone()
@@ -90,7 +90,7 @@ for name, n_heads, head_dim, test_dtype in models:
 
             # slice this sample's flat q from concatenated q_standard
             q_chunk = q_standard[offset: offset + qlen]
-            weight_chunk = weight_standard[offset: offset + qlen]
+            weight_chunk = weight_standard[offset: offset + qlen, head_dim: head_dim + n_heads]
             offset += qlen
 
             # reshape to [query_len, n_heads, head_dim]
