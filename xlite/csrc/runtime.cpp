@@ -503,6 +503,12 @@ bool XRuntime::TensorInPool(XTensor &t)
     return _pool->TensorInPool(t);
 }
 
+void XRuntime::ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable)
+{
+    defaultMatmulSwizzle = swizzle;
+    disableSwizzleTable = !useSwizzleTable;
+}
+
 void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
 {
     if (_inited) {

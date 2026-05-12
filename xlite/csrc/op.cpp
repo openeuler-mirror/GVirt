@@ -541,7 +541,7 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
 
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
                    const XTensor &bias, const XTensor &deqScale, bool transpose, uint64_t m0,
-                   uint64_t n0, uint64_t k0, uint64_t swizzle)
+                   uint64_t n0, uint64_t k0)
 {
     if (IsDummyRuntime(rt)) {
         if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16 && bias.ptr != nullptr) {
@@ -561,6 +561,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     uint64_t mLoop;
     uint64_t nLoop;
     uint64_t totalLoops;
+    uint64_t swizzle = rt.defaultMatmulSwizzle;
 
     // Notice: Ensure that no overflow occurs
     // L1(512K): PINGPONG * (sizeof(x) * m0 * 2k0 + sizeof(y) * n0 * k0) + BiasSize(Optional)] +
@@ -615,7 +616,9 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         aicNum = 1;
     }
 
-    XlitePickSwizzle(m, n, k, &swizzle);
+    if (!rt.disableSwizzleTable) {
+        XlitePickSwizzle(m, n, k, &swizzle);
+    }
 
     if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
         aclrtlaunch_matmul_float16_t(aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
@@ -734,22 +737,22 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
         aclrtlaunch_group_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
                                             deqScales.ptr, counts.ptr, counts.shape[0], outDim,
                                             inDim, -1, -1, -1, start, end, weightNZ, transpose,
-                                            MATMUL_SWIZZLE_DEFAULT_VALUE);
+                                            rt.defaultMatmulSwizzle);
     } else if (in.dtype == FP16 && weightDtype == FP16 && output.dtype == FP16) {
         aclrtlaunch_group_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
                                            deqScales.ptr, counts.ptr, counts.shape[0], outDim,
                                            inDim, -1, -1, -1, start, end, weightNZ, transpose,
-                                           MATMUL_SWIZZLE_DEFAULT_VALUE);
+                                           rt.defaultMatmulSwizzle);
     } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32 && !transpose) {
         aclrtlaunch_group_matmul_float(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
                                        deqScales.ptr, counts.ptr, counts.shape[0], outDim, inDim,
                                        -1, -1, -1, start, end, weightNZ, transpose,
-                                       MATMUL_SWIZZLE_DEFAULT_VALUE);
+                                       rt.defaultMatmulSwizzle);
     } else if (in.dtype == INT8 && weightDtype == INT8 && output.dtype == FP16) {
         aclrtlaunch_group_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
                                         deqScales.ptr, counts.ptr, counts.shape[0], outDim, inDim,
                                         -1, -1, -1, start, end, weightNZ, transpose,
-                                        MATMUL_SWIZZLE_DEFAULT_VALUE);
+                                        rt.defaultMatmulSwizzle);
     } else {
         std::string err_str = DBG_PREFIX;
         err_str += XT_STR(in) + XT_STR(output) + ", weight dtype:" + XDtypeStr(weightDtype);
