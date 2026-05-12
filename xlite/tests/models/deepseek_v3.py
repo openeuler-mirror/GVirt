@@ -466,10 +466,8 @@ class Indexer(torch.nn.Module):
         self.index_topk: int = args.index_topk
         self.q_lora_rank: int = args.q_lora_rank
         self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim)
-        self.wk = Linear(self.dim, self.head_dim)
+        self.wk_weights_proj = Linear(self.dim, self.head_dim + self.n_heads, dtype=torch.float32)
         self.k_norm = LayerNorm(self.head_dim)
-        # weights_proj in the checkpoint is stored in bf16, while the parameters here are stored in fp32 for convenient.
-        self.weights_proj = Linear(self.dim, self.n_heads, dtype=torch.float32)
         self.softmax_scale = self.head_dim ** -0.5
         self.indexer_rope_interleave = args.indexer_rope_interleave
 
@@ -486,7 +484,8 @@ class Indexer(torch.nn.Module):
         # rope in indexer is not interleaved
         q_pe = apply_rotary_emb(q_pe, freqs_cis, self.indexer_rope_interleave)
         q = torch.cat([q_pe, q_nope], dim=-1)
-        k = self.wk(x)
+        wk_weights = self.wk_weights_proj(x.float())
+        k = wk_weights[..., :self.head_dim].type_as(x)
         k = self.k_norm(k)
         k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
         # rope in indexer is not interleaved
@@ -495,7 +494,7 @@ class Indexer(torch.nn.Module):
         q = rotate_activation(q)
         k = rotate_activation(k)
         self.k_cache[:bsz, start_pos:end_pos] = k
-        weights = self.weights_proj(x.float()) * self.n_heads ** -0.5
+        weights = wk_weights[..., self.head_dim:] * self.n_heads ** -0.5
         scores = torch.einsum("bshd, btd -> bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
         index_score = torch.einsum("bsht,bsh->bst", scores, weights)
         if mask is not None:
@@ -1059,6 +1058,28 @@ class DeepSeek_V3(nn.Module):
             if is_wqkv_a:
                 continue
 
+            # Handle indexer wk and weights_proj merge into wk_weights_proj
+            is_indexer_wk_weights = False
+            for stride_id, weight_name in enumerate(["indexer.wk.weight", "indexer.weights_proj.weight"]):
+                if weight_name not in name:
+                    continue
+
+                param_name = name.replace(weight_name, "indexer.wk_weights_proj.weight")
+                if param_name not in param_dict:
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.',
+                                   param_name)
+                    continue
+                param = param_dict[param_name]
+                if stride_id == 0:  # wk.weight -> head_dim
+                    param.data[:args.index_head_dim].copy_(loaded_weight[:])
+                else:  # weights_proj.weight -> n_heads
+                    param.data[args.index_head_dim:].copy_(loaded_weight[:])
+
+                is_indexer_wk_weights = True
+                break
+            if is_indexer_wk_weights:
+                continue
+
             is_gate_up_weight = False
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
                 if weight_name not in name:
@@ -1212,10 +1233,9 @@ class DeepSeek_V3(nn.Module):
         self.xlite_model.mla_kv_b = [layer.attn.wkv_b.weight for layer in self.layers]
         self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
         self.xlite_model.index_q_b = [layer.attn.indexer.wq_b.weight for layer in self.layers if layer.attn.indexer is not None]
-        self.xlite_model.index_k = [layer.attn.indexer.wk.weight for layer in self.layers if layer.attn.indexer is not None]
+        self.xlite_model.index_k_weights_proj = [layer.attn.indexer.wk_weights_proj.weight.to(dtype=torch.get_default_dtype()) for layer in self.layers if layer.attn.indexer is not None]
         self.xlite_model.index_k_norm = [layer.attn.indexer.k_norm.weight.to(dtype=torch.get_default_dtype()) for layer in self.layers if layer.attn.indexer is not None]
         self.xlite_model.index_k_norm_bias = [layer.attn.indexer.k_norm.bias.to(dtype=torch.get_default_dtype()) for layer in self.layers if layer.attn.indexer is not None]
-        self.xlite_model.index_weight = [layer.attn.indexer.weights_proj.weight.to(dtype=torch.get_default_dtype()) for layer in self.layers if layer.attn.indexer is not None]
         self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [self.layers[i].ffn.w13.weight for i in range(args.n_dense_layers)]
         self.xlite_model.mlp_down = [self.layers[i].ffn.w2.weight for i in range(args.n_dense_layers)]

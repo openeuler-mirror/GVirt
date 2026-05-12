@@ -34,10 +34,9 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mlpDownQuantBias.resize(c.nDenseLayers);
     mlpDownDeqScale.resize(c.nDenseLayers);
     indexQB.resize(c.nLayers);
-    indexK.resize(c.nLayers);
+    indexKWeightsProj.resize(c.nLayers);
     indexKNorm.resize(c.nLayers);
     indexKNormBias.resize(c.nLayers);
-    indexWeight.resize(c.nLayers);
     moeGate.resize(c.nLayers);
     moeGateBias.resize(c.nLayers);
     moeSEUpGate.resize(c.nLayers);
@@ -297,38 +296,35 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
 {
     XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
                               hiddenState.dtype, DBG_LOC);
-    XTensor &k = rt.GetTensor({hiddenState.shape[0], _c.indexHeadDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &kw = rt.GetTensor({hiddenState.shape[0], _c.indexHeadDim + _c.indexNHeads},
+                               hiddenState.dtype, DBG_LOC);
 
     XliteOpMuls(rt, attnNormQc, _c.indexSoftmaxScale, attnNormQc);
     XliteOpMatmul(rt, attnNormQc, indexQB[layer], q, _c.weightNZ);
 
-    XliteOpMatmul(rt, hiddenState, indexK[layer], k, _c.weightNZ);
-    XliteOpLayerNorm(rt, k, indexKNorm[layer], indexKNormBias[layer], k, _c.normEps,
+    XliteOpMatmul(rt, hiddenState, indexKWeightsProj[layer], kw, _c.weightNZ);
+    XliteOpLayerNorm(rt, kw, indexKNorm[layer], indexKNormBias[layer], kw, _c.normEps,
                      _c.indexHeadDim);
     if (_c.indexRopeInterleaved) {
         XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q, freqsCis,
                            rt._attnPosition, _vGather);
         XTensor key, kCache;
-        XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim, _c.ropeHeadDim, 0, 0, _c.indexHeadDim, k,
-                                   freqsCis, rt._attnPosition, _vGather, _c.blockSize, key, kCache,
-                                   indexKCache, rt._attnSlotMapping);
+        XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim + _c.indexNHeads, _c.ropeHeadDim, 0, 0,
+                                   _c.indexHeadDim, kw, freqsCis, rt._attnPosition, _vGather,
+                                   _c.blockSize, key, kCache, indexKCache, rt._attnSlotMapping);
     } else {
         // 1.2 TODO
     }
-    rt.PutTensor(k);
 
-    XTensor &weights =
-        rt.GetTensor({hiddenState.shape[0], _c.indexNHeads}, hiddenState.dtype, DBG_LOC);
     float weightScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
-    XliteOpMatmul(rt, hiddenState, indexWeight[layer], weights, _c.weightNZ);
-    XliteOpMuls(rt, weights, weightScale, weights);
+    XliteOpMuls(rt, kw, weightScale, kw);
 
     XTensor &scores = rt.GetTensor({hiddenState.shape[0], rt._maxNumBlocks * _c.blockSize},
                                    hiddenState.dtype, DBG_LOC);
-    XliteOpIndexerScores(rt, q, indexKCache, weights, scores, rt._queryStartLoc, rt._lens,
+    XliteOpIndexerScores(rt, q, indexKCache, kw, scores, rt._queryStartLoc, rt._lens,
                          rt._cachedLens, rt._attnBlockTables, _c.indexNHeads, _c.indexHeadDim,
                          _c.blockSize, rt._batch, rt._maxNumBlocks);
-    rt.PutTensor(weights);
+    rt.PutTensor(kw);
     rt.PutTensor(q);
     XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
     XliteOpTopK(rt, scores, _dsaTopkIndices, topkIndices, rt._lens, rt._cachedLens, _c.indexTopK);
