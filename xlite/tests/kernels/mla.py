@@ -287,8 +287,8 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             # xlite MLA with topkIndices
             output_xlite_with_topk = torch.zeros(total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
 
-            torch.npu.synchronize()
             topk_indices_tensor = topk_indices_tensor.to(dtype=torch.int32)
+            torch.npu.synchronize()
             mla_with_indices(rt, qWithQr_xlite, k_cache_xlite, v_cache_xlite, wkvb,
                 output_xlite_with_topk, query_start_loc, query_lens, cached_lens,
                 block_tables, n_heads, rope_head_dim, nope_head_dim,
