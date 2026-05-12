@@ -136,10 +136,9 @@ public:
     std::vector<XTensor> mlaKVNorm;
 
     std::vector<XTensor> indexQB;
-    std::vector<XTensor> indexK;
+    std::vector<XTensor> indexKWeightsProj;
     std::vector<XTensor> indexKNorm;
     std::vector<XTensor> indexKNormBias;
-    std::vector<XTensor> indexWeight;
 
     std::vector<XTensor> mlpNorm;
     std::vector<XTensor> mlpNormBias;

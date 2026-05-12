@@ -347,10 +347,9 @@ class Model:
         mla_kv_b (List[torch.Tensor]): MLA KVB weights per layer.
         mla_kv_norm (List[torch.Tensor]): MLA KV norm weights per layer.
         index_q_b (List[torch.Tensor]): DSA index QB weights per layer.
-        index_k (List[torch.Tensor]): DSA index K weights per layer.
+        index_k_weights_proj (List[torch.Tensor]): DSA index K and weights projection combined per layer.
         index_k_norm (List[torch.Tensor]): DSA index K norm weights per layer.
         index_k_norm_bias (List[torch.Tensor]): DSA index K norm bias per layer.
-        index_weight (List[torch.Tensor]): DSA index weighting tensors per layer.
         mlp_norm (List[torch.Tensor]): MLP norm weights per layer.
         mlp_norm_bias (List[torch.Tensor]): MLP norm bias per layer.
         mlp_up_gate (List[torch.Tensor]): Dense up-gate weights per layer.
@@ -427,14 +426,12 @@ class Model:
     """MLA KV norm weights per layer."""
     index_q_b: List[torch.Tensor] = ...
     """DSA index QB weights per layer."""
-    index_k: List[torch.Tensor] = ...
-    """DSA index K weights per layer."""
+    index_k_weights_proj: List[torch.Tensor] = ...
+    """DSA index K and weights projection combined per layer."""
     index_k_norm: List[torch.Tensor] = ...
     """DSA index K norm weights per layer."""
     index_k_norm_bias: List[torch.Tensor] = ...
     """DSA index K norm bias per layer."""
-    index_weight: List[torch.Tensor] = ...
-    """DSA index weighting tensors per layer."""
     mlp_norm: List[torch.Tensor] = ...
     """MLP norm weights per layer."""
     mlp_norm_bias: List[torch.Tensor] = ...

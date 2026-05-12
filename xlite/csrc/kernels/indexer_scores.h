@@ -217,8 +217,8 @@ public:
 
                 // copy weight (queryTaskLen, nHeads) to L1
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
-                CopyGmToL1Nd2Nz(wl1Buf[curr], weight[qOffset * nHeads], wmSize, nHeads, nHeads,
-                                wmBlockPad);
+                CopyGmToL1Nd2Nz(wl1Buf[curr], weight[qOffset * (headDim + nHeads) + headDim],
+                                wmSize, nHeads, (headDim + nHeads), wmBlockPad);
 
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);

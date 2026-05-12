@@ -80,10 +80,9 @@ public:
     std::vector<at::Tensor> mlaKVB;
     std::vector<at::Tensor> mlaKVNorm;
     std::vector<at::Tensor> indexQB;
-    std::vector<at::Tensor> indexK;
+    std::vector<at::Tensor> indexKWeightsProj;
     std::vector<at::Tensor> indexKNorm;
     std::vector<at::Tensor> indexKNormBias;
-    std::vector<at::Tensor> indexWeight;
 
     std::vector<at::Tensor> mlpNorm;
     std::vector<at::Tensor> mlpNormBias;
@@ -297,13 +296,12 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             throw std::invalid_argument("Mismatched number of layers DSA attention QA/QB/QA "
                                         "norm/KVA/KVB/KV norm parameters");
         }
-        if (indexQB.size() != c.nLayers || indexK.size() != c.nLayers ||
-            indexKNorm.size() != c.nLayers || indexKNormBias.size() != c.nLayers ||
-            indexWeight.size() != c.nLayers) {
+        if (indexQB.size() != c.nLayers || indexKWeightsProj.size() != c.nLayers ||
+            indexKNorm.size() != c.nLayers || indexKNormBias.size() != c.nLayers) {
             std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << indexQB.size()
                       << std::endl;
             throw std::invalid_argument(
-                "Mismatched number of layers DSA attention index QB/K/KNorm/Weight parameters");
+                "Mismatched number of layers DSA attention index QB/KWeightsProj/KNorm parameters");
         }
     } else {
         std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attention type: " << c.attnType
@@ -435,10 +433,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
             InitXTensor(_model->indexQB[i], indexQB[i]);
-            InitXTensor(_model->indexK[i], indexK[i]);
+            InitXTensor(_model->indexKWeightsProj[i], indexKWeightsProj[i]);
             InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
             InitXTensor(_model->indexKNormBias[i], indexKNormBias[i]);
-            InitXTensor(_model->indexWeight[i], indexWeight[i]);
         }
     }
 
@@ -1487,10 +1484,9 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("mla_kv_b", &_CModel::mlaKVB)
         .def_readwrite("mla_kv_norm", &_CModel::mlaKVNorm)
         .def_readwrite("index_q_b", &_CModel::indexQB)
-        .def_readwrite("index_k", &_CModel::indexK)
+        .def_readwrite("index_k_weights_proj", &_CModel::indexKWeightsProj)
         .def_readwrite("index_k_norm", &_CModel::indexKNorm)
         .def_readwrite("index_k_norm_bias", &_CModel::indexKNormBias)
-        .def_readwrite("index_weight", &_CModel::indexWeight)
         .def_readwrite("mlp_norm", &_CModel::mlpNorm)
         .def_readwrite("mlp_norm_bias", &_CModel::mlpNormBias)
         .def_readwrite("mlp_up_gate", &_CModel::mlpUpGate)
