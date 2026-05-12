@@ -10,8 +10,9 @@
 import os
 import time
 import json
+import random
 from argparse import ArgumentParser
-from typing import List, Tuple
+from typing import List, Literal, Tuple
 
 import torch
 import torch.nn as nn
@@ -37,11 +38,7 @@ def sample(logits, temperature: float = 1.0):
 
 @torch.inference_mode()
 def generate(
-    model: nn.Module,
-    prompt_tokens: List[List[int]],
-    max_new_tokens: int,
-    eos_id: int,
-    temperature: float = 1.0
+    model: nn.Module, prompt_tokens: List[List[int]], max_new_tokens: int, eos_id: int, temperature: float = 1.0
 ) -> Tuple[List[List[int]], int]:
     """
     Generates new tokens based on the given prompt tokens using the specified model.
@@ -57,11 +54,13 @@ def generate(
         List[List[int]]: A list of lists containing the generated tokens for each sequence.
     """
     prompt_lens = [len(t) for t in prompt_tokens]
-    assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
+    assert max(prompt_lens) <= model.max_seq_len, (
+        f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
+    )
     total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
     tokens_cpu = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.int32, device="cpu")
     for i, t in enumerate(prompt_tokens):
-        tokens_cpu[i, :len(t)] = torch.tensor(t, dtype=torch.int32, device="cpu")
+        tokens_cpu[i, : len(t)] = torch.tensor(t, dtype=torch.int32, device="cpu")
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens), device="npu")
     prompt_mask = tokens_cpu != -1
@@ -85,9 +84,9 @@ def generate(
             break
     completion_tokens = []
     for i, toks in enumerate(tokens.tolist()):
-        toks = toks[prompt_lens[i]:prompt_lens[i]+max_new_tokens]
+        toks = toks[prompt_lens[i] : prompt_lens[i] + max_new_tokens]
         if eos_id in toks:
-            toks = toks[:toks.index(eos_id)]
+            toks = toks[: toks.index(eos_id)]
         completion_tokens.append(toks)
     return (completion_tokens, step)
 
@@ -97,10 +96,14 @@ def main(
     ckpt_path: str,
     config: str,
     input_file: str = "",
-    interactive: bool = True,
+    mode: Literal["single", "interactive", "bench"] = "single",
     max_new_tokens: int = 100,
     temperature: float = 1.0,
     no_prefix: bool = False,
+    bench_batch_size: int = 16,
+    bench_iters: int = 4,
+    bench_prompt_len: int = 2048,
+    bench_new_tokens: int = 1024,
 ) -> None:
     """
     Main function to load the model and perform interactive or batch text generation.
@@ -109,10 +112,14 @@ def main(
         ckpt_path (str): Path to the model checkpoint directory.
         config (str): Path to the model configuration file.
         input_file (str, optional): Path to a file containing input prompts. Defaults to "".
-        interactive (bool, optional): Whether to run in interactive mode. Defaults to True.
+        mode (Literal["single", "interactive", "bench"], optional): Generation mode. Defaults to "single".
         max_new_tokens (int, optional): Maximum number of new tokens to generate. Defaults to 100.
         temperature (float, optional): Temperature for sampling. Defaults to 1.0.
         no_prefix (bool, optional): Whether to skip adding prefix/suffix to prompts. Defaults to False.
+        bench_batch_size (int, optional): Batch size for bench serve. Defaults to 16.
+        bench_iters (int, optional): Number of iterations for bench serve. Defaults to 4.
+        bench_prompt_len (int, optional): Length of prompts for bench serve. Defaults to 2048.
+        bench_new_tokens (int, optional): Number of new tokens to generate for bench serve. Defaults to 1024.
     """
     if model_type == "deepseek_v3" or model_type == "deepseek_v32" or model_type == "glm5":
         from tests.models.deepseek_v3 import ModelArgs
@@ -157,7 +164,11 @@ def main(
     torch.set_num_threads(8)
     torch.manual_seed(965)
     with open(config) as f:
-        args = ModelArgs(**json.load(f))
+        config = json.load(f)
+        if mode == "bench":
+            config["max_batch_size"] = max(config.get("max_batch_size", 1), bench_batch_size)
+            config["max_seq_len"] = max(config.get("max_seq_len", 1024), bench_prompt_len + bench_new_tokens)
+        args = ModelArgs(**config)
     print(args)
     dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
     torch.set_default_dtype(dtype)
@@ -165,10 +176,52 @@ def main(
         model = Transformer(args)
     model.load_weights(ckpt_path)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path, trust_remote_code=True)
-    completion_tokens, _ = generate(model, [tokenizer.encode("Warn up")], 2, -1, 1.)
+    completion_tokens, _ = generate(model, [tokenizer.encode("Warn up")], 2, -1, 1.0)
     tokenizer.decode(completion_tokens[0])
 
-    if interactive:
+    if mode == "bench":
+        vocab_size = getattr(tokenizer, "vocab_size", None)
+        if vocab_size is None:
+            try:
+                vocab_size = len(tokenizer.get_vocab())
+            except Exception:
+                vocab_size = 200000
+
+        eos_id = -1  # no eos token for bench, generate until bench_new_tokens
+
+        if bench_prompt_len > model.max_seq_len:
+            raise ValueError(f"bench_prompt_len ({bench_prompt_len}) > model.max_seq_len ({model.max_seq_len})")
+
+        if bench_prompt_len + bench_new_tokens > model.max_seq_len:
+            print(
+                f"Warning: model.max_seq_len ({model.max_seq_len}) < prompt_len+new_tokens ("
+                f"{bench_prompt_len + bench_new_tokens}), truncating max_new_tokens to fit"
+            )
+            effective_max_new_tokens = max(0, model.max_seq_len - bench_prompt_len)
+        else:
+            effective_max_new_tokens = bench_new_tokens
+
+        def make_prompt():
+            return [random.randrange(vocab_size) for _ in range(bench_prompt_len)]
+
+        print(
+            f"Running bench: batch_size={bench_batch_size}, iters={bench_iters}, prompt_len={bench_prompt_len}, "
+            f"decode={effective_max_new_tokens}"
+        )
+        for it in range(bench_iters):
+            prompts = [make_prompt() for _ in range(bench_batch_size)]
+            s = time.monotonic_ns()
+            completion_tokens_batch, step = generate(model, prompts, effective_max_new_tokens, eos_id, temperature)
+            c = time.monotonic_ns()
+            d = (c - s) / 1e6
+            num_prefill = sum(len(p) for p in prompts)
+            num_completion = sum(len(completion_tokens_batch[i]) for i in range(len(prompts)))
+            print(
+                f"Iter {it + 1}/{bench_iters}: prefilled {num_prefill} | generated {num_completion} tokens in {d:.2f} "
+                f"ms. avg: {num_prefill / d * 1e3:.2f} | {num_completion / d * 1e3:.2f} tokens/s @ {d / step:.2f} ms "
+                f"step bs: {len(prompts)}"
+            )
+    elif mode == "interactive":
         messages = []
         while True:
             if world_size == 1:
@@ -212,54 +265,57 @@ def main(
             messages.append({"role": "assistant", "content": completion})
     else:
         print("start to run")
-        with open(input_file, 'r', encoding='utf-8') as file:
+        with open(input_file, "r", encoding="utf-8") as file:
             data = json.load(file)
 
         def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature, no_prefix):
             if no_prefix:
-                prompts_tokens_batch = [tokenizer.encode(item['query']) for item in batch]
+                prompts_tokens_batch = [tokenizer.encode(item["query"]) for item in batch]
             elif model_type in {"deepseek_v3", "glm4_moe", "glm5", "minimax_m2"}:
                 prompts_tokens_batch = [
-                    tokenizer.apply_chat_template([{"role": "user", "content": item['query']}],
-                                                  add_generation_prompt=True, return_dict=False)
+                    tokenizer.apply_chat_template(
+                        [{"role": "user", "content": item["query"]}], add_generation_prompt=True, return_dict=False
+                    )
                     for item in batch
                 ]
             elif model_type == "llama":
-                prompts_tokens_batch = [
-                    tokenizer.encode(f"<s>[INST] {item['query']} [/INST] ")
-                    for item in batch
-                ]
+                prompts_tokens_batch = [tokenizer.encode(f"<s>[INST] {item['query']} [/INST] ") for item in batch]
             elif model_type in {"qwen2", "qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe"}:
                 # Use apply_chat_template for correct format with proper newlines
                 prompts_tokens_batch = [
-                    tokenizer.apply_chat_template([{"role": "user", "content": item['query']}],
-                                                   add_generation_prompt=True, return_dict=False)
+                    tokenizer.apply_chat_template(
+                        [{"role": "user", "content": item["query"]}], add_generation_prompt=True, return_dict=False
+                    )
                     for item in batch
                 ]
             else:
-                prompts_tokens_batch = [tokenizer.encode(item['query']) for item in batch]
+                prompts_tokens_batch = [tokenizer.encode(item["query"]) for item in batch]
 
             s = time.monotonic_ns()
-            completion_tokens_batch, step = generate(model, prompts_tokens_batch, max_new_tokens, tokenizer.eos_token_id, temperature)
+            completion_tokens_batch, step = generate(
+                model, prompts_tokens_batch, max_new_tokens, tokenizer.eos_token_id, temperature
+            )
             c = time.monotonic_ns()
             d = (c - s) / 1e6
 
             completions_batch = tokenizer.batch_decode(completion_tokens_batch, skip_special_tokens=True)
             num = 0
             for idx, item in enumerate(batch):
-                item['response'] = completions_batch[idx].replace("Ġ", " ").replace("Ċ", "\n").replace("▁", " ")
+                item["response"] = completions_batch[idx].replace("Ġ", " ").replace("Ċ", "\n").replace("▁", " ")
                 num += len(completion_tokens_batch[idx]) + len(prompts_tokens_batch[idx]) - 1
                 print(f"Query: {item['query']}")
                 print(f"Completion: {item['response']}")
-            print(f"generate {num} tokens take {d:.2f} ms. avg: {num/d*1e3:.2f} tokens/s @ {d/step:.2f} ms bs: {len(batch)}")
+            print(
+                f"generate {num} tokens take {d:.2f} ms. avg: {num / d * 1e3:.2f} tokens/s @ {d / step:.2f} ms bs: {len(batch)}"
+            )
 
         batch_size = args.max_batch_size
 
         for i in range(0, len(data), batch_size):
-            batch = data[i:i + batch_size]
+            batch = data[i : i + batch_size]
             process_batch(batch, tokenizer, model, max_new_tokens, tokenizer.eos_token_id, temperature, no_prefix)
 
-        with open(input_file, 'w', encoding='utf-8') as file:
+        with open(input_file, "w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=4)
         print("The results have been written into the input_file.")
 
@@ -287,11 +343,41 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt-path", type=str, required=True)
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--input-file", type=str, default="")
-    parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--mode", type=str, default="single", choices=["single", "interactive", "bench"])
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--no-prefix", action="store_true")
+    parser.add_argument("--bench-batch-size", type=int, default=16, help="Batch size/concurrency for bench serve")
+    parser.add_argument("--bench-iters", type=int, default=4, help="Number of iterations for bench serve")
+    parser.add_argument("--bench-prompt-len", type=int, default=2048, help="Prompt length (tokens) for bench serve")
+    parser.add_argument("--bench-new-tokens", type=int, default=1024, help="New tokens to generate for bench serve")
+
     args = parser.parse_args()
-    assert args.model in ["deepseek_v3", "deepseek_v32", "glm5", "minimax_m2", "llama", "qwen2", "qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe", "glm4_moe"], f"{args.model} not supported!"
-    assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    main(args.model, args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.no_prefix)
+    assert args.model in [
+        "deepseek_v3",
+        "deepseek_v32",
+        "glm5",
+        "minimax_m2",
+        "llama",
+        "qwen2",
+        "qwen3",
+        "qwen3_moe",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "glm4_moe",
+    ], f"{args.model} not supported!"
+    assert args.input_file or args.mode != "single", "Either input-file or interactive mode must be specified"
+    main(
+        model_type=args.model,
+        ckpt_path=args.ckpt_path,
+        config=args.config,
+        input_file=args.input_file,
+        mode=args.mode,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        no_prefix=args.no_prefix,
+        bench_batch_size=args.bench_batch_size,
+        bench_iters=args.bench_iters,
+        bench_prompt_len=args.bench_prompt_len,
+        bench_new_tokens=args.bench_new_tokens,
+    )

@@ -3,28 +3,34 @@ export HCCL_DETERMINISTIC=true
 export LCCL_DETERMINISTIC=true
 models_base_path=${1:-/mnt/nvme0n1/models}
 test_config_path=tests/test_config.json
+test_input_path=tests/test_input_default.json
 
-# 交互模式配置开关
-# 设置为 "true" 启用交互模式，设置为其他值或不设置则使用批量输入模式
-INTERACTIVE_MODE=${INTERACTIVE_MODE:-false}
+RUN_ARGS=(--config "$test_config_path") # 通用运行参数数组
+max_new_tokens=${MAX_NEW_TOKENS:-128}
+RUN_ARGS+=(--max-new-tokens "$max_new_tokens")
+temperature=${TEMPERATURE:-0.0}
+RUN_ARGS+=(--temperature "$temperature")
 
-# 默认输入文件路径（非交互模式使用）
-DEFAULT_INPUT_FILE=tests/test_input_default.json
-
-# 根据 INTERACTIVE_MODE 设置通用参数
-if [ "$INTERACTIVE_MODE" = "true" ]; then
-    INTERACTIVE_FLAG="--interactive"
-    INPUT_FILE_FLAG=""
+# 交互模式配置开关，可选single/interactive/bench，默认为single
+run_mode=${RUN_MODE:-single}
+if [ "$run_mode" = "bench" ]; then
+    RUN_ARGS+=(--mode bench)
+    bench_batch_size=${BENCH_BS:-16}
+    bench_iters=${BENCH_IT:-4}
+    bench_prompt_len=${BENCH_N1:-2048}
+    bench_new_tokens=${BENCH_N2:-1024}
+    RUN_ARGS+=(--bench-batch-size "$bench_batch_size" --bench-iters "$bench_iters" --bench-prompt-len "$bench_prompt_len" --bench-new-tokens "$bench_new_tokens")
+elif [ "$run_mode" = "interactive" ]; then
+    RUN_ARGS+=(--mode interactive)
 else
-    INTERACTIVE_FLAG=""
-    # 创建默认输入文件
+    RUN_ARGS+=(--mode single)
     echo '[
         {
-            "query": "who are you?",
+            "query": "How to sleep well at night?",
             "response": ""
         }
-    ]' > $DEFAULT_INPUT_FILE
-    INPUT_FILE_FLAG="--input-file $DEFAULT_INPUT_FILE"
+    ]' > $test_input_path
+    RUN_ARGS+=(--input-file "$test_input_path")
 fi
 
 function run_qwen2.5_0.5B()
@@ -43,8 +49,7 @@ function run_qwen2.5_0.5B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    python tests/generate.py --model qwen2 --ckpt-path $models_base_path/Qwen2.5-0.5B-Instruct/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
-
+    python tests/generate.py --model qwen2 --ckpt-path $models_base_path/Qwen2.5-0.5B-Instruct/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -63,11 +68,7 @@ function run_qwen2_32B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen2 --ckpt-path $models_base_path/qwen32b/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
-
-    # batch input
-    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen --ckpt-path $models_base_path/qwen32b/ --config $test_config_path --input tests/test.json
-
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen2 --ckpt-path $models_base_path/qwen32b/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -87,11 +88,7 @@ function run_qwen3_32B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path $models_base_path/Qwen3-32B/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
-
-    # batch input
-    # torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path $models_base_path/Qwen3-32B/ --config $test_config_path --input tests/test.json
-
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path $models_base_path/Qwen3-32B/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -118,7 +115,7 @@ function run_qwen3_moe_30B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path $models_base_path/Qwen3-30B-A3B-Instruct-2507/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path $models_base_path/Qwen3-30B-A3B-Instruct-2507/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -136,7 +133,7 @@ function run_llama_7B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    python tests/generate.py --model llama --ckpt-path $models_base_path/Llama-2-7b-chat-hf/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
+    python tests/generate.py --model llama --ckpt-path $models_base_path/Llama-2-7b-chat-hf/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -154,7 +151,7 @@ function run_llama_13B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/Llama2-Chinese-13b-Chat/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
+    torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/Llama2-Chinese-13b-Chat/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -172,7 +169,7 @@ function run_llama_34B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/codellama34B/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/codellama34B/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -204,11 +201,7 @@ function run_deepseek_v3()
         "moe_tp_size": 1
     }' > $test_config_path
     # w8a8
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-R1-expert-int8 --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
-
-    # batch input
-    # torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-R1-expert-int8 --config $test_config_path --input tests/test.json
-
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-R1-expert-int8 ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -221,7 +214,7 @@ function run_glm4_moe()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path $models_base_path/GLM-4.7/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path $models_base_path/GLM-4.7/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -263,7 +256,7 @@ function run_deepseek_v32()
         "moe_ep_size": 16,
         "moe_tp_size": 1
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v32 --ckpt-path $models_base_path/DeepSeek-V3.2-bf16/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v32 --ckpt-path $models_base_path/DeepSeek-V3.2-bf16/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -308,7 +301,7 @@ function run_glm5()
         "moe_ep_size": 16,
         "moe_tp_size": 1
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/GLM-5/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/GLM-5/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -321,7 +314,7 @@ function run_minimax_m2()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model minimax_m2 --ckpt-path $models_base_path/MiniMax-M2.5-bf16/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model minimax_m2 --ckpt-path $models_base_path/MiniMax-M2.5-bf16/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -351,7 +344,7 @@ function run_qwen3_5_0.8B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    python tests/generate.py --model qwen3_5 --ckpt-path $models_base_path/Qwen3.5-0.8B/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG --max-new-tokens 64
+    python tests/generate.py --model qwen3_5 --ckpt-path $models_base_path/Qwen3.5-0.8B/ --config $test_config_path ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -381,7 +374,7 @@ function run_qwen3_5_moe_35B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_5_moe --ckpt-path $models_base_path/Qwen3.5-35B-A3B/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG --max-new-tokens 64
+    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_5_moe --ckpt-path $models_base_path/Qwen3.5-35B-A3B/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -417,7 +410,7 @@ function run_qwen3_5_moe_122B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_5_moe --ckpt-path $models_base_path/Qwen3.5-122B-A10B/ --config $test_config_path $INTERACTIVE_FLAG $INPUT_FILE_FLAG --max-new-tokens 64
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_5_moe --ckpt-path $models_base_path/Qwen3.5-122B-A10B/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -445,6 +438,6 @@ fi
 #run_glm5
 
 # 清理默认输入文件（如果存在）
-if [ -f "$DEFAULT_INPUT_FILE" ]; then
-    rm $DEFAULT_INPUT_FILE
+if [ -f "$test_input_path" ]; then
+    rm $test_input_path
 fi
