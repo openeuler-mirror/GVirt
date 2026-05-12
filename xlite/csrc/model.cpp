@@ -291,29 +291,36 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     return {attnQWithQr, attnNormQc};
 }
 
-XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
                                     XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
 {
-    XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
-                              hiddenState.dtype, DBG_LOC);
     XTensor &kw = rt.GetTensor({hiddenState.shape[0], _c.indexHeadDim + _c.indexNHeads},
                                hiddenState.dtype, DBG_LOC);
-
-    XliteOpMuls(rt, attnNormQc, _c.indexSoftmaxScale, attnNormQc);
-    XliteOpMatmul(rt, attnNormQc, indexQB[layer], q, _c.weightNZ);
-
     XliteOpMatmul(rt, hiddenState, indexKWeightsProj[layer], kw, _c.weightNZ);
     XliteOpLayerNorm(rt, kw, indexKNorm[layer], indexKNormBias[layer], kw, _c.normEps,
                      _c.indexHeadDim);
+    // TODO not interleaved case
     if (_c.indexRopeInterleaved) {
-        XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q, freqsCis,
-                           rt._attnPosition, _vGather);
         XTensor key, kCache;
         XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim + _c.indexNHeads, _c.ropeHeadDim, 0, 0,
                                    _c.indexHeadDim, kw, freqsCis, rt._attnPosition, _vGather,
                                    _c.blockSize, key, kCache, indexKCache, rt._attnSlotMapping);
-    } else {
-        // 1.2 TODO
+    }
+
+    // only use sparse attention when the sequence length is long enough
+    if (rt._maxNumBlocks * _c.blockSize <= _c.indexTopK) {
+        rt.PutTensor(kw);
+        return nullptr;
+    }
+
+    XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads, _c.indexHeadDim},
+                              hiddenState.dtype, DBG_LOC);
+    XliteOpMuls(rt, attnNormQc, _c.indexSoftmaxScale, attnNormQc);
+    XliteOpMatmul(rt, attnNormQc, indexQB[layer], q, _c.weightNZ);
+    // TODO not interleaved case
+    if (_c.indexRopeInterleaved) {
+        XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q, freqsCis,
+                           rt._attnPosition, _vGather);
     }
 
     float weightScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
@@ -329,7 +336,7 @@ XTensor &XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
     XliteOpTopK(rt, scores, _dsaTopkIndices, topkIndices, rt._lens, rt._cachedLens, _c.indexTopK);
     rt.PutTensor(scores);
-    return topkIndices;
+    return &topkIndices;
 }
 
 void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
@@ -346,7 +353,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     XTensor *topkIndices = nullptr;
     if (_c.attnType == XMODEL_ATTN_DSA) {
         topkIndices =
-            &ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
+            ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
     }
     rt.PutTensor(attnNormQc);
 
@@ -558,13 +565,10 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
-    if (_c.attnType == XMODEL_ATTN_MLA) {
+    if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
         ForwardAttnMLA(rt, layer, kvCache, freqsCis, hiddenState);
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
-    } else if (_c.attnType == XMODEL_ATTN_DSA) {
-        // TODO DSA
-        ForwardAttnMLA(rt, layer, kvCache, freqsCis, hiddenState);
     } else {
         throw std::runtime_error(std::string(__func__) + ": TODO");
     }
