@@ -1,6 +1,4 @@
 export FORWARD_BACKEND=xlite
-export HCCL_DETERMINISTIC=true
-export LCCL_DETERMINISTIC=true
 models_base_path=${1:-/mnt/nvme0n1/models}
 test_config_path=tests/test_config.json
 test_input_path=tests/test_input_default.json
@@ -14,6 +12,7 @@ RUN_ARGS+=(--temperature "$temperature")
 # 交互模式配置开关，可选single/interactive/bench，默认为single
 run_mode=${RUN_MODE:-single}
 if [ "$run_mode" = "bench" ]; then
+    # bench模式不需要确定性环境变量
     RUN_ARGS+=(--mode bench)
     bench_batch_size=${BENCH_BS:-16}
     bench_iters=${BENCH_IT:-4}
@@ -21,8 +20,12 @@ if [ "$run_mode" = "bench" ]; then
     bench_new_tokens=${BENCH_N2:-1024}
     RUN_ARGS+=(--bench-batch-size "$bench_batch_size" --bench-iters "$bench_iters" --bench-prompt-len "$bench_prompt_len" --bench-new-tokens "$bench_new_tokens")
 elif [ "$run_mode" = "interactive" ]; then
+    export HCCL_DETERMINISTIC=true
+    export LCCL_DETERMINISTIC=true
     RUN_ARGS+=(--mode interactive)
 else
+    export HCCL_DETERMINISTIC=true
+    export LCCL_DETERMINISTIC=true
     RUN_ARGS+=(--mode single)
     echo '[
         {
