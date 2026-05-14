@@ -417,28 +417,36 @@ function run_qwen3_5_moe_122B()
     rm $test_config_path
 }
 
-run_llama_7B
-run_llama_13B
-#run_llama_34B
+model_func=${MODEL:-}
 
-#run_qwen2.5_0.5B
-#run_qwen2_32B
-run_qwen3_32B
-run_qwen3_moe_30B
-#run_qwen3_5_0.8B
-#run_qwen3_5_moe_35B
+if [ -n "$model_func" ]; then
+    # 仅运行指定模型
+    $model_func
+else
+    # 默认运行所有模型
+    run_llama_7B
+    run_llama_13B
+    #run_llama_34B
 
-npu_count=$(python -c "import torch; print(torch.npu.device_count())")
-if [ $npu_count -ge 16 ]; then
-    run_glm4_moe
-    run_deepseek_v3
-    run_minimax_m2
-    #run_qwen3_5_moe_122B
+    #run_qwen2.5_0.5B
+    #run_qwen2_32B
+    run_qwen3_32B
+    run_qwen3_moe_30B
+    #run_qwen3_5_0.8B
+    #run_qwen3_5_moe_35B
+
+    npu_count=$(python -c "import torch; print(torch.npu.device_count())")
+    if [ $npu_count -ge 16 ]; then
+        run_glm4_moe
+        run_deepseek_v3
+        run_minimax_m2
+        #run_qwen3_5_moe_122B
+    fi
+
+    # bf16 need 32 NPUs
+    #run_deepseek_v32
+    #run_glm5
 fi
-
-# bf16 need 32 NPUs
-#run_deepseek_v32
-#run_glm5
 
 # 清理默认输入文件（如果存在）
 if [ -f "$test_input_path" ]; then
