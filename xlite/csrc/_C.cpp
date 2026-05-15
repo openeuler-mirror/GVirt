@@ -1225,15 +1225,16 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
                  std::vector<at::Tensor> &scales, at::Tensor &counts, uint32_t start, uint32_t end,
                  long outDim, long inDim, at::Tensor &output, bool weightNZ, bool transpose)
 {
-    XTensor _in, _counts, _output;
+    XTensor _in, _counts, _output, _scalesTensor;
+    XTensor *_scales = &_scalesTensor;
     std::vector<void *> p;
     uint32_t i, num = counts.size(0);
+    bool hasScale = (scales.size() == num);
 
     InitXTensor(_in, in);
     InitXTensor(_counts, counts);
     InitXTensor(_output, output);
     XTensor &_weights = rt.GetTensor({num}, INT64, DBG_LOC);
-    XTensor &_scales = rt.GetTensor({num}, INT64, DBG_LOC);
 
     p.resize(num);
     for (i = 0; i < num; i++) {
@@ -1241,18 +1242,21 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     }
     rt.MemcpyH2D(_weights.ptr, reinterpret_cast<void *>(p.data()), num * sizeof(void *));
 
-    if (scales.size() == num) {
+    if (hasScale) {
+        _scales = &rt.GetTensor({num}, INT64, DBG_LOC);
         for (i = 0; i < num; i++) {
             p[i] = TensorPtr(scales[i]);
         }
-        rt.MemcpyH2D(_scales.ptr, reinterpret_cast<void *>(p.data()), num * sizeof(void *));
+        rt.MemcpyH2D(_scales->ptr, reinterpret_cast<void *>(p.data()), num * sizeof(void *));
     }
 
-    XliteOpGroupMatmul(rt, _in, _weights, _scales, _counts, start, end, XDtype(weights[0]), outDim,
+    XliteOpGroupMatmul(rt, _in, _weights, *_scales, _counts, start, end, XDtype(weights[0]), outDim,
                        inDim, _output, weightNZ, transpose);
     rt.Synchronize();
     rt.PutTensor(_weights);
-    rt.PutTensor(_scales);
+    if (hasScale) {
+        rt.PutTensor(*_scales);
+    }
 }
 
 void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
