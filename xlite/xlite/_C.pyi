@@ -78,6 +78,17 @@ class Runtime:
             None: Context is updated on the calling thread.
         """
 
+    def configure_swizzle(self, swizzle: int, use_swizzle_table: bool) -> None:
+        """ Configure swizzle parameters for matrix multiplication
+
+        Args:
+            swizzle(int): new default swizzle valuey.
+            use_swizzle_table(bool): Whether to use precomputed swizzle values from xlite.
+
+        Returns:
+            None: The runtime updates swizzle configuration.
+        """
+
 class ModelConfig:
     """Model hyperparameters and layout used by :class:`Model`.
 

@@ -1371,7 +1371,9 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("multi_task_parallel", &XRuntime::multiTaskParallel)
         .def("update_core_num", &XRuntime::UpdateCoreNum, py::arg("util"))
         .def("init_tensor_pool", &XRuntime::InitTensorPool, py::arg("size"))
-        .def("set_current_context", &XRuntime::SetCurrentContext);
+        .def("set_current_context", &XRuntime::SetCurrentContext)
+        .def("configure_swizzle", &XRuntime::ConfigureSwizzle, py::arg("swizzle"),
+             py::arg("use_swizzle_table"));
 
     py::class_<XModelConfig>(m, "ModelConfig")
         .def(py::init<>())

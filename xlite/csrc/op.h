@@ -9,7 +9,6 @@
 #include "kernels/kernel_param.h"
 
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
-#define MATMUL_SWIZZLE_DEFAULT_VALUE (0x600)
 
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       uint32_t copySize = COPY_SIZE);
@@ -32,8 +31,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                    const XTensor &bias = XTensor(), const XTensor &deqScale = XTensor(),
                    bool transpose = false, uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
-                   uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
-                   uint64_t swizzle = MATMUL_SWIZZLE_DEFAULT_VALUE);
+                   uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE);
 
 void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &num = XTensor());
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale);

@@ -107,6 +107,9 @@ public:
     XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
     void PutTensor(XTensor &t);
     bool TensorInPool(XTensor &t);
+
+    void ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable);
+
     [[nodiscard]] virtual bool IsDummyRuntime() const
     {
         return false;
@@ -139,6 +142,8 @@ public:
     XTensor hiddenStatePad;
     XTensor hiddenStateSlice;
     uint32_t batchedTokens;
+    uint32_t defaultMatmulSwizzle = 0x600;
+    bool disableSwizzleTable = false;
 
     XcclComm *_tpXcclComm = nullptr;
     XcclComm *_dpXcclComm = nullptr;
