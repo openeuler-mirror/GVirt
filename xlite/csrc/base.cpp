@@ -518,13 +518,3 @@ bool MatmulWeight::IsQuanted()
 {
     return GetQuantType() >= STATIC_QUANT;
 }
-
-bool MatmulWeight::IsTransposed()
-{
-    return IsQuanted();
-}
-
-bool MatmulWeight::IsNzFormat()
-{
-    return IsQuanted();
-}

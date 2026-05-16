@@ -351,13 +351,26 @@ class Model:
         mha_q_norm_bias (List[torch.Tensor]): MHA Q norm bias per layer.
         mha_k_norm (List[torch.Tensor]): MHA K norm weights per layer.
         mha_k_norm_bias (List[torch.Tensor]): MHA K norm bias per layer.
-        mla_q_a (List[torch.Tensor]): MLA QA weights per layer.
+        mla_qkv_a (List[torch.Tensor]): MLA QA KVA weights per layer.
+        mla_qkv_a_input_scale (List[torch.Tensor]): MLA QA KVA quantization input scale per layer.
+        mla_qkv_a_input_offset (List[torch.Tensor]): MLA QA KVA quantization input offset per layer.
+        mla_qkv_a_quant_bias (List[torch.Tensor]): MLA QA KVA quantization bias per layer.
+        mla_qkv_a_deq_scale (List[torch.Tensor]): MLA QA KVA dequantization scale per layer.
         mla_q_b (List[torch.Tensor]): MLA QB weights per layer.
+        mla_q_b_input_scale (List[torch.Tensor]): MLA QB quantization input scale per layer.
+        mla_q_b_input_offset (List[torch.Tensor]): MLA QB quantization input offset per layer.
+        mla_q_b_quant_bias (List[torch.Tensor]): MLA QB quantization bias per layer.
+        mla_q_b_deq_scale (List[torch.Tensor]): MLA QB dequantization scale per layer.
         mla_q_norm (List[torch.Tensor]): MLA Q norm weights per layer.
-        mla_kv_a (List[torch.Tensor]): MLA KVA weights per layer.
+        mla_q_norm_bias (List[torch.Tensor]): MLA Q norm bias per layer.
         mla_kv_b (List[torch.Tensor]): MLA KVB weights per layer.
         mla_kv_norm (List[torch.Tensor]): MLA KV norm weights per layer.
+        mla_kv_norm_bias (List[torch.Tensor]): MLA KV norm bias per layer.
         index_q_b (List[torch.Tensor]): DSA index QB weights per layer.
+        index_q_b_input_scale (List[torch.Tensor]): DSA index QB quantization input scale per layer.
+        index_q_b_input_offset (List[torch.Tensor]): DSA index QB quantization input offset per layer.
+        index_q_b_quant_bias (List[torch.Tensor]): DSA index QB quantization bias per layer.
+        index_q_b_deq_scale (List[torch.Tensor]): DSA index QB dequantization scale per layer.
         index_k_weights_proj (List[torch.Tensor]): DSA index K and weights projection combined per layer.
         index_k_norm (List[torch.Tensor]): DSA index K norm weights per layer.
         index_k_norm_bias (List[torch.Tensor]): DSA index K norm bias per layer.
@@ -431,16 +444,44 @@ class Model:
     """MHA K norm bias per layer."""
     mla_qkv_a: List[torch.Tensor] = ...
     """MLA fused Q A and KV A weights per layer."""
+    mla_qkv_a_input_scale: List[torch.Tensor] = ...
+    """MLA QKVA 每层量化输入缩放因子"""
+    mla_qkv_a_input_offset: List[torch.Tensor] = ...
+    """MLA QKVA 每层量化输入偏移"""
+    mla_qkv_a_quant_bias: List[torch.Tensor] = ...
+    """MLA QKVA 每层量化偏置"""
+    mla_qkv_a_deq_scale: List[torch.Tensor] = ...
+    """MLA QKVA 每层反量化缩放因子"""
     mla_q_b: List[torch.Tensor] = ...
     """MLA QB weights per layer."""
+    mla_q_b_input_scale: List[torch.Tensor] = ...
+    """MLA QB 每层量化输入缩放因子"""
+    mla_q_b_input_offset: List[torch.Tensor] = ...
+    """MLA QB 每层量化输入偏移"""
+    mla_q_b_quant_bias: List[torch.Tensor] = ...
+    """MLA QB 每层量化偏置"""
+    mla_q_b_deq_scale: List[torch.Tensor] = ...
+    """MLA QB 每层反量化缩放因子"""
     mla_q_norm: List[torch.Tensor] = ...
     """MLA Q norm weights per layer."""
+    mla_q_norm_bias: List[torch.Tensor] = ...
+    """MLA Q norm bias per layer."""
     mla_kv_b: List[torch.Tensor] = ...
     """MLA KVB weights per layer."""
     mla_kv_norm: List[torch.Tensor] = ...
     """MLA KV norm weights per layer."""
+    mla_kv_norm_bias: List[torch.Tensor] = ...
+    """MLA KV norm bias per layer."""
     index_q_b: List[torch.Tensor] = ...
     """DSA index QB weights per layer."""
+    index_q_b_input_scale: List[torch.Tensor] = ...
+    """DSA index QB 每层量化输入缩放因子"""
+    index_q_b_input_offset: List[torch.Tensor] = ...
+    """DSA index QB 每层量化输入偏移"""
+    index_q_b_quant_bias: List[torch.Tensor] = ...
+    """DSA index QB 每层量化偏置"""
+    index_q_b_deq_scale: List[torch.Tensor] = ...
+    """DSA index QB 每层反量化缩放因子"""
     index_k_weights_proj: List[torch.Tensor] = ...
     """DSA index K and weights projection combined per layer."""
     index_k_norm: List[torch.Tensor] = ...

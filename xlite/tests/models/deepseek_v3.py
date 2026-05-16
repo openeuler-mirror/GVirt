@@ -178,7 +178,7 @@ def quantize_npu(
     return x_quant_fp32.to(torch.int8)
 
 
-def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, is_row_parallel: bool = False) -> torch.Tensor:
     """
     Applies a linear transformation to the incoming data: y = xA^T + b.
     This function supports specialized implementations based on quantization
@@ -206,7 +206,9 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
         x_int8 = quantize_npu(x, weight.input_scale, weight.input_offset)
         weight_T = weight.T.contiguous()
         deq_scale = weight.scale.squeeze(-1).float()
-        quant_bias_to_add = weight.quant_bias if rank == 0 else None
+        quant_bias_to_add = weight.quant_bias
+        if is_row_parallel and rank != 0:
+            quant_bias_to_add = None
 
         out = torch_npu.npu_quant_matmul(
             x_int8, weight_T,
@@ -215,7 +217,7 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
             output_dtype=torch.bfloat16
         )
 
-        if bias is not None:
+        if bias is not None and quant_bias_to_add is None:
             out = out + bias.view(1, -1)
         return out
 
@@ -301,7 +303,7 @@ class ColumnParallelLinear(Linear):
         Returns:
             torch.Tensor: Transformed tensor with column-parallel computation.
         """
-        y = linear(x, self.weight, self.bias)
+        y = linear(x, self.weight, self.bias, False)
         return y
 
 
@@ -332,7 +334,7 @@ class RowParallelLinear(Linear):
         Returns:
             torch.Tensor: Transformed tensor with row-parallel computation.
         """
-        y = linear(x, self.weight, None)
+        y = linear(x, self.weight, None, True)
         if world_size > 1:
             y = y.float()
             dist.all_reduce(y)
@@ -523,7 +525,7 @@ class Indexer(torch.nn.Module):
         self.q_lora_rank: int = args.q_lora_rank
         if args.quantization == "w8a8":
             self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim,
-                               bias=True, dtype=torch.int8, static_quant=True)
+                               dtype=torch.int8, static_quant=True)
         else:
             self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim)
         self.wk_weights_proj = Linear(self.dim, self.head_dim + self.n_heads, dtype=torch.float32)
@@ -595,16 +597,16 @@ class MLA(nn.Module):
         if args.quantization == "w8a8":
             # wqkv_a 合并 q_a_proj 和 kv_a_proj_with_mqa，静态量化
             self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
-                                 bias=True, dtype=torch.int8, static_quant=True)
+                                 dtype=torch.int8, static_quant=True)
             # wq_b 是 ColumnParallelLinear，静态量化
             self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim,
-                                              bias=True, dtype=torch.int8, static_quant=True)
+                                              dtype=torch.int8, static_quant=True)
             # wo 是 RowParallelLinear，静态量化
             self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim,
                                          dtype=torch.int8, static_quant=True)
         else:
-            self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim, bias=True)
-            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=True)
+            self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim)
+            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
             self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
         self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
         self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
@@ -705,7 +707,7 @@ class MLP(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        if args is not None and args.quantization in ("experts_int8", "w8a8"):
+        if args is not None and args.quantization == "w8a8":
             self.w13 = ColumnParallelLinear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = RowParallelLinear(inter_dim, dim, dtype=torch.int8)
         else:
@@ -734,7 +736,7 @@ class SharedExpertMLP(nn.Module):
     """
     def __init__(self, dim: int, inter_dim: int, args: ModelArgs = None):
         super().__init__()
-        if args is not None and args.quantization in ("experts_int8", "w8a8"):
+        if args is not None and args.quantization == "w8a8":
             # w8a8: shared_experts 使用动态量化（W8A8_DYNAMIC）
             self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
@@ -833,7 +835,6 @@ class Expert(nn.Module):
         """
         super().__init__()
         if args.quantization in ("experts_int8", "w8a8"):
-            # w8a8: experts 使用动态量化（W8A8_DYNAMIC），只需要 weight、weight_scale、weight_offset
             self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
         else:
@@ -1096,8 +1097,6 @@ class DeepSeek_V3(nn.Module):
 
         static_quant_weights = ("q_a_proj", "kv_a_proj_with_mqa", "wq_b", "wo")
 
-        self.xlite_weight_nz = True if forward_backend == "xlite" else False
-
         n_local_experts = args.n_routed_experts // args.moe_ep_size
         moe_tp_id = rank % args.moe_tp_size
         moe_ep_id = rank // args.moe_tp_size
@@ -1141,7 +1140,7 @@ class DeepSeek_V3(nn.Module):
             if not name.startswith("model."):
                 name = "model." + name
 
-            if "weight_scale" in name:
+            if args.quantization == "w8a8" and "weight_scale" in name or ".bias" in name:
                 if any(s in name for s in static_quant_weights):
                     continue
             name = name.replace("weight_scale", "scale")
@@ -1250,7 +1249,7 @@ class DeepSeek_V3(nn.Module):
                 continue
 
             if "wq_b" in name:
-                if ".quant_bias" in name or ".bias" in name or ".scale" in name:
+                if ".quant_bias" in name or ".scale" in name:
                     shard_size = param.shape[0]
                     loaded_weight_slice = loaded_weight[rank * shard_size:(rank + 1) * shard_size]
                     loaded_weight_slice = convert_pyslice_to_tensor(loaded_weight_slice)
@@ -1413,10 +1412,61 @@ class DeepSeek_V3(nn.Module):
                 for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx):
                     self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
                     self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
-            self.xlite_model.re_up_gate_scale = [self.layers[i].ffn.experts[j].w13.weight.xlite_scale
+            self.xlite_model.re_up_gate_deq_scale = [self.layers[i].ffn.experts[j].w13.weight.xlite_scale
+                                                     for i in range(args.n_dense_layers, args.n_layers)
+                                                     for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+            self.xlite_model.re_down_deq_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
+                                                  for i in range(args.n_dense_layers, args.n_layers)
+                                                  for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+        elif args.quantization == "w8a8":
+            for i in range(self.args.n_layers):
+                if self.layers[i].attn.indexer is not None:
+                    self.layers[i].attn.indexer.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.indexer.wq_b.weight.scale[0::1]
+                self.layers[i].attn.wqkv_a.weight.xlite_scale[0::2] = self.layers[i].attn.wqkv_a.weight.scale[0::1]
+                self.layers[i].attn.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.wq_b.weight.scale[0::1]
+                self.layers[i].attn.wo.weight.xlite_scale[0::2] = self.layers[i].attn.wo.weight.scale[0::1]
+            self.xlite_model.index_q_b_input_scale = [layer.attn.indexer.wq_b.weight.input_scale.reciprocal() for layer in self.layers if layer.attn.indexer is not None]
+            self.xlite_model.index_q_b_input_offset = [layer.attn.indexer.wq_b.weight.input_offset for layer in self.layers if layer.attn.indexer is not None]
+            self.xlite_model.index_q_b_quant_bias = [layer.attn.indexer.wq_b.weight.quant_bias for layer in self.layers if layer.attn.indexer is not None]
+            self.xlite_model.index_q_b_deq_scale = [layer.attn.indexer.wq_b.weight.xlite_scale for layer in self.layers if layer.attn.indexer is not None]
+            self.xlite_model.mla_qkv_a_input_scale = [layer.attn.wqkv_a.weight.input_scale.reciprocal() for layer in self.layers]
+            self.xlite_model.mla_qkv_a_input_offset = [layer.attn.wqkv_a.weight.input_offset for layer in self.layers]
+            self.xlite_model.mla_qkv_a_quant_bias = [layer.attn.wqkv_a.weight.quant_bias for layer in self.layers]
+            self.xlite_model.mla_qkv_a_deq_scale = [layer.attn.wqkv_a.weight.xlite_scale for layer in self.layers]
+            self.xlite_model.mla_q_b_input_scale = [layer.attn.wq_b.weight.input_scale.reciprocal() for layer in self.layers]
+            self.xlite_model.mla_q_b_input_offset = [layer.attn.wq_b.weight.input_offset for layer in self.layers]
+            self.xlite_model.mla_q_b_quant_bias = [layer.attn.wq_b.weight.quant_bias for layer in self.layers]
+            self.xlite_model.mla_q_b_deq_scale = [layer.attn.wq_b.weight.xlite_scale for layer in self.layers]
+            self.xlite_model.mla_q_norm_bias = [layer.attn.q_norm.bias for layer in self.layers]
+            self.xlite_model.mla_kv_norm_bias = [layer.attn.kv_norm.bias for layer in self.layers]
+            self.xlite_model.attn_out_input_scale = [layer.attn.wo.weight.input_scale.reciprocal() for layer in self.layers]
+            self.xlite_model.attn_out_input_offset = [layer.attn.wo.weight.input_offset for layer in self.layers]
+            self.xlite_model.attn_out_quant_bias = [layer.attn.wo.weight.quant_bias for layer in self.layers]
+            self.xlite_model.attn_out_deq_scale = [layer.attn.wo.weight.xlite_scale for layer in self.layers]
+            self.xlite_model.norm_bias = self.norm.bias
+            self.xlite_model.attn_norm_bias = [layer.attn_norm.bias for layer in self.layers]
+            self.xlite_model.mlp_norm_bias = [layer.ffn_norm.bias for layer in self.layers]
+            for i in range(self.args.n_dense_layers):
+                self.layers[i].ffn.w13.weight.xlite_scale[0::2] = self.layers[i].ffn.w13.weight.scale[0::1]
+                self.layers[i].ffn.w2.weight.xlite_scale[0::2] = self.layers[i].ffn.w2.weight.scale[0::1]
+            self.xlite_model.mlp_up_gate_deq_scale = [self.layers[i].ffn.w13.weight.xlite_scale
+                                                  for i in range(args.n_dense_layers)]
+            self.xlite_model.mlp_down_deq_scale = [self.layers[i].ffn.w2.weight.xlite_scale for i in range(args.n_dense_layers)]
+
+            for i in range(self.args.n_dense_layers, self.args.n_layers):
+                self.layers[i].ffn.shared_experts.w13.weight.xlite_scale[0::2] = self.layers[i].ffn.shared_experts.w13.weight.scale[0::1]
+                self.layers[i].ffn.shared_experts.w2.weight.xlite_scale[0::2] = self.layers[i].ffn.shared_experts.w2.weight.scale[0::1]
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx):
+                    self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
+                    self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
+            self.xlite_model.se_up_gate_deq_scale = [self.layers[i].ffn.shared_experts.w13.weight.xlite_scale
+                                                 for i in range(args.n_dense_layers, args.n_layers)]
+            self.xlite_model.se_down_deq_scale = [self.layers[i].ffn.shared_experts.w2.weight.xlite_scale
+                                                 for i in range(args.n_dense_layers, args.n_layers)]
+            self.xlite_model.re_up_gate_deq_scale = [self.layers[i].ffn.experts[j].w13.weight.xlite_scale
                                                  for i in range(args.n_dense_layers, args.n_layers)
                                                  for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-            self.xlite_model.re_down_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
+            self.xlite_model.re_down_deq_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
                                               for i in range(args.n_dense_layers, args.n_layers)
                                               for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
         self.xlite_model.init(config, rank)

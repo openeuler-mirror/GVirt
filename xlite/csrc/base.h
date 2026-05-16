@@ -237,8 +237,6 @@ public:
 
     enum QuantType GetQuantType();
     bool IsQuanted();
-    bool IsTransposed();
-    bool IsNzFormat();
 
 private:
     enum QuantType quantType = UNKONOWN_QUANT;
