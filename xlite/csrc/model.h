@@ -156,7 +156,9 @@ public:
     std::vector<XTensor> moeGate;
     std::vector<XTensor> moeGateBias;
     std::vector<XTensor> moeSEUpGate;
+    std::vector<XTensor> moeSEUpGateScale;
     std::vector<XTensor> moeSEDown;
+    std::vector<XTensor> moeSEDownScale;
     std::vector<std::vector<XTensor>> moeREUpGate;
     std::vector<std::vector<XTensor>> moeREUpGateScale;
     std::vector<std::vector<XTensor>> moeREDown;

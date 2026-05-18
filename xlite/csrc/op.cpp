@@ -1097,6 +1097,12 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
     if (IsDummyRuntime(rt)) {
         return;
     }
+    if (x.ptr == nullptr || scale_reciprocal.ptr == nullptr || offset.ptr == nullptr ||
+        out.ptr == nullptr) {
+        std::string err_str =
+            DBG_PREFIX + XT_STR(x) + XT_STR(scale_reciprocal) + XT_STR(offset) + XT_STR(out);
+        throw std::runtime_error(err_str + " null pointer!");
+    }
     size_t m = x.shape[0];
     size_t n = x.shape[1];
     if (x.dtype == BF16) {
@@ -1112,6 +1118,10 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, con
 {
     if (IsDummyRuntime(rt)) {
         return;
+    }
+    if (x.ptr == nullptr || scale.ptr == nullptr || out.ptr == nullptr) {
+        std::string err_str = DBG_PREFIX + XT_STR(x) + XT_STR(scale) + XT_STR(out);
+        throw std::runtime_error(err_str + " null pointer!");
     }
     size_t m = x.shape[0];
     size_t n = x.shape[1];

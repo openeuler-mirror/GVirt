@@ -302,6 +302,9 @@ std::string XTensor::ToStr(const char *name) const
         oss << (i ? ", " : "") << shape[i];
     }
     oss << "]";
+    if (ptr == nullptr) {
+        oss << "(null)";
+    }
     return oss.str();
 }
 
