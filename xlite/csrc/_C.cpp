@@ -1565,6 +1565,100 @@ void ReorderMoE(XRuntime &rt, at::Tensor &in, at::Tensor &out, at::Tensor &count
     rt.Synchronize();
 }
 
+void LinearAttProj(XRuntime &rt, at::Tensor &x, at::Tensor &W_qkv, at::Tensor &W_z, at::Tensor &W_b,
+                   at::Tensor &W_a, at::Tensor &mix_qkv, at::Tensor &z, at::Tensor &b,
+                   at::Tensor &a, uint32_t m, uint32_t n, uint32_t v, uint32_t h, uint32_t k)
+{
+    XTensor _x, _W_qkv, _W_z, _W_b, _W_a;
+    XTensor _mix_qkv, _z, _b, _a;
+    XTensor bias, deqScale;
+
+    InitXTensor(_x, x);
+    InitXTensor(_W_qkv, W_qkv);
+    InitXTensor(_W_z, W_z);
+    InitXTensor(_W_b, W_b);
+    InitXTensor(_W_a, W_a);
+
+    InitXTensor(_mix_qkv, mix_qkv);
+    InitXTensor(_z, z);
+    InitXTensor(_b, b);
+    InitXTensor(_a, a);
+
+    std::vector<XTensor> inputs = {_W_qkv, _W_z, _W_b, _W_a};
+    XTensor &W = rt.GetTensor({k, n + v + h + h}, XDtype(x), DBG_LOC);
+    XliteOpConcatCol(rt, inputs, W);
+
+    XTensor &out = rt.GetTensor({m, n + v + h + h}, XDtype(x), DBG_LOC);
+    XliteOpMatmul(rt, _x, W, out, false, bias, deqScale, true);
+    rt.PutTensor(W);
+
+    std::vector<XTensor> outputs = {_mix_qkv, _z, _b, _a};
+    XliteOpSplitCol(rt, out, outputs);
+    rt.PutTensor(out);
+    rt.Synchronize();
+}
+
+void Transpose_1_2(XRuntime &rt, at::Tensor &input, at::Tensor &output)
+{
+    XTensor _input, _output;
+    InitXTensor(_input, input);
+    InitXTensor(_output, output);
+    XliteOpTranspose_1_2(rt, _input, _output);
+    rt.Synchronize();
+}
+
+void LinearAttConv1dAndSiLU(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_state,
+                            at::Tensor &weight, at::Tensor &output)
+{
+    XTensor _mix_qkv, _conv_state, _weight, _output;
+    InitXTensor(_mix_qkv, mix_qkv);
+    InitXTensor(_conv_state, conv_state);
+    InitXTensor(_weight, weight);
+    InitXTensor(_output, output);
+    std::vector<XTensor> inputs = {_conv_state, _mix_qkv};
+    XTensor &x = rt.GetTensor(
+        {_mix_qkv.shape[0], _mix_qkv.shape[1], _mix_qkv.shape[2] + _conv_state.shape[2]},
+        XDtype(mix_qkv), DBG_LOC);
+    XliteOpConcatCol(rt, inputs, x);
+    XliteOpConv1dAndSiLU(rt, x, _weight, _output);
+    rt.PutTensor(x);
+    rt.Synchronize();
+}
+
+void SplitCol(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs)
+{
+    XTensor _in;
+    std::vector<XTensor> _outputs;
+    InitXTensor(_in, in);
+    uint32_t totalWidth = 0;
+    for (auto &output : outputs) {
+        XTensor x;
+        InitXTensor(x, output);
+        _outputs.push_back(x);
+        totalWidth += x.shape.back();
+    }
+    if (totalWidth != _in.shape.back()) {
+        throw std::runtime_error("input last dim != sum(outputs last dim)");
+    }
+    XliteOpSplitCol(rt, _in, _outputs);
+    rt.Synchronize();
+}
+
+void BetaDecay(XRuntime &rt, at::Tensor &b, at::Tensor &a, at::Tensor &A_log, at::Tensor &dt_bias,
+               at::Tensor &beta, at::Tensor &g, uint32_t bsz, uint32_t seqlen, uint32_t num_v_heads)
+{
+    XTensor _b, _a, _A_log, _dt_bias, _beta, _g;
+    InitXTensor(_b, b);
+    InitXTensor(_a, a);
+    InitXTensor(_A_log, A_log);
+    InitXTensor(_dt_bias, dt_bias);
+    InitXTensor(_beta, beta);
+    InitXTensor(_g, g);
+
+    XliteOpBetaDecay(rt, _b, _a, _A_log, _dt_bias, _beta, _g, bsz, seqlen, num_v_heads);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -1872,6 +1966,17 @@ PYBIND11_MODULE(_C, m)
     m.def("reorder_moe", &ReorderMoE, py::arg("rt"), py::arg("in_"), py::arg("out"),
           py::arg("counts"), py::arg("hidden_size"), py::arg("local_start"), py::arg("local_end"),
           py::arg("forward"));
+    m.def("linear_att_proj", &LinearAttProj, py::arg("rt"), py::arg("x"), py::arg("W_qkv"),
+          py::arg("W_z"), py::arg("W_b"), py::arg("W_a"), py::arg("mix_qkv"), py::arg("z"),
+          py::arg("b"), py::arg("a"), py::arg("m"), py::arg("n"), py::arg("v"), py::arg("h"),
+          py::arg("k"));
+    m.def("transpose_1_2", &Transpose_1_2, py::arg("rt"), py::arg("input"), py::arg("output"));
+    m.def("linear_att_conv_and_silu", &LinearAttConv1dAndSiLU, py::arg("rt"), py::arg("mix_qkv"),
+          py::arg("conv_state"), py::arg("weight"), py::arg("output"));
+    m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::arg("outputs"));
+    m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
+          py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
+          py::arg("num_v_heads"));
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,

@@ -46,6 +46,9 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/experts_counts_sum.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reorder_moe.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_float.cpp
 )
 
 # xlite_kernels_bf16_${RUN_MODE}
@@ -72,6 +75,9 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_scores_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/muls_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_bfloat16_t.cpp
 )
 
 # xlite_kernels_f16_${RUN_MODE}
@@ -90,6 +96,9 @@ file(GLOB KERNEL_FILES_F16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/norm_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_scores_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/muls_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_float16_t.cpp
 )
 
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)

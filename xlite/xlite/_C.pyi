@@ -1791,3 +1791,122 @@ def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
         None: Output is emitted to native stdout.
     """
     ...
+
+def linear_att_proj(
+    rt: Runtime,
+    x: torch.Tensor,
+    W_qkv: torch.Tensor,
+    W_z: torch.Tensor,
+    W_b: torch.Tensor,
+    W_a: torch.Tensor,
+    mix_qkv: torch.Tensor,
+    z: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    m: int,
+    n: int,
+    v: int,
+    h: int,
+    k: int,
+) -> None:
+    """Linear attention projection.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        x (torch.Tensor): Input tensor.
+        W_qkv (torch.Tensor): QKV weight tensor.
+        W_z (torch.Tensor): Z weight tensor.
+        W_b (torch.Tensor): B weight tensor.
+        W_a (torch.Tensor): A weight tensor.
+        mix_qkv (torch.Tensor): Output mixed QKV tensor.
+        z (torch.Tensor): Output z(gating parameters) tensor.
+        b (torch.Tensor): Output b(beta input) tensor.
+        a (torch.Tensor): Output a(decay input) tensor.
+        m (int): Dimension of the input x(batch*seqlen).
+        n (int): QKV weight dimension.
+        v (int): Z weight dimension.
+        h (int): B,A weight dimension.
+        k (int): Hidden layer dimension.
+
+    Returns:
+        None: Output tensors are written in place.
+    """
+    ...
+
+def transpose_1_2(rt: Runtime, input: torch.Tensor, eye: torch.Tensor, output: torch.Tensor) -> None:
+    """Transpose input 3D tensor along dimensions 1 and 2.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        input (torch.Tensor): Input tensor of shape (b, m, n).
+        output (torch.Tensor): Output tensor of shape (b, n, m).
+
+    Returns:
+        None: `output` is written in place.
+    """
+    ...
+
+def linear_att_conv_and_silu(
+    rt: Runtime,
+    mix_qkv: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    """Conv1d and SiLU activation for linear attention.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        mix_qkv (torch.Tensor): Input mixed QKV tensor.
+        conv_state (torch.Tensor): Convolution state tensor(should be zeroed if none).
+        weight (torch.Tensor): Kernel weight tensor.
+        output (torch.Tensor): Output tensor.
+
+    Returns:
+        None: `output` is written in place.
+    """
+    ...
+
+def split_col(rt: Runtime, in_: torch.Tensor, outputs: List[torch.Tensor]) -> None:
+    """Split tensor along column dimension into multiple outputs.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        in_ (torch.Tensor): Input tensor to split.
+        outputs (List[torch.Tensor]): List of output tensors.
+
+    Returns:
+        None: Output tensors are written in place.
+    """
+    ...
+
+def beta_decay(
+    rt: Runtime,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor,
+    bsz: int,
+    seqlen: int,
+    num_v_heads: int,
+) -> None:
+    """Calculate beta and decay for linear attention.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        b (torch.Tensor): b input tensor.
+        a (torch.Tensor): a input tensor.
+        A_log (torch.Tensor): Learnable Decay parameters.
+        dt_bias (torch.Tensor): Time bias.
+        beta (torch.Tensor): beta tensor.
+        g (torch.Tensor): g(decay) tensor.
+        bsz (int): Batch size.
+        seqlen (int): Sequence length.
+        num_v_heads (int): Number of value heads.
+
+    Returns:
+        None: Output tensors are written in place.
+    """
+    ...

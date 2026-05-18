@@ -12,6 +12,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <numeric>
 #include <list>
 #include <cstdint>
 #include <complex>
