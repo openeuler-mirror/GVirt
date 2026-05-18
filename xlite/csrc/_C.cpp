@@ -100,7 +100,9 @@ public:
     std::vector<at::Tensor> moeGate;
     std::vector<at::Tensor> moeGateBias;
     std::vector<at::Tensor> moeSEUpGate;
+    std::vector<at::Tensor> moeSEUpGateScale;
     std::vector<at::Tensor> moeSEDown;
+    std::vector<at::Tensor> moeSEDownScale;
     std::vector<at::Tensor> moeREUpGate;
     std::vector<at::Tensor> moeREUpGateScale;
     std::vector<at::Tensor> moeREDown;
@@ -361,6 +363,15 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             "Mismatched number of moe layers with shared experts parameters");
     }
 
+    if (c.nSharedExperts != 0 &&
+        ((!moeSEUpGateScale.empty() && moeSEUpGateScale.size() != (c.nLayers - c.nDenseLayers)) ||
+         (!moeSEDownScale.empty() && moeSEDownScale.size() != (c.nLayers - c.nDenseLayers)))) {
+        std::cerr << __FILE__ << ":" << __LINE__
+                  << ": num of moe layers: " << moeSEUpGateScale.size() << std::endl;
+        throw std::invalid_argument(
+            "Mismatched number of moe layers with shared experts quantization parameters");
+    }
+
     _model = new XModel(c, rankId);
 
     InitXTensor(_model->embed, embed);
@@ -373,6 +384,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
         InitXTensor(_model->attnOut[i], attnOut[i]);
+        if (_model->attnOut[i].dtype == INT8 && attnOutDeqScale.empty()) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": attention out input scale parameters are required when attention out "
+                         "weights are quantized"
+                      << std::endl;
+            throw std::invalid_argument("Attention out input scale parameters are required when "
+                                        "attention out weights are quantized");
+        }
         if (!attnOutInputScale.empty()) {
             InitXTensor(_model->attnOutInputScale[i], attnOutInputScale[i]);
         }
@@ -401,6 +420,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
         } else if (c.attnType == XMODEL_ATTN_MHA) {
             InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
+            if (_model->mhaQKV[i].dtype == INT8 && mhaQKVDeqScale.empty()) {
+                std::cerr << __FILE__ << ":" << __LINE__
+                          << ": MHA QKV input scale parameters are required when QKV weights are "
+                             "quantized"
+                          << std::endl;
+                throw std::invalid_argument(
+                    "MHA QKV input scale parameters are required when QKV weights are quantized");
+            }
             if (!mhaQKVInputScale.empty()) {
                 InitXTensor(_model->mhaQKVInputScale[i], mhaQKVInputScale[i]);
             }
@@ -442,19 +469,40 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     for (uint32_t i = 0; i < c.nDenseLayers; i++) {
         InitXTensor(_model->mlpUpGate[i], mlpUpGate[i]);
         InitXTensor(_model->mlpDown[i], mlpDown[i]);
-        if (!mlpUpGateInputScale.empty()) {
-            InitXTensor(_model->mlpUpGateInputScale[i], mlpUpGateInputScale[i]);
+        if (_model->mlpUpGate[i].dtype == INT8 && mlpUpGateDeqScale.empty()) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": MLP up gate input scale parameters are required when MLP up gate "
+                         "weights are quantized"
+                      << std::endl;
+            throw std::invalid_argument("MLP up gate input scale parameters are required when MLP "
+                                        "up gate weights are quantized");
+        }
+        if (_model->mlpDown[i].dtype == INT8 && mlpDownDeqScale.empty()) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": MLP down input scale parameters are required when MLP down weights are "
+                         "quantized"
+                      << std::endl;
+            throw std::invalid_argument(
+                "MLP down input scale parameters are required when MLP down weights are quantized");
+        }
+        if (!mlpUpGateInputOffset.empty()) {
             InitXTensor(_model->mlpUpGateInputOffset[i], mlpUpGateInputOffset[i]);
+            InitXTensor(_model->mlpUpGateInputScale[i], mlpUpGateInputScale[i]);
             InitXTensor(_model->mlpUpGateQuantBias[i], mlpUpGateQuantBias[i]);
             InitXTensor(_model->mlpUpGateDeqScale[i], mlpUpGateDeqScale[i]);
+        } else if (!mlpUpGateDeqScale.empty()) {
+            InitXTensor(_model->mlpUpGateDeqScale[i], mlpUpGateDeqScale[i]);
         }
-        if (!mlpDownInputScale.empty()) {
-            InitXTensor(_model->mlpDownInputScale[i], mlpDownInputScale[i]);
+
+        if (!mlpDownInputOffset.empty()) {
             InitXTensor(_model->mlpDownInputOffset[i], mlpDownInputOffset[i]);
+            InitXTensor(_model->mlpDownInputScale[i], mlpDownInputScale[i]);
             if (tp_rank % c.defTpSize == 0) {
                 // Notice: only tp_rank == 0 in RowParallelLinear need to add quant_bias
                 InitXTensor(_model->mlpDownQuantBias[i], mlpDownQuantBias[i]);
             }
+            InitXTensor(_model->mlpDownDeqScale[i], mlpDownDeqScale[i]);
+        } else if (!mlpDownDeqScale.empty()) {
             InitXTensor(_model->mlpDownDeqScale[i], mlpDownDeqScale[i]);
         }
     }
@@ -467,6 +515,28 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         if (c.nSharedExperts != 0) {
             InitXTensor(_model->moeSEUpGate[i], moeSEUpGate[moe_idx]);
             InitXTensor(_model->moeSEDown[i], moeSEDown[moe_idx]);
+            if (_model->moeSEUpGate[i].dtype == INT8 && moeSEUpGateScale.empty()) {
+                std::cerr << __FILE__ << ":" << __LINE__
+                          << ": Moe SE up gate scale parameters are required when Moe SE up gate "
+                             "weights are quantized"
+                          << std::endl;
+                throw std::invalid_argument("Moe SE up gate scale parameters are required when Moe "
+                                            "SE up gate weights are quantized");
+            }
+            if (_model->moeSEDown[i].dtype == INT8 && moeSEDownScale.empty()) {
+                std::cerr << __FILE__ << ":" << __LINE__
+                          << ": Moe SE down input scale parameters are required when Moe SE down "
+                             "weights are quantized"
+                          << std::endl;
+                throw std::invalid_argument("Moe SE down input scale parameters are required when "
+                                            "Moe SE down weights are quantized");
+            }
+            if (_model->moeSEUpGate[i].dtype == INT8) {
+                InitXTensor(_model->moeSEUpGateScale[i], moeSEUpGateScale[moe_idx]);
+            }
+            if (_model->moeSEDown[i].dtype == INT8) {
+                InitXTensor(_model->moeSEDownScale[i], moeSEDownScale[moe_idx]);
+            }
         }
 
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
@@ -1508,7 +1578,9 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("gate", &_CModel::moeGate)
         .def_readwrite("gate_bias", &_CModel::moeGateBias)
         .def_readwrite("se_up_gate", &_CModel::moeSEUpGate)
+        .def_readwrite("se_up_gate_scale", &_CModel::moeSEUpGateScale)
         .def_readwrite("se_down", &_CModel::moeSEDown)
+        .def_readwrite("se_down_scale", &_CModel::moeSEDownScale)
         .def_readwrite("re_up_gate", &_CModel::moeREUpGate)
         .def_readwrite("re_up_gate_scale", &_CModel::moeREUpGateScale)
         .def_readwrite("re_down", &_CModel::moeREDown)

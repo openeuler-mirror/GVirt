@@ -376,7 +376,9 @@ class Model:
         gate (List[torch.Tensor]): MoE gate weights per layer.
         gate_bias (List[torch.Tensor]): MoE gate bias per layer.
         se_up_gate (List[torch.Tensor]): Shared-expert up-gate weights per layer.
+        se_up_gate_scale (List[torch.Tensor]): Shared-expert up-gate scales per layer.
         se_down (List[torch.Tensor]): Shared-expert down weights per layer.
+        se_down_scale (List[torch.Tensor]): Shared-expert down scales per layer.
         re_up_gate (List[torch.Tensor]): Routed-expert up-gate weights.
         re_up_gate_scale (List[torch.Tensor]): Routed-expert up-gate scales.
         re_down (List[torch.Tensor]): Routed-expert down weights.
@@ -473,8 +475,12 @@ class Model:
     """MoE gate bias per layer."""
     se_up_gate: List[torch.Tensor] = ...
     """Shared-expert up-gate weights per layer."""
+    se_up_gate_scale: List[torch.Tensor] = ...
+    """Shared-expert up-gate scales per layer."""
     se_down: List[torch.Tensor] = ...
     """Shared-expert down weights per layer."""
+    se_down_scale: List[torch.Tensor] = ...
+    """Shared-expert down scales per layer."""
     re_up_gate: List[torch.Tensor] = ...
     """Routed-expert up-gate weights."""
     re_up_gate_scale: List[torch.Tensor] = ...
