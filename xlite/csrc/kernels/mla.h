@@ -974,14 +974,14 @@ public:
                 // copy K(T) (nSize, K0) to L1
                 if (doTopK) {
                     Nd2NzParams params(1, 1, nSize, 0, kvLoraRank, kBlockPad, 1, 0);
-                    for (int i = 0; i < kSize; i++) {
+                    for (int i = 0; i < kBlockPad; i++) {
                         DataCopy(aktl1bBuf[curr][i * kBlockSize],
                                  kCache[(topkOffset[kOffset + i]) * kvLoraRank + nOffset], params);
                     }
                 } else {
                     CopyGmToL1Nd2Nz(aktl1bBuf[curr],
-                                    kCache[block * blockSize * kvLoraRank + nOffset], kSize, nSize,
-                                    kvLoraRank, kBlockPad);
+                                    kCache[block * blockSize * kvLoraRank + nOffset], kBlockPad,
+                                    nSize, kvLoraRank, kBlockPad);
                 }
 
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
