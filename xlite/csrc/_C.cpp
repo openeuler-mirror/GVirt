@@ -112,6 +112,11 @@ private:
     XModel *_model = nullptr;
     std::vector<std::vector<XTensor>> _kv;
     std::vector<XTensor> _deepstackInputEmbeds;
+    void InitMatmulWeight(const std::string &name, std::vector<at::Tensor> &w,
+                          std::vector<at::Tensor> &iScale, std::vector<at::Tensor> &iOffset,
+                          std::vector<at::Tensor> &qBias, std::vector<at::Tensor> &dScale,
+                          std::vector<MatmulWeight> &weightsXT, uint32_t currLayer,
+                          bool isRowParallel, uint32_t tpRank, uint32_t layerOffset = 0);
 };
 
 static inline enum XDtype XDtype(at::Tensor &t)
@@ -162,13 +167,13 @@ static inline void InitXTensor(XTensor &out, at::Tensor &in)
 
 void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 {
-    uint32_t idx = 0, moe_idx = 0;
+    uint32_t idx = 0;
     uint32_t nLocalRoutedExperts = c.nRoutedExperts / c.moeEpSize;
     uint32_t expertsStartIdx = c.moeEpSize == 1 ? 0 : rankId / c.moeTPSize * nLocalRoutedExperts;
     uint32_t expertsEndIdx = expertsStartIdx + nLocalRoutedExperts;
     uint32_t numMoeLayers = c.nLayers - c.nDenseLayers;
     uint32_t nRE = numMoeLayers * nLocalRoutedExperts;
-    uint32_t tp_rank = rankId % c.defTpSize;
+    uint32_t tpRank = rankId % c.defTpSize;
 
     if (c.nRoutedExperts % c.moeEpSize != 0) {
         std::cerr << __FILE__ << ":" << __LINE__
@@ -383,28 +388,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
-        InitXTensor(_model->attnOut[i], attnOut[i]);
-        if (_model->attnOut[i].dtype == INT8 && attnOutDeqScale.empty()) {
-            std::cerr << __FILE__ << ":" << __LINE__
-                      << ": attention out input scale parameters are required when attention out "
-                         "weights are quantized"
-                      << std::endl;
-            throw std::invalid_argument("Attention out input scale parameters are required when "
-                                        "attention out weights are quantized");
-        }
-        if (!attnOutInputScale.empty()) {
-            InitXTensor(_model->attnOutInputScale[i], attnOutInputScale[i]);
-        }
-        if (!attnOutInputOffset.empty()) {
-            InitXTensor(_model->attnOutInputOffset[i], attnOutInputOffset[i]);
-        }
-        if (!attnOutQuantBias.empty() && tp_rank % c.defTpSize == 0) {
-            // Notice: only tp_rank == 0 in RowParallelLinear need to add quant_bias
-            InitXTensor(_model->attnOutQuantBias[i], attnOutQuantBias[i]);
-        }
-        if (!attnOutDeqScale.empty()) {
-            InitXTensor(_model->attnOutDeqScale[i], attnOutDeqScale[i]);
-        }
+        InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
+                         attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true, tpRank);
         if (!attnNormBias.empty()) {
             InitXTensor(_model->attnNormBias[i], attnNormBias[i]);
         }
@@ -419,27 +404,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
         } else if (c.attnType == XMODEL_ATTN_MHA) {
-            InitXTensor(_model->mhaQKV[i], mhaQKV[i]);
-            if (_model->mhaQKV[i].dtype == INT8 && mhaQKVDeqScale.empty()) {
-                std::cerr << __FILE__ << ":" << __LINE__
-                          << ": MHA QKV input scale parameters are required when QKV weights are "
-                             "quantized"
-                          << std::endl;
-                throw std::invalid_argument(
-                    "MHA QKV input scale parameters are required when QKV weights are quantized");
-            }
-            if (!mhaQKVInputScale.empty()) {
-                InitXTensor(_model->mhaQKVInputScale[i], mhaQKVInputScale[i]);
-            }
-            if (!mhaQKVInputOffset.empty()) {
-                InitXTensor(_model->mhaQKVInputOffset[i], mhaQKVInputOffset[i]);
-            }
-            if (!mhaQKVQuantBias.empty()) {
-                InitXTensor(_model->mhaQKVQuantBias[i], mhaQKVQuantBias[i]);
-            }
-            if (!mhaQKVDeqScale.empty()) {
-                InitXTensor(_model->mhaQKVDeqScale[i], mhaQKVDeqScale[i]);
-            }
+            InitMatmulWeight("mhaQKV", mhaQKV, mhaQKVInputScale, mhaQKVInputOffset, mhaQKVQuantBias,
+                             mhaQKVDeqScale, _model->mhaQKV, i, false, tpRank);
             if (c.addBias) {
                 InitXTensor(_model->mhaQKVBias[i], mhaQKVBias[i]);
             }
@@ -467,76 +433,25 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     }
 
     for (uint32_t i = 0; i < c.nDenseLayers; i++) {
-        InitXTensor(_model->mlpUpGate[i], mlpUpGate[i]);
-        InitXTensor(_model->mlpDown[i], mlpDown[i]);
-        if (_model->mlpUpGate[i].dtype == INT8 && mlpUpGateDeqScale.empty()) {
-            std::cerr << __FILE__ << ":" << __LINE__
-                      << ": MLP up gate input scale parameters are required when MLP up gate "
-                         "weights are quantized"
-                      << std::endl;
-            throw std::invalid_argument("MLP up gate input scale parameters are required when MLP "
-                                        "up gate weights are quantized");
-        }
-        if (_model->mlpDown[i].dtype == INT8 && mlpDownDeqScale.empty()) {
-            std::cerr << __FILE__ << ":" << __LINE__
-                      << ": MLP down input scale parameters are required when MLP down weights are "
-                         "quantized"
-                      << std::endl;
-            throw std::invalid_argument(
-                "MLP down input scale parameters are required when MLP down weights are quantized");
-        }
-        if (!mlpUpGateInputOffset.empty()) {
-            InitXTensor(_model->mlpUpGateInputOffset[i], mlpUpGateInputOffset[i]);
-            InitXTensor(_model->mlpUpGateInputScale[i], mlpUpGateInputScale[i]);
-            InitXTensor(_model->mlpUpGateQuantBias[i], mlpUpGateQuantBias[i]);
-            InitXTensor(_model->mlpUpGateDeqScale[i], mlpUpGateDeqScale[i]);
-        } else if (!mlpUpGateDeqScale.empty()) {
-            InitXTensor(_model->mlpUpGateDeqScale[i], mlpUpGateDeqScale[i]);
-        }
-
-        if (!mlpDownInputOffset.empty()) {
-            InitXTensor(_model->mlpDownInputOffset[i], mlpDownInputOffset[i]);
-            InitXTensor(_model->mlpDownInputScale[i], mlpDownInputScale[i]);
-            if (tp_rank % c.defTpSize == 0) {
-                // Notice: only tp_rank == 0 in RowParallelLinear need to add quant_bias
-                InitXTensor(_model->mlpDownQuantBias[i], mlpDownQuantBias[i]);
-            }
-            InitXTensor(_model->mlpDownDeqScale[i], mlpDownDeqScale[i]);
-        } else if (!mlpDownDeqScale.empty()) {
-            InitXTensor(_model->mlpDownDeqScale[i], mlpDownDeqScale[i]);
-        }
+        InitMatmulWeight("mlpUpGate", mlpUpGate, mlpUpGateInputScale, mlpUpGateInputOffset,
+                         mlpUpGateQuantBias, mlpUpGateDeqScale, _model->mlpUpGate, i, false,
+                         tpRank);
+        InitMatmulWeight("mlpDown", mlpDown, mlpDownInputScale, mlpDownInputOffset,
+                         mlpDownQuantBias, mlpDownDeqScale, _model->mlpDown, i, true, tpRank);
     }
 
     for (uint32_t i = c.nDenseLayers; i < c.nLayers; i++) {
-        InitXTensor(_model->moeGate[i], moeGate[moe_idx]);
+        InitXTensor(_model->moeGate[i], moeGate[i - c.nDenseLayers]);
         if (c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
-            InitXTensor(_model->moeGateBias[i], moeGateBias[moe_idx]);
+            InitXTensor(_model->moeGateBias[i], moeGateBias[i - c.nDenseLayers]);
         }
+        std::vector<at::Tensor> emptyWeights = {};
         if (c.nSharedExperts != 0) {
-            InitXTensor(_model->moeSEUpGate[i], moeSEUpGate[moe_idx]);
-            InitXTensor(_model->moeSEDown[i], moeSEDown[moe_idx]);
-            if (_model->moeSEUpGate[i].dtype == INT8 && moeSEUpGateScale.empty()) {
-                std::cerr << __FILE__ << ":" << __LINE__
-                          << ": Moe SE up gate scale parameters are required when Moe SE up gate "
-                             "weights are quantized"
-                          << std::endl;
-                throw std::invalid_argument("Moe SE up gate scale parameters are required when Moe "
-                                            "SE up gate weights are quantized");
-            }
-            if (_model->moeSEDown[i].dtype == INT8 && moeSEDownScale.empty()) {
-                std::cerr << __FILE__ << ":" << __LINE__
-                          << ": Moe SE down input scale parameters are required when Moe SE down "
-                             "weights are quantized"
-                          << std::endl;
-                throw std::invalid_argument("Moe SE down input scale parameters are required when "
-                                            "Moe SE down weights are quantized");
-            }
-            if (_model->moeSEUpGate[i].dtype == INT8) {
-                InitXTensor(_model->moeSEUpGateScale[i], moeSEUpGateScale[moe_idx]);
-            }
-            if (_model->moeSEDown[i].dtype == INT8) {
-                InitXTensor(_model->moeSEDownScale[i], moeSEDownScale[moe_idx]);
-            }
+            InitMatmulWeight("moeSEUpGate", moeSEUpGate, emptyWeights, emptyWeights, emptyWeights,
+                             moeSEUpGateScale, _model->moeSEUpGate, i, false, tpRank,
+                             c.nDenseLayers);
+            InitMatmulWeight("moeSEDown", moeSEDown, emptyWeights, emptyWeights, emptyWeights,
+                             moeSEDownScale, _model->moeSEDown, i, true, tpRank, c.nDenseLayers);
         }
 
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
@@ -550,7 +465,6 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             }
             idx++;
         }
-        moe_idx++;
     }
 
     _model->Init();
@@ -851,6 +765,38 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
 size_t _CModel::GetTensorPoolSize(int dbg)
 {
     return _model->GetTensorPoolSize(dbg);
+}
+
+void _CModel::InitMatmulWeight(const std::string &name, std::vector<at::Tensor> &w,
+                               std::vector<at::Tensor> &iScale, std::vector<at::Tensor> &iOffset,
+                               std::vector<at::Tensor> &qBias, std::vector<at::Tensor> &dScale,
+                               std::vector<MatmulWeight> &weightsXT, uint32_t currLayer,
+                               bool isRowParallel, uint32_t tpRank, uint32_t layerOffset)
+{
+    MatmulWeight &wXT = weightsXT[currLayer];
+    uint32_t weightLayer = currLayer - layerOffset;
+
+    wXT.name = name + "[" + std::to_string(currLayer) + "]";
+    InitXTensor(wXT.weight, w[weightLayer]);
+    if (wXT.weight.dtype == INT8 && dScale.size() <= weightLayer) {
+        std::string errStr = DBG_PREFIX + ": " + name +
+                             "dequant scale parameters are"
+                             "required when weights are quantized";
+        throw std::invalid_argument(errStr);
+    }
+    if (weightLayer < iScale.size()) {
+        InitXTensor(wXT.inputScale, iScale[weightLayer]);
+    }
+    if (weightLayer < iOffset.size()) {
+        InitXTensor(wXT.inputOffset, iOffset[weightLayer]);
+    }
+    // Notice: only tpRank == 0 in RowParallelLinear need to add quant_bias
+    if (weightLayer < qBias.size() && (!isRowParallel || tpRank == 0)) {
+        InitXTensor(wXT.quantBias, qBias[weightLayer]);
+    }
+    if (weightLayer < dScale.size()) {
+        InitXTensor(wXT.deqScale, dScale[weightLayer]);
+    }
 }
 
 void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
@@ -1398,9 +1344,11 @@ void DeQuant(XRuntime &rt, at::Tensor &in, at::Tensor &scale, at::Tensor &out, b
     XTensor _in, _scale, _out;
 
     InitXTensor(_in, in);
-    InitXTensor(_scale, scale);
     InitXTensor(_out, out);
-    XliteOpDeQuant(rt, _in, _out, hasScale, _scale);
+    if (hasScale) {
+        InitXTensor(_scale, scale);
+    }
+    XliteOpDeQuant(rt, _in, _out, _scale);
     rt.Synchronize();
 }
 

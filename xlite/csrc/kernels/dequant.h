@@ -12,7 +12,7 @@
 
 template <typename dtype>
 __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens,
-                               uint32_t m, uint32_t n, bool hasScale)
+                               uint32_t m, uint32_t n)
 {
     set_atomic_none();
     set_mask_norm();
@@ -27,6 +27,7 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR p
     uint32_t n_tile = 7168;
     uint32_t n_loop = DIV_ROUND_UP(n, n_tile);
     uint32_t n_pad = ROUND_UP(n_tile, (256 / sizeof(dtype)));
+    bool hasScale = (scale != nullptr);
 
     GMA(dtype) in_gm_buf = reinterpret_cast<GMA(dtype)>(in);
     GMA(float32_t) scale_gm_buf = reinterpret_cast<GMA(float32_t)>(scale);
@@ -122,18 +123,16 @@ __aicore__ inline void dequant(GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR p
     pipe_barrier(PIPE_ALL);
 }
 
-#define DEQUANT_FUNC_DEFINE(dtype)                                                                \
-    extern "C" __global__ __aicore__ void dequant_##dtype(GM_ADDR in, GM_ADDR scale, GM_ADDR out, \
-                                                          GM_ADDR pnum_tokens, uint32_t m,        \
-                                                          uint32_t n, bool has_scale)             \
-    {                                                                                             \
-        dequant<dtype>(in, scale, out, pnum_tokens, m, n, has_scale);                             \
+#define DEQUANT_FUNC_DEFINE(dtype)                                                           \
+    extern "C" __global__ __aicore__ void dequant_##dtype(                                   \
+        GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens, uint32_t m, uint32_t n) \
+    {                                                                                        \
+        dequant<dtype>(in, scale, out, pnum_tokens, m, n);                                   \
     }
 #else
-#define DEQUANT_FUNC_DEFINE(dtype)                                                                \
-    extern "C" __global__ __aicore__ void dequant_##dtype(GM_ADDR in, GM_ADDR scale, GM_ADDR out, \
-                                                          GM_ADDR pnum_tokens, uint32_t m,        \
-                                                          uint32_t n, bool has_scale)             \
-    {                                                                                             \
+#define DEQUANT_FUNC_DEFINE(dtype)                                                           \
+    extern "C" __global__ __aicore__ void dequant_##dtype(                                   \
+        GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens, uint32_t m, uint32_t n) \
+    {                                                                                        \
     }
 #endif

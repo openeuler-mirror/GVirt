@@ -58,6 +58,13 @@ enum XRopeType {
     MIX,
 };
 
+enum QuantType {
+    UNKONOWN_QUANT,
+    NO_QUANT,
+    STATIC_QUANT,
+    DYNAMIC_QUANT,
+};
+
 typedef struct DebugSrcLoc {
     const char *file;
     int line;
@@ -216,6 +223,25 @@ public:
     bool TensorInPool(XTensor &t) override;
     size_t maxUsedSize = 0;
     size_t currUsedSize = 0;
+};
+
+class MatmulWeight
+{
+public:
+    std::string name;
+    XTensor weight;
+    XTensor inputScale;   // for static quantization
+    XTensor inputOffset;  // for static quantization
+    XTensor quantBias;    // for static and dynamic quantization
+    XTensor deqScale;     // for static and dynamic quantization
+
+    enum QuantType GetQuantType();
+    bool IsQuanted();
+    bool IsTransposed();
+    bool IsNzFormat();
+
+private:
+    enum QuantType quantType = UNKONOWN_QUANT;
 };
 
 #endif

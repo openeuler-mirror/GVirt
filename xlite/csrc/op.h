@@ -96,8 +96,8 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
                   XTensor &out);
 void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out,
                      const XTensor &num = XTensor());
-void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, bool hasScale = false,
-                    const XTensor &scale = XTensor(), const XTensor &num = XTensor());
+void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scale = XTensor(),
+                    const XTensor &num = XTensor());
 void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out);
 void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs,
                   const std::vector<size_t> &sizes, uint32_t numPackets);
