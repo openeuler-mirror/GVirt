@@ -59,8 +59,9 @@ class CMakeBuild(build_ext):
         build_temp.mkdir(parents=True, exist_ok=True)
 
         is_editable = self.inplace or any(x in sys.argv for x in ("develop", "editable_wheel"))
-        print(f"CMakeBuild: Building in {'editable' if is_editable else 'standard'} mode")
         install_prefix = Path(self.build_lib).resolve()
+        print(f"CMakeBuild: Building in {'editable' if is_editable else 'standard'} mode; installing to "
+              f"{install_prefix}")
         cmake_prefix_paths = ";".join(
             [_get_pybind11_cmake_dir(), _get_torch_cmake_dir()]
         )
@@ -83,7 +84,7 @@ class CMakeBuild(build_ext):
         subprocess.check_call(install_cmd)
 
         # Remove headers and lib64 staging outputs from wheel contents.
-        for artifact_dir_sub in ("include", "lib64", "csrc"):
+        for artifact_dir_sub in ("include", "lib", "lib64", "csrc"):
             artifact_dir = install_prefix / artifact_dir_sub
             if artifact_dir.exists():
                 shutil.rmtree(artifact_dir)
