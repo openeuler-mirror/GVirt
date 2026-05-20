@@ -24,15 +24,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mlaKVNorm.resize(c.nLayers);
     mlpNorm.resize(c.nLayers);
     mlpUpGate.resize(c.nDenseLayers);
-    mlpUpGateInputScale.resize(c.nDenseLayers);
-    mlpUpGateInputOffset.resize(c.nDenseLayers);
-    mlpUpGateQuantBias.resize(c.nDenseLayers);
-    mlpUpGateDeqScale.resize(c.nDenseLayers);
     mlpDown.resize(c.nDenseLayers);
-    mlpDownInputScale.resize(c.nDenseLayers);
-    mlpDownInputOffset.resize(c.nDenseLayers);
-    mlpDownQuantBias.resize(c.nDenseLayers);
-    mlpDownDeqScale.resize(c.nDenseLayers);
     indexQB.resize(c.nLayers);
     indexKWeightsProj.resize(c.nLayers);
     indexKNorm.resize(c.nLayers);
@@ -40,9 +32,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     moeGate.resize(c.nLayers);
     moeGateBias.resize(c.nLayers);
     moeSEUpGate.resize(c.nLayers);
-    moeSEUpGateScale.resize(c.nLayers);
     moeSEDown.resize(c.nLayers);
-    moeSEDownScale.resize(c.nLayers);
     moeREUpGate.resize(c.nLayers);
     moeREUpGateScale.resize(c.nLayers);
     moeREDown.resize(c.nLayers);
@@ -56,15 +46,6 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
         moeREDown[i].resize(c.nRoutedExperts);
     }
 
-    // quantization
-    attnOutInputScale.resize(c.nLayers);
-    attnOutInputOffset.resize(c.nLayers);
-    attnOutQuantBias.resize(c.nLayers);
-    attnOutDeqScale.resize(c.nLayers);
-    mhaQKVInputScale.resize(c.nLayers);
-    mhaQKVInputOffset.resize(c.nLayers);
-    mhaQKVQuantBias.resize(c.nLayers);
-    mhaQKVDeqScale.resize(c.nLayers);
     attnNormBias.resize(c.nLayers);
     mhaQNormBias.resize(c.nLayers);
     mhaKNormBias.resize(c.nLayers);
@@ -206,18 +187,18 @@ void XModel::Init(void)
         }
     }
 
-    if (_c.nSharedExperts != 0 && !moeSEUpGate[_c.nDenseLayers].shape.empty() &&
-        !moeSEDown[_c.nDenseLayers].shape.empty()) {
-        if (_c.quantAttnWeightTrans) {
+    if (_c.nSharedExperts != 0 && !moeSEUpGate[_c.nDenseLayers].weight.shape.empty() &&
+        !moeSEDown[_c.nDenseLayers].weight.shape.empty()) {
+        if (moeSEUpGate[_c.nDenseLayers].IsTransposed()) {
             _isSharedExpertWeightFull =
-                moeSEUpGate[_c.nDenseLayers].shape.size() >= 2 &&
-                moeSEUpGate[_c.nDenseLayers].shape[1] == _c.moeIntermediateSize * 2 &&
-                moeSEDown[_c.nDenseLayers].shape[0] == _c.moeIntermediateSize;
+                moeSEUpGate[_c.nDenseLayers].weight.shape.size() >= 2 &&
+                moeSEUpGate[_c.nDenseLayers].weight.shape[1] == _c.moeIntermediateSize * 2 &&
+                moeSEDown[_c.nDenseLayers].weight.shape[0] == _c.moeIntermediateSize;
         } else {
             _isSharedExpertWeightFull =
-                moeSEDown[_c.nDenseLayers].shape.size() >= 2 &&
-                moeSEUpGate[_c.nDenseLayers].shape[0] == _c.moeIntermediateSize * 2 &&
-                moeSEDown[_c.nDenseLayers].shape[1] == _c.moeIntermediateSize;
+                moeSEDown[_c.nDenseLayers].weight.shape.size() >= 2 &&
+                moeSEUpGate[_c.nDenseLayers].weight.shape[0] == _c.moeIntermediateSize * 2 &&
+                moeSEDown[_c.nDenseLayers].weight.shape[1] == _c.moeIntermediateSize;
         }
     }
 }
@@ -259,6 +240,52 @@ void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, 
     XliteOpEmbed(rt, input, embed, start, end, output);
     if (_c.defTpSize > 1) {
         XliteOpAllReduceSum(rt, output, output, TP);
+    }
+}
+
+// TODO: optimize XTensor allocation and release order
+void XModel::ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x,
+                           std::vector<MatmulWeight> &weights, XTensor &out,
+                           const std::vector<XTensor> &weightBias)
+{
+    MatmulWeight &w = weights[layer];
+    enum QuantType quantType = w.GetQuantType();
+    bool isNz = _c.weightNZ || w.IsNzFormat();
+    bool isTransposed = _c.quantAttnWeightTrans || w.IsTransposed();
+
+    if (quantType == NO_QUANT) {
+        if (layer < weightBias.size()) {
+            XliteOpMatmul(rt, x, w.weight, out, isNz, weightBias[layer]);
+        } else {
+            XliteOpMatmul(rt, x, w.weight, out, isNz);
+        }
+        return;
+    }
+
+    XTensor &xQuanted = rt.GetTensor(x.shape, INT8, DBG_LOC);
+    XTensor &outQuanted = rt.GetTensor(out.shape, FP16, DBG_LOC);
+    if (quantType == DYNAMIC_QUANT) {
+        // quant(x) -> xQuanted, perChannelScale
+        XTensor &scale = rt.GetTensor({x.shape[0]}, FP32, DBG_LOC);
+        XliteOpQuantDyn(rt, x, scale, xQuanted);
+        // matmul(xQuanted, weight, quantBias, deqScale) -> outQuanted
+        XliteOpMatmul(rt, xQuanted, w.weight, outQuanted, isNz, w.quantBias, w.deqScale,
+                      isTransposed);
+        rt.PutTensor(xQuanted);
+        // dequant(outQuanted, perChannelScale) -> out
+        XliteOpDeQuant(rt, outQuanted, out, scale);
+        rt.PutTensor(outQuanted);
+        rt.PutTensor(scale);
+    } else {
+        // quant(x) -> xQuanted
+        XliteOpQuant(rt, x, w.inputScale, w.inputOffset, xQuanted);
+        // matmul(xQuanted, weight, quantBias, deqScale) -> outQuanted
+        XliteOpMatmul(rt, xQuanted, w.weight, outQuanted, isNz, w.quantBias, w.deqScale,
+                      isTransposed);
+        rt.PutTensor(xQuanted);
+        // dequant(outQuanted) -> out
+        XliteOpDeQuant(rt, outQuanted, out);
+        rt.PutTensor(outQuanted);
     }
 }
 
@@ -411,7 +438,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     }
     rt.PutTensor(attnQWithQr);
 
-    XliteOpMatmul(rt, attnOutput, attnOut[layer], hiddenState, _c.weightNZ);
+    XliteOpMatmul(rt, attnOutput, attnOut[layer].weight, hiddenState, _c.weightNZ);
 
     if (_c.defTpSize > 1) {
         if (rt.multiTaskParallel) {
@@ -437,30 +464,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 
     XTensor &qkv = rt.GetTensor({hiddenState.shape[0], (qHeads + 2 * kHeads) * _c.headDim},
                                 hiddenState.dtype, DBG_LOC);
-    if (mhaQKV[layer].dtype == INT8) {
-        XTensor &xQuanted = rt.GetTensor(hiddenState.shape, INT8, DBG_LOC);
-        XTensor &qkvFp16 = rt.GetTensor(qkv.shape, FP16, DBG_LOC);
-        if (mhaQKVInputScale[layer].ptr == nullptr) {
-            XTensor &scale = rt.GetTensor({hiddenState.shape[0]}, FP32, DBG_LOC);
-            XliteOpQuantDyn(rt, hiddenState, scale, xQuanted);
-            XliteOpMatmul(rt, xQuanted, mhaQKV[layer], qkvFp16, _c.weightNZ || _c.quantAttnWeightNz,
-                          mhaQKVQuantBias[layer], mhaQKVDeqScale[layer], _c.quantAttnWeightTrans);
-            XliteOpDeQuant(rt, qkvFp16, qkv, true, scale);
-            rt.PutTensor(scale);
-        } else {
-            XliteOpQuant(rt, hiddenState, mhaQKVInputScale[layer], mhaQKVInputOffset[layer],
-                         xQuanted);
-            XliteOpMatmul(rt, xQuanted, mhaQKV[layer], qkvFp16, _c.weightNZ || _c.quantAttnWeightNz,
-                          mhaQKVQuantBias[layer], mhaQKVDeqScale[layer], _c.quantAttnWeightTrans);
-            XliteOpDeQuant(rt, qkvFp16, qkv);
-        }
-        rt.PutTensor(xQuanted);
-        rt.PutTensor(qkvFp16);
-    } else if (_c.addBias) {
-        XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ, mhaQKVBias[layer]);
-    } else {
-        XliteOpMatmul(rt, hiddenState, mhaQKV[layer], qkv, _c.weightNZ);
-    }
+    ForwardLinear(rt, layer, hiddenState, mhaQKV, qkv, mhaQKVBias);
     if (_c.qkNorm && !_c.qkNormFull) {
         XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, true,
                        mhaQNormBias[layer], qHeads);
@@ -536,29 +540,8 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         rt.PutTensor(qk);
     }
 
-    if (attnOut[layer].dtype == INT8) {
-        XTensor &attnQuant = rt.GetTensor(attn.shape, INT8, DBG_LOC);
-        XTensor &tmpState = rt.GetTensor(hiddenState.shape, FP16, DBG_LOC);
-        if (attnOutInputScale[layer].ptr == nullptr) {
-            XTensor &scale = rt.GetTensor({attn.shape[0]}, FP32, DBG_LOC);
-            XliteOpQuantDyn(rt, attn, scale, attnQuant);
-            XliteOpMatmul(rt, attnQuant, attnOut[layer], tmpState,
-                          _c.weightNZ || _c.quantAttnWeightNz, attnOutQuantBias[layer],
-                          attnOutDeqScale[layer], _c.quantAttnWeightTrans);
-            XliteOpDeQuant(rt, tmpState, hiddenState, true, scale);
-            rt.PutTensor(scale);
-        } else {
-            XliteOpQuant(rt, attn, attnOutInputScale[layer], attnOutInputOffset[layer], attnQuant);
-            XliteOpMatmul(rt, attnQuant, attnOut[layer], tmpState,
-                          _c.weightNZ || _c.quantAttnWeightNz, attnOutQuantBias[layer],
-                          attnOutDeqScale[layer], _c.quantAttnWeightTrans);
-            XliteOpDeQuant(rt, tmpState, hiddenState);
-        }
-        rt.PutTensor(attnQuant);
-        rt.PutTensor(tmpState);
-    } else {
-        XliteOpMatmul(rt, attn, attnOut[layer], hiddenState, _c.weightNZ);
-    }
+    ForwardLinear(rt, layer, attn, attnOut, hiddenState);
+
     if (_c.defTpSize > 1) {
         if (rt.multiTaskParallel) {
             rt.NotifyRecordPeerStream();
@@ -585,78 +568,19 @@ void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<X
     }
 }
 
-void XModel::ForwardMLP(XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &hiddenState,
-                        bool withAllReduce, const XTensor &upGateInputScale,
-                        const XTensor &upGateInputOffset, const XTensor &upGateQuantBias,
-                        const XTensor &upGateDeqScale, const XTensor &downInputScale,
-                        const XTensor &downInputOffset, const XTensor &downQuantBias,
-                        const XTensor &downDeqScale)
+void XModel::ForwardMLP(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                        std::vector<MatmulWeight> &upGate, std::vector<MatmulWeight> &down,
+                        bool withAllReduce)
 {
-    uint32_t m = hiddenState.shape[0], k = hiddenState.shape[1];
-    uint32_t localIntermediateSize = (down.shape[0] == k) ? down.shape[1] : down.shape[0];
+    size_t m = hiddenState.shape[0], k = hiddenState.shape[1];
+    std::vector<size_t> &downShape = down[layer].weight.shape;
+    size_t localIntermediateSize = (downShape[0] == k) ? downShape[1] : downShape[0];
     XTensor &h13 = rt.GetTensor({m, localIntermediateSize * 2}, hiddenState.dtype, DBG_LOC);
     XTensor &h2 = rt.GetTensor({m, localIntermediateSize}, hiddenState.dtype, DBG_LOC);
 
-    if (upGate.dtype == INT8) {
-        if (upGateInputScale.ptr == nullptr) {
-            XTensor &xQuanted = rt.GetTensor(hiddenState.shape, INT8, DBG_LOC);
-            XTensor &scale = rt.GetTensor({hiddenState.shape[0]}, FP32, DBG_LOC);
-            XliteOpQuantDyn(rt, hiddenState, scale, xQuanted);
-            XTensor &outFp16 = rt.GetTensor(h13.shape, FP16, DBG_LOC);
-            XliteOpMatmul(rt, xQuanted, upGate, outFp16, _c.weightNZ || _c.quantAttnWeightNz,
-                          upGateQuantBias, upGateDeqScale, _c.quantAttnWeightTrans);
-            XliteOpDeQuant(rt, outFp16, h13, true, scale);
-            rt.PutTensor(outFp16);
-            rt.PutTensor(scale);
-            rt.PutTensor(xQuanted);
-        } else {
-            XTensor &xQuanted = rt.GetTensor(hiddenState.shape, INT8, DBG_LOC);
-            XTensor upScale = upGateInputScale, upOff = upGateInputOffset, upBias = upGateQuantBias,
-                    upDeq = upGateDeqScale;
-
-            XliteOpQuant(rt, hiddenState, upScale, upOff, xQuanted);
-            XTensor &outFp16 = rt.GetTensor(h13.shape, FP16, DBG_LOC);
-            XliteOpMatmul(rt, xQuanted, upGate, outFp16, _c.weightNZ || _c.quantAttnWeightNz,
-                          upBias, upDeq, _c.quantAttnWeightTrans);
-            rt.PutTensor(xQuanted);
-            XliteOpDeQuant(rt, outFp16, h13);
-            rt.PutTensor(outFp16);
-        }
-    } else {
-        XliteOpMatmul(rt, hiddenState, upGate, h13, _c.weightNZ);
-    }
-
+    ForwardLinear(rt, layer, hiddenState, upGate, h13);
     XliteOpSiluAndMul(rt, h13, h2);
-    if (down.dtype == INT8) {
-        if (downInputScale.ptr == nullptr) {
-            XTensor &xQuanted = rt.GetTensor(h2.shape, INT8, DBG_LOC);
-            XTensor &scale = rt.GetTensor({h2.shape[0]}, FP32, DBG_LOC);
-            XliteOpQuantDyn(rt, h2, scale, xQuanted);
-            XTensor &outFp16 = rt.GetTensor(hiddenState.shape, FP16, DBG_LOC);
-            XliteOpMatmul(rt, xQuanted, down, outFp16, _c.weightNZ || _c.quantAttnWeightNz,
-                          downQuantBias, downDeqScale, _c.quantAttnWeightTrans);
-            XliteOpDeQuant(rt, outFp16, hiddenState, true, scale);
-            rt.PutTensor(outFp16);
-            rt.PutTensor(scale);
-            rt.PutTensor(xQuanted);
-        } else {
-            XTensor downScale = downInputScale, downOff = downInputOffset, downBias = downQuantBias,
-                    downDeq = downDeqScale;
-
-            XTensor &xQuanted = rt.GetTensor(h2.shape, INT8, DBG_LOC);
-            XliteOpQuant(rt, h2, downScale, downOff, xQuanted);
-
-            XTensor &outFp16 = rt.GetTensor(hiddenState.shape, FP16, DBG_LOC);
-            XliteOpMatmul(rt, xQuanted, down, outFp16, _c.weightNZ || _c.quantAttnWeightNz,
-                          downBias, downDeq, _c.quantAttnWeightTrans);
-            rt.PutTensor(xQuanted);
-
-            XliteOpDeQuant(rt, outFp16, hiddenState);
-            rt.PutTensor(outFp16);
-        }
-    } else {
-        XliteOpMatmul(rt, h2, down, hiddenState, _c.weightNZ);
-    }
+    ForwardLinear(rt, layer, h2, down, hiddenState);
 
     if (withAllReduce && _c.defTpSize > 1) {
         if (rt.multiTaskParallel) {
@@ -826,7 +750,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
         // dequant(h13Quanted, perChannelScale) -> h13
         XTensor &h13 = rt.GetTensor(h13Quanted.shape, dtype, DBG_LOC);
-        XliteOpDeQuant(rt, h13Quanted, h13, true, scale, num);
+        XliteOpDeQuant(rt, h13Quanted, h13, scale, num);
         rt.PutTensor(h13Quanted);
         rt.PutTensor(scale);
         h13Ptr = &h13;
@@ -863,7 +787,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
         // dequant(outQuanted, perChannelScale) -> out
         XTensor &out = rt.GetTensor(outQuanted.shape, dtype, DBG_LOC);
-        XliteOpDeQuant(rt, outQuanted, out, true, scale, num);
+        XliteOpDeQuant(rt, outQuanted, out, scale, num);
         rt.PutTensor(outQuanted);
         rt.PutTensor(scale);
         outPtr = &out;
@@ -886,9 +810,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         XTensor &h = rt.GetTensor({m, _c.hiddenSize}, dtype, DBG_LOC);
         ForwardMOECombine(rt, h, weights, routing, unpIdx, *outPtr, expertsCounts);
         // share experts
-        ForwardMLP(rt, moeSEUpGate[layer], moeSEDown[layer], hiddenState, false, XTensor(),
-                   XTensor(), XTensor(), moeSEUpGateScale[layer], XTensor(), XTensor(), XTensor(),
-                   moeSEDownScale[layer]);
+        ForwardMLP(rt, layer, hiddenState, moeSEUpGate, moeSEDown, false);
         XliteOpAdd(rt, hiddenState, h, hiddenState);
         rt.PutTensor(h);
     } else {
@@ -910,10 +832,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 {
     if (layer < _c.nDenseLayers) {
-        ForwardMLP(rt, mlpUpGate[layer], mlpDown[layer], hiddenState, true,
-                   mlpUpGateInputScale[layer], mlpUpGateInputOffset[layer],
-                   mlpUpGateQuantBias[layer], mlpUpGateDeqScale[layer], mlpDownInputScale[layer],
-                   mlpDownInputOffset[layer], mlpDownQuantBias[layer], mlpDownDeqScale[layer]);
+        ForwardMLP(rt, layer, hiddenState, mlpUpGate, mlpDown, true);
     } else {
         ForwardMoE(rt, layer, hiddenState);
     }

@@ -113,17 +113,9 @@ public:
 
     std::vector<XTensor> attnNorm;
     std::vector<XTensor> attnNormBias;
-    std::vector<XTensor> attnOut;
-    std::vector<XTensor> attnOutInputScale;
-    std::vector<XTensor> attnOutInputOffset;
-    std::vector<XTensor> attnOutQuantBias;
-    std::vector<XTensor> attnOutDeqScale;
-    std::vector<XTensor> mhaQKV;
+    std::vector<MatmulWeight> attnOut;
+    std::vector<MatmulWeight> mhaQKV;
     std::vector<XTensor> mhaQKVBias;
-    std::vector<XTensor> mhaQKVInputScale;
-    std::vector<XTensor> mhaQKVInputOffset;
-    std::vector<XTensor> mhaQKVQuantBias;
-    std::vector<XTensor> mhaQKVDeqScale;
     std::vector<XTensor> mhaQNorm;
     std::vector<XTensor> mhaQNormBias;
     std::vector<XTensor> mhaKNorm;
@@ -142,23 +134,13 @@ public:
 
     std::vector<XTensor> mlpNorm;
     std::vector<XTensor> mlpNormBias;
-    std::vector<XTensor> mlpUpGate;
-    std::vector<XTensor> mlpUpGateInputScale;
-    std::vector<XTensor> mlpUpGateInputOffset;
-    std::vector<XTensor> mlpUpGateQuantBias;
-    std::vector<XTensor> mlpUpGateDeqScale;
-    std::vector<XTensor> mlpDown;
-    std::vector<XTensor> mlpDownInputScale;
-    std::vector<XTensor> mlpDownInputOffset;
-    std::vector<XTensor> mlpDownQuantBias;
-    std::vector<XTensor> mlpDownDeqScale;
+    std::vector<MatmulWeight> mlpUpGate;
+    std::vector<MatmulWeight> mlpDown;
 
     std::vector<XTensor> moeGate;
     std::vector<XTensor> moeGateBias;
-    std::vector<XTensor> moeSEUpGate;
-    std::vector<XTensor> moeSEUpGateScale;
-    std::vector<XTensor> moeSEDown;
-    std::vector<XTensor> moeSEDownScale;
+    std::vector<MatmulWeight> moeSEUpGate;
+    std::vector<MatmulWeight> moeSEDown;
     std::vector<std::vector<XTensor>> moeREUpGate;
     std::vector<std::vector<XTensor>> moeREUpGateScale;
     std::vector<std::vector<XTensor>> moeREDown;
@@ -178,12 +160,9 @@ private:
                         XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                      XTensor &freqsCis, XTensor &hiddenState);
-    void ForwardMLP(
-        XRuntime &rt, XTensor &upGate, XTensor &down, XTensor &hiddenState, bool withAllReduce,
-        const XTensor &upGateInputScale = XTensor(), const XTensor &upGateInputOffset = XTensor(),
-        const XTensor &upGateQuantBias = XTensor(), const XTensor &upGateDeqScale = XTensor(),
-        const XTensor &downInputScale = XTensor(), const XTensor &downInputOffset = XTensor(),
-        const XTensor &downQuantBias = XTensor(), const XTensor &downDeqScale = XTensor());
+    void ForwardMLP(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                    std::vector<MatmulWeight> &upGate, std::vector<MatmulWeight> &down,
+                    bool withAllReduce);
     std::tuple<XTensor &, XTensor &> ForwardMoEGate(XRuntime &rt, uint32_t layer, XTensor &input);
     std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> ForwardMoEDispatch(
         XRuntime &rt, XTensor &tokenSorted, XTensor &weights, XTensor &routing);
@@ -205,6 +184,9 @@ private:
                                    std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                    XTensor &output);
     void CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &kvCache);
+    void ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x, std::vector<MatmulWeight> &weights,
+                       XTensor &out, const std::vector<XTensor> &weightBias = {});
+
     struct XModelConfig _c;
     uint32_t _rankId;
 

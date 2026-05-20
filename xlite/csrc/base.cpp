@@ -491,3 +491,40 @@ bool XDummyTensorPool::TensorInPool(XTensor &t)
 {
     return t.type == XTENSOR_DYNAMIC;
 }
+
+enum QuantType MatmulWeight::GetQuantType()
+{
+    if (quantType != UNKONOWN_QUANT) {
+        return quantType;
+    }
+
+    // Note: some ranks may not have quantBias
+    if (weight.dtype != INT8) {
+        quantType = NO_QUANT;
+    } else if (inputScale.ptr && inputOffset.ptr && deqScale.ptr) {
+        quantType = STATIC_QUANT;
+    } else if (!inputScale.ptr && !inputOffset.ptr && deqScale.ptr) {
+        quantType = DYNAMIC_QUANT;
+    } else {
+        std::string errStr = DBG_PREFIX + name + " gets invalid matmul weights: " + XT_STR(weight) +
+                             XT_STR(quantBias) + XT_STR(deqScale) + XT_STR(inputScale) +
+                             XT_STR(inputOffset);
+        throw std::invalid_argument(errStr);
+    }
+    return quantType;
+}
+
+bool MatmulWeight::IsQuanted()
+{
+    return GetQuantType() >= STATIC_QUANT;
+}
+
+bool MatmulWeight::IsTransposed()
+{
+    return IsQuanted();
+}
+
+bool MatmulWeight::IsNzFormat()
+{
+    return IsQuanted();
+}
