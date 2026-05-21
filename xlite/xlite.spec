@@ -1,5 +1,5 @@
 Name:           xlite
-Version:        0.1.0rc8
+Version:        0.1.0rc9
 Release:        1%{?dist}
 Summary:        A lightweight, effective and easy-to-extend inference runtime
 
