@@ -34,13 +34,13 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     moeSEUpGate.resize(c.nLayers);
     moeSEDown.resize(c.nLayers);
     moeREUpGate.resize(c.nLayers);
-    moeREUpGateScale.resize(c.nLayers);
+    moeREUpGateDeqScale.resize(c.nLayers);
     moeREDown.resize(c.nLayers);
-    moeREDownScale.resize(c.nLayers);
+    moeREDownDeqScale.resize(c.nLayers);
     _moeREUpGate.resize(c.nLayers);
-    _moeREUpGateScale.resize(c.nLayers);
+    _moeREUpGateDeqScale.resize(c.nLayers);
     _moeREDown.resize(c.nLayers);
-    _moeREDownScale.resize(c.nLayers);
+    _moeREDownDeqScale.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
         moeREUpGate[i].resize(c.nRoutedExperts);
         moeREDown[i].resize(c.nRoutedExperts);
@@ -51,8 +51,8 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mhaKNormBias.resize(c.nLayers);
     mlpNormBias.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
-        moeREUpGateScale[i].resize(c.nRoutedExperts);
-        moeREDownScale[i].resize(c.nRoutedExperts);
+        moeREUpGateDeqScale[i].resize(c.nRoutedExperts);
+        moeREDownDeqScale[i].resize(c.nRoutedExperts);
     }
 }
 
@@ -104,7 +104,7 @@ void XModel::Init(void)
         isWeightEmpty = true;
         for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
             if (j >= start && j < end) {
-                weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScale[i][j].ptr);
+                weights[j] = reinterpret_cast<uint64_t>(moeREUpGateDeqScale[i][j].ptr);
                 if (weights[j] != 0) {
                     isWeightEmpty = false;
                 }
@@ -115,13 +115,13 @@ void XModel::Init(void)
         if (!isWeightEmpty) {
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-            _moeREUpGateScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
+            _moeREUpGateDeqScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
         }
 
         isWeightEmpty = true;
         for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
             if (j >= start && j < end) {
-                weights[j] = reinterpret_cast<uint64_t>(moeREDownScale[i][j].ptr);
+                weights[j] = reinterpret_cast<uint64_t>(moeREDownDeqScale[i][j].ptr);
                 if (weights[j] != 0) {
                     isWeightEmpty = false;
                 }
@@ -133,7 +133,7 @@ void XModel::Init(void)
         if (!isWeightEmpty) {
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-            _moeREDownScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
+            _moeREDownDeqScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
         }
     }
 
@@ -214,9 +214,9 @@ XModel::~XModel(void)
     }
     for (uint32_t i = _c.nDenseLayers; i < _c.nLayers; i++) {
         (void)aclrtFree(_moeREUpGate[i].ptr);
-        (void)aclrtFree(_moeREUpGateScale[i].ptr);
+        (void)aclrtFree(_moeREUpGateDeqScale[i].ptr);
         (void)aclrtFree(_moeREDown[i].ptr);
-        (void)aclrtFree(_moeREDownScale[i].ptr);
+        (void)aclrtFree(_moeREDownDeqScale[i].ptr);
     }
 
     if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
@@ -742,7 +742,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         // group_matmul(xQuanted * w13 * w13Scale) -> h13Quanted
         XTensor &h13Quanted =
             rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, FP16, DBG_LOC);
-        XliteOpGroupMatmul(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateScale[layer],
+        XliteOpGroupMatmul(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateDeqScale[layer],
                            expertsCounts, start, end, moeREUpGate[layer][start].dtype,
                            intermediateSize * 2, _c.hiddenSize, h13Quanted,
                            _c.weightNZ || _c.expertsWeightNZ, _c.expertsWeightTrans);
@@ -757,7 +757,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     } else {
         XTensor &h13 =
             rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, dtype, DBG_LOC);
-        XliteOpGroupMatmul(rt, expertsSorted, _moeREUpGate[layer], _moeREUpGateScale[layer],
+        XliteOpGroupMatmul(rt, expertsSorted, _moeREUpGate[layer], _moeREUpGateDeqScale[layer],
                            expertsCounts, start, end, moeREUpGate[layer][start].dtype,
                            intermediateSize * 2, _c.hiddenSize, h13,
                            _c.weightNZ || _c.expertsWeightNZ, _c.expertsWeightTrans);
@@ -779,8 +779,8 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
         // group_matmul(xQuanted * w2 * w2Scale) -> outQuanted
         XTensor &outQuanted = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, FP16, DBG_LOC);
-        XliteOpGroupMatmul(rt, xQuanted, _moeREDown[layer], _moeREDownScale[layer], expertsCounts,
-                           start, end, moeREDown[layer][start].dtype, _c.hiddenSize,
+        XliteOpGroupMatmul(rt, xQuanted, _moeREDown[layer], _moeREDownDeqScale[layer],
+                           expertsCounts, start, end, moeREDown[layer][start].dtype, _c.hiddenSize,
                            intermediateSize, outQuanted, _c.weightNZ || _c.expertsWeightNZ,
                            _c.expertsWeightTrans);
         rt.PutTensor(xQuanted);
@@ -793,9 +793,10 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         outPtr = &out;
     } else {
         XTensor &out = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, dtype, DBG_LOC);
-        XliteOpGroupMatmul(rt, h2, _moeREDown[layer], _moeREDownScale[layer], expertsCounts, start,
-                           end, moeREDown[layer][start].dtype, _c.hiddenSize, intermediateSize, out,
-                           _c.weightNZ || _c.expertsWeightNZ, _c.expertsWeightTrans);
+        XliteOpGroupMatmul(rt, h2, _moeREDown[layer], _moeREDownDeqScale[layer], expertsCounts,
+                           start, end, moeREDown[layer][start].dtype, _c.hiddenSize,
+                           intermediateSize, out, _c.weightNZ || _c.expertsWeightNZ,
+                           _c.expertsWeightTrans);
         rt.PutTensor(h2);
         outPtr = &out;
     }

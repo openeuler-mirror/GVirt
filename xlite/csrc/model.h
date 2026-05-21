@@ -142,9 +142,9 @@ public:
     std::vector<MatmulWeight> moeSEUpGate;
     std::vector<MatmulWeight> moeSEDown;
     std::vector<std::vector<XTensor>> moeREUpGate;
-    std::vector<std::vector<XTensor>> moeREUpGateScale;
+    std::vector<std::vector<XTensor>> moeREUpGateDeqScale;
     std::vector<std::vector<XTensor>> moeREDown;
-    std::vector<std::vector<XTensor>> moeREDownScale;
+    std::vector<std::vector<XTensor>> moeREDownDeqScale;
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
@@ -193,9 +193,9 @@ private:
     // FFN
     XTensor _gateIndices;
     std::vector<XTensor> _moeREUpGate;
-    std::vector<XTensor> _moeREUpGateScale;
+    std::vector<XTensor> _moeREUpGateDeqScale;
     std::vector<XTensor> _moeREDown;
-    std::vector<XTensor> _moeREDownScale;
+    std::vector<XTensor> _moeREDownDeqScale;
     bool _isSharedExpertWeightFull = false;
 
     // ATTN
