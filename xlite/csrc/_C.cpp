@@ -100,13 +100,13 @@ public:
     std::vector<at::Tensor> moeGate;
     std::vector<at::Tensor> moeGateBias;
     std::vector<at::Tensor> moeSEUpGate;
-    std::vector<at::Tensor> moeSEUpGateScale;
+    std::vector<at::Tensor> moeSEUpGateDeqScale;
     std::vector<at::Tensor> moeSEDown;
-    std::vector<at::Tensor> moeSEDownScale;
+    std::vector<at::Tensor> moeSEDownDeqScale;
     std::vector<at::Tensor> moeREUpGate;
-    std::vector<at::Tensor> moeREUpGateScale;
+    std::vector<at::Tensor> moeREUpGateDeqScale;
     std::vector<at::Tensor> moeREDown;
-    std::vector<at::Tensor> moeREDownScale;
+    std::vector<at::Tensor> moeREDownDeqScale;
 
 private:
     XModel *_model = nullptr;
@@ -368,11 +368,12 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             "Mismatched number of moe layers with shared experts parameters");
     }
 
-    if (c.nSharedExperts != 0 &&
-        ((!moeSEUpGateScale.empty() && moeSEUpGateScale.size() != (c.nLayers - c.nDenseLayers)) ||
-         (!moeSEDownScale.empty() && moeSEDownScale.size() != (c.nLayers - c.nDenseLayers)))) {
+    if (c.nSharedExperts != 0 && ((!moeSEUpGateDeqScale.empty() &&
+                                   moeSEUpGateDeqScale.size() != (c.nLayers - c.nDenseLayers)) ||
+                                  (!moeSEDownDeqScale.empty() &&
+                                   moeSEDownDeqScale.size() != (c.nLayers - c.nDenseLayers)))) {
         std::cerr << __FILE__ << ":" << __LINE__
-                  << ": num of moe layers: " << moeSEUpGateScale.size() << std::endl;
+                  << ": num of moe layers: " << moeSEUpGateDeqScale.size() << std::endl;
         throw std::invalid_argument(
             "Mismatched number of moe layers with shared experts quantization parameters");
     }
@@ -448,20 +449,20 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         std::vector<at::Tensor> emptyWeights = {};
         if (c.nSharedExperts != 0) {
             InitMatmulWeight("moeSEUpGate", moeSEUpGate, emptyWeights, emptyWeights, emptyWeights,
-                             moeSEUpGateScale, _model->moeSEUpGate, i, false, tpRank,
+                             moeSEUpGateDeqScale, _model->moeSEUpGate, i, false, tpRank,
                              c.nDenseLayers);
             InitMatmulWeight("moeSEDown", moeSEDown, emptyWeights, emptyWeights, emptyWeights,
-                             moeSEDownScale, _model->moeSEDown, i, true, tpRank, c.nDenseLayers);
+                             moeSEDownDeqScale, _model->moeSEDown, i, true, tpRank, c.nDenseLayers);
         }
 
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
             InitXTensor(_model->moeREUpGate[i][j], moeREUpGate[idx]);
             InitXTensor(_model->moeREDown[i][j], moeREDown[idx]);
-            if (!moeREUpGateScale.empty()) {
-                InitXTensor(_model->moeREUpGateScale[i][j], moeREUpGateScale[idx]);
+            if (!moeREUpGateDeqScale.empty()) {
+                InitXTensor(_model->moeREUpGateDeqScale[i][j], moeREUpGateDeqScale[idx]);
             }
-            if (!moeREDownScale.empty()) {
-                InitXTensor(_model->moeREDownScale[i][j], moeREDownScale[idx]);
+            if (!moeREDownDeqScale.empty()) {
+                InitXTensor(_model->moeREDownDeqScale[i][j], moeREDownDeqScale[idx]);
             }
             idx++;
         }
@@ -1526,13 +1527,15 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("gate", &_CModel::moeGate)
         .def_readwrite("gate_bias", &_CModel::moeGateBias)
         .def_readwrite("se_up_gate", &_CModel::moeSEUpGate)
-        .def_readwrite("se_up_gate_scale", &_CModel::moeSEUpGateScale)
+        .def_readwrite("se_up_gate_deq_scale", &_CModel::moeSEUpGateDeqScale)
         .def_readwrite("se_down", &_CModel::moeSEDown)
-        .def_readwrite("se_down_scale", &_CModel::moeSEDownScale)
+        .def_readwrite("se_down_deq_scale", &_CModel::moeSEDownDeqScale)
         .def_readwrite("re_up_gate", &_CModel::moeREUpGate)
-        .def_readwrite("re_up_gate_scale", &_CModel::moeREUpGateScale)
+        .def_readwrite("re_up_gate_scale", &_CModel::moeREUpGateDeqScale)
+        .def_readwrite("re_up_gate_deq_scale", &_CModel::moeREUpGateDeqScale)
         .def_readwrite("re_down", &_CModel::moeREDown)
-        .def_readwrite("re_down_scale", &_CModel::moeREDownScale)
+        .def_readwrite("re_down_scale", &_CModel::moeREDownDeqScale)
+        .def_readwrite("re_down_deq_scale", &_CModel::moeREDownDeqScale)
         .def("init", &_CModel::Init, "model init", py::arg("config"), py::arg("rank") = 0)
         .def("forward", &_CModel::Forward, "forward", py::arg("rt"), py::arg("input"),
              py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
