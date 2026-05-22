@@ -16,6 +16,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+import torch_npu
 
 from tests.models.deepseek_kernel import weight_dequant
 from tests.models.weight_utils import (hf_model_weights_iterator,
@@ -107,7 +108,7 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.
-    quantization: str = "none"
+    quantization: Literal["none", "experts_int8", "w8a8"] = "none"
     moe_ep_size: int = 1
     moe_tp_size: int = 1
     model_type: Literal["deepseek_v3", "deepseek_v32", "glm5"] = "deepseek_v3"
@@ -163,6 +164,20 @@ class ParallelEmbedding(nn.Module):
         return y
 
 
+def quantize_npu(
+    x: torch.Tensor,
+    input_scale_reciprocal: torch.Tensor,
+    aclnn_input_offset: torch.Tensor,
+) -> torch.Tensor:
+    """NPU INT8 activation quantization: q = clamp(round(x / scale + offset), -128, 127)."""
+    x_fp32 = x.float()
+    scale_fp32 = input_scale_reciprocal.float()
+    offset_fp32 = aclnn_input_offset.float()
+    x_quant_fp32 = torch.round(x_fp32 / scale_fp32 + offset_fp32)
+    x_quant_fp32 = torch.clamp(x_quant_fp32, -128.0, 127.0)
+    return x_quant_fp32.to(torch.int8)
+
+
 def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
     Applies a linear transformation to the incoming data: y = xA^T + b.
@@ -182,8 +197,28 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
     Notes:
         - If `weight` is quantized (e.g., `element_size() == 1`), dequantization and a `bf16` GEMM operation are applied.
         - If `gemm_impl == "bf16"`, a `bf16` GEMM operation are applied.
+        - If `weight` has static quantization parameters (input_scale, input_offset, quant_bias, deq_scale),
+          uses `quantize_npu` + `torch_npu.npu_quant_matmul` for static quantization.
     """
     assert gemm_impl == "bf16"
+
+    if hasattr(weight, 'input_scale') and weight.input_scale is not None:
+        x_int8 = quantize_npu(x, weight.input_scale, weight.input_offset)
+        weight_T = weight.T.contiguous()
+        deq_scale = weight.scale.squeeze(-1).float()
+        quant_bias_to_add = weight.quant_bias if rank == 0 else None
+
+        out = torch_npu.npu_quant_matmul(
+            x_int8, weight_T,
+            deq_scale,
+            bias=quant_bias_to_add,
+            output_dtype=torch.bfloat16
+        )
+
+        if bias is not None:
+            out = out + bias.view(1, -1)
+        return out
+
     if weight.element_size() > 1:
         return F.linear(x, weight, bias)
     else:
@@ -200,10 +235,12 @@ class Linear(nn.Module):
         out_features (int): Number of output features.
         bias (bool): Whether to include a bias term. Defaults to False.
         dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
+        static_quant (bool): Whether to use static quantization. Defaults to False.
+            Only applicable when weight is int8 (element_size() == 1).
     """
     dtype = torch.bfloat16
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -212,6 +249,11 @@ class Linear(nn.Module):
             self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32))
             if forward_backend == "xlite":
                 self.weight.xlite_scale = torch.zeros(out_features * 2, 1, dtype=torch.float32)
+
+            if static_quant:
+                self.weight.input_scale = self.input_scale = nn.Parameter(torch.empty(in_features, dtype=torch.bfloat16), requires_grad=False)
+                self.weight.input_offset = self.input_offset = nn.Parameter(torch.empty(in_features, dtype=torch.bfloat16), requires_grad=False)
+                self.weight.quant_bias = self.quant_bias = nn.Parameter(torch.empty(out_features, dtype=torch.int32), requires_grad=False)
         else:
             self.register_parameter("scale", None)
         if bias:
@@ -241,11 +283,13 @@ class ColumnParallelLinear(Linear):
         out_features (int): Total number of output features.
         bias (bool): Whether to include a bias term. Defaults to False.
         dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
+        static_quant (bool): Whether to use static quantization. Defaults to False.
+            Only applicable when weight is int8 (element_size() == 1).
     """
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False):
         assert out_features % world_size == 0, f"Output features must be divisible by world size (world_size={world_size})"
         self.part_out_features = out_features // world_size
-        super().__init__(in_features, self.part_out_features, bias, dtype)
+        super().__init__(in_features, self.part_out_features, bias, dtype, static_quant)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -270,11 +314,13 @@ class RowParallelLinear(Linear):
         out_features (int): Number of output features.
         bias (bool): Whether to include a bias term. Defaults to False.
         dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
+        static_quant (bool): Whether to use static quantization. Defaults to False.
+            Only applicable when weight is int8 (element_size() == 1).
     """
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False):
         assert in_features % world_size == 0, f"Input features must be divisible by world size (world_size={world_size})"
         self.part_in_features = in_features // world_size
-        super().__init__(self.part_in_features, out_features, bias, dtype)
+        super().__init__(self.part_in_features, out_features, bias, dtype, static_quant)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -302,12 +348,17 @@ class RMSNorm(nn.Module):
     Args:
         dim (int): Dimension of the input tensor.
         eps (float): Epsilon value for numerical stability. Defaults to 1e-6.
+        bias (bool): Whether to include a bias term. Defaults to False.
     """
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6, bias: bool = False):
         super().__init__()
         self.dim = dim
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(dim))
+        else:
+            self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor):
         """
@@ -319,7 +370,12 @@ class RMSNorm(nn.Module):
         Returns:
             torch.Tensor: Normalized tensor with the same shape as input.
         """
-        return F.rms_norm(x, (self.dim,), self.weight, self.eps)
+        if self.bias is None:
+            return F.rms_norm(x, (self.dim,), self.weight, self.eps)
+        else:
+            variance = x.pow(2).mean(-1, keepdim=True)
+            x = x * torch.rsqrt(variance + self.eps)
+            return x * self.weight + self.bias
 
 
 def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
@@ -465,7 +521,11 @@ class Indexer(torch.nn.Module):
         self.rope_head_dim: int = args.qk_rope_head_dim
         self.index_topk: int = args.index_topk
         self.q_lora_rank: int = args.q_lora_rank
-        self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim)
+        if args.quantization == "w8a8":
+            self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim,
+                               bias=True, dtype=torch.int8, static_quant=True)
+        else:
+            self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim)
         self.wk_weights_proj = Linear(self.dim, self.head_dim + self.n_heads, dtype=torch.float32)
         self.k_norm = LayerNorm(self.head_dim)
         self.softmax_scale = self.head_dim ** -0.5
@@ -531,12 +591,25 @@ class MLA(nn.Module):
         self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
         self.v_head_dim = args.v_head_dim
 
-        self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim)
-        self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps)
-        self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
-        self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps)
+        # 根据 args.quantization 决定是否使用静态量化
+        if args.quantization == "w8a8":
+            # wqkv_a 合并 q_a_proj 和 kv_a_proj_with_mqa，静态量化
+            self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+                                 bias=True, dtype=torch.int8, static_quant=True)
+            # wq_b 是 ColumnParallelLinear，静态量化
+            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim,
+                                              bias=True, dtype=torch.int8, static_quant=True)
+            # wo 是 RowParallelLinear，静态量化
+            self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim,
+                                         dtype=torch.int8, static_quant=True)
+        else:
+            self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim, bias=True)
+            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=True)
+            self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
+        self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
+        self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
+        # wkv_b 保持 FLOAT（根据 quant_model_description.json）
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
-        self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
         self.softmax_scale = self.qk_head_dim ** -0.5
         if args.max_seq_len > args.original_seq_len:
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
@@ -623,7 +696,7 @@ class MLP(nn.Module):
         w2 (nn.Module): Linear layer for hidden-to-output transformation.
         w3 (nn.Module): Additional linear layer for feature transformation.
     """
-    def __init__(self, dim: int, inter_dim: int):
+    def __init__(self, dim: int, inter_dim: int, args: ModelArgs = None):
         """
         Initializes the MLP layer.
 
@@ -632,8 +705,12 @@ class MLP(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        self.w13 = ColumnParallelLinear(dim, inter_dim * 2)
-        self.w2 = RowParallelLinear(inter_dim, dim)
+        if args is not None and args.quantization in ("experts_int8", "w8a8"):
+            self.w13 = ColumnParallelLinear(dim, inter_dim * 2, dtype=torch.int8)
+            self.w2 = RowParallelLinear(inter_dim, dim, dtype=torch.int8)
+        else:
+            self.w13 = ColumnParallelLinear(dim, inter_dim * 2)
+            self.w2 = RowParallelLinear(inter_dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -645,6 +722,27 @@ class MLP(nn.Module):
         Returns:
             torch.Tensor: Output tensor after MLP computation.
         """
+        y = self.w13(x)
+        y1, y3 = torch.split(y, y.shape[-1] // 2, dim=-1)
+        return self.w2(F.silu(y1) * y3)
+
+
+class SharedExpertMLP(nn.Module):
+    """
+    MLP for shared experts without tensor parallelism.
+    Each rank loads complete weights instead of sharding.
+    """
+    def __init__(self, dim: int, inter_dim: int, args: ModelArgs = None):
+        super().__init__()
+        if args is not None and args.quantization in ("experts_int8", "w8a8"):
+            # w8a8: shared_experts 使用动态量化（W8A8_DYNAMIC）
+            self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
+            self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
+        else:
+            self.w13 = Linear(dim, inter_dim * 2)
+            self.w2 = Linear(inter_dim, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.w13(x)
         y1, y3 = torch.split(y, y.shape[-1] // 2, dim=-1)
         return self.w2(F.silu(y1) * y3)
@@ -734,7 +832,8 @@ class Expert(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        if args.quantization == "experts_int8":
+        if args.quantization in ("experts_int8", "w8a8"):
+            # w8a8: experts 使用动态量化（W8A8_DYNAMIC），只需要 weight、weight_scale、weight_offset
             self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
         else:
@@ -787,7 +886,7 @@ class MoE(nn.Module):
         self.gate = Gate(args)
         self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args) if self.experts_start_idx <= i < self.experts_end_idx else None
                                       for i in range(self.n_routed_experts)])
-        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
+        self.shared_experts = SharedExpertMLP(args.dim, args.n_shared_experts * args.moe_inter_dim, args)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -836,9 +935,9 @@ class Block(nn.Module):
         """
         super().__init__()
         self.attn = MLA(args)
-        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
-        self.attn_norm = RMSNorm(args.dim, args.norm_eps)
-        self.ffn_norm = RMSNorm(args.dim, args.norm_eps)
+        self.ffn = MLP(args.dim, args.inter_dim, args) if layer_id < args.n_dense_layers else MoE(args)
+        self.attn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
+        self.ffn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
         self.n_dense_layers = args.n_dense_layers
         self.layer_id = layer_id
 
@@ -914,7 +1013,7 @@ class DeepSeek_V3(nn.Module):
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
-        self.norm = RMSNorm(args.dim, args.norm_eps)
+        self.norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
@@ -995,6 +1094,8 @@ class DeepSeek_V3(nn.Module):
         assert args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
         assert args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
 
+        static_quant_weights = ("q_a_proj", "kv_a_proj_with_mqa", "wq_b", "wo")
+
         self.xlite_weight_nz = True if forward_backend == "xlite" else False
 
         n_local_experts = args.n_routed_experts // args.moe_ep_size
@@ -1029,13 +1130,25 @@ class DeepSeek_V3(nn.Module):
             name = name.replace("input_layernorm", "attn_norm")
             name = name.replace("post_attention_layernorm", "ffn_norm")
             name = name.replace("q_a_layernorm", "q_norm")
-            name = name.replace("q_b_proj", "wq_b")
             name = name.replace("kv_a_layernorm", "kv_norm")
             name = name.replace("kv_b_proj", "wkv_b")
-            name = name.replace("o_proj", "wo")
             name = name.replace("lm_head", "head")
+            name = name.replace("q_b_proj", "wq_b")
+            name = name.replace("o_proj", "wo")
+
+            if ".weight_offset" in name:
+                continue
             if not name.startswith("model."):
                 name = "model." + name
+
+            if "weight_scale" in name:
+                if any(s in name for s in static_quant_weights):
+                    continue
+            name = name.replace("weight_scale", "scale")
+
+            if "deq_scale" in name:
+                if any(s in name for s in static_quant_weights):
+                    name = name.replace("deq_scale", "scale")
 
             is_wqkv_a = False
             for stride_id, weight_name in enumerate(["q_a_proj", "kv_a_proj_with_mqa"]):
@@ -1048,10 +1161,16 @@ class DeepSeek_V3(nn.Module):
                                    param_name)
                     continue
                 param = param_dict[param_name]
-                if stride_id == 0:
-                    param.data[:args.q_lora_rank].copy_(loaded_weight[:])
+                if ".scale" in name:
+                    if stride_id == 0:
+                        param.data[:args.q_lora_rank, 0].copy_(loaded_weight[:])
+                    else:  # kv_a_proj_with_mqa
+                        param.data[args.q_lora_rank:, 0].copy_(loaded_weight[:])
                 else:
-                    param.data[args.q_lora_rank:].copy_(loaded_weight[:])
+                    if stride_id == 0:
+                        param.data[:args.q_lora_rank].copy_(loaded_weight[:])
+                    else:
+                        param.data[args.q_lora_rank:].copy_(loaded_weight[:])
 
                 is_wqkv_a = True
                 break
@@ -1092,11 +1211,16 @@ class DeepSeek_V3(nn.Module):
                     continue
                 param = param_dict[param_name]
                 shard_size = param.shape[0] // 2
-                gate_up_idx = moe_tp_id if ("experts" in name and "shared_experts" not in name) else rank
-
-                loaded_weight = loaded_weight[shard_size * gate_up_idx:shard_size * (gate_up_idx + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
-                param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+                # shared_experts 不切分，每个 rank 加载完整权重
+                if "shared_experts" in name:
+                    param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    param_slice.data.copy_(loaded_weight)
+                else:
+                    gate_up_idx = moe_tp_id if "experts" in name else rank
+                    loaded_weight = loaded_weight[shard_size * gate_up_idx:shard_size * (gate_up_idx + 1)]
+                    param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
+                    param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
 
                 is_gate_up_weight = True
                 break
@@ -1109,6 +1233,12 @@ class DeepSeek_V3(nn.Module):
 
             param = param_dict[name]
 
+            if any(s in name for s in static_quant_weights):
+                if ".input_scale" in name or ".input_offset" in name:
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    param.data.copy_(loaded_weight.expand(param.shape))
+                    continue
+
             if "embed" in name:
                 load_tensor_parallel_weights(param, loaded_weight, args.vocab_size, args.dim, name,
                                              True, False, rank, world_size)
@@ -1118,6 +1248,17 @@ class DeepSeek_V3(nn.Module):
                 load_tensor_parallel_weights(param, loaded_weight, args.dim, args.vocab_size, name,
                                              False, True, rank, world_size)
                 continue
+
+            if "wq_b" in name:
+                if ".quant_bias" in name or ".bias" in name or ".scale" in name:
+                    shard_size = param.shape[0]
+                    loaded_weight_slice = loaded_weight[rank * shard_size:(rank + 1) * shard_size]
+                    loaded_weight_slice = convert_pyslice_to_tensor(loaded_weight_slice)
+                    if ".scale" in name:
+                        param.data[:loaded_weight_slice.shape[0], 0].copy_(loaded_weight_slice)
+                    else:
+                        param.data[:loaded_weight_slice.shape[0]].copy_(loaded_weight_slice)
+                    continue
 
             if "wq_b" in name and "indexer" not in name:
                 load_tensor_parallel_weights(param, loaded_weight, args.q_lora_rank,
@@ -1132,19 +1273,34 @@ class DeepSeek_V3(nn.Module):
                 continue
 
             if "wo" in name:
+                # quant_bias: shape [N]
+                if ".quant_bias" in name:
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    param.data.copy_(loaded_weight)
+                    continue
+
+                # scale: shape [N, 1]
+                if ".scale" in name:
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    param.data[:, 0].copy_(loaded_weight)
+                    continue
+
                 load_tensor_parallel_weights(param, loaded_weight, args.v_head_dim * args.n_heads,
                                              args.dim, name, True, True, rank, world_size)
                 continue
 
             if "w2" in name and (int(name.split(".")[2]) < args.n_dense_layers):
-                load_tensor_parallel_weights(param, loaded_weight, args.inter_dim, args.dim, name,
-                                             True, True, rank, world_size)
+                if ".scale" in name:
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    param.copy_(loaded_weight)
+                else:
+                    load_tensor_parallel_weights(param, loaded_weight, args.inter_dim, args.dim, name,
+                                                True, True, rank, world_size)
                 continue
 
             if "w2" in name and "shared_experts" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             args.n_shared_experts * args.moe_inter_dim, args.dim,
-                                             name, True, True, rank, world_size)
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                param.copy_(loaded_weight)
                 continue
 
             if "w2" in name and "experts" in name:
@@ -1155,7 +1311,8 @@ class DeepSeek_V3(nn.Module):
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
             param.copy_(loaded_weight)
-            torch.npu.empty_cache()
+
+        torch.npu.empty_cache()
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
