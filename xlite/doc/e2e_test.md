@@ -13,15 +13,15 @@ pip install xlite
 # xlite可选择decode only或full其中一种模式启动在线服务：
 # a. 配置xlite decode only模式，设置--additional-config='{"xlite_graph_config": {"enabled": true}}'
 cd ./tests/e2e/
-bash online_server_xlite_decode_only.sh 8080 server.log [model_path] [max_num_batched_tokens] [max_num_seqs] [max_model_len] [tensor_parallel_size]
+bash online_api_server.sh 8080 server.log [model_path] [max_num_batched_tokens] [max_num_seqs] [max_model_len] [tensor_parallel_size] "xlite_decode_only"
 
 # b. 配置xlite full模式，设置--additional-config='{"xlite_graph_config": {"enabled": true, "full_mode": true}}'
 cd ./tests/e2e/
-bash online_server_xlite_full.sh 8080 server.log [model_path] [max_num_batched_tokens] [max_num_seqs] [max_model_len] [tensor_parallel_size]
+bash online_api_server.sh 8080 server.log [model_path] [max_num_batched_tokens] [max_num_seqs] [max_model_len] [tensor_parallel_size] "xlite_full_mode"
 
 # c. 配置aclgraph模式（不使用xlite）
 cd ./tests/e2e/
-bash online_server_aclgraph.sh 8080 server.log [model_path] [max_num_batched_tokens] [max_num_seqs] [max_model_len] [tensor_parallel_size]
+bash online_api_server.sh 8080 server.log [model_path] [max_num_batched_tokens] [max_num_seqs] [max_model_len] [tensor_parallel_size] "aclgraph"
 
 # 参数说明：
 # - port: 服务端口（必需）
@@ -169,7 +169,7 @@ python3 run_benchmark_scheduler.py --run-now
 # 自定义所有参数
 python3 run_benchmark_scheduler.py \
     --model moe \
-    --receiver "927280411401503971" \
+    --receiver "1234567890" \
     --build-container xlite-build \
     --run-time 02:00
 ```
@@ -192,14 +192,14 @@ kill $(cat .scheduler.pid)
 
 ```bash
 cd ./tests/e2e/
-python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
+python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 ```
 
 **可选参数：**
 - `--model`: 测试模型类型（dense/moe/all），默认 moe
 - `--skip-pull`: 跳过代码拉取
 - `--skip-build`: 跳过编译
-- `--receiver`: 接收者ID，默认 927280411401503971
+- `--receiver`: 接收者ID，welink 群号
 - `--threshold`: 性能劣化阈值，默认 0.05（即5%）
 - `--build-container`: 编译容器名称
 - `--env-type`: 环境类型（blue/yellow），默认 yellow

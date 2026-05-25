@@ -634,7 +634,7 @@ def run_benchmark(model_type: str = "moe") -> Optional[Path]:
     在测试容器中执行基准测试脚本
     
     参数:
-        model_type: 模型类型 (dense/moe/all)
+        model_type: 模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)
     
     返回:
         报告目录路径，失败返回 None
@@ -1436,7 +1436,7 @@ def main():
     """
     # 解析命令行参数
     parser = argparse.ArgumentParser(description="xlite 每日自动化测试机器人")
-    parser.add_argument("--model", default="moe", choices=["dense", "moe", "all"],
+    parser.add_argument("--model", default="moe", choices=["dense", "moe", "dense_quant", "moe_quant", "origin", "quant", "all"],
                         help="测试模型类型 (default: moe)")
     parser.add_argument("--skip-pull", action="store_true", help="跳过代码拉取")
     parser.add_argument("--skip-build", action="store_true", help="跳过编译")
