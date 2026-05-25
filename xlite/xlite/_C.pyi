@@ -1,7 +1,7 @@
 """Type stubs for :mod:`xlite._C`.
 
 This file mirrors the symbols exported by `csrc/_C.cpp`.
-The typing and docstrings are designed for Python 3.9 to 3.11.
+The typing and docstrings are designed for Python 3.9 to 3.12.
 """
 
 from __future__ import annotations
