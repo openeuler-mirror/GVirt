@@ -22,6 +22,7 @@ from tests.models.weight_utils import matrix_nd2nz
 weight_nz = True
 transpose = False
 dtype = torch.bfloat16
+torch.npu.config.allow_internal_format = True
 
 repeat = 100_000
 US_IN_S = 100_000

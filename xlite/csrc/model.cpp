@@ -412,7 +412,8 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
         XliteOpMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, attnOutput,
                    rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
                    _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.kvLoraRank, _c.blockSize,
-                   rt._batch, rt._maxNumBlocks, _c.softmaxScale, _c.indexTopK, *topkIndices);
+                   rt._batch, rt._maxNumBlocks, _c.softmaxScale, _c.weightNZ, _c.indexTopK,
+                   *topkIndices);
         rt.PutTensor(qk);
         rt.PutTensor(*topkIndices);
     } else if (rt._maxNumBlocks * _c.blockSize <= tileSizeOfCachedKV) {
@@ -422,7 +423,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
         XliteOpMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, attnOutput,
                    rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
                    _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.kvLoraRank, _c.blockSize,
-                   rt._batch, rt._maxNumBlocks, _c.softmaxScale);
+                   rt._batch, rt._maxNumBlocks, _c.softmaxScale, _c.weightNZ);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
@@ -436,7 +437,8 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
         XliteOpFlashMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
                         lastSum, _sync, attnOutput, rt._queryStartLoc, rt._lens, rt._cachedLens,
                         rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
-                        _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale);
+                        _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
+                        _c.weightNZ);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);
