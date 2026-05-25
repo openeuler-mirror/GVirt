@@ -121,13 +121,15 @@ public:
     std::vector<XTensor> mhaKNorm;
     std::vector<XTensor> mhaKNormBias;
 
-    std::vector<XTensor> mlaQKVA;
-    std::vector<XTensor> mlaQB;
+    std::vector<MatmulWeight> mlaQKVA;
+    std::vector<MatmulWeight> mlaQB;
     std::vector<XTensor> mlaQNorm;
+    std::vector<XTensor> mlaQNormBias;
     std::vector<XTensor> mlaKVB;
     std::vector<XTensor> mlaKVNorm;
+    std::vector<XTensor> mlaKVNormBias;
 
-    std::vector<XTensor> indexQB;
+    std::vector<MatmulWeight> indexQB;
     std::vector<XTensor> indexKWeightsProj;
     std::vector<XTensor> indexKNorm;
     std::vector<XTensor> indexKNormBias;

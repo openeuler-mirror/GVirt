@@ -75,11 +75,25 @@ public:
     std::vector<at::Tensor> mhaKNorm;
     std::vector<at::Tensor> mhaKNormBias;
     std::vector<at::Tensor> mlaQKVA;
+    std::vector<at::Tensor> mlaQKVAInputScale;
+    std::vector<at::Tensor> mlaQKVAInputOffset;
+    std::vector<at::Tensor> mlaQKVAQuantBias;
+    std::vector<at::Tensor> mlaQKVADeqScale;
     std::vector<at::Tensor> mlaQB;
+    std::vector<at::Tensor> mlaQBInputScale;
+    std::vector<at::Tensor> mlaQBInputOffset;
+    std::vector<at::Tensor> mlaQBQuantBias;
+    std::vector<at::Tensor> mlaQBDeqScale;
     std::vector<at::Tensor> mlaQNorm;
+    std::vector<at::Tensor> mlaQNormBias;
     std::vector<at::Tensor> mlaKVB;
     std::vector<at::Tensor> mlaKVNorm;
+    std::vector<at::Tensor> mlaKVNormBias;
     std::vector<at::Tensor> indexQB;
+    std::vector<at::Tensor> indexQBInputScale;
+    std::vector<at::Tensor> indexQBInputOffset;
+    std::vector<at::Tensor> indexQBQuantBias;
+    std::vector<at::Tensor> indexQBDeqScale;
     std::vector<at::Tensor> indexKWeightsProj;
     std::vector<at::Tensor> indexKNorm;
     std::vector<at::Tensor> indexKNormBias;
@@ -269,6 +283,53 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             throw std::invalid_argument("Mismatched number of layers MLA attention QA/QB/QA "
                                         "norm/KVA/KVB/KV norm parameters");
         }
+        if (!mlaQKVAInputScale.empty() && mlaQKVAInputScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQKVAInputScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MLA QKVA input scale parameters");
+        }
+        if (!mlaQKVAInputOffset.empty() && mlaQKVAInputOffset.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQKVAInputOffset.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MLA QKVA input offset parameters");
+        }
+        if (!mlaQKVAQuantBias.empty() && mlaQKVAQuantBias.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQKVAQuantBias.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MLA QKVA quant bias parameters");
+        }
+        if (!mlaQKVADeqScale.empty() && mlaQKVADeqScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQKVADeqScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MLA QKVA dequant scale parameters");
+        }
+        if (!mlaQBInputScale.empty() && mlaQBInputScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQBInputScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MLA QB input scale parameters");
+        }
+        if (!mlaQBInputOffset.empty() && mlaQBInputOffset.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQBInputOffset.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MLA QB input offset parameters");
+        }
+        if (!mlaQBQuantBias.empty() && mlaQBQuantBias.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQBQuantBias.size()
+                      << std::endl;
+            throw std::invalid_argument("Mismatched number of layers MLA QB quant bias parameters");
+        }
+        if (!mlaQBDeqScale.empty() && mlaQBDeqScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQBDeqScale.size()
+                      << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers MLA QB dequant scale parameters");
+        }
     } else if (c.attnType == XMODEL_ATTN_MHA) {
         if (mhaQKV.size() != c.nLayers) {
             std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mhaQKV.size()
@@ -303,12 +364,66 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             throw std::invalid_argument("Mismatched number of layers DSA attention QA/QB/QA "
                                         "norm/KVA/KVB/KV norm parameters");
         }
+        if ((!mlaQNormBias.empty() && mlaQNormBias.size() != c.nLayers) ||
+            (!mlaKVNormBias.empty() && mlaKVNormBias.size() != c.nLayers)) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQNormBias.size()
+                      << std::endl;
+            throw std::invalid_argument("Mismatched number of layers DSA attention Q/KV norm "
+                                        "bias parameters");
+        }
         if (indexQB.size() != c.nLayers || indexKWeightsProj.size() != c.nLayers ||
             indexKNorm.size() != c.nLayers || indexKNormBias.size() != c.nLayers) {
             std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << indexQB.size()
                       << std::endl;
             throw std::invalid_argument(
                 "Mismatched number of layers DSA attention index QB/KWeightsProj/KNorm parameters");
+        }
+        if (!mlaQKVAInputScale.empty() && mlaQKVAInputScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQKVAInputScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers DSA QKVA input scale parameters");
+        }
+        if (!mlaQKVAInputOffset.empty() && mlaQKVAInputOffset.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQKVAInputOffset.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers DSA QKVA input offset parameters");
+        }
+        if (!mlaQKVAQuantBias.empty() && mlaQKVAQuantBias.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQKVAQuantBias.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers DSA QKVA quant bias parameters");
+        }
+        if (!mlaQKVADeqScale.empty() && mlaQKVADeqScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQKVADeqScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers DSA QKVA dequant scale parameters");
+        }
+        if (!mlaQBInputScale.empty() && mlaQBInputScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQBInputScale.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers DSA QB input scale parameters");
+        }
+        if (!mlaQBInputOffset.empty() && mlaQBInputOffset.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__
+                      << ": num of layers: " << mlaQBInputOffset.size() << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers DSA QB input offset parameters");
+        }
+        if (!mlaQBQuantBias.empty() && mlaQBQuantBias.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQBQuantBias.size()
+                      << std::endl;
+            throw std::invalid_argument("Mismatched number of layers DSA QB quant bias parameters");
+        }
+        if (!mlaQBDeqScale.empty() && mlaQBDeqScale.size() != c.nLayers) {
+            std::cerr << __FILE__ << ":" << __LINE__ << ": num of layers: " << mlaQBDeqScale.size()
+                      << std::endl;
+            throw std::invalid_argument(
+                "Mismatched number of layers DSA QB dequant scale parameters");
         }
     } else {
         std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attention type: " << c.attnType
@@ -399,11 +514,19 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         }
         InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
         if (c.attnType == XMODEL_ATTN_MLA) {
-            InitXTensor(_model->mlaQKVA[i], mlaQKVA[i]);
-            InitXTensor(_model->mlaQB[i], mlaQB[i]);
+            InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
+                             mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false, tpRank);
+            InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
+                             mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
             InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+            if (!mlaQNormBias.empty()) {
+                InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
+            }
             InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+            if (!mlaKVNormBias.empty()) {
+                InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
+            }
         } else if (c.attnType == XMODEL_ATTN_MHA) {
             InitMatmulWeight("mhaQKV", mhaQKV, mhaQKVInputScale, mhaQKVInputOffset, mhaQKVQuantBias,
                              mhaQKVDeqScale, _model->mhaQKV, i, false, tpRank);
@@ -421,12 +544,21 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 }
             }
         } else if (c.attnType == XMODEL_ATTN_DSA) {
-            InitXTensor(_model->mlaQKVA[i], mlaQKVA[i]);
-            InitXTensor(_model->mlaQB[i], mlaQB[i]);
+            InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
+                             mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false, tpRank);
+            InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
+                             mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
             InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+            if (!mlaQNormBias.empty()) {
+                InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
+            }
             InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
             InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
-            InitXTensor(_model->indexQB[i], indexQB[i]);
+            if (!mlaKVNormBias.empty()) {
+                InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
+            }
+            InitMatmulWeight("indexQB", indexQB, indexQBInputScale, indexQBInputOffset,
+                             indexQBQuantBias, indexQBDeqScale, _model->indexQB, i, false, tpRank);
             InitXTensor(_model->indexKWeightsProj[i], indexKWeightsProj[i]);
             InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
             InitXTensor(_model->indexKNormBias[i], indexKNormBias[i]);
@@ -781,7 +913,7 @@ void _CModel::InitMatmulWeight(const std::string &name, std::vector<at::Tensor> 
     InitXTensor(wXT.weight, w[weightLayer]);
     if (wXT.weight.dtype == INT8 && dScale.size() <= weightLayer) {
         std::string errStr = DBG_PREFIX + ": " + name +
-                             "dequant scale parameters are"
+                             "dequant scale parameters are "
                              "required when weights are quantized";
         throw std::invalid_argument(errStr);
     }
@@ -1506,9 +1638,23 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("mla_qkv_a", &_CModel::mlaQKVA)
         .def_readwrite("mla_q_b", &_CModel::mlaQB)
         .def_readwrite("mla_q_norm", &_CModel::mlaQNorm)
+        .def_readwrite("mla_q_norm_bias", &_CModel::mlaQNormBias)
         .def_readwrite("mla_kv_b", &_CModel::mlaKVB)
         .def_readwrite("mla_kv_norm", &_CModel::mlaKVNorm)
+        .def_readwrite("mla_kv_norm_bias", &_CModel::mlaKVNormBias)
+        .def_readwrite("mla_qkv_a_input_scale", &_CModel::mlaQKVAInputScale)
+        .def_readwrite("mla_qkv_a_input_offset", &_CModel::mlaQKVAInputOffset)
+        .def_readwrite("mla_qkv_a_quant_bias", &_CModel::mlaQKVAQuantBias)
+        .def_readwrite("mla_qkv_a_deq_scale", &_CModel::mlaQKVADeqScale)
+        .def_readwrite("mla_q_b_input_scale", &_CModel::mlaQBInputScale)
+        .def_readwrite("mla_q_b_input_offset", &_CModel::mlaQBInputOffset)
+        .def_readwrite("mla_q_b_quant_bias", &_CModel::mlaQBQuantBias)
+        .def_readwrite("mla_q_b_deq_scale", &_CModel::mlaQBDeqScale)
         .def_readwrite("index_q_b", &_CModel::indexQB)
+        .def_readwrite("index_q_b_input_scale", &_CModel::indexQBInputScale)
+        .def_readwrite("index_q_b_input_offset", &_CModel::indexQBInputOffset)
+        .def_readwrite("index_q_b_quant_bias", &_CModel::indexQBQuantBias)
+        .def_readwrite("index_q_b_deq_scale", &_CModel::indexQBDeqScale)
         .def_readwrite("index_k_weights_proj", &_CModel::indexKWeightsProj)
         .def_readwrite("index_k_norm", &_CModel::indexKNorm)
         .def_readwrite("index_k_norm_bias", &_CModel::indexKNormBias)

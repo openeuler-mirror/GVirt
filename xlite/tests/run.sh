@@ -201,10 +201,12 @@ function run_deepseek_v3()
         "dtype": "bf16",
         "quantization": "experts_int8",
         "moe_ep_size": 16,
-        "moe_tp_size": 1
+        "moe_tp_size": 1,
+        "max_batch_size": 1,
+        "max_seq_len": 1024
     }' > $test_config_path
     # w8a8
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-R1-expert-int8 ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-V3.1-expert-int8 ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -296,7 +298,9 @@ function run_deepseek_v32()
         "model_type": "deepseek_v32",
         "dtype": "bf16",
         "moe_ep_size": 16,
-        "moe_tp_size": 1
+        "moe_tp_size": 1,
+        "max_batch_size": 1,
+        "max_seq_len": 1024
     }' > $test_config_path
     torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v32 --ckpt-path $models_base_path/DeepSeek-V3.2-bf16/ ${RUN_ARGS[@]}
     rm $test_config_path
@@ -341,7 +345,9 @@ function run_glm5()
         "model_type": "glm5",
         "dtype": "bfloat16",
         "moe_ep_size": 16,
-        "moe_tp_size": 1
+        "moe_tp_size": 1,
+        "max_batch_size": 1,
+        "max_seq_len": 1024
     }' > $test_config_path
     torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/GLM-5/ ${RUN_ARGS[@]}
     rm $test_config_path
@@ -523,8 +529,8 @@ else
     if [ $npu_count -ge 16 ]; then
         run_glm4_moe
         run_deepseek_v3
-        #run_deepseek_v3_w8a8
-        #run_glm5_w8a8
+        run_deepseek_v3_w8a8
+        run_glm5_w8a8
         run_minimax_m2
         #run_qwen3_5_moe_122B
     fi

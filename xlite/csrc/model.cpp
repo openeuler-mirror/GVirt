@@ -20,8 +20,10 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mlaQKVA.resize(c.nLayers);
     mlaQB.resize(c.nLayers);
     mlaQNorm.resize(c.nLayers);
+    mlaQNormBias.resize(c.nLayers);
     mlaKVB.resize(c.nLayers);
     mlaKVNorm.resize(c.nLayers);
+    mlaKVNormBias.resize(c.nLayers);
     mlpNorm.resize(c.nLayers);
     mlpUpGate.resize(c.nDenseLayers);
     mlpDown.resize(c.nDenseLayers);
@@ -189,7 +191,7 @@ void XModel::Init(void)
 
     if (_c.nSharedExperts != 0 && !moeSEUpGate[_c.nDenseLayers].weight.shape.empty() &&
         !moeSEDown[_c.nDenseLayers].weight.shape.empty()) {
-        if (moeSEUpGate[_c.nDenseLayers].IsTransposed()) {
+        if (_c.quantAttnWeightTrans) {
             _isSharedExpertWeightFull =
                 moeSEUpGate[_c.nDenseLayers].weight.shape.size() >= 2 &&
                 moeSEUpGate[_c.nDenseLayers].weight.shape[1] == _c.moeIntermediateSize * 2 &&
@@ -250,8 +252,8 @@ void XModel::ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x,
 {
     MatmulWeight &w = weights[layer];
     enum QuantType quantType = w.GetQuantType();
-    bool isNz = _c.weightNZ || w.IsNzFormat();
-    bool isTransposed = _c.quantAttnWeightTrans || w.IsTransposed();
+    bool isNz = _c.weightNZ;
+    bool isTransposed = false;
 
     if (quantType == NO_QUANT) {
         if (layer < weightBias.size()) {
@@ -261,6 +263,9 @@ void XModel::ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x,
         }
         return;
     }
+
+    isNz = _c.weightNZ || _c.quantAttnWeightNz;
+    isTransposed = _c.quantAttnWeightTrans;
 
     XTensor &xQuanted = rt.GetTensor(x.shape, INT8, DBG_LOC);
     XTensor &outQuanted = rt.GetTensor(out.shape, FP16, DBG_LOC);
@@ -306,19 +311,22 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     XTensor &attnNormQc =
         rt.GetTensor({hiddenState.shape[0], _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
     XTensor &attnQWithQr =
-        rt.GetTensor({hiddenState.shape[0], nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim},
+        rt.GetTensor({hiddenState.shape[0], nLocalHeads * (_c.nopeHeadDim + _c.ropeHeadDim)},
                      hiddenState.dtype, DBG_LOC);
     XTensor &attnNormKvc =
         rt.GetTensor({hiddenState.shape[0], _c.kvLoraRank}, hiddenState.dtype, DBG_LOC);
 
-    // TODO: support MLA quantization
-    XliteOpMatmul(rt, hiddenState, mlaQKVA[layer], attnQkvc, _c.weightNZ);
-    XliteOpRmsNorm(rt, attnQkvc, mlaQNorm[layer], attnNormQc, _c.normEps, _c.qLoraRank);
-    XliteOpMatmul(rt, attnNormQc, mlaQB[layer], attnQWithQr, _c.weightNZ);
+    ForwardLinear(rt, layer, hiddenState, mlaQKVA, attnQkvc);
+
+    XliteOpRmsNorm(rt, attnQkvc, mlaQNorm[layer], attnNormQc, _c.normEps, _c.qLoraRank, true,
+                   mlaQNormBias[layer]);
+
+    ForwardLinear(rt, layer, attnNormQc, mlaQB, attnQWithQr);
+
     XliteOpRopeComplex(rt, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
                        _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition, _vGather);
     XliteOpRmsNorm(rt, attnQkvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank, true,
-                   XTensor(), 1, _c.qLoraRank);
+                   mlaKVNormBias[layer], 1, _c.qLoraRank);
     XliteOpRopeComplexAndCache(rt, 1, _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
                                _c.qLoraRank + _c.kvLoraRank, _c.kvLoraRank, _c.ropeHeadDim,
                                attnQkvc, freqsCis, rt._attnPosition, _vGather, _c.blockSize,
@@ -354,7 +362,7 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads, _c.indexHeadDim},
                               hiddenState.dtype, DBG_LOC);
     XliteOpMuls(rt, attnNormQc, _c.indexSoftmaxScale, attnNormQc);
-    XliteOpMatmul(rt, attnNormQc, indexQB[layer], q, _c.weightNZ);
+    ForwardLinear(rt, layer, attnNormQc, indexQB, q);
     // TODO not interleaved case
     if (_c.indexRopeInterleaved) {
         XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q, freqsCis,
@@ -438,8 +446,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     }
     rt.PutTensor(attnQWithQr);
 
-    XliteOpMatmul(rt, attnOutput, attnOut[layer].weight, hiddenState, _c.weightNZ);
-
+    ForwardLinear(rt, layer, attnOutput, attnOut, hiddenState);
     if (_c.defTpSize > 1) {
         if (rt.multiTaskParallel) {
             rt.NotifyRecordPeerStream();
