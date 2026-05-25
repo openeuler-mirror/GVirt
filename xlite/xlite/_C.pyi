@@ -1480,6 +1480,7 @@ def mla(
     batch: int,
     max_num_block: int,
     scale: float,
+    nz: bool = False,
     enable_flash_attention: bool = False,
 ) -> None:
     """Run MLA kernel using cached KV blocks (full attention).
@@ -1504,6 +1505,7 @@ def mla(
         batch (int): Batch size.
         max_num_block (int): Maximum number of blocks per request.
         scale (float): Attention scaling factor.
+        nz (bool): Whether to use nz wkvb.
         enable_flash_attention (bool): Whether to use flash attention kernels.
 
     Returns:
@@ -1533,6 +1535,7 @@ def mla_with_indices(
     scale: float,
     top_k: int,
     topk_indices: torch.Tensor,
+    nz: bool = False,
     enable_flash_attention: bool = False,
 ) -> None:
     """Run MLA kernel with sparse attention using top-k indices.
@@ -1559,6 +1562,7 @@ def mla_with_indices(
         scale (float): Attention scaling factor.
         top_k (int): Number of top-k indices for sparse attention.
         topk_indices (torch.Tensor): Top-k indices tensor for sparse attention.
+        nz (bool): Whether to use nz wkvb.
         enable_flash_attention (bool): Whether to use flash attention kernels.
 
     Returns:

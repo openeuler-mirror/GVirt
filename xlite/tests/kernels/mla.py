@@ -16,11 +16,15 @@ import numpy as np
 import warnings
 from typing import Iterable
 from xlite._C import Runtime, mla, mla_with_indices
+from xlite._C import print as xlite_print
+from tests.models.weight_utils import matrix_nd2nz
 
 logging.getLogger().setLevel(logging.INFO)
 
 rt = Runtime(0, 3000)
 torch.npu.set_device(0)
+torch.npu.config.allow_internal_format = True
+weight_nz = True
 
 BLOCK_SIZE = 128
 
@@ -79,7 +83,8 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             k_cache = rms_norm_last_dim(k_cache)
             v_cache = torch.randn(batch, max_seq_len, rope_head_dim)
             v_cache = rms_norm_last_dim(v_cache)
-            wkvb = torch.randn(n_heads, nope_head_dim + v_head_dim, kv_lora_rank).clamp(0.2, 1)
+            wkvb = torch.randn(n_heads * (nope_head_dim + v_head_dim), kv_lora_rank).clamp(0.2, 1)
+            wkvb = wkvb.view(n_heads, nope_head_dim + v_head_dim, kv_lora_rank)
 
             masks = []
             for i in range(batch):
@@ -173,11 +178,14 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                 k_cache_xlite[cache_block_idx, :current_seq_len] = current_k[:, seq_start:seq_end]
                 v_cache_xlite[cache_block_idx, :current_seq_len] = current_v[:, seq_start:seq_end]
 
+        xlite_wkvb = wkvb.view(n_heads * (nope_head_dim + v_head_dim), kv_lora_rank)
+        if weight_nz:
+            xlite_wkvb = matrix_nd2nz(xlite_wkvb)
         torch.npu.synchronize()
-        mla(rt, qWithQr_xlite, k_cache_xlite, v_cache_xlite, wkvb,
+        mla(rt, qWithQr_xlite, k_cache_xlite, v_cache_xlite, xlite_wkvb,
                    output_xlite, query_start_loc, query_lens, cached_lens,
                    block_tables, n_heads, rope_head_dim, nope_head_dim,
-                   v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, max_num_blocks, scale)
+                   v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, max_num_blocks, scale, weight_nz)
 
         logging.info(
             "mla %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s) executed!",
@@ -289,11 +297,11 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
 
             topk_indices_tensor = topk_indices_tensor.to(dtype=torch.int32)
             torch.npu.synchronize()
-            mla_with_indices(rt, qWithQr_xlite, k_cache_xlite, v_cache_xlite, wkvb,
+            mla_with_indices(rt, qWithQr_xlite, k_cache_xlite, v_cache_xlite, xlite_wkvb,
                 output_xlite_with_topk, query_start_loc, query_lens, cached_lens,
                 block_tables, n_heads, rope_head_dim, nope_head_dim,
                 v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, max_num_blocks, scale,
-                topk, topk_indices_tensor)
+                topk, topk_indices_tensor, weight_nz)
 
             logging.info(
                 "mla with topkIndices %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) executed!",

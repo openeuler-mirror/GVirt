@@ -15,6 +15,7 @@ from tests.models.weight_utils import matrix_nd2nz
 
 rt = Runtime(0, 500)
 torch.npu.set_device(0)
+torch.npu.config.allow_internal_format = True
 
 for weight_nz in [False, True]:
     for transpose in [False, True]:

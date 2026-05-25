@@ -36,7 +36,7 @@ public:
                                 GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                                 uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
                                 uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock,
-                                float scale, uint32_t topK)
+                                float scale, uint32_t nz, uint32_t topK)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qWithQr.SetGlobalBuffer((__gm__ Dtype *)qWithQr);
@@ -61,6 +61,7 @@ public:
         this->maxNumBlock = maxNumBlock;
         this->maxSeqLen = maxNumBlock * blockSize;
         this->scale = scale;
+        this->nz = nz;
         this->topK = (topkIndices == nullptr) ? 0 : topK;
         this->qkStride = this->topK > 0 ? this->topK : this->maxSeqLen;
 
@@ -299,8 +300,13 @@ public:
         CopyGmToL1Nd2Nz(qrl1aBuf, query[nopeHeadDim], queryLen, ropeHeadDim,
                         nHeads * (nopeHeadDim + ropeHeadDim), mBlockPad);
         // copy WUK (nopeHeadDim, kvLoraRank) to L1
-        CopyGmToL1Nd2Nz(wukl1bBuf, wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank],
-                        nopeHeadDim, kvLoraRank, kvLoraRank, nopeHeadDim);
+        if (nz == 0) {
+            CopyGmToL1Nd2Nz(wukl1bBuf, wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank],
+                            nopeHeadDim, kvLoraRank, kvLoraRank, nopeHeadDim);
+        } else {
+            CopyGmToL1(wukl1bBuf, wkvb[headIdx * (nopeHeadDim + vHeadDim) * kBlockSize],
+                       nopeHeadDim, kvLoraRank / kBlockSize, nHeads * (nopeHeadDim + vHeadDim));
+        }
         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
 
@@ -520,10 +526,17 @@ public:
 
             // copy WUV (VnSize, k0) to L1
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + wuvCurr);
-            CopyGmToL1Nd2Nz(wuvl1bBuf[wuvCurr],
-                            wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
-                                 (nopeHeadDim + VnOffset) * kvLoraRank],
-                            VnSize, kvLoraRank, kvLoraRank, nBlockPad);
+            if (nz == 0) {
+                CopyGmToL1Nd2Nz(wuvl1bBuf[wuvCurr],
+                                wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
+                                     (nopeHeadDim + VnOffset) * kvLoraRank],
+                                VnSize, kvLoraRank, kvLoraRank, nBlockPad);
+            } else {
+                CopyGmToL1(wuvl1bBuf[wuvCurr],
+                           wkvb[headIdx * (nopeHeadDim + vHeadDim) * kBlockSize +
+                                (nopeHeadDim + VnOffset) * kBlockSize],
+                           VnSize, kvLoraRank / kBlockSize, nHeads * (nopeHeadDim + vHeadDim));
+            }
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + wuvCurr);
 
             for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // totalLen
@@ -714,10 +727,18 @@ public:
 
                 // copy WUK(T) (nSize, k0) to L1
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
-                CopyGmToL1Nd2Nz(awukl1bBuf[curr],
-                                wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
-                                     kOffset * kvLoraRank + nOffset],
-                                kSize, nSize, kvLoraRank, kBlockPad);
+                if (nz == 0) {
+                    CopyGmToL1Nd2Nz(awukl1bBuf[curr],
+                                    wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
+                                         kOffset * kvLoraRank + nOffset],
+                                    kSize, nSize, kvLoraRank, kBlockPad);
+                } else {
+                    CopyGmToL1(
+                        awukl1bBuf[curr],
+                        wkvb[headIdx * (nopeHeadDim + vHeadDim) * kBlockSize +
+                             kOffset * kBlockSize + nOffset * nHeads * (nopeHeadDim + vHeadDim)],
+                        kSize, nSize / kBlockSize, nHeads * (nopeHeadDim + vHeadDim));
+                }
 
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
@@ -1058,10 +1079,18 @@ public:
 
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
                 // copy WUV (nSize, kSize) to L1
-                CopyGmToL1Nd2Nz(awuvl1bBuf[curr],
-                                wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
-                                     (nopeHeadDim + nOffset) * kvLoraRank + kOffset],
-                                nSize, kSize, kvLoraRank, nBlockPad);
+                if (nz == 0) {
+                    CopyGmToL1Nd2Nz(awuvl1bBuf[curr],
+                                    wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
+                                         (nopeHeadDim + nOffset) * kvLoraRank + kOffset],
+                                    nSize, kSize, kvLoraRank, nBlockPad);
+                } else {
+                    CopyGmToL1(awuvl1bBuf[curr],
+                               wkvb[headIdx * (nopeHeadDim + vHeadDim) * kBlockSize +
+                                    (nopeHeadDim + nOffset) * kBlockSize +
+                                    kOffset * nHeads * (nopeHeadDim + vHeadDim)],
+                               nSize, kSize / kBlockSize, nHeads * (nopeHeadDim + vHeadDim));
+                }
 
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + curr);
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + curr);
@@ -1358,6 +1387,7 @@ private:
     uint32_t maxNumBlock;
     uint32_t maxSeqLen;
     float scale;
+    uint32_t nz;
     uint32_t topK;
     uint32_t qkStride;
 
@@ -1404,11 +1434,11 @@ private:
         GM_ADDR qk, GM_ADDR output, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, \
         GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t nopeHeadDim,         \
         uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,               \
-        uint32_t maxNumBlock, float scale, uint32_t topK)                                         \
+        uint32_t maxNumBlock, float scale, uint32_t nz, uint32_t topK)                            \
     {                                                                                             \
         MLA<dtype> op;                                                                            \
         op.Init(qWithQr, kCache, vCache, wkvb, topkIndices, qk, output, queryStartLoc, queryLens, \
                 cachedLens, blockTables, nHeads, ropeHeadDim, nopeHeadDim, vHeadDim, kvLoraRank,  \
-                blockSize, batch, maxNumBlock, scale, topK);                                      \
+                blockSize, batch, maxNumBlock, scale, nz, topK);                                  \
         op.Run();                                                                                 \
     }

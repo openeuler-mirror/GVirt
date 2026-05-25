@@ -64,13 +64,14 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
                      XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                      XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                      uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
-                     uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale);
+                     uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale,
+                     bool weightNZ = false);
 void XliteOpMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache, XTensor &wkvb,
                 XTensor &qk, XTensor &output, XTensor &queryStartLoc, XTensor &lens,
                 XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                 uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
-                uint32_t batch, uint32_t maxNumBlock, float scale, uint32_t topK = 0,
-                const XTensor &topkIndices = XTensor());
+                uint32_t batch, uint32_t maxNumBlock, float scale, bool weightNZ = false,
+                uint32_t topK = 0, const XTensor &topkIndices = XTensor());
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
                           float normEps, XTensor &out, const XTensor &normBias = XTensor());
