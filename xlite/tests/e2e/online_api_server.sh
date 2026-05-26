@@ -5,6 +5,8 @@ max_num_batched_tokens=${4:-8192}
 max_num_seqs=${5:-200}
 max_model_len=${6:-6656}
 tensor_parallel_size=${7:-8}
+# 模式选择: aclgraph, xlite_decode_only, xlite_full_mode
+mode=${8:-aclgraph}
 
 # 基础
 export VLLM_USE_V1=1
@@ -13,6 +15,11 @@ export TASK_QUEUE_ENABLE=1
 # 通信优化
 export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
+# xlite_full_mode 模式下 xlite 已接管 prefill，无需开启
+if [[ "${mode}" != "xlite_full_mode" ]]; then
+    export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+	echo "Enabling flash comm"
+fi
 # 计算优化
 export OMP_PROC_BIND=false
 export VLLM_ASCEND_ENABLE_NZ=2
@@ -44,9 +51,36 @@ fi
 ip=127.0.0.1
 
 expert_parallel_param=""
-if [[ "${model_path}" == *"Qwen3-30B-A3B-Instruct-2507"* ]]; then
-	expert_parallel_param="--enable-expert-parallel"
+config_file="${model_path}/config.json"
+if [[ -f "${config_file}" ]]; then
+    if grep -qE '"num_experts"|"num_local_experts"' "${config_file}" 2>/dev/null; then
+        expert_parallel_param="--enable-expert-parallel"
+        echo "Detected MoE model, enabling expert parallel"
+    fi
 fi
+
+quantization_param=""
+if [[ -f "${model_path}/quant_model_description.json" ]]; then
+	quantization_param="--quantization ascend"
+    echo "Detected quanted model, enabling quantization"
+fi
+
+# 根据 mode 选择参数
+case "${mode}" in
+	aclgraph)
+		additional_config_param='{"enable_cpu_binding": true}'
+		;;
+	xlite_decode_only)
+		additional_config_param='{"xlite_graph_config": {"enabled": true}, "enable_cpu_binding": true}'
+		;;
+	xlite_full_mode)
+		additional_config_param='{"xlite_graph_config": {"enabled": true, "full_mode": true}, "enable_cpu_binding": true}'
+		;;
+	*)
+		echo "Unknown mode: ${mode}, exit"
+		exit 1
+		;;
+esac
 
 python -m vllm.entrypoints.openai.api_server \
 	--model ${model_path}  \
@@ -59,9 +93,10 @@ python -m vllm.entrypoints.openai.api_server \
 	--trust-remote-code \
 	--served-model-name qwen \
 	--no-enable-prefix-caching \
-	--additional-config '{"xlite_graph_config": {"enabled": true, "full_mode": true}, "enable_cpu_binding": true}' \
+	--additional-config "${additional_config_param}" \
 	--compilation-config '{"cudagraph_capture_sizes":[1, 16, 32, 48, 64, 96, 152, 200], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
 	--async-scheduling \
 	${expert_parallel_param} \
+	${quantization_param} \
 	--host ${ip} \
 	--port ${port} > ${log} 2>&1 &

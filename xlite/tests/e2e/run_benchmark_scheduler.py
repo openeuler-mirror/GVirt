@@ -173,7 +173,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="GVirt 每日测试机器人调度器")
     parser.add_argument("--model", default=DEFAULT_MODEL, 
-                       help="测试模型类型 (dense/moe/all)，默认 moe")
+                       help="测试模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)，默认 moe")
     parser.add_argument("--receiver", default=DEFAULT_RECEIVER,
                        help="接收者ID，默认 927280411401503971")
     parser.add_argument("--build-container", default=DEFAULT_BUILD_CONTAINER,

@@ -8,19 +8,29 @@ MODEL_TYPE=${1:-moe}
 declare -A MODELS
 MODELS[dense]="Qwen3-32B|/mnt/nvme0n1/models/Qwen3-32B"
 MODELS[moe]="Qwen3-30B-A3B-Instruct-2507|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507"
+MODELS[dense_quant]="Qwen3-32B-w8a8-nopdmix|/mnt/nvme0n1/models/Qwen3-32B-w8a8-nopdmix"
+MODELS[moe_quant]="Qwen3-30B-A3B-Instruct-2507-w8a8|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507-w8a8"
 
 # 确定要测试的模型列表
 declare -a TEST_MODELS
 if [ "${MODEL_TYPE}" = "all" ]; then
+    TEST_MODELS=("dense" "moe" "dense_quant" "moe_quant")
+elif [ "${MODEL_TYPE}" = "origin" ]; then
     TEST_MODELS=("dense" "moe")
-elif [ "${MODEL_TYPE}" = "dense" ] || [ "${MODEL_TYPE}" = "moe" ]; then
+elif [ "${MODEL_TYPE}" = "quant" ]; then
+    TEST_MODELS=("dense_quant" "moe_quant")
+elif [ "${MODEL_TYPE}" = "dense" ] || [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "dense_quant" ] || [ "${MODEL_TYPE}" = "moe_quant" ]; then
     TEST_MODELS=("${MODEL_TYPE}")
 else
-    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'dense'、'moe' 或 'all'"
-    echo "用法：$0 [dense|moe|all]"
-    echo "  dense  - 测试 Qwen3-32B 模型"
-    echo "  moe    - 测试 Qwen3-30B-A3B-Instruct-2507 模型（默认）"
-    echo "  all    - 测试所有模型"
+    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'dense'、'moe'、'dense_quant'、'moe_quant'、'origin'、'quant' 或 'all'"
+    echo "用法：$0 [dense|moe|dense_quant|moe_quant|origin|quant|all]"
+    echo "  dense       - 测试 Qwen3-32B 模型"
+    echo "  moe         - 测试 Qwen3-30B-A3B-Instruct-2507 模型（默认）"
+    echo "  dense_quant - 测试 Qwen3-32B-w8a8 模型"
+    echo "  moe_quant   - 测试 Qwen3-30B-A3B-Instruct-2507-w8a8 模型"
+    echo "  origin      - 测试所有非量化模型模型"
+    echo "  quant       - 测试所有量化模型"
+    echo "  all         - 测试所有模型"
     exit 1
 fi
 
@@ -54,7 +64,7 @@ format_duration() {
     fi
 }
 
-# 启动服务（参数：服务启动脚本路径 日志文件名名 模型路径 max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size）
+# 启动服务（参数：服务启动脚本路径 日志文件名名 模型路径 max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size mode）
 start_server() {
     local server_script=$1
     local log_file=$2
@@ -63,14 +73,15 @@ start_server() {
     local max_num_seqs=$5
     local max_model_len=$6
     local tensor_parallel_size=$7
+    local mode=$8
     # 清理旧日志（避免残留关键字影响匹配）
     rm -f "${log_file}"
     echo -e "\n======================================"
-    echo "启动服务：${server_script} 8080 ${log_file} ${model_path} ${max_num_batched_tokens} ${max_num_seqs} ${max_model_len} ${tensor_parallel_size}"
+    echo "启动服务：${server_script} 8080 ${log_file} ${model_path} ${max_num_batched_tokens} ${max_num_seqs} ${max_model_len} ${tensor_parallel_size} ${mode}"
     echo "日志文件：${log_file}（独立日志）"
     echo "======================================"
     # 后台启动服务并记录PID
-    bash "${server_script}" 8080 "${log_file}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" &
+    bash "${server_script}" 8080 "${log_file}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "${mode}" &
     SERVER_PID=$!
     echo "服务进程PID：${SERVER_PID}"
 }
@@ -181,7 +192,7 @@ run_scenario_test() {
     # Xlite Decode Only 服务
     echo -e "\n>>> 测试 Xlite Decode Only 服务"
     local decode_only_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_xlite_decode_only.log"
-    start_server "online_server_xlite_decode_only.sh" "${decode_only_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}"
+    start_server "online_api_server.sh" "${decode_only_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "xlite_decode_only"
     if ! wait_server_ready "${decode_only_log}"; then
         echo "警告：Xlite Decode Only 服务启动失败，跳过此服务"
         cleanup_all_processes
@@ -195,7 +206,7 @@ run_scenario_test() {
     # Xlite Full 服务
     echo -e "\n>>> 测试 Xlite Full 服务"
     local full_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_xlite_full.log"
-    start_server "online_server_xlite_full.sh" "${full_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}"
+    start_server "online_api_server.sh" "${full_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "xlite_full_mode"
     if ! wait_server_ready "${full_log}"; then
         echo "警告：Xlite Full 服务启动失败，跳过此服务"
         cleanup_all_processes
@@ -209,7 +220,7 @@ run_scenario_test() {
     # Aclgraph 服务
     echo -e "\n>>> 测试 Aclgraph 服务"
     local aclgraph_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_aclgraph.log"
-    start_server "online_server_aclgraph.sh" "${aclgraph_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}"
+    start_server "online_api_server.sh" "${aclgraph_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "aclgraph"
     if ! wait_server_ready "${aclgraph_log}"; then
         echo "警告：Aclgraph 服务启动失败，跳过此服务"
         cleanup_all_processes
@@ -354,7 +365,9 @@ SCENARIOS[4]="102400|10240|1 16|1|136192|16|136192|8"
 # 定义每个模型的场景数量
 declare -A MODEL_SCENARIO_COUNT
 MODEL_SCENARIO_COUNT[dense]=3
+MODEL_SCENARIO_COUNT[dense_quant]=3
 MODEL_SCENARIO_COUNT[moe]=4
+MODEL_SCENARIO_COUNT[moe_quant]=4
 
 # 用于存储每个模型的场景测试结果
 declare -A MODEL_TEST_RESULTS
