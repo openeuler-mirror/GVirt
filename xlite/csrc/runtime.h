@@ -157,17 +157,13 @@ public:
     // ATTN
     bool _attnInitialized = false;
     uint32_t _maxNumBlocks;
-    int _prefillBatch;
     int _batch;
-    uint32_t _prefillLen;
-    uint32_t _prefillLenPad;
     XTensor _attnPosition;
     XTensor _attnBlockTables;
     XTensor _attnSlotMapping;
     XTensor _position;
     XTensor _blockTables;
     XTensor _slotMapping;
-    XTensor _prefillLastIdx;
     XTensor _cachedLens;
     XTensor _lens;
     XTensor _queryStartLoc;

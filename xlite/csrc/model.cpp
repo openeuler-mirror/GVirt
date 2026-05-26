@@ -972,14 +972,14 @@ void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
     }
 }
 
-void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output)
+void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XTensor &output)
 {
     uint32_t batch = rt._batch;
     XTensor localOutput({output.shape[1], output.shape[2]}, output.dtype, output.ptr);
 
     if (batch < input.shape[0]) {
         XTensor &x = rt.GetTensor({batch, _c.hiddenSize}, input.dtype, DBG_LOC);
-        XliteOpEmbed(rt, rt._prefillLastIdx, input, 0, input.shape[0], x);
+        XliteOpEmbed(rt, indices, input, 0, input.shape[0], x);
         XliteOpMatmul(rt, x, head, localOutput, _c.weightNZ);
         rt.PutTensor(x);
     } else {
@@ -1037,7 +1037,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
 void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                                  std::vector<std::vector<XTensor>> &kvCache,
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                                 XTensor &output)
+                                 XTensor &indices, XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
 
@@ -1047,7 +1047,7 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
     }
     XTensor &h = rt.GetTensor({rt.batchedTokens, _c.hiddenSize}, embed.dtype, DBG_LOC);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, h);
-    ForwardGetLogits(rt, h, output);
+    ForwardGetLogits(rt, h, indices, output);
     rt.PutTensor(h);
 }
 
@@ -1100,7 +1100,6 @@ size_t XModel::GetTensorPoolSize(int dbg)
     for (uint32_t i = 0; i < batchSize; i++) {
         attnMeta.lens.push_back(seqLen);
         attnMeta.cachedLens.push_back(_c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0);
-        attnMeta.isPrefills.push_back(true);
         std::vector<uint32_t> blockTable(maxNumBlocks);
         for (uint32_t j = 0; j < maxNumBlocks; j++) {
             blockTable[j] = i * maxNumBlocks + j;
@@ -1153,7 +1152,9 @@ size_t XModel::GetTensorPoolSize(int dbg)
 
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
     Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
-    ForwardGetLogits(rt, output, logits);
+    XTensor indices;
+    indices.Init({batchSize}, INT32, nullptr);
+    ForwardGetLogits(rt, output, indices, logits);
     size_t size = rt.maxUsedSize();
 
     if (_rankId == 0 && dbg) {
