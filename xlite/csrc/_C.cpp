@@ -634,7 +634,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     InitXTensor(_output, output);
     InitXTensor(_freqsCis, freqsCis);
 
-    if (kvCache.size() != _kv.size()) {
+    if (kvCache.size() < _kv.size()) {
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
     }
 
