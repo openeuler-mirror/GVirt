@@ -94,11 +94,11 @@ public:
     void Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                  std::vector<std::vector<XTensor>> &kvCache,
                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output);
-    void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &output);
+    void ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XTensor &output);
     void ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                              std::vector<std::vector<XTensor>> &kvCache,
                              std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                             XTensor &output);
+                             XTensor &indices, XTensor &output);
     void ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                                  std::vector<std::vector<XTensor>> &kvCache,
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,

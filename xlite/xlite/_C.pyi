@@ -258,7 +258,7 @@ class ModelAttnMeta:
     Attributes:
         lens (List[int]): Per-sample query lengths.
         cached_lens (List[int]): Per-sample cached lengths.
-        is_prefills (List[bool]): Prefill/decode flags per sample.
+        is_prefills (List[bool]): Prefill/decode flags per sample(deprecated).
         block_tables (List[List[int]]): Per-sample block tables.
     """
 
@@ -267,7 +267,7 @@ class ModelAttnMeta:
     cached_lens: List[int] = ...
     """Per-sample cached lengths."""
     is_prefills: List[bool] = ...
-    """Prefill/decode flags per sample."""
+    """Prefill/decode flags per sample(deprecated)."""
     block_tables: List[List[int]] = ...
     """Per-sample block tables."""
 
@@ -280,7 +280,7 @@ class AttnMeta:
     Attributes:
         lens (List[int]): Per-sample query lengths.
         cached_lens (List[int]): Per-sample cached lengths.
-        is_prefills (List[bool]): Prefill/decode flags per sample.
+        is_prefills (List[bool]): Prefill/decode flags per sample(deprecated).
         block_tables_cpu (List[List[int]]): Per-sample block tables on host.
         positions (torch.Tensor): Position tensor for version-1 attention metadata.
     """
@@ -290,7 +290,7 @@ class AttnMeta:
     cached_lens: List[int] = ...
     """Per-sample cached lengths."""
     is_prefills: List[bool] = ...
-    """Prefill/decode flags per sample."""
+    """Prefill/decode flags per sample(deprecated)."""
     block_tables_cpu: List[List[int]] = ...
     """Per-sample block tables on host."""
     positions: torch.Tensor = ...
@@ -614,6 +614,7 @@ class Model:
         self,
         rt: Runtime,
         input: torch.Tensor,
+        indices: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
@@ -622,6 +623,7 @@ class Model:
         Args:
             rt (Runtime): Native runtime handle.
             input (torch.Tensor): Input hidden-state tensor.
+            indices (torch.Tensor): Logits indices.
             output (torch.Tensor): Output logits tensor.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
@@ -640,6 +642,7 @@ class Model:
         attn_meta: ModelAttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: torch.Tensor,
+        indices: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
@@ -651,6 +654,7 @@ class Model:
             attn_meta (ModelAttnMeta): Device-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
             freqs_cis (torch.Tensor): Rotary frequency tensor.
+            indices (torch.Tensor): Logits indices.
             output (torch.Tensor): Output logits buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
@@ -669,6 +673,7 @@ class Model:
         attn_meta: AttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: torch.Tensor,
+        indices: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
@@ -680,6 +685,7 @@ class Model:
             attn_meta (AttnMeta): Host-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
             freqs_cis (torch.Tensor): Rotary frequency tensor.
+            indices (torch.Tensor): Logits indices.
             output (torch.Tensor): Output logits buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 

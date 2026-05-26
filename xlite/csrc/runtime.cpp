@@ -124,7 +124,6 @@ XRuntime::~XRuntime(void)
         (void)aclrtFree(_cachedLens.ptr);
         (void)aclrtFree(_lens.ptr);
         (void)aclrtFree(_queryStartLoc.ptr);
-        (void)aclrtFree(_prefillLastIdx.ptr);
         (void)aclrtFree(_blockTables.ptr);
     }
 
@@ -319,9 +318,6 @@ void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t m
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _queryStartLoc.Init({maxBatch}, INT32, ptr);
 
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _prefillLastIdx.Init({maxBatch}, INT32, ptr);
-
     size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _blockTables.Init({maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32, ptr);
@@ -337,8 +333,6 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     uint32_t batch = attnMeta.lens.size();
     std::vector<uint32_t> lens(batch);
     std::vector<uint32_t> cachedLens(batch);
-    std::vector<uint32_t> prefillIdx(batch);
-    std::vector<uint32_t> prefillLastIdx(batch);
     std::vector<uint32_t> queryStartLoc(batch);
     std::vector<uint32_t> slotMapping, blockTables;
     std::vector<uint64_t> position;
@@ -347,7 +341,6 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
 
     batchedTokens = 0;
     _maxNumBlocks = 0;
-    _prefillBatch = 0;
     _batch = static_cast<int>(batch);
     queryStart = 0;
     for (uint32_t i = 0; i < batch; i++) {
@@ -358,24 +351,13 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
         _maxNumBlocks = blockNum > _maxNumBlocks ? blockNum : _maxNumBlocks;
         batchedTokens += lens[i];
-        prefillLastIdx[i] = batchedTokens - 1;
-        if (attnMeta.isPrefills[i]) {
-            prefillIdx[_prefillBatch] = i;
-            _prefillBatch++;
-            _prefillLen = lens[i];
-            _prefillLenPad = ROUND_UP(_prefillLen, blockSize);
-        } else if (lens[i] > 2) {
-            std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attnMeta" << i
-                      << ", decode len too long" << lens[i] << std::endl;
-            return;
-        }
     }
 
     if (batchedTokens == 0 || batchedTokens > maxBatchedTokens) {
-        std::cerr << __FILE__ << ":" << __LINE__ << ": invalid attnMeta batched tokens("
-                  << batchedTokens << ") > maxBatchedTokens(" << maxBatchedTokens << ")"
-                  << std::endl;
-        return;
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": invalid attnMeta batched tokens(" +
+                                 std::to_string(batchedTokens) + ") > maxBatchedTokens(" +
+                                 std::to_string(maxBatchedTokens) + ")");
     }
 
     size = batch * XDtypeBit(INT32) / 8;
@@ -384,10 +366,6 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         aclrtMemcpy(_cachedLens.ptr, size, cachedLens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     CHECK_ACL(aclrtMemcpy(_queryStartLoc.ptr, size, queryStartLoc.data(), size,
                           ACL_MEMCPY_HOST_TO_DEVICE));
-    if (_prefillBatch > 0) {
-        CHECK_ACL(aclrtMemcpy(_prefillLastIdx.ptr, size, prefillLastIdx.data(), size,
-                              ACL_MEMCPY_HOST_TO_DEVICE));
-    }
 
     position.resize(batchedTokens);
     slotMapping.resize(batchedTokens);
@@ -427,9 +405,9 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             _attnPosition = attnMeta.vllmPosition;
             break;
         default:
-            std::cerr << __FILE__ << ":" << __LINE__
-                      << ": invalid attnMeta version: " << attnMeta.version << std::endl;
-            return;
+            throw std::runtime_error(
+                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                ": invalid attnMeta version: " + std::to_string(attnMeta.version));
     }
 }
 
