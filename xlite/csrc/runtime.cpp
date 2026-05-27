@@ -52,7 +52,7 @@ void XRuntime::Init(size_t sizeMB)
     _nDevPerNode = count;
 
     if (sizeMB != 0) {
-        _pool = new XTensorPool(sizeMB << MB_BIT);
+        _pool = new XTensorPool(sizeMB << MB_BIT, _rankId);
         if (_pool->Init()) {
             throw std::runtime_error("XRuntime: tensor pool initialization failed");
         }
@@ -502,7 +502,7 @@ void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
     CHECK_ACL(aclrtGetDeviceCount(&count));
     _nDevPerNode = count;
 
-    _pool = new XDummyTensorPool(sizeMB << MB_BIT);
+    _pool = new XDummyTensorPool(sizeMB << MB_BIT, _rankId);
     if (_pool->Init()) {
         throw std::runtime_error("XDummyRuntime: tensor pool initialization failed");
     }

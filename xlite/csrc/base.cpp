@@ -366,12 +366,12 @@ XTensor &XTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtype, De
     void *ptr = _ptr;
 
     if (shape.empty()) {
-        std::cerr << loc.file << ":" << loc.line << ": size is 0" << std::endl;
+        std::cerr << loc.func << ":" << loc.line << ": size is 0" << std::endl;
         throw std::invalid_argument("get tensor shape size is 0");
     }
 
     if (_free.empty()) {
-        std::cerr << loc.file << ":" << loc.line
+        std::cerr << loc.func << ":" << loc.line
                   << ": dynamic tensor too many, please put after use" << std::endl;
         throw std::runtime_error("dynamic tensor too many, please put after use");
     }
@@ -402,7 +402,7 @@ XTensor &XTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtype, De
         return t;
     }
 
-    std::cerr << loc.file << ":" << loc.line << ": get " << size << " B failed, no free tensor";
+    std::cerr << loc.func << ":" << loc.line << ": get " << size << " B failed, no free tensor";
     std::cerr << ", shape=(";
     for (uint32_t i = 0; i < shape.size(); i++) {
         std::cerr << shape[i];
@@ -448,12 +448,12 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
     void *ptr = _ptr;
 
     if (shape.empty()) {
-        std::cerr << loc.file << ":" << loc.line << ": size is 0" << std::endl;
+        std::cerr << loc.func << ":" << loc.line << ": size is 0" << std::endl;
         throw std::invalid_argument("get tensor shape size is 0");
     }
 
     if (_free.empty()) {
-        std::cerr << loc.file << ":" << loc.line
+        std::cerr << loc.func << ":" << loc.line
                   << ": dynamic tensor too many, please put after use" << std::endl;
         throw std::runtime_error("dynamic tensor too many, please put after use");
     }
@@ -484,6 +484,15 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
     if (currUsedSize > maxUsedSize) {
         maxUsedSize = currUsedSize;
     }
+
+#ifdef XLITE_DEBUG_XTENSOR_ON
+    if (_rankId == 0) {
+        std::cout << "[DEBUG][" << __func__ << "](rank" << _rankId << ") " << loc.func << ":"
+                  << loc.line << ": allocate " << ToSizeStr(size)
+                  << ", max size: " << ToSizeStr(maxUsedSize) << std::endl;
+    }
+#endif
+
     return t;
 }
 
