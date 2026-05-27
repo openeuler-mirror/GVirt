@@ -108,7 +108,7 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.
-    quantization: Literal["none", "experts_int8", "w8a8"] = "none"
+    quantization: Literal["none", "w8a8"] = "none"
     moe_ep_size: int = 1
     moe_tp_size: int = 1
     model_type: Literal["deepseek_v3", "deepseek_v32", "glm5"] = "deepseek_v3"
@@ -834,7 +834,7 @@ class Expert(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        if args.quantization in ("experts_int8", "w8a8"):
+        if args.quantization == "w8a8":
             self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
         else:
@@ -1410,18 +1410,7 @@ class DeepSeek_V3(nn.Module):
         self.xlite_model.re_down = [self.layers[i].ffn.experts[j].w2.weight
                                     for i in range(args.n_dense_layers, args.n_layers)
                                     for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-        if args.quantization == "experts_int8":
-            for i in range(self.args.n_dense_layers, self.args.n_layers):
-                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx):
-                    self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
-                    self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
-            self.xlite_model.re_up_gate_deq_scale = [self.layers[i].ffn.experts[j].w13.weight.xlite_scale
-                                                     for i in range(args.n_dense_layers, args.n_layers)
-                                                     for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-            self.xlite_model.re_down_deq_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
-                                                  for i in range(args.n_dense_layers, args.n_layers)
-                                                  for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-        elif args.quantization == "w8a8":
+        if args.quantization == "w8a8":
             for i in range(self.args.n_layers):
                 if self.layers[i].attn.indexer is not None:
                     self.layers[i].attn.indexer.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.indexer.wq_b.weight.scale[0::1]
