@@ -176,40 +176,6 @@ function run_llama_34B()
     rm $test_config_path
 }
 
-function run_deepseek_v3()
-{
-    echo '{
-        "vocab_size": 129280,
-        "dim": 7168,
-        "inter_dim": 18432,
-        "moe_inter_dim": 2048,
-        "n_layers": 61,
-        "n_dense_layers": 3,
-        "n_heads": 128,
-        "n_routed_experts": 256,
-        "n_shared_experts": 1,
-        "n_activated_experts": 8,
-        "n_expert_groups": 8,
-        "n_limited_groups": 4,
-        "route_scale": 2.5,
-        "score_func": "sigmoid",
-        "q_lora_rank": 1536,
-        "kv_lora_rank": 512,
-        "qk_nope_head_dim": 128,
-        "qk_rope_head_dim": 64,
-        "v_head_dim": 128,
-        "dtype": "bf16",
-        "quantization": "experts_int8",
-        "moe_ep_size": 16,
-        "moe_tp_size": 1,
-        "max_batch_size": 1,
-        "max_seq_len": 1024
-    }' > $test_config_path
-    # w8a8
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-V3.1-expert-int8 ${RUN_ARGS[@]}
-    rm $test_config_path
-}
-
 function run_deepseek_v3_w8a8()
 {
     echo '{
@@ -528,7 +494,6 @@ else
     npu_count=$(python -c "import torch; print(torch.npu.device_count())")
     if [ $npu_count -ge 16 ]; then
         run_glm4_moe
-        run_deepseek_v3
         run_deepseek_v3_w8a8
         run_glm5_w8a8
         run_minimax_m2
