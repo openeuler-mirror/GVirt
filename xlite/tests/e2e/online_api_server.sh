@@ -53,7 +53,7 @@ ip=127.0.0.1
 expert_parallel_param=""
 config_file="${model_path}/config.json"
 if [[ -f "${config_file}" ]]; then
-    if grep -qE '"num_experts"|"num_local_experts"' "${config_file}" 2>/dev/null; then
+    if grep -q "num_experts\|moe_intermediate_size" "${config_file}" 2>/dev/null; then
         expert_parallel_param="--enable-expert-parallel"
         echo "Detected MoE model, enabling expert parallel"
     fi
