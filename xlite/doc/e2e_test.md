@@ -1,15 +1,17 @@
-### vllm_ascend + xlite 在线服务性能测试及对比
+# vllm_ascend + xlite 在线服务性能测试及对比
 
-1. **快速开始**
-```
+## 快速开始
+
+```bash
 # 安装vllm_ascend, 可参考https://github.com/vllm-project/vllm-ascend/blob/main/README.md
 
 # 安装xlite
 pip install xlite
 ```
 
-2. **启动在线服务**
-```
+## 启动在线服务
+
+```bash
 # xlite可选择decode only或full其中一种模式启动在线服务：
 # a. 配置xlite decode only模式，设置--additional-config='{"xlite_graph_config": {"enabled": true}}'
 cd ./tests/e2e/
@@ -33,8 +35,9 @@ bash online_api_server.sh 8080 server.log [model_path] [max_num_batched_tokens] 
 # - tensor_parallel_size: 张量并行大小（可选，默认8）
 ```
 
-3. **启动在线压测**
-```
+## 启动在线压测
+
+```bash
 # 运行压测脚本
 cd ./tests/e2e/
 bash online_server_test.sh [TYPE] [INPUT_LEN] [OUTPUT_LEN] [MODEL_NAME] [TOKENIZER_PATH] [HOST] [PORT] [CONCURRENCY_LIST] [NUM_PROMPTS_MULTIPLIER] [MAIN_OUTPUT_DIR]
@@ -58,8 +61,9 @@ bash online_server_test.sh
 bash online_server_test.sh xlite_decode_only 512 512 qwen /mnt/nvme0n1/models/Qwen3-32B 127.0.0.1 8080 "1 16 32 48 64 100" 10 ./benchmark_results
 ```
 
-4. **性能对比**
-```
+## 性能对比
+
+```bash
 # 方式方法1：一键运行完整性能对比（推荐）
 # 自动测试多个场景，包括三种服务（xlite_decode_only、xlite_full、aclgraph），并生成对比报告
 cd ./tests/e2e/
@@ -97,15 +101,34 @@ python process_data.py <aclgraph_dir> <xlite_full_dir> <xlite_decode_only_dir> -
 python process_data.py ./result_input_512_output_512_aclgraph ./result_input_512_output_512_xlite_full ./result_input_512_output_512_xlite_decode_only -o ./benchmark_comparison.log -m "Qwen3 32B"
 ```
 
-5. **每日自动化测试机器人**
+## 精度测试
+
+```bash
+# 运行精度测试脚本
+# 以下脚本会比较（Qwen3-30B-A3B, TP4EP4, xlite decode-only）和（Qwen3-30B-A3B, TP4EP4, aclgraph）两种配置在ceval数据集上的输出差异
+# 通过修改(--models, --tp-sizes, --ep-sizes, --xlite, --xlite-full)参数，可以测试不同配置的性能和输出差异
+cd tests/e2e/
+python batch_aisbench.py --help # 查看参数说明
+python batch_aisbench.py "/workspace/benchmark" \
+--num-prompts 64 \
+--model-dir "/mnt/sdb/models" \
+--models "Qwen3-30B-A3B" "Qwen3-30B-A3B" \
+--tp-sizes 4 4 \
+--ep-sizes 1 1 \
+--xlite 1 0 \
+--xlite-full 0 0
+```
+
+## 每日自动化测试机器人
 
 每日自动化测试机器人用于定时执行性能测试、对比版本差异、检测性能劣化并发送通知。
 
-### 5.1 容器准备
+### 容器准备
 
 需要准备两个容器：编译容器和测试容器。
 
 **启动编译容器 (xlite-build):**
+
 ```bash
 docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
   --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
@@ -124,7 +147,8 @@ docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE 
   /bin/bash -c "while true;do echo hello;sleep 5;done"
 ```
 
-**启动测试容器 (daily-test):**
+### 启动测试容器 (daily-test)
+
 ```bash
 docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
   --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
@@ -144,16 +168,18 @@ docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE 
   /bin/bash -c "while true;do echo hello;sleep 5;done"
 ```
 
-### 5.2 安装定时任务
+### 安装定时任务
 
 使用 Python 原生的 `schedule` 库实现定时任务，适合容器环境和宿主机环境：
 
 **安装依赖：**
+
 ```bash
 pip install schedule
 ```
 
 **运行调度器：**
+
 ```bash
 cd ./tests/e2e/
 
@@ -175,6 +201,7 @@ python3 run_benchmark_scheduler.py \
 ```
 
 **后台运行：**
+
 ```bash
 # 使用 nohup 后台运行
 nohup python3 run_benchmark_scheduler.py > scheduler.log 2>&1 &
@@ -186,7 +213,7 @@ echo $! > .scheduler.pid
 kill $(cat .scheduler.pid)
 ```
 
-### 5.3 手动执行测试
+### 手动执行测试
 
 除了定时任务，也可以手动执行测试：
 
@@ -196,6 +223,7 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 ```
 
 **可选参数：**
+
 - `--model`: 测试模型类型（dense/moe/all），默认 moe
 - `--skip-pull`: 跳过代码拉取
 - `--skip-build`: 跳过编译
@@ -206,7 +234,7 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
   - yellow 环境：需要执行 source /home/env.sh
   - blue 环境：不需要 source /home/env.sh
 
-### 5.4 测试流程
+### 测试流程
 
 自动化测试机器人执行以下流程：
 
@@ -218,7 +246,7 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 6. **性能检测**：检测性能劣化（超过阈值时告警）
 7. **通知发送**：发送测试结果到群组
 
-### 5.5 性能对比规则
+### 性能对比规则
 
 - **劣化判断**：
   - QPS 和 Output Speed：下降超过阈值视为劣化
@@ -226,7 +254,7 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 - **阈值设置**：默认为 5%，可通过 `--threshold` 参数调整
 - **对比基线**：自动查找同版本号的基线测试报告进行对比
 
-### 5.6 输出结果
+### 输出结果
 
 测试结果保存在 `/home/daily_reports/` 目录下：
 
@@ -242,12 +270,13 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
   - `daily_summary_*.txt`：每日测试摘要
 
 **日志说明**：
+
 - 测试执行日志会同时输出到终端和文件
 - 日志文件命名格式：`daily_benchmark_YYYYMMDD_HHMMSS.log`
 - 日志文件保存在版本报告目录中：`/home/daily_reports/xlite-{version}-{date}/daily_benchmark_YYYYMMDD_HHMMSS.log`
 - 日志文件与测试报告（benchmark_comparison_*.log 等）保存在同一目录
 
-### 5.7 常用命令
+### 常用命令
 
 **调度器管理：**
 ```bash
@@ -266,11 +295,12 @@ kill <PID>
 ```
 
 **手动执行测试：**
+
 ```bash
 python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
 ```
 
-### 5.8 NPU-SMI 版本检测
+### NPU-SMI 版本检测
 
 脚本会自动检测 NPU-SMI 版本并决定是否禁用 XCCL：
 
@@ -278,7 +308,7 @@ python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
 - **Version < 25.3**：禁用 XCCL（旧版本需要禁用）
 - **无法获取版本**：默认禁用 XCCL
 
-### 5.9 退出码
+### 退出码
 
 - `0`：成功，无性能劣化
 - `1`：执行失败
