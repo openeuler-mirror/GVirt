@@ -25,21 +25,30 @@ dist.init_process_group("hccl")
 rt = Runtime(local_rank, 500, rank, world_size)
 torch.npu.set_device(local_rank)
 
-with torch.device("npu"):
-    x = torch.randn(8, 7168, dtype=torch.float)
-    standard = x.clone()
-    z = torch.empty_like(standard)
+passed = True
+for dim1, dim2 in zip([1, 1, 1, 1, 32, 7168], [1, 4, 16, 37, 32, 7168]):
+    with torch.device("npu"):
+        x = torch.rand(dim1, dim2, dtype=torch.float)
+        standard = x.clone()
+        z = torch.empty_like(x)
 
-dist.all_reduce(standard, op=dist.ReduceOp.SUM)
+        dist.all_reduce(standard, op=dist.ReduceOp.SUM)
 
-torch.npu.synchronize()
-all_reduce(rt, z, x)
-torch.npu.synchronize()
-if rank == 1:
-    print('all reduce executed!')
-    try:
-        torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
-    except AssertionError as e:
-        print(f'{e}')
-        print(f'torch_npu: {standard}')
-        print(f'xlite: {z}')
+        torch.npu.synchronize()
+        all_reduce(rt, z, x)
+        torch.npu.synchronize()
+
+        try:
+            torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
+        except AssertionError as e:
+            print(
+                f"{'=' * 50}\n"
+                f"AllReduce result mismatch for dim ({dim1}, {dim2}) at rank {rank}. {e}\n"
+                f"Expected: {standard}\n"
+                f"Got: {z}\n",
+                end="",
+                flush=True,
+            )
+            passed = False
+
+print(f"***** AllReduce test {'passed' if passed else 'failed'} on rank {rank}! *****\n", end="", flush=True)
