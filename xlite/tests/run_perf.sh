@@ -71,6 +71,18 @@ if [ $npu_count -ge 16 ]; then
     for bs in 1 16; do
         run_bench_test deepseek_v3 $bs 100 1024 bfloat16 run_deepseek_v3 TP16moeEP16 decode
     done
+
+    for bs in 1 16; do
+        run_bench_test deepseek_v3_w8a8 $bs 100 1024 bfloat16 run_deepseek_v3_w8a8 TP16moeEP16 decode
+    done
+
+    for bs in 1 16; do
+        run_bench_test glm5_w8a8 $bs 100 1024 bfloat16 run_glm5_w8a8 TP16moeEP16 decode
+    done
+
+    for bs in 1 16; do
+        run_bench_test minimax_m2 $bs 100 1024 bfloat16 run_minimax_m2 TP16moeEP16 decode
+    done
 fi
 
 # Prefill测试 (3456+1)
@@ -87,4 +99,7 @@ run_bench_test qwen3_moe_30B 1 3456 1 bfloat16 run_qwen3_moe_30B TP8moeEP8 prefi
 if [ $npu_count -ge 16 ]; then
     run_bench_test glm4_moe 1 3456 1 bfloat16 run_glm4_moe TP16moeEP16 prefill
     run_bench_test deepseek_v3 1 3456 1 bfloat16 run_deepseek_v3 TP16moeEP16 prefill
+    run_bench_test deepseek_v3_w8a8 1 3456 1 bfloat16 run_deepseek_v3_w8a8 TP16moeEP16 prefill
+    run_bench_test glm5_w8a8 1 3456 1 bfloat16 run_glm5_w8a8 TP16moeEP16 prefill
+    run_bench_test minimax_m2 1 3456 1 bfloat16 run_minimax_m2 TP16moeEP16 prefill
 fi
