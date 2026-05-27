@@ -28,7 +28,7 @@
 #define DBG_LOC            \
     DebugSrcLoc            \
     {                      \
-        __FILE__, __LINE__ \
+        __func__, __LINE__ \
     }
 
 #define DBG_PREFIX (std::string(__func__) + ": ")
@@ -66,7 +66,7 @@ enum QuantType {
 };
 
 typedef struct DebugSrcLoc {
-    const char *file;
+    const char *func;
     int line;
 } DebugSrcLoc;
 
@@ -126,6 +126,17 @@ size_t inline XDtypeBit(enum XDtype dtype)
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                      ": unknown data type " + std::to_string(dtype));
     }
+}
+
+inline std::string ToSizeStr(size_t size)
+{
+    if (size < (1 << 10))
+        return std::to_string(size) + "B";
+    if (size < (1 << 20))
+        return std::to_string(size >> 10) + "KB";
+    if (size < (1 << 30))
+        return std::to_string(size >> 20) + "MB";
+    return std::to_string(size >> 30) + "GB";
 }
 
 #ifdef XLITE_DEBUG_ON
@@ -190,7 +201,7 @@ private:
 class XTensorPool
 {
 public:
-    XTensorPool(size_t size) : _size(size) {};
+    XTensorPool(size_t size, uint32_t rankId) : _size(size), _rankId(rankId) {};
     virtual ~XTensorPool(void);
     virtual int Init(void);
     virtual XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
@@ -208,6 +219,7 @@ public:
 protected:
     void *_ptr = nullptr;
     size_t _size;
+    uint32_t _rankId;
     XTensor _t[XLITE_MAX_NUM_DYNAMIC_TENSOR];
     std::list<std::reference_wrapper<XTensor>> _free;
     std::list<std::reference_wrapper<XTensor>> _used;
