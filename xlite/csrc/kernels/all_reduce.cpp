@@ -38,7 +38,7 @@ public:
         this->rankSize = rankSize;
         this->coreIdx = block_idx;
         this->coreNum = block_num;
-        uint64_t countPerRank = DIV_ROUND_UP(count, rankSize);
+        this->countPerRank = DIV_ROUND_UP(count, rankSize);
         this->blockNum = rankSize;
         this->offsetCurrRank = countPerRank * myRankId;
         this->generation = generation;
@@ -115,11 +115,11 @@ public:
         }
 
         // each rank process countPerRank elements
-        countCurrRank = countPerRank;
-        if (myRankId * countPerRank + countCurrRank > count) {
-            countCurrRank = count - myRankId * countPerRank;
+        this->countCurrRank = countPerRank;
+        if ((myRankId + 1) * countPerRank > count) {
+            this->countCurrRank = count - myRankId * countPerRank;
         }
-        this->countPerBlock = DIV_ROUND_UP(countCurrRank, blockNum);
+        this->countLastRank = count - countPerRank * (rankSize - 1);
     }
 
     __aicore__ inline void SetIpcFlag(uint32_t flagId, uint32_t value)
@@ -254,7 +254,7 @@ public:
                 taskCount = countCurrRank - taskOffset;
             }
             uint32_t copyNum = DIV_ROUND_UP(taskCount, copyCount);
-            uint64_t offset = myRankId * countCurrRank + taskOffset;
+            uint64_t offset = myRankId * countPerRank + taskOffset;
             for (uint32_t copyIdx = 0; copyIdx < copyNum; copyIdx++) {
                 uint64_t copyOffset = copyIdx * copyCount;
                 uint64_t gmOffset = offset + copyOffset;
@@ -297,13 +297,15 @@ public:
             if (processRankIdx == myRankId || processRankIdx >= rankSize) {
                 continue;
             }
+            uint64_t countCurrProcRank =
+                (processRankIdx == rankSize - 1) ? countLastRank : countPerRank;
             uint32_t taskIdx = rankSize > coreNum ? 0 : coreIdx % corePerRank;
-            uint64_t countPerTask = DIV_ROUND_UP(countCurrRank, corePerRank);
+            uint64_t countPerTask = DIV_ROUND_UP(countCurrProcRank, corePerRank);
             uint64_t taskOffset = taskIdx * countPerTask;
-            uint64_t outOffset = processRankIdx * countCurrRank + taskOffset;
+            uint64_t outOffset = processRankIdx * countPerRank + taskOffset;
             uint64_t taskCount = countPerTask;
             if (taskOffset + taskCount > countCurrRank) {
-                taskCount = countCurrRank - taskOffset;
+                taskCount = countCurrProcRank - taskOffset;
             }
             uint32_t copyNum = DIV_ROUND_UP(taskCount, copyCount);
 
@@ -340,7 +342,8 @@ private:
     uint64_t count;
     uint64_t offsetCurrRank;
     uint64_t countCurrRank;
-    uint64_t countPerBlock;
+    uint64_t countPerRank;
+    uint64_t countLastRank;
     uint64_t generation;
     uint32_t myRankId;
     uint32_t rankSize;
@@ -360,6 +363,9 @@ private:
         GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId, uint32_t rankSize, \
         uint64_t generation, GM_ADDR param, uint32_t copySize)                             \
     {                                                                                      \
+        if (count == 0 || rankSize <= 1 || copySize == 0) {                                \
+            return;                                                                        \
+        }                                                                                  \
         AllReduce<dtype> op;                                                               \
         op.Init(input, output, count, rankId, rankSize, generation, param, copySize);      \
         op.Run();                                                                          \

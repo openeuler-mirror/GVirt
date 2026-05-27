@@ -119,7 +119,7 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (IsDummyRuntime(rt)) {
-        if (xcclComm && in.dtype != INT64) {
+        if (xcclComm && in.dtype != INT64 && rankSize > 1) {
             bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
             if (needCopy) {
                 XTensor &tmpIn =
@@ -128,6 +128,14 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
                 rt.PutTensor(tmpIn);
                 rt.PutTensor(tmpOut);
             }
+        }
+        return;
+    }
+
+    if (rankSize <= 1) {
+        if (in.ptr != out.ptr) {
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, in.ptr, inBytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         }
         return;
     }
@@ -237,7 +245,7 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (IsDummyRuntime(rt)) {
-        if (xcclComm && in.dtype != INT64) {
+        if (xcclComm && in.dtype != INT64 && rankSize > 1) {
             bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
             if (needCopy) {
                 XTensor &tmpIn =
@@ -246,6 +254,14 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
                 rt.PutTensor(tmpIn);
                 rt.PutTensor(tmpOut);
             }
+        }
+        return;
+    }
+
+    if (rankSize <= 1) {
+        if (in.ptr != out.ptr) {
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, in.ptr, inBytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         }
         return;
     }
@@ -346,7 +362,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
     size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
 
     if (IsDummyRuntime(rt)) {
-        if (xcclComm && in.dtype != INT64) {
+        if (xcclComm && in.dtype != INT64 && rank > 1) {
             bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
             if (needCopy) {
                 XTensor &tmpBuff =
@@ -356,6 +372,15 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
         }
         return;
     }
+
+    if (rank <= 1) {
+        if (in.ptr != out.ptr) {
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, in.ptr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
+                                       rt.stream));
+        }
+        return;
+    }
+
     if (xcclComm && in.dtype != INT64) {
         bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
         void *inPtr = in.ptr;

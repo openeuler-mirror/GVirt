@@ -310,6 +310,9 @@ private:
         GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId, uint32_t rankSize, \
         uint64_t generation, GM_ADDR param, uint32_t copySize)                             \
     {                                                                                      \
+        if (count == 0 || rankSize <= 1 || copySize == 0) {                                \
+            return;                                                                        \
+        }                                                                                  \
         ReduceScatter<dtype> op;                                                           \
         op.Init(input, output, count, rankId, rankSize, generation, param, copySize);      \
         op.Run();                                                                          \
