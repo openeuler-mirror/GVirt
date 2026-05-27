@@ -268,30 +268,22 @@ void XModel::ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x,
     isTransposed = _c.quantAttnWeightTrans;
 
     XTensor &xQuanted = rt.GetTensor(x.shape, INT8, DBG_LOC);
-    XTensor &outQuanted = rt.GetTensor(out.shape, FP16, DBG_LOC);
     if (quantType == DYNAMIC_QUANT) {
         // quant(x) -> xQuanted, perChannelScale
         XTensor &scale = rt.GetTensor({x.shape[0]}, FP32, DBG_LOC);
         XliteOpQuantDyn(rt, x, scale, xQuanted);
-        // matmul(xQuanted, weight, quantBias, deqScale) -> outQuanted
-        XliteOpMatmul(rt, xQuanted, w.weight, outQuanted, isNz, w.quantBias, w.deqScale,
-                      isTransposed);
-        rt.PutTensor(xQuanted);
-        // dequant(outQuanted, perChannelScale) -> out
-        XliteOpDeQuant(rt, outQuanted, out, scale);
-        rt.PutTensor(outQuanted);
+        // matmulDequant(xQuanted, weight, quantBias, deqScale, perChannelScale) -> out
+        XliteOpMatmulDeQuant(rt, xQuanted, w.weight, out, w.quantBias, w.deqScale, isNz,
+                             isTransposed, scale);
         rt.PutTensor(scale);
     } else {
         // quant(x) -> xQuanted
         XliteOpQuant(rt, x, w.inputScale, w.inputOffset, xQuanted);
         // matmul(xQuanted, weight, quantBias, deqScale) -> outQuanted
-        XliteOpMatmul(rt, xQuanted, w.weight, outQuanted, isNz, w.quantBias, w.deqScale,
-                      isTransposed);
-        rt.PutTensor(xQuanted);
-        // dequant(outQuanted) -> out
-        XliteOpDeQuant(rt, outQuanted, out);
-        rt.PutTensor(outQuanted);
+        XliteOpMatmulDeQuant(rt, xQuanted, w.weight, out, w.quantBias, w.deqScale, isNz,
+                             isTransposed);
     }
+    rt.PutTensor(xQuanted);
 }
 
 std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
@@ -675,18 +667,18 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> XModel::Forwar
         rt.PutTensor(packedRecv);
 
         XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
+        XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
         XTensor &expertsSorted =
             rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
-        XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
         XliteOpPermutation(rt, inputAllDp, routingAllDp, start, end, expertsSorted, unpIdx,
                            expertsCounts);
         rt.PutTensor(inputAllDp);
         return {weightsAllDp, routingAllDp, unpIdx, expertsSorted, expertsCounts};
     } else {
         XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
+        XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
         XTensor &expertsSorted =
             rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
-        XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
         XliteOpPermutation(rt, tokenSorted, routing, start, end, expertsSorted, unpIdx,
                            expertsCounts);
         return {weights, routing, unpIdx, expertsSorted, expertsCounts};
@@ -748,19 +740,14 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         XliteOpQuantDyn(rt, expertsSorted, scale, xQuanted, num);
         rt.PutTensor(expertsSorted);
 
-        // group_matmul(xQuanted * w13 * w13Scale) -> h13Quanted
-        XTensor &h13Quanted =
-            rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, FP16, DBG_LOC);
-        XliteOpGroupMatmul(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateDeqScale[layer],
-                           expertsCounts, start, end, moeREUpGate[layer][start].dtype,
-                           intermediateSize * 2, _c.hiddenSize, h13Quanted,
-                           _c.weightNZ || _c.expertsWeightNZ, _c.expertsWeightTrans);
+        // group_matmul(xQuanted * w13 * w13Scale) * perChannelScale -> h13
+        XTensor &h13 =
+            rt.GetTensor({mAllDp * _c.nActExperts, intermediateSize * 2}, dtype, DBG_LOC);
+        XliteOpGroupMatmulDeQuant(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateDeqScale[layer],
+                                  expertsCounts, start, end, moeREUpGate[layer][start].dtype,
+                                  intermediateSize * 2, _c.hiddenSize, h13, scale, num,
+                                  _c.weightNZ || _c.expertsWeightNZ, _c.expertsWeightTrans);
         rt.PutTensor(xQuanted);
-
-        // dequant(h13Quanted, perChannelScale) -> h13
-        XTensor &h13 = rt.GetTensor(h13Quanted.shape, dtype, DBG_LOC);
-        XliteOpDeQuant(rt, h13Quanted, h13, scale, num);
-        rt.PutTensor(h13Quanted);
         rt.PutTensor(scale);
         h13Ptr = &h13;
     } else {
@@ -786,18 +773,13 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         XliteOpQuantDyn(rt, h2, scale, xQuanted, num);
         rt.PutTensor(h2);
 
-        // group_matmul(xQuanted * w2 * w2Scale) -> outQuanted
-        XTensor &outQuanted = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, FP16, DBG_LOC);
-        XliteOpGroupMatmul(rt, xQuanted, _moeREDown[layer], _moeREDownDeqScale[layer],
-                           expertsCounts, start, end, moeREDown[layer][start].dtype, _c.hiddenSize,
-                           intermediateSize, outQuanted, _c.weightNZ || _c.expertsWeightNZ,
-                           _c.expertsWeightTrans);
+        // group_matmul(xQuanted * w2 * w2Scale) * perChannelScale -> h2
+        XTensor &out = rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, dtype, DBG_LOC);
+        XliteOpGroupMatmulDeQuant(rt, xQuanted, _moeREDown[layer], _moeREDownDeqScale[layer],
+                                  expertsCounts, start, end, moeREDown[layer][start].dtype,
+                                  _c.hiddenSize, intermediateSize, out, scale, num,
+                                  _c.weightNZ || _c.expertsWeightNZ, _c.expertsWeightTrans);
         rt.PutTensor(xQuanted);
-
-        // dequant(outQuanted, perChannelScale) -> out
-        XTensor &out = rt.GetTensor(outQuanted.shape, dtype, DBG_LOC);
-        XliteOpDeQuant(rt, outQuanted, out, scale, num);
-        rt.PutTensor(outQuanted);
         rt.PutTensor(scale);
         outPtr = &out;
     } else {
