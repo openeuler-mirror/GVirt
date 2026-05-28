@@ -476,6 +476,13 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
             t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
             _free.pop_front();
             _used.insert(it, t);
+#ifdef XLITE_DEBUG_XTENSOR_ON
+            if (_rankId == 0) {
+                std::cout << "[DEBUG][" << __func__ << "](rank" << _rankId << ") " << loc.func
+                          << ":" << loc.line << ": allocate " << ToSizeStr(size) << " from used"
+                          << std::endl;
+            }
+#endif
             return t;
         }
         ptr = reinterpret_cast<void *>(
