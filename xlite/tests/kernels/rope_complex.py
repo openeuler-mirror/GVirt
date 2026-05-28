@@ -36,7 +36,8 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
     freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
-    y = torch.view_as_real(x * freqs_cis).flatten(3)
+    y = torch.view_as_real(x * freqs_cis)  # shape: (..., half_dim, 2)
+    y = torch.cat([y[..., 0], y[..., 1]], dim=-1)  # TWTWTW -> TTTWWW
     return y.to(dtype)
 
 
@@ -49,6 +50,7 @@ BATCH_SIZE = 8
 SEQ_LEN = 10
 
 test_cases = {
+    (torch.float16, 64, 64),
     (torch.float16, 64, 128),
     (torch.float16, 64, 192),
     (torch.float16, 64, 576),
@@ -72,11 +74,6 @@ for test_dtype, rope_dim, q_dim in test_cases:
         output_pe = torch.zeros(num_tokens, n_local_heads, rope_dim)
         
         position = torch.arange(SEQ_LEN, dtype=torch.int64).repeat(BATCH_SIZE)
-        
-        vGatherIndices = torch.arange(rope_dim, dtype=torch.int32)
-        for i in range(rope_dim // 2):
-            vGatherIndices[i * 2] = i * 4
-            vGatherIndices[i * 2 + 1] = i * 4 + 1024
 
     # standard
     # Reshape to (bsz, seqlen, n_local_heads, q_dim) for apply_rotary_emb
@@ -93,7 +90,7 @@ for test_dtype, rope_dim, q_dim in test_cases:
     # xlite
     torch.npu.synchronize()
     rope_complex(rt, n_local_heads, q_dim, rope_dim, attnQWithQr_xlite,
-                freqs_cis_xlite, position, vGatherIndices)
+                freqs_cis_xlite, position)
     torch.npu.synchronize()
 
     logging.info(f'rope_complex (rope_dim={rope_dim}, q_dim={q_dim}, {test_dtype}) executed!')

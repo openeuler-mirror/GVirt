@@ -203,7 +203,6 @@ private:
     // ATTN
     uint64_t _mropeMaskH;
     uint64_t _mropeMaskW;
-    XTensor _vGather;
     XTensor _a2v;
     XTensor _v2a;
     XTensor _sync;
