@@ -131,6 +131,7 @@ class ModelConfig:
         weight_nz (bool): Whether weights are in NZ layout.
         experts_weight_transpose (bool): Whether expert weights are transposed.
         experts_weight_nz (bool): Whether expert weights are in NZ layout.
+        gate_captured(bool): Whether gate layer is captured by vllm-ascend.
         qkv_bias (bool): Whether MHA QKV has bias.
         qk_norm (bool): Whether MHA applies Q/K norm.
         qk_norm_full (bool): Whether MHA applies Q/K norm full.
@@ -222,6 +223,8 @@ class ModelConfig:
     """Whether expert weights are transposed."""
     experts_weight_nz: bool = ...
     """Whether expert weights are in NZ layout."""
+    gate_captured: bool = ... 
+    """Whether gate layer is captured by vllm-ascend."""
     qkv_bias: bool = ...
     """Whether MHA QKV has bias."""
     qk_norm: bool = ...
