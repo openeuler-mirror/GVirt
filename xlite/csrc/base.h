@@ -130,13 +130,13 @@ size_t inline XDtypeBit(enum XDtype dtype)
 
 inline std::string ToSizeStr(size_t size)
 {
-    if (size < (1 << 10))
+    if (size < (1 << 10)) {
         return std::to_string(size) + "B";
-    if (size < (1 << 20))
+    } else if (size < (1 << 20)) {
         return std::to_string(size >> 10) + "KB";
-    if (size < (1 << 30))
+    } else {
         return std::to_string(size >> 20) + "MB";
-    return std::to_string(size >> 30) + "GB";
+    }
 }
 
 #ifdef XLITE_DEBUG_ON
