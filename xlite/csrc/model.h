@@ -71,6 +71,8 @@ struct XModelConfig {
     bool normTopKProb;
     bool expertsWeightTrans = false;
     bool expertsWeightNZ = false;
+    // For GLM4/GLM5, vllm-ascend doesn't capture the Gate layer, so its gate won't use NZ format
+    bool gateCaptured = true;
 
     // parallel config
     uint32_t defTpSize;
