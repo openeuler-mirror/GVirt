@@ -937,8 +937,7 @@ void XliteOpMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache
 }
 
 void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
-                        uint32_t offset, XTensor &inputWithR, XTensor &freqs, XTensor &position,
-                        XTensor &vGather)
+                        uint32_t offset, XTensor &inputWithR, XTensor &freqs, XTensor &position)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -947,13 +946,11 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
     if (inputWithR.dtype == FP16) {
         aclrtlaunch_rope_complex_and_cache_float16_t(
             rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, 0, 0,
-            inputWithR.ptr, freqs.ptr, position.ptr, vGather.ptr, 0, nullptr, nullptr, nullptr,
-            nullptr);
+            inputWithR.ptr, freqs.ptr, position.ptr, 0, nullptr, nullptr, nullptr, nullptr);
     } else if (inputWithR.dtype == BF16) {
         aclrtlaunch_rope_complex_and_cache_bfloat16_t(
             rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, 0, 0,
-            inputWithR.ptr, freqs.ptr, position.ptr, vGather.ptr, 0, nullptr, nullptr, nullptr,
-            nullptr);
+            inputWithR.ptr, freqs.ptr, position.ptr, 0, nullptr, nullptr, nullptr, nullptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
         throw std::runtime_error(err_str + " TODO");
@@ -963,8 +960,8 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
                                 uint32_t ropeDim, uint32_t offset, uint32_t kdim, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
-                                XTensor &vGather, uint32_t blockSize, XTensor &key, XTensor &kCache,
-                                XTensor &vCache, XTensor &slotMapping)
+                                uint32_t blockSize, XTensor &key, XTensor &kCache, XTensor &vCache,
+                                XTensor &slotMapping)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -973,13 +970,13 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
     if (inputWithR.dtype == FP16) {
         aclrtlaunch_rope_complex_and_cache_float16_t(
             rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, kdim,
-            vdim, inputWithR.ptr, freqs.ptr, position.ptr, vGather.ptr, blockSize, key.ptr,
-            kCache.ptr, vCache.ptr, slotMapping.ptr);
+            vdim, inputWithR.ptr, freqs.ptr, position.ptr, blockSize, key.ptr, kCache.ptr,
+            vCache.ptr, slotMapping.ptr);
     } else if (inputWithR.dtype == BF16) {
         aclrtlaunch_rope_complex_and_cache_bfloat16_t(
             rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, kdim,
-            vdim, inputWithR.ptr, freqs.ptr, position.ptr, vGather.ptr, blockSize, key.ptr,
-            kCache.ptr, vCache.ptr, slotMapping.ptr);
+            vdim, inputWithR.ptr, freqs.ptr, position.ptr, blockSize, key.ptr, kCache.ptr,
+            vCache.ptr, slotMapping.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
         throw std::runtime_error(err_str + " TODO");

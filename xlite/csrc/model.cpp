@@ -60,7 +60,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 
 void XModel::Init(void)
 {
-    std::vector<uint32_t> vbitsortIndices, vgatherIndices;
+    std::vector<uint32_t> vbitsortIndices;
     std::vector<uint64_t> weights;
     size_t size;
     bool isWeightEmpty = true;
@@ -139,18 +139,6 @@ void XModel::Init(void)
         }
     }
 
-    if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
-        size = _c.ropeHeadDim * XDtypeBit(INT32) / 8;
-        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-        vgatherIndices.resize(_c.ropeHeadDim);
-        for (uint32_t i = 0; i < _c.ropeHeadDim / 2; i++) {
-            vgatherIndices[i * 2] = i * 4;
-            vgatherIndices[i * 2 + 1] = i * 4 + 1024;
-        }
-        CHECK_ACL(aclrtMemcpy(ptr, size, vgatherIndices.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-        _vGather.Init({_c.ropeHeadDim}, INT32, ptr);
-    }
-
     if (_c.attnType == XMODEL_ATTN_MHA) {
         size = _c.maxBatch * _c.nHeads * 512;
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
@@ -219,10 +207,6 @@ XModel::~XModel(void)
         (void)aclrtFree(_moeREUpGateDeqScale[i].ptr);
         (void)aclrtFree(_moeREDown[i].ptr);
         (void)aclrtFree(_moeREDownDeqScale[i].ptr);
-    }
-
-    if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
-        (void)aclrtFree(_vGather.ptr);
     }
 
     if (_c.attnType == XMODEL_ATTN_MHA) {
@@ -316,13 +300,13 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     ForwardLinear(rt, layer, attnNormQc, mlaQB, attnQWithQr);
 
     XliteOpRopeComplex(rt, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
-                       _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition, _vGather);
+                       _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition);
     XliteOpRmsNorm(rt, attnQkvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank, true,
                    mlaKVNormBias[layer], 1, _c.qLoraRank);
     XliteOpRopeComplexAndCache(rt, 1, _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
                                _c.qLoraRank + _c.kvLoraRank, _c.kvLoraRank, _c.ropeHeadDim,
-                               attnQkvc, freqsCis, rt._attnPosition, _vGather, _c.blockSize,
-                               attnNormKvc, kCache, vCache, rt._attnSlotMapping);
+                               attnQkvc, freqsCis, rt._attnPosition, _c.blockSize, attnNormKvc,
+                               kCache, vCache, rt._attnSlotMapping);
     rt.PutTensor(attnQkvc);
     rt.PutTensor(attnNormKvc);
 
@@ -341,8 +325,8 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     if (_c.indexRopeInterleaved) {
         XTensor key, kCache;
         XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim + _c.indexNHeads, _c.ropeHeadDim, 0, 0,
-                                   _c.indexHeadDim, kw, freqsCis, rt._attnPosition, _vGather,
-                                   _c.blockSize, key, kCache, indexKCache, rt._attnSlotMapping);
+                                   _c.indexHeadDim, kw, freqsCis, rt._attnPosition, _c.blockSize,
+                                   key, kCache, indexKCache, rt._attnSlotMapping);
     }
 
     // only use sparse attention when the sequence length is long enough
@@ -358,7 +342,7 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     // TODO not interleaved case
     if (_c.indexRopeInterleaved) {
         XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q, freqsCis,
-                           rt._attnPosition, _vGather);
+                           rt._attnPosition);
     }
 
     float weightScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));

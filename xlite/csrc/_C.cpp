@@ -1399,16 +1399,14 @@ void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
 }
 
 void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
-                 at::Tensor &inputWithR, at::Tensor &freqs, at::Tensor &position,
-                 at::Tensor &vGather)
+                 at::Tensor &inputWithR, at::Tensor &freqs, at::Tensor &position)
 {
-    XTensor _inputWithR, _freqs, _position, _vGather, _outputPe;
+    XTensor _inputWithR, _freqs, _position, _outputPe;
     InitXTensor(_inputWithR, inputWithR);
     InitXTensor(_freqs, freqs);
     InitXTensor(_position, position);
-    InitXTensor(_vGather, vGather);
     XliteOpRopeComplex(rt, nLocalHeads, stepDim, ropeDim, stepDim - ropeDim, _inputWithR, _freqs,
-                       _position, _vGather);
+                       _position);
     rt.Synchronize();
 }
 
@@ -1754,7 +1752,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("is_long"));
     m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("n_local_heads"),
           py::arg("step_dim"), py::arg("rope_dim"), py::arg("input_with_r"), py::arg("freqs"),
-          py::arg("position"), py::arg("v_gather"));
+          py::arg("position"));
     m.def("quant", &Quant, py::arg("rt"), py::arg("x"), py::arg("scale_reciprocal"),
           py::arg("offset"), py::arg("out"));
     m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),
