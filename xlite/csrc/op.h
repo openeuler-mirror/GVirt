@@ -99,6 +99,15 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out,
                      const XTensor &num = XTensor());
 void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scale = XTensor(),
                     const XTensor &num = XTensor());
+void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
+                          const XTensor &quantBias = XTensor(),
+                          const XTensor &weightScale = XTensor(), bool weightNZ = false,
+                          bool transpose = false, const XTensor &outScale = XTensor(),
+                          const XTensor &num = XTensor());
+void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
+                               XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
+                               long outDim, long inDim, XTensor &output, XTensor &outScale,
+                               XTensor &num, bool weightNZ = false, bool transpose = false);
 void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out);
 void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs,
                   const std::vector<size_t> &sizes, uint32_t numPackets);

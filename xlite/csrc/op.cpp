@@ -1177,6 +1177,39 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scal
     }
 }
 
+void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
+                          const XTensor &quantBias, const XTensor &weightScale, bool weightNZ,
+                          bool transpose, const XTensor &outScale, const XTensor &num)
+{
+    if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == BF16) {
+        out.View(FP16);
+        XliteOpMatmul(rt, in, weight, out, weightNZ, quantBias, weightScale, transpose);
+        XliteOpDeQuant(rt, out, out, outScale, num);
+        out.View(BF16);
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(weight) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
+void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
+                               XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
+                               long outDim, long inDim, XTensor &output, XTensor &outScale,
+                               XTensor &num, bool weightNZ, bool transpose)
+{
+    if (in.dtype == INT8 && weightDtype == INT8 && output.dtype == BF16) {
+        output.View(FP16);
+        XliteOpGroupMatmul(rt, in, weights, deqScales, counts, start, end, weightDtype, outDim,
+                           inDim, output, weightNZ, transpose);
+        XliteOpDeQuant(rt, output, output, outScale, num);
+        output.View(BF16);
+    } else {
+        std::string err_str = DBG_PREFIX;
+        err_str += XT_STR(in) + XT_STR(output) + "weight dtype:" + XDtypeStr(weightDtype);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
 void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out)
 {
     if (IsDummyRuntime(rt)) {

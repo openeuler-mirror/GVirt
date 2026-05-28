@@ -322,6 +322,11 @@ void XTensor::View(std::vector<size_t> shape)
     this->numel = newNumel;
 }
 
+void XTensor::View(enum XDtype type)
+{
+    this->dtype = type;
+}
+
 void XTensor::Save(const std::string &path)
 {
 #ifdef XLITE_DEBUG_ON
