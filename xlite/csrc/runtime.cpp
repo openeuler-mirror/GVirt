@@ -334,9 +334,10 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     std::vector<uint32_t> lens(batch);
     std::vector<uint32_t> cachedLens(batch);
     std::vector<uint32_t> queryStartLoc(batch);
+    std::vector<uint32_t> numBlocks(batch);
     std::vector<uint32_t> slotMapping, blockTables;
     std::vector<uint64_t> position;
-    uint32_t blockNum, queryStart, blockId, id, k;
+    uint32_t queryStart, blockId, id, k;
     size_t size;
 
     batchedTokens = 0;
@@ -348,8 +349,8 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         cachedLens[i] = attnMeta.cachedLens[i];
         queryStartLoc[i] = queryStart;
         queryStart += lens[i];
-        blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
-        _maxNumBlocks = blockNum > _maxNumBlocks ? blockNum : _maxNumBlocks;
+        numBlocks[i] = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
+        _maxNumBlocks = numBlocks[i] > _maxNumBlocks ? numBlocks[i] : _maxNumBlocks;
         batchedTokens += lens[i];
     }
 
@@ -370,7 +371,18 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     position.resize(batchedTokens);
     slotMapping.resize(batchedTokens);
     k = 0;
+    if (attnMeta.blockTables.size() < batch) {
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": invalid blocktable(" +
+                                 std::to_string(attnMeta.blockTables.size()) + ")");
+    }
     for (uint32_t i = 0; i < batch; i++) {
+        if (attnMeta.blockTables[i].size() < numBlocks[i]) {
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": block table too small (" +
+                                     std::to_string(attnMeta.blockTables[i].size()) + " < " +
+                                     std::to_string(numBlocks[i]) + ")");
+        }
         for (uint32_t j = 0; j < lens[i]; j++) {
             position[k] = cachedLens[i] + j;
             blockId = position[k] / blockSize;
@@ -385,8 +397,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
 
     blockTables.resize(batch * _maxNumBlocks);
     for (uint32_t i = 0; i < batch; i++) {
-        blockNum = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
-        for (uint32_t j = 0; j < blockNum; j++) {
+        for (uint32_t j = 0; j < numBlocks[i]; j++) {
             blockTables[i * _maxNumBlocks + j] = attnMeta.blockTables[i][j];
         }
     }
