@@ -1061,16 +1061,20 @@ size_t XModel::GetTensorPoolSize(int dbg)
     attnMeta.version = 0;
     uint32_t batchSize = 1;
     uint32_t seqLen = _c.maxBatchedTokens;
-    uint32_t maxNumBlocks = DIV_ROUND_UP(_c.maxSeqLen, _c.blockSize);
+    uint32_t maxNumBlocks = 0;
 
     for (uint32_t i = 0; i < batchSize; i++) {
         attnMeta.lens.push_back(seqLen);
         attnMeta.cachedLens.push_back(_c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0);
-        std::vector<uint32_t> blockTable(maxNumBlocks);
-        for (uint32_t j = 0; j < maxNumBlocks; j++) {
-            blockTable[j] = i * maxNumBlocks + j;
+        uint32_t blocks = DIV_ROUND_UP(attnMeta.lens[i] + attnMeta.cachedLens[i], _c.blockSize);
+        std::vector<uint32_t> blockTable(blocks);
+        for (uint32_t j = 0; j < blocks; j++) {
+            blockTable[j] = i * blocks + j;
         }
         attnMeta.blockTables.push_back(blockTable);
+        if (blocks > maxNumBlocks) {
+            maxNumBlocks = blocks;
+        }
     }
 
     std::vector<std::vector<XTensor>> kvCache(_c.nLayers);
