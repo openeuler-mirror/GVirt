@@ -148,12 +148,11 @@ void XModel::Init(void)
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
         CHECK_ACL(aclrtMemset(ptr, size, 0, size));
         _v2a.Init({size / 4}, INT32, ptr);
-
-        size = AIC_MAX_NUM;
-        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-        CHECK_ACL(aclrtMemset(ptr, size, 0, size));
-        _sync.Init({AIC_MAX_NUM}, INT32, ptr);
     }
+    size = AIC_MAX_NUM;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    CHECK_ACL(aclrtMemset(ptr, size, 0, size));
+    _sync.Init({AIC_MAX_NUM}, INT32, ptr);
 
     _mropeMaskH = 0;
     _mropeMaskW = 0;
@@ -212,8 +211,8 @@ XModel::~XModel(void)
     if (_c.attnType == XMODEL_ATTN_MHA) {
         (void)aclrtFree(_a2v.ptr);
         (void)aclrtFree(_v2a.ptr);
-        (void)aclrtFree(_sync.ptr);
     }
+    (void)aclrtFree(_sync.ptr);
 }
 
 void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output)
