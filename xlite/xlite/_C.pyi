@@ -894,6 +894,41 @@ def matmul(
     """
     ...
 
+def matmul_bench(
+    rt: Runtime,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    z: torch.Tensor,
+    x_warmup: torch.Tensor,
+    y_warmup: torch.Tensor,
+    z_warmup: torch.Tensor,
+    iterations: int,
+    warmup_iterations: int,
+    weight_nz: bool = False,
+    transpose: bool = False,
+) -> int:
+    """Matmul benchmark. Measures average time of a matmul operation.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        x (torch.Tensor): Left matrix.
+        y (torch.Tensor): Right matrix/weight.
+        z (torch.Tensor): Output matrix.
+        x_warmup (torch.Tensor): Left matrix for warmup.
+        y_warmup (torch.Tensor): Right matrix/weight for warmup.
+        z_warmup (torch.Tensor): Output matrix for warmup.
+        iterations: Number of matmul iterations to run
+        weight_nz (bool): Whether `y` uses NZ weight layout.
+        transpose (bool): Whether to transpose the right matrix in compute.
+
+    Returns:
+        int: Measured average time for matmul operation in nanoseconds.
+
+    Raises:
+        RuntimeError: If the native kernel launch fails.
+    """
+    ...
+
 def matmul_with_bias(
     rt: Runtime,
     x: torch.Tensor,
