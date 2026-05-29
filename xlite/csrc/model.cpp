@@ -139,16 +139,6 @@ void XModel::Init(void)
         }
     }
 
-    if (_c.attnType == XMODEL_ATTN_MHA) {
-        size = _c.maxBatch * _c.nHeads * 512;
-        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-        CHECK_ACL(aclrtMemset(ptr, size, 0, size));
-        _a2v.Init({size / 4}, INT32, ptr);
-
-        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-        CHECK_ACL(aclrtMemset(ptr, size, 0, size));
-        _v2a.Init({size / 4}, INT32, ptr);
-    }
     size = AIC_MAX_NUM;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     CHECK_ACL(aclrtMemset(ptr, size, 0, size));
@@ -206,11 +196,6 @@ XModel::~XModel(void)
         (void)aclrtFree(_moeREUpGateDeqScale[i].ptr);
         (void)aclrtFree(_moeREDown[i].ptr);
         (void)aclrtFree(_moeREDownDeqScale[i].ptr);
-    }
-
-    if (_c.attnType == XMODEL_ATTN_MHA) {
-        (void)aclrtFree(_a2v.ptr);
-        (void)aclrtFree(_v2a.ptr);
     }
     (void)aclrtFree(_sync.ptr);
 }
