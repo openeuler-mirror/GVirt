@@ -98,6 +98,8 @@ public:
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
     void MemcpyH2D(void *dst, void *src, size_t size);
+    void MemcpyD2H(void *dst, void *src, size_t size);
+    void MemcpyD2HAsync(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
 
     void SetCurrentContext();

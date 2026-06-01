@@ -462,6 +462,16 @@ void XRuntime::MemcpyH2D(void *dst, void *src, size_t size)
     CHECK_ACL(aclrtMemcpy(dst, size, src, size, ACL_MEMCPY_HOST_TO_DEVICE));
 }
 
+void XRuntime::MemcpyD2H(void *dst, void *src, size_t size)
+{
+    CHECK_ACL(aclrtMemcpy(dst, size, src, size, ACL_MEMCPY_DEVICE_TO_HOST));
+}
+
+void XRuntime::MemcpyD2HAsync(void *dst, void *src, size_t size)
+{
+    CHECK_ACL(aclrtMemcpyAsync(dst, size, src, size, ACL_MEMCPY_DEVICE_TO_HOST, stream));
+}
+
 void XRuntime::UpdateCoreNum(float blockDimUtilization)
 {
     aicNum =
