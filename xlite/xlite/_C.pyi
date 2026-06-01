@@ -1737,6 +1737,47 @@ def experts_counts_sum(
     """
     ...
 
+def reorder_moe(
+    rt: Runtime,
+    in_: torch.Tensor,
+    out: torch.Tensor,
+    counts: torch.Tensor,
+    hidden_size: int,
+    local_start: int,
+    local_end: int,
+    forward: bool,
+) -> None:
+    """Permute token rows between source-grouped and expert-grouped layouts.
+
+    The kernel handles two directions based on ``forward``:
+
+    * **forward=True**: source-grouped → expert-grouped.  Input tokens are
+      grouped by source EP rank; output tokens are grouped by target expert
+      index, ready for per-expert computation.
+    * **forward=False**: expert-grouped → source-grouped.  The inverse
+      permutation that restores the original source-grouped order.
+
+    The ``counts`` tensor of shape ``[moe_ep_size, n_routed_experts]``
+    (int32) specifies how many tokens each source rank sends to each expert.
+    ``local_start`` and ``local_end`` select a contiguous range of local
+    experts (the shard owned by the current EP rank).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        in_ (torch.Tensor): Input token tensor ``[total_tokens, hidden_size]``.
+        out (torch.Tensor): Output token tensor ``[total_tokens, hidden_size]``.
+        counts (torch.Tensor): Per-source per-expert token count matrix
+            ``[moe_ep_size, n_routed_experts]`` (int32).
+        hidden_size (int): Hidden dimension per token.
+        local_start (int): First local expert index (inclusive).
+        local_end (int): Last local expert index (exclusive).
+        forward (bool): ``True`` for forward permutation, ``False`` for reverse.
+
+    Returns:
+        None: ``out`` is written in place.
+    """
+    ...
+
 def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
     """Print a tensor preview for debugging.
 

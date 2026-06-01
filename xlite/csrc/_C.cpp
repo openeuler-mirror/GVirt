@@ -1553,6 +1553,18 @@ void ExpertsCountsSum(XRuntime &rt, at::Tensor &expertsCountsInput, at::Tensor &
     rt.Synchronize();
 }
 
+void ReorderMoE(XRuntime &rt, at::Tensor &in, at::Tensor &out, at::Tensor &counts,
+                uint32_t hiddenSize, uint32_t localStart, uint32_t localEnd, bool forward)
+{
+    XTensor _in, _out, _counts;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    InitXTensor(_counts, counts);
+    XliteOpReorderMoE(rt, _in, _out, _counts, hiddenSize, localStart, localEnd, forward);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -1857,6 +1869,9 @@ PYBIND11_MODULE(_C, m)
     m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),
           py::arg("tokens_per_epgroup"), py::arg("experts_counts_output"),
           py::arg("n_routed_experts"));
+    m.def("reorder_moe", &ReorderMoE, py::arg("rt"), py::arg("in_"), py::arg("out"),
+          py::arg("counts"), py::arg("hidden_size"), py::arg("local_start"), py::arg("local_end"),
+          py::arg("forward"));
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,

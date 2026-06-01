@@ -120,4 +120,6 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output);
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,
                              XTensor &expertsCountsOutput, uint32_t nRoutedExperts);
+void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &counts,
+                       uint32_t hiddenSize, uint32_t localStart, uint32_t localEnd, bool forward);
 #endif

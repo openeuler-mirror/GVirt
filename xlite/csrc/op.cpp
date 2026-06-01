@@ -73,6 +73,7 @@
 #include "aclrtlaunch_topk_bfloat16_t.h"
 #include "aclrtlaunch_mla_bfloat16_t.h"
 #include "aclrtlaunch_experts_counts_sum.h"
+#include "aclrtlaunch_reorder_moe.h"
 
 static inline bool IsDummyRuntime(const XRuntime &rt)
 {
@@ -1327,4 +1328,24 @@ void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor 
     aclrtlaunch_experts_counts_sum(rt.aivNum, rt.stream, expertsCountsInput.ptr,
                                    tokensPerEpgroup.ptr, expertsCountsOutput.ptr, nRoutedExperts,
                                    tokensPerEpgroup.shape[0]);
+}
+
+void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &counts,
+                       uint32_t hiddenSize, uint32_t localStart, uint32_t localEnd, bool forward)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+
+    if (in.numel == 0 || localStart >= localEnd) {
+        return;
+    }
+
+    uint32_t moeEpSize = counts.shape[0];
+    uint32_t nRoutedExperts = counts.shape[1];
+    uint32_t elemBytes = XDtypeBit(in.dtype) / 8;
+
+    aclrtlaunch_reorder_moe(rt.aivNum, rt.stream, in.ptr, out.ptr, counts.ptr, moeEpSize,
+                            nRoutedExperts, hiddenSize, localStart, localEnd, forward ? 1 : 0,
+                            elemBytes);
 }
