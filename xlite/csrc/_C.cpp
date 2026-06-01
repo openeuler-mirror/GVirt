@@ -992,7 +992,36 @@ void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weig
     InitXTensor(_y, y);
     InitXTensor(_z, z);
     XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
+}
+
+uint64_t MatmulBench(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z,
+                     at::Tensor &x_warmup, at::Tensor &y_warmup, at::Tensor &z_warmup,
+                     int iterations, int warmup_iterations, bool weightNZ, bool transpose)
+{
+    XTensor _x, _y, _z, _x_warmup, _y_warmup, _z_warmup, _bias, _deqScale;
+
+    InitXTensor(_x, x);
+    InitXTensor(_y, y);
+    InitXTensor(_z, z);
+
+    InitXTensor(_x_warmup, x_warmup);
+    InitXTensor(_y_warmup, y_warmup);
+    InitXTensor(_z_warmup, z_warmup);
+
+    for (int i = 0; i < warmup_iterations; i++) {
+        XliteOpMatmul(rt, _x_warmup, _y_warmup, _z_warmup, weightNZ, _bias, _deqScale, transpose);
+    }
     rt.Synchronize();
+
+    auto begin = std::chrono::steady_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
+    }
+    rt.Synchronize();
+    auto end = std::chrono::steady_clock::now();
+
+    auto res = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count();
+    return res / iterations;
 }
 
 void MatmulWithBias(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, at::Tensor &bias,
@@ -1702,6 +1731,9 @@ PYBIND11_MODULE(_C, m)
     m.def("add", &Add, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"));
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
+    m.def("matmul_bench", &MatmulBench, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
+          py::arg("x_warmup"), py::arg("y_warmup"), py::arg("z_warmup"), py::arg("iterations"),
+          py::arg("warmup_iterations"), py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("matmul_with_bias", &MatmulWithBias, "matmul_with_bias", py::arg("rt"), py::arg("x"),
           py::arg("y"), py::arg("z"), py::arg("bias"), py::arg("weight_nz") = false);
     m.def("embed", &Embed, py::arg("rt"), py::arg("weight"), py::arg("in_"), py::arg("out"),

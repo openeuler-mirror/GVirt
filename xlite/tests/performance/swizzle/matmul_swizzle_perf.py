@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
@@ -11,11 +11,10 @@ import itertools
 import multiprocessing as mp
 import json
 import random
-import time
 import torch
 import argparse
 import tqdm
-from xlite._C import Runtime, matmul
+from xlite._C import Runtime, matmul_bench
 from tests.models.weight_utils import matrix_nd2nz
 
 
@@ -24,8 +23,9 @@ transpose = False
 dtype = torch.bfloat16
 torch.npu.config.allow_internal_format = True
 
-repeat = 100_000
-US_IN_S = 100_000
+WARMUP_RUNS = 2
+BENCH_RUNS = 1
+RUNS_PER_INPUT = 8
 
 
 def validate_globals():
@@ -39,11 +39,13 @@ def process_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_devices', type=int, default=device_count,
                         help='number of NPU devices to use (all by default)')
+    parser.add_argument('--swizzle', type=lambda x: int(x, 0), default=0x100,
+                        help='swizzle')
 
     args = parser.parse_args()
     if args.num_devices <= 0 or args.num_devices > device_count:
         msg = (f'num_devices must be between 1 and {device_count},'
-               'got {args.num_devices}')
+               f'got {args.num_devices}')
         raise ValueError(msg)
 
     return args
@@ -63,75 +65,79 @@ def make_inputs(m, n, k):
     return (x, y, z)
 
 
-def run_matmul(rt, x, y, z):
-    start = time.time()
-    for _ in range(repeat):
-        torch.npu.synchronize()
-        matmul(rt, x, y, z, weight_nz and dtype != torch.float, transpose)
-        torch.npu.synchronize()
-    end = time.time()
+def run_matmul(rt, real_args, warmup_args, device):
+    torch.npu.synchronize()
+    nz = weight_nz and dtype != torch.float
+    runs_args = (BENCH_RUNS, WARMUP_RUNS)
+    t = matmul_bench(rt, *real_args, *warmup_args, *runs_args, nz, transpose)
+    torch.npu.synchronize()
 
-    avg = (end - start) / repeat * US_IN_S
-    return avg
+    return t
 
 
 def run_test(m, n, k, swizzle, device):
     torch.set_default_device(f'npu:{device}')
     rt = Runtime(device, 500)
-    rt.configure_swizzle(swizzle, False)
     torch.npu.set_device(device)
-    x, y, z = make_inputs(m, n, k)
-    time = run_matmul(rt, x, y, z)
 
-    result = {
+    rt.configure_swizzle(swizzle, False)
+
+    real_args = make_inputs(m, n, k)
+    warmup_args = make_inputs(32768, 32768, 32768)
+
+    run_time = run_matmul(rt, real_args, warmup_args, device)
+    res = {
         'swizzle': hex(swizzle),
         'm': m,
         'n': n,
         'k': k,
-        'time': time
+        'time': run_time,
     }
 
-    return result
+    return res
 
 
 def process_job(x):
-    swizzle, (m, n, k) = x
+    (swizzle, (m, n, k)) = x
     name = mp.current_process().name
     device = int(''.join(filter(str.isnumeric, name))) - 1
+    # TODO: Process all swizzle values on a single NPU may decrease
+    # variance caused by per-device differences in clocks and voltages.
+    # From my tests this may decrease error by ~2%, but we can use
+    # --num_devices=1 on candidate swizzles.
 
-    t = run_test(m, n, k, swizzle, device)
-    return t
+    return run_test(m, n, k, swizzle, device)
 
 
 def worker_init():
     # Warm-up run
-    x = (0x100, (32, 2048, 2048))
-    process_job(x)
+    # x = (32, 2048, 2048)
+    # process_job(x)
+    pass
 
 
 def main():
     args = process_args()
     validate_globals()
 
-    swizzles = [0x700, 0x500, 0x600, 0x400, 0x900, 0x800, 0xE00, 0xB00, 0x301,
-                0x1400, 0x1200, 0x101, 0xF00, 0xD01, 0xA00, 0x601, 0x401,
-                0x201, 0x1F00, 0x1C00, 0x1B00, 0x1100, 0x1000, 0xD00, 0xC00,
-                0x1900, 0x1700, 0x1600, 0x1500, 0x1300]
-    shapes = [(32, 6144, 2048), (32, 2048, 6144),
-              (16, 6144, 2048), (16, 2048, 6144),
-              (8, 6144, 2048), (8, 2048, 6144),
-              (4, 6144, 2048), (4, 2048, 6144),
-              (1, 6144, 2048), (1, 2048, 6144)]
-    random.shuffle(swizzles)
-    random.shuffle(shapes)
+    m = [32, 2048, 4096, 5000]
+    nk = [(6144, 2048), (2048, 6144)]
 
-    total = len(swizzles) * len(shapes)
+    shapes = [(x[0], *x[1]) for x in itertools.product(m, nk)]
+    r = range(0x100, 0x1000, 0x100)
+    swizzles = itertools.chain(*[(x, x+1) for x in r])
 
     jobs = itertools.product(swizzles, shapes)
+    jobs = list(jobs) * RUNS_PER_INPUT
+    random.shuffle(jobs)
+
+    print(f"Running {len(jobs)} jobs on {args.num_devices} devices")
 
     with mp.Pool(processes=args.num_devices, initializer=worker_init) as pool:
-        res = list(tqdm.tqdm(pool.imap(process_job, jobs), total=total))
-        with open('swizzle_perf.json', 'w') as f:
+        res = tqdm.tqdm(pool.imap(process_job, jobs), total=len(jobs))
+
+        res = list(res)
+        with open('swizzle_perf_raw.json', 'w') as f:
             json.dump(res, f)
 
     return 0
