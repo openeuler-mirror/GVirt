@@ -10,6 +10,7 @@
 
 #define XLITE_DEFAULT_IP "127.0.0.1"
 #define XLITE_DP_PORT_OFFSET 200
+#define XLITE_EP_PORT_OFFSET 300
 #define XLITE_CCL_PORT_OFFSET 400
 
 bool isEnvironmentVariableTrue(const char *env_value_cstr)
@@ -26,8 +27,10 @@ bool isEnvironmentVariableTrue(const char *env_value_cstr)
     return env_value == "true" || env_value == "1" || env_value == "yes" || env_value == "on";
 }
 
-XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize)
-    : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize)
+XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize,
+                   uint32_t moeTpSize, uint32_t moeEpSize)
+    : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize), _moeTpSize(moeTpSize),
+      _moeEpSize(moeEpSize)
 {
     if (sizeMB != 0) {
         Init(sizeMB);
@@ -287,6 +290,19 @@ int XRuntime::InitHcclComm(void)
         sock->Broadcast(&rootInfo, sizeof(rootInfo));
         delete sock;
         CHECK_HCCL(HcclCommInitRootInfo(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm));
+    }
+
+    if (_moeEpSize > 1) {
+        ip = _ips[_rankId % _moeTpSize];
+        port = _port + XLITE_EP_PORT_OFFSET + _rankId % _moeTpSize + portOffset;
+
+        if (_rankId / _moeTpSize == 0) {
+            CHECK_HCCL(HcclGetRootInfo(&rootInfo));
+        }
+        XSock *sock = new XSock(_rankId / _moeTpSize, _moeEpSize, ip, port);
+        sock->Broadcast(&rootInfo, sizeof(rootInfo));
+        delete sock;
+        CHECK_HCCL(HcclCommInitRootInfo(_moeEpSize, &rootInfo, _rankId / _moeTpSize, &_epComm));
     }
     portOffset += 500;
 

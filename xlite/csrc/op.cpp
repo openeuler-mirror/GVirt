@@ -460,6 +460,31 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
                              hcclComm, rt.stream));
 }
 
+void XliteOpAlltoAllV(XRuntime &rt, XTensor &in, XTensor &out, XTensor &sendCounts,
+                      XTensor &recvCounts, XTensor &sdispls, XTensor &rdispls, enum commType type)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+
+    if (in.dtype != out.dtype) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": check tensor failed! input: " + std::to_string(in.dtype) +
+                                 " output: " + std::to_string(out.dtype));
+    }
+
+    HcclComm hcclComm = rt._tpComm;
+    if (type == DP) {
+        hcclComm = rt._dpComm;
+    } else if (type == EP) {
+        hcclComm = rt._epComm;
+    }
+
+    CHECK_HCCL(HcclAlltoAllV(in.ptr, sendCounts.ptr, sdispls.ptr, XDtype2HcclDtype(in.dtype),
+                             out.ptr, recvCounts.ptr, rdispls.ptr, XDtype2HcclDtype(out.dtype),
+                             hcclComm, rt.stream));
+}
+
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
                   XTensor &out)
 {

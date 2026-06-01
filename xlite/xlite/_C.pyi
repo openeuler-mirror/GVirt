@@ -37,6 +37,8 @@ class Runtime:
         rank: int = 0,
         tp_size: int = 1,
         dp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_ep_size: int = 1,
     ) -> None:
         """Create a runtime for one Ascend device.
 
@@ -46,6 +48,8 @@ class Runtime:
             rank (int): Global rank in the distributed group.
             tp_size (int): Tensor-parallel group size.
             dp_size (int): Data-parallel group size.
+            moe_tp_size (int): Tensor-parallel size for MoE layers.
+            moe_ep_size (int): Expert-parallel size for MoE layers.
         """
 
     def update_core_num(self, util: float) -> None:
@@ -848,6 +852,41 @@ def all_reduce(rt: Runtime, out: torch.Tensor, in_: torch.Tensor) -> None:
 
     Raises:
         RuntimeError: If the native collective call fails.
+    """
+    ...
+
+def alltoallv(
+    rt: Runtime,
+    out: torch.Tensor,
+    in_: torch.Tensor,
+    send_counts: torch.Tensor,
+    recv_counts: torch.Tensor,
+    sdispls: torch.Tensor,
+    rdispls: torch.Tensor,
+    comm_type: int = 0,
+) -> None:
+    """All-to-all vectorized collective communication.
+
+    Each rank sends `send_counts[i]` elements starting at `sdispls[i]` to
+    rank *i* and receives `recv_counts[i]` elements starting at `rdispls[i]`
+    from rank *i*.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): Output buffer for received data.
+        in_ (torch.Tensor): Input tensor with data to send.
+        send_counts (torch.Tensor): Per-rank send element counts.
+        recv_counts (torch.Tensor): Per-rank receive element counts.
+        sdispls (torch.Tensor): Per-rank send displacement offsets.
+        rdispls (torch.Tensor): Per-rank receive displacement offsets.
+        comm_type (int, default=0): Communication domain selector.
+            ``0`` (TP), ``1`` (DP), ``2`` (EP).
+
+    Returns:
+        None: `out` is written in place.
+
+    Raises:
+        RuntimeError: If ``in_.dtype != out.dtype`` or the HCCL call fails.
     """
     ...
 

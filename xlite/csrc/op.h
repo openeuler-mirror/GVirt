@@ -16,6 +16,8 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
                           uint32_t copySize = COPY_SIZE);
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                          uint32_t copySize = COPY_SIZE);
+void XliteOpAlltoAllV(XRuntime &rt, XTensor &in, XTensor &out, XTensor &sendCounts,
+                      XTensor &recvCounts, XTensor &sdispls, XTensor &rdispls, enum commType type);
 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
                   XTensor &out);
