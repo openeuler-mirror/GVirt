@@ -118,4 +118,6 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
                           uint32_t headDim, uint32_t blockSize, uint32_t batch,
                           uint32_t maxNumBlock);
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output);
+void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,
+                             XTensor &expertsCountsOutput, uint32_t nRoutedExperts);
 #endif

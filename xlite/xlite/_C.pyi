@@ -1704,6 +1704,39 @@ def muls(rt: Runtime, input: torch.Tensor, scale: float, output: torch.Tensor) -
     """
     ...
 
+def experts_counts_sum(
+    rt: Runtime,
+    experts_counts_input: torch.Tensor,
+    tokens_per_epgroup: torch.Tensor,
+    experts_counts_output: torch.Tensor,
+    n_routed_experts: int,
+) -> None:
+    """Compute two reductions over a per-DP-rank per-expert token count matrix.
+
+    Given an input ``experts_counts_input`` of shape ``[ep_size, n_routed_experts]``
+    where row *i* is the dispatch count vector from DP rank *i*, the kernel writes:
+
+    * ``tokens_per_epgroup[dp_idx, ep_id]`` — total tokens from DP rank ``dp_idx``
+      destined for experts in EP group ``ep_id``.  Shape ``[ep_size, ep_size]``.
+    * ``experts_counts_output[expert]`` — total tokens for expert ``expert``,
+      summed across all DP ranks.  Shape ``[n_routed_experts]``.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        experts_counts_input (torch.Tensor): Per-DP-rank per-expert count matrix
+            ``[ep_size, n_routed_experts]`` (int32).
+        tokens_per_epgroup (torch.Tensor): Output buffer for per-DP-rank
+            per-EP-group token sums ``[ep_size, ep_size]`` (int32).
+        experts_counts_output (torch.Tensor): Output buffer for per-expert total
+            counts ``[n_routed_experts]`` (int32).
+        n_routed_experts (int): Total number of routed experts.
+
+    Returns:
+        None: ``tokens_per_epgroup`` and ``experts_counts_output`` are written
+        in place.
+    """
+    ...
+
 def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
     """Print a tensor preview for debugging.
 

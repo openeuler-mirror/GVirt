@@ -72,6 +72,7 @@
 #include "aclrtlaunch_topk_float.h"
 #include "aclrtlaunch_topk_bfloat16_t.h"
 #include "aclrtlaunch_mla_bfloat16_t.h"
+#include "aclrtlaunch_experts_counts_sum.h"
 
 static inline bool IsDummyRuntime(const XRuntime &rt)
 {
@@ -1315,4 +1316,15 @@ void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)
         std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
         throw std::runtime_error(err_str + " unsupported!");
     }
+}
+
+void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,
+                             XTensor &expertsCountsOutput, uint32_t nRoutedExperts)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    aclrtlaunch_experts_counts_sum(rt.aivNum, rt.stream, expertsCountsInput.ptr,
+                                   tokensPerEpgroup.ptr, expertsCountsOutput.ptr, nRoutedExperts,
+                                   tokensPerEpgroup.shape[0]);
 }

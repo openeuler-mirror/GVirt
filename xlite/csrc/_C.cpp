@@ -1540,6 +1540,19 @@ void Muls(XRuntime &rt, at::Tensor &input, float scale, at::Tensor &output)
     rt.Synchronize();
 }
 
+void ExpertsCountsSum(XRuntime &rt, at::Tensor &expertsCountsInput, at::Tensor &tokensPerEpgroup,
+                      at::Tensor &expertsCountsOutput, uint32_t nRoutedExperts)
+{
+    XTensor _expertsCountsInput, _tokensPerEpgroup, _expertsCountsOutput;
+
+    InitXTensor(_expertsCountsInput, expertsCountsInput);
+    InitXTensor(_tokensPerEpgroup, tokensPerEpgroup);
+    InitXTensor(_expertsCountsOutput, expertsCountsOutput);
+    XliteOpExpertsCountsSum(rt, _expertsCountsInput, _tokensPerEpgroup, _expertsCountsOutput,
+                            nRoutedExperts);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -1841,6 +1854,9 @@ PYBIND11_MODULE(_C, m)
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
           py::arg("block_size"), py::arg("batch"), py::arg("max_num_block"));
     m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"));
+    m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),
+          py::arg("tokens_per_epgroup"), py::arg("experts_counts_output"),
+          py::arg("n_routed_experts"));
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,
