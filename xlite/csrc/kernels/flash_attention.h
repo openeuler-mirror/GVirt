@@ -556,7 +556,7 @@ public:
                 RunAivSoftmaxPingPong(
                     (__gm__ Dtype *)qk[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
                     nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN,
-                    nWorkStart % headNumInGroup, headNumInGroup,
+                    true, nWorkStart % headNumInGroup, headNumInGroup,
                     (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
                     (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr());
                 ffts_cross_core_sync(PIPE_MTE3, config);
@@ -586,7 +586,7 @@ public:
                         (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
                         (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(), lastWorkCurCore,
                         lastSubHeadOffset, nHeads, nKVHeads, headSize, lastKvOffset == 0,
-                        lastActualCalcSoftmaxLen, lastWorkStart % headNumInGroup, headNumInGroup);
+                        lastActualCalcSoftmaxLen, true, lastWorkStart % headNumInGroup, headNumInGroup);
                     if (!lastIsLastKvTile) {
                         set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                         wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
@@ -640,7 +640,7 @@ public:
                                 (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
                                 lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize,
                                 lastKvOffset == 0, lastActualCalcSoftmaxLen,
-                                lastWorkStart % headNumInGroup, headNumInGroup);
+                                true, lastWorkStart % headNumInGroup, headNumInGroup);
             if (!lastIsLastKvTile) {
                 set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
