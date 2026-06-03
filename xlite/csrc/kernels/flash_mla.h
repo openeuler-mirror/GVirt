@@ -1005,7 +1005,7 @@ public:
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
                 // copy K(T) (nSize, blockSize) to L1
                 CopyGmToL1Nd2Nz(aktl1bBuf[curr], kCache[block * blockSize * kvLoraRank + nOffset],
-                                kSize, nSize, kvLoraRank, kBlockPad);
+                                kBlockPad, nSize, kvLoraRank, kBlockPad);
 
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
