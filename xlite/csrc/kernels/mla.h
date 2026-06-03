@@ -229,6 +229,7 @@ public:
         aqcrl1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
         aqcrl1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += qcrSize;
+        uint32_t reuse = off;
 
         uint64_t wukSize = MAX_N0 * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
@@ -237,7 +238,8 @@ public:
             off += wukSize;
         }
 
-        uint64_t kSize = (blockSize > MAX_N0 ? blockSize : MAX_N0) * k0 * sizeof(Dtype);
+        off = reuse;
+        uint64_t kSize = (blockSize > MAX_N0 ? blockSize : MAX_N0) * 4 * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             akl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             akl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -830,6 +832,7 @@ public:
         SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         uint32_t block;
+        int pingpongL1B = 0;
         for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // totalLen or topK
             int nOffset = nIdx * n0;
             if (nOffset + nSize > nTotalLen) {
@@ -847,6 +850,7 @@ public:
             kBlockPad = k0;
             kBlockNum = k0 / kBlockSize;
             for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // kvLoraRank
+                int kIdx4 = kIdx % 4;
                 int kOffset = kIdx * k0;
                 if (kOffset + kSize > kvLoraRank) {
                     kSize = kvLoraRank - kOffset;
@@ -854,26 +858,36 @@ public:
                     kBlockNum = kBlockPad / kBlockSize;
                 }
 
-                // copy K (n0, k0) to L1
-                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
-                if (doTopK) {
-                    Nd2NzParams params(1, 1, kSize, 0, kvLoraRank, nBlockPad, 1, 0);
-                    for (int i = 0; i < nSize; i++) {
-                        DataCopy(akl1bBuf[curr][i * kBlockSize],
-                                 kCache[(topkOffset[nOffset + i]) * kvLoraRank + kOffset], params);
+                // copy K (n0, 4 * k0) to L1
+                if (kIdx4 == 0) {
+                    int kRemSize = 4 * k0;
+                    if (kOffset + kRemSize > kvLoraRank) {
+                        kRemSize = kvLoraRank - kOffset;
                     }
-                } else {
-                    CopyGmToL1Nd2Nz(akl1bBuf[curr],
-                                    kCache[block * blockSize * kvLoraRank + kOffset], nSize, kSize,
-                                    kvLoraRank, nBlockPad);
+                    WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + pingpongL1B);
+                    if (doTopK) {
+                        Nd2NzParams params(1, 1, kRemSize, 0, kvLoraRank, nBlockPad, 1, 0);
+                        for (int i = 0; i < nSize; i++) {
+                            DataCopy(akl1bBuf[pingpongL1B][i * kBlockSize],
+                                     kCache[(topkOffset[nOffset + i]) * kvLoraRank + kOffset],
+                                     params);
+                        }
+                    } else {
+                        CopyGmToL1Nd2Nz(akl1bBuf[pingpongL1B],
+                                        kCache[block * blockSize * kvLoraRank + kOffset], nSize,
+                                        kRemSize, kvLoraRank, nBlockPad);
+                    }
+                    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
+                    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
                 }
 
-                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
-                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
-
                 WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-                CopyToL0BCol(l0bBuf[curr], akl1bBuf[curr], nBlockNum, 0, kBlockNum);
-                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
+                CopyToL0BCol(l0bBuf[curr], akl1bBuf[pingpongL1B], nBlockNum,
+                             kIdx4 * k0 / kBlockSize, kBlockNum);
+                if (kIdx4 == 3) {
+                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + pingpongL1B);
+                    pingpongL1B ^= 1;
+                }
                 CopyToL0ACol(l0aBuf[curr], absorbl1aBuf[kOffset * mhBlockPad], mhBlockNum, 0,
                              kBlockNum);
 
