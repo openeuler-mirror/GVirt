@@ -98,6 +98,12 @@ static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
     }
 }
 
+template <typename... Args>
+static bool EachXDtype(enum XDtype dtype, Args &&...args)
+{
+    return (... && (std::forward<Args>(args).dtype == dtype));
+}
+
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       uint32_t copySize)
 {
@@ -466,10 +472,10 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (embed.dtype == FP16 && out.dtype == FP16) {
+    if (EachXDtype(FP16, embed, out)) {
         aclrtlaunch_embed_kernel_float16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr,
                                            embed.shape[1], in.shape[0], start, end, rt.tpSize());
-    } else if (embed.dtype == BF16 && out.dtype == BF16) {
+    } else if (EachXDtype(BF16, embed, out)) {
         aclrtlaunch_embed_kernel_bfloat16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr,
                                             embed.shape[1], in.shape[0], start, end, rt.tpSize());
     } else {
@@ -509,12 +515,12 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (in.dtype == FP16 && out.dtype == FP16) {
+    if (EachXDtype(FP16, in, out)) {
         aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
                                    out.ptr, in.shape[0], normDim, normEps, true, cntPerToken,
                                    in.shape[1], out.shape[1], inStartOffset, outStartOffset, true,
                                    nullptr, rt.tpSize());
-    } else if (in.dtype == BF16 && out.dtype == BF16) {
+    } else if (EachXDtype(BF16, in, out)) {
         aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
                                     out.ptr, in.shape[0], normDim, normEps, true, cntPerToken,
                                     in.shape[1], out.shape[1], inStartOffset, outStartOffset, true,
@@ -531,10 +537,10 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (in1.dtype == FP16 && in2.dtype == FP16 && out.dtype == FP16) {
+    if (EachXDtype(FP16, in1, in2, out)) {
         aclrtlaunch_add_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, out.ptr, in1.shape[0],
                                   in1.shape[1]);
-    } else if (in1.dtype == BF16 && in2.dtype == BF16 && out.dtype == BF16) {
+    } else if (EachXDtype(BF16, in1, in2, out)) {
         aclrtlaunch_add_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, out.ptr, in1.shape[0],
                                    in1.shape[1]);
     } else {
@@ -549,11 +555,11 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (in.dtype == FP16 && addInOut.dtype == FP16 && out.dtype == FP16) {
+    if (EachXDtype(FP16, in, addInOut, out)) {
         aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
                                    normBias.ptr, out.ptr, in.shape[0], in.shape[1], normEps, false,
                                    1, in.shape[1], out.shape[1], 0, 0, true, nullptr, rt.tpSize());
-    } else if (in.dtype == BF16 && addInOut.dtype == BF16 && out.dtype == BF16) {
+    } else if (EachXDtype(BF16, in, addInOut, out)) {
         aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
                                     normBias.ptr, out.ptr, in.shape[0], in.shape[1], normEps, false,
                                     1, in.shape[1], out.shape[1], 0, 0, true, nullptr, rt.tpSize());
@@ -569,7 +575,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                    uint64_t n0, uint64_t k0)
 {
     if (IsDummyRuntime(rt)) {
-        if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16 && bias.ptr != nullptr) {
+        if (EachXDtype(BF16, in, weight, out) && bias.ptr != nullptr) {
             XTensor &biasFp32 = rt.GetTensor(bias.shape, FP32, DBG_LOC);
             rt.PutTensor(biasFp32);
         } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
@@ -645,11 +651,11 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         XlitePickSwizzle(m, n, k, &swizzle);
     }
 
-    if (in.dtype == FP16 && weight.dtype == FP16 && out.dtype == FP16) {
+    if (EachXDtype(FP16, in, weight, out)) {
         aclrtlaunch_matmul_float16_t(aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k,
                                      weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr,
                                      deqScale.ptr);
-    } else if (in.dtype == BF16 && weight.dtype == BF16 && out.dtype == BF16) {
+    } else if (EachXDtype(BF16, in, weight, out)) {
         if (bias.ptr != nullptr) {
             XTensor &biasFp32 = rt.GetTensor(bias.shape, FP32, DBG_LOC);
             aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, bias.ptr, biasFp32.ptr,
@@ -663,7 +669,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
                                           weightNZ, transpose, m0, n0, k0, swizzle, bias.ptr,
                                           deqScale.ptr);
         }
-    } else if (in.dtype == FP32 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
+    } else if (EachXDtype(FP32, in, weight, out) && !transpose) {
         aclrtlaunch_matmul_float(aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, m, n, k, weightNZ,
                                  transpose, m0, n0, k0, swizzle, bias.ptr, deqScale.ptr);
     } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
@@ -686,13 +692,13 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (in.dtype == FP16 && out.dtype == FP16) {
+    if (EachXDtype(FP16, in, out)) {
         aclrtlaunch_silu_and_mul_float16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr,
                                            in.shape[0], out.shape[1]);
-    } else if (in.dtype == BF16 && out.dtype == BF16) {
+    } else if (EachXDtype(BF16, in, out)) {
         aclrtlaunch_silu_and_mul_bfloat16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr,
                                             in.shape[0], out.shape[1]);
-    } else if (in.dtype == FP32 && out.dtype == FP32) {
+    } else if (EachXDtype(FP32, in, out)) {
         aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr, in.shape[0],
                                        out.shape[1]);
     } else {
@@ -735,7 +741,7 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (in.dtype == BF16 && out.dtype == BF16 && weights.dtype == BF16) {
+    if (EachXDtype(BF16, in, out, weights)) {
         aclrtlaunch_unpermutation_bfloat16_t(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr,
                                              unpIdx.ptr, weights.ptr, out.shape[0], in.shape[1],
                                              weights.shape[1], start, end);
@@ -809,14 +815,12 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
         throw std::runtime_error(std::string(__func__) + ": unsupported rope type gptj");
     }
 
-    if (inout.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 &&
-        cossin.dtype == FP16) {
+    if (EachXDtype(FP16, inout, kCache, vCache, cossin)) {
         aclrtlaunch_rope_and_cache_float16_t(
             rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr, kCache.ptr, vCache.ptr,
             slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1], inout.shape[1], inout.shape[1],
             localHeads, localKvHeads, headDim, blockSize, scale, mropeMaskH, mropeMaskW);
-    } else if (inout.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 &&
-               cossin.dtype == BF16) {
+    } else if (EachXDtype(BF16, inout, kCache, vCache, cossin)) {
         aclrtlaunch_rope_and_cache_bfloat16_t(
             rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr, kCache.ptr, vCache.ptr,
             slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1], inout.shape[1], inout.shape[1],
@@ -836,14 +840,12 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 &&
-        output.dtype == FP16) {
+    if (EachXDtype(FP16, qkv, qk, kCache, vCache, output)) {
         aclrtlaunch_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
                                         qk.ptr, output.ptr, queryStartLoc.ptr, lens.ptr,
                                         cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
                                         blockSize, batch, maxNumBlock);
-    } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 &&
-               vCache.dtype == BF16 && output.dtype == BF16) {
+    } else if (EachXDtype(BF16, qkv, qk, kCache, vCache, output)) {
         aclrtlaunch_attention_bfloat16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
                                          qk.ptr, output.ptr, queryStartLoc.ptr, lens.ptr,
                                          cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
@@ -865,15 +867,13 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (qkv.dtype == FP16 && qk.dtype == FP16 && kCache.dtype == FP16 && vCache.dtype == FP16 &&
-        output.dtype == FP16) {
+    if (EachXDtype(FP16, qkv, qk, kCache, vCache, output)) {
         aclrtlaunch_flash_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
                                               qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr,
                                               lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
                                               lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads,
                                               nKvHeads, headDim, blockSize, batch, maxNumBlock);
-    } else if (qkv.dtype == BF16 && qk.dtype == BF16 && kCache.dtype == BF16 &&
-               vCache.dtype == BF16 && output.dtype == BF16) {
+    } else if (EachXDtype(BF16, qkv, qk, kCache, vCache, output)) {
         aclrtlaunch_flash_attention_bfloat16_t(
             rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr, sum.ptr,
             lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr, lens.ptr,
@@ -898,8 +898,7 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (qWithQr.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 &&
-        wkvb.dtype == BF16 && output.dtype == BF16) {
+    if (EachXDtype(BF16, qWithQr, kCache, vCache, wkvb, output)) {
         aclrtlaunch_flash_mla_bfloat16_t(
             rt.aicNum, rt.stream, qWithQr.ptr, kCache.ptr, vCache.ptr, wkvb.ptr, qk.ptr, sv.ptr,
             max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
@@ -922,8 +921,7 @@ void XliteOpMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (qWithQr.dtype == BF16 && kCache.dtype == BF16 && vCache.dtype == BF16 &&
-        wkvb.dtype == BF16 && output.dtype == BF16) {
+    if (EachXDtype(BF16, qWithQr, kCache, vCache, wkvb, output)) {
         aclrtlaunch_mla_bfloat16_t(rt.aicNum, rt.stream, qWithQr.ptr, kCache.ptr, vCache.ptr,
                                    wkvb.ptr, topkIndices.ptr, qk.ptr, output.ptr, queryStartLoc.ptr,
                                    lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
@@ -988,13 +986,13 @@ void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &outp
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (input.dtype == FP32 && weight.dtype == FP32 && output.dtype == FP32) {
+    if (EachXDtype(FP32, input, weight, output)) {
         aclrtlaunch_add_bias_float(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
                                    output.shape[0] * output.shape[1], output.shape[1]);
-    } else if (input.dtype == FP16 && weight.dtype == FP16 && output.dtype == FP16) {
+    } else if (EachXDtype(FP16, input, weight, output)) {
         aclrtlaunch_add_bias_float16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
                                        output.shape[0] * output.shape[1], output.shape[1]);
-    } else if (input.dtype == BF16 && weight.dtype == BF16 && output.dtype == BF16) {
+    } else if (EachXDtype(BF16, input, weight, output)) {
         aclrtlaunch_add_bias_bfloat16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
                                         output.shape[0] * output.shape[1], output.shape[1]);
     } else {
@@ -1258,13 +1256,12 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (q.dtype == FP16 && kCache.dtype == FP16 && weight.dtype == FP16 && scores.dtype == FP16) {
+    if (EachXDtype(FP16, q, kCache, weight, scores)) {
         aclrtlaunch_indexer_scores_float16_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
                                              scores.ptr, queryStartLoc.ptr, lens.ptr,
                                              cachedLens.ptr, blockTables.ptr, nHeads, headDim,
                                              blockSize, batch, maxNumBlock);
-    } else if (q.dtype == BF16 && kCache.dtype == BF16 && weight.dtype == BF16 &&
-               scores.dtype == BF16) {
+    } else if (EachXDtype(BF16, q, kCache, weight, scores)) {
         aclrtlaunch_indexer_scores_bfloat16_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
                                               scores.ptr, queryStartLoc.ptr, lens.ptr,
                                               cachedLens.ptr, blockTables.ptr, nHeads, headDim,
@@ -1281,9 +1278,9 @@ void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (input.dtype == FP16 && output.dtype == FP16) {
+    if (EachXDtype(FP16, input, output)) {
         aclrtlaunch_muls_float16_t(rt.aivNum, rt.stream, input.ptr, scale, output.ptr, input.numel);
-    } else if (input.dtype == BF16 && output.dtype == BF16) {
+    } else if (EachXDtype(BF16, input, output)) {
         aclrtlaunch_muls_bfloat16_t(rt.aivNum, rt.stream, input.ptr, scale, output.ptr,
                                     input.numel);
     } else {
