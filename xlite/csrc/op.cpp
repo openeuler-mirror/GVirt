@@ -73,6 +73,8 @@
 #include "aclrtlaunch_topk_bfloat16_t.h"
 #include "aclrtlaunch_mla_bfloat16_t.h"
 
+#define KERNEL_PTR_TYPE(name) decltype(aclrtlaunch_##name##_bfloat16_t)
+
 static inline bool IsDummyRuntime(const XRuntime &rt)
 {
     return rt.IsDummyRuntime();
@@ -182,44 +184,41 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         }
 
         // call correct allreduce kernel
+        uintptr_t count;
+        KERNEL_PTR_TYPE(allgather) * launchKernel;
         switch (in.dtype) {
             case FP16:
-                aclrtlaunch_allgather_float16_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                                localRank, rank, xcclComm->generation++,
-                                                xcclComm->dParam, copySize);
+                count = in.numel;
+                launchKernel = aclrtlaunch_allgather_float16_t;
                 break;
             case BF16:
-                aclrtlaunch_allgather_bfloat16_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                                 localRank, rank, xcclComm->generation++,
-                                                 xcclComm->dParam, copySize);
+                count = in.numel;
+                launchKernel = aclrtlaunch_allgather_bfloat16_t;
                 break;
             // BIT1 is packed, so count is in.numel / 8.
             case BIT1:
-                aclrtlaunch_allgather_int8_t(coreNum, rt.stream, inPtr, outPtr,
-                                             in.numel * XDtypeBit(in.dtype) / XDtypeBit(INT8),
-                                             localRank, rank, xcclComm->generation++,
-                                             xcclComm->dParam, copySize);
+                count = in.numel * XDtypeBit(in.dtype) / XDtypeBit(INT8);
+                launchKernel = aclrtlaunch_allgather_int8_t;
                 break;
             case INT8:
-                aclrtlaunch_allgather_int8_t(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank,
-                                             rank, xcclComm->generation++, xcclComm->dParam,
-                                             copySize);
+                count = in.numel;
+                launchKernel = aclrtlaunch_allgather_int8_t;
                 break;
             case INT32:
-                aclrtlaunch_allgather_int32_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                              localRank, rank, xcclComm->generation++,
-                                              xcclComm->dParam, copySize);
+                count = in.numel;
+                launchKernel = aclrtlaunch_allgather_int32_t;
                 break;
             case FP32:
-                aclrtlaunch_allgather_float(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank,
-                                            rank, xcclComm->generation++, xcclComm->dParam,
-                                            copySize);
+                count = in.numel;
+                launchKernel = aclrtlaunch_allgather_float;
                 break;
             default:
                 std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
                 throw std::runtime_error(err_str + " unsupported dtype for xccl func");
                 break;
         }
+        launchKernel(coreNum, rt.stream, inPtr, outPtr, count, localRank, rank,
+                     xcclComm->generation++, xcclComm->dParam, copySize);
 
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, outPtr, outBytes,
@@ -307,38 +306,31 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
             }
         }
 
+        KERNEL_PTR_TYPE(reduce_scatter) * launchKernel;
         // call correct allreduce kernel
         switch (in.dtype) {
             case FP16:
-                aclrtlaunch_reduce_scatter_float16_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                                     localRank, rank, xcclComm->generation++,
-                                                     xcclComm->dParam, copySize);
+                launchKernel = aclrtlaunch_reduce_scatter_float16_t;
                 break;
             case BF16:
-                aclrtlaunch_reduce_scatter_bfloat16_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                                      localRank, rank, xcclComm->generation++,
-                                                      xcclComm->dParam, copySize);
+                launchKernel = aclrtlaunch_reduce_scatter_bfloat16_t;
                 break;
             case INT8:
-                aclrtlaunch_reduce_scatter_int8_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                                  localRank, rank, xcclComm->generation++,
-                                                  xcclComm->dParam, copySize);
+                launchKernel = aclrtlaunch_reduce_scatter_int8_t;
                 break;
             case INT32:
-                aclrtlaunch_reduce_scatter_int32_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                                   localRank, rank, xcclComm->generation++,
-                                                   xcclComm->dParam, copySize);
+                launchKernel = aclrtlaunch_reduce_scatter_int32_t;
                 break;
             case FP32:
-                aclrtlaunch_reduce_scatter_float(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                                 localRank, rank, xcclComm->generation++,
-                                                 xcclComm->dParam, copySize);
+                launchKernel = aclrtlaunch_reduce_scatter_float;
                 break;
             default:
                 std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
                 throw std::runtime_error(err_str + " unsupported dtype for xccl func");
                 break;
         }
+        launchKernel(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank, rank,
+                     xcclComm->generation++, xcclComm->dParam, copySize);
 
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, outPtr, outBytes,
@@ -421,37 +413,30 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
         }
 
         // call correct allreduce kernel
+        KERNEL_PTR_TYPE(allreduce) * launchKernel;
         switch (in.dtype) {
             case FP16:
-                aclrtlaunch_allreduce_float16_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                                localRank, rank, xcclComm->generation++,
-                                                xcclComm->dParam, copySize);
+                launchKernel = aclrtlaunch_allreduce_float16_t;
                 break;
             case BF16:
-                aclrtlaunch_allreduce_bfloat16_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                                 localRank, rank, xcclComm->generation++,
-                                                 xcclComm->dParam, copySize);
+                launchKernel = aclrtlaunch_allreduce_bfloat16_t;
                 break;
             case INT8:
-                aclrtlaunch_allreduce_int8_t(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank,
-                                             rank, xcclComm->generation++, xcclComm->dParam,
-                                             copySize);
+                launchKernel = aclrtlaunch_allreduce_int8_t;
                 break;
             case INT32:
-                aclrtlaunch_allreduce_int32_t(coreNum, rt.stream, inPtr, outPtr, in.numel,
-                                              localRank, rank, xcclComm->generation++,
-                                              xcclComm->dParam, copySize);
+                launchKernel = aclrtlaunch_allreduce_int32_t;
                 break;
             case FP32:
-                aclrtlaunch_allreduce_float(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank,
-                                            rank, xcclComm->generation++, xcclComm->dParam,
-                                            copySize);
+                launchKernel = aclrtlaunch_allreduce_float;
                 break;
             default:
                 std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
                 throw std::runtime_error(err_str + " unsupported dtype for xccl func");
                 break;
         }
+        launchKernel(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank, rank,
+                     xcclComm->generation++, xcclComm->dParam, copySize);
 
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, outPtr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
@@ -472,16 +457,17 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(embed_kernel) * launchKernel;
     if (EachXDtype(FP16, embed, out)) {
-        aclrtlaunch_embed_kernel_float16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr,
-                                           embed.shape[1], in.shape[0], start, end, rt.tpSize());
+        launchKernel = aclrtlaunch_embed_kernel_float16_t;
     } else if (EachXDtype(BF16, embed, out)) {
-        aclrtlaunch_embed_kernel_bfloat16_t(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr,
-                                            embed.shape[1], in.shape[0], start, end, rt.tpSize());
+        launchKernel = aclrtlaunch_embed_kernel_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(embed) + XT_STR(out);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr, embed.shape[1], in.shape[0],
+                 start, end, rt.tpSize());
 }
 
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
@@ -491,21 +477,19 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(norm) * launchKernel;
     if (in.dtype == FP16 && (out.dtype == FP16 || out.dtype == FP32)) {
-        aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
-                                   out.ptr, in.shape[0], normDim, normEps, false, cntPerToken,
-                                   in.shape[1], out.shape[1], inStartOffset, outStartOffset,
-                                   useNorm, variance.ptr, rt.tpSize());
+        launchKernel = aclrtlaunch_norm_float16_t;
     } else if (in.dtype == BF16 && (out.dtype == BF16 || out.dtype == FP32)) {
-        aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
-                                    out.ptr, in.shape[0], normDim, normEps, false, cntPerToken,
-                                    in.shape[1], out.shape[1], inStartOffset, outStartOffset,
-                                    useNorm, variance.ptr, rt.tpSize());
+        launchKernel = aclrtlaunch_norm_bfloat16_t;
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(in) + XT_STR(norm) + XT_STR(out) + XT_STR(normBias);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
+                 in.shape[0], normDim, normEps, false, cntPerToken, in.shape[1], out.shape[1],
+                 inStartOffset, outStartOffset, useNorm, variance.ptr, rt.tpSize());
 }
 
 void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
@@ -515,21 +499,19 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(norm) * launchKernel;
     if (EachXDtype(FP16, in, out)) {
-        aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
-                                   out.ptr, in.shape[0], normDim, normEps, true, cntPerToken,
-                                   in.shape[1], out.shape[1], inStartOffset, outStartOffset, true,
-                                   nullptr, rt.tpSize());
+        launchKernel = aclrtlaunch_norm_float16_t;
     } else if (EachXDtype(BF16, in, out)) {
-        aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr,
-                                    out.ptr, in.shape[0], normDim, normEps, true, cntPerToken,
-                                    in.shape[1], out.shape[1], inStartOffset, outStartOffset, true,
-                                    nullptr, rt.tpSize());
+        launchKernel = aclrtlaunch_norm_bfloat16_t;
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(in) + XT_STR(norm) + XT_STR(normBias) + XT_STR(out);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
+                 in.shape[0], normDim, normEps, true, cntPerToken, in.shape[1], out.shape[1],
+                 inStartOffset, outStartOffset, true, nullptr, rt.tpSize());
 }
 
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
@@ -537,16 +519,16 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(add) * launchKernel;
     if (EachXDtype(FP16, in1, in2, out)) {
-        aclrtlaunch_add_float16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, out.ptr, in1.shape[0],
-                                  in1.shape[1]);
+        launchKernel = aclrtlaunch_add_float16_t;
     } else if (EachXDtype(BF16, in1, in2, out)) {
-        aclrtlaunch_add_bfloat16_t(rt.aivNum, rt.stream, in1.ptr, in2.ptr, out.ptr, in1.shape[0],
-                                   in1.shape[1]);
+        launchKernel = aclrtlaunch_add_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in1) + XT_STR(in2) + XT_STR(out);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, in1.ptr, in2.ptr, out.ptr, in1.shape[0], in1.shape[1]);
 }
 
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
@@ -555,19 +537,19 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(norm) * launchKernel;
     if (EachXDtype(FP16, in, addInOut, out)) {
-        aclrtlaunch_norm_float16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
-                                   normBias.ptr, out.ptr, in.shape[0], in.shape[1], normEps, false,
-                                   1, in.shape[1], out.shape[1], 0, 0, true, nullptr, rt.tpSize());
+        launchKernel = aclrtlaunch_norm_float16_t;
     } else if (EachXDtype(BF16, in, addInOut, out)) {
-        aclrtlaunch_norm_bfloat16_t(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr,
-                                    normBias.ptr, out.ptr, in.shape[0], in.shape[1], normEps, false,
-                                    1, in.shape[1], out.shape[1], 0, 0, true, nullptr, rt.tpSize());
+        launchKernel = aclrtlaunch_norm_bfloat16_t;
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(in) + XT_STR(addInOut) + XT_STR(norm) + XT_STR(out);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr, normBias.ptr, out.ptr,
+                 in.shape[0], in.shape[1], normEps, false, 1, in.shape[1], out.shape[1], 0, 0, true,
+                 nullptr, rt.tpSize());
 }
 
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
@@ -692,19 +674,18 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(silu_and_mul) * launchKernel;
     if (EachXDtype(FP16, in, out)) {
-        aclrtlaunch_silu_and_mul_float16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr,
-                                           in.shape[0], out.shape[1]);
+        launchKernel = aclrtlaunch_silu_and_mul_float16_t;
     } else if (EachXDtype(BF16, in, out)) {
-        aclrtlaunch_silu_and_mul_bfloat16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr,
-                                            in.shape[0], out.shape[1]);
+        launchKernel = aclrtlaunch_silu_and_mul_bfloat16_t;
     } else if (EachXDtype(FP32, in, out)) {
-        aclrtlaunch_silu_and_mul_float(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr, in.shape[0],
-                                       out.shape[1]);
+        launchKernel = aclrtlaunch_silu_and_mul_float;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr, in.shape[0], out.shape[1]);
 }
 
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale)
@@ -741,19 +722,18 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(unpermutation) * launchKernel;
     if (EachXDtype(BF16, in, out, weights)) {
-        aclrtlaunch_unpermutation_bfloat16_t(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr,
-                                             unpIdx.ptr, weights.ptr, out.shape[0], in.shape[1],
-                                             weights.shape[1], start, end);
+        launchKernel = aclrtlaunch_unpermutation_bfloat16_t;
     } else if (in.dtype == BF16 && out.dtype == BF16 && weights.dtype == FP32) {
-        aclrtlaunch_unpermutation_float(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr,
-                                        unpIdx.ptr, weights.ptr, out.shape[0], in.shape[1],
-                                        weights.shape[1], start, end);
+        launchKernel = aclrtlaunch_unpermutation_float;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(unpIdx) + XT_STR(routing) +
                               XT_STR(weights) + XT_STR(out);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr, weights.ptr,
+                 out.shape[0], in.shape[1], weights.shape[1], start, end);
 }
 
 // deqScales: uint64_t, 低 32 位 TF32 格式有效, 1 符号位, 8 指数位, 10 尾数位, 后 13 位不参与计算
@@ -764,31 +744,23 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(group_matmul) * launchKernel;
     if (in.dtype == BF16 && weightDtype == BF16 && output.dtype == BF16) {
-        aclrtlaunch_group_matmul_bfloat16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
-                                            deqScales.ptr, counts.ptr, counts.shape[0], outDim,
-                                            inDim, -1, -1, -1, start, end, weightNZ, transpose,
-                                            rt.defaultMatmulSwizzle);
+        launchKernel = aclrtlaunch_group_matmul_bfloat16_t;
     } else if (in.dtype == FP16 && weightDtype == FP16 && output.dtype == FP16) {
-        aclrtlaunch_group_matmul_float16_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
-                                           deqScales.ptr, counts.ptr, counts.shape[0], outDim,
-                                           inDim, -1, -1, -1, start, end, weightNZ, transpose,
-                                           rt.defaultMatmulSwizzle);
+        launchKernel = aclrtlaunch_group_matmul_float16_t;
     } else if (in.dtype == FP32 && weightDtype == FP32 && output.dtype == FP32 && !transpose) {
-        aclrtlaunch_group_matmul_float(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
-                                       deqScales.ptr, counts.ptr, counts.shape[0], outDim, inDim,
-                                       -1, -1, -1, start, end, weightNZ, transpose,
-                                       rt.defaultMatmulSwizzle);
+        launchKernel = aclrtlaunch_group_matmul_float;
     } else if (in.dtype == INT8 && weightDtype == INT8 && output.dtype == FP16) {
-        aclrtlaunch_group_matmul_int8_t(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr,
-                                        deqScales.ptr, counts.ptr, counts.shape[0], outDim, inDim,
-                                        -1, -1, -1, start, end, weightNZ, transpose,
-                                        rt.defaultMatmulSwizzle);
+        launchKernel = aclrtlaunch_group_matmul_int8_t;
     } else {
         std::string err_str = DBG_PREFIX;
         err_str += XT_STR(in) + XT_STR(output) + ", weight dtype:" + XDtypeStr(weightDtype);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, deqScales.ptr, counts.ptr,
+                 counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose,
+                 rt.defaultMatmulSwizzle);
 }
 
 void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
@@ -815,21 +787,20 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
         throw std::runtime_error(std::string(__func__) + ": unsupported rope type gptj");
     }
 
+    KERNEL_PTR_TYPE(rope_and_cache) * launchKernel;
     if (EachXDtype(FP16, inout, kCache, vCache, cossin)) {
-        aclrtlaunch_rope_and_cache_float16_t(
-            rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr, kCache.ptr, vCache.ptr,
-            slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1], inout.shape[1], inout.shape[1],
-            localHeads, localKvHeads, headDim, blockSize, scale, mropeMaskH, mropeMaskW);
+        launchKernel = aclrtlaunch_rope_and_cache_float16_t;
     } else if (EachXDtype(BF16, inout, kCache, vCache, cossin)) {
-        aclrtlaunch_rope_and_cache_bfloat16_t(
-            rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr, kCache.ptr, vCache.ptr,
-            slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1], inout.shape[1], inout.shape[1],
-            localHeads, localKvHeads, headDim, blockSize, scale, mropeMaskH, mropeMaskW);
+        launchKernel = aclrtlaunch_rope_and_cache_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(inout) + XT_STR(kCache) + XT_STR(vCache) +
                               XT_STR(position) + XT_STR(cossin) + XT_STR(slotMapping);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr, kCache.ptr,
+                 vCache.ptr, slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1],
+                 inout.shape[1], inout.shape[1], localHeads, localKvHeads, headDim, blockSize,
+                 scale, mropeMaskH, mropeMaskW);
 }
 
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk,
@@ -840,21 +811,19 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(attention) * launchKernel;
     if (EachXDtype(FP16, qkv, qk, kCache, vCache, output)) {
-        aclrtlaunch_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
-                                        qk.ptr, output.ptr, queryStartLoc.ptr, lens.ptr,
-                                        cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
-                                        blockSize, batch, maxNumBlock);
+        launchKernel = aclrtlaunch_attention_float16_t;
     } else if (EachXDtype(BF16, qkv, qk, kCache, vCache, output)) {
-        aclrtlaunch_attention_bfloat16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
-                                         qk.ptr, output.ptr, queryStartLoc.ptr, lens.ptr,
-                                         cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim,
-                                         blockSize, batch, maxNumBlock);
+        launchKernel = aclrtlaunch_attention_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qkv) + XT_STR(kCache) + XT_STR(vCache) +
                               XT_STR(qk) + XT_STR(output);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, output.ptr,
+                 queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads,
+                 headDim, blockSize, batch, maxNumBlock);
 }
 
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
@@ -867,23 +836,21 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
     if (IsDummyRuntime(rt)) {
         return;
     }
+
+    KERNEL_PTR_TYPE(flash_attention) * launchKernel;
     if (EachXDtype(FP16, qkv, qk, kCache, vCache, output)) {
-        aclrtlaunch_flash_attention_float16_t(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr,
-                                              qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr,
-                                              lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
-                                              lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads,
-                                              nKvHeads, headDim, blockSize, batch, maxNumBlock);
+        launchKernel = aclrtlaunch_flash_attention_float16_t;
     } else if (EachXDtype(BF16, qkv, qk, kCache, vCache, output)) {
-        aclrtlaunch_flash_attention_bfloat16_t(
-            rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr, sum.ptr,
-            lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr, lens.ptr,
-            cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize, batch,
-            maxNumBlock);
+        launchKernel = aclrtlaunch_flash_attention_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qkv) + XT_STR(kCache) + XT_STR(vCache) +
                               XT_STR(qk) + XT_STR(output);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr,
+                 sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
+                 lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize,
+                 batch, maxNumBlock);
 }
 
 void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache,
@@ -941,18 +908,18 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
         return;
     }
 
+    KERNEL_PTR_TYPE(rope_complex_and_cache) * launchKernel;
     if (inputWithR.dtype == FP16) {
-        aclrtlaunch_rope_complex_and_cache_float16_t(
-            rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, 0, 0,
-            inputWithR.ptr, freqs.ptr, position.ptr, 0, nullptr, nullptr, nullptr, nullptr);
+        launchKernel = aclrtlaunch_rope_complex_and_cache_float16_t;
     } else if (inputWithR.dtype == BF16) {
-        aclrtlaunch_rope_complex_and_cache_bfloat16_t(
-            rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, 0, 0,
-            inputWithR.ptr, freqs.ptr, position.ptr, 0, nullptr, nullptr, nullptr, nullptr);
+        launchKernel = aclrtlaunch_rope_complex_and_cache_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
         throw std::runtime_error(err_str + " TODO");
     }
+    launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
+                 0, 0, inputWithR.ptr, freqs.ptr, position.ptr, 0, nullptr, nullptr, nullptr,
+                 nullptr);
 }
 
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
@@ -965,20 +932,18 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
         return;
     }
 
+    KERNEL_PTR_TYPE(rope_complex_and_cache) * launchKernel;
     if (inputWithR.dtype == FP16) {
-        aclrtlaunch_rope_complex_and_cache_float16_t(
-            rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, kdim,
-            vdim, inputWithR.ptr, freqs.ptr, position.ptr, blockSize, key.ptr, kCache.ptr,
-            vCache.ptr, slotMapping.ptr);
+        launchKernel = aclrtlaunch_rope_complex_and_cache_float16_t;
     } else if (inputWithR.dtype == BF16) {
-        aclrtlaunch_rope_complex_and_cache_bfloat16_t(
-            rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset, kdim,
-            vdim, inputWithR.ptr, freqs.ptr, position.ptr, blockSize, key.ptr, kCache.ptr,
-            vCache.ptr, slotMapping.ptr);
+        launchKernel = aclrtlaunch_rope_complex_and_cache_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
         throw std::runtime_error(err_str + " TODO");
     }
+    launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
+                 kdim, vdim, inputWithR.ptr, freqs.ptr, position.ptr, blockSize, key.ptr,
+                 kCache.ptr, vCache.ptr, slotMapping.ptr);
 }
 
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)
@@ -986,19 +951,19 @@ void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &outp
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(add_bias) * launchKernel;
     if (EachXDtype(FP32, input, weight, output)) {
-        aclrtlaunch_add_bias_float(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
-                                   output.shape[0] * output.shape[1], output.shape[1]);
+        launchKernel = aclrtlaunch_add_bias_float;
     } else if (EachXDtype(FP16, input, weight, output)) {
-        aclrtlaunch_add_bias_float16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
-                                       output.shape[0] * output.shape[1], output.shape[1]);
+        launchKernel = aclrtlaunch_add_bias_float16_t;
     } else if (EachXDtype(BF16, input, weight, output)) {
-        aclrtlaunch_add_bias_bfloat16_t(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
-                                        output.shape[0] * output.shape[1], output.shape[1]);
+        launchKernel = aclrtlaunch_add_bias_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(weight) + XT_STR(output);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
+                 output.shape[0] * output.shape[1], output.shape[1]);
 }
 
 void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outWeights,
@@ -1007,21 +972,20 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(softmax_topk) * launchKernel;
     if (scores.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
         outRouting.dtype == BIT1) {
-        aclrtlaunch_softmax_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr,
-                                       outWeights.ptr, outRouting.ptr, scores.shape[0],
-                                       indices.shape[0], topK, normTopKProb);
+        launchKernel = aclrtlaunch_softmax_topk_float;
     } else if (scores.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 &&
                outRouting.dtype == BIT1) {
-        aclrtlaunch_softmax_topk_bfloat16_t(rt.aivNum, rt.stream, scores.ptr, indices.ptr,
-                                            outWeights.ptr, outRouting.ptr, scores.shape[0],
-                                            indices.shape[0], topK, normTopKProb);
+        launchKernel = aclrtlaunch_softmax_topk_bfloat16_t;
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(scores) + XT_STR(indices) + XT_STR(outWeights) + XT_STR(outRouting);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outWeights.ptr, outRouting.ptr,
+                 scores.shape[0], indices.shape[0], topK, normTopKProb);
 }
 
 void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias, float scale,
@@ -1031,22 +995,21 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(sigmoid_topk) * launchKernel;
     if (scores.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
         outRouting.dtype == BIT1) {
-        aclrtlaunch_sigmoid_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr, bias.ptr,
-                                       scale, outWeights.ptr, outRouting.ptr, scores.shape[0],
-                                       indices.shape[0], nGroup, nTopkGroup, topK, normTopKProb);
+        launchKernel = aclrtlaunch_sigmoid_topk_float;
     } else if (scores.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 &&
                outRouting.dtype == BIT1) {
-        aclrtlaunch_sigmoid_topk_bfloat16_t(rt.aivNum, rt.stream, scores.ptr, indices.ptr, bias.ptr,
-                                            scale, outWeights.ptr, outRouting.ptr, scores.shape[0],
-                                            indices.shape[0], nGroup, nTopkGroup, topK,
-                                            normTopKProb);
+        launchKernel = aclrtlaunch_sigmoid_topk_bfloat16_t;
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(scores) + XT_STR(indices) + XT_STR(outWeights) + XT_STR(outRouting);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, bias.ptr, scale, outWeights.ptr,
+                 outRouting.ptr, scores.shape[0], indices.shape[0], nGroup, nTopkGroup, topK,
+                 normTopKProb);
 }
 
 void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIndices,
@@ -1067,16 +1030,17 @@ void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIn
                                  std::to_string(k));
     }
 
+    KERNEL_PTR_TYPE(topk) * launchKernel;
     if (scores.dtype == BF16 && indices.dtype == INT32) {
-        aclrtlaunch_topk_bfloat16_t(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outIndices.ptr,
-                                    queryLens.ptr, cachedLens.ptr, maxSeqLen, batchNum, k);
+        launchKernel = aclrtlaunch_topk_bfloat16_t;
     } else if (scores.dtype == FP32 && indices.dtype == INT32) {
-        aclrtlaunch_topk_float(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outIndices.ptr,
-                               queryLens.ptr, cachedLens.ptr, maxSeqLen, batchNum, k);
+        launchKernel = aclrtlaunch_topk_float;
     } else {
         throw std::runtime_error(std::string(__func__) + ": unsupported!" +
                                  std::to_string(scores.dtype));
     }
+    launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outIndices.ptr, queryLens.ptr,
+                 cachedLens.ptr, maxSeqLen, batchNum, k);
 }
 
 void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)
@@ -1084,14 +1048,16 @@ void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(softmax) * launchKernel;
     if (x.dtype == FP16) {
-        aclrtlaunch_softmax_float16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
+        launchKernel = aclrtlaunch_softmax_float16_t;
     } else if (x.dtype == BF16) {
-        aclrtlaunch_softmax_bfloat16_t(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
+        launchKernel = aclrtlaunch_softmax_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(x);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(1, rt.stream, x.ptr, x.shape[0], x.shape[1], calcLen);
 }
 
 void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &expBuf)
@@ -1099,16 +1065,16 @@ void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &exp
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(softmax_long) * launchKernel;
     if (x.dtype == FP16) {
-        aclrtlaunch_softmax_long_float16_t(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1],
-                                           calcLen);
+        launchKernel = aclrtlaunch_softmax_long_float16_t;
     } else if (x.dtype == BF16) {
-        aclrtlaunch_softmax_long_bfloat16_t(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1],
-                                            calcLen);
+        launchKernel = aclrtlaunch_softmax_long_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(x);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(1, rt.stream, x.ptr, expBuf.ptr, x.shape[0], x.shape[1], calcLen);
 }
 
 // out = int8(x / scale + offset), turn scale to 1/scale before calculation
@@ -1256,21 +1222,19 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(indexer_scores) * launchKernel;
     if (EachXDtype(FP16, q, kCache, weight, scores)) {
-        aclrtlaunch_indexer_scores_float16_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
-                                             scores.ptr, queryStartLoc.ptr, lens.ptr,
-                                             cachedLens.ptr, blockTables.ptr, nHeads, headDim,
-                                             blockSize, batch, maxNumBlock);
+        launchKernel = aclrtlaunch_indexer_scores_float16_t;
     } else if (EachXDtype(BF16, q, kCache, weight, scores)) {
-        aclrtlaunch_indexer_scores_bfloat16_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
-                                              scores.ptr, queryStartLoc.ptr, lens.ptr,
-                                              cachedLens.ptr, blockTables.ptr, nHeads, headDim,
-                                              blockSize, batch, maxNumBlock);
+        launchKernel = aclrtlaunch_indexer_scores_bfloat16_t;
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(q) + XT_STR(kCache) + XT_STR(weight) + XT_STR(scores);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, scores.ptr, queryStartLoc.ptr,
+                 lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, headDim, blockSize, batch,
+                 maxNumBlock);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)
@@ -1278,13 +1242,14 @@ void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)
     if (IsDummyRuntime(rt)) {
         return;
     }
+    KERNEL_PTR_TYPE(muls) * launchKernel;
     if (EachXDtype(FP16, input, output)) {
-        aclrtlaunch_muls_float16_t(rt.aivNum, rt.stream, input.ptr, scale, output.ptr, input.numel);
+        launchKernel = aclrtlaunch_muls_float16_t;
     } else if (EachXDtype(BF16, input, output)) {
-        aclrtlaunch_muls_bfloat16_t(rt.aivNum, rt.stream, input.ptr, scale, output.ptr,
-                                    input.numel);
+        launchKernel = aclrtlaunch_muls_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    launchKernel(rt.aivNum, rt.stream, input.ptr, scale, output.ptr, input.numel);
 }
