@@ -481,7 +481,7 @@ public:
                     m0 > (MAX_M0 - 4)
                         ? 0
                         : (__gm__ float *)qk[currQkIdx][(m0 + subIdx * 2) * maxSeqLen].GetPhyAddr(),
-                    nSoftmaxCurCore, maxSeqLen, calcLen, outN, nSoftmaxStart % headNumInGroup,
+                    nSoftmaxCurCore, maxSeqLen, calcLen, outN, true, nSoftmaxStart % headNumInGroup,
                     headNumInGroup);
 
                 ffts_cross_core_sync(PIPE_MTE3, config);

@@ -459,7 +459,7 @@ public:
 
         int lastBatchIdx, lastQueryTaskLen, lastkvHeadIdx, last, lastKvOffset, lastKvLen,
             lastQueryTaskOffset, lastWorkStart, lastWorkCurCore, lastActualCalcSoftmaxLen;
-        int lastIsLastKvTile, lastSubHeadOffset;
+        int lastIsLastKvTile;
         uint32_t lastOutOffset;
         __gm__ uint32_t *lastBlockTable;
 
@@ -555,7 +555,7 @@ public:
                     kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
                 RunAivSoftmaxPingPong(
                     (__gm__ Dtype *)qk[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
-                    nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN,
+                    nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN, true,
                     nWorkStart % headNumInGroup, headNumInGroup,
                     (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
                     (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr());
@@ -585,8 +585,8 @@ public:
                         (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
                         (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
                         (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(), lastWorkCurCore,
-                        lastSubHeadOffset, nHeads, nKVHeads, headSize, lastKvOffset == 0,
-                        lastActualCalcSoftmaxLen, lastWorkStart % headNumInGroup, headNumInGroup);
+                        nHeads, headSize, lastKvOffset == 0, lastActualCalcSoftmaxLen, true,
+                        lastWorkStart % headNumInGroup, headNumInGroup);
                     if (!lastIsLastKvTile) {
                         set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                         wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
@@ -601,7 +601,6 @@ public:
                 lastWorkCurCore = nWorkCurCore;
                 lastkvHeadIdx = kvHeadIdx;
                 lastOutOffset = outOffset;
-                lastSubHeadOffset = subHeadOffset;
                 lastBlockTable = blockTable;
                 lastKvOffset = kvOffset;
                 lastKvLen = kvLen;
@@ -638,9 +637,9 @@ public:
                                 (__gm__ Dtype *)output[lastOutOffset * headSize].GetPhyAddr(),
                                 (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
                                 (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
-                                lastWorkCurCore, lastSubHeadOffset, nHeads, nKVHeads, headSize,
-                                lastKvOffset == 0, lastActualCalcSoftmaxLen,
-                                lastWorkStart % headNumInGroup, headNumInGroup);
+                                lastWorkCurCore, nHeads, headSize, lastKvOffset == 0,
+                                lastActualCalcSoftmaxLen, true, lastWorkStart % headNumInGroup,
+                                headNumInGroup);
             if (!lastIsLastKvTile) {
                 set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
