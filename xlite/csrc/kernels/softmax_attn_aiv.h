@@ -350,8 +350,8 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
     int curr = 0;
     for (uint32_t mIdx = 0; mIdx < m; ++mIdx) {
         // Calculate memory offsets for Grouped Query Attention (GQA)
-        // mOffset: offset to the correct KV head group in the output tensor
-        // nOffset: offset within the query head group
+        // seqIdx: seq Offset in output tensor
+        // headIdx: head Offset in output tensor
         uint32_t seqIdx = seqHead ? (mIdx + maskOff) / maskStride : (mIdx + maskOff) % maskStride;
         uint32_t headIdx = seqHead ? (mIdx + maskOff) % maskStride : (mIdx + maskOff) / maskStride;
         uint64_t offset = seqIdx * nHeads + headIdx;

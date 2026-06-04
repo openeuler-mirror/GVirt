@@ -31,9 +31,9 @@ struct XcclParam {
 
 AICORE_INLINE uint32_t GetTileSizeOfCachedKV(uint32_t aicNum)
 {
-    if (aicNum == 20) {  // A2
+    if (aicNum == 20) {
         return 8192;
-    } else if (aicNum == 24) {  // A3
+    } else if (aicNum == 24) {
         return 6016;
     }
     return 8192;
