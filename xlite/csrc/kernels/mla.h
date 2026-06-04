@@ -1349,6 +1349,7 @@ public:
                 ffts_cross_core_sync(PIPE_MTE3, config);
                 curr = 1 - curr;
             }
+            queryStart = -1;
             cachedLen = -1;
         }
     }
