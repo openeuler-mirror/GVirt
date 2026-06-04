@@ -70,8 +70,9 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
     for (int idx = 0; idx < m; ++idx) {
-        int actualCalcLen = seqHead ? calcLen + (idx + maskOff) / maskStride :
-                                calcLen + (idx + maskOff) % maskStride;  // 每一行开始mask的位置
+        int actualCalcLen = seqHead
+                                ? calcLen + (idx + maskOff) / maskStride
+                                : calcLen + (idx + maskOff) % maskStride;  // 每一行开始mask的位置
         if (actualCalcLen <= 0) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
             vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(outN, pad), 1, 1, 8, 0);
@@ -521,8 +522,9 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf, int32_t m,
                                          uint32_t n, uint32_t calcLen, uint32_t outN = 0,
-                                         bool seqHead = true, uint32_t maskOff = 0, uint32_t maskStride = 1,
-                                         bool hasScale = false, float scale = 1.0f)
+                                         bool seqHead = true, uint32_t maskOff = 0,
+                                         uint32_t maskStride = 1, bool hasScale = false,
+                                         float scale = 1.0f)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -566,8 +568,9 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);  // for V calc
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);  // for V out
     for (int idx = 0; idx < m; idx++) {
-        int actualCalcLen = seqHead ? calcLen + (idx + maskOff) / maskStride :
-                                calcLen + (idx + maskOff) % maskStride;  // 每一行开始mask的位置
+        int actualCalcLen = seqHead
+                                ? calcLen + (idx + maskOff) / maskStride
+                                : calcLen + (idx + maskOff) % maskStride;  // 每一行开始mask的位置
         if (actualCalcLen > outN) {
             actualCalcLen = outN;
         }
@@ -819,18 +822,19 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, __gm__ float *expBuf, uint32_t m,
                                      uint32_t n, uint32_t calcLen, uint32_t outN = 0,
-                                     bool seqHead = true, uint32_t maskOff = 0, uint32_t maskStride = 1,
-                                     bool hasScale = false, float scale = 1.0f)
+                                     bool seqHead = true, uint32_t maskOff = 0,
+                                     uint32_t maskStride = 1, bool hasScale = false,
+                                     float scale = 1.0f)
 {
-    RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, seqHead, maskOff, maskStride, hasScale,
-                             scale);
+    RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, seqHead, maskOff, maskStride,
+                             hasScale, scale);
 }
 
 #else
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n, int calcLen,
-                                             uint32_t outN = 0, bool seqHead = true, uint32_t maskOff = 0,
-                                             uint32_t maskStride = 1,
+                                             uint32_t outN = 0, bool seqHead = true,
+                                             uint32_t maskOff = 0, uint32_t maskStride = 1,
                                              __gm__ float *maxBuf = nullptr,
                                              __gm__ float *sumBuf = nullptr, bool hasScale = false,
                                              float scale = 1.0f)
@@ -839,8 +843,9 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf, uint32_t m,
                                          uint32_t n, uint32_t calcLen, uint32_t outN = 0,
-                                         bool seqHead = true, uint32_t maskOff = 0, uint32_t maskStride = 1,
-                                         bool hasScale = false, float scale = 1.0f)
+                                         bool seqHead = true, uint32_t maskOff = 0,
+                                         uint32_t maskStride = 1, bool hasScale = false,
+                                         float scale = 1.0f)
 {
 }
 #endif

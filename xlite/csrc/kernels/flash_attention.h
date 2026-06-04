@@ -555,8 +555,8 @@ public:
                     kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
                 RunAivSoftmaxPingPong(
                     (__gm__ Dtype *)qk[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
-                    nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN,
-                    true, nWorkStart % headNumInGroup, headNumInGroup,
+                    nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN, true,
+                    nWorkStart % headNumInGroup, headNumInGroup,
                     (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
                     (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr());
                 ffts_cross_core_sync(PIPE_MTE3, config);
