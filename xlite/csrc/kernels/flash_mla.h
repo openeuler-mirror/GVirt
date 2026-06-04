@@ -929,6 +929,10 @@ public:
                 PipeBarrier<PIPE_M>();
                 curr = 1 - curr;
             }
+            if (kLoop % 4 != 0) {
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + pingpongL1B);
+                pingpongL1B ^= 1;
+            }
 
             kSize = ropeHeadDim;
             int kBlockPad = ROUND_UP(kSize, kBlockSize);
