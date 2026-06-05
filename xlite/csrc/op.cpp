@@ -103,20 +103,45 @@ static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       uint32_t copySize)
 {
-    uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
+    uint32_t rankSize = rt.tpSize();
+    if (type == DP) {
+        rankSize = rt.dpSize();
+    } else if (type == EP) {
+        rankSize = rt.moeEpSize();
+    }
     if (in.dtype != out.dtype || in.numel * rankSize != out.numel) {
-        throw std::runtime_error(std::string(__func__) +
-                                 ": check tensor failed! input: " + std::to_string(in.dtype) +
-                                 " output: " + std::to_string(out.dtype));
+        std::stringstream ss;
+        ss << __func__ << ": check tensor failed!"
+           << " in.dtype=" << XDtypeStr(in.dtype) << "(" << in.dtype << ")"
+           << " out.dtype=" << XDtypeStr(out.dtype) << "(" << out.dtype << ")"
+           << " in.numel=" << in.numel << " rankSize=" << rankSize
+           << " expected out.numel=" << (in.numel * rankSize) << " actual out.numel=" << out.numel;
+        throw std::runtime_error(ss.str());
     }
     if ((in.numel * XDtypeBit(in.dtype)) % XDtypeBit(INT8)) {
         throw std::runtime_error(std::string(__func__) + ": all gather 8bit align check failed!");
     }
 
-    auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
-    auto hcclComm = (type == TP) ? rt._tpComm : rt._dpComm;
-    uint32_t rank = (type == TP) ? rt.tpSize() : rt.dpSize();
-    uint32_t localRank = (type == TP) ? (rt.rankId() % rt.tpSize()) : (rt.rankId() / rt.tpSize());
+    XcclComm *xcclComm = nullptr;
+    HcclComm hcclComm = nullptr;
+    uint32_t rank = 0;
+    uint32_t localRank = 0;
+    if (type == TP) {
+        xcclComm = rt._tpXcclComm;
+        hcclComm = rt._tpComm;
+        rank = rt.tpSize();
+        localRank = rt.rankId() % rt.tpSize();
+    } else if (type == DP) {
+        xcclComm = rt._dpXcclComm;
+        hcclComm = rt._dpComm;
+        rank = rt.dpSize();
+        localRank = rt.rankId() / rt.tpSize();
+    } else if (type == EP) {
+        xcclComm = rt._epXcclComm;
+        hcclComm = rt._epComm;
+        rank = rt.moeEpSize();
+        localRank = rt.rankId() / rt.moeTpSize();
+    }
     size_t inBytes = in.numel * XDtypeBit(in.dtype) / 8;
     size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
@@ -710,7 +735,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
 
 void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &num)
 {
-    if (IsDummyRuntime(rt)) {
+    if (IsDummyRuntime(rt) || in.numel == 0) {
         return;
     }
     if (in.dtype == FP16 && out.dtype == FP16) {
@@ -782,7 +807,7 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                         long outDim, long inDim, XTensor &output, bool weightNZ, bool transpose)
 {
-    if (IsDummyRuntime(rt)) {
+    if (IsDummyRuntime(rt) || in.numel == 0) {
         return;
     }
     if (in.dtype == BF16 && weightDtype == BF16 && output.dtype == BF16) {
@@ -1166,7 +1191,7 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
 
 void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, const XTensor &num)
 {
-    if (IsDummyRuntime(rt)) {
+    if (IsDummyRuntime(rt) || x.numel == 0) {
         return;
     }
     if (x.ptr == nullptr || scale.ptr == nullptr || out.ptr == nullptr) {
@@ -1187,7 +1212,7 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, con
 void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scale,
                     const XTensor &num)
 {
-    if (IsDummyRuntime(rt)) {
+    if (IsDummyRuntime(rt) || in.numel == 0) {
         return;
     }
     size_t m = in.shape[0];
@@ -1205,6 +1230,9 @@ void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
                           const XTensor &quantBias, const XTensor &weightScale, bool weightNZ,
                           bool transpose, const XTensor &outScale, const XTensor &num)
 {
+    if (IsDummyRuntime(rt) || in.numel == 0) {
+        return;
+    }
     if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == BF16) {
         out.View(FP16);
         XliteOpMatmul(rt, in, weight, out, weightNZ, quantBias, weightScale, transpose);
@@ -1221,6 +1249,9 @@ void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTen
                                long outDim, long inDim, XTensor &output, XTensor &outScale,
                                XTensor &num, bool weightNZ, bool transpose)
 {
+    if (IsDummyRuntime(rt) || in.numel == 0) {
+        return;
+    }
     if (in.dtype == INT8 && weightDtype == INT8 && output.dtype == BF16) {
         output.View(FP16);
         XliteOpGroupMatmul(rt, in, weights, deqScales, counts, start, end, weightDtype, outDim,

@@ -156,6 +156,7 @@ public:
     uint32_t batchedTokens;
     uint32_t defaultMatmulSwizzle = 0x600;
     bool disableSwizzleTable = false;
+    bool enableMoEAllToAll = false;
 
     XcclComm *_tpXcclComm = nullptr;
     XcclComm *_dpXcclComm = nullptr;
@@ -180,6 +181,9 @@ public:
     XTensor _cachedLens;
     XTensor _lens;
     XTensor _queryStartLoc;
+
+    // for MoE
+    XTensor _tokensPerEpGroupAllEpHost;
 
 protected:
     int GetNodeIps(void);

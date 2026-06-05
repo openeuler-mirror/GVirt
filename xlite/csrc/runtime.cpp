@@ -95,6 +95,14 @@ void XRuntime::Init(size_t sizeMB)
         }
     }
 
+    const char *envMoEAllToAll = std::getenv("XLITE_MOE_ALLTOALL");
+    if (isEnvironmentVariableTrue(envMoEAllToAll)) {
+        enableMoEAllToAll = true;
+        if (_rankId == 0) {
+            std::cout << "Xlite MoE AllToAll Enabled!" << std::endl;
+        }
+    }
+
     _inited = true;
 }
 
@@ -128,6 +136,7 @@ XRuntime::~XRuntime(void)
         (void)aclrtFree(_lens.ptr);
         (void)aclrtFree(_queryStartLoc.ptr);
         (void)aclrtFree(_blockTables.ptr);
+        (void)aclrtFreeHost(_tokensPerEpGroupAllEpHost.ptr);
     }
 
     if (!_initOutside) {
@@ -337,6 +346,10 @@ void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t m
     size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _blockTables.Init({maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32, ptr);
+
+    size = _moeEpSize * _moeEpSize * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMallocHost(&ptr, size));
+    _tokensPerEpGroupAllEpHost.Init({_moeEpSize * _moeEpSize}, INT32, ptr);
 }
 
 void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
