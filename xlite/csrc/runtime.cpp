@@ -10,6 +10,7 @@
 
 #define XLITE_DEFAULT_IP "127.0.0.1"
 #define XLITE_DP_PORT_OFFSET 200
+#define XLITE_EP_PORT_OFFSET 300
 #define XLITE_CCL_PORT_OFFSET 400
 
 bool isEnvironmentVariableTrue(const char *env_value_cstr)
@@ -26,8 +27,10 @@ bool isEnvironmentVariableTrue(const char *env_value_cstr)
     return env_value == "true" || env_value == "1" || env_value == "yes" || env_value == "on";
 }
 
-XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize)
-    : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize)
+XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize,
+                   uint32_t moeTpSize, uint32_t moeEpSize)
+    : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize), _moeTpSize(moeTpSize),
+      _moeEpSize(moeEpSize)
 {
     if (sizeMB != 0) {
         Init(sizeMB);
@@ -92,6 +95,14 @@ void XRuntime::Init(size_t sizeMB)
         }
     }
 
+    const char *envMoEAllToAll = std::getenv("XLITE_MOE_ALLTOALL");
+    if (isEnvironmentVariableTrue(envMoEAllToAll)) {
+        enableMoEAllToAll = true;
+        if (_rankId == 0) {
+            std::cout << "Xlite MoE AllToAll Enabled!" << std::endl;
+        }
+    }
+
     _inited = true;
 }
 
@@ -125,6 +136,7 @@ XRuntime::~XRuntime(void)
         (void)aclrtFree(_lens.ptr);
         (void)aclrtFree(_queryStartLoc.ptr);
         (void)aclrtFree(_blockTables.ptr);
+        (void)aclrtFreeHost(_tokensPerEpGroupAllEpHost.ptr);
     }
 
     if (!_initOutside) {
@@ -288,6 +300,19 @@ int XRuntime::InitHcclComm(void)
         delete sock;
         CHECK_HCCL(HcclCommInitRootInfo(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm));
     }
+
+    if (_moeEpSize > 1) {
+        ip = _ips[_rankId % _moeTpSize];
+        port = _port + XLITE_EP_PORT_OFFSET + _rankId % _moeTpSize + portOffset;
+
+        if (_rankId / _moeTpSize == 0) {
+            CHECK_HCCL(HcclGetRootInfo(&rootInfo));
+        }
+        XSock *sock = new XSock(_rankId / _moeTpSize, _moeEpSize, ip, port);
+        sock->Broadcast(&rootInfo, sizeof(rootInfo));
+        delete sock;
+        CHECK_HCCL(HcclCommInitRootInfo(_moeEpSize, &rootInfo, _rankId / _moeTpSize, &_epComm));
+    }
     portOffset += 500;
 
     return 0;
@@ -321,6 +346,10 @@ void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t m
     size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     _blockTables.Init({maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32, ptr);
+
+    size = _moeEpSize * _moeEpSize * XDtypeBit(INT32) / 8;
+    CHECK_ACL(aclrtMallocHost(&ptr, size));
+    _tokensPerEpGroupAllEpHost.Init({_moeEpSize * _moeEpSize}, INT32, ptr);
 }
 
 void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
@@ -444,6 +473,16 @@ void XRuntime::EventRecordCurrStream(aclrtStream currStream)
 void XRuntime::MemcpyH2D(void *dst, void *src, size_t size)
 {
     CHECK_ACL(aclrtMemcpy(dst, size, src, size, ACL_MEMCPY_HOST_TO_DEVICE));
+}
+
+void XRuntime::MemcpyD2H(void *dst, void *src, size_t size)
+{
+    CHECK_ACL(aclrtMemcpy(dst, size, src, size, ACL_MEMCPY_DEVICE_TO_HOST));
+}
+
+void XRuntime::MemcpyD2HAsync(void *dst, void *src, size_t size)
+{
+    CHECK_ACL(aclrtMemcpyAsync(dst, size, src, size, ACL_MEMCPY_DEVICE_TO_HOST, stream));
 }
 
 void XRuntime::UpdateCoreNum(float blockDimUtilization)

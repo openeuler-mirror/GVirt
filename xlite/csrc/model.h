@@ -83,6 +83,21 @@ struct XModelConfig {
     bool weightNZ = false;
 };
 
+struct MoEAlltoAllMeta {
+    std::vector<int64_t> sendCountsData;
+    std::vector<int64_t> recvCountsData;
+    std::vector<int64_t> sdisplsData;
+    std::vector<int64_t> rdisplsData;
+    XTensor sendCounts;
+    XTensor recvCounts;
+    XTensor sdispls;
+    XTensor rdispls;
+    uint64_t totalRecvElements = 0;
+    // per-source per-expert counts for reorder, pointer to device tensor (not value copy)
+    XTensor *expertsCountsAllEpDevice = nullptr;
+    uint32_t nRoutedExperts = 0;
+};
+
 #define TILESIZE_OF_QUERY 128  // the tile size of query
 #define AIC_MAX_NUM 25
 #define AIV_MAX_NUM 50
@@ -168,10 +183,21 @@ private:
                     std::vector<MatmulWeight> &upGate, std::vector<MatmulWeight> &down,
                     bool withAllReduce);
     std::tuple<XTensor &, XTensor &> ForwardMoEGate(XRuntime &rt, uint32_t layer, XTensor &input);
-    std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &> ForwardMoEDispatch(
-        XRuntime &rt, XTensor &tokenSorted, XTensor &weights, XTensor &routing);
+    std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMeta>
+        ForwardMoEDispatch(XRuntime &rt, XTensor &tokenSorted, XTensor &weights, XTensor &routing);
     void ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weights, XTensor &routing,
                            XTensor &unpIdx, XTensor &expertsSorted, XTensor &expertsCounts);
+    MoEAlltoAllMeta MoeComputeAlltoAllVMeta(const int32_t *tokensPerEpGroupAllEpHost,
+                                            uint32_t moeEpSize, uint32_t moeTpSize,
+                                            uint32_t hiddenSize, uint32_t rankId,
+                                            uint32_t nRoutedExperts);
+    MoEAlltoAllMeta MoeComputeReverseAlltoAllVMeta(const MoEAlltoAllMeta &meta, uint32_t moeEpSize);
+    std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMeta>
+        ForwardMoEDispatchAllToAll(XRuntime &rt, XTensor &tokenSorted, XTensor &weights,
+                                   XTensor &routing);
+    void ForwardMoECombineAllToAll(XRuntime &rt, XTensor &tokenSorted, XTensor &weights,
+                                   XTensor &routing, XTensor &unpIdx, XTensor &expertsSorted,
+                                   XTensor &expertsCounts, const MoEAlltoAllMeta &meta);
     void ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,

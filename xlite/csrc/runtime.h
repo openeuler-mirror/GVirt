@@ -76,6 +76,7 @@ struct XModelAttnMeta {
 
 enum commType {
     TP,
+    EP,
     DP,
     MAX_COMM_TYPE,
 };
@@ -86,7 +87,7 @@ class XRuntime
 {
 public:
     XRuntime(uint32_t devid, size_t sizeMB = 0, uint32_t rankId = 0, uint32_t tpSize = 1,
-             uint32_t dpSize = 1);
+             uint32_t dpSize = 1, uint32_t moeTpSize = 1, uint32_t moeEpSize = 1);
     virtual ~XRuntime(void);
     void Init(size_t sizeMB);
     void InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
@@ -97,6 +98,8 @@ public:
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
     void MemcpyH2D(void *dst, void *src, size_t size);
+    void MemcpyD2H(void *dst, void *src, size_t size);
+    void MemcpyD2HAsync(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
 
     void SetCurrentContext();
@@ -130,6 +133,14 @@ public:
     {
         return _dpSize;
     };
+    uint32_t moeTpSize(void)
+    {
+        return _moeTpSize;
+    };
+    uint32_t moeEpSize(void)
+    {
+        return _moeEpSize;
+    };
     aclrtStream stream = nullptr;
     uint32_t aicNum;
     uint32_t aivNum;
@@ -137,6 +148,7 @@ public:
     uint32_t originAivNum;
     HcclComm _tpComm = nullptr;
     HcclComm _dpComm = nullptr;
+    HcclComm _epComm = nullptr;
     uint32_t commOptimizeLen = XLITE_DEFAULT_COMM_OPTIMIZE_LEN;
     bool enableCommOptimize;
     XTensor hiddenStatePad;
@@ -144,9 +156,11 @@ public:
     uint32_t batchedTokens;
     uint32_t defaultMatmulSwizzle = 0x600;
     bool disableSwizzleTable = false;
+    bool enableMoEAllToAll = false;
 
     XcclComm *_tpXcclComm = nullptr;
     XcclComm *_dpXcclComm = nullptr;
+    XcclComm *_epXcclComm = nullptr;
 
     // for multi-task parallel
     bool multiTaskParallel = false;
@@ -168,6 +182,9 @@ public:
     XTensor _lens;
     XTensor _queryStartLoc;
 
+    // for MoE
+    XTensor _tokensPerEpGroupAllEpHost;
+
 protected:
     int GetNodeIps(void);
     int InitHcclComm(void);
@@ -182,6 +199,8 @@ protected:
     uint32_t _rankId;
     uint32_t _tpSize;
     uint32_t _dpSize;
+    uint32_t _moeTpSize;
+    uint32_t _moeEpSize;
     uint32_t _rankSize;
     uint32_t _nDevPerNode = 0;
     uint32_t _port = XLITE_DEFAULT_PORT;

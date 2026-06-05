@@ -964,6 +964,29 @@ void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in)
     rt.Synchronize();
 }
 
+void AlltoAllV(XRuntime &rt, at::Tensor &out, at::Tensor &in, at::Tensor &sendCounts,
+               at::Tensor &recvCounts, at::Tensor &sdispls, at::Tensor &rdispls,
+               uint32_t commType = 0)
+{
+    XTensor _in, _out, _sendCounts, _recvCounts, _sdispls, _rdispls;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    InitXTensor(_sendCounts, sendCounts);
+    InitXTensor(_recvCounts, recvCounts);
+    InitXTensor(_sdispls, sdispls);
+    InitXTensor(_rdispls, rdispls);
+
+    enum commType type = TP;
+    if (commType == 1) {
+        type = DP;
+    } else if (commType == 2) {
+        type = EP;
+    }
+    XliteOpAlltoAllV(rt, _in, _out, _sendCounts, _recvCounts, _sdispls, _rdispls, type);
+    rt.Synchronize();
+}
+
 void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
 {
     XTensor _x, _y, _z;
@@ -1517,12 +1540,37 @@ void Muls(XRuntime &rt, at::Tensor &input, float scale, at::Tensor &output)
     rt.Synchronize();
 }
 
+void ExpertsCountsSum(XRuntime &rt, at::Tensor &expertsCountsInput, at::Tensor &tokensPerEpgroup,
+                      at::Tensor &expertsCountsOutput, uint32_t nRoutedExperts)
+{
+    XTensor _expertsCountsInput, _tokensPerEpgroup, _expertsCountsOutput;
+
+    InitXTensor(_expertsCountsInput, expertsCountsInput);
+    InitXTensor(_tokensPerEpgroup, tokensPerEpgroup);
+    InitXTensor(_expertsCountsOutput, expertsCountsOutput);
+    XliteOpExpertsCountsSum(rt, _expertsCountsInput, _tokensPerEpgroup, _expertsCountsOutput,
+                            nRoutedExperts);
+    rt.Synchronize();
+}
+
+void ReorderMoE(XRuntime &rt, at::Tensor &in, at::Tensor &out, at::Tensor &counts,
+                uint32_t hiddenSize, uint32_t localStart, uint32_t localEnd, bool forward)
+{
+    XTensor _in, _out, _counts;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    InitXTensor(_counts, counts);
+    XliteOpReorderMoE(rt, _in, _out, _counts, hiddenSize, localStart, localEnd, forward);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
-        .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t>(), py::arg("devid"),
-             py::arg("size") = 0, py::arg("rank") = 0, py::arg("tp_size") = 1,
-             py::arg("dp_size") = 1)
+        .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>(),
+             py::arg("devid"), py::arg("size") = 0, py::arg("rank") = 0, py::arg("tp_size") = 1,
+             py::arg("dp_size") = 1, py::arg("moe_tp_size") = 1, py::arg("moe_ep_size") = 1)
         .def_readwrite("task_id", &XRuntime::taskId)
         .def_readwrite("notify", &XRuntime::notify)
         .def_readwrite("peer_notify", &XRuntime::peerNotify)
@@ -1728,6 +1776,9 @@ PYBIND11_MODULE(_C, m)
     m.def("all_gather", &AllGather, py::arg("rt"), py::arg("out"), py::arg("in_"));
     m.def("reduce_scatter", &ReduceScatter, py::arg("rt"), py::arg("out"), py::arg("in_"));
     m.def("all_reduce", &AllReduce, py::arg("rt"), py::arg("out"), py::arg("in_"));
+    m.def("alltoallv", &AlltoAllV, py::arg("rt"), py::arg("out"), py::arg("in_"),
+          py::arg("send_counts"), py::arg("recv_counts"), py::arg("sdispls"), py::arg("rdispls"),
+          py::arg("comm_type") = 0);
     m.def("add", &Add, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"));
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
@@ -1815,6 +1866,12 @@ PYBIND11_MODULE(_C, m)
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
           py::arg("block_size"), py::arg("batch"), py::arg("max_num_block"));
     m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"));
+    m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),
+          py::arg("tokens_per_epgroup"), py::arg("experts_counts_output"),
+          py::arg("n_routed_experts"));
+    m.def("reorder_moe", &ReorderMoE, py::arg("rt"), py::arg("in_"), py::arg("out"),
+          py::arg("counts"), py::arg("hidden_size"), py::arg("local_start"), py::arg("local_end"),
+          py::arg("forward"));
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,

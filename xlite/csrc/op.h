@@ -16,6 +16,8 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
                           uint32_t copySize = COPY_SIZE);
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                          uint32_t copySize = COPY_SIZE);
+void XliteOpAlltoAllV(XRuntime &rt, XTensor &in, XTensor &out, XTensor &sendCounts,
+                      XTensor &recvCounts, XTensor &sdispls, XTensor &rdispls, enum commType type);
 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
                   XTensor &out);
@@ -116,4 +118,8 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
                           uint32_t headDim, uint32_t blockSize, uint32_t batch,
                           uint32_t maxNumBlock);
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output);
+void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,
+                             XTensor &expertsCountsOutput, uint32_t nRoutedExperts);
+void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &counts,
+                       uint32_t hiddenSize, uint32_t localStart, uint32_t localEnd, bool forward);
 #endif

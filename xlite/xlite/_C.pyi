@@ -37,6 +37,8 @@ class Runtime:
         rank: int = 0,
         tp_size: int = 1,
         dp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_ep_size: int = 1,
     ) -> None:
         """Create a runtime for one Ascend device.
 
@@ -46,6 +48,8 @@ class Runtime:
             rank (int): Global rank in the distributed group.
             tp_size (int): Tensor-parallel group size.
             dp_size (int): Data-parallel group size.
+            moe_tp_size (int): Tensor-parallel size for MoE layers.
+            moe_ep_size (int): Expert-parallel size for MoE layers.
         """
 
     def update_core_num(self, util: float) -> None:
@@ -848,6 +852,41 @@ def all_reduce(rt: Runtime, out: torch.Tensor, in_: torch.Tensor) -> None:
 
     Raises:
         RuntimeError: If the native collective call fails.
+    """
+    ...
+
+def alltoallv(
+    rt: Runtime,
+    out: torch.Tensor,
+    in_: torch.Tensor,
+    send_counts: torch.Tensor,
+    recv_counts: torch.Tensor,
+    sdispls: torch.Tensor,
+    rdispls: torch.Tensor,
+    comm_type: int = 0,
+) -> None:
+    """All-to-all vectorized collective communication.
+
+    Each rank sends `send_counts[i]` elements starting at `sdispls[i]` to
+    rank *i* and receives `recv_counts[i]` elements starting at `rdispls[i]`
+    from rank *i*.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): Output buffer for received data.
+        in_ (torch.Tensor): Input tensor with data to send.
+        send_counts (torch.Tensor): Per-rank send element counts.
+        recv_counts (torch.Tensor): Per-rank receive element counts.
+        sdispls (torch.Tensor): Per-rank send displacement offsets.
+        rdispls (torch.Tensor): Per-rank receive displacement offsets.
+        comm_type (int, default=0): Communication domain selector.
+            ``0`` (TP), ``1`` (DP), ``2`` (EP).
+
+    Returns:
+        None: `out` is written in place.
+
+    Raises:
+        RuntimeError: If ``in_.dtype != out.dtype`` or the HCCL call fails.
     """
     ...
 
@@ -1662,6 +1701,80 @@ def muls(rt: Runtime, input: torch.Tensor, scale: float, output: torch.Tensor) -
 
     Returns:
         None: `output` is written in place.
+    """
+    ...
+
+def experts_counts_sum(
+    rt: Runtime,
+    experts_counts_input: torch.Tensor,
+    tokens_per_epgroup: torch.Tensor,
+    experts_counts_output: torch.Tensor,
+    n_routed_experts: int,
+) -> None:
+    """Compute two reductions over a per-DP-rank per-expert token count matrix.
+
+    Given an input ``experts_counts_input`` of shape ``[ep_size, n_routed_experts]``
+    where row *i* is the dispatch count vector from DP rank *i*, the kernel writes:
+
+    * ``tokens_per_epgroup[dp_idx, ep_id]`` — total tokens from DP rank ``dp_idx``
+      destined for experts in EP group ``ep_id``.  Shape ``[ep_size, ep_size]``.
+    * ``experts_counts_output[expert]`` — total tokens for expert ``expert``,
+      summed across all DP ranks.  Shape ``[n_routed_experts]``.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        experts_counts_input (torch.Tensor): Per-DP-rank per-expert count matrix
+            ``[ep_size, n_routed_experts]`` (int32).
+        tokens_per_epgroup (torch.Tensor): Output buffer for per-DP-rank
+            per-EP-group token sums ``[ep_size, ep_size]`` (int32).
+        experts_counts_output (torch.Tensor): Output buffer for per-expert total
+            counts ``[n_routed_experts]`` (int32).
+        n_routed_experts (int): Total number of routed experts.
+
+    Returns:
+        None: ``tokens_per_epgroup`` and ``experts_counts_output`` are written
+        in place.
+    """
+    ...
+
+def reorder_moe(
+    rt: Runtime,
+    in_: torch.Tensor,
+    out: torch.Tensor,
+    counts: torch.Tensor,
+    hidden_size: int,
+    local_start: int,
+    local_end: int,
+    forward: bool,
+) -> None:
+    """Permute token rows between source-grouped and expert-grouped layouts.
+
+    The kernel handles two directions based on ``forward``:
+
+    * **forward=True**: source-grouped → expert-grouped.  Input tokens are
+      grouped by source EP rank; output tokens are grouped by target expert
+      index, ready for per-expert computation.
+    * **forward=False**: expert-grouped → source-grouped.  The inverse
+      permutation that restores the original source-grouped order.
+
+    The ``counts`` tensor of shape ``[moe_ep_size, n_routed_experts]``
+    (int32) specifies how many tokens each source rank sends to each expert.
+    ``local_start`` and ``local_end`` select a contiguous range of local
+    experts (the shard owned by the current EP rank).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        in_ (torch.Tensor): Input token tensor ``[total_tokens, hidden_size]``.
+        out (torch.Tensor): Output token tensor ``[total_tokens, hidden_size]``.
+        counts (torch.Tensor): Per-source per-expert token count matrix
+            ``[moe_ep_size, n_routed_experts]`` (int32).
+        hidden_size (int): Hidden dimension per token.
+        local_start (int): First local expert index (inclusive).
+        local_end (int): Last local expert index (exclusive).
+        forward (bool): ``True`` for forward permutation, ``False`` for reverse.
+
+    Returns:
+        None: ``out`` is written in place.
     """
     ...
 
