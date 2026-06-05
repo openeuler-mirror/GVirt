@@ -39,11 +39,58 @@ def get_pr_comments(pr_number):
         print(f"Error fetching comments for PR #{pr_number}: {e}")
         return []
 
-def has_ci_bot_comment(comments):
+def get_pr_latest_commit_time(pr_number):
+    """Get the timestamp of the latest commit in the PR.
+
+    Args:
+        pr_number: PR number
+
+    Returns:
+        ISO format timestamp of the latest commit's author date, or None if not found
+    """
+    url = f"{GITCODE_API_BASE}/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{pr_number}/commits"
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        commits = response.json()
+        if isinstance(commits, list) and len(commits) > 0:
+            # The first commit in the list is the latest
+            latest_commit = commits[0]
+            commit_detail = latest_commit.get("commit", {})
+            author = commit_detail.get("author", {})
+            return author.get("date")
+        return None
+    except requests.RequestException as e:
+        print(f"Error fetching commits for PR #{pr_number}: {e}")
+        return None
+
+def has_ci_bot_comment(comments, latest_commit_time):
+    """Check if there's a CI bot comment after the latest commit.
+
+    Args:
+        comments: List of PR comments
+        latest_commit_time: ISO format timestamp of the latest commit's author date
+
+    Returns:
+        True if a CI bot comment exists after the latest commit, False otherwise
+    """
+    from datetime import datetime
+
+    if not latest_commit_time:
+        return False
+
+    commit_time = datetime.fromisoformat(latest_commit_time.replace('Z', '+00:00'))
+
     for comment in comments:
         body = comment.get("body", "")
         if "CI Test Results" in body or "CI测试结果" in body:
-            return True
+            comment_created_at = comment.get("created_at", "")
+            if comment_created_at:
+                comment_time = datetime.fromisoformat(comment_created_at.replace('Z', '+00:00'))
+                print(f"comment time: {comment_time} vs latest commit time: {commit_time}")
+                if comment_time > commit_time:
+                    return True
     return False
 
 def add_remote_if_not_exists(remote_name, remote_url):
@@ -289,9 +336,15 @@ def process_pr(pr):
     print(f"\n{'='*60}")
     print(f"Processing PR #{pr_number}: {pr_title}")
     print(f"{'='*60}")
+    # Skip draft PRs
+    if pr.get("draft", False):
+        print(f"PR #{pr_number} is a draft, skipping...")
+        return
+    # Get the latest commit's author time
+    latest_commit_time = get_pr_latest_commit_time(pr_number)
     comments = get_pr_comments(pr_number)
-    if has_ci_bot_comment(comments):
-        print(f"PR #{pr_number} already has CI bot comment, skipping...")
+    if has_ci_bot_comment(comments, latest_commit_time):
+        print(f"PR #{pr_number} already has CI bot comment after latest commit, skipping...")
         return
     print(f"Fetching PR #{pr_number} branch...")
     remote_name = source_owner
