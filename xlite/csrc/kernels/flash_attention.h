@@ -541,7 +541,10 @@ public:
                 int subHeadOffset = nWorkStart % headNumInGroup;
                 uint32_t calcSoftmaxLen = cachedLen + queryTaskStart + 1;
                 int actualCalcSoftmaxLen = calcSoftmaxLen - kvOffset;
-                uint32_t outN = ROUND_UP(cachedLen + queryTaskStart + queryTaskLen, blockSize);
+                if (actualCalcSoftmaxLen > kvLen) {
+                    actualCalcSoftmaxLen = kvLen;
+                }
+                uint32_t outN = ROUND_UP(kvLen, blockSize);
                 // wait aic qk done
                 wait_flag_dev(0);
 
