@@ -524,7 +524,9 @@ public:
                 int queryTaskOffset = queryStart + queryTaskStart;
                 int kvHeadOffset = kvHeadIdx * groupMemSize;
 
-                uint32_t qOffset = queryTaskOffset * headSize * nQKVHeads + kvHeadOffset;
+                uint32_t outOffset = queryTaskOffset * nHeads + kvHeadIdx * headNumInGroup;
+                uint32_t qOffset =
+                    (queryTaskOffset * nQKVHeads + kvHeadIdx * headNumInGroup) * headSize;
 
                 int isLastKvTile = (kvOffset + kvLen == calcLen) ? 1 : 0;
 
@@ -537,10 +539,7 @@ public:
                 }
                 int subQOffset = nWorkStart / headNumInGroup;
                 int subHeadOffset = nWorkStart % headNumInGroup;
-                uint32_t outOffset =
-                    (queryTaskOffset + subQOffset) * nHeads + kvHeadIdx * headNumInGroup;
-                uint32_t calcSoftmaxLen =
-                    cachedLen + queryTaskStart + nWorkStart / headNumInGroup + 1;
+                uint32_t calcSoftmaxLen = cachedLen + queryTaskStart + 1;
                 int actualCalcSoftmaxLen = calcSoftmaxLen - kvOffset;
                 uint32_t outN = ROUND_UP(cachedLen + queryTaskStart + queryTaskLen, blockSize);
                 // wait aic qk done
@@ -555,9 +554,8 @@ public:
                     kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
                 RunAivSoftmaxPingPong(
                     (__gm__ Dtype *)qk[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
-                    nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN, true,
-                    nWorkStart % headNumInGroup, headNumInGroup,
-                    (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
+                    nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN, true, nWorkStart,
+                    headNumInGroup, (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
                     (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr());
                 ffts_cross_core_sync(PIPE_MTE3, config);
 
@@ -586,7 +584,7 @@ public:
                         (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
                         (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(), lastWorkCurCore,
                         nHeads, headSize, lastKvOffset == 0, lastActualCalcSoftmaxLen, true,
-                        lastWorkStart % headNumInGroup, headNumInGroup);
+                        lastWorkStart, headNumInGroup);
                     if (!lastIsLastKvTile) {
                         set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                         wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
@@ -638,8 +636,7 @@ public:
                                 (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
                                 (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
                                 lastWorkCurCore, nHeads, headSize, lastKvOffset == 0,
-                                lastActualCalcSoftmaxLen, true, lastWorkStart % headNumInGroup,
-                                headNumInGroup);
+                                lastActualCalcSoftmaxLen, true, lastWorkStart, headNumInGroup);
             if (!lastIsLastKvTile) {
                 set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);

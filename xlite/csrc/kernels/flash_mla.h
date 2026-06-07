@@ -1320,7 +1320,7 @@ public:
 
         int lastBatchIdx, lastQueryTaskLen, lastHeadIdx, last, lastKvOffset, lastKvLen,
             lastQueryTaskOffset, lastWorkStart, lastWorkCurCore, lastActualCalcSoftmaxLen,
-            lastHeadSubTaskStart, lastQuerySubTaskStart;
+            lastHeadSubTaskStart;
         int lastIsLastKvTile;
         uint32_t lastOutOffset;
         __gm__ uint32_t *lastBlockTable;
@@ -1384,8 +1384,7 @@ public:
                 }
                 int queryTaskOffset = queryStart + queryTaskStart;
 
-                uint32_t qOffset =
-                    (queryTaskOffset * nHeads + headIdx) * (ropeHeadDim + nopeHeadDim);
+                uint32_t outOffset = queryTaskOffset * nHeads + headIdx;
 
                 int isLastKvTile = (kvOffset + kvLen == calcLen) ? 1 : 0;
 
@@ -1398,8 +1397,6 @@ public:
                 }
                 int querySubTaskStart = nWorkStart % queryTaskLen;
                 int headSubTaskStart = nWorkStart / queryTaskLen;
-                uint32_t outOffset =
-                    (queryTaskOffset + querySubTaskStart) * nHeads + headIdx + headSubTaskStart;
                 uint32_t calcSoftmaxLen = cachedLen + queryTaskStart + 1;
                 int actualCalcSoftmaxLen = calcSoftmaxLen - kvOffset;
                 uint32_t outN = ROUND_UP(cachedLen + queryTaskStart + queryTaskLen, blockSize);
@@ -1414,12 +1411,11 @@ public:
                            blockIdx, subBlockIdx, batchIdx, queryTaskOffset,
                            queryTaskOffset + queryTaskLen, headIdx + headSubTaskStart, nWorkStart,
                            nWorkStart + nWorkCurCore, kvOffset, kvOffset + kvLen,
-                           actualCalcSoftmaxLen, querySubTaskStart, queryTaskLen, outN, curr);
+                           actualCalcSoftmaxLen, nWorkStart, queryTaskLen, outN, curr);
                 RunAivSoftmaxPingPong(
                     (__gm__ Dtype *)qk[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
-                    nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN, false,
-                    querySubTaskStart, queryTaskLen,
-                    (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
+                    nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN, false, nWorkStart,
+                    queryTaskLen, (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
                     (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr(), true, scale);
                 ffts_cross_core_sync(PIPE_MTE3, config);
 
@@ -1449,7 +1445,7 @@ public:
                         (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
                         (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(), lastWorkCurCore,
                         nHeads, vHeadDim, lastKvOffset == 0, lastActualCalcSoftmaxLen, false,
-                        lastQuerySubTaskStart, lastQueryTaskLen);
+                        lastWorkStart, lastQueryTaskLen);
                     if (!lastIsLastKvTile) {
                         set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                         wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
@@ -1470,7 +1466,6 @@ public:
                 lastIsLastKvTile = isLastKvTile;
                 lastActualCalcSoftmaxLen = actualCalcSoftmaxLen;
                 lastHeadSubTaskStart = headSubTaskStart;
-                lastQuerySubTaskStart = querySubTaskStart;
                 last = curr;
                 needDoUpdate = 1;
 
@@ -1502,8 +1497,7 @@ public:
                                 (__gm__ float *)lastMax[lastOutOffset].GetPhyAddr(),
                                 (__gm__ float *)lastSum[lastOutOffset].GetPhyAddr(),
                                 lastWorkCurCore, nHeads, vHeadDim, lastKvOffset == 0,
-                                lastActualCalcSoftmaxLen, false, lastQuerySubTaskStart,
-                                lastQueryTaskLen);
+                                lastActualCalcSoftmaxLen, false, lastWorkStart, lastQueryTaskLen);
             if (!lastIsLastKvTile) {
                 set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
