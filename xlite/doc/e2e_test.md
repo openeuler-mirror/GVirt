@@ -234,6 +234,18 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
   - yellow 环境：需要执行 source /home/env.sh
   - blue 环境：不需要 source /home/env.sh
 
+**Profiling采集：**
+
+当设置 `XLITE_ENABLE_PROFILING` 环境变量为 1 时，在线测试脚本可自动采集 profiling 数据，参考 [vllm-ascend 服务性能分析指南](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/performance_and_debug/service_profiling_guide.html)。
+
+- 目前 profiling 是在检测到 vllm bench 正式运行后的 30s 后开始，可根据需要调整
+- profiling 数据的保存位置为测试执行路径下的 profile_<模型>\_<测试模式>\_$(date +%m%d_%H%M%S)
+- 完成测试后，需要进行数据处理，转换方式为进入 profile 文件夹后执行以下命令
+
+```
+python -c "from torch_npu.profiler.profiler import analyse; import glob; [analyse(p) for p in glob.glob('*_ascend_pt')]"
+```
+
 ### 测试流程
 
 自动化测试机器人执行以下流程：
@@ -259,10 +271,11 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 测试结果保存在 `/home/daily_reports/` 目录下：
 
 - **报告目录结构**：
+
   - `xlite-{version}-{date}/`：当前版本测试结果（带日期）
   - `xlite-{version}/`：基线版本测试结果（不带日期）
-
 - **报告文件**：
+
   - `daily_benchmark_YYYYMMDD_HHMMSS.log`：测试执行日志（包含所有输出信息）
   - `benchmark_comparison_*.log`：性能对比报告
   - `metrics_*.json`：指标数据（JSON格式）
@@ -279,6 +292,7 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 ### 常用命令
 
 **调度器管理：**
+
 ```bash
 # 启动调度器（前台运行）
 python3 run_benchmark_scheduler.py

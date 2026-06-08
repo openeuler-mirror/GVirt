@@ -50,6 +50,15 @@ fi
 
 ip=127.0.0.1
 
+# Profiling 参数 (通过环境变量 XLITE_ENABLE_PROFILING=1 开启)
+profiler_param='{}'
+if [[ "${XLITE_ENABLE_PROFILING}" == "1" ]]; then
+    profiler_dir="./profile_$(basename "${model_path}")_${mode}_$(date +%m%d_%H%M%S)"
+    profiler_param=$(jq -n --arg dir "$profiler_dir" \
+        '{"profiler": "torch", "torch_profiler_dir": $dir, "torch_profiler_with_stack": false}')
+    echo "Profiling enabled, output to ${profiler_dir}"
+fi
+
 expert_parallel_param=""
 config_file="${model_path}/config.json"
 if [[ -f "${config_file}" ]]; then
@@ -98,5 +107,6 @@ python -m vllm.entrypoints.openai.api_server \
 	--async-scheduling \
 	${expert_parallel_param} \
 	${quantization_param} \
+	--profiler-config "${profiler_param}" \
 	--host ${ip} \
 	--port ${port} > ${log} 2>&1 &

@@ -644,8 +644,7 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
         XliteOpPermutation(rt, inputAllDp, routingAllDp, start, end, expertsSorted, unpIdx,
                            expertsCounts);
         rt.PutTensor(inputAllDp);
-        return {weightsAllDp,  routingAllDp,  unpIdx,
-                expertsSorted, expertsCounts, MoEAlltoAllMeta{}};
+        return {weightsAllDp, routingAllDp, unpIdx, expertsSorted, expertsCounts, {}};
     } else {
         XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
         XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
@@ -653,7 +652,7 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
             rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
         XliteOpPermutation(rt, tokenSorted, routing, start, end, expertsSorted, unpIdx,
                            expertsCounts);
-        return {weights, routing, unpIdx, expertsSorted, expertsCounts, MoEAlltoAllMeta{}};
+        return {weights, routing, unpIdx, expertsSorted, expertsCounts, {}};
     }
 }
 

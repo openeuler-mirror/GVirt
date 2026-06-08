@@ -357,17 +357,21 @@ total_start_time_formatted=$(date "+%Y-%m-%d %H:%M:%S")
 # 定义场景配置数组
 # 格式：input_len|output_len|concurrency_list|num_prompts_multiplier|max_num_batched_tokens|max_num_seqs|max_model_len|tensor_parallel_size
 declare -A SCENARIOS
-SCENARIOS[1]="512|512|1 16 32 48 64 96|10|65536|96|7168|8"
-SCENARIOS[2]="3584|1536|1 16 32 48 64|10|65536|64|7168|8"
-SCENARIOS[3]="8192|1024|1 16 32 48 64|10|65536|64|11264|8"
-SCENARIOS[4]="102400|10240|1 16|1|136192|16|136192|8"
+SCENARIOS[1]="512|512|1 16 32 48 64 96|4|65536|96|7168|8"
+SCENARIOS[2]="3584|1536|1 16 32|4|65536|32|7168|8"
+SCENARIOS[3]="8192|1024|1 16 32|4|65536|32|11264|8"
+SCENARIOS[4]="16384|1536|1 16 32|4|65536|32|32768|8"
+SCENARIOS[5]="32768|3072|1 24|4|136192|24|65536|8"
+SCENARIOS[6]="73728|8192|1 12|2|136192|16|102400|8"
+SCENARIOS[7]="102400|10240|1 8|1|136192|8|136192|8"
 
 # 定义每个模型的场景数量
 declare -A MODEL_SCENARIO_COUNT
-MODEL_SCENARIO_COUNT[dense]=3
-MODEL_SCENARIO_COUNT[dense_quant]=3
-MODEL_SCENARIO_COUNT[moe]=4
-MODEL_SCENARIO_COUNT[moe_quant]=4
+# Due to the limitation of max_position_embeddings, the max_model_len of Qwen3 dense models should be less than 40960.
+MODEL_SCENARIO_COUNT[dense]=4
+MODEL_SCENARIO_COUNT[dense_quant]=4
+MODEL_SCENARIO_COUNT[moe]=7
+MODEL_SCENARIO_COUNT[moe_quant]=7
 
 # 用于存储每个模型的场景测试结果
 declare -A MODEL_TEST_RESULTS
