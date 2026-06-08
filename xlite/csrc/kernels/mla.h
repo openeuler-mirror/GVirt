@@ -1270,8 +1270,8 @@ public:
                 int queryTaskOffset = queryStart + queryTaskStart;
 
                 // do queryIdx & (headIdx，headIdx + headTileSize)'s QK
-                uint32_t qOffset =
-                    (queryTaskOffset * nHeads + headIdx) * (ropeHeadDim + nopeHeadDim);
+                uint32_t outOffset = queryTaskOffset * nHeads + headIdx;
+                uint32_t qOffset = outOffset * (ropeHeadDim + nopeHeadDim);
                 if (cachedLen < 0) {
                     cachedLen = cachedLens[batchIdx];
                 }
@@ -1308,7 +1308,7 @@ public:
 
                 lastBatchIdx = batchIdx;
                 lastQueryTaskOffset = queryTaskOffset;
-                lastOutOffset = queryTaskOffset * nHeads + headIdx;
+                lastOutOffset = outOffset;
                 lastQueryTaskLen = queryTaskLen;
                 lastHeadIdx = headIdx;
                 lastBlockTable = blockTable;
@@ -1413,15 +1413,15 @@ public:
                            "SOFTMAX\n",
                            dbgBlockIdx, subIdx, batchIdx, queryTaskOffset,
                            queryTaskOffset + queryTaskLen, headIdx + headSubTaskStart, nWorkStart,
-                           nWorkStart + nWorkCurCore, calcSoftmaxLen, querySubTaskStart,
-                           queryTaskLen, outN, curr);
+                           nWorkStart + nWorkCurCore, calcSoftmaxLen, nWorkStart, queryTaskLen,
+                           outN, curr);
                 RunAivSoftmax(
                     (__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(),
                     m0 > (MAX_M0 - 4)
                         ? 0
                         : (__gm__ float *)qk[curr][(m0 + subIdx * 2) * qkStride].GetPhyAddr(),
-                    nWorkCurCore, qkStride, calcSoftmaxLen, outN, false, querySubTaskStart,
-                    queryTaskLen, true, scale);
+                    nWorkCurCore, qkStride, calcSoftmaxLen, outN, false, nWorkStart, queryTaskLen,
+                    true, scale);
 
                 ffts_cross_core_sync(PIPE_MTE3, config);
                 curr = 1 - curr;

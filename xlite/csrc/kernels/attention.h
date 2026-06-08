@@ -451,19 +451,19 @@ public:
                     queryTaskLen = queryLen - queryTaskStart;
                 }
 
-                int nSoftmax = queryTaskLen * headNumInGroup;
-                int nSoftmaxPerCore = DIV_ROUND_UP(nSoftmax, 2);
-                int nSoftmaxCurCore = nSoftmaxPerCore;
+                int nWork = queryTaskLen * headNumInGroup;
+                int nWorkPerCore = DIV_ROUND_UP(nWork, 2);
+                int nWorkCurCore = nWorkPerCore;
                 uint32_t subIdx = get_subblockid();
-                int nSoftmaxStart = subIdx * nSoftmaxPerCore;
-                if (nSoftmaxStart + nSoftmaxCurCore > nSoftmax) {
-                    nSoftmaxCurCore = nSoftmax - nSoftmaxStart;
+                int nWorkStart = subIdx * nWorkPerCore;
+                if (nWorkStart + nWorkCurCore > nWork) {
+                    nWorkCurCore = nWork - nWorkStart;
                 }
-                uint32_t qkOffset = nSoftmaxStart * maxSeqLen;
+                uint32_t qkOffset = nWorkStart * maxSeqLen;
                 if (cachedLen < 0) {
                     cachedLen = cachedLens[batchIdx];
                 }
-                uint32_t calcLen = cachedLen + queryTaskStart + nSoftmaxStart / headNumInGroup + 1;
+                uint32_t calcLen = cachedLen + queryTaskStart + 1;
                 uint32_t outN = ROUND_UP(cachedLen + queryTaskStart + queryTaskLen, blockSize);
 
                 // wait aic qk done
@@ -474,15 +474,14 @@ public:
                 dbg_printf(
                     "block%d subblock%u: batch %d do softmax kvHeadIdx %u m %d calcLen %u outN "
                     "%u mask off %u, use %d qk buf\n",
-                    dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nSoftmaxCurCore, calcLen, outN,
-                    nSoftmaxStart % headNumInGroup, currQkIdx);
+                    dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nWorkCurCore, calcLen, outN,
+                    nWorkStart, currQkIdx);
                 RunAivSoftmax(
                     (__gm__ Dtype *)qk[currQkIdx][qkOffset].GetPhyAddr(),
                     m0 > (MAX_M0 - 4)
                         ? 0
                         : (__gm__ float *)qk[currQkIdx][(m0 + subIdx * 2) * maxSeqLen].GetPhyAddr(),
-                    nSoftmaxCurCore, maxSeqLen, calcLen, outN, true, nSoftmaxStart % headNumInGroup,
-                    headNumInGroup);
+                    nWorkCurCore, maxSeqLen, calcLen, outN, true, nWorkStart, headNumInGroup);
 
                 ffts_cross_core_sync(PIPE_MTE3, config);
                 currQkIdx = 1 - currQkIdx;

@@ -25,11 +25,13 @@ rt = Runtime(0, 3000)
 torch.npu.set_device(0)
 torch.npu.config.allow_internal_format = True
 weight_nz = True
+enable_flash = False
 
 BLOCK_SIZE = 128
 
 # model configurations: name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, dtype
 models = [
+    ("base", 1, 64, 128, 128, 16, torch.bfloat16),
     ("deepseek_v3", 16, 64, 128, 128, 512, torch.bfloat16),
     ("glm5", 16, 64, 192, 256, 512, torch.bfloat16),
 ]
@@ -185,7 +187,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
         mla(rt, qWithQr_xlite, k_cache_xlite, v_cache_xlite, xlite_wkvb,
                    output_xlite, query_start_loc, query_lens, cached_lens,
                    block_tables, n_heads, rope_head_dim, nope_head_dim,
-                   v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, max_num_blocks, scale, weight_nz)
+                   v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, max_num_blocks, scale, weight_nz, enable_flash)
 
         logging.info(
             "mla %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s) executed!",
