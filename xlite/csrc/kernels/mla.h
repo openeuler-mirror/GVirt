@@ -146,7 +146,7 @@ public:
         off += qcrSize;
         uint32_t reuse = off;
 
-        uint64_t wukSize = MAX_N0 * k0 * sizeof(Dtype);
+        uint64_t wukSize = MAX_N0 * 4 * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             awukl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             awukl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -167,6 +167,10 @@ public:
             akrl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += krSize;
         }
+        uint64_t total_qk = off;
+        dbg_printf("QK buf: sharel1Size %lu, reuse %lu, wukSize %lu x 2, kSize %lu x 2, krSize %lu "
+                   "x 2, total %lu\n",
+                   sharel1Size, reuse, wukSize, kSize, krSize, total_qk);
 
         // SV (absorb)
         off = sharel1Size;
@@ -177,19 +181,24 @@ public:
             off += ktSize;
         }
 
-        uint64_t qkSize = MAX_M0 * (blockSize > k0 ? blockSize : k0) * sizeof(Dtype);
+        uint64_t qkSize = MAX_M0 * 4 * (blockSize > k0 ? blockSize : k0) * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             aqkl1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             aqkl1aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += qkSize;
         }
+        uint64_t total_sv = off;
 
-        uint64_t wuvSize = MAX_N0 * k0 * sizeof(Dtype);
+        off = sharel1Size;
+        uint64_t wuvSize = MAX_N0 * 4 * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             awuvl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             awuvl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += wuvSize;
         }
+        dbg_printf(
+            "SV buf: sharel1Size %lu, ktSize %lu x 2, qkSize %lu x 2, wuvSize %lu x 2, total %lu\n",
+            sharel1Size, ktSize, qkSize, wuvSize, total_sv);
     }
 
     /* (absorb)
@@ -254,6 +263,7 @@ public:
         WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID0);
 
         int curr = 0;
+        int pingpongL1B = 0;
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID7);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
@@ -274,6 +284,7 @@ public:
                 kBlockNum = k0 / kBlockSize;
                 WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
                 for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // nopeHeadDim
+                    int kIdx4 = kIdx % 4;
                     int kOffset = kIdx * k0;
                     if (kOffset + kSize > nopeHeadDim) {
                         kSize = nopeHeadDim - kOffset;
@@ -281,23 +292,33 @@ public:
                         kBlockNum = kBlockPad / kBlockSize;
                     }
 
-                    // copy WUK(T) (nSize, k0) to L1
-                    WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
-                    if (nz == 0) {
-                        CopyGmToL1Nd2Nz(awukl1bBuf[curr],
-                                        wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
-                                             kOffset * kvLoraRank + nOffset],
-                                        kSize, nSize, kvLoraRank, kBlockPad);
-                    } else {
-                        CopyGmToL1(awukl1bBuf[curr],
-                                   wkvb[headIdx * (nopeHeadDim + vHeadDim) * kBlockSize +
-                                        kOffset * kBlockSize +
-                                        nOffset * nHeads * (nopeHeadDim + vHeadDim)],
-                                   kSize, nSize / kBlockSize, nHeads * (nopeHeadDim + vHeadDim));
-                    }
+                    // copy WUK(T) (nSize, 4 * k0) to L1
+                    int k0ActualBlockNum;
+                    if (kIdx4 == 0) {
+                        int kRemSize = 4 * k0;
+                        if (kOffset + kRemSize > nopeHeadDim) {
+                            kRemSize = nopeHeadDim - kOffset;
+                        }
+                        k0ActualBlockNum = DIV_ROUND_UP(kRemSize, kBlockSize);
+                        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + pingpongL1B);
+                        if (nz == 0) {
+                            CopyGmToL1Nd2Nz(awukl1bBuf[pingpongL1B],
+                                            wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
+                                                 kOffset * kvLoraRank + nOffset],
+                                            kRemSize, nSize, kvLoraRank,
+                                            ROUND_UP(kRemSize, kBlockSize));
+                        } else {
+                            CopyGmToL1(awukl1bBuf[pingpongL1B],
+                                       wkvb[headIdx * (nopeHeadDim + vHeadDim) * kBlockSize +
+                                            kOffset * kBlockSize +
+                                            nOffset * nHeads * (nopeHeadDim + vHeadDim)],
+                                       kRemSize, nSize / kBlockSize,
+                                       nHeads * (nopeHeadDim + vHeadDim));
+                        }
 
-                    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
-                    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
+                        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + pingpongL1B);
+                        WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + pingpongL1B);
+                    }
 
                     WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
                     LoadData2dParams params(0, mBlockNum, 1, 0, kBlockNum - 1, 0, inc);
@@ -307,9 +328,12 @@ public:
                                  aqcrl1aBuf[aqcrl1aOffset + k * mhBlockNum * cubeSize], params);
                     }
 
-                    CopyToL0BTCol(l0bBuf[curr], awukl1bBuf[curr], nBlockNum, 0, kBlockNum,
-                                  kBlockNum);
-                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
+                    CopyToL0BTCol(l0bBuf[curr], awukl1bBuf[pingpongL1B], nBlockNum,
+                                  kIdx4 * k0 / kBlockSize, kBlockNum, k0ActualBlockNum);
+                    if (kIdx4 == 3) {
+                        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + pingpongL1B);
+                        pingpongL1B ^= 1;
+                    }
 
                     SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
                     WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
@@ -320,6 +344,10 @@ public:
                     SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
                     PipeBarrier<PIPE_M>();
                     curr = 1 - curr;
+                }
+                if (kLoop % 4 != 0) {
+                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + pingpongL1B);
+                    pingpongL1B ^= 1;
                 }
                 SetFlag<HardEvent::M_FIX>(EVENT_ID0);
                 WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
@@ -361,7 +389,6 @@ public:
         SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         uint32_t block;
-        int pingpongL1B = 0;
         for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // totalLen or topK
             int nOffset = nIdx * n0;
             if (nOffset + nSize > nTotalLen) {
@@ -532,6 +559,8 @@ public:
         WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID0);
 
         int curr = 0;
+        int pingpongL1A = 0;
+        int pingpongL1B = 0;
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
@@ -554,6 +583,8 @@ public:
             kBlockNum = K0 / kBlockSize;
             uint32_t block;
             for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // totalLen or topK
+                int kIdx4 = kIdx % 4;
+                int kIdx2 = kIdx % 2;
                 int kOffset = kIdx * K0;
                 if (kOffset + kSize > kTotalLen) {
                     kSize = kTotalLen - kOffset;
@@ -564,10 +595,20 @@ public:
                     block = blockTable[kIdx];
                 }
 
-                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
-                // copy QK (headTileSize, queryTokens, K0) to L1
-                CopyGmToL1Nd2Nz(aqkl1aBuf[curr], qk[kOffset], mhSize, kBlockPad, qkStride,
-                                mhBlockPad);
+                if (kIdx4 == 0) {
+                    int kRemSize = 4 * K0;
+                    int kRemBlockPad = ROUND_UP(4 * K0, kBlockSize);
+                    if (kOffset + kRemSize > kTotalLen) {
+                        kRemSize = kTotalLen - kOffset;
+                        kRemBlockPad = ROUND_UP(kRemSize, kBlockSize);
+                    }
+                    WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
+                    // copy QK (headTileSize, queryTokens, 4 * K0) to L1
+                    CopyGmToL1Nd2Nz(aqkl1aBuf[pingpongL1A], qk[kOffset], mhSize, kRemBlockPad,
+                                    qkStride, mhBlockPad);
+                    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
+                    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
+                }
 
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
                 // copy K(T) (nSize, K0) to L1
@@ -583,12 +624,16 @@ public:
                                     nSize, kvLoraRank, kBlockPad);
                 }
 
-                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
-                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
 
                 WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-                CopyToL0ACol(l0aBuf[curr], aqkl1aBuf[curr], mhBlockNum, 0, kBlockNum);
-                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
+                CopyToL0ACol(l0aBuf[curr], aqkl1aBuf[pingpongL1A], mhBlockNum,
+                             kIdx4 * K0 / kBlockSize, kBlockNum);
+                if (kIdx4 == 3) {
+                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
+                    pingpongL1A ^= 1;
+                }
 
                 CopyToL0BTCol(l0bBuf[curr], aktl1bBuf[curr], nBlockNum, 0, kBlockNum, kBlockNum);
                 SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
@@ -602,6 +647,10 @@ public:
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
                 PipeBarrier<PIPE_M>();
                 curr = 1 - curr;
+            }
+            if (kLoop % 4 != 0) {
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
+                pingpongL1A ^= 1;
             }
             SetFlag<HardEvent::M_FIX>(EVENT_ID0);
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
@@ -652,6 +701,7 @@ public:
                 WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
 
                 for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // kvLoraRank
+                    int kIdx4 = kIdx % 4;
                     int kOffset = kIdx * k0;
                     if (kOffset + kSize > kvLoraRank) {
                         kSize = kvLoraRank - kOffset;
@@ -659,27 +709,38 @@ public:
                         kBlockNum = kBlockPad / kBlockSize;
                     }
 
-                    WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
-                    // copy WUV (nSize, kSize) to L1
-                    if (nz == 0) {
-                        CopyGmToL1Nd2Nz(awuvl1bBuf[curr],
-                                        wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
-                                             (nopeHeadDim + nOffset) * kvLoraRank + kOffset],
-                                        nSize, kSize, kvLoraRank, nBlockPad);
-                    } else {
-                        CopyGmToL1(awuvl1bBuf[curr],
-                                   wkvb[headIdx * (nopeHeadDim + vHeadDim) * kBlockSize +
-                                        (nopeHeadDim + nOffset) * kBlockSize +
-                                        kOffset * nHeads * (nopeHeadDim + vHeadDim)],
-                                   nSize, kSize / kBlockSize, nHeads * (nopeHeadDim + vHeadDim));
+                    if (kIdx4 == 0) {
+                        int kRemSize = 4 * k0;
+                        if (kOffset + kRemSize > kvLoraRank) {
+                            kRemSize = kvLoraRank - kOffset;
+                        }
+                        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + pingpongL1B);
+                        // copy WUV (nSize, 4 * k0) to L1
+                        if (nz == 0) {
+                            CopyGmToL1Nd2Nz(awuvl1bBuf[pingpongL1B],
+                                            wkvb[headIdx * (nopeHeadDim + vHeadDim) * kvLoraRank +
+                                                 (nopeHeadDim + nOffset) * kvLoraRank + kOffset],
+                                            nSize, kRemSize, kvLoraRank, nBlockPad);
+                        } else {
+                            CopyGmToL1(awuvl1bBuf[pingpongL1B],
+                                       wkvb[headIdx * (nopeHeadDim + vHeadDim) * kBlockSize +
+                                            (nopeHeadDim + nOffset) * kBlockSize +
+                                            kOffset * nHeads * (nopeHeadDim + vHeadDim)],
+                                       nSize, kRemSize / kBlockSize,
+                                       nHeads * (nopeHeadDim + vHeadDim));
+                        }
+
+                        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + pingpongL1B);
+                        WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + pingpongL1B);
                     }
 
-                    SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + curr);
-                    WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID6 + curr);
-
                     WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-                    CopyToL0BCol(l0bBuf[curr], awuvl1bBuf[curr], nBlockNum, 0, kBlockNum);
-                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + curr);
+                    CopyToL0BCol(l0bBuf[curr], awuvl1bBuf[pingpongL1B], nBlockNum,
+                                 kIdx4 * k0 / kBlockSize, kBlockNum);
+                    if (kIdx4 == 3) {
+                        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + pingpongL1B);
+                        pingpongL1B ^= 1;
+                    }
                     LoadData2dParams params(0, mBlockNum, 1, 0, kBlockNum - 1, 0, inc);
                     int absorbl1aOffset = nzHeadOffset + kOffset * mhBlockPad;
                     for (int k = 0; k < kBlockNum; k++) {
@@ -695,6 +756,10 @@ public:
                     SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
                     PipeBarrier<PIPE_M>();
                     curr = 1 - curr;
+                }
+                if (kLoop % 4 != 0) {
+                    SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6 + pingpongL1B);
+                    pingpongL1B ^= 1;
                 }
                 SetFlag<HardEvent::M_FIX>(EVENT_ID0);
                 WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
