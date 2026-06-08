@@ -1191,6 +1191,7 @@ def attention(
     batch: int,
     max_num_block: int,
     enable_flash_attention: bool = False,
+    tile_size_of_cached_kv: int = 8192,
 ) -> None:
     """Run paged attention for cached KV tensors.
 
@@ -1211,6 +1212,7 @@ def attention(
         batch (int): Batch size.
         max_num_block (int): Maximum number of blocks per request.
         enable_flash_attention (bool): Whether to use flash attention kernels.
+        tile_size_of_cached_kv (int): Tile size for cached KV in flash attention.
 
     Returns:
         None: `output` is written in place.
@@ -1563,6 +1565,7 @@ def mla(
     scale: float,
     nz: bool = False,
     enable_flash_attention: bool = False,
+    tile_size_of_cached_kv: int = 8192,
 ) -> None:
     """Run MLA kernel using cached KV blocks (full attention).
 
@@ -1588,6 +1591,7 @@ def mla(
         scale (float): Attention scaling factor.
         nz (bool): Whether to use nz wkvb.
         enable_flash_attention (bool): Whether to use flash attention kernels.
+        tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA.
 
     Returns:
         None: `output` is written in place.

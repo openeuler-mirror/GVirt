@@ -29,7 +29,7 @@ public:
                                 GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                                 uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
                                 uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,
-                                float scale, uint32_t nz)
+                                float scale, uint32_t nz, uint32_t tileSizeOfCachedKV)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qWithQr.SetGlobalBuffer((__gm__ Dtype *)qWithQr);
@@ -53,7 +53,7 @@ public:
         this->maxNumBlocks = maxNumBlocks;
         this->scale = scale;
         this->nz = nz;
-        this->tileSizeOfCachedKV = GetTileSizeOfCachedKV(block_num);
+        this->tileSizeOfCachedKV = tileSizeOfCachedKV;
         this->maxSeqLen = maxNumBlocks * blockSize;
         this->blockIdx = block_idx;
         this->subBlockIdx = get_subblockid();
@@ -1183,11 +1183,12 @@ private:
         GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,        \
         uint32_t nHeads, uint32_t ropeHeadDim, uint32_t nopeHeadDim, uint32_t vHeadDim,           \
         uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,           \
-        float scale, uint32_t nz)                                                                 \
+        float scale, uint32_t nz, uint32_t tileSizeOfCachedKV)                                    \
     {                                                                                             \
         FlashMLA<dtype> op;                                                                       \
         op.Init(qWithQr, kCache, vCache, wkvb, qk, sv, max, sum, lastMax, lastSum, sync, output,  \
                 queryStartLoc, queryLens, cachedLens, blockTables, nHeads, ropeHeadDim,           \
-                nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, scale, nz);    \
+                nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, scale, nz,     \
+                tileSizeOfCachedKV);                                                              \
         op.Run();                                                                                 \
     }

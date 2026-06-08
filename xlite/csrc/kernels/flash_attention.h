@@ -28,7 +28,7 @@ public:
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 GM_ADDR blockTables, uint32_t nHeads, uint32_t nKVHeads,
                                 uint32_t headSize, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlocks)
+                                uint32_t maxNumBlocks, uint32_t tileSizeOfCachedKV)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->input.SetGlobalBuffer((__gm__ Dtype *)input);
@@ -49,7 +49,7 @@ public:
         this->blockSize = blockSize;
         this->batch = batch;
         this->maxNumBlocks = maxNumBlocks;
-        this->tileSizeOfCachedKV = GetTileSizeOfCachedKV(block_num);
+        this->tileSizeOfCachedKV = tileSizeOfCachedKV;
         this->maxSeqLen = maxNumBlocks * blockSize;
         this->qMemSize = nHeads * headSize;
         this->kvMemSize = nKVHeads * headSize;
@@ -715,11 +715,11 @@ private:
         GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync, GM_ADDR output,               \
         GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,         \
         uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize, uint32_t batch, \
-        uint32_t maxNumBlocks)                                                                     \
+        uint32_t maxNumBlocks, uint32_t tileSizeOfCachedKV)                                        \
     {                                                                                              \
         FlashAttention<dtype> op;                                                                  \
         op.Init(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, sync, output,           \
                 queryStartLoc, queryLens, cachedLens, blockTables, nHeads, nKVHeads, headSize,     \
-                blockSize, batch, maxNumBlocks);                                                   \
+                blockSize, batch, maxNumBlocks, tileSizeOfCachedKV);                               \
         op.Run();                                                                                  \
     }

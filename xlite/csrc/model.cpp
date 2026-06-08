@@ -8,6 +8,7 @@
 #include "runtime.h"
 #include "op.h"
 #include "model.h"
+#include "auto_tuner.h"
 
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
@@ -398,7 +399,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                         lastSum, _sync, attnOutput, rt._queryStartLoc, rt._lens, rt._cachedLens,
                         rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
                         _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
-                        _c.weightNZ);
+                        _c.weightNZ, tileSizeOfCachedKV);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);
@@ -500,7 +501,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XliteOpFlashAttention(rt, qkv, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, _sync,
                               attn, rt._queryStartLoc, rt._lens, rt._cachedLens,
                               rt._attnBlockTables, qHeads, kHeads, _c.headDim, _c.blockSize,
-                              rt._batch, rt._maxNumBlocks);
+                              rt._batch, rt._maxNumBlocks, tileSizeOfCachedKV);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);
