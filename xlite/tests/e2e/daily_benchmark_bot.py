@@ -102,9 +102,9 @@ REPORT_DIR = Path("/home/daily_reports")
 
 # ====================== 容器配置 ======================
 # 编译容器名称
-BUILD_CONTAINER = os.environ.get("BUILD_CONTAINER", "xlite-build")
+BUILD_CONTAINER = os.environ.get("BUILD_CONTAINER", "")
 # 测试容器名称
-TEST_CONTAINER = "daily-test"
+TEST_CONTAINER = os.environ.get("TEST_CONTAINER", "")
 # 容器内 wheel 包存放路径
 CONTAINER_WHEEL_DIR = "/workspaces/code/opencode/GVirt/xlite/dist"
 
@@ -112,7 +112,7 @@ CONTAINER_WHEEL_DIR = "/workspaces/code/opencode/GVirt/xlite/dist"
 # 性能劣化阈值，超过此比例视为性能下降
 DEGRADATION_THRESHOLD = 0.05
 # TTFT指标是否作为对比指标（ttft_avg 和 ttft_p99）
-COMPARE_TTFT_METRICS = False
+COMPARE_TTFT_METRICS = True
 # TPOT P99指标是否作为对比指标
 COMPARE_TPOT_P99_METRICS = False
 # Webhook URL
@@ -254,10 +254,13 @@ def run_in_container(container_name: str, cmd: str, check: bool = True, show_out
     返回:
         (返回码, 标准输出, 标准错误)
     """
-    log_info(f"在容器 {container_name} 中执行: {cmd}")
-    docker_cmd = ["docker", "exec", container_name, "bash", "-c", cmd]
-    return run_command(docker_cmd, check=check, show_output=show_output)
-
+    if container_name != "":
+        log_info(f"在容器 {container_name} 中执行: {cmd}")
+        docker_cmd = ["docker", "exec", container_name, "bash", "-c", cmd]
+        return run_command(docker_cmd, check=check, show_output=show_output)
+    else:
+        log_info(f"在本地执行: {cmd}")
+        return run_command(["bash", "-c", cmd], check=check, show_output=show_output)
 
 def copy_from_container(container_name: str, container_path: str, local_path: Path) -> bool:
     """
@@ -271,10 +274,15 @@ def copy_from_container(container_name: str, container_path: str, local_path: Pa
     返回:
         True - 成功, False - 失败
     """
-    log_info(f"从容器 {container_name} 复制 {container_path} 到 {local_path}")
-    local_path.parent.mkdir(parents=True, exist_ok=True)
+    
     try:
-        run_command(["docker", "cp", f"{container_name}:{container_path}", str(local_path)])
+        if container_name != "":
+            log_info(f"从容器 {container_name} 复制 {container_path} 到 {local_path}")
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            run_command(["docker", "cp", f"{container_name}:{container_path}", str(local_path)])
+        else:
+            log_info(f"复制 {container_path} 到 {local_path}")
+            run_command(["cp", f"{container_path}", str(local_path)])
         return True
     except Exception as e:
         log_error(f"复制文件失败: {e}")
@@ -304,6 +312,7 @@ def pull_latest_code() -> bool:
     try:
         # 在编译容器中拉取代码
         log_info("在编译容器中拉取代码...")
+        log_info(f"BUILD_CONTAINER: {BUILD_CONTAINER}")
         run_in_container(BUILD_CONTAINER, f"rm -rf {PROJECT_ROOT}")
         run_in_container(BUILD_CONTAINER, f"mkdir -p {PROJECT_ROOT.parent}")
         run_in_container(
@@ -1055,8 +1064,8 @@ def generate_model_report(model_name: str, model_comparisons: List[Dict], report
                 continue
 
             # 显示表格头
-            detail_lines.append("  | 并发 | 服务 | TTFT Avg(ms) | TTFT P99(ms) | TPOT Avg(ms) | TPOT P99(ms) | Output Speed(tokens/s) |")
-            detail_lines.append("  |------|------|-------------|-------------|-------------|-------------|----------------------|")
+            detail_lines.append(" | 并发 | 服务 | TTFT Avg(ms) | TTFT P99 | TPOT Avg(ms) | TPOT P99 | Throughput(toks/s) |")
+            detail_lines.append(" |------|------|------|------|------|------|------|")
             
             # 显示每一行数据
             for row in row_changes:
@@ -1123,11 +1132,16 @@ def generate_model_report(model_name: str, model_comparisons: List[Dict], report
                 
                 row_str = f"  | {concurrency} | {service} | {' | '.join(formatted_parts)} |"
                 detail_lines.append(row_str)
-                detail_lines.append("")
+            detail_lines.append("")
     
     # 汇总摘要（作为折叠标题）
     status_icon = "⚠️" if total_degradations > 0 else "✅"
-    status_text = "发现性能劣化(超过5%阈值)，请关注！" if total_degradations > 0 else "性能正常，无劣化"
+    if total_degradations > 0:
+        status_text = "发现性能劣化(超过5%阈值)，请关注！"
+    elif total_improvements > 0:
+        status_text = "发现性能优化"
+    else:
+        status_text = "性能正常，无劣化"
     
     ip_address = MACHINE_IP if MACHINE_IP else "unknown"
     report_path = f"{ip_address}:{report_dir}" if report_dir else ""
@@ -1349,75 +1363,6 @@ def send_notification(message: str, receiver_id: Optional[str] = None):
         print("\n" + message)
 
 
-# ====================== 环境检查函数 ======================
-def check_and_install_docker() -> bool:
-    """
-    检查并安装 docker
-    
-    返回:
-        True - docker 可用或安装成功
-        False - docker 安装失败
-    """
-    log_info("检查 docker 是否可用...")
-    
-    # 检查 docker 命令是否存在
-    try:
-        result = subprocess.run(
-            ["docker", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            log_success(f"docker 已安装: {result.stdout.strip()}")
-            return True
-    except FileNotFoundError:
-        log_warning("docker 命令未找到，尝试安装...")
-    except Exception as e:
-        log_warning(f"检查 docker 失败: {e}")
-    
-    # 尝试安装 docker
-    try:
-        log_info("正在安装 docker.io...")
-        result = subprocess.run(
-            ["apt-get", "update"],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        if result.returncode != 0:
-            log_error(f"apt-get update 失败: {result.stderr}")
-            return False
-        
-        result = subprocess.run(
-            ["apt-get", "install", "-y", "docker.io"],
-            capture_output=True,
-            text=True,
-            timeout=600
-        )
-        if result.returncode != 0:
-            log_error(f"docker.io 安装失败: {result.stderr}")
-            return False
-        
-        # 验证安装
-        result = subprocess.run(
-            ["docker", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            log_success(f"docker 安装成功: {result.stdout.strip()}")
-            return True
-        else:
-            log_error("docker 安装后验证失败")
-            return False
-            
-    except Exception as e:
-        log_error(f"安装 docker 过程中出错: {e}")
-        return False
-
-
 # ====================== 主函数 ======================
 def main():
     """
@@ -1479,12 +1424,6 @@ def main():
     log_info(f"编译容器: {BUILD_CONTAINER}")
     log_info(f"环境类型: {ENV_TYPE}")
     log_info("=" * 60)
-    
-    # 检查并安装 docker（非调试模式需要）
-    if not args.report_dir:
-        if not check_and_install_docker():
-            log_error("docker 不可用且安装失败，终止执行")
-            sys.exit(1)
     
     # 调试模式：如果指定了报告目录，跳过前面的步骤
     if args.report_dir:
@@ -1601,6 +1540,7 @@ def main():
     # 为每个模型生成并发送独立报告
     model_names = list(model_groups.keys())
     log_info(f"准备为 {len(model_names)} 个模型发送通知")
+    num_models_to_report = 0
     for idx, model_name in enumerate(model_names):
         model_comparisons = model_groups[model_name]
         log_info(f"正在生成模型 {model_name} 的报告 [{idx + 1}/{len(model_names)}]")
@@ -1617,10 +1557,16 @@ def main():
         print("=" * 60)
         print(model_report)
         print("=" * 60 + "\n")
-        
-        log_info(f"正在发送模型 {model_name} 的通知 [{idx + 1}/{len(model_names)}]")
-        send_notification(model_report, args.receiver)
-    
+
+        if "发现性能优化" in model_report or "发现性能劣化" in model_report:
+            log_info(f"正在发送模型 {model_name} 的通知 [{idx + 1}/{len(model_names)}]")
+            send_notification(model_report, args.receiver)
+            num_models_to_report += 1
+
+    if num_models_to_report == 0:
+        log_info(f"测试模型性能均无变化")
+        send_notification(f"测试模型性能均无变化", args.receiver)
+
     # 步骤8: 设置退出码
     has_any_degradation = False
     for comparison in all_comparison_results:

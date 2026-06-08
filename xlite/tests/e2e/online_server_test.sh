@@ -35,7 +35,8 @@ do
     # 构建文件名
     file=input_${INPUT_LEN}_output_${OUTPUT_LEN}_concurrency${maxconcurrency}
     num_prompts=$((maxconcurrency * NUM_PROMPTS_MULTIPLIER))
-    
+    echo "`date +'%m-%d %H:%M:%S'`: vllm bench start: maxconcurrency: ${maxconcurrency} "
+
     # 执行vllm bench命令
     vllm bench serve \
     --max-concurrency ${maxconcurrency} \
@@ -51,4 +52,6 @@ do
     --tokenizer ${TOKENIZER_PATH} \
     --endpoint /v1/chat/completions \
     --ignore-eos  | tee ${dir}/${file}.log
+
+    echo "`date +'%m-%d %H:%M:%S'`: vllm bench end: maxconcurrency: ${maxconcurrency} "
 done
