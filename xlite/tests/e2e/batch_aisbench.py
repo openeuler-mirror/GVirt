@@ -34,11 +34,13 @@ class BenchResult:
     model_name: str
     dataset: str
     tp_size: int
-    ep_size: int
+    ep: bool
+    dp_size: int
     xlite: bool
     xlite_full_mode: bool
     metric: str
     accuracy: float
+    error: str | None = None
 
     def __post_init__(self):
         self.xlite = self.xlite or self.xlite_full_mode
@@ -46,7 +48,7 @@ class BenchResult:
 
     @staticmethod
     def markdown_header() -> str:
-        fields = ["Model", "Dataset", "TP", "EP", "backend", "Metric", "Accuracy"]
+        fields = ["Model", "Dataset", "TP", "EP", "DP", "Backend", "Metric", "Accuracy", "Error"]
         return f"| {' | '.join(fields)} |\n| {' | '.join(['---'] * len(fields))} |"
 
     def markdown_row(self) -> str:
@@ -57,14 +59,20 @@ class BenchResult:
                 backend_str = "xlite decode-only"
         else:
             backend_str = "aclgraph"
+
+        error_str = self.error if self.error else ""
+        if len(error_str) > 200:
+            error_str = error_str[:197] + "..."
         values: list[str] = [
             self.model_name,
             self.dataset,
             str(self.tp_size),
-            "Y" if self.ep_size > 0 else "N",
+            "Y" if self.ep else "N",
+            str(self.dp_size),
             backend_str,
             self.metric,
             f"{self.accuracy:.2f}",
+            error_str,
         ]
         return f"| {' | '.join(values)} |"
 
@@ -162,22 +170,32 @@ def start_vllm_server(
     model_path: str,
     *,
     model_name: str | None = None,
+    quantization: bool = False,
     port: int = 8384,
     tp_size: int = 1,
-    ep_size: int = 1,
-    max_num_seqs: int = 64,
-    max_model_len: int = 4096,
+    ep: bool = True,
+    dp_size: int = 1,
+    max_num_seqs: int = 128,
+    max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
     gpu_memory_utilization: float = 0.9,
     block_size: int = 128,
     xlite: bool = False,
     xlite_full_mode: bool = False,
+    device_ids: list[int] | None = None,
     timeout: int = 1800,
     debug: bool = False,
 ) -> subprocess.Popen:
     if not model_path or not Path(model_path).exists():
         raise ValueError(f"Model path {model_path} does not exist")
+
+    device_ids = device_ids or list(range(dp_size * tp_size))
+    if len(device_ids) < dp_size * tp_size:
+        raise ValueError(
+            f"Not enough device IDs provided for the required devices. Required devices: {dp_size * tp_size}, provided "
+            f"device IDs: {device_ids} (N = {len(device_ids)})"
+        )
 
     # start vllm server with the specified model and settings
     print(f"Starting vLLM server with model {model_path} on port {port}...")
@@ -198,6 +216,7 @@ def start_vllm_server(
         "HCCL_BUFFSIZE": "1024",
         "TASK_QUEUE_ENABLE": "1",
         "XLITE_FLASH_ATTENTION_ENABLE": "1",
+        "ASCEND_RT_VISIBLE_DEVICES": ",".join(str(i) for i in device_ids),
     }
     os.environ.update(envs)
 
@@ -208,8 +227,11 @@ def start_vllm_server(
         f'vllm serve "{model_path}" --async-scheduling --trust-remote-code',
         f'--served-model-name "{model_name}"',
         f'--port "{port}"',
+        "--nnodes 1",
         f'--tensor-parallel-size "{tp_size}"',
-        f"{'--enable-expert-parallel' if ep_size > 1 else ''}",
+        f"{'--enable-expert-parallel' if ep else ''}",
+        f'--data-parallel-size "{dp_size}"',
+        f'--data-parallel-size-local "{dp_size}"',
         f'--max-num-seqs "{max_num_seqs}"',
         f'--max-model-len "{max_model_len}"',
         f'--max-num-batched-tokens "{max_num_batched_tokens}"',
@@ -219,7 +241,13 @@ def start_vllm_server(
         '--compilation-config \'{"cudagraph_capture_sizes":[1,2,4,8,16,32,64], "cudagraph_mode": "FULL_DECODE_ONLY"}\'',
         f'--additional-config \'{{"xlite_graph_config": {{"enabled": {str(xlite).lower()}, "full_mode": {str(xlite_full_mode).lower()}}}}}\'',
     ]
+    if quantization:
+        vllm_cmd_lst.append("--quantization ascend")
     vllm_cmd = " ".join(vllm_cmd_lst)
+
+    os.environ["XLITE_NODE_IPS"] = ",".join(["127.0.0.1"] * dp_size)
+    os.environ["XLITE_LOCAL_IP"] = "127.0.0.1"
+    os.environ["XLITE_DEVS_PER_NODE"] = str(dp_size * tp_size)
 
     t1 = datetime.now()
     # ignore stdout and stderr of the server process, as it may contain a lot of logs
@@ -237,7 +265,10 @@ def start_vllm_server(
     try:
         while (datetime.now() - t1).total_seconds() < timeout:
             if process.poll() is not None:
-                raise RuntimeError(f"vLLM server process exited unexpectedly with code {process.returncode}")
+                raise RuntimeError(
+                    f"vLLM server process exited unexpectedly with code {process.returncode}:\n"
+                    f"{process.stderr.read().decode('utf-8') if process.stderr else 'No error message'}"
+                )
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 if sock.connect_ex(("localhost", port)) == 0:
                     break  # successfully connected to the port, server is ready
@@ -260,11 +291,13 @@ def run_ais_bench(
     ais_bench_num_prompts: int = 128,
     model_path: str = "",
     model_name: str | None = None,
+    quantization: bool = False,
     port: int = 8384,
     tp_size: int = 1,
-    ep_size: int = 1,
-    max_num_seqs: int = 256,
-    max_model_len: int = 4096,
+    ep: bool = True,
+    dp_size: int = 1,
+    max_num_seqs: int = 128,
+    max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
     gpu_memory_utilization: float = 0.9,
@@ -272,16 +305,30 @@ def run_ais_bench(
     xlite: bool = False,
     xlite_full_mode: bool = False,
     extra_args: str = "",
+    device_ids: list[int] | None = None,
     timeout: int = 1800,
     debug: bool = False,
-) -> BenchResult | None:
+) -> BenchResult:
     model_name = model_name or Path(model_path).stem or "model"
-    if not model_path or not Path(model_path).exists():
-        print(f"Model path {model_path} does not exist, skipping benchmark for model {model_name}...")
-        return None
-
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
     xlite_full_mode = xlite_full_mode and xlite  # full mode can only be enabled when xlite is enabled
+    bench_result = BenchResult(
+        model_name=model_name,
+        dataset="ceval-weighted",
+        tp_size=tp_size,
+        ep=ep,
+        dp_size=dp_size,
+        xlite=xlite,
+        xlite_full_mode=xlite_full_mode,
+        metric="weighted_average",
+        accuracy=0.0,
+    )
+
+    if not model_path or not Path(model_path).exists():
+        print(f"Model path {model_path} does not exist, skipping benchmark for model {model_name}...")
+        bench_result.error = "Model weights not found"
+        return bench_result
+
     SEC_SEP_1, SEC_SEP_2 = "=" * 50, "-" * 50
     print()
     print(SEC_SEP_1)
@@ -292,8 +339,11 @@ def run_ais_bench(
     print(SEC_SEP_2)
     print(f"Model path: {model_path}")
     print(f"Model name: {model_name}")
+    print(f"ASCEND_RT_VISIBLE_DEVICES: {','.join(map(str, device_ids)) if device_ids else 'Not set'}")
+    print(f"Quantization: {'Yes' if quantization else 'No'}")
     print(f"Tensor parallel size: {tp_size}")
-    print(f"Expert parallel size: {ep_size}")
+    print(f"Expert parallel: {'Yes' if ep else 'No'}")
+    print(f"Data parallel size: {dp_size}")
     print(f"Max number of sequences: {max_num_seqs}")
     print(f"Max model length: {max_model_len}")
     print(f"Max number of batched tokens: {max_num_batched_tokens}")
@@ -311,9 +361,11 @@ def run_ais_bench(
     if not ais_bench_script.exists():
         raise FileNotFoundError(f"ais_bench script not found at {ais_bench_script}")
 
-    ais_bench_output_dir = ais_bench_output_dir or (
-        ais_bench_dir / "outputs" / f"{model_name}{'-xlite' if xlite else ''}"
-    )
+    if xlite:
+        suffix = "-xlite-full" if xlite_full_mode else "-xlite-decode-only"
+    else:
+        suffix = "-aclgraph"
+    ais_bench_output_dir = ais_bench_output_dir or (ais_bench_dir / "outputs" / f"{model_name}{suffix}")
     if not ais_bench_output_dir.exists():
         ais_bench_output_dir.mkdir(parents=True)
 
@@ -349,9 +401,11 @@ def run_ais_bench(
     vllm_process = start_vllm_server(
         model_path=model_path,
         model_name=model_name,
+        quantization=quantization,
         port=port,
         tp_size=tp_size,
-        ep_size=ep_size,
+        ep=ep,
+        dp_size=dp_size,
         max_num_seqs=max_num_seqs,
         max_model_len=int(max_model_len * 1.5),
         max_num_batched_tokens=max_num_batched_tokens,
@@ -360,6 +414,7 @@ def run_ais_bench(
         block_size=block_size,
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
+        device_ids=device_ids,
         timeout=timeout,
         debug=debug,
     )
@@ -392,31 +447,28 @@ def run_ais_bench(
         weighted_accuracy = float(df.loc[mask, "vllm-api-general-chat"].values[-1])
 
         print(f"Finished ais_bench for model {model_name} with weighted accuracy {weighted_accuracy:.2f}")
-        print(SEC_SEP_1)
 
-        return BenchResult(
-            model_name=model_name,
-            dataset="ceval-weighted",
-            tp_size=tp_size,
-            ep_size=ep_size,
-            xlite=xlite,
-            xlite_full_mode=xlite_full_mode,
-            metric="weighted_average",
-            accuracy=weighted_accuracy,
-        )
+        bench_result.accuracy = weighted_accuracy
+        bench_result.error = None
+    except Exception as e:
+        print(f"Error occurred while running ais_bench for model {model_name}: {str(e)}")
+        bench_result.error = str(e).replace("\n", " ")
     finally:
+        print(SEC_SEP_1)
         stop_vllm_server(vllm_process)
+
+    return bench_result
 
 
 if __name__ == "__main__":
     epilog = """
-Example usage:
+Example usage::
 
-    python batch_aisbench.py /path/to/benchmark --num-prompts 64 --model-dir /dir/to/models --models model1 model2 --tps 2 4 --eps 0 1 --xlite 1 0 --xlite-full 0 0
+    python batch_aisbench.py /path/to/benchmark --num-prompts 64 --model-dir /dir/to/models --models model1 model2 --tps 2 4 --eps 0 1 --xlite 1 0
 
-    This will run the benchmark for (model1, TP2EP0, xlite decode-only), and (model2, TP4EP4, aclgraph). If `--output-dir` is\
-not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1[-xlite]` and\
-`/path/to/ais_bench_dir/outputs/model2` respectively.\
+This will run the benchmark for (model1, TP2EP0, xlite decode-only), and (model2, TP4EP4, aclgraph). If `--output-dir` is\
+not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-xlite-decode-only` and\
+`/path/to/ais_bench_dir/outputs/model2-aclgraph` respectively.\
     """
     __doc__ = f"{__doc__}\n\n{epilog}"
 
@@ -451,6 +503,13 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1[
     parser.add_argument("--port", type=int, default=8384, help="Port for vLLM server to listen on")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for benchmarking")
     parser.add_argument(
+        "-GMU",
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help="GPU memory utilization for vLLM server, between 0 and 1 (e.g., 0.9 for 90% utilization)",
+    )
+    parser.add_argument(
         "-N",
         "--num-prompts",
         type=int,
@@ -461,51 +520,99 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1[
         "--models", type=str, nargs="+", default=None, help="List of model subdirectory names to benchmark"
     )
     parser.add_argument(
+        "-Q",
+        "--quantization",
+        type=int,
+        nargs="+",
+        choices=[0, 1],
+        default=[0],
+        help="Whether the model is quantized (1 for yes, 0 for no; last value used for padding)",
+    )
+    parser.add_argument(
         "-TP",
         "--tps",
         "--tp-sizes",
+        dest="tps",
         type=int,
         nargs="+",
+        choices=[1, 2, 4, 8, 16],
         default=[1],
-        help="List of tensor parallel sizes for each model",
+        help="List of tensor parallel sizes for each model (last value used for padding)",
     )
     parser.add_argument(
         "-EP",
         "--eps",
-        "--ep-sizes",
+        dest="eps",
         type=int,
         nargs="+",
         choices=[0, 1],
         default=[1],
-        help="Whether to enable expert parallelism for each model (1 for yes, 0 for no)",
+        help="Whether to enable expert parallelism for each model (1 for yes, 0 for no; last value used for padding)",
+    )
+    parser.add_argument(
+        "-DP",
+        "--dps",
+        "--dp-sizes",
+        dest="dps",
+        type=int,
+        nargs="+",
+        default=[1],
+        help="List of data parallel sizes for each model (last value used for padding)",
+    )
+    parser.add_argument(
+        "-MNS",
+        "--max-num-seqs",
+        type=int,
+        nargs="+",
+        default=[128],
+        help="Max number of sequences for vLLM server and ais_bench (last value used for padding)",
+    )
+    parser.add_argument(
+        "-MML",
+        "--max-model-len",
+        type=int,
+        nargs="+",
+        default=[8192],
+        help="Max model length for vLLM server and ais_bench (last value used for padding)",
+    )
+    parser.add_argument(
+        "-MNT",
+        "--max-num-batched-tokens",
+        type=int,
+        nargs="+",
+        default=[8192],
+        help="Max number of batched tokens for vLLM server (last value used for padding)",
+    )
+    parser.add_argument(
+        "--extra-aisbench-args",
+        type=str,
+        nargs="+",
+        default=[""],
+        help="Extra arguments to pass to ais_bench command (last value used for padding)",
     )
     parser.add_argument(
         "-X",
         "--xlite",
         type=int,
         nargs="+",
-        default=[1],
-        help="Whether to enable xlite for each model (1 for yes, 0 for no)",
+        choices=[0, 1, 2],
+        default=[2],
+        help=(
+            "Whether to use xlite full mode (2), xlite decode-only mode (1), or aclgraph (0) for each model (last "
+            "value used for padding when `--broadcast-xlite` is not set; otherwise, values must be unique)"
+        ),
     )
     parser.add_argument(
-        "-XF",
-        "--xlite-full",
-        type=int,
-        nargs="+",
-        default=[0],
-        help="Whether to enable xlite full mode for each model (1 for yes, 0 for no)",
+        "-BX",
+        "--broadcast-xlite",
+        action="store_true",
+        help=(
+            "This will broadcast the `--xlite` settings for all `--models`, resulting in `n_models x n_xlite` "
+            "combinations of benchmarks. `--xlite` values must be unique in this case."
+        ),
     )
     parser.add_argument(
-        "-MNS", "--max-num-seqs", type=int, default=256, help="Max number of sequences for vLLM server and ais_bench"
-    )
-    parser.add_argument(
-        "-MML", "--max-model-len", type=int, default=4096, help="Max model length for vLLM server and ais_bench"
-    )
-    parser.add_argument(
-        "-MNT", "--max-num-batched-tokens", type=int, default=8192, help="Max number of batched tokens for vLLM server"
-    )
-    parser.add_argument(
-        "--extra-aisbench-args", type=str, default="", help="Extra arguments to pass to ais_bench command"
+        "-ds", "--device-ids", type=int, nargs="*", default=None, help="List of device IDs to use for benchmarking"
     )
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode with more verbose logging")
     args = parser.parse_args()
@@ -519,40 +626,104 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1[
     if not args.models:
         raise ValueError("No models specified for benchmarking, please provide model subdirectory names using --models")
 
-    try:
-        combinations = [
-            (model, tp, bool(ep), bool(xlite) or bool(xlite_full), bool(xlite) and bool(xlite_full))
-            for model, tp, ep, xlite, xlite_full in zip(
-                args.models, args.tp_sizes, args.ep_sizes, args.xlite, args.xlite_full
-            )
-        ]
-        if len(set(combinations)) != len(combinations):
-            raise ValueError("The combination of models, tp_sizes, and ep_sizes must be unique for each model")
-        for model, tp, ep, xlite, xlite_full in combinations:
-            model_path = args.model_dir / model
+    args_models: list[str] = args.models
+    n_models = len(args_models)
+    args_quantization: list[int] = args.quantization + [args.quantization[-1]] * (n_models - len(args.quantization))
+    args_tps: list[int] = args.tps + [args.tps[-1]] * (n_models - len(args.tps))
+    args_eps: list[bool] = args.eps + [args.eps[-1]] * (n_models - len(args.eps))
+    args_dps: list[int] = args.dps + [args.dps[-1]] * (n_models - len(args.dps))
+    args_max_num_seqs: list[int] = args.max_num_seqs + [args.max_num_seqs[-1]] * (n_models - len(args.max_num_seqs))
+    args_max_model_len: list[int] = args.max_model_len + [args.max_model_len[-1]] * (n_models - len(args.max_model_len))
+    args_max_num_batched_tokens: list[int] = args.max_num_batched_tokens + [args.max_num_batched_tokens[-1]] * (
+        n_models - len(args.max_num_batched_tokens)
+    )
+    args_extra_aisbench_args: list[str] = args.extra_aisbench_args + [args.extra_aisbench_args[-1]] * (
+        n_models - len(args.extra_aisbench_args)
+    )
+
+    if not args.broadcast_xlite:
+        args_xlite = args.xlite + [args.xlite[-1]] * (n_models - len(args.xlite))
+    elif len(set(args.xlite)) != len(args.xlite):
+        raise ValueError("When using --broadcast-xlite, the values in --xlite must be unique to avoid duplications")
+    else:
+        n_xlite = len(args.xlite)
+        # Tile xlite values for each model: [1,0] * 3 = [1,0,1,0,1,0]
+        args_xlite = args.xlite * n_models
+        # Repeat each model's args n_xlite times: [A,B,C] with n_xlite=2 -> [A,A,B,B,C,C]
+        args_models = [m for m in args_models for _ in range(n_xlite)]
+        args_quantization = [q for q in args_quantization for _ in range(n_xlite)]
+        args_tps = [tp for tp in args_tps for _ in range(n_xlite)]
+        args_eps = [ep for ep in args_eps for _ in range(n_xlite)]
+        args_dps = [dp for dp in args_dps for _ in range(n_xlite)]
+        args_max_num_seqs = [m for m in args_max_num_seqs for _ in range(n_xlite)]
+        args_max_model_len = [m for m in args_max_model_len for _ in range(n_xlite)]
+        args_max_num_batched_tokens = [m for m in args_max_num_batched_tokens for _ in range(n_xlite)]
+        args_extra_aisbench_args = [a for a in args_extra_aisbench_args for _ in range(n_xlite)]
+
+    combinations = [
+        (model, int(tp), ep, int(dp), xlite > 0, xlite > 1)
+        for model, tp, ep, dp, xlite in zip(args_models, args_tps, args_eps, args_dps, args_xlite)
+    ]
+    if len(set(combinations)) != len(combinations):
+        raise ValueError("The combination of models, tp_sizes, and ep_sizes must be unique for each model")
+
+    max_num_devices = max(tp * dp for tp, dp in zip(args_tps, args_dps))
+    device_ids_env = filter(None, os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "").split(","))
+    device_ids = args.device_ids or list(map(int, device_ids_env))
+    device_ids = device_ids or list(range(max_num_devices))
+    if max_num_devices > len(device_ids):
+        raise ValueError(
+            f"Not enough device IDs provided for the maximum required devices across all models. "
+            f"Max required devices: {max_num_devices}, provided device IDs: {device_ids}"
+        )
+    print(f"Using device IDs {','.join(map(str, device_ids))} for benchmarking (max required: {max_num_devices})")
+
+    for i, (model, tp, ep, dp, xlite, xlite_full) in enumerate(combinations):
+        print(f"\n>>> Running benchmark task {i + 1}/{len(combinations)}")
+        model_path = args.model_dir / model
+        try:
             result = run_ais_bench(
                 ais_bench_dir=args.ais_bench_dir,
                 ais_bench_output_dir=args.output_dir,
                 ais_bench_num_prompts=args.num_prompts,
                 model_path=str(model_path),
                 model_name=model,
+                quantization=bool(args_quantization[i]),
+                port=args.port,
                 tp_size=tp,
-                ep_size=int(ep),
-                max_num_seqs=args.max_num_seqs,
-                max_model_len=args.max_model_len,
-                max_num_batched_tokens=args.max_num_batched_tokens,
+                ep=ep,
+                dp_size=dp,
+                max_num_seqs=args_max_num_seqs[i],
+                max_model_len=args_max_model_len[i],
+                max_num_batched_tokens=args_max_num_batched_tokens[i],
                 seed=args.seed,
+                gpu_memory_utilization=args.gpu_memory_utilization,
                 xlite=xlite,
                 xlite_full_mode=xlite_full,
-                extra_args=args.extra_aisbench_args,
+                extra_args=args_extra_aisbench_args[i],
+                device_ids=device_ids[-tp * dp :],
                 debug=args.debug,
             )
-            if result:
-                bench_results.append(result)
-    finally:
-        # ensure all started vLLM server processes are stopped
-        for process in list(VLLM_PROCESSES):
-            stop_vllm_server(process)
+            bench_results.append(result)
+        except Exception as e:
+            result = BenchResult(
+                model_name=model,
+                dataset="ceval-weighted",
+                tp_size=tp,
+                ep=ep,
+                dp_size=dp,
+                xlite=xlite,
+                xlite_full_mode=xlite_full,
+                metric="weighted_average",
+                accuracy=0.0,
+                error=str(e).replace("\n", " "),
+            )
+            bench_results.append(result)
+        finally:
+            # ensure all started vLLM server processes are stopped
+            for process in list(VLLM_PROCESSES):
+                stop_vllm_server(process)
+        print(f"Completed benchmark task {i + 1}/{len(combinations)}")
 
     log_text = ""
     if bench_results:
@@ -565,7 +736,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1[
 
     print(log_text, end="")
 
-    log_file_path = (
+    log_file_path: Path = (
         args.log_file
         or args.ais_bench_dir / "reports" / f"benchmark_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     )
@@ -573,3 +744,25 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1[
     with open(log_file_path, "w") as f:
         f.write(log_text)
     print(f"\nBenchmark results written to log file at {log_file_path}")
+
+    # save as csv as well for easier parsing
+    log_csv_path: Path = log_file_path.with_suffix(".csv")
+    df = pd.DataFrame(
+        [
+            {
+                "model_name": result.model_name,
+                "dataset": result.dataset,
+                "tp_size": result.tp_size,
+                "ep": result.ep,
+                "dp_size": result.dp_size,
+                "xlite": result.xlite,
+                "xlite_full_mode": result.xlite_full_mode,
+                "metric": result.metric,
+                "accuracy": result.accuracy,
+                "error": result.error,
+            }
+            for result in bench_results
+        ]
+    )
+    df.to_csv(log_csv_path, index=False)
+    print(f"Benchmark results also written to CSV file at {log_csv_path}")

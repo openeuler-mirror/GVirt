@@ -106,17 +106,18 @@ python process_data.py ./result_input_512_output_512_aclgraph ./result_input_512
 ```bash
 # 运行精度测试脚本
 # 以下脚本会比较（Qwen3-30B-A3B, TP4EP4, xlite decode-only）和（Qwen3-30B-A3B, TP4EP4, aclgraph）两种配置在ceval数据集上的输出差异
-# 通过修改(--models, --tp-sizes, --ep-sizes, --xlite, --xlite-full)参数，可以测试不同配置的性能和输出差异
+# 通过修改(--models, --quantization, --tps, --eps, --dps, --xlite)参数，可以测试不同配置的性能和输出差异
 cd tests/e2e/
 python batch_aisbench.py --help # 查看参数说明
 python batch_aisbench.py "/workspace/benchmark" \
 --num-prompts 64 \
 --model-dir "/mnt/sdb/models" \
 --models "Qwen3-30B-A3B" "Qwen3-30B-A3B" \
---tp-sizes 4 4 \
---ep-sizes 1 1 \
---xlite 1 0 \
---xlite-full 0 0
+--quantization 0 0 \
+--tps 4 4 \
+--eps 1 1 \
+--dps 1 1 \
+--xlite 1 0
 ```
 
 ## 每日自动化测试机器人
