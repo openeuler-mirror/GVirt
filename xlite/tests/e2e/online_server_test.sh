@@ -35,6 +35,7 @@ do
     # 构建文件名
     file=input_${INPUT_LEN}_output_${OUTPUT_LEN}_concurrency${maxconcurrency}
     num_prompts=$((maxconcurrency * NUM_PROMPTS_MULTIPLIER))
+    log_file="${dir}/${file}.log"    
     echo "`date +'%m-%d %H:%M:%S'`: vllm bench start: maxconcurrency: ${maxconcurrency} "
 
     # 执行vllm bench命令
@@ -51,7 +52,41 @@ do
     --random-range-ratio ${RANDOM_RANGE_RATIO} \
     --tokenizer ${TOKENIZER_PATH} \
     --endpoint /v1/chat/completions \
-    --ignore-eos  | tee ${dir}/${file}.log
+    --ignore-eos | tee ${log_file} &
+    bench_pid=$!
+
+    # Profiling 捕获进程(通过环境变量 XLITE_ENABLE_PROFILING=1 开启)
+    if [[ "${XLITE_ENABLE_PROFILING}" == "1" ]]; then
+        (
+            # 监控日志文件，等待 "Starting main benchmark run" 出现，同时检查 bench 进程存活
+            while ! grep -q "Starting main benchmark run" "${log_file}" 2>/dev/null; do
+                if ! kill -0 ${bench_pid} 2>/dev/null; then
+                    echo "`date +'%m-%d %H:%M:%S'`: Bench process exited, aborting profiling."
+                    exit 0
+                fi
+                sleep 1
+            done
+
+            echo "`date +'%m-%d %H:%M:%S'`: Detected 'Starting main benchmark run', waiting 30s before profiling..."
+            sleep 30
+            echo "`date +'%m-%d %H:%M:%S'`: Start profiling..."
+            curl -s -X POST http://${HOST}:${PORT}/start_profile > /dev/null
+            sleep 1
+            curl -s -X POST http://${HOST}:${PORT}/stop_profile > /dev/null
+            echo "`date +'%m-%d %H:%M:%S'`: End profiling..."
+            # 数据转换方法，在 profiling 文件夹，如 vllm_profile 中执行：
+            # python -c "from torch_npu.profiler.profiler import analyse; import glob; [analyse(p) for p in glob.glob('*_ascend_pt')]"
+        ) &
+        profile_pid=$!
+    fi
+
+    # 等待 vllm bench 完成
+    wait ${bench_pid}
+
+    # 等待 profiling 进程完成
+    if [[ -n "${profile_pid}" ]]; then
+        wait ${profile_pid} 2>/dev/null
+    fi
 
     echo "`date +'%m-%d %H:%M:%S'`: vllm bench end: maxconcurrency: ${maxconcurrency} "
 done
