@@ -21,4 +21,7 @@ struct XcclParam {
     uint64_t ipcMems[XLITE_CCL_MAX_RANK_SIZE];
     uint64_t ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE];
 };
+
+// attention/mla
+#define XLITE_ATTENTION_MAX_M0 128
 #endif

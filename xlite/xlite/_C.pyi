@@ -1782,20 +1782,6 @@ def reorder_moe(
     """
     ...
 
-def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
-    """Print a tensor preview for debugging.
-
-    Args:
-        x (torch.Tensor): Tensor to print.
-        name (str): Optional label shown in output.
-        row (int): Number of rows to print.
-        col (int): Number of columns to print.
-
-    Returns:
-        None: Output is emitted to native stdout.
-    """
-    ...
-
 def linear_att_proj(
     rt: Runtime,
     x: torch.Tensor,
@@ -1912,5 +1898,46 @@ def beta_decay(
 
     Returns:
         None: Output tensors are written in place.
+    """
+    ...
+
+def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
+    """Print a tensor preview for debugging.
+
+    Args:
+        x (torch.Tensor): Tensor to print.
+        name (str): Optional label shown in output.
+        row (int): Number of rows to print.
+        col (int): Number of columns to print.
+
+    Returns:
+        None: Output is emitted to native stdout.
+    """
+    ...
+
+def get_tile_size_of_cached_kv(
+    cached_lens: List[int],
+    query_lens: List[int],
+    head_num_in_group: int,
+    n_kv_heads: int,
+    block_size: int,
+    aic_num: int,
+) -> int:
+    """Get optimal tile size for cached KV based on workload.
+
+    This function computes the optimal tile size for flash attention
+    based on the current workload characteristics including cached KV
+    lengths and query lengths.
+
+    Args:
+        cached_lens (List[int]): Per-sample cached KV token lengths.
+        query_lens (List[int]): Per-sample query token lengths.
+        head_num_in_group (int): Number of heads in each attention group.
+        n_kv_heads (int): Number of key/value heads.
+        block_size (int): KV cache block size.
+        aic_num (int): Number of AI cores available.
+
+    Returns:
+        int: Optimal tile size for cached KV in flash attention.
     """
     ...

@@ -127,6 +127,7 @@ add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/model.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/core_assigner.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/ccl.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/auto_tuner.cpp
 )
 
 target_compile_options(xlite PRIVATE

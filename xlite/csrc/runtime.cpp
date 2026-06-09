@@ -7,6 +7,7 @@
 #include "runtime.h"
 #include "sock.h"
 #include "ccl.h"
+#include "auto_tuner.h"
 
 #define XLITE_DEFAULT_IP "127.0.0.1"
 #define XLITE_DP_PORT_OFFSET 200
@@ -353,7 +354,8 @@ void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t m
 }
 
 void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
-                           uint64_t maxSeqLen, uint32_t blockSize)
+                           uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVHeads,
+                           uint32_t blockSize)
 {
     if (!_attnInitialized) {
         InitAttn(maxBatchedTokens, maxBatch, maxSeqLen, blockSize);
@@ -388,6 +390,15 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                  ": invalid attnMeta batched tokens(" +
                                  std::to_string(batchedTokens) + ") > maxBatchedTokens(" +
                                  std::to_string(maxBatchedTokens) + ")");
+    }
+
+    if (IsDummyRuntime() || _maxNumBlocks * blockSize <= MAX_KV_TILE_SIZE) {
+        _tileSizeOfCachedKV = MAX_KV_TILE_SIZE;
+    } else {
+        uint32_t localHeads = std::max(nHeads / _tpSize, static_cast<uint32_t>(1));
+        uint32_t localKvHeads = std::max(nKVHeads / _tpSize, static_cast<uint32_t>(1));
+        _tileSizeOfCachedKV = GetTileSizeOfCachedKV(cachedLens, lens, localHeads / localKvHeads,
+                                                    localKvHeads, blockSize, aicNum);
     }
 
     size = batch * XDtypeBit(INT32) / 8;

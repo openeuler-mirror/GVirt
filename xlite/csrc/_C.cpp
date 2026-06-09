@@ -11,6 +11,7 @@
 #include "op.h"
 #include "runtime.h"
 #include "model.h"
+#include "auto_tuner.h"
 
 namespace py = pybind11;
 
@@ -1175,20 +1176,21 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     InitXTensor(_blockTables, blockTables);
 
     if (!enableFlashAttention) {
-        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
-                                   XDtype(qkv), DBG_LOC);
+        XTensor &qk =
+            rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, maxNumBlock * blockSize},
+                         XDtype(qkv), DBG_LOC);
         XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _queryStartLoc, _lens,
                          _cachedLens, _blockTables, nHeads, nKvHeads, headDim, blockSize, batch,
                          maxNumBlock);
         rt.Synchronize();
         rt.PutTensor(qk);
     } else {
-        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, tileSizeOfCachedKV},
                                    XDtype(qkv), DBG_LOC);
         XTensor &sv =
-            rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, headDim}, XDtype(qkv), DBG_LOC);
-        XTensor &max = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+            rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, headDim}, XDtype(qkv), DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
@@ -1229,20 +1231,21 @@ void MLA(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::Tensor &vCac
     InitXTensor(_blockTables, blockTables);
 
     if (!enableFlashAttention) {
-        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
-                                   XDtype(qWithQr), DBG_LOC);
+        XTensor &qk =
+            rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, maxNumBlock * blockSize},
+                         XDtype(qWithQr), DBG_LOC);
         XliteOpMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, _output, _queryStartLoc, _lens,
                    _cachedLens, _blockTables, qHeads, ropeHeadDim, nopeHeadDim, vHeadDim,
                    kvLoraRank, blockSize, batch, maxNumBlock, scale, weightNz);
         rt.Synchronize();
         rt.PutTensor(qk);
     } else {
-        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, tileSizeOfCachedKV},
                                    XDtype(qWithQr), DBG_LOC);
-        XTensor &sv =
-            rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, vHeadDim}, XDtype(qWithQr), DBG_LOC);
-        XTensor &max = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &sv = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, vHeadDim},
+                                   XDtype(qWithQr), DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
@@ -1287,7 +1290,7 @@ void MLAWithIndices(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::T
     InitXTensor(_blockTables, blockTables);
     InitXTensor(_topkIndices, topkIndices);
 
-    XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, maxNumBlock * blockSize},
+    XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, maxNumBlock * blockSize},
                                XDtype(qWithQr), DBG_LOC);
     XliteOpMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, _output, _queryStartLoc, _lens,
                _cachedLens, _blockTables, qHeads, ropeHeadDim, nopeHeadDim, vHeadDim, kvLoraRank,
@@ -1980,4 +1983,8 @@ PYBIND11_MODULE(_C, m)
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,
           py::arg("col") = 6);
+    m.def("get_tile_size_of_cached_kv", &GetTileSizeOfCachedKV,
+          "Get optimal tile size for cached KV based on workload", py::arg("cached_lens"),
+          py::arg("query_lens"), py::arg("head_num_in_group"), py::arg("n_kv_heads"),
+          py::arg("block_size"), py::arg("aic_num"));
 }

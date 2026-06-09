@@ -10,7 +10,6 @@
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
 
-#define MAX_M0 128
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
 
@@ -63,20 +62,28 @@ public:
         this->setNextGeneration = 1;
         this->waitPrevGeneration = 1;
 
-        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * tileSizeOfCachedKV);
-        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * tileSizeOfCachedKV +
-                                    block_num * MAX_M0 * tileSizeOfCachedKV);
-        this->sv[0].SetGlobalBuffer(((__gm__ Dtype *)sv) + block_idx * MAX_M0 * headSize);
-        this->sv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) + block_idx * MAX_M0 * headSize +
-                                    block_num * MAX_M0 * headSize);
-        this->max[0].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0 * 2 +
-                                     subBlockIdx * MAX_M0);
-        this->max[1].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0 * 2 +
-                                     subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
-        this->sum[0].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 * 2 +
-                                     subBlockIdx * MAX_M0);
-        this->sum[1].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 * 2 +
-                                     subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
+        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * tileSizeOfCachedKV);
+        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * tileSizeOfCachedKV +
+                                    block_num * XLITE_ATTENTION_MAX_M0 * tileSizeOfCachedKV);
+        this->sv[0].SetGlobalBuffer(((__gm__ Dtype *)sv) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * headSize);
+        this->sv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * headSize +
+                                    block_num * XLITE_ATTENTION_MAX_M0 * headSize);
+        this->max[0].SetGlobalBuffer(((__gm__ float *)max) +
+                                     block_idx * XLITE_ATTENTION_MAX_M0 * 2 +
+                                     subBlockIdx * XLITE_ATTENTION_MAX_M0);
+        this->max[1].SetGlobalBuffer(
+            ((__gm__ float *)max) + block_idx * XLITE_ATTENTION_MAX_M0 * 2 +
+            subBlockIdx * XLITE_ATTENTION_MAX_M0 + block_num * XLITE_ATTENTION_MAX_M0 * 2);
+        this->sum[0].SetGlobalBuffer(((__gm__ float *)sum) +
+                                     block_idx * XLITE_ATTENTION_MAX_M0 * 2 +
+                                     subBlockIdx * XLITE_ATTENTION_MAX_M0);
+        this->sum[1].SetGlobalBuffer(
+            ((__gm__ float *)sum) + block_idx * XLITE_ATTENTION_MAX_M0 * 2 +
+            subBlockIdx * XLITE_ATTENTION_MAX_M0 + block_num * XLITE_ATTENTION_MAX_M0 * 2);
         this->lastMax.SetGlobalBuffer((__gm__ float *)lastMax);
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
@@ -84,7 +91,7 @@ public:
 
         // 分配L1/L0
         uint64_t aTileBytes =
-            MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
+            XLITE_ATTENTION_MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
         uint64_t bTileBytes = blockSize * headSize * sizeof(Dtype);
         uint64_t off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
@@ -350,10 +357,10 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            uint32_t m0 = MAX_M0;
+            uint32_t m0 = XLITE_ATTENTION_MAX_M0;
             int queryTileSize = m0 / headNumInGroup;
             if (queryTileSize == 0) {
-                queryTileSize = 1;
+                queryTileSize = XLITE_ATTENTION_MAX_M0;
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
@@ -481,10 +488,10 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            uint32_t m0 = MAX_M0;
+            uint32_t m0 = XLITE_ATTENTION_MAX_M0;
             int queryTileSize = m0 / headNumInGroup;
             if (queryTileSize == 0) {
-                queryTileSize = 1;
+                queryTileSize = XLITE_ATTENTION_MAX_M0;
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);

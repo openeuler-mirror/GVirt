@@ -3,12 +3,12 @@
  */
 #pragma once
 #include "kernel_macro.h"
+#include "kernel_param.h"
 #include "kernel_operator.h"
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
 #include "softmax_attn_aiv.h"
 
-#define MAX_M0 128
 #define MAX_N0 128
 #define MAX_K0 128
 #define MBLOCKSIZE 16
@@ -68,15 +68,17 @@ public:
         this->headTileSize = nHeads;
         this->nHeadTiles = nHeads / headTileSize;
 
-        this->qk[0].SetGlobalBuffer((__gm__ Dtype *)qk + block_idx * MAX_M0 * qkStride);
-        this->qk[1].SetGlobalBuffer((__gm__ Dtype *)qk + block_idx * MAX_M0 * qkStride +
-                                    block_num * MAX_M0 * qkStride);
+        this->qk[0].SetGlobalBuffer((__gm__ Dtype *)qk +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * qkStride);
+        this->qk[1].SetGlobalBuffer((__gm__ Dtype *)qk +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * qkStride +
+                                    block_num * XLITE_ATTENTION_MAX_M0 * qkStride);
 
         k0 = 256 / sizeof(Dtype);
         uint64_t off = 0;
 
         off = 0;
-        uint64_t l0aSize = MAX_M0 * k0 * sizeof(Dtype);
+        uint64_t l0aSize = XLITE_ATTENTION_MAX_M0 * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
             l0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -92,7 +94,7 @@ public:
         }
 
         off = 0;
-        uint64_t l0cSize = MAX_M0 * MAX_N0 * sizeof(float);
+        uint64_t l0cSize = XLITE_ATTENTION_MAX_M0 * MAX_N0 * sizeof(float);
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += l0cSize;
@@ -110,37 +112,37 @@ public:
          *     QC: (queryTokens, headTileSize, nopeHeadDim)
          *     WUK: (headTileSize, nopeHeadDim, kvLoraRank)
          *     Absorb: (headTileSize, queryTokens, kvLoraRank)
-         *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: MAX_K0
          * C = Absorb * K
          *     Absorb: (headTileSize * queryTokens, kvLoraRank)
          *     K: (cachedTokens, kvLoraRank)
          *     C: (headTileSize, queryTokens, cachedTokens)
-         *     m0: MAX_M0, n0: (blockSize > MAX_N0 ? blockSize : MAX_N0), k0: MAX_K0
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: (blockSize > MAX_N0 ? blockSize : MAX_N0), k0: MAX_K0
          * R = QR * KR
          *     QR: (headTileSize * queryTokens, ropeHeadDim)
          *     K: (cachedTokens, ropeHeadDim)
          *     R: (headTileSize, queryTokens, cachedTokens)
-         *     m0: MAX_M0, n0: (blockSize > MAX_N0 ? blockSize : MAX_N0), k0: MAX_K0
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: (blockSize > MAX_N0 ? blockSize : MAX_N0), k0: MAX_K0
          *
          * Absorb = QK * K(T)
          *     QK: (headTileSize, queryTokens, cachedTokens)
          *     K: (cachedTokens, kvLoraRank)
          *     Absorb: (headTileSize, queryTokens, kvLoraRank)
-         *     m0: MAX_M0, n0: MAX_N0, k0: (blockSize > k0 ? blockSize : k0)
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: (blockSize > k0 ? blockSize : k0)
          * Absorb * WUV
          *     Absorb: (headTileSize, queryTokens, kvLoraRank)
          *     WUV: (headTileSize, vHeadDim, kvLoraRank)
-         *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: MAX_K0
          */
         uint64_t off = 0;
-        uint64_t absorbSize = MAX_M0 * kvLoraRank * sizeof(Dtype);
+        uint64_t absorbSize = XLITE_ATTENTION_MAX_M0 * kvLoraRank * sizeof(Dtype);
         absorbl1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
         absorbl1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += absorbSize;
         uint64_t sharel1Size = off;
 
         // QK (absorb)
-        uint64_t qcrSize = MAX_M0 * nopeRopeHeadDim * sizeof(Dtype);
+        uint64_t qcrSize = XLITE_ATTENTION_MAX_M0 * nopeRopeHeadDim * sizeof(Dtype);
         aqcrl1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
         aqcrl1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += qcrSize;
@@ -181,7 +183,8 @@ public:
             off += ktSize;
         }
 
-        uint64_t qkSize = MAX_M0 * 4 * (blockSize > k0 ? blockSize : k0) * sizeof(Dtype);
+        uint64_t qkSize =
+            XLITE_ATTENTION_MAX_M0 * 4 * (blockSize > k0 ? blockSize : k0) * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             aqkl1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             aqkl1aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -206,17 +209,17 @@ public:
      *     QC: (queryTokens, headTileSize, nopeHeadDim)
      *     WUK: (headTileSize, nopeHeadDim, kvLoraRank)
      *     Absorb: (headTileSize, queryTokens, kvLoraRank)
-     *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: MAX_K0
      * C = Absorb * K
      *     Absorb: (headTileSize * queryTokens, kvLoraRank)
      *     K: (cachedTokens, kvLoraRank)
      *     C: (headTileSize, queryTokens, cachedTokens)
-     *     m0: MAX_M0, n0: (blockSize > MAX_N0 ? blockSize : MAX_N0), k0: MAX_K0
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: (blockSize > MAX_N0 ? blockSize : MAX_N0), k0: MAX_K0
      * R = QR * KR
      *     QR: (headTileSize * queryTokens, ropeHeadDim)
      *     K: (cachedTokens, ropeHeadDim)
      *     R: (headTileSize, queryTokens, cachedTokens)
-     *     m0: MAX_M0, n0: (blockSize > MAX_N0 ? blockSize : MAX_N0), k0: MAX_K0
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: (blockSize > MAX_N0 ? blockSize : MAX_N0), k0: MAX_K0
      */
     __aicore__ inline void RunAicQKAbsorb(GlobalTensor<Dtype> query, int queryLen, int headIdx,
                                           __gm__ uint32_t *blockTable, int totalLen,
@@ -517,11 +520,11 @@ public:
      *     QK: (headTileSize, queryTokens, cachedTokens)
      *     K: (cachedTokens, kvLoraRank)
      *     Absorb: (headTileSize, queryTokens, kvLoraRank)
-     *     m0: MAX_M0, n0: MAX_N0, k0: (blockSize > k0 ? blockSize : k0)
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: (blockSize > k0 ? blockSize : k0)
      * Absorb * WUV
      *     Absorb: (headTileSize, queryTokens, kvLoraRank)
      *     WUV: (headTileSize, vHeadDim, kvLoraRank)
-     *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: MAX_K0
      */
     __aicore__ inline void RunAicSVAbsorb(GlobalTensor<Dtype> qk, int queryLen, int headIdx,
                                           __gm__ uint32_t *blockTable, int totalLen,
@@ -779,7 +782,7 @@ public:
     /*
      * When the totalLen exceeds MAX_SUB_CONTEXT_SIZE in the RunAivSoftmaxLong function,
      * 4 rows must be reserved for the exp buffer (float type) used in softmax.
-     * Therefore, m0 must be less than or equal to MAX_M0 - 4.
+     * Therefore, m0 must be less than or equal to XLITE_ATTENTION_MAX_M0 - 4.
      */
     __aicore__ inline uint32_t GetOptimalM0(int queryLen, int cachedLen)
     {
@@ -1011,7 +1014,7 @@ public:
                            outN, curr);
                 RunAivSoftmax(
                     (__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(),
-                    m0 > (MAX_M0 - 4)
+                    m0 > (XLITE_ATTENTION_MAX_M0 - 4)
                         ? 0
                         : (__gm__ float *)qk[curr][(m0 + subIdx * 2) * qkStride].GetPhyAddr(),
                     nWorkCurCore, qkStride, calcSoftmaxLen, outN, false, nWorkStart, queryTaskLen,
