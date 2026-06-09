@@ -74,6 +74,15 @@
 #include "aclrtlaunch_mla_bfloat16_t.h"
 #include "aclrtlaunch_experts_counts_sum.h"
 #include "aclrtlaunch_reorder_moe.h"
+#include "aclrtlaunch_conv1d_and_silu_float.h"
+#include "aclrtlaunch_conv1d_and_silu_float16_t.h"
+#include "aclrtlaunch_conv1d_and_silu_bfloat16_t.h"
+#include "aclrtlaunch_beta_decay_float.h"
+#include "aclrtlaunch_beta_decay_float16_t.h"
+#include "aclrtlaunch_beta_decay_bfloat16_t.h"
+#include "aclrtlaunch_transpose_1_2_float.h"
+#include "aclrtlaunch_transpose_1_2_float16_t.h"
+#include "aclrtlaunch_transpose_1_2_bfloat16_t.h"
 
 #define KERNEL_PTR_TYPE(name) decltype(aclrtlaunch_##name##_bfloat16_t)
 
@@ -1244,6 +1253,50 @@ void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &ou
         offset += bytes;
     }
 }
+void XliteOpConcatCol(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    size_t times =
+        std::accumulate(inputs[0].shape.begin(), inputs[0].shape.end() - 1, 1, std::multiplies());
+
+    size_t totalLastDim = 0;
+    for (const auto &tensor : inputs) {
+        totalLastDim += tensor.shape.back();
+    }
+    size_t elemSize = XDtypeBit(inputs[0].dtype) / 8;
+    size_t outRowStride = totalLastDim * elemSize;
+    for (size_t h = 0; h < times; ++h) {
+        size_t dstOffset = h * outRowStride;
+        for (const auto &tensor : inputs) {
+            size_t rowBytes = tensor.shape.back() * elemSize;
+            CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(out.ptr) + dstOffset, rowBytes,
+                                       static_cast<uint8_t *>(tensor.ptr) + h * rowBytes, rowBytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            dstOffset += rowBytes;
+        }
+    }
+}
+
+void XliteOpSplitCol(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    size_t height = std::accumulate(in.shape.begin(), in.shape.end() - 1, 1, std::multiplies());
+    size_t elemSize = XDtypeBit(in.dtype) / 8;
+    for (size_t h = 0; h < height; ++h) {
+        size_t srcOffset = h * in.shape.back() * elemSize;
+        for (auto cur : outputs) {
+            size_t rowBytes = cur.shape.back() * elemSize;
+            CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(cur.ptr) + h * rowBytes, rowBytes,
+                                       static_cast<uint8_t *>(in.ptr) + srcOffset, rowBytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            srcOffset += rowBytes;
+        }
+    }
+}
 
 void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs,
                   const std::vector<size_t> &sizes, uint32_t numPackets)
@@ -1342,4 +1395,68 @@ void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &c
     aclrtlaunch_reorder_moe(rt.aivNum, rt.stream, in.ptr, out.ptr, counts.ptr, moeEpSize,
                             nRoutedExperts, hiddenSize, localStart, localEnd, forward ? 1 : 0,
                             elemBytes);
+}
+void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    KERNEL_PTR_TYPE(transpose_1_2) * launchKernel;
+    if (EachXDtype(FP32, input, output)) {
+        launchKernel = aclrtlaunch_transpose_1_2_float;
+    } else if (EachXDtype(FP16, input, output)) {
+        launchKernel = aclrtlaunch_transpose_1_2_float16_t;
+    } else if (EachXDtype(BF16, input, output)) {
+        launchKernel = aclrtlaunch_transpose_1_2_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    launchKernel(rt.aivNum, rt.stream, input.ptr, output.ptr, input.shape[0], input.shape[1],
+                 input.shape[2]);
+}
+
+void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &x, XTensor &weight, XTensor &output)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (x.shape[2] <= weight.shape[2]) {
+        throw std::runtime_error("Last dimension of input is too small!");
+    }
+    KERNEL_PTR_TYPE(conv1d_and_silu) * launchKernel;
+    if (EachXDtype(FP32, x, weight, output)) {
+        launchKernel = aclrtlaunch_conv1d_and_silu_float;
+    } else if (EachXDtype(FP16, x, weight, output)) {
+        launchKernel = aclrtlaunch_conv1d_and_silu_float16_t;
+    } else if (EachXDtype(BF16, x, weight, output)) {
+        launchKernel = aclrtlaunch_conv1d_and_silu_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(x) + XT_STR(weight) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    launchKernel(rt.aivNum, rt.stream, x.ptr, weight.ptr, output.ptr, x.shape[0], x.shape[1],
+                 x.shape[2] - weight.shape[2], weight.shape[2]);
+}
+
+void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
+                      XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
+                      uint32_t num_v_heads)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    KERNEL_PTR_TYPE(beta_decay) * launchKernel;
+    if (EachXDtype(FP32, b, a)) {
+        launchKernel = aclrtlaunch_beta_decay_float;
+    } else if (EachXDtype(FP16, b, a)) {
+        launchKernel = aclrtlaunch_beta_decay_float16_t;
+    } else if (EachXDtype(BF16, b, a)) {
+        launchKernel = aclrtlaunch_beta_decay_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(b) + XT_STR(a);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    launchKernel(rt.aivNum, rt.stream, b.ptr, a.ptr, A_log.ptr, dt_bias.ptr, beta.ptr, g.ptr, bsz,
+                 seqlen, num_v_heads);
 }

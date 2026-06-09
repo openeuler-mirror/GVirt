@@ -110,6 +110,8 @@ void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTen
                                long outDim, long inDim, XTensor &output, XTensor &outScale,
                                XTensor &num, bool weightNZ = false, bool transpose = false);
 void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out);
+void XliteOpConcatCol(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out);
+void XliteOpSplitCol(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs);
 void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs,
                   const std::vector<size_t> &sizes, uint32_t numPackets);
 void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight,
@@ -122,4 +124,9 @@ void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor 
                              XTensor &expertsCountsOutput, uint32_t nRoutedExperts);
 void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &counts,
                        uint32_t hiddenSize, uint32_t localStart, uint32_t localEnd, bool forward);
+void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output);
+void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &x, XTensor &weight, XTensor &output);
+void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
+                      XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
+                      uint32_t num_v_heads);
 #endif
