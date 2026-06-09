@@ -103,7 +103,7 @@ python -m vllm.entrypoints.openai.api_server \
 	--served-model-name qwen \
 	--no-enable-prefix-caching \
 	--additional-config "${additional_config_param}" \
-	--compilation-config '{"cudagraph_capture_sizes":[1, 16, 32, 48, 64, 96, 152, 200], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
+	--compilation-config '{"cudagraph_capture_sizes":[1, 4, 8, 12, 16, 24, 32, 48, 64, 96], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
 	--async-scheduling \
 	${expert_parallel_param} \
 	${quantization_param} \
