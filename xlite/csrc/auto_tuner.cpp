@@ -51,6 +51,11 @@ static float CalcTotalTaskNumRemainderScore(std::vector<uint32_t> &cachedLens,
 {
     uint32_t totalTaskNum = 0;
     for (size_t i = 0; i < cachedLens.size(); i++) {
+        uint32_t kvLen = cachedLens[i] + queryLens[i];
+        // ignore vllm pad seq
+        if (kvLen == 1) {
+            continue;
+        }
         totalTaskNum +=
             CalcTaskNum(cachedLens[i], queryLens[i], headNumInGroup, nKVHeads, tileSize);
     }
@@ -66,8 +71,13 @@ static float CalcKvRemainderScore(std::vector<uint32_t> &cachedLens,
                                   std::vector<uint32_t> &queryLens, uint32_t tileSize)
 {
     float totalScore = 0.0f;
+    int batch = 0;
     for (size_t i = 0; i < cachedLens.size(); i++) {
         uint32_t kvLen = cachedLens[i] + queryLens[i];
+        // ignore vllm pad seq
+        if (kvLen == 1) {
+            continue;
+        }
         uint32_t remainder = kvLen % tileSize;
         float score;
         if (remainder == 0) {
@@ -76,8 +86,9 @@ static float CalcKvRemainderScore(std::vector<uint32_t> &cachedLens,
             score = static_cast<float>(remainder) / static_cast<float>(tileSize);
         }
         totalScore += score;
+        batch++;
     }
-    return cachedLens.empty() ? 0.0f : totalScore / static_cast<float>(cachedLens.size());
+    return batch == 0 ? 0.0f : totalScore / static_cast<float>(batch);
 }
 
 static float CalcTileScore(std::vector<uint32_t> &cachedLens, std::vector<uint32_t> &queryLens,
