@@ -22,21 +22,6 @@ struct XcclParam {
     uint64_t ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE];
 };
 
-// flash attention kernel param
-#if defined(__CCE_AICORE__) || defined(__ASCEND_AICORE__)
-#define AICORE_INLINE __aicore__ inline
-#else
-#define AICORE_INLINE inline
-#endif
-
-AICORE_INLINE uint32_t GetTileSizeOfCachedKV(uint32_t aicNum)
-{
-    if (aicNum == 20) {
-        return 8192;
-    } else if (aicNum == 24) {
-        return 6016;
-    }
-    return 8192;
-}
-
+// attention/mla
+#define XLITE_ATTENTION_MAX_M0 128
 #endif

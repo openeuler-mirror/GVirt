@@ -7,13 +7,13 @@
  */
 #pragma once
 #include "kernel_macro.h"
+#include "kernel_param.h"
 #include "kernel_operator.h"
 #include "softmax_attn_aiv.h"
 
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
 
-#define MAX_M0 128
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
 #define SEQLEN_64 64
@@ -64,13 +64,15 @@ public:
         this->groupMemSize = headNumInGroup * headSize;
         this->blockMemSize = blockSize * kvMemSize;
 
-        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * maxSeqLen);
-        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * maxSeqLen +
-                                    block_num * MAX_M0 * maxSeqLen);
+        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * maxSeqLen);
+        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * maxSeqLen +
+                                    block_num * XLITE_ATTENTION_MAX_M0 * maxSeqLen);
 
         // 分配L1/L0
         uint64_t l1ATileBytes =
-            MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
+            XLITE_ATTENTION_MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
         uint64_t l1BTileBytes = blockSize * headSize * sizeof(Dtype);
         uint64_t off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
@@ -277,7 +279,7 @@ public:
     /*
      * When the totalLen exceeds MAX_SUB_CONTEXT_SIZE in the RunAivSoftmaxLong function,
      * 4 rows must be reserved for the exp buffer (float type) used in softmax.
-     * Therefore, m0 must be less than or equal to MAX_M0 - 4.
+     * Therefore, m0 must be less than or equal to XLITE_ATTENTION_MAX_M0 - 4.
      */
     __aicore__ inline uint32_t GetOptimalM0(int queryLen, int cachedLen)
     {
@@ -337,7 +339,7 @@ public:
             uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
             int queryTileSize = m0 / headNumInGroup;
             if (queryTileSize == 0) {
-                queryTileSize = 1;
+                queryTileSize = m0;
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
@@ -433,7 +435,7 @@ public:
             uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
             int queryTileSize = m0 / headNumInGroup;
             if (queryTileSize == 0) {
-                queryTileSize = 1;
+                queryTileSize = m0;
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
@@ -478,7 +480,7 @@ public:
                     nWorkStart, currQkIdx);
                 RunAivSoftmax(
                     (__gm__ Dtype *)qk[currQkIdx][qkOffset].GetPhyAddr(),
-                    m0 > (MAX_M0 - 4)
+                    m0 > (XLITE_ATTENTION_MAX_M0 - 4)
                         ? 0
                         : (__gm__ float *)qk[currQkIdx][(m0 + subIdx * 2) * maxSeqLen].GetPhyAddr(),
                     nWorkCurCore, maxSeqLen, calcLen, outN, true, nWorkStart, headNumInGroup);

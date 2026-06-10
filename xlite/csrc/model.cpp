@@ -365,9 +365,8 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
 
     XTensor &attnOutput =
         rt.GetTensor({attnQWithQr.shape[0], qHeads * _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
-    uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
     if (topkIndices != nullptr) {  // XMODEL_ATTN_DSA
-        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.indexTopK},
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, _c.indexTopK},
                                    attnQWithQr.dtype, DBG_LOC);
         XliteOpMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, attnOutput,
                    rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
@@ -376,9 +375,9 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                    *topkIndices);
         rt.PutTensor(qk);
         rt.PutTensor(*topkIndices);
-    } else if (rt._maxNumBlocks * _c.blockSize <= tileSizeOfCachedKV) {
+    } else if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
         XTensor &qk =
-            rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
+            rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
                          attnQWithQr.dtype, DBG_LOC);
         XliteOpMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, attnOutput,
                    rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
@@ -386,19 +385,19 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                    rt._batch, rt._maxNumBlocks, _c.softmaxScale, _c.weightNZ);
         rt.PutTensor(qk);
     } else {
-        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._tileSizeOfCachedKV},
                                    attnQWithQr.dtype, DBG_LOC);
-        XTensor &sv = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.vHeadDim},
+        XTensor &sv = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, _c.vHeadDim},
                                    attnQWithQr.dtype, DBG_LOC);
-        XTensor &max = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
         XliteOpFlashMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
                         lastSum, _sync, attnOutput, rt._queryStartLoc, rt._lens, rt._cachedLens,
                         rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
                         _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
-                        _c.weightNZ);
+                        _c.weightNZ, rt._tileSizeOfCachedKV);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);
@@ -479,28 +478,27 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
 
     XTensor &attn =
         rt.GetTensor({hiddenState.shape[0], qHeads * _c.headDim}, hiddenState.dtype, DBG_LOC);
-    uint32_t tileSizeOfCachedKV = GetTileSizeOfCachedKV(rt.aicNum);
-    if (rt._maxNumBlocks * _c.blockSize <= tileSizeOfCachedKV) {
+    if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
         XTensor &qk =
-            rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, rt._maxNumBlocks * _c.blockSize},
+            rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
                          hiddenState.dtype, DBG_LOC);
         XliteOpAttention(rt, qkv, kCache, vCache, qk, attn, rt._queryStartLoc, rt._lens,
                          rt._cachedLens, rt._attnBlockTables, qHeads, kHeads, _c.headDim,
                          _c.blockSize, rt._batch, rt._maxNumBlocks);
         rt.PutTensor(qk);
     } else {
-        XTensor &qk = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, tileSizeOfCachedKV},
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._tileSizeOfCachedKV},
                                    hiddenState.dtype, DBG_LOC);
-        XTensor &sv = rt.GetTensor({rt.aicNum * TILESIZE_OF_QUERY * 2, _c.headDim},
+        XTensor &sv = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, _c.headDim},
                                    hiddenState.dtype, DBG_LOC);
-        XTensor &max = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.GetTensor({rt.aivNum * TILESIZE_OF_QUERY * 2}, FP32, DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XliteOpFlashAttention(rt, qkv, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, _sync,
                               attn, rt._queryStartLoc, rt._lens, rt._cachedLens,
                               rt._attnBlockTables, qHeads, kHeads, _c.headDim, _c.blockSize,
-                              rt._batch, rt._maxNumBlocks);
+                              rt._batch, rt._maxNumBlocks, rt._tileSizeOfCachedKV);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);
@@ -1154,7 +1152,8 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                                      XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
+                   _c.blockSize);
     if (rt.dpSize() == 1 && rt.batchedTokens < input.shape[0]) {
         input.View({rt.batchedTokens});
         output.View({input.shape[0], output.shape[1]});
@@ -1183,7 +1182,8 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                      std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
+                   _c.blockSize);
     if (rt.dpSize() == 1 && rt.batchedTokens < input.shape[0]) {
         input.View({rt.batchedTokens});
         output.View({input.shape[0], output.shape[1]});
@@ -1198,7 +1198,8 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
 {
     CheckForwardParam(rt, kvCache);
 
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
+                   _c.blockSize);
     if (rt.dpSize() == 1 && rt.batchedTokens < input.shape[0]) {
         input.View({rt.batchedTokens});
     }
@@ -1311,7 +1312,8 @@ size_t XModel::GetTensorPoolSize(int dbg)
     XTensor output({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
     XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype, nullptr);
 
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.blockSize);
+    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
+                   _c.blockSize);
     Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
     XTensor indices;
     indices.Init({batchSize}, INT32, nullptr);

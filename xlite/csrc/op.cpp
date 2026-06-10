@@ -893,7 +893,7 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                            XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &queryStartLoc,
                            XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                            uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
-                           uint32_t batch, uint32_t maxNumBlock)
+                           uint32_t batch, uint32_t maxNumBlock, uint32_t tileSizeOfCachedKV)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -912,7 +912,7 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr,
                  sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize,
-                 batch, maxNumBlock);
+                 batch, maxNumBlock, tileSizeOfCachedKV);
 }
 
 void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache,
@@ -922,7 +922,7 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
                      XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                      uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
                      uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale,
-                     bool weightNZ)
+                     bool weightNZ, uint32_t tileSizeOfCachedKV)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -932,7 +932,7 @@ void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &v
             rt.aicNum, rt.stream, qWithQr.ptr, kCache.ptr, vCache.ptr, wkvb.ptr, qk.ptr, sv.ptr,
             max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
             lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim, nopeHeadDim, vHeadDim,
-            kvLoraRank, blockSize, batch, maxNumBlock, scale, weightNZ);
+            kvLoraRank, blockSize, batch, maxNumBlock, scale, weightNZ, tileSizeOfCachedKV);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qWithQr) + XT_STR(kCache) + XT_STR(vCache) +
                               XT_STR(wkvb) + XT_STR(output);

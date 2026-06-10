@@ -1191,6 +1191,7 @@ def attention(
     batch: int,
     max_num_block: int,
     enable_flash_attention: bool = False,
+    tile_size_of_cached_kv: int = 8192,
 ) -> None:
     """Run paged attention for cached KV tensors.
 
@@ -1211,6 +1212,7 @@ def attention(
         batch (int): Batch size.
         max_num_block (int): Maximum number of blocks per request.
         enable_flash_attention (bool): Whether to use flash attention kernels.
+        tile_size_of_cached_kv (int): Tile size for cached KV in flash attention.
 
     Returns:
         None: `output` is written in place.
@@ -1563,6 +1565,7 @@ def mla(
     scale: float,
     nz: bool = False,
     enable_flash_attention: bool = False,
+    tile_size_of_cached_kv: int = 8192,
 ) -> None:
     """Run MLA kernel using cached KV blocks (full attention).
 
@@ -1588,6 +1591,7 @@ def mla(
         scale (float): Attention scaling factor.
         nz (bool): Whether to use nz wkvb.
         enable_flash_attention (bool): Whether to use flash attention kernels.
+        tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA.
 
     Returns:
         None: `output` is written in place.
@@ -1778,20 +1782,6 @@ def reorder_moe(
     """
     ...
 
-def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
-    """Print a tensor preview for debugging.
-
-    Args:
-        x (torch.Tensor): Tensor to print.
-        name (str): Optional label shown in output.
-        row (int): Number of rows to print.
-        col (int): Number of columns to print.
-
-    Returns:
-        None: Output is emitted to native stdout.
-    """
-    ...
-
 def linear_att_proj(
     rt: Runtime,
     x: torch.Tensor,
@@ -1908,5 +1898,46 @@ def beta_decay(
 
     Returns:
         None: Output tensors are written in place.
+    """
+    ...
+
+def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
+    """Print a tensor preview for debugging.
+
+    Args:
+        x (torch.Tensor): Tensor to print.
+        name (str): Optional label shown in output.
+        row (int): Number of rows to print.
+        col (int): Number of columns to print.
+
+    Returns:
+        None: Output is emitted to native stdout.
+    """
+    ...
+
+def get_tile_size_of_cached_kv(
+    cached_lens: List[int],
+    query_lens: List[int],
+    head_num_in_group: int,
+    n_kv_heads: int,
+    block_size: int,
+    aic_num: int,
+) -> int:
+    """Get optimal tile size for cached KV based on workload.
+
+    This function computes the optimal tile size for flash attention
+    based on the current workload characteristics including cached KV
+    lengths and query lengths.
+
+    Args:
+        cached_lens (List[int]): Per-sample cached KV token lengths.
+        query_lens (List[int]): Per-sample query token lengths.
+        head_num_in_group (int): Number of heads in each attention group.
+        n_kv_heads (int): Number of key/value heads.
+        block_size (int): KV cache block size.
+        aic_num (int): Number of AI cores available.
+
+    Returns:
+        int: Optimal tile size for cached KV in flash attention.
     """
     ...

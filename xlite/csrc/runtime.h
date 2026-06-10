@@ -93,7 +93,7 @@ public:
     void InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
                   uint32_t blockSize);
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
-                     uint64_t maxSeqLen, uint32_t blockSize);
+                     uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads, uint32_t blockSize);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -172,6 +172,7 @@ public:
     bool _attnInitialized = false;
     uint32_t _maxNumBlocks;
     int _batch;
+    uint32_t _tileSizeOfCachedKV;
     XTensor _attnPosition;
     XTensor _attnBlockTables;
     XTensor _attnSlotMapping;

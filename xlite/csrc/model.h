@@ -32,7 +32,7 @@ struct XModelConfig {
     bool qkNorm = false;
     bool qkNormFull = false;
     uint32_t nHeads = 0;
-    uint32_t nKvHeads = 0;
+    uint32_t nKvHeads = 1;
     uint32_t headDim;
     uint32_t ropeHeadDim;
     uint32_t nopeHeadDim;
@@ -98,7 +98,7 @@ struct MoEAlltoAllMeta {
     uint32_t nRoutedExperts = 0;
 };
 
-#define TILESIZE_OF_QUERY 128  // the tile size of query
+#define XLITE_ATTENTION_MAX_M0 128  // the tile size of query
 #define AIC_MAX_NUM 25
 #define AIV_MAX_NUM 50
 

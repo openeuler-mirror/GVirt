@@ -9,7 +9,6 @@
 #include "debug.h"
 #include "softmax_attn_aiv.h"
 
-#define MAX_M0 128
 #define MAX_N0 128
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
@@ -29,7 +28,7 @@ public:
                                 GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                                 uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
                                 uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,
-                                float scale, uint32_t nz)
+                                float scale, uint32_t nz, uint32_t tileSizeOfCachedKV)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qWithQr.SetGlobalBuffer((__gm__ Dtype *)qWithQr);
@@ -53,7 +52,7 @@ public:
         this->maxNumBlocks = maxNumBlocks;
         this->scale = scale;
         this->nz = nz;
-        this->tileSizeOfCachedKV = GetTileSizeOfCachedKV(block_num);
+        this->tileSizeOfCachedKV = tileSizeOfCachedKV;
         this->maxSeqLen = maxNumBlocks * blockSize;
         this->blockIdx = block_idx;
         this->subBlockIdx = get_subblockid();
@@ -65,20 +64,28 @@ public:
         this->headTileSize = nHeads;
         this->nHeadTiles = nHeads / headTileSize;
 
-        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * tileSizeOfCachedKV);
-        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * MAX_M0 * tileSizeOfCachedKV +
-                                    block_num * MAX_M0 * tileSizeOfCachedKV);
-        this->sv[0].SetGlobalBuffer(((__gm__ Dtype *)sv) + block_idx * MAX_M0 * vHeadDim);
-        this->sv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) + block_idx * MAX_M0 * vHeadDim +
-                                    block_num * MAX_M0 * vHeadDim);
-        this->max[0].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0 * 2 +
-                                     subBlockIdx * MAX_M0);
-        this->max[1].SetGlobalBuffer(((__gm__ float *)max) + block_idx * MAX_M0 * 2 +
-                                     subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
-        this->sum[0].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 * 2 +
-                                     subBlockIdx * MAX_M0);
-        this->sum[1].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * MAX_M0 * 2 +
-                                     subBlockIdx * MAX_M0 + block_num * MAX_M0 * 2);
+        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * tileSizeOfCachedKV);
+        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * tileSizeOfCachedKV +
+                                    block_num * XLITE_ATTENTION_MAX_M0 * tileSizeOfCachedKV);
+        this->sv[0].SetGlobalBuffer(((__gm__ Dtype *)sv) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * vHeadDim);
+        this->sv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) +
+                                    block_idx * XLITE_ATTENTION_MAX_M0 * vHeadDim +
+                                    block_num * XLITE_ATTENTION_MAX_M0 * vHeadDim);
+        this->max[0].SetGlobalBuffer(((__gm__ float *)max) +
+                                     block_idx * XLITE_ATTENTION_MAX_M0 * 2 +
+                                     subBlockIdx * XLITE_ATTENTION_MAX_M0);
+        this->max[1].SetGlobalBuffer(
+            ((__gm__ float *)max) + block_idx * XLITE_ATTENTION_MAX_M0 * 2 +
+            subBlockIdx * XLITE_ATTENTION_MAX_M0 + block_num * XLITE_ATTENTION_MAX_M0 * 2);
+        this->sum[0].SetGlobalBuffer(((__gm__ float *)sum) +
+                                     block_idx * XLITE_ATTENTION_MAX_M0 * 2 +
+                                     subBlockIdx * XLITE_ATTENTION_MAX_M0);
+        this->sum[1].SetGlobalBuffer(
+            ((__gm__ float *)sum) + block_idx * XLITE_ATTENTION_MAX_M0 * 2 +
+            subBlockIdx * XLITE_ATTENTION_MAX_M0 + block_num * XLITE_ATTENTION_MAX_M0 * 2);
         this->lastMax.SetGlobalBuffer((__gm__ float *)lastMax);
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
@@ -88,7 +95,7 @@ public:
         uint64_t off = 0;
 
         off = 0;
-        uint64_t l0aSize = MAX_M0 * k0 * sizeof(Dtype);
+        uint64_t l0aSize = XLITE_ATTENTION_MAX_M0 * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
             l0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -104,7 +111,7 @@ public:
         }
 
         off = 0;
-        uint64_t l0cSize = MAX_M0 * MAX_N0 * sizeof(float);
+        uint64_t l0cSize = XLITE_ATTENTION_MAX_M0 * MAX_N0 * sizeof(float);
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += l0cSize;
@@ -122,37 +129,37 @@ public:
          *     QC: (queryTokens, headTileSize, nopeHeadDim)
          *     WUK: (headTileSize, nopeHeadDim, kvLoraRank)
          *     Absorb: (headTileSize, queryTokens, kvLoraRank)
-         *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: MAX_K0
          * C = Absorb * K
          *     Absorb: (headTileSize * queryTokens, kvLoraRank)
          *     K: (cachedTokens, kvLoraRank)
          *     C: (headTileSize, queryTokens, cachedTokens)
-         *     m0: MAX_M0, n0: blockSize, k0: MAX_K0
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: blockSize, k0: MAX_K0
          * R = QR * KR
          *     QR: (headTileSize * queryTokens, ropeHeadDim)
          *     K: (cachedTokens, ropeHeadDim)
          *     R: (headTileSize, queryTokens, cachedTokens)
-         *     m0: MAX_M0, n0: blockSize, k0: MAX_K0
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: blockSize, k0: MAX_K0
          *
          * Absorb = QK * K(T)
          *     QK: (headTileSize, queryTokens, cachedTokens)
          *     K: (cachedTokens, kvLoraRank)
          *     Absorb: (headTileSize, queryTokens, kvLoraRank)
-         *     m0: MAX_M0, n0: MAX_N0, k0: blockSize
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: blockSize
          * Absorb * WUV
          *     Absorb: (headTileSize, queryTokens, kvLoraRank)
          *     WUV: (headTileSize, vHeadDim, kvLoraRank)
-         *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+         *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: MAX_K0
          */
         uint64_t off = 0;
-        uint64_t absorbSize = MAX_M0 * kvLoraRank * sizeof(Dtype);
+        uint64_t absorbSize = XLITE_ATTENTION_MAX_M0 * kvLoraRank * sizeof(Dtype);
         absorbl1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
         absorbl1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += absorbSize;
         uint64_t sharel1Size = off;
 
         // QK (absorb)
-        uint64_t qcrSize = MAX_M0 * nopeRopeHeadDim * sizeof(Dtype);
+        uint64_t qcrSize = XLITE_ATTENTION_MAX_M0 * nopeRopeHeadDim * sizeof(Dtype);
         aqcrl1aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
         aqcrl1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += qcrSize;
@@ -193,7 +200,7 @@ public:
             off += ktSize;
         }
 
-        uint64_t qkSize = MAX_M0 * 4 * blockSize * sizeof(Dtype);
+        uint64_t qkSize = XLITE_ATTENTION_MAX_M0 * 4 * blockSize * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             aqkl1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             aqkl1aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -255,17 +262,17 @@ public:
      *     QC: (queryTokens, headTileSize, nopeHeadDim)
      *     WUK: (headTileSize, nopeHeadDim, kvLoraRank)
      *     Absorb: (headTileSize, queryTokens, kvLoraRank)
-     *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: MAX_K0
      * C = Absorb * K
      *     Absorb: (headTileSize * queryTokens, kvLoraRank)
      *     K: (cachedTokens, kvLoraRank)
      *     C: (headTileSize, queryTokens, cachedTokens)
-     *     m0: MAX_M0, n0: blockSize, k0: MAX_K0
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: blockSize, k0: MAX_K0
      * R = QR * KR
      *     QR: (headTileSize * queryTokens, ropeHeadDim)
      *     K: (cachedTokens, ropeHeadDim)
      *     R: (headTileSize, queryTokens, cachedTokens)
-     *     m0: MAX_M0, n0: blockSize, k0: MAX_K0
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: blockSize, k0: MAX_K0
      */
     __aicore__ inline void RunAicQKAbsorb(GlobalTensor<Dtype> query, int queryLen, int headIdx,
                                           __gm__ uint32_t *blockTable, int kvOffset, int kvLen,
@@ -534,11 +541,11 @@ public:
      *     QK: (headTileSize, queryTokens, cachedTokens)
      *     K: (cachedTokens, kvLoraRank)
      *     Absorb: (headTileSize, queryTokens, kvLoraRank)
-     *     m0: MAX_M0, n0: MAX_N0, k0: blockSize
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: blockSize
      * Absorb * WUV
      *     Absorb: (headTileSize, queryTokens, kvLoraRank)
      *     WUV: (headTileSize, vHeadDim, kvLoraRank)
-     *     m0: MAX_M0, n0: MAX_N0, k0: MAX_K0
+     *     m0: XLITE_ATTENTION_MAX_M0, n0: MAX_N0, k0: MAX_K0
      */
     __aicore__ inline void RunAicSVAbsorb(GlobalTensor<Dtype> qk, int queryLen, int headIdx,
                                           __gm__ uint32_t *blockTable, int kvOffset, int kvLen,
@@ -802,9 +809,9 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            int queryTileSize = MAX_M0 / headTileSize;
+            int queryTileSize = XLITE_ATTENTION_MAX_M0 / headTileSize;
             if (queryTileSize == 0) {
-                queryTileSize = MAX_M0;
+                queryTileSize = XLITE_ATTENTION_MAX_M0;
             }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int kvNum = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
@@ -934,9 +941,9 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            int queryTileSize = MAX_M0 / headTileSize;
+            int queryTileSize = XLITE_ATTENTION_MAX_M0 / headTileSize;
             if (queryTileSize == 0) {
-                queryTileSize = MAX_M0;
+                queryTileSize = XLITE_ATTENTION_MAX_M0;
             }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int kvNum = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
@@ -1183,11 +1190,12 @@ private:
         GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,        \
         uint32_t nHeads, uint32_t ropeHeadDim, uint32_t nopeHeadDim, uint32_t vHeadDim,           \
         uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,           \
-        float scale, uint32_t nz)                                                                 \
+        float scale, uint32_t nz, uint32_t tileSizeOfCachedKV)                                    \
     {                                                                                             \
         FlashMLA<dtype> op;                                                                       \
         op.Init(qWithQr, kCache, vCache, wkvb, qk, sv, max, sum, lastMax, lastSum, sync, output,  \
                 queryStartLoc, queryLens, cachedLens, blockTables, nHeads, ropeHeadDim,           \
-                nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, scale, nz);    \
+                nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, scale, nz,     \
+                tileSizeOfCachedKV);                                                              \
         op.Run();                                                                                 \
     }
