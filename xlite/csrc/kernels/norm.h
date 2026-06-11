@@ -12,7 +12,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
                             GM_ADDR output, uint32_t token_num, uint32_t norm_dim, float norm_eps,
                             bool mean, uint32_t cnt_per_token, uint32_t in_step, uint32_t out_step,
                             uint32_t in_start_offset, uint32_t out_start_offset, bool useNorm,
-                            GM_ADDR variance, uint32_t tpSize)
+                            GM_ADDR variance, uint32_t tpSize, bool l2_norm)
 {
     set_atomic_none();
     set_mask_norm();
@@ -20,6 +20,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
 
     bool has_addInOut = (addInOut != nullptr);
     bool has_variance = (variance != nullptr);
+    bool has_weight = (weight != nullptr);
     float n = (float)1.0 / norm_dim;
     float divTpSize = (float)1.0 / tpSize;
     uint32_t total_dim = norm_dim * cnt_per_token;
@@ -77,7 +78,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     int inCurr = 0;
     int outCurr = 0;
 
-    if (useNorm) {
+    if (useNorm && has_weight) {
         copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)weight, 0, 1, len_burst_per_norm, 0, 0);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
@@ -235,9 +236,11 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             vmul(calc1, calc0, calc0, repeat, 1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
 
-            // x ^ 2 / n
-            vmuls(calc1, calc1, n, repeat, 1, 1, 8, 8);
-            pipe_barrier(PIPE_V);
+            if (!l2_norm) {
+                // x ^ 2 / n
+                vmuls(calc1, calc1, n, repeat, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+            }
 
             // sum(x ^ 2)
             if (norm_dim == 128) {
@@ -285,12 +288,14 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             pipe_barrier(PIPE_V);
 
             // x / sqrt(sum(x ^ 2) + eps) * weight
-            vmul(calc1, weight_calc, calc1, repeat, 1, 1, 1, 8, 8, 8);
-            pipe_barrier(PIPE_V);
-
-            if (bias != nullptr) {
-                vadd(calc1, bias_calc, calc1, repeat, 1, 1, 1, 8, 8, 8);
+            if (!l2_norm) {
+                vmul(calc1, weight_calc, calc1, repeat, 1, 1, 1, 8, 8, 8);
                 pipe_barrier(PIPE_V);
+
+                if (bias != nullptr) {
+                    vadd(calc1, bias_calc, calc1, repeat, 1, 1, 1, 8, 8, 8);
+                    pipe_barrier(PIPE_V);
+                }
             }
 
             // cast data type
@@ -331,19 +336,19 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
         GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR bias, GM_ADDR out,               \
         uint32_t token_num, uint32_t norm_dim, float norm_eps, bool mean, uint32_t cnt_per_token, \
         uint32_t in_step, uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset, \
-        bool useNorm, GM_ADDR variance, uint32_t tpSize)                                          \
+        bool useNorm, GM_ADDR variance, uint32_t tpSize, bool l2_norm)                            \
     {                                                                                             \
         norm<dtype>(input, addInOut, weight, bias, out, token_num, norm_dim, norm_eps, mean,      \
                     cnt_per_token, in_step, out_step, in_start_offset, out_start_offset, useNorm, \
-                    variance, tpSize);                                                            \
+                    variance, tpSize, l2_norm);                                                   \
     }
 #else
 #define NORM_FUNC_DEFINE(dtype)                                                                   \
     extern "C" __global__ __aicore__ void norm_##dtype(                                           \
         GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR bias, GM_ADDR out,               \
-        uint32_t token_num, uint32_t norm_dim, float norm_eps, uint32_t cnt_per_token,            \
+        uint32_t token_num, uint32_t norm_dim, float norm_eps, bool mean, uint32_t cnt_per_token, \
         uint32_t in_step, uint32_t out_step, uint32_t in_start_offset, uint32_t out_start_offset, \
-        bool useNorm, GM_ADDR variance, uint32_t tpSize)                                          \
+        bool useNorm, GM_ADDR variance, uint32_t tpSize, bool l2_norm)                            \
     {                                                                                             \
     }
 #endif

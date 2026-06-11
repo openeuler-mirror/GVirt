@@ -1106,6 +1106,17 @@ void RMSNormWithBias(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor 
     rt.Synchronize();
 }
 
+void L2Norm(XRuntime &rt, at::Tensor &in, at::Tensor &out, float normEps, uint32_t normDim)
+{
+    XTensor _in, _out;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    XliteOpL2Norm(rt, _in, _out, normEps, normDim == 0 ? _in.shape[1] : normDim);
+
+    rt.Synchronize();
+}
+
 void LayerNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &normBias,
                at::Tensor &out, float normEps, uint32_t normDim)
 {
@@ -1895,6 +1906,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("out_start_offset") = 0);
     m.def("layernorm", &LayerNorm, py::arg("rt"), py::arg("in_"), py::arg("norm"),
           py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim"));
+    m.def("l2norm", &L2Norm, py::arg("rt"), py::arg("in_"), py::arg("out"), py::arg("norm_eps"),
+          py::arg("norm_dim") = 0);
     m.def("add_bias", &AddBias, py::arg("rt"), py::arg("in_"), py::arg("weight"), py::arg("out"));
     m.def("silu_and_mul", &SiluAndMul, py::arg("rt"), py::arg("in_"), py::arg("out"));
     m.def("rope_and_cache", &RopeAndCache, "rope_and_cache", py::arg("rt"), py::arg("inout"),

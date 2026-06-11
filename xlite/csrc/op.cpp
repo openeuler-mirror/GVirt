@@ -550,7 +550,7 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, floa
     }
     launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], normDim, normEps, false, cntPerToken, in.shape[1], out.shape[1],
-                 inStartOffset, outStartOffset, useNorm, variance.ptr, rt.tpSize());
+                 inStartOffset, outStartOffset, useNorm, variance.ptr, rt.tpSize(), false);
 }
 
 void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
@@ -572,7 +572,27 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
     }
     launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], normDim, normEps, true, cntPerToken, in.shape[1], out.shape[1],
-                 inStartOffset, outStartOffset, true, nullptr, rt.tpSize());
+                 inStartOffset, outStartOffset, true, nullptr, rt.tpSize(), false);
+}
+
+void XliteOpL2Norm(XRuntime &rt, XTensor &in, XTensor &out, float normEps, uint32_t normDim,
+                   uint32_t cntPerToken, uint32_t inStartOffset, uint32_t outStartOffset)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    KERNEL_PTR_TYPE(norm) * launchKernel;
+    if (in.dtype == FP16 && (out.dtype == FP16 || out.dtype == FP32)) {
+        launchKernel = aclrtlaunch_norm_float16_t;
+    } else if (in.dtype == BF16 && (out.dtype == BF16 || out.dtype == FP32)) {
+        launchKernel = aclrtlaunch_norm_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, nullptr, nullptr, out.ptr, in.shape[0],
+                 normDim, normEps, false, cntPerToken, in.shape[1], out.shape[1], inStartOffset,
+                 outStartOffset, true, nullptr, rt.tpSize(), true);
 }
 
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
@@ -610,7 +630,7 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
     }
     launchKernel(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], in.shape[1], normEps, false, 1, in.shape[1], out.shape[1], 0, 0, true,
-                 nullptr, rt.tpSize());
+                 nullptr, rt.tpSize(), false);
 }
 
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
