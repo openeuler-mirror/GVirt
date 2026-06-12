@@ -27,7 +27,11 @@ function run_qwen3_0.6B() {
         "max_seq_len": 1024
     }' > tests/test_config.json
     
-    torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-0.6B/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${max_tokens} --temperature ${temperature} --no-prefix | tee tests/${file}.log
+    if [ ${tp} -gt 1 ]; then
+        torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-0.6B/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${max_tokens} --temperature ${temperature} --no-prefix | tee tests/${file}.log
+    else
+        python tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-0.6B/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${max_tokens} --temperature ${temperature} --no-prefix | tee tests/${file}.log
+    fi
 }
 
 function test_accuracy() {
