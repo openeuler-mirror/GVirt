@@ -606,7 +606,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
     if (rankId == 0) {
         std::cout << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize
-                  << "), data parallel(" << c.defDpSize << "), expert parallel (" << c.moeEpSize
+                  << "), data parallel(" << c.defDpSize << "), expert parallel(" << c.moeEpSize
                   << ")]" << std::endl;
     }
 

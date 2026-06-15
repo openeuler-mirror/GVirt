@@ -1251,7 +1251,7 @@ class DeepSeek_V3(nn.Module):
                                              False, True, rank, world_size)
                 continue
 
-            if "wq_b" in name:
+            if "wq_b" in name and "indexer" not in name:
                 if ".quant_bias" in name or ".scale" in name:
                     shard_size = param.shape[0]
                     loaded_weight_slice = loaded_weight[rank * shard_size:(rank + 1) * shard_size]
@@ -1262,10 +1262,22 @@ class DeepSeek_V3(nn.Module):
                         param.data[:loaded_weight_slice.shape[0]].copy_(loaded_weight_slice)
                     continue
 
-            if "wq_b" in name and "indexer" not in name:
                 load_tensor_parallel_weights(param, loaded_weight, args.q_lora_rank,
                                              args.n_heads * (args.qk_nope_head_dim + args.qk_rope_head_dim), name,
                                              False, True, rank, world_size)
+                continue
+
+            if "wq_b" in name and "indexer" in name:
+                if ".quant_bias" in name or ".scale" in name:
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    if ".scale" in name:
+                        param.data[:, 0].copy_(loaded_weight)
+                    else:
+                        param.data.copy_(loaded_weight)
+                    continue
+
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                param.copy_(loaded_weight)
                 continue
 
             if "wkv_b" in name:
