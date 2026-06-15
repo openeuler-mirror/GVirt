@@ -319,7 +319,7 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
         return nullptr;
     }
 
-    XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads, _c.indexHeadDim},
+    XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
                               hiddenState.dtype, DBG_LOC);
     XliteOpMuls(rt, attnNormQc, _c.indexSoftmaxScale, attnNormQc);
     ForwardLinear(rt, layer, attnNormQc, indexQB, q);

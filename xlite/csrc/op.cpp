@@ -1190,7 +1190,7 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scal
         return;
     }
     size_t m = in.shape[0];
-    size_t n = in.shape[1];
+    size_t n = in.numel / in.shape[0];
     if (in.dtype == FP16) {
         aclrtlaunch_dequant_float16_t(rt.aivNum, rt.stream, in.ptr, scale.ptr, out.ptr, num.ptr, m,
                                       n);
