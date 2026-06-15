@@ -6,6 +6,6 @@
 
 #include <cstdint>
 
-void XlitePickSwizzle(uint64_t m, uint64_t n, uint64_t k, uint64_t *swizzle);
+void XlitePickSwizzle(uint64_t n, uint64_t k, uint64_t *swizzle);
 
 #endif

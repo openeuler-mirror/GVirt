@@ -691,7 +691,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     }
 
     if (!rt.disableSwizzleTable) {
-        XlitePickSwizzle(m, n, k, &swizzle);
+        XlitePickSwizzle(n, k, &swizzle);
     }
 
     KERNEL_PTR_TYPE(matmul) * launchKernel;
