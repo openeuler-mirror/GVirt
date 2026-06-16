@@ -150,7 +150,7 @@ run_bench_scripts_sequential() {
 #   $2 - input_len: 输入token长度
 #   $3 - output_len: 输出token长度
 #   $4 - concurrency_list: 并发度列表（空格分隔）
-#   $5 - num_prompts_multiplier: num_prompts_multiplier倍数（num_prompts = maxconcurrency * num_prompts_multiplier）
+#   $5 - num_prompts_multiplier_list: num_prompts_multiplier列表，与concurrency_list一一对应（空格分隔）
 #   $6 - model_path: 模型路径
 #   $7 - max_num_batched_tokens: 最大批处理token数
 #   $8 - max_num_seqs: 最大序列数
@@ -161,7 +161,7 @@ run_scenario_test() {
     local input_len=$2
     local output_len=$3
     local concurrency_list=$4
-    local num_prompts_multiplier=$5
+    local num_prompts_multiplier_list=$5
     local model_path=$6
     local max_num_batched_tokens=$7
     local max_num_seqs=$8
@@ -180,7 +180,7 @@ run_scenario_test() {
     echo "场景：${scenario_desc}"
     echo "输入长度：${input_len}，输出长度：${output_len}"
     echo "并发列表：${concurrency_list}"
-    echo "num_prompts_multiplier：${num_prompts_multiplier}"
+    echo "num_prompts_multiplier列表：${num_prompts_multiplier_list}"
     echo "模型路径：${model_path}"
     echo "max_num_batched_tokens：${max_num_batched_tokens}"
     echo "max_num_seqs：${max_num_seqs}"
@@ -197,7 +197,7 @@ run_scenario_test() {
         echo "警告：Xlite Decode Only 服务启动失败，跳过此服务"
         cleanup_all_processes
     else
-        run_bench_scripts_sequential "online_server_test.sh" "xlite_decode_only_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${concurrency_list}" "${num_prompts_multiplier}" "${main_output_dir}"
+        run_bench_scripts_sequential "online_server_test.sh" "xlite_decode_only_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${concurrency_list}" "${num_prompts_multiplier_list}" "${main_output_dir}"
         wait_10s "压测脚本执行完成，准备清理进程"
         cleanup_all_processes
     fi
@@ -211,7 +211,7 @@ run_scenario_test() {
         echo "警告：Xlite Full 服务启动失败，跳过此服务"
         cleanup_all_processes
     else
-        run_bench_scripts_sequential "online_server_test.sh" "xlite_full_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${concurrency_list}" "${num_prompts_multiplier}" "${main_output_dir}"
+        run_bench_scripts_sequential "online_server_test.sh" "xlite_full_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${concurrency_list}" "${num_prompts_multiplier_list}" "${main_output_dir}"
         wait_10s "压测脚本执行完成，准备清理进程"
         cleanup_all_processes
     fi
@@ -225,7 +225,7 @@ run_scenario_test() {
         echo "警告：Aclgraph 服务启动失败，跳过此服务"
         cleanup_all_processes
     else
-        run_bench_scripts_sequential "online_server_test.sh" "aclgraph_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${concurrency_list}" "${num_prompts_multiplier}" "${main_output_dir}"
+        run_bench_scripts_sequential "online_server_test.sh" "aclgraph_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${concurrency_list}" "${num_prompts_multiplier_list}" "${main_output_dir}"
         wait_10s "压测脚本执行完成，准备清理进程"
         cleanup_all_processes
     fi
@@ -355,15 +355,16 @@ total_start_time=$(date +%s)
 total_start_time_formatted=$(date "+%Y-%m-%d %H:%M:%S")
 
 # 定义场景配置数组
-# 格式：input_len|output_len|concurrency_list|num_prompts_multiplier|max_num_batched_tokens|max_num_seqs|max_model_len|tensor_parallel_size
+# 格式：input_len|output_len|concurrency_list|num_prompts_multiplier_list|max_num_batched_tokens|max_num_seqs|max_model_len|tensor_parallel_size
+# num_prompts_multiplier_list 与 concurrency_list 一一对应，每个并发数对应各自的 multiplier
 declare -A SCENARIOS
-SCENARIOS[1]="512|512|1 16 32 48 64 96|4|65536|96|7168|8"
-SCENARIOS[2]="3584|1536|1 16 32|4|65536|32|7168|8"
-SCENARIOS[3]="8192|1024|1 16 32|4|65536|32|11264|8"
-SCENARIOS[4]="16384|1536|1 16 32|4|65536|32|32768|8"
-SCENARIOS[5]="32768|3072|1 24|4|136192|24|65536|8"
-SCENARIOS[6]="73728|8192|1 12|2|136192|16|102400|8"
-SCENARIOS[7]="102400|10240|1 8|1|136192|8|136192|8"
+SCENARIOS[1]="512|512|1 16 32 48 64 96|10 8 4 4 4 4|65536|96|7168|8"
+SCENARIOS[2]="3584|1536|1 16 32|8 4 4|65536|32|7168|8"
+SCENARIOS[3]="8192|1024|1 16 32|8 4 4|65536|32|11264|8"
+SCENARIOS[4]="16384|1536|1 16 32|8 4 4|65536|32|32768|8"
+SCENARIOS[5]="32768|3072|1 24|4 4|136192|24|65536|8"
+SCENARIOS[6]="73728|8192|1 12|2 2|136192|16|102400|8"
+SCENARIOS[7]="102400|10240|1 8|2 1|136192|8|136192|8"
 
 # 定义每个模型的场景数量
 declare -A MODEL_SCENARIO_COUNT
@@ -393,7 +394,7 @@ for model_type in "${TEST_MODELS[@]}"; do
     
     # 遍历场景执行测试
     for ((i=1; i<=MODEL_SCENARIO_LIMIT; i++)); do
-        IFS='|' read -r input_len output_len concurrency_list num_prompts_multiplier max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size <<< "${SCENARIOS[$i]}"
+        IFS='|' read -r input_len output_len concurrency_list num_prompts_multiplier_list max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size <<< "${SCENARIOS[$i]}"
         
         # 记录场景测试结果
         scenario_result="失败"
@@ -405,7 +406,7 @@ for model_type in "${TEST_MODELS[@]}"; do
             "${input_len}" \
             "${output_len}" \
             "${concurrency_list}" \
-            "${num_prompts_multiplier}" \
+            "${num_prompts_multiplier_list}" \
             "${TEST_MODEL_PATH}" \
             "${max_num_batched_tokens}" \
             "${max_num_seqs}" \
@@ -479,7 +480,7 @@ for model_type in "${TEST_MODELS[@]}"; do
     IFS='|' read -r TEST_MODEL TEST_MODEL_PATH <<< "${MODELS[$model_type]}"
     MODEL_SCENARIO_LIMIT=${MODEL_SCENARIO_COUNT[$model_type]}
     for ((i=1; i<=MODEL_SCENARIO_LIMIT; i++)); do
-        IFS='|' read -r input_len output_len concurrency_list num_prompts_multiplier max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size <<< "${SCENARIOS[$i]}"
+        IFS='|' read -r input_len output_len concurrency_list num_prompts_multiplier_list max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size <<< "${SCENARIOS[$i]}"
         echo "  - ${MAIN_OUTPUT_DIR}/benchmark_comparison_${TEST_MODEL}_input${input_len}_output${output_len}_tp${tensor_parallel_size}_${date_suffix}.log"
     done
 done
