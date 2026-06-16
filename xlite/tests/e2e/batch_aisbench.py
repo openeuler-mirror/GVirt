@@ -6,7 +6,7 @@ Additionally, the script is designed to run within a container with `git`, `vllm
 Using `vllm-ascend`'s official container image is recommended.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import os
 import signal
@@ -40,11 +40,23 @@ class BenchResult:
     xlite_full_mode: bool
     metric: str
     accuracy: float
-    error: str | None = None
+
+    _error: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self.xlite = self.xlite or self.xlite_full_mode
         self.xlite_full_mode = self.xlite_full_mode and self.xlite
+
+    @property
+    def error(self) -> str | None:
+        return getattr(self, "_error", None)
+
+    @error.setter
+    def error(self, value: str | None):
+        value = value and value.replace("\n", " ")
+        if value and len(value) > 140:
+            value = f"{value[:137]}..."
+        self._error = value
 
     @staticmethod
     def markdown_header() -> str:
@@ -60,9 +72,6 @@ class BenchResult:
         else:
             backend_str = "aclgraph"
 
-        error_str = self.error if self.error else ""
-        if len(error_str) > 200:
-            error_str = error_str[:197] + "..."
         values: list[str] = [
             self.model_name,
             self.dataset,
@@ -72,7 +81,7 @@ class BenchResult:
             backend_str,
             self.metric,
             f"{self.accuracy:.2f}",
-            error_str,
+            self.error or "",
         ]
         return f"| {' | '.join(values)} |"
 
@@ -255,10 +264,10 @@ def start_vllm_server(
         vllm_cmd,
         shell=True,
         executable="/bin/bash",
-        start_new_session=True,
-        env=os.environ,
-        stdout=None if debug else subprocess.DEVNULL,
-        stderr=None if debug else subprocess.DEVNULL,
+        env=os.environ.copy(),
+        start_new_session=True,  # to allow killing the whole process group later
+        stdout=None if debug else subprocess.PIPE,
+        stderr=None if debug else subprocess.PIPE,
     )
 
     # check if the server is ready by checking port availability
@@ -365,7 +374,7 @@ def run_ais_bench(
         suffix = "-xlite-full" if xlite_full_mode else "-xlite-decode-only"
     else:
         suffix = "-aclgraph"
-    ais_bench_output_dir = ais_bench_output_dir or (ais_bench_dir / "outputs" / f"{model_name}{suffix}")
+    ais_bench_output_dir = (ais_bench_output_dir or ais_bench_dir / "outputs") / f"{model_name}{suffix}"
     if not ais_bench_output_dir.exists():
         ais_bench_output_dir.mkdir(parents=True)
 
@@ -435,7 +444,7 @@ def run_ais_bench(
             extra_args,
         ]
         aisbench_cmd = " ".join(aisbench_cmd_lst)
-        res = subprocess.run(aisbench_cmd, shell=True, executable="/bin/bash")
+        res = subprocess.run(aisbench_cmd, shell=True, capture_output=not debug, executable="/bin/bash")
         check_subprocess_result(res, "Failed to run ais_bench")
 
         # from the output directory, find the latest ais_bench_output_dir/*datetime*/summary/summary_*.csv
@@ -452,7 +461,7 @@ def run_ais_bench(
         bench_result.error = None
     except Exception as e:
         print(f"Error occurred while running ais_bench for model {model_name}: {str(e)}")
-        bench_result.error = str(e).replace("\n", " ")
+        bench_result.error = str(e)
     finally:
         print(SEC_SEP_1)
         stop_vllm_server(vllm_process)
@@ -507,7 +516,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         "--gpu-memory-utilization",
         type=float,
         default=0.9,
-        help="GPU memory utilization for vLLM server, between 0 and 1 (e.g., 0.9 for 90% utilization)",
+        help="GPU memory utilization for vLLM server, between 0 and 1 (e.g., 0.9 for 90%% utilization)",
     )
     parser.add_argument(
         "-N",
@@ -615,6 +624,9 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         "-ds", "--device-ids", type=int, nargs="*", default=None, help="List of device IDs to use for benchmarking"
     )
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode with more verbose logging")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Whether to do a dry run without actually running the benchmarks"
+    )
     args = parser.parse_args()
 
     print(f"Running batch AISBench with arguments: {args}")
@@ -678,6 +690,13 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         )
     print(f"Using device IDs {','.join(map(str, device_ids))} for benchmarking (max required: {max_num_devices})")
 
+    if args.dry_run:
+        print("Dry run enabled, not actually running benchmarks. The following combinations would be benchmarked:")
+        for i, (model, tp, ep, dp, xlite, xlite_full) in enumerate(combinations):
+            backend_str = "xlite full" if xlite_full else ("xlite decode-only" if xlite else "aclgraph")
+            print(f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, Backend: {backend_str}")
+        sys.exit(0)
+
     for i, (model, tp, ep, dp, xlite, xlite_full) in enumerate(combinations):
         print(f"\n>>> Running benchmark task {i + 1}/{len(combinations)}")
         model_path = args.model_dir / model
@@ -716,8 +735,8 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 xlite_full_mode=xlite_full,
                 metric="weighted_average",
                 accuracy=0.0,
-                error=str(e).replace("\n", " "),
             )
+            result.error = str(e)
             bench_results.append(result)
         finally:
             # ensure all started vLLM server processes are stopped
