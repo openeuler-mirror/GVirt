@@ -13,9 +13,9 @@ TOKENIZER_PATH=${5:-/mnt/nvme0n1/models/Qwen3-32B}
 HOST=${6:-127.0.0.1}
 PORT=${7:-8080}
 # 并发数列表
-CONCURRENCY_LIST=${8:-1 16 32 48 64 100}
-# NUM_PROMPTS_MULTIPLIER参数（默认值10）
-NUM_PROMPTS_MULTIPLIER=${9:-10}
+CONCURRENCY_LIST=${8:-"1 16 32 48 64 100"}
+# NUM_PROMPTS_MULTIPLIER列表，与CONCURRENCY_LIST一一对应
+NUM_PROMPTS_MULTIPLIER=${9:-"10 10 10 10 10 10"}
 # 主输出目录（可选参数）
 MAIN_OUTPUT_DIR=${10:-}
 # 其他配置
@@ -29,13 +29,24 @@ else
 fi
 mkdir -p ${dir}
 
-# 遍历并发数
-for maxconcurrency in ${CONCURRENCY_LIST}
+concurrency_arr=(${CONCURRENCY_LIST})
+multiplier_arr=(${NUM_PROMPTS_MULTIPLIER})
+# 若两者长度不一致，报错退出
+if [[ ${#concurrency_arr[@]} -ne ${#multiplier_arr[@]} ]]; then
+    echo "ERROR: CONCURRENCY_LIST(${#concurrency_arr[@]}) and NUM_PROMPTS_MULTIPLIER(${#multiplier_arr[@]}) don't match"
+    exit 1
+fi
+
+for i in "${!concurrency_arr[@]}"
 do
+    maxconcurrency=${concurrency_arr[$i]}
+    multiplier=${multiplier_arr[$i]}
+    num_prompts=$((maxconcurrency * multiplier))
+
     # 构建文件名
     file=input_${INPUT_LEN}_output_${OUTPUT_LEN}_concurrency${maxconcurrency}
-    num_prompts=$((maxconcurrency * NUM_PROMPTS_MULTIPLIER))
-    log_file="${dir}/${file}.log"    
+    log_file="${dir}/${file}.log"
+
     echo "`date +'%m-%d %H:%M:%S'`: vllm bench start: maxconcurrency: ${maxconcurrency} "
 
     # 执行vllm bench命令

@@ -523,8 +523,7 @@ def generate_model_report(
             output_len = comparison.get("output_len", "N/A")
 
             detail_lines.append(f"{scenario_idx}. input={input_len}, output={output_len}")
-            detail_lines.append("")
-
+            
             if comparison.get("error"):
                 detail_lines.append(f"  ⚠️  {comparison['error']}")
                 detail_lines.append("")
