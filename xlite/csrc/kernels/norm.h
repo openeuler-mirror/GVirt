@@ -8,6 +8,55 @@
 #ifdef __DAV_C220_VEC__
 
 template <typename Dtype>
+__aicore__ inline void convert_input(__ubuf__ float *dst, __ubuf__ Dtype *src, uint64_t repeat)
+{
+    if constexpr (std::is_same_v<Dtype, float16_t>) {
+        vconv_f162f32(dst, src, repeat, 1, 1, 8, 4);
+    } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+        vconv_bf162f32(dst, src, repeat, 1, 1, 8, 4);
+    }
+}
+
+template <typename Dtype>
+__aicore__ inline void convert_output(__ubuf__ Dtype *dst, __ubuf__ float *src, uint64_t repeat)
+{
+    if constexpr (std::is_same_v<Dtype, float16_t>) {
+        vconv_f322f16(dst, src, repeat, 1, 1, 4, 8);
+    } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+        vconv_f322bf16r(dst, src, repeat, 1, 1, 4, 8);
+    }
+}
+
+__aicore__ inline void reduce_sum(__ubuf__ float *buf, uint32_t cnt_per_token, uint32_t norm_dim)
+{
+    if (norm_dim == 128) {
+        vadd(buf, buf, buf + 64, cnt_per_token, 1, 1, 1, 16, 16, 16);
+        pipe_barrier(PIPE_V);
+        for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
+            auto buf_norm = buf + norm_idx * norm_dim;
+            vcadd(buf_norm, buf_norm, 1, 1, 1, 8, 0);
+        }
+    } else {
+        for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
+            auto buf_norm = buf + norm_idx * norm_dim;
+            ReduceSum(buf_norm, buf_norm, norm_dim);
+        }
+    }
+}
+
+__aicore__ inline void duplicate_item(__ubuf__ float *buf, uint32_t cnt_per_token, uint64_t repeat,
+                                      uint32_t norm_dim)
+{
+    for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
+        auto calc_norm = buf + norm_idx * norm_dim;
+        float dupnum = *calc_norm;
+        set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+        vector_dup(calc_norm, dupnum, repeat, 1, 1, 8, 1);
+    }
+}
+
+template <typename Dtype>
 __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_ADDR bias,
                             GM_ADDR output, uint32_t token_num, uint32_t norm_dim, float norm_eps,
                             bool mean, uint32_t cnt_per_token, uint32_t in_step, uint32_t out_step,
@@ -34,7 +83,6 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     uint64_t repeat_per_norm = DIV_ROUND_UP(norm_dim, calcPad);
     uint64_t len_burst_float_per_norm = DIV_ROUND_UP(norm_dim * sizeof(float), BLOCK_SIZE);
     uint64_t repeat_stride = DIV_ROUND_UP(norm_dim * sizeof(float), BLOCK_SIZE);
-    float dupnum;
 
     uint64_t off = 0;
     __ubuf__ Dtype *in0 = reinterpret_cast<__ubuf__ Dtype *>(off);
@@ -82,11 +130,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
         copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)weight, 0, 1, len_burst_per_norm, 0, 0);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
-        if constexpr (std::is_same_v<Dtype, float16_t>) {
-            vconv_f162f32(weight_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
-        } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-            vconv_bf162f32(weight_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
-        }
+        convert_input(weight_calc, in[inCurr], repeat_per_norm);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         inCurr = 1 - inCurr;
 
@@ -94,11 +138,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)bias, 0, 1, len_burst_per_norm, 0, 0);
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
-            if constexpr (std::is_same_v<Dtype, float16_t>) {
-                vconv_f162f32(bias_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
-            } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-                vconv_bf162f32(bias_calc, in[inCurr], repeat_per_norm, 1, 1, 8, 4);
-            }
+            convert_input(bias_calc, in[inCurr], repeat_per_norm);
             inCurr = 1 - inCurr;
         }
         pipe_barrier(PIPE_V);
@@ -135,11 +175,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
 
-        if constexpr (std::is_same_v<Dtype, float16_t>) {
-            vconv_f162f32(calc0, in[inCurr], repeat, 1, 1, 8, 4);
-        } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-            vconv_bf162f32(calc0, in[inCurr], repeat, 1, 1, 8, 4);
-        }
+        convert_input(calc0, in[inCurr], repeat);
         pipe_barrier(PIPE_V);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + inCurr);
         inCurr = 1 - inCurr;
@@ -152,26 +188,15 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
 
-            // cast data type && input = input + addInOut
-            if constexpr (std::is_same_v<Dtype, float16_t>) {
-                vconv_f162f32(calc1, in[inCurr], repeat, 1, 1, 8, 4);
-                pipe_barrier(PIPE_V);
-                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + inCurr);
-                inCurr = 1 - inCurr;
-                vadd(calc0, calc1, calc0, repeat, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
-                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
-                vconv_f322f16(out[outCurr], calc0, repeat, 1, 1, 4, 8);
-            } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-                vconv_bf162f32(calc1, in[inCurr], repeat, 1, 1, 8, 4);
-                pipe_barrier(PIPE_V);
-                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + inCurr);
-                inCurr = 1 - inCurr;
-                vadd(calc0, calc1, calc0, repeat, 1, 1, 1, 8, 8, 8);
-                pipe_barrier(PIPE_V);
-                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
-                vconv_f322bf16r(out[outCurr], calc0, repeat, 1, 1, 4, 8);
-            }
+            convert_input(calc1, in[inCurr], repeat);
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + inCurr);
+            inCurr = 1 - inCurr;
+            vadd(calc0, calc1, calc0, repeat, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
+            convert_output(out[outCurr], calc0, repeat);
+
             pipe_barrier(PIPE_V);
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + outCurr);
@@ -188,32 +213,14 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             pipe_barrier(PIPE_V);
 
             // mean = sum(x / n)
-            if (norm_dim == 128) {
-                vadd(calc1, calc1, calc1 + 64, cnt_per_token, 1, 1, 1, 16, 16, 16);
-                pipe_barrier(PIPE_V);
-                for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
-                    auto calc_norm = calc1 + norm_idx * norm_dim;
-                    vcadd(calc_norm, calc_norm, 1, 1, 1, 8, 0);
-                }
-            } else {
-                for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
-                    auto calc_norm = calc1 + norm_idx * norm_dim;
-                    ReduceSum(calc_norm, calc_norm, norm_dim);
-                }
-            }
+            reduce_sum(calc1, cnt_per_token, norm_dim);
             pipe_barrier(PIPE_V);
 
             set_flag(PIPE_V, PIPE_S, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
             // duplicate item
-            for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
-                auto calc_norm = calc1 + norm_idx * norm_dim;
-                dupnum = *calc_norm;
-                set_flag(PIPE_S, PIPE_V, EVENT_ID0);
-                wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
-                vector_dup(calc_norm, dupnum, repeat_per_norm, 1, 1, 8, 1);
-            }
+            duplicate_item(calc1, cnt_per_token, repeat_per_norm, norm_dim);
             pipe_barrier(PIPE_V);
 
             // x - mean
@@ -243,19 +250,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             }
 
             // sum(x ^ 2)
-            if (norm_dim == 128) {
-                vadd(calc1, calc1, calc1 + 64, cnt_per_token, 1, 1, 1, 16, 16, 16);
-                pipe_barrier(PIPE_V);
-                for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
-                    auto calc_norm = calc1 + norm_idx * norm_dim;
-                    vcadd(calc_norm, calc_norm, 1, 1, 1, 8, 0);
-                }
-            } else {
-                for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
-                    auto calc_norm = calc1 + norm_idx * norm_dim;
-                    ReduceSum(calc_norm, calc_norm, norm_dim);
-                }
-            }
+            reduce_sum(calc1, cnt_per_token, norm_dim);
             pipe_barrier(PIPE_V);
         }
 
@@ -274,13 +269,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
             // duplicate item
-            for (uint32_t norm_idx = 0; norm_idx < cnt_per_token; norm_idx++) {
-                auto calc_norm = calc1 + norm_idx * norm_dim;
-                dupnum = *calc_norm;
-                set_flag(PIPE_S, PIPE_V, EVENT_ID0);
-                wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
-                vector_dup(calc_norm, dupnum, repeat_per_norm, 1, 1, 8, 1);
-            }
+            duplicate_item(calc1, cnt_per_token, repeat_per_norm, norm_dim);
             pipe_barrier(PIPE_V);
 
             // x / sqrt(sum(x ^ 2) + eps)
@@ -300,11 +289,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
 
             // cast data type
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
-            if constexpr (std::is_same_v<Dtype, float16_t>) {
-                vconv_f322f16(out[outCurr], calc1, repeat, 1, 1, 4, 8);
-            } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-                vconv_f322bf16r(out[outCurr], calc1, repeat, 1, 1, 4, 8);
-            }
+            convert_output(out[outCurr], calc1, repeat);
             pipe_barrier(PIPE_V);
         } else {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
