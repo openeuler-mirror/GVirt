@@ -207,7 +207,7 @@ public:
 
 private:
     void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
-    void PrintMemoryVal(void *p, uint64_t off, XDtype dtype);
+    void PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &os = std::cout);
     enum XTensorType type = XTENSOR_STATIC;
     size_t bytes;
     friend class XTensorPool;
