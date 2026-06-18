@@ -1731,9 +1731,9 @@ void Concat(XRuntime &rt, std::vector<at::Tensor> &inputs, at::Tensor &out)
     // Validate byte sizes: the output must hold exactly the concatenated bytes.
     size_t inBytes = 0;
     for (auto &x : _inputs) {
-        inBytes += x.numel * XDtypeBit(x.dtype) / 8;
+        inBytes += x.bytes;
     }
-    size_t outBytes = _out.numel * XDtypeBit(_out.dtype) / 8;
+    size_t outBytes = _out.bytes;
     if (inBytes != outBytes) {
         throw std::runtime_error(std::string(__func__) + ": output bytes (" +
                                  std::to_string(outBytes) + ") != sum(inputs bytes) (" +
@@ -1768,7 +1768,7 @@ void Split(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs,
     for (size_t s : _sizes) {
         totalSize += s;
     }
-    size_t inBytes = _in.numel * XDtypeBit(_in.dtype) / 8;
+    size_t inBytes = _in.bytes;
     if (totalSize * numPackets != inBytes) {
         throw std::runtime_error(std::string(__func__) + ": input bytes (" +
                                  std::to_string(inBytes) + ") != totalSize*numPackets (" +
@@ -1778,7 +1778,7 @@ void Split(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs,
     // kernel writes out-of-bounds and corrupts adjacent device memory.
     for (size_t j = 0; j < _outputs.size(); j++) {
         size_t need = _sizes[j] * numPackets;
-        size_t cap = _outputs[j].numel * XDtypeBit(_outputs[j].dtype) / 8;
+        size_t cap = _outputs[j].bytes;
         if (need > cap) {
             throw std::runtime_error(std::string(__func__) + ": output[" + std::to_string(j) +
                                      "] bytes (" + std::to_string(cap) + ") < numPackets*sizes[" +

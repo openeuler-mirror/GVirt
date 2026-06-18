@@ -25,6 +25,7 @@
 #define MB_BIT 20
 #define XLITE_MAX_NUM_DYNAMIC_TENSOR 128
 #define XLITE_TENSOR_ALIGN 1024
+#define XLITE_TENSOR_ALIGN_BIT 8192  // XLITE_TENSOR_ALIGN * 8
 
 #define DBG_LOC            \
     DebugSrcLoc            \
@@ -217,23 +218,44 @@ public:
     std::string ToStr(const char *name = "") const;
     void View(std::vector<size_t> shape);
     void View(enum XDtype type);
+    void ResetView(bool resetShape = true, bool resetDtype = true);
     void Save(const std::string &path);
     bool CheckNanInf(const char *name = "", float threshold = -1.0f, std::ostream &os = std::cout);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
+    const std::vector<size_t> &OrigShape() const
+    {
+        return origShape;
+    }
+    const size_t OrigNumel() const
+    {
+        return origNumel;
+    }
+    const enum XDtype OrigDtype() const
+    {
+        return origDtype;
+    }
+    const size_t OrigBytes() const
+    {
+        return origBytes;
+    }
     enum XTensorType GetType()
     {
         return type;
     };
-    std::vector<size_t> shape;
-    size_t numel;
-    enum XDtype dtype;
-    void *ptr = nullptr;
+    std::vector<size_t> shape;  // DO NOT MODIFY shape directly, use View() to change shape
+    size_t numel;               // DO NOT MODIFY numel directly, use View() to change shape
+    enum XDtype dtype;          // DO NOT MODIFY dtype directly, use View() to change dtype
+    size_t bytes;               // DO NOT MODIFY bytes directly, use View() to change shape/dtype
+    void *ptr = nullptr;        // DO NOT MODIFY ptr directly unless you know what you are doing
 
 private:
     void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
     void PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &os = std::cout);
     enum XTensorType type = XTENSOR_STATIC;
-    size_t bytes;
+    std::vector<size_t> origShape;  // original shape, unaffected by view operation
+    size_t origNumel = 0;           // original numel, unaffected by view operation
+    enum XDtype origDtype;          // original dtype, unaffected by view operation
+    size_t origBytes;               // original bytes, unaffected by view operation
     friend class XTensorPool;
     friend class XDummyTensorPool;
 };

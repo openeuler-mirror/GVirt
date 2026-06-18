@@ -197,8 +197,6 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         rank = rt.moeEpSize();
         localRank = rt.rankId() / rt.moeTpSize();
     }
-    size_t inBytes = in.numel * XDtypeBit(in.dtype) / 8;
-    size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (IsDummyRuntime(rt)) {
         if (xcclComm && in.dtype != INT64 && rankSize > 1) {
@@ -216,7 +214,7 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
 
     if (rankSize <= 1) {
         if (in.ptr != out.ptr) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, in.ptr, inBytes,
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, in.ptr, in.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         }
         return;
@@ -232,14 +230,14 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         if (needCopy) {
             tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
             tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
-            CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, inBytes, in.ptr, inBytes,
+            CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, in.bytes, in.ptr, in.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpIn->ptr;
             outPtr = tmpOut->ptr;
         }
 
         // prevents the size of each copy from being too small.
-        uint64_t sizePerRank = DIV_ROUND_UP(in.numel * XDtypeBit(in.dtype) / 8, rank);
+        uint64_t sizePerRank = DIV_ROUND_UP(in.bytes, rank);
         uint64_t maxCoreNum = rank;
         if (sizePerRank >= DOUBLE_AIVNUM_SIZE_BOUND) {
             maxCoreNum = static_cast<uint64_t>(rank) * 2;
@@ -295,7 +293,7 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
                      xcclComm->generation++, xcclComm->dParam, copySize);
 
         if (needCopy) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, outPtr, outBytes,
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             rt.PutTensor(*tmpIn);
             rt.PutTensor(*tmpOut);
@@ -320,8 +318,6 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
     auto hcclComm = (type == TP) ? rt._tpComm : rt._dpComm;
     uint32_t rank = (type == TP) ? rt.tpSize() : rt.dpSize();
     uint32_t localRank = (type == TP) ? (rt.rankId() % rt.tpSize()) : (rt.rankId() / rt.tpSize());
-    size_t inBytes = in.numel * XDtypeBit(in.dtype) / 8;
-    size_t outBytes = out.numel * XDtypeBit(out.dtype) / 8;
 
     if (IsDummyRuntime(rt)) {
         if (xcclComm && in.dtype != INT64 && rankSize > 1) {
@@ -339,7 +335,7 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
 
     if (rankSize <= 1) {
         if (in.ptr != out.ptr) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, in.ptr, inBytes,
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, in.ptr, in.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         }
         return;
@@ -355,14 +351,14 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
         if (needCopy) {
             tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
             tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
-            CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, inBytes, in.ptr, inBytes,
+            CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, in.bytes, in.ptr, in.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpIn->ptr;
             outPtr = tmpOut->ptr;
         }
 
         // prevents the size of each copy from being too small.
-        uint64_t sizePerRank = DIV_ROUND_UP(in.numel * XDtypeBit(in.dtype) / 8, rank);
+        uint64_t sizePerRank = DIV_ROUND_UP(in.bytes, rank);
         uint64_t maxCoreNum = rank;
         if (sizePerRank >= DOUBLE_AIVNUM_SIZE_BOUND) {
             maxCoreNum = static_cast<uint64_t>(rank) * 2;
@@ -407,7 +403,7 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
                      xcclComm->generation++, xcclComm->dParam, copySize);
 
         if (needCopy) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, outBytes, outPtr, outBytes,
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             rt.PutTensor(*tmpIn);
             rt.PutTensor(*tmpOut);
@@ -431,7 +427,6 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
     auto hcclComm = (type == TP) ? rt._tpComm : rt._dpComm;
     uint32_t rank = (type == TP) ? rt.tpSize() : rt.dpSize();
     uint32_t localRank = (type == TP) ? (rt.rankId() % rt.tpSize()) : (rt.rankId() / rt.tpSize());
-    size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
 
     if (IsDummyRuntime(rt)) {
         if (xcclComm && in.dtype != INT64 && rank > 1) {
@@ -447,8 +442,8 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 
     if (rank <= 1) {
         if (in.ptr != out.ptr) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, in.ptr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
-                                       rt.stream));
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, in.bytes, in.ptr, in.bytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         }
         return;
     }
@@ -461,14 +456,14 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 
         if (needCopy) {
             tmpBuff = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
-            CHECK_ACL(aclrtMemcpyAsync(tmpBuff->ptr, bytes, in.ptr, bytes,
+            CHECK_ACL(aclrtMemcpyAsync(tmpBuff->ptr, in.bytes, in.ptr, in.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpBuff->ptr;
             outPtr = tmpBuff->ptr;
         }
 
         // prevents the size of each copy from being too small.
-        uint64_t sizePerRank = DIV_ROUND_UP(in.numel * XDtypeBit(in.dtype) / 8, rank);
+        uint64_t sizePerRank = DIV_ROUND_UP(in.bytes, rank);
         uint64_t maxCoreNum = rank;
         if (sizePerRank >= DOUBLE_AIVNUM_SIZE_BOUND) {
             maxCoreNum = static_cast<uint64_t>(rank) * 2;
@@ -513,8 +508,8 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
                      xcclComm->generation++, xcclComm->dParam, copySize);
 
         if (needCopy) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, outPtr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
-                                       rt.stream));
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             rt.PutTensor(*tmpBuff);
         }
         return;
@@ -1385,7 +1380,7 @@ void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &ou
         uint64_t totalBytes = 0;
         for (uint32_t i = 0; i < inputs.size(); i++) {
             ptrs[i] = inputs[i].ptr;
-            sizes[i] = inputs[i].numel * XDtypeBit(inputs[i].dtype) / 8;
+            sizes[i] = inputs[i].bytes;
             totalBytes += sizes[i];
         }
         // Scale block count to data size: small transfers use few blocks to avoid
@@ -1401,7 +1396,7 @@ void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &ou
     // Fallback for the rare > maxInputs case
     size_t offset = 0;
     for (const auto &tensor : inputs) {
-        size_t bytes = tensor.numel * XDtypeBit(tensor.dtype) / 8;
+        size_t bytes = tensor.bytes;
         void *dst = static_cast<uint8_t *>(out.ptr) + offset;
         CHECK_ACL(aclrtMemcpyAsync(dst, bytes, tensor.ptr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
                                    rt.stream));

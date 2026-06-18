@@ -21,8 +21,12 @@ void XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum
         numel *= shape[i];
     }
 
+    this->origNumel = numel;                                      // store original numel
+    this->origBytes = DIV_ROUND_UP(numel * XDtypeBit(dtype), 8);  // store original bytes
+    this->origShape = shape;                                      // store original shape
+    this->origDtype = dtype;                                      // store original dtype
     this->numel = numel;
-    this->bytes = numel * XDtypeBit(dtype) / 8;
+    this->bytes = DIV_ROUND_UP(numel * XDtypeBit(dtype), 8);
     this->shape = shape;
     this->dtype = dtype;
     this->ptr = ptr;
@@ -190,19 +194,18 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream
     uint32_t i, j;
     uint32_t hRow = DIV_ROUND_UP(nRow, 2);
     uint32_t hCol = DIV_ROUND_UP(nCol, 2);
-    size_t size = numel * XDtypeBit(dtype) / 8;
     aclError err;
 
-    if (size == 0) {
+    if (bytes == 0) {
         return;
     }
 
-    void *p = malloc(size);
+    void *p = malloc(bytes);
     if (!p) {
         return;
     }
 
-    err = aclrtMemcpy(p, size, ptr, size, ACL_MEMCPY_DEVICE_TO_HOST);
+    err = aclrtMemcpy(p, bytes, ptr, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
     if (err != ACL_ERROR_NONE) {
         free(p);
         return;
@@ -305,8 +308,7 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream
 
 bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os)
 {
-    size_t size = numel * XDtypeBit(dtype) / 8;
-    if (size == 0) {
+    if (bytes == 0) {
         return false;
     }
 
@@ -315,12 +317,12 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os)
         return false;
     }
 
-    void *p = malloc(size);
+    void *p = malloc(bytes);
     if (!p) {
         return false;
     }
 
-    aclError err = aclrtMemcpy(p, size, ptr, size, ACL_MEMCPY_DEVICE_TO_HOST);
+    aclError err = aclrtMemcpy(p, bytes, ptr, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
     if (err != ACL_ERROR_NONE) {
         free(p);
         return false;
@@ -426,11 +428,10 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os)
 
 void XTensor::Memset(int value)
 {
-    size_t size = numel * XDtypeBit(dtype) / 8;
-    if (size == 0) {
+    if (bytes == 0) {
         return;
     }
-    CHECK_ACL(aclrtMemset(ptr, size, value, size));
+    CHECK_ACL(aclrtMemset(ptr, bytes, value, bytes));
 }
 
 std::string XTensor::ToStr(const char *name) const
@@ -457,12 +458,14 @@ void XTensor::View(std::vector<size_t> shape)
     for (uint64_t i = 0; i < shape.size(); i++) {
         newNumel *= shape[i];
     }
-    if (newNumel * XDtypeBit(dtype) / 8 > bytes) {
+    size_t newBytes = DIV_ROUND_UP(newNumel * XDtypeBit(dtype), 8);
+    if (newBytes > origBytes) {
         throw std::runtime_error("Does not support performing the view operation on a tensor to "
                                  "reshape it into a larger size than the original.");
     }
     this->shape = shape;
     this->numel = newNumel;
+    this->bytes = newBytes;
 }
 
 void XTensor::View(enum XDtype type)
@@ -470,19 +473,29 @@ void XTensor::View(enum XDtype type)
     size_t oldBit = XDtypeBit(dtype);
     size_t newBit = XDtypeBit(type);
 
-    if (!shape.empty() && oldBit != newBit) {
-        size_t lastIdx = shape.size() - 1;
-        uint64_t lastBit = static_cast<uint64_t>(shape[lastIdx]) * oldBit;
+    if (!this->shape.empty() && oldBit != newBit) {
+        size_t lastIdx = this->shape.size() - 1;
+        uint64_t lastBit = static_cast<uint64_t>(this->shape[lastIdx]) * oldBit;
         if (lastBit % newBit != 0) {
             std::string err_str = "View(XDtype) failed: last dim of " + ToStr("Tensor") +
                                   " is not divisible by " + std::to_string(newBit) +
                                   " Bits, cannot reinterpret as " + XDtypeStr(type);
             throw std::runtime_error(err_str);
         }
-        shape[lastIdx] = lastBit / newBit;
-        numel = numel * oldBit / newBit;
+        this->shape[lastIdx] = lastBit / newBit;
+        this->numel = this->numel * oldBit / newBit;
     }
     this->dtype = type;
+}
+
+void XTensor::ResetView(bool resetShape, bool resetDtype)
+{
+    if (resetShape) {
+        View(origShape);
+    }
+    if (resetDtype) {
+        View(origDtype);
+    }
 }
 
 void XTensor::Save(const std::string &path)
@@ -545,7 +558,7 @@ XTensor &XTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtype, De
     for (uint64_t i = 0; i < shape.size(); i++) {
         numel *= shape[i];
     }
-    size = ROUND_UP(numel * XDtypeBit(dtype) / 8, XLITE_TENSOR_ALIGN);
+    size = ROUND_UP(numel * XDtypeBit(dtype), XLITE_TENSOR_ALIGN_BIT) / 8;
 
     for (auto it = _used.begin(); it != _used.end(); it++) {
         XTensor &use = it->get();
@@ -556,9 +569,9 @@ XTensor &XTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtype, De
             _used.insert(it, t);
             return t;
         }
-        ptr = reinterpret_cast<void *>(
-            reinterpret_cast<uint64_t>(use.ptr) +
-            ROUND_UP(use.numel * XDtypeBit(use.dtype) / 8, XLITE_TENSOR_ALIGN));
+        // use the true tensor size (original size at Init) to calculate the next free pointer
+        ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(use.ptr) +
+                                       ROUND_UP(use.origBytes, XLITE_TENSOR_ALIGN));
     }
     if (reinterpret_cast<uint64_t>(_ptr) + _size - reinterpret_cast<uint64_t>(ptr) >= size) {
         t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
@@ -632,7 +645,7 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
     for (uint64_t i = 0; i < shape.size(); i++) {
         numel *= shape[i];
     }
-    size = ROUND_UP(numel * XDtypeBit(dtype) / 8, XLITE_TENSOR_ALIGN);
+    size = ROUND_UP(numel * XDtypeBit(dtype), XLITE_TENSOR_ALIGN_BIT) / 8;
 
     for (auto it = _used.begin(); it != _used.end(); it++) {
         XTensor &use = it->get();
@@ -650,9 +663,9 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
 #endif
             return t;
         }
-        ptr = reinterpret_cast<void *>(
-            reinterpret_cast<uint64_t>(use.ptr) +
-            ROUND_UP(use.numel * XDtypeBit(use.dtype) / 8, XLITE_TENSOR_ALIGN));
+        // use the true tensor size (original size at Init) to calculate the next free pointer
+        ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(use.ptr) +
+                                       ROUND_UP(use.origBytes, XLITE_TENSOR_ALIGN));
     }
     t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
     _free.pop_front();
