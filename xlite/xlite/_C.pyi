@@ -1106,6 +1106,27 @@ def layernorm(
     """
     ...
 
+def l2norm(
+    rt: Runtime,
+    in_: torch.Tensor,
+    out: torch.Tensor,
+    norm_eps: float,
+    norm_dim: int = 0,
+) -> None:
+    """Apply L2 Norm.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        in_ (torch.Tensor): Input tensor.
+        out (torch.Tensor): Output tensor.
+        norm_eps (float): Numerical epsilon used in normalization.
+        norm_dim (int): Normalization width. `0` lets native code infer it.
+
+    Returns:
+        None: `out` is written in place.
+    """
+    ...
+
 def add_bias(rt: Runtime, in_: torch.Tensor, weight: torch.Tensor, out: torch.Tensor) -> None:
     """Add bias tensor to input tensor.
 
