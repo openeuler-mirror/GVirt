@@ -365,24 +365,15 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
 
     XTensor &attnOutput =
         rt.GetTensor({attnQWithQr.shape[0], qHeads * _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
-    if (topkIndices != nullptr) {  // XMODEL_ATTN_DSA
-        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, _c.indexTopK},
-                                   attnQWithQr.dtype, DBG_LOC);
-        XliteOpMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, attnOutput,
-                   rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
-                   _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.kvLoraRank, _c.blockSize,
-                   rt._batch, rt._maxNumBlocks, _c.softmaxScale, _c.weightNZ, _c.indexTopK,
-                   *topkIndices);
-        rt.PutTensor(qk);
-        rt.PutTensor(*topkIndices);
-    } else if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
+    if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
         XTensor &qk =
             rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
                          attnQWithQr.dtype, DBG_LOC);
         XliteOpMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, attnOutput,
                    rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
                    _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.kvLoraRank, _c.blockSize,
-                   rt._batch, rt._maxNumBlocks, _c.softmaxScale, _c.weightNZ);
+                   rt._batch, rt._maxNumBlocks, _c.softmaxScale, _c.weightNZ, _c.indexTopK,
+                   topkIndices == nullptr ? XTensor() : *topkIndices);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._tileSizeOfCachedKV},
@@ -397,13 +388,17 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                         lastSum, _sync, attnOutput, rt._queryStartLoc, rt._lens, rt._cachedLens,
                         rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
                         _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
-                        _c.weightNZ, rt._tileSizeOfCachedKV);
+                        _c.weightNZ, rt._tileSizeOfCachedKV, _c.indexTopK,
+                        topkIndices == nullptr ? XTensor() : *topkIndices);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);
         rt.PutTensor(max);
         rt.PutTensor(sv);
         rt.PutTensor(qk);
+    }
+    if (topkIndices != nullptr) {
+        rt.PutTensor(*topkIndices);
     }
     rt.PutTensor(attnQWithQr);
 
