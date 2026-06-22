@@ -6,6 +6,7 @@
 
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+#include "kernel_param.h"
 
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
@@ -13,22 +14,41 @@
 using namespace AscendC;
 
 #if __DAV_C220_VEC__
-/* ROUND_UP(n * sizeof(Dtype), VECTOR_MAX_BYTESIZE) * 4 +
- *     ROUND_UP(n * sizeof(float), VECTOR_MAX_BYTESIZE) +
- *     (DIV_ROUND_UP(n * sizeof(float), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE <= ub
- * size(196608B) float16_t or bfloat16_t: n <= 13952
- */
+static_assert(ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) * 4 +
+                      ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) +
+                      (DIV_ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) /
+                       2) *
+                          VECTOR_MAX_BYTESIZE +
+                      VECTOR_MAX_BYTESIZE * 9 +
+                      ROUND_UP(MAX_TOPK_NUM * sizeof(int32_t), VECTOR_MAX_BYTESIZE) * 3 +
+                      ROUND_UP(MAX_TOPK_NUM * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) +
+                      ROUND_UP(MAX_TOPK_NUM / 8, VECTOR_MAX_BYTESIZE) * 2 <=
+                  UB_SIZE,
+              "MAX_SOFTMAX_PINGPONG_LEN or MAX_TOPK_NUM too large (calc in bfloat16_t)");
+static_assert(ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float16_t), VECTOR_MAX_BYTESIZE) * 4 +
+                      ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) +
+                      (DIV_ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) /
+                       2) *
+                          VECTOR_MAX_BYTESIZE +
+                      VECTOR_MAX_BYTESIZE * 9 +
+                      ROUND_UP(MAX_TOPK_NUM * sizeof(int32_t), VECTOR_MAX_BYTESIZE) * 3 +
+                      ROUND_UP(MAX_TOPK_NUM * sizeof(float16_t), VECTOR_MAX_BYTESIZE) +
+                      ROUND_UP(MAX_TOPK_NUM / 8, VECTOR_MAX_BYTESIZE) * 2 <=
+                  UB_SIZE,
+              "MAX_SOFTMAX_PINGPONG_LEN or MAX_TOPK_NUM too large (calc in float16_t)");
 template <typename Dtype>
-inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n, int calcLen,
-                                             uint32_t outN = 0, bool seqHead = true,
-                                             uint32_t maskOff = 0, uint32_t maskStride = 1,
-                                             __gm__ float *maxBuf = nullptr,
-                                             __gm__ float *sumBuf = nullptr, bool hasScale = false,
-                                             float scale = 1.0f)
+inline __aicore__ void RunAivSoftmaxPingPong(
+    __gm__ Dtype *buf, uint32_t m, uint32_t n, int calcLen, uint32_t outN = 0, bool seqHead = true,
+    uint32_t maskOff = 0, uint32_t maskStride = 1, __gm__ float *maxBuf = nullptr,
+    __gm__ float *sumBuf = nullptr, bool hasScale = false, float scale = 1.0f,
+    uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
 {
+    float min = -3.4028235e+38;
+    Dtype minDtype = -3.4028235e+38;
     if (outN == 0 || outN > n) {
         outN = n;
     }
+    int len = outN > topK ? outN : topK;
 
     bool saveMaxSum = (maxBuf != nullptr && sumBuf != nullptr);
 
@@ -37,42 +57,78 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
 
     uint64_t off = 0;
     __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(len * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
     __ubuf__ Dtype *in2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(len * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
     __ubuf__ Dtype *in[PINGPONG_BUF_NUM] = {in1, in2};
     __ubuf__ Dtype *out1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(len * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
     __ubuf__ Dtype *out2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += ROUND_UP(outN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(len * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
     __ubuf__ Dtype *out[PINGPONG_BUF_NUM] = {out1, out2};
     __ubuf__ float *cal = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += ROUND_UP(outN * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(len * sizeof(float), VECTOR_MAX_BYTESIZE);
     __ubuf__ float *temp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += (DIV_ROUND_UP(outN * sizeof(float), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE;
+    off += (DIV_ROUND_UP(len * sizeof(float), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE;
     __ubuf__ float *maxOut0 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
+    off += saveMaxSum ? VECTOR_MAX_BYTESIZE : 0;
     __ubuf__ float *maxOut1 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
+    off += saveMaxSum ? VECTOR_MAX_BYTESIZE : 0;
     __ubuf__ float *maxOut[PINGPONG_BUF_NUM] = {maxOut0, maxOut1};
     __ubuf__ float *sumOut0 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
+    off += saveMaxSum ? VECTOR_MAX_BYTESIZE : 0;
     __ubuf__ float *sumOut1 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
+    off += saveMaxSum ? VECTOR_MAX_BYTESIZE : 0;
     __ubuf__ float *sumOut[PINGPONG_BUF_NUM] = {sumOut0, sumOut1};
+    __ubuf__ int32_t *indices0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
+    off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
+    __ubuf__ int32_t *indices1 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
+    off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
+    __ubuf__ int32_t *indices[PINGPONG_BUF_NUM] = {indices0, indices1};
+    __ubuf__ Dtype *inTopK = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+    off += topK != 0 ? ROUND_UP(topK * sizeof(Dtype), VECTOR_MAX_BYTESIZE) : 0;
+    __ubuf__ float *indicesFp32 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+    off += topK != 0 ? ROUND_UP(topK * sizeof(float), VECTOR_MAX_BYTESIZE) : 0;
+    __ubuf__ int32_t *cmp0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
+    off += topK != 0 ? VECTOR_MAX_BYTESIZE * 2 : 0;
+    __ubuf__ int32_t *cmp1 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
+    off += topK != 0 ? VECTOR_MAX_BYTESIZE : 0;
+    __ubuf__ float *cmpFp320 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+    off += topK != 0 ? VECTOR_MAX_BYTESIZE : 0;
+    __ubuf__ float *cmpFp321 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+    off += topK != 0 ? VECTOR_MAX_BYTESIZE : 0;
+    __ubuf__ uint8_t *topkMask0 = reinterpret_cast<__ubuf__ uint8_t *>((uintptr_t)off);
+    off += topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0;
+    __ubuf__ uint8_t *topkMask1 = reinterpret_cast<__ubuf__ uint8_t *>((uintptr_t)off);
+    off += topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0;
+    __ubuf__ int32_t *currIndices = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
+    off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
 
     constexpr int calPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+    constexpr int indicesPad = VECTOR_MAX_BYTESIZE / sizeof(int32_t);
+    int indicesRepeat = DIV_ROUND_UP(topK, indicesPad);
+    int topKCalRepeat = DIV_ROUND_UP(topK, calPad);
+    int topKRepeat = DIV_ROUND_UP(topK, pad);
+    int topKVandRepeat = DIV_ROUND_UP(topK, 2048);
+    int topKLoopCnt = DIV_ROUND_UP(topK, 128);
     int curr = 0;
+
+    if (topK > 0) {
+        vector_dup(cmp0, kvOffset, 1, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+        vconv_s322f32(cmpFp320, cmp0, 1, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+    }
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID3);
     for (int idx = 0; idx < m; ++idx) {
-        int actualCalcLen = seqHead
-                                ? calcLen + (idx + maskOff) / maskStride
-                                : calcLen + (idx + maskOff) % maskStride;  // 每一行开始mask的位置
+        uint32_t seqIdx = seqHead ? (idx + maskOff) / maskStride : (idx + maskOff) % maskStride;
+        uint32_t headIdx = seqHead ? (idx + maskOff) % maskStride : (idx + maskOff) / maskStride;
+        int actualCalcLen = calcLen + seqIdx;  // 每一行开始mask的位置
         if (actualCalcLen <= 0) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
             vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(outN, pad), 1, 1, 8, 0);
@@ -92,8 +148,6 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
             if (actualCalcLen > outN) {
                 actualCalcLen = outN;
             }
-            int padCachedTokens = ROUND_UP(actualCalcLen, calPad);
-            int repeat = padCachedTokens / calPad;
 
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
             if (actualCalcLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
@@ -104,8 +158,100 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
                                           actualCalcLen * sizeof(Dtype), 0, 0, 0, 0);
             }
 
-            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            int origActualCalcLen = actualCalcLen;
+            if (topK > 0) {
+                // copy topKIndices to indices
+                if (topK * sizeof(int32_t) % BLOCK_SIZE == 0) {
+                    copy_gm_to_ubuf(indices[curr], topkIndices + seqIdx * topK, 0, 1,
+                                    topK * sizeof(int32_t) / BLOCK_SIZE, 0, 0);
+                } else {
+                    copy_gm_to_ubuf_align_b16(indices[curr], topkIndices + seqIdx * topK, 0, 1,
+                                              topK * sizeof(int32_t), 0, 0, 0, 0);
+                }
+                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+                vector_dup(cmp1, kvOffset + origActualCalcLen, 1, 1, 1, 8, 0);
+                vector_dup(inTopK, minDtype, topKRepeat, 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
+                vconv_s322f32(cmpFp321, cmp1, 1, 1, 1, 8, 8);
+                set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+
+                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+                vconv_s322f32(indicesFp32, indices[curr], indicesRepeat, 1, 1, 8, 8);
+                vsub(currIndices, indices[curr], cmp0, indicesRepeat, 1, 1, 1, 8, 8, 0);
+                pipe_barrier(PIPE_V);
+                vmuls(indices[curr], currIndices, 2, indicesRepeat, 1, 1, 8, 8);
+
+                wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                float minIdx = cmpFp320[0];
+                float maxIdx = cmpFp321[0];
+                set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                vcmpvs_ge(topkMask0, indicesFp32, minIdx, topKCalRepeat, 0, 1, 0, 8);
+                vcmpvs_lt(topkMask1, indicesFp32, maxIdx, topKCalRepeat, 0, 1, 0, 8);
+                pipe_barrier(PIPE_V);
+                vand((__ubuf__ short *)topkMask0, (__ubuf__ short *)topkMask0,
+                     (__ubuf__ short *)topkMask1, topKVandRepeat, 1, 1, 1, 8, 8, 8);
+                pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+
+                bool needCalc = false;
+                uint64_t addrOffset = (uint64_t)in[curr];
+                for (int topLoop = 0; topLoop < topKLoopCnt; topLoop++) {
+                    uint64_t mask0 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16);
+                    uint64_t mask1 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16 + 8);
+                    __ubuf__ int32_t *indicesOffset = indices[curr] + topLoop * 128;
+                    if (mask0 != 0 || mask1 != 0) {
+                        set_vector_mask(mask1, mask0);
+                        vgather((__ubuf__ uint16_t *)inTopK + topLoop * 128,
+                                (__ubuf__ uint32_t *)indicesOffset, addrOffset, 0, 1);
+                        needCalc = true;
+                    }
+                }
+                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                pipe_barrier(PIPE_V);
+
+                if (!needCalc) {
+                    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+                    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
+                    vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(outN, pad), 1, 1, 8, 0);
+                    if (saveMaxSum) {
+                        vector_dup(maxOut[curr], min, 1, 1, 1, 8, 0);
+                        vector_dup(sumOut[curr], float(0), 1, 1, 1, 8, 0);
+                    }
+                    pipe_barrier(PIPE_V);
+
+                    set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+                    wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+                    if ((outN * sizeof(Dtype)) % BLOCK_SIZE == 0) {
+                        copy_ubuf_to_gm(buf + idx * n, out[curr], 0, 1,
+                                        outN * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
+                    } else {
+                        copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1,
+                                                  outN * sizeof(Dtype), 0, 0, 0, 0);
+                    }
+                    if (saveMaxSum) {
+                        copy_ubuf_to_gm_align_b16(maxBuf + idx, maxOut[curr], 0, 1, sizeof(float),
+                                                  0, 0, 0, 0);
+                        copy_ubuf_to_gm_align_b16(sumBuf + idx, sumOut[curr], 0, 1, sizeof(float),
+                                                  0, 0, 0, 0);
+                    }
+                    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
+                    curr = 1 - curr;
+                    continue;
+                }
+
+                copy_ubuf_to_ubuf(in[curr], inTopK, 0, 1,
+                                  DIV_ROUND_UP(topK * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+                pipe_barrier(PIPE_V);
+                // update actualCalcLen
+                actualCalcLen = topK;
+            } else {
+                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            }
+            int repeat = DIV_ROUND_UP(actualCalcLen, calPad);
 
             if constexpr (std::is_same<Dtype, half>::value) {
                 vconv_f162f32(cal, in[curr], repeat, 1, 1, 8, 4);
@@ -164,6 +310,52 @@ inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint
                 vconv_f322bf16r(out[curr], cal, repeat, 1, 1, 4, 8);
             }
             pipe_barrier(PIPE_V);
+
+            if (topK > 0) {
+                copy_ubuf_to_ubuf(inTopK, out[curr], 0, 1,
+                                  DIV_ROUND_UP(actualCalcLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
+                pipe_barrier(PIPE_V);
+                vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(origActualCalcLen, pad), 1, 1, 8, 0);
+                __ubuf__ uint16_t *currOut = (__ubuf__ uint16_t *)out[curr];
+                set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                int topkLoop = topK >> 6;
+                for (int i = 0; i < topkLoop; i++) {
+                    uint64_t mask = *((__ubuf__ uint64_t *)topkMask0 + i);
+                    if (mask == 0) {
+                        continue;
+                    }
+                    int currTopKBase = (i << 6);
+                    for (int j = 0; j < 16; j++) {
+                        int j2 = j << 2;
+                        uint64_t pair0Mask = mask & (3ull << j2);
+                        uint64_t pair1Mask = mask & (3ull << (j2 + 2));
+                        if (pair0Mask | pair1Mask) {
+                            int currTopK0 = currTopKBase + j2;
+                            int currTopK1 = currTopKBase + j2 + 2;
+                            uint64_t tmp1_0 = *(__ubuf__ uint64_t *)(currIndices + currTopK0);
+                            uint64_t tmp1_1 = *(__ubuf__ uint64_t *)(currIndices + currTopK1);
+                            uint32_t tmp2_0 = *(__ubuf__ uint32_t *)(inTopK + currTopK0);
+                            uint32_t tmp2_1 = *(__ubuf__ uint32_t *)(inTopK + currTopK1);
+                            if (pair0Mask & (1ULL << j2)) {
+                                currOut[tmp1_0 & 0xffffffff] = tmp2_0 & 0xffff;
+                            }
+                            if (pair0Mask & (1ULL << (j2 + 1))) {
+                                currOut[(tmp1_0 >> 32) & 0xffffffff] = (tmp2_0 >> 16) & 0xffff;
+                            }
+                            if (pair1Mask & (1ULL << (j2 + 2))) {
+                                currOut[tmp1_1 & 0xffffffff] = tmp2_1 & 0xffff;
+                            }
+                            if (pair1Mask & (1ULL << (j2 + 3))) {
+                                currOut[(tmp1_1 >> 32) & 0xffffffff] = (tmp2_1 >> 16) & 0xffff;
+                            }
+                        }
+                    }
+                }
+                set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                actualCalcLen = origActualCalcLen;
+            }
 
             if (outN > actualCalcLen) {
                 if (actualCalcLen % pad != 0) {
@@ -524,7 +716,8 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
                                          uint32_t n, uint32_t calcLen, uint32_t outN = 0,
                                          bool seqHead = true, uint32_t maskOff = 0,
                                          uint32_t maskStride = 1, bool hasScale = false,
-                                         float scale = 1.0f)
+                                         float scale = 1.0f, uint32_t kvOffset = 0,
+                                         uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -568,9 +761,9 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);  // for V calc
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);  // for V out
     for (int idx = 0; idx < m; idx++) {
-        int actualCalcLen = seqHead
-                                ? calcLen + (idx + maskOff) / maskStride
-                                : calcLen + (idx + maskOff) % maskStride;  // 每一行开始mask的位置
+        uint32_t seqIdx = seqHead ? (idx + maskOff) / maskStride : (idx + maskOff) % maskStride;
+        uint32_t headIdx = seqHead ? (idx + maskOff) % maskStride : (idx + maskOff) / maskStride;
+        int actualCalcLen = calcLen + seqIdx;  // 每一行开始mask的位置
         if (actualCalcLen > outN) {
             actualCalcLen = outN;
         }
@@ -824,20 +1017,20 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, __gm__ float *expBuf, ui
                                      uint32_t n, uint32_t calcLen, uint32_t outN = 0,
                                      bool seqHead = true, uint32_t maskOff = 0,
                                      uint32_t maskStride = 1, bool hasScale = false,
-                                     float scale = 1.0f)
+                                     float scale = 1.0f, uint32_t kvOffset = 0, uint32_t topK = 0,
+                                     __gm__ int32_t *topkIndices = nullptr)
 {
     RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, seqHead, maskOff, maskStride,
-                             hasScale, scale);
+                             hasScale, scale, kvOffset, topK, topkIndices);
 }
 
 #else
 template <typename Dtype>
-inline __aicore__ void RunAivSoftmaxPingPong(__gm__ Dtype *buf, uint32_t m, uint32_t n, int calcLen,
-                                             uint32_t outN = 0, bool seqHead = true,
-                                             uint32_t maskOff = 0, uint32_t maskStride = 1,
-                                             __gm__ float *maxBuf = nullptr,
-                                             __gm__ float *sumBuf = nullptr, bool hasScale = false,
-                                             float scale = 1.0f)
+inline __aicore__ void RunAivSoftmaxPingPong(
+    __gm__ Dtype *buf, uint32_t m, uint32_t n, int calcLen, uint32_t outN = 0, bool seqHead = true,
+    uint32_t maskOff = 0, uint32_t maskStride = 1, __gm__ float *maxBuf = nullptr,
+    __gm__ float *sumBuf = nullptr, bool hasScale = false, float scale = 1.0f,
+    uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
 {
 }
 template <typename Dtype>
@@ -845,7 +1038,8 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
                                          uint32_t n, uint32_t calcLen, uint32_t outN = 0,
                                          bool seqHead = true, uint32_t maskOff = 0,
                                          uint32_t maskStride = 1, bool hasScale = false,
-                                         float scale = 1.0f)
+                                         float scale = 1.0f, uint32_t kvOffset = 0,
+                                         uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
 {
 }
 #endif

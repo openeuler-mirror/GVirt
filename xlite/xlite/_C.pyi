@@ -1643,6 +1643,7 @@ def mla_with_indices(
     topk_indices: torch.Tensor,
     nz: bool = False,
     enable_flash_attention: bool = False,
+    tile_size_of_cached_kv: int = 8192,
 ) -> None:
     """Run MLA kernel with sparse attention using top-k indices.
 
@@ -1670,6 +1671,7 @@ def mla_with_indices(
         topk_indices (torch.Tensor): Top-k indices tensor for sparse attention.
         nz (bool): Whether to use nz wkvb.
         enable_flash_attention (bool): Whether to use flash attention kernels.
+        tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA.
 
     Returns:
         None: `output` is written in place.

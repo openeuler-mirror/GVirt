@@ -1284,7 +1284,7 @@ void MLAWithIndices(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::T
                     uint32_t nHeads, uint32_t ropeHeadDim, uint32_t nopeHeadDim, uint32_t vHeadDim,
                     uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock,
                     float scale, uint32_t topK, at::Tensor &topkIndices, bool weightNz,
-                    bool enableFlashAttention)
+                    bool enableFlashAttention, uint32_t tileSizeOfCachedKV)
 {
     XTensor _qWithQr, _kCache, _vCache, _wkvb, _output, _queryStartLoc, _lens, _cachedLens,
         _blockTables, _topkIndices;
@@ -1301,13 +1301,41 @@ void MLAWithIndices(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &kCache, at::T
     InitXTensor(_blockTables, blockTables);
     InitXTensor(_topkIndices, topkIndices);
 
-    XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, maxNumBlock * blockSize},
-                               XDtype(qWithQr), DBG_LOC);
-    XliteOpMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, _output, _queryStartLoc, _lens,
-               _cachedLens, _blockTables, qHeads, ropeHeadDim, nopeHeadDim, vHeadDim, kvLoraRank,
-               blockSize, batch, maxNumBlock, scale, weightNz, topK, _topkIndices);
-    rt.Synchronize();
-    rt.PutTensor(qk);
+    if (!enableFlashAttention) {
+        XTensor &qk =
+            rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, maxNumBlock * blockSize},
+                         XDtype(qWithQr), DBG_LOC);
+        XliteOpMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, _output, _queryStartLoc, _lens,
+                   _cachedLens, _blockTables, qHeads, ropeHeadDim, nopeHeadDim, vHeadDim,
+                   kvLoraRank, blockSize, batch, maxNumBlock, scale, weightNz, topK, _topkIndices);
+        rt.Synchronize();
+        rt.PutTensor(qk);
+    } else {
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, tileSizeOfCachedKV},
+                                   XDtype(qWithQr), DBG_LOC);
+        XTensor &sv = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, vHeadDim},
+                                   XDtype(qWithQr), DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &lastMax = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+        XTensor &lastSum = rt.GetTensor({_qWithQr.shape[0], qHeads}, FP32, DBG_LOC);
+        XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
+        sync.Memset(0);
+
+        XliteOpFlashMLA(rt, _qWithQr, _kCache, _vCache, _wkvb, qk, sv, max, sum, lastMax, lastSum,
+                        sync, _output, _queryStartLoc, _lens, _cachedLens, _blockTables, qHeads,
+                        ropeHeadDim, nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch,
+                        maxNumBlock, scale, weightNz, tileSizeOfCachedKV, topK, _topkIndices);
+
+        rt.Synchronize();
+        rt.PutTensor(sync);
+        rt.PutTensor(lastSum);
+        rt.PutTensor(lastMax);
+        rt.PutTensor(sum);
+        rt.PutTensor(max);
+        rt.PutTensor(sv);
+        rt.PutTensor(qk);
+    }
 }
 
 void AddAndRMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &addInOut, at::Tensor &norm,
@@ -1969,7 +1997,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("nope_head_dim"), py::arg("v_head_dim"), py::arg("kv_lora_rank"),
           py::arg("block_size"), py::arg("batch"), py::arg("max_num_block"), py::arg("scale"),
           py::arg("top_k"), py::arg("topk_indices"), py::arg("nz") = false,
-          py::arg("enable_flash_attention") = false);
+          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192);
     m.def("indexer_scores", &IndexerScores, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
           py::arg("weight"), py::arg("scores"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),

@@ -24,4 +24,8 @@ struct XcclParam {
 
 // attention/mla
 #define XLITE_ATTENTION_MAX_M0 128
+
+// mla topk
+#define MAX_TOPK_NUM 2048
+#define MAX_SOFTMAX_PINGPONG_LEN 11776
 #endif

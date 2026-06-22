@@ -22,19 +22,21 @@ public:
     }
 
     __aicore__ inline void Init(GM_ADDR qWithQr, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR wkvb,
-                                GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax,
-                                GM_ADDR lastSum, GM_ADDR sync, GM_ADDR output,
-                                GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
-                                GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                                uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
-                                uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,
-                                float scale, uint32_t nz, uint32_t tileSizeOfCachedKV)
+                                GM_ADDR topkIndices, GM_ADDR qk, GM_ADDR sv, GM_ADDR max,
+                                GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync,
+                                GM_ADDR output, GM_ADDR queryStartLoc, GM_ADDR queryLens,
+                                GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads,
+                                uint32_t ropeHeadDim, uint32_t nopeHeadDim, uint32_t vHeadDim,
+                                uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
+                                uint32_t maxNumBlocks, float scale, uint32_t nz,
+                                uint32_t tileSizeOfCachedKV, uint32_t topK)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qWithQr.SetGlobalBuffer((__gm__ Dtype *)qWithQr);
         this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
         this->vCache.SetGlobalBuffer((__gm__ Dtype *)vCache);
         this->wkvb.SetGlobalBuffer((__gm__ Dtype *)wkvb);
+        this->topkIndices = (__gm__ int32_t *)topkIndices;
         this->output.SetGlobalBuffer((__gm__ Dtype *)output);
 
         this->queryStartLoc = (__gm__ int32_t *)queryStartLoc;
@@ -52,6 +54,7 @@ public:
         this->maxNumBlocks = maxNumBlocks;
         this->scale = scale;
         this->nz = nz;
+        this->topK = (topkIndices == nullptr) ? 0 : topK;
         this->tileSizeOfCachedKV = tileSizeOfCachedKV;
         this->maxSeqLen = maxNumBlocks * blockSize;
         this->blockIdx = block_idx;
@@ -1017,7 +1020,9 @@ public:
                     (__gm__ Dtype *)qk[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
                     nWorkCurCore, tileSizeOfCachedKV, actualCalcSoftmaxLen, outN, false, nWorkStart,
                     queryTaskLen, (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
-                    (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr(), true, scale);
+                    (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr(), true, scale, kvOffset,
+                    calcLen > topK ? topK : 0,
+                    (calcLen > topK && topK > 0) ? topkIndices + topK * queryTaskOffset : nullptr);
                 ffts_cross_core_sync(PIPE_MTE3, config);
 
                 if (needDoUpdate != 0) {
@@ -1125,6 +1130,7 @@ private:
     GlobalTensor<Dtype> kCache;
     GlobalTensor<Dtype> vCache;
     GlobalTensor<Dtype> wkvb;
+    __gm__ int32_t *topkIndices;
     GlobalTensor<Dtype> qk[PINGPONG_BUF_NUM];
     GlobalTensor<Dtype> sv[PINGPONG_BUF_NUM];
     GlobalTensor<float> max[PINGPONG_BUF_NUM];
@@ -1152,6 +1158,7 @@ private:
     uint32_t maxSeqLen;
     float scale;
     uint32_t nz;
+    uint32_t topK;
     uint32_t tileSizeOfCachedKV;
     int blockIdx;
     int subBlockIdx;
@@ -1183,19 +1190,20 @@ private:
     LocalTensor<Dtype> awuvl1bBuf[PINGPONG_BUF_NUM];  // event 6/7
 };
 
-#define FLASH_MLA_FUNC_DEFINE(dtype)                                                              \
-    extern "C" __global__ __aicore__ void flash_mla_##dtype(                                      \
-        GM_ADDR qWithQr, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR wkvb, GM_ADDR qk, GM_ADDR sv,    \
-        GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync, GM_ADDR output, \
-        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,        \
-        uint32_t nHeads, uint32_t ropeHeadDim, uint32_t nopeHeadDim, uint32_t vHeadDim,           \
-        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,           \
-        float scale, uint32_t nz, uint32_t tileSizeOfCachedKV)                                    \
-    {                                                                                             \
-        FlashMLA<dtype> op;                                                                       \
-        op.Init(qWithQr, kCache, vCache, wkvb, qk, sv, max, sum, lastMax, lastSum, sync, output,  \
-                queryStartLoc, queryLens, cachedLens, blockTables, nHeads, ropeHeadDim,           \
-                nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, scale, nz,     \
-                tileSizeOfCachedKV);                                                              \
-        op.Run();                                                                                 \
+#define FLASH_MLA_FUNC_DEFINE(dtype)                                                            \
+    extern "C" __global__ __aicore__ void flash_mla_##dtype(                                    \
+        GM_ADDR qWithQr, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR wkvb, GM_ADDR topkIndices,     \
+        GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum,     \
+        GM_ADDR sync, GM_ADDR output, GM_ADDR queryStartLoc, GM_ADDR queryLens,                 \
+        GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,         \
+        uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize,       \
+        uint32_t batch, uint32_t maxNumBlocks, float scale, uint32_t nz,                        \
+        uint32_t tileSizeOfCachedKV, uint32_t topK)                                             \
+    {                                                                                           \
+        FlashMLA<dtype> op;                                                                     \
+        op.Init(qWithQr, kCache, vCache, wkvb, topkIndices, qk, sv, max, sum, lastMax, lastSum, \
+                sync, output, queryStartLoc, queryLens, cachedLens, blockTables, nHeads,        \
+                ropeHeadDim, nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, \
+                scale, nz, tileSizeOfCachedKV, topK);                                           \
+        op.Run();                                                                               \
     }
