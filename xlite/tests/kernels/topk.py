@@ -9,52 +9,65 @@
 # ===============================================================================
 import torch
 from xlite._C import Runtime, topk as xlite_topk
-import random
 
 K = 2048
-max_seq_len = 5000
-batches = 100
-testIterations = 100
+max_seq_len = 131072
+
+# work configurations: batch_size, cached_lens, query_lens
+work = [
+    (1, [0], [1]),
+    (1, [0], [30]),
+    (1, [0], [77]),
+    (1, [0], [128]),
+    (1, [0], [256]),
+    (1, [0], [1600]),
+    (1, [0], [2528]),
+    (1, [100], [30]),
+    (8, [0] * 8, [789, 65, 13, 6545, 24, 190, 2432, 124]),
+    (2, [4000] * 2, [1] * 2),
+    (2, [6000] * 2, [1] * 2),
+    (2, [131071] * 2, [1] * 2),
+    (5, [8, 13, 65, 11, 5], [1] * 5),
+    (1, [128], [128]),
+]
 
 
-def buildXliteInput(scores):
-    batch_size = len(scores)
-    res = torch.zeros(batch_size, max_seq_len)
+def build_xlite_input(scores):
+    res = torch.zeros(len(scores), max_seq_len)
     for i, s in enumerate(scores):
         res[i, :len(s)] = s
     return res
 
 
-def generate_sequences(input_sizes):
+def generate_sequences(cached_lens, query_lens):
     standard_scores = []
     standard_indices = []
 
-    for n_tokens in input_sizes:
-        t = torch.randn(n_tokens)
-        standard_scores.append(t)
-        if (n_tokens >= K):
-            standard_indices.append(t.topk(K)[1])
-        else:
-            standard_indices.append(t.topk(n_tokens)[1])
-            padding = torch.zeros(K - n_tokens, dtype=torch.int32)
-            standard_indices[-1] = torch.cat([standard_indices[-1], padding])
+    for c, q in zip(cached_lens, query_lens):
+        n_tokens = c + q
+        for _ in range(q):
+            t = torch.randn(n_tokens)
+            standard_scores.append(t)
+            if (n_tokens >= K):
+                standard_indices.append(t.topk(K)[1])
+            else:
+                standard_indices.append(t.topk(n_tokens)[1])
+                padding = torch.zeros(K - n_tokens, dtype=torch.int32)
+                standard_indices[-1] = torch.cat([standard_indices[-1], padding])
 
     standard_indices = torch.stack(standard_indices)
     return standard_scores, standard_indices.to(dtype=torch.int32)
 
 
-def run_test(rt, input_sizes, msg):
-    batches = len(input_sizes)
-    batch_sizes = torch.tensor(input_sizes, dtype=torch.int32)
-    standard_scores, standard_indices = generate_sequences(input_sizes)
+def run_test(rt, cached_lens, query_lens, msg):
+    standard_scores, standard_indices = generate_sequences(cached_lens, query_lens)
 
-    scores = buildXliteInput(standard_scores)
+    scores = build_xlite_input(standard_scores)
     indices = torch.arange(max_seq_len, dtype=torch.int32)
-    xlite_indices = torch.empty(batches, K, dtype=torch.int32)
+    xlite_indices = torch.empty(sum(query_lens), K, dtype=torch.int32)
 
-    # Construct query_lens (all 1s) and cached_lens (input_sizes - query_lens)
-    query_lens = torch.ones(batches, dtype=torch.int32)
-    cached_lens = batch_sizes - query_lens
+    query_lens = torch.tensor(query_lens, dtype=torch.int32)
+    cached_lens = torch.tensor(cached_lens, dtype=torch.int32)
 
     torch.npu.synchronize()
     xlite_topk(rt, scores, indices, xlite_indices, query_lens, cached_lens, K)
@@ -73,8 +86,7 @@ def run_test(rt, input_sizes, msg):
             s += f'[{c}]'
             if (i % 50 == 49):
                 s += '\n'
-        print(f"FAILED: {first_bad}")
-        print(f"input_sizes: {input_sizes}")
+        print(f"{msg}: FAILED: {first_bad}")
         print("standard indices:")
         print(standard_indices)
         print("xlite indices:")
@@ -89,14 +101,11 @@ def main():
 
     for dtype in reversed([torch.float32, torch.bfloat16]):
         torch.set_default_dtype(dtype)
-        for i in range(testIterations):
-            input_sizes = random.sample(range(1, max_seq_len+1), batches)
-            msg = f'{dtype}: [{i+1}/{testIterations}]'
-            run_test(rt, input_sizes, msg)
-
-        input_sizes = list(range(1, K*2))
-        msg = f'{dtype}: input < K'
-        run_test(rt, input_sizes, msg)
+        for batch, cached_lens, query_lens in work:
+            assert len(cached_lens) == batch, f"cached_lens length {len(cached_lens)} != batch {batch}"
+            assert len(query_lens) == batch, f"query_lens length {len(query_lens)} != batch {batch}"
+            msg = f'{dtype}: work(batch={batch}, cached_lens={cached_lens}, query_lens={query_lens})'
+            run_test(rt, cached_lens, query_lens, msg)
 
 
 if __name__ == "__main__":
