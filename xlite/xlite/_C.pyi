@@ -1023,6 +1023,32 @@ def embed(
     """
     ...
 
+def rmsnorm_variance_only(
+    rt: Runtime,
+    in_: torch.Tensor,
+    out: torch.Tensor,
+    norm_eps: float,
+    norm_dim: int = 0,
+    cnt_per_token: int = 1,
+    in_start_offset: int = 0,
+    out_start_offset: int = 0,
+) -> None:
+    """Compute variance for RMSNorm.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        in_ (torch.Tensor): Input tensor.
+        out (torch.Tensor): Output tensor.
+        norm_eps (float): Numerical epsilon used in normalization.
+        norm_dim (int): Normalization width. `0` lets native code infer it.
+        cnt_per_token (int): Number of contiguous segments per token.
+        in_start_offset (int): Input offset for segmented normalization.
+        out_start_offset (int): Output offset for segmented normalization.
+
+    Returns:
+        None: `out` is written in place.
+    """
+
 def rmsnorm(
     rt: Runtime,
     in_: torch.Tensor,
@@ -1033,7 +1059,6 @@ def rmsnorm(
     cnt_per_token: int = 1,
     in_start_offset: int = 0,
     out_start_offset: int = 0,
-    use_norm: bool = True,
     variance: Optional[torch.Tensor] = None
 ) -> None:
     """Apply RMSNorm with optional offsets.
@@ -1048,7 +1073,6 @@ def rmsnorm(
         cnt_per_token (int): Number of contiguous segments per token.
         in_start_offset (int): Input offset for segmented normalization.
         out_start_offset (int): Output offset for segmented normalization.
-        use_norm (bool): Whether to apply normalization.
         variance (Optional[torch.Tensor]): Optional output tensor for variance values.
 
     Returns:

@@ -1079,9 +1079,22 @@ void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, ui
     rt.Synchronize();
 }
 
+void RMSNormVarianceOnly(XRuntime &rt, at::Tensor &in, at::Tensor &out, float normEps,
+                         uint32_t normDim, uint32_t cntPerToken, uint32_t inStartOffset,
+                         uint32_t outStartOffset)
+{
+    XTensor _in, _out;
+
+    InitXTensor(_in, in);
+    InitXTensor(_out, out);
+    XliteOpRmsNorm(rt, _in, XTensor(), _out, normEps, normDim == 0 ? _in.shape[1] : normDim, false,
+                   XTensor(), cntPerToken, inStartOffset, outStartOffset, XTensor());
+    rt.Synchronize();
+}
+
 void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, float normEps,
              uint32_t normDim, uint32_t cntPerToken, uint32_t inStartOffset,
-             uint32_t outStartOffset, bool useNorm, std::optional<at::Tensor> variance)
+             uint32_t outStartOffset, std::optional<at::Tensor> variance)
 {
     XTensor _in, _out, _norm, _normBias, _variance;
 
@@ -1092,7 +1105,7 @@ void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, fl
         std::cout << "variance: " << variance.value() << std::endl;
         InitXTensor(_variance, variance.value());
     }
-    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, useNorm,
+    XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, true,
                    _normBias, cntPerToken, inStartOffset, outStartOffset, _variance);
     rt.Synchronize();
 }
@@ -1936,8 +1949,11 @@ PYBIND11_MODULE(_C, m)
     m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in_"), py::arg("norm"),
           py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
           py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
-          py::arg("out_start_offset") = 0, py::arg("use_norm") = true,
-          py::arg("variance") = std::nullopt);
+          py::arg("out_start_offset") = 0, py::arg("variance") = std::nullopt);
+    m.def("rmsnorm_variance_only", &RMSNormVarianceOnly, "rmsnorm_variance_only", py::arg("rt"),
+          py::arg("in_"), py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
+          py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
+          py::arg("out_start_offset") = 0);
     m.def("rmsnorm_with_bias", &RMSNormWithBias, "rmsnorm_with_bias", py::arg("rt"), py::arg("in_"),
           py::arg("norm"), py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"),
           py::arg("norm_dim") = 0, py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,

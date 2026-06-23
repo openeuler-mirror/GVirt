@@ -45,6 +45,7 @@ def main():
         torch.set_default_dtype(dtype)
         do_test(batch_size=64, dim=8192)
         do_test(batch_size=64, dim=128)
+        print(f"l2norm({dtype}) executed")
 
 
 if __name__ == "__main__":

@@ -438,10 +438,10 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     if (_c.qkNormFull) {
         XTensor &qLocalVariance = rt.GetTensor({qkv.shape[0], 1}, FP32, DBG_LOC);
         XTensor &kLocalVariance = rt.GetTensor({qkv.shape[0], 1}, FP32, DBG_LOC);
-        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qLocalVariance, _c.normEps, _c.headDim * qHeads,
-                       false, XTensor());
-        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], kLocalVariance, _c.normEps, _c.headDim * kHeads,
-                       false, XTensor(), 1, qHeads * _c.headDim);
+        XliteOpRmsNorm(rt, qkv, XTensor(), qLocalVariance, _c.normEps, _c.headDim * qHeads, false,
+                       XTensor());
+        XliteOpRmsNorm(rt, qkv, XTensor(), kLocalVariance, _c.normEps, _c.headDim * kHeads, false,
+                       XTensor(), 1, qHeads * _c.headDim);
         if (_c.defTpSize > 1) {
             // Merge two variance tensors into a single AllReduceSum
             size_t bytesPerVar = qkv.shape[0] * 1 * XDtypeBit(FP32) / 8;
