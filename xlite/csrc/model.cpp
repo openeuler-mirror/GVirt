@@ -340,7 +340,8 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     rt.PutTensor(kw);
     rt.PutTensor(q);
     XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
-    XliteOpTopK(rt, scores, _dsaTopkIndices, topkIndices, rt._lens, rt._cachedLens, _c.indexTopK);
+    XliteOpTopK(rt, scores, _dsaTopkIndices, topkIndices, rt._lens, rt._cachedLens, rt._batch,
+                _c.indexTopK);
     rt.PutTensor(scores);
     return &topkIndices;
 }

@@ -1116,13 +1116,12 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
 }
 
 void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIndices,
-                 XTensor &queryLens, XTensor &cachedLens, size_t k)
+                 XTensor &queryLens, XTensor &cachedLens, uint32_t batch, size_t k)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
 
-    uint32_t batchNum = queryLens.shape[0];
     uint32_t maxSeqLen = scores.shape[1];
     if (maxSeqLen <= k) {
         return;
@@ -1143,7 +1142,7 @@ void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIn
                                  std::to_string(scores.dtype));
     }
     launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outIndices.ptr, queryLens.ptr,
-                 cachedLens.ptr, maxSeqLen, batchNum, k);
+                 cachedLens.ptr, maxSeqLen, batch, k);
 }
 
 void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x)

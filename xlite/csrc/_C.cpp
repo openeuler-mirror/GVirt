@@ -1393,7 +1393,8 @@ void TopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &out
     InitXTensor(_queryLens, queryLens);
     InitXTensor(_cachedLens, cachedLens);
 
-    XliteOpTopK(rt, _scores, _indices, _outIndices, _queryLens, _cachedLens, k);
+    XliteOpTopK(rt, _scores, _indices, _outIndices, _queryLens, _cachedLens, _queryLens.shape[0],
+                k);
 
     rt.Synchronize();
 }
