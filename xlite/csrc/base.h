@@ -206,7 +206,7 @@ class XTensor
 public:
     XTensor() {};
     XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
-    void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
+    XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     // The os parameter lets callers (e.g. the debug module) capture the output into a
     // stream so it can be flushed atomically with a rank/color prefix. Defaults to
     // std::cout to keep legacy direct callers unchanged.
@@ -214,27 +214,29 @@ public:
                std::ostream &os = std::cout);
     void PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDtype subDtype,
                   uint32_t nRow = 6, uint32_t nCol = 6, std::ostream &os = std::cout);
-    void Memset(int value);
+    XTensor &Memset(int value);
     std::string ToStr(const char *name = "") const;
-    void View(std::vector<size_t> shape);
-    void View(enum XDtype type);
-    void ResetView(bool resetShape = true, bool resetDtype = true);
+    XTensor &View(std::vector<size_t> shape);
+    XTensor &View(enum XDtype type);
+    XTensor &View(size_t newDim, uint32_t dim = 0);
+    XTensor &ResetView(bool resetShape = true, bool resetDtype = true);
+    XTensor &MakeOriginal();  // update origShape, origNumel, origDtype, origBytes, etc. to current
     void Save(const std::string &path);
     bool CheckNanInf(const char *name = "", float threshold = -1.0f, std::ostream &os = std::cout);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
-    const std::vector<size_t> &OrigShape() const
+    [[nodiscard]] const std::vector<size_t> &OrigShape() const
     {
         return origShape;
     }
-    const size_t OrigNumel() const
+    [[nodiscard]] size_t OrigNumel() const
     {
         return origNumel;
     }
-    const enum XDtype OrigDtype() const
+    [[nodiscard]] XDtype OrigDtype() const
     {
         return origDtype;
     }
-    const size_t OrigBytes() const
+    [[nodiscard]] size_t OrigBytes() const
     {
         return origBytes;
     }
@@ -249,7 +251,7 @@ public:
     void *ptr = nullptr;        // DO NOT MODIFY ptr directly unless you know what you are doing
 
 private:
-    void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
+    XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
     void PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &os = std::cout);
     enum XTensorType type = XTENSOR_STATIC;
     std::vector<size_t> origShape;  // original shape, unaffected by view operation

@@ -9,7 +9,8 @@
 #include "ascend.h"
 #include "debug.h"
 
-void XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type)
+XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
+                       enum XTensorType type)
 {
     size_t numel = 1;
 
@@ -31,6 +32,7 @@ void XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum
     this->dtype = dtype;
     this->ptr = ptr;
     this->type = type;
+    return *this;
 }
 
 XTensor::XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr)
@@ -38,9 +40,9 @@ XTensor::XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr)
     Init(std::move(shape), dtype, ptr, XTENSOR_STATIC);
 }
 
-void XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr)
+XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr)
 {
-    Init(std::move(shape), dtype, ptr, XTENSOR_STATIC);
+    return Init(std::move(shape), dtype, ptr, XTENSOR_STATIC);
 }
 
 void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &os)
@@ -426,12 +428,12 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os)
     return hasAnomaly;
 }
 
-void XTensor::Memset(int value)
+XTensor &XTensor::Memset(int value)
 {
-    if (bytes == 0) {
-        return;
+    if (bytes != 0) {
+        CHECK_ACL(aclrtMemset(ptr, bytes, value, bytes));
     }
-    CHECK_ACL(aclrtMemset(ptr, bytes, value, bytes));
+    return *this;
 }
 
 std::string XTensor::ToStr(const char *name) const
@@ -452,9 +454,9 @@ std::string XTensor::ToStr(const char *name) const
     return oss.str();
 }
 
-void XTensor::View(std::vector<size_t> shape)
+XTensor &XTensor::View(std::vector<size_t> shape)
 {
-    size_t newNumel = 1;
+    size_t newNumel = shape.empty() ? 0 : 1;
     for (uint64_t i = 0; i < shape.size(); i++) {
         newNumel *= shape[i];
     }
@@ -466,9 +468,10 @@ void XTensor::View(std::vector<size_t> shape)
     this->shape = shape;
     this->numel = newNumel;
     this->bytes = newBytes;
+    return *this;
 }
 
-void XTensor::View(enum XDtype type)
+XTensor &XTensor::View(enum XDtype type)
 {
     size_t oldBit = XDtypeBit(dtype);
     size_t newBit = XDtypeBit(type);
@@ -486,9 +489,38 @@ void XTensor::View(enum XDtype type)
         this->numel = this->numel * oldBit / newBit;
     }
     this->dtype = type;
+    return *this;
 }
 
-void XTensor::ResetView(bool resetShape, bool resetDtype)
+// Change the size of a specific dimension while keeping the other dimensions unchanged
+XTensor &XTensor::View(size_t newDim, uint32_t dim)
+{
+    if (shape.size() <= dim) {
+        throw std::runtime_error("Invalid dimension index for View operation.");
+    }
+
+    if (newDim == shape[dim]) {
+        return *this;  // No change needed
+    }
+
+    size_t newNumel = newDim;
+    for (auto it = shape.begin(); it != shape.end(); ++it) {
+        if (it - shape.begin() != dim) {
+            newNumel *= *it;
+        }
+    }
+    size_t newBytes = DIV_ROUND_UP(newNumel * XDtypeBit(dtype), 8);
+    if (newBytes > origBytes) {
+        throw std::runtime_error("Does not support performing the view operation on a tensor to "
+                                 "reshape it into a larger size than the original.");
+    }
+    this->shape[dim] = newDim;
+    this->numel = newNumel;
+    this->bytes = newBytes;
+    return *this;
+}
+
+XTensor &XTensor::ResetView(bool resetShape, bool resetDtype)
 {
     if (resetShape) {
         View(origShape);
@@ -496,6 +528,16 @@ void XTensor::ResetView(bool resetShape, bool resetDtype)
     if (resetDtype) {
         View(origDtype);
     }
+    return *this;
+}
+
+XTensor &XTensor::MakeOriginal()
+{
+    this->origNumel = this->numel;
+    this->origBytes = this->bytes;
+    this->origShape = this->shape;
+    this->origDtype = this->dtype;
+    return *this;
 }
 
 void XTensor::Save(const std::string &path)
