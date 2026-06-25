@@ -367,9 +367,8 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     XTensor &attnOutput =
         rt.GetTensor({attnQWithQr.shape[0], qHeads * _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
     if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
-        XTensor &qk =
-            rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
-                         attnQWithQr.dtype, DBG_LOC);
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
+                                   attnQWithQr.dtype, DBG_LOC);
         XliteOpMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, attnOutput,
                    rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
                    _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.kvLoraRank, _c.blockSize,
@@ -377,12 +376,12 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                    topkIndices == nullptr ? XTensor() : *topkIndices);
         rt.PutTensor(qk);
     } else {
-        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._tileSizeOfCachedKV},
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
                                    attnQWithQr.dtype, DBG_LOC);
-        XTensor &sv = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, _c.vHeadDim},
-                                   attnQWithQr.dtype, DBG_LOC);
-        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sv =
+            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
         XliteOpFlashMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
@@ -475,20 +474,19 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     XTensor &attn =
         rt.GetTensor({hiddenState.shape[0], qHeads * _c.headDim}, hiddenState.dtype, DBG_LOC);
     if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
-        XTensor &qk =
-            rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
-                         hiddenState.dtype, DBG_LOC);
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
+                                   hiddenState.dtype, DBG_LOC);
         XliteOpAttention(rt, qkv, kCache, vCache, qk, attn, rt._queryStartLoc, rt._lens,
                          rt._cachedLens, rt._attnBlockTables, qHeads, kHeads, _c.headDim,
                          _c.blockSize, rt._batch, rt._maxNumBlocks);
         rt.PutTensor(qk);
     } else {
-        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, rt._tileSizeOfCachedKV},
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
                                    hiddenState.dtype, DBG_LOC);
-        XTensor &sv = rt.GetTensor({rt.aicNum * XLITE_ATTENTION_MAX_M0 * 2, _c.headDim},
-                                   hiddenState.dtype, DBG_LOC);
-        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_ATTENTION_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sv =
+            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.headDim}, hiddenState.dtype, DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XliteOpFlashAttention(rt, qkv, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, _sync,

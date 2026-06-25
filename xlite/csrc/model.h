@@ -98,7 +98,6 @@ struct MoEAlltoAllMeta {
     uint32_t nRoutedExperts = 0;
 };
 
-#define XLITE_ATTENTION_MAX_M0 128  // the tile size of query
 #define AIC_MAX_NUM 25
 #define AIV_MAX_NUM 50
 
