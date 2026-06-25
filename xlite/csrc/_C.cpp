@@ -935,33 +935,39 @@ void _CModel::InitMatmulWeight(const std::string &name, std::vector<at::Tensor> 
     }
 }
 
-void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in)
+void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType = 0)
 {
     XTensor _in, _out;
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
-    XliteOpAllGather(rt, _in, _out, TP);
+
+    enum commType type = commType == 1 ? DP : TP;
+    XliteOpAllGather(rt, _in, _out, type);
     rt.Synchronize();
 }
 
-void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in)
+void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType = 0)
 {
     XTensor _in, _out;
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
-    XliteOpReduceScatter(rt, _in, _out, TP);
+
+    enum commType type = commType == 1 ? DP : TP;
+    XliteOpReduceScatter(rt, _in, _out, type);
     rt.Synchronize();
 }
 
-void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in)
+void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType = 0)
 {
     XTensor _in, _out;
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
-    XliteOpAllReduceSum(rt, _in, _out, TP);
+
+    enum commType type = commType == 1 ? DP : TP;
+    XliteOpAllReduceSum(rt, _in, _out, type);
     rt.Synchronize();
 }
 
@@ -1908,9 +1914,12 @@ PYBIND11_MODULE(_C, m)
              py::call_guard<py::gil_scoped_release>());
 
     // kernels
-    m.def("all_gather", &AllGather, py::arg("rt"), py::arg("out"), py::arg("in_"));
-    m.def("reduce_scatter", &ReduceScatter, py::arg("rt"), py::arg("out"), py::arg("in_"));
-    m.def("all_reduce", &AllReduce, py::arg("rt"), py::arg("out"), py::arg("in_"));
+    m.def("all_gather", &AllGather, py::arg("rt"), py::arg("out"), py::arg("in_"),
+          py::arg("comm_type") = 0);
+    m.def("reduce_scatter", &ReduceScatter, py::arg("rt"), py::arg("out"), py::arg("in_"),
+          py::arg("comm_type") = 0);
+    m.def("all_reduce", &AllReduce, py::arg("rt"), py::arg("out"), py::arg("in_"),
+          py::arg("comm_type") = 0);
     m.def("alltoallv", &AlltoAllV, py::arg("rt"), py::arg("out"), py::arg("in_"),
           py::arg("send_counts"), py::arg("recv_counts"), py::arg("sdispls"), py::arg("rdispls"),
           py::arg("comm_type") = 0);

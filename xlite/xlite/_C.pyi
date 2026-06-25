@@ -807,13 +807,15 @@ class CoreAssigner:
 
 """Low-level collective and kernel operator bindings."""
 
-def all_gather(rt: Runtime, out: torch.Tensor, in_: torch.Tensor) -> None:
+def all_gather(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int = 0) -> None:
     """Collectively gather tensors from all ranks.
 
     Args:
         rt (Runtime): Native runtime handle.
         out (torch.Tensor): Output buffer for gathered values.
         in_ (torch.Tensor): Local input shard.
+        comm_type (int, default=0): Communication domain selector.
+            ``0`` (TP), ``1`` (DP).
 
     Returns:
         None: `out` is written in place.
@@ -823,13 +825,15 @@ def all_gather(rt: Runtime, out: torch.Tensor, in_: torch.Tensor) -> None:
     """
     ...
 
-def reduce_scatter(rt: Runtime, out: torch.Tensor, in_: torch.Tensor) -> None:
+def reduce_scatter(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int = 0) -> None:
     """Reduce then scatter tensors across ranks.
 
     Args:
         rt (Runtime): Native runtime handle.
         out (torch.Tensor): Output buffer for the reduced local shard.
         in_ (torch.Tensor): Input tensor to reduce across ranks.
+        comm_type (int, default=0): Communication domain selector.
+            ``0`` (TP), ``1`` (DP).
 
     Returns:
         None: `out` is written in place.
@@ -839,13 +843,15 @@ def reduce_scatter(rt: Runtime, out: torch.Tensor, in_: torch.Tensor) -> None:
     """
     ...
 
-def all_reduce(rt: Runtime, out: torch.Tensor, in_: torch.Tensor) -> None:
+def all_reduce(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int = 0) -> None:
     """Collectively reduce tensors across all ranks.
 
     Args:
         rt (Runtime): Native runtime handle.
         out (torch.Tensor): Output tensor for reduced results.
         in_ (torch.Tensor): Input tensor to reduce.
+        comm_type (int, default=0): Communication domain selector.
+            ``0`` (TP), ``1`` (DP).
 
     Returns:
         None: `out` is written in place.

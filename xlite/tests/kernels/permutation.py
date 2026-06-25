@@ -37,7 +37,7 @@ for n_routed_experts in [160, 256]:
             scores = scores.view(x.size(0), N_GROUPS, -1)
             group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1)
             indices = group_scores.topk(TOPK_GROUPS, dim=-1)[1]
-            mask = torch.zeros_like(scores[...,0]).scatter_(1, indices, True)
+            mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True)
             scores = (scores * mask.unsqueeze(-1)).flatten(1)
         indices = torch.topk(scores, TOPK, dim=-1)[1]
         counts = torch.bincount(indices.flatten(), minlength=n_routed_experts)
@@ -49,7 +49,6 @@ for n_routed_experts in [160, 256]:
                 continue
             idx, top = torch.where(indices == i)
             standard_token_sorted[idx] += x[idx] * weights[idx, i].unsqueeze(-1)
-
 
         # xlite
         unp_idx = torch.empty(n_routed_experts, BATCH_SIZE + 1, dtype=torch.int32, device="npu:0")
@@ -69,14 +68,14 @@ for n_routed_experts in [160, 256]:
         torch.npu.synchronize()
         experts_counts = experts_counts.view(n_routed_experts).to(dtype=torch.int64)
 
-        print(f'n_routed_experts: {n_routed_experts} dtype: {dtype} permutation executed!')
+        print(f"n_routed_experts: {n_routed_experts} dtype: {dtype} permutation executed!")
 
         try:
             torch.testing.assert_close(counts, experts_counts, atol=1e-5, rtol=1e-3)
         except AssertionError as e:
-            print(f'{e}')
-            print(f'torch_npu: {counts}')
-            print(f'xlite: {experts_counts}')
+            print(f">>>>>\npermutation error: {e}\n>>>>>")
+            print(f"torch_npu: {counts}")
+            print(f"xlite: {experts_counts}")
 
         if dtype == torch.float:
             continue
@@ -86,11 +85,11 @@ for n_routed_experts in [160, 256]:
         unpermutation(rt, experts_sorted, routing_xlite, weights, START, END, token_sorted, unp_idx)
         torch.npu.synchronize()
 
-        print(f'n_routed_experts: {n_routed_experts} dtype: {dtype} unpermutation executed!')
+        print(f"n_routed_experts: {n_routed_experts} dtype: {dtype} unpermutation executed!")
 
         try:
             torch.testing.assert_close(standard_token_sorted, token_sorted, atol=1e-5, rtol=1e-3)
         except AssertionError as e:
-            print(f'{e}')
-            print(f'torch_npu: {standard_token_sorted}')
-            print(f'xlite: {token_sorted}')
+            print(f">>>>>\nunpermutation error: {e}\n>>>>>")
+            print(f"torch_npu: {standard_token_sorted}")
+            print(f"xlite: {token_sorted}")
