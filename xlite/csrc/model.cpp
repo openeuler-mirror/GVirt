@@ -332,16 +332,17 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     float weightScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
     XliteOpMuls(rt, kw, weightScale, kw);
 
-    XTensor &scores = rt.GetTensor({hiddenState.shape[0], rt._maxNumBlocks * _c.blockSize},
-                                   hiddenState.dtype, DBG_LOC);
-    XliteOpIndexerScores(rt, q, indexKCache, kw, scores, rt._queryStartLoc, rt._lens,
-                         rt._cachedLens, rt._attnBlockTables, _c.indexNHeads, _c.indexHeadDim,
-                         _c.blockSize, rt._batch, rt._maxNumBlocks);
+    XTensor &scores =
+        rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
+    XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
+    XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
+    XliteOpIndexerTopK(rt, q, indexKCache, kw, scores, lastTopk, _dsaTopkIndices, topkIndices,
+                       rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, _sync,
+                       _c.indexNHeads, _c.indexHeadDim, _c.blockSize, rt._batch, rt._maxNumBlocks,
+                       _c.indexTopK);
     rt.PutTensor(kw);
     rt.PutTensor(q);
-    XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
-    XliteOpTopK(rt, scores, _dsaTopkIndices, topkIndices, rt._lens, rt._cachedLens, rt._batch,
-                _c.indexTopK);
+    rt.PutTensor(lastTopk);
     rt.PutTensor(scores);
     return &topkIndices;
 }
