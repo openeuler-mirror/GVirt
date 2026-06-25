@@ -25,22 +25,31 @@ dist.init_process_group("hccl")
 rt = Runtime(local_rank, 500, rank, world_size)
 torch.npu.set_device(local_rank)
 
-with torch.device("npu"):
-    x = torch.randn(8, 7168, dtype=torch.float)
-    y = [torch.empty_like(x) for _ in range(world_size)]
-    z = torch.empty(8 * world_size, 7168, dtype=torch.float)
+passed = True
+for dim1, dim2 in zip([1, 1, 1, 1, 32, 1029], [1, 4, 16, 37, 32, 7168]):
+    with torch.device("npu"):
+        x = torch.rand(dim1, dim2, dtype=torch.float)
+        y_list = [torch.empty_like(x) for _ in range(world_size)]
+        z = torch.empty(dim1 * world_size, dim2, dtype=torch.float)
 
-dist.all_gather(y, x)
-standard = torch.cat(y, dim=0)
+        dist.all_gather(y_list, x)
+        standard = torch.cat(y_list, dim=0)
 
-torch.npu.synchronize()
-all_gather(rt, z, x)
-torch.npu.synchronize()
-if rank == 1:
-    print('all gather executed!')
-    try:
-        torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
-    except AssertionError as e:
-        print(f'{e}')
-        print(f'torch_npu: {standard}')
-        print(f'xlite: {z}')
+        torch.npu.synchronize()
+        all_gather(rt, z, x)
+        torch.npu.synchronize()
+
+        try:
+            torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
+        except AssertionError as e:
+            print(
+                f"{'=' * 50}\n"
+                f"AllGather result mismatch for dim ({dim1}, {dim2}) at rank {rank}. {e}\n"
+                f"Expected: {standard}\n"
+                f"Got: {z}\n",
+                end="",
+                flush=True,
+            )
+            passed = False
+
+print(f"***** AllGather test {'passed' if passed else 'failed'} on rank {rank}! *****\n", end="", flush=True)

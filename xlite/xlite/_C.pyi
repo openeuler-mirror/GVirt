@@ -823,13 +823,15 @@ def all_gather(rt: Runtime, out: torch.Tensor, in_: torch.Tensor) -> None:
     """
     ...
 
-def reduce_scatter(rt: Runtime, out: torch.Tensor, in_: torch.Tensor) -> None:
+def reduce_scatter(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int = 0) -> None:
     """Reduce then scatter tensors across ranks.
 
     Args:
         rt (Runtime): Native runtime handle.
         out (torch.Tensor): Output buffer for the reduced local shard.
         in_ (torch.Tensor): Input tensor to reduce across ranks.
+        comm_type (int, default=0): Communication domain selector.
+            ``0`` (TP), ``1`` (DP).
 
     Returns:
         None: `out` is written in place.
