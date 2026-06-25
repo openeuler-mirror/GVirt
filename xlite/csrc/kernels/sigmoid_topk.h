@@ -14,10 +14,7 @@
 
 #ifdef __DAV_C220_VEC__
 constexpr uint32_t BIT_SIZE_OF_U32 = 32;
-constexpr uint64_t SORT_BLOCK_SIZE = 32;
 constexpr uint64_t SORT_RESULT_BLOCK_SIZE = SORT_BLOCK_SIZE * 2;
-constexpr uint64_t MGR_SORT_VALID_BITS_OFFSET = 8;
-constexpr uint64_t MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET = 12;
 
 static __aicore__ inline void DumpBufferIndex(__ubuf__ float *buf, const __gm__ char *name,
                                               int size, int step = 1)
