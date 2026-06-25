@@ -67,6 +67,8 @@
 #include "aclrtlaunch_norm_bfloat16_t.h"
 #include "aclrtlaunch_indexer_scores_float16_t.h"
 #include "aclrtlaunch_indexer_scores_bfloat16_t.h"
+#include "aclrtlaunch_indexer_topk_float16_t.h"
+#include "aclrtlaunch_indexer_topk_bfloat16_t.h"
 #include "aclrtlaunch_muls_float16_t.h"
 #include "aclrtlaunch_muls_bfloat16_t.h"
 #include "aclrtlaunch_topk_float.h"
@@ -1393,6 +1395,34 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, scores.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, headDim, blockSize, batch,
                  maxNumBlock);
+}
+
+void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight, XTensor &scores,
+                        XTensor &lastTopk, XTensor &indices, XTensor &topkIndices,
+                        XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
+                        XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
+                        uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (topK > MAX_TOPK_NUM) {
+        throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
+                                 std::to_string(MAX_TOPK_NUM));
+    }
+    KERNEL_PTR_TYPE(indexer_topk) * launchKernel;
+    if (EachXDtype(FP16, q, kCache, weight, scores)) {
+        launchKernel = aclrtlaunch_indexer_topk_float16_t;
+    } else if (EachXDtype(BF16, q, kCache, weight, scores)) {
+        launchKernel = aclrtlaunch_indexer_topk_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(q) + XT_STR(kCache) + XT_STR(weight) +
+                              XT_STR(scores) + XT_STR(indices) + XT_STR(topkIndices);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
+                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, indices.ptr,
+                 topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlock, topK);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)

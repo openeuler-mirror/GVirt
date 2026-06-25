@@ -730,13 +730,11 @@ __inline__ __aicore__ void MrgSort(__ubuf__ float *sort0, __ubuf__ float *sort1,
         if (sortRepeat % cnt != 0) {
             set_vector_mask(0xAAAAAAAAAAAAAAAA, 0xAAAAAAAAAAAAAAAA);
             vector_dup(addr + sortRepeat * len * 2, 0,
-                       DIV_ROUND_UP((cnt - sortRepeat % cnt) * len * 2 * sizeof(float), pad), 1, 1,
-                       8, 0);
+                       DIV_ROUND_UP((cnt - sortRepeat % cnt) * len * 2, pad), 1, 1, 8, 0);
             pipe_barrier(PIPE_V);
             set_vector_mask(0x5555555555555555, 0x5555555555555555);
             vector_dup(addr + sortRepeat * len * 2, float(min),
-                       DIV_ROUND_UP((cnt - sortRepeat % cnt) * len * 2 * sizeof(float), pad), 1, 1,
-                       8, 0);
+                       DIV_ROUND_UP((cnt - sortRepeat % cnt) * len * 2, pad), 1, 1, 8, 0);
             pipe_barrier(PIPE_V);
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
         }
