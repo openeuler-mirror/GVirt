@@ -22,6 +22,13 @@ struct XcclParam {
     uint64_t ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE];
 };
 
+// norm
+enum class NormKind {
+    Rms,
+    Layer,
+    L2,
+};
+
 // attention/mla
 #define XLITE_ATTENTION_MAX_M0 128
 

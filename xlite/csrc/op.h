@@ -23,7 +23,7 @@ void XliteOpAlltoAllV(XRuntime &rt, XTensor &in, XTensor &out, XTensor &sendCoun
 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
                   XTensor &out);
-void XliteOpRmsNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &out, float normEps,
+void XliteOpRmsNorm(XRuntime &rt, XTensor &in, const XTensor &norm, XTensor &out, float normEps,
                     uint32_t normDim, bool useNorm = true, const XTensor &normBias = XTensor(),
                     uint32_t cntPerToken = 1, uint32_t inStartOffset = 0,
                     uint32_t outStartOffset = 0, const XTensor &variance = XTensor());

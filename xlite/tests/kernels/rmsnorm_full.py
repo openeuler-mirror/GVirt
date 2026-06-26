@@ -17,7 +17,7 @@ import os
 import torch
 import torch_npu
 import torch.distributed as dist
-from xlite._C import Runtime, rmsnorm, all_reduce
+from xlite._C import Runtime, rmsnorm, rmsnorm_variance_only, all_reduce
 
 
 world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -60,9 +60,9 @@ for test_dtype in dtype_list:
 
         # xlite
         torch.npu.synchronize()
-        rmsnorm(rt, x, weight, variance_xlite, NORMEPS, norm_dim=DIM, cnt_per_token=1, use_norm=False)
+        rmsnorm_variance_only(rt, x, variance_xlite, NORMEPS, norm_dim=DIM, cnt_per_token=1)
         all_reduce(rt, variance_xlite, variance_xlite)
-        rmsnorm(rt, x, weight, y, NORMEPS, norm_dim=DIM, cnt_per_token=1, use_norm=True, variance=variance_xlite)
+        rmsnorm(rt, x, weight, y, NORMEPS, norm_dim=DIM, cnt_per_token=1, variance=variance_xlite)
         torch.npu.synchronize()
         if rank == 0:
             logging.info(f'rmsnorm({test_dtype}) executed!')
