@@ -37,11 +37,18 @@
         (h).Save(path);                                  \
     }
 
+#define XLITE_DEBUG_CHECK_NAN_INF(condition, rt, h, str) \
+    if ((condition) && !(rt).IsDummyRuntime()) {         \
+        (rt).Synchronize();                              \
+        (h).CheckNanInf(str);                            \
+    }
+
 #else
 #define XLITE_DEBUG_POINT(condition, rt, h, str)
 #define XLITE_DEBUG_POINT_ROWS_COLS(condition, rt, h, str, rows, cols)
 #define XLITE_DEBUG_PTR_POINT(condition, rt, h, str, subShape, subDtype)
 #define XLITE_DEBUG_DUMP_XTENSOR(condition, rt, h, path)
+#define XLITE_DEBUG_CHECK_NAN_INF(condition, rt, h, str)
 #endif
 
 typedef void *aclrtContext;

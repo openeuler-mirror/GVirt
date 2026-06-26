@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -286,6 +287,125 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol)
 
     std::cout << oss.str() << std::flush;
     free(p);
+}
+
+bool XTensor::CheckNanInf(const char *name, float threshold)
+{
+    size_t size = numel * XDtypeBit(dtype) / 8;
+    if (size == 0) {
+        return false;
+    }
+
+    // Only float-like dtypes can have NaN/Inf/large values
+    if (dtype != FP16 && dtype != BF16 && dtype != FP32 && dtype != CPLXF) {
+        return false;
+    }
+
+    void *p = malloc(size);
+    if (!p) {
+        return false;
+    }
+
+    aclError err = aclrtMemcpy(p, size, ptr, size, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (err != ACL_ERROR_NONE) {
+        free(p);
+        return false;
+    }
+
+    size_t nanCount = 0, infCount = 0, largeCount = 0;
+    size_t firstNanIdx = 0, firstInfIdx = 0, firstLargeIdx = 0;
+
+    for (size_t i = 0; i < numel; i++) {
+        float val;
+        switch (dtype) {
+            case FP16: {
+                __fp16 raw = (static_cast<__fp16 *>(p))[i];
+                val = static_cast<float>(raw);
+                break;
+            }
+            case BF16: {
+                uint16_t data = (static_cast<uint16_t *>(p))[i];
+                uint32_t float32Data = static_cast<uint32_t>(data) << 16;
+                std::memcpy(&val, &float32Data, sizeof(float));
+                break;
+            }
+            case FP32: {
+                val = (static_cast<float *>(p))[i];
+                break;
+            }
+            case CPLXF: {
+                // Check both real and imaginary parts
+                std::complex<float> cval = (static_cast<std::complex<float> *>(p))[i];
+                if (std::isnan(cval.real()) || std::isnan(cval.imag())) {
+                    nanCount++;
+                    firstNanIdx = (nanCount == 1) ? i : firstNanIdx;
+                }
+                if (std::isinf(cval.real()) || std::isinf(cval.imag())) {
+                    infCount++;
+                    firstInfIdx = (infCount == 1) ? i : firstInfIdx;
+                }
+                if (threshold > 0.0f &&
+                    (std::abs(cval.real()) > threshold || std::abs(cval.imag()) > threshold)) {
+                    largeCount++;
+                    firstLargeIdx = (largeCount == 1) ? i : firstLargeIdx;
+                }
+                continue;  // skip the shared check below
+            }
+            default:
+                continue;
+        }
+
+        if (std::isnan(val)) {
+            nanCount++;
+            firstNanIdx = (nanCount == 1) ? i : firstNanIdx;
+        }
+        if (std::isinf(val)) {
+            infCount++;
+            firstInfIdx = (infCount == 1) ? i : firstInfIdx;
+        }
+        if (threshold > 0.0f && std::abs(val) > threshold) {
+            largeCount++;
+            firstLargeIdx = (largeCount == 1) ? i : firstLargeIdx;
+        }
+    }
+
+    bool hasAnomaly = (nanCount > 0 || infCount > 0 || largeCount > 0);
+
+    if (hasAnomaly) {
+        size_t col = shape[shape.size() - 1];
+        std::ostringstream oss;
+        oss << name << ": ";
+        if (nanCount > 0) {
+            oss << nanCount << "/" << numel << " NaN (first at [" << firstNanIdx / col << ","
+                << firstNanIdx % col << "])";
+        }
+        if (infCount > 0) {
+            if (nanCount > 0) {
+                oss << ", ";
+            }
+            oss << infCount << "/" << numel << " Inf (first at [" << firstInfIdx / col << ","
+                << firstInfIdx % col << "])";
+        }
+        if (largeCount > 0) {
+            if (nanCount > 0 || infCount > 0) {
+                oss << ", ";
+            }
+            oss << largeCount << "/" << numel << " values >" << threshold << " (first at ["
+                << firstLargeIdx / col << "," << firstLargeIdx % col << "])";
+        }
+        oss << ", shape=(";
+        for (size_t i = 0; i < shape.size(); i++) {
+            oss << shape[i];
+            if (i != shape.size() - 1) {
+                oss << ", ";
+            }
+        }
+        oss << "), dtype=" << XDtypeStr(dtype) << std::endl;
+        std::cout << oss.str() << std::flush;
+    }
+
+    free(p);
+    return hasAnomaly;
 }
 
 void XTensor::Memset(int value)

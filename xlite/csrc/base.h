@@ -195,6 +195,7 @@ public:
     void View(std::vector<size_t> shape);
     void View(enum XDtype type);
     void Save(const std::string &path);
+    bool CheckNanInf(const char *name = "", float threshold = -1.0f);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
     enum XTensorType GetType()
     {
