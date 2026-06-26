@@ -31,7 +31,9 @@ public:
     __aicore__ inline void Init(GM_ADDR b, GM_ADDR a, GM_ADDR A_log, GM_ADDR dt_bias, GM_ADDR beta,
                                 GM_ADDR g, uint32_t bsz, uint32_t seqlen, uint32_t num_v_heads)
     {
+        set_atomic_none();
         set_mask_norm();
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
         this->b = (__gm__ Dtype *)b;
         this->a = (__gm__ Dtype *)a;
         this->A_log = (__gm__ Dtype *)A_log;

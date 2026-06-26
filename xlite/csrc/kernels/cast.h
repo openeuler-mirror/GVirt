@@ -11,6 +11,7 @@
 template <typename SrcType, typename TarType>
 __aicore__ void cast_kernel(GM_ADDR x, GM_ADDR y, uint32_t length)
 {
+    set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 

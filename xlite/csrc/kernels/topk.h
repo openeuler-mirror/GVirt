@@ -138,6 +138,7 @@ public:
 
     __aicore__ inline void Run()
     {
+        set_atomic_none();
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
         copy_gm_to_ubuf_align_b32(queryLensIn, queryLensGm, 0, 1, nBatches * sizeof(uint32_t), 0, 0,

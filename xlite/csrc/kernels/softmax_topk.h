@@ -70,6 +70,7 @@ public:
 
     __aicore__ inline void Run()
     {
+        set_atomic_none();
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
         // 准备indices，所有token通用
