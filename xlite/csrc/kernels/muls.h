@@ -9,6 +9,7 @@
 template <typename Dtype>
 __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uint64_t numel)
 {
+    set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 

@@ -31,7 +31,9 @@ public:
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR weight, GM_ADDR output, uint32_t batch,
                                 uint32_t channels, uint32_t seqLen, uint32_t kernelDim)
     {
+        set_atomic_none();
         set_mask_norm();
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
         this->input = (__gm__ Dtype *)input;
         this->weight = (__gm__ Dtype *)weight;
         this->output = (__gm__ Dtype *)output;

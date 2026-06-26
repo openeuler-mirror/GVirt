@@ -31,6 +31,10 @@ public:
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR output, uint32_t dim0, uint32_t dim1,
                                 uint32_t dim2)
     {
+        set_atomic_none();
+        set_mask_norm();
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+
         this->input.SetGlobalBuffer((__gm__ Dtype *)input);
         this->output.SetGlobalBuffer((__gm__ Dtype *)output);
         this->dim0 = dim0;

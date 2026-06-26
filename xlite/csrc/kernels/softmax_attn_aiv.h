@@ -52,6 +52,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
 
     bool saveMaxSum = (maxBuf != nullptr && sumBuf != nullptr);
 
+    set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
@@ -461,6 +462,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
     dbg_printf(
         "RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, actualCalcSoftmaxLen=%d\n", m,
         headSize, isFirstKvTile, actualCalcSoftmaxLen);
+    set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
@@ -719,6 +721,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
                                          float scale = 1.0f, uint32_t kvOffset = 0,
                                          uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
 {
+    set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 

@@ -868,6 +868,7 @@ public:
     __aicore__ inline void RunAiv()
     {
         set_atomic_none();
+        set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
         uint64_t flagIdx = 1;
         uint64_t mode = 2;  // inner-group aic/aiv sync
