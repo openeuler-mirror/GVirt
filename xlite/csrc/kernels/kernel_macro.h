@@ -11,6 +11,9 @@
 #define _XLITE_KERNEL_MACRO_H_
 
 #include "kernel_operator.h"
+#ifdef CCE_STUB
+#include "cce_stub.h"
+#endif
 using namespace AscendC;
 
 #define ROUND_DOWN(x, y) (((x) / (y)) * (y))
