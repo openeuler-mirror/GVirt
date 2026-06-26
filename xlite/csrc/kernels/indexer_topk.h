@@ -51,6 +51,7 @@ public:
         this->prevBlockIdx = blockIdx == 0 ? (block_num - 1) : (blockIdx - 1);
         this->setNextGeneration = 1;
         this->waitPrevGeneration = 1;
+        this->resetPrevCore = 0;
 
         this->scores[0].SetGlobalBuffer(((__gm__ Dtype *)scores) +
                                         block_idx * XLITE_MAX_M0 * tileSizeOfCachedKV);
@@ -300,7 +301,7 @@ public:
         assert(kvLen <= topK);
 
         // in
-        uint64_t off = 0;
+        uint64_t off = UB_BUF_ALIGN_SIZE;
         __ubuf__ Dtype *in0 = reinterpret_cast<__ubuf__ Dtype *>(off);
         off += ROUND_UP(topK * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
         __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>(off);
@@ -374,19 +375,6 @@ public:
             }
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
 
-            // copy last topk to last sort
-            if (kvOffset != 0) {
-                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID4 + curr);
-                if (topK * 2 * sizeof(uint32_t) % BLOCK_SIZE == 0) {
-                    copy_gm_to_ubuf(lastSort[curr], lastTopk + idx * 2 * topK, 0, 1,
-                                    topK * 2 * sizeof(uint32_t) / BLOCK_SIZE, 0, 0);
-                } else {
-                    copy_gm_to_ubuf_align_b16(lastSort[curr], lastTopk + idx * 2 * topK, 0, 1,
-                                              topK * 2 * sizeof(uint32_t), 0, 0, 0, 0);
-                }
-                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID4 + curr);
-            }
-
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
             // convert in to float
             if constexpr (std::is_same<Dtype, half>::value) {
@@ -420,7 +408,23 @@ public:
             // sort local & last
             int outNum = topK;
             if (kvOffset != 0) {
+                if (idx == 0) {
+                    WaitPrevCore();
+                    resetPrevCore = 1;
+                }
+                // copy last topk to last sort
+                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID4 + curr);
+                if (topK * 2 * sizeof(uint32_t) % BLOCK_SIZE == 0) {
+                    copy_gm_to_ubuf(lastSort[curr], lastTopk + idx * 2 * topK, 0, 1,
+                                    topK * 2 * sizeof(uint32_t) / BLOCK_SIZE, 0, 0);
+                } else {
+                    copy_gm_to_ubuf_align_b16(lastSort[curr], lastTopk + idx * 2 * topK, 0, 1,
+                                              topK * 2 * sizeof(uint32_t), 0, 0, 0, 0);
+                }
+
+                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID4 + curr);
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID4 + curr);
+
                 __ubuf__ float *addrs[4] = {localSort, lastSort[curr]};
                 vmrgsort4(totalSort, addrs, lens, config);
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID4 + curr);
@@ -460,6 +464,11 @@ public:
                 } else {
                     copy_ubuf_to_gm_align_b16(lastTopk + idx * topK * 2, totalSort, 0, 1,
                                               outNum * 2 * sizeof(uint32_t), 0, 0, 0, 0);
+                }
+                if (idx == queryLen - 1) {
+                    set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+                    wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+                    SetNextCore();
                 }
             }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
@@ -510,7 +519,6 @@ public:
         int totalIdx = 0;
         int curr = 0;
         int queryStart = -1;
-        int resetPrevCore = 0;
 #ifdef __DAV_C220_VEC__
         ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[0]);
         ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[1]);
@@ -569,10 +577,6 @@ public:
                 }
                 uint32_t outOffset = (queryTaskOffset + nWorkStart) * topK;
                 wait_flag_dev(a2vSyncFlag[curr]);
-                if (kvOffset != 0) {
-                    WaitPrevCore();
-                    resetPrevCore = 1;
-                }
                 dbg_printf("block%d subblock%u: {batch %d, query start loc %u, query [%u - %u), "
                            "index k [%u - %u)} use %d buf\n",
                            blockIdx, subBlockIdx, batchIdx, queryStart, queryOffset + nWorkStart,
@@ -583,11 +587,6 @@ public:
                     lastTopk + outOffset * 2, indices, nWorkCurCore, kvOffset, kvLen, totalLen,
                     topK, topkIndices + outOffset);
                 ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[curr]);
-                if (kvOffset + kvLen != totalLen) {
-                    set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
-                    wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
-                    SetNextCore();
-                }
 #endif
                 curr = 1 - curr;
             }
@@ -631,6 +630,7 @@ private:
     int prevBlockIdx;
     uint32_t setNextGeneration;
     uint32_t waitPrevGeneration;
+    int resetPrevCore;
 
     LocalTensor<Dtype> kl1Buf[PINGPONG_BUF_NUM];   // event 0/1
     LocalTensor<Dtype> ql1Buf[PINGPONG_BUF_NUM];   // event 2/3
