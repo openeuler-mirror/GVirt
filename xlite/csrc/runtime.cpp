@@ -14,20 +14,6 @@
 #define XLITE_EP_PORT_OFFSET 300
 #define XLITE_CCL_PORT_OFFSET 400
 
-bool isEnvironmentVariableTrue(const char *env_value_cstr)
-{
-    if (env_value_cstr == nullptr) {
-        return false;
-    }
-
-    std::string env_value = env_value_cstr;
-    for (size_t i = 0; i < env_value.size(); ++i) {
-        env_value[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(env_value[i])));
-    }
-
-    return env_value == "true" || env_value == "1" || env_value == "yes" || env_value == "on";
-}
-
 XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize,
                    uint32_t moeTpSize, uint32_t moeEpSize)
     : _devid(devid), _rankId(rankId), _tpSize(tpSize), _dpSize(dpSize), _moeTpSize(moeTpSize),
@@ -370,6 +356,11 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     std::vector<uint64_t> position;
     uint32_t queryStart, blockId, id, k;
     size_t size;
+
+    if (batch == 0) {
+        throw std::runtime_error(std::string(__func__) + ":" + std::to_string(__LINE__) +
+                                 ": invalid batchSize: " + std::to_string(batch));
+    }
 
     batchedTokens = 0;
     _maxNumBlocks = 0;
