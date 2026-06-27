@@ -1606,7 +1606,7 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
 
-    XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, topK}, XDtype(q), DBG_LOC);
+    XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, topK * 2}, XDtype(q), DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({_q.shape[0], 2 * topK}, INT32, DBG_LOC);
     XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
     sync.Memset(0);

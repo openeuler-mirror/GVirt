@@ -333,7 +333,7 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XliteOpMuls(rt, kw, weightScale, kw);
 
     XTensor &scores =
-        rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
+        rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, _c.indexTopK * 2}, hiddenState.dtype, DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
     XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
     XliteOpIndexerTopK(rt, q, indexKCache, kw, scores, lastTopk, _dsaTopkIndices, topkIndices,

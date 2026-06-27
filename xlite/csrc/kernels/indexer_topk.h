@@ -44,7 +44,7 @@ public:
         this->batch = batch;
         this->maxNumBlock = maxNumBlock;
         this->topK = topK;
-        this->tileSizeOfCachedKV = topK;
+        this->tileSizeOfCachedKV = 2 * topK;
         this->blockIdx = block_idx;
         this->subBlockIdx = get_subblockid();
         this->nextBlockIdx = (blockIdx + 1) % block_num;
@@ -298,19 +298,22 @@ public:
                                       __gm__ uint32_t *topkIndices)
     {
         constexpr float min = FLOAT_MIN;
-        assert(kvLen <= topK);
+
+        // total sort & WaitPrevCore & SetNextCore use
+        uint64_t off = 0;
+        __ubuf__ float *totalSort = reinterpret_cast<__ubuf__ float *>(off);
+        off += ROUND_UP(topK * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
 
         // in
-        uint64_t off = UB_BUF_ALIGN_SIZE;
         __ubuf__ Dtype *in0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += ROUND_UP(topK * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(kvLen * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
         __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += ROUND_UP(topK * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(kvLen * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
         __ubuf__ Dtype *in[PINGPONG_BUF_NUM] = {in0, in1};
         __ubuf__ uint32_t *sortIndices0 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(topK * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(kvLen * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         __ubuf__ uint32_t *sortIndices1 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(topK * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(kvLen * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         __ubuf__ uint32_t *sortIndices[PINGPONG_BUF_NUM] = {sortIndices0, sortIndices1};
         __ubuf__ float *lastSort0 = reinterpret_cast<__ubuf__ float *>(off);
         off += ROUND_UP(topK * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
@@ -327,19 +330,17 @@ public:
 
         // calc
         __ubuf__ float *mrgSortBuf0 = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(topK * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
-        __ubuf__ float *mrgSortBuf1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(topK * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
-        __ubuf__ float *mrgSortBuf[2] = {mrgSortBuf0, mrgSortBuf1};
-        __ubuf__ float *totalSort = reinterpret_cast<__ubuf__ float *>(off);
         off += ROUND_UP(topK * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        __ubuf__ float *mrgSortBuf1 = reinterpret_cast<__ubuf__ float *>(off);
+        off += ROUND_UP(topK * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        __ubuf__ float *mrgSortBuf[2] = {mrgSortBuf0, mrgSortBuf1};
         assert(off <= UB_SIZE);
 
         constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
         constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
         int repeat = DIV_ROUND_UP(kvLen, calcPad);
         int sortRepeat = DIV_ROUND_UP(kvLen, SORT_BLOCK_SIZE);
-        uint64_t lens = kvLen | (uint64_t)topK << 16;
+        uint64_t lens = (kvLen > topK ? topK : kvLen) | (uint64_t)topK << 16;
         uint64_t config = 1 | 0x3ull << MGR_SORT_VALID_BITS_OFFSET;
 
         int curr = 0;
@@ -434,7 +435,7 @@ public:
                 copy_ubuf_to_ubuf(totalSort, localSort, 0, 1,
                                   DIV_ROUND_UP(topK * 2 * sizeof(uint32_t), BLOCK_SIZE), 1, 1);
                 pipe_barrier(PIPE_V);
-                outNum = kvLen;
+                outNum = kvLen > topK ? topK : kvLen;
             }
 
             if (kvOffset + kvLen == totalLen) {
