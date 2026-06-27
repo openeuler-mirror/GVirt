@@ -81,8 +81,6 @@ enum commType {
     MAX_COMM_TYPE,
 };
 
-bool isEnvironmentVariableTrue(const char *env_value_cstr);
-
 class XRuntime
 {
 public:

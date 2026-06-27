@@ -6,7 +6,9 @@
 
 #include <vector>
 #include <cstdint>
+#include <cmath>
 
+#define MIN_KV_TILE_SIZE 1024
 #define MAX_KV_TILE_SIZE 8192
 
 uint32_t GetTileSizeOfCachedKV(std::vector<uint32_t> &cachedLens, std::vector<uint32_t> &queryLens,
