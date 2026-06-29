@@ -31,10 +31,7 @@
 
 #ifdef __DAV_C220_VEC__
 constexpr uint32_t BIT_SIZE_OF_U32 = 32;
-constexpr uint64_t SORT_BLOCK_SIZE = 32;
 constexpr uint64_t SORT_RESULT_BLOCK_SIZE = SORT_BLOCK_SIZE * 2;
-constexpr uint64_t MGR_SORT_VALID_BITS_OFFSET = 8;
-constexpr uint64_t MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET = 12;
 constexpr uint32_t CHUNK_SIZE = 2048;
 
 static __aicore__ inline void DumpBufferIndex(__ubuf__ float *buf, const __gm__ char *name,
@@ -302,16 +299,11 @@ public:
         vbitsort(scratch0, scoresIn, indicesIn, repeat);
         pipe_barrier(PIPE_V);
 
-        uint64_t mrgRepeat = len / 128;
-        Merge4(scratch1, scratch0, mrgRepeat, 32);
+        int dstBufIdx = 0;
+        MrgSort(scratch0, scratch1, repeat, &dstBufIdx);
+        __ubuf__ float *localSort = dstBufIdx == 0 ? scratch0 : scratch1;
 
-        mrgRepeat = len / 512;
-        Merge4(scratch0, scratch1, mrgRepeat, 128);
-
-        mrgRepeat = len / 2048;
-        Merge4(scratch1, scratch0, mrgRepeat, 512);
-
-        Merge2(topk1, topk0, scratch1, 1, 2048);
+        Merge2(topk1, topk0, localSort, 1, 2048);
     }
 
     __aicore__ inline void initTopk()

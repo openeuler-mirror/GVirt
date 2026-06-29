@@ -37,6 +37,9 @@ using namespace AscendC;
 #define C2_DATABLOCK 64        // The data block size of C2
 #define FIXPIPE_DATABLOCK 128  // The data block size of fixpipe
 #define FLOAT_MIN -3.4028235e+38
+#define SORT_BLOCK_SIZE 32ull
+#define MGR_SORT_VALID_BITS_OFFSET 8
+#define MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET 12
 
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst,
@@ -702,6 +705,48 @@ __inline__ __aicore__ void ReduceSum(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
         repeat = DIV_ROUND_UP(remain, pad);
     }
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
+}
+
+__inline__ __aicore__ void MrgSort(__ubuf__ float *sort0, __ubuf__ float *sort1, int vbitsortRepeat,
+                                   int *dstBufIdx)
+{
+    __ubuf__ float *mrgSortBuf[2] = {sort0, sort1};
+    constexpr float min = FLOAT_MIN;
+    int pad = VECTOR_MAX_BYTESIZE / sizeof(float);
+    uint64_t len = SORT_BLOCK_SIZE;
+    int cnt = 4;
+    int sortRepeat = vbitsortRepeat;
+    int bufIdx = 0;
+    uint64_t validBit = 0xF;
+    while (sortRepeat > 1) {
+        __ubuf__ float *addr = mrgSortBuf[bufIdx];
+        if (sortRepeat <= 2) {
+            cnt = 2;
+            validBit = 0x3;
+        } else if (sortRepeat <= 3) {
+            cnt = 3;
+            validBit = 0x7;
+        } else if (sortRepeat % cnt != 0) {
+            set_vector_mask(0xAAAAAAAAAAAAAAAA, 0xAAAAAAAAAAAAAAAA);
+            vector_dup(addr + sortRepeat * len * 2, 0,
+                       DIV_ROUND_UP((cnt - sortRepeat % cnt) * len * 2, pad), 1, 1, 8, 0);
+            set_vector_mask(0x5555555555555555, 0x5555555555555555);
+            vector_dup(addr + sortRepeat * len * 2, float(min),
+                       DIV_ROUND_UP((cnt - sortRepeat % cnt) * len * 2, pad), 1, 1, 8, 0);
+            pipe_barrier(PIPE_V);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
+        int stride = len * 2;
+        __ubuf__ float *addrs[4] = {addr, addr + stride, addr + 2 * stride, addr + 3 * stride};
+        uint64_t lens = len | len << 16 | len << 32 | len << 48;
+        sortRepeat = DIV_ROUND_UP(sortRepeat, cnt);
+        uint64_t config = sortRepeat | validBit << MGR_SORT_VALID_BITS_OFFSET;
+        bufIdx = 1 - bufIdx;
+        vmrgsort4(mrgSortBuf[bufIdx], addrs, lens, config);
+        pipe_barrier(PIPE_V);
+        len *= cnt;
+    }
+    *dstBufIdx = bufIdx;
 }
 
 #define BITS_PER_DWORD 64

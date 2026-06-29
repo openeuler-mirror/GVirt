@@ -64,15 +64,13 @@ public:
         this->groupMemSize = headNumInGroup * headSize;
         this->blockMemSize = blockSize * kvMemSize;
 
-        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) +
-                                    block_idx * XLITE_ATTENTION_MAX_M0 * maxSeqLen);
-        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) +
-                                    block_idx * XLITE_ATTENTION_MAX_M0 * maxSeqLen +
-                                    block_num * XLITE_ATTENTION_MAX_M0 * maxSeqLen);
+        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * XLITE_MAX_M0 * maxSeqLen);
+        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * XLITE_MAX_M0 * maxSeqLen +
+                                    block_num * XLITE_MAX_M0 * maxSeqLen);
 
         // 分配L1/L0
         uint64_t l1ATileBytes =
-            XLITE_ATTENTION_MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
+            XLITE_MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
         uint64_t l1BTileBytes = blockSize * headSize * sizeof(Dtype);
         uint64_t off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
@@ -279,7 +277,7 @@ public:
     /*
      * When the totalLen exceeds MAX_SUB_CONTEXT_SIZE in the RunAivSoftmaxLong function,
      * 4 rows must be reserved for the exp buffer (float type) used in softmax.
-     * Therefore, m0 must be less than or equal to XLITE_ATTENTION_MAX_M0 - 4.
+     * Therefore, m0 must be less than or equal to XLITE_MAX_M0 - 4.
      */
     __aicore__ inline uint32_t GetOptimalM0(int queryLen, int cachedLen)
     {
@@ -481,7 +479,7 @@ public:
                     nWorkStart, currQkIdx);
                 RunAivSoftmax(
                     (__gm__ Dtype *)qk[currQkIdx][qkOffset].GetPhyAddr(),
-                    m0 > (XLITE_ATTENTION_MAX_M0 - 4)
+                    m0 > (XLITE_MAX_M0 - 4)
                         ? 0
                         : (__gm__ float *)qk[currQkIdx][(m0 + subIdx * 2) * maxSeqLen].GetPhyAddr(),
                     nWorkCurCore, maxSeqLen, calcLen, outN, true, nWorkStart, headNumInGroup);

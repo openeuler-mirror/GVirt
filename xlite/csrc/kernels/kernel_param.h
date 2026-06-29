@@ -29,8 +29,8 @@ enum class NormKind {
     L2,
 };
 
-// attention/mla
-#define XLITE_ATTENTION_MAX_M0 128
+// attention/mla/indexer
+#define XLITE_MAX_M0 128
 
 // mla topk
 #define MAX_TOPK_NUM 2048

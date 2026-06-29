@@ -1747,6 +1747,57 @@ def indexer_scores(
     """
     ...
 
+def indexer_topk(
+    rt: Runtime,
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    weight: torch.Tensor,
+    indices: torch.Tensor,
+    topk_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    n_heads: int,
+    head_dim: int,
+    block_size: int,
+    batch: int,
+    max_num_block: int,
+    top_k: int,
+) -> None:
+    """Fused DSA indexer scores + top-k selection over cached keys.
+
+    Combines :func:`indexer_scores` and :func:`topk` into a single kernel
+    launch with pingpong buffers. Scratch buffers (scores, last_topk, sync)
+    are allocated internally by the runtime.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        q (torch.Tensor): Query tensor ``[total_query_len, n_heads, head_dim]``.
+        k_cache (torch.Tensor): Key cache tensor ``[max_num_block*batch, block_size, head_dim]``.
+        weight (torch.Tensor): Indexer weight tensor
+            ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are
+            the indexer weights).
+        indices (torch.Tensor): Input index tensor ``[max_seq_len]`` (int32),
+            pre-filled with ``0..max_seq_len-1``.
+        topk_indices (torch.Tensor): Output top-k indices tensor
+            ``[total_query_len, top_k]`` (int32).
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
+        lens (torch.Tensor): Current token lengths.
+        cached_lens (torch.Tensor): Cached token lengths.
+        block_tables (torch.Tensor): Block table tensor.
+        n_heads (int): Number of heads.
+        head_dim (int): Head dimension.
+        block_size (int): KV block size (must be <= 128).
+        batch (int): Batch size.
+        max_num_block (int): Maximum number of blocks per request.
+        top_k (int): Number of top-k indices to select (must be <= 2048).
+
+    Returns:
+        None: ``topk_indices`` is written in place.
+    """
+    ...
+
 def muls(rt: Runtime, input: torch.Tensor, scale: float, output: torch.Tensor) -> None:
     """Multiply tensor by scalar and write to output.
 

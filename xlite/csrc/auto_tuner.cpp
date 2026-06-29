@@ -9,9 +9,9 @@
 static uint32_t CalcTaskNum(uint32_t cachedLen, uint32_t queryLen, uint32_t headNumInGroup,
                             uint32_t nKVHeads, uint32_t tileSize)
 {
-    uint32_t queryTileSize = XLITE_ATTENTION_MAX_M0 / headNumInGroup;
+    uint32_t queryTileSize = XLITE_MAX_M0 / headNumInGroup;
     if (queryTileSize == 0) {
-        queryTileSize = XLITE_ATTENTION_MAX_M0;
+        queryTileSize = XLITE_MAX_M0;
     }
 
     uint32_t queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
