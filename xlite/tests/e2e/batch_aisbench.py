@@ -9,6 +9,7 @@ Using `vllm-ascend`'s official container image is recommended.
 from dataclasses import dataclass, field
 from datetime import datetime
 import os
+import re
 import signal
 from pathlib import Path
 import socket
@@ -116,6 +117,28 @@ def stop_vllm_server(process: subprocess.Popen, sleep_time: int = 120):
 def check_subprocess_result(res: subprocess.CompletedProcess, error_message: str):
     if res.returncode != 0:
         raise RuntimeError(f"{error_message}: {res.stderr.decode('utf-8') if res.stderr else 'No error message'}")
+
+
+_RE_REPEAT_MODEL = re.compile(r"^([1-9]\d*)\s*\*\s*(.+)\s*$")
+
+
+def expand_model_list(models: list[str]) -> list[str]:
+    """Expand ``N*<model>`` entries in the model list into N copies of ``<model>``.
+
+    Format: ``N*<model>`` where N is a positive integer (``\\d+\\*`` prefix, optional).
+    If no ``N*`` prefix is present, the model appears once (default N=1).
+
+    Examples:
+        ``["3*Qwen3-30B-A3B", "Qwen3-32B"]`` → ``["Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-32B"]``
+    """
+    expanded: list[str] = []
+    for entry in models:
+        match = _RE_REPEAT_MODEL.match(entry)
+        if match:
+            expanded.extend([match.group(2)] * int(match.group(1)))
+        else:
+            expanded.append(entry)
+    return expanded
 
 
 def prepare_env(
@@ -543,7 +566,11 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         help="Number of prompts within each subset of datasets to use for ais_bench evaluation",
     )
     parser.add_argument(
-        "--models", type=str, nargs="+", default=None, help="List of model subdirectory names to benchmark"
+        "--models",
+        type=str,
+        nargs="+",
+        default=None,
+        help="List of model subdirectory names to benchmark. Supports N*<model> format (e.g. 3*Qwen3-30B-A3B expands to 3 copies)",
     )
     parser.add_argument(
         "-Q",
@@ -660,13 +687,10 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
 
     print(f"Running batch AISBench with arguments: {args}")
 
-    # prepare the environment: clone ais_bench repo, create virtual environment, install requirements, download dataset
-    prepare_env(args.ais_bench_dir)
-
     if not args.models:
         raise ValueError("No models specified for benchmarking, please provide model subdirectory names using --models")
 
-    args_models: list[str] = args.models
+    args_models: list[str] = expand_model_list(args.models)
     n_models = len(args_models)
     args_quantization: list[int] = args.quantization + [args.quantization[-1]] * (n_models - len(args.quantization))
     args_tps: list[int] = args.tps + [args.tps[-1]] * (n_models - len(args.tps))
@@ -705,7 +729,20 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         for model, tp, ep, dp, xlite in zip(args_models, args_tps, args_eps, args_dps, args_xlite)
     ]
     if len(set(combinations)) != len(combinations):
-        raise ValueError("The combination of models, tp_sizes, and ep_sizes must be unique for each model")
+        # find the duplicate combinations
+        duplicates = set()
+        seen = set()
+        for combo in combinations:
+            if combo in seen:
+                duplicates.add(combo)
+            else:
+                seen.add(combo)
+        for dup in duplicates:
+            print(
+                f"Duplicate combination found: Model={dup[0]}, TP={dup[1]}, EP={'Y' if dup[2] else 'N'}, DP={dup[3]}, "
+                f"Xlite={'full' if dup[5] else ('decode-only' if dup[4] else 'aclgraph')}"
+            )
+        raise ValueError("The combination of models, tps, eps, etc., must be unique for each model")
 
     max_num_devices = max(tp * dp for tp, dp in zip(args_tps, args_dps))
     device_ids_env = filter(None, os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "").split(","))
@@ -724,6 +761,9 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
             backend_str = "xlite full" if xlite_full else ("xlite decode-only" if xlite else "aclgraph")
             print(f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, Backend: {backend_str}")
         sys.exit(0)
+
+    # prepare the environment: clone ais_bench repo, create virtual environment, install requirements, download dataset
+    prepare_env(args.ais_bench_dir)
 
     log_file_path: Path = (
         args.log_file
