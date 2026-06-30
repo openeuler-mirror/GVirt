@@ -660,9 +660,8 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
 
     print(f"Running batch AISBench with arguments: {args}")
 
+    # prepare the environment: clone ais_bench repo, create virtual environment, install requirements, download dataset
     prepare_env(args.ais_bench_dir)
-
-    bench_results: list[BenchResult] = []
 
     if not args.models:
         raise ValueError("No models specified for benchmarking, please provide model subdirectory names using --models")
@@ -726,6 +725,20 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
             print(f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, Backend: {backend_str}")
         sys.exit(0)
 
+    log_file_path: Path = (
+        args.log_file
+        or args.ais_bench_dir / "reports" / f"benchmark_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    )
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    log_csv_path: Path = log_file_path.with_suffix(".csv")
+
+    # Write headers first
+    with open(log_file_path, "w") as f:
+        f.write("\n\nFinal Benchmark Results:\n\n")
+        f.write(f"{BenchResult.markdown_header()}\n")
+    with open(log_csv_path, "w") as f:
+        f.write("model_name,dataset,tp_size,ep,dp_size,xlite,xlite_full_mode,metric,accuracy,error\n")
+
     for i, (model, tp, ep, dp, xlite, xlite_full) in enumerate(combinations):
         print(f"\n>>> Running benchmark task {i + 1}/{len(combinations)}")
         model_path = args.model_dir / model
@@ -755,7 +768,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 debug=args.debug,
                 vllm_timeout=args.vllm_timeout,
             )
-            bench_results.append(result)
         except Exception as e:
             result = BenchResult(
                 model_name=model,
@@ -769,51 +781,22 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 accuracy=0.0,
             )
             result.error = str(e)
-            bench_results.append(result)
         finally:
             # ensure all started vLLM server processes are stopped
             for process in list(VLLM_PROCESSES):
                 stop_vllm_server(process)
+
+        # Append this result to the log files immediately
+        with open(log_file_path, "a") as f:
+            f.write(f"{result.markdown_row()}\n")
+        with open(log_csv_path, "a") as f:
+            f.write(
+                f"{result.model_name},{result.dataset},{result.tp_size},{result.ep},"
+                f"{result.dp_size},{result.xlite},{result.xlite_full_mode},{result.metric},"
+                f"{result.accuracy},{result.error or ''}\n"
+            )
+        print(result.markdown_row())
         print(f"Completed benchmark task {i + 1}/{len(combinations)}")
 
-    log_text = ""
-    if bench_results:
-        log_text += "\n\nFinal Benchmark Results:\n\n"
-        log_text += f"{BenchResult.markdown_header()}\n"
-        for result in bench_results:
-            log_text += f"{result.markdown_row()}\n"
-    else:
-        log_text += "No benchmark results to display.\n"
-
-    print(log_text, end="")
-
-    log_file_path: Path = (
-        args.log_file
-        or args.ais_bench_dir / "reports" / f"benchmark_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-    )
-    log_file_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_file_path, "w") as f:
-        f.write(log_text)
     print(f"\nBenchmark results written to log file at {log_file_path}")
-
-    # save as csv as well for easier parsing
-    log_csv_path: Path = log_file_path.with_suffix(".csv")
-    df = pd.DataFrame(
-        [
-            {
-                "model_name": result.model_name,
-                "dataset": result.dataset,
-                "tp_size": result.tp_size,
-                "ep": result.ep,
-                "dp_size": result.dp_size,
-                "xlite": result.xlite,
-                "xlite_full_mode": result.xlite_full_mode,
-                "metric": result.metric,
-                "accuracy": result.accuracy,
-                "error": result.error,
-            }
-            for result in bench_results
-        ]
-    )
-    df.to_csv(log_csv_path, index=False)
     print(f"Benchmark results also written to CSV file at {log_csv_path}")
