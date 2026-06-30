@@ -32,6 +32,7 @@
     {                      \
         __func__, __LINE__ \
     }
+#define UNKNOWN_DBG_LOC DebugSrcLoc{"unknown", -1}
 
 #define DBG_PREFIX (std::string(__func__) + ": ")
 #define XT_STR(x) ((x).ToStr(#x) + ", ")
@@ -62,7 +63,7 @@ enum XRopeType {
 };
 
 enum QuantType {
-    UNKONOWN_QUANT,
+    UNKNOWN_QUANT,
     NO_QUANT,
     STATIC_QUANT,
     DYNAMIC_QUANT,
@@ -71,6 +72,11 @@ enum QuantType {
 typedef struct DebugSrcLoc {
     const char *func;
     int line;
+
+    [[nodiscard]] std::string ToStr() const
+    {
+        return line >= 0 ? std::string(func) + ":" + std::to_string(line) + ":" : std::string("");
+    }
 } DebugSrcLoc;
 
 inline const char *XDtypeStr(enum XDtype dtype)
@@ -315,7 +321,7 @@ public:
     bool IsQuanted();
 
 private:
-    enum QuantType quantType = UNKONOWN_QUANT;
+    enum QuantType quantType = UNKNOWN_QUANT;
 };
 
 #endif

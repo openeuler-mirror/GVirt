@@ -236,7 +236,7 @@ void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, 
 
     XliteOpEmbed(rt, input, embed, start, end, output);
     if (_c.defTpSize > 1) {
-        XliteOpAllReduceSum(rt, output, output, TP);
+        XliteOpAllReduceSum(rt, output, output, TP, DBG_LOC);
     }
 }
 
@@ -504,7 +504,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                        XTensor(), 1, qHeads * _c.headDim);
         if (_c.defTpSize > 1) {
             // Single AllReduceSum over the packed buffer reduces both variances in place.
-            XliteOpAllReduceSum(rt, packedVar, packedVar, TP);
+            XliteOpAllReduceSum(rt, packedVar, packedVar, TP, DBG_LOC);
         }
         XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim * qHeads, true,
                        XTensor(), 1, 0, 0, qLocalVariance);
@@ -558,9 +558,9 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
             rt.NotifyRecordPeerStream();
         }
         if (rt.enableCommOptimize || rt.enableMoEAllToAll) {
-            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
+            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, DBG_LOC);
         } else {
-            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, DBG_LOC);
         }
     }
     rt.PutTensor(qkv);
@@ -811,9 +811,9 @@ void XModel::ForwardMLP(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
         }
         if (!rt.enableMoEAllToAll) {
             if (rt.enableCommOptimize) {
-                XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
+                XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, DBG_LOC);
             } else {
-                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, DBG_LOC);
             }
         }
     }
@@ -902,7 +902,7 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
             rt.AllGatherInGraph(sendOut->ptr, recvOut->ptr, m,
                                 static_cast<int>(XDtype2HcclDtype(INT8)), DP);
         } else {
-            XliteOpAllGather(rt, *sendOut, *recvOut, DP);
+            XliteOpAllGather(rt, *sendOut, *recvOut, DP, DBG_LOC);
         }
 
         std::vector<XTensor> outputs = {inputAllDp, weightsAllDp, routingAllDp};
@@ -968,7 +968,7 @@ void XModel::ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weig
             CHECK_ACL(aclrtMemcpyAsync(tokenSorted.ptr, recvBytes, rt._rsRecvBuf.ptr, recvBytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
         } else {
-            XliteOpReduceScatter(rt, *sendOut, tokenSorted, DP);
+            XliteOpReduceScatter(rt, *sendOut, tokenSorted, DP, DBG_LOC);
         }
         if (!inGraph) {
             rt.PutTensor(*sendOut);  // eager: return pool tensor; graph: fixed buffer, skip
@@ -1079,7 +1079,7 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
         // step 2: allgather expertsCounts across EP ranks — each rank knows all ranks' token counts
         XTensor &expertsCountsAllEp =
             rt.GetTensor({_c.moeEpSize, _c.nRoutedExperts}, INT32, DBG_LOC);
-        XliteOpAllGather(rt, expertsCounts, expertsCountsAllEp, EP);
+        XliteOpAllGather(rt, expertsCounts, expertsCountsAllEp, EP, DBG_LOC);
         rt.PutTensor(expertsCounts);
 
         // step 3: compute tokensPerEpGroupAllEp[ep][ep] (tokens each EP rank sends to each EP rank)
@@ -1107,7 +1107,7 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
         XTensor &recvBuffer = rt.GetTensor({meta.totalRecvElements / _c.hiddenSize, _c.hiddenSize},
                                            tokenSorted.dtype, DBG_LOC);
         XliteOpAlltoAllV(rt, expertsSorted, recvBuffer, meta.sendCounts, meta.recvCounts,
-                         meta.sdispls, meta.rdispls, EP);
+                         meta.sdispls, meta.rdispls, EP, DBG_LOC);
 
         // step 6: reorder source-grouped → expert-grouped for GroupMatmul
         XTensor &expertGrouped = rt.GetTensor(
@@ -1158,7 +1158,7 @@ void XModel::ForwardMoECombineAllToAll(XRuntime &rt, XTensor &tokenSorted, XTens
             rt.GetTensor({revMeta.totalRecvElements / _c.hiddenSize, _c.hiddenSize},
                          expertsSorted.dtype, DBG_LOC);
         XliteOpAlltoAllV(rt, sourceGrouped, backBuffer, revMeta.sendCounts, revMeta.recvCounts,
-                         revMeta.sdispls, revMeta.rdispls, EP);
+                         revMeta.sdispls, revMeta.rdispls, EP, DBG_LOC);
         XliteOpUnpermutation(rt, backBuffer, unpIdx, routing, weights, 0, _c.nRoutedExperts,
                              tokenSorted);
 
@@ -1292,9 +1292,9 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         }
         if (!rt.enableMoEAllToAll) {
             if (rt.enableCommOptimize) {
-                XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
+                XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, DBG_LOC);
             } else {
-                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, DBG_LOC);
             }
         }
     }
@@ -1347,7 +1347,7 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         XliteOpAddAndRmsNorm(rt, rt.hiddenStateSlice, xSlice, mlpNorm[i], _c.normEps,
                              rt.hiddenStateSlice, mlpNormBias[i]);
         if (!rt.enableMoEAllToAll) {
-            XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP);
+            XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP, DBG_LOC);
         }
         if (rt.multiTaskParallel) {
             rt.NotifyWaitPeerStream();
@@ -1360,7 +1360,7 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         if (i < (_c.nLayers - 1)) {
             XliteOpAddAndRmsNorm(rt, rt.hiddenStateSlice, xSlice, attnNorm[i + 1], _c.normEps,
                                  rt.hiddenStateSlice, attnNormBias[i + 1]);
-            XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP);
+            XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP, DBG_LOC);
         }
         if (rt.multiTaskParallel) {
             rt.NotifyWaitPeerStream();
@@ -1369,9 +1369,9 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
     XliteOpAddAndRmsNorm(rt, rt.hiddenStateSlice, xSlice, norm, _c.normEps, rt.hiddenStateSlice,
                          normBias);
     if (actualM == mPad) {
-        XliteOpAllGather(rt, rt.hiddenStateSlice, output, TP);
+        XliteOpAllGather(rt, rt.hiddenStateSlice, output, TP, DBG_LOC);
     } else {
-        XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP);
+        XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP, DBG_LOC);
         aclrtMemcpyAsync(output.ptr, actualM * _c.hiddenSize * XDtypeBit(embed.dtype) / 8,
                          rt.hiddenStatePad.ptr,
                          actualM * _c.hiddenSize * XDtypeBit(embed.dtype) / 8,
@@ -1447,7 +1447,7 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XT
     }
 
     if (_c.defTpSize > 1) {
-        XliteOpAllGather(rt, localOutput, output, TP);
+        XliteOpAllGather(rt, localOutput, output, TP, DBG_LOC);
     }
 }
 

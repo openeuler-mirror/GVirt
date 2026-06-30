@@ -155,7 +155,7 @@ static bool EachXDtype(enum XDtype dtype, Args &&...args)
     return (... && (std::forward<Args>(args).dtype == dtype));
 }
 
-void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
+void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type, DebugSrcLoc loc,
                       uint32_t copySize)
 {
     uint32_t rankSize = rt.tpSize();
@@ -166,15 +166,16 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
     }
     if (in.dtype != out.dtype || in.numel * rankSize != out.numel) {
         std::stringstream ss;
-        ss << __func__ << ": check tensor failed!"
-           << " in.dtype=" << XDtypeStr(in.dtype) << "(" << in.dtype << ")"
-           << " out.dtype=" << XDtypeStr(out.dtype) << "(" << out.dtype << ")"
-           << " in.numel=" << in.numel << " rankSize=" << rankSize
-           << " expected out.numel=" << (in.numel * rankSize) << " actual out.numel=" << out.numel;
+        ss << loc.ToStr() << __func__ << ": check tensor failed! in.dtype=" << XDtypeStr(in.dtype)
+           << "(" << in.dtype << "), out.dtype=" << XDtypeStr(out.dtype) << "(" << out.dtype
+           << "); in.numel=" << in.numel << " rankSize=" << rankSize
+           << ", expected out.numel=" << (in.numel * rankSize)
+           << ", actual out.numel=" << out.numel;
         throw std::runtime_error(ss.str());
     }
     if ((in.numel * XDtypeBit(in.dtype)) % XDtypeBit(INT8)) {
-        throw std::runtime_error(std::string(__func__) + ": all gather 8bit align check failed!");
+        throw std::runtime_error(loc.ToStr() + std::string(__func__) +
+                                 ": all gather 8bit align check failed!");
     }
 
     XcclComm *xcclComm = nullptr;
@@ -307,11 +308,16 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
 }
 
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
-                          uint32_t copySize)
+                          DebugSrcLoc loc, uint32_t copySize)
 {
     uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
     if (in.dtype != out.dtype || in.numel != out.numel * rankSize) {
-        throw std::runtime_error(std::string(__func__) + ": check tensor failed!");
+        std::stringstream ss;
+        ss << loc.ToStr() << __func__ << ": check tensor failed! in.dtype=" << XDtypeStr(in.dtype)
+           << "(" << in.dtype << "), out.dtype=" << XDtypeStr(out.dtype) << "(" << out.dtype
+           << "); out.numel=" << out.numel << " rankSize=" << rankSize
+           << ", expected in.numel=" << (out.numel * rankSize) << ", actual in.numel=" << in.numel;
+        throw std::runtime_error(ss.str());
     }
 
     auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
@@ -417,10 +423,14 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
 }
 
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
-                         uint32_t copySize)
+                         DebugSrcLoc loc, uint32_t copySize)
 {
     if (in.dtype != out.dtype || in.numel != out.numel) {
-        throw std::runtime_error(std::string(__func__) + ": check tensor failed!");
+        std::stringstream ss;
+        ss << loc.ToStr() << __func__ << ": check tensor failed! in.dtype=" << XDtypeStr(in.dtype)
+           << "(" << in.dtype << "), out.dtype=" << XDtypeStr(out.dtype) << "(" << out.dtype
+           << "); in.numel=" << in.numel << ", out.numel=" << out.numel;
+        throw std::runtime_error(ss.str());
     }
 
     auto xcclComm = (type == TP) ? rt._tpXcclComm : rt._dpXcclComm;
@@ -521,14 +531,15 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 }
 
 void XliteOpAlltoAllV(XRuntime &rt, XTensor &in, XTensor &out, XTensor &sendCounts,
-                      XTensor &recvCounts, XTensor &sdispls, XTensor &rdispls, enum commType type)
+                      XTensor &recvCounts, XTensor &sdispls, XTensor &rdispls, enum commType type,
+                      DebugSrcLoc loc)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
 
     if (in.dtype != out.dtype) {
-        throw std::runtime_error(std::string(__func__) +
+        throw std::runtime_error(loc.ToStr() + std::string(__func__) +
                                  ": check tensor failed! input: " + std::to_string(in.dtype) +
                                  " output: " + std::to_string(out.dtype));
     }

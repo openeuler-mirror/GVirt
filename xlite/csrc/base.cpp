@@ -735,7 +735,7 @@ bool XDummyTensorPool::TensorInPool(XTensor &t)
 
 enum QuantType MatmulWeight::GetQuantType()
 {
-    if (quantType != UNKONOWN_QUANT) {
+    if (quantType != UNKNOWN_QUANT) {
         return quantType;
     }
 
