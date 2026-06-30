@@ -825,6 +825,10 @@ void XModel::ForwardMoECombineAllToAll(XRuntime &rt, XTensor &tokenSorted, XTens
                                        XTensor &expertsCounts, const MoEAlltoAllMeta &meta)
 {
     if (_c.defDpSize > 1) {
+        if (!meta.expertsCountsAllEpDevice) {
+            throw std::runtime_error(std::string(__func__) +
+                                     ": meta.expertsCountsAllEpDevice is nullptr");
+        }
         uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
         uint32_t localStart = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
         uint32_t localEnd = localStart + nLocalRoutedExperts;
