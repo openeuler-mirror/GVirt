@@ -315,8 +315,10 @@ def run_ais_bench(
     xlite_full_mode: bool = False,
     extra_args: str = "",
     device_ids: list[int] | None = None,
-    timeout: int = 1800,
+    timeout: int = 4 * 3600,  # 4 hours
+    retry: int = 3,
     debug: bool = False,
+    vllm_timeout: int = 1800,
 ) -> BenchResult:
     model_name = model_name or Path(model_path).stem or "model"
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
@@ -424,7 +426,7 @@ def run_ais_bench(
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
         device_ids=device_ids,
-        timeout=timeout,
+        timeout=vllm_timeout,
         debug=debug,
     )
     if vllm_process.stdout:
@@ -438,14 +440,29 @@ def run_ais_bench(
             "ais_bench --models vllm_api_general_chat",
             "--datasets ceval_gen_0_shot_cot_chat_prompt",
             "--mode all --dump-eval-details --merge-ds",
-            f'--max-num-workers "{min(os.cpu_count() or 4, 64, max_num_seqs)}"',
+            f'--max-num-workers "{min(os.cpu_count() or 4, 16, max_num_seqs)}"',
             f'--work-dir "{ais_bench_output_dir}"',
             f'--num-prompts "{ais_bench_num_prompts}"',
             extra_args,
         ]
         aisbench_cmd = " ".join(aisbench_cmd_lst)
-        res = subprocess.run(aisbench_cmd, shell=True, capture_output=not debug, executable="/bin/bash")
-        check_subprocess_result(res, "Failed to run ais_bench")
+
+        for i in range(1, retry + 1):
+            print(f"\nRunning ais_bench (attempt {i}/{retry}) for model {model_name}...\n")
+            t1 = time.time()
+            res = subprocess.run(
+                aisbench_cmd, shell=True, capture_output=not debug, executable="/bin/bash", timeout=timeout
+            )
+            if res.returncode == 0:
+                break  # success, exit the retry loop
+            time_taken = time.time() - t1
+            if i < retry and time_taken < timeout + 10:  # if the process failed before the timeout, retry
+                if " --reuse" not in aisbench_cmd and " -r" not in aisbench_cmd:
+                    aisbench_cmd += " --reuse"  # add --reuse flag for subsequent attempts
+                print(f"\nais_bench failed on attempt {i}/{retry}, retrying...\n")
+                time.sleep(5)
+                continue
+            check_subprocess_result(res, "Failed to run ais_bench")
 
         # from the output directory, find the latest ais_bench_output_dir/*datetime*/summary/summary_*.csv
         summary_path = max(ais_bench_output_dir.glob("*/summary/summary_*.csv"), key=os.path.getmtime)
@@ -453,7 +470,7 @@ def run_ais_bench(
         mask = (df["dataset"] == "ceval-weighted") & (df["metric"] == "weighted_average")
         if not mask.any():
             raise ValueError(f"Could not find weighted average accuracy in summary csv at {summary_path}")
-        weighted_accuracy = float(df.loc[mask, "vllm-api-general-chat"].values[-1])
+        weighted_accuracy = float(df.loc[mask, "vllm-api-general-chat"].values[-1])  # type: ignore[index]
 
         print(f"Finished ais_bench for model {model_name} with weighted accuracy {weighted_accuracy:.2f}")
 
@@ -627,6 +644,18 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     parser.add_argument(
         "--dry-run", action="store_true", help="Whether to do a dry run without actually running the benchmarks"
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=4 * 3600,
+        help="Timeout in seconds for ais_bench subprocess (default: 4h = 14400s)",
+    )
+    parser.add_argument(
+        "--retry", type=int, default=3, help="Number of retry attempts for ais_bench on failure (default: 3)"
+    )
+    parser.add_argument(
+        "--vllm-timeout", type=int, default=1800, help="Timeout in seconds for vLLM server startup (default: 1800s)"
+    )
     args = parser.parse_args()
 
     print(f"Running batch AISBench with arguments: {args}")
@@ -721,7 +750,10 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 xlite_full_mode=xlite_full,
                 extra_args=args_extra_aisbench_args[i],
                 device_ids=device_ids[-tp * dp :],
+                timeout=args.timeout,
+                retry=args.retry,
                 debug=args.debug,
+                vllm_timeout=args.vllm_timeout,
             )
             bench_results.append(result)
         except Exception as e:
