@@ -803,7 +803,8 @@ void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t st
         return;
     }
     aclrtlaunch_permutation(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr,
-                            counts.ptr, in.shape[0], in.shape[1], counts.shape[0], start, end);
+                            counts.ptr, in.shape[0], in.shape[1], out.shape[0], counts.shape[0],
+                            start, end);
 }
 
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing,

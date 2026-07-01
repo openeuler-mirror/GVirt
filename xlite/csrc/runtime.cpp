@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#include <cmath>
 #include <sstream>
 #include "ascend.h"
 #include "base.h"
@@ -87,6 +88,23 @@ void XRuntime::Init(size_t sizeMB)
         enableMoEAllToAll = true;
         if (_rankId == 0) {
             std::cout << "Xlite MoE AllToAll Enabled!" << std::endl;
+        }
+    }
+
+    const char *ratioPerEPEnv = std::getenv("XLITE_ACTIVE_TOKENS_RATIO_PER_EP");
+    if (ratioPerEPEnv) {
+        char *endPtr = nullptr;
+        double val = strtod(ratioPerEPEnv, &endPtr);
+        double min = 1 / static_cast<double>(_moeEpSize);
+        double max = 1.0f;
+        if (endPtr != ratioPerEPEnv && *endPtr == '\0' && std::isfinite(val)) {
+            activeTokensRatioPerEp = val;
+        }
+        if (activeTokensRatioPerEp < min) {
+            activeTokensRatioPerEp = min;
+        }
+        if (activeTokensRatioPerEp > max) {
+            activeTokensRatioPerEp = max;
         }
     }
 
@@ -576,6 +594,23 @@ void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
         long val = strtol(envCommOptimizeLen, &endPtr, 10);
         if (endPtr != envCommOptimizeLen && *endPtr == '\0' && val >= 0) {
             commOptimizeLen = static_cast<uint32_t>(val);
+        }
+    }
+
+    const char *ratioPerEPEnv = std::getenv("XLITE_ACTIVE_TOKENS_RATIO_PER_EP");
+    if (ratioPerEPEnv) {
+        char *endPtr = nullptr;
+        double val = strtod(ratioPerEPEnv, &endPtr);
+        double min = 1 / static_cast<double>(_moeEpSize);
+        double max = 1.0f;
+        if (endPtr != ratioPerEPEnv && *endPtr == '\0' && std::isfinite(val)) {
+            activeTokensRatioPerEp = val;
+        }
+        if (activeTokensRatioPerEp < min) {
+            activeTokensRatioPerEp = min;
+        }
+        if (activeTokensRatioPerEp > max) {
+            activeTokensRatioPerEp = max;
         }
     }
 
