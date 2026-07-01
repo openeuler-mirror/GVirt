@@ -632,8 +632,11 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
 
         XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
         XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
-        XTensor &expertsSorted =
-            rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
+        size_t shape0 = mAllDp * _c.nActExperts;
+        if (mAllDp >= XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD) {
+            shape0 = static_cast<size_t>(mAllDp * _c.nActExperts * rt.activeTokensRatioPerEp);
+        }
+        XTensor &expertsSorted = rt.GetTensor({shape0, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
         XliteOpPermutation(rt, inputAllDp, routingAllDp, start, end, expertsSorted, unpIdx,
                            expertsCounts);
         rt.PutTensor(inputAllDp);
@@ -641,8 +644,11 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
     } else {
         XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
         XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
-        XTensor &expertsSorted =
-            rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
+        size_t shape0 = mAllDp * _c.nActExperts;
+        if (mAllDp >= XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD) {
+            shape0 = static_cast<size_t>(mAllDp * _c.nActExperts * rt.activeTokensRatioPerEp);
+        }
+        XTensor &expertsSorted = rt.GetTensor({shape0, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
         XliteOpPermutation(rt, tokenSorted, routing, start, end, expertsSorted, unpIdx,
                            expertsCounts);
         return {weights, routing, unpIdx, expertsSorted, expertsCounts, {}};
@@ -814,8 +820,11 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
         return {weights, routing, unpIdx, expertGrouped, tokensPerExperts, meta};
     } else {
         XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
-        XTensor &expertsSorted =
-            rt.GetTensor({mAllDp * _c.nActExperts, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
+        size_t shape0 = mAllDp * _c.nActExperts;
+        if (mAllDp >= XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD) {
+            shape0 = static_cast<size_t>(mAllDp * _c.nActExperts * rt.activeTokensRatioPerEp);
+        }
+        XTensor &expertsSorted = rt.GetTensor({shape0, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
         XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
         XliteOpPermutation(rt, tokenSorted, routing, start, end, expertsSorted, unpIdx,
                            expertsCounts);

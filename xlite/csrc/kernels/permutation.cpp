@@ -9,8 +9,9 @@
 
 __aicore__ inline void permutation1(GM_ADDR input, GM_ADDR routing_map, GM_ADDR output,
                                     GM_ADDR unp_idx, GM_ADDR counts, uint32_t n_tokens,
-                                    uint32_t dim, uint32_t n_routed_experts,
-                                    uint32_t experts_start_idx, uint32_t experts_end_idx)
+                                    uint32_t dim, uint32_t max_expert_sorted,
+                                    uint32_t n_routed_experts, uint32_t experts_start_idx,
+                                    uint32_t experts_end_idx)
 {
     set_atomic_none();
     set_mask_norm();
@@ -94,8 +95,9 @@ __aicore__ inline void permutation1(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
 
 __aicore__ inline void permutation2(GM_ADDR input, GM_ADDR routing_map, GM_ADDR output,
                                     GM_ADDR unp_idx, GM_ADDR counts, uint32_t n_tokens,
-                                    uint32_t dim, uint32_t n_routed_experts,
-                                    uint32_t experts_start_idx, uint32_t experts_end_idx)
+                                    uint32_t dim, uint32_t max_expert_sorted,
+                                    uint32_t n_routed_experts, uint32_t experts_start_idx,
+                                    uint32_t experts_end_idx)
 {
     uint32_t sum = 0;
     __ubuf__ uint32_t *c = (__ubuf__ uint32_t *)get_imm(0);
@@ -114,6 +116,7 @@ __aicore__ inline void permutation2(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
         *(s + i) = sum;
         sum += count;
     }
+    assert(sum <= max_expert_sorted);
     *psum = sum;
 
     set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
@@ -127,8 +130,9 @@ __aicore__ inline void permutation2(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
 
 __aicore__ inline void permutation3(GM_ADDR input, GM_ADDR routing_map, GM_ADDR output,
                                     GM_ADDR unp_idx, GM_ADDR counts, uint32_t n_tokens,
-                                    uint32_t dim, uint32_t n_routed_experts,
-                                    uint32_t experts_start_idx, uint32_t experts_end_idx)
+                                    uint32_t dim, uint32_t max_expert_sorted,
+                                    uint32_t n_routed_experts, uint32_t experts_start_idx,
+                                    uint32_t experts_end_idx)
 {
     set_atomic_none();
     set_mask_norm();
@@ -194,31 +198,29 @@ __aicore__ inline void permutation3(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
     pipe_barrier(PIPE_ALL);
 }
 
-extern "C" __global__ __aicore__ void permutation(GM_ADDR input, GM_ADDR routing_map,
-                                                  GM_ADDR output, GM_ADDR unp_idx, GM_ADDR counts,
-                                                  uint32_t n_tokens, uint32_t dim,
-                                                  uint32_t n_routed_experts,
-                                                  uint32_t experts_start_idx,
-                                                  uint32_t experts_end_idx)
+extern "C" __global__ __aicore__ void permutation(
+    GM_ADDR input, GM_ADDR routing_map, GM_ADDR output, GM_ADDR unp_idx, GM_ADDR counts,
+    uint32_t n_tokens, uint32_t dim, uint32_t max_expert_sorted, uint32_t n_routed_experts,
+    uint32_t experts_start_idx, uint32_t experts_end_idx)
 {
     uint64_t flag_id = 0;
     uint64_t mode = 0;
     uint64_t config = 1 | (mode << 4) | (flag_id << 8);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
 
-    permutation1(input, routing_map, output, unp_idx, counts, n_tokens, dim, n_routed_experts,
-                 experts_start_idx, experts_end_idx);
+    permutation1(input, routing_map, output, unp_idx, counts, n_tokens, dim, max_expert_sorted,
+                 n_routed_experts, experts_start_idx, experts_end_idx);
     ffts_cross_core_sync(PIPE_MTE3, config);
     wait_flag_dev(flag_id);
 
     if (block_idx == 0) {
-        permutation2(input, routing_map, output, unp_idx, counts, n_tokens, dim, n_routed_experts,
-                     experts_start_idx, experts_end_idx);
+        permutation2(input, routing_map, output, unp_idx, counts, n_tokens, dim, max_expert_sorted,
+                     n_routed_experts, experts_start_idx, experts_end_idx);
     }
     ffts_cross_core_sync(PIPE_MTE3, config);
     wait_flag_dev(flag_id);
 
-    permutation3(input, routing_map, output, unp_idx, counts, n_tokens, dim, n_routed_experts,
-                 experts_start_idx, experts_end_idx);
+    permutation3(input, routing_map, output, unp_idx, counts, n_tokens, dim, max_expert_sorted,
+                 n_routed_experts, experts_start_idx, experts_end_idx);
 }
 #endif

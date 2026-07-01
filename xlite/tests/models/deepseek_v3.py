@@ -1330,7 +1330,7 @@ class DeepSeek_V3(nn.Module):
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = Runtime(local_rank, 0, rank, world_size)
+            self.xlite_rt = Runtime(local_rank, 0, rank, world_size, 1, 1, args.moe_ep_size)
             self.init_xlite_model(args)
             kv_size = self.init_xlite_kvcache(args)
             pool_size = self.xlite_model.get_tensor_pool_size()

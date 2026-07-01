@@ -10,6 +10,7 @@
 
 #define XLITE_DEFAULT_PORT 10266
 #define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144
+#define XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD 1024
 
 #ifdef XLITE_DEBUG_ON
 #define XLITE_DEBUG_POINT(condition, rt, h, str) \
@@ -155,6 +156,7 @@ public:
     uint32_t defaultMatmulSwizzle = 0x600;
     bool disableSwizzleTable = false;
     bool enableMoEAllToAll = false;
+    double activeTokensRatioPerEp = 1.0f;
 
     XcclComm *_tpXcclComm = nullptr;
     XcclComm *_dpXcclComm = nullptr;
