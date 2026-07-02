@@ -96,6 +96,7 @@ def stop_vllm_server(process: subprocess.Popen, sleep_time: int = 120):
     except ProcessLookupError:
         print(f"Process with PID {pid} not found, it may have already exited.")
         VLLM_PROCESSES.discard(process)
+        _close_stream_handles(process)
         return
 
     while True:
@@ -112,11 +113,45 @@ def stop_vllm_server(process: subprocess.Popen, sleep_time: int = 120):
             break
 
     VLLM_PROCESSES.discard(process)
+    _close_stream_handles(process)
+
+
+def _close_stream_handles(process: subprocess.Popen) -> None:
+    """Close any file-backed stdout/stderr streams on the given process.
+
+    Set when :func:`start_vllm_server` redirected the server logs to files.
+    ``DEVNULL``, ``None``, and ``PIPE`` have nothing to close.
+    """
+    for stream in (process.stdout, process.stderr):
+        if stream is None or isinstance(stream, (int, bytes)):
+            # subprocess.DEVNULL is an int (not a file object); skip so we never
+            # call .close() on something that doesn't have one.
+            continue
+        stream.close()
 
 
 def check_subprocess_result(res: subprocess.CompletedProcess, error_message: str):
     if res.returncode != 0:
         raise RuntimeError(f"{error_message}: {res.stderr.decode('utf-8') if res.stderr else 'No error message'}")
+
+
+def _read_tail(handle: object, max_bytes: int = 16 * 1024) -> str:
+    """Read the trailing bytes of a still-open log file handle opened for writing.
+
+    Used to surface vLLM's error output when the server process dies prematurely,
+    in the same role that ``res.stderr`` plays in :func:`check_subprocess_result`.
+    Returns the decoded tail, or an empty string if the handle is ``None``.
+    """
+    try:
+        handle.flush()  # ensure buffered writes are visible to the read
+        pos = handle.tell()
+        size = handle.seek(0, 2)  # SEEK_END
+        handle.seek(max(0, size - max_bytes))
+        tail = handle.read()
+        handle.seek(pos)  # restore the write position so the server keeps appending cleanly
+        return tail.decode("utf-8", errors="replace") if isinstance(tail, bytes) else tail
+    except Exception:
+        return "No error message available"
 
 
 _RE_REPEAT_MODEL = re.compile(r"^([1-9]\d*)\s*\*\s*(.+)\s*$")
@@ -158,9 +193,11 @@ def prepare_env(
         )
         check_subprocess_result(res, "Failed to clone ais_bench repo")
 
-    # make a `.venv` in the benchmark repo for ais_bench, and install requirements
+    # make a `.venv` in the benchmark repo for ais_bench, and install requirements.
+    # the venv is namespaced by Python version (e.g. `.venv_py39`, `.venv_py310`) so that
+    # different interpreters don't share — or clobber — each other's installed packages.
     os.chdir(ais_bench_dir)
-    venv_path = ais_bench_dir / ".venv"
+    venv_path = ais_bench_dir / f".venv_py{sys.version_info.major}{sys.version_info.minor}"
     if not venv_path.exists():
         print(f"Creating virtual environment for ais_bench at {venv_path}...")
         res = subprocess.run([sys.executable, "-m", "venv", str(venv_path)])
@@ -169,7 +206,7 @@ def prepare_env(
     # activate the virtual environment and install requirements
     activate_script = venv_path / "bin" / "activate"
     VENV_ACTIVATE_CMD = f"source {activate_script}"
-    print("Activating virtual environment and installing ais_bench...")
+    print(f"Activating virtual environment and installing ais_bench to {venv_path}...")
 
     res = subprocess.run(f"{VENV_ACTIVATE_CMD} && command -v ais_bench", shell=True, executable="/bin/bash")
     if res.returncode != 0:
@@ -210,13 +247,14 @@ def start_vllm_server(
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
-    gpu_memory_utilization: float = 0.9,
+    gpu_memory_utilization: float = 0.95,
     block_size: int = 128,
     xlite: bool = False,
     xlite_full_mode: bool = False,
     device_ids: list[int] | None = None,
     timeout: int = 1800,
     debug: bool = False,
+    print_to: Path | None = None,
 ) -> subprocess.Popen:
     if not model_path or not Path(model_path).exists():
         raise ValueError(f"Model path {model_path} does not exist")
@@ -289,15 +327,22 @@ def start_vllm_server(
     env_copy["XLITE_FLASH_ATTENTION_ENABLE"] = "1"
 
     t1 = datetime.now()
-    # ignore stdout and stderr of the server process, as it may contain a lot of logs
+    # in debug mode, stream the server logs to the console; otherwise, redirect them to a file
+    # (when print_to is given) or to /dev/null so they don't drown out the benchmark output.
+    # The log file handles are kept open for the lifetime of the server process and closed
+    # only after the readiness check below succeeds, so vLLM keeps writing until we're done.
+    stdprint_target = None if debug else subprocess.DEVNULL
+    if not debug and print_to is not None:
+        print_to.parent.mkdir(parents=True, exist_ok=True)
+        stdprint_target = open(print_to.with_suffix(".out.log"), "w")
     process = subprocess.Popen(
         vllm_cmd,
         shell=True,
         executable="/bin/bash",
         env=env_copy,
         start_new_session=True,  # to allow killing the whole process group later
-        stdout=None if debug else subprocess.PIPE,
-        stderr=None if debug else subprocess.PIPE,
+        stdout=stdprint_target,
+        stderr=stdprint_target,
     )
 
     # check if the server is ready by checking port availability
@@ -306,7 +351,7 @@ def start_vllm_server(
             if process.poll() is not None:
                 raise RuntimeError(
                     f"vLLM server process exited unexpectedly with code {process.returncode}:\n"
-                    f"{process.stderr.read().decode('utf-8') if process.stderr else 'No error message'}"
+                    f"{_read_tail(stdprint_target)}"
                 )
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 if sock.connect_ex(("localhost", port)) == 0:
@@ -317,6 +362,13 @@ def start_vllm_server(
     except Exception as e:
         process.terminate()
         raise e
+    except KeyboardInterrupt as e:
+        for process in list(VLLM_PROCESSES):
+            stop_vllm_server(process)
+        raise e
+    finally:
+        if stdprint_target and not isinstance(stdprint_target, int):  # don't close DEVNULL or None
+            stdprint_target.flush()
 
     VLLM_PROCESSES.add(process)
     print(f"vLLM server started successfully with PID {process.pid}")
@@ -338,7 +390,7 @@ def run_ais_bench(
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
-    gpu_memory_utilization: float = 0.9,
+    gpu_memory_utilization: float = 0.95,
     block_size: int = 128,
     xlite: bool = False,
     xlite_full_mode: bool = False,
@@ -457,11 +509,10 @@ def run_ais_bench(
         device_ids=device_ids,
         timeout=vllm_timeout,
         debug=debug,
+        # when not in debug mode, redirect the server logs to files next to the
+        # benchmark output so they're preserved for post-mortem inspection.
+        print_to=None if debug else ais_bench_output_dir / f"vllm_server_{model_name}{suffix}",
     )
-    if vllm_process.stdout:
-        vllm_process.stdout.close()
-    if vllm_process.stderr:
-        vllm_process.stderr.close()
 
     try:
         aisbench_cmd_lst: list[str] = [
@@ -505,6 +556,10 @@ def run_ais_bench(
 
         bench_result.accuracy = weighted_accuracy
         bench_result.error = None
+    except KeyboardInterrupt:
+        print(f"KeyboardInterrupt received, stopping vLLM server for model {model_name}...")
+        bench_result.error = "KeyboardInterrupt"
+        stop_vllm_server(vllm_process)
     except Exception as e:
         print(f"Error occurred while running ais_bench for model {model_name}: {str(e)}")
         bench_result.error = str(e)
@@ -552,7 +607,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     parser.add_argument(
         "--model-dir",
         type=Path,
-        required=True,
+        default="/mnt/sdb/models",
         help="Directory containing models to benchmark, each subdirectory is a model",
     )
     parser.add_argument("--port", type=int, default=8241, help="Port for vLLM server to listen on")
@@ -561,8 +616,8 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         "-GMU",
         "--gpu-memory-utilization",
         type=float,
-        default=0.9,
-        help="GPU memory utilization for vLLM server, between 0 and 1 (e.g., 0.9 for 90%% utilization)",
+        default=0.95,
+        help="GPU memory utilization for vLLM server, between 0 and 1 (e.g., 0.95 for 95%% utilization)",
     )
     parser.add_argument(
         "-N",
@@ -668,6 +723,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     parser.add_argument(
         "--dry-run", action="store_true", help="Whether to do a dry run without actually running the benchmarks"
     )
+    parser.add_argument("--env-only", action="store_true", help="Whether to only prepare the environment and exit")
     parser.add_argument(
         "--timeout",
         type=int,
@@ -683,6 +739,13 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     args = parser.parse_args()
 
     print(f"Running batch AISBench with arguments: {args}")
+
+    if not args.dry_run or args.env_only:
+        # prepare the environment: clone ais_bench repo, create virtual environment, install requirements, download dataset
+        prepare_env(args.ais_bench_dir)
+    if args.env_only:
+        print("Environment preparation complete, exiting as --env-only was specified.")
+        sys.exit(0)
 
     if not args.models:
         raise ValueError("No models specified for benchmarking, please provide model subdirectory names using --models")
@@ -757,9 +820,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
             print(f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, Backend: {backend_str}")
         sys.exit(0)
 
-    # prepare the environment: clone ais_bench repo, create virtual environment, install requirements, download dataset
-    prepare_env(args.ais_bench_dir)
-
     log_file_path: Path = (
         args.log_file
         or args.ais_bench_dir / "reports" / f"benchmark_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
@@ -815,6 +875,10 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 accuracy=0.0,
             )
             result.error = str(e)
+        except KeyboardInterrupt as e:
+            for process in list(VLLM_PROCESSES):
+                stop_vllm_server(process)
+            raise e
         finally:
             # ensure all started vLLM server processes are stopped
             for process in list(VLLM_PROCESSES):
