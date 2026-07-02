@@ -202,8 +202,7 @@ def start_vllm_server(
     model_path: str,
     *,
     model_name: str | None = None,
-    quantization: bool = False,
-    port: int = 8384,
+    port: int = 8241,
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
@@ -250,13 +249,16 @@ def start_vllm_server(
         "XLITE_FLASH_ATTENTION_ENABLE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": ",".join(str(i) for i in device_ids),
     }
-    os.environ.update(envs)
+
+    env_copy = os.environ.copy()
+    env_copy.update(envs)
 
     model_name = model_name or Path(model_path).stem or "model"
+    quantization = (Path(model_path) / "quant_model_description.json").exists()
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
     xlite_full_mode = xlite_full_mode and xlite  # full mode can only be enabled when xlite is enabled
     vllm_cmd_lst: list[str] = [
-        f'vllm serve "{model_path}" --async-scheduling --trust-remote-code',
+        f'vllm serve "{model_path}"',
         f'--served-model-name "{model_name}"',
         f'--port "{port}"',
         "--nnodes 1",
@@ -264,22 +266,27 @@ def start_vllm_server(
         f"{'--enable-expert-parallel' if ep else ''}",
         f'--data-parallel-size "{dp_size}"',
         f'--data-parallel-size-local "{dp_size}"',
+        "--data-parallel-address 127.0.0.1",
+        "--data-parallel-rpc-port 15973",
+        "--async-scheduling",
+        "--trust-remote-code",
         f'--max-num-seqs "{max_num_seqs}"',
         f'--max-model-len "{max_model_len}"',
         f'--max-num-batched-tokens "{max_num_batched_tokens}"',
         f'--seed "{seed}"',
         f'--gpu-memory-utilization "{gpu_memory_utilization}"',
         f'--block-size "{block_size}"',
-        '--compilation-config \'{"cudagraph_capture_sizes":[1,2,4,8,16,32,64], "cudagraph_mode": "FULL_DECODE_ONLY"}\'',
+        '--compilation-config \'{"cudagraph_capture_sizes":[4,8,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}\'',
         f'--additional-config \'{{"xlite_graph_config": {{"enabled": {str(xlite).lower()}, "full_mode": {str(xlite_full_mode).lower()}}}}}\'',
     ]
     if quantization:
         vllm_cmd_lst.append("--quantization ascend")
     vllm_cmd = " ".join(vllm_cmd_lst)
 
-    os.environ["XLITE_NODE_IPS"] = ",".join(["127.0.0.1"] * dp_size)
-    os.environ["XLITE_LOCAL_IP"] = "127.0.0.1"
-    os.environ["XLITE_DEVS_PER_NODE"] = str(dp_size * tp_size)
+    env_copy["XLITE_NODE_IPS"] = ",".join(["127.0.0.1"] * dp_size)
+    env_copy["XLITE_LOCAL_IP"] = "127.0.0.1"
+    env_copy["XLITE_DEVS_PER_NODE"] = str(dp_size * tp_size)
+    env_copy["XLITE_FLASH_ATTENTION_ENABLE"] = "1"
 
     t1 = datetime.now()
     # ignore stdout and stderr of the server process, as it may contain a lot of logs
@@ -287,7 +294,7 @@ def start_vllm_server(
         vllm_cmd,
         shell=True,
         executable="/bin/bash",
-        env=os.environ.copy(),
+        env=env_copy,
         start_new_session=True,  # to allow killing the whole process group later
         stdout=None if debug else subprocess.PIPE,
         stderr=None if debug else subprocess.PIPE,
@@ -323,7 +330,6 @@ def run_ais_bench(
     ais_bench_num_prompts: int = 128,
     model_path: str = "",
     model_name: str | None = None,
-    quantization: bool = False,
     port: int = 8384,
     tp_size: int = 1,
     ep: bool = True,
@@ -344,6 +350,7 @@ def run_ais_bench(
     vllm_timeout: int = 1800,
 ) -> BenchResult:
     model_name = model_name or Path(model_path).stem or "model"
+    quantization = (Path(model_path) / "quant_model_description.json").exists()
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
     xlite_full_mode = xlite_full_mode and xlite  # full mode can only be enabled when xlite is enabled
     bench_result = BenchResult(
@@ -435,7 +442,6 @@ def run_ais_bench(
     vllm_process = start_vllm_server(
         model_path=model_path,
         model_name=model_name,
-        quantization=quantization,
         port=port,
         tp_size=tp_size,
         ep=ep,
@@ -549,7 +555,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         required=True,
         help="Directory containing models to benchmark, each subdirectory is a model",
     )
-    parser.add_argument("--port", type=int, default=8384, help="Port for vLLM server to listen on")
+    parser.add_argument("--port", type=int, default=8241, help="Port for vLLM server to listen on")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for benchmarking")
     parser.add_argument(
         "-GMU",
@@ -571,15 +577,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         nargs="+",
         default=None,
         help="List of model subdirectory names to benchmark. Supports N*<model> format (e.g. 3*Qwen3-30B-A3B expands to 3 copies)",
-    )
-    parser.add_argument(
-        "-Q",
-        "--quantization",
-        type=int,
-        nargs="+",
-        choices=[0, 1],
-        default=[0],
-        help="Whether the model is quantized (1 for yes, 0 for no; last value used for padding)",
     )
     parser.add_argument(
         "-TP",
@@ -692,7 +689,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
 
     args_models: list[str] = expand_model_list(args.models)
     n_models = len(args_models)
-    args_quantization: list[int] = args.quantization + [args.quantization[-1]] * (n_models - len(args.quantization))
     args_tps: list[int] = args.tps + [args.tps[-1]] * (n_models - len(args.tps))
     args_eps: list[bool] = args.eps + [args.eps[-1]] * (n_models - len(args.eps))
     args_dps: list[int] = args.dps + [args.dps[-1]] * (n_models - len(args.dps))
@@ -715,7 +711,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         args_xlite = args.xlite * n_models
         # Repeat each model's args n_xlite times: [A,B,C] with n_xlite=2 -> [A,A,B,B,C,C]
         args_models = [m for m in args_models for _ in range(n_xlite)]
-        args_quantization = [q for q in args_quantization for _ in range(n_xlite)]
         args_tps = [tp for tp in args_tps for _ in range(n_xlite)]
         args_eps = [ep for ep in args_eps for _ in range(n_xlite)]
         args_dps = [dp for dp in args_dps for _ in range(n_xlite)]
@@ -781,7 +776,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
 
     for i, (model, tp, ep, dp, xlite, xlite_full) in enumerate(combinations):
         print(f"\n>>> Running benchmark task {i + 1}/{len(combinations)}")
-        model_path = args.model_dir / model
+        model_path: Path = args.model_dir / model
         try:
             result = run_ais_bench(
                 ais_bench_dir=args.ais_bench_dir,
@@ -789,7 +784,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 ais_bench_num_prompts=args.num_prompts,
                 model_path=str(model_path),
                 model_name=model,
-                quantization=bool(args_quantization[i]),
                 port=args.port,
                 tp_size=tp,
                 ep=ep,

@@ -258,7 +258,6 @@ def main():
     )
     default_model_args = (
         "--models Qwen3-32B-w8a8-nopdmix Qwen3-30B-A3B-Instruct-2507 Qwen3-VL-8B-Instruct GLM-4.7-W8A8-floatmtp MiniMax-M2.7-w8a8-QuaRot",
-        "--quantization 1 0 0 1 1",
         "--tps 4 4 4 8 8",
         "--eps 0 1 0 1 1",
         "--dps 1 1 1 1 1",
@@ -286,9 +285,7 @@ def main():
         "--timeout", type=int, default=4 * 3600, help="ais_bench 子进程超时时间（秒），默认 4h = 14400s"
     )
     parser.add_argument("--retry", type=int, default=3, help="ais_bench 失败时的重试次数，默认 3")
-    parser.add_argument(
-        "--vllm-timeout", type=int, default=1800, help="vLLM 服务器启动超时时间（秒），默认 1800s"
-    )
+    parser.add_argument("--vllm-timeout", type=int, default=1800, help="vLLM 服务器启动超时时间（秒），默认 1800s")
 
     args = parser.parse_args()
 

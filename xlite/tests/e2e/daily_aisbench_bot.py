@@ -670,9 +670,7 @@ def main():
     10. 返回退出码
     """
     # 解析命令行参数
-    default_model_args = (
-        "--models Qwen3-30B-A3B --quantization 0 --tps 8 --eps 1 --dps 1 --xlite 2 1 0 --broadcast-xlite"
-    )
+    default_model_args = "--models Qwen3-30B-A3B --tps 8 --eps 1 --dps 1 --xlite 2 1 0 --broadcast-xlite"
     parser = argparse.ArgumentParser(description="xlite 每日自动化精度测试机器人")
     parser.add_argument(
         "-args",
