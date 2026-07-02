@@ -1443,8 +1443,19 @@ void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uin
     }
     uint32_t shape0 = input.shape[0];
     uint32_t shape1 = input.shape.size() >= 2 ? input.shape[1] : 1;
+    if (calcOffset >= shape1) {
+        throw std::runtime_error(std::string(__func__) + ": calcOffset " +
+                                 std::to_string(calcOffset) + " >= shape1 " +
+                                 std::to_string(shape1));
+    }
     if (calcNum > shape1 - calcOffset) {
         calcNum = shape1 - calcOffset;
+    }
+    if (calcNum == 0) {
+        throw std::runtime_error(std::string(__func__) + ": calcNum should be > 0");
+    } else if (calcNum > MAX_MULS_CALC_NUM) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": calcNum should be <= " + std::to_string(MAX_MULS_CALC_NUM));
     }
     launchKernel(rt.aivNum, rt.stream, input.ptr, scale, output.ptr, shape0, shape1, calcOffset,
                  calcNum);

@@ -35,4 +35,7 @@ enum class NormKind {
 // mla topk
 #define MAX_TOPK_NUM 2048
 #define MAX_SOFTMAX_PINGPONG_LEN 11776
+
+// muls
+#define MAX_MULS_CALC_NUM 16320
 #endif

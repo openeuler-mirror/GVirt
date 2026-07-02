@@ -232,6 +232,7 @@ private:
     uint64_t _mropeMaskW;
     XTensor _sync;
     XTensor _dsaTopkIndices;
+    float _dsaIndexerScale = 1.0f;
 };
 
 #endif
