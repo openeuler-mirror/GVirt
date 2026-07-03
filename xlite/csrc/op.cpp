@@ -1426,7 +1426,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                  topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlock, topK);
 }
 
-void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)
+void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,
+                 uint32_t calcNum)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1440,7 +1441,24 @@ void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output)
         std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
         throw std::runtime_error(err_str + " unsupported!");
     }
-    launchKernel(rt.aivNum, rt.stream, input.ptr, scale, output.ptr, input.numel);
+    uint32_t shape0 = input.shape[0];
+    uint32_t shape1 = input.shape.size() >= 2 ? input.shape[1] : 1;
+    if (calcOffset >= shape1) {
+        throw std::runtime_error(std::string(__func__) + ": calcOffset " +
+                                 std::to_string(calcOffset) + " >= shape1 " +
+                                 std::to_string(shape1));
+    }
+    if (calcNum > shape1 - calcOffset) {
+        calcNum = shape1 - calcOffset;
+    }
+    if (calcNum == 0) {
+        throw std::runtime_error(std::string(__func__) + ": calcNum should be > 0");
+    } else if (calcNum > MAX_MULS_CALC_NUM) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": calcNum should be <= " + std::to_string(MAX_MULS_CALC_NUM));
+    }
+    launchKernel(rt.aivNum, rt.stream, input.ptr, scale, output.ptr, shape0, shape1, calcOffset,
+                 calcNum);
 }
 
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,

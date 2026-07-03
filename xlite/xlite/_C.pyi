@@ -147,7 +147,7 @@ class ModelConfig:
         index_head_dim (int): Indexer head dimension.
         index_n_heads (int): Indexer head count.
         index_topk (int): Indexer top-k size.
-        index_softmax_scale (float): Indexer softmax scale.
+        index_softmax_scale (float): Indexer softmax scale.(deprecated)
         index_rope_interleaved (bool): Whether indexer RoPE is interleaved.
     """
 
@@ -252,7 +252,7 @@ class ModelConfig:
     index_topk: int = ...
     """Indexer top-k size."""
     index_softmax_scale: float = ...
-    """Indexer softmax scale."""
+    """Indexer softmax scale.(deprecated)"""
     index_rope_interleaved: bool = ...
     """Whether indexer RoPE is interleaved."""
 

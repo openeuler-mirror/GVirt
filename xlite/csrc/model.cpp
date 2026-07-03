@@ -86,6 +86,11 @@ void XModel::Init(void)
         }
     }
 
+    if (_c.attnType == XMODEL_ATTN_DSA) {
+        _dsaIndexerScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
+        _dsaIndexerScale *= 1.0f / std::sqrt(static_cast<float>(_c.indexHeadDim));
+    }
+
     size = _c.nRoutedExperts * XDtypeBit(INT64) / 8;
     for (uint32_t i = _c.nDenseLayers; i < _c.nLayers; i++) {
         weights.resize(_c.nRoutedExperts);
@@ -321,7 +326,6 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
 
     XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
                               hiddenState.dtype, DBG_LOC);
-    XliteOpMuls(rt, attnNormQc, _c.indexSoftmaxScale, attnNormQc);
     ForwardLinear(rt, layer, attnNormQc, indexQB, q);
     // TODO not interleaved case
     if (_c.indexRopeInterleaved) {
@@ -329,8 +333,7 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
                            rt._attnPosition);
     }
 
-    float weightScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
-    XliteOpMuls(rt, kw, weightScale, kw);
+    XliteOpMuls(rt, kw, _dsaIndexerScale, kw, _c.indexHeadDim, _c.indexNHeads);
 
     XTensor &scores =
         rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, _c.indexTopK * 2}, hiddenState.dtype, DBG_LOC);

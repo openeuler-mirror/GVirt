@@ -131,7 +131,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK);
-void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output);
+void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output,
+                 uint32_t calcOffset = 0, uint32_t calcNum = UINT32_MAX);
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,
                              XTensor &expertsCountsOutput, uint32_t nRoutedExperts);
 void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &counts,
