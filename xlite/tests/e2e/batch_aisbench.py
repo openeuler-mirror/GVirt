@@ -9,6 +9,7 @@ Using `vllm-ascend`'s official container image is recommended.
 from dataclasses import dataclass, field
 from datetime import datetime
 import os
+import re
 import signal
 from pathlib import Path
 import socket
@@ -95,6 +96,7 @@ def stop_vllm_server(process: subprocess.Popen, sleep_time: int = 120):
     except ProcessLookupError:
         print(f"Process with PID {pid} not found, it may have already exited.")
         VLLM_PROCESSES.discard(process)
+        _close_stream_handles(process)
         return
 
     while True:
@@ -111,11 +113,67 @@ def stop_vllm_server(process: subprocess.Popen, sleep_time: int = 120):
             break
 
     VLLM_PROCESSES.discard(process)
+    _close_stream_handles(process)
+
+
+def _close_stream_handles(process: subprocess.Popen) -> None:
+    """Close any file-backed stdout/stderr streams on the given process.
+
+    Set when :func:`start_vllm_server` redirected the server logs to files.
+    ``DEVNULL``, ``None``, and ``PIPE`` have nothing to close.
+    """
+    for stream in (process.stdout, process.stderr):
+        if stream is None or isinstance(stream, (int, bytes)):
+            # subprocess.DEVNULL is an int (not a file object); skip so we never
+            # call .close() on something that doesn't have one.
+            continue
+        stream.close()
 
 
 def check_subprocess_result(res: subprocess.CompletedProcess, error_message: str):
     if res.returncode != 0:
         raise RuntimeError(f"{error_message}: {res.stderr.decode('utf-8') if res.stderr else 'No error message'}")
+
+
+def _read_tail(handle: object, max_bytes: int = 16 * 1024) -> str:
+    """Read the trailing bytes of a still-open log file handle opened for writing.
+
+    Used to surface vLLM's error output when the server process dies prematurely,
+    in the same role that ``res.stderr`` plays in :func:`check_subprocess_result`.
+    Returns the decoded tail, or an empty string if the handle is ``None``.
+    """
+    try:
+        handle.flush()  # ensure buffered writes are visible to the read
+        pos = handle.tell()
+        size = handle.seek(0, 2)  # SEEK_END
+        handle.seek(max(0, size - max_bytes))
+        tail = handle.read()
+        handle.seek(pos)  # restore the write position so the server keeps appending cleanly
+        return tail.decode("utf-8", errors="replace") if isinstance(tail, bytes) else tail
+    except Exception:
+        return "No error message available"
+
+
+_RE_REPEAT_MODEL = re.compile(r"^([1-9]\d*)\s*\*\s*(.+)\s*$")
+
+
+def expand_model_list(models: list[str]) -> list[str]:
+    """Expand ``N*<model>`` entries in the model list into N copies of ``<model>``.
+
+    Format: ``N*<model>`` where N is a positive integer (``\\d+\\*`` prefix, optional).
+    If no ``N*`` prefix is present, the model appears once (default N=1).
+
+    Examples:
+        ``["3*Qwen3-30B-A3B", "Qwen3-32B"]`` → ``["Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-32B"]``
+    """
+    expanded: list[str] = []
+    for entry in models:
+        match = _RE_REPEAT_MODEL.match(entry)
+        if match:
+            expanded.extend([match.group(2)] * int(match.group(1)))
+        else:
+            expanded.append(entry)
+    return expanded
 
 
 def prepare_env(
@@ -135,9 +193,11 @@ def prepare_env(
         )
         check_subprocess_result(res, "Failed to clone ais_bench repo")
 
-    # make a `.venv` in the benchmark repo for ais_bench, and install requirements
+    # make a `.venv` in the benchmark repo for ais_bench, and install requirements.
+    # the venv is namespaced by Python version (e.g. `.venv_py39`, `.venv_py310`) so that
+    # different interpreters don't share — or clobber — each other's installed packages.
     os.chdir(ais_bench_dir)
-    venv_path = ais_bench_dir / ".venv"
+    venv_path = ais_bench_dir / f".venv_py{sys.version_info.major}{sys.version_info.minor}"
     if not venv_path.exists():
         print(f"Creating virtual environment for ais_bench at {venv_path}...")
         res = subprocess.run([sys.executable, "-m", "venv", str(venv_path)])
@@ -146,7 +206,7 @@ def prepare_env(
     # activate the virtual environment and install requirements
     activate_script = venv_path / "bin" / "activate"
     VENV_ACTIVATE_CMD = f"source {activate_script}"
-    print("Activating virtual environment and installing ais_bench...")
+    print(f"Activating virtual environment and installing ais_bench to {venv_path}...")
 
     res = subprocess.run(f"{VENV_ACTIVATE_CMD} && command -v ais_bench", shell=True, executable="/bin/bash")
     if res.returncode != 0:
@@ -179,8 +239,7 @@ def start_vllm_server(
     model_path: str,
     *,
     model_name: str | None = None,
-    quantization: bool = False,
-    port: int = 8384,
+    port: int = 8241,
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
@@ -188,13 +247,14 @@ def start_vllm_server(
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
-    gpu_memory_utilization: float = 0.9,
+    gpu_memory_utilization: float = 0.95,
     block_size: int = 128,
     xlite: bool = False,
     xlite_full_mode: bool = False,
     device_ids: list[int] | None = None,
     timeout: int = 1800,
     debug: bool = False,
+    print_to: Path | None = None,
 ) -> subprocess.Popen:
     if not model_path or not Path(model_path).exists():
         raise ValueError(f"Model path {model_path} does not exist")
@@ -227,13 +287,16 @@ def start_vllm_server(
         "XLITE_FLASH_ATTENTION_ENABLE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": ",".join(str(i) for i in device_ids),
     }
-    os.environ.update(envs)
+
+    env_copy = os.environ.copy()
+    env_copy.update(envs)
 
     model_name = model_name or Path(model_path).stem or "model"
+    quantization = (Path(model_path) / "quant_model_description.json").exists()
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
     xlite_full_mode = xlite_full_mode and xlite  # full mode can only be enabled when xlite is enabled
     vllm_cmd_lst: list[str] = [
-        f'vllm serve "{model_path}" --async-scheduling --trust-remote-code',
+        f'vllm serve "{model_path}"',
         f'--served-model-name "{model_name}"',
         f'--port "{port}"',
         "--nnodes 1",
@@ -241,33 +304,45 @@ def start_vllm_server(
         f"{'--enable-expert-parallel' if ep else ''}",
         f'--data-parallel-size "{dp_size}"',
         f'--data-parallel-size-local "{dp_size}"',
+        "--data-parallel-address 127.0.0.1",
+        "--data-parallel-rpc-port 15973",
+        "--async-scheduling",
+        "--trust-remote-code",
         f'--max-num-seqs "{max_num_seqs}"',
         f'--max-model-len "{max_model_len}"',
         f'--max-num-batched-tokens "{max_num_batched_tokens}"',
         f'--seed "{seed}"',
         f'--gpu-memory-utilization "{gpu_memory_utilization}"',
         f'--block-size "{block_size}"',
-        '--compilation-config \'{"cudagraph_capture_sizes":[1,2,4,8,16,32,64], "cudagraph_mode": "FULL_DECODE_ONLY"}\'',
+        '--compilation-config \'{"cudagraph_capture_sizes":[4,8,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}\'',
         f'--additional-config \'{{"xlite_graph_config": {{"enabled": {str(xlite).lower()}, "full_mode": {str(xlite_full_mode).lower()}}}}}\'',
     ]
     if quantization:
         vllm_cmd_lst.append("--quantization ascend")
     vllm_cmd = " ".join(vllm_cmd_lst)
 
-    os.environ["XLITE_NODE_IPS"] = ",".join(["127.0.0.1"] * dp_size)
-    os.environ["XLITE_LOCAL_IP"] = "127.0.0.1"
-    os.environ["XLITE_DEVS_PER_NODE"] = str(dp_size * tp_size)
+    env_copy["XLITE_NODE_IPS"] = ",".join(["127.0.0.1"] * dp_size)
+    env_copy["XLITE_LOCAL_IP"] = "127.0.0.1"
+    env_copy["XLITE_DEVS_PER_NODE"] = str(dp_size * tp_size)
+    env_copy["XLITE_FLASH_ATTENTION_ENABLE"] = "1"
 
     t1 = datetime.now()
-    # ignore stdout and stderr of the server process, as it may contain a lot of logs
+    # in debug mode, stream the server logs to the console; otherwise, redirect them to a file
+    # (when print_to is given) or to /dev/null so they don't drown out the benchmark output.
+    # The log file handles are kept open for the lifetime of the server process and closed
+    # only after the readiness check below succeeds, so vLLM keeps writing until we're done.
+    stdprint_target = None if debug else subprocess.DEVNULL
+    if not debug and print_to is not None:
+        print_to.parent.mkdir(parents=True, exist_ok=True)
+        stdprint_target = open(print_to.with_suffix(".out.log"), "w")
     process = subprocess.Popen(
         vllm_cmd,
         shell=True,
         executable="/bin/bash",
-        env=os.environ.copy(),
+        env=env_copy,
         start_new_session=True,  # to allow killing the whole process group later
-        stdout=None if debug else subprocess.PIPE,
-        stderr=None if debug else subprocess.PIPE,
+        stdout=stdprint_target,
+        stderr=stdprint_target,
     )
 
     # check if the server is ready by checking port availability
@@ -276,7 +351,7 @@ def start_vllm_server(
             if process.poll() is not None:
                 raise RuntimeError(
                     f"vLLM server process exited unexpectedly with code {process.returncode}:\n"
-                    f"{process.stderr.read().decode('utf-8') if process.stderr else 'No error message'}"
+                    f"{_read_tail(stdprint_target)}"
                 )
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 if sock.connect_ex(("localhost", port)) == 0:
@@ -287,6 +362,13 @@ def start_vllm_server(
     except Exception as e:
         process.terminate()
         raise e
+    except KeyboardInterrupt as e:
+        for process in list(VLLM_PROCESSES):
+            stop_vllm_server(process)
+        raise e
+    finally:
+        if stdprint_target and not isinstance(stdprint_target, int):  # don't close DEVNULL or None
+            stdprint_target.flush()
 
     VLLM_PROCESSES.add(process)
     print(f"vLLM server started successfully with PID {process.pid}")
@@ -300,7 +382,6 @@ def run_ais_bench(
     ais_bench_num_prompts: int = 128,
     model_path: str = "",
     model_name: str | None = None,
-    quantization: bool = False,
     port: int = 8384,
     tp_size: int = 1,
     ep: bool = True,
@@ -309,16 +390,19 @@ def run_ais_bench(
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
-    gpu_memory_utilization: float = 0.9,
+    gpu_memory_utilization: float = 0.95,
     block_size: int = 128,
     xlite: bool = False,
     xlite_full_mode: bool = False,
     extra_args: str = "",
     device_ids: list[int] | None = None,
-    timeout: int = 1800,
+    timeout: int = 4 * 3600,  # 4 hours
+    retry: int = 3,
     debug: bool = False,
+    vllm_timeout: int = 1800,
 ) -> BenchResult:
     model_name = model_name or Path(model_path).stem or "model"
+    quantization = (Path(model_path) / "quant_model_description.json").exists()
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
     xlite_full_mode = xlite_full_mode and xlite  # full mode can only be enabled when xlite is enabled
     bench_result = BenchResult(
@@ -410,7 +494,6 @@ def run_ais_bench(
     vllm_process = start_vllm_server(
         model_path=model_path,
         model_name=model_name,
-        quantization=quantization,
         port=port,
         tp_size=tp_size,
         ep=ep,
@@ -424,13 +507,12 @@ def run_ais_bench(
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
         device_ids=device_ids,
-        timeout=timeout,
+        timeout=vllm_timeout,
         debug=debug,
+        # when not in debug mode, redirect the server logs to files next to the
+        # benchmark output so they're preserved for post-mortem inspection.
+        print_to=None if debug else ais_bench_output_dir / f"vllm_server_{model_name}{suffix}",
     )
-    if vllm_process.stdout:
-        vllm_process.stdout.close()
-    if vllm_process.stderr:
-        vllm_process.stderr.close()
 
     try:
         aisbench_cmd_lst: list[str] = [
@@ -438,14 +520,29 @@ def run_ais_bench(
             "ais_bench --models vllm_api_general_chat",
             "--datasets ceval_gen_0_shot_cot_chat_prompt",
             "--mode all --dump-eval-details --merge-ds",
-            f'--max-num-workers "{min(os.cpu_count() or 4, 64, max_num_seqs)}"',
+            f'--max-num-workers "{min(os.cpu_count() or 4, 16, max_num_seqs)}"',
             f'--work-dir "{ais_bench_output_dir}"',
             f'--num-prompts "{ais_bench_num_prompts}"',
             extra_args,
         ]
         aisbench_cmd = " ".join(aisbench_cmd_lst)
-        res = subprocess.run(aisbench_cmd, shell=True, capture_output=not debug, executable="/bin/bash")
-        check_subprocess_result(res, "Failed to run ais_bench")
+
+        for i in range(1, retry + 1):
+            print(f"\nRunning ais_bench (attempt {i}/{retry}) for model {model_name}...\n")
+            t1 = time.time()
+            res = subprocess.run(
+                aisbench_cmd, shell=True, capture_output=not debug, executable="/bin/bash", timeout=timeout
+            )
+            if res.returncode == 0:
+                break  # success, exit the retry loop
+            time_taken = time.time() - t1
+            if i < retry and time_taken < timeout + 10:  # if the process failed before the timeout, retry
+                if " --reuse" not in aisbench_cmd and " -r" not in aisbench_cmd:
+                    aisbench_cmd += " --reuse"  # add --reuse flag for subsequent attempts
+                print(f"\nais_bench failed on attempt {i}/{retry}, retrying...\n")
+                time.sleep(5)
+                continue
+            check_subprocess_result(res, "Failed to run ais_bench")
 
         # from the output directory, find the latest ais_bench_output_dir/*datetime*/summary/summary_*.csv
         summary_path = max(ais_bench_output_dir.glob("*/summary/summary_*.csv"), key=os.path.getmtime)
@@ -453,12 +550,16 @@ def run_ais_bench(
         mask = (df["dataset"] == "ceval-weighted") & (df["metric"] == "weighted_average")
         if not mask.any():
             raise ValueError(f"Could not find weighted average accuracy in summary csv at {summary_path}")
-        weighted_accuracy = float(df.loc[mask, "vllm-api-general-chat"].values[-1])
+        weighted_accuracy = float(df.loc[mask, "vllm-api-general-chat"].values[-1])  # type: ignore[index]
 
         print(f"Finished ais_bench for model {model_name} with weighted accuracy {weighted_accuracy:.2f}")
 
         bench_result.accuracy = weighted_accuracy
         bench_result.error = None
+    except KeyboardInterrupt:
+        print(f"KeyboardInterrupt received, stopping vLLM server for model {model_name}...")
+        bench_result.error = "KeyboardInterrupt"
+        stop_vllm_server(vllm_process)
     except Exception as e:
         print(f"Error occurred while running ais_bench for model {model_name}: {str(e)}")
         bench_result.error = str(e)
@@ -506,17 +607,17 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     parser.add_argument(
         "--model-dir",
         type=Path,
-        required=True,
+        default="/mnt/sdb/models",
         help="Directory containing models to benchmark, each subdirectory is a model",
     )
-    parser.add_argument("--port", type=int, default=8384, help="Port for vLLM server to listen on")
+    parser.add_argument("--port", type=int, default=8241, help="Port for vLLM server to listen on")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for benchmarking")
     parser.add_argument(
         "-GMU",
         "--gpu-memory-utilization",
         type=float,
-        default=0.9,
-        help="GPU memory utilization for vLLM server, between 0 and 1 (e.g., 0.9 for 90%% utilization)",
+        default=0.95,
+        help="GPU memory utilization for vLLM server, between 0 and 1 (e.g., 0.95 for 95%% utilization)",
     )
     parser.add_argument(
         "-N",
@@ -526,16 +627,11 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         help="Number of prompts within each subset of datasets to use for ais_bench evaluation",
     )
     parser.add_argument(
-        "--models", type=str, nargs="+", default=None, help="List of model subdirectory names to benchmark"
-    )
-    parser.add_argument(
-        "-Q",
-        "--quantization",
-        type=int,
+        "--models",
+        type=str,
         nargs="+",
-        choices=[0, 1],
-        default=[0],
-        help="Whether the model is quantized (1 for yes, 0 for no; last value used for padding)",
+        default=None,
+        help="List of model subdirectory names to benchmark. Supports N*<model> format (e.g. 3*Qwen3-30B-A3B expands to 3 copies)",
     )
     parser.add_argument(
         "-TP",
@@ -627,20 +723,35 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     parser.add_argument(
         "--dry-run", action="store_true", help="Whether to do a dry run without actually running the benchmarks"
     )
+    parser.add_argument("--env-only", action="store_true", help="Whether to only prepare the environment and exit")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=4 * 3600,
+        help="Timeout in seconds for ais_bench subprocess (default: 4h = 14400s)",
+    )
+    parser.add_argument(
+        "--retry", type=int, default=3, help="Number of retry attempts for ais_bench on failure (default: 3)"
+    )
+    parser.add_argument(
+        "--vllm-timeout", type=int, default=1800, help="Timeout in seconds for vLLM server startup (default: 1800s)"
+    )
     args = parser.parse_args()
 
     print(f"Running batch AISBench with arguments: {args}")
 
-    prepare_env(args.ais_bench_dir)
-
-    bench_results: list[BenchResult] = []
+    if not args.dry_run or args.env_only:
+        # prepare the environment: clone ais_bench repo, create virtual environment, install requirements, download dataset
+        prepare_env(args.ais_bench_dir)
+    if args.env_only:
+        print("Environment preparation complete, exiting as --env-only was specified.")
+        sys.exit(0)
 
     if not args.models:
         raise ValueError("No models specified for benchmarking, please provide model subdirectory names using --models")
 
-    args_models: list[str] = args.models
+    args_models: list[str] = expand_model_list(args.models)
     n_models = len(args_models)
-    args_quantization: list[int] = args.quantization + [args.quantization[-1]] * (n_models - len(args.quantization))
     args_tps: list[int] = args.tps + [args.tps[-1]] * (n_models - len(args.tps))
     args_eps: list[bool] = args.eps + [args.eps[-1]] * (n_models - len(args.eps))
     args_dps: list[int] = args.dps + [args.dps[-1]] * (n_models - len(args.dps))
@@ -663,7 +774,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         args_xlite = args.xlite * n_models
         # Repeat each model's args n_xlite times: [A,B,C] with n_xlite=2 -> [A,A,B,B,C,C]
         args_models = [m for m in args_models for _ in range(n_xlite)]
-        args_quantization = [q for q in args_quantization for _ in range(n_xlite)]
         args_tps = [tp for tp in args_tps for _ in range(n_xlite)]
         args_eps = [ep for ep in args_eps for _ in range(n_xlite)]
         args_dps = [dp for dp in args_dps for _ in range(n_xlite)]
@@ -677,7 +787,20 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         for model, tp, ep, dp, xlite in zip(args_models, args_tps, args_eps, args_dps, args_xlite)
     ]
     if len(set(combinations)) != len(combinations):
-        raise ValueError("The combination of models, tp_sizes, and ep_sizes must be unique for each model")
+        # find the duplicate combinations
+        duplicates = set()
+        seen = set()
+        for combo in combinations:
+            if combo in seen:
+                duplicates.add(combo)
+            else:
+                seen.add(combo)
+        for dup in duplicates:
+            print(
+                f"Duplicate combination found: Model={dup[0]}, TP={dup[1]}, EP={'Y' if dup[2] else 'N'}, DP={dup[3]}, "
+                f"Xlite={'full' if dup[5] else ('decode-only' if dup[4] else 'aclgraph')}"
+            )
+        raise ValueError("The combination of models, tps, eps, etc., must be unique for each model")
 
     max_num_devices = max(tp * dp for tp, dp in zip(args_tps, args_dps))
     device_ids_env = filter(None, os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "").split(","))
@@ -697,9 +820,23 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
             print(f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, Backend: {backend_str}")
         sys.exit(0)
 
+    log_file_path: Path = (
+        args.log_file
+        or args.ais_bench_dir / "reports" / f"benchmark_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    )
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    log_csv_path: Path = log_file_path.with_suffix(".csv")
+
+    # Write headers first
+    with open(log_file_path, "w") as f:
+        f.write("\n\nFinal Benchmark Results:\n\n")
+        f.write(f"{BenchResult.markdown_header()}\n")
+    with open(log_csv_path, "w") as f:
+        f.write("model_name,dataset,tp_size,ep,dp_size,xlite,xlite_full_mode,metric,accuracy,error\n")
+
     for i, (model, tp, ep, dp, xlite, xlite_full) in enumerate(combinations):
         print(f"\n>>> Running benchmark task {i + 1}/{len(combinations)}")
-        model_path = args.model_dir / model
+        model_path: Path = args.model_dir / model
         try:
             result = run_ais_bench(
                 ais_bench_dir=args.ais_bench_dir,
@@ -707,7 +844,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 ais_bench_num_prompts=args.num_prompts,
                 model_path=str(model_path),
                 model_name=model,
-                quantization=bool(args_quantization[i]),
                 port=args.port,
                 tp_size=tp,
                 ep=ep,
@@ -721,9 +857,11 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 xlite_full_mode=xlite_full,
                 extra_args=args_extra_aisbench_args[i],
                 device_ids=device_ids[-tp * dp :],
+                timeout=args.timeout,
+                retry=args.retry,
                 debug=args.debug,
+                vllm_timeout=args.vllm_timeout,
             )
-            bench_results.append(result)
         except Exception as e:
             result = BenchResult(
                 model_name=model,
@@ -737,51 +875,26 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 accuracy=0.0,
             )
             result.error = str(e)
-            bench_results.append(result)
+        except KeyboardInterrupt as e:
+            for process in list(VLLM_PROCESSES):
+                stop_vllm_server(process)
+            raise e
         finally:
             # ensure all started vLLM server processes are stopped
             for process in list(VLLM_PROCESSES):
                 stop_vllm_server(process)
+
+        # Append this result to the log files immediately
+        with open(log_file_path, "a") as f:
+            f.write(f"{result.markdown_row()}\n")
+        with open(log_csv_path, "a") as f:
+            f.write(
+                f"{result.model_name},{result.dataset},{result.tp_size},{result.ep},"
+                f"{result.dp_size},{result.xlite},{result.xlite_full_mode},{result.metric},"
+                f"{result.accuracy},{result.error or ''}\n"
+            )
+        print(result.markdown_row())
         print(f"Completed benchmark task {i + 1}/{len(combinations)}")
 
-    log_text = ""
-    if bench_results:
-        log_text += "\n\nFinal Benchmark Results:\n\n"
-        log_text += f"{BenchResult.markdown_header()}\n"
-        for result in bench_results:
-            log_text += f"{result.markdown_row()}\n"
-    else:
-        log_text += "No benchmark results to display.\n"
-
-    print(log_text, end="")
-
-    log_file_path: Path = (
-        args.log_file
-        or args.ais_bench_dir / "reports" / f"benchmark_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-    )
-    log_file_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_file_path, "w") as f:
-        f.write(log_text)
     print(f"\nBenchmark results written to log file at {log_file_path}")
-
-    # save as csv as well for easier parsing
-    log_csv_path: Path = log_file_path.with_suffix(".csv")
-    df = pd.DataFrame(
-        [
-            {
-                "model_name": result.model_name,
-                "dataset": result.dataset,
-                "tp_size": result.tp_size,
-                "ep": result.ep,
-                "dp_size": result.dp_size,
-                "xlite": result.xlite,
-                "xlite_full_mode": result.xlite_full_mode,
-                "metric": result.metric,
-                "accuracy": result.accuracy,
-                "error": result.error,
-            }
-            for result in bench_results
-        ]
-    )
-    df.to_csv(log_csv_path, index=False)
     print(f"Benchmark results also written to CSV file at {log_csv_path}")

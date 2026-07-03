@@ -52,6 +52,9 @@ class BenchmarkScheduler:
         run_time: str = DEFAULT_RUN_TIME,
         log_file: Path = SCRIPT_DIR / "scheduler.log",
         debug: bool = False,
+        timeout: int = 4 * 3600,
+        retry: int = 3,
+        vllm_timeout: int = 1800,
     ):
         self.type = type
         self.script = script.resolve()
@@ -62,6 +65,9 @@ class BenchmarkScheduler:
         self.running = True
         self.log_file = log_file
         self.debug = debug
+        self.timeout = timeout
+        self.retry = retry
+        self.vllm_timeout = vllm_timeout
 
         # 注册信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -145,6 +151,12 @@ class BenchmarkScheduler:
                 self.receiver,
                 "--build-container",
                 self.build_container,
+                "--timeout",
+                str(self.timeout),
+                "--retry",
+                str(self.retry),
+                "--vllm-timeout",
+                str(self.vllm_timeout),
             ]
             if self.debug:
                 cmd.append("--debug")
@@ -246,7 +258,6 @@ def main():
     )
     default_model_args = (
         "--models Qwen3-32B-w8a8-nopdmix Qwen3-30B-A3B-Instruct-2507 Qwen3-VL-8B-Instruct GLM-4.7-W8A8-floatmtp MiniMax-M2.7-w8a8-QuaRot",
-        "--quantization 1 0 0 1 1",
         "--tps 4 4 4 8 8",
         "--eps 0 1 0 1 1",
         "--dps 1 1 1 1 1",
@@ -270,6 +281,11 @@ def main():
     parser.add_argument("-rt", "--run-time", type=str, default=DEFAULT_RUN_TIME, help="执行时间 (HH:MM)，默认 02:00")
     parser.add_argument("-rn", "--run-now", action="store_true", help="立即执行一次测试，然后启动调度器")
     parser.add_argument("-d", "--debug", action="store_true", help="调试模式，直接输出测试过程到stdout")
+    parser.add_argument(
+        "--timeout", type=int, default=4 * 3600, help="ais_bench 子进程超时时间（秒），默认 4h = 14400s"
+    )
+    parser.add_argument("--retry", type=int, default=3, help="ais_bench 失败时的重试次数，默认 3")
+    parser.add_argument("--vllm-timeout", type=int, default=1800, help="vLLM 服务器启动超时时间（秒），默认 1800s")
 
     args = parser.parse_args()
 
@@ -289,6 +305,9 @@ def main():
         run_time=args.run_time,
         log_file=log_file,
         debug=args.debug,
+        timeout=args.timeout,
+        retry=args.retry,
+        vllm_timeout=args.vllm_timeout,
     )
 
     # 如果需要立即执行

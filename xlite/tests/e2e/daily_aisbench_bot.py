@@ -138,7 +138,14 @@ MIN_ACCURACY_THRESHOLD = 80
 
 
 # ====================== 精度基准测试执行函数 ======================
-def run_aisbench_benchmark(model_args: str, debug: bool = False, reference_commit: str | None = None) -> Optional[Path]:
+def run_aisbench_benchmark(
+    model_args: str,
+    debug: bool = False,
+    reference_commit: str | None = None,
+    timeout: int = 4 * 3600,
+    retry: int = 3,
+    vllm_timeout: int = 1800,
+) -> Optional[Path]:
     """
     在测试容器中执行精度基准测试脚本 (batch_aisbench.py)
 
@@ -147,6 +154,9 @@ def run_aisbench_benchmark(model_args: str, debug: bool = False, reference_commi
             的参数格式
         debug: 是否为调试模式，调试模式下会直接将测试过程输出到stdout，非调试模式下会将错误输出到日志文件
         reference_commit: 指定复用前期某个 xlite commit hash 测试；仅当 model_args 中包含 --reuse 或 -r 参数时生效
+        timeout: ais_bench 子进程超时时间（秒）
+        retry: ais_bench 失败时的重试次数
+        vllm_timeout: vLLM 服务器启动超时时间（秒）
 
     返回:
         报告目录路径，失败返回 None
@@ -184,6 +194,9 @@ def run_aisbench_benchmark(model_args: str, debug: bool = False, reference_commi
             f'--output-dir "{aisbench_output_dir}"',
             f'--log-file "{report_subdir / "aisbench_results.md"}"',
             f'--model-dir "{model_dir}"',
+            f"--timeout {timeout}",
+            f"--retry {retry}",
+            f"--vllm-timeout {vllm_timeout}",
             str(model_args),
         ]
         if debug:
@@ -657,9 +670,7 @@ def main():
     10. 返回退出码
     """
     # 解析命令行参数
-    default_model_args = (
-        "--models Qwen3-30B-A3B --quantization 0 --tps 8 --eps 1 --dps 1 --xlite 2 1 0 --broadcast-xlite"
-    )
+    default_model_args = "--models Qwen3-30B-A3B --tps 8 --eps 1 --dps 1 --xlite 2 1 0 --broadcast-xlite"
     parser = argparse.ArgumentParser(description="xlite 每日自动化精度测试机器人")
     parser.add_argument(
         "-args",
@@ -701,6 +712,11 @@ def main():
         help="指定复用前期某个 xlite commit hash 测试",
     )
     parser.add_argument("-d", "--debug", action="store_true", help="调试模式，直接输出测试过程到stdout")
+    parser.add_argument(
+        "--timeout", type=int, default=4 * 3600, help="ais_bench 子进程超时时间（秒），默认 4h = 14400s"
+    )
+    parser.add_argument("--retry", type=int, default=3, help="ais_bench 失败时的重试次数，默认 3")
+    parser.add_argument("--vllm-timeout", type=int, default=1800, help="vLLM 服务器启动超时时间（秒），默认 1800s")
 
     args = parser.parse_args()
 
@@ -758,7 +774,12 @@ def main():
 
         # 步骤4: 执行精度基准测试 (在测试容器中)
         report_dir = run_aisbench_benchmark(
-            model_args=args.model_args, debug=args.debug, reference_commit=args.reference_commit
+            model_args=args.model_args,
+            debug=args.debug,
+            reference_commit=args.reference_commit,
+            timeout=args.timeout,
+            retry=args.retry,
+            vllm_timeout=args.vllm_timeout,
         )
         if not report_dir:
             log_error("精度基准测试失败，终止执行")
