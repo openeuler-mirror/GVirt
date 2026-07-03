@@ -42,9 +42,10 @@ static uint32_t CalcTaskNum(uint32_t cachedLen, uint32_t queryLen, uint32_t head
     return validTaskNum;
 }
 
-static uint32_t CalcTotalTaskNum(std::vector<uint32_t> &cachedLens,
-                                 std::vector<uint32_t> &queryLens, uint32_t headNumInGroup,
-                                 uint32_t nKVHeads, uint32_t tileSize)
+static float CalcTotalTaskNumRemainderScore(std::vector<uint32_t> &cachedLens,
+                                            std::vector<uint32_t> &queryLens,
+                                            uint32_t headNumInGroup, uint32_t nKVHeads,
+                                            uint32_t aicNum, uint32_t tileSize)
 {
     uint32_t totalTaskNum = 0;
     for (size_t i = 0; i < cachedLens.size(); i++) {
@@ -56,11 +57,7 @@ static uint32_t CalcTotalTaskNum(std::vector<uint32_t> &cachedLens,
         totalTaskNum +=
             CalcTaskNum(cachedLens[i], queryLens[i], headNumInGroup, nKVHeads, tileSize);
     }
-    return totalTaskNum;
-}
 
-static float CalcTotalTaskNumRemainderScore(uint32_t totalTaskNum, uint32_t aicNum)
-{
     uint32_t remainder = totalTaskNum % aicNum;
     if (remainder == 0) {
         return 1.0f;
@@ -96,16 +93,11 @@ static float CalcTileScore(std::vector<uint32_t> &cachedLens, std::vector<uint32
                            uint32_t headNumInGroup, uint32_t nKVHeads, uint32_t aicNum,
                            uint32_t tileSize)
 {
+    // 仅用于全decode场景，评分权重固定
     float kvScore = CalcKvRemainderScore(cachedLens, queryLens, tileSize);
-    uint32_t totalTaskNum =
-        CalcTotalTaskNum(cachedLens, queryLens, headNumInGroup, nKVHeads, tileSize);
-    float taskScore = CalcTotalTaskNumRemainderScore(totalTaskNum, aicNum);
+    float taskScore = CalcTotalTaskNumRemainderScore(cachedLens, queryLens, headNumInGroup,
+                                                     nKVHeads, aicNum, tileSize);
     float tileSizeScore = static_cast<float>(tileSize) / static_cast<float>(MAX_KV_TILE_SIZE);
-
-    if (totalTaskNum <= aicNum) {
-        // 全是decode请求：kv_score权重0.3，remainder_score权重0.6，tile_size权重0.1
-        return kvScore * 0.3f + std::sqrt(taskScore) * 0.6f + tileSizeScore * 0.1f;
-    }
 
     // decode场景：KvScore权重0.7，taskScore权重0.2，TileSizeScore权重0.1
     return kvScore * 0.7f + taskScore * 0.2f + tileSizeScore * 0.1f;
