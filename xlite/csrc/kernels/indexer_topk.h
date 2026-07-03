@@ -311,9 +311,9 @@ public:
         off += ROUND_UP(kvLen * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
         __ubuf__ Dtype *in[PINGPONG_BUF_NUM] = {in0, in1};
         __ubuf__ uint32_t *sortIndices0 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(kvLen * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(topK * 2 * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         __ubuf__ uint32_t *sortIndices1 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(kvLen * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(topK * 2 * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         __ubuf__ uint32_t *sortIndices[PINGPONG_BUF_NUM] = {sortIndices0, sortIndices1};
         __ubuf__ float *lastSort0 = reinterpret_cast<__ubuf__ float *>(off);
         off += ROUND_UP(topK * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
@@ -333,13 +333,13 @@ public:
         off += ROUND_UP(topK * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
         __ubuf__ float *mrgSortBuf1 = reinterpret_cast<__ubuf__ float *>(off);
         off += ROUND_UP(topK * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
-        __ubuf__ float *mrgSortBuf[2] = {mrgSortBuf0, mrgSortBuf1};
         assert(off <= UB_SIZE);
 
         constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
         constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
         int repeat = DIV_ROUND_UP(kvLen, calcPad);
         int sortRepeat = DIV_ROUND_UP(kvLen, SORT_BLOCK_SIZE);
+        int topKSortRepeat = DIV_ROUND_UP(topK, SORT_BLOCK_SIZE);
         uint64_t lens = (kvLen > topK ? topK : kvLen) | (uint64_t)topK << 16;
         uint64_t config = 1 | 0x3ull << MGR_SORT_VALID_BITS_OFFSET;
 
@@ -356,24 +356,12 @@ public:
         for (int idx = 0; idx < queryLen; idx++) {
             // copy scores to in
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
-            if (kvLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(in[curr], scores + idx * tileSizeOfCachedKV, 0, 1,
-                                kvLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-            } else {
-                copy_gm_to_ubuf_align_b16(in[curr], scores + idx * tileSizeOfCachedKV, 0, 1,
-                                          kvLen * sizeof(Dtype), 0, 0, 0, 0);
-            }
+            CopyGmToUbufAligned(in[curr], scores + idx * tileSizeOfCachedKV, kvLen * sizeof(Dtype));
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
 
             // copy indices to sortIndices
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
-            if (kvLen * sizeof(uint32_t) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(sortIndices[curr], indices + kvOffset, 0, 1,
-                                kvLen * sizeof(uint32_t) / BLOCK_SIZE, 0, 0);
-            } else {
-                copy_gm_to_ubuf_align_b16(sortIndices[curr], indices + kvOffset, 0, 1,
-                                          kvLen * sizeof(uint32_t), 0, 0, 0, 0);
-            }
+            CopyGmToUbufAligned(sortIndices[curr], indices + kvOffset, kvLen * sizeof(uint32_t));
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
 
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
@@ -415,13 +403,8 @@ public:
                 }
                 // copy last topk to last sort
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID4 + curr);
-                if (topK * 2 * sizeof(uint32_t) % BLOCK_SIZE == 0) {
-                    copy_gm_to_ubuf(lastSort[curr], lastTopk + idx * 2 * topK, 0, 1,
-                                    topK * 2 * sizeof(uint32_t) / BLOCK_SIZE, 0, 0);
-                } else {
-                    copy_gm_to_ubuf_align_b16(lastSort[curr], lastTopk + idx * 2 * topK, 0, 1,
-                                              topK * 2 * sizeof(uint32_t), 0, 0, 0, 0);
-                }
+                CopyGmToUbufAligned(lastSort[curr], lastTopk + idx * 2 * topK,
+                                    topK * 2 * sizeof(uint32_t));
 
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID4 + curr);
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID4 + curr);
@@ -439,33 +422,63 @@ public:
             }
 
             if (kvOffset + kvLen == totalLen) {
+                // copy indices to sortIndices
+                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+                CopyGmToUbufAligned(sortIndices[curr], indices, outNum * sizeof(uint32_t));
+                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
+
+                __ubuf__ uint32_t *index0 = (__ubuf__ uint32_t *)mrgSortBuf0;
+                vreducev2(index0, (__ubuf__ uint32_t *)totalSort, (__ubuf__ uint32_t *)totalSort,
+                          DIV_ROUND_UP(outNum, 32), 1, 2, 8, 0);
+                pipe_barrier(PIPE_V);
+
+                // pad
+                int remain = outNum % calcPad;
+                if (remain != 0) {
+                    SetMaskFromHighBit(calcPad, calcPad - remain);
+                    vector_dup(index0 + ROUND_DOWN(outNum, calcPad), 0, 1, 1, 1, 8, 0);
+                    pipe_barrier(PIPE_V);
+                    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                }
+
+                vconv_s322f32(mrgSortBuf0, (__ubuf__ int *)index0, DIV_ROUND_UP(topK, calcPad), 1,
+                              1, 8, 8);
+                pipe_barrier(PIPE_V);
+
+                topKSortRepeat = DIV_ROUND_UP(outNum, SORT_BLOCK_SIZE);
+                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
+                vbitsort(mrgSortBuf1, mrgSortBuf0, sortIndices[curr], topKSortRepeat);
+                pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+
+                MrgSort(mrgSortBuf1, mrgSortBuf0, topKSortRepeat, &dstBufIdx);
+                __ubuf__ float *index = dstBufIdx == 0 ? mrgSortBuf1 : mrgSortBuf0;
+
+                __ubuf__ float *indexSorted = dstBufIdx == 0 ? mrgSortBuf0 : mrgSortBuf1;
+                vreducev2((__ubuf__ uint32_t *)indexSorted, (__ubuf__ uint32_t *)index,
+                          (__ubuf__ uint32_t *)index, DIV_ROUND_UP(outNum, 32), 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
+
+                vconv_f322s32r((__ubuf__ int *)index, indexSorted, DIV_ROUND_UP(outNum, calcPad), 1,
+                               1, 8, 8);
+                pipe_barrier(PIPE_V);
+
                 // get total topk indices
                 wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
-                vreducev2(out[curr], (__ubuf__ uint32_t *)totalSort, (__ubuf__ uint32_t *)totalSort,
-                          DIV_ROUND_UP(outNum, 32), 1, 2, 8, 0);
+                copy_ubuf_to_ubuf(out[curr], index, 0, 1,
+                                  DIV_ROUND_UP(outNum * sizeof(uint32_t), BLOCK_SIZE), 1, 1);
                 pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
                 // copy totalSort to topkIndices
-                if ((outNum * sizeof(uint32_t)) % BLOCK_SIZE == 0) {
-                    copy_ubuf_to_gm(topkIndices + idx * topK, out[curr], 0, 1,
-                                    outNum * sizeof(uint32_t) / BLOCK_SIZE, 0, 0);
-                } else {
-                    copy_ubuf_to_gm_align_b16(topkIndices + idx * topK, out[curr], 0, 1,
-                                              outNum * sizeof(uint32_t), 0, 0, 0, 0);
-                }
+                CopyUbufToGmAligned(topkIndices + idx * topK, out[curr], outNum * sizeof(uint32_t));
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
             } else {
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
                 // copy totalSort to last
-                if ((outNum * 2 * sizeof(uint32_t)) % BLOCK_SIZE == 0) {
-                    copy_ubuf_to_gm(lastTopk + idx * topK * 2, totalSort, 0, 1,
-                                    outNum * 2 * sizeof(uint32_t) / BLOCK_SIZE, 0, 0);
-                } else {
-                    copy_ubuf_to_gm_align_b16(lastTopk + idx * topK * 2, totalSort, 0, 1,
-                                              outNum * 2 * sizeof(uint32_t), 0, 0, 0, 0);
-                }
+                CopyUbufToGmAligned(lastTopk + idx * topK * 2, totalSort,
+                                    outNum * 2 * sizeof(uint32_t));
                 if (idx == queryLen - 1) {
                     set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                     wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);

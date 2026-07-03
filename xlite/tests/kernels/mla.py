@@ -254,6 +254,8 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             # Concatenate topk_indices into a flattened tensor
             # Shape: (total_query_len, topk)
             topk_indices_tensor = torch.stack(topk_indices_list)  # (total_query_len, topk)
+            # mla_with_indices 假设每行的 topk indices 已按升序排列
+            topk_indices_tensor, _ = torch.sort(topk_indices_tensor, dim=-1)
 
             # Standard MLA with topk mask: apply -inf mask before softmax
             outputs_with_topk = []
