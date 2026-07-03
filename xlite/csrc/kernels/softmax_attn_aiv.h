@@ -43,6 +43,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     __gm__ float *sumBuf = nullptr, bool hasScale = false, float scale = 1.0f,
     uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
 {
+    // Softmax mask value: the most negative fp32 value (≈ -inf). Used to fill invalid/missed
     float min = -3.4028235e+38;
     Dtype minDtype = -3.4028235e+38;
     if (outN == 0 || outN > n) {
@@ -113,6 +114,8 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     int topKRepeat = DIV_ROUND_UP(topK, pad);
     int topKVandRepeat = DIV_ROUND_UP(topK, 2048);
     int topKLoopCnt = DIV_ROUND_UP(topK, 128);
+    int firstHitBlock = -1;
+    int lastHitBlock = -1;
     int curr = 0;
 
     if (topK > 0) {
@@ -137,13 +140,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            if ((outN * sizeof(Dtype)) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype) / BLOCK_SIZE,
-                                0, 0);
-            } else {
-                copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype), 0,
-                                          0, 0, 0);
-            }
+            CopyUbufToGmAligned(buf + idx * n, out[curr], outN * sizeof(Dtype));
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
         } else {
             if (actualCalcLen > outN) {
@@ -151,24 +148,18 @@ inline __aicore__ void RunAivSoftmaxPingPong(
             }
 
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
-            if (actualCalcLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(in[curr], buf + idx * n, 0, 1,
-                                actualCalcLen * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-            } else {
-                copy_gm_to_ubuf_align_b16(in[curr], buf + idx * n, 0, 1,
-                                          actualCalcLen * sizeof(Dtype), 0, 0, 0, 0);
-            }
+            CopyGmToUbufAligned(in[curr], buf + idx * n, actualCalcLen * sizeof(Dtype));
 
             int origActualCalcLen = actualCalcLen;
+            // Per-64-slot hit masks, cached during the vgather scan and reused by the scatter
+            // loop after softmax, so scatter reads them from scalars instead of slow UB loads.
+            // Each topLoop covers 128 slots = 2 x uint64; topK <= MAX_TOPK_NUM bounds the array.
+            constexpr int kMaxMaskEntries = 2 * DIV_ROUND_UP(MAX_TOPK_NUM, 128);
+            uint64_t maskCache[kMaxMaskEntries];
             if (topK > 0) {
                 // copy topKIndices to indices
-                if (topK * sizeof(int32_t) % BLOCK_SIZE == 0) {
-                    copy_gm_to_ubuf(indices[curr], topkIndices + seqIdx * topK, 0, 1,
-                                    topK * sizeof(int32_t) / BLOCK_SIZE, 0, 0);
-                } else {
-                    copy_gm_to_ubuf_align_b16(indices[curr], topkIndices + seqIdx * topK, 0, 1,
-                                              topK * sizeof(int32_t), 0, 0, 0, 0);
-                }
+                CopyGmToUbufAligned(indices[curr], topkIndices + seqIdx * topK,
+                                    topK * sizeof(int32_t));
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
                 vector_dup(cmp1, kvOffset + origActualCalcLen, 1, 1, 1, 8, 0);
@@ -198,23 +189,34 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                 wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
                 bool needCalc = false;
+                firstHitBlock = -1;
+                lastHitBlock = -1;
                 uint64_t addrOffset = (uint64_t)in[curr];
+                // vgather hit scores into inTopK. topkMask0 is a bitmap (1 bit/slot); each
+                // topLoop covers 128 slots = 2 x uint64 (mask0: 0..63, mask1: 64..127) at
+                // byte offset topLoop*16. Cache masks for the later scatter loop.
                 for (int topLoop = 0; topLoop < topKLoopCnt; topLoop++) {
                     uint64_t mask0 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16);
                     uint64_t mask1 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16 + 8);
+                    maskCache[topLoop * 2] = mask0;
+                    maskCache[topLoop * 2 + 1] = mask1;
                     __ubuf__ int32_t *indicesOffset = indices[curr] + topLoop * 128;
                     if (mask0 != 0 || mask1 != 0) {
                         set_vector_mask(mask1, mask0);
                         vgather((__ubuf__ uint16_t *)inTopK + topLoop * 128,
                                 (__ubuf__ uint32_t *)indicesOffset, addrOffset, 0, 1);
                         needCalc = true;
+                        if (firstHitBlock < 0) {
+                            firstHitBlock = topLoop;
+                        }
+                        lastHitBlock = topLoop;
                     }
                 }
                 set_vector_mask((uint64_t)-1, (uint64_t)-1);
                 pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
 
                 if (!needCalc) {
-                    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
                     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
                     vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(outN, pad), 1, 1, 8, 0);
                     if (saveMaxSum) {
@@ -225,13 +227,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
 
                     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
                     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-                    if ((outN * sizeof(Dtype)) % BLOCK_SIZE == 0) {
-                        copy_ubuf_to_gm(buf + idx * n, out[curr], 0, 1,
-                                        outN * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-                    } else {
-                        copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1,
-                                                  outN * sizeof(Dtype), 0, 0, 0, 0);
-                    }
+                    CopyUbufToGmAligned(buf + idx * n, out[curr], outN * sizeof(Dtype));
                     if (saveMaxSum) {
                         copy_ubuf_to_gm_align_b16(maxBuf + idx, maxOut[curr], 0, 1, sizeof(float),
                                                   0, 0, 0, 0);
@@ -242,10 +238,6 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                     curr = 1 - curr;
                     continue;
                 }
-
-                copy_ubuf_to_ubuf(in[curr], inTopK, 0, 1,
-                                  DIV_ROUND_UP(topK * sizeof(Dtype), BLOCK_SIZE), 0, 0);
-                pipe_barrier(PIPE_V);
                 // update actualCalcLen
                 actualCalcLen = topK;
             } else {
@@ -254,13 +246,18 @@ inline __aicore__ void RunAivSoftmaxPingPong(
             }
             int repeat = DIV_ROUND_UP(actualCalcLen, calPad);
 
+            __ubuf__ Dtype *softmaxIn = (topK > 0) ? inTopK : in[curr];
+            __ubuf__ Dtype *softmaxOut = (topK > 0) ? inTopK : out[curr];
+
             if constexpr (std::is_same<Dtype, half>::value) {
-                vconv_f162f32(cal, in[curr], repeat, 1, 1, 8, 4);
+                vconv_f162f32(cal, softmaxIn, repeat, 1, 1, 8, 4);
             } else {
-                vconv_bf162f32(cal, in[curr], repeat, 1, 1, 8, 4);
+                vconv_bf162f32(cal, softmaxIn, repeat, 1, 1, 8, 4);
             }
             pipe_barrier(PIPE_V);
-            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+            if (topK == 0) {
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+            }
 
             if (hasScale) {
                 vmuls(cal, cal, scale, repeat, 1, 1, 8, 8);
@@ -306,50 +303,55 @@ inline __aicore__ void RunAivSoftmaxPingPong(
             pipe_barrier(PIPE_V);
 
             if constexpr (std::is_same<Dtype, half>::value) {
-                vconv_f322f16r(out[curr], cal, repeat, 1, 1, 4, 8);
+                vconv_f322f16r(softmaxOut, cal, repeat, 1, 1, 4, 8);
             } else {
-                vconv_f322bf16r(out[curr], cal, repeat, 1, 1, 4, 8);
+                vconv_f322bf16r(softmaxOut, cal, repeat, 1, 1, 4, 8);
             }
             pipe_barrier(PIPE_V);
 
             if (topK > 0) {
-                copy_ubuf_to_ubuf(inTopK, out[curr], 0, 1,
-                                  DIV_ROUND_UP(actualCalcLen * sizeof(Dtype), BLOCK_SIZE), 0, 0);
-                pipe_barrier(PIPE_V);
                 vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(origActualCalcLen, pad), 1, 1, 8, 0);
                 __ubuf__ uint16_t *currOut = (__ubuf__ uint16_t *)out[curr];
                 set_flag(PIPE_V, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+
+                // Scatter at 64-slot granularity (1 x uint64 mask); vgather's firstHitBlock/
+                // lastHitBlock are 128-slot block numbers, so multiply by 2 to align indices.
                 int topkLoop = topK >> 6;
-                for (int i = 0; i < topkLoop; i++) {
-                    uint64_t mask = *((__ubuf__ uint64_t *)topkMask0 + i);
-                    if (mask == 0) {
+                for (int i = firstHitBlock * 2; i <= lastHitBlock * 2 + 1 && i < topkLoop; i++) {
+                    uint64_t mask = maskCache[i];
+                    if (!mask) {
                         continue;
                     }
                     int currTopKBase = (i << 6);
+                    // Scatter 4 slots/iter: tmp1 = packed offsets (currIndices), tmp2 = packed
+                    // values (inTopK). full = all 64 slots hit -> write unconditionally; else
+                    // per-bit.
+                    bool full = (mask == ~(uint64_t)0);
                     for (int j = 0; j < 16; j++) {
                         int j2 = j << 2;
                         uint64_t pair0Mask = mask & (3ull << j2);
                         uint64_t pair1Mask = mask & (3ull << (j2 + 2));
-                        if (pair0Mask | pair1Mask) {
-                            int currTopK0 = currTopKBase + j2;
-                            int currTopK1 = currTopKBase + j2 + 2;
-                            uint64_t tmp1_0 = *(__ubuf__ uint64_t *)(currIndices + currTopK0);
-                            uint64_t tmp1_1 = *(__ubuf__ uint64_t *)(currIndices + currTopK1);
-                            uint32_t tmp2_0 = *(__ubuf__ uint32_t *)(inTopK + currTopK0);
-                            uint32_t tmp2_1 = *(__ubuf__ uint32_t *)(inTopK + currTopK1);
-                            if (pair0Mask & (1ULL << j2)) {
-                                currOut[tmp1_0 & 0xffffffff] = tmp2_0 & 0xffff;
-                            }
-                            if (pair0Mask & (1ULL << (j2 + 1))) {
-                                currOut[(tmp1_0 >> 32) & 0xffffffff] = (tmp2_0 >> 16) & 0xffff;
-                            }
-                            if (pair1Mask & (1ULL << (j2 + 2))) {
-                                currOut[tmp1_1 & 0xffffffff] = tmp2_1 & 0xffff;
-                            }
-                            if (pair1Mask & (1ULL << (j2 + 3))) {
-                                currOut[(tmp1_1 >> 32) & 0xffffffff] = (tmp2_1 >> 16) & 0xffff;
-                            }
+                        if (!full && !(pair0Mask | pair1Mask)) {
+                            continue;
+                        }
+                        int currTopK0 = currTopKBase + j2;
+                        int currTopK1 = currTopKBase + j2 + 2;
+                        uint64_t tmp1_0 = *(__ubuf__ uint64_t *)(currIndices + currTopK0);
+                        uint64_t tmp1_1 = *(__ubuf__ uint64_t *)(currIndices + currTopK1);
+                        uint32_t tmp2_0 = *(__ubuf__ uint32_t *)(inTopK + currTopK0);
+                        uint32_t tmp2_1 = *(__ubuf__ uint32_t *)(inTopK + currTopK1);
+                        if (full || (pair0Mask & (1ULL << j2))) {
+                            currOut[tmp1_0 & 0xffffffff] = tmp2_0 & 0xffff;
+                        }
+                        if (full || (pair0Mask & (1ULL << (j2 + 1)))) {
+                            currOut[(tmp1_0 >> 32) & 0xffffffff] = (tmp2_0 >> 16) & 0xffff;
+                        }
+                        if (full || (pair1Mask & (1ULL << (j2 + 2)))) {
+                            currOut[tmp1_1 & 0xffffffff] = tmp2_1 & 0xffff;
+                        }
+                        if (full || (pair1Mask & (1ULL << (j2 + 3)))) {
+                            currOut[(tmp1_1 >> 32) & 0xffffffff] = (tmp2_1 >> 16) & 0xffff;
                         }
                     }
                 }
@@ -374,13 +376,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            if ((outN * sizeof(Dtype)) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype) / BLOCK_SIZE,
-                                0, 0);
-            } else {
-                copy_ubuf_to_gm_align_b16(buf + idx * n, out[curr], 0, 1, outN * sizeof(Dtype), 0,
-                                          0, 0, 0);
-            }
+            CopyUbufToGmAligned(buf + idx * n, out[curr], outN * sizeof(Dtype));
             if (saveMaxSum) {
                 copy_ubuf_to_gm_align_b16(maxBuf + idx, maxOut[curr], 0, 1, sizeof(float), 0, 0, 0,
                                           0);
@@ -560,13 +556,7 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             // No merge needed since there's no previous data to combine with
             // Load current chunk data from GM to UB
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-            if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(svCurrUb[curr], currSv + mIdx * headSize, 0, 1,
-                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-            } else {
-                copy_gm_to_ubuf_align_b16(svCurrUb[curr], currSv + mIdx * headSize, 0, 1,
-                                          headSize * sizeof(Dtype), 0, 0, 0, 0);
-            }
+            CopyGmToUbufAligned(svCurrUb[curr], currSv + mIdx * headSize, headSize * sizeof(Dtype));
             copy_gm_to_ubuf_align_b16(maxCurrUb[curr], currMax + mIdx, 0, 1, sizeof(float), 0, 0, 0,
                                       0);
             copy_gm_to_ubuf_align_b16(sumCurrUb[curr], currSum + mIdx, 0, 1, sizeof(float), 0, 0, 0,
@@ -576,13 +566,8 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID4 + curr);
 
             // Store current results directly to output (first chunk initialization)
-            if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(output + offset * headSize, svCurrUb[curr], 0, 1,
-                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-            } else {
-                copy_ubuf_to_gm_align_b16(output + offset * headSize, svCurrUb[curr], 0, 1,
-                                          headSize * sizeof(Dtype), 0, 0, 0, 0);
-            }
+            CopyUbufToGmAligned(output + offset * headSize, svCurrUb[curr],
+                                headSize * sizeof(Dtype));
             copy_ubuf_to_gm_align_b16(lastMax + offset, maxCurrUb[curr], 0, 1, sizeof(float), 0, 0,
                                       0, 0);
             copy_ubuf_to_gm_align_b16(lastSum + offset, sumCurrUb[curr], 0, 1, sizeof(float), 0, 0,
@@ -601,17 +586,9 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             copy_gm_to_ubuf_align_b16(sumCurrUb[curr], currSum + mIdx, 0, 1, sizeof(float), 0, 0, 0,
                                       0);
             // Step 2: Load previous and current sv values
-            if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(svPrevUb[curr], output + offset * headSize, 0, 1,
-                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-                copy_gm_to_ubuf(svCurrUb[curr], currSv + mIdx * headSize, 0, 1,
-                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-            } else {
-                copy_gm_to_ubuf_align_b16(svPrevUb[curr], output + offset * headSize, 0, 1,
-                                          headSize * sizeof(Dtype), 0, 0, 0, 0);
-                copy_gm_to_ubuf_align_b16(svCurrUb[curr], currSv + mIdx * headSize, 0, 1,
-                                          headSize * sizeof(Dtype), 0, 0, 0, 0);
-            }
+            CopyGmToUbufAligned(svPrevUb[curr], output + offset * headSize,
+                                headSize * sizeof(Dtype));
+            CopyGmToUbufAligned(svCurrUb[curr], currSv + mIdx * headSize, headSize * sizeof(Dtype));
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
 
@@ -681,13 +658,8 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID2 + curr);
 
             // Step 12: Write merged output to GM
-            if (headSize * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(output + offset * headSize, svOutUb[curr], 0, 1,
-                                headSize * sizeof(Dtype) / BLOCK_SIZE, 0, 0);
-            } else {
-                copy_ubuf_to_gm_align_b16(output + offset * headSize, svOutUb[curr], 0, 1,
-                                          headSize * sizeof(Dtype), 0, 0, 0, 0);
-            }
+            CopyUbufToGmAligned(output + offset * headSize, svOutUb[curr],
+                                headSize * sizeof(Dtype));
             copy_ubuf_to_gm_align_b16(lastMax + offset, newMaxOutUb[curr], 0, 1, sizeof(float), 0,
                                       0, 0, 0);
             copy_ubuf_to_gm_align_b16(lastSum + offset, newSumOutUb[curr], 0, 1, sizeof(float), 0,
@@ -793,13 +765,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
             float curMaxVal, totalMaxVal;
 
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
-            if (curLen * sizeof(Dtype) % BLOCK_SIZE == 0) {
-                copy_gm_to_ubuf(in, curBuf + offset, 0, 1, curLen * sizeof(Dtype) / BLOCK_SIZE, 0,
-                                0);
-            } else {
-                copy_gm_to_ubuf_align_b16(in, curBuf + offset, 0, 1, curLen * sizeof(Dtype), 0, 0,
-                                          0, 0);
-            }
+            CopyGmToUbufAligned(in, curBuf + offset, curLen * sizeof(Dtype));
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID3);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID3);
 
@@ -892,13 +858,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
                 copy_ubuf_to_ubuf(curSum, calcDst, 0, 1, 8, 1, 1);
 
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
-                if (curLen * sizeof(float) % BLOCK_SIZE == 0) {
-                    copy_ubuf_to_gm(expBuf + offset, calc, 0, 1,
-                                    curLen * sizeof(float) / BLOCK_SIZE, 0, 0);
-                } else {
-                    copy_ubuf_to_gm_align_b16(expBuf + offset, calc, 0, 1, curLen * sizeof(float),
-                                              0, 0, 0, 0);
-                }
+                CopyUbufToGmAligned(expBuf + offset, calc, curLen * sizeof(float));
             }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
             copy_ubuf_to_ubuf(totalSum, calcDst, 0, 1, 8, 1, 1);
@@ -922,13 +882,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
 
             if (subBlockNum > 1) {
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-                if (curLen * sizeof(float) % BLOCK_SIZE == 0) {
-                    copy_gm_to_ubuf(calc, expBuf + offset, 0, 1,
-                                    curLen * sizeof(float) / BLOCK_SIZE, 0, 0);
-                } else {
-                    copy_gm_to_ubuf_align_b16(calc, expBuf + offset, 0, 1, curLen * sizeof(float),
-                                              0, 0, 0, 0);
-                }
+                CopyGmToUbufAligned(calc, expBuf + offset, curLen * sizeof(float));
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID3);
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID3);
 
@@ -974,13 +928,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
-            if ((curLen * sizeof(Dtype)) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype) / BLOCK_SIZE, 0,
-                                0);
-            } else {
-                copy_ubuf_to_gm_align_b16(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype), 0, 0,
-                                          0, 0);
-            }
+            CopyUbufToGmAligned(curBuf + offset, out, curLen * sizeof(Dtype));
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
         }
 
@@ -997,13 +945,7 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
             if (block == totalSubBlockNum - 1) {
                 curLen = outN - offset;
             }
-            if ((curLen * sizeof(Dtype)) % BLOCK_SIZE == 0) {
-                copy_ubuf_to_gm(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype) / BLOCK_SIZE, 0,
-                                0);
-            } else {
-                copy_ubuf_to_gm_align_b16(curBuf + offset, out, 0, 1, curLen * sizeof(Dtype), 0, 0,
-                                          0, 0);
-            }
+            CopyUbufToGmAligned(curBuf + offset, out, curLen * sizeof(Dtype));
             if (block == totalSubBlockNum - 1) {
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
             }
