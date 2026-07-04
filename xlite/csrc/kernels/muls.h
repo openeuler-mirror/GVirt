@@ -50,11 +50,7 @@ __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uin
         __gm__ Dtype *outPtr = output + process * shape1 + calcOffset;
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
-        if (actualLen % BLOCK_SIZE == 0) {
-            copy_gm_to_ubuf(in[curr], inPtr, 0, 1, actualLen / BLOCK_SIZE, 0, 0);
-        } else {
-            copy_gm_to_ubuf_align_b16(in[curr], inPtr, 0, 1, actualLen, 0, 0, 0, 0);
-        }
+        CopyGmToUbufAligned(in[curr], inPtr, actualLen);
 
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
@@ -81,11 +77,7 @@ __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uin
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
 
-        if (actualLen % BLOCK_SIZE == 0) {
-            copy_ubuf_to_gm(outPtr, out[curr], 0, 1, actualLen / BLOCK_SIZE, 0, 0);
-        } else {
-            copy_ubuf_to_gm_align_b16(outPtr, out[curr], 0, 1, actualLen, 0, 0, 0, 0);
-        }
+        CopyUbufToGmAligned(outPtr, out[curr], actualLen);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
         curr = 1 - curr;
     }
