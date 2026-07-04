@@ -44,7 +44,7 @@ public:
         this->batch = batch;
         this->maxNumBlock = maxNumBlock;
         this->topK = topK;
-        this->tileSizeOfCachedKV = 2 * topK;
+        this->tileSizeOfCachedKV = MAX_INDEXER_KV_TILE_LEN;
         this->blockIdx = block_idx;
         this->subBlockIdx = get_subblockid();
         this->nextBlockIdx = (blockIdx + 1) % block_num;
@@ -299,40 +299,43 @@ public:
     {
         constexpr float min = FLOAT_MIN;
 
+        assert(kvLen <= MAX_INDEXER_KV_TILE_LEN);
+        assert(topK <= MAX_TOPK_NUM);
+
         // total sort & WaitPrevCore & SetNextCore use
         uint64_t off = 0;
         __ubuf__ float *totalSort = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(topK * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_TOPK_NUM * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
 
         // in
         __ubuf__ Dtype *in0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += ROUND_UP(kvLen * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
         __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += ROUND_UP(kvLen * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
         __ubuf__ Dtype *in[PINGPONG_BUF_NUM] = {in0, in1};
         __ubuf__ uint32_t *sortIndices0 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(topK * 2 * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         __ubuf__ uint32_t *sortIndices1 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(topK * 2 * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         __ubuf__ uint32_t *sortIndices[PINGPONG_BUF_NUM] = {sortIndices0, sortIndices1};
         __ubuf__ float *lastSort0 = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(topK * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
         __ubuf__ float *lastSort1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(topK * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
         __ubuf__ float *lastSort[PINGPONG_BUF_NUM] = {lastSort0, lastSort1};
 
         // out
         __ubuf__ uint32_t *out0 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(topK * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_TOPK_NUM * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         __ubuf__ uint32_t *out1 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(topK * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_TOPK_NUM * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         __ubuf__ uint32_t *out[PINGPONG_BUF_NUM] = {out0, out1};
 
         // calc
         __ubuf__ float *mrgSortBuf0 = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(topK * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
         __ubuf__ float *mrgSortBuf1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(topK * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
         assert(off <= UB_SIZE);
 
         constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
