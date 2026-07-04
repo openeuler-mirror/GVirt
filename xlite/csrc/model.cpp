@@ -269,7 +269,7 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
 
     XTensor &kCache = kvCache[layer][0];
-    XTensor &vCache = kvCache[layer][1];
+    XTensor &peCache = kvCache[layer][1];
     XTensor &attnQkvc =
         rt.GetTensor({hiddenState.shape[0], _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim},
                      hiddenState.dtype, DBG_LOC);
@@ -295,7 +295,7 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
     XliteOpRopeComplexAndCache(rt, 1, _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
                                _c.qLoraRank + _c.kvLoraRank, _c.kvLoraRank, _c.ropeHeadDim,
                                attnQkvc, freqsCis, rt._attnPosition, _c.blockSize, attnNormKvc,
-                               kCache, vCache, rt._attnSlotMapping);
+                               kCache, peCache, rt._attnSlotMapping);
     rt.PutTensor(attnQkvc);
     rt.PutTensor(attnNormKvc);
 
@@ -335,8 +335,8 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
 
     XliteOpMuls(rt, kw, _dsaIndexerScale, kw, _c.indexHeadDim, _c.indexNHeads);
 
-    XTensor &scores =
-        rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, _c.indexTopK * 2}, hiddenState.dtype, DBG_LOC);
+    XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
+                                   hiddenState.dtype, DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
     XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
     XliteOpIndexerTopK(rt, q, indexKCache, kw, scores, lastTopk, _dsaTopkIndices, topkIndices,

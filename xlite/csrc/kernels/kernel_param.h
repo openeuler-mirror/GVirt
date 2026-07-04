@@ -31,8 +31,7 @@ enum class NormKind {
 
 // attention/mla/indexer
 #define XLITE_MAX_M0 128
-
-// mla topk
+#define MAX_INDEXER_KV_TILE_LEN 4096
 #define MAX_TOPK_NUM 2048
 #define MAX_SOFTMAX_PINGPONG_LEN 11776
 
