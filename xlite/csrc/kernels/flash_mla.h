@@ -313,6 +313,7 @@ public:
 
         int curr = 0;
         int pingpongL1B = 0;
+        int k0ActualBlockNum = 0;
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID6);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID7);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
@@ -342,7 +343,6 @@ public:
                     }
 
                     // copy WUK(T) (nSize, 4 * k0) to L1
-                    int k0ActualBlockNum;
                     if (kIdx4 == 0) {
                         int kRemSize = 4 * k0;
                         if (kOffset + kRemSize > nopeHeadDim) {
