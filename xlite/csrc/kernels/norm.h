@@ -62,7 +62,9 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
                             GM_ADDR output, uint32_t token_num, uint32_t norm_dim, float norm_eps,
                             int kind, uint32_t cnt_per_token, uint32_t in_step, uint32_t out_step,
                             uint32_t in_start_offset, uint32_t out_start_offset, bool useNorm,
-                            GM_ADDR variance, uint32_t tpSize)
+                            GM_ADDR variance, uint32_t tpSize, GM_ADDR kcache = nullptr,
+                            GM_ADDR slot_mapping = nullptr, uint32_t block_size = 0,
+                            int coreOffset = 0, int *nextCoreOffset = nullptr)
 {
     set_atomic_none();
     set_mask_norm();
@@ -164,9 +166,30 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
         }
     }
 
+    bool need_cache = (block_size != 0) && (kcache != nullptr) && (slot_mapping != nullptr);
+    if (need_cache) {
+        assert(useNorm);
+    }
+
+    if (nextCoreOffset) {
+        *nextCoreOffset = (coreOffset + token_num) % block_num;
+    }
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-    for (uint32_t loop = block_idx; loop < token_num; loop += block_num) {
+    for (uint32_t loop = 0; loop < token_num; loop++) {
+        if ((loop + coreOffset) % block_num != block_idx) {
+            continue;
+        }
+
+        uint32_t block = 0, block_offset = 0;
+        if (need_cache) {
+            uint32_t slot_idx = (uint32_t)(*((__gm__ uint32_t *)slot_mapping + loop));
+            block = slot_idx / block_size;
+            block_offset = slot_idx % block_size;
+            set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+            wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        }
+
         uint32_t in_offset = in_start_offset + loop * in_step;
         uint32_t out_offset = out_start_offset + loop * out_step;
         auto gm_in = (__gm__ Dtype *)input + in_offset;
@@ -307,10 +330,19 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + outCurr);
 
         if (useNorm) {
-            copy_ubuf_to_gm(gm_out_dtype, out[outCurr], 0, 1, len_burst, 0, 0);
+            if (output) {
+                copy_ubuf_to_gm(gm_out_dtype, out[outCurr], 0, 1, len_burst, 0, 0);
+            }
+            if (need_cache) {
+                auto *kcache_ptr = ((__gm__ Dtype *)(kcache)) + block * block_size * total_dim +
+                                   block_offset * total_dim;
+                copy_ubuf_to_gm(kcache_ptr, out[outCurr], 0, 1, len_burst, 0, 0);
+            }
         } else {
-            copy_ubuf_to_gm_align_b16(gm_out_float, out_float[outCurr], 0, 1, sizeof(float), 0, 0,
-                                      0, 0);
+            if (output) {
+                copy_ubuf_to_gm_align_b16(gm_out_float, out_float[outCurr], 0, 1, sizeof(float), 0,
+                                          0, 0, 0);
+            }
         }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
         outCurr = 1 - outCurr;
