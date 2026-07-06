@@ -283,19 +283,15 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
 
     ForwardLinear(rt, layer, hiddenState, mlaQKVA, attnQkvc);
 
-    XliteOpRmsNorm(rt, attnQkvc, mlaQNorm[layer], attnNormQc, _c.normEps, _c.qLoraRank, true,
-                   mlaQNormBias[layer]);
+    XliteOpMlaPrepare(rt, attnQkvc, mlaQNorm[layer], mlaQNormBias[layer], attnNormQc,
+                      mlaKVNorm[layer], mlaKVNormBias[layer], attnNormKvc, freqsCis,
+                      rt._attnPosition, _c.qLoraRank, _c.kvLoraRank, _c.ropeHeadDim, _c.blockSize,
+                      kCache, peCache, rt._attnSlotMapping, _c.normEps);
 
     ForwardLinear(rt, layer, attnNormQc, mlaQB, attnQWithQr);
 
     XliteOpRopeComplex(rt, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
                        _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition);
-    XliteOpRmsNorm(rt, attnQkvc, mlaKVNorm[layer], attnNormKvc, _c.normEps, _c.kvLoraRank, true,
-                   mlaKVNormBias[layer], 1, _c.qLoraRank);
-    XliteOpRopeComplexAndCache(rt, 1, _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim, _c.ropeHeadDim,
-                               _c.qLoraRank + _c.kvLoraRank, _c.kvLoraRank, _c.ropeHeadDim,
-                               attnQkvc, freqsCis, rt._attnPosition, _c.blockSize, attnNormKvc,
-                               kCache, peCache, rt._attnSlotMapping);
     rt.PutTensor(attnQkvc);
     rt.PutTensor(attnNormKvc);
 
