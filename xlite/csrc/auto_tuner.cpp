@@ -136,7 +136,7 @@ uint32_t GetBestTileSizeByFitting(const std::vector<uint32_t> &cachedLens, size_
     uint32_t tile = DIV_ROUND_UP(cachedLenInt, bestTasksInt);
     tile = ROUND_UP(tile, blockSize);
     tile = tile > MAX_KV_TILE_SIZE ? MAX_KV_TILE_SIZE : tile;
-    tile = tile < MIN_KV_TILE_SIZE ? MIN_KV_TILE_SIZE : tile;
+    tile = tile < SINGLE_BATCH_MIN_KV_TILE_SIZE ? SINGLE_BATCH_MIN_KV_TILE_SIZE : tile;
     return tile;
 }
 
