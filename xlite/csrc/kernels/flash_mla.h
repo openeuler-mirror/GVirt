@@ -807,6 +807,10 @@ public:
             lastQueryTaskOffset;
         __gm__ uint32_t *lastBlockTable;
 
+        int queryTileSize = XLITE_MAX_M0 / headTileSize;
+        if (queryTileSize == 0) {
+            queryTileSize = XLITE_MAX_M0;
+        }
         int needDoSV = 0;
         int totalIdx = 0;
         int curr = 0;
@@ -818,10 +822,6 @@ public:
                 (__gm__ uint32_t *)((uint64_t)blockTables +
                                     batchIdx * maxNumBlocks * sizeof(uint32_t));
 
-            int queryTileSize = XLITE_MAX_M0 / headTileSize;
-            if (queryTileSize == 0) {
-                queryTileSize = XLITE_MAX_M0;
-            }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int kvNum = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
             int taskNum = queryNum * nHeadTiles * kvNum;
@@ -928,6 +928,10 @@ public:
         int lastIsLastKvTile;
         uint32_t lastOutOffset;
 
+        int queryTileSize = XLITE_MAX_M0 / headTileSize;
+        if (queryTileSize == 0) {
+            queryTileSize = XLITE_MAX_M0;
+        }
         int needDoUpdate = 0;
         int totalIdx = 0;
         int curr = 0;
@@ -937,10 +941,6 @@ public:
             int queryLen = queryLens[batchIdx];
             int cachedLen = cachedLens[batchIdx];
 
-            int queryTileSize = XLITE_MAX_M0 / headTileSize;
-            if (queryTileSize == 0) {
-                queryTileSize = XLITE_MAX_M0;
-            }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int kvNum = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
             int taskNum = queryNum * nHeadTiles * kvNum;
