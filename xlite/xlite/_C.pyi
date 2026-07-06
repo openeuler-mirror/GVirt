@@ -1517,6 +1517,53 @@ def rope_complex(
     """
     ...
 
+def mla_prepare(
+    rt: Runtime,
+    attn_qkvc: torch.Tensor,
+    q_norm: torch.Tensor,
+    q_norm_bias: torch.Tensor,
+    attn_norm_qc: torch.Tensor,
+    kv_norm: torch.Tensor,
+    kv_norm_bias: torch.Tensor,
+    attn_norm_kvc: torch.Tensor,
+    freqs: torch.Tensor,
+    position: torch.Tensor,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    rope_head_dim: int,
+    block_size: int,
+    k_cache: torch.Tensor,
+    pe_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    norm_eps: float,
+) -> None:
+    """Fused MLA prepare: two RMSNorm passes followed by rope_complex_and_cache.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        attn_qkvc (torch.Tensor): Concatenated [q_lora_rank | kv_lora_rank | rope_head_dim] per token.
+        q_norm (torch.Tensor): RMSNorm weight for the q-lora slice.
+        q_norm_bias (torch.Tensor): RMSNorm bias for the q-lora slice.
+        attn_norm_qc (torch.Tensor): Output RMSNormed q-lora slice.
+        kv_norm (torch.Tensor): RMSNorm weight for the kv-lora slice.
+        kv_norm_bias (torch.Tensor): RMSNorm bias for the kv-lora slice.
+        attn_norm_kvc (torch.Tensor): Output RMSNormed kv-lora slice; also used as the `key` written into k_cache.
+        freqs (torch.Tensor): Precomputed rotary freqs_cis (TTTWWW layout).
+        position (torch.Tensor): Per-token position ids (int64).
+        q_lora_rank (int): q-lora rank dimension.
+        kv_lora_rank (int): kv-lora rank dimension.
+        rope_head_dim (int): Rotary head dimension.
+        block_size (int): Paged kv-cache block size; 0 disables cache writes.
+        k_cache (torch.Tensor): Output paged k-cache.
+        pe_cache (torch.Tensor): Output paged pe-cache (RoPE'd rope slice).
+        slot_mapping (torch.Tensor): Per-token paged-cache slot mapping.
+        norm_eps (float): RMSNorm epsilon.
+
+    Returns:
+        None: Outputs are written in place into attn_norm_qc, attn_norm_kvc, k_cache, pe_cache, and the rope slice of attn_qkvc.
+    """
+    ...
+
 def quant(
     rt: Runtime,
     x: torch.Tensor,

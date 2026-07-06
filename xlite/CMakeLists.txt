@@ -72,6 +72,7 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/quant_dyn_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/flash_mla_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/norm_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_prepare_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_scores_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/muls_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_bfloat16_t.cpp
@@ -95,6 +96,7 @@ file(GLOB KERNEL_FILES_F16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/flash_attention_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/dequant_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/norm_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_prepare_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_scores_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/muls_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_float16_t.cpp
