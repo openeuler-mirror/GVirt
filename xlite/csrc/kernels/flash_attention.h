@@ -455,7 +455,6 @@ public:
             lastQueryTaskOffset, lastWorkStart, lastWorkCurCore, lastActualCalcSoftmaxLen;
         int lastIsLastKvTile;
         uint32_t lastOutOffset;
-        __gm__ uint32_t *lastBlockTable;
 
         int needDoUpdate = 0;
         int totalIdx = 0;
@@ -465,9 +464,6 @@ public:
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
             int cachedLen = cachedLens[batchIdx];
-            __gm__ uint32_t *blockTable =
-                (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
 
             uint32_t m0 = XLITE_MAX_M0;
             int queryTileSize = m0 / headNumInGroup;
@@ -587,7 +583,6 @@ public:
                 lastWorkCurCore = nWorkCurCore;
                 lastkvHeadIdx = kvHeadIdx;
                 lastOutOffset = outOffset;
-                lastBlockTable = blockTable;
                 lastKvOffset = kvOffset;
                 lastKvLen = kvLen;
                 lastIsLastKvTile = isLastKvTile;
