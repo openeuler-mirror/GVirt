@@ -3,10 +3,13 @@
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 
+from contextlib import contextmanager
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+from typing import Optional
 
 from setuptools import Command, Extension, setup
 from setuptools.command.build_ext import build_ext
@@ -53,6 +56,137 @@ def _get_pybind11_cmake_dir() -> str:
     ).strip()
 
 
+# ---------------------------------------------------------------------------
+# Patch extract_host_stub.py during the build to drop the overflow-status
+# device-memory (de)allocation from host_stub.cpp. Best-effort: restored after
+# the build, and any failure (missing/unreadable/unwritable) skips the patch
+# without aborting.
+# ---------------------------------------------------------------------------
+_DEFAULT_ASCEND_CANN_PACKAGE_PATH = "/usr/local/Ascend/ascend-toolkit/latest"
+
+# ascendc_kernel_cmake subdirs to try; mirrors CMakeLists.txt (compiler then tools).
+_ASCENDC_KERNEL_CMAKE_SUBDIRS = (
+    "compiler/tikcpp/ascendc_kernel_cmake",
+    "tools/tikcpp/ascendc_kernel_cmake",
+)
+
+# Python statements to comment out; commented form is derived dynamically, and
+# checked first so already-commented snippets are left alone.
+_EXTRACT_HOST_STUB_PATCHES = (
+    r"""    buff.write('''    constexpr uint32_t __ascendc_overflow_status_size = 8;
+    AllocAscendMemDevice(&(__ascendc_args.__ascendc_overflow), __ascendc_overflow_status_size);
+''')""",
+    r"""    buff.write('    FreeAscendMemDevice(__ascendc_args.__ascendc_overflow);\n')""",
+)
+
+
+def _comment_out(snippet: str) -> str:
+    """Prefix each non-empty line of `snippet` with '# '."""
+    return "".join(
+        f"# {line}" if line.strip() else line
+        for line in snippet.splitlines(keepends=True)
+    )
+
+
+def _get_ascendc_kernel_cmake_dir() -> Optional[Path]:
+    """Resolve ascendc_kernel_cmake dir, mirroring CMakeLists.txt.
+
+    Base from ASCEND_CANN_PACKAGE_PATH env var (CMake's default as fallback);
+    tries compiler/tikcpp then tools/tikcpp. None if neither exists.
+    """
+    base = Path(os.environ.get("ASCEND_CANN_PACKAGE_PATH",
+                               _DEFAULT_ASCEND_CANN_PACKAGE_PATH))
+    for sub in _ASCENDC_KERNEL_CMAKE_SUBDIRS:
+        candidate = base / sub
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _find_extract_host_stub() -> Optional[Path]:
+    """Find extract_host_stub.py by name; its subdirectory varies per CANN version."""
+    root = _get_ascendc_kernel_cmake_dir()
+    if root is None:
+        return None
+    # Prefer the system `find`; fall back to Path.rglob if it is unavailable.
+    try:
+        result = subprocess.run(
+            ["find", str(root), "-name", "extract_host_stub.py"],
+            check=False, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            lines = [line for line in result.stdout.splitlines() if line]
+            if lines:
+                return Path(lines[0])
+    except FileNotFoundError:
+        pass
+    matches = list(root.rglob("extract_host_stub.py"))
+    return matches[0] if matches else None
+
+
+def _try_apply_patch(stub_path: Path) -> Optional[str]:
+    """Comment out the overflow calls in `stub_path`. Best-effort, never raises.
+
+    Returns original content (to restore later) when patched, else None (already
+    commented, unreadable, or unwritable). Never blocks the build.
+    """
+    try:
+        original_content = stub_path.read_text(encoding="utf-8")
+    except (PermissionError, OSError) as err:
+        print(f"AscendPatch: cannot read {stub_path} ({err}); skipping patch")
+        return None
+
+    patched_content = original_content
+    applied = []
+    for active in _EXTRACT_HOST_STUB_PATCHES:
+        commented = _comment_out(active)
+        if commented in patched_content:  # already commented: leave alone
+            continue
+        if active in patched_content:
+            patched_content = patched_content.replace(active, commented, 1)
+            applied.append(active)
+
+    if not applied:
+        print(f"AscendPatch: snippets already commented in {stub_path}; leaving as-is")
+        return None
+
+    try:
+        stub_path.write_text(patched_content, encoding="utf-8")
+    except (PermissionError, OSError) as err:
+        print(f"AscendPatch: cannot patch {stub_path} ({err}); skipping patch")
+        return None
+    print(f"AscendPatch: patched {stub_path} (commented {len(applied)} snippet(s))")
+    return original_content
+
+
+@contextmanager
+def _patched_extract_host_stub():
+    """Comment out the overflow (de)allocation calls during the build.
+
+    Best-effort: any patch-flow failure skips the patch without aborting. When
+    patched, original content is restored on exit; a restore failure only warns
+    (never masks a build failure).
+    """
+    stub_path = _find_extract_host_stub()
+    original_content = None
+    if stub_path is not None and stub_path.exists():
+        original_content = _try_apply_patch(stub_path)
+    else:
+        print("AscendPatch: extract_host_stub.py not found; skipping patch")
+
+    try:
+        yield
+    finally:
+        if original_content is not None and stub_path is not None:
+            try:
+                stub_path.write_text(original_content, encoding="utf-8")
+            except (PermissionError, OSError) as err:
+                print(f"AscendPatch: cannot restore {stub_path} ({err}); "
+                      f"file left patched")
+            else:
+                print(f"AscendPatch: restored {stub_path}")
+
+
 class CMakeBuild(build_ext):
     def build_extension(self, ext):
         build_temp = Path(self.build_temp or (ROOT_DIR / "cmake_build")).resolve()
@@ -79,9 +213,10 @@ class CMakeBuild(build_ext):
         build_cmd = ["cmake", "--build", str(build_temp), "-j"]
         install_cmd = ["cmake", "--install", str(build_temp)]
 
-        subprocess.check_call(configure_cmd)
-        subprocess.check_call(build_cmd)
-        subprocess.check_call(install_cmd)
+        with _patched_extract_host_stub():
+            subprocess.check_call(configure_cmd)
+            subprocess.check_call(build_cmd)
+            subprocess.check_call(install_cmd)
 
         # Remove headers and lib64 staging outputs from wheel contents.
         for artifact_dir_sub in ("include", "lib", "lib64", "csrc"):
