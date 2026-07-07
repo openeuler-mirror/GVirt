@@ -130,40 +130,47 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     int inCurr = 0;
     int outCurr = 0;
 
-    if (weight) {
-        copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)weight, 0, 1, len_burst_per_norm, 0, 0);
-        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
-        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
-        convert_input(weight_calc, in[inCurr], repeat_per_norm);
-        inCurr = 1 - inCurr;
-    }
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+    if (token_num >= block_num || (block_idx >= coreOffset && block_idx < coreOffset + token_num) ||
+        (block_idx < coreOffset && block_idx < ((coreOffset + token_num) % block_num))) {
+        if (weight) {
+            copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)weight, 0, 1, len_burst_per_norm, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
+            convert_input(weight_calc, in[inCurr], repeat_per_norm);
+            inCurr = 1 - inCurr;
+        }
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
 
-    if (bias) {
-        copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)bias, 0, 1, len_burst_per_norm, 0, 0);
-        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
-        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
-        convert_input(bias_calc, in[inCurr], repeat_per_norm);
-        inCurr = 1 - inCurr;
-    }
+        if (bias) {
+            copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)bias, 0, 1, len_burst_per_norm, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
+            convert_input(bias_calc, in[inCurr], repeat_per_norm);
+            inCurr = 1 - inCurr;
+        }
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
 
-    pipe_barrier(PIPE_V);
-    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+        pipe_barrier(PIPE_V);
 
-    if (weight || bias) {
-        for (uint32_t norm_idx = 1; norm_idx < cnt_per_token; norm_idx++) {
-            if (weight) {
-                auto weight_norm = weight_calc + norm_idx * norm_dim;
-                copy_ubuf_to_ubuf(weight_norm, weight_calc, 0, 1, len_burst_float_per_norm, 0, 0);
-            }
-            if (bias) {
-                auto bias_norm = bias_calc + norm_idx * norm_dim;
-                copy_ubuf_to_ubuf(bias_norm, bias_calc, 0, 1, len_burst_float_per_norm, 0, 0);
-            }
-            if (norm_idx == cnt_per_token - 1) {
-                pipe_barrier(PIPE_V);
+        if (weight || bias) {
+            for (uint32_t norm_idx = 1; norm_idx < cnt_per_token; norm_idx++) {
+                if (weight) {
+                    auto weight_norm = weight_calc + norm_idx * norm_dim;
+                    copy_ubuf_to_ubuf(weight_norm, weight_calc, 0, 1, len_burst_float_per_norm, 0,
+                                      0);
+                }
+                if (bias) {
+                    auto bias_norm = bias_calc + norm_idx * norm_dim;
+                    copy_ubuf_to_ubuf(bias_norm, bias_calc, 0, 1, len_burst_float_per_norm, 0, 0);
+                }
+                if (norm_idx == cnt_per_token - 1) {
+                    pipe_barrier(PIPE_V);
+                }
             }
         }
+    } else {
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     }
 
     bool need_cache = (block_size != 0) && (kcache != nullptr) && (slot_mapping != nullptr);
