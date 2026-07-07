@@ -13,7 +13,8 @@ template <typename Dtype>
 __aicore__ __inline__ void rope_complex_and_cache(
     uint32_t nTokens, uint32_t nLocalHeads, uint32_t qDim, uint32_t qkRopeHeadDim, uint32_t offset,
     uint32_t kdim, uint32_t vdim, GM_ADDR q_ptr, GM_ADDR freqs_ptr, GM_ADDR position,
-    uint32_t block_size, GM_ADDR key, GM_ADDR kcache, GM_ADDR vcache, GM_ADDR slot_mapping)
+    uint32_t block_size, GM_ADDR key, GM_ADDR kcache, GM_ADDR vcache, GM_ADDR slot_mapping,
+    int coreOffset = 0, int *nextCoreOffset = nullptr)
 {
     set_atomic_none();
     set_mask_norm();
@@ -67,7 +68,13 @@ __aicore__ __inline__ void rope_complex_and_cache(
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
 
-    for (int index = block_idx; index < nTokens * nLocalHeads; index += block_num) {
+    if (nextCoreOffset) {
+        *nextCoreOffset = (coreOffset + nTokens * nLocalHeads) % block_num;
+    }
+    for (uint32_t index = 0; index < nTokens * nLocalHeads; index++) {
+        if ((index + coreOffset) % block_num != block_idx) {
+            continue;
+        }
         int token_idx = index / nLocalHeads;
 
         uint32_t slot_idx, block, block_offset;

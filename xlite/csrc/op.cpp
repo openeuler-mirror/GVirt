@@ -65,6 +65,8 @@
 #include "aclrtlaunch_flash_mla_bfloat16_t.h"
 #include "aclrtlaunch_norm_float16_t.h"
 #include "aclrtlaunch_norm_bfloat16_t.h"
+#include "aclrtlaunch_mla_prepare_float16_t.h"
+#include "aclrtlaunch_mla_prepare_bfloat16_t.h"
 #include "aclrtlaunch_indexer_scores_float16_t.h"
 #include "aclrtlaunch_indexer_scores_bfloat16_t.h"
 #include "aclrtlaunch_indexer_topk_float16_t.h"
@@ -1056,6 +1058,32 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
     launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
                  kdim, vdim, inputWithR.ptr, freqs.ptr, position.ptr, blockSize, key.ptr,
                  kCache.ptr, vCache.ptr, slotMapping.ptr);
+}
+
+void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
+                       const XTensor &qNormBias, XTensor &attnNormQc, const XTensor &kvNorm,
+                       const XTensor &kvNormBias, const XTensor &freqs, const XTensor &position,
+                       uint32_t qLoraRank, uint32_t kvLoraRank, uint32_t ropeHeadDim,
+                       uint32_t blockSize, XTensor &kCache, XTensor &peCache,
+                       const XTensor &slotMapping, float normEps, const XTensor &attnNormKvc)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+
+    KERNEL_PTR_TYPE(mla_prepare) * launchKernel;
+    if (attnQkvc.dtype == FP16) {
+        launchKernel = aclrtlaunch_mla_prepare_float16_t;
+    } else if (attnQkvc.dtype == BF16) {
+        launchKernel = aclrtlaunch_mla_prepare_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(attnQkvc);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    launchKernel(rt.aivNum, rt.stream, attnQkvc.ptr, qNorm.ptr, qNormBias.ptr, attnNormQc.ptr,
+                 kvNorm.ptr, kvNormBias.ptr, attnNormKvc.ptr, freqs.ptr, position.ptr, kCache.ptr,
+                 peCache.ptr, slotMapping.ptr, attnQkvc.shape[0], qLoraRank, kvLoraRank,
+                 ropeHeadDim, blockSize, normEps, rt.tpSize());
 }
 
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)

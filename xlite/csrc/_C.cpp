@@ -1518,6 +1518,32 @@ void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t 
     rt.Synchronize();
 }
 
+void MlaPrepare(XRuntime &rt, at::Tensor &attnQkvc, at::Tensor &qNorm, at::Tensor &qNormBias,
+                at::Tensor &attnNormQc, at::Tensor &kvNorm, at::Tensor &kvNormBias,
+                at::Tensor &attnNormKvc, at::Tensor &freqs, at::Tensor &position,
+                uint32_t qLoraRank, uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t blockSize,
+                at::Tensor &kCache, at::Tensor &peCache, at::Tensor &slotMapping, float normEps)
+{
+    XTensor _attnQkvc, _qNorm, _qNormBias, _attnNormQc, _kvNorm, _kvNormBias, _attnNormKvc, _freqs,
+        _position, _kCache, _peCache, _slotMapping;
+    InitXTensor(_attnQkvc, attnQkvc);
+    InitXTensor(_qNorm, qNorm);
+    InitXTensor(_qNormBias, qNormBias);
+    InitXTensor(_attnNormQc, attnNormQc);
+    InitXTensor(_kvNorm, kvNorm);
+    InitXTensor(_kvNormBias, kvNormBias);
+    InitXTensor(_attnNormKvc, attnNormKvc);
+    InitXTensor(_freqs, freqs);
+    InitXTensor(_position, position);
+    InitXTensor(_kCache, kCache);
+    InitXTensor(_peCache, peCache);
+    InitXTensor(_slotMapping, slotMapping);
+    XliteOpMlaPrepare(rt, _attnQkvc, _qNorm, _qNormBias, _attnNormQc, _kvNorm, _kvNormBias, _freqs,
+                      _position, qLoraRank, kvLoraRank, ropeHeadDim, blockSize, _kCache, _peCache,
+                      _slotMapping, normEps, _attnNormKvc);
+    rt.Synchronize();
+}
+
 void Quant(XRuntime &rt, at::Tensor &x, at::Tensor &scaleReciprocal, at::Tensor &offset,
            at::Tensor &out)
 {
@@ -2030,6 +2056,12 @@ PYBIND11_MODULE(_C, m)
     m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("n_local_heads"),
           py::arg("step_dim"), py::arg("rope_dim"), py::arg("input_with_r"), py::arg("freqs"),
           py::arg("position"));
+    m.def("mla_prepare", &MlaPrepare, py::arg("rt"), py::arg("attn_qkvc"), py::arg("q_norm"),
+          py::arg("q_norm_bias"), py::arg("attn_norm_qc"), py::arg("kv_norm"),
+          py::arg("kv_norm_bias"), py::arg("attn_norm_kvc"), py::arg("freqs"), py::arg("position"),
+          py::arg("q_lora_rank"), py::arg("kv_lora_rank"), py::arg("rope_head_dim"),
+          py::arg("block_size"), py::arg("k_cache"), py::arg("pe_cache"), py::arg("slot_mapping"),
+          py::arg("norm_eps"));
     m.def("quant", &Quant, py::arg("rt"), py::arg("x"), py::arg("scale_reciprocal"),
           py::arg("offset"), py::arg("out"));
     m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),

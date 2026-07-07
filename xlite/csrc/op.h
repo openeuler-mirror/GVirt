@@ -100,6 +100,13 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
                                 uint32_t blockSize, XTensor &key, XTensor &kCache, XTensor &vCache,
                                 XTensor &slotMapping);
+void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
+                       const XTensor &qNormBias, XTensor &attnNormQc, const XTensor &kvNorm,
+                       const XTensor &kvNormBias, const XTensor &freqs, const XTensor &position,
+                       uint32_t qLoraRank, uint32_t kvLoraRank, uint32_t ropeHeadDim,
+                       uint32_t blockSize, XTensor &kCache, XTensor &peCache,
+                       const XTensor &slotMapping, float normEps,
+                       const XTensor &attnNormKvc = XTensor());
 
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
                   XTensor &out);
