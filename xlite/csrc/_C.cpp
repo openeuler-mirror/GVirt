@@ -1538,9 +1538,9 @@ void MlaPrepare(XRuntime &rt, at::Tensor &attnQkvc, at::Tensor &qNorm, at::Tenso
     InitXTensor(_kCache, kCache);
     InitXTensor(_peCache, peCache);
     InitXTensor(_slotMapping, slotMapping);
-    XliteOpMlaPrepare(rt, _attnQkvc, _qNorm, _qNormBias, _attnNormQc, _kvNorm, _kvNormBias,
-                      _attnNormKvc, _freqs, _position, qLoraRank, kvLoraRank, ropeHeadDim,
-                      blockSize, _kCache, _peCache, _slotMapping, normEps);
+    XliteOpMlaPrepare(rt, _attnQkvc, _qNorm, _qNormBias, _attnNormQc, _kvNorm, _kvNormBias, _freqs,
+                      _position, qLoraRank, kvLoraRank, ropeHeadDim, blockSize, _kCache, _peCache,
+                      _slotMapping, normEps, _attnNormKvc);
     rt.Synchronize();
 }
 
