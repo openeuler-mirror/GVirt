@@ -22,45 +22,61 @@ __aicore__ __inline__ void rope_complex_and_cache(
     bool need_k_cache = (block_size != 0) && (kcache != nullptr) && (slot_mapping != nullptr);
     bool need_v_cache = (block_size != 0) && (vcache != nullptr) && (slot_mapping != nullptr);
 
+    int ropeDtypeBytes = ropeDim * sizeof(Dtype);
+    int vCacheBytes = vdim * sizeof(Dtype);
+    int kCacheBytes = kdim * sizeof(Dtype);
+    int ropeFPBytes = ropeDim * sizeof(float);
+    int inputBytes = need_v_cache ? vCacheBytes : ropeDtypeBytes;
+    int vRemainBytes = need_v_cache ? (vCacheBytes - ropeDtypeBytes) : 0;
+    int freqsBytes = ropeFPBytes;
+    int outputBytes = ropeDtypeBytes;
+    int kStride = nLocalHeads * block_size * kdim;
+    int vStride = nLocalHeads * block_size * vdim;
+    int remain_blocks = DIV_ROUND_UP(vRemainBytes, BLOCK_SIZE);
+    constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
+    int repeat = DIV_ROUND_UP(ropeDim, calcPad);
+
     int maxCnt = 1024;
     uint64_t off = 0;
     UBA(Dtype) input0 = reinterpret_cast<UBA(Dtype)>(off);
-    off += ROUND_UP(shape1 * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(inputBytes, VECTOR_MAX_BYTESIZE);
     UBA(Dtype) input1 = reinterpret_cast<UBA(Dtype)>(off);
-    off += ROUND_UP(shape1 * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(inputBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) freqs0 = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeDim * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) freqs1 = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeDim * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE);
     UBA(Dtype) out0 = reinterpret_cast<UBA(Dtype)>(off);
-    off += ROUND_UP((need_v_cache ? vdim : ropeDim) * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(inputBytes, VECTOR_MAX_BYTESIZE);
     UBA(Dtype) out1 = reinterpret_cast<UBA(Dtype)>(off);
-    off += ROUND_UP((need_v_cache ? vdim : ropeDim) * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(inputBytes, VECTOR_MAX_BYTESIZE);
     UBA(Dtype) kinput0 = reinterpret_cast<UBA(Dtype)>(off);
-    off += need_k_cache ? ROUND_UP(kdim * sizeof(Dtype), VECTOR_MAX_BYTESIZE) : 0;
+    off += need_k_cache ? ROUND_UP(kCacheBytes, VECTOR_MAX_BYTESIZE) : 0;
     UBA(Dtype) kinput1 = reinterpret_cast<UBA(Dtype)>(off);
-    off += need_k_cache ? ROUND_UP(kdim * sizeof(Dtype), VECTOR_MAX_BYTESIZE) : 0;
+    off += need_k_cache ? ROUND_UP(kCacheBytes, VECTOR_MAX_BYTESIZE) : 0;
+    UBA(Dtype) vRemain = reinterpret_cast<UBA(Dtype)>(off);
+    off += need_v_cache ? ROUND_UP(vRemainBytes, VECTOR_MAX_BYTESIZE) : 0;
 
     UBA(float) out_f32 = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeDim * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) input_f32 = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(shape1 * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_even = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP((ropeDim) * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_odd = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP((ropeDim) * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) cos = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP((ropeDim) * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) sin = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP((ropeDim) * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_even_cos = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP((ropeDim) * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_odd_sin = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP((ropeDim) * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_even_sin = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP((ropeDim) * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_odd_cos = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP((ropeDim) * sizeof(float), VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(uint64_t) positionUB = reinterpret_cast<UBA(uint64_t)>(off);
     off += ROUND_UP((maxCnt) * sizeof(uint64_t), VECTOR_MAX_BYTESIZE);
     UBA(uint32_t) slotMappingUB = reinterpret_cast<UBA(uint32_t)>(off);
@@ -79,15 +95,6 @@ __aicore__ __inline__ void rope_complex_and_cache(
         *nextCoreOffset = (coreOffset + taskNum) % block_num;
     }
 
-    int inputBytes = need_v_cache ? vdim * sizeof(Dtype) : ropeDim * sizeof(Dtype);
-    int freqsBytes = ropeDim * sizeof(float);
-    int outputBytes = ropeDim * sizeof(Dtype);
-    int vCacheBytes = vdim * sizeof(Dtype);
-    int remain_blocks = vdim > ropeDim ? ((vdim - ropeDim) * sizeof(Dtype)) >> 5 : 0;
-    constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
-    int repeat = DIV_ROUND_UP(ropeDim, calcPad);
-
-    int curr = 0;
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
@@ -96,57 +103,51 @@ __aicore__ __inline__ void rope_complex_and_cache(
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
-    bool updatePostion = false;
-    for (uint32_t index = 0; index < taskNum; index++) {
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
+    int curr = 0;
+    int baseTokenIdx = -1;
+    int first = (block_idx + block_num - coreOffset) % block_num;
+    for (uint32_t index = first; index < taskNum; index += block_num) {
         int token_idx = index / nLocalHeads;
-        int head_idx = index % nLocalHeads;
-        if (token_idx % maxCnt == 0 && head_idx == 0) {
-            updatePostion = true;
-        }
-
-        if ((index + coreOffset) % block_num != block_idx) {
-            continue;
-        }
-
-        if (updatePostion) {
+        if (baseTokenIdx == -1 || token_idx >= baseTokenIdx + maxCnt) {
             int remain = maxCnt;
-            int down = ROUND_DOWN(token_idx, maxCnt);
-            if (down + maxCnt > nTokens) {
-                remain = nTokens - down;
+            if (token_idx + maxCnt > nTokens) {
+                remain = nTokens - token_idx;
             }
             set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
             wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
-            CopyGmToUbufAligned(positionUB, ((__gm__ uint64_t *)position) + down,
+            CopyGmToUbufAligned(positionUB, ((__gm__ uint64_t *)position) + token_idx,
                                 remain * sizeof(uint64_t));
             if (need_k_cache || need_v_cache) {
-                CopyGmToUbufAligned(slotMappingUB, ((__gm__ uint32_t *)slot_mapping) + down,
+                CopyGmToUbufAligned(slotMappingUB, ((__gm__ uint32_t *)slot_mapping) + token_idx,
                                     remain * sizeof(uint32_t));
             }
             set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
             wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-            updatePostion = false;
+            baseTokenIdx = token_idx;
         }
 
         auto *input_gm = (__gm__ Dtype *)(input_ptr) + index * shape1 + offset;
         auto *output_gm = input_gm;
-        auto *freqs_gm = (__gm__ float *)(freqs_ptr) + positionUB[token_idx % maxCnt] * ropeDim;
+        auto *freqs_gm =
+            (__gm__ float *)(freqs_ptr) + positionUB[token_idx - baseTokenIdx] * ropeDim;
 
         uint32_t slot_idx, block, block_offset;
         if (need_k_cache || need_v_cache) {
-            slot_idx = slotMappingUB[token_idx % maxCnt];
+            slot_idx = slotMappingUB[token_idx - baseTokenIdx];
             block = slot_idx / block_size;
             block_offset = slot_idx % block_size;
         }
         if (need_k_cache) {
             auto *key_ptr = (__gm__ Dtype *)(key) + index * kdim;
-            auto *kcache_ptr = ((__gm__ Dtype *)(kcache)) +
-                               block * nLocalHeads * block_size * kdim + block_offset * kdim;
-            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + curr);
-            CopyGmToUbufAligned(kinputs[curr], key_ptr, kdim * sizeof(Dtype));
-            set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0 + curr);
-            wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0 + curr);
-            CopyUbufToGmAligned(kcache_ptr, kinputs[curr], kdim * sizeof(Dtype));
-            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + curr);
+            auto *kcache_ptr = ((__gm__ Dtype *)(kcache)) + block * kStride + block_offset * kdim;
+            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
+            CopyGmToUbufAligned(kinputs[curr], key_ptr, kCacheBytes);
+            set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID4 + curr);
+            wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID4 + curr);
+            CopyUbufToGmAligned(kcache_ptr, kinputs[curr], kCacheBytes);
+            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
         }
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
@@ -166,21 +167,13 @@ __aicore__ __inline__ void rope_complex_and_cache(
             vconv_bf162f32(input_f32, inputs[curr], repeat, 1, 1, 8, 4);
         }
         if (need_v_cache && remain_blocks > 0) {
-            copy_ubuf_to_ubuf(outs[curr] + ropeDim, inputs[curr] + ropeDim, 0, 1, remain_blocks, 0,
-                              0);
+            copy_ubuf_to_ubuf(vRemain, inputs[curr] + ropeDim, 0, 1, remain_blocks, 0, 0);
         }
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
         pipe_barrier(PIPE_V);
 
-        SetMask(ropeDim);
-        // [x0, x2, x4, ...]
-        vreducev2((UBA(uint32_t))x_even, (UBA(uint32_t))input_f32, (UBA(uint32_t))input_f32, repeat,
-                  1, 1, 8, 0);
-        // [x1, x3, x5, ...]
-        vreducev2((UBA(uint32_t))x_odd, (UBA(uint32_t))input_f32, (UBA(uint32_t))input_f32, repeat,
-                  1, 2, 8, 0);
-
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
+        SetMask(ropeDim);
         // [cos(k/(theta^(2t/dim))]
         vreducev2((UBA(uint32_t))cos, (UBA(uint32_t))freqs[curr], (UBA(uint32_t))freqs[curr],
                   repeat, 1, 1, 8, 0);
@@ -188,6 +181,13 @@ __aicore__ __inline__ void rope_complex_and_cache(
         vreducev2((UBA(uint32_t))sin, (UBA(uint32_t))freqs[curr], (UBA(uint32_t))freqs[curr],
                   repeat, 1, 2, 8, 0);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+
+        // [x0, x2, x4, ...]
+        vreducev2((UBA(uint32_t))x_even, (UBA(uint32_t))input_f32, (UBA(uint32_t))input_f32, repeat,
+                  1, 1, 8, 0);
+        // [x1, x3, x5, ...]
+        vreducev2((UBA(uint32_t))x_odd, (UBA(uint32_t))input_f32, (UBA(uint32_t))input_f32, repeat,
+                  1, 2, 8, 0);
         pipe_barrier(PIPE_V);
 
         SetMask(ropeDim / 2);
@@ -205,9 +205,9 @@ __aicore__ __inline__ void rope_complex_and_cache(
         vsub(out_f32, x_even_cos, x_odd_sin, repeat, 1, 1, 1, 8, 8, 8);
         // img : x[0::2] * sin + x[1::2] * cos
         vadd(out_f32 + ropeDim / 2, x_even_sin, x_odd_cos, repeat, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-        pipe_barrier(PIPE_V);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
         // out FP32 -> Dtype
         if constexpr (std::is_same_v<Dtype, float16_t>) {
@@ -215,14 +215,17 @@ __aicore__ __inline__ void rope_complex_and_cache(
         } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
             vconv_f322bf16r(outs[curr], out_f32, repeat, 1, 1, 4, 8);
         }
+        if (need_v_cache && remain_blocks > 0) {
+            copy_ubuf_to_ubuf(outs[curr] + ropeDim, vRemain, 0, 1, remain_blocks, 0, 0);
+        }
+        pipe_barrier(PIPE_V);
 
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
         // out UB -> GM
         CopyUbufToGmAligned(output_gm, outs[curr], outputBytes);
         if (need_v_cache) {
-            auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) +
-                               block * nLocalHeads * block_size * vdim + block_offset * vdim;
+            auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) + block * vStride + block_offset * vdim;
             CopyUbufToGmAligned(vcache_ptr, outs[curr], vCacheBytes);
         }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
@@ -233,6 +236,8 @@ __aicore__ __inline__ void rope_complex_and_cache(
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
