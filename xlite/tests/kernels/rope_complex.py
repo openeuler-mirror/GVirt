@@ -49,7 +49,7 @@ MAX_SEQ_LEN = 1024
 BATCH_SIZE = 8
 SEQ_LEN = 10
 
-test_cases = {
+test_cases = [
     (torch.float16, 64, 64),
     (torch.float16, 64, 128),
     (torch.float16, 64, 192),
@@ -57,7 +57,7 @@ test_cases = {
     (torch.bfloat16, 64, 128),
     (torch.bfloat16, 64, 192),
     (torch.bfloat16, 64, 576),
-}
+]
 
 for test_dtype, rope_dim, q_dim in test_cases:
     n_local_heads = 16
