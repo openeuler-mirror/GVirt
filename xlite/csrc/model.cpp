@@ -8,6 +8,7 @@
 #include "runtime.h"
 #include "op.h"
 #include "model.h"
+#include "debug.h"
 
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
@@ -1025,11 +1026,10 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         if (i == 0) {
             XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], true, attnNormBias[i]);
         }
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " in").c_str());
+        XDEBUG_SET_STATE(_rankId == 0 && (i == 0 || i == _c.nDenseLayers));
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
         ForwardAttn(rt, i, kvCache, freqsCis, h);
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " after attn").c_str());
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
         XliteOpAddAndRmsNorm(rt, rt.hiddenStateSlice, xSlice, mlpNorm[i], _c.normEps,
                              rt.hiddenStateSlice, mlpNormBias[i]);
         if (!rt.enableMoEAllToAll) {
@@ -1039,8 +1039,7 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
             rt.NotifyWaitPeerStream();
         }
         ForwardFFN(rt, i, rt.enableMoEAllToAll ? rt.hiddenStateSlice : h);
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " after ffn").c_str());
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after ffn").c_str(), 1e6f);
         if (i < _c.deepstackNumLevel) {
             XliteOpAdd(rt, h, deepstackInputEmbeds[i], h);
         }
@@ -1077,15 +1076,13 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
         if (i == 0) {
             XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], true, attnNormBias[i]);
         }
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " in").c_str());
+        XDEBUG_SET_STATE(_rankId == 0 && (i == 0 || i == _c.nDenseLayers));
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
         ForwardAttn(rt, i, kvCache, freqsCis, h);
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " after attn").c_str());
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
         XliteOpAddAndRmsNorm(rt, h, x, mlpNorm[i], _c.normEps, h, mlpNormBias[i]);
         ForwardFFN(rt, i, h);
-        XLITE_DEBUG_POINT(_rankId == 0 && (i == 0 || i == _c.nDenseLayers), rt, h,
-                          ("layer" + std::to_string(i) + " after ffn").c_str());
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after ffn").c_str(), 1e6f);
         if (i < _c.deepstackNumLevel) {
             XliteOpAdd(rt, h, deepstackInputEmbeds[i], h);
         }
@@ -1315,8 +1312,9 @@ size_t XModel::GetTensorPoolSize(int dbg)
     size_t size = rt.maxUsedSize();
 
     if (_rankId == 0 && dbg) {
-        std::cout << "[Tensor pool] calculated size: " << size << " bytes ("
-                  << DIV_ROUND_UP(size, 1ull << MB_BIT) << " MB)" << std::endl;
+        XDebugStream s(_rankId, __func__);
+        s << "calculated size: " << size << " bytes (" << DIV_ROUND_UP(size, 1ull << MB_BIT)
+          << " MB)" << std::endl;
     }
     return DIV_ROUND_UP(size, 1ull << MB_BIT);
 }

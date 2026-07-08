@@ -187,15 +187,19 @@ public:
     XTensor() {};
     XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
-    void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6);
+    // The os parameter lets callers (e.g. the debug module) capture the output into a
+    // stream so it can be flushed atomically with a rank/color prefix. Defaults to
+    // std::cout to keep legacy direct callers unchanged.
+    void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6,
+               std::ostream &os = std::cout);
     void PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDtype subDtype,
-                  uint32_t nRow = 6, uint32_t nCol = 6);
+                  uint32_t nRow = 6, uint32_t nCol = 6, std::ostream &os = std::cout);
     void Memset(int value);
     std::string ToStr(const char *name = "") const;
     void View(std::vector<size_t> shape);
     void View(enum XDtype type);
     void Save(const std::string &path);
-    bool CheckNanInf(const char *name = "", float threshold = -1.0f);
+    bool CheckNanInf(const char *name = "", float threshold = -1.0f, std::ostream &os = std::cout);
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
     enum XTensorType GetType()
     {

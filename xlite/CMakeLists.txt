@@ -119,11 +119,10 @@ ascendc_library(xlite_kernels_common_${RUN_MODE} SHARED ${KERNEL_FILES_COMMON})
 ascendc_library(xlite_kernels_bf16_${RUN_MODE} SHARED ${KERNEL_FILES_BF16})
 ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
 
-option(XLITE_DEBUG "Enable xlite debug mode" OFF)
-
 # xlite
 add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/debug.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/sock.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/swizzle.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/op.cpp
@@ -133,6 +132,48 @@ add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/ccl.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/auto_tuner.cpp
 )
+
+# ---------------------------------------------------------------------------
+# Debug control.
+#
+# Driven solely by the XLITE_DEBUG_ON env var (a comma-separated token list).
+# CMake only PARSES it into macros; the debug module (csrc/debug.h) owns the
+# logic of which macro gates which block.
+#
+#   XLITE_DEBUG_ON not set, empty, or a falsy token (0/false/no/off)
+#       -> no debug macros defined (distribution build).
+#   XLITE_DEBUG_ON=<tok>[,<tok>...]  (any non-falsy value)
+#       -> defines XLITE_DEBUG_ON (base debug) PLUS, for each token <tok>,
+#          a macro XLITE_DEBUG_ON_<TOK> (token uppercased). e.g.
+#          XLITE_DEBUG_ON=forward,tuner  ->  XLITE_DEBUG_ON
+#                                            XLITE_DEBUG_ON_FORWARD
+#                                            XLITE_DEBUG_ON_TUNER
+#
+# Token recognition (uppercasing) happens here; unknown tokens are still passed
+# through as XLITE_DEBUG_ON_<TOK> so the debug module can warn/ignore them.
+# ---------------------------------------------------------------------------
+if(DEFINED ENV{XLITE_DEBUG_ON})
+    string(TOLOWER "$ENV{XLITE_DEBUG_ON}" _xlite_dbg_raw)
+    string(STRIP "${_xlite_dbg_raw}" _xlite_dbg_raw)
+    if(NOT (_xlite_dbg_raw STREQUAL "" OR _xlite_dbg_raw MATCHES "^(0|false|no|off)$"))
+        target_compile_definitions(xlite PUBLIC XLITE_DEBUG_ON)
+        string(REPLACE "," ";" _xlite_dbg_list "${_xlite_dbg_raw}")
+        foreach(_tok IN LISTS _xlite_dbg_list)
+            string(STRIP "${_tok}" _tok)
+            if(_tok STREQUAL "")
+                continue()
+            endif()
+            string(TOUPPER "${_tok}" _tok)
+            target_compile_definitions(xlite PUBLIC "XLITE_DEBUG_ON_${_tok}")
+        endforeach()
+        message(STATUS "XLITE_DEBUG_ON='${_xlite_dbg_raw}' -> XLITE_DEBUG_ON + per-token XLITE_DEBUG_ON_<TOK>")
+    else()
+        message(STATUS "XLITE_DEBUG_ON='${_xlite_dbg_raw}' -> no debug macros")
+    endif()
+    unset(_xlite_dbg_raw)
+    unset(_xlite_dbg_list)
+    unset(_tok)
+endif()
 
 target_compile_options(xlite PRIVATE
     -std=c++17 -O3 -Wall -Werror
@@ -145,10 +186,6 @@ target_link_libraries(xlite PRIVATE
     hccl
     torch
 )
-
-if(XLITE_DEBUG)
-    target_compile_definitions(xlite PRIVATE XLITE_DEBUG_ON)
-endif()
 
 # _C
 find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)

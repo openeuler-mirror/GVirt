@@ -12,45 +12,6 @@
 #define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144
 #define XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD 1024
 
-#ifdef XLITE_DEBUG_ON
-#define XLITE_DEBUG_POINT(condition, rt, h, str) \
-    if ((condition) && !(rt).IsDummyRuntime()) { \
-        (rt).Synchronize();                      \
-        (h).Print((str));                        \
-    }
-
-#define XLITE_DEBUG_POINT_ROWS_COLS(condition, rt, h, str, rows, cols) \
-    if ((condition) && !(rt).IsDummyRuntime()) {                       \
-        (rt).Synchronize();                                            \
-        (h).Print(str, rows, cols);                                    \
-    }
-
-#define XLITE_DEBUG_PTR_POINT(condition, rt, h, str, subShape, subDtype) \
-    if ((condition) && !(rt).IsDummyRuntime()) {                         \
-        (rt).Synchronize();                                              \
-        (h).PrintPtr(str, subShape, subDtype);                           \
-    }
-
-#define XLITE_DEBUG_DUMP_XTENSOR(condition, rt, h, path) \
-    if ((condition) && !(rt).IsDummyRuntime()) {         \
-        (rt).Synchronize();                              \
-        (h).Save(path);                                  \
-    }
-
-#define XLITE_DEBUG_CHECK_NAN_INF(condition, rt, h, str) \
-    if ((condition) && !(rt).IsDummyRuntime()) {         \
-        (rt).Synchronize();                              \
-        (h).CheckNanInf(str);                            \
-    }
-
-#else
-#define XLITE_DEBUG_POINT(condition, rt, h, str)
-#define XLITE_DEBUG_POINT_ROWS_COLS(condition, rt, h, str, rows, cols)
-#define XLITE_DEBUG_PTR_POINT(condition, rt, h, str, subShape, subDtype)
-#define XLITE_DEBUG_DUMP_XTENSOR(condition, rt, h, path)
-#define XLITE_DEBUG_CHECK_NAN_INF(condition, rt, h, str)
-#endif
-
 typedef void *aclrtContext;
 typedef void *aclrtNotify;
 typedef void *aclrtStream;
