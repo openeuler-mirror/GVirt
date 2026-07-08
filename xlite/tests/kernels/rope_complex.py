@@ -60,7 +60,7 @@ test_cases = [
 ]
 
 for test_dtype, rope_dim, q_dim in test_cases:
-    n_local_heads = 16
+    n_local_heads = 64
     num_tokens = BATCH_SIZE * SEQ_LEN
     
     torch.set_default_dtype(test_dtype)

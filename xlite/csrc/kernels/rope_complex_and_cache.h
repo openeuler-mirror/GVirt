@@ -19,6 +19,9 @@ __aicore__ __inline__ void rope_complex_and_cache(
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
     bool need_v_cache = (block_size != 0) && (vcache != nullptr) && (slot_mapping != nullptr);
+    if (need_v_cache) {
+        assert(nLocalHeads == 1);
+    }
 
     int ropeDtypeBytes = ropeDim * sizeof(Dtype);
     int vCacheBytes = vdim * sizeof(Dtype);
@@ -27,48 +30,58 @@ __aicore__ __inline__ void rope_complex_and_cache(
     int vRemainBytes = need_v_cache ? (vCacheBytes - ropeDtypeBytes) : 0;
     int freqsBytes = ropeFPBytes;
     int outputBytes = ropeDtypeBytes;
+    int totalRopeFPBytes = ropeFPBytes * nLocalHeads;
+    int totalInputBytes = inputBytes * nLocalHeads;
+    int totalVRemainBytes = vRemainBytes * nLocalHeads;
+    int totalOutputBytes = outputBytes * nLocalHeads;
+    int totalShape1 = shape1 * nLocalHeads;
+    int srcStride =
+        DIV_ROUND_UP((shape1 - (need_v_cache ? vdim : ropeDim)) * sizeof(Dtype), BLOCK_SIZE);
+    int remainStride = DIV_ROUND_UP(ropeDtypeBytes, BLOCK_SIZE);
     int vStride = nLocalHeads * block_size * vdim;
+    int input_blocks = DIV_ROUND_UP(inputBytes, BLOCK_SIZE);
     int remain_blocks = DIV_ROUND_UP(vRemainBytes, BLOCK_SIZE);
+    int rope_blocks = DIV_ROUND_UP(ropeFPBytes, BLOCK_SIZE);
+    int half_rope_blocks = DIV_ROUND_UP(ropeFPBytes / 2, BLOCK_SIZE);
     constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     int repeat = DIV_ROUND_UP(ropeDim, calcPad);
+    int totalRepeat = DIV_ROUND_UP(ropeDim * nLocalHeads, calcPad);
 
-    int maxCnt = 1024;
+    int maxCnt = 256;
     uint64_t off = 0;
     UBA(Dtype) input0 = reinterpret_cast<UBA(Dtype)>(off);
-    off += ROUND_UP(inputBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE);
     UBA(Dtype) input1 = reinterpret_cast<UBA(Dtype)>(off);
-    off += ROUND_UP(inputBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) freqs0 = reinterpret_cast<UBA(float)>(off);
     off += ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) freqs1 = reinterpret_cast<UBA(float)>(off);
     off += ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE);
     UBA(Dtype) out0 = reinterpret_cast<UBA(Dtype)>(off);
-    off += ROUND_UP(inputBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE);
     UBA(Dtype) out1 = reinterpret_cast<UBA(Dtype)>(off);
-    off += ROUND_UP(inputBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE);
     UBA(Dtype) vRemain = reinterpret_cast<UBA(Dtype)>(off);
-    off += need_v_cache ? ROUND_UP(vRemainBytes, VECTOR_MAX_BYTESIZE) : 0;
+    off += need_v_cache ? ROUND_UP(totalVRemainBytes, VECTOR_MAX_BYTESIZE) : 0;
 
-    UBA(float) out_f32 = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
-    UBA(float) input_f32 = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) inOutFP32 = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_even = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_odd = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) cos = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) sin = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_even_cos = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_odd_sin = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_even_sin = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(float) x_odd_cos = reinterpret_cast<UBA(float)>(off);
-    off += ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
     UBA(uint64_t) positionUB = reinterpret_cast<UBA(uint64_t)>(off);
     off += ROUND_UP((maxCnt) * sizeof(uint64_t), VECTOR_MAX_BYTESIZE);
     UBA(uint32_t) slotMappingUB = reinterpret_cast<UBA(uint32_t)>(off);
@@ -79,7 +92,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
     UBA(float) freqs[2] = {freqs0, freqs1};
     UBA(Dtype) outs[2] = {out0, out1};
 
-    int taskNum = nTokens * nLocalHeads;
+    int taskNum = nTokens;
     if (nextCoreOffset) {
         *nextCoreOffset = (coreOffset + taskNum) % block_num;
     }
@@ -98,7 +111,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
     int baseTokenIdx = -1;
     int first = (block_idx + block_num - coreOffset) % block_num;
     for (uint32_t index = first; index < taskNum; index += block_num) {
-        int token_idx = index / nLocalHeads;
+        int token_idx = index;
         if (baseTokenIdx == -1 || token_idx >= baseTokenIdx + maxCnt) {
             int remain = maxCnt;
             if (token_idx + maxCnt > nTokens) {
@@ -117,14 +130,14 @@ __aicore__ __inline__ void rope_complex_and_cache(
             baseTokenIdx = token_idx;
         }
 
-        auto *input_gm = (__gm__ Dtype *)(input_ptr) + index * shape1 + offset;
+        auto *input_gm = (__gm__ Dtype *)(input_ptr) + token_idx * totalShape1 + offset;
         auto *output_gm = input_gm;
         auto *freqs_gm =
             (__gm__ float *)(freqs_ptr) + positionUB[token_idx - baseTokenIdx] * ropeDim;
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
         // input GM -> UB
-        CopyGmToUbufAligned(inputs[curr], input_gm, inputBytes);
+        copy_gm_to_ubuf(inputs[curr], input_gm, 0, nLocalHeads, input_blocks, srcStride, 0);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
@@ -134,12 +147,13 @@ __aicore__ __inline__ void rope_complex_and_cache(
 
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
         if constexpr (std::is_same_v<Dtype, float16_t>) {
-            vconv_f162f32(input_f32, inputs[curr], repeat, 1, 1, 8, 4);
+            vconv_f162f32(inOutFP32, inputs[curr], nLocalHeads, 1, 1, rope_blocks, input_blocks);
         } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-            vconv_bf162f32(input_f32, inputs[curr], repeat, 1, 1, 8, 4);
+            vconv_bf162f32(inOutFP32, inputs[curr], nLocalHeads, 1, 1, rope_blocks, input_blocks);
         }
         if (need_v_cache && remain_blocks > 0) {
-            copy_ubuf_to_ubuf(vRemain, inputs[curr] + ropeDim, 0, 1, remain_blocks, 0, 0);
+            copy_ubuf_to_ubuf(vRemain, inputs[curr] + ropeDim, 0, nLocalHeads, remain_blocks,
+                              remainStride, 0);
         }
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
         pipe_barrier(PIPE_V);
@@ -155,40 +169,43 @@ __aicore__ __inline__ void rope_complex_and_cache(
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
 
         // [x0, x2, x4, ...]
-        vreducev2((UBA(uint32_t))x_even, (UBA(uint32_t))input_f32, (UBA(uint32_t))input_f32, repeat,
-                  1, 1, 8, 0);
+        vreducev2((UBA(uint32_t))x_even, (UBA(uint32_t))inOutFP32, (UBA(uint32_t))inOutFP32,
+                  totalRepeat, 1, 1, 8, 0);
         // [x1, x3, x5, ...]
-        vreducev2((UBA(uint32_t))x_odd, (UBA(uint32_t))input_f32, (UBA(uint32_t))input_f32, repeat,
-                  1, 2, 8, 0);
+        vreducev2((UBA(uint32_t))x_odd, (UBA(uint32_t))inOutFP32, (UBA(uint32_t))inOutFP32,
+                  totalRepeat, 1, 2, 8, 0);
         pipe_barrier(PIPE_V);
 
         SetMask(ropeDim / 2);
         // x[0::2] * cos
-        vmul(x_even_cos, x_even, cos, repeat, 1, 1, 1, 8, 8, 8);
+        vmul(x_even_cos, x_even, cos, nLocalHeads, 1, 1, 1, half_rope_blocks, half_rope_blocks, 0);
         // x[1::2] * sin
-        vmul(x_odd_sin, x_odd, sin, repeat, 1, 1, 1, 8, 8, 8);
+        vmul(x_odd_sin, x_odd, sin, nLocalHeads, 1, 1, 1, half_rope_blocks, half_rope_blocks, 0);
         // x[0::2] * sin
-        vmul(x_even_sin, x_even, sin, repeat, 1, 1, 1, 8, 8, 8);
+        vmul(x_even_sin, x_even, sin, nLocalHeads, 1, 1, 1, half_rope_blocks, half_rope_blocks, 0);
         // x[1::2] * cos
-        vmul(x_odd_cos, x_odd, cos, repeat, 1, 1, 1, 8, 8, 8);
+        vmul(x_odd_cos, x_odd, cos, nLocalHeads, 1, 1, 1, half_rope_blocks, half_rope_blocks, 0);
         pipe_barrier(PIPE_V);
 
         // real : x[0::2] * cos - x[1::2] * sin
-        vsub(out_f32, x_even_cos, x_odd_sin, repeat, 1, 1, 1, 8, 8, 8);
+        vsub(inOutFP32, x_even_cos, x_odd_sin, nLocalHeads, 1, 1, 1, rope_blocks, half_rope_blocks,
+             half_rope_blocks);
         // img : x[0::2] * sin + x[1::2] * cos
-        vadd(out_f32 + ropeDim / 2, x_even_sin, x_odd_cos, repeat, 1, 1, 1, 8, 8, 8);
+        vadd(inOutFP32 + ropeDim / 2, x_even_sin, x_odd_cos, nLocalHeads, 1, 1, 1, rope_blocks,
+             half_rope_blocks, half_rope_blocks);
         pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
         // out FP32 -> Dtype
         if constexpr (std::is_same_v<Dtype, float16_t>) {
-            vconv_f322f16(outs[curr], out_f32, repeat, 1, 1, 4, 8);
+            vconv_f322f16(outs[curr], inOutFP32, nLocalHeads, 1, 1, input_blocks, rope_blocks);
         } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-            vconv_f322bf16r(outs[curr], out_f32, repeat, 1, 1, 4, 8);
+            vconv_f322bf16r(outs[curr], inOutFP32, nLocalHeads, 1, 1, input_blocks, rope_blocks);
         }
         if (need_v_cache && remain_blocks > 0) {
-            copy_ubuf_to_ubuf(outs[curr] + ropeDim, vRemain, 0, 1, remain_blocks, 0, 0);
+            copy_ubuf_to_ubuf(outs[curr] + ropeDim, vRemain, 0, nLocalHeads, remain_blocks, 0,
+                              remainStride);
         }
         pipe_barrier(PIPE_V);
 
@@ -202,7 +219,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
             auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) + block * vStride + block_offset * vdim;
             CopyUbufToGmAligned(vcache_ptr, outs[curr], vCacheBytes);
         } else {
-            CopyUbufToGmAligned(output_gm, outs[curr], outputBytes);
+            copy_ubuf_to_gm(output_gm, outs[curr], 0, nLocalHeads, input_blocks, 0, srcStride);
         }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
         curr = 1 - curr;
