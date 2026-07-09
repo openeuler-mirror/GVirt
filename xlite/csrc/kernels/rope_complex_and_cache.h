@@ -195,13 +195,14 @@ __aicore__ __inline__ void rope_complex_and_cache(
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
         // out UB -> GM
-        CopyUbufToGmAligned(output_gm, outs[curr], outputBytes);
         if (need_v_cache) {
             uint32_t slot_idx = slotMappingUB[token_idx - baseTokenIdx];
             uint32_t block = slot_idx / block_size;
             uint32_t block_offset = slot_idx % block_size;
             auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) + block * vStride + block_offset * vdim;
             CopyUbufToGmAligned(vcache_ptr, outs[curr], vCacheBytes);
+        } else {
+            CopyUbufToGmAligned(output_gm, outs[curr], outputBytes);
         }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
         curr = 1 - curr;
