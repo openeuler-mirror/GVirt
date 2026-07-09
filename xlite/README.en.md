@@ -50,7 +50,7 @@ For supported models, see [Model List](doc/models.md).
 ```bash
 # Install vllm_ascend, refer to https://github.com/vllm-project/vllm-ascend/blob/main/README.md
 # Install xlite
-pip install xlite
+pip install xlite --extra-index https://download.pytorch.org/whl/cpu/
 ```
 
 ### Offline Inference Example

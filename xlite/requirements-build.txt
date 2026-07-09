@@ -6,4 +6,5 @@
 
 setuptools>=64.0.0,<82.0.0
 cmake>=3.22.0
--r requirements.txt
+pybind11>=3.0.0
+torch>=2.5.1,<=2.10.0

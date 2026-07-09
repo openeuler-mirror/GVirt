@@ -51,7 +51,7 @@ xlite支持模型见[模型列表](doc/models.md)。
 ```bash
 # 安装vllm_ascend, 可参考https://github.com/vllm-project/vllm-ascend/blob/main/README.md
 # 安装xlite
-pip install xlite
+pip install xlite --extra-index https://download.pytorch.org/whl/cpu/
 ```
 
 ### 离线推理示例
