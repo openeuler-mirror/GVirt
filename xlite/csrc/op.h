@@ -96,10 +96,9 @@ void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &exp
 void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
                         uint32_t offset, XTensor &inputWithR, XTensor &freqs, XTensor &position);
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
-                                uint32_t ropeDim, uint32_t offset, uint32_t kdim, uint32_t vdim,
+                                uint32_t ropeDim, uint32_t offset, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
-                                uint32_t blockSize, XTensor &key, XTensor &kCache, XTensor &vCache,
-                                XTensor &slotMapping);
+                                uint32_t blockSize, XTensor &vCache, XTensor &slotMapping);
 void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
                        const XTensor &qNormBias, XTensor &attnNormQc, const XTensor &kvNorm,
                        const XTensor &kvNormBias, const XTensor &freqs, const XTensor &position,

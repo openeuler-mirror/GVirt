@@ -1032,15 +1032,13 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
         throw std::runtime_error(err_str + " TODO");
     }
     launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
-                 0, 0, inputWithR.ptr, freqs.ptr, position.ptr, 0, nullptr, nullptr, nullptr,
-                 nullptr);
+                 0, inputWithR.ptr, freqs.ptr, position.ptr, 0, nullptr, nullptr);
 }
 
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
-                                uint32_t ropeDim, uint32_t offset, uint32_t kdim, uint32_t vdim,
+                                uint32_t ropeDim, uint32_t offset, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
-                                uint32_t blockSize, XTensor &key, XTensor &kCache, XTensor &vCache,
-                                XTensor &slotMapping)
+                                uint32_t blockSize, XTensor &vCache, XTensor &slotMapping)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1056,8 +1054,8 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
         throw std::runtime_error(err_str + " TODO");
     }
     launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
-                 kdim, vdim, inputWithR.ptr, freqs.ptr, position.ptr, blockSize, key.ptr,
-                 kCache.ptr, vCache.ptr, slotMapping.ptr);
+                 vdim, inputWithR.ptr, freqs.ptr, position.ptr, blockSize, vCache.ptr,
+                 slotMapping.ptr);
 }
 
 void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,

@@ -305,10 +305,9 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
                      _c.indexHeadDim);
     // TODO not interleaved case
     if (_c.indexRopeInterleaved) {
-        XTensor key, kCache;
-        XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim + _c.indexNHeads, _c.ropeHeadDim, 0, 0,
+        XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim + _c.indexNHeads, _c.ropeHeadDim, 0,
                                    _c.indexHeadDim, kw, freqsCis, rt._attnPosition, _c.blockSize,
-                                   key, kCache, indexKCache, rt._attnSlotMapping);
+                                   indexKCache, rt._attnSlotMapping);
     }
 
     // only use sparse attention when the sequence length is long enough
