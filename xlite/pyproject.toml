@@ -26,7 +26,7 @@ classifiers = [
 ]
 # synchronize with requirements.txt when updating dependencies
 dependencies = [
-    "torch>=2.5.1", # ake sure (torch: build version <= runtime version)
+    "torch>=2.5.1", # make sure (torch: build version <= runtime version)
 ]
 
 [project.optional-dependencies]

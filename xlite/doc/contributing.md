@@ -23,17 +23,17 @@ docker run --name xlite -it --rm --privileged -v /usr/local/Ascend/driver:/usr/l
 ```bash
 git clone https://atomgit.com/openeuler/GVirt.git
 cd GVirt/xlite
-pip install -r requirements-build.txt  # 安装构建依赖（若跳过，后续安装需移除--no-build-isolation参数）
-pip install . --no-build-isolation  # 安装当前目录下的xlite包
+pip install -r requirements-build.txt --extra-index https://download.pytorch.org/whl/cpu/  # 安装构建依赖（若跳过，后续安装需移除--no-build-isolation参数）
+pip install . --no-build-isolation --extra-index https://download.pytorch.org/whl/cpu/  # 安装当前目录下的xlite包
 
 # 若开发环境安装，建议使用"-v .[dev]"（py源码修改后可直接在开发环境中生效）
-pip install -v -e .[dev] --no-build-isolation
+pip install -v -e .[dev] --no-build-isolation --extra-index https://download.pytorch.org/whl/cpu/
 ```
 
 若仅需测试正在开发的功能，可直接从主分支安装：
 
 ```bash
-pip install git+https://atomgit.com/openeuler/GVirt.git@master#subdirectory=xlite
+pip install git+https://atomgit.com/openeuler/GVirt.git@master#subdirectory=xlite --extra-index https://download.pytorch.org/whl/cpu/
 ```
 
 ## 编译
@@ -42,8 +42,8 @@ pip install git+https://atomgit.com/openeuler/GVirt.git@master#subdirectory=xlit
 
 ```bash
 cd GVirt/xlite
-pip install -r requirements-build.txt
-pip install -r requirements-dev.txt  # 进一步安装开发依赖（可选）
+pip install -r requirements-build.txt --extra-index https://download.pytorch.org/whl/cpu/
+pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/  # 进一步安装开发依赖（可选）
 ```
 
 编译步骤：
@@ -98,13 +98,14 @@ rpmbuild -bb xlite.spec --nodebuginfo
 推荐方式（完整遵循`pyproject.toml`中的构建配置）：
 
 ```bash
-python -m build --wheel --no-isolation  # 构建whl包；如需.tar.gz包可去掉--wheel参数
+pip install build  # 安装build工具
+PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu/ python -m build --wheel --no-isolation  # 构建whl包；如需.tar.gz包可去掉--wheel参数
 ```
 
 传统方式（可能不会自动安装`[build-system]`依赖）：
 
 ```bash
-python setup.py bdist_wheel && python setup.py clean  # 构建whl包并清理构建产物
+PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu/ python setup.py bdist_wheel && python setup.py clean  # 构建whl包并清理构建产物
 ```
 
 构建后生成的whl包在`dist`目录下。
