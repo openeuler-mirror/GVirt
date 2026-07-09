@@ -4,7 +4,7 @@ requires = [
     "setuptools>=64.0.0,<82.0.0",
     "cmake>=3.22.0",
     "pybind11>=3.0.0",
-    "torch>=2.5.1", # use torch+cpu; make sure (torch: build version <= runtime version)
+    "torch>=2.5.1,<=2.10.0", # use torch+cpu; make sure (torch: build version <= runtime version)
 ]
 build-backend = "setuptools.build_meta"
 
