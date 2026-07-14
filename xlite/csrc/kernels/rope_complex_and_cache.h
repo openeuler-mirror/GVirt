@@ -105,8 +105,6 @@ __aicore__ __inline__ void rope_complex_and_cache(
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
-    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
-    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
     int curr = 0;
     int baseTokenIdx = -1;
     int first = (block_idx + block_num - coreOffset) % block_num;
@@ -229,8 +227,6 @@ __aicore__ __inline__ void rope_complex_and_cache(
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
-    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
-    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
