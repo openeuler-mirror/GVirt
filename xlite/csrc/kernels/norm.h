@@ -183,11 +183,8 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     }
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-    for (uint32_t loop = 0; loop < token_num; loop++) {
-        if ((loop + coreOffset) % block_num != block_idx) {
-            continue;
-        }
-
+    int first = (block_idx + block_num - coreOffset) % block_num;
+    for (uint32_t loop = first; loop < token_num; loop += block_num) {
         uint32_t block = 0, block_offset = 0;
         if (need_cache) {
             uint32_t slot_idx = (uint32_t)(*((__gm__ uint32_t *)slot_mapping + loop));
