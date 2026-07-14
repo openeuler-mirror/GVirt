@@ -69,10 +69,10 @@ def _get_pybind11_cmake_dir() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Patch extract_host_stub.py during the build to drop the overflow-status
-# device-memory (de)allocation from host_stub.cpp. Best-effort: restored after
-# the build, and any failure (missing/unreadable/unwritable) skips the patch
-# without aborting.
+# Patch extract_host_stub.py during the build to drop the overflow- and
+# dump-status device-memory (de)allocation from host_stub.cpp. Best-effort:
+# restored after the build, and any failure (missing/unreadable/unwritable)
+# skips the patch without aborting.
 # ---------------------------------------------------------------------------
 _DEFAULT_ASCEND_CANN_PACKAGE_PATH = "/usr/local/Ascend/ascend-toolkit/latest"
 
@@ -82,13 +82,31 @@ _ASCENDC_KERNEL_CMAKE_SUBDIRS = (
     "tools/tikcpp/ascendc_kernel_cmake",
 )
 
-# Python statements to comment out; commented form is derived dynamically, and
-# checked first so already-commented snippets are left alone.
-_EXTRACT_HOST_STUB_PATCHES = (
+# Python statements to comment out (commented form derived dynamically); checked
+# first so already-commented snippets are left alone. Drops the overflow
+# device-memory (de)allocation.
+_EXTRACT_HOST_STUB_COMMENT_PATCHES = (
     r"""    buff.write('''    constexpr uint32_t __ascendc_overflow_status_size = 8;
     AllocAscendMemDevice(&(__ascendc_args.__ascendc_overflow), __ascendc_overflow_status_size);
 ''')""",
     r"""    buff.write('    FreeAscendMemDevice(__ascendc_args.__ascendc_overflow);\n')""",
+)
+
+# In-place (old, new) text edits; applied once when `old` is still present
+# (idempotent). `new` is non-empty so the post-edit form is detectable on a
+# re-run -- the deletion is rewritten to a C++ comment rather than truly
+# elided. Drops the dump device-memory (de)allocation, keeping the surrounding
+# #if/#endif and __ascendc_one_core_dump_size.
+_EXTRACT_HOST_STUB_REPLACE_PATCHES = (
+    (
+        "    AllocAscendMemDevice(&(__ascendc_args.__ascendc_dump), "
+        "__ascendc_one_core_dump_size * {str(dump_factor)});\n",
+        "    // xlite: dump device-memory allocation elided\n",
+    ),
+    (
+        r"""        buff.write('    FreeAscendMemDevice(__ascendc_args.__ascendc_dump);\n#endif\n')""",
+        r"""        buff.write('#endif\n')""",
+    ),
 )
 
 
@@ -137,10 +155,15 @@ def _find_extract_host_stub() -> Optional[Path]:
 
 
 def _try_apply_patch(stub_path: Path) -> Optional[str]:
-    """Comment out the overflow calls in `stub_path`. Best-effort, never raises.
+    """Apply build-time edits to `stub_path`. Best-effort, never raises.
 
-    Returns original content (to restore later) when patched, else None (already
-    commented, unreadable, or unwritable). Never blocks the build.
+    Each patch resolves to one of: applied (rewritten this run), already-applied
+    (post-edit form present -> skip), or MISSING (neither form present -- CANN
+    bumped the stub text). Missing patches emit a loud warning but never block
+    the build.
+
+    Returns original content (to restore later) when any edit applied, else None
+    (everything already applied, unreadable, or unwritable).
     """
     try:
         original_content = stub_path.read_text(encoding="utf-8")
@@ -149,17 +172,40 @@ def _try_apply_patch(stub_path: Path) -> Optional[str]:
         return None
 
     patched_content = original_content
-    applied = []
-    for active in _EXTRACT_HOST_STUB_PATCHES:
+    commented_count = 0
+    replaced_count = 0
+    missing = []
+
+    for active in _EXTRACT_HOST_STUB_COMMENT_PATCHES:
         commented = _comment_out(active)
         if commented in patched_content:  # already commented: leave alone
             continue
         if active in patched_content:
             patched_content = patched_content.replace(active, commented, 1)
-            applied.append(active)
+            commented_count += 1
+        else:
+            missing.append(active)
 
-    if not applied:
-        print(f"AscendPatch: snippets already commented in {stub_path}; leaving as-is")
+    for old, new in _EXTRACT_HOST_STUB_REPLACE_PATCHES:
+        if old not in patched_content:
+            if new in patched_content:  # already applied: leave alone
+                continue
+            missing.append(old)
+            continue
+        patched_content = patched_content.replace(old, new, 1)
+        replaced_count += 1
+
+    if missing:
+        print(f"AscendPatch: WARNING — {len(missing)} patch snippet(s) missing "
+              f"in {stub_path}; stub may have changed. The (de)allocation "
+              f"edits they carry were NOT applied. Snippets:")
+        for i, snippet in enumerate(missing, 1):
+            preview = snippet if len(snippet) <= 120 else snippet[:117] + "..."
+            print(f"  [{i}] {preview!r}")
+
+    if not (commented_count or replaced_count):
+        if not missing:
+            print(f"AscendPatch: snippets already patched in {stub_path}; leaving as-is")
         return None
 
     try:
@@ -167,17 +213,17 @@ def _try_apply_patch(stub_path: Path) -> Optional[str]:
     except (PermissionError, OSError) as err:
         print(f"AscendPatch: cannot patch {stub_path} ({err}); skipping patch")
         return None
-    print(f"AscendPatch: patched {stub_path} (commented {len(applied)} snippet(s))")
+    print(f"AscendPatch: patched {stub_path} "
+          f"(commented {commented_count}, replaced {replaced_count})")
     return original_content
 
 
 @contextmanager
 def _patched_extract_host_stub():
-    """Comment out the overflow (de)allocation calls during the build.
+    """Apply the overflow + dump (de)allocation edits during the build.
 
-    Best-effort: any patch-flow failure skips the patch without aborting. When
-    patched, original content is restored on exit; a restore failure only warns
-    (never masks a build failure).
+    Best-effort: patch failures skip the patch; on success the original content
+    is restored on exit (restore failure only warns, never masks a build error).
     """
     stub_path = _find_extract_host_stub()
     original_content = None
