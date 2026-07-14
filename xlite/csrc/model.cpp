@@ -431,37 +431,28 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                        mhaKNormBias[layer], kHeads, qHeads * _c.headDim, qHeads * _c.headDim);
     }
     if (_c.qkNormFull) {
-        XTensor &qLocalVariance = rt.GetTensor({qkv.shape[0], 1}, FP32, DBG_LOC);
-        XTensor &kLocalVariance = rt.GetTensor({qkv.shape[0], 1}, FP32, DBG_LOC);
+        size_t rows = qkv.shape[0];
+        size_t bytesPerVar = rows * XDtypeBit(FP32) / 8;
+        XTensor &packedVar = rt.GetTensor({rows, 2}, FP32, DBG_LOC);
+        XTensor qLocalVariance;
+        XTensor kLocalVariance;
+        qLocalVariance.Init({rows, 1}, FP32, packedVar.ptr);
+        kLocalVariance.Init(
+            {rows, 1}, FP32,
+            reinterpret_cast<void *>(reinterpret_cast<uint64_t>(packedVar.ptr) + bytesPerVar));
         XliteOpRmsNorm(rt, qkv, XTensor(), qLocalVariance, _c.normEps, _c.headDim * qHeads, false,
                        XTensor());
         XliteOpRmsNorm(rt, qkv, XTensor(), kLocalVariance, _c.normEps, _c.headDim * kHeads, false,
                        XTensor(), 1, qHeads * _c.headDim);
         if (_c.defTpSize > 1) {
-            // Merge two variance tensors into a single AllReduceSum
-            size_t bytesPerVar = qkv.shape[0] * 1 * XDtypeBit(FP32) / 8;
-            XTensor &packedVar = rt.GetTensor({qkv.shape[0], 2}, FP32, DBG_LOC);
-
-            // Concatenate two tensors
-            std::vector<XTensor> inputs = {qLocalVariance, kLocalVariance};
-            XliteOpConcat(rt, inputs, packedVar);
-
-            // Single AllReduceSum operation
+            // Single AllReduceSum over the packed buffer reduces both variances in place.
             XliteOpAllReduceSum(rt, packedVar, packedVar, TP);
-
-            // Split back into two tensors
-            std::vector<XTensor> outputs = {qLocalVariance, kLocalVariance};
-            std::vector<size_t> sizes = {bytesPerVar, bytesPerVar};
-            XliteOpSplit(rt, packedVar, outputs, sizes, 1);
-
-            rt.PutTensor(packedVar);
         }
         XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim * qHeads, true,
                        XTensor(), 1, 0, 0, qLocalVariance);
         XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim * kHeads, true,
                        XTensor(), 1, qHeads * _c.headDim, qHeads * _c.headDim, kLocalVariance);
-        rt.PutTensor(qLocalVariance);
-        rt.PutTensor(kLocalVariance);
+        rt.PutTensor(packedVar);
     }
     XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis, rt._attnSlotMapping,
                      _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim, _c.blockSize,
