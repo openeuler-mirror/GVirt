@@ -433,7 +433,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     if (_c.qkNormFull) {
         size_t rows = qkv.shape[0];
         size_t bytesPerVar = rows * XDtypeBit(FP32) / 8;
-        XTensor &packedVar = rt.GetTensor({rows, 2}, FP32, DBG_LOC);
+        XTensor &packedVar = rt.GetTensor({rows * 2, 1}, FP32, DBG_LOC);
         XTensor qLocalVariance;
         XTensor kLocalVariance;
         qLocalVariance.Init({rows, 1}, FP32, packedVar.ptr);
