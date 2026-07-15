@@ -3,6 +3,7 @@
  */
 #include "base.h"
 #include "auto_tuner.h"
+#include "debug.h"
 #include "kernels/kernel_param.h"
 
 // same logic with flash attention/mla kernels
@@ -189,18 +190,21 @@ uint32_t GetTileSizeOfCachedKV(std::vector<uint32_t> &cachedLens, std::vector<ui
         bestTileSize = GetBestTileSizeByScores(cachedLens, queryLens, headNumInGroup, nKVHeads,
                                                blockSize, aicNum);
     }
-#ifdef XLITE_DEBUG_ON
-    std::cout << "cachedLens[" << batch << "]: [";
-    for (uint32_t i = 0; i < batch; i++) {
-        std::cout << cachedLens[i] << ((i == batch - 1) ? "" : ", ");
+#ifdef XLITE_DEBUG_ON_TUNER
+    {  // enabled at build time via XLITE_DEBUG_ON=tuner (or =all)
+        XDebugStream s(__func__);
+        s << "cachedLens[" << batch << "]: [";
+        for (uint32_t i = 0; i < batch; i++) {
+            s << cachedLens[i] << ((i == batch - 1) ? "" : ", ");
+        }
+        s << "]" << std::endl;
+        s << "queryLens[" << batch << "]: [";
+        for (uint32_t i = 0; i < batch; i++) {
+            s << queryLens[i] << ((i == batch - 1) ? "" : ", ");
+        }
+        s << "]" << std::endl;
+        s << "selected kvTileSize: " << bestTileSize << std::endl;
     }
-    std::cout << "]" << std::endl;
-    std::cout << "queryLens[" << batch << "]: [";
-    for (uint32_t i = 0; i < batch; i++) {
-        std::cout << queryLens[i] << ((i == batch - 1) ? "" : ", ");
-    }
-    std::cout << "]" << std::endl;
-    std::cout << "selected kvTileSize: " << bestTileSize << std::endl;
 #endif
     return bestTileSize;
 }

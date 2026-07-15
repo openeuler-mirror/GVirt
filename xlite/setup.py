@@ -321,10 +321,18 @@ class CMakeBuild(build_ext):
         build_cmd = ["cmake", "--build", str(build_temp), "-j"]
         install_cmd = ["cmake", "--install", str(build_temp)]
 
+        # Wheel (non-editable) builds must never ship debug code. Debug is driven purely by the XLITE_DEBUG_ON env var.
+        # CMakeLists.txt parses it into macros. Editable builds can set XLITE_DEBUG_ON=forward,tuner...
+        cmake_env = None
+        if not is_editable and not os.environ.get("XLITE_DEBUG_ON", "").lower().startswith("force"):
+            cmake_env = os.environ.copy()
+            cmake_env.pop("XLITE_DEBUG_ON", None)
+            print("CMakeBuild: stripped XLITE_DEBUG_ON from env for non-editable build")
+
         with _patched_extract_host_stub():
-            subprocess.check_call(configure_cmd)
-            subprocess.check_call(build_cmd)
-            subprocess.check_call(install_cmd)
+            subprocess.check_call(configure_cmd, env=cmake_env)
+            subprocess.check_call(build_cmd, env=cmake_env)
+            subprocess.check_call(install_cmd, env=cmake_env)
 
         # Remove headers and lib64 staging outputs from wheel contents.
         for artifact_dir_sub in ("include", "lib", "lib64", "csrc"):
