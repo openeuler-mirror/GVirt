@@ -206,9 +206,6 @@ protected:
     uint32_t _nDevPerNode = 0;
     uint32_t _port = XLITE_DEFAULT_PORT;
     std::vector<std::string> _ips;
-
-    char _ipcXTensorKeys[XLITE_CCL_MAX_RANK_SIZE][EXPORT_KEY_LEN];
-    void *_ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE] = {nullptr};
 };
 
 class XDummyRuntime : public XRuntime
