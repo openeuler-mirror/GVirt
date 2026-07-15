@@ -993,7 +993,14 @@ public:
                 if (actualCalcSoftmaxLen > kvLen) {
                     actualCalcSoftmaxLen = kvLen;
                 }
-                uint32_t outN = ROUND_UP(kvLen, blockSize);
+                // Since RunAicSVAbsorb reads (headTileSize, queryTokens, 4 * blockSize) from QK
+                // each time, softmax must be padded to 4 * blockSize to prevent residual values in
+                // QK from being included in SV computation along the cached token dimension and
+                // degrading accuracy.
+                uint32_t outN = ROUND_UP(kvLen, 4 * blockSize);
+                if (outN > tileSizeOfCachedKV) {
+                    outN = tileSizeOfCachedKV;
+                }
                 // wait aic qk done
                 wait_flag_dev(0);
 

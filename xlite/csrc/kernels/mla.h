@@ -942,7 +942,14 @@ public:
                 int headSubTaskStart = nWorkStart / queryTaskLen;
                 uint32_t qkOffset = nWorkStart * qkStride;
                 uint32_t calcSoftmaxLen = cachedLen + queryTaskStart + 1;
-                uint32_t outN = ROUND_UP(cachedLen + queryTaskStart + queryTaskLen, blockSize);
+                // Since RunAicSVAbsorb reads (headTileSize, queryTokens, 4 * blockSize) from QK
+                // each time, softmax must be padded to 4 * blockSize to prevent residual values in
+                // QK from being included in SV computation along the cached token dimension and
+                // degrading accuracy.
+                uint32_t outN = ROUND_UP(cachedLen + queryTaskStart + queryTaskLen, 4 * blockSize);
+                if (outN > maxSeqLen) {
+                    outN = maxSeqLen;
+                }
 
                 // wait aic qk done
                 wait_flag_dev(0);

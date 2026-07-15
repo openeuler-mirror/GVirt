@@ -17,7 +17,7 @@ __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uin
     constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
 
     int actualLen = calcNum * sizeof(Dtype);
-    uint64_t len = ROUND_UP(actualLen, UB_BUF_ALIGN_SIZE);
+    uint64_t len = ROUND_UP(actualLen, VECTOR_MAX_BYTESIZE);
     uint64_t off = 0;
     __ubuf__ Dtype *in1 = (__ubuf__ Dtype *)off;
     off += len;
@@ -29,7 +29,7 @@ __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uin
     if constexpr (std::is_same<Dtype, float>::value) {
         off += len;
     } else {
-        off += 2 * len;
+        off += ROUND_UP(actualLen * sizeof(float), VECTOR_MAX_BYTESIZE);
     }
 
     __ubuf__ Dtype *out1 = (__ubuf__ Dtype *)off;
