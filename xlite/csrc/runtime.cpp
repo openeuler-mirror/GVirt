@@ -199,12 +199,6 @@ void XRuntime::FiniXcclComm(void)
 {
     delete _tpXcclComm;
     delete _dpXcclComm;
-    for (uint32_t rank = 0; rank < _rankSize; rank++) {
-        if (_ipcXTensorMems[rank] == nullptr) {
-            continue;
-        }
-        (void)aclrtIpcMemClose(_ipcXTensorKeys[rank]);
-    }
 }
 
 int XRuntime::InitXcclComm(void)
@@ -213,9 +207,11 @@ int XRuntime::InitXcclComm(void)
     uint32_t port;
     const char *envDisableXccl = std::getenv("XLITE_DISABLE_XCCL");
     const char *envDeterministic = std::getenv("HCCL_DETERMINISTIC");
-    void *ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE];
+    void *myXTensorPtr = _pool->Ptr();
+    size_t myXTensorSize = _pool->Size();
+    char ipcXTensorKey[EXPORT_KEY_LEN];
 
-    if (_rankSize == 1 || _rankSize > _nDevPerNode || _rankSize > XLITE_CCL_MAX_RANK_SIZE) {
+    if (_rankSize == 1 || _rankSize > XLITE_CCL_MAX_RANK_SIZE) {
         return 0;
     }
 
@@ -223,43 +219,32 @@ int XRuntime::InitXcclComm(void)
         return 0;
     }
 
-    XSock *sock = new XSock(_rankId, _rankSize, _ips[0], _port + XLITE_CCL_PORT_OFFSET);
+    bool enableTpXccl = (_tpSize > 1 && _tpSize <= _nDevPerNode);
+    bool enableDpXccl = (_dpSize > 1 && _rankSize <= _nDevPerNode);
 
-    _ipcXTensorMems[_rankId] = _pool->Ptr();
-    CHECK_ACL(aclrtIpcMemGetExportKey(_pool->Ptr(), _pool->Size(), _ipcXTensorKeys[_rankId],
-                                      EXPORT_KEY_LEN,
-                                      ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION));
-    sock->AllGather(&_ipcXTensorKeys[_rankId], EXPORT_KEY_LEN, _ipcXTensorKeys);
-    for (uint32_t rank = 0; rank < _rankSize; rank++) {
-        if (rank == _rankId) {
-            continue;
-        }
-        CHECK_ACL(aclrtIpcMemImportByKey(&_ipcXTensorMems[rank], _ipcXTensorKeys[rank],
-                                         ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS));
+    if (!enableTpXccl && !enableDpXccl) {
+        return 0;
     }
-    delete sock;
+
+    CHECK_ACL(aclrtIpcMemGetExportKey(myXTensorPtr, myXTensorSize, ipcXTensorKey, EXPORT_KEY_LEN,
+                                      ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION));
 
     static uint32_t portOffset = 0;
-    if (_tpSize > 1) {
+    if (enableTpXccl) {
         ip = _ips[ROUND_DOWN(_rankId, _tpSize) / _nDevPerNode];
-        port = _port + _rankId / _tpSize + portOffset;
+        port = _port + XLITE_CCL_PORT_OFFSET + _rankId / _tpSize + portOffset;
         _tpXcclComm = new XcclComm(_rankId % _tpSize, _tpSize);
-        for (uint32_t rank = 0; rank < _tpSize; rank++) {
-            ipcXTensorMems[rank] = _ipcXTensorMems[ROUND_DOWN(_rankId, _tpSize) + rank];
-        }
-        if (_tpXcclComm->Init(ip, port, ipcXTensorMems)) {
+        if (_tpXcclComm->Init(ip, port, myXTensorPtr, ipcXTensorKey)) {
             return -EFAULT;
         }
     }
 
-    if (_dpSize > 1) {
+    if (enableDpXccl) {
         ip = _ips[_rankId % _tpSize / _nDevPerNode];
-        port = _port + XLITE_DP_PORT_OFFSET + _rankId % _tpSize + portOffset;
+        port =
+            _port + XLITE_CCL_PORT_OFFSET + XLITE_DP_PORT_OFFSET + _rankId % _tpSize + portOffset;
         _dpXcclComm = new XcclComm(_rankId / _tpSize, _dpSize);
-        for (uint32_t rank = 0; rank < _dpSize; rank++) {
-            ipcXTensorMems[rank] = _ipcXTensorMems[rank * _tpSize + _rankId % _tpSize];
-        }
-        if (_dpXcclComm->Init(ip, port, ipcXTensorMems)) {
+        if (_dpXcclComm->Init(ip, port, myXTensorPtr, ipcXTensorKey)) {
             return -EFAULT;
         }
     }
@@ -622,7 +607,7 @@ int XDummyRuntime::InitDummyXcclComm(void)
     const char *envDisableXccl = std::getenv("XLITE_DISABLE_XCCL");
     const char *envDeterministic = std::getenv("HCCL_DETERMINISTIC");
 
-    if (_rankSize == 1 || _rankSize > _nDevPerNode || _rankSize > XLITE_CCL_MAX_RANK_SIZE) {
+    if (_rankSize == 1 || _rankSize > XLITE_CCL_MAX_RANK_SIZE) {
         return 0;
     }
 
@@ -630,11 +615,18 @@ int XDummyRuntime::InitDummyXcclComm(void)
         return 0;
     }
 
-    if (_tpSize > 1) {
+    bool enableTpXccl = (_tpSize > 1 && _tpSize <= _nDevPerNode);
+    bool enableDpXccl = (_dpSize > 1 && _rankSize <= _nDevPerNode);
+
+    if (!enableTpXccl && !enableDpXccl) {
+        return 0;
+    }
+
+    if (enableTpXccl) {
         _tpXcclComm = new XcclComm(_rankId % _tpSize, _tpSize);
     }
 
-    if (_dpSize > 1) {
+    if (enableDpXccl) {
         _dpXcclComm = new XcclComm(_rankId / _tpSize, _dpSize);
     }
     return 0;

@@ -16,7 +16,13 @@
 XcclComm::~XcclComm(void)
 {
     for (uint32_t rank = 0; rank < _rankSize; rank++) {
-        if (_ipcMems[rank] == nullptr) {
+        if (rank == _rankId || _ipcXTensorMems[rank] == nullptr) {
+            continue;
+        }
+        (void)aclrtIpcMemClose(_ipcXTensorKeys[rank]);
+    }
+    for (uint32_t rank = 0; rank < _rankSize; rank++) {
+        if (rank == _rankId || _ipcMems[rank] == nullptr) {
             continue;
         }
         (void)aclrtIpcMemClose(_ipcKeys[rank]);
@@ -25,8 +31,7 @@ XcclComm::~XcclComm(void)
     (void)aclrtFree(dParam);
 }
 
-int XcclComm::Init(const std::string &ip, uint32_t port,
-                   void *ipcXTensorMems[XLITE_CCL_MAX_RANK_SIZE])
+int XcclComm::Init(const std::string &ip, uint32_t port, void *myXTensorPtr, char *myXTensorKey)
 {
     int32_t pids[XLITE_CCL_MAX_RANK_SIZE];
 
@@ -35,6 +40,17 @@ int XcclComm::Init(const std::string &ip, uint32_t port,
     }
 
     auto sock = std::make_unique<XSock>(_rankId, _rankSize, ip, port);
+
+    _ipcXTensorMems[_rankId] = myXTensorPtr;
+    memcpy(_ipcXTensorKeys[_rankId], myXTensorKey, EXPORT_KEY_LEN);
+    sock->AllGather(_ipcXTensorKeys[_rankId], EXPORT_KEY_LEN, _ipcXTensorKeys);
+    for (uint32_t rank = 0; rank < _rankSize; rank++) {
+        if (rank == _rankId) {
+            continue;
+        }
+        CHECK_ACL(aclrtIpcMemImportByKey(&_ipcXTensorMems[rank], _ipcXTensorKeys[rank],
+                                         ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS));
+    }
 
     CHECK_ACL(aclrtMalloc(&_ipcMems[_rankId], XLITE_CCL_IPC_MEM_SIZE, ACL_MEM_MALLOC_NORMAL_ONLY));
     CHECK_ACL(aclrtMemset(_ipcMems[_rankId], XLITE_CCL_IPC_MEM_SIZE, 0, XLITE_CCL_IPC_MEM_SIZE));
@@ -57,7 +73,7 @@ int XcclComm::Init(const std::string &ip, uint32_t port,
     struct XcclParam hParam;
     for (uint32_t rank = 0; rank < _rankSize; rank++) {
         hParam.ipcMems[rank] = reinterpret_cast<uint64_t>(_ipcMems[rank]);
-        hParam.ipcXTensorMems[rank] = reinterpret_cast<uint64_t>(ipcXTensorMems[rank]);
+        hParam.ipcXTensorMems[rank] = reinterpret_cast<uint64_t>(_ipcXTensorMems[rank]);
     }
     CHECK_ACL(aclrtMalloc((void **)&dParam, sizeof(struct XcclParam), ACL_MEM_MALLOC_NORMAL_ONLY));
     CHECK_ACL(aclrtMemcpy(dParam, sizeof(struct XcclParam), &hParam, sizeof(struct XcclParam),
