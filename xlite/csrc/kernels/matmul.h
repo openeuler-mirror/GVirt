@@ -27,7 +27,7 @@ public:
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR bias, GM_ADDR deqScale,
                                 uint64_t m, uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose,
                                 uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl,
-                                uint32_t curBlock = 0, uint32_t curCount = 0, uint32_t remain = 0)
+                                int coreOffset = 0, int *nextCoreOffset = nullptr)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 
@@ -63,9 +63,14 @@ public:
         this->m0 = m0;
         this->n0 = n0;
         this->k0 = k0;
-        this->curBlock = curBlock;
-        this->curCount = curCount;
-        this->remain = remain;
+        this->nLoop = DIV_ROUND_UP(n, n0);
+        this->mLoop = DIV_ROUND_UP(m, m0);
+        this->firstCore = (GetBlockIdx() + GetBlockNum() - coreOffset) % GetBlockNum();
+        this->coreLoop = nLoop * mLoop;
+
+        if (nextCoreOffset != nullptr) {
+            *nextCoreOffset = (coreOffset + coreLoop) % GetBlockNum();
+        }
 
         this->mBlockSize = 16;
         this->nBlockSize = 16;
@@ -197,17 +202,9 @@ public:
         SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
 
-        int nLoop = DIV_ROUND_UP(n, n0);
-        int mLoop = DIV_ROUND_UP(m, m0);
-        int coreLoop = nLoop * mLoop;
-        curCount = (curCount == 0) ? coreLoop : curCount;
-
-        for (int32_t loopIdx = curBlock; loopIdx < curCount; loopIdx++) {
-            if (loopIdx % GetBlockNum() != GetBlockIdx()) {
-                continue;
-            }
-            int64_t midx = (loopIdx - remain) / nLoop;
-            int64_t nidx = (loopIdx - remain) % nLoop;
+        for (int32_t loopIdx = firstCore; loopIdx < coreLoop; loopIdx += GetBlockNum()) {
+            int64_t midx = loopIdx / nLoop;
+            int64_t nidx = loopIdx % nLoop;
             GetMNBlockIdx(loopIdx, mLoop, nLoop, swizzleDirection, swizzlCount, midx, nidx);
             int nOffset = nidx * n0;
             int mOffset = midx * m0;
@@ -432,9 +429,10 @@ private:
     int kQtileSize;
     int32_t swizzlCount;
     int32_t swizzleDirection;
-    uint32_t curBlock;
-    uint32_t curCount;
-    uint32_t remain;
+    int firstCore;
+    int coreLoop;
+    int mLoop;
+    int nLoop;
     bool hasBias = false;
     bool hasDeqScale = false;
 };

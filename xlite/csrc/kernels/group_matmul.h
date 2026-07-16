@@ -30,17 +30,14 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR de
 
     uint32_t nLoop = DIV_ROUND_UP(kN, n0);
     uint32_t off = 0;
-    uint32_t remain = 0;
+    int coreOffset = 0;
+    int nextCoreOffset = 0;
     for (uint32_t i = startIdx; i < endIdx && i < n; i++) {
         uint32_t kM = *((__gm__ uint32_t *)(counts + i * sizeof(uint32_t)));
         if (kM <= 0) {
             continue;
         }
 
-        int mLoop = DIV_ROUND_UP(kM, m0);
-        uint32_t curCount = remain + mLoop * nLoop;
-        uint32_t curBlock =
-            get_block_idx() >= remain ? get_block_idx() : get_block_idx() + get_block_num();
         uint64_t weightAddr = *((__gm__ uint64_t *)(ws + i * sizeof(void *)));
         uint64_t deqScaleAddr = (uint64_t)nullptr;
         if (useDequant) {
@@ -49,11 +46,11 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR de
         __gm__ uint8_t *w = (__gm__ uint8_t *)weightAddr;
         __gm__ uint8_t *deqScale = (__gm__ uint8_t *)deqScaleAddr;
         matmul_op.Init(x + off * kK * sizeof(Dtype), w, z + off * kN * sizeof(OutDtype), nullptr,
-                       deqScale, kM, kN, kK, weightNZ, transpose, m0, n0, k0, swizzle, curBlock,
-                       curCount, remain);
+                       deqScale, kM, kN, kK, weightNZ, transpose, m0, n0, k0, swizzle, coreOffset,
+                       &nextCoreOffset);
         matmul_op.Run();
         off += kM;
-        remain = curCount % get_block_num();
+        coreOffset = nextCoreOffset;
     }
 }
 
