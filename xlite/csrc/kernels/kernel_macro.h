@@ -24,11 +24,12 @@ using namespace AscendC;
 
 #define BLOCK_SIZE 32
 #define VECTOR_MAX_REPEAT 255
-#define VECTOR_MAX_BYTESIZE 256     // The maximum byte size of one repeat in vector
-#define VECTOR_MAX_NUM_OF_FP32 64   // The maximum num of float32 dtype in one vector repeat
-#define VECTOR_MAX_NUM_OF_FP16 128  // The maximum num of float16 dtype in one vector repeat
-#define VECTOR_MAX_NUM_OF_BF16 128  // The maximum num of bfloat16 dtype in one vector repeat
-#define VECTOR_MAX_NUM_OF_INT8 256  // The maximum num of int8 dtype in one vector repeat
+#define VECTOR_MAX_BYTESIZE 256      // The maximum byte size of one repeat in vector
+#define VECTOR_MAX_NUM_OF_FP32 64    // The maximum num of float32 dtype in one vector repeat
+#define VECTOR_MAX_NUM_OF_FP16 128   // The maximum num of float16 dtype in one vector repeat
+#define VECTOR_MAX_NUM_OF_BF16 128   // The maximum num of bfloat16 dtype in one vector repeat
+#define VECTOR_MAX_NUM_OF_INT16 128  // The maximum num of int16 dtype in one vector repeat
+#define VECTOR_MAX_NUM_OF_INT8 256   // The maximum num of int8 dtype in one vector repeat
 #define AIC_CACHE_LINE_SIZE 512
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 #define UB_SIZE 196608

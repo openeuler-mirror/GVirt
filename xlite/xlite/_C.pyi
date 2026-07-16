@@ -2119,6 +2119,23 @@ def einsum_mht_htd_mhd(
     """
     ...
 
+def unpack_activation(
+    rt: Runtime,
+    input: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    """Split int8 tensor to low/high int4 tensor.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        input (torch.Tensor): input int8 tensor.
+        output (torch.Tensor): output low/high int4 tensor.
+
+    Returns:
+        None: Output tensors are written in place.
+    """
+    ...
+
 def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
     """Print a tensor preview for debugging.
 

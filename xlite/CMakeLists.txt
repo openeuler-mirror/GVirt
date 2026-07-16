@@ -43,6 +43,7 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reduce_scatter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/all_gather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_int8_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpack_activation_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/experts_counts_sum.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reorder_moe.cpp
