@@ -1876,6 +1876,28 @@ void BetaDecay(XRuntime &rt, at::Tensor &b, at::Tensor &a, at::Tensor &A_log, at
     rt.Synchronize();
 }
 
+void EinsumMhtHdtMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &hdt, at::Tensor &mhd, uint32_t m,
+                     uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
+{
+    XTensor _mht, _hdt, _mhd;
+    InitXTensor(_mht, mht);
+    InitXTensor(_hdt, hdt);
+    InitXTensor(_mhd, mhd);
+    XliteOpEinsumMhtHdtMhd(rt, _mht, _hdt, _mhd, m, h, t, d, weightNZ);
+    rt.Synchronize();
+}
+
+void EinsumMhtHtdMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &htd, at::Tensor &mhd, uint32_t m,
+                     uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
+{
+    XTensor _mht, _htd, _mhd;
+    InitXTensor(_mht, mht);
+    InitXTensor(_htd, htd);
+    InitXTensor(_mhd, mhd);
+    XliteOpEinsumMhtHtdMhd(rt, _mht, _htd, _mhd, m, h, t, d, weightNZ);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -2214,6 +2236,12 @@ PYBIND11_MODULE(_C, m)
     m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
           py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
           py::arg("num_v_heads"));
+    m.def("einsum_mht_hdt_mhd", &EinsumMhtHdtMhd, "einsum_mht_hdt_mhd", py::arg("rt"),
+          py::arg("mht"), py::arg("hdt"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
+          py::arg("d"), py::arg("weight_nz") = false);
+    m.def("einsum_mht_htd_mhd", &EinsumMhtHtdMhd, "einsum_mht_htd_mhd", py::arg("rt"),
+          py::arg("mht"), py::arg("htd"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
+          py::arg("d"), py::arg("weight_nz") = false);
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,

@@ -1,0 +1,42 @@
+/*
+ * Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
+ */
+#pragma once
+#include "kernel_operator.h"
+#include "matmul.h"
+
+// mhd = torch.einsum("mht,htd->mhd", mht, htd)
+template <typename Dtype, typename MatDtype, typename OutDtype>
+__aicore__ void einsum_mht_hdt_mhd(GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32_t m, uint32_t h,
+                                   uint32_t t, uint32_t d, uint64_t m0, uint64_t n0, uint64_t k0,
+                                   bool weightNZ, uint64_t swizzle)
+{
+    Matmul<Dtype, MatDtype, OutDtype> matmul_op;
+
+    int coreOffset = 0;
+    int nextCoreOffset = 0;
+    int xStride = t * sizeof(Dtype);
+    int yStride = d * t * sizeof(Dtype);
+    int zStride = d * sizeof(Dtype);
+    int srcDStride = h * t;
+    int dstDStride = h * d;
+    for (int hIdx = 0; hIdx < h; hIdx++) {
+        GM_ADDR x = mht + hIdx * xStride;
+        GM_ADDR y = hdt + hIdx * yStride;
+        GM_ADDR z = mhd + hIdx * zStride;
+        matmul_op.Init(x, y, z, nullptr, nullptr, m, d, t, weightNZ, 0, m0, n0, k0, swizzle,
+                       coreOffset, &nextCoreOffset, srcDStride, dstDStride);
+        matmul_op.Run();
+        coreOffset = nextCoreOffset;
+    }
+}
+
+#define EINSUM_MHT_HDT_MHD_FUNC_DEFINE(dtype)                                                    \
+    extern "C" __global__ __aicore__ void einsum_mht_hdt_mhd_##dtype(                            \
+        GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32_t m, uint32_t h, uint32_t t, uint32_t d,   \
+        uint64_t m0, uint64_t n0, uint64_t k0, bool weightNZ, uint64_t swizzle)                  \
+    {                                                                                            \
+        KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);                                          \
+        einsum_mht_hdt_mhd<dtype, float, dtype>(mht, hdt, mhd, m, h, t, d, m0, n0, k0, weightNZ, \
+                                                swizzle);                                        \
+    }

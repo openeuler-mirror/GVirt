@@ -80,6 +80,8 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_topk_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_hdt_mhd_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_htd_mhd_bfloat16_t.cpp
 )
 
 # xlite_kernels_f16_${RUN_MODE}
@@ -103,6 +105,8 @@ file(GLOB KERNEL_FILES_F16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_topk_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_hdt_mhd_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_htd_mhd_float16_t.cpp
 )
 
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)

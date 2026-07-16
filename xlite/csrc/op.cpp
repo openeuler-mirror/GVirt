@@ -87,6 +87,10 @@
 #include "aclrtlaunch_transpose_1_2_float.h"
 #include "aclrtlaunch_transpose_1_2_float16_t.h"
 #include "aclrtlaunch_transpose_1_2_bfloat16_t.h"
+#include "aclrtlaunch_einsum_mht_hdt_mhd_float16_t.h"
+#include "aclrtlaunch_einsum_mht_hdt_mhd_bfloat16_t.h"
+#include "aclrtlaunch_einsum_mht_htd_mhd_float16_t.h"
+#include "aclrtlaunch_einsum_mht_htd_mhd_bfloat16_t.h"
 
 #include "kernels/kernel_param.h"
 
@@ -1580,4 +1584,52 @@ void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTen
     }
     launchKernel(rt.aivNum, rt.stream, b.ptr, a.ptr, A_log.ptr, dt_bias.ptr, beta.ptr, g.ptr, bsz,
                  seqlen, num_v_heads);
+}
+
+void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
+                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    KERNEL_PTR_TYPE(einsum_mht_hdt_mhd) * launchKernel;
+    if (EachXDtype(FP16, mht, hdt, mhd)) {
+        launchKernel = aclrtlaunch_einsum_mht_hdt_mhd_float16_t;
+    } else if (EachXDtype(BF16, mht, hdt, mhd)) {
+        launchKernel = aclrtlaunch_einsum_mht_hdt_mhd_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(mht) + XT_STR(hdt) + XT_STR(mhd);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    uint64_t swizzle = rt.defaultMatmulSwizzle;
+    if (!rt.disableSwizzleTable) {
+        XlitePickSwizzle(d, t, &swizzle);
+    }
+    launchKernel(rt.aicNum, rt.stream, mht.ptr, hdt.ptr, mhd.ptr, m, h, t, d,
+                 MATMUL_M0_N0_K0_DEFAULT_VALUE, MATMUL_M0_N0_K0_DEFAULT_VALUE,
+                 MATMUL_M0_N0_K0_DEFAULT_VALUE, weightNZ, swizzle);
+}
+
+void XliteOpEinsumMhtHtdMhd(XRuntime &rt, XTensor &mht, XTensor &htd, XTensor &mhd, uint32_t m,
+                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    KERNEL_PTR_TYPE(einsum_mht_htd_mhd) * launchKernel;
+    if (EachXDtype(FP16, mht, htd, mhd)) {
+        launchKernel = aclrtlaunch_einsum_mht_htd_mhd_float16_t;
+    } else if (EachXDtype(BF16, mht, htd, mhd)) {
+        launchKernel = aclrtlaunch_einsum_mht_htd_mhd_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(mht) + XT_STR(htd) + XT_STR(mhd);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    uint64_t swizzle = rt.defaultMatmulSwizzle;
+    if (!rt.disableSwizzleTable) {
+        XlitePickSwizzle(d, t, &swizzle);
+    }
+    launchKernel(rt.aicNum, rt.stream, mht.ptr, htd.ptr, mhd.ptr, m, h, t, d,
+                 MATMUL_M0_N0_K0_DEFAULT_VALUE, MATMUL_M0_N0_K0_DEFAULT_VALUE,
+                 MATMUL_M0_N0_K0_DEFAULT_VALUE, weightNZ, swizzle);
 }

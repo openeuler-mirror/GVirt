@@ -148,4 +148,8 @@ void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &x, XTensor &weight, XTensor &ou
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
                       XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
                       uint32_t num_v_heads);
+void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
+                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ);
+void XliteOpEinsumMhtHtdMhd(XRuntime &rt, XTensor &mht, XTensor &htd, XTensor &mhd, uint32_t m,
+                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ);
 #endif
