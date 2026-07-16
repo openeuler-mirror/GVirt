@@ -27,7 +27,8 @@ public:
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR bias, GM_ADDR deqScale,
                                 uint64_t m, uint64_t n, uint64_t k, uint64_t nz, uint64_t transpose,
                                 uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl,
-                                int coreOffset = 0, int *nextCoreOffset = nullptr)
+                                int coreOffset = 0, int *nextCoreOffset = nullptr,
+                                int xSrcDValue = -1, int zDstDValue = -1)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 
@@ -47,6 +48,9 @@ public:
         this->k = k;
         this->nz = nz;
         this->transpose = transpose;
+
+        this->srcDValue = xSrcDValue == -1 ? k : xSrcDValue;
+        this->dstDValue = zDstDValue == -1 ? n : zDstDValue;
 
         hasBias = (bias != nullptr);
         hasDeqScale = (deqScale != nullptr);
@@ -223,7 +227,7 @@ public:
             int nActualBlockPad = ROUND_UP(nActual, nBlockSize);
             int nActualBlockNum = DIV_ROUND_UP(nActual, nBlockSize);
 
-            GlobalTensor<OutDtype> outGm = cGmBuf[mOffset * n + nOffset];
+            GlobalTensor<OutDtype> outGm = cGmBuf[mOffset * dstDValue + nOffset];
 
             if (hasBias) {
                 // Bias GM -> L1
@@ -278,8 +282,8 @@ public:
                         kRemSize = k - kOffset;
                     }
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
-                    CopyGmToL1Nd2Nz(l1aBuf[pingpongL1A], aGmBuf[mOffset * k + kOffset], mActual,
-                                    kRemSize, k, mActualBlockPad);
+                    CopyGmToL1Nd2Nz(l1aBuf[pingpongL1A], aGmBuf[mOffset * srcDValue + kOffset],
+                                    mActual, kRemSize, srcDValue, mActualBlockPad);
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
                 }
 
@@ -378,8 +382,8 @@ public:
             /* C L0C -> GM */
             SetFlag<HardEvent::M_FIX>(EVENT_ID0);
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-            CopyToGmWithDequant(outGm, l0cBuf, mActual, nActual, mActualBlockPad, n, hasDeqScale,
-                                fixpipeBuf);
+            CopyToGmWithDequant(outGm, l0cBuf, mActual, nActual, mActualBlockPad, dstDValue,
+                                hasDeqScale, fixpipeBuf);
             if (hasDeqScale) {
                 PipeBarrier<PIPE_FIX>();
             }
@@ -425,6 +429,8 @@ private:
     uint64_t mBlockSize;
     uint64_t nBlockSize;
     uint64_t kBlockSize;
+    int srcDValue;
+    int dstDValue;
     int kDtileSize;
     int kQtileSize;
     int32_t swizzlCount;
