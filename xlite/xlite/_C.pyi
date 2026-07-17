@@ -2021,6 +2021,53 @@ def split_col(rt: Runtime, in_: torch.Tensor, outputs: List[torch.Tensor]) -> No
     """
     ...
 
+
+def concat(rt: Runtime, inputs: List[torch.Tensor], out: torch.Tensor) -> None:
+    """Concatenate input tensors into one contiguous byte buffer (1D pack).
+
+    The inputs are laid out end-to-end by raw bytes into ``out``. ``out`` is
+    treated as a flat byte buffer: its total byte size must equal the sum of the
+    input byte sizes. Element dtype / shape of the inputs need not match; only
+    bytes are packed. Used by the MoE packed-send path to stage one AllGather.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        inputs (List[torch.Tensor]): Input tensors to pack (each viewed as bytes).
+        out (torch.Tensor): Flat output buffer holding all inputs concatenated.
+
+    Returns:
+        None: ``out`` is written in place.
+    """
+    ...
+
+
+def split(
+    rt: Runtime,
+    in_: torch.Tensor,
+    outputs: List[torch.Tensor],
+    sizes: List[int],
+    num_packets: int,
+) -> None:
+    """Split a contiguous byte buffer into outputs, repeated across packets.
+
+    ``in_`` holds ``num_packets`` interleaved packets, each ``sum(sizes)``
+    bytes. For packet ``i`` and output ``j``, ``sizes[j]`` bytes are copied from
+    ``in_ + i*sum(sizes) + offset_j`` into ``outputs[j] + i*sizes[j]``. Each
+    output is treated as a flat byte buffer of size ``num_packets * sizes[j]``
+    bytes. Used by the MoE packed-recv path to deinterleave one AllGather result.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        in_ (torch.Tensor): Flat input buffer holding all packets.
+        outputs (List[torch.Tensor]): Output buffers, one per segment.
+        sizes (List[int]): Byte size of each segment within a single packet.
+        num_packets (int): Number of interleaved packets in ``in_``.
+
+    Returns:
+        None: Output tensors are written in place.
+    """
+    ...
+
 def beta_decay(
     rt: Runtime,
     b: torch.Tensor,

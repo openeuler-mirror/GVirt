@@ -1861,6 +1861,81 @@ void SplitCol(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs)
     rt.Synchronize();
 }
 
+void Concat(XRuntime &rt, std::vector<at::Tensor> &inputs, at::Tensor &out)
+{
+    if (inputs.empty()) {
+        return;
+    }
+    std::vector<XTensor> _inputs;
+    for (auto &input : inputs) {
+        XTensor x;
+        InitXTensor(x, input);
+        _inputs.push_back(x);
+    }
+    XTensor _out;
+    InitXTensor(_out, out);
+
+    // Validate byte sizes: the output must hold exactly the concatenated bytes.
+    size_t inBytes = 0;
+    for (auto &x : _inputs) {
+        inBytes += x.numel * XDtypeBit(x.dtype) / 8;
+    }
+    size_t outBytes = _out.numel * XDtypeBit(_out.dtype) / 8;
+    if (inBytes != outBytes) {
+        throw std::runtime_error(std::string(__func__) + ": output bytes (" +
+                                 std::to_string(outBytes) + ") != sum(inputs bytes) (" +
+                                 std::to_string(inBytes) + ")");
+    }
+    XliteOpConcat(rt, _inputs, _out);
+    rt.Synchronize();
+}
+
+void Split(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs,
+           std::vector<uint32_t> &sizes, uint32_t numPackets)
+{
+    if (outputs.empty()) {
+        return;
+    }
+    if (outputs.size() != sizes.size()) {
+        throw std::runtime_error(std::string(__func__) + ": outputs count (" +
+                                 std::to_string(outputs.size()) + ") != sizes count (" +
+                                 std::to_string(sizes.size()) + ")");
+    }
+    XTensor _in;
+    std::vector<XTensor> _outputs;
+    InitXTensor(_in, in);
+    for (auto &output : outputs) {
+        XTensor x;
+        InitXTensor(x, output);
+        _outputs.push_back(x);
+    }
+    std::vector<size_t> _sizes(sizes.begin(), sizes.end());
+
+    size_t totalSize = 0;
+    for (size_t s : _sizes) {
+        totalSize += s;
+    }
+    size_t inBytes = _in.numel * XDtypeBit(_in.dtype) / 8;
+    if (totalSize * numPackets != inBytes) {
+        throw std::runtime_error(std::string(__func__) + ": input bytes (" +
+                                 std::to_string(inBytes) + ") != totalSize*numPackets (" +
+                                 std::to_string(totalSize * numPackets) + ")");
+    }
+    // Validate each output holds numPackets * sizes[j] bytes; otherwise the
+    // kernel writes out-of-bounds and corrupts adjacent device memory.
+    for (size_t j = 0; j < _outputs.size(); j++) {
+        size_t need = _sizes[j] * numPackets;
+        size_t cap = _outputs[j].numel * XDtypeBit(_outputs[j].dtype) / 8;
+        if (need > cap) {
+            throw std::runtime_error(std::string(__func__) + ": output[" + std::to_string(j) +
+                                     "] bytes (" + std::to_string(cap) + ") < numPackets*sizes[" +
+                                     std::to_string(j) + "] (" + std::to_string(need) + ")");
+        }
+    }
+    XliteOpSplit(rt, _in, _outputs, _sizes, numPackets);
+    rt.Synchronize();
+}
+
 void BetaDecay(XRuntime &rt, at::Tensor &b, at::Tensor &a, at::Tensor &A_log, at::Tensor &dt_bias,
                at::Tensor &beta, at::Tensor &g, uint32_t bsz, uint32_t seqlen, uint32_t num_v_heads)
 {
@@ -2243,6 +2318,9 @@ PYBIND11_MODULE(_C, m)
     m.def("linear_att_conv_and_silu", &LinearAttConv1dAndSiLU, py::arg("rt"), py::arg("mix_qkv"),
           py::arg("conv_state"), py::arg("weight"), py::arg("output"));
     m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::arg("outputs"));
+    m.def("concat", &Concat, py::arg("rt"), py::arg("inputs"), py::arg("out"));
+    m.def("split", &Split, py::arg("rt"), py::arg("in"), py::arg("outputs"), py::arg("sizes"),
+          py::arg("num_packets"));
     m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
           py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
           py::arg("num_v_heads"));
