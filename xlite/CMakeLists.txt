@@ -46,6 +46,8 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/experts_counts_sum.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reorder_moe.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/concat.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/split.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_float.cpp

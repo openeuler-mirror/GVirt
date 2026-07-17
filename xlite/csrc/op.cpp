@@ -78,6 +78,8 @@
 #include "aclrtlaunch_mla_bfloat16_t.h"
 #include "aclrtlaunch_experts_counts_sum.h"
 #include "aclrtlaunch_reorder_moe.h"
+#include "aclrtlaunch_concat.h"
+#include "aclrtlaunch_split.h"
 #include "aclrtlaunch_conv1d_and_silu_float.h"
 #include "aclrtlaunch_conv1d_and_silu_float16_t.h"
 #include "aclrtlaunch_conv1d_and_silu_bfloat16_t.h"
@@ -95,6 +97,25 @@
 static inline bool IsDummyRuntime(const XRuntime &rt)
 {
     return rt.IsDummyRuntime();
+}
+
+// Pick how many AIV blocks to launch for a byte-wise copy kernel (concat/split)
+// based on the total bytes. Each block processes ~tilePerCore bytes in series,
+// so for small data we launch only a few blocks (avoids the multi-core launch +
+// pipe_barrier sync overhead that dominates tiny transfers), while large data
+// saturates all aivNum cores. tilePerCore ~= 2 MB keeps the per-block work
+// (~tens of us) well above the launch cost (~2 us).
+static inline uint32_t CopyKernelBlockNum(const XRuntime &rt, uint64_t totalBytes,
+                                          uint64_t tilePerCore = 2 * 1024 * 1024)
+{
+    if (totalBytes == 0 || rt.aivNum <= 1) {
+        return 1;
+    }
+    uint64_t needed = DIV_ROUND_UP(totalBytes, tilePerCore);
+    if (needed >= rt.aivNum) {
+        return rt.aivNum;
+    }
+    return static_cast<uint32_t>(needed);
 }
 
 static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
@@ -1322,11 +1343,35 @@ void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &ou
         return;
     }
 
+    constexpr uint32_t maxInputs = 8;
+
+    // Concat kernel supports up to maxInputs inputs
+    if (inputs.size() <= maxInputs) {
+        void *ptrs[maxInputs] = {nullptr};
+        uint64_t sizes[maxInputs] = {0};
+        uint64_t totalBytes = 0;
+        for (uint32_t i = 0; i < inputs.size(); i++) {
+            ptrs[i] = inputs[i].ptr;
+            sizes[i] = inputs[i].numel * XDtypeBit(inputs[i].dtype) / 8;
+            totalBytes += sizes[i];
+        }
+        // Scale block count to data size: small transfers use few blocks to avoid
+        // multi-core launch+barrier overhead; large transfers saturate all cores.
+        uint32_t numBlocks = CopyKernelBlockNum(rt, totalBytes);
+        aclrtlaunch_concat(numBlocks, rt.stream, out.ptr, ptrs[0], ptrs[1], ptrs[2], ptrs[3],
+                           ptrs[4], ptrs[5], ptrs[6], ptrs[7], sizes[0], sizes[1], sizes[2],
+                           sizes[3], sizes[4], sizes[5], sizes[6], sizes[7],
+                           static_cast<uint32_t>(inputs.size()), totalBytes);
+        return;
+    }
+
+    // Fallback for the rare > maxInputs case
     size_t offset = 0;
     for (const auto &tensor : inputs) {
         size_t bytes = tensor.numel * XDtypeBit(tensor.dtype) / 8;
-        CHECK_ACL(aclrtMemcpyAsync(static_cast<uint8_t *>(out.ptr) + offset, bytes, tensor.ptr,
-                                   bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        void *dst = static_cast<uint8_t *>(out.ptr) + offset;
+        CHECK_ACL(aclrtMemcpyAsync(dst, bytes, tensor.ptr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
+                                   rt.stream));
         offset += bytes;
     }
 }
@@ -1388,7 +1433,27 @@ void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs
         totalSize += size;
     }
 
-    // 从输入缓冲区解开为多个tensor
+    constexpr uint32_t maxOutputs = 8;
+
+    // Split kernel supports up to maxOutputs outputs
+    if (outputs.size() <= maxOutputs && sizes.size() == outputs.size()) {
+        void *ptrs[maxOutputs] = {nullptr};
+        uint64_t s[maxOutputs] = {0};
+        for (uint32_t i = 0; i < outputs.size(); i++) {
+            ptrs[i] = outputs[i].ptr;
+            s[i] = sizes[i];
+        }
+        // Total bytes the kernel copies = numPackets * totalSize; scale block count
+        // to data size to avoid multi-core launch+barrier overhead on tiny transfers.
+        uint32_t numBlocks = CopyKernelBlockNum(rt, static_cast<uint64_t>(numPackets) * totalSize);
+        aclrtlaunch_split(numBlocks, rt.stream, in.ptr, ptrs[0], ptrs[1], ptrs[2], ptrs[3], ptrs[4],
+                          ptrs[5], ptrs[6], ptrs[7], s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+                          static_cast<uint32_t>(outputs.size()), numPackets,
+                          static_cast<uint64_t>(totalSize));
+        return;
+    }
+
+    // Fallback for the rare > maxOutputs case
     for (uint32_t i = 0; i < numPackets; i++) {
         uint8_t *srcBase = static_cast<uint8_t *>(in.ptr) + i * totalSize;
         size_t srcOffset = 0;

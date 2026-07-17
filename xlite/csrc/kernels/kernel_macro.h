@@ -765,30 +765,38 @@ inline __aicore__ int bitmapTest(__ubuf__ uint64_t *addr, uint32_t id)
 }
 
 // Copy data from GM to UB with automatic alignment handling.
-// When byteSize is aligned to BLOCK_SIZE (32 bytes), uses copy_gm_to_ubuf with block count;
-// otherwise uses copy_gm_to_ubuf_align_b16 with byte size for unaligned transfers.
-// DstT and SrcT can differ (e.g. float* dst with uint32_t* src for interleaved sort buffers).
+// Selects the DMA primitive by byte alignment so any size is supported:
+//   32B aligned -> copy_gm_to_ubuf (block count);
+//   2B  aligned -> copy_gm_to_ubuf_align_b16 (byte size);
+//   otherwise  -> copy_gm_to_ubuf_align_b8   (byte size, incl. odd sizes).
+// The b16/b8 _align variants take a byte lenBurst and handle the internal
+// padding internally. DstT and SrcT can differ (e.g. float* dst with
+// uint32_t* src for interleaved sort buffers).
 template <typename DstT, typename SrcT = DstT>
 __aicore__ inline void CopyGmToUbufAligned(__ubuf__ DstT *dst, __gm__ SrcT *src, uint32_t byteSize)
 {
     if (byteSize % BLOCK_SIZE == 0) {
         copy_gm_to_ubuf(dst, src, 0, 1, byteSize / BLOCK_SIZE, 0, 0);
-    } else {
+    } else if (byteSize % 2 == 0) {
         copy_gm_to_ubuf_align_b16(dst, src, 0, 1, byteSize, 0, 0, 0, 0);
+    } else {
+        copy_gm_to_ubuf_align_b8(dst, src, 0, 1, byteSize, 0, 0, 0, 0);
     }
 }
 
-// Copy data from UB to GM with automatic alignment handling.
-// When byteSize is aligned to BLOCK_SIZE (32 bytes), uses copy_ubuf_to_gm with block count;
-// otherwise uses copy_ubuf_to_gm_align_b16 with byte size for unaligned transfers.
-// DstT and SrcT can differ (e.g. uint32_t* dst with float* src for interleaved sort buffers).
+// Copy data from UB to GM with automatic alignment handling (see
+// CopyGmToUbufAligned above for the primitive selection rationale).
+// DstT and SrcT can differ (e.g. uint32_t* dst with float* src for
+// interleaved sort buffers).
 template <typename DstT, typename SrcT = DstT>
 __aicore__ inline void CopyUbufToGmAligned(__gm__ DstT *dst, __ubuf__ SrcT *src, uint32_t byteSize)
 {
     if (byteSize % BLOCK_SIZE == 0) {
         copy_ubuf_to_gm(dst, src, 0, 1, byteSize / BLOCK_SIZE, 0, 0);
-    } else {
+    } else if (byteSize % 2 == 0) {
         copy_ubuf_to_gm_align_b16(dst, src, 0, 1, byteSize, 0, 0, 0, 0);
+    } else {
+        copy_ubuf_to_gm_align_b8(dst, src, 0, 1, byteSize, 0, 0, 0, 0);
     }
 }
 
