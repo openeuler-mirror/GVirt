@@ -786,6 +786,7 @@ public:
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
+        int coreOffset = 0;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
             __gm__ uint32_t *blockTable =
@@ -803,10 +804,8 @@ public:
             }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum * nHeadTiles;
-            for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != block_idx) {
-                    continue;
-                }
+            int firstCore = (GetBlockIdx() + GetBlockNum() - coreOffset) % GetBlockNum();
+            for (int idx = firstCore; idx < taskNum; idx += GetBlockNum()) {
                 int headTileIdx = idx % nHeadTiles;
                 int headIdx = headTileIdx * headTileSize;
                 int queryIdx = idx / nHeadTiles;
@@ -858,6 +857,7 @@ public:
 
                 curr = 1 - curr;
             }
+            coreOffset = (coreOffset + taskNum) % GetBlockNum();
             queryStart = -1;
             cachedLen = -1;
         }
@@ -888,6 +888,7 @@ public:
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
+        int coreOffset = 0;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
             __gm__ uint32_t *blockTable =
@@ -905,10 +906,8 @@ public:
             }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum * nHeadTiles;
-            for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != block_idx) {
-                    continue;
-                }
+            int firstCore = (block_idx + block_num - coreOffset) % block_num;
+            for (int idx = firstCore; idx < taskNum; idx += block_num) {
                 int headTileIdx = idx % nHeadTiles;
                 int headIdx = headTileIdx * headTileSize;
                 int queryIdx = idx / nHeadTiles;
@@ -980,6 +979,7 @@ public:
                 ffts_cross_core_sync(PIPE_MTE3, config);
                 curr = 1 - curr;
             }
+            coreOffset = (coreOffset + taskNum) % block_num;
             queryStart = -1;
             cachedLen = -1;
         }
