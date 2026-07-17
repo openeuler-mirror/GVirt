@@ -48,6 +48,16 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &
             os << val;
             break;
         }
+        case INT4: {
+            uint8_t *raw = static_cast<uint8_t *>(p) + off / 2;
+            int32_t val = (off % 2 == 0) ? (*raw & 0x0F) : ((*raw >> 4) & 0x0F);
+            val = (val ^ 0x8) - 0x8;
+            if (val >= 0) {
+                os << " ";
+            }
+            os << val;
+            break;
+        }
         case INT8: {
             int32_t val = (static_cast<int8_t *>(p))[off];
             if (val >= 0) {
@@ -457,6 +467,21 @@ void XTensor::View(std::vector<size_t> shape)
 
 void XTensor::View(enum XDtype type)
 {
+    size_t oldBit = XDtypeBit(dtype);
+    size_t newBit = XDtypeBit(type);
+
+    if (!shape.empty() && oldBit != newBit) {
+        size_t lastIdx = shape.size() - 1;
+        uint64_t lastBit = static_cast<uint64_t>(shape[lastIdx]) * oldBit;
+        if (lastBit % newBit != 0) {
+            std::string err_str = "View(XDtype) failed: last dim of " + ToStr("Tensor") +
+                                  " is not divisible by " + std::to_string(newBit) +
+                                  " Bits, cannot reinterpret as " + XDtypeStr(type);
+            throw std::runtime_error(err_str);
+        }
+        shape[lastIdx] = lastBit / newBit;
+        numel = numel * oldBit / newBit;
+    }
     this->dtype = type;
 }
 

@@ -91,6 +91,7 @@
 #include "aclrtlaunch_einsum_mht_hdt_mhd_bfloat16_t.h"
 #include "aclrtlaunch_einsum_mht_htd_mhd_float16_t.h"
 #include "aclrtlaunch_einsum_mht_htd_mhd_bfloat16_t.h"
+#include "aclrtlaunch_unpack_activation_int8_t.h"
 
 #include "kernels/kernel_param.h"
 
@@ -1632,4 +1633,18 @@ void XliteOpEinsumMhtHtdMhd(XRuntime &rt, XTensor &mht, XTensor &htd, XTensor &m
     launchKernel(rt.aicNum, rt.stream, mht.ptr, htd.ptr, mhd.ptr, m, h, t, d,
                  MATMUL_M0_N0_K0_DEFAULT_VALUE, MATMUL_M0_N0_K0_DEFAULT_VALUE,
                  MATMUL_M0_N0_K0_DEFAULT_VALUE, weightNZ, swizzle);
+}
+
+void XliteOpUnpackActivation(XRuntime &rt, XTensor &input, XTensor &output)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (input.dtype == INT8 && input.shape.size() == 2 && input.shape[1] % 2 == 0) {
+        aclrtlaunch_unpack_activation_int8_t(rt.aivNum, rt.stream, input.ptr, output.ptr,
+                                             input.shape[0], input.shape[1]);
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
 }

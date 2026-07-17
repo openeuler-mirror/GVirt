@@ -1898,6 +1898,16 @@ void EinsumMhtHtdMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &htd, at::Tensor 
     rt.Synchronize();
 }
 
+void UnpackActivation(XRuntime &rt, at::Tensor &input, at::Tensor &output)
+{
+    XTensor _input, _output;
+    InitXTensor(_input, input);
+    InitXTensor(_output, output);
+
+    XliteOpUnpackActivation(rt, _input, _output);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -2242,6 +2252,8 @@ PYBIND11_MODULE(_C, m)
     m.def("einsum_mht_htd_mhd", &EinsumMhtHtdMhd, "einsum_mht_htd_mhd", py::arg("rt"),
           py::arg("mht"), py::arg("htd"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
           py::arg("d"), py::arg("weight_nz") = false);
+    m.def("unpack_activation", &UnpackActivation, py::arg("rt"), py::arg("input"),
+          py::arg("output"));
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,

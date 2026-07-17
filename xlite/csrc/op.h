@@ -152,4 +152,5 @@ void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &m
                             uint32_t h, uint32_t t, uint32_t d, bool weightNZ);
 void XliteOpEinsumMhtHtdMhd(XRuntime &rt, XTensor &mht, XTensor &htd, XTensor &mhd, uint32_t m,
                             uint32_t h, uint32_t t, uint32_t d, bool weightNZ);
+void XliteOpUnpackActivation(XRuntime &rt, XTensor &input, XTensor &output);
 #endif

@@ -37,6 +37,7 @@
 
 enum XDtype {
     BIT1,
+    INT4,
     INT8,
     INT32,
     INT64,
@@ -76,6 +77,8 @@ inline const char *XDtypeStr(enum XDtype dtype)
     switch (dtype) {
         case BIT1:
             return "BIT1";
+        case INT4:
+            return "INT4";
         case INT8:
             return "INT8";
         case INT32:
@@ -112,6 +115,8 @@ size_t inline XDtypeBit(enum XDtype dtype)
     switch (dtype) {
         case BIT1:
             return 1;
+        case INT4:
+            return 4;
         case INT8:
             return 8;
         case FP16:
@@ -161,7 +166,7 @@ at::ScalarType inline ToScalarType(enum XDtype dtype)
             return at::ScalarType::Long;
         default:
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                     ": unknown data type " + std::to_string(dtype));
+                                     ": unsupported data type " + std::to_string(dtype));
     }
 }
 #endif
