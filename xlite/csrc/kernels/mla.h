@@ -10,7 +10,6 @@
 #include "softmax_attn_aiv.h"
 
 #define MAX_N0 128
-#define MAX_K0 128
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
 #define SEQLEN_64 64
@@ -815,9 +814,6 @@ public:
                 int queryTaskStart = queryIdx * queryTileSize;
                 if (queryTaskStart + queryTaskLen > queryLen) {
                     queryTaskLen = queryLen - queryTaskStart;
-                }
-                if (cachedLen < 0) {
-                    cachedLen = cachedLens[batchIdx];
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
                 if (queryStart < 0) {

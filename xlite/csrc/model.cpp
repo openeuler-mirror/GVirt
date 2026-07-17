@@ -349,7 +349,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
                             XTensor &hiddenState)
 {
     XTensor &kCache = kvCache[layer][0];
-    XTensor &vCache = kvCache[layer][1];
+    XTensor &peCache = kvCache[layer][1];
     uint32_t qHeads = _c.nHeads / _c.defTpSize;
 
     auto [attnQWithQr, attnNormQc] =
@@ -367,7 +367,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
                                    attnQWithQr.dtype, DBG_LOC);
-        XliteOpMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, attnOutput,
+        XliteOpMLA(rt, attnQWithQr, kCache, peCache, mlaKVB[layer], qk, attnOutput,
                    rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
                    _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.kvLoraRank, _c.blockSize,
                    rt._batch, rt._maxNumBlocks, _c.softmaxScale, _c.weightNZ, _c.indexTopK,
@@ -382,7 +382,7 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
         XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
-        XliteOpFlashMLA(rt, attnQWithQr, kCache, vCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
+        XliteOpFlashMLA(rt, attnQWithQr, kCache, peCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
                         lastSum, _sync, attnOutput, rt._queryStartLoc, rt._lens, rt._cachedLens,
                         rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
                         _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
