@@ -2052,6 +2052,73 @@ def beta_decay(
     """
     ...
 
+def einsum_mht_hdt_mhd(
+    rt: Runtime,
+    mht: torch.Tensor,
+    hdt: torch.Tensor,
+    mhd: torch.Tensor,
+    m: int,
+    h: int,
+    t: int,
+    d: int,
+    weight_nz: bool = False,
+) -> None:
+    """Batched matmul for ``mhd = einsum("mht,hdt->mhd", mht, hdt)``.
+
+    The right operand ``hdt`` has a head-major layout (``[h, d, t]``), which the
+    kernel consumes via the matmul transpose path. The output ``mhd`` is laid
+    out as ``[m, h, d]`` with the head dimension ``h`` kept as an outer loop.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        mht (torch.Tensor): Left operand of shape ``[m, h, t]``.
+        hdt (torch.Tensor): Right operand of shape ``[h, d, t]``.
+        mhd (torch.Tensor): Output tensor of shape ``[m, h, d]``.
+        m (int): Outer batch dimension (token count).
+        h (int): Head dimension.
+        t (int): Inner reduction dimension.
+        d (int): Output feature dimension.
+        weight_nz (bool): Whether ``hdt`` is in NZ weight layout.
+
+    Returns:
+        None: ``mhd`` is written in place.
+    """
+    ...
+
+def einsum_mht_htd_mhd(
+    rt: Runtime,
+    mht: torch.Tensor,
+    htd: torch.Tensor,
+    mhd: torch.Tensor,
+    m: int,
+    h: int,
+    t: int,
+    d: int,
+    weight_nz: bool = False,
+) -> None:
+    """Batched matmul for ``mhd = einsum("mht,htd->mhd", mht, htd)``.
+
+    The right operand ``htd`` has a head-row layout (``[h, t, d]``), which the
+    kernel consumes directly via the standard matmul path. The output ``mhd``
+    is laid out as ``[m, h, d]`` with the head dimension ``h`` kept as an outer
+    loop.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        mht (torch.Tensor): Left operand of shape ``[m, h, t]``.
+        htd (torch.Tensor): Right operand of shape ``[h, t, d]``.
+        mhd (torch.Tensor): Output tensor of shape ``[m, h, d]``.
+        m (int): Outer batch dimension (token count).
+        h (int): Head dimension.
+        t (int): Inner reduction dimension.
+        d (int): Output feature dimension.
+        weight_nz (bool): Whether ``htd`` is in NZ weight layout.
+
+    Returns:
+        None: ``mhd`` is written in place.
+    """
+    ...
+
 def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
     """Print a tensor preview for debugging.
 
