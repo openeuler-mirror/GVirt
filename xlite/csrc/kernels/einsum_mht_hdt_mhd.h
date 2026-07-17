@@ -5,7 +5,7 @@
 #include "kernel_operator.h"
 #include "matmul.h"
 
-// mhd = torch.einsum("mht,htd->mhd", mht, htd)
+// mhd = torch.einsum("mht,hdt->mhd", mht, hdt)
 template <typename Dtype, typename MatDtype, typename OutDtype>
 __aicore__ void einsum_mht_hdt_mhd(GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32_t m, uint32_t h,
                                    uint32_t t, uint32_t d, uint64_t m0, uint64_t n0, uint64_t k0,
