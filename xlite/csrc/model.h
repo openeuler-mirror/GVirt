@@ -145,6 +145,8 @@ public:
     std::vector<XTensor> mlaQNorm;
     std::vector<XTensor> mlaQNormBias;
     std::vector<XTensor> mlaKVB;
+    std::vector<XTensor> mlaWUV;
+    std::vector<XTensor> mlaWUKT;
     std::vector<XTensor> mlaKVNorm;
     std::vector<XTensor> mlaKVNormBias;
 

@@ -23,6 +23,8 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mlaQNorm.resize(c.nLayers);
     mlaQNormBias.resize(c.nLayers);
     mlaKVB.resize(c.nLayers);
+    mlaWUV.resize(c.nLayers);
+    mlaWUKT.resize(c.nLayers);
     mlaKVNorm.resize(c.nLayers);
     mlaKVNormBias.resize(c.nLayers);
     mlpNorm.resize(c.nLayers);
