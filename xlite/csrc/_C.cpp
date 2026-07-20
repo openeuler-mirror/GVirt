@@ -1608,14 +1608,16 @@ void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
 }
 
 void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
-                 at::Tensor &inputWithR, at::Tensor &freqs, at::Tensor &position)
+                 at::Tensor &inputWithR, at::Tensor &freqs, at::Tensor &position,
+                 at::Tensor &output)
 {
-    XTensor _inputWithR, _freqs, _position, _outputPe;
+    XTensor _inputWithR, _freqs, _position, _output;
     InitXTensor(_inputWithR, inputWithR);
     InitXTensor(_freqs, freqs);
     InitXTensor(_position, position);
-    XliteOpRopeComplex(rt, nLocalHeads, stepDim, ropeDim, stepDim - ropeDim, _inputWithR, _freqs,
-                       _position);
+    InitXTensor(_output, output);
+    XliteOpRopeComplex(rt, nLocalHeads, stepDim, ropeDim, ropeDim, stepDim - ropeDim, 0,
+                       _inputWithR, _freqs, _position, _output);
     rt.Synchronize();
 }
 
@@ -2263,7 +2265,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("is_long"));
     m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("n_local_heads"),
           py::arg("step_dim"), py::arg("rope_dim"), py::arg("input_with_r"), py::arg("freqs"),
-          py::arg("position"));
+          py::arg("position"), py::arg("output"));
     m.def("mla_prepare", &MlaPrepare, py::arg("rt"), py::arg("attn_qkvc"), py::arg("q_norm"),
           py::arg("q_norm_bias"), py::arg("attn_norm_qc"), py::arg("kv_norm"),
           py::arg("kv_norm_bias"), py::arg("attn_norm_kvc"), py::arg("freqs"), py::arg("position"),
