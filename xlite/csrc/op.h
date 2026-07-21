@@ -149,8 +149,10 @@ void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTen
                       XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
                       uint32_t num_v_heads);
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
-                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ);
+                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T = -1,
+                            int D = -1);
 void XliteOpEinsumMhtHtdMhd(XRuntime &rt, XTensor &mht, XTensor &htd, XTensor &mhd, uint32_t m,
-                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ);
+                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T = -1,
+                            int D = -1);
 void XliteOpUnpackActivation(XRuntime &rt, XTensor &input, XTensor &output);
 #endif

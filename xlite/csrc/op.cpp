@@ -1653,7 +1653,7 @@ void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTen
 }
 
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
-                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
+                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T, int D)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1673,11 +1673,11 @@ void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &m
     }
     launchKernel(rt.aicNum, rt.stream, mht.ptr, hdt.ptr, mhd.ptr, m, h, t, d,
                  MATMUL_M0_N0_K0_DEFAULT_VALUE, MATMUL_M0_N0_K0_DEFAULT_VALUE,
-                 MATMUL_M0_N0_K0_DEFAULT_VALUE, weightNZ, swizzle);
+                 MATMUL_M0_N0_K0_DEFAULT_VALUE, weightNZ, swizzle, T, D);
 }
 
 void XliteOpEinsumMhtHtdMhd(XRuntime &rt, XTensor &mht, XTensor &htd, XTensor &mhd, uint32_t m,
-                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
+                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T, int D)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1697,7 +1697,7 @@ void XliteOpEinsumMhtHtdMhd(XRuntime &rt, XTensor &mht, XTensor &htd, XTensor &m
     }
     launchKernel(rt.aicNum, rt.stream, mht.ptr, htd.ptr, mhd.ptr, m, h, t, d,
                  MATMUL_M0_N0_K0_DEFAULT_VALUE, MATMUL_M0_N0_K0_DEFAULT_VALUE,
-                 MATMUL_M0_N0_K0_DEFAULT_VALUE, weightNZ, swizzle);
+                 MATMUL_M0_N0_K0_DEFAULT_VALUE, weightNZ, swizzle, T, D);
 }
 
 void XliteOpUnpackActivation(XRuntime &rt, XTensor &input, XTensor &output)

@@ -9,17 +9,23 @@
 template <typename Dtype, typename MatDtype, typename OutDtype>
 __aicore__ void einsum_mht_hdt_mhd(GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32_t m, uint32_t h,
                                    uint32_t t, uint32_t d, uint64_t m0, uint64_t n0, uint64_t k0,
-                                   bool weightNZ, uint64_t swizzle)
+                                   bool weightNZ, uint64_t swizzle, int T = -1, int D = -1)
 {
     Matmul<Dtype, MatDtype, OutDtype> matmul_op;
 
     int coreOffset = 0;
     int nextCoreOffset = 0;
-    int xStride = t * sizeof(Dtype);
+    if (T == -1) {
+        T = t;
+    }
+    if (D == -1) {
+        D = d;
+    }
+    int xStride = T * sizeof(Dtype);
     int yStride = d * t * sizeof(Dtype);
-    int zStride = d * sizeof(Dtype);
-    int srcDStride = h * t;
-    int dstDStride = h * d;
+    int zStride = D * sizeof(Dtype);
+    int srcDStride = h * T;
+    int dstDStride = h * D;
     for (int hIdx = 0; hIdx < h; hIdx++) {
         GM_ADDR x = mht + hIdx * xStride;
         GM_ADDR y = hdt + hIdx * yStride;
@@ -34,9 +40,9 @@ __aicore__ void einsum_mht_hdt_mhd(GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32
 #define EINSUM_MHT_HDT_MHD_FUNC_DEFINE(dtype)                                                    \
     extern "C" __global__ __aicore__ void einsum_mht_hdt_mhd_##dtype(                            \
         GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32_t m, uint32_t h, uint32_t t, uint32_t d,   \
-        uint64_t m0, uint64_t n0, uint64_t k0, bool weightNZ, uint64_t swizzle)                  \
+        uint64_t m0, uint64_t n0, uint64_t k0, bool weightNZ, uint64_t swizzle, int T, int D)    \
     {                                                                                            \
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);                                          \
         einsum_mht_hdt_mhd<dtype, float, dtype>(mht, hdt, mhd, m, h, t, d, m0, n0, k0, weightNZ, \
-                                                swizzle);                                        \
+                                                swizzle, T, D);                                  \
     }
