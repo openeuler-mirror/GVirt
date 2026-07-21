@@ -1757,6 +1757,79 @@ def mla_with_indices(
     """
     ...
 
+def mla_v2(
+    rt: Runtime,
+    q_with_qr: torch.Tensor,
+    qr: torch.Tensor,
+    k_cache: torch.Tensor,
+    pe_cache: torch.Tensor,
+    wuk_t: torch.Tensor,
+    wuv: torch.Tensor,
+    output: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    n_heads: int,
+    rope_head_dim: int,
+    nope_head_dim: int,
+    v_head_dim: int,
+    kv_lora_rank: int,
+    block_size: int,
+    batch: int,
+    max_num_blocks: int,
+    scale: float,
+    topk_indices: torch.Tensor,
+    top_k: int = 0,
+    nz: bool = False,
+    enable_flash_attention: bool = False,
+    tile_size_of_cached_kv: int = 8192,
+) -> None:
+    """Run MLA v2 path as three kernels: wuk einsum + mla_v2 attention + wuv einsum.
+
+    Compared to :func:`mla`, the WUK absorb and WUV projection are moved out of
+    the fused kernel and run as separate einsum operators surrounding the
+    ``mla_v2`` attention kernel. The final ``output`` (v_head_dim) is the same
+    as :func:`mla`'s output.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        q_with_qr (torch.Tensor): Query tensor with rotary components, shape
+            (total_query_tokens, n_heads, nope_head_dim + rope_head_dim).
+        qr (torch.Tensor): Pre-rotated q_rope slice, contiguous, shape
+            (total_query_tokens, n_heads, rope_head_dim).
+        k_cache (torch.Tensor): Paged KV cache (kv_lora_rank slice).
+        pe_cache (torch.Tensor): Paged RoPE key cache (rope_head_dim slice).
+        wuk_t (torch.Tensor): MLA W_UK^T weight, shape
+            (n_heads, nope_head_dim, kv_lora_rank).
+        wuv (torch.Tensor): MLA W_UV weight, shape
+            (n_heads, kv_lora_rank, v_head_dim).
+        output (torch.Tensor): Output tensor (v_head_dim); written in place.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
+        lens (torch.Tensor): Current token lengths.
+        cached_lens (torch.Tensor): Cached token lengths.
+        block_tables (torch.Tensor): Block table tensor.
+        n_heads (int): Number of query heads.
+        rope_head_dim (int): Rotary head dimension.
+        nope_head_dim (int): Non-rotary head dimension.
+        v_head_dim (int): Value head dimension.
+        kv_lora_rank (int): KV LoRA rank.
+        block_size (int): KV block size.
+        batch (int): Batch size.
+        max_num_blocks (int): Maximum number of blocks per request.
+        scale (float): Attention scaling factor.
+        topk_indices (torch.Tensor): Top-k indices tensor for sparse attention
+            (may be empty when ``top_k == 0``).
+        top_k (int): Number of top-k indices; 0 disables sparse attention.
+        nz (bool): Whether to use nz weights.
+        enable_flash_attention (bool): Whether to use the flash MLA v2 kernel.
+        tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA v2.
+
+    Returns:
+        None: `output` is written in place.
+    """
+    ...
+
 def indexer_scores(
     rt: Runtime,
     q: torch.Tensor,

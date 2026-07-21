@@ -782,7 +782,6 @@ public:
         __gm__ uint32_t *lastBlockTable;
 
         int needDoSV = 0;
-        int totalIdx = 0;
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
@@ -884,7 +883,6 @@ public:
         uint64_t mode = 2;  // inner-group aic/aiv sync
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
 
-        int totalIdx = 0;
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
