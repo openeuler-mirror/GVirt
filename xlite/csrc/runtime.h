@@ -103,6 +103,7 @@ public:
     XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
     void PutTensor(XTensor &t);
     bool TensorInPool(XTensor &t);
+    int64_t GetTensorOffset(XTensor &t);
 
     void ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable);
 

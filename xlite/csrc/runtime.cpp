@@ -126,6 +126,9 @@ XRuntime::~XRuntime(void)
     if (_dpSize > 1 && _dpComm) {
         HcclCommDestroy(_dpComm);
     }
+    if (_moeEpSize > 1 && _epComm) {
+        HcclCommDestroy(_epComm);
+    }
 
     delete _pool;
     if (_event) {
@@ -786,6 +789,16 @@ void XRuntime::PutTensor(XTensor &t)
 bool XRuntime::TensorInPool(XTensor &t)
 {
     return _pool->TensorInPool(t);
+}
+
+int64_t XRuntime::GetTensorOffset(XTensor &t)
+{
+    if (!_pool->TensorInPool(t)) {
+        return -1;
+    }
+    uint64_t poolStart = reinterpret_cast<uint64_t>(_pool->Ptr());
+    uint64_t tensorStart = reinterpret_cast<uint64_t>(t.ptr);
+    return static_cast<int64_t>(tensorStart - poolStart);
 }
 
 void XRuntime::ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable)

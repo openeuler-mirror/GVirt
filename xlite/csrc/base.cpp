@@ -47,11 +47,12 @@ XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr)
 
 void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &os)
 {
+    std::ostringstream oss;
     switch (dtype) {
         case BIT1: {
             uint64_t *raw = static_cast<uint64_t *>(p) + off / 64;
             uint32_t val = ((*raw) & (1ull << (off % 64))) ? 1 : 0;
-            os << val;
+            oss << val;
             break;
         }
         case INT4: {
@@ -59,43 +60,43 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &
             int32_t val = (off % 2 == 0) ? (*raw & 0x0F) : ((*raw >> 4) & 0x0F);
             val = (val ^ 0x8) - 0x8;
             if (val >= 0) {
-                os << " ";
+                oss << " ";
             }
-            os << val;
+            oss << val;
             break;
         }
         case INT8: {
             int32_t val = (static_cast<int8_t *>(p))[off];
             if (val >= 0) {
-                os << " ";
+                oss << " ";
             }
-            os << val;
+            oss << val;
             break;
         }
         case INT32: {
             int32_t val = (static_cast<int32_t *>(p))[off];
             if (val >= 0) {
-                os << " ";
+                oss << " ";
             }
-            os << val;
+            oss << val;
             break;
         }
         case INT64: {
             int64_t val = (static_cast<int64_t *>(p))[off];
             if (val >= 0) {
-                os << " ";
+                oss << " ";
             }
-            os << val;
+            oss << val;
             break;
         }
         case FP16: {
             __fp16 val = (static_cast<__fp16 *>(p))[off];
             if (val >= 0) {
-                os << " ";
+                oss << " ";
             }
-            os << std::scientific << std::setprecision(4);
-            os << val;
-            os.unsetf(std::ios::scientific);
+            oss << std::scientific << std::setprecision(4);
+            oss << val;
+            oss.unsetf(std::ios::scientific);
             break;
         }
         case BF16: {
@@ -104,72 +105,87 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &
             float val;
             std::memcpy(&val, &float32Data, sizeof(float));
             if (val >= 0) {
-                os << " ";
+                oss << " ";
             }
-            os << std::scientific << std::setprecision(4);
-            os << val;
-            os.unsetf(std::ios::scientific);
+            oss << std::scientific << std::setprecision(4);
+            oss << val;
+            oss.unsetf(std::ios::scientific);
             break;
         }
         case FP32: {
             float val = (static_cast<float *>(p))[off];
             if (val >= 0) {
-                os << " ";
+                oss << " ";
             }
-            os << std::scientific << std::setprecision(4);
-            os << val;
-            os.unsetf(std::ios::scientific);
+            oss << std::scientific << std::setprecision(4);
+            oss << val;
+            oss.unsetf(std::ios::scientific);
             break;
         }
         case CPLXF: {
             std::complex<float> val = (static_cast<std::complex<float> *>(p))[off];
             if (val.real() >= 0 && val.imag() >= 0) {
-                os << " ";
+                oss << " ";
             }
-            os << std::scientific << std::setprecision(4);
-            os << val.real();
+            oss << std::scientific << std::setprecision(4);
+            oss << val.real();
             if (val.imag() >= 0) {
-                os << " + ";
+                oss << " + ";
             } else {
-                os << " - ";
+                oss << " - ";
             }
-            os << std::abs(val.imag()) << "j";
-            os.unsetf(std::ios::scientific);
+            oss << std::abs(val.imag()) << "j";
+            oss.unsetf(std::ios::scientific);
             break;
         }
         default:
             break;
     }
+    os << oss.str();
 }
 
 void XTensor::PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDtype subDtype,
-                       uint32_t nRow, uint32_t nCol, std::ostream &os)
+                       uint32_t nRow, uint32_t nCol, std::ostream &os, const char *endingNote)
 {
     aclError err;
     std::vector<XTensor> tensorVec;
     uint32_t printRows = nRow > numel ? numel : nRow;
     uint32_t hRow = DIV_ROUND_UP(printRows, 2);
+    std::string endingNoteStr;
+    if (endingNote != nullptr && endingNote[0] != '\0') {
+        endingNoteStr = " <" + std::string(endingNote) + ">";
+    }
+
+    std::ostringstream oss;
+    if (name != nullptr && name[0] != '\0') {
+        oss << name << ": ";
+    }
 
     if (XDtypeBit(dtype) / 8 != sizeof(void *)) {
-        std::ostringstream oss;
-        oss << name << " is not ptr size" << std::endl;
+        oss << "invalid ptr size" << endingNoteStr << std::endl;
         os << oss.str() << std::flush;
         return;
     }
 
     size_t size = numel * sizeof(void *);
     if (size == 0) {
+        oss << "empty tensor" << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return;
     }
 
     void *p = malloc(size);
     if (!p) {
+        oss << "failed to allocate memory" << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return;
     }
 
     err = aclrtMemcpy(p, size, ptr, size, ACL_MEMCPY_DEVICE_TO_HOST);
     if (err != ACL_ERROR_NONE) {
         free(p);
+        oss << "failed to copy data from device to host" << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return;
     }
 
@@ -178,44 +194,59 @@ void XTensor::PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDt
         std::string subName = std::string(name) + "[" + std::to_string(i) + "]";
         addr = *(static_cast<uint64_t *>(p) + i);
         XTensor(subShape, subDtype, reinterpret_cast<void *>(addr))
-            .Print(subName.c_str(), nRow, nCol, os);
+            .Print(subName.c_str(), nRow, nCol, oss);
     }
 
     for (size_t i = numel - hRow; i < numel; i++) {
         std::string subName = std::string(name) + "[" + std::to_string(i) + "]";
         addr = *(static_cast<uint64_t *>(p) + i);
         XTensor(subShape, subDtype, reinterpret_cast<void *>(addr))
-            .Print(subName.c_str(), nRow, nCol, os);
+            .Print(subName.c_str(), nRow, nCol, oss);
     }
+    if (endingNote != nullptr && endingNote[0] != '\0') {
+        oss << endingNoteStr << std::endl;
+    }
+    os << oss.str() << std::flush;
 
     free(p);
 }
 
-void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream &os)
+void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream &os,
+                    const char *endingNote)
 {
     uint32_t i, j;
     uint32_t hRow = DIV_ROUND_UP(nRow, 2);
     uint32_t hCol = DIV_ROUND_UP(nCol, 2);
     aclError err;
+    std::string endingNoteStr;
+    if (endingNote != nullptr && endingNote[0] != '\0') {
+        endingNoteStr = " <" + std::string(endingNote) + ">";
+    }
+
+    std::ostringstream oss;
+    if (name != nullptr && name[0] != '\0') {
+        oss << name << ": ";
+    }
 
     if (bytes == 0) {
+        oss << "empty tensor" << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return;
     }
 
     void *p = malloc(bytes);
     if (!p) {
+        oss << "failed to allocate memory" << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return;
     }
 
     err = aclrtMemcpy(p, bytes, ptr, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
     if (err != ACL_ERROR_NONE) {
         free(p);
+        oss << "failed to copy data from device to host" << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return;
-    }
-
-    std::ostringstream oss;
-    if (name != nullptr && name[0] != '\0') {
-        oss << name << ": ";
     }
 
     oss << "XTensor(";
@@ -302,31 +333,51 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream
             oss << ", ";
         }
     }
-    oss << "), dtype=" << XDtypeStr(dtype) << ")" << std::endl;
-
+    oss << "), dtype=" << XDtypeStr(dtype) << ")" << endingNoteStr << std::endl;
     os << oss.str() << std::flush;
+
     free(p);
 }
 
-bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os)
+bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os,
+                          const char *endingNote)
 {
+    std::string endingNoteStr;
+    if (endingNote != nullptr && endingNote[0] != '\0') {
+        endingNoteStr = " <" + std::string(endingNote) + ">";
+    }
+
+    std::ostringstream oss;
+    if (name != nullptr && name[0] != '\0') {
+        oss << name << ": ";
+    }
+
     if (bytes == 0) {
+        oss << "empty tensor" << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return false;
     }
 
     // Only float-like dtypes can have NaN/Inf/large values
     if (dtype != FP16 && dtype != BF16 && dtype != FP32 && dtype != CPLXF) {
+        oss << "dtype " << XDtypeStr(dtype) << " does not support NaN/Inf/large value checks"
+            << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return false;
     }
 
     void *p = malloc(bytes);
     if (!p) {
+        oss << "failed to allocate memory" << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return false;
     }
 
     aclError err = aclrtMemcpy(p, bytes, ptr, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
     if (err != ACL_ERROR_NONE) {
         free(p);
+        oss << "failed to copy data from device to host" << endingNoteStr << std::endl;
+        os << oss.str() << std::flush;
         return false;
     }
 
@@ -389,12 +440,10 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os)
 
     bool hasAnomaly = (nanCount > 0 || infCount > 0 || largeCount > 0);
 
-    if (hasAnomaly) {
+    if (!hasAnomaly) {
+        oss << "no NaN/Inf/large number anomalies found";
+    } else {
         size_t col = shape[shape.size() - 1];
-        std::ostringstream oss;
-        if (name != nullptr && name[0] != '\0') {
-            oss << name << ": ";
-        }
         if (nanCount > 0) {
             oss << nanCount << " NaN (first at [" << firstNanIdx / col << "," << firstNanIdx % col
                 << "])";
@@ -413,16 +462,17 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os)
             oss << largeCount << " values >" << threshold << " (first at [" << firstLargeIdx / col
                 << "," << firstLargeIdx % col << "])";
         }
-        oss << ", shape=(";
-        for (size_t i = 0; i < shape.size(); i++) {
-            oss << shape[i];
-            if (i != shape.size() - 1) {
-                oss << ", ";
-            }
-        }
-        oss << "), dtype=" << XDtypeStr(dtype) << std::endl;
-        os << oss.str() << std::flush;
     }
+
+    oss << ", shape=(";
+    for (size_t i = 0; i < shape.size(); i++) {
+        oss << shape[i];
+        if (i != shape.size() - 1) {
+            oss << ", ";
+        }
+    }
+    oss << "), dtype=" << XDtypeStr(dtype) << endingNoteStr << std::endl;
+    os << oss.str() << std::flush;
 
     free(p);
     return hasAnomaly;

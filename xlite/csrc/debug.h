@@ -244,12 +244,14 @@ private:
  */
 #ifdef XLITE_DEBUG_ON
 void XDebugSetState(bool condition);
-void XDebugPrint(XRuntime &rt, XTensor &h, const char *str, float threshold = -1.0f);
-void XDebugPrintRowsCols(XRuntime &rt, XTensor &h, const char *str, uint32_t rows, uint32_t cols,
+void XDebugPrintLog(XRuntime &rt, const char *header, const char *str);
+void XDebugPrintOffset(XRuntime &rt, XTensor &h, const char *header);
+void XDebugPrint(XRuntime &rt, XTensor &h, const char *header, float threshold = -1.0f);
+void XDebugPrintRowsCols(XRuntime &rt, XTensor &h, const char *header, uint32_t rows, uint32_t cols,
                          float threshold = -1.0f);
-void XDebugPrintPtr(XRuntime &rt, XTensor &h, const char *str, std::vector<size_t> &subShape,
+void XDebugPrintPtr(XRuntime &rt, XTensor &h, const char *header, std::vector<size_t> &subShape,
                     enum XDtype subDtype, float threshold = -1.0f);
-void XDebugCheckNanInf(XRuntime &rt, XTensor &h, const char *str, float threshold = -1.0f);
+void XDebugCheckNanInf(XRuntime &rt, XTensor &h, const char *header, float threshold = -1.0f);
 void XDebugDumpXTensor(XRuntime &rt, XTensor &h, const std::string &path);
 #define XDEBUG_LOG(rt, str) XDebugLog(true, (rt).rankId(), "", (str))
 #else
@@ -263,30 +265,34 @@ void XDebugDumpXTensor(XRuntime &rt, XTensor &h, const std::string &path);
  */
 #if defined(XLITE_DEBUG_ON) && defined(XLITE_DEBUG_ON_FORWARD)
 #define XDEBUG_SET_STATE(condition) XDebugSetState((condition))
-#define XDEBUG_PRINT(rt, h, str) XDebugPrint((rt), (h), (str))
-#define XDEBUG_PRINT_X(rt, h, str, threshold) XDebugPrint((rt), (h), (str), (threshold))
-#define XDEBUG_PRINT_ROWS_COLS(rt, h, str, rows, cols) \
-    XDebugPrintRowsCols((rt), (h), (str), (rows), (cols))
-#define XDEBUG_PRINT_ROWS_COLS_X(rt, h, str, rows, cols, threshold) \
-    XDebugPrintRowsCols((rt), (h), (str), (rows), (cols), (threshold))
-#define XDEBUG_PRINT_PTR(rt, h, str, subShape, subDtype) \
-    XDebugPrintPtr((rt), (h), (str), (subShape), (subDtype))
-#define XDEBUG_PRINT_PTR_X(rt, h, str, subShape, subDtype, threshold) \
-    XDebugPrintPtr((rt), (h), (str), (subShape), (subDtype), (threshold))
-#define XDEBUG_CHECK_NAN_INF(rt, h, str) XDebugCheckNanInf((rt), (h), (str))
-#define XDEBUG_CHECK_NAN_INF_X(rt, h, str, threshold) \
-    XDebugCheckNanInf((rt), (h), (str), (threshold))
+#define XDEBUG_PRINT_LOG(rt, header, str) XDebugPrintLog((rt), (header), (str))
+#define XDEBUG_PRINT_OFFSET(rt, h, header) XDebugPrintOffset((rt), (h), (header))
+#define XDEBUG_PRINT(rt, h, header) XDebugPrint((rt), (h), (header))
+#define XDEBUG_PRINT_X(rt, h, header, threshold) XDebugPrint((rt), (h), (header), (threshold))
+#define XDEBUG_PRINT_ROWS_COLS(rt, h, header, rows, cols) \
+    XDebugPrintRowsCols((rt), (h), (header), (rows), (cols))
+#define XDEBUG_PRINT_ROWS_COLS_X(rt, h, header, rows, cols, threshold) \
+    XDebugPrintRowsCols((rt), (h), (header), (rows), (cols), (threshold))
+#define XDEBUG_PRINT_PTR(rt, h, header, subShape, subDtype) \
+    XDebugPrintPtr((rt), (h), (header), (subShape), (subDtype))
+#define XDEBUG_PRINT_PTR_X(rt, h, header, subShape, subDtype, threshold) \
+    XDebugPrintPtr((rt), (h), (header), (subShape), (subDtype), (threshold))
+#define XDEBUG_CHECK_NAN_INF(rt, h, header) XDebugCheckNanInf((rt), (h), (header))
+#define XDEBUG_CHECK_NAN_INF_X(rt, h, header, threshold) \
+    XDebugCheckNanInf((rt), (h), (header), (threshold))
 #define XDEBUG_DUMP_XTENSOR(rt, h, path) XDebugDumpXTensor((rt), (h), (path))
 #else
 #define XDEBUG_SET_STATE(condition)
-#define XDEBUG_PRINT(rt, h, str)
-#define XDEBUG_PRINT_X(rt, h, str, threshold)
-#define XDEBUG_PRINT_ROWS_COLS(rt, h, str, rows, cols)
-#define XDEBUG_PRINT_ROWS_COLS_X(rt, h, str, rows, cols, threshold)
-#define XDEBUG_PRINT_PTR(rt, h, str, subShape, subDtype)
-#define XDEBUG_PRINT_PTR_X(rt, h, str, subShape, subDtype, threshold)
-#define XDEBUG_CHECK_NAN_INF(rt, h, str)
-#define XDEBUG_CHECK_NAN_INF_X(rt, h, str, threshold)
+#define XDEBUG_PRINT_LOG(rt, header, str)
+#define XDEBUG_PRINT_OFFSET(rt, h, header)
+#define XDEBUG_PRINT(rt, h, header)
+#define XDEBUG_PRINT_X(rt, h, header, threshold)
+#define XDEBUG_PRINT_ROWS_COLS(rt, h, header, rows, cols)
+#define XDEBUG_PRINT_ROWS_COLS_X(rt, h, header, rows, cols, threshold)
+#define XDEBUG_PRINT_PTR(rt, h, header, subShape, subDtype)
+#define XDEBUG_PRINT_PTR_X(rt, h, header, subShape, subDtype, threshold)
+#define XDEBUG_CHECK_NAN_INF(rt, h, header)
+#define XDEBUG_CHECK_NAN_INF_X(rt, h, header, threshold)
 #define XDEBUG_DUMP_XTENSOR(rt, h, path)
 #endif
 

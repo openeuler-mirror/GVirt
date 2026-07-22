@@ -442,9 +442,9 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
             rt.NotifyRecordPeerStream();
         }
         if (rt.enableCommOptimize || rt.enableMoEAllToAll) {
-            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
+            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, DBG_LOC);
         } else {
-            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, DBG_LOC);
         }
     }
     rt.PutTensor(attnOutput);
@@ -765,9 +765,9 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
                 rt.NotifyRecordPeerStream();
             }
             if (rt.enableCommOptimize || rt.enableMoEAllToAll) {
-                XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
+                XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, DBG_LOC);
             } else {
-                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, DBG_LOC);
             }
         }
     }

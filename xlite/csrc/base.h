@@ -217,9 +217,10 @@ public:
     // stream so it can be flushed atomically with a rank/color prefix. Defaults to
     // std::cout to keep legacy direct callers unchanged.
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6,
-               std::ostream &os = std::cout);
+               std::ostream &os = std::cout, const char *endingNote = "");
     void PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDtype subDtype,
-                  uint32_t nRow = 6, uint32_t nCol = 6, std::ostream &os = std::cout);
+                  uint32_t nRow = 6, uint32_t nCol = 6, std::ostream &os = std::cout,
+                  const char *endingNote = "");
     XTensor &Memset(int value);
     std::string ToStr(const char *name = "") const;
     XTensor &View(std::vector<size_t> shape);
@@ -228,7 +229,8 @@ public:
     XTensor &ResetView(bool resetShape = true, bool resetDtype = true);
     XTensor &MakeOriginal();  // update origShape, origNumel, origDtype, origBytes, etc. to current
     void Save(const std::string &path);
-    bool CheckNanInf(const char *name = "", float threshold = -1.0f, std::ostream &os = std::cout);
+    bool CheckNanInf(const char *name = "", float threshold = -1.0f, std::ostream &os = std::cout,
+                     const char *endingNote = "");
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
     [[nodiscard]] const std::vector<size_t> &OrigShape() const
     {

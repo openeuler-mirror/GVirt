@@ -77,7 +77,42 @@ void XDebugSetState(bool condition)
     DebugPrintFlag().store(condition, std::memory_order_relaxed);
 }
 
-void XDebugPrint(XRuntime &rt, XTensor &h, const char *str, float threshold)
+void XDebugPrintLog(XRuntime &rt, const char *header, const char *str)
+{
+    if (!DebugPrintEnabled() || rt.IsDummyRuntime()) {
+        return;
+    }
+    {
+        XDebugStream s(rt.rankId(), header);
+        s << str << std::endl;
+    }
+}
+
+void XDebugPrintOffset(XRuntime &rt, XTensor &h, const char *header)
+{
+    if (!DebugPrintEnabled() || rt.IsDummyRuntime()) {
+        return;
+    }
+    {
+        XDebugStream s(rt.rankId(), header);
+        int64_t offset = rt.GetTensorOffset(h);
+        if (offset < 0) {
+            s << "tensor not in pool";
+        } else {
+            s << "offset in pool: " << offset;
+        }
+        s << ", shape=(";
+        for (uint32_t i = 0; i < h.shape.size(); i++) {
+            s << h.shape[i];
+            if (i != h.shape.size() - 1) {
+                s << ", ";
+            }
+        }
+        s << "), dtype=" << XDtypeStr(h.dtype) << std::endl;
+    }
+}
+
+void XDebugPrint(XRuntime &rt, XTensor &h, const char *header, float threshold)
 {
     if (!DebugPrintEnabled() || rt.IsDummyRuntime()) {
         return;
@@ -86,13 +121,14 @@ void XDebugPrint(XRuntime &rt, XTensor &h, const char *str, float threshold)
     // Print and CheckNanInf share one stream so their output is gathered and
     // flushed as a single atomic line (rank-tagged, colored).
     {
-        XDebugStream s(rt.rankId(), str);
-        h.Print("", 6, 6, s.stream());
-        h.CheckNanInf(str, threshold, s.stream());
+        XDebugStream s(rt.rankId(), header);
+        std::string offsetNote = "offset in pool: " + std::to_string(rt.GetTensorOffset(h));
+        h.Print("", 6, 6, s.stream(), offsetNote.c_str());
+        h.CheckNanInf(header, threshold, s.stream());
     }
 }
 
-void XDebugPrintRowsCols(XRuntime &rt, XTensor &h, const char *str, uint32_t rows, uint32_t cols,
+void XDebugPrintRowsCols(XRuntime &rt, XTensor &h, const char *header, uint32_t rows, uint32_t cols,
                          float threshold)
 {
     if (!DebugPrintEnabled() || rt.IsDummyRuntime()) {
@@ -100,13 +136,14 @@ void XDebugPrintRowsCols(XRuntime &rt, XTensor &h, const char *str, uint32_t row
     }
     rt.Synchronize();
     {
-        XDebugStream s(rt.rankId(), str);
-        h.Print("", rows, cols, s.stream());
-        h.CheckNanInf(str, threshold, s.stream());
+        XDebugStream s(rt.rankId(), header);
+        std::string offsetNote = "offset in pool: " + std::to_string(rt.GetTensorOffset(h));
+        h.Print("", rows, cols, s.stream(), offsetNote.c_str());
+        h.CheckNanInf(header, threshold, s.stream());
     }
 }
 
-void XDebugPrintPtr(XRuntime &rt, XTensor &h, const char *str, std::vector<size_t> &subShape,
+void XDebugPrintPtr(XRuntime &rt, XTensor &h, const char *header, std::vector<size_t> &subShape,
                     enum XDtype subDtype, float threshold)
 {
     if (!DebugPrintEnabled() || rt.IsDummyRuntime()) {
@@ -114,21 +151,23 @@ void XDebugPrintPtr(XRuntime &rt, XTensor &h, const char *str, std::vector<size_
     }
     rt.Synchronize();
     {
-        XDebugStream s(rt.rankId(), str);
-        h.PrintPtr(str, subShape, subDtype, 6, 6, s.stream());
-        h.CheckNanInf(str, threshold, s.stream());
+        XDebugStream s(rt.rankId(), header);
+        std::string offsetNote = "offset in pool: " + std::to_string(rt.GetTensorOffset(h));
+        h.PrintPtr(header, subShape, subDtype, 6, 6, s.stream(), offsetNote.c_str());
+        h.CheckNanInf(header, threshold, s.stream());
     }
 }
 
-void XDebugCheckNanInf(XRuntime &rt, XTensor &h, const char *str, float threshold)
+void XDebugCheckNanInf(XRuntime &rt, XTensor &h, const char *header, float threshold)
 {
     if (!DebugPrintEnabled() || rt.IsDummyRuntime()) {
         return;
     }
     rt.Synchronize();
     {
-        XDebugStream s(rt.rankId(), str);
-        h.CheckNanInf("", threshold, s.stream());
+        XDebugStream s(rt.rankId(), header);
+        std::string offsetNote = "offset in pool: " + std::to_string(rt.GetTensorOffset(h));
+        h.CheckNanInf("", threshold, s.stream(), offsetNote.c_str());
     }
 }
 
