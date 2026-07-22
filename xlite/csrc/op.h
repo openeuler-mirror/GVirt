@@ -81,6 +81,20 @@ void XliteOpMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache
                 uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
                 uint32_t batch, uint32_t maxNumBlock, float scale, bool weightNZ = false,
                 uint32_t topK = 0, const XTensor &topkIndices = XTensor());
+void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
+                  XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
+                  XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
+                  uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,
+                  float scale, uint32_t topK = 0, const XTensor &topkIndices = XTensor());
+void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache,
+                       XTensor &peCache, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
+                       XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &oAbsorb,
+                       XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
+                       XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
+                       uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
+                       uint32_t maxNumBlocks, float scale,
+                       uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE, uint32_t topK = 0,
+                       const XTensor &topkIndices = XTensor());
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
                           float normEps, XTensor &out, const XTensor &normBias = XTensor());

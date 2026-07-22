@@ -10,7 +10,6 @@
 #include "softmax_attn_aiv.h"
 
 #define MAX_N0 128
-#define MAX_K0 128
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
 #define SEQLEN_64 64
@@ -783,10 +782,10 @@ public:
         __gm__ uint32_t *lastBlockTable;
 
         int needDoSV = 0;
-        int totalIdx = 0;
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
+        int coreOffset = 0;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
             __gm__ uint32_t *blockTable =
@@ -804,10 +803,8 @@ public:
             }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum * nHeadTiles;
-            for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != block_idx) {
-                    continue;
-                }
+            int firstCore = (GetBlockIdx() + GetBlockNum() - coreOffset) % GetBlockNum();
+            for (int idx = firstCore; idx < taskNum; idx += GetBlockNum()) {
                 int headTileIdx = idx % nHeadTiles;
                 int headIdx = headTileIdx * headTileSize;
                 int queryIdx = idx / nHeadTiles;
@@ -815,9 +812,6 @@ public:
                 int queryTaskStart = queryIdx * queryTileSize;
                 if (queryTaskStart + queryTaskLen > queryLen) {
                     queryTaskLen = queryLen - queryTaskStart;
-                }
-                if (cachedLen < 0) {
-                    cachedLen = cachedLens[batchIdx];
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
                 if (queryStart < 0) {
@@ -862,6 +856,7 @@ public:
 
                 curr = 1 - curr;
             }
+            coreOffset = (coreOffset + taskNum) % GetBlockNum();
             queryStart = -1;
             cachedLen = -1;
         }
@@ -888,10 +883,10 @@ public:
         uint64_t mode = 2;  // inner-group aic/aiv sync
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
 
-        int totalIdx = 0;
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
+        int coreOffset = 0;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
             __gm__ uint32_t *blockTable =
@@ -909,10 +904,8 @@ public:
             }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum * nHeadTiles;
-            for (int idx = 0; idx < taskNum; idx++, totalIdx++) {
-                if (totalIdx % block_num != block_idx) {
-                    continue;
-                }
+            int firstCore = (block_idx + block_num - coreOffset) % block_num;
+            for (int idx = firstCore; idx < taskNum; idx += block_num) {
                 int headTileIdx = idx % nHeadTiles;
                 int headIdx = headTileIdx * headTileSize;
                 int queryIdx = idx / nHeadTiles;
@@ -984,6 +977,7 @@ public:
                 ffts_cross_core_sync(PIPE_MTE3, config);
                 curr = 1 - curr;
             }
+            coreOffset = (coreOffset + taskNum) % block_num;
             queryStart = -1;
             cachedLen = -1;
         }

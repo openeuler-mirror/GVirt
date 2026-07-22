@@ -76,6 +76,8 @@
 #include "aclrtlaunch_topk_float.h"
 #include "aclrtlaunch_topk_bfloat16_t.h"
 #include "aclrtlaunch_mla_bfloat16_t.h"
+#include "aclrtlaunch_mla_v2_bfloat16_t.h"
+#include "aclrtlaunch_flash_mla_v2_bfloat16_t.h"
 #include "aclrtlaunch_experts_counts_sum.h"
 #include "aclrtlaunch_reorder_moe.h"
 #include "aclrtlaunch_concat.h"
@@ -1037,6 +1039,71 @@ void XliteOpMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qWithQr) + XT_STR(kCache) + XT_STR(vCache) +
                               XT_STR(wkvb) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
+void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
+                  XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
+                  XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
+                  uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,
+                  float scale, uint32_t topK, const XTensor &topkIndices)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (topK != 0 && maxNumBlocks * blockSize > MAX_SOFTMAX_PINGPONG_LEN) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": topK > 0 is not supported when maxNumBlocks (" +
+                                 std::to_string(maxNumBlocks) + ") * blockSize > " +
+                                 std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
+    }
+    if (topK > MAX_TOPK_NUM) {
+        throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
+                                 std::to_string(MAX_TOPK_NUM));
+    }
+    if (EachXDtype(BF16, qAbsorb, qr, kCache, peCache, oAbsorb)) {
+        aclrtlaunch_mla_v2_bfloat16_t(
+            rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
+            qk.ptr, oAbsorb.ptr, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
+            nHeads, ropeHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, scale, topK);
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
+                              XT_STR(peCache) + XT_STR(oAbsorb);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
+void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache,
+                       XTensor &peCache, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
+                       XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &oAbsorb,
+                       XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
+                       XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
+                       uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
+                       uint32_t maxNumBlocks, float scale, uint32_t tileSizeOfCachedKV,
+                       uint32_t topK, const XTensor &topkIndices)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (tileSizeOfCachedKV > MAX_SOFTMAX_PINGPONG_LEN) {
+        throw std::runtime_error(std::string(__func__) + ": tile size of kv " +
+                                 std::to_string(tileSizeOfCachedKV) + " > " +
+                                 std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
+    }
+    if (topK > MAX_TOPK_NUM) {
+        throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
+                                 std::to_string(MAX_TOPK_NUM));
+    }
+    if (EachXDtype(BF16, qAbsorb, qr, kCache, peCache, oAbsorb)) {
+        aclrtlaunch_flash_mla_v2_bfloat16_t(
+            rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
+            qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, oAbsorb.ptr,
+            queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
+            kvLoraRank, blockSize, batch, maxNumBlocks, scale, tileSizeOfCachedKV, topK);
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
+                              XT_STR(peCache) + XT_STR(oAbsorb);
         throw std::runtime_error(err_str + " unsupported!");
     }
 }
