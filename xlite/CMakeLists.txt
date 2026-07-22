@@ -126,6 +126,27 @@ ascendc_library(xlite_kernels_common_${RUN_MODE} SHARED ${KERNEL_FILES_COMMON})
 ascendc_library(xlite_kernels_bf16_${RUN_MODE} SHARED ${KERNEL_FILES_BF16})
 ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
 
+# If XLITE_DEBUG_ON env var is NOT set (empty / falsy), disable ascendc printf
+# by adding ASCENDC_DUMP=0 to the ascendc kernel compile definitions. When
+# XLITE_DEBUG_ON is set, ASCENDC_DUMP is left as the default (1) so printf
+# remains enabled for debugging.
+set(_xlite_dbg_enabled FALSE)
+if(DEFINED ENV{XLITE_DEBUG_ON})
+    string(TOLOWER "$ENV{XLITE_DEBUG_ON}" _xlite_dbg_raw)
+    string(STRIP "${_xlite_dbg_raw}" _xlite_dbg_raw)
+    if(NOT (_xlite_dbg_raw STREQUAL "" OR _xlite_dbg_raw MATCHES "^(0|false|no|off)$"))
+        set(_xlite_dbg_enabled TRUE)
+    endif()
+    unset(_xlite_dbg_raw)
+endif()
+
+if(NOT _xlite_dbg_enabled)
+    message(STATUS "XLITE_DEBUG_ON not set -> disabling ascendc printf via ASCENDC_DUMP=0 (default ASCENDC_DUMP=1)")
+    ascendc_compile_definitions(xlite_kernels_common_${RUN_MODE} PRIVATE ASCENDC_DUMP=0)
+    ascendc_compile_definitions(xlite_kernels_bf16_${RUN_MODE} PRIVATE ASCENDC_DUMP=0)
+    ascendc_compile_definitions(xlite_kernels_f16_${RUN_MODE} PRIVATE ASCENDC_DUMP=0)
+endif()
+
 # xlite
 add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.cpp
