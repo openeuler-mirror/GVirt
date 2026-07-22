@@ -52,6 +52,7 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/msd_merge_dequant_int8_t.cpp
 )
 
 # xlite_kernels_bf16_${RUN_MODE}

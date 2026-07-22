@@ -1738,6 +1738,18 @@ void QuantDyn(XRuntime &rt, at::Tensor &x, at::Tensor &scale, at::Tensor &out)
     rt.Synchronize();
 }
 
+void MSDMergeDequant(XRuntime &rt, at::Tensor &yMerged, at::Tensor &scaleBias,
+                     at::Tensor &perTokenScale, at::Tensor &out)
+{
+    XTensor _yMerged, _scaleBias, _perTokenScale, _out;
+    InitXTensor(_yMerged, yMerged);
+    InitXTensor(_scaleBias, scaleBias);
+    InitXTensor(_perTokenScale, perTokenScale);
+    InitXTensor(_out, out);
+    XliteOpMSDMergeDequant(rt, _yMerged, _scaleBias, _perTokenScale, _out);
+    rt.Synchronize();
+}
+
 void MatmulDeQuant(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &bias,
                    at::Tensor &deqScale, at::Tensor &z, bool weightNZ, bool transpose)
 {
@@ -2345,6 +2357,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("offset"), py::arg("out"));
     m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),
           py::arg("out"));
+    m.def("msd_merge_dequant", &MSDMergeDequant, "msd_merge_dequant", py::arg("rt"),
+          py::arg("y_merged"), py::arg("scale_bias"), py::arg("per_token_scale"), py::arg("out"));
     m.def("matmul_dequant", &MatmulDeQuant, "matmul_dequant", py::arg("rt"), py::arg("x"),
           py::arg("y"), py::arg("bias"), py::arg("deq_scale"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
