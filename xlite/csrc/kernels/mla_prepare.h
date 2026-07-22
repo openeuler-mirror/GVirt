@@ -34,8 +34,8 @@ __aicore__ void mla_prepare(GM_ADDR attnQkvc, GM_ADDR qNorm, GM_ADDR qNormBias, 
 
     coreOffset = nextCoreOffset;
     rope_complex_and_cache<Dtype>(token_num, 1, totalDim, ropeHeadDim, qLoraRank + kvLoraRank,
-                                  ropeHeadDim, attnQkvc, freqs, position, blockSize, peCache,
-                                  slotMapping, coreOffset, &nextCoreOffset);
+                                  ropeHeadDim, attnQkvc, nullptr, 0, 0, freqs, position, blockSize,
+                                  peCache, slotMapping, coreOffset, &nextCoreOffset);
 }
 
 #define MLA_PREPARE_FUNC_DEFINE(dtype)                                                            \

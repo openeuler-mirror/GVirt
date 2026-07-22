@@ -289,8 +289,9 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
 
     ForwardLinear(rt, layer, attnNormQc, mlaQB, attnQWithQr);
 
-    XliteOpRopeComplex(rt, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
-                       _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition);
+    XliteOpRopeComplex(rt, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim,
+                       _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim, _c.nopeHeadDim,
+                       _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition, attnQWithQr);
     rt.PutTensor(attnQkvc);
 
     return {attnQWithQr, attnNormQc};
@@ -322,8 +323,8 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     ForwardLinear(rt, layer, attnNormQc, indexQB, q);
     // TODO not interleaved case
     if (_c.indexRopeInterleaved) {
-        XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.ropeHeadDim, 0, q, freqsCis,
-                           rt._attnPosition);
+        XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.indexHeadDim, _c.ropeHeadDim, 0,
+                           0, q, freqsCis, rt._attnPosition, q);
     }
 
     XliteOpMuls(rt, kw, _dsaIndexerScale, kw, _c.indexHeadDim, _c.indexNHeads);

@@ -1500,6 +1500,7 @@ def rope_complex(
     input_with_r: torch.Tensor,
     freqs: torch.Tensor,
     position: torch.Tensor,
+    output: torch.Tensor,
 ) -> None:
     """Apply complex-domain rotary embedding helper.
 
@@ -1511,6 +1512,7 @@ def rope_complex(
         input_with_r (torch.Tensor): Input tensor with real/imag layout.
         freqs (torch.Tensor): Rotary frequency tensor.
         position (torch.Tensor): Position tensor.
+        output (torch.Tensor): Output tensor.
 
     Returns:
         None: Output is produced in place according to kernel contract.
