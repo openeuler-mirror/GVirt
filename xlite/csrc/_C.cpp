@@ -1271,6 +1271,17 @@ void SiluAndMul(XRuntime &rt, at::Tensor &in, at::Tensor &out)
     rt.Synchronize();
 }
 
+void SigmoidGateMul(XRuntime &rt, at::Tensor &attn, at::Tensor &gate, at::Tensor &out)
+{
+    XTensor _attn, _gate, _out;
+    InitXTensor(_attn, attn);
+    InitXTensor(_gate, gate);
+    InitXTensor(_out, out);
+
+    XliteOpSigmoidGateMul(rt, _attn, _gate, _out);
+    rt.Synchronize();
+}
+
 void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tensor &vCache,
                   at::Tensor &position, at::Tensor &cossin, at::Tensor &slotMapping,
                   uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t rotDim,
@@ -2128,6 +2139,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("qkv_bias", &XModelConfig::addBias)
         .def_readwrite("qk_norm", &XModelConfig::qkNorm)
         .def_readwrite("qk_norm_full", &XModelConfig::qkNormFull)
+        .def_readwrite("attn_output_gate", &XModelConfig::attnOutputGate)
         .def_readwrite("scoring_func", &XModelConfig::scoringFunc)
         .def_readwrite("norm_topk_prob", &XModelConfig::normTopKProb)
         .def_readwrite("mrope_section", &XModelConfig::mropeSection)
@@ -2311,6 +2323,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("norm_dim") = 0);
     m.def("add_bias", &AddBias, py::arg("rt"), py::arg("in_"), py::arg("weight"), py::arg("out"));
     m.def("silu_and_mul", &SiluAndMul, py::arg("rt"), py::arg("in_"), py::arg("out"));
+    m.def("sigmoid_gate_mul", &SigmoidGateMul, py::arg("rt"), py::arg("attn"), py::arg("gate"),
+          py::arg("out"));
     m.def("rope_and_cache", &RopeAndCache, "rope_and_cache", py::arg("rt"), py::arg("inout"),
           py::arg("k_cache"), py::arg("v_cache"), py::arg("position"), py::arg("cosin"),
           py::arg("slot_mapping"), py::arg("n_heads"), py::arg("n_kv_heads"), py::arg("head_dim"),

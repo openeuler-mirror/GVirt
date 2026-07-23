@@ -422,10 +422,30 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     XTensor &vCache = kvCache[layer][1];
     uint32_t qHeads = _c.nHeads / _c.defTpSize;
     uint32_t kHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+    uint32_t qDim = qHeads * _c.headDim;
+    // With output gate: fused mhaQKV layout is [Q | K | V | Gate] so a single
+    // SplitCol yields contiguous [Q|K|V] for Rope/Attention (no ConcatCol).
+    uint32_t qkvDim = (qHeads + 2 * kHeads) * _c.headDim;
+    uint32_t projOutDim = _c.attnOutputGate ? (qkvDim + qDim) : qkvDim;
 
-    XTensor &qkv = rt.GetTensor({hiddenState.shape[0], (qHeads + 2 * kHeads) * _c.headDim},
-                                hiddenState.dtype, DBG_LOC);
-    ForwardLinear(rt, layer, hiddenState, mhaQKV, qkv, mhaQKVBias);
+    XTensor &projOut = rt.GetTensor({hiddenState.shape[0], projOutDim}, hiddenState.dtype, DBG_LOC);
+    ForwardLinear(rt, layer, hiddenState, mhaQKV, projOut, mhaQKVBias);
+
+    XTensor *gatePtr = nullptr;
+    XTensor *qkvPtr = nullptr;
+    if (_c.attnOutputGate) {
+        XTensor &qkv = rt.GetTensor({hiddenState.shape[0], qkvDim}, hiddenState.dtype, DBG_LOC);
+        XTensor &gate = rt.GetTensor({hiddenState.shape[0], qDim}, hiddenState.dtype, DBG_LOC);
+        std::vector<XTensor> splitOut = {qkv, gate};
+        XliteOpSplitCol(rt, projOut, splitOut);
+        rt.PutTensor(projOut);
+        gatePtr = &gate;
+        qkvPtr = &qkv;
+    } else {
+        qkvPtr = &projOut;
+    }
+    XTensor &qkv = *qkvPtr;
+
     if (_c.qkNorm && !_c.qkNormFull) {
         XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, true,
                        mhaQNormBias[layer], qHeads);
@@ -488,6 +508,11 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         rt.PutTensor(max);
         rt.PutTensor(sv);
         rt.PutTensor(qk);
+    }
+
+    if (gatePtr != nullptr) {
+        XliteOpSigmoidGateMul(rt, attn, *gatePtr, attn);
+        rt.PutTensor(*gatePtr);
     }
 
     ForwardLinear(rt, layer, attn, attnOut, hiddenState);

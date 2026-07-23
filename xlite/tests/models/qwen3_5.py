@@ -32,6 +32,23 @@ if forward_backend == "xlite":
     import numpy as np
 
 
+def _mha_qkv_weight(attn, head_dim: int, n_heads: int):
+    """Pack HF interleaved [q|gate] as [Q|K|V|Gate] for xlite ForwardAttnMHA."""
+    n_local = n_heads // world_size
+    # q_proj.weight: [n_local * 2 * head_dim, hidden]
+    w = attn.q_proj.weight.view(n_local, 2, head_dim, -1)
+    q_w = w[:, 0].reshape(n_local * head_dim, -1).contiguous()
+    g_w = w[:, 1].reshape(n_local * head_dim, -1).contiguous()
+    weights = [q_w, attn.k_proj.weight, attn.v_proj.weight, g_w]
+    if attn.q_proj.bias is not None:
+        b = attn.q_proj.bias.view(n_local, 2, head_dim)
+        q_b = b[:, 0].reshape(-1).contiguous()
+        g_b = b[:, 1].reshape(-1).contiguous()
+        biases = [q_b, attn.k_proj.bias, attn.v_proj.bias, g_b]
+        return torch.cat(weights, dim=0), torch.cat(biases, dim=0)
+    return torch.cat(weights, dim=0), None
+
+
 @dataclass
 class ModelArgs:
     max_batch_size: int = 8
@@ -947,6 +964,7 @@ class Qwen3_5(nn.Module):
         config.weight_nz = self.xlite_weight_nz
         config.qkv_bias = args.qkv_bias
         config.qk_norm = args.qk_norm
+        config.attn_output_gate = True
 
         self.xlite_model = Model()
         self.xlite_model.embed = self.embed_tokens.weight
@@ -954,14 +972,17 @@ class Qwen3_5(nn.Module):
         self.xlite_model.head = self.lm_head.weight
         self.xlite_model.attn_norm = [layer.input_layernorm.weight for layer in self.layers]
         self.xlite_model.attn_out = [layer.self_attn.o_proj.weight for layer in self.layers if layer.is_full_attention]
-        # Combine q, k, v projections for full attention layers
-        self.xlite_model.mha_qkv = [
-            torch.cat([
-                layer.self_attn.q_proj.weight,
-                layer.self_attn.k_proj.weight,
-                layer.self_attn.v_proj.weight
-            ], dim=0) for layer in self.layers if layer.is_full_attention
-        ]
+        # Pack as [Q | K | V | Gate] for ForwardAttnMHA + sigmoid_gate_mul.
+        mha_qkv_list = []
+        mha_qkv_bias = []
+        for layer in self.layers:
+            if not layer.is_full_attention:
+                continue
+            mha_qkv, qkv_bias = _mha_qkv_weight(layer.self_attn, args.head_dim, args.n_heads)
+            mha_qkv_list.append(mha_qkv)
+            if qkv_bias is not None:
+                mha_qkv_bias.append(qkv_bias)
+        self.xlite_model.mha_qkv = mha_qkv_list
         self.xlite_model.mlp_norm = [layer.post_attention_layernorm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [layer.mlp.gate_up_proj.weight for layer in self.layers]
         self.xlite_model.mlp_down = [layer.mlp.down_proj.weight for layer in self.layers]
@@ -969,13 +990,7 @@ class Qwen3_5(nn.Module):
             self.xlite_model.mha_q_norm = [layer.self_attn.q_norm.weight for layer in self.layers if layer.is_full_attention]
             self.xlite_model.mha_k_norm = [layer.self_attn.k_norm.weight for layer in self.layers if layer.is_full_attention]
         if args.qkv_bias:
-            self.xlite_model.mha_qkv_bias = [
-                torch.cat([
-                    layer.self_attn.q_proj.bias,
-                    layer.self_attn.k_proj.bias,
-                    layer.self_attn.v_proj.bias
-                ], dim=0) for layer in self.layers if layer.is_full_attention
-            ]
+            self.xlite_model.mha_qkv_bias = mha_qkv_bias
 
         self.xlite_model.init(config, rank)
 
