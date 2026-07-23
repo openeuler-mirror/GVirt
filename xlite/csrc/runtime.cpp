@@ -6,6 +6,7 @@
 #include "ascend.h"
 #include "base.h"
 #include "runtime.h"
+#include "op.h"
 #include "sock.h"
 #include "ccl.h"
 #include "auto_tuner.h"
@@ -108,6 +109,10 @@ void XRuntime::Init(size_t sizeMB)
         }
     }
 
+    if (isEnvironmentVariableFalse(std::getenv("XLITE_ENABLE_GRAPH_COMM"))) {
+        _graphCommEnabled = false;
+    }
+
     _inited = true;
 }
 
@@ -126,6 +131,20 @@ XRuntime::~XRuntime(void)
     if (_event) {
         (void)aclrtDestroyEvent(_event);
     }
+    for (auto &e : _agGraphs) {
+        if (e.modelRI) {
+            (void)aclmdlRIDestroy(e.modelRI);
+            e.modelRI = nullptr;
+        }
+    }
+    _agGraphs.clear();
+    for (auto &e : _rsGraphs) {
+        if (e.modelRI) {
+            (void)aclmdlRIDestroy(e.modelRI);
+            e.modelRI = nullptr;
+        }
+    }
+    _rsGraphs.clear();
     if (notify) {
         (void)aclrtDestroyNotify(notify);
     }
@@ -142,6 +161,8 @@ XRuntime::~XRuntime(void)
         (void)aclrtFree(_queryStartLoc.ptr);
         (void)aclrtFree(_blockTables.ptr);
         (void)aclrtFreeHost(_tokensPerEpGroupAllEpHost.ptr);
+        (void)aclrtFree(_agSendBuf.ptr);
+        (void)aclrtFree(_agRecvBuf.ptr);
     }
 
     if (!_initOutside) {
@@ -342,12 +363,69 @@ void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t m
     _tokensPerEpGroupAllEpHost.Init({_moeEpSize * _moeEpSize}, INT32, ptr);
 }
 
+void XRuntime::PrepareCommBuffers(uint64_t maxBatch, uint32_t hiddenSize, uint32_t nRoutedExperts,
+                                  uint32_t defDpSize, int inputDtype, int weightsDtype)
+{
+    enum XDtype inDtype = static_cast<enum XDtype>(inputDtype);
+    enum XDtype wDtype = static_cast<enum XDtype>(weightsDtype);
+    uint64_t perTokenInput = hiddenSize * XDtypeBit(inDtype) / 8;
+    uint64_t perTokenWeights = static_cast<uint64_t>(nRoutedExperts) * XDtypeBit(wDtype) / 8;
+    uint64_t perTokenRouting = static_cast<uint64_t>(nRoutedExperts) / 8;  // BIT1: 1 bit/expert
+    _agPerTokenBytes =
+        perTokenInput + perTokenWeights + perTokenRouting;  // needed by Select fallback
+    // AG buffers serve in-graph path (m <= maxBatch); eager uses pool tensors.
+    uint64_t agSendBytes = maxBatch * _agPerTokenBytes;
+    uint64_t agRecvBytes = agSendBytes * defDpSize;
+
+    // RS aliases AG buffers; AG and RS per-token costs differ (INT8-packed vs
+    // inputDtype hidden), so size each to the max to keep the alias from overflowing.
+    enum XDtype rsDtype = inDtype;  // RS dtype == inputDtype (embed.dtype)
+    _rsPerTokenBytes = static_cast<uint64_t>(hiddenSize) * XDtypeBit(rsDtype) / 8;
+    _rsHiddenSize = hiddenSize;
+    uint64_t rsSendBytes = maxBatch * defDpSize * _rsPerTokenBytes;
+    uint64_t rsRecvBytes = maxBatch * _rsPerTokenBytes;
+
+    uint64_t sendBytes = std::max(agSendBytes, rsSendBytes);
+    uint64_t recvBytes = std::max(agRecvBytes, rsRecvBytes);
+    void *sendPtr = nullptr;
+    void *recvPtr = nullptr;
+    CHECK_ACL(aclrtMalloc(&sendPtr, sendBytes, ACL_MEM_MALLOC_NORMAL_ONLY));
+    CHECK_ACL(aclrtMalloc(&recvPtr, recvBytes, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _agSendBuf.Init({sendBytes}, INT8, sendPtr);
+    _agRecvBuf.Init({recvBytes}, INT8, recvPtr);
+    // RS alias wrappers: each views only its own logical slice of the oversized buffer.
+    _rsSendBuf.Init({rsSendBytes}, INT8, _agSendBuf.ptr);  // alias, no extra malloc
+    _rsRecvBuf.Init({rsRecvBytes}, INT8, _agRecvBuf.ptr);  // alias, no extra malloc
+}
+
 void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                            uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVHeads,
-                           uint32_t blockSize)
+                           uint32_t blockSize, uint32_t hiddenSize, uint32_t nRoutedExperts,
+                           uint32_t defDpSize, int inputDtype, int weightsDtype)
 {
     if (!_attnInitialized) {
         InitAttn(maxBatchedTokens, maxBatch, maxSeqLen, blockSize);
+        bool agInGraph = AllGatherInGraphActive(DP);
+        bool rsInGraph = ReduceScatterInGraphActive(DP);
+        if (defDpSize > 1 && (agInGraph || rsInGraph)) {
+            PrepareCommBuffers(maxBatch, hiddenSize, nRoutedExperts, defDpSize, inputDtype,
+                               weightsDtype);
+            if (agInGraph && maxBatch > 0 && _agPerTokenBytes != 0) {
+                int hcclDtypeInt = static_cast<int>(XDtype2HcclDtype(INT8));
+                _agGraphs.assign(maxBatch + 1, GraphCaptureEntry{});  // index 0 unused, 1..maxBatch
+                for (uint32_t m = 1; m <= static_cast<uint32_t>(maxBatch); m++) {
+                    CaptureHcclAllGather(_agSendBuf.ptr, _agRecvBuf.ptr, m, hcclDtypeInt, DP);
+                }
+            }
+            if (rsInGraph && maxBatch > 0 && hiddenSize > 0) {
+                int rsHcclDtype =
+                    static_cast<int>(XDtype2HcclDtype(static_cast<enum XDtype>(inputDtype)));
+                _rsGraphs.assign(maxBatch + 1, GraphCaptureEntry{});  // index 0 unused, 1..maxBatch
+                for (uint32_t m = 1; m <= static_cast<uint32_t>(maxBatch); m++) {
+                    CaptureHcclReduceScatter(_rsSendBuf.ptr, _rsRecvBuf.ptr, m, rsHcclDtype, DP);
+                }
+            }
+        }
         _attnInitialized = true;
     }
     uint32_t batch = attnMeta.lens.size();
@@ -473,6 +551,169 @@ void XRuntime::EventRecordCurrStream(aclrtStream currStream)
     CHECK_ACL(aclrtRecordEvent(_event, stream));
     CHECK_ACL(aclrtStreamWaitEvent(currStream, _event));
     CHECK_ACL(aclrtResetEvent(_event, currStream));
+}
+
+static inline HcclComm HcclCommFor(XRuntime &rt, enum commType type)
+{
+    switch (type) {
+        case TP:
+            return rt._tpComm;
+        case DP:
+            return rt._dpComm;
+        case EP:
+            return rt._epComm;
+        default:
+            return nullptr;
+    }
+}
+
+static inline bool XcclActiveFor(const XRuntime &rt, enum commType type, enum XDtype dtype)
+{
+    XcclComm *xccl = nullptr;
+    switch (type) {
+        case TP:
+            xccl = rt._tpXcclComm;
+            break;
+        case DP:
+            xccl = rt._dpXcclComm;
+            break;
+        case EP:
+            xccl = rt._epXcclComm;
+            break;
+        default:
+            return false;
+    }
+    return xccl != nullptr && dtype != INT64;
+}
+
+bool XRuntime::AllGatherInGraphActive(enum commType type) const
+{
+    return !IsDummyRuntime() && _graphCommEnabled && !XcclActiveFor(*this, type, INT8);
+}
+
+bool XRuntime::ReduceScatterInGraphActive(enum commType type) const
+{
+    return !IsDummyRuntime() && _graphCommEnabled && !XcclActiveFor(*this, type, BF16);
+}
+
+void XRuntime::CaptureHcclAllGather(void *send, void *recv, uint32_t m, int hcclDtype,
+                                    enum commType type)
+{
+    uint64_t sendBytes = static_cast<uint64_t>(m) * _agPerTokenBytes;
+    if (m == 0 || m >= _agGraphs.size() || _agPerTokenBytes == 0) {
+        throw std::runtime_error(
+            std::string(__func__) + ": invalid m=" + std::to_string(m) +
+            " (need 1<=m<=" + std::to_string(_agGraphs.size() - 1) +
+            " and _agPerTokenBytes>0; PrepareAttn pre-captures m=1..maxBatch)");
+    }
+    if (_agGraphs[m].modelRI != nullptr) {
+        return;  // already captured for this m
+    }
+    HcclComm comm = HcclCommFor(*this, type);
+    if (comm == nullptr) {
+        throw std::runtime_error(std::string(__func__) + ": HCCL comm is null for commType=" +
+                                 std::to_string(static_cast<int>(type)) +
+                                 " (need XLITE_DISABLE_XCCL and the matching size>1)");
+    }
+    HcclDataType dtype = static_cast<HcclDataType>(hcclDtype);
+    aclmdlRI modelRI = nullptr;
+    CHECK_ACL(aclmdlRICaptureBegin(stream, ACL_MODEL_RI_CAPTURE_MODE_GLOBAL));
+    CHECK_HCCL(HcclAllGather(send, recv, sendBytes, dtype, comm, stream));
+    CHECK_ACL(aclmdlRICaptureEnd(stream, &modelRI));
+    _agGraphs[m] = GraphCaptureEntry{modelRI, send, recv};
+}
+
+void XRuntime::RunHcclAllGatherInGraph(void *send, void *recv, uint32_t m, int hcclDtype,
+                                       enum commType type)
+{
+    if (m == 0 || m >= _agGraphs.size()) {
+        throw std::runtime_error(std::string(__func__) + ": invalid m=" + std::to_string(m) +
+                                 " (need 1<=m<=" + std::to_string(_agGraphs.size() - 1) + ")");
+    }
+    const GraphCaptureEntry &e = _agGraphs[m];
+    if (e.modelRI == nullptr) {
+        throw std::runtime_error(std::string(__func__) + ": no captured graph for m=" +
+                                 std::to_string(m) + "; call CaptureHcclAllGather first");
+    }
+    if (send != e.sendAddr || recv != e.recvAddr) {
+        std::stringstream ss;
+        ss << __func__ << ": FIXED-ADDRESS VIOLATION for m=" << m << " dtype=" << hcclDtype
+           << " commType=" << static_cast<int>(type) << " rank=" << _rankId
+           << " : replay send=" << send << " recv=" << recv << " but captured send=" << e.sendAddr
+           << " recv=" << e.recvAddr
+           << ". The pool's bump pointer drifted (call sequence changed before AllGather) — "
+           << "re-capture or fix the Get/Put ordering of packedSend/packedRecv.";
+        throw std::runtime_error(ss.str());
+    }
+    CHECK_ACL(aclmdlRIExecuteAsync(e.modelRI, stream));
+}
+
+void XRuntime::AllGatherInGraph(void *send, void *recv, uint32_t m, int hcclDtype,
+                                enum commType type)
+{
+    if (IsDummyRuntime()) {
+        return;
+    }
+    RunHcclAllGatherInGraph(send, recv, m, hcclDtype, type);
+}
+
+void XRuntime::CaptureHcclReduceScatter(void *send, void *recv, uint32_t m, int hcclDtype,
+                                        enum commType type)
+{
+    if (m == 0 || m >= _rsGraphs.size() || _rsHiddenSize == 0) {
+        throw std::runtime_error(std::string(__func__) + ": invalid m=" + std::to_string(m) +
+                                 " (need 1<=m<=" + std::to_string(_rsGraphs.size() - 1) +
+                                 " and _rsHiddenSize>0; PrepareAttn pre-captures m=1..maxBatch)");
+    }
+    if (_rsGraphs[m].modelRI != nullptr) {
+        return;  // already captured for this m
+    }
+    HcclComm comm = HcclCommFor(*this, type);
+    if (comm == nullptr) {
+        throw std::runtime_error(std::string(__func__) + ": HCCL comm is null for commType=" +
+                                 std::to_string(static_cast<int>(type)) +
+                                 " (need XLITE_DISABLE_XCCL and the matching size>1)");
+    }
+    HcclDataType dtype = static_cast<HcclDataType>(hcclDtype);
+    uint64_t recvCount =
+        static_cast<uint64_t>(m) * _rsHiddenSize;  // element count (dtype-agnostic)
+    aclmdlRI modelRI = nullptr;
+    CHECK_ACL(aclmdlRICaptureBegin(stream, ACL_MODEL_RI_CAPTURE_MODE_GLOBAL));
+    CHECK_HCCL(HcclReduceScatter(send, recv, recvCount, dtype, HCCL_REDUCE_SUM, comm, stream));
+    CHECK_ACL(aclmdlRICaptureEnd(stream, &modelRI));
+    _rsGraphs[m] = GraphCaptureEntry{modelRI, send, recv};
+}
+
+void XRuntime::RunHcclReduceScatterInGraph(void *send, void *recv, uint32_t m, int hcclDtype,
+                                           enum commType type)
+{
+    if (m == 0 || m >= _rsGraphs.size()) {
+        throw std::runtime_error(std::string(__func__) + ": invalid m=" + std::to_string(m) +
+                                 " (need 1<=m<=" + std::to_string(_rsGraphs.size() - 1) + ")");
+    }
+    const GraphCaptureEntry &e = _rsGraphs[m];
+    if (e.modelRI == nullptr) {
+        throw std::runtime_error(std::string(__func__) + ": no captured RS graph for m=" +
+                                 std::to_string(m) + "; call CaptureHcclReduceScatter first");
+    }
+    if (send != e.sendAddr || recv != e.recvAddr) {
+        std::stringstream ss;
+        ss << __func__ << ": FIXED-ADDRESS VIOLATION for m=" << m << " dtype=" << hcclDtype
+           << " commType=" << static_cast<int>(type) << " rank=" << _rankId
+           << " : replay send=" << send << " recv=" << recv << " but captured send=" << e.sendAddr
+           << " recv=" << e.recvAddr;
+        throw std::runtime_error(ss.str());
+    }
+    CHECK_ACL(aclmdlRIExecuteAsync(e.modelRI, stream));
+}
+
+void XRuntime::ReduceScatterInGraph(void *send, void *recv, uint32_t m, int hcclDtype,
+                                    enum commType type)
+{
+    if (IsDummyRuntime()) {
+        return;
+    }
+    RunHcclReduceScatterInGraph(send, recv, m, hcclDtype, type);
 }
 
 void XRuntime::MemcpyH2D(void *dst, void *src, size_t size)

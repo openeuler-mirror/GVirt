@@ -123,7 +123,7 @@ static inline uint32_t CopyKernelBlockNum(const XRuntime &rt, uint64_t totalByte
     return static_cast<uint32_t>(needed);
 }
 
-static HcclDataType XDtype2HcclDtype(enum XDtype dtype)
+HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
     switch (dtype) {
         case INT8:

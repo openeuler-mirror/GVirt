@@ -10,20 +10,30 @@
 | `XLITE_NODE_IPS` | 字符串 | `127.0.0.1` | 多节点推理时的节点 IP 地址列表，以逗号分隔。当 `rankSize > nDevPerNode` 时必须设置。 |
 | `XLITE_PORT` | 整数 | `10266` | 通信基础端口号。TP 通信使用 `port + rankId/tpSize`，DP 通信使用 `port + 200 + rankId%tpSize`，XCCL 通信使用 `port + 400`。 |
 | `XLITE_COMM_OPTIMIZE_LEN` | 整数 | `6144` | 通信优化阈值长度。用于优化prefill阶段长序列的通信性能。 |
-| `XLITE_DISABLE_XCCL` | 布尔 | `false` | 是否禁用 XCCL（XLite 自定义通信算子）。设置为 `true` 时禁用，回退到 HCCL。 |
+| `XLITE_DISABLE_XCCL` | 布尔 | `false` | 是否禁用 XCCL（XLite 自定义通信算子）。设置为 `true` 时禁用，回退到 HCCL。注意：外部环境变量 `HCCL_DETERMINISTIC` 被设为 `true` 时同样会禁用 XCCL（因 xccl 非确定性，与确定性模式冲突，见 `runtime.cpp` 的 `InitXcclComm`/`InitDummyXcclComm`）。 |
+| `XLITE_ENABLE_GRAPH_COMM` | 布尔 | `true` | 是否启用通信算子入图（HCCL AllGather/ReduceScatter 的 ACL Graph 捕获+重放，主流上 capture 与 replay。默认启用；设为 `false`/`0`/`no`/`off`（不区分大小写）时关闭，回退到 eager HCCL 单算子路径。注意：即便启用，仅当对应 (type, dtype) 无可用 xccl comm 时才实际走入图路径（xccl self-kernel 不可被 ACL Graph 捕获）；dummy runtime 评估 `get_tensor_pool_size` 时恒走 eager（不入图）。 |
 | `XLITE_MOE_ALLTOALL` | 布尔 | `false` | 是否启用 MoE AlltoAll 通信模式。启用后，MoE 的 dispatch/combine 阶段使用 AlltoAllV 集合通信替代默认的 AllGather + ReduceScatter 方式，跨 EP（Expert Parallel）rank 分发/收集 token，并消除 MoE 后的 TP AllReduce。 |
 | `XLITE_ACTIVE_TOKENS_RATIO_PER_EP` | double | `1.0f` | 影响开启EP后单卡按专家排序后激活Tensor的内存占用。该环境变量有效配置范围为[1/ep_size ... 1.0f]。默认1.0f含义为单卡极端情况需要处理所有激活的Token，因此专家排序后激活Tensor的shape为[token个数 * num_experts_per_tok, hidden_size]; 配置为1/ep_size含义为单卡只需要处理所有激活的Token的1/ep_size，因此专家排序后激活Tensor的shape为[token个数 * num_experts_per_tok /ep_size, hidden_size]。该值越小代表EP负载越均衡，排序后激活Tensor预占内存越小，配置过小可能导致算子报错，建议按照实际负载均衡度评估合理值。注意：该配置仅当输入token个数（所有DP的batched token总和）>= 1024个时才生效，小于1024的情况使用默认1.0f进行计算。 |
 
 ## 布尔值解析规则
 
-以下值被视为 `true`（不区分大小写）：
+xlite 用 `isEnvironmentVariableTrue` / `isEnvironmentVariableFalse`（`base.h`，不区分大小写）解析布尔环境变量。
+
+以下值被视为 `true`：
 
 - `true`
 - `1`
 - `yes`
 - `on`
 
-其他任何值（包括空或未设置）均被视为 `false`。
+以下值被视为 `false`：
+
+- `false`
+- `0`
+- `no`
+- `off`
+
+> 注意：规则按变量语义分两类。`XLITE_DISABLE_XCCL`、`XLITE_MOE_ALLTOALL` 等“启用型”变量用 `isEnvironmentVariableTrue`——未设置或任意非真值均视为 `false`。`XLITE_ENABLE_GRAPH_COMM` 是“默认启用、可关闭”型变量：默认 `true`，仅当值匹配 `isEnvironmentVariableFalse`（`false`/`0`/`no`/`off`）时才置为 `false`，未设置保持默认启用。
 
 ## 端口分配说明
 
