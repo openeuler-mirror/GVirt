@@ -474,11 +474,12 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     }
 
     size = batch * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMemcpy(_lens.ptr, size, lens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     CHECK_ACL(
-        aclrtMemcpy(_cachedLens.ptr, size, cachedLens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(_queryStartLoc.ptr, size, queryStartLoc.data(), size,
-                          ACL_MEMCPY_HOST_TO_DEVICE));
+        aclrtMemcpyAsync(_lens.ptr, size, lens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE, stream));
+    CHECK_ACL(aclrtMemcpyAsync(_cachedLens.ptr, size, cachedLens.data(), size,
+                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
+    CHECK_ACL(aclrtMemcpyAsync(_queryStartLoc.ptr, size, queryStartLoc.data(), size,
+                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
 
     position.resize(batchedTokens);
     slotMapping.resize(batchedTokens);
@@ -503,8 +504,8 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         }
     }
     size = batchedTokens * XDtypeBit(INT32) / 8;
-    CHECK_ACL(
-        aclrtMemcpy(_slotMapping.ptr, size, slotMapping.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpyAsync(_slotMapping.ptr, size, slotMapping.data(), size,
+                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
     _attnSlotMapping = _slotMapping;
 
     blockTables.resize(batch * _maxNumBlocks);
@@ -514,14 +515,14 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         }
     }
     size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
-    CHECK_ACL(
-        aclrtMemcpy(_blockTables.ptr, size, blockTables.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpyAsync(_blockTables.ptr, size, blockTables.data(), size,
+                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
     _attnBlockTables = _blockTables;
     switch (attnMeta.version) {
         case 0:
             size = batchedTokens * XDtypeBit(INT64) / 8;
-            CHECK_ACL(
-                aclrtMemcpy(_position.ptr, size, position.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+            CHECK_ACL(aclrtMemcpyAsync(_position.ptr, size, position.data(), size,
+                                       ACL_MEMCPY_HOST_TO_DEVICE, stream));
             _attnPosition = _position;
             break;
         case 1:
