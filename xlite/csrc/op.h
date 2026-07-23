@@ -162,7 +162,8 @@ void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor 
 void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &counts,
                        uint32_t hiddenSize, uint32_t localStart, uint32_t localEnd, bool forward);
 void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output);
-void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &x, XTensor &weight, XTensor &output);
+void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
+                          XTensor &output, bool updateState = true);
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
                       XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
                       uint32_t num_v_heads);

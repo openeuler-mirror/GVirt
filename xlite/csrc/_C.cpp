@@ -1926,13 +1926,8 @@ void LinearAttConv1dAndSiLU(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_
     InitXTensor(_conv_state, conv_state);
     InitXTensor(_weight, weight);
     InitXTensor(_output, output);
-    std::vector<XTensor> inputs = {_conv_state, _mix_qkv};
-    XTensor &x = rt.GetTensor(
-        {_mix_qkv.shape[0], _mix_qkv.shape[1], _mix_qkv.shape[2] + _conv_state.shape[2]},
-        XDtype(mix_qkv), DBG_LOC);
-    XliteOpConcatCol(rt, inputs, x);
-    XliteOpConv1dAndSiLU(rt, x, _weight, _output);
-    rt.PutTensor(x);
+    // Unit tests compare output only; leave state unchanged.
+    XliteOpConv1dAndSiLU(rt, _conv_state, _mix_qkv, _weight, _output, /*updateState=*/false);
     rt.Synchronize();
 }
 

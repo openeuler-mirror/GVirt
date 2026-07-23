@@ -2089,17 +2089,17 @@ def linear_att_conv_and_silu(
     weight: torch.Tensor,
     output: torch.Tensor,
 ) -> None:
-    """Conv1d and SiLU activation for linear attention.
+    """Fused causal conv1d + SiLU for linear attention (no host concat).
 
     Args:
         rt (Runtime): Native runtime handle.
-        mix_qkv (torch.Tensor): Input mixed QKV tensor.
-        conv_state (torch.Tensor): Convolution state tensor(should be zeroed if none).
-        weight (torch.Tensor): Kernel weight tensor.
-        output (torch.Tensor): Output tensor.
+        mix_qkv (torch.Tensor): Input mixed QKV tensor, shape [B, C, S].
+        conv_state (torch.Tensor): Convolution state tensor, shape [B, C, K].
+        weight (torch.Tensor): Kernel weight tensor, shape [C, 1, K] or [C, K].
+        output (torch.Tensor): Output tensor, shape [B, C, S].
 
     Returns:
-        None: `output` is written in place.
+        None: `output` is written in place. State is left unchanged.
     """
     ...
 
