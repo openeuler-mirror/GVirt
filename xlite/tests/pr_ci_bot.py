@@ -96,7 +96,10 @@ def has_ci_bot_comment(comments, latest_commit_time):
 def add_remote_if_not_exists(remote_name, remote_url):
     try:
         result = subprocess.run(["git", "remote", "add", remote_name, remote_url], capture_output=True, text=True, cwd=GIT_REPO_DIR)
-        if result.returncode != 0 and "already exists" not in result.stderr:
+        if result.returncode != 0 and "already exists" in result.stderr:
+            # remote 已存在，更新 URL 以应对 fork 重命名场景
+            subprocess.run(["git", "remote", "set-url", remote_name, remote_url], capture_output=True, text=True, cwd=GIT_REPO_DIR)
+        elif result.returncode != 0:
             print(f"Warning: {result.stderr}")
     except Exception as e:
         print(f"Error adding remote: {e}")
@@ -347,8 +350,9 @@ def process_pr(pr):
         print(f"PR #{pr_number} already has CI bot comment after latest commit, skipping...")
         return
     print(f"Fetching PR #{pr_number} branch...")
+    source_repo_name = source_repo["name"]
     remote_name = source_owner
-    remote_url = f"https://gitcode.com/{source_owner}/{REPO_NAME}.git"
+    remote_url = f"https://gitcode.com/{source_owner}/{source_repo_name}.git"
     local_branch = f"pr-{pr_number}"
     add_remote_if_not_exists(remote_name, remote_url)
     if not fetch_pr_branch(remote_name, source_branch, local_branch):
