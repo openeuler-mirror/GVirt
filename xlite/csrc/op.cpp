@@ -88,6 +88,8 @@
 #include "aclrtlaunch_beta_decay_float.h"
 #include "aclrtlaunch_beta_decay_float16_t.h"
 #include "aclrtlaunch_beta_decay_bfloat16_t.h"
+#include "aclrtlaunch_sigmoid_gate_mul_float16_t.h"
+#include "aclrtlaunch_sigmoid_gate_mul_bfloat16_t.h"
 #include "aclrtlaunch_transpose_1_2_float.h"
 #include "aclrtlaunch_transpose_1_2_float16_t.h"
 #include "aclrtlaunch_transpose_1_2_bfloat16_t.h"
@@ -1746,6 +1748,31 @@ void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTen
     }
     launchKernel(rt.aivNum, rt.stream, b.ptr, a.ptr, A_log.ptr, dt_bias.ptr, beta.ptr, g.ptr, bsz,
                  seqlen, num_v_heads);
+}
+
+void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &out)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (attn.shape.size() < 2 || gate.shape.size() < 2 || out.shape.size() < 2) {
+        throw std::runtime_error(std::string(__func__) + ": attn/gate/out must be 2D");
+    }
+    if (attn.shape[0] != gate.shape[0] || attn.shape[1] != gate.shape[1] ||
+        attn.shape[0] != out.shape[0] || attn.shape[1] != out.shape[1]) {
+        throw std::runtime_error(std::string(__func__) + ": attn/gate/out shape mismatch");
+    }
+    KERNEL_PTR_TYPE(sigmoid_gate_mul) * launchKernel;
+    if (EachXDtype(FP16, attn, gate, out)) {
+        launchKernel = aclrtlaunch_sigmoid_gate_mul_float16_t;
+    } else if (EachXDtype(BF16, attn, gate, out)) {
+        launchKernel = aclrtlaunch_sigmoid_gate_mul_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(attn) + XT_STR(gate) + XT_STR(out);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    launchKernel(rt.aivNum, rt.stream, attn.ptr, gate.ptr, out.ptr,
+                 static_cast<uint32_t>(attn.shape[0]), static_cast<uint32_t>(attn.shape[1]));
 }
 
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,

@@ -31,6 +31,9 @@ struct XModelConfig {
     bool addBias = false;
     bool qkNorm = false;
     bool qkNormFull = false;
+    // Qwen3.5 full-attention output gate: attn *= sigmoid(gate).
+    // When true, fused mhaQKV layout is [Q | K | V | Gate].
+    bool attnOutputGate = false;
     uint32_t nHeads = 0;
     uint32_t nKvHeads = 1;
     uint32_t headDim;

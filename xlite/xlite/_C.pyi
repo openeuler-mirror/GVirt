@@ -139,6 +139,8 @@ class ModelConfig:
         qkv_bias (bool): Whether MHA QKV has bias.
         qk_norm (bool): Whether MHA applies Q/K norm.
         qk_norm_full (bool): Whether MHA applies Q/K norm full.
+        attn_output_gate (bool): Whether full MHA applies sigmoid output gate (Qwen3.5).
+            When true, fused mha_qkv layout is [Q | K | V | Gate].
         scoring_func (ScoringFuncType): MoE scoring function.
         norm_topk_prob (bool): Whether top-k probabilities are normalized.
         mrope_section (List[int]): mRoPE section layout values.
@@ -235,6 +237,8 @@ class ModelConfig:
     """Whether MHA applies Q/K norm."""
     qk_norm_full: bool = ...
     """Whether MHA applies Q/K norm full."""
+    attn_output_gate: bool = ...
+    """Whether full MHA applies sigmoid output gate (Qwen3.5)."""
     scoring_func: ScoringFuncType = ...
     """MoE scoring function."""
     norm_topk_prob: bool = ...
@@ -1178,6 +1182,22 @@ def silu_and_mul(rt: Runtime, in_: torch.Tensor, out: torch.Tensor) -> None:
         rt (Runtime): Native runtime handle.
         in_ (torch.Tensor): Input tensor.
         out (torch.Tensor): Output tensor.
+
+    Returns:
+        None: `out` is written in place.
+    """
+    ...
+
+def sigmoid_gate_mul(
+    rt: Runtime, attn: torch.Tensor, gate: torch.Tensor, out: torch.Tensor
+) -> None:
+    """Compute out = attn * sigmoid(gate), elementwise.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        attn (torch.Tensor): Attention output, shape [num_tokens, dim].
+        gate (torch.Tensor): Gate logits, shape [num_tokens, dim].
+        out (torch.Tensor): Output tensor, shape [num_tokens, dim]. May alias `attn`.
 
     Returns:
         None: `out` is written in place.
