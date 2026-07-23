@@ -156,9 +156,57 @@ def main(
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
     if world_size > 1:
         dist.init_process_group("hccl")
+
+    # DP deployment: world_size = tp_size * dp_size. tp_rank = rank % tp_size,
+    # dp_rank = rank // tp_size (matches C++ XRuntime). Weights replicated across
+    # DP groups, sharded within TP; each DP rank serves a disjoint prompt subset.
+    # The C++ engine handles MoE DP AllGather/ReduceScatter; dense layers per-DP.
+    dp_size = int(os.getenv("XLITE_DP_SIZE", "1"))
+    assert world_size % dp_size == 0, (
+        f"WORLD_SIZE ({world_size}) must be divisible by XLITE_DP_SIZE ({dp_size})"
+    )
+    # DP is supported only on the xlite backend (its C++ engine handles the MoE
+    # DP AllGather/ReduceScatter natively); the torch_npu reference path does not.
+    _fb = os.getenv("FORWARD_BACKEND", "torch_npu")
+    if dp_size > 1 and _fb != "xlite":
+        raise NotImplementedError(
+            f"XLITE_DP_SIZE>1 requires FORWARD_BACKEND=xlite (got {_fb!r}); "
+            "torch_npu does not support DP."
+        )
+    tp_size = world_size // dp_size
+    os.environ["XLITE_TP_SIZE"] = str(tp_size)
+    dp_rank = rank // tp_size
+    explicit_tp = os.getenv("XLITE_TP_SIZE")  # sanity-check if explicitly overridden
+    if explicit_tp is not None and int(explicit_tp) != tp_size:
+        raise ValueError(f"XLITE_TP_SIZE ({explicit_tp}) != world_size/dp_size ({tp_size})")
+    if dp_size > 1 and mode == "interactive":
+        raise NotImplementedError(
+            "DP (XLITE_DP_SIZE>1) is not supported in interactive mode; "
+            "use single/bench mode, or run DP groups as separate processes."
+        )
+
+    # DP subgroup: ranks sharing tp_rank across DP groups (dst=0 = dp_rank=0).
+    # Kept narrow so gather_object runs only over the dp_size real DP ranks,
+    # not the full world_size default group.
+    dp_group = None
+    if dp_size > 1 and world_size > 1:
+        tp_rank = rank % tp_size
+        dp_group_ranks = [g * tp_size + tp_rank for g in range(dp_size)]
+        dp_group = dist.new_group(ranks=dp_group_ranks)
+
+    # DP: each DP group's root (tp_rank==0) prints its shard, prefixed [rankN]
+    # so concurrent output stays readable; global summaries use _raw_print.
+    # Non-DP: only rank 0 prints, as before.
     global print
-    if rank != 0:
+    _raw_print = print  # unprefixed, for global summaries
+    _is_dp_printer = (dp_size == 1 and rank == 0) or (dp_size > 1 and rank % tp_size == 0)
+    if not _is_dp_printer:
         print = lambda *_, **__: None
+    elif dp_size > 1:
+        _rk = rank
+        def _print(*a, **kw):
+            _raw_print(f"[rank{_rk}]", *a, **kw)
+        print = _print
     torch.npu.set_device(local_rank)
     torch.npu.config.allow_internal_format = True
     torch.set_num_threads(8)
@@ -204,22 +252,40 @@ def main(
         def make_prompt():
             return [random.randrange(vocab_size) for _ in range(bench_prompt_len)]
 
+        # DP: split bench_batch_size evenly so every DP rank gets the same local_bs
+        # (uniform m for MoE DP AllGather); rank 0 reports aggregate (× dp_size).
+        if dp_size > 1 and bench_batch_size % dp_size != 0:
+            print(
+                f"Warning: bench_batch_size ({bench_batch_size}) not divisible by dp_size "
+                f"({dp_size}); rounding local batch down to {bench_batch_size // dp_size}"
+            )
+        local_bs = max(1, bench_batch_size // dp_size)
+
         print(
-            f"Running bench: batch_size={bench_batch_size}, iters={bench_iters}, prompt_len={bench_prompt_len}, "
+            f"Running bench: batch_size={bench_batch_size}"
+            + (f" (={local_bs}/rank × {dp_size} DP)" if dp_size > 1 else "")
+            + f", iters={bench_iters}, prompt_len={bench_prompt_len}, "
             f"decode={effective_max_new_tokens}"
         )
         for it in range(bench_iters):
-            prompts = [make_prompt() for _ in range(bench_batch_size)]
+            prompts = [make_prompt() for _ in range(local_bs)]
             s = time.monotonic_ns()
             completion_tokens_batch, step = generate(model, prompts, effective_max_new_tokens, eos_id, temperature)
             c = time.monotonic_ns()
             d = (c - s) / 1e6
             num_prefill = sum(len(p) for p in prompts)
             num_completion = sum(len(completion_tokens_batch[i]) for i in range(len(prompts)))
+            agg_prefill = num_prefill * dp_size
+            agg_completion = num_completion * dp_size
             print(
-                f"Iter {it + 1}/{bench_iters}: prefilled {num_prefill} | generated {num_completion} tokens in {d:.2f} "
-                f"ms. avg: {num_prefill / d * 1e3:.2f} | {num_completion / d * 1e3:.2f} tokens/s @ {d / step:.2f} ms "
-                f"step bs: {len(prompts)}"
+                f"Iter {it + 1}/{bench_iters}: prefilled {num_prefill}"
+                + (f" (≈{agg_prefill} agg)" if dp_size > 1 else "")
+                + f" | generated {num_completion}"
+                + (f" (≈{agg_completion} agg)" if dp_size > 1 else "")
+                + f" tokens in {d:.2f} ms. avg: {num_prefill / d * 1e3:.2f} | "
+                f"{num_completion / d * 1e3:.2f} tokens/s"
+                + (f" (≈{agg_completion / d * 1e3:.2f} agg tokens/s)" if dp_size > 1 else "")
+                + f" @ {d / step:.2f} ms step bs: {len(prompts)}"
             )
     elif mode == "interactive":
         messages = []
@@ -264,7 +330,8 @@ def main(
             print(completion)
             messages.append({"role": "assistant", "content": completion})
     else:
-        print("start to run")
+        if rank == 0:
+            _raw_print("start to run")
         with open(input_file, "r", encoding="utf-8") as file:
             data = json.load(file)
 
@@ -303,21 +370,103 @@ def main(
             for idx, item in enumerate(batch):
                 item["response"] = completions_batch[idx].replace("Ġ", " ").replace("Ċ", "\n").replace("▁", " ")
                 num += len(completion_tokens_batch[idx]) + len(prompts_tokens_batch[idx]) - 1
-                print(f"Query: {item['query']}")
-                print(f"Completion: {item['response']}")
-            print(
-                f"generate {num} tokens take {d:.2f} ms. avg: {num / d * 1e3:.2f} tokens/s @ {d / step:.2f} ms bs: {len(batch)}"
-            )
+            if dp_size > 1:
+                stats = {"num": num, "d": d, "step": step, "bs": len(batch)}
+                for item in batch:
+                    item["_stats"] = stats
+            else:
+                for item in batch:
+                    print(f"Query: {item['query']}")
+                    print(f"Completion: {item['response']}")
+                print(
+                    f"generate {num} tokens take {d:.2f} ms. avg: {num / d * 1e3:.2f} tokens/s @ {d / step:.2f} ms bs: {len(batch)}"
+                )
+            return num, d, step
 
-        batch_size = args.max_batch_size
+        # DP shard: round-robin striping so every DP rank serves a disjoint,
+        # equal-sized slice (uniform m for MoE DP AllGather); the last rank is
+        # padded with sentinels whose responses are dropped on gather.
+        local_batch_size = args.max_batch_size
+        if dp_size > 1:
+            n = len(data)
+            per_rank = (n + dp_size - 1) // dp_size
+            local_data = []
+            for i in range(per_rank):
+                idx = i * dp_size + dp_rank
+                if idx < n:
+                    local_data.append(data[idx])
+                else:
+                    local_data.append({"query": "", "_pad": True})  # sentinel, dropped on gather
+            dist.barrier()  # keep DP ranks lock-stepped per batch (identical m)
+        else:
+            local_data = data
 
-        for i in range(0, len(data), batch_size):
-            batch = data[i : i + batch_size]
-            process_batch(batch, tokenizer, model, max_new_tokens, tokenizer.eos_token_id, temperature, no_prefix)
+        local_stats = []
+        for i in range(0, len(local_data), local_batch_size):
+            batch = local_data[i : i + local_batch_size]
+            local_stats.append(process_batch(batch, tokenizer, model, max_new_tokens, tokenizer.eos_token_id, temperature, no_prefix))
+            if dp_size > 1:
+                dist.barrier()
 
-        with open(input_file, "w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=4)
-        print("The results have been written into the input_file.")
+        if dp_size > 1:
+            # Gather local_data back to rank 0 on the default group (torch_npu's
+            # gather_object needs dst as a global rank, no group= on non-dst).
+            # rank 0 picks the dp_rank=0 member of each DP group (global ranks
+            # 0, tp_size, 2*tp_size, ...) — the real shards; TP ranks are replicas.
+            gathered = [None] * world_size if rank == 0 else None
+            dist.gather_object(local_data,
+                               object_gather_list=gathered if rank == 0 else None,
+                               dst=0)
+            if rank == 0:
+                merged = [None] * n
+                for src_dp in range(dp_size):
+                    src_global_rank = src_dp * tp_size  # dp_rank=0 of DP group src_dp
+                    shard = gathered[src_global_rank]
+                    for i, item in enumerate(shard):
+                        idx = i * dp_size + src_dp
+                        if idx < n:
+                            merged[idx] = item
+                data = merged
+                for src_dp in range(dp_size):
+                    shard = [it for it in merged[src_dp::dp_size] if it and not it.get("_pad")]
+                    if not shard:
+                        continue
+                    _raw_print(f"----- [DP{src_dp}] (global rank {src_dp * tp_size}) -----")
+                    for item in shard:
+                        _raw_print(f"[DP{src_dp}] Query: {item['query']}")
+                        _raw_print(f"[DP{src_dp}] Completion: {item['response']}")
+                    seen = []
+                    for item in shard:
+                        s = item.get("_stats")
+                        if s is not None and s not in seen:
+                            seen.append(s)
+                    for s in seen:
+                        _raw_print(
+                            f"[DP{src_dp}] generate {s['num']} tokens take {s['d']:.2f} ms. "
+                            f"avg: {s['num'] / s['d'] * 1e3:.2f} tokens/s @ {s['d'] / s['step']:.2f} ms bs: {s['bs']}"
+                        )
+                    tot = sum(s["num"] for s in seen)
+                    agg_d = max((s["d"] for s in seen), default=0.0)
+                    agg_step = max((s["step"] for s in seen), default=1)
+                    _raw_print(
+                        f"[DP{src_dp}] total {tot} tokens, {len(shard)} queries "
+                        f"(parallel {agg_d:.2f} ms, {tot / agg_d * 1e3:.2f} tokens/s @ {agg_d / agg_step:.2f} ms)"
+                    )
+            else:
+                data = local_data
+            if rank == 0:
+                total_tokens = sum(s[0] for s in local_stats) * dp_size
+                _raw_print(f"[DP] aggregate {total_tokens} tokens across {dp_size} DP ranks")
+        else:
+            data = local_data
+
+        if rank == 0:
+            for item in data:
+                if isinstance(item, dict):
+                    item.pop("_stats", None)
+            with open(input_file, "w", encoding="utf-8") as file:
+                json.dump(data, file, ensure_ascii=False, indent=4)
+            _raw_print("The results have been written into the input_file.")
 
     if world_size > 1:
         dist.destroy_process_group()
