@@ -96,6 +96,7 @@
 #include "aclrtlaunch_einsum_mht_htd_mhd_float16_t.h"
 #include "aclrtlaunch_einsum_mht_htd_mhd_bfloat16_t.h"
 #include "aclrtlaunch_unpack_activation_int8_t.h"
+#include "aclrtlaunch_msd_merge_dequant_int8_t.h"
 
 #include "kernels/kernel_param.h"
 
@@ -1349,6 +1350,32 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, con
                                              num.ptr, m, n);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(x);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
+void XliteOpMSDMergeDequant(XRuntime &rt, XTensor &yMerged, XTensor &scaleBias,
+                            XTensor &perTokenScale, XTensor &out)
+{
+    if (IsDummyRuntime(rt) || yMerged.numel == 0) {
+        return;
+    }
+
+    std::string err_str =
+        DBG_PREFIX + XT_STR(yMerged) + XT_STR(scaleBias) + XT_STR(perTokenScale) + XT_STR(out);
+    // MSD W4A8 Post-stage standalone op: merge the Mid-stage row-merged result
+    // [2*m, n] (low rows [0,m), high rows [m,2m)), compensate low-nibble -8 bias, and
+    // per-token dequantize.  Y = (Y_high*16 + Y_low + scale_bias) * perTokenScale.
+    if (yMerged.dtype == FP16 && scaleBias.dtype == FP32 && perTokenScale.dtype == FP32 &&
+        out.dtype == BF16) {
+        if (yMerged.shape.size() != 2 || yMerged.shape[0] % 2 == 1) {
+            throw std::runtime_error(err_str + " yMerged.shape is invalid!");
+        }
+        uint32_t m = yMerged.shape[0] / 2;
+        uint32_t n = yMerged.shape[1];
+        aclrtlaunch_msd_merge_dequant_int8_t(rt.aivNum, rt.stream, yMerged.ptr, scaleBias.ptr,
+                                             perTokenScale.ptr, out.ptr, nullptr, m, n);
+    } else {
         throw std::runtime_error(err_str + " unsupported!");
     }
 }
