@@ -1703,27 +1703,50 @@ void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output)
                  input.shape[2]);
 }
 
-void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &x, XTensor &weight, XTensor &output)
+void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
+                          XTensor &output, bool updateState)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (x.shape[2] <= weight.shape[2]) {
-        throw std::runtime_error("Last dimension of input is too small!");
+    if (state.shape.size() != 3 || input.shape.size() != 3 || output.shape.size() != 3) {
+        throw std::runtime_error("XliteOpConv1dAndSiLU: state/input/output must be 3D [B,C,*]");
     }
+    if (state.shape[0] != input.shape[0] || state.shape[1] != input.shape[1] ||
+        output.shape[0] != input.shape[0] || output.shape[1] != input.shape[1] ||
+        output.shape[2] != input.shape[2]) {
+        throw std::runtime_error("XliteOpConv1dAndSiLU: batch/channel/seq shape mismatch");
+    }
+    uint32_t kernelDim = weight.shape.size() >= 3 ? weight.shape[2] : weight.shape.back();
+    if (state.shape[2] != kernelDim) {
+        throw std::runtime_error("XliteOpConv1dAndSiLU: state last dim != kernelDim");
+    }
+    if (weight.shape[0] != input.shape[1]) {
+        throw std::runtime_error("XliteOpConv1dAndSiLU: weight channels mismatch");
+    }
+    uint32_t batch = input.shape[0];
+    uint32_t channels = input.shape[1];
+    uint32_t seqLen = input.shape[2];
+
     KERNEL_PTR_TYPE(conv1d_and_silu) * launchKernel;
-    if (EachXDtype(FP32, x, weight, output)) {
+    if (EachXDtype(FP32, state, input, weight, output)) {
         launchKernel = aclrtlaunch_conv1d_and_silu_float;
-    } else if (EachXDtype(FP16, x, weight, output)) {
+    } else if (EachXDtype(FP16, state, input, weight, output)) {
         launchKernel = aclrtlaunch_conv1d_and_silu_float16_t;
-    } else if (EachXDtype(BF16, x, weight, output)) {
+    } else if (EachXDtype(BF16, state, input, weight, output)) {
         launchKernel = aclrtlaunch_conv1d_and_silu_bfloat16_t;
     } else {
-        std::string err_str = DBG_PREFIX + XT_STR(x) + XT_STR(weight) + XT_STR(output);
+        std::string err_str =
+            DBG_PREFIX + XT_STR(state) + XT_STR(input) + XT_STR(weight) + XT_STR(output);
         throw std::runtime_error(err_str + " unsupported!");
     }
-    launchKernel(rt.aivNum, rt.stream, x.ptr, weight.ptr, output.ptr, x.shape[0], x.shape[1],
-                 x.shape[2] - weight.shape[2], weight.shape[2]);
+
+    if (kernelDim > 16 || seqLen > 4096) {
+        throw std::runtime_error(
+            "XliteOpConv1dAndSiLU: require kernelDim<=16 and seqLen<=4096 for fused kernel");
+    }
+    launchKernel(rt.aivNum, rt.stream, state.ptr, input.ptr, weight.ptr, output.ptr, batch,
+                 channels, seqLen, kernelDim, updateState ? 1u : 0u);
 }
 
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
