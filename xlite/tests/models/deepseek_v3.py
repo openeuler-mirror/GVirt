@@ -1431,6 +1431,21 @@ class DeepSeek_V3(nn.Module):
         self.xlite_model.mla_qkv_a = [layer.attn.wqkv_a.weight for layer in self.layers]
         self.xlite_model.mla_q_b = [layer.attn.wq_b.weight for layer in self.layers]
         self.xlite_model.mla_q_norm = [layer.attn.q_norm.weight for layer in self.layers]
+        n_local_heads = args.n_heads // world_size
+        self.xlite_model.mla_wuv = [
+            layer.attn.wkv_b.weight
+                .view(n_local_heads, -1, args.kv_lora_rank)
+                .split([args.qk_nope_head_dim, args.v_head_dim], dim=1)[1]
+                .permute(0, 2, 1).contiguous()
+            for layer in self.layers
+        ]
+        self.xlite_model.mla_wuk_t = [
+            layer.attn.wkv_b.weight
+                .view(n_local_heads, -1, args.kv_lora_rank)
+                .split([args.qk_nope_head_dim, args.v_head_dim], dim=1)[0]
+                .contiguous()
+            for layer in self.layers
+        ]
         self.xlite_model.mla_kv_b = [layer.attn.wkv_b.weight for layer in self.layers]
         self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
         self.xlite_model.index_q_b = [layer.attn.indexer.wq_b.weight for layer in self.layers if layer.attn.indexer is not None]
