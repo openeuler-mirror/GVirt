@@ -101,6 +101,16 @@ public:
     std::vector<at::Tensor> indexKNorm;
     std::vector<at::Tensor> indexKNormBias;
 
+    std::vector<at::Tensor> linearInProjQKV;
+    std::vector<at::Tensor> linearInProjZ;
+    std::vector<at::Tensor> linearInProjB;
+    std::vector<at::Tensor> linearInProjA;
+    std::vector<at::Tensor> linearConv1d;
+    std::vector<at::Tensor> linearALog;
+    std::vector<at::Tensor> linearDtBias;
+    std::vector<at::Tensor> linearNorm;
+    std::vector<at::Tensor> linearOutProj;
+
     std::vector<at::Tensor> mlpNorm;
     std::vector<at::Tensor> mlpNormBias;
     std::vector<at::Tensor> mlpUpGate;
@@ -180,6 +190,46 @@ static inline void InitXTensor(XTensor &out, at::Tensor &in)
     }
 
     out.Init(sizes, XDtype(in), TensorPtr(in));
+}
+
+static bool TensorUsable(const at::Tensor &t)
+{
+    return t.defined() && t.numel() > 0;
+}
+
+static void InitOptionalXTensor(XTensor &out, at::Tensor &in)
+{
+    if (TensorUsable(in)) {
+        InitXTensor(out, in);
+    }
+}
+
+static std::vector<uint32_t> ResolveLayerTypes(XModelConfig &c)
+{
+    std::vector<uint32_t> layerTypes = c.layerTypes;
+    if (!layerTypes.empty()) {
+        if (layerTypes.size() != c.nLayers) {
+            throw std::invalid_argument("layerTypes size must equal nLayers");
+        }
+        return layerTypes;
+    }
+    if (c.attnType == XMODEL_ATTN_HYBRID) {
+        layerTypes.resize(c.nLayers);
+        for (uint32_t i = 0; i < c.nLayers; i++) {
+            layerTypes[i] = ((i + 1) % c.fullAttentionInterval == 0) ? XMODEL_LAYER_ATTN_FULL
+                                                                     : XMODEL_LAYER_ATTN_LINEAR;
+        }
+    }
+    return layerTypes;
+}
+
+static bool IsConfigLayerFullAttention(XModelConfig &c, uint32_t layer,
+                                       const std::vector<uint32_t> &layerTypes)
+{
+    if (layerTypes.empty()) {
+        return c.attnType == XMODEL_ATTN_MHA;
+    }
+    return layerTypes[layer] == XMODEL_LAYER_ATTN_FULL;
 }
 
 void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
@@ -505,6 +555,25 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             throw std::invalid_argument(
                 "Mismatched number of layers DSA QB dequant scale parameters");
         }
+    } else if (c.attnType == XMODEL_ATTN_HYBRID) {
+        if (c.linearNumKHeads == 0 || c.linearNumVHeads == 0 || c.linearKeyHeadDim == 0 ||
+            c.linearValueHeadDim == 0 || c.linearConvKernelDim == 0) {
+            throw std::invalid_argument("Linear attention config is incomplete");
+        }
+        if (attnOut.size() != c.nLayers || mhaQKV.size() != c.nLayers ||
+            linearInProjQKV.size() != c.nLayers || linearInProjZ.size() != c.nLayers ||
+            linearInProjB.size() != c.nLayers || linearInProjA.size() != c.nLayers ||
+            linearOutProj.size() != c.nLayers || linearConv1d.size() != c.nLayers ||
+            linearALog.size() != c.nLayers || linearDtBias.size() != c.nLayers ||
+            linearNorm.size() != c.nLayers) {
+            throw std::invalid_argument(
+                "Hybrid attention requires per-layer weight lists of size nLayers");
+        }
+        if (c.qkNorm && (mhaQNorm.size() != c.nLayers || mhaKNorm.size() != c.nLayers)) {
+            throw std::invalid_argument(
+                "Mismatched number of layers MHA Q/K norm parameters for hybrid model");
+        }
+        ResolveLayerTypes(c);
     } else {
         {
             XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
@@ -600,10 +669,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         InitXTensor(_model->normBias, normBias);
     }
 
+    std::vector<uint32_t> layerTypes = ResolveLayerTypes(c);
     for (uint32_t i = 0; i < c.nLayers; i++) {
         InitXTensor(_model->attnNorm[i], attnNorm[i]);
-        InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
-                         attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true, tpRank);
         if (!attnNormBias.empty()) {
             InitXTensor(_model->attnNormBias[i], attnNormBias[i]);
         }
@@ -611,55 +679,105 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             InitXTensor(_model->mlpNormBias[i], mlpNormBias[i]);
         }
         InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
-        if (c.attnType == XMODEL_ATTN_MLA) {
-            InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
-                             mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false, tpRank);
-            InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
-                             mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
-            InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
-            if (!mlaQNormBias.empty()) {
-                InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
-            }
-            InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
-            InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
-            if (!mlaKVNormBias.empty()) {
-                InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
-            }
-        } else if (c.attnType == XMODEL_ATTN_MHA) {
-            InitMatmulWeight("mhaQKV", mhaQKV, mhaQKVInputScale, mhaQKVInputOffset, mhaQKVQuantBias,
-                             mhaQKVDeqScale, _model->mhaQKV, i, false, tpRank);
-            if (c.addBias) {
-                InitXTensor(_model->mhaQKVBias[i], mhaQKVBias[i]);
-            }
-            if (c.qkNorm) {
-                InitXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
-                InitXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
-                if (!mhaQNormBias.empty()) {
-                    InitXTensor(_model->mhaQNormBias[i], mhaQNormBias[i]);
+
+        bool isFullLayer = IsConfigLayerFullAttention(c, i, layerTypes);
+        if (c.attnType == XMODEL_ATTN_HYBRID) {
+            if (isFullLayer) {
+                InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
+                                 attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true,
+                                 tpRank);
+                InitMatmulWeight("mhaQKV", mhaQKV, mhaQKVInputScale, mhaQKVInputOffset,
+                                 mhaQKVQuantBias, mhaQKVDeqScale, _model->mhaQKV, i, false, tpRank);
+                if (c.addBias) {
+                    InitOptionalXTensor(_model->mhaQKVBias[i], mhaQKVBias[i]);
                 }
-                if (!mhaKNormBias.empty()) {
-                    InitXTensor(_model->mhaKNormBias[i], mhaKNormBias[i]);
+                if (c.qkNorm) {
+                    InitOptionalXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
+                    InitOptionalXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
+                    if (!mhaQNormBias.empty()) {
+                        InitOptionalXTensor(_model->mhaQNormBias[i], mhaQNormBias[i]);
+                    }
+                    if (!mhaKNormBias.empty()) {
+                        InitOptionalXTensor(_model->mhaKNormBias[i], mhaKNormBias[i]);
+                    }
                 }
+            } else {
+                InitMatmulWeight("linearOutProj", linearOutProj, attnOutInputScale,
+                                 attnOutInputOffset, attnOutQuantBias, attnOutDeqScale,
+                                 _model->linearOutProj, i, true, tpRank);
+                InitMatmulWeight("linearInProjQKV", linearInProjQKV, mhaQKVInputScale,
+                                 mhaQKVInputOffset, mhaQKVQuantBias, mhaQKVDeqScale,
+                                 _model->linearInProjQKV, i, false, tpRank);
+                InitMatmulWeight("linearInProjZ", linearInProjZ, mhaQKVInputScale,
+                                 mhaQKVInputOffset, mhaQKVQuantBias, mhaQKVDeqScale,
+                                 _model->linearInProjZ, i, false, tpRank);
+                InitMatmulWeight("linearInProjB", linearInProjB, mhaQKVInputScale,
+                                 mhaQKVInputOffset, mhaQKVQuantBias, mhaQKVDeqScale,
+                                 _model->linearInProjB, i, false, tpRank);
+                InitMatmulWeight("linearInProjA", linearInProjA, mhaQKVInputScale,
+                                 mhaQKVInputOffset, mhaQKVQuantBias, mhaQKVDeqScale,
+                                 _model->linearInProjA, i, false, tpRank);
+                InitOptionalXTensor(_model->linearConv1d[i], linearConv1d[i]);
+                InitOptionalXTensor(_model->linearALog[i], linearALog[i]);
+                InitOptionalXTensor(_model->linearDtBias[i], linearDtBias[i]);
+                InitOptionalXTensor(_model->linearNorm[i], linearNorm[i]);
             }
-        } else if (c.attnType == XMODEL_ATTN_DSA) {
-            InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
-                             mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false, tpRank);
-            InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
-                             mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
-            InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
-            if (!mlaQNormBias.empty()) {
-                InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
+        } else {
+            InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
+                             attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true, tpRank);
+            if (c.attnType == XMODEL_ATTN_MLA) {
+                InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
+                                 mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false,
+                                 tpRank);
+                InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
+                                 mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
+                InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+                if (!mlaQNormBias.empty()) {
+                    InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
+                }
+                InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
+                InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+                if (!mlaKVNormBias.empty()) {
+                    InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
+                }
+            } else if (c.attnType == XMODEL_ATTN_MHA) {
+                InitMatmulWeight("mhaQKV", mhaQKV, mhaQKVInputScale, mhaQKVInputOffset,
+                                 mhaQKVQuantBias, mhaQKVDeqScale, _model->mhaQKV, i, false, tpRank);
+                if (c.addBias) {
+                    InitXTensor(_model->mhaQKVBias[i], mhaQKVBias[i]);
+                }
+                if (c.qkNorm) {
+                    InitXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
+                    InitXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
+                    if (!mhaQNormBias.empty()) {
+                        InitXTensor(_model->mhaQNormBias[i], mhaQNormBias[i]);
+                    }
+                    if (!mhaKNormBias.empty()) {
+                        InitXTensor(_model->mhaKNormBias[i], mhaKNormBias[i]);
+                    }
+                }
+            } else if (c.attnType == XMODEL_ATTN_DSA) {
+                InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
+                                 mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false,
+                                 tpRank);
+                InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
+                                 mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
+                InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+                if (!mlaQNormBias.empty()) {
+                    InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
+                }
+                InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
+                InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+                if (!mlaKVNormBias.empty()) {
+                    InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
+                }
+                InitMatmulWeight("indexQB", indexQB, indexQBInputScale, indexQBInputOffset,
+                                 indexQBQuantBias, indexQBDeqScale, _model->indexQB, i, false,
+                                 tpRank);
+                InitXTensor(_model->indexKWeightsProj[i], indexKWeightsProj[i]);
+                InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
+                InitXTensor(_model->indexKNormBias[i], indexKNormBias[i]);
             }
-            InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
-            InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
-            if (!mlaKVNormBias.empty()) {
-                InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
-            }
-            InitMatmulWeight("indexQB", indexQB, indexQBInputScale, indexQBInputOffset,
-                             indexQBQuantBias, indexQBDeqScale, _model->indexQB, i, false, tpRank);
-            InitXTensor(_model->indexKWeightsProj[i], indexKWeightsProj[i]);
-            InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
-            InitXTensor(_model->indexKNormBias[i], indexKNormBias[i]);
         }
     }
 
@@ -2162,7 +2280,14 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_n_heads", &XModelConfig::indexNHeads)
         .def_readwrite("index_topk", &XModelConfig::indexTopK)
         .def_readwrite("index_softmax_scale", &XModelConfig::indexSoftmaxScale)
-        .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved);
+        .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved)
+        .def_readwrite("linear_num_k_heads", &XModelConfig::linearNumKHeads)
+        .def_readwrite("linear_num_v_heads", &XModelConfig::linearNumVHeads)
+        .def_readwrite("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)
+        .def_readwrite("linear_value_head_dim", &XModelConfig::linearValueHeadDim)
+        .def_readwrite("linear_conv_kernel_dim", &XModelConfig::linearConvKernelDim)
+        .def_readwrite("layer_types", &XModelConfig::layerTypes)
+        .def_readwrite("full_attention_interval", &XModelConfig::fullAttentionInterval);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
         .def(py::init<>())
@@ -2183,6 +2308,12 @@ PYBIND11_MODULE(_C, m)
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
         .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
         .value("AttnDSA", XModelAttnType::XMODEL_ATTN_DSA)
+        .value("AttnHybrid", XModelAttnType::XMODEL_ATTN_HYBRID)
+        .export_values();
+
+    py::enum_<XModelLayerAttnType>(m, "LayerAttnType")
+        .value("LayerAttnFull", XModelLayerAttnType::XMODEL_LAYER_ATTN_FULL)
+        .value("LayerAttnLinear", XModelLayerAttnType::XMODEL_LAYER_ATTN_LINEAR)
         .export_values();
 
     py::enum_<XModelScoringFuncType>(m, "ScoringFuncType")
@@ -2236,6 +2367,15 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_k_weights_proj", &_CModel::indexKWeightsProj)
         .def_readwrite("index_k_norm", &_CModel::indexKNorm)
         .def_readwrite("index_k_norm_bias", &_CModel::indexKNormBias)
+        .def_readwrite("linear_in_proj_qkv", &_CModel::linearInProjQKV)
+        .def_readwrite("linear_in_proj_z", &_CModel::linearInProjZ)
+        .def_readwrite("linear_in_proj_b", &_CModel::linearInProjB)
+        .def_readwrite("linear_in_proj_a", &_CModel::linearInProjA)
+        .def_readwrite("linear_conv1d", &_CModel::linearConv1d)
+        .def_readwrite("linear_a_log", &_CModel::linearALog)
+        .def_readwrite("linear_dt_bias", &_CModel::linearDtBias)
+        .def_readwrite("linear_norm", &_CModel::linearNorm)
+        .def_readwrite("linear_out_proj", &_CModel::linearOutProj)
         .def_readwrite("mlp_norm", &_CModel::mlpNorm)
         .def_readwrite("mlp_norm_bias", &_CModel::mlpNormBias)
         .def_readwrite("mlp_up_gate", &_CModel::mlpUpGate)

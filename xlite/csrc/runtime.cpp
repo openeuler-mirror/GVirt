@@ -369,6 +369,8 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     _maxNumBlocks = 0;
     _batch = static_cast<int>(batch);
     queryStart = 0;
+    bool allCached = true;
+    bool anyMultiToken = false;
     for (uint32_t i = 0; i < batch; i++) {
         lens[i] = attnMeta.lens[i];
         cachedLens[i] = attnMeta.cachedLens[i];
@@ -377,7 +379,15 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         numBlocks[i] = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
         _maxNumBlocks = numBlocks[i] > _maxNumBlocks ? numBlocks[i] : _maxNumBlocks;
         batchedTokens += lens[i];
+        if (cachedLens[i] == 0) {
+            allCached = false;
+        }
+        if (lens[i] != 1) {
+            anyMultiToken = true;
+        }
     }
+    // Decode only when every request has cache and this step is a single token.
+    _linearDecodeStep = allCached && !anyMultiToken && batch > 0;
 
     if (batchedTokens == 0 || batchedTokens > maxBatchedTokens) {
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +

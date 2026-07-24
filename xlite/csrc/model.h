@@ -60,6 +60,17 @@ struct XModelConfig {
     float indexSoftmaxScale;
     bool indexRopeInterleaved = false;
 
+    // linear attention config
+    uint32_t linearNumKHeads = 0;
+    uint32_t linearNumVHeads = 0;
+    uint32_t linearKeyHeadDim = 0;
+    uint32_t linearValueHeadDim = 0;
+    uint32_t linearConvKernelDim = 0;
+    // Per-layer attention type for hybrid models (Qwen3.5): 0=full, 1=linear.
+    // When empty and attnType==HYBRID, auto-generated from fullAttentionInterval.
+    std::vector<uint32_t> layerTypes;
+    uint32_t fullAttentionInterval = 4;
+
     // mlp
     uint32_t nDenseLayers = 0;
     uint32_t nRoutedExperts = 0;
@@ -153,6 +164,16 @@ public:
     std::vector<XTensor> indexKNorm;
     std::vector<XTensor> indexKNormBias;
 
+    std::vector<MatmulWeight> linearInProjQKV;
+    std::vector<MatmulWeight> linearInProjZ;
+    std::vector<MatmulWeight> linearInProjB;
+    std::vector<MatmulWeight> linearInProjA;
+    std::vector<XTensor> linearConv1d;
+    std::vector<XTensor> linearALog;
+    std::vector<XTensor> linearDtBias;
+    std::vector<XTensor> linearNorm;
+    std::vector<MatmulWeight> linearOutProj;
+
     std::vector<XTensor> mlpNorm;
     std::vector<XTensor> mlpNormBias;
     std::vector<MatmulWeight> mlpUpGate;
@@ -179,6 +200,8 @@ private:
     void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);
     void ForwardAttnMHA(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
+    void ForwardAttnLinear(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
+                           XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                      XTensor &freqsCis, XTensor &hiddenState);
     void ForwardMLP(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
@@ -221,6 +244,8 @@ private:
 
     struct XModelConfig _c;
     uint32_t _rankId;
+    // Hybrid (Qwen3.5): per-layer attn type, 0=full 1=linear. Empty => non-hybrid.
+    std::vector<uint32_t> _layerTypes;
 
     // FFN
     XTensor _gateIndices;

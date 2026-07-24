@@ -36,6 +36,18 @@ def sample(logits, temperature: float = 1.0):
     return probs.div_(torch.empty_like(probs).exponential_(1)).argmax(dim=-1)
 
 
+def apply_qwen_chat_template(tokenizer, messages, model_type: str):
+    """Apply Qwen chat template; disable thinking for Qwen3/3.5 short-gen tests."""
+    kwargs = {"add_generation_prompt": True, "return_dict": False}
+    if model_type in {"qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe"}:
+        kwargs["enable_thinking"] = False
+    try:
+        return tokenizer.apply_chat_template(messages, **kwargs)
+    except TypeError:
+        kwargs.pop("enable_thinking", None)
+        return tokenizer.apply_chat_template(messages, **kwargs)
+
+
 @torch.inference_mode()
 def generate(
     model: nn.Module, prompt_tokens: List[List[int]], max_new_tokens: int, eos_id: int, temperature: float = 1.0
@@ -254,8 +266,7 @@ def main(
                 formatted_prompt += " "
                 prompt_tokens = tokenizer.encode(formatted_prompt)
             elif model_type in {"qwen2", "qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe"}:
-                # Use apply_chat_template for correct format
-                prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
+                prompt_tokens = apply_qwen_chat_template(tokenizer, messages, model_type)
             else:
                 prompt_tokens = tokenizer.encode(prompt)
             completion_tokens, _ = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
@@ -281,10 +292,9 @@ def main(
             elif model_type == "llama":
                 prompts_tokens_batch = [tokenizer.encode(f"<s>[INST] {item['query']} [/INST] ") for item in batch]
             elif model_type in {"qwen2", "qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe"}:
-                # Use apply_chat_template for correct format with proper newlines
                 prompts_tokens_batch = [
-                    tokenizer.apply_chat_template(
-                        [{"role": "user", "content": item["query"]}], add_generation_prompt=True, return_dict=False
+                    apply_qwen_chat_template(
+                        tokenizer, [{"role": "user", "content": item["query"]}], model_type
                     )
                     for item in batch
                 ]
