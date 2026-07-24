@@ -231,6 +231,38 @@ static bool IsConfigLayerFullAttention(XModelConfig &c, uint32_t layer,
     return c.attnType == XMODEL_ATTN_MHA;
 }
 
+namespace
+{
+using TensorsRef = std::reference_wrapper<std::vector<at::Tensor>>;
+struct LayersCheckEntry {
+    TensorsRef weights;
+    std::string name;
+    bool allowEmpty;
+    bool predicate;
+};
+
+void checkLayersDims(const std::vector<LayersCheckEntry> &table, uint32_t size, uint32_t rankId,
+                     const std::string &prefix)
+{
+    for (const auto &entry : table) {
+        const auto &w = entry.weights.get();
+        if (!entry.predicate) {
+            continue;
+        }
+        if (entry.allowEmpty && w.empty()) {
+            continue;
+        }
+
+        if (w.size() != size) {
+            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
+            s << "num of layers: " << w.size() << std::endl;
+            std::string msg = prefix + " " + entry.name + " parameters";
+            throw std::invalid_argument(msg);
+        }
+    }
+}
+}  // namespace
+
 void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 {
     uint32_t idx = 0;
@@ -261,371 +293,123 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             "num of layers must be greater than or equal to num of dense layers");
     }
 
-    if (attnNorm.size() != c.nLayers || attnOut.size() != c.nLayers ||
-        mlpNorm.size() != c.nLayers) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of layers: " << attnNorm.size() << std::endl;
-        }
-        throw std::invalid_argument(
-            "Mismatched number of layers attention norm or attention out or mlp norm parameters");
-    }
-
-    if (!attnNormBias.empty() && attnNormBias.size() != c.nLayers) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of layers: " << attnNormBias.size() << std::endl;
-        }
-        throw std::invalid_argument("Mismatched number of layers attention norm bias parameters");
-    }
-    if (!mlpNormBias.empty() && mlpNormBias.size() != c.nLayers) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of layers: " << mlpNormBias.size() << std::endl;
-        }
-        throw std::invalid_argument("Mismatched number of layers MLP norm bias parameters");
-    }
-
-    if (c.attnType == XMODEL_ATTN_MHA) {
-        if (!attnOutInputScale.empty() && attnOutInputScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << attnOutInputScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers attention out input scale parameters");
-        }
-        if (!attnOutInputOffset.empty() && attnOutInputOffset.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << attnOutInputOffset.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers attention out input offset parameters");
-        }
-        if (!attnOutQuantBias.empty() && attnOutQuantBias.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << attnOutQuantBias.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers attention out quant bias parameters");
-        }
-        if (!attnOutDeqScale.empty() && attnOutDeqScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << attnOutDeqScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers attention out dequant scale parameters");
-        }
-        if (!mhaQKVInputScale.empty() && mhaQKVInputScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mhaQKVInputScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MHA QKV input scale parameters");
-        }
-        if (!mhaQKVInputOffset.empty() && mhaQKVInputOffset.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mhaQKVInputOffset.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MHA QKV input offset parameters");
-        }
-        if (!mhaQKVQuantBias.empty() && mhaQKVQuantBias.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mhaQKVQuantBias.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MHA QKV quant bias parameters");
-        }
-        if (!mhaQKVDeqScale.empty() && mhaQKVDeqScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mhaQKVDeqScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MHA QKV dequant scale parameters");
-        }
-    }
-
-    if (c.attnType == XMODEL_ATTN_MLA) {
-        if (mlaQKVA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
-            mlaQNorm.size() != c.nLayers || mlaKVNorm.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVA.size() << std::endl;
-            }
-            throw std::invalid_argument("Mismatched number of layers MLA attention QA/QB/QA "
-                                        "norm/KVA/KV norm parameters");
-        }
-        if (mlaWUV.size() != c.nLayers || mlaWUKT.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: mlaWUV=" << mlaWUV.size() << ", mlaWUKT=" << mlaWUKT.size()
-                  << std::endl;
-            }
-            throw std::invalid_argument("Mismatched number of layers MLA WUV / WUK_T parameters");
-        }
-        if (!mlaQKVAInputScale.empty() && mlaQKVAInputScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVAInputScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MLA QKVA input scale parameters");
-        }
-        if (!mlaQKVAInputOffset.empty() && mlaQKVAInputOffset.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVAInputOffset.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MLA QKVA input offset parameters");
-        }
-        if (!mlaQKVAQuantBias.empty() && mlaQKVAQuantBias.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVAQuantBias.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MLA QKVA quant bias parameters");
-        }
-        if (!mlaQKVADeqScale.empty() && mlaQKVADeqScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVADeqScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MLA QKVA dequant scale parameters");
-        }
-        if (!mlaQBInputScale.empty() && mlaQBInputScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQBInputScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MLA QB input scale parameters");
-        }
-        if (!mlaQBInputOffset.empty() && mlaQBInputOffset.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQBInputOffset.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MLA QB input offset parameters");
-        }
-        if (!mlaQBQuantBias.empty() && mlaQBQuantBias.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQBQuantBias.size() << std::endl;
-            }
-            throw std::invalid_argument("Mismatched number of layers MLA QB quant bias parameters");
-        }
-        if (!mlaQBDeqScale.empty() && mlaQBDeqScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQBDeqScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MLA QB dequant scale parameters");
-        }
-    } else if (c.attnType == XMODEL_ATTN_MHA) {
-        if (mhaQKV.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mhaQKV.size() << std::endl;
-            }
-            throw std::invalid_argument("Mismatched number of layers MHA attention QKV parameters");
-        }
-        if (c.addBias && mhaQKVBias.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mhaQKVBias.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MHA attention QKV bias parameters");
-        }
-        if (c.qkNorm && (mhaQNorm.size() != c.nLayers || mhaKNorm.size() != c.nLayers)) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mhaQNorm.size() << ", " << mhaKNorm.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MHA attention Q/K norm parameters");
-        }
-        if (c.qkNorm && ((!mhaQNormBias.empty() && mhaQNormBias.size() != c.nLayers) ||
-                         (!mhaKNormBias.empty() && mhaKNormBias.size() != c.nLayers))) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mhaQNormBias.size() << ", " << mhaKNormBias.size()
-                  << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers MHA attention Q/K norm bias parameters");
-        }
-    } else if (c.attnType == XMODEL_ATTN_DSA) {
-        if (mlaQKVA.size() != c.nLayers || mlaQB.size() != c.nLayers ||
-            mlaQNorm.size() != c.nLayers || mlaKVNorm.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVA.size() << std::endl;
-            }
-            throw std::invalid_argument("Mismatched number of layers DSA attention QA/QB/QA "
-                                        "norm/KVA/KV norm parameters");
-        }
-        if (mlaWUV.size() != c.nLayers || mlaWUKT.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: mlaWUV=" << mlaWUV.size() << ", mlaWUKT=" << mlaWUKT.size()
-                  << std::endl;
-            }
-            throw std::invalid_argument("Mismatched number of layers DSA WUV / WUK_T parameters");
-        }
-        if ((!mlaQNormBias.empty() && mlaQNormBias.size() != c.nLayers) ||
-            (!mlaKVNormBias.empty() && mlaKVNormBias.size() != c.nLayers)) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQNormBias.size() << ", " << mlaKVNormBias.size()
-                  << std::endl;
-            }
-            throw std::invalid_argument("Mismatched number of layers DSA attention Q/KV norm "
-                                        "bias parameters");
-        }
-        if (indexQB.size() != c.nLayers || indexKWeightsProj.size() != c.nLayers ||
-            indexKNorm.size() != c.nLayers || indexKNormBias.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << indexQB.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers DSA attention index QB/KWeightsProj/KNorm parameters");
-        }
-        if (!mlaQKVAInputScale.empty() && mlaQKVAInputScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVAInputScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers DSA QKVA input scale parameters");
-        }
-        if (!mlaQKVAInputOffset.empty() && mlaQKVAInputOffset.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVAInputOffset.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers DSA QKVA input offset parameters");
-        }
-        if (!mlaQKVAQuantBias.empty() && mlaQKVAQuantBias.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVAQuantBias.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers DSA QKVA quant bias parameters");
-        }
-        if (!mlaQKVADeqScale.empty() && mlaQKVADeqScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQKVADeqScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers DSA QKVA dequant scale parameters");
-        }
-        if (!mlaQBInputScale.empty() && mlaQBInputScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQBInputScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers DSA QB input scale parameters");
-        }
-        if (!mlaQBInputOffset.empty() && mlaQBInputOffset.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQBInputOffset.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers DSA QB input offset parameters");
-        }
-        if (!mlaQBQuantBias.empty() && mlaQBQuantBias.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQBQuantBias.size() << std::endl;
-            }
-            throw std::invalid_argument("Mismatched number of layers DSA QB quant bias parameters");
-        }
-        if (!mlaQBDeqScale.empty() && mlaQBDeqScale.size() != c.nLayers) {
-            {
-                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-                s << "num of layers: " << mlaQBDeqScale.size() << std::endl;
-            }
-            throw std::invalid_argument(
-                "Mismatched number of layers DSA QB dequant scale parameters");
-        }
-    } else if (c.attnType == XMODEL_ATTN_HYBRID) {
+    if (c.attnType == XMODEL_ATTN_HYBRID) {
         if (c.linearNumKHeads == 0 || c.linearNumVHeads == 0 || c.linearKeyHeadDim == 0 ||
             c.linearValueHeadDim == 0 || c.linearConvKernelDim == 0) {
             throw std::invalid_argument("Linear attention config is incomplete");
         }
-        if (attnOut.size() != c.nLayers || mhaQKV.size() != c.nLayers ||
-            linearInProjQKV.size() != c.nLayers || linearInProjZ.size() != c.nLayers ||
-            linearInProjB.size() != c.nLayers || linearInProjA.size() != c.nLayers ||
-            linearOutProj.size() != c.nLayers || linearConv1d.size() != c.nLayers ||
-            linearALog.size() != c.nLayers || linearDtBias.size() != c.nLayers ||
-            linearNorm.size() != c.nLayers) {
-            throw std::invalid_argument(
-                "Hybrid attention requires per-layer weight lists of size nLayers");
-        }
-        if (c.qkNorm && (mhaQNorm.size() != c.nLayers || mhaKNorm.size() != c.nLayers)) {
-            throw std::invalid_argument(
-                "Mismatched number of layers MHA Q/K norm parameters for hybrid model");
-        }
         if (c.fullAttentionInterval == 0) {
             throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
         }
-    } else {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "invalid attention type: " << c.attnType << std::endl;
-        }
+    } else if (c.attnType >= XMODEL_ATTN_MAX_TYPE) {
+        XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
+        s << "invalid attention type: " << c.attnType << std::endl;
         throw std::invalid_argument("Invalid attention type");
     }
 
-    if (mlpUpGate.size() != c.nDenseLayers || mlpDown.size() != c.nDenseLayers) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of dense layers: " << mlpUpGate.size() << std::endl;
-        }
-        throw std::invalid_argument("Mismatched number of dense layers up gate or down parameters");
-    }
+    bool isAttnMLA = c.attnType == XMODEL_ATTN_MLA;
+    bool isAttnMHA = c.attnType == XMODEL_ATTN_MHA;
+    bool isAttnDSA = c.attnType == XMODEL_ATTN_DSA;
+    bool isAttnHybrid = c.attnType == XMODEL_ATTN_HYBRID;
+    const std::vector<LayersCheckEntry> layersTable = {
+        // Tensors, Message, allowEmpty, Predicate
+        // Common
+        {std::ref(attnNorm), "attention norm", false, true},
+        {std::ref(attnOut), "attention out", false, true},
+        {std::ref(mlpNorm), "mlp norm", false, true},
+        {std::ref(attnNormBias), "attention norm bias", true, true},
+        {std::ref(mlpNormBias), "MLP norm bias", true, true},
+        // MHA
+        {std::ref(attnOutInputScale), "attention out input scale", true, isAttnMHA},
+        {std::ref(attnOutInputOffset), "attention out input offset", true, isAttnMHA},
+        {std::ref(attnOutQuantBias), "attention out quant bias", true, isAttnMHA},
+        {std::ref(attnOutDeqScale), "attention out dequant scale", true, isAttnMHA},
+        {std::ref(mhaQKVInputScale), "MHA QKV input scale", true, isAttnMHA},
+        {std::ref(mhaQKVInputOffset), "MHA QKV input offset", true, isAttnMHA},
+        {std::ref(mhaQKVQuantBias), "MHA QKV quant bias", true, isAttnMHA},
+        {std::ref(mhaQKVDeqScale), "MHA QKV dequant scale", true, isAttnMHA},
+        // MLA
+        {std::ref(mlaQKVA), "MLA attention QKVA", false, isAttnMLA},
+        {std::ref(mlaQB), "MLA attention QB", false, isAttnMLA},
+        {std::ref(mlaQNorm), "MLA attention Q Norm", false, isAttnMLA},
+        {std::ref(mlaKVNorm), "MLA attention KV Norm", false, isAttnMLA},
+        {std::ref(mlaWUV), "MLA WUV", false, isAttnMLA},
+        {std::ref(mlaWUKT), "MLA WUK_T", false, isAttnMLA},
+        {std::ref(mlaQKVAInputScale), "MLA QKVA input scale", true, isAttnMLA},
+        {std::ref(mlaQKVAInputOffset), "MLA QKVA input offset", true, isAttnMLA},
+        {std::ref(mlaQKVAQuantBias), "MLA QKVA quant bias", true, isAttnMLA},
+        {std::ref(mlaQKVADeqScale), "MLA QKVA dequant scale", true, isAttnMLA},
+        {std::ref(mlaQBInputScale), "MLA QB input scale", true, isAttnMLA},
+        {std::ref(mlaQBInputOffset), "MLA QB input offset", true, isAttnMLA},
+        {std::ref(mlaQBQuantBias), "MLA QB quant bias", true, isAttnMLA},
+        {std::ref(mlaQBDeqScale), "MLA QB dequant scale", true, isAttnMLA},
+        // MHA
+        {std::ref(mhaQKV), "MHA QKV", false, isAttnMHA},
+        {std::ref(mhaQKVBias), "MHA QKV bias", false, isAttnMHA && c.addBias},
+        {std::ref(mhaQNorm), "MHA Q norm", false, isAttnMHA && c.qkNorm},
+        {std::ref(mhaKNorm), "MHA K norm", false, isAttnMHA && c.qkNorm},
+        {std::ref(mhaQNormBias), "MHA Q norm bias", true, isAttnMHA && c.qkNorm},
+        {std::ref(mhaKNormBias), "MHA K norm bias", true, isAttnMHA && c.qkNorm},
+        // DSA
+        {std::ref(mlaQKVA), "DSA attention QKVA", false, isAttnDSA},
+        {std::ref(mlaQB), "DSA attention QB", false, isAttnDSA},
+        {std::ref(mlaQNorm), "DSA attention Q Norm", false, isAttnDSA},
+        {std::ref(mlaKVNorm), "DSA attention KV norm", false, isAttnDSA},
+        {std::ref(mlaWUV), "DSA WUV", false, isAttnDSA},
+        {std::ref(mlaWUKT), "DSA WUK_T", false, isAttnDSA},
+        {std::ref(mlaQNormBias), "DSA attention Q norm bias", true, isAttnDSA},
+        {std::ref(mlaKVNormBias), "DSA attention KV norm bias", true, isAttnDSA},
+        {std::ref(indexQB), "DSA attention index QB", false, isAttnDSA},
+        {std::ref(indexKWeightsProj), "DSA attention index KWeightsProj", false, isAttnDSA},
+        {std::ref(indexKNorm), "DSA attention index KNorm", false, isAttnDSA},
+        {std::ref(indexKNormBias), "DSA attention index KNorm bias", false, isAttnDSA},
+        {std::ref(mlaQKVAInputScale), "DSA QKVA input scale", true, isAttnDSA},
+        {std::ref(mlaQKVAInputOffset), "DSA QKVA input offset", true, isAttnDSA},
+        {std::ref(mlaQKVAQuantBias), "DSA QKVA quant bias", true, isAttnDSA},
+        {std::ref(mlaQKVADeqScale), "DSA QKVA dequant scale", true, isAttnDSA},
+        {std::ref(mlaQBInputScale), "DSA QB input scale", true, isAttnDSA},
+        {std::ref(mlaQBInputOffset), "DSA QB input offset", true, isAttnDSA},
+        {std::ref(mlaQBQuantBias), "DSA QB quant bias", true, isAttnDSA},
+        {std::ref(mlaQBDeqScale), "DSA QB dequant scale", true, isAttnDSA},
+        // Hybrid
+        {std::ref(mhaQKV), "Hybrid QKV", false, isAttnHybrid},
+        {std::ref(linearInProjQKV), "Linear QKV proj", false, isAttnHybrid},
+        {std::ref(linearInProjZ), "Linear Z proj", false, isAttnHybrid},
+        {std::ref(linearInProjB), "Linear B proj", false, isAttnHybrid},
+        {std::ref(linearInProjA), "Linear A proj", false, isAttnHybrid},
+        {std::ref(linearOutProj), "Linear out proj", false, isAttnHybrid},
+        {std::ref(linearConv1d), "Linear conv1d", false, isAttnHybrid},
+        {std::ref(linearALog), "Linear A log", false, isAttnHybrid},
+        {std::ref(linearDtBias), "Linear Dt bias", false, isAttnHybrid},
+        {std::ref(linearNorm), "Linear norm", false, isAttnHybrid},
+        {std::ref(mhaQNorm), "Hybrid Q norm", false, isAttnHybrid && c.qkNorm},
+        {std::ref(mhaKNorm), "Hybrid K norm", false, isAttnHybrid && c.qkNorm},
+    };
+    checkLayersDims(layersTable, c.nLayers, rankId, "Mismatched number of layers");
 
-    if ((!mlpUpGateInputScale.empty() && mlpUpGateInputScale.size() != c.nDenseLayers) ||
-        (!mlpUpGateInputOffset.empty() && mlpUpGateInputOffset.size() != c.nDenseLayers) ||
-        (!mlpUpGateQuantBias.empty() && mlpUpGateQuantBias.size() != c.nDenseLayers) ||
-        (!mlpUpGateDeqScale.empty() && mlpUpGateDeqScale.size() != c.nDenseLayers)) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of dense layers: " << mlpUpGateInputScale.size() << std::endl;
-        }
-        throw std::invalid_argument("Mismatched number of dense layers up gate quanted parameters");
-    }
+    const std::vector<LayersCheckEntry> denseLayersTable = {
+        {std::ref(mlpUpGate), "up gate", false, true},
+        {std::ref(mlpDown), "down", false, true},
+        {std::ref(mlpUpGateInputScale), "up gate input scale", true, true},
+        {std::ref(mlpUpGateInputOffset), "up gate input offset", true, true},
+        {std::ref(mlpUpGateQuantBias), "up gate quant bias", true, true},
+        {std::ref(mlpUpGateDeqScale), "up gate deq scale", true, true},
+        {std::ref(mlpDownInputScale), "down gate input scale", true, true},
+        {std::ref(mlpDownInputOffset), "down gate input offset", true, true},
+        {std::ref(mlpDownQuantBias), "down gate quant bias", true, true},
+        {std::ref(mlpDownDeqScale), "down gate deq scale", true, true},
+    };
+    checkLayersDims(denseLayersTable, c.nDenseLayers, rankId, "Mismatched number of dense layers");
 
-    if ((!mlpDownInputScale.empty() && mlpDownInputScale.size() != c.nDenseLayers) ||
-        (!mlpDownInputOffset.empty() && mlpDownInputOffset.size() != c.nDenseLayers) ||
-        (!mlpDownQuantBias.empty() && mlpDownQuantBias.size() != c.nDenseLayers) ||
-        (!mlpDownDeqScale.empty() && mlpDownDeqScale.size() != c.nDenseLayers)) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of dense layers: " << mlpDownInputScale.size() << std::endl;
-        }
-        throw std::invalid_argument("Mismatched number of dense layers down quanted parameters");
-    }
+    const std::vector<LayersCheckEntry> moeLayersTable = {
+        {std::ref(moeGate), "gate", false, true},
+        {std::ref(moeGateBias), "gate bias", false, c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID},
+        {std::ref(moeSEUpGate), "SE up gate", false, c.nSharedExperts != 0},
+        {std::ref(moeSEDown), "SE down", false, c.nSharedExperts != 0},
+        {std::ref(moeSEUpGateDeqScale), "SE up gate deq scale", true, c.nSharedExperts != 0},
+        {std::ref(moeSEDownDeqScale), "SE down deq scale", true, c.nSharedExperts != 0},
+    };
+    checkLayersDims(moeLayersTable, numMoeLayers, rankId, "Mismatched number of moe layers");
 
     if (moeREUpGate.size() != nRE || moeREDown.size() != nRE) {
         {
@@ -634,45 +418,6 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         }
         throw std::invalid_argument(
             "Mismatched number of routed experts up gate or down parameters");
-    }
-
-    if (moeGate.size() != (c.nLayers - c.nDenseLayers)) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of moe layers: " << moeGate.size() << std::endl;
-        }
-        throw std::invalid_argument("Mismatched number of moe layers gate parameters");
-    }
-
-    if (c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID &&
-        moeGateBias.size() != (c.nLayers - c.nDenseLayers)) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of moe layers: " << moeGateBias.size() << std::endl;
-        }
-        throw std::invalid_argument("Mismatched number of moe layers gate bias parameters");
-    }
-
-    if (c.nSharedExperts != 0 && (moeSEUpGate.size() != (c.nLayers - c.nDenseLayers) ||
-                                  moeSEDown.size() != (c.nLayers - c.nDenseLayers))) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of moe layers with shared experts: " << moeSEUpGate.size() << std::endl;
-        }
-        throw std::invalid_argument(
-            "Mismatched number of moe layers with shared experts parameters");
-    }
-
-    if (c.nSharedExperts != 0 && ((!moeSEUpGateDeqScale.empty() &&
-                                   moeSEUpGateDeqScale.size() != (c.nLayers - c.nDenseLayers)) ||
-                                  (!moeSEDownDeqScale.empty() &&
-                                   moeSEDownDeqScale.size() != (c.nLayers - c.nDenseLayers)))) {
-        {
-            XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of moe layers: " << moeSEUpGateDeqScale.size() << std::endl;
-        }
-        throw std::invalid_argument(
-            "Mismatched number of moe layers with shared experts quantization parameters");
     }
 
     _model = new XModel(c, rankId);
