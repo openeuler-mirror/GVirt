@@ -2040,6 +2040,24 @@ void BetaDecay(XRuntime &rt, at::Tensor &b, at::Tensor &a, at::Tensor &A_log, at
     rt.Synchronize();
 }
 
+void RecurrentGatedDeltaRule(XRuntime &rt, at::Tensor &query, at::Tensor &key, at::Tensor &value,
+                             at::Tensor &beta, at::Tensor &g, at::Tensor &state, at::Tensor &out,
+                             uint32_t batch, uint32_t seqlen, uint32_t num_heads, uint32_t k_dim,
+                             uint32_t v_dim)
+{
+    XTensor _query, _key, _value, _beta, _g, _state, _out;
+    InitXTensor(_query, query);
+    InitXTensor(_key, key);
+    InitXTensor(_value, value);
+    InitXTensor(_beta, beta);
+    InitXTensor(_g, g);
+    InitXTensor(_state, state);
+    InitXTensor(_out, out);
+    XliteOpRecurrentGatedDeltaRule(rt, _query, _key, _value, _beta, _g, _state, _out, batch, seqlen,
+                                   num_heads, k_dim, v_dim);
+    rt.Synchronize();
+}
+
 void EinsumMhtHdtMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &hdt, at::Tensor &mhd, uint32_t m,
                      uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
 {
@@ -2426,6 +2444,10 @@ PYBIND11_MODULE(_C, m)
     m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
           py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
           py::arg("num_v_heads"));
+    m.def("recurrent_gated_delta_rule", &RecurrentGatedDeltaRule, py::arg("rt"), py::arg("query"),
+          py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"), py::arg("state"),
+          py::arg("out"), py::arg("batch"), py::arg("seqlen"), py::arg("num_heads"),
+          py::arg("k_dim"), py::arg("v_dim"));
     m.def("einsum_mht_hdt_mhd", &EinsumMhtHdtMhd, "einsum_mht_hdt_mhd", py::arg("rt"),
           py::arg("mht"), py::arg("hdt"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
           py::arg("d"), py::arg("weight_nz") = false);

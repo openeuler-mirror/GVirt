@@ -167,6 +167,13 @@ void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor 
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
                       XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
                       uint32_t num_v_heads);
+// Recurrent gated delta rule. q/k: [B*S, H*kDim], v/out: [B*S, H*vDim],
+// beta/g: [B*S, H], state: [B, H, kDim, vDim] (updated in-place).
+// g is log-space (from BetaDecay); kernel applies exp(g). Q/K should already be L2-normalized.
+void XliteOpRecurrentGatedDeltaRule(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
+                                    XTensor &beta, XTensor &g, XTensor &state, XTensor &out,
+                                    uint32_t batch, uint32_t seqlen, uint32_t numHeads,
+                                    uint32_t kDim, uint32_t vDim);
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
                             uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T = -1,
                             int D = -1);

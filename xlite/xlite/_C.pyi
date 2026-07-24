@@ -2194,6 +2194,43 @@ def beta_decay(
     """
     ...
 
+def recurrent_gated_delta_rule(
+    rt: Runtime,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor,
+    state: torch.Tensor,
+    out: torch.Tensor,
+    batch: int,
+    seqlen: int,
+    num_heads: int,
+    k_dim: int,
+    v_dim: int,
+) -> None:
+    """Recurrent gated delta rule (GDN linear-attention core).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        query (torch.Tensor): [B*S, H*k_dim], L2-normalized.
+        key (torch.Tensor): [B*S, H*k_dim], L2-normalized.
+        value (torch.Tensor): [B*S, H*v_dim].
+        beta (torch.Tensor): [B*S, H].
+        g (torch.Tensor): [B*S, H], log-space decay (kernel applies exp).
+        state (torch.Tensor): [B, H, k_dim, v_dim], updated in-place.
+        out (torch.Tensor): [B*S, H*v_dim].
+        batch (int): Batch size.
+        seqlen (int): Sequence length.
+        num_heads (int): Number of heads.
+        k_dim (int): Key head dim (<=128).
+        v_dim (int): Value head dim (<=128).
+
+    Returns:
+        None: Output and state are written in place.
+    """
+    ...
+
 def einsum_mht_hdt_mhd(
     rt: Runtime,
     mht: torch.Tensor,

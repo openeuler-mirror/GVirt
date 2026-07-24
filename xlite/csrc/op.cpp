@@ -90,6 +90,9 @@
 #include "aclrtlaunch_beta_decay_bfloat16_t.h"
 #include "aclrtlaunch_sigmoid_gate_mul_float16_t.h"
 #include "aclrtlaunch_sigmoid_gate_mul_bfloat16_t.h"
+#include "aclrtlaunch_recurrent_gated_delta_rule_float.h"
+#include "aclrtlaunch_recurrent_gated_delta_rule_float16_t.h"
+#include "aclrtlaunch_recurrent_gated_delta_rule_bfloat16_t.h"
 #include "aclrtlaunch_transpose_1_2_float.h"
 #include "aclrtlaunch_transpose_1_2_float16_t.h"
 #include "aclrtlaunch_transpose_1_2_bfloat16_t.h"
@@ -1796,6 +1799,56 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
     }
     launchKernel(rt.aivNum, rt.stream, attn.ptr, gate.ptr, out.ptr,
                  static_cast<uint32_t>(attn.shape[0]), static_cast<uint32_t>(attn.shape[1]));
+}
+
+void XliteOpRecurrentGatedDeltaRule(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
+                                    XTensor &beta, XTensor &g, XTensor &state, XTensor &out,
+                                    uint32_t batch, uint32_t seqlen, uint32_t numHeads,
+                                    uint32_t kDim, uint32_t vDim)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (kDim == 0 || vDim == 0 || numHeads == 0 || batch == 0 || seqlen == 0) {
+        throw std::runtime_error(std::string(__func__) + ": invalid dims");
+    }
+    if (kDim > 128 || vDim > 128) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": kDim/vDim must be <= 128 for current kernel");
+    }
+    uint32_t tokens = batch * seqlen;
+    if (query.shape[0] != tokens || key.shape[0] != tokens || value.shape[0] != tokens ||
+        out.shape[0] != tokens || beta.shape[0] != tokens || g.shape[0] != tokens) {
+        throw std::runtime_error(std::string(__func__) + ": token dim mismatch");
+    }
+    if (query.shape.size() < 2 || key.shape.size() < 2 || value.shape.size() < 2 ||
+        out.shape.size() < 2 || query.shape[1] != numHeads * kDim ||
+        key.shape[1] != numHeads * kDim || value.shape[1] != numHeads * vDim ||
+        out.shape[1] != numHeads * vDim) {
+        throw std::runtime_error(std::string(__func__) + ": feature dim mismatch");
+    }
+    if (beta.shape.size() < 2 || g.shape.size() < 2 || beta.shape[1] != numHeads ||
+        g.shape[1] != numHeads) {
+        throw std::runtime_error(std::string(__func__) + ": beta/g head dim mismatch");
+    }
+    if (state.shape.size() != 4 || state.shape[0] < batch || state.shape[1] != numHeads ||
+        state.shape[2] != kDim || state.shape[3] != vDim) {
+        throw std::runtime_error(std::string(__func__) + ": state shape mismatch");
+    }
+    KERNEL_PTR_TYPE(recurrent_gated_delta_rule) * launchKernel;
+    if (EachXDtype(FP32, query, key, value, beta, g, state, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_float;
+    } else if (EachXDtype(FP16, query, key, value, beta, g, state, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_float16_t;
+    } else if (EachXDtype(BF16, query, key, value, beta, g, state, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(query) + XT_STR(key) + XT_STR(value);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    launchKernel(rt.aivNum, rt.stream, query.ptr, key.ptr, value.ptr, beta.ptr, g.ptr, state.ptr,
+                 out.ptr, batch, seqlen, numHeads, kDim, vDim,
+                 1.0f / sqrtf(static_cast<float>(kDim)));
 }
 
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
