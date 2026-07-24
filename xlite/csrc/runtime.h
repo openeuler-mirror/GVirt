@@ -16,6 +16,7 @@ typedef void *aclrtContext;
 typedef void *aclrtNotify;
 typedef void *aclrtStream;
 typedef void *aclrtEvent;
+typedef void *aclmdlRI;
 typedef void *HcclComm;
 class XTensorPool;
 class XcclComm;
@@ -60,7 +61,9 @@ public:
     void InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
                   uint32_t blockSize);
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
-                     uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads, uint32_t blockSize);
+                     uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads, uint32_t blockSize,
+                     uint32_t hiddenSize, uint32_t nRoutedExperts, uint32_t defDpSize,
+                     int inputDtype, int weightsDtype);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -72,6 +75,23 @@ public:
     void SetCurrentContext();
     void NotifyWaitPeerStream();
     void NotifyRecordPeerStream();
+
+    void PrepareCommBuffers(uint64_t maxBatch, uint32_t hiddenSize, uint32_t nRoutedExperts,
+                            uint32_t defDpSize, int inputDtype, int weightsDtype);
+    void CaptureHcclAllGather(void *send, void *recv, uint32_t m, int hcclDtype,
+                              enum commType type);
+    void RunHcclAllGatherInGraph(void *send, void *recv, uint32_t m, int hcclDtype,
+                                 enum commType type);
+    void AllGatherInGraph(void *send, void *recv, uint32_t m, int hcclDtype, enum commType type);
+    [[nodiscard]] bool AllGatherInGraphActive(enum commType type) const;
+
+    void CaptureHcclReduceScatter(void *send, void *recv, uint32_t m, int hcclDtype,
+                                  enum commType type);
+    void RunHcclReduceScatterInGraph(void *send, void *recv, uint32_t m, int hcclDtype,
+                                     enum commType type);
+    void ReduceScatterInGraph(void *send, void *recv, uint32_t m, int hcclDtype,
+                              enum commType type);
+    [[nodiscard]] bool ReduceScatterInGraphActive(enum commType type) const;
 
     int InitTensorPool(size_t sizeMB);
     XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
@@ -109,6 +129,20 @@ public:
         return _moeEpSize;
     };
     aclrtStream stream = nullptr;
+    struct GraphCaptureEntry {
+        aclmdlRI modelRI = nullptr;
+        void *sendAddr = nullptr;
+        void *recvAddr = nullptr;
+    };
+    std::vector<GraphCaptureEntry> _agGraphs;
+    XTensor _agSendBuf;
+    XTensor _agRecvBuf;
+    uint64_t _agPerTokenBytes = 0;
+    std::vector<GraphCaptureEntry> _rsGraphs;
+    XTensor _rsSendBuf;
+    XTensor _rsRecvBuf;
+    uint64_t _rsPerTokenBytes = 0;
+    uint32_t _rsHiddenSize = 0;
     uint32_t aicNum;
     uint32_t aivNum;
     uint32_t originAicNum;
@@ -164,6 +198,7 @@ protected:
     aclrtContext context = nullptr;
     bool _initOutside = false;
     bool _inited = false;
+    bool _graphCommEnabled = true;
     XTensorPool *_pool = nullptr;
     uint32_t _rankId;
     uint32_t _tpSize;

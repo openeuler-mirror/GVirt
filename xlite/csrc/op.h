@@ -6,12 +6,14 @@
 
 #include "base.h"
 #include "runtime.h"
+#include "ascend.h"
 #include "auto_tuner.h"
 #include "kernels/kernel_param.h"
 
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN);
 
+HcclDataType XDtype2HcclDtype(enum XDtype dtype);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       uint32_t copySize = COPY_SIZE);
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,

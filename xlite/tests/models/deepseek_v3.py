@@ -27,9 +27,10 @@ from tests.models.weight_utils import (hf_model_weights_iterator,
 debug = False
 world_size = 1
 rank = 0
+global_rank = 0
+global_world_size = 1
 block_size = 128
 gemm_impl = "bf16"
-
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     xlite_rt = None
@@ -878,11 +879,13 @@ class MoE(nn.Module):
         """
         super().__init__()
         self.dim = args.dim
-        assert args.n_routed_experts % world_size == 0, f"Number of experts must be divisible by world size (world_size={world_size})"
+        # EP spans the FULL world (orthogonal to DP): use GLOBAL world/rank here,
+        # not the TP-local values __init__ rebound. moe_ep_size == global world_size.
+        assert args.n_routed_experts % global_world_size == 0, f"Number of experts must be divisible by world size (world_size={global_world_size})"
         self.n_routed_experts = args.n_routed_experts
-        self.n_local_experts = args.n_routed_experts // world_size
+        self.n_local_experts = args.n_routed_experts // global_world_size
         self.n_activated_experts = args.n_activated_experts
-        self.experts_start_idx = rank * self.n_local_experts
+        self.experts_start_idx = global_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
         self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args) if self.experts_start_idx <= i < self.experts_end_idx else None
@@ -901,6 +904,7 @@ class MoE(nn.Module):
         """
         shape = x.size()
         x = x.view(-1, self.dim)
+
         weights, indices = self.gate(x)
         y = torch.zeros_like(x)
         counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
@@ -910,9 +914,13 @@ class MoE(nn.Module):
             expert = self.experts[i]
             idx, top = torch.where(indices == i)
             y[idx] += expert(x[idx]) * weights[idx, top, None]
-        z = self.shared_experts(x)
-        if world_size > 1:
+        # EP all_reduce: sum per-EP-rank partials into the complete output.
+        # global_world_size (full world == EP group), not the TP-rebound world_size.
+        if global_world_size > 1:
             dist.all_reduce(y)
+
+        # Shared experts run on this rank's OWN m tokens.
+        z = self.shared_experts(x)
         return (y + z).view(shape)
 
 
@@ -1003,9 +1011,28 @@ class DeepSeek_V3(nn.Module):
         Args:
             args (ModelArgs): Model arguments containing DeepSeek_V3 parameters.
         """
-        global world_size, rank
+        global world_size, rank, global_rank, global_world_size
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
+        # DP deployment: world_size = tp_size * dp_size. xlite handles DP natively
+        # in C++ (passed via self.global_rank/tp_size/dp_size); torch_npu does NOT
+        # support DP (asserted in generate.py). Dense runs pure-TP.
+        # global_rank/global_world_size stay at the pre-rebind full-world values for
+        # MoE EP placement (Block builds attn+MoE together, so can't reorder).
+        global_rank = rank
+        global_world_size = world_size
+        self.global_rank = rank
+        self.global_world_size = world_size
+        self.dp_size = int(os.getenv("XLITE_DP_SIZE", "1"))
+        assert world_size % self.dp_size == 0, (
+            f"WORLD_SIZE ({world_size}) must be divisible by XLITE_DP_SIZE ({self.dp_size})"
+        )
+        self.tp_size = world_size // self.dp_size
+        self.tp_rank = rank % self.tp_size
+        self.dp_rank = rank // self.tp_size
+        # Dense-layer view: pure-TP rebind (world_size<-tp_size, rank<-tp_rank).
+        world_size = self.tp_size
+        rank = self.tp_rank
         Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
         super().__init__()
         self.args = args
@@ -1101,8 +1128,9 @@ class DeepSeek_V3(nn.Module):
         static_quant_weights = ("q_a_proj", "kv_a_proj_with_mqa", "wq_b", "wo")
 
         n_local_experts = args.n_routed_experts // args.moe_ep_size
-        moe_tp_id = rank % args.moe_tp_size
-        moe_ep_id = rank // args.moe_tp_size
+        # EP spans the FULL world (orthogonal to DP): ep/tp id from GLOBAL rank.
+        moe_tp_id = global_rank % args.moe_tp_size
+        moe_ep_id = global_rank // args.moe_tp_size
         param_dict = {name if "lm_head" in name else "model." + name: param for name, param in self.named_parameters()}
         for _, param in self.named_parameters():
             param.requires_grad = False
@@ -1330,7 +1358,9 @@ class DeepSeek_V3(nn.Module):
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = Runtime(local_rank, 0, rank, world_size, 1, 1, args.moe_ep_size)
+            # Runtime rank = GLOBAL rank; tp_size/dp_size explicit. EP spans the
+            # full world (moe_ep_size == world_size), orthogonal to DP.
+            self.xlite_rt = Runtime(local_rank, 0, self.global_rank, self.tp_size, self.dp_size, 1, args.moe_ep_size)
             self.init_xlite_model(args)
             kv_size = self.init_xlite_kvcache(args)
             pool_size = self.xlite_model.get_tensor_pool_size()
@@ -1340,7 +1370,7 @@ class DeepSeek_V3(nn.Module):
             for _, param in self.named_parameters():
                 memory_usage = param.element_size() * param.numel()
                 total_model_memory += memory_usage
-            if rank == 0:
+            if self.global_rank == 0:
                 print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
                       f" KV Cache: {kv_size // 1024 // 1024} MB" +
                       f" Tensor pool: {pool_size} MB")
@@ -1369,8 +1399,8 @@ class DeepSeek_V3(nn.Module):
         config.intermediate_size = args.inter_dim
         config.moe_intermediate_size = args.moe_inter_dim
         config.route_scale = args.route_scale
-        config.def_tp_size = world_size
-        config.def_dp_size = 1
+        config.def_tp_size = self.tp_size
+        config.def_dp_size = self.dp_size
         config.moe_ep_size = args.moe_ep_size
         config.moe_tp_size = args.moe_tp_size
         config.block_size = block_size
@@ -1473,7 +1503,8 @@ class DeepSeek_V3(nn.Module):
             self.xlite_model.re_down_deq_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
                                               for i in range(args.n_dense_layers, args.n_layers)
                                               for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-        self.xlite_model.init(config, rank)
+        # init() takes the GLOBAL rank (C++ derives tp_rank/ep_id from it).
+        self.xlite_model.init(config, self.global_rank)
 
     def init_xlite_kvcache(self, args: ModelArgs):
         block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
