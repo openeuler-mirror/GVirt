@@ -636,6 +636,50 @@ def generate_model_report(
     return "\n".join(lines)
 
 
+def build_no_change_report(report_dir: Optional[Path], model_count: int = 0) -> str:
+    """
+    所有模型性能均无显著变化时生成汇总通知
+
+    参数:
+        report_dir: 报告保存目录路径
+        model_count: 本次测试的模型数量
+
+    返回:
+        格式化的报告字符串
+    """
+    vllm_ascend_version = get_vllm_ascend_version()
+    xlite_commit = get_xlite_commit()
+    baseline_info = get_baseline_info()
+
+    # 获取当前测试日期（从report_dir中提取）
+    current_date = "unknown"
+    if report_dir:
+        match = re.search(r"xlite-[\w.]+-(\d{8})", str(report_dir))
+        if match:
+            current_date = match.group(1)
+
+    lines = [f'<font color="blue"><b>xlite {current_date} 性能测试报告</b></font>', ""]
+
+    summary = f"📊 性能统计: <b>劣化项: 0 | 提升项: 0</b>"
+    if model_count:
+        summary += f" (共 {model_count} 个模型)"
+    lines.append(summary)
+    lines.append(f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite commit: {xlite_commit}")
+    lines.append(
+        f"【对比基线】 vllm-ascend 版本: {baseline_info['vllm_ascend_version']}, xlite 版本: {baseline_info['version']}"
+    )
+    lines.append("✅ 测试模型性能均无变化")
+
+    # 添加报告路径
+    ip_address = os.environ.get("MACHINE_IP", "")
+    report_path = f"{ip_address}:{report_dir}" if report_dir else ""
+    if report_path:
+        lines.append(f"报告保存路径: {report_path}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ====================== 历史报告查找函数 ======================
 def extract_model_info(report_path: Path) -> Optional[Dict]:
     """
@@ -965,7 +1009,8 @@ def main():
 
     if num_models_to_report == 0:
         log_info("测试模型性能均无变化")
-        send_notification("测试模型性能均无变化", args.receiver)
+        no_change_report = build_no_change_report(report_dir, len(model_groups))
+        send_notification(no_change_report, args.receiver)
 
     # 步骤8: 设置退出码
     has_any_degradation = False
