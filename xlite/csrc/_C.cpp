@@ -621,11 +621,8 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     }
 
     if (input.size(0) == 0) {
-        return;
+        return;  // for DP dummy run with MoE, add a padding token to avoid empty input
     }
-
-    // only calculate the region [_input.shape[0], _output.shape[1]]
-    _output.View({_input.shape[0], _output.shape[1]});
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
         if (kvCache[i].size() != _kv[i].size()) {
@@ -725,7 +722,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
     }
 
     if (input.size(0) == 0) {
-        return;
+        return;  // for DP dummy run with MoE, add a padding token to avoid empty input
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
@@ -804,11 +801,8 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     }
 
     if (input.size(0) == 0) {
-        return;
+        return;  // for DP dummy run with MoE, add a padding token to avoid empty input
     }
-
-    // only calculate the region [_input.shape[0], _output.shape[1]]
-    _output.View({_input.shape[0], _output.shape[1]});
 
     if (deepstackInput.size() != _deepstackInputEmbeds.size()) {
         throw std::runtime_error(std::string(__func__) + ": check deepstack input failed");

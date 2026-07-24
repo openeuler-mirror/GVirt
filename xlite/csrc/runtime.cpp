@@ -154,7 +154,7 @@ XRuntime::~XRuntime(void)
     if (stream) {
         (void)aclrtDestroyStream(stream);
     }
-    (void)aclrtResetDevice(static_cast<int>(_devid));
+    (void)aclrtResetDevice(static_cast<int32_t>(_devid));
 
     if (_attnInitialized) {
         (void)aclrtFree(_position.ptr);
