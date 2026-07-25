@@ -347,7 +347,8 @@ public:
         int curr = 0;
         int pingpongL1A = 0;
         int pingpongL1B = 0;
-        int L1BkRemBlockNum;
+        int L1BkRemBlockPad = ROUND_UP(2 * svk0, kBlockSize);
+        int L1BkRemBlockNum = L1BkRemBlockPad / kBlockSize;
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
@@ -368,7 +369,6 @@ public:
             kSize = svk0;
             kBlockPad = svk0;
             kBlockNum = svk0 / kBlockSize;
-            L1BkRemBlockNum = DIV_ROUND_UP(2 * svk0, kBlockSize);
             for (int kIdx = 0; kIdx < kLoop; kIdx++) {  // calcLen
                 int kIdx4 = kIdx % 4;
                 int kIdx2 = kIdx % 2;
@@ -378,6 +378,8 @@ public:
                     kBlockPad = ROUND_UP(kSize, kBlockSize);
                     kBlockNum = kBlockPad / kBlockSize;
                 }
+                int blockOffset = kOffset / blockSize;
+                int blockRemainder = kOffset % blockSize;
 
                 if (kIdx4 == 0) {
                     int kRemSize = 4 * svk0;
@@ -396,18 +398,14 @@ public:
 
                 if (kIdx2 == 0) {
                     int kRemSize = 2 * svk0;
-                    int kRemBlockPad = ROUND_UP(kRemSize, kBlockSize);
                     if (kOffset + kRemSize > calcLen) {
                         kRemSize = calcLen - kOffset;
-                        kRemBlockPad = ROUND_UP(kRemSize, kBlockSize);
-                        L1BkRemBlockNum = kRemBlockPad / kBlockSize;
                     }
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + pingpongL1B);
                     // copy K(T) (nSize, 2 * svk0) to L1
                     for (int bid = 0; bid < DIV_ROUND_UP(kRemSize, blockSize); bid++) {
                         int kOffsetTmp = bid * blockSize;
-                        int kTotalOffset = kIdx * svk0 + kOffsetTmp;
-                        uint32_t block = blockTable[kTotalOffset / blockSize];
+                        uint32_t block = blockTable[blockOffset + bid];
                         int kRemSizeTmp = blockSize;
                         int kRemBlockPadTmp = ROUND_UP(kRemSizeTmp, kBlockSize);
                         if (kOffsetTmp + kRemSizeTmp > kRemSize) {
@@ -416,9 +414,8 @@ public:
                         }
                         CopyGmToL1Nd2Nz(
                             aktl1bBuf[pingpongL1B][bid * blockSize * kBlockSize],
-                            kCache[(block * blockSize + kTotalOffset % blockSize) * kvLoraRank +
-                                   nOffset],
-                            kRemBlockPadTmp, nSize, kvLoraRank, kRemBlockPad);
+                            kCache[(block * blockSize + blockRemainder) * kvLoraRank + nOffset],
+                            kRemBlockPadTmp, nSize, kvLoraRank, L1BkRemBlockPad);
                     }
 
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
