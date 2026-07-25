@@ -25,7 +25,13 @@ enum XModelAttnType {
     XMODEL_ATTN_MHA,
     XMODEL_ATTN_MLA,
     XMODEL_ATTN_DSA,
+    XMODEL_ATTN_HYBRID,
     XMODEL_ATTN_MAX_TYPE,
+};
+
+enum XModelLayerAttnType {
+    XMODEL_LAYER_ATTN_FULL = 0,
+    XMODEL_LAYER_ATTN_LINEAR = 1,
 };
 
 struct XModelAttnMeta {
@@ -172,6 +178,9 @@ public:
 
     // ATTN
     bool _attnInitialized = false;
+    // Host-side: true when this step is decode (seqlen==1 and all cached_lens>0).
+    // Avoids D2H sync via GetFirstAttnPosition in every linear layer.
+    bool _linearDecodeStep = false;
     uint32_t _maxNumBlocks;
     int _batch;
     uint32_t _tileSizeOfCachedKV;

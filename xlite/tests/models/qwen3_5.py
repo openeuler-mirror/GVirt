@@ -28,7 +28,9 @@ rank = 0
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     block_size = 128
-    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMHA, Model
+    from xlite._C import (
+        Runtime, ModelConfig, ModelAttnMeta, AttnHybrid, Model,
+    )
     import numpy as np
 
 
@@ -47,6 +49,11 @@ def _mha_qkv_weight(attn, head_dim: int, n_heads: int):
         biases = [q_b, attn.k_proj.bias, attn.v_proj.bias, g_b]
         return torch.cat(weights, dim=0), torch.cat(biases, dim=0)
     return torch.cat(weights, dim=0), None
+
+
+def _gemma_norm_to_xlite(weight: torch.Tensor) -> torch.Tensor:
+    """Gemma RMSNorm x*(1+w) -> standard RMSNorm x*w for xlite kernels."""
+    return (weight.float() + 1.0).to(weight.dtype).contiguous()
 
 
 @dataclass
@@ -314,6 +321,12 @@ class LinearAttn(nn.Module):
         self.conv_kernel_dim = args.linear_conv_kernel_dim
 
         # Local heads for tensor parallel
+        assert args.linear_num_key_heads % world_size == 0, (
+            f"linear_num_key_heads ({args.linear_num_key_heads}) must be divisible by world_size ({world_size})"
+        )
+        assert args.linear_num_value_heads % world_size == 0, (
+            f"linear_num_value_heads ({args.linear_num_value_heads}) must be divisible by world_size ({world_size})"
+        )
         self.num_local_k_heads = args.linear_num_key_heads // world_size
         self.num_local_v_heads = args.linear_num_value_heads // world_size
 
@@ -671,8 +684,15 @@ class Qwen3_5(nn.Module):
         assert self.args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
         assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
         assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+        assert self.args.linear_num_key_heads % world_size == 0, (
+            f"linear_num_key_heads ({self.args.linear_num_key_heads}) must be divisible by world_size ({world_size})"
+        )
+        assert self.args.linear_num_value_heads % world_size == 0, (
+            f"linear_num_value_heads ({self.args.linear_num_value_heads}) must be divisible by world_size ({world_size})"
+        )
 
-        self.xlite_weight_nz = True if forward_backend == "xlite" else False
+        # Tied embed/lm_head share storage; NZ must not rewrite embed (ND row lookup).
+        self.xlite_weight_nz = forward_backend == "xlite" and not self.args.tie_word_embeddings
 
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
         n_local_kv_heads = max(1, self.args.n_kv_heads // world_size)
@@ -918,17 +938,12 @@ class Qwen3_5(nn.Module):
             self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
             for layer_id, layer in enumerate(self.layers):
                 if layer.is_full_attention:
-                    layer.self_attn.q_proj.weight.data = matrix_nd2nz(layer.self_attn.q_proj.weight)
-                    layer.self_attn.k_proj.weight.data = matrix_nd2nz(layer.self_attn.k_proj.weight)
-                    layer.self_attn.v_proj.weight.data = matrix_nd2nz(layer.self_attn.v_proj.weight)
+                    # q/k/v stay ND until packed as [Q|K|V|Gate] in init_xlite_model.
                     layer.self_attn.o_proj.weight.data = matrix_nd2nz(layer.self_attn.o_proj.weight)
                 else:
-                    layer.linear_attn.in_proj_qkv.weight.data = matrix_nd2nz(layer.linear_attn.in_proj_qkv.weight)
-                    layer.linear_attn.in_proj_z.weight.data = matrix_nd2nz(layer.linear_attn.in_proj_z.weight)
-                    layer.linear_attn.in_proj_a.weight.data = matrix_nd2nz(layer.linear_attn.in_proj_a.weight)
-                    layer.linear_attn.in_proj_b.weight.data = matrix_nd2nz(layer.linear_attn.in_proj_b.weight)
+                    # in_proj_* stay ND: fused Concat+Matmul in ForwardAttnLinear.
+                    # conv1d kernel expects ND layout (channel-major [C,1,K]), not NZ.
                     layer.linear_attn.out_proj.weight.data = matrix_nd2nz(layer.linear_attn.out_proj.weight)
-                    layer.linear_attn.conv1d.weight.data = matrix_nd2nz(layer.linear_attn.conv1d.weight)
                 layer.mlp.gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.gate_up_proj.weight)
                 layer.mlp.down_proj.weight.data = matrix_nd2nz(layer.mlp.down_proj.weight)
             torch.npu.empty_cache()
@@ -959,7 +974,7 @@ class Qwen3_5(nn.Module):
         config.n_heads = args.n_heads
         config.n_kv_heads = args.n_kv_heads
         config.head_dim = args.head_dim
-        config.rope_head_dim = args.head_dim
+        config.rope_head_dim = args.rotary_dim
         config.norm_eps = args.norm_eps
         config.rope_theta = args.rope_theta
         config.softmax_scale = args.head_dim ** -0.5
@@ -973,35 +988,111 @@ class Qwen3_5(nn.Module):
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size
         config.max_num_batched_tokens = args.max_num_batched_tokens
-        config.attn_type = AttnMHA
+        config.attn_type = AttnHybrid
+        config.full_attention_interval = args.full_attention_interval
+        config.linear_num_k_heads = args.linear_num_key_heads
+        config.linear_num_v_heads = args.linear_num_value_heads
+        config.linear_key_head_dim = args.linear_key_head_dim
+        config.linear_value_head_dim = args.linear_value_head_dim
+        config.linear_conv_kernel_dim = args.linear_conv_kernel_dim
         config.weight_nz = self.xlite_weight_nz
         config.qkv_bias = args.qkv_bias
         config.qk_norm = args.qk_norm
         config.attn_output_gate = True
 
+        empty_weight = torch.empty(0, dtype=torch.get_default_dtype(), device="npu")
         self.xlite_model = Model()
         self.xlite_model.embed = self.embed_tokens.weight
-        self.xlite_model.norm = self.norm.weight
+        # Gemma RMSNorm weights -> standard RMSNorm scale for xlite.
+        self._xlite_norm_weights = [_gemma_norm_to_xlite(self.norm.weight)]
+        self.xlite_model.norm = self._xlite_norm_weights[0]
         self.xlite_model.head = self.lm_head.weight
-        self.xlite_model.attn_norm = [layer.input_layernorm.weight for layer in self.layers]
-        self.xlite_model.attn_out = [layer.self_attn.o_proj.weight for layer in self.layers if layer.is_full_attention]
-        # Pack as [Q | K | V | Gate] for ForwardAttnMHA + sigmoid_gate_mul.
-        mha_qkv_list = []
-        mha_qkv_bias = []
-        for layer in self.layers:
-            if not layer.is_full_attention:
-                continue
-            mha_qkv, qkv_bias = _mha_qkv_weight(layer.self_attn, args.head_dim, args.n_heads)
-            mha_qkv_list.append(mha_qkv)
-            if qkv_bias is not None:
-                mha_qkv_bias.append(qkv_bias)
-        self.xlite_model.mha_qkv = mha_qkv_list
-        self.xlite_model.mlp_norm = [layer.post_attention_layernorm.weight for layer in self.layers]
+        self._xlite_attn_norm_weights = [
+            _gemma_norm_to_xlite(layer.input_layernorm.weight) for layer in self.layers
+        ]
+        self._xlite_mlp_norm_weights = [
+            _gemma_norm_to_xlite(layer.post_attention_layernorm.weight) for layer in self.layers
+        ]
+        self.xlite_model.attn_norm = self._xlite_attn_norm_weights
+        self.xlite_model.mlp_norm = self._xlite_mlp_norm_weights
         self.xlite_model.mlp_up_gate = [layer.mlp.gate_up_proj.weight for layer in self.layers]
         self.xlite_model.mlp_down = [layer.mlp.down_proj.weight for layer in self.layers]
+
+        # Per-layer lists (n_layers); unused attn type uses empty placeholder.
+        attn_out_list = []
+        mha_qkv_list = []
+        mha_qkv_bias = []
+        linear_in_proj_qkv_list = []
+        linear_in_proj_z_list = []
+        linear_in_proj_b_list = []
+        linear_in_proj_a_list = []
+        linear_conv1d_list = []
+        linear_a_log_list = []
+        linear_dt_bias_list = []
+        linear_norm_list = []
+        linear_out_proj_list = []
+
+        for layer in self.layers:
+            if layer.is_full_attention:
+                attn = layer.self_attn
+                mha_qkv, qkv_bias = _mha_qkv_weight(attn, args.head_dim, args.n_heads)
+                if self.xlite_weight_nz:
+                    mha_qkv = matrix_nd2nz(mha_qkv)
+                attn_out_list.append(attn.o_proj.weight)
+                mha_qkv_list.append(mha_qkv)
+                if qkv_bias is not None:
+                    mha_qkv_bias.append(qkv_bias)
+                linear_in_proj_qkv_list.append(empty_weight)
+                linear_in_proj_z_list.append(empty_weight)
+                linear_in_proj_b_list.append(empty_weight)
+                linear_in_proj_a_list.append(empty_weight)
+                linear_conv1d_list.append(empty_weight)
+                linear_a_log_list.append(empty_weight)
+                linear_dt_bias_list.append(empty_weight)
+                linear_norm_list.append(empty_weight)
+                linear_out_proj_list.append(empty_weight)
+            else:
+                la = layer.linear_attn
+                attn_out_list.append(empty_weight)
+                mha_qkv_list.append(empty_weight)
+                if args.qkv_bias:
+                    mha_qkv_bias.append(empty_weight)
+                linear_in_proj_qkv_list.append(la.in_proj_qkv.weight)
+                linear_in_proj_z_list.append(la.in_proj_z.weight)
+                linear_in_proj_b_list.append(la.in_proj_b.weight)
+                linear_in_proj_a_list.append(la.in_proj_a.weight)
+                linear_conv1d_list.append(la.conv1d.weight)
+                linear_a_log_list.append(la.A_log)
+                linear_dt_bias_list.append(la.dt_bias)
+                # Linear gated RMSNorm uses standard x*w (not Gemma 1+w).
+                linear_norm_list.append(la.norm.weight)
+                linear_out_proj_list.append(la.out_proj.weight)
+
+        self.xlite_model.attn_out = attn_out_list
+        self.xlite_model.mha_qkv = mha_qkv_list
+        self.xlite_model.linear_in_proj_qkv = linear_in_proj_qkv_list
+        self.xlite_model.linear_in_proj_z = linear_in_proj_z_list
+        self.xlite_model.linear_in_proj_b = linear_in_proj_b_list
+        self.xlite_model.linear_in_proj_a = linear_in_proj_a_list
+        self.xlite_model.linear_conv1d = linear_conv1d_list
+        self.xlite_model.linear_a_log = linear_a_log_list
+        self.xlite_model.linear_dt_bias = linear_dt_bias_list
+        self.xlite_model.linear_norm = linear_norm_list
+        self.xlite_model.linear_out_proj = linear_out_proj_list
+
         if args.qk_norm:
-            self.xlite_model.mha_q_norm = [layer.self_attn.q_norm.weight for layer in self.layers if layer.is_full_attention]
-            self.xlite_model.mha_k_norm = [layer.self_attn.k_norm.weight for layer in self.layers if layer.is_full_attention]
+            self._xlite_mha_q_norm_weights = [
+                _gemma_norm_to_xlite(layer.self_attn.q_norm.weight)
+                if layer.is_full_attention else empty_weight
+                for layer in self.layers
+            ]
+            self._xlite_mha_k_norm_weights = [
+                _gemma_norm_to_xlite(layer.self_attn.k_norm.weight)
+                if layer.is_full_attention else empty_weight
+                for layer in self.layers
+            ]
+            self.xlite_model.mha_q_norm = self._xlite_mha_q_norm_weights
+            self.xlite_model.mha_k_norm = self._xlite_mha_k_norm_weights
         if args.qkv_bias:
             self.xlite_model.mha_qkv_bias = mha_qkv_bias
 
@@ -1011,13 +1102,30 @@ class Qwen3_5(nn.Module):
     def init_xlite_kvcache(self, args: ModelArgs):
         block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
         head_num = max(args.n_kv_heads // world_size, 1)
-        # Only full attention layers need KV cache
-        n_full_attn_layers = sum(1 for layer in self.layers if layer.is_full_attention)
-        self.xlite_kv_cache = [(torch.zeros(block_num, block_size, head_num, args.head_dim, dtype=torch.get_default_dtype(), device='npu'),
-                                torch.zeros(block_num, block_size, head_num, args.head_dim, dtype=torch.get_default_dtype(), device='npu'))
-                               for _ in range(n_full_attn_layers)]
-        kv_size = (block_num * head_num * block_size * (args.head_dim + args.head_dim) *
-                   self.xlite_kv_cache[0][0].element_size() * n_full_attn_layers)
+        n_local_k = args.linear_num_key_heads // world_size
+        n_local_v = args.linear_num_value_heads // world_size
+        conv_dim = n_local_k * args.linear_key_head_dim * 2 + n_local_v * args.linear_value_head_dim
+
+        self.xlite_kv_cache = []
+        kv_size = 0
+        for layer in self.layers:
+            if layer.is_full_attention:
+                k = torch.zeros(block_num, block_size, head_num, args.head_dim,
+                                dtype=torch.get_default_dtype(), device="npu")
+                v = torch.zeros(block_num, block_size, head_num, args.head_dim,
+                                dtype=torch.get_default_dtype(), device="npu")
+                self.xlite_kv_cache.append([k, v])
+                kv_size += block_num * head_num * block_size * args.head_dim * 2 * k.element_size()
+            else:
+                conv_state = torch.zeros(
+                    args.max_batch_size, conv_dim, args.linear_conv_kernel_dim,
+                    dtype=torch.get_default_dtype(), device="npu")
+                ssm_state = torch.zeros(
+                    args.max_batch_size, n_local_v, args.linear_key_head_dim, args.linear_value_head_dim,
+                    dtype=torch.get_default_dtype(), device="npu")
+                self.xlite_kv_cache.append([conv_state, ssm_state])
+                kv_size += conv_state.numel() * conv_state.element_size()
+                kv_size += ssm_state.numel() * ssm_state.element_size()
         return kv_size
 
     def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):

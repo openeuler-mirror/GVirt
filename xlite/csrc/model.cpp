@@ -34,6 +34,15 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     indexKWeightsProj.resize(c.nLayers);
     indexKNorm.resize(c.nLayers);
     indexKNormBias.resize(c.nLayers);
+    linearInProjQKV.resize(c.nLayers);
+    linearInProjZ.resize(c.nLayers);
+    linearInProjB.resize(c.nLayers);
+    linearInProjA.resize(c.nLayers);
+    linearConv1d.resize(c.nLayers);
+    linearALog.resize(c.nLayers);
+    linearDtBias.resize(c.nLayers);
+    linearNorm.resize(c.nLayers);
+    linearOutProj.resize(c.nLayers);
     moeGate.resize(c.nLayers);
     moeGateBias.resize(c.nLayers);
     moeSEUpGate.resize(c.nLayers);
@@ -58,6 +67,17 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     for (uint32_t i = 0; i < c.nLayers; i++) {
         moeREUpGateDeqScale[i].resize(c.nRoutedExperts);
         moeREDownDeqScale[i].resize(c.nRoutedExperts);
+    }
+
+    if (c.attnType == XMODEL_ATTN_HYBRID) {
+        if (c.fullAttentionInterval == 0) {
+            throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
+        }
+        _layerTypes.resize(c.nLayers);
+        for (uint32_t i = 0; i < c.nLayers; i++) {
+            _layerTypes[i] = ((i + 1) % c.fullAttentionInterval == 0) ? XMODEL_LAYER_ATTN_FULL
+                                                                      : XMODEL_LAYER_ATTN_LINEAR;
+        }
     }
 }
 
@@ -655,10 +675,222 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     rt.PutTensor(attn);
 }
 
+namespace
+{
+
+void ExpandLinearHeads(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numTokens,
+                       uint32_t nKHeads, uint32_t nVHeads, uint32_t headDim)
+{
+    if (rt.IsDummyRuntime()) {
+        return;
+    }
+    if (nKHeads == nVHeads) {
+        if (in.ptr != out.ptr) {
+            size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
+            CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, in.ptr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
+                                       rt.stream));
+        }
+        return;
+    }
+    if (nVHeads % nKHeads != 0) {
+        throw std::runtime_error("ForwardAttnLinear: num_v_heads must be divisible by num_k_heads");
+    }
+    uint32_t expand = nVHeads / nKHeads;
+    size_t headBytes = headDim * XDtypeBit(in.dtype) / 8;
+    size_t inRowBytes = nKHeads * headDim * XDtypeBit(in.dtype) / 8;
+    size_t outRowBytes = nVHeads * headDim * XDtypeBit(in.dtype) / 8;
+    for (uint32_t t = 0; t < numTokens; ++t) {
+        auto *srcRow = static_cast<uint8_t *>(in.ptr) + t * inRowBytes;
+        auto *dstRow = static_cast<uint8_t *>(out.ptr) + t * outRowBytes;
+        for (uint32_t h = 0; h < nKHeads; ++h) {
+            auto *srcHead = srcRow + h * headBytes;
+            for (uint32_t e = 0; e < expand; ++e) {
+                auto *dstHead = dstRow + (h * expand + e) * headBytes;
+                CHECK_ACL(aclrtMemcpyAsync(dstHead, headBytes, srcHead, headBytes,
+                                           ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            }
+        }
+    }
+}
+
+}  // namespace
+
+void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
+                               std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
+                               XTensor &hiddenState)
+{
+    (void)freqsCis;
+    if (kvCache.size() <= layer || kvCache[layer].size() < 2) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": linear-attention state cache missing at layer " +
+                                 std::to_string(layer));
+    }
+    XTensor &convState = kvCache[layer][0];
+    XTensor &ssmState = kvCache[layer][1];
+
+    uint32_t m = hiddenState.shape[0];
+    uint32_t batch = static_cast<uint32_t>(rt._batch);
+    if (batch == 0 || m % batch != 0) {
+        throw std::runtime_error(
+            "ForwardAttnLinear: token layout requires uniform seqlen per batch item");
+    }
+    uint32_t seqlen = m / batch;
+
+    uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
+    uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
+    uint32_t localKeyDim = nLocalKHeads * _c.linearKeyHeadDim;
+    uint32_t localValueDim = nLocalVHeads * _c.linearValueHeadDim;
+    uint32_t convDim = localKeyDim * 2 + localValueDim;
+    uint32_t qkvDim = localKeyDim * 2 + localValueDim;
+    uint32_t zDim = localValueDim;
+    uint32_t bDim = nLocalVHeads;
+    uint32_t aDim = nLocalVHeads;
+    uint32_t totalOutDim = qkvDim + zDim + bDim + aDim;
+
+    // Step 1: Fused ND projection [W_qkv; W_z; W_b; W_a].
+    // Must stay ND: NZ weights cannot be Concat'd; tiny NZ matmul tiles over-read.
+    XTensor &mixQkv = rt.GetTensor({m, qkvDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &z = rt.GetTensor({m, zDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &b = rt.GetTensor({m, bDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &a = rt.GetTensor({m, aDim}, hiddenState.dtype, DBG_LOC);
+    {
+        std::vector<XTensor> weightInputs = {
+            linearInProjQKV[layer].weight, linearInProjZ[layer].weight, linearInProjB[layer].weight,
+            linearInProjA[layer].weight};
+        XTensor &W = rt.GetTensor({totalOutDim, hiddenState.shape[1]}, hiddenState.dtype, DBG_LOC);
+        XliteOpConcat(rt, weightInputs, W);
+
+        XTensor &projOut = rt.GetTensor({m, totalOutDim}, hiddenState.dtype, DBG_LOC);
+        XliteOpMatmul(rt, hiddenState, W, projOut, false);
+        rt.PutTensor(W);
+
+        std::vector<XTensor> projSplit = {mixQkv, z, b, a};
+        XliteOpSplitCol(rt, projOut, projSplit);
+        rt.PutTensor(projOut);
+    }
+
+    // Step 2: beta = sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias)
+    XTensor &beta = rt.GetTensor({m, nLocalVHeads}, hiddenState.dtype, DBG_LOC);
+    XTensor &g = rt.GetTensor({m, nLocalVHeads}, hiddenState.dtype, DBG_LOC);
+    XliteOpBetaDecay(rt, b, a, linearALog[layer], linearDtBias[layer], beta, g, batch, seqlen,
+                     nLocalVHeads);
+    rt.PutTensor(b);
+    rt.PutTensor(a);
+
+    // Step 3: causal conv1d + SiLU on mixed qkv
+    XTensor &mixTrans = rt.GetTensor({batch, qkvDim, seqlen}, hiddenState.dtype, DBG_LOC);
+    XTensor &convOut = rt.GetTensor({batch, convDim, seqlen}, hiddenState.dtype, DBG_LOC);
+    XTensor &convSeq = rt.GetTensor({batch, seqlen, convDim}, hiddenState.dtype, DBG_LOC);
+    bool decodeStep = rt._linearDecodeStep && (seqlen == 1);
+    {
+        XTensor mix3d;
+        mix3d.Init({batch, seqlen, qkvDim}, mixQkv.dtype, mixQkv.ptr);
+        XliteOpTranspose_1_2(rt, mix3d, mixTrans);
+
+        // Prefill must NOT reuse stale conv_state (Python ignores it and pads zeros).
+        if (!decodeStep && !rt.IsDummyRuntime()) {
+            size_t convBytes = static_cast<size_t>(batch) * convDim * _c.linearConvKernelDim *
+                               XDtypeBit(convState.dtype) / 8;
+            CHECK_ACL(aclrtMemsetAsync(convState.ptr, convBytes, 0, convBytes, rt.stream));
+        }
+
+        XTensor convStateBatch;
+        convStateBatch.Init({batch, convDim, _c.linearConvKernelDim}, convState.dtype,
+                            convState.ptr);
+        XliteOpConv1dAndSiLU(rt, convStateBatch, mixTrans, linearConv1d[layer], convOut,
+                             /*updateState=*/true);
+
+        rt.PutTensor(mixTrans);
+        XliteOpTranspose_1_2(rt, convOut, convSeq);
+        rt.PutTensor(convOut);
+        rt.PutTensor(mixQkv);
+    }
+
+    XTensor convFlat;
+    convFlat.Init({m, convDim}, convSeq.dtype, convSeq.ptr);
+
+    // Step 4-7: split / L2 / expand / gated delta
+    XTensor &query = rt.GetTensor({m, localKeyDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &key = rt.GetTensor({m, localKeyDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &value = rt.GetTensor({m, localValueDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &queryExp =
+        rt.GetTensor({m, nLocalVHeads * _c.linearKeyHeadDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &keyExp =
+        rt.GetTensor({m, nLocalVHeads * _c.linearKeyHeadDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &coreAttn = rt.GetTensor({m, localValueDim}, hiddenState.dtype, DBG_LOC);
+    {
+        std::vector<XTensor> qkvSplit = {query, key, value};
+        XliteOpSplitCol(rt, convFlat, qkvSplit);
+        rt.PutTensor(convSeq);
+
+        XliteOpL2Norm(rt, query, query, _c.normEps, _c.linearKeyHeadDim, nLocalKHeads);
+        XliteOpL2Norm(rt, key, key, _c.normEps, _c.linearKeyHeadDim, nLocalKHeads);
+
+        ExpandLinearHeads(rt, query, queryExp, m, nLocalKHeads, nLocalVHeads, _c.linearKeyHeadDim);
+        ExpandLinearHeads(rt, key, keyExp, m, nLocalKHeads, nLocalVHeads, _c.linearKeyHeadDim);
+        rt.PutTensor(query);
+        rt.PutTensor(key);
+
+        if (!decodeStep && !rt.IsDummyRuntime()) {
+            size_t stateBytes = ssmState.numel * XDtypeBit(ssmState.dtype) / 8;
+            CHECK_ACL(aclrtMemsetAsync(ssmState.ptr, stateBytes, 0, stateBytes, rt.stream));
+        }
+
+        XliteOpRecurrentGatedDeltaRule(rt, queryExp, keyExp, value, beta, g, ssmState, coreAttn,
+                                       batch, seqlen, nLocalVHeads, _c.linearKeyHeadDim,
+                                       _c.linearValueHeadDim);
+        rt.PutTensor(queryExp);
+        rt.PutTensor(keyExp);
+        rt.PutTensor(beta);
+        rt.PutTensor(g);
+        rt.PutTensor(value);
+    }
+
+    // Step 8: RMSNormGated(core, z) = rmsnorm(core) * silu(z)
+    XTensor &gated = rt.GetTensor({m, localValueDim}, hiddenState.dtype, DBG_LOC);
+    {
+        XTensor &normed = rt.GetTensor({m, localValueDim}, hiddenState.dtype, DBG_LOC);
+        XliteOpRmsNorm(rt, coreAttn, linearNorm[layer], normed, _c.normEps, _c.linearValueHeadDim,
+                       true, XTensor(), nLocalVHeads);
+        XTensor &siluIn = rt.GetTensor({m, localValueDim * 2}, hiddenState.dtype, DBG_LOC);
+        std::vector<XTensor> normGateInputs = {z, normed};
+        XliteOpConcatCol(rt, normGateInputs, siluIn);
+        rt.PutTensor(z);
+        rt.PutTensor(normed);
+
+        XliteOpSiluAndMul(rt, siluIn, gated);
+        rt.PutTensor(siluIn);
+        rt.PutTensor(coreAttn);
+    }
+
+    // Step 9: output projection + TP all-reduce
+    {
+        ForwardLinear(rt, layer, gated, linearOutProj, hiddenState);
+        rt.PutTensor(gated);
+
+        if (_c.defTpSize > 1) {
+            if (rt.multiTaskParallel) {
+                rt.NotifyRecordPeerStream();
+            }
+            if (rt.enableCommOptimize || rt.enableMoEAllToAll) {
+                XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
+            } else {
+                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+            }
+        }
+    }
+}
+
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
-    if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
+    if (_c.attnType == XMODEL_ATTN_HYBRID) {
+        if (_layerTypes[layer] == XMODEL_LAYER_ATTN_FULL) {
+            ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
+        } else {
+            ForwardAttnLinear(rt, layer, kvCache, freqsCis, hiddenState);
+        }
+    } else if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
         ForwardAttnMLAV2(rt, layer, kvCache, freqsCis, hiddenState);
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
@@ -1413,6 +1645,47 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                                  ": xlite runtime not inited");
     }
 
+    if (kvCache.size() != _c.nLayers) {
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": state cache size must equal nLayers");
+    }
+
+    if (_c.attnType == XMODEL_ATTN_HYBRID) {
+        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+        uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
+        uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
+        uint32_t convDim =
+            nLocalKHeads * _c.linearKeyHeadDim * 2 + nLocalVHeads * _c.linearValueHeadDim;
+        for (uint32_t i = 0; i < _c.nLayers; i++) {
+            if (kvCache[i].size() != 2) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": each layer must provide two state tensors");
+            }
+            const XTensor &c0 = kvCache[i][0];
+            const XTensor &c1 = kvCache[i][1];
+            if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
+                if (c0.shape.size() != 4 || c1.shape.size() != 4 || c0.shape[1] != _c.blockSize ||
+                    c1.shape[1] != _c.blockSize || c0.shape[2] != expectedKvHeads ||
+                    c1.shape[2] != expectedKvHeads || c0.shape[3] != _c.headDim ||
+                    c1.shape[3] != _c.headDim) {
+                    throw std::runtime_error(
+                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                        ": full-attention cache shape mismatch at layer " + std::to_string(i));
+                }
+            } else {
+                if (c0.shape.size() != 3 || c0.shape[0] != _c.maxBatch || c0.shape[1] != convDim ||
+                    c0.shape[2] != _c.linearConvKernelDim || c1.shape.size() != 4 ||
+                    c1.shape[0] != _c.maxBatch || c1.shape[1] != nLocalVHeads ||
+                    c1.shape[2] != _c.linearKeyHeadDim || c1.shape[3] != _c.linearValueHeadDim) {
+                    throw std::runtime_error(
+                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                        ": linear-attention state shape mismatch at layer " + std::to_string(i));
+                }
+            }
+        }
+        return;
+    }
+
     uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
     if (kCache.shape[1] != _c.blockSize || vCache.shape[1] != _c.blockSize ||
         kCache.shape[2] != expectedKvHeads || vCache.shape[2] != expectedKvHeads ||
@@ -1462,7 +1735,28 @@ size_t XModel::GetTensorPoolSize(int dbg)
     std::vector<std::vector<XTensor>> kvCache(_c.nLayers);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-        if (_c.attnType == XMODEL_ATTN_MHA) {
+        if (_c.attnType == XMODEL_ATTN_HYBRID) {
+            if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
+                XTensor kCache(
+                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                    embed.dtype, nullptr);
+                XTensor vCache(
+                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                    embed.dtype, nullptr);
+                kvCache[i] = {kCache, vCache};
+            } else {
+                uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
+                uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
+                uint32_t convDim =
+                    nLocalKHeads * _c.linearKeyHeadDim * 2 + nLocalVHeads * _c.linearValueHeadDim;
+                XTensor convState({_c.maxBatch, convDim, _c.linearConvKernelDim}, embed.dtype,
+                                  nullptr);
+                XTensor ssmState(
+                    {_c.maxBatch, nLocalVHeads, _c.linearKeyHeadDim, _c.linearValueHeadDim},
+                    embed.dtype, nullptr);
+                kvCache[i] = {convState, ssmState};
+            }
+        } else if (_c.attnType == XMODEL_ATTN_MHA) {
             XTensor kCache({_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
                            embed.dtype, nullptr);
             XTensor vCache({_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
