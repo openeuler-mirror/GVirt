@@ -185,6 +185,20 @@ bool inline isEnvironmentVariableTrue(const char *env_value_cstr)
     return env_value == "true" || env_value == "1" || env_value == "yes" || env_value == "on";
 }
 
+bool inline isEnvironmentVariableFalse(const char *env_value_cstr)
+{
+    if (env_value_cstr == nullptr) {
+        return false;
+    }
+
+    std::string env_value = env_value_cstr;
+    for (size_t i = 0; i < env_value.size(); ++i) {
+        env_value[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(env_value[i])));
+    }
+
+    return env_value == "false" || env_value == "0" || env_value == "no" || env_value == "off";
+}
+
 class XTensorPool;
 class XTensor
 {

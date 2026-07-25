@@ -256,6 +256,7 @@ target_compile_options(_C PRIVATE
 target_include_directories(_C PRIVATE
     ${pybind11_INCLUDE_DIRS}
     ${TORCH_INCLUDE_DIRS}
+    ${ASCEND_CANN_PACKAGE_PATH}/include
 )
 
 target_link_directories(_C PRIVATE

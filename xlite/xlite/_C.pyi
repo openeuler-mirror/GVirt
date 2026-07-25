@@ -405,6 +405,8 @@ class Model:
         mla_q_norm (List[torch.Tensor]): MLA Q norm weights per layer.
         mla_q_norm_bias (List[torch.Tensor]): MLA Q norm bias per layer.
         mla_kv_b (List[torch.Tensor]): MLA KVB weights per layer.
+        mla_wuv (List[torch.Tensor]): MLA W_UV weights per layer, shape (n_local_heads, kv_lora_rank, v_head_dim).
+        mla_wuk_t (List[torch.Tensor]): MLA W_UK^T weights per layer, shape (n_local_heads, qk_nope_head_dim, kv_lora_rank).
         mla_kv_norm (List[torch.Tensor]): MLA KV norm weights per layer.
         mla_kv_norm_bias (List[torch.Tensor]): MLA KV norm bias per layer.
         index_q_b (List[torch.Tensor]): DSA index QB weights per layer.
@@ -518,6 +520,10 @@ class Model:
     """MLA Q norm bias per layer."""
     mla_kv_b: List[torch.Tensor] = ...
     """MLA KVB weights per layer."""
+    mla_wuv: List[torch.Tensor] = ...
+    """MLA W_UV weights per layer, shape (n_local_heads, kv_lora_rank, v_head_dim)."""
+    mla_wuk_t: List[torch.Tensor] = ...
+    """MLA W_UK^T weights per layer, shape (n_local_heads, qk_nope_head_dim, kv_lora_rank)."""
     mla_kv_norm: List[torch.Tensor] = ...
     """MLA KV norm weights per layer."""
     mla_kv_norm_bias: List[torch.Tensor] = ...

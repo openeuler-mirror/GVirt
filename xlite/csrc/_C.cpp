@@ -90,6 +90,8 @@ public:
     std::vector<at::Tensor> mlaQNorm;
     std::vector<at::Tensor> mlaQNormBias;
     std::vector<at::Tensor> mlaKVB;
+    std::vector<at::Tensor> mlaWUV;
+    std::vector<at::Tensor> mlaWUKT;
     std::vector<at::Tensor> mlaKVNorm;
     std::vector<at::Tensor> mlaKVNormBias;
     std::vector<at::Tensor> indexQB;
@@ -365,6 +367,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             throw std::invalid_argument("Mismatched number of layers MLA attention QA/QB/QA "
                                         "norm/KVA/KVB/KV norm parameters");
         }
+        if (mlaWUV.size() != c.nLayers || mlaWUKT.size() != c.nLayers) {
+            {
+                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
+                s << "num of layers: mlaWUV=" << mlaWUV.size() << ", mlaWUKT=" << mlaWUKT.size()
+                  << std::endl;
+            }
+            throw std::invalid_argument("Mismatched number of layers MLA WUV / WUK_T parameters");
+        }
         if (!mlaQKVAInputScale.empty() && mlaQKVAInputScale.size() != c.nLayers) {
             {
                 XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
@@ -472,6 +482,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             }
             throw std::invalid_argument("Mismatched number of layers DSA attention QA/QB/QA "
                                         "norm/KVA/KVB/KV norm parameters");
+        }
+        if (mlaWUV.size() != c.nLayers || mlaWUKT.size() != c.nLayers) {
+            {
+                XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
+                s << "num of layers: mlaWUV=" << mlaWUV.size() << ", mlaWUKT=" << mlaWUKT.size()
+                  << std::endl;
+            }
+            throw std::invalid_argument("Mismatched number of layers DSA WUV / WUK_T parameters");
         }
         if ((!mlaQNormBias.empty() && mlaQNormBias.size() != c.nLayers) ||
             (!mlaKVNormBias.empty() && mlaKVNormBias.size() != c.nLayers)) {
@@ -736,6 +754,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                     InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
                 }
                 InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
+                InitXTensor(_model->mlaWUV[i], mlaWUV[i]);
+                InitXTensor(_model->mlaWUKT[i], mlaWUKT[i]);
                 InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
                 if (!mlaKVNormBias.empty()) {
                     InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
@@ -767,6 +787,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                     InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
                 }
                 InitXTensor(_model->mlaKVB[i], mlaKVB[i]);
+                InitXTensor(_model->mlaWUV[i], mlaWUV[i]);
+                InitXTensor(_model->mlaWUKT[i], mlaWUKT[i]);
                 InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
                 if (!mlaKVNormBias.empty()) {
                     InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
@@ -2349,6 +2371,8 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("mla_q_norm", &_CModel::mlaQNorm)
         .def_readwrite("mla_q_norm_bias", &_CModel::mlaQNormBias)
         .def_readwrite("mla_kv_b", &_CModel::mlaKVB)
+        .def_readwrite("mla_wuv", &_CModel::mlaWUV)
+        .def_readwrite("mla_wuk_t", &_CModel::mlaWUKT)
         .def_readwrite("mla_kv_norm", &_CModel::mlaKVNorm)
         .def_readwrite("mla_kv_norm_bias", &_CModel::mlaKVNormBias)
         .def_readwrite("mla_qkv_a_input_scale", &_CModel::mlaQKVAInputScale)

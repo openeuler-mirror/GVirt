@@ -1,7 +1,37 @@
-export FORWARD_BACKEND=xlite
+export FORWARD_BACKEND=${FORWARD_BACKEND:-xlite}
+cd "$(dirname "$0")/.."
 models_base_path=${1:-/mnt/nvme0n1/models}
 test_config_path=tests/test_config.json
 test_input_path=tests/test_input_default.json
+
+if [ -n "${XLITE_NPUS:-}" ]; then
+    export ASCEND_RT_VISIBLE_DEVICES=$XLITE_NPUS
+fi
+if [ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" ]; then
+    export XLITE_DEVS_PER_NODE=$(echo $ASCEND_RT_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
+fi
+export XLITE_DP_SIZE=${XLITE_DP_SIZE:-1}
+if [ "${XLITE_GRAPH:-0}" = "1" ]; then
+    export XLITE_ENABLE_GRAPH_COMM=1
+else
+    export XLITE_ENABLE_GRAPH_COMM=0
+fi
+export MASTER_PORT=${MASTER_PORT:-$((29600 + RANDOM % 399))}
+
+# Usage (env-driven):
+#   XLITE_NPUS=<devs>    NPU ids (e.g. 0,1,...,15); -> ASCEND_RT_VISIBLE_DEVICES
+#   XLITE_DP_SIZE=<dp>   DP size (default 1 = pure TP)
+#   XLITE_GRAPH=<0|1>    1 = in-graph comm (default 0 = eager)
+#   MODEL=<func>         run.sh function; omit for the default sweep
+#   MAX_NEW_TOKENS, TEMPERATURE, RUN_MODE, FORWARD_BACKEND as before
+# Example: XLITE_NPUS=0,1,...,15 XLITE_GRAPH=1 XLITE_DP_SIZE=2 \
+#          MAX_NEW_TOKENS=16 MODEL=run_deepseek_v3_w8a8 bash tests/run.sh /mnt/sdb/models
+#
+# DP layout: world_size = tp_size * dp_size; contiguous tp_size ranks form a TP
+# group, same tp_rank across groups form a DP group. Dense layers shard within
+# the TP group; MoE experts span the full world (moe_ep_size * moe_tp_size ==
+# world_size, keep config's moe_ep_size as-is). DP only changes XLITE_DP_SIZE.
+# Interactive mode rejects XLITE_DP_SIZE>1 (use single/bench).
 
 RUN_ARGS=(--config "$test_config_path") # 通用运行参数数组
 max_new_tokens=${MAX_NEW_TOKENS:-128}
@@ -27,12 +57,27 @@ else
     export HCCL_DETERMINISTIC=true
     export LCCL_DETERMINISTIC=true
     RUN_ARGS+=(--mode single)
-    echo '[
-        {
-            "query": "How to sleep well at night?",
-            "response": ""
-        }
-    ]' > $test_input_path
+    # DP>1 needs a multiple of dp_size IDENTICAL queries so every DP rank gets
+    # the same row count (uniform m for MoE AllGather/ReduceScatter); no rank
+    # gets an empty-query sentinel whose MoE forward would corrupt the real
+    # query via the DP AllGather. dp_size==1 keeps the original single query.
+    _dp_n=${XLITE_DP_SIZE:-1}
+    if [ "$_dp_n" -gt 1 ]; then
+        _nrows=$(python -c "import sys; dp=int(sys.argv[1]); print(((dp+dp-1)//dp)*dp)" "$_dp_n")
+        python - "$test_input_path" "$_nrows" <<'PY'
+import json, sys
+path, n = sys.argv[1], int(sys.argv[2])
+item = {"query": "How to sleep well at night?", "response": ""}
+json.dump([item for _ in range(n)], open(path, "w"), ensure_ascii=False, indent=4)
+PY
+    else
+        echo '[
+            {
+                "query": "How to sleep well at night?",
+                "response": ""
+            }
+        ]' > $test_input_path
+    fi
     RUN_ARGS+=(--input-file "$test_input_path")
 fi
 
@@ -71,12 +116,13 @@ function run_qwen2_32B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen2 --ckpt-path $models_base_path/qwen32b/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-8} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen2 --ckpt-path $models_base_path/qwen32b/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
 function run_qwen3_32B()
 {
+    local _mb=$(python -c "import sys; print(max(1, int(sys.argv[1])))" "${XLITE_DP_SIZE:-1}")
     echo '{
         "vocab_size": 151936,
         "dim": 5120,
@@ -88,10 +134,10 @@ function run_qwen3_32B()
         "norm_eps": 1e-06,
         "rope_theta": 1000000.0,
         "dtype": "bfloat16",
-        "max_batch_size": 1,
+        "max_batch_size": '"$_mb"',
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path $models_base_path/Qwen3-32B/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-8} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path $models_base_path/Qwen3-32B/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -115,15 +161,16 @@ function run_qwen3_moe_30B()
         "moe_ep_size": 8,
         "moe_tp_size": 1,
         "dtype": "bfloat16",
-        "max_batch_size": 1,
+        "max_batch_size": 64,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path $models_base_path/Qwen3-30B-A3B-Instruct-2507/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-8} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_moe --ckpt-path $models_base_path/Qwen3-30B-A3B-Instruct-2507/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
 function run_llama_7B()
 {
+    local dp=${XLITE_DP_SIZE:-1}
     echo '{
         "vocab_size": 32000,
         "dim": 4096,
@@ -133,10 +180,10 @@ function run_llama_7B()
         "n_kv_heads": 32,
         "norm_eps": 1e-05,
         "dtype": "float16",
-        "max_batch_size": 1,
+        "max_batch_size": '"$dp"',
         "max_seq_len": 1024
     }' > $test_config_path
-    python tests/generate.py --model llama --ckpt-path $models_base_path/Llama-2-7b-chat-hf/ ${RUN_ARGS[@]}
+    XLITE_DP_SIZE=$dp torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-2} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/Llama-2-7b-chat-hf/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -154,7 +201,7 @@ function run_llama_13B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/Llama2-Chinese-13b-Chat/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-2} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/Llama2-Chinese-13b-Chat/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -172,7 +219,7 @@ function run_llama_34B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/codellama34B/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-8} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model llama --ckpt-path $models_base_path/codellama34B/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -211,7 +258,7 @@ function run_deepseek_v3_w8a8()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-V3.1-w8a8-mtp-QuaRot ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v3 --ckpt-path $models_base_path/DeepSeek-V3.1-w8a8-mtp-QuaRot ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -224,7 +271,7 @@ function run_glm4_moe()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path $models_base_path/GLM-4.7/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe --ckpt-path $models_base_path/GLM-4.7/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -268,7 +315,7 @@ function run_deepseek_v32()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v32 --ckpt-path $models_base_path/DeepSeek-V3.2-bf16/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v32 --ckpt-path $models_base_path/DeepSeek-V3.2-bf16/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -315,7 +362,7 @@ function run_glm5()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/GLM-5/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/GLM-5/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -360,7 +407,7 @@ function run_glm5_w8a8()
         "moe_ep_size": 16,
         "moe_tp_size": 1
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/GLM-5-w8a8/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/GLM-5-w8a8/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -373,7 +420,7 @@ function run_minimax_m2()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model minimax_m2 --ckpt-path $models_base_path/MiniMax-M2.5-bf16/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model minimax_m2 --ckpt-path $models_base_path/MiniMax-M2.5-bf16/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -433,7 +480,7 @@ function run_qwen3_5_moe_35B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_5_moe --ckpt-path $models_base_path/Qwen3.5-35B-A3B/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-8} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_5_moe --ckpt-path $models_base_path/Qwen3.5-35B-A3B/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
@@ -469,7 +516,7 @@ function run_qwen3_5_moe_122B()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=16 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_5_moe --ckpt-path $models_base_path/Qwen3.5-122B-A10B/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3_5_moe --ckpt-path $models_base_path/Qwen3.5-122B-A10B/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 

@@ -23,6 +23,8 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mlaQNorm.resize(c.nLayers);
     mlaQNormBias.resize(c.nLayers);
     mlaKVB.resize(c.nLayers);
+    mlaWUV.resize(c.nLayers);
+    mlaWUKT.resize(c.nLayers);
     mlaKVNorm.resize(c.nLayers);
     mlaKVNormBias.resize(c.nLayers);
     mlpNorm.resize(c.nLayers);
@@ -436,6 +438,128 @@ void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
     rt.PutTensor(attnOutput);
 }
 
+std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
+    XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
+    XTensor &hiddenState)
+{
+    if (_c.defTpSize == 0 || _c.nHeads % _c.defTpSize != 0) {
+        throw std::invalid_argument("nHeads must be divisible by defTpSize and defTpSize > 0");
+    }
+    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+
+    XTensor &kCache = kvCache[layer][0];
+    XTensor &peCache = kvCache[layer][1];
+    XTensor &attnQkvc =
+        rt.GetTensor({hiddenState.shape[0], _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim},
+                     hiddenState.dtype, DBG_LOC);
+    XTensor &attnNormQc =
+        rt.GetTensor({hiddenState.shape[0], _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
+    XTensor &attnQWithQr =
+        rt.GetTensor({hiddenState.shape[0], nLocalHeads * (_c.nopeHeadDim + _c.ropeHeadDim)},
+                     hiddenState.dtype, DBG_LOC);
+
+    ForwardLinear(rt, layer, hiddenState, mlaQKVA, attnQkvc);
+
+    XliteOpMlaPrepare(rt, attnQkvc, mlaQNorm[layer], mlaQNormBias[layer], attnNormQc,
+                      mlaKVNorm[layer], mlaKVNormBias[layer], freqsCis, rt._attnPosition,
+                      _c.qLoraRank, _c.kvLoraRank, _c.ropeHeadDim, _c.blockSize, kCache, peCache,
+                      rt._attnSlotMapping, _c.normEps);
+    rt.PutTensor(attnQkvc);
+
+    ForwardLinear(rt, layer, attnNormQc, mlaQB, attnQWithQr);
+
+    XTensor &qPe = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.ropeHeadDim},
+                                hiddenState.dtype, DBG_LOC);
+    XliteOpRopeComplex(rt, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
+                       _c.ropeHeadDim, _c.nopeHeadDim, 0, attnQWithQr, freqsCis, rt._attnPosition,
+                       qPe);
+
+    return {attnQWithQr, qPe, attnNormQc};
+}
+
+void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
+                              std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
+                              XTensor &hiddenState)
+{
+    XTensor &kCache = kvCache[layer][0];
+    XTensor &peCache = kvCache[layer][1];
+    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+
+    auto [attnQWithQr, qPe, attnNormQc] =
+        ForwardAttnMLACommonV2(rt, layer, kvCache, freqsCis, hiddenState);
+
+    XTensor *topkIndices = nullptr;
+    if (_c.attnType == XMODEL_ATTN_DSA) {
+        topkIndices =
+            ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
+    }
+    rt.PutTensor(attnNormQc);
+
+    XTensor &qAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
+                                    hiddenState.dtype, DBG_LOC);
+    XliteOpEinsumMhtHtdMhd(rt, attnQWithQr, mlaWUKT[layer], qAbsorb, hiddenState.shape[0],
+                           nLocalHeads, _c.nopeHeadDim, _c.kvLoraRank, _c.weightNZ,
+                           static_cast<int>(_c.nopeHeadDim + _c.ropeHeadDim));
+    rt.PutTensor(attnQWithQr);
+
+    XTensor &oAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
+                                    hiddenState.dtype, DBG_LOC);
+    if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
+                                   hiddenState.dtype, DBG_LOC);
+        XliteOpMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, oAbsorb, rt._queryStartLoc, rt._lens,
+                     rt._cachedLens, rt._attnBlockTables, nLocalHeads, _c.ropeHeadDim,
+                     _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
+                     _c.indexTopK, topkIndices == nullptr ? XTensor() : *topkIndices);
+        rt.PutTensor(qk);
+    } else {
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
+                                   hiddenState.dtype, DBG_LOC);
+        XTensor &sv =
+            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.kvLoraRank}, hiddenState.dtype, DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &lastMax = rt.GetTensor({hiddenState.shape[0], nLocalHeads}, FP32, DBG_LOC);
+        XTensor &lastSum = rt.GetTensor({hiddenState.shape[0], nLocalHeads}, FP32, DBG_LOC);
+        XliteOpFlashMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, sv, max, sum, lastMax, lastSum,
+                          _sync, oAbsorb, rt._queryStartLoc, rt._lens, rt._cachedLens,
+                          rt._attnBlockTables, nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
+                          _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
+                          rt._tileSizeOfCachedKV, _c.indexTopK,
+                          topkIndices == nullptr ? XTensor() : *topkIndices);
+        rt.PutTensor(lastSum);
+        rt.PutTensor(lastMax);
+        rt.PutTensor(sum);
+        rt.PutTensor(max);
+        rt.PutTensor(sv);
+        rt.PutTensor(qk);
+    }
+    if (topkIndices != nullptr) {
+        rt.PutTensor(*topkIndices);
+    }
+    rt.PutTensor(qPe);
+    rt.PutTensor(qAbsorb);
+
+    XTensor &attnOutput =
+        rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.vHeadDim}, hiddenState.dtype, DBG_LOC);
+    XliteOpEinsumMhtHtdMhd(rt, oAbsorb, mlaWUV[layer], attnOutput, hiddenState.shape[0],
+                           nLocalHeads, _c.kvLoraRank, _c.vHeadDim, _c.weightNZ);
+    rt.PutTensor(oAbsorb);
+
+    ForwardLinear(rt, layer, attnOutput, attnOut, hiddenState);
+    if (_c.defTpSize > 1) {
+        if (rt.multiTaskParallel) {
+            rt.NotifyRecordPeerStream();
+        }
+        if (rt.enableCommOptimize || rt.enableMoEAllToAll) {
+            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
+        } else {
+            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
+        }
+    }
+    rt.PutTensor(attnOutput);
+}
+
 void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                             std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
                             XTensor &hiddenState)
@@ -772,7 +896,7 @@ void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<X
     }
 
     if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
-        ForwardAttnMLA(rt, layer, kvCache, freqsCis, hiddenState);
+        ForwardAttnMLAV2(rt, layer, kvCache, freqsCis, hiddenState);
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
     } else {
@@ -860,25 +984,48 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
         XTensor &routingAllDp =
             rt.GetTensor({mAllDp, _c.nRoutedExperts}, routingPerDp.dtype, DBG_LOC);
 
-        // 获取临时buffer
-        XTensor &packedSend = rt.GetTensor({static_cast<uint32_t>(totalBytes)}, INT8, DBG_LOC);
+        bool inGraph = rt.AllGatherInGraphActive(DP) && (m <= _c.maxBatch);
+
+        // packedSend: graph → bind fixed _agSendBuf; eager → pool GetTensor (returned below).
+        XTensor sendFixed;
+        XTensor *sendOut = nullptr;
+        if (inGraph) {
+            sendFixed.Init({totalBytes}, INT8, rt._agSendBuf.ptr);
+            sendOut = &sendFixed;
+        } else {
+            sendOut = &rt.GetTensor({totalBytes}, INT8, DBG_LOC);
+        }
 
         // 打包tensor
         std::vector<XTensor> inputs = {inputPerDp, weightsPerDp, routingPerDp};
-        XliteOpConcat(rt, inputs, packedSend);
+        XliteOpConcat(rt, inputs, *sendOut);
         rt.PutTensor(routingPerDp);
         rt.PutTensor(weightsPerDp);
 
-        // 一次AllGather
-        XTensor &packedRecv = rt.GetTensor({static_cast<uint32_t>(allTotalBytes)}, INT8, DBG_LOC);
-        XliteOpAllGather(rt, packedSend, packedRecv, DP);
-        rt.PutTensor(packedSend);
+        // packedRecv: graph → bind fixed _agRecvBuf; eager → pool GetTensor.
+        XTensor recvFixed;
+        XTensor *recvOut = nullptr;
+        if (inGraph) {
+            recvFixed.Init({allTotalBytes}, INT8, rt._agRecvBuf.ptr);
+            recvOut = &recvFixed;
+        } else {
+            recvOut = &rt.GetTensor({allTotalBytes}, INT8, DBG_LOC);
+        }
+        if (inGraph) {
+            rt.AllGatherInGraph(sendOut->ptr, recvOut->ptr, m,
+                                static_cast<int>(XDtype2HcclDtype(INT8)), DP);
+        } else {
+            XliteOpAllGather(rt, *sendOut, *recvOut, DP);
+        }
 
-        // 拆包为多个Tensor
         std::vector<XTensor> outputs = {inputAllDp, weightsAllDp, routingAllDp};
         std::vector<size_t> sizes = {bytesInput, bytesWeights, bytesRouting};
-        XliteOpSplit(rt, packedRecv, outputs, sizes, _c.defDpSize);
-        rt.PutTensor(packedRecv);
+        XliteOpSplit(rt, *recvOut, outputs, sizes, _c.defDpSize);
+
+        if (!inGraph) {
+            rt.PutTensor(*sendOut);  // eager: return pool; graph: fixed buffer, no Put
+            rt.PutTensor(*recvOut);
+        }
 
         XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
         XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
@@ -916,12 +1063,29 @@ void XModel::ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weig
     uint32_t end = start + nLocalRoutedExperts;
 
     if (_c.defDpSize > 1) {
-        XTensor &tokenSortedAllDp =
-            rt.GetTensor({mAllDp, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
-        XliteOpUnpermutation(rt, expertsSorted, unpIdx, routing, weights, start, end,
-                             tokenSortedAllDp);
-        XliteOpReduceScatter(rt, tokenSortedAllDp, tokenSorted, DP);
-        rt.PutTensor(tokenSortedAllDp);
+        bool inGraph = rt.ReduceScatterInGraphActive(DP) && (m <= _c.maxBatch);
+        XTensor rsSendFixed;  // graph: bound to _rsSendBuf; eager: unused
+        XTensor *sendOut = nullptr;
+        if (inGraph) {
+            rsSendFixed.Init({mAllDp, _c.hiddenSize}, tokenSorted.dtype, rt._rsSendBuf.ptr);
+            sendOut = &rsSendFixed;
+        } else {
+            sendOut = &rt.GetTensor({mAllDp, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
+        }
+        XliteOpUnpermutation(rt, expertsSorted, unpIdx, routing, weights, start, end, *sendOut);
+        if (inGraph) {
+            rt.ReduceScatterInGraph(rt._rsSendBuf.ptr, rt._rsRecvBuf.ptr, m,
+                                    static_cast<int>(XDtype2HcclDtype(tokenSorted.dtype)), DP);
+            size_t recvBytes =
+                static_cast<size_t>(m) * _c.hiddenSize * XDtypeBit(tokenSorted.dtype) / 8;
+            CHECK_ACL(aclrtMemcpyAsync(tokenSorted.ptr, recvBytes, rt._rsRecvBuf.ptr, recvBytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        } else {
+            XliteOpReduceScatter(rt, *sendOut, tokenSorted, DP);
+        }
+        if (!inGraph) {
+            rt.PutTensor(*sendOut);  // eager: return pool tensor; graph: fixed buffer, skip
+        }
     } else {
         XliteOpUnpermutation(rt, expertsSorted, unpIdx, routing, weights, start, end, tokenSorted);
     }
@@ -1407,7 +1571,10 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
 {
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
-                   _c.blockSize);
+                   _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                   static_cast<int>(embed.dtype),
+                   (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
+                                                  : static_cast<int>(embed.dtype));
     if (rt.dpSize() == 1 && rt.batchedTokens < input.shape[0]) {
         input.View({rt.batchedTokens});
         output.View({input.shape[0], output.shape[1]});
@@ -1437,7 +1604,10 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
 {
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
-                   _c.blockSize);
+                   _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                   static_cast<int>(embed.dtype),
+                   (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
+                                                  : static_cast<int>(embed.dtype));
     if (rt.dpSize() == 1 && rt.batchedTokens < input.shape[0]) {
         input.View({rt.batchedTokens});
         output.View({input.shape[0], output.shape[1]});
@@ -1453,7 +1623,10 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
     CheckForwardParam(rt, kvCache);
 
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
-                   _c.blockSize);
+                   _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                   static_cast<int>(embed.dtype),
+                   (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
+                                                  : static_cast<int>(embed.dtype));
     if (rt.dpSize() == 1 && rt.batchedTokens < input.shape[0]) {
         input.View({rt.batchedTokens});
     }
@@ -1629,7 +1802,10 @@ size_t XModel::GetTensorPoolSize(int dbg)
     XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype, nullptr);
 
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
-                   _c.blockSize);
+                   _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                   static_cast<int>(embed.dtype),
+                   (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
+                                                  : static_cast<int>(embed.dtype));
     Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
     XTensor indices;
     indices.Init({batchSize}, INT32, nullptr);
