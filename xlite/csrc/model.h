@@ -66,9 +66,7 @@ struct XModelConfig {
     uint32_t linearKeyHeadDim = 0;
     uint32_t linearValueHeadDim = 0;
     uint32_t linearConvKernelDim = 0;
-    // Per-layer attention type for hybrid models (Qwen3.5): 0=full, 1=linear.
-    // When empty and attnType==HYBRID, auto-generated from fullAttentionInterval.
-    std::vector<uint32_t> layerTypes;
+    // Hybrid (Qwen3.5): full-attention every fullAttentionInterval layers.
     uint32_t fullAttentionInterval = 4;
 
     // mlp

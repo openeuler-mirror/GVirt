@@ -57,7 +57,7 @@ enum commType {
     MAX_COMM_TYPE,
 };
 
-class XRuntime  // NOLINT(clang-analyzer-optin.performance.Padding)
+class XRuntime
 {
 public:
     XRuntime(uint32_t devid, size_t sizeMB = 0, uint32_t rankId = 0, uint32_t tpSize = 1,

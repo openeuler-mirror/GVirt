@@ -30,7 +30,6 @@ if forward_backend == "xlite":
     block_size = 128
     from xlite._C import (
         Runtime, ModelConfig, ModelAttnMeta, AttnHybrid, Model,
-        LayerAttnFull, LayerAttnLinear,
     )
     import numpy as np
 
@@ -692,7 +691,8 @@ class Qwen3_5(nn.Module):
             f"linear_num_value_heads ({self.args.linear_num_value_heads}) must be divisible by world_size ({world_size})"
         )
 
-        self.xlite_weight_nz = True if forward_backend == "xlite" else False
+        # Tied embed/lm_head share storage; NZ must not rewrite embed (ND row lookup).
+        self.xlite_weight_nz = forward_backend == "xlite" and not self.args.tie_word_embeddings
 
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
         n_local_kv_heads = max(1, self.args.n_kv_heads // world_size)
@@ -938,17 +938,12 @@ class Qwen3_5(nn.Module):
             self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
             for layer_id, layer in enumerate(self.layers):
                 if layer.is_full_attention:
-                    layer.self_attn.q_proj.weight.data = matrix_nd2nz(layer.self_attn.q_proj.weight)
-                    layer.self_attn.k_proj.weight.data = matrix_nd2nz(layer.self_attn.k_proj.weight)
-                    layer.self_attn.v_proj.weight.data = matrix_nd2nz(layer.self_attn.v_proj.weight)
+                    # q/k/v stay ND until packed as [Q|K|V|Gate] in init_xlite_model.
                     layer.self_attn.o_proj.weight.data = matrix_nd2nz(layer.self_attn.o_proj.weight)
                 else:
-                    layer.linear_attn.in_proj_qkv.weight.data = matrix_nd2nz(layer.linear_attn.in_proj_qkv.weight)
-                    layer.linear_attn.in_proj_z.weight.data = matrix_nd2nz(layer.linear_attn.in_proj_z.weight)
-                    layer.linear_attn.in_proj_a.weight.data = matrix_nd2nz(layer.linear_attn.in_proj_a.weight)
-                    layer.linear_attn.in_proj_b.weight.data = matrix_nd2nz(layer.linear_attn.in_proj_b.weight)
+                    # in_proj_* stay ND: fused Concat+Matmul in ForwardAttnLinear.
+                    # conv1d kernel expects ND layout (channel-major [C,1,K]), not NZ.
                     layer.linear_attn.out_proj.weight.data = matrix_nd2nz(layer.linear_attn.out_proj.weight)
-                    layer.linear_attn.conv1d.weight.data = matrix_nd2nz(layer.linear_attn.conv1d.weight)
                 layer.mlp.gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.gate_up_proj.weight)
                 layer.mlp.down_proj.weight.data = matrix_nd2nz(layer.mlp.down_proj.weight)
             torch.npu.empty_cache()
@@ -994,10 +989,6 @@ class Qwen3_5(nn.Module):
         config.max_batch_size = args.max_batch_size
         config.max_num_batched_tokens = args.max_num_batched_tokens
         config.attn_type = AttnHybrid
-        config.layer_types = [
-            LayerAttnFull if layer.is_full_attention else LayerAttnLinear
-            for layer in self.layers
-        ]
         config.full_attention_interval = args.full_attention_interval
         config.linear_num_k_heads = args.linear_num_key_heads
         config.linear_num_v_heads = args.linear_num_value_heads

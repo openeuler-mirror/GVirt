@@ -206,21 +206,19 @@ static void InitOptionalXTensor(XTensor &out, at::Tensor &in)
     }
 }
 
-static std::vector<uint32_t> ResolveLayerTypes(XModelConfig &c)
+static std::vector<uint32_t> ResolveLayerTypes(const XModelConfig &c)
 {
-    std::vector<uint32_t> layerTypes = c.layerTypes;
-    if (!layerTypes.empty()) {
-        if (layerTypes.size() != c.nLayers) {
-            throw std::invalid_argument("layerTypes size must equal nLayers");
-        }
+    std::vector<uint32_t> layerTypes;
+    if (c.attnType != XMODEL_ATTN_HYBRID) {
         return layerTypes;
     }
-    if (c.attnType == XMODEL_ATTN_HYBRID) {
-        layerTypes.resize(c.nLayers);
-        for (uint32_t i = 0; i < c.nLayers; i++) {
-            layerTypes[i] = ((i + 1) % c.fullAttentionInterval == 0) ? XMODEL_LAYER_ATTN_FULL
-                                                                     : XMODEL_LAYER_ATTN_LINEAR;
-        }
+    if (c.fullAttentionInterval == 0) {
+        throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
+    }
+    layerTypes.resize(c.nLayers);
+    for (uint32_t i = 0; i < c.nLayers; i++) {
+        layerTypes[i] = ((i + 1) % c.fullAttentionInterval == 0) ? XMODEL_LAYER_ATTN_FULL
+                                                                 : XMODEL_LAYER_ATTN_LINEAR;
     }
     return layerTypes;
 }
@@ -228,10 +226,10 @@ static std::vector<uint32_t> ResolveLayerTypes(XModelConfig &c)
 static bool IsConfigLayerFullAttention(XModelConfig &c, uint32_t layer,
                                        const std::vector<uint32_t> &layerTypes)
 {
-    if (layerTypes.empty()) {
-        return c.attnType == XMODEL_ATTN_MHA;
+    if (c.attnType == XMODEL_ATTN_HYBRID) {
+        return layerTypes[layer] == XMODEL_LAYER_ATTN_FULL;
     }
-    return layerTypes[layer] == XMODEL_LAYER_ATTN_FULL;
+    return c.attnType == XMODEL_ATTN_MHA;
 }
 
 void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
@@ -591,7 +589,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             throw std::invalid_argument(
                 "Mismatched number of layers MHA Q/K norm parameters for hybrid model");
         }
-        ResolveLayerTypes(c);
+        if (c.fullAttentionInterval == 0) {
+            throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
+        }
     } else {
         {
             XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
@@ -2308,7 +2308,6 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)
         .def_readwrite("linear_value_head_dim", &XModelConfig::linearValueHeadDim)
         .def_readwrite("linear_conv_kernel_dim", &XModelConfig::linearConvKernelDim)
-        .def_readwrite("layer_types", &XModelConfig::layerTypes)
         .def_readwrite("full_attention_interval", &XModelConfig::fullAttentionInterval);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
@@ -2331,11 +2330,6 @@ PYBIND11_MODULE(_C, m)
         .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
         .value("AttnDSA", XModelAttnType::XMODEL_ATTN_DSA)
         .value("AttnHybrid", XModelAttnType::XMODEL_ATTN_HYBRID)
-        .export_values();
-
-    py::enum_<XModelLayerAttnType>(m, "LayerAttnType")
-        .value("LayerAttnFull", XModelLayerAttnType::XMODEL_LAYER_ATTN_FULL)
-        .value("LayerAttnLinear", XModelLayerAttnType::XMODEL_LAYER_ATTN_LINEAR)
         .export_values();
 
     py::enum_<XModelScoringFuncType>(m, "ScoringFuncType")

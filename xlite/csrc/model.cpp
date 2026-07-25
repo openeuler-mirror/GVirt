@@ -69,12 +69,10 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
         moeREDownDeqScale[i].resize(c.nRoutedExperts);
     }
 
-    _layerTypes = c.layerTypes;
-    if (!_layerTypes.empty()) {
-        if (_layerTypes.size() != c.nLayers) {
-            throw std::invalid_argument("layerTypes size must equal nLayers");
+    if (c.attnType == XMODEL_ATTN_HYBRID) {
+        if (c.fullAttentionInterval == 0) {
+            throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
         }
-    } else if (c.attnType == XMODEL_ATTN_HYBRID) {
         _layerTypes.resize(c.nLayers);
         for (uint32_t i = 0; i < c.nLayers; i++) {
             _layerTypes[i] = ((i + 1) % c.fullAttentionInterval == 0) ? XMODEL_LAYER_ATTN_FULL
@@ -886,16 +884,13 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
-    if (!_layerTypes.empty()) {
+    if (_c.attnType == XMODEL_ATTN_HYBRID) {
         if (_layerTypes[layer] == XMODEL_LAYER_ATTN_FULL) {
             ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
         } else {
             ForwardAttnLinear(rt, layer, kvCache, freqsCis, hiddenState);
         }
-        return;
-    }
-
-    if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
+    } else if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
         ForwardAttnMLAV2(rt, layer, kvCache, freqsCis, hiddenState);
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
@@ -1655,7 +1650,7 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                                  ": state cache size must equal nLayers");
     }
 
-    if (!_layerTypes.empty()) {
+    if (_c.attnType == XMODEL_ATTN_HYBRID) {
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
         uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
         uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
@@ -1740,7 +1735,7 @@ size_t XModel::GetTensorPoolSize(int dbg)
     std::vector<std::vector<XTensor>> kvCache(_c.nLayers);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-        if (!_layerTypes.empty()) {
+        if (_c.attnType == XMODEL_ATTN_HYBRID) {
             if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
                 XTensor kCache(
                     {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
