@@ -67,11 +67,7 @@ class ModelArgs:
     model_type: str = "qwen3_moe"
 
     def __post_init__(self):
-        # max_num_batched_tokens = max(max_seq_len, max_batch_size): decoupled from
-        # the product (was max_seq_len*max_batch_size) to avoid oversizing the AG
-        # buffers — prefill ≤ max_seq_len, decode batch ≤ max_batch_size, the max
-        # covers any single forward. KV cache still sized by max_batch_size.
-        self.max_num_batched_tokens = max(self.max_seq_len, self.max_batch_size)
+        self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
         if self.head_dim is None:
             self.head_dim = self.dim // self.n_heads
 
