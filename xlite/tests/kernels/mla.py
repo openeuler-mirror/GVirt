@@ -10,20 +10,17 @@
 """
 mla kernel test (unified).
 
-Each (model, work) case runs the `mla` and `mla_v2` interfaces against the
-*same* random inputs, so the two kernel paths share one standard reference
-implementation. The standard loop computes:
+Each (model, work) case runs the `mla_v2` interface against a standard
+reference implementation. The standard loop computes:
 
     q_absorb  = q_nope @ WUK[:, :nope_head_dim]            # host-side absorb
     scores    = (q_absorb @ k_cache + q_rope @ pe_cache) * scale + mask
     o_absorb  = softmax(scores) @ k_cache                  # shape (t, h, kv_lora_rank)
     output    = o_absorb @ WUV                             # shape (t, h, v_head_dim)
 
-- `mla` / `mla_with_indices`: one fused kernel takes qWithQr + wkvb, does
-  absorb + attention + WUV internally; output is the projected tensor (v_head_dim).
 - `mla_v2`: three-kernel path — wuk einsum + mla_v2 attention kernel + wuv
-  einsum — takes qWithQr + qr + wuk_t + wuv, output is still the projected
-  tensor (v_head_dim). Both paths are compared against `output`.
+  einsum — takes qWithQr + qr + wuk_t + wuv, output is the projected tensor
+  (v_head_dim), compared against `output`.
 
 `pe_cache` here is the RoPE'd key slice (shape (batch, max_seq, rope_head_dim))
 — named `v_cache` historically in mla.py; semantically identical to pe_cache in
@@ -37,7 +34,7 @@ import math
 import numpy as np
 import warnings
 from typing import Iterable
-from xlite._C import Runtime, mla, mla_with_indices, mla_v2
+from xlite._C import Runtime, mla_v2
 from xlite._C import print as xlite_print
 from tests.models.weight_utils import matrix_nd2nz
 
@@ -123,7 +120,6 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
 
             # xlite
             qWithQr_xlite = qWithQr_standard.clone()
-            output_xlite = torch.zeros(total_query_len, n_heads, v_head_dim)
 
             kvcache_block_num = max_num_blocks * batch
             k_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, kv_lora_rank)
@@ -241,38 +237,6 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                 k_cache_xlite[cache_block_idx, :current_seq_len] = current_k[:, seq_start:seq_end]
                 pe_cache_xlite[cache_block_idx, :current_seq_len] = current_pe[:, seq_start:seq_end]
 
-        xlite_wkvb = wkvb.view(n_heads * (nope_head_dim + v_head_dim), kv_lora_rank)
-        if weight_nz:
-            xlite_wkvb = matrix_nd2nz(xlite_wkvb)
-        torch.npu.synchronize()
-
-        # ----- mla kernel (absorb + WUV inside) -----
-        mla(rt, qWithQr_xlite, k_cache_xlite, pe_cache_xlite, xlite_wkvb,
-                   output_xlite, query_start_loc, query_lens, cached_lens,
-                   block_tables, n_heads, rope_head_dim, nope_head_dim,
-                   v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, max_num_blocks, scale, weight_nz, enable_flash, tile_size)
-
-        logging.info(
-            "mla %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s) executed!",
-            name,
-            n_heads,
-            rope_head_dim,
-            nope_head_dim,
-            v_head_dim,
-            kv_lora_rank,
-            test_dtype,
-            batch,
-            cached_lens_list,
-            query_len_list,
-        )
-
-        try:
-            torch.testing.assert_close(output_xlite, output_standard, atol=1e-5, rtol=5e-02)
-        except AssertionError as e:
-            logging.error(f'{e}')
-            logging.error(f'torch_npu: {output_standard}')
-            logging.error(f'xlite: {output_xlite}')
-
         # ----- mla_v2 kernel (wuk einsum + mla_v2 + wuv einsum) -----
         torch.npu.synchronize()
         mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite, wuv_xlite,
@@ -337,7 +301,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             # Concatenate topk_indices into a flattened tensor
             # Shape: (total_query_len, topk)
             topk_indices_tensor = torch.stack(topk_indices_list)  # (total_query_len, topk)
-            # mla_with_indices / mla_v2 假设每行的 topk indices 已按升序排列
+            # mla_v2 假设每行的 topk indices 已按升序排列
             topk_indices_tensor, _ = torch.sort(topk_indices_tensor, dim=-1)
 
             # Standard MLA with topk mask: apply -inf mask before softmax
@@ -391,39 +355,9 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             output_standard_with_topk = torch.cat(outputs_with_topk, dim=0)
 
             # xlite MLA with topkIndices
-            output_xlite_with_topk = torch.zeros(total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
             output_xlite_with_topk_v2 = torch.zeros(total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
 
             topk_indices_tensor = topk_indices_tensor.to(dtype=torch.int32)
-            torch.npu.synchronize()
-
-            mla_with_indices(rt, qWithQr_xlite, k_cache_xlite, pe_cache_xlite, xlite_wkvb,
-                output_xlite_with_topk, query_start_loc, query_lens, cached_lens,
-                block_tables, n_heads, rope_head_dim, nope_head_dim,
-                v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, max_num_blocks, scale,
-                topk, topk_indices_tensor, weight_nz, enable_flash, tile_size)
-
-            logging.info(
-                "mla with topkIndices %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) executed!",
-                name,
-                n_heads,
-                rope_head_dim,
-                nope_head_dim,
-                v_head_dim,
-                kv_lora_rank,
-                test_dtype,
-                batch,
-                cached_lens_list,
-                query_len_list,
-                topk,
-            )
-
-            try:
-                torch.testing.assert_close(output_xlite_with_topk, output_standard_with_topk, atol=1e-5, rtol=5e-02)
-            except AssertionError as e:
-                logging.error(f'MLA with topkIndices test failed: {e}')
-                logging.error(f'Standard MLA with topk mask: {output_standard_with_topk}')
-                logging.error(f'xlite MLA with topkIndices: {output_xlite_with_topk}')
 
             torch.npu.synchronize()
             mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite, wuv_xlite,

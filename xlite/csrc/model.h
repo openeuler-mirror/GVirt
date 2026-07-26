@@ -153,7 +153,6 @@ public:
     std::vector<MatmulWeight> mlaQB;
     std::vector<XTensor> mlaQNorm;
     std::vector<XTensor> mlaQNormBias;
-    std::vector<XTensor> mlaKVB;
     std::vector<XTensor> mlaWUV;
     std::vector<XTensor> mlaWUKT;
     std::vector<XTensor> mlaKVNorm;
@@ -190,16 +189,11 @@ public:
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
-    std::tuple<XTensor &, XTensor &> ForwardAttnMLACommon(
-        XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
-        XTensor &hiddenState);
     std::tuple<XTensor &, XTensor &, XTensor &> ForwardAttnMLACommonV2(
         XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
         XTensor &hiddenState);
     XTensor *ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
                                 XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis);
-    void ForwardAttnMLA(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
-                        XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttnMLAV2(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                           XTensor &freqsCis, XTensor &hiddenState);
     void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);

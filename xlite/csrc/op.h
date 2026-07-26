@@ -68,21 +68,6 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                            uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
                            uint32_t batch, uint32_t maxNumBlock,
                            uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE);
-void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache,
-                     XTensor &wkvb, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
-                     XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &output,
-                     XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
-                     XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                     uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
-                     uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale,
-                     bool weightNZ = false, uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE,
-                     uint32_t topK = 0, const XTensor &topkIndices = XTensor());
-void XliteOpMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache, XTensor &wkvb,
-                XTensor &qk, XTensor &output, XTensor &queryStartLoc, XTensor &lens,
-                XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
-                uint32_t batch, uint32_t maxNumBlock, float scale, bool weightNZ = false,
-                uint32_t topK = 0, const XTensor &topkIndices = XTensor());
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
                   XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
