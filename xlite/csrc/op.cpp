@@ -62,7 +62,6 @@
 #include "aclrtlaunch_rope_complex_and_cache_bfloat16_t.h"
 #include "aclrtlaunch_flash_attention_float16_t.h"
 #include "aclrtlaunch_flash_attention_bfloat16_t.h"
-#include "aclrtlaunch_flash_mla_bfloat16_t.h"
 #include "aclrtlaunch_norm_float16_t.h"
 #include "aclrtlaunch_norm_bfloat16_t.h"
 #include "aclrtlaunch_mla_prepare_float16_t.h"
@@ -75,7 +74,6 @@
 #include "aclrtlaunch_muls_bfloat16_t.h"
 #include "aclrtlaunch_topk_float.h"
 #include "aclrtlaunch_topk_bfloat16_t.h"
-#include "aclrtlaunch_mla_bfloat16_t.h"
 #include "aclrtlaunch_mla_v2_bfloat16_t.h"
 #include "aclrtlaunch_flash_mla_v2_bfloat16_t.h"
 #include "aclrtlaunch_experts_counts_sum.h"
@@ -978,75 +976,6 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                  sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize,
                  batch, maxNumBlock, tileSizeOfCachedKV);
-}
-
-void XliteOpFlashMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache,
-                     XTensor &wkvb, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
-                     XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &output,
-                     XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
-                     XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                     uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank,
-                     uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, float scale,
-                     bool weightNZ, uint32_t tileSizeOfCachedKV, uint32_t topK,
-                     const XTensor &topkIndices)
-{
-    if (IsDummyRuntime(rt)) {
-        return;
-    }
-    if (tileSizeOfCachedKV > MAX_SOFTMAX_PINGPONG_LEN) {
-        throw std::runtime_error(std::string(__func__) + ": tile size of kv " +
-                                 std::to_string(tileSizeOfCachedKV) + " > " +
-                                 std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
-    }
-    if (topK > MAX_TOPK_NUM) {
-        throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
-                                 std::to_string(MAX_TOPK_NUM));
-    }
-    if (EachXDtype(BF16, qWithQr, kCache, vCache, wkvb, output)) {
-        aclrtlaunch_flash_mla_bfloat16_t(
-            rt.aicNum, rt.stream, qWithQr.ptr, kCache.ptr, vCache.ptr, wkvb.ptr, topkIndices.ptr,
-            qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr,
-            queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
-            nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlock, scale, weightNZ,
-            tileSizeOfCachedKV, topK);
-    } else {
-        std::string err_str = DBG_PREFIX + XT_STR(qWithQr) + XT_STR(kCache) + XT_STR(vCache) +
-                              XT_STR(wkvb) + XT_STR(output);
-        throw std::runtime_error(err_str + " unsupported!");
-    }
-}
-
-void XliteOpMLA(XRuntime &rt, XTensor &qWithQr, XTensor &kCache, XTensor &vCache, XTensor &wkvb,
-                XTensor &qk, XTensor &output, XTensor &queryStartLoc, XTensor &lens,
-                XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                uint32_t nopeHeadDim, uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
-                uint32_t batch, uint32_t maxNumBlock, float scale, bool weightNZ, uint32_t topK,
-                const XTensor &topkIndices)
-{
-    if (IsDummyRuntime(rt)) {
-        return;
-    }
-    if (topK != 0 && maxNumBlock * blockSize > MAX_SOFTMAX_PINGPONG_LEN) {
-        throw std::runtime_error(std::string(__func__) +
-                                 ": topK > 0 is not supported when maxNumBlock (" +
-                                 std::to_string(maxNumBlock) + ") * blockSize > " +
-                                 std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
-    }
-    if (topK > MAX_TOPK_NUM) {
-        throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
-                                 std::to_string(MAX_TOPK_NUM));
-    }
-    if (EachXDtype(BF16, qWithQr, kCache, vCache, wkvb, output)) {
-        aclrtlaunch_mla_bfloat16_t(rt.aicNum, rt.stream, qWithQr.ptr, kCache.ptr, vCache.ptr,
-                                   wkvb.ptr, topkIndices.ptr, qk.ptr, output.ptr, queryStartLoc.ptr,
-                                   lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
-                                   nopeHeadDim, vHeadDim, kvLoraRank, blockSize, batch, maxNumBlock,
-                                   scale, weightNZ, topK);
-    } else {
-        std::string err_str = DBG_PREFIX + XT_STR(qWithQr) + XT_STR(kCache) + XT_STR(vCache) +
-                              XT_STR(wkvb) + XT_STR(output);
-        throw std::runtime_error(err_str + " unsupported!");
-    }
 }
 
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,

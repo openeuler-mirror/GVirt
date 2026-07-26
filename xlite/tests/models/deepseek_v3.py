@@ -1446,7 +1446,6 @@ class DeepSeek_V3(nn.Module):
                 .contiguous()
             for layer in self.layers
         ]
-        self.xlite_model.mla_kv_b = [layer.attn.wkv_b.weight for layer in self.layers]
         self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
         self.xlite_model.index_q_b = [layer.attn.indexer.wq_b.weight for layer in self.layers if layer.attn.indexer is not None]
         self.xlite_model.index_k_weights_proj = [layer.attn.indexer.wk_weights_proj.weight.to(dtype=torch.get_default_dtype()) for layer in self.layers if layer.attn.indexer is not None]

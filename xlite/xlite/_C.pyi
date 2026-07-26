@@ -390,7 +390,6 @@ class Model:
         mla_q_b_deq_scale (List[torch.Tensor]): MLA QB dequantization scale per layer.
         mla_q_norm (List[torch.Tensor]): MLA Q norm weights per layer.
         mla_q_norm_bias (List[torch.Tensor]): MLA Q norm bias per layer.
-        mla_kv_b (List[torch.Tensor]): MLA KVB weights per layer.
         mla_wuv (List[torch.Tensor]): MLA W_UV weights per layer, shape (n_local_heads, kv_lora_rank, v_head_dim).
         mla_wuk_t (List[torch.Tensor]): MLA W_UK^T weights per layer, shape (n_local_heads, qk_nope_head_dim, kv_lora_rank).
         mla_kv_norm (List[torch.Tensor]): MLA KV norm weights per layer.
@@ -504,8 +503,6 @@ class Model:
     """MLA Q norm weights per layer."""
     mla_q_norm_bias: List[torch.Tensor] = ...
     """MLA Q norm bias per layer."""
-    mla_kv_b: List[torch.Tensor] = ...
-    """MLA KVB weights per layer."""
     mla_wuv: List[torch.Tensor] = ...
     """MLA W_UV weights per layer, shape (n_local_heads, kv_lora_rank, v_head_dim)."""
     mla_wuk_t: List[torch.Tensor] = ...
@@ -1709,120 +1706,6 @@ def dequant(rt: Runtime, in_: torch.Tensor, scale: torch.Tensor, out: torch.Tens
 
     Returns:
         None: `out` is written in place.
-    """
-    ...
-
-def mla(
-    rt: Runtime,
-    q_with_qr: torch.Tensor,
-    k_cache: torch.Tensor,
-    v_cache: torch.Tensor,
-    wkvb: torch.Tensor,
-    output: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    lens: torch.Tensor,
-    cached_lens: torch.Tensor,
-    block_tables: torch.Tensor,
-    n_heads: int,
-    rope_head_dim: int,
-    nope_head_dim: int,
-    v_head_dim: int,
-    kv_lora_rank: int,
-    block_size: int,
-    batch: int,
-    max_num_block: int,
-    scale: float,
-    nz: bool = False,
-    enable_flash_attention: bool = False,
-    tile_size_of_cached_kv: int = 8192,
-) -> None:
-    """Run MLA kernel using cached KV blocks (full attention).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        q_with_qr (torch.Tensor): Query tensor with rotary components.
-        k_cache (torch.Tensor): Key cache tensor.
-        v_cache (torch.Tensor): Value cache tensor.
-        wkvb (torch.Tensor): MLA projection tensor.
-        output (torch.Tensor): Attention output tensor.
-        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
-        lens (torch.Tensor): Current token lengths.
-        cached_lens (torch.Tensor): Cached token lengths.
-        block_tables (torch.Tensor): Block table tensor.
-        n_heads (int): Number of query heads.
-        rope_head_dim (int): Rotary head dimension.
-        nope_head_dim (int): Non-rotary head dimension.
-        v_head_dim (int): Value head dimension.
-        kv_lora_rank (int): KV LoRA rank.
-        block_size (int): KV block size.
-        batch (int): Batch size.
-        max_num_block (int): Maximum number of blocks per request.
-        scale (float): Attention scaling factor.
-        nz (bool): Whether to use nz wkvb.
-        enable_flash_attention (bool): Whether to use flash attention kernels.
-        tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA.
-
-    Returns:
-        None: `output` is written in place.
-    """
-    ...
-
-def mla_with_indices(
-    rt: Runtime,
-    q_with_qr: torch.Tensor,
-    k_cache: torch.Tensor,
-    v_cache: torch.Tensor,
-    wkvb: torch.Tensor,
-    output: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    lens: torch.Tensor,
-    cached_lens: torch.Tensor,
-    block_tables: torch.Tensor,
-    n_heads: int,
-    rope_head_dim: int,
-    nope_head_dim: int,
-    v_head_dim: int,
-    kv_lora_rank: int,
-    block_size: int,
-    batch: int,
-    max_num_block: int,
-    scale: float,
-    top_k: int,
-    topk_indices: torch.Tensor,
-    nz: bool = False,
-    enable_flash_attention: bool = False,
-    tile_size_of_cached_kv: int = 8192,
-) -> None:
-    """Run MLA kernel with sparse attention using top-k indices.
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        q_with_qr (torch.Tensor): Query tensor with rotary components.
-        k_cache (torch.Tensor): Key cache tensor.
-        v_cache (torch.Tensor): Value cache tensor.
-        wkvb (torch.Tensor): MLA projection tensor.
-        output (torch.Tensor): Attention output tensor.
-        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
-        lens (torch.Tensor): Current token lengths.
-        cached_lens (torch.Tensor): Cached token lengths.
-        block_tables (torch.Tensor): Block table tensor.
-        n_heads (int): Number of query heads.
-        rope_head_dim (int): Rotary head dimension.
-        nope_head_dim (int): Non-rotary head dimension.
-        v_head_dim (int): Value head dimension.
-        kv_lora_rank (int): KV LoRA rank.
-        block_size (int): KV block size.
-        batch (int): Batch size.
-        max_num_block (int): Maximum number of blocks per request.
-        scale (float): Attention scaling factor.
-        top_k (int): Number of top-k indices for sparse attention.
-        topk_indices (torch.Tensor): Top-k indices tensor for sparse attention.
-        nz (bool): Whether to use nz wkvb.
-        enable_flash_attention (bool): Whether to use flash attention kernels.
-        tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA.
-
-    Returns:
-        None: `output` is written in place.
     """
     ...
 

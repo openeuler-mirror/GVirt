@@ -22,7 +22,6 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mlaQB.resize(c.nLayers);
     mlaQNorm.resize(c.nLayers);
     mlaQNormBias.resize(c.nLayers);
-    mlaKVB.resize(c.nLayers);
     mlaWUV.resize(c.nLayers);
     mlaWUKT.resize(c.nLayers);
     mlaKVNorm.resize(c.nLayers);
@@ -282,43 +281,6 @@ void XModel::ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x,
     rt.PutTensor(xQuanted);
 }
 
-std::tuple<XTensor &, XTensor &> XModel::ForwardAttnMLACommon(
-    XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
-    XTensor &hiddenState)
-{
-    if (_c.defTpSize == 0 || _c.nHeads % _c.defTpSize != 0) {
-        throw std::invalid_argument("nHeads must be divisible by defTpSize and defTpSize > 0");
-    }
-    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
-
-    XTensor &kCache = kvCache[layer][0];
-    XTensor &peCache = kvCache[layer][1];
-    XTensor &attnQkvc =
-        rt.GetTensor({hiddenState.shape[0], _c.qLoraRank + _c.kvLoraRank + _c.ropeHeadDim},
-                     hiddenState.dtype, DBG_LOC);
-    XTensor &attnNormQc =
-        rt.GetTensor({hiddenState.shape[0], _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
-    XTensor &attnQWithQr =
-        rt.GetTensor({hiddenState.shape[0], nLocalHeads * (_c.nopeHeadDim + _c.ropeHeadDim)},
-                     hiddenState.dtype, DBG_LOC);
-
-    ForwardLinear(rt, layer, hiddenState, mlaQKVA, attnQkvc);
-
-    XliteOpMlaPrepare(rt, attnQkvc, mlaQNorm[layer], mlaQNormBias[layer], attnNormQc,
-                      mlaKVNorm[layer], mlaKVNormBias[layer], freqsCis, rt._attnPosition,
-                      _c.qLoraRank, _c.kvLoraRank, _c.ropeHeadDim, _c.blockSize, kCache, peCache,
-                      rt._attnSlotMapping, _c.normEps);
-
-    ForwardLinear(rt, layer, attnNormQc, mlaQB, attnQWithQr);
-
-    XliteOpRopeComplex(rt, nLocalHeads, _c.nopeHeadDim + _c.ropeHeadDim,
-                       _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim, _c.nopeHeadDim,
-                       _c.nopeHeadDim, attnQWithQr, freqsCis, rt._attnPosition, attnQWithQr);
-    rt.PutTensor(attnQkvc);
-
-    return {attnQWithQr, attnNormQc};
-}
-
 XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
                                     XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
 {
@@ -364,76 +326,6 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     rt.PutTensor(lastTopk);
     rt.PutTensor(scores);
     return &topkIndices;
-}
-
-void XModel::ForwardAttnMLA(XRuntime &rt, uint32_t layer,
-                            std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
-                            XTensor &hiddenState)
-{
-    XTensor &kCache = kvCache[layer][0];
-    XTensor &peCache = kvCache[layer][1];
-    uint32_t qHeads = _c.nHeads / _c.defTpSize;
-
-    auto [attnQWithQr, attnNormQc] =
-        ForwardAttnMLACommon(rt, layer, kvCache, freqsCis, hiddenState);
-
-    XTensor *topkIndices = nullptr;
-    if (_c.attnType == XMODEL_ATTN_DSA) {
-        topkIndices =
-            ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
-    }
-    rt.PutTensor(attnNormQc);
-
-    XTensor &attnOutput =
-        rt.GetTensor({attnQWithQr.shape[0], qHeads * _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
-    if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
-        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
-                                   attnQWithQr.dtype, DBG_LOC);
-        XliteOpMLA(rt, attnQWithQr, kCache, peCache, mlaKVB[layer], qk, attnOutput,
-                   rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, qHeads,
-                   _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim, _c.kvLoraRank, _c.blockSize,
-                   rt._batch, rt._maxNumBlocks, _c.softmaxScale, _c.weightNZ, _c.indexTopK,
-                   topkIndices == nullptr ? XTensor() : *topkIndices);
-        rt.PutTensor(qk);
-    } else {
-        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
-                                   attnQWithQr.dtype, DBG_LOC);
-        XTensor &sv =
-            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.vHeadDim}, attnQWithQr.dtype, DBG_LOC);
-        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
-        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
-        XTensor &lastMax = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
-        XTensor &lastSum = rt.GetTensor({attnQWithQr.shape[0], qHeads}, FP32, DBG_LOC);
-        XliteOpFlashMLA(rt, attnQWithQr, kCache, peCache, mlaKVB[layer], qk, sv, max, sum, lastMax,
-                        lastSum, _sync, attnOutput, rt._queryStartLoc, rt._lens, rt._cachedLens,
-                        rt._attnBlockTables, qHeads, _c.ropeHeadDim, _c.nopeHeadDim, _c.vHeadDim,
-                        _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
-                        _c.weightNZ, rt._tileSizeOfCachedKV, _c.indexTopK,
-                        topkIndices == nullptr ? XTensor() : *topkIndices);
-        rt.PutTensor(lastSum);
-        rt.PutTensor(lastMax);
-        rt.PutTensor(sum);
-        rt.PutTensor(max);
-        rt.PutTensor(sv);
-        rt.PutTensor(qk);
-    }
-    if (topkIndices != nullptr) {
-        rt.PutTensor(*topkIndices);
-    }
-    rt.PutTensor(attnQWithQr);
-
-    ForwardLinear(rt, layer, attnOutput, attnOut, hiddenState);
-    if (_c.defTpSize > 1) {
-        if (rt.multiTaskParallel) {
-            rt.NotifyRecordPeerStream();
-        }
-        if (rt.enableCommOptimize || rt.enableMoEAllToAll) {
-            XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP);
-        } else {
-            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP);
-        }
-    }
-    rt.PutTensor(attnOutput);
 }
 
 std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
