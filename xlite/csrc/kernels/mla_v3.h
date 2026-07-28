@@ -9,7 +9,6 @@
 #include "debug.h"
 #include "softmax_attn_aiv.h"
 
-#define MAX_N0 128
 #define MBLOCKSIZE 16
 #define NBLOCKSIZE 16
 #define SEQLEN_64 64
@@ -22,49 +21,46 @@
 #define SEQLEN_96K 98304
 
 template <typename Dtype>
-class MLAV2
+class MLAV3
 {
 public:
-    __aicore__ inline MLAV2()
+    __aicore__ inline MLAV3()
     {
     }
 
-    __aicore__ inline void Init(GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache,
-                                GM_ADDR topkIndices, GM_ADDR qk, GM_ADDR oAbsorb,
+    __aicore__ inline void Init(GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kDenseCache,
+                                GM_ADDR peDenseCache, GM_ADDR qk, GM_ADDR oAbsorb,
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
-                                GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                                uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlocks, float scale, uint32_t topK)
+                                uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank,
+                                uint32_t batch, uint32_t indexTopK, float scale)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qAbsorb.SetGlobalBuffer((__gm__ Dtype *)qAbsorb);
         this->qr.SetGlobalBuffer((__gm__ Dtype *)qr);
-        this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
-        this->peCache.SetGlobalBuffer((__gm__ Dtype *)peCache);
-        this->topkIndices = (__gm__ int32_t *)topkIndices;
+        this->kDenseCache.SetGlobalBuffer((__gm__ Dtype *)kDenseCache);
+        this->peDenseCache.SetGlobalBuffer((__gm__ Dtype *)peDenseCache);
         this->oAbsorb.SetGlobalBuffer((__gm__ Dtype *)oAbsorb);
 
         this->queryStartLoc = (__gm__ int32_t *)queryStartLoc;
         this->queryLens = (__gm__ int32_t *)queryLens;
         this->cachedLens = (__gm__ int32_t *)cachedLens;
-        this->blockTables = (__gm__ int32_t *)blockTables;
 
         this->nHeads = nHeads;
         this->ropeHeadDim = ropeHeadDim;
         this->kvLoraRank = kvLoraRank;
-        this->blockSize = blockSize;
         this->batch = batch;
-        this->maxNumBlocks = maxNumBlocks;
-        this->maxSeqLen = maxNumBlocks * blockSize;
+        this->indexTopK = indexTopK;
+        this->maxSeqLen = indexTopK;
         this->scale = scale;
-        this->topK = (topkIndices == nullptr) ? 0 : topK;
+        this->topK = 0;
         this->qkStride = this->maxSeqLen;
 
         this->qk[0].SetGlobalBuffer((__gm__ Dtype *)qk + block_idx * XLITE_MAX_M0 * qkStride);
         this->qk[1].SetGlobalBuffer((__gm__ Dtype *)qk + block_idx * XLITE_MAX_M0 * qkStride +
                                     block_num * XLITE_MAX_M0 * qkStride);
 
-        qkk0 = 256 / sizeof(Dtype);
+        qkn0 = 128;
+        qkk0 = 128;
         svn0 = 256;
         svk0 = 64;
         uint64_t off = 0;
@@ -81,14 +77,14 @@ public:
         aqrl1aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += qrSize;
 
-        uint64_t kSize = blockSize * 4 * qkk0 * sizeof(Dtype);
+        uint64_t kSize = qkn0 * 4 * qkk0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             akl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             akl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += kSize;
         }
 
-        uint64_t krSize = blockSize * ropeHeadDim * sizeof(Dtype);
+        uint64_t krSize = qkn0 * ropeHeadDim * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             akrl1bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             akrl1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -108,7 +104,7 @@ public:
         }
 
         off = 0;
-        uint64_t l0bSize = MAX_N0 * qkk0 * sizeof(Dtype);
+        uint64_t l0bSize = qkn0 * qkk0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             qkl0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
             qkl0bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -116,7 +112,7 @@ public:
         }
 
         off = 0;
-        uint64_t l0cSize = XLITE_MAX_M0 * MAX_N0 * sizeof(float);
+        uint64_t l0cSize = XLITE_MAX_M0 * qkn0 * sizeof(float);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             qkl0cBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
             qkl0cBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -169,26 +165,26 @@ public:
      *     Absorb: (queryTokens * nHeads, kvLoraRank)
      *     K: (cachedTokens, kvLoraRank)
      *     C: (queryTokens * nHeads, cachedTokens)
-     *     m0: XLITE_MAX_M0, n0: blockSize, k0: qkk0
+     *     m0: XLITE_MAX_M0, n0: qkn0, k0: qkk0
      * R = QR * KR
      *     QR: (queryTokens * nHeads, ropeHeadDim)
      *     K: (cachedTokens, ropeHeadDim)
      *     R: (queryTokens * nHeads, cachedTokens)
-     *     m0: XLITE_MAX_M0, n0: blockSize, k0: qkk0
+     *     m0: XLITE_MAX_M0, n0: qkn0, k0: qkk0
      * QK = C + R
      */
     __aicore__ inline void RunAicQK(GlobalTensor<Dtype> qAbsorb, GlobalTensor<Dtype> qr,
-                                    uint32_t queryTaskLen, __gm__ uint32_t *blockTable,
-                                    uint32_t calcLen, GlobalTensor<Dtype> qk)
+                                    uint32_t queryTaskLen, uint32_t calcLen, GlobalTensor<Dtype> qk,
+                                    GlobalTensor<Dtype> kCache, GlobalTensor<Dtype> peCache)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mSize = queryTaskLen * nHeads;
         int mBlockPad = ROUND_UP(mSize, MBLOCKSIZE);
         int mBlockNum = mBlockPad / MBLOCKSIZE;
-        int nSize = blockSize;
+        int nSize = qkn0;
         int nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
         int nBlockNum = nBlockPad / NBLOCKSIZE;
-        int nLoop = DIV_ROUND_UP(calcLen, blockSize);
+        int nLoop = DIV_ROUND_UP(calcLen, qkn0);
         int kSize = qkk0;
         int kBlockPad = qkk0;
         int kBlockNum = qkk0 / kBlockSize;
@@ -215,8 +211,9 @@ public:
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         SetFlag<HardEvent::FIX_M>(EVENT_ID1);
         for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // calcLen
-            uint32_t block = blockTable[nIdx];
-            int nOffset = nIdx * blockSize;
+            // dense cache: physical block id == nIdx (contiguous layout)
+            uint32_t block = nIdx;
+            int nOffset = nIdx * qkn0;
             if (nOffset + nSize > calcLen) {
                 nSize = calcLen - nOffset;
                 nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
@@ -236,7 +233,7 @@ public:
                     kBlockPad = ROUND_UP(kSize, kBlockSize);
                     kBlockNum = kBlockPad / kBlockSize;
                 }
-                // copy K (blockSize, 4 * qkk0) to L1
+                // copy K (qkn0, 4 * qkk0) to L1
                 if (kIdx4 == 0) {
                     int kRemSize = 4 * qkk0;
                     if (kOffset + kRemSize > kvLoraRank) {
@@ -244,8 +241,8 @@ public:
                     }
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + pingpongL1B);
                     CopyGmToL1Nd2Nz(akl1bBuf[pingpongL1B],
-                                    kCache[block * blockSize * kvLoraRank + kOffset], nSize,
-                                    kRemSize, kvLoraRank, nBlockPad);
+                                    kCache[block * qkn0 * kvLoraRank + kOffset], nSize, kRemSize,
+                                    kvLoraRank, nBlockPad);
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
                 }
@@ -263,7 +260,7 @@ public:
                 SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
 
-                // mmad C (queryTokens * nHeads, blockSize) = Absorb * K
+                // mmad C (queryTokens * nHeads, qkn0) = Absorb * K
                 CalMmad(qkl0cBuf[pingpongL0C], qkl0aBuf[curr], qkl0bBuf[curr], mBlockPad, nBlockPad,
                         kBlockPad, kIdx == 0);
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
@@ -278,9 +275,9 @@ public:
             kSize = ropeHeadDim;
             kBlockPad = ROUND_UP(kSize, kBlockSize);
             kBlockNum = kBlockPad / kBlockSize;
-            // copy KR (blockSize, ropeHeadDim) to L1
+            // copy KR (qkn0, ropeHeadDim) to L1
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
-            CopyGmToL1Nd2Nz(akrl1bBuf[curr], peCache[block * blockSize * ropeHeadDim], nSize,
+            CopyGmToL1Nd2Nz(akrl1bBuf[curr], peCache[block * qkn0 * ropeHeadDim], nSize,
                             ropeHeadDim, ropeHeadDim, nBlockPad);
 
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curr);
@@ -294,7 +291,7 @@ public:
             SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
 
-            // mmad R (queryTokens * nHeads, blockSize) = QR * KR
+            // mmad R (queryTokens * nHeads, qkn0) = QR * KR
             CalMmad(qkl0cBuf[pingpongL0C], qkl0aBuf[curr], qkl0bBuf[curr], mBlockPad, nBlockPad,
                     kBlockPad, false);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
@@ -304,8 +301,7 @@ public:
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0 + pingpongL0C);
 
             // copy final QK(queryTokens * nHeads, nSize) from L0C to GM
-            CopyToGm(qk[nIdx * blockSize], qkl0cBuf[pingpongL0C], mSize, nSize, mBlockPad,
-                     qkStride);
+            CopyToGm(qk[nIdx * qkn0], qkl0cBuf[pingpongL0C], mSize, nSize, mBlockPad, qkStride);
             SetFlag<HardEvent::FIX_M>(EVENT_ID0 + pingpongL0C);
             curr = 1 - curr;
             pingpongL0C ^= 1;
@@ -327,9 +323,8 @@ public:
      *     Absorb: (queryTokens * nHeads, kvLoraRank)
      *     m0: XLITE_MAX_M0, n0: svn0, k0: svk0
      */
-    __aicore__ inline void RunAicSV(GlobalTensor<Dtype> qk, uint32_t queryTaskLen,
-                                    __gm__ uint32_t *blockTable, uint32_t calcLen,
-                                    GlobalTensor<Dtype> oAbsorb)
+    __aicore__ inline void RunAicSV(GlobalTensor<Dtype> qk, uint32_t queryTaskLen, uint32_t calcLen,
+                                    GlobalTensor<Dtype> oAbsorb, GlobalTensor<Dtype> kCache)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mSize = queryTaskLen * nHeads;
@@ -378,8 +373,6 @@ public:
                     kBlockPad = ROUND_UP(kSize, kBlockSize);
                     kBlockNum = kBlockPad / kBlockSize;
                 }
-                int blockOffset = kOffset / blockSize;
-                int blockRemainder = kOffset % blockSize;
 
                 if (kIdx4 == 0) {
                     int kRemSize = 4 * svk0;
@@ -402,21 +395,9 @@ public:
                         kRemSize = calcLen - kOffset;
                     }
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + pingpongL1B);
-                    // copy K(T) (nSize, 2 * svk0) to L1
-                    for (int bid = 0; bid < DIV_ROUND_UP(kRemSize, blockSize); bid++) {
-                        int kOffsetTmp = bid * blockSize;
-                        uint32_t block = blockTable[blockOffset + bid];
-                        int kRemSizeTmp = blockSize;
-                        int kRemBlockPadTmp = ROUND_UP(kRemSizeTmp, kBlockSize);
-                        if (kOffsetTmp + kRemSizeTmp > kRemSize) {
-                            kRemSizeTmp = kRemSize - kOffsetTmp;
-                            kRemBlockPadTmp = ROUND_UP(kRemSizeTmp, kBlockSize);
-                        }
-                        CopyGmToL1Nd2Nz(
-                            aktl1bBuf[pingpongL1B][bid * blockSize * kBlockSize],
-                            kCache[(block * blockSize + blockRemainder) * kvLoraRank + nOffset],
-                            kRemBlockPadTmp, nSize, kvLoraRank, L1BkRemBlockPad);
-                    }
+                    // copy K(T) (kRemSize, nSize) to L1 — dense cache is contiguous
+                    CopyGmToL1Nd2Nz(aktl1bBuf[pingpongL1B], kCache[kOffset * kvLoraRank + nOffset],
+                                    kRemSize, nSize, kvLoraRank, L1BkRemBlockPad);
 
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
@@ -514,7 +495,7 @@ public:
 
         int lastBatchIdx, lastQueryTaskOffset, lastQueryTaskLen, last, lastAbsorbOffset,
             lastCalcLen;
-        __gm__ uint32_t *lastBlockTable;
+        GlobalTensor<Dtype> lastKCache;
 
         int needDoSV = 0;
         int totalIdx = 0;
@@ -524,13 +505,14 @@ public:
         int coreOffset = 0;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
-            __gm__ uint32_t *blockTable =
-                (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
 
             if (cachedLen < 0) {
                 cachedLen = cachedLens[batchIdx];
             }
+
+            // per-batch dense cache subview (batch b starts at b * indexTopK tokens)
+            GlobalTensor<Dtype> kCache = kDenseCache[batchIdx * indexTopK * kvLoraRank];
+            GlobalTensor<Dtype> peCache = peDenseCache[batchIdx * indexTopK * ropeHeadDim];
 
             uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
             int queryTileSize = m0 / nHeads;
@@ -548,6 +530,9 @@ public:
                     queryTaskLen = queryLen - queryTaskStart;
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
+                if (calcLen > indexTopK) {
+                    calcLen = indexTopK;
+                }
                 if (queryStart < 0) {
                     queryStart = queryStartLoc[batchIdx];
                 }
@@ -562,8 +547,8 @@ public:
                            " use %d temp buf: QK\n",
                            GetBlockIdx(), batchIdx, queryTaskOffset, queryTaskOffset + queryTaskLen,
                            nHeads, curr);
-                RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], queryTaskLen, blockTable, calcLen,
-                         qk[curr]);
+                RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], queryTaskLen, calcLen, qk[curr],
+                         kCache, peCache);
                 ffts_cross_core_sync(PIPE_FIX, config);
 
                 if (needDoSV != 0) {
@@ -574,16 +559,16 @@ public:
                                " use %d temp buf: SV\n",
                                GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
                                lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
-                    RunAicSV(qk[last], lastQueryTaskLen, lastBlockTable, lastCalcLen,
-                             oAbsorb[lastAbsorbOffset]);
+                    RunAicSV(qk[last], lastQueryTaskLen, lastCalcLen, oAbsorb[lastAbsorbOffset],
+                             lastKCache);
                 }
 
                 lastBatchIdx = batchIdx;
                 lastQueryTaskOffset = queryTaskOffset;
                 lastAbsorbOffset = absorbOffset;
                 lastQueryTaskLen = queryTaskLen;
-                lastBlockTable = blockTable;
                 lastCalcLen = calcLen;
+                lastKCache = kCache;
                 last = curr;
                 needDoSV = 1;
 
@@ -601,8 +586,8 @@ public:
                        " use %d temp buf: SV\n",
                        GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
                        lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
-            RunAicSV(qk[last], lastQueryTaskLen, lastBlockTable, lastCalcLen,
-                     oAbsorb[lastAbsorbOffset]);
+            RunAicSV(qk[last], lastQueryTaskLen, lastCalcLen, oAbsorb[lastAbsorbOffset],
+                     lastKCache);
         }
     }
 
@@ -622,9 +607,6 @@ public:
         int coreOffset = 0;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
-            __gm__ uint32_t *blockTable =
-                (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
 
             if (cachedLen < 0) {
                 cachedLen = cachedLens[batchIdx];
@@ -646,6 +628,9 @@ public:
                     queryTaskLen = queryLen - queryTaskStart;
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
+                if (calcLen > indexTopK) {
+                    calcLen = indexTopK;
+                }
                 if (queryStart < 0) {
                     queryStart = queryStartLoc[batchIdx];
                 }
@@ -682,22 +667,13 @@ public:
                            dbgBlockIdx, subIdx, batchIdx, queryTaskOffset,
                            queryTaskOffset + queryTaskLen, nWorkStart, nWorkStart + nWorkCurCore,
                            calcSoftmaxLen, nWorkStart, nHeads, outN, curr);
-                if (topK == 0) {
-                    RunAivSoftmax(
-                        (__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(),
-                        m0 > (XLITE_MAX_M0 - 4)
-                            ? 0
-                            : (__gm__ float *)qk[curr][(m0 + subIdx * 2) * qkStride].GetPhyAddr(),
-                        nWorkCurCore, qkStride, calcSoftmaxLen, outN, true, nWorkStart, nHeads,
-                        true, scale);
-                } else {
-                    RunAivSoftmaxPingPong(
-                        (__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(), nWorkCurCore, qkStride,
-                        calcSoftmaxLen, outN, true, nWorkStart, nHeads, nullptr, nullptr, true,
-                        scale, 0, calcLen > topK ? topK : 0,
-                        (calcLen > topK && topK > 0) ? topkIndices + topK * queryTaskOffset
-                                                     : nullptr);
-                }
+                RunAivSoftmax(
+                    (__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(),
+                    m0 > (XLITE_MAX_M0 - 4)
+                        ? 0
+                        : (__gm__ float *)qk[curr][(m0 + subIdx * 2) * qkStride].GetPhyAddr(),
+                    nWorkCurCore, qkStride, calcSoftmaxLen, outN, true, nWorkStart, nHeads, true,
+                    scale);
 
                 ffts_cross_core_sync(PIPE_MTE3, config);
                 curr = 1 - curr;
@@ -720,9 +696,8 @@ public:
 private:
     GlobalTensor<Dtype> qAbsorb;
     GlobalTensor<Dtype> qr;
-    GlobalTensor<Dtype> kCache;
-    GlobalTensor<Dtype> peCache;
-    __gm__ int32_t *topkIndices;
+    GlobalTensor<Dtype> kDenseCache;
+    GlobalTensor<Dtype> peDenseCache;
     GlobalTensor<Dtype> oAbsorb;
     GlobalTensor<Dtype> qk[PINGPONG_BUF_NUM];
 
@@ -742,33 +717,31 @@ private:
     __gm__ int32_t *queryStartLoc;
     __gm__ int32_t *queryLens;
     __gm__ int32_t *cachedLens;
-    __gm__ int32_t *blockTables;
 
     uint32_t nHeads;
     uint32_t ropeHeadDim;
     uint32_t kvLoraRank;
-    uint32_t blockSize;
     uint32_t batch;
-    uint32_t maxNumBlocks;
+    uint32_t indexTopK;
     uint32_t maxSeqLen;
     float scale;
     uint32_t topK;
     uint32_t qkStride;
+    int qkn0;
     int qkk0;
     int svn0;
     int svk0;
 };
 
-#define MLA_V2_FUNC_DEFINE(dtype)                                                                  \
-    extern "C" __global__ __aicore__ void mla_v2_##dtype(                                          \
-        GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache, GM_ADDR topkIndices,         \
-        GM_ADDR qk, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, \
-        GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank,           \
-        uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks, float scale, uint32_t topK)     \
-    {                                                                                              \
-        MLAV2<dtype> op;                                                                           \
-        op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb, queryStartLoc, queryLens,  \
-                cachedLens, blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,        \
-                maxNumBlocks, scale, topK);                                                        \
-        op.Run();                                                                                  \
+#define MLA_V3_FUNC_DEFINE(dtype)                                                              \
+    extern "C" __global__ __aicore__ void mla_v3_##dtype(                                      \
+        GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kDenseCache, GM_ADDR peDenseCache, GM_ADDR qk,    \
+        GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,         \
+        uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank, uint32_t batch,            \
+        uint32_t indexTopK, float scale)                                                       \
+    {                                                                                          \
+        MLAV3<dtype> op;                                                                       \
+        op.Init(qAbsorb, qr, kDenseCache, peDenseCache, qk, oAbsorb, queryStartLoc, queryLens, \
+                cachedLens, nHeads, ropeHeadDim, kvLoraRank, batch, indexTopK, scale);         \
+        op.Run();                                                                              \
     }

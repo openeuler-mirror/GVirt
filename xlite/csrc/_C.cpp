@@ -1298,6 +1298,51 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
     rt.PutTensor(oAbsorb);
 }
 
+void GatherSparseKVCache(XRuntime &rt, at::Tensor &kCache, at::Tensor &peCache,
+                         at::Tensor &blockTables, at::Tensor &topkIndices, at::Tensor &queryLens,
+                         at::Tensor &cachedLens, at::Tensor &kDenseCache, at::Tensor &peDenseCache,
+                         uint32_t batch, uint32_t indexTopK, uint32_t blockSize,
+                         uint32_t maxNumBlocks, uint32_t kvLoraRank, uint32_t ropeHeadDim,
+                         uint32_t kvHeads)
+{
+    XTensor _kCache, _peCache, _blockTables, _topkIndices, _queryLens, _cachedLens, _kDenseCache,
+        _peDenseCache;
+    InitXTensor(_kCache, kCache);
+    InitXTensor(_peCache, peCache);
+    InitXTensor(_blockTables, blockTables);
+    InitXTensor(_topkIndices, topkIndices);
+    InitXTensor(_queryLens, queryLens);
+    InitXTensor(_cachedLens, cachedLens);
+    InitXTensor(_kDenseCache, kDenseCache);
+    InitXTensor(_peDenseCache, peDenseCache);
+    XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices, _queryLens,
+                               _cachedLens, _kDenseCache, _peDenseCache, batch, indexTopK,
+                               blockSize, maxNumBlocks, kvLoraRank, ropeHeadDim, kvHeads);
+    rt.Synchronize();
+}
+
+void MLAV3(XRuntime &rt, at::Tensor &qAbsorb, at::Tensor &qr, at::Tensor &kDenseCache,
+           at::Tensor &peDenseCache, at::Tensor &oAbsorb, at::Tensor &queryStartLoc,
+           at::Tensor &lens, at::Tensor &cachedLens, uint32_t nHeads, uint32_t ropeHeadDim,
+           uint32_t kvLoraRank, uint32_t batch, uint32_t indexTopK, float scale)
+{
+    XTensor _qAbsorb, _qr, _kDenseCache, _peDenseCache, _oAbsorb, _queryStartLoc, _lens,
+        _cachedLens;
+    InitXTensor(_qAbsorb, qAbsorb);
+    InitXTensor(_qr, qr);
+    InitXTensor(_kDenseCache, kDenseCache);
+    InitXTensor(_peDenseCache, peDenseCache);
+    InitXTensor(_oAbsorb, oAbsorb);
+    InitXTensor(_queryStartLoc, queryStartLoc);
+    InitXTensor(_lens, lens);
+    InitXTensor(_cachedLens, cachedLens);
+    XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, indexTopK}, XDtype(qAbsorb), DBG_LOC);
+    XliteOpMLAV3(rt, _qAbsorb, _qr, _kDenseCache, _peDenseCache, qk, _oAbsorb, _queryStartLoc,
+                 _lens, _cachedLens, nHeads, ropeHeadDim, kvLoraRank, batch, indexTopK, scale);
+    rt.PutTensor(qk);
+    rt.Synchronize();
+}
+
 void AddAndRMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &addInOut, at::Tensor &norm,
                    at::Tensor &out, float normEps)
 {
@@ -2180,6 +2225,17 @@ PYBIND11_MODULE(_C, m)
           py::arg("block_size"), py::arg("batch"), py::arg("max_num_blocks"), py::arg("scale"),
           py::arg("topk_indices"), py::arg("top_k") = 0, py::arg("nz") = false,
           py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192);
+    m.def("gather_sparse_kv_cache", &GatherSparseKVCache, py::arg("rt"), py::arg("k_cache"),
+          py::arg("pe_cache"), py::arg("block_tables"), py::arg("topk_indices"),
+          py::arg("query_lens"), py::arg("cached_lens"), py::arg("k_dense_cache"),
+          py::arg("pe_dense_cache"), py::arg("batch"), py::arg("index_topk"), py::arg("block_size"),
+          py::arg("max_num_blocks"), py::arg("kv_lora_rank"), py::arg("rope_head_dim"),
+          py::arg("kv_heads") = 1);
+    m.def("mla_v3", &MLAV3, py::arg("rt"), py::arg("q_absorb"), py::arg("qr"),
+          py::arg("k_dense_cache"), py::arg("pe_dense_cache"), py::arg("o_absorb"),
+          py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"), py::arg("n_heads"),
+          py::arg("rope_head_dim"), py::arg("kv_lora_rank"), py::arg("batch"),
+          py::arg("index_topk"), py::arg("scale"));
     m.def("indexer_scores", &IndexerScores, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
           py::arg("weight"), py::arg("scores"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),

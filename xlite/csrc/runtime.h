@@ -178,6 +178,7 @@ public:
 
     // ATTN
     bool _attnInitialized = false;
+    bool _decodeStep = false;
     // Host-side: true when this step is decode (seqlen==1 and all cached_lens>0).
     // Avoids D2H sync via GetFirstAttnPosition in every linear layer.
     bool _linearDecodeStep = false;

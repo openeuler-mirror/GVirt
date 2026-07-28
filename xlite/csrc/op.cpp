@@ -76,6 +76,8 @@
 #include "aclrtlaunch_topk_bfloat16_t.h"
 #include "aclrtlaunch_mla_v2_bfloat16_t.h"
 #include "aclrtlaunch_flash_mla_v2_bfloat16_t.h"
+#include "aclrtlaunch_gather_sparse_kv_cache_bfloat16_t.h"
+#include "aclrtlaunch_mla_v3_bfloat16_t.h"
 #include "aclrtlaunch_experts_counts_sum.h"
 #include "aclrtlaunch_reorder_moe.h"
 #include "aclrtlaunch_concat.h"
@@ -1039,6 +1041,52 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
+void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, XTensor &peCache,
+                                XTensor &blockTables, XTensor &topkIndices, XTensor &queryLens,
+                                XTensor &cachedLens, XTensor &kDenseCache, XTensor &peDenseCache,
+                                uint32_t batch, uint32_t indexTopK, uint32_t blockSize,
+                                uint32_t maxNumBlocks, uint32_t kvLoraRank, uint32_t ropeHeadDim,
+                                uint32_t kvHeads)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (kvHeads != 1) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": kvHeads should be less than or equal to 1");
+    }
+    if (EachXDtype(BF16, kCache, peCache, kDenseCache, peDenseCache)) {
+        aclrtlaunch_gather_sparse_kv_cache_bfloat16_t(
+            rt.aivNum, rt.stream, kCache.ptr, peCache.ptr, blockTables.ptr, topkIndices.ptr,
+            queryLens.ptr, cachedLens.ptr, kDenseCache.ptr, peDenseCache.ptr, batch, indexTopK,
+            blockSize, maxNumBlocks, kvLoraRank, ropeHeadDim);
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(kCache) + XT_STR(peCache) + XT_STR(kDenseCache) +
+                              XT_STR(peDenseCache);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
+void XliteOpMLAV3(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kDenseCache,
+                  XTensor &peDenseCache, XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc,
+                  XTensor &lens, XTensor &cachedLens, uint32_t nHeads, uint32_t ropeHeadDim,
+                  uint32_t kvLoraRank, uint32_t batch, uint32_t indexTopK, float scale)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (EachXDtype(BF16, qAbsorb, qr, kDenseCache, peDenseCache, oAbsorb)) {
+        aclrtlaunch_mla_v3_bfloat16_t(rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kDenseCache.ptr,
+                                      peDenseCache.ptr, qk.ptr, oAbsorb.ptr, queryStartLoc.ptr,
+                                      lens.ptr, cachedLens.ptr, nHeads, ropeHeadDim, kvLoraRank,
+                                      batch, indexTopK, scale);
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kDenseCache) +
+                              XT_STR(peDenseCache) + XT_STR(oAbsorb);
         throw std::runtime_error(err_str + " unsupported!");
     }
 }
