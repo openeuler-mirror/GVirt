@@ -203,8 +203,9 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         if (xcclComm && in.dtype != INT64 && rankSize > 1) {
             bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
             if (needCopy) {
-                XTensor &tmpIn = rt.GetTensor(in.OrigShape(), in.dtype, DBG_LOC);
-                XTensor &tmpOut = rt.GetTensor(out.OrigShape(), out.dtype, DBG_LOC);
+                XTensor &tmpIn =
+                    rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+                XTensor &tmpOut = rt.GetTensor(out.shape, out.dtype, DBG_LOC);
                 rt.PutTensor(tmpIn);
                 rt.PutTensor(tmpOut);
             }
@@ -228,8 +229,8 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         XTensor *tmpOut = nullptr;
 
         if (needCopy) {
-            tmpIn = &rt.GetTensor(in.OrigShape(), in.dtype, DBG_LOC).View(in.shape[0]);
-            tmpOut = &rt.GetTensor(out.OrigShape(), out.dtype, DBG_LOC).View(out.shape[0]);
+            tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+            tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
             CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, in.bytes, in.ptr, in.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpIn->ptr;
@@ -328,9 +329,9 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
         if (xcclComm && in.dtype != INT64 && rankSize > 1) {
             bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
             if (needCopy) {
-                // no extra View() needed for dummy runtime
-                XTensor &tmpIn = rt.GetTensor(in.OrigShape(), in.dtype, DBG_LOC);
-                XTensor &tmpOut = rt.GetTensor(out.OrigShape(), out.dtype, DBG_LOC);
+                XTensor &tmpIn =
+                    rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+                XTensor &tmpOut = rt.GetTensor(out.shape, out.dtype, DBG_LOC);
                 rt.PutTensor(tmpIn);
                 rt.PutTensor(tmpOut);
             }
@@ -354,8 +355,8 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
         XTensor *tmpOut = nullptr;
 
         if (needCopy) {
-            tmpIn = &rt.GetTensor(in.OrigShape(), in.dtype, DBG_LOC).View(in.shape[0]);
-            tmpOut = &rt.GetTensor(out.OrigShape(), out.dtype, DBG_LOC).View(out.shape[0]);
+            tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
+            tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
             CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, in.bytes, in.ptr, in.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpIn->ptr;
@@ -442,7 +443,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
             bool needCopy = (!rt.TensorInPool(in) || !rt.TensorInPool(out));
             if (needCopy) {
                 XTensor &tmpBuff =
-                    rt.GetTensor(in.OrigShape(), in.dtype, DBG_LOC).View(in.shape[0]);
+                    rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
                 rt.PutTensor(tmpBuff);
             }
         }
@@ -464,7 +465,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
         XTensor *tmpBuff = nullptr;
 
         if (needCopy) {
-            tmpBuff = &rt.GetTensor(in.OrigShape(), in.dtype, DBG_LOC).View(in.shape[0]);
+            tmpBuff = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
             CHECK_ACL(aclrtMemcpyAsync(tmpBuff->ptr, in.bytes, in.ptr, in.bytes,
                                        ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
             inPtr = tmpBuff->ptr;
@@ -689,7 +690,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
             XTensor &biasFp32 = rt.GetTensor(bias.shape, FP32, DBG_LOC);
             rt.PutTensor(biasFp32);
         } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
-            XTensor &tmp = rt.GetTensor(in.OrigShape(), FP32, DBG_LOC);
+            XTensor &tmp = rt.GetTensor(in.shape, FP32, DBG_LOC);
             rt.PutTensor(tmp);
         }
         return;
@@ -776,7 +777,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     } else if (EachXDtype(FP32, in, weight, out) && !transpose) {
         launchKernel = aclrtlaunch_matmul_float;
     } else if (in.dtype == BF16 && EachXDtype(FP32, weight, out) && !transpose) {
-        castedIn = &rt.GetTensor(in.OrigShape(), FP32, DBG_LOC).View(in.shape[0]);
+        castedIn = &rt.GetTensor(in.shape, FP32, DBG_LOC);
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, castedIn->ptr, in.numel);
         launchKernel = aclrtlaunch_matmul_float;
     } else if (EachXDtype(INT8, in, weight) && out.dtype == FP16) {

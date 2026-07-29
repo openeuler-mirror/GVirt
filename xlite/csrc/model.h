@@ -132,6 +132,19 @@ public:
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                  XTensor &output);
     size_t GetTensorPoolSize(int dbg);
+    // whether to use communication optimization
+    void ConfigRtCommOptimize(XRuntime &rt, size_t tokenNum)
+    {
+        rt.enableCommOptimize =
+            (_c.defTpSize > 1 && (tokenNum >= rt.commOptimizeLen || rt.multiTaskParallel)) ||
+            (_c.defDpSize > 1 && _c.defTpSize > 1 && _c.moeEpSize > 1 && rt.enableMoEAllToAll);
+    }
+    // whether to pad the token number to match the max tokens across DP ranks
+    bool PadForDp(XRuntime &rt)
+    {
+        return (!rt.IsDummyRuntime() && rt.dpSize() > 1 && _c.nRoutedExperts > 0 &&
+                !rt.enableMoEAllToAll);
+    }
 
     // weights
     XTensor embed;

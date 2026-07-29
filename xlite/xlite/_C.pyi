@@ -83,7 +83,7 @@ class Runtime:
         """
 
     def configure_swizzle(self, swizzle: int, use_swizzle_table: bool) -> None:
-        """ Configure swizzle parameters for matrix multiplication
+        """Configure swizzle parameters for matrix multiplication
 
         Args:
             swizzle(int): new default swizzle valuey.
@@ -229,7 +229,7 @@ class ModelConfig:
     """Whether expert weights are transposed."""
     experts_weight_nz: bool = ...
     """Whether expert weights are in NZ layout."""
-    gate_captured: bool = ... 
+    gate_captured: bool = ...
     """Whether gate layer is captured by vllm-ascend."""
     qkv_bias: bool = ...
     """Whether MHA QKV has bias."""
@@ -1109,7 +1109,7 @@ def rmsnorm(
     cnt_per_token: int = 1,
     in_start_offset: int = 0,
     out_start_offset: int = 0,
-    variance: Optional[torch.Tensor] = None
+    variance: Optional[torch.Tensor] = None,
 ) -> None:
     """Apply RMSNorm with optional offsets.
 
@@ -1234,9 +1234,7 @@ def silu_and_mul(rt: Runtime, in_: torch.Tensor, out: torch.Tensor) -> None:
     """
     ...
 
-def sigmoid_gate_mul(
-    rt: Runtime, attn: torch.Tensor, gate: torch.Tensor, out: torch.Tensor
-) -> None:
+def sigmoid_gate_mul(rt: Runtime, attn: torch.Tensor, gate: torch.Tensor, out: torch.Tensor) -> None:
     """Compute out = attn * sigmoid(gate), elementwise.
 
     Args:
@@ -1424,7 +1422,7 @@ def topk(
     outIndices: torch.Tensor,
     query_lens: torch.Tensor,
     cached_lens: torch.Tensor,
-    k: int
+    k: int,
 ) -> None:
     """Select top-k elements by scores in batches
 
@@ -2048,7 +2046,6 @@ def split_col(rt: Runtime, in_: torch.Tensor, outputs: List[torch.Tensor]) -> No
     """
     ...
 
-
 def concat(rt: Runtime, inputs: List[torch.Tensor], out: torch.Tensor) -> None:
     """Concatenate input tensors into one contiguous byte buffer (1D pack).
 
@@ -2066,7 +2063,6 @@ def concat(rt: Runtime, inputs: List[torch.Tensor], out: torch.Tensor) -> None:
         None: ``out`` is written in place.
     """
     ...
-
 
 def split(
     rt: Runtime,

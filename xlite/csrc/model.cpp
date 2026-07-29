@@ -304,7 +304,6 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
 
     XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
                               hiddenState.dtype, DBG_LOC);
-    XliteOpMuls(rt, attnNormQc, _c.indexSoftmaxScale, attnNormQc);
     ForwardLinear(rt, layer, attnNormQc, indexQB, q);
     // TODO not interleaved case
     if (_c.indexRopeInterleaved) {
@@ -827,7 +826,7 @@ void XModel::ForwardMLP(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
 std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t layer,
                                                         XTensor &input)
 {
-    uint32_t m = input.shape[0], M = rt.enableMoEAllToAll ? input.shape[0] : input.OrigShape()[0];
+    uint32_t m = input.shape[0], M = rt.maxTokensDp;  // input may or may not be padded to match DPs
     XTensor &weights = rt.GetTensor({M, _c.nRoutedExperts}, moeGate[layer].dtype, DBG_LOC);
     XTensor &routing = rt.GetTensor({M, _c.nRoutedExperts}, BIT1, DBG_LOC);
     XTensor &scores = rt.GetTensor({M, _c.nRoutedExperts}, moeGate[layer].dtype, DBG_LOC).View(m);
@@ -851,7 +850,8 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
     XModel::ForwardMoEDispatch(XRuntime &rt, XTensor &tokenSorted, XTensor &weights,
                                XTensor &routing)
 {
-    uint32_t m = tokenSorted.OrigShape()[0];
+    // NOTE: the input XTensor's must already be viewed/padded to match DPs, if needed
+    uint32_t m = rt.maxTokensDp;  // should equal to `tokenSorted.shape[0]`
     uint32_t mAllDp = m * _c.defDpSize;
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
@@ -860,10 +860,7 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
     if (_c.defDpSize > 1) {
         XTensor &inputPerDp = tokenSorted, &weightsPerDp = weights, &routingPerDp = routing;
         // 计算字节大小
-        size_t bytesInput = m * _c.hiddenSize * XDtypeBit(inputPerDp.dtype) / 8;
-        size_t bytesWeights = m * _c.nRoutedExperts * XDtypeBit(weightsPerDp.dtype) / 8;
-        size_t bytesRouting = m * _c.nRoutedExperts / 8;
-        size_t totalBytes = bytesInput + bytesWeights + bytesRouting;
+        size_t totalBytes = inputPerDp.bytes + weightsPerDp.bytes + routingPerDp.bytes;
         size_t allTotalBytes = totalBytes * _c.defDpSize;
 
         // 获取最终输出用的tensor
@@ -908,7 +905,7 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
         }
 
         std::vector<XTensor> outputs = {inputAllDp, weightsAllDp, routingAllDp};
-        std::vector<size_t> sizes = {bytesInput, bytesWeights, bytesRouting};
+        std::vector<size_t> sizes = {inputPerDp.bytes, weightsPerDp.bytes, routingPerDp.bytes};
         XliteOpSplit(rt, *recvOut, outputs, sizes, _c.defDpSize);
 
         if (!inGraph) {
@@ -945,8 +942,8 @@ void XModel::ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weig
                                XTensor &routing, XTensor &unpIdx, XTensor &expertsSorted,
                                XTensor &expertsCounts)
 {
-    uint32_t m = tokenSorted.OrigShape()[0];
-    uint32_t mAllDp = m * _c.defDpSize;
+    // NOTE: the input XTensor's must already be viewed/padded to match DPs, if needed
+    uint32_t m = rt.maxTokensDp, mAllDp = rt.maxTokensDp * _c.defDpSize;
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
@@ -1182,7 +1179,8 @@ void XModel::ForwardMoECombineAllToAll(XRuntime &rt, XTensor &tokenSorted, XTens
 
 void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 {
-    size_t m0 = hiddenState.shape[0];
+    // the original shape of hiddenState must not be smaller than (maxTokensDp, hiddenSize)
+    size_t m = rt.currTokens, M = rt.maxTokensDp;
     uint32_t intermediateSize = _c.moeIntermediateSize / _c.moeTPSize;
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
@@ -1194,7 +1192,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     auto [w, r] = ForwardMoEGate(rt, layer, hiddenState);
     auto [weights, routing, unpIdx, expertsSorted, expertsCounts, meta] =
         rt.enableMoEAllToAll ? ForwardMoEDispatchAllToAll(rt, hiddenState, w, r)
-                             : ForwardMoEDispatch(rt, hiddenState.ResetView(true, false), w, r);
+                             : ForwardMoEDispatch(rt, hiddenState.View(M), w, r);
     // actual token num for current rank
     XTensor num = rt.enableMoEAllToAll ? XTensor() : XTensor({1}, INT32, unpIdx.ptr);
 
@@ -1264,24 +1262,24 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     if (_c.nSharedExperts != 0 &&
         ((_isSharedExpertWeightFull && ((rt.rankId() % rt.tpSize()) == 0)) ||
          !_isSharedExpertWeightFull)) {
-        XTensor &h = rt.GetTensor(hiddenState.shape, dtype, DBG_LOC).View(m0);
-        if (rt.enableMoEAllToAll) {
+        XTensor &h = rt.GetTensor(hiddenState.shape, dtype, DBG_LOC);
+        if (rt.enableMoEAllToAll) {  // hiddenState of shape (currTokens = m, hiddenSize)
             ForwardMoECombineAllToAll(rt, h, weights, routing, unpIdx, *outPtr, expertsCounts,
                                       meta);
-        } else {
+        } else {  // hiddenState of shape (maxTokensDp, hiddenSize)
             ForwardMOECombine(rt, h, weights, routing, unpIdx, *outPtr, expertsCounts);
         }
         // share experts
-        ForwardMLP(rt, layer, hiddenState.View(m0), moeSEUpGate, moeSEDown, false);
-        XliteOpAdd(rt, hiddenState, h, hiddenState);
+        ForwardMLP(rt, layer, hiddenState.View(m), moeSEUpGate, moeSEDown, false);
+        XliteOpAdd(rt, hiddenState, h.View(m), hiddenState);
         rt.PutTensor(h);
     } else {
-        if (rt.enableMoEAllToAll) {
+        if (rt.enableMoEAllToAll) {  // hiddenState of shape (currTokens = m, hiddenSize)
             ForwardMoECombineAllToAll(rt, hiddenState, weights, routing, unpIdx, *outPtr,
                                       expertsCounts, meta);
-        } else {
+        } else {  // hiddenState of shape (maxTokensDp, hiddenSize)
             ForwardMOECombine(rt, hiddenState, weights, routing, unpIdx, *outPtr, expertsCounts);
-            hiddenState.View(m0);
+            hiddenState.View(m);
         }
     }
 
@@ -1318,26 +1316,27 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
                                        std::vector<XTensor> &deepstackInputEmbeds,
                                        XTensor &freqsCis, XTensor &output)
 {
+    // m: actual token num (x, h, output)
+    // mPad: token num padded to match TP size (xPad, hiddenStatePad)
+    // mPadPerTp: mPad / TP size (xSlice, hiddenStateSlice)
+    // M: max possible token num considering both TP and DP (outputPad, original h/hiddenStatePad)
     XTensor xSlice;
-    size_t actualM = output.shape[0];
-    size_t mPad = xPad.shape[0];
+    size_t m = rt.currTokens, mPad = xPad.shape[0], M = std::max(mPad, rt.maxTokensDp);
     size_t mPadPerTp = mPad / _c.defTpSize;
     size_t sizePerTp = mPad * _c.hiddenSize / _c.defTpSize * XDtypeBit(embed.dtype) / 8;
     XTensor x, h;
-    x.Init({output.OrigShape()[0], _c.hiddenSize}, embed.dtype, xPad.ptr).View(actualM);
+    x.Init({m, _c.hiddenSize}, embed.dtype, xPad.ptr);
 
-    XTensor &outputPad =
-        rt.GetTensor({xPad.OrigShape()[0], _c.hiddenSize}, embed.dtype, DBG_LOC).View(mPad);
-    h.Init({output.OrigShape()[0], _c.hiddenSize}, embed.dtype, outputPad.ptr).View(actualM);
-    rt.hiddenStatePad.Init({xPad.OrigShape()[0], _c.hiddenSize}, embed.dtype, outputPad.ptr)
-        .View(mPad);
+    XTensor &outputPad = rt.GetTensor({M, _c.hiddenSize}, embed.dtype, DBG_LOC);
+    h.Init({M, _c.hiddenSize}, embed.dtype, outputPad.ptr).View(m);
+    rt.hiddenStatePad.Init({M, _c.hiddenSize}, embed.dtype, outputPad.ptr).View(mPad);
 
     void *slicePtr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(rt.hiddenStatePad.ptr) +
                                               (rt.rankId() % _c.defTpSize) * sizePerTp);
     rt.hiddenStateSlice.Init({mPadPerTp, _c.hiddenSize}, rt.hiddenStatePad.dtype, slicePtr);
     slicePtr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(xPad.ptr) +
                                         (rt.rankId() % _c.defTpSize) * sizePerTp);
-    xSlice.Init({mPadPerTp, xPad.shape[1]}, xPad.dtype, slicePtr);
+    xSlice.Init({mPadPerTp, _c.hiddenSize}, xPad.dtype, slicePtr);
 
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (i == 0) {
@@ -1382,7 +1381,8 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
                                 std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                 XTensor &output)
 {
-    XTensor &h = rt.GetTensor(output.OrigShape(), embed.dtype, DBG_LOC).View(output.shape[0]);
+    XTensor &h =
+        rt.GetTensor({rt.maxTokensDp, _c.hiddenSize}, embed.dtype, DBG_LOC).View(rt.currTokens);
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (i == 0) {
             XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], true, attnNormBias[i]);
@@ -1410,21 +1410,17 @@ void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                    std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                    XTensor &h)
 {
-    if ((_c.defTpSize > 1 && (h.OrigShape()[0] >= rt.commOptimizeLen || rt.multiTaskParallel)) ||
-        (_c.defDpSize > 1 && _c.defTpSize > 1 && _c.moeEpSize > 1 && rt.enableMoEAllToAll)) {
-        XTensor &xPad = rt.GetTensor({ROUND_UP(h.OrigShape()[0], _c.defTpSize), _c.hiddenSize},
-                                     embed.dtype, DBG_LOC)
-                            .View(ROUND_UP(h.shape[0], _c.defTpSize));
-        XTensor x;
-        x.Init({h.OrigShape()[0], _c.hiddenSize}, embed.dtype, xPad.ptr).View(h.shape[0]);
-        ForwardParallelEmbed(rt, input, embed, x);
-        rt.enableCommOptimize = true;
-        ForwardLayersCommOptimize(rt, xPad, kvCache, deepstackInputEmbeds, freqsCis, h);
+    // under DP, different ranks may routed differently with `enableCommOptimize` enabled/disabled;
+    // thus, `ForwardFNN` from both paths must be guarded for correct DP communications
+    if (rt.enableCommOptimize) {
+        size_t m = rt.currTokens, mPad = ROUND_UP(rt.currTokens, _c.defTpSize);
+        XTensor &xPad = rt.GetTensor({mPad, _c.hiddenSize}, embed.dtype, DBG_LOC);
+        ForwardParallelEmbed(rt, input, embed, xPad.View(m));
+        ForwardLayersCommOptimize(rt, xPad.View(mPad), kvCache, deepstackInputEmbeds, freqsCis, h);
         rt.PutTensor(xPad);
     } else {
-        XTensor &x = rt.GetTensor(h.OrigShape(), embed.dtype, DBG_LOC).View(h.shape[0]);
+        XTensor &x = rt.GetTensor({rt.currTokens, _c.hiddenSize}, embed.dtype, DBG_LOC);
         ForwardParallelEmbed(rt, input, embed, x);
-        rt.enableCommOptimize = false;
         ForwardLayersNaive(rt, x, kvCache, deepstackInputEmbeds, freqsCis, h);
         rt.PutTensor(x);
     }
@@ -1460,32 +1456,28 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype));
-
     if (rt.batchedTokens < input.shape[0]) {
-        input.View(rt.batchedTokens).MakeOriginal();
+        input.View(rt.batchedTokens);
     }
-    output.View(input.shape[0]);  // DP: output row num signal the max token number across DP groups
-    if (rt.dpSize() <= 1 || _c.nRoutedExperts == 0) {  // non-MoE or MoE with DP=1
-        output.MakeOriginal();
-    }
+    rt.currTokens = input.shape[0];
+    rt.maxTokensDp = PadForDp(rt) ? output.OrigShape()[0] : rt.currTokens;
+    output.View(rt.currTokens);
 
-    if (_c.defTpSize > 1 && output.OrigShape()[0] >= rt.commOptimizeLen) {
-        rt.enableCommOptimize = true;
-        if (output.OrigShape()[0] % _c.defTpSize != 0) {
-            XTensor &xPad =
-                rt.GetTensor({ROUND_UP(output.OrigShape()[0], _c.defTpSize), _c.hiddenSize},
-                             embed.dtype, DBG_LOC)
-                    .View(ROUND_UP(output.shape[0], _c.defTpSize));
-            size_t copySize = output.shape[0] * _c.hiddenSize * XDtypeBit(embed.dtype) / 8;
-            aclrtMemcpyAsync(xPad.ptr, copySize, input.ptr, copySize, ACL_MEMCPY_DEVICE_TO_DEVICE,
-                             rt.stream);
-            ForwardLayersCommOptimize(rt, xPad, kvCache, deepstackInputEmbeds, freqsCis, output);
-            rt.PutTensor(xPad);
+    ConfigRtCommOptimize(rt, rt.currTokens);
+    if (rt.enableCommOptimize) {
+        size_t mPad = ROUND_UP(input.shape[0], _c.defTpSize);
+        XTensor *xPadPtr;
+        if (input.OrigShape()[0] >= mPad) {
+            XTensor xPad({mPad, _c.hiddenSize}, embed.dtype, input.ptr);
+            xPadPtr = &xPad;
         } else {
-            ForwardLayersCommOptimize(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
+            xPadPtr = &rt.GetTensor({mPad, _c.hiddenSize}, embed.dtype, DBG_LOC);
+            aclrtMemcpyAsync(xPadPtr->ptr, input.bytes, input.ptr, input.bytes,
+                             ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream);
         }
+        ForwardLayersCommOptimize(rt, *xPadPtr, kvCache, deepstackInputEmbeds, freqsCis, output);
+        rt.PutTensor(*xPadPtr);
     } else {
-        rt.enableCommOptimize = false;
         ForwardLayersNaive(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
     }
 }
@@ -1500,15 +1492,14 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype));
-
     if (rt.batchedTokens < input.shape[0]) {
-        input.View(rt.batchedTokens).MakeOriginal();
+        input.View(rt.batchedTokens);
     }
-    output.View(input.shape[0]);  // DP: output row num signal the max token number across DP groups
-    if (rt.dpSize() <= 1 || _c.nRoutedExperts == 0) {  // non-MoE or MoE with DP=1
-        output.MakeOriginal();
-    }
+    rt.currTokens = input.shape[0];
+    rt.maxTokensDp = PadForDp(rt) ? output.OrigShape()[0] : rt.currTokens;
+    output.View(rt.currTokens);
 
+    ConfigRtCommOptimize(rt, rt.currTokens);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, output);
 }
 
@@ -1524,22 +1515,20 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype));
-
-    uint32_t outputRowDim = output.shape.size() - 2;
     if (rt.batchedTokens < input.shape[0]) {
-        input.View(rt.batchedTokens).MakeOriginal();
+        input.View(rt.batchedTokens);
     }
-    output.View(input.shape[outputRowDim], outputRowDim);  // DP: output row num signal the max
-                                                           // token number across DP groups
-    if (rt.dpSize() <= 1 || _c.nRoutedExperts == 0) {      // non-MoE or MoE with DP=1
-        output.MakeOriginal();
-    }
+    rt.currTokens = input.shape[0];
+    // shape of output: world_size, numTokens, vocab_size // world_size (numTokens = maxTokensDp)
+    rt.maxTokensDp = PadForDp(rt) ? output.OrigShape()[output.shape.size() - 2] : rt.currTokens;
 
+    ConfigRtCommOptimize(rt, rt.currTokens);
     XTensor &h =
-        rt.GetTensor({output.OrigShape()[outputRowDim], _c.hiddenSize}, embed.dtype, DBG_LOC)
-            .View(output.shape[outputRowDim]);
+        rt.GetTensor({rt.maxTokensDp, _c.hiddenSize}, embed.dtype, DBG_LOC).View(rt.currTokens);
     ForwardEmbedAndLayers(rt, input, kvCache, deepstackInputEmbeds, freqsCis, h);
-    ForwardGetLogits(rt, h, indices, output);
+    // here, output is not contiguous by `numTokens` dimension, thus we must view `h` instead
+    // TODO: change output's shape to be of `numTokens, world_size, vocab_size // world_size`
+    ForwardGetLogits(rt, h.View(rt.maxTokensDp), indices, output);
     rt.PutTensor(h);
 }
 
@@ -1627,6 +1616,7 @@ size_t XModel::GetTensorPoolSize(int dbg)
     XModelAttnMeta attnMeta;
     attnMeta.version = 0;
     uint32_t batchSize = 1;
+    _c.maxBatchedTokens = ROUND_UP(_c.maxBatchedTokens, _c.defTpSize);
     uint32_t seqLen = _c.maxBatchedTokens;
     uint32_t maxNumBlocks = 0;
 
