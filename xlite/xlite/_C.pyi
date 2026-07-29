@@ -2192,7 +2192,7 @@ def linear_att_conv_and_silu(
         output (torch.Tensor): Output tensor, shape [B, C, S].
 
     Returns:
-        None: `output` is written in place. State is left unchanged.
+        None: `output` is written in place. State is always updated.
     """
     ...
 

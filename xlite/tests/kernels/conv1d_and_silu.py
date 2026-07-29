@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import time
 import torch.nn.functional as F
 from xlite._C import Runtime, transpose_1_2, linear_att_conv_and_silu
 
@@ -46,9 +47,13 @@ def run_test(rt, batch, seq_len, msg):
     standard = torch.zeros(batch, seq_len, channels)
     torch.npu.synchronize()
     torch_impl(input, weight, conv_state, standard)
+    expected_state = torch.cat([conv_state, input.transpose(1,2)], dim=-1)[..., -kernel_dim:]
+    torch.npu.synchronize()
     my_impl(rt, input, weight, conv_state, output, batch, seq_len)
+    torch.npu.synchronize()
     try:
         torch.testing.assert_close(standard, output, rtol=1e-2, atol=1e-3)
+        torch.testing.assert_close(expected_state, conv_state, rtol=1e-2, atol=1e-3)
         print(f"{msg}: PASS")
     except Exception as e:
         print(f"{msg}: FAILED")
@@ -61,6 +66,7 @@ if __name__ == "__main__":
     torch.set_default_device("npu:0")
     torch.set_printoptions(threshold=torch.inf)
 
+    t = time.time()
     for dtype in [torch.bfloat16, torch.float16]:
         torch.set_default_dtype(dtype)
         for batch in range(1, 9):
@@ -68,3 +74,5 @@ if __name__ == "__main__":
                 seq_len = 2**i
                 msg = f'[{dtype}/{batch}/{seq_len}]'
                 run_test(rt, batch, seq_len, msg)
+    total = time.time() - t
+    print(f'completed in {total} s.')

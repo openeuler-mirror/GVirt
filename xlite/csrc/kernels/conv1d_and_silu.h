@@ -294,6 +294,7 @@ public:
                     WriteBackState(batchIdx, channel);
                     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
                 }
+                pipe_barrier(PIPE_ALL);
             }
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         }

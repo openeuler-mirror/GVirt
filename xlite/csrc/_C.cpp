@@ -1742,7 +1742,7 @@ void LinearAttConv1dAndSiLU(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_
     InitXTensor(_weight, weight);
     InitXTensor(_output, output);
     // Unit tests compare output only; leave state unchanged.
-    XliteOpConv1dAndSiLU(rt, _conv_state, _mix_qkv, _weight, _output, /*updateState=*/false);
+    XliteOpConv1dAndSiLU(rt, _conv_state, _mix_qkv, _weight, _output, /*updateState=*/true);
     rt.Synchronize();
 }
 
