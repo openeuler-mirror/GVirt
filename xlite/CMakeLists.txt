@@ -81,6 +81,8 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/muls_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_v2_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/flash_mla_v2_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/gather_sparse_kv_cache_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_v3_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sigmoid_gate_mul_bfloat16_t.cpp

@@ -394,7 +394,28 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
 
     XTensor &oAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
                                     hiddenState.dtype, DBG_LOC);
-    if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
+    if (rt._decodeStep && _c.attnType == XMODEL_ATTN_DSA && topkIndices != nullptr) {
+        // Decode + DSA long-sequence path: gather sparse top-k tokens into a
+        // contiguous dense cache, then run mla_v3 on the dense cache.
+        XTensor &kDense =
+            rt.GetTensor({static_cast<size_t>(rt._batch), _c.indexTopK, _c.kvLoraRank},
+                         hiddenState.dtype, DBG_LOC);
+        XTensor &peDense =
+            rt.GetTensor({static_cast<size_t>(rt._batch), _c.indexTopK, _c.ropeHeadDim},
+                         hiddenState.dtype, DBG_LOC);
+        XliteOpGatherSparseKVCache(rt, kCache, peCache, rt._attnBlockTables, *topkIndices, rt._lens,
+                                   rt._cachedLens, kDense, peDense, rt._batch, _c.indexTopK,
+                                   _c.blockSize, rt._maxNumBlocks, _c.kvLoraRank, _c.ropeHeadDim,
+                                   _c.nKvHeads);
+        XTensor &qkDense =
+            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
+        XliteOpMLAV3(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._queryStartLoc,
+                     rt._lens, rt._cachedLens, nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
+                     rt._batch, _c.indexTopK, _c.softmaxScale);
+        rt.PutTensor(qkDense);
+        rt.PutTensor(peDense);
+        rt.PutTensor(kDense);
+    } else if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
                                    hiddenState.dtype, DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, oAbsorb, rt._queryStartLoc, rt._lens,

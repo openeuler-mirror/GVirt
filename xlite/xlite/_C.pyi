@@ -1692,6 +1692,45 @@ def matmul_dequant(
     """
     ...
 
+def msd_merge_dequant(
+    rt: Runtime,
+    y_merged: torch.Tensor,
+    scale_bias: torch.Tensor,
+    per_token_scale: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    """Merge MSD (W4A8) row-merged int8 result and per-token dequantize.
+
+    Used by the MSD W4A8 MoE post-stage to turn a mid-stage row-merged result
+    into the final BF16 output. ``y_merged`` packs two halves of a 4-bit weight
+    matmul: rows ``[0, m)`` hold the low nibble and rows ``[m, 2m)`` hold the
+    high nibble (each in int8 form). The kernel reconstructs the full value
+    ``Y_high * 16 + Y_low``, compensates the low-nibble ``-8`` bias, adds a
+    per-column ``scale_bias``, and scales by a per-token ``per_token_scale``::
+
+        Y = (Y_high * 16 + Y_low + scale_bias) * perTokenScale
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        y_merged (torch.Tensor): Row-merged int8 mid-stage result, shape
+            ``[2*m, n]`` (float16). Rows ``[0, m)`` are the low nibble, rows
+            ``[m, 2m)`` are the high nibble.
+        scale_bias (torch.Tensor): Per-column bias added after merge, shape
+            ``[n]`` (float32).
+        per_token_scale (torch.Tensor): Per-token dequantization scale, shape
+            ``[m]`` (float32).
+        out (torch.Tensor): Output tensor, shape ``[m, n]`` (bfloat16).
+
+    Returns:
+        None: `out` is written in place.
+
+    Raises:
+        RuntimeError: If dtypes/shapes are unsupported
+            (requires ``y_merged`` float16, ``scale_bias``/``per_token_scale``
+            float32, ``out`` bfloat16, and ``y_merged.shape[0]`` even).
+    """
+    ...
+
 def dequant(rt: Runtime, in_: torch.Tensor, scale: torch.Tensor, out: torch.Tensor, has_scale: bool) -> None:
     """Dequantize tensor values into output precision.
 
@@ -1777,6 +1816,130 @@ def mla_v2(
 
     Returns:
         None: `output` is written in place.
+    """
+    ...
+
+def gather_sparse_kv_cache(
+    rt: Runtime,
+    k_cache: torch.Tensor,
+    pe_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    topk_indices: torch.Tensor,
+    query_lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    k_dense_cache: torch.Tensor,
+    pe_dense_cache: torch.Tensor,
+    batch: int,
+    index_topk: int,
+    block_size: int,
+    max_num_blocks: int,
+    kv_lora_rank: int,
+    rope_head_dim: int,
+    kv_heads: int = 1,
+) -> None:
+    """Gather sparse KV cache into a contiguous dense cache per batch.
+
+    For each ``(b, i)`` pair, reads the token index ``tok = topk_indices[b, i]``
+    (token-index semantics), maps it to the physical block via
+    ``block_tables[b * max_num_blocks + tok // block_size]`` and offset
+    ``tok % block_size``, and copies one row from paged ``k_cache`` /
+    ``pe_cache`` into the contiguous ``k_dense_cache`` / ``pe_dense_cache``.
+
+    Only the first ``min(query_lens[b] + cached_lens[b], index_topk)`` slots per
+    batch are written; slots beyond that (topk_indices padding tail) are
+    **skipped** (left as-is, typically zero-initialized by the caller).
+    :func:`mla_v3` reads only those valid slots and masks the rest in softmax,
+    so the skipped slots do not affect output.
+
+    Used by the decode + DSA long-sequence path to feed a contiguous dense cache
+    to :func:`mla_v3` instead of the paged layout.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        k_cache (torch.Tensor): Paged KV cache (kv_lora_rank slice), shape
+            (kvcache_block_num, block_size, kv_heads, kv_lora_rank).
+        pe_cache (torch.Tensor): Paged RoPE key cache (rope_head_dim slice),
+            shape (kvcache_block_num, block_size, kv_heads, rope_head_dim).
+        block_tables (torch.Tensor): Block table, shape (batch * max_num_blocks).
+        topk_indices (torch.Tensor): Top-k token indices from IndexerTopK, shape
+            (batch, index_topk), dtype int32.
+        query_lens (torch.Tensor): Per-batch current query lengths, shape
+            (batch,), dtype int32. Decode = 1 per batch.
+        cached_lens (torch.Tensor): Per-batch cached token lengths, shape
+            (batch,), dtype int32. Used with query_lens to derive the valid
+            slot count per batch.
+        k_dense_cache (torch.Tensor): Output contiguous K cache, shape
+            (batch, index_topk, kv_heads, kv_lora_rank); written in place.
+        pe_dense_cache (torch.Tensor): Output contiguous PE cache, shape
+            (batch, index_topk, kv_heads, rope_head_dim); written in place.
+        batch (int): Batch size.
+        index_topk (int): Number of top-k tokens per batch (dense length).
+        block_size (int): KV block size.
+        max_num_blocks (int): Maximum number of blocks per request.
+        kv_lora_rank (int): KV LoRA rank.
+        rope_head_dim (int): Rotary head dimension.
+        kv_heads (int): Number of KV heads (must be 1; defaults to 1 for MLA).
+
+    Returns:
+        None: `k_dense_cache` and `pe_dense_cache` are written in place.
+    """
+    ...
+
+def mla_v3(
+    rt: Runtime,
+    q_absorb: torch.Tensor,
+    qr: torch.Tensor,
+    k_dense_cache: torch.Tensor,
+    pe_dense_cache: torch.Tensor,
+    o_absorb: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    n_heads: int,
+    rope_head_dim: int,
+    kv_lora_rank: int,
+    batch: int,
+    index_topk: int,
+    scale: float,
+) -> None:
+    """Run MLA v3 attention over a contiguous dense KV cache.
+
+    Variant of :func:`mla_v2` that reads from a contiguous
+    ``k_dense_cache`` / ``pe_dense_cache`` (produced by
+    :func:`gather_sparse_kv_cache`) instead of a paged block-table layout.
+    Drops the block-table indirection and the top-k vgather mask: every dense
+    token participates in softmax (no causal mask), since the dense cache is
+    already the top-k selected tokens. The QK/SV n-tile size is a fixed
+    internal constant (no ``block_size`` argument needed, unlike :func:`mla_v2`).
+
+    The ``qk`` workspace is allocated internally from the runtime tensor pool.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        q_absorb (torch.Tensor): Pre-absorbed query, shape
+            (total_query_tokens, n_heads, kv_lora_rank).
+        qr (torch.Tensor): Pre-rotated q_rope slice, shape
+            (total_query_tokens, n_heads, rope_head_dim).
+        k_dense_cache (torch.Tensor): Contiguous K cache, shape
+            (batch, index_topk, kv_heads, kv_lora_rank).
+        pe_dense_cache (torch.Tensor): Contiguous PE cache, shape
+            (batch, index_topk, kv_heads, rope_head_dim).
+        o_absorb (torch.Tensor): Output absorb tensor, shape
+            (total_query_tokens, n_heads, kv_lora_rank); written in place.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
+        lens (torch.Tensor): Current token lengths.
+        cached_lens (torch.Tensor): Cached token lengths.
+        n_heads (int): Number of query heads.
+        rope_head_dim (int): Rotary head dimension.
+        kv_lora_rank (int): KV LoRA rank.
+        block_size (int): KV block size (used as the n0 tile in QK/SV mmad).
+        batch (int): Batch size.
+        index_topk (int): Number of top-k tokens per batch (dense length).
+        scale (float): Attention scaling factor.
+
+    Returns:
+        None: `o_absorb` is written in place. Apply the WUV projection on the
+        host side to obtain the final output.
     """
     ...
 
