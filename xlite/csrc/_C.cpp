@@ -913,7 +913,7 @@ void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType 
     InitXTensor(_out, out);
 
     enum commType type = commType == 1 ? DP : TP;
-    XliteOpAllGather(rt, _in, _out, type, DBG_LOC);
+    XliteOpAllGather(rt, _in, _out, type, type == DP, DBG_LOC);
     rt.Synchronize();
 }
 
@@ -925,7 +925,7 @@ void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commT
     InitXTensor(_out, out);
 
     enum commType type = commType == 1 ? DP : TP;
-    XliteOpReduceScatter(rt, _in, _out, type, DBG_LOC);
+    XliteOpReduceScatter(rt, _in, _out, type, type == DP, DBG_LOC);
     rt.Synchronize();
 }
 
@@ -937,7 +937,7 @@ void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType 
     InitXTensor(_out, out);
 
     enum commType type = commType == 1 ? DP : TP;
-    XliteOpAllReduceSum(rt, _in, _out, type, DBG_LOC);
+    XliteOpAllReduceSum(rt, _in, _out, type, type == DP, DBG_LOC);
     rt.Synchronize();
 }
 

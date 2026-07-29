@@ -15,11 +15,14 @@ static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN);
 
 HcclDataType XDtype2HcclDtype(enum XDtype dtype);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
-                      DebugSrcLoc loc = UNKNOWN_DBG_LOC, uint32_t copySize = COPY_SIZE);
+                      bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
+                      uint32_t copySize = COPY_SIZE);
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
-                          DebugSrcLoc loc = UNKNOWN_DBG_LOC, uint32_t copySize = COPY_SIZE);
+                          bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
+                          uint32_t copySize = COPY_SIZE);
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
-                         DebugSrcLoc loc = UNKNOWN_DBG_LOC, uint32_t copySize = COPY_SIZE);
+                         bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
+                         uint32_t copySize = COPY_SIZE);
 void XliteOpAlltoAllV(XRuntime &rt, XTensor &in, XTensor &out, XTensor &sendCounts,
                       XTensor &recvCounts, XTensor &sdispls, XTensor &rdispls, enum commType type,
                       DebugSrcLoc loc = UNKNOWN_DBG_LOC);

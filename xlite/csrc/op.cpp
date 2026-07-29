@@ -155,8 +155,8 @@ static bool EachXDtype(enum XDtype dtype, Args &&...args)
     return (... && (std::forward<Args>(args).dtype == dtype));
 }
 
-void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type, DebugSrcLoc loc,
-                      uint32_t copySize)
+void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type, bool fetchOffset,
+                      DebugSrcLoc loc, uint32_t copySize)
 {
     uint32_t rankSize = rt.tpSize();
     if (type == DP) {
@@ -290,7 +290,7 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
                 break;
         }
         launchKernel(coreNum, rt.stream, inPtr, outPtr, count, localRank, rank,
-                     xcclComm->generation++, xcclComm->dParam, copySize);
+                     xcclComm->generation++, xcclComm->dParam, copySize, fetchOffset || type == DP);
 
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
@@ -307,7 +307,7 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
 }
 
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
-                          DebugSrcLoc loc, uint32_t copySize)
+                          bool fetchOffset, DebugSrcLoc loc, uint32_t copySize)
 {
     uint32_t rankSize = type == TP ? rt.tpSize() : rt.dpSize();
     if (in.dtype != out.dtype || in.numel != out.numel * rankSize) {
@@ -405,7 +405,7 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
                 break;
         }
         launchKernel(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank, rank,
-                     xcclComm->generation++, xcclComm->dParam, copySize);
+                     xcclComm->generation++, xcclComm->dParam, copySize, fetchOffset || type == DP);
 
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
@@ -422,7 +422,7 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
 }
 
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
-                         DebugSrcLoc loc, uint32_t copySize)
+                         bool fetchOffset, DebugSrcLoc loc, uint32_t copySize)
 {
     if (in.dtype != out.dtype || in.numel != out.numel) {
         std::stringstream ss;
@@ -514,7 +514,7 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
                 break;
         }
         launchKernel(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank, rank,
-                     xcclComm->generation++, xcclComm->dParam, copySize);
+                     xcclComm->generation++, xcclComm->dParam, copySize, fetchOffset || type == DP);
 
         if (needCopy) {
             CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
