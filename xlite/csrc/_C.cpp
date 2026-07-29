@@ -621,11 +621,8 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     }
 
     if (input.size(0) == 0) {
-        return;
+        return;  // for DP dummy run with MoE, add a padding token to avoid empty input
     }
-
-    // only calculate the region [_input.shape[0], _output.shape[1]]
-    _output.View({_input.shape[0], _output.shape[1]});
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
         if (kvCache[i].size() != _kv[i].size()) {
@@ -725,7 +722,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
     }
 
     if (input.size(0) == 0) {
-        return;
+        return;  // for DP dummy run with MoE, add a padding token to avoid empty input
     }
 
     for (uint64_t i = 0; i < _kv.size(); i++) {
@@ -804,11 +801,8 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     }
 
     if (input.size(0) == 0) {
-        return;
+        return;  // for DP dummy run with MoE, add a padding token to avoid empty input
     }
-
-    // only calculate the region [_input.shape[0], _output.shape[1]]
-    _output.View({_input.shape[0], _output.shape[1]});
 
     if (deepstackInput.size() != _deepstackInputEmbeds.size()) {
         throw std::runtime_error(std::string(__func__) + ": check deepstack input failed");
@@ -919,7 +913,7 @@ void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType 
     InitXTensor(_out, out);
 
     enum commType type = commType == 1 ? DP : TP;
-    XliteOpAllGather(rt, _in, _out, type);
+    XliteOpAllGather(rt, _in, _out, type, type == DP, DBG_LOC);
     rt.Synchronize();
 }
 
@@ -931,7 +925,7 @@ void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commT
     InitXTensor(_out, out);
 
     enum commType type = commType == 1 ? DP : TP;
-    XliteOpReduceScatter(rt, _in, _out, type);
+    XliteOpReduceScatter(rt, _in, _out, type, type == DP, DBG_LOC);
     rt.Synchronize();
 }
 
@@ -943,7 +937,7 @@ void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType 
     InitXTensor(_out, out);
 
     enum commType type = commType == 1 ? DP : TP;
-    XliteOpAllReduceSum(rt, _in, _out, type);
+    XliteOpAllReduceSum(rt, _in, _out, type, type == DP, DBG_LOC);
     rt.Synchronize();
 }
 
@@ -966,7 +960,7 @@ void AlltoAllV(XRuntime &rt, at::Tensor &out, at::Tensor &in, at::Tensor &sendCo
     } else if (commType == 2) {
         type = EP;
     }
-    XliteOpAlltoAllV(rt, _in, _out, _sendCounts, _recvCounts, _sdispls, _rdispls, type);
+    XliteOpAlltoAllV(rt, _in, _out, _sendCounts, _recvCounts, _sdispls, _rdispls, type, DBG_LOC);
     rt.Synchronize();
 }
 
@@ -1731,9 +1725,9 @@ void Concat(XRuntime &rt, std::vector<at::Tensor> &inputs, at::Tensor &out)
     // Validate byte sizes: the output must hold exactly the concatenated bytes.
     size_t inBytes = 0;
     for (auto &x : _inputs) {
-        inBytes += x.numel * XDtypeBit(x.dtype) / 8;
+        inBytes += x.bytes;
     }
-    size_t outBytes = _out.numel * XDtypeBit(_out.dtype) / 8;
+    size_t outBytes = _out.bytes;
     if (inBytes != outBytes) {
         throw std::runtime_error(std::string(__func__) + ": output bytes (" +
                                  std::to_string(outBytes) + ") != sum(inputs bytes) (" +
@@ -1768,7 +1762,7 @@ void Split(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs,
     for (size_t s : _sizes) {
         totalSize += s;
     }
-    size_t inBytes = _in.numel * XDtypeBit(_in.dtype) / 8;
+    size_t inBytes = _in.bytes;
     if (totalSize * numPackets != inBytes) {
         throw std::runtime_error(std::string(__func__) + ": input bytes (" +
                                  std::to_string(inBytes) + ") != totalSize*numPackets (" +
@@ -1778,7 +1772,7 @@ void Split(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs,
     // kernel writes out-of-bounds and corrupts adjacent device memory.
     for (size_t j = 0; j < _outputs.size(); j++) {
         size_t need = _sizes[j] * numPackets;
-        size_t cap = _outputs[j].numel * XDtypeBit(_outputs[j].dtype) / 8;
+        size_t cap = _outputs[j].bytes;
         if (need > cap) {
             throw std::runtime_error(std::string(__func__) + ": output[" + std::to_string(j) +
                                      "] bytes (" + std::to_string(cap) + ") < numPackets*sizes[" +

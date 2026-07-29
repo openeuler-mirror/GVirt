@@ -103,6 +103,7 @@ public:
     XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
     void PutTensor(XTensor &t);
     bool TensorInPool(XTensor &t);
+    int64_t GetTensorOffset(XTensor &t);
 
     void ConfigureSwizzle(uint32_t swizzle, bool useSwizzleTable);
 
@@ -196,6 +197,12 @@ public:
 
     // for MoE
     XTensor _tokensPerEpGroupAllEpHost;
+
+    // DP metadata
+    uint64_t currTokens = 1;
+    // maxTokensDp: initialized as max tokens across DP ranks; updated to the token number
+    // to pad to for MoE when _dpSize > 1 and _nRoutedExperts > 0 and !enableMoEAllToAll
+    uint64_t maxTokensDp = 1;
 
 protected:
     int GetNodeIps(void);

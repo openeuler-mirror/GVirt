@@ -22,7 +22,7 @@ public:
 
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId,
                                 uint32_t rankSize, uint64_t generation, GM_ADDR param,
-                                uint32_t copySize)
+                                uint32_t copySize, bool fetchOffset)
     {
         __gm__ struct XcclParam *xcclParam = (__gm__ struct XcclParam *)param;
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
@@ -63,13 +63,15 @@ public:
         }
 
         if (coreIdx == 0) {
-            // __gm__ uint64_t *inputOffset = (__gm__ uint64_t *)(this->param.ipcMems[myRankId]);
-            // __gm__ uint64_t *outputOffset = (__gm__ uint64_t *)(this->param.ipcMems[myRankId] +
-            // sizeof(uint64_t)); *inputOffset = (uint64_t)input -
-            // (uint64_t)this->param.ipcXTensorMems[myRankId]; *outputOffset = (uint64_t)output -
-            // (uint64_t)this->param.ipcXTensorMems[myRankId];
-            // DataCacheCleanAndInvalid(inputOffset);
-            // DataCacheCleanAndInvalid(outputOffset);
+            if (fetchOffset) {
+                __gm__ uint64_t *inputOffset = (__gm__ uint64_t *)(this->param.ipcMems[myRankId]);
+                __gm__ uint64_t *outputOffset =
+                    (__gm__ uint64_t *)(this->param.ipcMems[myRankId] + sizeof(uint64_t));
+                *inputOffset = (uint64_t)input - (uint64_t)this->param.ipcXTensorMems[myRankId];
+                *outputOffset = (uint64_t)output - (uint64_t)this->param.ipcXTensorMems[myRankId];
+                DataCacheCleanAndInvalid(inputOffset);
+                DataCacheCleanAndInvalid(outputOffset);
+            }
             SetIpcFlag(0, generation);
         }
 
@@ -96,18 +98,21 @@ public:
                 outputBuf[r].SetGlobalBuffer((__gm__ Dtype *)output);
                 continue;
             }
-            // __gm__ uint64_t *inputOffset = (__gm__ uint64_t *)(this->param.ipcMems[r]);
-            // __gm__ uint64_t *outputOffset = (__gm__ uint64_t *)(this->param.ipcMems[r] +
-            // sizeof(uint64_t));
             struct XcclIpcMemData localIpcMemData;
-            // DataCacheCleanAndInvalid(inputOffset);
-            // DataCacheCleanAndInvalid(outputOffset);
-            // localIpcMemData.inputOffset = *inputOffset;
-            // localIpcMemData.outputOffset = *outputOffset;
-            localIpcMemData.inputOffset =
-                (uint64_t)input - (uint64_t)this->param.ipcXTensorMems[myRankId];
-            localIpcMemData.outputOffset =
-                (uint64_t)output - (uint64_t)this->param.ipcXTensorMems[myRankId];
+            if (fetchOffset) {
+                __gm__ uint64_t *inputOffset = (__gm__ uint64_t *)(this->param.ipcMems[r]);
+                __gm__ uint64_t *outputOffset =
+                    (__gm__ uint64_t *)(this->param.ipcMems[r] + sizeof(uint64_t));
+                localIpcMemData.inputOffset = *inputOffset;
+                localIpcMemData.outputOffset = *outputOffset;
+                DataCacheCleanAndInvalid(inputOffset);
+                DataCacheCleanAndInvalid(outputOffset);
+            } else {
+                localIpcMemData.inputOffset =
+                    (uint64_t)input - (uint64_t)this->param.ipcXTensorMems[myRankId];
+                localIpcMemData.outputOffset =
+                    (uint64_t)output - (uint64_t)this->param.ipcXTensorMems[myRankId];
+            }
             if (this->skipMyRank) {
                 localIpcMemData.inputOffset =
                     localIpcMemData.outputOffset + r * countPerRank * sizeof(Dtype);
@@ -288,17 +293,17 @@ private:
     bool skipMyRank;
 };
 
-#define ALLGATHER_FUNC_DEFINE(dtype)                                                       \
-    extern "C" __global__ __aicore__ void allgather_##dtype(                               \
-        GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId, uint32_t rankSize, \
-        uint64_t generation, GM_ADDR param, uint32_t copySize)                             \
-    {                                                                                      \
-        if (count == 0 || rankSize <= 1 || copySize == 0) {                                \
-            return;                                                                        \
-        }                                                                                  \
-        AllGather<dtype> op;                                                               \
-        op.Init(input, output, count, rankId, rankSize, generation, param, copySize);      \
-        op.Run();                                                                          \
+#define ALLGATHER_FUNC_DEFINE(dtype)                                                               \
+    extern "C" __global__ __aicore__ void allgather_##dtype(                                       \
+        GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId, uint32_t rankSize,         \
+        uint64_t generation, GM_ADDR param, uint32_t copySize, bool fetchOffset)                   \
+    {                                                                                              \
+        if (count == 0 || rankSize <= 1 || copySize == 0) {                                        \
+            return;                                                                                \
+        }                                                                                          \
+        AllGather<dtype> op;                                                                       \
+        op.Init(input, output, count, rankId, rankSize, generation, param, copySize, fetchOffset); \
+        op.Run();                                                                                  \
     }
 
 ALLGATHER_FUNC_DEFINE(int8_t);

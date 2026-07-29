@@ -25,12 +25,14 @@
 #define MB_BIT 20
 #define XLITE_MAX_NUM_DYNAMIC_TENSOR 128
 #define XLITE_TENSOR_ALIGN 1024
+#define XLITE_TENSOR_ALIGN_BIT 8192  // XLITE_TENSOR_ALIGN * 8
 
 #define DBG_LOC            \
     DebugSrcLoc            \
     {                      \
         __func__, __LINE__ \
     }
+#define UNKNOWN_DBG_LOC DebugSrcLoc{"unknown", -1}
 
 #define DBG_PREFIX (std::string(__func__) + ": ")
 #define XT_STR(x) ((x).ToStr(#x) + ", ")
@@ -61,7 +63,7 @@ enum XRopeType {
 };
 
 enum QuantType {
-    UNKONOWN_QUANT,
+    UNKNOWN_QUANT,
     NO_QUANT,
     STATIC_QUANT,
     DYNAMIC_QUANT,
@@ -70,6 +72,11 @@ enum QuantType {
 typedef struct DebugSrcLoc {
     const char *func;
     int line;
+
+    [[nodiscard]] std::string ToStr() const
+    {
+        return line >= 0 ? std::string(func) + ":" + std::to_string(line) + ":" : std::string("");
+    }
 } DebugSrcLoc;
 
 inline const char *XDtypeStr(enum XDtype dtype)
@@ -205,35 +212,60 @@ class XTensor
 public:
     XTensor() {};
     XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
-    void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
+    XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
     // The os parameter lets callers (e.g. the debug module) capture the output into a
     // stream so it can be flushed atomically with a rank/color prefix. Defaults to
     // std::cout to keep legacy direct callers unchanged.
     void Print(const char *name = "", uint32_t nRow = 6, uint32_t nCol = 6,
-               std::ostream &os = std::cout);
+               std::ostream &os = std::cout, const char *endingNote = "");
     void PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDtype subDtype,
-                  uint32_t nRow = 6, uint32_t nCol = 6, std::ostream &os = std::cout);
-    void Memset(int value);
+                  uint32_t nRow = 6, uint32_t nCol = 6, std::ostream &os = std::cout,
+                  const char *endingNote = "");
+    XTensor &Memset(int value);
     std::string ToStr(const char *name = "") const;
-    void View(std::vector<size_t> shape);
-    void View(enum XDtype type);
+    XTensor &View(std::vector<size_t> shape);
+    XTensor &View(enum XDtype type);
+    XTensor &View(size_t newDim, uint32_t dim = 0);
+    XTensor &ResetView(bool resetShape = true, bool resetDtype = true);
+    XTensor &MakeOriginal();  // update origShape, origNumel, origDtype, origBytes, etc. to current
     void Save(const std::string &path);
-    bool CheckNanInf(const char *name = "", float threshold = -1.0f, std::ostream &os = std::cout);
+    bool CheckNanInf(const char *name = "", float threshold = -1.0f, std::ostream &os = std::cout,
+                     const char *endingNote = "");
     friend std::ostream &operator<<(std::ostream &os, const XTensor &p);
+    [[nodiscard]] const std::vector<size_t> &OrigShape() const
+    {
+        return origShape;
+    }
+    [[nodiscard]] size_t OrigNumel() const
+    {
+        return origNumel;
+    }
+    [[nodiscard]] XDtype OrigDtype() const
+    {
+        return origDtype;
+    }
+    [[nodiscard]] size_t OrigBytes() const
+    {
+        return origBytes;
+    }
     enum XTensorType GetType()
     {
         return type;
     };
-    std::vector<size_t> shape;
-    size_t numel;
-    enum XDtype dtype;
-    void *ptr = nullptr;
+    std::vector<size_t> shape;  // DO NOT MODIFY shape directly, use View() to change shape
+    size_t numel;               // DO NOT MODIFY numel directly, use View() to change shape
+    enum XDtype dtype;          // DO NOT MODIFY dtype directly, use View() to change dtype
+    size_t bytes;               // DO NOT MODIFY bytes directly, use View() to change shape/dtype
+    void *ptr = nullptr;        // DO NOT MODIFY ptr directly unless you know what you are doing
 
 private:
-    void Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
+    XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
     void PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &os = std::cout);
     enum XTensorType type = XTENSOR_STATIC;
-    size_t bytes;
+    std::vector<size_t> origShape;  // original shape, unaffected by view operation
+    size_t origNumel = 0;           // original numel, unaffected by view operation
+    enum XDtype origDtype;          // original dtype, unaffected by view operation
+    size_t origBytes;               // original bytes, unaffected by view operation
     friend class XTensorPool;
     friend class XDummyTensorPool;
 };
@@ -291,7 +323,7 @@ public:
     bool IsQuanted();
 
 private:
-    enum QuantType quantType = UNKONOWN_QUANT;
+    enum QuantType quantType = UNKNOWN_QUANT;
 };
 
 #endif
