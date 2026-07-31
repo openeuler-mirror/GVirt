@@ -41,6 +41,7 @@ using namespace AscendC;
 #define SORT_BLOCK_SIZE 32ull
 #define MGR_SORT_VALID_BITS_OFFSET 8
 #define MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET 12
+#define BYTE_BITS 8
 
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst,
@@ -112,12 +113,15 @@ __aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst,
                                        const GlobalTensor<Dtype> &src, int nValue, int dValue,
                                        int srcDValue, int dstNzC0Stride)
 {
+    int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
+    srcDValue = std::is_same<Dtype, int4b_t>::value ? srcDValue / 2 : srcDValue;
+    dValue = std::is_same<Dtype, int4b_t>::value ? dValue / 2 : dValue;
     if (srcDValue <= 65535) {
         Nd2NzParams nd2nzParams(1 /* NdNum */, nValue, dValue, 0 /* srcNdMatrixStride */, srcDValue,
                                 dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
         DataCopy(dst, src, nd2nzParams);
     } else {
-        constexpr int kBlockSize = 32 / sizeof(Dtype);
+        int kBlockSize = 32 * 8 / dtypeBits;
         Nd2NzParams nd2nzParams(1 /* NdNum */, 1, dValue, 0 /* srcNdMatrixStride */, srcDValue,
                                 dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
         for (int i = 0; i < nValue; i++) {
@@ -138,7 +142,8 @@ template <typename Dtype>
 __aicore__ inline void CopyToL0ACol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src,
                                     int mBlockNum, int kBlockStart, int kBlockNum)
 {
-    int cubeSize = 512 / sizeof(Dtype);
+    int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
+    int cubeSize = 512 * 8 / dtypeBits;
     LoadData2dParams params(0 /* startIndex */, mBlockNum /* repeatTimes */, 1 /* srcStride */,
                             0 /* sid */, kBlockNum - 1 /* dstGap */, 0, inc);
     for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
@@ -150,7 +155,8 @@ template <typename Dtype>
 __aicore__ inline void CopyToL0BCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src,
                                     int nBlockNum, int kBlockStart, int kBlockNum)
 {
-    int cubeSize = 512 / sizeof(Dtype);
+    int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
+    int cubeSize = 512 * 8 / dtypeBits;
     LoadData2dParams params(0, kBlockNum * nBlockNum, 1, 0, 0, 0, inc);
     LoadData(dst, src[kBlockStart * nBlockNum * cubeSize], params);
 }
@@ -159,15 +165,18 @@ template <typename Dtype>
 __aicore__ inline void CopyToL0BTCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src,
                                      int nBlockNum, int kBlockStart, int kBlockNum, int srcStride)
 {
-    if constexpr (std::is_same<Dtype, int8_t>::value) {
-        int cubeSize = 32 * 32 * 1;
-        LoadData2dTransposeParams params(0, nBlockNum, srcStride, 1, 0);
+    int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
+    if constexpr (std::is_same<Dtype, int8_t>::value || std::is_same<Dtype, int4b_t>::value) {
+        int cubeSize = 32 * 8 / dtypeBits;
+        cubeSize = cubeSize * cubeSize;
+        int dstGap = std::is_same<Dtype, int4b_t>::value ? 3 : 1;
+        LoadData2dTransposeParams params(0, nBlockNum, srcStride, dstGap, 0);
         for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
             LoadDataWithTranspose(dst[(k - kBlockStart) * nBlockNum * cubeSize], src[k * cubeSize],
                                   params);
         }
     } else {
-        int cubeSize = 512 / sizeof(Dtype);
+        int cubeSize = 512 * 8 / dtypeBits;
         LoadData2dParams params(0, nBlockNum, srcStride, 0, 0, 1, inc);
         for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
             LoadData(dst[(k - kBlockStart) * nBlockNum * cubeSize], src[k * cubeSize], params);
@@ -267,6 +276,7 @@ __aicore__ inline void CopyToGm(const GlobalTensor<OutDtype> &dst, const LocalTe
         float quant = 1;
         uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<int32_t *>(&quant));
         SetFixpipePreQuantFlag(deqScalar);
+        PipeBarrier<PIPE_FIX>();
     }
     DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 1);
     SetFixpipeNz2ndFlag(1, 1, 1);

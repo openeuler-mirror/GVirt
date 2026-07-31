@@ -54,6 +54,7 @@ public:
 
         hasBias = (bias != nullptr);
         hasDeqScale = (deqScale != nullptr);
+        int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
 
         if (m0 == (uint64_t)-1) {
             m0 = ROUND_UP(m, 32);
@@ -61,7 +62,7 @@ public:
                 m0 = 128;
             }
             n0 = (hasBias || hasDeqScale) ? 128 : 256;
-            k0 = 512 / sizeof(Dtype);
+            k0 = 512 * BYTE_BITS / dtypeBits;
         }
 
         this->m0 = m0;
@@ -77,25 +78,26 @@ public:
         }
 
         this->mBlockSize = 16;
-        this->nBlockSize = 16;
-        if (std::is_same<Dtype, int8_t>::value && transpose) {
+        if (transpose) {
             // When the B matrix is the transpose matrix of the int8 data type, the
             // unit of the fractal during the L1 to L0 data conversion is 32*32*1B.
-            this->nBlockSize = 32;
+            this->nBlockSize = 32 * BYTE_BITS / dtypeBits;
+        } else {
+            this->nBlockSize = 16;
         }
-        this->kBlockSize = 32 / sizeof(Dtype);
+        this->kBlockSize = 32 * BYTE_BITS / dtypeBits;
 
         kDtileSize = k0 << 1;
         kQtileSize = k0 >> 2;
 
-        int l1ATileBytes = m0 * kDtileSize * sizeof(Dtype);
-        int l1BTileBytes = n0 * k0 * sizeof(Dtype);
+        int l1ATileBytes = m0 * kDtileSize * dtypeBits / BYTE_BITS;
+        int l1BTileBytes = n0 * k0 * dtypeBits / BYTE_BITS;
         int l1BiasTileBytes = n0 * sizeof(MatDtype);
         int l1DeqScaleTileBytes = n0 * sizeof(uint64_t);
-        int l0ATileBytes = m0 * kQtileSize * sizeof(Dtype);
-        int l0BTileBytes = n0 * kQtileSize * sizeof(Dtype);
+        int l0ATileBytes = m0 * kQtileSize * dtypeBits / BYTE_BITS;
+        int l0BTileBytes = n0 * kQtileSize * dtypeBits / BYTE_BITS;
         int l0BiasTileBytes = n0 * sizeof(MatDtype);
-        int l0CTileBytes = m0 * n0 * sizeof(Dtype);
+        int l0CTileBytes = m0 * n0 * sizeof(MatDtype);
         uint64_t off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
@@ -234,6 +236,7 @@ public:
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
                 DataCopy(l1BiasBuf, biasGmBuf[nOffset], nActualBlockPad);
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
+
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
                 WaitFlag<HardEvent::M_MTE1>(EVENT_ID4);
                 // Bias L1 -> L0
@@ -246,6 +249,7 @@ public:
                      0, 0});
 
                 SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
             }
             if (hasDeqScale) {
                 // DeqScale GM -> L1
@@ -264,13 +268,11 @@ public:
                                                   FIXPIPE_DATABLOCK)),
                           0, 0});
                 PipeBarrier<PIPE_FIX>();
-                SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
             }
 
             WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
             int kOffset = 0;
-            int kIdx = 0;
-            for (; kIdx < kLoop; kIdx++) {
+            for (int kIdx = 0; kIdx < kLoop; kIdx++) {
                 int kIdx8 = kIdx % 8;
                 int kIdx4 = kIdx % 4;
                 int kIdx2 = kIdx % 2;
@@ -329,9 +331,9 @@ public:
                 }
                 CopyToL0ACol(l0aBuf[kIdx2], l1aBuf[pingpongL1A], mActualBlockNum,
                              kIdx8 * kQtileBlockNum, kActualBlockNum);
-                if (kIdx8 == 7) {
+                if (kIdx8 == 7 || kIdx == (kLoop - 1)) {
                     SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
-                    pingpongL1A ^= 1;
+                    pingpongL1A = 1 - pingpongL1A;
                 }
 
                 /* B L1 -> L0B */
@@ -345,38 +347,27 @@ public:
                     CopyToL0BCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum,
                                  kIdx4 * kQtileBlockNum, kActualBlockNum);
                 }
-                if (kIdx4 == 3) {
+                if (kIdx4 == 3 || kIdx == (kLoop - 1)) {
                     SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
-                    pingpongL1B ^= 1;
+                    pingpongL1B = 1 - pingpongL1B;
                 }
 
                 /* Mmad L0A L0B -> L0C */
-                SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
-                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
-                if (hasBias) {
-                    SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
-                    WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
-                }
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + kIdx2);
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + kIdx2);
 
                 PipeBarrier<PIPE_M>();
                 if (hasBias && kIdx == 0) {
+                    WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
                     CalMmadWithBias(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], l0BiasBuf,
                                     mActualBlockPad, nActualBlockPad, kActualBlockPad);
+                    SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
                 } else {
                     CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], mActualBlockPad, nActualBlockPad,
                             kActualBlockPad, kIdx == 0);
                 }
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + kIdx2);
                 kOffset += kActual;
-            }
-            if (hasBias) {
-                SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
-            }
-            if (kIdx % 8 != 0) {
-                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
-            }
-            if (kIdx % 4 != 0) {
-                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
             }
 
             /* C L0C -> GM */
@@ -385,7 +376,7 @@ public:
             CopyToGmWithDequant(outGm, l0cBuf, mActual, nActual, mActualBlockPad, dstDValue,
                                 hasDeqScale, fixpipeBuf);
             if (hasDeqScale) {
-                PipeBarrier<PIPE_FIX>();
+                SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
             }
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         }  // M * N
@@ -443,21 +434,21 @@ private:
     bool hasDeqScale = false;
 };
 
-#define MATMUL_FUNC_DEFINE(dtype)                                                                 \
-    extern "C" __global__ __aicore__ void matmul_##dtype(                                         \
-        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,         \
-        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl, GM_ADDR bias, \
-        GM_ADDR deqScale)                                                                         \
-    {                                                                                             \
-        if constexpr (std::is_same<dtype, int8_t>::value) {                                       \
-            Matmul<dtype, int32_t, half> op;                                                      \
-            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);         \
-            op.Run();                                                                             \
-        } else {                                                                                  \
-            Matmul<dtype, float, dtype> op;                                                       \
-            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);         \
-            op.Run();                                                                             \
-        }                                                                                         \
+#define MATMUL_FUNC_DEFINE(dtype)                                                                  \
+    extern "C" __global__ __aicore__ void matmul_##dtype(                                          \
+        GM_ADDR x, GM_ADDR y, GM_ADDR z, uint64_t m, uint64_t n, uint64_t k, uint64_t nz,          \
+        uint64_t transpose, uint64_t m0, uint64_t n0, uint64_t k0, uint64_t swizzl, GM_ADDR bias,  \
+        GM_ADDR deqScale)                                                                          \
+    {                                                                                              \
+        if constexpr (std::is_same<dtype, int8_t>::value || std::is_same<dtype, int4b_t>::value) { \
+            Matmul<dtype, int32_t, half> op;                                                       \
+            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);          \
+            op.Run();                                                                              \
+        } else {                                                                                   \
+            Matmul<dtype, float, dtype> op;                                                        \
+            op.Init(x, y, z, bias, deqScale, m, n, k, nz, transpose, m0, n0, k0, swizzl);          \
+            op.Run();                                                                              \
+        }                                                                                          \
     }
 
 #endif
