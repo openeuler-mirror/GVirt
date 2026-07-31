@@ -18,6 +18,7 @@
 #include "aclrtlaunch_matmul_float16_t.h"
 #include "aclrtlaunch_matmul_bfloat16_t.h"
 #include "aclrtlaunch_matmul_float.h"
+
 #include "aclrtlaunch_add_bias_float.h"
 #include "aclrtlaunch_add_bias_float16_t.h"
 #include "aclrtlaunch_add_bias_bfloat16_t.h"
@@ -52,8 +53,11 @@
 #include "aclrtlaunch_allgather_float.h"
 #include "aclrtlaunch_quant_bf16_to_i8_static.h"
 #include "aclrtlaunch_quant_bf16_to_i8_dynamic.h"
+#include "aclrtlaunch_unpack_activation_int8_t.h"
 #include "aclrtlaunch_matmul_int8_t.h"
+#include "aclrtlaunch_matmul_int4b_t.h"
 #include "aclrtlaunch_dequant_float16_t.h"
+#include "aclrtlaunch_msd_merge_dequant_int8_t.h"
 #include "aclrtlaunch_attention_float16_t.h"
 #include "aclrtlaunch_attention_bfloat16_t.h"
 #include "aclrtlaunch_sigmoid_topk_float.h"
@@ -100,8 +104,6 @@
 #include "aclrtlaunch_einsum_mht_hdt_mhd_bfloat16_t.h"
 #include "aclrtlaunch_einsum_mht_htd_mhd_float16_t.h"
 #include "aclrtlaunch_einsum_mht_htd_mhd_bfloat16_t.h"
-#include "aclrtlaunch_unpack_activation_int8_t.h"
-#include "aclrtlaunch_msd_merge_dequant_int8_t.h"
 
 #include "kernels/kernel_param.h"
 
@@ -784,6 +786,8 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         launchKernel = aclrtlaunch_matmul_float;
     } else if (EachXDtype(INT8, in, weight) && out.dtype == FP16) {
         launchKernel = aclrtlaunch_matmul_int8_t;
+    } else if (EachXDtype(INT4, in, weight) && out.dtype == FP16) {
+        launchKernel = aclrtlaunch_matmul_int4b_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(weight) + XT_STR(out);
         throw std::runtime_error(err_str + " unsupported!");

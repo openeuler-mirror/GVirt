@@ -991,6 +991,10 @@ void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weig
     InitXTensor(_x, x);
     InitXTensor(_y, y);
     InitXTensor(_z, z);
+    if (_x.dtype == INT32 && _y.dtype == INT32) {  // for int4 matmul
+        _x.View(INT4);
+        _y.View(INT4);
+    }
     XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
 }
 
@@ -1033,6 +1037,10 @@ void MatmulWithBias(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, a
     InitXTensor(_y, y);
     InitXTensor(_z, z);
     InitXTensor(_bias, bias);
+    if (_x.dtype == INT32 && _y.dtype == INT32) {  // for int4 matmul
+        _x.View(INT4);
+        _y.View(INT4);
+    }
     XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqSacle);
     rt.Synchronize();
 }
@@ -1574,6 +1582,10 @@ void MatmulDeQuant(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &bias,
     InitXTensor(_bias, bias);
     InitXTensor(_deqScale, deqScale);
     InitXTensor(_z, z);
+    if (_x.dtype == INT32 && _y.dtype == INT32) {  // for int4 matmul
+        _x.View(INT4);
+        _y.View(INT4);
+    }
     XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
     rt.Synchronize();
 }

@@ -12,6 +12,7 @@ from xlite._C import Runtime, matmul_with_bias
 import torch.nn.functional as F
 from tests.models.weight_utils import matrix_nd2nz
 
+torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
 rt = Runtime(0, 500)
 torch.npu.set_device(0)
@@ -27,7 +28,7 @@ for weight_nz in [False, True]:
                     z = torch.zeros(m, n, dtype=dtype, device="npu:0")
                     bias = torch.randn(n, dtype=torch.float, device="npu:0")
 
-                    standard = F.linear(x, y_standard, bias)
+                    standard = F.linear(x, y_standard, bias).to(dtype)
 
                     if weight_nz and dtype != torch.float:
                         y = matrix_nd2nz(y)
