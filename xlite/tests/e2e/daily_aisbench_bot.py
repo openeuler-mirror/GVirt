@@ -84,45 +84,45 @@ xlite 每日自动化精度测试机器人
     REPORT_DIR = /home/daily_aisbench_reports (容器内路径)
 """
 
+import argparse
 import os
-import sys
 import re
 import subprocess
-import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 # 导入共享工具模块
 from daily_bot_utils import (
+    build_project,
+    # 环境检测
+    detect_model_device,
+    get_current_commit,
+    # 版本信息
+    get_current_version,
+    get_vllm_ascend_version,
+    get_xlite_commit,
+    install_wheel,
+    log_error,
     # 日志工具
     log_info,
     log_success,
     log_warning,
-    log_error,
-    setup_logging,
     move_log_file,
     # 代码拉取和编译
     pull_latest_code,
-    build_project,
-    install_wheel,
-    # 版本信息
-    get_current_version,
-    get_current_commit,
-    get_vllm_ascend_version,
-    get_xlite_commit,
-    # 环境检测
-    detect_model_device,
-    should_disable_xccl,
     # 数据存储
     save_metrics_json,
     # 通知发送
     send_notification,
     # 配置设置
     set_build_container,
-    set_test_container,
     set_env_type,
     set_machine_ip,
+    set_test_container,
+    setup_logging,
+    should_disable_xccl,
 )
 
 # ====================== 本地配置 ======================
@@ -142,7 +142,7 @@ def run_aisbench_benchmark(
     model_args: str,
     debug: bool = False,
     reference_commit: str | None = None,
-    timeout: int = 4 * 3600,
+    timeout: int = 2 * 3600,
     retry: int = 3,
     vllm_timeout: int = 1800,
 ) -> Optional[Path]:
@@ -216,7 +216,7 @@ def run_aisbench_benchmark(
 
         # 执行精度测试脚本 (model_args 是 shell 风格参数字符串，需要 shell=True)
         result = subprocess.run(
-            aisbench_cmd_str, cwd=str(E2E_DIR), env=env, shell=True, capture_output=not debug, text=True
+            aisbench_cmd_str, cwd=str(E2E_DIR), env=env, shell=True, capture_output=not debug, text=True, check=False
         )
 
         if result.returncode != 0:
@@ -519,6 +519,20 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
     ip_address = ip_address or "unknown-ip"
     report_path = f"{ip_address}:{report_dir}" if report_dir else ""
 
+    # 所有精度指标均为 N/A（无有效数据）时，发送简短的异常活动说明，而非生成空数据表格
+    has_valid_metric = any(
+        accuracy is not None for backends in model_results.values() for accuracy in backends.values()
+    )
+    if not has_valid_metric:
+        note_lines = list(header_lines)
+        note_lines.append("⚠️ <b>未获取到有效精度数据</b>")
+        note_lines.append("本次测试所有精度指标均为 N/A，未产生实际数据，请检查测试日志确认是否存在异常。")
+        if report_path:
+            note_lines.append(f"报告保存路径: {report_path}")
+        note_lines.append("")
+        report_main = "\n".join(note_lines)
+        return report_main, None
+
     # ====== 第一条通知: 标题 + 汇总 + 详细数据 ======
     header_lines.append(f"📊 精度统计: <b>警告项: {total_warnings}</b>")
     header_lines.append(f"{status_icon} {status_text}")
@@ -712,9 +726,7 @@ def main():
         help="指定复用前期某个 xlite commit hash 测试",
     )
     parser.add_argument("-d", "--debug", action="store_true", help="调试模式，直接输出测试过程到stdout")
-    parser.add_argument(
-        "--timeout", type=int, default=4 * 3600, help="ais_bench 子进程超时时间（秒），默认 4h = 14400s"
-    )
+    parser.add_argument("--timeout", type=int, default=2 * 3600, help="ais_bench 子进程超时时间（秒），默认 2h = 7200s")
     parser.add_argument("--retry", type=int, default=3, help="ais_bench 失败时的重试次数，默认 3")
     parser.add_argument("--vllm-timeout", type=int, default=1800, help="vLLM 服务器启动超时时间（秒），默认 1800s")
 
@@ -753,10 +765,9 @@ def main():
         log_info(f"使用报告目录: {report_dir}")
     else:
         # 步骤1: 拉取最新代码 (在编译容器中)
-        if not args.skip_pull:
-            if not pull_latest_code():
-                log_error("代码拉取失败，终止执行")
-                sys.exit(1)
+        if not args.skip_pull and not pull_latest_code():
+            log_error("代码拉取失败，终止执行")
+            sys.exit(1)
 
         # 步骤2: 编译项目 (在编译容器中)
         wheel_path = None
@@ -767,10 +778,9 @@ def main():
                 sys.exit(1)
 
         # 步骤3: 安装 wheel 包
-        if wheel_path:
-            if not install_wheel(wheel_path):
-                log_error("wheel 包安装失败，终止执行")
-                sys.exit(1)
+        if wheel_path and not install_wheel(wheel_path):
+            log_error("wheel 包安装失败，终止执行")
+            sys.exit(1)
 
         # 步骤4: 执行精度基准测试 (在测试容器中)
         report_dir = run_aisbench_benchmark(

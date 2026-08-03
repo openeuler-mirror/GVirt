@@ -6,18 +6,18 @@ Additionally, the script is designed to run within a container with `git`, `vllm
 Using `vllm-ascend`'s official container image is recommended.
 """
 
-from dataclasses import dataclass, field
-from datetime import datetime
 import os
 import re
 import signal
-from pathlib import Path
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import zipfile
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -27,7 +27,7 @@ CWD = Path(__file__).parent.resolve()  # current working directory
 AIS_BENCH_DIR = TMP_DIR / "benchmark"  # path to clone ais_bench repo and store datasets
 VENV_ACTIVATE_CMD: str = ""
 
-VLLM_PROCESSES: set[subprocess.Popen] = set()  # to keep track of started vLLM server processes for cleanup
+_PROCESS_GROUPS: set[subprocess.Popen] = set()  # to keep track of started subprocesses for cleanup on exit
 
 
 @dataclass(kw_only=True, slots=True)
@@ -42,6 +42,7 @@ class BenchResult:
     metric: str
     accuracy: float
 
+    _n_chars: int = field(default=400, init=False, repr=False)
     _error: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
@@ -54,9 +55,10 @@ class BenchResult:
 
     @error.setter
     def error(self, value: str | None):
-        value = value and value.replace("\n", " ")
-        if value and len(value) > 140:
-            value = f"{value[:137]}..."
+        value = value and value.replace("\n", " ").strip()
+        value = re.sub(r"\s+", " ", value) if value else ""
+        if value and len(value) > self._n_chars + 3:
+            value = f"{value[: self._n_chars]}..."
         self._error = value
 
     @staticmethod
@@ -87,15 +89,15 @@ class BenchResult:
         return f"| {' | '.join(values)} |"
 
 
-def stop_vllm_server(process: subprocess.Popen, sleep_time: int = 120):
+def stop_process_group(process: subprocess.Popen, sleep_time: int = 120):
     pid = process.pid
-    print(f"Stopping vLLM server with PID {pid}...")
+    print(f"Stopping the process group containing PID {pid}...")
     t1 = datetime.now()
     try:
         os.killpg(os.getpgid(pid), signal.SIGTERM)
     except ProcessLookupError:
         print(f"Process with PID {pid} not found, it may have already exited.")
-        VLLM_PROCESSES.discard(process)
+        _PROCESS_GROUPS.discard(process)
         _close_stream_handles(process)
         return
 
@@ -112,7 +114,7 @@ def stop_vllm_server(process: subprocess.Popen, sleep_time: int = 120):
             print(f"Process with PID {pid} has been stopped successfully.")
             break
 
-    VLLM_PROCESSES.discard(process)
+    _PROCESS_GROUPS.discard(process)
     _close_stream_handles(process)
 
 
@@ -154,17 +156,20 @@ def _read_tail(handle: object, max_bytes: int = 16 * 1024) -> str:
         return "No error message available"
 
 
-_RE_REPEAT_MODEL = re.compile(r"^([1-9]\d*)\s*\*\s*(.+)\s*$")
+_RE_REPEAT_MODEL = re.compile(r"^([1-9]\d*)\s*[~\*]\s*(.+)\s*$")
 
 
 def expand_model_list(models: list[str]) -> list[str]:
-    """Expand ``N*<model>`` entries in the model list into N copies of ``<model>``.
+    """Expand ``N~<model>`` entries in the model list into N copies of ``<model>``.
 
-    Format: ``N*<model>`` where N is a positive integer (``\\d+\\*`` prefix, optional).
-    If no ``N*`` prefix is present, the model appears once (default N=1).
+    Format: ``N~<model>`` where N is a positive integer (``\\d+~`` prefix, optional).
+    If no ``N~`` prefix is present, the model appears once (default N=1).
 
     Examples:
-        ``["3*Qwen3-30B-A3B", "Qwen3-32B"]`` → ``["Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-32B"]``
+        ``["3~Qwen3-30B-A3B", "Qwen3-32B"]`` → ``["Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-32B"]``
+
+    Note: technically, you can use `*` to replace `~` to achieve the same effect, but `~` is preferred to avoid
+    confusion with shell globbing.
     """
     expanded: list[str] = []
     for entry in models:
@@ -235,15 +240,46 @@ def prepare_env(
         check_subprocess_result(res, "Failed to download ceval dataset")
 
 
+def cleanup_on_exit():
+    """Terminate all subprocesses in the global process group set on exit."""
+    for process in list(_PROCESS_GROUPS):
+        try:
+            stop_process_group(process, 0)
+        except:
+            continue
+
+
+def check_port_available(port: int, timeout: int = 30) -> bool:
+    """Check if the given port is available for binding."""
+    t1 = datetime.now()
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            result = sock.connect_ex(("localhost", port))
+            available = result != 0
+        time_delta = (datetime.now() - t1).total_seconds()
+        if available or time_delta > timeout:
+            return available
+        time.sleep(1)  # wait a bit before retrying
+
+
+def find_available_port(start_port: int = 8241, n: int = 20000) -> int:
+    """Find an available port in the given range."""
+    end_port = start_port + max(1, n)
+    for port in range(start_port, end_port):
+        if check_port_available(port, 0):
+            return port
+    raise RuntimeError(f"No available port found in range {start_port}-{end_port}")
+
+
 def start_vllm_server(
     model_path: str,
     *,
     model_name: str | None = None,
-    port: int = 8241,
+    port: int | None = None,
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
-    max_num_seqs: int = 128,
+    max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
@@ -253,7 +289,6 @@ def start_vllm_server(
     xlite_full_mode: bool = False,
     device_ids: list[int] | None = None,
     timeout: int = 1800,
-    debug: bool = False,
     print_to: Path | None = None,
 ) -> subprocess.Popen:
     if not model_path or not Path(model_path).exists():
@@ -267,13 +302,11 @@ def start_vllm_server(
         )
 
     # start vllm server with the specified model and settings
+    if port is None:
+        port = find_available_port()
+    if not check_port_available(port):
+        raise RuntimeError(f"Port {port} is already in use, cannot start vLLM server")
     print(f"Starting vLLM server with model {model_path} on port {port}...")
-
-    # check if port is available
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        result = sock.connect_ex(("localhost", port))
-        if result == 0:
-            raise RuntimeError(f"Port {port} is already in use, please specify a different port")
 
     envs: dict[str, str] = {
         "VLLM_USE_V1": "1",
@@ -327,14 +360,15 @@ def start_vllm_server(
     env_copy["XLITE_FLASH_ATTENTION_ENABLE"] = "1"
 
     t1 = datetime.now()
-    # in debug mode, stream the server logs to the console; otherwise, redirect them to a file
-    # (when print_to is given) or to /dev/null so they don't drown out the benchmark output.
+    # by default, redirect the vllm server logs to /dev/null; otherwise, redirect them to a `print_to` file.
     # The log file handles are kept open for the lifetime of the server process and closed
     # only after the readiness check below succeeds, so vLLM keeps writing until we're done.
-    stdprint_target = None if debug else subprocess.DEVNULL
-    if not debug and print_to is not None:
+    stdprint_target = subprocess.DEVNULL
+    if print_to is not None:
         print_to.parent.mkdir(parents=True, exist_ok=True)
-        stdprint_target = open(print_to.with_suffix(".out.log"), "w")
+        log_path = print_to.parent / f"{print_to.name}.out.log"
+        stdprint_target = open(log_path, "w")
+        print(f"Redirecting vLLM server logs to {log_path}...")
     process = subprocess.Popen(
         vllm_cmd,
         shell=True,
@@ -360,17 +394,17 @@ def start_vllm_server(
         else:  # if `break` was not hit and loop exhausted
             raise TimeoutError(f"vLLM server did not start within {timeout} seconds")
     except Exception as e:
-        process.terminate()
+        stop_process_group(process, 0)
         raise e
     except KeyboardInterrupt as e:
-        for process in list(VLLM_PROCESSES):
-            stop_vllm_server(process)
+        print("KeyboardInterrupt received, stopping vLLM server...")
+        stop_process_group(process, 0)
         raise e
     finally:
         if stdprint_target and not isinstance(stdprint_target, int):  # don't close DEVNULL or None
             stdprint_target.flush()
 
-    VLLM_PROCESSES.add(process)
+    _PROCESS_GROUPS.add(process)
     print(f"vLLM server started successfully with PID {process.pid}")
     return process
 
@@ -386,7 +420,7 @@ def run_ais_bench(
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
-    max_num_seqs: int = 128,
+    max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
@@ -396,15 +430,15 @@ def run_ais_bench(
     xlite_full_mode: bool = False,
     extra_args: str = "",
     device_ids: list[int] | None = None,
-    timeout: int = 4 * 3600,  # 4 hours
+    timeout: int = 2 * 3600,  # 2 hours
     retry: int = 3,
-    debug: bool = False,
     vllm_timeout: int = 1800,
 ) -> BenchResult:
     model_name = model_name or Path(model_path).stem or "model"
     quantization = (Path(model_path) / "quant_model_description.json").exists()
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
     xlite_full_mode = xlite_full_mode and xlite  # full mode can only be enabled when xlite is enabled
+    port = find_available_port(port)
     bench_result = BenchResult(
         model_name=model_name,
         dataset="ceval-weighted",
@@ -458,9 +492,11 @@ def run_ais_bench(
         suffix = "-xlite-full" if xlite_full_mode else "-xlite-decode-only"
     else:
         suffix = "-aclgraph"
+    suffix = f"-TP{tp_size}DP{dp_size}{'EP' if ep else ''}{suffix}"
     ais_bench_output_dir = (ais_bench_output_dir or ais_bench_dir / "outputs") / f"{model_name}{suffix}"
     if not ais_bench_output_dir.exists():
         ais_bench_output_dir.mkdir(parents=True)
+    print(f"ais_bench output directory: {ais_bench_output_dir}")
 
     # find the line `host_port=xxx` in the script and replace it with the actual port
     res = subprocess.run(
@@ -491,7 +527,8 @@ def run_ais_bench(
     )
     check_subprocess_result(res, "Failed to update batch_size in ais_bench script")
 
-    vllm_process = start_vllm_server(
+    time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    start_vllm_server(
         model_path=model_path,
         model_name=model_name,
         port=port,
@@ -508,41 +545,53 @@ def run_ais_bench(
         xlite_full_mode=xlite_full_mode,
         device_ids=device_ids,
         timeout=vllm_timeout,
-        debug=debug,
-        # when not in debug mode, redirect the server logs to files next to the
-        # benchmark output so they're preserved for post-mortem inspection.
-        print_to=None if debug else ais_bench_output_dir / f"vllm_server_{model_name}{suffix}",
+        # redirect the server logs to files next to the benchmark output so they're preserved for inspection.
+        # must use dot prefix to avoid --reuse flag in ais_bench picking the wrong working directory
+        print_to=ais_bench_output_dir / ".vllm_logs" / f"{time_str}_{model_name}{suffix}",
     )
 
     try:
+        max_cpu_workers = int(os.environ.get("XLITE_AISBENCH_WORKERS", 16))
         aisbench_cmd_lst: list[str] = [
             f"{VENV_ACTIVATE_CMD} &&",
             "ais_bench --models vllm_api_general_chat",
             "--datasets ceval_gen_0_shot_cot_chat_prompt",
             "--mode all --dump-eval-details --merge-ds",
-            f'--max-num-workers "{min(os.cpu_count() or 4, 16, max_num_seqs)}"',
+            f'--max-num-workers "{min(os.cpu_count() or 4, max_cpu_workers, max_num_seqs)}"',
             f'--work-dir "{ais_bench_output_dir}"',
             f'--num-prompts "{ais_bench_num_prompts}"',
+            "--num-warmups 0",
             extra_args,
         ]
         aisbench_cmd = " ".join(aisbench_cmd_lst)
 
         for i in range(1, retry + 1):
-            print(f"\nRunning ais_bench (attempt {i}/{retry}) for model {model_name}...\n")
-            t1 = time.time()
-            res = subprocess.run(
-                aisbench_cmd, shell=True, capture_output=not debug, executable="/bin/bash", timeout=timeout
-            )
-            if res.returncode == 0:
-                break  # success, exit the retry loop
-            time_taken = time.time() - t1
-            if i < retry and time_taken < timeout + 10:  # if the process failed before the timeout, retry
-                if " --reuse" not in aisbench_cmd and " -r" not in aisbench_cmd:
-                    aisbench_cmd += " --reuse"  # add --reuse flag for subsequent attempts
-                print(f"\nais_bench failed on attempt {i}/{retry}, retrying...\n")
-                time.sleep(5)
-                continue
-            check_subprocess_result(res, "Failed to run ais_bench")
+            retry_str = f"[attempt {i}/{retry}] " if retry > 1 else ""
+            print(f"\n{retry_str}Running ais_bench for model {model_name}...")
+            # if the process failed before the timeout, retry
+            if i > 1 and " --reuse" not in aisbench_cmd and " -r" not in aisbench_cmd:
+                aisbench_cmd += " --reuse"  # add --reuse flag for subsequent attempts
+                print(f"{retry_str}ais_bench failed on previous attempt(s), retrying with --reuse...")
+            process = subprocess.Popen(aisbench_cmd, shell=True, start_new_session=True, executable="/bin/bash")
+            _PROCESS_GROUPS.add(process)
+            print(f"{retry_str}ais_bench started with PID {process.pid} (completion timeout={timeout}s)...")
+            try:
+                process.wait(timeout=timeout)
+                if process.returncode != 0:
+                    raise RuntimeError(
+                        f"ais_bench exited with code {process.returncode}: {process.stderr.read() if process.stderr else 'no error message'}"
+                    )
+                break
+            except KeyboardInterrupt as e:
+                print(f"\n{retry_str}KeyboardInterrupt received, cancelling current attempt of ais_bench...")
+                process.kill()
+            except subprocess.TimeoutExpired as e:
+                process.kill()
+                if i == retry:
+                    raise RuntimeError(f"aisbench timed out after {timeout}s") from e
+            finally:
+                process.kill()
+                stop_process_group(process, 5)  # ensure the process is stopped before the next attempt
 
         # from the output directory, find the latest ais_bench_output_dir/*datetime*/summary/summary_*.csv
         summary_path = max(ais_bench_output_dir.glob("*/summary/summary_*.csv"), key=os.path.getmtime)
@@ -556,16 +605,16 @@ def run_ais_bench(
 
         bench_result.accuracy = weighted_accuracy
         bench_result.error = None
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as e:
         print(f"KeyboardInterrupt received, stopping vLLM server for model {model_name}...")
-        bench_result.error = "KeyboardInterrupt"
-        stop_vllm_server(vllm_process)
+        cleanup_on_exit()
+        raise e
     except Exception as e:
         print(f"Error occurred while running ais_bench for model {model_name}: {str(e)}")
         bench_result.error = str(e)
     finally:
         print(SEC_SEP_1)
-        stop_vllm_server(vllm_process)
+        cleanup_on_exit()
 
     return bench_result
 
@@ -631,7 +680,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         type=str,
         nargs="+",
         default=None,
-        help="List of model subdirectory names to benchmark. Supports N*<model> format (e.g. 3*Qwen3-30B-A3B expands to 3 copies)",
+        help="List of model subdirectory names to benchmark. Supports N~<model> format (e.g. 3~Qwen3-30B-A3B expands to 3 copies)",
     )
     parser.add_argument(
         "-TP",
@@ -669,7 +718,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         "--max-num-seqs",
         type=int,
         nargs="+",
-        default=[128],
+        default=[512],
         help="Max number of sequences for vLLM server and ais_bench (last value used for padding)",
     )
     parser.add_argument(
@@ -727,8 +776,8 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     parser.add_argument(
         "--timeout",
         type=int,
-        default=4 * 3600,
-        help="Timeout in seconds for ais_bench subprocess (default: 4h = 14400s)",
+        default=2 * 3600,
+        help="Timeout in seconds for ais_bench subprocess (default: 2h = 7200s)",
     )
     parser.add_argument(
         "--retry", type=int, default=3, help="Number of retry attempts for ais_bench on failure (default: 3)"
@@ -859,7 +908,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 device_ids=device_ids[-tp * dp :],
                 timeout=args.timeout,
                 retry=args.retry,
-                debug=args.debug,
                 vllm_timeout=args.vllm_timeout,
             )
         except Exception as e:
@@ -875,14 +923,13 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 accuracy=0.0,
             )
             result.error = str(e)
-        except KeyboardInterrupt as e:
-            for process in list(VLLM_PROCESSES):
-                stop_vllm_server(process)
-            raise e
+        except KeyboardInterrupt:
+            print("KeyboardInterrupt received, stopping benchmark...")
+            cleanup_on_exit()
+            break
         finally:
             # ensure all started vLLM server processes are stopped
-            for process in list(VLLM_PROCESSES):
-                stop_vllm_server(process)
+            cleanup_on_exit()
 
         # Append this result to the log files immediately
         with open(log_file_path, "a") as f:
