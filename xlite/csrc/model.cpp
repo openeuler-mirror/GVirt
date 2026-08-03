@@ -1606,37 +1606,40 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
     }
 }
 
-size_t XModel::DummyRunPrefill()
+size_t XModel::DummyRun()
 {
     XDummyRuntime rt(0, 0, _rankId, _c.defTpSize, _c.defDpSize, _c.moeTPSize, _c.moeEpSize);
     rt.InitDummyRuntime(1ull << 40);
 
-    XModelAttnMeta attnMeta;
-    attnMeta.version = 0;
-    uint32_t batchSize = 1;
     _c.maxBatchedTokens = ROUND_UP(_c.maxBatchedTokens, _c.defTpSize);
-    uint32_t seqLen = _c.maxBatchedTokens;
-    uint32_t maxNumBlocks = 0;
 
-    for (uint32_t i = 0; i < batchSize; i++) {
-        attnMeta.lens.push_back(seqLen);
-        attnMeta.cachedLens.push_back(_c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0);
-        uint32_t blocks = DIV_ROUND_UP(attnMeta.lens[i] + attnMeta.cachedLens[i], _c.blockSize);
-        std::vector<uint32_t> blockTable(blocks);
-        for (uint32_t j = 0; j < blocks; j++) {
-            blockTable[j] = i * blocks + j;
-        }
-        attnMeta.blockTables.push_back(blockTable);
-        if (blocks > maxNumBlocks) {
-            maxNumBlocks = blocks;
-        }
-    }
-
-    std::vector<std::vector<XTensor>> kvCache(_c.nLayers);
-    for (uint32_t i = 0; i < _c.nLayers; i++) {
-        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-        if (_c.attnType == XMODEL_ATTN_HYBRID) {
-            if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
+    auto buildKvCache = [&](uint32_t maxNumBlocks) {
+        std::vector<std::vector<XTensor>> kvCache(_c.nLayers);
+        for (uint32_t i = 0; i < _c.nLayers; i++) {
+            uint32_t expectedKvHeads =
+                std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+            if (_c.attnType == XMODEL_ATTN_HYBRID) {
+                if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
+                    XTensor kCache(
+                        {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                        embed.dtype, nullptr);
+                    XTensor vCache(
+                        {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                        embed.dtype, nullptr);
+                    kvCache[i] = {kCache, vCache};
+                } else {
+                    uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
+                    uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
+                    uint32_t convDim = nLocalKHeads * _c.linearKeyHeadDim * 2 +
+                                       nLocalVHeads * _c.linearValueHeadDim;
+                    XTensor convState({_c.maxBatch, convDim, _c.linearConvKernelDim}, embed.dtype,
+                                      nullptr);
+                    XTensor ssmState(
+                        {_c.maxBatch, nLocalVHeads, _c.linearKeyHeadDim, _c.linearValueHeadDim},
+                        embed.dtype, nullptr);
+                    kvCache[i] = {convState, ssmState};
+                }
+            } else if (_c.attnType == XMODEL_ATTN_MHA) {
                 XTensor kCache(
                     {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
                     embed.dtype, nullptr);
@@ -1644,178 +1647,129 @@ size_t XModel::DummyRunPrefill()
                     {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
                     embed.dtype, nullptr);
                 kvCache[i] = {kCache, vCache};
-            } else {
-                uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
-                uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
-                uint32_t convDim =
-                    nLocalKHeads * _c.linearKeyHeadDim * 2 + nLocalVHeads * _c.linearValueHeadDim;
-                XTensor convState({_c.maxBatch, convDim, _c.linearConvKernelDim}, embed.dtype,
-                                  nullptr);
-                XTensor ssmState(
-                    {_c.maxBatch, nLocalVHeads, _c.linearKeyHeadDim, _c.linearValueHeadDim},
-                    embed.dtype, nullptr);
-                kvCache[i] = {convState, ssmState};
-            }
-        } else if (_c.attnType == XMODEL_ATTN_MHA) {
-            XTensor kCache({_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
-                           embed.dtype, nullptr);
-            XTensor vCache({_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
-                           embed.dtype, nullptr);
-            kvCache[i] = {kCache, vCache};
-        } else if (_c.attnType == XMODEL_ATTN_MLA) {
-            XTensor kCache(
-                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.kvLoraRank},
-                embed.dtype, nullptr);
-            XTensor vCache(
-                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.ropeHeadDim},
-                embed.dtype, nullptr);
-            kvCache[i] = {kCache, vCache};
-        } else if (_c.attnType == XMODEL_ATTN_DSA) {
-            XTensor kCache(
-                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.kvLoraRank},
-                embed.dtype, nullptr);
-            XTensor vCache(
-                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.ropeHeadDim},
-                embed.dtype, nullptr);
-            XTensor indexKCache({_c.maxBatch * maxNumBlocks, _c.blockSize, 1, _c.indexHeadDim},
-                                embed.dtype, nullptr);
-            kvCache[i] = {kCache, vCache, indexKCache};
-        } else {
-            throw std::runtime_error(std::string(__func__) + ": TODO");
-        }
-    }
-
-    std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
-    for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
-        XTensor deepstackEmbed({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
-        deepstackInputEmbeds[i] = deepstackEmbed;
-    }
-
-    XTensor freqsCis({_c.maxBatchedTokens, _c.ropeHeadDim}, embed.dtype, nullptr);
-    XTensor input({_c.maxBatchedTokens}, INT32, nullptr);
-    XTensor output({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
-    XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype, nullptr);
-
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
-                   _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
-                   static_cast<int>(embed.dtype),
-                   (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
-                                                  : static_cast<int>(embed.dtype));
-    Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
-    XTensor indices;
-    indices.Init({batchSize}, INT32, nullptr);
-    ForwardGetLogits(rt, output, indices, logits);
-    return rt.maxUsedSize();
-}
-
-size_t XModel::DummyRunDecode()
-{
-    if (_c.maxBatch == 0) {
-        return 0;
-    }
-
-    XDummyRuntime rt(0, 0, _rankId, _c.defTpSize, _c.defDpSize, _c.moeTPSize, _c.moeEpSize);
-    rt.InitDummyRuntime(1ull << 40);
-
-    XModelAttnMeta attnMeta;
-    attnMeta.version = 0;
-    uint32_t batchSize = static_cast<uint32_t>(_c.maxBatch);
-    uint32_t cachedLen = _c.maxSeqLen > 0 ? static_cast<uint32_t>(_c.maxSeqLen - 1) : 0;
-    uint32_t maxNumBlocks = 0;
-
-    for (uint32_t i = 0; i < batchSize; i++) {
-        attnMeta.lens.push_back(1);
-        attnMeta.cachedLens.push_back(cachedLen);
-        uint32_t blocks = DIV_ROUND_UP(1 + cachedLen, _c.blockSize);
-        std::vector<uint32_t> blockTable(blocks);
-        for (uint32_t j = 0; j < blocks; j++) {
-            blockTable[j] = i * blocks + j;
-        }
-        attnMeta.blockTables.push_back(blockTable);
-        if (blocks > maxNumBlocks) {
-            maxNumBlocks = blocks;
-        }
-    }
-
-    std::vector<std::vector<XTensor>> kvCache(_c.nLayers);
-    for (uint32_t i = 0; i < _c.nLayers; i++) {
-        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-        if (_c.attnType == XMODEL_ATTN_HYBRID) {
-            if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
+            } else if (_c.attnType == XMODEL_ATTN_MLA) {
                 XTensor kCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.kvLoraRank},
                     embed.dtype, nullptr);
                 XTensor vCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.ropeHeadDim},
                     embed.dtype, nullptr);
                 kvCache[i] = {kCache, vCache};
-            } else {
-                uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
-                uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
-                uint32_t convDim =
-                    nLocalKHeads * _c.linearKeyHeadDim * 2 + nLocalVHeads * _c.linearValueHeadDim;
-                XTensor convState({_c.maxBatch, convDim, _c.linearConvKernelDim}, embed.dtype,
-                                  nullptr);
-                XTensor ssmState(
-                    {_c.maxBatch, nLocalVHeads, _c.linearKeyHeadDim, _c.linearValueHeadDim},
+            } else if (_c.attnType == XMODEL_ATTN_DSA) {
+                XTensor kCache(
+                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.kvLoraRank},
                     embed.dtype, nullptr);
-                kvCache[i] = {convState, ssmState};
+                XTensor vCache(
+                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.ropeHeadDim},
+                    embed.dtype, nullptr);
+                XTensor indexKCache({_c.maxBatch * maxNumBlocks, _c.blockSize, 1, _c.indexHeadDim},
+                                    embed.dtype, nullptr);
+                kvCache[i] = {kCache, vCache, indexKCache};
+            } else {
+                throw std::runtime_error("DummyRun: TODO");
             }
-        } else if (_c.attnType == XMODEL_ATTN_MHA) {
-            XTensor kCache({_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
-                           embed.dtype, nullptr);
-            XTensor vCache({_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
-                           embed.dtype, nullptr);
-            kvCache[i] = {kCache, vCache};
-        } else if (_c.attnType == XMODEL_ATTN_MLA) {
-            XTensor kCache(
-                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.kvLoraRank},
-                embed.dtype, nullptr);
-            XTensor vCache(
-                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.ropeHeadDim},
-                embed.dtype, nullptr);
-            kvCache[i] = {kCache, vCache};
-        } else if (_c.attnType == XMODEL_ATTN_DSA) {
-            XTensor kCache(
-                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.kvLoraRank},
-                embed.dtype, nullptr);
-            XTensor vCache(
-                {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.ropeHeadDim},
-                embed.dtype, nullptr);
-            XTensor indexKCache({_c.maxBatch * maxNumBlocks, _c.blockSize, 1, _c.indexHeadDim},
-                                embed.dtype, nullptr);
-            kvCache[i] = {kCache, vCache, indexKCache};
-        } else {
+        }
+        return kvCache;
+    };
+
+    auto runPrefill = [&]() {
+        XModelAttnMeta attnMeta;
+        attnMeta.version = 0;
+        uint32_t batchSize = 1;
+        uint32_t seqLen = _c.maxBatchedTokens;
+        uint32_t maxNumBlocks = 0;
+        for (uint32_t i = 0; i < batchSize; i++) {
+            attnMeta.lens.push_back(seqLen);
+            attnMeta.cachedLens.push_back(_c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0);
+            uint32_t blocks = DIV_ROUND_UP(attnMeta.lens[i] + attnMeta.cachedLens[i], _c.blockSize);
+            std::vector<uint32_t> blockTable(blocks);
+            for (uint32_t j = 0; j < blocks; j++) {
+                blockTable[j] = i * blocks + j;
+            }
+            attnMeta.blockTables.push_back(blockTable);
+            if (blocks > maxNumBlocks) {
+                maxNumBlocks = blocks;
+            }
+        }
+        auto kvCache = buildKvCache(maxNumBlocks);
+        std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
+        for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
+            XTensor deepstackEmbed({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
+            deepstackInputEmbeds[i] = deepstackEmbed;
+        }
+        XTensor freqsCis({_c.maxBatchedTokens, _c.ropeHeadDim}, embed.dtype, nullptr);
+        XTensor input({_c.maxBatchedTokens}, INT32, nullptr);
+        XTensor output({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
+        XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
+                       nullptr);
+        rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads,
+                       _c.nKvHeads, _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                       static_cast<int>(embed.dtype),
+                       (_c.nDenseLayers < _c.nLayers)
+                           ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
+                           : static_cast<int>(embed.dtype));
+        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
+        XTensor indices;
+        indices.Init({batchSize}, INT32, nullptr);
+        ForwardGetLogits(rt, output, indices, logits);
+    };
+
+    auto runDecode = [&]() -> size_t {
+        if (_c.maxBatch == 0) {
             return 0;
         }
-    }
+        XModelAttnMeta attnMeta;
+        attnMeta.version = 0;
+        uint32_t batchSize = static_cast<uint32_t>(_c.maxBatch);
+        uint32_t cachedLen = _c.maxSeqLen > 0 ? static_cast<uint32_t>(_c.maxSeqLen - 1) : 0;
+        uint32_t maxNumBlocks = 0;
+        for (uint32_t i = 0; i < batchSize; i++) {
+            attnMeta.lens.push_back(1);
+            attnMeta.cachedLens.push_back(cachedLen);
+            uint32_t blocks = DIV_ROUND_UP(1 + cachedLen, _c.blockSize);
+            std::vector<uint32_t> blockTable(blocks);
+            for (uint32_t j = 0; j < blocks; j++) {
+                blockTable[j] = i * blocks + j;
+            }
+            attnMeta.blockTables.push_back(blockTable);
+            if (blocks > maxNumBlocks) {
+                maxNumBlocks = blocks;
+            }
+        }
+        auto kvCache = buildKvCache(maxNumBlocks);
+        std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
+        for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
+            XTensor deepstackEmbed({_c.maxBatch, _c.hiddenSize}, embed.dtype, nullptr);
+            deepstackInputEmbeds[i] = deepstackEmbed;
+        }
+        XTensor freqsCis({_c.maxBatch, _c.ropeHeadDim}, embed.dtype, nullptr);
+        XTensor input({_c.maxBatch}, INT32, nullptr);
+        XTensor output({_c.maxBatch, _c.hiddenSize}, embed.dtype, nullptr);
+        XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
+                       nullptr);
+        rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads,
+                       _c.nKvHeads, _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                       static_cast<int>(embed.dtype),
+                       (_c.nDenseLayers < _c.nLayers)
+                           ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
+                           : static_cast<int>(embed.dtype));
+        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
+        XTensor indices;
+        indices.Init({batchSize}, INT32, nullptr);
+        ForwardGetLogits(rt, output, indices, logits);
+        return rt.maxUsedSize();
+    };
 
-    std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
-    for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
-        XTensor deepstackEmbed({_c.maxBatch, _c.hiddenSize}, embed.dtype, nullptr);
-        deepstackInputEmbeds[i] = deepstackEmbed;
-    }
-
-    XTensor freqsCis({_c.maxBatch, _c.ropeHeadDim}, embed.dtype, nullptr);
-    XTensor input({_c.maxBatch}, INT32, nullptr);
-    XTensor output({_c.maxBatch, _c.hiddenSize}, embed.dtype, nullptr);
-    XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype, nullptr);
-
-    rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
-                   _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
-                   static_cast<int>(embed.dtype),
-                   (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
-                                                  : static_cast<int>(embed.dtype));
-    Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
-    XTensor indices;
-    indices.Init({batchSize}, INT32, nullptr);
-    ForwardGetLogits(rt, output, indices, logits);
-    return rt.maxUsedSize();
+    size_t prefillSize = 0;
+    runPrefill();
+    prefillSize = rt.maxUsedSize();
+    size_t decodeSize = runDecode();
+    return std::max(prefillSize, decodeSize);
 }
 
 size_t XModel::GetTensorPoolSize(int dbg)
 {
-    size_t size = std::max(DummyRunPrefill(), DummyRunDecode());
+    size_t size = DummyRun();
 
     if (_rankId == 0 && dbg) {
         XDebugStream s(_rankId, __func__);

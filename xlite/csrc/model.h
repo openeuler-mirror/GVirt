@@ -251,8 +251,7 @@ private:
                                    std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                    XTensor &output);
     void CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &kvCache);
-    size_t DummyRunPrefill();
-    size_t DummyRunDecode();
+    size_t DummyRun();
     void ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x, std::vector<MatmulWeight> &weights,
                        XTensor &out, const std::vector<XTensor> &weightBias = {});
 
