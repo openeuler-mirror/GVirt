@@ -122,6 +122,11 @@ void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
                        uint32_t blockSize, XTensor &kCache, XTensor &peCache,
                        const XTensor &slotMapping, float normEps,
                        const XTensor &attnNormKvc = XTensor());
+void XliteOpQkRmsNorm(XRuntime &rt, XTensor &in, const XTensor &qNorm, const XTensor &qNormBias,
+                      const XTensor &kNorm, const XTensor &kNormBias, XTensor &out, float normEps,
+                      uint32_t qNormDim, uint32_t qCntPerToken, uint32_t kNormDim,
+                      uint32_t kCntPerToken, uint32_t kStartOffset, bool useNorm,
+                      const XTensor &qVariance = XTensor(), const XTensor &kVariance = XTensor());
 
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
                   XTensor &out);

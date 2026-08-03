@@ -70,6 +70,8 @@
 #include "aclrtlaunch_norm_bfloat16_t.h"
 #include "aclrtlaunch_mla_prepare_float16_t.h"
 #include "aclrtlaunch_mla_prepare_bfloat16_t.h"
+#include "aclrtlaunch_qk_rms_norm_float16_t.h"
+#include "aclrtlaunch_qk_rms_norm_bfloat16_t.h"
 #include "aclrtlaunch_indexer_scores_float16_t.h"
 #include "aclrtlaunch_indexer_scores_bfloat16_t.h"
 #include "aclrtlaunch_indexer_topk_float16_t.h"
@@ -1170,6 +1172,35 @@ void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
                  kvNorm.ptr, kvNormBias.ptr, attnNormKvc.ptr, freqs.ptr, position.ptr, kCache.ptr,
                  peCache.ptr, slotMapping.ptr, attnQkvc.shape[0], qLoraRank, kvLoraRank,
                  ropeHeadDim, blockSize, normEps, rt.tpSize());
+}
+
+void XliteOpQkRmsNorm(XRuntime &rt, XTensor &in, const XTensor &qNorm, const XTensor &qNormBias,
+                      const XTensor &kNorm, const XTensor &kNormBias, XTensor &out, float normEps,
+                      uint32_t qNormDim, uint32_t qCntPerToken, uint32_t kNormDim,
+                      uint32_t kCntPerToken, uint32_t kStartOffset, bool useNorm,
+                      const XTensor &qVariance, const XTensor &kVariance)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    KERNEL_PTR_TYPE(qk_rms_norm) * launchKernel;
+    if (in.dtype == FP16 && (out.dtype == FP16 || out.dtype == FP32)) {
+        launchKernel = aclrtlaunch_qk_rms_norm_float16_t;
+    } else if (in.dtype == BF16 && (out.dtype == BF16 || out.dtype == FP32)) {
+        launchKernel = aclrtlaunch_qk_rms_norm_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out) + XT_STR(qNorm) + XT_STR(kNorm);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    void *qOutPtr = useNorm ? out.ptr : qVariance.ptr;
+    void *kOutPtr = useNorm ? out.ptr : kVariance.ptr;
+    void *qVarArg = useNorm ? qVariance.ptr : nullptr;
+    void *kVarArg = useNorm ? kVariance.ptr : nullptr;
+    uint32_t outStep = useNorm ? out.shape[1] : 1;
+    launchKernel(rt.aivNum, rt.stream, in.ptr, qNorm.ptr, qNormBias.ptr, qOutPtr, kNorm.ptr,
+                 kNormBias.ptr, kOutPtr, in.shape[0], qNormDim, qCntPerToken, kNormDim,
+                 kCntPerToken, in.shape[1], outStep, normEps, kStartOffset, useNorm, qVarArg,
+                 kVarArg, rt.tpSize());
 }
 
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)
