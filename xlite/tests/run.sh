@@ -420,7 +420,7 @@ function run_minimax_m2()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model minimax_m2 --ckpt-path $models_base_path/MiniMax-M2.5-bf16/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model minimax_m2 --ckpt-path $models_base_path/MiniMax-M2.7-bf16/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 

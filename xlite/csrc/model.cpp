@@ -483,10 +483,9 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     XTensor &qkv = *qkvPtr;
 
     if (_c.qkNorm && !_c.qkNormFull) {
-        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim, true,
-                       mhaQNormBias[layer], qHeads);
-        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim, true,
-                       mhaKNormBias[layer], kHeads, qHeads * _c.headDim, qHeads * _c.headDim);
+        XliteOpQkRmsNorm(rt, qkv, mhaQNorm[layer], mhaQNormBias[layer], mhaKNorm[layer],
+                         mhaKNormBias[layer], qkv, _c.normEps, _c.headDim, qHeads, _c.headDim,
+                         kHeads, qHeads * _c.headDim, true);
     }
     if (_c.qkNormFull) {
         size_t rows = qkv.shape[0];
@@ -506,10 +505,9 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
             // Single AllReduceSum over the packed buffer reduces both variances in place.
             XliteOpAllReduceSum(rt, packedVar, packedVar, TP, false, DBG_LOC);
         }
-        XliteOpRmsNorm(rt, qkv, mhaQNorm[layer], qkv, _c.normEps, _c.headDim * qHeads, true,
-                       XTensor(), 1, 0, 0, qLocalVariance);
-        XliteOpRmsNorm(rt, qkv, mhaKNorm[layer], qkv, _c.normEps, _c.headDim * kHeads, true,
-                       XTensor(), 1, qHeads * _c.headDim, qHeads * _c.headDim, kLocalVariance);
+        XliteOpQkRmsNorm(rt, qkv, mhaQNorm[layer], XTensor(), mhaKNorm[layer], XTensor(), qkv,
+                         _c.normEps, _c.headDim * qHeads, 1, _c.headDim * kHeads, 1,
+                         qHeads * _c.headDim, true, qLocalVariance, kLocalVariance);
         rt.PutTensor(packedVar);
     }
     XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis, rt._attnSlotMapping,
