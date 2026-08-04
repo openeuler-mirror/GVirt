@@ -28,6 +28,7 @@ class XliteCausalConv1dSiLU
 public:
     static constexpr int kMaxKernel = 16;
     static constexpr int kMaxInputF = 4096;
+    static constexpr int loopSize = 8;
 
     __aicore__ inline XliteCausalConv1dSiLU()
     {
@@ -75,8 +76,10 @@ public:
 
         qkv_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += 8 * 32;
-        kernel_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += 8 * 32;
+        for (int i = 0; i < loopSize; i++) {
+            kernel_buf[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+            off += 16 * 32;
+        }
         mul_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += 8 * 32;
         calc_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
@@ -199,10 +202,10 @@ public:
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
     }
 
-    __aicore__ inline void GatherWindow(int i)
+    __aicore__ inline void GatherWindow(int i, int len)
     {
         int K = (int)kernelDim;
-        for (int j = 0; j < K; ++j) {
+        for (int j = 0; j < K + (len - 1); ++j) {
             int absIdx = i + 1 + j;
             float v = (absIdx < K) ? ReadFloat(state_f, absIdx) : ReadFloat(input_f, absIdx - K);
             WriteFloat(qkv_buf, j, v);
@@ -235,7 +238,7 @@ public:
 
             int wOffset = channel * (int)kernelDim;
             if constexpr (std::is_same<Dtype, float>::value) {
-                CopyGmToUbufAligned(kernel_buf, weight + wOffset,
+                CopyGmToUbufAligned(kernel_buf[0], weight + wOffset,
                                     static_cast<uint32_t>(kernelDim * sizeof(Dtype)));
                 pipe_barrier(PIPE_MTE2);
             } else {
@@ -247,13 +250,23 @@ public:
                 uint64_t wmask = (kernelDim >= 64) ? (uint64_t)-1 : ((1ull << kernelDim) - 1ull);
                 set_vector_mask(0, wmask);
                 if constexpr (std::is_same<Dtype, float16_t>::value) {
-                    vconv_f162f32(kernel_buf, tmp_kernel_buf, 1, 0, 0, 0, 0);
+                    vconv_f162f32(kernel_buf[0], tmp_kernel_buf, 1, 0, 0, 0, 0);
                 } else {
-                    vconv_bf162f32(kernel_buf, tmp_kernel_buf, 1, 0, 0, 0, 0);
+                    vconv_bf162f32(kernel_buf[0], tmp_kernel_buf, 1, 0, 0, 0, 0);
                 }
                 pipe_barrier(PIPE_V);
                 set_vector_mask(0, 15);
             }
+
+            set_flag(PIPE_V, PIPE_S, EVENT_ID2);
+            wait_flag(PIPE_V, PIPE_S, EVENT_ID2);
+            for (int i = 0; i < kernelDim; i++) {
+                for (int j = 1; j < loopSize; j++) {
+                    kernel_buf[j][i + j] = kernel_buf[0][i];
+                }
+            }
+            set_flag(PIPE_S, PIPE_V, EVENT_ID2);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID2);
 
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
             for (int batchIdx = 0; batchIdx < (int)batch; ++batchIdx) {
@@ -263,28 +276,31 @@ public:
                 LoadGmToFloat(state + stateBase, (int)kernelDim, state_f);
                 LoadGmToFloat(input + inputBase, (int)seqLen, input_f);
 
-                for (int i = 0; i < (int)seqLen; ++i) {
-                    GatherWindow(i);
+                for (int i = 0; i < (int)seqLen; i += loopSize) {
+                    int realLoopSize = MIN(loopSize, (int)seqLen - i);
+                    set_flag(PIPE_S, PIPE_V, EVENT_ID3);
+                    wait_flag(PIPE_S, PIPE_V, EVENT_ID3);
+                    GatherWindow(i, realLoopSize);
 
                     uint64_t kmask =
                         (kernelDim >= 64) ? (uint64_t)-1 : ((1ull << kernelDim) - 1ull);
-                    set_vector_mask(0, kmask);
-                    vmul(mul_buf, qkv_buf, kernel_buf, 1, 0, 0, 0, 0, 0, 0);
-                    pipe_barrier(PIPE_V);
-                    vcadd(mul_buf, mul_buf, 1, 0, 0, 0, 0);
-                    pipe_barrier(PIPE_V);
-                    set_vector_mask(0, 15);
 
+                    for (int j = 0; j < realLoopSize; j++) {
+                        set_vector_mask(0, kmask << j);
+                        vmul(mul_buf, qkv_buf, kernel_buf[j], 1, 1, 1, 1, 1, 8, 0);
+                        pipe_barrier(PIPE_V);
+                        vcadd(mul_buf + j, mul_buf, 1, 1, 1, 8, 0);
+                        pipe_barrier(PIPE_V);
+                    }
+
+                    set_vector_mask(0, 0xff);
                     SiLU();
 
-                    DumpBuffer(kernel_buf, "kernel", 4);
-                    DumpBuffer(qkv_buf, "qkv", 4);
-                    DumpBuffer(mul_buf, "mul", 4);
-                    DumpBuffer(out_buf, "out", 1);
-
                     int outOffset = (batchIdx * (int)channels + channel) * (int)seqLen + i;
+                    set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+                    wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
                     // Per-element dst is often not 32B-aligned (bf16); use aligned helper.
-                    CopyUbufToGmAligned(output + outOffset, out_buf, sizeof(Dtype));
+                    CopyUbufToGmAligned(output + outOffset, out_buf, realLoopSize * sizeof(Dtype));
                     pipe_barrier(PIPE_MTE3);
                     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
                 }
@@ -312,7 +328,7 @@ private:
     __ubuf__ float *input_f;
     __ubuf__ float *new_state_f;
     __ubuf__ float *qkv_buf;
-    __ubuf__ float *kernel_buf;
+    __ubuf__ float *kernel_buf[loopSize];
     __ubuf__ float *mul_buf;
     __ubuf__ float *calc_buf;
     __ubuf__ Dtype *out_buf;
