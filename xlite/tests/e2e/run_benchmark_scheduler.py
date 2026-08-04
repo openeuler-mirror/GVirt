@@ -18,14 +18,16 @@ GVirt 每日测试机器人调度器
     - 支持自定义执行时间
 """
 
-import sys
+import os
 import signal
-import schedule
-import time
 import subprocess
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+
+import schedule
 
 # ====================== 配置 ======================
 # 脚本目录
@@ -224,6 +226,12 @@ class BenchmarkScheduler:
                 schedule.run_pending()
                 time.sleep(60)  # 每分钟检查一次
             except KeyboardInterrupt:
+                subprocess.run(
+                    ["pkill", "-e", "-f", "-9", "VLLM|vllm|ais_bench|aisbench"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self.log("已终止所有相关进程")
                 break
             except Exception as e:
                 self.log(f"调度器运行异常: {e}")
@@ -257,13 +265,17 @@ def main():
         help="*性能*测试模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)，默认 moe；仅 bench 模式有效",
     )
     default_model_args = (
-        "--models Qwen3-32B-w8a8-nopdmix Qwen3-30B-A3B-Instruct-2507 Qwen3-VL-8B-Instruct GLM-4.7-W8A8-floatmtp MiniMax-M2.7-w8a8-QuaRot",
-        "--tps 4 4 4 8 8",
-        "--eps 0 1 0 1 1",
-        "--dps 1 1 1 1 1",
+        "--models Qwen3-32B-w8a8-nopdmix Qwen3-VL-8B-Instruct",
+        "2~Qwen3-30B-A3B-Instruct-2507 2~GLM-4.7-W8A8-floatmtp 2~MiniMax-M2.7-w8a8-QuaRot",
+        "--tps 4 4 4 2 8 4 8 4",
+        "--dps 1 1 1 2 1 2 1 2",
+        "--eps 0 0 1",  # will expand the rest of the eps values with 1
         "--xlite 2 1 0",
         "--broadcast-xlite",
-        "--max-num-seqs 256",
+        f"--num-prompts {int(os.environ.get('XLITE_AISBENCH_NUM_PROMPTS', 128))}",
+        "--max-num-seqs 512",
+        "--max-model-len 8192",
+        "--max-num-batched-tokens 8192",
     )
     parser.add_argument(
         "-args",
@@ -281,9 +293,7 @@ def main():
     parser.add_argument("-rt", "--run-time", type=str, default=DEFAULT_RUN_TIME, help="执行时间 (HH:MM)，默认 02:00")
     parser.add_argument("-rn", "--run-now", action="store_true", help="立即执行一次测试，然后启动调度器")
     parser.add_argument("-d", "--debug", action="store_true", help="调试模式，直接输出测试过程到stdout")
-    parser.add_argument(
-        "--timeout", type=int, default=4 * 3600, help="ais_bench 子进程超时时间（秒），默认 4h = 14400s"
-    )
+    parser.add_argument("--timeout", type=int, default=2 * 3600, help="ais_bench 子进程超时时间（秒），默认 2h = 7200s")
     parser.add_argument("--retry", type=int, default=3, help="ais_bench 失败时的重试次数，默认 3")
     parser.add_argument("--vllm-timeout", type=int, default=1800, help="vLLM 服务器启动超时时间（秒），默认 1800s")
 
