@@ -448,7 +448,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
 
     batchedTokens = 0;
     _maxNumBlocks = 0;
-    _batch = static_cast<int>(batch);
+    _batch = batch;
     queryStart = 0;
     bool allCached = true;
     bool anyMultiToken = false;
