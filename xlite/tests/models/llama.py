@@ -384,9 +384,9 @@ class Llama(nn.Module):
             while True:
                 task = self.task_queue.get()
                 args, event = task
-                tokens, attn_meta, xlite_kv_cache, freqs_cis, logits, stream = args
+                tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream = args
                 self.xlite_rt.multi_task_parallel = True
-                self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, freqs_cis, logits, stream)
+                self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream)
                 event.set()
 
     @torch.inference_mode()
@@ -401,8 +401,14 @@ class Llama(nn.Module):
         stream = torch.npu.current_stream().npu_stream
         logits0 = torch.empty(world_size, tokens0.size(0), self.args.vocab_size // world_size, device=tokens.device)
         logits1 = torch.empty(world_size, tokens1.size(0), self.args.vocab_size // world_size, device=tokens.device)
-        event0 = self.thread_pool[0].add_task(args = (tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits0, stream))
-        event1 = self.thread_pool[1].add_task(args = (tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits1, stream))
+        # logits_indices: pick the last-token hidden of each sequence for the lm_head,
+        # matching forward_xlite (arange(batch)*seqlen + seqlen-1).
+        b0, s0 = tokens0.size(0), tokens0.size(1)
+        b1, s1 = tokens1.size(0), tokens1.size(1)
+        logits_indices0 = torch.arange(b0, dtype=torch.int32, device=tokens.device) * s0 + (s0 - 1)
+        logits_indices1 = torch.arange(b1, dtype=torch.int32, device=tokens.device) * s1 + (s1 - 1)
+        event0 = self.thread_pool[0].add_task(args = (tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits_indices0, logits0, stream))
+        event1 = self.thread_pool[1].add_task(args = (tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits_indices1, logits1, stream))
         event0.wait()
         event1.wait()
         logits0 = logits0.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
