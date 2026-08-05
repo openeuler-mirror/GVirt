@@ -28,6 +28,7 @@ class XliteCausalConv1dSiLU
 public:
     static constexpr int kMaxKernel = 16;
     static constexpr int kMaxInputF = 4096;
+    static constexpr int kGatherPad = 128;
     static constexpr int loopSize = 8;
 
     __aicore__ inline XliteCausalConv1dSiLU()
@@ -64,7 +65,8 @@ public:
             off = (off + 31) / 32 * 32;
         }
         input_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += kMaxInputF * sizeof(float);
+        // Extra pad so vgather reads stay in bounds when processing sequence tail
+        off += (kMaxInputF + kGatherPad) * sizeof(float);
         if (off % 32 != 0) {
             off = (off + 31) / 32 * 32;
         }
@@ -75,6 +77,8 @@ public:
         }
 
         qkv_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 8 * 32;
+        off_ramp = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
         off += 8 * 32;
         for (int i = 0; i < loopSize; i++) {
             kernel_buf[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
@@ -140,7 +144,7 @@ public:
             pipe_barrier(PIPE_MTE2);
             return;
         }
-        constexpr int kChunk = 8;
+        constexpr int kChunk = 128;  // 256B stage_buf: 128 fp16/bf16 per round trip
         int done = 0;
         while (done < nElem) {
             int take = nElem - done;
@@ -153,12 +157,12 @@ public:
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
 
-            uint64_t mask = (take >= 64) ? (uint64_t)-1 : ((1ull << take) - 1ull);
-            set_vector_mask(0, mask);
+            SetMask(take);
+            int repeat = DIV_ROUND_UP(take, VECTOR_MAX_NUM_OF_FP32);
             if constexpr (std::is_same<Dtype, float16_t>::value) {
-                vconv_f162f32(dstF + done, stage_buf, 1, 0, 0, 0, 0);
+                vconv_f162f32(dstF + done, stage_buf, repeat, 1, 1, 8, 4);
             } else {
-                vconv_bf162f32(dstF + done, stage_buf, 1, 0, 0, 0, 0);
+                vconv_bf162f32(dstF + done, stage_buf, repeat, 1, 1, 8, 4);
             }
             pipe_barrier(PIPE_V);
             done += take;
@@ -173,7 +177,7 @@ public:
             pipe_barrier(PIPE_MTE3);
             return;
         }
-        constexpr int kChunk = 8;
+        constexpr int kChunk = 128;  // 128 fp16/bf16 = 256B stage_buf
         int done = 0;
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
         while (done < nElem) {
@@ -181,13 +185,13 @@ public:
             if (take > kChunk) {
                 take = kChunk;
             }
-            uint64_t mask = (take >= 64) ? (uint64_t)-1 : ((1ull << take) - 1ull);
-            set_vector_mask(0, mask);
+            SetMask(take);
+            int repeat = DIV_ROUND_UP(take, VECTOR_MAX_NUM_OF_FP32);
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
             if constexpr (std::is_same<Dtype, float16_t>::value) {
-                vconv_f322f16(stage_buf, srcF + done, 1, 0, 0, 0, 0);
+                vconv_f322f16(stage_buf, srcF + done, repeat, 1, 1, 4, 8);
             } else {
-                vconv_f322bf16r(stage_buf, srcF + done, 1, 0, 0, 0, 0);
+                vconv_f322bf16r(stage_buf, srcF + done, repeat, 1, 1, 4, 8);
             }
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
@@ -202,9 +206,20 @@ public:
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
     }
 
+    // Window [i+1, i+K+len) of concat. For i >= K-1 the window lies entirely
+    // inside input_f, so one vgather (PIPE_V) fetches it instead of scalar
+    // PIPE_S moves; the first K-1 windows straddle state_f and stay scalar.
     __aicore__ inline void GatherWindow(int i, int len)
     {
         int K = (int)kernelDim;
+        if (i >= K - 1) {
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+            uint32_t baseAddr =
+                static_cast<uint32_t>((uint64_t)input_f + (i + 1 - K) * (int)sizeof(float));
+            vgather((__ubuf__ uint32_t *)qkv_buf, off_ramp, baseAddr, 8, 1);
+            pipe_barrier(PIPE_V);
+            return;
+        }
         for (int j = 0; j < K + (len - 1); ++j) {
             int absIdx = i + 1 + j;
             float v = (absIdx < K) ? ReadFloat(state_f, absIdx) : ReadFloat(input_f, absIdx - K);
@@ -232,6 +247,9 @@ public:
         }
 
         set_vector_mask(0, 15);
+        for (int k = 0; k < 64; k++) {
+            off_ramp[k] = static_cast<uint32_t>(k * (int)sizeof(float));
+        }
         for (int channel = 0; channel < (int)channels; channel++) {
             if (channel % GetBlockNum() != GetBlockIdx())
                 continue;
@@ -328,6 +346,7 @@ private:
     __ubuf__ float *input_f;
     __ubuf__ float *new_state_f;
     __ubuf__ float *qkv_buf;
+    __ubuf__ uint32_t *off_ramp;
     __ubuf__ float *kernel_buf[loopSize];
     __ubuf__ float *mul_buf;
     __ubuf__ float *calc_buf;
