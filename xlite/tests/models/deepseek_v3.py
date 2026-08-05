@@ -17,6 +17,8 @@ from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import torch_npu
+import threading
+import queue
 
 from tests.models.deepseek_kernel import weight_dequant
 from tests.models.weight_utils import (hf_model_weights_iterator,
@@ -1044,6 +1046,7 @@ class DeepSeek_V3(nn.Module):
         self.norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
+        self.multi_task_parallel = (os.getenv("MULTI_TASK_PARALLEL", "0") == "1")
 
     @torch.inference_mode()
     def forward_naive(self, tokens: torch.Tensor, start_pos: int = 0):
@@ -1100,6 +1103,56 @@ class DeepSeek_V3(nn.Module):
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
+    class PersistentThread(threading.Thread):
+        def __init__(self, model, task_id):
+            super().__init__(daemon=True)
+            self.xlite_model = model.xlite_model
+            self.task_queue = queue.Queue()
+            self.xlite_rt = model.xlite_rt_list[task_id]
+            self.xlite_rt.task_id = task_id
+
+        def add_task(self, args):
+            event = threading.Event()
+            self.task_queue.put((args, event))
+            return event
+
+        @torch.inference_mode()
+        def run(self) -> None:
+            self.xlite_rt.set_current_context()
+            while True:
+                task = self.task_queue.get()
+                args, event = task
+                tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream = args
+                self.xlite_rt.multi_task_parallel = True
+                self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream)
+                event.set()
+
+    @torch.inference_mode()
+    def forward_xlite_parallel(self, tokens: torch.Tensor, start_pos: int = 0):
+        mid = tokens.size(1) // 2
+        tokens0 = tokens[:, :mid]
+        tokens1 = tokens[:, mid:]
+        tokens0 = tokens0.contiguous().view(tokens0.size(0), tokens0.size(1))
+        tokens1 = tokens1.contiguous().view(tokens1.size(0), tokens1.size(1))
+        attn_meta0 = self.prepare_xlite_attnmeta(tokens0, start_pos)
+        attn_meta1 = self.prepare_xlite_attnmeta(tokens1, start_pos + mid)
+        stream = torch.npu.current_stream().npu_stream
+        logits0 = torch.empty(world_size, tokens0.size(0), self.args.vocab_size // world_size, device=tokens.device)
+        logits1 = torch.empty(world_size, tokens1.size(0), self.args.vocab_size // world_size, device=tokens.device)
+        # logits_indices: pick the last-token hidden of each sequence for the lm_head,
+        # matching forward_xlite (arange(batch)*seqlen + seqlen-1).
+        b0, s0 = tokens0.size(0), tokens0.size(1)
+        b1, s1 = tokens1.size(0), tokens1.size(1)
+        logits_indices0 = torch.arange(b0, dtype=torch.int32, device=tokens.device) * s0 + (s0 - 1)
+        logits_indices1 = torch.arange(b1, dtype=torch.int32, device=tokens.device) * s1 + (s1 - 1)
+        event0 = self.thread_pool[0].add_task(args = (tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits_indices0, logits0, stream))
+        event1 = self.thread_pool[1].add_task(args = (tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits_indices1, logits1, stream))
+        event0.wait()
+        event1.wait()
+        logits0 = logits0.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
+        logits1 = logits1.permute(1, 0, 2).reshape(tokens1.size(0), self.args.vocab_size)
+        return logits1
+
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         """
@@ -1113,7 +1166,11 @@ class DeepSeek_V3(nn.Module):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         if forward_backend == "xlite":
-            return self.forward_xlite(tokens, start_pos)
+            if not self.multi_task_parallel or tokens.size(0) * tokens.size(1) < 1024:
+                self.xlite_rt.multi_task_parallel = False
+                return self.forward_xlite(tokens, start_pos)
+
+            return self.forward_xlite_parallel(tokens, start_pos)
         else:
             return self.forward_naive(tokens, start_pos)
 
@@ -1374,6 +1431,16 @@ class DeepSeek_V3(nn.Module):
                 print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
                       f" KV Cache: {kv_size // 1024 // 1024} MB" +
                       f" Tensor pool: {pool_size} MB")
+
+            if self.multi_task_parallel:
+                self.xlite_rt_list = [self.xlite_rt, Runtime(local_rank, 0, self.global_rank,
+                                                             self.tp_size, self.dp_size, 1, args.moe_ep_size)]
+                self.xlite_rt_list[1].init_tensor_pool(pool_size)
+                self.xlite_rt_list[0].peer_notify = self.xlite_rt_list[1].notify
+                self.xlite_rt_list[1].peer_notify = self.xlite_rt_list[0].notify
+                self.thread_pool = [self.PersistentThread(model=self, task_id=i) for i in range(2)]
+                for thread in self.thread_pool:
+                    thread.start()
 
     def init_xlite_model(self, args: ModelArgs):
         config = ModelConfig()
