@@ -10,6 +10,8 @@
 #include "model.h"
 #include "debug.h"
 
+#define XLITE_MLA_V3_THRESHOLD 280
+
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
     attnNorm.resize(c.nLayers);
@@ -394,7 +396,36 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
 
     XTensor &oAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
                                     hiddenState.dtype, DBG_LOC);
-    if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
+    // Route decode+DSA to the mla_v3 (sparse gather) path only when it pays off.
+    // Below ~280 tokens/seq the gather overhead dominates and v3 regresses by up
+    // to 9% on short-prompt + large-batch cases (see mla_v2 vs mla_v3 perf sweep).
+    // Cond 1 (cached KV > tile): long-seq fallback where v3 is consistently faster.
+    // Cond 2 (per-seq cached KV > 280 * batch): perf-derived threshold that steers
+    //   degenerate short-prompt + large-batch cases back to v2 to avoid regression.
+    if (rt._decodeStep && _c.attnType == XMODEL_ATTN_DSA && topkIndices != nullptr &&
+        (rt._maxNumBlocks * _c.blockSize > rt._tileSizeOfCachedKV ||
+         rt._maxNumBlocks * _c.blockSize > XLITE_MLA_V3_THRESHOLD * rt._batch)) {
+        // Decode + DSA long-sequence path: gather sparse top-k tokens into a
+        // contiguous dense cache, then run mla_v3 on the dense cache.
+        XTensor &kDense =
+            rt.GetTensor({static_cast<size_t>(rt._batch), _c.indexTopK, _c.kvLoraRank},
+                         hiddenState.dtype, DBG_LOC);
+        XTensor &peDense =
+            rt.GetTensor({static_cast<size_t>(rt._batch), _c.indexTopK, _c.ropeHeadDim},
+                         hiddenState.dtype, DBG_LOC);
+        XliteOpGatherSparseKVCache(rt, kCache, peCache, rt._attnBlockTables, *topkIndices, rt._lens,
+                                   rt._cachedLens, kDense, peDense, rt._batch, _c.indexTopK,
+                                   _c.blockSize, rt._maxNumBlocks, _c.kvLoraRank, _c.ropeHeadDim,
+                                   _c.nKvHeads);
+        XTensor &qkDense =
+            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
+        XliteOpMLAV3(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._queryStartLoc,
+                     rt._lens, rt._cachedLens, nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
+                     rt._batch, _c.indexTopK, _c.softmaxScale);
+        rt.PutTensor(qkDense);
+        rt.PutTensor(peDense);
+        rt.PutTensor(kDense);
+    } else if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
                                    hiddenState.dtype, DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, oAbsorb, rt._queryStartLoc, rt._lens,

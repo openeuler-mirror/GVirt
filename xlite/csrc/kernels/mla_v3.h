@@ -391,13 +391,15 @@ public:
 
                 if (kIdx2 == 0) {
                     int kRemSize = 2 * svk0;
+                    int kRemBlockPad = ROUND_UP(kRemSize, kBlockSize);
                     if (kOffset + kRemSize > calcLen) {
                         kRemSize = calcLen - kOffset;
+                        kRemBlockPad = ROUND_UP(kRemSize, kBlockSize);
                     }
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + pingpongL1B);
                     // copy K(T) (kRemSize, nSize) to L1 — dense cache is contiguous
                     CopyGmToL1Nd2Nz(aktl1bBuf[pingpongL1B], kCache[kOffset * kvLoraRank + nOffset],
-                                    kRemSize, nSize, kvLoraRank, L1BkRemBlockPad);
+                                    kRemBlockPad, nSize, kvLoraRank, L1BkRemBlockPad);
 
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
@@ -543,10 +545,10 @@ public:
                 uint32_t absorbOffset = mhOffset * kvLoraRank;
                 uint32_t qrOffset = mhOffset * ropeHeadDim;
 
-                dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u)}"
+                dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u), calcLen %d}"
                            " use %d temp buf: QK\n",
                            GetBlockIdx(), batchIdx, queryTaskOffset, queryTaskOffset + queryTaskLen,
-                           nHeads, curr);
+                           nHeads, calcLen, curr);
                 RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], queryTaskLen, calcLen, qk[curr],
                          kCache, peCache);
                 ffts_cross_core_sync(PIPE_FIX, config);
@@ -555,10 +557,10 @@ public:
                     // wait vector softmax done
                     wait_flag_dev(1);
                     // do softmax * V
-                    dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u)}"
+                    dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u), calcLen %d}"
                                " use %d temp buf: SV\n",
                                GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
-                               lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
+                               lastQueryTaskOffset + lastQueryTaskLen, nHeads, lastCalcLen, last);
                     RunAicSV(qk[last], lastQueryTaskLen, lastCalcLen, oAbsorb[lastAbsorbOffset],
                              lastKCache);
                 }
@@ -582,10 +584,10 @@ public:
         // do last softmax * V
         if (needDoSV != 0) {
             wait_flag_dev(1);
-            dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u)}"
+            dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u), calcLen %d}"
                        " use %d temp buf: SV\n",
                        GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
-                       lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
+                       lastQueryTaskOffset + lastQueryTaskLen, nHeads, lastCalcLen, last);
             RunAicSV(qk[last], lastQueryTaskLen, lastCalcLen, oAbsorb[lastAbsorbOffset],
                      lastKCache);
         }
