@@ -1495,9 +1495,9 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
     ConfigRtCommOptimize(rt, rt.currTokens);
     if (rt.enableCommOptimize) {
         size_t mPad = ROUND_UP(input.shape[0], _c.defTpSize);
-        XTensor *xPadPtr;
+        XTensor *xPadPtr, xPad;
         if (input.OrigShape()[0] >= mPad) {
-            XTensor xPad({mPad, _c.hiddenSize}, embed.dtype, input.ptr);
+            xPad.Init({mPad, _c.hiddenSize}, embed.dtype, input.ptr);
             xPadPtr = &xPad;
         } else {
             xPadPtr = &rt.GetTensor({mPad, _c.hiddenSize}, embed.dtype, DBG_LOC);
