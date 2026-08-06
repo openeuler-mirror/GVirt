@@ -184,7 +184,7 @@ public:
     // Avoids D2H sync via GetFirstAttnPosition in every linear layer.
     bool _linearDecodeStep = false;
     uint32_t _maxNumBlocks;
-    int _batch;
+    uint32_t _batch;
     uint32_t _tileSizeOfCachedKV;
     XTensor _attnPosition;
     XTensor _attnBlockTables;

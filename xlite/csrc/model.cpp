@@ -650,7 +650,7 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     XTensor &ssmState = kvCache[layer][1];
 
     uint32_t m = hiddenState.shape[0];
-    uint32_t batch = static_cast<uint32_t>(rt._batch);
+    uint32_t batch = rt._batch;
     if (batch == 0 || m % batch != 0) {
         throw std::runtime_error(
             "ForwardAttnLinear: token layout requires uniform seqlen per batch item");
