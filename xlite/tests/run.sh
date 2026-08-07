@@ -262,6 +262,54 @@ function run_deepseek_v3_w8a8()
     rm $test_config_path
 }
 
+function run_deepseek_v4_w8a8()
+{
+    echo '{
+        "vocab_size": 129280,
+        "dim": 4096,
+        "moe_inter_dim": 2048,
+        "n_layers": 43,
+        "n_hash_layers": 3,
+        "n_mtp_layers": 0,
+        "n_heads": 64,
+        "norm_eps": 1e-06,
+        "n_routed_experts": 256,
+        "n_shared_experts": 1,
+        "n_activated_experts": 6,
+        "score_func": "sqrtsoftplus",
+        "route_scale": 1.5,
+        "swiglu_limit": 10.0,
+        "q_lora_rank": 1024,
+        "head_dim": 512,
+        "rope_head_dim": 64,
+        "o_groups": 8,
+        "o_lora_rank": 1024,
+        "window_size": 128,
+        "compress_ratios": [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0],
+        "compress_rope_theta": 160000.0,
+        "original_seq_len": 65536,
+        "rope_theta": 10000.0,
+        "rope_factor": 16,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "index_n_heads": 64,
+        "index_head_dim": 128,
+        "index_topk": 512,
+        "hc_mult": 4,
+        "hc_sinkhorn_iters": 20,
+        "hc_eps": 1e-06,
+        "temperature": 1.0,
+        "dtype": "bf16",
+        "quantization": "w8a8",
+        "moe_ep_size": 8,
+        "moe_tp_size": 1,
+        "max_batch_size": 1,
+        "max_seq_len": 1024
+    }' > $test_config_path
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-8} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v4 --ckpt-path $models_base_path/DeepSeek-V4-Flash-w8a8-mtp ${RUN_ARGS[@]}
+    rm $test_config_path
+}
+
 function run_glm4_moe()
 {
     echo '{
