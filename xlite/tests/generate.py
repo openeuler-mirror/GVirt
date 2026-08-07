@@ -136,6 +136,9 @@ def main(
     if model_type == "deepseek_v3" or model_type == "deepseek_v32" or model_type == "glm5":
         from tests.models.deepseek_v3 import ModelArgs
         from tests.models.deepseek_v3 import DeepSeek_V3 as Transformer
+    elif model_type == "deepseek_v4":
+        from tests.models.deepseek_v4 import ModelArgs
+        from tests.models.deepseek_v4 import Transformer
     elif model_type == "llama":
         from tests.models.llama import ModelArgs
         from tests.models.llama import Llama as Transformer
@@ -318,7 +321,7 @@ def main(
                 messages.clear()
                 continue
             messages.append({"role": "user", "content": prompt})
-            if model_type in {"deepseek_v3", "glm4_moe", "glm5", "minimax_m2"}:
+            if model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm5", "minimax_m2"}:
                 prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
             elif model_type == "llama":
                 formatted_prompt = ""
@@ -349,13 +352,18 @@ def main(
         def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature, no_prefix):
             if no_prefix:
                 prompts_tokens_batch = [tokenizer.encode(item["query"]) for item in batch]
-            elif model_type in {"deepseek_v3", "glm4_moe", "glm5", "minimax_m2"}:
-                prompts_tokens_batch = [
-                    tokenizer.apply_chat_template(
-                        [{"role": "user", "content": item["query"]}], add_generation_prompt=True, return_dict=False
-                    )
-                    for item in batch
-                ]
+            elif model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm5", "minimax_m2"}:
+                prompts_tokens_batch = []
+                for item in batch:
+                    try:
+                        toks = tokenizer.apply_chat_template(
+                            [{"role": "user", "content": item["query"]}], add_generation_prompt=True, return_dict=False
+                        )
+                    except (ValueError, TypeError):
+                        # Tokenizer has no chat_template (e.g. DeepSeek-V4-Flash ckpt) -> raw encode.
+                        bos = tokenizer.bos_token_id
+                        toks = ([bos] if bos is not None else []) + tokenizer.encode(item["query"])
+                    prompts_tokens_batch.append(toks)
             elif model_type == "llama":
                 prompts_tokens_batch = [tokenizer.encode(f"<s>[INST] {item['query']} [/INST] ") for item in batch]
             elif model_type in {"qwen2", "qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe"}:
@@ -515,6 +523,7 @@ if __name__ == "__main__":
     assert args.model in [
         "deepseek_v3",
         "deepseek_v32",
+        "deepseek_v4",
         "glm5",
         "minimax_m2",
         "llama",
