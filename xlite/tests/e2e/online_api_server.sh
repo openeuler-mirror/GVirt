@@ -15,6 +15,11 @@ export TASK_QUEUE_ENABLE=1
 # 通信优化
 export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
+# xlite_full_mode 模式下 xlite 已接管 prefill，无需开启
+if [[ "${mode}" != "xlite_full_mode" ]]; then
+    export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+	echo "Enabling flash comm"
+fi
 # 计算优化
 export OMP_PROC_BIND=false
 export VLLM_ASCEND_ENABLE_NZ=2
@@ -72,10 +77,10 @@ fi
 # 根据 mode 选择参数
 case "${mode}" in
 	aclgraph)
-		additional_config_param='{"enable_flashcomm1": true, "enable_cpu_binding": true}'
+		additional_config_param='{"enable_cpu_binding": true}'
 		;;
 	xlite_decode_only)
-		additional_config_param='{"xlite_graph_config": {"enabled": true}, "enable_flashcomm1": true, "enable_cpu_binding": true}'
+		additional_config_param='{"xlite_graph_config": {"enabled": true}, "enable_cpu_binding": true}'
 		;;
 	xlite_full_mode)
 		additional_config_param='{"xlite_graph_config": {"enabled": true, "full_mode": true}, "enable_cpu_binding": true}'
