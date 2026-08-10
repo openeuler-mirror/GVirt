@@ -93,6 +93,22 @@ struct XModelConfig {
     uint32_t moeTPSize;
 
     bool weightNZ = false;
+
+    // ===== DeepSeek-V4 (CxA) =====
+    uint32_t oGroups = 0;
+    uint32_t oLoraRank = 0;
+    uint32_t windowSize = 0;
+    float compressRopeTheta = 10000.0f;
+    uint64_t originalSeqLen = 0;
+    float ropeFactor = 1.0f;
+    uint32_t betaFast = 32;
+    uint32_t betaSlow = 1;
+    uint32_t hcMult = 0;
+    uint32_t hcSinkhornIters = 0;
+    float hcEps = 1e-6f;
+    float swigluLimit = 0.0f;
+    uint32_t nHashLayers = 0;
+    std::vector<uint32_t> compressRatios;
 };
 
 struct MoEAlltoAllMeta {
@@ -199,6 +215,41 @@ public:
     std::vector<std::vector<XTensor>> moeREUpGateDeqScale;
     std::vector<std::vector<XTensor>> moeREDown;
     std::vector<std::vector<XTensor>> moeREDownDeqScale;
+
+    // ===== DeepSeek-V4 (CxA) attention weights =====
+    std::vector<XTensor> attnSink;
+    std::vector<MatmulWeight> attnWqA;
+    std::vector<XTensor> attnWoA;
+    std::vector<XTensor> attnWoB;
+    std::vector<MatmulWeight> attnWKv;
+
+    // Compressor (per-layer; empty tensor for non-compress layers)
+    std::vector<XTensor> compApe;
+    std::vector<XTensor> compWKv;
+    std::vector<XTensor> compWGate;
+    std::vector<XTensor> compNorm;
+
+    // Indexer (per-layer; empty tensor for non-indexer layers)
+    std::vector<MatmulWeight> idxWqB;
+    std::vector<XTensor> idxWeightsProj;
+
+    // Indexer's internal Compressor (per-layer; only on compress_ratio==4 layers)
+    std::vector<XTensor> idxCompApe;
+    std::vector<XTensor> idxCompWKv;
+    std::vector<XTensor> idxCompWGate;
+    std::vector<XTensor> idxCompNorm;
+
+    // Multi-stage Hyper-Connections (per-layer)
+    std::vector<XTensor> hcAttnFn;
+    std::vector<XTensor> hcFfnFn;
+    std::vector<XTensor> hcAttnBase;
+    std::vector<XTensor> hcFfnBase;
+    std::vector<XTensor> hcAttnScale;
+    std::vector<XTensor> hcFfnScale;
+    // MHC head (one for the whole Transformer)
+    XTensor hcHeadFn;
+    XTensor hcHeadBase;
+    XTensor hcHeadScale;
 
 private:
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);

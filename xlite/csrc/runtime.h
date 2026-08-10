@@ -26,6 +26,7 @@ enum XModelAttnType {
     XMODEL_ATTN_MLA,
     XMODEL_ATTN_DSA,
     XMODEL_ATTN_HYBRID,
+    XMODEL_ATTN_CXA,
     XMODEL_ATTN_MAX_TYPE,
 };
 
