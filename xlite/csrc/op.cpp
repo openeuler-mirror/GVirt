@@ -99,7 +99,6 @@
 #include "aclrtlaunch_recurrent_gated_delta_rule_float.h"
 #include "aclrtlaunch_recurrent_gated_delta_rule_float16_t.h"
 #include "aclrtlaunch_recurrent_gated_delta_rule_bfloat16_t.h"
-#include "aclrtlaunch_transpose_1_2_float.h"
 #include "aclrtlaunch_transpose_1_2_float16_t.h"
 #include "aclrtlaunch_transpose_1_2_bfloat16_t.h"
 #include "aclrtlaunch_einsum_mht_hdt_mhd_float16_t.h"
@@ -1712,9 +1711,7 @@ void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output)
         return;
     }
     KERNEL_PTR_TYPE(transpose_1_2) * launchKernel;
-    if (EachXDtype(FP32, input, output)) {
-        launchKernel = aclrtlaunch_transpose_1_2_float;
-    } else if (EachXDtype(FP16, input, output)) {
+    if (EachXDtype(FP16, input, output)) {
         launchKernel = aclrtlaunch_transpose_1_2_float16_t;
     } else if (EachXDtype(BF16, input, output)) {
         launchKernel = aclrtlaunch_transpose_1_2_bfloat16_t;
