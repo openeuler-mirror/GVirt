@@ -57,6 +57,7 @@ class BenchmarkScheduler:
         timeout: int = 4 * 3600,
         retry: int = 3,
         vllm_timeout: int = 1800,
+        offline_only: bool = False,
     ):
         self.type = type
         self.script = script.resolve()
@@ -70,6 +71,7 @@ class BenchmarkScheduler:
         self.timeout = timeout
         self.retry = retry
         self.vllm_timeout = vllm_timeout
+        self.offline_only = offline_only
 
         # 注册信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -110,6 +112,9 @@ class BenchmarkScheduler:
                 "--build-container",
                 self.build_container,
             ]
+            if self.offline_only:
+                # offline_only=True => 跳过在线, 仅跑离线 bench (透传 bot 的 --offline-bench)
+                cmd.append("--offline-bench")
 
             self.log(f"执行命令: {' '.join(cmd)}")
 
@@ -212,6 +217,8 @@ class BenchmarkScheduler:
         self.log(f"编译容器: {self.build_container}")
         self.log(f"执行时间: 每天 {self.run_time}")
         self.log(f"日志文件: {self.log_file}")
+        if self.type == "bench":
+            self.log(f"仅离线 bench: {'是' if self.offline_only else '否 (默认: 在线→离线 两阶段)'}")
         self.log("========================================")
 
         # 设置定时任务
@@ -293,6 +300,12 @@ def main():
     parser.add_argument("-rt", "--run-time", type=str, default=DEFAULT_RUN_TIME, help="执行时间 (HH:MM)，默认 02:00")
     parser.add_argument("-rn", "--run-now", action="store_true", help="立即执行一次测试，然后启动调度器")
     parser.add_argument("-d", "--debug", action="store_true", help="调试模式，直接输出测试过程到stdout")
+    parser.add_argument(
+        "-o",
+        "--offline-only",
+        action="store_true",
+        help="仅跑离线 bench (跳过在线性能测试); 默认为 先在线→再离线 两阶段; 仅 bench 模式有效",
+    )
     parser.add_argument("--timeout", type=int, default=2 * 3600, help="ais_bench 子进程超时时间（秒），默认 2h = 7200s")
     parser.add_argument("--retry", type=int, default=3, help="ais_bench 失败时的重试次数，默认 3")
     parser.add_argument("--vllm-timeout", type=int, default=1800, help="vLLM 服务器启动超时时间（秒），默认 1800s")
@@ -318,6 +331,7 @@ def main():
         timeout=args.timeout,
         retry=args.retry,
         vllm_timeout=args.vllm_timeout,
+        offline_only=args.offline_only,
     )
 
     # 如果需要立即执行

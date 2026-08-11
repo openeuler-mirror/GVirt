@@ -106,6 +106,8 @@ from daily_bot_utils import (
     get_current_version,
     get_vllm_ascend_version,
     get_xlite_commit,
+    # xlite 库路径
+    get_xlite_lib_path,
     # 环境检测
     detect_model_device,
     should_disable_xccl,
@@ -121,6 +123,7 @@ from daily_bot_utils import (
     set_machine_ip,
     # 路径常量
     E2E_DIR,
+    XLITE_DIR,
 )
 
 # ====================== 本地配置 ======================
@@ -133,6 +136,51 @@ DEGRADATION_THRESHOLD = 0.05
 COMPARE_TTFT_METRICS = True
 # TPOT P99指标是否作为对比指标
 COMPARE_TPOT_P99_METRICS = False
+
+# ====================== 离线 bench 测试配置 ======================
+# 用 run.sh 跑 run_glm5_w8a8 的 bench 模式，只跑 8 层（不关心精度），
+# 记录性能数据并与基线对比。其余逻辑与 online 性能测试一致。
+OFFLINE_BENCH_MODEL = "glm5_w8a8"
+OFFLINE_BENCH_N_LAYERS = 8
+# 用 8 卡跑：NPU id 列表（长度即卡数）。moe_ep_size 必须与卡数一致
+OFFLINE_BENCH_NPUS = "0,1,2,3,4,5,6,7"
+OFFLINE_BENCH_MOE_EP_SIZE = 8
+# checkpoint 目录名 (models_base_path 下的子目录), 不同环境挂载的目录名可能不同。
+OFFLINE_BENCH_CKPT_DIR = "GLM-5.1-w8a8"
+OFFLINE_BENCH_ITERS = 10
+# bench 场景: (input_len, output_len, batch_size)
+# output_len==1 即 prefill 场景
+OFFLINE_BENCH_SCENARIOS = [
+    # 场景1: 512|512, concurrency 1 16 32 48 64
+    (512, 512, 1),
+    (512, 512, 16),
+    (512, 512, 32),
+    (512, 512, 48),
+    (512, 512, 64),
+    # 场景2: 3584|1536, concurrency 1 16
+    (3584, 1536, 1),
+    (3584, 1536, 16),
+    # 场景3: 8192|1024, concurrency 1
+    (8192, 1024, 1),
+    # 场景4: 16384|1536, concurrency 1
+    (16384, 1536, 1),
+    # 场景5: 32768|3072, concurrency 1
+    (32768, 3072, 1),
+    # 场景6: 73728|8192, concurrency 1
+    (73728, 8192, 1),
+    # 场景7: prefill 场景
+    (512, 1, 1),
+    (512, 1, 16),
+    (512, 1, 32),
+    (512, 1, 48),
+    (512, 1, 64),
+    (3584, 1, 1),
+    (3584, 1, 16),
+    (8192, 1, 1),
+    (16384, 1, 1),
+    (32768, 1, 1),
+    (73728, 1, 1),
+]
 
 
 # ====================== 基准测试执行函数 ======================
@@ -223,6 +271,440 @@ def run_benchmark(model_type: str = "moe") -> Optional[Path]:
     except Exception as e:
         log_error(f"基准测试执行异常: {e}")
         return None
+
+
+# ====================== 离线 bench 测试执行函数 ======================
+def run_offline_bench() -> Optional[Path]:
+    """
+    在测试容器中执行离线 bench 测试 (run.sh bench 模式)
+
+    用 run.sh 跑 run_glm5_w8a8 的 bench 模式，只跑 OFFLINE_BENCH_N_LAYERS 层。
+
+    返回:
+        报告目录路径，失败返回 None
+
+    说明:
+        每个场景的完整 stdout 保存到报告目录下的 offline_bench_<scenario>.log，
+        供 parse_offline_bench_report 解析。
+    """
+    log_info(
+        f"开始执行离线 bench 测试 (模型: {OFFLINE_BENCH_MODEL}, 层数: {OFFLINE_BENCH_N_LAYERS}, "
+        f"场景数: {len(OFFLINE_BENCH_SCENARIOS)})..."
+    )
+
+    # 检测模型存储设备以确定 models_base_path
+    device = detect_model_device()
+    if device:
+        models_base_path = f"/mnt/{device}/models"
+        log_info(f"模型路径: {models_base_path}")
+    else:
+        models_base_path = "/mnt/nvme0n1/models"
+        log_warning(f"未检测到模型设备，使用默认路径: {models_base_path}")
+
+    # 创建当前版本报告目录 (版本号+日期)
+    current_version = get_current_version()
+    current_date = datetime.now().strftime("%Y%m%d")
+    report_subdir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
+    report_subdir.mkdir(parents=True, exist_ok=True)
+
+    # 将日志文件移动到报告目录
+    move_log_file(report_subdir)
+
+    try:
+        # run.sh 内部 cd "$(dirname "$0")/.." 到 XLITE_DIR 拉取仓根, 故以 XLITE_DIR 为 cwd
+        for input_len, output_len, bs in OFFLINE_BENCH_SCENARIOS:
+            scenario_tag = f"in{input_len}_out{output_len}_bs{bs}"
+            log_file = report_subdir / f"offline_bench_{OFFLINE_BENCH_MODEL}_{scenario_tag}_{current_date}.log"
+            log_info(
+                f"执行离线 bench: in={input_len} out={output_len} bs={bs} "
+                f"(iters={OFFLINE_BENCH_ITERS}) -> {log_file.name}"
+            )
+
+            env = os.environ.copy()
+            env["XLITE_N_LAYERS"] = str(OFFLINE_BENCH_N_LAYERS)
+            # 前置 site-packages: cwd=拉取仓根, 其下 xlite/ 源码会遮蔽已装 wheel (含 _C),
+            # 前置 site-packages 即可; XLITE_DIR 留后让 tests 包仍可达。
+            xlite_lib_path = get_xlite_lib_path()
+            if xlite_lib_path and xlite_lib_path.exists():
+                site_packages_dir = str(xlite_lib_path.parent)
+                existing_pp = env.get("PYTHONPATH", "")
+                env["PYTHONPATH"] = (
+                    f"{site_packages_dir}:{XLITE_DIR}:{existing_pp}"
+                    if existing_pp
+                    else f"{site_packages_dir}:{XLITE_DIR}"
+                )
+            env["XLITE_NPUS"] = OFFLINE_BENCH_NPUS  # -> ASCEND_RT_VISIBLE_DEVICES
+            env["XLITE_MOE_EP_SIZE"] = str(OFFLINE_BENCH_MOE_EP_SIZE)  # 须等于卡数
+            env["XLITE_GLM5_W8A8_CKPT"] = OFFLINE_BENCH_CKPT_DIR
+            env["RUN_MODE"] = "bench"
+            env["MODEL"] = f"run_{OFFLINE_BENCH_MODEL}"
+            env["BENCH_IT"] = str(OFFLINE_BENCH_ITERS)
+            env["BENCH_BS"] = str(bs)
+            env["BENCH_N1"] = str(input_len)
+            env["BENCH_N2"] = str(output_len)
+            if should_disable_xccl():
+                env["XLITE_DISABLE_XCCL"] = "True"
+
+            result = subprocess.run(
+                ["bash", "tests/run.sh", models_base_path],
+                cwd=str(XLITE_DIR),
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            # 保存完整 stdout (含配置打印与 Iter 行) 供解析与排查
+            log_file.write_text(result.stdout, encoding="utf-8")
+
+            if result.returncode != 0:
+                log_error(f"离线 bench 场景 {scenario_tag} 执行失败 (返回码 {result.returncode}): {result.stderr[-500:]}")
+                continue
+
+            # OOM 兜底: torchrun 吞掉 OOM 的 SIGTERM(-15) 仍返回 0, 仅看 returncode
+            # 会把"空日志 + null 指标"误报成功。校验日志无 'tokens/s' 行则判失败。
+            if "tokens/s" not in result.stdout:
+                err_tail = (result.stderr or "")[-800:]
+                log_error(
+                    f"离线 bench 场景 {scenario_tag} 未产出有效结果 "
+                    f"(返回码 {result.returncode} 但日志无 'tokens/s' 行, 疑似 OOM/崩溃):\n{err_tail}"
+                )
+                continue
+
+            log_success(f"离线 bench 场景 {scenario_tag} 执行完成!")
+
+        log_success("离线 bench 测试执行完成!")
+        return report_subdir
+
+    except Exception as e:
+        log_error(f"离线 bench 测试执行异常: {e}")
+        return None
+
+
+# ====================== 离线 bench 报告解析函数 ======================
+def parse_offline_bench_report(report_path: Path) -> Dict:
+    """
+    解析离线 bench 报告文件 (run.sh bench 模式的 stdout)
+
+    返回指标字典 (input_len/output_len/batch_size 从文件名提取, 其余从 Iter 行解析)。
+    首轮含 warmup 偏差大, 丢弃; 对其余轮 total_ms / decode_tps / step_latency_ms
+    取算术平均; generated_tokens 各轮稳定, 取末轮。
+    decode_tps: prefill(output_len==1) 取日志 avg 字段 (prefilled/时间),
+    decode 取 tokens/s 字段 (generated/时间)。
+    """
+    metrics = {
+        "model": OFFLINE_BENCH_MODEL,
+        "timestamp": "",
+        "batch_size": None,
+        "input_len": None,
+        "output_len": None,
+        "n_layers": OFFLINE_BENCH_N_LAYERS,
+        "iters": OFFLINE_BENCH_ITERS,
+        "decode_tps": None,
+        "step_latency_ms": None,
+        "total_ms": None,
+    }
+
+    if not report_path.exists():
+        return metrics
+
+    content = report_path.read_text(encoding="utf-8")
+    metrics["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 场景信息从文件名解析:
+    # offline_bench_<model>_in<input>_out<output>_bs<bs>_<date>.log
+    name_match = re.search(
+        r"offline_bench_\w+_in(\d+)_out(\d+)_bs(\d+)", report_path.name
+    )
+    if name_match:
+        metrics["input_len"] = int(name_match.group(1))
+        metrics["output_len"] = int(name_match.group(2))
+        metrics["batch_size"] = int(name_match.group(3))
+
+    # Iter 行: "Iter X/Y: ... generated N tokens in D.DD ms. avg: A.AA | B.BB tokens/s @ C.CC ms step bs: D"
+    # 捕获 g1=generated g2=total_ms g3=avg(prefill) g4=tokens/s(decode) g5=step; .*? 兼容 DP 的 (≈... agg)
+    iter_pattern = re.compile(
+        r"Iter \d+/\d+:.*?generated (\d+).*?tokens in ([\d.]+) ms\."
+        r".*?avg: ([\d.]+).*?([\d.]+) tokens/s.*?@ ([\d.]+) ms step bs: (\d+)"
+    )
+    rounds = list(iter_pattern.finditer(content))
+
+    # 丢弃首轮(warmup), 对其余轮取平均; 只有一轮时退化为取该轮。
+    if rounds:
+        stable = rounds[1:] if len(rounds) > 1 else rounds
+        metrics["generated_tokens"] = int(rounds[-1].group(1))  # 各轮稳定, 取末轮
+        metrics["total_ms"] = sum(float(m.group(2)) for m in stable) / len(stable)
+        # prefill(output_len==1) 取 avg(g3); decode 取 tokens/s(g4)
+        tps_group = 3 if metrics.get("output_len") == 1 else 4
+        metrics["decode_tps"] = sum(float(m.group(tps_group)) for m in stable) / len(stable)
+        metrics["step_latency_ms"] = sum(float(m.group(5)) for m in stable) / len(stable)
+
+    return metrics
+
+
+# ====================== 离线 bench 性能对比函数 ======================
+def compare_offline_metrics(current: Dict, baseline: Dict) -> Dict:
+    """
+    对比当前版本和基线版本的离线 bench 性能指标
+
+    返回 row_changes 风格的对比结果 (与 compare_metrics 对齐)。
+    decode_tps 越高越好, step_latency_ms / total_ms 越低越好; 变化超过阈值记为劣化/提升。
+    """
+    comparison = {
+        "date_current": current.get("timestamp", ""),
+        "date_baseline": baseline.get("timestamp", ""),
+        "model": current.get("model", ""),
+        "row_changes": [],
+    }
+
+    if not baseline.get("decode_tps") and not baseline.get("step_latency_ms"):
+        comparison["error"] = "缺少基线对比数据"
+        return comparison
+
+    changes = {}
+    # decode_tps 越高越好
+    for metric in ["decode_tps", "step_latency_ms", "total_ms"]:
+        current_val = current.get(metric)
+        baseline_val = baseline.get(metric)
+
+        if current_val is None or baseline_val is None or baseline_val == 0:
+            changes[metric] = {
+                "current": current_val,
+                "baseline": baseline_val,
+                "change_ratio": None,
+                "is_degradation": False,
+                "is_improvement": False,
+            }
+            continue
+
+        change_ratio = (current_val - baseline_val) / baseline_val
+        if metric == "decode_tps":
+            # 越高越好: 下降为劣化，上升为提升
+            is_degradation = change_ratio < -DEGRADATION_THRESHOLD
+            is_improvement = change_ratio > DEGRADATION_THRESHOLD
+        else:
+            # 越低越好 (延迟): 上升为劣化，下降为提升
+            is_degradation = change_ratio > DEGRADATION_THRESHOLD
+            is_improvement = change_ratio < -DEGRADATION_THRESHOLD
+
+        changes[metric] = {
+            "current": current_val,
+            "baseline": baseline_val,
+            "change_ratio": change_ratio,
+            "is_degradation": is_degradation,
+            "is_improvement": is_improvement,
+        }
+
+    has_significant_change = any(
+        c.get("is_degradation") or c.get("is_improvement") for c in changes.values()
+    )
+    if has_significant_change:
+        comparison["row_changes"].append(
+            {
+                "concurrency": current.get("batch_size"),
+                "service": "prefill" if current.get("output_len") == 1 else "decode",
+                "input_len": current.get("input_len"),
+                "output_len": current.get("output_len"),
+                "changes": changes,
+            }
+        )
+
+    return comparison
+
+
+# ====================== 离线 bench 历史报告查找函数 ======================
+def get_previous_offline_report(
+    input_len: int, output_len: int, batch_size: int
+) -> Tuple[Optional[Path], Optional[str]]:
+    """
+    获取基线版本指定离线 bench 场景的报告文件路径
+
+    参数:
+        input_len: 输入长度
+        output_len: 输出长度
+        batch_size: 批大小
+
+    返回:
+        (报告文件路径, 版本号)，不存在则返回 (None, None)
+    """
+    current_version = get_current_version()
+
+    if current_version == "unknown":
+        log_warning("无法获取当前版本号")
+        return None, None
+
+    baseline_version_dir = REPORT_DIR / f"xlite-{current_version}"
+    if not baseline_version_dir.exists():
+        log_warning(f"基线目录不存在: {baseline_version_dir}")
+        return None, current_version
+
+    pattern = (
+        f"offline_bench_{OFFLINE_BENCH_MODEL}"
+        f"_in{input_len}_out{output_len}_bs{batch_size}_*.log"
+    )
+    reports = list(baseline_version_dir.glob(pattern))
+    if reports:
+        return reports[0], current_version
+
+    log_warning(
+        f"基线目录中未找到离线 bench 场景 in={input_len} out={output_len} bs={batch_size} 的报告"
+    )
+    return None, current_version
+
+
+# ====================== 离线 bench 报告生成函数 ======================
+def generate_offline_report(
+    model_name: str,
+    comparisons: List[Dict],
+    report_dir: Optional[Path] = None,
+    model_index: int = 0,
+    total_models: int = 1,
+) -> str:
+    """
+    为离线 bench 生成测试报告
+
+    参数:
+        model_name: 模型名称
+        comparisons: 该模型的对比结果字典列表
+        report_dir: 报告保存目录路径
+        model_index: 当前模型索引（从0开始）
+        total_models: 总模型数
+
+    返回:
+        格式化的报告字符串
+    """
+    lines = []
+
+    vllm_ascend_version = get_vllm_ascend_version()
+    xlite_commit = get_xlite_commit()
+    current_version = get_current_version()
+    baseline_info = get_baseline_info()
+
+    current_date = "unknown"
+    if report_dir:
+        match = re.search(r"xlite-[\w.]+-(\d{8})", str(report_dir))
+        if match:
+            current_date = match.group(1)
+
+    lines.append(
+        f'<font color="blue"><b>xlite {current_date} 离线 bench 性能测试报告 '
+        f"[{model_index + 1}/{total_models}] (GLM-5.1-w8a8, {OFFLINE_BENCH_N_LAYERS} 层)</b></font>"
+    )
+    lines.append("")
+
+    total_rows_with_change = 0
+    total_degradations = 0
+    total_improvements = 0
+
+    detail_lines = []
+    scenario_idx = 0
+    for comparison in comparisons:
+        row_changes = comparison.get("row_changes", [])
+        if row_changes:
+            scenario_idx += 1
+            for row in row_changes:
+                service = row["service"]
+                concurrency = row["concurrency"]
+                changes = row["changes"]
+                input_len = row.get("input_len")
+                output_len = row.get("output_len")
+
+                detail_lines.append(
+                    f"{scenario_idx}. {service} in={input_len} out={output_len} bs={concurrency}"
+                )
+
+                if comparison.get("error"):
+                    detail_lines.append(f"  ⚠️  {comparison['error']}")
+                    detail_lines.append("")
+                    continue
+
+                detail_lines.append(
+                    " | 场景 | throughput(tokens/s) | step latency(ms) | total(ms) |"
+                )
+                detail_lines.append(" |------|------|------|------|")
+
+                row_degradations = sum(1 for c in changes.values() if c.get("is_degradation"))
+                row_improvements = sum(1 for c in changes.values() if c.get("is_improvement"))
+
+                total_degradations += row_degradations
+                total_improvements += row_improvements
+                total_rows_with_change += 1
+
+                def format_value(metric_name, change_info):
+                    current_v = change_info["current"]
+                    baseline_v = change_info["baseline"]
+                    change_ratio = change_info["change_ratio"]
+
+                    if current_v is None or baseline_v is None:
+                        return "N/A"
+
+                    if change_info["is_degradation"]:
+                        change_percent = change_ratio * 100
+                        return f"{current_v:.2f} ({change_percent:+.0f}%)"
+                    elif change_info["is_improvement"]:
+                        change_percent = change_ratio * 100
+                        return f"{current_v:.2f} ({change_percent:+.0f}%)"
+                    else:
+                        return f"{current_v:.2f}"
+
+                metrics_order = ["decode_tps", "step_latency_ms", "total_ms"]
+                formatted_parts = []
+                i = 0
+                while i < len(metrics_order):
+                    metric = metrics_order[i]
+                    change_info = changes[metric]
+
+                    if change_info.get("is_degradation"):
+                        red_parts = []
+                        while i < len(metrics_order) and changes[metrics_order[i]].get("is_degradation"):
+                            red_parts.append(format_value(metrics_order[i], changes[metrics_order[i]]))
+                            i += 1
+                        formatted_parts.append(
+                            f'<font color="red"><b>{" | ".join(red_parts)}</b></font>'
+                        )
+                    elif change_info.get("is_improvement"):
+                        green_parts = []
+                        while i < len(metrics_order) and changes[metrics_order[i]].get("is_improvement"):
+                            green_parts.append(format_value(metrics_order[i], changes[metrics_order[i]]))
+                            i += 1
+                        formatted_parts.append(
+                            f'<font color="green"><b>{" | ".join(green_parts)}</b></font>'
+                        )
+                    else:
+                        formatted_parts.append(format_value(metric, change_info))
+                        i += 1
+
+                detail_lines.append(f"  | {service} bs={concurrency} | {' | '.join(formatted_parts)} |")
+            detail_lines.append("")
+
+    status_icon = "⚠️" if total_degradations > 0 else "✅"
+    if total_degradations > 0:
+        status_text = "发现性能劣化(超过阈值)，请关注！"
+    elif total_improvements > 0:
+        status_text = "发现性能优化"
+    else:
+        status_text = "性能正常，无劣化"
+
+    ip_address = os.environ.get("MACHINE_IP", "")
+    report_path = f"{ip_address}:{report_dir}" if report_dir else ""
+
+    lines.append(
+        f'📊 <font color="blue"><b>{model_name}</b></font> 离线 bench 性能统计: '
+        f"<b>劣化项: {total_degradations} | 提升项: {total_improvements}</b>"
+    )
+    lines.append(f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite commit: {xlite_commit}")
+    lines.append(
+        f"【对比基线】 vllm-ascend 版本: {baseline_info['vllm_ascend_version']}, xlite 版本: {baseline_info['version']}"
+    )
+    lines.append(f"{status_icon} {status_text}")
+
+    if report_path:
+        lines.append(f"报告保存路径: {report_path}")
+        lines.append("")
+
+    if total_degradations > 0 or total_improvements > 0:
+        lines.extend(detail_lines)
+
+    return "\n".join(lines)
 
 
 # ====================== 报告解析函数 ======================
@@ -636,13 +1118,16 @@ def generate_model_report(
     return "\n".join(lines)
 
 
-def build_no_change_report(report_dir: Optional[Path], model_count: int = 0) -> str:
+def build_no_change_report(
+    report_dir: Optional[Path], model_count: int = 0, is_offline: bool = False
+) -> str:
     """
     所有模型性能均无显著变化时生成汇总通知
 
     参数:
         report_dir: 报告保存目录路径
         model_count: 本次测试的模型数量
+        is_offline: 是否为离线 bench 测试
 
     返回:
         格式化的报告字符串
@@ -658,7 +1143,11 @@ def build_no_change_report(report_dir: Optional[Path], model_count: int = 0) -> 
         if match:
             current_date = match.group(1)
 
-    lines = [f'<font color="blue"><b>xlite {current_date} 性能测试报告</b></font>', ""]
+    if is_offline:
+        header = f"xlite {current_date} 离线 bench 性能测试报告 (GLM-5.1-w8a8, {OFFLINE_BENCH_N_LAYERS} 层)"
+    else:
+        header = f"xlite {current_date} 性能测试报告"
+    lines = [f'<font color="blue"><b>{header}</b></font>', ""]
 
     summary = f"📊 性能统计: <b>劣化项: 0 | 提升项: 0</b>"
     if model_count:
@@ -798,6 +1287,237 @@ def get_baseline_info() -> Dict:
     return baseline_info
 
 
+# ====================== 报告处理辅助函数 ======================
+def _process_online_reports(report_dir: Path, current_reports: List[Path]) -> List[Dict]:
+    """
+    解析 online 性能测试报告并与基线对比 (报告处理阶段)
+
+    参数:
+        report_dir: 当前版本报告目录
+        current_reports: 当前版本的 benchmark_comparison_*.log 文件列表
+
+    返回:
+        对比结果字典列表
+    """
+    all_comparison_results = []
+
+    for current_report in current_reports:
+        model_info = extract_model_info(current_report)
+        if not model_info:
+            log_warning(f"无法从报告文件名提取模型信息: {current_report.name}")
+            continue
+
+        model_name = model_info["model_name"]
+        input_len = model_info["input_len"]
+        output_len = model_info["output_len"]
+
+        log_info(f"处理模型: {model_name} (input={input_len}, output={output_len})")
+        log_info(f"当前版本报告: {current_report}")
+
+        # 解析当前版本指标
+        current_metrics = parse_benchmark_report(current_report)
+        current_metrics["input_len"] = input_len
+        current_metrics["output_len"] = output_len
+        # 确保模型名称被正确设置（优先使用从文件名提取的模型名称）
+        if not current_metrics.get("model"):
+            current_metrics["model"] = model_name
+
+        # 保存当前版本指标
+        current_json = report_dir / f"metrics_{model_name}_input{input_len}_output{output_len}.json"
+        save_metrics_json(current_metrics, current_json)
+
+        # 与基线版本数据对比
+        baseline_report, baseline_version = get_previous_version_report(model_name, input_len, output_len)
+        comparison_result = {}
+
+        if baseline_report:
+            log_info(f"对比基准: {baseline_report} (版本: {baseline_version})")
+            baseline_metrics = parse_benchmark_report(baseline_report)
+            comparison_result = compare_metrics(current_metrics, baseline_metrics)
+
+            # 保存对比结果
+            comparison_json = report_dir / f"comparison_{model_name}_input{input_len}_output{output_len}.json"
+            save_metrics_json(comparison_result, comparison_json)
+        else:
+            log_warning(f"未找到模型 {model_name} (input={input_len}, output={output_len}) 的基线测试报告，跳过对比")
+            comparison_result = {
+                "error": "无基线数据",
+                "date_current": current_metrics.get("timestamp", ""),
+                "model": current_metrics.get("model", ""),
+                "baseline_version": baseline_version or "unknown",
+            }
+
+        all_comparison_results.append(comparison_result)
+
+    return all_comparison_results
+
+
+def _process_offline_reports(report_dir: Path) -> List[Dict]:
+    """
+    解析离线 bench 测试报告并与基线对比
+
+    参数:
+        report_dir: 当前版本报告目录
+
+    返回:
+        对比结果字典列表
+    """
+    all_comparison_results = []
+
+    # 查找所有离线 bench 场景报告
+    offline_reports = sorted(report_dir.glob(f"offline_bench_{OFFLINE_BENCH_MODEL}_*_*.log"))
+    if not offline_reports:
+        log_error("未找到离线 bench 测试报告文件")
+        return all_comparison_results
+
+    for current_report in offline_reports:
+        log_info(f"处理离线 bench 报告: {current_report}")
+
+        # 解析当前版本指标
+        current_metrics = parse_offline_bench_report(current_report)
+        input_len = current_metrics.get("input_len")
+        output_len = current_metrics.get("output_len")
+        batch_size = current_metrics.get("batch_size")
+
+        if batch_size is None or input_len is None or output_len is None:
+            log_warning(f"无法从报告文件名提取场景信息: {current_report.name}")
+            continue
+
+        # 误判检测: 无效结果 (OOM/崩溃导致日志无 Iter 行, decode_tps 为 None)
+        # 不生成 metrics/对比/报告, 避免 null 指标被误报为"无劣化"。
+        if current_metrics.get("decode_tps") is None:
+            log_warning(
+                f"离线 bench 场景 {current_report.name} 无有效性能指标 "
+                f"(decode_tps 为空, 疑似 OOM/崩溃), 跳过该场景"
+            )
+            continue
+
+        scenario_tag = f"in{input_len}_out{output_len}_bs{batch_size}"
+
+        # 保存当前版本指标
+        current_json = report_dir / f"offline_metrics_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
+        save_metrics_json(current_metrics, current_json)
+
+        # 与基线版本数据对比
+        baseline_report, baseline_version = get_previous_offline_report(
+            input_len, output_len, batch_size
+        )
+        comparison_result = {}
+
+        if baseline_report:
+            log_info(
+                f"对比基准: {baseline_report} (版本: {baseline_version}, 场景: {scenario_tag})"
+            )
+            baseline_metrics = parse_offline_bench_report(baseline_report)
+            comparison_result = compare_offline_metrics(current_metrics, baseline_metrics)
+
+            # 保存对比结果
+            comparison_json = report_dir / f"offline_comparison_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
+            save_metrics_json(comparison_result, comparison_json)
+        else:
+            log_warning(
+                f"未找到离线 bench 场景 {scenario_tag} 的基线报告，跳过对比"
+            )
+            comparison_result = {
+                "error": "无基线数据",
+                "date_current": current_metrics.get("timestamp", ""),
+                "model": current_metrics.get("model", ""),
+                "baseline_version": baseline_version or "unknown",
+            }
+
+        all_comparison_results.append(comparison_result)
+
+    return all_comparison_results
+
+
+def _report_phase(
+    report_dir: Path,
+    all_comparison_results: List[Dict],
+    receiver: str,
+    is_offline: bool,
+) -> bool:
+    """
+    对一组对比结果 (online 或 offline) 生成报告并发送通知。
+
+    将按模型分组 -> 生成报告 -> 发通知的逻辑复用于 online 与
+    offline 两阶段, 使"默认先在线再离线"时两阶段各出一份通知。
+
+    参数:
+        report_dir: 当前版本报告目录
+        all_comparison_results: 该阶段的对比结果列表
+        receiver: 通知接收者 ID
+        is_offline: True=离线 bench 阶段 (用 generate_offline_report / offline_summary),
+                    False=在线阶段 (用 generate_model_report / daily_summary)
+
+    返回:
+        该阶段是否检测到任何劣化 (True=有劣化)
+    """
+    if not all_comparison_results:
+        log_error("没有有效的对比结果")
+        return False
+
+    # 按模型分组
+    model_groups = {}
+    for comparison in all_comparison_results:
+        model_name = comparison.get("model", "Unknown") or "Unknown"
+        model_groups.setdefault(model_name, []).append(comparison)
+
+    log_info(f"检测到 {len(model_groups)} 个模型:")
+    for model_name, comparisons in model_groups.items():
+        log_info(f"  - {model_name}: {len(comparisons)} 个测试场景")
+
+    model_names = list(model_groups.keys())
+    log_info(f"准备为 {len(model_names)} 个模型发送通知")
+    num_models_to_report = 0
+    for idx, model_name in enumerate(model_names):
+        model_comparisons = model_groups[model_name]
+        log_info(f"正在生成模型 {model_name} 的报告 [{idx + 1}/{len(model_names)}]")
+        if is_offline:
+            model_report = generate_offline_report(
+                model_name, model_comparisons, report_dir, idx, len(model_names)
+            )
+            summary_prefix = "offline_summary"
+        else:
+            model_report = generate_model_report(
+                model_name, model_comparisons, report_dir, idx, len(model_names)
+            )
+            summary_prefix = "daily_summary"
+
+        model_report_file = report_dir / f"{summary_prefix}_{model_name}_{idx + 1}.txt"
+        model_report_file.write_text(model_report, encoding="utf-8")
+        log_info(f"模型 {model_name} 的报告已保存至: {model_report_file}")
+
+        print("\n" + "=" * 60)
+        print(f"模型 {model_name} 的报告 [{idx + 1}/{len(model_names)}]")
+        print("=" * 60)
+        print(model_report)
+        print("=" * 60 + "\n")
+
+        if "发现性能优化" in model_report or "发现性能劣化" in model_report:
+            log_info(f"正在发送模型 {model_name} 的通知 [{idx + 1}/{len(model_names)}]")
+            send_notification(model_report, receiver)
+            num_models_to_report += 1
+
+    if num_models_to_report == 0:
+        log_info("测试模型性能均无变化")
+        no_change_report = build_no_change_report(report_dir, len(model_groups), is_offline)
+        send_notification(no_change_report, receiver)
+
+    # 该阶段是否检测到劣化
+    has_degradation = False
+    for comparison in all_comparison_results:
+        for row in comparison.get("row_changes", []):
+            for change in row["changes"].values():
+                if change.get("is_degradation"):
+                    has_degradation = True
+                    break
+            if has_degradation:
+                break
+        if has_degradation:
+            break
+    return has_degradation
+
+
 # ====================== 主函数 ======================
 def main():
     """
@@ -839,6 +1559,16 @@ def main():
     parser.add_argument(
         "--compare-tpot-p99", action="store_true", help="启用TPOT P99指标作为对比指标（默认不比较TPOT P99）"
     )
+    parser.add_argument(
+        "--offline-bench",
+        action="store_true",
+        help="仅跑离线 bench 测试（跳过在线性能测试）。默认流程为: 先在线性能测试, 再离线 bench。",
+    )
+    parser.add_argument(
+        "--skip-offline-bench",
+        action="store_true",
+        help="跳过离线 bench 阶段, 只跑在线性能测试。",
+    )
 
     args = parser.parse_args()
 
@@ -869,7 +1599,19 @@ def main():
     log_info(f"环境类型: {args.env_type}")
     log_info("=" * 60)
 
-    # 调试模式：如果指定了报告目录，跳过前面的步骤
+    # 默认流程: 先在线性能测试, 再离线 bench 测试 (各出一份通知)。
+    #   --offline-bench        : 仅离线 (跳过在线)
+    #   --skip-offline-bench   : 仅在线 (跳过离线)
+    if args.offline_bench:
+        run_online = False
+        run_offline = True
+        if args.skip_offline_bench:
+            log_warning("--offline-bench 与 --skip-offline-bench 同时指定, 互斥, 按 --offline-bench 处理 (仅离线)")
+            args.skip_offline_bench = False
+    else:
+        run_online = True
+        run_offline = not args.skip_offline_bench
+
     if args.report_dir:
         log_info("调试模式：使用指定的报告目录，跳过拉取、编译、测试步骤")
         report_dir = Path(args.report_dir)
@@ -899,132 +1641,60 @@ def main():
                 sys.exit(1)
 
         # 步骤4: 执行基准测试 (在测试容器中)
-        report_dir = run_benchmark(args.model)
-        if not report_dir:
-            log_error("基准测试失败，终止执行")
-            sys.exit(1)
+        report_dir = None
+        if run_online:
+            log_info("=" * 60)
+            log_info("阶段 1/2: 在线性能测试")
+            log_info("=" * 60)
+            report_dir = run_benchmark(args.model)
+            if not report_dir:
+                log_error("在线基准测试失败，终止执行")
+                sys.exit(1)
 
-    # 步骤5: 查找并解析当前版本报告
-    current_reports = list(report_dir.glob("benchmark_comparison_*.log"))
-    if not current_reports:
-        log_error("未找到测试报告文件")
-        sys.exit(1)
+        if run_offline:
+            log_info("=" * 60)
+            log_info(f"阶段 {'2/2' if run_online else '1/1'}: 离线 bench 测试")
+            log_info("=" * 60)
+            offline_report_dir = run_offline_bench()
+            if not offline_report_dir:
+                log_error("离线 bench 测试失败，终止执行")
+                sys.exit(1)
+            report_dir = offline_report_dir
 
-    # 按模型分别处理报告
-    all_comparison_results = []
-
-    for current_report in current_reports:
-        model_info = extract_model_info(current_report)
-        if not model_info:
-            log_warning(f"无法从报告文件名提取模型信息: {current_report.name}")
-            continue
-
-        model_name = model_info["model_name"]
-        input_len = model_info["input_len"]
-        output_len = model_info["output_len"]
-
-        log_info(f"处理模型: {model_name} (input={input_len}, output={output_len})")
-        log_info(f"当前版本报告: {current_report}")
-
-        # 解析当前版本指标
-        current_metrics = parse_benchmark_report(current_report)
-        current_metrics["input_len"] = input_len
-        current_metrics["output_len"] = output_len
-        # 确保模型名称被正确设置（优先使用从文件名提取的模型名称）
-        if not current_metrics.get("model"):
-            current_metrics["model"] = model_name
-
-        # 保存当前版本指标
-        current_json = report_dir / f"metrics_{model_name}_input{input_len}_output{output_len}.json"
-        save_metrics_json(current_metrics, current_json)
-
-        # 步骤6: 与基线版本数据对比
-        baseline_report, baseline_version = get_previous_version_report(model_name, input_len, output_len)
-        comparison_result = {}
-
-        if baseline_report:
-            log_info(f"对比基准: {baseline_report} (版本: {baseline_version})")
-            baseline_metrics = parse_benchmark_report(baseline_report)
-            comparison_result = compare_metrics(current_metrics, baseline_metrics)
-
-            # 保存对比结果
-            comparison_json = report_dir / f"comparison_{model_name}_input{input_len}_output{output_len}.json"
-            save_metrics_json(comparison_result, comparison_json)
-        else:
-            log_warning(f"未找到模型 {model_name} (input={input_len}, output={output_len}) 的基线测试报告，跳过对比")
-            comparison_result = {
-                "error": "无基线数据",
-                "date_current": current_metrics.get("timestamp", ""),
-                "model": current_metrics.get("model", ""),
-                "baseline_version": baseline_version or "unknown",
-            }
-
-        all_comparison_results.append(comparison_result)
-
-    if not all_comparison_results:
-        log_error("没有有效的对比结果")
-        sys.exit(1)
-
-    # 步骤7: 发送通知（按模型分开发送）
-    # 按模型分组
-    model_groups = {}
-    for comparison in all_comparison_results:
-        model_name = comparison.get("model", "Unknown")
-        if not model_name:
-            model_name = "Unknown"
-        if model_name not in model_groups:
-            model_groups[model_name] = []
-        model_groups[model_name].append(comparison)
-
-    # 输出模型分组信息
-    log_info(f"检测到 {len(model_groups)} 个模型:")
-    for model_name, comparisons in model_groups.items():
-        log_info(f"  - {model_name}: {len(comparisons)} 个测试场景")
-
-    # 为每个模型生成并发送独立报告
-    model_names = list(model_groups.keys())
-    log_info(f"准备为 {len(model_names)} 个模型发送通知")
-    num_models_to_report = 0
-    for idx, model_name in enumerate(model_names):
-        model_comparisons = model_groups[model_name]
-        log_info(f"正在生成模型 {model_name} 的报告 [{idx + 1}/{len(model_names)}]")
-        model_report = generate_model_report(model_name, model_comparisons, report_dir, idx, len(model_names))
-
-        # 保存模型报告到文件
-        model_report_file = report_dir / f"daily_summary_{model_name}_{idx + 1}.txt"
-        model_report_file.write_text(model_report, encoding="utf-8")
-        log_info(f"模型 {model_name} 的报告已保存至: {model_report_file}")
-
-        # 打印模型报告
-        print("\n" + "=" * 60)
-        print(f"模型 {model_name} 的报告 [{idx + 1}/{len(model_names)}]")
-        print("=" * 60)
-        print(model_report)
-        print("=" * 60 + "\n")
-
-        if "发现性能优化" in model_report or "发现性能劣化" in model_report:
-            log_info(f"正在发送模型 {model_name} 的通知 [{idx + 1}/{len(model_names)}]")
-            send_notification(model_report, args.receiver)
-            num_models_to_report += 1
-
-    if num_models_to_report == 0:
-        log_info("测试模型性能均无变化")
-        no_change_report = build_no_change_report(report_dir, len(model_groups))
-        send_notification(no_change_report, args.receiver)
-
-    # 步骤8: 设置退出码
+    # 步骤5: 处理报告 + 发送通知 (在线/离线各一份)
     has_any_degradation = False
-    for comparison in all_comparison_results:
-        for row in comparison.get("row_changes", []):
-            for change in row["changes"].values():
-                if change.get("is_degradation"):
-                    has_any_degradation = True
-                    break
-            if has_any_degradation:
-                break
-        if has_any_degradation:
-            break
+    has_infra_failure = False  # 报告缺失/无效等基础设施故障 (与"有劣化"区分, 走 exit 1)
 
+    if run_online:
+        current_reports = list(report_dir.glob("benchmark_comparison_*.log"))
+        if not current_reports:
+            log_error("未找到在线测试报告文件")
+            has_infra_failure = True
+        else:
+            all_comparison_results = _process_online_reports(report_dir, current_reports)
+            log_info("=" * 60)
+            log_info("在线性能测试: 生成报告与通知")
+            log_info("=" * 60)
+            if _report_phase(report_dir, all_comparison_results, args.receiver, is_offline=False):
+                has_any_degradation = True
+
+    if run_offline:
+        all_comparison_results = _process_offline_reports(report_dir)
+        log_info("=" * 60)
+        log_info("离线 bench 测试: 生成报告与通知")
+        log_info("=" * 60)
+        if not all_comparison_results:
+            # 一个有效场景都没有 = 基础设施故障 (单个场景 OOM 已在 _process_offline 内跳过)
+            has_infra_failure = True
+        elif _report_phase(report_dir, all_comparison_results, args.receiver, is_offline=True):
+            has_any_degradation = True
+
+    # 步骤6: 设置退出码
+    #   0=成功无劣化 | 1=基础设施故障(报告缺失等) | 2=成功但有劣化
+    if has_infra_failure:
+        log_error(f"测试基础设施故障。报告已保存至: {report_dir}")
+        log_success("自动化测试完成!")
+        return 1
     if has_any_degradation:
         log_warning(f"检测到性能劣化。报告已保存至: {report_dir}")
         log_success("自动化测试完成!")
