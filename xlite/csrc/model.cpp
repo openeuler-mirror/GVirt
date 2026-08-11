@@ -842,6 +842,13 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     }
 }
 
+void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer,
+                            std::vector<std::vector<XTensor>> &kvCache,
+                            std::vector<XTensor> &freqsCis, XTensor &hiddenState)
+{
+    // TODO
+}
+
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
@@ -855,8 +862,6 @@ void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<X
         ForwardAttnMLAV2(rt, layer, kvCache, freqsCis, hiddenState);
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
-    } else if (_c.attnType == XMODEL_ATTN_CXA) {
-        // TODO
     } else {
         throw std::runtime_error(std::string(__func__) + ": TODO");
     }
@@ -1475,23 +1480,77 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
     rt.PutTensor(h);
 }
 
+void XModel::ForwardHcPre(XRuntime &rt, XTensor &input, XTensor &hcFn, XTensor &hcScale,
+                          XTensor &hcBase, XTensor &output, const XTensor &post,
+                          const XTensor &comb)
+{
+    // TODO
+}
+
+void XModel::ForwardHcPost(XRuntime &rt, XTensor &input, XTensor &post, XTensor &comb,
+                           XTensor &residual, XTensor &output)
+{
+    // TODO
+}
+
+void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<XTensor>> &kvCache,
+                              std::vector<XTensor> &freqsCis, XTensor &output)
+{
+    XTensor &residual = rt.GetTensor({x.shape[0], _c.hcMult, _c.hiddenSize}, embed.dtype, DBG_LOC);
+    XTensor &h =
+        rt.GetTensor({rt.maxTokensDp, _c.hiddenSize}, embed.dtype, DBG_LOC).View(rt.currTokens);
+    XTensor &post = rt.GetTensor({x.shape[0], _c.hcMult}, embed.dtype, DBG_LOC);
+    XTensor &comb = rt.GetTensor({x.shape[0], _c.hcMult * _c.hcMult}, embed.dtype, DBG_LOC);
+    for (uint32_t i = 0; i < _c.nLayers; i++) {
+        XDEBUG_SET_STATE(_rankId == 0 && (i == 0 || i == _c.nDenseLayers));
+        XDEBUG_PRINT_X(rt, i == 0 ? x : residual, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
+        ForwardHcPre(rt, i == 0 ? x : residual, hcAttnFn[i], hcAttnScale[i], hcAttnBase[i], h, post,
+                     comb);
+        XliteOpRmsNorm(rt, h, attnNorm[i], h, _c.normEps, _c.hiddenSize, true, attnNormBias[i]);
+        ForwardAttnCXA(rt, i, kvCache, freqsCis, h);
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
+        ForwardHcPost(rt, h, post, comb, i == 0 ? x : residual, residual);
+
+        ForwardHcPre(rt, residual, hcFfnFn[i], hcFfnScale[i], hcFfnBase[i], h, post, comb);
+        XliteOpRmsNorm(rt, h, mlpNorm[i], h, _c.normEps, _c.hiddenSize, true, mlpNormBias[i]);
+        ForwardFFN(rt, i, h);
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after ffn").c_str(), 1e6f);
+        ForwardHcPost(rt, h, post, comb, residual, residual);
+    }
+    ForwardHcPre(rt, residual, hcHeadFn, hcHeadScale, hcHeadBase, h);
+    XliteOpRmsNorm(rt, h, norm, output, _c.normEps, _c.hiddenSize, true, normBias);
+    rt.PutTensor(comb);
+    rt.PutTensor(post);
+    rt.PutTensor(h);
+    rt.PutTensor(residual);
+}
+
 void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                    std::vector<std::vector<XTensor>> &kvCache,
-                                   std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                                   XTensor &h)
+                                   std::vector<XTensor> &deepstackInputEmbeds,
+                                   std::vector<XTensor> &freqsCis, XTensor &h)
 {
-    // under DP, different ranks may routed differently with `enableCommOptimize` enabled/disabled;
-    // thus, `ForwardFNN` from both paths must be guarded for correct DP communications
-    if (rt.enableCommOptimize) {
-        size_t m = rt.currTokens, mPad = ROUND_UP(rt.currTokens, _c.defTpSize);
-        XTensor &xPad = rt.GetTensor({mPad, _c.hiddenSize}, embed.dtype, DBG_LOC);
-        ForwardParallelEmbed(rt, input, embed, xPad.View(m));
-        ForwardLayersCommOptimize(rt, xPad.View(mPad), kvCache, deepstackInputEmbeds, freqsCis, h);
-        rt.PutTensor(xPad);
+    if (_c.hcMult == 0) {
+        // under DP, different ranks may routed differently with `enableCommOptimize`
+        // enabled/disabled;
+        // thus, `ForwardFNN` from both paths must be guarded for correct DP communications
+        if (rt.enableCommOptimize) {
+            size_t m = rt.currTokens, mPad = ROUND_UP(rt.currTokens, _c.defTpSize);
+            XTensor &xPad = rt.GetTensor({mPad, _c.hiddenSize}, embed.dtype, DBG_LOC);
+            ForwardParallelEmbed(rt, input, embed, xPad.View(m));
+            ForwardLayersCommOptimize(rt, xPad.View(mPad), kvCache, deepstackInputEmbeds,
+                                      freqsCis[0], h);
+            rt.PutTensor(xPad);
+        } else {
+            XTensor &x = rt.GetTensor({rt.currTokens, _c.hiddenSize}, embed.dtype, DBG_LOC);
+            ForwardParallelEmbed(rt, input, embed, x);
+            ForwardLayersNaive(rt, x, kvCache, deepstackInputEmbeds, freqsCis[0], h);
+            rt.PutTensor(x);
+        }
     } else {
         XTensor &x = rt.GetTensor({rt.currTokens, _c.hiddenSize}, embed.dtype, DBG_LOC);
         ForwardParallelEmbed(rt, input, embed, x);
-        ForwardLayersNaive(rt, x, kvCache, deepstackInputEmbeds, freqsCis, h);
+        ForwardLayersMhc(rt, x, kvCache, freqsCis, h);
         rt.PutTensor(x);
     }
 }
@@ -1554,7 +1613,8 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
 
 void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                      std::vector<std::vector<XTensor>> &kvCache,
-                     std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output)
+                     std::vector<XTensor> &deepstackInputEmbeds, std::vector<XTensor> &freqsCis,
+                     XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
@@ -1575,8 +1635,8 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
 
 void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                                  std::vector<std::vector<XTensor>> &kvCache,
-                                 std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                                 XTensor &indices, XTensor &output)
+                                 std::vector<XTensor> &deepstackInputEmbeds,
+                                 std::vector<XTensor> &freqsCis, XTensor &indices, XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
 
@@ -1804,6 +1864,7 @@ size_t XModel::DummyRun()
             deepstackInputEmbeds[i] = deepstackEmbed;
         }
         XTensor freqsCis({_c.maxBatchedTokens, _c.ropeHeadDim}, embed.dtype, nullptr);
+        std::vector<XTensor> freqsCisVec = {freqsCis};
         XTensor input({_c.maxBatchedTokens}, INT32, nullptr);
         XTensor output({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
         XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
@@ -1814,7 +1875,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype));
-        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
+        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
         ForwardGetLogits(rt, output, indices, logits);
@@ -1849,6 +1910,7 @@ size_t XModel::DummyRun()
             deepstackInputEmbeds[i] = deepstackEmbed;
         }
         XTensor freqsCis({_c.maxBatch, _c.ropeHeadDim}, embed.dtype, nullptr);
+        std::vector<XTensor> freqsCisVec = {freqsCis};
         XTensor input({_c.maxBatch}, INT32, nullptr);
         XTensor output({_c.maxBatch, _c.hiddenSize}, embed.dtype, nullptr);
         XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
@@ -1859,7 +1921,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype));
-        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
+        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
         ForwardGetLogits(rt, output, indices, logits);

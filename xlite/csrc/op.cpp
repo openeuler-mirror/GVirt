@@ -599,6 +599,11 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == FP32 && !transpose) {
             XTensor &tmp = rt.GetTensor(in.shape, FP32, DBG_LOC);
             rt.PutTensor(tmp);
+        } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == BF16 && !transpose) {
+            XTensor &inFp32 = rt.GetTensor(in.shape, FP32, DBG_LOC);
+            XTensor &outFp32 = rt.GetTensor(out.shape, FP32, DBG_LOC);
+            rt.PutTensor(inFp32);
+            rt.PutTensor(outFp32);
         }
         return;
     }
@@ -672,6 +677,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     KERNEL_PTR_TYPE(matmul) * launchKernel;
     XTensor *castedIn = nullptr;
     XTensor *castedBias = nullptr;
+    XTensor *castedOut = nullptr;
     if (EachXDtype(FP16, in, weight, out)) {
         launchKernel = aclrtlaunch_matmul_float16_t;
     } else if (EachXDtype(BF16, in, weight, out)) {
@@ -687,24 +693,37 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         castedIn = &rt.GetTensor(in.shape, FP32, DBG_LOC);
         aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, castedIn->ptr, in.numel);
         launchKernel = aclrtlaunch_matmul_float;
+    } else if (in.dtype == BF16 && weight.dtype == FP32 && out.dtype == BF16 && !transpose) {
+        castedIn = &rt.GetTensor(in.shape, FP32, DBG_LOC);
+        aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, in.ptr, castedIn->ptr, in.numel);
+        castedOut = &rt.GetTensor(out.shape, FP32, DBG_LOC);
+        launchKernel = aclrtlaunch_matmul_float;
     } else if (EachXDtype(INT8, in, weight) && out.dtype == FP16) {
         launchKernel = aclrtlaunch_matmul_int8_t;
     } else if (EachXDtype(INT4, in, weight) && out.dtype == FP16) {
         launchKernel = aclrtlaunch_matmul_int4b_t;
     } else {
-        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(weight) + XT_STR(out);
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(weight) + XT_STR(out) +
+                              " transpose=" + std::to_string(transpose);
         throw std::runtime_error(err_str + " unsupported!");
     }
     auto inPtr = castedIn ? castedIn->ptr : in.ptr;
     auto biasPtr = castedBias ? castedBias->ptr : bias.ptr;
+    auto outPtr = castedOut ? castedOut->ptr : out.ptr;
 
-    launchKernel(aicNum, rt.stream, inPtr, weight.ptr, out.ptr, m, n, k, weightNZ, transpose, m0,
-                 n0, k0, swizzle, biasPtr, deqScale.ptr);
+    launchKernel(aicNum, rt.stream, inPtr, weight.ptr, outPtr, m, n, k, weightNZ, transpose, m0, n0,
+                 k0, swizzle, biasPtr, deqScale.ptr);
+    if (castedOut) {
+        aclrtlaunch_cast_float_bfloat16_t(rt.aivNum, rt.stream, castedOut->ptr, out.ptr, out.numel);
+    }
     if (castedIn) {
         rt.PutTensor(*castedIn);
     }
     if (castedBias) {
         rt.PutTensor(*castedBias);
+    }
+    if (castedOut) {
+        rt.PutTensor(*castedOut);
     }
 }
 
