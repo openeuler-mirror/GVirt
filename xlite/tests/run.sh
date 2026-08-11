@@ -368,12 +368,18 @@ function run_glm5()
 
 function run_glm5_w8a8()
 {
+    # 层数 (离线 bench 可裁剪, 如 8 层只测性能); 默认 78 = 完整模型。
+    local _n_layers=${XLITE_N_LAYERS:-78}
+    # moe_ep_size 须等于卡数; 默认 16, 离线 8 卡场景设 8。
+    local _moe_ep_size=${XLITE_MOE_EP_SIZE:-16}
+    # checkpoint 目录名 (不同环境挂载名可能不同); 默认 GLM-5-w8a8。
+    local _ckpt_dir=${XLITE_GLM5_W8A8_CKPT:-GLM-5-w8a8}
     echo '{
         "vocab_size": 154880,
         "dim": 6144,
         "inter_dim": 12288,
         "moe_inter_dim": 2048,
-        "n_layers": 78,
+        "n_layers": '"$_n_layers"',
         "n_dense_layers": 3,
         "n_heads": 64,
         "norm_eps": 1e-05,
@@ -404,10 +410,10 @@ function run_glm5_w8a8()
         "quantization": "w8a8",
         "model_type": "glm5",
         "dtype": "bfloat16",
-        "moe_ep_size": 16,
+        "moe_ep_size": '"$_moe_ep_size"',
         "moe_tp_size": 1
     }' > $test_config_path
-    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/GLM-5-w8a8/ ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/$_ckpt_dir/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 
