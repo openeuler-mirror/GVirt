@@ -56,6 +56,28 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     _moeREUpGateDeqScale.resize(c.nLayers);
     _moeREDown.resize(c.nLayers);
     _moeREDownDeqScale.resize(c.nLayers);
+
+    attnSink.resize(c.nLayers);
+    attnWqA.resize(c.nLayers);
+    attnWoA.resize(c.nLayers);
+    attnWoB.resize(c.nLayers);
+    attnWKv.resize(c.nLayers);
+    compApe.resize(c.nLayers);
+    compWKv.resize(c.nLayers);
+    compWGate.resize(c.nLayers);
+    compNorm.resize(c.nLayers);
+    idxWqB.resize(c.nLayers);
+    idxWeightsProj.resize(c.nLayers);
+    idxCompApe.resize(c.nLayers);
+    idxCompWKv.resize(c.nLayers);
+    idxCompWGate.resize(c.nLayers);
+    idxCompNorm.resize(c.nLayers);
+    hcAttnFn.resize(c.nLayers);
+    hcFfnFn.resize(c.nLayers);
+    hcAttnBase.resize(c.nLayers);
+    hcFfnBase.resize(c.nLayers);
+    hcAttnScale.resize(c.nLayers);
+    hcFfnScale.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
         moeREUpGate[i].resize(c.nRoutedExperts);
         moeREDown[i].resize(c.nRoutedExperts);
@@ -113,6 +135,23 @@ void XModel::Init(void)
     if (_c.attnType == XMODEL_ATTN_DSA) {
         _dsaIndexerScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
         _dsaIndexerScale *= 1.0f / std::sqrt(static_cast<float>(_c.indexHeadDim));
+    }
+
+    if (_c.attnType == XMODEL_ATTN_CXA) {
+        if (_c.oGroups == 0 || _c.oLoraRank == 0) {
+            throw std::invalid_argument("CxA: o_groups and o_lora_rank must be set");
+        }
+        if (_c.windowSize == 0) {
+            throw std::invalid_argument("CxA: window_size must be set");
+        }
+        if (!_c.compressRatios.empty() &&
+            _c.compressRatios.size() < static_cast<size_t>(_c.nLayers)) {
+            throw std::invalid_argument(
+                "CxA: compress_ratios size must be 0 or greater than n_layers");
+        }
+        if (_c.hcMult == 0) {
+            throw std::invalid_argument("CxA: hc_mult must be set");
+        }
     }
 
     size = _c.nRoutedExperts * XDtypeBit(INT64) / 8;
@@ -816,6 +855,8 @@ void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<X
         ForwardAttnMLAV2(rt, layer, kvCache, freqsCis, hiddenState);
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
+    } else if (_c.attnType == XMODEL_ATTN_CXA) {
+        // TODO
     } else {
         throw std::runtime_error(std::string(__func__) + ": TODO");
     }
@@ -1563,8 +1604,6 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
 
 void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &kvCache)
 {
-    XTensor &kCache = kvCache[0][0];
-    XTensor &vCache = kvCache[0][1];
     if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                  ": check runtime communication setting failed");
@@ -1613,25 +1652,56 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                 }
             }
         }
-        return;
-    }
-
-    uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-    if (kCache.shape[1] != _c.blockSize || vCache.shape[1] != _c.blockSize ||
-        kCache.shape[2] != expectedKvHeads || vCache.shape[2] != expectedKvHeads ||
-        (_c.attnType == XMODEL_ATTN_MHA && kCache.shape[3] != _c.headDim) ||
-        (_c.attnType == XMODEL_ATTN_MLA &&
-         (kCache.shape[3] != _c.kvLoraRank || vCache.shape[3] != _c.ropeHeadDim))) {
-        throw std::runtime_error(
-            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-            ": kv cache's shape not match [block_num, block_size, kv_head_num, head_size]");
-    }
-    if (_c.attnType == XMODEL_ATTN_DSA) {
-        XTensor &indexKCache = kvCache[0][2];
+    } else if (_c.attnType == XMODEL_ATTN_MHA) {
+        XTensor &kCache = kvCache[0][0];
+        XTensor &vCache = kvCache[0][1];
+        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+        if (kCache.shape[1] != _c.blockSize || vCache.shape[1] != _c.blockSize ||
+            kCache.shape[2] != expectedKvHeads || vCache.shape[2] != expectedKvHeads ||
+            kCache.shape[3] != _c.headDim || vCache.shape[3] != _c.headDim) {
+            throw std::runtime_error(
+                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                ": kv cache's shape not match [block_num, block_size, kv_head_num, head_size]");
+        }
+    } else if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
+        XTensor &kCache = kvCache[0][0];
+        XTensor &vCache = kvCache[0][1];
+        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+        if (kCache.shape[1] != _c.blockSize || kCache.shape[2] != expectedKvHeads ||
+            kCache.shape[3] != _c.kvLoraRank) {
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": k nope cache's shape not match [block_num, block_size, "
+                                     "kv_head_num, kv_lora_rank]");
+        }
+        if (vCache.shape[1] != _c.blockSize || vCache.shape[2] != expectedKvHeads ||
+            vCache.shape[3] != _c.ropeHeadDim) {
+            throw std::runtime_error(
+                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                ": pe cache's shape not match [block_num, block_size, kv_head_num, rope_head_dim]");
+        }
+        if (_c.attnType == XMODEL_ATTN_DSA) {
+            XTensor &indexKCache = kvCache[0][2];
+            if (indexKCache.shape[1] != _c.blockSize || indexKCache.shape[2] != 1 ||
+                indexKCache.shape[3] != _c.indexHeadDim) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": DSA index k cache's shape not match [block_num, "
+                                         "block_size, 1, index_head_size]");
+            }
+        }
+    } else if (_c.attnType == XMODEL_ATTN_CXA) {
+        XTensor &kCache = kvCache[0][0];
+        XTensor &indexKCache = kvCache[0][1];
+        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+        if (kCache.shape[1] != _c.blockSize || kCache.shape[2] != expectedKvHeads ||
+            kCache.shape[3] != _c.headDim) {
+            throw std::runtime_error(
+                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                ": kv cache's shape not match [block_num, block_size, kv_head_num, head_dim]");
+        }
         if (indexKCache.shape[1] != _c.blockSize || indexKCache.shape[2] != 1 ||
             indexKCache.shape[3] != _c.indexHeadDim) {
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                     ": DSA index k cache's shape not match [block_num, "
+                                     ": CXA index k cache's shape not match [block_num, "
                                      "block_size, 1, index_head_size]");
         }
     }
@@ -1696,8 +1766,13 @@ size_t XModel::DummyRun()
                 XTensor indexKCache({_c.maxBatch * maxNumBlocks, _c.blockSize, 1, _c.indexHeadDim},
                                     embed.dtype, nullptr);
                 kvCache[i] = {kCache, vCache, indexKCache};
-            } else {
-                throw std::runtime_error("DummyRun: TODO");
+            } else if (_c.attnType == XMODEL_ATTN_CXA) {
+                XTensor kCache(
+                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                    embed.dtype, nullptr);
+                XTensor indexKCache({_c.maxBatch * maxNumBlocks, _c.blockSize, 1, _c.indexHeadDim},
+                                    embed.dtype, nullptr);
+                kvCache[i] = {kCache, indexKCache};
             }
         }
         return kvCache;

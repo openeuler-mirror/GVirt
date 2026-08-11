@@ -34,6 +34,22 @@ rank = 0
 global_rank = 0
 global_world_size = 1
 
+block_size = 128
+forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
+if forward_backend == "xlite":
+    xlite_rt = None
+    xlite_model = None
+    block_size = 64
+    from xlite._C import (
+        Runtime,
+        ModelConfig,
+        ModelAttnMeta,
+        AttnCxA,
+        Model,
+        ScoringFuncSoftmax,
+    )
+    import numpy as np
+
 
 @dataclass
 class ModelArgs:
@@ -571,18 +587,19 @@ class Gate(nn.Module):
 
 
 class Expert(nn.Module):
-    """Single MoE expert: SwiGLU FFN. w1/w2/w3 are W8A8_DYNAMIC -> int8."""
+    """Single MoE expert: SwiGLU FFN. w13/w2 are W8A8_DYNAMIC -> int8.
+    w13 merges the gate (w1) and up (w3) projections into one Linear so the
+    forward issues a single GEMM and splits the result for SwiGLU."""
     def __init__(self, dim: int, inter_dim: int, swiglu_limit: float = 0):
         super().__init__()
-        self.w1 = Linear(dim, inter_dim, dtype=torch.int8)
+        self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
         self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
-        self.w3 = Linear(dim, inter_dim, dtype=torch.int8)
         self.swiglu_limit = swiglu_limit
 
     def forward(self, x: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         dtype = x.dtype
-        gate = self.w1(x).float()
-        up = self.w3(x).float()
+        y = self.w13(x).float()
+        gate, up = torch.split(y, y.shape[-1] // 2, dim=-1)
         if self.swiglu_limit > 0:
             up = torch.clamp(up, min=-self.swiglu_limit, max=self.swiglu_limit)
             gate = torch.clamp(gate, max=self.swiglu_limit)
@@ -723,6 +740,18 @@ class Transformer(nn.Module):
         rank = dist.get_rank() if dist.is_initialized() else 0
         global_rank = rank
         global_world_size = world_size
+        self.global_rank = rank
+        self.global_world_size = world_size
+        self.dp_size = int(os.getenv("XLITE_DP_SIZE", "1"))
+        assert world_size % self.dp_size == 0, (
+            f"WORLD_SIZE ({world_size}) must be divisible by XLITE_DP_SIZE ({self.dp_size})"
+        )
+        self.tp_size = world_size // self.dp_size
+        self.tp_rank = rank % self.tp_size
+        self.dp_rank = rank // self.tp_size
+        # Dense-layer view: pure-TP rebind (world_size<-tp_size, rank<-tp_rank).
+        world_size = self.tp_size
+        rank = self.tp_rank
         super().__init__()
         self.args = args
         self.max_seq_len = args.max_seq_len
@@ -786,7 +815,7 @@ class Transformer(nn.Module):
                     continue
 
             # EP shard of experts: skip experts not on this rank.
-            # experts weight key: layers.<id>.ffn.experts.<eid>.w1.weight[_scale/_offset]
+            # experts weight key: layers.<id>.ffn.experts.<eid>.w13.weight[_scale/_offset]
             # idx is the 3rd-from-last token regardless of whether name starts with "layers." or "model.layers."
             if "experts" in name and "shared_experts" not in name:
                 idx = int(name.split(".")[-3])
@@ -805,6 +834,27 @@ class Transformer(nn.Module):
                 target_name = name[:-len("weight_offset")] + "weight_offset"
             else:
                 target_name = name
+
+            # Merge w1 (gate) and w3 (up) checkpoint weights into the model's w13
+            # param (w13 has shape [inter_dim*2, dim]; w1 lands in [:inter_dim],
+            # w3 in [inter_dim:]). Same merge applies to .scale / .weight_offset
+            # rows — v4 ckpt stores them per-row ([inter_dim, 1] each), so each
+            # half is copied into the corresponding half of the merged [inter_dim*2, 1] param.
+            segs = target_name.split(".")
+            if len(segs) >= 2 and segs[-2] in ("w1", "w3"):
+                stride_id = 0 if segs[-2] == "w1" else 1
+                segs[-2] = "w13"
+                merged_name = ".".join(segs)
+                if merged_name not in param_dict:
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.',
+                                   merged_name)
+                    continue
+                merged_param = param_dict[merged_name]
+                half = merged_param.shape[0] // 2
+                slot = half * stride_id
+                loaded_t = convert_pyslice_to_tensor(loaded_weight)
+                merged_param.data[slot:slot + half].copy_(loaded_t[:half])
+                continue
 
             if target_name not in param_dict:
                 logger.warning('Loading model has no param named %s in checkpoints, bypass.',
@@ -827,7 +877,7 @@ class Transformer(nn.Module):
             # ===== Per-row scale/offset for int8 Linear (shard along output dim) =====
             # For ColumnParallel int8 layers (wq_b, wo indexer.wq_b, indexer.weights_proj), shard rows.
             # For RowParallel int8 layers (wo_b), the weight is [N, part_in] -> scale/offset is [N, 1] (NOT sharded along N).
-            # For plain int8 Linear (wq_a, wkv, experts.w1/w2/w3), scale/offset is full [N, 1] (NOT sharded).
+            # For plain int8 Linear (wq_a, wkv, experts.w13/w2, shared_experts.w13/w2), scale/offset is full [N, 1] (NOT sharded).
             if is_scale or is_offset:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 # Determine if this layer is ColumnParallel (shard output dim).
@@ -846,17 +896,14 @@ class Transformer(nn.Module):
                 continue
 
             # ===== int8 weight tensor (or bf16 weight tensor) =====
-            # experts w1/w2/w3 EP-shard on output dim (w1, w3) or input dim (w2).
+            # experts w13/w2 EP-shard on output dim (w13) or input dim (w2).
             if "experts" in target_name and "shared_experts" not in target_name and ".weight" in target_name and target_name.rsplit(".", 1)[-1] == "weight":
-                # Determine w1/w2/w3 by suffix.
+                # Determine w13/w2 by suffix. (w1/w3 already merged above.)
                 last_tok = target_name.split(".")[-2]
-                if last_tok == "w1" or last_tok == "w3":
-                    # ColumnParallel-like: output dim sharded by EP.
+                if last_tok == "w13":
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                     param.data.copy_(loaded_weight)
                 elif last_tok == "w2":
-                    # RowParallel-like: input dim sharded by EP (but EP only, no TP for V4 MoE since moe_tp_size=1).
-                    # When moe_ep_size==world_size, n_local_experts = n_routed/world; each rank loads its own experts' full w2.
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                     param.data.copy_(loaded_weight)
                 else:
@@ -913,3 +960,287 @@ class Transformer(nn.Module):
             param.data.copy_(loaded_weight)
 
         torch.npu.empty_cache()
+
+        if forward_backend == "xlite":
+            local_rank = int(os.getenv("LOCAL_RANK", "0"))
+            self.xlite_rt = Runtime(local_rank, 0, self.global_rank, self.tp_size,
+                                    self.dp_size, 1, args.moe_ep_size)
+            self.init_xlite_model(args)
+            kv_size = self.init_xlite_kvcache(args)
+            pool_size = self.xlite_model.get_tensor_pool_size()
+            self.xlite_rt.init_tensor_pool(pool_size)
+
+            total_model_memory = 0
+            for _, param in self.named_parameters():
+                total_model_memory += param.element_size() * param.numel()
+            if self.global_rank == 0:
+                print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
+                      f" KV Cache: {kv_size // 1024 // 1024} MB" +
+                      f" Tensor pool: {pool_size} MB")
+
+    def init_xlite_model(self, args: ModelArgs):
+        """Wire v4 weights into xlite Model and run C++ init (param passing only)."""
+        config = ModelConfig()
+        # ===== common fields (mirror v3 init_xlite_model) =====
+        config.vocab_size = args.vocab_size
+        config.hidden_size = args.dim
+        config.n_layers = args.n_layers
+        config.n_heads = args.n_heads
+        config.n_kv_heads = 1
+        config.head_dim = args.head_dim
+        config.nope_head_dim = args.head_dim - args.rope_head_dim
+        config.rope_head_dim = args.rope_head_dim
+        config.v_head_dim = args.head_dim  # v4: v_head_dim == head_dim
+        config.q_lora_rank = args.q_lora_rank
+        config.kv_lora_rank = args.head_dim  # v4: kv_lora_rank == head_dim (wkv projects dim->head_dim)
+        config.norm_eps = args.norm_eps
+        config.rope_theta = args.rope_theta
+        config.softmax_scale = self.layers[0].attn.softmax_scale
+        config.n_dense_layers = 0  # v4: all layers are MoE
+        config.n_routed_experts = args.n_routed_experts
+        config.n_shared_experts = args.n_shared_experts
+        config.n_act_experts = args.n_activated_experts
+        config.intermediate_size = args.moe_inter_dim
+        config.moe_intermediate_size = args.moe_inter_dim
+        config.route_scale = args.route_scale
+        config.def_tp_size = self.tp_size
+        config.def_dp_size = self.dp_size
+        config.moe_ep_size = args.moe_ep_size
+        config.moe_tp_size = args.moe_tp_size
+        config.block_size = block_size
+        config.max_seq_len = args.max_seq_len
+        config.max_batch_size = args.max_batch_size
+        config.max_num_batched_tokens = args.max_batch_size * args.max_seq_len
+        config.attn_type = AttnCxA
+        # v4-specific scalar fields
+        config.o_groups = args.o_groups
+        config.o_lora_rank = args.o_lora_rank
+        config.window_size = args.window_size
+        config.compress_rope_theta = args.compress_rope_theta
+        config.original_seq_len = args.original_seq_len
+        config.rope_factor = args.rope_factor
+        config.beta_fast = args.beta_fast
+        config.beta_slow = args.beta_slow
+        config.hc_mult = args.hc_mult
+        config.hc_sinkhorn_iters = args.hc_sinkhorn_iters
+        config.hc_eps = args.hc_eps
+        config.swiglu_limit = args.swiglu_limit
+        config.n_hash_layers = args.n_hash_layers
+        config.compress_ratios = list(args.compress_ratios)
+        # MoE scoring: v4 uses sqrtsoftplus, which is not yet wired into xlite's
+        # ScoringFuncType enum. Use softmax as placeholder; the C++ forward is not
+        # implemented yet so this only affects init-time validation.
+        config.scoring_func = ScoringFuncSoftmax
+        config.norm_topk_prob = True
+        config.index_head_dim = args.index_head_dim
+        config.index_n_heads = args.index_n_heads
+        config.index_topk = args.index_topk
+
+        global xlite_model
+        xlite_model = self.xlite_model = Model()
+        self.xlite_model.embed = self.embed.weight
+        self.xlite_model.norm = self.norm.weight
+        self.xlite_model.head = self.head.weight
+        self.xlite_model.attn_norm = [layer.attn_norm.weight for layer in self.layers]
+        self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
+
+        # Helpers for v4 w8a8 dynamic quant weights. v4's Linear has weight.scale
+        # of shape [out_features, 1] (fp32) and weight.weight_offset of the same
+        # shape. C++ expects xlite_scale layout [out_features*2, 1] with the
+        # scale replicated at [0::2] (matches v3's Linear.xlite_scale field).
+        def _xlite_scale_of(weight):
+            s = weight.scale  # [out_features, 1] fp32
+            out = torch.zeros(s.shape[0] * 2, 1, dtype=s.dtype, device=s.device)
+            out[0::2] = s
+            return out.contiguous()
+
+        def _per_layer(getter):
+            """Pick the per-layer weight tensor; return torch.empty(0) if the
+            submodule doesn't exist on this layer (e.g. compress_ratio==0 layers
+            have no compressor, compress_ratio!=4 layers have no indexer)."""
+            out = []
+            for L in self.layers:
+                idx = getattr(L.attn, "indexer", None)
+                try:
+                    t = getter(L, idx)
+                except (AttributeError, TypeError):
+                    t = None
+                if t is not None and t.numel() > 0:
+                    out.append(t)
+                else:
+                    out.append(torch.empty(0))
+            return out
+
+        def _per_layer_deq_scale(getter):
+            """Same as _per_layer but applies _xlite_scale_of to the picked
+            int8 weight tensor. Returns torch.empty(0) for layers without the
+            submodule (so the deq_scale list aligns 1:1 with the weight list)
+            or for layers whose weight is fp32 (no quant scale to attach)."""
+            out = []
+            for L in self.layers:
+                idx = getattr(L.attn, "indexer", None)
+                try:
+                    t = getter(L, idx)
+                except (AttributeError, TypeError):
+                    t = None
+                if t is not None and t.numel() > 0 and t.element_size() == 1 \
+                        and hasattr(t, "scale"):
+                    out.append(_xlite_scale_of(t))
+                else:
+                    out.append(torch.empty(0))
+            return out
+
+        # CxA attention weights
+        self.xlite_model.attn_wo_a = [layer.attn.wo_a.weight for layer in self.layers]
+        self.xlite_model.attn_wo_b = [layer.attn.wo_b.weight for layer in self.layers]
+        self.xlite_model.attn_sink = [layer.attn.attn_sink for layer in self.layers]
+        # v4 attention wkv (dim -> head_dim int8 Linear; output goes to kv_norm).
+        # New v4 field (not in v3 DSA).
+        self.xlite_model.attn_wkv = [layer.attn.wkv.weight for layer in self.layers]
+        self.xlite_model.attn_wkv_deq_scale = [_xlite_scale_of(layer.attn.wkv.weight) for layer in self.layers]
+        # v4 attention wq_a (separate v4 field — v4's wq_a is q_a only, different
+        # from v3 MLA's wqkv_a which merges q_a + kv_a).
+        self.xlite_model.attn_wq_a = [layer.attn.wq_a.weight for layer in self.layers]
+        self.xlite_model.attn_wq_a_deq_scale = [_xlite_scale_of(layer.attn.wq_a.weight) for layer in self.layers]
+        # wq_b reuses MLA's mla_q_b field (same structure as v3 MLA).
+        self.xlite_model.mla_q_b = [layer.attn.wq_b.weight for layer in self.layers]
+        self.xlite_model.mla_q_b_deq_scale = [_xlite_scale_of(layer.attn.wq_b.weight) for layer in self.layers]
+        # q_norm/kv_norm reuse MLA's mla_q_norm/mla_kv_norm fields.
+        self.xlite_model.mla_q_norm = [layer.attn.q_norm.weight for layer in self.layers]
+        self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
+        # v4 has no separate attn_out projection (uses wo_a/wo_b), leave empty.
+        self.xlite_model.attn_out = []
+
+        # Compressor + Indexer (per-layer; empty tensor for non-applicable layers).
+        # v4 attention has a compressor iff compress_ratio != 0; an indexer iff
+        # compress_ratio == 4. Layers without the relevant submodule get an empty
+        # tensor (C++ InitOptionalXTensor skips empty/undefined tensors).
+
+        # Attention.compressor (exists iff compress_ratio != 0)
+        # Attention.compressor (exists iff compress_ratio != 0). wkv/wgate are
+        # fp32 Linear in v4 — no w8a8 four-pack, only the weight tensor is needed.
+        self.xlite_model.comp_ape = _per_layer(
+            lambda L, _idx: L.attn.compressor.ape if L.attn.compress_ratio else None)
+        self.xlite_model.comp_w_kv = _per_layer(
+            lambda L, _idx: L.attn.compressor.wkv.weight if L.attn.compress_ratio else None)
+        self.xlite_model.comp_w_gate = _per_layer(
+            lambda L, _idx: L.attn.compressor.wgate.weight if L.attn.compress_ratio else None)
+        self.xlite_model.comp_norm = _per_layer(
+            lambda L, _idx: L.attn.compressor.norm.weight if L.attn.compress_ratio else None)
+
+        # Indexer fields (exists iff compress_ratio == 4). v4 indexer.wq_b has a
+        # different shape from DSA's index_q_b, so it's a separate v4 field.
+        self.xlite_model.idx_wq_b = _per_layer(
+            lambda L, idx: idx.wq_b.weight if idx is not None else None)
+        self.xlite_model.idx_wq_b_deq_scale = _per_layer_deq_scale(
+            lambda L, idx: idx.wq_b.weight if idx is not None else None)
+        self.xlite_model.idx_weights_proj = _per_layer(
+            lambda L, idx: idx.weights_proj.weight if idx is not None else None)
+        # Indexer's internal Compressor (fp32 Linear — weight only, no 4-pack).
+        self.xlite_model.idx_comp_ape = _per_layer(
+            lambda L, idx: getattr(idx.compressor, "ape", None) if idx is not None else None)
+        self.xlite_model.idx_comp_w_kv = _per_layer(
+            lambda L, idx: idx.compressor.wkv.weight if idx is not None else None)
+        self.xlite_model.idx_comp_w_gate = _per_layer(
+            lambda L, idx: idx.compressor.wgate.weight if idx is not None else None)
+        self.xlite_model.idx_comp_norm = _per_layer(
+            lambda L, idx: idx.compressor.norm.weight if idx is not None else None)
+
+        # Multi-stage Hyper-Connections (per-layer)
+        self.xlite_model.hc_attn_fn = [layer.hc_attn_fn for layer in self.layers]
+        self.xlite_model.hc_ffn_fn = [layer.hc_ffn_fn for layer in self.layers]
+        self.xlite_model.hc_attn_base = [layer.hc_attn_base for layer in self.layers]
+        self.xlite_model.hc_ffn_base = [layer.hc_ffn_base for layer in self.layers]
+        self.xlite_model.hc_attn_scale = [layer.hc_attn_scale for layer in self.layers]
+        self.xlite_model.hc_ffn_scale = [layer.hc_ffn_scale for layer in self.layers]
+        # Transformer-level MHC head
+        self.xlite_model.hc_head_fn = self.hc_head_fn
+        self.xlite_model.hc_head_base = self.hc_head_base
+        self.xlite_model.hc_head_scale = self.hc_head_scale
+
+        # MoE: reuse existing gate/se_*/re_* fields.
+        self.xlite_model.gate = [layer.ffn.gate.weight for layer in self.layers]
+        self.xlite_model.gate_bias = [
+            layer.ffn.gate.bias if layer.ffn.gate.bias is not None else torch.empty(0)
+            for layer in self.layers
+        ]
+        # v4 shared/routed experts are SwiGLU FFNs with merged w13 (gate+up)
+        # and w2 (down). se_up_gate/re_up_gate hold the merged w13 weight,
+        # se_down/re_down hold w2.
+        self.xlite_model.se_up_gate = [layer.ffn.shared_experts.w13.weight for layer in self.layers]
+        self.xlite_model.se_down = [layer.ffn.shared_experts.w2.weight for layer in self.layers]
+        self.xlite_model.re_up_gate = [
+            layer.ffn.experts[i].w13.weight
+            for layer in self.layers
+            for i in range(layer.ffn.experts_start_idx, layer.ffn.experts_end_idx)
+        ]
+        self.xlite_model.re_down = [
+            layer.ffn.experts[i].w2.weight
+            for layer in self.layers
+            for i in range(layer.ffn.experts_start_idx, layer.ffn.experts_end_idx)
+        ]
+        # deq_scale for SE/RE int8 weights: v4's Linear has weight.scale of shape
+        # [out_features, 1] (fp32). v3's xlite_scale is [out_features*2, 1] with
+        # scale replicated at [0::2] — C++ MoE group_matmul expects this layout.
+        # Constructed via _xlite_scale_of defined above.
+        self.xlite_model.se_up_gate_deq_scale = [
+            _xlite_scale_of(layer.ffn.shared_experts.w13.weight) for layer in self.layers
+        ]
+        self.xlite_model.se_down_deq_scale = [
+            _xlite_scale_of(layer.ffn.shared_experts.w2.weight) for layer in self.layers
+        ]
+        self.xlite_model.re_up_gate_deq_scale = [
+            _xlite_scale_of(layer.ffn.experts[i].w13.weight)
+            for layer in self.layers
+            for i in range(layer.ffn.experts_start_idx, layer.ffn.experts_end_idx)
+        ]
+        self.xlite_model.re_down_deq_scale = [
+            _xlite_scale_of(layer.ffn.experts[i].w2.weight)
+            for layer in self.layers
+            for i in range(layer.ffn.experts_start_idx, layer.ffn.experts_end_idx)
+        ]
+
+        # init() takes the GLOBAL rank (C++ derives tp_rank/ep_id from it).
+        self.xlite_model.init(config, self.global_rank)
+
+    def init_xlite_kvcache(self, args: ModelArgs):
+        """Allocate v4 KV cache. Reuses DSA-style 3-slot layout as a placeholder;
+        the actual window+compressed layout will be finalized when C++ forward lands.
+        """
+        block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
+        head_num = 1
+        self.xlite_kv_cache = [
+            (torch.zeros(block_num, block_size, head_num, args.head_dim,
+                         dtype=torch.get_default_dtype(), device='npu'),
+             torch.zeros(block_num, block_size, head_num, args.index_head_dim,
+                         dtype=torch.get_default_dtype(), device='npu'))
+            for _ in range(args.n_layers)
+        ]
+        kv_size = (block_num * head_num * block_size *
+                   (args.head_dim + args.index_head_dim) *
+                   self.xlite_kv_cache[0][0].element_size() * args.n_layers)
+        return kv_size
+
+    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
+        batch = tokens.size(0)
+        seqlen = tokens.size(1)
+        step = (self.args.max_seq_len + block_size - 1) // block_size
+        block_num = (seqlen + start_pos + block_size - 1) // block_size
+        attn_meta = ModelAttnMeta()
+        attn_meta.lens = [seqlen] * batch
+        attn_meta.cached_lens = [start_pos] * batch
+        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
+        block_indices = np.arange(block_num, dtype=np.uint32)
+        attn_meta.block_tables = batch_indices * step + block_indices
+        return attn_meta
+
+    def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
+        """xlite C++ forward entry point — not yet implemented.
+
+        The C++ CxA forward path (sparse attention + KV compressor + indexer + MHC)
+        is still TBD. Calling this raises NotImplementedError; use forward() (the
+        PyTorch reference path) for now.
+        """
+        raise NotImplementedError(
+            "v4 xlite forward not implemented; use forward() (PyTorch reference path)"
+        )
