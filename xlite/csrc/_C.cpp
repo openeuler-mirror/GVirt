@@ -31,19 +31,27 @@ public:
     ~_CModel();
     void Init(struct XModelConfig &c, uint32_t rankId);
     void Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                 std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                 std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
                  at::Tensor &output, uint64_t currStream);
     void ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                    std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                    at::Tensor &output, uint64_t currStream);
+    void ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                   std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
+                   at::Tensor &output, uint64_t currStream);
     void ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indices, at::Tensor &output,
                           uint64_t currStream);
     void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                             std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
-                             at::Tensor &indices, at::Tensor &output, uint64_t currStream);
+                             std::vector<std::vector<at::Tensor>> &kvCache,
+                             std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
+                             at::Tensor &output, uint64_t currStream);
     void ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                                std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                                at::Tensor &indices, at::Tensor &output, uint64_t currStream);
+    void ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                               std::vector<std::vector<at::Tensor>> &kvCache,
+                               std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
+                               at::Tensor &output, uint64_t currStream);
     void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                  std::vector<std::vector<at::Tensor>> &kvCache,
                                  at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
@@ -750,15 +758,19 @@ _CModel::~_CModel(void)
 }
 
 void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                      std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
-                      at::Tensor &output, uint64_t currStream)
+                      std::vector<std::vector<at::Tensor>> &kvCache,
+                      std::vector<at::Tensor> &freqsCis, at::Tensor &output, uint64_t currStream)
 {
-    XTensor _input, _output, _freqsCis;
+    XTensor _input, _output;
+    std::vector<XTensor> _freqsCis;
     aclrtStream currAclStream = nullptr;
 
     InitXTensor(_input, input);
     InitXTensor(_output, output);
-    InitXTensor(_freqsCis, freqsCis);
+    _freqsCis.resize(freqsCis.size());
+    for (int i = 0; i < freqsCis.size(); i++) {
+        InitXTensor(_freqsCis[i], freqsCis[i]);
+    }
 
     if (kvCache.size() < _kv.size()) {
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
@@ -821,6 +833,20 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
     _attnMeta.cachedLens = attnMeta.cachedLens;
     _attnMeta.blockTables = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
+    std::vector<at::Tensor> freqsCisVec = {freqsCis};
+    Forward(rt, input, _attnMeta, kvCache, freqsCisVec, output, currStream);
+}
+
+void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                        std::vector<std::vector<at::Tensor>> &kvCache,
+                        std::vector<at::Tensor> &freqsCis, at::Tensor &output, uint64_t currStream)
+{
+    XModelAttnMeta _attnMeta;
+    _attnMeta.version = 1;
+    _attnMeta.lens = attnMeta.lens;
+    _attnMeta.cachedLens = attnMeta.cachedLens;
+    _attnMeta.blockTables = attnMeta.blockTablesList;
+    InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
     Forward(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
@@ -854,16 +880,20 @@ void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indi
 
 void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                   std::vector<std::vector<at::Tensor>> &kvCache,
-                                  at::Tensor &freqsCis, at::Tensor &indices, at::Tensor &output,
-                                  uint64_t currStream)
+                                  std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
+                                  at::Tensor &output, uint64_t currStream)
 {
-    XTensor _input, _indices, _output, _freqsCis;
+    XTensor _input, _indices, _output;
+    std::vector<XTensor> _freqsCis;
     aclrtStream currAclStream = nullptr;
 
     InitXTensor(_input, input);
     InitXTensor(_indices, indices);
     InitXTensor(_output, output);
-    InitXTensor(_freqsCis, freqsCis);
+    _freqsCis.resize(freqsCis.size());
+    for (int i = 0; i < freqsCis.size(); i++) {
+        InitXTensor(_freqsCis[i], freqsCis[i]);
+    }
 
     if (kvCache.size() != _kv.size()) {
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
@@ -917,6 +947,21 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnM
                                     std::vector<std::vector<at::Tensor>> &kvCache,
                                     at::Tensor &freqsCis, at::Tensor &indices, at::Tensor &output,
                                     uint64_t currStream)
+{
+    XModelAttnMeta _attnMeta;
+    _attnMeta.version = 1;
+    _attnMeta.lens = attnMeta.lens;
+    _attnMeta.cachedLens = attnMeta.cachedLens;
+    _attnMeta.blockTables = attnMeta.blockTablesList;
+    InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
+    std::vector<at::Tensor> freqsCisVec = {freqsCis};
+    ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCisVec, indices, output, currStream);
+}
+
+void _CModel::ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                                    std::vector<std::vector<at::Tensor>> &kvCache,
+                                    std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
+                                    at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 1;
@@ -2303,6 +2348,9 @@ PYBIND11_MODULE(_C, m)
         .def("forward", &_CModel::ForwardV1, "forward", py::arg("rt"), py::arg("input"),
              py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("forward", &_CModel::ForwardV2, "forward", py::arg("rt"), py::arg("input"),
+             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_get_logits", &_CModel::ForwardGetLogits, "forward_get_logits", py::arg("rt"),
              py::arg("input"), py::arg("indices"), py::arg("output"), py::arg("curr_stream") = 0,
              py::call_guard<py::gil_scoped_release>())
@@ -2311,6 +2359,10 @@ PYBIND11_MODULE(_C, m)
              py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV1, "forward_and_get_logits",
+             py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+             py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV2, "forward_and_get_logits",
              py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
              py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())

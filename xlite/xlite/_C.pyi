@@ -7,7 +7,7 @@ The typing and docstrings are designed for Python 3.9 to 3.12.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional, Sequence, overload
+from typing import List, Optional, Sequence, Union, overload
 
 import torch
 
@@ -773,7 +773,7 @@ class Model:
         input: torch.Tensor,
         attn_meta: ModelAttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: torch.Tensor,
+        freqs_cis: Sequence[torch.Tensor],
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
@@ -784,7 +784,10 @@ class Model:
             input (torch.Tensor): Input token tensor.
             attn_meta (ModelAttnMeta): Device-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
+            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors,
+                one entry per layer (DeepSeek-V4 uses different ``rope_theta`` for
+                compress vs non-compress layers). V3-style callers may pass a
+                single-element list; all layers share that one tensor.
             output (torch.Tensor): Output hidden-state buffer.
             curr_stream (int): Optional ACL stream pointer cast to integer.
 
@@ -802,18 +805,22 @@ class Model:
         input: torch.Tensor,
         attn_meta: AttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: torch.Tensor,
+        freqs_cis: Union[torch.Tensor, Sequence[torch.Tensor]],
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
-        """Run forward pass with host/vLLM-compatible attention metadata.
+        """Run forward pass with host/vLLM-compatible attention metadata (V1).
+
+        Legacy single-tensor entry: ``freqs_cis`` is shared across all layers.
+        Internally wrapped into a one-element list and dispatched to the V2 path.
 
         Args:
             rt (Runtime): Native runtime handle.
             input (torch.Tensor): Input token tensor.
             attn_meta (AttnMeta): Host-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
+            freqs_cis (Union[torch.Tensor, Sequence[torch.Tensor]]): Rotary
+                frequency tensor shared by all layers, or a per-layer sequence
             output (torch.Tensor): Output hidden-state buffer.
             curr_stream (int): Optional ACL stream pointer cast to integer.
 
@@ -855,7 +862,7 @@ class Model:
         input: torch.Tensor,
         attn_meta: ModelAttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: torch.Tensor,
+        freqs_cis: Sequence[torch.Tensor],
         indices: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int = 0,
@@ -867,7 +874,10 @@ class Model:
             input (torch.Tensor): Input token tensor.
             attn_meta (ModelAttnMeta): Device-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
+            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors,
+                one entry per layer (DeepSeek-V4 uses different ``rope_theta`` for
+                compress vs non-compress layers). V3-style callers may pass a
+                single-element list; all layers share that one tensor.
             indices (torch.Tensor): Logits indices.
             output (torch.Tensor): Output logits buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
@@ -886,19 +896,23 @@ class Model:
         input: torch.Tensor,
         attn_meta: AttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: torch.Tensor,
+        freqs_cis: Union[torch.Tensor, Sequence[torch.Tensor]],
         indices: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
-        """Run forward pass and materialize logits (host metadata).
+        """Run forward pass and materialize logits (host metadata, V1).
+
+        Legacy single-tensor entry: ``freqs_cis`` is shared across all layers.
+        Internally wrapped into a one-element list and dispatched to the V2 path.
 
         Args:
             rt (Runtime): Native runtime handle.
             input (torch.Tensor): Input token tensor.
             attn_meta (AttnMeta): Host-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
+            freqs_cis (Union[torch.Tensor, Sequence[torch.Tensor]]): Rotary
+                frequency tensor shared by all layers, or a per-layer sequence
             indices (torch.Tensor): Logits indices.
             output (torch.Tensor): Output logits buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.

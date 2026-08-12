@@ -771,7 +771,7 @@ class Transformer(nn.Module):
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
     @torch.inference_mode()
-    def forward(self, input_ids: torch.Tensor, start_pos: int = 0):
+    def forward_naive(self, input_ids: torch.Tensor, start_pos: int = 0):
         h = self.embed(input_ids)
         # Expand to hc_mult copies for Hyper-Connections
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
@@ -780,6 +780,46 @@ class Transformer(nn.Module):
         h = self.layers[-1].hc_head(h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         logits = self.head(self.norm(h))
         return logits
+
+    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
+        batch = tokens.size(0)
+        seqlen = tokens.size(1)
+        step = (self.args.max_seq_len + block_size - 1) // block_size
+        block_num = (seqlen + start_pos + block_size - 1) // block_size
+        attn_meta = ModelAttnMeta()
+        attn_meta.lens = [seqlen] * batch
+        attn_meta.cached_lens = [start_pos] * batch
+        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
+        block_indices = np.arange(block_num, dtype=np.uint32)
+        attn_meta.block_tables = batch_indices * step + block_indices
+        return attn_meta
+
+    @torch.inference_mode()
+    def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
+        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size,
+                             device=tokens.device)
+        tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
+        batch = tokens.size(0)
+        seqlen = tokens.size(1)
+        logits_indices = torch.arange(batch, dtype=torch.int32, device=tokens.device) * seqlen + (seqlen - 1)
+        attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
+        stream = torch.npu.current_stream().npu_stream
+        h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
+        # v4 freqs_cis is per-layer (compress vs non-compress layers differ in rope_theta);
+        # pass a list, one entry per layer, instead of v3's single tensor.
+        freqs_cis = [layer.attn.freqs_cis for layer in self.layers]
+        self.xlite_model.forward(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache,
+                                 freqs_cis, h, stream)
+        self.xlite_model.forward_get_logits(self.xlite_rt, h, logits_indices, logits)
+        logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
+        return logits
+
+    @torch.inference_mode()
+    def forward(self, input_ids: torch.Tensor, start_pos: int = 0):
+        if forward_backend == "xlite":
+            return self.forward_xlite(input_ids, start_pos)
+        else:
+            return self.forward_naive(input_ids, start_pos)
 
     def load_weights(self, model_path: str):
         """Load DeepSeek-V4-Flash-w8a8-mtp checkpoint."""
@@ -1220,27 +1260,3 @@ class Transformer(nn.Module):
                    (args.head_dim + args.index_head_dim) *
                    self.xlite_kv_cache[0][0].element_size() * args.n_layers)
         return kv_size
-
-    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
-        batch = tokens.size(0)
-        seqlen = tokens.size(1)
-        step = (self.args.max_seq_len + block_size - 1) // block_size
-        block_num = (seqlen + start_pos + block_size - 1) // block_size
-        attn_meta = ModelAttnMeta()
-        attn_meta.lens = [seqlen] * batch
-        attn_meta.cached_lens = [start_pos] * batch
-        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-        block_indices = np.arange(block_num, dtype=np.uint32)
-        attn_meta.block_tables = batch_indices * step + block_indices
-        return attn_meta
-
-    def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
-        """xlite C++ forward entry point — not yet implemented.
-
-        The C++ CxA forward path (sparse attention + KV compressor + indexer + MHC)
-        is still TBD. Calling this raises NotImplementedError; use forward() (the
-        PyTorch reference path) for now.
-        """
-        raise NotImplementedError(
-            "v4 xlite forward not implemented; use forward() (PyTorch reference path)"
-        )
