@@ -768,7 +768,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     InitXTensor(_input, input);
     InitXTensor(_output, output);
     _freqsCis.resize(freqsCis.size());
-    for (int i = 0; i < freqsCis.size(); i++) {
+    for (size_t i = 0; i < freqsCis.size(); i++) {
         InitXTensor(_freqsCis[i], freqsCis[i]);
     }
 
@@ -891,7 +891,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
     InitXTensor(_indices, indices);
     InitXTensor(_output, output);
     _freqsCis.resize(freqsCis.size());
-    for (int i = 0; i < freqsCis.size(); i++) {
+    for (size_t i = 0; i < freqsCis.size(); i++) {
         InitXTensor(_freqsCis[i], freqsCis[i]);
     }
 
