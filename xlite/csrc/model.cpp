@@ -56,6 +56,28 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     _moeREUpGateDeqScale.resize(c.nLayers);
     _moeREDown.resize(c.nLayers);
     _moeREDownDeqScale.resize(c.nLayers);
+
+    attnSink.resize(c.nLayers);
+    attnWqA.resize(c.nLayers);
+    attnWoA.resize(c.nLayers);
+    attnWoB.resize(c.nLayers);
+    attnWKv.resize(c.nLayers);
+    compApe.resize(c.nLayers);
+    compWKv.resize(c.nLayers);
+    compWGate.resize(c.nLayers);
+    compNorm.resize(c.nLayers);
+    idxWqB.resize(c.nLayers);
+    idxWeightsProj.resize(c.nLayers);
+    idxCompApe.resize(c.nLayers);
+    idxCompWKv.resize(c.nLayers);
+    idxCompWGate.resize(c.nLayers);
+    idxCompNorm.resize(c.nLayers);
+    hcAttnFn.resize(c.nLayers);
+    hcFfnFn.resize(c.nLayers);
+    hcAttnBase.resize(c.nLayers);
+    hcFfnBase.resize(c.nLayers);
+    hcAttnScale.resize(c.nLayers);
+    hcFfnScale.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
         moeREUpGate[i].resize(c.nRoutedExperts);
         moeREDown[i].resize(c.nRoutedExperts);
@@ -113,6 +135,23 @@ void XModel::Init(void)
     if (_c.attnType == XMODEL_ATTN_DSA) {
         _dsaIndexerScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
         _dsaIndexerScale *= 1.0f / std::sqrt(static_cast<float>(_c.indexHeadDim));
+    }
+
+    if (_c.attnType == XMODEL_ATTN_CXA) {
+        if (_c.oGroups == 0 || _c.oLoraRank == 0) {
+            throw std::invalid_argument("CxA: o_groups and o_lora_rank must be set");
+        }
+        if (_c.windowSize == 0) {
+            throw std::invalid_argument("CxA: window_size must be set");
+        }
+        if (!_c.compressRatios.empty() &&
+            _c.compressRatios.size() < static_cast<size_t>(_c.nLayers)) {
+            throw std::invalid_argument(
+                "CxA: compress_ratios size must be 0 or greater than n_layers");
+        }
+        if (_c.hcMult == 0) {
+            throw std::invalid_argument("CxA: hc_mult must be set");
+        }
     }
 
     size = _c.nRoutedExperts * XDtypeBit(INT64) / 8;
@@ -803,6 +842,13 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     }
 }
 
+void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer,
+                            std::vector<std::vector<XTensor>> &kvCache,
+                            std::vector<XTensor> &freqsCis, XTensor &hiddenState)
+{
+    // TODO
+}
+
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
@@ -1434,23 +1480,77 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
     rt.PutTensor(h);
 }
 
+void XModel::ForwardHcPre(XRuntime &rt, XTensor &input, XTensor &hcFn, XTensor &hcScale,
+                          XTensor &hcBase, XTensor &output, const XTensor &post,
+                          const XTensor &comb)
+{
+    // TODO
+}
+
+void XModel::ForwardHcPost(XRuntime &rt, XTensor &input, XTensor &post, XTensor &comb,
+                           XTensor &residual, XTensor &output)
+{
+    // TODO
+}
+
+void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<XTensor>> &kvCache,
+                              std::vector<XTensor> &freqsCis, XTensor &output)
+{
+    XTensor &residual = rt.GetTensor({x.shape[0], _c.hcMult, _c.hiddenSize}, embed.dtype, DBG_LOC);
+    XTensor &h =
+        rt.GetTensor({rt.maxTokensDp, _c.hiddenSize}, embed.dtype, DBG_LOC).View(rt.currTokens);
+    XTensor &post = rt.GetTensor({x.shape[0], _c.hcMult}, embed.dtype, DBG_LOC);
+    XTensor &comb = rt.GetTensor({x.shape[0], _c.hcMult * _c.hcMult}, embed.dtype, DBG_LOC);
+    for (uint32_t i = 0; i < _c.nLayers; i++) {
+        XDEBUG_SET_STATE(_rankId == 0 && (i == 0 || i == _c.nDenseLayers));
+        XDEBUG_PRINT_X(rt, i == 0 ? x : residual, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
+        ForwardHcPre(rt, i == 0 ? x : residual, hcAttnFn[i], hcAttnScale[i], hcAttnBase[i], h, post,
+                     comb);
+        XliteOpRmsNorm(rt, h, attnNorm[i], h, _c.normEps, _c.hiddenSize, true, attnNormBias[i]);
+        ForwardAttnCXA(rt, i, kvCache, freqsCis, h);
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
+        ForwardHcPost(rt, h, post, comb, i == 0 ? x : residual, residual);
+
+        ForwardHcPre(rt, residual, hcFfnFn[i], hcFfnScale[i], hcFfnBase[i], h, post, comb);
+        XliteOpRmsNorm(rt, h, mlpNorm[i], h, _c.normEps, _c.hiddenSize, true, mlpNormBias[i]);
+        ForwardFFN(rt, i, h);
+        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after ffn").c_str(), 1e6f);
+        ForwardHcPost(rt, h, post, comb, residual, residual);
+    }
+    ForwardHcPre(rt, residual, hcHeadFn, hcHeadScale, hcHeadBase, h);
+    XliteOpRmsNorm(rt, h, norm, output, _c.normEps, _c.hiddenSize, true, normBias);
+    rt.PutTensor(comb);
+    rt.PutTensor(post);
+    rt.PutTensor(h);
+    rt.PutTensor(residual);
+}
+
 void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                    std::vector<std::vector<XTensor>> &kvCache,
-                                   std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                                   XTensor &h)
+                                   std::vector<XTensor> &deepstackInputEmbeds,
+                                   std::vector<XTensor> &freqsCis, XTensor &h)
 {
-    // under DP, different ranks may routed differently with `enableCommOptimize` enabled/disabled;
-    // thus, `ForwardFNN` from both paths must be guarded for correct DP communications
-    if (rt.enableCommOptimize) {
-        size_t m = rt.currTokens, mPad = ROUND_UP(rt.currTokens, _c.defTpSize);
-        XTensor &xPad = rt.GetTensor({mPad, _c.hiddenSize}, embed.dtype, DBG_LOC);
-        ForwardParallelEmbed(rt, input, embed, xPad.View(m));
-        ForwardLayersCommOptimize(rt, xPad.View(mPad), kvCache, deepstackInputEmbeds, freqsCis, h);
-        rt.PutTensor(xPad);
+    if (_c.hcMult == 0) {
+        // under DP, different ranks may routed differently with `enableCommOptimize`
+        // enabled/disabled;
+        // thus, `ForwardFNN` from both paths must be guarded for correct DP communications
+        if (rt.enableCommOptimize) {
+            size_t m = rt.currTokens, mPad = ROUND_UP(rt.currTokens, _c.defTpSize);
+            XTensor &xPad = rt.GetTensor({mPad, _c.hiddenSize}, embed.dtype, DBG_LOC);
+            ForwardParallelEmbed(rt, input, embed, xPad.View(m));
+            ForwardLayersCommOptimize(rt, xPad.View(mPad), kvCache, deepstackInputEmbeds,
+                                      freqsCis[0], h);
+            rt.PutTensor(xPad);
+        } else {
+            XTensor &x = rt.GetTensor({rt.currTokens, _c.hiddenSize}, embed.dtype, DBG_LOC);
+            ForwardParallelEmbed(rt, input, embed, x);
+            ForwardLayersNaive(rt, x, kvCache, deepstackInputEmbeds, freqsCis[0], h);
+            rt.PutTensor(x);
+        }
     } else {
         XTensor &x = rt.GetTensor({rt.currTokens, _c.hiddenSize}, embed.dtype, DBG_LOC);
         ForwardParallelEmbed(rt, input, embed, x);
-        ForwardLayersNaive(rt, x, kvCache, deepstackInputEmbeds, freqsCis, h);
+        ForwardLayersMhc(rt, x, kvCache, freqsCis, h);
         rt.PutTensor(x);
     }
 }
@@ -1513,7 +1613,8 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
 
 void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                      std::vector<std::vector<XTensor>> &kvCache,
-                     std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis, XTensor &output)
+                     std::vector<XTensor> &deepstackInputEmbeds, std::vector<XTensor> &freqsCis,
+                     XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
@@ -1534,8 +1635,8 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
 
 void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                                  std::vector<std::vector<XTensor>> &kvCache,
-                                 std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                                 XTensor &indices, XTensor &output)
+                                 std::vector<XTensor> &deepstackInputEmbeds,
+                                 std::vector<XTensor> &freqsCis, XTensor &indices, XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
 
@@ -1563,8 +1664,6 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
 
 void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &kvCache)
 {
-    XTensor &kCache = kvCache[0][0];
-    XTensor &vCache = kvCache[0][1];
     if (rt.rankId() != _rankId || rt.tpSize() != _c.defTpSize || rt.dpSize() != _c.defDpSize) {
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                  ": check runtime communication setting failed");
@@ -1613,25 +1712,56 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                 }
             }
         }
-        return;
-    }
-
-    uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-    if (kCache.shape[1] != _c.blockSize || vCache.shape[1] != _c.blockSize ||
-        kCache.shape[2] != expectedKvHeads || vCache.shape[2] != expectedKvHeads ||
-        (_c.attnType == XMODEL_ATTN_MHA && kCache.shape[3] != _c.headDim) ||
-        (_c.attnType == XMODEL_ATTN_MLA &&
-         (kCache.shape[3] != _c.kvLoraRank || vCache.shape[3] != _c.ropeHeadDim))) {
-        throw std::runtime_error(
-            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-            ": kv cache's shape not match [block_num, block_size, kv_head_num, head_size]");
-    }
-    if (_c.attnType == XMODEL_ATTN_DSA) {
-        XTensor &indexKCache = kvCache[0][2];
+    } else if (_c.attnType == XMODEL_ATTN_MHA) {
+        XTensor &kCache = kvCache[0][0];
+        XTensor &vCache = kvCache[0][1];
+        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+        if (kCache.shape[1] != _c.blockSize || vCache.shape[1] != _c.blockSize ||
+            kCache.shape[2] != expectedKvHeads || vCache.shape[2] != expectedKvHeads ||
+            kCache.shape[3] != _c.headDim || vCache.shape[3] != _c.headDim) {
+            throw std::runtime_error(
+                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                ": kv cache's shape not match [block_num, block_size, kv_head_num, head_size]");
+        }
+    } else if (_c.attnType == XMODEL_ATTN_MLA || _c.attnType == XMODEL_ATTN_DSA) {
+        XTensor &kCache = kvCache[0][0];
+        XTensor &vCache = kvCache[0][1];
+        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+        if (kCache.shape[1] != _c.blockSize || kCache.shape[2] != expectedKvHeads ||
+            kCache.shape[3] != _c.kvLoraRank) {
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": k nope cache's shape not match [block_num, block_size, "
+                                     "kv_head_num, kv_lora_rank]");
+        }
+        if (vCache.shape[1] != _c.blockSize || vCache.shape[2] != expectedKvHeads ||
+            vCache.shape[3] != _c.ropeHeadDim) {
+            throw std::runtime_error(
+                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                ": pe cache's shape not match [block_num, block_size, kv_head_num, rope_head_dim]");
+        }
+        if (_c.attnType == XMODEL_ATTN_DSA) {
+            XTensor &indexKCache = kvCache[0][2];
+            if (indexKCache.shape[1] != _c.blockSize || indexKCache.shape[2] != 1 ||
+                indexKCache.shape[3] != _c.indexHeadDim) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": DSA index k cache's shape not match [block_num, "
+                                         "block_size, 1, index_head_size]");
+            }
+        }
+    } else if (_c.attnType == XMODEL_ATTN_CXA) {
+        XTensor &kCache = kvCache[0][0];
+        XTensor &indexKCache = kvCache[0][1];
+        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+        if (kCache.shape[1] != _c.blockSize || kCache.shape[2] != expectedKvHeads ||
+            kCache.shape[3] != _c.headDim) {
+            throw std::runtime_error(
+                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                ": kv cache's shape not match [block_num, block_size, kv_head_num, head_dim]");
+        }
         if (indexKCache.shape[1] != _c.blockSize || indexKCache.shape[2] != 1 ||
             indexKCache.shape[3] != _c.indexHeadDim) {
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                     ": DSA index k cache's shape not match [block_num, "
+                                     ": CXA index k cache's shape not match [block_num, "
                                      "block_size, 1, index_head_size]");
         }
     }
@@ -1696,8 +1826,13 @@ size_t XModel::DummyRun()
                 XTensor indexKCache({_c.maxBatch * maxNumBlocks, _c.blockSize, 1, _c.indexHeadDim},
                                     embed.dtype, nullptr);
                 kvCache[i] = {kCache, vCache, indexKCache};
-            } else {
-                throw std::runtime_error("DummyRun: TODO");
+            } else if (_c.attnType == XMODEL_ATTN_CXA) {
+                XTensor kCache(
+                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                    embed.dtype, nullptr);
+                XTensor indexKCache({_c.maxBatch * maxNumBlocks, _c.blockSize, 1, _c.indexHeadDim},
+                                    embed.dtype, nullptr);
+                kvCache[i] = {kCache, indexKCache};
             }
         }
         return kvCache;
@@ -1729,6 +1864,7 @@ size_t XModel::DummyRun()
             deepstackInputEmbeds[i] = deepstackEmbed;
         }
         XTensor freqsCis({_c.maxBatchedTokens, _c.ropeHeadDim}, embed.dtype, nullptr);
+        std::vector<XTensor> freqsCisVec = {freqsCis};
         XTensor input({_c.maxBatchedTokens}, INT32, nullptr);
         XTensor output({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
         XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
@@ -1739,7 +1875,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype));
-        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
+        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
         ForwardGetLogits(rt, output, indices, logits);
@@ -1774,6 +1910,7 @@ size_t XModel::DummyRun()
             deepstackInputEmbeds[i] = deepstackEmbed;
         }
         XTensor freqsCis({_c.maxBatch, _c.ropeHeadDim}, embed.dtype, nullptr);
+        std::vector<XTensor> freqsCisVec = {freqsCis};
         XTensor input({_c.maxBatch}, INT32, nullptr);
         XTensor output({_c.maxBatch, _c.hiddenSize}, embed.dtype, nullptr);
         XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
@@ -1784,7 +1921,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype));
-        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCis, output);
+        Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
         ForwardGetLogits(rt, output, indices, logits);

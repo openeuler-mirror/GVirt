@@ -31,19 +31,27 @@ public:
     ~_CModel();
     void Init(struct XModelConfig &c, uint32_t rankId);
     void Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                 std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                 std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
                  at::Tensor &output, uint64_t currStream);
     void ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                    std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                    at::Tensor &output, uint64_t currStream);
+    void ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                   std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
+                   at::Tensor &output, uint64_t currStream);
     void ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indices, at::Tensor &output,
                           uint64_t currStream);
     void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                             std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
-                             at::Tensor &indices, at::Tensor &output, uint64_t currStream);
+                             std::vector<std::vector<at::Tensor>> &kvCache,
+                             std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
+                             at::Tensor &output, uint64_t currStream);
     void ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                                std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                                at::Tensor &indices, at::Tensor &output, uint64_t currStream);
+    void ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                               std::vector<std::vector<at::Tensor>> &kvCache,
+                               std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
+                               at::Tensor &output, uint64_t currStream);
     void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                  std::vector<std::vector<at::Tensor>> &kvCache,
                                  at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
@@ -135,6 +143,44 @@ public:
     std::vector<at::Tensor> moeREUpGateDeqScale;
     std::vector<at::Tensor> moeREDown;
     std::vector<at::Tensor> moeREDownDeqScale;
+
+    // DeepSeek-V4 (CxA)
+    std::vector<at::Tensor> attnSink;
+    std::vector<at::Tensor> attnWqA;
+    std::vector<at::Tensor> attnWqAInputScale;
+    std::vector<at::Tensor> attnWqAInputOffset;
+    std::vector<at::Tensor> attnWqAQuantBias;
+    std::vector<at::Tensor> attnWqADeqScale;
+    std::vector<at::Tensor> attnWoA;
+    std::vector<at::Tensor> attnWoB;
+    std::vector<at::Tensor> attnWKv;
+    std::vector<at::Tensor> attnWKvInputScale;
+    std::vector<at::Tensor> attnWKvInputOffset;
+    std::vector<at::Tensor> attnWKvQuantBias;
+    std::vector<at::Tensor> attnWKvDeqScale;
+    std::vector<at::Tensor> compApe;
+    std::vector<at::Tensor> compWKv;
+    std::vector<at::Tensor> compWGate;
+    std::vector<at::Tensor> compNorm;
+    std::vector<at::Tensor> idxWqB;
+    std::vector<at::Tensor> idxWqBInputScale;
+    std::vector<at::Tensor> idxWqBInputOffset;
+    std::vector<at::Tensor> idxWqBQuantBias;
+    std::vector<at::Tensor> idxWqBDeqScale;
+    std::vector<at::Tensor> idxWeightsProj;
+    std::vector<at::Tensor> idxCompApe;
+    std::vector<at::Tensor> idxCompWKv;
+    std::vector<at::Tensor> idxCompWGate;
+    std::vector<at::Tensor> idxCompNorm;
+    std::vector<at::Tensor> hcAttnFn;
+    std::vector<at::Tensor> hcFfnFn;
+    std::vector<at::Tensor> hcAttnBase;
+    std::vector<at::Tensor> hcFfnBase;
+    std::vector<at::Tensor> hcAttnScale;
+    std::vector<at::Tensor> hcFfnScale;
+    at::Tensor hcHeadFn;
+    at::Tensor hcHeadBase;
+    at::Tensor hcHeadScale;
 
 private:
     XModel *_model = nullptr;
@@ -307,15 +353,21 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         throw std::invalid_argument("Invalid attention type");
     }
 
+    if (c.attnType == XMODEL_ATTN_CXA && c.compressRatios.size() < c.nLayers) {
+        throw std::invalid_argument(
+            "compressRatios must have at least nLayers elements for CxA attention");
+    }
+
     bool isAttnMLA = c.attnType == XMODEL_ATTN_MLA;
     bool isAttnMHA = c.attnType == XMODEL_ATTN_MHA;
     bool isAttnDSA = c.attnType == XMODEL_ATTN_DSA;
     bool isAttnHybrid = c.attnType == XMODEL_ATTN_HYBRID;
+    bool isAttnCxA = c.attnType == XMODEL_ATTN_CXA;
     const std::vector<LayersCheckEntry> layersTable = {
         // Tensors, Message, allowEmpty, Predicate
         // Common
         {std::ref(attnNorm), "attention norm", false, true},
-        {std::ref(attnOut), "attention out", false, true},
+        {std::ref(attnOut), "attention out", false, !isAttnCxA},
         {std::ref(mlpNorm), "mlp norm", false, true},
         {std::ref(attnNormBias), "attention norm bias", true, true},
         {std::ref(mlpNormBias), "MLP norm bias", true, true},
@@ -363,6 +415,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         {std::ref(indexKWeightsProj), "DSA attention index KWeightsProj", false, isAttnDSA},
         {std::ref(indexKNorm), "DSA attention index KNorm", false, isAttnDSA},
         {std::ref(indexKNormBias), "DSA attention index KNorm bias", false, isAttnDSA},
+        {std::ref(indexQBInputScale), "DSA index QB input scale", true, isAttnDSA},
+        {std::ref(indexQBInputOffset), "DSA index QB input offset", true, isAttnDSA},
+        {std::ref(indexQBQuantBias), "DSA index QB quant bias", true, isAttnDSA},
+        {std::ref(indexQBDeqScale), "DSA index QB dequant scale", true, isAttnDSA},
         {std::ref(mlaQKVAInputScale), "DSA QKVA input scale", true, isAttnDSA},
         {std::ref(mlaQKVAInputOffset), "DSA QKVA input offset", true, isAttnDSA},
         {std::ref(mlaQKVAQuantBias), "DSA QKVA quant bias", true, isAttnDSA},
@@ -384,6 +440,47 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         {std::ref(linearNorm), "Linear norm", false, isAttnHybrid},
         {std::ref(mhaQNorm), "Hybrid Q norm", false, isAttnHybrid && c.qkNorm},
         {std::ref(mhaKNorm), "Hybrid K norm", false, isAttnHybrid && c.qkNorm},
+        // CxA (DeepSeek-V4)
+        {std::ref(attnSink), "v4 attn sink", false, isAttnCxA},
+        {std::ref(attnWqA), "v4 attn wq_a", false, isAttnCxA},
+        {std::ref(attnWqAInputScale), "v4 attn wq_a input scale", true, isAttnCxA},
+        {std::ref(attnWqAInputOffset), "v4 attn wq_a input offset", true, isAttnCxA},
+        {std::ref(attnWqAQuantBias), "v4 attn wq_a quant bias", true, isAttnCxA},
+        {std::ref(attnWqADeqScale), "v4 attn wq_a deq scale", true, isAttnCxA},
+        {std::ref(mlaQB), "DSA attention QB", false, isAttnCxA},
+        {std::ref(mlaQBInputScale), "DSA QB input scale", true, isAttnCxA},
+        {std::ref(mlaQBInputOffset), "DSA QB input offset", true, isAttnCxA},
+        {std::ref(mlaQBQuantBias), "DSA QB quant bias", true, isAttnCxA},
+        {std::ref(mlaQBDeqScale), "DSA QB dequant scale", true, isAttnCxA},
+        {std::ref(mlaQNorm), "DSA attention Q Norm", false, isAttnCxA},
+        {std::ref(mlaKVNorm), "DSA attention KV norm", false, isAttnCxA},
+        {std::ref(attnWoA), "v4 attn wo_a", false, isAttnCxA},
+        {std::ref(attnWoB), "v4 attn wo_b", false, isAttnCxA},
+        {std::ref(attnWKv), "v4 attn wkv", false, isAttnCxA},
+        {std::ref(attnWKvInputScale), "v4 attn wkv input scale", true, isAttnCxA},
+        {std::ref(attnWKvInputOffset), "v4 attn wkv input offset", true, isAttnCxA},
+        {std::ref(attnWKvQuantBias), "v4 attn wkv quant bias", true, isAttnCxA},
+        {std::ref(attnWKvDeqScale), "v4 attn wkv deq scale", true, isAttnCxA},
+        {std::ref(compApe), "v4 compressor ape", false, isAttnCxA},
+        {std::ref(compWKv), "v4 compressor wkv", false, isAttnCxA},
+        {std::ref(compWGate), "v4 compressor wgate", false, isAttnCxA},
+        {std::ref(compNorm), "v4 compressor norm", false, isAttnCxA},
+        {std::ref(idxWeightsProj), "v4 indexer weights_proj", false, isAttnCxA},
+        {std::ref(idxWqB), "v4 indexer wq_b", false, isAttnCxA},
+        {std::ref(idxWqBInputScale), "v4 indexer wq_b input scale", true, isAttnCxA},
+        {std::ref(idxWqBInputOffset), "v4 indexer wq_b input offset", true, isAttnCxA},
+        {std::ref(idxWqBQuantBias), "v4 indexer wq_b quant bias", true, isAttnCxA},
+        {std::ref(idxWqBDeqScale), "v4 indexer wq_b deq scale", true, isAttnCxA},
+        {std::ref(idxCompApe), "v4 idx compressor ape", false, isAttnCxA},
+        {std::ref(idxCompWKv), "v4 idx compressor wkv", false, isAttnCxA},
+        {std::ref(idxCompWGate), "v4 idx compressor wgate", false, isAttnCxA},
+        {std::ref(idxCompNorm), "v4 idx compressor norm", false, isAttnCxA},
+        {std::ref(hcAttnFn), "v4 hc attn fn", false, isAttnCxA},
+        {std::ref(hcFfnFn), "v4 hc ffn fn", false, isAttnCxA},
+        {std::ref(hcAttnBase), "v4 hc attn base", false, isAttnCxA},
+        {std::ref(hcFfnBase), "v4 hc ffn base", false, isAttnCxA},
+        {std::ref(hcAttnScale), "v4 hc attn scale", false, isAttnCxA},
+        {std::ref(hcFfnScale), "v4 hc ffn scale", false, isAttnCxA},
     };
     checkLayersDims(layersTable, c.nLayers, rankId, "Mismatched number of layers");
 
@@ -483,9 +580,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitOptionalXTensor(_model->linearNorm[i], linearNorm[i]);
             }
         } else {
-            InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
-                             attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true, tpRank);
             if (c.attnType == XMODEL_ATTN_MLA) {
+                InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
+                                 attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true,
+                                 tpRank);
                 InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
                                  mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false,
                                  tpRank);
@@ -502,6 +600,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                     InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
                 }
             } else if (c.attnType == XMODEL_ATTN_MHA) {
+                InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
+                                 attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true,
+                                 tpRank);
                 InitMatmulWeight("mhaQKV", mhaQKV, mhaQKVInputScale, mhaQKVInputOffset,
                                  mhaQKVQuantBias, mhaQKVDeqScale, _model->mhaQKV, i, false, tpRank);
                 if (c.addBias) {
@@ -518,6 +619,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                     }
                 }
             } else if (c.attnType == XMODEL_ATTN_DSA) {
+                InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
+                                 attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true,
+                                 tpRank);
                 InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
                                  mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false,
                                  tpRank);
@@ -539,6 +643,52 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitXTensor(_model->indexKWeightsProj[i], indexKWeightsProj[i]);
                 InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
                 InitXTensor(_model->indexKNormBias[i], indexKNormBias[i]);
+            } else if (c.attnType == XMODEL_ATTN_CXA) {
+                InitMatmulWeight("attnWqA", attnWqA, attnWqAInputScale, attnWqAInputOffset,
+                                 attnWqAQuantBias, attnWqADeqScale, _model->attnWqA, i, false,
+                                 tpRank);
+                InitMatmulWeight("attnWKv", attnWKv, attnWKvInputScale, attnWKvInputOffset,
+                                 attnWKvQuantBias, attnWKvDeqScale, _model->attnWKv, i, false,
+                                 tpRank);
+                // wq_b reuses MLA's mlaQB field (same structure as v3 MLA).
+                InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
+                                 mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
+                // q_norm/kv_norm reuse MLA's mlaQNorm/mlaKVNorm fields.
+                InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+                if (!mlaQNormBias.empty()) {
+                    InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
+                }
+                InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+                if (!mlaKVNormBias.empty()) {
+                    InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
+                }
+                // v4 attention output projection (replaces v3 attnOut).
+                InitXTensor(_model->attnWoA[i], attnWoA[i]);
+                InitXTensor(_model->attnWoB[i], attnWoB[i]);
+                InitXTensor(_model->attnSink[i], attnSink[i]);
+                // Compressor (per-layer; may be empty when compress_ratio == 0).
+                InitOptionalXTensor(_model->compWKv[i], compWKv[i]);
+                InitOptionalXTensor(_model->compWGate[i], compWGate[i]);
+                InitOptionalXTensor(_model->compApe[i], compApe[i]);
+                InitOptionalXTensor(_model->compNorm[i], compNorm[i]);
+                // Indexer's weights (only on compress_ratio==4 layers)
+                if (c.compressRatios[i] == 4) {
+                    InitMatmulWeight("idxWqB", idxWqB, idxWqBInputScale, idxWqBInputOffset,
+                                     idxWqBQuantBias, idxWqBDeqScale, _model->idxWqB, i, false,
+                                     tpRank);
+                    InitXTensor(_model->idxWeightsProj[i], idxWeightsProj[i]);
+                    InitXTensor(_model->idxCompWKv[i], idxCompWKv[i]);
+                    InitXTensor(_model->idxCompWGate[i], idxCompWGate[i]);
+                    InitXTensor(_model->idxCompApe[i], idxCompApe[i]);
+                    InitXTensor(_model->idxCompNorm[i], idxCompNorm[i]);
+                }
+                // MHC (per-layer).
+                InitXTensor(_model->hcAttnFn[i], hcAttnFn[i]);
+                InitXTensor(_model->hcFfnFn[i], hcFfnFn[i]);
+                InitXTensor(_model->hcAttnBase[i], hcAttnBase[i]);
+                InitXTensor(_model->hcFfnBase[i], hcFfnBase[i]);
+                InitXTensor(_model->hcAttnScale[i], hcAttnScale[i]);
+                InitXTensor(_model->hcFfnScale[i], hcFfnScale[i]);
             }
         }
     }
@@ -578,12 +728,18 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         }
     }
 
+    if (c.attnType == XMODEL_ATTN_CXA) {
+        InitXTensor(_model->hcHeadFn, hcHeadFn);
+        InitXTensor(_model->hcHeadBase, hcHeadBase);
+        InitXTensor(_model->hcHeadScale, hcHeadScale);
+    }
+
     _model->Init();
 
     if (rankId == 0) {
         XDebugStream s(rankId, "");
         s << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize << "), data parallel("
-          << c.defDpSize << "), expert parallel(" << c.moeEpSize << ")" << std::endl;
+          << c.defDpSize << "), expert parallel(" << c.moeEpSize << ")]" << std::endl;
     }
 
     _kv.resize(c.nLayers);
@@ -602,15 +758,19 @@ _CModel::~_CModel(void)
 }
 
 void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                      std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
-                      at::Tensor &output, uint64_t currStream)
+                      std::vector<std::vector<at::Tensor>> &kvCache,
+                      std::vector<at::Tensor> &freqsCis, at::Tensor &output, uint64_t currStream)
 {
-    XTensor _input, _output, _freqsCis;
+    XTensor _input, _output;
+    std::vector<XTensor> _freqsCis;
     aclrtStream currAclStream = nullptr;
 
     InitXTensor(_input, input);
     InitXTensor(_output, output);
-    InitXTensor(_freqsCis, freqsCis);
+    _freqsCis.resize(freqsCis.size());
+    for (size_t i = 0; i < freqsCis.size(); i++) {
+        InitXTensor(_freqsCis[i], freqsCis[i]);
+    }
 
     if (kvCache.size() < _kv.size()) {
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
@@ -673,6 +833,20 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
     _attnMeta.cachedLens = attnMeta.cachedLens;
     _attnMeta.blockTables = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
+    std::vector<at::Tensor> freqsCisVec = {freqsCis};
+    Forward(rt, input, _attnMeta, kvCache, freqsCisVec, output, currStream);
+}
+
+void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                        std::vector<std::vector<at::Tensor>> &kvCache,
+                        std::vector<at::Tensor> &freqsCis, at::Tensor &output, uint64_t currStream)
+{
+    XModelAttnMeta _attnMeta;
+    _attnMeta.version = 1;
+    _attnMeta.lens = attnMeta.lens;
+    _attnMeta.cachedLens = attnMeta.cachedLens;
+    _attnMeta.blockTables = attnMeta.blockTablesList;
+    InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
     Forward(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
@@ -706,16 +880,20 @@ void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indi
 
 void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                   std::vector<std::vector<at::Tensor>> &kvCache,
-                                  at::Tensor &freqsCis, at::Tensor &indices, at::Tensor &output,
-                                  uint64_t currStream)
+                                  std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
+                                  at::Tensor &output, uint64_t currStream)
 {
-    XTensor _input, _indices, _output, _freqsCis;
+    XTensor _input, _indices, _output;
+    std::vector<XTensor> _freqsCis;
     aclrtStream currAclStream = nullptr;
 
     InitXTensor(_input, input);
     InitXTensor(_indices, indices);
     InitXTensor(_output, output);
-    InitXTensor(_freqsCis, freqsCis);
+    _freqsCis.resize(freqsCis.size());
+    for (size_t i = 0; i < freqsCis.size(); i++) {
+        InitXTensor(_freqsCis[i], freqsCis[i]);
+    }
 
     if (kvCache.size() != _kv.size()) {
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
@@ -769,6 +947,21 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnM
                                     std::vector<std::vector<at::Tensor>> &kvCache,
                                     at::Tensor &freqsCis, at::Tensor &indices, at::Tensor &output,
                                     uint64_t currStream)
+{
+    XModelAttnMeta _attnMeta;
+    _attnMeta.version = 1;
+    _attnMeta.lens = attnMeta.lens;
+    _attnMeta.cachedLens = attnMeta.cachedLens;
+    _attnMeta.blockTables = attnMeta.blockTablesList;
+    InitXTensor(_attnMeta.vllmPosition, attnMeta.positions);
+    std::vector<at::Tensor> freqsCisVec = {freqsCis};
+    ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCisVec, indices, output, currStream);
+}
+
+void _CModel::ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                                    std::vector<std::vector<at::Tensor>> &kvCache,
+                                    std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
+                                    at::Tensor &output, uint64_t currStream)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 1;
@@ -883,6 +1076,10 @@ void _CModel::InitMatmulWeight(const std::string &name, std::vector<at::Tensor> 
     uint32_t weightLayer = currLayer - layerOffset;
 
     wXT.name = name + "[" + std::to_string(currLayer) + "]";
+    if (weightLayer >= w.size() || !TensorUsable(w[weightLayer])) {
+        throw std::invalid_argument(DBG_PREFIX + ": " + wXT.name +
+                                    " weight tensor is required but not provided");
+    }
     InitXTensor(wXT.weight, w[weightLayer]);
     if (wXT.weight.dtype == INT8 && dScale.size() <= weightLayer) {
         std::string errStr = DBG_PREFIX + ": " + name +
@@ -1983,7 +2180,21 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)
         .def_readwrite("linear_value_head_dim", &XModelConfig::linearValueHeadDim)
         .def_readwrite("linear_conv_kernel_dim", &XModelConfig::linearConvKernelDim)
-        .def_readwrite("full_attention_interval", &XModelConfig::fullAttentionInterval);
+        .def_readwrite("full_attention_interval", &XModelConfig::fullAttentionInterval)
+        .def_readwrite("o_groups", &XModelConfig::oGroups)
+        .def_readwrite("o_lora_rank", &XModelConfig::oLoraRank)
+        .def_readwrite("window_size", &XModelConfig::windowSize)
+        .def_readwrite("compress_rope_theta", &XModelConfig::compressRopeTheta)
+        .def_readwrite("original_seq_len", &XModelConfig::originalSeqLen)
+        .def_readwrite("rope_factor", &XModelConfig::ropeFactor)
+        .def_readwrite("beta_fast", &XModelConfig::betaFast)
+        .def_readwrite("beta_slow", &XModelConfig::betaSlow)
+        .def_readwrite("hc_mult", &XModelConfig::hcMult)
+        .def_readwrite("hc_sinkhorn_iters", &XModelConfig::hcSinkhornIters)
+        .def_readwrite("hc_eps", &XModelConfig::hcEps)
+        .def_readwrite("swiglu_limit", &XModelConfig::swigluLimit)
+        .def_readwrite("n_hash_layers", &XModelConfig::nHashLayers)
+        .def_readwrite("compress_ratios", &XModelConfig::compressRatios);
 
     py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
         .def(py::init<>())
@@ -2005,6 +2216,7 @@ PYBIND11_MODULE(_C, m)
         .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
         .value("AttnDSA", XModelAttnType::XMODEL_ATTN_DSA)
         .value("AttnHybrid", XModelAttnType::XMODEL_ATTN_HYBRID)
+        .value("AttnCxA", XModelAttnType::XMODEL_ATTN_CXA)
         .export_values();
 
     py::enum_<XModelScoringFuncType>(m, "ScoringFuncType")
@@ -2092,11 +2304,51 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("re_down", &_CModel::moeREDown)
         .def_readwrite("re_down_scale", &_CModel::moeREDownDeqScale)
         .def_readwrite("re_down_deq_scale", &_CModel::moeREDownDeqScale)
+        // DeepSeek-V4 (CxA)
+        .def_readwrite("attn_sink", &_CModel::attnSink)
+        .def_readwrite("attn_wq_a", &_CModel::attnWqA)
+        .def_readwrite("attn_wq_a_input_scale", &_CModel::attnWqAInputScale)
+        .def_readwrite("attn_wq_a_input_offset", &_CModel::attnWqAInputOffset)
+        .def_readwrite("attn_wq_a_quant_bias", &_CModel::attnWqAQuantBias)
+        .def_readwrite("attn_wq_a_deq_scale", &_CModel::attnWqADeqScale)
+        .def_readwrite("attn_wo_a", &_CModel::attnWoA)
+        .def_readwrite("attn_wo_b", &_CModel::attnWoB)
+        .def_readwrite("attn_wkv", &_CModel::attnWKv)
+        .def_readwrite("attn_wkv_input_scale", &_CModel::attnWKvInputScale)
+        .def_readwrite("attn_wkv_input_offset", &_CModel::attnWKvInputOffset)
+        .def_readwrite("attn_wkv_quant_bias", &_CModel::attnWKvQuantBias)
+        .def_readwrite("attn_wkv_deq_scale", &_CModel::attnWKvDeqScale)
+        .def_readwrite("comp_ape", &_CModel::compApe)
+        .def_readwrite("comp_w_kv", &_CModel::compWKv)
+        .def_readwrite("comp_w_gate", &_CModel::compWGate)
+        .def_readwrite("comp_norm", &_CModel::compNorm)
+        .def_readwrite("idx_wq_b", &_CModel::idxWqB)
+        .def_readwrite("idx_wq_b_input_scale", &_CModel::idxWqBInputScale)
+        .def_readwrite("idx_wq_b_input_offset", &_CModel::idxWqBInputOffset)
+        .def_readwrite("idx_wq_b_quant_bias", &_CModel::idxWqBQuantBias)
+        .def_readwrite("idx_wq_b_deq_scale", &_CModel::idxWqBDeqScale)
+        .def_readwrite("idx_weights_proj", &_CModel::idxWeightsProj)
+        .def_readwrite("idx_comp_ape", &_CModel::idxCompApe)
+        .def_readwrite("idx_comp_w_kv", &_CModel::idxCompWKv)
+        .def_readwrite("idx_comp_w_gate", &_CModel::idxCompWGate)
+        .def_readwrite("idx_comp_norm", &_CModel::idxCompNorm)
+        .def_readwrite("hc_attn_fn", &_CModel::hcAttnFn)
+        .def_readwrite("hc_ffn_fn", &_CModel::hcFfnFn)
+        .def_readwrite("hc_attn_base", &_CModel::hcAttnBase)
+        .def_readwrite("hc_ffn_base", &_CModel::hcFfnBase)
+        .def_readwrite("hc_attn_scale", &_CModel::hcAttnScale)
+        .def_readwrite("hc_ffn_scale", &_CModel::hcFfnScale)
+        .def_readwrite("hc_head_fn", &_CModel::hcHeadFn)
+        .def_readwrite("hc_head_base", &_CModel::hcHeadBase)
+        .def_readwrite("hc_head_scale", &_CModel::hcHeadScale)
         .def("init", &_CModel::Init, "model init", py::arg("config"), py::arg("rank") = 0)
         .def("forward", &_CModel::Forward, "forward", py::arg("rt"), py::arg("input"),
              py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward", &_CModel::ForwardV1, "forward", py::arg("rt"), py::arg("input"),
+             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("forward", &_CModel::ForwardV2, "forward", py::arg("rt"), py::arg("input"),
              py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_get_logits", &_CModel::ForwardGetLogits, "forward_get_logits", py::arg("rt"),
@@ -2107,6 +2359,10 @@ PYBIND11_MODULE(_C, m)
              py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV1, "forward_and_get_logits",
+             py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+             py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV2, "forward_and_get_logits",
              py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
              py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())

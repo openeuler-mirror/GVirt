@@ -63,8 +63,8 @@ def sparse_attn(
     exp_scores = exp_scores.masked_fill(invalid.unsqueeze(2), 0.0)
     sum_exp = exp_scores.sum(dim=-1, keepdim=True)  # [b, s, h, 1]
 
-    # attn_sink: [h] -> add exp(0 - scores_max) to denominator (sink score is 0).
-    sink_term = torch.exp(-scores_max.squeeze(-1))  # [b, s, h]
+    # attn_sink: [h] -> add exp(attn_sink - scores_max) to denominator (sink logit is learnable per-head).
+    sink_term = torch.exp(attn_sink.view(1, 1, -1) - scores_max.squeeze(-1))  # [b, s, h]
     sum_exp = sum_exp.squeeze(-1) + sink_term  # [b, s, h]
     sum_exp = sum_exp.unsqueeze(-1)  # [b, s, h, 1]
 

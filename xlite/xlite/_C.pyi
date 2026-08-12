@@ -7,7 +7,7 @@ The typing and docstrings are designed for Python 3.9 to 3.12.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional, Sequence, overload
+from typing import List, Optional, Sequence, Union, overload
 
 import torch
 
@@ -151,6 +151,20 @@ class ModelConfig:
         index_topk (int): Indexer top-k size.
         index_softmax_scale (float): Indexer softmax scale.(deprecated)
         index_rope_interleaved (bool): Whether indexer RoPE is interleaved.
+        o_groups (int): Output projection group count (DeepSeek-V4).
+        o_lora_rank (int): Output projection LoRA rank (DeepSeek-V4).
+        window_size (int): Sliding window attention size (DeepSeek-V4).
+        compress_rope_theta (float): KV compressor RoPE base (DeepSeek-V4).
+        original_seq_len (int): YaRN original sequence length (DeepSeek-V4).
+        rope_factor (float): YaRN extension factor (DeepSeek-V4).
+        beta_fast (int): YaRN beta_fast (DeepSeek-V4).
+        beta_slow (int): YaRN beta_slow (DeepSeek-V4).
+        hc_mult (int): Multi-stage Hyper-Connections multiplier (DeepSeek-V4).
+        hc_sinkhorn_iters (int): MHC Sinkhorn iterations (DeepSeek-V4).
+        hc_eps (float): MHC Sinkhorn epsilon (DeepSeek-V4).
+        swiglu_limit (float): SwiGLU clamp limit; 0 disables (DeepSeek-V4).
+        n_hash_layers (int): Number of hash-routed MoE layers (DeepSeek-V4).
+        compress_ratios (List[int]): Per-layer KV compression ratios (DeepSeek-V4).
     """
 
     vocab_size: int = ...
@@ -271,6 +285,34 @@ class ModelConfig:
     """Indexer softmax scale.(deprecated)"""
     index_rope_interleaved: bool = ...
     """Whether indexer RoPE is interleaved."""
+    o_groups: int = ...
+    """Output projection group count (DeepSeek-V4)."""
+    o_lora_rank: int = ...
+    """Output projection LoRA rank (DeepSeek-V4)."""
+    window_size: int = ...
+    """Sliding window attention size (DeepSeek-V4)."""
+    compress_rope_theta: float = ...
+    """KV compressor RoPE base (DeepSeek-V4)."""
+    original_seq_len: int = ...
+    """YaRN original sequence length (DeepSeek-V4)."""
+    rope_factor: float = ...
+    """YaRN extension factor (DeepSeek-V4)."""
+    beta_fast: int = ...
+    """YaRN beta_fast (DeepSeek-V4)."""
+    beta_slow: int = ...
+    """YaRN beta_slow (DeepSeek-V4)."""
+    hc_mult: int = ...
+    """Multi-stage Hyper-Connections multiplier (DeepSeek-V4)."""
+    hc_sinkhorn_iters: int = ...
+    """MHC Sinkhorn iterations (DeepSeek-V4)."""
+    hc_eps: float = ...
+    """MHC Sinkhorn epsilon (DeepSeek-V4)."""
+    swiglu_limit: float = ...
+    """SwiGLU clamp limit; 0 disables (DeepSeek-V4)."""
+    n_hash_layers: int = ...
+    """Number of hash-routed MoE layers (DeepSeek-V4)."""
+    compress_ratios: List[int] = ...
+    """Per-layer KV compression ratios (DeepSeek-V4)."""
 
 class ModelAttnMeta:
     """Device-side attention metadata for the legacy forward path.
@@ -330,6 +372,8 @@ class AttnType(Enum):
     """Dual sparse attention."""
     AttnHybrid = ...
     """Hybrid full + linear attention (Qwen3.5)."""
+    AttnCxA = ...
+    """C4A / C128A attention (DeepSeek-V4)."""
 
 class ScoringFuncType(Enum):
     """MoE scoring function enum exported by the native extension."""
@@ -347,6 +391,8 @@ AttnMLA: AttnType = ...
 """Alias for :attr:`AttnType.AttnMLA`."""
 AttnDSA: AttnType = ...
 """Alias for :attr:`AttnType.AttnDSA`."""
+AttnCxA: AttnType = ...
+"""Alias for :attr:`AttnType.AttnCxA`."""
 
 ScoringFuncSoftmax: ScoringFuncType = ...
 """Alias for :attr:`ScoringFuncType.ScoringFuncSoftmax`."""
@@ -435,6 +481,42 @@ class Model:
         re_down (List[torch.Tensor]): Routed-expert down weights.
         re_down_scale (List[torch.Tensor]): Routed-expert down scales(deprecated).
         re_down_deq_scale (List[torch.Tensor]): Routed-expert down scales.
+        attn_sink (List[torch.Tensor]): Per-head attention sink (DeepSeek-V4).
+        attn_wq_a (List[torch.Tensor]): Per-layer attention wq_a (DeepSeek-V4).
+        attn_wq_a_input_scale (List[torch.Tensor]): Attn wq_a quantization input scale per layer.
+        attn_wq_a_input_offset (List[torch.Tensor]): Attn wq_a quantization input offset per layer.
+        attn_wq_a_quant_bias (List[torch.Tensor]): Attn wq_a quantization bias per layer.
+        attn_wq_a_deq_scale (List[torch.Tensor]): Attn wq_a dequantization scale per layer.
+        attn_wo_a (List[torch.Tensor]): Per-layer output projection wo_a (DeepSeek-V4).
+        attn_wo_b (List[torch.Tensor]): Per-layer output projection wo_b (DeepSeek-V4).
+        attn_wkv (List[torch.Tensor]): Per-layer attention wkv (DeepSeek-V4).
+        attn_wkv_input_scale (List[torch.Tensor]): Attn wkv quantization input scale per layer.
+        attn_wkv_input_offset (List[torch.Tensor]): Attn wkv quantization input offset per layer.
+        attn_wkv_quant_bias (List[torch.Tensor]): Attn wkv quantization bias per layer.
+        attn_wkv_deq_scale (List[torch.Tensor]): Attn wkv dequantization scale per layer.
+        comp_ape (List[torch.Tensor]): Compressor ape per layer (DeepSeek-V4).
+        comp_w_kv (List[torch.Tensor]): Compressor wkv per layer (DeepSeek-V4, fp32).
+        comp_w_gate (List[torch.Tensor]): Compressor wgate per layer (DeepSeek-V4, fp32).
+        comp_norm (List[torch.Tensor]): Compressor RMSNorm weight per layer (DeepSeek-V4).
+        idx_wq_b (List[torch.Tensor]): Indexer wq_b per layer (DeepSeek-V4).
+        idx_wq_b_input_scale (List[torch.Tensor]): Indexer wq_b quantization input scale per layer.
+        idx_wq_b_input_offset (List[torch.Tensor]): Indexer wq_b quantization input offset per layer.
+        idx_wq_b_quant_bias (List[torch.Tensor]): Indexer wq_b quantization bias per layer.
+        idx_wq_b_deq_scale (List[torch.Tensor]): Indexer wq_b dequantization scale per layer.
+        idx_weights_proj (List[torch.Tensor]): Indexer weights_proj per layer (DeepSeek-V4).
+        idx_comp_ape (List[torch.Tensor]): Indexer compressor ape per layer (DeepSeek-V4).
+        idx_comp_w_kv (List[torch.Tensor]): Indexer compressor wkv per layer (fp32).
+        idx_comp_w_gate (List[torch.Tensor]): Indexer compressor wgate per layer (fp32).
+        idx_comp_norm (List[torch.Tensor]): Indexer compressor norm per layer (DeepSeek-V4).
+        hc_attn_fn (List[torch.Tensor]): MHC attn fn per layer (DeepSeek-V4).
+        hc_ffn_fn (List[torch.Tensor]): MHC ffn fn per layer (DeepSeek-V4).
+        hc_attn_base (List[torch.Tensor]): MHC attn base per layer (DeepSeek-V4).
+        hc_ffn_base (List[torch.Tensor]): MHC ffn base per layer (DeepSeek-V4).
+        hc_attn_scale (List[torch.Tensor]): MHC attn scale per layer (DeepSeek-V4).
+        hc_ffn_scale (List[torch.Tensor]): MHC ffn scale per layer (DeepSeek-V4).
+        hc_head_fn (torch.Tensor): MHC head fn (Transformer-level, DeepSeek-V4).
+        hc_head_base (torch.Tensor): MHC head base (Transformer-level, DeepSeek-V4).
+        hc_head_scale (torch.Tensor): MHC head scale (Transformer-level, DeepSeek-V4).
     """
 
     embed: torch.Tensor = ...
@@ -594,6 +676,81 @@ class Model:
     re_down_deq_scale: List[torch.Tensor] = ...
     """Routed-expert down scales."""
 
+    # DeepSeek-V4 (CxA)
+    attn_sink: List[torch.Tensor] = ...
+    """Per-head attention sink (DeepSeek-V4)."""
+    attn_wq_a: List[torch.Tensor] = ...
+    """Per-layer attention wq_a (DeepSeek-V4)."""
+    attn_wq_a_input_scale: List[torch.Tensor] = ...
+    """Attn wq_a quantization input scale per layer."""
+    attn_wq_a_input_offset: List[torch.Tensor] = ...
+    """Attn wq_a quantization input offset per layer."""
+    attn_wq_a_quant_bias: List[torch.Tensor] = ...
+    """Attn wq_a quantization bias per layer."""
+    attn_wq_a_deq_scale: List[torch.Tensor] = ...
+    """Attn wq_a dequantization scale per layer."""
+    attn_wo_a: List[torch.Tensor] = ...
+    """Per-layer output projection wo_a (DeepSeek-V4)."""
+    attn_wo_b: List[torch.Tensor] = ...
+    """Per-layer output projection wo_b (DeepSeek-V4)."""
+    attn_wkv: List[torch.Tensor] = ...
+    """Per-layer attention wkv (DeepSeek-V4)."""
+    attn_wkv_input_scale: List[torch.Tensor] = ...
+    """Attn wkv quantization input scale per layer."""
+    attn_wkv_input_offset: List[torch.Tensor] = ...
+    """Attn wkv quantization input offset per layer."""
+    attn_wkv_quant_bias: List[torch.Tensor] = ...
+    """Attn wkv quantization bias per layer."""
+    attn_wkv_deq_scale: List[torch.Tensor] = ...
+    """Attn wkv dequantization scale per layer."""
+    comp_ape: List[torch.Tensor] = ...
+    """Compressor ape per layer (DeepSeek-V4)."""
+    comp_w_kv: List[torch.Tensor] = ...
+    """Compressor wkv per layer (DeepSeek-V4, fp32)."""
+    comp_w_gate: List[torch.Tensor] = ...
+    """Compressor wgate per layer (DeepSeek-V4, fp32)."""
+    comp_norm: List[torch.Tensor] = ...
+    """Compressor RMSNorm weight per layer (DeepSeek-V4)."""
+    # Indexer.wq_b is v4-specific (different shape from DSA's index_q_b).
+    idx_wq_b: List[torch.Tensor] = ...
+    """Indexer wq_b per layer (DeepSeek-V4)."""
+    idx_wq_b_input_scale: List[torch.Tensor] = ...
+    """Indexer wq_b quantization input scale per layer."""
+    idx_wq_b_input_offset: List[torch.Tensor] = ...
+    """Indexer wq_b quantization input offset per layer."""
+    idx_wq_b_quant_bias: List[torch.Tensor] = ...
+    """Indexer wq_b quantization bias per layer."""
+    idx_wq_b_deq_scale: List[torch.Tensor] = ...
+    """Indexer wq_b dequantization scale per layer."""
+    idx_weights_proj: List[torch.Tensor] = ...
+    """Indexer weights_proj per layer (DeepSeek-V4)."""
+    idx_comp_ape: List[torch.Tensor] = ...
+    """Indexer compressor ape per layer (DeepSeek-V4)."""
+    idx_comp_w_kv: List[torch.Tensor] = ...
+    """Indexer compressor wkv per layer (fp32)."""
+    idx_comp_w_gate: List[torch.Tensor] = ...
+    """Indexer compressor wgate per layer (fp32)."""
+    idx_comp_norm: List[torch.Tensor] = ...
+    """Indexer compressor norm per layer (DeepSeek-V4)."""
+    hc_attn_fn: List[torch.Tensor] = ...
+    """MHC attn fn per layer (DeepSeek-V4)."""
+    hc_ffn_fn: List[torch.Tensor] = ...
+    """MHC ffn fn per layer (DeepSeek-V4)."""
+    hc_attn_base: List[torch.Tensor] = ...
+    """MHC attn base per layer (DeepSeek-V4)."""
+    hc_ffn_base: List[torch.Tensor] = ...
+    """MHC ffn base per layer (DeepSeek-V4)."""
+    hc_attn_scale: List[torch.Tensor] = ...
+    """MHC attn scale per layer (DeepSeek-V4)."""
+    hc_ffn_scale: List[torch.Tensor] = ...
+    """MHC ffn scale per layer (DeepSeek-V4)."""
+    hc_head_fn: torch.Tensor = ...
+    """MHC head fn (Transformer-level, DeepSeek-V4)."""
+    hc_head_base: torch.Tensor = ...
+    """MHC head base (Transformer-level, DeepSeek-V4)."""
+    hc_head_scale: torch.Tensor = ...
+    """MHC head scale (Transformer-level, DeepSeek-V4)."""
+
     def init(self, config: ModelConfig, rank: int = 0) -> None:
         """Initialize native model state from Python-provided weights.
 
@@ -616,7 +773,7 @@ class Model:
         input: torch.Tensor,
         attn_meta: ModelAttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: torch.Tensor,
+        freqs_cis: Sequence[torch.Tensor],
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
@@ -627,7 +784,10 @@ class Model:
             input (torch.Tensor): Input token tensor.
             attn_meta (ModelAttnMeta): Device-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
+            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors,
+                one entry per layer (DeepSeek-V4 uses different ``rope_theta`` for
+                compress vs non-compress layers). V3-style callers may pass a
+                single-element list; all layers share that one tensor.
             output (torch.Tensor): Output hidden-state buffer.
             curr_stream (int): Optional ACL stream pointer cast to integer.
 
@@ -645,18 +805,22 @@ class Model:
         input: torch.Tensor,
         attn_meta: AttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: torch.Tensor,
+        freqs_cis: Union[torch.Tensor, Sequence[torch.Tensor]],
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
-        """Run forward pass with host/vLLM-compatible attention metadata.
+        """Run forward pass with host/vLLM-compatible attention metadata (V1).
+
+        Legacy single-tensor entry: ``freqs_cis`` is shared across all layers.
+        Internally wrapped into a one-element list and dispatched to the V2 path.
 
         Args:
             rt (Runtime): Native runtime handle.
             input (torch.Tensor): Input token tensor.
             attn_meta (AttnMeta): Host-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
+            freqs_cis (Union[torch.Tensor, Sequence[torch.Tensor]]): Rotary
+                frequency tensor shared by all layers, or a per-layer sequence
             output (torch.Tensor): Output hidden-state buffer.
             curr_stream (int): Optional ACL stream pointer cast to integer.
 
@@ -698,7 +862,7 @@ class Model:
         input: torch.Tensor,
         attn_meta: ModelAttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: torch.Tensor,
+        freqs_cis: Sequence[torch.Tensor],
         indices: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int = 0,
@@ -710,7 +874,10 @@ class Model:
             input (torch.Tensor): Input token tensor.
             attn_meta (ModelAttnMeta): Device-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
+            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors,
+                one entry per layer (DeepSeek-V4 uses different ``rope_theta`` for
+                compress vs non-compress layers). V3-style callers may pass a
+                single-element list; all layers share that one tensor.
             indices (torch.Tensor): Logits indices.
             output (torch.Tensor): Output logits buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
@@ -729,19 +896,23 @@ class Model:
         input: torch.Tensor,
         attn_meta: AttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: torch.Tensor,
+        freqs_cis: Union[torch.Tensor, Sequence[torch.Tensor]],
         indices: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
-        """Run forward pass and materialize logits (host metadata).
+        """Run forward pass and materialize logits (host metadata, V1).
+
+        Legacy single-tensor entry: ``freqs_cis`` is shared across all layers.
+        Internally wrapped into a one-element list and dispatched to the V2 path.
 
         Args:
             rt (Runtime): Native runtime handle.
             input (torch.Tensor): Input token tensor.
             attn_meta (AttnMeta): Host-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
+            freqs_cis (Union[torch.Tensor, Sequence[torch.Tensor]]): Rotary
+                frequency tensor shared by all layers, or a per-layer sequence
             indices (torch.Tensor): Logits indices.
             output (torch.Tensor): Output logits buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
