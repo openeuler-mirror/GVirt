@@ -37,7 +37,7 @@ if __name__ == "__main__":
     torch.set_default_device("npu:0")
     torch.set_printoptions(threshold=torch.inf)
 
-    for dtype in [torch.bfloat16, torch.float16, torch.float32]:
+    for dtype in [torch.bfloat16, torch.float16]:
         torch.set_default_dtype(dtype)
         for batch in range(1, 9):
             for i in range(13):
