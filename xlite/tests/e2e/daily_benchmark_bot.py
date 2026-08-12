@@ -216,12 +216,15 @@ def update_model_paths(device: str) -> bool:
         return False
 
 
-def run_benchmark(model_type: str = "moe") -> Optional[Path]:
+def run_benchmark(
+    model_type: str = "moe", report_subdir: Optional[Path] = None
+) -> Optional[Path]:
     """
     在测试容器中执行基准测试脚本
 
     参数:
         model_type: 模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)
+        report_subdir: 报告目录路径。传入则复用, 否则按当前版本+日期新建。
 
     返回:
         报告目录路径，失败返回 None
@@ -238,10 +241,11 @@ def run_benchmark(model_type: str = "moe") -> Optional[Path]:
     else:
         log_warning("使用脚本中默认的模型路径")
 
-    # 创建当前版本报告目录 (版本号+日期)
-    current_version = get_current_version()
-    current_date = datetime.now().strftime("%Y%m%d")
-    report_subdir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
+    # 报告目录: 传入则复用, 否则按当前版本+日期新建
+    if report_subdir is None:
+        current_version = get_current_version()
+        current_date = datetime.now().strftime("%Y%m%d")
+        report_subdir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
     report_subdir.mkdir(parents=True, exist_ok=True)
 
     # 将日志文件移动到报告目录
@@ -274,11 +278,14 @@ def run_benchmark(model_type: str = "moe") -> Optional[Path]:
 
 
 # ====================== 离线 bench 测试执行函数 ======================
-def run_offline_bench() -> Optional[Path]:
+def run_offline_bench(report_subdir: Optional[Path] = None) -> Optional[Path]:
     """
     在测试容器中执行离线 bench 测试 (run.sh bench 模式)
 
     用 run.sh 跑 run_glm5_w8a8 的 bench 模式，只跑 OFFLINE_BENCH_N_LAYERS 层。
+
+    参数:
+        report_subdir: 报告目录路径。传入则复用, 否则按当前版本+日期新建。
 
     返回:
         报告目录路径，失败返回 None
@@ -301,10 +308,15 @@ def run_offline_bench() -> Optional[Path]:
         models_base_path = "/mnt/nvme0n1/models"
         log_warning(f"未检测到模型设备，使用默认路径: {models_base_path}")
 
-    # 创建当前版本报告目录 (版本号+日期)
-    current_version = get_current_version()
-    current_date = datetime.now().strftime("%Y%m%d")
-    report_subdir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
+    # 报告目录: 传入则复用, 否则按当前版本+日期新建。
+    # current_date 与目录日期保持一致 (复用时从目录名提取, 保证日志文件名日期一致)
+    if report_subdir is None:
+        current_version = get_current_version()
+        current_date = datetime.now().strftime("%Y%m%d")
+        report_subdir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
+    else:
+        match = re.search(r"(\d{8})$", str(report_subdir))
+        current_date = match.group(1) if match else datetime.now().strftime("%Y%m%d")
     report_subdir.mkdir(parents=True, exist_ok=True)
 
     # 将日志文件移动到报告目录
@@ -1641,13 +1653,20 @@ def main():
                 sys.exit(1)
 
         # 步骤4: 执行基准测试 (在测试容器中)
-        report_dir = None
+        # 一次性确定报告目录 (版本+日期), 供在线/离线两阶段复用,
+        # 避免跨午夜跑测试时结果分到不同日期目录。
+        current_version = get_current_version()
+        current_date = datetime.now().strftime("%Y%m%d")
+        report_dir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        log_info(f"本次测试报告目录: {report_dir}")
+
         if run_online:
             log_info("=" * 60)
             log_info("阶段 1/2: 在线性能测试")
             log_info("=" * 60)
-            report_dir = run_benchmark(args.model)
-            if not report_dir:
+            online_report_dir = run_benchmark(args.model, report_dir)
+            if not online_report_dir:
                 log_error("在线基准测试失败，终止执行")
                 sys.exit(1)
 
@@ -1655,11 +1674,10 @@ def main():
             log_info("=" * 60)
             log_info(f"阶段 {'2/2' if run_online else '1/1'}: 离线 bench 测试")
             log_info("=" * 60)
-            offline_report_dir = run_offline_bench()
+            offline_report_dir = run_offline_bench(report_dir)
             if not offline_report_dir:
                 log_error("离线 bench 测试失败，终止执行")
                 sys.exit(1)
-            report_dir = offline_report_dir
 
     # 步骤5: 处理报告 + 发送通知 (在线/离线各一份)
     has_any_degradation = False
