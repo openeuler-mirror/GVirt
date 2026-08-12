@@ -599,7 +599,7 @@ def generate_offline_report(
 
     lines.append(
         f'<font color="blue"><b>xlite {current_date} 离线 bench 性能测试报告 '
-        f"[{model_index + 1}/{total_models}] (GLM-5.1-w8a8, {OFFLINE_BENCH_N_LAYERS} 层)</b></font>"
+        f"[{model_index + 1}/{total_models}]</b></font>"
     )
     lines.append("")
 
@@ -994,7 +994,7 @@ def generate_model_report(
             current_date = match.group(1)
 
     lines.append(
-        f'<font color="blue"><b>xlite {current_date} 性能测试报告 [{model_index + 1}/{total_models}]</b></font>'
+        f'<font color="blue"><b>xlite {current_date} 在线性能测试报告 [{model_index + 1}/{total_models}]</b></font>'
     )
     lines.append("")
 
@@ -1131,14 +1131,14 @@ def generate_model_report(
 
 
 def build_no_change_report(
-    report_dir: Optional[Path], model_count: int = 0, is_offline: bool = False
+    report_dir: Optional[Path], model_names: Optional[List[str]] = None, is_offline: bool = False
 ) -> str:
     """
     所有模型性能均无显著变化时生成汇总通知
 
     参数:
         report_dir: 报告保存目录路径
-        model_count: 本次测试的模型数量
+        model_names: 本次测试的模型名称列表
         is_offline: 是否为离线 bench 测试
 
     返回:
@@ -1156,20 +1156,19 @@ def build_no_change_report(
             current_date = match.group(1)
 
     if is_offline:
-        header = f"xlite {current_date} 离线 bench 性能测试报告 (GLM-5.1-w8a8, {OFFLINE_BENCH_N_LAYERS} 层)"
+        header = f"xlite {current_date} 离线 bench 性能测试报告"
     else:
-        header = f"xlite {current_date} 性能测试报告"
+        header = f"xlite {current_date} 在线性能测试报告"
     lines = [f'<font color="blue"><b>{header}</b></font>', ""]
 
-    summary = f"📊 性能统计: <b>劣化项: 0 | 提升项: 0</b>"
-    if model_count:
-        summary += f" (共 {model_count} 个模型)"
-    lines.append(summary)
     lines.append(f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite commit: {xlite_commit}")
     lines.append(
         f"【对比基线】 vllm-ascend 版本: {baseline_info['vllm_ascend_version']}, xlite 版本: {baseline_info['version']}"
     )
-    lines.append("✅ 测试模型性能均无变化")
+    models_text = ""
+    if model_names:
+        models_text = f" (共 {len(model_names)} 个模型: {', '.join(model_names)})"
+    lines.append(f"✅ 测试模型性能均无变化{models_text}")
 
     # 添加报告路径
     ip_address = os.environ.get("MACHINE_IP", "")
@@ -1479,8 +1478,10 @@ def _report_phase(
         log_info(f"  - {model_name}: {len(comparisons)} 个测试场景")
 
     model_names = list(model_groups.keys())
-    log_info(f"准备为 {len(model_names)} 个模型发送通知")
-    num_models_to_report = 0
+    log_info(f"准备为 {len(model_names)} 个模型生成报告")
+    # 先生成全部模型报告。有任一变化则每模型各发一条(含无变化), 否则只发一条合并通知。
+    model_reports = []
+    any_change = False
     for idx, model_name in enumerate(model_names):
         model_comparisons = model_groups[model_name]
         log_info(f"正在生成模型 {model_name} 的报告 [{idx + 1}/{len(model_names)}]")
@@ -1505,14 +1506,17 @@ def _report_phase(
         print(model_report)
         print("=" * 60 + "\n")
 
+        model_reports.append((model_name, model_report))
         if "发现性能优化" in model_report or "发现性能劣化" in model_report:
-            log_info(f"正在发送模型 {model_name} 的通知 [{idx + 1}/{len(model_names)}]")
-            send_notification(model_report, receiver)
-            num_models_to_report += 1
+            any_change = True
 
-    if num_models_to_report == 0:
+    if any_change:
+        for idx, (model_name, model_report) in enumerate(model_reports):
+            log_info(f"正在发送模型 {model_name} 的通知 [{idx + 1}/{len(model_reports)}]")
+            send_notification(model_report, receiver)
+    else:
         log_info("测试模型性能均无变化")
-        no_change_report = build_no_change_report(report_dir, len(model_groups), is_offline)
+        no_change_report = build_no_change_report(report_dir, list(model_groups.keys()), is_offline)
         send_notification(no_change_report, receiver)
 
     # 该阶段是否检测到劣化
