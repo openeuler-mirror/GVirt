@@ -9,6 +9,7 @@
 #include "aclrtlaunch_all.h"
 
 #include "kernels/kernel_param.h"
+#include "trace/trace.h"
 
 #define KERNEL_PTR_TYPE(name) decltype(aclrtlaunch_##name##_bfloat16_t)
 
@@ -711,6 +712,9 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     auto biasPtr = castedBias ? castedBias->ptr : bias.ptr;
     auto outPtr = castedOut ? castedOut->ptr : out.ptr;
 
+    auto inDtype = castedIn ? castedIn->dtype : in.dtype;
+    xlite_trace::RecordMatmul(rt.rankId(), inDtype, transpose, weightNZ, m, n, k);
+
     launchKernel(aicNum, rt.stream, inPtr, weight.ptr, outPtr, m, n, k, weightNZ, transpose, m0, n0,
                  k0, swizzle, biasPtr, deqScale.ptr);
     if (castedOut) {
@@ -819,6 +823,9 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
         err_str += XT_STR(in) + XT_STR(output) + ", weight dtype:" + XDtypeStr(weightDtype);
         throw std::runtime_error(err_str + " unsupported!");
     }
+    xlite_trace::RecordGroupMatmul(rt, counts, start, end, weightDtype, transpose, weightNZ,
+                                   static_cast<uint64_t>(outDim), static_cast<uint64_t>(inDim));
+
     launchKernel(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, deqScales.ptr, counts.ptr,
                  counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose,
                  rt.defaultMatmulSwizzle);
