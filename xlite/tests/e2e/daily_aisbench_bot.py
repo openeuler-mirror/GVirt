@@ -282,8 +282,9 @@ def parse_aisbench_report(report_path: Path) -> Dict:
                 tp: int = int(row.get("tp_size", 0))
                 ep: bool = row.get("ep", "").strip().lower() in ["true", "y", "yes", "1"]
                 dp: int = int(row.get("dp_size", 0))
+                mtp: int = int(row.get("mtp_tokens", 0))
                 result = {
-                    "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}",
+                    "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}{f'+MTP{mtp}' if mtp > 0 else ''}",
                     "backend": backend,
                     "accuracy": float(row.get("accuracy", 0.0)),
                     "error": row.get("error", "") if row.get("error") else None,
@@ -316,23 +317,24 @@ def parse_aisbench_markdown_report(report_path: Path) -> Dict:
     content = report_path.read_text(encoding="utf-8")
 
     # 定义表格行的正则表达式
-    # 格式: | Model | Dataset | TP | EP | DP | Backend | Metric | Accuracy | Error |
+    # 格式: | Model | Dataset | TP | EP | DP | MTP | Backend | Metric | Accuracy | Error |
     table_pattern = re.compile(
         r"\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*(\d+)\s*\|\s*([YN])\s*\|\s*(\d+)\s*\|"
-        r"\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([\d.]+)\s*\|\s*([^|]*)\s*\|"
+        r"\s*(\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([\d.]+)\s*\|\s*([^|]*)\s*\|"
     )
 
     for match in table_pattern.finditer(content):
-        backend = match.group(6).strip()
+        backend = match.group(7).strip()
         model_name = match.group(1).strip()
         tp: int = int(match.group(3).strip())
         ep: bool = match.group(4).strip().upper() == "Y"
         dp: int = int(match.group(5).strip())
+        mtp: int = int(match.group(6).strip())
         result = {
-            "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}",
+            "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}{f'+MTP{mtp}' if mtp > 0 else ''}",
             "backend": backend,
-            "accuracy": float(match.group(8)),
-            "error": match.group(9).strip() if match.group(9).strip() else None,
+            "accuracy": float(match.group(9)),
+            "error": match.group(10).strip() if match.group(10).strip() else None,
         }
         metrics["results"].append(result)
 
