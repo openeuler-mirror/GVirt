@@ -127,6 +127,12 @@ void XliteOpQkRmsNorm(XRuntime &rt, XTensor &in, const XTensor &qNorm, const XTe
                       uint32_t qNormDim, uint32_t qCntPerToken, uint32_t kNormDim,
                       uint32_t kCntPerToken, uint32_t kStartOffset, bool useNorm,
                       const XTensor &qVariance = XTensor(), const XTensor &kVariance = XTensor());
+void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
+                           const XTensor &kNormBias, const XTensor &freqs, const XTensor &position,
+                           uint32_t indexHeadDim, uint32_t indexNHeads, uint32_t ropeHeadDim,
+                           uint32_t blockSize, XTensor &indexKCache, const XTensor &slotMapping,
+                           float normEps, const XTensor &q = XTensor(), float scale = 1.0f,
+                           uint32_t topK = 2048, bool isLong = false, uint32_t tpSize = 1);
 
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
                   XTensor &out);

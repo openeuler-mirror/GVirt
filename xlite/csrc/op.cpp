@@ -1123,6 +1123,35 @@ void XliteOpQkRmsNorm(XRuntime &rt, XTensor &in, const XTensor &qNorm, const XTe
                  kVarArg, rt.tpSize());
 }
 
+void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
+                           const XTensor &kNormBias, const XTensor &freqs, const XTensor &position,
+                           uint32_t indexHeadDim, uint32_t indexNHeads, uint32_t ropeHeadDim,
+                           uint32_t blockSize, XTensor &indexKCache, const XTensor &slotMapping,
+                           float normEps, const XTensor &q, float scale, uint32_t topK, bool isLong,
+                           uint32_t tpSize)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (tpSize != 1) {
+        throw std::runtime_error(std::string(__func__) + ": tpSize should be 1, got " +
+                                 std::to_string(tpSize));
+    }
+
+    KERNEL_PTR_TYPE(indexer_prepare) * launchKernel;
+    if (kw.dtype == FP16) {
+        launchKernel = aclrtlaunch_indexer_prepare_float16_t;
+    } else if (kw.dtype == BF16) {
+        launchKernel = aclrtlaunch_indexer_prepare_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(kw);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    launchKernel(rt.aivNum, rt.stream, kw.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
+                 kw.shape[0], indexHeadDim, indexNHeads, ropeHeadDim, blockSize, normEps,
+                 indexKCache.ptr, slotMapping.ptr, q.ptr, scale, topK, isLong);
+}
+
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)
 {
     if (IsDummyRuntime(rt)) {
