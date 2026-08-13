@@ -1735,6 +1735,27 @@ void MlaPrepare(XRuntime &rt, at::Tensor &attnQkvc, at::Tensor &qNorm, at::Tenso
     rt.Synchronize();
 }
 
+void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor &kNormBias,
+                    at::Tensor &freqs, at::Tensor &position, uint32_t indexHeadDim,
+                    uint32_t indexNHeads, uint32_t ropeHeadDim, uint32_t blockSize,
+                    at::Tensor &indexKCache, at::Tensor &slotMapping, float normEps, at::Tensor &q,
+                    float scale, uint32_t topK, bool isLong)
+{
+    XTensor _kw, _kNorm, _kNormBias, _freqs, _position, _indexKCache, _slotMapping, _q;
+    InitXTensor(_kw, kw);
+    InitXTensor(_kNorm, kNorm);
+    InitXTensor(_kNormBias, kNormBias);
+    InitXTensor(_freqs, freqs);
+    InitXTensor(_position, position);
+    InitXTensor(_indexKCache, indexKCache);
+    InitXTensor(_slotMapping, slotMapping);
+    InitXTensor(_q, q);
+    XliteOpIndexerPrepare(rt, _kw, _kNorm, _kNormBias, _freqs, _position, indexHeadDim, indexNHeads,
+                          ropeHeadDim, blockSize, _indexKCache, _slotMapping, normEps, _q, scale,
+                          topK, isLong);
+    rt.Synchronize();
+}
+
 void Quant(XRuntime &rt, at::Tensor &x, at::Tensor &scaleReciprocal, at::Tensor &offset,
            at::Tensor &out)
 {
@@ -2468,6 +2489,11 @@ PYBIND11_MODULE(_C, m)
           py::arg("q_lora_rank"), py::arg("kv_lora_rank"), py::arg("rope_head_dim"),
           py::arg("block_size"), py::arg("k_cache"), py::arg("pe_cache"), py::arg("slot_mapping"),
           py::arg("norm_eps"));
+    m.def("indexer_prepare", &IndexerPrepare, py::arg("rt"), py::arg("kw"), py::arg("k_norm"),
+          py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("index_head_dim"),
+          py::arg("index_n_heads"), py::arg("rope_head_dim"), py::arg("block_size"),
+          py::arg("index_k_cache"), py::arg("slot_mapping"), py::arg("norm_eps"), py::arg("q"),
+          py::arg("scale"), py::arg("top_k"), py::arg("is_long"));
     m.def("quant", &Quant, py::arg("rt"), py::arg("x"), py::arg("scale_reciprocal"),
           py::arg("offset"), py::arg("out"));
     m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),

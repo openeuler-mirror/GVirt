@@ -1801,6 +1801,62 @@ def mla_prepare(
     """
     ...
 
+def indexer_prepare(
+    rt: Runtime,
+    kw: torch.Tensor,
+    k_norm: torch.Tensor,
+    k_norm_bias: torch.Tensor,
+    freqs: torch.Tensor,
+    position: torch.Tensor,
+    index_head_dim: int,
+    index_n_heads: int,
+    rope_head_dim: int,
+    block_size: int,
+    index_k_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    norm_eps: float,
+    q: torch.Tensor,
+    scale: float,
+    top_k: int,
+    is_long: bool,
+) -> None:
+    """Fused DSA indexer prepare: LayerNorm + rope_complex_and_cache, optional rope_complex(q) + muls(kw).
+
+    Always runs:
+      * LayerNorm over ``kw[:, :index_head_dim]`` (in place).
+      * rope_complex_and_cache on ``kw[:, :index_head_dim+index_n_heads]`` writing the
+        rotary slice of ``kw`` and scattering ``index_head_dim`` slice into ``index_k_cache``.
+
+    When ``is_long`` is true, additionally runs:
+      * rope_complex on ``q`` (``index_n_heads`` heads, each ``index_head_dim`` wide), in place.
+      * muls on ``kw[:, index_head_dim:index_head_dim+index_n_heads]`` by ``scale`` (in place).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        kw (torch.Tensor): ``[token_num, index_head_dim + index_n_heads]`` per token.
+        k_norm (torch.Tensor): LayerNorm weight ``[index_head_dim]``.
+        k_norm_bias (torch.Tensor): LayerNorm bias ``[index_head_dim]``.
+        freqs (torch.Tensor): Precomputed rotary freqs_cis (TTTWWW layout).
+        position (torch.Tensor): Per-token position ids (int64).
+        index_head_dim (int): Indexer head dimension.
+        index_n_heads (int): Indexer head count (also the muls width).
+        rope_head_dim (int): Rotary head dimension.
+        block_size (int): Paged k-cache block size; 0 disables cache writes.
+        index_k_cache (torch.Tensor): Output paged indexer k-cache.
+        slot_mapping (torch.Tensor): Per-token paged-cache slot mapping (int32).
+        norm_eps (float): LayerNorm epsilon.
+        q (torch.Tensor): ``[token_num, index_n_heads * index_head_dim]`` query tensor; only
+            touched when ``is_long`` is true. The rotary slice is written in place.
+        scale (float): Scalar applied to ``kw[:, index_head_dim:]`` when ``is_long`` is true.
+        top_k (int): Number of top-k tokens to select in the indexer/sparse attention.
+        is_long (bool): Whether to run the rope_complex(q) + muls(kw) tail.
+
+    Returns:
+        None: ``kw`` (norm+rope slices, optional muls slice), ``index_k_cache``, and (when
+        ``is_long``) the rotary slice of ``q`` are written in place.
+    """
+    ...
+
 def quant(
     rt: Runtime,
     x: torch.Tensor,

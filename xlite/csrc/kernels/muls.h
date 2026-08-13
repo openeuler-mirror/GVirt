@@ -8,7 +8,8 @@
 #ifdef __DAV_C220_VEC__
 template <typename Dtype>
 __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uint32_t shape0,
-                     uint32_t shape1, uint32_t calcOffset, uint32_t calcNum)
+                     uint32_t shape1, uint32_t calcOffset, uint32_t calcNum, int coreOffset = 0,
+                     int *nextCoreOffset = nullptr)
 {
     set_atomic_none();
     set_mask_norm();
@@ -29,7 +30,7 @@ __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uin
     if constexpr (std::is_same<Dtype, float>::value) {
         off += len;
     } else {
-        off += ROUND_UP(actualLen * sizeof(float), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(calcNum * sizeof(float), VECTOR_MAX_BYTESIZE);
     }
 
     __ubuf__ Dtype *out1 = (__ubuf__ Dtype *)off;
@@ -40,12 +41,17 @@ __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uin
 
     int repeat = DIV_ROUND_UP(calcNum, calcPad);
 
+    if (nextCoreOffset) {
+        *nextCoreOffset = (coreOffset + shape0) % block_num;
+    }
+
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     int curr = 0;
-    for (uint32_t process = block_idx; process < shape0; process += uint32_t(block_num)) {
+    int first = (block_idx + block_num - coreOffset) % block_num;
+    for (uint32_t process = first; process < shape0; process += uint32_t(block_num)) {
         __gm__ Dtype *inPtr = input + process * shape1 + calcOffset;
         __gm__ Dtype *outPtr = output + process * shape1 + calcOffset;
 

@@ -325,45 +325,44 @@ void XModel::ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x,
 XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
                                     XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
 {
+    // TODO not interleaved case
+    if (!_c.indexRopeInterleaved) {
+        throw std::runtime_error(std::string(__func__) + ": TODO");
+    }
+
     XTensor &kw = rt.GetTensor({hiddenState.shape[0], _c.indexHeadDim + _c.indexNHeads},
                                hiddenState.dtype, DBG_LOC);
     XliteOpMatmul(rt, hiddenState, indexKWeightsProj[layer], kw, _c.weightNZ);
-    XliteOpLayerNorm(rt, kw, indexKNorm[layer], indexKNormBias[layer], kw, _c.normEps,
-                     _c.indexHeadDim);
-    // TODO not interleaved case
-    if (_c.indexRopeInterleaved) {
-        XliteOpRopeComplexAndCache(rt, 1, _c.indexHeadDim + _c.indexNHeads, _c.ropeHeadDim, 0,
-                                   _c.indexHeadDim, kw, freqsCis, rt._attnPosition, _c.blockSize,
-                                   indexKCache, rt._attnSlotMapping);
-    }
 
     // only use sparse attention when the sequence length is long enough
-    if (rt._maxNumBlocks * _c.blockSize <= _c.indexTopK) {
+    bool isLong = rt._maxNumBlocks * _c.blockSize > _c.indexTopK;
+    XTensor *qPtr = nullptr;
+    if (isLong) {
+        qPtr = &rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
+                             hiddenState.dtype, DBG_LOC);
+        ForwardLinear(rt, layer, attnNormQc, indexQB, *qPtr);
+    }
+    XliteOpIndexerPrepare(rt, kw, indexKNorm[layer], indexKNormBias[layer], freqsCis,
+                          rt._attnPosition, _c.indexHeadDim, _c.indexNHeads, _c.ropeHeadDim,
+                          _c.blockSize, indexKCache, rt._attnSlotMapping, _c.normEps,
+                          qPtr == nullptr ? XTensor() : *qPtr, _dsaIndexerScale, _c.indexTopK,
+                          isLong);
+
+    if (!isLong) {
         rt.PutTensor(kw);
         return nullptr;
     }
-
-    XTensor &q = rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
-                              hiddenState.dtype, DBG_LOC);
-    ForwardLinear(rt, layer, attnNormQc, indexQB, q);
-    // TODO not interleaved case
-    if (_c.indexRopeInterleaved) {
-        XliteOpRopeComplex(rt, _c.indexNHeads, _c.indexHeadDim, _c.indexHeadDim, _c.ropeHeadDim, 0,
-                           0, q, freqsCis, rt._attnPosition, q);
-    }
-
-    XliteOpMuls(rt, kw, _dsaIndexerScale, kw, _c.indexHeadDim, _c.indexNHeads);
 
     XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
                                    hiddenState.dtype, DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
     XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
-    XliteOpIndexerTopK(rt, q, indexKCache, kw, scores, lastTopk, _dsaTopkIndices, topkIndices,
+    XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices, topkIndices,
                        rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, _sync,
                        _c.indexNHeads, _c.indexHeadDim, _c.blockSize, rt._batch, rt._maxNumBlocks,
                        _c.indexTopK);
     rt.PutTensor(kw);
-    rt.PutTensor(q);
+    rt.PutTensor(*qPtr);
     rt.PutTensor(lastTopk);
     rt.PutTensor(scores);
     return &topkIndices;

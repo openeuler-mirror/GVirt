@@ -187,15 +187,15 @@ public:
     uint32_t _maxNumBlocks;
     uint32_t _batch;
     uint32_t _tileSizeOfCachedKV;
-    XTensor _attnPosition;
-    XTensor _attnBlockTables;
-    XTensor _attnSlotMapping;
-    XTensor _position;
-    XTensor _blockTables;
-    XTensor _slotMapping;
-    XTensor _cachedLens;
-    XTensor _lens;
-    XTensor _queryStartLoc;
+    XTensor _attnPosition;     // uint64_t
+    XTensor _attnBlockTables;  // uint32_t
+    XTensor _attnSlotMapping;  // uint32_t
+    XTensor _position;         // uint64_t
+    XTensor _blockTables;      // uint32_t
+    XTensor _slotMapping;      // uint32_t
+    XTensor _cachedLens;       // uint32_t
+    XTensor _lens;             // uint32_t
+    XTensor _queryStartLoc;    // uint32_t
 
     // for MoE
     XTensor _tokensPerEpGroupAllEpHost;
