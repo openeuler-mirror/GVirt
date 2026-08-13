@@ -37,6 +37,7 @@ class BenchResult:
     tp_size: int
     ep: bool
     dp_size: int
+    mtp_tokens: int
     xlite: bool
     xlite_full_mode: bool
     metric: str
@@ -63,7 +64,7 @@ class BenchResult:
 
     @staticmethod
     def markdown_header() -> str:
-        fields = ["Model", "Dataset", "TP", "EP", "DP", "Backend", "Metric", "Accuracy", "Error"]
+        fields = ["Model", "Dataset", "TP", "EP", "DP", "MTP", "Backend", "Metric", "Accuracy", "Error"]
         return f"| {' | '.join(fields)} |\n| {' | '.join(['---'] * len(fields))} |"
 
     def markdown_row(self) -> str:
@@ -81,6 +82,7 @@ class BenchResult:
             str(self.tp_size),
             "Y" if self.ep else "N",
             str(self.dp_size),
+            str(self.mtp_tokens),
             backend_str,
             self.metric,
             f"{self.accuracy:.2f}",
@@ -279,6 +281,7 @@ def start_vllm_server(
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
+    mtp_tokens: int = 0,
     max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
@@ -352,6 +355,8 @@ def start_vllm_server(
     ]
     if quantization:
         vllm_cmd_lst.append("--quantization ascend")
+    if mtp_tokens > 0:
+        vllm_cmd_lst.append(f'--speculative-config \'{{"method": "mtp","num_speculative_tokens": {mtp_tokens}}}\'')
     vllm_cmd = " ".join(vllm_cmd_lst)
 
     env_copy["XLITE_NODE_IPS"] = ",".join(["127.0.0.1"] * dp_size)
@@ -420,6 +425,7 @@ def run_ais_bench(
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
+    mtp_tokens: int = 0,
     max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
@@ -445,6 +451,7 @@ def run_ais_bench(
         tp_size=tp_size,
         ep=ep,
         dp_size=dp_size,
+        mtp_tokens=mtp_tokens,
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
         metric="weighted_average",
@@ -471,6 +478,7 @@ def run_ais_bench(
     print(f"Tensor parallel size: {tp_size}")
     print(f"Expert parallel: {'Yes' if ep else 'No'}")
     print(f"Data parallel size: {dp_size}")
+    print(f"MTP speculative decode tokens: {mtp_tokens}")
     print(f"Max number of sequences: {max_num_seqs}")
     print(f"Max model length: {max_model_len}")
     print(f"Max number of batched tokens: {max_num_batched_tokens}")
@@ -489,11 +497,14 @@ def run_ais_bench(
         raise FileNotFoundError(f"ais_bench script not found at {ais_bench_script}")
 
     if xlite:
-        suffix = "-xlite-full" if xlite_full_mode else "-xlite-decode-only"
+        suffix_backend = "xlite-full" if xlite_full_mode else "xlite-decode-only"
     else:
-        suffix = "-aclgraph"
-    suffix = f"-TP{tp_size}DP{dp_size}{'EP' if ep else ''}{suffix}"
-    ais_bench_output_dir = (ais_bench_output_dir or ais_bench_dir / "outputs") / f"{model_name}{suffix}"
+        suffix_backend = "aclgraph"
+    suffix_deployment = f"TP{tp_size}DP{dp_size}{'EP' if ep else ''}{f'-MTP{mtp_tokens}' if mtp_tokens > 0 else ''}"
+    suffix = f"-{suffix_deployment}-{suffix_backend}"
+    ais_bench_output_dir = (
+        (ais_bench_output_dir or ais_bench_dir / "outputs") / model_name / suffix_backend / suffix_deployment
+    )
     if not ais_bench_output_dir.exists():
         ais_bench_output_dir.mkdir(parents=True)
     print(f"ais_bench output directory: {ais_bench_output_dir}")
@@ -535,6 +546,7 @@ def run_ais_bench(
         tp_size=tp_size,
         ep=ep,
         dp_size=dp_size,
+        mtp_tokens=mtp_tokens,
         max_num_seqs=max_num_seqs,
         max_model_len=int(max_model_len * 1.5),
         max_num_batched_tokens=max_num_batched_tokens,
@@ -714,6 +726,17 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         help="List of data parallel sizes for each model (last value used for padding)",
     )
     parser.add_argument(
+        "-MTP",
+        "--mtps",
+        "--mtp-nums",
+        dest="mtps",
+        type=int,
+        nargs="+",
+        choices=list(range(16)),
+        default=[0],
+        help="List of MTP speculative decode token numbers for each model (last value used for padding)",
+    )
+    parser.add_argument(
         "-MNS",
         "--max-num-seqs",
         type=int,
@@ -804,6 +827,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     args_tps: list[int] = args.tps + [args.tps[-1]] * (n_models - len(args.tps))
     args_eps: list[bool] = args.eps + [args.eps[-1]] * (n_models - len(args.eps))
     args_dps: list[int] = args.dps + [args.dps[-1]] * (n_models - len(args.dps))
+    args_mtps: list[int] = args.mtps + [args.mtps[-1]] * (n_models - len(args.mtps))
     args_max_num_seqs: list[int] = args.max_num_seqs + [args.max_num_seqs[-1]] * (n_models - len(args.max_num_seqs))
     args_max_model_len: list[int] = args.max_model_len + [args.max_model_len[-1]] * (n_models - len(args.max_model_len))
     args_max_num_batched_tokens: list[int] = args.max_num_batched_tokens + [args.max_num_batched_tokens[-1]] * (
@@ -812,7 +836,6 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     args_extra_aisbench_args: list[str] = args.extra_aisbench_args + [args.extra_aisbench_args[-1]] * (
         n_models - len(args.extra_aisbench_args)
     )
-
     if not args.broadcast_xlite:
         args_xlite = args.xlite + [args.xlite[-1]] * (n_models - len(args.xlite))
     elif len(set(args.xlite)) != len(args.xlite):
@@ -826,14 +849,15 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         args_tps = [tp for tp in args_tps for _ in range(n_xlite)]
         args_eps = [ep for ep in args_eps for _ in range(n_xlite)]
         args_dps = [dp for dp in args_dps for _ in range(n_xlite)]
+        args_mtps = [m for m in args_mtps for _ in range(n_xlite)]
         args_max_num_seqs = [m for m in args_max_num_seqs for _ in range(n_xlite)]
         args_max_model_len = [m for m in args_max_model_len for _ in range(n_xlite)]
         args_max_num_batched_tokens = [m for m in args_max_num_batched_tokens for _ in range(n_xlite)]
         args_extra_aisbench_args = [a for a in args_extra_aisbench_args for _ in range(n_xlite)]
 
     combinations = [
-        (model, int(tp), ep, int(dp), xlite > 0, xlite > 1)
-        for model, tp, ep, dp, xlite in zip(args_models, args_tps, args_eps, args_dps, args_xlite)
+        (model, int(tp), ep, int(dp), int(mtp), xlite > 0, xlite > 1)
+        for model, tp, ep, dp, mtp, xlite in zip(args_models, args_tps, args_eps, args_dps, args_mtps, args_xlite)
     ]
     if len(set(combinations)) != len(combinations):
         # find the duplicate combinations
@@ -847,9 +871,9 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         for dup in duplicates:
             print(
                 f"Duplicate combination found: Model={dup[0]}, TP={dup[1]}, EP={'Y' if dup[2] else 'N'}, DP={dup[3]}, "
-                f"Xlite={'full' if dup[5] else ('decode-only' if dup[4] else 'aclgraph')}"
+                f"MTP={dup[4]}, Xlite={'full' if dup[6] else ('decode-only' if dup[5] else 'aclgraph')}"
             )
-        raise ValueError("The combination of models, tps, eps, etc., must be unique for each model")
+        raise ValueError("The combination of models, tps, eps, dps, mtps, etc., must be unique for each model")
 
     max_num_devices = max(tp * dp for tp, dp in zip(args_tps, args_dps))
     device_ids_env = filter(None, os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "").split(","))
@@ -864,9 +888,11 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
 
     if args.dry_run:
         print("Dry run enabled, not actually running benchmarks. The following combinations would be benchmarked:")
-        for i, (model, tp, ep, dp, xlite, xlite_full) in enumerate(combinations):
+        for i, (model, tp, ep, dp, mtp, xlite, xlite_full) in enumerate(combinations):
             backend_str = "xlite full" if xlite_full else ("xlite decode-only" if xlite else "aclgraph")
-            print(f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, Backend: {backend_str}")
+            print(
+                f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, MTP: {mtp}, Backend: {backend_str}"
+            )
         sys.exit(0)
 
     log_file_path: Path = (
@@ -881,9 +907,9 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         f.write("\n\nFinal Benchmark Results:\n\n")
         f.write(f"{BenchResult.markdown_header()}\n")
     with open(log_csv_path, "w") as f:
-        f.write("model_name,dataset,tp_size,ep,dp_size,xlite,xlite_full_mode,metric,accuracy,error\n")
+        f.write("model_name,dataset,tp_size,ep,dp_size,mtp_tokens,xlite,xlite_full_mode,metric,accuracy,error\n")
 
-    for i, (model, tp, ep, dp, xlite, xlite_full) in enumerate(combinations):
+    for i, (model, tp, ep, dp, mtp, xlite, xlite_full) in enumerate(combinations):
         print(f"\n>>> Running benchmark task {i + 1}/{len(combinations)}")
         model_path: Path = args.model_dir / model
         try:
@@ -897,6 +923,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 tp_size=tp,
                 ep=ep,
                 dp_size=dp,
+                mtp_tokens=mtp,
                 max_num_seqs=args_max_num_seqs[i],
                 max_model_len=args_max_model_len[i],
                 max_num_batched_tokens=args_max_num_batched_tokens[i],
@@ -917,6 +944,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 tp_size=tp,
                 ep=ep,
                 dp_size=dp,
+                mtp_tokens=mtp,
                 xlite=xlite,
                 xlite_full_mode=xlite_full,
                 metric="weighted_average",
@@ -936,9 +964,9 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
             f.write(f"{result.markdown_row()}\n")
         with open(log_csv_path, "a") as f:
             f.write(
-                f"{result.model_name},{result.dataset},{result.tp_size},{result.ep},"
-                f"{result.dp_size},{result.xlite},{result.xlite_full_mode},{result.metric},"
-                f"{result.accuracy},{result.error or ''}\n"
+                f"{result.model_name},{result.dataset},{result.tp_size},{result.ep},{result.dp_size},"
+                f"{result.mtp_tokens},{result.xlite},{result.xlite_full_mode},{result.metric},{result.accuracy},"
+                f"{result.error or ''}\n"
             )
         print(result.markdown_row())
         print(f"Completed benchmark task {i + 1}/{len(combinations)}")
