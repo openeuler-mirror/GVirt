@@ -740,17 +740,30 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     XTensor &mixTrans = rt.GetTensor({batch, qkvDim, seqlen}, hiddenState.dtype, DBG_LOC);
     XTensor &convOut = rt.GetTensor({batch, convDim, seqlen}, hiddenState.dtype, DBG_LOC);
     XTensor &convSeq = rt.GetTensor({batch, seqlen, convDim}, hiddenState.dtype, DBG_LOC);
-    bool decodeStep = rt._linearDecodeStep && (seqlen == 1);
+    // Clear conv/ssm only for fresh prefill (cached_lens==0). Decode and
+    // chunked-prefill continuation (cached>0) must reuse state: xlite has no
+    // chunk_gated_delta_rule, so recurrent resumes from the previous step.
+    auto linearCachedLen = [&](uint32_t req) -> uint32_t {
+        if (req < rt._cachedLensHost.size()) {
+            return rt._cachedLensHost[req];
+        }
+        return 0;
+    };
     {
         XTensor mix3d;
         mix3d.Init({batch, seqlen, qkvDim}, mixQkv.dtype, mixQkv.ptr);
         XliteOpTranspose_1_2(rt, mix3d, mixTrans);
 
-        // Prefill must NOT reuse stale conv_state (Python ignores it and pads zeros).
-        if (!decodeStep && !rt.IsDummyRuntime()) {
-            size_t convBytes = static_cast<size_t>(batch) * convDim * _c.linearConvKernelDim *
-                               XDtypeBit(convState.dtype) / 8;
-            CHECK_ACL(aclrtMemsetAsync(convState.ptr, convBytes, 0, convBytes, rt.stream));
+        if (!rt.IsDummyRuntime()) {
+            size_t convRowBytes = static_cast<size_t>(convDim) * _c.linearConvKernelDim *
+                                  XDtypeBit(convState.dtype) / 8;
+            for (uint32_t i = 0; i < batch; ++i) {
+                if (linearCachedLen(i) != 0) {
+                    continue;
+                }
+                auto *row = static_cast<char *>(convState.ptr) + i * convRowBytes;
+                CHECK_ACL(aclrtMemsetAsync(row, convRowBytes, 0, convRowBytes, rt.stream));
+            }
         }
 
         XTensor convStateBatch;
@@ -790,9 +803,19 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
         rt.PutTensor(query);
         rt.PutTensor(key);
 
-        if (!decodeStep && !rt.IsDummyRuntime()) {
-            size_t stateBytes = ssmState.numel * XDtypeBit(ssmState.dtype) / 8;
-            CHECK_ACL(aclrtMemsetAsync(ssmState.ptr, stateBytes, 0, stateBytes, rt.stream));
+        if (!rt.IsDummyRuntime()) {
+            if (ssmState.shape.empty() || ssmState.shape[0] == 0) {
+                throw std::runtime_error("ForwardAttnLinear: invalid ssmState batch dim");
+            }
+            size_t ssmRowBytes =
+                (ssmState.numel / ssmState.shape[0]) * XDtypeBit(ssmState.dtype) / 8;
+            for (uint32_t i = 0; i < batch; ++i) {
+                if (linearCachedLen(i) != 0) {
+                    continue;
+                }
+                auto *row = static_cast<char *>(ssmState.ptr) + i * ssmRowBytes;
+                CHECK_ACL(aclrtMemsetAsync(row, ssmRowBytes, 0, ssmRowBytes, rt.stream));
+            }
         }
 
         XliteOpRecurrentGatedDeltaRule(rt, queryExp, keyExp, value, beta, g, ssmState, coreAttn,

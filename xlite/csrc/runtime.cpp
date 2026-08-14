@@ -470,6 +470,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     _decodeStep = !anyMultiToken;
     // Decode only when every request has cache and this step is a single token.
     _linearDecodeStep = allCached && !anyMultiToken && batch > 0;
+    _cachedLensHost = cachedLens;
 
     if (batchedTokens == 0 || batchedTokens > maxBatchedTokens) {
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
