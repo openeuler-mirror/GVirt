@@ -273,6 +273,11 @@ private:
                         XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttnLinear(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                            XTensor &freqsCis, XTensor &hiddenState);
+    std::tuple<XTensor &, XTensor &> ForwardAttnCXACommon(XRuntime &rt, uint32_t layer,
+                                                          std::vector<XTensor> &kvCache,
+                                                          XTensor &freqsCis, XTensor &hiddenState);
+    XTensor *ForwardAttnCXAIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState, XTensor &qr,
+                                   std::vector<XTensor> &kvCache, XTensor &freqsCis);
     void ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,

@@ -1141,9 +1141,12 @@ class Transformer(nn.Module):
         # wq_b reuses MLA's mla_q_b field (same structure as v3 MLA).
         self.xlite_model.mla_q_b = [layer.attn.wq_b.weight for layer in self.layers]
         self.xlite_model.mla_q_b_deq_scale = [_xlite_scale_of(layer.attn.wq_b.weight) for layer in self.layers]
-        # q_norm/kv_norm reuse MLA's mla_q_norm/mla_kv_norm fields.
-        self.xlite_model.mla_q_norm = [layer.attn.q_norm.weight for layer in self.layers]
-        self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
+        self.xlite_model.mla_q_norm = [
+            layer.attn.q_norm.weight.to(torch.bfloat16).contiguous() for layer in self.layers
+        ]
+        self.xlite_model.mla_kv_norm = [
+            layer.attn.kv_norm.weight.to(torch.bfloat16).contiguous() for layer in self.layers
+        ]
         # v4 has no separate attn_out projection (uses wo_a/wo_b), leave empty.
         self.xlite_model.attn_out = []
 

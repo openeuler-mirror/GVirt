@@ -935,11 +935,92 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     }
 }
 
+std::tuple<XTensor &, XTensor &> XModel::ForwardAttnCXACommon(XRuntime &rt, uint32_t layer,
+                                                              std::vector<XTensor> &kvCache,
+                                                              XTensor &freqsCis,
+                                                              XTensor &hiddenState)
+{
+    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+    XTensor &qr = rt.GetTensor({hiddenState.shape[0], _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
+    XTensor &q =
+        rt.GetTensor({hiddenState.shape[0], nLocalHeads, _c.headDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &kv = rt.GetTensor({hiddenState.shape[0], _c.headDim}, hiddenState.dtype, DBG_LOC);
+
+    ForwardLinear(rt, layer, hiddenState, attnWqA, qr);
+    ForwardLinear(rt, layer, hiddenState, attnWKv, kv);
+
+    XliteOpRmsNorm(rt, qr, mlaQNorm[layer], qr, _c.normEps, _c.qLoraRank);
+    XliteOpRmsNorm(rt, kv, mlaKVNorm[layer], kv, _c.normEps, _c.headDim);
+
+    XliteOpRopeComplexAndCache(rt, 1, _c.headDim, _c.ropeHeadDim, _c.headDim - _c.ropeHeadDim,
+                               _c.headDim, kv, freqsCis, rt._attnPosition,
+                               _c.blockSizes[CXA_SWA_KV], kvCache[CXA_SWA_KV],
+                               rt._attnSlotMapping[CXA_SWA_KV], true);
+
+    if (_c.compressRatios[layer] > 0) {
+        // TODO compressor hiddenState, store to compress cache
+    }
+
+    ForwardLinear(rt, layer, qr, mlaQB, q);
+
+    q.View({hiddenState.shape[0], nLocalHeads * _c.headDim});
+    XliteOpRmsNorm(rt, q, XTensor(), q, _c.normEps, _c.headDim, true, XTensor(), nLocalHeads);
+    q.View({hiddenState.shape[0], nLocalHeads, _c.headDim});
+
+    XliteOpRopeComplex(rt, nLocalHeads, _c.headDim, _c.headDim, _c.ropeHeadDim,
+                       _c.headDim - _c.ropeHeadDim, _c.headDim - _c.ropeHeadDim, q, freqsCis,
+                       rt._attnPosition, q, false, true);
+    rt.PutTensor(kv);
+    return {qr, q};
+}
+
+XTensor *XModel::ForwardAttnCXAIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                                       XTensor &qr, std::vector<XTensor> &kvCache,
+                                       XTensor &freqsCis)
+{
+    XTensor &topkIndices =
+        rt.GetTensor({hiddenState.shape[0], _c.windowSize + _c.indexTopK}, INT32, DBG_LOC);
+    // TODO : implement CXA attention indexer
+    return &topkIndices;
+}
+
 void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer,
                             std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
                             XTensor &hiddenState)
 {
-    // TODO
+    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+    uint32_t nLocalGroups = _c.oGroups / _c.defTpSize;
+    auto [qr, q] = ForwardAttnCXACommon(rt, layer, kvCache[layer], freqsCis, hiddenState);
+    XTensor *pTopkIndices = nullptr;
+    if (_c.compressRatios[layer] == 4) {
+        pTopkIndices = ForwardAttnCXAIndexer(rt, layer, hiddenState, qr, kvCache[layer], freqsCis);
+    }
+
+    XTensor &o =
+        rt.GetTensor({hiddenState.shape[0], nLocalHeads, _c.headDim}, hiddenState.dtype, DBG_LOC);
+    // TODO implement CXA attention: q, topkIndices, kvCache -> o
+    if (pTopkIndices) {
+        rt.PutTensor(*pTopkIndices);
+    }
+    rt.PutTensor(q);
+    rt.PutTensor(qr);
+
+    XliteOpRopeComplex(rt, nLocalHeads, _c.headDim, _c.headDim, _c.ropeHeadDim,
+                       _c.headDim - _c.ropeHeadDim, _c.headDim - _c.ropeHeadDim, o, freqsCis,
+                       rt._attnPosition, o, true);
+
+    o.View({hiddenState.shape[0], nLocalGroups, nLocalHeads * _c.headDim / nLocalGroups});
+    XTensor &oa = rt.GetTensor({hiddenState.shape[0], nLocalGroups * _c.oLoraRank},
+                               hiddenState.dtype, DBG_LOC);
+    XliteOpMatmul(rt, o, attnWoA[layer], oa, _c.weightNZ);
+    rt.PutTensor(o);
+
+    XliteOpMatmul(rt, oa, attnWoB[layer], hiddenState, _c.weightNZ);
+    rt.PutTensor(oa);
+
+    if (_c.defTpSize > 1) {
+        XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
+    }
 }
 
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
