@@ -744,7 +744,13 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
     _kv.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
-        _kv[i].resize(c.attnType == XMODEL_ATTN_DSA ? 3 : 2);
+        if (c.attnType == XMODEL_ATTN_DSA) {
+            _kv[i].resize(3);
+        } else if (c.attnType == XMODEL_ATTN_CXA) {
+            _kv[i].resize(5);
+        } else {
+            _kv[i].resize(2);
+        }
     }
     _deepstackInputEmbeds.resize(c.deepstackNumLevel);
 }

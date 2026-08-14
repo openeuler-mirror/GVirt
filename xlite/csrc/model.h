@@ -267,7 +267,7 @@ private:
     void ForwardAttnLinear(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                            XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
-                        std::vector<XTensor> &freqsCis, XTensor &hiddenState);
+                        XTensor &freqsCis, XTensor &hiddenState);
     void ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                      XTensor &freqsCis, XTensor &hiddenState);
     void ForwardMLP(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
