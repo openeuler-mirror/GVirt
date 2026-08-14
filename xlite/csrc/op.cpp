@@ -812,6 +812,8 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
         launchKernel = aclrtlaunch_group_matmul_float;
     } else if (in.dtype == INT8 && weightDtype == INT8 && output.dtype == FP16) {
         launchKernel = aclrtlaunch_group_matmul_int8_t;
+    } else if (in.dtype == INT4 && weightDtype == INT4 && output.dtype == FP16) {
+        launchKernel = aclrtlaunch_group_matmul_int4b_t;
     } else {
         std::string err_str = DBG_PREFIX;
         err_str += XT_STR(in) + XT_STR(output) + ", weight dtype:" + XDtypeStr(weightDtype);
@@ -1326,27 +1328,25 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, con
     }
 }
 
-void XliteOpMSDMergeDequant(XRuntime &rt, XTensor &yMerged, XTensor &scaleBias,
-                            XTensor &perTokenScale, XTensor &out)
+void XliteOpMSDMergeDequant(XRuntime &rt, XTensor &yMerged, XTensor &scaleBiasPtrs, XTensor &counts,
+                            uint32_t start, uint32_t end, XTensor &perTokenScale, XTensor &out)
 {
     if (IsDummyRuntime(rt) || yMerged.numel == 0) {
         return;
     }
 
     std::string err_str =
-        DBG_PREFIX + XT_STR(yMerged) + XT_STR(scaleBias) + XT_STR(perTokenScale) + XT_STR(out);
-    // MSD W4A8 Post-stage standalone op: merge the Mid-stage row-merged result
-    // [2*m, n] (low rows [0,m), high rows [m,2m)), compensate low-nibble -8 bias, and
-    // per-token dequantize.  Y = (Y_high*16 + Y_low + scale_bias) * perTokenScale.
-    if (yMerged.dtype == FP16 && scaleBias.dtype == FP32 && perTokenScale.dtype == FP32 &&
-        out.dtype == BF16) {
+        DBG_PREFIX + XT_STR(yMerged) + XT_STR(scaleBiasPtrs) + XT_STR(perTokenScale) + XT_STR(out);
+
+    if (yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype == BF16) {
         if (yMerged.shape.size() != 2 || yMerged.shape[0] % 2 == 1) {
             throw std::runtime_error(err_str + " yMerged.shape is invalid!");
         }
         uint32_t m = yMerged.shape[0] / 2;
         uint32_t n = yMerged.shape[1];
-        aclrtlaunch_msd_merge_dequant_int8_t(rt.aivNum, rt.stream, yMerged.ptr, scaleBias.ptr,
-                                             perTokenScale.ptr, out.ptr, nullptr, m, n);
+        aclrtlaunch_msd_merge_dequant_int8_t(rt.aivNum, rt.stream, yMerged.ptr, scaleBiasPtrs.ptr,
+                                             perTokenScale.ptr, out.ptr, nullptr, m, n, counts.ptr,
+                                             start, end);
     } else {
         throw std::runtime_error(err_str + " unsupported!");
     }

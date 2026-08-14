@@ -56,6 +56,12 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     _moeREUpGateDeqScale.resize(c.nLayers);
     _moeREDown.resize(c.nLayers);
     _moeREDownDeqScale.resize(c.nLayers);
+    _moeREUpGateScaleBias.resize(c.nLayers);
+    _moeREDownScaleBias.resize(c.nLayers);
+    for (uint32_t i = 0; i < c.nLayers; i++) {
+        moeREUpGate[i].resize(c.nRoutedExperts);
+        moeREDown[i].resize(c.nRoutedExperts);
+    }
 
     attnSink.resize(c.nLayers);
     attnWqA.resize(c.nLayers);
@@ -78,10 +84,6 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     hcFfnBase.resize(c.nLayers);
     hcAttnScale.resize(c.nLayers);
     hcFfnScale.resize(c.nLayers);
-    for (uint32_t i = 0; i < c.nLayers; i++) {
-        moeREUpGate[i].resize(c.nRoutedExperts);
-        moeREDown[i].resize(c.nRoutedExperts);
-    }
 
     attnNormBias.resize(c.nLayers);
     mhaQNormBias.resize(c.nLayers);
@@ -90,6 +92,14 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     for (uint32_t i = 0; i < c.nLayers; i++) {
         moeREUpGateDeqScale[i].resize(c.nRoutedExperts);
         moeREDownDeqScale[i].resize(c.nRoutedExperts);
+    }
+    if (c.quantMsdW4a8) {
+        moeREUpGateScaleBias.resize(c.nLayers);
+        moeREDownScaleBias.resize(c.nLayers);
+        for (uint32_t i = 0; i < c.nLayers; i++) {
+            moeREUpGateScaleBias[i].resize(c.nRoutedExperts);
+            moeREDownScaleBias[i].resize(c.nRoutedExperts);
+        }
     }
 
     if (c.attnType == XMODEL_ATTN_HYBRID) {
@@ -205,6 +215,22 @@ void XModel::Init(void)
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
             _moeREDownDeqScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
         }
+
+        if (_c.quantMsdW4a8) {
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
+                weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScaleBias[i][j].ptr);
+            }
+            CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+            _moeREUpGateScaleBias[i].Init({_c.nRoutedExperts}, INT64, ptr);
+
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
+                weights[j] = reinterpret_cast<uint64_t>(moeREDownScaleBias[i][j].ptr);
+            }
+            CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+            _moeREDownScaleBias[i].Init({_c.nRoutedExperts}, INT64, ptr);
+        }
     }
 
     size = AIC_MAX_NUM;
@@ -264,6 +290,8 @@ XModel::~XModel(void)
         (void)aclrtFree(_moeREUpGateDeqScale[i].ptr);
         (void)aclrtFree(_moeREDown[i].ptr);
         (void)aclrtFree(_moeREDownDeqScale[i].ptr);
+        (void)aclrtFree(_moeREUpGateScaleBias[i].ptr);
+        (void)aclrtFree(_moeREDownScaleBias[i].ptr);
     }
     (void)aclrtFree(_sync.ptr);
 }
@@ -1251,6 +1279,45 @@ void XModel::ForwardMoECombineAllToAll(XRuntime &rt, XTensor &tokenSorted, XTens
     rt.PutTensor(weights);
 }
 
+void XModel::ForwardMoEMSD(XRuntime &rt, uint32_t layer, XTensor &expertsSorted, XTensor &counts,
+                           XTensor &num, uint32_t start, uint32_t end, uint32_t outDim,
+                           std::vector<XTensor> &weights, std::vector<XTensor> &deqScales,
+                           std::vector<XTensor> &scaleBias, XTensor &output)
+{
+    // MSD W4A8 routed-expert three-stage pipeline, group form:
+    //   1. QuantDyn  : bf16 activation → xINT8 + perTokenScale[m] (FP32)
+    //   2. Unpack    : xINT8 [m, k] → xINT8 [2m, k/2] interleaved (token r → row 2r low, 2r+1 high)
+    //   3. GroupMatmul xInt4 [2m, k/2] × w_int4 [k/2, n] (single pass, grouped by 2×counts)
+    //      → yMerged [2m, n] FP16, where rows (2r, 2r+1) hold the low/high result pair for token r
+    //   4. MergeDequant: (yMerged [2m, n] + scaleBias[m, n]) * perTokenScale[m] → [m, n] BF16
+    uint32_t m = expertsSorted.shape[0];
+    uint32_t k = expertsSorted.shape[1];
+
+    // Step 1: dynamic per-token quantization bf16 → int8
+    XTensor &xInt8 = rt.GetTensor(expertsSorted.shape, INT8, DBG_LOC);
+    XTensor &perTokenScale = rt.GetTensor({m}, FP32, DBG_LOC);
+    XliteOpQuantDyn(rt, expertsSorted, perTokenScale, xInt8, num);
+
+    // Step 2: unpack INT8 → interleaved double-row INT4-packed layout [2m, k/2]
+    // For input token r, row 2r = low nibbles, row 2r+1 = high nibbles
+    XTensor &xUnpacked = rt.GetTensor({2 * m, k}, INT4, DBG_LOC);
+    XliteOpUnpackActivation(rt, xInt8, xUnpacked);
+    rt.PutTensor(xInt8);
+
+    // Step 3: INT4 group_matmul → FP16 mid-stage [2m, outDim] (single pass, interleaved rows)
+    XTensor &yMerged = rt.GetTensor({2 * m, outDim}, FP16, DBG_LOC);
+    XliteOpGroupMatmul(rt, xUnpacked, weights[layer], deqScales[layer], counts, start, end, INT4,
+                       outDim, k, yMerged, _c.weightNZ || _c.expertsWeightNZ,
+                       _c.expertsWeightTrans);
+    rt.PutTensor(xUnpacked);
+
+    // Step 4: (yMerged [2m, n] + scaleBias[m, n]) * perTokenScale[m] for target experts
+    XliteOpMSDMergeDequant(rt, yMerged, scaleBias[layer], counts, start, end, perTokenScale,
+                           output);
+    rt.PutTensor(yMerged);
+    rt.PutTensor(perTokenScale);
+}
+
 void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 {
     // the original shape of hiddenState must not be smaller than (maxTokensDp, hiddenSize)
@@ -1259,9 +1326,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
     uint32_t end = start + nLocalRoutedExperts;
-    enum XDtype dtype = hiddenState.dtype;
     enum XDtype moeReDtype = moeREUpGate[layer][start].dtype;
-    bool useQuant = moeReDtype != dtype;
 
     auto [w, r] = ForwardMoEGate(rt, layer, hiddenState);
     auto [weights, routing, unpIdx, expertsSorted, expertsCounts, meta] =
@@ -1272,7 +1337,16 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
     // routed experts
     XTensor *h13Ptr;
-    if (useQuant) {
+    if (moeReDtype == INT4) {
+        // MSD W4A8: QuantDyn → Unpack → INT4 group_matmul → merge_dequant
+        XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
+                                    hiddenState.dtype, DBG_LOC);
+        ForwardMoEMSD(rt, layer, expertsSorted, expertsCounts, num, start, end,
+                      intermediateSize * 2, _moeREUpGate, _moeREUpGateDeqScale,
+                      _moeREUpGateScaleBias, h13);
+        rt.PutTensor(expertsSorted);
+        h13Ptr = &h13;
+    } else if (moeReDtype == INT8) {
         // quant(x) -> xQuanted, perChannelScale
         XTensor &xQuanted = rt.GetTensor(expertsSorted.shape, moeReDtype, DBG_LOC);
         XTensor &scale = rt.GetTensor({expertsSorted.shape[0]}, FP32, DBG_LOC);
@@ -1280,7 +1354,8 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         rt.PutTensor(expertsSorted);
 
         // group_matmul(xQuanted * w13 * w13Scale) * perChannelScale -> h13
-        XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2}, dtype, DBG_LOC);
+        XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
+                                    hiddenState.dtype, DBG_LOC);
         XliteOpGroupMatmulDeQuant(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateDeqScale[layer],
                                   expertsCounts, start, end, moeREUpGate[layer][start].dtype,
                                   intermediateSize * 2, _c.hiddenSize, h13, scale, num,
@@ -1289,7 +1364,8 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         rt.PutTensor(scale);
         h13Ptr = &h13;
     } else {
-        XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2}, dtype, DBG_LOC);
+        XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
+                                    hiddenState.dtype, DBG_LOC);
         XliteOpGroupMatmul(rt, expertsSorted, _moeREUpGate[layer], _moeREUpGateDeqScale[layer],
                            expertsCounts, start, end, moeREUpGate[layer][start].dtype,
                            intermediateSize * 2, _c.hiddenSize, h13,
@@ -1298,12 +1374,21 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         h13Ptr = &h13;
     }
 
-    XTensor &h2 = rt.GetTensor({expertsSorted.shape[0], intermediateSize}, dtype, DBG_LOC);
+    XTensor &h2 =
+        rt.GetTensor({expertsSorted.shape[0], intermediateSize}, hiddenState.dtype, DBG_LOC);
     XliteOpSiluAndMul(rt, *h13Ptr, h2, num);
     rt.PutTensor(*h13Ptr);
 
     XTensor *outPtr;
-    if (useQuant) {
+    if (moeReDtype == INT4) {
+        // MSD W4A8: QuantDyn → Unpack → INT4 group_matmul → merge_dequant (w2/down)
+        XTensor &out =
+            rt.GetTensor({expertsSorted.shape[0], _c.hiddenSize}, hiddenState.dtype, DBG_LOC);
+        ForwardMoEMSD(rt, layer, h2, expertsCounts, num, start, end, _c.hiddenSize, _moeREDown,
+                      _moeREDownDeqScale, _moeREDownScaleBias, out);
+        rt.PutTensor(h2);
+        outPtr = &out;
+    } else if (moeReDtype == INT8) {
         // quant(x) -> xQuanted, perChannelScale
         XTensor &xQuanted = rt.GetTensor(h2.shape, moeReDtype, DBG_LOC);
         XTensor &scale = rt.GetTensor({h2.shape[0]}, FP32, DBG_LOC);
@@ -1311,7 +1396,8 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         rt.PutTensor(h2);
 
         // group_matmul(xQuanted * w2 * w2Scale) * perChannelScale -> h2
-        XTensor &out = rt.GetTensor({expertsSorted.shape[0], _c.hiddenSize}, dtype, DBG_LOC);
+        XTensor &out =
+            rt.GetTensor({expertsSorted.shape[0], _c.hiddenSize}, hiddenState.dtype, DBG_LOC);
         XliteOpGroupMatmulDeQuant(rt, xQuanted, _moeREDown[layer], _moeREDownDeqScale[layer],
                                   expertsCounts, start, end, moeREDown[layer][start].dtype,
                                   _c.hiddenSize, intermediateSize, out, scale, num,
@@ -1320,7 +1406,8 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         rt.PutTensor(scale);
         outPtr = &out;
     } else {
-        XTensor &out = rt.GetTensor({expertsSorted.shape[0], _c.hiddenSize}, dtype, DBG_LOC);
+        XTensor &out =
+            rt.GetTensor({expertsSorted.shape[0], _c.hiddenSize}, hiddenState.dtype, DBG_LOC);
         XliteOpGroupMatmul(rt, h2, _moeREDown[layer], _moeREDownDeqScale[layer], expertsCounts,
                            start, end, moeREDown[layer][start].dtype, _c.hiddenSize,
                            intermediateSize, out, _c.weightNZ || _c.expertsWeightNZ,
@@ -1336,7 +1423,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     if (_c.nSharedExperts != 0 &&
         ((_isSharedExpertWeightFull && ((rt.rankId() % rt.tpSize()) == 0)) ||
          !_isSharedExpertWeightFull)) {
-        XTensor &h = rt.GetTensor(hiddenState.shape, dtype, DBG_LOC);
+        XTensor &h = rt.GetTensor(hiddenState.shape, hiddenState.dtype, DBG_LOC);
         if (rt.enableMoEAllToAll) {  // hiddenState of shape (currTokens = m, hiddenSize)
             ForwardMoECombineAllToAll(rt, h, weights, routing, unpIdx, *outPtr, expertsCounts,
                                       meta);

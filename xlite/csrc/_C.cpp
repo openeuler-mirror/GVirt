@@ -143,6 +143,8 @@ public:
     std::vector<at::Tensor> moeREUpGateDeqScale;
     std::vector<at::Tensor> moeREDown;
     std::vector<at::Tensor> moeREDownDeqScale;
+    std::vector<at::Tensor> moeREUpGateScaleBias;
+    std::vector<at::Tensor> moeREDownScaleBias;
 
     // DeepSeek-V4 (CxA)
     std::vector<at::Tensor> attnSink;
@@ -718,11 +720,24 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
             InitXTensor(_model->moeREUpGate[i][j], moeREUpGate[idx]);
             InitXTensor(_model->moeREDown[i][j], moeREDown[idx]);
+            // for w4a8 quantization: weights will arrive as int4pack (int32 dtype)
+            if (_model->moeREUpGate[i][j].dtype == INT32) {
+                _model->moeREUpGate[i][j].View(INT4);
+            }
+            if (_model->moeREDown[i][j].dtype == INT32) {
+                _model->moeREDown[i][j].View(INT4);
+            }
             if (!moeREUpGateDeqScale.empty()) {
                 InitXTensor(_model->moeREUpGateDeqScale[i][j], moeREUpGateDeqScale[idx]);
             }
             if (!moeREDownDeqScale.empty()) {
                 InitXTensor(_model->moeREDownDeqScale[i][j], moeREDownDeqScale[idx]);
+            }
+            if (!moeREUpGateScaleBias.empty()) {
+                InitXTensor(_model->moeREUpGateScaleBias[i][j], moeREUpGateScaleBias[idx]);
+            }
+            if (!moeREDownScaleBias.empty()) {
+                InitXTensor(_model->moeREDownScaleBias[i][j], moeREDownScaleBias[idx]);
             }
             idx++;
         }
@@ -1081,6 +1096,10 @@ void _CModel::InitMatmulWeight(const std::string &name, std::vector<at::Tensor> 
                                     " weight tensor is required but not provided");
     }
     InitXTensor(wXT.weight, w[weightLayer]);
+    if (wXT.weight.dtype ==
+        INT32) {  // for int4 matmul: weights will arrive as int4pack (int32 dtype)
+        wXT.weight.View(INT4);
+    }
     if (wXT.weight.dtype == INT8 && dScale.size() <= weightLayer) {
         std::string errStr = DBG_PREFIX + ": " + name +
                              "dequant scale parameters are "
@@ -1656,6 +1675,11 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     InitXTensor(_in, in);
     InitXTensor(_counts, counts);
     InitXTensor(_output, output);
+    if (!weights.empty() && XDtype(weights[0]) == INT32 &&
+        (_in.dtype == INT32 || _in.dtype == INT8)) {
+        // for the w4a8 matmul, activation and weight will be viewed as int4
+        _in.View(INT4);
+    }
     XTensor &_weights = rt.GetTensor({num}, INT64, DBG_LOC);
 
     p.resize(num);
@@ -1672,8 +1696,12 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
         rt.MemcpyH2D(_scales->ptr, reinterpret_cast<void *>(p.data()), num * sizeof(void *));
     }
 
-    XliteOpGroupMatmul(rt, _in, _weights, *_scales, _counts, start, end, XDtype(weights[0]), outDim,
-                       inDim, _output, weightNZ, transpose);
+    enum XDtype weightDtype = XDtype(weights[0]);
+    if (weightDtype == INT32) {
+        weightDtype = INT4;
+    }
+    XliteOpGroupMatmul(rt, _in, _weights, *_scales, _counts, start, end, weightDtype, outDim, inDim,
+                       _output, weightNZ, transpose);
     rt.Synchronize();
     rt.PutTensor(_weights);
     if (hasScale) {
@@ -1778,16 +1806,32 @@ void QuantDyn(XRuntime &rt, at::Tensor &x, at::Tensor &scale, at::Tensor &out)
     rt.Synchronize();
 }
 
-void MSDMergeDequant(XRuntime &rt, at::Tensor &yMerged, at::Tensor &scaleBias,
-                     at::Tensor &perTokenScale, at::Tensor &out)
+void MSDMergeDequant(XRuntime &rt, at::Tensor &yMerged, std::vector<at::Tensor> &scaleBiases,
+                     at::Tensor &counts, at::Tensor &perTokenScale, at::Tensor &out)
 {
-    XTensor _yMerged, _scaleBias, _perTokenScale, _out;
+    XTensor _yMerged, _perTokenScale, _out, _counts;
     InitXTensor(_yMerged, yMerged);
-    InitXTensor(_scaleBias, scaleBias);
+    InitXTensor(_counts, counts);
     InitXTensor(_perTokenScale, perTokenScale);
     InitXTensor(_out, out);
-    XliteOpMSDMergeDequant(rt, _yMerged, _scaleBias, _perTokenScale, _out);
+
+    // Build an INT64 [numExperts] pointer array of per-expert scale_bias pointers
+    uint32_t numExperts = scaleBiases.size();
+    if (numExperts == 0) {
+        throw std::invalid_argument("group matmul need at least one expert");
+    }
+    XTensor &_scaleBiasPtrs = rt.GetTensor({numExperts}, INT64, DBG_LOC);
+    std::vector<void *> p(numExperts);
+    for (uint32_t i = 0; i < numExperts; i++) {
+        p[i] = TensorPtr(scaleBiases[i]);
+    }
+    rt.MemcpyH2D(_scaleBiasPtrs.ptr, reinterpret_cast<void *>(p.data()),
+                 numExperts * sizeof(void *));
+
+    XliteOpMSDMergeDequant(rt, _yMerged, _scaleBiasPtrs, _counts, 0, numExperts, _perTokenScale,
+                           _out);
     rt.Synchronize();
+    rt.PutTensor(_scaleBiasPtrs);
 }
 
 void MatmulDeQuant(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &bias,
@@ -2182,6 +2226,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("experts_weight_transpose", &XModelConfig::expertsWeightTrans)
         .def_readwrite("experts_weight_nz", &XModelConfig::expertsWeightNZ)
         .def_readwrite("gate_captured", &XModelConfig::gateCaptured)
+        .def_readwrite("quant_msd_w4a8", &XModelConfig::quantMsdW4a8)
         .def_readwrite("qkv_bias", &XModelConfig::addBias)
         .def_readwrite("qk_norm", &XModelConfig::qkNorm)
         .def_readwrite("qk_norm_full", &XModelConfig::qkNormFull)
@@ -2325,6 +2370,8 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("re_down", &_CModel::moeREDown)
         .def_readwrite("re_down_scale", &_CModel::moeREDownDeqScale)
         .def_readwrite("re_down_deq_scale", &_CModel::moeREDownDeqScale)
+        .def_readwrite("re_up_gate_scale_bias", &_CModel::moeREUpGateScaleBias)
+        .def_readwrite("re_down_scale_bias", &_CModel::moeREDownScaleBias)
         // DeepSeek-V4 (CxA)
         .def_readwrite("attn_sink", &_CModel::attnSink)
         .def_readwrite("attn_wq_a", &_CModel::attnWqA)
@@ -2499,7 +2546,8 @@ PYBIND11_MODULE(_C, m)
     m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),
           py::arg("out"));
     m.def("msd_merge_dequant", &MSDMergeDequant, "msd_merge_dequant", py::arg("rt"),
-          py::arg("y_merged"), py::arg("scale_bias"), py::arg("per_token_scale"), py::arg("out"));
+          py::arg("y_merged"), py::arg("scale_biases"), py::arg("counts"),
+          py::arg("per_token_scale"), py::arg("out"));
     m.def("matmul_dequant", &MatmulDeQuant, "matmul_dequant", py::arg("rt"), py::arg("x"),
           py::arg("y"), py::arg("bias"), py::arg("deq_scale"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);

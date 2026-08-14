@@ -20,12 +20,14 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR de
 
     bool useDequant = (deqScales != nullptr);
 
+    int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
+
     if (m0 == (uint64_t)-1) {
         m0 = 128;
         // The L1 buffer was fully used. When the deqscale need space,
         // the L1 buffer will overflow, so shrink n0.
         n0 = useDequant ? 128 : 256;
-        k0 = 512 / sizeof(Dtype);
+        k0 = 512 * BYTE_BITS / dtypeBits;
     }
 
     uint32_t nLoop = DIV_ROUND_UP(kN, n0);
@@ -37,6 +39,11 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR de
         if (kM <= 0) {
             continue;
         }
+        // For w4a8, INT8 activation will be packed into [2m, k/2] INT4 matrix, so counts
+        // should be 2 * kM in int4 case
+        if (std::is_same<Dtype, int4b_t>::value) {
+            kM = kM * 2;
+        }
 
         uint64_t weightAddr = *((__gm__ uint64_t *)(ws + i * sizeof(void *)));
         uint64_t deqScaleAddr = (uint64_t)nullptr;
@@ -45,29 +52,31 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR de
         }
         __gm__ uint8_t *w = (__gm__ uint8_t *)weightAddr;
         __gm__ uint8_t *deqScale = (__gm__ uint8_t *)deqScaleAddr;
-        matmul_op.Init(x + off * kK * sizeof(Dtype), w, z + off * kN * sizeof(OutDtype), nullptr,
-                       deqScale, kM, kN, kK, weightNZ, transpose, m0, n0, k0, swizzle, coreOffset,
-                       &nextCoreOffset);
+
+        uint64_t xOffBytes = off * kK * dtypeBits / BYTE_BITS;
+        uint64_t zOffBytes = off * kN * sizeof(OutDtype);
+        matmul_op.Init(x + xOffBytes, w, z + zOffBytes, nullptr, deqScale, kM, kN, kK, weightNZ,
+                       transpose, m0, n0, k0, swizzle, coreOffset, &nextCoreOffset);
         matmul_op.Run();
         off += kM;
         coreOffset = nextCoreOffset;
     }
 }
 
-#define GROUPMATMUL_FUNC_DEFINE(dtype)                                                            \
-    extern "C" __global__ __aicore__ void group_matmul_##dtype(                                   \
-        GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR deqScales, GM_ADDR counts, uint32_t n,          \
-        int64_t kN, int64_t kK, uint64_t m0, uint64_t n0, uint64_t k0, uint32_t startIdx,         \
-        uint32_t endIdx, bool weightNZ, bool transpose, uint64_t swizzle)                         \
-    {                                                                                             \
-        KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);                                           \
-        if constexpr (std::is_same<dtype, int8_t>::value) {                                       \
-            group_matmul_kernel<dtype, int32_t, half>(x, ws, z, deqScales, counts, n, kN, kK, m0, \
-                                                      n0, k0, startIdx, endIdx, weightNZ,         \
-                                                      transpose, swizzle);                        \
-        } else {                                                                                  \
-            group_matmul_kernel<dtype, float, dtype>(x, ws, z, deqScales, counts, n, kN, kK, m0,  \
-                                                     n0, k0, startIdx, endIdx, weightNZ,          \
-                                                     transpose, swizzle);                         \
-        }                                                                                         \
+#define GROUPMATMUL_FUNC_DEFINE(dtype)                                                             \
+    extern "C" __global__ __aicore__ void group_matmul_##dtype(                                    \
+        GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR deqScales, GM_ADDR counts, uint32_t n,           \
+        int64_t kN, int64_t kK, uint64_t m0, uint64_t n0, uint64_t k0, uint32_t startIdx,          \
+        uint32_t endIdx, bool weightNZ, bool transpose, uint64_t swizzle)                          \
+    {                                                                                              \
+        KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);                                            \
+        if constexpr (std::is_same<dtype, int8_t>::value || std::is_same<dtype, int4b_t>::value) { \
+            group_matmul_kernel<dtype, int32_t, half>(x, ws, z, deqScales, counts, n, kN, kK, m0,  \
+                                                      n0, k0, startIdx, endIdx, weightNZ,          \
+                                                      transpose, swizzle);                         \
+        } else {                                                                                   \
+            group_matmul_kernel<dtype, float, dtype>(x, ws, z, deqScales, counts, n, kN, kK, m0,   \
+                                                     n0, k0, startIdx, endIdx, weightNZ,           \
+                                                     transpose, swizzle);                          \
+        }                                                                                          \
     }

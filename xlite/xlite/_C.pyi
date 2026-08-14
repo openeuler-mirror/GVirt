@@ -1922,7 +1922,8 @@ def matmul_dequant(
 def msd_merge_dequant(
     rt: Runtime,
     y_merged: torch.Tensor,
-    scale_bias: torch.Tensor,
+    scale_biases: Sequence[torch.Tensor],
+    counts: torch.Tensor,
     per_token_scale: torch.Tensor,
     out: torch.Tensor,
 ) -> None:
