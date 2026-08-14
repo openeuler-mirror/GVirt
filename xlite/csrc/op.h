@@ -140,8 +140,8 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out,
                      const XTensor &num = XTensor());
 void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scale = XTensor(),
                     const XTensor &num = XTensor());
-void XliteOpMSDMergeDequant(XRuntime &rt, XTensor &yMerged, XTensor &scaleBias,
-                            XTensor &perTokenScale, XTensor &out);
+void XliteOpMSDMergeDequant(XRuntime &rt, XTensor &yMerged, XTensor &scaleBiasPtrs, XTensor &counts,
+                            uint32_t start, uint32_t end, XTensor &perTokenScale, XTensor &out);
 void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
                           const XTensor &quantBias = XTensor(),
                           const XTensor &weightScale = XTensor(), bool weightNZ = false,

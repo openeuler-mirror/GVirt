@@ -7,15 +7,17 @@
 
 #ifdef __DAV_C220_VEC__
 
-// Unpack INT4 weights stored as packed INT8 (2 INT4 per INT8) into separate
-// INT4 weights for MSD (Mixed-precision Split-activation Decomposition) computation.
+// Unpack INT8 activations stored as packed INT8 into interleaved low/high INT4
+// rows for MSD (Mixed-precision Split-activation Decomposition) computation.
 //
 // Input:  act_packed [m, k] INT8, where each byte holds two INT4:
 //         - Low  4 bits (bits 0-3): even-index INT4 (unsigned nibble 0-15)
 //         - High 4 bits (bits 4-7): odd-index  INT4 (signed, via int8/16 floor)
 //
-// Output: weight_low  [m, k/2] packed-INT4 — low nibbles, 2 per byte, signed [-8,7]
-//         weight_high [m, k/2] packed-INT4 — high nibbles, 2 per byte, signed [-8,7]
+// Output: act_out [2m, k/2] packed-INT4 — interleaved low/high rows, 2 per byte, signed [-8,7]
+//         For input token at row r, the two output rows are:
+//           row 2r     = low  nibbles of token r
+//           row 2r + 1 = high nibbles of token r
 //
 // MSD principle: INT8 = high_nibble × 16 + low_nibble
 //   high_nibble = floor(x / 16) (already signed from int8 arithmetic)
@@ -127,16 +129,16 @@ __aicore__ inline void unpack_activation(GM_ADDR act_packed, GM_ADDR act_out, ui
         vconv_f162s4(reinterpret_cast<UBA(void)>(out_low_bufs[event_id]), work_fp16, fp16_rep, 1, 1,
                      2, 8);
         // vconv(x_high_fp16) -> x_high_int4
-        vconv_f162s4z(reinterpret_cast<UBA(void)>(out_high_bufs[event_id]), fp16_buf, fp16_rep, 1,
+        vconv_f162s4f(reinterpret_cast<UBA(void)>(out_high_bufs[event_id]), fp16_buf, fp16_rep, 1,
                       1, 2, 8);
         set_flag(PIPE_V, PIPE_MTE3, event_id);
 
         wait_flag(PIPE_V, PIPE_MTE3, event_id);
-        // x_low_int4 UB -> GM
-        copy_ubuf_to_gm_align_b8(low_gm + row * k_half, out_low_bufs[event_id], 0, 1,
+        // x_low_int4 UB -> GM (interleaved: token r's low  -> row 2r, high -> row 2r+1)
+        copy_ubuf_to_gm_align_b8(low_gm + (2 * row) * k_half, out_low_bufs[event_id], 0, 1,
                                  k_half * sizeof(int8_t), 0, 0, 0, 0);
         // x_high_int4 UB -> GM
-        copy_ubuf_to_gm_align_b8(low_gm + (row + m) * k_half, out_high_bufs[event_id], 0, 1,
+        copy_ubuf_to_gm_align_b8(low_gm + (2 * row + 1) * k_half, out_high_bufs[event_id], 0, 1,
                                  k_half * sizeof(int8_t), 0, 0, 0, 0);
         set_flag(PIPE_MTE3, PIPE_V, event_id);
 

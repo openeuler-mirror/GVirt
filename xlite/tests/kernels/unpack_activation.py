@@ -14,6 +14,7 @@ from xlite._C import Runtime, unpack_activation
 npu_devid = 0
 rt = Runtime(npu_devid, 500)
 torch.npu.set_device(npu_devid)
+torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
 supported_dtype_list = [torch.int8]
 
@@ -37,14 +38,25 @@ def pack_int4_to_int8(x):
     return result
 
 def msd_split_activation_int8(activation_int8):
-    """将 INT8 激活拆分为高 4bit 和低 4bit"""
-    # 高 4bit: 算术右移，补符号位，值域 [-8, 7]
-    high4 = (activation_int8.clone() / 16).to(torch.int8)
+    """将 INT8 激活拆分为高 4bit 和低 4bit (interleaved per token, adjacent rows).
+
+    Output layout [2m, k_half] (k_half = n/2): for token r, output row 2r holds the low
+    nibbles and row 2r+1 holds the high nibbles — i.e. each token's low/high halves are
+    placed in adjacent rows rather than split into two disjoint column regions. This
+    matches the kernel's native [2m, k_half] interleaved-row output directly.
+    """
+    # 高 4bit: 算术右移 = floor(x/16), 值域 [-8, 7].
+    # 必须用整型算术右移而非浮点除法+to(int8): 后者按向零截断(trunc)取整, 对负数
+    # (如 x=-27: trunc=-1, floor=-2) 会与 kernel 的 floor 高 nibble 不一致, 破坏
+    # 补码恒等式 x = high4*16 + (low4_raw & 0x0F).
+    high4 = (activation_int8.to(torch.int32) >> 4).to(torch.int8)
     # 低 4bit: 先转 uint8 消除符号位干扰，再取低 4bit，值域 [0, 15]
     low4 = (activation_int8.clone() & 0x0F).to(torch.float16) - 8
     low4 = pack_int4_to_int8(low4.to(torch.int8))
     high4 = pack_int4_to_int8(high4)
-    merged = torch.cat([low4, high4], dim=0).reshape(activation_int8.shape)
+    # 同一 token 的低/高 4bit 放相邻行: row 2r = low, row 2r+1 = high
+    m = activation_int8.shape[0]
+    merged = torch.stack([low4, high4], dim=1).reshape(2 * m, -1)
     return merged
 
 
@@ -52,7 +64,8 @@ for m, n in test_cases:
     in_type = torch.int8
     out_type = torch.int8
     x = torch.randint(low=-128, high=128, size=(m, n), dtype=torch.int8, device="npu")
-    z = torch.empty(m, n, dtype=torch.int8, device=f"npu:{npu_devid}")
+    # 输出为 [2m, n/2]: 同一 token 的低/高 4bit 写入相邻行 (row 2r / 2r+1)
+    z = torch.empty(2 * m, n // 2, dtype=torch.int8, device=f"npu:{npu_devid}")
 
     expected_z = msd_split_activation_int8(x)
 

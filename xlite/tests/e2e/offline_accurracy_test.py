@@ -24,8 +24,9 @@ quant_models = [
     ["qwen3-0.6B", f"{base_model_path}/Qwen3-0.6B-W8A8", 1],
     ["qwen3-32B", f"{base_model_path}/Qwen3-32B-w8a8-nopdmix", 8],
     ["qwen3-moe", f"{base_model_path}/Qwen3-30B-A3B-Instruct-2507-w8a8/", 8],
-    # ["minimax-2.7", f"{base_model_path}/MiniMax-M2.7-w8a8-QuaRot/", 8],
+    ["minimax-2.7", f"{base_model_path}/MiniMax-M2.7-w8a8-QuaRot/", 8],
     ["glm-4.7-w8a8", f"{base_model_path}/GLM-4.7-W8A8-floatmtp", 8],
+    ["glm-5.1-w4a8", f"{base_model_path}/GLM-5.1-w4a8", 8],
 ]
 
 prompts = [

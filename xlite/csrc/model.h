@@ -85,6 +85,8 @@ struct XModelConfig {
     bool expertsWeightNZ = false;
     // For GLM4/GLM5, vllm-ascend doesn't capture the Gate layer, so its gate won't use NZ format
     bool gateCaptured = true;
+    // MSD W4A8 flag
+    bool quantMsdW4a8 = false;
 
     // parallel config
     uint32_t defTpSize;
@@ -216,6 +218,8 @@ public:
     std::vector<std::vector<XTensor>> moeREUpGateDeqScale;
     std::vector<std::vector<XTensor>> moeREDown;
     std::vector<std::vector<XTensor>> moeREDownDeqScale;
+    std::vector<std::vector<XTensor>> moeREUpGateScaleBias;
+    std::vector<std::vector<XTensor>> moeREDownScaleBias;
 
     // ===== DeepSeek-V4 (CxA) attention weights =====
     std::vector<XTensor> attnSink;
@@ -290,6 +294,10 @@ private:
                                    XTensor &routing, XTensor &unpIdx, XTensor &expertsSorted,
                                    XTensor &expertsCounts, const MoEAlltoAllMeta &meta);
     void ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
+    void ForwardMoEMSD(XRuntime &rt, uint32_t layer, XTensor &expertsSorted, XTensor &counts,
+                       XTensor &num, uint32_t start, uint32_t end, uint32_t outDim,
+                       std::vector<XTensor> &weights, std::vector<XTensor> &deqScales,
+                       std::vector<XTensor> &scaleBias, XTensor &output);
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                std::vector<std::vector<XTensor>> &kvCache,
@@ -327,6 +335,8 @@ private:
     std::vector<XTensor> _moeREUpGateDeqScale;
     std::vector<XTensor> _moeREDown;
     std::vector<XTensor> _moeREDownDeqScale;
+    std::vector<XTensor> _moeREUpGateScaleBias;
+    std::vector<XTensor> _moeREDownScaleBias;
     bool _isSharedExpertWeightFull = false;
 
     // ATTN

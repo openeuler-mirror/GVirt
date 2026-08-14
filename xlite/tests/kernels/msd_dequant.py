@@ -11,14 +11,14 @@
 # Single-op test for the MSD W4A8 post-stage kernel `msd_merge_dequant`.
 #
 # In the end-to-end MSD pipeline, the Mid-stage INT4×INT4 matmul produces a
-# row-merged result of shape [2*m, n]: rows [0, m) hold Y_low, rows [m, 2*m) hold
-# Y_high (low-first / high-after, NOT interleaved). The post-stage op takes this
-# single merged matrix (no separate y_high/y_low pointers) and computes:
+# row-merged result of shape [2*m, n] interleaved by token: rows (2r, 2r+1) hold
+# (Y_low, Y_high) for token r. The post-stage op takes this single merged matrix
+# (no separate y_high/y_low pointers) and computes:
 #
-#   Y[r] = (Y_high[r+m] * 16 + Y_low[r] + scale_bias[col]) * perTokenScale[row]
+#   Y[r] = (Y_high[2r+1] * 16 + Y_low[2r] + scale_bias[col]) * perTokenScale[row]
 #
 # where
-#   y_merged      : fp16 [2*m, n]  — low rows [0,m), high rows [m,2*m)
+#   y_merged      : fp16 [2*m, n]  — interleaved (2r = low, 2r+1 = high)
 #   scale_bias    : fp32 [n]       — per-column low-nibble -8 offset compensation
 #   perTokenScale : fp32 [m]       — per-row activation dequant scale
 #   out           : bf16 [m, n]
@@ -39,15 +39,15 @@ def msd_merge_dequant_ref(y_merged, scale_bias, per_token_scale):
     """Pure-torch reference for the MSD merge + bias + per-token dequant.
 
     Args:
-        y_merged:        fp16 [2*m, n]  (low rows [0,m), high rows [m,2*m))
+        y_merged:        fp16 [2*m, n]  (interleaved: rows 2r = low, 2r+1 = high)
         scale_bias:      fp32 [n]
         per_token_scale: fp32 [m]
     Returns:
         bf16 [m, n]
     """
     m = y_merged.shape[0] // 2
-    y_low = y_merged[:m].float()          # rows [0, m)
-    y_high = y_merged[m:].float()         # rows [m, 2*m)
+    y_low = y_merged[0::2].float()          # rows 0, 2, 4, ... = low
+    y_high = y_merged[1::2].float()        # rows 1, 3, 5, ... = high
     merged = y_high * 16.0 + y_low                       # [m, n]
     merged = merged + scale_bias.float().view(1, -1)     # per-column bias
     merged = merged * per_token_scale.float().view(-1, 1) # per-row scale
@@ -69,9 +69,9 @@ for m, n in test_cases:
     # cleanly; per_token_scale must be nonzero.
     y_low = torch.randn(m, n, dtype=torch.float16, device=f"npu:{npu_devid}")
     y_high = torch.randn(m, n, dtype=torch.float16, device=f"npu:{npu_devid}")
-    # Row-merged [2*m, n]: low-first, high-after (matches the Mid-stage layout).
-    y_merged = torch.cat([y_low, y_high], dim=0)
-    scale_bias = torch.randn(n, dtype=torch.float32, device=f"npu:{npu_devid}")
+    # Row-merged [2*m, n] interleaved: rows (2r, 2r+1) = (low, high) for token r.
+    y_merged = torch.stack([y_low, y_high], dim=1).reshape(2 * m, n)
+    scale_bias = torch.randn(1, n, dtype=torch.float32, device=f"npu:{npu_devid}")
     per_token_scale = torch.randn(m, dtype=torch.float32, device=f"npu:{npu_devid}")
     per_token_scale = torch.where(per_token_scale == 0, torch.ones_like(per_token_scale),
                                  per_token_scale)
@@ -80,8 +80,11 @@ for m, n in test_cases:
     # torch reference (compute on NPU in fp32, same as kernel's fp32 chain)
     expected = msd_merge_dequant_ref(y_merged, scale_bias, per_token_scale)
 
+    # New multi-expert signature: scale_biases (per-expert [n] list) + counts. Single-expert
+    # case = one expert with counts=[m].
+    counts = torch.tensor([m], dtype=torch.int32, device=f"npu:{npu_devid}")
     torch.npu.synchronize()
-    msd_merge_dequant(rt, y_merged, scale_bias, per_token_scale, out)
+    msd_merge_dequant(rt, y_merged, [scale_bias], counts, per_token_scale, out)
     torch.npu.synchronize()
 
     # bf16 has ~3 decimal digits of precision; atol=1, rtol=1/64 are generous
@@ -90,14 +93,7 @@ for m, n in test_cases:
         torch.testing.assert_close(expected, out, atol=1, rtol=1 / 64)
         print(f"msd_merge_dequant [{m}, {n}] output check passed")
     except AssertionError as e:
-        print(f"[{m}, {n}] output check FAILED:")
+        print(f"msd_merge_dequant [{m}, {n}] output check failed")
         print(f"{e}")
-        print(f"y_merged: {y_merged[:4, :8]} ... {y_merged[m:m+4, :8]}, shape: {y_merged.shape}")
-        print(f"scale_bias: {scale_bias[:8]}, shape: {scale_bias.shape}")
-        print(f"per_token_scale: {per_token_scale[:8]}, shape: {per_token_scale.shape}")
         print(f"expected: {expected[:4, :8]}")
         print(f"xlite:    {out[:4, :8]}")
-        # element-wise diff for debugging
-        diff = (expected.float() - out.float()).abs()
-        print(f"max abs diff: {diff.max().item():.6f} at index {diff.argmax().item()}")
-        print(f"mean abs diff: {diff.mean().item():.6f}")
