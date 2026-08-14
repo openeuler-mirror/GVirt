@@ -1244,19 +1244,64 @@ class Transformer(nn.Module):
         self.xlite_model.init(config, self.global_rank)
 
     def init_xlite_kvcache(self, args: ModelArgs):
-        """Allocate v4 KV cache. Reuses DSA-style 3-slot layout as a placeholder;
-        the actual window+compressed layout will be finalized when C++ forward lands.
+        """Allocate v4 KV cache. Per-layer tuple layout:
+        (indexer_state, indexer_k, compress_kv, state, swa_kv).
+        indexer_* only exist on compress_ratio==4 layers; compress_kv/state exist
+        on compress_ratio!=0 layers; swa_kv exists on every layer. Each cache has
+        its own block_num sized to the number of slots it actually holds.
         """
-        block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
+        dtype = torch.get_default_dtype()
+        device = 'npu'
         head_num = 1
-        self.xlite_kv_cache = [
-            (torch.zeros(block_num, block_size, head_num, args.head_dim,
-                         dtype=torch.get_default_dtype(), device='npu'),
-             torch.zeros(block_num, block_size, head_num, args.index_head_dim,
-                         dtype=torch.get_default_dtype(), device='npu'))
-            for _ in range(args.n_layers)
-        ]
-        kv_size = (block_num * head_num * block_size *
-                   (args.head_dim + args.index_head_dim) *
-                   self.xlite_kv_cache[0][0].element_size() * args.n_layers)
+        swa_blocks = (args.window_size + block_size - 1) // block_size * args.max_batch_size
+        ratios = args.compress_ratios
+
+        def _empty():
+            return torch.empty(0, dtype=dtype, device=device)
+
+        def _blocks(n_slots):
+            return (n_slots + block_size - 1) // block_size * args.max_batch_size
+
+        self.xlite_kv_cache = []
+        for layer_id in range(args.n_layers):
+            ratio = ratios[layer_id]
+            has_indexer = ratio == 4
+            has_compress = ratio != 0
+            coff = 1 + has_indexer  # overlap == (ratio == 4)
+            indexer_state_dim = 2 * coff * args.index_head_dim
+            state_dim = 2 * coff * args.head_dim
+
+            if has_indexer:
+                idx_kv_blocks = _blocks(args.max_seq_len // ratio)
+                idx_state_blocks = _blocks(coff * ratio)
+                indexer_state = torch.zeros(idx_state_blocks, block_size, head_num, indexer_state_dim,
+                                            dtype=dtype, device=device)
+                indexer_k = torch.zeros(idx_kv_blocks, block_size, head_num, args.index_head_dim,
+                                        dtype=dtype, device=device)
+            else:
+                indexer_state = _empty()
+                indexer_k = _empty()
+
+            if has_compress:
+                comp_kv_blocks = _blocks(args.max_seq_len // ratio)
+                comp_state_blocks = _blocks(coff * ratio)
+                compress_kv = torch.zeros(comp_kv_blocks, block_size, head_num, args.head_dim,
+                                          dtype=dtype, device=device)
+                state = torch.zeros(comp_state_blocks, block_size, head_num, state_dim,
+                                    dtype=dtype, device=device)
+            else:
+                compress_kv = _empty()
+                state = _empty()
+
+            swa_kv = torch.zeros(swa_blocks, block_size, head_num, args.head_dim,
+                                 dtype=dtype, device=device)
+
+            self.xlite_kv_cache.append(
+                (indexer_state, indexer_k, compress_kv, state, swa_kv))
+
+        kv_size = sum(
+            t.numel() * t.element_size()
+            for layer_cache in self.xlite_kv_cache
+            for t in layer_cache
+        )
         return kv_size

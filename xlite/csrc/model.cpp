@@ -870,8 +870,8 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
 }
 
 void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer,
-                            std::vector<std::vector<XTensor>> &kvCache,
-                            std::vector<XTensor> &freqsCis, XTensor &hiddenState)
+                            std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
+                            XTensor &hiddenState)
 {
     // TODO
 }
@@ -1593,7 +1593,7 @@ void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<
         ForwardHcPre(rt, i == 0 ? x : residual, hcAttnFn[i], hcAttnScale[i], hcAttnBase[i], h, post,
                      comb);
         XliteOpRmsNorm(rt, h, attnNorm[i], h, _c.normEps, _c.hiddenSize, true, attnNormBias[i]);
-        ForwardAttnCXA(rt, i, kvCache, freqsCis, h);
+        ForwardAttnCXA(rt, i, kvCache, freqsCis[i], h);
         XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
         ForwardHcPost(rt, h, post, comb, i == 0 ? x : residual, residual);
 
@@ -1835,21 +1835,73 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
             }
         }
     } else if (_c.attnType == XMODEL_ATTN_CXA) {
-        XTensor &kCache = kvCache[0][0];
-        XTensor &indexKCache = kvCache[0][1];
-        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-        if (kCache.shape[1] != _c.blockSize || kCache.shape[2] != expectedKvHeads ||
-            kCache.shape[3] != _c.headDim) {
-            throw std::runtime_error(
-                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                ": kv cache's shape not match [block_num, block_size, kv_head_num, head_dim]");
-        }
-        if (indexKCache.shape[1] != _c.blockSize || indexKCache.shape[2] != 1 ||
-            indexKCache.shape[3] != _c.indexHeadDim) {
+        // Per-layer 5-tuple: (indexer_state, indexer_k, compress_kv, state, swa_kv).
+        // Each cache has its own block_num sized to the slots it actually holds.
+        // indexer_* exist only on compress_ratio==4 layers; compress_kv/state exist
+        // only on compress_ratio!=0 layers; swa_kv exists on every layer.
+        if (kvCache[0].size() != 5) {
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                     ": CXA index k cache's shape not match [block_num, "
-                                     "block_size, 1, index_head_size]");
+                                     ": CXA kv cache must be a 5-tuple per layer");
         }
+        // check layer 2
+        uint32_t checkLayer = _c.nLayers <= 2 ? 0 : 2;
+        uint32_t ratio = _c.compressRatios[checkLayer];
+        bool hasIndexer = (ratio == 4);
+        bool hasCompress = (ratio != 0);
+        uint32_t coff = 1 + (hasIndexer ? 1 : 0);  // overlap == (ratio == 4)
+
+        auto isEmpty = [](XTensor &t) { return t.numel == 0 || t.shape.empty(); };
+        auto checkShape = [](XTensor &t, uint32_t blockSize, uint32_t headNum, size_t dim,
+                             const char *what) {
+            if (t.shape.size() != 4 || t.shape[1] != blockSize || t.shape[2] != headNum ||
+                t.shape[3] != dim) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": CXA " + what +
+                                         " shape not match [block_num, "
+                                         "block_size, head_num, dim]");
+            }
+        };
+
+        XTensor &indexerState = kvCache[checkLayer][0];
+        XTensor &indexerK = kvCache[checkLayer][1];
+        if (hasIndexer) {
+            if (isEmpty(indexerState) || isEmpty(indexerK)) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": CXA indexer cache must be non-empty on ratio==4 layer");
+            }
+            checkShape(indexerState, _c.blockSize, 1, 2 * coff * _c.indexHeadDim,
+                       "indexer state cache");
+            checkShape(indexerK, _c.blockSize, 1, _c.indexHeadDim, "indexer k cache");
+        } else {
+            if (!isEmpty(indexerState) || !isEmpty(indexerK)) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": CXA indexer cache must be empty on non-ratio==4 layer");
+            }
+        }
+
+        XTensor &compressKv = kvCache[checkLayer][2];
+        XTensor &state = kvCache[checkLayer][3];
+        if (hasCompress) {
+            if (isEmpty(compressKv) || isEmpty(state)) {
+                throw std::runtime_error(
+                    std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                    ": CXA compress cache must be non-empty on ratio!=0 layer");
+            }
+            checkShape(compressKv, _c.blockSize, 1, _c.headDim, "compress kv cache");
+            checkShape(state, _c.blockSize, 1, 2 * coff * _c.headDim, "state cache");
+        } else {
+            if (!isEmpty(compressKv) || !isEmpty(state)) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": CXA compress cache must be empty on ratio==0 layer");
+            }
+        }
+
+        XTensor &swaKv = kvCache[checkLayer][4];
+        if (isEmpty(swaKv)) {
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": CXA swa kv cache must be non-empty");
+        }
+        checkShape(swaKv, _c.blockSize, 1, _c.headDim, "swa kv cache");
     }
 }
 
@@ -1913,12 +1965,40 @@ size_t XModel::DummyRun()
                                     embed.dtype, nullptr);
                 kvCache[i] = {kCache, vCache, indexKCache};
             } else if (_c.attnType == XMODEL_ATTN_CXA) {
-                XTensor kCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
-                    embed.dtype, nullptr);
-                XTensor indexKCache({_c.maxBatch * maxNumBlocks, _c.blockSize, 1, _c.indexHeadDim},
-                                    embed.dtype, nullptr);
-                kvCache[i] = {kCache, indexKCache};
+                uint32_t ratio = _c.compressRatios.empty() ? 0 : _c.compressRatios[i];
+                bool hasIndexer = (ratio == 4);
+                bool hasCompress = (ratio != 0);
+                uint32_t coff = 1 + (hasIndexer ? 1 : 0);
+                uint32_t swaBlocks = _c.maxBatch * DIV_ROUND_UP(_c.windowSize, _c.blockSize);
+                uint32_t compKvBlocks =
+                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen / ratio, _c.blockSize)
+                                : 0;
+                uint32_t compStateBlocks =
+                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(coff * ratio, _c.blockSize) : 0;
+                uint32_t idxStateBlocks =
+                    hasIndexer ? _c.maxBatch * DIV_ROUND_UP(coff * ratio, _c.blockSize) : 0;
+
+                auto emptyTensor = [&]() -> XTensor { return XTensor({0}, embed.dtype, nullptr); };
+
+                XTensor indexerState =
+                    hasIndexer
+                        ? XTensor({idxStateBlocks, _c.blockSize, 1, 2 * coff * _c.indexHeadDim},
+                                  embed.dtype, nullptr)
+                        : emptyTensor();
+                XTensor indexerK = hasIndexer
+                                       ? XTensor({compKvBlocks, _c.blockSize, 1, _c.indexHeadDim},
+                                                 embed.dtype, nullptr)
+                                       : emptyTensor();
+                XTensor compressKv =
+                    hasCompress
+                        ? XTensor({compKvBlocks, _c.blockSize, 1, _c.headDim}, embed.dtype, nullptr)
+                        : emptyTensor();
+                XTensor state =
+                    hasCompress ? XTensor({compStateBlocks, _c.blockSize, 1, 2 * coff * _c.headDim},
+                                          embed.dtype, nullptr)
+                                : emptyTensor();
+                XTensor swaKv({swaBlocks, _c.blockSize, 1, _c.headDim}, embed.dtype, nullptr);
+                kvCache[i] = {indexerState, indexerK, compressKv, state, swaKv};
             }
         }
         return kvCache;
