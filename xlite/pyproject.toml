@@ -62,7 +62,8 @@ version = { attr = "xlite.__version__" }
 exclude = ["*.tools", "*.tools.*", "tests", "tests.*"]
 
 [tool.setuptools.package-data]
-xlite = ["py.typed", "*.pyi", "*.so", "lib/*.so"]
+xlite = ["py.typed", "*.pyi", "*.so", "lib/*.so",
+         "lib/cmake/xlite/*.cmake", "include/xlite/*.h"]
 
 [tool.mypy]
 mypy_path = "xlite"

@@ -311,6 +311,23 @@ class CMakeBuild(build_ext):
                 shutil.copy2(so_file, source_tree_lib_dir / so_file.name)
                 print(f"Editable install detected: Copied {so_file} to {source_tree_lib_dir}")
 
+            # move headers and cmake config to source tree for editable installs
+            cmake_include_dir = install_prefix / "xlite" / "include"
+            if cmake_include_dir.exists():
+                source_tree_include_dir = ROOT_DIR / "xlite" / "include"
+                if source_tree_include_dir.exists():
+                    shutil.rmtree(source_tree_include_dir)
+                shutil.copytree(cmake_include_dir, source_tree_include_dir)
+                print(f"Editable install detected: Synced headers to {source_tree_include_dir}")
+
+            cmake_config_dir = cmake_lib_dir / "cmake"
+            if cmake_config_dir.exists():
+                source_tree_config_dir = source_tree_lib_dir / "cmake"
+                if source_tree_config_dir.exists():
+                    shutil.rmtree(source_tree_config_dir)
+                shutil.copytree(cmake_config_dir, source_tree_config_dir)
+                print(f"Editable install detected: Synced cmake config to {source_tree_config_dir}")
+
 
 setup(
     ext_modules=[Extension(name="xlite._C", sources=[])],

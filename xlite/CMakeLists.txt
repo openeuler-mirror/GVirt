@@ -322,3 +322,14 @@ install(TARGETS xlite_kernels_common_${RUN_MODE} xlite_kernels_bf16_${RUN_MODE} 
 install(TARGETS _C
     LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite
 )
+
+# Install public C++ headers.
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/csrc/xlite.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/csrc/runtime.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/csrc/model.h
+        DESTINATION ${CMAKE_INSTALL_PATH}/xlite/include/xlite)
+
+# Install cmake package config for find_package(xlite).
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/csrc/xliteConfig.cmake
+        DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib/cmake/xlite)

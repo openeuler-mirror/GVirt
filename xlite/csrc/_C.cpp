@@ -6,11 +6,9 @@
 #include <torch/torch.h>
 #include <torch/extension.h>
 #include <optional>
-#include "base.h"
+#include "xlite.h"
 #include "core_assigner.h"
 #include "op.h"
-#include "runtime.h"
-#include "model.h"
 #include "auto_tuner.h"
 #include "debug.h"
 
@@ -194,52 +192,6 @@ private:
                           std::vector<MatmulWeight> &weightsXT, uint32_t currLayer,
                           bool isRowParallel, uint32_t tpRank, uint32_t layerOffset = 0);
 };
-
-static inline enum XDtype XDtype(at::Tensor &t)
-{
-    switch (t.scalar_type()) {
-        case at::ScalarType::Char:
-            return INT8;
-        case at::ScalarType::Int:
-            return INT32;
-        case at::ScalarType::Long:
-            return INT64;
-        case at::ScalarType::Half:
-            return FP16;
-        case at::ScalarType::BFloat16:
-            return BF16;
-        case at::ScalarType::Float:
-            return FP32;
-        case at::ScalarType::ComplexFloat:
-            return CPLXF;
-        default:
-            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                     ": unknown data type " +
-                                     std::to_string(static_cast<int>(t.scalar_type())));
-    }
-}
-
-static inline void *TensorPtr(at::Tensor &t)
-{
-    return reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(t.storage().data_ptr().get()) +
-                                    t.storage_offset() * t.dtype().itemsize());
-}
-
-static inline void InitXTensor(XTensor &out, at::Tensor &in)
-{
-    auto sizesVec = in.sizes().vec();
-    std::vector<size_t> sizes;
-    sizes.reserve(sizesVec.size());
-
-    for (auto s : sizesVec) {
-        if (s < 0) {
-            throw std::runtime_error("Negative size detected: " + std::to_string(s));
-        }
-        sizes.push_back(static_cast<size_t>(s));
-    }
-
-    out.Init(sizes, XDtype(in), TensorPtr(in));
-}
 
 static bool TensorUsable(const at::Tensor &t)
 {
@@ -1428,16 +1380,16 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
 
     if (!enableFlashAttention) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, maxNumBlock * blockSize},
-                                   XDtype(qkv), DBG_LOC);
+                                   XDtypeOf(qkv), DBG_LOC);
         XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _queryStartLoc, _lens,
                          _cachedLens, _blockTables, nHeads, nKvHeads, headDim, blockSize, batch,
                          maxNumBlock);
         rt.Synchronize();
         rt.PutTensor(qk);
     } else {
-        XTensor &qk =
-            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, tileSizeOfCachedKV}, XDtype(qkv), DBG_LOC);
-        XTensor &sv = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, headDim}, XDtype(qkv), DBG_LOC);
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, tileSizeOfCachedKV},
+                                   XDtypeOf(qkv), DBG_LOC);
+        XTensor &sv = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, headDim}, XDtypeOf(qkv), DBG_LOC);
         XTensor &max = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
@@ -1482,24 +1434,24 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
     InitXTensor(_topkIndices, topkIndices);
 
     XTensor &qAbsorb =
-        rt.GetTensor({_qWithQr.shape[0], nHeads * kvLoraRank}, XDtype(qWithQr), DBG_LOC);
+        rt.GetTensor({_qWithQr.shape[0], nHeads * kvLoraRank}, XDtypeOf(qWithQr), DBG_LOC);
     XliteOpEinsumMhtHtdMhd(rt, _qWithQr, _wukT, qAbsorb, _qWithQr.shape[0], nHeads, nopeHeadDim,
                            kvLoraRank, weightNz, static_cast<int>(nopeHeadDim + ropeHeadDim));
 
     XTensor &oAbsorb =
-        rt.GetTensor({_qWithQr.shape[0], nHeads * kvLoraRank}, XDtype(qWithQr), DBG_LOC);
+        rt.GetTensor({_qWithQr.shape[0], nHeads * kvLoraRank}, XDtypeOf(qWithQr), DBG_LOC);
     if (!enableFlashAttention) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, maxNumBlocks * blockSize},
-                                   XDtype(qWithQr), DBG_LOC);
+                                   XDtypeOf(qWithQr), DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, _qr, _kCache, _peCache, qk, oAbsorb, _queryStartLoc, _lens,
                      _cachedLens, _blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
                      maxNumBlocks, scale, topK, _topkIndices);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, tileSizeOfCachedKV},
-                                   XDtype(qWithQr), DBG_LOC);
+                                   XDtypeOf(qWithQr), DBG_LOC);
         XTensor &sv =
-            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, kvLoraRank}, XDtype(qWithQr), DBG_LOC);
+            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, kvLoraRank}, XDtypeOf(qWithQr), DBG_LOC);
         XTensor &max = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
         XTensor &lastMax = rt.GetTensor({_qWithQr.shape[0], nHeads}, FP32, DBG_LOC);
@@ -1565,7 +1517,8 @@ void MLAV3(XRuntime &rt, at::Tensor &qAbsorb, at::Tensor &qr, at::Tensor &kDense
     InitXTensor(_queryStartLoc, queryStartLoc);
     InitXTensor(_lens, lens);
     InitXTensor(_cachedLens, cachedLens);
-    XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, indexTopK}, XDtype(qAbsorb), DBG_LOC);
+    XTensor &qk =
+        rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, indexTopK}, XDtypeOf(qAbsorb), DBG_LOC);
     XliteOpMLAV3(rt, _qAbsorb, _qr, _kDenseCache, _peDenseCache, qk, _oAbsorb, _queryStartLoc,
                  _lens, _cachedLens, nHeads, ropeHeadDim, kvLoraRank, batch, indexTopK, scale);
     rt.PutTensor(qk);
@@ -1636,7 +1589,7 @@ void TopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &out
 void CastUp(XRuntime &rt, at::Tensor &in, at::Tensor &out)
 {
     XTensor _in, _out;
-    XTensor &inScale = rt.GetTensor({1}, XDtype(in), DBG_LOC);
+    XTensor &inScale = rt.GetTensor({1}, XDtypeOf(in), DBG_LOC);
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
@@ -1686,7 +1639,7 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     InitXTensor(_in, in);
     InitXTensor(_counts, counts);
     InitXTensor(_output, output);
-    if (!weights.empty() && XDtype(weights[0]) == INT32 &&
+    if (!weights.empty() && XDtypeOf(weights[0]) == INT32 &&
         (_in.dtype == INT32 || _in.dtype == INT8)) {
         // for the w4a8 matmul, activation and weight will be viewed as int4
         _in.View(INT4);
@@ -1707,7 +1660,7 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
         rt.MemcpyH2D(_scales->ptr, reinterpret_cast<void *>(p.data()), num * sizeof(void *));
     }
 
-    enum XDtype weightDtype = XDtype(weights[0]);
+    enum XDtype weightDtype = XDtypeOf(weights[0]);
     if (weightDtype == INT32) {
         weightDtype = INT4;
     }
@@ -1916,7 +1869,7 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     InitXTensor(_blockTables, blockTables);
 
     XTensor &scores =
-        rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN}, XDtype(q), DBG_LOC);
+        rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN}, XDtypeOf(q), DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({_q.shape[0], 2 * topK}, INT32, DBG_LOC);
     XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
     sync.Memset(0);
@@ -1984,10 +1937,10 @@ void LinearAttProj(XRuntime &rt, at::Tensor &x, at::Tensor &W_qkv, at::Tensor &W
     InitXTensor(_a, a);
 
     std::vector<XTensor> inputs = {_W_qkv, _W_z, _W_b, _W_a};
-    XTensor &W = rt.GetTensor({k, n + v + h + h}, XDtype(x), DBG_LOC);
+    XTensor &W = rt.GetTensor({k, n + v + h + h}, XDtypeOf(x), DBG_LOC);
     XliteOpConcatCol(rt, inputs, W);
 
-    XTensor &out = rt.GetTensor({m, n + v + h + h}, XDtype(x), DBG_LOC);
+    XTensor &out = rt.GetTensor({m, n + v + h + h}, XDtypeOf(x), DBG_LOC);
     XliteOpMatmul(rt, _x, W, out, false, bias, deqScale, true);
     rt.PutTensor(W);
 
