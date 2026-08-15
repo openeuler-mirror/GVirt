@@ -17,7 +17,13 @@
  * GM copies use CopyGmToUbufAligned / CopyUbufToGmAligned so lengths need not
  * be 32B-aligned.
  *
- * Limits (host falls back if exceeded): kernelDim <= 16, seqLen <= 4096.
+ * Limits: kernelDim <= 16, seqLen (or per-request lens) <= 4096.
+ *
+ * Layouts:
+ *   Uniform (seqLen != 0): input/output [B, C, S], state [B, C, K]
+ *   Packed (seqLen == 0): input/output [T, C] token-major, state still [B, C, K];
+ *     per-request tokens are input[queryStartLoc[b] : queryStartLoc[b]+queryLens[b]].
+ *     Host sets seqLen=0 for packed; do not test GM pointers against nullptr.
  */
 #pragma once
 #include "kernel_operator.h"
@@ -34,6 +40,7 @@ class XliteCausalConv1dSiLU
 public:
     static constexpr int kMaxKernel = 16;
     static constexpr int kMaxInputF = 4096;
+    static constexpr int kMaxBatchMeta = 256;
     // Extra pad so full-width (64-lane) tail reads stay inside input_f.
     static constexpr int kGatherPad = 128;
     static constexpr int kBlock = VECTOR_MAX_NUM_OF_FP32;
@@ -44,7 +51,8 @@ public:
 
     __aicore__ inline void Init(GM_ADDR state, GM_ADDR input, GM_ADDR weight, GM_ADDR output,
                                 uint32_t batch, uint32_t channels, uint32_t seqLen,
-                                uint32_t kernelDim, uint32_t updateState)
+                                uint32_t kernelDim, uint32_t updateState, GM_ADDR queryStartLoc,
+                                GM_ADDR queryLens)
     {
         set_atomic_none();
         set_mask_norm();
@@ -53,6 +61,8 @@ public:
         this->input = (__gm__ Dtype *)input;
         this->weight = (__gm__ Dtype *)weight;
         this->output = (__gm__ Dtype *)output;
+        this->queryStartLoc = (__gm__ int32_t *)queryStartLoc;
+        this->queryLens = (__gm__ int32_t *)queryLens;
         this->batch = batch;
         this->channels = channels;
         this->seqLen = seqLen;
@@ -97,6 +107,13 @@ public:
         calc_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += 8 * 32;
         out_buf = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += 64 * sizeof(Dtype);
+        if (off % 32 != 0) {
+            off = (off + 31) / 32 * 32;
+        }
+        meta_start = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
+        off += kMaxBatchMeta * sizeof(int32_t);
+        meta_lens = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
     }
 
     __aicore__ inline float ReadFloat(__ubuf__ float *buf, int idx)
@@ -225,10 +242,85 @@ public:
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
     }
 
-    __aicore__ inline void WriteBackState(int batchIdx, int channel)
+    __aicore__ inline bool Packed()
+    {
+        // Host sets seqLen=0 for packed mixed-length. GM pointer != nullptr is
+        // not reliable on device (CANN may pass a non-null dummy).
+        return seqLen == 0;
+    }
+
+    // Packed [T,C]: tokens of one channel are stride-C apart.
+    // align_b16 bursts are placed 32B apart in UB; compact the first Dtype of
+    // each slot, then convert. Never DMA from a non-32B UB pointer (ADDR_MISALIGN).
+    __aicore__ inline void LoadPackedChannel(__gm__ Dtype *base, int S, int stride,
+                                             __ubuf__ float *dstF)
+    {
+        constexpr int kSlot = BLOCK_SIZE / sizeof(Dtype);
+        constexpr int kMaxTake = kMaxInputF / kSlot;
+        uint32_t elemBytes = static_cast<uint32_t>(sizeof(Dtype));
+        uint32_t srcGap = static_cast<uint32_t>(stride - 1) * elemBytes;
+        int done = 0;
+        while (done < S) {
+            int take = S - done;
+            if (take > kMaxTake) {
+                take = kMaxTake;
+            }
+            if constexpr (std::is_same<Dtype, float>::value) {
+                copy_gm_to_ubuf_align_b32(stage_buf, base + done * stride, 0, (uint16_t)take,
+                                          elemBytes, 0, 0, srcGap, 0);
+            } else {
+                copy_gm_to_ubuf_align_b16(stage_buf, base + done * stride, 0, (uint16_t)take,
+                                          elemBytes, 0, 0, srcGap, 0);
+            }
+            pipe_barrier(PIPE_MTE2);
+            set_flag(PIPE_MTE2, PIPE_S, EVENT_ID2);
+            wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID2);
+            for (int i = 0; i < take; ++i) {
+                stage_buf[i] = stage_buf[i * kSlot];
+            }
+            set_flag(PIPE_S, PIPE_V, EVENT_ID2);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID2);
+            if constexpr (std::is_same<Dtype, float>::value) {
+                for (int i = 0; i < take; ++i) {
+                    WriteFloat(dstF, done + i, ReadFloat(stage_buf, i));
+                }
+            } else {
+                if (take >= 2 * VECTOR_MAX_NUM_OF_FP32) {
+                    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                } else {
+                    SetMask(take);
+                }
+                int repeat = DIV_ROUND_UP(take, VECTOR_MAX_NUM_OF_FP32);
+                if constexpr (std::is_same<Dtype, float16_t>::value) {
+                    vconv_f162f32(dstF + done, stage_buf, repeat, 1, 1, 8, 4);
+                } else {
+                    vconv_bf162f32(dstF + done, stage_buf, repeat, 1, 1, 8, 4);
+                }
+                pipe_barrier(PIPE_V);
+                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+            }
+            done += take;
+        }
+    }
+
+    __aicore__ inline void StorePackedChannel(__gm__ Dtype *base, int S, int stride,
+                                              __ubuf__ Dtype *src, int nElem)
+    {
+        (void)S;
+        uint32_t elemBytes = static_cast<uint32_t>(sizeof(Dtype));
+        for (int s = 0; s < nElem; ++s) {
+            // UB src+s is not 32B-aligned; DMA only from tmp_kernel_buf.
+            pipe_barrier(PIPE_ALL);
+            tmp_kernel_buf[0] = src[s];
+            pipe_barrier(PIPE_ALL);
+            CopyUbufToGmAligned(base + s * stride, tmp_kernel_buf, elemBytes);
+            pipe_barrier(PIPE_MTE3);
+        }
+    }
+
+    __aicore__ inline void WriteBackState(int batchIdx, int channel, int S)
     {
         int K = (int)kernelDim;
-        int S = (int)seqLen;
         for (int j = 0; j < K; ++j) {
             int absIdx = S + j;
             float v = (absIdx < K) ? ReadFloat(state_f, absIdx) : ReadFloat(input_f, absIdx - K);
@@ -240,11 +332,23 @@ public:
 
     __aicore__ inline void Process()
     {
-        if ((int)kernelDim > kMaxKernel || (int)seqLen > kMaxInputF) {
+        int K = (int)kernelDim;
+        if (K > kMaxKernel) {
             return;
         }
-        int K = (int)kernelDim;
-        int S = (int)seqLen;
+        bool packed = Packed();
+        if (!packed && (int)seqLen > kMaxInputF) {
+            return;
+        }
+        if (packed) {
+            uint32_t n = batch < kMaxBatchMeta ? batch : kMaxBatchMeta;
+            CopyGmToUbufAligned(meta_start, queryStartLoc, n * sizeof(int32_t));
+            pipe_barrier(PIPE_MTE2);
+            CopyGmToUbufAligned(meta_lens, queryLens, n * sizeof(int32_t));
+            pipe_barrier(PIPE_MTE2);
+            set_flag(PIPE_MTE2, PIPE_S, EVENT_ID1);
+            wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID1);
+        }
 
         // Byte offsets for vgather: lane p reads base + off_ramp[p].
         for (int k = 0; k < kBlock; k++) {
@@ -291,11 +395,29 @@ public:
 
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
             for (int batchIdx = 0; batchIdx < (int)batch; ++batchIdx) {
+                int S;
+                int start;
+                if (packed) {
+                    // meta_* live in UB; must not read them from V without a drain.
+                    pipe_barrier(PIPE_ALL);
+                    S = (int)meta_lens[batchIdx];
+                    start = (int)meta_start[batchIdx];
+                } else {
+                    S = (int)seqLen;
+                    start = 0;
+                }
+                if (S <= 0 || S > kMaxInputF) {
+                    continue;
+                }
                 int stateBase = (batchIdx * (int)channels + channel) * K;
-                int inputBase = (batchIdx * (int)channels + channel) * S;
-
                 LoadGmToFloat(state + stateBase, K, state_f);
-                LoadGmToFloat(input + inputBase, S, input_f);
+                if (packed) {
+                    LoadPackedChannel(input + start * (int)channels + channel, S, (int)channels,
+                                      input_f);
+                } else {
+                    int inputBase = (batchIdx * (int)channels + channel) * S;
+                    LoadGmToFloat(input + inputBase, S, input_f);
+                }
 
                 // ---- Straddle outputs [0, K-1): window spans state and input ----
                 int scalarEnd = MIN(K - 1, S);
@@ -324,11 +446,16 @@ public:
                         WriteFloat(acc_buf, pos, dot);
                     }
                     SiLU();
-                    int outOffset = (batchIdx * (int)channels + channel) * S;
                     set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
                     wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-                    CopyUbufToGmAligned(output + outOffset, out_buf, scalarEnd * sizeof(Dtype));
-                    pipe_barrier(PIPE_MTE3);
+                    if (packed) {
+                        StorePackedChannel(output + start * (int)channels + channel, S,
+                                           (int)channels, out_buf, scalarEnd);
+                    } else {
+                        int outOffset = (batchIdx * (int)channels + channel) * S;
+                        CopyUbufToGmAligned(output + outOffset, out_buf, scalarEnd * sizeof(Dtype));
+                        pipe_barrier(PIPE_MTE3);
+                    }
                     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
                 }
 
@@ -350,18 +477,22 @@ public:
                     }
                     SiLU();
 
-                    int outOffset = (batchIdx * (int)channels + channel) * S + i;
                     set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
                     wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-                    // Per-element dst is often not 32B-aligned (bf16); use aligned helper.
-                    CopyUbufToGmAligned(output + outOffset, out_buf, realLen * sizeof(Dtype));
-                    pipe_barrier(PIPE_MTE3);
+                    if (packed) {
+                        StorePackedChannel(output + (start + i) * (int)channels + channel, S,
+                                           (int)channels, out_buf, realLen);
+                    } else {
+                        int outOffset = (batchIdx * (int)channels + channel) * S + i;
+                        CopyUbufToGmAligned(output + outOffset, out_buf, realLen * sizeof(Dtype));
+                        pipe_barrier(PIPE_MTE3);
+                    }
                     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
                 }
 
                 if (updateState) {
                     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-                    WriteBackState(batchIdx, channel);
+                    WriteBackState(batchIdx, channel, S);
                     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
                 }
                 pipe_barrier(PIPE_ALL);
@@ -375,6 +506,8 @@ private:
     __gm__ Dtype *input;
     __gm__ Dtype *weight;
     __gm__ Dtype *output;
+    __gm__ int32_t *queryStartLoc;
+    __gm__ int32_t *queryLens;
 
     __ubuf__ Dtype *stage_buf;
     __ubuf__ Dtype *tmp_kernel_buf;
@@ -387,6 +520,8 @@ private:
     __ubuf__ float *acc_buf;
     __ubuf__ float *calc_buf;
     __ubuf__ Dtype *out_buf;
+    __ubuf__ int32_t *meta_start;
+    __ubuf__ int32_t *meta_lens;
 
     uint32_t batch;
     uint32_t channels;
@@ -395,20 +530,34 @@ private:
     uint32_t updateState;
 };
 
-#define CONV1D_AND_SILU_FUNC_DEFINE(dtype)                                                      \
-    extern "C" __global__ __aicore__ void conv1d_and_silu_##dtype(                              \
-        GM_ADDR state, GM_ADDR input, GM_ADDR weight, GM_ADDR output, uint32_t batch,           \
-        uint32_t channels, uint32_t seqLen, uint32_t kernelDim, uint32_t updateState)           \
-    {                                                                                           \
-        XliteCausalConv1dSiLU<dtype> op;                                                        \
-        op.Init(state, input, weight, output, batch, channels, seqLen, kernelDim, updateState); \
-        op.Process();                                                                           \
+#define CONV1D_AND_SILU_FUNC_DEFINE(dtype)                                                     \
+    extern "C" __global__ __aicore__ void conv1d_and_silu_##dtype(                             \
+        GM_ADDR state, GM_ADDR input, GM_ADDR weight, GM_ADDR output, uint32_t batch,          \
+        uint32_t channels, uint32_t seqLen, uint32_t kernelDim, uint32_t updateState,          \
+        GM_ADDR queryStartLoc, GM_ADDR queryLens)                                              \
+    {                                                                                          \
+        XliteCausalConv1dSiLU<dtype> op;                                                       \
+        op.Init(state, input, weight, output, batch, channels, seqLen, kernelDim, updateState, \
+                queryStartLoc, queryLens);                                                     \
+        op.Process();                                                                          \
     }
 #else
 #define CONV1D_AND_SILU_FUNC_DEFINE(dtype)                                            \
     extern "C" __global__ __aicore__ void conv1d_and_silu_##dtype(                    \
         GM_ADDR state, GM_ADDR input, GM_ADDR weight, GM_ADDR output, uint32_t batch, \
-        uint32_t channels, uint32_t seqLen, uint32_t kernelDim, uint32_t updateState) \
+        uint32_t channels, uint32_t seqLen, uint32_t kernelDim, uint32_t updateState, \
+        GM_ADDR queryStartLoc, GM_ADDR queryLens)                                     \
     {                                                                                 \
+        (void)state;                                                                  \
+        (void)input;                                                                  \
+        (void)weight;                                                                 \
+        (void)output;                                                                 \
+        (void)batch;                                                                  \
+        (void)channels;                                                               \
+        (void)seqLen;                                                                 \
+        (void)kernelDim;                                                              \
+        (void)updateState;                                                            \
+        (void)queryStartLoc;                                                          \
+        (void)queryLens;                                                              \
     }
 #endif

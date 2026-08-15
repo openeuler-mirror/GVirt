@@ -711,6 +711,14 @@ void ExpandLinearHeads(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numToke
     }
 }
 
+void ZeroLinearStateSlot(XRuntime &rt, XTensor &state, uint32_t batchIdx, uint32_t slotElems)
+{
+    size_t elemBytes = XDtypeBit(state.dtype) / 8;
+    size_t slotBytes = static_cast<size_t>(slotElems) * elemBytes;
+    auto *ptr = static_cast<uint8_t *>(state.ptr) + static_cast<size_t>(batchIdx) * slotBytes;
+    CHECK_ACL(aclrtMemsetAsync(ptr, slotBytes, 0, slotBytes, rt.stream));
+}
+
 }  // namespace
 
 void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
@@ -728,11 +736,38 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
 
     uint32_t m = hiddenState.shape[0];
     uint32_t batch = rt._batch;
-    if (batch == 0 || m % batch != 0) {
-        throw std::runtime_error(
-            "ForwardAttnLinear: token layout requires uniform seqlen per batch item");
+    if (batch == 0) {
+        throw std::runtime_error("ForwardAttnLinear: empty batch");
     }
-    uint32_t seqlen = m / batch;
+    if (rt._hostLens.size() != batch || rt._cachedLensHost.size() != batch) {
+        throw std::runtime_error(
+            "ForwardAttnLinear: host lens not populated; PrepareAttn must run first");
+    }
+    uint32_t seqlen = rt._hostLens[0];
+    bool uniform = true;
+    uint32_t tokenSum = 0;
+    uint32_t maxSeqlen = 0;
+    for (uint32_t i = 0; i < batch; ++i) {
+        uint32_t li = rt._hostLens[i];
+        tokenSum += li;
+        if (li != seqlen) {
+            uniform = false;
+        }
+        if (li > maxSeqlen) {
+            maxSeqlen = li;
+        }
+    }
+    if (seqlen == 0) {
+        uniform = false;
+    }
+    if (tokenSum != m) {
+        throw std::runtime_error("ForwardAttnLinear: packed token count mismatch (got " +
+                                 std::to_string(m) + ", expected " + std::to_string(tokenSum) +
+                                 ")");
+    }
+    if (!rt.IsDummyRuntime() && maxSeqlen > 4096) {
+        throw std::runtime_error("ForwardAttnLinear: per-request seqlen exceeds conv kernel limit");
+    }
 
     uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
     uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
@@ -770,55 +805,45 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     // Step 2: beta = sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias)
     XTensor &beta = rt.GetTensor({m, nLocalVHeads}, hiddenState.dtype, DBG_LOC);
     XTensor &g = rt.GetTensor({m, nLocalVHeads}, hiddenState.dtype, DBG_LOC);
-    XliteOpBetaDecay(rt, b, a, linearALog[layer], linearDtBias[layer], beta, g, batch, seqlen,
-                     nLocalVHeads);
+    XliteOpBetaDecay(rt, b, a, linearALog[layer], linearDtBias[layer], beta, g, m, 1, nLocalVHeads);
     rt.PutTensor(b);
     rt.PutTensor(a);
 
     // Step 3: causal conv1d + SiLU on mixed qkv
-    XTensor &mixTrans = rt.GetTensor({batch, qkvDim, seqlen}, hiddenState.dtype, DBG_LOC);
-    XTensor &convOut = rt.GetTensor({batch, convDim, seqlen}, hiddenState.dtype, DBG_LOC);
-    XTensor &convSeq = rt.GetTensor({batch, seqlen, convDim}, hiddenState.dtype, DBG_LOC);
     // Clear conv/ssm only for fresh prefill (cached_lens==0). Decode and
     // chunked-prefill continuation (cached>0) must reuse state: xlite has no
     // chunk_gated_delta_rule, so recurrent resumes from the previous step.
-    auto linearCachedLen = [&](uint32_t req) -> uint32_t {
-        if (req < rt._cachedLensHost.size()) {
-            return rt._cachedLensHost[req];
+    XTensor &convPacked = rt.GetTensor({m, convDim}, hiddenState.dtype, DBG_LOC);
+    if (!rt.IsDummyRuntime()) {
+        uint32_t convSlot = convDim * _c.linearConvKernelDim;
+        for (uint32_t i = 0; i < batch; ++i) {
+            if (i < rt._cachedLensHost.size() && rt._cachedLensHost[i] != 0) {
+                continue;
+            }
+            ZeroLinearStateSlot(rt, convState, i, convSlot);
         }
-        return 0;
-    };
-    {
+    }
+    XTensor convStateBatch;
+    convStateBatch.Init({batch, convDim, _c.linearConvKernelDim}, convState.dtype, convState.ptr);
+    if (uniform) {
+        XTensor &mixTrans = rt.GetTensor({batch, qkvDim, seqlen}, hiddenState.dtype, DBG_LOC);
+        XTensor &convOut = rt.GetTensor({batch, convDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor mix3d;
         mix3d.Init({batch, seqlen, qkvDim}, mixQkv.dtype, mixQkv.ptr);
         XliteOpTranspose_1_2(rt, mix3d, mixTrans);
-
-        if (!rt.IsDummyRuntime()) {
-            size_t convRowBytes = static_cast<size_t>(convDim) * _c.linearConvKernelDim *
-                                  XDtypeBit(convState.dtype) / 8;
-            for (uint32_t i = 0; i < batch; ++i) {
-                if (linearCachedLen(i) != 0) {
-                    continue;
-                }
-                auto *row = static_cast<char *>(convState.ptr) + i * convRowBytes;
-                CHECK_ACL(aclrtMemsetAsync(row, convRowBytes, 0, convRowBytes, rt.stream));
-            }
-        }
-
-        XTensor convStateBatch;
-        convStateBatch.Init({batch, convDim, _c.linearConvKernelDim}, convState.dtype,
-                            convState.ptr);
         XliteOpConv1dAndSiLU(rt, convStateBatch, mixTrans, linearConv1d[layer], convOut,
                              /*updateState=*/true);
-
         rt.PutTensor(mixTrans);
-        XliteOpTranspose_1_2(rt, convOut, convSeq);
+        XTensor convSeq3d;
+        convSeq3d.Init({batch, seqlen, convDim}, convPacked.dtype, convPacked.ptr);
+        XliteOpTranspose_1_2(rt, convOut, convSeq3d);
         rt.PutTensor(convOut);
         rt.PutTensor(mixQkv);
+    } else {
+        XliteOpConv1dAndSiLU(rt, convStateBatch, mixQkv, linearConv1d[layer], convPacked,
+                             /*updateState=*/true, &rt._attnQueryStartLoc, &rt._attnLens);
+        rt.PutTensor(mixQkv);
     }
-
-    XTensor convFlat;
-    convFlat.Init({m, convDim}, convSeq.dtype, convSeq.ptr);
 
     // Step 4-7: split / L2 / expand / gated delta
     XTensor &query = rt.GetTensor({m, localKeyDim}, hiddenState.dtype, DBG_LOC);
@@ -831,8 +856,8 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     XTensor &coreAttn = rt.GetTensor({m, localValueDim}, hiddenState.dtype, DBG_LOC);
     {
         std::vector<XTensor> qkvSplit = {query, key, value};
-        XliteOpSplitCol(rt, convFlat, qkvSplit);
-        rt.PutTensor(convSeq);
+        XliteOpSplitCol(rt, convPacked, qkvSplit);
+        rt.PutTensor(convPacked);
 
         XliteOpL2Norm(rt, query, query, _c.normEps, _c.linearKeyHeadDim, nLocalKHeads);
         XliteOpL2Norm(rt, key, key, _c.normEps, _c.linearKeyHeadDim, nLocalKHeads);
@@ -846,20 +871,25 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
             if (ssmState.shape.empty() || ssmState.shape[0] == 0) {
                 throw std::runtime_error("ForwardAttnLinear: invalid ssmState batch dim");
             }
-            size_t ssmRowBytes =
-                (ssmState.numel / ssmState.shape[0]) * XDtypeBit(ssmState.dtype) / 8;
+            uint32_t ssmSlot = nLocalVHeads * _c.linearKeyHeadDim * _c.linearValueHeadDim;
             for (uint32_t i = 0; i < batch; ++i) {
-                if (linearCachedLen(i) != 0) {
+                if (i < rt._cachedLensHost.size() && rt._cachedLensHost[i] != 0) {
                     continue;
                 }
-                auto *row = static_cast<char *>(ssmState.ptr) + i * ssmRowBytes;
-                CHECK_ACL(aclrtMemsetAsync(row, ssmRowBytes, 0, ssmRowBytes, rt.stream));
+                ZeroLinearStateSlot(rt, ssmState, i, ssmSlot);
             }
         }
 
-        XliteOpRecurrentGatedDeltaRule(rt, queryExp, keyExp, value, beta, g, ssmState, coreAttn,
-                                       batch, seqlen, nLocalVHeads, _c.linearKeyHeadDim,
-                                       _c.linearValueHeadDim);
+        if (uniform) {
+            XliteOpRecurrentGatedDeltaRule(rt, queryExp, keyExp, value, beta, g, ssmState, coreAttn,
+                                           batch, seqlen, nLocalVHeads, _c.linearKeyHeadDim,
+                                           _c.linearValueHeadDim);
+        } else {
+            XliteOpRecurrentGatedDeltaRule(rt, queryExp, keyExp, value, beta, g, ssmState, coreAttn,
+                                           batch, /*seqlen=*/0, nLocalVHeads, _c.linearKeyHeadDim,
+                                           _c.linearValueHeadDim, &rt._attnQueryStartLoc,
+                                           &rt._attnLens);
+        }
         rt.PutTensor(queryExp);
         rt.PutTensor(keyExp);
         rt.PutTensor(beta);

@@ -6,10 +6,14 @@
  * use_qk_l2norm=False (L2Norm already applied upstream).
  *
  * Layouts:
- *   query/key: [B*S, H*kDim]
- *   value/out: [B*S, H*vDim]
- *   beta/g:    [B*S, H]   (g is log-space; kernel applies exp(g))
+ *   query/key: [T, H*kDim]   (T = B*S uniform, or packed sum(lens[b]))
+ *   value/out: [T, H*vDim]
+ *   beta/g:    [T, H]   (g is log-space; kernel applies exp(g))
  *   state:     [B, H, kDim, vDim]  (updated in-place)
+ *   queryStartLoc/queryLens: packed mixed-length [B] int32. Host sets seqlen=0
+ *     to select packed mode (do not test GM pointers against nullptr — CANN
+ *     may pass a non-null dummy). Then t = queryStartLoc[b] + s, s < queryLens[b].
+ *     If seqlen != 0: uniform t = b * seqlen + s.
  */
 #pragma once
 #include "kernel_operator.h"
@@ -31,7 +35,8 @@ public:
 
     __aicore__ inline void Init(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR beta, GM_ADDR g,
                                 GM_ADDR state, GM_ADDR out, uint32_t batch, uint32_t seqlen,
-                                uint32_t numHeads, uint32_t kDim, uint32_t vDim, float scale)
+                                uint32_t numHeads, uint32_t kDim, uint32_t vDim, float scale,
+                                GM_ADDR queryStartLoc, GM_ADDR queryLens)
     {
         set_atomic_none();
         set_mask_norm();
@@ -44,6 +49,8 @@ public:
         this->g = (__gm__ Dtype *)g;
         this->state = (__gm__ Dtype *)state;
         this->out = (__gm__ Dtype *)out;
+        this->queryStartLoc = (__gm__ int32_t *)queryStartLoc;
+        this->queryLens = (__gm__ int32_t *)queryLens;
         this->batch = batch;
         this->seqlen = seqlen;
         this->numHeads = numHeads;
@@ -231,15 +238,35 @@ public:
         return val;
     }
 
+    __aicore__ inline uint32_t LoadU32(__gm__ int32_t *ptr)
+    {
+        copy_gm_to_ubuf(reinterpret_cast<__ubuf__ int32_t *>(outTmp), ptr, 0, 1, 1, 0, 0);
+        pipe_barrier(PIPE_MTE2);
+        set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+        wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+        return static_cast<uint32_t>(reinterpret_cast<__ubuf__ int32_t *>(outTmp)[0]);
+    }
+
     __aicore__ inline void ProcessOneHead(uint32_t b, uint32_t h)
     {
         uint32_t stateOff = ((b * numHeads) + h) * kDim * vDim;
         LoadVec(stateF, state + stateOff, stateIn, kDim * vDim, stateBlocks, stateF32Repeat);
 
         float scale = this->scale;
+        uint32_t tokenStart;
+        uint32_t tokenLen;
+        // seqlen==0 is the packed-mode flag from the host. GM pointer != nullptr
+        // is not a reliable check on device (CANN often substitutes a dummy).
+        if (seqlen == 0) {
+            tokenStart = LoadU32(queryStartLoc + b);
+            tokenLen = LoadU32(queryLens + b);
+        } else {
+            tokenStart = b * seqlen;
+            tokenLen = seqlen;
+        }
 
-        for (uint32_t s = 0; s < seqlen; ++s) {
-            uint32_t t = b * seqlen + s;
+        for (uint32_t s = 0; s < tokenLen; ++s) {
+            uint32_t t = tokenStart + s;
             uint32_t qkOff = t * numHeads * kDim + h * kDim;
             uint32_t vOff = t * numHeads * vDim + h * vDim;
             uint32_t bgOff = t * numHeads + h;
@@ -331,6 +358,8 @@ private:
     __gm__ Dtype *g;
     __gm__ Dtype *state;
     __gm__ Dtype *out;
+    __gm__ int32_t *queryStartLoc;
+    __gm__ int32_t *queryLens;
 
     __ubuf__ Dtype *qIn;
     __ubuf__ Dtype *kIn;
@@ -369,11 +398,11 @@ private:
     extern "C" __global__ __aicore__ void recurrent_gated_delta_rule_##dtype(                \
         GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR beta, GM_ADDR g, GM_ADDR state,   \
         GM_ADDR out, uint32_t batch, uint32_t seqlen, uint32_t numHeads, uint32_t kDim,      \
-        uint32_t vDim, float scale)                                                          \
+        uint32_t vDim, float scale, GM_ADDR queryStartLoc, GM_ADDR queryLens)                \
     {                                                                                        \
         RecurrentGatedDeltaRule<dtype> op;                                                   \
         op.Init(query, key, value, beta, g, state, out, batch, seqlen, numHeads, kDim, vDim, \
-                scale);                                                                      \
+                scale, queryStartLoc, queryLens);                                            \
         op.Process();                                                                        \
     }
 #else
@@ -381,7 +410,7 @@ private:
     extern "C" __global__ __aicore__ void recurrent_gated_delta_rule_##dtype(              \
         GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR beta, GM_ADDR g, GM_ADDR state, \
         GM_ADDR out, uint32_t batch, uint32_t seqlen, uint32_t numHeads, uint32_t kDim,    \
-        uint32_t vDim, float scale)                                                        \
+        uint32_t vDim, float scale, GM_ADDR queryStartLoc, GM_ADDR queryLens)              \
     {                                                                                      \
         (void)query;                                                                       \
         (void)key;                                                                         \
@@ -396,5 +425,7 @@ private:
         (void)kDim;                                                                        \
         (void)vDim;                                                                        \
         (void)scale;                                                                       \
+        (void)queryStartLoc;                                                               \
+        (void)queryLens;                                                                   \
     }
 #endif
