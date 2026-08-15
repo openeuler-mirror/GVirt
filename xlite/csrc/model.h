@@ -59,6 +59,7 @@ struct XModelConfig {
     uint32_t indexTopK;
     float indexSoftmaxScale;
     bool indexRopeInterleaved = false;
+    std::vector<bool> indexerSkipLayers;
 
     // linear attention config
     uint32_t linearNumKHeads = 0;

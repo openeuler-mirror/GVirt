@@ -166,6 +166,7 @@ XRuntime::~XRuntime(void)
         (void)aclrtFreeHost(_tokensPerEpGroupAllEpHost.ptr);
         (void)aclrtFree(_agSendBuf.ptr);
         (void)aclrtFree(_agRecvBuf.ptr);
+        (void)aclrtFree(_dsaTopkBuffer.ptr);
     }
 
     if (!_initOutside) {
@@ -333,7 +334,7 @@ int XRuntime::InitHcclComm(void)
 }
 
 void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
-                        uint32_t blockSize)
+                        uint32_t blockSize, uint32_t indexTopK)
 {
     std::vector<uint32_t> vgatherIndices;
     size_t size;
@@ -364,6 +365,12 @@ void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t m
     size = _moeEpSize * _moeEpSize * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMallocHost(&ptr, size));
     _tokensPerEpGroupAllEpHost.Init({_moeEpSize * _moeEpSize}, INT32, ptr);
+
+    if (indexTopK > 0) {
+        size = maxBatchedTokens * indexTopK * XDtypeBit(INT32) / 8;
+        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+        _dsaTopkBuffer.Init({maxBatchedTokens, indexTopK}, INT32, ptr);
+    }
 }
 
 void XRuntime::PrepareCommBuffers(uint64_t maxBatch, uint32_t hiddenSize, uint32_t nRoutedExperts,
@@ -404,10 +411,10 @@ void XRuntime::PrepareCommBuffers(uint64_t maxBatch, uint32_t hiddenSize, uint32
 void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                            uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVHeads,
                            uint32_t blockSize, uint32_t hiddenSize, uint32_t nRoutedExperts,
-                           uint32_t defDpSize, int inputDtype, int weightsDtype)
+                           uint32_t defDpSize, int inputDtype, int weightsDtype, uint32_t indexTopK)
 {
     if (!_attnInitialized) {
-        InitAttn(maxBatchedTokens, maxBatch, maxSeqLen, blockSize);
+        InitAttn(maxBatchedTokens, maxBatch, maxSeqLen, blockSize, indexTopK);
         bool agInGraph = AllGatherInGraphActive(DP);
         bool rsInGraph = ReduceScatterInGraphActive(DP);
         if (defDpSize > 1 && (agInGraph || rsInGraph)) {
@@ -430,6 +437,10 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             }
         }
         _attnInitialized = true;
+    }
+    // Reset cross-layer topk state per step, first full layer repopulates it.
+    if (indexTopK > 0) {
+        _dsaTopkValid = false;
     }
     uint32_t batch = attnMeta.lens.size();
     std::vector<uint32_t> lens(batch);

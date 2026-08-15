@@ -120,6 +120,8 @@ class ModelArgs:
     index_head_dim: int = 128
     index_topk: int = 2048
     indexer_rope_interleave: bool = False
+    index_topk_freq: int = 1
+    index_skip_topk_offset: int = 0
 
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
@@ -568,6 +570,17 @@ class Indexer(torch.nn.Module):
         return topk_indices
 
 
+def dsa_skip_topk(layer_id: int, args: "ModelArgs") -> bool:
+    """Skip DSA indexer on shared layers (mirrors xlite csrc indexerSkipLayers)."""
+    if args.index_topk_freq <= 1:  # no sharing: DeepSeek-V3, GLM-5.1
+        return False
+    if args.index_skip_topk_offset > 0:  # GLM-5.2: layers 0..offset-1 are full
+        shifted = max(layer_id - args.index_skip_topk_offset + 1, 0)
+    else:
+        shifted = max(layer_id - 1, 0)
+    return shifted % args.index_topk_freq != 0
+
+
 class MLA(nn.Module):
     """
     Multi-Head Latent Attention (MLA) Layer.
@@ -584,7 +597,7 @@ class MLA(nn.Module):
         v_head_dim (int): Dimensionality of value projections.
         softmax_scale (float): Scaling factor for softmax in attention computation.
     """
-    def __init__(self, args: ModelArgs):
+    def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.n_heads
@@ -595,6 +608,8 @@ class MLA(nn.Module):
         self.qk_rope_head_dim = args.qk_rope_head_dim
         self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
         self.v_head_dim = args.v_head_dim
+        self.layer_id = layer_id
+        self.skip_topk = dsa_skip_topk(layer_id, args)
 
         # 根据 args.quantization 决定是否使用静态量化
         if args.quantization == "w8a8":
@@ -626,7 +641,8 @@ class MLA(nn.Module):
             self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
             self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor],
+                topk_cache: Optional[dict] = None):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
 
@@ -635,6 +651,7 @@ class MLA(nn.Module):
             start_pos (int): Starting position in the sequence for caching.
             freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
             mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
+            topk_cache (Optional[dict]): Cross-layer topk cache for DSA shared layers.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -664,8 +681,13 @@ class MLA(nn.Module):
             if self.indexer is None:
                 scores += mask.unsqueeze(1)
             else:
-                # indexer
-                topk_indices = self.indexer(x, qr, start_pos, freqs_cis, mask)
+                # DSA top-k sharing: shared layers reuse prev full topkIndices.
+                if self.skip_topk and topk_cache is not None and topk_cache.get("last") is not None:
+                    topk_indices = topk_cache["last"]
+                else:
+                    topk_indices = self.indexer(x, qr, start_pos, freqs_cis, mask)
+                    if topk_cache is not None:
+                        topk_cache["last"] = topk_indices
                 index_mask = torch.full((bsz, seqlen, seqlen), float("-inf"), device=x.device).scatter_(-1, topk_indices, 0)
                 index_mask += mask
                 scores += index_mask.unsqueeze(2)
@@ -680,8 +702,12 @@ class MLA(nn.Module):
                       torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
 
             if self.indexer is not None:
-                # indexer
-                topk_indices = self.indexer(x, qr, start_pos, freqs_cis, mask)
+                if self.skip_topk and topk_cache is not None and topk_cache.get("last") is not None:
+                    topk_indices = topk_cache["last"]
+                else:
+                    topk_indices = self.indexer(x, qr, start_pos, freqs_cis, mask)
+                    if topk_cache is not None:
+                        topk_cache["last"] = topk_indices
                 index_mask = torch.full((bsz, 1, end_pos), float("-inf"), device=x.device).scatter_(-1, topk_indices, 0)
                 scores += index_mask.unsqueeze(2)
 
@@ -945,14 +971,15 @@ class Block(nn.Module):
             args (ModelArgs): Model arguments containing block parameters.
         """
         super().__init__()
-        self.attn = MLA(args)
+        self.attn = MLA(layer_id, args)
         self.ffn = MLP(args.dim, args.inter_dim, args) if layer_id < args.n_dense_layers else MoE(args)
         self.attn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
         self.ffn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
         self.n_dense_layers = args.n_dense_layers
         self.layer_id = layer_id
 
-    def forward_naive(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward_naive(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor],
+                      topk_cache: Optional[dict] = None) -> torch.Tensor:
         """
         Forward pass for the DeepSeek_V3 block.
 
@@ -961,6 +988,7 @@ class Block(nn.Module):
             start_pos (int): Starting position in the sequence.
             freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
             mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
+            topk_cache (Optional[dict]): Cross-layer topk cache for DSA shared layers.
 
         Returns:
             torch.Tensor: Output tensor after block computation.
@@ -968,7 +996,7 @@ class Block(nn.Module):
         attn_norm_out = self.attn_norm(x)
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.n_dense_layers):
             print(f"layer{self.layer_id} in: {attn_norm_out}")
-        attn_out = self.attn(attn_norm_out, start_pos, freqs_cis, mask)
+        attn_out = self.attn(attn_norm_out, start_pos, freqs_cis, mask, topk_cache)
         if debug and rank == 0 and (self.layer_id == 0 or self.layer_id == self.n_dense_layers):
             print(f"layer{self.layer_id} after attn: {attn_out}")
         x = x + attn_out
@@ -979,7 +1007,8 @@ class Block(nn.Module):
         x = x + ffn_out
         return x
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor],
+                topk_cache: Optional[dict] = None) -> torch.Tensor:
         """
         Forward pass for the DeepSeek_V3 block.
 
@@ -988,11 +1017,12 @@ class Block(nn.Module):
             start_pos (int): Starting position in the sequence.
             freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
             mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
+            topk_cache (Optional[dict]): Cross-layer topk cache for DSA shared layers.
 
         Returns:
             torch.Tensor: Output tensor after block computation.
         """
-        return self.forward_naive(x, start_pos, freqs_cis, mask)
+        return self.forward_naive(x, start_pos, freqs_cis, mask, topk_cache)
 
 class DeepSeek_V3(nn.Module):
     """
@@ -1066,8 +1096,10 @@ class DeepSeek_V3(nn.Module):
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+        # DSA top-k sharing: cross-layer cache, reset per forward.
+        topk_cache = {"last": None} if any(layer.attn.skip_topk for layer in self.layers) else None
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+            h = layer(h, start_pos, freqs_cis, mask, topk_cache)
         h = self.norm(h)[:, -1]
         logits = self.head(h)
         if world_size > 1:
@@ -1486,6 +1518,7 @@ class DeepSeek_V3(nn.Module):
             config.index_topk = args.index_topk
             config.index_softmax_scale = self.layers[0].attn.indexer.softmax_scale
             config.index_rope_interleaved = args.indexer_rope_interleave
+            config.indexer_skip_layers = [dsa_skip_topk(i, args) for i in range(args.n_layers)]
             config.attn_type = AttnDSA
 
         global xlite_model
@@ -1514,10 +1547,13 @@ class DeepSeek_V3(nn.Module):
             for layer in self.layers
         ]
         self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
-        self.xlite_model.index_q_b = [layer.attn.indexer.wq_b.weight for layer in self.layers if layer.attn.indexer is not None]
-        self.xlite_model.index_k_weights_proj = [layer.attn.indexer.wk_weights_proj.weight.to(dtype=torch.get_default_dtype()) for layer in self.layers if layer.attn.indexer is not None]
-        self.xlite_model.index_k_norm = [layer.attn.indexer.k_norm.weight.to(dtype=torch.get_default_dtype()) for layer in self.layers if layer.attn.indexer is not None]
-        self.xlite_model.index_k_norm_bias = [layer.attn.indexer.k_norm.bias.to(dtype=torch.get_default_dtype()) for layer in self.layers if layer.attn.indexer is not None]
+        # DSA shared layers skip indexer weights (csrc skips binding); pass empty placeholder.
+        def indexer_w(layer, fn):
+            return fn(layer.attn.indexer) if (layer.attn.indexer is not None and not layer.attn.skip_topk) else torch.empty(0)
+        self.xlite_model.index_q_b = [indexer_w(l, lambda i: i.wq_b.weight) for l in self.layers]
+        self.xlite_model.index_k_weights_proj = [indexer_w(l, lambda i: i.wk_weights_proj.weight.to(dtype=torch.get_default_dtype())) for l in self.layers]
+        self.xlite_model.index_k_norm = [indexer_w(l, lambda i: i.k_norm.weight.to(dtype=torch.get_default_dtype())) for l in self.layers]
+        self.xlite_model.index_k_norm_bias = [indexer_w(l, lambda i: i.k_norm.bias.to(dtype=torch.get_default_dtype())) for l in self.layers]
         self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [self.layers[i].ffn.w13.weight for i in range(args.n_dense_layers)]
         self.xlite_model.mlp_down = [self.layers[i].ffn.w2.weight for i in range(args.n_dense_layers)]
@@ -1535,15 +1571,15 @@ class DeepSeek_V3(nn.Module):
                                     for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
         if args.quantization == "w8a8":
             for i in range(self.args.n_layers):
-                if self.layers[i].attn.indexer is not None:
+                if self.layers[i].attn.indexer is not None and not self.layers[i].attn.skip_topk:
                     self.layers[i].attn.indexer.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.indexer.wq_b.weight.scale[0::1]
                 self.layers[i].attn.wqkv_a.weight.xlite_scale[0::2] = self.layers[i].attn.wqkv_a.weight.scale[0::1]
                 self.layers[i].attn.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.wq_b.weight.scale[0::1]
                 self.layers[i].attn.wo.weight.xlite_scale[0::2] = self.layers[i].attn.wo.weight.scale[0::1]
-            self.xlite_model.index_q_b_input_scale = [layer.attn.indexer.wq_b.weight.input_scale.reciprocal() for layer in self.layers if layer.attn.indexer is not None]
-            self.xlite_model.index_q_b_input_offset = [layer.attn.indexer.wq_b.weight.input_offset for layer in self.layers if layer.attn.indexer is not None]
-            self.xlite_model.index_q_b_quant_bias = [layer.attn.indexer.wq_b.weight.quant_bias for layer in self.layers if layer.attn.indexer is not None]
-            self.xlite_model.index_q_b_deq_scale = [layer.attn.indexer.wq_b.weight.xlite_scale for layer in self.layers if layer.attn.indexer is not None]
+            self.xlite_model.index_q_b_input_scale = [indexer_w(l, lambda i: i.wq_b.weight.input_scale.reciprocal()) for l in self.layers]
+            self.xlite_model.index_q_b_input_offset = [indexer_w(l, lambda i: i.wq_b.weight.input_offset) for l in self.layers]
+            self.xlite_model.index_q_b_quant_bias = [indexer_w(l, lambda i: i.wq_b.weight.quant_bias) for l in self.layers]
+            self.xlite_model.index_q_b_deq_scale = [indexer_w(l, lambda i: i.wq_b.weight.xlite_scale) for l in self.layers]
             self.xlite_model.mla_qkv_a_input_scale = [layer.attn.wqkv_a.weight.input_scale.reciprocal() for layer in self.layers]
             self.xlite_model.mla_qkv_a_input_offset = [layer.attn.wqkv_a.weight.input_offset for layer in self.layers]
             self.xlite_model.mla_qkv_a_quant_bias = [layer.attn.wqkv_a.weight.quant_bias for layer in self.layers]
