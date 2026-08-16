@@ -6,11 +6,12 @@
 #include "kernel_macro.h"
 
 #ifdef __DAV_C220_VEC__
-// out = attn * sigmoid(gate_raw), elementwise.
-// attn/gate/out: [num_tokens, dim], processed per token with tiled dim chunks.
+// out = attn * sigmoid(gate_raw).
+// attn/out: [num_tokens, dim].
+// gate:     [num_tokens, dim] elementwise, or [num_tokens, 1] broadcast (gateDim == 1).
 template <typename Dtype>
 __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ Dtype *out,
-                                 uint32_t numTokens, uint32_t dim)
+                                 uint32_t numTokens, uint32_t dim, uint32_t gateDim)
 {
     set_atomic_none();
     set_mask_norm();
@@ -68,8 +69,37 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     int curr = 0;
+    const bool broadcast = (gateDim == 1);
 
     for (uint32_t token = block_idx; token < numTokens; token += uint32_t(block_num)) {
+        float sig = 0.0f;
+        if (broadcast) {
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
+            CopyGmToUbufAligned(gateIn[curr], gate + token, static_cast<uint32_t>(sizeof(Dtype)));
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+                vconv_bf162f32(gateF[curr], gateIn[curr], 1, 1, 1, 8, 4);
+            } else {
+                vconv_f162f32(gateF[curr], gateIn[curr], 1, 1, 1, 8, 4);
+            }
+            pipe_barrier(PIPE_V);
+            vmuls(gateF[curr], gateF[curr], (float)-1.0, 1, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+            vexp(gateF[curr], gateF[curr], 1, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+            vadds(gateF[curr], gateF[curr], (float)1.0, 1, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+            vdiv(gateF[curr], ones, gateF[curr], 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_S, EVENT_ID2);
+            wait_flag(PIPE_V, PIPE_S, EVENT_ID2);
+            sig = gateF[curr][0];
+            set_flag(PIPE_S, PIPE_V, EVENT_ID2);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID2);
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
+        }
+
         for (uint32_t col = 0; col < dim; col += static_cast<uint32_t>(tile)) {
             uint32_t calcNum = dim - col;
             if (calcNum > static_cast<uint32_t>(tile)) {
@@ -79,38 +109,46 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
             int repeat = DIV_ROUND_UP(static_cast<int>(calcNum), calcPad);
 
             __gm__ Dtype *attnPtr = attn + token * dim + col;
-            __gm__ Dtype *gatePtr = gate + token * dim + col;
             __gm__ Dtype *outPtr = out + token * dim + col;
 
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
             CopyGmToUbufAligned(attnIn[curr], attnPtr, actualLen);
-            CopyGmToUbufAligned(gateIn[curr], gatePtr, actualLen);
+            if (!broadcast) {
+                __gm__ Dtype *gatePtr = gate + token * dim + col;
+                CopyGmToUbufAligned(gateIn[curr], gatePtr, actualLen);
+            }
 
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
             if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
                 vconv_bf162f32(attnF[curr], attnIn[curr], repeat, 1, 1, 8, 4);
-                vconv_bf162f32(gateF[curr], gateIn[curr], repeat, 1, 1, 8, 4);
+                if (!broadcast) {
+                    vconv_bf162f32(gateF[curr], gateIn[curr], repeat, 1, 1, 8, 4);
+                }
             } else {
                 vconv_f162f32(attnF[curr], attnIn[curr], repeat, 1, 1, 8, 4);
-                vconv_f162f32(gateF[curr], gateIn[curr], repeat, 1, 1, 8, 4);
+                if (!broadcast) {
+                    vconv_f162f32(gateF[curr], gateIn[curr], repeat, 1, 1, 8, 4);
+                }
             }
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
 
-            // sigmoid(gate) = 1 / (1 + exp(-gate))
-            vmuls(gateF[curr], gateF[curr], (float)-1.0, repeat, 1, 1, 8, 8);
-            pipe_barrier(PIPE_V);
-            vexp(gateF[curr], gateF[curr], repeat, 1, 1, 8, 8);
-            pipe_barrier(PIPE_V);
-            vadds(gateF[curr], gateF[curr], (float)1.0, repeat, 1, 1, 8, 8);
-            pipe_barrier(PIPE_V);
-            vdiv(gateF[curr], ones, gateF[curr], repeat, 1, 1, 1, 8, 8, 8);
-            pipe_barrier(PIPE_V);
-
-            // attn * sigmoid(gate)
-            vmul(attnF[curr], attnF[curr], gateF[curr], repeat, 1, 1, 1, 8, 8, 8);
+            if (broadcast) {
+                vmuls(attnF[curr], attnF[curr], sig, repeat, 1, 1, 8, 8);
+            } else {
+                // sigmoid(gate) = 1 / (1 + exp(-gate))
+                vmuls(gateF[curr], gateF[curr], (float)-1.0, repeat, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+                vexp(gateF[curr], gateF[curr], repeat, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+                vadds(gateF[curr], gateF[curr], (float)1.0, repeat, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+                vdiv(gateF[curr], ones, gateF[curr], repeat, 1, 1, 1, 8, 8, 8);
+                pipe_barrier(PIPE_V);
+                vmul(attnF[curr], attnF[curr], gateF[curr], repeat, 1, 1, 1, 8, 8, 8);
+            }
             pipe_barrier(PIPE_V);
 
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
@@ -137,15 +175,17 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
 
 #define SIGMOID_GATE_MUL_FUNC_DEFINE(dtype)                                               \
     extern "C" __global__ __aicore__ void sigmoid_gate_mul_##dtype(                       \
-        GM_ADDR attn, GM_ADDR gate, GM_ADDR out, uint32_t numTokens, uint32_t dim)        \
+        GM_ADDR attn, GM_ADDR gate, GM_ADDR out, uint32_t numTokens, uint32_t dim,        \
+        uint32_t gateDim)                                                                 \
     {                                                                                     \
         sigmoid_gate_mul((__gm__ dtype *)attn, (__gm__ dtype *)gate, (__gm__ dtype *)out, \
-                         numTokens, dim);                                                 \
+                         numTokens, dim, gateDim);                                        \
     }
 #else
 #define SIGMOID_GATE_MUL_FUNC_DEFINE(dtype)                                        \
     extern "C" __global__ __aicore__ void sigmoid_gate_mul_##dtype(                \
-        GM_ADDR attn, GM_ADDR gate, GM_ADDR out, uint32_t numTokens, uint32_t dim) \
+        GM_ADDR attn, GM_ADDR gate, GM_ADDR out, uint32_t numTokens, uint32_t dim, \
+        uint32_t gateDim)                                                          \
     {                                                                              \
     }
 #endif

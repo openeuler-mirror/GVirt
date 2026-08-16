@@ -15,9 +15,9 @@ def torch_sigmoid_gate_mul(attn, gate):
     return attn * torch.sigmoid(gate.float()).to(attn.dtype)
 
 
-def run_test(rt, num_tokens, dim, dtype, inplace, msg):
+def run_test(rt, num_tokens, dim, dtype, inplace, msg, broadcast=False):
     attn = torch.randn(num_tokens, dim, dtype=dtype)
-    gate = torch.randn(num_tokens, dim, dtype=dtype)
+    gate = torch.randn(num_tokens, 1 if broadcast else dim, dtype=dtype)
     standard = torch_sigmoid_gate_mul(attn, gate)
 
     if inplace:
@@ -65,3 +65,5 @@ if __name__ == "__main__":
                 mode = "inplace" if inplace else "out"
                 msg = f"[{dtype}/T={num_tokens}/D={dim}/{mode}]"
                 run_test(rt, num_tokens, dim, dtype, inplace, msg)
+                bmsg = f"[{dtype}/T={num_tokens}/D={dim}/{mode}/bcast]"
+                run_test(rt, num_tokens, dim, dtype, inplace, bmsg, broadcast=True)
