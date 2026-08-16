@@ -50,6 +50,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     moeGateBias.resize(c.nLayers);
     moeSEUpGate.resize(c.nLayers);
     moeSEDown.resize(c.nLayers);
+    moeSEGate.resize(c.nLayers);
     moeREUpGate.resize(c.nLayers);
     moeREUpGateDeqScale.resize(c.nLayers);
     moeREDown.resize(c.nLayers);
@@ -1464,8 +1465,19 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         } else {  // hiddenState of shape (maxTokensDp, hiddenSize)
             ForwardMOECombine(rt, h, weights, routing, unpIdx, *outPtr, expertsCounts);
         }
-        // share experts
+        // share experts: y = routed + sigmoid(se_gate(x)) * shared(x)
+        // ForwardMLP overwrites hiddenState, so compute the scalar gate from x first.
+        // se_gate is Linear(H->1) in ND (never NZ-converted); do not pass weightNZ.
+        XTensor *seGateLogits = nullptr;
+        if (moeSEGate[layer].ptr != nullptr) {
+            seGateLogits = &rt.GetTensor({m, 1}, hiddenState.dtype, DBG_LOC);
+            XliteOpMatmul(rt, hiddenState.View(m), moeSEGate[layer], *seGateLogits, false);
+        }
         ForwardMLP(rt, layer, hiddenState.View(m), moeSEUpGate, moeSEDown, false);
+        if (seGateLogits != nullptr) {
+            XliteOpSigmoidGateMul(rt, hiddenState, *seGateLogits, hiddenState);
+            rt.PutTensor(*seGateLogits);
+        }
         XliteOpAdd(rt, hiddenState, h.View(m), hiddenState);
         rt.PutTensor(h);
     } else {

@@ -142,6 +142,7 @@ public:
     std::vector<at::Tensor> moeSEUpGateDeqScale;
     std::vector<at::Tensor> moeSEDown;
     std::vector<at::Tensor> moeSEDownDeqScale;
+    std::vector<at::Tensor> moeSEGate;
     std::vector<at::Tensor> moeREUpGate;
     std::vector<at::Tensor> moeREUpGateDeqScale;
     std::vector<at::Tensor> moeREDown;
@@ -475,6 +476,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         {std::ref(moeGateBias), "gate bias", false, c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID},
         {std::ref(moeSEUpGate), "SE up gate", false, c.nSharedExperts != 0},
         {std::ref(moeSEDown), "SE down", false, c.nSharedExperts != 0},
+        {std::ref(moeSEGate), "SE gate", true, c.nSharedExperts != 0},
         {std::ref(moeSEUpGateDeqScale), "SE up gate deq scale", true, c.nSharedExperts != 0},
         {std::ref(moeSEDownDeqScale), "SE down deq scale", true, c.nSharedExperts != 0},
     };
@@ -690,6 +692,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                              c.nDenseLayers);
             InitMatmulWeight("moeSEDown", moeSEDown, emptyWeights, emptyWeights, emptyWeights,
                              moeSEDownDeqScale, _model->moeSEDown, i, true, tpRank, c.nDenseLayers);
+            uint32_t seIdx = i - c.nDenseLayers;
+            if (seIdx < moeSEGate.size()) {
+                InitOptionalXTensor(_model->moeSEGate[i], moeSEGate[seIdx]);
+            }
         }
 
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
@@ -2438,6 +2444,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("se_up_gate_deq_scale", &_CModel::moeSEUpGateDeqScale)
         .def_readwrite("se_down", &_CModel::moeSEDown)
         .def_readwrite("se_down_deq_scale", &_CModel::moeSEDownDeqScale)
+        .def_readwrite("se_gate", &_CModel::moeSEGate)
         .def_readwrite("re_up_gate", &_CModel::moeREUpGate)
         .def_readwrite("re_up_gate_scale", &_CModel::moeREUpGateDeqScale)
         .def_readwrite("re_up_gate_deq_scale", &_CModel::moeREUpGateDeqScale)

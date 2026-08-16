@@ -1758,9 +1758,13 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
     if (attn.shape.size() < 2 || gate.shape.size() < 2 || out.shape.size() < 2) {
         throw std::runtime_error(std::string(__func__) + ": attn/gate/out must be 2D");
     }
-    if (attn.shape[0] != gate.shape[0] || attn.shape[1] != gate.shape[1] ||
-        attn.shape[0] != out.shape[0] || attn.shape[1] != out.shape[1]) {
+    if (attn.shape[0] != gate.shape[0] || attn.shape[0] != out.shape[0] ||
+        attn.shape[1] != out.shape[1]) {
         throw std::runtime_error(std::string(__func__) + ": attn/gate/out shape mismatch");
+    }
+    if (gate.shape[1] != 1 && gate.shape[1] != attn.shape[1]) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": gate last dim must be 1 (broadcast) or match attn dim");
     }
     KERNEL_PTR_TYPE(sigmoid_gate_mul) * launchKernel;
     if (EachXDtype(FP16, attn, gate, out)) {
@@ -1772,7 +1776,8 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
         throw std::runtime_error(err_str + " unsupported!");
     }
     launchKernel(rt.aivNum, rt.stream, attn.ptr, gate.ptr, out.ptr,
-                 static_cast<uint32_t>(attn.shape[0]), static_cast<uint32_t>(attn.shape[1]));
+                 static_cast<uint32_t>(attn.shape[0]), static_cast<uint32_t>(attn.shape[1]),
+                 static_cast<uint32_t>(gate.shape[1]));
 }
 
 void XliteOpRecurrentGatedDeltaRule(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
