@@ -184,6 +184,10 @@ public:
     // Host-side: true when this step is decode (seqlen==1 and all cached_lens>0).
     // Avoids D2H sync via GetFirstAttnPosition in every linear layer.
     bool _linearDecodeStep = false;
+    // Host copy of cached_lens from PrepareAttn. Linear layers clear conv/ssm
+    // only for requests with cached==0 (fresh prefill); chunked-prefill
+    // continuation (cached>0, multi-token) reuses state via recurrent GDN.
+    std::vector<uint32_t> _cachedLensHost;
     uint32_t _maxNumBlocks;
     uint32_t _batch;
     uint32_t _tileSizeOfCachedKV;

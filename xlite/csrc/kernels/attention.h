@@ -24,6 +24,8 @@
 #define SEQLEN_48K 49152
 #define SEQLEN_60K 61440
 #define SEQLEN_96K 98304
+// Ascend cube L0A/L0B are 64KB each. Pingpong needs 2 tiles to fit.
+#define ASCEND_L0_BYTES (64 * 1024)
 
 template <typename Dtype>
 class Attention
@@ -68,10 +70,26 @@ public:
         this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * XLITE_MAX_M0 * maxSeqLen +
                                     block_num * XLITE_MAX_M0 * maxSeqLen);
 
-        // 分配L1/L0
-        uint64_t l1ATileBytes =
-            XLITE_MAX_M0 * (headSize > blockSize ? headSize : blockSize) * sizeof(Dtype);
-        uint64_t l1BTileBytes = blockSize * headSize * sizeof(Dtype);
+        // L0A/L0B are 64KB each. Keep pingpong; shrink the Cube KV tile so
+        // 2 * tile * headSize * sizeof(Dtype) fits. Do not tie tile to
+        // blockSize/headDim — otherwise headDim=256 & blockSize=128 fills
+        // L0 with one buffer and pingpong overflows (CCU address check).
+        const uint64_t dtypeBytes = sizeof(Dtype);
+        uint32_t tile = blockSize;
+        while (tile > static_cast<uint32_t>(NBLOCKSIZE) &&
+               (2ull * tile * headSize * dtypeBytes > ASCEND_L0_BYTES ||
+                2ull * XLITE_MAX_M0 * tile * dtypeBytes > ASCEND_L0_BYTES)) {
+            tile >>= 1;
+        }
+        this->cubeKvTile = tile;
+
+        // L1A holds Q (M0 x headSize) or SV qk panel (M0 x cubeKvTile).
+        uint64_t l1ATileBytes = static_cast<uint64_t>(XLITE_MAX_M0) *
+                                (headSize > cubeKvTile ? headSize : cubeKvTile) * dtypeBytes;
+        uint64_t l1BTileBytes = static_cast<uint64_t>(cubeKvTile) * headSize * dtypeBytes;
+        uint64_t l0aSvBytes = static_cast<uint64_t>(XLITE_MAX_M0) * cubeKvTile * dtypeBytes;
+        uint64_t l0bBytes = l1BTileBytes;
+
         uint64_t off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
@@ -83,17 +101,19 @@ public:
             l1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += l1BTileBytes;
         }
+        // L0A: buf0 sized for Q (M0 x headSize). SV pingpong places buf1 at
+        // l0aSvBytes inside the same 64KB — QK and SV are sequential phases.
         off = 0;
-        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
-            l0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
-            l0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l1ATileBytes;
-        }
+        l0aBuf[0].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
+        l0aBuf[0].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        l0aBuf[1].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
+        l0aBuf[1].address_.bufferAddr = reinterpret_cast<uint64_t>(off + l0aSvBytes);
+        // L0B: full pingpong on cubeKvTile x headSize tiles.
         off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
             l0bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l1BTileBytes;
+            off += l0bBytes;
         }
         off = 0;
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
@@ -104,6 +124,7 @@ public:
      * m: tokens
      * n: cachedTokens
      * k: headSize
+     * Cube loads KV in cubeKvTile-sized panels (may be < blockSize).
      */
     __aicore__ inline void RunAicQK(GlobalTensor<Dtype> query, int queryLen, int kvHeadIdx,
                                     __gm__ uint32_t *blockTable, int totalLen,
@@ -111,13 +132,11 @@ public:
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mActual = queryLen * headNumInGroup;
-        int nLoop = DIV_ROUND_UP(totalLen, blockSize);
         int mBlockPad = ROUND_UP(mActual, MBLOCKSIZE);
         int mBlockNum = mBlockPad / MBLOCKSIZE;
-        int nBlockPad = ROUND_UP(blockSize, NBLOCKSIZE);
-        int nBlockNum = nBlockPad / NBLOCKSIZE;
         int kBlockNum = DIV_ROUND_UP(headSize, kBlockSize);
         int kvHeadOffset = kvHeadIdx * headSize;
+        int tile = static_cast<int>(cubeKvTile);
 
         Nd2NzParams nd2nzParams(1 /* NdNum */, queryLen /* nValue */, headSize /* dValue */,
                                 0 /* srcNdMatrixStride */, qkvMemSize /* srcDValue */,
@@ -143,18 +162,23 @@ public:
         SetFlag<HardEvent::M_MTE1>(EVENT_ID2);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID3);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
-        for (int nIdx = 0; nIdx < nLoop; nIdx++) {
-            uint32_t blockIdx = blockTable[nIdx];
-            int nSize = blockSize;
-            if (nIdx * blockSize + nSize > totalLen) {
-                nSize = totalLen - nIdx * blockSize;
-                nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
-                nBlockNum = nBlockPad / NBLOCKSIZE;
+        for (int pos = 0; pos < totalLen; pos += tile) {
+            int rowInBlock = pos % static_cast<int>(blockSize);
+            int nSize = tile;
+            if (rowInBlock + nSize > static_cast<int>(blockSize)) {
+                nSize = static_cast<int>(blockSize) - rowInBlock;
             }
+            if (pos + nSize > totalLen) {
+                nSize = totalLen - pos;
+            }
+            int nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+            int nBlockNum = nBlockPad / NBLOCKSIZE;
+            uint32_t blk = blockTable[pos / static_cast<int>(blockSize)];
 
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
-            CopyGmToL1Nd2Nz(l1bBuf[curIdx], kCache[blockIdx * blockMemSize + kvHeadOffset], nSize,
-                            headSize, kvMemSize, nBlockPad);
+            CopyGmToL1Nd2Nz(l1bBuf[curIdx],
+                            kCache[blk * blockMemSize + rowInBlock * kvMemSize + kvHeadOffset],
+                            nSize, headSize, kvMemSize, nBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
 
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
@@ -170,7 +194,7 @@ public:
             SetFlag<HardEvent::M_FIX>(EVENT_ID0);
 
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-            CopyToGm(qk[nIdx * blockSize], l0cBuf, mActual, nSize, mBlockPad, maxSeqLen);
+            CopyToGm(qk[pos], l0cBuf, mActual, nSize, mBlockPad, maxSeqLen);
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
             PipeBarrier<PIPE_M>();
             curIdx = 1 - curIdx;
@@ -193,13 +217,11 @@ public:
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mActual = queryLen * headNumInGroup;
-        int kLoop = DIV_ROUND_UP(totalLen, blockSize);
         int mBlockPad = ROUND_UP(mActual, MBLOCKSIZE);
         int mBlockNum = mBlockPad / MBLOCKSIZE;
         int nBlockNum = DIV_ROUND_UP(headSize, NBLOCKSIZE);
-        int kBlockPad = ROUND_UP(blockSize, kBlockSize);
-        int kBlockNum = kBlockPad / kBlockSize;
         int kvHeadOffset = kvHeadIdx * headSize;
+        int tile = static_cast<int>(cubeKvTile);
 
         int curIdx = 0;
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
@@ -212,22 +234,27 @@ public:
         SetFlag<HardEvent::M_MTE1>(EVENT_ID3);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
-        for (int kIdx = 0; kIdx < kLoop; kIdx++) {
-            int kSize = blockSize;
-            if (kIdx * blockSize + kSize > totalLen) {
-                kSize = totalLen - kIdx * blockSize;
-                kBlockPad = ROUND_UP(kSize, kBlockSize);
-                kBlockNum = kBlockPad / kBlockSize;
+        int first = 1;
+        for (int pos = 0; pos < totalLen; pos += tile) {
+            int rowInBlock = pos % static_cast<int>(blockSize);
+            int kSize = tile;
+            if (rowInBlock + kSize > static_cast<int>(blockSize)) {
+                kSize = static_cast<int>(blockSize) - rowInBlock;
             }
+            if (pos + kSize > totalLen) {
+                kSize = totalLen - pos;
+            }
+            int kBlockPad = ROUND_UP(kSize, kBlockSize);
+            int kBlockNum = kBlockPad / kBlockSize;
+            uint32_t blk = blockTable[pos / static_cast<int>(blockSize)];
 
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curIdx);
-            CopyGmToL1Nd2Nz(l1aBuf[curIdx], qk[kIdx * blockSize], mActual, kBlockPad, maxSeqLen,
-                            mBlockPad);
+            CopyGmToL1Nd2Nz(l1aBuf[curIdx], qk[pos], mActual, kBlockPad, maxSeqLen, mBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curIdx);
 
-            uint32_t blockIdx = blockTable[kIdx];
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
-            CopyGmToL1Nd2Nz(l1bBuf[curIdx], vCache[blockIdx * blockMemSize + kvHeadOffset],
+            CopyGmToL1Nd2Nz(l1bBuf[curIdx],
+                            vCache[blk * blockMemSize + rowInBlock * kvMemSize + kvHeadOffset],
                             kBlockPad, headSize, kvMemSize, kBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
 
@@ -246,7 +273,8 @@ public:
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curIdx);
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID2 + curIdx);
             CalMmad(l0cBuf, l0aBuf[curIdx], l0bBuf[curIdx], mBlockPad, headSize, kBlockPad,
-                    kIdx == 0);
+                    first != 0);
+            first = 0;
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curIdx);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID2 + curIdx);
             PipeBarrier<PIPE_M>();
@@ -526,6 +554,8 @@ private:
     uint32_t qkvMemSize;
     uint32_t groupMemSize;
     uint32_t blockMemSize;
+    // Cube KV panel length (<= blockSize) so L0 pingpong fits for large headDim.
+    uint32_t cubeKvTile;
 
     LocalTensor<Dtype> l1aBuf[PINGPONG_BUF_NUM];
     LocalTensor<Dtype> l1bBuf[PINGPONG_BUF_NUM];
