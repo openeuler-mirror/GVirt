@@ -41,7 +41,6 @@ __aicore__ __inline__ void rope_complex_and_cache(
         DIV_ROUND_UP((shape1 - (need_v_cache ? vdim : ropeDim)) * sizeof(Dtype), BLOCK_SIZE);
     int dstStride = DIV_ROUND_UP((outShape1 - ropeDim) * sizeof(Dtype), BLOCK_SIZE);
     int remainStride = DIV_ROUND_UP(ropeDtypeBytes, BLOCK_SIZE);
-    int vStride = nLocalHeads * block_size * vdim;
     int input_blocks = DIV_ROUND_UP(inputBytes, BLOCK_SIZE);
     int remain_blocks = DIV_ROUND_UP(vRemainBytes, BLOCK_SIZE);
     int rope_blocks = DIV_ROUND_UP(ropeFPBytes, BLOCK_SIZE);
@@ -215,9 +214,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
         // out UB -> GM
         if (need_v_cache) {
             uint32_t slot_idx = slotMappingUB[token_idx - baseTokenIdx];
-            uint32_t block = slot_idx / block_size;
-            uint32_t block_offset = slot_idx % block_size;
-            auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) + block * vStride + block_offset * vdim;
+            auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) + slot_idx * nLocalHeads * vdim;
             CopyUbufToGmAligned(vcache_ptr, outs[curr], vCacheBytes);
         } else {
             copy_ubuf_to_gm(output_gm, outs[curr], 0, nLocalHeads, input_blocks, 0, dstStride);
