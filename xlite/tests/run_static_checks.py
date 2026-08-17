@@ -26,6 +26,8 @@ def run_cpp_checks(root_dir, args):
         cmd.append('--no-header-guard')
     if args.no_cpp_tidy:
         cmd.append('--no-tidy')
+    if args.jobs is not None:
+        cmd.extend(['--jobs', str(args.jobs)])
     
     result = subprocess.run(cmd)
     return result.returncode == 0
@@ -92,6 +94,8 @@ Examples:
                        help='Skip C++ header guard check')
     parser.add_argument('--no-cpp-tidy', action='store_true',
                        help='Skip clang-tidy check')
+    parser.add_argument('--jobs', '-j', type=int, default=None,
+                        help='Number of parallel C++ check workers')
     
     # Python check options
     parser.add_argument('--no-python-flake8', action='store_true',
