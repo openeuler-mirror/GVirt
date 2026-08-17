@@ -465,6 +465,55 @@ function run_glm5_w8a8()
     rm $test_config_path
 }
 
+# GLM-5.2 W8A8 (shared indexer: index_topk_freq=4/index_skip_topk_offset=3,
+# layer 3 skips indexer and reuses layer 2 topkIndices). EP8, moe_ep_size=8.
+function run_glm5_2_w8a8()
+{
+    echo '{
+        "vocab_size": 154880,
+        "dim": 6144,
+        "inter_dim": 12288,
+        "moe_inter_dim": 2048,
+        "n_layers": 4,
+        "n_dense_layers": 3,
+        "n_heads": 64,
+        "norm_eps": 1e-05,
+        "n_routed_experts": 256,
+        "n_shared_experts": 1,
+        "n_activated_experts": 8,
+        "n_expert_groups": 1,
+        "n_limited_groups": 1,
+        "score_func": "sigmoid",
+        "route_scale": 2.5,
+        "q_lora_rank": 2048,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 192,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 256,
+        "original_seq_len": 4096,
+        "rope_theta": 8000000.0,
+        "rope_factor": 40,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "mscale": 1.0,
+        "max_batch_size": 1,
+        "max_seq_len": 1024,
+        "index_n_heads": 32,
+        "index_head_dim": 128,
+        "index_topk": 2048,
+        "indexer_rope_interleave": true,
+        "index_topk_freq": 4,
+        "index_skip_topk_offset": 3,
+        "quantization": "w8a8",
+        "model_type": "glm5",
+        "dtype": "bfloat16",
+        "moe_ep_size": 8,
+        "moe_tp_size": 1
+    }' > $test_config_path
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-8} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/GLM-5.2-w8a8/ ${RUN_ARGS[@]}
+    rm $test_config_path
+}
+
 function run_minimax_m2()
 {
     echo '{

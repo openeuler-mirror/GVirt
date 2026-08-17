@@ -639,12 +639,17 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 if (!mlaKVNormBias.empty()) {
                     InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
                 }
-                InitMatmulWeight("indexQB", indexQB, indexQBInputScale, indexQBInputOffset,
-                                 indexQBQuantBias, indexQBDeqScale, _model->indexQB, i, false,
-                                 tpRank);
-                InitXTensor(_model->indexKWeightsProj[i], indexKWeightsProj[i]);
-                InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
-                InitXTensor(_model->indexKNormBias[i], indexKNormBias[i]);
+                // DSA top-k sharing: skip indexer weight binding on shared layers. Empty list
+                // (e.g. consumers without GLM-5.2 support) = no sharing, bind every layer.
+                if (c.indexerSkipLayers.empty() ||
+                    (i < c.indexerSkipLayers.size() && !c.indexerSkipLayers[i])) {
+                    InitMatmulWeight("indexQB", indexQB, indexQBInputScale, indexQBInputOffset,
+                                     indexQBQuantBias, indexQBDeqScale, _model->indexQB, i, false,
+                                     tpRank);
+                    InitXTensor(_model->indexKWeightsProj[i], indexKWeightsProj[i]);
+                    InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
+                    InitXTensor(_model->indexKNormBias[i], indexKNormBias[i]);
+                }
             } else if (c.attnType == XMODEL_ATTN_CXA) {
                 InitMatmulWeight("attnWqA", attnWqA, attnWqAInputScale, attnWqAInputOffset,
                                  attnWqAQuantBias, attnWqADeqScale, _model->attnWqA, i, false,
@@ -2247,6 +2252,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_topk", &XModelConfig::indexTopK)
         .def_readwrite("index_softmax_scale", &XModelConfig::indexSoftmaxScale)
         .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved)
+        .def_readwrite("indexer_skip_layers", &XModelConfig::indexerSkipLayers)
         .def_readwrite("linear_num_k_heads", &XModelConfig::linearNumKHeads)
         .def_readwrite("linear_num_v_heads", &XModelConfig::linearNumVHeads)
         .def_readwrite("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)

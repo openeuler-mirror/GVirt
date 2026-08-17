@@ -1,7 +1,9 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#include <algorithm>
 #include <sstream>
+#include <string>
 #include <tuple>
 #include "ascend.h"
 #include "base.h"
@@ -384,16 +386,17 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
                                    hiddenState.dtype, DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
-    XTensor &topkIndices = rt.GetTensor({hiddenState.shape[0], _c.indexTopK}, INT32, DBG_LOC);
-    XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices, topkIndices,
-                       rt._queryStartLoc, rt._lens, rt._cachedLens, rt._attnBlockTables, _sync,
-                       _c.indexNHeads, _c.indexHeadDim, _c.blockSize, rt._batch, rt._maxNumBlocks,
-                       _c.indexTopK);
+    rt._dsaTopkBuffer.View({hiddenState.shape[0], _c.indexTopK});
+    XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices,
+                       rt._dsaTopkBuffer, rt._queryStartLoc, rt._lens, rt._cachedLens,
+                       rt._attnBlockTables, _sync, _c.indexNHeads, _c.indexHeadDim, _c.blockSize,
+                       rt._batch, rt._maxNumBlocks, _c.indexTopK);
     rt.PutTensor(kw);
     rt.PutTensor(*qPtr);
     rt.PutTensor(lastTopk);
     rt.PutTensor(scores);
-    return &topkIndices;
+    rt._dsaTopkValid = true;
+    return &rt._dsaTopkBuffer;
 }
 
 std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
@@ -448,8 +451,13 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
 
     XTensor *topkIndices = nullptr;
     if (_c.attnType == XMODEL_ATTN_DSA) {
-        topkIndices =
-            ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
+        // DSA top-k sharing: shared layers reuse prev full layer's topkIndices.
+        if (layer < _c.indexerSkipLayers.size() && _c.indexerSkipLayers[layer]) {
+            topkIndices = rt._dsaTopkValid ? &rt._dsaTopkBuffer : nullptr;
+        } else {
+            topkIndices =
+                ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
+        }
     }
     rt.PutTensor(attnNormQc);
 
@@ -520,9 +528,6 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         rt.PutTensor(max);
         rt.PutTensor(sv);
         rt.PutTensor(qk);
-    }
-    if (topkIndices != nullptr) {
-        rt.PutTensor(*topkIndices);
     }
     rt.PutTensor(qPe);
     rt.PutTensor(qAbsorb);
@@ -1693,7 +1698,8 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                    _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
-                                                  : static_cast<int>(embed.dtype));
+                                                  : static_cast<int>(embed.dtype),
+                   _c.indexTopK);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -1730,7 +1736,8 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                    _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
-                                                  : static_cast<int>(embed.dtype));
+                                                  : static_cast<int>(embed.dtype),
+                   _c.indexTopK);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -1753,7 +1760,8 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
                    _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
-                                                  : static_cast<int>(embed.dtype));
+                                                  : static_cast<int>(embed.dtype),
+                   _c.indexTopK);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -2063,7 +2071,8 @@ size_t XModel::DummyRun()
                        static_cast<int>(embed.dtype),
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
-                           : static_cast<int>(embed.dtype));
+                           : static_cast<int>(embed.dtype),
+                       _c.indexTopK);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
@@ -2109,7 +2118,8 @@ size_t XModel::DummyRun()
                        static_cast<int>(embed.dtype),
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
-                           : static_cast<int>(embed.dtype));
+                           : static_cast<int>(embed.dtype),
+                       _c.indexTopK);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);

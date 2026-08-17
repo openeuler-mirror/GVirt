@@ -66,11 +66,11 @@ public:
     virtual ~XRuntime(void);
     void Init(size_t sizeMB);
     void InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
-                  uint32_t blockSize);
+                  uint32_t blockSize, uint32_t indexTopK);
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                      uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads, uint32_t blockSize,
                      uint32_t hiddenSize, uint32_t nRoutedExperts, uint32_t defDpSize,
-                     int inputDtype, int weightsDtype);
+                     int inputDtype, int weightsDtype, uint32_t indexTopK);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -200,6 +200,8 @@ public:
     XTensor _cachedLens;       // uint32_t
     XTensor _lens;             // uint32_t
     XTensor _queryStartLoc;    // uint32_t
+    XTensor _dsaTopkBuffer;    // int32_t, cross-layer shared topk
+    bool _dsaTopkValid = false;
 
     // for MoE
     XTensor _tokensPerEpGroupAllEpHost;
