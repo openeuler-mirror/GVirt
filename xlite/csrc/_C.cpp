@@ -30,9 +30,6 @@ public:
     _CModel() {};
     ~_CModel();
     void Init(struct XModelConfig &c, uint32_t rankId);
-    void Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                 std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
-                 at::Tensor &output, uint64_t currStream);
     void ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                    std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                    at::Tensor &output, uint64_t currStream);
@@ -41,10 +38,6 @@ public:
                    at::Tensor &output, uint64_t currStream);
     void ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indices, at::Tensor &output,
                           uint64_t currStream);
-    void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                             std::vector<std::vector<at::Tensor>> &kvCache,
-                             std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
-                             at::Tensor &output, uint64_t currStream);
     void ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                                std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                                at::Tensor &indices, at::Tensor &output, uint64_t currStream);
@@ -52,10 +45,6 @@ public:
                                std::vector<std::vector<at::Tensor>> &kvCache,
                                std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
                                at::Tensor &output, uint64_t currStream);
-    void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
-                                 std::vector<std::vector<at::Tensor>> &kvCache,
-                                 at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
-                                 std::vector<at::Tensor> &deepstackInput);
     void ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                                    std::vector<std::vector<at::Tensor>> &kvCache,
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
@@ -188,6 +177,17 @@ private:
     XModel *_model = nullptr;
     std::vector<std::vector<XTensor>> _kv;
     std::vector<XTensor> _deepstackInputEmbeds;
+    void Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
+                 std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
+                 at::Tensor &output, uint64_t currStream);
+    void ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
+                             std::vector<std::vector<at::Tensor>> &kvCache,
+                             std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
+                             at::Tensor &output, uint64_t currStream);
+    void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
+                                 std::vector<std::vector<at::Tensor>> &kvCache,
+                                 at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
+                                 std::vector<at::Tensor> &deepstackInput);
     void InitMatmulWeight(const std::string &name, std::vector<at::Tensor> &w,
                           std::vector<at::Tensor> &iScale, std::vector<at::Tensor> &iOffset,
                           std::vector<at::Tensor> &qBias, std::vector<at::Tensor> &dScale,
@@ -2274,13 +2274,6 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("n_hash_layers", &XModelConfig::nHashLayers)
         .def_readwrite("compress_ratios", &XModelConfig::compressRatios);
 
-    py::class_<XModelAttnMeta>(m, "ModelAttnMeta")
-        .def(py::init<>())
-        .def_readwrite("lens", &XModelAttnMeta::lens)
-        .def_readwrite("cached_lens", &XModelAttnMeta::cachedLens)
-        .def_readwrite("is_prefills", &XModelAttnMeta::isPrefills)
-        .def_readwrite("block_tables", &XModelAttnMeta::blockTables);
-
     py::class_<CModelAttnMeta>(m, "AttnMeta")
         .def(py::init<>())
         .def_readwrite("lens", &CModelAttnMeta::lens)
@@ -2422,9 +2415,6 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("hc_head_base", &_CModel::hcHeadBase)
         .def_readwrite("hc_head_scale", &_CModel::hcHeadScale)
         .def("init", &_CModel::Init, "model init", py::arg("config"), py::arg("rank") = 0)
-        .def("forward", &_CModel::Forward, "forward", py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward", &_CModel::ForwardV1, "forward", py::arg("rt"), py::arg("input"),
              py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
@@ -2434,10 +2424,6 @@ PYBIND11_MODULE(_C, m)
         .def("forward_get_logits", &_CModel::ForwardGetLogits, "forward_get_logits", py::arg("rt"),
              py::arg("input"), py::arg("indices"), py::arg("output"), py::arg("curr_stream") = 0,
              py::call_guard<py::gil_scoped_release>())
-        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogits, "forward_and_get_logits",
-             py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
-             py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV1, "forward_and_get_logits",
              py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
              py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
@@ -2446,11 +2432,6 @@ PYBIND11_MODULE(_C, m)
              py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
              py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbeds,
-             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
-             py::call_guard<py::gil_scoped_release>())
         .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbedsV1,
              "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
