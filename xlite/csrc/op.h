@@ -196,4 +196,6 @@ void XliteOpUnpackActivation(XRuntime &rt, XTensor &input, XTensor &output);
 void XliteOpHcAct(XRuntime &rt, XTensor &mixes, const XTensor &hcScale, const XTensor &hcBase,
                   XTensor &post, XTensor &comb, uint32_t hcMult, float eps, uint32_t sinkhornIters,
                   bool headOnly, XTensor &xResid, XTensor &output);
+void XliteOpHcPost(XRuntime &rt, XTensor &x, XTensor &post, XTensor &comb, XTensor &residual,
+                   XTensor &y, uint32_t m, uint32_t hcMult, uint32_t hidden);
 #endif

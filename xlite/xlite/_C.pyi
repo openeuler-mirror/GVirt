@@ -2718,3 +2718,37 @@ def hc_act(
         None: `post`/`comb`/`output` written in place.
     """
     ...
+
+def hc_post(
+    rt: Runtime,
+    x: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+    residual: torch.Tensor,
+    y: torch.Tensor,
+    m: int,
+    hc_mult: int,
+    hidden: int,
+) -> None:
+    """Hyper-Connection post-activation merge (DeepSeek-V4).
+
+    y[m,H,D] = post[m,H]*x[m,D] (broadcast) + sum_k comb[m,H,k]*residual[m,k,D].
+    `x` [m, hidden] bf16, `post` [m, hc_mult] fp32, `comb` [m, hc_mult*hc_mult] fp32,
+    `residual` [m, hc_mult, hidden] bf16, `y` [m, hc_mult, hidden] bf16. `residual`
+    may alias `y` (in-place): all sources are read before any output is written.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        x (torch.Tensor): Submodule output [m, hidden] bf16.
+        post (torch.Tensor): Post gate [m, hc_mult] fp32.
+        comb (torch.Tensor): Comb matrix [m, hc_mult*hc_mult] fp32.
+        residual (torch.Tensor): Residual stream [m, hc_mult, hidden] bf16.
+        y (torch.Tensor): Output [m, hc_mult, hidden] bf16.
+        m (int): Token count.
+        hc_mult (int): Hyper-connection multiplier H.
+        hidden (int): Hidden dimension D.
+
+    Returns:
+        None: `y` written in place.
+    """
+    ...

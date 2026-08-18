@@ -2200,6 +2200,19 @@ void HcAct(XRuntime &rt, at::Tensor &mixes, at::Tensor &hcScale, at::Tensor &hcB
     rt.Synchronize();
 }
 
+void HcPost(XRuntime &rt, at::Tensor &x, at::Tensor &post, at::Tensor &comb, at::Tensor &residual,
+            at::Tensor &y, uint32_t m, uint32_t hcMult, uint32_t hidden)
+{
+    XTensor _x, _post, _comb, _residual, _y;
+    InitXTensor(_x, x);
+    InitXTensor(_post, post);
+    InitXTensor(_comb, comb);
+    InitXTensor(_residual, residual);
+    InitXTensor(_y, y);
+    XliteOpHcPost(rt, _x, _post, _comb, _residual, _y, m, hcMult, hidden);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -2651,7 +2664,8 @@ PYBIND11_MODULE(_C, m)
     m.def("hc_act", &HcAct, py::arg("rt"), py::arg("mixes"), py::arg("hc_scale"),
           py::arg("hc_base"), py::arg("post"), py::arg("comb"), py::arg("hc_mult"), py::arg("eps"),
           py::arg("sinkhorn_iters"), py::arg("x_resid"), py::arg("output"));
-
+    m.def("hc_post", &HcPost, py::arg("rt"), py::arg("x"), py::arg("post"), py::arg("comb"),
+          py::arg("residual"), py::arg("y"), py::arg("m"), py::arg("hc_mult"), py::arg("hidden"));
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,
           py::arg("col") = 6);

@@ -1913,3 +1913,20 @@ void XliteOpHcAct(XRuntime &rt, XTensor &mixes, const XTensor &hcScale, const XT
                              hcScale.ptr, m, hcMult, eps, sinkhornIters, headOnly ? 1u : 0u,
                              xResid.ptr, output.ptr, hidden);
 }
+
+void XliteOpHcPost(XRuntime &rt, XTensor &x, XTensor &post, XTensor &comb, XTensor &residual,
+                   XTensor &y, uint32_t m, uint32_t hcMult, uint32_t hidden)
+{
+    if (IsDummyRuntime(rt) || x.numel == 0) {
+        return;
+    }
+    if (x.dtype == BF16 && post.dtype == FP32 && comb.dtype == FP32 && residual.dtype == BF16 &&
+        y.dtype == BF16) {
+        aclrtlaunch_hc_post_bfloat16_t(rt.aivNum, rt.stream, x.ptr, post.ptr, comb.ptr,
+                                       residual.ptr, y.ptr, m, hcMult, hidden);
+    } else {
+        std::string err_str =
+            DBG_PREFIX + XT_STR(x) + XT_STR(post) + XT_STR(comb) + XT_STR(residual) + XT_STR(y);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
