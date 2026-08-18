@@ -7,7 +7,7 @@ The typing and docstrings are designed for Python 3.9 to 3.12.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional, Sequence, Union, overload
+from typing import List, Optional, Sequence, Union
 
 import torch
 
@@ -743,7 +743,6 @@ class Model:
             RuntimeError: If native initialization fails.
         """
 
-    @overload
     def forward(
         self,
         rt: Runtime,
@@ -800,7 +799,6 @@ class Model:
             RuntimeError: If the native logits path fails.
         """
 
-    @overload
     def forward_and_get_logits(
         self,
         rt: Runtime,
@@ -835,7 +833,6 @@ class Model:
             RuntimeError: On invalid KV-cache layout or other native execution failures.
         """
 
-    @overload
     def forward_with_inputs_embeds(
         self,
         rt: Runtime,
