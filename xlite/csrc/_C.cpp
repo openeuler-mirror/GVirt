@@ -1305,7 +1305,7 @@ void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, fl
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
-    InitXTensor(_norm, norm);
+    InitOptionalXTensor(_norm, norm);
     if (variance.has_value()) {
 #ifdef XLITE_DEBUG_ON_MISC
         {

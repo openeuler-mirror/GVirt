@@ -832,6 +832,26 @@ __aicore__ inline void CopyUbufToGmAligned(__gm__ DstT *dst, __ubuf__ SrcT *src,
     }
 }
 
+template <typename Dtype>
+__aicore__ inline void convert_input(__ubuf__ float *dst, __ubuf__ Dtype *src, uint64_t repeat)
+{
+    if constexpr (std::is_same_v<Dtype, float16_t>) {
+        vconv_f162f32(dst, src, repeat, 1, 1, 8, 4);
+    } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+        vconv_bf162f32(dst, src, repeat, 1, 1, 8, 4);
+    }
+}
+
+template <typename Dtype>
+__aicore__ inline void convert_output(__ubuf__ Dtype *dst, __ubuf__ float *src, uint64_t repeat)
+{
+    if constexpr (std::is_same_v<Dtype, float16_t>) {
+        vconv_f322f16(dst, src, repeat, 1, 1, 4, 8);
+    } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+        vconv_f322bf16r(dst, src, repeat, 1, 1, 4, 8);
+    }
+}
+
 #endif
 
 #endif

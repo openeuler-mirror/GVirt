@@ -502,7 +502,8 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, const XTensor &norm, XTensor &out
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::Rms);
     launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1],
-                 inStartOffset, outStartOffset, useNorm, variance.ptr, rt.tpSize());
+                 inStartOffset, outStartOffset, useNorm, variance.ptr, rt.tpSize(),
+                 out.dtype == FP32);
 }
 
 void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
@@ -525,7 +526,7 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::Layer);
     launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1],
-                 inStartOffset, outStartOffset, true, nullptr, rt.tpSize());
+                 inStartOffset, outStartOffset, true, nullptr, rt.tpSize(), false);
 }
 
 void XliteOpL2Norm(XRuntime &rt, XTensor &in, XTensor &out, float normEps, uint32_t normDim,
@@ -546,7 +547,7 @@ void XliteOpL2Norm(XRuntime &rt, XTensor &in, XTensor &out, float normEps, uint3
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::L2);
     launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, nullptr, nullptr, out.ptr, in.shape[0],
                  normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1], inStartOffset,
-                 outStartOffset, true, nullptr, rt.tpSize());
+                 outStartOffset, true, nullptr, rt.tpSize(), out.dtype == FP32);
 }
 
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
@@ -585,7 +586,7 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::Rms);
     launchKernel(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], in.shape[1], normEps, kind, 1, in.shape[1], out.shape[1], 0, 0, true,
-                 nullptr, rt.tpSize());
+                 nullptr, rt.tpSize(), false);
 }
 
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
