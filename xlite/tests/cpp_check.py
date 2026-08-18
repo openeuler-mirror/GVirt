@@ -9,6 +9,7 @@ import subprocess
 import re
 import shutil
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor,as_completed
 
 
 class CppChecker:
@@ -28,17 +29,15 @@ class CppChecker:
             has_copyright = any(re.search(copyright_pattern, line) for line in first_lines)
             
             if not has_copyright:
-                self.errors.append(f"{file_path}: Missing copyright header")
-                return False
-            return True
+                return [f"{file_path}: Missing copyright header"]
+            return []
         except Exception as e:
-            self.errors.append(f"{file_path}: Error reading file: {e}")
-            return False
+            return [f"{file_path}: Error reading file: {e}"]
 
     def check_header_guard(self, file_path):
         """Check if header file has proper header guard"""
         if not file_path.suffix == '.h':
-            return True
+            return []
         
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -64,21 +63,18 @@ class CppChecker:
                     break
 
             if not has_pragma_once and not has_ifndef:
-                self.errors.append(f"{file_path}: Missing header guard")
-                return False
+                return [f"{file_path}: Missing header guard"]
 
             # If using #ifndef, check for matching #define
             if has_ifndef and ifndef_match:
                 has_define = any(re.match(rf'#define\s+{re.escape(ifndef_match)}', line)
                                 for line in lines)
                 if not has_define:
-                    self.errors.append(f"{file_path}: Missing #define for header guard {ifndef_match}")
-                    return False
+                    return [f"{file_path}: Missing #define for header guard {ifndef_match}"]
 
-            return True
+            return []
         except Exception as e:
-            self.errors.append(f"{file_path}: Error checking header guard: {e}")
-            return False
+            return [f"{file_path}: Error checking header guard: {e}"]
 
     def check_format(self, file_path):
         """Check code formatting with clang-format"""
@@ -90,15 +86,12 @@ class CppChecker:
             )
             
             if result.returncode != 0:
-                self.errors.append(f"{file_path}: Code formatting issues found")
-                return False
-            return True
+                return [f"{file_path}: Code formatting issues found"]
+            return []
         except FileNotFoundError:
-            self.errors.append("clang-format not found, skipping format check")
-            return True
+            return ["clang-format not found, skipping format check"]
         except Exception as e:
-            self.errors.append(f"{file_path}: Error running clang-format: {e}")
-            return False
+            return [f"{file_path}: Error running clang-format: {e}"]
 
     def build_project(self):
         """Build project to generate operator header files"""
@@ -184,7 +177,7 @@ class CppChecker:
         try:
             config_file = '.clang-tidy'
             if 'kernels' in str(file_path) or 'csrc/ascend.h' in str(file_path):
-                return True
+                return []
 
             build_dir = self.root_dir / 'build'
             result = subprocess.run(
@@ -196,17 +189,13 @@ class CppChecker:
             )
 
             if result.returncode != 0 or result.stdout.strip():
-                for line in result.stdout.split('\n'):
-                    if line.strip():
-                        self.errors.append(f"{file_path}: {line}")
-                return False
-            return True
+                errors = [f"{file_path}: {line}" for line in result.stdout.split('\n') if line.strip()]
+                return errors
+            return []
         except FileNotFoundError:
-            self.errors.append("clang-tidy not found, skipping static analysis")
-            return True
+            return ["clang-tidy not found, skipping static analysis"]
         except Exception as e:
-            self.errors.append(f"{file_path}: Error running clang-tidy: {e}")
-            return False
+            return [f"{file_path}: Error running clang-tidy: {e}"]
 
     def find_cpp_files(self):
         """Find all C++ source and header files"""
@@ -215,8 +204,27 @@ class CppChecker:
             cpp_files.extend(self.csrc_dir.rglob(ext))
         return sorted(cpp_files)
 
+    def _check_file(self, file_path, check_format, check_copyright_flag,
+                    check_header_guard_flag, run_tidy):
+        """Run all enabled checks for a single file and return collected errors"""
+        errors = []
+
+        if check_copyright_flag:
+            errors.extend(self.check_copyright(file_path))
+
+        if check_header_guard_flag:
+            errors.extend(self.check_header_guard(file_path))
+
+        if check_format:
+            errors.extend(self.check_format(file_path))
+
+        if run_tidy:
+            errors.extend(self.run_clang_tidy(file_path))
+
+        return file_path, errors
+
     def run_checks(self, check_format=True, check_copyright_flag=True, 
-                   check_header_guard_flag=True, run_tidy=True):
+                   check_header_guard_flag=True, run_tidy=True, jobs=16):
         """Run all checks"""
         cpp_files = self.find_cpp_files()
         
@@ -237,22 +245,39 @@ class CppChecker:
             if not self.generate_compile_commands():
                 all_passed = False
         
-        for file_path in cpp_files:
-            print(f"\033[K  Checking {file_path.relative_to(self.root_dir)}", end='\r')
-            
-            if check_copyright_flag:
-                self.check_copyright(file_path)
-            
-            if check_header_guard_flag:
-                self.check_header_guard(file_path)
-            
-            if check_format:
-                self.check_format(file_path)
-            
-            if run_tidy:
-                self.run_clang_tidy(file_path)
+        results = {}
+        executor = ThreadPoolExecutor(max_workers=jobs)
+        try:
+            futures = {
+                executor.submit(self._check_file, file_path, check_format,
+                                check_copyright_flag, check_header_guard_flag,
+                                run_tidy): file_path
+                for file_path in cpp_files
+            }
+            completed = 0
+            for future in as_completed(futures):
+                file_path = futures[future]
+                try:
+                    _, errors = future.result()
+                except Exception as e:
+                    errors = [f"{file_path}: Internal error running checks: {e}"]
+                results[file_path] = errors
+                completed += 1
+                print(f"\033[K  Checked {completed}/{len(cpp_files)} files", end='\r')
+        except KeyboardInterrupt:
+            print("\nInterrupted, cancelling remaining checks...")
+            executor.shutdown(wait=False, cancel_futures=True)
+            return False
+        executor.shutdown()
         
         print()
+        
+        seen = set()
+        for file_path in cpp_files:
+            for error in results[file_path]:
+                if error not in seen:
+                    seen.add(error)
+                    self.errors.append(error)
         
         if self.errors:
             print(f"\n❌  {len(self.errors)} ERRORS:")
@@ -286,6 +311,8 @@ def main():
                        help='Skip header guard check')
     parser.add_argument('--no-tidy', action='store_true',
                        help='Skip clang-tidy check')
+    parser.add_argument('--jobs', '-j', type=int, default=16,
+                       help='Number of parallel workers')
     
     args = parser.parse_args()
     
@@ -294,7 +321,8 @@ def main():
         check_format=not args.no_format,
         check_copyright_flag=not args.no_copyright,
         check_header_guard_flag=not args.no_header_guard,
-        run_tidy=not args.no_tidy
+        run_tidy=not args.no_tidy,
+        jobs=args.jobs
     )
     
     sys.exit(0 if result else 1)
