@@ -1966,9 +1966,10 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                 throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                          ": CXA indexer cache must be non-empty on ratio==4 layer");
             }
-            checkShape(indexerState, _c.blockSizes[0], 1, 2 * coff * _c.indexHeadDim,
-                       "indexer state cache");
-            checkShape(indexerK, _c.blockSizes[0], 1, _c.indexHeadDim, "indexer k cache");
+            checkShape(indexerState, _c.blockSizes[CXA_INDEXER_STATE], 1,
+                       2 * coff * _c.indexHeadDim, "indexer state cache");
+            checkShape(indexerK, _c.blockSizes[CXA_INDEXER_K], 1, _c.indexHeadDim,
+                       "indexer k cache");
         } else {
             if (!isEmpty(indexerState) || !isEmpty(indexerK)) {
                 throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
@@ -1984,8 +1985,9 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                     std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                     ": CXA compress cache must be non-empty on ratio!=0 layer");
             }
-            checkShape(compressKv, _c.blockSizes[0], 1, _c.headDim, "compress kv cache");
-            checkShape(state, _c.blockSizes[0], 1, 2 * coff * _c.headDim, "state cache");
+            checkShape(compressKv, _c.blockSizes[CXA_COMPRESS_KV], 1, _c.headDim,
+                       "compress kv cache");
+            checkShape(state, _c.blockSizes[CXA_STATE], 1, 2 * coff * _c.headDim, "state cache");
         } else {
             if (!isEmpty(compressKv) || !isEmpty(state)) {
                 throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
@@ -1998,7 +2000,7 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                      ": CXA swa kv cache must be non-empty");
         }
-        checkShape(swaKv, _c.blockSizes[0], 1, _c.headDim, "swa kv cache");
+        checkShape(swaKv, _c.blockSizes[CXA_SWA_KV], 1, _c.headDim, "swa kv cache");
     }
 }
 
@@ -2067,63 +2069,86 @@ size_t XModel::DummyRun()
                 bool hasIndexer = (ratio == 4);
                 bool hasCompress = (ratio != 0);
                 uint32_t coff = 1 + (hasIndexer ? 1 : 0);
-                uint32_t swaBlocks = _c.maxBatch * DIV_ROUND_UP(_c.windowSize, _c.blockSizes[0]);
+                uint32_t swaBlocks =
+                    _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSizes[CXA_SWA_KV]);
                 uint32_t compKvBlocks =
-                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen / ratio, _c.blockSizes[0])
+                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen / ratio,
+                                                             _c.blockSizes[CXA_COMPRESS_KV])
                                 : 0;
+                uint32_t idxKvBlocks =
+                    hasIndexer ? _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen / ratio,
+                                                            _c.blockSizes[CXA_INDEXER_K])
+                               : 0;
                 uint32_t compStateBlocks =
-                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(coff * ratio, _c.blockSizes[0]) : 0;
+                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSizes[CXA_STATE])
+                                : 0;
                 uint32_t idxStateBlocks =
-                    hasIndexer ? _c.maxBatch * DIV_ROUND_UP(coff * ratio, _c.blockSizes[0]) : 0;
+                    hasIndexer
+                        ? _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen, _c.blockSizes[CXA_INDEXER_STATE])
+                        : 0;
 
                 auto emptyTensor = [&]() -> XTensor { return XTensor({0}, embed.dtype, nullptr); };
 
                 XTensor indexerState =
-                    hasIndexer
-                        ? XTensor({idxStateBlocks, _c.blockSizes[0], 1, 2 * coff * _c.indexHeadDim},
-                                  embed.dtype, nullptr)
-                        : emptyTensor();
-                XTensor indexerK =
-                    hasIndexer ? XTensor({compKvBlocks, _c.blockSizes[0], 1, _c.indexHeadDim},
+                    hasIndexer ? XTensor({idxStateBlocks, _c.blockSizes[CXA_INDEXER_STATE], 1,
+                                          2 * coff * _c.indexHeadDim},
                                          embed.dtype, nullptr)
                                : emptyTensor();
-                XTensor compressKv = hasCompress
-                                         ? XTensor({compKvBlocks, _c.blockSizes[0], 1, _c.headDim},
-                                                   embed.dtype, nullptr)
-                                         : emptyTensor();
-                XTensor state =
-                    hasCompress
-                        ? XTensor({compStateBlocks, _c.blockSizes[0], 1, 2 * coff * _c.headDim},
+                XTensor indexerK =
+                    hasIndexer
+                        ? XTensor({idxKvBlocks, _c.blockSizes[CXA_INDEXER_K], 1, _c.indexHeadDim},
                                   embed.dtype, nullptr)
                         : emptyTensor();
-                XTensor swaKv({swaBlocks, _c.blockSizes[0], 1, _c.headDim}, embed.dtype, nullptr);
+                XTensor compressKv =
+                    hasCompress
+                        ? XTensor({compKvBlocks, _c.blockSizes[CXA_COMPRESS_KV], 1, _c.headDim},
+                                  embed.dtype, nullptr)
+                        : emptyTensor();
+                XTensor state = hasCompress ? XTensor({compStateBlocks, _c.blockSizes[CXA_STATE], 1,
+                                                       2 * coff * _c.headDim},
+                                                      embed.dtype, nullptr)
+                                            : emptyTensor();
+                XTensor swaKv({swaBlocks, _c.blockSizes[CXA_SWA_KV], 1, _c.headDim}, embed.dtype,
+                              nullptr);
                 kvCache[i] = {indexerState, indexerK, compressKv, state, swaKv};
             }
         }
         return kvCache;
     };
 
-    auto runPrefill = [&]() {
+    // v2 attnMeta for DummyRun: device tensors only need shape to pass CheckAttnMetaV2
+    // (dummy runtime never dereferences their nullptr payloads). One block_tables /
+    // slot_mapping entry per blockSizes element, sized to the per-cache maxNumBlocks.
+    auto buildV2AttnMeta = [&](uint32_t batchSize, uint32_t seqLen, uint32_t cachedLen) {
         XModelAttnMeta attnMeta;
-        attnMeta.version = 0;
+        attnMeta.version = 2;
         attnMeta.attnType = _c.attnType;
-        uint32_t batchSize = 1;
-        uint32_t seqLen = _c.maxBatchedTokens;
-        uint32_t maxNumBlocks = 0;
+        uint32_t batchedTokens = batchSize * seqLen;
+        uint32_t totalLens = seqLen + cachedLen;
         for (uint32_t i = 0; i < batchSize; i++) {
             attnMeta.lensCpu.push_back(seqLen);
-            attnMeta.cachedLensCpu.push_back(_c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0);
-            uint32_t blocks =
-                DIV_ROUND_UP(attnMeta.lensCpu[i] + attnMeta.cachedLensCpu[i], _c.blockSizes[0]);
-            std::vector<uint32_t> blockTable(blocks);
-            for (uint32_t j = 0; j < blocks; j++) {
-                blockTable[j] = i * blocks + j;
-            }
-            attnMeta.blockTablesCpu.push_back(blockTable);
-            if (blocks > maxNumBlocks) {
-                maxNumBlocks = blocks;
-            }
+            attnMeta.cachedLensCpu.push_back(cachedLen);
         }
+        attnMeta.lens.Init({batchSize}, INT32, nullptr);
+        attnMeta.cachedLens.Init({batchSize}, INT32, nullptr);
+        attnMeta.queryStartLoc.Init({batchSize}, INT32, nullptr);
+        attnMeta.position.Init({batchedTokens}, INT64, nullptr);
+        for (uint32_t bs : _c.blockSizes) {
+            uint32_t maxNumBlocks = DIV_ROUND_UP(totalLens, bs);
+            attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, maxNumBlocks}, INT32,
+                                              nullptr);
+            attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);
+        }
+        return attnMeta;
+    };
+
+    auto runPrefill = [&]() {
+        uint32_t batchSize = 1;
+        uint32_t seqLen = _c.maxBatchedTokens;
+        uint32_t cachedLen = _c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0;
+        auto attnMeta = buildV2AttnMeta(batchSize, seqLen, cachedLen);
+        // kvCache is sized off blockSizes[0] (matches _attnBlockTables[0].shape[1]).
+        uint32_t maxNumBlocks = DIV_ROUND_UP(seqLen + cachedLen, _c.blockSizes[0]);
         auto kvCache = buildKvCache(maxNumBlocks);
         std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
         for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
@@ -2153,25 +2178,11 @@ size_t XModel::DummyRun()
         if (_c.maxBatch == 0) {
             return 0;
         }
-        XModelAttnMeta attnMeta;
-        attnMeta.version = 0;
-        attnMeta.attnType = _c.attnType;
         uint32_t batchSize = static_cast<uint32_t>(_c.maxBatch);
         uint32_t cachedLen = _c.maxSeqLen > 0 ? static_cast<uint32_t>(_c.maxSeqLen - 1) : 0;
-        uint32_t maxNumBlocks = 0;
-        for (uint32_t i = 0; i < batchSize; i++) {
-            attnMeta.lensCpu.push_back(1);
-            attnMeta.cachedLensCpu.push_back(cachedLen);
-            uint32_t blocks = DIV_ROUND_UP(1 + cachedLen, _c.blockSizes[0]);
-            std::vector<uint32_t> blockTable(blocks);
-            for (uint32_t j = 0; j < blocks; j++) {
-                blockTable[j] = i * blocks + j;
-            }
-            attnMeta.blockTablesCpu.push_back(blockTable);
-            if (blocks > maxNumBlocks) {
-                maxNumBlocks = blocks;
-            }
-        }
+        auto attnMeta = buildV2AttnMeta(batchSize, 1, cachedLen);
+        // kvCache is sized off blockSizes[0] (matches _attnBlockTables[0].shape[1]).
+        uint32_t maxNumBlocks = DIV_ROUND_UP(1 + cachedLen, _c.blockSizes[0]);
         auto kvCache = buildKvCache(maxNumBlocks);
         std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
         for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
