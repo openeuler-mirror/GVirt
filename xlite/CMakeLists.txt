@@ -192,9 +192,14 @@ add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/core_assigner.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/ccl.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/auto_tuner.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/trace/csv_sink.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/trace/matmul_tracer.cpp
 )
 
-target_include_directories(xlite PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(xlite PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc
+)
 
 add_dependencies(xlite xlite_aclrtlaunch_all)
 
@@ -238,6 +243,21 @@ if(DEFINED ENV{XLITE_DEBUG_ON})
     unset(_xlite_dbg_raw)
     unset(_xlite_dbg_list)
     unset(_tok)
+endif()
+
+# ---------------------------------------------------------------------------
+# Matmul shape trace. Driven solely by the XLITE_TRACE_MATMUL env var. When set
+# (truthy), defines XLITE_TRACE_MATMUL so xlite tracer records a histogram of
+# matmul shapes and flushes it crash-safely to a file.
+# ---------------------------------------------------------------------------
+if(DEFINED ENV{XLITE_TRACE_MATMUL})
+    string(TOLOWER "$ENV{XLITE_TRACE_MATMUL}" _xlite_trace_raw)
+    string(STRIP "${_xlite_trace_raw}" _xlite_trace_raw)
+    if(NOT (_xlite_trace_raw STREQUAL "" OR _xlite_trace_raw MATCHES "^(0|false|no|off)$"))
+        target_compile_definitions(xlite PUBLIC XLITE_TRACE_MATMUL)
+        message(STATUS "XLITE_TRACE_MATMUL='${_xlite_trace_raw}' -> XLITE_TRACE_MATMUL")
+    endif()
+    unset(_xlite_trace_raw)
 endif()
 
 target_compile_options(xlite PRIVATE
