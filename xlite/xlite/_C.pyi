@@ -2676,3 +2676,45 @@ def get_tile_size_of_cached_kv(
         int: Optimal tile size for cached KV in flash attention.
     """
     ...
+
+def hc_act(
+    rt: Runtime,
+    mixes: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+    hc_mult: int,
+    eps: float,
+    sinkhorn_iters: int,
+    x_resid: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    """Hyper-Connection gate activation.
+
+    Computes pre/post/comb gates from `mixes`:
+      pre  = sigmoid(mixes[:, :K]       * scale[0] + base[:K])           + eps
+      post = 2 * sigmoid(mixes[:, K:2K] * scale[1] + base[K:2K])
+      comb = sinkhorn(softmax(mixes[:, 2K:] * scale[2] + base[2K:]) + eps)
+    where K = hc_mult. `mixes` [n, mix_hc] (mix_hc = (2+K)*K), `hc_scale` [3],
+    `hc_base` [mix_hc]; all fp32. Head mode is auto-detected when
+    `hc_base.numel() == hc_mult` (only pre runs, post/comb untouched). `pre` is
+    consumed internally and never written to GM.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        mixes (torch.Tensor): Gate pre-activation [n, mix_hc] fp32.
+        hc_scale (torch.Tensor): Per-segment scale [3] fp32 (or [1] in head mode).
+        hc_base (torch.Tensor): Per-segment bias [mix_hc] fp32 (or [hc_mult] head).
+        post (torch.Tensor): Output post gate [n, hc_mult] fp32.
+        comb (torch.Tensor): Output comb [n, hc_mult*hc_mult] fp32.
+        hc_mult (int): Hyper-connection multiplier K.
+        eps (float): Epsilon added to pre and every Sinkhorn denominator.
+        sinkhorn_iters (int): Sinkhorn normalization iterations.
+        x_resid (torch.Tensor): Merge input [n, hc_mult, hidden] bf16.
+        output (torch.Tensor): Merge output [n, hidden] bf16.
+
+    Returns:
+        None: `post`/`comb`/`output` written in place.
+    """
+    ...

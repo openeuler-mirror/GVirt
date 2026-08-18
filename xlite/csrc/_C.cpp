@@ -2178,6 +2178,28 @@ void UnpackActivation(XRuntime &rt, at::Tensor &input, at::Tensor &output)
     rt.Synchronize();
 }
 
+void HcAct(XRuntime &rt, at::Tensor &mixes, at::Tensor &hcScale, at::Tensor &hcBase,
+           at::Tensor &post, at::Tensor &comb, uint32_t hcMult, float eps, uint32_t sinkhornIters,
+           at::Tensor &xResid, at::Tensor &output)
+{
+    XTensor _mixes, _hcScale, _hcBase, _post, _comb, _xResid, _output;
+
+    InitXTensor(_mixes, mixes);
+    InitXTensor(_hcScale, hcScale);
+    InitXTensor(_hcBase, hcBase);
+    InitXTensor(_post, post);
+    InitXTensor(_comb, comb);
+    if (TensorUsable(xResid)) {
+        InitXTensor(_xResid, xResid);
+    }
+    if (TensorUsable(output)) {
+        InitXTensor(_output, output);
+    }
+    XliteOpHcAct(rt, _mixes, _hcScale, _hcBase, _post, _comb, hcMult, eps, sinkhornIters, false,
+                 _xResid, _output);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -2626,6 +2648,9 @@ PYBIND11_MODULE(_C, m)
           py::arg("d"), py::arg("weight_nz") = false);
     m.def("unpack_activation", &UnpackActivation, py::arg("rt"), py::arg("input"),
           py::arg("output"));
+    m.def("hc_act", &HcAct, py::arg("rt"), py::arg("mixes"), py::arg("hc_scale"),
+          py::arg("hc_base"), py::arg("post"), py::arg("comb"), py::arg("hc_mult"), py::arg("eps"),
+          py::arg("sinkhorn_iters"), py::arg("x_resid"), py::arg("output"));
 
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,

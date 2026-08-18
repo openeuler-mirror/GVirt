@@ -1877,3 +1877,38 @@ void XliteOpUnpackActivation(XRuntime &rt, XTensor &input, XTensor &output)
         throw std::runtime_error(err_str + " unsupported!");
     }
 }
+
+void XliteOpHcAct(XRuntime &rt, XTensor &mixes, const XTensor &hcScale, const XTensor &hcBase,
+                  XTensor &post, XTensor &comb, uint32_t hcMult, float eps, uint32_t sinkhornIters,
+                  bool headOnly, XTensor &xResid, XTensor &output)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    // head mode: hcBase is [hcMult] (pre bias only); attn/ffn is [(2+hcMult)*hcMult].
+    if (!headOnly) {
+        headOnly = (hcBase.numel == hcMult);
+    }
+    // All operands fp32. In head mode post/comb are empty XTensor() (kernel skips them).
+    if (headOnly) {
+        if (!EachXDtype(FP32, mixes, hcBase) || hcScale.dtype != FP32) {
+            std::string err_str = DBG_PREFIX + XT_STR(mixes) + XT_STR(hcScale) + XT_STR(hcBase);
+            throw std::runtime_error(err_str + " (head) must all be FP32!");
+        }
+    } else if (!EachXDtype(FP32, mixes, hcBase, post, comb) || hcScale.dtype != FP32) {
+        std::string err_str = DBG_PREFIX + XT_STR(mixes) + XT_STR(hcScale) + XT_STR(hcBase) +
+                              XT_STR(post) + XT_STR(comb);
+        throw std::runtime_error(err_str + " must all be FP32!");
+    }
+    // Pre-merge: y[m, hidden] = sum_h pre[h]*x[m,h,hidden]. bf16 I/O, folded into the kernel.
+    if (xResid.dtype != BF16 || output.dtype != BF16) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(xResid) + XT_STR(output) +
+                                 " (merge) must be BF16!");
+    }
+
+    uint32_t m = mixes.shape[0];
+    uint32_t hidden = output.shape[1];
+    aclrtlaunch_hc_act_float(rt.aivNum, rt.stream, mixes.ptr, hcBase.ptr, post.ptr, comb.ptr,
+                             hcScale.ptr, m, hcMult, eps, sinkhornIters, headOnly ? 1u : 0u,
+                             xResid.ptr, output.ptr, hidden);
+}
