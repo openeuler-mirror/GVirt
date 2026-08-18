@@ -156,16 +156,34 @@ XRuntime::~XRuntime(void)
     }
     (void)aclrtResetDevice(static_cast<int32_t>(_devid));
 
-    if (_attnInitialized) {
+    if (_position.ptr) {
         (void)aclrtFree(_position.ptr);
+    }
+    if (_slotMapping.ptr) {
         (void)aclrtFree(_slotMapping.ptr);
+    }
+    if (_cachedLens.ptr) {
         (void)aclrtFree(_cachedLens.ptr);
+    }
+    if (_lens.ptr) {
         (void)aclrtFree(_lens.ptr);
+    }
+    if (_queryStartLoc.ptr) {
         (void)aclrtFree(_queryStartLoc.ptr);
+    }
+    if (_blockTables.ptr) {
         (void)aclrtFree(_blockTables.ptr);
+    }
+    if (_tokensPerEpGroupAllEpHost.ptr) {
         (void)aclrtFreeHost(_tokensPerEpGroupAllEpHost.ptr);
+    }
+    if (_agSendBuf.ptr) {
         (void)aclrtFree(_agSendBuf.ptr);
+    }
+    if (_agRecvBuf.ptr) {
         (void)aclrtFree(_agRecvBuf.ptr);
+    }
+    if (_dsaTopkBuffer.ptr) {
         (void)aclrtFree(_dsaTopkBuffer.ptr);
     }
 
@@ -333,34 +351,45 @@ int XRuntime::InitHcclComm(void)
     return 0;
 }
 
-void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
-                        uint32_t blockSize, uint32_t indexTopK)
+void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
+                        uint64_t maxSeqLen, const std::vector<uint32_t> &blockSizes,
+                        uint32_t indexTopK)
 {
     std::vector<uint32_t> vgatherIndices;
     size_t size;
     void *ptr;
 
-    size = maxBatchedTokens * XDtypeBit(INT64) / 8;
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _position.Init({maxBatchedTokens}, INT64, ptr);
+    switch (attnMeta.version) {
+        case 0:
+            size = maxBatchedTokens * XDtypeBit(INT64) / 8;
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _position.Init({maxBatchedTokens}, INT64, ptr);
+        case 1:
+            size = maxBatchedTokens * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _slotMapping.Init({maxBatchedTokens}, INT32, ptr);
 
-    size = maxBatchedTokens * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _slotMapping.Init({maxBatchedTokens}, INT32, ptr);
+            size = maxBatch * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _cachedLens.Init({maxBatch}, INT32, ptr);
 
-    size = maxBatch * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _cachedLens.Init({maxBatch}, INT32, ptr);
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _lens.Init({maxBatch}, INT32, ptr);
 
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _lens.Init({maxBatch}, INT32, ptr);
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _queryStartLoc.Init({maxBatch}, INT32, ptr);
 
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _queryStartLoc.Init({maxBatch}, INT32, ptr);
-
-    size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _blockTables.Init({maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32, ptr);
+            size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSizes[0]) * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _blockTables.Init({maxBatch, DIV_ROUND_UP(maxSeqLen, blockSizes[0])}, INT32, ptr);
+            break;
+        case 2:
+            break;
+        default:
+            throw std::runtime_error(std::string(__func__) +
+                                     ": unsupported attention meta version " +
+                                     std::to_string(attnMeta.version));
+    }
 
     size = _moeEpSize * _moeEpSize * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMallocHost(&ptr, size));
@@ -469,6 +498,9 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
 // Verify v2 device tensors equal what v1's host-side algorithm would produce.
 void XRuntime::VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, std::vector<uint32_t> blockSizes)
 {
+    if (IsDummyRuntime()) {
+        return;
+    }
     const uint32_t batch = _batch;
     const uint32_t batchedTokens = this->batchedTokens;
     const uint32_t maxNumBlocks = attnMeta.blockTables[0].shape[1];
@@ -584,7 +616,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                            int weightsDtype, uint32_t indexTopK)
 {
     if (!_attnInitialized) {
-        InitAttn(maxBatchedTokens, maxBatch, maxSeqLen, blockSizes[0], indexTopK);
+        InitAttn(attnMeta, maxBatchedTokens, maxBatch, maxSeqLen, blockSizes, indexTopK);
         bool agInGraph = AllGatherInGraphActive(DP);
         bool rsInGraph = ReduceScatterInGraphActive(DP);
         if (defDpSize > 1 && (agInGraph || rsInGraph)) {
@@ -628,6 +660,12 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                  ": invalid batchSize: " + std::to_string(batch));
     }
 
+    if (attnMeta.attnType == XMODEL_ATTN_CXA && blockSizes.size() < CXA_SWA_KV + 1) {
+        throw std::runtime_error(
+            std::string(__func__) + ":" + std::to_string(__LINE__) +
+            ": invalid blockSizes for CXA, expect size >= " + std::to_string(CXA_SWA_KV + 1));
+    }
+
     batchedTokens = 0;
     maxTotalLens = 0;
     _batch = batch;
@@ -668,8 +706,10 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     } else {
         uint32_t localHeads = std::max(nHeads / _tpSize, static_cast<uint32_t>(1));
         uint32_t localKvHeads = std::max(nKVHeads / _tpSize, static_cast<uint32_t>(1));
-        _tileSizeOfCachedKV = GetTileSizeOfCachedKV(cachedLens, lens, localHeads / localKvHeads,
-                                                    localKvHeads, blockSizes[0], aicNum);
+        _tileSizeOfCachedKV = GetTileSizeOfCachedKV(
+            cachedLens, lens, localHeads / localKvHeads, localKvHeads,
+            attnMeta.attnType == XMODEL_ATTN_CXA ? blockSizes[CXA_COMPRESS_KV] : blockSizes[0],
+            aicNum);
     }
 
     size = batch * XDtypeBit(INT32) / 8;

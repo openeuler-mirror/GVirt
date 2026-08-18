@@ -132,9 +132,10 @@ class ModelConfig:
         max_m (int): Maximum token count batched.
         max_num_batched_tokens (int): Maximum token count batched.
         block_size (int): KV block size.(deprecated)
-        block_sizes (List[int]): Per-attention-type KV block sizes; element 0 is the
-            uniform KV block size used by most paths. When empty at construction, the
-            C++ side seeds it from ``block_size`` so a single-element vector always exists.
+        block_sizes (List[int]): Per-attention-type KV block sizes. Single-element for
+            non-CXA; for CXA one entry per 5-tuple cache in order
+            ``(indexer_state, indexer_k, compress_kv, state, swa_kv)``. Seeded from
+            ``block_size`` when empty at construction.
         weight_nz (bool): Whether weights are in NZ layout.
         experts_weight_transpose (bool): Whether expert weights are transposed.
         experts_weight_nz (bool): Whether expert weights are in NZ layout.
@@ -241,9 +242,9 @@ class ModelConfig:
     block_size: int = ...
     """KV block size.(deprecated)"""
     block_sizes: List[int] = ...
-    """Per-attention-type KV block sizes; element 0 is the uniform KV block size used
-    by most paths. When empty at construction, the C++ side seeds it from ``block_size``
-    so a single-element vector always exists."""
+    """Per-attention-type KV block sizes. Single-element for non-CXA; for CXA one entry
+    per 5-tuple cache in order (indexer_state, indexer_k, compress_kv, state, swa_kv).
+    Seeded from ``block_size`` when empty at construction."""
     weight_nz: bool = ...
     """Whether weights are in NZ layout."""
     experts_weight_transpose: bool = ...
