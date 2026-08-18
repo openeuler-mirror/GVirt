@@ -189,7 +189,7 @@ def run_static_check():
 
 def run_vllm_ascend_static_check():
     try:
-        mypy_cmd = f"MYPYPATH={VLLM_DIR}:{XLITE_DIR}/xlite mypy --follow-imports skip --check-untyped-defs --python-version 3.11 {VLLM_ASCEND}/vllm_ascend/xlite/xlite.py"
+        mypy_cmd = f"MYPYPATH={VLLM_DIR}:{XLITE_DIR}/xlite mypy --follow-imports skip --check-untyped-defs --python-version 3.11 --config-file={VLLM_ASCEND}/mypy.ini {VLLM_ASCEND}/vllm_ascend/xlite/xlite.py"
         print(f"Running vllm_ascend static check: {mypy_cmd}")
         cmd = ["bash", "-c", mypy_cmd]
         print("Starting vllm_ascend static check (timeout: 30 minutes)...")
@@ -265,7 +265,7 @@ def post_pr_comment(pr_number, xlite_check_results, xlite_output, vllm_ascend_ch
 
     vllm_ascend_suggestion = ""
     if not vllm_ascend_check_results["success"]:
-        vllm_ascend_suggestion = f"\n\n**Suggestion**: Please run `mypy --follow-imports skip --check-untyped-defs --python-version 3.11 vllm_ascend/xlite/xlite.py` to see detailed error messages and fix them."
+        vllm_ascend_suggestion = f"\n\n**Suggestion**: Please run `mypy --follow-imports skip --check-untyped-defs --python-version 3.11 --config-file=mypy.ini vllm_ascend/xlite/xlite.py` to see detailed error messages and fix them."
 
     body = f"""### CI Test Results
 
