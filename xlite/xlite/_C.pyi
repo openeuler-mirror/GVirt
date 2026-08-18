@@ -7,7 +7,7 @@ The typing and docstrings are designed for Python 3.9 to 3.12.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional, Sequence, Union, overload
+from typing import List, Optional, Sequence, Union
 
 import torch
 
@@ -316,30 +316,8 @@ class ModelConfig:
     compress_ratios: List[int] = ...
     """Per-layer KV compression ratios (DeepSeek-V4)."""
 
-class ModelAttnMeta:
-    """Device-side attention metadata for the legacy forward path.
-
-    The native runtime derives slot mapping and block-table tensors from these
-    host lists before launching attention kernels.
-
-    Attributes:
-        lens (List[int]): Per-sample query lengths.
-        cached_lens (List[int]): Per-sample cached lengths.
-        is_prefills (List[bool]): Prefill/decode flags per sample(deprecated).
-        block_tables (List[List[int]]): Per-sample block tables.
-    """
-
-    lens: List[int] = ...
-    """Per-sample query lengths."""
-    cached_lens: List[int] = ...
-    """Per-sample cached lengths."""
-    is_prefills: List[bool] = ...
-    """Prefill/decode flags per sample(deprecated)."""
-    block_tables: List[List[int]] = ...
-    """Per-sample block tables."""
-
 class AttnMeta:
-    """Host-side attention metadata for the version-1 vLLM-compatible path.
+    """Attention metadata for the native runtime forward path.
 
     This path reuses host block-table lists while taking `positions` directly
     from the provided tensor for attention position indexing.
@@ -347,7 +325,6 @@ class AttnMeta:
     Attributes:
         lens (List[int]): Per-sample query lengths.
         cached_lens (List[int]): Per-sample cached lengths.
-        is_prefills (List[bool]): Prefill/decode flags per sample(deprecated).
         block_tables_cpu (List[List[int]]): Per-sample block tables on host.
         positions (torch.Tensor): Position tensor for version-1 attention metadata.
     """
@@ -356,8 +333,6 @@ class AttnMeta:
     """Per-sample query lengths."""
     cached_lens: List[int] = ...
     """Per-sample cached lengths."""
-    is_prefills: List[bool] = ...
-    """Prefill/decode flags per sample(deprecated)."""
     block_tables_cpu: List[List[int]] = ...
     """Per-sample block tables on host."""
     positions: torch.Tensor = ...
@@ -768,39 +743,6 @@ class Model:
             RuntimeError: If native initialization fails.
         """
 
-    @overload
-    def forward(
-        self,
-        rt: Runtime,
-        input: torch.Tensor,
-        attn_meta: ModelAttnMeta,
-        kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: Sequence[torch.Tensor],
-        output: torch.Tensor,
-        curr_stream: int = 0,
-    ) -> None:
-        """Run forward pass with device-side attention metadata.
-
-        Args:
-            rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input token tensor.
-            attn_meta (ModelAttnMeta): Device-side attention metadata.
-            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors,
-                one entry per layer (DeepSeek-V4 uses different ``rope_theta`` for
-                compress vs non-compress layers). V3-style callers may pass a
-                single-element list; all layers share that one tensor.
-            output (torch.Tensor): Output hidden-state buffer.
-            curr_stream (int): Optional ACL stream pointer cast to integer.
-
-        Returns:
-            None: Output is written in place.
-
-        Raises:
-            RuntimeError: On invalid shapes or cache mismatch.
-        """
-
-    @overload
     def forward(
         self,
         rt: Runtime,
@@ -857,41 +799,6 @@ class Model:
             RuntimeError: If the native logits path fails.
         """
 
-    @overload
-    def forward_and_get_logits(
-        self,
-        rt: Runtime,
-        input: torch.Tensor,
-        attn_meta: ModelAttnMeta,
-        kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: Sequence[torch.Tensor],
-        indices: torch.Tensor,
-        output: torch.Tensor,
-        curr_stream: int = 0,
-    ) -> None:
-        """Run forward pass and materialize logits (device metadata).
-
-        Args:
-            rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input token tensor.
-            attn_meta (ModelAttnMeta): Device-side attention metadata.
-            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors,
-                one entry per layer (DeepSeek-V4 uses different ``rope_theta`` for
-                compress vs non-compress layers). V3-style callers may pass a
-                single-element list; all layers share that one tensor.
-            indices (torch.Tensor): Logits indices.
-            output (torch.Tensor): Output logits buffer.
-            curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
-
-        Returns:
-            None: Output is written in place.
-
-        Raises:
-            RuntimeError: On invalid KV-cache layout or other native execution failures.
-        """
-
-    @overload
     def forward_and_get_logits(
         self,
         rt: Runtime,
@@ -926,38 +833,6 @@ class Model:
             RuntimeError: On invalid KV-cache layout or other native execution failures.
         """
 
-    @overload
-    def forward_with_inputs_embeds(
-        self,
-        rt: Runtime,
-        input: torch.Tensor,
-        attn_meta: ModelAttnMeta,
-        kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: torch.Tensor,
-        output: torch.Tensor,
-        curr_stream: int = 0,
-        deepstack_input: Sequence[torch.Tensor] = ...,
-    ) -> None:
-        """Run forward pass with deepstack input embeddings (device metadata).
-
-        Args:
-            rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input token tensor.
-            attn_meta (ModelAttnMeta): Device-side attention metadata.
-            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
-            output (torch.Tensor): Output hidden-state buffer.
-            curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
-            deepstack_input (Sequence[torch.Tensor]): Extra deepstack embeddings.
-
-        Returns:
-            None: Output is written in place.
-
-        Raises:
-            RuntimeError: On KV-cache/deepstack shape mismatch or other native execution failures.
-        """
-
-    @overload
     def forward_with_inputs_embeds(
         self,
         rt: Runtime,

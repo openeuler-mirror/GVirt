@@ -38,7 +38,7 @@ if forward_backend == "xlite":
     xlite_rt = None
     xlite_model = None
     block_size = 64
-    from xlite._C import Runtime, ModelConfig, ModelAttnMeta, AttnMLA, AttnDSA, Model, ScoringFuncSigmoid
+    from xlite._C import Runtime, ModelConfig, AttnMeta, AttnMLA, AttnDSA, Model, ScoringFuncSigmoid
     import numpy as np
 
 @dataclass
@@ -1646,12 +1646,14 @@ class DeepSeek_V3(nn.Module):
         seqlen = tokens.size(1)
         step = (self.args.max_seq_len + block_size - 1) // block_size
         block_num = (seqlen + start_pos + block_size - 1) // block_size
-        attn_meta = ModelAttnMeta()
+        attn_meta = AttnMeta()
         attn_meta.lens = [seqlen] * batch
         attn_meta.cached_lens = [start_pos] * batch
         batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
         block_indices = np.arange(block_num, dtype=np.uint32)
-        attn_meta.block_tables = batch_indices * step + block_indices
+        attn_meta.block_tables_cpu = batch_indices * step + block_indices
+        attn_meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
+            .repeat(batch).to(tokens.device)
         return attn_meta
 
 
