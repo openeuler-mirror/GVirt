@@ -325,7 +325,6 @@ class AttnMeta:
     Attributes:
         lens (List[int]): Per-sample query lengths.
         cached_lens (List[int]): Per-sample cached lengths.
-        is_prefills (List[bool]): Prefill/decode flags per sample(deprecated).
         block_tables_cpu (List[List[int]]): Per-sample block tables on host.
         positions (torch.Tensor): Position tensor for version-1 attention metadata.
     """
@@ -334,8 +333,6 @@ class AttnMeta:
     """Per-sample query lengths."""
     cached_lens: List[int] = ...
     """Per-sample cached lengths."""
-    is_prefills: List[bool] = ...
-    """Prefill/decode flags per sample(deprecated)."""
     block_tables_cpu: List[List[int]] = ...
     """Per-sample block tables on host."""
     positions: torch.Tensor = ...

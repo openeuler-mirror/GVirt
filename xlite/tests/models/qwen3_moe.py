@@ -863,7 +863,6 @@ class Qwen3MoE(nn.Module):
         attn_meta = AttnMeta()
         attn_meta.lens = [seqlen] * batch
         attn_meta.cached_lens = [start_pos] * batch
-        attn_meta.is_prefills = [True if seqlen != 1 else False] * batch
         batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
         block_indices = np.arange(block_num, dtype=np.uint32)
         attn_meta.block_tables_cpu = batch_indices * step + block_indices

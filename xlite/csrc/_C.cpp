@@ -19,7 +19,6 @@ namespace py = pybind11;
 struct CModelAttnMeta {
     std::vector<uint32_t> lens;
     std::vector<uint32_t> cachedLens;
-    std::vector<bool> isPrefills;
     std::vector<std::vector<uint32_t>> blockTablesList;
     at::Tensor positions;
 };
@@ -2278,7 +2277,6 @@ PYBIND11_MODULE(_C, m)
         .def(py::init<>())
         .def_readwrite("lens", &CModelAttnMeta::lens)
         .def_readwrite("cached_lens", &CModelAttnMeta::cachedLens)
-        .def_readwrite("is_prefills", &CModelAttnMeta::isPrefills)
         .def_readwrite("block_tables_cpu", &CModelAttnMeta::blockTablesList)
         .def_readwrite("positions", &CModelAttnMeta::positions);
 
