@@ -6,7 +6,6 @@
 
 #include <cstdint>
 #include "base.h"
-#include "ccl.h"
 
 #define XLITE_DEFAULT_PORT 10266
 #define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144

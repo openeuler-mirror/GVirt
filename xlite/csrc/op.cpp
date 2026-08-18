@@ -4,6 +4,7 @@
 #include "base.h"
 #include "ascend.h"
 #include "runtime.h"
+#include "ccl.h"
 #include "op.h"
 #include "swizzle.h"
 #include "aclrtlaunch_all.h"
