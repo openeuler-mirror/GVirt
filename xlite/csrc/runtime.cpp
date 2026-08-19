@@ -408,6 +408,60 @@ void XRuntime::PrepareCommBuffers(uint64_t maxBatch, uint32_t hiddenSize, uint32
     _rsRecvBuf.Init({rsRecvBytes}, INT8, _agRecvBuf.ptr);  // alias, no extra malloc
 }
 
+static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint32_t batchedTokens,
+                            uint32_t maxNumBlocks)
+{
+    if (attnMeta.lens.shape.size() != 1 || attnMeta.lens.shape[0] < batch) {
+        throw std::runtime_error(
+            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+            ": lens shape mismatch, expect 1D len >= " + std::to_string(batch));
+    }
+    if (attnMeta.cachedLens.shape.size() != 1 || attnMeta.cachedLens.shape[0] < batch) {
+        throw std::runtime_error(
+            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+            ": cachedLens shape mismatch, expect 1D len >= " + std::to_string(batch));
+    }
+    if (attnMeta.queryStartLoc.shape.size() != 1 || attnMeta.queryStartLoc.shape[0] < batch) {
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": queryStartLoc shape mismatch, got dim " +
+                                 std::to_string(attnMeta.queryStartLoc.shape.size()) + " len " +
+                                 std::to_string(attnMeta.queryStartLoc.shape.empty()
+                                                    ? 0
+                                                    : attnMeta.queryStartLoc.shape[0]) +
+                                 ", expect 1D len >= " + std::to_string(batch));
+    }
+    uint32_t expectedKvCacheNum = 1;
+    if (attnMeta.slotMapping.size() != expectedKvCacheNum) {
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": slotMapping size mismatch, expect " +
+                                 std::to_string(expectedKvCacheNum) + " got " +
+                                 std::to_string(attnMeta.slotMapping.size()));
+    }
+    if (attnMeta.blockTables.size() != expectedKvCacheNum) {
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": blockTables size mismatch, expect " +
+                                 std::to_string(expectedKvCacheNum) + " got " +
+                                 std::to_string(attnMeta.blockTables.size()));
+    }
+    if (attnMeta.slotMapping[0].shape.size() != 1 ||
+        attnMeta.slotMapping[0].shape[0] < batchedTokens) {
+        throw std::runtime_error(
+            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+            ": slotMapping shape mismatch, expect 1D len >= " + std::to_string(batchedTokens));
+    }
+    if (attnMeta.blockTables[0].shape.size() != 2 || attnMeta.blockTables[0].shape[0] < batch ||
+        attnMeta.blockTables[0].shape[1] < maxNumBlocks) {
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": blockTables shape mismatch, expect 2D [batch, >= " +
+                                 std::to_string(maxNumBlocks) + "]");
+    }
+    if (attnMeta.position.shape.size() != 1 || attnMeta.position.shape[0] < batchedTokens) {
+        throw std::runtime_error(
+            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+            ": position shape mismatch, expect 1D len >= " + std::to_string(batchedTokens));
+    }
+}
+
 void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                            uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVHeads,
                            uint32_t blockSize, uint32_t hiddenSize, uint32_t nRoutedExperts,
@@ -442,14 +496,14 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     if (indexTopK > 0) {
         _dsaTopkValid = false;
     }
-    uint32_t batch = attnMeta.lens.size();
+    uint32_t batch = attnMeta.lensCpu.size();
     std::vector<uint32_t> lens(batch);
     std::vector<uint32_t> cachedLens(batch);
     std::vector<uint32_t> queryStartLoc(batch);
     std::vector<uint32_t> numBlocks(batch);
     std::vector<uint32_t> slotMapping, blockTables;
     std::vector<uint64_t> position;
-    uint32_t queryStart, blockId, id, k;
+    uint32_t queryStart, blockId, id, k, maxNumBlocks;
     size_t size;
 
     if (batch == 0) {
@@ -458,18 +512,18 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     }
 
     batchedTokens = 0;
-    _maxNumBlocks = 0;
+    maxNumBlocks = 0;
     _batch = batch;
     queryStart = 0;
     bool allCached = true;
     bool anyMultiToken = false;
     for (uint32_t i = 0; i < batch; i++) {
-        lens[i] = attnMeta.lens[i];
-        cachedLens[i] = attnMeta.cachedLens[i];
+        lens[i] = attnMeta.lensCpu[i];
+        cachedLens[i] = attnMeta.cachedLensCpu[i];
         queryStartLoc[i] = queryStart;
         queryStart += lens[i];
         numBlocks[i] = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
-        _maxNumBlocks = numBlocks[i] > _maxNumBlocks ? numBlocks[i] : _maxNumBlocks;
+        maxNumBlocks = numBlocks[i] > maxNumBlocks ? numBlocks[i] : maxNumBlocks;
         batchedTokens += lens[i];
         if (cachedLens[i] == 0) {
             allCached = false;
@@ -490,7 +544,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                  std::to_string(maxBatchedTokens) + ")");
     }
 
-    if (IsDummyRuntime() || _maxNumBlocks * blockSize <= MAX_KV_TILE_SIZE) {
+    if (IsDummyRuntime() || maxNumBlocks * blockSize <= MAX_KV_TILE_SIZE) {
         _tileSizeOfCachedKV = MAX_KV_TILE_SIZE;
     } else {
         uint32_t localHeads = std::max(nHeads / _tpSize, static_cast<uint32_t>(1));
@@ -500,60 +554,81 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     }
 
     size = batch * XDtypeBit(INT32) / 8;
-    CHECK_ACL(
-        aclrtMemcpyAsync(_lens.ptr, size, lens.data(), size, ACL_MEMCPY_HOST_TO_DEVICE, stream));
-    CHECK_ACL(aclrtMemcpyAsync(_cachedLens.ptr, size, cachedLens.data(), size,
-                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
-    CHECK_ACL(aclrtMemcpyAsync(_queryStartLoc.ptr, size, queryStartLoc.data(), size,
-                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
 
-    position.resize(batchedTokens);
-    slotMapping.resize(batchedTokens);
-    k = 0;
-    if (attnMeta.blockTables.size() < batch) {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": invalid blocktable(" +
-                                 std::to_string(attnMeta.blockTables.size()) + ")");
-    }
-    for (uint32_t i = 0; i < batch; i++) {
-        if (attnMeta.blockTables[i].size() < numBlocks[i]) {
-            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                     ": block table too small (" +
-                                     std::to_string(attnMeta.blockTables[i].size()) + " < " +
-                                     std::to_string(numBlocks[i]) + ")");
-        }
-        for (uint32_t j = 0; j < lens[i]; j++) {
-            position[k] = cachedLens[i] + j;
-            blockId = position[k] / blockSize;
-            id = position[k] % blockSize;
-            slotMapping[k++] = attnMeta.blockTables[i][blockId] * blockSize + id;
-        }
-    }
-    size = batchedTokens * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMemcpyAsync(_slotMapping.ptr, size, slotMapping.data(), size,
-                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
-    _attnSlotMapping = _slotMapping;
-
-    blockTables.resize(batch * _maxNumBlocks);
-    for (uint32_t i = 0; i < batch; i++) {
-        for (uint32_t j = 0; j < numBlocks[i]; j++) {
-            blockTables[i * _maxNumBlocks + j] = attnMeta.blockTables[i][j];
-        }
-    }
-    size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMemcpyAsync(_blockTables.ptr, size, blockTables.data(), size,
-                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
-    _attnBlockTables = _blockTables;
     switch (attnMeta.version) {
         case 0:
-            size = batchedTokens * XDtypeBit(INT64) / 8;
-            CHECK_ACL(aclrtMemcpyAsync(_position.ptr, size, position.data(), size,
-                                       ACL_MEMCPY_HOST_TO_DEVICE, stream));
-            _attnPosition = _position;
-            break;
         case 1:
-            _attnPosition = attnMeta.vllmPosition;
+            CHECK_ACL(aclrtMemcpyAsync(_lens.ptr, size, lens.data(), size,
+                                       ACL_MEMCPY_HOST_TO_DEVICE, stream));
+            CHECK_ACL(aclrtMemcpyAsync(_cachedLens.ptr, size, cachedLens.data(), size,
+                                       ACL_MEMCPY_HOST_TO_DEVICE, stream));
+            CHECK_ACL(aclrtMemcpyAsync(_queryStartLoc.ptr, size, queryStartLoc.data(), size,
+                                       ACL_MEMCPY_HOST_TO_DEVICE, stream));
+            _attnLens = _lens;
+            _attnCachedLens = _cachedLens;
+            _attnQueryStartLoc = _queryStartLoc;
+
+            position.resize(batchedTokens);
+            slotMapping.resize(batchedTokens);
+            k = 0;
+            if (attnMeta.blockTablesCpu.size() < batch) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": invalid blocktable(" +
+                                         std::to_string(attnMeta.blockTablesCpu.size()) + ")");
+            }
+            for (uint32_t i = 0; i < batch; i++) {
+                if (attnMeta.blockTablesCpu[i].size() < numBlocks[i]) {
+                    throw std::runtime_error(std::string(__FILE__) + ":" +
+                                             std::to_string(__LINE__) +
+                                             ": block table too small (" +
+                                             std::to_string(attnMeta.blockTablesCpu[i].size()) +
+                                             " < " + std::to_string(numBlocks[i]) + ")");
+                }
+                for (uint32_t j = 0; j < lens[i]; j++) {
+                    position[k] = cachedLens[i] + j;
+                    blockId = position[k] / blockSize;
+                    id = position[k] % blockSize;
+                    slotMapping[k++] = attnMeta.blockTablesCpu[i][blockId] * blockSize + id;
+                }
+            }
+            size = batchedTokens * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMemcpyAsync(_slotMapping.ptr, size, slotMapping.data(), size,
+                                       ACL_MEMCPY_HOST_TO_DEVICE, stream));
+            _attnSlotMapping = {_slotMapping};
+
+            _maxNumBlocks = maxNumBlocks;
+            blockTables.resize(batch * _maxNumBlocks);
+            for (uint32_t i = 0; i < batch; i++) {
+                for (uint32_t j = 0; j < numBlocks[i]; j++) {
+                    blockTables[i * _maxNumBlocks + j] = attnMeta.blockTablesCpu[i][j];
+                }
+            }
+            size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMemcpyAsync(_blockTables.ptr, size, blockTables.data(), size,
+                                       ACL_MEMCPY_HOST_TO_DEVICE, stream));
+            _attnBlockTables = {_blockTables};
+            if (attnMeta.version == 0) {
+                size = batchedTokens * XDtypeBit(INT64) / 8;
+                CHECK_ACL(aclrtMemcpyAsync(_position.ptr, size, position.data(), size,
+                                           ACL_MEMCPY_HOST_TO_DEVICE, stream));
+                _attnPosition = _position;
+            } else {
+                _attnPosition = attnMeta.position;
+            }
             break;
+        case 2: {
+            // Version 2: lens / cachedLens / queryStartLoc / slotMapping / blockTables are
+            // pre-built on the Python side as device tensors; shape-check and alias (zero copy).
+            CheckAttnMetaV2(attnMeta, batch, batchedTokens, maxNumBlocks);
+            _maxNumBlocks = attnMeta.blockTables[0].shape[1];
+            _attnLens = attnMeta.lens;
+            _attnCachedLens = attnMeta.cachedLens;
+            _attnQueryStartLoc = attnMeta.queryStartLoc;
+            _attnSlotMapping = attnMeta.slotMapping;
+            _attnBlockTables = attnMeta.blockTables;
+            _attnPosition = attnMeta.position;
+            break;
+        }
         default:
             throw std::runtime_error(
                 std::string(__FILE__) + ":" + std::to_string(__LINE__) +

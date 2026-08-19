@@ -338,6 +338,48 @@ class AttnMeta:
     positions: torch.Tensor = ...
     """Position tensor for version-1 attention metadata."""
 
+
+class AttnMetaV2:
+    """Device-tensor attention metadata for the V2 forward path.
+
+    Unlike :class:`AttnMeta` (V1), this variant carries ``lens``,
+    ``cached_lens``, ``query_start_loc``, ``slot_mapping`` and
+    ``block_tables`` as pre-built device tensors. The C++ side skips host
+    computation and H2D copies, only shape-checking and aliasing these tensors
+    (zero-copy). Per-sample block tables are flattened into a 1D tensor padded
+    to ``max_num_blocks``. The host ``lens_cpu``/``cached_lens_cpu`` lists are
+    still required for C++-side tile-size selection (``GetTileSizeOfCachedKV``).
+
+    Attributes:
+        lens (torch.Tensor): Per-sample query lengths, shape ``[batch]`` int32 device.
+        cached_lens (torch.Tensor): Per-sample cached lengths, shape ``[batch]`` int32 device.
+        positions (torch.Tensor): Position tensor, shape ``[batched_tokens]`` int64.
+        lens_cpu (List[int]): Per-sample query lengths (host, for tile-size selection).
+        cached_lens_cpu (List[int]): Per-sample cached lengths (host, for tile-size selection).
+        query_start_loc (torch.Tensor): Prefix-sum of lens, shape ``[batch]`` int32.
+        slot_mapping (Sequence[torch.Tensor]): Slot indices, each shape
+            ``[batched_tokens]`` int32 device, one per kv cache.
+        block_tables (Sequence[torch.Tensor]): Padded block tables, each shape
+            ``[batch, max_num_blocks]`` int32 device, one per kv cache.
+    """
+
+    lens: torch.Tensor = ...
+    """Per-sample query lengths, shape ``[batch]`` int32 device."""
+    cached_lens: torch.Tensor = ...
+    """Per-sample cached lengths, shape ``[batch]`` int32 device."""
+    positions: torch.Tensor = ...
+    """Position tensor, shape ``[batched_tokens]`` int64."""
+    lens_cpu: List[int] = ...
+    """Per-sample query lengths (host, for tile-size selection)."""
+    cached_lens_cpu: List[int] = ...
+    """Per-sample cached lengths (host, for tile-size selection)."""
+    query_start_loc: torch.Tensor = ...
+    """Prefix-sum of lens, shape ``[batch]`` int32."""
+    slot_mapping: Sequence[torch.Tensor] = ...
+    """Slot indices, each shape ``[batched_tokens]`` int32 device, per kv cache."""
+    block_tables: Sequence[torch.Tensor] = ...
+    """Padded block tables, each shape ``[batch, max_num_blocks]`` int32 device, per kv cache."""
+
 class AttnType(Enum):
     """Attention type enum exported by the native extension."""
 
@@ -749,22 +791,21 @@ class Model:
         input: torch.Tensor,
         attn_meta: AttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: Union[torch.Tensor, Sequence[torch.Tensor]],
+        freqs_cis: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
         """Run forward pass with host/vLLM-compatible attention metadata (V1).
 
-        Legacy single-tensor entry: ``freqs_cis`` is shared across all layers.
-        Internally wrapped into a one-element list and dispatched to the V2 path.
+        ``freqs_cis`` is a single tensor shared across all layers. For per-layer
+        freqs tensors or device-side attention metadata, use :meth:`forward_v2`.
 
         Args:
             rt (Runtime): Native runtime handle.
             input (torch.Tensor): Input token tensor.
             attn_meta (AttnMeta): Host-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (Union[torch.Tensor, Sequence[torch.Tensor]]): Rotary
-                frequency tensor shared by all layers, or a per-layer sequence
+            freqs_cis (torch.Tensor): Rotary frequency tensor shared by all layers.
             output (torch.Tensor): Output hidden-state buffer.
             curr_stream (int): Optional ACL stream pointer cast to integer.
 
@@ -805,15 +846,16 @@ class Model:
         input: torch.Tensor,
         attn_meta: AttnMeta,
         kv_cache: Sequence[Sequence[torch.Tensor]],
-        freqs_cis: Union[torch.Tensor, Sequence[torch.Tensor]],
+        freqs_cis: torch.Tensor,
         indices: torch.Tensor,
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
         """Run forward pass and materialize logits (host metadata, V1).
 
-        Legacy single-tensor entry: ``freqs_cis`` is shared across all layers.
-        Internally wrapped into a one-element list and dispatched to the V2 path.
+        ``freqs_cis`` is a single tensor shared across all layers. For per-layer
+        freqs tensors or device-side attention metadata, use
+        :meth:`forward_and_get_logits_v2`.
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -861,6 +903,98 @@ class Model:
 
         Raises:
             RuntimeError: On KV-cache/deepstack shape mismatch or other native execution failures.
+        """
+
+    def forward_v2(
+        self,
+        rt: Runtime,
+        input: torch.Tensor,
+        attn_meta: AttnMetaV2,
+        kv_cache: Sequence[Sequence[torch.Tensor]],
+        freqs_cis: Sequence[torch.Tensor],
+        output: torch.Tensor,
+        curr_stream: int = 0,
+    ) -> None:
+        """Run forward pass with device-tensor attention metadata (V2).
+
+        Unlike :meth:`forward` (V1), this path takes ``query_start_loc``,
+        ``slot_mapping`` and ``block_tables`` as pre-built device tensors on
+        ``attn_meta``; the native side skips host computation and H2D copies.
+
+        Args:
+            rt (Runtime): Native runtime handle.
+            input (torch.Tensor): Input token tensor.
+            attn_meta (AttnMetaV2): Device-tensor attention metadata.
+            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
+            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors.
+            output (torch.Tensor): Output hidden-state buffer.
+            curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
+
+        Returns:
+            None: Output is written in place.
+
+        Raises:
+            RuntimeError: On shape mismatch or other native execution failures.
+        """
+
+    def forward_and_get_logits_v2(
+        self,
+        rt: Runtime,
+        input: torch.Tensor,
+        attn_meta: AttnMetaV2,
+        kv_cache: Sequence[Sequence[torch.Tensor]],
+        freqs_cis: Sequence[torch.Tensor],
+        indices: torch.Tensor,
+        output: torch.Tensor,
+        curr_stream: int = 0,
+    ) -> None:
+        """Run forward pass and materialize logits (device metadata, V2).
+
+        Args:
+            rt (Runtime): Native runtime handle.
+            input (torch.Tensor): Input token tensor.
+            attn_meta (AttnMetaV2): Device-tensor attention metadata.
+            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
+            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors.
+            indices (torch.Tensor): Logits indices.
+            output (torch.Tensor): Output logits buffer.
+            curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
+
+        Returns:
+            None: Output is written in place.
+
+        Raises:
+            RuntimeError: On shape mismatch or other native execution failures.
+        """
+
+    def forward_with_inputs_embeds_v2(
+        self,
+        rt: Runtime,
+        input: torch.Tensor,
+        attn_meta: AttnMetaV2,
+        kv_cache: Sequence[Sequence[torch.Tensor]],
+        freqs_cis: torch.Tensor,
+        output: torch.Tensor,
+        curr_stream: int = 0,
+        deepstack_input: Sequence[torch.Tensor] = ...,
+    ) -> None:
+        """Run forward pass with deepstack input embeddings (device metadata, V2).
+
+        Args:
+            rt (Runtime): Native runtime handle.
+            input (torch.Tensor): Input token tensor.
+            attn_meta (AttnMetaV2): Device-tensor attention metadata.
+            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
+            freqs_cis (torch.Tensor): Rotary frequency tensor.
+            output (torch.Tensor): Output hidden-state buffer.
+            curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
+            deepstack_input (Sequence[torch.Tensor]): Extra deepstack embeddings.
+
+        Returns:
+            None: Output is written in place.
+
+        Raises:
+            RuntimeError: On shape mismatch or other native execution failures.
         """
 
     def get_tensor_pool_size(self, dbg: int = 0) -> int:
