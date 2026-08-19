@@ -310,8 +310,7 @@ private:
                             std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                             XTensor &output);
     void ForwardHcPre(XRuntime &rt, XTensor &input, XTensor &hcFn, XTensor &hcScale,
-                      XTensor &hcBase, XTensor &output, const XTensor &post = XTensor(),
-                      const XTensor &comb = XTensor());
+                      XTensor &hcBase, XTensor &output, XTensor &post, XTensor &comb);
     void ForwardHcPost(XRuntime &rt, XTensor &input, XTensor &post, XTensor &comb,
                        XTensor &residual, XTensor &output);
     void ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<XTensor>> &kvCache,
