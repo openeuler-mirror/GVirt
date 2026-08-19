@@ -221,7 +221,6 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
     uint32_t embed_dim = rot_dim / 2;
     uint32_t q_size = num_heads * head_size;
     uint32_t kv_size = num_kv_heads * head_size;
-    uint32_t slot_blocksize = kv_size * block_size;
     uint32_t pos_dim = (mrope_mask_h != 0 || mrope_mask_w != 0) ? 3 : 1;
 
     // input
@@ -441,8 +440,6 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
 
     uint32_t cos_shift;
     uint32_t sin_shift;
-    uint32_t slotblock_idx;
-    uint32_t slotblock_shift;
     uint64_t slot_startidx;
     uint32_t poslot_idx;
     for (uint32_t loop0 = 0; loop0 < posslot_iters; loop0 += 1) {
@@ -483,10 +480,7 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
             auto gm_cos = (__gm__ Dtype *)cos_sin_cache + cos_shift;
             auto gm_sin = (__gm__ Dtype *)cos_sin_cache + sin_shift;
             // slot
-            slotblock_idx = *(slot_int_ubuf_addr0 + poslot_idx) / block_size;
-            slotblock_shift = *(slot_int_ubuf_addr0 + poslot_idx) % block_size;
-            slot_startidx =
-                slotblock_idx * slot_blocksize + slotblock_shift * num_kv_heads * head_size;
+            slot_startidx = *(slot_int_ubuf_addr0 + poslot_idx) * kv_size;
             auto gm_kcache = (__gm__ Dtype *)key_cache + slot_startidx;
             auto gm_vcache = (__gm__ Dtype *)value_cache + slot_startidx;
 
