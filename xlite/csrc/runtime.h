@@ -36,17 +36,23 @@ enum XModelLayerAttnType {
 
 struct XModelAttnMeta {
     int version = 0;
+    enum XModelAttnType attnType = XMODEL_ATTN_MHA;
 
-    std::vector<uint32_t> lens;
-    std::vector<uint32_t> cachedLens;
+    std::vector<uint32_t> lensCpu;
+    std::vector<uint32_t> cachedLensCpu;
 
     /* only for version 0 */
-    std::vector<std::vector<uint32_t>> blockTables;
+    std::vector<std::vector<uint32_t>> blockTablesCpu;
 
-    /* only for version 1 */
-    XTensor vllmBlockTables;
-    XTensor vllmSlotMapping;
-    XTensor vllmPosition;
+    /* for version 1/2 */
+    XTensor position;
+
+    /* only for version 2 */
+    std::vector<XTensor> blockTables;
+    std::vector<XTensor> slotMapping;
+    XTensor queryStartLoc;
+    XTensor lens;
+    XTensor cachedLens;
 };
 
 enum commType {
@@ -76,6 +82,9 @@ public:
     void MemcpyD2H(void *dst, void *src, size_t size);
     void MemcpyD2HAsync(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
+#ifdef XLITE_DEBUG_ON
+    void VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t blockSize);
+#endif
 
     void SetCurrentContext();
     void NotifyWaitPeerStream();
@@ -189,16 +198,23 @@ public:
     uint32_t _maxNumBlocks;
     uint32_t _batch;
     uint32_t _tileSizeOfCachedKV;
-    XTensor _attnPosition;     // uint64_t
-    XTensor _attnBlockTables;  // uint32_t
-    XTensor _attnSlotMapping;  // uint32_t
-    XTensor _position;         // uint64_t
-    XTensor _blockTables;      // uint32_t
-    XTensor _slotMapping;      // uint32_t
-    XTensor _cachedLens;       // uint32_t
-    XTensor _lens;             // uint32_t
-    XTensor _queryStartLoc;    // uint32_t
-    XTensor _dsaTopkBuffer;    // int32_t, cross-layer shared topk
+    XTensor
+        _attnPosition;  // [batchedTokens] int64, ref: v0/1 -> _position, v2 -> attnMeta.position
+    std::vector<XTensor> _attnBlockTables;  // [batch, maxNumBlocks] int32, per-kv-cache, ref: v0/1
+                                            // -> {_blockTables}, v2 -> attnMeta.blockTables
+    std::vector<XTensor> _attnSlotMapping;  // [batchedTokens] int32, per-kv-cache, ref: v0/1 ->
+                                            // {_slotMapping}, v2 -> attnMeta.slotMapping
+    XTensor _attnLens;        // [batch] int32, ref: v0/1 -> _lens, v2 -> attnMeta.lens
+    XTensor _attnCachedLens;  // [batch] int32, ref: v0/1 -> _cachedLens, v2 -> attnMeta.cachedLens
+    XTensor _attnQueryStartLoc;  // [batch] int32, ref: v0/1 -> _queryStartLoc, v2 ->
+                                 // attnMeta.queryStartLoc
+    XTensor _position;           // [maxBatchedTokens] int64, internal buffer (malloc+free in dtor)
+    XTensor _blockTables;        // [maxBatch, maxNumBlocks] int32, internal buffer
+    XTensor _slotMapping;        // [maxBatchedTokens] int32, internal buffer
+    XTensor _cachedLens;         // [maxBatch] int32, internal buffer
+    XTensor _lens;               // [maxBatch] int32, internal buffer
+    XTensor _queryStartLoc;      // [maxBatch] int32, internal buffer
+    XTensor _dsaTopkBuffer;      // int32_t, cross-layer shared topk
     bool _dsaTopkValid = false;
 
     // for MoE

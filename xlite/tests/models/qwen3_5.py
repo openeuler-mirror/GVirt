@@ -31,7 +31,7 @@ forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     block_size = 128
     from xlite._C import (
-        Runtime, ModelConfig, AttnMeta, AttnHybrid, Model,
+        Runtime, ModelConfig, AttnMeta, AttnMetaV2, AttnHybrid, Model,
     )
     import numpy as np
 
@@ -662,15 +662,16 @@ class Qwen3_5(nn.Module):
 
     @torch.inference_mode()
     def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
+        """Forward using V2 device-tensor attention metadata (zero-copy path)."""
         logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device)
         tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
         batch = tokens.size(0)
         seqlen = tokens.size(1)
         logits_indices = torch.arange(batch, dtype=torch.int32, device=tokens.device) * seqlen + (seqlen - 1)
-        attn_meta = self.prepare_xlite_attnmeta(tokens, start_pos)
+        attn_meta = self.prepare_xlite_attnmeta_v2(tokens, start_pos)
         stream = torch.npu.current_stream().npu_stream
         h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
-        self.xlite_model.forward(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, [self.freqs_cis], h, stream)
+        self.xlite_model.forward_v2(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, [self.freqs_cis], h, stream)
         self.xlite_model.forward_get_logits(self.xlite_rt, h, logits_indices, logits)
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
@@ -696,7 +697,7 @@ class Qwen3_5(nn.Module):
                 args, event = task
                 tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream = args
                 self.xlite_rt.multi_task_parallel = True
-                self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, [freqs_cis], logits_indices, logits, stream)
+                self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream)
                 event.set()
 
     @torch.inference_mode()
@@ -1209,3 +1210,46 @@ class Qwen3_5(nn.Module):
         attn_meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
             .repeat(batch).to(tokens.device)
         return attn_meta
+
+    def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
+        """Build AttnMetaV2 with device-tensor query_start_loc / slot_mapping /
+        block_tables. The C++ side skips host computation and H2D copies."""
+        batch = tokens.size(0)
+        seqlen = tokens.size(1)
+        step = (self.args.max_seq_len + block_size - 1) // block_size
+        block_num = (seqlen + start_pos + block_size - 1) // block_size
+        lens = [seqlen] * batch
+        cached_lens = [start_pos] * batch
+        max_num_blocks = block_num  # all samples share lens/cached_lens in tests
+
+        meta = AttnMetaV2()
+        meta.lens_cpu = lens
+        meta.cached_lens_cpu = cached_lens
+        meta.lens = torch.tensor(lens, dtype=torch.int32, device=tokens.device)
+        meta.cached_lens = torch.tensor(cached_lens, dtype=torch.int32, device=tokens.device)
+
+        lens_cpu = torch.tensor(lens, dtype=torch.int32)
+        qsl_cpu = torch.zeros(batch, dtype=torch.int32)
+        qsl_cpu[1:] = torch.cumsum(lens_cpu, dim=0)[:-1]
+        meta.query_start_loc = qsl_cpu.to(tokens.device, non_blocking=True)
+
+        meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
+            .repeat(batch).to(tokens.device, non_blocking=True)
+
+        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
+        block_indices = np.arange(block_num, dtype=np.uint32)
+        block_tables_2d = batch_indices * step + block_indices
+        bt_padded = np.zeros((batch, max_num_blocks), dtype=np.uint32)
+        bt_padded[:, :block_num] = block_tables_2d
+        meta.block_tables = [torch.from_numpy(bt_padded.astype(np.int32)) \
+            .to(tokens.device, non_blocking=True)]
+
+        positions_per_sample = np.arange(start_pos, start_pos + seqlen, dtype=np.uint32)
+        block_idx = positions_per_sample // block_size
+        block_id_in_table = bt_padded[np.arange(batch)[:, None], block_idx]
+        offset_in_block = positions_per_sample % block_size
+        slot_mapping_2d = block_id_in_table.astype(np.uint32) * block_size + offset_in_block
+        meta.slot_mapping = [torch.from_numpy(slot_mapping_2d.flatten().astype(np.int32)) \
+            .to(tokens.device, non_blocking=True)]
+
+        return meta

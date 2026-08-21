@@ -374,7 +374,7 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     }
     XliteOpIndexerPrepare(rt, kw, indexKNorm[layer], indexKNormBias[layer], freqsCis,
                           rt._attnPosition, _c.indexHeadDim, _c.indexNHeads, _c.ropeHeadDim,
-                          _c.blockSize, indexKCache, rt._attnSlotMapping, _c.normEps,
+                          _c.blockSize, indexKCache, rt._attnSlotMapping[0], _c.normEps,
                           qPtr == nullptr ? XTensor() : *qPtr, _dsaIndexerScale, _c.indexTopK,
                           isLong);
 
@@ -388,8 +388,8 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
     rt._dsaTopkBuffer.View({hiddenState.shape[0], _c.indexTopK});
     XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices,
-                       rt._dsaTopkBuffer, rt._queryStartLoc, rt._lens, rt._cachedLens,
-                       rt._attnBlockTables, _sync, _c.indexNHeads, _c.indexHeadDim, _c.blockSize,
+                       rt._dsaTopkBuffer, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
+                       rt._attnBlockTables[0], _sync, _c.indexNHeads, _c.indexHeadDim, _c.blockSize,
                        rt._batch, rt._maxNumBlocks, _c.indexTopK);
     rt.PutTensor(kw);
     rt.PutTensor(*qPtr);
@@ -424,7 +424,7 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
     XliteOpMlaPrepare(rt, attnQkvc, mlaQNorm[layer], mlaQNormBias[layer], attnNormQc,
                       mlaKVNorm[layer], mlaKVNormBias[layer], freqsCis, rt._attnPosition,
                       _c.qLoraRank, _c.kvLoraRank, _c.ropeHeadDim, _c.blockSize, kCache, peCache,
-                      rt._attnSlotMapping, _c.normEps);
+                      rt._attnSlotMapping[0], _c.normEps);
     rt.PutTensor(attnQkvc);
 
     ForwardLinear(rt, layer, attnNormQc, mlaQB, attnQWithQr);
@@ -487,14 +487,14 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         XTensor &peDense =
             rt.GetTensor({static_cast<size_t>(rt._batch), _c.indexTopK, _c.ropeHeadDim},
                          hiddenState.dtype, DBG_LOC);
-        XliteOpGatherSparseKVCache(rt, kCache, peCache, rt._attnBlockTables, *topkIndices, rt._lens,
-                                   rt._cachedLens, kDense, peDense, rt._batch, _c.indexTopK,
-                                   _c.blockSize, rt._maxNumBlocks, _c.kvLoraRank, _c.ropeHeadDim,
-                                   _c.nKvHeads);
+        XliteOpGatherSparseKVCache(rt, kCache, peCache, rt._attnBlockTables[0], *topkIndices,
+                                   rt._attnLens, rt._attnCachedLens, kDense, peDense, rt._batch,
+                                   _c.indexTopK, _c.blockSize, rt._maxNumBlocks, _c.kvLoraRank,
+                                   _c.ropeHeadDim, _c.nKvHeads);
         XTensor &qkDense =
             rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
-        XliteOpMLAV3(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._queryStartLoc,
-                     rt._lens, rt._cachedLens, nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
+        XliteOpMLAV3(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._attnQueryStartLoc,
+                     rt._attnLens, rt._attnCachedLens, nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
                      rt._batch, _c.indexTopK, _c.softmaxScale);
         rt.PutTensor(qkDense);
         rt.PutTensor(peDense);
@@ -502,10 +502,11 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
     } else if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
                                    hiddenState.dtype, DBG_LOC);
-        XliteOpMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, oAbsorb, rt._queryStartLoc, rt._lens,
-                     rt._cachedLens, rt._attnBlockTables, nLocalHeads, _c.ropeHeadDim,
-                     _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
-                     _c.indexTopK, topkIndices == nullptr ? XTensor() : *topkIndices);
+        XliteOpMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, oAbsorb, rt._attnQueryStartLoc,
+                     rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], nLocalHeads,
+                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks,
+                     _c.softmaxScale, _c.indexTopK,
+                     topkIndices == nullptr ? XTensor() : *topkIndices);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
@@ -517,8 +518,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         XTensor &lastMax = rt.GetTensor({hiddenState.shape[0], nLocalHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({hiddenState.shape[0], nLocalHeads}, FP32, DBG_LOC);
         XliteOpFlashMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, sv, max, sum, lastMax, lastSum,
-                          _sync, oAbsorb, rt._queryStartLoc, rt._lens, rt._cachedLens,
-                          rt._attnBlockTables, nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
+                          _sync, oAbsorb, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
+                          rt._attnBlockTables[0], nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
                           _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
                           rt._tileSizeOfCachedKV, _c.indexTopK,
                           topkIndices == nullptr ? XTensor() : *topkIndices);
@@ -612,7 +613,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                          qHeads * _c.headDim, true, qLocalVariance, kLocalVariance);
         rt.PutTensor(packedVar);
     }
-    XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis, rt._attnSlotMapping,
+    XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis, rt._attnSlotMapping[0],
                      _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim, _c.blockSize,
                      _c.ropeType == XMODEL_ROPE_NEOX, _mropeMaskH, _mropeMaskW);
 
@@ -621,8 +622,8 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
                                    hiddenState.dtype, DBG_LOC);
-        XliteOpAttention(rt, qkv, kCache, vCache, qk, attn, rt._queryStartLoc, rt._lens,
-                         rt._cachedLens, rt._attnBlockTables, qHeads, kHeads, _c.headDim,
+        XliteOpAttention(rt, qkv, kCache, vCache, qk, attn, rt._attnQueryStartLoc, rt._attnLens,
+                         rt._attnCachedLens, rt._attnBlockTables[0], qHeads, kHeads, _c.headDim,
                          _c.blockSize, rt._batch, rt._maxNumBlocks);
         rt.PutTensor(qk);
     } else {
@@ -635,8 +636,8 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XTensor &lastMax = rt.GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XliteOpFlashAttention(rt, qkv, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, _sync,
-                              attn, rt._queryStartLoc, rt._lens, rt._cachedLens,
-                              rt._attnBlockTables, qHeads, kHeads, _c.headDim, _c.blockSize,
+                              attn, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
+                              rt._attnBlockTables[0], qHeads, kHeads, _c.headDim, _c.blockSize,
                               rt._batch, rt._maxNumBlocks, rt._tileSizeOfCachedKV);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
@@ -2055,18 +2056,20 @@ size_t XModel::DummyRun()
     auto runPrefill = [&]() {
         XModelAttnMeta attnMeta;
         attnMeta.version = 0;
+        attnMeta.attnType = _c.attnType;
         uint32_t batchSize = 1;
         uint32_t seqLen = _c.maxBatchedTokens;
         uint32_t maxNumBlocks = 0;
         for (uint32_t i = 0; i < batchSize; i++) {
-            attnMeta.lens.push_back(seqLen);
-            attnMeta.cachedLens.push_back(_c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0);
-            uint32_t blocks = DIV_ROUND_UP(attnMeta.lens[i] + attnMeta.cachedLens[i], _c.blockSize);
+            attnMeta.lensCpu.push_back(seqLen);
+            attnMeta.cachedLensCpu.push_back(_c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0);
+            uint32_t blocks =
+                DIV_ROUND_UP(attnMeta.lensCpu[i] + attnMeta.cachedLensCpu[i], _c.blockSize);
             std::vector<uint32_t> blockTable(blocks);
             for (uint32_t j = 0; j < blocks; j++) {
                 blockTable[j] = i * blocks + j;
             }
-            attnMeta.blockTables.push_back(blockTable);
+            attnMeta.blockTablesCpu.push_back(blockTable);
             if (blocks > maxNumBlocks) {
                 maxNumBlocks = blocks;
             }
@@ -2102,18 +2105,19 @@ size_t XModel::DummyRun()
         }
         XModelAttnMeta attnMeta;
         attnMeta.version = 0;
+        attnMeta.attnType = _c.attnType;
         uint32_t batchSize = static_cast<uint32_t>(_c.maxBatch);
         uint32_t cachedLen = _c.maxSeqLen > 0 ? static_cast<uint32_t>(_c.maxSeqLen - 1) : 0;
         uint32_t maxNumBlocks = 0;
         for (uint32_t i = 0; i < batchSize; i++) {
-            attnMeta.lens.push_back(1);
-            attnMeta.cachedLens.push_back(cachedLen);
+            attnMeta.lensCpu.push_back(1);
+            attnMeta.cachedLensCpu.push_back(cachedLen);
             uint32_t blocks = DIV_ROUND_UP(1 + cachedLen, _c.blockSize);
             std::vector<uint32_t> blockTable(blocks);
             for (uint32_t j = 0; j < blocks; j++) {
                 blockTable[j] = i * blocks + j;
             }
-            attnMeta.blockTables.push_back(blockTable);
+            attnMeta.blockTablesCpu.push_back(blockTable);
             if (blocks > maxNumBlocks) {
                 maxNumBlocks = blocks;
             }
