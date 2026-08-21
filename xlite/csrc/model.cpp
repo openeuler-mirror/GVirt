@@ -114,6 +114,9 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
                                                                       : XMODEL_LAYER_ATTN_LINEAR;
         }
     }
+    if (_c.blockSizes.empty()) {
+        _c.blockSizes.push_back(_c.blockSize);
+    }
 }
 
 void XModel::Init(void)
@@ -365,7 +368,7 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     XliteOpMatmul(rt, hiddenState, indexKWeightsProj[layer], kw, _c.weightNZ);
 
     // only use sparse attention when the sequence length is long enough
-    bool isLong = rt._maxNumBlocks * _c.blockSize > _c.indexTopK;
+    bool isLong = rt._maxNumBlocks * _c.blockSizes[0] > _c.indexTopK;
     XTensor *qPtr = nullptr;
     if (isLong) {
         qPtr = &rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
@@ -374,7 +377,7 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     }
     XliteOpIndexerPrepare(rt, kw, indexKNorm[layer], indexKNormBias[layer], freqsCis,
                           rt._attnPosition, _c.indexHeadDim, _c.indexNHeads, _c.ropeHeadDim,
-                          _c.blockSize, indexKCache, rt._attnSlotMapping[0], _c.normEps,
+                          _c.blockSizes[0], indexKCache, rt._attnSlotMapping[0], _c.normEps,
                           qPtr == nullptr ? XTensor() : *qPtr, _dsaIndexerScale, _c.indexTopK,
                           isLong);
 
@@ -389,8 +392,8 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     rt._dsaTopkBuffer.View({hiddenState.shape[0], _c.indexTopK});
     XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices,
                        rt._dsaTopkBuffer, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
-                       rt._attnBlockTables[0], _sync, _c.indexNHeads, _c.indexHeadDim, _c.blockSize,
-                       rt._batch, rt._maxNumBlocks, _c.indexTopK);
+                       rt._attnBlockTables[0], _sync, _c.indexNHeads, _c.indexHeadDim,
+                       _c.blockSizes[0], rt._batch, rt._maxNumBlocks, _c.indexTopK);
     rt.PutTensor(kw);
     rt.PutTensor(*qPtr);
     rt.PutTensor(lastTopk);
@@ -423,8 +426,8 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
 
     XliteOpMlaPrepare(rt, attnQkvc, mlaQNorm[layer], mlaQNormBias[layer], attnNormQc,
                       mlaKVNorm[layer], mlaKVNormBias[layer], freqsCis, rt._attnPosition,
-                      _c.qLoraRank, _c.kvLoraRank, _c.ropeHeadDim, _c.blockSize, kCache, peCache,
-                      rt._attnSlotMapping[0], _c.normEps);
+                      _c.qLoraRank, _c.kvLoraRank, _c.ropeHeadDim, _c.blockSizes[0], kCache,
+                      peCache, rt._attnSlotMapping[0], _c.normEps);
     rt.PutTensor(attnQkvc);
 
     ForwardLinear(rt, layer, attnNormQc, mlaQB, attnQWithQr);
@@ -477,8 +480,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
     // Cond 2 (per-seq cached KV > 280 * batch): perf-derived threshold that steers
     //   degenerate short-prompt + large-batch cases back to v2 to avoid regression.
     if (rt._decodeStep && _c.attnType == XMODEL_ATTN_DSA && topkIndices != nullptr &&
-        (rt._maxNumBlocks * _c.blockSize > rt._tileSizeOfCachedKV ||
-         rt._maxNumBlocks * _c.blockSize > XLITE_MLA_V3_THRESHOLD * rt._batch)) {
+        (rt._maxNumBlocks * _c.blockSizes[0] > rt._tileSizeOfCachedKV ||
+         rt._maxNumBlocks * _c.blockSizes[0] > XLITE_MLA_V3_THRESHOLD * rt._batch)) {
         // Decode + DSA long-sequence path: gather sparse top-k tokens into a
         // contiguous dense cache, then run mla_v3 on the dense cache.
         XTensor &kDense =
@@ -489,7 +492,7 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                          hiddenState.dtype, DBG_LOC);
         XliteOpGatherSparseKVCache(rt, kCache, peCache, rt._attnBlockTables[0], *topkIndices,
                                    rt._attnLens, rt._attnCachedLens, kDense, peDense, rt._batch,
-                                   _c.indexTopK, _c.blockSize, rt._maxNumBlocks, _c.kvLoraRank,
+                                   _c.indexTopK, _c.blockSizes[0], rt._maxNumBlocks, _c.kvLoraRank,
                                    _c.ropeHeadDim, _c.nKvHeads);
         XTensor &qkDense =
             rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
@@ -499,12 +502,13 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         rt.PutTensor(qkDense);
         rt.PutTensor(peDense);
         rt.PutTensor(kDense);
-    } else if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
-        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
-                                   hiddenState.dtype, DBG_LOC);
+    } else if (rt._maxNumBlocks * _c.blockSizes[0] <= rt._tileSizeOfCachedKV) {
+        XTensor &qk =
+            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSizes[0]},
+                         hiddenState.dtype, DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, oAbsorb, rt._attnQueryStartLoc,
                      rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], nLocalHeads,
-                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSize, rt._batch, rt._maxNumBlocks,
+                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch, rt._maxNumBlocks,
                      _c.softmaxScale, _c.indexTopK,
                      topkIndices == nullptr ? XTensor() : *topkIndices);
         rt.PutTensor(qk);
@@ -520,7 +524,7 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         XliteOpFlashMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, sv, max, sum, lastMax, lastSum,
                           _sync, oAbsorb, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
                           rt._attnBlockTables[0], nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
-                          _c.blockSize, rt._batch, rt._maxNumBlocks, _c.softmaxScale,
+                          _c.blockSizes[0], rt._batch, rt._maxNumBlocks, _c.softmaxScale,
                           rt._tileSizeOfCachedKV, _c.indexTopK,
                           topkIndices == nullptr ? XTensor() : *topkIndices);
         rt.PutTensor(lastSum);
@@ -614,17 +618,18 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         rt.PutTensor(packedVar);
     }
     XliteOpRopeCache(rt, qkv, kCache, vCache, rt._attnPosition, freqsCis, rt._attnSlotMapping[0],
-                     _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim, _c.blockSize,
+                     _c.nHeads, _c.nKvHeads, _c.headDim, _c.ropeHeadDim, _c.blockSizes[0],
                      _c.ropeType == XMODEL_ROPE_NEOX, _mropeMaskH, _mropeMaskW);
 
     XTensor &attn =
         rt.GetTensor({hiddenState.shape[0], qHeads * _c.headDim}, hiddenState.dtype, DBG_LOC);
-    if (rt._maxNumBlocks * _c.blockSize <= rt._tileSizeOfCachedKV) {
-        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSize},
-                                   hiddenState.dtype, DBG_LOC);
+    if (rt._maxNumBlocks * _c.blockSizes[0] <= rt._tileSizeOfCachedKV) {
+        XTensor &qk =
+            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._maxNumBlocks * _c.blockSizes[0]},
+                         hiddenState.dtype, DBG_LOC);
         XliteOpAttention(rt, qkv, kCache, vCache, qk, attn, rt._attnQueryStartLoc, rt._attnLens,
                          rt._attnCachedLens, rt._attnBlockTables[0], qHeads, kHeads, _c.headDim,
-                         _c.blockSize, rt._batch, rt._maxNumBlocks);
+                         _c.blockSizes[0], rt._batch, rt._maxNumBlocks);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
@@ -637,7 +642,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XTensor &lastSum = rt.GetTensor({qkv.shape[0], qHeads}, FP32, DBG_LOC);
         XliteOpFlashAttention(rt, qkv, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, _sync,
                               attn, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
-                              rt._attnBlockTables[0], qHeads, kHeads, _c.headDim, _c.blockSize,
+                              rt._attnBlockTables[0], qHeads, kHeads, _c.headDim, _c.blockSizes[0],
                               rt._batch, rt._maxNumBlocks, rt._tileSizeOfCachedKV);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
@@ -1713,7 +1718,7 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
 {
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
-                   _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                   _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
@@ -1751,7 +1756,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
 {
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
-                   _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                   _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
@@ -1775,7 +1780,7 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
     CheckForwardParam(rt, kvCache);
 
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
-                   _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                   _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
@@ -1828,10 +1833,10 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
             const XTensor &c0 = kvCache[i][0];
             const XTensor &c1 = kvCache[i][1];
             if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
-                if (c0.shape.size() != 4 || c1.shape.size() != 4 || c0.shape[1] != _c.blockSize ||
-                    c1.shape[1] != _c.blockSize || c0.shape[2] != expectedKvHeads ||
-                    c1.shape[2] != expectedKvHeads || c0.shape[3] != _c.headDim ||
-                    c1.shape[3] != _c.headDim) {
+                if (c0.shape.size() != 4 || c1.shape.size() != 4 ||
+                    c0.shape[1] != _c.blockSizes[0] || c1.shape[1] != _c.blockSizes[0] ||
+                    c0.shape[2] != expectedKvHeads || c1.shape[2] != expectedKvHeads ||
+                    c0.shape[3] != _c.headDim || c1.shape[3] != _c.headDim) {
                     throw std::runtime_error(
                         std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                         ": full-attention cache shape mismatch at layer " + std::to_string(i));
@@ -1851,7 +1856,7 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
         XTensor &kCache = kvCache[0][0];
         XTensor &vCache = kvCache[0][1];
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-        if (kCache.shape[1] != _c.blockSize || vCache.shape[1] != _c.blockSize ||
+        if (kCache.shape[1] != _c.blockSizes[0] || vCache.shape[1] != _c.blockSizes[0] ||
             kCache.shape[2] != expectedKvHeads || vCache.shape[2] != expectedKvHeads ||
             kCache.shape[3] != _c.headDim || vCache.shape[3] != _c.headDim) {
             throw std::runtime_error(
@@ -1862,13 +1867,13 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
         XTensor &kCache = kvCache[0][0];
         XTensor &vCache = kvCache[0][1];
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-        if (kCache.shape[1] != _c.blockSize || kCache.shape[2] != expectedKvHeads ||
+        if (kCache.shape[1] != _c.blockSizes[0] || kCache.shape[2] != expectedKvHeads ||
             kCache.shape[3] != _c.kvLoraRank) {
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                      ": k nope cache's shape not match [block_num, block_size, "
                                      "kv_head_num, kv_lora_rank]");
         }
-        if (vCache.shape[1] != _c.blockSize || vCache.shape[2] != expectedKvHeads ||
+        if (vCache.shape[1] != _c.blockSizes[0] || vCache.shape[2] != expectedKvHeads ||
             vCache.shape[3] != _c.ropeHeadDim) {
             throw std::runtime_error(
                 std::string(__FILE__) + ":" + std::to_string(__LINE__) +
@@ -1876,7 +1881,7 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
         }
         if (_c.attnType == XMODEL_ATTN_DSA) {
             XTensor &indexKCache = kvCache[0][2];
-            if (indexKCache.shape[1] != _c.blockSize || indexKCache.shape[2] != 1 ||
+            if (indexKCache.shape[1] != _c.blockSizes[0] || indexKCache.shape[2] != 1 ||
                 indexKCache.shape[3] != _c.indexHeadDim) {
                 throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                          ": DSA index k cache's shape not match [block_num, "
@@ -1918,9 +1923,9 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                 throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                          ": CXA indexer cache must be non-empty on ratio==4 layer");
             }
-            checkShape(indexerState, _c.blockSize, 1, 2 * coff * _c.indexHeadDim,
+            checkShape(indexerState, _c.blockSizes[0], 1, 2 * coff * _c.indexHeadDim,
                        "indexer state cache");
-            checkShape(indexerK, _c.blockSize, 1, _c.indexHeadDim, "indexer k cache");
+            checkShape(indexerK, _c.blockSizes[0], 1, _c.indexHeadDim, "indexer k cache");
         } else {
             if (!isEmpty(indexerState) || !isEmpty(indexerK)) {
                 throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
@@ -1936,8 +1941,8 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                     std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                     ": CXA compress cache must be non-empty on ratio!=0 layer");
             }
-            checkShape(compressKv, _c.blockSize, 1, _c.headDim, "compress kv cache");
-            checkShape(state, _c.blockSize, 1, 2 * coff * _c.headDim, "state cache");
+            checkShape(compressKv, _c.blockSizes[0], 1, _c.headDim, "compress kv cache");
+            checkShape(state, _c.blockSizes[0], 1, 2 * coff * _c.headDim, "state cache");
         } else {
             if (!isEmpty(compressKv) || !isEmpty(state)) {
                 throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
@@ -1950,7 +1955,7 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                      ": CXA swa kv cache must be non-empty");
         }
-        checkShape(swaKv, _c.blockSize, 1, _c.headDim, "swa kv cache");
+        checkShape(swaKv, _c.blockSizes[0], 1, _c.headDim, "swa kv cache");
     }
 }
 
@@ -1969,10 +1974,10 @@ size_t XModel::DummyRun()
             if (_c.attnType == XMODEL_ATTN_HYBRID) {
                 if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
                     XTensor kCache(
-                        {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                        {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.headDim},
                         embed.dtype, nullptr);
                     XTensor vCache(
-                        {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                        {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.headDim},
                         embed.dtype, nullptr);
                     kvCache[i] = {kCache, vCache};
                 } else {
@@ -1989,64 +1994,66 @@ size_t XModel::DummyRun()
                 }
             } else if (_c.attnType == XMODEL_ATTN_MHA) {
                 XTensor kCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                    {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.headDim},
                     embed.dtype, nullptr);
                 XTensor vCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.headDim},
+                    {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.headDim},
                     embed.dtype, nullptr);
                 kvCache[i] = {kCache, vCache};
             } else if (_c.attnType == XMODEL_ATTN_MLA) {
                 XTensor kCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.kvLoraRank},
+                    {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.kvLoraRank},
                     embed.dtype, nullptr);
                 XTensor vCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.ropeHeadDim},
+                    {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.ropeHeadDim},
                     embed.dtype, nullptr);
                 kvCache[i] = {kCache, vCache};
             } else if (_c.attnType == XMODEL_ATTN_DSA) {
                 XTensor kCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.kvLoraRank},
+                    {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.kvLoraRank},
                     embed.dtype, nullptr);
                 XTensor vCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSize, expectedKvHeads, _c.ropeHeadDim},
+                    {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.ropeHeadDim},
                     embed.dtype, nullptr);
-                XTensor indexKCache({_c.maxBatch * maxNumBlocks, _c.blockSize, 1, _c.indexHeadDim},
-                                    embed.dtype, nullptr);
+                XTensor indexKCache(
+                    {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], 1, _c.indexHeadDim}, embed.dtype,
+                    nullptr);
                 kvCache[i] = {kCache, vCache, indexKCache};
             } else if (_c.attnType == XMODEL_ATTN_CXA) {
                 uint32_t ratio = _c.compressRatios.empty() ? 0 : _c.compressRatios[i];
                 bool hasIndexer = (ratio == 4);
                 bool hasCompress = (ratio != 0);
                 uint32_t coff = 1 + (hasIndexer ? 1 : 0);
-                uint32_t swaBlocks = _c.maxBatch * DIV_ROUND_UP(_c.windowSize, _c.blockSize);
+                uint32_t swaBlocks = _c.maxBatch * DIV_ROUND_UP(_c.windowSize, _c.blockSizes[0]);
                 uint32_t compKvBlocks =
-                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen / ratio, _c.blockSize)
+                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(_c.maxSeqLen / ratio, _c.blockSizes[0])
                                 : 0;
                 uint32_t compStateBlocks =
-                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(coff * ratio, _c.blockSize) : 0;
+                    hasCompress ? _c.maxBatch * DIV_ROUND_UP(coff * ratio, _c.blockSizes[0]) : 0;
                 uint32_t idxStateBlocks =
-                    hasIndexer ? _c.maxBatch * DIV_ROUND_UP(coff * ratio, _c.blockSize) : 0;
+                    hasIndexer ? _c.maxBatch * DIV_ROUND_UP(coff * ratio, _c.blockSizes[0]) : 0;
 
                 auto emptyTensor = [&]() -> XTensor { return XTensor({0}, embed.dtype, nullptr); };
 
                 XTensor indexerState =
                     hasIndexer
-                        ? XTensor({idxStateBlocks, _c.blockSize, 1, 2 * coff * _c.indexHeadDim},
+                        ? XTensor({idxStateBlocks, _c.blockSizes[0], 1, 2 * coff * _c.indexHeadDim},
                                   embed.dtype, nullptr)
                         : emptyTensor();
-                XTensor indexerK = hasIndexer
-                                       ? XTensor({compKvBlocks, _c.blockSize, 1, _c.indexHeadDim},
-                                                 embed.dtype, nullptr)
-                                       : emptyTensor();
-                XTensor compressKv =
-                    hasCompress
-                        ? XTensor({compKvBlocks, _c.blockSize, 1, _c.headDim}, embed.dtype, nullptr)
-                        : emptyTensor();
+                XTensor indexerK =
+                    hasIndexer ? XTensor({compKvBlocks, _c.blockSizes[0], 1, _c.indexHeadDim},
+                                         embed.dtype, nullptr)
+                               : emptyTensor();
+                XTensor compressKv = hasCompress
+                                         ? XTensor({compKvBlocks, _c.blockSizes[0], 1, _c.headDim},
+                                                   embed.dtype, nullptr)
+                                         : emptyTensor();
                 XTensor state =
-                    hasCompress ? XTensor({compStateBlocks, _c.blockSize, 1, 2 * coff * _c.headDim},
-                                          embed.dtype, nullptr)
-                                : emptyTensor();
-                XTensor swaKv({swaBlocks, _c.blockSize, 1, _c.headDim}, embed.dtype, nullptr);
+                    hasCompress
+                        ? XTensor({compStateBlocks, _c.blockSizes[0], 1, 2 * coff * _c.headDim},
+                                  embed.dtype, nullptr)
+                        : emptyTensor();
+                XTensor swaKv({swaBlocks, _c.blockSizes[0], 1, _c.headDim}, embed.dtype, nullptr);
                 kvCache[i] = {indexerState, indexerK, compressKv, state, swaKv};
             }
         }
@@ -2064,7 +2071,7 @@ size_t XModel::DummyRun()
             attnMeta.lensCpu.push_back(seqLen);
             attnMeta.cachedLensCpu.push_back(_c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0);
             uint32_t blocks =
-                DIV_ROUND_UP(attnMeta.lensCpu[i] + attnMeta.cachedLensCpu[i], _c.blockSize);
+                DIV_ROUND_UP(attnMeta.lensCpu[i] + attnMeta.cachedLensCpu[i], _c.blockSizes[0]);
             std::vector<uint32_t> blockTable(blocks);
             for (uint32_t j = 0; j < blocks; j++) {
                 blockTable[j] = i * blocks + j;
@@ -2087,7 +2094,7 @@ size_t XModel::DummyRun()
         XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
                        nullptr);
         rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads,
-                       _c.nKvHeads, _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                       _c.nKvHeads, _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                        static_cast<int>(embed.dtype),
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
@@ -2112,7 +2119,7 @@ size_t XModel::DummyRun()
         for (uint32_t i = 0; i < batchSize; i++) {
             attnMeta.lensCpu.push_back(1);
             attnMeta.cachedLensCpu.push_back(cachedLen);
-            uint32_t blocks = DIV_ROUND_UP(1 + cachedLen, _c.blockSize);
+            uint32_t blocks = DIV_ROUND_UP(1 + cachedLen, _c.blockSizes[0]);
             std::vector<uint32_t> blockTable(blocks);
             for (uint32_t j = 0; j < blocks; j++) {
                 blockTable[j] = i * blocks + j;
@@ -2135,7 +2142,7 @@ size_t XModel::DummyRun()
         XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
                        nullptr);
         rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads,
-                       _c.nKvHeads, _c.blockSize, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+                       _c.nKvHeads, _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                        static_cast<int>(embed.dtype),
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)

@@ -131,7 +131,10 @@ class ModelConfig:
         max_batch_size (int): Maximum batch size.
         max_m (int): Maximum token count batched.
         max_num_batched_tokens (int): Maximum token count batched.
-        block_size (int): KV block size.
+        block_size (int): KV block size.(deprecated)
+        block_sizes (List[int]): Per-attention-type KV block sizes; element 0 is the
+            uniform KV block size used by most paths. When empty at construction, the
+            C++ side seeds it from ``block_size`` so a single-element vector always exists.
         weight_nz (bool): Whether weights are in NZ layout.
         experts_weight_transpose (bool): Whether expert weights are transposed.
         experts_weight_nz (bool): Whether expert weights are in NZ layout.
@@ -236,7 +239,11 @@ class ModelConfig:
     max_num_batched_tokens: int = ...
     """Maximum token count batched."""
     block_size: int = ...
-    """KV block size."""
+    """KV block size.(deprecated)"""
+    block_sizes: List[int] = ...
+    """Per-attention-type KV block sizes; element 0 is the uniform KV block size used
+    by most paths. When empty at construction, the C++ side seeds it from ``block_size``
+    so a single-element vector always exists."""
     weight_nz: bool = ...
     """Whether weights are in NZ layout."""
     experts_weight_transpose: bool = ...

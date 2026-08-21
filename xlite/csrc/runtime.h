@@ -72,9 +72,9 @@ public:
     void InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
                   uint32_t blockSize, uint32_t indexTopK);
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
-                     uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads, uint32_t blockSize,
-                     uint32_t hiddenSize, uint32_t nRoutedExperts, uint32_t defDpSize,
-                     int inputDtype, int weightsDtype, uint32_t indexTopK);
+                     uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads,
+                     std::vector<uint32_t> blockSizes, uint32_t hiddenSize, uint32_t nRoutedExperts,
+                     uint32_t defDpSize, int inputDtype, int weightsDtype, uint32_t indexTopK);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -83,7 +83,7 @@ public:
     void MemcpyD2HAsync(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
 #ifdef XLITE_DEBUG_ON
-    void VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t blockSize);
+    void VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, std::vector<uint32_t> blockSizes);
 #endif
 
     void SetCurrentContext();

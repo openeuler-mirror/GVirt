@@ -464,7 +464,7 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
 
 #ifdef XLITE_DEBUG_ON
 // Verify v2 device tensors equal what v1's host-side algorithm would produce.
-void XRuntime::VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t blockSize)
+void XRuntime::VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, std::vector<uint32_t> blockSizes)
 {
     const uint32_t batch = _batch;
     const uint32_t batchedTokens = this->batchedTokens;
@@ -542,9 +542,9 @@ void XRuntime::VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t blockSi
         for (uint32_t i = 0; i < batch; i++) {
             for (uint32_t j = 0; j < attnMeta.lensCpu[i]; j++) {
                 uint32_t pos = attnMeta.cachedLensCpu[i] + j;
-                uint32_t blockId = pos / blockSize;
-                uint32_t id = pos % blockSize;
-                uint32_t expect = blockTablesHost[i * maxNumBlocks + blockId] * blockSize + id;
+                uint32_t blockId = pos / blockSizes[0];
+                uint32_t id = pos % blockSizes[0];
+                uint32_t expect = blockTablesHost[i * maxNumBlocks + blockId] * blockSizes[0] + id;
                 if (host[k] != expect) {
                     fail("slotMapping", k, host[k], expect, __LINE__);
                 }
@@ -576,11 +576,12 @@ void XRuntime::VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t blockSi
 
 void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                            uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVHeads,
-                           uint32_t blockSize, uint32_t hiddenSize, uint32_t nRoutedExperts,
-                           uint32_t defDpSize, int inputDtype, int weightsDtype, uint32_t indexTopK)
+                           std::vector<uint32_t> blockSizes, uint32_t hiddenSize,
+                           uint32_t nRoutedExperts, uint32_t defDpSize, int inputDtype,
+                           int weightsDtype, uint32_t indexTopK)
 {
     if (!_attnInitialized) {
-        InitAttn(maxBatchedTokens, maxBatch, maxSeqLen, blockSize, indexTopK);
+        InitAttn(maxBatchedTokens, maxBatch, maxSeqLen, blockSizes[0], indexTopK);
         bool agInGraph = AllGatherInGraphActive(DP);
         bool rsInGraph = ReduceScatterInGraphActive(DP);
         if (defDpSize > 1 && (agInGraph || rsInGraph)) {
@@ -634,7 +635,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         cachedLens[i] = attnMeta.cachedLensCpu[i];
         queryStartLoc[i] = queryStart;
         queryStart += lens[i];
-        numBlocks[i] = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSize);
+        numBlocks[i] = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSizes[0]);
         maxNumBlocks = numBlocks[i] > maxNumBlocks ? numBlocks[i] : maxNumBlocks;
         batchedTokens += lens[i];
         if (cachedLens[i] == 0) {
@@ -656,13 +657,13 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                  std::to_string(maxBatchedTokens) + ")");
     }
 
-    if (IsDummyRuntime() || maxNumBlocks * blockSize <= MAX_KV_TILE_SIZE) {
+    if (IsDummyRuntime() || maxNumBlocks * blockSizes[0] <= MAX_KV_TILE_SIZE) {
         _tileSizeOfCachedKV = MAX_KV_TILE_SIZE;
     } else {
         uint32_t localHeads = std::max(nHeads / _tpSize, static_cast<uint32_t>(1));
         uint32_t localKvHeads = std::max(nKVHeads / _tpSize, static_cast<uint32_t>(1));
         _tileSizeOfCachedKV = GetTileSizeOfCachedKV(cachedLens, lens, localHeads / localKvHeads,
-                                                    localKvHeads, blockSize, aicNum);
+                                                    localKvHeads, blockSizes[0], aicNum);
     }
 
     size = batch * XDtypeBit(INT32) / 8;
@@ -698,9 +699,9 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                 }
                 for (uint32_t j = 0; j < lens[i]; j++) {
                     position[k] = cachedLens[i] + j;
-                    blockId = position[k] / blockSize;
-                    id = position[k] % blockSize;
-                    slotMapping[k++] = attnMeta.blockTablesCpu[i][blockId] * blockSize + id;
+                    blockId = position[k] / blockSizes[0];
+                    id = position[k] % blockSizes[0];
+                    slotMapping[k++] = attnMeta.blockTablesCpu[i][blockId] * blockSizes[0] + id;
                 }
             }
             size = batchedTokens * XDtypeBit(INT32) / 8;
@@ -733,7 +734,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             // pre-built on the Python side as device tensors; shape-check and alias (zero copy).
             CheckAttnMetaV2(attnMeta, batch, batchedTokens, maxNumBlocks);
 #ifdef XLITE_DEBUG_ON
-            VerifyAttnMetaV2(attnMeta, blockSize);
+            VerifyAttnMetaV2(attnMeta, blockSizes);
 #endif
             _maxNumBlocks = attnMeta.blockTables[0].shape[1];
             _attnLens = attnMeta.lens;
