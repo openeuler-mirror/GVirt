@@ -55,6 +55,7 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/msd_merge_dequant_int8_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_act_float.cpp
 )
 
 # xlite_kernels_bf16_${RUN_MODE}
@@ -94,6 +95,7 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_hdt_mhd_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_htd_mhd_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_prepare_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_post_bfloat16_t.cpp
 )
 
 # xlite_kernels_f16_${RUN_MODE}

@@ -504,7 +504,8 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, const XTensor &norm, XTensor &out
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::Rms);
     launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1],
-                 inStartOffset, outStartOffset, useNorm, variance.ptr, rt.tpSize());
+                 inStartOffset, outStartOffset, useNorm, variance.ptr, rt.tpSize(),
+                 out.dtype == FP32);
 }
 
 void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
@@ -527,7 +528,7 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::Layer);
     launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1],
-                 inStartOffset, outStartOffset, true, nullptr, rt.tpSize());
+                 inStartOffset, outStartOffset, true, nullptr, rt.tpSize(), false);
 }
 
 void XliteOpL2Norm(XRuntime &rt, XTensor &in, XTensor &out, float normEps, uint32_t normDim,
@@ -548,7 +549,7 @@ void XliteOpL2Norm(XRuntime &rt, XTensor &in, XTensor &out, float normEps, uint3
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::L2);
     launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, nullptr, nullptr, out.ptr, in.shape[0],
                  normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1], inStartOffset,
-                 outStartOffset, true, nullptr, rt.tpSize());
+                 outStartOffset, true, nullptr, rt.tpSize(), out.dtype == FP32);
 }
 
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
@@ -587,7 +588,7 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::Rms);
     launchKernel(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], in.shape[1], normEps, kind, 1, in.shape[1], out.shape[1], 0, 0, true,
-                 nullptr, rt.tpSize());
+                 nullptr, rt.tpSize(), false);
 }
 
 void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
@@ -1882,6 +1883,58 @@ void XliteOpUnpackActivation(XRuntime &rt, XTensor &input, XTensor &output)
                                              input.shape[0], input.shape[1]);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
+void XliteOpHcAct(XRuntime &rt, XTensor &mixes, const XTensor &hcScale, const XTensor &hcBase,
+                  XTensor &post, XTensor &comb, uint32_t hcMult, float eps, uint32_t sinkhornIters,
+                  bool headOnly, XTensor &xResid, XTensor &output)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    // head mode: hcBase is [hcMult] (pre bias only); attn/ffn is [(2+hcMult)*hcMult].
+    if (!headOnly) {
+        headOnly = (hcBase.numel == hcMult);
+    }
+    // All operands fp32. In head mode post/comb are empty XTensor() (kernel skips them).
+    if (headOnly) {
+        if (!EachXDtype(FP32, mixes, hcBase) || hcScale.dtype != FP32) {
+            std::string err_str = DBG_PREFIX + XT_STR(mixes) + XT_STR(hcScale) + XT_STR(hcBase);
+            throw std::runtime_error(err_str + " (head) must all be FP32!");
+        }
+    } else if (!EachXDtype(FP32, mixes, hcBase, post, comb) || hcScale.dtype != FP32) {
+        std::string err_str = DBG_PREFIX + XT_STR(mixes) + XT_STR(hcScale) + XT_STR(hcBase) +
+                              XT_STR(post) + XT_STR(comb);
+        throw std::runtime_error(err_str + " must all be FP32!");
+    }
+    // Pre-merge: y[m, hidden] = sum_h pre[h]*x[m,h,hidden]. bf16 I/O, folded into the kernel.
+    if (xResid.dtype != BF16 || output.dtype != BF16) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(xResid) + XT_STR(output) +
+                                 " (merge) must be BF16!");
+    }
+
+    uint32_t m = mixes.shape[0];
+    uint32_t hidden = output.shape[1];
+    aclrtlaunch_hc_act_float(rt.aivNum, rt.stream, mixes.ptr, hcBase.ptr, post.ptr, comb.ptr,
+                             hcScale.ptr, m, hcMult, eps, sinkhornIters, headOnly ? 1u : 0u,
+                             xResid.ptr, output.ptr, hidden);
+}
+
+void XliteOpHcPost(XRuntime &rt, XTensor &x, XTensor &post, XTensor &comb, XTensor &residual,
+                   XTensor &y, uint32_t m, uint32_t hcMult, uint32_t hidden)
+{
+    if (IsDummyRuntime(rt) || x.numel == 0) {
+        return;
+    }
+    if (x.dtype == BF16 && post.dtype == FP32 && comb.dtype == FP32 && residual.dtype == BF16 &&
+        y.dtype == BF16) {
+        aclrtlaunch_hc_post_bfloat16_t(rt.aivNum, rt.stream, x.ptr, post.ptr, comb.ptr,
+                                       residual.ptr, y.ptr, m, hcMult, hidden);
+    } else {
+        std::string err_str =
+            DBG_PREFIX + XT_STR(x) + XT_STR(post) + XT_STR(comb) + XT_STR(residual) + XT_STR(y);
         throw std::runtime_error(err_str + " unsupported!");
     }
 }

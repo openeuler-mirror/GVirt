@@ -1595,16 +1595,31 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
 }
 
 void XModel::ForwardHcPre(XRuntime &rt, XTensor &input, XTensor &hcFn, XTensor &hcScale,
-                          XTensor &hcBase, XTensor &output, const XTensor &post,
-                          const XTensor &comb)
+                          XTensor &hcBase, XTensor &output, XTensor &post, XTensor &comb)
 {
-    // TODO
+    const uint32_t hcMult = _c.hcMult;
+    const uint32_t hiddenSize = _c.hiddenSize;
+    const uint32_t hcDim = hcMult * hiddenSize;
+    const uint32_t outFeatures = hcFn.shape[0];  // mix_hc for attn/ffn, hc_mult for head
+    const bool headOnly = (outFeatures == hcMult);
+
+    XTensor &mixes = rt.GetTensor({input.shape[0], outFeatures}, FP32, DBG_LOC);
+    XTensor &xFlat = input.View({input.shape[0], hcDim});
+    XTensor &xNorm = rt.GetTensor({input.shape[0], hcDim}, FP32, DBG_LOC);
+    XliteOpRmsNorm(rt, xFlat, XTensor(), xNorm, _c.normEps, hcDim, true);
+    XliteOpMatmul(rt, xNorm, hcFn, mixes, false);
+    input.ResetView();
+    rt.PutTensor(xNorm);
+    XliteOpHcAct(rt, mixes, hcScale, hcBase, post, comb, hcMult, _c.hcEps, _c.hcSinkhornIters,
+                 headOnly, input, output);
+    rt.PutTensor(mixes);
 }
 
 void XModel::ForwardHcPost(XRuntime &rt, XTensor &input, XTensor &post, XTensor &comb,
                            XTensor &residual, XTensor &output)
 {
-    // TODO
+    const uint32_t m = post.shape[0];
+    XliteOpHcPost(rt, input, post, comb, residual, output, m, _c.hcMult, _c.hiddenSize);
 }
 
 void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<XTensor>> &kvCache,
@@ -1613,17 +1628,19 @@ void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<
     XTensor &residual = rt.GetTensor({x.shape[0], _c.hcMult, _c.hiddenSize}, embed.dtype, DBG_LOC);
     XTensor &h =
         rt.GetTensor({rt.maxTokensDp, _c.hiddenSize}, embed.dtype, DBG_LOC).View(rt.currTokens);
-    XTensor &post = rt.GetTensor({x.shape[0], _c.hcMult}, embed.dtype, DBG_LOC);
-    XTensor &comb = rt.GetTensor({x.shape[0], _c.hcMult * _c.hcMult}, embed.dtype, DBG_LOC);
+    XTensor &post = rt.GetTensor({x.shape[0], _c.hcMult}, FP32, DBG_LOC);
+    XTensor &comb = rt.GetTensor({x.shape[0], _c.hcMult * _c.hcMult}, FP32, DBG_LOC);
+    if (x.shape.size() == 2) {
+        XliteOpConcatCol(rt, std::vector<XTensor>(_c.hcMult, x), residual);
+    }
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         XDEBUG_SET_STATE(_rankId == 0 && (i == 0 || i == _c.nDenseLayers));
         XDEBUG_PRINT_X(rt, i == 0 ? x : residual, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
-        ForwardHcPre(rt, i == 0 ? x : residual, hcAttnFn[i], hcAttnScale[i], hcAttnBase[i], h, post,
-                     comb);
+        ForwardHcPre(rt, residual, hcAttnFn[i], hcAttnScale[i], hcAttnBase[i], h, post, comb);
         XliteOpRmsNorm(rt, h, attnNorm[i], h, _c.normEps, _c.hiddenSize, true, attnNormBias[i]);
         ForwardAttnCXA(rt, i, kvCache, freqsCis[i], h);
         XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
-        ForwardHcPost(rt, h, post, comb, i == 0 ? x : residual, residual);
+        ForwardHcPost(rt, h, post, comb, residual, residual);
 
         ForwardHcPre(rt, residual, hcFfnFn[i], hcFfnScale[i], hcFfnBase[i], h, post, comb);
         XliteOpRmsNorm(rt, h, mlpNorm[i], h, _c.normEps, _c.hiddenSize, true, mlpNormBias[i]);
@@ -1631,7 +1648,7 @@ void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<
         XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after ffn").c_str(), 1e6f);
         ForwardHcPost(rt, h, post, comb, residual, residual);
     }
-    ForwardHcPre(rt, residual, hcHeadFn, hcHeadScale, hcHeadBase, h);
+    ForwardHcPre(rt, residual, hcHeadFn, hcHeadScale, hcHeadBase, h, post, comb);
     XliteOpRmsNorm(rt, h, norm, output, _c.normEps, _c.hiddenSize, true, normBias);
     rt.PutTensor(comb);
     rt.PutTensor(post);

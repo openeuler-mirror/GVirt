@@ -201,10 +201,11 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor):
         dtype = x.dtype
+        w = self.weight.to(dtype)
         x = x.float()
         var = x.square().mean(-1, keepdim=True)
         x = x * torch.rsqrt(var + self.eps)
-        return (self.weight * x).to(dtype)
+        return (w * x.to(dtype).float()).to(dtype)
 
 
 @lru_cache(2)
@@ -1081,10 +1082,10 @@ class Transformer(nn.Module):
         global xlite_model
         xlite_model = self.xlite_model = Model()
         self.xlite_model.embed = self.embed.weight
-        self.xlite_model.norm = self.norm.weight
+        self.xlite_model.norm = self.norm.weight.to(torch.bfloat16).contiguous()
         self.xlite_model.head = self.head.weight
-        self.xlite_model.attn_norm = [layer.attn_norm.weight for layer in self.layers]
-        self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
+        self.xlite_model.attn_norm = [layer.attn_norm.weight.to(torch.bfloat16).contiguous() for layer in self.layers]
+        self.xlite_model.mlp_norm = [layer.ffn_norm.weight.to(torch.bfloat16).contiguous() for layer in self.layers]
 
         # Helpers for v4 w8a8 dynamic quant weights. v4's Linear has weight.scale
         # of shape [out_features, 1] (fp32) and weight.weight_offset of the same

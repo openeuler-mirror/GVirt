@@ -1256,7 +1256,7 @@ void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, fl
 
     InitXTensor(_in, in);
     InitXTensor(_out, out);
-    InitXTensor(_norm, norm);
+    InitOptionalXTensor(_norm, norm);
     if (variance.has_value()) {
 #ifdef XLITE_DEBUG_ON_MISC
         {
@@ -2130,6 +2130,41 @@ void UnpackActivation(XRuntime &rt, at::Tensor &input, at::Tensor &output)
     rt.Synchronize();
 }
 
+void HcAct(XRuntime &rt, at::Tensor &mixes, at::Tensor &hcScale, at::Tensor &hcBase,
+           at::Tensor &post, at::Tensor &comb, uint32_t hcMult, float eps, uint32_t sinkhornIters,
+           at::Tensor &xResid, at::Tensor &output)
+{
+    XTensor _mixes, _hcScale, _hcBase, _post, _comb, _xResid, _output;
+
+    InitXTensor(_mixes, mixes);
+    InitXTensor(_hcScale, hcScale);
+    InitXTensor(_hcBase, hcBase);
+    InitXTensor(_post, post);
+    InitXTensor(_comb, comb);
+    if (TensorUsable(xResid)) {
+        InitXTensor(_xResid, xResid);
+    }
+    if (TensorUsable(output)) {
+        InitXTensor(_output, output);
+    }
+    XliteOpHcAct(rt, _mixes, _hcScale, _hcBase, _post, _comb, hcMult, eps, sinkhornIters, false,
+                 _xResid, _output);
+    rt.Synchronize();
+}
+
+void HcPost(XRuntime &rt, at::Tensor &x, at::Tensor &post, at::Tensor &comb, at::Tensor &residual,
+            at::Tensor &y, uint32_t m, uint32_t hcMult, uint32_t hidden)
+{
+    XTensor _x, _post, _comb, _residual, _y;
+    InitXTensor(_x, x);
+    InitXTensor(_post, post);
+    InitXTensor(_comb, comb);
+    InitXTensor(_residual, residual);
+    InitXTensor(_y, y);
+    XliteOpHcPost(rt, _x, _post, _comb, _residual, _y, m, hcMult, hidden);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -2558,7 +2593,11 @@ PYBIND11_MODULE(_C, m)
           py::arg("d"), py::arg("weight_nz") = false);
     m.def("unpack_activation", &UnpackActivation, py::arg("rt"), py::arg("input"),
           py::arg("output"));
-
+    m.def("hc_act", &HcAct, py::arg("rt"), py::arg("mixes"), py::arg("hc_scale"),
+          py::arg("hc_base"), py::arg("post"), py::arg("comb"), py::arg("hc_mult"), py::arg("eps"),
+          py::arg("sinkhorn_iters"), py::arg("x_resid"), py::arg("output"));
+    m.def("hc_post", &HcPost, py::arg("rt"), py::arg("x"), py::arg("post"), py::arg("comb"),
+          py::arg("residual"), py::arg("y"), py::arg("m"), py::arg("hc_mult"), py::arg("hidden"));
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,
           py::arg("col") = 6);
