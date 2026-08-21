@@ -1502,7 +1502,7 @@ class DeepSeek_V3(nn.Module):
         config.def_dp_size = self.dp_size
         config.moe_ep_size = args.moe_ep_size
         config.moe_tp_size = args.moe_tp_size
-        config.block_size = block_size
+        config.block_sizes = [block_size]
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size
         config.max_num_batched_tokens = args.max_num_batched_tokens
