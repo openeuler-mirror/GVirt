@@ -7,3 +7,5 @@ tags
 cscope.out
 extra-info/
 tests/test_output/
+xlite/include/
+xlite/lib/
