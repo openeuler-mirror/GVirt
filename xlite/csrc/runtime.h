@@ -82,6 +82,9 @@ public:
     void MemcpyD2H(void *dst, void *src, size_t size);
     void MemcpyD2HAsync(void *dst, void *src, size_t size);
     void UpdateCoreNum(float blockDimUtilization);
+#ifdef XLITE_DEBUG_ON
+    void VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t blockSize);
+#endif
 
     void SetCurrentContext();
     void NotifyWaitPeerStream();

@@ -462,6 +462,118 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
     }
 }
 
+#ifdef XLITE_DEBUG_ON
+// Verify v2 device tensors equal what v1's host-side algorithm would produce.
+void XRuntime::VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t blockSize)
+{
+    const uint32_t batch = _batch;
+    const uint32_t batchedTokens = this->batchedTokens;
+    const uint32_t maxNumBlocks = attnMeta.blockTables[0].shape[1];
+    aclrtStream stream = this->stream;
+    uint32_t rankId = this->rankId();
+    const auto fail = [&](const char *field, uint32_t idx, uint64_t device, uint64_t expected,
+                          int line) {
+        std::stringstream ss;
+        ss << std::string(__FILE__) << ":" << std::to_string(line)
+           << ": VerifyAttnMetaV2: " << field << " mismatch (R" << rankId << ") idx=" << idx
+           << " device=" << device << " expected=" << expected;
+        throw std::runtime_error(ss.str());
+    };
+
+    // lens / cachedLens
+    {
+        std::vector<uint32_t> host(batch);
+        size_t bytes = batch * XDtypeBit(INT32) / 8;
+        CHECK_ACL(aclrtMemcpyAsync(host.data(), bytes, attnMeta.lens.ptr, bytes,
+                                   ACL_MEMCPY_DEVICE_TO_HOST, stream));
+        CHECK_ACL(aclrtSynchronizeStream(stream));
+        for (uint32_t i = 0; i < batch; i++) {
+            if (host[i] != attnMeta.lensCpu[i]) {
+                fail("lens", i, host[i], attnMeta.lensCpu[i], __LINE__);
+            }
+        }
+    }
+    {
+        std::vector<uint32_t> host(batch);
+        size_t bytes = batch * XDtypeBit(INT32) / 8;
+        CHECK_ACL(aclrtMemcpyAsync(host.data(), bytes, attnMeta.cachedLens.ptr, bytes,
+                                   ACL_MEMCPY_DEVICE_TO_HOST, stream));
+        CHECK_ACL(aclrtSynchronizeStream(stream));
+        for (uint32_t i = 0; i < batch; i++) {
+            if (host[i] != attnMeta.cachedLensCpu[i]) {
+                fail("cachedLens", i, host[i], attnMeta.cachedLensCpu[i], __LINE__);
+            }
+        }
+    }
+
+    // queryStartLoc
+    {
+        std::vector<uint32_t> host(batch);
+        size_t bytes = batch * XDtypeBit(INT32) / 8;
+        CHECK_ACL(aclrtMemcpyAsync(host.data(), bytes, attnMeta.queryStartLoc.ptr, bytes,
+                                   ACL_MEMCPY_DEVICE_TO_HOST, stream));
+        CHECK_ACL(aclrtSynchronizeStream(stream));
+        uint32_t acc = 0;
+        for (uint32_t i = 0; i < batch; i++) {
+            if (host[i] != acc) {
+                fail("queryStartLoc", i, host[i], acc, __LINE__);
+            }
+            acc += attnMeta.lensCpu[i];
+        }
+    }
+
+    // blockTables
+    std::vector<uint32_t> blockTablesHost(batch * maxNumBlocks);
+    {
+        size_t bytes = batch * maxNumBlocks * XDtypeBit(INT32) / 8;
+        CHECK_ACL(aclrtMemcpyAsync(blockTablesHost.data(), bytes, attnMeta.blockTables[0].ptr,
+                                   bytes, ACL_MEMCPY_DEVICE_TO_HOST, stream));
+        CHECK_ACL(aclrtSynchronizeStream(stream));
+    }
+
+    // slotMapping
+    {
+        std::vector<uint32_t> host(batchedTokens);
+        size_t bytes = batchedTokens * XDtypeBit(INT32) / 8;
+        CHECK_ACL(aclrtMemcpyAsync(host.data(), bytes, attnMeta.slotMapping[0].ptr, bytes,
+                                   ACL_MEMCPY_DEVICE_TO_HOST, stream));
+        CHECK_ACL(aclrtSynchronizeStream(stream));
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < batch; i++) {
+            for (uint32_t j = 0; j < attnMeta.lensCpu[i]; j++) {
+                uint32_t pos = attnMeta.cachedLensCpu[i] + j;
+                uint32_t blockId = pos / blockSize;
+                uint32_t id = pos % blockSize;
+                uint32_t expect = blockTablesHost[i * maxNumBlocks + blockId] * blockSize + id;
+                if (host[k] != expect) {
+                    fail("slotMapping", k, host[k], expect, __LINE__);
+                }
+                k++;
+            }
+        }
+    }
+
+    // position
+    {
+        std::vector<uint64_t> host(batchedTokens);
+        size_t bytes = batchedTokens * XDtypeBit(INT64) / 8;
+        CHECK_ACL(aclrtMemcpyAsync(host.data(), bytes, attnMeta.position.ptr, bytes,
+                                   ACL_MEMCPY_DEVICE_TO_HOST, stream));
+        CHECK_ACL(aclrtSynchronizeStream(stream));
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < batch; i++) {
+            for (uint32_t j = 0; j < attnMeta.lensCpu[i]; j++) {
+                uint64_t expect = static_cast<uint64_t>(attnMeta.cachedLensCpu[i]) + j;
+                if (host[k] != expect) {
+                    fail("position", k, host[k], expect, __LINE__);
+                }
+                k++;
+            }
+        }
+    }
+}
+#endif  // XLITE_DEBUG_ON
+
 void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                            uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVHeads,
                            uint32_t blockSize, uint32_t hiddenSize, uint32_t nRoutedExperts,
@@ -620,6 +732,9 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             // Version 2: lens / cachedLens / queryStartLoc / slotMapping / blockTables are
             // pre-built on the Python side as device tensors; shape-check and alias (zero copy).
             CheckAttnMetaV2(attnMeta, batch, batchedTokens, maxNumBlocks);
+#ifdef XLITE_DEBUG_ON
+            VerifyAttnMetaV2(attnMeta, blockSize);
+#endif
             _maxNumBlocks = attnMeta.blockTables[0].shape[1];
             _attnLens = attnMeta.lens;
             _attnCachedLens = attnMeta.cachedLens;
