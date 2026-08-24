@@ -42,7 +42,8 @@ struct XModelConfig {
     uint32_t vHeadDim;
     uint32_t qLoraRank;
     uint32_t kvLoraRank;
-    uint32_t blockSize;
+    uint32_t blockSize;  // drop after next version, use blockSizes instead
+    std::vector<uint32_t> blockSizes;
     uint32_t deepstackNumLevel = 0;
     uint64_t maxBatchedTokens;
     uint64_t maxBatch;
