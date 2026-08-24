@@ -6,6 +6,12 @@ set(SOC_VERSION "Ascend910B3" CACHE STRING "system on chip type")
 set(ASCEND_CANN_PACKAGE_PATH "/usr/local/Ascend/ascend-toolkit/latest"
     CACHE STRING "ASCEND CANN package installation directory"
 )
+# Package version for find_package(xlite) compatibility checks.
+set(XLITE_VERSION "" CACHE STRING "xlite package version (e.g. 0.2.0); empty = dev build")
+if(XLITE_VERSION STREQUAL "")
+    set(XLITE_VERSION "0.0.0-dev")
+    message(STATUS "XLITE_VERSION unset; using dev sentinel '${XLITE_VERSION}'")
+endif()
 message(STATUS "RUN_MODE: ${RUN_MODE}")
 message(STATUS "SOC_VERSION: ${SOC_VERSION}")
 message(STATUS "ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
@@ -345,13 +351,26 @@ install(TARGETS _C
     LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite
 )
 
-# Install public C++ headers.
+# Install public C++ headers under a namespaced layout (<prefix>/xlite/include/xlite/*.h)
+# so downstream consumers use `#include "xlite/xlite.h"`.
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/csrc/xlite.h
               ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.h
               ${CMAKE_CURRENT_SOURCE_DIR}/csrc/runtime.h
               ${CMAKE_CURRENT_SOURCE_DIR}/csrc/model.h
         DESTINATION ${CMAKE_INSTALL_PATH}/xlite/include/xlite)
 
-# Install cmake package config for find_package(xlite).
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/csrc/xliteConfig.cmake
+# find_package(xlite) config — a self-locating hand-authored config
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/xliteConfig.cmake.in
+    ${CMAKE_BINARY_DIR}/xliteConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib/cmake/xlite)
+install(FILES ${CMAKE_BINARY_DIR}/xliteConfig.cmake
+        DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib/cmake/xlite)
+
+write_basic_package_version_file(
+    ${CMAKE_BINARY_DIR}/xliteConfigVersion.cmake
+    VERSION ${XLITE_VERSION}
+    COMPATIBILITY SameMajorVersion)
+install(FILES ${CMAKE_BINARY_DIR}/xliteConfigVersion.cmake
         DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib/cmake/xlite)
