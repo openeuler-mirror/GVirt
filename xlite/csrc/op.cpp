@@ -124,8 +124,9 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
 
     if (rankSize <= 1) {
         if (in.ptr != out.ptr) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, in.ptr, in.bytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            TRACECHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, in.ptr, in.bytes,
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream),
+                           loc);
         }
         return;
     }
@@ -140,8 +141,9 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
         if (needCopy) {
             tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
             tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
-            CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, in.bytes, in.ptr, in.bytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            TRACECHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, in.bytes, in.ptr, in.bytes,
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream),
+                           loc);
             inPtr = tmpIn->ptr;
             outPtr = tmpOut->ptr;
         }
@@ -203,8 +205,9 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
                      xcclComm->generation++, xcclComm->dParam, copySize, fetchOffset || type == DP);
 
         if (needCopy) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            TRACECHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream),
+                           loc);
             rt.PutTensor(*tmpIn);
             rt.PutTensor(*tmpOut);
         }
@@ -212,8 +215,9 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
     }
 
     // fallback to HCCL path
-    CHECK_HCCL(HcclAllGather(in.ptr, out.ptr, in.numel * XDtypeBit(in.dtype) / XDtypeBit(INT8),
-                             HCCL_DATA_TYPE_INT8, hcclComm, rt.stream));
+    TRACECHECK_HCCL(HcclAllGather(in.ptr, out.ptr, in.numel * XDtypeBit(in.dtype) / XDtypeBit(INT8),
+                                  HCCL_DATA_TYPE_INT8, hcclComm, rt.stream),
+                    loc);
 }
 
 void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
@@ -250,8 +254,9 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
 
     if (rankSize <= 1) {
         if (in.ptr != out.ptr) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, in.ptr, in.bytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            TRACECHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, in.ptr, in.bytes,
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream),
+                           loc);
         }
         return;
     }
@@ -266,8 +271,9 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
         if (needCopy) {
             tmpIn = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
             tmpOut = &rt.GetTensor(out.shape, out.dtype, DBG_LOC);
-            CHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, in.bytes, in.ptr, in.bytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            TRACECHECK_ACL(aclrtMemcpyAsync(tmpIn->ptr, in.bytes, in.ptr, in.bytes,
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream),
+                           loc);
             inPtr = tmpIn->ptr;
             outPtr = tmpOut->ptr;
         }
@@ -318,8 +324,9 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
                      xcclComm->generation++, xcclComm->dParam, copySize, fetchOffset || type == DP);
 
         if (needCopy) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            TRACECHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream),
+                           loc);
             rt.PutTensor(*tmpIn);
             rt.PutTensor(*tmpOut);
         }
@@ -327,8 +334,9 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
     }
 
     // fallback to HCCL path
-    CHECK_HCCL(HcclReduceScatter(in.ptr, out.ptr, out.numel, XDtype2HcclDtype(in.dtype),
-                                 HCCL_REDUCE_SUM, hcclComm, rt.stream));
+    TRACECHECK_HCCL(HcclReduceScatter(in.ptr, out.ptr, out.numel, XDtype2HcclDtype(in.dtype),
+                                      HCCL_REDUCE_SUM, hcclComm, rt.stream),
+                    loc);
 }
 
 void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
@@ -361,8 +369,9 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 
     if (rank <= 1) {
         if (in.ptr != out.ptr) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, in.bytes, in.ptr, in.bytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            TRACECHECK_ACL(aclrtMemcpyAsync(out.ptr, in.bytes, in.ptr, in.bytes,
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream),
+                           loc);
         }
         return;
     }
@@ -375,8 +384,9 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
 
         if (needCopy) {
             tmpBuff = &rt.GetTensor(in.shape, in.dtype, DBG_LOC);  // tmp to ensure not from pool
-            CHECK_ACL(aclrtMemcpyAsync(tmpBuff->ptr, in.bytes, in.ptr, in.bytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            TRACECHECK_ACL(aclrtMemcpyAsync(tmpBuff->ptr, in.bytes, in.ptr, in.bytes,
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream),
+                           loc);
             inPtr = tmpBuff->ptr;
             outPtr = tmpBuff->ptr;
         }
@@ -427,16 +437,18 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
                      xcclComm->generation++, xcclComm->dParam, copySize, fetchOffset || type == DP);
 
         if (needCopy) {
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
-                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+            TRACECHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream),
+                           loc);
             rt.PutTensor(*tmpBuff);
         }
         return;
     }
 
     // fallback to HCCL path
-    CHECK_HCCL(HcclAllReduce(in.ptr, out.ptr, in.numel, XDtype2HcclDtype(in.dtype), HCCL_REDUCE_SUM,
-                             hcclComm, rt.stream));
+    TRACECHECK_HCCL(HcclAllReduce(in.ptr, out.ptr, in.numel, XDtype2HcclDtype(in.dtype),
+                                  HCCL_REDUCE_SUM, hcclComm, rt.stream),
+                    loc);
 }
 
 void XliteOpAlltoAllV(XRuntime &rt, XTensor &in, XTensor &out, XTensor &sendCounts,
@@ -460,9 +472,10 @@ void XliteOpAlltoAllV(XRuntime &rt, XTensor &in, XTensor &out, XTensor &sendCoun
         hcclComm = rt._epComm;
     }
 
-    CHECK_HCCL(HcclAlltoAllV(in.ptr, sendCounts.ptr, sdispls.ptr, XDtype2HcclDtype(in.dtype),
-                             out.ptr, recvCounts.ptr, rdispls.ptr, XDtype2HcclDtype(out.dtype),
-                             hcclComm, rt.stream));
+    TRACECHECK_HCCL(HcclAlltoAllV(in.ptr, sendCounts.ptr, sdispls.ptr, XDtype2HcclDtype(in.dtype),
+                                  out.ptr, recvCounts.ptr, rdispls.ptr, XDtype2HcclDtype(out.dtype),
+                                  hcclComm, rt.stream),
+                    loc);
 }
 
 void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uint32_t end,
