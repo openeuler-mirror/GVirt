@@ -195,7 +195,6 @@ public:
     // only for requests with cached==0 (fresh prefill); chunked-prefill
     // continuation (cached>0, multi-token) reuses state via recurrent GDN.
     std::vector<uint32_t> _cachedLensHost;
-    uint32_t _maxNumBlocks;
     uint32_t _batch;
     uint32_t _tileSizeOfCachedKV;
     XTensor
@@ -209,7 +208,7 @@ public:
     XTensor _attnQueryStartLoc;  // [batch] int32, ref: v0/1 -> _queryStartLoc, v2 ->
                                  // attnMeta.queryStartLoc
     XTensor _position;           // [maxBatchedTokens] int64, internal buffer (malloc+free in dtor)
-    XTensor _blockTables;        // [maxBatch, maxNumBlocks] int32, internal buffer
+    XTensor _blockTables;  // [maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)] int32, internal buffer
     XTensor _slotMapping;        // [maxBatchedTokens] int32, internal buffer
     XTensor _cachedLens;         // [maxBatch] int32, internal buffer
     XTensor _lens;               // [maxBatch] int32, internal buffer
