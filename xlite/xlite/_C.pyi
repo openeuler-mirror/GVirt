@@ -501,6 +501,7 @@ class Model:
         se_up_gate_deq_scale (List[torch.Tensor]): Shared-expert up-gate scales per layer.
         se_down (List[torch.Tensor]): Shared-expert down weights per layer.
         se_down_deq_scale (List[torch.Tensor]): Shared-expert down scales per layer.
+        se_gate (List[torch.Tensor]): Optional shared-expert sigmoid gate, shape [1, hidden] per MoE layer.
         re_up_gate (List[torch.Tensor]): Routed-expert up-gate weights.
         re_up_gate_scale (List[torch.Tensor]): Routed-expert up-gate scales(deprecated).
         re_up_gate_deq_scale (List[torch.Tensor]): Routed-expert up-gate scales.
@@ -689,6 +690,8 @@ class Model:
     """Shared-expert down weights per layer."""
     se_down_deq_scale: List[torch.Tensor] = ...
     """Shared-expert down scales per layer."""
+    se_gate: List[torch.Tensor] = ...
+    """Optional shared-expert sigmoid gate weights per MoE layer, shape [1, hidden]."""
     re_up_gate: List[torch.Tensor] = ...
     """Routed-expert up-gate weights."""
     re_up_gate_scale: List[torch.Tensor] = ...
@@ -1424,12 +1427,13 @@ def silu_and_mul(rt: Runtime, in_: torch.Tensor, out: torch.Tensor) -> None:
     ...
 
 def sigmoid_gate_mul(rt: Runtime, attn: torch.Tensor, gate: torch.Tensor, out: torch.Tensor) -> None:
-    """Compute out = attn * sigmoid(gate), elementwise.
+    """Compute out = attn * sigmoid(gate).
 
     Args:
         rt (Runtime): Native runtime handle.
         attn (torch.Tensor): Attention output, shape [num_tokens, dim].
-        gate (torch.Tensor): Gate logits, shape [num_tokens, dim].
+        gate (torch.Tensor): Gate logits, shape [num_tokens, dim] (elementwise) or
+            [num_tokens, 1] (broadcast per token).
         out (torch.Tensor): Output tensor, shape [num_tokens, dim]. May alias `attn`.
 
     Returns:
