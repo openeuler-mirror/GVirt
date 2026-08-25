@@ -1683,29 +1683,72 @@ void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output)
 }
 
 void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
-                          XTensor &output, bool updateState)
+                          XTensor &output, bool updateState, XTensor *queryStartLoc,
+                          XTensor *queryLens)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (state.shape.size() != 3 || input.shape.size() != 3 || output.shape.size() != 3) {
-        throw std::runtime_error("XliteOpConv1dAndSiLU: state/input/output must be 3D [B,C,*]");
-    }
-    if (state.shape[0] != input.shape[0] || state.shape[1] != input.shape[1] ||
-        output.shape[0] != input.shape[0] || output.shape[1] != input.shape[1] ||
-        output.shape[2] != input.shape[2]) {
-        throw std::runtime_error("XliteOpConv1dAndSiLU: batch/channel/seq shape mismatch");
-    }
+    bool packed = queryStartLoc != nullptr && queryLens != nullptr;
     uint32_t kernelDim = weight.shape.size() >= 3 ? weight.shape[2] : weight.shape.back();
-    if (state.shape[2] != kernelDim) {
-        throw std::runtime_error("XliteOpConv1dAndSiLU: state last dim != kernelDim");
+    uint32_t batch;
+    uint32_t channels;
+    uint32_t seqLen = 0;
+
+    if (packed) {
+        if (state.shape.size() != 3 || input.shape.size() != 2 || output.shape.size() != 2) {
+            throw std::runtime_error(
+                "XliteOpConv1dAndSiLU: packed mode expects state [B,C,K] and input/output [T,C]");
+        }
+        if (queryStartLoc->dtype != INT32 || queryLens->dtype != INT32) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: queryStartLoc/queryLens must be int32");
+        }
+        batch = state.shape[0];
+        channels = state.shape[1];
+        if (queryStartLoc->numel < batch || queryLens->numel < batch) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: queryStartLoc/queryLens too small");
+        }
+        if (batch > 256) {
+            throw std::runtime_error(
+                "XliteOpConv1dAndSiLU: packed batch exceeds kernel meta limit");
+        }
+        if (input.shape[1] != channels || output.shape[1] != channels ||
+            input.shape[0] != output.shape[0]) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: packed input/output channel mismatch");
+        }
+        if (state.shape[2] != kernelDim) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: state last dim != kernelDim");
+        }
+        if (weight.shape[0] != channels) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: weight channels mismatch");
+        }
+        if (kernelDim > 16) {
+            throw std::runtime_error(
+                "XliteOpConv1dAndSiLU: require kernelDim<=16 for fused kernel");
+        }
+    } else {
+        if (state.shape.size() != 3 || input.shape.size() != 3 || output.shape.size() != 3) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: state/input/output must be 3D [B,C,*]");
+        }
+        if (state.shape[0] != input.shape[0] || state.shape[1] != input.shape[1] ||
+            output.shape[0] != input.shape[0] || output.shape[1] != input.shape[1] ||
+            output.shape[2] != input.shape[2]) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: batch/channel/seq shape mismatch");
+        }
+        if (state.shape[2] != kernelDim) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: state last dim != kernelDim");
+        }
+        if (weight.shape[0] != input.shape[1]) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: weight channels mismatch");
+        }
+        batch = input.shape[0];
+        channels = input.shape[1];
+        seqLen = input.shape[2];
+        if (kernelDim > 16 || seqLen > 4096) {
+            throw std::runtime_error(
+                "XliteOpConv1dAndSiLU: require kernelDim<=16 and seqLen<=4096 for fused kernel");
+        }
     }
-    if (weight.shape[0] != input.shape[1]) {
-        throw std::runtime_error("XliteOpConv1dAndSiLU: weight channels mismatch");
-    }
-    uint32_t batch = input.shape[0];
-    uint32_t channels = input.shape[1];
-    uint32_t seqLen = input.shape[2];
 
     KERNEL_PTR_TYPE(conv1d_and_silu) * launchKernel;
     if (EachXDtype(FP32, state, input, weight, output)) {
@@ -1720,12 +1763,9 @@ void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor 
         throw std::runtime_error(err_str + " unsupported!");
     }
 
-    if (kernelDim > 16 || seqLen > 4096) {
-        throw std::runtime_error(
-            "XliteOpConv1dAndSiLU: require kernelDim<=16 and seqLen<=4096 for fused kernel");
-    }
     launchKernel(rt.aivNum, rt.stream, state.ptr, input.ptr, weight.ptr, output.ptr, batch,
-                 channels, seqLen, kernelDim, updateState ? 1u : 0u);
+                 channels, seqLen, kernelDim, updateState ? 1u : 0u,
+                 packed ? queryStartLoc->ptr : nullptr, packed ? queryLens->ptr : nullptr);
 }
 
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
@@ -1778,19 +1818,24 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
 void XliteOpRecurrentGatedDeltaRule(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
                                     XTensor &beta, XTensor &g, XTensor &state, XTensor &out,
                                     uint32_t batch, uint32_t seqlen, uint32_t numHeads,
-                                    uint32_t kDim, uint32_t vDim)
+                                    uint32_t kDim, uint32_t vDim, XTensor *queryStartLoc,
+                                    XTensor *queryLens)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (kDim == 0 || vDim == 0 || numHeads == 0 || batch == 0 || seqlen == 0) {
+    bool packed = queryStartLoc != nullptr && queryLens != nullptr;
+    if (kDim == 0 || vDim == 0 || numHeads == 0 || batch == 0) {
+        throw std::runtime_error(std::string(__func__) + ": invalid dims");
+    }
+    if (!packed && seqlen == 0) {
         throw std::runtime_error(std::string(__func__) + ": invalid dims");
     }
     if (kDim > 128 || vDim > 128) {
         throw std::runtime_error(std::string(__func__) +
                                  ": kDim/vDim must be <= 128 for current kernel");
     }
-    uint32_t tokens = batch * seqlen;
+    uint32_t tokens = packed ? static_cast<uint32_t>(query.shape[0]) : batch * seqlen;
     if (query.shape[0] != tokens || key.shape[0] != tokens || value.shape[0] != tokens ||
         out.shape[0] != tokens || beta.shape[0] != tokens || g.shape[0] != tokens) {
         throw std::runtime_error(std::string(__func__) + ": token dim mismatch");
@@ -1809,6 +1854,13 @@ void XliteOpRecurrentGatedDeltaRule(XRuntime &rt, XTensor &query, XTensor &key, 
         state.shape[2] != kDim || state.shape[3] != vDim) {
         throw std::runtime_error(std::string(__func__) + ": state shape mismatch");
     }
+    if (packed) {
+        if (queryStartLoc->dtype != INT32 || queryLens->dtype != INT32 ||
+            queryStartLoc->numel < batch || queryLens->numel < batch) {
+            throw std::runtime_error(std::string(__func__) +
+                                     ": queryStartLoc/queryLens must be int32[B]");
+        }
+    }
     KERNEL_PTR_TYPE(recurrent_gated_delta_rule) * launchKernel;
     if (EachXDtype(FP32, query, key, value, beta, g, state, out)) {
         launchKernel = aclrtlaunch_recurrent_gated_delta_rule_float;
@@ -1821,8 +1873,9 @@ void XliteOpRecurrentGatedDeltaRule(XRuntime &rt, XTensor &query, XTensor &key, 
         throw std::runtime_error(err_str + " unsupported!");
     }
     launchKernel(rt.aivNum, rt.stream, query.ptr, key.ptr, value.ptr, beta.ptr, g.ptr, state.ptr,
-                 out.ptr, batch, seqlen, numHeads, kDim, vDim,
-                 1.0f / sqrtf(static_cast<float>(kDim)));
+                 out.ptr, batch, packed ? 0u : seqlen, numHeads, kDim, vDim,
+                 1.0f / sqrtf(static_cast<float>(kDim)), packed ? queryStartLoc->ptr : nullptr,
+                 packed ? queryLens->ptr : nullptr);
 }
 
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,

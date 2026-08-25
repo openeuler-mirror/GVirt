@@ -2030,15 +2030,26 @@ void Transpose_1_2(XRuntime &rt, at::Tensor &input, at::Tensor &output)
 }
 
 void LinearAttConv1dAndSiLU(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_state,
-                            at::Tensor &weight, at::Tensor &output)
+                            at::Tensor &weight, at::Tensor &output,
+                            std::optional<at::Tensor> query_start_loc = std::nullopt,
+                            std::optional<at::Tensor> query_lens = std::nullopt)
 {
-    XTensor _mix_qkv, _conv_state, _weight, _output;
+    XTensor _mix_qkv, _conv_state, _weight, _output, _start, _lens;
     InitXTensor(_mix_qkv, mix_qkv);
     InitXTensor(_conv_state, conv_state);
     InitXTensor(_weight, weight);
     InitXTensor(_output, output);
-    // Unit tests compare output only; leave state unchanged.
-    XliteOpConv1dAndSiLU(rt, _conv_state, _mix_qkv, _weight, _output, /*updateState=*/true);
+    XTensor *startPtr = nullptr;
+    XTensor *lensPtr = nullptr;
+    if (query_start_loc.has_value() && query_lens.has_value() && query_start_loc->defined() &&
+        query_lens->defined() && query_start_loc->numel() > 0 && query_lens->numel() > 0) {
+        InitXTensor(_start, *query_start_loc);
+        InitXTensor(_lens, *query_lens);
+        startPtr = &_start;
+        lensPtr = &_lens;
+    }
+    XliteOpConv1dAndSiLU(rt, _conv_state, _mix_qkv, _weight, _output, /*updateState=*/true,
+                         startPtr, lensPtr);
     rt.Synchronize();
 }
 
@@ -2154,9 +2165,11 @@ void BetaDecay(XRuntime &rt, at::Tensor &b, at::Tensor &a, at::Tensor &A_log, at
 void RecurrentGatedDeltaRule(XRuntime &rt, at::Tensor &query, at::Tensor &key, at::Tensor &value,
                              at::Tensor &beta, at::Tensor &g, at::Tensor &state, at::Tensor &out,
                              uint32_t batch, uint32_t seqlen, uint32_t num_heads, uint32_t k_dim,
-                             uint32_t v_dim)
+                             uint32_t v_dim,
+                             std::optional<at::Tensor> query_start_loc = std::nullopt,
+                             std::optional<at::Tensor> query_lens = std::nullopt)
 {
-    XTensor _query, _key, _value, _beta, _g, _state, _out;
+    XTensor _query, _key, _value, _beta, _g, _state, _out, _start, _lens;
     InitXTensor(_query, query);
     InitXTensor(_key, key);
     InitXTensor(_value, value);
@@ -2164,8 +2177,17 @@ void RecurrentGatedDeltaRule(XRuntime &rt, at::Tensor &query, at::Tensor &key, a
     InitXTensor(_g, g);
     InitXTensor(_state, state);
     InitXTensor(_out, out);
+    XTensor *startPtr = nullptr;
+    XTensor *lensPtr = nullptr;
+    if (query_start_loc.has_value() && query_lens.has_value() && query_start_loc->defined() &&
+        query_lens->defined() && query_start_loc->numel() > 0 && query_lens->numel() > 0) {
+        InitXTensor(_start, *query_start_loc);
+        InitXTensor(_lens, *query_lens);
+        startPtr = &_start;
+        lensPtr = &_lens;
+    }
     XliteOpRecurrentGatedDeltaRule(rt, _query, _key, _value, _beta, _g, _state, _out, batch, seqlen,
-                                   num_heads, k_dim, v_dim);
+                                   num_heads, k_dim, v_dim, startPtr, lensPtr);
     rt.Synchronize();
 }
 
@@ -2661,7 +2683,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("k"));
     m.def("transpose_1_2", &Transpose_1_2, py::arg("rt"), py::arg("input"), py::arg("output"));
     m.def("linear_att_conv_and_silu", &LinearAttConv1dAndSiLU, py::arg("rt"), py::arg("mix_qkv"),
-          py::arg("conv_state"), py::arg("weight"), py::arg("output"));
+          py::arg("conv_state"), py::arg("weight"), py::arg("output"),
+          py::arg("query_start_loc") = py::none(), py::arg("query_lens") = py::none());
     m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::arg("outputs"));
     m.def("concat", &Concat, py::arg("rt"), py::arg("inputs"), py::arg("out"));
     m.def("split", &Split, py::arg("rt"), py::arg("in"), py::arg("outputs"), py::arg("sizes"),
@@ -2672,7 +2695,8 @@ PYBIND11_MODULE(_C, m)
     m.def("recurrent_gated_delta_rule", &RecurrentGatedDeltaRule, py::arg("rt"), py::arg("query"),
           py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"), py::arg("state"),
           py::arg("out"), py::arg("batch"), py::arg("seqlen"), py::arg("num_heads"),
-          py::arg("k_dim"), py::arg("v_dim"));
+          py::arg("k_dim"), py::arg("v_dim"), py::arg("query_start_loc") = py::none(),
+          py::arg("query_lens") = py::none());
     m.def("einsum_mht_hdt_mhd", &EinsumMhtHdtMhd, "einsum_mht_hdt_mhd", py::arg("rt"),
           py::arg("mht"), py::arg("hdt"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
           py::arg("d"), py::arg("weight_nz") = false);

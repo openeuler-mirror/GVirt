@@ -645,6 +645,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             anyMultiToken = true;
         }
     }
+    _hostLens = lens;
     _decodeStep = !anyMultiToken;
     // Decode only when every request has cache and this step is a single token.
     _linearDecodeStep = allCached && !anyMultiToken && batch > 0;

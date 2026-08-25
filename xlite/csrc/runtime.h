@@ -216,6 +216,8 @@ public:
     XTensor _queryStartLoc;      // [maxBatch] int32, internal buffer
     XTensor _dsaTopkBuffer;      // int32_t, cross-layer shared topk
     bool _dsaTopkValid = false;
+    // Host copy of per-request query lengths from PrepareAttn (mixed-length linear attn).
+    std::vector<uint32_t> _hostLens;
 
     // for MoE
     XTensor _tokensPerEpGroupAllEpHost;

@@ -60,6 +60,49 @@ def run_test(rt, batch, seq_len, msg):
         raise e
 
 
+def run_packed_mixed(rt, lens, msg):
+    batch = len(lens)
+    total = sum(lens)
+    inp = torch.randn(total, channels)
+    weight = torch.randn(channels, 1, kernel_dim)
+    conv_state = torch.randn(batch, channels, kernel_dim)
+    output = torch.zeros(total, channels)
+    starts = [0]
+    for seq_len in lens[:-1]:
+        starts.append(starts[-1] + seq_len)
+    query_start_loc = torch.tensor(starts, dtype=torch.int32, device="npu:0")
+    query_lens = torch.tensor(lens, dtype=torch.int32, device="npu:0")
+    # 32B GM pad so kernel block copies of int32 meta stay in-bounds.
+    if query_start_loc.numel() < 8:
+        pad = 8 - query_start_loc.numel()
+        query_start_loc = torch.cat(
+            [query_start_loc, torch.zeros(pad, dtype=torch.int32, device="npu:0")]
+        )
+        query_lens = torch.cat(
+            [query_lens, torch.zeros(pad, dtype=torch.int32, device="npu:0")]
+        )
+
+    ref_parts = []
+    expected_state = conv_state.clone()
+    for i, seq_len in enumerate(lens):
+        start = starts[i]
+        x = inp[start : start + seq_len]  # [S, C]
+        cat = torch.cat([expected_state[i : i + 1], x.transpose(0, 1).unsqueeze(0)], dim=-1)
+        out = F.silu(F.conv1d(cat, weight, padding=0, groups=channels)[:, :, -seq_len:])
+        ref_parts.append(out.squeeze(0).transpose(0, 1))
+        expected_state[i] = cat[0, :, -kernel_dim:]
+    standard = torch.cat(ref_parts, dim=0)
+
+    torch.npu.synchronize()
+    linear_att_conv_and_silu(
+        rt, inp, conv_state, weight, output, query_start_loc, query_lens
+    )
+    torch.npu.synchronize()
+    torch.testing.assert_close(standard, output, rtol=1e-2, atol=1e-3)
+    torch.testing.assert_close(expected_state, conv_state, rtol=1e-2, atol=1e-3)
+    print(f"{msg}: PASS")
+
+
 if __name__ == "__main__":
     rt = Runtime(0, 500)
     torch.npu.set_device(0)
@@ -74,5 +117,7 @@ if __name__ == "__main__":
                 seq_len = 2**i
                 msg = f'[{dtype}/{batch}/{seq_len}]'
                 run_test(rt, batch, seq_len, msg)
+        run_packed_mixed(rt, [1, 4, 2], f"[{dtype}/packed-mixed=[1,4,2]]")
+        run_packed_mixed(rt, [8, 1], f"[{dtype}/packed-mixed=[8,1]]")
     total = time.time() - t
     print(f'completed in {total} s.')
