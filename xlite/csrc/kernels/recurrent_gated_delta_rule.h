@@ -98,6 +98,16 @@ public:
         // Dedicated 1-element scratch for scalar<->vector handoff (g/beta/exp).
         scalarF = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += 256;
+        // M4-c vectorized token step (fast path kDim==vDim==128):
+        //   tile [128][64] fp32 broadcast tile (kF or qF rows), 32KB
+        //   prod [128][64] fp32 matvec product tile, 32KB
+        //   offZero: all-zero lane-offset ramp for broadcast vgather.
+        tile = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += ROUND_UP(128 * 64 * sizeof(float), 256);
+        prod = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += ROUND_UP(128 * 64 * sizeof(float), 256);
+        offZero = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += 256;
         assert(off <= UB_SIZE);
     }
 
@@ -247,8 +257,123 @@ public:
         return static_cast<uint32_t>(reinterpret_cast<__ubuf__ int32_t *>(outTmp)[0]);
     }
 
+    // Hard V fence for vgather/vconv producers (S round trip through event
+    // flags; a bare pipe_barrier(PIPE_V) does not order their UB writeback
+    // before dependent vector reads on this part).
+    __aicore__ inline void VFence()
+    {
+        set_flag(PIPE_V, PIPE_S, EVENT_ID1);
+        wait_flag(PIPE_V, PIPE_S, EVENT_ID1);
+        set_flag(PIPE_S, PIPE_V, EVENT_ID1);
+        wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
+    }
+
+    // tile[i][0..63] = srcF[i] broadcast (i in [0,128)). vgather with an
+    // all-zero lane-offset ramp: every lane reads base = srcF + i.
+    __aicore__ inline void BuildBroadcastTile(__ubuf__ float *dst, __ubuf__ float *srcF)
+    {
+        for (uint32_t i = 0; i < 128; ++i) {
+            uint32_t baseAddr = (uint32_t)((uint64_t)srcF + (uint64_t)i * sizeof(float));
+            vgather((__ubuf__ uint32_t *)(dst + i * 64), offZero, baseAddr, 8, 1);
+        }
+        VFence();
+    }
+
+    // kv[0..63] = sum over the 128 rows of prod[128][64] (tree of strided
+    // in-place vadd; levels 64,32,16,8,4,2,1 repeats). Destroys prod.
+    __aicore__ inline void ReduceRows(__ubuf__ float *buf)
+    {
+        for (uint32_t stride = 64; stride >= 1; stride >>= 1) {
+            vadd(buf, buf, buf + stride * 64, stride, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+    }
+
+    // Vectorized per-token step for kDim==128 && vDim==128:
+    //   kv   = sum_k state[k,v]*k[k]          (matvec, 2 V-halves)
+    //   delta = (v - kv) * beta
+    //   state = state*exp(g) + k[.]*delta[.]  (scalar scale + broadcast vmadd)
+    //   out  = sum_k state[k,v]*q[k]          (matvec, 2 V-halves)
+    // All element math is pure vector ops on [128][64] tiles; no per-element
+    // scalar operands (register-reuse hazard) and ~30 barriers per token
+    // instead of ~770.
+    __aicore__ inline void TokenStepFast(uint32_t t, float gExp, float betaVal, uint32_t h)
+    {
+        uint32_t qkOff = t * numHeads * kDim + h * kDim;
+        uint32_t vOff = t * numHeads * vDim + h * vDim;
+        uint32_t bgOff = t * numHeads + h;
+
+        LoadVec(qF, query + qkOff, qIn, kDim, qkBlocks, kRepeat);
+        LoadVec(kF, key + qkOff, kIn, kDim, qkBlocks, kRepeat);
+        LoadVec(vF, value + vOff, vIn, vDim, vBlocks, vRepeat);
+        VFence();  // vconv (LoadVec bf16->f32) writeback must land before vgather reads
+
+        // q *= scale
+        set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+        vmuls(qF, qF, scale, kRepeat, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        // state *= exp(g) FIRST (kv below must see the decayed state)
+        VMulsLarge(stateF, stateF, gExp, kDim * vDim);
+
+        // kTile rows broadcast from kF
+        BuildBroadcastTile(tile, kF);
+
+        // ---- kv = sum_k state[k,v]*k[k], per V-half ----
+        for (uint32_t half = 0; half < 2; ++half) {
+            // prod = stateF[:, half] elementwise* kTile
+            vmul(prod, stateF + half * 64, tile, 128, 1, 1, 1, 8, 16, 8);
+            pipe_barrier(PIPE_V);
+            ReduceRows(prod);
+            // kvMem[half] = prod row 0
+            vadds(kvMem + half * 64, prod, 0.0f, 1, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+
+        vsub(delta, vF, kvMem, vRepeat, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+        vmuls(delta, delta, betaVal, vRepeat, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        // ---- state += k[.]*delta[.] (rank-1 update) ----
+        // vmadd's src1RepeatStride=0 is broken on this part (probe mode 3), so
+        // use vmul with src1RepeatStride=0 (probe mode 6, exact) + vadd:
+        //   prod[k][:] = kTile[k]*delta[half][:] then stateF[:, half] += prod.
+        for (uint32_t half = 0; half < 2; ++half) {
+            vmul(prod, tile, delta + half * 64, 128, 1, 1, 1, 8, 8, 0);
+            pipe_barrier(PIPE_V);
+            vadd(stateF + half * 64, stateF + half * 64, prod, 128, 1, 1, 1, 16, 16, 8);
+            pipe_barrier(PIPE_V);
+        }
+
+        // qTile rows broadcast from qF (reuses the tile buffer)
+        BuildBroadcastTile(tile, qF);
+
+        // ---- out = sum_k state[k,v]*q[k], per V-half ----
+        for (uint32_t half = 0; half < 2; ++half) {
+            vmul(prod, stateF + half * 64, tile, 128, 1, 1, 1, 8, 16, 8);
+            pipe_barrier(PIPE_V);
+            ReduceRows(prod);
+            vadds(outF + half * 64, prod, 0.0f, 1, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+
+        StoreVec(out + vOff, outF, outTmp, vBlocks, vRepeat);
+        // StoreVec ends on MTE3; next LoadVec starts on MTE2.
+        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    }
+
     __aicore__ inline void ProcessOneHead(uint32_t b, uint32_t h)
     {
+        // Per-token scalar prefetch buffers: one S<->V flag round trip publishes
+        // all kDim scalars, replacing per-element ReadFloat (two round trips per
+        // element x 384 per token).
+        float kArr[GDR_MAX_K_DIM];
+        float qArr[GDR_MAX_K_DIM];
         uint32_t stateOff = ((b * numHeads) + h) * kDim * vDim;
         LoadVec(stateF, state + stateOff, stateIn, kDim * vDim, stateBlocks, stateF32Repeat);
 
@@ -265,11 +390,19 @@ public:
             tokenLen = seqlen;
         }
 
+        bool fastPath = (kDim == 128 && vDim == 128);
         for (uint32_t s = 0; s < tokenLen; ++s) {
             uint32_t t = tokenStart + s;
             uint32_t qkOff = t * numHeads * kDim + h * kDim;
             uint32_t vOff = t * numHeads * vDim + h * vDim;
             uint32_t bgOff = t * numHeads + h;
+
+            if (fastPath) {
+                float gExp = ExpScalar(LoadScalar(g + bgOff));
+                float betaVal = LoadScalar(beta + bgOff);
+                TokenStepFast(t, gExp, betaVal, h);
+                continue;
+            }
 
             LoadVec(qF, query + qkOff, qIn, kDim, qkBlocks, kRepeat);
             LoadVec(kF, key + qkOff, kIn, kDim, qkBlocks, kRepeat);
@@ -281,6 +414,18 @@ public:
             vmuls(qF, qF, scale, kRepeat, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
 
+            // Bulk-prefetch k/q scalars (single flag round trip for all kDim).
+            set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+            for (uint32_t ki = 0; ki < kDim; ++ki) {
+                kArr[ki] = kF[ki];
+            }
+            for (uint32_t ki = 0; ki < kDim; ++ki) {
+                qArr[ki] = qF[ki];
+            }
+            set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+
             float gExp = ExpScalar(LoadScalar(g + bgOff));
             float betaVal = LoadScalar(beta + bgOff);
 
@@ -291,7 +436,7 @@ public:
             vector_dup(kvMem, float(0), vRepeat, 1, 0, 8, 0);
             pipe_barrier(PIPE_V);
             for (uint32_t ki = 0; ki < kDim; ++ki) {
-                float kk = ReadFloat(kF, ki);
+                float kk = kArr[ki];
                 vmuls(tmpRow, stateF + ki * vDim, kk, vRepeat, 1, 1, 8, 8);
                 pipe_barrier(PIPE_V);
                 vadd(kvMem, kvMem, tmpRow, vRepeat, 1, 1, 1, 8, 8, 8);
@@ -308,7 +453,7 @@ public:
 
             // state[k,v] += k[k] * delta[v]
             for (uint32_t ki = 0; ki < kDim; ++ki) {
-                float kk = ReadFloat(kF, ki);
+                float kk = kArr[ki];
                 vmuls(tmpRow, delta, kk, vRepeat, 1, 1, 8, 8);
                 pipe_barrier(PIPE_V);
                 vadd(stateF + ki * vDim, stateF + ki * vDim, tmpRow, vRepeat, 1, 1, 1, 8, 8, 8);
@@ -319,7 +464,7 @@ public:
             vector_dup(outF, float(0), vRepeat, 1, 0, 8, 0);
             pipe_barrier(PIPE_V);
             for (uint32_t ki = 0; ki < kDim; ++ki) {
-                float qq = ReadFloat(qF, ki);
+                float qq = qArr[ki];
                 vmuls(tmpRow, stateF + ki * vDim, qq, vRepeat, 1, 1, 8, 8);
                 pipe_barrier(PIPE_V);
                 vadd(outF, outF, tmpRow, vRepeat, 1, 1, 1, 8, 8, 8);
@@ -342,6 +487,12 @@ public:
         if (kDim > GDR_MAX_K_DIM || vDim > GDR_MAX_V_DIM || kDim == 0 || vDim == 0) {
             return;
         }
+        // all-zero lane-offset ramp for the broadcast vgather (fast path)
+        for (int p = 0; p < 64; ++p) {
+            offZero[p] = 0;
+        }
+        set_flag(PIPE_S, PIPE_V, EVENT_ID1);
+        wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
         uint32_t total = batch * numHeads;
         for (uint32_t idx = GetBlockIdx(); idx < total; idx += GetBlockNum()) {
             uint32_t b = idx / numHeads;
@@ -375,6 +526,9 @@ private:
     __ubuf__ float *delta;
     __ubuf__ float *outF;
     __ubuf__ float *tmpRow;
+    __ubuf__ float *tile;    // [128][64] fp32 broadcast tile (M4-c fast path)
+    __ubuf__ float *prod;    // [128][64] fp32 product tile
+    __ubuf__ uint32_t *offZero;
     __ubuf__ float *scalarF;
 
     uint32_t batch;
