@@ -16,6 +16,16 @@
         }                                                                                     \
     } while (0);
 
+#define TRACECHECK_ACL(x, loc)                                                   \
+    do {                                                                         \
+        aclError __ret = x;                                                      \
+        if (__ret != ACL_ERROR_NONE) {                                           \
+            throw std::runtime_error(loc.ToStr() + std::string(__func__) + ":" + \
+                                     std::to_string(__LINE__) +                  \
+                                     " aclError:" + std::to_string(__ret));      \
+        }                                                                        \
+    } while (0);
+
 #define CHECK_HCCL(x)                                                                         \
     do {                                                                                      \
         HcclResult __ret = x;                                                                 \
@@ -23,6 +33,16 @@
             throw std::runtime_error(std::string(__func__) + ":" + std::to_string(__LINE__) + \
                                      " HcclResult:" + std::to_string(__ret));                 \
         }                                                                                     \
+    } while (0);
+
+#define TRACECHECK_HCCL(x, loc)                                                  \
+    do {                                                                         \
+        HcclResult __ret = x;                                                    \
+        if (__ret != HCCL_SUCCESS) {                                             \
+            throw std::runtime_error(loc.ToStr() + std::string(__func__) + ":" + \
+                                     std::to_string(__LINE__) +                  \
+                                     " HcclResult:" + std::to_string(__ret));    \
+        }                                                                        \
     } while (0);
 
 #endif
