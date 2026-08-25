@@ -710,17 +710,17 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                        ACL_MEMCPY_HOST_TO_DEVICE, stream));
             _attnSlotMapping = {_slotMapping};
 
-            _maxNumBlocks = maxNumBlocks;
-            blockTables.resize(batch * _maxNumBlocks);
+            blockTables.resize(batch * maxNumBlocks);
             for (uint32_t i = 0; i < batch; i++) {
                 for (uint32_t j = 0; j < numBlocks[i]; j++) {
-                    blockTables[i * _maxNumBlocks + j] = attnMeta.blockTablesCpu[i][j];
+                    blockTables[i * maxNumBlocks + j] = attnMeta.blockTablesCpu[i][j];
                 }
             }
-            size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
+            size = batch * maxNumBlocks * XDtypeBit(INT32) / 8;
             CHECK_ACL(aclrtMemcpyAsync(_blockTables.ptr, size, blockTables.data(), size,
                                        ACL_MEMCPY_HOST_TO_DEVICE, stream));
             _attnBlockTables = {_blockTables};
+            _attnBlockTables[0].View({batch, maxNumBlocks});
             if (attnMeta.version == 0) {
                 size = batchedTokens * XDtypeBit(INT64) / 8;
                 CHECK_ACL(aclrtMemcpyAsync(_position.ptr, size, position.data(), size,
@@ -737,7 +737,6 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
 #ifdef XLITE_DEBUG_ON
             VerifyAttnMetaV2(attnMeta, blockSizes);
 #endif
-            _maxNumBlocks = attnMeta.blockTables[0].shape[1];
             _attnLens = attnMeta.lens;
             _attnCachedLens = attnMeta.cachedLens;
             _attnQueryStartLoc = attnMeta.queryStartLoc;
