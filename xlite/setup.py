@@ -68,6 +68,17 @@ def _get_pybind11_cmake_dir() -> str:
     ).strip()
 
 
+def _get_xlite_version() -> str:
+    """Source the package version from xlite.__version__ (single source of
+    truth; mirrors pyproject's tool.setuptools.dynamic). Falls back to a dev
+    sentinel if the import fails, leaving CMake's own default to apply."""
+    try:
+        import xlite  # noqa: F401  (import for __version__ side-effect)
+        return xlite.__version__
+    except Exception:  # pragma: no cover - xlite must exist in its own source tree
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Patch extract_host_stub.py during the build to drop the overflow-status
 # device-memory (de)allocation from host_stub.cpp. Best-effort: restored after
@@ -272,6 +283,9 @@ class CMakeBuild(build_ext):
             f"-DCMAKE_PREFIX_PATH={cmake_prefix_paths}",
             f"-DXLITE_EDITABLE_BUILD={'ON' if is_editable else 'OFF'}",
         ]
+        xlite_version = _get_xlite_version()
+        if xlite_version:
+            configure_cmd.append(f"-DXLITE_VERSION={xlite_version}")
         build_cmd = ["cmake", "--build", str(build_temp), "-j"]
         install_cmd = ["cmake", "--install", str(build_temp)]
 
