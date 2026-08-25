@@ -778,29 +778,22 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     uint32_t zDim = localValueDim;
     uint32_t bDim = nLocalVHeads;
     uint32_t aDim = nLocalVHeads;
-    uint32_t totalOutDim = qkvDim + zDim + bDim + aDim;
 
-    // Step 1: Fused ND projection [W_qkv; W_z; W_b; W_a].
-    // Must stay ND: NZ weights cannot be Concat'd; tiny NZ matmul tiles over-read.
+    // Step 1: Direct per-weight ND projections (no runtime weight concat).
+    // The old path Concat'd W_qkv/W_z/W_b/W_a into a 169MB temp W every step
+    // (48 layers x 169MB D2D per step) before one fused matmul + SplitCol.
+    // Weights are ND here (NZ weights cannot be Concat'd; tiny NZ matmul
+    // tiles over-read), so each projection can consume its own weight
+    // directly: zero D2D, no temp W, no SplitCol. Numerically identical:
+    // same matmul split along N, no summation reordering.
     XTensor &mixQkv = rt.GetTensor({m, qkvDim}, hiddenState.dtype, DBG_LOC);
     XTensor &z = rt.GetTensor({m, zDim}, hiddenState.dtype, DBG_LOC);
     XTensor &b = rt.GetTensor({m, bDim}, hiddenState.dtype, DBG_LOC);
     XTensor &a = rt.GetTensor({m, aDim}, hiddenState.dtype, DBG_LOC);
-    {
-        std::vector<XTensor> weightInputs = {
-            linearInProjQKV[layer].weight, linearInProjZ[layer].weight, linearInProjB[layer].weight,
-            linearInProjA[layer].weight};
-        XTensor &W = rt.GetTensor({totalOutDim, hiddenState.shape[1]}, hiddenState.dtype, DBG_LOC);
-        XliteOpConcat(rt, weightInputs, W);
-
-        XTensor &projOut = rt.GetTensor({m, totalOutDim}, hiddenState.dtype, DBG_LOC);
-        XliteOpMatmul(rt, hiddenState, W, projOut, false);
-        rt.PutTensor(W);
-
-        std::vector<XTensor> projSplit = {mixQkv, z, b, a};
-        XliteOpSplitCol(rt, projOut, projSplit);
-        rt.PutTensor(projOut);
-    }
+    XliteOpMatmul(rt, hiddenState, linearInProjQKV[layer].weight, mixQkv, false);
+    XliteOpMatmul(rt, hiddenState, linearInProjZ[layer].weight, z, false);
+    XliteOpMatmul(rt, hiddenState, linearInProjB[layer].weight, b, false);
+    XliteOpMatmul(rt, hiddenState, linearInProjA[layer].weight, a, false);
 
     // Step 2: beta = sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias)
     XTensor &beta = rt.GetTensor({m, nLocalVHeads}, hiddenState.dtype, DBG_LOC);
