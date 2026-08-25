@@ -1659,7 +1659,7 @@ class DeepSeek_V3(nn.Module):
 
     def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
         return prepare_xlite_attnmeta_v2(
-            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, block_size
+            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size]
         )
 
 
