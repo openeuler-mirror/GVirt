@@ -526,8 +526,8 @@ private:
     __ubuf__ float *delta;
     __ubuf__ float *outF;
     __ubuf__ float *tmpRow;
-    __ubuf__ float *tile;    // [128][64] fp32 broadcast tile (M4-c fast path)
-    __ubuf__ float *prod;    // [128][64] fp32 product tile
+    __ubuf__ float *tile;  // [128][64] fp32 broadcast tile (M4-c fast path)
+    __ubuf__ float *prod;  // [128][64] fp32 product tile
     __ubuf__ uint32_t *offZero;
     __ubuf__ float *scalarF;
 
