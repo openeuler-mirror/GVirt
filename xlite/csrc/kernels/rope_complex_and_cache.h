@@ -13,7 +13,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
     uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim, uint32_t offset,
     uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, uint32_t outOffset,
     GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size, GM_ADDR vcache, GM_ADDR slot_mapping,
-    int coreOffset = 0, int *nextCoreOffset = nullptr)
+    bool inverse, int coreOffset = 0, int *nextCoreOffset = nullptr)
 {
     set_atomic_none();
     set_mask_norm();
@@ -187,12 +187,21 @@ __aicore__ __inline__ void rope_complex_and_cache(
         vmul(x_odd_cos, x_odd, cos, nLocalHeads, 1, 1, 1, half_rope_blocks, half_rope_blocks, 0);
         pipe_barrier(PIPE_V);
 
-        // real : x[0::2] * cos - x[1::2] * sin
-        vsub(inOutFP32, x_even_cos, x_odd_sin, nLocalHeads, 1, 1, 1, rope_blocks, half_rope_blocks,
-             half_rope_blocks);
-        // img : x[0::2] * sin + x[1::2] * cos
-        vadd(inOutFP32 + ropeDim / 2, x_even_sin, x_odd_cos, nLocalHeads, 1, 1, 1, rope_blocks,
-             half_rope_blocks, half_rope_blocks);
+        if (inverse) {
+            // real : x[0::2] * cos + x[1::2] * sin  (rotates by -theta)
+            vadd(inOutFP32, x_even_cos, x_odd_sin, nLocalHeads, 1, 1, 1, rope_blocks,
+                 half_rope_blocks, half_rope_blocks);
+            // img : -x[0::2] * sin + x[1::2] * cos
+            vsub(inOutFP32 + ropeDim / 2, x_odd_cos, x_even_sin, nLocalHeads, 1, 1, 1, rope_blocks,
+                 half_rope_blocks, half_rope_blocks);
+        } else {
+            // real : x[0::2] * cos - x[1::2] * sin
+            vsub(inOutFP32, x_even_cos, x_odd_sin, nLocalHeads, 1, 1, 1, rope_blocks,
+                 half_rope_blocks, half_rope_blocks);
+            // img : x[0::2] * sin + x[1::2] * cos
+            vadd(inOutFP32 + ropeDim / 2, x_even_sin, x_odd_cos, nLocalHeads, 1, 1, 1, rope_blocks,
+                 half_rope_blocks, half_rope_blocks);
+        }
         pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
@@ -242,11 +251,11 @@ __aicore__ __inline__ void rope_complex_and_cache(
         uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim,                 \
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
-        GM_ADDR vcache, GM_ADDR slot_mapping)                                                      \
+        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse)                                    \
     {                                                                                              \
         rope_complex_and_cache<dtype>(nTokens, nLocalHeads, shape1, ropeDim, offset, vdim,         \
                                       input_ptr, output_ptr, outShape1, outOffset, freqs_ptr,      \
-                                      position, block_size, vcache, slot_mapping);                 \
+                                      position, block_size, vcache, slot_mapping, inverse != 0);   \
     }
 #else
 #define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                      \
@@ -254,7 +263,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
         uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim,                 \
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
-        GM_ADDR vcache, GM_ADDR slot_mapping)                                                      \
+        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse)                                    \
     {                                                                                              \
     }
 #endif
