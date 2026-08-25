@@ -156,16 +156,34 @@ XRuntime::~XRuntime(void)
     }
     (void)aclrtResetDevice(static_cast<int32_t>(_devid));
 
-    if (_attnInitialized) {
+    if (_position.ptr) {
         (void)aclrtFree(_position.ptr);
+    }
+    if (_slotMapping.ptr) {
         (void)aclrtFree(_slotMapping.ptr);
+    }
+    if (_cachedLens.ptr) {
         (void)aclrtFree(_cachedLens.ptr);
+    }
+    if (_lens.ptr) {
         (void)aclrtFree(_lens.ptr);
+    }
+    if (_queryStartLoc.ptr) {
         (void)aclrtFree(_queryStartLoc.ptr);
+    }
+    if (_blockTables.ptr) {
         (void)aclrtFree(_blockTables.ptr);
+    }
+    if (_tokensPerEpGroupAllEpHost.ptr) {
         (void)aclrtFreeHost(_tokensPerEpGroupAllEpHost.ptr);
+    }
+    if (_agSendBuf.ptr) {
         (void)aclrtFree(_agSendBuf.ptr);
+    }
+    if (_agRecvBuf.ptr) {
         (void)aclrtFree(_agRecvBuf.ptr);
+    }
+    if (_dsaTopkBuffer.ptr) {
         (void)aclrtFree(_dsaTopkBuffer.ptr);
     }
 
@@ -333,34 +351,45 @@ int XRuntime::InitHcclComm(void)
     return 0;
 }
 
-void XRuntime::InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
-                        uint32_t blockSize, uint32_t indexTopK)
+void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
+                        uint64_t maxSeqLen, const std::vector<uint32_t> &blockSizes,
+                        uint32_t indexTopK)
 {
     std::vector<uint32_t> vgatherIndices;
     size_t size;
     void *ptr;
 
-    size = maxBatchedTokens * XDtypeBit(INT64) / 8;
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _position.Init({maxBatchedTokens}, INT64, ptr);
+    switch (attnMeta.version) {
+        case 0:
+            size = maxBatchedTokens * XDtypeBit(INT64) / 8;
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _position.Init({maxBatchedTokens}, INT64, ptr);
+        case 1:
+            size = maxBatchedTokens * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _slotMapping.Init({maxBatchedTokens}, INT32, ptr);
 
-    size = maxBatchedTokens * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _slotMapping.Init({maxBatchedTokens}, INT32, ptr);
+            size = maxBatch * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _cachedLens.Init({maxBatch}, INT32, ptr);
 
-    size = maxBatch * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _cachedLens.Init({maxBatch}, INT32, ptr);
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _lens.Init({maxBatch}, INT32, ptr);
 
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _lens.Init({maxBatch}, INT32, ptr);
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _queryStartLoc.Init({maxBatch}, INT32, ptr);
 
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _queryStartLoc.Init({maxBatch}, INT32, ptr);
-
-    size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize) * XDtypeBit(INT32) / 8;
-    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _blockTables.Init({maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)}, INT32, ptr);
+            size = maxBatch * DIV_ROUND_UP(maxSeqLen, blockSizes[0]) * XDtypeBit(INT32) / 8;
+            CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+            _blockTables.Init({maxBatch, DIV_ROUND_UP(maxSeqLen, blockSizes[0])}, INT32, ptr);
+            break;
+        case 2:
+            break;
+        default:
+            throw std::runtime_error(std::string(__func__) +
+                                     ": unsupported attention meta version " +
+                                     std::to_string(attnMeta.version));
+    }
 
     size = _moeEpSize * _moeEpSize * XDtypeBit(INT32) / 8;
     CHECK_ACL(aclrtMallocHost(&ptr, size));
@@ -409,7 +438,7 @@ void XRuntime::PrepareCommBuffers(uint64_t maxBatch, uint32_t hiddenSize, uint32
 }
 
 static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint32_t batchedTokens,
-                            uint32_t maxNumBlocks)
+                            std::vector<uint32_t> blockSizes, uint32_t maxTotalLens)
 {
     if (attnMeta.lens.shape.size() != 1 || attnMeta.lens.shape[0] < batch) {
         throw std::runtime_error(
@@ -430,7 +459,12 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
                                                     : attnMeta.queryStartLoc.shape[0]) +
                                  ", expect 1D len >= " + std::to_string(batch));
     }
-    uint32_t expectedKvCacheNum = 1;
+    if (attnMeta.position.shape.size() != 1 || attnMeta.position.shape[0] < batchedTokens) {
+        throw std::runtime_error(
+            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+            ": position shape mismatch, expect 1D len >= " + std::to_string(batchedTokens));
+    }
+    uint32_t expectedKvCacheNum = blockSizes.size();
     if (attnMeta.slotMapping.size() != expectedKvCacheNum) {
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                  ": slotMapping size mismatch, expect " +
@@ -443,22 +477,20 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
                                  std::to_string(expectedKvCacheNum) + " got " +
                                  std::to_string(attnMeta.blockTables.size()));
     }
-    if (attnMeta.slotMapping[0].shape.size() != 1 ||
-        attnMeta.slotMapping[0].shape[0] < batchedTokens) {
-        throw std::runtime_error(
-            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-            ": slotMapping shape mismatch, expect 1D len >= " + std::to_string(batchedTokens));
-    }
-    if (attnMeta.blockTables[0].shape.size() != 2 || attnMeta.blockTables[0].shape[0] < batch ||
-        attnMeta.blockTables[0].shape[1] < maxNumBlocks) {
-        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": blockTables shape mismatch, expect 2D [batch, >= " +
-                                 std::to_string(maxNumBlocks) + "]");
-    }
-    if (attnMeta.position.shape.size() != 1 || attnMeta.position.shape[0] < batchedTokens) {
-        throw std::runtime_error(
-            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-            ": position shape mismatch, expect 1D len >= " + std::to_string(batchedTokens));
+    for (size_t i = 0; i < expectedKvCacheNum; i++) {
+        if (attnMeta.slotMapping[i].shape.size() != 1 ||
+            attnMeta.slotMapping[i].shape[0] < batchedTokens) {
+            throw std::runtime_error(
+                std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                ": slotMapping shape mismatch, expect 1D len >= " + std::to_string(batchedTokens));
+        }
+        uint32_t maxNumBlocks = DIV_ROUND_UP(maxTotalLens, blockSizes[i]);
+        if (attnMeta.blockTables[i].shape.size() != 2 || attnMeta.blockTables[i].shape[0] < batch ||
+            attnMeta.blockTables[i].shape[1] < maxNumBlocks) {
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": blockTables shape mismatch, expect 2D [batch, >= " +
+                                     std::to_string(maxNumBlocks) + "]");
+        }
     }
 }
 
@@ -466,6 +498,9 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
 // Verify v2 device tensors equal what v1's host-side algorithm would produce.
 void XRuntime::VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, std::vector<uint32_t> blockSizes)
 {
+    if (IsDummyRuntime()) {
+        return;
+    }
     const uint32_t batch = _batch;
     const uint32_t batchedTokens = this->batchedTokens;
     const uint32_t maxNumBlocks = attnMeta.blockTables[0].shape[1];
@@ -581,7 +616,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                            int weightsDtype, uint32_t indexTopK)
 {
     if (!_attnInitialized) {
-        InitAttn(maxBatchedTokens, maxBatch, maxSeqLen, blockSizes[0], indexTopK);
+        InitAttn(attnMeta, maxBatchedTokens, maxBatch, maxSeqLen, blockSizes, indexTopK);
         bool agInGraph = AllGatherInGraphActive(DP);
         bool rsInGraph = ReduceScatterInGraphActive(DP);
         if (defDpSize > 1 && (agInGraph || rsInGraph)) {
@@ -614,9 +649,10 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     std::vector<uint32_t> cachedLens(batch);
     std::vector<uint32_t> queryStartLoc(batch);
     std::vector<uint32_t> numBlocks(batch);
+    std::vector<uint32_t> totalLens(batch);
     std::vector<uint32_t> slotMapping, blockTables;
     std::vector<uint64_t> position;
-    uint32_t queryStart, blockId, id, k, maxNumBlocks;
+    uint32_t queryStart, blockId, id, k, maxTotalLens;
     size_t size;
 
     if (batch == 0) {
@@ -624,8 +660,14 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                  ": invalid batchSize: " + std::to_string(batch));
     }
 
+    if (attnMeta.attnType == XMODEL_ATTN_CXA && blockSizes.size() < CXA_SWA_KV + 1) {
+        throw std::runtime_error(
+            std::string(__func__) + ":" + std::to_string(__LINE__) +
+            ": invalid blockSizes for CXA, expect size >= " + std::to_string(CXA_SWA_KV + 1));
+    }
+
     batchedTokens = 0;
-    maxNumBlocks = 0;
+    maxTotalLens = 0;
     _batch = batch;
     queryStart = 0;
     bool allCached = true;
@@ -633,11 +675,12 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     for (uint32_t i = 0; i < batch; i++) {
         lens[i] = attnMeta.lensCpu[i];
         cachedLens[i] = attnMeta.cachedLensCpu[i];
+        totalLens[i] = lens[i] + cachedLens[i];
         queryStartLoc[i] = queryStart;
         queryStart += lens[i];
-        numBlocks[i] = DIV_ROUND_UP(lens[i] + cachedLens[i], blockSizes[0]);
-        maxNumBlocks = numBlocks[i] > maxNumBlocks ? numBlocks[i] : maxNumBlocks;
+        maxTotalLens = totalLens[i] > maxTotalLens ? totalLens[i] : maxTotalLens;
         batchedTokens += lens[i];
+        numBlocks[i] = DIV_ROUND_UP(totalLens[i], blockSizes[0]);
         if (cachedLens[i] == 0) {
             allCached = false;
         }
@@ -658,20 +701,23 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                  std::to_string(maxBatchedTokens) + ")");
     }
 
-    if (IsDummyRuntime() || maxNumBlocks * blockSizes[0] <= MAX_KV_TILE_SIZE) {
+    if (IsDummyRuntime() || maxTotalLens <= MAX_KV_TILE_SIZE) {
         _tileSizeOfCachedKV = MAX_KV_TILE_SIZE;
     } else {
         uint32_t localHeads = std::max(nHeads / _tpSize, static_cast<uint32_t>(1));
         uint32_t localKvHeads = std::max(nKVHeads / _tpSize, static_cast<uint32_t>(1));
-        _tileSizeOfCachedKV = GetTileSizeOfCachedKV(cachedLens, lens, localHeads / localKvHeads,
-                                                    localKvHeads, blockSizes[0], aicNum);
+        _tileSizeOfCachedKV = GetTileSizeOfCachedKV(
+            cachedLens, lens, localHeads / localKvHeads, localKvHeads,
+            attnMeta.attnType == XMODEL_ATTN_CXA ? blockSizes[CXA_COMPRESS_KV] : blockSizes[0],
+            aicNum);
     }
 
     size = batch * XDtypeBit(INT32) / 8;
 
     switch (attnMeta.version) {
         case 0:
-        case 1:
+        case 1: {
+            uint32_t maxNumBlocks = DIV_ROUND_UP(maxTotalLens, blockSizes[0]);
             CHECK_ACL(aclrtMemcpyAsync(_lens.ptr, size, lens.data(), size,
                                        ACL_MEMCPY_HOST_TO_DEVICE, stream));
             CHECK_ACL(aclrtMemcpyAsync(_cachedLens.ptr, size, cachedLens.data(), size,
@@ -710,17 +756,17 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                        ACL_MEMCPY_HOST_TO_DEVICE, stream));
             _attnSlotMapping = {_slotMapping};
 
-            _maxNumBlocks = maxNumBlocks;
-            blockTables.resize(batch * _maxNumBlocks);
+            blockTables.resize(batch * maxNumBlocks);
             for (uint32_t i = 0; i < batch; i++) {
                 for (uint32_t j = 0; j < numBlocks[i]; j++) {
-                    blockTables[i * _maxNumBlocks + j] = attnMeta.blockTablesCpu[i][j];
+                    blockTables[i * maxNumBlocks + j] = attnMeta.blockTablesCpu[i][j];
                 }
             }
-            size = batch * _maxNumBlocks * XDtypeBit(INT32) / 8;
+            size = batch * maxNumBlocks * XDtypeBit(INT32) / 8;
             CHECK_ACL(aclrtMemcpyAsync(_blockTables.ptr, size, blockTables.data(), size,
                                        ACL_MEMCPY_HOST_TO_DEVICE, stream));
             _attnBlockTables = {_blockTables};
+            _attnBlockTables[0].View({batch, maxNumBlocks});
             if (attnMeta.version == 0) {
                 size = batchedTokens * XDtypeBit(INT64) / 8;
                 CHECK_ACL(aclrtMemcpyAsync(_position.ptr, size, position.data(), size,
@@ -730,14 +776,14 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                 _attnPosition = attnMeta.position;
             }
             break;
+        }
         case 2: {
             // Version 2: lens / cachedLens / queryStartLoc / slotMapping / blockTables are
             // pre-built on the Python side as device tensors; shape-check and alias (zero copy).
-            CheckAttnMetaV2(attnMeta, batch, batchedTokens, maxNumBlocks);
+            CheckAttnMetaV2(attnMeta, batch, batchedTokens, blockSizes, maxTotalLens);
 #ifdef XLITE_DEBUG_ON
             VerifyAttnMetaV2(attnMeta, blockSizes);
 #endif
-            _maxNumBlocks = attnMeta.blockTables[0].shape[1];
             _attnLens = attnMeta.lens;
             _attnCachedLens = attnMeta.cachedLens;
             _attnQueryStartLoc = attnMeta.queryStartLoc;
