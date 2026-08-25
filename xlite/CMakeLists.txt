@@ -57,6 +57,7 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reorder_moe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/concat.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/split.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/repeat_interleave.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_float.cpp

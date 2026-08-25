@@ -557,6 +557,36 @@ function run_qwen3_5_0.8B()
     rm $test_config_path
 }
 
+function run_qwen3_5_27B()
+{
+    echo '{
+        "vocab_size": 248320,
+        "dim": 5120,
+        "head_dim": 256,
+        "inter_dim": 17408,
+        "n_layers": 64,
+        "n_heads": 24,
+        "n_kv_heads": 4,
+        "norm_eps": 1e-06,
+        "rope_theta": 10000000.0,
+        "dtype": "bfloat16",
+        "tie_word_embeddings": false,
+        "qkv_bias": false,
+        "qk_norm": true,
+        "full_attention_interval": 4,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 48,
+        "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4,
+        "partial_rotary_factor": 0.25,
+        "max_batch_size": 1,
+        "max_seq_len": 1024
+    }' > $test_config_path
+    python tests/generate.py --model qwen3_5 --ckpt-path $models_base_path/Qwen3.5-27B/ --config $test_config_path ${RUN_ARGS[@]}
+    rm $test_config_path
+}
+
 function run_qwen3_5_moe_35B()
 {
     echo '{

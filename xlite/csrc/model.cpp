@@ -693,22 +693,8 @@ void ExpandLinearHeads(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numToke
     if (nVHeads % nKHeads != 0) {
         throw std::runtime_error("ForwardAttnLinear: num_v_heads must be divisible by num_k_heads");
     }
-    uint32_t expand = nVHeads / nKHeads;
-    size_t headBytes = headDim * XDtypeBit(in.dtype) / 8;
-    size_t inRowBytes = nKHeads * headDim * XDtypeBit(in.dtype) / 8;
-    size_t outRowBytes = nVHeads * headDim * XDtypeBit(in.dtype) / 8;
-    for (uint32_t t = 0; t < numTokens; ++t) {
-        auto *srcRow = static_cast<uint8_t *>(in.ptr) + t * inRowBytes;
-        auto *dstRow = static_cast<uint8_t *>(out.ptr) + t * outRowBytes;
-        for (uint32_t h = 0; h < nKHeads; ++h) {
-            auto *srcHead = srcRow + h * headBytes;
-            for (uint32_t e = 0; e < expand; ++e) {
-                auto *dstHead = dstRow + (h * expand + e) * headBytes;
-                CHECK_ACL(aclrtMemcpyAsync(dstHead, headBytes, srcHead, headBytes,
-                                           ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
-            }
-        }
-    }
+    uint32_t headBytes = headDim * XDtypeBit(in.dtype) / 8;
+    XliteOpRepeatInterleave(rt, in, out, numTokens, nKHeads, nVHeads, headBytes);
 }
 
 void ZeroLinearStateSlot(XRuntime &rt, XTensor &state, uint32_t batchIdx, uint32_t slotElems)

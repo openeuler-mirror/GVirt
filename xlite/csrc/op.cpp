@@ -38,6 +38,24 @@ static inline uint32_t CopyKernelBlockNum(const XRuntime &rt, uint64_t totalByte
     return static_cast<uint32_t>(needed);
 }
 
+// Pick how many AIV blocks to launch for a small per-segment kernel (e.g.
+// repeat_interleave) based on the number of segments. Decode (~48 segments)
+// uses a few blocks to avoid multi-core launch + pipe_barrier sync overhead;
+// prefill (~24576 segments) saturates all aivNum cores. tilePerCore keeps
+// per-block work well above launch cost (~2 us).
+static inline uint32_t ConvKernelBlockNum(const XRuntime &rt, uint64_t totalSegs,
+                                          uint64_t tilePerCore = 4096)
+{
+    if (totalSegs == 0 || rt.aivNum <= 1) {
+        return 1;
+    }
+    uint64_t needed = DIV_ROUND_UP(totalSegs, tilePerCore);
+    if (needed >= rt.aivNum) {
+        return rt.aivNum;
+    }
+    return static_cast<uint32_t>(needed);
+}
+
 HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
     switch (dtype) {
@@ -1569,6 +1587,32 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, scores.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, headDim, blockSize, batch,
                  maxNumBlock);
+}
+
+void XliteOpRepeatInterleave(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numTokens,
+                             uint32_t nKHeads, uint32_t nVHeads, uint32_t headBytes)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (numTokens == 0 || nKHeads == 0 || nVHeads == 0 || headBytes == 0) {
+        throw std::runtime_error(std::string(__func__) + ": invalid dims");
+    }
+    if (nVHeads % nKHeads != 0) {
+        throw std::runtime_error(std::string(__func__) + ": nVHeads must be divisible by nKHeads");
+    }
+    // kernel stages one segment in half the UB; reject oversized heads here
+    constexpr uint64_t kMaxHeadBytes = 96 * 1024;
+    if (headBytes > kMaxHeadBytes) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": headBytes exceeds kernel staging capacity");
+    }
+    uint64_t totalSegs = static_cast<uint64_t>(numTokens) * nVHeads;
+    // Scale AIV blocks to the number of output head segments: decode (~48 segs)
+    // uses a handful of cores; prefill (~24576 segs) saturates all cores.
+    uint32_t numBlocks = ConvKernelBlockNum(rt, totalSegs, /*tilePerCore=*/4096);
+    aclrtlaunch_repeat_interleave(numBlocks, rt.stream, in.ptr, out.ptr, numTokens, nKHeads,
+                                  nVHeads, headBytes);
 }
 
 void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight, XTensor &scores,
