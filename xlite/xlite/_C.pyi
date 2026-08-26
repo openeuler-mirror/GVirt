@@ -1759,6 +1759,8 @@ def rope_complex(
     freqs: torch.Tensor,
     position: torch.Tensor,
     output: torch.Tensor,
+    inverse: bool = False,
+    out_interleaved: bool = False,
 ) -> None:
     """Apply complex-domain rotary embedding helper.
 
@@ -1771,6 +1773,11 @@ def rope_complex(
         freqs (torch.Tensor): Rotary frequency tensor.
         position (torch.Tensor): Position tensor.
         output (torch.Tensor): Output tensor.
+        inverse (bool): If True, apply the conjugate (reverse) rotation.
+        out_interleaved (bool): If True, write the rope result interleaved
+            ``[r0,i0,r1,i1,...]`` (matches torch ``view_as_real().flatten``);
+            otherwise write the deinterleaved half layout
+            ``[r0..r(half-1) | i0..i(half-1)]`` (MLA/DSA kv-cache convention).
 
     Returns:
         None: Output is produced in place according to kernel contract.
