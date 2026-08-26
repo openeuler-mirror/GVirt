@@ -113,6 +113,7 @@ public:
             offZero = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
             off += 256;
         }
+        fastPath = (kDim == 128 && vDim == 128 && sizeof(Dtype) == 2) ? 1u : 0u;
         assert(off <= UB_SIZE);
     }
 
@@ -262,13 +263,16 @@ public:
         return static_cast<uint32_t>(reinterpret_cast<__ubuf__ int32_t *>(outTmp)[0]);
     }
 
-    // Hard V fence for vgather/vconv producers (S round trip through event
-    // flags; a bare pipe_barrier(PIPE_V) does not order their UB writeback
-    // before dependent vector reads on this part).
-    __aicore__ inline void VFence()
+    // vgather/vconv producers need an S-roundtrip event fence on this part;
+    // pipe_barrier(PIPE_V) alone does not order their UB writeback.
+    __aicore__ inline void VFenceVToS()
     {
         set_flag(PIPE_V, PIPE_S, EVENT_ID1);
         wait_flag(PIPE_V, PIPE_S, EVENT_ID1);
+    }
+
+    __aicore__ inline void VFenceSToV()
+    {
         set_flag(PIPE_S, PIPE_V, EVENT_ID1);
         wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
     }
@@ -281,7 +285,7 @@ public:
             uint32_t baseAddr = (uint32_t)((uint64_t)srcF + (uint64_t)i * sizeof(float));
             vgather((__ubuf__ uint32_t *)(dst + i * 64), offZero, baseAddr, 8, 1);
         }
-        VFence();
+        VFenceVToS();
     }
 
     // kv[0..63] = sum over the 128 rows of prod[128][64] (tree of strided
@@ -300,18 +304,17 @@ public:
     //   state = state*exp(g) + k[.]*delta[.]  (scalar scale + broadcast vmadd)
     //   out  = sum_k state[k,v]*q[k]          (matvec, 2 V-halves)
     // All element math is pure vector ops on [128][64] tiles; no per-element
-    // scalar operands (register-reuse hazard) and ~30 barriers per token
-    // instead of ~770.
+    // scalar operands (register-reuse hazard on this part).
     __aicore__ inline void TokenStepFast(uint32_t t, float gExp, float betaVal, uint32_t h)
     {
         uint32_t qkOff = t * numHeads * kDim + h * kDim;
         uint32_t vOff = t * numHeads * vDim + h * vDim;
-        uint32_t bgOff = t * numHeads + h;
 
         LoadVec(qF, query + qkOff, qIn, kDim, qkBlocks, kRepeat);
         LoadVec(kF, key + qkOff, kIn, kDim, qkBlocks, kRepeat);
         LoadVec(vF, value + vOff, vIn, vDim, vBlocks, vRepeat);
-        VFence();  // vconv (LoadVec bf16->f32) writeback must land before vgather reads
+        VFenceVToS();  // vconv writeback must land before vgather reads kF/qF
+        VFenceSToV();
 
         // q *= scale
         set_flag(PIPE_S, PIPE_V, EVENT_ID0);
@@ -324,6 +327,7 @@ public:
 
         // kTile rows broadcast from kF
         BuildBroadcastTile(tile, kF);
+        VFenceSToV();
 
         // ---- kv = sum_k state[k,v]*k[k], per V-half ----
         for (uint32_t half = 0; half < 2; ++half) {
@@ -356,6 +360,7 @@ public:
 
         // qTile rows broadcast from qF (reuses the tile buffer)
         BuildBroadcastTile(tile, qF);
+        VFenceSToV();
 
         // ---- out = sum_k state[k,v]*q[k], per V-half ----
         for (uint32_t half = 0; half < 2; ++half) {
@@ -395,9 +400,7 @@ public:
             tokenLen = seqlen;
         }
 
-        // Fast path needs the tile/prod/offZero buffers, which are only
-        // allocated for 16-bit dtypes (fp32 would overflow UB, see Init).
-        bool fastPath = (kDim == 128 && vDim == 128 && sizeof(Dtype) == 2);
+        // Fast path needs the tile/prod/offZero buffers (see Init).
         for (uint32_t s = 0; s < tokenLen; ++s) {
             uint32_t t = tokenStart + s;
             uint32_t qkOff = t * numHeads * kDim + h * kDim;
@@ -494,9 +497,7 @@ public:
         if (kDim > GDR_MAX_K_DIM || vDim > GDR_MAX_V_DIM || kDim == 0 || vDim == 0) {
             return;
         }
-        // all-zero lane-offset ramp for the broadcast vgather (fast path);
-        // offZero is only allocated for 16-bit dtypes (see Init).
-        if (offZero != nullptr) {
+        if (fastPath) {
             for (int p = 0; p < 64; ++p) {
                 offZero[p] = 0;
             }
@@ -547,6 +548,7 @@ private:
     uint32_t kDim;
     uint32_t vDim;
     float scale;
+    uint32_t fastPath = 0;
     uint32_t qkBytes;
     uint32_t vBytes;
     uint32_t stateBytes;
