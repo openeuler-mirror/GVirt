@@ -184,6 +184,11 @@ public:
     bool enableMoEAllToAll = false;
     double activeTokensRatioPerEp = 1.0f;
 
+    // cross-layer buffer
+    XTensor _dsaTopkBuffer;  // int32, buffer for storing topk results, allocated via aclrtMalloc
+    XTensor *dsaPerLayerTopk = nullptr;  // ptr to the **current** layer's topk result, either a
+                                         // nullptr (no topk needed) or a ptr to _dsaTopkBuffer
+
     XcclComm *_tpXcclComm = nullptr;
     XcclComm *_dpXcclComm = nullptr;
     XcclComm *_epXcclComm = nullptr;
@@ -222,8 +227,6 @@ public:
     XTensor _cachedLens;   // [maxBatch] int32, internal buffer
     XTensor _lens;         // [maxBatch] int32, internal buffer
     XTensor _queryStartLoc;  // [maxBatch] int32, internal buffer
-    XTensor _dsaTopkBuffer;  // int32_t, cross-layer shared topk
-    bool _dsaTopkValid = false;
     // Host copy of per-request query lengths from PrepareAttn (mixed-length linear attn).
     std::vector<uint32_t> _hostLens;
 
