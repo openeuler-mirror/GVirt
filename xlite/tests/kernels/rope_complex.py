@@ -28,12 +28,19 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     return freqs_cis.to("npu")
 
 
-def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False,
+                     interleaved: bool = False) -> torch.Tensor:
     """
     Applies rotary positional embeddings to the input tensor.
     Based on tests/models/deepseek_v3.py apply_rotary_emb function.
     When inverse=True, applies the conjugate (reverse) rotation by taking the
     complex conjugate of freqs_cis.
+
+    interleaved selects the output layout:
+      False -> deinterleaved half layout [r0..r(half-1) | i0..i(half-1)]
+               (MLA/DSA kv-cache convention, matches xlite out_interleaved=False)
+      True  -> interleaved layout [r0,i0,r1,i1,...]
+               (torch view_as_real().flatten convention, matches xlite out_interleaved=True)
     """
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
@@ -41,7 +48,10 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = F
         freqs_cis = freqs_cis.conj()
     freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
     y = torch.view_as_real(x * freqs_cis)  # shape: (..., half_dim, 2)
-    y = torch.cat([y[..., 0], y[..., 1]], dim=-1)  # TWTWTW -> TTTWWW
+    if interleaved:
+        y = y.flatten(-2)  # TWTWTW
+    else:
+        y = torch.cat([y[..., 0], y[..., 1]], dim=-1)  # TWTWTW -> TTTWWW
     return y.to(dtype)
 
 
@@ -65,43 +75,48 @@ test_cases = [
 
 for test_dtype, rope_dim, q_dim in test_cases:
     for inverse in (False, True):
-        n_local_heads = 64
-        num_tokens = BATCH_SIZE * SEQ_LEN
+        for out_interleaved in (False, True):
+            n_local_heads = 64
+            num_tokens = BATCH_SIZE * SEQ_LEN
 
-        torch.set_default_dtype(test_dtype)
-        with torch.device("npu"):
-            attnQWithQr = torch.randn(num_tokens, n_local_heads, q_dim)
-            freqs_cis = precompute_freqs_cis(rope_dim, MAX_SEQ_LEN, ROPE_THETA)[0:SEQ_LEN]
+            torch.set_default_dtype(test_dtype)
+            with torch.device("npu"):
+                attnQWithQr = torch.randn(num_tokens, n_local_heads, q_dim)
+                freqs_cis = precompute_freqs_cis(rope_dim, MAX_SEQ_LEN, ROPE_THETA)[0:SEQ_LEN]
 
-            attnQWithQr_xlite = attnQWithQr.clone()
-            freqs_cis_xlite = freqs_cis.clone()
+                attnQWithQr_xlite = attnQWithQr.clone()
+                freqs_cis_xlite = freqs_cis.clone()
 
-            position = torch.arange(SEQ_LEN, dtype=torch.int64).repeat(BATCH_SIZE)
-            output_xlite = torch.randn(num_tokens, n_local_heads, rope_dim)
+                position = torch.arange(SEQ_LEN, dtype=torch.int64).repeat(BATCH_SIZE)
+                output_xlite = torch.randn(num_tokens, n_local_heads, rope_dim)
 
-        # standard
-        # Reshape to (bsz, seqlen, n_local_heads, q_dim) for apply_rotary_emb
-        attnQWithQr_reshaped = attnQWithQr.view(BATCH_SIZE, SEQ_LEN, n_local_heads, q_dim)
-        # Extract only the rope part (last rope_dim elements)
-        q_pe_input = attnQWithQr_reshaped[..., -rope_dim:]
-        # Reshape to (bsz, seqlen, n_local_heads, rope_dim) for apply_rotary_emb
-        q_pe_input = q_pe_input.contiguous()
-        q_pe_standard = apply_rotary_emb(q_pe_input, freqs_cis, inverse=inverse)
-        # Reshape back to (num_tokens, n_local_heads, rope_dim)
-        q_pe_standard = q_pe_standard.view(num_tokens, n_local_heads, rope_dim)
+            # standard
+            # Reshape to (bsz, seqlen, n_local_heads, q_dim) for apply_rotary_emb
+            attnQWithQr_reshaped = attnQWithQr.view(BATCH_SIZE, SEQ_LEN, n_local_heads, q_dim)
+            # Extract only the rope part (last rope_dim elements)
+            q_pe_input = attnQWithQr_reshaped[..., -rope_dim:]
+            # Reshape to (bsz, seqlen, n_local_heads, rope_dim) for apply_rotary_emb
+            q_pe_input = q_pe_input.contiguous()
+            q_pe_standard = apply_rotary_emb(q_pe_input, freqs_cis, inverse=inverse,
+                                             interleaved=out_interleaved)
+            # Reshape back to (num_tokens, n_local_heads, rope_dim)
+            q_pe_standard = q_pe_standard.view(num_tokens, n_local_heads, rope_dim)
 
-        # xlite
-        torch.npu.synchronize()
-        rope_complex(rt, n_local_heads, q_dim, rope_dim, attnQWithQr_xlite,
-                    freqs_cis_xlite, position, output_xlite, inverse=inverse)
-        torch.npu.synchronize()
+            # xlite
+            torch.npu.synchronize()
+            rope_complex(rt, n_local_heads, q_dim, rope_dim, attnQWithQr_xlite,
+                        freqs_cis_xlite, position, output_xlite, inverse=inverse,
+                        out_interleaved=out_interleaved)
+            torch.npu.synchronize()
 
-        tag = "inverse" if inverse else "forward"
-        logging.info(f'rope_complex ({tag}, rope_dim={rope_dim}, q_dim={q_dim}, {test_dtype}) executed!')
+            tag = "inverse" if inverse else "forward"
+            lay = "interleaved" if out_interleaved else "deinterleaved"
+            logging.info(f'rope_complex ({tag}, {lay}, rope_dim={rope_dim}, q_dim={q_dim}, '
+                         f'{test_dtype}) executed!')
 
-        try:
-            torch.testing.assert_close(q_pe_standard, output_xlite, atol=1e-5, rtol=1e-3)
-        except AssertionError as e:
-            logging.error(f'{e}')
-            logging.error(f'torch_npu: {q_pe_standard}')
-            logging.error(f'xlite: {output_xlite}')
+            try:
+                torch.testing.assert_close(q_pe_standard, output_xlite, atol=1e-5, rtol=1e-3)
+            except AssertionError as e:
+                logging.error(f'{e}')
+                logging.error(f'torch_npu: {q_pe_standard}')
+                logging.error(f'xlite: {output_xlite}')

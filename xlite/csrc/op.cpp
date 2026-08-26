@@ -1036,7 +1036,8 @@ void XliteOpMLAV3(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kDenseCa
 
 void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t outStepDim,
                         uint32_t ropeDim, uint32_t offset, uint32_t outOffset, XTensor &inputWithR,
-                        XTensor &freqs, XTensor &position, XTensor &output, bool inverse)
+                        XTensor &freqs, XTensor &position, XTensor &output, bool inverse,
+                        bool outInterleaved)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1053,13 +1054,14 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
     }
     launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
                  0, inputWithR.ptr, output.ptr, outStepDim, outOffset, freqs.ptr, position.ptr, 0,
-                 nullptr, nullptr, inverse ? 1u : 0u);
+                 nullptr, nullptr, inverse ? 1u : 0u, outInterleaved ? 1u : 0u);
 }
 
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
                                 uint32_t ropeDim, uint32_t offset, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
-                                uint32_t blockSize, XTensor &vCache, XTensor &slotMapping)
+                                uint32_t blockSize, XTensor &vCache, XTensor &slotMapping,
+                                bool outInterleaved)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1076,7 +1078,7 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
     }
     launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
                  vdim, inputWithR.ptr, nullptr, 0, 0, freqs.ptr, position.ptr, blockSize,
-                 vCache.ptr, slotMapping.ptr, 0u);
+                 vCache.ptr, slotMapping.ptr, 0u, outInterleaved ? 1u : 0u);
 }
 
 void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
