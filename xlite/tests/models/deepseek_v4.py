@@ -10,6 +10,7 @@
 import os
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple, Optional, Literal
 from functools import lru_cache
 
@@ -102,6 +103,8 @@ class ModelArgs:
     moe_ep_size: int = 8
     moe_tp_size: int = 1
     quantization: Literal["none", "w8a8"] = "w8a8"
+    # the raw model config path
+    config_path: Optional[Path] = None
 
 
 class ParallelEmbedding(nn.Module):

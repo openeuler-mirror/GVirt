@@ -356,8 +356,8 @@ void XModel::ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x,
     rt.PutTensor(xQuanted);
 }
 
-XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
-                                    XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
+void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                                XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
 {
     // TODO not interleaved case
     if (!_c.indexRopeInterleaved) {
@@ -385,13 +385,15 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
 
     if (!isLong) {
         rt.PutTensor(kw);
-        return nullptr;
+        rt.dsaPerLayerTopk = nullptr;
+        return;
     }
 
     XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
                                    hiddenState.dtype, DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
-    rt._dsaTopkBuffer.View({hiddenState.shape[0], _c.indexTopK});
+    rt._dsaTopkBuffer.View(hiddenState.shape[0]);
+    rt.dsaPerLayerTopk = &rt._dsaTopkBuffer;
     XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices,
                        rt._dsaTopkBuffer, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
                        rt._attnBlockTables[0], _sync, _c.indexNHeads, _c.indexHeadDim,
@@ -400,8 +402,6 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     rt.PutTensor(*qPtr);
     rt.PutTensor(lastTopk);
     rt.PutTensor(scores);
-    rt._dsaTopkValid = true;
-    return &rt._dsaTopkBuffer;
 }
 
 std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
@@ -455,16 +455,12 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
     auto [attnQWithQr, qPe, attnNormQc] =
         ForwardAttnMLACommonV2(rt, layer, kvCache, freqsCis, hiddenState);
 
-    XTensor *topkIndices = nullptr;
-    if (_c.attnType == XMODEL_ATTN_DSA) {
-        // DSA top-k sharing: shared layers reuse prev full layer's topkIndices.
-        if (layer < _c.indexerSkipLayers.size() && _c.indexerSkipLayers[layer]) {
-            topkIndices = rt._dsaTopkValid ? &rt._dsaTopkBuffer : nullptr;
-        } else {
-            topkIndices =
-                ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
-        }
+    if (_c.attnType == XMODEL_ATTN_DSA &&
+        (layer >= _c.indexFullMask.size() || _c.indexFullMask[layer])) {
+        // For shared indexer, only update the current topk for a full indexer layer
+        ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
     }
+    XTensor *topkIndices = rt.dsaPerLayerTopk;
     rt.PutTensor(attnNormQc);
 
     XTensor &qAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},

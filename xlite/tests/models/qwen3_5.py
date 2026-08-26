@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Literal
 
 import os
@@ -87,6 +88,8 @@ class ModelArgs:
     model_type: str = "qwen3_5"
     # RoPE parameters
     partial_rotary_factor: float = 0.25  # Only 25% of head_dim gets rotary embeddings
+    # the raw model config path
+    config_path: Optional[Path] = None
 
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size

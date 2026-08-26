@@ -60,7 +60,7 @@ struct XModelConfig {
     uint32_t indexTopK;
     float indexSoftmaxScale;
     bool indexRopeInterleaved = false;
-    std::vector<bool> indexerSkipLayers;
+    std::vector<bool> indexFullMask;  // per-layer indexer mask - true: full indexer, false: shared
 
     // linear attention config
     uint32_t linearNumKHeads = 0;
@@ -264,8 +264,8 @@ private:
     std::tuple<XTensor &, XTensor &, XTensor &> ForwardAttnMLACommonV2(
         XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
         XTensor &hiddenState);
-    XTensor *ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
-                                XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis);
+    void ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState, XTensor &attnNormQc,
+                            XTensor &indexKCache, XTensor &freqsCis);
     void ForwardAttnMLAV2(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                           XTensor &freqsCis, XTensor &hiddenState);
     void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);

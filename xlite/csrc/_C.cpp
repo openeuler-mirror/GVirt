@@ -611,10 +611,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 if (!mlaKVNormBias.empty()) {
                     InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
                 }
-                // DSA top-k sharing: skip indexer weight binding on shared layers. Empty list
-                // (e.g. consumers without GLM-5.2 support) = no sharing, bind every layer.
-                if (c.indexerSkipLayers.empty() ||
-                    (i < c.indexerSkipLayers.size() && !c.indexerSkipLayers[i])) {
+                // DSA top-k sharing: skip indexer weight binding on shared layers.
+                if (i >= c.indexFullMask.size() || c.indexFullMask[i]) {
                     InitMatmulWeight("indexQB", indexQB, indexQBInputScale, indexQBInputOffset,
                                      indexQBQuantBias, indexQBDeqScale, _model->indexQB, i, false,
                                      tpRank);
@@ -732,7 +730,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
     _model->Init();
 
-    if (rankId == 0) {
+    if (rankId % c.defTpSize == 0) {
         XDebugStream s(rankId, "");
         s << "Euler Xlite Model Inited! [tensor paralled(" << c.defTpSize << "), data parallel("
           << c.defDpSize << "), expert parallel(" << c.moeEpSize << ")]" << std::endl;
@@ -2379,7 +2377,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_topk", &XModelConfig::indexTopK)
         .def_readwrite("index_softmax_scale", &XModelConfig::indexSoftmaxScale)
         .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved)
-        .def_readwrite("indexer_skip_layers", &XModelConfig::indexerSkipLayers)
+        .def_readwrite("index_full_mask", &XModelConfig::indexFullMask)
         .def_readwrite("linear_num_k_heads", &XModelConfig::linearNumKHeads)
         .def_readwrite("linear_num_v_heads", &XModelConfig::linearNumVHeads)
         .def_readwrite("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)

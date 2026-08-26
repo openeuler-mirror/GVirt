@@ -8,7 +8,8 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Literal, Optional
 
 
 @dataclass
@@ -42,6 +43,8 @@ class ModelArgs:
     moe_ep_size: int = 1
     moe_tp_size: int = 1
     model_type: str = "minimax_m2"
+    # the raw model config path
+    config_path: Optional[Path] = None
 
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size

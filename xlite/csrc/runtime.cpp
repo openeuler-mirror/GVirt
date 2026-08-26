@@ -640,10 +640,6 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         }
         _attnInitialized = true;
     }
-    // Reset cross-layer topk state per step, first full layer repopulates it.
-    if (indexTopK > 0) {
-        _dsaTopkValid = false;
-    }
     uint32_t batch = attnMeta.lensCpu.size();
     std::vector<uint32_t> lens(batch);
     std::vector<uint32_t> cachedLens(batch);
