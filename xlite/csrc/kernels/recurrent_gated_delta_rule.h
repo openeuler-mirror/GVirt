@@ -102,9 +102,6 @@ public:
         //   tile [128][64] fp32 broadcast tile (kF or qF rows), 32KB
         //   prod [128][64] fp32 matvec product tile, 32KB
         //   offZero: all-zero lane-offset ramp for broadcast vgather.
-        tile = nullptr;
-        prod = nullptr;
-        offZero = nullptr;
         // 16-bit dtypes only: for fp32 the 16-bit staging buffers
         // (qIn/kIn/vIn/stateIn/outTmp) double in size and tile+prod would push
         // total UB usage ~6KB over UB_SIZE (192KB); fp32 keeps the slow path.
@@ -539,9 +536,9 @@ private:
     __ubuf__ float *delta;
     __ubuf__ float *outF;
     __ubuf__ float *tmpRow;
-    __ubuf__ float *tile;  // [128][64] fp32 broadcast tile (M4-c fast path)
-    __ubuf__ float *prod;  // [128][64] fp32 product tile
-    __ubuf__ uint32_t *offZero;
+    __ubuf__ float *tile = nullptr;  // [128][64] fp32 broadcast tile (M4-c fast path)
+    __ubuf__ float *prod = nullptr;  // [128][64] fp32 product tile
+    __ubuf__ uint32_t *offZero = nullptr;
     __ubuf__ float *scalarF;
 
     uint32_t batch;
