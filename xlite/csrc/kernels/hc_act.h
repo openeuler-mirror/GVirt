@@ -186,13 +186,12 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
     float scalePre = scaleUb[0];
     float scalePost = headOnly ? 0.0f : scaleUb[1];
     float scaleComb = headOnly ? 0.0f : scaleUb[2];
-    vector_dup(onesUb, 1.0f, repeat, 1, 1, 8, 0);
     if (!headOnly) {
         for (int p = 0; p < hcMult; p++) {
             offRamp[p] = static_cast<uint32_t>(p * sizeof(float));
         }
-        set_flag(PIPE_S, PIPE_V, EVENT_ID4);
     }
+    vector_dup(onesUb, 1.0f, repeat, 1, 1, 8, 0);
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
@@ -283,9 +282,6 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID6 + curr);
         convert_output(outDtypeArr[curr], yCalc, vecRep);
         if (!headOnly) {
-            if (process == block_idx) {
-                wait_flag(PIPE_S, PIPE_V, EVENT_ID4);
-            }
             SetMask(hcMult);
             uint32_t baseAddr = static_cast<uint32_t>(reinterpret_cast<uint64_t>(calcUb + hcMult));
             vgather((__ubuf__ uint32_t *)postOut[curr], offRamp, baseAddr, 8, 1);
