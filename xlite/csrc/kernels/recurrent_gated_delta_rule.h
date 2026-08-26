@@ -102,12 +102,20 @@ public:
         //   tile [128][64] fp32 broadcast tile (kF or qF rows), 32KB
         //   prod [128][64] fp32 matvec product tile, 32KB
         //   offZero: all-zero lane-offset ramp for broadcast vgather.
-        tile = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += ROUND_UP(128 * 64 * sizeof(float), 256);
-        prod = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += ROUND_UP(128 * 64 * sizeof(float), 256);
-        offZero = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        off += 256;
+        tile = nullptr;
+        prod = nullptr;
+        offZero = nullptr;
+        // 16-bit dtypes only: for fp32 the 16-bit staging buffers
+        // (qIn/kIn/vIn/stateIn/outTmp) double in size and tile+prod would push
+        // total UB usage ~6KB over UB_SIZE (192KB); fp32 keeps the slow path.
+        if (sizeof(Dtype) == 2) {
+            tile = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+            off += ROUND_UP(128 * 64 * sizeof(float), 256);
+            prod = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+            off += ROUND_UP(128 * 64 * sizeof(float), 256);
+            offZero = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+            off += 256;
+        }
         assert(off <= UB_SIZE);
     }
 
@@ -390,7 +398,9 @@ public:
             tokenLen = seqlen;
         }
 
-        bool fastPath = (kDim == 128 && vDim == 128);
+        // Fast path needs the tile/prod/offZero buffers, which are only
+        // allocated for 16-bit dtypes (fp32 would overflow UB, see Init).
+        bool fastPath = (kDim == 128 && vDim == 128 && sizeof(Dtype) == 2);
         for (uint32_t s = 0; s < tokenLen; ++s) {
             uint32_t t = tokenStart + s;
             uint32_t qkOff = t * numHeads * kDim + h * kDim;
@@ -487,12 +497,15 @@ public:
         if (kDim > GDR_MAX_K_DIM || vDim > GDR_MAX_V_DIM || kDim == 0 || vDim == 0) {
             return;
         }
-        // all-zero lane-offset ramp for the broadcast vgather (fast path)
-        for (int p = 0; p < 64; ++p) {
-            offZero[p] = 0;
+        // all-zero lane-offset ramp for the broadcast vgather (fast path);
+        // offZero is only allocated for 16-bit dtypes (see Init).
+        if (offZero != nullptr) {
+            for (int p = 0; p < 64; ++p) {
+                offZero[p] = 0;
+            }
+            set_flag(PIPE_S, PIPE_V, EVENT_ID1);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
         }
-        set_flag(PIPE_S, PIPE_V, EVENT_ID1);
-        wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
         uint32_t total = batch * numHeads;
         for (uint32_t idx = GetBlockIdx(); idx < total; idx += GetBlockNum()) {
             uint32_t b = idx / numHeads;
@@ -526,8 +539,8 @@ private:
     __ubuf__ float *delta;
     __ubuf__ float *outF;
     __ubuf__ float *tmpRow;
-    __ubuf__ float *tile;  // [128][64] fp32 broadcast tile (M4-c fast path)
-    __ubuf__ float *prod;  // [128][64] fp32 product tile
+    __ubuf__ float *tile;    // [128][64] fp32 broadcast tile (M4-c fast path)
+    __ubuf__ float *prod;    // [128][64] fp32 product tile
     __ubuf__ uint32_t *offZero;
     __ubuf__ float *scalarF;
 
