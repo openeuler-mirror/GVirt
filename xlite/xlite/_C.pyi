@@ -1609,6 +1609,56 @@ def sigmoid_topk(
     """
     ...
 
+def sqrtsoftplus_hash_topk(
+    rt: Runtime,
+    scores: torch.Tensor,
+    indices: torch.Tensor,
+    bias: torch.Tensor,
+    input_ids: torch.Tensor,
+    tid2eid: torch.Tensor,
+    out_weights: torch.Tensor,
+    routing_map: torch.Tensor,
+    scale: float,
+    top_k: int,
+    hash: bool,
+) -> None:
+    """Compute V4 MoE gate routing (the part below the matmul), sqrtsoftplus only.
+
+    The caller feeds pre-activation ``scores`` (the ``F.linear`` output); this op does
+    the sqrtsoftplus activation, top-k (or hash lookup), gather, normalize, scale.
+
+    Two outputs: a sparse ``[M, n_routed_experts]`` weight row (only the top-k expert
+    slots hold a value, rest 0) and a ``[M, n_routed_experts]`` BIT1 routing bitmap (one
+    bit per selected expert). The dense top-k indices are internal and NOT a GM output.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        scores (torch.Tensor): Pre-activation routing scores ``[M, n_routed_experts]``
+            (bf16 or fp32).
+        indices (torch.Tensor): Identity helper ``[n_routed_experts]`` int32 (``0..N-1``),
+            used as the vbitsort sort-key payload in the non-hash top-k path.
+        bias (torch.Tensor): Per-expert bias ``[n_routed_experts]`` fp32. Pass an empty
+            tensor on hash layers (bias is unused there).
+        input_ids (torch.Tensor): Token ids ``[M]`` int32. Only read when ``hash`` is True;
+            pass an empty tensor on non-hash layers.
+        tid2eid (torch.Tensor): Token-id->expert lookup table
+            ``[vocab_size, n_activated_experts]`` int32. Only read when ``hash`` is True;
+            pass an empty tensor on non-hash layers.
+        scale (float): ``route_scale`` multiplier applied after normalization.
+        out_weights (torch.Tensor): Output SPARSE weights ``[M, n_routed_experts]`` (same
+            dtype as ``scores``) — only the top-k selected experts hold a nonzero weight,
+            the rest are 0.
+        routing_map (torch.Tensor): Output routing bitmap ``[M, n_routed_experts]`` uint32
+            (BIT1, one bit per expert; set for the top-k selected experts).
+        top_k (int): Number of experts selected per token (``n_activated_experts``).
+        hash (bool): If True, route via ``tid2eid[input_ids]`` (first ``n_hash_layers``);
+            else route via ``scores.topk``.
+
+    Returns:
+        None: Output tensors are written in place.
+    """
+    ...
+
 def topk(
     rt: Runtime,
     scores: torch.Tensor,

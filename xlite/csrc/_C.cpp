@@ -1645,6 +1645,26 @@ void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
     rt.Synchronize();
 }
 
+void SqrtsoftplusHashTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &bias,
+                          at::Tensor &inputIds, at::Tensor &tid2eid, at::Tensor &outWeights,
+                          at::Tensor &routingMap, float scale, uint32_t topK, bool hash)
+{
+    XTensor _scores, _indices, _bias, _inputIds, _tid2eid, _outWeights, _routingMap;
+
+    InitXTensor(_scores, scores);
+    InitXTensor(_indices, indices);
+    InitXTensor(_bias, bias);
+    InitXTensor(_inputIds, inputIds);
+    InitXTensor(_tid2eid, tid2eid);
+    InitXTensor(_outWeights, outWeights);
+    auto scoresSizesVec = scores.sizes().vec();
+    std::vector<size_t> sizes(scoresSizesVec.begin(), scoresSizesVec.end());
+    _routingMap.Init(sizes, BIT1, TensorPtr(routingMap));
+    XliteOpSqrtsoftplusHashTopK(rt, _scores, _indices, _bias, _inputIds, _tid2eid, _outWeights,
+                                _routingMap, scale, topK, hash);
+    rt.Synchronize();
+}
+
 void TopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &outIndices,
           at::Tensor &queryLens, at::Tensor &cachedLens, size_t k)
 {
@@ -2610,6 +2630,10 @@ PYBIND11_MODULE(_C, m)
           py::arg("bias"), py::arg("scale"), py::arg("out_weights"), py::arg("out_routing"),
           py::arg("n_group"), py::arg("n_topk_group"), py::arg("top_k"),
           py::arg("norm_top_k_prob"));
+    m.def("sqrtsoftplus_hash_topk", &SqrtsoftplusHashTopK, py::arg("rt"), py::arg("scores"),
+          py::arg("indices"), py::arg("bias"), py::arg("input_ids"), py::arg("tid2eid"),
+          py::arg("out_weights"), py::arg("routing_map"), py::arg("scale"), py::arg("top_k"),
+          py::arg("hash"));
     m.def("topk", &TopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
           py::arg("outIndices"), py::arg("query_lens"), py::arg("cached_lens"), py::arg("k"));
     m.def("cast_up", &CastUp, py::arg("rt"), py::arg("in_"), py::arg("out"));

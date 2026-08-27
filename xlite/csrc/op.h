@@ -104,6 +104,9 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
 void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias, float scale,
                         XTensor &outWeights, XTensor &outRouting, uint32_t nGroup,
                         uint32_t nTopkGroup, uint32_t topK, bool normTopKProb);
+void XliteOpSqrtsoftplusHashTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias,
+                                 XTensor &inputIds, XTensor &tid2eid, XTensor &outWeights,
+                                 XTensor &routingMap, float scale, uint32_t topK, bool hash);
 void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIndices,
                  XTensor &queryLens, XTensor &cachedLens, uint32_t batch, size_t k);
 void XliteOpSoftmax(XRuntime &rt, uint32_t calcLen, XTensor &x);
