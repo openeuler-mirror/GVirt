@@ -177,6 +177,16 @@ void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output);
 void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                           XTensor &output, bool updateState = true,
                           XTensor *queryStartLoc = nullptr, XTensor *queryLens = nullptr);
+// Token-row-parallel conv1d+SiLU for uniform prefill (P3-A v2). input/output are
+// [T,C] token-major; parallelizes over contiguous token-row segments with a
+// sliding window (chunked strided DMA) and a vgather-based weight tap
+// transpose. When updateState is true the conv state update runs as a separate
+// kernel launch right after the conv kernel (the conv cores read state GM for
+// the window context, so an in-kernel update would race them; the launch
+// boundary is the inter-core barrier). Constraints: kernelDim in {1,2,4},
+// seqLen >= kernelDim, channels % 1024 == 0.
+void XliteOpConv1dAndSiLUToken(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
+                               XTensor &output, uint32_t seqLen, bool updateState = true);
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
                       XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
                       uint32_t num_v_heads);

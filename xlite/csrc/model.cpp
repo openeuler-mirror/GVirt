@@ -825,7 +825,21 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     }
     XTensor convStateBatch;
     convStateBatch.Init({batch, convDim, _c.linearConvKernelDim}, convState.dtype, convState.ptr);
-    if (uniform) {
+    // Decode (seqlen==1) and mixed-length use the packed 2D path.
+    // Prefill (seqlen>1, uniform) uses the token-row-parallel kernel (P3-A v2)
+    // when its constraints hold (K in {1,2,4}, seqlen >= K, convDim % 1024 == 0):
+    // it consumes token-major [m,C] mixQkv directly, removing the two
+    // XliteOpTranspose_1_2 of the old 3D path.
+    // Constraints unmet -> old 3D transpose path. Decode/mixed -> packed.
+    bool decodeSingle = (seqlen == 1 && batch == 1);
+    uint32_t convK = _c.linearConvKernelDim;
+    bool useToken = uniform && !decodeSingle && seqlen >= convK &&
+                    (convK == 1 || convK == 2 || convK == 4) && (convDim % 1024 == 0);
+    if (useToken) {
+        XliteOpConv1dAndSiLUToken(rt, convStateBatch, mixQkv, linearConv1d[layer], convPacked,
+                                  seqlen, /*updateState=*/true);
+        rt.PutTensor(mixQkv);
+    } else if (uniform && !decodeSingle) {
         XTensor &mixTrans = rt.GetTensor({batch, qkvDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor &convOut = rt.GetTensor({batch, convDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor mix3d;
