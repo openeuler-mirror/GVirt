@@ -6,6 +6,7 @@
 #include "kernel_operator.h"
 #include "kernel_param.h"
 #include "softmax_attn_aiv.h"
+#include "ring_sync.h"
 
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
@@ -52,12 +53,7 @@ public:
         this->qkvMemSize = nQKVHeads * headSize;
         this->groupMemSize = headNumInGroup * headSize;
         this->blockMemSize = blockSize * kvMemSize;
-        this->blockIdx = block_idx;
-        this->subBlockIdx = get_subblockid();
-        this->nextBlockIdx = (blockIdx + 1) % block_num;
-        this->prevBlockIdx = blockIdx == 0 ? (block_num - 1) : (blockIdx - 1);
-        this->setNextGeneration = 1;
-        this->waitPrevGeneration = 1;
+        ringSync.Init(sync);
 
         this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) +
                                     block_idx * XLITE_MAX_M0 * tileSizeOfCachedKV);
@@ -68,17 +64,17 @@ public:
         this->sv[1].SetGlobalBuffer(((__gm__ Dtype *)sv) + block_idx * XLITE_MAX_M0 * headSize +
                                     block_num * XLITE_MAX_M0 * headSize);
         this->max[0].SetGlobalBuffer(((__gm__ float *)max) + block_idx * XLITE_MAX_M0 * 2 +
-                                     subBlockIdx * XLITE_MAX_M0);
+                                     get_subblockid() * XLITE_MAX_M0);
         this->max[1].SetGlobalBuffer(((__gm__ float *)max) + block_idx * XLITE_MAX_M0 * 2 +
-                                     subBlockIdx * XLITE_MAX_M0 + block_num * XLITE_MAX_M0 * 2);
+                                     get_subblockid() * XLITE_MAX_M0 +
+                                     block_num * XLITE_MAX_M0 * 2);
         this->sum[0].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * XLITE_MAX_M0 * 2 +
-                                     subBlockIdx * XLITE_MAX_M0);
+                                     get_subblockid() * XLITE_MAX_M0);
         this->sum[1].SetGlobalBuffer(((__gm__ float *)sum) + block_idx * XLITE_MAX_M0 * 2 +
-                                     subBlockIdx * XLITE_MAX_M0 + block_num * XLITE_MAX_M0 * 2);
+                                     get_subblockid() * XLITE_MAX_M0 +
+                                     block_num * XLITE_MAX_M0 * 2);
         this->lastMax.SetGlobalBuffer((__gm__ float *)lastMax);
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
-        this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
-        this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * 2 + subBlockIdx;
 
         // 分配L1/L0：保留 pingpong；Cube KV tile 与 blockSize 解耦，
         // 保证 2 * tile * headSize * sizeof 落在 64KB L0 内（headDim=256 时
@@ -121,43 +117,6 @@ public:
         off = 0;
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-    }
-
-    __aicore__ inline void SetNextCore()
-    {
-        __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
-        dbg_printf("block%d subblock%u set block%d subblock%u %u\n", blockIdx, subBlockIdx,
-                   nextBlockIdx, subBlockIdx, setNextGeneration);
-        *val = setNextGeneration;
-        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-        copy_ubuf_to_gm_align_b16(setNextSync, val, 0, 1, sizeof(int32_t), 0, 0, 0, 0);
-        PipeBarrier<PIPE_ALL>();
-        setNextGeneration++;
-    }
-
-    __aicore__ inline void WaitPrevCore()
-    {
-        __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
-        dbg_printf("block%d subblock%u wait block%d subblock%u %u\n", blockIdx, subBlockIdx,
-                   prevBlockIdx, subBlockIdx, waitPrevGeneration);
-        do {
-            copy_gm_to_ubuf_align_b16(val, waitPrevSync, 0, 1, sizeof(int32_t), 0, 0, 0, 0);
-            set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-            wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-        } while (*val < waitPrevGeneration);
-        waitPrevGeneration++;
-    }
-
-    __aicore__ inline void ResetPrevCore()
-    {
-        __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
-        dbg_printf("block%d subblock%u reset block%d subblock%u\n", blockIdx, subBlockIdx,
-                   prevBlockIdx, subBlockIdx);
-        *val = 0;
-        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-        copy_ubuf_to_gm_align_b16(waitPrevSync, val, 0, 1, sizeof(int32_t), 0, 0, 0, 0);
     }
 
     /*
@@ -466,6 +425,8 @@ public:
         uint64_t mode = 2;  // inner-group aic/aiv sync
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
 
+        int dbgBlockIdx = block_idx;
+
         int lastBatchIdx, lastQueryTaskLen, lastkvHeadIdx, last, lastKvOffset, lastKvLen,
             lastQueryTaskOffset, lastWorkStart, lastWorkCurCore, lastActualCalcSoftmaxLen;
         int lastIsLastKvTile;
@@ -527,7 +488,7 @@ public:
                 int nWork = queryTaskLen * headNumInGroup;
                 int nWorkPerCore = DIV_ROUND_UP(nWork, 2);
                 int nWorkCurCore = nWorkPerCore;
-                int nWorkStart = subBlockIdx * nWorkPerCore;
+                int nWorkStart = get_subblockid() * nWorkPerCore;
                 if (nWorkStart + nWorkCurCore > nWork) {
                     nWorkCurCore = nWork - nWorkStart;
                 }
@@ -546,7 +507,7 @@ public:
                     "block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u - "
                     "%u), kvHeadIdx %u "
                     "kv [%u - %u)} use %d temp buf: SOFTMAX\n",
-                    blockIdx, subBlockIdx, batchIdx, queryTaskOffset,
+                    dbgBlockIdx, get_subblockid(), batchIdx, queryTaskOffset,
                     queryTaskOffset + queryTaskLen, nWorkStart, nWorkStart + nWorkCurCore,
                     kvHeadIdx, kvOffset, kvOffset + kvLen, curr);
                 RunAivSoftmaxPingPong(
@@ -560,14 +521,14 @@ public:
                     // wait aic sv done
                     wait_flag_dev(1);
                     if (lastKvOffset != 0) {
-                        WaitPrevCore();
+                        ringSync.WaitPrevCore();
                         resetPrevCore = 1;
                     }
                     dbg_printf(
                         "block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u "
                         "- %u), kvHeadIdx %u "
                         "kv [%u - %u)} use %d temp buf: UPDATE\n",
-                        blockIdx, subBlockIdx, lastBatchIdx, lastQueryTaskOffset,
+                        dbgBlockIdx, get_subblockid(), lastBatchIdx, lastQueryTaskOffset,
                         lastQueryTaskOffset + lastQueryTaskLen, lastWorkStart,
                         lastWorkStart + lastWorkCurCore, lastkvHeadIdx, lastKvOffset,
                         lastKvOffset + lastKvLen, last);
@@ -585,7 +546,7 @@ public:
                     if (!lastIsLastKvTile) {
                         set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                         wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
-                        SetNextCore();
+                        ringSync.SetNextCore();
                     }
                 }
 
@@ -612,14 +573,14 @@ public:
         if (needDoUpdate != 0) {
             wait_flag_dev(1);
             if (lastKvOffset != 0) {
-                WaitPrevCore();
+                ringSync.WaitPrevCore();
                 resetPrevCore = 1;
             }
             dbg_printf(
                 "block%d subblock%u: {batch %d, query [%u - %u) query x head group [%u - %u), "
                 "kvHeadIdx %u "
                 "kv [%u - %u)} use %d temp buf: UPDATE\n",
-                blockIdx, subBlockIdx, lastBatchIdx, lastQueryTaskOffset,
+                dbgBlockIdx, get_subblockid(), lastBatchIdx, lastQueryTaskOffset,
                 lastQueryTaskOffset + lastQueryTaskLen, lastWorkStart,
                 lastWorkStart + lastWorkCurCore, lastkvHeadIdx, lastKvOffset,
                 lastKvOffset + lastKvLen, last);
@@ -635,12 +596,12 @@ public:
             if (!lastIsLastKvTile) {
                 set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
-                SetNextCore();
+                ringSync.SetNextCore();
             }
         }
         PipeBarrier<PIPE_ALL>();
         if (resetPrevCore) {
-            ResetPrevCore();
+            ringSync.ResetPrevCore();
         }
     }
 
@@ -654,6 +615,7 @@ public:
     }
 
 private:
+    RingSync<Dtype> ringSync;
     GlobalTensor<Dtype> input;
     GlobalTensor<Dtype> kCache;
     GlobalTensor<Dtype> vCache;
@@ -664,8 +626,6 @@ private:
     GlobalTensor<float> lastMax;
     GlobalTensor<float> lastSum;
     GlobalTensor<Dtype> output;
-    __gm__ int32_t *setNextSync;
-    __gm__ int32_t *waitPrevSync;
 
     __gm__ int32_t *queryStartLoc;
     __gm__ int32_t *queryLens;
@@ -689,12 +649,6 @@ private:
     uint32_t blockMemSize;
     // Cube KV panel length (<= blockSize) so L0 pingpong fits for large headDim.
     uint32_t cubeKvTile;
-    int blockIdx;
-    int subBlockIdx;
-    int nextBlockIdx;
-    int prevBlockIdx;
-    uint32_t setNextGeneration;
-    uint32_t waitPrevGeneration;
 
     LocalTensor<Dtype> l1aBuf[PINGPONG_BUF_NUM];
     LocalTensor<Dtype> l1bBuf[PINGPONG_BUF_NUM];
