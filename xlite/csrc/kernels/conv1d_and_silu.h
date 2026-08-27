@@ -469,7 +469,14 @@ public:
                         uint32_t baseAddr = static_cast<uint32_t>(
                             (uint64_t)input_f + (i + 1 - K + j) * (int)sizeof(float));
                         vgather((__ubuf__ uint32_t *)qkv_tmp, off_ramp, baseAddr, 8, 1);
-                        pipe_barrier(PIPE_V);
+                        // vgather UB writeback is NOT covered by pipe_barrier(PIPE_V)
+                        // (proven on this NPU). Use an S-roundtrip event fence before
+                        // vmuls consumes qkv_tmp, otherwise the dependent vector op can
+                        // be issued while the gather is still writing -> AIV hazard.
+                        set_flag(PIPE_V, PIPE_S, EVENT_ID3);
+                        wait_flag(PIPE_V, PIPE_S, EVENT_ID3);
+                        set_flag(PIPE_S, PIPE_V, EVENT_ID3);
+                        wait_flag(PIPE_S, PIPE_V, EVENT_ID3);
                         vmuls(calc_buf, qkv_tmp, w[j], 1, 1, 1, 8, 8);
                         pipe_barrier(PIPE_V);
                         vadd(acc_buf, acc_buf, calc_buf, 1, 1, 1, 1, 8, 8, 8);

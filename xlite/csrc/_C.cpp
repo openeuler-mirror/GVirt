@@ -2101,6 +2101,30 @@ void Concat(XRuntime &rt, std::vector<at::Tensor> &inputs, at::Tensor &out)
     rt.Synchronize();
 }
 
+void ConcatCol(XRuntime &rt, std::vector<at::Tensor> &inputs, at::Tensor &out)
+{
+    if (inputs.empty()) {
+        return;
+    }
+    std::vector<XTensor> _inputs;
+    uint32_t totalWidth = 0;
+    for (auto &input : inputs) {
+        XTensor x;
+        InitXTensor(x, input);
+        _inputs.push_back(x);
+        totalWidth += x.shape.back();
+    }
+    XTensor _out;
+    InitXTensor(_out, out);
+    if (totalWidth != _out.shape.back()) {
+        throw std::runtime_error(std::string(__func__) + ": out last dim (" +
+                                 std::to_string(_out.shape.back()) + ") != sum(inputs last dim) (" +
+                                 std::to_string(totalWidth) + ")");
+    }
+    XliteOpConcatCol(rt, _inputs, _out);
+    rt.Synchronize();
+}
+
 void Split(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs,
            std::vector<uint32_t> &sizes, uint32_t numPackets)
 {
@@ -2687,6 +2711,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("query_start_loc") = py::none(), py::arg("query_lens") = py::none());
     m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::arg("outputs"));
     m.def("concat", &Concat, py::arg("rt"), py::arg("inputs"), py::arg("out"));
+    m.def("concat_col", &ConcatCol, py::arg("rt"), py::arg("inputs"), py::arg("out"));
     m.def("split", &Split, py::arg("rt"), py::arg("in"), py::arg("outputs"), py::arg("sizes"),
           py::arg("num_packets"));
     m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
