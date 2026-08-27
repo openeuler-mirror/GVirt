@@ -308,14 +308,25 @@ public:
     {
         (void)S;
         uint32_t elemBytes = static_cast<uint32_t>(sizeof(Dtype));
+        // Bulk scatter: expand contiguous src[0..nElem) into the 32B-slot layout
+        // that align_b16 expects on the UB side (each burst lives in its own
+        // 32B slot), then one copy_ubuf_to_gm_align_b16 writes every burst to a
+        // GM position stride elements apart (dstGap). nElem <= kBlock=64, so
+        // slot staging fits stage_buf (8KB for fp16/bf16).
+        constexpr int kSlot = BLOCK_SIZE / sizeof(Dtype);
+        // SiLU (vdiv) writes out_buf on V pipe
+        set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
         for (int s = 0; s < nElem; ++s) {
-            // UB src+s is not 32B-aligned; DMA only from tmp_kernel_buf.
-            pipe_barrier(PIPE_ALL);
-            tmp_kernel_buf[0] = src[s];
-            pipe_barrier(PIPE_ALL);
-            CopyUbufToGmAligned(base + s * stride, tmp_kernel_buf, elemBytes);
-            pipe_barrier(PIPE_MTE3);
+            stage_buf[s * kSlot] = src[s];
         }
+        // S→MTE3: slot scatter must be visible before align_b16 DMA reads stage_buf.
+        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        uint32_t dstGap = static_cast<uint32_t>(stride - 1) * elemBytes;
+        copy_ubuf_to_gm_align_b16(base, stage_buf, 0, static_cast<uint16_t>(nElem), elemBytes, 0, 0,
+                                  0, dstGap);
+        pipe_barrier(PIPE_MTE3);
     }
 
     __aicore__ inline void WriteBackState(int batchIdx, int channel, int S)
