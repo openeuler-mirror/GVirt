@@ -10,16 +10,6 @@
 #include "softmax_attn_aiv.h"
 
 #define MAX_N0 128
-#define MBLOCKSIZE 16
-#define NBLOCKSIZE 16
-#define SEQLEN_64 64
-#define SEQLEN_12K 12288
-#define SEQLEN_20K 20480
-#define SEQLEN_24K 24576
-#define SEQLEN_30K 30720
-#define SEQLEN_48K 49152
-#define SEQLEN_60K 61440
-#define SEQLEN_96K 98304
 
 template <typename Dtype>
 class FLASHMLAV2

@@ -9,8 +9,6 @@
 #pragma once
 
 #define MAX_N0 XLITE_MAX_M0
-#define MBLOCKSIZE 16
-#define NBLOCKSIZE 16
 
 template <typename Dtype>
 class IndexerTopK

@@ -10,11 +10,6 @@
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
 
-#define MBLOCKSIZE 16
-#define NBLOCKSIZE 16
-// Ascend cube L0A/L0B are 64KB each. Pingpong needs 2 tiles to fit.
-#define ASCEND_L0_BYTES (64 * 1024)
-
 template <typename Dtype>
 class FlashAttention
 {

@@ -14,19 +14,6 @@
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
 
-#define MBLOCKSIZE 16
-#define NBLOCKSIZE 16
-#define SEQLEN_64 64
-#define SEQLEN_12K 12288
-#define SEQLEN_20K 20480
-#define SEQLEN_24K 24576
-#define SEQLEN_30K 30720
-#define SEQLEN_48K 49152
-#define SEQLEN_60K 61440
-#define SEQLEN_96K 98304
-// Ascend cube L0A/L0B are 64KB each. Pingpong needs 2 tiles to fit.
-#define ASCEND_L0_BYTES (64 * 1024)
-
 template <typename Dtype>
 class Attention
 {
@@ -298,37 +285,6 @@ public:
             for (int i = 0; i < queryLen; i++) {
                 CopyToGm(output[i * qMemSize], l0cBuf[i * l0cOffset], headNumInGroup, headSize,
                          mBlockPad, headSize);
-            }
-        }
-    }
-
-    /*
-     * When the totalLen exceeds MAX_SUB_CONTEXT_SIZE in the RunAivSoftmaxLong function,
-     * 4 rows must be reserved for the exp buffer (float type) used in softmax.
-     * Therefore, m0 must be less than or equal to XLITE_MAX_M0 - 4.
-     */
-    __aicore__ inline uint32_t GetOptimalM0(int queryLen, int cachedLen)
-    {
-        if (queryLen <= SEQLEN_64) {
-            return 16;
-        } else {
-            int totalLen = queryLen + cachedLen;
-            if (totalLen <= SEQLEN_12K) {
-                return 128;
-            } else if (totalLen <= SEQLEN_20K) {
-                return 112;
-            } else if (totalLen <= SEQLEN_24K) {
-                return 96;
-            } else if (totalLen <= SEQLEN_30K) {
-                return 80;
-            } else if (totalLen <= SEQLEN_48K) {
-                return 64;
-            } else if (totalLen <= SEQLEN_60K) {
-                return 48;
-            } else if (totalLen <= SEQLEN_96K) {
-                return 32;
-            } else {
-                return 16;
             }
         }
     }

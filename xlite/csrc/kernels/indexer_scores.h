@@ -7,8 +7,6 @@
 
 #define MAX_M0 128
 #define MAX_N0 MAX_M0
-#define MBLOCKSIZE 16
-#define NBLOCKSIZE 16
 
 template <typename Dtype>
 class IndexerScores
