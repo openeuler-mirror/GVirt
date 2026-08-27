@@ -1558,8 +1558,9 @@ class DeepSeek_V3(nn.Module):
             return fn(layer.attn.indexer) if (layer.attn.indexer is not None and layer.attn.full_indexer) else torch.empty(1)
         self.xlite_model.index_q_b = [indexer_w(l, lambda i: i.wq_b.weight) for l in self.layers]
         self.xlite_model.index_k_weights_proj = [indexer_w(l, lambda i: i.wk_weights_proj.weight.to(dtype=torch.get_default_dtype())) for l in self.layers]
-        self.xlite_model.index_k_norm = [indexer_w(l, lambda i: i.k_norm.weight.to(dtype=torch.get_default_dtype())) for l in self.layers]
-        self.xlite_model.index_k_norm_bias = [indexer_w(l, lambda i: i.k_norm.bias.to(dtype=torch.get_default_dtype())) for l in self.layers]
+        # indexer norm weight and bias should be in float32 or the default dtype
+        self.xlite_model.index_k_norm = [indexer_w(l, lambda i: i.k_norm.weight) for l in self.layers]
+        self.xlite_model.index_k_norm_bias = [indexer_w(l, lambda i: i.k_norm.bias) for l in self.layers]
         self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [self.layers[i].ffn.w13.weight for i in range(args.n_dense_layers)]
         self.xlite_model.mlp_down = [self.layers[i].ffn.w2.weight for i in range(args.n_dense_layers)]

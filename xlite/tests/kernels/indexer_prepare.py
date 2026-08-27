@@ -132,8 +132,8 @@ def run_test(
         kw = torch.randn(num_tokens, total_dim) / 10
         kw_ref = kw.clone()
 
-        k_norm = torch.randn(index_head_dim) / 10
-        k_norm_bias = torch.randn(index_head_dim) / 10
+        k_norm = torch.randn(index_head_dim, dtype=torch.float32) / 10
+        k_norm_bias = torch.randn(index_head_dim, dtype=torch.float32) / 10
 
         # positions: per-token absolute sequence position within each sample.
         # Sample i's tokens occupy positions [cached_lens[i], cached+qlen).
@@ -167,9 +167,7 @@ def run_test(
     freqs_per_token = freqs_cis.cpu()[pos_list].to("npu")
 
     # 1) LayerNorm over kw[:, :index_head_dim].
-    ln_slice = F.layer_norm(
-        kw_ref[:, :index_head_dim], (index_head_dim,), k_norm.float(), k_norm_bias.float(), NORM_EPS
-    )
+    ln_slice = F.layer_norm(kw_ref[:, :index_head_dim], (index_head_dim,), k_norm, k_norm_bias, NORM_EPS)
 
     # 2) RoPE on the rope_head_dim prefix of the LN result.
     pe_rot = apply_rotary_emb(
