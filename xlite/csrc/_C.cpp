@@ -2073,6 +2073,19 @@ void LinearAttConv1dAndSiLU(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_
     rt.Synchronize();
 }
 
+void LinearAttConv1dAndSiLUToken(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_state,
+                                 at::Tensor &weight, at::Tensor &output, int64_t seq_len)
+{
+    XTensor _mix_qkv, _conv_state, _weight, _output;
+    InitXTensor(_mix_qkv, mix_qkv);
+    InitXTensor(_conv_state, conv_state);
+    InitXTensor(_weight, weight);
+    InitXTensor(_output, output);
+    XliteOpConv1dAndSiLUToken(rt, _conv_state, _mix_qkv, _weight, _output,
+                              static_cast<uint32_t>(seq_len), /*updateState=*/true);
+    rt.Synchronize();
+}
+
 void SplitCol(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs)
 {
     XTensor _in;
@@ -2712,6 +2725,9 @@ PYBIND11_MODULE(_C, m)
     m.def("linear_att_conv_and_silu", &LinearAttConv1dAndSiLU, py::arg("rt"), py::arg("mix_qkv"),
           py::arg("conv_state"), py::arg("weight"), py::arg("output"),
           py::arg("query_start_loc") = py::none(), py::arg("query_lens") = py::none());
+    m.def("linear_att_conv_and_silu_token", &LinearAttConv1dAndSiLUToken, py::arg("rt"),
+          py::arg("mix_qkv"), py::arg("conv_state"), py::arg("weight"), py::arg("output"),
+          py::arg("seq_len"));
     m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::arg("outputs"));
     m.def("concat", &Concat, py::arg("rt"), py::arg("inputs"), py::arg("out"));
     m.def("split", &Split, py::arg("rt"), py::arg("in"), py::arg("outputs"), py::arg("sizes"),
