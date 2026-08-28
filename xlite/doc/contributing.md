@@ -99,8 +99,10 @@ vllm_ascend + xlite在线服务的性能测试及性能对比分析，请参考 
 ```bash
 # 切换到xlite目录下，执行以下命令准备rpm构建环境
 mkdir -p /root/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SOPES,SPECS,SRPMS}
+# 从当前 git tag 重新生成 xlite.spec（Version 与 wheel 的 setuptools_scm 版本同源）
+python scripts/make_spec.py
+VERSION=$(awk '/^Version:/{print $2}' xlite.spec)
 # 拷贝源码至/root/rpmbuild/SOURCES/xlite-${VERSION}.tar.gz，执行以下命令
-VERSION=0.1.0  # 替换为当前版本号
 git archive --format=tar.gz --prefix=xlite-${VERSION}/ -o /root/rpmbuild/SOURCES/xlite-${VERSION}.tar.gz HEAD
 cp xlite.spec /root/rpmbuild/SPECS/
 cd /root/rpmbuild/SPECS

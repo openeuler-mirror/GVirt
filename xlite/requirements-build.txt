@@ -5,6 +5,7 @@
 # Note: the torch version for building xlite should not be higher than the torch version during runtime/dev
 
 setuptools>=64.0.0,<82.0.0
+setuptools-scm>=8.0.0
 cmake>=3.22.0
 pybind11>=3.0.0
 torch>=2.5.1,<=2.10.0

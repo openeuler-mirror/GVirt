@@ -1,5 +1,5 @@
 Name:           xlite
-Version:        0.2.0rc0
+Version:        @VERSION@
 Release:        1%{?dist}
 Summary:        A lightweight, effective and easy-to-extend inference runtime
 
@@ -9,6 +9,10 @@ Source0:        %{name}-%{version}.tar.gz
 # Disable automatic dependency generation; equivalent to `rpm --nodeps` for the generated package.
 AutoReq:        no
 
+# NOTE: setuptools-scm must be importable during %py3_build (setup.py calls it at
+# import time). Keep this in sync with the [build-system] requires in pyproject.toml
+# and requirements-build.txt.
+BuildRequires:  python3-setuptools-scm
 BuildRequires:  gcc-c++, cmake >= 3.16, make
 BuildRequires:  pciutils
 BuildRequires:  zlib-devel
@@ -70,6 +74,7 @@ fi
 %exclude %{python3_sitearch}/**/*.pyo
 
 %changelog
+@CHANGELOG@
 * Thu Oct 16 2025 wangxiaoran <wangxiaoran11@huawei.com> - 1.0-1
 - Adapt rpm spec for building.
 * Mon May 19 2025 lulina <lina.lulina@huawei.com> - 1.0-1
