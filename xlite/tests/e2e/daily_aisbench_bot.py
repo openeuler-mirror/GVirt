@@ -99,6 +99,7 @@ from daily_bot_utils import (
     # 环境检测
     detect_model_device,
     # 版本信息
+    get_last_release_tag,
     get_xlite_version,
     get_xlite_commit,
     get_vllm_ascend_version,
@@ -170,14 +171,14 @@ def run_aisbench_benchmark(
     model_dir = f"/mnt/{device}/models" if device else "/mnt/sdb/models"
 
     # 创建当前版本报告目录 (版本号+日期)
-    current_version = get_xlite_version()
+    last_release_version = get_last_release_tag()
     current_commit = get_xlite_commit() or "unknown"
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     aisbench_repo_dir = REPORT_DIR / "benchmark"
     if "--reuse" not in model_args and "-r" not in model_args:
         reference_commit = current_commit
     aisbench_output_dir = REPORT_DIR / "outputs" / (reference_commit or current_commit)
-    report_subdir = REPORT_DIR / f"xlite-{current_version}" / f"{current_time}-{current_commit}"
+    report_subdir = REPORT_DIR / f"xlite-{last_release_version}" / f"{current_time}-{current_commit}"
     report_subdir.mkdir(parents=True, exist_ok=True)
 
     # 将日志文件移动到报告目录
