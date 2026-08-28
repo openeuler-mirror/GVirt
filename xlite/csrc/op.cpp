@@ -958,6 +958,34 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                  batch, maxNumBlocks, tileSizeOfCachedKV);
 }
 
+void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressKCache,
+                XTensor &swaBlockTables, XTensor &compressBlockTables, uint32_t swaBlockSize,
+                uint32_t compressBlockSize, XTensor &attnSink, XTensor &scores, XTensor &output,
+                uint32_t batch, XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
+                uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
+                uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK,
+                const XTensor &topkIndices)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    KERNEL_PTR_TYPE(cxa) * launchKernel;
+    if (EachXDtype(BF16, q, swaKCache, compressKCache, scores, output)) {
+        launchKernel = aclrtlaunch_cxa_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(q) + XT_STR(swaKCache) + XT_STR(compressKCache) +
+                              XT_STR(scores) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    uint32_t swaMaxNumBlocks = DeriveMaxNumBlocks(swaBlockTables, batch);
+    uint32_t compressMaxNumBlocks = DeriveMaxNumBlocks(compressBlockTables, batch);
+    launchKernel(rt.aicNum, rt.stream, q.ptr, swaKCache.ptr, compressKCache.ptr, swaBlockTables.ptr,
+                 compressBlockTables.ptr, swaBlockSize, compressBlockSize, swaMaxNumBlocks,
+                 compressMaxNumBlocks, attnSink.ptr, scores.ptr, output.ptr, batch,
+                 queryStartLoc.ptr, lens.ptr, cachedLens.ptr, nHeads, headDim, scale, windowSize,
+                 kvSize, compressRatio, indexTopK, topkIndices.ptr);
+}
+
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
                   XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,

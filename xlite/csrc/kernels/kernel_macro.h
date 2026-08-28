@@ -381,6 +381,16 @@ inline __aicore__ void SetMaskFromHighBit(int32_t high, int32_t len)
     }
 }
 
+// make sure that: lo < hi <= 64. Masks the middle range [lo, hi) of one
+// 64-element sub-block (bit-per-element; same register SetMask and
+// SetMaskFromHighBit use for 4-byte dtypes).
+inline __aicore__ void SetMaskRange(int32_t lo, int32_t hi)
+{
+    uint64_t hiMask = hi == 64 ? ~(uint64_t)0 : (((uint64_t)1 << hi) - 1);
+    uint64_t mask = hiMask ^ (((uint64_t)1 << lo) - 1);
+    set_vector_mask(0, mask);
+}
+
 template <typename Dtype>
 __inline__ __aicore__ void ReduceMaxV3(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, uint32_t dim)
 {

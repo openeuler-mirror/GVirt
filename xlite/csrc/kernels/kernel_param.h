@@ -29,8 +29,15 @@ enum class NormKind {
     L2,
 };
 
-// attention/mla/indexer
+// attention/mla/cxa/indexer
 #define XLITE_MAX_M0 128
+// mmad k/n granularity in elements for a 2-byte dtype (BLOCK_SIZE / 2); the lead-in
+// RunAicQK/RunAicSV round windowStart down to is always less than this.
+#define K_BLOCK_SIZE_2B 16
+// compress-segment n/k tile (svck0) in RunAicQK/RunAicSV (see cxa_aic_helper.h); the
+// compress segment of the scores workspace is padded to a multiple of 4*svck0 because
+// RunAicSV reads 4*svck0 compress-score elements per call.
+#define CXA_SVCK0 64
 #define MAX_INDEXER_KV_TILE_LEN 4096
 #define MAX_TOPK_NUM 2048
 #define MAX_SOFTMAX_PINGPONG_LEN 11776

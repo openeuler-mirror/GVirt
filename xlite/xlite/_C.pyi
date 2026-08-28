@@ -2211,6 +2211,91 @@ def gather_sparse_kv_cache(
     """
     ...
 
+def cxa(
+    rt: Runtime,
+    q: torch.Tensor,
+    swa_k_cache: torch.Tensor,
+    compress_k_cache: torch.Tensor,
+    swa_block_tables: torch.Tensor,
+    compress_block_tables: torch.Tensor,
+    swa_block_size: int,
+    compress_block_size: int,
+    attn_sink: torch.Tensor,
+    output: torch.Tensor,
+    batch: int,
+    query_start_loc: torch.Tensor,
+    lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    n_heads: int,
+    head_dim: int,
+    scale: float,
+    window_size: int,
+    compress_ratio: int,
+    index_topk: int,
+    topk_indices: torch.Tensor,
+) -> None:
+    """Run the CXA (C4A and C128A) kernel for DeepSeek-V4.
+
+    Fused sliding-window + compressed sparse attention. The attention score
+    layout has stride ``window_size + kv_size``: the leading ``window_size``
+    columns are the sliding-window (SWA) KV and the trailing ``kv_size``
+    columns are the compressed KV. Softmax is computed over both segments
+    jointly, with the per-head ``attn_sink`` bias folded into the denominator.
+
+    * **Window causal mask** -- a query at position ``q`` may only attend to
+      SWA tokens in ``[max(0, q - window_size + 1), q]``; positions beyond the
+      currently generated length are masked to ``-inf``.
+    * **Compress top-k mask** -- of the ``kv_size`` compressed tokens, only
+      those referenced by ``topk_indices`` are kept; entries set to ``-1`` are
+      masked to ``-inf`` (and their exp contributions zeroed).
+    * **attn_sink** -- ``exp(attn_sink - row_max)`` is added to the softmax
+      denominator (one learnable term per head).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        q (torch.Tensor): Query, shape (total_query_tokens, n_heads, head_dim),
+            dtype bfloat16.
+        swa_k_cache (torch.Tensor): Paged sliding-window KV cache, shape
+            (swa_block_num, swa_block_size, head_dim), dtype bfloat16.
+        compress_k_cache (torch.Tensor): Paged compressed KV cache, shape
+            (compress_block_num, compress_block_size, head_dim), dtype
+            bfloat16. Unused when ``compress_ratio == 0`` (may be empty).
+        swa_block_tables (torch.Tensor): Block table for the SWA cache, 1-D
+            ``[batch * swa_max_num_blocks]`` or 2-D
+            ``[batch, swa_max_num_blocks]`` int32.
+        compress_block_tables (torch.Tensor): Block table for the compressed
+            cache, 1-D or 2-D int32 (same convention as ``swa_block_tables``).
+        swa_block_size (int): Block size of the SWA cache.
+        compress_block_size (int): Block size of the compressed cache.
+        attn_sink (torch.Tensor): Per-head attention sink bias, shape
+            (n_heads,), dtype **float32**.
+        output (torch.Tensor): Output tensor, shape
+            (total_query_tokens, n_heads, head_dim), dtype bfloat16; written
+            in place.
+        batch (int): Batch size.
+        query_start_loc (torch.Tensor): Prefix-sum of query lengths, shape
+            (batch,), dtype int32.
+        lens (torch.Tensor): Per-batch current query lengths, shape (batch,),
+            dtype int32.
+        cached_lens (torch.Tensor): Per-batch cached token lengths, shape
+            (batch,), dtype int32.
+        n_heads (int): Number of local query heads.
+        head_dim (int): Head dimension.
+        scale (float): Softmax scaling factor (``1 / sqrt(head_dim)``).
+        window_size (int): Sliding-window size (SWA segment width).
+        compress_ratio (int): Compression ratio; ``0`` disables the compressed
+            segment (pure sliding-window attention).
+        index_topk (int): Number of top-k compressed indices per query row;
+            ``0`` disables the compress sparse path.
+        topk_indices (torch.Tensor): Top-k compressed-token indices, shape
+            (total_query_tokens, index_topk), dtype int32. ``-1`` marks a
+            masked-out position.
+
+    Returns:
+        None: `output` is written in place.
+    """
+    ...
+
 def mla_v3(
     rt: Runtime,
     q_absorb: torch.Tensor,

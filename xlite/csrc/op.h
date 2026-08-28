@@ -97,6 +97,13 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                            XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                            uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
                            uint32_t batch, uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE);
+void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressKCache,
+                XTensor &swaBlockTables, XTensor &compressBlockTables, uint32_t swaBlockSize,
+                uint32_t compressBlockSize, XTensor &attnSink, XTensor &scores, XTensor &output,
+                uint32_t batch, XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
+                uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
+                uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK,
+                const XTensor &topkIndices = XTensor());
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
                   XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
