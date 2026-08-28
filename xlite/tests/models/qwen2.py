@@ -8,7 +8,8 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Literal, Optional
 
 
 @dataclass
@@ -30,6 +31,8 @@ class Qwen2ModelArgs:
     qkv_bias: bool = True
     qk_norm: bool = False
     model_type: str = "qwen2"
+    # the raw model config path
+    config_path: Optional[Path] = None
 
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size

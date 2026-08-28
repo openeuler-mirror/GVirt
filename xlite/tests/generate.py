@@ -13,6 +13,7 @@ import json
 import random
 from argparse import ArgumentParser
 from typing import List, Literal, Tuple
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -121,7 +122,7 @@ def main(
     Main function to load the model and perform interactive or batch text generation.
 
     Args:
-        ckpt_path (str): Path to the model checkpoint directory.
+        ckpt_path (str): Path to the model checkpoint directory; should also contain the configuration ``config.json``.
         config (str): Path to the model configuration file.
         input_file (str, optional): Path to a file containing input prompts. Defaults to "".
         mode (Literal["single", "interactive", "bench"], optional): Generation mode. Defaults to "single".
@@ -228,6 +229,7 @@ def main(
     torch.manual_seed(965)
     with open(config) as f:
         config = json.load(f)
+        config["config_path"] = Path(ckpt_path) / "config.json"
         if mode == "bench":
             config["max_batch_size"] = max(config.get("max_batch_size", 1), bench_batch_size)
             config["max_seq_len"] = max(config.get("max_seq_len", 1024), bench_prompt_len + bench_new_tokens)
@@ -499,8 +501,8 @@ if __name__ == "__main__":
         --config (str): Path to the model configuration file.
         --input-file (str, optional): File containing prompts for batch processing.
         --interactive (bool, optional): Enable interactive mode for generating text.
-        --max-new-tokens (int, optional): Maximum number of new tokens to generate. Defaults to 200.
-        --temperature (float, optional): Temperature for sampling. Defaults to 0.2.
+        --max-new-tokens (int, optional): Maximum number of new tokens to generate. Defaults to 1000.
+        --temperature (float, optional): Temperature for sampling. Defaults to 0.0.
 
     Raises:
         AssertionError: If neither input-file nor interactive mode is specified.
@@ -511,7 +513,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--input-file", type=str, default="")
     parser.add_argument("--mode", type=str, default="single", choices=["single", "interactive", "bench"])
-    parser.add_argument("--max-new-tokens", type=int, default=200)
+    parser.add_argument("--max-new-tokens", type=int, default=1000)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--no-prefix", action="store_true")
     parser.add_argument("--bench-batch-size", type=int, default=16, help="Batch size/concurrency for bench serve")

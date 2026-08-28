@@ -314,11 +314,15 @@ public:
         // GM position stride elements apart (dstGap). nElem <= kBlock=64, so
         // slot staging fits stage_buf (8KB for fp16/bf16).
         constexpr int kSlot = BLOCK_SIZE / sizeof(Dtype);
-        pipe_barrier(PIPE_ALL);
+        // SiLU (vdiv) writes out_buf on V pipe
+        set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
         for (int s = 0; s < nElem; ++s) {
             stage_buf[s * kSlot] = src[s];
         }
-        pipe_barrier(PIPE_ALL);
+        // S→MTE3: slot scatter must be visible before align_b16 DMA reads stage_buf.
+        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
         uint32_t dstGap = static_cast<uint32_t>(stride - 1) * elemBytes;
         copy_ubuf_to_gm_align_b16(base, stage_buf, 0, static_cast<uint16_t>(nElem), elemBytes, 0, 0,
                                   0, dstGap);

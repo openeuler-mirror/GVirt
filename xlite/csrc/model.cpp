@@ -356,8 +356,8 @@ void XModel::ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x,
     rt.PutTensor(xQuanted);
 }
 
-XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
-                                    XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
+void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                                XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
 {
     // TODO not interleaved case
     if (!_c.indexRopeInterleaved) {
@@ -385,13 +385,15 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
 
     if (!isLong) {
         rt.PutTensor(kw);
-        return nullptr;
+        rt.dsaPerLayerTopk = nullptr;
+        return;
     }
 
     XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
                                    hiddenState.dtype, DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
-    rt._dsaTopkBuffer.View({hiddenState.shape[0], _c.indexTopK});
+    rt._dsaTopkBuffer.View(hiddenState.shape[0]);
+    rt.dsaPerLayerTopk = &rt._dsaTopkBuffer;
     XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices,
                        rt._dsaTopkBuffer, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
                        rt._attnBlockTables[0], _sync, _c.indexNHeads, _c.indexHeadDim,
@@ -400,8 +402,6 @@ XTensor *XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hidde
     rt.PutTensor(*qPtr);
     rt.PutTensor(lastTopk);
     rt.PutTensor(scores);
-    rt._dsaTopkValid = true;
-    return &rt._dsaTopkBuffer;
 }
 
 std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
@@ -455,16 +455,12 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
     auto [attnQWithQr, qPe, attnNormQc] =
         ForwardAttnMLACommonV2(rt, layer, kvCache, freqsCis, hiddenState);
 
-    XTensor *topkIndices = nullptr;
-    if (_c.attnType == XMODEL_ATTN_DSA) {
-        // DSA top-k sharing: shared layers reuse prev full layer's topkIndices.
-        if (layer < _c.indexerSkipLayers.size() && _c.indexerSkipLayers[layer]) {
-            topkIndices = rt._dsaTopkValid ? &rt._dsaTopkBuffer : nullptr;
-        } else {
-            topkIndices =
-                ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
-        }
+    if (_c.attnType == XMODEL_ATTN_DSA &&
+        (layer >= _c.indexFullMask.size() || _c.indexFullMask[layer])) {
+        // For shared indexer, only update the current topk for a full indexer layer
+        ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
     }
+    XTensor *topkIndices = rt.dsaPerLayerTopk;
     rt.PutTensor(attnNormQc);
 
     XTensor &qAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
@@ -780,29 +776,22 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     uint32_t zDim = localValueDim;
     uint32_t bDim = nLocalVHeads;
     uint32_t aDim = nLocalVHeads;
-    uint32_t totalOutDim = qkvDim + zDim + bDim + aDim;
 
-    // Step 1: Fused ND projection [W_qkv; W_z; W_b; W_a].
-    // Must stay ND: NZ weights cannot be Concat'd; tiny NZ matmul tiles over-read.
+    // Step 1: Direct per-weight ND projections (no runtime weight concat).
+    // The old path Concat'd W_qkv/W_z/W_b/W_a into a 169MB temp W every step
+    // (48 layers x 169MB D2D per step) before one fused matmul + SplitCol.
+    // Weights are ND here (NZ weights cannot be Concat'd; tiny NZ matmul
+    // tiles over-read), so each projection can consume its own weight
+    // directly: zero D2D, no temp W, no SplitCol. Numerically identical:
+    // same matmul split along N, no summation reordering.
     XTensor &mixQkv = rt.GetTensor({m, qkvDim}, hiddenState.dtype, DBG_LOC);
     XTensor &z = rt.GetTensor({m, zDim}, hiddenState.dtype, DBG_LOC);
     XTensor &b = rt.GetTensor({m, bDim}, hiddenState.dtype, DBG_LOC);
     XTensor &a = rt.GetTensor({m, aDim}, hiddenState.dtype, DBG_LOC);
-    {
-        std::vector<XTensor> weightInputs = {
-            linearInProjQKV[layer].weight, linearInProjZ[layer].weight, linearInProjB[layer].weight,
-            linearInProjA[layer].weight};
-        XTensor &W = rt.GetTensor({totalOutDim, hiddenState.shape[1]}, hiddenState.dtype, DBG_LOC);
-        XliteOpConcat(rt, weightInputs, W);
-
-        XTensor &projOut = rt.GetTensor({m, totalOutDim}, hiddenState.dtype, DBG_LOC);
-        XliteOpMatmul(rt, hiddenState, W, projOut, false);
-        rt.PutTensor(W);
-
-        std::vector<XTensor> projSplit = {mixQkv, z, b, a};
-        XliteOpSplitCol(rt, projOut, projSplit);
-        rt.PutTensor(projOut);
-    }
+    XliteOpMatmul(rt, hiddenState, linearInProjQKV[layer].weight, mixQkv, false);
+    XliteOpMatmul(rt, hiddenState, linearInProjZ[layer].weight, z, false);
+    XliteOpMatmul(rt, hiddenState, linearInProjB[layer].weight, b, false);
+    XliteOpMatmul(rt, hiddenState, linearInProjA[layer].weight, a, false);
 
     // Step 2: beta = sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias)
     XTensor &beta = rt.GetTensor({m, nLocalVHeads}, hiddenState.dtype, DBG_LOC);
@@ -827,21 +816,29 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     }
     XTensor convStateBatch;
     convStateBatch.Init({batch, convDim, _c.linearConvKernelDim}, convState.dtype, convState.ptr);
-    // Decode (seqlen==1) and mixed-length use the packed 2D path.
-    // Prefill (seqlen>1, uniform) uses the token-row-parallel kernel (P3-A v2)
-    // when its constraints hold (K in {1,2,4}, seqlen >= K, convDim % 1024 == 0):
-    // it consumes token-major [m,C] mixQkv directly, removing the two
+    // Decode (seqlen==1) and small tasks use the packed 2D path:
+    //   mixQkv    [m, qkvDim] token-major (matmul output)
+    //   convPacked [m, convDim] token-major (Step4 SplitCol consumes directly)
+    // queryStartLoc/lens are populated every step by PrepareAttn.
+    //
+    // decode: seqlen==1 (any batch). [B,1,C] and [B,C,1] are memory-identical
+    // for contiguous tensors, so the two Transpose_1_2 are identity ops even
+    // with multiple requests in flight. Skip them and use the packed 2D path.
+    //
+    // Prefill (seqlen>1, uniform) uses the token-row-parallel kernel when its
+    // constraints hold (K in {1,2,4}, seqlen >= K, convDim % 1024 == 0): it
+    // consumes token-major [m,C] mixQkv directly, removing the two
     // XliteOpTranspose_1_2 of the old 3D path.
     // Constraints unmet -> old 3D transpose path. Decode/mixed -> packed.
-    bool decodeSingle = (seqlen == 1 && batch == 1);
+    bool decodeStep = (seqlen == 1);
     uint32_t convK = _c.linearConvKernelDim;
-    bool useToken = uniform && !decodeSingle && seqlen >= convK &&
+    bool useToken = uniform && !decodeStep && seqlen >= convK &&
                     (convK == 1 || convK == 2 || convK == 4) && (convDim % 1024 == 0);
     if (useToken) {
         XliteOpConv1dAndSiLUToken(rt, convStateBatch, mixQkv, linearConv1d[layer], convPacked,
                                   seqlen, /*updateState=*/true);
         rt.PutTensor(mixQkv);
-    } else if (uniform && !decodeSingle) {
+    } else if (uniform && !decodeStep) {
         XTensor &mixTrans = rt.GetTensor({batch, qkvDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor &convOut = rt.GetTensor({batch, convDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor mix3d;
@@ -949,11 +946,92 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     }
 }
 
+std::tuple<XTensor &, XTensor &> XModel::ForwardAttnCXACommon(XRuntime &rt, uint32_t layer,
+                                                              std::vector<XTensor> &kvCache,
+                                                              XTensor &freqsCis,
+                                                              XTensor &hiddenState)
+{
+    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+    XTensor &qr = rt.GetTensor({hiddenState.shape[0], _c.qLoraRank}, hiddenState.dtype, DBG_LOC);
+    XTensor &q =
+        rt.GetTensor({hiddenState.shape[0], nLocalHeads, _c.headDim}, hiddenState.dtype, DBG_LOC);
+    XTensor &kv = rt.GetTensor({hiddenState.shape[0], _c.headDim}, hiddenState.dtype, DBG_LOC);
+
+    ForwardLinear(rt, layer, hiddenState, attnWqA, qr);
+    ForwardLinear(rt, layer, hiddenState, attnWKv, kv);
+
+    XliteOpRmsNorm(rt, qr, mlaQNorm[layer], qr, _c.normEps, _c.qLoraRank);
+    XliteOpRmsNorm(rt, kv, mlaKVNorm[layer], kv, _c.normEps, _c.headDim);
+
+    XliteOpRopeComplexAndCache(rt, 1, _c.headDim, _c.ropeHeadDim, _c.headDim - _c.ropeHeadDim,
+                               _c.headDim, kv, freqsCis, rt._attnPosition,
+                               _c.blockSizes[CXA_SWA_KV], kvCache[CXA_SWA_KV],
+                               rt._attnSlotMapping[CXA_SWA_KV], true);
+
+    if (_c.compressRatios[layer] > 0) {
+        // TODO compressor hiddenState, store to compress cache
+    }
+
+    ForwardLinear(rt, layer, qr, mlaQB, q);
+
+    q.View({hiddenState.shape[0], nLocalHeads * _c.headDim});
+    XliteOpRmsNorm(rt, q, XTensor(), q, _c.normEps, _c.headDim, true, XTensor(), nLocalHeads);
+    q.View({hiddenState.shape[0], nLocalHeads, _c.headDim});
+
+    XliteOpRopeComplex(rt, nLocalHeads, _c.headDim, _c.headDim, _c.ropeHeadDim,
+                       _c.headDim - _c.ropeHeadDim, _c.headDim - _c.ropeHeadDim, q, freqsCis,
+                       rt._attnPosition, q, false, true);
+    rt.PutTensor(kv);
+    return {qr, q};
+}
+
+XTensor *XModel::ForwardAttnCXAIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                                       XTensor &qr, std::vector<XTensor> &kvCache,
+                                       XTensor &freqsCis)
+{
+    XTensor &topkIndices =
+        rt.GetTensor({hiddenState.shape[0], _c.windowSize + _c.indexTopK}, INT32, DBG_LOC);
+    // TODO : implement CXA attention indexer
+    return &topkIndices;
+}
+
 void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer,
                             std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
                             XTensor &hiddenState)
 {
-    // TODO
+    uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
+    uint32_t nLocalGroups = _c.oGroups / _c.defTpSize;
+    auto [qr, q] = ForwardAttnCXACommon(rt, layer, kvCache[layer], freqsCis, hiddenState);
+    XTensor *pTopkIndices = nullptr;
+    if (_c.compressRatios[layer] == 4) {
+        pTopkIndices = ForwardAttnCXAIndexer(rt, layer, hiddenState, qr, kvCache[layer], freqsCis);
+    }
+
+    XTensor &o =
+        rt.GetTensor({hiddenState.shape[0], nLocalHeads, _c.headDim}, hiddenState.dtype, DBG_LOC);
+    // TODO implement CXA attention: q, topkIndices, kvCache -> o
+    if (pTopkIndices) {
+        rt.PutTensor(*pTopkIndices);
+    }
+    rt.PutTensor(q);
+    rt.PutTensor(qr);
+
+    XliteOpRopeComplex(rt, nLocalHeads, _c.headDim, _c.headDim, _c.ropeHeadDim,
+                       _c.headDim - _c.ropeHeadDim, _c.headDim - _c.ropeHeadDim, o, freqsCis,
+                       rt._attnPosition, o, true);
+
+    o.View({hiddenState.shape[0], nLocalGroups, nLocalHeads * _c.headDim / nLocalGroups});
+    XTensor &oa = rt.GetTensor({hiddenState.shape[0], nLocalGroups * _c.oLoraRank},
+                               hiddenState.dtype, DBG_LOC);
+    XliteOpMatmul(rt, o, attnWoA[layer], oa, _c.weightNZ);
+    rt.PutTensor(o);
+
+    XliteOpMatmul(rt, oa, attnWoB[layer], hiddenState, _c.weightNZ);
+    rt.PutTensor(oa);
+
+    if (_c.defTpSize > 1) {
+        XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
+    }
 }
 
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
