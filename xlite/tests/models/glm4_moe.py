@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple, Optional, Literal
 
 import os
@@ -69,6 +70,8 @@ class ModelArgs:
     moe_ep_size: int = 1
     moe_tp_size: int = 1
     model_type: str = "glm4moe"
+    # the raw model config path
+    config_path: Optional[Path] = None
 
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
@@ -367,7 +370,7 @@ class Gate(nn.Module):
         scores_for_choice = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)
         topk_indices = torch.topk(scores_for_choice, k=self.topk, dim=-1, sorted=False)[1]
         return topk_indices
-    
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for the gating mechanism.
