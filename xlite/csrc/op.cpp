@@ -1856,6 +1856,81 @@ void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor 
                  packed ? queryStartLoc->ptr : nullptr, packed ? queryLens->ptr : nullptr);
 }
 
+void XliteOpConv1dAndSiLUToken(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
+                               XTensor &output, uint32_t seqLen, bool updateState)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    // input/output must be token-major 2D [T, C]; state [B, C, K].
+    if (state.shape.size() != 3 || input.shape.size() != 2 || output.shape.size() != 2) {
+        throw std::runtime_error(
+            "XliteOpConv1dAndSiLUToken: expects state [B,C,K] and input/output [T,C]");
+    }
+    uint32_t batch = state.shape[0];
+    uint32_t channels = state.shape[1];
+    if (input.shape[1] != channels || output.shape[1] != channels ||
+        input.shape[0] != output.shape[0]) {
+        throw std::runtime_error("XliteOpConv1dAndSiLUToken: channel/token mismatch");
+    }
+    uint32_t kernelDim = state.shape[2];
+    if (kernelDim < 1 || kernelDim > 4 || kernelDim == 3) {
+        throw std::runtime_error(
+            "XliteOpConv1dAndSiLUToken: require kernelDim in {1,2,4} (kernelDim=" +
+            std::to_string(kernelDim) + ")");
+    }
+    if (seqLen == 0 || seqLen < kernelDim || batch * seqLen != input.shape[0]) {
+        throw std::runtime_error("XliteOpConv1dAndSiLUToken: invalid uniform seqLen (seqLen=" +
+                                 std::to_string(seqLen) + " batch=" + std::to_string(batch) +
+                                 " input[0]=" + std::to_string(input.shape[0]) + ")");
+    }
+    if (channels % 1024 != 0) {
+        throw std::runtime_error(
+            "XliteOpConv1dAndSiLUToken: channels must be multiple of 1024 (channels=" +
+            std::to_string(channels) + ")");
+    }
+    // Weight layout [C,1,K] (or [C,K]): kernel reads weight + cb*kChanBlock*K
+    // contiguously, so a mismatched weight would over-read GM.
+    if (weight.shape[0] != channels) {
+        throw std::runtime_error("XliteOpConv1dAndSiLUToken: weight channels mismatch");
+    }
+    uint32_t weightKernelDim = weight.shape.size() >= 3 ? weight.shape[2] : weight.shape.back();
+    if (weightKernelDim != kernelDim) {
+        throw std::runtime_error("XliteOpConv1dAndSiLUToken: weight kernel dim mismatch");
+    }
+
+    KERNEL_PTR_TYPE(conv1d_and_silu_token) * launchKernel;
+    KERNEL_PTR_TYPE(conv1d_state_update) * launchStateKernel;
+    if (EachXDtype(FP32, state, input, weight, output)) {
+        launchKernel = aclrtlaunch_conv1d_and_silu_token_float;
+        launchStateKernel = aclrtlaunch_conv1d_state_update_float;
+    } else if (EachXDtype(FP16, state, input, weight, output)) {
+        launchKernel = aclrtlaunch_conv1d_and_silu_token_float16_t;
+        launchStateKernel = aclrtlaunch_conv1d_state_update_float16_t;
+    } else if (EachXDtype(BF16, state, input, weight, output)) {
+        launchKernel = aclrtlaunch_conv1d_and_silu_token_bfloat16_t;
+        launchStateKernel = aclrtlaunch_conv1d_state_update_bfloat16_t;
+    } else {
+        std::string err_str =
+            DBG_PREFIX + XT_STR(state) + XT_STR(input) + XT_STR(weight) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+
+    uint32_t totalRows = batch * seqLen;
+    uint32_t coreNum = rt.aivNum < totalRows ? rt.aivNum : totalRows;
+    launchKernel(coreNum, rt.stream, state.ptr, input.ptr, weight.ptr, output.ptr, batch, channels,
+                 seqLen, kernelDim);
+    if (updateState) {
+        // State update is a separate launch: conv cores read state GM for the
+        // window context, so an in-kernel update would race them. The launch
+        // boundary is the inter-core barrier.
+        uint32_t units = batch * (channels / 1024);
+        uint32_t stateCores = rt.aivNum < units ? rt.aivNum : units;
+        launchStateKernel(stateCores, rt.stream, state.ptr, input.ptr, batch, channels, seqLen,
+                          kernelDim);
+    }
+}
+
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
                       XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
                       uint32_t num_v_heads)

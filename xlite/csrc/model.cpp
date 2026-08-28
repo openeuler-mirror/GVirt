@@ -821,14 +821,24 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     //   convPacked [m, convDim] token-major (Step4 SplitCol consumes directly)
     // queryStartLoc/lens are populated every step by PrepareAttn.
     //
-    // Prefill (seqlen>1, uniform) keeps the 3D [B,C,S] transpose path: the
-    // packed stride-gather (LoadPackedChannel) costs more than the two
-    // Transpose_1_2 round-trips it would save on long sequences.
     // decode: seqlen==1 (any batch). [B,1,C] and [B,C,1] are memory-identical
     // for contiguous tensors, so the two Transpose_1_2 are identity ops even
     // with multiple requests in flight. Skip them and use the packed 2D path.
+    //
+    // Prefill (seqlen>1, uniform) uses the token-row-parallel kernel when its
+    // constraints hold (K in {1,2,4}, seqlen >= K, convDim % 1024 == 0): it
+    // consumes token-major [m,C] mixQkv directly, removing the two
+    // XliteOpTranspose_1_2 of the old 3D path.
+    // Constraints unmet -> old 3D transpose path. Decode/mixed -> packed.
     bool decodeStep = (seqlen == 1);
-    if (uniform && !decodeStep) {
+    uint32_t convK = _c.linearConvKernelDim;
+    bool useToken = uniform && !decodeStep && seqlen >= convK &&
+                    (convK == 1 || convK == 2 || convK == 4) && (convDim % 1024 == 0);
+    if (useToken) {
+        XliteOpConv1dAndSiLUToken(rt, convStateBatch, mixQkv, linearConv1d[layer], convPacked,
+                                  seqlen, /*updateState=*/true);
+        rt.PutTensor(mixQkv);
+    } else if (uniform && !decodeStep) {
         XTensor &mixTrans = rt.GetTensor({batch, qkvDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor &convOut = rt.GetTensor({batch, convDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor mix3d;
