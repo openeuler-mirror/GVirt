@@ -8,22 +8,20 @@
  *   if updateState: state = concat[..., -K:]
  *
  * No GM workspace concat. State/input are loaded into aligned UB float
- * buffers. Outputs whose window lies entirely inside input (i >= K-1) are
- * produced in full-width 64-lane blocks: each of the K taps is fetched with a
- * vgather (which accepts arbitrary byte-offset bases, unlike plain vector ops
- * that need 32B-aligned sources) and accumulated with vmuls+vadd, so 64
- * outputs cost ~2K+ vector ops with fully-utilized lanes. Only the first K-1
- * outputs (window straddling state and input) are computed via scalar moves.
- * GM copies use CopyGmToUbufAligned / CopyUbufToGmAligned so lengths need not
- * be 32B-aligned.
- *
- * Limits: kernelDim <= 16, seqLen (or per-request lens) <= 4096.
+ * buffers.
  *
  * Layouts:
- *   Uniform (seqLen != 0): input/output [B, C, S], state [B, C, K]
- *   Packed (seqLen == 0): input/output [T, C] token-major, state still [B, C, K];
- *     per-request tokens are input[queryStartLoc[b] : queryStartLoc[b]+queryLens[b]].
- *     Host sets seqLen=0 for packed; do not test GM pointers against nullptr.
+ *   Uniform (seqLen != 0): input/output [B, S, C] (channel is the inner,
+ *     contiguous dim), state [B, C, K], weight [C, 1, K].
+ *   Packed (seqLen == 0): input/output [T, C] token-major, state still [B, C, K].
+ *
+ * The 64-lane (vectorized) dimension is the CHANNEL, not the sequence. Each tap
+ * of the K-tap convolution is a contiguous, 32B-aligned 64-channel vector load
+ * (vmul + vadd), instead of the per-tap vgather the [B,C,S] layout required.
+ * Consuming/producing [B,S,C] directly also removes the two [B,S,C]<->[B,C,S]
+ * Transpose passes around the kernel.
+ *
+ * Limits: kernelDim <= 16, seqLen (or per-request lens) <= 4096.
  */
 #pragma once
 #include "kernel_operator.h"
@@ -41,9 +39,9 @@ public:
     static constexpr int kMaxKernel = 16;
     static constexpr int kMaxInputF = 4096;
     static constexpr int kMaxBatchMeta = 256;
-    // Extra pad so full-width (64-lane) tail reads stay inside input_f.
-    static constexpr int kGatherPad = 128;
-    static constexpr int kBlock = VECTOR_MAX_NUM_OF_FP32;
+    static constexpr int kBlock = VECTOR_MAX_NUM_OF_FP32;  // 64 lanes
+    static constexpr int kTile = 128;
+    static constexpr int kWin = kMaxKernel - 1 + kTile;
 
     __aicore__ inline XliteCausalConv1dSiLU()
     {
@@ -70,44 +68,63 @@ public:
         this->updateState = updateState;
 
         uint64_t off = 0;
-        // Aligned staging for GM<->UB dtype copies (must stay at offset 0 of a 32B region).
-        // Sized for a single fp16/bf16 conversion round trip of the whole input.
+        // Aligned staging for GM<->UB dtype conversion round trips.
         stage_buf = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += kMaxInputF * sizeof(Dtype);  // 8KB (fp16/bf16)
-        tmp_kernel_buf = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += 8 * 32;
+        off += kMaxInputF * sizeof(Dtype);
 
-        // fp32 weights (K floats) read into scalar registers once per channel.
-        kernel_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += 8 * 32;
-
-        state_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += kMaxKernel * sizeof(float);  // 64B, keep 32B-aligned
+        w_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kBlock * kMaxKernel * sizeof(float);
         if (off % 32 != 0) {
             off = (off + 31) / 32 * 32;
         }
-        input_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        // Extra pad so full-width tap reads stay in bounds at the sequence tail.
-        off += (kMaxInputF + kGatherPad) * sizeof(float);
+        w_reorg = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kBlock * kMaxKernel * sizeof(float);
+        if (off % 32 != 0) {
+            off = (off + 31) / 32 * 32;
+        }
+        state_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kBlock * kMaxKernel * sizeof(float);
+        if (off % 32 != 0) {
+            off = (off + 31) / 32 * 32;
+        }
+        state_reorg = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kBlock * kMaxKernel * sizeof(float);
+        if (off % 32 != 0) {
+            off = (off + 31) / 32 * 32;
+        }
+
+        if constexpr (std::is_same<Dtype, float>::value) {
+            win_raw = nullptr;
+        } else {
+            win_raw = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+            off += kWin * kBlock * sizeof(Dtype);
+            if (off % 32 != 0) {
+                off = (off + 31) / 32 * 32;
+            }
+        }
+        window_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kWin * kBlock * sizeof(float);
+        if (off % 32 != 0) {
+            off = (off + 31) / 32 * 32;
+        }
+
+        state_win = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kMaxKernel * kBlock * sizeof(float);
         if (off % 32 != 0) {
             off = (off + 31) / 32 * 32;
         }
         new_state_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += kMaxKernel * sizeof(float);
+        off += kMaxKernel * kBlock * sizeof(float);
         if (off % 32 != 0) {
             off = (off + 31) / 32 * 32;
         }
 
-        off_ramp = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        off += 8 * 32;
-        qkv_tmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += 8 * 32;
         acc_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += 8 * 32;
         calc_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += 8 * 32;
-        out_buf = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += 64 * sizeof(Dtype);
+        out_tile = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += kTile * kBlock * sizeof(Dtype);
         if (off % 32 != 0) {
             off = (off + 31) / 32 * 32;
         }
@@ -116,26 +133,62 @@ public:
         meta_lens = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
     }
 
-    __aicore__ inline float ReadFloat(__ubuf__ float *buf, int idx)
+    __aicore__ inline void SetLaneMask(int w)
+    {
+        if (w >= kBlock) {
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        } else {
+            SetMask(w);
+        }
+    }
+
+    // pipe_barrier(PIPE_X) alone does NOT order UB data produced/consumed by
+    // *different* pipes (MTE2/V/MTE3/S); explicit event flags are required.
+    // EVENT_ID0: MTE2 <-> V and V <-> MTE3 for the window/out_tile pipeline.
+    // EVENT_ID1: scalar (S) pipe fences.
+    // EVENT_ID2: stage_buf MTE2 <-> V inside LoadGmToFloat/StoreFloatToGm.
+    __aicore__ inline void FlagMTE2V()
+    {
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+    }
+    __aicore__ inline void FlagVMTE2()
+    {
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+    }
+    __aicore__ inline void FlagVMTE3()
+    {
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+    }
+    __aicore__ inline void FlagMTE3V()
+    {
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+    }
+    __aicore__ inline void FlagMTE2S()
+    {
+        set_flag(PIPE_MTE2, PIPE_S, EVENT_ID1);
+        wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID1);
+    }
+    __aicore__ inline void FlagVS()
     {
         set_flag(PIPE_V, PIPE_S, EVENT_ID1);
         wait_flag(PIPE_V, PIPE_S, EVENT_ID1);
-        float val = buf[idx];
-        set_flag(PIPE_S, PIPE_V, EVENT_ID1);
-        wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
-        return val;
     }
-
-    __aicore__ inline void WriteFloat(__ubuf__ float *buf, int idx, float val)
+    __aicore__ inline void FlagSV()
     {
-        set_flag(PIPE_V, PIPE_S, EVENT_ID1);
-        wait_flag(PIPE_V, PIPE_S, EVENT_ID1);
-        buf[idx] = val;
         set_flag(PIPE_S, PIPE_V, EVENT_ID1);
         wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
     }
+    __aicore__ inline void FlagSMTE3()
+    {
+        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID1);
+        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID1);
+    }
 
-    __aicore__ inline void SiLU()
+    __aicore__ inline void SiLU(__ubuf__ Dtype *dst)
     {
         vmuls(calc_buf, acc_buf, (float)-1.0, 1, 1, 1, 8, 8);
         pipe_barrier(PIPE_V);
@@ -144,21 +197,18 @@ public:
         vadds(calc_buf, calc_buf, (float)1.0, 1, 1, 1, 8, 8);
         pipe_barrier(PIPE_V);
 
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         if constexpr (std::is_same<Dtype, float>::value) {
-            vdiv(out_buf, acc_buf, calc_buf, 1, 1, 1, 1, 8, 8, 8);
+            vdiv(dst, acc_buf, calc_buf, 1, 1, 1, 1, 8, 8, 8);
         } else {
             vdiv(calc_buf, acc_buf, calc_buf, 1, 1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
             if constexpr (std::is_same<Dtype, float16_t>::value) {
-                vconv_f322f16(out_buf, calc_buf, 1, 1, 1, 4, 8);
+                vconv_f322f16(dst, calc_buf, 1, 1, 1, 4, 8);
             } else {
-                vconv_f322bf16r(out_buf, calc_buf, 1, 1, 1, 4, 8);
+                vconv_f322bf16r(dst, calc_buf, 1, 1, 1, 4, 8);
             }
         }
         pipe_barrier(PIPE_V);
-        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     }
 
     // Load nElem dtype values from GM into dstF (float). One round trip per
@@ -182,9 +232,6 @@ public:
             pipe_barrier(PIPE_MTE2);
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
-
-            // The 128-bit vector mask cycles across repeats (64 lanes each);
-            // SetMask only covers up to two repeats, so use a full mask above.
             if (take >= 2 * VECTOR_MAX_NUM_OF_FP32) {
                 set_vector_mask((uint64_t)-1, (uint64_t)-1);
             } else {
@@ -197,6 +244,8 @@ public:
                 vconv_bf162f32(dstF + done, stage_buf, repeat, 1, 1, 8, 4);
             }
             pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
             done += take;
         }
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -242,103 +291,221 @@ public:
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
     }
 
+    // Load a [nPos, w] tile of channel-block c0 (w channels starting at c0) from
+    // GM positions [tokenBase+loPos, tokenBase+loPos+nPos) into UB at row dstIdx.
+    // Each UB row is kBlock elements wide. When both the row and the channel
+    // width are 32B-aligned, use one multi-burst DMA; otherwise fall back to a
+    // per-position copy.
+    __aicore__ inline void LoadTileInto(__ubuf__ Dtype *dst, int tokenBase, int c0, int loPos,
+                                        int nPos, int dstIdx)
+    {
+        int C = (int)channels;
+        int w = MIN(kBlock, C - c0);
+        __gm__ Dtype *src = input + ((tokenBase + loPos) * C + c0);
+        int burstBytes = w * (int)sizeof(Dtype);
+        int burstBlocks = burstBytes / BLOCK_SIZE;
+        int rowBytes = C * (int)sizeof(Dtype);
+        if (w == kBlock && burstBlocks * BLOCK_SIZE == burstBytes && rowBytes % BLOCK_SIZE == 0) {
+            uint64_t cfg =
+                __set_dmi_config(0, nPos, burstBlocks, rowBytes / BLOCK_SIZE - burstBlocks, 0);
+            copy_gm_to_ubuf(dst + dstIdx * kBlock, src, cfg);
+        } else {
+            for (int i = 0; i < nPos; i++) {
+                CopyGmToUbufAligned(dst + (dstIdx + i) * kBlock, src + i * C,
+                                    static_cast<uint32_t>(burstBytes));
+            }
+        }
+        pipe_barrier(PIPE_MTE2);
+    }
+
+    __aicore__ inline void ConvertTile(int nPos, int dstIdx)
+    {
+        if constexpr (std::is_same<Dtype, float>::value) {
+            return;
+        }
+        int off = dstIdx * kBlock;
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        if constexpr (std::is_same<Dtype, float16_t>::value) {
+            vconv_f162f32(window_f + off, win_raw + off, nPos, 1, 1, 8, 4);
+        } else {
+            vconv_bf162f32(window_f + off, win_raw + off, nPos, 1, 1, 8, 4);
+        }
+        pipe_barrier(PIPE_V);
+    }
+
+    // Load [w, K] weights and re-layout them to [K, kBlock] so tap j lives at a
+    // contiguous 64-lane vector (w_reorg + j*kBlock).
+    __aicore__ inline void LoadWeights(int c0, int w)
+    {
+        int K = (int)kernelDim;
+        LoadGmToFloat(weight + c0 * K, w * K, w_f);
+        if constexpr (std::is_same<Dtype, float>::value) {
+            FlagMTE2S();
+        } else {
+            FlagVS();
+        }
+        for (int l = 0; l < w; l++) {
+            for (int j = 0; j < K; j++) {
+                w_reorg[j * kBlock + l] = w_f[l * K + j];
+            }
+        }
+        FlagSV();
+    }
+
+    // Load [w, K] state and re-layout it to [K, kBlock].
+    __aicore__ inline void LoadState(int b, int c0, int w)
+    {
+        int K = (int)kernelDim;
+        int stateBase = (b * (int)channels + c0) * K;
+        LoadGmToFloat(state + stateBase, w * K, state_f);
+        if constexpr (std::is_same<Dtype, float>::value) {
+            FlagMTE2S();
+        } else {
+            FlagVS();
+        }
+        for (int l = 0; l < w; l++) {
+            for (int p = 0; p < K; p++) {
+                state_reorg[p * kBlock + l] = state_f[l * K + p];
+            }
+        }
+        FlagSV();
+    }
+
+    // Compute one output position (channel block c0, w lanes) and store the
+    // SiLU result into out_tile row (s - s0).
+    __aicore__ inline void ComputePosition(int s, int s0, int w)
+    {
+        int K = (int)kernelDim;
+        SetLaneMask(w);
+        vector_dup(acc_buf, 0.0f, 1, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        for (int j = 0; j < K; j++) {
+            int p = s + 1 + j;
+            __ubuf__ float *tap =
+                (p < K) ? (state_reorg + p * kBlock) : (window_f + (p - s0 - 1) * kBlock);
+            vmul(calc_buf, tap, w_reorg + j * kBlock, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vadd(acc_buf, acc_buf, calc_buf, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+        SiLU(out_tile + (s - s0) * kBlock);
+    }
+
+    // Store out_tile rows [0, nPos) to GM positions [tokenBase+s0, tokenBase+s0+nPos)
+    // with a channel-stride C. Bulk multi-burst DMA when the full block is used.
+    __aicore__ inline void StoreTile(int tokenBase, int c0, int s0, int nPos, int w)
+    {
+        int C = (int)channels;
+        __gm__ Dtype *dst = output + (tokenBase + s0) * C + c0;
+        int burstBytes = w * (int)sizeof(Dtype);
+        int burstBlocks = burstBytes / BLOCK_SIZE;
+        int rowBlocks = C * (int)sizeof(Dtype) / BLOCK_SIZE;
+        if (w == kBlock && burstBlocks * BLOCK_SIZE == burstBytes &&
+            rowBlocks * BLOCK_SIZE == C * (int)sizeof(Dtype)) {
+            uint64_t cfg = __set_dmi_config(0, nPos, burstBlocks, 0, rowBlocks - burstBlocks);
+            copy_ubuf_to_gm(dst, out_tile, cfg);
+        } else {
+            for (int s = 0; s < nPos; s++) {
+                CopyUbufToGmAligned(dst + s * C, out_tile + s * kBlock,
+                                    static_cast<uint32_t>(burstBytes));
+            }
+        }
+        pipe_barrier(PIPE_MTE3);
+    }
+
+    __aicore__ inline void ProcessSequence(int tokenBase, int c0, int w, int S)
+    {
+        int K = (int)kernelDim;
+        for (int s0 = 0; s0 < S; s0 += kTile) {
+            int loPos = (s0 == 0) ? 0 : (s0 - K + 1);
+            int hiPos = MIN(s0 + kTile - 1, S - 1);
+            if (hiPos < loPos) {
+                break;
+            }
+            int nPos = hiPos - loPos + 1;
+            int dstIdx = (s0 == 0) ? (K - 1) : 0;
+
+            if constexpr (std::is_same<Dtype, float>::value) {
+                LoadTileInto(window_f, tokenBase, c0, loPos, nPos, dstIdx);
+            } else {
+                LoadTileInto(win_raw, tokenBase, c0, loPos, nPos, dstIdx);
+            }
+            FlagMTE2V();
+            ConvertTile(nPos, dstIdx);
+            FlagVMTE2();
+
+            int sEnd = MIN(s0 + kTile, S);
+            for (int s = s0; s < sEnd; s++) {
+                ComputePosition(s, s0, w);
+            }
+            FlagVMTE3();
+            StoreTile(tokenBase, c0, s0, sEnd - s0, w);
+            FlagMTE3V();
+        }
+    }
+
+    // Load the trailing input window used to derive the new state.
+    __aicore__ inline void LoadStateWin(int tokenBase, int c0, int S)
+    {
+        int K = (int)kernelDim;
+        int firstPos = MAX(0, S - K);
+        int nPos = S - firstPos;
+        if (nPos <= 0) {
+            return;
+        }
+        if constexpr (std::is_same<Dtype, float>::value) {
+            LoadTileInto(state_win, tokenBase, c0, firstPos, nPos, 0);
+        } else {
+            LoadTileInto(win_raw, tokenBase, c0, firstPos, nPos, 0);
+            FlagMTE2V();
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+            if constexpr (std::is_same<Dtype, float16_t>::value) {
+                vconv_f162f32(state_win, win_raw, nPos, 1, 1, 8, 4);
+            } else {
+                vconv_bf162f32(state_win, win_raw, nPos, 1, 1, 8, 4);
+            }
+            pipe_barrier(PIPE_V);
+            FlagVMTE2();
+        }
+    }
+
+    __aicore__ inline void WriteBackState(int b, int tokenBase, int c0, int w, int S)
+    {
+        int K = (int)kernelDim;
+        int C = (int)channels;
+        int firstPos = MAX(0, S - K);
+
+        LoadStateWin(tokenBase, c0, S);
+        if constexpr (std::is_same<Dtype, float>::value) {
+            FlagMTE2S();
+        } else {
+            FlagVS();
+        }
+        for (int t = 0; t < K; t++) {
+            int concatIdx = S + t;
+            for (int l = 0; l < w; l++) {
+                float v;
+                if (concatIdx < K) {
+                    v = state_reorg[concatIdx * kBlock + l];
+                } else {
+                    v = state_win[(concatIdx - K - firstPos) * kBlock + l];
+                }
+                new_state_f[l * K + t] = v;
+            }
+        }
+        if constexpr (std::is_same<Dtype, float>::value) {
+            FlagSMTE3();
+        } else {
+            FlagSV();
+        }
+        StoreFloatToGm(new_state_f, state + (b * C + c0) * K, w * K);
+    }
+
     __aicore__ inline bool Packed()
     {
         // Host sets seqLen=0 for packed mixed-length. GM pointer != nullptr is
         // not reliable on device (CANN may pass a non-null dummy).
         return seqLen == 0;
-    }
-
-    // Packed [T,C]: tokens of one channel are stride-C apart.
-    // align_b16 bursts are placed 32B apart in UB; compact the first Dtype of
-    // each slot, then convert. Never DMA from a non-32B UB pointer (ADDR_MISALIGN).
-    __aicore__ inline void LoadPackedChannel(__gm__ Dtype *base, int S, int stride,
-                                             __ubuf__ float *dstF)
-    {
-        constexpr int kSlot = BLOCK_SIZE / sizeof(Dtype);
-        constexpr int kMaxTake = kMaxInputF / kSlot;
-        uint32_t elemBytes = static_cast<uint32_t>(sizeof(Dtype));
-        uint32_t srcGap = static_cast<uint32_t>(stride - 1) * elemBytes;
-        int done = 0;
-        while (done < S) {
-            int take = S - done;
-            if (take > kMaxTake) {
-                take = kMaxTake;
-            }
-            if constexpr (std::is_same<Dtype, float>::value) {
-                copy_gm_to_ubuf_align_b32(stage_buf, base + done * stride, 0, (uint16_t)take,
-                                          elemBytes, 0, 0, srcGap, 0);
-            } else {
-                copy_gm_to_ubuf_align_b16(stage_buf, base + done * stride, 0, (uint16_t)take,
-                                          elemBytes, 0, 0, srcGap, 0);
-            }
-            pipe_barrier(PIPE_MTE2);
-            set_flag(PIPE_MTE2, PIPE_S, EVENT_ID2);
-            wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID2);
-            for (int i = 0; i < take; ++i) {
-                stage_buf[i] = stage_buf[i * kSlot];
-            }
-            set_flag(PIPE_S, PIPE_V, EVENT_ID2);
-            wait_flag(PIPE_S, PIPE_V, EVENT_ID2);
-            if constexpr (std::is_same<Dtype, float>::value) {
-                for (int i = 0; i < take; ++i) {
-                    WriteFloat(dstF, done + i, ReadFloat(stage_buf, i));
-                }
-            } else {
-                if (take >= 2 * VECTOR_MAX_NUM_OF_FP32) {
-                    set_vector_mask((uint64_t)-1, (uint64_t)-1);
-                } else {
-                    SetMask(take);
-                }
-                int repeat = DIV_ROUND_UP(take, VECTOR_MAX_NUM_OF_FP32);
-                if constexpr (std::is_same<Dtype, float16_t>::value) {
-                    vconv_f162f32(dstF + done, stage_buf, repeat, 1, 1, 8, 4);
-                } else {
-                    vconv_bf162f32(dstF + done, stage_buf, repeat, 1, 1, 8, 4);
-                }
-                pipe_barrier(PIPE_V);
-                set_vector_mask((uint64_t)-1, (uint64_t)-1);
-            }
-            done += take;
-        }
-    }
-
-    __aicore__ inline void StorePackedChannel(__gm__ Dtype *base, int S, int stride,
-                                              __ubuf__ Dtype *src, int nElem)
-    {
-        (void)S;
-        uint32_t elemBytes = static_cast<uint32_t>(sizeof(Dtype));
-        // Bulk scatter: expand contiguous src[0..nElem) into the 32B-slot layout
-        // that align_b16 expects on the UB side (each burst lives in its own
-        // 32B slot), then one copy_ubuf_to_gm_align_b16 writes every burst to a
-        // GM position stride elements apart (dstGap). nElem <= kBlock=64, so
-        // slot staging fits stage_buf (8KB for fp16/bf16).
-        constexpr int kSlot = BLOCK_SIZE / sizeof(Dtype);
-        // SiLU (vdiv) writes out_buf on V pipe
-        set_flag(PIPE_V, PIPE_S, EVENT_ID0);
-        wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
-        for (int s = 0; s < nElem; ++s) {
-            stage_buf[s * kSlot] = src[s];
-        }
-        // S→MTE3: slot scatter must be visible before align_b16 DMA reads stage_buf.
-        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-        uint32_t dstGap = static_cast<uint32_t>(stride - 1) * elemBytes;
-        copy_ubuf_to_gm_align_b16(base, stage_buf, 0, static_cast<uint16_t>(nElem), elemBytes, 0, 0,
-                                  0, dstGap);
-        pipe_barrier(PIPE_MTE3);
-    }
-
-    __aicore__ inline void WriteBackState(int batchIdx, int channel, int S)
-    {
-        int K = (int)kernelDim;
-        for (int j = 0; j < K; ++j) {
-            int absIdx = S + j;
-            float v = (absIdx < K) ? ReadFloat(state_f, absIdx) : ReadFloat(input_f, absIdx - K);
-            WriteFloat(new_state_f, j, v);
-        }
-        int stateBase = (batchIdx * (int)channels + channel) * K;
-        StoreFloatToGm(new_state_f, state + stateBase, K);
     }
 
     __aicore__ inline void Process()
@@ -357,165 +524,39 @@ public:
             pipe_barrier(PIPE_MTE2);
             CopyGmToUbufAligned(meta_lens, queryLens, n * sizeof(int32_t));
             pipe_barrier(PIPE_MTE2);
-            set_flag(PIPE_MTE2, PIPE_S, EVENT_ID1);
-            wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID1);
+            FlagMTE2S();
         }
 
-        // Byte offsets for vgather: lane p reads base + off_ramp[p].
-        for (int k = 0; k < kBlock; k++) {
-            off_ramp[k] = static_cast<uint32_t>(k * (int)sizeof(float));
-        }
-        set_flag(PIPE_S, PIPE_V, EVENT_ID1);
-        wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
-
-        for (int channel = 0; channel < (int)channels; channel++) {
-            if (channel % GetBlockNum() != GetBlockIdx())
+        int C = (int)channels;
+        int nBlocks = DIV_ROUND_UP(C, kBlock);
+        for (int cb = 0; cb < nBlocks; cb++) {
+            if (cb % GetBlockNum() != GetBlockIdx()) {
                 continue;
-
-            int wOffset = channel * K;
-            if constexpr (std::is_same<Dtype, float>::value) {
-                CopyGmToUbufAligned(kernel_buf, weight + wOffset,
-                                    static_cast<uint32_t>(K * sizeof(Dtype)));
-                pipe_barrier(PIPE_MTE2);
-            } else {
-                CopyGmToUbufAligned(tmp_kernel_buf, weight + wOffset,
-                                    static_cast<uint32_t>(K * sizeof(Dtype)));
-                pipe_barrier(PIPE_MTE2);
-                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-                uint64_t wmask = (K >= 64) ? (uint64_t)-1 : ((1ull << K) - 1ull);
-                set_vector_mask(0, wmask);
-                if constexpr (std::is_same<Dtype, float16_t>::value) {
-                    vconv_f162f32(kernel_buf, tmp_kernel_buf, 1, 1, 1, 8, 4);
-                } else {
-                    vconv_bf162f32(kernel_buf, tmp_kernel_buf, 1, 1, 1, 8, 4);
-                }
-                pipe_barrier(PIPE_V);
-                set_vector_mask((uint64_t)-1, (uint64_t)-1);
             }
+            int c0 = cb * kBlock;
+            int w = MIN(kBlock, C - c0);
 
-            // Read the K fp32 weights into scalar registers (once per channel).
-            set_flag(PIPE_V, PIPE_S, EVENT_ID1);
-            wait_flag(PIPE_V, PIPE_S, EVENT_ID1);
-            float w[kMaxKernel];
-            for (int j = 0; j < K; ++j) {
-                w[j] = kernel_buf[j];
-            }
-            set_flag(PIPE_S, PIPE_V, EVENT_ID1);
-            wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
-
-            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-            for (int batchIdx = 0; batchIdx < (int)batch; ++batchIdx) {
+            LoadWeights(c0, w);
+            for (int b = 0; b < (int)batch; b++) {
                 int S;
-                int start;
+                int tokenBase;
                 if (packed) {
-                    // meta_* live in UB; must not read them from V without a drain.
-                    pipe_barrier(PIPE_ALL);
-                    S = (int)meta_lens[batchIdx];
-                    start = (int)meta_start[batchIdx];
+                    S = (int)meta_lens[b];
+                    tokenBase = (int)meta_start[b];
                 } else {
                     S = (int)seqLen;
-                    start = 0;
+                    tokenBase = b * S;
                 }
                 if (S <= 0 || S > kMaxInputF) {
                     continue;
                 }
-                int stateBase = (batchIdx * (int)channels + channel) * K;
-                LoadGmToFloat(state + stateBase, K, state_f);
-                if (packed) {
-                    LoadPackedChannel(input + start * (int)channels + channel, S, (int)channels,
-                                      input_f);
-                } else {
-                    int inputBase = (batchIdx * (int)channels + channel) * S;
-                    LoadGmToFloat(input + inputBase, S, input_f);
-                }
-
-                // ---- Straddle outputs [0, K-1): window spans state and input ----
-                int scalarEnd = MIN(K - 1, S);
-                if (scalarEnd > 0) {
-                    float st[kMaxKernel];
-                    float in[kMaxKernel];
-                    set_flag(PIPE_MTE2, PIPE_S, EVENT_ID1);
-                    wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID1);
-                    set_flag(PIPE_V, PIPE_S, EVENT_ID1);
-                    wait_flag(PIPE_V, PIPE_S, EVENT_ID1);
-                    for (int j = 0; j < K; ++j) {
-                        st[j] = state_f[j];
-                    }
-                    for (int j = 0; j < MIN(K, S); ++j) {
-                        in[j] = input_f[j];
-                    }
-                    set_flag(PIPE_S, PIPE_V, EVENT_ID1);
-                    wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
-                    for (int pos = 0; pos < scalarEnd; ++pos) {
-                        float dot = 0.0f;
-                        for (int j = 0; j < K; ++j) {
-                            int t = pos + 1 + j;
-                            float v = (t < K) ? st[t] : in[t - K];
-                            dot += w[j] * v;
-                        }
-                        WriteFloat(acc_buf, pos, dot);
-                    }
-                    SiLU();
-                    set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-                    wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-                    if (packed) {
-                        StorePackedChannel(output + start * (int)channels + channel, S,
-                                           (int)channels, out_buf, scalarEnd);
-                    } else {
-                        int outOffset = (batchIdx * (int)channels + channel) * S;
-                        CopyUbufToGmAligned(output + outOffset, out_buf, scalarEnd * sizeof(Dtype));
-                        pipe_barrier(PIPE_MTE3);
-                    }
-                    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-                }
-
-                // ---- Windows fully inside input: full-width 64-lane blocks ----
-                for (int i = K - 1; i < S; i += kBlock) {
-                    int realLen = MIN(kBlock, S - i);
-
-                    vector_dup(acc_buf, 0.0f, 1, 1, 1, 8, 8);
-                    pipe_barrier(PIPE_V);
-                    for (int j = 0; j < K; ++j) {
-                        uint32_t baseAddr = static_cast<uint32_t>(
-                            (uint64_t)input_f + (i + 1 - K + j) * (int)sizeof(float));
-                        vgather((__ubuf__ uint32_t *)qkv_tmp, off_ramp, baseAddr, 8, 1);
-                        // vgather UB writeback is NOT covered by pipe_barrier(PIPE_V)
-                        // (proven on this NPU). Use an S-roundtrip event fence before
-                        // vmuls consumes qkv_tmp, otherwise the dependent vector op can
-                        // be issued while the gather is still writing -> AIV hazard.
-                        set_flag(PIPE_V, PIPE_S, EVENT_ID3);
-                        wait_flag(PIPE_V, PIPE_S, EVENT_ID3);
-                        set_flag(PIPE_S, PIPE_V, EVENT_ID3);
-                        wait_flag(PIPE_S, PIPE_V, EVENT_ID3);
-                        vmuls(calc_buf, qkv_tmp, w[j], 1, 1, 1, 8, 8);
-                        pipe_barrier(PIPE_V);
-                        vadd(acc_buf, acc_buf, calc_buf, 1, 1, 1, 1, 8, 8, 8);
-                        pipe_barrier(PIPE_V);
-                    }
-                    SiLU();
-
-                    set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-                    wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
-                    if (packed) {
-                        StorePackedChannel(output + (start + i) * (int)channels + channel, S,
-                                           (int)channels, out_buf, realLen);
-                    } else {
-                        int outOffset = (batchIdx * (int)channels + channel) * S + i;
-                        CopyUbufToGmAligned(output + outOffset, out_buf, realLen * sizeof(Dtype));
-                        pipe_barrier(PIPE_MTE3);
-                    }
-                    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-                }
-
+                LoadState(b, c0, w);
+                ProcessSequence(tokenBase, c0, w, S);
                 if (updateState) {
-                    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-                    WriteBackState(batchIdx, channel, S);
-                    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+                    WriteBackState(b, tokenBase, c0, w, S);
                 }
                 pipe_barrier(PIPE_ALL);
             }
-            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         }
     }
 
@@ -528,16 +569,17 @@ private:
     __gm__ int32_t *queryLens;
 
     __ubuf__ Dtype *stage_buf;
-    __ubuf__ Dtype *tmp_kernel_buf;
-    __ubuf__ float *kernel_buf;
+    __ubuf__ float *w_f;
+    __ubuf__ float *w_reorg;
     __ubuf__ float *state_f;
-    __ubuf__ float *input_f;
+    __ubuf__ float *state_reorg;
+    __ubuf__ Dtype *win_raw;
+    __ubuf__ float *window_f;
+    __ubuf__ float *state_win;
     __ubuf__ float *new_state_f;
-    __ubuf__ uint32_t *off_ramp;
-    __ubuf__ float *qkv_tmp;
     __ubuf__ float *acc_buf;
     __ubuf__ float *calc_buf;
-    __ubuf__ Dtype *out_buf;
+    __ubuf__ Dtype *out_tile;
     __ubuf__ int32_t *meta_start;
     __ubuf__ int32_t *meta_lens;
 
