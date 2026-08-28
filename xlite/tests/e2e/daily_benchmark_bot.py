@@ -83,6 +83,7 @@ xlite 每日自动化测试机器人
 import os
 import sys
 import re
+import shutil
 import subprocess
 import argparse
 from datetime import datetime
@@ -103,9 +104,9 @@ from daily_bot_utils import (
     build_project,
     install_wheel,
     # 版本信息
-    get_current_version,
     get_vllm_ascend_version,
-    get_xlite_commit,
+    get_xlite_version,
+    get_last_release_tag,
     # xlite 库路径
     get_xlite_lib_path,
     # 环境检测
@@ -216,9 +217,7 @@ def update_model_paths(device: str) -> bool:
         return False
 
 
-def run_benchmark(
-    model_type: str = "moe", report_subdir: Optional[Path] = None
-) -> Optional[Path]:
+def run_benchmark(model_type: str = "moe", report_subdir: Optional[Path] = None) -> Optional[Path]:
     """
     在测试容器中执行基准测试脚本
 
@@ -243,7 +242,7 @@ def run_benchmark(
 
     # 报告目录: 传入则复用, 否则按当前版本+日期新建
     if report_subdir is None:
-        current_version = get_current_version()
+        current_version = get_xlite_version()
         current_date = datetime.now().strftime("%Y%m%d")
         report_subdir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
     report_subdir.mkdir(parents=True, exist_ok=True)
@@ -311,7 +310,7 @@ def run_offline_bench(report_subdir: Optional[Path] = None) -> Optional[Path]:
     # 报告目录: 传入则复用, 否则按当前版本+日期新建。
     # current_date 与目录日期保持一致 (复用时从目录名提取, 保证日志文件名日期一致)
     if report_subdir is None:
-        current_version = get_current_version()
+        current_version = get_xlite_version()
         current_date = datetime.now().strftime("%Y%m%d")
         report_subdir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
     else:
@@ -369,7 +368,9 @@ def run_offline_bench(report_subdir: Optional[Path] = None) -> Optional[Path]:
             log_file.write_text(result.stdout, encoding="utf-8")
 
             if result.returncode != 0:
-                log_error(f"离线 bench 场景 {scenario_tag} 执行失败 (返回码 {result.returncode}): {result.stderr[-500:]}")
+                log_error(
+                    f"离线 bench 场景 {scenario_tag} 执行失败 (返回码 {result.returncode}): {result.stderr[-500:]}"
+                )
                 continue
 
             # OOM 兜底: torchrun 吞掉 OOM 的 SIGTERM(-15) 仍返回 0, 仅看 returncode
@@ -424,9 +425,7 @@ def parse_offline_bench_report(report_path: Path) -> Dict:
 
     # 场景信息从文件名解析:
     # offline_bench_<model>_in<input>_out<output>_bs<bs>_<date>.log
-    name_match = re.search(
-        r"offline_bench_\w+_in(\d+)_out(\d+)_bs(\d+)", report_path.name
-    )
+    name_match = re.search(r"offline_bench_\w+_in(\d+)_out(\d+)_bs(\d+)", report_path.name)
     if name_match:
         metrics["input_len"] = int(name_match.group(1))
         metrics["output_len"] = int(name_match.group(2))
@@ -506,9 +505,7 @@ def compare_offline_metrics(current: Dict, baseline: Dict) -> Dict:
             "is_improvement": is_improvement,
         }
 
-    has_significant_change = any(
-        c.get("is_degradation") or c.get("is_improvement") for c in changes.values()
-    )
+    has_significant_change = any(c.get("is_degradation") or c.get("is_improvement") for c in changes.values())
     if has_significant_change:
         comparison["row_changes"].append(
             {
@@ -537,30 +534,30 @@ def get_previous_offline_report(
 
     返回:
         (报告文件路径, 版本号)，不存在则返回 (None, None)
-    """
-    current_version = get_current_version()
 
-    if current_version == "unknown":
-        log_warning("无法获取当前版本号")
+    说明:
+        - 基线目录: xlite-{release_tag} (无日期，如 xlite-0.2.0rc0)，用最近发布 tag
+          作为 key，在两次 tag 之间的所有 dev 构建间稳定，故每日构建都对比同一基线。
+        - 当前目录: xlite-{dev_version}-{date} (有日期)，用 dev 版本号+日期。
+    """
+    baseline_version = get_last_release_tag()
+
+    if baseline_version == "unknown":
+        log_warning("无法获取基线版本号")
         return None, None
 
-    baseline_version_dir = REPORT_DIR / f"xlite-{current_version}"
+    baseline_version_dir = REPORT_DIR / f"xlite-{baseline_version}"
     if not baseline_version_dir.exists():
         log_warning(f"基线目录不存在: {baseline_version_dir}")
-        return None, current_version
+        return None, baseline_version
 
-    pattern = (
-        f"offline_bench_{OFFLINE_BENCH_MODEL}"
-        f"_in{input_len}_out{output_len}_bs{batch_size}_*.log"
-    )
+    pattern = f"offline_bench_{OFFLINE_BENCH_MODEL}_in{input_len}_out{output_len}_bs{batch_size}_*.log"
     reports = list(baseline_version_dir.glob(pattern))
     if reports:
-        return reports[0], current_version
+        return reports[0], baseline_version
 
-    log_warning(
-        f"基线目录中未找到离线 bench 场景 in={input_len} out={output_len} bs={batch_size} 的报告"
-    )
-    return None, current_version
+    log_warning(f"基线目录中未找到离线 bench 场景 in={input_len} out={output_len} bs={batch_size} 的报告")
+    return None, baseline_version
 
 
 # ====================== 离线 bench 报告生成函数 ======================
@@ -587,8 +584,7 @@ def generate_offline_report(
     lines = []
 
     vllm_ascend_version = get_vllm_ascend_version()
-    xlite_commit = get_xlite_commit()
-    current_version = get_current_version()
+    xlite_version = get_xlite_version()
     baseline_info = get_baseline_info()
 
     current_date = "unknown"
@@ -620,18 +616,14 @@ def generate_offline_report(
                 input_len = row.get("input_len")
                 output_len = row.get("output_len")
 
-                detail_lines.append(
-                    f"{scenario_idx}. {service} in={input_len} out={output_len} bs={concurrency}"
-                )
+                detail_lines.append(f"{scenario_idx}. {service} in={input_len} out={output_len} bs={concurrency}")
 
                 if comparison.get("error"):
                     detail_lines.append(f"  ⚠️  {comparison['error']}")
                     detail_lines.append("")
                     continue
 
-                detail_lines.append(
-                    " | 场景 | throughput(tokens/s) | step latency(ms) | total(ms) |"
-                )
+                detail_lines.append(" | 场景 | throughput(tokens/s) | step latency(ms) | total(ms) |")
                 detail_lines.append(" |------|------|------|------|")
 
                 row_degradations = sum(1 for c in changes.values() if c.get("is_degradation"))
@@ -670,17 +662,13 @@ def generate_offline_report(
                         while i < len(metrics_order) and changes[metrics_order[i]].get("is_degradation"):
                             red_parts.append(format_value(metrics_order[i], changes[metrics_order[i]]))
                             i += 1
-                        formatted_parts.append(
-                            f'<font color="red"><b>{" | ".join(red_parts)}</b></font>'
-                        )
+                        formatted_parts.append(f'<font color="red"><b>{" | ".join(red_parts)}</b></font>')
                     elif change_info.get("is_improvement"):
                         green_parts = []
                         while i < len(metrics_order) and changes[metrics_order[i]].get("is_improvement"):
                             green_parts.append(format_value(metrics_order[i], changes[metrics_order[i]]))
                             i += 1
-                        formatted_parts.append(
-                            f'<font color="green"><b>{" | ".join(green_parts)}</b></font>'
-                        )
+                        formatted_parts.append(f'<font color="green"><b>{" | ".join(green_parts)}</b></font>')
                     else:
                         formatted_parts.append(format_value(metric, change_info))
                         i += 1
@@ -703,7 +691,7 @@ def generate_offline_report(
         f'📊 <font color="blue"><b>{model_name}</b></font> 离线 bench 性能统计: '
         f"<b>劣化项: {total_degradations} | 提升项: {total_improvements}</b>"
     )
-    lines.append(f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite commit: {xlite_commit}")
+    lines.append(f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite 版本: {xlite_version}")
     lines.append(
         f"【对比基线】 vllm-ascend 版本: {baseline_info['vllm_ascend_version']}, xlite 版本: {baseline_info['version']}"
     )
@@ -982,8 +970,7 @@ def generate_model_report(
     lines = []
 
     vllm_ascend_version = get_vllm_ascend_version()
-    xlite_commit = get_xlite_commit()
-    current_version = get_current_version()
+    xlite_version = get_xlite_version()
     baseline_info = get_baseline_info()
 
     # 获取当前测试日期（从report_dir中提取）
@@ -1017,7 +1004,7 @@ def generate_model_report(
             output_len = comparison.get("output_len", "N/A")
 
             detail_lines.append(f"{scenario_idx}. input={input_len}, output={output_len}")
-            
+
             if comparison.get("error"):
                 detail_lines.append(f"  ⚠️  {comparison['error']}")
                 detail_lines.append("")
@@ -1112,7 +1099,7 @@ def generate_model_report(
     lines.append(
         f'📊 <font color="blue"><b>{model_name}</b></font> 性能统计: <b>劣化项: {total_degradations} | 提升项: {total_improvements}</b>'
     )
-    lines.append(f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite commit: {xlite_commit}")
+    lines.append(f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite 版本: {xlite_version}")
     lines.append(
         f"【对比基线】 vllm-ascend 版本: {baseline_info['vllm_ascend_version']}, xlite 版本: {baseline_info['version']}"
     )
@@ -1145,7 +1132,7 @@ def build_no_change_report(
         格式化的报告字符串
     """
     vllm_ascend_version = get_vllm_ascend_version()
-    xlite_commit = get_xlite_commit()
+    xlite_version = get_xlite_version()
     baseline_info = get_baseline_info()
 
     # 获取当前测试日期（从report_dir中提取）
@@ -1161,7 +1148,7 @@ def build_no_change_report(
         header = f"xlite {current_date} 在线性能测试报告"
     lines = [f'<font color="blue"><b>{header}</b></font>', ""]
 
-    lines.append(f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite commit: {xlite_commit}")
+    lines.append(f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite 版本: {xlite_version}")
     lines.append(
         f"【对比基线】 vllm-ascend 版本: {baseline_info['vllm_ascend_version']}, xlite 版本: {baseline_info['version']}"
     )
@@ -1219,30 +1206,31 @@ def get_previous_version_report(
         (报告文件路径, 版本号)，不存在则返回 (None, None)
 
     说明:
-        - 基线目录: xlite-{version} (无日期，如 xlite-0.1.0rc4)
-        - 当前目录: xlite-{version}-{date} (有日期，如 xlite-0.1.0rc4-20260403)
+        - 基线目录: xlite-{release_tag} (无日期，如 xlite-0.2.0rc0)，用最近发布 tag
+          作为 key，在两次 tag 之间的所有 dev 构建间稳定，故每日构建都对比同一基线。
+        - 当前目录: xlite-{dev_version}-{date} (有日期，如 xlite-0.2.0rc1.dev146+...-20260828)。
     """
-    current_version = get_current_version()
+    baseline_version = get_last_release_tag()
 
-    if current_version == "unknown":
-        log_warning("无法获取当前版本号")
+    if baseline_version == "unknown":
+        log_warning("无法获取基线版本号")
         return None, None
 
-    # 基线目录使用当前版本号（不带日期）
-    baseline_version_dir = REPORT_DIR / f"xlite-{current_version}"
+    # 基线目录使用最近发布 tag（不带日期）
+    baseline_version_dir = REPORT_DIR / f"xlite-{baseline_version}"
 
     if not baseline_version_dir.exists():
         log_warning(f"基线目录不存在: {baseline_version_dir}")
-        return None, current_version
+        return None, baseline_version
 
     # 查找匹配模型名称、输入输出长度的报告文件
     pattern = f"benchmark_comparison_{model_name}_input{input_len}_output{output_len}_*.log"
     reports = list(baseline_version_dir.glob(pattern))
     if reports:
-        return reports[0], current_version
+        return reports[0], baseline_version
 
     log_warning(f"基线目录中未找到模型 {model_name} (input={input_len}, output={output_len}) 的报告")
-    return None, current_version
+    return None, baseline_version
 
 
 def get_baseline_info() -> Dict:
@@ -1258,11 +1246,11 @@ def get_baseline_info() -> Dict:
             "vllm_ascend_version": "vllm-ascend版本号"
         }
     """
-    current_version = get_current_version()
-    baseline_version_dir = REPORT_DIR / f"xlite-{current_version}"
+    baseline_version = get_last_release_tag()
+    baseline_version_dir = REPORT_DIR / f"xlite-{baseline_version}"
 
     baseline_info = {
-        "version": current_version,
+        "version": baseline_version,
         "date": "unknown",
         "commit": "unknown",
         "vllm_ascend_version": "unknown",
@@ -1296,6 +1284,52 @@ def get_baseline_info() -> Dict:
             log_warning(f"读取基线summary文件失败: {e}")
 
     return baseline_info
+
+
+def seed_baseline_if_release(report_dir: Path) -> None:
+    """
+    若本次构建恰好处于某个发布 tag 上 (get_xlite_version() == 最近 tag，
+    即 distance==0 的干净 tag 构建)，则把本次报告目录镜像为基线目录
+    xlite-{tag}/，使后续两次 tag 之间的每日 dev 构建有基线可对比。
+
+    基线目录采用覆盖式更新: 每次在 tag 上构建都刷新基线为最新结果，
+    因此基线始终反映该 tag 的最新一次运行。仅在 tag 构建时触发，dev
+    构建只写带日期的报告目录、不更新基线，避免基线被未发布代码污染。
+
+    参数:
+        report_dir: 本次运行的报告目录 (xlite-{dev_version}-{date})
+    """
+    current_version = get_xlite_version()
+    release_tag = get_last_release_tag()
+
+    # dev 构建 (当前版本带 .dev/.+g... 后缀，与最近 tag 不同): 不更新基线。
+    # 浅克隆等无 tag 情形 get_last_release_tag 退化为当前版本，二者相等会
+    # 误判为 tag 构建；用 git describe --exact-match 再确认一次。
+    if current_version != release_tag:
+        return
+    try:
+        exact = subprocess.run(
+            ["git", "describe", "--tags", "--exact-match"],
+            cwd=str(XLITE_DIR),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if exact.returncode != 0:
+            # HEAD 不在某个 tag 上 (dev 构建): 不更新基线。
+            return
+    except Exception as e:
+        log_warning(f"基线种子: 确认 tag 失败, 跳过基线更新: {e}")
+        return
+
+    baseline_dir = REPORT_DIR / f"xlite-{release_tag}"
+    log_info(f"检测到发布 tag 构建 ({release_tag})，刷新基线目录: {baseline_dir}")
+
+    # 覆盖式更新: 先清旧基线再镜像本次结果，保证基线即本次运行。
+    if baseline_dir.exists():
+        shutil.rmtree(baseline_dir)
+    shutil.copytree(report_dir, baseline_dir)
+    log_success(f"基线已更新: {baseline_dir}")
 
 
 # ====================== 报告处理辅助函数 ======================
@@ -1398,8 +1432,7 @@ def _process_offline_reports(report_dir: Path) -> List[Dict]:
         # 不生成 metrics/对比/报告, 避免 null 指标被误报为"无劣化"。
         if current_metrics.get("decode_tps") is None:
             log_warning(
-                f"离线 bench 场景 {current_report.name} 无有效性能指标 "
-                f"(decode_tps 为空, 疑似 OOM/崩溃), 跳过该场景"
+                f"离线 bench 场景 {current_report.name} 无有效性能指标 (decode_tps 为空, 疑似 OOM/崩溃), 跳过该场景"
             )
             continue
 
@@ -1410,15 +1443,11 @@ def _process_offline_reports(report_dir: Path) -> List[Dict]:
         save_metrics_json(current_metrics, current_json)
 
         # 与基线版本数据对比
-        baseline_report, baseline_version = get_previous_offline_report(
-            input_len, output_len, batch_size
-        )
+        baseline_report, baseline_version = get_previous_offline_report(input_len, output_len, batch_size)
         comparison_result = {}
 
         if baseline_report:
-            log_info(
-                f"对比基准: {baseline_report} (版本: {baseline_version}, 场景: {scenario_tag})"
-            )
+            log_info(f"对比基准: {baseline_report} (版本: {baseline_version}, 场景: {scenario_tag})")
             baseline_metrics = parse_offline_bench_report(baseline_report)
             comparison_result = compare_offline_metrics(current_metrics, baseline_metrics)
 
@@ -1426,9 +1455,7 @@ def _process_offline_reports(report_dir: Path) -> List[Dict]:
             comparison_json = report_dir / f"offline_comparison_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
             save_metrics_json(comparison_result, comparison_json)
         else:
-            log_warning(
-                f"未找到离线 bench 场景 {scenario_tag} 的基线报告，跳过对比"
-            )
+            log_warning(f"未找到离线 bench 场景 {scenario_tag} 的基线报告，跳过对比")
             comparison_result = {
                 "error": "无基线数据",
                 "date_current": current_metrics.get("timestamp", ""),
@@ -1486,14 +1513,10 @@ def _report_phase(
         model_comparisons = model_groups[model_name]
         log_info(f"正在生成模型 {model_name} 的报告 [{idx + 1}/{len(model_names)}]")
         if is_offline:
-            model_report = generate_offline_report(
-                model_name, model_comparisons, report_dir, idx, len(model_names)
-            )
+            model_report = generate_offline_report(model_name, model_comparisons, report_dir, idx, len(model_names))
             summary_prefix = "offline_summary"
         else:
-            model_report = generate_model_report(
-                model_name, model_comparisons, report_dir, idx, len(model_names)
-            )
+            model_report = generate_model_report(model_name, model_comparisons, report_dir, idx, len(model_names))
             summary_prefix = "daily_summary"
 
         model_report_file = report_dir / f"{summary_prefix}_{model_name}_{idx + 1}.txt"
@@ -1659,7 +1682,7 @@ def main():
         # 步骤4: 执行基准测试 (在测试容器中)
         # 一次性确定报告目录 (版本+日期), 供在线/离线两阶段复用,
         # 避免跨午夜跑测试时结果分到不同日期目录。
-        current_version = get_current_version()
+        current_version = get_xlite_version()
         current_date = datetime.now().strftime("%Y%m%d")
         report_dir = REPORT_DIR / f"xlite-{current_version}-{current_date}"
         report_dir.mkdir(parents=True, exist_ok=True)
@@ -1710,6 +1733,11 @@ def main():
             has_infra_failure = True
         elif _report_phase(report_dir, all_comparison_results, args.receiver, is_offline=True):
             has_any_degradation = True
+
+    # 报告阶段后: 若本次恰为发布 tag 构建，镜像本次结果为基线，供后续 dev 构建对比。
+    # 仅在非调试模式 (有真实本次运行报告目录) 时触发。
+    if not args.report_dir:
+        seed_baseline_if_release(report_dir)
 
     # 步骤6: 设置退出码
     #   0=成功无劣化 | 1=基础设施故障(报告缺失等) | 2=成功但有劣化

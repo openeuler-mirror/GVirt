@@ -98,11 +98,10 @@ from daily_bot_utils import (
     build_project,
     # 环境检测
     detect_model_device,
-    get_current_commit,
     # 版本信息
-    get_current_version,
-    get_vllm_ascend_version,
+    get_xlite_version,
     get_xlite_commit,
+    get_vllm_ascend_version,
     install_wheel,
     log_error,
     # 日志工具
@@ -171,8 +170,8 @@ def run_aisbench_benchmark(
     model_dir = f"/mnt/{device}/models" if device else "/mnt/sdb/models"
 
     # 创建当前版本报告目录 (版本号+日期)
-    current_version = get_current_version()
-    current_commit = get_current_commit() or "unknown"
+    current_version = get_xlite_version()
+    current_commit = get_xlite_commit() or "unknown"
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     aisbench_repo_dir = REPORT_DIR / "benchmark"
     if "--reuse" not in model_args and "-r" not in model_args:
@@ -469,7 +468,7 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
         - report_warnings: 包含标题和警告详情的报告，无警告时为 None
     """
     vllm_ascend_version = get_vllm_ascend_version()
-    xlite_commit = get_xlite_commit()
+    xlite_version = get_xlite_version()
 
     # 获取当前测试日期（从report_dir中提取）
     current_date = "unknown_date"
@@ -482,7 +481,7 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
     header_lines = [
         f'<font color="blue"><b>xlite {current_date} 精度测试报告</b></font>',
         "",
-        f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite commit: {xlite_commit}",
+        f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite 版本: {xlite_version}",
     ]
 
     # 按模型名称分组结果
@@ -618,8 +617,8 @@ def generate_summary_report(analysis: Dict, report_dir: Path, xlite_threshold: f
     返回:
         报告文本
     """
-    current_version = get_current_version()
-    current_commit = get_current_commit()
+    current_version = get_xlite_version()
+    current_commit = get_xlite_commit()
     vllm_ascend_version = get_vllm_ascend_version()
     current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -627,7 +626,7 @@ def generate_summary_report(analysis: Dict, report_dir: Path, xlite_threshold: f
         "=" * 60,
         "xlite 每日精度测试报告",
         "=" * 60,
-        f"版本: {current_version}",
+        f"xlite 版本: {current_version}",
         f"xlite commit: {current_commit}",
         f"vllm-ascend 版本: {vllm_ascend_version}",
         f"测试时间: {current_date}",
