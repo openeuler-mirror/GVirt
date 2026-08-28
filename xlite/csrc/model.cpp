@@ -820,7 +820,19 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     }
     XTensor convStateBatch;
     convStateBatch.Init({batch, convDim, _c.linearConvKernelDim}, convState.dtype, convState.ptr);
-    if (uniform) {
+    // Decode (seqlen==1) and small tasks use the packed 2D path:
+    //   mixQkv    [m, qkvDim] token-major (matmul output)
+    //   convPacked [m, convDim] token-major (Step4 SplitCol consumes directly)
+    // queryStartLoc/lens are populated every step by PrepareAttn.
+    //
+    // Prefill (seqlen>1, uniform) keeps the 3D [B,C,S] transpose path: the
+    // packed stride-gather (LoadPackedChannel) costs more than the two
+    // Transpose_1_2 round-trips it would save on long sequences.
+    // decode: seqlen==1 (any batch). [B,1,C] and [B,C,1] are memory-identical
+    // for contiguous tensors, so the two Transpose_1_2 are identity ops even
+    // with multiple requests in flight. Skip them and use the packed 2D path.
+    bool decodeStep = (seqlen == 1);
+    if (uniform && !decodeStep) {
         XTensor &mixTrans = rt.GetTensor({batch, qkvDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor &convOut = rt.GetTensor({batch, convDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor mix3d;
