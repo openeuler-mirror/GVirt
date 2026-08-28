@@ -132,9 +132,10 @@ class ModelConfig:
         max_m (int): Maximum token count batched.
         max_num_batched_tokens (int): Maximum token count batched.
         block_size (int): KV block size.(deprecated)
-        block_sizes (List[int]): Per-attention-type KV block sizes; element 0 is the
-            uniform KV block size used by most paths. When empty at construction, the
-            C++ side seeds it from ``block_size`` so a single-element vector always exists.
+        block_sizes (List[int]): Per-attention-type KV block sizes. Single-element for
+            non-CXA; for CXA one entry per 5-tuple cache in order
+            ``(indexer_state, indexer_k, compress_kv, state, swa_kv)``. Seeded from
+            ``block_size`` when empty at construction.
         weight_nz (bool): Whether weights are in NZ layout.
         experts_weight_transpose (bool): Whether expert weights are transposed.
         experts_weight_nz (bool): Whether expert weights are in NZ layout.
@@ -241,9 +242,9 @@ class ModelConfig:
     block_size: int = ...
     """KV block size.(deprecated)"""
     block_sizes: List[int] = ...
-    """Per-attention-type KV block sizes; element 0 is the uniform KV block size used
-    by most paths. When empty at construction, the C++ side seeds it from ``block_size``
-    so a single-element vector always exists."""
+    """Per-attention-type KV block sizes. Single-element for non-CXA; for CXA one entry
+    per 5-tuple cache in order (indexer_state, indexer_k, compress_kv, state, swa_kv).
+    Seeded from ``block_size`` when empty at construction."""
     weight_nz: bool = ...
     """Whether weights are in NZ layout."""
     experts_weight_transpose: bool = ...
@@ -501,6 +502,7 @@ class Model:
         se_up_gate_deq_scale (List[torch.Tensor]): Shared-expert up-gate scales per layer.
         se_down (List[torch.Tensor]): Shared-expert down weights per layer.
         se_down_deq_scale (List[torch.Tensor]): Shared-expert down scales per layer.
+        se_gate (List[torch.Tensor]): Optional shared-expert sigmoid gate, shape [1, hidden] per MoE layer.
         re_up_gate (List[torch.Tensor]): Routed-expert up-gate weights.
         re_up_gate_scale (List[torch.Tensor]): Routed-expert up-gate scales(deprecated).
         re_up_gate_deq_scale (List[torch.Tensor]): Routed-expert up-gate scales.
@@ -689,6 +691,8 @@ class Model:
     """Shared-expert down weights per layer."""
     se_down_deq_scale: List[torch.Tensor] = ...
     """Shared-expert down scales per layer."""
+    se_gate: List[torch.Tensor] = ...
+    """Optional shared-expert sigmoid gate weights per MoE layer, shape [1, hidden]."""
     re_up_gate: List[torch.Tensor] = ...
     """Routed-expert up-gate weights."""
     re_up_gate_scale: List[torch.Tensor] = ...
@@ -1424,12 +1428,13 @@ def silu_and_mul(rt: Runtime, in_: torch.Tensor, out: torch.Tensor) -> None:
     ...
 
 def sigmoid_gate_mul(rt: Runtime, attn: torch.Tensor, gate: torch.Tensor, out: torch.Tensor) -> None:
-    """Compute out = attn * sigmoid(gate), elementwise.
+    """Compute out = attn * sigmoid(gate).
 
     Args:
         rt (Runtime): Native runtime handle.
         attn (torch.Tensor): Attention output, shape [num_tokens, dim].
-        gate (torch.Tensor): Gate logits, shape [num_tokens, dim].
+        gate (torch.Tensor): Gate logits, shape [num_tokens, dim] (elementwise) or
+            [num_tokens, 1] (broadcast per token).
         out (torch.Tensor): Output tensor, shape [num_tokens, dim]. May alias `attn`.
 
     Returns:
@@ -1754,6 +1759,8 @@ def rope_complex(
     freqs: torch.Tensor,
     position: torch.Tensor,
     output: torch.Tensor,
+    inverse: bool = False,
+    out_interleaved: bool = False,
 ) -> None:
     """Apply complex-domain rotary embedding helper.
 
@@ -1766,6 +1773,11 @@ def rope_complex(
         freqs (torch.Tensor): Rotary frequency tensor.
         position (torch.Tensor): Position tensor.
         output (torch.Tensor): Output tensor.
+        inverse (bool): If True, apply the conjugate (reverse) rotation.
+        out_interleaved (bool): If True, write the rope result interleaved
+            ``[r0,i0,r1,i1,...]`` (matches torch ``view_as_real().flatten``);
+            otherwise write the deinterleaved half layout
+            ``[r0..r(half-1) | i0..i(half-1)]`` (MLA/DSA kv-cache convention).
 
     Returns:
         None: Output is produced in place according to kernel contract.

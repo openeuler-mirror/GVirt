@@ -34,12 +34,12 @@ rank = 0
 global_rank = 0
 global_world_size = 1
 
-block_size = 128
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     xlite_rt = None
     xlite_model = None
-    block_size = 64
+    # CXA 5-tuple per-cache block sizes: (indexer_state, indexer_k, compress_kv, state, swa_kv)
+    cxa_block_sizes = [8, 128, 128, 32, 64]
     from xlite._C import (
         Runtime,
         ModelConfig,
@@ -50,6 +50,7 @@ if forward_backend == "xlite":
         ScoringFuncSoftmax,
     )
     import numpy as np
+    from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
 
 
 @dataclass
@@ -783,63 +784,10 @@ class Transformer(nn.Module):
         logits = self.head(self.norm(h))
         return logits
 
-    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
-        batch = tokens.size(0)
-        seqlen = tokens.size(1)
-        step = (self.args.max_seq_len + block_size - 1) // block_size
-        block_num = (seqlen + start_pos + block_size - 1) // block_size
-        attn_meta = AttnMeta()
-        attn_meta.lens = [seqlen] * batch
-        attn_meta.cached_lens = [start_pos] * batch
-        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-        block_indices = np.arange(block_num, dtype=np.uint32)
-        attn_meta.block_tables_cpu = batch_indices * step + block_indices
-        attn_meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
-            .repeat(batch).to(tokens.device)
-        return attn_meta
-
     def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
-        """Build AttnMetaV2 with device-tensor query_start_loc / slot_mapping /
-        block_tables. The C++ side skips host computation and H2D copies."""
-        batch = tokens.size(0)
-        seqlen = tokens.size(1)
-        step = (self.args.max_seq_len + block_size - 1) // block_size
-        block_num = (seqlen + start_pos + block_size - 1) // block_size
-        lens = [seqlen] * batch
-        cached_lens = [start_pos] * batch
-        max_num_blocks = block_num  # all samples share lens/cached_lens in tests
-
-        meta = AttnMetaV2()
-        meta.lens_cpu = lens
-        meta.cached_lens_cpu = cached_lens
-        meta.lens = torch.tensor(lens, dtype=torch.int32, device=tokens.device)
-        meta.cached_lens = torch.tensor(cached_lens, dtype=torch.int32, device=tokens.device)
-
-        lens_cpu = torch.tensor(lens, dtype=torch.int32)
-        qsl_cpu = torch.zeros(batch, dtype=torch.int32)
-        qsl_cpu[1:] = torch.cumsum(lens_cpu, dim=0)[:-1]
-        meta.query_start_loc = qsl_cpu.to(tokens.device, non_blocking=True)
-
-        meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
-            .repeat(batch).to(tokens.device, non_blocking=True)
-
-        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-        block_indices = np.arange(block_num, dtype=np.uint32)
-        block_tables_2d = batch_indices * step + block_indices
-        bt_padded = np.zeros((batch, max_num_blocks), dtype=np.uint32)
-        bt_padded[:, :block_num] = block_tables_2d
-        meta.block_tables = [torch.from_numpy(bt_padded.astype(np.int32)) \
-            .to(tokens.device, non_blocking=True)]
-
-        positions_per_sample = np.arange(start_pos, start_pos + seqlen, dtype=np.uint32)
-        block_idx = positions_per_sample // block_size
-        block_id_in_table = bt_padded[np.arange(batch)[:, None], block_idx]
-        offset_in_block = positions_per_sample % block_size
-        slot_mapping_2d = block_id_in_table.astype(np.uint32) * block_size + offset_in_block
-        meta.slot_mapping = [torch.from_numpy(slot_mapping_2d.flatten().astype(np.int32)) \
-            .to(tokens.device, non_blocking=True)]
-
-        return meta
+        return prepare_xlite_attnmeta_v2(
+            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, cxa_block_sizes
+        )
 
     @torch.inference_mode()
     def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
@@ -1095,7 +1043,7 @@ class Transformer(nn.Module):
         config.def_dp_size = self.dp_size
         config.moe_ep_size = args.moe_ep_size
         config.moe_tp_size = args.moe_tp_size
-        config.block_sizes = [block_size]
+        config.block_sizes = cxa_block_sizes
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size
         config.max_num_batched_tokens = args.max_batch_size * args.max_seq_len
@@ -1292,23 +1240,23 @@ class Transformer(nn.Module):
         self.xlite_model.init(config, self.global_rank)
 
     def init_xlite_kvcache(self, args: ModelArgs):
-        """Allocate v4 KV cache. Per-layer tuple layout:
+        """Allocate v4 KV cache. Per-layer 5-tuple:
         (indexer_state, indexer_k, compress_kv, state, swa_kv).
-        indexer_* only exist on compress_ratio==4 layers; compress_kv/state exist
-        on compress_ratio!=0 layers; swa_kv exists on every layer. Each cache has
-        its own block_num sized to the number of slots it actually holds.
+        indexer_* only on compress_ratio==4 layers; compress_kv/state only on
+        compress_ratio!=0 layers; swa_kv on every layer. Each cache uses its own
+        block_size from ``cxa_block_sizes``.
         """
         dtype = torch.get_default_dtype()
         device = 'npu'
         head_num = 1
-        swa_blocks = (args.window_size + block_size - 1) // block_size * args.max_batch_size
         ratios = args.compress_ratios
+        bs_indexer_state, bs_indexer_k, bs_compress_kv, bs_state, bs_swa = cxa_block_sizes
 
         def _empty():
             return torch.empty(0, dtype=dtype, device=device)
 
-        def _blocks(n_slots):
-            return (n_slots + block_size - 1) // block_size * args.max_batch_size
+        def _blocks(n_slots, bs):
+            return (n_slots + bs - 1) // bs * args.max_batch_size
 
         self.xlite_kv_cache = []
         for layer_id in range(args.n_layers):
@@ -1320,28 +1268,29 @@ class Transformer(nn.Module):
             state_dim = 2 * coff * args.head_dim
 
             if has_indexer:
-                idx_kv_blocks = _blocks(args.max_seq_len // ratio)
-                idx_state_blocks = _blocks(coff * ratio)
-                indexer_state = torch.zeros(idx_state_blocks, block_size, head_num, indexer_state_dim,
+                idx_kv_blocks = _blocks(args.max_seq_len // ratio, bs_indexer_k)
+                idx_state_blocks = _blocks(args.max_seq_len, bs_indexer_state)
+                indexer_state = torch.zeros(idx_state_blocks, bs_indexer_state, head_num, indexer_state_dim,
                                             dtype=dtype, device=device)
-                indexer_k = torch.zeros(idx_kv_blocks, block_size, head_num, args.index_head_dim,
+                indexer_k = torch.zeros(idx_kv_blocks, bs_indexer_k, head_num, args.index_head_dim,
                                         dtype=dtype, device=device)
             else:
                 indexer_state = _empty()
                 indexer_k = _empty()
 
             if has_compress:
-                comp_kv_blocks = _blocks(args.max_seq_len // ratio)
-                comp_state_blocks = _blocks(coff * ratio)
-                compress_kv = torch.zeros(comp_kv_blocks, block_size, head_num, args.head_dim,
+                comp_kv_blocks = _blocks(args.max_seq_len // ratio, bs_compress_kv)
+                comp_state_blocks = _blocks(args.max_seq_len, bs_state)
+                compress_kv = torch.zeros(comp_kv_blocks, bs_compress_kv, head_num, args.head_dim,
                                           dtype=dtype, device=device)
-                state = torch.zeros(comp_state_blocks, block_size, head_num, state_dim,
+                state = torch.zeros(comp_state_blocks, bs_state, head_num, state_dim,
                                     dtype=dtype, device=device)
             else:
                 compress_kv = _empty()
                 state = _empty()
 
-            swa_kv = torch.zeros(swa_blocks, block_size, head_num, args.head_dim,
+            swa_blocks = _blocks(args.max_seq_len, bs_swa)
+            swa_kv = torch.zeros(swa_blocks, bs_swa, head_num, args.head_dim,
                                  dtype=dtype, device=device)
 
             self.xlite_kv_cache.append(

@@ -13,7 +13,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
     uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim, uint32_t offset,
     uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, uint32_t outOffset,
     GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size, GM_ADDR vcache, GM_ADDR slot_mapping,
-    int coreOffset = 0, int *nextCoreOffset = nullptr)
+    bool inverse, bool outInterleaved, int coreOffset = 0, int *nextCoreOffset = nullptr)
 {
     set_atomic_none();
     set_mask_norm();
@@ -31,6 +31,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
     int vRemainBytes = need_v_cache ? (vCacheBytes - ropeDtypeBytes) : 0;
     int freqsBytes = ropeFPBytes;
     int outputBytes = ropeDtypeBytes;
+    int output_blocks = DIV_ROUND_UP(outputBytes, BLOCK_SIZE);
     int totalRopeFPBytes = ropeFPBytes * nLocalHeads;
     int totalInputBytes = inputBytes * nLocalHeads;
     int totalVRemainBytes = vRemainBytes * nLocalHeads;
@@ -45,9 +46,15 @@ __aicore__ __inline__ void rope_complex_and_cache(
     int remain_blocks = DIV_ROUND_UP(vRemainBytes, BLOCK_SIZE);
     int rope_blocks = DIV_ROUND_UP(ropeFPBytes, BLOCK_SIZE);
     int half_rope_blocks = DIV_ROUND_UP(ropeFPBytes / 2, BLOCK_SIZE);
+    int half = ropeDim / 2;
     constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     int repeat = DIV_ROUND_UP(ropeDim, calcPad);
     int totalRepeat = DIV_ROUND_UP(ropeDim * nLocalHeads, calcPad);
+
+    // When need_v_cache and remain>0, the whole [remain | rope] head is loaded into UB
+    // once and written back once after the rope step. The rope region may sit at the head
+    // start (offset==0) or at the tail (offset!=0, CXA)
+    bool fullHeadLoad = need_v_cache && remain_blocks > 0;
 
     int maxCnt = 256;
     uint64_t off = 0;
@@ -88,6 +95,12 @@ __aicore__ __inline__ void rope_complex_and_cache(
     off += ROUND_UP((maxCnt) * sizeof(uint64_t), VECTOR_MAX_BYTESIZE);
     UBA(uint32_t) slotMappingUB = reinterpret_cast<UBA(uint32_t)>(off);
     off += need_v_cache ? ROUND_UP((maxCnt) * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0;
+    // outInterleaved path: single-head scratch for interleaved [r0,i0,r1,i1,...]
+    // (reused per head) + fixed vgather index table filled once on the scalar unit.
+    UBA(float) interleavedFP32Head = reinterpret_cast<UBA(float)>(off);
+    off += outInterleaved ? ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE) : 0;
+    UBA(uint32_t) vgatherIndicesUB = reinterpret_cast<UBA(uint32_t)>(off);
+    off += outInterleaved ? ROUND_UP(ropeDim * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0;
     assert(off <= UB_SIZE);
 
     UBA(Dtype) inputs[2] = {input0, input1};
@@ -97,6 +110,19 @@ __aicore__ __inline__ void rope_complex_and_cache(
     int taskNum = nTokens;
     if (nextCoreOffset) {
         *nextCoreOffset = (coreOffset + taskNum) % block_num;
+    }
+
+    // Fill vgather index table: indices[2k]=k*4 (real[k]), indices[2k+1]=(half+k)*4
+    // (imag[k]); vgather then interleaves [r0..r31 | i0..i31] -> [r0,i0,r1,i1,...].
+    if (outInterleaved) {
+        set_flag(PIPE_V, PIPE_S, EVENT_ID4);
+        wait_flag(PIPE_V, PIPE_S, EVENT_ID4);
+        for (int k = 0; k < half; k++) {
+            vgatherIndicesUB[2 * k] = (uint32_t)(k * sizeof(float));
+            vgatherIndicesUB[2 * k + 1] = (uint32_t)((half + k) * sizeof(float));
+        }
+        set_flag(PIPE_S, PIPE_V, EVENT_ID4);
+        wait_flag(PIPE_S, PIPE_V, EVENT_ID4);
     }
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
@@ -130,7 +156,11 @@ __aicore__ __inline__ void rope_complex_and_cache(
             baseTokenIdx = token_idx;
         }
 
-        auto *input_gm = (__gm__ Dtype *)(input_ptr) + token_idx * totalShape1 + offset;
+        // rope source/output point at the rope region within the head.
+        UBA(Dtype) ropeIn = fullHeadLoad ? inputs[curr] + offset : inputs[curr];
+        UBA(Dtype) ropeOut = fullHeadLoad ? outs[curr] + offset : outs[curr];
+        auto *input_gm =
+            (__gm__ Dtype *)(input_ptr) + token_idx * totalShape1 + (fullHeadLoad ? 0 : offset);
         auto *output_gm = (__gm__ Dtype *)(output_ptr) + token_idx * totalOutShape1 + outOffset;
         auto *freqs_gm =
             (__gm__ float *)(freqs_ptr) + positionUB[token_idx - baseTokenIdx] * ropeDim;
@@ -147,13 +177,19 @@ __aicore__ __inline__ void rope_complex_and_cache(
 
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
         if constexpr (std::is_same_v<Dtype, float16_t>) {
-            vconv_f162f32(inOutFP32, inputs[curr], nLocalHeads, 1, 1, rope_blocks, input_blocks);
+            vconv_f162f32(inOutFP32, ropeIn, nLocalHeads, 1, 1, rope_blocks, input_blocks);
         } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-            vconv_bf162f32(inOutFP32, inputs[curr], nLocalHeads, 1, 1, rope_blocks, input_blocks);
+            vconv_bf162f32(inOutFP32, ropeIn, nLocalHeads, 1, 1, rope_blocks, input_blocks);
         }
-        if (need_v_cache && remain_blocks > 0) {
-            copy_ubuf_to_ubuf(vRemain, inputs[curr] + ropeDim, 0, nLocalHeads, remain_blocks,
-                              remainStride, 0);
+        // stash remain (rope-after when offset!=0, rope-before when offset==0) for writeback.
+        if (fullHeadLoad) {
+            if (offset == 0) {
+                copy_ubuf_to_ubuf(vRemain, inputs[curr] + ropeDim, 0, nLocalHeads, remain_blocks,
+                                  remainStride, 0);
+            } else {
+                copy_ubuf_to_ubuf(vRemain, inputs[curr], 0, nLocalHeads, remain_blocks,
+                                  remainStride, 0);
+            }
         }
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
         pipe_barrier(PIPE_V);
@@ -187,35 +223,74 @@ __aicore__ __inline__ void rope_complex_and_cache(
         vmul(x_odd_cos, x_odd, cos, nLocalHeads, 1, 1, 1, half_rope_blocks, half_rope_blocks, 0);
         pipe_barrier(PIPE_V);
 
-        // real : x[0::2] * cos - x[1::2] * sin
-        vsub(inOutFP32, x_even_cos, x_odd_sin, nLocalHeads, 1, 1, 1, rope_blocks, half_rope_blocks,
-             half_rope_blocks);
-        // img : x[0::2] * sin + x[1::2] * cos
-        vadd(inOutFP32 + ropeDim / 2, x_even_sin, x_odd_cos, nLocalHeads, 1, 1, 1, rope_blocks,
-             half_rope_blocks, half_rope_blocks);
+        if (inverse) {
+            // real : x[0::2] * cos + x[1::2] * sin  (rotates by -theta)
+            vadd(inOutFP32, x_even_cos, x_odd_sin, nLocalHeads, 1, 1, 1, rope_blocks,
+                 half_rope_blocks, half_rope_blocks);
+            // img : -x[0::2] * sin + x[1::2] * cos
+            vsub(inOutFP32 + ropeDim / 2, x_odd_cos, x_even_sin, nLocalHeads, 1, 1, 1, rope_blocks,
+                 half_rope_blocks, half_rope_blocks);
+        } else {
+            // real : x[0::2] * cos - x[1::2] * sin
+            vsub(inOutFP32, x_even_cos, x_odd_sin, nLocalHeads, 1, 1, 1, rope_blocks,
+                 half_rope_blocks, half_rope_blocks);
+            // img : x[0::2] * sin + x[1::2] * cos
+            vadd(inOutFP32 + ropeDim / 2, x_even_sin, x_odd_cos, nLocalHeads, 1, 1, 1, rope_blocks,
+                 half_rope_blocks, half_rope_blocks);
+        }
         pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
-        // out FP32 -> Dtype
-        if constexpr (std::is_same_v<Dtype, float16_t>) {
-            vconv_f322f16(outs[curr], inOutFP32, nLocalHeads, 1, 1, input_blocks, rope_blocks);
-        } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-            vconv_f322bf16r(outs[curr], inOutFP32, nLocalHeads, 1, 1, input_blocks, rope_blocks);
+        // out FP32 -> Dtype. outInterleaved: vgather each head into [r0,i0,r1,i1,...] and
+        // convert head-by-head; otherwise convert all heads at once.
+        if (outInterleaved) {
+            set_mask_count();
+            set_vector_mask(0x0, ropeDim);
+            for (uint32_t h = 0; h < nLocalHeads; h++) {
+                uint32_t base =
+                    static_cast<uint32_t>(reinterpret_cast<uint64_t>(inOutFP32 + h * ropeDim));
+                vgather((__ubuf__ uint32_t *)interleavedFP32Head, vgatherIndicesUB, base, 0, 1);
+                pipe_barrier(PIPE_V);
+                if constexpr (std::is_same_v<Dtype, float16_t>) {
+                    vconv_f322f16(ropeOut + h * ropeDim, interleavedFP32Head, 1, 1, 1, input_blocks,
+                                  rope_blocks);
+                } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+                    vconv_f322bf16r(ropeOut + h * ropeDim, interleavedFP32Head, 1, 1, 1,
+                                    input_blocks, rope_blocks);
+                }
+                pipe_barrier(PIPE_V);
+            }
+            set_mask_norm();
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        } else {
+            if constexpr (std::is_same_v<Dtype, float16_t>) {
+                vconv_f322f16(ropeOut, inOutFP32, nLocalHeads, 1, 1, input_blocks, rope_blocks);
+            } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+                vconv_f322bf16r(ropeOut, inOutFP32, nLocalHeads, 1, 1, input_blocks, rope_blocks);
+            }
         }
-        if (need_v_cache && remain_blocks > 0) {
-            copy_ubuf_to_ubuf(outs[curr] + ropeDim, vRemain, 0, nLocalHeads, remain_blocks, 0,
-                              remainStride);
+        if (fullHeadLoad) {
+            if (offset == 0) {
+                copy_ubuf_to_ubuf(outs[curr] + ropeDim, vRemain, 0, nLocalHeads, remain_blocks, 0,
+                                  remainStride);
+            } else {
+                copy_ubuf_to_ubuf(outs[curr], vRemain, 0, nLocalHeads, remain_blocks, 0,
+                                  remainStride);
+            }
         }
         pipe_barrier(PIPE_V);
 
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
-        // out UB -> GM
+        // out UB -> GM. vcache stores the whole head; in-place kv writes back the rope region.
         if (need_v_cache) {
             uint32_t slot_idx = slotMappingUB[token_idx - baseTokenIdx];
             auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) + slot_idx * nLocalHeads * vdim;
             CopyUbufToGmAligned(vcache_ptr, outs[curr], vCacheBytes);
+            if (output_ptr != nullptr) {
+                copy_ubuf_to_gm(output_gm, ropeOut, 0, nLocalHeads, output_blocks, 0, dstStride);
+            }
         } else {
             copy_ubuf_to_gm(output_gm, outs[curr], 0, nLocalHeads, input_blocks, 0, dstStride);
         }
@@ -242,11 +317,12 @@ __aicore__ __inline__ void rope_complex_and_cache(
         uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim,                 \
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
-        GM_ADDR vcache, GM_ADDR slot_mapping)                                                      \
+        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved)           \
     {                                                                                              \
         rope_complex_and_cache<dtype>(nTokens, nLocalHeads, shape1, ropeDim, offset, vdim,         \
                                       input_ptr, output_ptr, outShape1, outOffset, freqs_ptr,      \
-                                      position, block_size, vcache, slot_mapping);                 \
+                                      position, block_size, vcache, slot_mapping, inverse != 0,    \
+                                      outInterleaved != 0);                                        \
     }
 #else
 #define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                      \
@@ -254,7 +330,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
         uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim,                 \
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
-        GM_ADDR vcache, GM_ADDR slot_mapping)                                                      \
+        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved)           \
     {                                                                                              \
     }
 #endif

@@ -34,6 +34,15 @@ enum XModelLayerAttnType {
     XMODEL_LAYER_ATTN_LINEAR = 1,
 };
 
+// CXA 5-tuple block-size indices: (indexer_state, indexer_k, compress_kv, state, swa_kv).
+enum CxaCacheIndex {
+    CXA_INDEXER_STATE = 0,
+    CXA_INDEXER_K = 1,
+    CXA_COMPRESS_KV = 2,
+    CXA_STATE = 3,
+    CXA_SWA_KV = 4,
+};
+
 struct XModelAttnMeta {
     int version = 0;
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
@@ -69,8 +78,8 @@ public:
              uint32_t dpSize = 1, uint32_t moeTpSize = 1, uint32_t moeEpSize = 1);
     virtual ~XRuntime(void);
     void Init(size_t sizeMB);
-    void InitAttn(uint64_t maxBatchedTokens, uint64_t maxBatch, uint64_t maxSeqLen,
-                  uint32_t blockSize, uint32_t indexTopK);
+    void InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
+                  uint64_t maxSeqLen, const std::vector<uint32_t> &blockSizes, uint32_t indexTopK);
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                      uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads,
                      std::vector<uint32_t> blockSizes, uint32_t hiddenSize, uint32_t nRoutedExperts,
@@ -195,7 +204,6 @@ public:
     // only for requests with cached==0 (fresh prefill); chunked-prefill
     // continuation (cached>0, multi-token) reuses state via recurrent GDN.
     std::vector<uint32_t> _cachedLensHost;
-    uint32_t _maxNumBlocks;
     uint32_t _batch;
     uint32_t _tileSizeOfCachedKV;
     XTensor
@@ -209,12 +217,12 @@ public:
     XTensor _attnQueryStartLoc;  // [batch] int32, ref: v0/1 -> _queryStartLoc, v2 ->
                                  // attnMeta.queryStartLoc
     XTensor _position;           // [maxBatchedTokens] int64, internal buffer (malloc+free in dtor)
-    XTensor _blockTables;        // [maxBatch, maxNumBlocks] int32, internal buffer
-    XTensor _slotMapping;        // [maxBatchedTokens] int32, internal buffer
-    XTensor _cachedLens;         // [maxBatch] int32, internal buffer
-    XTensor _lens;               // [maxBatch] int32, internal buffer
-    XTensor _queryStartLoc;      // [maxBatch] int32, internal buffer
-    XTensor _dsaTopkBuffer;      // int32_t, cross-layer shared topk
+    XTensor _blockTables;  // [maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)] int32, internal buffer
+    XTensor _slotMapping;  // [maxBatchedTokens] int32, internal buffer
+    XTensor _cachedLens;   // [maxBatch] int32, internal buffer
+    XTensor _lens;         // [maxBatch] int32, internal buffer
+    XTensor _queryStartLoc;  // [maxBatch] int32, internal buffer
+    XTensor _dsaTopkBuffer;  // int32_t, cross-layer shared topk
     bool _dsaTopkValid = false;
     // Host copy of per-request query lengths from PrepareAttn (mixed-length linear attn).
     std::vector<uint32_t> _hostLens;

@@ -1036,7 +1036,8 @@ void XliteOpMLAV3(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kDenseCa
 
 void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t outStepDim,
                         uint32_t ropeDim, uint32_t offset, uint32_t outOffset, XTensor &inputWithR,
-                        XTensor &freqs, XTensor &position, XTensor &output)
+                        XTensor &freqs, XTensor &position, XTensor &output, bool inverse,
+                        bool outInterleaved)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1053,13 +1054,14 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
     }
     launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
                  0, inputWithR.ptr, output.ptr, outStepDim, outOffset, freqs.ptr, position.ptr, 0,
-                 nullptr, nullptr);
+                 nullptr, nullptr, inverse ? 1u : 0u, outInterleaved ? 1u : 0u);
 }
 
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
                                 uint32_t ropeDim, uint32_t offset, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
-                                uint32_t blockSize, XTensor &vCache, XTensor &slotMapping)
+                                uint32_t blockSize, XTensor &vCache, XTensor &slotMapping,
+                                bool outInterleaved)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1076,7 +1078,7 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
     }
     launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
                  vdim, inputWithR.ptr, nullptr, 0, 0, freqs.ptr, position.ptr, blockSize,
-                 vCache.ptr, slotMapping.ptr);
+                 vCache.ptr, slotMapping.ptr, 0u, outInterleaved ? 1u : 0u);
 }
 
 void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
@@ -1873,9 +1875,13 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
     if (attn.shape.size() < 2 || gate.shape.size() < 2 || out.shape.size() < 2) {
         throw std::runtime_error(std::string(__func__) + ": attn/gate/out must be 2D");
     }
-    if (attn.shape[0] != gate.shape[0] || attn.shape[1] != gate.shape[1] ||
-        attn.shape[0] != out.shape[0] || attn.shape[1] != out.shape[1]) {
+    if (attn.shape[0] != gate.shape[0] || attn.shape[0] != out.shape[0] ||
+        attn.shape[1] != out.shape[1]) {
         throw std::runtime_error(std::string(__func__) + ": attn/gate/out shape mismatch");
+    }
+    if (gate.shape[1] != 1 && gate.shape[1] != attn.shape[1]) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": gate last dim must be 1 (broadcast) or match attn dim");
     }
     KERNEL_PTR_TYPE(sigmoid_gate_mul) * launchKernel;
     if (EachXDtype(FP16, attn, gate, out)) {
@@ -1887,7 +1893,8 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
         throw std::runtime_error(err_str + " unsupported!");
     }
     launchKernel(rt.aivNum, rt.stream, attn.ptr, gate.ptr, out.ptr,
-                 static_cast<uint32_t>(attn.shape[0]), static_cast<uint32_t>(attn.shape[1]));
+                 static_cast<uint32_t>(attn.shape[0]), static_cast<uint32_t>(attn.shape[1]),
+                 static_cast<uint32_t>(gate.shape[1]));
 }
 
 void XliteOpRecurrentGatedDeltaRule(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,

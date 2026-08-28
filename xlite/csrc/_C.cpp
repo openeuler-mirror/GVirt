@@ -142,6 +142,7 @@ public:
     std::vector<at::Tensor> moeSEUpGateDeqScale;
     std::vector<at::Tensor> moeSEDown;
     std::vector<at::Tensor> moeSEDownDeqScale;
+    std::vector<at::Tensor> moeSEGate;
     std::vector<at::Tensor> moeREUpGate;
     std::vector<at::Tensor> moeREUpGateDeqScale;
     std::vector<at::Tensor> moeREDown;
@@ -475,6 +476,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         {std::ref(moeGateBias), "gate bias", false, c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID},
         {std::ref(moeSEUpGate), "SE up gate", false, c.nSharedExperts != 0},
         {std::ref(moeSEDown), "SE down", false, c.nSharedExperts != 0},
+        {std::ref(moeSEGate), "SE gate", true, c.nSharedExperts != 0},
         {std::ref(moeSEUpGateDeqScale), "SE up gate deq scale", true, c.nSharedExperts != 0},
         {std::ref(moeSEDownDeqScale), "SE down deq scale", true, c.nSharedExperts != 0},
     };
@@ -690,6 +692,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                              c.nDenseLayers);
             InitMatmulWeight("moeSEDown", moeSEDown, emptyWeights, emptyWeights, emptyWeights,
                              moeSEDownDeqScale, _model->moeSEDown, i, true, tpRank, c.nDenseLayers);
+            uint32_t seIdx = i - c.nDenseLayers;
+            if (seIdx < moeSEGate.size()) {
+                InitOptionalXTensor(_model->moeSEGate[i], moeSEGate[seIdx]);
+            }
         }
 
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
@@ -1759,7 +1765,7 @@ void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
 
 void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
                  at::Tensor &inputWithR, at::Tensor &freqs, at::Tensor &position,
-                 at::Tensor &output)
+                 at::Tensor &output, bool inverse, bool outInterleaved)
 {
     XTensor _inputWithR, _freqs, _position, _output;
     InitXTensor(_inputWithR, inputWithR);
@@ -1767,7 +1773,23 @@ void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t 
     InitXTensor(_position, position);
     InitXTensor(_output, output);
     XliteOpRopeComplex(rt, nLocalHeads, stepDim, ropeDim, ropeDim, stepDim - ropeDim, 0,
-                       _inputWithR, _freqs, _position, _output);
+                       _inputWithR, _freqs, _position, _output, inverse, outInterleaved);
+    rt.Synchronize();
+}
+
+void RopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
+                         uint32_t offset, uint32_t vdim, at::Tensor &inputWithR, at::Tensor &freqs,
+                         at::Tensor &position, uint32_t blockSize, at::Tensor &vCache,
+                         at::Tensor &slotMapping, bool outInterleaved)
+{
+    XTensor _inputWithR, _freqs, _position, _vCache, _slotMapping;
+    InitXTensor(_inputWithR, inputWithR);
+    InitXTensor(_freqs, freqs);
+    InitXTensor(_position, position);
+    InitXTensor(_vCache, vCache);
+    InitXTensor(_slotMapping, slotMapping);
+    XliteOpRopeComplexAndCache(rt, nLocalHeads, stepDim, ropeDim, offset, vdim, _inputWithR, _freqs,
+                               _position, blockSize, _vCache, _slotMapping, outInterleaved);
     rt.Synchronize();
 }
 
@@ -2473,6 +2495,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("se_up_gate_deq_scale", &_CModel::moeSEUpGateDeqScale)
         .def_readwrite("se_down", &_CModel::moeSEDown)
         .def_readwrite("se_down_deq_scale", &_CModel::moeSEDownDeqScale)
+        .def_readwrite("se_gate", &_CModel::moeSEGate)
         .def_readwrite("re_up_gate", &_CModel::moeREUpGate)
         .def_readwrite("re_up_gate_scale", &_CModel::moeREUpGateDeqScale)
         .def_readwrite("re_up_gate_deq_scale", &_CModel::moeREUpGateDeqScale)
@@ -2631,7 +2654,13 @@ PYBIND11_MODULE(_C, m)
           py::arg("is_long"));
     m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("n_local_heads"),
           py::arg("step_dim"), py::arg("rope_dim"), py::arg("input_with_r"), py::arg("freqs"),
-          py::arg("position"), py::arg("output"));
+          py::arg("position"), py::arg("output"), py::arg("inverse") = false,
+          py::arg("out_interleaved") = false);
+    m.def("rope_complex_and_cache", &RopeComplexAndCache, "rope_complex_and_cache", py::arg("rt"),
+          py::arg("n_local_heads"), py::arg("step_dim"), py::arg("rope_dim"), py::arg("offset"),
+          py::arg("vdim"), py::arg("input_with_r"), py::arg("freqs"), py::arg("position"),
+          py::arg("block_size"), py::arg("v_cache"), py::arg("slot_mapping"),
+          py::arg("out_interleaved") = false);
     m.def("mla_prepare", &MlaPrepare, py::arg("rt"), py::arg("attn_qkvc"), py::arg("q_norm"),
           py::arg("q_norm_bias"), py::arg("attn_norm_qc"), py::arg("kv_norm"),
           py::arg("kv_norm_bias"), py::arg("attn_norm_kvc"), py::arg("freqs"), py::arg("position"),

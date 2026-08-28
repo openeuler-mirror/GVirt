@@ -14,63 +14,70 @@
 
 #ifdef __DAV_C220_VEC__
 __aicore__ inline void hc_col_normalize(__ubuf__ float *comb, __ubuf__ float *colBuf,
-                                        __ubuf__ uint32_t *colOffRamp, __ubuf__ float *reduceBlk,
-                                        uint32_t hcMult, uint32_t combRowStride, int colRepeat,
-                                        float eps)
+                                        uint32_t hcMult, uint32_t combRowStride, float eps)
 {
-    for (uint32_t c = 0; c < hcMult; c++) {
-        // Gather column c (strided reads, one elem per row) into aligned colBuf via vgather.
-        uint32_t colBase = static_cast<uint32_t>(reinterpret_cast<uint64_t>(comb + c));
-        vgather((__ubuf__ uint32_t *)colBuf, colOffRamp, colBase, 8, 1);
+    // colSum = Σ_r row_r (cross-row same-column add), +eps, then comb[r][c] /= colSum[c].
+    copy_ubuf_to_ubuf(colBuf, comb, 0, 1, 1, 0, 0);  // colSum = row0
+    pipe_barrier(PIPE_V);
+    set_mask_norm();
+    SetMask(hcMult);
+    for (uint32_t r = 1; r < hcMult; r++) {
+        vadd(colBuf, colBuf, comb + r * combRowStride, 1, 1, 1, 1, combRowStride, combRowStride,
+             combRowStride);
         pipe_barrier(PIPE_V);
-        ReduceSum(reduceBlk, colBuf, hcMult);
-        vadds(reduceBlk, reduceBlk, eps, 1, 1, 1, 8, 8);
-        pipe_barrier(PIPE_V);
-        vbrcb((__ubuf__ uint32_t *)reduceBlk, (__ubuf__ uint32_t *)reduceBlk, 0, 0, 1);
-        pipe_barrier(PIPE_V);
-        SetMask(hcMult);
-        vdiv(colBuf, colBuf, reduceBlk, colRepeat, 1, 1, 0, 8, 8, 0);
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        pipe_barrier(PIPE_V);
-        set_flag(PIPE_V, PIPE_S, EVENT_ID4);
-        wait_flag(PIPE_V, PIPE_S, EVENT_ID4);
-        for (uint32_t r = 0; r < hcMult; r++) {
-            comb[r * combRowStride + c] = colBuf[r];
-        }
-        set_flag(PIPE_S, PIPE_V, EVENT_ID4);
-        wait_flag(PIPE_S, PIPE_V, EVENT_ID4);
     }
+    vadds(colBuf, colBuf, eps, 1, 1, 1, combRowStride, combRowStride);  // denom = colSum + eps
+    pipe_barrier(PIPE_V);
+    vdiv(comb, comb, colBuf, hcMult, 1, 1, 0, 1, 1, 0);
+    pipe_barrier(PIPE_V);
+    set_vector_mask((uint64_t)-1, (uint64_t)-1);
 }
 
-__aicore__ inline void hc_row_normalize(__ubuf__ float *comb, __ubuf__ float *colBuf,
-                                        __ubuf__ uint32_t *offRamp, __ubuf__ float *reduceBlk,
-                                        uint32_t hcMult, uint32_t combRowStride, int colRepeat,
-                                        float eps)
+__aicore__ inline void hc_row_normalize(__ubuf__ float *comb, __ubuf__ float *scalarBuf,
+                                        __ubuf__ float *brcbBuf, uint32_t hcMult,
+                                        uint32_t combRowStride, int combRep, float eps)
 {
-    for (uint32_t r = 0; r < hcMult; r++) {
-        __ubuf__ float *row = comb + r * combRowStride;
-        uint32_t rowBase = static_cast<uint32_t>(reinterpret_cast<uint64_t>(row));
-        vgather((__ubuf__ uint32_t *)colBuf, offRamp, rowBase, 8, 1);
-        pipe_barrier(PIPE_V);
+    // rowSum = Σ_c comb[r][c], +eps, broadcast per row, then comb /= rowSum.
+    set_mask_norm();
+    SetMask(hcMult);
+    vcadd(scalarBuf, comb, hcMult, 1, 1, 1, 0);
+    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+    pipe_barrier(PIPE_V);
+    vadds(scalarBuf, scalarBuf, eps, combRep, 1, 1, 8, 8);  // denom = rowSum + eps
+    pipe_barrier(PIPE_V);
+    vbrcb((__ubuf__ uint32_t *)brcbBuf, (__ubuf__ uint32_t *)scalarBuf, 1, 8, 1);
+    pipe_barrier(PIPE_V);
+    vdiv(comb, comb, brcbBuf, combRep, 1, 1, 1, 8, 8, 8);
+    pipe_barrier(PIPE_V);
+}
 
-        ReduceSum(reduceBlk, colBuf, hcMult);
-        vadds(reduceBlk, reduceBlk, eps, 1, 1, 1, 8, 8);
-        pipe_barrier(PIPE_V);
-        vbrcb((__ubuf__ uint32_t *)reduceBlk, (__ubuf__ uint32_t *)reduceBlk, 0, 0, 1);
-        pipe_barrier(PIPE_V);
-        SetMask(hcMult);
-        vdiv(colBuf, colBuf, reduceBlk, colRepeat, 1, 1, 0, 8, 8, 0);
-        set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        pipe_barrier(PIPE_V);
-
-        set_flag(PIPE_V, PIPE_S, EVENT_ID4);
-        wait_flag(PIPE_V, PIPE_S, EVENT_ID4);
-        for (uint32_t c = 0; c < hcMult; c++) {
-            row[c] = colBuf[c];
-        }
-        set_flag(PIPE_S, PIPE_V, EVENT_ID4);
-        wait_flag(PIPE_S, PIPE_V, EVENT_ID4);
-    }
+__aicore__ inline void hc_softmax_rows(__ubuf__ float *comb, __ubuf__ float *scalarBuf,
+                                       __ubuf__ float *brcbBuf, uint32_t hcMult,
+                                       uint32_t combRowStride, int combRep, float eps)
+{
+    // softmax over rows: rowMax → -= max → exp → rowSum → /= sum, +eps.
+    set_mask_norm();
+    SetMask(hcMult);
+    vcmax(scalarBuf, comb, hcMult, 1, 1, 1, Order_t::ONLY_VALUE);
+    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+    pipe_barrier(PIPE_V);
+    vbrcb((__ubuf__ uint32_t *)brcbBuf, (__ubuf__ uint32_t *)scalarBuf, 1, 8, 1);
+    pipe_barrier(PIPE_V);
+    vsub(comb, comb, brcbBuf, combRep, 1, 1, 1, 8, 8, 8);
+    pipe_barrier(PIPE_V);
+    vexp(comb, comb, combRep, 1, 1, 8, 8);
+    pipe_barrier(PIPE_V);
+    set_mask_norm();
+    SetMask(hcMult);
+    vcadd(scalarBuf, comb, hcMult, 1, 1, 1, 0);
+    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+    pipe_barrier(PIPE_V);
+    vbrcb((__ubuf__ uint32_t *)brcbBuf, (__ubuf__ uint32_t *)scalarBuf, 1, 8, 1);
+    pipe_barrier(PIPE_V);
+    vdiv(comb, comb, brcbBuf, combRep, 1, 1, 1, 8, 8, 8);
+    pipe_barrier(PIPE_V);
+    vadds(comb, comb, eps, combRep, 1, 1, 8, 8);  // softmax + eps
+    pipe_barrier(PIPE_V);
 }
 
 template <typename Dtype>
@@ -93,7 +100,6 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
     const uint32_t prePostBytes = hcMult * sizeof(float);
     const uint64_t lenPrePost = ROUND_UP(prePostBytes, VECTOR_MAX_BYTESIZE);
     int repeat = DIV_ROUND_UP(hcMult, calcPad);
-    int colRepeat = DIV_ROUND_UP(hcMult, calcPad);
 
     const uint64_t maskPre = (hcMult >= 64) ? (uint64_t)-1 : ((1ULL << hcMult) - 1);
     const uint64_t maskPost = maskPre << hcMult;
@@ -125,22 +131,30 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
     __ubuf__ float *postOut[2] = {postOut0, postOut1};
     __ubuf__ float *combOut[2] = {combOut0, combOut1};
 
+    const uint32_t hcMultAlign = ROUND_UP(hcMult, BLOCK_SIZE / sizeof(float));    // hcMult=4 → 8
+    const uint64_t combAlignBytes = hcMult * hcMultAlign * sizeof(float);         // 4*8*4 = 128B
+    const uint64_t lenCombAlign = ROUND_UP(combAlignBytes, VECTOR_MAX_BYTESIZE);  // 256B
+    const int combRep =
+        DIV_ROUND_UP(hcMult * hcMultAlign, calcPad);  // whole-block vector repeats over combAlign
+    __ubuf__ float *combAlign = (__ubuf__ float *)off;
+    off += lenCombAlign;
+
     __ubuf__ float *baseUb = (__ubuf__ float *)off;
     off += lenBaseUb;
 
-    __ubuf__ float *reduceBlk = (__ubuf__ float *)off;  // vbrcb scalar broadcast scratch
+    __ubuf__ float *colBuf = (__ubuf__ float *)off;  // colSum scratch (col-norm broadcast source)
     off += lenPrePost;
-    __ubuf__ float *colBuf = (__ubuf__ float *)off;  // S-pipe column gather/scatter
-    off += lenPrePost;
+
+    __ubuf__ float *scalarBuf = (__ubuf__ float *)off;
+    off += lenCombAlign;
+    __ubuf__ float *brcbBuf = (__ubuf__ float *)off;
+    off += lenCombAlign;
 
     __ubuf__ float *onesUb = (__ubuf__ float *)off;  // 1.0 for vdiv-based 1/x (avoids vrec)
     off += lenPrePost;
     __ubuf__ float *scaleUb = (__ubuf__ float *)off;  // {scalePre[,scalePost,scaleComb]} from GM
     off += lenPrePost;
     __ubuf__ uint32_t *offRamp = (__ubuf__ uint32_t *)off;
-    off += lenPrePost;
-    __ubuf__ uint32_t *colOffRamp = (__ubuf__ uint32_t *)off;  // p*combRowStride*4 offsets for
-                                                               // strided column gather
     off += lenPrePost;
 
     const uint64_t residDtypeLen = ROUND_UP(hcMult * hidden * sizeof(Dtype), UB_BUF_ALIGN_SIZE);
@@ -172,16 +186,12 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
     float scalePre = scaleUb[0];
     float scalePost = headOnly ? 0.0f : scaleUb[1];
     float scaleComb = headOnly ? 0.0f : scaleUb[2];
-    vector_dup(onesUb, 1.0f, repeat, 1, 1, 8, 0);
-    pipe_barrier(PIPE_V);
-    set_flag(PIPE_V, PIPE_S, EVENT_ID1);
-    wait_flag(PIPE_V, PIPE_S, EVENT_ID1);
-    for (int p = 0; p < calcPad; p++) {
-        offRamp[p] = static_cast<uint32_t>(p * sizeof(float));
-        colOffRamp[p] = static_cast<uint32_t>(p * hcMult * sizeof(float));  // column stride
+    if (!headOnly) {
+        for (int p = 0; p < hcMult; p++) {
+            offRamp[p] = static_cast<uint32_t>(p * sizeof(float));
+        }
     }
-    set_flag(PIPE_S, PIPE_V, EVENT_ID1);
-    wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
+    vector_dup(onesUb, 1.0f, repeat, 1, 1, 8, 0);
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
@@ -251,6 +261,13 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
         if (!headOnly) {
             set_vector_mask(0x0, maskPost);
             vmuls(calcUb, calcUb, 2.0f, repeat, 1, 1, 8, 8);
+            set_mask_norm();
+            SetMask(hcMult);
+            for (uint32_t r = 0; r < hcMult; r++) {
+                uint32_t rowBase = static_cast<uint32_t>(
+                    reinterpret_cast<uint64_t>(calcUb + 2 * hcMult + r * hcMult));
+                vgather((__ubuf__ uint32_t *)(combAlign + r * hcMultAlign), offRamp, rowBase, 8, 1);
+            }
         }
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
         pipe_barrier(PIPE_V);
@@ -280,62 +297,27 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
         }
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID6 + curr);
 
+        // for comb
         if (!headOnly) {
-            for (uint32_t r = 0; r < hcMult; r++) {
-                uint32_t rowBase = static_cast<uint32_t>(
-                    reinterpret_cast<uint64_t>(calcUb + 2 * hcMult + r * hcMult));
-                vgather((__ubuf__ uint32_t *)colBuf, offRamp, rowBase, 8, 1);
-                pipe_barrier(PIPE_V);
+            // Softmax over rows of combAlign + eps.
+            hc_softmax_rows(combAlign, scalarBuf, brcbBuf, hcMult, hcMultAlign, combRep, eps);
 
-                ReduceMax(reduceBlk, colBuf, hcMult);
-                vbrcb((__ubuf__ uint32_t *)reduceBlk, (__ubuf__ uint32_t *)reduceBlk, 0, 0, 1);
-                pipe_barrier(PIPE_V);
-                SetMask(hcMult);
-                vsub(colBuf, colBuf, reduceBlk, colRepeat, 1, 1, 0, 8, 8, 0);
-                set_vector_mask((uint64_t)-1, (uint64_t)-1);
-                pipe_barrier(PIPE_V);
-                vexp(colBuf, colBuf, colRepeat, 1, 1, 8, 8);
-                pipe_barrier(PIPE_V);
-                ReduceSum(reduceBlk, colBuf, hcMult);
-                vbrcb((__ubuf__ uint32_t *)reduceBlk, (__ubuf__ uint32_t *)reduceBlk, 0, 0, 1);
-                pipe_barrier(PIPE_V);
-                SetMask(hcMult);
-                vdiv(colBuf, colBuf, reduceBlk, colRepeat, 1, 1, 0, 8, 8, 0);
-                set_vector_mask((uint64_t)-1, (uint64_t)-1);
-                pipe_barrier(PIPE_V);
-
-                // Scatter colBuf back to row r (S-pipe scalar; vscatter unsupported).
-                set_flag(PIPE_V, PIPE_S, EVENT_ID4);
-                wait_flag(PIPE_V, PIPE_S, EVENT_ID4);
-                for (uint32_t c = 0; c < hcMult; c++) {
-                    calcUb[2 * hcMult + r * hcMult + c] = colBuf[c];
-                }
-                set_flag(PIPE_S, PIPE_V, EVENT_ID4);
-                wait_flag(PIPE_S, PIPE_V, EVENT_ID4);
-            }
-            set_vector_mask(0x0, maskComb);
-            vadds(calcUb, calcUb, eps, repeat, 1, 1, 8, 8);  // + eps
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
-            pipe_barrier(PIPE_V);
-
-            // Sinkhorn: col-norm once, then (row-norm, col-norm)*(iters-1). denom = sum + eps.
-            hc_col_normalize(calcUb + 2 * hcMult, colBuf, colOffRamp, reduceBlk, hcMult, hcMult,
-                             colRepeat, eps);
+            // Sinkhorn: col-norm once, then (row-norm, col-norm)*(iters-1).
+            hc_col_normalize(combAlign, colBuf, hcMult, hcMultAlign, eps);
             for (uint32_t it = 0; it + 1 < sinkhornIters; it++) {
-                hc_row_normalize(calcUb + 2 * hcMult, colBuf, offRamp, reduceBlk, hcMult, hcMult,
-                                 colRepeat, eps);
-                hc_col_normalize(calcUb + 2 * hcMult, colBuf, colOffRamp, reduceBlk, hcMult, hcMult,
-                                 colRepeat, eps);
+                hc_row_normalize(combAlign, scalarBuf, brcbBuf, hcMult, hcMultAlign, combRep, eps);
+                hc_col_normalize(combAlign, colBuf, hcMult, hcMultAlign, eps);
             }
 
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
-            copy_ubuf_to_ubuf(combOut[curr], calcUb + 2 * hcMult, 0, 1,
-                              DIV_ROUND_UP(combElems * sizeof(float), BLOCK_SIZE), 0, 0);
+            copy_ubuf_to_ubuf(combOut[curr], combAlign, 0, hcMult, 1, 0, 0);
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2 + curr);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID2 + curr);
-            CopyUbufToGmAligned(comb + process * combElems, combOut[curr],
-                                combElems * sizeof(float));
+            for (uint32_t r = 0; r < hcMult; r++) {
+                CopyUbufToGmAligned(comb + process * combElems + r * hcMult,
+                                    combOut[curr] + r * hcMultAlign, hcMult * sizeof(float));
+            }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
         }
         curr = 1 - curr;

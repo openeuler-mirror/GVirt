@@ -368,7 +368,7 @@ __aicore__ inline void indexer_prepare(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormB
     if (is_long) {
         rope_complex_and_cache<Dtype>(token_num, index_n_heads, index_head_dim, rope_head_dim, 0,
                                       rope_head_dim, q, q, index_head_dim, 0, freqs, position, 0,
-                                      nullptr, nullptr, core_offset);
+                                      nullptr, nullptr, false, false, core_offset);
     }
 }
 
