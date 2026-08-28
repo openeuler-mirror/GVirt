@@ -156,6 +156,8 @@ void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTen
 void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out);
 void XliteOpConcatCol(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out);
 void XliteOpSplitCol(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs);
+void XliteOpRepeatInterleave(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numTokens,
+                             uint32_t nKHeads, uint32_t nVHeads, uint32_t headBytes);
 void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs,
                   const std::vector<size_t> &sizes, uint32_t numPackets);
 void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &out);
