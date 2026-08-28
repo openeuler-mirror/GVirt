@@ -56,11 +56,11 @@ public:
     void ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                                    std::vector<std::vector<at::Tensor>> &kvCache,
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
-                                   std::vector<at::Tensor> &deepstackInput);
+                                   std::vector<at::Tensor> &deepstackInput, at::Tensor &inputIds);
     void ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnMeta,
                                    std::vector<std::vector<at::Tensor>> &kvCache,
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
-                                   std::vector<at::Tensor> &deepstackInput);
+                                   std::vector<at::Tensor> &deepstackInput, at::Tensor &inputIds);
     size_t GetTensorPoolSize(int dbg);
 
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
@@ -138,6 +138,7 @@ public:
 
     std::vector<at::Tensor> moeGate;
     std::vector<at::Tensor> moeGateBias;
+    std::vector<at::Tensor> moeTid2Eid;
     std::vector<at::Tensor> moeSEUpGate;
     std::vector<at::Tensor> moeSEUpGateDeqScale;
     std::vector<at::Tensor> moeSEDown;
@@ -202,7 +203,7 @@ private:
     void ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                  std::vector<std::vector<at::Tensor>> &kvCache,
                                  at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
-                                 std::vector<at::Tensor> &deepstackInput);
+                                 std::vector<at::Tensor> &deepstackInput, at::Tensor &inputIds);
     void InitMatmulWeight(const std::string &name, std::vector<at::Tensor> &w,
                           std::vector<at::Tensor> &iScale, std::vector<at::Tensor> &iOffset,
                           std::vector<at::Tensor> &qBias, std::vector<at::Tensor> &dScale,
@@ -481,6 +482,12 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         {std::ref(moeSEDownDeqScale), "SE down deq scale", true, c.nSharedExperts != 0},
     };
     checkLayersDims(moeLayersTable, numMoeLayers, rankId, "Mismatched number of moe layers");
+    if (c.scoringFunc == XMODEL_SCORING_FUNC_SQRTSOFTPLUS && c.nHashLayers > 0 &&
+        moeTid2Eid.size() != c.nHashLayers) {
+        XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
+        s << "tid2eid num of layers: " << moeTid2Eid.size() << std::endl;
+        throw std::invalid_argument("Mismatched number of tid2eid parameters");
+    }
 
     if (moeREUpGate.size() != nRE || moeREDown.size() != nRE) {
         {
@@ -684,6 +691,14 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         InitXTensor(_model->moeGate[i], moeGate[i - c.nDenseLayers]);
         if (c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
             InitXTensor(_model->moeGateBias[i], moeGateBias[i - c.nDenseLayers]);
+        }
+        if (c.scoringFunc == XMODEL_SCORING_FUNC_SQRTSOFTPLUS) {
+            InitOptionalXTensor(_model->moeGateBias[i], moeGateBias[i - c.nDenseLayers]);
+        }
+        if (c.scoringFunc == XMODEL_SCORING_FUNC_SQRTSOFTPLUS &&
+            i < c.nDenseLayers + c.nHashLayers) {
+            InitOptionalXTensor(_model->moeTid2Eid[i - c.nDenseLayers],
+                                moeTid2Eid[i - c.nDenseLayers]);
         }
         std::vector<at::Tensor> emptyWeights = {};
         if (c.nSharedExperts != 0) {
@@ -893,7 +908,8 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
                                         std::vector<std::vector<at::Tensor>> &kvCache,
                                         at::Tensor &freqsCis, at::Tensor &output,
                                         uint64_t currStream,
-                                        std::vector<at::Tensor> &deepstackInput)
+                                        std::vector<at::Tensor> &deepstackInput,
+                                        at::Tensor &inputIds)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 2;
@@ -913,7 +929,7 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
         InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i]);
     }
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
-                            deepstackInput);
+                            deepstackInput, inputIds);
 }
 
 void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indices,
@@ -1028,15 +1044,16 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnM
 void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                       std::vector<std::vector<at::Tensor>> &kvCache,
                                       at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
-                                      std::vector<at::Tensor> &deepstackInput)
+                                      std::vector<at::Tensor> &deepstackInput, at::Tensor &inputIds)
 {
     XModelAttnMeta _attnMeta;
-    XTensor _input, _output, _freqsCis;
+    XTensor _input, _output, _freqsCis, _inputIds;
     aclrtStream currAclStream = nullptr;
 
     InitXTensor(_input, input);
     InitXTensor(_output, output);
     InitXTensor(_freqsCis, freqsCis);
+    InitXTensor(_inputIds, inputIds);
 
     if (kvCache.size() != _kv.size()) {
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
@@ -1078,7 +1095,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     }
 
     _model->ForwardWithInputsEmbeds(rt, _input, attnMeta, _kv, _deepstackInputEmbeds, _freqsCis,
-                                    _output);
+                                    _inputIds, _output);
 
     if (rt.multiTaskParallel) {
         if (rt.taskId == 0) {
@@ -1102,7 +1119,8 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
                                         std::vector<std::vector<at::Tensor>> &kvCache,
                                         at::Tensor &freqsCis, at::Tensor &output,
                                         uint64_t currStream,
-                                        std::vector<at::Tensor> &deepstackInput)
+                                        std::vector<at::Tensor> &deepstackInput,
+                                        at::Tensor &inputIds)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 1;
@@ -1112,7 +1130,7 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.position, attnMeta.positions);
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
-                            deepstackInput);
+                            deepstackInput, inputIds);
 }
 
 size_t _CModel::GetTensorPoolSize(int dbg)
@@ -2410,6 +2428,7 @@ PYBIND11_MODULE(_C, m)
     py::enum_<XModelScoringFuncType>(m, "ScoringFuncType")
         .value("ScoringFuncSoftmax", XModelScoringFuncType::XMODEL_SCORING_FUNC_SOFTMAX)
         .value("ScoringFuncSigmoid", XModelScoringFuncType::XMODEL_SCORING_FUNC_SIGMOID)
+        .value("ScoringFuncSqrtsoftplus", XModelScoringFuncType::XMODEL_SCORING_FUNC_SQRTSOFTPLUS)
         .export_values();
 
     py::class_<_CModel>(m, "Model")
@@ -2482,6 +2501,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("mlp_down_deq_scale", &_CModel::mlpDownDeqScale)
         .def_readwrite("gate", &_CModel::moeGate)
         .def_readwrite("gate_bias", &_CModel::moeGateBias)
+        .def_readwrite("tid2eid", &_CModel::moeTid2Eid)
         .def_readwrite("se_up_gate", &_CModel::moeSEUpGate)
         .def_readwrite("se_up_gate_deq_scale", &_CModel::moeSEUpGateDeqScale)
         .def_readwrite("se_down", &_CModel::moeSEDown)
@@ -2547,7 +2567,7 @@ PYBIND11_MODULE(_C, m)
              "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
-             py::call_guard<py::gil_scoped_release>())
+             py::arg("input_ids"), py::call_guard<py::gil_scoped_release>())
         .def("forward_v2", &_CModel::ForwardV2, "forward_v2", py::arg("rt"), py::arg("input"),
              py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
@@ -2559,7 +2579,7 @@ PYBIND11_MODULE(_C, m)
              "forward_with_inputs_embeds_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
-             py::call_guard<py::gil_scoped_release>())
+             py::arg("input_ids"), py::call_guard<py::gil_scoped_release>())
         .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize, "get_tensor_pool_size",
              py::arg("dbg") = 0);
 

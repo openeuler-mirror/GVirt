@@ -1232,7 +1232,7 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
 }
 
 void XliteOpSqrtsoftplusHashTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias,
-                                 XTensor &inputIds, XTensor &tid2eid, XTensor &outWeights,
+                                 XTensor &inputIds, const XTensor &tid2eid, XTensor &outWeights,
                                  XTensor &routingMap, float scale, uint32_t topK, bool hash)
 {
     if (IsDummyRuntime(rt)) {
@@ -1255,7 +1255,8 @@ void XliteOpSqrtsoftplusHashTopK(XRuntime &rt, XTensor &scores, XTensor &indices
     // hash path gathers from pre-bias scores, so bias is dead work; pass null and the device
     // kernel gates the bias add + DMA on `biasGm != nullptr`. Non-hash needs the real bias.
     void *biasPtr = hash ? nullptr : bias.ptr;
-    launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, biasPtr, inputIds.ptr, tid2eid.ptr,
+    void *tid2eidPtr = hash ? tid2eid.ptr : nullptr;
+    launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, biasPtr, inputIds.ptr, tid2eidPtr,
                  outWeights.ptr, routingMap.ptr, scale, scores.shape[0], indices.shape[0], topK,
                  hash ? 1 : 0);
 }

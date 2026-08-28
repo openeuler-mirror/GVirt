@@ -48,6 +48,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     linearOutProj.resize(c.nLayers);
     moeGate.resize(c.nLayers);
     moeGateBias.resize(c.nLayers);
+    moeTid2Eid.resize(c.nHashLayers);
     moeSEUpGate.resize(c.nLayers);
     moeSEDown.resize(c.nLayers);
     moeSEGate.resize(c.nLayers);
@@ -1001,7 +1002,28 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
 
     XliteOpMatmul(rt, input, moeGate[layer], scores, _c.gateCaptured && _c.weightNZ);
 
-    if (_c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
+    if (_c.scoringFunc == XMODEL_SCORING_FUNC_SQRTSOFTPLUS) {
+        uint32_t moELayer = layer - _c.nDenseLayers;
+        bool isHash = moELayer < _c.nHashLayers;
+        const XTensor &tid2eid = isHash ? moeTid2Eid[moELayer] : XTensor();
+        XTensor *inputIds = &_inputIds;
+        if (M > m) {
+            XTensor &inputIdsPad = rt.GetTensor({M}, INT32, DBG_LOC);
+            void *padPtr = static_cast<uint8_t *>(inputIdsPad.ptr) + m * sizeof(uint32_t);
+            size_t padBytes = (M - m) * sizeof(uint32_t);
+            CHECK_ACL(aclrtMemcpyAsync(inputIdsPad.ptr, m * sizeof(uint32_t), _inputIds.ptr,
+                                       m * sizeof(uint32_t), ACL_MEMCPY_DEVICE_TO_DEVICE,
+                                       rt.stream));
+            CHECK_ACL(aclrtMemsetAsync(padPtr, padBytes, 0, padBytes, rt.stream));
+            inputIds = &inputIdsPad;
+        }
+        XliteOpSqrtsoftplusHashTopK(rt, scores.View(M), _gateIndices, moeGateBias[layer], *inputIds,
+                                    tid2eid, weights, routing, _c.routeScale, _c.nActExperts,
+                                    isHash);
+        if (M > m) {
+            rt.PutTensor(*inputIds);
+        }
+    } else if (_c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
         XliteOpSigmoidTopK(rt, scores.View(M), _gateIndices, moeGateBias[layer], _c.routeScale,
                            weights, routing, _c.nExpertGroups, _c.nLimitedGroups, _c.nActExperts,
                            _c.normTopKProb);
@@ -1710,6 +1732,7 @@ void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                    std::vector<XTensor> &deepstackInputEmbeds,
                                    std::vector<XTensor> &freqsCis, XTensor &h)
 {
+    _inputIds.Init(input.shape, input.dtype, input.ptr);
     if (_c.hcMult == 0) {
         // under DP, different ranks may routed differently with `enableCommOptimize`
         // enabled/disabled;
@@ -1757,7 +1780,7 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XT
 void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                                      std::vector<std::vector<XTensor>> &kvCache,
                                      std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                                     XTensor &output)
+                                     XTensor &inputIds, XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
@@ -1768,12 +1791,14 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                    _c.indexTopK);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
+        inputIds.View(rt.batchedTokens);
     }
     rt.currTokens = input.shape[0];
     rt.maxTokensDp = PadForDp(rt) ? output.OrigShape()[0] : rt.currTokens;
     output.View(rt.currTokens);
 
     ConfigRtCommOptimize(rt, rt.currTokens);
+    _inputIds.Init(inputIds.shape, inputIds.dtype, inputIds.ptr);
     if (rt.enableCommOptimize) {
         size_t mPad = ROUND_UP(input.shape[0], _c.defTpSize);
         XTensor *xPadPtr, xPad;

@@ -409,6 +409,8 @@ class ScoringFuncType(Enum):
     """Softmax-based expert routing."""
     ScoringFuncSigmoid = ...
     """Sigmoid-based expert routing."""
+    ScoringFuncSqrtsoftplus = ...
+    """Sqrtsoftplus-based expert routing (hash or topk)."""
 
 AttnMHA: AttnType = ...
 """Alias for :attr:`AttnType.AttnMHA`."""
@@ -425,6 +427,8 @@ ScoringFuncSoftmax: ScoringFuncType = ...
 """Alias for :attr:`ScoringFuncType.ScoringFuncSoftmax`."""
 ScoringFuncSigmoid: ScoringFuncType = ...
 """Alias for :attr:`ScoringFuncType.ScoringFuncSigmoid`."""
+ScoringFuncSqrtsoftplus: ScoringFuncType = ...
+"""Alias for :attr:`ScoringFuncType.ScoringFuncSqrtsoftplus`."""
 
 class Model:
     """Model weights and forward methods.
@@ -683,6 +687,8 @@ class Model:
     """MoE gate weights per layer."""
     gate_bias: List[torch.Tensor] = ...
     """MoE gate bias per layer."""
+    tid2eid: List[torch.Tensor] = ...
+    """MoE hash layers: token-id->expert lookup table ``[vocab_size, n_act_experts]`` per layer."""
     se_up_gate: List[torch.Tensor] = ...
     """Shared-expert up-gate weights per layer."""
     se_up_gate_deq_scale: List[torch.Tensor] = ...
@@ -896,6 +902,7 @@ class Model:
         output: torch.Tensor,
         curr_stream: int = 0,
         deepstack_input: Sequence[torch.Tensor] = ...,
+        input_ids: torch.Tensor = ...,
     ) -> None:
         """Run forward pass with deepstack input embeddings (host metadata).
 
@@ -908,6 +915,8 @@ class Model:
             output (torch.Tensor): Output hidden-state buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
             deepstack_input (Sequence[torch.Tensor]): Extra deepstack embeddings.
+            input_ids (torch.Tensor): Token ids for the sqrtsoftplus MoE hash-gate path
+                (tid2eid[input_ids]); required only when scoring_func is sqrtsoftplus.
 
         Returns:
             None: Output is written in place.
@@ -988,6 +997,7 @@ class Model:
         output: torch.Tensor,
         curr_stream: int = 0,
         deepstack_input: Sequence[torch.Tensor] = ...,
+        input_ids: torch.Tensor = ...,
     ) -> None:
         """Run forward pass with deepstack input embeddings (device metadata, V2).
 
@@ -1000,6 +1010,8 @@ class Model:
             output (torch.Tensor): Output hidden-state buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
             deepstack_input (Sequence[torch.Tensor]): Extra deepstack embeddings.
+            input_ids (torch.Tensor): Token ids for the sqrtsoftplus MoE hash-gate path
+                (tid2eid[input_ids]); required only when scoring_func is sqrtsoftplus.
 
         Returns:
             None: Output is written in place.
