@@ -9,3 +9,5 @@ extra-info/
 tests/test_output/
 xlite/include/
 xlite/lib/
+xlite/_version.py
+xlite.spec

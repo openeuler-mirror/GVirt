@@ -2,6 +2,7 @@
 # synchronize with requirements-build.txt when updating build dependencies
 requires = [
     "setuptools>=64.0.0,<82.0.0",
+    "setuptools-scm>=8.0.0",      # setup.py imports get_version at top level; required for build
     "cmake>=3.22.0",
     "pybind11>=3.0.0",
     "torch>=2.5.1,<=2.10.0",      # use torch+cpu; make sure (torch: build version <= runtime version)
@@ -55,14 +56,19 @@ Homepage = "https://atomgit.com/openeuler/GVirt"
 [tool.setuptools]
 include-package-data = false
 
-[tool.setuptools.dynamic]
-version = { attr = "xlite.__version__" }
-
 [tool.setuptools.packages.find]
 exclude = ["*.tools", "*.tools.*", "tests", "tests.*"]
 
 [tool.setuptools.package-data]
 xlite = ["py.typed", "*.pyi", "*.so", "lib/*.so", "include/xlite/*.h", "lib/cmake/xlite/*.cmake"]
+
+# Version owned by the setuptools_scm plugin. `root` is the monorepo root;
+# `write_to` is resolved against it -> <monorepo>/xlite/xlite/_version.py.
+[tool.setuptools_scm]
+root             = ".."
+write_to         = "xlite/xlite/_version.py"
+write_to_source  = true
+fallback_version = "0.0.0"
 
 [tool.mypy]
 mypy_path = "xlite"

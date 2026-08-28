@@ -16,7 +16,7 @@ xlite 每日自动化测试机器人共享工具模块
         Colors, log_info, log_success, log_warning, log_error,
         setup_logging, run_command, run_in_container, copy_from_container,
         pull_latest_code, build_project, install_wheel,
-        get_current_version, get_current_commit,
+        get_xlite_version, get_xlite_commit,
         save_metrics_json, load_metrics_json,
         send_notification, should_disable_xccl, detect_model_device
     )
@@ -494,7 +494,7 @@ def install_wheel(wheel_path: Path) -> bool:
 
 
 # ====================== 版本信息函数 ======================
-def get_current_version() -> str:
+def get_xlite_version() -> str:
     """
     获取当前 xlite 版本号
 
@@ -530,7 +530,7 @@ def get_current_version() -> str:
     return "unknown"
 
 
-def get_current_commit() -> str:
+def get_xlite_commit() -> str:
     """
     获取当前 xlite commit hash
 
@@ -543,7 +543,43 @@ def get_current_commit() -> str:
             return result.stdout.strip()[:8]
     except Exception:
         pass
-    return "unknown"
+    return "N/A"
+
+
+def get_last_release_tag() -> str:
+    """
+    获取最近一个已发布 tag (即基线版本号)
+
+    用 `git describe --tags --abbrev=0` 取离 HEAD 最近、且可达的 tag，去掉
+    distance/node 后缀，得到纯发布版本号 (如 '0.2.0rc0')。该值在两个 tag
+    之间的所有 dev commit 上保持稳定，故适合作为基线目录的 key——两次 tag
+    之间的每日构建都对比同一份基线。
+
+    与 get_xlite_version() 的区别:
+        get_xlite_version()    返回 dev 串 (如 0.2.0rc1.dev146+g...)，每次提交都变，
+                                  用于给本次运行的报告目录命名 (保证不重名)。
+        get_last_release_tag()    返回最近 tag (如 0.2.0rc0)，稳定，用于查找/命名基线目录。
+
+    无可达 tag (如浅克隆) 时退化为 get_xlite_version()，使基线查找优雅降级
+    而非返回 "unknown"。
+
+    返回:
+        最近发布 tag 字符串
+    """
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            cwd=XLITE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception as e:
+        log_warning(f"获取最近发布 tag 失败: {e}")
+    # 无可达 tag: 退化为当前版本串，使基线查找仍能优雅降级。
+    return get_xlite_version()
 
 
 def get_vllm_ascend_version() -> str:
@@ -562,25 +598,6 @@ def get_vllm_ascend_version() -> str:
         return "N/A"
     except Exception as e:
         log_warning(f"获取 vllm-ascend 版本失败: {e}")
-        return "N/A"
-
-
-def get_xlite_commit() -> str:
-    """
-    获取 xlite 项目的 commit 号（短格式）
-
-    返回:
-        commit 号（短格式），获取失败返回 "N/A"
-    """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=XLITE_DIR, timeout=10
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return "N/A"
-    except Exception as e:
-        log_warning(f"获取 xlite commit 失败: {e}")
         return "N/A"
 
 

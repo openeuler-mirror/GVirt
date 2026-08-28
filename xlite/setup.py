@@ -30,6 +30,25 @@ except ImportError:
 ROOT_DIR = Path(__file__).resolve().parent
 
 
+def _read_version() -> str:
+    """Read the version the setuptools_scm plugin wrote to xlite/_version.py.
+
+    The plugin (configured in pyproject.toml) owns inference and also ships
+    scm_version.json in the sdist, so the version survives a no-git rebuild.
+    Calling get_version() here directly would bypass that recovery and fall
+    back to 0.0.0 when .git is absent. Read lazily so CMakeBuild sees the file
+    the plugin writes during the build; on first configure fall back to
+    SETUPTOOLS_SCM_PRETEND_VERSION or 0.0.0 (CMake's own default applies).
+    """
+    version_file = ROOT_DIR / "xlite" / "_version.py"
+    if version_file.exists():
+        namespace: dict[str, str] = {}
+        exec(version_file.read_text(encoding="utf-8"), namespace)
+        if namespace.get("__version__"):
+            return namespace["__version__"]
+    return os.environ.get("SETUPTOOLS_SCM_PRETEND_VERSION", "0.0.0")
+
+
 class CleanCommand(Command):
     description = "Remove local build artifacts"
     user_options = []
@@ -51,32 +70,16 @@ class CleanCommand(Command):
 def _get_torch_cmake_dir() -> str:
     import torch
 
-    torch_site_path = (
-        Path(torch.__file__).resolve().parent / "share" / "cmake" / "Torch"
-    )
+    torch_site_path = Path(torch.__file__).resolve().parent / "share" / "cmake" / "Torch"
     if not torch_site_path.exists():
         raise RuntimeError(
-            f"Torch CMake package was not found at {torch_site_path}. "
-            "Install torch in the active environment first."
+            f"Torch CMake package was not found at {torch_site_path}. Install torch in the active environment first."
         )
     return str(torch_site_path)
 
 
 def _get_pybind11_cmake_dir() -> str:
-    return subprocess.check_output(
-        [sys.executable, "-m", "pybind11", "--cmakedir"], text=True
-    ).strip()
-
-
-def _get_xlite_version() -> str:
-    """Source the package version from xlite.__version__ (single source of
-    truth; mirrors pyproject's tool.setuptools.dynamic). Falls back to a dev
-    sentinel if the import fails, leaving CMake's own default to apply."""
-    try:
-        import xlite  # noqa: F401  (import for __version__ side-effect)
-        return xlite.__version__
-    except Exception:  # pragma: no cover - xlite must exist in its own source tree
-        return ""
+    return subprocess.check_output([sys.executable, "-m", "pybind11", "--cmakedir"], text=True).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -105,10 +108,7 @@ _EXTRACT_HOST_STUB_PATCHES = (
 
 def _comment_out(snippet: str) -> str:
     """Prefix each non-empty line of `snippet` with '# '."""
-    return "".join(
-        f"# {line}" if line.strip() else line
-        for line in snippet.splitlines(keepends=True)
-    )
+    return "".join(f"# {line}" if line.strip() else line for line in snippet.splitlines(keepends=True))
 
 
 def _get_ascendc_kernel_cmake_dir() -> Optional[Path]:
@@ -117,8 +117,7 @@ def _get_ascendc_kernel_cmake_dir() -> Optional[Path]:
     Base from ASCEND_CANN_PACKAGE_PATH env var (CMake's default as fallback);
     tries compiler/tikcpp then tools/tikcpp. None if neither exists.
     """
-    base = Path(os.environ.get("ASCEND_CANN_PACKAGE_PATH",
-                               _DEFAULT_ASCEND_CANN_PACKAGE_PATH))
+    base = Path(os.environ.get("ASCEND_CANN_PACKAGE_PATH", _DEFAULT_ASCEND_CANN_PACKAGE_PATH))
     for sub in _ASCENDC_KERNEL_CMAKE_SUBDIRS:
         candidate = base / sub
         if candidate.is_dir():
@@ -135,7 +134,9 @@ def _find_extract_host_stub() -> Optional[Path]:
     try:
         result = subprocess.run(
             ["find", str(root), "-name", "extract_host_stub.py"],
-            check=False, capture_output=True, text=True,
+            check=False,
+            capture_output=True,
+            text=True,
         )
         if result.returncode == 0:
             lines = [line for line in result.stdout.splitlines() if line]
@@ -204,13 +205,13 @@ def _patched_extract_host_stub():
             try:
                 stub_path.write_text(original_content, encoding="utf-8")
             except (PermissionError, OSError) as err:
-                print(f"AscendPatch: cannot restore {stub_path} ({err}); "
-                      f"file left patched")
+                print(f"AscendPatch: cannot restore {stub_path} ({err}); file left patched")
             else:
                 print(f"AscendPatch: restored {stub_path}")
 
 
 if _bdist_wheel is not None:
+
     class _ManylinuxTagBdistWheel(_bdist_wheel):
         """Retag built wheel `linux_<arch>` -> `manylinux2014_<arch>` (filename
         + `.dist-info/WHEEL` Tag) for PyPI upload. Arch-agnostic."""
@@ -267,11 +268,10 @@ class CMakeBuild(build_ext):
 
         is_editable = self.inplace or any(x in sys.argv for x in ("develop", "editable_wheel"))
         install_prefix = Path(self.build_lib).resolve()
-        print(f"CMakeBuild: Building in {'editable' if is_editable else 'standard'} mode; installing to "
-              f"{install_prefix}")
-        cmake_prefix_paths = ";".join(
-            [_get_pybind11_cmake_dir(), _get_torch_cmake_dir()]
+        print(
+            f"CMakeBuild: Building in {'editable' if is_editable else 'standard'} mode; installing to {install_prefix}"
         )
+        cmake_prefix_paths = ";".join([_get_pybind11_cmake_dir(), _get_torch_cmake_dir()])
 
         configure_cmd = [
             "cmake",
@@ -283,9 +283,7 @@ class CMakeBuild(build_ext):
             f"-DCMAKE_PREFIX_PATH={cmake_prefix_paths}",
             f"-DXLITE_EDITABLE_BUILD={'ON' if is_editable else 'OFF'}",
         ]
-        xlite_version = _get_xlite_version()
-        if xlite_version:
-            configure_cmd.append(f"-DXLITE_VERSION={xlite_version}")
+        configure_cmd.append(f"-DXLITE_VERSION={_read_version()}")
         build_cmd = ["cmake", "--build", str(build_temp), "-j"]
         install_cmd = ["cmake", "--install", str(build_temp)]
 
@@ -344,6 +342,8 @@ class CMakeBuild(build_ext):
 
 
 setup(
+    # version is dynamic in pyproject.toml; not passed here so the
+    # setuptools_scm plugin infers it (and recovers from scm_version.json).
     ext_modules=[Extension(name="xlite._C", sources=[])],
     cmdclass={
         "build_ext": CMakeBuild,
