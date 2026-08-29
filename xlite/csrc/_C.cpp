@@ -1414,13 +1414,13 @@ void AddBias(XRuntime &rt, at::Tensor &in, at::Tensor &weight, at::Tensor &out)
     rt.Synchronize();
 }
 
-void SiluAndMul(XRuntime &rt, at::Tensor &in, at::Tensor &out)
+void SiluAndMul(XRuntime &rt, at::Tensor &in, at::Tensor &out, float swigluLimit)
 {
     XTensor _in, _out;
     InitXTensor(_in, in);
     InitXTensor(_out, out);
 
-    XliteOpSiluAndMul(rt, _in, _out);
+    XliteOpSiluAndMul(rt, _in, _out, XTensor(), swigluLimit);
     rt.Synchronize();
 }
 
@@ -2654,7 +2654,8 @@ PYBIND11_MODULE(_C, m)
     m.def("l2norm", &L2Norm, py::arg("rt"), py::arg("in_"), py::arg("out"), py::arg("norm_eps"),
           py::arg("norm_dim") = 0);
     m.def("add_bias", &AddBias, py::arg("rt"), py::arg("in_"), py::arg("weight"), py::arg("out"));
-    m.def("silu_and_mul", &SiluAndMul, py::arg("rt"), py::arg("in_"), py::arg("out"));
+    m.def("silu_and_mul", &SiluAndMul, py::arg("rt"), py::arg("in_"), py::arg("out"),
+          py::arg("swiglu_limit") = 0.0f);
     m.def("sigmoid_gate_mul", &SigmoidGateMul, py::arg("rt"), py::arg("attn"), py::arg("gate"),
           py::arg("out"));
     m.def("rope_and_cache", &RopeAndCache, "rope_and_cache", py::arg("rt"), py::arg("inout"),

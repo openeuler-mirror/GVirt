@@ -764,7 +764,8 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     }
 }
 
-void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &num)
+void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &num,
+                       float swigluLimit)
 {
     if (IsDummyRuntime(rt) || in.numel == 0) {
         return;
@@ -780,7 +781,8 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
         throw std::runtime_error(err_str + "not supported!");
     }
-    launchKernel(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr, in.shape[0], out.shape[1]);
+    launchKernel(rt.aivNum, rt.stream, in.ptr, out.ptr, num.ptr, in.shape[0], out.shape[1],
+                 swigluLimit);
 }
 
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale)

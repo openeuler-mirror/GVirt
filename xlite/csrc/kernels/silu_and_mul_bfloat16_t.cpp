@@ -7,7 +7,8 @@
 #ifdef __DAV_C220_VEC__
 
 extern "C" __global__ __aicore__ void silu_and_mul_bfloat16_t(GM_ADDR x, GM_ADDR y, GM_ADDR pm,
-                                                              uint32_t n_tokens, uint32_t dim)
+                                                              uint32_t n_tokens, uint32_t dim,
+                                                              float swiglu_limit)
 {
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -38,6 +39,9 @@ extern "C" __global__ __aicore__ void silu_and_mul_bfloat16_t(GM_ADDR x, GM_ADDR
 
     int burst_copy = DIV_ROUND_UP(dim_split * sizeof(bfloat16_t), BLOCK_SIZE);
     int repeat_cal = DIV_ROUND_UP(dim_split, calc_pad);
+
+    uint64_t clamp_config = set_vector_1src_xt(VECTOR_MAX_BYTESIZE / BLOCK_SIZE,
+                                               VECTOR_MAX_BYTESIZE / BLOCK_SIZE, 1, 1, repeat_cal);
 
     int event_id = 0;
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
@@ -71,6 +75,15 @@ extern "C" __global__ __aicore__ void silu_and_mul_bfloat16_t(GM_ADDR x, GM_ADDR
                        0);
             pipe_barrier(PIPE_V);
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
+
+        // SwiGLU clamp: up = clamp(up, -L, L), gate = clamp(gate, max=L).
+        if (swiglu_limit > 0.0f) {
+            vmins(x32_ub + padded_dim, x32_ub + padded_dim, (float)swiglu_limit, clamp_config);
+            vmins(x32_ub, x32_ub, (float)swiglu_limit, clamp_config);
+            pipe_barrier(PIPE_V);
+            vmaxs(x32_ub + padded_dim, x32_ub + padded_dim, (float)(-swiglu_limit), clamp_config);
+            pipe_barrier(PIPE_V);
         }
 
         // -x
