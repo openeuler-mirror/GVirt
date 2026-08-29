@@ -2140,7 +2140,7 @@ void ConcatCol(XRuntime &rt, std::vector<at::Tensor> &inputs, at::Tensor &out)
         return;
     }
     std::vector<XTensor> _inputs;
-    uint32_t totalWidth = 0;
+    size_t totalWidth = 0;
     for (auto &input : inputs) {
         XTensor x;
         InitXTensor(x, input);
