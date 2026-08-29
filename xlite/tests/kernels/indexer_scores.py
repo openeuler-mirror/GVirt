@@ -132,7 +132,7 @@ for name, n_heads, head_dim, test_dtype in models:
         torch.npu.synchronize()
         indexer_scores(rt, q_xlite, k_cache_xlite, weight_xlite, scores_xlite,
                       query_start_loc, query_lens, cached_lens, block_tables,
-                      n_heads, head_dim, BLOCK_SIZE, batch, max_num_blocks)
+                      n_heads, head_dim, BLOCK_SIZE, batch)
 
         logging.info(
             "indexer_scores %s (%d heads, %d head_dim, %s) work (%d batch, cached_lens=%s, query_lens=%s) executed!",

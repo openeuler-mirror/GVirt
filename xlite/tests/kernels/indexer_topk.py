@@ -157,7 +157,7 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list,
     indexer_topk(rt, q_xlite, k_cache_xlite, weight_xlite, indices,
                  topk_indices_xlite, query_start_loc, query_lens, cached_lens,
                  block_tables, n_heads, head_dim, BLOCK_SIZE, batch,
-                 max_num_blocks, topK)
+                 topK)
     torch.npu.synchronize()
 
     logging.info(

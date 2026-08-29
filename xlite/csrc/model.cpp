@@ -398,7 +398,7 @@ void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenSta
     XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices,
                        rt._dsaTopkBuffer, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
                        rt._attnBlockTables[0], _sync, _c.indexNHeads, _c.indexHeadDim,
-                       _c.blockSizes[0], rt._batch, maxNumBlocks, _c.indexTopK);
+                       _c.blockSizes[0], rt._batch, _c.indexTopK);
     rt.PutTensor(kw);
     rt.PutTensor(*qPtr);
     rt.PutTensor(lastTopk);
@@ -492,8 +492,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                          hiddenState.dtype, DBG_LOC);
         XliteOpGatherSparseKVCache(rt, kCache, peCache, rt._attnBlockTables[0], *topkIndices,
                                    rt._attnLens, rt._attnCachedLens, kDense, peDense, rt._batch,
-                                   _c.indexTopK, _c.blockSizes[0], maxNumBlocks, _c.kvLoraRank,
-                                   _c.ropeHeadDim, _c.nKvHeads);
+                                   _c.indexTopK, _c.blockSizes[0], _c.kvLoraRank, _c.ropeHeadDim,
+                                   _c.nKvHeads);
         XTensor &qkDense =
             rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
         XliteOpMLAV3(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._attnQueryStartLoc,
@@ -507,9 +507,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                                    hiddenState.dtype, DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, oAbsorb, rt._attnQueryStartLoc,
                      rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], nLocalHeads,
-                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch, maxNumBlocks,
-                     _c.softmaxScale, _c.indexTopK,
-                     topkIndices == nullptr ? XTensor() : *topkIndices);
+                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch, _c.softmaxScale,
+                     _c.indexTopK, topkIndices == nullptr ? XTensor() : *topkIndices);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
@@ -523,9 +522,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         XliteOpFlashMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, sv, max, sum, lastMax, lastSum,
                           _sync, oAbsorb, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
                           rt._attnBlockTables[0], nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
-                          _c.blockSizes[0], rt._batch, maxNumBlocks, _c.softmaxScale,
-                          rt._tileSizeOfCachedKV, _c.indexTopK,
-                          topkIndices == nullptr ? XTensor() : *topkIndices);
+                          _c.blockSizes[0], rt._batch, _c.softmaxScale, rt._tileSizeOfCachedKV,
+                          _c.indexTopK, topkIndices == nullptr ? XTensor() : *topkIndices);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);
@@ -628,7 +626,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                                    hiddenState.dtype, DBG_LOC);
         XliteOpAttention(rt, qkv, kCache, vCache, qk, attn, rt._attnQueryStartLoc, rt._attnLens,
                          rt._attnCachedLens, rt._attnBlockTables[0], qHeads, kHeads, _c.headDim,
-                         _c.blockSizes[0], rt._batch, maxNumBlocks);
+                         _c.blockSizes[0], rt._batch);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
@@ -642,7 +640,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         XliteOpFlashAttention(rt, qkv, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, _sync,
                               attn, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
                               rt._attnBlockTables[0], qHeads, kHeads, _c.headDim, _c.blockSizes[0],
-                              rt._batch, maxNumBlocks, rt._tileSizeOfCachedKV);
+                              rt._batch, rt._tileSizeOfCachedKV);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);

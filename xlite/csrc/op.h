@@ -13,6 +13,31 @@
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN);
 
+// Derive maxNumBlocks from blockTables: 2-D [batch, maxNumBlocks] -> shape[1];
+// 1-D [batch * maxNumBlocks] -> len / batch. Avoids shape[1] UB on 1-D input.
+static inline uint32_t DeriveMaxNumBlocks(const XTensor &blockTables, uint32_t batch)
+{
+    const auto &shape = blockTables.shape;
+    if (shape.size() == 2) {
+        return static_cast<uint32_t>(shape[1]);
+    }
+    if (shape.size() == 1) {
+        if (batch == 0) {
+            throw std::runtime_error(
+                std::string(__func__) +
+                ": batch == 0 when deriving maxNumBlocks from 1-D blockTables");
+        }
+        if (shape[0] % batch != 0) {
+            throw std::runtime_error(std::string(__func__) + ": 1-D blockTables length (" +
+                                     std::to_string(shape[0]) + ") is not divisible by batch (" +
+                                     std::to_string(batch) + ")");
+        }
+        return static_cast<uint32_t>(shape[0] / batch);
+    }
+    throw std::runtime_error(std::string(__func__) + ": blockTables must be 1-D or 2-D, got rank " +
+                             std::to_string(shape.size()));
+}
+
 HcclDataType XDtype2HcclDtype(enum XDtype dtype);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
@@ -64,34 +89,31 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk,
                       XTensor &output, XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
-                      uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock);
+                      uint32_t blockSize, uint32_t batch);
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
                            XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum, XTensor &lastMax,
                            XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &queryStartLoc,
                            XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                            uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
-                           uint32_t batch, uint32_t maxNumBlock,
-                           uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE);
+                           uint32_t batch, uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE);
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
                   XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                  uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,
-                  float scale, uint32_t topK = 0, const XTensor &topkIndices = XTensor());
+                  uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
+                  uint32_t topK = 0, const XTensor &topkIndices = XTensor());
 void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache,
                        XTensor &peCache, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
                        XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &oAbsorb,
                        XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                        XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                       uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
-                       uint32_t maxNumBlocks, float scale,
+                       uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
                        uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE, uint32_t topK = 0,
                        const XTensor &topkIndices = XTensor());
 void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, XTensor &peCache,
                                 XTensor &blockTables, XTensor &topkIndices, XTensor &queryLens,
                                 XTensor &cachedLens, XTensor &kDenseCache, XTensor &peDenseCache,
                                 uint32_t batch, uint32_t indexTopK, uint32_t blockSize,
-                                uint32_t maxNumBlocks, uint32_t kvLoraRank, uint32_t ropeHeadDim,
-                                uint32_t kvHeads);
+                                uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t kvHeads);
 void XliteOpMLAV3(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kDenseCache,
                   XTensor &peDenseCache, XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc,
                   XTensor &lens, XTensor &cachedLens, uint32_t nHeads, uint32_t ropeHeadDim,
@@ -167,13 +189,12 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
 void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight,
                           XTensor &scores, XTensor &queryStartLoc, XTensor &lens,
                           XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,
-                          uint32_t headDim, uint32_t blockSize, uint32_t batch,
-                          uint32_t maxNumBlock);
+                          uint32_t headDim, uint32_t blockSize, uint32_t batch);
 void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight, XTensor &scores,
                         XTensor &lastTopk, XTensor &indices, XTensor &topkIndices,
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
-                        uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK);
+                        uint32_t blockSize, uint32_t batch, uint32_t topK);
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output,
                  uint32_t calcOffset = 0, uint32_t calcNum = UINT32_MAX);
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,

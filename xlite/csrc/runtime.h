@@ -210,6 +210,7 @@ public:
     // continuation (cached>0, multi-token) reuses state via recurrent GDN.
     std::vector<uint32_t> _cachedLensHost;
     uint32_t _batch;
+    uint32_t _maxTotalLens;
     uint32_t _tileSizeOfCachedKV;
     XTensor
         _attnPosition;  // [batchedTokens] int64, ref: v0/1 -> _position, v2 -> attnMeta.position

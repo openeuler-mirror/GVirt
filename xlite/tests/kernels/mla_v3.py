@@ -197,7 +197,7 @@ def run_test(name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_ra
     torch.npu.synchronize()
     gather_sparse_kv_cache(rt, k_cache_xlite, pe_cache_xlite, block_tables,
                            topk_indices_tensor, query_lens, cached_lens, k_dense_xlite,
-                           pe_dense_xlite, batch, topK, BLOCK_SIZE, max_num_blocks,
+                           pe_dense_xlite, batch, topK, BLOCK_SIZE,
                            kv_lora_rank, rope_head_dim, 1)
     mla_v3(rt, q_absorb_xlite, qr_xlite, k_dense_xlite, pe_dense_xlite,
            o_absorb_xlite, query_start_loc, query_lens, cached_lens, n_heads, rope_head_dim,

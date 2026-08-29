@@ -1511,7 +1511,6 @@ def attention(
     head_dim: int,
     block_size: int,
     batch: int,
-    max_num_block: int,
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
 ) -> None:
@@ -1526,13 +1525,15 @@ def attention(
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
         lens (torch.Tensor): Current token lengths.
         cached_lens (torch.Tensor): Cached token lengths.
-        block_tables (torch.Tensor): Block table tensor.
+        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
+            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
+            per-request max_num_blocks is derived internally from the shape
+            (2-D: shape[1]; 1-D: len // batch).
         n_heads (int): Number of query heads.
         n_kv_heads (int): Number of KV heads.
         head_dim (int): Head dimension.
         block_size (int): KV block size.
         batch (int): Batch size.
-        max_num_block (int): Maximum number of blocks per request.
         enable_flash_attention (bool): Whether to use flash attention kernels.
         tile_size_of_cached_kv (int): Tile size for cached KV in flash attention.
 
@@ -2087,7 +2088,6 @@ def mla_v2(
     kv_lora_rank: int,
     block_size: int,
     batch: int,
-    max_num_blocks: int,
     scale: float,
     topk_indices: torch.Tensor,
     top_k: int = 0,
@@ -2118,7 +2118,10 @@ def mla_v2(
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
         lens (torch.Tensor): Current token lengths.
         cached_lens (torch.Tensor): Cached token lengths.
-        block_tables (torch.Tensor): Block table tensor.
+        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
+            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
+            per-request max_num_blocks is derived internally from the shape
+            (2-D: shape[1]; 1-D: len // batch).
         n_heads (int): Number of query heads.
         rope_head_dim (int): Rotary head dimension.
         nope_head_dim (int): Non-rotary head dimension.
@@ -2126,7 +2129,6 @@ def mla_v2(
         kv_lora_rank (int): KV LoRA rank.
         block_size (int): KV block size.
         batch (int): Batch size.
-        max_num_blocks (int): Maximum number of blocks per request.
         scale (float): Attention scaling factor.
         topk_indices (torch.Tensor): Top-k indices tensor for sparse attention
             (may be empty when ``top_k == 0``).
@@ -2153,7 +2155,6 @@ def gather_sparse_kv_cache(
     batch: int,
     index_topk: int,
     block_size: int,
-    max_num_blocks: int,
     kv_lora_rank: int,
     rope_head_dim: int,
     kv_heads: int = 1,
@@ -2181,7 +2182,10 @@ def gather_sparse_kv_cache(
             (kvcache_block_num, block_size, kv_heads, kv_lora_rank).
         pe_cache (torch.Tensor): Paged RoPE key cache (rope_head_dim slice),
             shape (kvcache_block_num, block_size, kv_heads, rope_head_dim).
-        block_tables (torch.Tensor): Block table, shape (batch * max_num_blocks).
+        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
+            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
+            per-request max_num_blocks is derived internally from the shape
+            (2-D: shape[1]; 1-D: len // batch).
         topk_indices (torch.Tensor): Top-k token indices from IndexerTopK, shape
             (batch, index_topk), dtype int32.
         query_lens (torch.Tensor): Per-batch current query lengths, shape
@@ -2196,7 +2200,6 @@ def gather_sparse_kv_cache(
         batch (int): Batch size.
         index_topk (int): Number of top-k tokens per batch (dense length).
         block_size (int): KV block size.
-        max_num_blocks (int): Maximum number of blocks per request.
         kv_lora_rank (int): KV LoRA rank.
         rope_head_dim (int): Rotary head dimension.
         kv_heads (int): Number of KV heads (must be 1; defaults to 1 for MLA).
@@ -2278,7 +2281,6 @@ def indexer_scores(
     head_dim: int,
     block_size: int,
     batch: int,
-    max_num_block: int,
 ) -> None:
     """Compute DSA indexer scores over cached keys.
 
@@ -2291,12 +2293,14 @@ def indexer_scores(
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
         lens (torch.Tensor): Current token lengths.
         cached_lens (torch.Tensor): Cached token lengths.
-        block_tables (torch.Tensor): Block table tensor.
+        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
+            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
+            per-request max_num_blocks is derived internally from the shape
+            (2-D: shape[1]; 1-D: len // batch).
         n_heads (int): Number of heads.
         head_dim (int): Head dimension.
         block_size (int): KV block size.
         batch (int): Batch size.
-        max_num_block (int): Maximum number of blocks per request.
 
     Returns:
         None: `scores` is written in place.
@@ -2318,7 +2322,6 @@ def indexer_topk(
     head_dim: int,
     block_size: int,
     batch: int,
-    max_num_block: int,
     top_k: int,
 ) -> None:
     """Fused DSA indexer scores + top-k selection over cached keys.
@@ -2341,12 +2344,14 @@ def indexer_topk(
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
         lens (torch.Tensor): Current token lengths.
         cached_lens (torch.Tensor): Cached token lengths.
-        block_tables (torch.Tensor): Block table tensor.
+        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
+            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
+            per-request max_num_blocks is derived internally from the shape
+            (2-D: shape[1]; 1-D: len // batch).
         n_heads (int): Number of heads.
         head_dim (int): Head dimension.
         block_size (int): KV block size (must be <= 128).
         batch (int): Batch size.
-        max_num_block (int): Maximum number of blocks per request.
         top_k (int): Number of top-k indices to select (must be <= 2048).
 
     Returns:

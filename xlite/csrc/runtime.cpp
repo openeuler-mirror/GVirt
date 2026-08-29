@@ -648,7 +648,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     std::vector<uint32_t> totalLens(batch);
     std::vector<uint32_t> slotMapping, blockTables;
     std::vector<uint64_t> position;
-    uint32_t queryStart, blockId, id, k, maxTotalLens;
+    uint32_t queryStart, blockId, id, k;
     size_t size;
 
     if (batch == 0) {
@@ -663,7 +663,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     }
 
     batchedTokens = 0;
-    maxTotalLens = 0;
+    _maxTotalLens = 0;
     _batch = batch;
     queryStart = 0;
     bool allCached = true;
@@ -674,7 +674,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         totalLens[i] = lens[i] + cachedLens[i];
         queryStartLoc[i] = queryStart;
         queryStart += lens[i];
-        maxTotalLens = totalLens[i] > maxTotalLens ? totalLens[i] : maxTotalLens;
+        _maxTotalLens = totalLens[i] > _maxTotalLens ? totalLens[i] : _maxTotalLens;
         batchedTokens += lens[i];
         numBlocks[i] = DIV_ROUND_UP(totalLens[i], blockSizes[0]);
         if (cachedLens[i] == 0) {
@@ -697,7 +697,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                  std::to_string(maxBatchedTokens) + ")");
     }
 
-    if (IsDummyRuntime() || maxTotalLens <= MAX_KV_TILE_SIZE) {
+    if (IsDummyRuntime() || _maxTotalLens <= MAX_KV_TILE_SIZE) {
         _tileSizeOfCachedKV = MAX_KV_TILE_SIZE;
     } else {
         uint32_t localHeads = std::max(nHeads / _tpSize, static_cast<uint32_t>(1));
@@ -713,7 +713,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     switch (attnMeta.version) {
         case 0:
         case 1: {
-            uint32_t maxNumBlocks = DIV_ROUND_UP(maxTotalLens, blockSizes[0]);
+            uint32_t maxNumBlocks = DIV_ROUND_UP(_maxTotalLens, blockSizes[0]);
             CHECK_ACL(aclrtMemcpyAsync(_lens.ptr, size, lens.data(), size,
                                        ACL_MEMCPY_HOST_TO_DEVICE, stream));
             CHECK_ACL(aclrtMemcpyAsync(_cachedLens.ptr, size, cachedLens.data(), size,
@@ -776,7 +776,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         case 2: {
             // Version 2: lens / cachedLens / queryStartLoc / slotMapping / blockTables are
             // pre-built on the Python side as device tensors; shape-check and alias (zero copy).
-            CheckAttnMetaV2(attnMeta, batch, batchedTokens, blockSizes, maxTotalLens);
+            CheckAttnMetaV2(attnMeta, batch, batchedTokens, blockSizes, _maxTotalLens);
 #ifdef XLITE_DEBUG_ON
             VerifyAttnMetaV2(attnMeta, blockSizes);
 #endif

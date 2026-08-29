@@ -222,7 +222,7 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
         torch.npu.synchronize()
         attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite,
                   output_xlite, query_start_loc, query_lens, cached_lens,
-                  block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, max_num_blocks, enable_flash)
+                  block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, enable_flash)
 
         logging.info(
             "attention %s (%d heads, %d kv heads, %d head dim, %s) work (%d batch, cached_lens=%s, query_lens=%s) executed!",

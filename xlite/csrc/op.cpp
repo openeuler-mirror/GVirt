@@ -907,7 +907,7 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk,
                       XTensor &output, XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
-                      uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock)
+                      uint32_t blockSize, uint32_t batch)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -922,9 +922,10 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                               XT_STR(qk) + XT_STR(output);
         throw std::runtime_error(err_str + "not supported!");
     }
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, output.ptr,
                  queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads,
-                 headDim, blockSize, batch, maxNumBlock);
+                 headDim, blockSize, batch, maxNumBlocks);
 }
 
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
@@ -932,7 +933,7 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                            XTensor &lastSum, XTensor &sync, XTensor &output, XTensor &queryStartLoc,
                            XTensor &lens, XTensor &cachedLens, XTensor &blockTables,
                            uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim, uint32_t blockSize,
-                           uint32_t batch, uint32_t maxNumBlock, uint32_t tileSizeOfCachedKV)
+                           uint32_t batch, uint32_t tileSizeOfCachedKV)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -948,21 +949,23 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                               XT_STR(qk) + XT_STR(output);
         throw std::runtime_error(err_str + "not supported!");
     }
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr,
                  sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize,
-                 batch, maxNumBlock, tileSizeOfCachedKV);
+                 batch, maxNumBlocks, tileSizeOfCachedKV);
 }
 
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
                   XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                  uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,
-                  float scale, uint32_t topK, const XTensor &topkIndices)
+                  uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
+                  uint32_t topK, const XTensor &topkIndices)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     if (topK != 0 && maxNumBlocks * blockSize > MAX_SOFTMAX_PINGPONG_LEN) {
         throw std::runtime_error(std::string(__func__) +
                                  ": topK > 0 is not supported when maxNumBlocks (" +
@@ -990,9 +993,8 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                        XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &oAbsorb,
                        XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                        XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                       uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
-                       uint32_t maxNumBlocks, float scale, uint32_t tileSizeOfCachedKV,
-                       uint32_t topK, const XTensor &topkIndices)
+                       uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
+                       uint32_t tileSizeOfCachedKV, uint32_t topK, const XTensor &topkIndices)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1006,6 +1008,7 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
         throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
                                  std::to_string(MAX_TOPK_NUM));
     }
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     if (EachXDtype(BF16, qAbsorb, qr, kCache, peCache, oAbsorb)) {
         aclrtlaunch_flash_mla_v2_bfloat16_t(
             rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
@@ -1023,8 +1026,7 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, XTensor &peCache,
                                 XTensor &blockTables, XTensor &topkIndices, XTensor &queryLens,
                                 XTensor &cachedLens, XTensor &kDenseCache, XTensor &peDenseCache,
                                 uint32_t batch, uint32_t indexTopK, uint32_t blockSize,
-                                uint32_t maxNumBlocks, uint32_t kvLoraRank, uint32_t ropeHeadDim,
-                                uint32_t kvHeads)
+                                uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t kvHeads)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1033,6 +1035,7 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, XTensor &peCache,
         throw std::runtime_error(std::string(__func__) +
                                  ": kvHeads should be less than or equal to 1");
     }
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     if (EachXDtype(BF16, kCache, peCache, kDenseCache, peDenseCache)) {
         aclrtlaunch_gather_sparse_kv_cache_bfloat16_t(
             rt.aivNum, rt.stream, kCache.ptr, peCache.ptr, blockTables.ptr, topkIndices.ptr,
@@ -1615,8 +1618,7 @@ void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs
 void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight,
                           XTensor &scores, XTensor &queryStartLoc, XTensor &lens,
                           XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,
-                          uint32_t headDim, uint32_t blockSize, uint32_t batch,
-                          uint32_t maxNumBlock)
+                          uint32_t headDim, uint32_t blockSize, uint32_t batch)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1631,9 +1633,10 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
             DBG_PREFIX + XT_STR(q) + XT_STR(kCache) + XT_STR(weight) + XT_STR(scores);
         throw std::runtime_error(err_str + "not supported!");
     }
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, scores.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, headDim, blockSize, batch,
-                 maxNumBlock);
+                 maxNumBlocks);
 }
 
 void XliteOpRepeatInterleave(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numTokens,
@@ -1666,7 +1669,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &lastTopk, XTensor &indices, XTensor &topkIndices,
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
-                        uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK)
+                        uint32_t blockSize, uint32_t batch, uint32_t topK)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1685,9 +1688,10 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                               XT_STR(scores) + XT_STR(indices) + XT_STR(topkIndices);
         throw std::runtime_error(err_str + "not supported!");
     }
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, indices.ptr,
-                 topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlock, topK);
+                 topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlocks, topK);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,
