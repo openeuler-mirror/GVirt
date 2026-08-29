@@ -589,7 +589,7 @@ def generate_offline_report(
 
     current_date = "unknown"
     if report_dir:
-        match = re.search(r"xlite-[\w.]+-(\d{8})", str(report_dir))
+        match = re.search(r"xlite-[\w.\+]+-(\d{8})$", str(report_dir))
         if match:
             current_date = match.group(1)
 
@@ -976,7 +976,7 @@ def generate_model_report(
     # 获取当前测试日期（从report_dir中提取）
     current_date = "unknown"
     if report_dir:
-        match = re.search(r"xlite-[\w.]+-(\d{8})", str(report_dir))
+        match = re.search(r"xlite-[\w.\+]+-(\d{8})$", str(report_dir))
         if match:
             current_date = match.group(1)
 
@@ -1138,7 +1138,7 @@ def build_no_change_report(
     # 获取当前测试日期（从report_dir中提取）
     current_date = "unknown"
     if report_dir:
-        match = re.search(r"xlite-[\w.]+-(\d{8})", str(report_dir))
+        match = re.search(r"xlite-[\w.\+]+-(\d{8})$", str(report_dir))
         if match:
             current_date = match.group(1)
 
@@ -1242,19 +1242,13 @@ def get_baseline_info() -> Dict:
         {
             "version": "版本号",
             "date": "日期",
-            "commit": "commit号",
             "vllm_ascend_version": "vllm-ascend版本号"
         }
     """
     baseline_version = get_last_release_tag()
     baseline_version_dir = REPORT_DIR / f"xlite-{baseline_version}"
 
-    baseline_info = {
-        "version": baseline_version,
-        "date": "unknown",
-        "commit": "unknown",
-        "vllm_ascend_version": "unknown",
-    }
+    baseline_info = {"version": baseline_version, "date": "unknown", "vllm_ascend_version": "unknown"}
 
     if not baseline_version_dir.exists():
         return baseline_info
@@ -1274,9 +1268,6 @@ def get_baseline_info() -> Dict:
     if summary_file.exists():
         try:
             content = summary_file.read_text(encoding="utf-8")
-            match = re.search(r"xlite commit:\s*(\S+)", content)
-            if match:
-                baseline_info["commit"] = match.group(1)
             match = re.search(r"vllm-ascend 版本:\s*(\S+)", content)
             if match:
                 baseline_info["vllm_ascend_version"] = match.group(1)

@@ -453,7 +453,7 @@ def build_project(report_dir: Path) -> Tuple[bool, Optional[Path]]:
         container_wheel_path = f"{build_dir}/dist/{wheel_name}"
 
         # 复制 wheel 包到本地
-        local_wheel_path = report_dir / "wheels" / wheel_name
+        local_wheel_path = Path(report_dir) / "wheels" / wheel_name
         if not copy_from_container(BUILD_CONTAINER, container_wheel_path, local_wheel_path):
             log_error("复制 wheel 包失败")
             return False, None
