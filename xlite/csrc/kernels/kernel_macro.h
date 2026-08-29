@@ -64,6 +64,10 @@ using namespace AscendC;
 #define MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET 12
 #define BYTE_BITS 8
 
+#define MBLOCKSIZE 16
+#define NBLOCKSIZE 16
+#define ASCEND_L0_BYTES (64 * 1024)
+
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst,
                                             uint16_t srcGap, uint16_t dstGap)
@@ -853,5 +857,41 @@ __aicore__ inline void convert_output(__ubuf__ Dtype *dst, __ubuf__ float *src, 
 }
 
 #endif
+
+// Cube M0 by context length; long-context values leave 4 rows for
+// RunAivSoftmaxLong's exp buffer. Shared across attention/mla_v2/mla_v3.
+#define SEQLEN_64 64
+#define SEQLEN_12K 12288
+#define SEQLEN_20K 20480
+#define SEQLEN_24K 24576
+#define SEQLEN_30K 30720
+#define SEQLEN_48K 49152
+#define SEQLEN_60K 61440
+#define SEQLEN_96K 98304
+inline __aicore__ uint32_t GetOptimalM0(int queryLen, int cachedLen)
+{
+    if (queryLen <= SEQLEN_64) {
+        return 16;
+    } else {
+        int totalLen = queryLen + cachedLen;
+        if (totalLen <= SEQLEN_12K) {
+            return 128;
+        } else if (totalLen <= SEQLEN_20K) {
+            return 112;
+        } else if (totalLen <= SEQLEN_24K) {
+            return 96;
+        } else if (totalLen <= SEQLEN_30K) {
+            return 80;
+        } else if (totalLen <= SEQLEN_48K) {
+            return 64;
+        } else if (totalLen <= SEQLEN_60K) {
+            return 48;
+        } else if (totalLen <= SEQLEN_96K) {
+            return 32;
+        } else {
+            return 16;
+        }
+    }
+}
 
 #endif
