@@ -10,24 +10,37 @@
 #define XLITE_CONCAT_SPLIT_MAX_INPUTS 8
 #endif
 
+// Unified concat kernel (the mirror of split_kernel): inputs are nInputs
+// tensors each [numPackets, sizes[i]] (row-major, sizes[i] = per-row bytes),
+// out is [numPackets, totalSize] with totalSize = sum(sizes). For each output
+// row (packet) pkt and input i: out[pkt, inOff[i] : inOff[i]+sizes[i]] =
+// inputs[i][pkt, :]. We walk the flat output range and, per sub-segment,
+// decompose the output offset into (pkt, inPkt), find the covering input, and
+// read that input's strided row bytes.
+//
+// Flat concat is the degenerate numPackets=1 case: pkt is always 0 and
+// totalBytes == totalSize, so the source offset reduces to the flat inOff.
+// The plain `concat` entry below just forwards numPackets=1. Single kernel
+// launch replaces the per-row memcpy storm in XliteOpConcatCol.
 __aicore__ inline void concat_kernel(GM_ADDR out, GM_ADDR in0, GM_ADDR in1, GM_ADDR in2,
                                      GM_ADDR in3, GM_ADDR in4, GM_ADDR in5, GM_ADDR in6,
                                      GM_ADDR in7, uint64_t s0, uint64_t s1, uint64_t s2,
                                      uint64_t s3, uint64_t s4, uint64_t s5, uint64_t s6,
-                                     uint64_t s7, uint32_t nInputs, uint64_t totalBytes)
+                                     uint64_t s7, uint32_t nInputs, uint32_t numPackets,
+                                     uint64_t totalSize)
 {
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    if (totalBytes == 0 || nInputs == 0) {
+    if (nInputs == 0 || numPackets == 0 || totalSize == 0) {
         return;
     }
 
     GM_ADDR inputs[XLITE_CONCAT_SPLIT_MAX_INPUTS] = {in0, in1, in2, in3, in4, in5, in6, in7};
     uint64_t sizes[XLITE_CONCAT_SPLIT_MAX_INPUTS] = {s0, s1, s2, s3, s4, s5, s6, s7};
 
-    // running offset at which each input starts in the output
+    // running in-row (column) offset at which each input starts in an output row
     uint64_t inOff[XLITE_CONCAT_SPLIT_MAX_INPUTS] = {0};
     for (uint32_t i = 1; i < nInputs; i++) {
         inOff[i] = inOff[i - 1] + sizes[i - 1];
@@ -46,6 +59,8 @@ __aicore__ inline void concat_kernel(GM_ADDR out, GM_ADDR in0, GM_ADDR in1, GM_A
     };
     uint32_t segBufSize = halfBuf;  // max bytes per sub-segment
 
+    uint64_t totalBytes = (uint64_t)numPackets * totalSize;
+
     // Seed both MTE3->MTE2 flags so the first wait of each buffer can consume.
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
@@ -56,7 +71,7 @@ __aicore__ inline void concat_kernel(GM_ADDR out, GM_ADDR in0, GM_ADDR in1, GM_A
     // is written out from dataBuf[(i-1)%2] concurrently.
     uint32_t curr = 0;
     bool hasPending = false;
-    uint64_t pendDstOff = 0;  // output offset of the sub-segment awaiting write
+    uint64_t pendDstOff = 0;  // flat output offset of the sub-segment awaiting write
     uint32_t pendSize = 0;
 
     for (uint64_t bo = (uint64_t)block_idx * segBufSize; bo < totalBytes;
@@ -68,15 +83,19 @@ __aicore__ inline void concat_kernel(GM_ADDR out, GM_ADDR in0, GM_ADDR in1, GM_A
         // writing out the previous buffered sub-segment between reads.
         uint64_t segDstOff = bo;
         while (remain > 0) {
+            uint32_t pkt = (uint32_t)(segDstOff / totalSize);
+            uint64_t inPkt = segDstOff % totalSize;
+            // find the input whose column range covers inPkt
             uint32_t idx = 0;
-            while (idx + 1 < nInputs && segDstOff >= inOff[idx + 1]) {
+            while (idx + 1 < nInputs && inPkt >= inOff[idx + 1]) {
                 idx++;
             }
-            uint64_t localOff = segDstOff - inOff[idx];
+            uint64_t localOff = inPkt - inOff[idx];
+            // avail stays within this packet row because inOff[idx]+sizes[idx] <= totalSize
             uint64_t avail = sizes[idx] - localOff;
             uint32_t take = (remain < avail) ? remain : (uint32_t)avail;
             if (take > segBufSize) {
-                take = segBufSize;  // cap to UB half (single input exceeds it)
+                take = segBufSize;
             }
 
             // Write out the previous buffered sub-segment from dataBuf[1-curr]
@@ -88,9 +107,11 @@ __aicore__ inline void concat_kernel(GM_ADDR out, GM_ADDR in0, GM_ADDR in1, GM_A
                 set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + wbuf);
             }
 
-            // Read this sub-segment into dataBuf[curr] at offset 0.
+            // Read this sub-segment from the strided input row into dataBuf[curr].
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + curr);
-            CopyGmToUbufAligned(dataBuf[curr], (__gm__ uint8_t *)inputs[idx] + localOff, take);
+            CopyGmToUbufAligned(
+                dataBuf[curr],
+                (__gm__ uint8_t *)inputs[idx] + (uint64_t)pkt * sizes[idx] + localOff, take);
             set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0 + curr);
 
             pendDstOff = segDstOff;
@@ -123,7 +144,21 @@ extern "C" __global__ __aicore__ void concat(GM_ADDR out, GM_ADDR in0, GM_ADDR i
                                              uint64_t s7, uint32_t nInputs, uint64_t totalBytes)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
+    // Flat concat: a single packet covering totalBytes (pkt is always 0, so
+    // the per-packet decomposition degenerates to flat inOff addressing).
     concat_kernel(out, in0, in1, in2, in3, in4, in5, in6, in7, s0, s1, s2, s3, s4, s5, s6, s7,
-                  nInputs, totalBytes);
+                  nInputs, 1, totalBytes);
+}
+
+extern "C" __global__ __aicore__ void concat_col(GM_ADDR out, GM_ADDR in0, GM_ADDR in1, GM_ADDR in2,
+                                                 GM_ADDR in3, GM_ADDR in4, GM_ADDR in5, GM_ADDR in6,
+                                                 GM_ADDR in7, uint64_t s0, uint64_t s1, uint64_t s2,
+                                                 uint64_t s3, uint64_t s4, uint64_t s5, uint64_t s6,
+                                                 uint64_t s7, uint32_t nInputs, uint32_t numPackets,
+                                                 uint64_t totalSize)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
+    concat_kernel(out, in0, in1, in2, in3, in4, in5, in6, in7, s0, s1, s2, s3, s4, s5, s6, s7,
+                  nInputs, numPackets, totalSize);
 }
 #endif

@@ -1531,12 +1531,45 @@ void XliteOpConcatCol(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor 
     size_t times =
         std::accumulate(inputs[0].shape.begin(), inputs[0].shape.end() - 1, 1, std::multiplies());
 
+    // The kernel/memcpy paths index every input as [times, lastDim] and the
+    // output as [times, totalLastDim]; mismatched shapes or dtypes would be
+    // silent memory corruption, so validate up front.
     size_t totalLastDim = 0;
     for (const auto &tensor : inputs) {
+        size_t t =
+            std::accumulate(tensor.shape.begin(), tensor.shape.end() - 1, 1, std::multiplies());
+        if (t != times || tensor.dtype != inputs[0].dtype) {
+            throw std::runtime_error("XliteOpConcatCol: inputs must share dtype and leading dims");
+        }
         totalLastDim += tensor.shape.back();
+    }
+    size_t outTimes = std::accumulate(out.shape.begin(), out.shape.end() - 1, 1, std::multiplies());
+    if (outTimes != times || out.shape.back() != totalLastDim) {
+        throw std::runtime_error("XliteOpConcatCol: out must be [times, sum(inputs last dim)]");
     }
     size_t elemSize = XDtypeBit(inputs[0].dtype) / 8;
     size_t outRowStride = totalLastDim * elemSize;
+
+    constexpr uint32_t maxInputs = 8;
+    // Column concat == concat_col kernel: out is [times, outRowStride]; each row
+    // gathers per-input column chunks (sizes[i] = inputs[i] row bytes) from the
+    // strided inputs. Single kernel launch replaces the per-row memcpy storm.
+    if (inputs.size() <= maxInputs && times > 0) {
+        void *ptrs[maxInputs] = {nullptr};
+        uint64_t s[maxInputs] = {0};
+        for (uint32_t i = 0; i < inputs.size(); i++) {
+            ptrs[i] = inputs[i].ptr;
+            s[i] = static_cast<uint64_t>(inputs[i].shape.back()) * elemSize;
+        }
+        uint32_t numBlocks = CopyKernelBlockNum(rt, static_cast<uint64_t>(times) * outRowStride);
+        aclrtlaunch_concat_col(numBlocks, rt.stream, out.ptr, ptrs[0], ptrs[1], ptrs[2], ptrs[3],
+                               ptrs[4], ptrs[5], ptrs[6], ptrs[7], s[0], s[1], s[2], s[3], s[4],
+                               s[5], s[6], s[7], static_cast<uint32_t>(inputs.size()),
+                               static_cast<uint32_t>(times), static_cast<uint64_t>(outRowStride));
+        return;
+    }
+
+    // Fallback for the rare > maxInputs case: per-row memcpy.
     for (size_t h = 0; h < times; ++h) {
         size_t dstOffset = h * outRowStride;
         for (const auto &tensor : inputs) {
@@ -1556,6 +1589,44 @@ void XliteOpSplitCol(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outp
     }
     size_t height = std::accumulate(in.shape.begin(), in.shape.end() - 1, 1, std::multiplies());
     size_t elemSize = XDtypeBit(in.dtype) / 8;
+
+    // The kernel/memcpy paths index every output as [height, lastDim] and the
+    // input as [height, sum(lastDim)]; validate before any device access.
+    size_t sumLastDim = 0;
+    for (const auto &o : outputs) {
+        size_t h = std::accumulate(o.shape.begin(), o.shape.end() - 1, 1, std::multiplies());
+        if (h != height || o.dtype != in.dtype) {
+            throw std::runtime_error("XliteOpSplitCol: outputs must share dtype and leading dims");
+        }
+        sumLastDim += o.shape.back();
+    }
+    if (sumLastDim != in.shape.back()) {
+        throw std::runtime_error("XliteOpSplitCol: sum(outputs last dim) != in last dim");
+    }
+
+    constexpr uint32_t maxOutputs = 8;
+    // Column split == split kernel with numPackets=height: each row (packet) of
+    // totalSize bytes is cut into per-output column chunks of sizes[i] bytes.
+    // Single kernel launch replaces the per-row memcpy storm (and its many
+    // tiny async copy-engine tasks).
+    if (outputs.size() <= maxOutputs && height > 0) {
+        void *ptrs[maxOutputs] = {nullptr};
+        uint64_t s[maxOutputs] = {0};
+        uint64_t totalSize = 0;
+        for (uint32_t i = 0; i < outputs.size(); i++) {
+            ptrs[i] = outputs[i].ptr;
+            s[i] = static_cast<uint64_t>(outputs[i].shape.back()) * elemSize;
+            totalSize += s[i];
+        }
+        uint32_t numBlocks = CopyKernelBlockNum(rt, static_cast<uint64_t>(height) * totalSize);
+        aclrtlaunch_split(numBlocks, rt.stream, in.ptr, ptrs[0], ptrs[1], ptrs[2], ptrs[3], ptrs[4],
+                          ptrs[5], ptrs[6], ptrs[7], s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+                          static_cast<uint32_t>(outputs.size()), static_cast<uint32_t>(height),
+                          totalSize);
+        return;
+    }
+
+    // Fallback for the rare > maxOutputs case: per-row memcpy.
     for (size_t h = 0; h < height; ++h) {
         size_t srcOffset = h * in.shape.back() * elemSize;
         for (auto cur : outputs) {
