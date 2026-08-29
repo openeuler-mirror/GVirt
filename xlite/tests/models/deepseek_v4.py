@@ -49,6 +49,7 @@ if forward_backend == "xlite":
         AttnCxA,
         Model,
         ScoringFuncSoftmax,
+        ScoringFuncSqrtsoftplus,
     )
     import numpy as np
     from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
@@ -1066,10 +1067,7 @@ class Transformer(nn.Module):
         config.swiglu_limit = args.swiglu_limit
         config.n_hash_layers = args.n_hash_layers
         config.compress_ratios = list(args.compress_ratios)
-        # MoE scoring: v4 uses sqrtsoftplus, which is not yet wired into xlite's
-        # ScoringFuncType enum. Use softmax as placeholder; the C++ forward is not
-        # implemented yet so this only affects init-time validation.
-        config.scoring_func = ScoringFuncSoftmax
+        config.scoring_func = ScoringFuncSqrtsoftplus
         config.norm_topk_prob = True
         config.index_head_dim = args.index_head_dim
         config.index_n_heads = args.index_n_heads
@@ -1205,6 +1203,10 @@ class Transformer(nn.Module):
         self.xlite_model.gate_bias = [
             layer.ffn.gate.bias if layer.ffn.gate.bias is not None else torch.empty(0)
             for layer in self.layers
+        ]
+        self.xlite_model.tid2eid = [
+            layer.ffn.gate.tid2eid
+            for layer in self.layers if layer.ffn.gate.hash
         ]
         # v4 shared/routed experts are SwiGLU FFNs with merged w13 (gate+up)
         # and w2 (down). se_up_gate/re_up_gate hold the merged w13 weight,

@@ -16,6 +16,7 @@ enum XModelRopeType {
 enum XModelScoringFuncType {
     XMODEL_SCORING_FUNC_SOFTMAX,
     XMODEL_SCORING_FUNC_SIGMOID,
+    XMODEL_SCORING_FUNC_SQRTSOFTPLUS,
     XMODEL_SCORING_FUNC_MAX_TYPE,
 };
 
@@ -151,7 +152,7 @@ public:
     void ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                                  std::vector<std::vector<XTensor>> &kvCache,
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
-                                 XTensor &output);
+                                 XTensor &inputIds, XTensor &output);
     size_t GetTensorPoolSize(int dbg);
     // whether to use communication optimization
     void ConfigRtCommOptimize(XRuntime &rt, size_t tokenNum)
@@ -214,6 +215,7 @@ public:
 
     std::vector<XTensor> moeGate;
     std::vector<XTensor> moeGateBias;
+    std::vector<XTensor> moeTid2Eid;
     std::vector<MatmulWeight> moeSEUpGate;
     std::vector<MatmulWeight> moeSEDown;
     std::vector<XTensor> moeSEGate;
@@ -338,6 +340,7 @@ private:
 
     // FFN
     XTensor _gateIndices;
+    XTensor _inputIds;
     std::vector<XTensor> _moeREUpGate;
     std::vector<XTensor> _moeREUpGateDeqScale;
     std::vector<XTensor> _moeREDown;

@@ -1264,6 +1264,36 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
                  normTopKProb);
 }
 
+void XliteOpSqrtsoftplusHashTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias,
+                                 XTensor &inputIds, const XTensor &tid2eid, XTensor &outWeights,
+                                 XTensor &routingMap, float scale, uint32_t topK, bool hash)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    // dtype dispatch mirrors sigmoid_topk/softmax_topk: TWO outputs (sparse [M,N] weights + [M,N]
+    // BIT1 routing bitmap); no dense indices output.
+    KERNEL_PTR_TYPE(sqrtsoftplus_hash_topk) * launchKernel;
+    if (scores.dtype == FP32 && indices.dtype == INT32 && outWeights.dtype == FP32 &&
+        routingMap.dtype == BIT1) {
+        launchKernel = aclrtlaunch_sqrtsoftplus_hash_topk_float;
+    } else if (scores.dtype == BF16 && indices.dtype == INT32 && outWeights.dtype == BF16 &&
+               routingMap.dtype == BIT1) {
+        launchKernel = aclrtlaunch_sqrtsoftplus_hash_topk_bfloat16_t;
+    } else {
+        std::string err_str =
+            DBG_PREFIX + XT_STR(scores) + XT_STR(indices) + XT_STR(outWeights) + XT_STR(routingMap);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+    // hash path gathers from pre-bias scores, so bias is dead work; pass null and the device
+    // kernel gates the bias add + DMA on `biasGm != nullptr`. Non-hash needs the real bias.
+    void *biasPtr = hash ? nullptr : bias.ptr;
+    void *tid2eidPtr = hash ? tid2eid.ptr : nullptr;
+    launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, biasPtr, inputIds.ptr, tid2eidPtr,
+                 outWeights.ptr, routingMap.ptr, scale, scores.shape[0], indices.shape[0], topK,
+                 hash ? 1 : 0);
+}
+
 void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIndices,
                  XTensor &queryLens, XTensor &cachedLens, uint32_t batch, size_t k)
 {
