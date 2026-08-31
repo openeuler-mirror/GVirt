@@ -56,11 +56,13 @@ public:
     void ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                                    std::vector<std::vector<at::Tensor>> &kvCache,
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
-                                   std::vector<at::Tensor> &deepstackInput, at::Tensor &inputIds);
+                                   std::vector<at::Tensor> &deepstackInput,
+                                   const std::optional<at::Tensor> &inputIds);
     void ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnMeta,
                                    std::vector<std::vector<at::Tensor>> &kvCache,
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
-                                   std::vector<at::Tensor> &deepstackInput, at::Tensor &inputIds);
+                                   std::vector<at::Tensor> &deepstackInput,
+                                   const std::optional<at::Tensor> &inputIds);
     size_t GetTensorPoolSize(int dbg);
 
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
@@ -907,7 +909,7 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
                                         at::Tensor &freqsCis, at::Tensor &output,
                                         uint64_t currStream,
                                         std::vector<at::Tensor> &deepstackInput,
-                                        at::Tensor &inputIds)
+                                        const std::optional<at::Tensor> &inputIds)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 2;
@@ -926,8 +928,9 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
     for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
         InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i]);
     }
+    at::Tensor ids = inputIds.value_or(at::Tensor());
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
-                            deepstackInput, inputIds);
+                            deepstackInput, ids);
 }
 
 void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indices,
@@ -1051,7 +1054,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     InitXTensor(_input, input);
     InitXTensor(_output, output);
     InitXTensor(_freqsCis, freqsCis);
-    InitXTensor(_inputIds, inputIds);
+    InitOptionalXTensor(_inputIds, inputIds);
 
     if (kvCache.size() != _kv.size()) {
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
@@ -1118,7 +1121,7 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
                                         at::Tensor &freqsCis, at::Tensor &output,
                                         uint64_t currStream,
                                         std::vector<at::Tensor> &deepstackInput,
-                                        at::Tensor &inputIds)
+                                        const std::optional<at::Tensor> &inputIds)
 {
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 1;
@@ -1127,8 +1130,9 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.position, attnMeta.positions);
+    at::Tensor ids = inputIds.value_or(at::Tensor());
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
-                            deepstackInput, inputIds);
+                            deepstackInput, ids);
 }
 
 size_t _CModel::GetTensorPoolSize(int dbg)
@@ -2617,7 +2621,7 @@ PYBIND11_MODULE(_C, m)
              "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
-             py::arg("input_ids"), py::call_guard<py::gil_scoped_release>())
+             py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
         .def("forward_v2", &_CModel::ForwardV2, "forward_v2", py::arg("rt"), py::arg("input"),
              py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
@@ -2629,7 +2633,7 @@ PYBIND11_MODULE(_C, m)
              "forward_with_inputs_embeds_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
-             py::arg("input_ids"), py::call_guard<py::gil_scoped_release>())
+             py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
         .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize, "get_tensor_pool_size",
              py::arg("dbg") = 0);
 
