@@ -1083,6 +1083,11 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
         bool isHash = moELayer < _c.nHashLayers;
         const XTensor &tid2eid = isHash ? moeTid2Eid[moELayer] : XTensor();
         XTensor *inputIds = &_inputIds;
+        if (!rt.IsDummyRuntime() && isHash && (_inputIds.ptr == nullptr || _inputIds.numel == 0)) {
+            throw std::runtime_error(
+                std::string(__func__) + ": hash-gated MoE layer " + std::to_string(layer) +
+                " requires input_ids (token ids); pass them to forward_with_inputs_embeds[/_v2]");
+        }
         if (M > m) {
             XTensor &inputIdsPad = rt.GetTensor({M}, INT32, DBG_LOC);
             void *padPtr = static_cast<uint8_t *>(inputIdsPad.ptr) + m * sizeof(uint32_t);
@@ -1772,7 +1777,7 @@ void XModel::ForwardHcPost(XRuntime &rt, XTensor &input, XTensor &post, XTensor 
 void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<XTensor>> &kvCache,
                               std::vector<XTensor> &freqsCis, XTensor &output)
 {
-    XTensor &residual = rt.GetTensor({x.shape[0], _c.hcMult, _c.hiddenSize}, embed.dtype, DBG_LOC);
+    XTensor &residual = rt.GetTensor({x.shape[0], _c.hcMult * _c.hiddenSize}, embed.dtype, DBG_LOC);
     XTensor &h =
         rt.GetTensor({rt.maxTokensDp, _c.hiddenSize}, embed.dtype, DBG_LOC).View(rt.currTokens);
     XTensor &post = rt.GetTensor({x.shape[0], _c.hcMult}, FP32, DBG_LOC);
@@ -1874,7 +1879,9 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
     output.View(rt.currTokens);
 
     ConfigRtCommOptimize(rt, rt.currTokens);
-    _inputIds.Init(inputIds.shape, inputIds.dtype, inputIds.ptr);
+    if (inputIds.ptr != nullptr && inputIds.numel != 0) {
+        _inputIds.Init(inputIds.shape, inputIds.dtype, inputIds.ptr);
+    }
     if (rt.enableCommOptimize) {
         size_t mPad = ROUND_UP(input.shape[0], _c.defTpSize);
         XTensor *xPadPtr, xPad;

@@ -903,7 +903,7 @@ class Model:
         output: torch.Tensor,
         curr_stream: int = 0,
         deepstack_input: Sequence[torch.Tensor] = ...,
-        input_ids: torch.Tensor = ...,
+        input_ids: Optional[torch.Tensor] = None,
     ) -> None:
         """Run forward pass with deepstack input embeddings (host metadata).
 
@@ -915,9 +915,10 @@ class Model:
             freqs_cis (torch.Tensor): Rotary frequency tensor.
             output (torch.Tensor): Output hidden-state buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
-            deepstack_input (Sequence[torch.Tensor]): Extra deepstack embeddings.
-            input_ids (torch.Tensor): Token ids for the sqrtsoftplus MoE hash-gate path
-                (tid2eid[input_ids]); required only when scoring_func is sqrtsoftplus.
+            deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings.
+            input_ids (Optional[torch.Tensor], default None): Token ids for the sqrtsoftplus MoE
+                hash-gate path (tid2eid[input_ids]); required only when scoring_func is
+                sqrtsoftplus, otherwise may be left unset (defaults to None).
 
         Returns:
             None: Output is written in place.
@@ -998,7 +999,7 @@ class Model:
         output: torch.Tensor,
         curr_stream: int = 0,
         deepstack_input: Sequence[torch.Tensor] = ...,
-        input_ids: torch.Tensor = ...,
+        input_ids: Optional[torch.Tensor] = None,
     ) -> None:
         """Run forward pass with deepstack input embeddings (device metadata, V2).
 
@@ -1010,9 +1011,10 @@ class Model:
             freqs_cis (torch.Tensor): Rotary frequency tensor.
             output (torch.Tensor): Output hidden-state buffer.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
-            deepstack_input (Sequence[torch.Tensor]): Extra deepstack embeddings.
-            input_ids (torch.Tensor): Token ids for the sqrtsoftplus MoE hash-gate path
-                (tid2eid[input_ids]); required only when scoring_func is sqrtsoftplus.
+            deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings.
+            input_ids (Optional[torch.Tensor], default None): Token ids for the sqrtsoftplus MoE
+                hash-gate path (tid2eid[input_ids]); required only when scoring_func is
+                sqrtsoftplus, otherwise may be left unset (defaults to None).
 
         Returns:
             None: Output is written in place.
