@@ -16,7 +16,7 @@
 // Workloads》 [ASPLOS 2026]
 template <typename SrcType, typename CalType>
 __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t num_tokens,
-                             uint32_t dim)
+                             uint32_t dim, float swiglu_limit = 0.0f)
 {
     set_atomic_none();
     set_mask_norm();
@@ -110,6 +110,16 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t
         set_flag(PIPE_MTE2, PIPE_V, event_id);
         wait_flag(PIPE_MTE2, PIPE_V, event_id);
 
+        // SwiGLU clamp: up = clamp(up, -L, L), gate = clamp(gate, max=L).
+        // x_ubuf = gate, y_ubuf = up.
+        if (swiglu_limit > 0.0f) {
+            vmins(x_ubuf, x_ubuf, (CalType)swiglu_limit, vector_config2ops);
+            vmins(y_ubuf, y_ubuf, (CalType)swiglu_limit, vector_config2ops);
+            pipe_barrier(PIPE_V);
+            vmaxs(y_ubuf, y_ubuf, (CalType)(-swiglu_limit), vector_config2ops);
+            pipe_barrier(PIPE_V);
+        }
+
         // -x
         vmuls(cal_ubuf, x_ubuf, (CalType)-1.0, vector_config2ops);
         pipe_barrier(PIPE_V);
@@ -144,17 +154,19 @@ __aicore__ void silu_and_mul(GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t
     pipe_barrier(PIPE_ALL);
 }
 
-#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                  \
-    extern "C" __global__ __aicore__ void silu_and_mul_##dtype(                     \
-        GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t n_tokens, uint32_t dim) \
-    {                                                                               \
-        silu_and_mul<dtype, cast_type>(x, y, pnum_tokens, n_tokens, dim);           \
+#define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                      \
+    extern "C" __global__ __aicore__ void silu_and_mul_##dtype(                         \
+        GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t n_tokens, uint32_t dim,     \
+        float swiglu_limit)                                                             \
+    {                                                                                   \
+        silu_and_mul<dtype, cast_type>(x, y, pnum_tokens, n_tokens, dim, swiglu_limit); \
     }
 
 #else
 #define SILU_AND_MUL_FUNC_DEFINE(dtype, cast_type)                                  \
     extern "C" __global__ __aicore__ void silu_and_mul_##dtype(                     \
-        GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t n_tokens, uint32_t dim) \
+        GM_ADDR x, GM_ADDR y, GM_ADDR pnum_tokens, uint32_t n_tokens, uint32_t dim, \
+        float swiglu_limit)                                                         \
     {                                                                               \
     }
 #endif

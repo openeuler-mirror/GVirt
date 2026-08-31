@@ -1048,7 +1048,7 @@ void XModel::ForwardMLP(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
     XTensor &h2 = rt.GetTensor({m, localIntermediateSize}, hiddenState.dtype, DBG_LOC);
 
     ForwardLinear(rt, layer, hiddenState, upGate, h13);
-    XliteOpSiluAndMul(rt, h13, h2);
+    XliteOpSiluAndMul(rt, h13, h2, XTensor(), _c.swigluLimit);
     ForwardLinear(rt, layer, h2, down, hiddenState);
 
     if (withAllReduce && _c.defTpSize > 1) {
@@ -1540,7 +1540,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
     XTensor &h2 =
         rt.GetTensor({expertsSorted.shape[0], intermediateSize}, hiddenState.dtype, DBG_LOC);
-    XliteOpSiluAndMul(rt, *h13Ptr, h2, num);
+    XliteOpSiluAndMul(rt, *h13Ptr, h2, num, _c.swigluLimit);
     rt.PutTensor(*h13Ptr);
 
     XTensor *outPtr;

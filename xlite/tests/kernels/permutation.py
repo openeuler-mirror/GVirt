@@ -37,18 +37,21 @@ for n_routed_experts in [160, 256]:
             scores = scores.view(x.size(0), N_GROUPS, -1)
             group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1)
             indices = group_scores.topk(TOPK_GROUPS, dim=-1)[1]
-            mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True)
+            mask = torch.zeros(x.size(0), N_GROUPS, dtype=torch.bool, device=x.device).scatter_(1, indices, True)
             scores = (scores * mask.unsqueeze(-1)).flatten(1)
         indices = torch.topk(scores, TOPK, dim=-1)[1]
         counts = torch.bincount(indices.flatten(), minlength=n_routed_experts)
 
         weights = torch.randn(BATCH_SIZE, n_routed_experts, dtype=dtype, device="npu:0")
-        standard_token_sorted = torch.zeros_like(x)
+        # fp32 accumulator + single final bf16 cast: matches the kernel, avoids
+        # per-step bf16 rounding that would skew the reference.
+        standard_token_sorted = torch.zeros(BATCH_SIZE, DIM, dtype=torch.float32, device="npu:0")
         for i in range(START, END):
             if counts[i] == 0:
                 continue
             idx, top = torch.where(indices == i)
-            standard_token_sorted[idx] += x[idx] * weights[idx, i].unsqueeze(-1)
+            standard_token_sorted[idx] += x[idx].float() * weights[idx, i].unsqueeze(-1).float()
+        standard_token_sorted = standard_token_sorted.to(dtype)
 
         # xlite
         unp_idx = torch.empty(n_routed_experts, BATCH_SIZE + 1, dtype=torch.int32, device="npu:0")
@@ -80,7 +83,7 @@ for n_routed_experts in [160, 256]:
         if dtype == torch.float:
             continue
 
-        token_sorted = torch.zeros_like(x)
+        token_sorted = torch.zeros(BATCH_SIZE, DIM, dtype=dtype, device=x.device)
         torch.npu.synchronize()
         unpermutation(rt, experts_sorted, routing_xlite, weights, START, END, token_sorted, unp_idx)
         torch.npu.synchronize()

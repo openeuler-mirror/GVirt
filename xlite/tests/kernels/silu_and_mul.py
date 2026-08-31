@@ -32,7 +32,7 @@ for dtype, atol, rtol in supported_dtype_list:
         silu_and_mul(rt, input, output)
         torch.npu.synchronize()
 
-        print(f'silu and mul {dtype} executed!')
+        print(f'silu and mul {dtype} dim={dim} executed!')
 
         try:
             torch.testing.assert_close(standard, output, atol=atol, rtol=rtol)
@@ -40,3 +40,34 @@ for dtype, atol, rtol in supported_dtype_list:
             print(f'{e}')
             print(f'torch_npu: {standard}')
             print(f'xlite: {output}')
+
+        # SwiGLU limit clamp path: up = clamp(up, -L, L), gate = clamp(gate, max=L).
+        # Output magnitude scales ~ L*L (silu(L)*up ≈ L*L for large L), so the small
+        # atol/rtol used above (tuned for unit-magnitude randn) is far too tight for
+        # the clamped path. Use scale-appropriate tolerances: a few ULPs of the output
+        # dtype at the clamped magnitude.
+        clamp_atol = {torch.float: 2e-5, torch.float16: 2e-5, torch.bfloat16: 2e-2}[dtype]
+        clamp_rtol = {torch.float: 2e-3, torch.float16: 2e-3, torch.bfloat16: 2e-4}[dtype]
+        for swiglu_limit in [2.0, 10.0]:
+            input = torch.randn(41, dim * 2, dtype=dtype, device="npu:0") * 20.0
+            output = torch.empty(41, dim, dtype=dtype, device="npu:0")
+
+            d = input.shape[-1] // 2
+            gate = input[..., :d]
+            up = input[..., d:]
+            up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
+            gate = torch.clamp(gate, max=swiglu_limit)
+            standard = torch.nn.functional.silu(gate) * up
+
+            torch.npu.synchronize()
+            silu_and_mul(rt, input, output, swiglu_limit=swiglu_limit)
+            torch.npu.synchronize()
+
+            print(f'silu and mul {dtype} swiglu_limit={swiglu_limit} dim={dim} executed!')
+
+            try:
+                torch.testing.assert_close(standard, output, atol=clamp_atol, rtol=clamp_rtol)
+            except AssertionError as e:
+                print(f'{e}')
+                print(f'torch_npu: {standard}')
+                print(f'xlite: {output}')
