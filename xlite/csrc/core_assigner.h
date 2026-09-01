@@ -5,6 +5,8 @@
 #ifndef _XLITE_CORE_ASSIGNER_H
 #define _XLITE_CORE_ASSIGNER_H
 
+#include <cmath>
+#include <cstdlib>
 #include <condition_variable>
 
 const float XLITE_MAX_CORE_RATIO = 1.0f;
