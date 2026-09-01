@@ -29,15 +29,36 @@ def get_open_prs():
         return []
 
 def get_pr_comments(pr_number):
+    """Fetch all comments of a PR, handling pagination.
+
+    GitCode API defaults to a small page size and only returns the first
+    page (the earliest comments) unless we explicitly paginate. Without
+    pagination, once a PR accumulates more comments than the default page
+    size, has_ci_bot_comment() can only see the oldest comments and will
+    never find a CI bot comment newer than the latest commit.
+    """
     url = f"{GITCODE_API_BASE}/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{pr_number}/comments"
     headers = {"Authorization": f"Bearer {TOKEN}"}
+    all_comments = []
+    page = 1
+    per_page = 50
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json()
+        while True:
+            params = {"page": page, "per_page": per_page}
+            response = requests.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            batch = response.json()
+            if not isinstance(batch, list) or len(batch) == 0:
+                break
+            all_comments.extend(batch)
+            # Stop if this page was not full (last page)
+            if len(batch) < per_page:
+                break
+            page += 1
+        return all_comments
     except requests.RequestException as e:
         print(f"Error fetching comments for PR #{pr_number}: {e}")
-        return []
+        return all_comments
 
 def get_pr_latest_commit_time(pr_number):
     """Get the timestamp of the latest commit in the PR.
