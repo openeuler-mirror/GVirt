@@ -10,21 +10,14 @@
 import torch
 import time
 import torch.nn.functional as F
-from xlite._C import Runtime, transpose_1_2, linear_att_conv_and_silu
+from xlite._C import Runtime, linear_att_conv_and_silu
 
 channels = 6144
 kernel_dim = 4
 
 
 def my_impl(rt, input, weight, conv_state, output, batch, seq_len):
-    mix_qkv = torch.empty(batch, channels, seq_len)
-    torch.npu.synchronize()
-    transpose_1_2(rt, input, mix_qkv)
-    torch.npu.synchronize()
-    out = torch.empty(batch, channels, seq_len)
-    linear_att_conv_and_silu(rt, mix_qkv, conv_state, weight, out)
-    torch.npu.synchronize()
-    transpose_1_2(rt, out, output)
+    linear_att_conv_and_silu(rt, input, conv_state, weight, output)
     torch.npu.synchronize()
 
 

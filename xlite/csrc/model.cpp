@@ -801,20 +801,15 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     }
     XTensor convStateBatch;
     convStateBatch.Init({batch, convDim, _c.linearConvKernelDim}, convState.dtype, convState.ptr);
-    // Decode (seqlen==1) and small tasks use the packed 2D path:
-    //   mixQkv    [m, qkvDim] token-major (matmul output)
-    //   convPacked [m, convDim] token-major (Step4 SplitCol consumes directly)
-    // queryStartLoc/lens are populated every step by PrepareAttn.
-    //
-    // decode: seqlen==1 (any batch). [B,1,C] and [B,C,1] are memory-identical
-    // for contiguous tensors, so the two Transpose_1_2 are identity ops even
-    // with multiple requests in flight. Skip them and use the packed 2D path.
+    // Decode (seqlen==1) uses the packed 2D path: [B,1,C] and [B,C,1] are
+    // memory-identical for contiguous tensors, so the two Transpose_1_2 are
+    // identity ops. Skip them and use the packed 2D path.
     //
     // Prefill (seqlen>1, uniform) uses the token-row-parallel kernel when its
-    // constraints hold (K in {1,2,4}, seqlen >= K, convDim % 1024 == 0): it
-    // consumes token-major [m,C] mixQkv directly, removing the two
-    // XliteOpTranspose_1_2 of the old 3D path.
-    // Constraints unmet -> old 3D transpose path. Decode/mixed -> packed.
+    // constraints hold (K in {1,2,4}, seqlen >= K, convDim % 1024 == 0).
+    // Otherwise the fused conv kernel consumes/produces the token-major
+    // [B,S,C] layout directly, so no Transpose passes are needed either.
+    // Decode/mixed -> packed.
     bool decodeStep = (seqlen == 1);
     uint32_t convK = _c.linearConvKernelDim;
     bool useToken = uniform && !decodeStep && seqlen >= convK &&
@@ -824,18 +819,12 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
                                   seqlen, /*updateState=*/true);
         rt.PutTensor(mixQkv);
     } else if (uniform && !decodeStep) {
-        XTensor &mixTrans = rt.GetTensor({batch, qkvDim, seqlen}, hiddenState.dtype, DBG_LOC);
-        XTensor &convOut = rt.GetTensor({batch, convDim, seqlen}, hiddenState.dtype, DBG_LOC);
         XTensor mix3d;
         mix3d.Init({batch, seqlen, qkvDim}, mixQkv.dtype, mixQkv.ptr);
-        XliteOpTranspose_1_2(rt, mix3d, mixTrans);
-        XliteOpConv1dAndSiLU(rt, convStateBatch, mixTrans, linearConv1d[layer], convOut,
-                             /*updateState=*/true);
-        rt.PutTensor(mixTrans);
         XTensor convSeq3d;
         convSeq3d.Init({batch, seqlen, convDim}, convPacked.dtype, convPacked.ptr);
-        XliteOpTranspose_1_2(rt, convOut, convSeq3d);
-        rt.PutTensor(convOut);
+        XliteOpConv1dAndSiLU(rt, convStateBatch, mix3d, linearConv1d[layer], convSeq3d,
+                             /*updateState=*/true);
         rt.PutTensor(mixQkv);
     } else {
         XliteOpConv1dAndSiLU(rt, convStateBatch, mixQkv, linearConv1d[layer], convPacked,

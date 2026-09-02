@@ -1896,22 +1896,26 @@ void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor 
         }
     } else {
         if (state.shape.size() != 3 || input.shape.size() != 3 || output.shape.size() != 3) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: state/input/output must be 3D [B,C,*]");
+            throw std::runtime_error("XliteOpConv1dAndSiLU: state/input/output must be 3D [B,*,C]");
         }
-        if (state.shape[0] != input.shape[0] || state.shape[1] != input.shape[1] ||
-            output.shape[0] != input.shape[0] || output.shape[1] != input.shape[1] ||
-            output.shape[2] != input.shape[2]) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: batch/channel/seq shape mismatch");
+        if (state.shape[0] != input.shape[0] || output.shape[0] != input.shape[0]) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: batch shape mismatch");
+        }
+        if (state.shape[1] != input.shape[2] || output.shape[2] != input.shape[2]) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: channel shape mismatch");
+        }
+        if (output.shape[1] != input.shape[1]) {
+            throw std::runtime_error("XliteOpConv1dAndSiLU: seq shape mismatch");
         }
         if (state.shape[2] != kernelDim) {
             throw std::runtime_error("XliteOpConv1dAndSiLU: state last dim != kernelDim");
         }
-        if (weight.shape[0] != input.shape[1]) {
+        if (weight.shape[0] != input.shape[2]) {
             throw std::runtime_error("XliteOpConv1dAndSiLU: weight channels mismatch");
         }
         batch = input.shape[0];
-        channels = input.shape[1];
-        seqLen = input.shape[2];
+        channels = input.shape[2];
+        seqLen = input.shape[1];
         if (kernelDim > 16 || seqLen > 4096) {
             throw std::runtime_error(
                 "XliteOpConv1dAndSiLU: require kernelDim<=16 and seqLen<=4096 for fused kernel");

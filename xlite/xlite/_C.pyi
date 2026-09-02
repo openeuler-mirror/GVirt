@@ -2514,10 +2514,10 @@ def linear_att_conv_and_silu(
 
     Args:
         rt (Runtime): Native runtime handle.
-        mix_qkv (torch.Tensor): Input mixed QKV tensor, shape [B, C, S].
+        mix_qkv (torch.Tensor): Input mixed QKV tensor, shape [B, S, C].
         conv_state (torch.Tensor): Convolution state tensor, shape [B, C, K].
         weight (torch.Tensor): Kernel weight tensor, shape [C, 1, K] or [C, K].
-        output (torch.Tensor): Output tensor, shape [B, C, S].
+        output (torch.Tensor): Output tensor, shape [B, S, C].
 
     Returns:
         None: `output` is written in place. State is always updated.

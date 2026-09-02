@@ -12,7 +12,7 @@ import time
 import torch
 import torch.nn.functional as F
 from xlite._C import (Runtime, linear_att_conv_and_silu,
-                      linear_att_conv_and_silu_token, transpose_1_2)
+                      linear_att_conv_and_silu_token)
 
 kernel_dim = 4
 
@@ -69,34 +69,31 @@ def run_perf(rt, batch=1, seq_len=512, channels=10240, dtype=torch.bfloat16):
     input = torch.randn(batch, seq_len, channels, dtype=dtype, device="npu:0")
     weight = torch.randn(channels, 1, kernel_dim, dtype=dtype, device="npu:0")
     state_t = torch.randn(batch, channels, kernel_dim, dtype=dtype, device="npu:0")
-    state_3d = state_t.clone()
+    state_chan = state_t.clone()
 
     mix_qkv = input.reshape(batch * seq_len, channels).contiguous()
     out_tok = torch.zeros(batch * seq_len, channels, dtype=dtype, device="npu:0")
 
-    # old 3D path: transpose [B,S,C]->[B,C,S], channel-parallel conv, transpose back
-    mix_trans = torch.empty(batch, channels, seq_len, dtype=dtype, device="npu:0")
-    conv_out = torch.empty(batch, channels, seq_len, dtype=dtype, device="npu:0")
-    out_3d = torch.empty(batch, seq_len, channels, dtype=dtype, device="npu:0")
+    # channel-parallel path: the fused conv consumes/produces [B,S,C] directly
+    # (no Transpose passes) and updates the state in-kernel.
+    out_chan = torch.empty(batch, seq_len, channels, dtype=dtype, device="npu:0")
     torch.npu.synchronize()  # torch stream -> rt stream barrier
 
     def token_path():
         linear_att_conv_and_silu_token(rt, mix_qkv, state_t, weight, out_tok, seq_len)
 
-    def old_3d_path():
-        transpose_1_2(rt, input, mix_trans)
-        linear_att_conv_and_silu(rt, mix_trans, state_3d, weight, conv_out)
-        transpose_1_2(rt, conv_out, out_3d)
+    def chan_path():
+        linear_att_conv_and_silu(rt, input, state_chan, weight, out_chan)
 
     t_tok = bench(token_path)
-    t_old = bench(old_3d_path)
+    t_chan = bench(chan_path)
     # numerical cross-check while we are here
-    torch.testing.assert_close(out_tok.reshape(batch, seq_len, channels), out_3d,
+    torch.testing.assert_close(out_tok.reshape(batch, seq_len, channels), out_chan,
                                rtol=1e-2, atol=1e-3)
-    torch.testing.assert_close(state_t, state_3d, rtol=1e-2, atol=1e-3)
+    torch.testing.assert_close(state_t, state_chan, rtol=1e-2, atol=1e-3)
     print(f"[perf B={batch} S={seq_len} C={channels} {dtype}] "
-          f"token={t_tok:.3f} ms/call, old3d={t_old:.3f} ms/call, "
-          f"speedup={t_old / t_tok:.2f}x")
+          f"token={t_tok:.3f} ms/call, chan={t_chan:.3f} ms/call, "
+          f"speedup={t_chan / t_tok:.2f}x")
 
 
 if __name__ == "__main__":
