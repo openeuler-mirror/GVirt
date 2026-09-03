@@ -22,18 +22,13 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR de
 
     int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
 
-    if (m0 == (uint64_t)-1) {
-        m0 = 128;
-        // The L1 buffer was fully used. When the deqscale need space,
-        // the L1 buffer will overflow, so shrink n0.
-        n0 = useDequant ? 128 : 256;
-        k0 = 512 * BYTE_BITS / dtypeBits;
-    }
+    matmul_op.Init(m0, n0, k0, false, useDequant, transpose, weightNZ, swizzle);
+    matmul_op.SetFlags();
 
-    uint32_t nLoop = DIV_ROUND_UP(kN, n0);
     uint32_t off = 0;
-    int coreOffset = 0;
-    int nextCoreOffset = 0;
+    uint32_t coreOffset = 0;
+    int blockNum = GetBlockNum();
+    int blockIdx = GetBlockIdx();
     for (uint32_t i = startIdx; i < endIdx && i < n; i++) {
         uint32_t kM = *((__gm__ uint32_t *)(counts + i * sizeof(uint32_t)));
         if (kM <= 0) {
@@ -55,12 +50,17 @@ __aicore__ void group_matmul_kernel(GM_ADDR x, GM_ADDR ws, GM_ADDR z, GM_ADDR de
 
         uint64_t xOffBytes = off * kK * dtypeBits / BYTE_BITS;
         uint64_t zOffBytes = off * kN * sizeof(OutDtype);
-        matmul_op.Init(x + xOffBytes, w, z + zOffBytes, nullptr, deqScale, kM, kN, kK, weightNZ,
-                       transpose, m0, n0, k0, swizzle, coreOffset, &nextCoreOffset);
-        matmul_op.Run();
+
+        int64_t tiles = matmul_op.TaskTilesInit(x + xOffBytes, w, z + zOffBytes, (GM_ADDR) nullptr,
+                                                (GM_ADDR)deqScale, kM, kN, kK);
+        int64_t first = (blockIdx + blockNum - coreOffset) % blockNum;
+        for (int64_t idx = first; idx < tiles; idx += blockNum) {
+            matmul_op.RunTileByIdx(idx);
+        }
+        coreOffset = (coreOffset + tiles) % blockNum;
         off += kM;
-        coreOffset = nextCoreOffset;
     }
+    matmul_op.WaitFlags();
 }
 
 #define GROUPMATMUL_FUNC_DEFINE(dtype)                                                             \

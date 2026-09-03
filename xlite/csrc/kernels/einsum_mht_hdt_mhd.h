@@ -13,28 +13,36 @@ __aicore__ void einsum_mht_hdt_mhd(GM_ADDR mht, GM_ADDR hdt, GM_ADDR mhd, uint32
 {
     Matmul<Dtype, MatDtype, OutDtype> matmul_op;
 
-    int coreOffset = 0;
-    int nextCoreOffset = 0;
     if (T == -1) {
         T = t;
     }
     if (D == -1) {
         D = d;
     }
+    matmul_op.Init(m0, n0, k0, false, false, 0, weightNZ, swizzle);
+    matmul_op.SetFlags();
+
     int xStride = T * sizeof(Dtype);
     int yStride = d * t * sizeof(Dtype);
     int zStride = D * sizeof(Dtype);
     int srcDStride = h * T;
     int dstDStride = h * D;
+    uint32_t coreOffset = 0;
+    int blockNum = GetBlockNum();
+    int blockIdx = GetBlockIdx();
     for (int hIdx = 0; hIdx < h; hIdx++) {
         GM_ADDR x = mht + hIdx * xStride;
         GM_ADDR y = hdt + hIdx * yStride;
         GM_ADDR z = mhd + hIdx * zStride;
-        matmul_op.Init(x, y, z, nullptr, nullptr, m, d, t, weightNZ, 0, m0, n0, k0, swizzle,
-                       coreOffset, &nextCoreOffset, srcDStride, dstDStride);
-        matmul_op.Run();
-        coreOffset = nextCoreOffset;
+        int64_t tiles =
+            matmul_op.TaskTilesInit(x, y, z, nullptr, nullptr, m, d, t, srcDStride, dstDStride);
+        int64_t first = (blockIdx + blockNum - coreOffset) % blockNum;
+        for (int64_t idx = first; idx < tiles; idx += blockNum) {
+            matmul_op.RunTileByIdx(idx);
+        }
+        coreOffset = (coreOffset + tiles) % blockNum;
     }
+    matmul_op.WaitFlags();
 }
 
 #define EINSUM_MHT_HDT_MHD_FUNC_DEFINE(dtype)                                                    \
