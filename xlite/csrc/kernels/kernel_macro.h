@@ -68,6 +68,8 @@ using namespace AscendC;
 #define NBLOCKSIZE 16
 #define ASCEND_L0_BYTES (64 * 1024)
 
+#define GetDTypeBits(Dtype) (std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS))
+
 // 设置拷贝数据的config
 inline __aicore__ uint64_t __set_dmi_config(uint8_t sid, uint16_t nBurst, uint16_t lenBurst,
                                             uint16_t srcGap, uint16_t dstGap)
