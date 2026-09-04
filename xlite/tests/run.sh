@@ -465,6 +465,54 @@ function run_glm5_w8a8()
     rm $test_config_path
 }
 
+function run_glm5_w4a8()
+{
+    local _n_layers=${XLITE_N_LAYERS:-78}
+    local _moe_ep_size=${XLITE_MOE_EP_SIZE:-16}
+    local _ckpt_dir=${XLITE_GLM5_W4A8_CKPT:-GLM-5-w4a8}
+    echo '{
+        "vocab_size": 154880,
+        "dim": 6144,
+        "inter_dim": 12288,
+        "moe_inter_dim": 2048,
+        "n_layers": '"$_n_layers"',
+        "n_dense_layers": 3,
+        "n_heads": 64,
+        "norm_eps": 1e-05,
+        "n_routed_experts": 256,
+        "n_shared_experts": 1,
+        "n_activated_experts": 8,
+        "n_expert_groups": 1,
+        "n_limited_groups": 1,
+        "score_func": "sigmoid",
+        "route_scale": 2.5,
+        "q_lora_rank": 2048,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 192,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 256,
+        "original_seq_len": 4096,
+        "rope_theta": 1000000.0,
+        "rope_factor": 40,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "mscale": 1.0,
+        "max_batch_size": 1,
+        "max_seq_len": 1024,
+        "index_n_heads": 32,
+        "index_head_dim": 128,
+        "index_topk": 2048,
+        "indexer_rope_interleave": true,
+        "quantization": "w4a8",
+        "model_type": "glm5",
+        "dtype": "bfloat16",
+        "moe_ep_size": '"$_moe_ep_size"',
+        "moe_tp_size": 1
+    }' > $test_config_path
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-16} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm5 --ckpt-path $models_base_path/$_ckpt_dir/ ${RUN_ARGS[@]}
+    rm $test_config_path
+}
+
 function run_minimax_m2()
 {
     echo '{
@@ -627,6 +675,7 @@ else
         run_glm4_moe
         run_deepseek_v3_w8a8
         run_glm5_w8a8
+        run_glm5_w4a8
         run_minimax_m2
         #run_qwen3_5_moe_122B
     fi

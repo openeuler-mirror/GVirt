@@ -114,7 +114,7 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.
-    quantization: Literal["none", "w8a8"] = "none"
+    quantization: Literal["none", "w8a8", "w4a8"] = "none"
     moe_ep_size: int = 1
     moe_tp_size: int = 1
     model_type: Literal["deepseek_v3", "deepseek_v32", "glm5"] = "deepseek_v3"
@@ -182,6 +182,136 @@ class ParallelEmbedding(nn.Module):
             y[mask] = 0
             dist.all_reduce(y)
         return y
+
+
+def unpack_int4_weight(w_packed: torch.Tensor) -> torch.Tensor:
+    """Unpack 2×int4-per-byte int8 weight to int4 values.
+
+    Input:  [E, K, N/2] (or [K, N/2]) int8, two signed int4 packed per byte
+            (low nibble = logical even col, high nibble = logical odd col).
+    Output: [E, K, N] (or [K, N]) float32, signed int4 values in [-8, 7].
+
+    Convention verified against scale_bias in test_group_matmul_int4.py.
+    """
+    w = w_packed.to(torch.int32)
+    lo = w & 0x0F
+    hi = (w >> 4) & 0x0F
+    lo_s = torch.where(lo >= 8, lo - 16, lo).to(torch.float32)
+    hi_s = torch.where(hi >= 8, hi - 16, hi).to(torch.float32)
+    out = torch.empty(*w.shape[:-1], w.shape[-1] * 2, dtype=torch.float32, device=w.device)
+    out[..., 0::2] = lo_s
+    out[..., 1::2] = hi_s
+    return out
+
+
+def _unpack_int4_weight_i32(w_packed: torch.Tensor) -> torch.Tensor:
+    """Same as unpack_int4_weight but returns int32 values in [-8, 7] directly.
+
+    Used by _pack_w4a8_weight_for_xlite to feed npu_convert_weight_to_int4pack
+    without a float32 round-trip.
+    """
+    w = w_packed.to(torch.int32)
+    lo = w & 0x0F
+    hi = (w >> 4) & 0x0F
+    lo_s = torch.where(lo >= 8, lo - 16, lo)
+    hi_s = torch.where(hi >= 8, hi - 16, hi)
+    out = torch.empty(*w.shape[:-1], w.shape[-1] * 2, dtype=torch.int32, device=w.device)
+    out[..., 0::2] = lo_s
+    out[..., 1::2] = hi_s
+    return out
+
+
+def _pack_w4a8_weight_for_xlite(weight_packed: torch.Tensor) -> torch.Tensor:
+    """int8 packed [N//2, K] -> xlite int4pack int32 (NZ layout, C++ View(INT4)).
+
+    Mirrors the verified pack recipe in test_msd_merge_ep.py:94:
+      int8 packed -> unpack to int4 values int32 [K, N] (low=even col, high=odd col,
+        >=8 subtract 16, signed) -> npu_format_cast(29, FRACTAL_NZ) ->
+        npu_convert_weight_to_int4pack.
+    The returned tensor has dtype=int32; C++ (_C.cpp:730) detects INT32 and calls
+    View(INT4), so moeREUpGate[layer].dtype == INT4 routes the expert through
+    ForwardMoEMSD (model.cpp:1357,1368) instead of the W8A8 GroupMatmulDeQuant path
+    (which would ignore scale_bias and produce garbage).
+
+    int8 packed param is N-first [N//2, K]; transpose to [K, N//2] then unpack to
+    [K, N] for matmul(x[m,k], W[k,n]).
+    """
+    ACL_FORMAT_FRACTAL_NZ = 29
+    # [N//2, K] -> [K, N] int4 values (int32 container, signed [-8, 7])
+    W_int4 = _unpack_int4_weight_i32(weight_packed.t().contiguous())  # [K, N] int32
+    W_nz = torch_npu.npu_format_cast(
+        W_int4.to("npu").to(torch.int32).contiguous(), ACL_FORMAT_FRACTAL_NZ)
+    return torch_npu.npu_convert_weight_to_int4pack(W_nz)
+
+
+def w4a8_msd_linear(x: torch.Tensor, weight_packed: torch.Tensor,
+                    weight_scale: torch.Tensor, scale_bias: torch.Tensor) -> torch.Tensor:
+    """W4A8 MSD single-expert linear: QuantDyn(x) → int4 matmul → merge+dequant.
+
+    Implements the Mixture-of-Sum-Decomposition pipeline for one expert weight
+    (kept FP32 throughout the mid-stage, per the bf16-precision-amplification fix):
+
+      1. QuantDyn:   bf16 x [m, k] → int8 [m, k] + per_token_scale [m, 1] (fp32)
+      2. Unpack x:   int8 → high4 = x>>4, low4 = (x & 0x0F)  (floor split, [-8,7] semantics)
+      3. Unpack W:   packed int8 [k, n/2] → int4 values [k, n] (float32)
+      4. Matmul:     y_low  = matmul(low4,  W) × deq_scale
+                     y_high = matmul(high4, W) × deq_scale
+      5. Merge+deq:  mid = (y_high × 16 + y_low + scale_bias) × per_token_scale   (FP32)
+
+    Args:
+        x:            [m, k] bf16/fp16 activation.
+        weight_packed:[k, n/2] int8 (2×int4 packed; weight_scale/scale_bias use logical n).
+        weight_scale: [n, 1] fp32 per-channel deq_scale (= antiquant_scale).
+        scale_bias:   [n, 1] fp32 (= 8 × Σ_k W_int4[k] × deq_scale[k]).
+
+    Returns:
+        mid: [m, n] fp32 (SwiGLU input, kept FP32 to avoid bf16 amplification).
+    """
+    # --- Step 1: QuantDyn ---
+    x_fp32 = x.float()
+    absmax = x_fp32.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+    per_token = absmax / 127.0
+    x_i8 = torch.round(x_fp32 / per_token).clamp(-128.0, 127.0).to(torch.int8)
+
+    # --- Step 2: unpack activation into high/low 4-bit (floor split, signed) ---
+    # Matches xlite unpack_activation (unpack_activation.h): low_nibble = (int8 & 0x0F) - 8,
+    # high_nibble = (int8 >> 4) (sign-extended to [-8,7] for signed int8).
+    # Use float32 for the matmul (NPU Cube does not support int32 matmul; the torch
+    # reference path trades exact int accumulation for device compatibility).
+    x_i = x_i8.to(torch.int32)
+    high4 = (x_i >> 4).to(torch.float32)            # [-8, 7] fp32
+    low4 = ((x_i & 0x0F) - 8).to(torch.float32)     # [-8, 7] fp32 (matches unpack_activation)
+
+    # --- Step 3: unpack weight (signed int4 values, float32 for Cube) ---
+    # weight_packed stored as [N_packed, K] (output-first, matches Linear param layout
+    # [out//2, in]); transpose to [K, N_packed], unpack → [K, N] for matmul(x[m,k], W[k,n]).
+    # Chunked over K to bound peak memory (full [K,N] fp32 = 8× packed size; 256 experts
+    # × 78 layers would OOM if materialized all at once).
+    W_packed_t = weight_packed.t().contiguous()   # [K, N_packed]
+
+    # --- Step 4: chunked matmul (fp32 accumulate) → × per-channel deq_scale ---
+    deq = weight_scale.reshape(1, -1).float()    # [1, n]
+    k_total = W_packed_t.shape[0]
+    k_chunk = max(1, k_total // 4)                # 4 chunks to cap peak
+    y_low = None
+    y_high = None
+    for k0 in range(0, k_total, k_chunk):
+        k1 = min(k0 + k_chunk, k_total)
+        W_chunk = unpack_int4_weight(W_packed_t[k0:k1])   # [kc, n] float32
+        yl = torch.matmul(low4[:, k0:k1], W_chunk) * deq
+        yh = torch.matmul(high4[:, k0:k1], W_chunk) * deq
+        y_low = yl if y_low is None else y_low + yl
+        y_high = yh if y_high is None else y_high + yh
+        del W_chunk
+
+    # --- Step 5: merge + scale_bias + per_token (FP32 mid; see §0.5 约束2) ---
+    # Keep mid FP32 to avoid bf16 amplification through silu+quant. Set the env
+    # var XLITE_W4A8_MID_DTYPE=bf16 to compare against the old bf16-drop path.
+    sb = scale_bias.reshape(1, -1).float()        # [1, n]
+    mid = (y_high * 16.0 + y_low + sb) * per_token   # [m, n] fp32
+    if os.getenv("XLITE_W4A8_MID_DTYPE", "fp32") == "bf16":
+        mid = mid.to(torch.bfloat16)
+    return mid
 
 
 def quantize_npu(
@@ -259,19 +389,30 @@ class Linear(nn.Module):
         dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
         static_quant (bool): Whether to use static quantization. Defaults to False.
             Only applicable when weight is int8 (element_size() == 1).
+        w4a8 (bool): Whether this layer uses W4A8 (int4 packed weight). Defaults to False.
+            When True, weight is int8 storage holding 2×int4 packed along output dim
+            (physical out = out_features // 2); a scale_bias parameter is added.
     """
     dtype = torch.bfloat16
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False, w4a8: bool = False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
+        self.w4a8 = w4a8
+        if w4a8:
+            weight_out = out_features // 2
+        else:
+            weight_out = out_features
+        self.weight = nn.Parameter(torch.empty(weight_out, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
         if self.weight.element_size() == 1:
             self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32))
             if forward_backend == "xlite":
                 self.weight.xlite_scale = torch.zeros(out_features * 2, 1, dtype=torch.float32)
 
+            if w4a8:
+                # W4A8 MSD: scale_bias = 8 × Σ_k(W_int4[k] × deq_scale) (per-channel).
+                self.weight.scale_bias = self.scale_bias = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32))
             if static_quant:
                 self.weight.input_scale = self.input_scale = nn.Parameter(torch.empty(in_features, dtype=torch.bfloat16), requires_grad=False)
                 self.weight.input_offset = self.input_offset = nn.Parameter(torch.empty(in_features, dtype=torch.bfloat16), requires_grad=False)
@@ -308,10 +449,10 @@ class ColumnParallelLinear(Linear):
         static_quant (bool): Whether to use static quantization. Defaults to False.
             Only applicable when weight is int8 (element_size() == 1).
     """
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False, w4a8: bool = False):
         assert out_features % world_size == 0, f"Output features must be divisible by world size (world_size={world_size})"
         self.part_out_features = out_features // world_size
-        super().__init__(in_features, self.part_out_features, bias, dtype, static_quant)
+        super().__init__(in_features, self.part_out_features, bias, dtype, static_quant, w4a8)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -339,10 +480,10 @@ class RowParallelLinear(Linear):
         static_quant (bool): Whether to use static quantization. Defaults to False.
             Only applicable when weight is int8 (element_size() == 1).
     """
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False, w4a8: bool = False):
         assert in_features % world_size == 0, f"Input features must be divisible by world size (world_size={world_size})"
         self.part_in_features = in_features // world_size
-        super().__init__(self.part_in_features, out_features, bias, dtype, static_quant)
+        super().__init__(self.part_in_features, out_features, bias, dtype, static_quant, w4a8)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -546,6 +687,9 @@ class Indexer(torch.nn.Module):
         if args.quantization == "w8a8":
             self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim,
                                dtype=torch.int8, static_quant=True)
+        elif args.quantization == "w4a8":
+            # W8A8_DYNAMIC (mixed-quant model): int8 weight + scale, dynamic activation
+            self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim, dtype=torch.int8)
         else:
             self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim)
         self.wk_weights_proj = Linear(self.dim, self.head_dim + self.n_heads, dtype=torch.float32)
@@ -617,22 +761,30 @@ class MLA(nn.Module):
         self.full_indexer = args.index_full_mask[layer_id] if args.index_full_mask and layer_id != 0 else True
 
         # 根据 args.quantization 决定是否使用静态量化
+        # - w8a8: 静态量化 (static_quant, 有 input_scale/offset/quant_bias/deq_scale)
+        # - w4a8: 混合量化模型里 attention 是 W8A8_DYNAMIC (有 weight_scale/offset, 无静态四元组),
+        #         用 dynamic int8 (static_quant=False), 走 weight_dequant + F.linear 路径
         if args.quantization == "w8a8":
-            # wqkv_a 合并 q_a_proj 和 kv_a_proj_with_mqa，静态量化
             self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
                                  dtype=torch.int8, static_quant=True)
-            # wq_b 是 ColumnParallelLinear，静态量化
             self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim,
                                               dtype=torch.int8, static_quant=True)
-            # wo 是 RowParallelLinear，静态量化
             self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim,
                                          dtype=torch.int8, static_quant=True)
+        elif args.quantization == "w4a8":
+            # W8A8_DYNAMIC: int8 weight + per-channel scale, dynamic activation quant
+            self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+                                 dtype=torch.int8)
+            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim,
+                                              dtype=torch.int8)
+            self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim,
+                                         dtype=torch.int8)
         else:
             self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim)
             self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
             self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
-        self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
-        self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
+        self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
+        self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
         # wkv_b 保持 FLOAT（根据 quant_model_description.json）
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
         self.softmax_scale = self.qk_head_dim ** -0.5
@@ -742,7 +894,10 @@ class MLP(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        if args is not None and args.quantization == "w8a8":
+        # shared_experts are W8A8_DYNAMIC in the GLM-5.1-w4a8 mixed-quant model
+        # (routed experts are W4A8, but shared/dense/attn stay W8A8). So treat both
+        # w4a8 and w8a8 as int8 (with scale) here — only pure "none" stays bf16.
+        if args is not None and args.quantization in ("w8a8", "w4a8"):
             self.w13 = ColumnParallelLinear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = RowParallelLinear(inter_dim, dim, dtype=torch.int8)
         else:
@@ -771,8 +926,10 @@ class SharedExpertMLP(nn.Module):
     """
     def __init__(self, dim: int, inter_dim: int, args: ModelArgs = None):
         super().__init__()
-        if args is not None and args.quantization == "w8a8":
-            # w8a8: shared_experts 使用动态量化（W8A8_DYNAMIC）
+        # shared_experts are W8A8_DYNAMIC in the GLM-5.1-w4a8 mixed-quant model
+        # (routed experts are W4A8, but shared/dense/attn stay W8A8). So treat both
+        # w4a8 and w8a8 as int8 (with scale) here — only pure "none" stays bf16.
+        if args is not None and args.quantization in ("w8a8", "w4a8"):
             self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
         else:
@@ -869,7 +1026,12 @@ class Expert(nn.Module):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__()
-        if args.quantization == "w8a8":
+        if args.quantization == "w4a8":
+            # W4A8 MSD: int4 weight packed in int8 storage (output dim compressed 2×),
+            # scale_bias per-channel. Forward uses the MSD path (MoE.forward), not linear().
+            self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8, w4a8=True)
+            self.w2 = Linear(inter_dim, dim, dtype=torch.int8, w4a8=True)
+        elif args.quantization == "w8a8":
             self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
         else:
@@ -942,12 +1104,24 @@ class MoE(nn.Module):
         weights, indices = self.gate(x)
         y = torch.zeros_like(x)
         counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
+        w4a8 = self.experts[self.experts_start_idx].w13.w4a8
         for i in range(self.experts_start_idx, self.experts_end_idx):
             if counts[i] == 0:
                 continue
             expert = self.experts[i]
             idx, top = torch.where(indices == i)
-            y[idx] += expert(x[idx]) * weights[idx, top, None]
+            if w4a8:
+                xi = x[idx]  # [c, dim] bf16
+                # --- w13 MSD → mid [c, 2*inter] fp32 ---
+                mid = w4a8_msd_linear(xi, expert.w13.weight, expert.w13.weight.scale, expert.w13.weight.scale_bias)
+                # --- SwiGLU (fp32): first half=gate, second half=up ---
+                half = mid.shape[-1] // 2
+                h2_fp32 = mid[:, half:] * (mid[:, :half] * torch.sigmoid(mid[:, :half]))  # [c, inter] fp32
+                # --- w2 MSD (re-quantize h2 → int8, then int4 matmul) ---
+                out = w4a8_msd_linear(h2_fp32, expert.w2.weight, expert.w2.weight.scale, expert.w2.weight.scale_bias)
+                y[idx] += out.to(x.dtype) * weights[idx, top, None]
+            else:
+                y[idx] += expert(x[idx]) * weights[idx, top, None]
         # EP all_reduce: sum per-EP-rank partials into the complete output.
         # global_world_size (full world == EP group), not the TP-rebound world_size.
         if global_world_size > 1:
@@ -979,8 +1153,8 @@ class Block(nn.Module):
         super().__init__()
         self.attn = MLA(layer_id, args)
         self.ffn = MLP(args.dim, args.inter_dim, args) if layer_id < args.n_dense_layers else MoE(args)
-        self.attn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
-        self.ffn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
+        self.attn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
+        self.ffn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
         self.n_dense_layers = args.n_dense_layers
         self.layer_id = layer_id
 
@@ -1079,7 +1253,7 @@ class DeepSeek_V3(nn.Module):
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
-        self.norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization == "w8a8" else False)
+        self.norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
         self.multi_task_parallel = (os.getenv("MULTI_TASK_PARALLEL", "0") == "1")
@@ -1266,6 +1440,77 @@ class DeepSeek_V3(nn.Module):
             if not name.startswith("model."):
                 name = "model." + name
 
+            # ---- W4A8 routed-expert weights (gate/up → w13, down → w2) ----
+            # int4 weight: checkpoint [out_logical, in] int8 (2×int4 packed along out,
+            # i.e. physical [out_logical//2, in]); param [out_logical//2, in] int8.
+            # scale_bias: checkpoint [out_logical, 1] (gate/up) or [out_logical, 16] (down);
+            #   param [out_logical, 1]; down's [.,16] summed to [out_logical] on load.
+            # gate/up scale_bias must be fused into w13.scale_bias [2*inter, 1] (gate first).
+            if args.quantization == "w4a8" and "experts" in name and "shared_experts" not in name:
+                _is_w13_w4a8 = ("gate_proj" in name or "up_proj" in name)
+                _is_w2_w4a8 = ("w2" in name and "gate_proj" not in name and "up_proj" not in name)
+                _is_sb = "scale_bias" in name
+                _is_w = name.endswith(".weight")
+                _is_scale = "weight_scale" in name
+
+                # --- w13 (gate/up) W4A8: weight, weight_scale, scale_bias ---
+                if _is_w13_w4a8:
+                    param_name = name.replace("gate_proj", "w13").replace("up_proj", "w13")
+                    if _is_scale:
+                        # checkpoint "weight_scale" → param "scale" (drop "weight_")
+                        param_name = param_name.replace("weight_scale", "scale")
+                    elif _is_sb:
+                        pass  # scale_bias → scale_bias (already matches param key)
+                    if param_name not in param_dict:
+                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                        continue
+                    param = param_dict[param_name]
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    if "gate_proj" in name:
+                        slot = (0, param.shape[0] // 2)
+                    else:
+                        slot = (param.shape[0] // 2, param.shape[0])
+                    if _is_w:
+                        # weight: checkpoint [inter//2, dim] packed (N-first); param half-slot
+                        # [inter//2, dim] also N-first. w4a8_msd_linear transposes internally.
+                        param.data[slot[0]:slot[1]].copy_(loaded_weight)
+                    elif _is_scale:
+                        # weight_scale: [inter, 1] → param [2*inter, 1] slot
+                        param.data[slot[0]:slot[1], 0].copy_(loaded_weight.reshape(-1))
+                    elif _is_sb:
+                        # scale_bias: [inter, 1] → param [2*inter, 1] slot
+                        param.data[slot[0]:slot[1], 0].copy_(loaded_weight.reshape(-1))
+                    continue
+
+                # --- w2 (down) W4A8: weight, weight_scale, scale_bias ---
+                if _is_w2_w4a8:
+                    # name already has w2 (down_proj→w2 done by generic chain)
+                    param_name_for_w2 = name
+                    if _is_scale:
+                        param_name_for_w2 = param_name_for_w2.replace("weight_scale", "scale")
+                    elif _is_sb:
+                        pass  # scale_bias → scale_bias
+                    if param_name_for_w2 not in param_dict:
+                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name_for_w2)
+                        continue
+                    param = param_dict[param_name_for_w2]
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    if _is_w:
+                        # checkpoint [hidden//2, inter] packed (N-first); param [hidden//2, inter] N-first.
+                        # w4a8_msd_linear transposes internally for matmul.
+                        param.data.copy_(loaded_weight)
+                    elif _is_scale:
+                        # weight_scale: [hidden, 1] → param [hidden, 1]
+                        param.data[:, 0].copy_(loaded_weight.reshape(-1))
+                    elif _is_sb:
+                        # scale_bias: [hidden, 16] → sum over dim 1 → [hidden]; param [hidden, 1]
+                        if loaded_weight.dim() == 2 and loaded_weight.shape[1] == 16:
+                            sb = loaded_weight.transpose(0, 1).contiguous().sum(dim=0)
+                        else:
+                            sb = loaded_weight.flatten()
+                        param.data[:, 0].copy_(sb)
+                    continue
+
             if args.quantization == "w8a8" and "weight_scale" in name or ".bias" in name:
                 if any(s in name for s in static_quant_weights):
                     continue
@@ -1288,9 +1533,9 @@ class DeepSeek_V3(nn.Module):
                 param = param_dict[param_name]
                 if ".scale" in name:
                     if stride_id == 0:
-                        param.data[:args.q_lora_rank, 0].copy_(loaded_weight[:])
+                        param.data[:args.q_lora_rank, 0].copy_(loaded_weight[:].reshape(-1))
                     else:  # kv_a_proj_with_mqa
-                        param.data[args.q_lora_rank:, 0].copy_(loaded_weight[:])
+                        param.data[args.q_lora_rank:, 0].copy_(loaded_weight[:].reshape(-1))
                 else:
                     if stride_id == 0:
                         param.data[:args.q_lora_rank].copy_(loaded_weight[:])
@@ -1380,7 +1625,7 @@ class DeepSeek_V3(nn.Module):
                     loaded_weight_slice = loaded_weight[rank * shard_size:(rank + 1) * shard_size]
                     loaded_weight_slice = convert_pyslice_to_tensor(loaded_weight_slice)
                     if ".scale" in name:
-                        param.data[:loaded_weight_slice.shape[0], 0].copy_(loaded_weight_slice)
+                        param.data[:loaded_weight_slice.shape[0], 0].copy_(loaded_weight_slice.reshape(-1))
                     else:
                         param.data[:loaded_weight_slice.shape[0]].copy_(loaded_weight_slice)
                     continue
@@ -1394,7 +1639,7 @@ class DeepSeek_V3(nn.Module):
                 if ".quant_bias" in name or ".scale" in name:
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                     if ".scale" in name:
-                        param.data[:, 0].copy_(loaded_weight)
+                        param.data[:, 0].copy_(loaded_weight.reshape(-1))
                     else:
                         param.data.copy_(loaded_weight)
                     continue
@@ -1419,7 +1664,7 @@ class DeepSeek_V3(nn.Module):
                 # scale: shape [N, 1]
                 if ".scale" in name:
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                    param.data[:, 0].copy_(loaded_weight)
+                    param.data[:, 0].copy_(loaded_weight.reshape(-1))
                     continue
 
                 load_tensor_parallel_weights(param, loaded_weight, args.v_head_dim * args.n_heads,
@@ -1576,34 +1821,44 @@ class DeepSeek_V3(nn.Module):
         self.xlite_model.re_down = [self.layers[i].ffn.experts[j].w2.weight
                                     for i in range(args.n_dense_layers, args.n_layers)
                                     for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-        if args.quantization == "w8a8":
+        if args.quantization in ("w8a8", "w4a8"):
+            # deq_scale (fixpipe xlite_scale) + norm_bias binding is shared by w8a8 and
+            # w4a8: in the mixed-quant GLM-5.1-w4a8 model, attention / dense mlp /
+            # shared_experts are W8A8_DYNAMIC (int8 weight + per-channel scale, dynamic
+            # activation quant).
             for i in range(self.args.n_layers):
                 if self.layers[i].attn.indexer is not None and self.layers[i].attn.full_indexer:
                     self.layers[i].attn.indexer.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.indexer.wq_b.weight.scale[0::1]
                 self.layers[i].attn.wqkv_a.weight.xlite_scale[0::2] = self.layers[i].attn.wqkv_a.weight.scale[0::1]
                 self.layers[i].attn.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.wq_b.weight.scale[0::1]
                 self.layers[i].attn.wo.weight.xlite_scale[0::2] = self.layers[i].attn.wo.weight.scale[0::1]
-            self.xlite_model.index_q_b_input_scale = [indexer_w(l, lambda i: i.wq_b.weight.input_scale.reciprocal()) for l in self.layers]
-            self.xlite_model.index_q_b_input_offset = [indexer_w(l, lambda i: i.wq_b.weight.input_offset) for l in self.layers]
-            self.xlite_model.index_q_b_quant_bias = [indexer_w(l, lambda i: i.wq_b.weight.quant_bias) for l in self.layers]
             self.xlite_model.index_q_b_deq_scale = [indexer_w(l, lambda i: i.wq_b.weight.xlite_scale) for l in self.layers]
-            self.xlite_model.mla_qkv_a_input_scale = [layer.attn.wqkv_a.weight.input_scale.reciprocal() for layer in self.layers]
-            self.xlite_model.mla_qkv_a_input_offset = [layer.attn.wqkv_a.weight.input_offset for layer in self.layers]
-            self.xlite_model.mla_qkv_a_quant_bias = [layer.attn.wqkv_a.weight.quant_bias for layer in self.layers]
             self.xlite_model.mla_qkv_a_deq_scale = [layer.attn.wqkv_a.weight.xlite_scale for layer in self.layers]
-            self.xlite_model.mla_q_b_input_scale = [layer.attn.wq_b.weight.input_scale.reciprocal() for layer in self.layers]
-            self.xlite_model.mla_q_b_input_offset = [layer.attn.wq_b.weight.input_offset for layer in self.layers]
-            self.xlite_model.mla_q_b_quant_bias = [layer.attn.wq_b.weight.quant_bias for layer in self.layers]
             self.xlite_model.mla_q_b_deq_scale = [layer.attn.wq_b.weight.xlite_scale for layer in self.layers]
             self.xlite_model.mla_q_norm_bias = [layer.attn.q_norm.bias for layer in self.layers]
             self.xlite_model.mla_kv_norm_bias = [layer.attn.kv_norm.bias for layer in self.layers]
-            self.xlite_model.attn_out_input_scale = [layer.attn.wo.weight.input_scale.reciprocal() for layer in self.layers]
-            self.xlite_model.attn_out_input_offset = [layer.attn.wo.weight.input_offset for layer in self.layers]
-            self.xlite_model.attn_out_quant_bias = [layer.attn.wo.weight.quant_bias for layer in self.layers]
             self.xlite_model.attn_out_deq_scale = [layer.attn.wo.weight.xlite_scale for layer in self.layers]
             self.xlite_model.norm_bias = self.norm.bias
             self.xlite_model.attn_norm_bias = [layer.attn_norm.bias for layer in self.layers]
             self.xlite_model.mlp_norm_bias = [layer.ffn_norm.bias for layer in self.layers]
+            # Static-quant tuples (input_scale/input_offset/quant_bias) only exist under
+            # w8a8 (Linear static_quant=True). w4a8 attn/dense/shared are W8A8_DYNAMIC
+            # (static_quant=False) — these attrs don't exist, and C++ falls back to
+            # DYNAMIC_QUANT from the absence of inputScale. Bind empty lists so C++
+            # InitMatmulWeight skips them (weightLayer < iScale.size() == 0).
+            if args.quantization == "w8a8":
+                self.xlite_model.index_q_b_input_scale = [indexer_w(l, lambda i: i.wq_b.weight.input_scale.reciprocal()) for l in self.layers]
+                self.xlite_model.index_q_b_input_offset = [indexer_w(l, lambda i: i.wq_b.weight.input_offset) for l in self.layers]
+                self.xlite_model.index_q_b_quant_bias = [indexer_w(l, lambda i: i.wq_b.weight.quant_bias) for l in self.layers]
+                self.xlite_model.mla_qkv_a_input_scale = [layer.attn.wqkv_a.weight.input_scale.reciprocal() for layer in self.layers]
+                self.xlite_model.mla_qkv_a_input_offset = [layer.attn.wqkv_a.weight.input_offset for layer in self.layers]
+                self.xlite_model.mla_qkv_a_quant_bias = [layer.attn.wqkv_a.weight.quant_bias for layer in self.layers]
+                self.xlite_model.mla_q_b_input_scale = [layer.attn.wq_b.weight.input_scale.reciprocal() for layer in self.layers]
+                self.xlite_model.mla_q_b_input_offset = [layer.attn.wq_b.weight.input_offset for layer in self.layers]
+                self.xlite_model.mla_q_b_quant_bias = [layer.attn.wq_b.weight.quant_bias for layer in self.layers]
+                self.xlite_model.attn_out_input_scale = [layer.attn.wo.weight.input_scale.reciprocal() for layer in self.layers]
+                self.xlite_model.attn_out_input_offset = [layer.attn.wo.weight.input_offset for layer in self.layers]
+                self.xlite_model.attn_out_quant_bias = [layer.attn.wo.weight.quant_bias for layer in self.layers]
             for i in range(self.args.n_dense_layers):
                 self.layers[i].ffn.w13.weight.xlite_scale[0::2] = self.layers[i].ffn.w13.weight.scale[0::1]
                 self.layers[i].ffn.w2.weight.xlite_scale[0::2] = self.layers[i].ffn.w2.weight.scale[0::1]
@@ -1627,6 +1882,22 @@ class DeepSeek_V3(nn.Module):
             self.xlite_model.re_down_deq_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
                                               for i in range(args.n_dense_layers, args.n_layers)
                                               for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+        if args.quantization == "w4a8":
+            config.quant_msd_w4a8 = True
+            config.experts_weight_transpose = True
+            config.experts_weight_nz = True
+            self.xlite_model.re_up_gate = [_pack_w4a8_weight_for_xlite(self.layers[i].ffn.experts[j].w13.weight)
+                                           for i in range(args.n_dense_layers, args.n_layers)
+                                           for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+            self.xlite_model.re_down = [_pack_w4a8_weight_for_xlite(self.layers[i].ffn.experts[j].w2.weight)
+                                        for i in range(args.n_dense_layers, args.n_layers)
+                                        for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+            self.xlite_model.re_up_gate_scale_bias = [self.layers[i].ffn.experts[j].w13.weight.scale_bias.data.reshape(-1).contiguous()
+                                                       for i in range(args.n_dense_layers, args.n_layers)
+                                                       for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+            self.xlite_model.re_down_scale_bias = [self.layers[i].ffn.experts[j].w2.weight.scale_bias.data.reshape(-1).contiguous()
+                                                   for i in range(args.n_dense_layers, args.n_layers)
+                                                   for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
         # init() takes the GLOBAL rank (C++ derives tp_rank/ep_id from it).
         self.xlite_model.init(config, self.global_rank)
 
