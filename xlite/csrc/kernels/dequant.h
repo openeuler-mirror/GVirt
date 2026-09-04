@@ -18,13 +18,12 @@ public:
     {
     }
 
-    __aicore__ inline void Init(uint32_t n, bool hasScale)
+    __aicore__ inline void Init(bool hasScale)
     {
         set_atomic_none();
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-        this->n = n;
         this->nTile = 7168;
         this->nPad = ROUND_UP(this->nTile, (256 / sizeof(dtype)));
         this->hasScale = hasScale;
@@ -79,46 +78,17 @@ public:
     {
         RunTile(this->inGmBuf + idx * this->n,
                 this->scaleGmBuf == nullptr ? nullptr : this->scaleGmBuf + idx,
-                this->outGmBuf + idx * this->n, 1, this->n, this->n);
+                this->outGmBuf + idx * this->n, 1, this->n);
     }
 
     __aicore__ inline void RunTile(GMA(dtype) tileInGm, GMA(float32_t) tileScaleGm,
-                                   GMA(dtype) tileOutGm, uint32_t localRows, uint32_t nActual,
-                                   uint32_t rowStride)
+                                   GMA(dtype) tileOutGm, uint32_t localRows, uint32_t nActual)
     {
         if (localRows == 0 || nActual == 0) {
             return;
         }
-        RunRows(tileInGm, tileScaleGm, tileOutGm, localRows, nActual, rowStride);
-    }
-
-    __aicore__ inline void WaitFlags()
-    {
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-        pipe_barrier(PIPE_ALL);
-    }
-
-    __aicore__ inline void Run(GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnumTokens,
-                               uint32_t m, uint32_t n)
-    {
-        SetFlags();
-        int64_t tiles = TaskTilesInit(in, scale, out, pnumTokens, m, n);
-        for (int64_t idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum()) {
-            RunTileByIdx(idx);
-        }
-        WaitFlags();
-    }
-
-private:
-    __aicore__ inline void RunRows(GMA(dtype) tileInGm, GMA(float32_t) tileScaleGm,
-                                   GMA(dtype) tileOutGm, uint32_t rowCount, uint32_t nActual,
-                                   uint32_t rowStride)
-    {
         uint32_t nLoop = DIV_ROUND_UP(nActual, this->nTile);
-        for (uint32_t row = 0; row < rowCount; row++) {
+        for (uint32_t row = 0; row < localRows; row++) {
             for (uint32_t loop = 0; loop < nLoop; loop++) {
                 uint32_t nOffset = loop * this->nTile;
                 uint32_t nSize = (loop == nLoop - 1) ? (nActual - nOffset) : this->nTile;
@@ -128,7 +98,7 @@ private:
 
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + eventId);
                 copy_gm_to_ubuf_align_b16(this->inUbBuf[eventId],
-                                          tileInGm + row * rowStride + nOffset, 0, 1,
+                                          tileInGm + row * this->n + nOffset, 0, 1,
                                           nSize * sizeof(dtype), 0, 0, 0, 0);
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + eventId);
 
@@ -158,7 +128,7 @@ private:
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + eventId);
 
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + eventId);
-                copy_ubuf_to_gm_align_b16(tileOutGm + row * rowStride + nOffset,
+                copy_ubuf_to_gm_align_b16(tileOutGm + row * this->n + nOffset,
                                           this->outUbBuf[eventId], 0, 1, nSize * sizeof(bfloat16_t),
                                           0, 0, 0, 0);
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + eventId);
@@ -167,6 +137,27 @@ private:
         }
     }
 
+    __aicore__ inline void WaitFlags()
+    {
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+        pipe_barrier(PIPE_ALL);
+    }
+
+    __aicore__ inline void Run(GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnumTokens,
+                               uint32_t m, uint32_t n)
+    {
+        SetFlags();
+        int64_t tiles = TaskTilesInit(in, scale, out, pnumTokens, m, n);
+        for (int64_t idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum()) {
+            RunTileByIdx(idx);
+        }
+        WaitFlags();
+    }
+
+private:
     uint32_t m = 0;
     uint32_t n = 0;
     uint32_t nTile = 0;
@@ -189,7 +180,7 @@ private:
         GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens, uint32_t m, uint32_t n) \
     {                                                                                        \
         Dequant<dtype> op;                                                                   \
-        op.Init(n, scale != nullptr);                                                        \
+        op.Init(scale != nullptr);                                                           \
         op.Run(in, scale, out, pnum_tokens, m, n);                                           \
     }
 #else
