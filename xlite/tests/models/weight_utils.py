@@ -22,6 +22,18 @@ from tqdm.auto import tqdm
 
 ACL_FORMAT_FRACTAL_NZ = 29
 
+def _hbm_trace(tag: str, start_pos: int = 0):
+    """Per-forward HBM 占用打点"""
+    alloc = torch.npu.memory_allocated()
+    reserved = torch.npu.memory_reserved()
+    free, total = torch.npu.mem_get_info()
+    print(
+        f"[HBM_TRACE] tag={tag:16s} pos={start_pos:5d} "
+        f"alloc={alloc / 1024 / 1024:9.1f}MB reserved={reserved / 1024 / 1024:9.1f}MB "
+        f"free={free / 1024 / 1024:9.1f}MB total={total / 1024 / 1024:9.1f}MB",
+        flush=True,
+    )
+
 
 def rearrange_matrix(matrix, n0, k_block_size=16):
     """nd2nz"""
