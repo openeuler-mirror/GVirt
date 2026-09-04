@@ -46,8 +46,8 @@ public:
         this->scaleUbBuf =
             reinterpret_cast<UBA(float32_t)>((uintptr_t)(this->outUbBuf[1] + this->nPad));
 
-        UBA(float32_t) endAddr =
-            reinterpret_cast<UBA(float32_t)>((uintptr_t)(this->scaleUbBuf + 1));
+        UBA(float32_t)
+        endAddr = reinterpret_cast<UBA(float32_t)>((uintptr_t)(this->scaleUbBuf + 1));
     }
 
     __aicore__ inline void SetFlags()
@@ -77,8 +77,8 @@ public:
 
     __aicore__ inline void RunTileByIdx(int64_t idx)
     {
-        RunTile(this->inGmBuf + idx * this->n, this->scaleGmBuf == nullptr ? nullptr
-                                                                            : this->scaleGmBuf + idx,
+        RunTile(this->inGmBuf + idx * this->n,
+                this->scaleGmBuf == nullptr ? nullptr : this->scaleGmBuf + idx,
                 this->outGmBuf + idx * this->n, 1, this->n, this->n);
     }
 
@@ -148,8 +148,8 @@ private:
                 UBA(float32_t) tmpPtr = this->tmpUbBuf[eventId];
                 if (this->hasScale) {
                     wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-                    vmuls(this->mulUbBuf[eventId], this->tmpUbBuf[eventId], float(*this->scaleUbBuf),
-                          nRepeats, 1, 1, 8, 8);
+                    vmuls(this->mulUbBuf[eventId], this->tmpUbBuf[eventId],
+                          float(*this->scaleUbBuf), nRepeats, 1, 1, 8, 8);
                     pipe_barrier(PIPE_V);
                     tmpPtr = this->mulUbBuf[eventId];
                 }
@@ -159,8 +159,8 @@ private:
 
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + eventId);
                 copy_ubuf_to_gm_align_b16(tileOutGm + row * rowStride + nOffset,
-                                          this->outUbBuf[eventId], 0, 1,
-                                          nSize * sizeof(bfloat16_t), 0, 0, 0, 0);
+                                          this->outUbBuf[eventId], 0, 1, nSize * sizeof(bfloat16_t),
+                                          0, 0, 0, 0);
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + eventId);
                 this->eventId = 1 - eventId;
             }
@@ -177,10 +177,10 @@ private:
     GMA(dtype) inGmBuf = nullptr;
     GMA(float32_t) scaleGmBuf = nullptr;
     GMA(dtype) outGmBuf = nullptr;
-    UBA(dtype) inUbBuf[PINGPONG] = {nullptr, nullptr};
-    UBA(float32_t) tmpUbBuf[PINGPONG] = {nullptr, nullptr};
-    UBA(float32_t) mulUbBuf[PINGPONG] = {nullptr, nullptr};
-    UBA(bfloat16_t) outUbBuf[PINGPONG] = {nullptr, nullptr};
+    UBA(dtype) inUbBuf[PINGPONG] = { nullptr, nullptr };
+    UBA(float32_t) tmpUbBuf[PINGPONG] = { nullptr, nullptr };
+    UBA(float32_t) mulUbBuf[PINGPONG] = { nullptr, nullptr };
+    UBA(bfloat16_t) outUbBuf[PINGPONG] = { nullptr, nullptr };
     UBA(float32_t) scaleUbBuf = nullptr;
 };
 
