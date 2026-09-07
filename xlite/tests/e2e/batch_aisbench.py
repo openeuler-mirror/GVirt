@@ -8,6 +8,7 @@ Using `vllm-ascend`'s official container image is recommended.
 
 import os
 import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -904,7 +905,11 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
 
     # Write headers first
     with open(log_file_path, "w") as f:
-        f.write("\n\nFinal Benchmark Results:\n\n")
+        # Record the shell command used to run this script for reference
+        command = shlex.join(["python", str(Path(sys.argv[0]).resolve()), *sys.argv[1:]])
+        f.write(f"# Benchmark Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write(f"## Command Used\n\n```bash\n{command}\n```\n\n")
+        f.write("## Final Benchmark Results:\n\n")
         f.write(f"{BenchResult.markdown_header()}\n")
     with open(log_csv_path, "w") as f:
         f.write("model_name,dataset,tp_size,ep,dp_size,mtp_tokens,xlite,xlite_full_mode,metric,accuracy,error\n")
