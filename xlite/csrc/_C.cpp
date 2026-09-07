@@ -1491,7 +1491,7 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
         XTensor &lastMax = rt.GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({_qkv.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
-        sync.Memset(0);
+        sync.Memset(0, rt.stream);
         XliteOpFlashAttention(rt, _qkv, _kCache, _vCache, qk, sv, max, sum, lastMax, lastSum, sync,
                               _output, _queryStartLoc, _lens, _cachedLens, _blockTables, nHeads,
                               nKvHeads, headDim, blockSize, batch, tileSizeOfCachedKV);
@@ -1554,7 +1554,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
         XTensor &lastMax = rt.GetTensor({_qWithQr.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &lastSum = rt.GetTensor({_qWithQr.shape[0], nHeads}, FP32, DBG_LOC);
         XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
-        sync.Memset(0);
+        sync.Memset(0, rt.stream);
 
         XliteOpFlashMLAV2(rt, qAbsorb, _qr, _kCache, _peCache, qk, sv, max, sum, lastMax, lastSum,
                           sync, oAbsorb, _queryStartLoc, _lens, _cachedLens, _blockTables, nHeads,
@@ -2003,7 +2003,7 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
         rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN}, XDtypeOf(q), DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({_q.shape[0], 2 * topK}, INT32, DBG_LOC);
     XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
-    sync.Memset(0);
+    sync.Memset(0, rt.stream);
 
     XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, _indices, _topkIndices,
                        _queryStartLoc, _lens, _cachedLens, _blockTables, sync, nHeads, headDim,

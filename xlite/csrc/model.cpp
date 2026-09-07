@@ -1061,8 +1061,10 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
                                                         XTensor &input)
 {
     uint32_t m = input.shape[0], M = rt.maxTokensDp;  // input may or may not be padded to match DPs
-    XTensor &weights = rt.GetTensor({M, _c.nRoutedExperts}, moeGate[layer].dtype, DBG_LOC);
-    XTensor &routing = rt.GetTensor({M, _c.nRoutedExperts}, BIT1, DBG_LOC);
+    XTensor &weights = rt.GetTensor({M, _c.nRoutedExperts}, moeGate[layer].dtype, DBG_LOC).View(m);
+    XTensor &routing = rt.GetTensor({M, _c.nRoutedExperts}, BIT1, DBG_LOC)
+                           .Memset(0, rt.stream, m * _c.nRoutedExperts)
+                           .View(m);
     XTensor &scores = rt.GetTensor({M, _c.nRoutedExperts}, moeGate[layer].dtype, DBG_LOC).View(m);
 
     XliteOpMatmul(rt, input, moeGate[layer], scores, _c.gateCaptured && _c.weightNZ);
@@ -1071,39 +1073,25 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
         uint32_t moELayer = layer - _c.nDenseLayers;
         bool isHash = moELayer < _c.nHashLayers;
         const XTensor &tid2eid = isHash ? moeTid2Eid[moELayer] : XTensor();
-        XTensor *inputIds = &_inputIds;
         if (!rt.IsDummyRuntime() && isHash && (_inputIds.ptr == nullptr || _inputIds.numel == 0)) {
             throw std::runtime_error(
                 std::string(__func__) + ": hash-gated MoE layer " + std::to_string(layer) +
                 " requires input_ids (token ids); pass them to forward_with_inputs_embeds[/_v2]");
         }
-        if (M > m) {
-            XTensor &inputIdsPad = rt.GetTensor({M}, INT32, DBG_LOC);
-            void *padPtr = static_cast<uint8_t *>(inputIdsPad.ptr) + m * sizeof(uint32_t);
-            size_t padBytes = (M - m) * sizeof(uint32_t);
-            CHECK_ACL(aclrtMemcpyAsync(inputIdsPad.ptr, m * sizeof(uint32_t), _inputIds.ptr,
-                                       m * sizeof(uint32_t), ACL_MEMCPY_DEVICE_TO_DEVICE,
-                                       rt.stream));
-            CHECK_ACL(aclrtMemsetAsync(padPtr, padBytes, 0, padBytes, rt.stream));
-            inputIds = &inputIdsPad;
-        }
-        XliteOpSqrtsoftplusHashTopK(rt, scores.View(M), _gateIndices, moeGateBias[layer], *inputIds,
+        XliteOpSqrtsoftplusHashTopK(rt, scores, _gateIndices, moeGateBias[layer], _inputIds,
                                     tid2eid, weights, routing, _c.routeScale, _c.nActExperts,
                                     isHash);
-        if (M > m) {
-            rt.PutTensor(*inputIds);
-        }
     } else if (_c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
-        XliteOpSigmoidTopK(rt, scores.View(M), _gateIndices, moeGateBias[layer], _c.routeScale,
-                           weights, routing, _c.nExpertGroups, _c.nLimitedGroups, _c.nActExperts,
+        XliteOpSigmoidTopK(rt, scores, _gateIndices, moeGateBias[layer], _c.routeScale, weights,
+                           routing, _c.nExpertGroups, _c.nLimitedGroups, _c.nActExperts,
                            _c.normTopKProb);
     } else {
-        XliteOpSoftmaxTopK(rt, scores.View(M), _gateIndices, weights, routing, _c.nActExperts,
+        XliteOpSoftmaxTopK(rt, scores, _gateIndices, weights, routing, _c.nActExperts,
                            _c.normTopKProb);
     }
 
     rt.PutTensor(scores);
-    return {weights, routing};
+    return {weights.View(M), routing.View(M)};
 }
 
 std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMeta>
