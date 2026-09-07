@@ -992,7 +992,7 @@ void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer,
 
     XliteOpRopeComplex(rt, nLocalHeads, _c.headDim, _c.headDim, _c.ropeHeadDim,
                        _c.headDim - _c.ropeHeadDim, _c.headDim - _c.ropeHeadDim, o, freqsCis,
-                       rt._attnPosition, o, true);
+                       rt._attnPosition, o, true, true);
 
     o.View({hiddenState.shape[0], nLocalGroups, nLocalHeads * _c.headDim / nLocalGroups});
     XTensor &oa = rt.GetTensor({hiddenState.shape[0], nLocalGroups * _c.oLoraRank},
