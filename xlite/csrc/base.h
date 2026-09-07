@@ -37,6 +37,8 @@
 #define DBG_PREFIX (std::string(__func__) + ": ")
 #define XT_STR(x) ((x).ToStr(#x) + ", ")
 
+typedef void *aclrtStream;
+
 enum XDtype {
     BIT1,
     INT4,
@@ -221,7 +223,8 @@ public:
     void PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDtype subDtype,
                   uint32_t nRow = 6, uint32_t nCol = 6, std::ostream &os = std::cout,
                   const char *endingNote = "");
-    XTensor &Memset(int value);
+    XTensor &Memset(int32_t value, aclrtStream stream = nullptr, size_t offset = 0,
+                    bool roundUp = false);
     std::string ToStr(const char *name = "") const;
     XTensor &View(std::vector<size_t> shape);
     XTensor &View(enum XDtype type);

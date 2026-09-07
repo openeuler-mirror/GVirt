@@ -478,10 +478,25 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os,
     return hasAnomaly;
 }
 
-XTensor &XTensor::Memset(int value)
+XTensor &XTensor::Memset(int32_t value, aclrtStream stream, size_t offset, bool roundUp)
 {
-    if (bytes != 0) {
-        CHECK_ACL(aclrtMemset(ptr, bytes, value, bytes));
+    if (!ptr || offset >= numel) {
+        return *this;  // No operation needed if ptr is null or offset is out of bounds
+    }
+    if (!roundUp) {
+        offset = offset * XDtypeBit(dtype) / 8;
+    } else {
+        offset = DIV_ROUND_UP(offset * XDtypeBit(dtype), 8);
+    }
+    size_t setBytes = bytes - offset;
+    if (setBytes <= 0) {
+        return *this;  // No operation needed if setBytes is zero or negative
+    }
+    if (stream == nullptr) {
+        CHECK_ACL(aclrtMemset(static_cast<char *>(ptr) + offset, setBytes, value, setBytes));
+    } else {
+        CHECK_ACL(
+            aclrtMemsetAsync(static_cast<char *>(ptr) + offset, setBytes, value, setBytes, stream));
     }
     return *this;
 }
