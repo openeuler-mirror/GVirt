@@ -2096,27 +2096,35 @@ def mla_v2(
     nz: bool = False,
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
+    dense: bool = False,
 ) -> None:
     """Run MLA v2 path as three kernels: wuk einsum + mla_v2 attention + wuv einsum.
 
-    Compared to :func:`mla`, the WUK absorb and WUV projection are moved out of
-    the fused kernel and run as separate einsum operators surrounding the
-    ``mla_v2`` attention kernel. The final ``output`` (v_head_dim) is the same
-    as :func:`mla`'s output.
+    ``dense=False`` (default): the mla_v2 attention kernel walks the paged KV
+    cache via ``block_tables`` (with optional top-k token selection when
+    ``top_k > 0``); ``enable_flash_attention`` selects the flash variant for
+    long sequences.
+
+    ``dense=True``: gather the top-k tokens selected by ``topk_indices`` into
+    a contiguous per-batch dense cache (via :func:`gather_sparse_kv_cache`,
+    called internally), then run mla_v2 on it. Requires ``top_k > 0`` and
+    query_len == 1 per batch (decode); ``enable_flash_attention`` and
+    ``block_tables`` are unused in this mode.
 
     Args:
         rt (Runtime): Native runtime handle.
-        q_with_qr (torch.Tensor): Query tensor with rotary components, shape
+        q_with_qr (torch.Tensor): Query tensor, shape
             (total_query_tokens, n_heads, nope_head_dim + rope_head_dim).
         qr (torch.Tensor): Pre-rotated q_rope slice, contiguous, shape
             (total_query_tokens, n_heads, rope_head_dim).
-        k_cache (torch.Tensor): Paged KV cache (kv_lora_rank slice).
+        k_cache (torch.Tensor): Paged KV cache (kv_lora_rank slice); in dense
+            mode the source paged cache the top-k tokens are gathered from.
         pe_cache (torch.Tensor): Paged RoPE key cache (rope_head_dim slice).
         wuk_t (torch.Tensor): MLA W_UK^T weight, shape
             (n_heads, nope_head_dim, kv_lora_rank).
         wuv (torch.Tensor): MLA W_UV weight, shape
             (n_heads, kv_lora_rank, v_head_dim).
-        output (torch.Tensor): Output tensor (v_head_dim); written in place.
+        output (torch.Tensor): Output tensor (v_head_dim), written in place.
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
         lens (torch.Tensor): Current token lengths.
         cached_lens (torch.Tensor): Cached token lengths.
@@ -2134,10 +2142,15 @@ def mla_v2(
         scale (float): Attention scaling factor.
         topk_indices (torch.Tensor): Top-k indices tensor for sparse attention
             (may be empty when ``top_k == 0``).
-        top_k (int): Number of top-k indices; 0 disables sparse attention.
+        top_k (int): Number of top-k indices; 0 disables sparse attention in
+            paged mode. In dense mode this is the dense cache length
+            (``index_topk``) and must be > 0.
         nz (bool): Whether to use nz weights.
-        enable_flash_attention (bool): Whether to use the flash MLA v2 kernel.
+        enable_flash_attention (bool): Whether to use the flash MLA v2 kernel
+            (paged mode only; ignored when ``dense=True``).
         tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA v2.
+        dense (bool): Whether to gather a contiguous dense KV cache (via
+            ``topk_indices``) instead of walking the paged block-table layout.
 
     Returns:
         None: `output` is written in place.
@@ -2172,11 +2185,11 @@ def gather_sparse_kv_cache(
     Only the first ``min(query_lens[b] + cached_lens[b], index_topk)`` slots per
     batch are written; slots beyond that (topk_indices padding tail) are
     **skipped** (left as-is, typically zero-initialized by the caller).
-    :func:`mla_v3` reads only those valid slots and masks the rest in softmax,
-    so the skipped slots do not affect output.
+    :func:`mla_v2` with ``dense=True`` reads only those valid slots and masks
+    the rest in softmax, so the skipped slots do not affect output.
 
     Used by the decode + DSA long-sequence path to feed a contiguous dense cache
-    to :func:`mla_v3` instead of the paged layout.
+    to :func:`mla_v2` (``dense=True``) instead of the paged layout.
 
     Args:
         rt (Runtime): Native runtime handle.
@@ -2293,64 +2306,6 @@ def cxa(
 
     Returns:
         None: `output` is written in place.
-    """
-    ...
-
-def mla_v3(
-    rt: Runtime,
-    q_absorb: torch.Tensor,
-    qr: torch.Tensor,
-    k_dense_cache: torch.Tensor,
-    pe_dense_cache: torch.Tensor,
-    o_absorb: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    lens: torch.Tensor,
-    cached_lens: torch.Tensor,
-    n_heads: int,
-    rope_head_dim: int,
-    kv_lora_rank: int,
-    batch: int,
-    index_topk: int,
-    scale: float,
-) -> None:
-    """Run MLA v3 attention over a contiguous dense KV cache.
-
-    Variant of :func:`mla_v2` that reads from a contiguous
-    ``k_dense_cache`` / ``pe_dense_cache`` (produced by
-    :func:`gather_sparse_kv_cache`) instead of a paged block-table layout.
-    Drops the block-table indirection and the top-k vgather mask: every dense
-    token participates in softmax (no causal mask), since the dense cache is
-    already the top-k selected tokens. The QK/SV n-tile size is a fixed
-    internal constant (no ``block_size`` argument needed, unlike :func:`mla_v2`).
-
-    The ``qk`` workspace is allocated internally from the runtime tensor pool.
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        q_absorb (torch.Tensor): Pre-absorbed query, shape
-            (total_query_tokens, n_heads, kv_lora_rank).
-        qr (torch.Tensor): Pre-rotated q_rope slice, shape
-            (total_query_tokens, n_heads, rope_head_dim).
-        k_dense_cache (torch.Tensor): Contiguous K cache, shape
-            (batch, index_topk, kv_heads, kv_lora_rank).
-        pe_dense_cache (torch.Tensor): Contiguous PE cache, shape
-            (batch, index_topk, kv_heads, rope_head_dim).
-        o_absorb (torch.Tensor): Output absorb tensor, shape
-            (total_query_tokens, n_heads, kv_lora_rank); written in place.
-        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
-        lens (torch.Tensor): Current token lengths.
-        cached_lens (torch.Tensor): Cached token lengths.
-        n_heads (int): Number of query heads.
-        rope_head_dim (int): Rotary head dimension.
-        kv_lora_rank (int): KV LoRA rank.
-        block_size (int): KV block size (used as the n0 tile in QK/SV mmad).
-        batch (int): Batch size.
-        index_topk (int): Number of top-k tokens per batch (dense length).
-        scale (float): Attention scaling factor.
-
-    Returns:
-        None: `o_absorb` is written in place. Apply the WUV projection on the
-        host side to obtain the final output.
     """
     ...
 

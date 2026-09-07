@@ -73,6 +73,13 @@ work = [
     (2, [131071] * 2, [1] * 2),
     (5, [8, 13, 65, 11, 5], [1] * 5),
     (1, [128], [128]),
+    (1, [16384], [1]),
+    (3, [32751] * 3, [1] * 3),
+    (3, [2047, 8191, 45841], [1] * 3),
+    (4, [2047] * 4, [1] * 4),
+    (1, [131071], [1]),
+    (1, [127], [1]),
+    (1, [4096], [1]),
 ]
 
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
@@ -258,21 +265,17 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             logging.error(f'torch_npu: {output_standard}')
             logging.error(f'xlite: {output_xlite_v2}')
 
-        if not enable_flash and max_seq_len > MAX_SOFTMAX_PINGPONG_LEN:
-            continue
         # Test MLA with topkIndices: verify that MLA with topkIndices produces the same output
         # as standard MLA with -inf mask applied before softmax
-        # This simulates the DSA (Dual Sparse Attention) behavior used in deepseek_v32/glm5
-        top_k_test_cases = [
-            # (min(128, max_seq_len),),  # small topk
-            # (min(1024, max_seq_len),),  # medium topk
-            (min(2048, max_seq_len),),  # large topk
-        ]
+        topk_values = sorted({min(t, max_seq_len) for t in (128, 1024, 2048)})
 
-        for topk_value in top_k_test_cases:
-            topk = topk_value[0]
-            if topk <= 0:
-                continue
+        # The sparse topkIndices path needs flash attention for long sequences
+        # (the non-flash mla_v2 kernel rejects topK > 0 when max_seq_len >
+        # MAX_SOFTMAX_PINGPONG_LEN); the dense path is independent of flash and
+        # has no sequence-length limit, so it always runs for decode cases.
+        run_sparse_topk = enable_flash or max_seq_len <= MAX_SOFTMAX_PINGPONG_LEN
+
+        for topk in topk_values:
 
             # Generate random topk_indices for each sample in the batch
             # This simulates the indexer output that selects top-k positions
@@ -281,7 +284,6 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             for i in range(batch):
                 qlen = query_len_list[i]
                 clen = cached_lens_list[i]
-                total_len = qlen + clen
                 # For each query position, generate topk indices
                 # Each query position q_idx can only attend to positions in [0, clen + q_idx]
                 # due to causal mask constraint
@@ -289,20 +291,17 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                     valid_len = clen + q_idx + 1  # +1 because q_idx can attend to itself
                     perm = torch.randperm(valid_len, device="npu")
                     if valid_len < topk:
-                        # Pad with the last valid index to reach topk size
-                        perm = torch.cat([perm, perm[-1:].expand(topk - valid_len)])
+                        pad = perm.new_full((topk - valid_len,), valid_len)
+                        perm = torch.cat([perm, pad])
                     else:
                         perm = perm[:topk]
                     topk_indices_list.append(perm)
 
-            if len(topk_indices_list) == 0:
-                continue
-
             # Concatenate topk_indices into a flattened tensor
             # Shape: (total_query_len, topk)
             topk_indices_tensor = torch.stack(topk_indices_list)  # (total_query_len, topk)
-            # mla_v2 假设每行的 topk indices 已按升序排列
             topk_indices_tensor, _ = torch.sort(topk_indices_tensor, dim=-1)
+            topk_indices_tensor = topk_indices_tensor.to(dtype=torch.int32)
 
             # Standard MLA with topk mask: apply -inf mask before softmax
             # Produces o_absorb_standard_with_topk (stop at absorb) and
@@ -354,30 +353,76 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             o_absorb_standard_with_topk = torch.cat(o_absorbs_with_topk, dim=0)
             output_standard_with_topk = torch.cat(outputs_with_topk, dim=0)
 
-            # xlite MLA with topkIndices
-            output_xlite_with_topk_v2 = torch.zeros(total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
+            # ----- xlite sparse path: mla_v2 with topkIndices (paged KV cache,
+            # -inf mask applied inside the kernel's softmax) -----
+            if run_sparse_topk:
+                output_xlite_with_topk_v2 = torch.zeros(
+                    total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
 
-            topk_indices_tensor = topk_indices_tensor.to(dtype=torch.int32)
+                torch.npu.synchronize()
+                mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite,
+                       wuv_xlite, output_xlite_with_topk_v2, query_start_loc, query_lens,
+                       cached_lens, block_tables, n_heads, rope_head_dim, nope_head_dim,
+                       v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, scale, topk_indices_tensor,
+                       topk, weight_nz, enable_flash, tile_size)
+
+                logging.info(
+                    "mla_v2 with topkIndices %s (%d heads, %d rope_head_dim, %d nope_head_dim, "
+                    "%d v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, "
+                    "query_lens=%s, topk=%d) executed!",
+                    name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank,
+                    test_dtype, batch, cached_lens_list, query_len_list, topk,
+                )
+
+                try:
+                    torch.testing.assert_close(
+                        output_xlite_with_topk_v2, output_standard_with_topk, atol=1e-5,
+                        rtol=5e-02)
+                except AssertionError as e:
+                    logging.error(f'mla_v2 with topkIndices test failed: {e}')
+                    logging.error(f'Standard mla_v2 with topk mask: {output_standard_with_topk}')
+                    logging.error(f'xlite mla_v2 with topkIndices: {output_xlite_with_topk_v2}')
+            else:
+                logging.info(
+                    "mla_v2 with topkIndices %s work (%d batch, cached_lens=%s, "
+                    "query_lens=%s, topk=%d) skipped: non-flash kernel rejects topk > 0 "
+                    "when max_seq_len > %d",
+                    name, batch, cached_lens_list, query_len_list, topk,
+                    MAX_SOFTMAX_PINGPONG_LEN,
+                )
+
+            # ----- xlite dense mode: gather the same topk_indices into a
+            # contiguous dense cache, then run mla_v2 in dense mode on it.
+            if any(qlen != 1 for qlen in query_len_list):
+                logging.info(
+                    "mla_v2 dense %s work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) "
+                    "skipped: dense mode requires query_len == 1 per batch",
+                    name, batch, cached_lens_list, query_len_list, topk,
+                )
+                continue
+
+            output_xlite_dense = torch.zeros(
+                total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
 
             torch.npu.synchronize()
-            mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite, wuv_xlite,
-                   output_xlite_with_topk_v2, query_start_loc, query_lens, cached_lens, block_tables,
-                   n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, BLOCK_SIZE, batch,
-                   scale, topk_indices_tensor, topk, weight_nz, enable_flash,
-                   tile_size)
+            mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite,
+                   wuv_xlite, output_xlite_dense, query_start_loc, query_lens, cached_lens,
+                   block_tables, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank,
+                   BLOCK_SIZE, batch, scale, topk_indices_tensor, topk, weight_nz, enable_flash,
+                   tile_size, True)
 
             logging.info(
-                "mla_v2 with topkIndices %s (%d heads, %d rope_head_dim, %d nope_head_dim, "
-                "%d v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, "
-                "query_lens=%s, topk=%d) executed!",
+                "mla_v2 dense %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, "
+                "%d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) "
+                "executed!",
                 name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_dtype,
                 batch, cached_lens_list, query_len_list, topk,
             )
 
             try:
                 torch.testing.assert_close(
-                    output_xlite_with_topk_v2, output_standard_with_topk, atol=1e-5, rtol=5e-02)
+                    output_xlite_dense, output_standard_with_topk, atol=1e-5, rtol=5e-02)
             except AssertionError as e:
-                logging.error(f'mla_v2 with topkIndices test failed: {e}')
+                logging.error(f'mla_v2 dense test failed: {e}')
                 logging.error(f'Standard mla_v2 with topk mask: {output_standard_with_topk}')
-                logging.error(f'xlite mla_v2 with topkIndices: {output_xlite_with_topk_v2}')
+                logging.error(f'xlite mla_v2 dense: {output_xlite_dense}')

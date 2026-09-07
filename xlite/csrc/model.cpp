@@ -12,7 +12,9 @@
 #include "model.h"
 #include "debug.h"
 
-#define XLITE_MLA_V3_THRESHOLD 280
+// Per-seq cached-KV token threshold for routing decode+DSA to the dense
+// (sparse gather) path vs the paged path; see ForwardAttnMLAV2.
+#define XLITE_MLA_DENSE_THRESHOLD 280
 
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
@@ -473,17 +475,18 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
 
     XTensor &oAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
                                     hiddenState.dtype, DBG_LOC);
-    // Route decode+DSA to the mla_v3 (sparse gather) path only when it pays off.
-    // Below ~280 tokens/seq the gather overhead dominates and v3 regresses by up
-    // to 9% on short-prompt + large-batch cases (see mla_v2 vs mla_v3 perf sweep).
-    // Cond 1 (cached KV > tile): long-seq fallback where v3 is consistently faster.
+    // Route decode+DSA to the dense (sparse gather) path only when it
+    // pays off. Below ~280 tokens/seq the gather overhead dominates and the
+    // dense path regresses by up to 9% on short-prompt + large-batch cases
+    // (see paged vs dense perf sweep).
+    // Cond 1 (cached KV > tile): long-seq fallback where dense is consistently faster.
     // Cond 2 (per-seq cached KV > 280 * batch): perf-derived threshold that steers
-    //   degenerate short-prompt + large-batch cases back to v2 to avoid regression.
+    //   degenerate short-prompt + large-batch cases back to paged to avoid regression.
     if (rt._decodeStep && _c.attnType == XMODEL_ATTN_DSA && topkIndices != nullptr &&
         (maxNumBlocks * _c.blockSizes[0] > rt._tileSizeOfCachedKV ||
-         maxNumBlocks * _c.blockSizes[0] > XLITE_MLA_V3_THRESHOLD * rt._batch)) {
+         maxNumBlocks * _c.blockSizes[0] > XLITE_MLA_DENSE_THRESHOLD * rt._batch)) {
         // Decode + DSA long-sequence path: gather sparse top-k tokens into a
-        // contiguous dense cache, then run mla_v3 on the dense cache.
+        // contiguous dense cache, then run mla_v2 in dense mode on it.
         XTensor &kDense =
             rt.GetTensor({static_cast<size_t>(rt._batch), _c.indexTopK, _c.kvLoraRank},
                          hiddenState.dtype, DBG_LOC);
@@ -496,9 +499,10 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                                    _c.nKvHeads);
         XTensor &qkDense =
             rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
-        XliteOpMLAV3(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._attnQueryStartLoc,
-                     rt._attnLens, rt._attnCachedLens, nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
-                     rt._batch, _c.indexTopK, _c.softmaxScale);
+        XliteOpMLAV2(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._attnQueryStartLoc,
+                     rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], nLocalHeads,
+                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch, _c.indexTopK,
+                     _c.softmaxScale, 0, XTensor(), true);
         rt.PutTensor(qkDense);
         rt.PutTensor(peDense);
         rt.PutTensor(kDense);
@@ -507,8 +511,9 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                                    hiddenState.dtype, DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, oAbsorb, rt._attnQueryStartLoc,
                      rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], nLocalHeads,
-                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch, _c.softmaxScale,
-                     _c.indexTopK, topkIndices == nullptr ? XTensor() : *topkIndices);
+                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch,
+                     maxNumBlocks * _c.blockSizes[0], _c.softmaxScale, _c.indexTopK,
+                     topkIndices == nullptr ? XTensor() : *topkIndices);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
