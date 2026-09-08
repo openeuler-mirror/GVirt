@@ -335,7 +335,8 @@ class AttnMeta:
         lens (List[int]): Per-sample query lengths.
         cached_lens (List[int]): Per-sample cached lengths.
         block_tables_cpu (List[List[int]]): Per-sample block tables on host.
-        positions (torch.Tensor): Position tensor for version-1 attention metadata.
+        positions (torch.Tensor): Position tensor for version-1 attention metadata,
+            shape ``[batched_tokens]`` int64 device.
     """
 
     lens: List[int] = ...
@@ -345,7 +346,7 @@ class AttnMeta:
     block_tables_cpu: List[List[int]] = ...
     """Per-sample block tables on host."""
     positions: torch.Tensor = ...
-    """Position tensor for version-1 attention metadata."""
+    """Position tensor for version-1 attention metadata, shape ``[batched_tokens]`` int64 device."""
 
 
 class AttnMetaV2:
@@ -435,358 +436,544 @@ class Model:
     """Model weights and forward methods.
 
     Attributes:
-        embed (torch.Tensor): Embedding weights.
-        norm (torch.Tensor): Final normalization weights.
-        norm_bias (torch.Tensor): Final normalization bias.
-        head (torch.Tensor): LM head weights.
-        attn_norm (List[torch.Tensor]): Attention norm weights per layer.
-        attn_norm_bias (List[torch.Tensor]): Attention norm bias per layer.
-        attn_out (List[torch.Tensor]): Attention output projection weights per layer.
-        attn_out_input_scale (List[torch.Tensor]): Attn output quantization input scale per layer.
-        attn_out_input_offset (List[torch.Tensor]): Attn output quantization input offset per layer.
-        attn_out_quant_bias (List[torch.Tensor]): Attn output quantization bias per layer.
-        attn_out_deq_scale (List[torch.Tensor]): Attn output dequantization scale per layer.
-        mha_qkv (List[torch.Tensor]): MHA QKV weights per layer.
-        mha_qkv_bias (List[torch.Tensor]): MHA QKV bias per layer.
-        mha_qkv_input_scale (List[torch.Tensor]): MHA QKV quantization input scale per layer.
-        mha_qkv_input_offset (List[torch.Tensor]): MHA QKV quantization input offset per layer.
-        mha_qkv_quant_bias (List[torch.Tensor]): MHA QKV quantization bias per layer.
-        mha_qkv_deq_scale (List[torch.Tensor]): MHA QKV dequantization scale per layer.
-        mha_q_norm (List[torch.Tensor]): MHA Q norm weights per layer.
-        mha_q_norm_bias (List[torch.Tensor]): MHA Q norm bias per layer.
-        mha_k_norm (List[torch.Tensor]): MHA K norm weights per layer.
-        mha_k_norm_bias (List[torch.Tensor]): MHA K norm bias per layer.
-        mla_qkv_a (List[torch.Tensor]): MLA QA KVA weights per layer.
-        mla_qkv_a_input_scale (List[torch.Tensor]): MLA QA KVA quantization input scale per layer.
-        mla_qkv_a_input_offset (List[torch.Tensor]): MLA QA KVA quantization input offset per layer.
-        mla_qkv_a_quant_bias (List[torch.Tensor]): MLA QA KVA quantization bias per layer.
-        mla_qkv_a_deq_scale (List[torch.Tensor]): MLA QA KVA dequantization scale per layer.
-        mla_q_b (List[torch.Tensor]): MLA QB weights per layer.
-        mla_q_b_input_scale (List[torch.Tensor]): MLA QB quantization input scale per layer.
-        mla_q_b_input_offset (List[torch.Tensor]): MLA QB quantization input offset per layer.
-        mla_q_b_quant_bias (List[torch.Tensor]): MLA QB quantization bias per layer.
-        mla_q_b_deq_scale (List[torch.Tensor]): MLA QB dequantization scale per layer.
-        mla_q_norm (List[torch.Tensor]): MLA Q norm weights per layer.
-        mla_q_norm_bias (List[torch.Tensor]): MLA Q norm bias per layer.
+        embed (torch.Tensor): Embedding table, shape ``[vocab_size/def_tp_size, hidden_size]``,
+            model dtype (fp16/bf16).
+        norm (torch.Tensor): Final RMSNorm weight, shape ``[hidden_size]``, model dtype.
+        norm_bias (torch.Tensor): Final RMSNorm bias, shape ``[hidden_size]``, model dtype. Optional.
+        head (torch.Tensor): LM head weight, shape ``[vocab_size/def_tp_size, hidden_size]``,
+            model dtype.
+        attn_norm (List[torch.Tensor]): Attention norm weights per layer, each
+            ``[hidden_size]``, model dtype.
+        attn_norm_bias (List[torch.Tensor]): Attention norm bias per layer, each
+            ``[hidden_size]``, model dtype. Optional.
+        attn_out (List[torch.Tensor]): Attention output projection weights per layer, each
+            ``[hidden_size, n_local_heads*head_dim]`` (MHA) / ``[hidden_size,
+            n_local_heads*v_head_dim]`` (MLA). Model dtype / int8 / int4. Empty for CxA.
+        attn_out_input_scale (List[torch.Tensor]): Attn output static-quant input scale
+            (reciprocal) per layer, each ``[in_features]``, bf16.
+        attn_out_input_offset (List[torch.Tensor]): Attn output static-quant input offset
+            per layer, each ``[in_features]``, bf16.
+        attn_out_quant_bias (List[torch.Tensor]): Attn output quantization bias per layer,
+            each ``[hidden_size]``, int32 (tp_rank 0 only).
+        attn_out_deq_scale (List[torch.Tensor]): Attn output dequantization scale per layer,
+            each ``[2*hidden_size, 1]``, fp32.
+        mha_qkv (List[torch.Tensor]): MHA QKV weights per layer, each
+            ``[(n_local_heads+2*n_local_kv_heads)*head_dim (+q_dim if gate), hidden_size]``,
+            model dtype / int8 / int4.
+        mha_qkv_bias (List[torch.Tensor]): MHA QKV bias per layer, each
+            ``[qkv_dim (+q_dim if gate)]``, model dtype. Present only when ``qkv_bias`` is set.
+        mha_qkv_input_scale (List[torch.Tensor]): MHA QKV static-quant input scale per layer,
+            each ``[hidden_size]``, bf16.
+        mha_qkv_input_offset (List[torch.Tensor]): MHA QKV static-quant input offset per
+            layer, each ``[hidden_size]``, bf16.
+        mha_qkv_quant_bias (List[torch.Tensor]): MHA QKV quantization bias per layer, each
+            ``[qkv_dim(+gate)]``, int32.
+        mha_qkv_deq_scale (List[torch.Tensor]): MHA QKV dequantization scale per layer, each
+            ``[2*qkv_dim(+gate), 1]``, fp32.
+        mha_q_norm (List[torch.Tensor]): MHA Q norm weights per layer, each ``[head_dim]``
+            (qk_norm) or ``[head_dim*n_local_heads]`` (qk_norm_full), model dtype.
+        mha_q_norm_bias (List[torch.Tensor]): MHA Q norm bias per layer, same shape as
+            :attr:`mha_q_norm`, model dtype. Optional.
+        mha_k_norm (List[torch.Tensor]): MHA K norm weights per layer, each ``[head_dim]``
+            (qk_norm) or ``[head_dim*n_local_kv_heads]`` (qk_norm_full), model dtype.
+        mha_k_norm_bias (List[torch.Tensor]): MHA K norm bias per layer, same shape as
+            :attr:`mha_k_norm`, model dtype. Optional.
+        mla_qkv_a (List[torch.Tensor]): MLA QA KVA weights per layer, each
+            ``[q_lora_rank + kv_lora_rank + rope_head_dim, hidden_size]``, model dtype /
+            int8 / int4.
+        mla_qkv_a_input_scale (List[torch.Tensor]): MLA QA KVA quantization input scale per
+            layer, each ``[hidden_size]``, bf16.
+        mla_qkv_a_input_offset (List[torch.Tensor]): MLA QA KVA quantization input offset
+            per layer, each ``[hidden_size]``, bf16.
+        mla_qkv_a_quant_bias (List[torch.Tensor]): MLA QA KVA quantization bias per layer,
+            each ``[q_lora_rank + kv_lora_rank + rope_head_dim]``, int32.
+        mla_qkv_a_deq_scale (List[torch.Tensor]): MLA QA KVA dequantization scale per layer,
+            each ``[2*(q_lora_rank + kv_lora_rank + rope_head_dim), 1]``, fp32.
+        mla_q_b (List[torch.Tensor]): MLA QB weights per layer, each
+            ``[n_local_heads*(nope_head_dim+rope_head_dim), q_lora_rank]`` (MLA/DSA) or
+            ``[n_local_heads*head_dim, q_lora_rank]`` (CxA), model dtype / int8 / int4.
+        mla_q_b_input_scale (List[torch.Tensor]): MLA QB quantization input scale per layer,
+            each ``[q_lora_rank]``, bf16.
+        mla_q_b_input_offset (List[torch.Tensor]): MLA QB quantization input offset per
+            layer, each ``[q_lora_rank]``, bf16.
+        mla_q_b_quant_bias (List[torch.Tensor]): MLA QB quantization bias per layer, each
+            ``[out_dim]``, int32.
+        mla_q_b_deq_scale (List[torch.Tensor]): MLA QB dequantization scale per layer, each
+            ``[2*out_dim, 1]``, fp32.
+        mla_q_norm (List[torch.Tensor]): MLA Q norm weights per layer, each
+            ``[q_lora_rank]``, model dtype.
+        mla_q_norm_bias (List[torch.Tensor]): MLA Q norm bias per layer, each
+            ``[q_lora_rank]``, model dtype. Optional.
         mla_wuv (List[torch.Tensor]): MLA W_UV weights per layer, shape (n_local_heads, kv_lora_rank, v_head_dim).
         mla_wuk_t (List[torch.Tensor]): MLA W_UK^T weights per layer, shape (n_local_heads, qk_nope_head_dim, kv_lora_rank).
-        mla_kv_norm (List[torch.Tensor]): MLA KV norm weights per layer.
-        mla_kv_norm_bias (List[torch.Tensor]): MLA KV norm bias per layer.
-        index_q_b (List[torch.Tensor]): DSA index QB weights per layer.
-        index_q_b_input_scale (List[torch.Tensor]): DSA index QB quantization input scale per layer.
-        index_q_b_input_offset (List[torch.Tensor]): DSA index QB quantization input offset per layer.
-        index_q_b_quant_bias (List[torch.Tensor]): DSA index QB quantization bias per layer.
-        index_q_b_deq_scale (List[torch.Tensor]): DSA index QB dequantization scale per layer.
-        index_k_weights_proj (List[torch.Tensor]): DSA index K and weights projection combined per layer.
-        index_k_norm (List[torch.Tensor]): DSA index K norm weights per layer.
-        index_k_norm_bias (List[torch.Tensor]): DSA index K norm bias per layer.
-        linear_in_proj_qkv (List[torch.Tensor]): Linear attention QKV projection weights per layer.
-        linear_in_proj_z (List[torch.Tensor]): Linear attention Z projection weights per layer.
-        linear_in_proj_b (List[torch.Tensor]): Linear attention B projection weights per layer.
-        linear_in_proj_a (List[torch.Tensor]): Linear attention A projection weights per layer.
-        linear_conv1d (List[torch.Tensor]): Linear attention conv1d weights per layer.
-        linear_a_log (List[torch.Tensor]): Linear attention A_log parameters per layer.
-        linear_dt_bias (List[torch.Tensor]): Linear attention dt_bias parameters per layer.
-        linear_norm (List[torch.Tensor]): Linear attention gated RMSNorm weights per layer.
-        linear_out_proj (List[torch.Tensor]): Linear attention output projection weights per layer.
-        mlp_norm (List[torch.Tensor]): MLP norm weights per layer.
-        mlp_norm_bias (List[torch.Tensor]): MLP norm bias per layer.
-        mlp_up_gate (List[torch.Tensor]): Dense up-gate weights per layer.
-        mlp_up_gate_input_scale (List[torch.Tensor]): Dense up-gate quantization input scale per layer.
-        mlp_up_gate_input_offset (List[torch.Tensor]): Dense up-gate quantization input offset per layer.
-        mlp_up_gate_quant_bias (List[torch.Tensor]): Dense up-gate quantization bias per layer.
-        mlp_up_gate_deq_scale (List[torch.Tensor]): Dense up-gate dequantization scale per layer.
-        mlp_down (List[torch.Tensor]): Dense down weights per layer.
-        mlp_down_input_scale (List[torch.Tensor]): Dense down quantization input scale per layer.
-        mlp_down_input_offset (List[torch.Tensor]): Dense down quantization input offset per layer.
-        mlp_down_quant_bias (List[torch.Tensor]): Dense down quantization bias per layer.
-        mlp_down_deq_scale (List[torch.Tensor]): Dense down dequantization scale per layer.
-        gate (List[torch.Tensor]): MoE gate weights per layer.
-        gate_bias (List[torch.Tensor]): MoE gate bias per layer.
-        se_up_gate (List[torch.Tensor]): Shared-expert up-gate weights per layer.
-        se_up_gate_deq_scale (List[torch.Tensor]): Shared-expert up-gate scales per layer.
-        se_down (List[torch.Tensor]): Shared-expert down weights per layer.
-        se_down_deq_scale (List[torch.Tensor]): Shared-expert down scales per layer.
+        mla_kv_norm (List[torch.Tensor]): MLA KV norm weights per layer, each
+            ``[kv_lora_rank]`` (MLA/DSA) or ``[head_dim]`` (CxA), model dtype.
+        mla_kv_norm_bias (List[torch.Tensor]): MLA KV norm bias per layer, same shape as
+            :attr:`mla_kv_norm`, model dtype. Optional.
+        index_q_b (List[torch.Tensor]): DSA index QB weights per layer, each
+            ``[index_n_heads*index_head_dim, q_lora_rank]``, model dtype / int8 / int4
+            (expected to run with ``def_tp_size == 1``; not enforced natively).
+        index_q_b_input_scale (List[torch.Tensor]): DSA index QB quantization input scale
+            per layer, each ``[q_lora_rank]``, bf16.
+        index_q_b_input_offset (List[torch.Tensor]): DSA index QB quantization input offset
+            per layer, each ``[q_lora_rank]``, bf16.
+        index_q_b_quant_bias (List[torch.Tensor]): DSA index QB quantization bias per layer,
+            each ``[index_n_heads*index_head_dim]``, int32.
+        index_q_b_deq_scale (List[torch.Tensor]): DSA index QB dequantization scale per
+            layer, each ``[2*index_n_heads*index_head_dim, 1]``, fp32.
+        index_k_weights_proj (List[torch.Tensor]): DSA index K and weights projection
+            combined per layer, each ``[index_head_dim + index_n_heads, hidden_size]``,
+            model dtype.
+        index_k_norm (List[torch.Tensor]): DSA index K norm weights per layer, each
+            ``[index_head_dim]``, model dtype or fp32.
+        index_k_norm_bias (List[torch.Tensor]): DSA index K norm bias per layer, each
+            ``[index_head_dim]``, model dtype or fp32.
+        linear_in_proj_qkv (List[torch.Tensor]): Linear attention QKV projection weights per
+            layer, each ``[2*n_local_k*linear_key_head_dim + n_local_v*linear_value_head_dim,
+            hidden_size]``, model dtype / int8 / int4.
+        linear_in_proj_z (List[torch.Tensor]): Linear attention Z projection weights per
+            layer, each ``[n_local_v*linear_value_head_dim, hidden_size]``, model dtype /
+            int8 / int4.
+        linear_in_proj_b (List[torch.Tensor]): Linear attention B projection weights per
+            layer, each ``[n_local_v, hidden_size]``, model dtype / int8 / int4.
+        linear_in_proj_a (List[torch.Tensor]): Linear attention A projection weights per
+            layer, each ``[n_local_v, hidden_size]``, model dtype / int8 / int4.
+        linear_conv1d (List[torch.Tensor]): Linear attention conv1d weights per layer, each
+            ``[conv_dim, 1, linear_conv_kernel_dim]``, model dtype.
+        linear_a_log (List[torch.Tensor]): Linear attention A_log parameters per layer, each
+            ``[n_local_v]``, model dtype.
+        linear_dt_bias (List[torch.Tensor]): Linear attention dt_bias parameters per layer,
+            each ``[n_local_v]``, model dtype.
+        linear_norm (List[torch.Tensor]): Linear attention gated RMSNorm weights per layer,
+            each ``[linear_value_head_dim]``, model dtype.
+        linear_out_proj (List[torch.Tensor]): Linear attention output projection weights per
+            layer, each ``[hidden_size, n_local_v*linear_value_head_dim]``, model dtype /
+            int8 / int4.
+        mlp_norm (List[torch.Tensor]): MLP norm weights per layer, each ``[hidden_size]``,
+            model dtype.
+        mlp_norm_bias (List[torch.Tensor]): MLP norm bias per layer, each ``[hidden_size]``,
+            model dtype. Optional.
+        mlp_up_gate (List[torch.Tensor]): Dense up-gate weights per layer, each
+            ``[2*local_intermediate_size, hidden_size]``, model dtype / int8 / int4.
+        mlp_up_gate_input_scale (List[torch.Tensor]): Dense up-gate quantization input scale
+            per layer, each ``[hidden_size]``, bf16.
+        mlp_up_gate_input_offset (List[torch.Tensor]): Dense up-gate quantization input
+            offset per layer, each ``[hidden_size]``, bf16.
+        mlp_up_gate_quant_bias (List[torch.Tensor]): Dense up-gate quantization bias per
+            layer, each ``[2*local_intermediate_size]``, int32.
+        mlp_up_gate_deq_scale (List[torch.Tensor]): Dense up-gate dequantization scale per
+            layer, each ``[2*2*local_intermediate_size, 1]``, fp32.
+        mlp_down (List[torch.Tensor]): Dense down weights per layer, each
+            ``[hidden_size, local_intermediate_size]``, model dtype / int8 / int4.
+        mlp_down_input_scale (List[torch.Tensor]): Dense down quantization input scale per
+            layer, each ``[local_intermediate_size]``, bf16.
+        mlp_down_input_offset (List[torch.Tensor]): Dense down quantization input offset per
+            layer, each ``[local_intermediate_size]``, bf16.
+        mlp_down_quant_bias (List[torch.Tensor]): Dense down quantization bias per layer,
+            each ``[hidden_size]``, int32.
+        mlp_down_deq_scale (List[torch.Tensor]): Dense down dequantization scale per layer,
+            each ``[2*hidden_size, 1]``, fp32.
+        gate (List[torch.Tensor]): MoE gate weights per layer, each
+            ``[n_routed_experts, hidden_size]``, fp32 or bf16.
+        gate_bias (List[torch.Tensor]): MoE gate bias per layer, each
+            ``[n_routed_experts]``, fp32.
+        se_up_gate (List[torch.Tensor]): Shared-expert up-gate weights per layer, each
+            ``[2*moe_intermediate_size, hidden_size]`` (or TP-sharded), model dtype / int8.
+        se_up_gate_deq_scale (List[torch.Tensor]): Shared-expert up-gate scales per layer,
+            each ``[2*2*moe_intermediate_size, 1]``, fp32.
+        se_down (List[torch.Tensor]): Shared-expert down weights per layer, each
+            ``[hidden_size, moe_intermediate_size]`` (or TP-sharded), model dtype / int8.
+        se_down_deq_scale (List[torch.Tensor]): Shared-expert down scales per layer, each
+            ``[2*hidden_size, 1]``, fp32.
         se_gate (List[torch.Tensor]): Optional shared-expert sigmoid gate, shape [1, hidden] per MoE layer.
-        re_up_gate (List[torch.Tensor]): Routed-expert up-gate weights.
+        re_up_gate (List[torch.Tensor]): Routed-expert up-gate weights, one per local expert,
+            each ``[2*(moe_intermediate_size/moe_tp_size), hidden_size]``, model dtype /
+            int8 / int4.
         re_up_gate_scale (List[torch.Tensor]): Routed-expert up-gate scales(deprecated).
-        re_up_gate_deq_scale (List[torch.Tensor]): Routed-expert up-gate scales.
-        re_down (List[torch.Tensor]): Routed-expert down weights.
+        re_up_gate_deq_scale (List[torch.Tensor]): Routed-expert up-gate scales, one per
+            local expert, each ``[2*2*(moe_intermediate_size/moe_tp_size), 1]``, fp32.
+        re_down (List[torch.Tensor]): Routed-expert down weights, one per local expert, each
+            ``[hidden_size, moe_intermediate_size/moe_tp_size]``, model dtype / int8 / int4.
         re_down_scale (List[torch.Tensor]): Routed-expert down scales(deprecated).
-        re_down_deq_scale (List[torch.Tensor]): Routed-expert down scales.
-        attn_sink (List[torch.Tensor]): Per-head attention sink (DeepSeek-V4).
-        attn_wq_a (List[torch.Tensor]): Per-layer attention wq_a (DeepSeek-V4).
-        attn_wq_a_input_scale (List[torch.Tensor]): Attn wq_a quantization input scale per layer.
-        attn_wq_a_input_offset (List[torch.Tensor]): Attn wq_a quantization input offset per layer.
-        attn_wq_a_quant_bias (List[torch.Tensor]): Attn wq_a quantization bias per layer.
-        attn_wq_a_deq_scale (List[torch.Tensor]): Attn wq_a dequantization scale per layer.
-        attn_wo_a (List[torch.Tensor]): Per-layer output projection wo_a (DeepSeek-V4).
-        attn_wo_b (List[torch.Tensor]): Per-layer output projection wo_b (DeepSeek-V4).
-        attn_wkv (List[torch.Tensor]): Per-layer attention wkv (DeepSeek-V4).
-        attn_wkv_input_scale (List[torch.Tensor]): Attn wkv quantization input scale per layer.
-        attn_wkv_input_offset (List[torch.Tensor]): Attn wkv quantization input offset per layer.
-        attn_wkv_quant_bias (List[torch.Tensor]): Attn wkv quantization bias per layer.
-        attn_wkv_deq_scale (List[torch.Tensor]): Attn wkv dequantization scale per layer.
-        comp_ape (List[torch.Tensor]): Compressor ape per layer (DeepSeek-V4).
-        comp_w_kv (List[torch.Tensor]): Compressor wkv per layer (DeepSeek-V4, fp32).
-        comp_w_gate (List[torch.Tensor]): Compressor wgate per layer (DeepSeek-V4, fp32).
-        comp_norm (List[torch.Tensor]): Compressor RMSNorm weight per layer (DeepSeek-V4).
-        idx_wq_b (List[torch.Tensor]): Indexer wq_b per layer (DeepSeek-V4).
-        idx_wq_b_input_scale (List[torch.Tensor]): Indexer wq_b quantization input scale per layer.
-        idx_wq_b_input_offset (List[torch.Tensor]): Indexer wq_b quantization input offset per layer.
-        idx_wq_b_quant_bias (List[torch.Tensor]): Indexer wq_b quantization bias per layer.
-        idx_wq_b_deq_scale (List[torch.Tensor]): Indexer wq_b dequantization scale per layer.
-        idx_weights_proj (List[torch.Tensor]): Indexer weights_proj per layer (DeepSeek-V4).
-        idx_comp_ape (List[torch.Tensor]): Indexer compressor ape per layer (DeepSeek-V4).
-        idx_comp_w_kv (List[torch.Tensor]): Indexer compressor wkv per layer (fp32).
-        idx_comp_w_gate (List[torch.Tensor]): Indexer compressor wgate per layer (fp32).
-        idx_comp_norm (List[torch.Tensor]): Indexer compressor norm per layer (DeepSeek-V4).
-        hc_attn_fn (List[torch.Tensor]): MHC attn fn per layer (DeepSeek-V4).
-        hc_ffn_fn (List[torch.Tensor]): MHC ffn fn per layer (DeepSeek-V4).
-        hc_attn_base (List[torch.Tensor]): MHC attn base per layer (DeepSeek-V4).
-        hc_ffn_base (List[torch.Tensor]): MHC ffn base per layer (DeepSeek-V4).
-        hc_attn_scale (List[torch.Tensor]): MHC attn scale per layer (DeepSeek-V4).
-        hc_ffn_scale (List[torch.Tensor]): MHC ffn scale per layer (DeepSeek-V4).
-        hc_head_fn (torch.Tensor): MHC head fn (Transformer-level, DeepSeek-V4).
-        hc_head_base (torch.Tensor): MHC head base (Transformer-level, DeepSeek-V4).
-        hc_head_scale (torch.Tensor): MHC head scale (Transformer-level, DeepSeek-V4).
+        re_down_deq_scale (List[torch.Tensor]): Routed-expert down scales, one per local
+            expert, each ``[2*hidden_size, 1]``, fp32.
+        attn_sink (List[torch.Tensor]): Per-head attention sink (DeepSeek-V4), each
+            ``[n_local_heads]``, fp32.
+        attn_wq_a (List[torch.Tensor]): Per-layer attention wq_a (DeepSeek-V4), each
+            ``[q_lora_rank, hidden_size]``, model dtype / int8 / int4.
+        attn_wq_a_input_scale (List[torch.Tensor]): Attn wq_a quantization input scale per
+            layer, each ``[hidden_size]``, bf16.
+        attn_wq_a_input_offset (List[torch.Tensor]): Attn wq_a quantization input offset per
+            layer, each ``[hidden_size]``, bf16.
+        attn_wq_a_quant_bias (List[torch.Tensor]): Attn wq_a quantization bias per layer,
+            each ``[q_lora_rank]``, int32.
+        attn_wq_a_deq_scale (List[torch.Tensor]): Attn wq_a dequantization scale per layer,
+            each ``[2*q_lora_rank, 1]``, fp32.
+        attn_wo_a (List[torch.Tensor]): Per-layer output projection wo_a (DeepSeek-V4), each
+            ``[n_local_groups*o_lora_rank, n_local_heads*head_dim/n_local_groups]``, model dtype.
+        attn_wo_b (List[torch.Tensor]): Per-layer output projection wo_b (DeepSeek-V4), each
+            ``[hidden_size, n_local_groups*o_lora_rank]``, model dtype.
+        attn_wkv (List[torch.Tensor]): Per-layer attention wkv (DeepSeek-V4), each
+            ``[head_dim, hidden_size]``, model dtype / int8 / int4.
+        attn_wkv_input_scale (List[torch.Tensor]): Attn wkv quantization input scale per
+            layer, each ``[hidden_size]``, bf16.
+        attn_wkv_input_offset (List[torch.Tensor]): Attn wkv quantization input offset per
+            layer, each ``[hidden_size]``, bf16.
+        attn_wkv_quant_bias (List[torch.Tensor]): Attn wkv quantization bias per layer, each
+            ``[head_dim]``, int32.
+        attn_wkv_deq_scale (List[torch.Tensor]): Attn wkv dequantization scale per layer,
+            each ``[2*head_dim, 1]``, fp32.
+        comp_ape (List[torch.Tensor]): Compressor ape per layer (DeepSeek-V4), each
+            ``[compress_ratios[layer], coff*head_dim]``, fp32.
+        comp_w_kv (List[torch.Tensor]): Compressor wkv per layer (DeepSeek-V4, fp32), each
+            ``[coff*head_dim, hidden_size]``.
+        comp_w_gate (List[torch.Tensor]): Compressor wgate per layer (DeepSeek-V4, fp32),
+            each ``[coff*head_dim, hidden_size]``.
+        comp_norm (List[torch.Tensor]): Compressor RMSNorm weight per layer (DeepSeek-V4),
+            each ``[head_dim]``, fp32.
+        idx_wq_b (List[torch.Tensor]): Indexer wq_b per layer (DeepSeek-V4), each
+            ``[index_n_heads*index_head_dim, q_lora_rank]``, model dtype / int8 / int4.
+        idx_wq_b_input_scale (List[torch.Tensor]): Indexer wq_b quantization input scale per
+            layer, each ``[q_lora_rank]``, bf16.
+        idx_wq_b_input_offset (List[torch.Tensor]): Indexer wq_b quantization input offset
+            per layer, each ``[q_lora_rank]``, bf16.
+        idx_wq_b_quant_bias (List[torch.Tensor]): Indexer wq_b quantization bias per layer,
+            each ``[index_n_heads*index_head_dim]``, int32.
+        idx_wq_b_deq_scale (List[torch.Tensor]): Indexer wq_b dequantization scale per
+            layer, each ``[2*index_n_heads*index_head_dim, 1]``, fp32.
+        idx_weights_proj (List[torch.Tensor]): Indexer weights_proj per layer (DeepSeek-V4),
+            each ``[index_n_heads, hidden_size]``, model dtype.
+        idx_comp_ape (List[torch.Tensor]): Indexer compressor ape per layer (DeepSeek-V4),
+            each ``[4, 2*index_head_dim]``, fp32.
+        idx_comp_w_kv (List[torch.Tensor]): Indexer compressor wkv per layer (fp32), each
+            ``[2*index_head_dim, hidden_size]``.
+        idx_comp_w_gate (List[torch.Tensor]): Indexer compressor wgate per layer (fp32),
+            each ``[2*index_head_dim, hidden_size]``.
+        idx_comp_norm (List[torch.Tensor]): Indexer compressor norm per layer (DeepSeek-V4),
+            each ``[index_head_dim]``, fp32.
+        hc_attn_fn (List[torch.Tensor]): MHC attn fn per layer (DeepSeek-V4), each
+            ``[(2+hc_mult)*hc_mult, hc_mult*hidden_size]``, fp32.
+        hc_ffn_fn (List[torch.Tensor]): MHC ffn fn per layer (DeepSeek-V4), each
+            ``[(2+hc_mult)*hc_mult, hc_mult*hidden_size]``, fp32.
+        hc_attn_base (List[torch.Tensor]): MHC attn base per layer (DeepSeek-V4), each
+            ``[(2+hc_mult)*hc_mult]``, fp32.
+        hc_ffn_base (List[torch.Tensor]): MHC ffn base per layer (DeepSeek-V4), each
+            ``[(2+hc_mult)*hc_mult]``, fp32.
+        hc_attn_scale (List[torch.Tensor]): MHC attn scale per layer (DeepSeek-V4), each
+            ``[3]``, fp32.
+        hc_ffn_scale (List[torch.Tensor]): MHC ffn scale per layer (DeepSeek-V4), each
+            ``[3]``, fp32.
+        hc_head_fn (torch.Tensor): MHC head fn (Transformer-level, DeepSeek-V4), shape
+            ``[hc_mult, hc_mult*hidden_size]``, fp32.
+        hc_head_base (torch.Tensor): MHC head base (Transformer-level, DeepSeek-V4), shape
+            ``[hc_mult]``, fp32.
+        hc_head_scale (torch.Tensor): MHC head scale (Transformer-level, DeepSeek-V4), shape
+            ``[1]``, fp32.
     """
 
     embed: torch.Tensor = ...
-    """Embedding weights."""
+    """Embedding table, shape ``[vocab_size/def_tp_size, hidden_size]``, model dtype (fp16/bf16)."""
     norm: torch.Tensor = ...
-    """Final normalization weights."""
+    """Final RMSNorm weight, shape ``[hidden_size]``, model dtype."""
     norm_bias: torch.Tensor = ...
-    """Final normalization bias."""
+    """Final RMSNorm bias, shape ``[hidden_size]``, model dtype. Optional (empty when absent)."""
     head: torch.Tensor = ...
-    """LM head weights."""
+    """LM head weight, shape ``[vocab_size/def_tp_size, hidden_size]``, model dtype."""
     attn_norm: List[torch.Tensor] = ...
-    """Attention norm weights per layer."""
+    """Attention norm weights per layer, each shape ``[hidden_size]``, model dtype."""
     attn_norm_bias: List[torch.Tensor] = ...
-    """Attention norm bias per layer."""
+    """Attention norm bias per layer, each shape ``[hidden_size]``, model dtype. Optional."""
     attn_out: List[torch.Tensor] = ...
-    """Attention output projection weights per layer."""
+    """Attention output projection weight per layer, shape ``[hidden_size, n_local_heads*head_dim]``
+    (MHA) or ``[hidden_size, n_local_heads*v_head_dim]`` (MLA/DSA). Model dtype, int8 (quantized),
+    or int32-packed int4. Empty for CxA (replaced by attn_wo_a/attn_wo_b). Row-parallel."""
     attn_out_input_scale: List[torch.Tensor] = ...
-    """Attn output quantization input scale per layer."""
+    """Attn output static-quant input scale (reciprocal) per layer, shape ``[in_features]``, bf16.
+    Present only when the weight is int8 with static quant."""
     attn_out_input_offset: List[torch.Tensor] = ...
-    """Attn output quantization input offset per layer."""
+    """Attn output static-quant input offset per layer, shape ``[in_features]``, bf16. Static quant only."""
     attn_out_quant_bias: List[torch.Tensor] = ...
-    """Attn output quantization bias per layer."""
+    """Attn output quantization bias per layer, shape ``[hidden_size]``, int32. Bound only on
+    tp_rank 0 (row-parallel). Used by both static and dynamic quantization."""
     attn_out_deq_scale: List[torch.Tensor] = ...
-    """Attn output dequantization scale per layer."""
+    """Attn output weight dequant scale per layer, shape ``[2*hidden_size, 1]``, fp32. Required
+    when the weight is int8."""
     mha_qkv: List[torch.Tensor] = ...
-    """MHA QKV weights per layer."""
+    """MHA fused QKV weight per layer, shape ``[(n_local_heads+2*n_local_kv_heads)*head_dim
+    (+ n_local_heads*head_dim if attn_output_gate), hidden_size]`` with fused layout [Q|K|V]
+    (or [Q|K|V|Gate]). Model dtype, int8, or int32-packed int4. MHA/hybrid full-attention layers."""
     mha_qkv_bias: List[torch.Tensor] = ...
-    """MHA QKV bias per layer."""
+    """MHA QKV bias per layer, shape ``[qkv_dim (+q_dim if gate)]``, model dtype. Present only
+    when config ``qkv_bias`` is true."""
     mha_qkv_input_scale: List[torch.Tensor] = ...
-    """MHA QKV quantization input scale per layer."""
+    """MHA QKV static-quant input scale (reciprocal) per layer, shape ``[hidden_size]``, bf16.
+    In hybrid models these lists also supply the linear_in_proj_* quant params."""
     mha_qkv_input_offset: List[torch.Tensor] = ...
-    """MHA QKV quantization input offset per layer."""
+    """MHA QKV static-quant input offset per layer, shape ``[hidden_size]``, bf16."""
     mha_qkv_quant_bias: List[torch.Tensor] = ...
-    """MHA QKV quantization bias per layer."""
+    """MHA QKV quantization bias per layer, shape ``[qkv_dim(+gate)]``, int32."""
     mha_qkv_deq_scale: List[torch.Tensor] = ...
-    """MHA QKV dequantization scale per layer."""
+    """MHA QKV weight dequant scale per layer, shape ``[2*qkv_dim(+gate), 1]``, fp32. Required
+    when the weight is int8."""
     mha_q_norm: List[torch.Tensor] = ...
-    """MHA Q norm weights per layer."""
+    """MHA Q norm weight per layer, shape ``[head_dim]`` (qk_norm) or
+    ``[head_dim*n_local_heads]`` (qk_norm_full), model dtype."""
     mha_q_norm_bias: List[torch.Tensor] = ...
-    """MHA Q norm bias per layer."""
+    """MHA Q norm bias per layer, same shape as :attr:`mha_q_norm`, model dtype. Optional."""
     mha_k_norm: List[torch.Tensor] = ...
-    """MHA K norm weights per layer."""
+    """MHA K norm weight per layer, shape ``[head_dim]`` (qk_norm) or
+    ``[head_dim*n_local_kv_heads]`` (qk_norm_full), model dtype."""
     mha_k_norm_bias: List[torch.Tensor] = ...
-    """MHA K norm bias per layer."""
+    """MHA K norm bias per layer, same shape as :attr:`mha_k_norm`, model dtype. Optional."""
     mla_qkv_a: List[torch.Tensor] = ...
-    """MLA fused Q A and KV A weights per layer."""
+    """MLA fused Q-A / KV-A weight per layer, shape
+    ``[q_lora_rank + kv_lora_rank + rope_head_dim, hidden_size]``, model dtype / int8 /
+    int32-packed int4. Not sharded."""
     mla_qkv_a_input_scale: List[torch.Tensor] = ...
-    """MLA QKVA 每层量化输入缩放因子"""
+    """MLA QKVA static-quant input scale (reciprocal) per layer, shape ``[hidden_size]``, bf16."""
     mla_qkv_a_input_offset: List[torch.Tensor] = ...
-    """MLA QKVA 每层量化输入偏移"""
+    """MLA QKVA static-quant input offset per layer, shape ``[hidden_size]``, bf16."""
     mla_qkv_a_quant_bias: List[torch.Tensor] = ...
-    """MLA QKVA 每层量化偏置"""
+    """MLA QKVA quantization bias per layer, shape
+    ``[q_lora_rank + kv_lora_rank + rope_head_dim]``, int32."""
     mla_qkv_a_deq_scale: List[torch.Tensor] = ...
-    """MLA QKVA 每层反量化缩放因子"""
+    """MLA QKVA weight dequant scale per layer, shape
+    ``[2*(q_lora_rank + kv_lora_rank + rope_head_dim), 1]``, fp32."""
     mla_q_b: List[torch.Tensor] = ...
-    """MLA QB weights per layer."""
+    """MLA Q-B weight per layer, shape ``[n_local_heads*(nope_head_dim+rope_head_dim),
+    q_lora_rank]`` (MLA/DSA) or ``[n_local_heads*head_dim, q_lora_rank]`` (CxA reuses the
+    field as wq_b). Model dtype / int8 / int32-packed int4. Column-parallel."""
     mla_q_b_input_scale: List[torch.Tensor] = ...
-    """MLA QB 每层量化输入缩放因子"""
+    """MLA QB static-quant input scale (reciprocal) per layer, shape ``[q_lora_rank]``, bf16."""
     mla_q_b_input_offset: List[torch.Tensor] = ...
-    """MLA QB 每层量化输入偏移"""
+    """MLA QB static-quant input offset per layer, shape ``[q_lora_rank]``, bf16."""
     mla_q_b_quant_bias: List[torch.Tensor] = ...
-    """MLA QB 每层量化偏置"""
+    """MLA QB quantization bias per layer, shape ``[out_dim]``, int32."""
     mla_q_b_deq_scale: List[torch.Tensor] = ...
-    """MLA QB 每层反量化缩放因子"""
+    """MLA QB weight dequant scale per layer, shape ``[2*out_dim, 1]``, fp32."""
     mla_q_norm: List[torch.Tensor] = ...
-    """MLA Q norm weights per layer."""
+    """MLA Q norm weight per layer, shape ``[q_lora_rank]``, model dtype."""
     mla_q_norm_bias: List[torch.Tensor] = ...
-    """MLA Q norm bias per layer."""
+    """MLA Q norm bias per layer, shape ``[q_lora_rank]``, model dtype. Optional."""
     mla_wuv: List[torch.Tensor] = ...
-    """MLA W_UV weights per layer, shape (n_local_heads, kv_lora_rank, v_head_dim)."""
+    """MLA W_UV weight per layer, shape (n_local_heads, kv_lora_rank, v_head_dim), model dtype."""
     mla_wuk_t: List[torch.Tensor] = ...
-    """MLA W_UK^T weights per layer, shape (n_local_heads, qk_nope_head_dim, kv_lora_rank)."""
+    """MLA W_UK^T weight per layer, shape (n_local_heads, qk_nope_head_dim, kv_lora_rank), model dtype."""
     mla_kv_norm: List[torch.Tensor] = ...
-    """MLA KV norm weights per layer."""
+    """MLA KV norm weight per layer, shape ``[kv_lora_rank]`` (MLA/DSA) or ``[head_dim]`` (CxA),
+    model dtype."""
     mla_kv_norm_bias: List[torch.Tensor] = ...
-    """MLA KV norm bias per layer."""
+    """MLA KV norm bias per layer, same shape as :attr:`mla_kv_norm`, model dtype. Optional."""
     index_q_b: List[torch.Tensor] = ...
-    """DSA index QB weights per layer."""
+    """DSA index QB weight per layer, shape ``[index_n_heads*index_head_dim, q_lora_rank]``,
+    model dtype / int8 / int32-packed int4. Bound only on full-indexer layers (expected to
+    run with ``def_tp_size == 1``; not enforced natively); empty on shared-indexer layers."""
     index_q_b_input_scale: List[torch.Tensor] = ...
-    """DSA index QB 每层量化输入缩放因子"""
+    """DSA index QB static-quant input scale (reciprocal) per layer, shape ``[q_lora_rank]``, bf16."""
     index_q_b_input_offset: List[torch.Tensor] = ...
-    """DSA index QB 每层量化输入偏移"""
+    """DSA index QB static-quant input offset per layer, shape ``[q_lora_rank]``, bf16."""
     index_q_b_quant_bias: List[torch.Tensor] = ...
-    """DSA index QB 每层量化偏置"""
+    """DSA index QB quantization bias per layer, shape ``[index_n_heads*index_head_dim]``, int32."""
     index_q_b_deq_scale: List[torch.Tensor] = ...
-    """DSA index QB 每层反量化缩放因子"""
+    """DSA index QB weight dequant scale per layer, shape ``[2*index_n_heads*index_head_dim, 1]``, fp32."""
     index_k_weights_proj: List[torch.Tensor] = ...
-    """DSA index K and weights projection combined per layer."""
+    """DSA index K/weights projection weight per layer, shape
+    ``[index_head_dim + index_n_heads, hidden_size]``, model dtype."""
     index_k_norm: List[torch.Tensor] = ...
-    """DSA index K norm weights per layer."""
+    """DSA index K LayerNorm weight per layer, shape ``[index_head_dim]``, model dtype or fp32."""
     index_k_norm_bias: List[torch.Tensor] = ...
-    """DSA index K norm bias per layer."""
+    """DSA index K LayerNorm bias per layer, shape ``[index_head_dim]``, model dtype or fp32."""
     linear_in_proj_qkv: List[torch.Tensor] = ...
-    """Linear attention QKV projection weights per layer."""
+    """Linear attention QKV projection weight per layer, shape
+    ``[2*n_local_k*linear_key_head_dim + n_local_v*linear_value_head_dim, hidden_size]``,
+    model dtype / int8 / int32-packed int4 (quant params via :attr:`mha_qkv_*`)."""
     linear_in_proj_z: List[torch.Tensor] = ...
-    """Linear attention Z projection weights per layer."""
+    """Linear attention Z projection weight per layer, shape
+    ``[n_local_v*linear_value_head_dim, hidden_size]``, model dtype / int8 / int4."""
     linear_in_proj_b: List[torch.Tensor] = ...
-    """Linear attention B projection weights per layer."""
+    """Linear attention B projection weight per layer, shape ``[n_local_v, hidden_size]``,
+    model dtype / int8 / int4."""
     linear_in_proj_a: List[torch.Tensor] = ...
-    """Linear attention A projection weights per layer."""
+    """Linear attention A projection weight per layer, shape ``[n_local_v, hidden_size]``,
+    model dtype / int8 / int4."""
     linear_conv1d: List[torch.Tensor] = ...
-    """Linear attention conv1d weights per layer."""
+    """Linear attention causal conv1d kernel per layer, shape
+    ``[conv_dim, 1, linear_conv_kernel_dim]`` where
+    ``conv_dim = 2*n_local_k*linear_key_head_dim + n_local_v*linear_value_head_dim``,
+    model dtype (fp32/fp16/bf16). kernel_dim <= 16."""
     linear_a_log: List[torch.Tensor] = ...
-    """Linear attention A_log parameters per layer."""
+    """Linear attention A_log parameter per layer, shape ``[n_local_v]``, model dtype."""
     linear_dt_bias: List[torch.Tensor] = ...
-    """Linear attention dt_bias parameters per layer."""
+    """Linear attention dt_bias parameter per layer, shape ``[n_local_v]``, model dtype."""
     linear_norm: List[torch.Tensor] = ...
-    """Linear attention gated RMSNorm weights per layer."""
+    """Linear attention gated RMSNorm weight per layer, shape ``[linear_value_head_dim]``
+    (replicated per v-head), model dtype."""
     linear_out_proj: List[torch.Tensor] = ...
-    """Linear attention output projection weights per layer."""
+    """Linear attention output projection weight per layer, shape
+    ``[hidden_size, n_local_v*linear_value_head_dim]``, model dtype / int8 / int4 (quant
+    params via :attr:`attn_out_*`). Row-parallel."""
     mlp_norm: List[torch.Tensor] = ...
-    """MLP norm weights per layer."""
+    """MLP norm weights per layer, each shape ``[hidden_size]``, model dtype."""
     mlp_norm_bias: List[torch.Tensor] = ...
-    """MLP norm bias per layer."""
+    """MLP norm bias per layer, each shape ``[hidden_size]``, model dtype. Optional."""
     mlp_up_gate: List[torch.Tensor] = ...
-    """Dense up-gate weights per layer."""
+    """Dense up-gate weight per layer, shape ``[2*local_intermediate_size, hidden_size]``,
+    model dtype / int8 / int32-packed int4. Dense layers only."""
     mlp_up_gate_input_scale: List[torch.Tensor] = ...
-    """Dense up-gate quantization input scale per layer."""
+    """Dense up-gate static-quant input scale (reciprocal) per layer, shape ``[hidden_size]``, bf16."""
     mlp_up_gate_input_offset: List[torch.Tensor] = ...
-    """Dense up-gate quantization input offset per layer."""
+    """Dense up-gate static-quant input offset per layer, shape ``[hidden_size]``, bf16."""
     mlp_up_gate_quant_bias: List[torch.Tensor] = ...
-    """Dense up-gate quantization bias per layer."""
+    """Dense up-gate quantization bias per layer, shape ``[2*local_intermediate_size]``, int32."""
     mlp_up_gate_deq_scale: List[torch.Tensor] = ...
-    """Dense up-gate dequantization scale per layer."""
+    """Dense up-gate weight dequant scale per layer, shape ``[2*2*local_intermediate_size, 1]``, fp32."""
     mlp_down: List[torch.Tensor] = ...
-    """Dense down weights per layer."""
+    """Dense down weight per layer, shape ``[hidden_size, local_intermediate_size]``, model
+    dtype / int8 / int32-packed int4. Row-parallel."""
     mlp_down_input_scale: List[torch.Tensor] = ...
-    """Dense down quantization input scale per layer."""
+    """Dense down static-quant input scale (reciprocal) per layer, shape
+    ``[local_intermediate_size]``, bf16."""
     mlp_down_input_offset: List[torch.Tensor] = ...
-    """Dense down quantization input offset per layer."""
+    """Dense down static-quant input offset per layer, shape
+    ``[local_intermediate_size]``, bf16."""
     mlp_down_quant_bias: List[torch.Tensor] = ...
-    """Dense down quantization bias per layer."""
+    """Dense down quantization bias per layer, shape ``[hidden_size]``, int32 (tp_rank 0 only)."""
     mlp_down_deq_scale: List[torch.Tensor] = ...
-    """Dense down dequantization scale per layer."""
+    """Dense down weight dequant scale per layer, shape ``[2*hidden_size, 1]``, fp32."""
     gate: List[torch.Tensor] = ...
-    """MoE gate weights per layer."""
+    """MoE gate weight per MoE layer, shape ``[n_routed_experts, hidden_size]``, fp32 or bf16."""
     gate_bias: List[torch.Tensor] = ...
-    """MoE gate bias per layer."""
+    """MoE gate bias per MoE layer, shape ``[n_routed_experts]``, fp32. Required for sigmoid
+    scoring; unused for softmax; optional on sqrtsoftplus hash layers."""
     tid2eid: List[torch.Tensor] = ...
-    """MoE hash layers: token-id->expert lookup table ``[vocab_size, n_act_experts]`` per layer."""
+    """MoE hash layers: token-id->expert lookup table ``[vocab_size, n_act_experts]`` int32 per layer."""
     se_up_gate: List[torch.Tensor] = ...
-    """Shared-expert up-gate weights per layer."""
+    """Shared-expert up-gate weight per MoE layer, shape ``[2*moe_intermediate_size, hidden_size]``
+    (replicated) or ``[2*moe_intermediate_size/tp, hidden_size]`` (TP-sharded; auto-detected).
+    Model dtype or int8."""
     se_up_gate_deq_scale: List[torch.Tensor] = ...
-    """Shared-expert up-gate scales per layer."""
+    """Shared-expert up-gate weight dequant scale per MoE layer, shape
+    ``[2*2*moe_intermediate_size, 1]``, fp32. Empty when unquantized."""
     se_down: List[torch.Tensor] = ...
-    """Shared-expert down weights per layer."""
+    """Shared-expert down weight per MoE layer, shape ``[hidden_size, moe_intermediate_size]``
+    (replicated) or ``[hidden_size, moe_intermediate_size/tp]`` (sharded). Model dtype or int8."""
     se_down_deq_scale: List[torch.Tensor] = ...
-    """Shared-expert down scales per layer."""
+    """Shared-expert down weight dequant scale per MoE layer, shape ``[2*hidden_size, 1]``, fp32."""
     se_gate: List[torch.Tensor] = ...
-    """Optional shared-expert sigmoid gate weights per MoE layer, shape [1, hidden]."""
+    """Optional shared-expert sigmoid gate weight per MoE layer, shape [1, hidden]."""
     re_up_gate: List[torch.Tensor] = ...
-    """Routed-expert up-gate weights."""
+    """Routed-expert up-gate weights, one per local expert, each shape
+    ``[2*(moe_intermediate_size/moe_tp_size), hidden_size]``. Model dtype, int8, or
+    int32-packed int4 (MSD W4A8). Flat list ordered layer-major then local expert."""
     re_up_gate_scale: List[torch.Tensor] = ...
     """Routed-expert up-gate scales.(deprecated)"""
     re_up_gate_deq_scale: List[torch.Tensor] = ...
-    """Routed-expert up-gate scales."""
+    """Routed-expert up-gate weight dequant scales, one per local expert, each shape
+    ``[2*2*(moe_intermediate_size/moe_tp_size), 1]``, fp32."""
     re_down: List[torch.Tensor] = ...
-    """Routed-expert down weights."""
+    """Routed-expert down weights, one per local expert, each shape
+    ``[hidden_size, moe_intermediate_size/moe_tp_size]``. Model dtype, int8, or int32-packed
+    int4. Same flat ordering as :attr:`re_up_gate`."""
     re_down_scale: List[torch.Tensor] = ...
     """Routed-expert down scales.(deprecated)"""
     re_down_deq_scale: List[torch.Tensor] = ...
-    """Routed-expert down scales."""
+    """Routed-expert down weight dequant scales, one per local expert, each shape
+    ``[2*hidden_size, 1]``, fp32."""
 
     # DeepSeek-V4 (CxA)
     attn_sink: List[torch.Tensor] = ...
-    """Per-head attention sink (DeepSeek-V4)."""
+    """Per-head attention sink (DeepSeek-V4), shape ``[n_local_heads]``, fp32."""
     attn_wq_a: List[torch.Tensor] = ...
-    """Per-layer attention wq_a (DeepSeek-V4)."""
+    """Per-layer attention wq_a (DeepSeek-V4), shape ``[q_lora_rank, hidden_size]``, model
+    dtype / int8 / int4."""
     attn_wq_a_input_scale: List[torch.Tensor] = ...
-    """Attn wq_a quantization input scale per layer."""
+    """Attn wq_a static-quant input scale (reciprocal) per layer, shape ``[hidden_size]``, bf16."""
     attn_wq_a_input_offset: List[torch.Tensor] = ...
-    """Attn wq_a quantization input offset per layer."""
+    """Attn wq_a static-quant input offset per layer, shape ``[hidden_size]``, bf16."""
     attn_wq_a_quant_bias: List[torch.Tensor] = ...
-    """Attn wq_a quantization bias per layer."""
+    """Attn wq_a quantization bias per layer, shape ``[q_lora_rank]``, int32."""
     attn_wq_a_deq_scale: List[torch.Tensor] = ...
-    """Attn wq_a dequantization scale per layer."""
+    """Attn wq_a weight dequant scale per layer, shape ``[2*q_lora_rank, 1]``, fp32."""
     attn_wo_a: List[torch.Tensor] = ...
-    """Per-layer output projection wo_a (DeepSeek-V4)."""
+    """Per-layer output projection wo_a (DeepSeek-V4), shape
+    ``[n_local_groups*o_lora_rank, n_local_heads*head_dim/n_local_groups]`` where
+    ``n_local_groups = o_groups/tp``, model dtype."""
     attn_wo_b: List[torch.Tensor] = ...
-    """Per-layer output projection wo_b (DeepSeek-V4)."""
+    """Per-layer output projection wo_b (DeepSeek-V4), shape
+    ``[hidden_size, n_local_groups*o_lora_rank]``, model dtype."""
     attn_wkv: List[torch.Tensor] = ...
-    """Per-layer attention wkv (DeepSeek-V4)."""
+    """Per-layer attention wkv (DeepSeek-V4), shape ``[head_dim, hidden_size]``, model dtype /
+    int8 / int4."""
     attn_wkv_input_scale: List[torch.Tensor] = ...
-    """Attn wkv quantization input scale per layer."""
+    """Attn wkv static-quant input scale (reciprocal) per layer, shape ``[hidden_size]``, bf16."""
     attn_wkv_input_offset: List[torch.Tensor] = ...
-    """Attn wkv quantization input offset per layer."""
+    """Attn wkv static-quant input offset per layer, shape ``[hidden_size]``, bf16."""
     attn_wkv_quant_bias: List[torch.Tensor] = ...
-    """Attn wkv quantization bias per layer."""
+    """Attn wkv quantization bias per layer, shape ``[head_dim]``, int32."""
     attn_wkv_deq_scale: List[torch.Tensor] = ...
-    """Attn wkv dequantization scale per layer."""
+    """Attn wkv weight dequant scale per layer, shape ``[2*head_dim, 1]``, fp32."""
     comp_ape: List[torch.Tensor] = ...
-    """Compressor ape per layer (DeepSeek-V4)."""
+    """Compressor ape per layer (DeepSeek-V4), shape ``[compress_ratios[layer],
+    coff*head_dim]`` with ``coff = 2`` if the ratio is 4 else ``1``, fp32. Empty on
+    ratio-0 layers."""
     comp_w_kv: List[torch.Tensor] = ...
-    """Compressor wkv per layer (DeepSeek-V4, fp32)."""
+    """Compressor wkv per layer (DeepSeek-V4, fp32), shape ``[coff*head_dim, hidden_size]``.
+    Empty on ratio-0 layers."""
     comp_w_gate: List[torch.Tensor] = ...
-    """Compressor wgate per layer (DeepSeek-V4, fp32)."""
+    """Compressor wgate per layer (DeepSeek-V4, fp32), shape ``[coff*head_dim, hidden_size]``.
+    Empty on ratio-0 layers."""
     comp_norm: List[torch.Tensor] = ...
-    """Compressor RMSNorm weight per layer (DeepSeek-V4)."""
+    """Compressor RMSNorm weight per layer (DeepSeek-V4), shape ``[head_dim]``, fp32. Empty on
+    ratio-0 layers."""
     # Indexer.wq_b is v4-specific (different shape from DSA's index_q_b).
     idx_wq_b: List[torch.Tensor] = ...
-    """Indexer wq_b per layer (DeepSeek-V4)."""
+    """Indexer wq_b per layer (DeepSeek-V4), shape ``[index_n_heads*index_head_dim,
+    q_lora_rank]``, model dtype / int8 / int4. Bound only on compress_ratios==4 layers."""
     idx_wq_b_input_scale: List[torch.Tensor] = ...
-    """Indexer wq_b quantization input scale per layer."""
+    """Indexer wq_b static-quant input scale (reciprocal) per layer, shape ``[q_lora_rank]``, bf16."""
     idx_wq_b_input_offset: List[torch.Tensor] = ...
-    """Indexer wq_b quantization input offset per layer."""
+    """Indexer wq_b static-quant input offset per layer, shape ``[q_lora_rank]``, bf16."""
     idx_wq_b_quant_bias: List[torch.Tensor] = ...
-    """Indexer wq_b quantization bias per layer."""
+    """Indexer wq_b quantization bias per layer, shape ``[index_n_heads*index_head_dim]``, int32."""
     idx_wq_b_deq_scale: List[torch.Tensor] = ...
-    """Indexer wq_b dequantization scale per layer."""
+    """Indexer wq_b weight dequant scale per layer, shape
+    ``[2*index_n_heads*index_head_dim, 1]``, fp32."""
     idx_weights_proj: List[torch.Tensor] = ...
-    """Indexer weights_proj per layer (DeepSeek-V4)."""
+    """Indexer weights_proj per layer (DeepSeek-V4), shape ``[index_n_heads, hidden_size]``,
+    model dtype. Ratio-4 layers only."""
     idx_comp_ape: List[torch.Tensor] = ...
-    """Indexer compressor ape per layer (DeepSeek-V4)."""
+    """Indexer compressor ape per layer (DeepSeek-V4), shape ``[4, 2*index_head_dim]``, fp32.
+    Ratio-4 layers only."""
     idx_comp_w_kv: List[torch.Tensor] = ...
-    """Indexer compressor wkv per layer (fp32)."""
+    """Indexer compressor wkv per layer (fp32), shape ``[2*index_head_dim, hidden_size]``.
+    Ratio-4 layers only."""
     idx_comp_w_gate: List[torch.Tensor] = ...
-    """Indexer compressor wgate per layer (fp32)."""
+    """Indexer compressor wgate per layer (fp32), shape ``[2*index_head_dim, hidden_size]``.
+    Ratio-4 layers only."""
     idx_comp_norm: List[torch.Tensor] = ...
-    """Indexer compressor norm per layer (DeepSeek-V4)."""
+    """Indexer compressor norm per layer (DeepSeek-V4), shape ``[index_head_dim]``, fp32.
+    Ratio-4 layers only."""
     hc_attn_fn: List[torch.Tensor] = ...
-    """MHC attn fn per layer (DeepSeek-V4)."""
+    """MHC attn mix matrix per layer (DeepSeek-V4), shape
+    ``[(2+hc_mult)*hc_mult, hc_mult*hidden_size]``, fp32."""
     hc_ffn_fn: List[torch.Tensor] = ...
-    """MHC ffn fn per layer (DeepSeek-V4)."""
+    """MHC ffn mix matrix per layer (DeepSeek-V4), shape
+    ``[(2+hc_mult)*hc_mult, hc_mult*hidden_size]``, fp32."""
     hc_attn_base: List[torch.Tensor] = ...
-    """MHC attn base per layer (DeepSeek-V4)."""
+    """MHC attn bias per layer (DeepSeek-V4), shape ``[(2+hc_mult)*hc_mult]``, fp32."""
     hc_ffn_base: List[torch.Tensor] = ...
-    """MHC ffn base per layer (DeepSeek-V4)."""
+    """MHC ffn bias per layer (DeepSeek-V4), shape ``[(2+hc_mult)*hc_mult]``, fp32."""
     hc_attn_scale: List[torch.Tensor] = ...
-    """MHC attn scale per layer (DeepSeek-V4)."""
+    """MHC attn per-segment scale per layer (DeepSeek-V4), shape ``[3]`` (pre/post/comb), fp32."""
     hc_ffn_scale: List[torch.Tensor] = ...
-    """MHC ffn scale per layer (DeepSeek-V4)."""
+    """MHC ffn per-segment scale per layer (DeepSeek-V4), shape ``[3]`` (pre/post/comb), fp32."""
     hc_head_fn: torch.Tensor = ...
-    """MHC head fn (Transformer-level, DeepSeek-V4)."""
+    """MHC head mix matrix (Transformer-level, DeepSeek-V4), shape
+    ``[hc_mult, hc_mult*hidden_size]``, fp32."""
     hc_head_base: torch.Tensor = ...
-    """MHC head base (Transformer-level, DeepSeek-V4)."""
+    """MHC head bias (Transformer-level, DeepSeek-V4), shape ``[hc_mult]``, fp32 (pre-bias only)."""
     hc_head_scale: torch.Tensor = ...
-    """MHC head scale (Transformer-level, DeepSeek-V4)."""
+    """MHC head scale (Transformer-level, DeepSeek-V4), shape ``[1]``, fp32 (scale_pre only)."""
 
     def init(self, config: ModelConfig, rank: int = 0) -> None:
         """Initialize native model state from Python-provided weights.
@@ -820,11 +1007,24 @@ class Model:
 
         Args:
             rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input token tensor.
+            input (torch.Tensor): Input token ids, shape ``[num_tokens]``, int32/int64 device.
             attn_meta (AttnMeta): Host-side attention metadata.
-            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor shared by all layers.
-            output (torch.Tensor): Output hidden-state buffer.
+            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache, model dtype,
+                paged layout (outer dim = block count):
+                MHA ``[blocks, block_size, n_local_kv_heads, head_dim]`` (k, v);
+                MLA/DSA k-nope ``[blocks, block_size, n_local_kv_heads, kv_lora_rank]`` +
+                pe ``[blocks, block_size, n_local_kv_heads, rope_head_dim]`` (DSA adds
+                indexer k ``[blocks, block_size, 1, index_head_dim]``);
+                HYBRID linear layers hold conv state ``[max_batch, conv_dim,
+                linear_conv_kernel_dim]`` + ssm state ``[max_batch, n_local_v,
+                linear_key_head_dim, linear_value_head_dim]``;
+                CXA holds the 5-tuple (indexer_state, indexer_k, compress_kv, state, swa_kv).
+            freqs_cis (torch.Tensor): Rotary frequency table shared by all layers, shape
+                ``[max_position, rope_head_dim]``, model dtype (per row ``[cos | sin]``
+                concatenated). Indexed by each token's ``position`` value, not by row order,
+                so it must cover the full ``max_seq_len`` range.
+            output (torch.Tensor): Output hidden-state buffer, shape
+                ``[num_tokens, hidden_size]``, model dtype.
             curr_stream (int): Optional ACL stream pointer cast to integer.
 
         Returns:
@@ -846,9 +1046,13 @@ class Model:
 
         Args:
             rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input hidden-state tensor.
-            indices (torch.Tensor): Logits indices.
-            output (torch.Tensor): Output logits tensor.
+            input (torch.Tensor): Input hidden states, shape ``[num_tokens, hidden_size]``,
+                model dtype.
+            indices (torch.Tensor): Logits indices (last-row gather per sample), shape
+                ``[batch]``, int32 device.
+            output (torch.Tensor): Output logits tensor, shape
+                ``[def_tp_size, num_tokens, vocab_size/def_tp_size]``, model dtype
+                (all-gathered over TP along dim 0).
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:
@@ -877,13 +1081,16 @@ class Model:
 
         Args:
             rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input token tensor.
+            input (torch.Tensor): Input token ids, shape ``[num_tokens]``, int32/int64 device.
             attn_meta (AttnMeta): Host-side attention metadata.
-            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
+            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache (see :meth:`forward`).
             freqs_cis (Union[torch.Tensor, Sequence[torch.Tensor]]): Rotary
-                frequency tensor shared by all layers, or a per-layer sequence
-            indices (torch.Tensor): Logits indices.
-            output (torch.Tensor): Output logits buffer.
+                frequency table shared by all layers, or a per-layer sequence; each
+                ``[max_position, rope_head_dim]``, model dtype (per row ``[cos | sin]``
+                concatenated, indexed by token position value).
+            indices (torch.Tensor): Logits indices, shape ``[batch]``, int32 device.
+            output (torch.Tensor): Output logits buffer, shape
+                ``[def_tp_size, max_tokens_dp, vocab_size/def_tp_size]``, model dtype.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:
@@ -909,16 +1116,22 @@ class Model:
 
         Args:
             rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input token tensor.
+            input (torch.Tensor): Input embeddings, shape ``[num_tokens, hidden_size]``,
+                model dtype (no embedding lookup).
             attn_meta (AttnMeta): Host-side attention metadata.
-            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
-            output (torch.Tensor): Output hidden-state buffer.
+            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache (see :meth:`forward`).
+            freqs_cis (torch.Tensor): Rotary frequency table, shape
+                ``[max_position, rope_head_dim]``, model dtype (per row ``[cos | sin]``
+                concatenated, indexed by token position value).
+            output (torch.Tensor): Output hidden-state buffer, shape
+                ``[num_tokens, hidden_size]``, model dtype.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
-            deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings.
+            deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings,
+                each shape ``[num_tokens, hidden_size]``, model dtype; length must equal
+                ``deepstack_num_level``.
             input_ids (Optional[torch.Tensor], default None): Token ids for the sqrtsoftplus MoE
-                hash-gate path (tid2eid[input_ids]); required only when scoring_func is
-                sqrtsoftplus, otherwise may be left unset (defaults to None).
+                hash-gate path (tid2eid[input_ids]), shape ``[num_tokens]`` int32; required only
+                when scoring_func is sqrtsoftplus, otherwise may be left unset (defaults to None).
 
         Returns:
             None: Output is written in place.
@@ -945,11 +1158,15 @@ class Model:
 
         Args:
             rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input token tensor.
+            input (torch.Tensor): Input token ids, shape ``[num_tokens]``, int32/int64 device.
             attn_meta (AttnMetaV2): Device-tensor attention metadata.
-            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors.
-            output (torch.Tensor): Output hidden-state buffer.
+            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache (see :meth:`forward`).
+            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tables, each
+                ``[max_position, rope_head_dim]``, model dtype (per row ``[cos | sin]``
+                concatenated, indexed by token position value; list length >= n_layers for CXA;
+                non-CXA reads only freqs_cis[0]).
+            output (torch.Tensor): Output hidden-state buffer, shape
+                ``[num_tokens, hidden_size]``, model dtype.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:
@@ -974,12 +1191,15 @@ class Model:
 
         Args:
             rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input token tensor.
+            input (torch.Tensor): Input token ids, shape ``[num_tokens]``, int32/int64 device.
             attn_meta (AttnMetaV2): Device-tensor attention metadata.
-            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tensors.
-            indices (torch.Tensor): Logits indices.
-            output (torch.Tensor): Output logits buffer.
+            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache (see :meth:`forward`).
+            freqs_cis (Sequence[torch.Tensor]): Per-layer rotary frequency tables, each
+                ``[max_position, rope_head_dim]``, model dtype (per row ``[cos | sin]``
+                concatenated, indexed by token position value).
+            indices (torch.Tensor): Logits indices, shape ``[batch]``, int32 device.
+            output (torch.Tensor): Output logits buffer, shape
+                ``[def_tp_size, max_tokens_dp, vocab_size/def_tp_size]``, model dtype.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:
@@ -1005,16 +1225,22 @@ class Model:
 
         Args:
             rt (Runtime): Native runtime handle.
-            input (torch.Tensor): Input token tensor.
+            input (torch.Tensor): Input embeddings, shape ``[num_tokens, hidden_size]``,
+                model dtype.
             attn_meta (AttnMetaV2): Device-tensor attention metadata.
-            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache.
-            freqs_cis (torch.Tensor): Rotary frequency tensor.
-            output (torch.Tensor): Output hidden-state buffer.
+            kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache (see :meth:`forward`).
+            freqs_cis (torch.Tensor): Rotary frequency table, shape
+                ``[max_position, rope_head_dim]``, model dtype (per row ``[cos | sin]``
+                concatenated, indexed by token position value; single tensor, not a list).
+            output (torch.Tensor): Output hidden-state buffer, shape
+                ``[num_tokens, hidden_size]``, model dtype.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
-            deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings.
+            deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings,
+                each shape ``[num_tokens, hidden_size]``, model dtype; length must equal
+                ``deepstack_num_level``.
             input_ids (Optional[torch.Tensor], default None): Token ids for the sqrtsoftplus MoE
-                hash-gate path (tid2eid[input_ids]); required only when scoring_func is
-                sqrtsoftplus, otherwise may be left unset (defaults to None).
+                hash-gate path (tid2eid[input_ids]), shape ``[num_tokens]`` int32; required only
+                when scoring_func is sqrtsoftplus, otherwise may be left unset (defaults to None).
 
         Returns:
             None: Output is written in place.
@@ -1070,8 +1296,9 @@ def all_gather(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int
 
     Args:
         rt (Runtime): Native runtime handle.
-        out (torch.Tensor): Output buffer for gathered values.
-        in_ (torch.Tensor): Local input shard.
+        out (torch.Tensor): Output buffer for gathered values, any shape with
+            ``out.numel == in_.numel * world_size``, dtype same as ``in_``.
+        in_ (torch.Tensor): Local input shard, any shape/dtype (fp16/bf16/int8/int32/fp32/int64).
         comm_type (int, default=0): Communication domain selector.
             ``0`` (TP), ``1`` (DP).
 
@@ -1088,8 +1315,10 @@ def reduce_scatter(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type:
 
     Args:
         rt (Runtime): Native runtime handle.
-        out (torch.Tensor): Output buffer for the reduced local shard.
-        in_ (torch.Tensor): Input tensor to reduce across ranks.
+        out (torch.Tensor): Output buffer for the reduced local shard, any shape,
+            dtype same as ``in_``.
+        in_ (torch.Tensor): Input tensor to reduce (SUM), with
+            ``in_.numel == out.numel * world_size``.
         comm_type (int, default=0): Communication domain selector.
             ``0`` (TP), ``1`` (DP).
 
@@ -1106,8 +1335,9 @@ def all_reduce(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int
 
     Args:
         rt (Runtime): Native runtime handle.
-        out (torch.Tensor): Output tensor for reduced results.
-        in_ (torch.Tensor): Input tensor to reduce.
+        out (torch.Tensor): Output tensor for reduced results (SUM), same numel and
+            dtype as ``in_``.
+        in_ (torch.Tensor): Input tensor to reduce, any shape (fp16/bf16/int8/int32/fp32/int64).
         comm_type (int, default=0): Communication domain selector.
             ``0`` (TP), ``1`` (DP).
 
@@ -1137,12 +1367,12 @@ def alltoallv(
 
     Args:
         rt (Runtime): Native runtime handle.
-        out (torch.Tensor): Output buffer for received data.
+        out (torch.Tensor): Output buffer for received data, dtype same as ``in_``.
         in_ (torch.Tensor): Input tensor with data to send.
-        send_counts (torch.Tensor): Per-rank send element counts.
-        recv_counts (torch.Tensor): Per-rank receive element counts.
-        sdispls (torch.Tensor): Per-rank send displacement offsets.
-        rdispls (torch.Tensor): Per-rank receive displacement offsets.
+        send_counts (torch.Tensor): Per-rank send element counts, int, shape ``[world_size]``.
+        recv_counts (torch.Tensor): Per-rank receive element counts, int, shape ``[world_size]``.
+        sdispls (torch.Tensor): Per-rank send displacement offsets, int, shape ``[world_size]``.
+        rdispls (torch.Tensor): Per-rank receive displacement offsets, int, shape ``[world_size]``.
         comm_type (int, default=0): Communication domain selector.
             ``0`` (TP), ``1`` (DP), ``2`` (EP).
 
@@ -1159,9 +1389,9 @@ def add(rt: Runtime, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> None:
 
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Left operand.
-        y (torch.Tensor): Right operand.
-        z (torch.Tensor): Output tensor.
+        x (torch.Tensor): Left operand, shape ``[m, n]``, fp16 or bf16.
+        y (torch.Tensor): Right operand, shape ``[m, n]``, same dtype as ``x``.
+        z (torch.Tensor): Output tensor, shape ``[m, n]``, same dtype as ``x``.
 
     Returns:
         None: `z` is written in place.
@@ -1183,9 +1413,13 @@ def matmul(
 
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Left matrix.
-        y (torch.Tensor): Right matrix/weight.
-        z (torch.Tensor): Output matrix.
+        x (torch.Tensor): Left matrix, shape ``[m, k]``. Dtype combos (x, y, z): all fp16;
+            all bf16; all fp32 (transpose=False); (bf16, fp32, fp32)/(bf16, fp32, bf16)
+            (transpose=False); (int8, int8, fp16); (int4, int4, fp16) — int32-packed int4
+            tensors are auto-viewed as int4.
+        y (torch.Tensor): Right matrix/weight, shape ``[n, k]`` (transpose=False) or
+            ``[k, n]`` (transpose=True).
+        z (torch.Tensor): Output matrix, shape ``[m, n]``.
         weight_nz (bool): Whether `y` uses NZ weight layout.
         transpose (bool): Whether to transpose the right matrix in compute.
 
@@ -1214,12 +1448,12 @@ def matmul_bench(
 
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Left matrix.
-        y (torch.Tensor): Right matrix/weight.
-        z (torch.Tensor): Output matrix.
-        x_warmup (torch.Tensor): Left matrix for warmup.
-        y_warmup (torch.Tensor): Right matrix/weight for warmup.
-        z_warmup (torch.Tensor): Output matrix for warmup.
+        x (torch.Tensor): Left matrix, shape ``[m, k]`` (see :func:`matmul` for dtype combos).
+        y (torch.Tensor): Right matrix/weight, shape ``[n, k]`` or ``[k, n]`` per transpose.
+        z (torch.Tensor): Output matrix, shape ``[m, n]``.
+        x_warmup (torch.Tensor): Left matrix for warmup, same contract as ``x``.
+        y_warmup (torch.Tensor): Right matrix/weight for warmup, same contract as ``y``.
+        z_warmup (torch.Tensor): Output matrix for warmup, same contract as ``z``.
         iterations: Number of matmul iterations to run
         weight_nz (bool): Whether `y` uses NZ weight layout.
         transpose (bool): Whether to transpose the right matrix in compute.
@@ -1244,10 +1478,11 @@ def matmul_with_bias(
 
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Left matrix.
-        y (torch.Tensor): Right matrix/weight.
-        z (torch.Tensor): Output matrix.
-        bias (torch.Tensor): Bias tensor added to output.
+        x (torch.Tensor): Left matrix, shape ``[m, k]`` (see :func:`matmul` for dtype combos,
+            transpose=False only).
+        y (torch.Tensor): Right matrix/weight, shape ``[n, k]``.
+        z (torch.Tensor): Output matrix, shape ``[m, n]``.
+        bias (torch.Tensor): Per-column bias added to output, shape ``[n]``.
         weight_nz (bool): Whether `y` uses NZ weight layout.
 
     Returns:
@@ -1270,9 +1505,11 @@ def embed(
 
     Args:
         rt (Runtime): Native runtime handle.
-        weight (torch.Tensor): Embedding table.
-        in_ (torch.Tensor): Token IDs.
-        out (torch.Tensor): Output embedding tensor.
+        weight (torch.Tensor): Embedding table, shape ``[vocab, hidden]``, fp16 or bf16
+            (``hidden`` must be divisible by 16).
+        in_ (torch.Tensor): Token IDs, shape ``[num_tokens]`` (read as uint32 row indices).
+        out (torch.Tensor): Output embedding tensor, shape ``[num_tokens, hidden]``, same
+            dtype as ``weight``.
         start (int): Start token index (inclusive).
         end (int): End token index (exclusive).
 
@@ -1295,8 +1532,9 @@ def rmsnorm_variance_only(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor.
-        out (torch.Tensor): Output tensor.
+        in_ (torch.Tensor): Input tensor, shape ``[tokens, dim]``, fp16 or bf16.
+        out (torch.Tensor): Variance-only output tensor, shape ``[tokens, 1]`` (or
+            ``[tokens, cnt_per_token]``), fp16/bf16 (same as in) or fp32.
         norm_eps (float): Numerical epsilon used in normalization.
         norm_dim (int): Normalization width. `0` lets native code infer it.
         cnt_per_token (int): Number of contiguous segments per token.
@@ -1323,15 +1561,18 @@ def rmsnorm(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor.
-        norm (torch.Tensor): RMSNorm weight tensor.
-        out (torch.Tensor): Output tensor.
+        in_ (torch.Tensor): Input tensor, shape ``[tokens, dim]``, fp16 or bf16.
+        norm (torch.Tensor): RMSNorm weight tensor, shape ``[norm_dim]``, model dtype.
+            Optional (empty skips the affine term).
+        out (torch.Tensor): Output tensor, shape ``[tokens, dim]`` (or a stepped variant),
+            fp16/bf16 (same as in) or fp32.
         norm_eps (float): Numerical epsilon used in normalization.
         norm_dim (int): Normalization width. `0` lets native code infer it.
         cnt_per_token (int): Number of contiguous segments per token.
         in_start_offset (int): Input offset for segmented normalization.
         out_start_offset (int): Output offset for segmented normalization.
-        variance (Optional[torch.Tensor]): Optional output tensor for variance values.
+        variance (Optional[torch.Tensor]): Optional output tensor for variance values, shape
+            ``[tokens, cnt_per_token]``, fp32.
 
     Returns:
         None: `out` is written in place.
@@ -1354,10 +1595,10 @@ def rmsnorm_with_bias(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor.
-        norm (torch.Tensor): RMSNorm weight tensor.
-        norm_bias (torch.Tensor): RMSNorm Bias tensor.
-        out (torch.Tensor): Output tensor.
+        in_ (torch.Tensor): Input tensor, shape ``[tokens, dim]``, fp16 or bf16.
+        norm (torch.Tensor): RMSNorm weight tensor, shape ``[norm_dim]``, model dtype.
+        norm_bias (torch.Tensor): RMSNorm Bias tensor, shape ``[norm_dim]``, model dtype.
+        out (torch.Tensor): Output tensor, shape ``[tokens, dim]``, fp16/bf16 or fp32.
         norm_eps (float): Numerical epsilon used in normalization.
         norm_dim (int): Normalization width. `0` lets native code infer it.
         cnt_per_token (int): Number of contiguous segments per token.
@@ -1382,10 +1623,10 @@ def layernorm(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor.
-        norm (torch.Tensor): LayerNorm weight tensor.
-        norm_bias (torch.Tensor): LayerNorm bias tensor.
-        out (torch.Tensor): Output tensor.
+        in_ (torch.Tensor): Input tensor, shape ``[tokens, dim]``, fp16 or bf16.
+        norm (torch.Tensor): LayerNorm weight tensor, shape ``[norm_dim]``, model dtype.
+        norm_bias (torch.Tensor): LayerNorm bias tensor, shape ``[norm_dim]``, model dtype.
+        out (torch.Tensor): Output tensor, shape ``[tokens, dim]``, same dtype as ``in_``.
         norm_eps (float): Numerical epsilon used in normalization.
         norm_dim (int): Normalization width.
 
@@ -1405,8 +1646,8 @@ def l2norm(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor.
-        out (torch.Tensor): Output tensor.
+        in_ (torch.Tensor): Input tensor, shape ``[tokens, dim]``, fp16 or bf16.
+        out (torch.Tensor): Output tensor, same shape, fp16/bf16 (same as in) or fp32.
         norm_eps (float): Numerical epsilon used in normalization.
         norm_dim (int): Normalization width. `0` lets native code infer it.
 
@@ -1420,22 +1661,30 @@ def add_bias(rt: Runtime, in_: torch.Tensor, weight: torch.Tensor, out: torch.Te
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor.
-        weight (torch.Tensor): Bias tensor.
-        out (torch.Tensor): Output tensor.
+        in_ (torch.Tensor): Input tensor, shape ``[m, n]``, fp32/fp16/bf16 (all three same).
+        weight (torch.Tensor): Bias tensor, shape ``[n]`` (broadcast per column), same dtype.
+        out (torch.Tensor): Output tensor, shape ``[m, n]``, same dtype.
 
     Returns:
         None: `out` is written in place.
     """
     ...
 
-def silu_and_mul(rt: Runtime, in_: torch.Tensor, out: torch.Tensor) -> None:
+def silu_and_mul(
+    rt: Runtime,
+    in_: torch.Tensor,
+    out: torch.Tensor,
+    swiglu_limit: float = 0.0,
+) -> None:
     """Apply SiLU and gated multiply.
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor.
-        out (torch.Tensor): Output tensor.
+        in_ (torch.Tensor): Input tensor, shape ``[m, 2n]`` (last dim = 2 x out last dim),
+            fp16/bf16/fp32 (same as out).
+        out (torch.Tensor): Output tensor, shape ``[m, n]``, same dtype as ``in_``.
+        swiglu_limit (float, default=0.0): Clamp limit for the swiglu variant
+            (``0`` disables clamping).
 
     Returns:
         None: `out` is written in place.
@@ -1447,9 +1696,9 @@ def sigmoid_gate_mul(rt: Runtime, attn: torch.Tensor, gate: torch.Tensor, out: t
 
     Args:
         rt (Runtime): Native runtime handle.
-        attn (torch.Tensor): Attention output, shape [num_tokens, dim].
+        attn (torch.Tensor): Attention output, shape [num_tokens, dim], fp16 or bf16.
         gate (torch.Tensor): Gate logits, shape [num_tokens, dim] (elementwise) or
-            [num_tokens, 1] (broadcast per token).
+            [num_tokens, 1] (broadcast per token), same dtype.
         out (torch.Tensor): Output tensor, shape [num_tokens, dim]. May alias `attn`.
 
     Returns:
@@ -1478,18 +1727,27 @@ def rope_and_cache(
 
     Args:
         rt (Runtime): Native runtime handle.
-        inout (torch.Tensor): Input/output QKV tensor.
-        k_cache (torch.Tensor): Key cache tensor.
-        v_cache (torch.Tensor): Value cache tensor.
-        position (torch.Tensor): Position indices.
-        cosin (torch.Tensor): Rotary cosine/sine tensor.
-        slot_mapping (torch.Tensor): Slot mapping for paged cache writes.
+        inout (torch.Tensor): Input/output packed QKV tensor, shape
+            ``[tokens, (n_heads + 2*n_kv_heads)*head_dim]``, layout [Q|K|V], fp16/bf16
+            (must match caches/cossin). RoPE is applied in place.
+        k_cache (torch.Tensor): Paged key cache, shape
+            ``[num_blocks, block_size, n_kv_heads, head_dim]``, same dtype.
+        v_cache (torch.Tensor): Paged value cache, shape
+            ``[num_blocks, block_size, n_kv_heads, head_dim]``, same dtype.
+        position (torch.Tensor): Per-token position indices, shape ``[tokens]``, int64
+            (mRoPE: flattened ``[3, tokens]`` int64 — base, height, width planes).
+        cosin (torch.Tensor): Rotary cosine/sine table, shape ``[max_position, rot_dim]``,
+            same dtype as ``inout``; each row is ``[cos | sin]`` concatenated
+            (``cos`` at ``position*rot_dim``, ``sin`` right after), indexed by each
+            token's ``position`` value, so it must cover the full position range.
+        slot_mapping (torch.Tensor): Per-token paged-cache slots, shape ``[tokens]``, int32
+            (slot = block_id*block_size + offset).
         n_heads (int): Number of query heads.
         n_kv_heads (int): Number of KV heads.
         head_dim (int): Head dimension.
         rot_dim (int): Rotary dimension.
         block_size (int): KV cache block size.
-        is_neox (bool): Whether to use NeoX rotary layout.
+        is_neox (bool): Whether to use NeoX rotary layout (gptj style not supported).
         mrope_mask_h (int): Optional mRoPE height mask.
         mrope_mask_w (int): Optional mRoPE width mask.
 
@@ -1520,13 +1778,18 @@ def attention(
 
     Args:
         rt (Runtime): Native runtime handle.
-        qkv (torch.Tensor): Query tensor.
-        k_cache (torch.Tensor): Key cache tensor.
-        v_cache (torch.Tensor): Value cache tensor.
-        output (torch.Tensor): Attention output tensor.
-        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
-        lens (torch.Tensor): Current token lengths.
-        cached_lens (torch.Tensor): Cached token lengths.
+        qkv (torch.Tensor): Packed QKV tensor, shape
+            ``[tokens, (n_heads + 2*n_kv_heads)*head_dim]``, fp16 or bf16 (must match
+            caches/output).
+        k_cache (torch.Tensor): Paged key cache, shape
+            ``[num_blocks, block_size, n_kv_heads, head_dim]``, same dtype.
+        v_cache (torch.Tensor): Paged value cache, same layout/dtype as ``k_cache``.
+        output (torch.Tensor): Attention output tensor, shape
+            ``[tokens, n_heads*head_dim]``, same dtype.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
+            int32 device.
+        lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
+        cached_lens (torch.Tensor): Cached token lengths, shape ``[batch]``, int32 device.
         block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
             (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
             per-request max_num_blocks is derived internally from the shape
@@ -1556,10 +1819,11 @@ def add_and_rmsnorm(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Residual input tensor.
-        add_in_out (torch.Tensor): In/out tensor for residual accumulation.
-        norm (torch.Tensor): RMSNorm weight tensor.
-        out (torch.Tensor): Output tensor.
+        in_ (torch.Tensor): Residual input tensor, shape ``[m, dim]``, fp16 or bf16.
+        add_in_out (torch.Tensor): In/out tensor for residual accumulation, shape
+            ``[m, dim]``, same dtype (residual is accumulated in place).
+        norm (torch.Tensor): RMSNorm weight tensor, shape ``[dim]``, model dtype.
+        out (torch.Tensor): Output tensor, shape ``[m, dim]``, same dtype.
         norm_eps (float): Numerical epsilon used in normalization.
 
     Returns:
@@ -1580,10 +1844,15 @@ def softmax_topk(
 
     Args:
         rt (Runtime): Native runtime handle.
-        scores (torch.Tensor): Routing score tensor.
-        indices (torch.Tensor): Output top-k index tensor.
-        out_weights (torch.Tensor): Output top-k probability tensor.
-        out_routing (torch.Tensor): Output routing mask tensor.
+        scores (torch.Tensor): Routing score tensor, shape ``[tokens, n_routed_experts]``,
+            fp32 or bf16.
+        indices (torch.Tensor): Identity helper, shape ``[n_routed_experts]``, int32
+            (``0..N-1``, sort-key payload).
+        out_weights (torch.Tensor): Output SPARSE top-k weight tensor, shape
+            ``[tokens, n_routed_experts]``, same dtype as ``scores`` (only selected slots
+            hold nonzero values).
+        out_routing (torch.Tensor): Output routing bitmap, shape
+            ``[tokens, ceil(n_routed_experts/64)]``, int64 (one bit per expert).
         top_k (int): Number of experts selected per token.
         norm_top_k_prob (bool): Whether to normalize selected probabilities.
 
@@ -1609,12 +1878,18 @@ def sigmoid_topk(
 
     Args:
         rt (Runtime): Native runtime handle.
-        scores (torch.Tensor): Routing score tensor.
-        indices (torch.Tensor): Output top-k index tensor.
-        bias (torch.Tensor): Bias tensor applied before top-k selection.
+        scores (torch.Tensor): Routing score tensor, shape ``[tokens, n_routed_experts]``,
+            fp32 or bf16.
+        indices (torch.Tensor): Identity helper, shape ``[n_routed_experts]``, int32
+            (``0..N-1``, sort-key payload).
+        bias (torch.Tensor): Per-expert e_score_correction_bias, shape
+            ``[n_routed_experts]``, fp32.
         scale (float): Scale factor applied to scores.
-        out_weights (torch.Tensor): Output top-k weight tensor.
-        out_routing (torch.Tensor): Output routing mask tensor.
+        out_weights (torch.Tensor): Output top-k weight tensor, shape
+            ``[tokens, n_routed_experts]``, same dtype as ``scores`` (sparse, selected
+            slots only).
+        out_routing (torch.Tensor): Output routing bitmap, shape
+            ``[tokens, ceil(n_routed_experts/64)]``, int64 (one bit per expert).
         n_group (int): Number of routing groups.
         n_topk_group (int): Number of groups participating in top-k.
         top_k (int): Number of experts selected per token.
@@ -1688,12 +1963,16 @@ def topk(
 
     Args:
         rt (Runtime): Native runtime handle.
-        scores (torch.Tensor): Routing score tensor.
-        indices (torch.Tensor): Tensor of indices that match scores.
-        outIndices (torch.Tensor): Output top-k index tensor.
-        query_lens (torch.Tensor): Vector of query lengths for each batch.
-        cached_lens (torch.Tensor): Vector of cached KV lengths for each batch.
-        k (int): Number of experts selected per token.
+        scores (torch.Tensor): Score tensor, shape ``[batch, seq_len]``, bf16 or fp32.
+            No-op when ``scores.shape[1] <= k``.
+        indices (torch.Tensor): Index tensor matching scores, shape ``[batch, seq_len]``,
+            int32 (``0..seq_len-1`` identity).
+        outIndices (torch.Tensor): Output top-k index tensor, shape ``[batch, k]``, int32.
+        query_lens (torch.Tensor): Vector of query lengths for each batch, shape ``[batch]``,
+            int32 device (batch is taken from this tensor's shape[0]).
+        cached_lens (torch.Tensor): Vector of cached KV lengths for each batch, shape
+            ``[batch]``, int32 device.
+        k (int): Number of experts selected per token (must be exactly 2048).
 
     Returns:
         None: Output tensors are written in place.
@@ -1705,8 +1984,8 @@ def cast_up(rt: Runtime, in_: torch.Tensor, out: torch.Tensor) -> None:
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor.
-        out (torch.Tensor): Output tensor.
+        in_ (torch.Tensor): Input tensor, bf16, any shape.
+        out (torch.Tensor): Output tensor, fp32, same numel as ``in_``.
 
     Returns:
         None: `out` is written in place.
@@ -1727,13 +2006,18 @@ def permutation(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input token tensor.
-        routing (torch.Tensor): Routing/expert assignment tensor.
+        in_ (torch.Tensor): Input token tensor, shape ``[tokens, hidden]``, any dtype.
+        routing (torch.Tensor): Routing bitmap (BIT1 packed, e.g. int64), shape
+            ``[tokens, ceil(n_experts/64)]``.
         start (int): Start expert index.
         end (int): End expert index.
-        out (torch.Tensor): Permuted output tensor.
-        unp_idx (torch.Tensor): Unpermutation index tensor.
-        counts (torch.Tensor): Per-expert count tensor.
+        out (torch.Tensor): Permuted output tensor, shape ``[permuted_tokens, hidden]``,
+            same dtype as ``in_``.
+        unp_idx (torch.Tensor): Unpermutation index grid output, shape
+            ``[n_experts, tokens + 1]``, int32: per expert ``e``, column ``t`` holds the
+            offset of token ``t`` within expert ``e``'s permuted segment, and the final
+            column holds that expert's total count (consumed by :func:`unpermutation`).
+        counts (torch.Tensor): Per-expert count output, shape ``[end-start]``, int32.
 
     Returns:
         None: Output tensors are written in place.
@@ -1754,13 +2038,17 @@ def unpermutation(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Permuted input tensor.
-        routing (torch.Tensor): Routing/expert assignment tensor.
-        weights (torch.Tensor): Routing weight tensor.
+        in_ (torch.Tensor): Permuted input tensor, shape ``[tokens, hidden]``, bf16.
+        routing (torch.Tensor): Routing bitmap (BIT1 packed, e.g. int64), shape
+            ``[tokens, ceil(n_experts/64)]``.
+        weights (torch.Tensor): Per-token per-expert routing weight map, shape
+            ``[tokens, n_experts]`` (full expert width), bf16 (when in/out are bf16) or
+            fp32; entries for non-selected experts are ignored.
         start (int): Start expert index.
         end (int): End expert index.
-        out (torch.Tensor): Unpermuted output tensor.
-        unp_idx (torch.Tensor): Unpermutation index tensor.
+        out (torch.Tensor): Unpermuted output tensor, shape ``[orig_tokens, hidden]``, bf16.
+        unp_idx (torch.Tensor): Unpermutation index tensor (from :func:`permutation`),
+            int32.
 
     Returns:
         None: `out` is written in place.
@@ -1785,15 +2073,22 @@ def group_matmul(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor.
-        weights (Sequence[torch.Tensor]): Per-group weight tensors.
-        scales (Sequence[torch.Tensor]): Optional per-group scale tensors.
-        counts (torch.Tensor): Per-group token count tensor.
+        in_ (torch.Tensor): Input tensor, shape ``[sum_tokens, in_dim]``. Dtype combos
+            (in, weight, out): bf16/bf16/bf16, fp16/fp16/fp16, fp32/fp32/fp32
+            (transpose=False), int8/int8/fp16, int4/int4/fp16 (int32-packed int4
+            activations/weights are auto-viewed as int4).
+        weights (Sequence[torch.Tensor]): Per-group (per-expert) 2D weight tensors, each
+            ``[out_dim, in_dim]`` (or transposed layout when ``transpose=True``); must
+            share dtype.
+        scales (Sequence[torch.Tensor]): Optional per-group deq-scale tensors (uint64
+            TF32-packed fp32 pairs), one per group; length must equal ``counts.size(0)``
+            when provided.
+        counts (torch.Tensor): Per-group token count tensor, shape ``[num_experts]``, int32.
         start (int): Start group index.
         end (int): End group index.
         out_dim (int): Output dimension.
         in_dim (int): Input dimension.
-        output (torch.Tensor): Output tensor.
+        output (torch.Tensor): Output tensor, shape ``[sum_tokens, out_dim]``.
         weight_nz (bool): Whether weight tensors use NZ layout.
         transpose (bool): Whether grouped weights are transposed.
 
@@ -1807,8 +2102,10 @@ def softmax(rt: Runtime, x: torch.Tensor, calc_len: int, is_long: bool) -> None:
 
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Input/output tensor.
-        calc_len (int): Effective softmax length.
+        x (torch.Tensor): Input/output tensor, shape ``[m, n]``, fp16 or bf16 (in-place).
+        calc_len (int): Base softmax length; row ``i`` computes ``calc_len + i`` elements
+            (causal/row-dependent), clamped to ``n``. Pass ``calc_len == n`` for full-width
+            softmax on a single row (``m == 1``).
         is_long (bool): Whether to use the long-sequence kernel path.
 
     Returns:
@@ -1835,10 +2132,15 @@ def rope_complex(
         n_local_heads (int): Number of local heads.
         step_dim (int): Per-step hidden dimension.
         rope_dim (int): Rotary dimension.
-        input_with_r (torch.Tensor): Input tensor with real/imag layout.
-        freqs (torch.Tensor): Rotary frequency tensor.
-        position (torch.Tensor): Position tensor.
-        output (torch.Tensor): Output tensor.
+        input_with_r (torch.Tensor): Input tensor with real/imag layout, shape
+            ``[tokens, n_local_heads*step_dim]``, fp16 or bf16.
+        freqs (torch.Tensor): Rotary frequency table, shape ``[max_position, rope_dim/2]``
+            complex or equivalent, model dtype. Indexed by each token's ``position`` value
+            (``freqs_ptr + position[token] * rope_dim``), so it must cover the full
+            position range.
+        position (torch.Tensor): Per-token position ids, shape ``[tokens]``, int64.
+        output (torch.Tensor): Output tensor, rope-only slice, shape
+            ``[tokens, n_local_heads*rope_dim]`` (out step = rope_dim), model dtype.
         inverse (bool): If True, apply the conjugate (reverse) rotation.
         out_interleaved (bool): If True, write the rope result interleaved
             ``[r0,i0,r1,i1,...]`` (matches torch ``view_as_real().flatten``);
@@ -1874,22 +2176,36 @@ def mla_prepare(
 
     Args:
         rt (Runtime): Native runtime handle.
-        attn_qkvc (torch.Tensor): Concatenated [q_lora_rank | kv_lora_rank | rope_head_dim] per token.
-        q_norm (torch.Tensor): RMSNorm weight for the q-lora slice.
-        q_norm_bias (torch.Tensor): RMSNorm bias for the q-lora slice.
-        attn_norm_qc (torch.Tensor): Output RMSNormed q-lora slice.
-        kv_norm (torch.Tensor): RMSNorm weight for the kv-lora slice.
-        kv_norm_bias (torch.Tensor): RMSNorm bias for the kv-lora slice.
-        attn_norm_kvc (torch.Tensor): Output RMSNormed kv-lora slice; also used as the `key` written into k_cache.
-        freqs (torch.Tensor): Precomputed rotary freqs_cis (TTTWWW layout).
-        position (torch.Tensor): Per-token position ids (int64).
+        attn_qkvc (torch.Tensor): Concatenated [q_lora_rank | kv_lora_rank | rope_head_dim]
+            per token, shape ``[tokens, q_lora_rank + kv_lora_rank + rope_head_dim]``,
+            fp16 or bf16 (rope slice written in place).
+        q_norm (torch.Tensor): RMSNorm weight for the q-lora slice, shape
+            ``[q_lora_rank]``, model dtype.
+        q_norm_bias (torch.Tensor): RMSNorm bias for the q-lora slice, shape
+            ``[q_lora_rank]``, model dtype.
+        attn_norm_qc (torch.Tensor): Output RMSNormed q-lora slice, shape
+            ``[tokens, q_lora_rank]``, model dtype.
+        kv_norm (torch.Tensor): RMSNorm weight for the kv-lora slice, shape
+            ``[kv_lora_rank]``, model dtype.
+        kv_norm_bias (torch.Tensor): RMSNorm bias for the kv-lora slice, shape
+            ``[kv_lora_rank]``, model dtype.
+        attn_norm_kvc (torch.Tensor): Output RMSNormed kv-lora slice, shape
+            ``[tokens, kv_lora_rank]``, model dtype; also used as the `key` written into
+            k_cache.
+        freqs (torch.Tensor): Precomputed rotary freqs_cis (TTTWWW layout), shape
+            ``[max_position, rope_head_dim/2]`` complex, model dtype; indexed by each
+            token's ``position`` value, so it must cover the full position range.
+        position (torch.Tensor): Per-token position ids (int64), shape ``[tokens]``.
         q_lora_rank (int): q-lora rank dimension.
         kv_lora_rank (int): kv-lora rank dimension.
         rope_head_dim (int): Rotary head dimension.
         block_size (int): Paged kv-cache block size; 0 disables cache writes.
-        k_cache (torch.Tensor): Output paged k-cache.
-        pe_cache (torch.Tensor): Output paged pe-cache (RoPE'd rope slice).
-        slot_mapping (torch.Tensor): Per-token paged-cache slot mapping.
+        k_cache (torch.Tensor): Output paged k-cache, shape
+            ``[num_blocks, block_size, 1, kv_lora_rank]``, model dtype.
+        pe_cache (torch.Tensor): Output paged pe-cache (RoPE'd rope slice), shape
+            ``[num_blocks, block_size, 1, rope_head_dim]``, model dtype.
+        slot_mapping (torch.Tensor): Per-token paged-cache slot mapping, shape
+            ``[tokens]``, int32.
         norm_eps (float): RMSNorm epsilon.
 
     Returns:
@@ -1929,20 +2245,25 @@ def indexer_prepare(
 
     Args:
         rt (Runtime): Native runtime handle.
-        kw (torch.Tensor): ``[token_num, index_head_dim + index_n_heads]`` per token.
-        k_norm (torch.Tensor): LayerNorm weight ``[index_head_dim]``.
-        k_norm_bias (torch.Tensor): LayerNorm bias ``[index_head_dim]``.
-        freqs (torch.Tensor): Precomputed rotary freqs_cis (TTTWWW layout).
-        position (torch.Tensor): Per-token position ids (int64).
+        kw (torch.Tensor): ``[token_num, index_head_dim + index_n_heads]`` per token, fp16
+            or bf16 (norm/rope/muls slices written in place).
+        k_norm (torch.Tensor): LayerNorm weight ``[index_head_dim]``, model dtype or fp32.
+        k_norm_bias (torch.Tensor): LayerNorm bias ``[index_head_dim]``, model dtype or fp32.
+        freqs (torch.Tensor): Precomputed rotary freqs_cis (TTTWWW layout), shape
+            ``[max_position, rope_head_dim/2]`` complex, model dtype; indexed by each
+            token's ``position`` value, so it must cover the full position range.
+        position (torch.Tensor): Per-token position ids (int64), shape ``[token_num]``.
         index_head_dim (int): Indexer head dimension.
         index_n_heads (int): Indexer head count (also the muls width).
         rope_head_dim (int): Rotary head dimension.
         block_size (int): Paged k-cache block size; 0 disables cache writes.
-        index_k_cache (torch.Tensor): Output paged indexer k-cache.
-        slot_mapping (torch.Tensor): Per-token paged-cache slot mapping (int32).
+        index_k_cache (torch.Tensor): Output paged indexer k-cache, shape
+            ``[num_blocks, block_size, 1, index_head_dim]``, model dtype.
+        slot_mapping (torch.Tensor): Per-token paged-cache slot mapping (int32), shape
+            ``[token_num]``.
         norm_eps (float): LayerNorm epsilon.
-        q (torch.Tensor): ``[token_num, index_n_heads * index_head_dim]`` query tensor; only
-            touched when ``is_long`` is true. The rotary slice is written in place.
+        q (torch.Tensor): ``[token_num, index_n_heads * index_head_dim]`` query tensor, model
+            dtype; only touched when ``is_long`` is true. The rotary slice is written in place.
         scale (float): Scalar applied to ``kw[:, index_head_dim:]`` when ``is_long`` is true.
         top_k (int): Number of top-k tokens to select in the indexer/sparse attention.
         is_long (bool): Whether to run the rope_complex(q) + muls(kw) tail.
@@ -1964,10 +2285,13 @@ def quant(
 
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Input tensor.
-        scale_reciprocal (torch.Tensor): Reciprocal scale tensor.
-        offset (torch.Tensor): Quantization offset tensor.
-        out (torch.Tensor): Quantized output tensor.
+        x (torch.Tensor): Input tensor, shape ``[m, n]``, bf16.
+        scale_reciprocal (torch.Tensor): Reciprocal scale tensor, shape ``[n]``
+            (per-column), bf16 (read as bf16 by the kernel; fp32 is not supported).
+        offset (torch.Tensor): Quantization offset tensor, shape ``[n]``, bf16
+            (same layout and dtype as the scale).
+        out (torch.Tensor): Quantized output tensor, shape ``[m, n]``, int8
+            (``int8(x*scale + offset)``).
 
     Returns:
         None: `out` is written in place.
@@ -1979,9 +2303,9 @@ def quant_dynamic(rt: Runtime, x: torch.Tensor, scale: torch.Tensor, out: torch.
 
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Input tensor.
-        scale (torch.Tensor): Output scale tensor.
-        out (torch.Tensor): Quantized output tensor.
+        x (torch.Tensor): Input tensor, shape ``[m, n]``, bf16.
+        scale (torch.Tensor): Output dynamic per-token scale, shape ``[m]``, fp32.
+        out (torch.Tensor): Quantized output tensor, shape ``[m, n]``, int8.
 
     Returns:
         None: `scale` and `out` are written in place.
@@ -2002,11 +2326,13 @@ def matmul_dequant(
 
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Left matrix.
-        y (torch.Tensor): Quantized right matrix.
-        bias (torch.Tensor): Bias tensor.
-        deq_scale (torch.Tensor): Dequantization scale tensor.
-        z (torch.Tensor): Output matrix.
+        x (torch.Tensor): Left matrix, shape ``[m, k]``, int8.
+        y (torch.Tensor): Quantized right matrix, shape ``[n, k]`` (transpose=False) or
+            ``[k, n]`` (transpose=True), int8.
+        bias (torch.Tensor): Quantization bias, shape ``[n]``, int32 (optional).
+        deq_scale (torch.Tensor): Weight dequantization scale, shape ``[2*n, 1]``, fp32
+            (uint64 TF32-packed pairs).
+        z (torch.Tensor): Output matrix, shape ``[m, n]``, bf16.
         weight_nz (bool): Whether `y` uses NZ layout.
         transpose (bool): Whether to transpose the right matrix.
 
@@ -2060,9 +2386,10 @@ def dequant(rt: Runtime, in_: torch.Tensor, scale: torch.Tensor, out: torch.Tens
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Quantized input tensor.
-        scale (torch.Tensor): Scale tensor.
-        out (torch.Tensor): Dequantized output tensor.
+        in_ (torch.Tensor): Quantized input tensor, shape ``[m, n]``, fp16.
+        scale (torch.Tensor): Scale tensor, fp32 (per-token or per-tensor; only read when
+            ``has_scale`` is true).
+        out (torch.Tensor): Dequantized output tensor, shape ``[m, n]``, bf16.
         has_scale (bool): Whether scale should be applied.
 
     Returns:
@@ -2113,21 +2440,25 @@ def mla_v2(
 
     Args:
         rt (Runtime): Native runtime handle.
-        q_with_qr (torch.Tensor): Query tensor, shape
-            (total_query_tokens, n_heads, nope_head_dim + rope_head_dim).
+        q_with_qr (torch.Tensor): Query tensor with rotary components, shape
+            (total_query_tokens, n_heads, nope_head_dim + rope_head_dim), bf16.
         qr (torch.Tensor): Pre-rotated q_rope slice, contiguous, shape
-            (total_query_tokens, n_heads, rope_head_dim).
-        k_cache (torch.Tensor): Paged KV cache (kv_lora_rank slice); in dense
+            (total_query_tokens, n_heads, rope_head_dim), bf16.
+        k_cache (torch.Tensor): Paged KV cache (kv_lora_rank slice), shape
+            ``[num_blocks, block_size, 1, kv_lora_rank]``, bf16; in dense
             mode the source paged cache the top-k tokens are gathered from.
-        pe_cache (torch.Tensor): Paged RoPE key cache (rope_head_dim slice).
+        pe_cache (torch.Tensor): Paged RoPE key cache (rope_head_dim slice), shape
+            ``[num_blocks, block_size, 1, rope_head_dim]``, bf16.
         wuk_t (torch.Tensor): MLA W_UK^T weight, shape
-            (n_heads, nope_head_dim, kv_lora_rank).
+            (n_heads, nope_head_dim, kv_lora_rank), bf16.
         wuv (torch.Tensor): MLA W_UV weight, shape
-            (n_heads, kv_lora_rank, v_head_dim).
-        output (torch.Tensor): Output tensor (v_head_dim), written in place.
-        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
-        lens (torch.Tensor): Current token lengths.
-        cached_lens (torch.Tensor): Cached token lengths.
+            (n_heads, kv_lora_rank, v_head_dim), bf16.
+        output (torch.Tensor): Output tensor (v_head_dim), shape
+            ``[total_query_tokens, n_heads*v_head_dim]``, bf16; written in place.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
+            int32 device.
+        lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
+        cached_lens (torch.Tensor): Cached token lengths, shape ``[batch]``, int32 device.
         block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
             (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
             per-request max_num_blocks is derived internally from the shape
@@ -2140,8 +2471,8 @@ def mla_v2(
         block_size (int): KV block size.
         batch (int): Batch size.
         scale (float): Attention scaling factor.
-        topk_indices (torch.Tensor): Top-k indices tensor for sparse attention
-            (may be empty when ``top_k == 0``).
+        topk_indices (torch.Tensor): Top-k indices tensor for sparse attention, shape
+            ``[batch, top_k]``, int32 (may be empty when ``top_k == 0``).
         top_k (int): Number of top-k indices; 0 disables sparse attention in
             paged mode. In dense mode this is the dense cache length
             (``index_topk``) and must be > 0.
@@ -2194,9 +2525,9 @@ def gather_sparse_kv_cache(
     Args:
         rt (Runtime): Native runtime handle.
         k_cache (torch.Tensor): Paged KV cache (kv_lora_rank slice), shape
-            (kvcache_block_num, block_size, kv_heads, kv_lora_rank).
+            (kvcache_block_num, block_size, kv_heads, kv_lora_rank), bf16.
         pe_cache (torch.Tensor): Paged RoPE key cache (rope_head_dim slice),
-            shape (kvcache_block_num, block_size, kv_heads, rope_head_dim).
+            shape (kvcache_block_num, block_size, kv_heads, rope_head_dim), bf16.
         block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
             (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
             per-request max_num_blocks is derived internally from the shape
@@ -2209,9 +2540,9 @@ def gather_sparse_kv_cache(
             (batch,), dtype int32. Used with query_lens to derive the valid
             slot count per batch.
         k_dense_cache (torch.Tensor): Output contiguous K cache, shape
-            (batch, index_topk, kv_heads, kv_lora_rank); written in place.
+            (batch, index_topk, kv_heads, kv_lora_rank), bf16; written in place.
         pe_dense_cache (torch.Tensor): Output contiguous PE cache, shape
-            (batch, index_topk, kv_heads, rope_head_dim); written in place.
+            (batch, index_topk, kv_heads, rope_head_dim), bf16; written in place.
         batch (int): Batch size.
         index_topk (int): Number of top-k tokens per batch (dense length).
         block_size (int): KV block size.
@@ -2328,13 +2659,17 @@ def indexer_scores(
 
     Args:
         rt (Runtime): Native runtime handle.
-        q (torch.Tensor): Query tensor.
-        k_cache (torch.Tensor): Key cache tensor.
-        weight (torch.Tensor): Indexer weight tensor.
-        scores (torch.Tensor): Output score tensor.
-        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
-        lens (torch.Tensor): Current token lengths.
-        cached_lens (torch.Tensor): Cached token lengths.
+        q (torch.Tensor): Query tensor, shape ``[tokens, n_heads*head_dim]``, fp16 or bf16
+            (must match k_cache/weight/scores).
+        k_cache (torch.Tensor): Paged index-key cache, shape
+            ``[num_blocks, block_size, 1, head_dim]``, same dtype.
+        weight (torch.Tensor): Indexer weight tensor, shape ``[tokens, n_heads]`` slice
+            (per-token weights), same dtype.
+        scores (torch.Tensor): Output score tensor, shape ``[tokens, ...]``, same dtype.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
+            int32 device.
+        lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
+        cached_lens (torch.Tensor): Cached token lengths, shape ``[batch]``, int32 device.
         block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
             (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
             per-request max_num_blocks is derived internally from the shape
@@ -2374,18 +2709,21 @@ def indexer_topk(
 
     Args:
         rt (Runtime): Native runtime handle.
-        q (torch.Tensor): Query tensor ``[total_query_len, n_heads, head_dim]``.
-        k_cache (torch.Tensor): Key cache tensor ``[max_num_block*batch, block_size, head_dim]``.
+        q (torch.Tensor): Query tensor ``[total_query_len, n_heads, head_dim]``, fp16/bf16
+            (must match k_cache/weight).
+        k_cache (torch.Tensor): Key cache tensor ``[max_num_block*batch, block_size,
+        head_dim]``, same dtype.
         weight (torch.Tensor): Indexer weight tensor
             ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are
-            the indexer weights).
+            the indexer weights), same dtype.
         indices (torch.Tensor): Input index tensor ``[max_seq_len]`` (int32),
             pre-filled with ``0..max_seq_len-1``.
         topk_indices (torch.Tensor): Output top-k indices tensor
             ``[total_query_len, top_k]`` (int32).
-        query_start_loc (torch.Tensor): Prefix-sum prompt lengths.
-        lens (torch.Tensor): Current token lengths.
-        cached_lens (torch.Tensor): Cached token lengths.
+        query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
+            int32 device.
+        lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
+        cached_lens (torch.Tensor): Cached token lengths, shape ``[batch]``, int32 device.
         block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
             (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
             per-request max_num_blocks is derived internally from the shape
@@ -2406,9 +2744,9 @@ def muls(rt: Runtime, input: torch.Tensor, scale: float, output: torch.Tensor) -
 
     Args:
         rt (Runtime): Native runtime handle.
-        input (torch.Tensor): Input tensor.
+        input (torch.Tensor): Input tensor, 1D or 2D, fp16 or bf16.
         scale (float): Scalar multiplier.
-        output (torch.Tensor): Output tensor.
+        output (torch.Tensor): Output tensor, same shape and dtype as ``input``.
 
     Returns:
         None: `output` is written in place.
@@ -2475,8 +2813,10 @@ def reorder_moe(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input token tensor ``[total_tokens, hidden_size]``.
-        out (torch.Tensor): Output token tensor ``[total_tokens, hidden_size]``.
+        in_ (torch.Tensor): Input token tensor ``[total_tokens, hidden_size]``, any dtype
+            (handled bytewise).
+        out (torch.Tensor): Output token tensor ``[total_tokens, hidden_size]``, same
+            dtype as ``in_``.
         counts (torch.Tensor): Per-source per-expert token count matrix
             ``[moe_ep_size, n_routed_experts]`` (int32).
         hidden_size (int): Hidden dimension per token.
@@ -2510,15 +2850,15 @@ def linear_att_proj(
 
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Input tensor.
-        W_qkv (torch.Tensor): QKV weight tensor.
-        W_z (torch.Tensor): Z weight tensor.
-        W_b (torch.Tensor): B weight tensor.
-        W_a (torch.Tensor): A weight tensor.
-        mix_qkv (torch.Tensor): Output mixed QKV tensor.
-        z (torch.Tensor): Output z(gating parameters) tensor.
-        b (torch.Tensor): Output b(beta input) tensor.
-        a (torch.Tensor): Output a(decay input) tensor.
+        x (torch.Tensor): Input tensor, shape ``[m, k]``, fp16 or bf16.
+        W_qkv (torch.Tensor): QKV weight tensor, shape ``[n, k]``, same dtype.
+        W_z (torch.Tensor): Z weight tensor, shape ``[v, k]``, same dtype.
+        W_b (torch.Tensor): B weight tensor, shape ``[h, k]``, same dtype.
+        W_a (torch.Tensor): A weight tensor, shape ``[h, k]``, same dtype.
+        mix_qkv (torch.Tensor): Output mixed QKV tensor, shape ``[m, n]``, same dtype.
+        z (torch.Tensor): Output z(gating parameters) tensor, shape ``[m, v]``, same dtype.
+        b (torch.Tensor): Output b(beta input) tensor, shape ``[m, h]``, same dtype.
+        a (torch.Tensor): Output a(decay input) tensor, shape ``[m, h]``, same dtype.
         m (int): Dimension of the input x(batch*seqlen).
         n (int): QKV weight dimension.
         v (int): Z weight dimension.
@@ -2535,8 +2875,8 @@ def transpose_1_2(rt: Runtime, input: torch.Tensor, eye: torch.Tensor, output: t
 
     Args:
         rt (Runtime): Native runtime handle.
-        input (torch.Tensor): Input tensor of shape (b, m, n).
-        output (torch.Tensor): Output tensor of shape (b, n, m).
+        input (torch.Tensor): Input tensor of shape (b, m, n), fp16 or bf16.
+        output (torch.Tensor): Output tensor of shape (b, n, m), same dtype.
 
     Returns:
         None: `output` is written in place.
@@ -2554,10 +2894,12 @@ def linear_att_conv_and_silu(
 
     Args:
         rt (Runtime): Native runtime handle.
-        mix_qkv (torch.Tensor): Input mixed QKV tensor, shape [B, S, C].
-        conv_state (torch.Tensor): Convolution state tensor, shape [B, C, K].
-        weight (torch.Tensor): Kernel weight tensor, shape [C, 1, K] or [C, K].
-        output (torch.Tensor): Output tensor, shape [B, S, C].
+        mix_qkv (torch.Tensor): Input mixed QKV tensor, shape [B, S, C], fp32/fp16/bf16
+            (all operands same dtype).
+        conv_state (torch.Tensor): Convolution state tensor, shape [B, C, K], same dtype;
+            updated in place (K = kernel size, <= 16; S <= 4096).
+        weight (torch.Tensor): Kernel weight tensor, shape [C, 1, K] or [C, K], same dtype.
+        output (torch.Tensor): Output tensor, shape [B, S, C], same dtype.
 
     Returns:
         None: `output` is written in place. State is always updated.
@@ -2569,8 +2911,11 @@ def split_col(rt: Runtime, in_: torch.Tensor, outputs: List[torch.Tensor]) -> No
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input tensor to split.
-        outputs (List[torch.Tensor]): List of output tensors.
+        in_ (torch.Tensor): Input tensor to split, any rank >= 1, any dtype; split along
+            the last dim.
+        outputs (List[torch.Tensor]): List of output tensors (1..8 for the fused kernel),
+            each sharing ``in_``'s dtype and leading dims, with the last dims summing to
+            ``in_``'s last dim.
 
     Returns:
         None: Output tensors are written in place.
@@ -2587,8 +2932,10 @@ def concat(rt: Runtime, inputs: List[torch.Tensor], out: torch.Tensor) -> None:
 
     Args:
         rt (Runtime): Native runtime handle.
-        inputs (List[torch.Tensor]): Input tensors to pack (each viewed as bytes).
-        out (torch.Tensor): Flat output buffer holding all inputs concatenated.
+        inputs (List[torch.Tensor]): Input tensors to pack (each viewed as bytes; dtypes
+            and shapes may differ).
+        out (torch.Tensor): Flat output buffer holding all inputs concatenated; its total
+            byte size must equal the sum of the input byte sizes.
 
     Returns:
         None: ``out`` is written in place.
@@ -2612,8 +2959,10 @@ def split(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Flat input buffer holding all packets.
-        outputs (List[torch.Tensor]): Output buffers, one per segment.
+        in_ (torch.Tensor): Flat input buffer holding all packets; byte size must equal
+            ``sum(sizes) * num_packets``.
+        outputs (List[torch.Tensor]): Output buffers, one per segment (len == len(sizes));
+            each must hold at least ``sizes[j] * num_packets`` bytes.
         sizes (List[int]): Byte size of each segment within a single packet.
         num_packets (int): Number of interleaved packets in ``in_``.
 
@@ -2638,12 +2987,14 @@ def beta_decay(
 
     Args:
         rt (Runtime): Native runtime handle.
-        b (torch.Tensor): b input tensor.
-        a (torch.Tensor): a input tensor.
-        A_log (torch.Tensor): Learnable Decay parameters.
-        dt_bias (torch.Tensor): Time bias.
-        beta (torch.Tensor): beta tensor.
-        g (torch.Tensor): g(decay) tensor.
+        b (torch.Tensor): b input tensor, shape ``[bsz, seqlen, num_v_heads]``, fp32/fp16/bf16
+            (same as ``a``).
+        a (torch.Tensor): a input tensor, same shape/dtype as ``b``.
+        A_log (torch.Tensor): Learnable decay parameters, shape ``[num_v_heads]``.
+        dt_bias (torch.Tensor): Time bias, shape ``[num_v_heads]``.
+        beta (torch.Tensor): beta output tensor, shape ``[bsz, seqlen, num_v_heads]``.
+        g (torch.Tensor): g(decay) output tensor (log-space; kernel applies exp), shape
+            ``[bsz, seqlen, num_v_heads]``.
         bsz (int): Batch size.
         seqlen (int): Sequence length.
         num_v_heads (int): Number of value heads.
@@ -2672,13 +3023,14 @@ def recurrent_gated_delta_rule(
 
     Args:
         rt (Runtime): Native runtime handle.
-        query (torch.Tensor): [B*S, H*k_dim], L2-normalized.
-        key (torch.Tensor): [B*S, H*k_dim], L2-normalized.
-        value (torch.Tensor): [B*S, H*v_dim].
-        beta (torch.Tensor): [B*S, H].
-        g (torch.Tensor): [B*S, H], log-space decay (kernel applies exp).
-        state (torch.Tensor): [B, H, k_dim, v_dim], updated in-place.
-        out (torch.Tensor): [B*S, H*v_dim].
+        query (torch.Tensor): [B*S, H*k_dim], L2-normalized, fp32/fp16/bf16 (all operands
+            same dtype).
+        key (torch.Tensor): [B*S, H*k_dim], L2-normalized, same dtype.
+        value (torch.Tensor): [B*S, H*v_dim], same dtype.
+        beta (torch.Tensor): [B*S, H], same dtype.
+        g (torch.Tensor): [B*S, H], log-space decay (kernel applies exp), same dtype.
+        state (torch.Tensor): [B, H, k_dim, v_dim], same dtype, updated in-place.
+        out (torch.Tensor): [B*S, H*v_dim], same dtype.
         batch (int): Batch size.
         seqlen (int): Sequence length.
         num_heads (int): Number of heads.
@@ -2709,9 +3061,10 @@ def einsum_mht_hdt_mhd(
 
     Args:
         rt (Runtime): Native runtime handle.
-        mht (torch.Tensor): Left operand of shape ``[m, h, t]``.
-        hdt (torch.Tensor): Right operand of shape ``[h, d, t]``.
-        mhd (torch.Tensor): Output tensor of shape ``[m, h, d]``.
+        mht (torch.Tensor): Left operand of shape ``[m, h, t]``, fp16 or bf16 (all three
+            same dtype).
+        hdt (torch.Tensor): Right operand of shape ``[h, d, t]``, same dtype.
+        mhd (torch.Tensor): Output tensor of shape ``[m, h, d]``, same dtype.
         m (int): Outer batch dimension (token count).
         h (int): Head dimension.
         t (int): Inner reduction dimension.
@@ -2743,9 +3096,10 @@ def einsum_mht_htd_mhd(
 
     Args:
         rt (Runtime): Native runtime handle.
-        mht (torch.Tensor): Left operand of shape ``[m, h, t]``.
-        htd (torch.Tensor): Right operand of shape ``[h, t, d]``.
-        mhd (torch.Tensor): Output tensor of shape ``[m, h, d]``.
+        mht (torch.Tensor): Left operand of shape ``[m, h, t]``, fp16 or bf16 (all three
+            same dtype).
+        htd (torch.Tensor): Right operand of shape ``[h, t, d]``, same dtype.
+        mhd (torch.Tensor): Output tensor of shape ``[m, h, d]``, same dtype.
         m (int): Outer batch dimension (token count).
         h (int): Head dimension.
         t (int): Inner reduction dimension.
@@ -2766,8 +3120,9 @@ def unpack_activation(
 
     Args:
         rt (Runtime): Native runtime handle.
-        input (torch.Tensor): input int8 tensor.
-        output (torch.Tensor): output low/high int4 tensor.
+        input (torch.Tensor): input int8 tensor, shape ``[m, n]`` with ``n`` even.
+        output (torch.Tensor): output low/high int4 tensor, shape ``[m, n/2]`` int8
+            (low nibble | high nibble packed).
 
     Returns:
         None: Output tensors are written in place.
@@ -2841,11 +3196,12 @@ def hc_act(
 
     Args:
         rt (Runtime): Native runtime handle.
-        mixes (torch.Tensor): Gate pre-activation [n, mix_hc] fp32.
+        mixes (torch.Tensor): Gate pre-activation [n, mix_hc] fp32, where
+            ``mix_hc = (2+hc_mult)*hc_mult``.
         hc_scale (torch.Tensor): Per-segment scale [3] fp32 (or [1] in head mode).
         hc_base (torch.Tensor): Per-segment bias [mix_hc] fp32 (or [hc_mult] head).
-        post (torch.Tensor): Output post gate [n, hc_mult] fp32.
-        comb (torch.Tensor): Output comb [n, hc_mult*hc_mult] fp32.
+        post (torch.Tensor): Output post gate [n, hc_mult] fp32 (empty in head mode).
+        comb (torch.Tensor): Output comb [n, hc_mult*hc_mult] fp32 (empty in head mode).
         hc_mult (int): Hyper-connection multiplier K.
         eps (float): Epsilon added to pre and every Sinkhorn denominator.
         sinkhorn_iters (int): Sinkhorn normalization iterations.
@@ -2880,7 +3236,7 @@ def hc_post(
         x (torch.Tensor): Submodule output [m, hidden] bf16.
         post (torch.Tensor): Post gate [m, hc_mult] fp32.
         comb (torch.Tensor): Comb matrix [m, hc_mult*hc_mult] fp32.
-        residual (torch.Tensor): Residual stream [m, hc_mult, hidden] bf16.
+        residual (torch.Tensor): Residual stream [m, hc_mult, hidden] bf16 (may alias ``y``).
         y (torch.Tensor): Output [m, hc_mult, hidden] bf16.
         m (int): Token count.
         hc_mult (int): Hyper-connection multiplier H.
