@@ -10,6 +10,14 @@
 #include "softmax_attn_aiv.h"
 #include "mla_aic_helper.h"
 
+// Unified MLA decode kernel covering both KV cache layouts (dense flag):
+//   - sparse : paged KV cache walked via
+//     blockTables, with optional top-k token selection (DSA) driven by
+//     topkIndices.
+//   - dense : per-batch contiguous KV cache gathered
+//     by gather_sparse_kv_cache; batch b occupies tokens
+//     [b * maxSeqLen, (b + 1) * maxSeqLen) and blockTable is unused
+//     (block id == logical index, see MlaAicHelper's dense flag).
 template <typename Dtype>
 class MLAV2
 {
@@ -23,7 +31,7 @@ public:
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                                 uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlocks, float scale, uint32_t topK)
+                                uint32_t maxSeqLen, float scale, uint32_t topK, uint32_t dense)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qAbsorb.SetGlobalBuffer((__gm__ Dtype *)qAbsorb);
@@ -42,17 +50,19 @@ public:
         this->ropeHeadDim = ropeHeadDim;
         this->kvLoraRank = kvLoraRank;
         this->batch = batch;
-        this->maxNumBlocks = maxNumBlocks;
-        this->maxSeqLen = maxNumBlocks * blockSize;
+        this->maxSeqLen = maxSeqLen;
+        this->qkStride = maxSeqLen;
         this->scale = scale;
-        this->topK = (topkIndices == nullptr) ? 0 : topK;
-        this->qkStride = this->maxSeqLen;
+        this->dense = dense != 0;
+        this->maxNumBlocks = this->dense ? 0 : DIV_ROUND_UP(maxSeqLen, blockSize);
+        this->topK = (!this->dense && topkIndices != nullptr) ? topK : 0;
 
         this->qk[0].SetGlobalBuffer((__gm__ Dtype *)qk + block_idx * XLITE_MAX_M0 * qkStride);
         this->qk[1].SetGlobalBuffer((__gm__ Dtype *)qk + block_idx * XLITE_MAX_M0 * qkStride +
                                     block_num * XLITE_MAX_M0 * qkStride);
 
-        svk0 = aicHelper.Init(nHeads, ropeHeadDim, kvLoraRank, blockSize, qkStride, false);
+        svk0 = aicHelper.Init(nHeads, ropeHeadDim, kvLoraRank, this->dense ? 0 : blockSize,
+                              qkStride, this->dense);
     }
 
     __aicore__ inline void RunAic()
@@ -67,22 +77,33 @@ public:
 
         int lastBatchIdx, lastQueryTaskOffset, lastQueryTaskLen, last, lastAbsorbOffset,
             lastCalcLen;
+        GlobalTensor<Dtype> lastKCache;
         __gm__ uint32_t *lastBlockTable;
 
         int needDoSV = 0;
-        int totalIdx = 0;
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
         int coreOffset = 0;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
-            __gm__ uint32_t *blockTable =
-                (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
 
             if (cachedLen < 0) {
                 cachedLen = cachedLens[batchIdx];
+            }
+
+            // per-batch KV view: dense mode takes a subview of the contiguous
+            // cache (batch b starts at b * maxSeqLen tokens); sparse mode walks
+            // the full paged cache through this batch's block table.
+            GlobalTensor<Dtype> batchKCache = kCache;
+            GlobalTensor<Dtype> batchPeCache = peCache;
+            __gm__ uint32_t *blockTable = nullptr;
+            if (dense) {
+                batchKCache = kCache[batchIdx * maxSeqLen * kvLoraRank];
+                batchPeCache = peCache[batchIdx * maxSeqLen * ropeHeadDim];
+            } else {
+                blockTable = (__gm__ uint32_t *)((uint64_t)blockTables +
+                                                 batchIdx * maxNumBlocks * sizeof(uint32_t));
             }
 
             uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
@@ -101,6 +122,10 @@ public:
                     queryTaskLen = queryLen - queryTaskStart;
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
+                if (dense && calcLen > maxSeqLen) {
+                    // dense cache only holds maxSeqLen (= indexTopK) tokens
+                    calcLen = maxSeqLen;
+                }
                 if (queryStart < 0) {
                     queryStart = queryStartLoc[batchIdx];
                 }
@@ -111,11 +136,11 @@ public:
                 uint32_t absorbOffset = mhOffset * kvLoraRank;
                 uint32_t qrOffset = mhOffset * ropeHeadDim;
 
-                dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u)}"
+                dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u), calcLen %d}"
                            " use %d temp buf: QK\n",
                            GetBlockIdx(), batchIdx, queryTaskOffset, queryTaskOffset + queryTaskLen,
-                           nHeads, curr);
-                aicHelper.RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], kCache, peCache,
+                           nHeads, calcLen, curr);
+                aicHelper.RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], batchKCache, batchPeCache,
                                    queryTaskLen, blockTable, 0, calcLen, qk[curr]);
                 ffts_cross_core_sync(PIPE_FIX, config);
 
@@ -123,11 +148,11 @@ public:
                     // wait vector softmax done
                     wait_flag_dev(1);
                     // do softmax * V
-                    dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u)}"
+                    dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u), calcLen %d}"
                                " use %d temp buf: SV\n",
                                GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
-                               lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
-                    aicHelper.RunAicSV(qk[last], kCache, lastQueryTaskLen, lastBlockTable, 0,
+                               lastQueryTaskOffset + lastQueryTaskLen, nHeads, lastCalcLen, last);
+                    aicHelper.RunAicSV(qk[last], lastKCache, lastQueryTaskLen, lastBlockTable, 0,
                                        lastCalcLen, oAbsorb[lastAbsorbOffset]);
                 }
 
@@ -135,8 +160,9 @@ public:
                 lastQueryTaskOffset = queryTaskOffset;
                 lastAbsorbOffset = absorbOffset;
                 lastQueryTaskLen = queryTaskLen;
-                lastBlockTable = blockTable;
                 lastCalcLen = calcLen;
+                lastKCache = batchKCache;
+                lastBlockTable = blockTable;
                 last = curr;
                 needDoSV = 1;
 
@@ -150,12 +176,12 @@ public:
         // do last softmax * V
         if (needDoSV != 0) {
             wait_flag_dev(1);
-            dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u)}"
+            dbg_printf("block%d: {batch %d, query [%u - %u), headIdx [0 - %u), calcLen %d}"
                        " use %d temp buf: SV\n",
                        GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
-                       lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
-            aicHelper.RunAicSV(qk[last], kCache, lastQueryTaskLen, lastBlockTable, 0, lastCalcLen,
-                               oAbsorb[lastAbsorbOffset]);
+                       lastQueryTaskOffset + lastQueryTaskLen, nHeads, lastCalcLen, last);
+            aicHelper.RunAicSV(qk[last], lastKCache, lastQueryTaskLen, lastBlockTable, 0,
+                               lastCalcLen, oAbsorb[lastAbsorbOffset]);
         }
     }
 
@@ -168,16 +194,12 @@ public:
         uint64_t mode = 2;  // inner-group aic/aiv sync
         uint64_t config = 1 | (mode << 4) | (flagIdx << 8);
 
-        int totalIdx = 0;
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
         int coreOffset = 0;
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
-            __gm__ uint32_t *blockTable =
-                (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
 
             if (cachedLen < 0) {
                 cachedLen = cachedLens[batchIdx];
@@ -199,6 +221,10 @@ public:
                     queryTaskLen = queryLen - queryTaskStart;
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
+                if (dense && calcLen > maxSeqLen) {
+                    // dense cache only holds maxSeqLen (= indexTopK) tokens
+                    calcLen = maxSeqLen;
+                }
                 if (queryStart < 0) {
                     queryStart = queryStartLoc[batchIdx];
                 }
@@ -296,6 +322,7 @@ private:
     uint32_t topK;
     uint32_t qkStride;
     int svk0;
+    bool dense;
 };
 
 #define MLA_V2_FUNC_DEFINE(dtype)                                                                  \
@@ -303,11 +330,12 @@ private:
         GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache, GM_ADDR topkIndices,         \
         GM_ADDR qk, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, \
         GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank,           \
-        uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks, float scale, uint32_t topK)     \
+        uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen, float scale, uint32_t topK,        \
+        uint32_t dense)                                                                            \
     {                                                                                              \
         MLAV2<dtype> op;                                                                           \
         op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb, queryStartLoc, queryLens,  \
                 cachedLens, blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,        \
-                maxNumBlocks, scale, topK);                                                        \
+                maxSeqLen, scale, topK, dense);                                                    \
         op.Run();                                                                                  \
     }

@@ -986,31 +986,37 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
                  kvSize, compressRatio, indexTopK, topkIndices.ptr);
 }
 
+// Unified MLA decode kernel entry. dense=false walks the paged KV cache via
+// blockTables (with optional top-k token selection); dense=true reads a
+// per-batch contiguous KV cache (gathered by gather_sparse_kv_cache), where
+// maxSeqLen == indexTopK and blockTables/topK are unused.
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
                   XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
-                  uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
-                  uint32_t topK, const XTensor &topkIndices)
+                  uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen,
+                  float scale, uint32_t topK, const XTensor &topkIndices, bool dense)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
-    if (topK != 0 && maxNumBlocks * blockSize > MAX_SOFTMAX_PINGPONG_LEN) {
-        throw std::runtime_error(std::string(__func__) +
-                                 ": topK > 0 is not supported when maxNumBlocks (" +
-                                 std::to_string(maxNumBlocks) + ") * blockSize > " +
-                                 std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
-    }
-    if (topK > MAX_TOPK_NUM) {
-        throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
-                                 std::to_string(MAX_TOPK_NUM));
+    if (!dense) {
+        if (topK != 0 && maxSeqLen > MAX_SOFTMAX_PINGPONG_LEN) {
+            throw std::runtime_error(
+                std::string(__func__) + ": topK > 0 is not supported when maxSeqLen (" +
+                std::to_string(maxSeqLen) + ") > " + std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
+        }
+        if (topK > MAX_TOPK_NUM) {
+            throw std::runtime_error(std::string(__func__) +
+                                     ": topK should be less than or equal to " +
+                                     std::to_string(MAX_TOPK_NUM));
+        }
     }
     if (EachXDtype(BF16, qAbsorb, qr, kCache, peCache, oAbsorb)) {
-        aclrtlaunch_mla_v2_bfloat16_t(
-            rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
-            qk.ptr, oAbsorb.ptr, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
-            nHeads, ropeHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, scale, topK);
+        aclrtlaunch_mla_v2_bfloat16_t(rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr,
+                                      peCache.ptr, topkIndices.ptr, qk.ptr, oAbsorb.ptr,
+                                      queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
+                                      nHeads, ropeHeadDim, kvLoraRank, blockSize, batch, maxSeqLen,
+                                      scale, topK, dense ? 1u : 0u);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1074,26 +1080,6 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, XTensor &peCache,
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(kCache) + XT_STR(peCache) + XT_STR(kDenseCache) +
                               XT_STR(peDenseCache);
-        throw std::runtime_error(err_str + "not supported!");
-    }
-}
-
-void XliteOpMLAV3(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kDenseCache,
-                  XTensor &peDenseCache, XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc,
-                  XTensor &lens, XTensor &cachedLens, uint32_t nHeads, uint32_t ropeHeadDim,
-                  uint32_t kvLoraRank, uint32_t batch, uint32_t indexTopK, float scale)
-{
-    if (IsDummyRuntime(rt)) {
-        return;
-    }
-    if (EachXDtype(BF16, qAbsorb, qr, kDenseCache, peDenseCache, oAbsorb)) {
-        aclrtlaunch_mla_v3_bfloat16_t(rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kDenseCache.ptr,
-                                      peDenseCache.ptr, qk.ptr, oAbsorb.ptr, queryStartLoc.ptr,
-                                      lens.ptr, cachedLens.ptr, nHeads, ropeHeadDim, kvLoraRank,
-                                      batch, indexTopK, scale);
-    } else {
-        std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kDenseCache) +
-                              XT_STR(peDenseCache) + XT_STR(oAbsorb);
         throw std::runtime_error(err_str + "not supported!");
     }
 }

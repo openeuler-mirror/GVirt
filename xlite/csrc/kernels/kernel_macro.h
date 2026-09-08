@@ -871,7 +871,7 @@ __aicore__ inline void convert_output(__ubuf__ Dtype *dst, __ubuf__ float *src, 
 #endif
 
 // Cube M0 by context length; long-context values leave 4 rows for
-// RunAivSoftmaxLong's exp buffer. Shared across attention/mla_v2/mla_v3.
+// RunAivSoftmaxLong's exp buffer. Shared across attention/mla_v2 (paged and dense modes).
 #define SEQLEN_64 64
 #define SEQLEN_12K 12288
 #define SEQLEN_20K 20480
