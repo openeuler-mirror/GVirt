@@ -1621,6 +1621,41 @@ void MLAV3(XRuntime &rt, at::Tensor &qAbsorb, at::Tensor &qr, at::Tensor &kDense
     rt.Synchronize();
 }
 
+void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compressKCache,
+         at::Tensor &swaBlockTables, at::Tensor &compressBlockTables, uint32_t swaBlockSize,
+         uint32_t compressBlockSize, at::Tensor &attnSink, at::Tensor &output, uint32_t batch,
+         at::Tensor &queryStartLoc, at::Tensor &lens, at::Tensor &cachedLens, uint32_t nHeads,
+         uint32_t headDim, float scale, uint32_t windowSize, uint32_t compressRatio,
+         uint32_t indexTopK, at::Tensor &topkIndices)
+{
+    XTensor _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables, _attnSink,
+        _output, _queryStartLoc, _lens, _cachedLens, _topkIndices;
+    InitXTensor(_q, q);
+    InitXTensor(_swaKCache, swaKCache);
+    InitXTensor(_compressKCache, compressKCache);
+    InitXTensor(_swaBlockTables, swaBlockTables);
+    InitXTensor(_compressBlockTables, compressBlockTables);
+    InitXTensor(_attnSink, attnSink);
+    InitXTensor(_output, output);
+    InitXTensor(_queryStartLoc, queryStartLoc);
+    InitXTensor(_lens, lens);
+    InitXTensor(_cachedLens, cachedLens);
+    InitXTensor(_topkIndices, topkIndices);
+    uint32_t swaSegWidth = windowSize == 0 ? 0 : windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B;
+    uint32_t compressMaxNumBlocks = DeriveMaxNumBlocks(_compressBlockTables, batch);
+    uint32_t kvSize = compressRatio == 0 || compressMaxNumBlocks == 0
+                          ? 0
+                          : ROUND_UP(compressMaxNumBlocks * compressBlockSize, 4 * CXA_SVCK0);
+    XTensor &scores =
+        rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize}, XDtypeOf(q), DBG_LOC);
+    XliteOpCXA(rt, _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables,
+               swaBlockSize, compressBlockSize, _attnSink, scores, _output, batch, _queryStartLoc,
+               _lens, _cachedLens, nHeads, headDim, scale, windowSize, kvSize, compressRatio,
+               indexTopK, _topkIndices);
+    rt.PutTensor(scores);
+    rt.Synchronize();
+}
+
 void AddAndRMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &addInOut, at::Tensor &norm,
                    at::Tensor &out, float normEps)
 {
@@ -2766,6 +2801,13 @@ PYBIND11_MODULE(_C, m)
           py::arg("query_lens"), py::arg("cached_lens"), py::arg("k_dense_cache"),
           py::arg("pe_dense_cache"), py::arg("batch"), py::arg("index_topk"), py::arg("block_size"),
           py::arg("kv_lora_rank"), py::arg("rope_head_dim"), py::arg("kv_heads") = 1);
+    m.def("cxa", &CXA, "cxa", py::arg("rt"), py::arg("q"), py::arg("swa_k_cache"),
+          py::arg("compress_k_cache"), py::arg("swa_block_tables"),
+          py::arg("compress_block_tables"), py::arg("swa_block_size"),
+          py::arg("compress_block_size"), py::arg("attn_sink"), py::arg("output"), py::arg("batch"),
+          py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"), py::arg("n_heads"),
+          py::arg("head_dim"), py::arg("scale"), py::arg("window_size"), py::arg("compress_ratio"),
+          py::arg("index_topk"), py::arg("topk_indices"));
     m.def("mla_v3", &MLAV3, py::arg("rt"), py::arg("q_absorb"), py::arg("qr"),
           py::arg("k_dense_cache"), py::arg("pe_dense_cache"), py::arg("o_absorb"),
           py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"), py::arg("n_heads"),

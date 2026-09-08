@@ -14,6 +14,7 @@
 using namespace AscendC;
 
 #if __DAV_C220_VEC__
+#define MAX_SWA_SEG_WIDTH 4096
 static_assert(ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) * 4 +
                       ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) +
                       (DIV_ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) /
@@ -36,12 +37,38 @@ static_assert(ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float16_t), VECTOR_MAX_
                       ROUND_UP(MAX_TOPK_NUM / 8, VECTOR_MAX_BYTESIZE) * 2 <=
                   UB_SIZE,
               "MAX_SOFTMAX_PINGPONG_LEN or MAX_TOPK_NUM too large (calc in float16_t)");
+static_assert(
+    ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) * 4 +
+            ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float), VECTOR_MAX_BYTESIZE) +
+            (DIV_ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float), VECTOR_MAX_BYTESIZE) /
+             2) *
+                VECTOR_MAX_BYTESIZE +
+            VECTOR_MAX_BYTESIZE * 10 +
+            ROUND_UP(MAX_TOPK_NUM * sizeof(int32_t), VECTOR_MAX_BYTESIZE) * 3 +
+            ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) +
+            ROUND_UP(MAX_TOPK_NUM / 8, VECTOR_MAX_BYTESIZE) * 2 <=
+        UB_SIZE,
+    "MAX_TOPK_NUM or MAX_SWA_SEG_WIDTH too large (calc in bfloat16_t)");
+static_assert(
+    ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float16_t), VECTOR_MAX_BYTESIZE) * 4 +
+            ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float), VECTOR_MAX_BYTESIZE) +
+            (DIV_ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float), VECTOR_MAX_BYTESIZE) /
+             2) *
+                VECTOR_MAX_BYTESIZE +
+            VECTOR_MAX_BYTESIZE * 10 +
+            ROUND_UP(MAX_TOPK_NUM * sizeof(int32_t), VECTOR_MAX_BYTESIZE) * 3 +
+            ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float16_t), VECTOR_MAX_BYTESIZE) +
+            ROUND_UP(MAX_TOPK_NUM / 8, VECTOR_MAX_BYTESIZE) * 2 <=
+        UB_SIZE,
+    "MAX_TOPK_NUM or MAX_SWA_SEG_WIDTH too large (calc in float16_t)");
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxPingPong(
     __gm__ Dtype *buf, uint32_t m, uint32_t n, int calcLen, uint32_t outN = 0, bool seqHead = true,
     uint32_t maskOff = 0, uint32_t maskStride = 1, __gm__ float *maxBuf = nullptr,
     __gm__ float *sumBuf = nullptr, bool hasScale = false, float scale = 1.0f,
-    uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
+    uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr,
+    uint32_t winSize = 0, uint32_t winCalcLen = 0, uint32_t compressRatio = 1,
+    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
 {
     // Softmax mask value: the most negative fp32 value (≈ -inf). Used to fill invalid/missed
     float min = -3.4028235e+38;
@@ -49,7 +76,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     if (outN == 0 || outN > n) {
         outN = n;
     }
-    int len = outN > topK ? outN : topK;
+    int len = MAX(outN, topK + swaSegWidth);
 
     bool saveMaxSum = (maxBuf != nullptr && sumBuf != nullptr);
 
@@ -88,7 +115,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
     __ubuf__ int32_t *indices[PINGPONG_BUF_NUM] = {indices0, indices1};
     __ubuf__ Dtype *inTopK = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK * sizeof(Dtype), VECTOR_MAX_BYTESIZE) : 0;
+    off += topK != 0 ? ROUND_UP((topK + swaSegWidth) * sizeof(Dtype), VECTOR_MAX_BYTESIZE) : 0;
     __ubuf__ float *indicesFp32 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
     off += topK != 0 ? ROUND_UP(topK * sizeof(float), VECTOR_MAX_BYTESIZE) : 0;
     __ubuf__ int32_t *cmp0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
@@ -105,13 +132,14 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     off += topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0;
     __ubuf__ int32_t *currIndices = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
     off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
+    __ubuf__ float *sink = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+    off += attnSink != nullptr ? VECTOR_MAX_BYTESIZE : 0;
 
     constexpr int calPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
     constexpr int indicesPad = VECTOR_MAX_BYTESIZE / sizeof(int32_t);
     int indicesRepeat = DIV_ROUND_UP(topK, indicesPad);
     int topKCalRepeat = DIV_ROUND_UP(topK, calPad);
-    int topKRepeat = DIV_ROUND_UP(topK, pad);
     int topKVandRepeat = DIV_ROUND_UP(topK, 2048);
     int topKLoopCnt = DIV_ROUND_UP(topK, 128);
     int firstHitBlock = -1;
@@ -133,6 +161,9 @@ inline __aicore__ void RunAivSoftmaxPingPong(
         uint32_t seqIdx = seqHead ? (idx + maskOff) / maskStride : (idx + maskOff) % maskStride;
         uint32_t headIdx = seqHead ? (idx + maskOff) % maskStride : (idx + maskOff) / maskStride;
         int actualCalcLen = calcLen + seqIdx;  // 每一行开始mask的位置
+        if (swaSegWidth > 0) {
+            actualCalcLen = swaSegWidth + (calcLen + (int)seqIdx) / (int)compressRatio;
+        }
         if (actualCalcLen <= 0) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
             vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(outN, pad), 1, 1, 8, 0);
@@ -157,13 +188,12 @@ inline __aicore__ void RunAivSoftmaxPingPong(
             constexpr int kMaxMaskEntries = 2 * DIV_ROUND_UP(MAX_TOPK_NUM, 128);
             uint64_t maskCache[kMaxMaskEntries];
             if (topK > 0) {
-                // copy topKIndices to indices
                 CopyGmToUbufAligned(indices[curr], topkIndices + seqIdx * topK,
                                     topK * sizeof(int32_t));
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
                 vector_dup(cmp1, kvOffset + origActualCalcLen, 1, 1, 1, 8, 0);
-                vector_dup(inTopK, minDtype, topKRepeat, 1, 1, 8, 0);
+                vector_dup(inTopK, minDtype, DIV_ROUND_UP(swaSegWidth + topK, pad), 1, 1, 8, 0);
                 pipe_barrier(PIPE_V);
                 vconv_s322f32(cmpFp321, cmp1, 1, 1, 1, 8, 8);
                 set_flag(PIPE_V, PIPE_S, EVENT_ID0);
@@ -192,9 +222,12 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                 firstHitBlock = -1;
                 lastHitBlock = -1;
                 uint64_t addrOffset = (uint64_t)in[curr];
-                // vgather hit scores into inTopK. topkMask0 is a bitmap (1 bit/slot); each
-                // topLoop covers 128 slots = 2 x uint64 (mask0: 0..63, mask1: 64..127) at
-                // byte offset topLoop*16. Cache masks for the later scatter loop.
+                __ubuf__ Dtype *gatherDst = inTopK + swaSegWidth;
+                if (swaSegWidth > 0) {
+                    copy_ubuf_to_ubuf(inTopK, in[curr], 0, 1,
+                                      DIV_ROUND_UP(swaSegWidth * sizeof(Dtype), BLOCK_SIZE), 1, 1);
+                    pipe_barrier(PIPE_V);
+                }
                 for (int topLoop = 0; topLoop < topKLoopCnt; topLoop++) {
                     uint64_t mask0 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16);
                     uint64_t mask1 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16 + 8);
@@ -203,7 +236,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                     __ubuf__ int32_t *indicesOffset = indices[curr] + topLoop * 128;
                     if (mask0 != 0 || mask1 != 0) {
                         set_vector_mask(mask1, mask0);
-                        vgather((__ubuf__ uint16_t *)inTopK + topLoop * 128,
+                        vgather((__ubuf__ uint16_t *)gatherDst + topLoop * 128,
                                 (__ubuf__ uint32_t *)indicesOffset, addrOffset, 0, 1);
                         needCalc = true;
                         if (firstHitBlock < 0) {
@@ -216,7 +249,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                 pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
 
-                if (!needCalc) {
+                if (!needCalc && swaSegWidth == 0) {
                     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
                     vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(outN, pad), 1, 1, 8, 0);
                     if (saveMaxSum) {
@@ -238,8 +271,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                     curr = 1 - curr;
                     continue;
                 }
-                // update actualCalcLen
-                actualCalcLen = topK;
+                actualCalcLen = swaSegWidth + topK;
             } else {
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
@@ -257,6 +289,58 @@ inline __aicore__ void RunAivSoftmaxPingPong(
             pipe_barrier(PIPE_V);
             if (topK == 0) {
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
+            }
+
+            if (swaSegWidth > 0 && winSize > 0) {
+                int actualWinLen = (int)winCalcLen + (int)seqIdx;
+                if (actualWinLen > (int)swaSegWidth) {
+                    actualWinLen = swaSegWidth;
+                }
+                if (actualWinLen < (int)swaSegWidth) {
+                    // right mask: pad [actualWinLen, swaSegWidth) with min
+                    int wstart = actualWinLen / calPad;
+                    int wend = DIV_ROUND_UP(swaSegWidth, calPad);
+                    int wtail = swaSegWidth % calPad;
+                    if (wstart == wend - 1) {
+                        int lo = actualWinLen % calPad;
+                        int hi = wtail != 0 ? wtail : calPad;
+                        SetMaskRange(lo, hi);
+                        vector_dup(cal + wstart * calPad, min, 1, 1, 1, 8, 0);
+                        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                        pipe_barrier(PIPE_V);
+                    } else {
+                        for (int w = wstart; w < wend; w++) {
+                            if (w == wstart) {
+                                SetMaskFromHighBit(calPad, calPad - actualWinLen % calPad);
+                                vector_dup(cal + w * calPad, min, 1, 1, 1, 8, 0);
+                                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                            } else if (wtail != 0 && w == wend - 1) {
+                                SetMask(wtail);
+                                vector_dup(cal + w * calPad, min, 1, 1, 1, 8, 0);
+                                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                            } else {
+                                vector_dup(cal + w * calPad, min, 1, 1, 1, 8, 0);
+                            }
+                        }
+                        pipe_barrier(PIPE_V);
+                    }
+                }
+
+                // left causal mask: pad columns [0, lEnd) with min
+                int lEnd = actualWinLen > (int)winSize ? actualWinLen - (int)winSize : 0;
+                int lFull = lEnd / calPad;
+                if (lFull > 0) {
+                    vector_dup(cal, min, lFull, 1, 1, 8, 0);
+                }
+                int lRem = lEnd % calPad;
+                if (lRem > 0) {
+                    SetMask(lRem);
+                    vector_dup(cal + lFull * calPad, min, 1, 1, 1, 8, 0);
+                    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                }
+                if (lEnd > 0) {
+                    pipe_barrier(PIPE_V);
+                }
             }
 
             if (hasScale) {
@@ -278,17 +362,36 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                 pipe_barrier(PIPE_V);
             }
 
+            if (attnSink != nullptr) {
+                set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                *sink = attnSink[headIdx];
+                set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+            }
+
             // QK - max
             vsub(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
+            if (attnSink != nullptr) {
+                vsub(sink, sink, temp, 1, 1, 1, 0, 8, 8, 0);
+            }
             pipe_barrier(PIPE_V);
 
             // EXP = exp(QK-max)
             vexp(cal, cal, repeat, 1, 1, 8, 8);
+            if (attnSink != nullptr) {
+                vexp(sink, sink, 1, 1, 1, 8, 8);
+            }
             pipe_barrier(PIPE_V);
 
             // s = Reduce_sum(EXP)
             ReduceSumV2(temp, cal, actualCalcLen);
             pipe_barrier(PIPE_V);
+
+            if (attnSink != nullptr) {
+                vadd(temp, temp, sink, 1, 1, 1, 0, 8, 8, 0);
+                pipe_barrier(PIPE_V);
+            }
 
             if (saveMaxSum) {
                 copy_ubuf_to_ubuf(sumOut[curr], temp, 0, 1, 1, 1, 1);
@@ -311,6 +414,12 @@ inline __aicore__ void RunAivSoftmaxPingPong(
 
             if (topK > 0) {
                 vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(origActualCalcLen, pad), 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
+                if (swaSegWidth > 0) {
+                    copy_ubuf_to_ubuf(out[curr], softmaxOut, 0, 1,
+                                      DIV_ROUND_UP(swaSegWidth * sizeof(Dtype), BLOCK_SIZE), 1, 1);
+                    pipe_barrier(PIPE_V);
+                }
                 __ubuf__ uint16_t *currOut = (__ubuf__ uint16_t *)out[curr];
                 set_flag(PIPE_V, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
@@ -318,15 +427,16 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                 // Scatter at 64-slot granularity (1 x uint64 mask); vgather's firstHitBlock/
                 // lastHitBlock are 128-slot block numbers, so multiply by 2 to align indices.
                 int topkLoop = topK >> 6;
-                for (int i = firstHitBlock * 2; i <= lastHitBlock * 2 + 1 && i < topkLoop; i++) {
+                for (int i = firstHitBlock < 0 ? topkLoop : firstHitBlock * 2;
+                     i <= lastHitBlock * 2 + 1 && i < topkLoop; i++) {
                     uint64_t mask = maskCache[i];
                     if (!mask) {
                         continue;
                     }
                     int currTopKBase = (i << 6);
                     // Scatter 4 slots/iter: tmp1 = packed offsets (currIndices), tmp2 = packed
-                    // values (inTopK). full = all 64 slots hit -> write unconditionally; else
-                    // per-bit.
+                    // values (softmaxOut + swaSegWidth = gathered compress weights). full =
+                    // all 64 slots hit -> write unconditionally; else per-bit.
                     bool full = (mask == ~(uint64_t)0);
                     for (int j = 0; j < 16; j++) {
                         int j2 = j << 2;
@@ -339,8 +449,10 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                         int currTopK1 = currTopKBase + j2 + 2;
                         uint64_t tmp1_0 = *(__ubuf__ uint64_t *)(currIndices + currTopK0);
                         uint64_t tmp1_1 = *(__ubuf__ uint64_t *)(currIndices + currTopK1);
-                        uint32_t tmp2_0 = *(__ubuf__ uint32_t *)(inTopK + currTopK0);
-                        uint32_t tmp2_1 = *(__ubuf__ uint32_t *)(inTopK + currTopK1);
+                        uint32_t tmp2_0 =
+                            *(__ubuf__ uint32_t *)(softmaxOut + swaSegWidth + currTopK0);
+                        uint32_t tmp2_1 =
+                            *(__ubuf__ uint32_t *)(softmaxOut + swaSegWidth + currTopK1);
                         if (full || (pair0Mask & (1ULL << j2))) {
                             currOut[tmp1_0 & 0xffffffff] = tmp2_0 & 0xffff;
                         }
@@ -686,12 +798,12 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
  * SIZE(196608) float16_t or bfloat16_t: subBlockNum <= 127 float16_t or bfloat16_t: n <= 2064512
  */
 template <typename Dtype>
-inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf, int32_t m,
-                                         uint32_t n, uint32_t calcLen, uint32_t outN = 0,
-                                         bool seqHead = true, uint32_t maskOff = 0,
-                                         uint32_t maskStride = 1, bool hasScale = false,
-                                         float scale = 1.0f, uint32_t kvOffset = 0,
-                                         uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
+inline __aicore__ void RunAivSoftmaxLong(
+    __gm__ Dtype *buf, __gm__ float *expBuf, int32_t m, uint32_t n, uint32_t calcLen,
+    uint32_t outN = 0, bool seqHead = true, uint32_t maskOff = 0, uint32_t maskStride = 1,
+    bool hasScale = false, float scale = 1.0f, uint32_t kvOffset = 0, uint32_t topK = 0,
+    __gm__ int32_t *topkIndices = nullptr, uint32_t winSize = 0, uint32_t winCalcLen = 0,
+    uint32_t compressRatio = 1, __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
 {
     set_atomic_none();
     set_mask_norm();
@@ -730,6 +842,8 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
     off += (totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE;
     auto *sum = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
     off += (totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE;
+    __ubuf__ float *sink = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+    off += VECTOR_MAX_BYTESIZE;
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);  // for MTE2 in
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);  // for MTE2 calc
@@ -738,13 +852,25 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
     for (int idx = 0; idx < m; idx++) {
         uint32_t seqIdx = seqHead ? (idx + maskOff) / maskStride : (idx + maskOff) % maskStride;
         uint32_t headIdx = seqHead ? (idx + maskOff) % maskStride : (idx + maskOff) / maskStride;
-        int actualCalcLen = calcLen + seqIdx;  // 每一行开始mask的位置
+        int actualCalcLen =
+            swaSegWidth + (calcLen + seqIdx) / compressRatio;  // 每一行开始mask的位置
         if (actualCalcLen > outN) {
             actualCalcLen = outN;
+        }
+        int actualCaclWinLen = winSize == 0 ? 0 : winCalcLen + seqIdx;
+        if (actualCaclWinLen > (int)swaSegWidth) {
+            actualCaclWinLen = swaSegWidth;
         }
         uint64_t calcOutLen = ROUND_UP(actualCalcLen, MAX_SUB_CONTEXT_SIZE);
         if (calcOutLen > outN) {
             calcOutLen = outN;
+        }
+        if (attnSink) {
+            set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+            *sink = attnSink[headIdx];
+            set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
         }
 
         // stage1: max(x) & sum(exp(x - max(x)))
@@ -777,6 +903,56 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
             }
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+
+            // winSize == 0 (compress-only attention) has no SWA segment: swaSegWidth == 0
+            // and actualCaclWinLen == 0, so both masks below are no-ops.
+            if (block == 0 && winSize > 0) {
+                // Right causal mask: pad columns [actualCaclWinLen, swaSegWidth) with -inf.
+                if (actualCaclWinLen < (int)swaSegWidth) {
+                    int wstart = actualCaclWinLen / calcPad;
+                    int wend = DIV_ROUND_UP(swaSegWidth, calcPad);
+                    int wtail = swaSegWidth % calcPad;
+                    if (wstart == wend - 1) {
+                        int lo = actualCaclWinLen % calcPad;
+                        int hi = wtail != 0 ? wtail : calcPad;
+                        SetMaskRange(lo, hi);
+                        vector_dup(calc + wstart * calcPad, min, 1, 1, 1, 8, 0);
+                        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                        pipe_barrier(PIPE_V);
+                    } else {
+                        for (int w = wstart; w < wend; w++) {
+                            if (w == wstart) {
+                                SetMaskFromHighBit(calcPad, calcPad - actualCaclWinLen % calcPad);
+                                vector_dup(calc + w * calcPad, min, 1, 1, 1, 8, 0);
+                                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                            } else if (wtail != 0 && w == wend - 1) {
+                                SetMask(wtail);
+                                vector_dup(calc + w * calcPad, min, 1, 1, 1, 8, 0);
+                                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                            } else {
+                                vector_dup(calc + w * calcPad, min, 1, 1, 1, 8, 0);
+                            }
+                        }
+                        pipe_barrier(PIPE_V);
+                    }
+                }
+
+                // Left causal mask: pad columns [0, lEnd) with -inf.
+                int lEnd = actualCaclWinLen > (int)winSize ? actualCaclWinLen - (int)winSize : 0;
+                int lFull = lEnd / calcPad;
+                if (lFull > 0) {
+                    vector_dup(calc, min, lFull, 1, 1, 8, 0);
+                }
+                int lRem = lEnd % calcPad;
+                if (lRem > 0) {
+                    SetMask(lRem);
+                    vector_dup(calc + lFull * calcPad, min, 1, 1, 1, 8, 0);
+                    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                }
+                if (lEnd > 0) {
+                    pipe_barrier(PIPE_V);
+                }
+            }
 
             if (hasScale) {
                 vmuls(calc, calc, scale, curRepeat, 1, 1, 8, 8);
@@ -818,8 +994,14 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
             }
 
             vsub(calc, calc, calcDst, curRepeat, 1, 1, 0, 8, 8, 0);
+            if (attnSink) {
+                vsub(sink, sink, calcDst, 1, 1, 1, 0, 8, 8, 0);
+            }
             pipe_barrier(PIPE_V);
             vexp(calc, calc, curRepeat, 1, 1, 8, 8);
+            if (attnSink) {
+                vexp(sink, sink, 1, 1, 1, 8, 8);
+            }
             pipe_barrier(PIPE_V);
             if (subBlockNum > 1) {
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
@@ -830,6 +1012,11 @@ inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf
                 pipe_barrier(PIPE_V);
             } else {
                 ReduceSum(calcDst, calc, curLen);
+            }
+
+            if (attnSink) {
+                vadd(calcDst, calcDst, sink, 1, 1, 1, 0, 8, 8, 0);
+                pipe_barrier(PIPE_V);
             }
 
             vbrcb((__ubuf__ uint32_t *)calcDst, (__ubuf__ uint32_t *)calcDst, 0, 0, 1);
@@ -963,10 +1150,13 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, __gm__ float *expBuf, ui
                                      bool seqHead = true, uint32_t maskOff = 0,
                                      uint32_t maskStride = 1, bool hasScale = false,
                                      float scale = 1.0f, uint32_t kvOffset = 0, uint32_t topK = 0,
-                                     __gm__ int32_t *topkIndices = nullptr)
+                                     __gm__ int32_t *topkIndices = nullptr, uint32_t winSize = 0,
+                                     uint32_t winCalcLen = 0, uint32_t compressRatio = 1,
+                                     __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
 {
     RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, seqHead, maskOff, maskStride,
-                             hasScale, scale, kvOffset, topK, topkIndices);
+                             hasScale, scale, kvOffset, topK, topkIndices, winSize, winCalcLen,
+                             compressRatio, attnSink, swaSegWidth);
 }
 
 #else
@@ -975,7 +1165,9 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     __gm__ Dtype *buf, uint32_t m, uint32_t n, int calcLen, uint32_t outN = 0, bool seqHead = true,
     uint32_t maskOff = 0, uint32_t maskStride = 1, __gm__ float *maxBuf = nullptr,
     __gm__ float *sumBuf = nullptr, bool hasScale = false, float scale = 1.0f,
-    uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
+    uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr,
+    uint32_t winSize = 0, uint32_t winCalcLen = 0, uint32_t compressRatio = 1,
+    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
 {
 }
 template <typename Dtype>

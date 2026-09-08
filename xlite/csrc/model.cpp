@@ -969,21 +969,33 @@ XTensor *XModel::ForwardAttnCXAIndexer(XRuntime &rt, uint32_t layer, XTensor &hi
     return &topkIndices;
 }
 
-void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer,
-                            std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
-                            XTensor &hiddenState)
+void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<XTensor> &kvCache,
+                            XTensor &freqsCis, XTensor &hiddenState)
 {
     uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
     uint32_t nLocalGroups = _c.oGroups / _c.defTpSize;
-    auto [qr, q] = ForwardAttnCXACommon(rt, layer, kvCache[layer], freqsCis, hiddenState);
+    auto [qr, q] = ForwardAttnCXACommon(rt, layer, kvCache, freqsCis, hiddenState);
     XTensor *pTopkIndices = nullptr;
     if (_c.compressRatios[layer] == 4) {
-        pTopkIndices = ForwardAttnCXAIndexer(rt, layer, hiddenState, qr, kvCache[layer], freqsCis);
+        pTopkIndices = ForwardAttnCXAIndexer(rt, layer, hiddenState, qr, kvCache, freqsCis);
     }
 
     XTensor &o =
         rt.GetTensor({hiddenState.shape[0], nLocalHeads, _c.headDim}, hiddenState.dtype, DBG_LOC);
-    // TODO implement CXA attention: q, topkIndices, kvCache -> o
+    uint32_t swaSegWidth = _c.windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B;
+    uint32_t kvsize = _c.compressRatios[layer] == 0
+                          ? 0
+                          : ROUND_UP(rt._maxTotalLens / _c.compressRatios[layer], 4 * CXA_SVCK0);
+    XTensor &scores = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvsize},
+                                   hiddenState.dtype, DBG_LOC);
+    XliteOpCXA(rt, q, kvCache[CXA_SWA_KV], kvCache[CXA_COMPRESS_KV],
+               rt._attnBlockTables[CXA_SWA_KV], rt._attnBlockTables[CXA_COMPRESS_KV],
+               _c.blockSizes[CXA_SWA_KV], _c.blockSizes[CXA_COMPRESS_KV], attnSink[layer], scores,
+               o, rt._batch, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens, nLocalHeads,
+               _c.headDim, _c.softmaxScale, _c.windowSize, kvsize, _c.compressRatios[layer],
+               _c.indexTopK, pTopkIndices == nullptr ? XTensor() : *pTopkIndices);
+    rt.PutTensor(scores);
+
     if (pTopkIndices) {
         rt.PutTensor(*pTopkIndices);
     }
@@ -1767,7 +1779,7 @@ void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<
         XDEBUG_PRINT_X(rt, i == 0 ? x : residual, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
         ForwardHcPre(rt, residual, hcAttnFn[i], hcAttnScale[i], hcAttnBase[i], h, post, comb);
         XliteOpRmsNorm(rt, h, attnNorm[i], h, _c.normEps, _c.hiddenSize, true, attnNormBias[i]);
-        ForwardAttnCXA(rt, i, kvCache, freqsCis[i], h);
+        ForwardAttnCXA(rt, i, kvCache[i], freqsCis[i], h);
         XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
         ForwardHcPost(rt, h, post, comb, residual, residual);
 
