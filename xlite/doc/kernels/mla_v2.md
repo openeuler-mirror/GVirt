@@ -54,7 +54,7 @@ mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
 | batch | 标量 | - | uint32 | batch |
 | maxSeqLen | 标量 | - | uint32 | sparse: maxNumBlocks*blockSize;dense: indexTopK(dense cache 每批长度) |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
-| topK | 标量 | - | uint32 | DSA top-k;host 限制仅 sparse 模式生效:`maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=11776` 且 `topK ≤ MAX_TOPK_NUM=2048`(`csrc/op.cpp:1002-1013`);dense 模式 topK 传 0 |
+| topK | 标量 | - | uint32 | DSA top-k;host 限制仅 sparse 模式生效:`maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=11776` 且 `topK ≤ MAX_TOPK_NUM=2048`(`csrc/op.cpp:1002-1013`);dense 模式 host 要求 topK > 0 且其值即 dense cache 长度 indexTopK(`csrc/_C.cpp:1540-1544`),内核内部将其用作 maxSeqLen 并把 softmax topK 置 0(`csrc/kernels/mla_v2.h:58`) |
 | dense | 标量 | - | uint32 | 1=dense 连续 cache(`[batch, maxSeqLen, ...]`,由 gather_sparse_kv_cache 收集,blockTable 不使用),0=paged(`csrc/op.cpp:989-997`) |
 
 ## 支持的数据类型
