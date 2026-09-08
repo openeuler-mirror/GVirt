@@ -38,7 +38,7 @@ Python 接口:`recurrent_gated_delta_rule(rt, query, key, value, beta, g, state,
 - `float16_t`([recurrent_gated_delta_rule_float16_t.cpp](../../csrc/kernels/recurrent_gated_delta_rule_float16_t.cpp))
 - `bfloat16_t`([recurrent_gated_delta_rule_bfloat16_t.cpp](../../csrc/kernels/recurrent_gated_delta_rule_bfloat16_t.cpp))
 
-fp16/bf16 输入在 UB 内升到 fp32 计算;16-bit dtype 且 `kDim==vDim==128` 时启用向量化快路径(见下)。要求 8 个张量 dtype 一致([csrc/op.cpp:2105-2110](../../csrc/op.cpp#L2105-L2110))。
+fp16/bf16 输入在 UB 内升到 fp32 计算;16-bit dtype 且 `kDim==vDim==128` 时启用向量化快路径(见下)。要求 7 个张量(query、key、value、beta、g、state、out)dtype 一致([csrc/op.cpp:2131-2136](../../csrc/op.cpp#L2131-L2136))。
 
 ## 实现原理
 

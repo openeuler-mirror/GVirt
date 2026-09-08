@@ -576,11 +576,14 @@ class Model:
         gate (List[torch.Tensor]): MoE gate weights per layer, each
             ``[n_routed_experts, hidden_size]``, fp32 or bf16.
         gate_bias (List[torch.Tensor]): MoE gate bias per layer, each
-            ``[n_routed_experts]``, fp32.
+            ``[n_routed_experts]``, fp32. Optional on sqrtsoftplus scoring layers
+            (required for sigmoid); not consumed by hash-mode layers.
         se_up_gate (List[torch.Tensor]): Shared-expert up-gate weights per layer, each
             ``[2*moe_intermediate_size, hidden_size]`` (or TP-sharded), model dtype / int8.
         se_up_gate_deq_scale (List[torch.Tensor]): Shared-expert up-gate scales per layer,
-            each ``[2*2*moe_intermediate_size, 1]``, fp32.
+            each ``[2*2*moe_intermediate_size, 1]``, fp32 (or
+            ``[2*2*moe_intermediate_size/moe_tp_size, 1]`` when the shared-expert up-gate
+            weight is TP-sharded).
         se_down (List[torch.Tensor]): Shared-expert down weights per layer, each
             ``[hidden_size, moe_intermediate_size]`` (or TP-sharded), model dtype / int8.
         se_down_deq_scale (List[torch.Tensor]): Shared-expert down scales per layer, each
@@ -632,7 +635,8 @@ class Model:
         comp_norm (List[torch.Tensor]): Compressor RMSNorm weight per layer (DeepSeek-V4),
             each ``[head_dim]``, fp32.
         idx_wq_b (List[torch.Tensor]): Indexer wq_b per layer (DeepSeek-V4), each
-            ``[index_n_heads*index_head_dim, q_lora_rank]``, model dtype / int8 / int4.
+            ``[index_n_heads*index_head_dim/def_tp_size, q_lora_rank]`` (ColumnParallel,
+            output dim sharded), model dtype / int8 / int4.
         idx_wq_b_input_scale (List[torch.Tensor]): Indexer wq_b quantization input scale per
             layer, each ``[q_lora_rank]``, bf16.
         idx_wq_b_input_offset (List[torch.Tensor]): Indexer wq_b quantization input offset
@@ -642,7 +646,8 @@ class Model:
         idx_wq_b_deq_scale (List[torch.Tensor]): Indexer wq_b dequantization scale per
             layer, each ``[2*index_n_heads*index_head_dim, 1]``, fp32.
         idx_weights_proj (List[torch.Tensor]): Indexer weights_proj per layer (DeepSeek-V4),
-            each ``[index_n_heads, hidden_size]``, model dtype.
+            each ``[index_n_heads/def_tp_size, hidden_size]`` (ColumnParallel, output dim
+            sharded), model dtype.
         idx_comp_ape (List[torch.Tensor]): Indexer compressor ape per layer (DeepSeek-V4),
             each ``[4, 2*index_head_dim]``, fp32.
         idx_comp_w_kv (List[torch.Tensor]): Indexer compressor wkv per layer (fp32), each
@@ -1533,8 +1538,9 @@ def rmsnorm_variance_only(
     Args:
         rt (Runtime): Native runtime handle.
         in_ (torch.Tensor): Input tensor, shape ``[tokens, dim]``, fp16 or bf16.
-        out (torch.Tensor): Variance-only output tensor, shape ``[tokens, 1]`` (or
-            ``[tokens, cnt_per_token]``), fp16/bf16 (same as in) or fp32.
+        out (torch.Tensor): Variance-only output tensor, shape ``[tokens, 1]``,
+            fp32. The kernel writes one float per token row (only the first
+            segment when ``cnt_per_token > 1``).
         norm_eps (float): Numerical epsilon used in normalization.
         norm_dim (int): Normalization width. `0` lets native code infer it.
         cnt_per_token (int): Number of contiguous segments per token.
@@ -1572,7 +1578,7 @@ def rmsnorm(
         in_start_offset (int): Input offset for segmented normalization.
         out_start_offset (int): Output offset for segmented normalization.
         variance (Optional[torch.Tensor]): Optional output tensor for variance values, shape
-            ``[tokens, cnt_per_token]``, fp32.
+            ``[tokens, 1]``, fp32. Only the first segment's variance is written per row.
 
     Returns:
         None: `out` is written in place.
@@ -1742,8 +1748,9 @@ def rope_and_cache(
             token's ``position`` value, so it must cover the full position range.
         slot_mapping (torch.Tensor): Per-token paged-cache slots, shape ``[tokens]``, int32
             (slot = block_id*block_size + offset).
-        n_heads (int): Number of query heads.
-        n_kv_heads (int): Number of KV heads.
+        n_heads (int): Global number of query heads (the host divides by tp size to get
+            this rank's local head count).
+        n_kv_heads (int): Global number of KV heads (divided by tp size on the host).
         head_dim (int): Head dimension.
         rot_dim (int): Rotary dimension.
         block_size (int): KV cache block size.
@@ -1965,9 +1972,12 @@ def topk(
         rt (Runtime): Native runtime handle.
         scores (torch.Tensor): Score tensor, shape ``[batch, seq_len]``, bf16 or fp32.
             No-op when ``scores.shape[1] <= k``.
-        indices (torch.Tensor): Index tensor matching scores, shape ``[batch, seq_len]``,
-            int32 (``0..seq_len-1`` identity).
-        outIndices (torch.Tensor): Output top-k index tensor, shape ``[batch, k]``, int32.
+        indices (torch.Tensor): Identity index table, shape ``[max_seq_len]`` (1-D,
+            shared by all batch rows), int32 (``0..max_seq_len-1``).
+        outIndices (torch.Tensor): Output top-k index tensor, shape
+            ``[sum(query_lens), k]`` int32 — one row per query token across the
+            whole batch, written via a global row counter (``[batch, k]`` only
+            when every query length is 1).
         query_lens (torch.Tensor): Vector of query lengths for each batch, shape ``[batch]``,
             int32 device (batch is taken from this tensor's shape[0]).
         cached_lens (torch.Tensor): Vector of cached KV lengths for each batch, shape
@@ -2006,7 +2016,8 @@ def permutation(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input token tensor, shape ``[tokens, hidden]``, any dtype.
+        in_ (torch.Tensor): Input token tensor, shape ``[tokens, hidden]``, bf16 (the
+            only dtype the kernel supports; rows are moved as raw 2-byte elements).
         routing (torch.Tensor): Routing bitmap (BIT1 packed, e.g. int64), shape
             ``[tokens, ceil(n_experts/64)]``.
         start (int): Start expert index.
@@ -2015,9 +2026,13 @@ def permutation(
             same dtype as ``in_``.
         unp_idx (torch.Tensor): Unpermutation index grid output, shape
             ``[n_experts, tokens + 1]``, int32: per expert ``e``, column ``t`` holds the
-            offset of token ``t`` within expert ``e``'s permuted segment, and the final
-            column holds that expert's total count (consumed by :func:`unpermutation`).
-        counts (torch.Tensor): Per-expert count output, shape ``[end-start]``, int32.
+            row of token ``t`` within expert ``e``'s permuted segment; the final column
+            holds each expert's segment start offset (exclusive prefix sum of counts);
+            ``[0, 0]`` is overwritten with the total permuted token count (consumed by
+            :func:`unpermutation`).
+        counts (torch.Tensor): Per-expert count output, shape ``[n_routed_experts]``,
+            int32 — indexed by absolute expert id (must be full-width even when
+            ``start > 0``; experts outside ``[start, end)`` are written 0).
 
     Returns:
         None: Output tensors are written in place.
@@ -2038,7 +2053,10 @@ def unpermutation(
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Permuted input tensor, shape ``[tokens, hidden]``, bf16.
+        in_ (torch.Tensor): Permuted input tensor, shape
+            ``[max_expert_sorted, hidden]`` (the permuted buffer's capacity; rows are
+            gathered via ``unp_idx``, so this need not equal the original token count),
+            bf16.
         routing (torch.Tensor): Routing bitmap (BIT1 packed, e.g. int64), shape
             ``[tokens, ceil(n_experts/64)]``.
         weights (torch.Tensor): Per-token per-expert routing weight map, shape
@@ -2047,8 +2065,8 @@ def unpermutation(
         start (int): Start expert index.
         end (int): End expert index.
         out (torch.Tensor): Unpermuted output tensor, shape ``[orig_tokens, hidden]``, bf16.
-        unp_idx (torch.Tensor): Unpermutation index tensor (from :func:`permutation`),
-            int32.
+        unp_idx (torch.Tensor): Unpermutation index grid (from :func:`permutation`), shape
+            ``[n_experts, tokens + 1]``, int32.
 
     Returns:
         None: `out` is written in place.
@@ -2135,7 +2153,9 @@ def rope_complex(
         input_with_r (torch.Tensor): Input tensor with real/imag layout, shape
             ``[tokens, n_local_heads*step_dim]``, fp16 or bf16.
         freqs (torch.Tensor): Rotary frequency table, shape ``[max_position, rope_dim/2]``
-            complex or equivalent, model dtype. Indexed by each token's ``position`` value
+            complex64 (or equivalent real view ``[max_position, rope_dim]`` fp32). The
+            kernel always reads it as float32 regardless of model dtype. Indexed by
+            each token's ``position`` value
             (``freqs_ptr + position[token] * rope_dim``), so it must cover the full
             position range.
         position (torch.Tensor): Per-token position ids, shape ``[tokens]``, int64.
@@ -2193,7 +2213,9 @@ def mla_prepare(
             ``[tokens, kv_lora_rank]``, model dtype; also used as the `key` written into
             k_cache.
         freqs (torch.Tensor): Precomputed rotary freqs_cis (TTTWWW layout), shape
-            ``[max_position, rope_head_dim/2]`` complex, model dtype; indexed by each
+            ``[max_position, rope_head_dim/2]`` complex64 (or equivalent real view
+            ``[max_position, rope_head_dim]`` fp32). The kernel always reads it as
+            float32 regardless of model dtype; indexed by each
             token's ``position`` value, so it must cover the full position range.
         position (torch.Tensor): Per-token position ids (int64), shape ``[tokens]``.
         q_lora_rank (int): q-lora rank dimension.
@@ -2250,7 +2272,9 @@ def indexer_prepare(
         k_norm (torch.Tensor): LayerNorm weight ``[index_head_dim]``, model dtype or fp32.
         k_norm_bias (torch.Tensor): LayerNorm bias ``[index_head_dim]``, model dtype or fp32.
         freqs (torch.Tensor): Precomputed rotary freqs_cis (TTTWWW layout), shape
-            ``[max_position, rope_head_dim/2]`` complex, model dtype; indexed by each
+            ``[max_position, rope_head_dim/2]`` complex64 (or equivalent real view
+            ``[max_position, rope_head_dim]`` fp32). The kernel always reads it as
+            float32 regardless of model dtype; indexed by each
             token's ``position`` value, so it must cover the full position range.
         position (torch.Tensor): Per-token position ids (int64), shape ``[token_num]``.
         index_head_dim (int): Indexer head dimension.
@@ -2330,9 +2354,9 @@ def matmul_dequant(
         y (torch.Tensor): Quantized right matrix, shape ``[n, k]`` (transpose=False) or
             ``[k, n]`` (transpose=True), int8.
         bias (torch.Tensor): Quantization bias, shape ``[n]``, int32 (optional).
-        deq_scale (torch.Tensor): Weight dequantization scale, shape ``[2*n, 1]``, fp32
+        deq_scale (torch.Tensor): Weight dequantization scale, flat ``[2*n]``, fp32
             (uint64 TF32-packed pairs).
-        z (torch.Tensor): Output matrix, shape ``[m, n]``, bf16.
+        z (torch.Tensor): Output matrix, shape ``[m, n]``, fp16.
         weight_nz (bool): Whether `y` uses NZ layout.
         transpose (bool): Whether to transpose the right matrix.
 
@@ -2353,18 +2377,21 @@ def msd_merge_dequant(
 
     Used by the MSD W4A8 MoE post-stage to turn a mid-stage row-merged result
     into the final BF16 output. ``y_merged`` packs two halves of a 4-bit weight
-    matmul: rows ``[0, m)`` hold the low nibble and rows ``[m, 2m)`` hold the
-    high nibble (each in int8 form). The kernel reconstructs the full value
-    ``Y_high * 16 + Y_low``, compensates the low-nibble ``-8`` bias, adds a
-    per-column ``scale_bias``, and scales by a per-token ``per_token_scale``::
+    matmul in an interleaved row layout: token ``r``'s low-nibble row is
+    ``2*r`` and its high-nibble row is ``2*r + 1`` (each in int8 form). The
+    kernel reconstructs the full value ``Y_high * 16 + Y_low``, compensates
+    the low-nibble ``-8`` bias, adds a per-column ``scale_bias``, and scales
+    by a per-token ``per_token_scale``::
 
         Y = (Y_high * 16 + Y_low + scale_bias) * perTokenScale
 
     Args:
         rt (Runtime): Native runtime handle.
         y_merged (torch.Tensor): Row-merged int8 mid-stage result, shape
-            ``[2*m, n]`` (float16). Rows ``[0, m)`` are the low nibble, rows
-            ``[m, 2m)`` are the high nibble.
+            ``[2*m, n]`` (float16). Row ``2*r`` is the low nibble and row
+            ``2*r + 1`` the high nibble of token ``r``.
+        counts (torch.Tensor): Per-expert merged row counts, shape
+            ``[num_experts]``, int32 (read as uint32 by the kernel).
         scale_bias (torch.Tensor): Per-column bias added after merge, shape
             ``[n]`` (float32).
         per_token_scale (torch.Tensor): Per-token dequantization scale, shape
@@ -2387,8 +2414,9 @@ def dequant(rt: Runtime, in_: torch.Tensor, scale: torch.Tensor, out: torch.Tens
     Args:
         rt (Runtime): Native runtime handle.
         in_ (torch.Tensor): Quantized input tensor, shape ``[m, n]``, fp16.
-        scale (torch.Tensor): Scale tensor, fp32 (per-token or per-tensor; only read when
-            ``has_scale`` is true).
+        scale (torch.Tensor): Scale tensor, shape ``[m]``, fp32, per-token (one scale
+            per row; the kernel indexes it by row number; only read when ``has_scale``
+            is true).
         out (torch.Tensor): Dequantized output tensor, shape ``[m, n]``, bf16.
         has_scale (bool): Whether scale should be applied.
 
@@ -2472,7 +2500,8 @@ def mla_v2(
         batch (int): Batch size.
         scale (float): Attention scaling factor.
         topk_indices (torch.Tensor): Top-k indices tensor for sparse attention, shape
-            ``[batch, top_k]``, int32 (may be empty when ``top_k == 0``).
+            ``[total_query_tokens, top_k]`` int32, one row per query token
+            (``[batch, top_k]`` in decode); may be empty when ``top_k == 0``.
         top_k (int): Number of top-k indices; 0 disables sparse attention in
             paged mode. In dense mode this is the dense cache length
             (``index_topk``) and must be > 0.
@@ -2663,8 +2692,9 @@ def indexer_scores(
             (must match k_cache/weight/scores).
         k_cache (torch.Tensor): Paged index-key cache, shape
             ``[num_blocks, block_size, 1, head_dim]``, same dtype.
-        weight (torch.Tensor): Indexer weight tensor, shape ``[tokens, n_heads]`` slice
-            (per-token weights), same dtype.
+        weight (torch.Tensor): Indexer weight tensor, shape ``[tokens, head_dim + n_heads]``,
+            same dtype — the kernel strides rows by ``head_dim + n_heads`` and consumes
+            only the trailing ``n_heads`` columns of each row.
         scores (torch.Tensor): Output score tensor, shape ``[tokens, ...]``, same dtype.
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
             int32 device.
@@ -2870,7 +2900,7 @@ def linear_att_proj(
     """
     ...
 
-def transpose_1_2(rt: Runtime, input: torch.Tensor, eye: torch.Tensor, output: torch.Tensor) -> None:
+def transpose_1_2(rt: Runtime, input: torch.Tensor, output: torch.Tensor) -> None:
     """Transpose input 3D tensor along dimensions 1 and 2.
 
     Args:
@@ -2889,20 +2919,64 @@ def linear_att_conv_and_silu(
     conv_state: torch.Tensor,
     weight: torch.Tensor,
     output: torch.Tensor,
+    query_start_loc: Optional[torch.Tensor] = None,
+    query_lens: Optional[torch.Tensor] = None,
 ) -> None:
     """Fused causal conv1d + SiLU for linear attention (no host concat).
 
+    Two modes. Uniform: ``mix_qkv``/``output`` are ``[B, S, C]`` and both
+    optional tensors are omitted. Packed: ``mix_qkv``/``output`` are
+    token-major ``[T, C]`` (``T = sum of per-request lengths``, ``T <= 256``
+    requests), and ``query_start_loc``/``query_lens`` (both ``[batch]``,
+    int32) describe the per-request segments; ``S <= 4096`` per request.
+
     Args:
         rt (Runtime): Native runtime handle.
-        mix_qkv (torch.Tensor): Input mixed QKV tensor, shape [B, S, C], fp32/fp16/bf16
-            (all operands same dtype).
-        conv_state (torch.Tensor): Convolution state tensor, shape [B, C, K], same dtype;
-            updated in place (K = kernel size, <= 16; S <= 4096).
-        weight (torch.Tensor): Kernel weight tensor, shape [C, 1, K] or [C, K], same dtype.
-        output (torch.Tensor): Output tensor, shape [B, S, C], same dtype.
+        mix_qkv (torch.Tensor): Input mixed QKV tensor, ``[B, S, C]`` (uniform)
+            or ``[T, C]`` (packed), fp32/fp16/bf16 (all operands same dtype).
+        conv_state (torch.Tensor): Convolution state tensor, shape ``[B, C, K]``,
+            same dtype; updated in place (K = kernel size, <= 16).
+        weight (torch.Tensor): Kernel weight tensor, shape ``[C, 1, K]`` or
+            ``[C, K]``, same dtype.
+        output (torch.Tensor): Output tensor, same shape as ``mix_qkv``, same dtype.
+        query_start_loc (Optional[torch.Tensor]): Packed mode only: exclusive
+            prefix-sum segment starts, shape ``[batch]``, int32.
+        query_lens (Optional[torch.Tensor]): Packed mode only: per-request token
+            counts, shape ``[batch]``, int32.
 
     Returns:
         None: `output` is written in place. State is always updated.
+    """
+    ...
+
+def linear_att_conv_and_silu_token(
+    rt: Runtime,
+    mix_qkv: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    output: torch.Tensor,
+    seq_len: int,
+) -> None:
+    """Fused causal conv1d + SiLU on token-major input (uniform seqlen).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        mix_qkv (torch.Tensor): Input mixed QKV tensor, token-major
+            ``[T, C]`` with ``T = batch * seq_len``, fp32/fp16/bf16
+            (all operands same dtype).
+        conv_state (torch.Tensor): Convolution state tensor, shape
+            ``[B, C, K]``, same dtype; updated in place. ``K`` (kernel
+            dim) must be in ``{1, 2, 4}``; ``seq_len >= K``.
+        weight (torch.Tensor): Kernel weight tensor, shape ``[C, 1, K]`` or
+            ``[C, K]``, same dtype.
+        output (torch.Tensor): Output tensor, shape ``[T, C]``, same dtype.
+        seq_len (int): Per-request sequence length; ``batch * seq_len``
+            must equal ``mix_qkv.shape[0]``. ``C`` must be a multiple of
+            1024.
+
+    Returns:
+        None: `output` is written in place. State is updated via a separate
+        kernel launch.
     """
     ...
 
@@ -2990,11 +3064,12 @@ def beta_decay(
         b (torch.Tensor): b input tensor, shape ``[bsz, seqlen, num_v_heads]``, fp32/fp16/bf16
             (same as ``a``).
         a (torch.Tensor): a input tensor, same shape/dtype as ``b``.
-        A_log (torch.Tensor): Learnable decay parameters, shape ``[num_v_heads]``.
+        A_log (torch.Tensor): Learnable decay parameters (log-space; the kernel applies
+            exp to it), shape ``[num_v_heads]``.
         dt_bias (torch.Tensor): Time bias, shape ``[num_v_heads]``.
         beta (torch.Tensor): beta output tensor, shape ``[bsz, seqlen, num_v_heads]``.
-        g (torch.Tensor): g(decay) output tensor (log-space; kernel applies exp), shape
-            ``[bsz, seqlen, num_v_heads]``.
+        g (torch.Tensor): g(decay) output tensor ``g = -exp(A_log) * softplus(a + dt_bias)``,
+            shape ``[bsz, seqlen, num_v_heads]``.
         bsz (int): Batch size.
         seqlen (int): Sequence length.
         num_v_heads (int): Number of value heads.
@@ -3018,8 +3093,16 @@ def recurrent_gated_delta_rule(
     num_heads: int,
     k_dim: int,
     v_dim: int,
+    query_start_loc: Optional[torch.Tensor] = None,
+    query_lens: Optional[torch.Tensor] = None,
 ) -> None:
     """Recurrent gated delta rule (GDN linear-attention core).
+
+    Two modes. Uniform: rows are ``[B*seqlen, ...]`` in batch-major order and
+    both optional tensors are omitted. Packed: ``query_start_loc``/``query_lens``
+    (both ``[batch]``, int32) describe per-request row segments
+    (``[start[b], start[b]+lens[b])``) within the ``[T, ...]`` rows, and
+    ``seqlen`` is ignored.
 
     Args:
         rt (Runtime): Native runtime handle.
@@ -3036,6 +3119,10 @@ def recurrent_gated_delta_rule(
         num_heads (int): Number of heads.
         k_dim (int): Key head dim (<=128).
         v_dim (int): Value head dim (<=128).
+        query_start_loc (Optional[torch.Tensor]): Packed mode only: exclusive prefix-sum
+            segment starts, shape ``[batch]``, int32.
+        query_lens (Optional[torch.Tensor]): Packed mode only: per-request token counts,
+            shape ``[batch]``, int32.
 
     Returns:
         None: Output and state are written in place.
@@ -3056,7 +3143,8 @@ def einsum_mht_hdt_mhd(
     """Batched matmul for ``mhd = einsum("mht,hdt->mhd", mht, hdt)``.
 
     The right operand ``hdt`` has a head-major layout (``[h, d, t]``), which the
-    kernel consumes via the matmul transpose path. The output ``mhd`` is laid
+    kernel consumes via the matmul non-transpose path (transpose=0, loading
+    ND2NZ with ``t`` as the row stride). The output ``mhd`` is laid
     out as ``[m, h, d]`` with the head dimension ``h`` kept as an outer loop.
 
     Args:
@@ -3090,7 +3178,7 @@ def einsum_mht_htd_mhd(
     """Batched matmul for ``mhd = einsum("mht,htd->mhd", mht, htd)``.
 
     The right operand ``htd`` has a head-row layout (``[h, t, d]``), which the
-    kernel consumes directly via the standard matmul path. The output ``mhd``
+    kernel consumes via the matmul transpose path (transpose=1). The output ``mhd``
     is laid out as ``[m, h, d]`` with the head dimension ``h`` kept as an outer
     loop.
 
@@ -3121,8 +3209,9 @@ def unpack_activation(
     Args:
         rt (Runtime): Native runtime handle.
         input (torch.Tensor): input int8 tensor, shape ``[m, n]`` with ``n`` even.
-        output (torch.Tensor): output low/high int4 tensor, shape ``[m, n/2]`` int8
-            (low nibble | high nibble packed).
+        output (torch.Tensor): output low/high int4 tensor, shape ``[2*m, n/2]`` int8,
+            interleaved: row ``2*r`` holds the low nibbles and row ``2*r + 1`` the
+            high nibbles of input token ``r``.
 
     Returns:
         None: Output tensors are written in place.
@@ -3203,7 +3292,8 @@ def hc_act(
         post (torch.Tensor): Output post gate [n, hc_mult] fp32 (empty in head mode).
         comb (torch.Tensor): Output comb [n, hc_mult*hc_mult] fp32 (empty in head mode).
         hc_mult (int): Hyper-connection multiplier K.
-        eps (float): Epsilon added to pre and every Sinkhorn denominator.
+        eps (float): Epsilon added to pre, to the softmax input, and to every Sinkhorn
+            denominator.
         sinkhorn_iters (int): Sinkhorn normalization iterations.
         x_resid (torch.Tensor): Merge input [n, hc_mult, hidden] bf16.
         output (torch.Tensor): Merge output [n, hidden] bf16.
@@ -3226,10 +3316,12 @@ def hc_post(
 ) -> None:
     """Hyper-Connection post-activation merge (DeepSeek-V4).
 
-    y[m,H,D] = post[m,H]*x[m,D] (broadcast) + sum_k comb[m,H,k]*residual[m,k,D].
-    `x` [m, hidden] bf16, `post` [m, hc_mult] fp32, `comb` [m, hc_mult*hc_mult] fp32,
-    `residual` [m, hc_mult, hidden] bf16, `y` [m, hc_mult, hidden] bf16. `residual`
-    may alias `y` (in-place): all sources are read before any output is written.
+    y[m,k,D] = post[m,k]*x[m,D] (broadcast) + sum_h comb[m,h*H+k]*residual[m,h,D]:
+    `comb` contracts the source stream h and indexes the output stream k, i.e. the
+    flat layout is source-major. `x` [m, hidden] bf16, `post` [m, hc_mult] fp32,
+    `comb` [m, hc_mult*hc_mult] fp32, `residual` [m, hc_mult, hidden] bf16,
+    `y` [m, hc_mult, hidden] bf16. `residual` may alias `y` (in-place): all sources
+    are read before any output is written.
 
     Args:
         rt (Runtime): Native runtime handle.

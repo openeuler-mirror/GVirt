@@ -8,8 +8,8 @@
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| input | 输入 | `[dim0, dim1, dim2]` | float16 | 源张量,行主序连续存储 |
-| output | 输出 | `[dim0, dim2, dim1]` | float16 | 转置结果 |
+| input | 输入 | `[dim0, dim1, dim2]` | float16 / bfloat16 | 源张量,行主序连续存储 |
+| output | 输出 | `[dim0, dim2, dim1]` | float16 / bfloat16 | 转置结果,与 input 同 dtype |
 | dim0 | 标量 | - | uint32_t | 批次大小(不参与转置) |
 | dim1 | 标量 | - | uint32_t | 输入的第 1 维长度 |
 | dim2 | 标量 | - | uint32_t | 输入的第 2 维长度 |
@@ -17,6 +17,7 @@
 ## 支持的数据类型
 
 - `float16_t`([transpose_1_2_float16_t.cpp](../../csrc/kernels/transpose_1_2_float16_t.cpp))
+- `bfloat16_t`([transpose_1_2_bfloat16_t.cpp](../../csrc/kernels/transpose_1_2_bfloat16_t.cpp))
 
 ## 实现原理
 

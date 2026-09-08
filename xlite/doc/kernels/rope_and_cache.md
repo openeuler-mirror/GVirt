@@ -27,7 +27,7 @@ Python 接口:`rope_and_cache(rt, inout, k_cache, v_cache, position, cossin, slo
 | position | 输入 | `[num_tokens]`(MroPE 为 `[3, num_tokens]`) | int64 | 每 token 的位置 id;MroPE 时第 2/3 行为 h/w 位置([csrc/kernels/rope_and_cache.h:458-460](../../csrc/kernels/rope_and_cache.h#L458-L460)) |
 | cossin | 输入 | `[max_pos, rot_dim]` | 同 inout | 预计算表,前 `rot_dim/2` 列为 cos、后 `rot_dim/2` 列为 sin(见测试 `precompute_freqs_cis` 的 `cat((cos, sin), dim=-1)`) |
 | slot_mapping | 输入 | `[num_tokens]` | int32 | 每 token 在 cache 中的平坦 slot 索引 |
-| n_heads / n_kv_heads | 标量 | - | uint32 | 本 rank 的 Q 头数与 KV 头数(host 已除以 tpSize) |
+| n_heads / n_kv_heads | 标量 | - | uint32 | **全局** Q 头数与 KV 头数(host 内部除以 tpSize 得本 rank 头数,见 [csrc/op.cpp:879-881](../../csrc/op.cpp#L879-L881)) |
 | head_dim | 标量 | - | uint32 | 每头维度,支持 64 / 128 |
 | rot_dim | 标量 | - | uint32 | 旋转维度,支持 64 / 128(可小于 head_dim,如 head_dim=128 + rot_dim=64) |
 | block_size | 标量 | - | uint32 | cache 块大小(kernel 内不直接使用,slot_mapping 已是平坦索引) |
