@@ -173,6 +173,35 @@ add_custom_command(
 )
 add_custom_target(xlite_aclrtlaunch_all DEPENDS "${_MERGED_KERN_H}")
 
+set(_xlite_msprof_enabled FALSE)
+if(DEFINED ENV{XLITE_MSPROF_RECODE_SHAPE})
+    string(TOLOWER "$ENV{XLITE_MSPROF_RECODE_SHAPE}" _xlite_msprof_raw)
+    string(STRIP "${_xlite_msprof_raw}" _xlite_msprof_raw)
+    if(NOT (_xlite_msprof_raw STREQUAL "" OR _xlite_msprof_raw MATCHES "^(0|false|no|off)$"))
+        set(_xlite_msprof_enabled TRUE)
+    endif()
+endif()
+
+# Inject XLiteMsprofShapeHook into the generated host_stub.cpp files (see
+# scripts/patch_host_stub.py). Only done when XLITE_MSPROF_RECODE_SHAPE is on.
+if(_xlite_msprof_enabled)
+    set(_XLITE_AUTO_GEN_DIRS
+        ${CMAKE_CURRENT_BINARY_DIR}/auto_gen
+    )
+    add_custom_target(xlite_patch_host_stub ALL
+        COMMAND ${CMAKE_COMMAND} -E env python3
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_host_stub.py ${_XLITE_AUTO_GEN_DIRS}
+        VERBATIM
+    )
+    foreach(_kernel_target IN ITEMS
+            xlite_kernels_common_${RUN_MODE}
+            xlite_kernels_bf16_${RUN_MODE}
+            xlite_kernels_f16_${RUN_MODE})
+        add_dependencies(xlite_patch_host_stub ${_kernel_target}_merge_obj)
+        add_dependencies(${_kernel_target}_host_stub_obj xlite_patch_host_stub)
+    endforeach()
+endif()
+
 # If XLITE_DEBUG_ON env var is NOT set (empty / falsy), disable ascendc printf
 # by adding ASCENDC_DUMP=0 to the ascendc kernel compile definitions. When
 # XLITE_DEBUG_ON is set, ASCENDC_DUMP is left as the default (1) so printf
@@ -208,6 +237,7 @@ add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/auto_tuner.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/trace/csv_sink.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/trace/matmul_tracer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/trace/msprof_shape.cpp
 )
 
 target_include_directories(xlite PRIVATE
@@ -273,6 +303,17 @@ if(DEFINED ENV{XLITE_TRACE_MATMUL})
     endif()
     unset(_xlite_trace_raw)
 endif()
+
+# ---------------------------------------------------------------------------
+# Msprof shape record. Driven solely by the XLITE_MSPROF_RECODE_SHAPE env var
+# (parsed at the top of this file, where it also gates the host_stub patch).
+# ---------------------------------------------------------------------------
+if(_xlite_msprof_enabled)
+    target_compile_definitions(xlite PUBLIC XLITE_MSPROF_RECODE_SHAPE)
+    message(STATUS "XLITE_MSPROF_RECODE_SHAPE='${_xlite_msprof_raw}' -> XLITE_MSPROF_RECODE_SHAPE")
+endif()
+unset(_xlite_msprof_raw)
+unset(_xlite_msprof_enabled)
 
 target_compile_options(xlite PRIVATE
     -std=c++17 -O3 -Wall -Werror
