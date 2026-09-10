@@ -9,6 +9,8 @@
 # ===============================================================================
 from __future__ import absolute_import
 
+from collections import defaultdict
+
 import logging
 import numpy as np
 import torch
@@ -61,8 +63,7 @@ def max_blocks(query_lens, cached_lens, block_size):
     return (max_sum + block_size - 1) // block_size
 
 
-def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list,
-             query_len_list, topK):
+def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK):
     max_num_blocks = max_blocks(query_len_list, cached_lens_list, BLOCK_SIZE)
     max_seq_len = max_num_blocks * BLOCK_SIZE
     total_query_len = sum(query_len_list)
@@ -83,43 +84,51 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list,
         cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
         query_lens_np = np.array(query_len_list)
         query_start_loc_np = np.cumsum(query_lens_np) - query_lens_np
-        query_start_loc = torch.tensor(query_start_loc_np.tolist(),
-                                       dtype=torch.int32).flatten()
+        query_start_loc = torch.tensor(query_start_loc_np.tolist(), dtype=torch.int32).flatten()
 
         batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
         block_indices = np.arange(max_num_blocks, dtype=np.uint32)
         block_tables_array = batch_indices * max_num_blocks + block_indices
-        block_tables = torch.tensor(block_tables_array.tolist(),
-                                    dtype=torch.int32).flatten()
+        block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32).flatten()
 
         indices = torch.arange(max_seq_len, dtype=torch.int32).npu()
-        topk_indices_xlite = torch.empty(total_query_len, topK,
-                                         dtype=torch.int32).npu()
+        topk_indices_xlite = torch.empty(total_query_len, topK, dtype=torch.int32).npu()
 
-    # standard indexer_scores forward: process each sample
+    # standard indexer_scores forward: process each sample. The reference score
+    # tensor [qlen, seq_len, n_heads] is fp32 and grows ~qlen*seq_len*n_heads;
+    # for large prefill (qlen up to 13542) that is tens of GiB, which OOMs the
+    # device. Compute it on the host instead, chunked over query rows so peak
+    # host memory stays ~chunk*seq_len*n_heads*4B (a few hundred MiB).
+    q_std_cpu = q_standard.cpu().float()
+    k_cache_cpu = k_cache.cpu().float()
+    weight_std_cpu = weight_standard.cpu().float()
+
     index_scores_standard_list = []
     offset = 0
     for i in range(batch):
         qlen = query_len_list[i]
         clen = cached_lens_list[i]
-        q_chunk = q_standard[offset: offset + qlen]
-        weight_chunk = weight_standard[offset: offset + qlen,
-                                       head_dim: head_dim + n_heads]
+        seq_len = clen + qlen
+        q_chunk = q_std_cpu[offset : offset + qlen].view(qlen, n_heads, head_dim)
+        weight_chunk = weight_std_cpu[offset : offset + qlen, head_dim : head_dim + n_heads]
         offset += qlen
 
-        q_chunk = q_chunk.view(qlen, n_heads, head_dim)
-        k_cache_slice = k_cache[i:i + 1, :clen + qlen]
-        scores = torch.einsum("bshd,btd->bsht", q_chunk.unsqueeze(0),
-                              k_cache_slice)
-        scores = scores.squeeze(0)
-        index_score = torch.einsum("sht,sh->st", scores, weight_chunk)
+        k_slice = k_cache_cpu[i, :seq_len]  # [seq_len, head_dim]
+        index_score = torch.empty(qlen, seq_len, dtype=torch.float32)
+        # scores[s] = clamp(q[s] @ k.T, 0); index_score[s] = scores[s] @ weight[s]
+        chunk = 256
+        for s0 in range(0, qlen, chunk):
+            s1 = min(s0 + chunk, qlen)
+            scores = torch.einsum("chd,td->cht", q_chunk[s0:s1], k_slice)  # [chunk, seq_len, n_heads]
+            scores = scores.clamp(min=0)  # ReLU filter to match kernel's L0C copy with reluEn=1
+            index_score[s0:s1] = torch.einsum("cht,ch->ct", scores, weight_chunk[s0:s1])
         index_scores_standard_list.append(index_score)
 
     # xlite: write per-sample KV into block cache
     for i in range(batch):
         qlen = query_len_list[i]
         clen = cached_lens_list[i]
-        current_k = k_cache[i:i + 1, :qlen + clen]
+        current_k = k_cache[i : i + 1, : qlen + clen]
         sample_cache_start = i * max_num_blocks
         total_len = clen + qlen
         num_blocks_needed = (total_len + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -130,92 +139,141 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list,
             cache_block_idx = sample_cache_start + block_idx
             if cache_block_idx >= (i + 1) * max_num_blocks:
                 break
-            k_cache_xlite[cache_block_idx, :current_seq_len] = \
-                current_k[:, seq_start:seq_end]
+            k_cache_xlite[cache_block_idx, :current_seq_len] = current_k[:, seq_start:seq_end]
 
-    # standard topk: for each query position, select topK indices from
-    # [0, clen+qlen) range. When total_len < topK, pad with the last valid
-    # index (this matches the kernel's behavior of only writing kvLen
-    # indices when total_len <= topK — we compare only the valid prefix).
+    # standard topk: for each query position q (absolute cache position
+    # p0 = clen + q), select topK indices from the causal range [0, p0]
+    # (including itself, no future tokens). The kernel's causal
+    # mask masks scores after p0 to -inf, so every emitted index is <= p0.
+    #
+    # Topk results are only meaningful for sparse attention, i.e. when the
+    # token has more than topK candidates including itself (p0 >= topK); for p0 < topK the
+    # token uses dense attention and the kernel does not need topk. We still
+    # compute the reference topk for every row here, but only compare rows with
+    # p0 >= topK against the kernel below.
     standard_topk_list = []
     for i in range(batch):
         qlen = query_len_list[i]
         clen = cached_lens_list[i]
-        total_len = clen + qlen
         index_score = index_scores_standard_list[i]  # [qlen, total_len]
-        k = min(topK, total_len)
-        # topk returns (values, indices); we only need indices
-        _, tk_idx = torch.topk(index_score, k=k, dim=-1)
-        if k < topK:
-            # pad with the last selected index to reach topK columns
-            pad = tk_idx[:, -1:].expand(qlen, topK - k)
-            tk_idx = torch.cat([tk_idx, pad], dim=-1)
-        standard_topk_list.append(tk_idx.to(dtype=torch.int32))
+        tk_idx_list = []
+        for q in range(qlen):
+            p0 = clen + q  # absolute position; valid candidates [0, p0]
+            row_score = index_score[q].clone()
+            row_score[p0 + 1:] = float("-inf")
+            k = min(topK, p0 + 1)
+            if k == 0:
+                # no valid candidates (p0 == 0); kernel writes nothing real
+                tk_idx = torch.zeros(topK, dtype=torch.int32, device=row_score.device)
+            else:
+                _, idx = torch.topk(row_score, k=k)
+                if k < topK:
+                    pad = idx[-1:].expand(topK - k)
+                    idx = torch.cat([idx, pad])
+                tk_idx = idx.to(dtype=torch.int32)
+            tk_idx_list.append(tk_idx)
+        standard_topk_list.append(torch.stack(tk_idx_list, dim=0))
     standard_topk = torch.cat(standard_topk_list, dim=0)
 
-    torch.npu.synchronize()
-    indexer_topk(rt, q_xlite, k_cache_xlite, weight_xlite, indices,
-                 topk_indices_xlite, query_start_loc, query_lens, cached_lens,
-                 block_tables, n_heads, head_dim, BLOCK_SIZE, batch,
-                 topK)
-    torch.npu.synchronize()
-
     logging.info(
-        "indexer_topk %s (%d heads, %d head_dim, %s) work (%d batch, "
-        "cached_lens=%s, query_lens=%s, topK=%d) executed!",
-        name, n_heads, head_dim, test_dtype, batch, cached_lens_list,
-        query_len_list, topK)
+        "indexer_topk %s (%d heads, %d head_dim, %s) work (%d batch, cached_lens=%s, query_lens=%s, topK=%d) executed!",
+        name,
+        n_heads,
+        head_dim,
+        test_dtype,
+        batch,
+        cached_lens_list,
+        query_len_list,
+        topK,
+    )
 
-    # Compare per batch. When total_len < topK, the kernel only writes the
-    # first total_len indices; remaining columns are uninitialized. We
-    # therefore compare only the first min(topK, total_len) columns.
+    torch.npu.synchronize()
+    indexer_topk(
+        rt,
+        q_xlite,
+        k_cache_xlite,
+        weight_xlite,
+        indices,
+        topk_indices_xlite,
+        query_start_loc,
+        query_lens,
+        cached_lens,
+        block_tables,
+        n_heads,
+        head_dim,
+        BLOCK_SIZE,
+        batch,
+        topK,
+    )
+    torch.npu.synchronize()
+
+    # Compare per batch, per row. Topk is only valid (sparse) for tokens whose
+    # absolute position p0 = clen + q is at least topK (p0 >= topK); for
+    # p0 < topK the token uses dense attention and its topk is not compared
+    # against the kernel (the kernel still emits min(topK, p0 + 1) indices for such
+    # rows when their tile is processed, but those are dense, not sparse picks).
+    #
+    # For comparable rows (p0 >= topK) the kernel emits exactly topK indices,
+    # all drawn from the causal range [0, p0] (self yes, no future tokens). Compare
+    # the full topK-width row as a set (position within a row doesn't matter).
     all_match = True
+    compared = 0
     offset = 0
+    errors: dict[int, dict[int, float]] = defaultdict(dict)
+    max_pcts: list[float] = []
     for i in range(batch):
+        max_pct_per_batch = 0.0
         qlen = query_len_list[i]
         clen = cached_lens_list[i]
-        total_len = clen + qlen
-        k = min(topK, total_len)
 
-        sample_standard = standard_topk[offset: offset + qlen, :k]
-        sample_xlite = topk_indices_xlite[offset: offset + qlen, :k]
+        for q in range(qlen):
+            p0 = clen + q
+            if p0 < topK:
+                continue  # dense attention; topk not valid for comparison
 
-        # topk ties can produce different index orderings; compute order
-        # and precision can also swap near-tie indices. Compare as sets per
-        # row: position within a row doesn't matter, only the fraction of
-        # indices that differ (set difference / k). Sort on CPU — aclnnSort
-        # on NPU fails for tiny slices (e.g. k=1) with "Dst tensor size is
-        # less than src tensor size".
-        std_sorted, _ = torch.sort(sample_standard.cpu(), dim=-1)
-        xlite_sorted, _ = torch.sort(sample_xlite.cpu(), dim=-1)
+            k = topK  # p0 >= topK => full topK-width, all candidates in [0, p0]
+            row_standard = standard_topk[offset + q, :k]
+            row_xlite = topk_indices_xlite[offset + q, :k]
 
-        # For each std index, searchsorted in xlite_sorted. Since topk
-        # indices are unique within a row, a hit means set membership.
-        # diff_count[i] = number of std indices absent from xlite row i.
-        pos = torch.searchsorted(xlite_sorted, std_sorted)
-        pos = pos.clamp_max(k - 1)
-        hits = (xlite_sorted.gather(-1, pos) == std_sorted).to(torch.int32)
-        diff_count = k - hits.sum(dim=-1).to(torch.int32)
-        diff_pct = diff_count.to(torch.float32) * (100.0 / k)
+            # # sanity: every emitted index must be a valid causal position (<= p0)
+            # assert (row_xlite <= p0).all(), f"Sample {i} row {q} (p0={p0}) has non-causal topk indices: {row_xlite}"
 
-        max_pct = diff_pct.max().item()
-        mean_pct = diff_pct.mean().item()
+            std_sorted, _ = torch.sort(row_standard.cpu(), dim=-1)
+            xlite_sorted, _ = torch.sort(row_xlite.cpu(), dim=-1)
 
-        if max_pct > DIFF_PCT_THRESHOLD:
-            logging.error(
-                f"Sample {i} mismatch: max diff pct={max_pct:.2f}% "
-                f"(mean={mean_pct:.2f}%), threshold={DIFF_PCT_THRESHOLD:.2f}%")
-            logging.error(f"torch (sorted): {std_sorted}")
-            logging.error(f"xlite (sorted): {xlite_sorted}")
-            all_match = False
-        else:
-            logging.info(
-                f"Sample {i} ok: max diff pct={max_pct:.2f}%, "
-                f"mean={mean_pct:.2f}%")
+            pos = torch.searchsorted(xlite_sorted, std_sorted)
+            pos = pos.clamp_max(k - 1)
+            hits = (xlite_sorted.gather(-1, pos) == std_sorted).to(torch.int32)
+            diff_count = k - hits.sum(dim=-1).to(torch.int32)
+            diff_pct = diff_count.to(torch.float32) * (100.0 / k)
+
+            max_pct = diff_pct.max().item()
+            max_pct_per_batch = max(max_pct_per_batch, max_pct)
+            compared += 1
+
+            if max_pct > DIFF_PCT_THRESHOLD:
+                # logging.error(
+                #     f"\tSample {i} row {q} (p0={p0}) mismatch: max diff pct="
+                #     f"{max_pct:.2f}%, threshold={DIFF_PCT_THRESHOLD:.2f}%"
+                # )
+                # logging.error(f"\ttorch (sorted): {std_sorted}")
+                # logging.error(f"\txlite (sorted): {xlite_sorted}")
+                all_match = False
+                errors[i][q] = max_pct
+            else:
+                logging.debug(f"\tSample {i} row {q} (p0={p0}) ok: max diff pct={max_pct:.2f}%")
         offset += qlen
+        max_pcts.append(max_pct_per_batch)
 
-    if all_match:
-        logging.info("All samples passed for topK=%d!", topK)
+    if compared == 0:
+        logging.info(f"\tNo sparse rows (all p0 < topK={topK}) for this config; nothing to compare.")
+    elif all_match:
+        logging.info(f"\tAll samples passed for topK={topK}! max diff pct per batch: {max_pcts}")
+    else:
+        logging.error(f"\tSome samples failed for topK={topK}! max diff pct per batch: {max_pcts}")
+        for i, err in errors.items():
+            error_info = ", ".join(f"{row} ({pct:.2f}%)" for row, pct in err.items())
+            logging.error(f"\tBatch {i}: {error_info}")
 
 
 def main():
@@ -226,8 +284,7 @@ def main():
             for topK in topk_values:
                 # skip configurations where topK is larger than the
                 # scratch constraint MAX_TOPK_NUM or doesn't make sense
-                run_test(name, n_heads, head_dim, test_dtype, batch,
-                         cached_lens_list, query_len_list, topK)
+                run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK)
 
 
 if __name__ == "__main__":

@@ -103,7 +103,7 @@ for name, n_heads, head_dim, test_dtype in models:
             k_cache_slice = k_cache[i:i+1, :clen + qlen]  # shape: [1, t, head_dim]
             scores = torch.einsum("bshd,btd->bsht", q_chunk.unsqueeze(0), k_cache_slice)  # [1, query_len, n_heads, t]
             # index_score = scores * weight, result: [query_len, cached_len + query_len]
-            scores = scores.squeeze(0)  # [query_len, n_heads, t]
+            scores = torch.relu(scores.squeeze(0))  # [query_len, n_heads, t]
             index_score = torch.einsum("sht,sh->st", scores, weight_chunk)
             index_scores_standard_list.append(index_score)
 

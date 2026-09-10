@@ -731,7 +731,7 @@ class Indexer(torch.nn.Module):
         k = rotate_activation(k)
         self.k_cache[:bsz, start_pos:end_pos] = k
         weights = wk_weights[..., self.head_dim:] * self.n_heads ** -0.5
-        scores = torch.einsum("bshd, btd -> bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
+        scores = torch.relu(torch.einsum("bshd, btd -> bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale)
         index_score = torch.einsum("bsht,bsh->bst", scores, weights)
         if mask is not None:
             index_score += mask

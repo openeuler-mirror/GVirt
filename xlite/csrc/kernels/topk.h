@@ -299,7 +299,7 @@ public:
         vbitsort(scratch0, scoresIn, indicesIn, repeat);
         pipe_barrier(PIPE_V);
 
-        int dstBufIdx = 0;
+        uint32_t dstBufIdx = 0;
         MrgSort(scratch0, scratch1, repeat, &dstBufIdx);
         __ubuf__ float *localSort = dstBufIdx == 0 ? scratch0 : scratch1;
 
