@@ -972,16 +972,29 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                  batch, maxNumBlocks, tileSizeOfCachedKV);
 }
 
+// Unified CXA decode kernel entry. dense=false walks the paged compress-KV cache via
+// compressBlockTables (with optional top-k token selection); dense=true reads a
+// per-batch contiguous compress-KV cache (batch b occupies compressed tokens
+// [b * indexTopK, (b + 1) * indexTopK)), where top-k masking is disabled and the
+// SWA cache stays paged (swaBlockTables still used).
 void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressKCache,
                 XTensor &swaBlockTables, XTensor &compressBlockTables, uint32_t swaBlockSize,
                 uint32_t compressBlockSize, XTensor &attnSink, XTensor &scores, XTensor &output,
                 uint32_t batch, XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                 uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
                 uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK,
-                const XTensor &topkIndices)
+                const XTensor &topkIndices, bool dense)
 {
     if (IsDummyRuntime(rt)) {
         return;
+    }
+    if (dense && compressRatio == 0) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": dense=True requires compressRatio > 0 (no compress cache)");
+    }
+    if (dense && indexTopK == 0) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": dense=True requires indexTopK > 0 (dense cache length)");
     }
     KERNEL_PTR_TYPE(cxa) * launchKernel;
     if (EachXDtype(BF16, q, swaKCache, compressKCache, scores, output)) {
@@ -992,12 +1005,12 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
         throw std::runtime_error(err_str + " unsupported!");
     }
     uint32_t swaMaxNumBlocks = DeriveMaxNumBlocks(swaBlockTables, batch);
-    uint32_t compressMaxNumBlocks = DeriveMaxNumBlocks(compressBlockTables, batch);
+    uint32_t compressMaxNumBlocks = dense ? 0 : DeriveMaxNumBlocks(compressBlockTables, batch);
     launchKernel(rt.aicNum, rt.stream, q.ptr, swaKCache.ptr, compressKCache.ptr, swaBlockTables.ptr,
-                 compressBlockTables.ptr, swaBlockSize, compressBlockSize, swaMaxNumBlocks,
-                 compressMaxNumBlocks, attnSink.ptr, scores.ptr, output.ptr, batch,
+                 compressBlockTables.ptr, swaBlockSize, dense ? 0 : compressBlockSize,
+                 swaMaxNumBlocks, compressMaxNumBlocks, attnSink.ptr, scores.ptr, output.ptr, batch,
                  queryStartLoc.ptr, lens.ptr, cachedLens.ptr, nHeads, headDim, scale, windowSize,
-                 kvSize, compressRatio, indexTopK, topkIndices.ptr);
+                 kvSize, compressRatio, indexTopK, topkIndices.ptr, dense ? 1u : 0u);
 }
 
 // Unified MLA decode kernel entry. dense=false walks the paged KV cache via
@@ -1072,11 +1085,12 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
     }
 }
 
-void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, XTensor &peCache,
+void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &peCache,
                                 XTensor &blockTables, XTensor &topkIndices, XTensor &queryLens,
-                                XTensor &cachedLens, XTensor &kDenseCache, XTensor &peDenseCache,
-                                uint32_t batch, uint32_t indexTopK, uint32_t blockSize,
-                                uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t kvHeads)
+                                XTensor &cachedLens, XTensor &kDenseCache,
+                                const XTensor &peDenseCache, uint32_t batch, uint32_t indexTopK,
+                                uint32_t blockSize, uint32_t kvLoraRank, uint32_t ropeHeadDim,
+                                uint32_t kvHeads, uint32_t compressRatio)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1086,14 +1100,13 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, XTensor &peCache,
                                  ": kvHeads should be less than or equal to 1");
     }
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
-    if (EachXDtype(BF16, kCache, peCache, kDenseCache, peDenseCache)) {
+    if (EachXDtype(BF16, kCache, kDenseCache)) {
         aclrtlaunch_gather_sparse_kv_cache_bfloat16_t(
             rt.aivNum, rt.stream, kCache.ptr, peCache.ptr, blockTables.ptr, topkIndices.ptr,
             queryLens.ptr, cachedLens.ptr, kDenseCache.ptr, peDenseCache.ptr, batch, indexTopK,
-            blockSize, maxNumBlocks, kvLoraRank, ropeHeadDim);
+            blockSize, maxNumBlocks, kvLoraRank, ropeHeadDim, compressRatio);
     } else {
-        std::string err_str = DBG_PREFIX + XT_STR(kCache) + XT_STR(peCache) + XT_STR(kDenseCache) +
-                              XT_STR(peDenseCache);
+        std::string err_str = DBG_PREFIX + XT_STR(kCache) + XT_STR(kDenseCache);
         throw std::runtime_error(err_str + "not supported!");
     }
 }

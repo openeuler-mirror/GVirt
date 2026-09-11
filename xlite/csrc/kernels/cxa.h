@@ -16,6 +16,16 @@
 
 // CXA (C4A and C128A) attention kernel framework.
 //
+// Unified kernel covering two compress-KV cache layouts (dense flag); the SWA
+// cache is always paged and walked via swaBlockTables in both modes:
+//   - sparse: paged compressKCache walked via compressBlockTables, with
+//     optional top-k token selection (DSA) driven by topkIndices.
+//   - dense : per-batch contiguous compressKCache; batch b occupies compressed
+//     tokens [b * maxSeqLen, (b + 1) * maxSeqLen) with maxSeqLen == indexTopK,
+//     and compressBlockTables is unused (block id == logical index). The
+//     compress segment is attended causally without top-k masking, clamped to
+//     maxSeqLen.
+//
 // Inputs:
 //   q:    [totalQ, nLocalHeads, headDim]    query
 //   swaKCache:    [block, swaBlockSize, headDim]    sliding-window KV cache
@@ -48,7 +58,7 @@ public:
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
                                 uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK,
-                                GM_ADDR topkIndices)
+                                GM_ADDR topkIndices, uint32_t dense)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -69,9 +79,13 @@ public:
         this->headDim = headDim;
         this->scale = scale;
         this->compressRatio = compressRatio;
-        this->indexTopK = (topkIndices == nullptr) ? 0 : indexTopK;
+        this->dense = dense != 0;
+        // top-k masking is a sparse-mode feature: in dense mode the compress cache
+        // is attended causally, so topkIndices is ignored.
+        this->indexTopK = (!this->dense && topkIndices != nullptr) ? indexTopK : 0;
+        this->maxSeqLen = indexTopK;
         this->swaMaxNumBlocks = swaMaxNumBlocks;
-        this->compressMaxNumBlocks = compressMaxNumBlocks;
+        this->compressMaxNumBlocks = this->dense ? 0 : compressMaxNumBlocks;
         this->windowSize = windowSize;
         // the causal-window union of one query tile is windowSize + XLITE_MAX_M0 wide;
         // +K_BLOCK_SIZE_2B absorbs the windowStart round-down lead-in.
@@ -84,8 +98,9 @@ public:
                                         block_idx * XLITE_MAX_M0 * qkStride +
                                         block_num * XLITE_MAX_M0 * qkStride);
 
-        this->svk0 = aicHelper.Init(nHeads, headDim, swaBlockSize, compressBlockSize, windowSize,
-                                    compressRatio, qkStride, swaSegWidth, false);
+        this->svk0 =
+            aicHelper.Init(nHeads, headDim, swaBlockSize, this->dense ? 0 : compressBlockSize,
+                           windowSize, compressRatio, qkStride, swaSegWidth, this->dense);
     }
 
     __aicore__ inline void RunAic()
@@ -102,9 +117,9 @@ public:
         int lastAbsQueryStart = 0;
         __gm__ uint32_t *lastSwaBt;
         __gm__ uint32_t *lastCompressBt;
+        GlobalTensor<Dtype> lastCompressKCache;
 
         int needDoSV = 0;
-        int totalIdx = 0;
         int curr = 0;
         int queryStart = -1;
         int cachedLen = -1;
@@ -114,12 +129,23 @@ public:
             __gm__ uint32_t *swaBt =
                 (__gm__ uint32_t *)((uint64_t)swaBlockTables +
                                     batchIdx * swaMaxNumBlocks * sizeof(uint32_t));
-            __gm__ uint32_t *compressBt =
-                (__gm__ uint32_t *)((uint64_t)compressBlockTables +
-                                    batchIdx * compressMaxNumBlocks * sizeof(uint32_t));
 
             if (cachedLen < 0) {
                 cachedLen = cachedLens[batchIdx];
+            }
+
+            // per-batch compress KV view: dense mode takes a subview of the contiguous
+            // cache (batch b starts at b * maxSeqLen compressed tokens, maxSeqLen ==
+            // indexTopK); sparse mode walks the full paged cache through this batch's
+            // block table.
+            GlobalTensor<Dtype> batchCompressKCache = compressKCache;
+            __gm__ uint32_t *compressBt = nullptr;
+            if (dense) {
+                batchCompressKCache = compressKCache[batchIdx * maxSeqLen * headDim];
+            } else {
+                compressBt =
+                    (__gm__ uint32_t *)((uint64_t)compressBlockTables +
+                                        batchIdx * compressMaxNumBlocks * sizeof(uint32_t));
             }
 
             uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
@@ -151,8 +177,9 @@ public:
                            " use %d temp buf: QK\n",
                            GetBlockIdx(), batchIdx, queryTaskOffset, queryTaskOffset + queryTaskLen,
                            nHeads, curr);
-                aicHelper.RunAicQK(q[mhOffset], swaKCache, compressKCache, swaBt, compressBt,
-                                   absQueryStart, queryTaskLen, 0, calcLen, scores[curr]);
+                aicHelper.RunAicQK(q[mhOffset], swaKCache, batchCompressKCache, swaBt, compressBt,
+                                   absQueryStart, queryTaskLen, 0, calcLen, calcLen, maxSeqLen,
+                                   scores[curr]);
                 ffts_cross_core_sync(PIPE_FIX, config);
 
                 if (needDoSV != 0) {
@@ -163,9 +190,9 @@ public:
                                " use %d temp buf: SV\n",
                                GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
                                lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
-                    aicHelper.RunAicSV(scores[last], swaKCache, compressKCache, lastSwaBt,
+                    aicHelper.RunAicSV(scores[last], swaKCache, lastCompressKCache, lastSwaBt,
                                        lastCompressBt, lastAbsQueryStart, lastQueryTaskLen, 0,
-                                       lastCalcLen, output[lastMhOffset]);
+                                       lastCalcLen, lastCalcLen, maxSeqLen, output[lastMhOffset]);
                 }
 
                 lastBatchIdx = batchIdx;
@@ -174,6 +201,7 @@ public:
                 lastQueryTaskLen = queryTaskLen;
                 lastSwaBt = swaBt;
                 lastCompressBt = compressBt;
+                lastCompressKCache = batchCompressKCache;
                 lastCalcLen = calcLen;
                 lastAbsQueryStart = absQueryStart;
                 last = curr;
@@ -193,9 +221,9 @@ public:
                        " use %d temp buf: SV\n",
                        GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
                        lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
-            aicHelper.RunAicSV(scores[last], swaKCache, compressKCache, lastSwaBt, lastCompressBt,
-                               lastAbsQueryStart, lastQueryTaskLen, 0, lastCalcLen,
-                               output[lastMhOffset]);
+            aicHelper.RunAicSV(scores[last], swaKCache, lastCompressKCache, lastSwaBt,
+                               lastCompressBt, lastAbsQueryStart, lastQueryTaskLen, 0, lastCalcLen,
+                               lastCalcLen, maxSeqLen, output[lastMhOffset]);
         }
     }
 
@@ -260,9 +288,15 @@ public:
                                    ? (int)calcSoftmaxLen - (int)windowSize
                                    : 0;  // this tile's causal window start (abs coords)
                 uint32_t winCalcLen = calcSoftmaxLen - ROUND_DOWN(winStart, K_BLOCK_SIZE_2B);
+                // compress-segment causal length in compressed tokens, clamped to the
+                // dense cache size maxSeqLen (= indexTopK) in dense mode; the SWA
+                // segment keeps its own unclamped causal window semantics.
+                uint32_t ncCalcLen = compressRatio == 0 ? 0 : calcLen / compressRatio;
+                if (dense && ncCalcLen > maxSeqLen) {
+                    ncCalcLen = maxSeqLen;
+                }
                 uint32_t outN =
-                    swaSegWidth +
-                    (compressRatio == 0 ? 0 : ROUND_UP(calcLen / compressRatio, 4 * svk0));
+                    swaSegWidth + (compressRatio == 0 ? 0 : ROUND_UP(ncCalcLen, 4 * svk0));
                 if (outN > qkStride) {
                     outN = qkStride;
                 }
@@ -287,7 +321,8 @@ public:
                                             .GetPhyAddr(),
                                   nWorkCurCore, qkStride, calcSoftmaxLen, outN, true, nWorkStart,
                                   nHeads, true, scale, 0, 0, nullptr, windowSize, winCalcLen,
-                                  compressRatio == 0 ? 1 : compressRatio, attnSink, swaSegWidth);
+                                  compressRatio == 0 ? 1 : compressRatio, attnSink, swaSegWidth,
+                                  dense && compressRatio != 0 ? maxSeqLen : 0);
                 } else {
                     RunAivSoftmaxPingPong(
                         (__gm__ Dtype *)scores[curr][qkOffset].GetPhyAddr(), nWorkCurCore, qkStride,
@@ -297,7 +332,7 @@ public:
                             ? topkIndices + indexTopK * queryTaskOffset
                             : nullptr,
                         windowSize, winCalcLen, compressRatio == 0 ? 1 : compressRatio, attnSink,
-                        swaSegWidth);
+                        swaSegWidth, dense && compressRatio != 0 ? maxSeqLen : 0);
                 }
 
                 ffts_cross_core_sync(PIPE_MTE3, config);
@@ -338,6 +373,7 @@ private:
     uint32_t headDim;
     uint32_t compressRatio;
     uint32_t indexTopK;
+    uint32_t maxSeqLen;
     uint32_t kvSize;
     uint32_t qkStride;
     uint32_t swaSegWidth;
@@ -345,6 +381,7 @@ private:
     uint32_t compressMaxNumBlocks;
     uint32_t windowSize;
     float scale;
+    bool dense;
     int svk0;
 
     CxaAicHelper<Dtype> aicHelper;
@@ -357,12 +394,13 @@ private:
         uint32_t swaMaxNumBlocks, uint32_t compressMaxNumBlocks, GM_ADDR attnSink, GM_ADDR scores, \
         GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,                  \
         GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,   \
-        uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices)          \
+        uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices,          \
+        uint32_t dense)                                                                            \
     {                                                                                              \
         CXA<dtype> op;                                                                             \
         op.Init(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables, swaBlockSize,   \
                 compressBlockSize, swaMaxNumBlocks, compressMaxNumBlocks, attnSink, scores,        \
                 output, batch, queryStartLoc, queryLens, cachedLens, nHeads, headDim, scale,       \
-                windowSize, kvSize, compressRatio, indexTopK, topkIndices);                        \
+                windowSize, kvSize, compressRatio, indexTopK, topkIndices, dense);                 \
         op.Run();                                                                                  \
     }

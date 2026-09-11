@@ -12,13 +12,11 @@
 
 #ifdef __DAV_C220_VEC__
 template <typename Dtype>
-__aicore__ __inline__ void gather_sparse_kv_cache(GM_ADDR kCache, GM_ADDR peCache,
-                                                  GM_ADDR blockTables, GM_ADDR topkIndices,
-                                                  GM_ADDR queryLens, GM_ADDR cachedLens,
-                                                  GM_ADDR kDenseCache, GM_ADDR peDenseCache,
-                                                  uint32_t batch, uint32_t indexTopK,
-                                                  uint32_t blockSize, uint32_t maxNumBlocks,
-                                                  uint32_t kvLoraRank, uint32_t ropeHeadDim)
+__aicore__ __inline__ void gather_sparse_kv_cache(
+    GM_ADDR kCache, GM_ADDR peCache, GM_ADDR blockTables, GM_ADDR topkIndices, GM_ADDR queryLens,
+    GM_ADDR cachedLens, GM_ADDR kDenseCache, GM_ADDR peDenseCache, uint32_t batch,
+    uint32_t indexTopK, uint32_t blockSize, uint32_t maxNumBlocks, uint32_t kvLoraRank,
+    uint32_t ropeHeadDim, uint32_t compressRatio = 1)
 {
     set_atomic_none();
     set_mask_norm();
@@ -77,7 +75,11 @@ __aicore__ __inline__ void gather_sparse_kv_cache(GM_ADDR kCache, GM_ADDR peCach
         if (batch != lastBatch) {
             queryLen = queryLensGm[batch];
             cacheLen = cachedLensGm[batch];
-            totalLen = queryLen + cacheLen;
+            if (compressRatio == 0) {
+                totalLen = queryLen + cacheLen;
+            } else {
+                totalLen = (queryLen + cacheLen) / compressRatio;
+            }
             lastBatch = batch;
             set_flag(PIPE_S, PIPE_MTE2, EVENT_ID4);
             wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID4);
@@ -109,10 +111,14 @@ __aicore__ __inline__ void gather_sparse_kv_cache(GM_ADDR kCache, GM_ADDR peCach
 
         for (int i = 0; i < cnt; i++) {
             uint32_t srcOffset = physBlock[i] * blockSize + rem[i];
-            CopyGmToUbufAligned(kBuf[curr] + i * kvLoraRank, kCacheGm + srcOffset * kvLoraRank,
-                                kHeadBytes);
-            CopyGmToUbufAligned(peBuf[curr] + i * ropeHeadDim, peCacheGm + srcOffset * ropeHeadDim,
-                                peHeadBytes);
+            if (kCacheGm) {
+                CopyGmToUbufAligned(kBuf[curr] + i * kvLoraRank, kCacheGm + srcOffset * kvLoraRank,
+                                    kHeadBytes);
+            }
+            if (peCacheGm) {
+                CopyGmToUbufAligned(peBuf[curr] + i * ropeHeadDim,
+                                    peCacheGm + srcOffset * ropeHeadDim, peHeadBytes);
+            }
         }
 
         set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0 + curr);
@@ -121,8 +127,12 @@ __aicore__ __inline__ void gather_sparse_kv_cache(GM_ADDR kCache, GM_ADDR peCach
         // UB -> GM
         uint32_t kDstOffset = offset * kvLoraRank;
         uint32_t peDstOffset = offset * ropeHeadDim;
-        CopyUbufToGmAligned(kDenseGm + kDstOffset, kBuf[curr], kHeadBytes * cnt);
-        CopyUbufToGmAligned(peDenseGm + peDstOffset, peBuf[curr], peHeadBytes * cnt);
+        if (kDenseGm) {
+            CopyUbufToGmAligned(kDenseGm + kDstOffset, kBuf[curr], kHeadBytes * cnt);
+        }
+        if (peDenseGm) {
+            CopyUbufToGmAligned(peDenseGm + peDstOffset, peBuf[curr], peHeadBytes * cnt);
+        }
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + curr);
 
         curr = 1 - curr;
@@ -138,11 +148,12 @@ __aicore__ __inline__ void gather_sparse_kv_cache(GM_ADDR kCache, GM_ADDR peCach
         GM_ADDR kCache, GM_ADDR peCache, GM_ADDR blockTables, GM_ADDR topkIndices,             \
         GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR kDenseCache, GM_ADDR peDenseCache,      \
         uint32_t batch, uint32_t indexTopK, uint32_t blockSize, uint32_t maxNumBlocks,         \
-        uint32_t kvLoraRank, uint32_t ropeHeadDim)                                             \
+        uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t compressRatio)                     \
     {                                                                                          \
         gather_sparse_kv_cache<dtype>(kCache, peCache, blockTables, topkIndices, queryLens,    \
                                       cachedLens, kDenseCache, peDenseCache, batch, indexTopK, \
-                                      blockSize, maxNumBlocks, kvLoraRank, ropeHeadDim);       \
+                                      blockSize, maxNumBlocks, kvLoraRank, ropeHeadDim,        \
+                                      compressRatio);                                          \
     }
 #else
 #define GATHER_SPARSE_KV_CACHE_FUNC_DEFINE(dtype)                                         \
@@ -150,7 +161,7 @@ __aicore__ __inline__ void gather_sparse_kv_cache(GM_ADDR kCache, GM_ADDR peCach
         GM_ADDR kCache, GM_ADDR peCache, GM_ADDR blockTables, GM_ADDR topkIndices,        \
         GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR kDenseCache, GM_ADDR peDenseCache, \
         uint32_t batch, uint32_t indexTopK, uint32_t blockSize, uint32_t maxNumBlocks,    \
-        uint32_t kvLoraRank, uint32_t ropeHeadDim)                                        \
+        uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t compressRatio)                \
     {                                                                                     \
     }
 #endif

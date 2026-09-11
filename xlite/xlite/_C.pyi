@@ -2542,21 +2542,35 @@ def gather_sparse_kv_cache(
     ``tok % block_size``, and copies one row from paged ``k_cache`` /
     ``pe_cache`` into the contiguous ``k_dense_cache`` / ``pe_dense_cache``.
 
-    Only the first ``min(query_lens[b] + cached_lens[b], index_topk)`` slots per
-    batch are written; slots beyond that (topk_indices padding tail) are
+    The valid slot count per batch is ``min(total_len, index_topk)`` where
+    ``total_len`` follows the host-side ``compress_ratio`` (not a Python
+    parameter; defaults to 1 internally, and is the actual compression ratio
+    when :func:`cxa` calls this in dense mode):
+    ``compress_ratio == 0`` -> ``query_lens[b] + cached_lens[b]``;
+    otherwise ``(query_lens[b] + cached_lens[b]) // compress_ratio`` (compressed
+    tokens). Slots beyond ``total_len`` (topk_indices padding tail) are
     **skipped** (left as-is, typically zero-initialized by the caller).
-    :func:`mla_v2` with ``dense=True`` reads only those valid slots and masks
-    the rest in softmax, so the skipped slots do not affect output.
+    :func:`mla_v2` / :func:`cxa` with ``dense=True`` read only those valid slots
+    and mask the rest in softmax, so the skipped slots do not affect output.
+
+    Each channel (``k_cache``/``k_dense_cache`` and ``pe_cache``/``pe_dense_cache``)
+    is skipped independently when its source/destination tensor is empty, so a
+    caller may gather the K channel only (e.g. :func:`cxa` dense mode passes an
+    empty ``pe_cache``/``pe_dense_cache``).
 
     Used by the decode + DSA long-sequence path to feed a contiguous dense cache
-    to :func:`mla_v2` (``dense=True``) instead of the paged layout.
+    to :func:`mla_v2` (``dense=True``) instead of the paged layout, and by
+    :func:`cxa` (``dense=True``) to build the contiguous compressed-KV cache.
 
     Args:
         rt (Runtime): Native runtime handle.
         k_cache (torch.Tensor): Paged KV cache (kv_lora_rank slice), shape
-            (kvcache_block_num, block_size, kv_heads, kv_lora_rank), bf16.
+            (kvcache_block_num, block_size, kv_heads, kv_lora_rank), bf16. May be
+            empty to skip the K channel.
         pe_cache (torch.Tensor): Paged RoPE key cache (rope_head_dim slice),
             shape (kvcache_block_num, block_size, kv_heads, rope_head_dim), bf16.
+            May be empty to skip the PE channel (e.g. when only the K channel is
+            gathered).
         block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
             (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
             per-request max_num_blocks is derived internally from the shape
@@ -2567,16 +2581,20 @@ def gather_sparse_kv_cache(
             (batch,), dtype int32. Decode = 1 per batch.
         cached_lens (torch.Tensor): Per-batch cached token lengths, shape
             (batch,), dtype int32. Used with query_lens to derive the valid
-            slot count per batch.
+            slot count per batch (see ``total_len`` above).
         k_dense_cache (torch.Tensor): Output contiguous K cache, shape
             (batch, index_topk, kv_heads, kv_lora_rank), bf16; written in place.
+            May be empty to skip the K channel.
         pe_dense_cache (torch.Tensor): Output contiguous PE cache, shape
             (batch, index_topk, kv_heads, rope_head_dim), bf16; written in place.
+            May be empty to skip the PE channel.
         batch (int): Batch size.
-        index_topk (int): Number of top-k tokens per batch (dense length).
+        index_topk (int): Number of top-k tokens per batch (dense length). Host
+            requires ``index_topk <= 2048`` (``MAX_TOPK_NUM``).
         block_size (int): KV block size.
-        kv_lora_rank (int): KV LoRA rank.
-        rope_head_dim (int): Rotary head dimension.
+        kv_lora_rank (int): KV LoRA rank. When :func:`cxa` calls this internally
+            (dense mode) this is ``head_dim`` and ``rope_head_dim`` is 0 (K only).
+        rope_head_dim (int): Rotary head dimension. ``0`` skips the PE channel.
         kv_heads (int): Number of KV heads (must be 1; defaults to 1 for MLA).
 
     Returns:
@@ -2606,6 +2624,7 @@ def cxa(
     compress_ratio: int,
     index_topk: int,
     topk_indices: torch.Tensor,
+    dense: bool = False,
 ) -> None:
     """Run the CXA (C4A and C128A) kernel for DeepSeek-V4.
 
@@ -2620,7 +2639,14 @@ def cxa(
       currently generated length are masked to ``-inf``.
     * **Compress top-k mask** -- of the ``kv_size`` compressed tokens, only
       those referenced by ``topk_indices`` are kept; entries set to ``-1`` are
-      masked to ``-inf`` (and their exp contributions zeroed).
+      masked to ``-inf`` (and their exp contributions zeroed). Disabled in
+      dense mode, where the compress segment is attended causally instead.
+    * **Dense mode** (``dense=True``) -- the compressed tokens selected by
+      ``topk_indices`` are gathered (via ``compress_block_tables``) into a
+      per-batch contiguous cache first: batch ``b`` occupies compressed
+      tokens ``[b * index_topk, (b + 1) * index_topk)``. The kernel then
+      attends the compress segment causally without top-k masking. The SWA
+      cache stays paged and is still walked via ``swa_block_tables``.
     * **attn_sink** -- ``exp(attn_sink - row_max)`` is added to the softmax
       denominator (one learnable term per head).
 
@@ -2630,16 +2656,28 @@ def cxa(
             dtype bfloat16.
         swa_k_cache (torch.Tensor): Paged sliding-window KV cache, shape
             (swa_block_num, swa_block_size, head_dim), dtype bfloat16.
-        compress_k_cache (torch.Tensor): Paged compressed KV cache, shape
-            (compress_block_num, compress_block_size, head_dim), dtype
-            bfloat16. Unused when ``compress_ratio == 0`` (may be empty).
+        compress_k_cache (torch.Tensor): Compressed KV cache, dtype bfloat16.
+            Paged mode: shape ``(compress_block_num, compress_block_size, head_dim)``,
+            walked via ``compress_block_tables``. Dense mode: a per-batch
+            contiguous cache of shape ``(batch, index_topk, head_dim)``,
+            gathered internally by :func:`gather_sparse_kv_cache` (via
+            ``compress_block_tables``), where batch ``b`` occupies compressed
+            tokens ``[b * index_topk, (b + 1) * index_topk)``. Unused when
+            ``compress_ratio == 0`` (may be empty).
         swa_block_tables (torch.Tensor): Block table for the SWA cache, 1-D
             ``[batch * swa_max_num_blocks]`` or 2-D
-            ``[batch, swa_max_num_blocks]`` int32.
+            ``[batch, swa_max_num_blocks]`` int32. The SWA cache is paged and
+            walked via this table in both modes.
         compress_block_tables (torch.Tensor): Block table for the compressed
             cache, 1-D or 2-D int32 (same convention as ``swa_block_tables``).
+            Paged mode: used to walk the paged compress cache. Dense mode: used
+            by the internal :func:`gather_sparse_kv_cache` call to build the
+            contiguous dense cache, then unused by the kernel itself (may be
+            empty otherwise).
         swa_block_size (int): Block size of the SWA cache.
-        compress_block_size (int): Block size of the compressed cache.
+        compress_block_size (int): Block size of the compressed cache. In dense
+            mode this is the block size of the source paged cache the top-k
+            tokens are gathered from.
         attn_sink (torch.Tensor): Per-head attention sink bias, shape
             (n_heads,), dtype **float32**.
         output (torch.Tensor): Output tensor, shape
@@ -2655,14 +2693,22 @@ def cxa(
         n_heads (int): Number of local query heads.
         head_dim (int): Head dimension.
         scale (float): Softmax scaling factor (``1 / sqrt(head_dim)``).
-        window_size (int): Sliding-window size (SWA segment width).
+        window_size (int): Sliding-window size (SWA segment width). ``0``
+            disables the SWA segment (pure compressed attention).
         compress_ratio (int): Compression ratio; ``0`` disables the compressed
             segment (pure sliding-window attention).
         index_topk (int): Number of top-k compressed indices per query row;
-            ``0`` disables the compress sparse path.
+            ``0`` disables the compress sparse path. In dense mode this is the
+            dense cache length (``max_seq_len``) and must be > 0; the compress
+            segment is then attended causally without top-k masking.
         topk_indices (torch.Tensor): Top-k compressed-token indices, shape
-            (total_query_tokens, index_topk), dtype int32. ``-1`` marks a
-            masked-out position.
+            (total_query_tokens, index_topk), dtype int32, in compress-relative
+            coordinates (compressed token ``j`` -> ``j``). ``-1`` marks a
+            masked-out position. Ignored in dense mode (may be empty).
+        dense (bool): Run in dense mode over a per-batch contiguous compressed
+            cache (see ``compress_k_cache`` and the Dense mode note above).
+            Requires ``compress_ratio > 0`` and ``index_topk > 0``. Defaults to
+            False (paged mode).
 
     Returns:
         None: `output` is written in place.

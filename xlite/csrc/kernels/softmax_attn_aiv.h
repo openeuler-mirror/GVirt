@@ -68,7 +68,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     __gm__ float *sumBuf = nullptr, bool hasScale = false, float scale = 1.0f,
     uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr,
     uint32_t winSize = 0, uint32_t winCalcLen = 0, uint32_t compressRatio = 1,
-    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
+    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0, uint32_t compressCap = 0)
 {
     // Softmax mask value: the most negative fp32 value (≈ -inf). Used to fill invalid/missed
     float min = -3.4028235e+38;
@@ -162,7 +162,14 @@ inline __aicore__ void RunAivSoftmaxPingPong(
         uint32_t headIdx = seqHead ? (idx + maskOff) % maskStride : (idx + maskOff) / maskStride;
         int actualCalcLen = calcLen + seqIdx;  // 每一行开始mask的位置
         if (swaSegWidth > 0) {
-            actualCalcLen = swaSegWidth + (calcLen + (int)seqIdx) / (int)compressRatio;
+            int rowCalcLen = (calcLen + (int)seqIdx) / (int)compressRatio;
+            if (compressCap != 0 && rowCalcLen > (int)compressCap) {
+                // dense mode: the compress cache only holds compressCap compressed
+                // tokens, so the compress-segment causal length is clamped (SWA segment
+                // unaffected).
+                rowCalcLen = compressCap;
+            }
+            actualCalcLen = swaSegWidth + rowCalcLen;
         }
         if (actualCalcLen <= 0) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
@@ -221,7 +228,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                 bool needCalc = false;
                 firstHitBlock = -1;
                 lastHitBlock = -1;
-                uint64_t addrOffset = (uint64_t)in[curr];
+                uint64_t addrOffset = (uint64_t)(in[curr] + swaSegWidth);
                 __ubuf__ Dtype *gatherDst = inTopK + swaSegWidth;
                 if (swaSegWidth > 0) {
                     copy_ubuf_to_ubuf(inTopK, in[curr], 0, 1,
@@ -420,7 +427,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                                       DIV_ROUND_UP(swaSegWidth * sizeof(Dtype), BLOCK_SIZE), 1, 1);
                     pipe_barrier(PIPE_V);
                 }
-                __ubuf__ uint16_t *currOut = (__ubuf__ uint16_t *)out[curr];
+                __ubuf__ uint16_t *currOut = (__ubuf__ uint16_t *)(out[curr] + swaSegWidth);
                 set_flag(PIPE_V, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
@@ -803,7 +810,8 @@ inline __aicore__ void RunAivSoftmaxLong(
     uint32_t outN = 0, bool seqHead = true, uint32_t maskOff = 0, uint32_t maskStride = 1,
     bool hasScale = false, float scale = 1.0f, uint32_t kvOffset = 0, uint32_t topK = 0,
     __gm__ int32_t *topkIndices = nullptr, uint32_t winSize = 0, uint32_t winCalcLen = 0,
-    uint32_t compressRatio = 1, __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
+    uint32_t compressRatio = 1, __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0,
+    uint32_t compressCap = 0)
 {
     set_atomic_none();
     set_mask_norm();
@@ -852,8 +860,13 @@ inline __aicore__ void RunAivSoftmaxLong(
     for (int idx = 0; idx < m; idx++) {
         uint32_t seqIdx = seqHead ? (idx + maskOff) / maskStride : (idx + maskOff) % maskStride;
         uint32_t headIdx = seqHead ? (idx + maskOff) % maskStride : (idx + maskOff) / maskStride;
-        int actualCalcLen =
-            swaSegWidth + (calcLen + seqIdx) / compressRatio;  // 每一行开始mask的位置
+        int rowCalcLen = (calcLen + seqIdx) / compressRatio;
+        if (compressCap != 0 && rowCalcLen > (int)compressCap) {
+            // dense mode: the compress cache only holds compressCap compressed tokens,
+            // so the compress-segment causal length is clamped (SWA segment unaffected).
+            rowCalcLen = compressCap;
+        }
+        int actualCalcLen = swaSegWidth + rowCalcLen;  // 每一行开始mask的位置
         if (actualCalcLen > outN) {
             actualCalcLen = outN;
         }
@@ -1152,11 +1165,12 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, __gm__ float *expBuf, ui
                                      float scale = 1.0f, uint32_t kvOffset = 0, uint32_t topK = 0,
                                      __gm__ int32_t *topkIndices = nullptr, uint32_t winSize = 0,
                                      uint32_t winCalcLen = 0, uint32_t compressRatio = 1,
-                                     __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
+                                     __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0,
+                                     uint32_t compressCap = 0)
 {
     RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, seqHead, maskOff, maskStride,
                              hasScale, scale, kvOffset, topK, topkIndices, winSize, winCalcLen,
-                             compressRatio, attnSink, swaSegWidth);
+                             compressRatio, attnSink, swaSegWidth, compressCap);
 }
 
 #else

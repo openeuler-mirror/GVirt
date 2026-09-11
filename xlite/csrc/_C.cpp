@@ -1623,7 +1623,7 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
          uint32_t compressBlockSize, at::Tensor &attnSink, at::Tensor &output, uint32_t batch,
          at::Tensor &queryStartLoc, at::Tensor &lens, at::Tensor &cachedLens, uint32_t nHeads,
          uint32_t headDim, float scale, uint32_t windowSize, uint32_t compressRatio,
-         uint32_t indexTopK, at::Tensor &topkIndices)
+         uint32_t indexTopK, at::Tensor &topkIndices, bool dense)
 {
     XTensor _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables, _attnSink,
         _output, _queryStartLoc, _lens, _cachedLens, _topkIndices;
@@ -1639,17 +1639,39 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_topkIndices, topkIndices);
     uint32_t swaSegWidth = windowSize == 0 ? 0 : windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B;
-    uint32_t compressMaxNumBlocks = DeriveMaxNumBlocks(_compressBlockTables, batch);
-    uint32_t kvSize = compressRatio == 0 || compressMaxNumBlocks == 0
-                          ? 0
-                          : ROUND_UP(compressMaxNumBlocks * compressBlockSize, 4 * CXA_SVCK0);
-    XTensor &scores =
-        rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize}, XDtypeOf(q), DBG_LOC);
-    XliteOpCXA(rt, _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables,
-               swaBlockSize, compressBlockSize, _attnSink, scores, _output, batch, _queryStartLoc,
-               _lens, _cachedLens, nHeads, headDim, scale, windowSize, kvSize, compressRatio,
-               indexTopK, _topkIndices);
-    rt.PutTensor(scores);
+    // kvSize = compress-segment capacity of the scores workspace (compressed tokens):
+    // dense mode holds batch * indexTopK contiguous compressed tokens; sparse mode walks
+    // the paged cache (compressMaxNumBlocks * compressBlockSize per batch).
+    uint32_t kvSize;
+    if (dense) {
+        kvSize = compressRatio == 0 ? 0 : ROUND_UP((uint64_t)batch * indexTopK, 4 * CXA_SVCK0);
+        XTensor &compressKCacheDense =
+            rt.GetTensor({static_cast<size_t>(batch), indexTopK, headDim}, XDtypeOf(q), DBG_LOC);
+        XliteOpGatherSparseKVCache(rt, _compressKCache, XTensor(), _compressBlockTables,
+                                   _topkIndices, _lens, _cachedLens, compressKCacheDense, XTensor(),
+                                   batch, indexTopK, compressBlockSize, headDim, 0, 1,
+                                   compressRatio);
+        XTensor &scores = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize},
+                                       XDtypeOf(q), DBG_LOC);
+        XliteOpCXA(rt, _q, _swaKCache, compressKCacheDense, _swaBlockTables, _compressBlockTables,
+                   swaBlockSize, compressBlockSize, _attnSink, scores, _output, batch,
+                   _queryStartLoc, _lens, _cachedLens, nHeads, headDim, scale, windowSize, kvSize,
+                   compressRatio, indexTopK, XTensor(), true);
+        rt.PutTensor(compressKCacheDense);
+        rt.PutTensor(scores);
+    } else {
+        uint32_t compressMaxNumBlocks = DeriveMaxNumBlocks(_compressBlockTables, batch);
+        kvSize = compressRatio == 0 || compressMaxNumBlocks == 0
+                     ? 0
+                     : ROUND_UP(compressMaxNumBlocks * compressBlockSize, 4 * CXA_SVCK0);
+        XTensor &scores = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize},
+                                       XDtypeOf(q), DBG_LOC);
+        XliteOpCXA(rt, _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables,
+                   swaBlockSize, compressBlockSize, _attnSink, scores, _output, batch,
+                   _queryStartLoc, _lens, _cachedLens, nHeads, headDim, scale, windowSize, kvSize,
+                   compressRatio, indexTopK, _topkIndices, false);
+        rt.PutTensor(scores);
+    }
     rt.Synchronize();
 }
 
@@ -2804,7 +2826,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("compress_block_size"), py::arg("attn_sink"), py::arg("output"), py::arg("batch"),
           py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"), py::arg("n_heads"),
           py::arg("head_dim"), py::arg("scale"), py::arg("window_size"), py::arg("compress_ratio"),
-          py::arg("index_topk"), py::arg("topk_indices"));
+          py::arg("index_topk"), py::arg("topk_indices"), py::arg("dense") = false);
     m.def("indexer_scores", &IndexerScores, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
           py::arg("weight"), py::arg("scores"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
