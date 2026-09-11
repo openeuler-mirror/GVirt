@@ -147,7 +147,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     int curr = 0;
 
     if (topK > 0) {
-        vector_dup(cmp0, kvOffset, 1, 1, 1, 8, 0);
+        vector_dup(cmp0, kvOffset / compressRatio, 1, 1, 1, 8, 0);
         pipe_barrier(PIPE_V);
         vconv_s322f32(cmpFp320, cmp0, 1, 1, 1, 8, 8);
         pipe_barrier(PIPE_V);
@@ -160,20 +160,23 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     for (int idx = 0; idx < m; ++idx) {
         uint32_t seqIdx = seqHead ? (idx + maskOff) / maskStride : (idx + maskOff) % maskStride;
         uint32_t headIdx = seqHead ? (idx + maskOff) % maskStride : (idx + maskOff) / maskStride;
-        int actualCalcLen = calcLen + seqIdx;  // 每一行开始mask的位置
-        if (swaSegWidth > 0) {
-            int rowCalcLen = (calcLen + (int)seqIdx) / (int)compressRatio;
-            if (compressCap != 0 && rowCalcLen > (int)compressCap) {
+        int actualCalcLen = calcLen + seqIdx;
+        int causalLen = actualCalcLen / (int)compressRatio;  // 每一行开始mask的位置
+        // fold to compress-token units; must run for non-SWA tiles too (flash kvIdx>0 tiles
+        // carry a compress segment whose causal len is in compressed, not absolute, tokens).
+        if (swaSegWidth > 0 || compressRatio > 1) {
+            actualCalcLen = swaSegWidth + causalLen;
+            if (compressCap != 0 && causalLen > (int)compressCap) {
                 // dense mode: the compress cache only holds compressCap compressed
                 // tokens, so the compress-segment causal length is clamped (SWA segment
                 // unaffected).
-                rowCalcLen = compressCap;
+                actualCalcLen = swaSegWidth + compressCap;
             }
-            actualCalcLen = swaSegWidth + rowCalcLen;
         }
         if (actualCalcLen <= 0) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
             vector_dup(out[curr], Dtype(0), DIV_ROUND_UP(outN, pad), 1, 1, 8, 0);
+            // no max/sum written: Update folds identically and skips this row too.
             pipe_barrier(PIPE_V);
 
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
@@ -183,6 +186,9 @@ inline __aicore__ void RunAivSoftmaxPingPong(
         } else {
             if (actualCalcLen > outN) {
                 actualCalcLen = outN;
+            }
+            if (causalLen > outN - swaSegWidth) {
+                causalLen = outN - swaSegWidth;
             }
 
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);
@@ -199,7 +205,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                                     topK * sizeof(int32_t));
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
-                vector_dup(cmp1, kvOffset + origActualCalcLen, 1, 1, 1, 8, 0);
+                vector_dup(cmp1, kvOffset / compressRatio + causalLen, 1, 1, 1, 8, 0);
                 vector_dup(inTopK, minDtype, DIV_ROUND_UP(swaSegWidth + topK, pad), 1, 1, 8, 0);
                 pipe_barrier(PIPE_V);
                 vconv_s322f32(cmpFp321, cmp1, 1, 1, 1, 8, 8);
@@ -572,11 +578,13 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
                                            __gm__ float *lastMax, __gm__ float *lastSum, uint32_t m,
                                            uint32_t nHeads, uint32_t headSize, int isFirstKvTile,
                                            int actualCalcSoftmaxLen, bool seqHead, uint32_t maskOff,
-                                           uint32_t maskStride)
+                                           uint32_t maskStride, uint32_t compressRatio = 1,
+                                           uint32_t swaSegWidth = 0, uint32_t compressCap = 0)
 {
-    dbg_printf(
-        "RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, actualCalcSoftmaxLen=%d\n", m,
-        headSize, isFirstKvTile, actualCalcSoftmaxLen);
+    dbg_printf("RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, actualCalcSoftmaxLen=%d, "
+               "compressRatio=%u, swaSegWidth=%u, compressCap=%u\n",
+               m, headSize, isFirstKvTile, actualCalcSoftmaxLen, compressRatio, swaSegWidth,
+               compressCap);
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -665,8 +673,22 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
         uint32_t seqIdx = seqHead ? (mIdx + maskOff) / maskStride : (mIdx + maskOff) % maskStride;
         uint32_t headIdx = seqHead ? (mIdx + maskOff) % maskStride : (mIdx + maskOff) / maskStride;
         uint64_t offset = seqIdx * nHeads + headIdx;
-        // Adjust actual calculation length based on causal mask position
+        // Adjust actual calculation length based on causal mask position.
+        // fold identically to RunAivSoftmaxPingPong so the same rows are skipped;
+        // else Update would read PingPong's unwritten max/sum (Bug3).
         int actualCalcLen = actualCalcSoftmaxLen + seqIdx;
+        int causalLen = actualCalcLen / (int)compressRatio;  // 每一行开始mask的位置
+        // fold to compress-token units; must run for non-SWA tiles too (flash kvIdx>0 tiles
+        // carry a compress segment whose causal len is in compressed, not absolute, tokens).
+        if (swaSegWidth > 0 || compressRatio > 1) {
+            actualCalcLen = swaSegWidth + causalLen;
+            if (compressCap != 0 && causalLen > (int)compressCap) {
+                // dense mode: the compress cache only holds compressCap compressed
+                // tokens, so the compress-segment causal length is clamped (SWA segment
+                // unaffected).
+                actualCalcLen = swaSegWidth + compressCap;
+            }
+        }
         if (actualCalcLen <= 0) {
             continue;
         }
@@ -860,13 +882,19 @@ inline __aicore__ void RunAivSoftmaxLong(
     for (int idx = 0; idx < m; idx++) {
         uint32_t seqIdx = seqHead ? (idx + maskOff) / maskStride : (idx + maskOff) % maskStride;
         uint32_t headIdx = seqHead ? (idx + maskOff) % maskStride : (idx + maskOff) / maskStride;
-        int rowCalcLen = (calcLen + seqIdx) / compressRatio;
-        if (compressCap != 0 && rowCalcLen > (int)compressCap) {
-            // dense mode: the compress cache only holds compressCap compressed tokens,
-            // so the compress-segment causal length is clamped (SWA segment unaffected).
-            rowCalcLen = compressCap;
+        int actualCalcLen = calcLen + seqIdx;
+        int causalLen = actualCalcLen / (int)compressRatio;  // 每一行开始mask的位置
+        // fold to compress-token units; must run for non-SWA tiles too (flash kvIdx>0 tiles
+        // carry a compress segment whose causal len is in compressed, not absolute, tokens).
+        if (swaSegWidth > 0 || compressRatio > 1) {
+            actualCalcLen = swaSegWidth + causalLen;
+            if (compressCap != 0 && causalLen > (int)compressCap) {
+                // dense mode: the compress cache only holds compressCap compressed
+                // tokens, so the compress-segment causal length is clamped (SWA segment
+                // unaffected).
+                actualCalcLen = swaSegWidth + compressCap;
+            }
         }
-        int actualCalcLen = swaSegWidth + rowCalcLen;  // 每一行开始mask的位置
         if (actualCalcLen > outN) {
             actualCalcLen = outN;
         }
@@ -981,11 +1009,21 @@ inline __aicore__ void RunAivSoftmaxLong(
 
             vbrcb((__ubuf__ uint32_t *)calcDst, (__ubuf__ uint32_t *)calcDst, 0, 0, 1);
 
-            if (subBlockNum > 1 && block == 0) {
+            if (block == 0) {
+                // init max[]/sum[] slots for sub-block merge and the trailing
+                // totalMax/totalSum scalars; single-block (subBlockNum==1) still needs
+                // totalMax saved so attnSink can be folded once after the loop using the
+                // global max.
                 vector_dup(max, min, subBlockNum + 1, 1, 1, 8, 0);
                 vector_dup(sum, float(0), subBlockNum + 1, 1, 1, 8, 0);
             }
             pipe_barrier(PIPE_V);
+
+            if (subBlockNum == 1) {
+                // single-block: totalMax = this block's max (== global max)
+                copy_ubuf_to_ubuf(totalMax, calcDst, 0, 1, 8, 1, 1);
+                pipe_barrier(PIPE_V);
+            }
 
             if (subBlockNum > 1) {
                 set_flag(PIPE_V, PIPE_S, EVENT_ID2);
@@ -1007,14 +1045,8 @@ inline __aicore__ void RunAivSoftmaxLong(
             }
 
             vsub(calc, calc, calcDst, curRepeat, 1, 1, 0, 8, 8, 0);
-            if (attnSink) {
-                vsub(sink, sink, calcDst, 1, 1, 1, 0, 8, 8, 0);
-            }
             pipe_barrier(PIPE_V);
             vexp(calc, calc, curRepeat, 1, 1, 8, 8);
-            if (attnSink) {
-                vexp(sink, sink, 1, 1, 1, 8, 8);
-            }
             pipe_barrier(PIPE_V);
             if (subBlockNum > 1) {
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID4);
@@ -1025,11 +1057,6 @@ inline __aicore__ void RunAivSoftmaxLong(
                 pipe_barrier(PIPE_V);
             } else {
                 ReduceSum(calcDst, calc, curLen);
-            }
-
-            if (attnSink) {
-                vadd(calcDst, calcDst, sink, 1, 1, 1, 0, 8, 8, 0);
-                pipe_barrier(PIPE_V);
             }
 
             vbrcb((__ubuf__ uint32_t *)calcDst, (__ubuf__ uint32_t *)calcDst, 0, 0, 1);
@@ -1062,6 +1089,22 @@ inline __aicore__ void RunAivSoftmaxLong(
             }
             set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
             copy_ubuf_to_ubuf(totalSum, calcDst, 0, 1, 8, 1, 1);
+            pipe_barrier(PIPE_V);
+        }
+
+        // Fold attnSink into the global sum ONCE using the global max (totalMax).
+        // Previously sink was folded per sub-block inside the loop: sink was subtracted
+        // by each block's local max (polluting the scalar across iterations) and its exp
+        // added to every block's partial sum, so the denominator was inflated and the
+        // max reference was wrong -- intermittently corrupting rows where subBlockNum>1.
+        if (attnSink) {
+            vsub(sink, sink, totalMax, 1, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
+            vexp(sink, sink, 1, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+            vadd(totalSum, totalSum, sink, 1, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
+            vbrcb((__ubuf__ uint32_t *)totalSum, (__ubuf__ uint32_t *)totalSum, 0, 0, 1);
             pipe_barrier(PIPE_V);
         }
 
@@ -1181,16 +1224,17 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     __gm__ float *sumBuf = nullptr, bool hasScale = false, float scale = 1.0f,
     uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr,
     uint32_t winSize = 0, uint32_t winCalcLen = 0, uint32_t compressRatio = 1,
-    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
+    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0, uint32_t compressCap = 0)
 {
 }
 template <typename Dtype>
-inline __aicore__ void RunAivSoftmaxLong(__gm__ Dtype *buf, __gm__ float *expBuf, uint32_t m,
-                                         uint32_t n, uint32_t calcLen, uint32_t outN = 0,
-                                         bool seqHead = true, uint32_t maskOff = 0,
-                                         uint32_t maskStride = 1, bool hasScale = false,
-                                         float scale = 1.0f, uint32_t kvOffset = 0,
-                                         uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr)
+inline __aicore__ void RunAivSoftmaxLong(
+    __gm__ Dtype *buf, __gm__ float *expBuf, uint32_t m, uint32_t n, uint32_t calcLen,
+    uint32_t outN = 0, bool seqHead = true, uint32_t maskOff = 0, uint32_t maskStride = 1,
+    bool hasScale = false, float scale = 1.0f, uint32_t kvOffset = 0, uint32_t topK = 0,
+    __gm__ int32_t *topkIndices = nullptr, uint32_t winSize = 0, uint32_t winCalcLen = 0,
+    uint32_t compressRatio = 1, __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0,
+    uint32_t compressCap = 0)
 {
 }
 #endif

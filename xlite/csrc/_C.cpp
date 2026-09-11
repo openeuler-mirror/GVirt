@@ -1623,7 +1623,8 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
          uint32_t compressBlockSize, at::Tensor &attnSink, at::Tensor &output, uint32_t batch,
          at::Tensor &queryStartLoc, at::Tensor &lens, at::Tensor &cachedLens, uint32_t nHeads,
          uint32_t headDim, float scale, uint32_t windowSize, uint32_t compressRatio,
-         uint32_t indexTopK, at::Tensor &topkIndices, bool dense)
+         uint32_t indexTopK, at::Tensor &topkIndices, bool enableFlashAttention,
+         uint32_t tileSizeOfCachedKV, bool dense)
 {
     XTensor _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables, _attnSink,
         _output, _queryStartLoc, _lens, _cachedLens, _topkIndices;
@@ -1659,6 +1660,29 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
                    compressRatio, indexTopK, XTensor(), true);
         rt.PutTensor(compressKCacheDense);
         rt.PutTensor(scores);
+    } else if (enableFlashAttention && compressRatio != 0) {
+        uint32_t qkWidth = swaSegWidth + tileSizeOfCachedKV;
+        XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, qkWidth}, XDtypeOf(q), DBG_LOC);
+        XTensor &sv = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, headDim}, XDtypeOf(q), DBG_LOC);
+        XTensor &max = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &sum = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
+        XTensor &lastMax = rt.GetTensor({_q.shape[0], nHeads}, FP32, DBG_LOC);
+        XTensor &lastSum = rt.GetTensor({_q.shape[0], nHeads}, FP32, DBG_LOC);
+        XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
+        sync.Memset(0, rt.stream);
+
+        XliteOpFlashCXA(rt, _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables,
+                        swaBlockSize, compressBlockSize, _attnSink, qk, sv, max, sum, lastMax,
+                        lastSum, sync, _output, batch, _queryStartLoc, _lens, _cachedLens, nHeads,
+                        headDim, scale, windowSize, compressRatio, indexTopK, _topkIndices,
+                        tileSizeOfCachedKV);
+        rt.PutTensor(sync);
+        rt.PutTensor(lastSum);
+        rt.PutTensor(lastMax);
+        rt.PutTensor(sum);
+        rt.PutTensor(max);
+        rt.PutTensor(sv);
+        rt.PutTensor(qk);
     } else {
         uint32_t compressMaxNumBlocks = DeriveMaxNumBlocks(_compressBlockTables, batch);
         kvSize = compressRatio == 0 || compressMaxNumBlocks == 0
@@ -2885,7 +2909,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("compress_block_size"), py::arg("attn_sink"), py::arg("output"), py::arg("batch"),
           py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"), py::arg("n_heads"),
           py::arg("head_dim"), py::arg("scale"), py::arg("window_size"), py::arg("compress_ratio"),
-          py::arg("index_topk"), py::arg("topk_indices"), py::arg("dense") = false);
+          py::arg("index_topk"), py::arg("topk_indices"), py::arg("enable_flash_attention") = false,
+          py::arg("tile_size_of_cached_kv") = 8192, py::arg("dense") = false);
     m.def("indexer_scores", &IndexerScores, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
           py::arg("weight"), py::arg("scores"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),

@@ -179,7 +179,7 @@ public:
                            nHeads, curr);
                 aicHelper.RunAicQK(q[mhOffset], swaKCache, batchCompressKCache, swaBt, compressBt,
                                    absQueryStart, queryTaskLen, 0, calcLen, calcLen, maxSeqLen,
-                                   scores[curr]);
+                                   scores[curr], windowSize != 0);
                 ffts_cross_core_sync(PIPE_FIX, config);
 
                 if (needDoSV != 0) {
@@ -192,7 +192,8 @@ public:
                                lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
                     aicHelper.RunAicSV(scores[last], swaKCache, lastCompressKCache, lastSwaBt,
                                        lastCompressBt, lastAbsQueryStart, lastQueryTaskLen, 0,
-                                       lastCalcLen, lastCalcLen, maxSeqLen, output[lastMhOffset]);
+                                       lastCalcLen, lastCalcLen, maxSeqLen, output[lastMhOffset],
+                                       windowSize != 0);
                 }
 
                 lastBatchIdx = batchIdx;
@@ -223,7 +224,7 @@ public:
                        lastQueryTaskOffset + lastQueryTaskLen, nHeads, last);
             aicHelper.RunAicSV(scores[last], swaKCache, lastCompressKCache, lastSwaBt,
                                lastCompressBt, lastAbsQueryStart, lastQueryTaskLen, 0, lastCalcLen,
-                               lastCalcLen, maxSeqLen, output[lastMhOffset]);
+                               lastCalcLen, maxSeqLen, output[lastMhOffset], windowSize != 0);
         }
     }
 

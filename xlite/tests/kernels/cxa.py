@@ -53,6 +53,11 @@ torch.npu.set_device(0)
 torch.npu.config.allow_internal_format = True
 MAX_SOFTMAX_PINGPONG_LEN = 11776
 
+# flash path: tiles the KV-len dimension, mirroring flash_mla_v2. Long rows that
+# exceed MAX_SOFTMAX_PINGPONG_LEN run via flash instead of being skipped.
+enable_flash = True
+tile_size = 8192
+
 # block sizes (per-cache, per the CXA 5-tuple; here we pick)
 swa_block_size = 64
 compress_block_size = 128
@@ -85,6 +90,9 @@ work = [
     (1, [128], [128]),
     (1, [129], [129]),
     (1, [143], [1]),
+    # long prefill: compressTotalLen > tile_size -> multi-tile merge path (kvNum >= 2).
+    (1, [131071], [257]),
+    (1, [32768], [256]),
 ]
 
 
@@ -154,6 +162,7 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
         total_lens = [cl + ql for cl, ql in zip(cached_lens_list, query_len_list)]
         max_total_len = max(total_lens)
 
+        skip_nonflash_topk = False
         if index_topk > 0 and compress_ratio > 0:
             swa_seg_width = 0 if window_size == 0 else window_size + 128 + 16
             max_row = max(
@@ -162,14 +171,20 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
             )
             max_row = max(max_row, index_topk + swa_seg_width)
             if max_row > MAX_SOFTMAX_PINGPONG_LEN:
+                if not enable_flash:
+                    logging.info(
+                        "cxa %s SKIP work (batch %d, cached_lens=%s, query_lens=%s): "
+                        "topk path row width %d exceeds PingPong UB budget "
+                        "MAX_SOFTMAX_PINGPONG_LEN and flash is disabled",
+                        name, batch, cached_lens_list, query_len_list, max_row)
+                    continue
+                skip_nonflash_topk = True
                 logging.info(
-                    "cxa %s SKIP work (batch %d, cached_lens=%s, query_lens=%s): "
-                    "topk path row width %d exceeds PingPong UB budget MAX_SOFTMAX_PINGPONG_LEN",
-                    name, batch, cached_lens_list, query_len_list, max_row)
-                continue
+                    "cxa %s non-flash topk path skipped (row width %d > "
+                    "MAX_SOFTMAX_PINGPONG_LEN); flash path will run instead",
+                    name, max_row)
 
         # compressed KV length per sample (== total_len // compress_ratio).
-        # kv_size (compress-segment capacity) is derived INSIDE the op from the compress
         if compress_ratio > 0:
             compressed_kv_lens = [tl // compress_ratio for tl in total_lens]
             kv_size = max_total_len // compress_ratio
@@ -188,11 +203,12 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
             # ---- reference: build sparse_attn inputs per sample ----
             # q_standard: [total_query_len, n_heads, head_dim]
             q_standard = torch.randn(total_query_len, n_heads, head_dim)
-            # attn_sink: [n_heads] fp32 (learnable per-head sink bias)
-            attn_sink = torch.randn(n_heads, dtype=torch.float32) * 0.1
+            # attn_sink: [n_heads] fp32. Scaled up for compress models to expose the per-tile
+            # sink-fold bug; small for pure-SWA (never hits multi-tile merge).
+            sink_scale = 2.0 if compress_ratio > 0 else 0.1
+            attn_sink = torch.randn(n_heads, dtype=torch.float32) * sink_scale
 
             # per-sample KV: [b, window_size + compressed_kv_len_b, head_dim]
-            # We build the full token data once and share between reference and xlite.
             kv_list = []
             for i in range(batch):
                 n_compress = compressed_kv_lens[i]
@@ -216,11 +232,8 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                     n_comp = compressed_kv_lens[i]
                     comp_topk = build_compress_topk(
                         compress_ratio, n_comp, tl, ql, window_size, "npu")  # (ql, n_comp)
-                    # Sparse top-k path: when a row sees more than index_topk visible
-                    # compress tokens, select a random subset so gather/scatter offsets
-                    # span the whole compress segment, and hand the SAME subset to both
-                    # the reference and the kernel. Rows with calcLen <= index_topk take
-                    # the kernel's full-causal path and keep all visible entries.
+                    # Sparse top-k path: rows with > index_topk visible compress tokens pick a
+                    # random subset (shared by ref and kernel) so gather/scatter spans the segment.
                     if index_topk > 0:
                         base_pos = tl - ql
                         n_visible_np = (np.arange(ql) + base_pos + 1) // compress_ratio
@@ -357,26 +370,53 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
             f"query_lens={query_len_list}, window={window_size}, ratio={compress_ratio}, "
             f"kv_size={kv_size}, index_topk={index_topk})"
         )
-        try:
-            torch.npu.synchronize()
-            cxa(rt, q_standard, swa_k_cache, compress_k_cache, swa_block_tables,
-                compress_block_tables, swa_block_size, compress_block_size, attn_sink,
-                output_xlite, batch, query_start_loc, query_lens, cached_lens, n_heads,
-                head_dim, scale, window_size, compress_ratio, index_topk,
-                topk_indices_op)
-            torch.npu.synchronize()
-        except Exception as e:
-            logging.error(f'{case_desc} KERNEL FAILED: {e}')
-            continue
 
-        logging.info("%s executed!", case_desc)
+        # ---- non-flash (single-pass) sparse path ----
+        if not skip_nonflash_topk:
+            try:
+                torch.npu.synchronize()
+                cxa(rt, q_standard, swa_k_cache, compress_k_cache, swa_block_tables,
+                    compress_block_tables, swa_block_size, compress_block_size, attn_sink,
+                    output_xlite, batch, query_start_loc, query_lens, cached_lens, n_heads,
+                    head_dim, scale, window_size, compress_ratio, index_topk,
+                    topk_indices_op)
+                torch.npu.synchronize()
+            except Exception as e:
+                logging.error(f'{case_desc} KERNEL FAILED: {e}')
+                continue
 
-        try:
-            torch.testing.assert_close(output_xlite, output_standard, atol=5e-5, rtol=5e-02)
-        except AssertionError as e:
-            logging.error(f'cxa mismatch: {e}')
-            logging.error(f'sparse_attn ref: {output_standard}')
-            logging.error(f'xlite cxa:        {output_xlite}')
+            logging.info("%s executed!", case_desc)
+
+            try:
+                torch.testing.assert_close(output_xlite, output_standard, atol=5e-5, rtol=5e-02)
+            except AssertionError as e:
+                logging.error(f'cxa mismatch: {e}')
+                logging.error(f'sparse_attn ref: {output_standard}')
+                logging.error(f'xlite cxa:        {output_xlite}')
+
+        # ---- flash (online-softmax, KV-len tiled) sparse path ----
+        if enable_flash:
+            output_xlite_flash = torch.zeros(total_query_len, n_heads, head_dim, device="npu")
+            flash_desc = case_desc + f" [flash, tile_size={tile_size}]"
+            try:
+                torch.npu.synchronize()
+                cxa(rt, q_standard, swa_k_cache, compress_k_cache, swa_block_tables,
+                    compress_block_tables, swa_block_size, compress_block_size, attn_sink,
+                    output_xlite_flash, batch, query_start_loc, query_lens, cached_lens, n_heads,
+                    head_dim, scale, window_size, compress_ratio, index_topk,
+                    topk_indices_op, enable_flash_attention=True, tile_size_of_cached_kv=tile_size)
+                torch.npu.synchronize()
+            except Exception as e:
+                logging.error(f'{flash_desc} KERNEL FAILED: {e}')
+            else:
+                logging.info("%s executed!", flash_desc)
+                try:
+                    torch.testing.assert_close(output_xlite_flash, output_standard, atol=5e-5,
+                                               rtol=5e-02)
+                except AssertionError as e:
+                    logging.error(f'cxa flash mismatch: {e}')
+                    logging.error(f'sparse_attn ref: {output_standard}')
+                    logging.error(f'xlite cxa flash:   {output_xlite_flash}')
 
         # ----- xlite dense mode: the selected compressed tokens are gathered into a
         # per-batch contiguous cache (batch b holds index_topk compressed tokens at

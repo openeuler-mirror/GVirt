@@ -2677,6 +2677,8 @@ def cxa(
     compress_ratio: int,
     index_topk: int,
     topk_indices: torch.Tensor,
+    enable_flash_attention: bool = False,
+    tile_size_of_cached_kv: int = 8192,
     dense: bool = False,
 ) -> None:
     """Run the CXA (C4A and C128A) kernel for DeepSeek-V4.
@@ -2758,6 +2760,16 @@ def cxa(
             (total_query_tokens, index_topk), dtype int32, in compress-relative
             coordinates (compressed token ``j`` -> ``j``). ``-1`` marks a
             masked-out position. Ignored in dense mode (may be empty).
+        enable_flash_attention (bool): Use the flash (online-softmax) variant,
+            which splits the compress-token (KV-len) dimension into
+            ``tile_size_of_cached_kv``-wide tiles and merges them with online
+            softmax. Required for long prefill rows whose single-pass width
+            exceeds the PingPong UB budget and for ``index_topk`` rows that
+            exceed it. Only the sparse (paged) path is supported; dense mode is
+            unaffected (always uses the non-flash kernel). Defaults to False.
+        tile_size_of_cached_kv (int): Width of each KV-len (compress-token) tile
+            in the flash variant. Must be <= the PingPong UB budget. Defaults to
+            8192. Ignored unless ``enable_flash_attention`` is True.
         dense (bool): Run in dense mode over a per-batch contiguous compressed
             cache (see ``compress_k_cache`` and the Dense mode note above).
             Requires ``compress_ratio > 0`` and ``index_topk > 0``. Defaults to

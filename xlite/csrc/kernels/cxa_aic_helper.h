@@ -133,7 +133,7 @@ public:
                                     __gm__ uint32_t *compressBlockTables, uint32_t queryOffset,
                                     uint32_t queryLen, uint32_t kvOffset, uint32_t kvLen,
                                     uint32_t totalLen, uint32_t compressTotalLen,
-                                    GlobalTensor<Dtype> scores)
+                                    GlobalTensor<Dtype> scores, bool hasSwa)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mSize = queryLen * nHeads;
@@ -172,7 +172,7 @@ public:
         int kBlockPad = qkk0;
         int kBlockNum = qkk0 / kBlockSize;
         int kLoop = DIV_ROUND_UP(headDim, qkk0);
-        if (windowSize != 0) {
+        if (hasSwa && windowSize != 0) {
             for (int nIdx = nwIdxStart; nIdx < nwIdxEnd + 1; nIdx++) {  // window size
                 uint32_t block = swaBlockTables[nIdx];
                 uint32_t blockOffset = nIdx == nwIdxStart ? nwBlockOffset : 0;
@@ -258,7 +258,7 @@ public:
             if (dense && ncTotalLen > (int)compressTotalLen) {
                 ncTotalLen = compressTotalLen;
             }
-            int nIdxStart = kvOffset / qkcn0;
+            int nIdxStart = (kvOffset / compressRatio) / qkcn0;
             int nSize = qkcn0;
             int nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
             int nBlockNum = nBlockPad / NBLOCKSIZE;
@@ -330,7 +330,8 @@ public:
                 SetFlag<HardEvent::M_FIX>(EVENT_ID0);
                 WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
                 // copy scores (queryTokens * nHeads, qkcn0) from L0C to GM
-                CopyToGm(scores[swaSegWidth + nOffset], qkl0cBuf, mSize, nSize, mBlockPad,
+                int swaSegWidthEff = hasSwa ? (int)swaSegWidth : 0;
+                CopyToGm(scores[swaSegWidthEff + nOffset], qkl0cBuf, mSize, nSize, mBlockPad,
                          qkStride);
                 SetFlag<HardEvent::FIX_M>(EVENT_ID0);
             }
@@ -356,7 +357,7 @@ public:
                                     __gm__ uint32_t *compressBlockTables, uint32_t queryOffset,
                                     uint32_t queryLen, uint32_t kvOffset, uint32_t kvLen,
                                     uint32_t totalLen, uint32_t compressTotalLen,
-                                    GlobalTensor<Dtype> output)
+                                    GlobalTensor<Dtype> output, bool hasSwa)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mSize = queryLen * nHeads;
@@ -380,14 +381,15 @@ public:
         int kwIdxEnd = windowEnd / svwk0;
         int kwBlockOffset = alignStart % swaBlockSize;
         int kwOffset = alignStart % svwk0;
-        int kcIdxStart = !dense ? kvOffset / compressBlockSize : 0;
+        int kcIdxStart =
+            (!dense && compressRatio != 0) ? (kvOffset / compressRatio) / compressBlockSize : 0;
         int kcTotalLen = compressRatio == 0 ? 0 : kvLen / compressRatio;
         if (dense && kcTotalLen > (int)compressTotalLen) {
             kcTotalLen = compressTotalLen;
         }
         int kcLoop = DIV_ROUND_UP(kcTotalLen, svck0);
 
-        if (windowSize == 0 && kcTotalLen == 0) {
+        if ((!hasSwa || windowSize == 0) && kcTotalLen == 0) {
             return;
         }
 
@@ -413,7 +415,7 @@ public:
 
             WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
 
-            if (windowSize != 0) {
+            if (hasSwa && windowSize != 0) {
                 for (int kIdx = kwIdxStart; kIdx < kwIdxEnd + 1; kIdx++) {  // window size
                     uint32_t block = swaBlockTables[kIdx];
                     uint32_t blockOffset = kIdx == kwIdxStart ? kwBlockOffset : 0;
@@ -495,7 +497,8 @@ public:
                         }
                         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
                         // copy scores (queryTokens * nHeads, 4 * svck0) to L1
-                        CopyGmToL1Nd2Nz(scoresl1aBuf[pingpongL1A], scores[swaSegWidth + kOffset],
+                        int swaSegWidthEff = hasSwa ? (int)swaSegWidth : 0;
+                        CopyGmToL1Nd2Nz(scoresl1aBuf[pingpongL1A], scores[swaSegWidthEff + kOffset],
                                         mSize, kRemBlockPad, qkStride, mBlockPad);
                         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
                         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
