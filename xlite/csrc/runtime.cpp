@@ -92,6 +92,13 @@ void XRuntime::Init(size_t sizeMB)
         }
     }
 
+    if (isEnvironmentVariableTrue(std::getenv("XLITE_FUSED_DENSE_W8A8"))) {
+        enableFusedDenseW8A8 = true;
+        if (_rankId == 0) {
+            std::cout << "Xlite fused dense W8A8 enabled!" << std::endl;
+        }
+    }
+
     const char *ratioPerEPEnv = std::getenv("XLITE_ACTIVE_TOKENS_RATIO_PER_EP");
     if (ratioPerEPEnv) {
         char *endPtr = nullptr;
@@ -1085,6 +1092,9 @@ void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
     originAicNum = aicNum;
     originAivNum = aivNum;
 
+    if (isEnvironmentVariableTrue(std::getenv("XLITE_FUSED_DENSE_W8A8"))) {
+        enableFusedDenseW8A8 = true;
+    }
     const char *envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
     if (envCommOptimizeLen) {
         char *endPtr = nullptr;

@@ -180,6 +180,12 @@ void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
                           const XTensor &weightScale = XTensor(), bool weightNZ = false,
                           bool transpose = false, const XTensor &outScale = XTensor(),
                           const XTensor &num = XTensor());
+void XliteOpFusionOperatorMatmulDequantPipeline(
+    XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, const XTensor &quantBias = XTensor(),
+    const XTensor &weightScale = XTensor(), bool weightNZ = false, bool transpose = false,
+    const XTensor &outScale = XTensor(), const XTensor &num = XTensor(),
+    uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE, uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
+    uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE);
 void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                                XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                                long outDim, long inDim, XTensor &output, XTensor &outScale,

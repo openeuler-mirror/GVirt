@@ -182,6 +182,7 @@ public:
     uint32_t defaultMatmulSwizzle = 0x600;
     bool disableSwizzleTable = false;
     bool enableMoEAllToAll = false;
+    bool enableFusedDenseW8A8 = false;
     double activeTokensRatioPerEp = 1.0f;
 
     // cross-layer buffer

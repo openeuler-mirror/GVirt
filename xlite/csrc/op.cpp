@@ -57,6 +57,57 @@ static inline uint32_t ConvKernelBlockNum(const XRuntime &rt, uint64_t totalSegs
     return static_cast<uint32_t>(needed);
 }
 
+// Pick the AIC matmul tiling (m0, n0, k0) and the number of AIC blocks to
+// launch, shared by XliteOpMatmul and the fused matmul+dequant pipeline so
+// both paths always use the same tiling policy. Pass m0/n0/k0 as
+// MATMUL_M0_N0_K0_DEFAULT_VALUE (or leave them 0) to use the auto policy.
+static inline void PickMatmulTiling(const XRuntime &rt, uint64_t m, uint64_t n, uint64_t k,
+                                    uint64_t weightDtypeBits, bool needExtraSpace, uint64_t &m0,
+                                    uint64_t &n0, uint64_t &k0, uint32_t &aicNum)
+{
+    if (m0 == MATMUL_M0_N0_K0_DEFAULT_VALUE || n0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
+        k0 == MATMUL_M0_N0_K0_DEFAULT_VALUE) {
+        m0 = ROUND_UP(m, 32);
+        if (m0 > 128) {
+            m0 = 128;
+        }
+        // if matmul has bias or dequant scale, L1 buffer will overflow!
+        n0 = needExtraSpace ? 128 : 256;
+        k0 = 4096 / weightDtypeBits;
+
+        uint64_t mLoop = DIV_ROUND_UP(m, m0);
+        uint64_t nLoop = DIV_ROUND_UP(n, n0);
+        uint64_t totalLoops = mLoop * nLoop;
+        uint64_t lastLoops = totalLoops % rt.aicNum;
+
+        // If the data size is small, we should make a data tiling mode
+        // to ensure even loads on each AICore.
+        if (totalLoops < static_cast<uint64_t>(3) * rt.aicNum &&
+            (lastLoops != 0 && lastLoops < rt.aicNum / 2)) {
+            if (n <= static_cast<uint64_t>(32) * rt.aicNum) {
+                m0 = m0 > 64 ? 64 : m0;
+                n0 = 64;
+            } else if (n <= static_cast<uint64_t>(64) * rt.aicNum) {
+                n0 = 64;
+            } else if (n <= static_cast<uint64_t>(128) * rt.aicNum) {
+                n0 = 128;
+            } else if (n <= static_cast<uint64_t>(256) * rt.aicNum) {
+                n0 = needExtraSpace ? 128 : 256;
+            } else {
+                m0 = m0 > 64 ? 64 : m0;
+                // BiasTable(1K): 4 * n0 <= 1K, so that n0 <= 256
+                n0 = needExtraSpace ? 256 : 384;
+                k0 /= 2;
+            }
+        }
+    }
+    uint64_t totalLoops = DIV_ROUND_UP(m, m0) * DIV_ROUND_UP(n, n0);
+    aicNum = totalLoops > rt.aicNum ? rt.aicNum : totalLoops;
+    if (aicNum == 0) {
+        aicNum = 1;
+    }
+}
+
 HcclDataType XDtype2HcclDtype(enum XDtype dtype)
 {
     switch (dtype) {
@@ -647,63 +698,10 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
     bool needExtraSpace = (bias.ptr != nullptr || deqScale.ptr != nullptr);
-    uint64_t mLoop;
-    uint64_t nLoop;
-    uint64_t totalLoops;
     uint64_t swizzle = rt.defaultMatmulSwizzle;
+    uint32_t aicNum;
 
-    // Notice: Ensure that no overflow occurs
-    // L1(512K): PINGPONG * (sizeof(x) * m0 * 2k0 + sizeof(y) * n0 * k0) + BiasSize(Optional)] +
-    // FixPipe(Optional)
-    //         = 4 * sizeof(x) * m0 * k0 + 2 * k0 * sizeof(y) * n0 + [4 * n0] + [8 * n0]
-    //         = 2 * k0 * (2 * sizeof(x) * m0 + sizeof(y) * n0) + [12 * n0]
-    // L0A(64K): PINGPONG * sizeof(x) * m0 * k0 / 4 = sizeof(x) * m0 * k0 / 2
-    // L0B(64K): PINGPONG * sizeof(y) * m0 * k0 / 4 = sizeof(y) * m0 * k0 / 2
-    // BiasTable(1K): n0 * sizeof(float/int32_t) = 4 * n0
-    // FixPipe(2K): n0 * sizeof(uint64_t) = 8 * n0
-    if (m0 == MATMUL_M0_N0_K0_DEFAULT_VALUE || n0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
-        k0 == MATMUL_M0_N0_K0_DEFAULT_VALUE) {
-        m0 = ROUND_UP(m, 32);
-        if (m0 > 128) {
-            m0 = 128;
-        }
-        // if matmul has bias or dequant scale, L1 buffer will overflow!
-        n0 = needExtraSpace ? 128 : 256;
-        k0 = 4096 / XDtypeBit(weight.dtype);
-
-        mLoop = DIV_ROUND_UP(m, m0);
-        nLoop = DIV_ROUND_UP(n, n0);
-        totalLoops = mLoop * nLoop;
-        uint64_t lastLoops = totalLoops % rt.aicNum;
-
-        // If the data size is small, we should make a data tiling mode
-        // to ensure even loads on each AICore.
-        if (totalLoops < static_cast<uint64_t>(3) * rt.aicNum &&
-            (lastLoops != 0 && lastLoops < rt.aicNum / 2)) {
-            if (n <= static_cast<uint64_t>(32) * rt.aicNum) {
-                m0 = m0 > 64 ? 64 : m0;
-                n0 = 64;
-            } else if (n <= static_cast<uint64_t>(64) * rt.aicNum) {
-                n0 = 64;
-            } else if (n <= static_cast<uint64_t>(128) * rt.aicNum) {
-                n0 = 128;
-            } else if (n <= static_cast<uint64_t>(256) * rt.aicNum) {
-                n0 = needExtraSpace ? 128 : 256;
-            } else {
-                m0 = m0 > 64 ? 64 : m0;
-                // BiasTable(1K): 4 * n0 <= 1K, so that n0 <= 256
-                n0 = needExtraSpace ? 256 : 384;
-                k0 /= 2;
-            }
-        }
-    }
-    mLoop = DIV_ROUND_UP(m, m0);
-    nLoop = DIV_ROUND_UP(n, n0);
-    totalLoops = mLoop * nLoop;
-    uint32_t aicNum = totalLoops > rt.aicNum ? rt.aicNum : totalLoops;
-    if (aicNum == 0) {
-        aicNum = 1;
-    }
+    PickMatmulTiling(rt, m, n, k, XDtypeBit(weight.dtype), needExtraSpace, m0, n0, k0, aicNum);
 
     if (!rt.disableSwizzleTable) {
         XlitePickSwizzle(n, k, &swizzle);
@@ -1497,10 +1495,48 @@ void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
         return;
     }
     if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == BF16) {
-        out.View(FP16);
-        XliteOpMatmul(rt, in, weight, out, weightNZ, quantBias, weightScale, transpose);
-        XliteOpDeQuant(rt, out, out, outScale, num);
-        out.View(BF16);
+        bool enableFused = rt.enableFusedDenseW8A8 && in.shape.size() == 2 &&
+                           out.shape.size() == 2 && weightScale.ptr != nullptr;
+        if (enableFused) {
+            XliteOpFusionOperatorMatmulDequantPipeline(rt, in, weight, out, quantBias, weightScale,
+                                                       weightNZ, transpose, outScale, num);
+        } else {
+            out.View(FP16);
+            XliteOpMatmul(rt, in, weight, out, weightNZ, quantBias, weightScale, transpose);
+            XliteOpDeQuant(rt, out, out, outScale, num);
+            out.View(BF16);
+        }
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(weight) + XT_STR(out);
+        throw std::runtime_error(err_str + "not supported!");
+    }
+}
+
+void XliteOpFusionOperatorMatmulDequantPipeline(XRuntime &rt, XTensor &in, XTensor &weight,
+                                                XTensor &out, const XTensor &quantBias,
+                                                const XTensor &weightScale, bool weightNZ,
+                                                bool transpose, const XTensor &outScale,
+                                                const XTensor &num, uint64_t m0, uint64_t n0,
+                                                uint64_t k0)
+{
+    if (IsDummyRuntime(rt) || in.numel == 0) {
+        return;
+    }
+
+    uint64_t m = in.shape[0];
+    uint64_t k = in.shape[1];
+    uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
+    bool needExtraSpace = (quantBias.ptr != nullptr || weightScale.ptr != nullptr);
+    uint32_t aicNum;
+
+    // Keep the AIC matmul tiling identical to XliteOpMatmul so the fused
+    // kernel never changes matmul's tiling policy.
+    PickMatmulTiling(rt, m, n, k, XDtypeBit(weight.dtype), needExtraSpace, m0, n0, k0, aicNum);
+
+    if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == BF16) {
+        aclrtlaunch_fusion_operator_matmul_dequant_pipeline_int8_t(
+            aicNum, rt.stream, in.ptr, weight.ptr, out.ptr, quantBias.ptr, weightScale.ptr,
+            outScale.ptr, num.ptr, m, n, k, weightNZ, transpose, m0, n0, k0);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(weight) + XT_STR(out);
         throw std::runtime_error(err_str + "not supported!");
