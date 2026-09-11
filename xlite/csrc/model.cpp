@@ -998,7 +998,7 @@ void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<XTensor> &
                _c.blockSizes[CXA_SWA_KV], _c.blockSizes[CXA_COMPRESS_KV], attnSink[layer], scores,
                o, rt._batch, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens, nLocalHeads,
                _c.headDim, _c.softmaxScale, _c.windowSize, kvsize, _c.compressRatios[layer],
-               _c.indexTopK, pTopkIndices == nullptr ? XTensor() : *pTopkIndices);
+               _c.indexTopK, pTopkIndices == nullptr ? XTensor() : *pTopkIndices, false);
     rt.PutTensor(scores);
 
     if (pTopkIndices) {

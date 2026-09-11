@@ -256,8 +256,8 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 q_chunk = q_standard[q_offset:q_offset + ql].unsqueeze(0)  # (1, ql, h, d)
                 q_offset += ql
                 # sparse_attn expects [b, s, h, d]; kv [b, n, d]; topk [b, s, topk]
-                o = sparse_attn(q_chunk, kv_list[i].unsqueeze(0),
-                                attn_sink, topk_indices_list[i].unsqueeze(0), scale)
+                o = sparse_attn(q_chunk.float(), kv_list[i].unsqueeze(0).float(),
+                                attn_sink, topk_indices_list[i].unsqueeze(0), scale).to(test_dtype)
                 ref_outputs.append(o.squeeze(0))  # (ql, h, d)
             output_standard = torch.cat(ref_outputs, dim=0)  # (total_query_len, h, d)
 
@@ -331,13 +331,12 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 tl = total_lens[i]
                 # Convert coordinates for the op: the reference's compress indices are
                 # absolute (total_len + comp_idx) into [SWA(total_len) | compress], while
-                # the op expects score-ROW coordinates, where compress token j sits at
-                # column swaSegWidth + j (swaSegWidth must match the kernel:
-                # windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B). -1 stays -1.
-                swa_seg_width = 0 if window_size == 0 else window_size + 128 + 16
+                # the op expects compress-relative coordinates (compressed token j ->
+                # index j; the kernel places it at score column swaSegWidth + j, and the
+                # dense-mode gather resolves it through compress_block_tables). -1 stays -1.
                 comp_part = topk_indices_list[i][:, window_size:].clone()  # (ql, comp_topk_len)
                 mask_neg = comp_part < 0
-                comp_part = comp_part - tl + swa_seg_width
+                comp_part = comp_part - tl
                 comp_part = torch.where(mask_neg, torch.full_like(comp_part, -1), comp_part)
                 if comp_part.shape[1] < op_topk_width:
                     pad = torch.full((ql, op_topk_width - comp_part.shape[1]), -1,
@@ -378,4 +377,63 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
             logging.error(f'cxa mismatch: {e}')
             logging.error(f'sparse_attn ref: {output_standard}')
             logging.error(f'xlite cxa:        {output_xlite}')
+
+        # ----- xlite dense mode: the selected compressed tokens are gathered into a
+        # per-batch contiguous cache (batch b holds index_topk compressed tokens at
+        # [b * index_topk, (b + 1) * index_topk)), no block table inside the kernel,
+        # no top-k masking -- the compress segment is attended causally, clamped to
+        # index_topk. The reference gathers the SAME sampled selection, so both sides
+        # attend over the identical token set. SWA stays paged (unchanged caches).
+        if compress_ratio == 0 or index_topk == 0:
+            continue
+
+        # ----- xlite dense mode: gather the same topk_indices into a contiguous dense
+        # cache, then run cxa in dense mode on it. The gather kernel resolves each
+        # index in topk_indices_op through compress_block_tables, so the dense cache
+        # holds exactly the sampled top-k tokens (a random subset of [0, n_visible)
+        # when n_visible > index_topk). The reference therefore attends over the SAME
+        # subset: reuse topk_indices_list[i] verbatim. SWA stays paged (unchanged).
+        if any(qlen != 1 for qlen in query_len_list):
+            logging.info(
+                "cxa dense %s work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) "
+                "skipped: dense mode requires query_len == 1 per batch",
+                name, batch, cached_lens_list, query_len_list, index_topk,
+            )
+            continue
+
+        # reference with the same sampled compress selection the kernel gathers
+        dense_ref_outputs = []
+        q_offset = 0
+        for i in range(batch):
+            ql = query_len_list[i]
+            q_chunk = q_standard[q_offset:q_offset + ql].unsqueeze(0)
+            q_offset += ql
+            o = sparse_attn(q_chunk.float(), kv_list[i].unsqueeze(0).float(),
+                            attn_sink, topk_indices_list[i].unsqueeze(0), scale).to(test_dtype)
+            dense_ref_outputs.append(o.squeeze(0))
+        output_dense_standard = torch.cat(dense_ref_outputs, dim=0)
+
+        output_xlite_dense = torch.zeros(total_query_len, n_heads, head_dim, device="npu")
+
+        try:
+            torch.npu.synchronize()
+            cxa(rt, q_standard, swa_k_cache, compress_k_cache, swa_block_tables,
+                compress_block_tables, swa_block_size, compress_block_size, attn_sink,
+                output_xlite_dense, batch, query_start_loc, query_lens, cached_lens, n_heads,
+                head_dim, scale, window_size, compress_ratio, index_topk,
+                topk_indices_op, dense=True)
+            torch.npu.synchronize()
+        except Exception as e:
+            logging.error(f'{case_desc} DENSE KERNEL FAILED: {e}')
+            continue
+
+        logging.info("%s dense executed!", case_desc)
+
+        try:
+            torch.testing.assert_close(output_xlite_dense, output_dense_standard, atol=5e-05,
+                                       rtol=5e-02)
+        except AssertionError as e:
+            logging.error(f'cxa dense mismatch: {e}')
+            logging.error(f'sparse_attn dense ref: {output_dense_standard}')
+            logging.error(f'xlite cxa dense:        {output_xlite_dense}')
 

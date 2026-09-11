@@ -123,19 +123,22 @@ public:
      *          Q: (queryTokens * nHeads, headDim)
      *          K: (windowSize + kvLen, headDim)
      *          m0: XLITE_MAX_M0, n0: qkwn0 qkcn0, k0: qkk0
+     * totalLen bounds the SWA segment (absolute token positions); in dense mode the
+     * compress segment is bounded by compressTotalLen instead (compressed-token count,
+     * i.e. maxSeqLen), while the SWA segment keeps its causal window length.
      */
     __aicore__ inline void RunAicQK(GlobalTensor<Dtype> q, GlobalTensor<Dtype> swaKCache,
                                     GlobalTensor<Dtype> compressKCache,
                                     __gm__ uint32_t *swaBlockTables,
                                     __gm__ uint32_t *compressBlockTables, uint32_t queryOffset,
                                     uint32_t queryLen, uint32_t kvOffset, uint32_t kvLen,
+                                    uint32_t totalLen, uint32_t compressTotalLen,
                                     GlobalTensor<Dtype> scores)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mSize = queryLen * nHeads;
         int mBlockPad = ROUND_UP(mSize, MBLOCKSIZE);
         int mBlockNum = mBlockPad / MBLOCKSIZE;
-        int totalLen = kvOffset + kvLen;
 
         int curr = 0;
         int pingpongL1B = 0;
@@ -248,7 +251,13 @@ public:
         }
 
         if (compressRatio != 0) {
+            // dense mode: compress cache only holds maxSeqLen (= indexTopK) compressed
+            // tokens, so ncTotalLen is clamped to compressTotalLen; sparse mode walks the
+            // full causal compress length kvLen / compressRatio.
             int ncTotalLen = kvLen / compressRatio;
+            if (dense && ncTotalLen > (int)compressTotalLen) {
+                ncTotalLen = compressTotalLen;
+            }
             int nIdxStart = kvOffset / qkcn0;
             int nSize = qkcn0;
             int nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
@@ -338,12 +347,15 @@ public:
      *          scores: (queryTokens * nHeads, windowSize + kvLen)
      *          K: (windowSize + kvLen, headDim)
      *          m0: XLITE_MAX_M0, n0: svn0, k0: svk0
+     * totalLen bounds the SWA segment; compressTotalLen bounds the compress segment in
+     * dense mode (compressed-token count, see RunAicQK).
      */
     __aicore__ inline void RunAicSV(GlobalTensor<Dtype> scores, GlobalTensor<Dtype> swaKCache,
                                     GlobalTensor<Dtype> compressKCache,
                                     __gm__ uint32_t *swaBlockTables,
                                     __gm__ uint32_t *compressBlockTables, uint32_t queryOffset,
                                     uint32_t queryLen, uint32_t kvOffset, uint32_t kvLen,
+                                    uint32_t totalLen, uint32_t compressTotalLen,
                                     GlobalTensor<Dtype> output)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
@@ -354,7 +366,6 @@ public:
         int nBlockPad = svn0;
         int nBlockNum = svn0 / NBLOCKSIZE;
         int nLoop = DIV_ROUND_UP(headDim, svn0);
-        int totalLen = kvOffset + kvLen;
 
         // window [alignStart, windowEnd], matching RunAicQK's SWA segment layout (scores
         // column 0 = abs pos alignStart). With every tile boundary a kBlockSize multiple,
@@ -371,6 +382,9 @@ public:
         int kwOffset = alignStart % svwk0;
         int kcIdxStart = !dense ? kvOffset / compressBlockSize : 0;
         int kcTotalLen = compressRatio == 0 ? 0 : kvLen / compressRatio;
+        if (dense && kcTotalLen > (int)compressTotalLen) {
+            kcTotalLen = compressTotalLen;
+        }
         int kcLoop = DIV_ROUND_UP(kcTotalLen, svck0);
 
         if (windowSize == 0 && kcTotalLen == 0) {

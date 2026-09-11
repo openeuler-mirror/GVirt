@@ -103,7 +103,7 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
                 uint32_t batch, XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                 uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
                 uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK,
-                const XTensor &topkIndices = XTensor());
+                const XTensor &topkIndices = XTensor(), bool dense = false);
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
                   XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
@@ -118,11 +118,12 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
                        uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE, uint32_t topK = 0,
                        const XTensor &topkIndices = XTensor());
-void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, XTensor &peCache,
+void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &peCache,
                                 XTensor &blockTables, XTensor &topkIndices, XTensor &queryLens,
-                                XTensor &cachedLens, XTensor &kDenseCache, XTensor &peDenseCache,
-                                uint32_t batch, uint32_t indexTopK, uint32_t blockSize,
-                                uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t kvHeads);
+                                XTensor &cachedLens, XTensor &kDenseCache,
+                                const XTensor &peDenseCache, uint32_t batch, uint32_t indexTopK,
+                                uint32_t blockSize, uint32_t kvLoraRank, uint32_t ropeHeadDim,
+                                uint32_t kvHeads, uint32_t compressRatio = 1);
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
                           float normEps, XTensor &out, const XTensor &normBias = XTensor());
