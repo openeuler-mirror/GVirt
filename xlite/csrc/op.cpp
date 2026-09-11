@@ -11,6 +11,7 @@
 
 #include "kernels/kernel_param.h"
 #include "trace/trace.h"
+#include "trace/msprof_shape.h"
 
 #define KERNEL_PTR_TYPE(name) decltype(aclrtlaunch_##name##_bfloat16_t)
 
@@ -748,8 +749,21 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     auto inDtype = castedIn ? castedIn->dtype : in.dtype;
     xlite_trace::RecordMatmul(rt.rankId(), inDtype, transpose, weightNZ, m, n, k);
 
+#ifdef XLITE_MSPROF_RECODE_SHAPE
+    const char *mmName = launchKernel == aclrtlaunch_matmul_float16_t    ? "matmul_float16_t"
+                         : launchKernel == aclrtlaunch_matmul_bfloat16_t ? "matmul_bfloat16_t"
+                         : launchKernel == aclrtlaunch_matmul_float      ? "matmul_float"
+                         : launchKernel == aclrtlaunch_matmul_int8_t     ? "matmul_int8_t"
+                                                                         : "matmul_int4b_t";
+    const msprofshape::TensorDesc mmInputs[] = {{inPtr, inDtype, in.shape},
+                                                {weight.ptr, weight.dtype, weight.shape}};
+    const msprofshape::TensorDesc mmOutputs[] = {
+        {outPtr, castedOut ? castedOut->dtype : out.dtype, out.shape}};
+    msprofshape::StageLaunchShapes(mmName, mmInputs, 2, mmOutputs, 1);
+#endif
     launchKernel(aicNum, rt.stream, inPtr, weight.ptr, outPtr, m, n, k, weightNZ, transpose, m0, n0,
                  k0, swizzle, biasPtr, deqScale.ptr);
+
     if (castedOut) {
         aclrtlaunch_cast_float_bfloat16_t(rt.aivNum, rt.stream, castedOut->ptr, out.ptr, out.numel);
     }
