@@ -44,6 +44,7 @@
 | 算子 | 文档 | 说明 |
 |---|---|---|
 | matmul | [matmul.md](matmul.md) | 矩阵乘(含 int8/int4 量化变体) |
+| fusion_operator_matmul_dequant_pipeline | [fusion_operator_matmul_dequant_pipeline.md](fusion_operator_matmul_dequant_pipeline.md) | W8A8 matmul+dequant 跨核流水融合(AIC 算 / AIV 反量化,单 MIX kernel) |
 | group_matmul | [group_matmul.md](group_matmul.md) | 分组矩阵乘(MoE) |
 | conv1d_and_silu | [conv1d_and_silu.md](conv1d_and_silu.md) | 1D 卷积与 SiLU 融合 |
 | conv1d_and_silu_token | [conv1d_and_silu_token.md](conv1d_and_silu_token.md) | token 维 1D 卷积与 SiLU 融合 |

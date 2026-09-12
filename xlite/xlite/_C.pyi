@@ -2408,6 +2408,59 @@ def msd_merge_dequant(
     """
     ...
 
+def fusion_operator_matmul_dequant_pipeline(
+    rt: Runtime,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    bias: torch.Tensor,
+    deq_scale: torch.Tensor,
+    out_scale: torch.Tensor,
+    num: torch.Tensor,
+    weight_nz: bool = False,
+    transpose: bool = False,
+) -> None:
+    """Matmul on quantized weights with fused tile-pipeline dequantization.
+
+    Single mixed AIC/AIV kernel computing the W8A8 matmul (int8 x int8,
+    int32 accumulate) plus weight-scale dequantization on the cube fixpipe,
+    then converting the fp16 intermediate to bf16 with an optional per-token
+    scale on the vector cores. Equivalent to ``matmul_dequant`` followed by
+    ``dequant``, but the two stages overlap across cores inside one kernel::
+
+        Y = (x @ weight^T + bias) * deq_scale * out_scale[:, None]
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        x (torch.Tensor): Already-quantized activation matrix, shape
+            ``[m, k]``, int8.
+        weight (torch.Tensor): Quantized weight matrix, shape ``[n, k]``
+            (transpose=False) or ``[k, n]`` (transpose=True), int8.
+        out (torch.Tensor): Output tensor, shape ``[m, n]``, bfloat16.
+            Written in place; the kernel internally stores the fp16
+            intermediate at the same address before overwriting with bf16.
+        bias (torch.Tensor): Quantization bias, shape ``[n]``, int32
+            (optional; pass an empty tensor to skip).
+        deq_scale (torch.Tensor): Weight dequantization scale, flat
+            ``[2*n]``, fp32 (uint64 TF32-packed pairs, even slots hold the
+            scale and odd slots are zero).
+        out_scale (torch.Tensor): Per-token dequantization scale, shape
+            ``[m]``, fp32 (optional; pass an empty tensor to skip).
+        num (torch.Tensor): Dynamic token count, shape ``[1]``, int32
+            (read as uint32; only the first ``min(num, m)`` rows are
+            processed). Pass an empty tensor to use ``m``.
+        weight_nz (bool): Whether `weight` uses NZ layout.
+        transpose (bool): Whether to transpose the right matrix.
+
+    Returns:
+        None: `out` is written in place.
+
+    Raises:
+        RuntimeError: If dtypes are unsupported (requires ``x``/``weight``
+            int8 and ``out`` bfloat16).
+    """
+    ...
+    
 def dequant(rt: Runtime, in_: torch.Tensor, scale: torch.Tensor, out: torch.Tensor, has_scale: bool) -> None:
     """Dequantize tensor values into output precision.
 

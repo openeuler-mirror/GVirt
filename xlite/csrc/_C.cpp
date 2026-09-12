@@ -2015,6 +2015,29 @@ void DeQuant(XRuntime &rt, at::Tensor &in, at::Tensor &scale, at::Tensor &out, b
     rt.Synchronize();
 }
 
+void FusionOperatorMatmulDequantPipeline(XRuntime &rt, at::Tensor &x, at::Tensor &weight,
+                                         at::Tensor &out, at::Tensor &bias, at::Tensor &deqScale,
+                                         bool weightNZ, bool transpose, at::Tensor &outScale,
+                                         at::Tensor &num)
+{
+    XTensor _x, _weight, _out, _bias, _deqScale, _outScale, _num;
+
+    InitXTensor(_x, x);
+    InitXTensor(_weight, weight);
+    InitXTensor(_out, out);
+    InitXTensor(_bias, bias);
+    InitXTensor(_deqScale, deqScale);
+    if (outScale.numel() > 0) {
+        InitXTensor(_outScale, outScale);
+    }
+    if (num.numel() > 0) {
+        InitXTensor(_num, num);
+    }
+    XliteOpFusionOperatorMatmulDequantPipeline(rt, _x, _weight, _out, _bias, _deqScale, weightNZ,
+                                               transpose, _outScale, _num);
+    rt.Synchronize();
+}
+
 void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &weight,
                    at::Tensor &scores, at::Tensor &queryStartLoc, at::Tensor &lens,
                    at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads,
@@ -2805,6 +2828,10 @@ PYBIND11_MODULE(_C, m)
     m.def("matmul_dequant", &MatmulDeQuant, "matmul_dequant", py::arg("rt"), py::arg("x"),
           py::arg("y"), py::arg("bias"), py::arg("deq_scale"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
+    m.def("fusion_operator_matmul_dequant_pipeline", &FusionOperatorMatmulDequantPipeline,
+          "fusion_operator_matmul_dequant_pipeline", py::arg("rt"), py::arg("x"), py::arg("weight"),
+          py::arg("out"), py::arg("bias"), py::arg("deq_scale"), py::arg("weight_nz") = false,
+          py::arg("transpose") = false, py::arg("out_scale"), py::arg("num"));
     m.def("dequant", &DeQuant, py::arg("rt"), py::arg("in_"), py::arg("scale"), py::arg("out"),
           py::arg("has_scale"));
     m.def("mla_v2", &MLAV2, py::arg("rt"), py::arg("q_with_qr"), py::arg("qr"), py::arg("k_cache"),

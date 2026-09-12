@@ -7,6 +7,7 @@
 #define UBA(T) __ubuf__ T *
 #define GMA(T) __gm__ T *
 #define PINGPONG 2
+#define AIC_AIV_RATIO 2
 
 #ifdef __DAV_C220_VEC__
 
@@ -18,7 +19,7 @@ public:
     {
     }
 
-    __aicore__ inline void Init(bool hasScale)
+    __aicore__ inline void Init(bool hasScale, uint64_t m0 = 1, uint64_t n0 = 0)
     {
         set_atomic_none();
         set_mask_norm();
@@ -26,6 +27,8 @@ public:
 
         this->nTile = 7168;
         this->nPad = ROUND_UP(this->nTile, (256 / sizeof(dtype)));
+        this->m0 = m0;
+        this->n0 = n0;
         this->hasScale = hasScale;
 
         this->inUbBuf[0] = reinterpret_cast<UBA(dtype)>((uintptr_t)0);
@@ -55,43 +58,74 @@ public:
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-        this->eventId = 0;
     }
 
     __aicore__ inline int64_t TaskTilesInit(GM_ADDR in, GM_ADDR scale, GM_ADDR out,
-                                            GM_ADDR pnumTokens, uint32_t m, uint32_t n)
+                                            GM_ADDR pnumTokens, uint64_t m, uint64_t n,
+                                            bool isInFused)
     {
         this->inGmBuf = reinterpret_cast<GMA(dtype)>(in);
         this->scaleGmBuf = reinterpret_cast<GMA(float32_t)>(scale);
         this->outGmBuf = reinterpret_cast<GMA(dtype)>(out);
         this->m = m;
         this->n = n;
+        this->eventId = 0;
         if (pnumTokens != nullptr) {
             uint32_t pnumTokensValue = *((__gm__ uint32_t *)pnumTokens);
             this->m = pnumTokensValue < m ? pnumTokensValue : m;
         }
-        this->nLoop = DIV_ROUND_UP(this->n, this->nTile);
-        return static_cast<int64_t>(this->m);
+        // fusion operator need AIC_tilecount:AIV_tilecount=1:2
+        this->isInFused = isInFused;
+        if (isInFused) {
+            this->mTiles = DIV_ROUND_UP(this->m, this->m0 * AIC_AIV_RATIO) * AIC_AIV_RATIO;
+        } else {
+            this->mTiles = DIV_ROUND_UP(this->m, this->m0);
+        }
+
+        this->nTiles = this->n0 > 0 ? DIV_ROUND_UP(this->n, this->n0) : 1;
+        return static_cast<int64_t>(this->mTiles * this->nTiles);
     }
 
+    // Linear tile index → 2D (mIdx, nIdx): tileIdx = mIdx * nTiles + nIdx
     __aicore__ inline void RunTileByIdx(int64_t idx)
     {
-        RunTile(this->inGmBuf + idx * this->n,
-                this->scaleGmBuf == nullptr ? nullptr : this->scaleGmBuf + idx,
-                this->outGmBuf + idx * this->n, 1, this->n);
+        int64_t mIdx;
+        int64_t nIdx;
+        if (this->isInFused) {
+            int64_t aicIdx = idx >> 1;  // AIC tile linear index (mIdx_aic * nTiles + nIdx)
+            int64_t sub = idx & 1;      // which row-half of the AIC m-tile
+            mIdx = (aicIdx / this->nTiles) * 2 + sub;
+            nIdx = aicIdx % this->nTiles;
+        } else {
+            mIdx = idx / this->nTiles;
+            nIdx = idx % this->nTiles;
+        }
+        uint32_t rowOffset = static_cast<uint64_t>(mIdx) * this->m0;
+        uint32_t colOffset = this->n0 > 0 ? static_cast<uint64_t>(nIdx) * this->n0 : 0;
+
+        if (rowOffset >= this->m || colOffset >= this->n) {  // skip when tile out of range
+            return;
+        }
+        uint32_t actualRows = MIN((this->m - rowOffset), this->m0);
+        uint32_t localCols = this->n0 > 0 ? MIN((this->n - colOffset), this->n0) : this->n;
+
+        // Row stride is always this->n (full matrix width in row-major GM layout)
+        RunTile(this->inGmBuf + rowOffset * this->n + colOffset,
+                this->scaleGmBuf == nullptr ? nullptr : this->scaleGmBuf + rowOffset,
+                this->outGmBuf + rowOffset * this->n + colOffset, actualRows, localCols);
     }
 
     __aicore__ inline void RunTile(GMA(dtype) tileInGm, GMA(float32_t) tileScaleGm,
-                                   GMA(dtype) tileOutGm, uint32_t localRows, uint32_t nActual)
+                                   GMA(dtype) tileOutGm, uint32_t localRows, uint32_t localCols)
     {
-        if (localRows == 0 || nActual == 0) {
+        if (localRows == 0 || localCols == 0) {
             return;
         }
-        uint32_t nLoop = DIV_ROUND_UP(nActual, this->nTile);
+        uint32_t nLoop = DIV_ROUND_UP(localCols, this->nTile);
         for (uint32_t row = 0; row < localRows; row++) {
             for (uint32_t loop = 0; loop < nLoop; loop++) {
                 uint32_t nOffset = loop * this->nTile;
-                uint32_t nSize = (loop == nLoop - 1) ? (nActual - nOffset) : this->nTile;
+                uint32_t nSize = (loop == nLoop - 1) ? (localCols - nOffset) : this->nTile;
                 uint32_t nSizePad = ROUND_UP(nSize, (256 / sizeof(dtype)));
                 uint32_t nRepeats = DIV_ROUND_UP(nSizePad, VECTOR_MAX_NUM_OF_FP32);
                 int eventId = this->eventId;
@@ -143,14 +177,13 @@ public:
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-        pipe_barrier(PIPE_ALL);
     }
 
     __aicore__ inline void Run(GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnumTokens,
-                               uint32_t m, uint32_t n)
+                               uint64_t m, uint64_t n)
     {
         SetFlags();
-        int64_t tiles = TaskTilesInit(in, scale, out, pnumTokens, m, n);
+        int64_t tiles = TaskTilesInit(in, scale, out, pnumTokens, m, n, false);
         for (int64_t idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum()) {
             RunTileByIdx(idx);
         }
@@ -158,12 +191,16 @@ public:
     }
 
 private:
-    uint32_t m = 0;
-    uint32_t n = 0;
+    uint64_t m = 0;
+    uint64_t n = 0;
+    uint64_t m0 = 1;
+    uint64_t n0 = 0;
+    uint32_t mTiles = 0;
+    uint32_t nTiles = 1;
     uint32_t nTile = 0;
     uint32_t nPad = 0;
-    uint32_t nLoop = 0;
     bool hasScale = false;
+    bool isInFused = false;
     int eventId = 0;
     GMA(dtype) inGmBuf = nullptr;
     GMA(float32_t) scaleGmBuf = nullptr;
