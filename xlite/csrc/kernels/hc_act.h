@@ -5,12 +5,13 @@
 #include "kernel_macro.h"
 #include "kernel_operator.h"
 
-// hc_act: per-token activation for Hyper-Connection pre/post/comb (fp32 only).
+// hc_act: per-token Hyper-Connection gate (fp32) + optional merge (bf16).
 //   pre  = sigmoid(mixes[:, :hcMult]   * scalePre  + basePre)  + eps
 //   post = 2*sigmoid(mixes[:, hcMult:2*hcMult] * scalePost + basePost)
 //   comb = sinkhorn(softmax(mixes[:, 2*hcMult:] * scaleComb + baseComb) + eps)
-// headOnly: hc_head path — mixes is [m, hcMult], base is [hcMult], scale is [1]; only pre
-// runs (no post/comb/sinkhorn); post/comb GM ptrs may be null (never dereferenced).
+// headOnly (preSum=true only): pre-only path, mixes [m,hcMult], base [hcMult], scale [1].
+// preSum: true = fused merge y=Σ_h pre[h]*x[h,hidden] + post writeback; false = write pre to
+// GM (merge done by hc_pre), always non-head.
 
 #ifdef __DAV_C220_VEC__
 __aicore__ inline void hc_col_normalize(__ubuf__ float *comb, __ubuf__ float *colBuf,
@@ -84,7 +85,8 @@ template <typename Dtype>
 __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ float *post,
                               __gm__ float *comb, __gm__ float *hcScale, uint32_t m,
                               uint32_t hcMult, float eps, uint32_t sinkhornIters, uint32_t headOnly,
-                              __gm__ Dtype *xResid, __gm__ Dtype *yOut, uint32_t hidden)
+                              uint32_t preSum, __gm__ float *pre, __gm__ Dtype *xResid,
+                              __gm__ Dtype *yOut, uint32_t hidden)
 {
     set_atomic_none();
     set_mask_norm();
@@ -161,20 +163,37 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
     const uint64_t yDtypeLen = ROUND_UP(hidden * sizeof(Dtype), UB_BUF_ALIGN_SIZE);
     const uint64_t residFp32Len = ROUND_UP(hcMult * hidden * sizeof(float), UB_BUF_ALIGN_SIZE);
     const uint64_t mergeFp32Len = ROUND_UP(hidden * sizeof(float), UB_BUF_ALIGN_SIZE);
-    // IO slot 0: residual [hcMult, hidden] bf16 in, y [hidden] bf16 out.
-    __ubuf__ Dtype *inDtype0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += residDtypeLen;
-    __ubuf__ Dtype *outDtype0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += yDtypeLen;
-    // IO slot 1
-    __ubuf__ Dtype *inDtype1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += residDtypeLen;
-    __ubuf__ Dtype *outDtype1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += yDtypeLen;
-    __ubuf__ float *xFp32 = (__ubuf__ float *)off;  // whole [hcMult, hidden] residual as fp32
-    off += residFp32Len;
-    __ubuf__ float *yCalc = (__ubuf__ float *)off;  // accumulator: sum_h pre[h]*x (V reused)
-    off += mergeFp32Len;
+    __ubuf__ float *preOut0 = nullptr;
+    __ubuf__ float *preOut1 = nullptr;
+    __ubuf__ Dtype *inDtype0 = nullptr;
+    __ubuf__ Dtype *inDtype1 = nullptr;
+    __ubuf__ Dtype *outDtype0 = nullptr;
+    __ubuf__ Dtype *outDtype1 = nullptr;
+    __ubuf__ float *xFp32 = nullptr;
+    __ubuf__ float *yCalc = nullptr;
+    if (preSum) {
+        // IO slot 0/1: residual [hcMult, hidden] bf16 in, y [hidden] bf16 out.
+        inDtype0 = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += residDtypeLen;
+        outDtype0 = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += yDtypeLen;
+        inDtype1 = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += residDtypeLen;
+        outDtype1 = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += yDtypeLen;
+        xFp32 = (__ubuf__ float *)off;  // [hcMult, hidden] residual as fp32
+        off += residFp32Len;
+        yCalc = (__ubuf__ float *)off;  // accumulator: Σ_h pre[h]*x
+        off += mergeFp32Len;
+    } else {
+        preOut0 = (__ubuf__ float *)off;
+        off += lenPrePost;
+        preOut1 = (__ubuf__ float *)off;
+        off += lenPrePost;
+        yCalc = (__ubuf__ float *)off;  // vgather pre staging (-> ub2ub to preOut)
+        off += lenPrePost;
+    }
+    __ubuf__ float *preOut[2] = {preOut0, preOut1};
     __ubuf__ Dtype *inDtypeArr[2] = {inDtype0, inDtype1};
     __ubuf__ Dtype *outDtypeArr[2] = {outDtype0, outDtype1};
     assert(off <= UB_SIZE);
@@ -215,8 +234,10 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
         CopyGmToUbufAligned(mixesUb[curr], mixPtr, baseUbBytes);
-        for (uint32_t h = 0; h < hcMult; h++) {
-            CopyGmToUbufAligned(inDtypeArr[curr] + h * hidden, xBase + h * hidden, dBytes);
+        if (preSum) {
+            for (uint32_t h = 0; h < hcMult; h++) {
+                CopyGmToUbufAligned(inDtypeArr[curr] + h * hidden, xBase + h * hidden, dBytes);
+            }
         }
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
@@ -230,14 +251,16 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
             vmuls(calcUb, mixesUb[curr], scaleComb, repeat, 1, 1, 8, 8);
         }
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        // Cast residual bf16 [hcMult, hidden] -> fp32 in VECTOR_MAX_REPEAT chunks.
-        for (int chunk = 0; chunk < totalRep; chunk += VECTOR_MAX_REPEAT) {
-            const int rep =
-                (totalRep - chunk) < VECTOR_MAX_REPEAT ? (totalRep - chunk) : VECTOR_MAX_REPEAT;
-            convert_input(xFp32 + chunk * calcPad, inDtypeArr[curr] + chunk * calcPad, rep);
+        if (preSum) {
+            // Cast residual bf16 [hcMult, hidden] -> fp32 in VECTOR_MAX_REPEAT chunks.
+            for (int chunk = 0; chunk < totalRep; chunk += VECTOR_MAX_REPEAT) {
+                const int rep =
+                    (totalRep - chunk) < VECTOR_MAX_REPEAT ? (totalRep - chunk) : VECTOR_MAX_REPEAT;
+                convert_input(xFp32 + chunk * calcPad, inDtypeArr[curr] + chunk * calcPad, rep);
+            }
+            vector_dup(yCalc, 0.0f, vecRep, 1, 1, 8, 0);
         }
-        vector_dup(yCalc, 0.0f, vecRep, 1, 1, 8, 0);
-        pipe_barrier(PIPE_V);
+        pipe_barrier(PIPE_V);  // vmuls(calcUb<-mixesUb) must drain before MTE2 reuses mixesUb
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
 
         // `mixes*scale + base` is shared by pre/post/comb.
@@ -271,16 +294,32 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
         }
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
         pipe_barrier(PIPE_V);
-        set_flag(PIPE_V, PIPE_S, EVENT_ID4);
-        wait_flag(PIPE_V, PIPE_S, EVENT_ID4);
-        for (uint32_t h = 0; h < hcMult; h++) {
-            float preH = calcUb[h];
-            vaxpy(yCalc, xFp32 + h * hidden, preH, vecRep, 1, 1, 8, 8);
+
+        if (preSum) {
+            // y = Σ_h pre[h]*x[h,hidden]
+            set_flag(PIPE_V, PIPE_S, EVENT_ID4);
+            wait_flag(PIPE_V, PIPE_S, EVENT_ID4);
+            for (uint32_t h = 0; h < hcMult; h++) {
+                float preH = calcUb[h];
+                vaxpy(yCalc, xFp32 + h * hidden, preH, vecRep, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+            }
+        } else {
+            set_mask_norm();
+            SetMask(hcMult);
+            uint32_t preAddr = static_cast<uint32_t>(reinterpret_cast<uint64_t>(calcUb));
+            vgather((__ubuf__ uint32_t *)yCalc, offRamp, preAddr, 8, 1);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
             pipe_barrier(PIPE_V);
         }
 
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID6 + curr);
-        convert_output(outDtypeArr[curr], yCalc, vecRep);
+        if (preSum) {
+            convert_output(outDtypeArr[curr], yCalc, vecRep);
+        } else {
+            const uint32_t preBlocks = lenPrePost / BLOCK_SIZE;
+            copy_ubuf_to_ubuf(preOut[curr], yCalc, 0, 1, preBlocks, 0, 0);
+        }
         if (!headOnly) {
             SetMask(hcMult);
             uint32_t baseAddr = static_cast<uint32_t>(reinterpret_cast<uint64_t>(calcUb + hcMult));
@@ -290,7 +329,11 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
         pipe_barrier(PIPE_V);
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID6 + curr);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID6 + curr);
-        CopyUbufToGmAligned(yRow, outDtypeArr[curr], dBytes);
+        if (preSum) {
+            CopyUbufToGmAligned(yRow, outDtypeArr[curr], dBytes);
+        } else {
+            CopyUbufToGmAligned(pre + process * hcMult, preOut[curr], prePostBytes);
+        }
         if (!headOnly) {
             __gm__ float *postOutPtr = post + process * hcMult;
             CopyUbufToGmAligned(postOutPtr, postOut[curr], prePostBytes);
@@ -336,20 +379,20 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
 #define HC_ACT_FUNC_DEFINE                                                                      \
     extern "C" __global__ __aicore__ void hc_act_float(                                         \
         GM_ADDR mixes, GM_ADDR hcBase, GM_ADDR post, GM_ADDR comb, GM_ADDR hcScale, uint32_t m, \
-        uint32_t hcMult, float eps, uint32_t sinkhornIters, uint32_t headOnly, GM_ADDR xResid,  \
-        GM_ADDR yOut, uint32_t hidden)                                                          \
+        uint32_t hcMult, float eps, uint32_t sinkhornIters, uint32_t headOnly, uint32_t preSum, \
+        GM_ADDR pre, GM_ADDR xResid, GM_ADDR yOut, uint32_t hidden)                             \
     {                                                                                           \
         hc_act<bfloat16_t>((__gm__ float *)mixes, (__gm__ float *)hcBase, (__gm__ float *)post, \
                            (__gm__ float *)comb, (__gm__ float *)hcScale, m, hcMult, eps,       \
-                           sinkhornIters, headOnly, (__gm__ bfloat16_t *)xResid,                \
-                           (__gm__ bfloat16_t *)yOut, hidden);                                  \
+                           sinkhornIters, headOnly, preSum, (__gm__ float *)pre,                \
+                           (__gm__ bfloat16_t *)xResid, (__gm__ bfloat16_t *)yOut, hidden);     \
     }
 #else
 #define HC_ACT_FUNC_DEFINE                                                                      \
     extern "C" __global__ __aicore__ void hc_act_float(                                         \
         GM_ADDR mixes, GM_ADDR hcBase, GM_ADDR post, GM_ADDR comb, GM_ADDR hcScale, uint32_t m, \
-        uint32_t hcMult, float eps, uint32_t sinkhornIters, uint32_t headOnly, GM_ADDR xResid,  \
-        GM_ADDR yOut, uint32_t hidden)                                                          \
+        uint32_t hcMult, float eps, uint32_t sinkhornIters, uint32_t headOnly, uint32_t preSum, \
+        GM_ADDR pre, GM_ADDR xResid, GM_ADDR yOut, uint32_t hidden)                             \
     {                                                                                           \
     }
 #endif
