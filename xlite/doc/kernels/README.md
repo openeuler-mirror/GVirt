@@ -107,8 +107,9 @@
 
 | 算子 | 文档 | 说明 |
 |---|---|---|
-| hc_act | [hc_act.md](hc_act.md) | HC 模型激活融合 |
+| hc_act | [hc_act.md](hc_act.md) | HC 模型激活融合(preSum=1 pre sum操作 / preSum=0 写 pre) |
 | hc_post | [hc_post.md](hc_post.md) | HC 模型后处理融合 |
+| hc_pre | [hc_pre.md](hc_pre.md) | HC pre sum操作(消费 hc_split_sinkhorn 的 pre) |
 
 ## 目录约定
 

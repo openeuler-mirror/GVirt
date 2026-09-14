@@ -251,4 +251,9 @@ void XliteOpHcAct(XRuntime &rt, XTensor &mixes, const XTensor &hcScale, const XT
                   bool headOnly, XTensor &xResid, XTensor &output);
 void XliteOpHcPost(XRuntime &rt, XTensor &x, XTensor &post, XTensor &comb, XTensor &residual,
                    XTensor &y, uint32_t m, uint32_t hcMult, uint32_t hidden);
+void XliteOpHcSplitSinkhorn(XRuntime &rt, XTensor &mixes, const XTensor &hcScale,
+                            const XTensor &hcBase, XTensor &pre, XTensor &post, XTensor &comb,
+                            uint32_t hcMult, float eps, uint32_t sinkhornIters, bool headOnly);
+void XliteOpHcPre(XRuntime &rt, XTensor &xResid, const XTensor &pre, XTensor &output, uint32_t m,
+                  uint32_t hcMult, uint32_t hidden);
 #endif

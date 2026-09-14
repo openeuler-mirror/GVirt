@@ -2433,6 +2433,38 @@ void HcPost(XRuntime &rt, at::Tensor &x, at::Tensor &post, at::Tensor &comb, at:
     rt.Synchronize();
 }
 
+void HcSplitSinkhorn(XRuntime &rt, at::Tensor &mixes, at::Tensor &hcScale, at::Tensor &hcBase,
+                     at::Tensor &pre, at::Tensor &post, at::Tensor &comb, uint32_t hcMult,
+                     float eps, uint32_t sinkhornIters)
+{
+    XTensor _mixes, _hcScale, _hcBase, _pre, _post, _comb;
+    InitXTensor(_mixes, mixes);
+    InitXTensor(_hcScale, hcScale);
+    InitXTensor(_hcBase, hcBase);
+    InitXTensor(_pre, pre);
+    if (TensorUsable(post)) {
+        InitXTensor(_post, post);
+    }
+    if (TensorUsable(comb)) {
+        InitXTensor(_comb, comb);
+    }
+    // hc_split_sinkhorn has no head path; headOnly is ignored (always non-head).
+    XliteOpHcSplitSinkhorn(rt, _mixes, _hcScale, _hcBase, _pre, _post, _comb, hcMult, eps,
+                           sinkhornIters, false);
+    rt.Synchronize();
+}
+
+void HcPre(XRuntime &rt, at::Tensor &xResid, at::Tensor &pre, at::Tensor &output, uint32_t m,
+           uint32_t hcMult, uint32_t hidden)
+{
+    XTensor _xResid, _pre, _output;
+    InitXTensor(_xResid, xResid);
+    InitXTensor(_pre, pre);
+    InitXTensor(_output, output);
+    XliteOpHcPre(rt, _xResid, _pre, _output, m, hcMult, hidden);
+    rt.Synchronize();
+}
+
 PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
@@ -2907,6 +2939,11 @@ PYBIND11_MODULE(_C, m)
           py::arg("sinkhorn_iters"), py::arg("x_resid"), py::arg("output"));
     m.def("hc_post", &HcPost, py::arg("rt"), py::arg("x"), py::arg("post"), py::arg("comb"),
           py::arg("residual"), py::arg("y"), py::arg("m"), py::arg("hc_mult"), py::arg("hidden"));
+    m.def("hc_split_sinkhorn", &HcSplitSinkhorn, py::arg("rt"), py::arg("mixes"),
+          py::arg("hc_scale"), py::arg("hc_base"), py::arg("pre"), py::arg("post"), py::arg("comb"),
+          py::arg("hc_mult"), py::arg("eps"), py::arg("sinkhorn_iters"));
+    m.def("hc_pre", &HcPre, py::arg("rt"), py::arg("x_resid"), py::arg("pre"), py::arg("output"),
+          py::arg("m"), py::arg("hc_mult"), py::arg("hidden"));
     // funcs
     m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,
           py::arg("col") = 6);

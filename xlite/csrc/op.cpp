@@ -2301,7 +2301,7 @@ void XliteOpHcAct(XRuntime &rt, XTensor &mixes, const XTensor &hcScale, const XT
     uint32_t hidden = output.shape[1];
     aclrtlaunch_hc_act_float(rt.aivNum, rt.stream, mixes.ptr, hcBase.ptr, post.ptr, comb.ptr,
                              hcScale.ptr, m, hcMult, eps, sinkhornIters, headOnly ? 1u : 0u,
-                             xResid.ptr, output.ptr, hidden);
+                             1u /*preSum*/, nullptr /*pre*/, xResid.ptr, output.ptr, hidden);
 }
 
 void XliteOpHcPost(XRuntime &rt, XTensor &x, XTensor &post, XTensor &comb, XTensor &residual,
@@ -2319,4 +2319,45 @@ void XliteOpHcPost(XRuntime &rt, XTensor &x, XTensor &post, XTensor &comb, XTens
             DBG_PREFIX + XT_STR(x) + XT_STR(post) + XT_STR(comb) + XT_STR(residual) + XT_STR(y);
         throw std::runtime_error(err_str + "not supported!");
     }
+}
+
+void XliteOpHcSplitSinkhorn(XRuntime &rt, XTensor &mixes, const XTensor &hcScale,
+                            const XTensor &hcBase, XTensor &pre, XTensor &post, XTensor &comb,
+                            uint32_t hcMult, float eps, uint32_t sinkhornIters, bool headOnly)
+{
+    if (IsDummyRuntime(rt) || mixes.numel == 0) {
+        return;
+    }
+    // hc_split_sinkhorn has no head path: hcBase is always [(2+hcMult)*hcMult] (attn/ffn),
+    // all of pre/post/comb run, and the kernel runs with headOnly=0.
+    (void)headOnly;
+    if (!EachXDtype(FP32, mixes, hcBase, post, comb, pre) || hcScale.dtype != FP32) {
+        std::string err_str = DBG_PREFIX + XT_STR(mixes) + XT_STR(hcScale) + XT_STR(hcBase) +
+                              XT_STR(post) + XT_STR(comb) + XT_STR(pre);
+        throw std::runtime_error(err_str + " must all be FP32!");
+    }
+
+    uint32_t m = mixes.shape[0];
+    // hc_split_sinkhorn is hc_act with preSum=0: the gate/post/comb paths are shared, and the
+    // pre gate is written to GM (the merge is done out-of-kernel by hc_pre).  xResid/yOut are
+    // unused (null), hidden=0.
+    aclrtlaunch_hc_act_float(rt.aivNum, rt.stream, mixes.ptr, hcBase.ptr, post.ptr, comb.ptr,
+                             hcScale.ptr, m, hcMult, eps, sinkhornIters, 0u /*headOnly*/,
+                             0u /*preSum*/, pre.ptr /*pre*/, nullptr /*xResid*/, nullptr /*yOut*/,
+                             0u);
+}
+
+void XliteOpHcPre(XRuntime &rt, XTensor &xResid, const XTensor &pre, XTensor &output, uint32_t m,
+                  uint32_t hcMult, uint32_t hidden)
+{
+    if (IsDummyRuntime(rt) || xResid.numel == 0) {
+        return;
+    }
+    // Merge: y[m, hidden] = sum_h pre[h]*x[m,h,hidden]. bf16 I/O, pre is fp32 from GM.
+    if (xResid.dtype != BF16 || output.dtype != BF16 || pre.dtype != FP32) {
+        std::string err_str = DBG_PREFIX + XT_STR(xResid) + XT_STR(pre) + XT_STR(output);
+        throw std::runtime_error(err_str + " (merge) must be BF16 (x,y) / FP32 (pre)!");
+    }
+    aclrtlaunch_hc_pre_bfloat16_t(rt.aivNum, rt.stream, pre.ptr, xResid.ptr, output.ptr, m, hcMult,
+                                  hidden);
 }

@@ -3437,3 +3437,90 @@ def hc_post(
         None: `y` written in place.
     """
     ...
+
+def hc_split_sinkhorn(
+    rt: Runtime,
+    mixes: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    pre: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+    hc_mult: int,
+    eps: float,
+    sinkhorn_iters: int,
+) -> None:
+    """Hyper-Connection gate activation, defused (DeepSeek-V4).
+
+    Computes the same pre/post/comb gates as :func:`hc_act`'s gate stage, but
+    writes **all three** to GM (including ``pre``, which :func:`hc_act` consumes
+    internally). The merge is performed separately by :func:`hc_pre`.
+
+      pre  = sigmoid(mixes[:, :K]       * scale[0] + base[:K])           + eps
+      post = 2 * sigmoid(mixes[:, K:2K] * scale[1] + base[K:2K])
+      comb = sinkhorn(softmax(mixes[:, 2K:] * scale[2] + base[2K:]) + eps)
+
+    where ``K = hc_mult``. ``mixes`` ``[n, mix_hc]`` (``mix_hc = (2+K)*K``),
+    ``hc_scale`` ``[3]``, ``hc_base`` ``[mix_hc]``; all fp32. Head mode is
+    auto-detected when ``hc_base.numel() == hc_mult`` (only ``pre`` runs;
+    ``post``/``comb`` are not written and may be passed empty).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        mixes (torch.Tensor): Gate pre-activation ``[n, mix_hc]`` fp32, where
+            ``mix_hc = (2+hc_mult)*hc_mult``.
+        hc_scale (torch.Tensor): Per-segment scale ``[3]`` fp32 (or ``[1]`` in
+            head mode).
+        hc_base (torch.Tensor): Per-segment bias ``[mix_hc]`` fp32 (or
+            ``[hc_mult]`` in head mode).
+        pre (torch.Tensor): Output pre gate ``[n, hc_mult]`` fp32. Always
+            written (including head mode).
+        post (torch.Tensor): Output post gate ``[n, hc_mult]`` fp32 (empty in
+            head mode).
+        comb (torch.Tensor): Output comb ``[n, hc_mult*hc_mult]`` fp32 (empty
+            in head mode).
+        hc_mult (int): Hyper-connection multiplier K.
+        eps (float): Epsilon added to pre, to the softmax input, and to every
+            Sinkhorn denominator.
+        sinkhorn_iters (int): Sinkhorn normalization iterations.
+
+    Returns:
+        None: `pre`/`post`/`comb` written in place.
+    """
+    ...
+
+def hc_pre(
+    rt: Runtime,
+    x_resid: torch.Tensor,
+    pre: torch.Tensor,
+    output: torch.Tensor,
+    m: int,
+    hc_mult: int,
+    hidden: int,
+) -> None:
+    """Hyper-Connection pre-activation merge, defused (DeepSeek-V4).
+
+    Collapses the hc copies into one, weighted by ``pre``::
+
+        y[m, hidden] = sum_h pre[m, h] * x[m, h, hidden]
+
+    fp32 accumulate, bf16 output. This is the merge segment of :func:`hc_act`
+    split out as its own kernel — it consumes the ``pre`` written to GM by
+    :func:`hc_split_sinkhorn`. Mirrors ``inference/model.py:hc_pre``::
+
+        y = torch.sum(pre_mix.unsqueeze(-1) * x.float(), dim=2)
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        x_resid (torch.Tensor): Merge input ``[n, hc_mult, hidden]`` bf16.
+        pre (torch.Tensor): Pre gate ``[n, hc_mult]`` fp32 (read from GM; the
+            :func:`hc_split_sinkhorn` output).
+        output (torch.Tensor): Merge output ``[n, hidden]`` bf16.
+        m (int): Token count ``n``.
+        hc_mult (int): Hyper-connection multiplier K.
+        hidden (int): Hidden dimension D.
+
+    Returns:
+        None: `output` written in place.
+    """
+    ...
