@@ -748,11 +748,16 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     xlite_trace::RecordMatmul(rt.rankId(), inDtype, transpose, weightNZ, m, n, k);
 
 #ifdef XLITE_MSPROF_RECODE_SHAPE
-    const char *mmName = launchKernel == aclrtlaunch_matmul_float16_t    ? "matmul_float16_t"
-                         : launchKernel == aclrtlaunch_matmul_bfloat16_t ? "matmul_bfloat16_t"
-                         : launchKernel == aclrtlaunch_matmul_float      ? "matmul_float"
-                         : launchKernel == aclrtlaunch_matmul_int8_t     ? "matmul_int8_t"
-                                                                         : "matmul_int4b_t";
+    const char *mmName = "matmul_int4b_t";
+    if (launchKernel == aclrtlaunch_matmul_float16_t) {
+        mmName = "matmul_float16_t";
+    } else if (launchKernel == aclrtlaunch_matmul_bfloat16_t) {
+        mmName = "matmul_bfloat16_t";
+    } else if (launchKernel == aclrtlaunch_matmul_float) {
+        mmName = "matmul_float";
+    } else if (launchKernel == aclrtlaunch_matmul_int8_t) {
+        mmName = "matmul_int8_t";
+    }
     const msprofshape::TensorDesc mmInputs[] = {{inPtr, inDtype, in.shape},
                                                 {weight.ptr, weight.dtype, weight.shape}};
     const msprofshape::TensorDesc mmOutputs[] = {
