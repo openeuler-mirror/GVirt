@@ -42,10 +42,12 @@ constexpr uint32_t kAdditionDataLen = 232;  // MSPROF_ADDTIONAL_INFO_DATA_LENGTH
 constexpr uint32_t kFormatND = 2;           // ACL_FORMAT_ND
 
 // One reported tensor (ptr kept for parity with msprof's record layout).
+// shape is held by value so a staged TensorDesc stays valid after the source
+// XTensor is released (it is pushed into a thread_local vector in msprof_shape.cpp).
 struct TensorDesc {
     const void *ptr;
     enum XDtype dtype;
-    const std::vector<size_t> &shape;
+    std::vector<size_t> shape;
 };
 
 #pragma pack(1)
