@@ -90,7 +90,7 @@ int XSock::InitServer(void)
             return ret;
         }
 
-        if (rank > _rankSize || rank <= 0 || _clientFds[rank] >= 0) {
+        if (rank >= _rankSize || rank == 0 || _clientFds[rank] >= 0) {
             XDebugStream s(_rankId, std::string("sock:") + __func__);
             s << "recv invalid rank id" << std::endl;
             close(clientFd);
