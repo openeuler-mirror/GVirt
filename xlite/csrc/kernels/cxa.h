@@ -289,13 +289,10 @@ public:
                                    ? (int)calcSoftmaxLen - (int)windowSize
                                    : 0;  // this tile's causal window start (abs coords)
                 uint32_t winCalcLen = calcSoftmaxLen - ROUND_DOWN(winStart, K_BLOCK_SIZE_2B);
-                // compress-segment causal length in compressed tokens, clamped to the
-                // dense cache size maxSeqLen (= indexTopK) in dense mode; the SWA
-                // segment keeps its own unclamped causal window semantics.
+                // compress-segment causal length in compressed tokens; outN is clamped to
+                // qkStride below, which already bounds the dense compress segment to
+                // maxSeqLen (= indexTopK).
                 uint32_t ncCalcLen = compressRatio == 0 ? 0 : calcLen / compressRatio;
-                if (dense && ncCalcLen > maxSeqLen) {
-                    ncCalcLen = maxSeqLen;
-                }
                 uint32_t outN =
                     swaSegWidth + (compressRatio == 0 ? 0 : ROUND_UP(ncCalcLen, 4 * svk0));
                 if (outN > qkStride) {
@@ -322,18 +319,17 @@ public:
                                             .GetPhyAddr(),
                                   nWorkCurCore, qkStride, calcSoftmaxLen, outN, true, nWorkStart,
                                   nHeads, true, scale, 0, 0, nullptr, windowSize, winCalcLen,
-                                  compressRatio == 0 ? 1 : compressRatio, attnSink, swaSegWidth,
-                                  dense && compressRatio != 0 ? maxSeqLen : 0);
+                                  compressRatio == 0 ? 1 : compressRatio, attnSink, swaSegWidth);
                 } else {
                     RunAivSoftmaxPingPong(
                         (__gm__ Dtype *)scores[curr][qkOffset].GetPhyAddr(), nWorkCurCore, qkStride,
                         calcSoftmaxLen, outN, true, nWorkStart, nHeads, nullptr, nullptr, true,
-                        scale, 0, calcLen > indexTopK ? indexTopK : 0,
-                        (calcLen > indexTopK && indexTopK > 0)
+                        scale, 0, ncCalcLen > indexTopK ? indexTopK : 0,
+                        (ncCalcLen > indexTopK && indexTopK > 0)
                             ? topkIndices + indexTopK * queryTaskOffset
                             : nullptr,
                         windowSize, winCalcLen, compressRatio == 0 ? 1 : compressRatio, attnSink,
-                        swaSegWidth, dense && compressRatio != 0 ? maxSeqLen : 0);
+                        swaSegWidth);
                 }
 
                 ffts_cross_core_sync(PIPE_MTE3, config);

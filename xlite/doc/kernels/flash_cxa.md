@@ -100,6 +100,6 @@ host 侧约束(`csrc/op.cpp:1107-1121`):`tileSizeOfCachedKV ≤ MAX_SOFTMAX_PING
 - AIV 流水(`RunAiv`,softmax + online update):`csrc/kernels/flash_cxa.h:230`
 - QK/SV cube 计算:`csrc/kernels/cxa_aic_helper.h:130`/`:353`(与 cxa 共用,`hasSwa` 参数由 flash_cxa 传入)
 - tile softmax(ping-pong,含 top-k):`csrc/kernels/softmax_attn_aiv.h:65`
-- online softmax update:`csrc/kernels/softmax_attn_aiv.h:576`
+- online softmax update:`csrc/kernels/softmax_attn_aiv.h:570`
 - RingSync:`csrc/kernels/ring_sync.h`
 - host launch:`csrc/op.cpp:1095`、workspace 分配 `csrc/_C.cpp:1664-1683`、Python 路由 `csrc/_C.cpp:1663`
