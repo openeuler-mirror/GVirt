@@ -1088,6 +1088,54 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
     }
 }
 
+// Flash (online-softmax) variant of CXA. Mirrors XliteOpFlashMLAV2: tiles the
+// compress-token dimension into tileSizeOfCachedKV chunks merged with online
+// softmax, for long prefill rows / topK rows exceeding the PingPong UB budget.
+// Sparse (paged) path only; dense decode uses the non-flash cxa kernel.
+void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressKCache,
+                     XTensor &swaBlockTables, XTensor &compressBlockTables, uint32_t swaBlockSize,
+                     uint32_t compressBlockSize, XTensor &attnSink, XTensor &qk, XTensor &sv,
+                     XTensor &max, XTensor &sum, XTensor &lastMax, XTensor &lastSum, XTensor &sync,
+                     XTensor &output, uint32_t batch, XTensor &queryStartLoc, XTensor &lens,
+                     XTensor &cachedLens, uint32_t nHeads, uint32_t headDim, float scale,
+                     uint32_t windowSize, uint32_t compressRatio, uint32_t indexTopK,
+                     const XTensor &topkIndices, uint32_t tileSizeOfCachedKV)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (tileSizeOfCachedKV > MAX_SOFTMAX_PINGPONG_LEN) {
+        throw std::runtime_error(std::string(__func__) + ": tile size of kv " +
+                                 std::to_string(tileSizeOfCachedKV) + " > " +
+                                 std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
+    }
+    if (indexTopK > MAX_TOPK_NUM) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": indexTopK should be less than or "
+                                 "equal to " +
+                                 std::to_string(MAX_TOPK_NUM));
+    }
+    if (compressRatio == 0) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": compressRatio should be greater than 0");
+    }
+    uint32_t swaMaxNumBlocks = DeriveMaxNumBlocks(swaBlockTables, batch);
+    uint32_t compressMaxNumBlocks = DeriveMaxNumBlocks(compressBlockTables, batch);
+    if (EachXDtype(BF16, q, swaKCache, compressKCache, qk, sv, output)) {
+        aclrtlaunch_flash_cxa_bfloat16_t(
+            rt.aicNum, rt.stream, q.ptr, swaKCache.ptr, compressKCache.ptr, swaBlockTables.ptr,
+            compressBlockTables.ptr, swaBlockSize, compressBlockSize, swaMaxNumBlocks,
+            compressMaxNumBlocks, attnSink.ptr, qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr,
+            lastSum.ptr, sync.ptr, output.ptr, batch, queryStartLoc.ptr, lens.ptr, cachedLens.ptr,
+            nHeads, headDim, scale, windowSize, compressRatio, indexTopK, topkIndices.ptr,
+            tileSizeOfCachedKV);
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(q) + XT_STR(swaKCache) + XT_STR(compressKCache) +
+                              XT_STR(qk) + XT_STR(sv) + XT_STR(output);
+        throw std::runtime_error(err_str + " unsupported!");
+    }
+}
+
 void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &peCache,
                                 XTensor &blockTables, XTensor &topkIndices, XTensor &queryLens,
                                 XTensor &cachedLens, XTensor &kDenseCache,

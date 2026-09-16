@@ -104,6 +104,18 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
                 uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
                 uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK,
                 const XTensor &topkIndices = XTensor(), bool dense = false);
+// Flash (online-softmax) variant of CXA: tiles the compress-token (KV-len)
+// dimension into tileSizeOfCachedKV chunks merged with online softmax. Sparse
+// (paged) path only; dense decode uses the non-flash cxa kernel.
+void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressKCache,
+                     XTensor &swaBlockTables, XTensor &compressBlockTables, uint32_t swaBlockSize,
+                     uint32_t compressBlockSize, XTensor &attnSink, XTensor &qk, XTensor &sv,
+                     XTensor &max, XTensor &sum, XTensor &lastMax, XTensor &lastSum, XTensor &sync,
+                     XTensor &output, uint32_t batch, XTensor &queryStartLoc, XTensor &lens,
+                     XTensor &cachedLens, uint32_t nHeads, uint32_t headDim, float scale,
+                     uint32_t windowSize, uint32_t compressRatio, uint32_t indexTopK,
+                     const XTensor &topkIndices = XTensor(),
+                     uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE);
 void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, XTensor &peCache,
                   XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,

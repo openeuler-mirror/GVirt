@@ -63,6 +63,7 @@
 | indexer_scores | [indexer_scores.md](indexer_scores.md) | Indexer 分数计算 |
 | indexer_topk | [indexer_topk.md](indexer_topk.md) | Indexer TopK 选路 |
 | cxa | [cxa.md](cxa.md) | C4A/C128A 滑窗+压缩稀疏注意力(DeepSeek-V4) |
+| flash_cxa | [flash_cxa.md](flash_cxa.md) | CXA 的 flash 在线 softmax 变体(KV-len 分 tile 合并,长 prefill/topk 行) |
 | einsum_mht_hdt_mhd | [einsum_mht_hdt_mhd.md](einsum_mht_hdt_mhd.md) | 线性注意力 einsum |
 | einsum_mht_htd_mhd | [einsum_mht_htd_mhd.md](einsum_mht_htd_mhd.md) | 线性注意力 einsum |
 | recurrent_gated_delta_rule | [recurrent_gated_delta_rule.md](recurrent_gated_delta_rule.md) | 门控 Delta Rule 循环核 |
