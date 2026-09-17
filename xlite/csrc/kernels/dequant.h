@@ -25,7 +25,7 @@ public:
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-        this->nTile = 7168;
+        this->nTile = 12288;
         this->nPad = ROUND_UP(this->nTile, (256 / sizeof(dtype)));
         this->m0 = m0;
         this->n0 = n0;
@@ -37,19 +37,10 @@ public:
             reinterpret_cast<UBA(float32_t)>((uintptr_t)(this->inUbBuf[1] + this->nPad));
         this->tmpUbBuf[1] =
             reinterpret_cast<UBA(float32_t)>((uintptr_t)(this->tmpUbBuf[0] + this->nPad));
-        this->mulUbBuf[0] =
-            reinterpret_cast<UBA(float32_t)>((uintptr_t)(this->tmpUbBuf[1] + this->nPad));
-        this->mulUbBuf[1] =
-            reinterpret_cast<UBA(float32_t)>((uintptr_t)(this->mulUbBuf[0] + this->nPad));
         this->outUbBuf[0] =
-            reinterpret_cast<UBA(bfloat16_t)>((uintptr_t)(this->mulUbBuf[1] + this->nPad));
+            reinterpret_cast<UBA(bfloat16_t)>((uintptr_t)(this->tmpUbBuf[1] + this->nPad));
         this->outUbBuf[1] =
             reinterpret_cast<UBA(bfloat16_t)>((uintptr_t)(this->outUbBuf[0] + this->nPad));
-        this->scaleUbBuf =
-            reinterpret_cast<UBA(float32_t)>((uintptr_t)(this->outUbBuf[1] + this->nPad));
-
-        UBA(float32_t)
-        endAddr = reinterpret_cast<UBA(float32_t)>((uintptr_t)(this->scaleUbBuf + 1));
     }
 
     __aicore__ inline void SetFlags()
@@ -122,7 +113,13 @@ public:
             return;
         }
         uint32_t nLoop = DIV_ROUND_UP(localCols, this->nTile);
+        float scaleValue;
         for (uint32_t row = 0; row < localRows; row++) {
+            if (this->hasScale) {
+                scaleValue = *(tileScaleGm + row);
+                set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+            }
             for (uint32_t loop = 0; loop < nLoop; loop++) {
                 uint32_t nOffset = loop * this->nTile;
                 uint32_t nSize = (loop == nLoop - 1) ? (localCols - nOffset) : this->nTile;
@@ -136,29 +133,21 @@ public:
                                           nSize * sizeof(dtype), 0, 0, 0, 0);
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + eventId);
 
-                if (this->hasScale) {
-                    copy_gm_to_ubuf_align_b16(this->scaleUbBuf, tileScaleGm + row, 0, 1,
-                                              sizeof(float), 0, 0, 0, 0);
-                    set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-                }
-
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + eventId);
-                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + eventId);
                 vconv_f162f32(this->tmpUbBuf[eventId], this->inUbBuf[eventId], nRepeats, 1, 1, 8,
                               4);
                 pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + eventId);
 
-                UBA(float32_t) tmpPtr = this->tmpUbBuf[eventId];
                 if (this->hasScale) {
-                    wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-                    vmuls(this->mulUbBuf[eventId], this->tmpUbBuf[eventId],
-                          float(*this->scaleUbBuf), nRepeats, 1, 1, 8, 8);
+                    vmuls(this->tmpUbBuf[eventId], this->tmpUbBuf[eventId], scaleValue, nRepeats, 1,
+                          1, 8, 8);
                     pipe_barrier(PIPE_V);
-                    tmpPtr = this->mulUbBuf[eventId];
                 }
 
-                vconv_f322bf16r(this->outUbBuf[eventId], tmpPtr, nRepeats, 1, 1, 4, 8);
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + eventId);
+                vconv_f322bf16r(this->outUbBuf[eventId], this->tmpUbBuf[eventId], nRepeats, 1, 1, 4,
+                                8);
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + eventId);
 
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + eventId);
@@ -207,9 +196,7 @@ private:
     GMA(dtype) outGmBuf = nullptr;
     UBA(dtype) inUbBuf[PINGPONG] = { nullptr, nullptr };
     UBA(float32_t) tmpUbBuf[PINGPONG] = { nullptr, nullptr };
-    UBA(float32_t) mulUbBuf[PINGPONG] = { nullptr, nullptr };
     UBA(bfloat16_t) outUbBuf[PINGPONG] = { nullptr, nullptr };
-    UBA(float32_t) scaleUbBuf = nullptr;
 };
 
 #define DEQUANT_FUNC_DEFINE(dtype)                                                           \

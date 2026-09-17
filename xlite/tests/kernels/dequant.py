@@ -19,12 +19,13 @@ cases = [
     [40, 192],
     [5, 6144],
     [5, 12288],
+    [5418, 18432],
 ]
 
 for m, n in cases:
     for has_scale in [False, True]:
-        inout = torch.randn(m, n, dtype=torch.float16, device="npu:0")
-        scales = torch.randn(m, dtype=torch.float, device="npu:0")
+        inout = torch.randn(m, n, dtype=torch.float16, device="npu")
+        scales = torch.randn(m, dtype=torch.float, device="npu")
 
         # torch 采用四舍五入，偶数优先的策略
         if has_scale:
@@ -34,7 +35,6 @@ for m, n in cases:
 
         torch.npu.synchronize()
         dequant(rt, inout, scales, inout, has_scale)
-        torch.npu.synchronize()
         print(f'Dequant [{m}, {n}] torch.float16 to torch.bfloat { "with scale " if has_scale else "" }executed!')
 
         inout = inout.view(torch.bfloat16)
