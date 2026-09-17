@@ -62,8 +62,8 @@ static inline uint32_t ConvKernelBlockNum(const XRuntime &rt, uint64_t totalSegs
 // both paths always use the same tiling policy. Pass m0/n0/k0 as
 // MATMUL_M0_N0_K0_DEFAULT_VALUE (or leave them 0) to use the auto policy.
 static inline void PickMatmulTiling(const XRuntime &rt, uint64_t m, uint64_t n, uint64_t k,
-                                    uint64_t weightDtypeBits, bool needExtraSpace, uint64_t &m0,
-                                    uint64_t &n0, uint64_t &k0, uint32_t &aicNum)
+                                    uint64_t weightDtypeBits, uint64_t &m0, uint64_t &n0,
+                                    uint64_t &k0, uint32_t &aicNum)
 {
     if (m0 == MATMUL_M0_N0_K0_DEFAULT_VALUE || n0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
         k0 == MATMUL_M0_N0_K0_DEFAULT_VALUE) {
@@ -71,8 +71,7 @@ static inline void PickMatmulTiling(const XRuntime &rt, uint64_t m, uint64_t n, 
         if (m0 > 128) {
             m0 = 128;
         }
-        // if matmul has bias or dequant scale, L1 buffer will overflow!
-        n0 = needExtraSpace ? 128 : 256;
+        n0 = 256;
         k0 = 4096 / weightDtypeBits;
 
         uint64_t mLoop = DIV_ROUND_UP(m, m0);
@@ -92,11 +91,10 @@ static inline void PickMatmulTiling(const XRuntime &rt, uint64_t m, uint64_t n, 
             } else if (n <= static_cast<uint64_t>(128) * rt.aicNum) {
                 n0 = 128;
             } else if (n <= static_cast<uint64_t>(256) * rt.aicNum) {
-                n0 = needExtraSpace ? 128 : 256;
+                n0 = 256;
             } else {
                 m0 = m0 > 64 ? 64 : m0;
-                // BiasTable(1K): 4 * n0 <= 1K, so that n0 <= 256
-                n0 = needExtraSpace ? 256 : 384;
+                n0 = 384;
                 k0 /= 2;
             }
         }
@@ -697,11 +695,10 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
-    bool needExtraSpace = (bias.ptr != nullptr || deqScale.ptr != nullptr);
     uint64_t swizzle = rt.defaultMatmulSwizzle;
     uint32_t aicNum;
 
-    PickMatmulTiling(rt, m, n, k, XDtypeBit(weight.dtype), needExtraSpace, m0, n0, k0, aicNum);
+    PickMatmulTiling(rt, m, n, k, XDtypeBit(weight.dtype), m0, n0, k0, aicNum);
 
     if (!rt.disableSwizzleTable) {
         XlitePickSwizzle(n, k, &swizzle);
@@ -1579,12 +1576,11 @@ void XliteOpFusionOperatorMatmulDequantPipeline(XRuntime &rt, XTensor &in, XTens
     uint64_t m = in.shape[0];
     uint64_t k = in.shape[1];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
-    bool needExtraSpace = (quantBias.ptr != nullptr || weightScale.ptr != nullptr);
     uint32_t aicNum;
 
     // Keep the AIC matmul tiling identical to XliteOpMatmul so the fused
     // kernel never changes matmul's tiling policy.
-    PickMatmulTiling(rt, m, n, k, XDtypeBit(weight.dtype), needExtraSpace, m0, n0, k0, aicNum);
+    PickMatmulTiling(rt, m, n, k, XDtypeBit(weight.dtype), m0, n0, k0, aicNum);
 
     if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == BF16) {
         aclrtlaunch_fusion_operator_matmul_dequant_pipeline_int8_t(
