@@ -68,7 +68,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     __gm__ float *sumBuf = nullptr, bool hasScale = false, float scale = 1.0f,
     uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr,
     uint32_t winSize = 0, uint32_t winCalcLen = 0, uint32_t compressRatio = 1,
-    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0, uint32_t compressCap = 0)
+    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
 {
     // Softmax mask value: the most negative fp32 value (≈ -inf). Used to fill invalid/missed
     float min = -3.4028235e+38;
@@ -166,12 +166,6 @@ inline __aicore__ void RunAivSoftmaxPingPong(
         // carry a compress segment whose causal len is in compressed, not absolute, tokens).
         if (swaSegWidth > 0 || compressRatio > 1) {
             actualCalcLen = swaSegWidth + causalLen;
-            if (compressCap != 0 && causalLen > (int)compressCap) {
-                // dense mode: the compress cache only holds compressCap compressed
-                // tokens, so the compress-segment causal length is clamped (SWA segment
-                // unaffected).
-                actualCalcLen = swaSegWidth + compressCap;
-            }
         }
         if (actualCalcLen <= 0) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
@@ -579,12 +573,11 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
                                            uint32_t nHeads, uint32_t headSize, int isFirstKvTile,
                                            int actualCalcSoftmaxLen, bool seqHead, uint32_t maskOff,
                                            uint32_t maskStride, uint32_t compressRatio = 1,
-                                           uint32_t swaSegWidth = 0, uint32_t compressCap = 0)
+                                           uint32_t swaSegWidth = 0)
 {
     dbg_printf("RunAivSoftmaxUpdate: m=%u, headSize=%u, isFirstKvTile=%d, actualCalcSoftmaxLen=%d, "
-               "compressRatio=%u, swaSegWidth=%u, compressCap=%u\n",
-               m, headSize, isFirstKvTile, actualCalcSoftmaxLen, compressRatio, swaSegWidth,
-               compressCap);
+               "compressRatio=%u, swaSegWidth=%u\n",
+               m, headSize, isFirstKvTile, actualCalcSoftmaxLen, compressRatio, swaSegWidth);
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -682,12 +675,6 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
         // carry a compress segment whose causal len is in compressed, not absolute, tokens).
         if (swaSegWidth > 0 || compressRatio > 1) {
             actualCalcLen = swaSegWidth + causalLen;
-            if (compressCap != 0 && causalLen > (int)compressCap) {
-                // dense mode: the compress cache only holds compressCap compressed
-                // tokens, so the compress-segment causal length is clamped (SWA segment
-                // unaffected).
-                actualCalcLen = swaSegWidth + compressCap;
-            }
         }
         if (actualCalcLen <= 0) {
             continue;
@@ -832,8 +819,7 @@ inline __aicore__ void RunAivSoftmaxLong(
     uint32_t outN = 0, bool seqHead = true, uint32_t maskOff = 0, uint32_t maskStride = 1,
     bool hasScale = false, float scale = 1.0f, uint32_t kvOffset = 0, uint32_t topK = 0,
     __gm__ int32_t *topkIndices = nullptr, uint32_t winSize = 0, uint32_t winCalcLen = 0,
-    uint32_t compressRatio = 1, __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0,
-    uint32_t compressCap = 0)
+    uint32_t compressRatio = 1, __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
 {
     set_atomic_none();
     set_mask_norm();
@@ -888,12 +874,6 @@ inline __aicore__ void RunAivSoftmaxLong(
         // carry a compress segment whose causal len is in compressed, not absolute, tokens).
         if (swaSegWidth > 0 || compressRatio > 1) {
             actualCalcLen = swaSegWidth + causalLen;
-            if (compressCap != 0 && causalLen > (int)compressCap) {
-                // dense mode: the compress cache only holds compressCap compressed
-                // tokens, so the compress-segment causal length is clamped (SWA segment
-                // unaffected).
-                actualCalcLen = swaSegWidth + compressCap;
-            }
         }
         if (actualCalcLen > outN) {
             actualCalcLen = outN;
@@ -1208,12 +1188,11 @@ inline __aicore__ void RunAivSoftmax(__gm__ Dtype *buf, __gm__ float *expBuf, ui
                                      float scale = 1.0f, uint32_t kvOffset = 0, uint32_t topK = 0,
                                      __gm__ int32_t *topkIndices = nullptr, uint32_t winSize = 0,
                                      uint32_t winCalcLen = 0, uint32_t compressRatio = 1,
-                                     __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0,
-                                     uint32_t compressCap = 0)
+                                     __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
 {
     RunAivSoftmaxLong<Dtype>(buf, expBuf, m, n, calcLen, outN, seqHead, maskOff, maskStride,
                              hasScale, scale, kvOffset, topK, topkIndices, winSize, winCalcLen,
-                             compressRatio, attnSink, swaSegWidth, compressCap);
+                             compressRatio, attnSink, swaSegWidth);
 }
 
 #else
@@ -1224,7 +1203,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     __gm__ float *sumBuf = nullptr, bool hasScale = false, float scale = 1.0f,
     uint32_t kvOffset = 0, uint32_t topK = 0, __gm__ int32_t *topkIndices = nullptr,
     uint32_t winSize = 0, uint32_t winCalcLen = 0, uint32_t compressRatio = 1,
-    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0, uint32_t compressCap = 0)
+    __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
 {
 }
 template <typename Dtype>
@@ -1233,8 +1212,7 @@ inline __aicore__ void RunAivSoftmaxLong(
     uint32_t outN = 0, bool seqHead = true, uint32_t maskOff = 0, uint32_t maskStride = 1,
     bool hasScale = false, float scale = 1.0f, uint32_t kvOffset = 0, uint32_t topK = 0,
     __gm__ int32_t *topkIndices = nullptr, uint32_t winSize = 0, uint32_t winCalcLen = 0,
-    uint32_t compressRatio = 1, __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0,
-    uint32_t compressCap = 0)
+    uint32_t compressRatio = 1, __gm__ float *attnSink = nullptr, uint32_t swaSegWidth = 0)
 {
 }
 #endif

@@ -1641,11 +1641,11 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
     InitXTensor(_topkIndices, topkIndices);
     uint32_t swaSegWidth = windowSize == 0 ? 0 : windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B;
     // kvSize = compress-segment capacity of the scores workspace (compressed tokens):
-    // dense mode holds batch * indexTopK contiguous compressed tokens; sparse mode walks
-    // the paged cache (compressMaxNumBlocks * compressBlockSize per batch).
+    // dense mode holds indexTopK contiguous compressed tokens per batch; sparse mode
+    // walks the paged cache (compressMaxNumBlocks * compressBlockSize per batch).
     uint32_t kvSize;
     if (dense) {
-        kvSize = compressRatio == 0 ? 0 : ROUND_UP((uint64_t)batch * indexTopK, 4 * CXA_SVCK0);
+        kvSize = compressRatio == 0 ? 0 : ROUND_UP((uint64_t)indexTopK, 4 * CXA_SVCK0);
         XTensor &compressKCacheDense =
             rt.GetTensor({static_cast<size_t>(batch), indexTopK, headDim}, XDtypeOf(q), DBG_LOC);
         XliteOpGatherSparseKVCache(rt, _compressKCache, XTensor(), _compressBlockTables,
