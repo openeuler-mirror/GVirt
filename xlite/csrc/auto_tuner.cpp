@@ -208,3 +208,47 @@ uint32_t GetTileSizeOfCachedKV(std::vector<uint32_t> &cachedLens, std::vector<ui
 #endif
     return bestTileSize;
 }
+
+void PickMatmulTiling(uint32_t aicNum, uint64_t m, uint64_t n, uint64_t k, uint64_t weightDtypeBits,
+                      uint64_t &m0, uint64_t &n0, uint64_t &k0, uint32_t &launchAicNum)
+{
+    if (m0 == MATMUL_M0_N0_K0_DEFAULT_VALUE || n0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
+        k0 == MATMUL_M0_N0_K0_DEFAULT_VALUE) {
+        m0 = ROUND_UP(m, 32);
+        if (m0 > 128) {
+            m0 = 128;
+        }
+        n0 = 256;
+        k0 = 4096 / weightDtypeBits;
+
+        uint64_t mLoop = DIV_ROUND_UP(m, m0);
+        uint64_t nLoop = DIV_ROUND_UP(n, n0);
+        uint64_t totalLoops = mLoop * nLoop;
+        uint64_t lastLoops = totalLoops % aicNum;
+
+        // If the data size is small, we should make a data tiling mode
+        // to ensure even loads on each AICore.
+        if (totalLoops < static_cast<uint64_t>(3) * aicNum &&
+            (lastLoops != 0 && lastLoops < aicNum / 2)) {
+            if (n <= static_cast<uint64_t>(32) * aicNum) {
+                m0 = m0 > 64 ? 64 : m0;
+                n0 = 64;
+            } else if (n <= static_cast<uint64_t>(64) * aicNum) {
+                n0 = 64;
+            } else if (n <= static_cast<uint64_t>(128) * aicNum) {
+                n0 = 128;
+            } else if (n <= static_cast<uint64_t>(256) * aicNum) {
+                n0 = 256;
+            } else {
+                m0 = m0 > 64 ? 64 : m0;
+                n0 = 384;
+                k0 /= 2;
+            }
+        }
+    }
+    uint64_t totalLoops = DIV_ROUND_UP(m, m0) * DIV_ROUND_UP(n, n0);
+    launchAicNum = totalLoops > aicNum ? aicNum : totalLoops;
+    if (launchAicNum == 0) {
+        launchAicNum = 1;
+    }
+}
