@@ -10,7 +10,6 @@
 #include "auto_tuner.h"
 #include "kernels/kernel_param.h"
 
-#define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
 static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN);
 
 // Derive maxNumBlocks from blockTables: 2-D [batch, maxNumBlocks] -> shape[1];
