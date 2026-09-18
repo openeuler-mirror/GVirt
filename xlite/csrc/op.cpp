@@ -512,8 +512,8 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
         std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(embed) + XT_STR(out);
         throw std::runtime_error(err_str + "not supported!");
     }
-    launchKernel(rt.aivNum, rt.stream, embed.ptr, in.ptr, out.ptr, embed.shape[1], in.shape[0],
-                 start, end, rt.tpSize());
+    launchKernel(PickMinBlockNum(rt.aivNum, in.shape[0]), rt.stream, embed.ptr, in.ptr, out.ptr,
+                 embed.shape[1], in.shape[0], start, end, rt.tpSize());
 }
 
 void XliteOpRmsNorm(XRuntime &rt, XTensor &in, const XTensor &norm, XTensor &out, float normEps,
@@ -534,10 +534,10 @@ void XliteOpRmsNorm(XRuntime &rt, XTensor &in, const XTensor &norm, XTensor &out
         throw std::runtime_error(err_str + "not supported!");
     }
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::Rms);
-    launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
-                 in.shape[0], normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1],
-                 inStartOffset, outStartOffset, useNorm, variance.ptr, rt.tpSize(),
-                 out.dtype == FP32);
+    uint32_t blockNum = PickMinBlockNum(rt.aivNum, in.shape[0]);
+    launchKernel(blockNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr, in.shape[0],
+                 normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1], inStartOffset,
+                 outStartOffset, useNorm, variance.ptr, rt.tpSize(), out.dtype == FP32);
 }
 
 void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBias, XTensor &out,
@@ -558,9 +558,10 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
         throw std::runtime_error(err_str + "not supported!");
     }
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::Layer);
-    launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr,
-                 in.shape[0], normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1],
-                 inStartOffset, outStartOffset, true, nullptr, rt.tpSize(), false);
+    uint32_t blockNum = PickMinBlockNum(rt.aivNum, in.shape[0]);
+    launchKernel(blockNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr, in.shape[0],
+                 normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1], inStartOffset,
+                 outStartOffset, true, nullptr, rt.tpSize(), false);
 }
 
 void XliteOpL2Norm(XRuntime &rt, XTensor &in, XTensor &out, float normEps, uint32_t normDim,
@@ -579,7 +580,8 @@ void XliteOpL2Norm(XRuntime &rt, XTensor &in, XTensor &out, float normEps, uint3
         throw std::runtime_error(err_str + "not supported!");
     }
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::L2);
-    launchKernel(rt.aivNum, rt.stream, in.ptr, nullptr, nullptr, nullptr, out.ptr, in.shape[0],
+    uint32_t blockNum = PickMinBlockNum(rt.aivNum, in.shape[0]);
+    launchKernel(blockNum, rt.stream, in.ptr, nullptr, nullptr, nullptr, out.ptr, in.shape[0],
                  normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1], inStartOffset,
                  outStartOffset, true, nullptr, rt.tpSize(), out.dtype == FP32);
 }
@@ -598,7 +600,8 @@ void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out)
         std::string err_str = DBG_PREFIX + XT_STR(in1) + XT_STR(in2) + XT_STR(out);
         throw std::runtime_error(err_str + "not supported!");
     }
-    launchKernel(rt.aivNum, rt.stream, in1.ptr, in2.ptr, out.ptr, in1.shape[0], in1.shape[1]);
+    launchKernel(PickMinBlockNum(rt.aivNum, in1.shape[0]), rt.stream, in1.ptr, in2.ptr, out.ptr,
+                 in1.shape[0], in1.shape[1]);
 }
 
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
@@ -618,7 +621,8 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
         throw std::runtime_error(err_str + "not supported!");
     }
     auto kind = static_cast<std::underlying_type_t<NormKind>>(NormKind::Rms);
-    launchKernel(rt.aivNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr, normBias.ptr, out.ptr,
+    uint32_t blockNum = PickMinBlockNum(rt.aivNum, in.shape[0]);
+    launchKernel(blockNum, rt.stream, in.ptr, addInOut.ptr, norm.ptr, normBias.ptr, out.ptr,
                  in.shape[0], in.shape[1], normEps, kind, 1, in.shape[1], out.shape[1], 0, 0, true,
                  nullptr, rt.tpSize(), false);
 }
@@ -795,8 +799,8 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
                               XT_STR(weights) + XT_STR(out);
         throw std::runtime_error(err_str + "not supported!");
     }
-    launchKernel(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr, weights.ptr,
-                 out.shape[0], in.shape[1], weights.shape[1], start, end);
+    launchKernel(PickMinBlockNum(rt.aivNum, out.shape[0]), rt.stream, in.ptr, routing.ptr, out.ptr,
+                 unpIdx.ptr, weights.ptr, out.shape[0], in.shape[1], weights.shape[1], start, end);
 }
 
 // deqScales: uint64_t, 低 32 位 TF32 格式有效, 1 符号位, 8 指数位, 10 尾数位, 后 13 位不参与计算
@@ -1101,9 +1105,10 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     if (EachXDtype(BF16, kCache, kDenseCache)) {
         aclrtlaunch_gather_sparse_kv_cache_bfloat16_t(
-            rt.aivNum, rt.stream, kCache.ptr, peCache.ptr, blockTables.ptr, topkIndices.ptr,
-            queryLens.ptr, cachedLens.ptr, kDenseCache.ptr, peDenseCache.ptr, batch, indexTopK,
-            blockSize, maxNumBlocks, kvLoraRank, ropeHeadDim, compressRatio);
+            PickMinBlockNum(rt.aivNum, static_cast<uint64_t>(batch) * DIV_ROUND_UP(indexTopK, 16)),
+            rt.stream, kCache.ptr, peCache.ptr, blockTables.ptr, topkIndices.ptr, queryLens.ptr,
+            cachedLens.ptr, kDenseCache.ptr, peDenseCache.ptr, batch, indexTopK, blockSize,
+            maxNumBlocks, kvLoraRank, ropeHeadDim, compressRatio);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(kCache) + XT_STR(kDenseCache);
         throw std::runtime_error(err_str + "not supported!");
@@ -1128,9 +1133,10 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
         std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
         throw std::runtime_error(err_str + " TODO");
     }
-    launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
-                 0, inputWithR.ptr, output.ptr, outStepDim, outOffset, freqs.ptr, position.ptr, 0,
-                 nullptr, nullptr, inverse ? 1u : 0u, outInterleaved ? 1u : 0u);
+    launchKernel(PickMinBlockNum(rt.aivNum, inputWithR.shape[0]), rt.stream, inputWithR.shape[0],
+                 nLocalHeads, stepDim, ropeDim, offset, 0, inputWithR.ptr, output.ptr, outStepDim,
+                 outOffset, freqs.ptr, position.ptr, 0, nullptr, nullptr, inverse ? 1u : 0u,
+                 outInterleaved ? 1u : 0u);
 }
 
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
@@ -1152,9 +1158,10 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
         std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
         throw std::runtime_error(err_str + " TODO");
     }
-    launchKernel(rt.aivNum, rt.stream, inputWithR.shape[0], nLocalHeads, stepDim, ropeDim, offset,
-                 vdim, inputWithR.ptr, nullptr, 0, 0, freqs.ptr, position.ptr, blockSize,
-                 vCache.ptr, slotMapping.ptr, 0u, outInterleaved ? 1u : 0u);
+    launchKernel(PickMinBlockNum(rt.aivNum, inputWithR.shape[0]), rt.stream, inputWithR.shape[0],
+                 nLocalHeads, stepDim, ropeDim, offset, vdim, inputWithR.ptr, nullptr, 0, 0,
+                 freqs.ptr, position.ptr, blockSize, vCache.ptr, slotMapping.ptr, 0u,
+                 outInterleaved ? 1u : 0u);
 }
 
 void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
@@ -1259,8 +1266,8 @@ void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &outp
         std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(weight) + XT_STR(output);
         throw std::runtime_error(err_str + "not supported!");
     }
-    launchKernel(rt.aivNum, rt.stream, input.ptr, weight.ptr, output.ptr,
-                 output.shape[0] * output.shape[1], output.shape[1]);
+    launchKernel(PickMinBlockNum(rt.aivNum, output.shape[0]), rt.stream, input.ptr, weight.ptr,
+                 output.ptr, output.shape[0] * output.shape[1], output.shape[1]);
 }
 
 void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outWeights,
@@ -1281,8 +1288,9 @@ void XliteOpSoftmaxTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
             DBG_PREFIX + XT_STR(scores) + XT_STR(indices) + XT_STR(outWeights) + XT_STR(outRouting);
         throw std::runtime_error(err_str + "not supported!");
     }
-    launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, outWeights.ptr, outRouting.ptr,
-                 scores.shape[0], indices.shape[0], topK, normTopKProb);
+    launchKernel(PickMinBlockNum(rt.aivNum, scores.shape[0]), rt.stream, scores.ptr, indices.ptr,
+                 outWeights.ptr, outRouting.ptr, scores.shape[0], indices.shape[0], topK,
+                 normTopKProb);
 }
 
 void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias, float scale,
@@ -1304,9 +1312,9 @@ void XliteOpSigmoidTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor
             DBG_PREFIX + XT_STR(scores) + XT_STR(indices) + XT_STR(outWeights) + XT_STR(outRouting);
         throw std::runtime_error(err_str + "not supported!");
     }
-    launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, bias.ptr, scale, outWeights.ptr,
-                 outRouting.ptr, scores.shape[0], indices.shape[0], nGroup, nTopkGroup, topK,
-                 normTopKProb);
+    launchKernel(PickMinBlockNum(rt.aivNum, scores.shape[0]), rt.stream, scores.ptr, indices.ptr,
+                 bias.ptr, scale, outWeights.ptr, outRouting.ptr, scores.shape[0], indices.shape[0],
+                 nGroup, nTopkGroup, topK, normTopKProb);
 }
 
 void XliteOpSqrtsoftplusHashTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &bias,
@@ -1334,9 +1342,9 @@ void XliteOpSqrtsoftplusHashTopK(XRuntime &rt, XTensor &scores, XTensor &indices
     // kernel gates the bias add + DMA on `biasGm != nullptr`. Non-hash needs the real bias.
     void *biasPtr = hash ? nullptr : bias.ptr;
     void *tid2eidPtr = hash ? tid2eid.ptr : nullptr;
-    launchKernel(rt.aivNum, rt.stream, scores.ptr, indices.ptr, biasPtr, inputIds.ptr, tid2eidPtr,
-                 outWeights.ptr, routingMap.ptr, scale, scores.shape[0], indices.shape[0], topK,
-                 hash ? 1 : 0);
+    launchKernel(PickMinBlockNum(rt.aivNum, scores.shape[0]), rt.stream, scores.ptr, indices.ptr,
+                 biasPtr, inputIds.ptr, tid2eidPtr, outWeights.ptr, routingMap.ptr, scale,
+                 scores.shape[0], indices.shape[0], topK, hash ? 1 : 0);
 }
 
 void XliteOpTopK(XRuntime &rt, XTensor &scores, XTensor &indices, XTensor &outIndices,
@@ -1419,8 +1427,8 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
     size_t m = x.shape[0];
     size_t n = x.shape[1];
     if (x.dtype == BF16) {
-        aclrtlaunch_quant_bf16_to_i8_static(rt.aivNum, rt.stream, x.ptr, scale_reciprocal.ptr,
-                                            offset.ptr, out.ptr, m, n);
+        aclrtlaunch_quant_bf16_to_i8_static(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream,
+                                            x.ptr, scale_reciprocal.ptr, offset.ptr, out.ptr, m, n);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(x);
         throw std::runtime_error(err_str + "not supported!");
@@ -1439,8 +1447,8 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, con
     size_t m = x.shape[0];
     size_t n = x.shape[1];
     if (x.dtype == BF16) {
-        aclrtlaunch_quant_bf16_to_i8_dynamic(rt.aivNum, rt.stream, x.ptr, scale.ptr, out.ptr,
-                                             num.ptr, m, n);
+        aclrtlaunch_quant_bf16_to_i8_dynamic(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream,
+                                             x.ptr, scale.ptr, out.ptr, num.ptr, m, n);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(x);
         throw std::runtime_error(err_str + "not supported!");
@@ -1463,9 +1471,9 @@ void XliteOpMSDMergeDequant(XRuntime &rt, XTensor &yMerged, XTensor &scaleBiasPt
         }
         uint32_t m = yMerged.shape[0] / 2;
         uint32_t n = yMerged.shape[1];
-        aclrtlaunch_msd_merge_dequant_int8_t(rt.aivNum, rt.stream, yMerged.ptr, scaleBiasPtrs.ptr,
-                                             perTokenScale.ptr, out.ptr, nullptr, m, n, counts.ptr,
-                                             start, end);
+        aclrtlaunch_msd_merge_dequant_int8_t(
+            PickMinBlockNum(rt.aivNum, yMerged.shape[0] / 2), rt.stream, yMerged.ptr,
+            scaleBiasPtrs.ptr, perTokenScale.ptr, out.ptr, nullptr, m, n, counts.ptr, start, end);
     } else {
         throw std::runtime_error(err_str + "not supported!");
     }
@@ -1480,8 +1488,8 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scal
     size_t m = in.shape[0];
     size_t n = in.numel / in.shape[0];
     if (in.dtype == FP16) {
-        aclrtlaunch_dequant_float16_t(rt.aivNum, rt.stream, in.ptr, scale.ptr, out.ptr, num.ptr, m,
-                                      n);
+        aclrtlaunch_dequant_float16_t(PickMinBlockNum(rt.aivNum, in.shape[0]), rt.stream, in.ptr,
+                                      scale.ptr, out.ptr, num.ptr, m, n);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(in);
         throw std::runtime_error(err_str + "not supported!");
@@ -1875,8 +1883,8 @@ void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uin
         throw std::runtime_error(std::string(__func__) +
                                  ": calcNum should be <= " + std::to_string(MAX_MULS_CALC_NUM));
     }
-    launchKernel(rt.aivNum, rt.stream, input.ptr, scale, output.ptr, shape0, shape1, calcOffset,
-                 calcNum);
+    launchKernel(PickMinBlockNum(rt.aivNum, shape0), rt.stream, input.ptr, scale, output.ptr,
+                 shape0, shape1, calcOffset, calcNum);
 }
 
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,
@@ -2139,7 +2147,7 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
         std::string err_str = DBG_PREFIX + XT_STR(attn) + XT_STR(gate) + XT_STR(out);
         throw std::runtime_error(err_str + "not supported!");
     }
-    launchKernel(rt.aivNum, rt.stream, attn.ptr, gate.ptr, out.ptr,
+    launchKernel(PickMinBlockNum(rt.aivNum, attn.shape[0]), rt.stream, attn.ptr, gate.ptr, out.ptr,
                  static_cast<uint32_t>(attn.shape[0]), static_cast<uint32_t>(attn.shape[1]),
                  static_cast<uint32_t>(gate.shape[1]));
 }
@@ -2261,8 +2269,8 @@ void XliteOpUnpackActivation(XRuntime &rt, XTensor &input, XTensor &output)
         return;
     }
     if (input.dtype == INT8 && input.shape.size() == 2 && input.shape[1] % 2 == 0) {
-        aclrtlaunch_unpack_activation_int8_t(rt.aivNum, rt.stream, input.ptr, output.ptr,
-                                             input.shape[0], input.shape[1]);
+        aclrtlaunch_unpack_activation_int8_t(PickMinBlockNum(rt.aivNum, input.shape[0]), rt.stream,
+                                             input.ptr, output.ptr, input.shape[0], input.shape[1]);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
         throw std::runtime_error(err_str + "not supported!");
@@ -2299,9 +2307,10 @@ void XliteOpHcAct(XRuntime &rt, XTensor &mixes, const XTensor &hcScale, const XT
 
     uint32_t m = mixes.shape[0];
     uint32_t hidden = output.shape[1];
-    aclrtlaunch_hc_act_float(rt.aivNum, rt.stream, mixes.ptr, hcBase.ptr, post.ptr, comb.ptr,
-                             hcScale.ptr, m, hcMult, eps, sinkhornIters, headOnly ? 1u : 0u,
-                             1u /*preSum*/, nullptr /*pre*/, xResid.ptr, output.ptr, hidden);
+    aclrtlaunch_hc_act_float(PickMinBlockNum(rt.aivNum, m), rt.stream, mixes.ptr, hcBase.ptr,
+                             post.ptr, comb.ptr, hcScale.ptr, m, hcMult, eps, sinkhornIters,
+                             headOnly ? 1u : 0u, 1u /*preSum*/, nullptr /*pre*/, xResid.ptr,
+                             output.ptr, hidden);
 }
 
 void XliteOpHcPost(XRuntime &rt, XTensor &x, XTensor &post, XTensor &comb, XTensor &residual,
@@ -2312,8 +2321,8 @@ void XliteOpHcPost(XRuntime &rt, XTensor &x, XTensor &post, XTensor &comb, XTens
     }
     if (x.dtype == BF16 && post.dtype == FP32 && comb.dtype == FP32 && residual.dtype == BF16 &&
         y.dtype == BF16) {
-        aclrtlaunch_hc_post_bfloat16_t(rt.aivNum, rt.stream, x.ptr, post.ptr, comb.ptr,
-                                       residual.ptr, y.ptr, m, hcMult, hidden);
+        aclrtlaunch_hc_post_bfloat16_t(PickMinBlockNum(rt.aivNum, m), rt.stream, x.ptr, post.ptr,
+                                       comb.ptr, residual.ptr, y.ptr, m, hcMult, hidden);
     } else {
         std::string err_str =
             DBG_PREFIX + XT_STR(x) + XT_STR(post) + XT_STR(comb) + XT_STR(residual) + XT_STR(y);
@@ -2341,10 +2350,10 @@ void XliteOpHcSplitSinkhorn(XRuntime &rt, XTensor &mixes, const XTensor &hcScale
     // hc_split_sinkhorn is hc_act with preSum=0: the gate/post/comb paths are shared, and the
     // pre gate is written to GM (the merge is done out-of-kernel by hc_pre).  xResid/yOut are
     // unused (null), hidden=0.
-    aclrtlaunch_hc_act_float(rt.aivNum, rt.stream, mixes.ptr, hcBase.ptr, post.ptr, comb.ptr,
-                             hcScale.ptr, m, hcMult, eps, sinkhornIters, 0u /*headOnly*/,
-                             0u /*preSum*/, pre.ptr /*pre*/, nullptr /*xResid*/, nullptr /*yOut*/,
-                             0u);
+    aclrtlaunch_hc_act_float(PickMinBlockNum(rt.aivNum, m), rt.stream, mixes.ptr, hcBase.ptr,
+                             post.ptr, comb.ptr, hcScale.ptr, m, hcMult, eps, sinkhornIters,
+                             0u /*headOnly*/, 0u /*preSum*/, pre.ptr /*pre*/, nullptr /*xResid*/,
+                             nullptr /*yOut*/, 0u);
 }
 
 void XliteOpHcPre(XRuntime &rt, XTensor &xResid, const XTensor &pre, XTensor &output, uint32_t m,
@@ -2358,6 +2367,6 @@ void XliteOpHcPre(XRuntime &rt, XTensor &xResid, const XTensor &pre, XTensor &ou
         std::string err_str = DBG_PREFIX + XT_STR(xResid) + XT_STR(pre) + XT_STR(output);
         throw std::runtime_error(err_str + " (merge) must be BF16 (x,y) / FP32 (pre)!");
     }
-    aclrtlaunch_hc_pre_bfloat16_t(rt.aivNum, rt.stream, pre.ptr, xResid.ptr, output.ptr, m, hcMult,
-                                  hidden);
+    aclrtlaunch_hc_pre_bfloat16_t(PickMinBlockNum(rt.aivNum, m), rt.stream, pre.ptr, xResid.ptr,
+                                  output.ptr, m, hcMult, hidden);
 }
