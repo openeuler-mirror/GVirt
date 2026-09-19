@@ -252,3 +252,11 @@ void PickMatmulTiling(uint32_t aicNum, uint64_t m, uint64_t n, uint64_t k, uint6
         launchAicNum = 1;
     }
 }
+
+uint32_t PickMinBlockNum(uint32_t coreNum, uint64_t totalRows)
+{
+    if (totalRows == 0 || coreNum <= 1) {
+        return 1;
+    }
+    return totalRows >= coreNum ? coreNum : static_cast<uint32_t>(totalRows);
+}

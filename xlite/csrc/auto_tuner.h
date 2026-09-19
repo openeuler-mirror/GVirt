@@ -29,4 +29,9 @@ uint32_t GetTileSizeOfCachedKV(std::vector<uint32_t> &cachedLens, std::vector<ui
 void PickMatmulTiling(uint32_t aicNum, uint64_t m, uint64_t n, uint64_t k, uint64_t weightDtypeBits,
                       uint64_t &m0, uint64_t &n0, uint64_t &k0, uint32_t &launchAicNum);
 
+// Since the per-core overhead grows with the number of cores used, for operators whose overall
+// execution time is on the order of microseconds and whose single-core computation time is
+// relatively small, performance can be improved by reducing the number of launched cores and
+// increasing the per-core workload.
+uint32_t PickMinBlockNum(uint32_t coreNum, uint64_t totalRows);
 #endif
