@@ -668,7 +668,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     if (EachXDtype(FP16, in, weight, out)) {
         launchKernel = aclrtlaunch_matmul_float16_t;
     } else if (EachXDtype(BF16, in, weight, out)) {
-        if (bias.ptr != nullptr) {
+        if (bias.ptr != nullptr && EachXDtype(BF16, bias)) {
             castedBias = &rt.GetTensor(bias.shape, FP32, DBG_LOC);
             aclrtlaunch_cast_bfloat16_t_float(rt.aivNum, rt.stream, bias.ptr, castedBias->ptr,
                                               bias.numel);
