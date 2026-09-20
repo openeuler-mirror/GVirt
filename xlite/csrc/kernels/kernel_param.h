@@ -44,4 +44,7 @@ enum class NormKind {
 
 // muls
 #define MAX_MULS_CALC_NUM 16320
+
+// quant_bf16_to_i8_dynamic
+#define XLITE_QUANT_DYN_MAX_K 12160
 #endif

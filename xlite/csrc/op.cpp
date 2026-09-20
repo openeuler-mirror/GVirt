@@ -1447,6 +1447,11 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, con
     }
     size_t m = x.shape[0];
     size_t n = x.shape[1];
+    if (n > XLITE_QUANT_DYN_MAX_K) {
+        std::string err_str = DBG_PREFIX + XT_STR(x);
+        throw std::runtime_error(err_str + "quant_bf16_to_i8_dynamic k=" + std::to_string(n) +
+                                 " > UB-safe max " + std::to_string(XLITE_QUANT_DYN_MAX_K));
+    }
     if (x.dtype == BF16) {
         aclrtlaunch_quant_bf16_to_i8_dynamic(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream,
                                              x.ptr, scale.ptr, out.ptr, num.ptr, m, n);

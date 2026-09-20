@@ -4,8 +4,23 @@
 #pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+#include "kernel_param.h"
 
 #ifdef __DAV_C220_VEC__
+
+// UB layout of quant_bf16_to_i8 (below): 7 k_pad buffers + scaleUb(1 float).
+//   x1,x2: bfloat16_t  | xf32,xAbs: float | zf16: half | z1,z2: int8_t
+// bytes = k_pad * (2*sizeof(bfloat16_t) + 2*sizeof(float) + sizeof(half)
+//                  + 2*sizeof(int8_t)) + sizeof(float)
+// k_pad = ROUND_UP(XLITE_QUANT_DYN_MAX_K, 256 / sizeof(bfloat16_t)).
+// This must fit in UB_SIZE; XLITE_QUANT_DYN_MAX_K is chosen so it does. Host
+// (op.cpp) rejects any k > XLITE_QUANT_DYN_MAX_K before launch.
+static_assert(ROUND_UP(XLITE_QUANT_DYN_MAX_K, 256 / sizeof(bfloat16_t)) *
+                          (2 * sizeof(bfloat16_t) + 2 * sizeof(float) + sizeof(half) +
+                           2 * sizeof(int8_t)) +
+                      sizeof(float) <=
+                  UB_SIZE,
+              "quant_bf16_to_i8_dynamic UB layout overflows UB_SIZE");
 
 __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM_ADDR pnum_tokens,
                                         uint32_t m, uint32_t k)
