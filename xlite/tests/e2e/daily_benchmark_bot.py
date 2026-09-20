@@ -63,6 +63,7 @@ xlite 每日自动化测试机器人
     --skip-build: 跳过编译
     --receiver: 接收者ID，默认 927280411401503971
     --threshold: 性能劣化阈值，默认 0.05 (即5%)
+    --offline-threshold: 离线 bench 性能劣化阈值，默认 0.025 (即2.5%)
     --build-container: 编译容器名称
     --env-type: 环境类型 (blue/yellow)，默认 yellow
                - yellow 环境: 需要执行 source /home/env.sh
@@ -133,6 +134,10 @@ REPORT_DIR = Path("/home/daily_reports")
 
 # 性能劣化阈值，超过此比例视为性能下降
 DEGRADATION_THRESHOLD = 0.05
+# 离线 bench 性能劣化阈值 (与在线分离): 默认 0.025 = 2.5%。
+# 离线 bench 噪声更小、对劣化更敏感, 故用更紧的阈值; 在线性能测试仍用上面
+# 的 DEGRADATION_THRESHOLD (默认 5%)。
+OFFLINE_DEGRADATION_THRESHOLD = 0.025
 # TTFT指标是否作为对比指标（ttft_avg 和 ttft_p99）
 COMPARE_TTFT_METRICS = True
 # TPOT P99指标是否作为对比指标
@@ -459,6 +464,7 @@ def compare_offline_metrics(current: Dict, baseline: Dict) -> Dict:
 
     返回 row_changes 风格的对比结果 (与 compare_metrics 对齐)。
     decode_tps 越高越好, step_latency_ms / total_ms 越低越好; 变化超过阈值记为劣化/提升。
+    阈值用 OFFLINE_DEGRADATION_THRESHOLD (与在线的 DEGRADATION_THRESHOLD 分离)。
     """
     comparison = {
         "date_current": current.get("timestamp", ""),
@@ -490,12 +496,12 @@ def compare_offline_metrics(current: Dict, baseline: Dict) -> Dict:
         change_ratio = (current_val - baseline_val) / baseline_val
         if metric == "decode_tps":
             # 越高越好: 下降为劣化，上升为提升
-            is_degradation = change_ratio < -DEGRADATION_THRESHOLD
-            is_improvement = change_ratio > DEGRADATION_THRESHOLD
+            is_degradation = change_ratio < -OFFLINE_DEGRADATION_THRESHOLD
+            is_improvement = change_ratio > OFFLINE_DEGRADATION_THRESHOLD
         else:
             # 越低越好 (延迟): 上升为劣化，下降为提升
-            is_degradation = change_ratio > DEGRADATION_THRESHOLD
-            is_improvement = change_ratio < -DEGRADATION_THRESHOLD
+            is_degradation = change_ratio > OFFLINE_DEGRADATION_THRESHOLD
+            is_improvement = change_ratio < -OFFLINE_DEGRADATION_THRESHOLD
 
         changes[metric] = {
             "current": current_val,
@@ -678,7 +684,7 @@ def generate_offline_report(
 
     status_icon = "⚠️" if total_degradations > 0 else "✅"
     if total_degradations > 0:
-        status_text = "发现性能劣化(超过阈值)，请关注！"
+        status_text = f"发现性能劣化(超过{OFFLINE_DEGRADATION_THRESHOLD*100:.1f}%阈值)，请关注！"
     elif total_improvements > 0:
         status_text = "发现性能优化"
     else:
@@ -1578,6 +1584,12 @@ def main():
         "--receiver", type=str, default="927280411401503971", help="接收者ID (default: 927280411401503971)"
     )
     parser.add_argument("--threshold", type=float, default=0.05, help="性能劣化阈值 (default: 0.05 = 5%%)")
+    parser.add_argument(
+        "--offline-threshold",
+        type=float,
+        default=0.025,
+        help="离线 bench 性能劣化阈值 (default: 0.025 = 2.5%%); 与在线 --threshold 分离",
+    )
     parser.add_argument("--build-container", type=str, default=None, help="编译容器名称")
     parser.add_argument(
         "--report-dir", type=str, default=None, help="指定已有的报告目录（调试模式，跳过拉取、编译、测试步骤）"
@@ -1603,8 +1615,9 @@ def main():
     args = parser.parse_args()
 
     # 更新全局配置
-    global DEGRADATION_THRESHOLD, COMPARE_TTFT_METRICS, COMPARE_TPOT_P99_METRICS
+    global DEGRADATION_THRESHOLD, OFFLINE_DEGRADATION_THRESHOLD, COMPARE_TTFT_METRICS, COMPARE_TPOT_P99_METRICS
     DEGRADATION_THRESHOLD = args.threshold
+    OFFLINE_DEGRADATION_THRESHOLD = args.offline_threshold
     COMPARE_TTFT_METRICS = args.compare_ttft
     COMPARE_TPOT_P99_METRICS = args.compare_tpot_p99
 
