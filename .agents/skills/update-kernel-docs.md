@@ -45,6 +45,10 @@ description: Generate or refresh operator implementation-principle docs in xlite
 
 ## 关键代码位置(可选)
 关键函数入口的行号引用列表。
+
+- **适用条件**:仅当算子实现源码较长(超过约 1000 行)时才需要本章节;短算子(≤1000 行)整体可读性强,不需要本章节,应省略整个章节而非留空标题
+- **选取范围**:仅标记对理解实现原理最关键的函数入口(如主计算入口、tiling/分块函数、流水线同步函数、边界处理函数),总数**不超过 5 个**
+- **避免堆砌**:不要把所有函数都列出,也不要列纯 boilerplate(如构造函数、Run 派发壳);每条引用应指向读者定位核心逻辑时最想跳转的那一行
 ```
 
 引用代码位置统一使用相对 `xlite/` 的路径 + 行号,如 `csrc/kernels/add.h:33`(markdown 中写成 `` `csrc/kernels/add.h:33` `` 或链接形式 `[add.h:33](../../csrc/kernels/add.h#L33)`)。
