@@ -18,7 +18,7 @@
 | Cpu Binding | ✅ | ✅ |
 | Data Parallel | ✅ | ✅ |
 | Disaggregated Prefill | ✅ | ✅ |
-| Speculative Decoding(MTP) | 🟠 | 🟠 |
+| Speculative Decoding(MTP) | ✅ | ✅ |
 | Speculative Decoding(Eager3) | ❌ | ❌ |
 | EPLB | ❌ | ❌ |
 | EP | ✅ | ✅ |
@@ -37,5 +37,5 @@
 
 备注说明：
 * KV Cache Pool/Disaggregated Prefill：kv connector仅支持非layerwise方式
-* speculative：仅支持线性投机，暂不支持树形投机
+* Speculative Decoding：仅支持线性因果关系的投机推理，暂不支持树形投机；draft model依赖vllm-ascend的实现
 * N/A: 由于xlite full mode已经接管了全部forward流程，对应特性在xlite中有相关实现，因此无需再手动开启vllm ascend的特性
