@@ -1079,9 +1079,11 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
 {
     uint32_t m = input.shape[0], M = rt.maxTokensDp;  // input may or may not be padded to match DPs
     XTensor &weights = rt.GetTensor({M, _c.nRoutedExperts}, moeGate[layer].dtype, DBG_LOC).View(m);
-    XTensor &routing = rt.GetTensor({M, _c.nRoutedExperts}, BIT1, DBG_LOC)
-                           .Memset(0, rt.stream, m * _c.nRoutedExperts)
-                           .View(m);
+    XTensor &routing = rt.GetTensor({M, _c.nRoutedExperts}, BIT1, DBG_LOC);
+    if (!rt.IsDummyRuntime()) {
+        (void)routing.Memset(0, rt.stream, m * _c.nRoutedExperts);
+    }
+    (void)routing.View(m);
     XTensor &scores = rt.GetTensor({M, _c.nRoutedExperts}, moeGate[layer].dtype, DBG_LOC).View(m);
 
     XliteOpMatmul(rt, input, moeGate[layer], scores, _c.gateCaptured && _c.weightNZ);
