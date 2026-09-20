@@ -27,7 +27,8 @@ uint32_t GetTileSizeOfCachedKV(std::vector<uint32_t> &cachedLens, std::vector<ui
 // aicNum is the hardware AIC count (e.g. rt.aicNum); launchAicNum receives the
 // actual number of AIC blocks to launch for this matmul.
 void PickMatmulTiling(uint32_t aicNum, uint64_t m, uint64_t n, uint64_t k, uint64_t weightDtypeBits,
-                      uint64_t &m0, uint64_t &n0, uint64_t &k0, uint32_t &launchAicNum);
+                      bool needExtraSpace, uint64_t &m0, uint64_t &n0, uint64_t &k0,
+                      uint32_t &launchAicNum);
 
 // Since the per-core overhead grows with the number of cores used, for operators whose overall
 // execution time is on the order of microseconds and whose single-core computation time is

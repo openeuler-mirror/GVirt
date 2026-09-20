@@ -39,7 +39,9 @@ public:
 
         if (m0 == (uint64_t)-1) {
             m0 = 128;
-            n0 = 256;
+            // The L1 buffer was fully used. When the deqscale need space,
+            // the L1 buffer will overflow, so shrink n0.
+            n0 = (hasBias || hasDeqScale) ? 128 : 256;
             k0 = 512 * BYTE_BITS / dtypeBits;
         }
 
@@ -83,8 +85,6 @@ public:
             l1bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += l1BTileBytes;
         }
-        // l1BiasBuf & l1DeqScaleBuf are shared with l1bBuf
-        off = l1ATileBytes * PINGPONG_BUF_NUM;
         if (hasBias) {
             l1BiasBuf.address_.logicPos = static_cast<uint8_t>(TPosition::C1);
             l1BiasBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -131,6 +131,7 @@ public:
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
+        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
     }
@@ -161,6 +162,7 @@ public:
     {
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
         WaitFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
+        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
@@ -228,7 +230,7 @@ private:
 
         if (hasBias) {
             // Bias GM -> L1
-            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
             DataCopy(l1BiasBuf, biasGmBuf[nOffset], nActualBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
 
@@ -242,13 +244,12 @@ private:
                 {1, (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(MatDtype)), C2_DATABLOCK)), 0,
                  0});
 
-            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
             SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
         }
         if (hasDeqScale) {
             // DeqScale GM -> L1
             WaitFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
-            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
             DataCopy(l1DeqScaleBuf, deqScaleGmBuf[nOffset], nActualBlockPad);
             SetFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
 
@@ -263,9 +264,6 @@ private:
                  (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)), FIXPIPE_DATABLOCK)),
                  0, 0});
             PipeBarrier<PIPE_FIX>();
-            SetFlag<HardEvent::FIX_MTE1>(EVENT_ID5);
-            WaitFlag<HardEvent::FIX_MTE1>(EVENT_ID5);
-            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
         }
 
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
