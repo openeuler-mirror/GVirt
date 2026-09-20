@@ -650,10 +650,12 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
+    bool needExtraSpace = (bias.ptr != nullptr || deqScale.ptr != nullptr);
     uint64_t swizzle = rt.defaultMatmulSwizzle;
     uint32_t aicNum;
 
-    PickMatmulTiling(rt.aicNum, m, n, k, XDtypeBit(weight.dtype), m0, n0, k0, aicNum);
+    PickMatmulTiling(rt.aicNum, m, n, k, XDtypeBit(weight.dtype), needExtraSpace, m0, n0, k0,
+                     aicNum);
 
     if (!rt.disableSwizzleTable) {
         XlitePickSwizzle(n, k, &swizzle);
@@ -1535,11 +1537,13 @@ void XliteOpFusionOperatorMatmulDequantPipeline(XRuntime &rt, XTensor &in, XTens
     uint64_t m = in.shape[0];
     uint64_t k = in.shape[1];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
+    bool needExtraSpace = (quantBias.ptr != nullptr || weightScale.ptr != nullptr);
     uint32_t aicNum;
 
     // Keep the AIC matmul tiling identical to XliteOpMatmul so the fused
     // kernel never changes matmul's tiling policy.
-    PickMatmulTiling(rt.aicNum, m, n, k, XDtypeBit(weight.dtype), m0, n0, k0, aicNum);
+    PickMatmulTiling(rt.aicNum, m, n, k, XDtypeBit(weight.dtype), needExtraSpace, m0, n0, k0,
+                     aicNum);
 
     if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == BF16) {
         aclrtlaunch_fusion_operator_matmul_dequant_pipeline_int8_t(
