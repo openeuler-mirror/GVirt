@@ -650,12 +650,8 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
-    bool needExtraSpace = (bias.ptr != nullptr || deqScale.ptr != nullptr);
     uint64_t swizzle = rt.defaultMatmulSwizzle;
     uint32_t aicNum;
-
-    PickMatmulTiling(rt.aicNum, m, n, k, XDtypeBit(weight.dtype), needExtraSpace, m0, n0, k0,
-                     aicNum);
 
     if (!rt.disableSwizzleTable) {
         XlitePickSwizzle(n, k, &swizzle);
@@ -718,6 +714,8 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         {outPtr, castedOut ? castedOut->dtype : out.dtype, out.shape}};
     msprofshape::StageLaunchShapes(mmName, mmInputs, 2, mmOutputs, 1);
 #endif
+    PickMatmulTiling(rt.aicNum, m, n, k, XDtypeBit(weight.dtype), biasPtr != nullptr,
+                     deqScale.ptr != nullptr, m0, n0, k0, aicNum);
     launchKernel(aicNum, rt.stream, inPtr, weight.ptr, outPtr, m, n, k, weightNZ, transpose, m0, n0,
                  k0, swizzle, biasPtr, deqScale.ptr);
 
@@ -833,8 +831,9 @@ void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &de
                                    static_cast<uint64_t>(outDim), static_cast<uint64_t>(inDim));
 
     launchKernel(rt.aicNum, rt.stream, in.ptr, weights.ptr, output.ptr, deqScales.ptr, counts.ptr,
-                 counts.shape[0], outDim, inDim, -1, -1, -1, start, end, weightNZ, transpose,
-                 rt.defaultMatmulSwizzle);
+                 counts.shape[0], outDim, inDim, MATMUL_M0_N0_K0_DEFAULT_VALUE,
+                 MATMUL_M0_N0_K0_DEFAULT_VALUE, MATMUL_M0_N0_K0_DEFAULT_VALUE, start, end, weightNZ,
+                 transpose, rt.defaultMatmulSwizzle);
 }
 
 void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vCache,
@@ -1537,13 +1536,12 @@ void XliteOpFusionOperatorMatmulDequantPipeline(XRuntime &rt, XTensor &in, XTens
     uint64_t m = in.shape[0];
     uint64_t k = in.shape[1];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
-    bool needExtraSpace = (quantBias.ptr != nullptr || weightScale.ptr != nullptr);
     uint32_t aicNum;
 
     // Keep the AIC matmul tiling identical to XliteOpMatmul so the fused
     // kernel never changes matmul's tiling policy.
-    PickMatmulTiling(rt.aicNum, m, n, k, XDtypeBit(weight.dtype), needExtraSpace, m0, n0, k0,
-                     aicNum);
+    PickMatmulTiling(rt.aicNum, m, n, k, XDtypeBit(weight.dtype), quantBias.ptr != nullptr,
+                     weightScale.ptr != nullptr, m0, n0, k0, aicNum);
 
     if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == BF16) {
         aclrtlaunch_fusion_operator_matmul_dequant_pipeline_int8_t(
