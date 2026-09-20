@@ -97,11 +97,11 @@ for weight_nz in [True, False]:
 
             standard = npu_quant_matmul_cpu(x.to("cpu"), y.to("cpu"), deqScale.to("cpu"), bias.to("cpu"), torch.float16)
 
-            torch.npu.synchronize()
             # fixpipe硬件要求：以uint64_t存储fp32，高位为0，低位为fp32格式的二进制值
             scale = torch.zeros(n * 2, dtype=torch.float32, device=f"npu:{dev_id}")
             scale[0::2] = deqScale[0::1]
             scale[1::2] = 0
+            torch.npu.synchronize()
             matmul_dequant(rt, x, y_in, bias, scale, z, weight_nz and dtype != torch.float, transpose)
             torch.npu.synchronize()
 

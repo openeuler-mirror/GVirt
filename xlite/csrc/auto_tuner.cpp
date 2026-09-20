@@ -210,7 +210,7 @@ uint32_t GetTileSizeOfCachedKV(std::vector<uint32_t> &cachedLens, std::vector<ui
 }
 
 void PickMatmulTiling(uint32_t aicNum, uint64_t m, uint64_t n, uint64_t k, uint64_t weightDtypeBits,
-                      bool needExtraSpace, uint64_t &m0, uint64_t &n0, uint64_t &k0,
+                      bool hasBias, bool hasDeqScale, uint64_t &m0, uint64_t &n0, uint64_t &k0,
                       uint32_t &launchAicNum)
 {
     if (m0 == MATMUL_M0_N0_K0_DEFAULT_VALUE || n0 == MATMUL_M0_N0_K0_DEFAULT_VALUE ||
@@ -219,8 +219,7 @@ void PickMatmulTiling(uint32_t aicNum, uint64_t m, uint64_t n, uint64_t k, uint6
         if (m0 > 128) {
             m0 = 128;
         }
-        // if matmul has bias or dequant scale, L1 buffer will overflow!
-        n0 = needExtraSpace ? 128 : 256;
+        n0 = 256;
         k0 = 4096 / weightDtypeBits;
 
         uint64_t mLoop = DIV_ROUND_UP(m, m0);
@@ -240,12 +239,18 @@ void PickMatmulTiling(uint32_t aicNum, uint64_t m, uint64_t n, uint64_t k, uint6
             } else if (n <= static_cast<uint64_t>(128) * aicNum) {
                 n0 = 128;
             } else if (n <= static_cast<uint64_t>(256) * aicNum) {
-                n0 = needExtraSpace ? 128 : 256;
+                n0 = 256;
             } else {
                 m0 = m0 > 64 ? 64 : m0;
-                n0 = needExtraSpace ? 256 : 384;
+                n0 = 384;
                 k0 /= 2;
             }
+        }
+        if (hasDeqScale && n0 > 256) {
+            n0 = 256;  // A2/A3: fixpipe buffer 2k (256 * 8B)
+        }
+        if (hasBias && n0 > 256) {
+            n0 = 256;  // A2/A3: bias buffer 1k (256 * sizeof(MatDtype))
         }
     }
     uint64_t totalLoops = DIV_ROUND_UP(m, m0) * DIV_ROUND_UP(n, n0);
