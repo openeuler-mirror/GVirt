@@ -360,7 +360,15 @@ private:
             SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + kIdx2);
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + kIdx2);
 
-            PipeBarrier<PIPE_M>();
+            // Serialize L0C write-read between consecutive Mmads only for small
+            // tiles. For large tiles the Cube scheduler pipelines the Mmads and
+            // resolves the L0C write-read hazard itself, so the barrier would
+            // only stall. Threshold: (m/16)*(n/16) < 10 in cube-block units.
+            // See:
+            // https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/API/ascendcopapi/docs/zh/api/SIMD-API/basic_api/cube_compute_ISASI/mmad_compute/Mmad.md
+            if (mActualBlockNum * nActualBlockNum < 10) {
+                PipeBarrier<PIPE_M>();
+            }
             if (hasBias && kIdx == 0) {
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
                 CalMmadWithBias(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], l0BiasBuf, mActualBlockPad,
