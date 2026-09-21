@@ -395,11 +395,11 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
 
     // pos and slot
     uint32_t params_start = calcbuf_start;
-    uint32_t iter_posslot_num = ROUND_DOWN(UB_SIZE - params_start, 3 * BLOCK_SIZE) /
+    // Round down to a multiple of 8 tokens (never round up; may cause ubuf overflow)
+    uint32_t iter_posslot_num = ROUND_DOWN(UB_SIZE - params_start, pos_dim * BLOCK_SIZE) /
                                 (sizeof(uint64_t) * pos_dim + sizeof(uint32_t));
-    if (iter_posslot_num > num_tokens) {
-        iter_posslot_num = num_tokens;
-    }
+    iter_posslot_num = MIN(ROUND_DOWN(iter_posslot_num, BLOCK_SIZE / sizeof(uint32_t)), num_tokens);
+    assert(iter_posslot_num > 0);
     uint32_t posslot_iters = DIV_ROUND_UP(num_tokens, iter_posslot_num);
 
     uint32_t pos_size = ROUND_UP(iter_posslot_num * sizeof(uint64_t), BLOCK_SIZE);
