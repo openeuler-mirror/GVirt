@@ -18,6 +18,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -184,6 +185,23 @@ def expand_model_list(models: list[str]) -> list[str]:
     return expanded
 
 
+@lru_cache(maxsize=1)
+def get_xlite_version() -> str:
+    """Get the version of the installed xlite package."""
+
+    xlite_version = "unknown"
+    try:
+        xlite_version = (
+            subprocess.run(
+                ["python", "-c", "import xlite; print(xlite.__version__)"], capture_output=True, text=True, check=True
+            ).stdout.strip()
+            or "unknown"
+        )
+    except Exception:
+        pass
+    return xlite_version
+
+
 def prepare_env(
     ais_bench_dir: Path | None = None,
     aisbench_git_url: str = "https://github.com/AISBench/benchmark.git",
@@ -287,8 +305,9 @@ def start_vllm_server(
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
-    gpu_memory_utilization: float = 0.95,
+    gpu_memory_utilization: float = 0.92,
     block_size: int = 128,
+    use_mrv2: bool = False,
     xlite: bool = False,
     xlite_full_mode: bool = False,
     device_ids: list[int] | None = None,
@@ -314,6 +333,7 @@ def start_vllm_server(
 
     envs: dict[str, str] = {
         "VLLM_USE_V1": "1",
+        "VLLM_USE_V2_MODEL_RUNNER": "1" if use_mrv2 else "0",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "VLLM_ENGINE_READY_TIMEOUT_S": str(timeout),
@@ -431,8 +451,9 @@ def run_ais_bench(
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
     seed: int = 42,
-    gpu_memory_utilization: float = 0.95,
+    gpu_memory_utilization: float = 0.92,
     block_size: int = 128,
+    use_mrv2: bool = False,
     xlite: bool = False,
     xlite_full_mode: bool = False,
     extra_args: str = "",
@@ -503,9 +524,8 @@ def run_ais_bench(
         suffix_backend = "aclgraph"
     suffix_deployment = f"TP{tp_size}DP{dp_size}{'EP' if ep else ''}{f'-MTP{mtp_tokens}' if mtp_tokens > 0 else ''}"
     suffix = f"-{suffix_deployment}-{suffix_backend}"
-    ais_bench_output_dir = (
-        (ais_bench_output_dir or ais_bench_dir / "outputs") / model_name / suffix_backend / suffix_deployment
-    )
+    ais_bench_output_parent_dir = ais_bench_output_dir or ais_bench_dir / "outputs" / get_xlite_version()
+    ais_bench_output_dir = ais_bench_output_parent_dir / model_name / suffix_backend / suffix_deployment
     if not ais_bench_output_dir.exists():
         ais_bench_output_dir.mkdir(parents=True)
     print(f"ais_bench output directory: {ais_bench_output_dir}")
@@ -554,6 +574,7 @@ def run_ais_bench(
         seed=seed,
         gpu_memory_utilization=gpu_memory_utilization,
         block_size=block_size,
+        use_mrv2=use_mrv2,
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
         device_ids=device_ids,
@@ -678,7 +699,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         "-GMU",
         "--gpu-memory-utilization",
         type=float,
-        default=0.95,
+        default=0.92,
         help="GPU memory utilization for vLLM server, between 0 and 1 (e.g., 0.95 for 95%% utilization)",
     )
     parser.add_argument(
@@ -760,6 +781,19 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         nargs="+",
         default=[8192],
         help="Max number of batched tokens for vLLM server (last value used for padding)",
+    )
+    parser.set_defaults(use_mrv2=False)
+    parser.add_argument(
+        "-MRV2",
+        "--use-mrv2",
+        action="store_true",
+        help="Whether to use the vLLM Model Runner V2 for model execution (default: False)",
+    )
+    parser.add_argument(
+        "--no-use-mrv2",
+        action="store_false",
+        dest="use_mrv2",
+        help="Whether to NOT use the vLLM Model Runner V2 for model execution (default: False)",
     )
     parser.add_argument(
         "--extra-aisbench-args",
@@ -896,18 +930,18 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
             )
         sys.exit(0)
 
-    log_file_path: Path = (
-        args.log_file
-        or args.ais_bench_dir / "reports" / f"benchmark_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-    )
+    default_suffix = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{get_xlite_version()}"
+    log_file_path: Path = args.log_file or args.ais_bench_dir / "reports" / f"benchmark_report_{default_suffix}.md"
     log_file_path.parent.mkdir(parents=True, exist_ok=True)
     log_csv_path: Path = log_file_path.with_suffix(".csv")
 
     # Write headers first
     with open(log_file_path, "w") as f:
+        f.write(f"# Benchmark Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        # Record the Xlite version for reference
+        f.write(f"## Version Information\n\nxlite: `{get_xlite_version()}`\npython: `{sys.version}`\n\n")
         # Record the shell command used to run this script for reference
         command = shlex.join(["python", str(Path(sys.argv[0]).resolve()), *sys.argv[1:]])
-        f.write(f"# Benchmark Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         f.write(f"## Command Used\n\n```bash\n{command}\n```\n\n")
         f.write("## Final Benchmark Results:\n\n")
         f.write(f"{BenchResult.markdown_header()}\n")
@@ -934,6 +968,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 max_num_batched_tokens=args_max_num_batched_tokens[i],
                 seed=args.seed,
                 gpu_memory_utilization=args.gpu_memory_utilization,
+                use_mrv2=args.use_mrv2,
                 xlite=xlite,
                 xlite_full_mode=xlite_full,
                 extra_args=args_extra_aisbench_args[i],
