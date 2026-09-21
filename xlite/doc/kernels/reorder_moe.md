@@ -10,11 +10,11 @@ MoE EP（专家并行）场景下的 token 行重排：在"按来源 EP rank 分
 |------|------|-------|-------|------|
 | input (in) | 输入 | [total_tokens, hidden_size] | float / float16 / bfloat16 | forward=1 时为 source-grouped 布局；forward=0 时为 expert-grouped 布局（`tests/kernels/reorder_moe.py:41,105`） |
 | output (out) | 输出 | [total_tokens, hidden_size] | 同 input | 与 input 相反布局的输出；total_tokens = counts[:, localStart:localEnd].sum() |
-| counts | 输入 | [moe_ep_size, n_routed_experts] | int32 | 每个来源（EP rank/DP rank）发给每个专家的 token 数；host 侧取 `counts.shape[0]`=moeEpSize、`counts.shape[1]`=nRoutedExperts（`csrc/op.cpp:1815-1816`） |
+| counts | 输入 | [moe_ep_size, n_routed_experts] | int32 | 每个来源（EP rank/DP rank）发给每个专家的 token 数；host 侧取 `counts.shape[0]`=moeEpSize、`counts.shape[1]`=nRoutedExperts（`csrc/op.cpp:1919-1920`） |
 | hiddenSize | 标量 | - | uint32_t | 每行元素数（不含 dtype 字节数） |
 | localStart / localEnd | 标量 | - | uint32_t | 本卡负责的专家区间 [localStart, localEnd)，只有这些专家的行参与重排 |
-| forward | 标量 | - | uint32_t | 1=source→expert（scatter），0=expert→source（gather）；host 侧由 bool 转换（`csrc/op.cpp:1820`） |
-| elemBytes | 标量 | - | uint32_t | 元素字节数，host 侧按 in.dtype 计算（`csrc/op.cpp:1817`） |
+| forward | 标量 | - | uint32_t | 1=source→expert（scatter），0=expert→source（gather）；host 侧由 bool 转换（`csrc/op.cpp:1924`） |
+| elemBytes | 标量 | - | uint32_t | 元素字节数，host 侧按 in.dtype 计算（`csrc/op.cpp:1921`） |
 
 Python 调用方式（`tests/kernels/reorder_moe.py:208-209`）：`reorder_moe(rt, inp, out_fwd, counts, HIDDEN_SIZE, local_start, local_end, True)`。
 
@@ -56,4 +56,4 @@ host 侧不做 dtype 限制，dtype 通过 `elemBytes` 传入；测试覆盖 flo
 
 - `numPairs == 0`（本卡无本地专家）或 `pairStart >= numPairs`（block 多于 pair）时直接返回（`csrc/kernels/reorder_moe.cpp:25-26,40-41`）；
 - `cnt == 0` 的 pair 跳过搬运但照常推进游标（`csrc/kernels/reorder_moe.cpp:86-88`）；
-- host 侧 `in.numel == 0 || localStart >= localEnd` 时直接返回不 launch（`csrc/op.cpp:1811-1813`）。
+- host 侧 `in.numel == 0 || localStart >= localEnd` 时直接返回不 launch（`csrc/op.cpp:1915`）。

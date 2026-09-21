@@ -25,7 +25,7 @@ sigmoid_topk(rt, scores, indices, bias, scale, weights_out, indices_out,
              n_group, topk_group, topK, True)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:1236`(`XliteOpSigmoidTopK`)。kernel 签名(`csrc/kernels/sigmoid_topk.h:388`):
+host 侧 launch 见 `csrc/op.cpp:1297`(`XliteOpSigmoidTopK`)。kernel 签名(`csrc/kernels/sigmoid_topk.h:388`):
 
 ```cpp
 sigmoid_topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR bias, float scale,
@@ -51,7 +51,7 @@ sigmoid_topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR bias, float scale,
 | `sigmoid_topk_float` | `csrc/kernels/sigmoid_topk_float.cpp` | scores/weightsMap 为 fp32 |
 | `sigmoid_topk_bfloat16_t` | `csrc/kernels/sigmoid_topk_bfloat16_t.cpp` | scores/weightsMap 为 bf16(核内 fp32 计算,输出 `vconv_f322bf16r` 转回) |
 
-dtype 分派见 `csrc/op.cpp:1243-1254`(indices 须 INT32、routingMap 须 BIT1)。纯向量核。
+dtype 分派见 `csrc/op.cpp:1305-1316`(indices 须 INT32、routingMap 须 BIT1)。纯向量核。
 
 ## 实现原理
 

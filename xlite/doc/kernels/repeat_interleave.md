@@ -12,10 +12,10 @@
 | out | 输出 | [num_tokens, nVHeads * headBytes] | 同 in（字节层面无需一致） | 输出 token×V 头矩阵，nVHeads == nKHeads * expand |
 | numTokens | 标量 | - | uint32_t | token 数 T |
 | nKHeads | 标量 | - | uint32_t | 源头数 |
-| nVHeads | 标量 | - | uint32_t | 目标头数，须被 nKHeads 整除（host 侧强校验，`csrc/op.cpp:1712-1714`） |
-| headBytes | 标量 | - | uint32_t | 每头字节数 = headDim * elemSize（`csrc/model.cpp:695`），上限 96KB（`csrc/op.cpp:1716-1720`） |
+| nVHeads | 标量 | - | uint32_t | 目标头数，须被 nKHeads 整除（host 侧强校验，`csrc/op.cpp:1816-1817`） |
+| headBytes | 标量 | - | uint32_t | 每头字节数 = headDim * elemSize（`csrc/model.cpp:698`），上限 96KB（`csrc/op.cpp:1820-1823`） |
 
-Python 侧无独立测试脚本；由模型层 `ForwardAttnLinear` 调用（`csrc/model.cpp:697`：`nKHeads == nVHeads` 时退化为单次 memcpy，`nVHeads % nKHeads != 0` 时报错）。
+Python 侧无独立测试脚本；由模型层 `ExpandLinearHeads` 调用（`csrc/model.cpp:687`：`nKHeads == nVHeads` 时退化为单次 memcpy，`nVHeads % nKHeads != 0` 时报错）。`ExpandLinearHeads` 定义于 `csrc/model.cpp:681`，由 `XModel::ForwardAttnLinear` 在 `csrc/model.cpp:857-858` 调用。
 
 ## 支持的数据类型
 
@@ -35,7 +35,7 @@ host 侧不做 dtype 分派，元素大小通过 headBytes（字节数）传入�
 - 源地址 `src = t * (nKHeads*headBytes) + kh * headBytes`（同一 K 头被 expand 个输出段读取，`csrc/kernels/repeat_interleave.cpp:69-73`）；
 - 目标地址 `dst = t * (nVHeads*headBytes) + hv * headBytes`。
 
-block 数由 host 侧按段数缩放：decode（约 48 段）只起几个 block，prefill（约 24576 段）打满全部 AIV（`ConvKernelBlockNum`，tilePerCore=4096，`csrc/op.cpp:46-57,1721-1724`）。
+block 数由 host 侧按段数缩放：decode（约 48 段）只起几个 block，prefill（约 24576 段）打满全部 AIV（`ConvKernelBlockNum`，tilePerCore=4096，`csrc/op.cpp:46-57,1828`）。
 
 ### UB staging 与乒乓（`csrc/kernels/repeat_interleave.cpp:47-61,75-99`）
 
@@ -52,4 +52,4 @@ block 数由 host 侧按段数缩放：decode（约 48 段）只起几个 block�
 
 ### 边界处理
 
-`numTokens/nKHeads/nVHeads/headBytes` 为 0、`nVHeads % nKHeads != 0`、`expand == 0` 时 kernel 直接返回（`csrc/kernels/repeat_interleave.cpp:31-40`）；host 侧对非法维度与 `headBytes > 96KB` 提前抛错（`csrc/op.cpp:1709-1720`）。
+`numTokens/nKHeads/nVHeads/headBytes` 为 0、`nVHeads % nKHeads != 0`、`expand == 0` 时 kernel 直接返回（`csrc/kernels/repeat_interleave.cpp:31-40`）；host 侧对非法维度与 `headBytes > 96KB` 提前抛错（`csrc/op.cpp:1813-1823`）。

@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-V4 MoE 路由门控算子(DeepSeek V4 风格,`sqrtsoftplus` 激活 + 可选 hash 选路),见 kernel 头注释(`csrc/kernels/sqrtsoftplus_hash_topk.h:22-27`)。数学语义(测试参考 `tests/sqrtsoftplus_hash_topk.py:25-39`):
+V4 MoE 路由门控算子(DeepSeek V4 风格,`sqrtsoftplus` 激活 + 可选 hash 选路),见 kernel 头注释(`csrc/kernels/sqrtsoftplus_hash_topk.h:22-27`)。数学语义(测试参考 `tests/kernels/sqrtsoftplus_hash_topk.py:25-39`):
 
 ```
 s0 = sqrt(softplus(scores))             # 原始得分(pre-bias)
@@ -23,7 +23,7 @@ sqrtsoftplus_hash_topk(rt, scores, indices_helper, bias, input_ids, tid2eid,
                        out_weights, routing_map, scale, top_k, use_hash)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:1260`(`XliteOpSqrtsoftplusHashTopK`)。kernel 签名(`csrc/kernels/sqrtsoftplus_hash_topk.h:432`):
+host 侧 launch 见 `csrc/op.cpp:1321`(`XliteOpSqrtsoftplusHashTopK`)。kernel 签名(`csrc/kernels/sqrtsoftplus_hash_topk.h:432`):
 
 ```cpp
 sqrtsoftplus_hash_topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR bias,
@@ -36,7 +36,7 @@ sqrtsoftplus_hash_topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR bias,
 |---|---|---|---|---|
 | scores | 输入 | `[numTokens, numRoutedExperts]` | fp32 / bf16 | router logits |
 | indices | 输入 | `[numRoutedExperts]` | int32 | `arange` 恒等索引表(host 传 `indices.shape[0]` 作为专家数) |
-| bias | 输入 | `[numRoutedExperts]` 或空 | fp32 | 选路 bias;hash 模式下 host 传 nullptr(dead weight,`csrc/op.cpp:1281-1283`) |
+| bias | 输入 | `[numRoutedExperts]` 或空 | fp32 | 选路 bias;hash 模式下 host 传 nullptr(dead weight,`csrc/op.cpp:1342-1344`) |
 | inputIds | 输入 | `[numTokens]` 或空 | int32 | token 的 input id(词表索引);仅 hash 模式使用 |
 | tid2eid | 输入 | `[vocab_size, topK]` 或空 | int32 | hash 表:input_id → topK 个专家 id;仅 hash 模式使用 |
 | outWeights | 输出 | `[numTokens, numRoutedExperts]` | 与 scores 同 dtype | 稀疏权重行:被选 topK 槽位为归一化×scale 权重,其余 0 |
@@ -51,7 +51,7 @@ sqrtsoftplus_hash_topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR bias,
 | `sqrtsoftplus_hash_topk_float` | `csrc/kernels/sqrtsoftplus_hash_topk_float.cpp` | scores/outWeights 为 fp32 |
 | `sqrtsoftplus_hash_topk_bfloat16_t` | `csrc/kernels/sqrtsoftplus_hash_topk_bfloat16_t.cpp` | scores/outWeights 为 bf16(核内 fp32 计算) |
 
-dtype 分派见 `csrc/op.cpp:1269-1280`(indices 须 INT32、routingMap 须 BIT1)。纯向量核。
+dtype 分派见 `csrc/op.cpp:1329-1340`(indices 须 INT32、routingMap 须 BIT1)。纯向量核。
 
 ## 实现原理
 

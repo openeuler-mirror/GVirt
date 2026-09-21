@@ -6,7 +6,7 @@
 
 ## 输入输出参数
 
-Python 接口:`einsum_mht_hdt_mhd(rt, mht, hdt, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHdtMhd`,[csrc/op.cpp:2121-2143](../../csrc/op.cpp#L2121-L2143))。
+Python 接口:`einsum_mht_hdt_mhd(rt, mht, hdt, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHdtMhd`,[csrc/op.cpp:2225-2247](../../csrc/op.cpp#L2225-L2247))。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@ Python 接口:`einsum_mht_hdt_mhd(rt, mht, hdt, mhd, m, h, t, d, weight_nz=False
 | weight_nz | 标量 | - | bool | 右操作数是否为 NZ 分形布局 |
 | T / D | 标量(可选) | - | int | mht 行宽 / mhd 行宽的对齐覆盖;缺省(`-1`)时取 t / d。MLA 流程中传入 `nopeHeadDim + ropeHeadDim` 以跳过 head 中不参与计算的 rope 区(见 [csrc/model.cpp:469-471](../../csrc/model.cpp#L469-L471) 对 htd 变体的用法) |
 
-host 侧 swizzle 策略由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选([csrc/op.cpp:2136-2139](../../csrc/op.cpp#L2136-L2139));`m0/n0/k0` 取 `MATMUL_M0_N0_K0_DEFAULT_VALUE`(即 128/256/按 dtype)。
+host 侧 swizzle 策略由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选([csrc/op.cpp:2241-2243](../../csrc/op.cpp#L2241-L2243));`m0/n0/k0` 取 `MATMUL_M0_N0_K0_DEFAULT_VALUE`(即 128/256/按 dtype)。
 
 ## 支持的数据类型
 
@@ -57,7 +57,7 @@ for hIdx in 0..h:
 每个 `(m0=128) × (n0=256)` 输出 tile 在 Cube 核内执行标准五级流水([csrc/kernels/matmul.h:200-378](../../csrc/kernels/matmul.h#L200-L378)):
 
 1. **A GM→L1**:`CopyGmToL1Nd2Nz` 把 `[mActual, kRem]` 的 A 转成 NZ 分形进 `l1aBuf`(K 方向双缓冲,K 预取 `kDtileSize = 2*k0`);
-2. **B GM→L1**:本算子 `transpose=0` 且 `nz=0` 时走 `CopyGmToL1Nd2Nz(bGmBuf[nOffset*k + kOffset], nActual, kRemSize, k, ...)`——注意 B 逻辑上是 `[d, t]`(N×K),以 k 为行距 ND2NZ 装载,等效完成 Bᵀ 的分形化([csrc/kernels/matmul.h:297-299](../../csrc/kernels/matmul.h#L297-L299));`nz=1` 时直接 `CopyGmToL1` 拷贝现成 NZ 分形;
+2. **B GM→L1**:本算子 `transpose=0` 且 `nz=0` 时走 `CopyGmToL1Nd2Nz(bGmBuf[nOffset*k + kOffset], nActual, kRemSize, k, ...)`——注意 B 逻辑上是 `[d, t]`(N×K),以 k 为行距 ND2NZ 装载,等效完成 Bᵀ 的分形化([csrc/kernels/matmul.h:306-307](../../csrc/kernels/matmul.h#L306-L307));`nz=1` 时直接 `CopyGmToL1` 拷贝现成 NZ 分形;
 3. **L1→L0A/L0B**:`CopyToL0ACol` / `CopyToL0BCol` 分形下搬,均带 ping-pong 双缓冲;
 4. **Mmad**:K 方向按 `kQtileSize` 分段累加到 L0C(`CalMmad`,kIdx==0 时初始化累加器);
 5. **L0C→GM**:`CopyToGmWithDequant` 写回 C tile(本算子无 bias/dequant)。

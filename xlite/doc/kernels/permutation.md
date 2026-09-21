@@ -12,7 +12,7 @@ MoE token 重排（permutation）：按路由位图 `routing_map` 将每个 toke
 | routing_map (routing) | 输入 | [num_tokens, n_routed_experts] 位图（BIT1，每行 n_routed_experts/8 字节） | uint8 位图 | token→专家路由结果，bit(t*n_routed_experts+e)=1 表示 token t 路由到专家 e（测试中由 int32 张量按位拼出，`tests/kernels/permutation.py:60-67`） |
 | output (out) | 输出 | [max_expert_sorted, dim] | bfloat16 | 按专家分组排序后的 token；第 e 个专家的段起始偏移由 unp_idx 的 starts 列给出 |
 | unp_idx | 输出 | [n_routed_experts, num_tokens+1] | int32 | 布局见下文：`[e, t]` = token t 在专家 e 段内的行号；最后一列为各专家段起始偏移；`[0,0]` 被复用存放总 token 数 |
-| counts | 输出 | [n_routed_experts, 1] | int32 | 每个专家收到的 token 数（host 侧取 `counts.shape[0]` 作 n_routed_experts，`csrc/op.cpp:812-814`） |
+| counts | 输出 | [n_routed_experts, 1] | int32 | 每个专家收到的 token 数（host 侧取 `counts.shape[0]` 作 n_routed_experts，`csrc/op.cpp:782`） |
 | n_tokens / dim | 标量 | - | uint32_t | `in.shape[0]` / `in.shape[1]` |
 | max_expert_sorted | 标量 | - | uint32_t | `out.shape[0]`，即排序缓冲区容量，kernel 内 assert 总数不超过它（`csrc/kernels/permutation.cpp:119`） |
 | experts_start_idx / experts_end_idx | 标量 | - | uint32_t | 本卡（EP rank）负责的专家区间 [start, end)，区间外专家不计数、不搬数 |

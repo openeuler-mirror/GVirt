@@ -18,13 +18,13 @@ comb   = sinkhorn(softmax(mixes[:, 2K:] * scale[2] + base[2K:]) + eps)         #
 y      = Σ_h pre[h] * xResid[:, h, :]            # 仅 preSum=1            # [hidden]
 ```
 
-另有 head 模式(`headOnly`,对应 `hc_head`,模型最后的 Hyper-Connection 头,**仅 `preSum=1` 时出现**):`mixes` 只有 `[m, K]`、`hcScale` 只有 1 个标量、`hcBase` 只有 `[K]`,仅计算 `pre` 并做 pre sum,不算 post/comb/Sinkhorn;host 侧由 `hcBase.numel() == hcMult` 自动识别(`csrc/op.cpp:2231-2233`)。上游调用链为 `rmsnorm → matmul → hc_act`(见 `tests/kernels/hc_pre.py`、`tests/kernels/hc_head.py`)。
+另有 head 模式(`headOnly`,对应 `hc_head`,模型最后的 Hyper-Connection 头,**仅 `preSum=1` 时出现**):`mixes` 只有 `[m, K]`、`hcScale` 只有 1 个标量、`hcBase` 只有 `[K]`,仅计算 `pre` 并做 pre sum,不算 post/comb/Sinkhorn;host 侧由 `hcBase.numel() == hcMult` 自动识别(`csrc/op.cpp:2295-2296`)。上游调用链为 `rmsnorm → matmul → hc_act`(见 `tests/kernels/hc_pre.py`、`tests/kernels/hc_head.py`)。
 
 ## 输入输出参数
 
 Python 侧:
-- 融合:`hc_act(rt, mixes, hc_scale, hc_base, post, comb, HC_MULT, eps, sinkhorn_iters, x_resid=..., output=...)`,host 侧封装 `XliteOpHcAct`(`csrc/op.cpp:2223`),以 `preSum=1`、`pre=nullptr` 启动(`csrc/op.cpp:2253-2255`);
-- 拆分:`hc_split_sinkhorn(rt, mixes, hc_scale, hc_base, pre, post, comb, HC_MULT, eps, sinkhorn_iters)`,host 侧封装 `XliteOpHcSplitSinkhorn`(`csrc/op.cpp:2275`),以 `preSum=0`、`headOnly=0`、`xResid/yOut=nullptr`、`hidden=0` 启动(`csrc/op.cpp:2295-2298`)。
+- 融合:`hc_act(rt, mixes, hc_scale, hc_base, post, comb, HC_MULT, eps, sinkhorn_iters, x_resid=..., output=...)`,host 侧封装 `XliteOpHcAct`(`csrc/op.cpp:2287`),以 `preSum=1`、`pre=nullptr` 启动(`csrc/op.cpp:2317-2320`);
+- 拆分:`hc_split_sinkhorn(rt, mixes, hc_scale, hc_base, pre, post, comb, HC_MULT, eps, sinkhorn_iters)`,host 侧封装 `XliteOpHcSplitSinkhorn`(`csrc/op.cpp:2340`),以 `preSum=0`、`headOnly=0`、`xResid/yOut=nullptr`、`hidden=0` 启动(`csrc/op.cpp:2360-2363`)。
 
 kernel 签名(模板 `csrc/kernels/hc_act.h:84-89`,入口宏 `hc_act_float` `csrc/kernels/hc_act.h:379-389`):
 
@@ -46,7 +46,7 @@ hc_act_float(GM_ADDR mixes, GM_ADDR hcBase, GM_ADDR post, GM_ADDR comb, GM_ADDR 
 | comb | 输出 | `[m, K*K]` | FP32 | Sinkhorn 归一化后的混合矩阵,行优先 `comb[h*K+k]`(head 模式不写) |
 | preSum | 标量 | - | uint32 | 1 = 融合 pre sum(写 y,pre 不落盘);0 = 拆分(写 pre 到 GM,pre sum 由 hc_pre 完成) |
 | pre | 输出 | `[m, K]` | FP32 | pre 门;仅 `preSum=0` 写回 GM,`preSum=1` 传 nullptr |
-| xResid | 输入 | `[m, K, hidden]` | BF16 | 未归一化残差(pre-sum 输入);仅 `preSum=1` 使用,host 强制 BF16(`csrc/op.cpp:2246`) |
+| xResid | 输入 | `[m, K, hidden]` | BF16 | 未归一化残差(pre-sum 输入);仅 `preSum=1` 使用,host 强制 BF16(`csrc/op.cpp:2310`) |
 | yOut | 输出 | `[m, hidden]` | BF16 | pre-sum 结果 `Σ_h pre[h]*xResid[:,h,:]`;仅 `preSum=1` 写出 |
 | m | 标量 | - | uint32 | token 数(`mixes.shape[0]`) |
 | hcMult | 标量 | - | uint32 | Hyper-Connection 流数 K ∈ [1,7] |
@@ -60,7 +60,7 @@ hc_act_float(GM_ADDR mixes, GM_ADDR hcBase, GM_ADDR post, GM_ADDR comb, GM_ADDR 
 ## 支持的数据类型
 
 - 模板 `csrc/kernels/hc_act.h`(模板参数 Dtype 只影响 `preSum=1` 时 pre-sum I/O 的 `xResid`/`yOut`)。
-- 实例化文件 `csrc/kernels/hc_act_float.cpp`,导出 `hc_act_float`,内部固定以 `Dtype = bfloat16_t` 调用模板(`csrc/kernels/hc_act.h:385-388`),即 **门控计算 FP32、pre-sum I/O BF16** 的单一组合;host 侧强制校验 mixes/hcScale/hcBase/post/comb/pre 为 FP32、xResid/output 为 BF16(`csrc/op.cpp:2236-2248`、`csrc/op.cpp:2285-2288`)。
+- 实例化文件 `csrc/kernels/hc_act_float.cpp`,导出 `hc_act_float`,内部固定以 `Dtype = bfloat16_t` 调用模板(`csrc/kernels/hc_act.h:385-388`),即 **门控计算 FP32、pre-sum I/O BF16** 的单一组合;host 侧强制校验 mixes/hcScale/hcBase/post/comb/pre 为 FP32、xResid/output 为 BF16(`csrc/op.cpp:2299-2313`、`csrc/op.cpp:2350-2354`)。
 - kernel 整体用 `#ifdef __DAV_C220_VEC__` 保护,非 C220 向量核平台编译为空实现(`csrc/kernels/hc_act.h:390-398`)。
 
 ## 实现原理
@@ -119,4 +119,4 @@ MTE2(载入)/ V(计算)/ MTE3(写出)之间用事件对流水:`EVENT_ID0+curr` �
 - vmuls→pipe_barrier(精度关键):`csrc/kernels/hc_act.h:245`、`csrc/kernels/hc_act.h:263`
 - pre sum(vaxpy)/pre gather 分支:`csrc/kernels/hc_act.h:298`、`csrc/kernels/hc_act.h:307`
 - Sinkhorn 迭代:`csrc/kernels/hc_act.h:346`
-- host 封装 `XliteOpHcAct`:`csrc/op.cpp:2223`;`XliteOpHcSplitSinkhorn`:`csrc/op.cpp:2275`
+- host 封装 `XliteOpHcAct`:`csrc/op.cpp:2287`;`XliteOpHcSplitSinkhorn`:`csrc/op.cpp:2340`

@@ -16,7 +16,7 @@ Y[r] = (Y_high[r] × 16 + Y_low[r] + scale_bias[expert(r)][c]) × perTokenScale[
 
 ## 输入输出参数
 
-Python 入口 `msd_merge_dequant(rt, y_merged, scale_biases, counts, per_token_scale, out)`(`csrc/_C.cpp:2742`);scale_biases 是每专家一个 `[n]` fp32 张量的列表,host 侧拼成 INT64 指针数组 H2D 拷贝后传入(`csrc/_C.cpp:1899-1925`)。kernel 签名见 `csrc/kernels/msd_merge_dequant.h:188-196`:
+Python 入口 `msd_merge_dequant(rt, y_merged, scale_biases, counts, per_token_scale, out)`(`csrc/_C.cpp:2881`);scale_biases 是每专家一个 `[n]` fp32 张量的列表,host 侧拼成 INT64 指针数组 H2D 拷贝后传入(`csrc/_C.cpp:1983-2009`)。kernel 签名见 `csrc/kernels/msd_merge_dequant.h:188-196`:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -24,7 +24,7 @@ Python 入口 `msd_merge_dequant(rt, y_merged, scale_biases, counts, per_token_s
 | scaleBiasPtrs | 输入 | `[numExperts]` | int64(GM 指针数组) | 每专家 scale_bias 矩阵 `[n]`(fp32)的 GM 地址;按全局专家 id 索引 |
 | perTokenScale | 输入 | `[m]` | float32 | 每 token 激活反量化 scale(quant_dyn 输出) |
 | y | 输出 | `[m, n]` | bfloat16 | 最终结果 |
-| pnum_tokens | 输入(可选) | `[1]` | uint32 | 动态真实 token 数;host 当前固定传 null(op.cpp:1415) |
+| pnum_tokens | 输入(可选) | `[1]` | uint32 | 动态真实 token 数;host 当前固定传 null(op.cpp:1482) |
 | m | 标量 | - | uint32_t | 输出行数,host 由 `yMerged.shape[0] / 2` 得出 |
 | n | 标量 | - | uint32_t | 列数,`yMerged.shape[1]` |
 | counts | 输入 | `[numExperts]` | uint32 | 每专家 token 数(未翻倍,与 out 行轴一致);按全局专家 id 索引,仅 `[startIdx, endIdx)` 有 token |
@@ -36,7 +36,7 @@ Python 入口 `msd_merge_dequant(rt, y_merged, scale_biases, counts, per_token_s
 
 - `int8_t` 实例(算子语义为 fp16 输入 → bf16 输出;[msd_merge_dequant_int8_t.cpp](../../csrc/kernels/msd_merge_dequant_int8_t.cpp))
 
-host 校验 `yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype == BF16`,且 yMerged 为 2D、行数为偶数(`csrc/op.cpp:1408-1413`)。
+host 校验 `yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype == BF16`,且 yMerged 为 2D、行数为偶数(`csrc/op.cpp:1474-1475`)。
 
 ## 实现原理
 
@@ -80,4 +80,4 @@ host 校验 `yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype =
 
 - `pnum_tokens` 非空时 clamp m(msd_merge_dequant.h:52-55),host 当前传 null;
 - n 非 128 整数倍时 `n_pad` 补齐计算,搬运按真实 `n * sizeof(half/float/bfloat16)` 字节;
-- host 侧行数为奇数直接抛错(op.cpp:1409-1410);Python 绑定固定 `start=0, end=numExperts`(`csrc/_C.cpp:1921`),EP 分片范围由模型侧 `XliteOpMSDMergeDequant` 直接调用时传入([csrc/model.cpp:1476](../../csrc/model.cpp))。
+- host 侧行数为奇数直接抛错(op.cpp:1475);Python 绑定固定 `start=0, end=numExperts`(`csrc/_C.cpp:2005`),EP 分片范围由模型侧 `XliteOpMSDMergeDequant` 直接调用时传入([csrc/model.cpp:1478](../../csrc/model.cpp))。

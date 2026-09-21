@@ -10,12 +10,12 @@ dtype 转换算子。当前实现两个方向：bf16 → float32（cast_up，升
 |------|------|-------|-------|------|
 | x | 输入 | 任意（按长度 length 的一维流处理） | bfloat16（cast_up）/ float（fp32→bf16 方向） | 输入张量，shape 不参与计算，只取元素总数 |
 | y | 输出 | 同 x | float（cast_up）/ bfloat16（fp32→bf16 方向） | 输出张量，长度与 x 相同 |
-| length | 标量 | - | uint32_t | 元素总数，host 侧传 `in.numel`（`csrc/op.cpp:819`） |
+| length | 标量 | - | uint32_t | 元素总数，host 侧传 `in.numel`（`csrc/op.cpp:768`） |
 
 Python 绑定：
 
-- `cast_up(rt, x, y)`（`csrc/_C.cpp:1699-1709`，`tests/kernels/cast.py:21`）：bf16 → float32，host 侧 `XliteOpCastUp` 只接受 `in.dtype == BF16 && out.dtype == FP32`，其余抛异常；inScale 参数当前实现中仅作占位；
-- fp32→bf16 方向（`aclrtlaunch_cast_float_bfloat16_t`）目前作为 matmul 等 host 侧组合路径的内部 kernel 使用（例如 `csrc/op.cpp:758-760` matmul 输出 FP32 转 BF16 时调用），未单独导出 Python 接口；`XliteOpCastDown` 为 TODO。
+- `cast_up(rt, x, y)`（`csrc/_C.cpp:2846`，`tests/kernels/cast.py:21`）：bf16 → float32，host 侧 `XliteOpCastUp` 只接受 `in.dtype == BF16 && out.dtype == FP32`，其余抛异常；inScale 参数当前实现中仅作占位；
+- fp32→bf16 方向（`aclrtlaunch_cast_float_bfloat16_t`）目前作为 matmul 等 host 侧组合路径的内部 kernel 使用（例如 `csrc/op.cpp:723` matmul 输出 FP32 转 BF16 时调用），未单独导出 Python 接口；`XliteOpCastDown` 为 TODO。
 
 ## 支持的数据类型
 

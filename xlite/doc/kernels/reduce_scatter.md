@@ -6,7 +6,7 @@ ReduceScatter(SUM)集合通信算子:每个 rank 持有形状相同的完整输�
 
 ## 输入输出参数
 
-Python 侧调用:`reduce_scatter(rt, z, y, comm_type)`(`tests/kernels/reduce_scatter.py:55`),host 侧 launch 见 `csrc/op.cpp:241`(`XliteOpReduceScatter`)。
+Python 侧调用:`reduce_scatter(rt, z, y, comm_type)`(`tests/kernels/reduce_scatter.py:55`),host 侧 launch 见 `csrc/op.cpp:242`(`XliteOpReduceScatter`)。
 
 kernel 签名(`csrc/kernels/reduce_scatter.cpp:314`):
 
@@ -18,14 +18,14 @@ reduce_scatter_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t r
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| input | 输入 | `[rankSize * N]`(逻辑上任意形状,N = count/rankSize) | FP16 / BF16 / INT8 / INT32 / FP32 | 本 rank 的完整输入。要求 `in.numel == out.numel * rankSize`(`csrc/op.cpp:245`) |
+| input | 输入 | `[rankSize * N]`(逻辑上任意形状,N = count/rankSize) | FP16 / BF16 / INT8 / INT32 / FP32 | 本 rank 的完整输入。要求 `in.numel == out.numel * rankSize`(`csrc/op.cpp:246`) |
 | output | 输出 | `[N]` | 同 input | 全 rank 求和后的第 rankId 块 |
 | count | 标量 | - | uint64 | 输入总元素数 `in.numel`;kernel 内 `countPerRank = DIV_ROUND_UP(count, rankSize)`(`csrc/kernels/reduce_scatter.cpp:41`) |
-| rankId / rankSize | 标量 | - | uint32 | 通信域内编号与总 rank 数(TP 取 `rankId % tpSize`,DP 取 `rankId / tpSize`,`csrc/op.cpp:257`) |
-| generation | 标量 | - | uint64 | 通信代数,每次调用递增(`csrc/op.cpp:342`),用于 IPC flag 单调比较 |
+| rankId / rankSize | 标量 | - | uint32 | 通信域内编号与总 rank 数(TP 取 `rankId % tpSize`,DP 取 `rankId / tpSize`,`csrc/op.cpp:258`) |
+| generation | 标量 | - | uint64 | 通信代数,每次调用递增(`csrc/op.cpp:343`),用于 IPC flag 单调比较 |
 | param | 输入 | - | `XcclParam` | 所有 rank 的 `ipcMems` / `ipcXTensorMems` 基址(`csrc/kernels/kernel_param.h:20`) |
 | copySize | 标量 | - | uint32 | 每次 UB 搬运的目标字节数,默认 `COPY_SIZE`(32768),host 侧按核数调整(`csrc/op.cpp:310-316`) |
-| fetchOffset | 标量 | - | bool | true 时通过 IPC 内存发布/获取各 rank 张量偏移;DP 域恒为 true(`csrc/op.cpp:342`) |
+| fetchOffset | 标量 | - | bool | true 时通过 IPC 内存发布/获取各 rank 张量偏移;DP 域恒为 true(`csrc/op.cpp:343`) |
 
 测试 shape 约定(`tests/kernels/reduce_scatter.py:44-55`):每 rank 输入 `y = cat(x_list, dim=0)` 形状 `[dim1*world_size, dim2]`,输出 `[dim1, dim2]`,`count = dim1*world_size*dim2`。注意 kernel 把 `count` 向上取整分块,故 `count` 最好能被 rankSize 整除;否则最后一块较短(`countCurrRank` 钳位,`csrc/kernels/reduce_scatter.cpp:124-126`)。
 

@@ -10,9 +10,9 @@
 |------|------|-------|-------|------|
 | in | 输入 | [numPackets * totalSize] 字节 | 任意 | 连续输入；totalSize = Σ sizes[j] |
 | out0..out7 (outputs) | 输出 | out_j 为 [numPackets * sizes[j]] 字节 | 任意 | 最多 8 个输出；`split_col` 场景为 `[rows, widths[j]]`（每行取一段） |
-| s0..s7 (sizes) | 标量 | - | uint64_t | 各段字节数。flat split 由 Python 侧显式传入（字节，`tests/kernels/split.py:67`）；split_col 由 host 侧按 `outputs[i].shape.back() * elemSize` 计算（`csrc/op.cpp:1608`） |
+| s0..s7 (sizes) | 标量 | - | uint64_t | 各段字节数。flat split 由 Python 侧显式传入（字节，`tests/kernels/split.py:67`）；split_col 由 host 侧按 `outputs[i].shape.back() * elemSize` 计算（`csrc/op.cpp:1712`） |
 | nOutputs | 标量 | - | uint32_t | 输出个数 |
-| numPackets | 标量 | - | uint32_t | 包数；split_col 场景 = 输入的前导维乘积（行数，`csrc/op.cpp:1580,1614`） |
+| numPackets | 标量 | - | uint32_t | 包数；split_col 场景 = 输入的前导维乘积（行数，`csrc/op.cpp:1684,1718`） |
 | totalSize | 标量 | - | uint64_t | 单包字节数 Σ sizes[j] |
 
 Python 调用方式：
@@ -34,7 +34,7 @@ host 侧不做 dtype 分派；测试覆盖 float16/bfloat16/float32/int32/int8�
 
 - `outOff[j]`：输出 j 的段在包内的起始字节偏移（前缀和，`csrc/kernels/split.cpp:32-35`）；
 - 总工作量 = `totalBytes = numPackets * totalSize`。block 以 `segBufSize`（半个 UB）为步长跨步切分平坦源区间 `[0, totalBytes)`：`for (gbo = block_idx * segBufSize; gbo < totalBytes; gbo += block_num * segBufSize)`。头注释明确该平坦切分替代旧的 `totalJobs = numPackets * nOutputs` 分配方式（numPackets==1 时 3 个 job 摊到 48 核大量闲置，`csrc/kernels/split.cpp:49-53`）；
-- block 数由 host 侧按 `numPackets * totalSize` 字节缩放（`CopyKernelBlockNum`，tilePerCore≈2MB，`csrc/op.cpp:28-39,1657`）。
+- block 数由 host 侧按 `numPackets * totalSize` 字节缩放（`CopyKernelBlockNum`，tilePerCore≈2MB，`csrc/op.cpp:28-39,1715`（split_col）/ `1762`（split））。
 
 ### 子段分解与乒乓搬运（`csrc/kernels/split.cpp:77-124`）
 
@@ -55,5 +55,5 @@ host 侧不做 dtype 分派；测试覆盖 float16/bfloat16/float32/int32/int8�
 ### 边界处理与 host 侧校验
 
 - `numPackets == 0 || nOutputs == 0 || totalSize == 0` 直接返回（`csrc/kernels/split.cpp:23-25`）；
-- 超过 8 个输出时 host 侧回退为逐包逐段 `aclrtMemcpyAsync`（`csrc/op.cpp:1665-1676`）；
-- Python 侧校验：`outputs.size() == sizes.size()`、`totalSize * numPackets == in.bytes`、每个 `outputs[j].bytes >= sizes[j] * numPackets`（防止越界写设备内存，`csrc/_C.cpp:2218-2235`，测试 `tests/kernels/split.py:99-110` 专门验证 undersized output 被拒绝）；`split_col` 额外校验各输出 dtype/前导维一致且列宽之和等于输入列宽（`csrc/op.cpp:1583-1595`）。
+- 超过 8 个输出时 host 侧回退为逐包逐段 `aclrtMemcpyAsync`（`csrc/op.cpp:1769-1780`）；
+- Python 侧校验：`outputs.size() == sizes.size()`、`totalSize * numPackets == in.bytes`、每个 `outputs[j].bytes >= sizes[j] * numPackets`（防止越界写设备内存，`csrc/_C.cpp:2309-2343`，测试 `tests/kernels/split.py:99-110` 专门验证 undersized output 被拒绝）；`split_col` 额外校验各输出 dtype/前导维一致且列宽之和等于输入列宽（`csrc/op.cpp:1689-1699`）。

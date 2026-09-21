@@ -14,7 +14,7 @@ attention(rt, qkv, k_cache, v_cache, output, query_start_loc, query_lens,
           BLOCK_SIZE, batch, enable_flash=False)
 ```
 
-host 封装 `Attention` → `XliteOpAttention`(`csrc/_C.cpp:1460`、`csrc/op.cpp:909`)。kernel 签名(`csrc/kernels/attention.h:281`):
+host 封装 `Attention` → `XliteOpAttention`(`csrc/_C.cpp:1460`、`csrc/op.cpp:879`)。kernel 签名(`csrc/kernels/attention.h:281`):
 
 ```cpp
 attention_<dtype>(input, kCache, vCache, qk, output, queryStartLoc, queryLens,
@@ -47,7 +47,7 @@ attention_<dtype>(input, kCache, vCache, qk, output, queryStartLoc, queryLens,
 | float16_t | `csrc/kernels/attention_float16_t.cpp` | `attention_float16_t` |
 | bfloat16_t | `csrc/kernels/attention_bfloat16_t.cpp` | `attention_bfloat16_t` |
 
-host 侧要求 qkv/qk/kCache/vCache/output 五者 dtype 一致(`csrc/op.cpp:918-925`)。
+host 侧要求 qkv/qk/kCache/vCache/output 五者 dtype 一致(`csrc/op.cpp:889-895`)。
 
 ## 实现原理
 
@@ -56,7 +56,7 @@ host 侧要求 qkv/qk/kCache/vCache/output 五者 dtype 一致(`csrc/op.cpp:918-
 ### 任务划分与 M0 自适应
 
 - 每个 batch 按 `queryTileSize` 切 query 块,任务空间为 `queryNum * nKVHeads`(`csrc/kernels/attention.h:94-95`)。
-- `m0 = GetOptimalM0(queryLen, cachedLen)`(`csrc/kernels/kernel_macro.h:873`):queryLen≤64 取 16,否则按总长 12K/20K/24K/30K/48K/60K/96K 分档取 128/112/96/80/64/48/32/16。`m0` 是 Cube 单次 mmad 的 M 维(tokens × headNumInGroup),长序列时压缩 m0 以控制 qk workspace 的 GM 占用(qk 行宽为 maxSeqLen)。`queryTileSize = m0 / headNumInGroup`,GQA 组内多 query 头拼成 m0 行一起算。
+- `m0 = GetOptimalM0(queryLen, cachedLen)`(`csrc/kernels/kernel_macro.h:883`):queryLen≤64 取 16,否则按总长 12K/20K/24K/30K/48K/60K/96K 分档取 128/112/96/80/64/48/32/16。`m0` 是 Cube 单次 mmad 的 M 维(tokens × headNumInGroup),长序列时压缩 m0 以控制 qk workspace 的 GM 占用(qk 行宽为 maxSeqLen)。`queryTileSize = m0 / headNumInGroup`,GQA 组内多 query 头拼成 m0 行一起算。
 - 任务按 `totalIdx % block_num` 轮转分配到各核,并用 `(totalIdx/block_num)%2` 交替正反序以均衡负载(`csrc/kernels/attention.h:97-98`)。
 - AIV 侧每个核再按 `get_subblockid()`(2 个 subblock)把 `queryTaskLen * headNumInGroup` 行对半分(`csrc/kernels/attention.h:206-213`)。
 
@@ -86,6 +86,6 @@ AIC 在 QK 写完后 `ffts_cross_core_sync(PIPE_FIX, config)`(flagIdx=0,inner-gr
 
 - 主类与任务调度:`csrc/kernels/attention.h:59`(RunAic)、`csrc/kernels/attention.h:162`(RunAiv)
 - QK/SV GEMM 与 L1/L0 布局:`csrc/kernels/attention_aic_helper.h:23`(Init)、`:89`(RunAicQK)、`:177`(RunAicSV)
-- softmax:`csrc/kernels/softmax_attn_aiv.h:801`(RunAivSoftmaxLong)
+- softmax:`csrc/kernels/softmax_attn_aiv.h:817`(RunAivSoftmaxLong)
 - M0 分档:`csrc/kernels/kernel_macro.h:883`(GetOptimalM0);常量 `XLITE_MAX_M0=128`、`MAX_SOFTMAX_PINGPONG_LEN=11776`(`csrc/kernels/kernel_param.h:33,43`)
-- host launch:`csrc/op.cpp:909`(XliteOpAttention)、路由 `csrc/model.cpp:636`
+- host launch:`csrc/op.cpp:879`(XliteOpAttention)、路由 `csrc/model.cpp:636`

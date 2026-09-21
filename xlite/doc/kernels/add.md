@@ -11,10 +11,10 @@
 | x | 输入 | [x_numel, y_numel] | float16 / bfloat16 | 加数，行数为 `x_numel`（block 切分维度），每行 `y_numel` 个元素 |
 | y | 输入 | [x_numel, y_numel] | float16 / bfloat16 | 加数，与 x 同形状 |
 | z | 输出 | [x_numel, y_numel] | float16 / bfloat16 | 结果，可与 x/y 为同一 tensor（原地更新） |
-| x_numel | 标量 | - | uint32_t | 矩阵行数（host 侧传入 `in1.shape[0]`，见 `csrc/op.cpp:594` XliteOpAdd） |
+| x_numel | 标量 | - | uint32_t | 矩阵行数（host 侧传入 `in1.shape[0]`，见 `csrc/op.cpp:603-604` XliteOpAdd） |
 | y_numel | 标量 | - | uint32_t | 每行元素个数（host 侧传入 `in1.shape[1]`） |
 
-Python 调用方式（`tests/kernels/add.py:27`）：`add(rt, x, y, z)`，要求 x/y/z dtype 一致（`EachXDtype` 检查，`csrc/op.cpp:588-593`）。
+Python 调用方式（`tests/kernels/add.py:27`）：`add(rt, x, y, z)`，要求 x/y/z dtype 一致（`EachXDtype` 检查，`csrc/op.cpp:595-602`）。
 
 ## 支持的数据类型
 

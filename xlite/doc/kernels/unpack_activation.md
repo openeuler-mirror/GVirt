@@ -11,7 +11,7 @@ MSD(Mixed-precision Split-activation Decomposition,W4A8)管线的第二步:把 I
 
 ## 输入输出参数
 
-Python 入口 `unpack_activation(rt, input, output)`(`csrc/_C.cpp:2810`)。kernel 签名见 `csrc/kernels/unpack_activation.h:155-160`:
+Python 入口 `unpack_activation(rt, input, output)`(`csrc/_C.cpp:2960`)。kernel 签名见 `csrc/kernels/unpack_activation.h:155-160`:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -26,7 +26,7 @@ Python 入口 `unpack_activation(rt, input, output)`(`csrc/_C.cpp:2810`)。kerne
 
 - `int8_t`(INT8 → INT4-packed INT8;[unpack_activation_int8_t.cpp](../../csrc/kernels/unpack_activation_int8_t.cpp))
 
-host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.cpp:2174`)。
+host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.cpp:2278`)。
 
 ## 实现原理
 

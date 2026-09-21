@@ -8,7 +8,7 @@
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |------|------|-------|-------|------|
-| input | 输入 | [shape0, shape1] | float16 / bfloat16 | 输入矩阵；shape0 为行数（block 切分维度），shape1 为列数（一维 tensor 时按 shape1=1 处理，`csrc/op.cpp:1771`） |
+| input | 输入 | [shape0, shape1] | float16 / bfloat16 | 输入矩阵；shape0 为行数（block 切分维度），shape1 为列数（一维 tensor 时按 shape1=1 处理，`csrc/op.cpp:1878`） |
 | scale | 标量 | - | float | 乘法系数（kernel 端为 fp32） |
 | output | 输出 | [shape0, shape1] | 同 input | 结果，可与 input 为同一 tensor |
 | shape0 | 标量 | - | uint32_t | 行数，host 侧传 `input.shape[0]` |
@@ -25,7 +25,7 @@ kernel 侧实际地址为 `input + process * shape1 + calcOffset`（`csrc/kernel
 | float16_t | `csrc/kernels/muls_float16_t.cpp` | `muls_float16_t` |
 | bfloat16_t | `csrc/kernels/muls_bfloat16_t.cpp` | `muls_bfloat16_t` |
 
-仅支持 `__DAV_C220_VEC__`，其余架构导出空实现（`csrc/kernels/muls.h:104-110`）。注意：模板里虽然按 `float` 分支保留了 off 布局逻辑，但当前 host 侧（`csrc/op.cpp:1764-1770`）与实例化文件都只提供 fp16/bf16。
+仅支持 `__DAV_C220_VEC__`，其余架构导出空实现（`csrc/kernels/muls.h:104-110`）。注意：模板里虽然按 `float` 分支保留了 off 布局逻辑，但当前 host 侧（`csrc/op.cpp:1867-1876`）与实例化文件都只提供 fp16/bf16。
 
 ## 实现原理
 
@@ -73,5 +73,5 @@ UB 偏移手工累加分配（`csrc/kernels/muls.h:21-40`），`len = ROUND_UP(c
 ### 边界处理
 
 - 搬运用 `CopyGmToUbufAligned`/`CopyUbufToGmAligned`（按字节数 32B/2B/1B 对齐自适应选择 DMA 原语），支持 calcNum 非 32B 整数倍的场景，写回长度为精确的 `calcNum * sizeof(Dtype)` 字节；
-- host 侧校验 `calcOffset < shape1`、`calcNum <= shape1 - calcOffset` 且 `calcNum <= 16320`（`csrc/op.cpp:1772-1789`）；
+- host 侧校验 `calcOffset < shape1`、`calcNum <= shape1 - calcOffset` 且 `calcNum <= 16320`（`csrc/op.cpp:1879-1891`）；
 - calcNum 上限 16320 = 255 repeat × 64 fp32，即单行切片需一次性放入 UB 计算缓冲（无行内二次分块）。

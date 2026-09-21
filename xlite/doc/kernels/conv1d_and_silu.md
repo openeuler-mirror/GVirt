@@ -35,7 +35,7 @@ conv1d_and_silu_##dtype(state, input, weight, output, batch, channels,
 | queryStartLoc | 输入（packed） | [B]（>=8，int32） | int32 | packed 模式下各请求在 [T, C] 中的起始行 |
 | queryLens | 输入（packed） | [B]（>=8，int32） | int32 | packed 模式下各请求的序列长度 |
 
-限制（host 侧强制，`csrc/op.cpp:1867-1910`）：`kernelDim <= 16`；均匀模式 `seqLen <= 4096`；packed batch <= 256。均匀模式要求 state/input/output 均为 3D 且 B/C/S 匹配；packed 模式 input/output 为 2D，以 `queryStartLoc/queryLens`（int32）描述变长请求，二者 numel 需 >= batch（测试中 pad 到 8 个 int32 保证 32B 块拷贝不越界，`tests/kernels/conv1d_and_silu.py:68-76`）。
+限制（host 侧强制，`csrc/op.cpp:1952-2020`）：`kernelDim <= 16`；均匀模式 `seqLen <= 4096`；packed batch <= 256。均匀模式要求 state/input/output 均为 3D 且 B/C/S 匹配；packed 模式 input/output 为 2D，以 `queryStartLoc/queryLens`（int32）描述变长请求，二者 numel 需 >= batch（测试中 pad 到 8 个 int32 保证 32B 块拷贝不越界，`tests/kernels/conv1d_and_silu.py:68-76`）。
 
 Python 调用方式：
 
@@ -50,7 +50,7 @@ Python 调用方式：
 | bfloat16_t | `csrc/kernels/conv1d_and_silu_bfloat16_t.cpp` | `conv1d_and_silu_bfloat16_t` |
 | float | `csrc/kernels/conv1d_and_silu_float.cpp` | `conv1d_and_silu_float` |
 
-仅支持 `__DAV_C220_VEC__`（向量核），其他架构导出空实现（`csrc/kernels/conv1d_and_silu.h:604-622`）。四组 tensor dtype 必须一致（`EachXDtype`，`csrc/op.cpp:1914-1919`）。
+仅支持 `__DAV_C220_VEC__`（向量核），其他架构导出空实现（`csrc/kernels/conv1d_and_silu.h:604-622`）。四组 tensor dtype 必须一致（`EachXDtype`，`csrc/op.cpp:2018-2024`）。
 
 ## 实现原理
 

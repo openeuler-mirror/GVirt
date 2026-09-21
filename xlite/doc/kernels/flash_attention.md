@@ -14,7 +14,7 @@ attention(rt, qkv, k_cache, v_cache, output, query_start_loc, query_lens,
           BLOCK_SIZE, batch, enable_flash=True, tile_size)
 ```
 
-host 封装 `Attention(enableFlashAttention=true)` 分支 → `XliteOpFlashAttention`(`csrc/_C.cpp:1485-1506`、`csrc/op.cpp:933`)。kernel 签名(`csrc/kernels/flash_attention.h:428`):
+host 封装 `Attention(enableFlashAttention=true)` 分支 → `XliteOpFlashAttention`(`csrc/_C.cpp:1485-1506`、`csrc/op.cpp:903`)。kernel 签名(`csrc/kernels/flash_attention.h:428`):
 
 ```cpp
 flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum,
@@ -36,7 +36,7 @@ flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSu
 | queryStartLoc / queryLens / cachedLens | 输入 | `[batch]` | INT32 | 同 attention |
 | blockTables | 输入 | `[batch, maxNumBlocks]` | INT32 | 逻辑块→物理块映射 |
 | nHeads / nKVHeads / headSize / blockSize / batch / maxNumBlocks | 标量 | - | uint32 | 同 attention |
-| tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 侧经 `csrc/op.h:14` 的 static_assert 保证 `MAX_KV_TILE_SIZE(8192) ≤ MAX_SOFTMAX_PINGPONG_LEN(11776)`,由 auto-tuner 在 8192 内选取 |
+| tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 侧经 `csrc/op.h:13` 的 static_assert 保证 `MAX_KV_TILE_SIZE(8192) ≤ MAX_SOFTMAX_PINGPONG_LEN(11776)`,由 auto-tuner 在 8192 内选取 |
 
 ## 支持的数据类型
 
@@ -45,7 +45,7 @@ flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSu
 | float16_t | `csrc/kernels/flash_attention_float16_t.cpp` | `flash_attention_float16_t` |
 | bfloat16_t | `csrc/kernels/flash_attention_bfloat16_t.cpp` | `flash_attention_bfloat16_t` |
 
-host 校验 qkv/qk/kCache/vCache/output dtype 一致(`csrc/op.cpp:945-952`)。
+host 校验 qkv/qk/kCache/vCache/output dtype 一致(`csrc/op.cpp:915-923`)。
 
 ## 实现原理
 
@@ -64,7 +64,7 @@ host 校验 qkv/qk/kCache/vCache/output dtype 一致(`csrc/op.cpp:945-952`)。
 
 ### online softmax 合并(RunAivSoftmaxUpdate,softmax_attn_aiv.h 并入)
 
-`RunAivSoftmaxUpdate`(`csrc/kernels/softmax_attn_aiv.h:563`)实现标准 flash 在线归并,对每行:
+`RunAivSoftmaxUpdate`(`csrc/kernels/softmax_attn_aiv.h:570`)实现标准 flash 在线归并,对每行:
 
 ```
 new_max = max(max_prev, max_curr)
@@ -95,6 +95,6 @@ output  = sv_out / new_sum
 - 主类与流水调度:`csrc/kernels/flash_attention.h:77`(RunAic)、`:196`(RunAiv)
 - QK/SV:`csrc/kernels/attention_aic_helper.h`(与 attention 共用;SV 的 flash 紧凑写分支 `:270-272`)
 - tile 内 softmax(ping-pong 单趟):`csrc/kernels/softmax_attn_aiv.h:65`
-- online softmax update:`csrc/kernels/softmax_attn_aiv.h:563`
+- online softmax update:`csrc/kernels/softmax_attn_aiv.h:570`
 - 跨核同步:`csrc/kernels/ring_sync.h`
-- host launch:`csrc/op.cpp:933`、workspace 分配 `csrc/_C.cpp:1485-1506`、路由 `csrc/model.cpp:636`
+- host launch:`csrc/op.cpp:903`、workspace 分配 `csrc/_C.cpp:1485-1506`、路由 `csrc/model.cpp:636`

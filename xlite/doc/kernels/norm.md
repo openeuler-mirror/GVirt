@@ -12,7 +12,7 @@
 
 ## 输入输出参数
 
-Python 侧入口:`rmsnorm / rmsnorm_with_bias / rmsnorm_variance_only / layernorm / l2norm`(`csrc/_C.cpp:2661-2675`)。以 kernel 签名(`csrc/kernels/norm.h:223-229`)为准:
+Python 侧入口:`rmsnorm / rmsnorm_with_bias / rmsnorm_variance_only / layernorm / l2norm`(`csrc/_C.cpp:2800-2814`)。以 kernel 签名(`csrc/kernels/norm.h:223-229`)为准:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -88,7 +88,7 @@ MTE2(搬入)/ V(计算)/ MTE3(搬出)三管线,事件标志协议:
 6. **输出**:useNorm 时 `convert_output` 转 Dtype 写 GM(outFp32 时 fp32 直写);variance-only(useNorm=false)时只把每段方差(fp32)写出(norm.h:509-537)。
 7. **(可选)写 KV cache**:kcache/slot_mapping/block_size 非空时,归一化结果按 `slot_idx` 定位额外写一份到 paged cache(norm.h:522-526),该路径目前由 mla_prepare 等调用方使用,`norm_*` 导出符号固定传 nullptr(norm.h:557)。
 
-`reduce_sum`(norm.h:11-26)对 `norm_dim == 128` 走快速路径:先一条 `vadd` 折半,再逐段 `vcadd`(`Order_t::ONLY_VALUE` 语义,结果落在段首);其他维度调用通用 `ReduceSum`(kernel_macro.h:701,二分折叠 + `vcadd` 收尾)。`duplicate_item`(norm.h:28-38)经 S 管线读段首标量后 `vector_dup` 广播整段。
+`reduce_sum`(norm.h:11-26)对 `norm_dim == 128` 走快速路径:先一条 `vadd` 折半,再逐段 `vcadd`(`Order_t::ONLY_VALUE` 语义,结果落在段首);其他维度调用通用 `ReduceSum`(kernel_macro.h:711,二分折叠 + `vcadd` 收尾)。`duplicate_item`(norm.h:28-38)经 S 管线读段首标量后 `vector_dup` 广播整段。
 
 ### 边界处理
 

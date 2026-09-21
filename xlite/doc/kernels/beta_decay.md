@@ -13,7 +13,7 @@ g    = -exp(A_log) * softplus(a + dt_bias) # 衰减系数
 
 ## 输入输出参数
 
-Python 入口 `beta_decay(rt, b, a, A_log, dt_bias, beta, g, bsz, seqlen, num_v_heads)`(`csrc/_C.cpp:2796`)。kernel 签名见 `csrc/kernels/beta_decay.h:282-291`:
+Python 入口 `beta_decay(rt, b, a, A_log, dt_bias, beta, g, bsz, seqlen, num_v_heads)`(`csrc/_C.cpp:2946`)。kernel 签名见 `csrc/kernels/beta_decay.h:282-291`:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -35,7 +35,7 @@ Python 入口 `beta_decay(rt, b, a, A_log, dt_bias, beta, g, bsz, seqlen, num_v_
 - `float16_t`([beta_decay_float16_t.cpp](../../csrc/kernels/beta_decay_float16_t.cpp))
 - `bfloat16_t`([beta_decay_bfloat16_t.cpp](../../csrc/kernels/beta_decay_bfloat16_t.cpp))
 
-host 要求 b、a 同 dtype 且为 FP32/FP16/BF16(`csrc/op.cpp:2014-2020`)。
+host 要求 b、a 同 dtype 且为 FP32/FP16/BF16(`csrc/op.cpp:2118-2123`)。
 
 ## 实现原理
 

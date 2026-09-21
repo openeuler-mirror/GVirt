@@ -20,9 +20,9 @@ conv1d_state_update_##dtype(state, input, batch, channels, seqLen, kernelDim)
 | weight | 输入 | [C, 1, K]（或 [C, K]） | 同 state | depthwise 卷积核；kernel 按 `weight + cb*1024*K` 连续读取 |
 | output | 输出 | [T, C] | 同 state | SiLU 后输出 |
 | batch | 标量 | - | uint32 | B |
-| channels | 标量 | - | uint32 | C，**必须为 1024 的倍数**（host 强制，`csrc/op.cpp:1959-1963`） |
-| seqLen | 标量 | - | uint32 | 均匀 S，要求 `S >= K` 且 `B*S == T`（`csrc/op.cpp:1954-1958`） |
-| kernelDim | 标量 | - | uint32 | K，仅允许 {1, 2, 4}（host 强制，`csrc/op.cpp:1949-1953`） |
+| channels | 标量 | - | uint32 | C，**必须为 1024 的倍数**（host 强制，`csrc/op.cpp:2063-2067`） |
+| seqLen | 标量 | - | uint32 | 均匀 S，要求 `S >= K` 且 `B*S == T`（`csrc/op.cpp:2058-2061`） |
+| kernelDim | 标量 | - | uint32 | K，仅允许 {1, 2, 4}（host 强制，`csrc/op.cpp:2053-2056`） |
 
 窗口语义（`conv1d_and_silu_token.h:40-46`）：对 batch 内相对行 i，tap k 的来源为 `i+1+k < K → state[i+1+k]`，否则 `input` 行 `i-K+1+k`（同 batch）。
 
@@ -32,7 +32,7 @@ Python 调用方式（`tests/kernels/conv1d_and_silu_token.py:44`）：
 linear_att_conv_and_silu_token(rt, mix_qkv, conv_state, weight, output, seq_len)
 ```
 
-host 侧（`csrc/op.cpp:1931-2003`）按 `coreNum = min(aivNum, B*S)` 启动 conv kernel；若 `updateState` 再按 `stateCores = min(aivNum, B * (C/1024))` 启动 state kernel。
+host 侧（`csrc/op.cpp:2095-2107`）按 `coreNum = min(aivNum, B*S)` 启动 conv kernel；若 `updateState` 再按 `stateCores = min(aivNum, B * (C/1024))` 启动 state kernel。
 
 ## 支持的数据类型
 
@@ -42,7 +42,7 @@ host 侧（`csrc/op.cpp:1931-2003`）按 `coreNum = min(aivNum, B*S)` 启动 con
 | bfloat16_t | `csrc/kernels/conv1d_and_silu_token_bfloat16_t.cpp` | `conv1d_and_silu_token_bfloat16_t` / `conv1d_state_update_bfloat16_t` |
 | float | `csrc/kernels/conv1d_and_silu_token_float.cpp` | `conv1d_and_silu_token_float` / `conv1d_state_update_float` |
 
-仅支持 `__DAV_C220_VEC__`，其他架构导出空实现（`conv1d_and_silu_token.h:610-636`）。dtype 约束见 `csrc/op.cpp:1976-1989`。
+仅支持 `__DAV_C220_VEC__`，其他架构导出空实现（`conv1d_and_silu_token.h:610-636`）。dtype 约束见 `csrc/op.cpp:2080-2090`。
 
 ## 实现原理
 
@@ -100,4 +100,4 @@ host 侧（`csrc/op.cpp:1931-2003`）按 `coreNum = min(aivNum, B*S)` 启动 con
 2. 反向 vgather 打包：偏移 `off_tile[p] = (p%K)*CB*4 + (p/K)*4`，lane p（组 g）读 `rows_f[p%K][g*(64/K) + p/K]`，把 `[K][CB]` 行数据聚成 GM 所需的 `[CB][K]` tile（`conv1d_and_silu_token.h:532-539`）；
 3. 非 float 先 vconv 舍回 dtype（tile_raw），再整块 `CopyUbufToGmAligned` 写 `state + (b*C + cb*CB)*K`。
 
-独立 launch 的原因：conv 主 kernel 各核读 state GM 作窗口上下文，若同 launch 内末行核改写 state 会与其他核竞争，两次 launch 的边界即天然核间屏障（`conv1d_and_silu_token.h:440-445` 注释、`csrc/op.cpp:1995-2002`）。
+独立 launch 的原因：conv 主 kernel 各核读 state GM 作窗口上下文，若同 launch 内末行核改写 state 会与其他核竞争，两次 launch 的边界即天然核间屏障（`conv1d_and_silu_token.h:440-445` 注释、`csrc/op.cpp:2100-2107`）。
