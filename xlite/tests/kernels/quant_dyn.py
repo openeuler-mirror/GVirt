@@ -21,6 +21,10 @@ test_cases = [
     [8192, 2048],
     [40, 96],
     [200000, 96],
+    # k > XLITE_QUANT_DYN_MAX_K(12160): exercises the k-tiling path.
+    [8, 12288],      # GLM-5 inter_dim, small m, large k
+    [8192, 12288],   # large m, large k (previously overflowed)
+    [8, 24576],      # multi-tile (3 tiles), k_loop>1
 ]
 
 for m, n in test_cases:
