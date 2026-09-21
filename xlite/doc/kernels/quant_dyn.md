@@ -14,7 +14,7 @@ out        = int8(x_scaled)              (vconv_f162s8 饱和舍入)
 
 ## 输入输出参数
 
-Python 入口 `quant_dynamic(rt, x, scale, out)`(`csrc/_C.cpp:2740`)。kernel 签名见 `csrc/kernels/quant_dyn.h:99-104`:
+Python 入口 `quant_dynamic(rt, x, scale, out)`(`csrc/_C.cpp:2879`)。kernel 签名见 `csrc/kernels/quant_dyn.h:25-26`:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -31,18 +31,18 @@ Python 入口 `quant_dynamic(rt, x, scale, out)`(`csrc/_C.cpp:2740`)。kernel �
 
 - 输入 `bfloat16_t` → 输出 `int8_t` + `float` scale([quant_dyn_bfloat16_t.cpp](../../csrc/kernels/quant_dyn_bfloat16_t.cpp))
 
-host 仅接受 `x.dtype == BF16`(`csrc/op.cpp:1389`)。
+host 仅接受 `x.dtype == BF16`(`csrc/op.cpp:1455`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/quant_dyn.h](../../csrc/kernels/quant_dyn.h),函数 `quant_bf16_to_i8`(quant_dyn.h:10-97)。
+实现位于 [csrc/kernels/quant_dyn.h](../../csrc/kernels/quant_dyn.h),函数 `quant_bf16_to_i8`(quant_dyn.h:25-112)。
 
 ### 分块策略
 
-- **无 k 切块**:整行一次搬入 UB(要求 k 不超 UB 容量,MoE 场景 k = hiddenSize 满足;`k_pad = ROUND_UP(k, 128)` 即按 BF16 16 字节粒度对齐,quant_dyn.h:22)。
-- **多 Block 并行**:`for (row = block_idx; row < m; row += block_num)`(quant_dyn.h:45),行间轮转。行内为纯串行归约 + 量化,行间用 x/z 双缓冲 ping-pong 流水。
+- **无 k 切块**:整行一次搬入 UB(要求 k 不超 UB 容量,MoE 场景 k = hiddenSize 满足;`k_pad = ROUND_UP(k, 128)` 即按 BF16 16 字节粒度对齐,quant_dyn.h:37)。
+- **多 Block 并行**:`for (row = block_idx; row < m; row += block_num)`(quant_dyn.h:60),行间轮转。行内为纯串行归约 + 量化,行间用 x/z 双缓冲 ping-pong 流水。
 
-### UB 内存布局(quant_dyn.h:24-33)
+### UB 内存布局(quant_dyn.h:39-48)
 
 | 缓冲 | dtype | 用途 |
 |---|---|---|
@@ -56,21 +56,21 @@ host 仅接受 `x.dtype == BF16`(`csrc/op.cpp:1389`)。
 
 ### 流水线同步
 
-- 行数据链:MTE2/V 用 EVENT_ID0/ID1 ping-pong(`V→MTE2` 释放、`MTE2→V` 就绪,quant_dyn.h:48-56);INT8 结果 V→MTE3→GM→`MTE3→V` 回收 z 缓冲(quant_dyn.h:81-87)。
-- scale 写出链走 **S 管线**:`ReduceMax` 后 `V→S` 同步读回 absmax 标量(quant_dyn.h:63-67),再 `S→MTE3` 把 scaleUb 单元素 `copy_ubuf_to_gm_align_b32` 写到 `scales[row]`(quant_dyn.h:68-75)。S 管线介入是因为标量读写只能走 Scalar pipe,`PIPE_MTE3→PIPE_S` 事件保证上一行 scale 写出完成后才复用 scaleUb。
+- 行数据链:MTE2/V 用 EVENT_ID0/ID1 ping-pong(`V→MTE2` 释放、`MTE2→V` 就绪,quant_dyn.h:55-71);INT8 结果 V→MTE3→GM→`MTE3→V` 回收 z 缓冲(quant_dyn.h:96-102)。
+- scale 写出链走 **S 管线**:`ReduceMax` 后 `V→S` 同步读回 absmax 标量(quant_dyn.h:77-80),再 `S→MTE3` 把 scaleUb 单元素 `copy_ubuf_to_gm_align_b32` 写到 `scales[row]`(quant_dyn.h:83-90)。S 管线介入是因为标量读写只能走 Scalar pipe,`PIPE_MTE3→PIPE_S` 事件保证上一行 scale 写出完成后才复用 scaleUb。
 
-### 关键计算步骤(quant_dyn.h:54-86)
+### 关键计算步骤(quant_dyn.h:60-104)
 
 1. 搬入整行 BF16,`vconv_bf162f32` 转 FP32;
 2. `vabs` 取绝对值;
-3. `ReduceMax(xAbs, xAbs, k)` 归约出整行 absmax(通用归约实现见 [kernel_macro.h:644](../../csrc/kernels/kernel_macro.h),二分折叠 + `vcmax`);
+3. `ReduceMax(xAbs, xAbs, k)` 归约出整行 absmax(通用归约实现见 [kernel_macro.h:655](../../csrc/kernels/kernel_macro.h),二分折叠 + `vcmax`);
 4. S 管线读回 `*xAbs`,标量算 `scale = absmax / 127`、`scaleRec = 127 / absmax`;
 5. scale 写 GM;`vmuls` 把整行乘 scaleRec;
-6. `vconv_f322f16` 转 FP16,`vconv_f162s8`(饱和舍入)转 INT8(注意此处用的是非 `a` 后缀的 `vconv_f162s8`,量化值已按 scale 压缩到 [-127, 127] 范围内,quant_dyn.h:82);
+6. `vconv_f322f16` 转 FP16,`vconv_f162s8`(饱和舍入)转 INT8(注意此处用的是非 `a` 后缀的 `vconv_f162s8`,量化值已按 scale 压缩到 [-127, 127] 范围内,quant_dyn.h:97);
 7. `copy_ubuf_to_gm_align_b8` 写回。
 
 ### 边界处理
 
-- `pnum_tokens` 非空时 `m = min(*pnum_tokens, m)`(quant_dyn.h:17-20),跳过 DP padding 出来的无效行;
+- `pnum_tokens` 非空时 `m = min(*pnum_tokens, m)`(quant_dyn.h:32-35),跳过 DP padding 出来的无效行;
 - k 非 128 整数倍时 `k_pad` 补齐做向量计算,搬运/写出仍按真实 k 字节;
-- host 侧 `x.numel == 0` 直接返回(op.cpp:1380)。
+- host 侧 `x.numel == 0` 直接返回(op.cpp:1441)。

@@ -8,11 +8,11 @@
 out = int8(x * scale_reciprocal + offset)
 ```
 
-其中 `scale_reciprocal` 是量化 scale 的倒数(`1/scale`,由离线校准给出),`offset` 为量化偏置;host 语义上等价 `clamp(round(x/scale + offset), -128, 127)`(饱和由 `vconv_f162s8a` 的饱和舍入指令完成)。scale/offset 与激活同一 k 维按列对齐,属于 W8A8 推理管线的激活量化步骤([csrc/model.cpp:352](../../csrc/model.cpp))。
+其中 `scale_reciprocal` 是量化 scale 的倒数(`1/scale`,由离线校准给出),`offset` 为量化偏置;host 语义上等价 `clamp(round(x/scale + offset), -128, 127)`(饱和由 `vconv_f162s8a` 的饱和舍入指令完成)。scale/offset 与激活同一 k 维按列对齐,属于 W8A8 推理管线的激活量化步骤([csrc/model.cpp:354](../../csrc/model.cpp))。
 
 ## 输入输出参数
 
-Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2738`)。kernel 签名见 `csrc/kernels/quant.h:153-158`:
+Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2877`)。kernel 签名见 `csrc/kernels/quant.h:153-158`:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -29,7 +29,7 @@ Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2738`)�
 
 - 输入 `bfloat16_t` → 输出 `int8_t`([quant_bfloat16_t.cpp](../../csrc/kernels/quant_bfloat16_t.cpp))
 
-host 侧仅接受 `x.dtype == BF16`(`csrc/op.cpp:1369`),算子名即 `quant_bf16_to_i8_static`。
+host 侧仅接受 `x.dtype == BF16`(`csrc/op.cpp:1430`),算子名即 `quant_bf16_to_i8_static`。
 
 ## 实现原理
 

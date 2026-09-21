@@ -19,7 +19,7 @@ cxa(rt, q, swa_k_cache, compress_k_cache, swa_block_tables, compress_block_table
     index_topk, topk_indices, enable_flash_attention=True, tile_size_of_cached_kv=8192)
 ```
 
-host 封装 `XliteOpFlashCXA`(`csrc/op.cpp:1095`)→ kernel `flash_cxa_bfloat16_t`(`csrc/kernels/flash_cxa.h:482` 的 `FLASH_CXA_FUNC_DEFINE`)。kernel 签名(`csrc/kernels/flash_cxa.h:31` 的 `Init`):
+host 封装 `XliteOpFlashCXA`(`csrc/op.cpp:1048`)→ kernel `flash_cxa_bfloat16_t`(`csrc/kernels/flash_cxa.h:482` 的 `FLASH_CXA_FUNC_DEFINE`)。kernel 签名(`csrc/kernels/flash_cxa.h:31` 的 `Init`):
 
 ```cpp
 flash_cxa_<dtype>(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables,
@@ -46,7 +46,7 @@ flash_cxa_<dtype>(q, swaKCache, compressKCache, swaBlockTables, compressBlockTab
 | query_start_loc / query_lens / cached_lens | 输入 | `[batch]` | INT32 | query 长度前缀和 / 当前 query 长度 / 已缓存长度 |
 | n_heads / head_dim / scale / window_size / compress_ratio / index_topk | 标量 | - | uint32/float | 同 cxa;flash 要求 `compressRatio != 0` |
 | topk_indices | 输入(可选) | `[totalQ, indexTopK]` | INT32 | DSA top-k 压缩索引;`indexTopK == 0` 时禁用 |
-| tile_size_of_cached_kv | 标量 | - | uint32 | KV-len(压缩 token)tile 宽度;host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN = 11776`(`csrc/op.cpp:1107-1111`),默认 `MAX_KV_TILE_SIZE = 8192`(`csrc/auto_tuner.h:13`) |
+| tile_size_of_cached_kv | 标量 | - | uint32 | KV-len(压缩 token)tile 宽度;host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN = 11776`(`csrc/op.cpp:1060-1064`),默认 `MAX_KV_TILE_SIZE = 8192`(`csrc/auto_tuner.h:13`) |
 
 workspace 由 `csrc/_C.cpp:1664-1673` 分配:`qk`/`sv` 宽度分别为 `qkWidth = swaSegWidth + tileSizeOfCachedKV` 与 `headDim`,`max`/`sum` 各 `aivNum * XLITE_MAX_M0 * 2`,`lastMax`/`lastSum` 为 `[totalQ, nHeads]`,`sync` 为 `[1, aivNum]` 并 `Memset(0)`。
 
@@ -56,11 +56,11 @@ workspace 由 `csrc/_C.cpp:1664-1673` 分配:`qk`/`sv` 宽度分别为 `qkWidth 
 |---|---|---|
 | bfloat16_t | `csrc/kernels/flash_cxa_bfloat16_t.cpp` | `flash_cxa_bfloat16_t` |
 
-host 侧仅 BF16(`csrc/op.cpp:1124-1134` 的 `EachXDtype(BF16, ...)`,否则抛 unsupported)。
+host 侧仅 BF16(`csrc/op.cpp:1077-1089` 的 `EachXDtype(BF16, ...)`,否则抛 unsupported)。
 
 调度类型为 `KERNEL_TYPE_MIX_AIC_1_2`(`csrc/kernels/flash_cxa.h:42`):1 AIC + 2 AIV 混合调度,与 cxa 一致。
 
-host 侧约束(`csrc/op.cpp:1107-1121`):`tileSizeOfCachedKV ≤ MAX_SOFTMAX_PINGPONG_LEN`、`indexTopK ≤ MAX_TOPK_NUM = 2048`、`compressRatio != 0`(flash 必须有压缩段)。
+host 侧约束(`csrc/op.cpp:1060-1074`):`tileSizeOfCachedKV ≤ MAX_SOFTMAX_PINGPONG_LEN`、`indexTopK ≤ MAX_TOPK_NUM = 2048`、`compressRatio != 0`(flash 必须有压缩段)。
 
 ## 实现原理
 
@@ -98,8 +98,8 @@ host 侧约束(`csrc/op.cpp:1107-1121`):`tileSizeOfCachedKV ≤ MAX_SOFTMAX_PING
 - 主类与 Init:`csrc/kernels/flash_cxa.h:24`、`Init` `:31`
 - AIC 流水(`RunAic`):`csrc/kernels/flash_cxa.h:93`
 - AIV 流水(`RunAiv`,softmax + online update):`csrc/kernels/flash_cxa.h:230`
-- QK/SV cube 计算:`csrc/kernels/cxa_aic_helper.h:130`/`:353`(与 cxa 共用,`hasSwa` 参数由 flash_cxa 传入)
+- QK/SV cube 计算:`csrc/kernels/cxa_aic_helper.h:130`/`:354`(与 cxa 共用,`hasSwa` 参数由 flash_cxa 传入)
 - tile softmax(ping-pong,含 top-k):`csrc/kernels/softmax_attn_aiv.h:65`
 - online softmax update:`csrc/kernels/softmax_attn_aiv.h:570`
 - RingSync:`csrc/kernels/ring_sync.h`
-- host launch:`csrc/op.cpp:1095`、workspace 分配 `csrc/_C.cpp:1664-1683`、Python 路由 `csrc/_C.cpp:1663`
+- host launch:`csrc/op.cpp:1048`、workspace 分配 `csrc/_C.cpp:1664-1683`、Python 路由 `csrc/_C.cpp:1663`

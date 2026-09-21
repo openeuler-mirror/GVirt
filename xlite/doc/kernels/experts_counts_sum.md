@@ -9,7 +9,7 @@ MoE AllToAll 通信前的计数归约：对"每个 DP rank × 每个专家"的 t
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |------|------|-------|-------|------|
 | experts_counts_input | 输入 | [ep_size, n_routed_experts] | int32 | 每行对应一个 DP rank，每列一个专家的 token 计数 |
-| tokens_per_epgroup | 输出 | [ep_size, ep_size] | int32 | `tokens_per_epgroup[dp_idx, ep_id]` = DP rank dp_idx 发往 EP 组 ep_id 的 token 总和；ep_id = expert // (n_routed_experts/ep_size)。host 侧取 `tokensPerEpgroup.shape[0]` 作 ep_size（`csrc/op.cpp:1801`） |
+| tokens_per_epgroup | 输出 | [ep_size, ep_size] | int32 | `tokens_per_epgroup[dp_idx, ep_id]` = DP rank dp_idx 发往 EP 组 ep_id 的 token 总和；ep_id = expert // (n_routed_experts/ep_size)。host 侧取 `tokensPerEpgroup.shape[0]` 作 ep_size（`csrc/op.cpp:1905`） |
 | experts_counts_output | 输出 | [n_routed_experts] | int32 | `output[e] = Σ_dp counts[dp, e]`，每个专家跨全部 DP rank 的总计数 |
 | n_routed_experts | 标量 | - | uint32_t | 专家总数，须被 ep_size 整除（测试约束，`tests/kernels/experts_counts_sum.py:37-38`） |
 | ep_size | 标量 | - | uint32_t | DP/EP rank 数（隐含等于输入行数） |
@@ -26,7 +26,7 @@ Python 调用方式（`tests/kernels/experts_counts_sum.py:63-69`）：`experts_
 
 ## 实现原理
 
-单 kernel 两阶段，launch 时使用全部 AIV block（`rt.aivNum`，`csrc/op.cpp:1799`）。
+单 kernel 两阶段，launch 时使用全部 AIV block（`rt.aivNum`，`csrc/op.cpp:1903`）。
 
 ### 任务切分（`csrc/kernels/experts_counts_sum.cpp:24-39`）
 

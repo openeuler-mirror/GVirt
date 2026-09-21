@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-复数风格的旋转位置编码(complex RoPE,DeepSeek MLA 系约定):把每个 head 中长度为 `ropeDim` 的 rope 区视为 `ropeDim/2` 个复数,与 `e^{i·pos·θ_k}` 相乘完成旋转,并把整个 head(含 rope 区前的 remain 部分)按 `slot_mapping` 写入 vCache。支持正向/逆向(`inverse`,共轭旋转)与输出交错/半分两种布局(`outInterleaved`),兼容 rope 区位于 head 头部(MLA pe cache)或尾部(CXA swa kv `[remain | rope]` 布局)两种排布。非 cache 的纯计算入口 `rope_complex` 复用同一 kernel(host 传 `output_ptr` 非 null、`vcache=nullptr`,见 [csrc/op.cpp:1061-1082](../../csrc/op.cpp#L1061-L1082))。
+复数风格的旋转位置编码(complex RoPE,DeepSeek MLA 系约定):把每个 head 中长度为 `ropeDim` 的 rope 区视为 `ropeDim/2` 个复数,与 `e^{i·pos·θ_k}` 相乘完成旋转,并把整个 head(含 rope 区前的 remain 部分)按 `slot_mapping` 写入 vCache。支持正向/逆向(`inverse`,共轭旋转)与输出交错/半分两种布局(`outInterleaved`),兼容 rope 区位于 head 头部(MLA pe cache)或尾部(CXA swa kv `[remain | rope]` 布局)两种排布。非 cache 的纯计算入口 `rope_complex` 复用同一 kernel(host 传 `output_ptr` 非 null、`vcache=nullptr`,见 [csrc/op.cpp:1119-1141](../../csrc/op.cpp#L1119-L1141))。
 
 数学语义(输入按 `(r0, i0, r1, i1, ...)` 交错解释,`half = ropeDim/2`):
 
@@ -24,7 +24,7 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 | position | 输入 | `[num_tokens]` | int64 | 每 token 的位置 id,用于索引 freqs 行 |
 | v_cache | 输出 | `[num_blocks, block_size, n_local_heads, vdim]` | 同 input | 每 slot 存一个完整 head(vdim);CXA 场景 vdim=step_dim 包含 remain,MLA pe cache 场景 vdim=rope_dim 只存 rope 区 |
 | slot_mapping | 输入 | `[num_tokens]` | int32 | token 的平坦 slot 索引;`v_cache + slot * n_local_heads * vdim` 寻址 |
-| output | 输出(纯计算模式) | `[num_tokens, n_local_heads, rope_dim]` | 同 input | 仅 `rope_complex` 入口使用;cache 入口 host 传 `nullptr`([csrc/op.cpp:1103-1105](../../csrc/op.cpp#L1103-L1105)) |
+| output | 输出(纯计算模式) | `[num_tokens, n_local_heads, rope_dim]` | 同 input | 仅 `rope_complex` 入口使用;cache 入口 host 传 `nullptr`([csrc/op.cpp:1143-1163](../../csrc/op.cpp#L1143-L1163)) |
 | n_local_heads | 标量 | - | uint32 | 头数;cache 模式断言为 1 |
 | step_dim | 标量 | - | uint32 | input 第 2 维(完整 head 维度) |
 | rope_dim | 标量 | - | uint32 | rope 区长度(偶数),测试覆盖 64/128/192/576 |
@@ -39,7 +39,7 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 - `float16_t`([rope_complex_and_cache_float16_t.cpp](../../csrc/kernels/rope_complex_and_cache_float16_t.cpp))
 - `bfloat16_t`([rope_complex_and_cache_bfloat16_t.cpp](../../csrc/kernels/rope_complex_and_cache_bfloat16_t.cpp))
 
-按 `inputWithR.dtype` 单独判别([csrc/op.cpp:1094-1099](../../csrc/op.cpp#L1094-L1099)),内部统一升到 fp32 计算。
+按 `inputWithR.dtype` 单独判别([csrc/op.cpp:1128-1135](../../csrc/op.cpp#L1128-L1135)),内部统一升到 fp32 计算。
 
 ## 实现原理
 

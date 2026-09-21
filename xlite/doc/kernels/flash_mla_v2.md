@@ -6,14 +6,14 @@ MLA 吸收式注意力的 flash(在线 softmax)版本,是 mla_v2 的长序列路
 
 ## 输入输出参数
 
-Python 侧经 `mla_v2(..., enable_flash=True, tile_size)` 进入 host 分支(`tests/kernels/mla.py:269` 的 `enable_flash = True`、`tile_size = 8192`):
+Python 侧经 `mla_v2(..., enable_flash=True, tile_size)` 进入 host 分支(`tests/kernels/mla.py:47` 的 `enable_flash = True`、`tile_size = 8192`):
 
 ```python
 mla_v2(rt, q_with_qr, qr, k_cache, pe_cache, wuk_t, wuv, output, ..., topk_indices,
        top_k, weight_nz, enable_flash=True, tile_size)
 ```
 
-host 封装 `MLAV2` 的 flash 分支(`csrc/_C.cpp:1567-1590`)→ `XliteOpFlashMLAV2`(`csrc/op.cpp:1027`)。kernel 签名(`csrc/kernels/flash_mla_v2.h:434`):
+host 封装 `MLAV2` 的 flash 分支(`csrc/_C.cpp:1567-1590`)→ `XliteOpFlashMLAV2`(`csrc/op.cpp:1010`)。kernel 签名(`csrc/kernels/flash_mla_v2.h:434`):
 
 ```cpp
 flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum,
@@ -27,7 +27,7 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 | qAbsorb | 输入 | `[total_tokens, nHeads, kvLoraRank]` | BF16 | host 已做 WUK 吸收的 Q latent |
 | qr | 输入 | `[total_tokens, nHeads, ropeHeadDim]` | BF16 | Q 的 RoPE 部分 |
 | kCache / peCache | 输入 | `[numBlocks, blockSize, kvLoraRank]` / `[..., ropeHeadDim]` | BF16 | paged latent K / RoPE K cache |
-| topkIndices | 输入(可选) | `[total_tokens, topK]` | INT32 | DSA top-k token 下标(升序);host 限制 `topK ≤ MAX_TOPK_NUM=2048`(`csrc/op.cpp:1043-1047`) |
+| topkIndices | 输入(可选) | `[total_tokens, topK]` | INT32 | DSA top-k token 下标(升序);host 限制 `topK ≤ MAX_TOPK_NUM=2048`(`csrc/op.cpp:1026-1029`) |
 | qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, tileSizeOfCachedKV]` | BF16 | 当前 KV tile 的 QK 分数,按核双缓冲 |
 | sv | workspace | `[aicNum * XLITE_MAX_M0 * 2, kvLoraRank]` | BF16 | 当前 tile 的 softmax·kCache 部分和 |
 | max / sum | workspace | `[aivNum * XLITE_MAX_M0 * 2]` | FP32 | 当前 tile 局部 max / Σexp |
@@ -37,7 +37,7 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 | queryStartLoc / queryLens / cachedLens / blockTables | 输入 | `[batch]` / `[batch, maxNumBlocks]` | INT32 | 同 mla_v2 |
 | nHeads / ropeHeadDim / kvLoraRank / blockSize / batch / maxNumBlocks | 标量 | - | uint32 | 同 mla_v2 |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
-| tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN=11776`(`csrc/op.cpp:1038-1042`) |
+| tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN=11776`(`csrc/op.cpp:1021-1025`) |
 
 ## 支持的数据类型
 
@@ -45,7 +45,7 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 |---|---|---|
 | bfloat16_t | `csrc/kernels/flash_mla_v2_bfloat16_t.cpp` | `flash_mla_v2_bfloat16_t` |
 
-host 侧仅 BF16(`csrc/op.cpp:1022`)。
+host 侧仅 BF16(`csrc/op.cpp:1031`)。
 
 ## 实现原理
 
@@ -75,6 +75,6 @@ topkIndices 形状 `[total_tokens, topK]`,按 `topkIndices + topK * queryTaskOff
 - 主类与流水:`csrc/kernels/flash_mla_v2.h:77`(RunAic)、`:194`(RunAiv)
 - 吸收式 QK/SV:`csrc/kernels/mla_aic_helper.h:158`/`:312`(与 mla_v2 共用)
 - tile softmax(ping-pong,含 top-k):`csrc/kernels/softmax_attn_aiv.h:65`
-- online softmax update:`csrc/kernels/softmax_attn_aiv.h:563`
+- online softmax update:`csrc/kernels/softmax_attn_aiv.h:570`
 - RingSync:`csrc/kernels/ring_sync.h`
-- host launch:`csrc/op.cpp:1027`、workspace `csrc/_C.cpp:1567-1590`、路由 `csrc/model.cpp:518-538`
+- host launch:`csrc/op.cpp:1010`、workspace `csrc/_C.cpp:1567-1590`、路由 `csrc/model.cpp:518-538`

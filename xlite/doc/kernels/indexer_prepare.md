@@ -20,7 +20,7 @@ indexer_prepare(rt, kw, k_norm, k_norm_bias, freqs_cis, position,
                 index_k_cache, slot_mapping, norm_eps, q, scale, topK, is_long)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:1163`(`XliteOpIndexerPrepare`)。kernel 签名(`csrc/kernels/indexer_prepare.h:392`):
+host 侧 launch 见 `csrc/op.cpp:1223`(`XliteOpIndexerPrepare`)。kernel 签名(`csrc/kernels/indexer_prepare.h:392`):
 
 ```cpp
 indexer_prepare_<dtype>(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR freqs,
@@ -54,7 +54,7 @@ indexer_prepare_<dtype>(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR fr
 | `indexer_prepare_bfloat16_t` | `csrc/kernels/indexer_prepare_bfloat16_t.cpp` | kw 为 bf16;kNorm/kNormBias 可为 bf16 或 fp32 |
 | `indexer_prepare_float16_t` | `csrc/kernels/indexer_prepare_float16_t.cpp` | kw 为 fp16;kNorm/kNormBias 可为 fp16 或 fp32 |
 
-dtype 分派逻辑见 `csrc/op.cpp:1178-1188`。kernel 为纯向量核(`__DAV_C220_VEC__`,`KERNEL_TASK_TYPE_DEFAULT` 未设,由 `XliteOpIndexerPrepare` 以 `rt.aivNum` 个 block launch)。
+dtype 分派逻辑见 `csrc/op.cpp:1238-1248`。kernel 为纯向量核(`__DAV_C220_VEC__`,`KERNEL_TASK_TYPE_DEFAULT` 未设,由 `XliteOpIndexerPrepare` 以 `rt.aivNum` 个 block launch)。
 
 ## 实现原理
 

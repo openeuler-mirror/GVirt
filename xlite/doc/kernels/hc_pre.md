@@ -12,7 +12,7 @@ y[m, hidden] = Σ_h pre[m, h] * xResid[m, h, hidden]      # fp32 累加, bf16 �
 
 ## 输入输出参数
 
-Python 侧调用:`hc_pre(rt, x_resid, pre, output, m, hc_mult, hidden)`(`xlite/_C.pyi`),host 侧封装 `XliteOpHcPre`(`csrc/op.cpp:2301`),以 `hc_pre_bfloat16_t` 启动(`csrc/op.cpp:2312-2313`)。
+Python 侧调用:`hc_pre(rt, x_resid, pre, output, m, hc_mult, hidden)`(`xlite/_C.pyi`),host 侧封装 `XliteOpHcPre`(`csrc/op.cpp:2366`),以 `hc_pre_bfloat16_t` 启动(`csrc/op.cpp:2377-2378`)。
 
 kernel 签名(模板 `csrc/kernels/hc_pre.h:13-15`,入口宏 `csrc/kernels/hc_pre.h:113-119`):
 
@@ -31,7 +31,7 @@ hc_pre_bfloat16_t(GM_ADDR pre, GM_ADDR xResid, GM_ADDR yOut, uint32_t m, uint32_
 | hcMult | 标量 | - | uint32 | Hyper-Connection 流数 K |
 | hidden | 标量 | - | uint32 | 每流特征维 D |
 
-host 校验 `xResid`/`yOut` 为 BF16、`pre` 为 FP32(`csrc/op.cpp:2308-2311`)。
+host 校验 `xResid`/`yOut` 为 BF16、`pre` 为 FP32(`csrc/op.cpp:2373-2376`)。
 
 ## 支持的数据类型
 
@@ -69,4 +69,4 @@ host 校验 `xResid`/`yOut` 为 BF16、`pre` 为 FP32(`csrc/op.cpp:2308-2311`)�
 - token 循环:`csrc/kernels/hc_pre.h:66`
 - ub2ub pre 中转:`csrc/kernels/hc_pre.h:78`
 - vaxpy pre-sum:`csrc/kernels/hc_pre.h:90`
-- host 封装 `XliteOpHcPre`:`csrc/op.cpp:2301`
+- host 封装 `XliteOpHcPre`:`csrc/op.cpp:2366`

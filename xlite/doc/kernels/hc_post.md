@@ -8,11 +8,11 @@ DeepSeek-V4 Hyper-Connection 的后融合算子(post-attn/FFN merge):注意力�
 y[m, k, d] = post[m, k] * x[m, d] + Σ_h comb[m, h*K + k] * residual[m, h, d]
 ```
 
-即 `term1` 为 post 门控的子模块输出广播,`term2` 是一个 K=H 的小批量 GEMM(comb [H,H] × residual [H,D])。这种小 K GEMM 在 Cube 矩阵核上效率很低,因此整个算子用纯 Vector 指令(`vmuls` + K 次 `vaxpy`)一次 AIV pass 完成,同时融合 bf16↔fp32 类型转换,fp32 精度计算。模型中以 in-place 方式调用(residual == y,`model.cpp:1618`,测试 `tests/kernels/hc_post.py:82` 同样)。
+即 `term1` 为 post 门控的子模块输出广播,`term2` 是一个 K=H 的小批量 GEMM(comb [H,H] × residual [H,D])。这种小 K GEMM 在 Cube 矩阵核上效率很低,因此整个算子用纯 Vector 指令(`vmuls` + K 次 `vaxpy`)一次 AIV pass 完成,同时融合 bf16↔fp32 类型转换,fp32 精度计算。模型中以 in-place 方式调用(residual == y,`model.cpp:1789`,测试 `tests/kernels/hc_post.py:82` 同样)。
 
 ## 输入输出参数
 
-Python 侧调用:`hc_post(rt, x_n, post_n, comb_n, residual_inplace, residual_inplace, n, HC_MULT, hidden)`(`tests/kernels/hc_post.py:82`),host 侧封装 `XliteOpHcPost`(`csrc/op.cpp:2218`)。
+Python 侧调用:`hc_post(rt, x_n, post_n, comb_n, residual_inplace, residual_inplace, n, HC_MULT, hidden)`(`tests/kernels/hc_post.py:82`),host 侧封装 `XliteOpHcPost`(`csrc/op.cpp:2323`)。
 
 kernel 签名(`csrc/kernels/hc_post.h:146`):
 
@@ -30,11 +30,11 @@ hc_post_<dtype>(GM_ADDR x, GM_ADDR post, GM_ADDR comb, GM_ADDR residual, GM_ADDR
 | comb | 输入 | `[m, K*K]` | FP32 | Sinkhorn 双随机混合矩阵,`comb[h*K+k]`:h=源流,k=输出流 |
 | residual | 输入 | `[m, K, D]` | BF16 | hc 域残差(K 条流);in-place 调用时与 y 同一 tensor |
 | y | 输出 | `[m, K, D]` | BF16 | 展开后的 K 条残差流;in-place 时覆写 residual |
-| m | 标量 | - | uint32 | token 数(host 校验 `m == x.shape[0]` 隐含,`x.numel == 0` 时直接返回,`csrc/op.cpp:2221`) |
+| m | 标量 | - | uint32 | token 数(host 校验 `m == x.shape[0]` 隐含,`x.numel == 0` 时直接返回,`csrc/op.cpp:2326`) |
 | hcMult | 标量 | - | uint32 | 流数 K |
 | hidden | 标量 | - | uint32 | 每流特征维 D(测试覆盖 256 ~ 4096) |
 
-host 侧 dtype 校验:x/residual/y 必须为 BF16、post/comb 必须为 FP32,否则抛错(`csrc/op.cpp:2224-2232`)。测试 shape 约定(`tests/kernels/hc_post.py:51-82`):`[b, s, ...]` 展平为 `[n=b*s, ...]`,case 从 `(1,1,256)` decode 单 token 到 `(8,1024,4096)` 真实 prefill 规模。
+host 侧 dtype 校验:x/residual/y 必须为 BF16、post/comb 必须为 FP32,否则抛错(`csrc/op.cpp:2329-2336`)。测试 shape 约定(`tests/kernels/hc_post.py:51-82`):`[b, s, ...]` 展平为 `[n=b*s, ...]`,case 从 `(1,1,256)` decode 单 token 到 `(8,1024,4096)` 真实 prefill 规模。
 
 ## 支持的数据类型
 

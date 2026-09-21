@@ -11,10 +11,10 @@
 | x（input） | 输入 | [rowNum, yNumel] | float / float16 / bfloat16 | 输入矩阵，rowNum = xNumel / yNumel |
 | y（weight/bias） | 输入 | [yNumel] | float / float16 / bfloat16 | 偏置向量，每行广播相加 |
 | z（output） | 输出 | [rowNum, yNumel] | 同 x | 结果，可与 x 为同一 tensor（原地更新，测试中即如此） |
-| xNumel | 标量 | - | uint32_t | x 的总元素数，host 侧传 `output.shape[0] * output.shape[1]`（`csrc/op.cpp:1212-1213`） |
+| xNumel | 标量 | - | uint32_t | x 的总元素数，host 侧传 `output.shape[0] * output.shape[1]`（`csrc/op.cpp:1270-1271`） |
 | yNumel | 标量 | - | uint32_t | 偏置长度/矩阵列宽，host 侧传 `output.shape[1]` |
 
-Python 调用方式（`tests/kernels/add_bias.py:34`）：`add_bias(rt, z, bias, z)`。host 侧要求 input/weight/output 三者 dtype 一致（`csrc/op.cpp:1199-1210`）。
+Python 调用方式（`tests/kernels/add_bias.py:34`）：`add_bias(rt, z, bias, z)`。host 侧要求 input/weight/output 三者 dtype 一致（`csrc/op.cpp:1260-1268`）。
 
 ## 支持的数据类型
 

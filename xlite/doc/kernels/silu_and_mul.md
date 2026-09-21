@@ -14,7 +14,7 @@ SwiGLU 激活：输入 x 按最后一维分成两半 gate 和 up，输出 `y = s
 | y | 输出 | [num_tokens, dim] | 同 x | 激活结果 |
 | pnum_tokens | 输入(可选) | [1] | uint32 | 实际 token 数指针（动态 batch 场景），取 min(*pnum_tokens, num_tokens)；可为空 |
 | num_tokens | 标量 | - | uint32_t | token 数，host 侧传 `in.shape[0]` |
-| dim | 标量 | - | uint32_t | 输出列宽，host 侧传 `out.shape[1]`（`csrc/op.cpp:781-782`） |
+| dim | 标量 | - | uint32_t | 输出列宽，host 侧传 `out.shape[1]`（`csrc/op.cpp:753-754`） |
 | swiglu_limit | 标量 | - | float | 截断阈值 L，<= 0 表示不启用 clamp |
 
 Python 调用方式（`tests/kernels/silu_and_mul.py:32`）：`silu_and_mul(rt, input, output)`，带 clamp 时 `silu_and_mul(rt, input, output, swiglu_limit=L)`。
@@ -84,6 +84,6 @@ bf16 采用不同的切分与布局：
 
 - 任务切分：`index = block_idx; index < n_tokens * split; index += block_num` 跨 block stride 循环；若 dim 过大（`dim > UB_SIZE / (5*4 + 5*2)` 折算），将 dim 对半拆分成 `split` 段，行 × 段作为并行任务（`row = index / split, line = index % split`）；
 - UB 布局：`x32_ub0/x32_ub1`（fp32 gate+up，双缓冲，每块 2*padded_dim 个 fp32）、`tmp`（fp32 中间量）、`output_ub`（bf16 输出）、`x32_ub0_bf16/x32_ub1_bf16`（bf16 原始输入，双缓冲）；
-- 计算流程与 fp16 模板相同（clamp → vmuls(-1) → vexp → vadds(1) → vdiv → vmul），但显式插入 `vconv_bf162f32` 升精度、`vconv_f322bf16r` 降精度（`silu_and_mul_bfloat16_t.cpp:80-83, 118-120`）；
-- 尾部处理：`dim_split % 64 != 0` 时用 `SetMaskFromHighBit` + `vector_dup(0)` 把 fp32 缓冲尾部 padding 置零（`silu_and_mul_bfloat16_t.cpp:85-92`），随后恢复全 1 mask；搬运用 32B 取整的 burst_copy，最后一个 split 段按实际长度写回；
+- 计算流程与 fp16 模板相同（clamp → vmuls(-1) → vexp → vadds(1) → vdiv → vmul），但显式插入 `vconv_bf162f32` 升精度、`vconv_f322bf16r` 降精度（`silu_and_mul_bfloat16_t.cpp:67, 111`）；
+- 尾部处理：`dim_split % 64 != 0` 时用 `SetMaskFromHighBit` + `vector_dup(0)` 把 fp32 缓冲尾部 padding 置零（`silu_and_mul_bfloat16_t.cpp:71-78`），随后恢复全 1 mask；搬运用 32B 取整的 burst_copy，最后一个 split 段按实际长度写回；
 - 同步：与 fp16 模板同构的 set_flag/wait_flag 双缓冲流水（EVENT_ID0/ID1）。

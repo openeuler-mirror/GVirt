@@ -12,7 +12,7 @@ Python 侧调用(`tests/kernels/topk.py:73`):
 topk(rt, scores, indices, out_indices, query_lens, cached_lens, K)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:1290`(`XliteOpTopK`):`maxSeqLen = scores.shape[1]`;`maxSeqLen <= k` 时直接跳过;`k != 2048` 抛错(注释明确 "Only topK equals 2048 is supported",`csrc/kernels/topk.h:15`)。kernel 签名(`csrc/kernels/topk.h:363`):
+host 侧 launch 见 `csrc/op.cpp:1351`(`XliteOpTopK`):`maxSeqLen = scores.shape[1]`;`maxSeqLen <= k` 时直接跳过;`k != 2048` 抛错(注释明确 "Only topK equals 2048 is supported",`csrc/kernels/topk.h:13`)。kernel 签名(`csrc/kernels/topk.h:363`):
 
 ```cpp
 topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR queryLens,
@@ -35,7 +35,7 @@ topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR queryL
 | `topk_bfloat16_t` | `csrc/kernels/topk_bfloat16_t.cpp` | scores 为 bf16(核内 `vconv_bf162f32` 转 fp32 再排序) |
 | `topk_float` | `csrc/kernels/topk_float.cpp` | scores 为 fp32 |
 
-dtype 分派见 `csrc/op.cpp:1307-1315`(要求 indices 为 INT32)。纯向量核(`__DAV_C220_VEC__`,以 `rt.aivNum` launch)。
+dtype 分派见 `csrc/op.cpp:1369-1376`(要求 indices 为 INT32)。纯向量核(`__DAV_C220_VEC__`,以 `rt.aivNum` launch)。
 
 ## 实现原理
 

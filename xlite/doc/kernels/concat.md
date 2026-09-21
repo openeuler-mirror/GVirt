@@ -11,7 +11,7 @@
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |------|------|-------|-------|------|
 | in0..in7 (inputs) | 输入 | 任意（取字节数 s_i = tensor.bytes） | 任意 | 最多 8 个（`XLITE_CONCAT_SPLIT_MAX_INPUTS = 8`，`csrc/kernels/concat.cpp:9-11`）；不足 8 个时多余指针/size 为 0 |
-| out | 输出 | 一维（totalBytes 字节） | 任意 | out.bytes 必须等于 Σ s_i（host 侧校验，`csrc/_C.cpp:2157-2167`） |
+| out | 输出 | 一维（totalBytes 字节） | 任意 | out.bytes 必须等于 Σ s_i（host 侧校验，`csrc/_C.cpp:2265-2273`） |
 | s0..s7 | 标量 | - | uint64_t | 各输入的字节数 |
 | nInputs | 标量 | - | uint32_t | 实际输入个数 |
 | totalBytes | 标量 | - | uint64_t | Σ s_i，即 flat 输出总字节数 |
@@ -36,7 +36,7 @@ host 侧不做 dtype 分派；测试覆盖 float16/bfloat16/float32/int32/int8 �
 
 - `inOff[i]`：输入 i 在输出行内的起始列（字节）偏移，前缀和计算（`csrc/kernels/concat.cpp:44-47`）；
 - 总工作量 = `totalBytes = numPackets * totalSize`（输出总字节数）。block 以 `segBufSize`（半个 UB）为步长跨步切分平坦的 `[0, totalBytes)` 区间：`for (bo = block_idx * segBufSize; bo < totalBytes; bo += block_num * segBufSize)`（`csrc/kernels/concat.cpp:77-78`），保证不论 packet/输入多少所有核均分数据（头注释：替代旧的按 `numPackets*nInputs` 分任务在少量 job 时闲置大量核的做法，见 split 同源说明）。
-- block 数由 host 侧按总字节缩放（`CopyKernelBlockNum`，tilePerCore≈2MB：小传输只起 1 个 block 避免多核 launch+同步开销，大传输打满 AIV，`csrc/op.cpp:28-39,1498`）。
+- block 数由 host 侧按总字节缩放（`CopyKernelBlockNum`，tilePerCore≈2MB：小传输只起 1 个 block 避免多核 launch+同步开销，大传输打满 AIV，`csrc/op.cpp:28-39,1602`）。
 
 ### 子段分解与乒乓搬运（`csrc/kernels/concat.cpp:79-125`）
 
@@ -57,5 +57,5 @@ host 侧不做 dtype 分派；测试覆盖 float16/bfloat16/float32/int32/int8 �
 ### 边界处理与 host 侧校验
 
 - `nInputs == 0 || numPackets == 0 || totalSize == 0` 直接返回（`csrc/kernels/concat.cpp:36-38`）；
-- 超过 8 个输入时 host 侧回退为逐 tensor 的 `aclrtMemcpyAsync`（`csrc/op.cpp:1506-1514`）；
-- Python 侧校验 `out.bytes == Σ inputs.bytes`，不符抛错（`csrc/_C.cpp:2157-2167`）；`concat_col` 额外校验各输入 dtype 与前导维一致、out 为 `[times, Σ lastDim]`（`csrc/op.cpp:1521-1539`）。
+- 超过 8 个输入时 host 侧回退为逐 tensor 的 `aclrtMemcpyAsync`（`csrc/op.cpp:1610-1618`）；
+- Python 侧校验 `out.bytes == Σ inputs.bytes`，不符抛错（`csrc/_C.cpp:2265-2273`）；`concat_col` 额外校验各输入 dtype 与前导维一致、out 为 `[times, Σ lastDim]`（`csrc/op.cpp:1636,1642`）。

@@ -20,7 +20,7 @@ indexer_scores(rt, q, k_cache, weight, scores, query_start_loc, query_lens,
                cached_lens, block_tables, n_heads, head_dim, block_size, batch)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:1679`(`XliteOpIndexerScores`,`KERNEL_TASK_TYPE_AIC_ONLY`,用 `rt.aicNum` 个 Cube 核)。kernel 签名(`csrc/kernels/indexer_scores.h:293`):
+host 侧 launch 见 `csrc/op.cpp:1783`(`XliteOpIndexerScores`,`KERNEL_TASK_TYPE_AIC_ONLY`,用 `rt.aicNum` 个 Cube 核)。kernel 签名(`csrc/kernels/indexer_scores.h:293`):
 
 ```cpp
 indexer_scores_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores,
@@ -38,7 +38,7 @@ indexer_scores_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores
 | queryStartLoc | 输入 | `[batch]` | int32 | 各 batch query 在拼接 q 中的起始偏移(前缀和) |
 | queryLens | 输入 | `[batch]` | int32 | 各 batch 的 query 长度 |
 | cachedLens | 输入 | `[batch]` | int32 | 各 batch 已缓存 KV 长度(总 KV 长度 = cachedLen + queryLen) |
-| blockTables | 输入 | `[batch, maxNumBlock]` | int32 | 逻辑块 → 物理块映射表;`maxNumBlock` 由 host 侧 `DeriveMaxNumBlocks` 推导(`csrc/op.cpp:1697`) |
+| blockTables | 输入 | `[batch, maxNumBlock]` | int32 | 逻辑块 → 物理块映射表;`maxNumBlock` 由 host 侧 `DeriveMaxNumBlocks` 推导(`csrc/op.cpp:1801`) |
 | nHeads / headDim / blockSize / batch | — | 标量 | uint32 | 测试配置:nHeads=64, headDim=128, blockSize=128;约束 `blockSize <= MAX_M0=128`、`headDim <= k0`(`indexer_scores.h:49-51`) |
 
 ## 支持的数据类型
@@ -48,7 +48,7 @@ indexer_scores_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores
 | `indexer_scores_bfloat16_t` | `csrc/kernels/indexer_scores_bfloat16_t.cpp` | q/kCache/weight/scores 全为 bf16 |
 | `indexer_scores_float16_t` | `csrc/kernels/indexer_scores_float16_t.cpp` | 全为 fp16 |
 
-dtype 分派要求四张 tensor 同 dtype(`csrc/op.cpp:1688-1691`)。无 fp32 变体。
+dtype 分派要求四张 tensor 同 dtype(`csrc/op.cpp:1792-1799`)。无 fp32 变体。
 
 ## 实现原理
 

@@ -6,7 +6,7 @@
 
 ## 输入输出参数
 
-Python 接口:`einsum_mht_htd_mhd(rt, mht, htd, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHtdMhd`,[csrc/op.cpp:2145-2167](../../csrc/op.cpp#L2145-L2167))。
+Python 接口:`einsum_mht_htd_mhd(rt, mht, htd, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHtdMhd`,[csrc/op.cpp:2249-2271](../../csrc/op.cpp#L2249-L2271))。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@ Python 接口:`einsum_mht_htd_mhd(rt, mht, htd, mhd, m, h, t, d, weight_nz=False
 | weight_nz | 标量 | - | bool | 右操作数是否为 ND2NZ 分形布局 |
 | T / D | 标量(可选) | - | int | mht 行宽 / mhd 行宽的对齐覆盖;缺省(`-1`)时取 t / d。Q 吸收场景传 `nopeHeadDim + ropeHeadDim`(A 行距为完整 head 宽,只取前 t 列参与计算,[csrc/model.cpp:469-471](../../csrc/model.cpp#L469-L471)) |
 
-host 侧 swizzle 由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选([csrc/op.cpp:2160-2163](../../csrc/op.cpp#L2160-L2163));`m0/n0/k0` 取默认值(M0=128,N0=256,K0 按 dtype)。
+host 侧 swizzle 由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选([csrc/op.cpp:2265-2267](../../csrc/op.cpp#L2265-L2267));`m0/n0/k0` 取默认值(M0=128,N0=256,K0 按 dtype)。
 
 ## 支持的数据类型
 
@@ -57,7 +57,7 @@ for hIdx in 0..h:
 每个 `(m0=128) × (n0=256)` 输出 tile 在 Cube 核内执行五级流水([csrc/kernels/matmul.h:200-378](../../csrc/kernels/matmul.h#L200-L378)):
 
 1. **A GM→L1**:`CopyGmToL1Nd2Nz` 把 `[mActual, kRem]` 的 A 转成 NZ 分形进 `l1aBuf`(K 方向双缓冲,`kDtileSize = 2*k0` 预取);
-2. **B GM→L1(本算子专属分支)**:`transpose=1 && nz==0` 时走 `CopyGmToL1Nd2Nz(bGmBuf[kOffset*n + nOffset], kRemSize, nActual, n, ...)`——B 逻辑上是 `[t, d]`(K×N),以 n 为行距、交换 NK 角色做 ND2NZ,直接产出转置后的分形([csrc/kernels/matmul.h:304-306](../../csrc/kernels/matmul.h#L304-L306));`nz==1` 时按 `kStride` 行距 `CopyGmToL1` 拷贝现成 NZ 分形([csrc/kernels/matmul.h:307-311](../../csrc/kernels/matmul.h#L307-L311));
+2. **B GM→L1(本算子专属分支)**:`transpose=1 && nz==0` 时走 `CopyGmToL1Nd2Nz(bGmBuf[kOffset*n + nOffset], kRemSize, nActual, n, ...)`——B 逻辑上是 `[t, d]`(K×N),以 n 为行距、交换 NK 角色做 ND2NZ,直接产出转置后的分形([csrc/kernels/matmul.h:312-314](../../csrc/kernels/matmul.h#L312-L314));`nz==1` 时按 `kStride` 行距 `CopyGmToL1` 拷贝现成 NZ 分形([csrc/kernels/matmul.h:315-318](../../csrc/kernels/matmul.h#L315-L318));
 3. **L1→L0A/L0B**:`CopyToL0ACol` / **`CopyToL0BTCol`**(转置专用,带 k0ActualBlockNum 参数)分形下搬,各自 ping-pong 双缓冲([csrc/kernels/matmul.h:339-345](../../csrc/kernels/matmul.h#L339-L345));
 4. **Mmad**:K 方向按 `kQtileSize` 分段累加到 L0C(`CalMmad`,kIdx==0 初始化);
 5. **L0C→GM**:`CopyToGmWithDequant` 写回 C tile(无 bias/dequant)。

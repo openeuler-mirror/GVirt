@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-DSA(Dual Sparse Attention)decode 长序列路径的 KV 收集算子:按 indexer 给出的每 batch top-k token 下标(`topkIndices`),把 paged(分页)cache 中的 `kCache`(kvLoraRank)与 `peCache`(ropeHeadDim)逐 token 收集到每 batch 连续的 dense cache 中,供 mla_v2 / cxa 的 dense 模式连续读取。本质上是一次 `dense[b, i] = paged[blockTable[b][tok/bs]*bs + tok%bs]` 的双通道 gather,host 侧要求 `kvHeads == 1`(`csrc/op.cpp:1098-1101`)。
+DSA(Dual Sparse Attention)decode 长序列路径的 KV 收集算子:按 indexer 给出的每 batch top-k token 下标(`topkIndices`),把 paged(分页)cache 中的 `kCache`(kvLoraRank)与 `peCache`(ropeHeadDim)逐 token 收集到每 batch 连续的 dense cache 中,供 mla_v2 / cxa 的 dense 模式连续读取。本质上是一次 `dense[b, i] = paged[blockTable[b][tok/bs]*bs + tok%bs]` 的双通道 gather,host 侧要求 `kvHeads == 1`(`csrc/op.cpp:1102-1105`)。
 
 `compressRatio` 参数控制 `totalLen` 的统计粒度:`compressRatio == 0` 时 `totalLen = queryLen + cachedLen`(按原始 token 计);否则 `totalLen = (queryLen + cachedLen) / compressRatio`(按压缩 token 计,压缩 KV 场景)。`compressRatio` 默认为 1,即按原始 token 收集(MLA 场景)。cxa 的 dense 模式内部以 `compressRatio` 调用本算子收集压缩 KV(`csrc/_C.cpp:1650-1653`)。
 
@@ -16,7 +16,7 @@ gather_sparse_kv_cache(rt, k_cache, pe_cache, block_tables, topk_indices,
                        BLOCK_SIZE, kv_lora_rank, rope_head_dim)
 ```
 
-Python 绑定 `gather_sparse_kv_cache`(`csrc/_C.cpp:2818`,`kv_heads` 默认 1,无 `compress_ratio` 形参)→ `GatherSparseKVCache`(`csrc/_C.cpp:1599`)→ `XliteOpGatherSparseKVCache`(`csrc/op.cpp:1088`)。kernel 签名(`csrc/kernels/gather_sparse_kv_cache.h:15`):
+Python 绑定 `gather_sparse_kv_cache`(`csrc/_C.cpp:2901`,`kv_heads` 默认 1,无 `compress_ratio` 形参)→ `GatherSparseKVCache`(`csrc/_C.cpp:1599`)→ `XliteOpGatherSparseKVCache`(`csrc/op.cpp:1092`)。kernel 签名(`csrc/kernels/gather_sparse_kv_cache.h:15`):
 
 ```cpp
 gather_sparse_kv_cache_<dtype>(kCache, peCache, blockTables, topkIndices, queryLens,
@@ -37,7 +37,7 @@ gather_sparse_kv_cache_<dtype>(kCache, peCache, blockTables, topkIndices, queryL
 | batch | 标量 | - | uint32 | batch 数 |
 | indexTopK | 标量 | - | uint32 | 每 batch 收集的 token 数上限(host 语义上 ≤ `MAX_TOPK_NUM=2048`(`csrc/kernels/kernel_param.h:42`),测试覆盖 512/2048) |
 | blockSize | 标量 | - | uint32 | KV cache 块大小(128) |
-| maxNumBlocks | 标量 | - | uint32 | host 由 blockTables 推得(`DeriveMaxNumBlocks`,`csrc/op.cpp:1102`) |
+| maxNumBlocks | 标量 | - | uint32 | host 由 blockTables 推得(`DeriveMaxNumBlocks`,`csrc/op.cpp:1106`) |
 | kvLoraRank / ropeHeadDim | 标量 | - | uint32 | 两个通道的向量宽(测试 512/64);cxa dense 模式内部调用时 kvLoraRank=headDim、ropeHeadDim=0(仅 K 通道) |
 | compressRatio | 标量 | - | uint32 | 压缩比;`0` 按 `(qLen+cLen)` 统计 totalLen,否则按 `(qLen+cLen)/compressRatio` 统计;默认 1。cxa dense 模式内部传入实际压缩比 |
 
@@ -51,7 +51,7 @@ gather_sparse_kv_cache_<dtype>(kCache, peCache, blockTables, topkIndices, queryL
 |---|---|---|
 | bfloat16_t | `csrc/kernels/gather_sparse_kv_cache_bfloat16_t.cpp` | `gather_sparse_kv_cache_bfloat16_t` |
 
-host 仅 BF16(`csrc/op.cpp:1103`);kernel 在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现(`csrc/kernels/gather_sparse_kv_cache.h:158-167`)。仅在 `rt.aivNum` 个向量核上 launch(`csrc/op.cpp:1104`)。
+host 仅 BF16(`csrc/op.cpp:1107`);kernel 在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现(`csrc/kernels/gather_sparse_kv_cache.h:158-167`)。仅在 `rt.aivNum` 个向量核上 launch(`csrc/op.cpp:1109`)。
 
 ## 实现原理
 

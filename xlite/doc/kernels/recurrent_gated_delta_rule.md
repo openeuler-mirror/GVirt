@@ -28,9 +28,9 @@ Python 接口:`recurrent_gated_delta_rule(rt, query, key, value, beta, g, state,
 | state | 输入/输出 | `[batch, num_heads, k_dim, v_dim]` | 同上 | 循环状态,原地更新 |
 | out | 输出 | `[T, num_heads * v_dim]` | 同上 | 每 token 的注意力输出 |
 | batch / seqlen | 标量 | - | uint32 | 均匀 batch 模式;`seqlen=0` 表示 packed 模式([csrc/kernels/recurrent_gated_delta_rule.h:13-16](../../csrc/kernels/recurrent_gated_delta_rule.h#L13-L16)) |
-| num_heads / k_dim / v_dim | 标量 | - | uint32 | kDim、vDim ≤ 128(`GDR_MAX_K_DIM/GDR_MAX_V_DIM`,host 侧强制检查,[csrc/op.cpp:2074-2077](../../csrc/op.cpp#L2074-L2077)) |
+| num_heads / k_dim / v_dim | 标量 | - | uint32 | kDim、vDim ≤ 128(`GDR_MAX_K_DIM/GDR_MAX_V_DIM`,host 侧强制检查,[csrc/op.cpp:2178-2181](../../csrc/op.cpp#L2178-L2181)) |
 | query_start_loc / query_lens | 输入(可选) | `[batch]` | int32 | packed 混合长度模式:第 b 条序列 token 区间为 `[queryStartLoc[b], +queryLens[b])`;均匀模式传 None |
-| scale | 标量(host 生成) | - | float | 固定 `1/sqrt(kDim)`([csrc/op.cpp:2115-2118](../../csrc/op.cpp#L2115-L2118)) |
+| scale | 标量(host 生成) | - | float | 固定 `1/sqrt(kDim)`([csrc/op.cpp:2221](../../csrc/op.cpp#L2221)) |
 
 ## 支持的数据类型
 
@@ -38,7 +38,7 @@ Python 接口:`recurrent_gated_delta_rule(rt, query, key, value, beta, g, state,
 - `float16_t`([recurrent_gated_delta_rule_float16_t.cpp](../../csrc/kernels/recurrent_gated_delta_rule_float16_t.cpp))
 - `bfloat16_t`([recurrent_gated_delta_rule_bfloat16_t.cpp](../../csrc/kernels/recurrent_gated_delta_rule_bfloat16_t.cpp))
 
-fp16/bf16 输入在 UB 内升到 fp32 计算;16-bit dtype 且 `kDim==vDim==128` 时启用向量化快路径(见下)。要求 7 个张量(query、key、value、beta、g、state、out)dtype 一致([csrc/op.cpp:2131-2136](../../csrc/op.cpp#L2131-L2136))。
+fp16/bf16 输入在 UB 内升到 fp32 计算;16-bit dtype 且 `kDim==vDim==128` 时启用向量化快路径(见下)。要求 7 个张量(query、key、value、beta、g、state、out)dtype 一致([csrc/op.cpp:2208-2214](../../csrc/op.cpp#L2208-L2214))。
 
 ## 实现原理
 

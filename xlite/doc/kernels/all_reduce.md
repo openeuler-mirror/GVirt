@@ -6,7 +6,7 @@ AllReduce(SUM)集合通信算子:所有 rank 各持有一份同形状输入,通�
 
 ## 输入输出参数
 
-Python 侧调用:`all_reduce(rt, z, x, comm_type)`(`tests/kernels/all_reduce.py:53`),host 侧 launch 见 `csrc/op.cpp:360`(`XliteOpAllReduceSum`)。
+Python 侧调用:`all_reduce(rt, z, x, comm_type)`(`tests/kernels/all_reduce.py:53`),host 侧 launch 见 `csrc/op.cpp:361`(`XliteOpAllReduceSum`)。
 
 kernel 签名(`csrc/kernels/all_reduce.cpp:367`):
 
@@ -18,14 +18,14 @@ allreduce_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| input | 输入 | `[N]`(逻辑上任意形状,N = count 个元素) | FP16 / BF16 / INT8 / INT32 / FP32 | 本 rank 输入。要求 `in.numel == out.numel` 且 dtype 一致(`csrc/op.cpp:363`) |
+| input | 输入 | `[N]`(逻辑上任意形状,N = count 个元素) | FP16 / BF16 / INT8 / INT32 / FP32 | 本 rank 输入。要求 `in.numel == out.numel` 且 dtype 一致(`csrc/op.cpp:364`) |
 | output | 输出 | `[N]` | 同 input | 全 rank 求和结果。`skipMyRank`(input == output,in-place)时省去自身块的先写(`csrc/kernels/all_reduce.cpp:45`) |
 | count | 标量 | - | uint64 | 元素总数 `in.numel`,被切成 rankSize 块 |
-| rankId / rankSize | 标量 | - | uint32 | 通信域内编号与总 rank 数(TP 取 `rankId % tpSize`,DP 取 `rankId / tpSize`,`csrc/op.cpp:374`) |
-| generation | 标量 | - | uint64 | 通信代数,host 侧每次调用递增(`csrc/op.cpp:455`),用于 IPC flag 单调比较 |
+| rankId / rankSize | 标量 | - | uint32 | 通信域内编号与总 rank 数(TP 取 `rankId % tpSize`,DP 取 `rankId / tpSize`,`csrc/op.cpp:375`) |
+| generation | 标量 | - | uint64 | 通信代数,host 侧每次调用递增(`csrc/op.cpp:456`),用于 IPC flag 单调比较 |
 | param | 输入 | - | `XcclParam` | 所有 rank 的 `ipcMems` / `ipcXTensorMems` 基址(`csrc/kernels/kernel_param.h:20`) |
 | copySize | 标量 | - | uint32 | 每次 UB 搬运的目标字节数,默认 `COPY_SIZE`(32768),host 侧按核数调整(`csrc/op.cpp:426-428`) |
-| fetchOffset | 标量 | - | bool | true 时通过 IPC 内存发布/获取各 rank 张量偏移;DP 域恒为 true(`csrc/op.cpp:455`) |
+| fetchOffset | 标量 | - | bool | true 时通过 IPC 内存发布/获取各 rank 张量偏移;DP 域恒为 true(`csrc/op.cpp:456`) |
 
 测试 shape 约定(`tests/kernels/all_reduce.py:44`):`x`/`z` 均为 `[dim1, dim2]`(从 `[1,1]` 到 `[512,7168]`,含非对齐 37),`count = dim1*dim2`。
 

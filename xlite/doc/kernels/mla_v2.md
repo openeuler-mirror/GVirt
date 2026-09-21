@@ -28,7 +28,7 @@ mla_v2(rt, q_with_qr, qr, k_cache, pe_cache, wuk_t, wuv, output, query_start_loc
        dense=False)
 ```
 
-host 封装 `MLAV2`(`csrc/_C.cpp:1509`)在 paged 路径下先做 `qAbsorb = einsum(q_nope, wukT)` 再调 `XliteOpMLAV2`,最后 `output = einsum(oAbsorb, wuv)`;dense 路径(`dense=True`,host 侧先经 `gather_sparse_kv_cache` 收集,`csrc/_C.cpp:1540-1559`)qWithQr 直接是预吸收的 q_absorb,输出止于 o_absorb。接口完整 docstring 见 `xlite/_C.pyi:2101-2158`。kernel 签名(`csrc/kernels/mla_v2.h:329`):
+host 封装 `MLAV2`(`csrc/_C.cpp:1509`)在 paged 路径下先做 `qAbsorb = einsum(q_nope, wukT)` 再调 `XliteOpMLAV2`,最后 `output = einsum(oAbsorb, wuv)`;dense 路径(`dense=True`,host 侧先经 `gather_sparse_kv_cache` 收集,`csrc/_C.cpp:1540-1559`)qWithQr 直接是预吸收的 q_absorb,输出止于 o_absorb。接口完整 docstring 见 `xlite/_C.pyi:2481-2570`。kernel 签名(`csrc/kernels/mla_v2.h:329`):
 
 ```cpp
 mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
@@ -54,7 +54,7 @@ mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
 | batch | 标量 | - | uint32 | batch |
 | maxSeqLen | 标量 | - | uint32 | sparse: maxNumBlocks*blockSize;dense: indexTopK(dense cache 每批长度) |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
-| topK | 标量 | - | uint32 | DSA top-k;host 限制仅 sparse 模式生效:`maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=11776` 且 `topK ≤ MAX_TOPK_NUM=2048`(`csrc/op.cpp:1002-1013`);dense 模式 host 要求 topK > 0 且其值即 dense cache 长度 indexTopK(`csrc/_C.cpp:1540-1544`),内核内部将其用作 maxSeqLen 并把 softmax topK 置 0(`csrc/kernels/mla_v2.h:58`) |
+| topK | 标量 | - | uint32 | DSA top-k;host 限制仅 sparse 模式生效:`maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=11776` 且 `topK ≤ MAX_TOPK_NUM=2048`(`csrc/op.cpp:985-996`);dense 模式 host 要求 topK > 0 且其值即 dense cache 长度 indexTopK(`csrc/_C.cpp:1540-1544`),内核内部将其用作 maxSeqLen 并把 softmax topK 置 0(`csrc/kernels/mla_v2.h:58`) |
 | dense | 标量 | - | uint32 | 1=dense 连续 cache(`[batch, maxSeqLen, ...]`,由 gather_sparse_kv_cache 收集,blockTable 不使用),0=paged(`csrc/op.cpp:989-997`) |
 
 ## 支持的数据类型
@@ -63,15 +63,15 @@ mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
 |---|---|---|
 | bfloat16_t | `csrc/kernels/mla_v2_bfloat16_t.cpp` | `mla_v2_bfloat16_t` |
 
-host 侧仅接受 BF16(`csrc/op.cpp:1014`);qAbsorb/qr/kCache/peCache/oAbsorb 需一致。
+host 侧仅接受 BF16(`csrc/op.cpp:997`);qAbsorb/qr/kCache/peCache/oAbsorb 需一致。
 
 ## 实现原理
 
-混合 AIC/AIV kernel(`KERNEL_TYPE_MIX_AIC_1_2`,`csrc/kernels/mla_v2.h:38`),三级流水 AIC-QK → AIV-softmax → AIC-SV,与 attention 同构但矩阵乘换成 MLA 的吸收式形态。
+混合 AIC/AIV kernel(`KERNEL_TYPE_MIX_AIC_1_2`,`csrc/kernels/mla_v2.h:36`),三级流水 AIC-QK → AIV-softmax → AIC-SV,与 attention 同构但矩阵乘换成 MLA 的吸收式形态。
 
 ### 任务划分
 
-- `m0 = GetOptimalM0(queryLen, cachedLen)` 自适应(同 attention,`csrc/kernels/kernel_macro.h:873`),`queryTileSize = m0 / nHeads`——MLA 每 batch 一次算**全部 nHeads 个头**(无 KV 头分组),`mSize = queryTaskLen * nHeads` 行拼成 Cube 的 M 维。
+- `m0 = GetOptimalM0(queryLen, cachedLen)` 自适应(同 attention,`csrc/kernels/kernel_macro.h:883`),`queryTileSize = m0 / nHeads`——MLA 每 batch 一次算**全部 nHeads 个头**(无 KV 头分组),`mSize = queryTaskLen * nHeads` 行拼成 Cube 的 M 维。
 - 任务空间为 `queryNum`(每 batch),核间用 `firstCore = (GetBlockIdx()+GetBlockNum()-coreOffset) % GetBlockNum()` 的循环 stride 分配,`coreOffset` 跨 batch 累计保证相邻 batch 起始核轮转、负载均衡(`csrc/kernels/mla_v2.h:116-117`、`:171`)。
 - dense 模式 `calcLen` clip 到 maxSeqLen(dense cache 只存 indexTopK 个 token,`csrc/kernels/mla_v2.h:125-128`);per-batch KV 视图 dense 时取 `kCache[batchIdx * maxSeqLen * ...]` 子视图,sparse 时走 blockTable(`csrc/kernels/mla_v2.h:95-107`)。
 
@@ -91,7 +91,7 @@ host 侧仅接受 BF16(`csrc/op.cpp:1014`);qAbsorb/qr/kCache/peCache/oAbsorb 需
 
 ### AIV 侧:softmax 与 top-k 路径
 
-- **topK == 0**:`RunAivSoftmax`(`csrc/kernels/softmax_attn_aiv.h:1148`)→ `RunAivSoftmaxLong`(`:801`)(见 attention 文档),带 `hasScale=true, scale`(QK 乘 scale 在 softmax 内完成)、causal 由 `calcSoftmaxLen = cachedLen + queryTaskStart + 1` + maskOff/headStride=nHeads 实现(`csrc/kernels/mla_v2.h:242`、`:264-271`)。
+- **topK == 0**:`RunAivSoftmax`(`csrc/kernels/softmax_attn_aiv.h:1184`)→ `RunAivSoftmaxLong`(`:817`)(见 attention 文档),带 `hasScale=true, scale`(QK 乘 scale 在 softmax 内完成)、causal 由 `calcSoftmaxLen = cachedLen + queryTaskStart + 1` + maskOff/headStride=nHeads 实现(`csrc/kernels/mla_v2.h:242`、`:264-271`)。
 - **topK > 0**(sparse + DSA):`RunAivSoftmaxPingPong`(`csrc/kernels/softmax_attn_aiv.h:65`,wrapper `:1164`)。该路径先用 `vcmpvs_ge/vcmpvs_lt + vand` 生成命中位图,`vgather` 按 topkIndices 从 QK 行中收集 topK 个分数(未命中的槽位填 -3.4e38),对收集后的 topK 长度做 softmax,再用标量 scatter 按 64 槽粒度把概率散回原 token 位置、其余位置清零(`csrc/kernels/softmax_attn_aiv.h:185-241`、`:415-466`)。行有效长度 `calcLen > topK` 时才启用,否则退化为全量(`csrc/kernels/mla_v2.h:273-278`)。
 - **outN 对齐**:softmax 输出行宽取 `ROUND_UP(calcLen, 4*svk0)`(clip 到 maxSeqLen),因为 RunAicSV 每次读 4*svk0=256 列 QK,残留脏数据会沿 KV 维混进 SV 累加(`csrc/kernels/mla_v2.h:243-250`)。
 
@@ -103,6 +103,6 @@ host 侧仅接受 BF16(`csrc/op.cpp:1014`);qAbsorb/qr/kCache/peCache/oAbsorb 需
 
 - 主类/双模式说明:`csrc/kernels/mla_v2.h:13-20`(注释)、`:68`(RunAic)、`:188`(RunAiv)
 - QK/SV 吸收式 GEMM:`csrc/kernels/mla_aic_helper.h:158`(RunAicQK)、`:312`(RunAicSV)、`:30`(Init 缓冲布局)
-- softmax 全量/top-k:`csrc/kernels/softmax_attn_aiv.h:1148`(RunAivSoftmax)/`:65`(RunAivSoftmaxPingPong;其内部实现 `:801` 为 RunAivSoftmaxLong,新增 SWA 段/压缩比/attnSink 参数为 cxa 算子服务,mla_v2 调用时均取默认值、行为不变)
-- host launch 与限制:`csrc/op.cpp:993`(XliteOpMLAV2,dense 校验 `:1002-1013`);路由 `csrc/model.cpp:509`(短序列)、`:485-508`(dense gather 路径,decode+DSA 长序列时启用,阈值 `XLITE_MLA_DENSE_THRESHOLD=280`,`csrc/model.cpp:17`)
+- softmax 全量/top-k:`csrc/kernels/softmax_attn_aiv.h:1184`(RunAivSoftmax)/`:65`(RunAivSoftmaxPingPong;其内部实现 `:817` 为 RunAivSoftmaxLong,新增 SWA 段/压缩比/attnSink 参数为 cxa 算子服务,mla_v2 调用时均取默认值、行为不变)
+- host launch 与限制:`csrc/op.cpp:976`(XliteOpMLAV2,dense 校验 `:985-996`);路由 `csrc/model.cpp:509`(短序列)、`:485-508`(dense gather 路径,decode+DSA 长序列时启用,阈值 `XLITE_MLA_DENSE_THRESHOLD=280`,`csrc/model.cpp:17`)
 - 常量:`csrc/kernels/kernel_param.h:33,42-43`(XLITE_MAX_M0/MAX_TOPK_NUM/MAX_SOFTMAX_PINGPONG_LEN)

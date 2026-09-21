@@ -22,7 +22,7 @@ indexer_topk(rt, q, k_cache, weight, indices, topk_indices, query_start_loc,
              block_size, batch, topK)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:1729`(`XliteOpIndexerTopK`,要求 `topK <= MAX_TOPK_NUM=2048`)。kernel 签名(`csrc/kernels/indexer_topk.h:660`):
+host 侧 launch 见 `csrc/op.cpp:1833`(`XliteOpIndexerTopK`,要求 `topK <= MAX_TOPK_NUM=2048`)。kernel 签名(`csrc/kernels/indexer_topk.h:660`):
 
 ```cpp
 indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc,
@@ -54,7 +54,7 @@ indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR querySta
 | `indexer_topk_bfloat16_t` | `csrc/kernels/indexer_topk_bfloat16_t.cpp` | q/kCache/weight/scores 全 bf16 |
 | `indexer_topk_float16_t` | `csrc/kernels/indexer_topk_float16_t.cpp` | 全 fp16 |
 
-dtype 分派见 `csrc/op.cpp:1742-1751`,四张计算 tensor 必须同 dtype。
+dtype 分派见 `csrc/op.cpp:1846-1855`,四张计算 tensor 必须同 dtype。
 
 ## 实现原理
 
@@ -94,13 +94,13 @@ dtype 分派见 `csrc/op.cpp:1742-1751`,四张计算 tensor 必须同 dtype。
 | `out[2]` | 各 `MAX_TOPK_NUM` 个 u32 | 乒乓:最终结果搬出 |
 | `mrgSortBuf[2]` | 各 `MAX_INDEXER_KV_TILE_LEN*2*float` | vbitsort 归并工作区 |
 
-`MAX_TOPK_NUM=2048` 与 `MAX_INDEXER_KV_TILE_LEN=4096`(均定义于 `csrc/kernels/kernel_param.h:41-42`)正是这套 UB 布局的容量上限来源,因此 host 侧强制 `topK <= 2048`(`csrc/op.cpp:1738-1741`)。
+`MAX_TOPK_NUM=2048` 与 `MAX_INDEXER_KV_TILE_LEN=4096`(均定义于 `csrc/kernels/kernel_param.h:41-42`)正是这套 UB 布局的容量上限来源,因此 host 侧强制 `topK <= 2048`(`csrc/op.cpp:1842-1845`)。
 
 **topk 算法**(基于硬件排序指令,非堆、非位图):
 
 1. **搬入 + 转 fp32**:tile 得分(`scores + idx*4096`,kvLen 个)与对应索引段搬入并 `vconv` 成 float(`indexer_topk.h:359-374`);尾部用 `SetMaskFromHighBit` + `vector_dup(FLOAT_MIN)` 补齐到 `calcPad` 对齐(`indexer_topk.h:379-385`);
 2. **块内排序**:`vbitsort(mrgSortBuf1, mrgSortBuf0, sortIndices[curr], sortRepeat)` 按 `SORT_BLOCK_SIZE=32` 一组做位排序(值+原始索引成对输出,每组占 64 元素;`sortRepeat = DIV_ROUND_UP(kvLen, 32)`,`indexer_topk.h:389`);
-3. **归并**:`MrgSort`(`csrc/kernels/kernel_macro.h:748-788`)用 `vmrgsort4` 四路归并循环(4→3→2 路自适应,不足 4 组时用 `FLOAT_MIN`/0 按 mask 补齐偶奇位)把所有 32 元素组归并成单个降序序列 `localSort`;
+3. **归并**:`MrgSort`(`csrc/kernels/kernel_macro.h:758-798`)用 `vmrgsort4` 四路归并循环(4→3→2 路自适应,不足 4 组时用 `FLOAT_MIN`/0 按 mask 补齐偶奇位)把所有 32 元素组归并成单个降序序列 `localSort`;
 4. **与上一核候选融合**:
    - 若 `kvOffset != 0`(非首 tile):先 `WaitPrevCore()` 等前一个核把它的全局候选写入本核的 `lastTopk` 段,然后 `vmrgsort4(totalSort, {localSort, lastSort}, lens, config)` 二路归并,`lens = min(kvLen,topK) | topK<<16` 表示两个输入队列的有效长度(`indexer_topk.h:400-416`);
    - 若 `kvOffset == 0`(首 tile):直接把 `localSort` 拷入 `totalSort`,`outNum = min(kvLen, topK)`(`indexer_topk.h:417-423`);

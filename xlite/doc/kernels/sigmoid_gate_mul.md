@@ -13,9 +13,9 @@
 | out | 输出 | [numTokens, dim] | 同 attn | 结果，可与 attn 为同一 tensor（原地更新，模型 ForwardAttn 使用 in-place 路径） |
 | numTokens | 标量 | - | uint32_t | token 数（行数），host 侧传 `attn.shape[0]` |
 | dim | 标量 | - | uint32_t | 每行元素数，host 侧传 `attn.shape[1]` |
-| gateDim | 标量 | - | uint32_t | gate 的最后一维大小（1 或 dim），host 侧传 `gate.shape[1]`（`csrc/op.cpp:2050-2053`） |
+| gateDim | 标量 | - | uint32_t | gate 的最后一维大小（1 或 dim），host 侧传 `gate.shape[1]`（`csrc/op.cpp:2157-2159`） |
 
-Python 调用方式（`tests/kernels/sigmoid_gate_mul.py:26`）：`sigmoid_gate_mul(rt, attn, gate, out)`。host 侧校验三者必须为 2D、行数一致、gate 最后一维为 1 或等于 dim（`csrc/op.cpp:2032-2043`）。
+Python 调用方式（`tests/kernels/sigmoid_gate_mul.py:26`）：`sigmoid_gate_mul(rt, attn, gate, out)`。host 侧校验三者必须为 2D、行数一致、gate 最后一维为 1 或等于 dim（`csrc/op.cpp:2137-2147`）。
 
 ## 支持的数据类型
 

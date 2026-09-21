@@ -21,31 +21,31 @@ Python 接口:`rope_and_cache(rt, inout, k_cache, v_cache, position, cossin, slo
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| inout | 输入/输出 | `[num_tokens, (num_heads + 2 * num_kv_heads) * head_dim]` | float16 / bfloat16 | 融合 QKV。host 侧按 TP 切分后的头数拆出 q/k/v 三个指针([csrc/op.cpp:880-886](../../csrc/op.cpp#L880-L886)),q 在行首,k、v 依次随其后;Q/K 旋转后原地写回 |
+| inout | 输入/输出 | `[num_tokens, (num_heads + 2 * num_kv_heads) * head_dim]` | float16 / bfloat16 | 融合 QKV。host 侧按 TP 切分后的头数拆出 q/k/v 三个指针([csrc/op.cpp:850-855](../../csrc/op.cpp#L850-L855)),q 在行首,k、v 依次随其后;Q/K 旋转后原地写回 |
 | k_cache | 输出 | `[block_num, block_size, num_kv_heads, head_dim]` | 同 inout | KV cache 的 K 平面,按 slot 展开寻址 |
 | v_cache | 输出 | 同 k_cache | 同 inout | KV cache 的 V 平面,V 不做旋转,直接搬运写入 |
 | position | 输入 | `[num_tokens]`(MroPE 为 `[3, num_tokens]`) | int64 | 每 token 的位置 id;MroPE 时第 2/3 行为 h/w 位置([csrc/kernels/rope_and_cache.h:458-460](../../csrc/kernels/rope_and_cache.h#L458-L460)) |
 | cossin | 输入 | `[max_pos, rot_dim]` | 同 inout | 预计算表,前 `rot_dim/2` 列为 cos、后 `rot_dim/2` 列为 sin(见测试 `precompute_freqs_cis` 的 `cat((cos, sin), dim=-1)`) |
 | slot_mapping | 输入 | `[num_tokens]` | int32 | 每 token 在 cache 中的平坦 slot 索引 |
-| n_heads / n_kv_heads | 标量 | - | uint32 | **全局** Q 头数与 KV 头数(host 内部除以 tpSize 得本 rank 头数,见 [csrc/op.cpp:879-881](../../csrc/op.cpp#L879-L881)) |
+| n_heads / n_kv_heads | 标量 | - | uint32 | **全局** Q 头数与 KV 头数(host 内部除以 tpSize 得本 rank 头数,见 [csrc/op.cpp:847-849](../../csrc/op.cpp#L847-L849)) |
 | head_dim | 标量 | - | uint32 | 每头维度,支持 64 / 128 |
 | rot_dim | 标量 | - | uint32 | 旋转维度,支持 64 / 128(可小于 head_dim,如 head_dim=128 + rot_dim=64) |
 | block_size | 标量 | - | uint32 | cache 块大小(kernel 内不直接使用,slot_mapping 已是平坦索引) |
-| is_neox | 标量 | - | bool | 仅支持 NeoX 风格,gptj 会抛错([csrc/op.cpp:889-891](../../csrc/op.cpp#L889-L891)) |
+| is_neox | 标量 | - | bool | 仅支持 NeoX 风格,gptj 会抛错([csrc/op.cpp:859-860](../../csrc/op.cpp#L859-L860)) |
 | mrope_mask_h / mrope_mask_w | 标量 | - | uint64 | MroPE 的向量 lane 掩码,非 0 时启用三路位置模式 |
 
-`scale = 1.0 / sqrt(headDim)` 由 host 计算传入([csrc/op.cpp:887](../../csrc/op.cpp#L887));q/k/v 的行 stride 均为 `inout.shape[1]`(整行 QKV 宽度)。
+`scale = 1.0 / sqrt(headDim)` 由 host 计算传入([csrc/op.cpp:857](../../csrc/op.cpp#L857));q/k/v 的行 stride 均为 `inout.shape[1]`(整行 QKV 宽度)。
 
 ## 支持的数据类型
 
 - `float16_t`([rope_and_cache_float16_t.cpp](../../csrc/kernels/rope_and_cache_float16_t.cpp)):fp16 域内直接计算(`calc_cossin`)
 - `bfloat16_t`([rope_and_cache_bfloat16_t.cpp](../../csrc/kernels/rope_and_cache_bfloat16_t.cpp)):转 fp32 计算,乘积经一次 bf16 舍入回退以保证与 torch_npu 位级一致(`calc_cossin_cast`)
 
-要求 inout、kCache、vCache、cossin 四者 dtype 一致([csrc/op.cpp:894-897](../../csrc/op.cpp#L894-L897))。
+要求 inout、kCache、vCache、cossin 四者 dtype 一致([csrc/op.cpp:864-868](../../csrc/op.cpp#L864-L868))。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/rope_and_cache.h](../../csrc/kernels/rope_and_cache.h),为 C220 向量核(`__DAV_C220_VEC__`)上的标量 C 风格 kernel,由 `XliteOpRopeCache`([csrc/op.cpp:869-907](../../csrc/op.cpp#L869-L907))以 `rt.aivNum` 个 AIV block 启动。
+实现位于 [csrc/kernels/rope_and_cache.h](../../csrc/kernels/rope_and_cache.h),为 C220 向量核(`__DAV_C220_VEC__`)上的标量 C 风格 kernel,由 `XliteOpRopeCache`([csrc/op.cpp:839-877](../../csrc/op.cpp#L839-L877))以 `rt.aivNum` 个 AIV block 启动。
 
 ### 两级循环与多 Block 并行
 

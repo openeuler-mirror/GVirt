@@ -8,9 +8,9 @@ MoE token 逆重排（unpermutation）：把按专家分组排序的计算结果
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |------|------|-------|-------|------|
-| input (in) | 输入 | [max_expert_sorted, dim] | bfloat16 | 按专家分组排序的 experts 输出（permutation 的 output）。host 侧传 `in.shape[1]` 作 dim（`csrc/op.cpp:833-834`）；元素大小硬编码为 `sizeof(bfloat16_t)`（`csrc/kernels/unpermutation.h:27`） |
+| input (in) | 输入 | [max_expert_sorted, dim] | bfloat16 | 按专家分组排序的 experts 输出（permutation 的 output）。host 侧传 `in.shape[1]` 作 dim（`csrc/op.cpp:802-803`）；元素大小硬编码为 `sizeof(bfloat16_t)`（`csrc/kernels/unpermutation.h:27`） |
 | routing_map (routing) | 输入 | [num_tokens, n_routed_experts] 位图（BIT1，每行 n_routed_experts/8 字节） | uint8 位图 | 与 permutation 相同的路由位图 |
-| weights_map (weights) | 输入 | [num_tokens, n_routed_experts] | bfloat16 或 float | 门控权重 w[t, e]；host 侧传 `weights.shape[1]` 作 n_routed_experts。bfloat16 变体要求 weights 为 BF16（`csrc/op.cpp:824`）；float 变体用于 in/out 为 BF16 而 weights 为 FP32 的组合（`csrc/op.cpp:826`），此时权重直接从 GM 按标量读取 |
+| weights_map (weights) | 输入 | [num_tokens, n_routed_experts] | bfloat16 或 float | 门控权重 w[t, e]；host 侧传 `weights.shape[1]` 作 n_routed_experts。bfloat16 变体要求 weights 为 BF16（`csrc/op.cpp:793-794`）；float 变体用于 in/out 为 BF16 而 weights 为 FP32 的组合（`csrc/op.cpp:795-796`），此时权重直接从 GM 按标量读取 |
 | output (out) | 输出 | [num_tokens, dim] | bfloat16 | 还原并加权求和后的 token；host 侧传 `out.shape[0]` 作 n_tokens |
 | unp_idx | 输入 | [n_routed_experts, num_tokens+1] | int32 | permutation 写出的索引：`[e, t]` 为 token t 在专家 e 段内的行号 j，最后一列 starts[e] 为专家 e 段起始行号（`csrc/kernels/unpermutation.h:19`） |
 | experts_start_idx / experts_end_idx | 标量 | - | uint32_t | 本卡负责的专家区间 [start, end) |
@@ -19,7 +19,7 @@ Python 调用方式（`tests/kernels/permutation.py:88`）：`unpermutation(rt, 
 
 ## 支持的数据类型
 
-| dtype 变体 | 实例化文件 | kernel 符号 | host 侧 dtype 条件（`csrc/op.cpp:824-827`） |
+| dtype 变体 | 实例化文件 | kernel 符号 | host 侧 dtype 条件（`csrc/op.cpp:793-800`） |
 |------|-----------|-------------|------|
 | bfloat16_t | `csrc/kernels/unpermutation_bfloat16_t.cpp` | `unpermutation_bfloat16_t` | in/out/weights 均为 BF16 |
 | float | `csrc/kernels/unpermutation_float.cpp` | `unpermutation_float` | in/out 为 BF16，weights 为 FP32（权重从 GM 按 float 标量读取） |
