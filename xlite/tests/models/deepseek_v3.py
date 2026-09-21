@@ -114,6 +114,7 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.
+    rope_type: str = "yarn"
     quantization: Literal["none", "w8a8", "w4a8"] = "none"
     moe_ep_size: int = 1
     moe_tp_size: int = 1
@@ -131,12 +132,21 @@ class ModelArgs:
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
         self.index_full_mask = self.index_full_mask or []
-        if not self.index_full_mask and self.config_path and self.config_path.exists():
+        if self.config_path and self.config_path.exists():
             with open(self.config_path, "r") as f:
                 default_config = json.load(f)
-            index_types: list[str] = default_config.get("indexer_types", []) or []
-            self.index_full_mask = list(map(lambda x: str(x).lower().startswith("full"), index_types))
-            self.rope_theta = default_config.get("rope_parameters", {}).get("rope_theta", self.rope_theta)
+            if not self.index_full_mask:
+                index_types: list[str] = default_config.get("indexer_types", []) or []
+                self.index_full_mask = list(map(lambda x: str(x).lower().startswith("full"), index_types))
+            rope_params = default_config.get("rope_parameters", {}) or {}
+            rope_scaling = default_config.get("rope_scaling", {}) or {}
+            self.rope_theta = rope_params.get("rope_theta", self.rope_theta)
+            # GLM: rope_parameters.rope_type ("default")
+            # DSv3: rope_scaling.type ("yarn")
+            rtype = rope_params.get("rope_type") or rope_scaling.get("type") or "default"
+            self.rope_type = str(rtype).lower()
+            if "original_max_position_embeddings" in rope_scaling:
+                self.original_seq_len = rope_scaling["original_max_position_embeddings"]
         self.index_full_mask = self.index_full_mask[:self.n_layers] or [True] * self.n_layers
         assert len(self.index_full_mask) == self.n_layers, f"indexer mask length mismatch"
 
@@ -611,7 +621,7 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
         return ramp_func
 
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-    if seqlen > args.original_seq_len:
+    if args.rope_type == "yarn" and seqlen > args.original_seq_len:
         low, high = find_correction_range(beta_fast, beta_slow, dim, base, args.original_seq_len)
         smooth = 1 - linear_ramp_factor(low, high, dim // 2)
         freqs = freqs / factor * (1 - smooth) + freqs * smooth
@@ -788,7 +798,7 @@ class MLA(nn.Module):
         # wkv_b 保持 FLOAT（根据 quant_model_description.json）
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
         self.softmax_scale = self.qk_head_dim ** -0.5
-        if args.max_seq_len > args.original_seq_len:
+        if args.rope_type == "yarn" and args.max_seq_len > args.original_seq_len:
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 

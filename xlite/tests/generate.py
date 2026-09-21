@@ -51,7 +51,7 @@ def apply_qwen_chat_template(tokenizer, messages, model_type: str):
 
 @torch.inference_mode()
 def generate(
-    model: nn.Module, prompt_tokens: List[List[int]], max_new_tokens: int, eos_id: int, temperature: float = 1.0
+    model: nn.Module, prompt_tokens: List[List[int]], max_new_tokens: int, eos_id, temperature: float = 1.0
 ) -> Tuple[List[List[int]], int]:
     """
     Generates new tokens based on the given prompt tokens using the specified model.
@@ -60,12 +60,14 @@ def generate(
         model (nn.Module): The model used for token generation.
         prompt_tokens (List[List[int]]): A list of lists containing the prompt tokens for each sequence.
         max_new_tokens (int): The maximum number of new tokens to generate.
-        eos_id (int): The end-of-sequence token ID.
+        eos_id (int | List[int]): The end-of-sequence token ID, or a list of them.
         temperature (float, optional): The temperature value for sampling. Defaults to 1.0.
 
     Returns:
         List[List[int]]: A list of lists containing the generated tokens for each sequence.
     """
+    eos_set = {eos_id} if isinstance(eos_id, int) else set(eos_id)
+
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len, (
         f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
@@ -90,7 +92,10 @@ def generate(
             next_token = logits.argmax(dim=-1)
         next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
         tokens[:, cur_pos] = next_token
-        finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
+        is_eos = torch.zeros_like(next_token, dtype=torch.bool)
+        for _e in eos_set:
+            is_eos |= (next_token == _e)
+        finished |= torch.logical_and(~prompt_mask[:, cur_pos], is_eos)
         prev_pos = cur_pos
         step = step + 1
         if finished.all():
@@ -98,8 +103,8 @@ def generate(
     completion_tokens = []
     for i, toks in enumerate(tokens.tolist()):
         toks = toks[prompt_lens[i] : prompt_lens[i] + max_new_tokens]
-        if eos_id in toks:
-            toks = toks[: toks.index(eos_id)]
+        cut = next((j for j, t in enumerate(toks) if t in eos_set), len(toks))
+        toks = toks[:cut]
         completion_tokens.append(toks)
     return (completion_tokens, step)
 
@@ -244,6 +249,21 @@ def main(
     completion_tokens, _ = generate(model, [tokenizer.encode("Warn up")], 2, -1, 1.0)
     tokenizer.decode(completion_tokens[0])
 
+    import json as _json
+    _eos_ids = [tokenizer.eos_token_id]
+    try:
+        _gc_path = os.path.join(ckpt_path, "generation_config.json")
+        with open(_gc_path, encoding="utf-8") as _f:
+            _gc = _json.load(_f)
+        _gc_eos = _gc.get("eos_token_id")
+        if isinstance(_gc_eos, list):
+            _eos_ids = _gc_eos
+        elif isinstance(_gc_eos, int):
+            _eos_ids = [_gc_eos]
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+    eos_ids = _eos_ids
+
     if mode == "bench":
         vocab_size = getattr(tokenizer, "vocab_size", None)
         if vocab_size is None:
@@ -287,7 +307,7 @@ def main(
         for it in range(bench_iters):
             prompts = [make_prompt() for _ in range(local_bs)]
             s = time.monotonic_ns()
-            completion_tokens_batch, step = generate(model, prompts, effective_max_new_tokens, eos_id, temperature)
+            completion_tokens_batch, step = generate(model, prompts, effective_max_new_tokens, eos_ids, temperature)
             c = time.monotonic_ns()
             d = (c - s) / 1e6
             num_prefill = sum(len(p) for p in prompts)
@@ -340,7 +360,7 @@ def main(
                 prompt_tokens = apply_qwen_chat_template(tokenizer, messages, model_type)
             else:
                 prompt_tokens = tokenizer.encode(prompt)
-            completion_tokens, _ = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
+            completion_tokens, _ = generate(model, [prompt_tokens], max_new_tokens, eos_ids, temperature)
             completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
             completion = completion.replace("Ġ", " ").replace("Ċ", "\n").replace("▁", " ")
             print(completion)
@@ -380,7 +400,7 @@ def main(
 
             s = time.monotonic_ns()
             completion_tokens_batch, step = generate(
-                model, prompts_tokens_batch, max_new_tokens, tokenizer.eos_token_id, temperature
+                model, prompts_tokens_batch, max_new_tokens, eos_ids, temperature
             )
             c = time.monotonic_ns()
             d = (c - s) / 1e6
