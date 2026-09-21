@@ -488,10 +488,10 @@ XTensor &XTensor::Memset(int32_t value, aclrtStream stream, size_t offset, bool 
     } else {
         offset = DIV_ROUND_UP(offset * XDtypeBit(dtype), 8);
     }
-    size_t setBytes = bytes - offset;
-    if (setBytes <= 0) {
-        return *this;  // No operation needed if setBytes is zero or negative
+    if (bytes <= offset) {
+        return *this;  // No operation needed since offset is beyond the allocated bytes
     }
+    size_t setBytes = bytes - offset;
     if (stream == nullptr) {
         CHECK_ACL(aclrtMemset(static_cast<char *>(ptr) + offset, setBytes, value, setBytes));
     } else {
