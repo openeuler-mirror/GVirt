@@ -396,15 +396,13 @@ class Indexer(torch.nn.Module):
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.index_n_heads
-        self.n_local_heads = args.index_n_heads // world_size
+        self.n_local_heads = args.index_n_heads
         self.head_dim = args.index_head_dim
         self.rope_head_dim = args.rope_head_dim
         self.index_topk = args.index_topk
         self.q_lora_rank = args.q_lora_rank
-        # indexer.wq_b is W8A8_DYNAMIC -> int8 ColumnParallel
-        self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.head_dim, dtype=torch.int8)
-        # indexer.weights_proj is FLOAT -> bf16 Linear
-        self.weights_proj = ColumnParallelLinear(self.dim, self.n_heads, dtype=torch.bfloat16)
+        self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim, dtype=torch.int8)
+        self.weights_proj = Linear(self.dim, self.n_heads, dtype=torch.bfloat16)
         self.softmax_scale = self.head_dim ** -0.5
         self.compress_ratio = compress_ratio
 
@@ -431,8 +429,6 @@ class Indexer(torch.nn.Module):
         # QAT-quant simulation skipped: kv stays bf16.
         index_score = torch.einsum("bshd,btd->bsht", q, self.kv_cache[:bsz, :end_pos // ratio])
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
-        if world_size > 1:
-            dist.all_reduce(index_score)
         if start_pos == 0:
             mask = torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1) >= torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1) // ratio
             index_score += torch.where(mask, float("-inf"), 0)
@@ -915,14 +911,17 @@ class Transformer(nn.Module):
                 continue
 
             # ===== Per-row scale/offset for int8 Linear (shard along output dim) =====
-            # For ColumnParallel int8 layers (wq_b, wo indexer.wq_b, indexer.weights_proj), shard rows.
+            # For ColumnParallel int8 layers (wq_b, wo_a), shard rows.
+            # indexer.wq_b / indexer.weights_proj Replicated
             # For RowParallel int8 layers (wo_b), the weight is [N, part_in] -> scale/offset is [N, 1] (NOT sharded along N).
             # For plain int8 Linear (wq_a, wkv, experts.w13/w2, shared_experts.w13/w2), scale/offset is full [N, 1] (NOT sharded).
             if is_scale or is_offset:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 # Determine if this layer is ColumnParallel (shard output dim).
-                col_parallel_names = ("wq_b", "wo_a", "indexer.wq_b", "indexer.weights_proj")
-                is_col_parallel = any(s in target_name for s in col_parallel_names) and "wo_b" not in target_name
+                col_parallel_names = ("wq_b", "wo_a")
+                is_col_parallel = (any(s in target_name for s in col_parallel_names)
+                                   and "wo_b" not in target_name
+                                   and "indexer" not in target_name)
                 if is_col_parallel:
                     shard_size = param.shape[0]
                     loaded_weight = loaded_weight[rank * shard_size:(rank + 1) * shard_size]
@@ -971,17 +970,15 @@ class Transformer(nn.Module):
                                              args.o_groups * args.o_lora_rank, args.dim,
                                              target_name, True, True, rank, world_size)
                 continue
-            # indexer.wq_b: ColumnParallel (shard output dim).
+            # indexer.wq_b: Replicated
             if target_name.endswith("indexer.wq_b.weight"):
-                load_tensor_parallel_weights(param, loaded_weight, args.q_lora_rank,
-                                             args.index_n_heads * args.index_head_dim,
-                                             target_name, False, True, rank, world_size)
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                param.data.copy_(loaded_weight)
                 continue
-            # indexer.weights_proj: ColumnParallel (shard output dim).
+            # indexer.weights_proj: Replicated
             if target_name.endswith("indexer.weights_proj.weight"):
-                load_tensor_parallel_weights(param, loaded_weight, args.dim,
-                                             args.index_n_heads,
-                                             target_name, False, True, rank, world_size)
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                param.data.copy_(loaded_weight)
                 continue
 
             # attn_sink: per-head sink, shard along head dim (n_local_heads = n_heads // world_size).
