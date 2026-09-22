@@ -307,7 +307,7 @@ def main(
         for it in range(bench_iters):
             prompts = [make_prompt() for _ in range(local_bs)]
             s = time.monotonic_ns()
-            completion_tokens_batch, step = generate(model, prompts, effective_max_new_tokens, eos_ids, temperature)
+            completion_tokens_batch, step = generate(model, prompts, effective_max_new_tokens, eos_id, temperature)
             c = time.monotonic_ns()
             d = (c - s) / 1e6
             num_prefill = sum(len(p) for p in prompts)
