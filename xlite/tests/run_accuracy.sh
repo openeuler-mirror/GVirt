@@ -83,9 +83,9 @@ prompts = [
 ]
 
 golden_answers = [
-    " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the",
-    ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
-    ' Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital',
+    " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I want to know if there are any",
+    " the only one who can make the decision on the national security of the country. The president is also the only one who can make the decision on the national security",
+    " Paris. The capital of France is also the capital of the French Republic. The capital of France is also the capital of the French government. The capital of France",
     " not just a technological challenge but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and"
 ]
 
@@ -109,7 +109,7 @@ for i in range(len(prompts)):
     query = prompts[i]
     expected = golden_answers[i]
     actual = results[i]['response']
-    
+
     if actual == expected:
         print(f"✓ Test {i} PASSED")
         passed += 1

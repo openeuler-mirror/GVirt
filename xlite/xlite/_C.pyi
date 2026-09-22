@@ -1735,7 +1735,7 @@ def rope_and_cache(
         rt (Runtime): Native runtime handle.
         inout (torch.Tensor): Input/output packed QKV tensor, shape
             ``[tokens, (n_heads + 2*n_kv_heads)*head_dim]``, layout [Q|K|V], fp16/bf16
-            (must match caches/cossin). RoPE is applied in place.
+            (must match caches). RoPE is applied in place.
         k_cache (torch.Tensor): Paged key cache, shape
             ``[num_blocks, block_size, n_kv_heads, head_dim]``, same dtype.
         v_cache (torch.Tensor): Paged value cache, shape
@@ -1743,9 +1743,11 @@ def rope_and_cache(
         position (torch.Tensor): Per-token position indices, shape ``[tokens]``, int64
             (mRoPE: flattened ``[3, tokens]`` int64 — base, height, width planes).
         cosin (torch.Tensor): Rotary cosine/sine table, shape ``[max_position, rot_dim]``,
-            same dtype as ``inout``; each row is ``[cos | sin]`` concatenated
-            (``cos`` at ``position*rot_dim``, ``sin`` right after), indexed by each
-            token's ``position`` value, so it must cover the full position range.
+            fp32 (recommended); each row is ``[cos | sin]`` concatenated (``cos`` at
+            ``position*rot_dim``, ``sin`` right after), indexed by each token's
+            ``position`` value, so it must cover the full position range. A table in the
+            ``inout`` dtype instead selects the deprecated model-dtype path (bf16
+            round-trip emulation / fp16 direct math).
         slot_mapping (torch.Tensor): Per-token paged-cache slots, shape ``[tokens]``, int32
             (slot = block_id*block_size + offset).
         n_heads (int): Global number of query heads (the host divides by tp size to get

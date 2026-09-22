@@ -860,20 +860,22 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
         throw std::runtime_error(std::string(__func__) + ": unsupported rope type gptj");
     }
 
+    bool cossinInFp32 = cossin.dtype == FP32;
     KERNEL_PTR_TYPE(rope_and_cache) * launchKernel;
-    if (EachXDtype(FP16, inout, kCache, vCache, cossin)) {
+    if (EachXDtype(FP16, inout, kCache, vCache) && (cossinInFp32 || cossin.dtype == FP16)) {
         launchKernel = aclrtlaunch_rope_and_cache_float16_t;
-    } else if (EachXDtype(BF16, inout, kCache, vCache, cossin)) {
+    } else if (EachXDtype(BF16, inout, kCache, vCache) && (cossinInFp32 || cossin.dtype == BF16)) {
         launchKernel = aclrtlaunch_rope_and_cache_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(inout) + XT_STR(kCache) + XT_STR(vCache) +
                               XT_STR(position) + XT_STR(cossin) + XT_STR(slotMapping);
         throw std::runtime_error(err_str + "not supported!");
     }
+
     launchKernel(rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr, kCache.ptr,
                  vCache.ptr, slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1],
                  inout.shape[1], inout.shape[1], localHeads, localKvHeads, headDim, blockSize,
-                 scale, mropeMaskH, mropeMaskW);
+                 scale, mropeMaskH, mropeMaskW, cossinInFp32);
 }
 
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk,

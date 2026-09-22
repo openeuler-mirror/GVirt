@@ -205,8 +205,8 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu")[: (dim // 2)] / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
-    cos_cache = freqs.cos().to(torch.get_default_dtype())
-    sin_cache = freqs.sin().to(torch.get_default_dtype())
+    cos_cache = freqs.cos()  # fp32: rope_and_cache cos/sin contract
+    sin_cache = freqs.sin()
     freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
     return freq_cis.to("npu")
 
@@ -224,7 +224,7 @@ def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor) -
     x2 = x_rot[..., x_rot.shape[-1] // 2:]
     x_rot_half = torch.cat((-x2, x1), dim=-1)
 
-    x_rot_embedded = (x_rot * cos) + (x_rot_half * sin)
+    x_rot_embedded = ((x_rot * cos) + (x_rot_half * sin)).to(x.dtype)
     return torch.cat([x_rot_embedded, x_pass], dim=-1)
 
 
