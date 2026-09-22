@@ -1898,7 +1898,7 @@ void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t 
 void RopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
                          uint32_t offset, uint32_t vdim, at::Tensor &inputWithR, at::Tensor &freqs,
                          at::Tensor &position, uint32_t blockSize, at::Tensor &vCache,
-                         at::Tensor &slotMapping, bool outInterleaved)
+                         at::Tensor &slotMapping, bool outInterleaved, bool doRotate = false)
 {
     XTensor _inputWithR, _freqs, _position, _vCache, _slotMapping;
     InitXTensor(_inputWithR, inputWithR);
@@ -1907,7 +1907,8 @@ void RopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, u
     InitXTensor(_vCache, vCache);
     InitXTensor(_slotMapping, slotMapping);
     XliteOpRopeComplexAndCache(rt, nLocalHeads, stepDim, ropeDim, offset, vdim, _inputWithR, _freqs,
-                               _position, blockSize, _vCache, _slotMapping, outInterleaved);
+                               _position, blockSize, _vCache, _slotMapping, outInterleaved,
+                               doRotate);
     rt.Synchronize();
 }
 
@@ -2862,7 +2863,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("n_local_heads"), py::arg("step_dim"), py::arg("rope_dim"), py::arg("offset"),
           py::arg("vdim"), py::arg("input_with_r"), py::arg("freqs"), py::arg("position"),
           py::arg("block_size"), py::arg("v_cache"), py::arg("slot_mapping"),
-          py::arg("out_interleaved") = false);
+          py::arg("out_interleaved") = false, py::arg("do_rotate") = false);
     m.def("mla_prepare", &MlaPrepare, py::arg("rt"), py::arg("attn_qkvc"), py::arg("q_norm"),
           py::arg("q_norm_bias"), py::arg("attn_norm_qc"), py::arg("kv_norm"),
           py::arg("kv_norm_bias"), py::arg("attn_norm_kvc"), py::arg("freqs"), py::arg("position"),

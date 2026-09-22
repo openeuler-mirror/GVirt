@@ -1137,14 +1137,14 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
     launchKernel(PickMinBlockNum(rt.aivNum, inputWithR.shape[0]), rt.stream, inputWithR.shape[0],
                  nLocalHeads, stepDim, ropeDim, offset, 0, inputWithR.ptr, output.ptr, outStepDim,
                  outOffset, freqs.ptr, position.ptr, 0, nullptr, nullptr, inverse ? 1u : 0u,
-                 outInterleaved ? 1u : 0u);
+                 outInterleaved ? 1u : 0u, 0u, 1.0f);
 }
 
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
                                 uint32_t ropeDim, uint32_t offset, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
                                 uint32_t blockSize, XTensor &vCache, XTensor &slotMapping,
-                                bool outInterleaved)
+                                bool outInterleaved, bool doRotate)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1159,10 +1159,12 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
         std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
         throw std::runtime_error(err_str + " TODO");
     }
+    // rotate scale = 1/sqrt(vdim), derived internally (not passed from Python).
+    float rotateScale = doRotate ? (1.0f / sqrtf(static_cast<float>(vdim))) : 1.0f;
     launchKernel(PickMinBlockNum(rt.aivNum, inputWithR.shape[0]), rt.stream, inputWithR.shape[0],
                  nLocalHeads, stepDim, ropeDim, offset, vdim, inputWithR.ptr, nullptr, 0, 0,
                  freqs.ptr, position.ptr, blockSize, vCache.ptr, slotMapping.ptr, 0u,
-                 outInterleaved ? 1u : 0u);
+                 outInterleaved ? 1u : 0u, doRotate ? 1u : 0u, rotateScale);
 }
 
 void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,

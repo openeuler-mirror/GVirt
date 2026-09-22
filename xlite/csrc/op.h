@@ -158,7 +158,7 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
                                 uint32_t ropeDim, uint32_t offset, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,
                                 uint32_t blockSize, XTensor &vCache, XTensor &slotMapping,
-                                bool outInterleaved = false);
+                                bool outInterleaved = false, bool doRotate = false);
 void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
                        const XTensor &qNormBias, XTensor &attnNormQc, const XTensor &kvNorm,
                        const XTensor &kvNormBias, const XTensor &freqs, const XTensor &position,

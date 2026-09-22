@@ -2172,6 +2172,53 @@ def rope_complex(
     """
     ...
 
+def rope_complex_and_cache(
+    rt: Runtime,
+    n_local_heads: int,
+    step_dim: int,
+    rope_dim: int,
+    offset: int,
+    vdim: int,
+    input_with_r: torch.Tensor,
+    freqs: torch.Tensor,
+    position: torch.Tensor,
+    block_size: int,
+    v_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    out_interleaved: bool = False,
+    do_rotate: bool = False,
+) -> None:
+    """Apply complex-domain rotary embedding and write the whole head into a paged vCache.
+
+    Single-op test entry for the CXA kv path: loads the whole head ``[remain | rope]``
+    into UB, rotates the rope region (last ``rope_dim`` elements), and writes the whole
+    head back into ``v_cache`` at the slot given by ``slot_mapping``. With ``do_rotate=True``
+    additionally applies ``x * 1/sqrt(vdim)`` to the whole head after rope and before the
+    cache write (scale derived internally; only fires on the fullHeadLoad path, i.e. remain > 0).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        n_local_heads (int): Number of local heads; asserted 1 in cache mode.
+        step_dim (int): Full head dimension (input width).
+        rope_dim (int): Rotary dimension (even).
+        offset (int): Rope region start within the head, ``step_dim - rope_dim``.
+        vdim (int): Per-slot head width in vCache.
+        input_with_r (torch.Tensor): Input head, shape ``[num_tokens, n_local_heads, step_dim]``,
+            fp16 or bf16.
+        freqs (torch.Tensor): Complex frequency table, shape ``[max_pos, rope_dim]`` fp32.
+        position (torch.Tensor): Per-token position ids, shape ``[num_tokens]`` int64.
+        block_size (int): vCache block size.
+        v_cache (torch.Tensor): Paged vCache, shape ``[num_blocks, block_size, n_local_heads, vdim]``.
+        slot_mapping (torch.Tensor): Flat slot index per token, shape ``[num_tokens]`` int32.
+        out_interleaved (bool): If True, write the rope result interleaved ``[r0,i0,r1,i1,...]``;
+            otherwise the deinterleaved half layout ``[r0..r(half-1) | i0..i(half-1)]``.
+        do_rotate (bool): If True, scale the whole head by ``1/sqrt(vdim)`` after rope.
+
+    Returns:
+        None: v_cache is written in place; the input tensor is NOT written back.
+    """
+    ...
+
 def mla_prepare(
     rt: Runtime,
     attn_qkvc: torch.Tensor,
