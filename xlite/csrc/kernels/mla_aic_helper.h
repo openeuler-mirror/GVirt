@@ -247,7 +247,9 @@ public:
                 CalMmad(qkl0cBuf[pingpongL0C], qkl0aBuf[curr], qkl0bBuf[curr], mBlockPad, nBlockPad,
                         kBlockPad, kIdx == 0);
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-                PipeBarrier<PIPE_M>();
+                if (mBlockNum * nBlockNum < 10) {
+                    PipeBarrier<PIPE_M>();
+                }
                 curr = 1 - curr;
             }
             if (kLoop % 4 != 0) {
@@ -278,7 +280,9 @@ public:
             CalMmad(qkl0cBuf[pingpongL0C], qkl0aBuf[curr], qkl0bBuf[curr], mBlockPad, nBlockPad,
                     kBlockPad, false);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-            PipeBarrier<PIPE_M>();
+            if (mBlockNum * nBlockNum < 10) {
+                PipeBarrier<PIPE_M>();
+            }
 
             SetFlag<HardEvent::M_FIX>(EVENT_ID0 + pingpongL0C);
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0 + pingpongL0C);
@@ -437,7 +441,9 @@ public:
                 CalMmad(svl0cBuf, svl0aBuf[curr], svl0bBuf[curr], mBlockPad, nBlockPad, kBlockPad,
                         kIdx == 0);
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-                PipeBarrier<PIPE_M>();
+                if (mBlockNum * nBlockNum < 10) {
+                    PipeBarrier<PIPE_M>();
+                }
                 curr = 1 - curr;
             }
             if (kLoop % 4 != 0) {

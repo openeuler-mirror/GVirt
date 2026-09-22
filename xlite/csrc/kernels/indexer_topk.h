@@ -235,7 +235,9 @@ public:
             // mmad scores (blockSize, queryTaskLen, nHeads)
             WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
             CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, headDim, true);
-            PipeBarrier<PIPE_M>();
+            if (mBlockNum * nBlockNum < 10) {
+                PipeBarrier<PIPE_M>();
+            }
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
 
             SetFlag<HardEvent::M_FIX>(EVENT_ID0);
@@ -265,7 +267,9 @@ public:
                 WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
                 CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], MBLOCKSIZE, wnBlockPad, nHeads, true);
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-                PipeBarrier<PIPE_M>();
+                if (wnBlockNum < 10) {
+                    PipeBarrier<PIPE_M>();
+                }
 
                 SetFlag<HardEvent::M_FIX>(EVENT_ID0);
                 WaitFlag<HardEvent::M_FIX>(EVENT_ID0);

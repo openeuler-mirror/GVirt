@@ -157,7 +157,9 @@ public:
             WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
             CopyToGm(qk[local], l0cBuf, mActual, nSize, mBlockPad, qkStride);
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
-            PipeBarrier<PIPE_M>();
+            if (mBlockNum * nBlockNum < 10) {
+                PipeBarrier<PIPE_M>();
+            }
             curIdx = 1 - curIdx;
         }
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
@@ -242,7 +244,9 @@ public:
             first = 0;
             SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curIdx);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID2 + curIdx);
-            PipeBarrier<PIPE_M>();
+            if (mBlockNum * nBlockNum < 10) {
+                PipeBarrier<PIPE_M>();
+            }
             curIdx = 1 - curIdx;
         }
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID3);
