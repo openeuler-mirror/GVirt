@@ -247,6 +247,14 @@ __aicore__ __inline__ void rope_complex_and_cache(
         pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
+        // standalone rotate_activation: scale the rope-region FP32 in place by 1/sqrt(stepDim).
+        // The nope region is scaled by the caller via muls. Cache path scales the whole head
+        // below (fullHeadLoad), so guard with !need_v_cache to avoid double-scaling.
+        if (doRotate && !need_v_cache) {
+            vmuls(inOutFP32, inOutFP32, rotateScale, totalRepeat, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
         // out FP32 -> Dtype. outInterleaved: vgather each head into [r0,i0,r1,i1,...] and
         // convert head-by-head; otherwise convert all heads at once.
@@ -287,7 +295,8 @@ __aicore__ __inline__ void rope_complex_and_cache(
         }
         pipe_barrier(PIPE_V);
 
-        // rotate (x * 1/sqrt(vdim)) on the whole head, after rope and before the cache write.
+        // cache-path rotate: scale the whole head by 1/sqrt(vdim) after rope, before the cache
+        // write. fullHeadLoad => cache path (nLocalHeads==1), so rotateRepeat <= VECTOR_MAX_REPEAT.
         if (doRotate && fullHeadLoad) {
             if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
                 vconv_bf162f32(rotateFP32, outs[curr], rotateRepeat, 1, 1, 8, 4);

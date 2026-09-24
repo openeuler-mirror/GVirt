@@ -2142,13 +2142,27 @@ def rope_complex(
     output: torch.Tensor,
     inverse: bool = False,
     out_interleaved: bool = False,
+    do_rotate: bool = False,
 ) -> None:
-    """Apply complex-domain rotary embedding helper.
+    """Apply complex-domain rotary embedding to the rope region, optionally scaling it.
+
+    Only the rope region (last ``rope_dim`` elements of each head) is read, rotated, and
+    written to ``output``; the nope region (the first ``step_dim - rope_dim`` elements) is
+    never touched here. With ``do_rotate=True`` the rotated rope region is additionally
+    scaled by ``1/sqrt(step_dim)`` in place on the FP32 stage before writeback — this is the
+    rope-region half of ``rotate_activation`` (``x * x.size(-1)**-0.5`` with
+    ``x.size(-1) == step_dim == head_dim``).
+
+    Because the head is ``[nope | rope]`` and the scale is element-wise, scaling the whole
+    head equals scaling the nope and rope regions independently by the same factor. So the
+    caller completes ``rotate_activation`` on the whole head by scaling the nope region
+    separately via :func:`muls` (in-place, partial-row, ``calc_offset=0``,
+    ``calc_num=step_dim-rope_dim``). The output always has rope-region width.
 
     Args:
         rt (Runtime): Native runtime handle.
         n_local_heads (int): Number of local heads.
-        step_dim (int): Per-step hidden dimension.
+        step_dim (int): Per-step hidden dimension (== head_dim).
         rope_dim (int): Rotary dimension.
         input_with_r (torch.Tensor): Input tensor with real/imag layout, shape
             ``[tokens, n_local_heads*step_dim]``, fp16 or bf16.
@@ -2159,13 +2173,18 @@ def rope_complex(
             (``freqs_ptr + position[token] * rope_dim``), so it must cover the full
             position range.
         position (torch.Tensor): Per-token position ids, shape ``[tokens]``, int64.
-        output (torch.Tensor): Output tensor, rope-only slice, shape
-            ``[tokens, n_local_heads*rope_dim]`` (out step = rope_dim), model dtype.
+        output (torch.Tensor): Output tensor, rope-region slice, shape
+            ``[tokens, n_local_heads*rope_dim]``. Model dtype. With ``do_rotate=True`` the
+            values are scaled by ``1/sqrt(step_dim)``.
         inverse (bool): If True, apply the conjugate (reverse) rotation.
         out_interleaved (bool): If True, write the rope result interleaved
             ``[r0,i0,r1,i1,...]`` (matches torch ``view_as_real().flatten``);
             otherwise write the deinterleaved half layout
             ``[r0..r(half-1) | i0..i(half-1)]`` (MLA/DSA kv-cache convention).
+        do_rotate (bool): If True, scale the rope region by ``1/sqrt(step_dim)`` after rope
+            (the rope-region half of ``rotate_activation``). The nope region must be scaled
+            separately by the caller via :func:`muls`. A rope-only head
+            (``step_dim == rope_dim``) needs no nope scaling.
 
     Returns:
         None: Output is produced in place according to kernel contract.
@@ -2927,14 +2946,35 @@ def indexer_topk(
     """
     ...
 
-def muls(rt: Runtime, input: torch.Tensor, scale: float, output: torch.Tensor) -> None:
+def muls(
+    rt: Runtime,
+    input: torch.Tensor,
+    scale: float,
+    output: torch.Tensor,
+    calc_offset: int = 0,
+    calc_num: int = 4294967295,
+) -> None:
     """Multiply tensor by scalar and write to output.
+
+    Treats ``input``/``output`` as 2D ``[shape0, shape1]`` and scales each row's slice
+    ``[calc_offset : calc_offset + calc_num]`` (the rest of each row is left untouched).
+    With the defaults (``calc_offset=0``, ``calc_num`` = ``UINT32_MAX``) the whole row is
+    scaled — the original whole-tensor behavior. ``input is output`` (in place) is supported;
+    rows are disjoint across cores so in-place writes are race-free.
+
+    This partial-row form backs the nope-region half of ``rotate_activation``: call
+    ``rope_complex(do_rotate=True)`` for the rope region and this with
+    ``calc_offset=0, calc_num=step_dim-rope_dim`` for the nope region.
 
     Args:
         rt (Runtime): Native runtime handle.
         input (torch.Tensor): Input tensor, 1D or 2D, fp16 or bf16.
         scale (float): Scalar multiplier.
         output (torch.Tensor): Output tensor, same shape and dtype as ``input``.
+        calc_offset (int): Per-row element offset where scaling starts (default 0).
+        calc_num (int): Number of elements per row to scale, starting at ``calc_offset``
+            (default ``UINT32_MAX`` = whole row). ``calc_offset + calc_num`` must not
+            exceed ``shape1``.
 
     Returns:
         None: `output` is written in place.

@@ -1119,7 +1119,7 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
 void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t outStepDim,
                         uint32_t ropeDim, uint32_t offset, uint32_t outOffset, XTensor &inputWithR,
                         XTensor &freqs, XTensor &position, XTensor &output, bool inverse,
-                        bool outInterleaved)
+                        bool outInterleaved, bool doRotate)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1134,10 +1134,14 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
         std::string err_str = DBG_PREFIX + XT_STR(inputWithR);
         throw std::runtime_error(err_str + " TODO");
     }
+    // rotate_activation: doRotate scales the rope region in place; the caller scales the nope
+    // region via muls. rotateScale = 1/sqrt(stepDim) is derived internally.
+    float rotateScale = doRotate ? (1.0f / sqrtf(static_cast<float>(stepDim))) : 1.0f;
+    uint32_t vdim = 0;
     launchKernel(PickMinBlockNum(rt.aivNum, inputWithR.shape[0]), rt.stream, inputWithR.shape[0],
-                 nLocalHeads, stepDim, ropeDim, offset, 0, inputWithR.ptr, output.ptr, outStepDim,
-                 outOffset, freqs.ptr, position.ptr, 0, nullptr, nullptr, inverse ? 1u : 0u,
-                 outInterleaved ? 1u : 0u, 0u, 1.0f);
+                 nLocalHeads, stepDim, ropeDim, offset, vdim, inputWithR.ptr, output.ptr,
+                 outStepDim, outOffset, freqs.ptr, position.ptr, 0, nullptr, nullptr,
+                 inverse ? 1u : 0u, outInterleaved ? 1u : 0u, doRotate ? 1u : 0u, rotateScale);
 }
 
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
