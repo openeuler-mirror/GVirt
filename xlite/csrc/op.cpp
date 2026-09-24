@@ -1430,7 +1430,7 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
     size_t m = x.shape[0];
     size_t n = x.shape[1];
     if (x.dtype == BF16) {
-        aclrtlaunch_quant_bf16_to_i8_static(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream,
+        aclrtlaunch_quant_static_bfloat16_t(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream,
                                             x.ptr, scale_reciprocal.ptr, offset.ptr, out.ptr, m, n);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(x);
@@ -1450,7 +1450,7 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, con
     size_t m = x.shape[0];
     size_t n = x.shape[1];
     if (x.dtype == BF16) {
-        aclrtlaunch_quant_bf16_to_i8_dynamic(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream,
+        aclrtlaunch_quant_dynamic_bfloat16_t(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream,
                                              x.ptr, scale.ptr, out.ptr, num.ptr, m, n);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(x);

@@ -15,19 +15,26 @@
 //   k_loop >  1 (k >  K_TILE): phase1 reduces cross-tile absmax into rowAbsUb via vmax; phase2
 //     re-reads each x tile (not kept resident).
 #define QUANT_DYN_K_TILE 8192
-static_assert(ROUND_UP(QUANT_DYN_K_TILE, 256 / sizeof(bfloat16_t)) *
-                          (2 * sizeof(bfloat16_t) + 2 * sizeof(float) + sizeof(half) +
-                           2 * sizeof(int8_t)) +
-                      sizeof(float) <=
-                  UB_SIZE,
-              "quant_bf16_to_i8_dynamic UB layout overflows UB_SIZE");
-// ReduceMax supports float dim up to VECTOR_MAX_REPEAT(255) * pad(64) = 16320; K_TILE must fit.
-static_assert(QUANT_DYN_K_TILE <= VECTOR_MAX_REPEAT * (VECTOR_MAX_BYTESIZE / sizeof(float)),
-              "QUANT_DYN_K_TILE exceeds ReduceMax float limit");
 
-__aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM_ADDR pnum_tokens,
-                                        uint32_t m, uint32_t k)
+// out = int8(x * 127 / absmax(x_row)), scale = absmax(x_row) / 127
+// dynamic per-token quantization, [m, k] activation; dtype = float16_t / bfloat16_t
+template <typename dtype>
+__aicore__ inline void quant_dyn_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM_ADDR pnum_tokens,
+                                       uint32_t m, uint32_t k)
 {
+    // UB layout below: x1,x2: dtype | xf32_buf,xAbs_buf: float | zf16_buf: half | z1,z2: int8_t
+    // | rowAbsUb: float(1). bytes = k_pad * (2*sizeof(dtype) + 2*sizeof(float) + sizeof(half)
+    //            + 2*sizeof(int8_t)) + sizeof(float); must fit in UB_SIZE.
+    static_assert(
+        ROUND_UP(QUANT_DYN_K_TILE, 256 / sizeof(dtype)) *
+                    (2 * sizeof(dtype) + 2 * sizeof(float) + sizeof(half) + 2 * sizeof(int8_t)) +
+                sizeof(float) <=
+            UB_SIZE,
+        "quant_dynamic UB layout overflows UB_SIZE");
+    // ReduceMax supports float dim up to VECTOR_MAX_REPEAT(255) * pad(64) = 16320; K_TILE must fit.
+    static_assert(QUANT_DYN_K_TILE <= VECTOR_MAX_REPEAT * (VECTOR_MAX_BYTESIZE / sizeof(float)),
+                  "QUANT_DYN_K_TILE exceeds ReduceMax float limit");
+
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -40,12 +47,12 @@ __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM
     constexpr uint32_t k_tile = QUANT_DYN_K_TILE;
     uint32_t k_loop = DIV_ROUND_UP(k, k_tile);
 
-    uint32_t k_pad = ROUND_UP(k_tile, (256 / sizeof(bfloat16_t)));
-    uint32_t k_pad_row = ROUND_UP(k, VECTOR_MAX_NUM_OF_BF16);
+    uint32_t k_pad = ROUND_UP(k_tile, (256 / sizeof(dtype)));
+    uint32_t k_pad_row = ROUND_UP(k, 256 / sizeof(dtype));
     uint32_t k_repeats_row = k_pad_row / VECTOR_MAX_NUM_OF_FP32;
 
-    auto *x1 = reinterpret_cast<__ubuf__ bfloat16_t *>((uintptr_t)0);
-    auto *x2 = reinterpret_cast<__ubuf__ bfloat16_t *>(x1 + k_pad);
+    auto *x1 = reinterpret_cast<__ubuf__ dtype *>((uintptr_t)0);
+    auto *x2 = reinterpret_cast<__ubuf__ dtype *>(x1 + k_pad);
     auto *xf32_buf = reinterpret_cast<__ubuf__ float *>(x2 + k_pad);
     auto *xAbs_buf = reinterpret_cast<__ubuf__ float *>(xf32_buf + k_pad);
     auto *zf16_buf = reinterpret_cast<__ubuf__ half *>(xAbs_buf + k_pad);
@@ -55,10 +62,10 @@ __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM
     auto *sum_addr = reinterpret_cast<__ubuf__ float *>(rowAbsUb + 1);
     assert((uint64_t)sum_addr <= UB_SIZE);
 
-    __ubuf__ bfloat16_t *xBufs[2] = {x1, x2};
+    __ubuf__ dtype *xBufs[2] = {x1, x2};
     __ubuf__ int8_t *zBufs[2] = {z1, z2};
 
-    __gm__ bfloat16_t *x_gm = reinterpret_cast<__gm__ bfloat16_t *>(x);
+    __gm__ dtype *x_gm = reinterpret_cast<__gm__ dtype *>(x);
     __gm__ int8_t *z_gm = reinterpret_cast<__gm__ int8_t *>(z);
     __gm__ float *scales_gm = reinterpret_cast<__gm__ float *>(scales);
 
@@ -78,13 +85,13 @@ __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM
         if (k_loop == 1) {
             // x GM -> UB
             wait_flag(PIPE_V, PIPE_MTE2, eId);
-            copy_gm_to_ubuf_align_b16(xBufs[eId], x_gm + rowOffset, 0, 1, k * sizeof(bfloat16_t), 0,
-                                      0, 0, 0);
+            copy_gm_to_ubuf_align_b16(xBufs[eId], x_gm + rowOffset, 0, 1, k * sizeof(dtype), 0, 0,
+                                      0, 0);
             set_flag(PIPE_MTE2, PIPE_V, eId);
 
-            // BF16 -> FP32 (shared by phase1 absmax and phase2 convert)
+            // FP16/BF16 -> FP32 (shared by phase1 absmax and phase2 convert)
             wait_flag(PIPE_MTE2, PIPE_V, eId);
-            vconv_bf162f32(xf32_buf, xBufs[eId], k_repeats_row, 1, 1, 8, 4);
+            convert_input<dtype>(xf32_buf, xBufs[eId], k_repeats_row);
             set_flag(PIPE_V, PIPE_MTE2, eId);  // xBufs[eId] free for next row
             pipe_barrier(PIPE_V);
 
@@ -138,18 +145,18 @@ __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM
             uint32_t k_offset = loop * k_tile;
             bool last_loop = (loop == k_loop - 1);
             uint32_t k_size = last_loop ? (k - k_offset) : k_tile;
-            uint32_t k_size_pad = ROUND_UP(k_size, VECTOR_MAX_NUM_OF_BF16);
+            uint32_t k_size_pad = ROUND_UP(k_size, 256 / sizeof(dtype));
             uint32_t k_repeats = k_size_pad / VECTOR_MAX_NUM_OF_FP32;
 
             // x tile GM -> UB
             wait_flag(PIPE_V, PIPE_MTE2, eId);
             copy_gm_to_ubuf_align_b16(xBufs[eId], x_gm + rowOffset + k_offset, 0, 1,
-                                      k_size * sizeof(bfloat16_t), 0, 0, 0, 0);
+                                      k_size * sizeof(dtype), 0, 0, 0, 0);
             set_flag(PIPE_MTE2, PIPE_V, eId);
 
-            // BF16 -> FP32
+            // FP16/BF16 -> FP32
             wait_flag(PIPE_MTE2, PIPE_V, eId);
-            vconv_bf162f32(xf32_buf, xBufs[eId], k_repeats, 1, 1, 8, 4);
+            convert_input<dtype>(xf32_buf, xBufs[eId], k_repeats);
             set_flag(PIPE_V, PIPE_MTE2, eId);  // xBufs[eId] free for next tile
             pipe_barrier(PIPE_V);
 
@@ -184,17 +191,17 @@ __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM
             uint32_t k_offset = loop * k_tile;
             bool last_loop = (loop == k_loop - 1);
             uint32_t k_size = last_loop ? (k - k_offset) : k_tile;
-            uint32_t k_size_pad = ROUND_UP(k_size, VECTOR_MAX_NUM_OF_BF16);
+            uint32_t k_size_pad = ROUND_UP(k_size, 256 / sizeof(dtype));
             uint32_t k_repeats = k_size_pad / VECTOR_MAX_NUM_OF_FP32;
 
             // x tile GM -> UB
             wait_flag(PIPE_V, PIPE_MTE2, eId);
             copy_gm_to_ubuf_align_b16(xBufs[eId], x_gm + rowOffset + k_offset, 0, 1,
-                                      k_size * sizeof(bfloat16_t), 0, 0, 0, 0);
+                                      k_size * sizeof(dtype), 0, 0, 0, 0);
             set_flag(PIPE_MTE2, PIPE_V, eId);
 
             wait_flag(PIPE_MTE2, PIPE_V, eId);
-            vconv_bf162f32(xf32_buf, xBufs[eId], k_repeats, 1, 1, 8, 4);
+            convert_input<dtype>(xf32_buf, xBufs[eId], k_repeats);
             set_flag(PIPE_V, PIPE_MTE2, eId);  // xBufs[eId] free for next tile
             pipe_barrier(PIPE_V);
 
@@ -224,14 +231,14 @@ __aicore__ inline void quant_bf16_to_i8(GM_ADDR x, GM_ADDR scales, GM_ADDR z, GM
 }
 
 #define QUANT_DYN_FUNC_DEFINE(dtype)                                                         \
-    extern "C" __global__ __aicore__ void quant_bf16_to_i8_dynamic(                          \
+    extern "C" __global__ __aicore__ void quant_dynamic_##dtype(                             \
         GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens, uint32_t m, uint32_t k) \
     {                                                                                        \
-        quant_bf16_to_i8(in, scale, out, pnum_tokens, m, k);                                 \
+        quant_dyn_to_i8<dtype>(in, scale, out, pnum_tokens, m, k);                           \
     }
 #else
 #define QUANT_DYN_FUNC_DEFINE(dtype)                                                         \
-    extern "C" __global__ __aicore__ void quant_bf16_to_i8_dynamic(                          \
+    extern "C" __global__ __aicore__ void quant_dynamic_##dtype(                             \
         GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens, uint32_t m, uint32_t k) \
     {                                                                                        \
     }
