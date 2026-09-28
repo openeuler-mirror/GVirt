@@ -96,6 +96,13 @@ def main():
         help="模型名称（默认：Qwen3 32B）"
     )
 
+    # 可选参数：测试环境型号（默认：910B3(A2)）
+    parser.add_argument(
+        "-d", "--device",
+        default="910B3(A2)",
+        help="测试环境型号（默认：910B3(A2)）"
+    )
+
     # 解析参数
     args = parser.parse_args()
 
@@ -105,6 +112,7 @@ def main():
     FOLDER3 = args.folder3
     OUTPUT_LOG = args.output
     MODEL_NAME = args.model
+    DEVICE_TYPE = args.device
     # --------------------------------------------------------------------------------
 
     # 文件夹名称映射（用于表格中的item列，固定对应关系）
@@ -214,7 +222,7 @@ def main():
         # 获取当前时间
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        f.write(f"## {MODEL_NAME} TPS 910B3(A2) Online Inference Performance Comparison\n")
+        f.write(f"## {MODEL_NAME} TPS {DEVICE_TYPE} Online Inference Performance Comparison\n")
         f.write(f"- Report Generated Time: {current_time}\n")
         f.write("- aclgraph: main\n")
         f.write("- xlite-full: main + xlite-full\n")

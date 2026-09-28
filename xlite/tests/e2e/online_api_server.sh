@@ -9,7 +9,7 @@ tensor_parallel_size=${7:-8}
 mode=${8:-aclgraph}
 
 # 基础
-export VLLM_USE_V1=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # 调度优化
 export TASK_QUEUE_ENABLE=1
 # 通信优化
@@ -17,7 +17,6 @@ export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
 # 计算优化
 export OMP_PROC_BIND=false
-export VLLM_ASCEND_ENABLE_NZ=2
 # 绑核
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
@@ -72,13 +71,13 @@ fi
 # 根据 mode 选择参数
 case "${mode}" in
 	aclgraph)
-		additional_config_param='{"enable_flashcomm1": true, "enable_cpu_binding": true}'
+		additional_config_param='{"weight_nz_mode": 2, "enable_balance_scheduling": true, "enable_flashcomm1": true, "multistream_overlap_shared_expert": true}'
 		;;
 	xlite_decode_only)
-		additional_config_param='{"enable_flashcomm1": true, "xlite_graph_config": {"enabled": true}, "enable_cpu_binding": true}'
+		additional_config_param='{"xlite_graph_config": {"enabled": true}, "weight_nz_mode": 2, "enable_balance_scheduling": true, "enable_flashcomm1": true, "multistream_overlap_shared_expert": true}'
 		;;
 	xlite_full_mode)
-		additional_config_param='{"xlite_graph_config": {"enabled": true, "full_mode": true}, "enable_cpu_binding": true}'
+		additional_config_param='{"xlite_graph_config": {"enabled": true, "full_mode": true}, "weight_nz_mode": 2, "enable_balance_scheduling": true}'
 		;;
 	*)
 		echo "Unknown mode: ${mode}, exit"

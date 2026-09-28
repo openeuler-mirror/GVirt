@@ -10,27 +10,29 @@ MODELS[dense]="Qwen3-32B|/mnt/nvme0n1/models/Qwen3-32B"
 MODELS[moe]="Qwen3-30B-A3B-Instruct-2507|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507"
 MODELS[dense_quant]="Qwen3-32B-w8a8-nopdmix|/mnt/nvme0n1/models/Qwen3-32B-w8a8-nopdmix"
 MODELS[moe_quant]="Qwen3-30B-A3B-Instruct-2507-w8a8|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507-w8a8"
+MODELS[moe_quant_a3]="GLM-5.2-w8a8|/mnt/nvme0n1/models/GLM-5.2-w8a8/"
 
 # 确定要测试的模型列表
 declare -a TEST_MODELS
 if [ "${MODEL_TYPE}" = "all" ]; then
-    TEST_MODELS=("dense" "moe" "dense_quant" "moe_quant")
+    TEST_MODELS=("dense" "moe" "dense_quant" "moe_quant" "moe_quant_a3")
 elif [ "${MODEL_TYPE}" = "origin" ]; then
     TEST_MODELS=("dense" "moe")
 elif [ "${MODEL_TYPE}" = "quant" ]; then
-    TEST_MODELS=("dense_quant" "moe_quant")
-elif [ "${MODEL_TYPE}" = "dense" ] || [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "dense_quant" ] || [ "${MODEL_TYPE}" = "moe_quant" ]; then
+    TEST_MODELS=("dense_quant" "moe_quant" "moe_quant_a3")
+elif [ "${MODEL_TYPE}" = "dense" ] || [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "dense_quant" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ]; then
     TEST_MODELS=("${MODEL_TYPE}")
 else
-    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'dense'、'moe'、'dense_quant'、'moe_quant'、'origin'、'quant' 或 'all'"
-    echo "用法：$0 [dense|moe|dense_quant|moe_quant|origin|quant|all]"
-    echo "  dense       - 测试 Qwen3-32B 模型"
-    echo "  moe         - 测试 Qwen3-30B-A3B-Instruct-2507 模型（默认）"
-    echo "  dense_quant - 测试 Qwen3-32B-w8a8 模型"
-    echo "  moe_quant   - 测试 Qwen3-30B-A3B-Instruct-2507-w8a8 模型"
-    echo "  origin      - 测试所有非量化模型模型"
-    echo "  quant       - 测试所有量化模型"
-    echo "  all         - 测试所有模型"
+    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'dense'、'moe'、'dense_quant'、'moe_quant'、'moe_quant_a3'、'origin'、'quant' 或 'all'"
+    echo "用法：$0 [dense|moe|dense_quant|moe_quant|moe_quant_a3|origin|quant|all]"
+    echo "  dense        - 测试 Qwen3-32B 模型"
+    echo "  moe          - 测试 Qwen3-30B-A3B-Instruct-2507 模型（默认）"
+    echo "  dense_quant  - 测试 Qwen3-32B-w8a8 模型"
+    echo "  moe_quant    - 测试 Qwen3-30B-A3B-Instruct-2507-w8a8 模型"
+    echo "  moe_quant_a3 - 测试 GLM-5.2-w8a8 模型"
+    echo "  origin       - 测试所有非量化模型模型"
+    echo "  quant        - 测试所有量化模型"
+    echo "  all          - 测试所有模型"
     exit 1
 fi
 
@@ -280,6 +282,7 @@ process_scenario_data() {
     local model_name=$4
     local tensor_parallel_size=$5
     local main_output_dir=$6
+    local device_type=${7:-910B3(A2)}
     
     echo -e "\n======================================"
     echo "处理场景数据：${scenario_desc}"
@@ -314,14 +317,16 @@ process_scenario_data() {
     echo "  xlite-decode-only: ${xlite_decode_only_dir}"
     echo "  输出文件: ${output_file}"
     echo "  模型名称: ${model_name}"
-    
+    echo "  测试环境型号: ${device_type}"
+
     # 调用 process_data.py
     python process_data.py \
         "${aclgraph_dir}" \
         "${xlite_full_dir}" \
         "${xlite_decode_only_dir}" \
         -o "${output_file}" \
-        -m "${model_name}"
+        -m "${model_name}" \
+        -d "${device_type}"
     
     if [ $? -eq 0 ]; then
         echo -e "\n数据处理完成！报告已生成：${output_file}"
@@ -354,17 +359,26 @@ echo "======================================"
 total_start_time=$(date +%s)
 total_start_time_formatted=$(date "+%Y-%m-%d %H:%M:%S")
 
-# 定义场景配置数组
+# 定义场景配置（按模型维度选择，all/quant 等组合模式下 moe_quant_a3 也用 A3 专属参数）
 # 格式：input_len|output_len|concurrency_list|num_prompts_multiplier_list|max_num_batched_tokens|max_num_seqs|max_model_len|tensor_parallel_size
 # num_prompts_multiplier_list 与 concurrency_list 一一对应，每个并发数对应各自的 multiplier
+declare -A SCENARIOS_DEFAULT
+SCENARIOS_DEFAULT[1]="512|512|1 16 32 48 64|10 10 10 10 10|65536|96|7168|8"
+SCENARIOS_DEFAULT[2]="3584|1536|1 16 32|10 10 10|65536|32|7168|8"
+SCENARIOS_DEFAULT[3]="8192|1024|1 16 32|10 10 10|65536|32|11264|8"
+SCENARIOS_DEFAULT[4]="16384|1536|1 16|10 10|65536|32|32768|8"
+SCENARIOS_DEFAULT[5]="32768|3072|1 8|10 10|136192|24|65536|8"
+SCENARIOS_DEFAULT[6]="73728|8192|1 4|4 4|136192|16|102400|8"
+SCENARIOS_DEFAULT[7]="102400|10240|1 4|4 4|136192|8|136192|8"
+
+# moe_quant_a3（GLM-5.2-w8a8）运行于 Ascend910(A3)，tp=16、max_num_batched_tokens=8192、A3 专属 max_model_len
+declare -A SCENARIOS_A3
+SCENARIOS_A3[1]="3584|1536|1 16 32|8 4 4|8192|32|7168|16"
+SCENARIOS_A3[2]="8192|1024|1 16 32|8 4 4|8192|32|11264|16"
+SCENARIOS_A3[3]="16384|1536|1 16 32|8 4 4|8192|32|22768|16"
+
+# SCENARIOS 在 for model_type 循环内按当前模型选择，使 all/quant 模式下 moe_quant_a3 也使用 A3 专属参数
 declare -A SCENARIOS
-SCENARIOS[1]="512|512|1 16 32 48 64|10 10 10 10 10|65536|96|7168|8"
-SCENARIOS[2]="3584|1536|1 16 32|10 10 10|65536|32|7168|8"
-SCENARIOS[3]="8192|1024|1 16 32|10 10 10|65536|32|11264|8"
-SCENARIOS[4]="16384|1536|1 16|10 10|65536|32|32768|8"
-SCENARIOS[5]="32768|3072|1 8|10 10|136192|24|65536|8"
-SCENARIOS[6]="73728|8192|1 4|4 4|136192|16|102400|8"
-SCENARIOS[7]="102400|10240|1 4|4 4|136192|8|136192|8"
 
 # 定义每个模型的场景数量
 declare -A MODEL_SCENARIO_COUNT
@@ -373,6 +387,7 @@ MODEL_SCENARIO_COUNT[dense]=4
 MODEL_SCENARIO_COUNT[dense_quant]=4
 MODEL_SCENARIO_COUNT[moe]=7
 MODEL_SCENARIO_COUNT[moe_quant]=7
+MODEL_SCENARIO_COUNT[moe_quant_a3]=3
 
 # 用于存储每个模型的场景测试结果
 declare -A MODEL_TEST_RESULTS
@@ -380,9 +395,16 @@ declare -A MODEL_TEST_RESULTS
 # 遍历所有要测试的模型
 for model_type in "${TEST_MODELS[@]}"; do
     IFS='|' read -r TEST_MODEL TEST_MODEL_PATH <<< "${MODELS[$model_type]}"
-    
+
     # 获取当前模型需要测试的场景数量
     MODEL_SCENARIO_LIMIT=${MODEL_SCENARIO_COUNT[$model_type]}
+
+    SCENARIOS=()
+    if [ "${model_type}" = "moe_quant_a3" ]; then
+        for k in "${!SCENARIOS_A3[@]}"; do SCENARIOS[$k]="${SCENARIOS_A3[$k]}"; done
+    else
+        for k in "${!SCENARIOS_DEFAULT[@]}"; do SCENARIOS[$k]="${SCENARIOS_DEFAULT[$k]}"; done
+    fi
     
     echo "======================================"
     echo "开始测试模型：${TEST_MODEL}"
@@ -427,7 +449,13 @@ for model_type in "${TEST_MODELS[@]}"; do
         scenario_duration_formatted=$(format_duration ${scenario_duration})
         
         # 处理场景数据（捕获错误）
-        if ! process_scenario_data "${TEST_MODEL}_场景${i}：输入${input_len}token,输出${output_len}token" "${input_len}" "${output_len}" "${TEST_MODEL}" "${tensor_parallel_size}" "${MAIN_OUTPUT_DIR}"; then
+        # moe_quant_a3 运行于 Ascend910(A3)，其余默认 910B3(A2)
+        # 此循环位于脚本顶层而非函数内，不可使用 local（set -u 下会因 unbound variable 退出）
+        device_type="910B3(A2)"
+        if [ "${model_type}" = "moe_quant_a3" ]; then
+            device_type="Ascend910(A3)"
+        fi
+        if ! process_scenario_data "${TEST_MODEL}_场景${i}：输入${input_len}token,输出${output_len}token" "${input_len}" "${output_len}" "${TEST_MODEL}" "${tensor_parallel_size}" "${MAIN_OUTPUT_DIR}" "${device_type}"; then
             echo -e "\n警告：场景${i}数据处理失败，继续下一个场景"
             scenario_result="数据处理失败"
         fi
