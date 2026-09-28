@@ -91,6 +91,10 @@ struct XModelConfig {
     // MSD W4A8 flag
     bool quantMsdW4a8 = false;
 
+    // MLA related weight format
+    bool mlaWuvWeightNZ = false;
+    bool mlaWuktWeightNZ = false;
+
     // parallel config
     uint32_t defTpSize;
     uint32_t defDpSize;
