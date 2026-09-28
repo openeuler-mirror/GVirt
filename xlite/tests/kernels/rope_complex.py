@@ -10,8 +10,9 @@
 from __future__ import absolute_import
 import logging
 import math
+import numpy as np
 import torch
-from xlite._C import Runtime, rope_complex
+from xlite._C import Runtime, rope_complex, muls
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -105,8 +106,8 @@ for test_dtype, rope_dim, q_dim in test_cases:
             # xlite
             torch.npu.synchronize()
             rope_complex(rt, n_local_heads, q_dim, rope_dim, attnQWithQr_xlite,
-                        freqs_cis_xlite, position, output_xlite, inverse=inverse,
-                        out_interleaved=out_interleaved)
+                         freqs_cis_xlite, position, output_xlite, inverse=inverse,
+                         out_interleaved=out_interleaved, do_rotate=False)
             torch.npu.synchronize()
 
             tag = "inverse" if inverse else "forward"
@@ -120,3 +121,60 @@ for test_dtype, rope_dim, q_dim in test_cases:
                 logging.error(f'{e}')
                 logging.error(f'torch_npu: {q_pe_standard}')
                 logging.error(f'xlite: {output_xlite}')
+
+
+# Combined: rope_complex(do_rotate) + muls(nope) == full rotate_activation. Needs q_dim > rope_dim.
+logging.info('=== combined: rope_complex(do_rotate) + muls(nope) == full rotate_activation ===')
+for test_dtype, rope_dim, q_dim in test_cases:
+    if q_dim <= rope_dim:
+        continue
+    for inverse in (False, True):
+        for out_interleaved in (False, True):
+            n_local_heads = 64
+            num_tokens = BATCH_SIZE * SEQ_LEN
+            nope_dim = q_dim - rope_dim
+
+            torch.set_default_dtype(test_dtype)
+            with torch.device("npu"):
+                attnQWithQr = torch.randn(num_tokens, n_local_heads, q_dim)
+                freqs_cis = precompute_freqs_cis(rope_dim, MAX_SEQ_LEN, ROPE_THETA)[0:SEQ_LEN]
+
+                q = attnQWithQr.clone()
+                freqs_cis_xlite = freqs_cis.clone()
+                position = torch.arange(SEQ_LEN, dtype=torch.int64).repeat(BATCH_SIZE)
+                rope_out = torch.randn(num_tokens, n_local_heads, rope_dim)
+
+            # reference: rotate_activation on the whole [nope | rope_rotated] head
+            attnQWithQr_reshaped = attnQWithQr.view(BATCH_SIZE, SEQ_LEN, n_local_heads, q_dim)
+            q_pe_input = attnQWithQr_reshaped[..., -rope_dim:].contiguous()
+            q_pe_standard = apply_rotary_emb(q_pe_input, freqs_cis, inverse=inverse,
+                                             interleaved=out_interleaved)
+            q_pe_standard = q_pe_standard.view(num_tokens, n_local_heads, rope_dim)
+            nope_part = attnQWithQr_reshaped[..., :-rope_dim].reshape(num_tokens, n_local_heads, nope_dim)
+            # f32 scale to match the kernel's 1/sqrtf(stepDim).
+            rotate_scale = float(np.float32(1.0) / np.sqrt(np.float32(q_dim)))
+            full_ref = (torch.cat([nope_part, q_pe_standard], dim=-1).float() * rotate_scale)
+            full_ref = full_ref.to(test_dtype)
+
+            # actual: rope_complex scales the rope region; muls scales the nope region in place.
+            torch.npu.synchronize()
+            rope_complex(rt, n_local_heads, q_dim, rope_dim, q, freqs_cis_xlite, position,
+                         rope_out, inverse=inverse, out_interleaved=out_interleaved, do_rotate=True)
+            q_flat = q.view(num_tokens * n_local_heads, q_dim)
+            muls(rt, q_flat, rotate_scale, q_flat, calc_offset=0, calc_num=nope_dim)
+            torch.npu.synchronize()
+
+            scaled_nope = q.view(num_tokens, n_local_heads, q_dim)[..., :nope_dim]
+            full = torch.cat([scaled_nope, rope_out], dim=-1)
+
+            tag = "inverse" if inverse else "forward"
+            lay = "interleaved" if out_interleaved else "deinterleaved"
+            logging.info(f'combined ({tag}, {lay}, rope_dim={rope_dim}, q_dim={q_dim}, '
+                         f'{test_dtype}) executed!')
+
+            try:
+                torch.testing.assert_close(full_ref, full, atol=1e-5, rtol=1e-3)
+            except AssertionError as e:
+                logging.error(f'{e}')
+                logging.error(f'torch_npu: {full_ref}')
+                logging.error(f'xlite: {full}')

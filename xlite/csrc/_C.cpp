@@ -1883,22 +1883,25 @@ void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
 
 void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
                  at::Tensor &inputWithR, at::Tensor &freqs, at::Tensor &position,
-                 at::Tensor &output, bool inverse, bool outInterleaved)
+                 at::Tensor &output, bool inverse, bool outInterleaved, bool doRotate)
 {
     XTensor _inputWithR, _freqs, _position, _output;
     InitXTensor(_inputWithR, inputWithR);
     InitXTensor(_freqs, freqs);
     InitXTensor(_position, position);
     InitXTensor(_output, output);
-    XliteOpRopeComplex(rt, nLocalHeads, stepDim, ropeDim, ropeDim, stepDim - ropeDim, 0,
-                       _inputWithR, _freqs, _position, _output, inverse, outInterleaved);
+    // outStepDim = ropeDim: the standalone op writes only the rope region. offset/outOffset keep
+    // the rope region at the head tail ([nope | rope]); the caller scales the nope region via muls.
+    uint32_t outStepDim = ropeDim;
+    XliteOpRopeComplex(rt, nLocalHeads, stepDim, outStepDim, ropeDim, stepDim - ropeDim, 0,
+                       _inputWithR, _freqs, _position, _output, inverse, outInterleaved, doRotate);
     rt.Synchronize();
 }
 
 void RopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
                          uint32_t offset, uint32_t vdim, at::Tensor &inputWithR, at::Tensor &freqs,
                          at::Tensor &position, uint32_t blockSize, at::Tensor &vCache,
-                         at::Tensor &slotMapping, bool outInterleaved)
+                         at::Tensor &slotMapping, bool outInterleaved, bool doRotate = false)
 {
     XTensor _inputWithR, _freqs, _position, _vCache, _slotMapping;
     InitXTensor(_inputWithR, inputWithR);
@@ -1907,7 +1910,8 @@ void RopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, u
     InitXTensor(_vCache, vCache);
     InitXTensor(_slotMapping, slotMapping);
     XliteOpRopeComplexAndCache(rt, nLocalHeads, stepDim, ropeDim, offset, vdim, _inputWithR, _freqs,
-                               _position, blockSize, _vCache, _slotMapping, outInterleaved);
+                               _position, blockSize, _vCache, _slotMapping, outInterleaved,
+                               doRotate);
     rt.Synchronize();
 }
 
@@ -2115,12 +2119,13 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     rt.PutTensor(scores);
 }
 
-void Muls(XRuntime &rt, at::Tensor &input, float scale, at::Tensor &output)
+void Muls(XRuntime &rt, at::Tensor &input, float scale, at::Tensor &output, uint32_t calcOffset = 0,
+          uint32_t calcNum = UINT32_MAX)
 {
     XTensor _input, _output;
     InitXTensor(_input, input);
     InitXTensor(_output, output);
-    XliteOpMuls(rt, _input, scale, _output);
+    XliteOpMuls(rt, _input, scale, _output, calcOffset, calcNum);
     rt.Synchronize();
 }
 
@@ -2857,12 +2862,12 @@ PYBIND11_MODULE(_C, m)
     m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("n_local_heads"),
           py::arg("step_dim"), py::arg("rope_dim"), py::arg("input_with_r"), py::arg("freqs"),
           py::arg("position"), py::arg("output"), py::arg("inverse") = false,
-          py::arg("out_interleaved") = false);
+          py::arg("out_interleaved") = false, py::arg("do_rotate") = false);
     m.def("rope_complex_and_cache", &RopeComplexAndCache, "rope_complex_and_cache", py::arg("rt"),
           py::arg("n_local_heads"), py::arg("step_dim"), py::arg("rope_dim"), py::arg("offset"),
           py::arg("vdim"), py::arg("input_with_r"), py::arg("freqs"), py::arg("position"),
           py::arg("block_size"), py::arg("v_cache"), py::arg("slot_mapping"),
-          py::arg("out_interleaved") = false);
+          py::arg("out_interleaved") = false, py::arg("do_rotate") = false);
     m.def("mla_prepare", &MlaPrepare, py::arg("rt"), py::arg("attn_qkvc"), py::arg("q_norm"),
           py::arg("q_norm_bias"), py::arg("attn_norm_qc"), py::arg("kv_norm"),
           py::arg("kv_norm_bias"), py::arg("attn_norm_kvc"), py::arg("freqs"), py::arg("position"),
@@ -2920,7 +2925,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"),
           py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"), py::arg("block_size"),
           py::arg("batch"), py::arg("top_k"));
-    m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"));
+    m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"),
+          py::arg("calc_offset") = 0, py::arg("calc_num") = UINT32_MAX);
     m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),
           py::arg("tokens_per_epgroup"), py::arg("experts_counts_output"),
           py::arg("n_routed_experts"));

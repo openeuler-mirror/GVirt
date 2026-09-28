@@ -16,6 +16,11 @@ The kernel loads the whole head [remain | rope] into UB, rotates the rope
 region (last `rope_dim` elements), and writes the whole head back into vCache
 at the slot given by slot_mapping, plus an in-place writeback of the rope
 region to the input tensor.
+
+With do_rotate=True the kernel additionally applies x * 1/sqrt(vdim) to the
+whole head after rope and before the cache write (scale derived internally).
+rotate only fires on the fullHeadLoad path (CXA: remain > 0); the MLA-style
+rope-only layout (remain == 0) skips it.
 """
 from __future__ import absolute_import
 import logging
@@ -82,79 +87,91 @@ total = 0
 
 for test_dtype, rope_dim, head_dim in CXA_CASES + MLA_CASES:
     for out_interleaved in (False, True):
-        total += 1
-        n_local_heads = 1  # CXA kv / MLA pe cache assert nLocalHeads==1 when need_v_cache
-        offset = head_dim - rope_dim
-        vdim = head_dim  # vCache stores a full head per slot (matches CXA swaKv shape)
-        block_size = 16
-        # enough blocks for all tokens at distinct slots
-        num_blocks = (NUM_TOKENS + block_size - 1) // block_size
+        for do_rotate in (False, True):
+            total += 1
+            n_local_heads = 1  # CXA kv / MLA pe cache assert nLocalHeads==1 when need_v_cache
+            offset = head_dim - rope_dim
+            vdim = head_dim  # vCache stores a full head per slot (matches CXA swaKv shape)
+            block_size = 16
+            # enough blocks for all tokens at distinct slots
+            num_blocks = (NUM_TOKENS + block_size - 1) // block_size
 
-        torch.set_default_dtype(test_dtype)
-        with torch.device("npu"):
-            # input head: [remain | rope], shape (num_tokens, n_local_heads, head_dim)
-            kv = torch.randn(NUM_TOKENS, n_local_heads, head_dim)
-            kv_ref = kv.clone()
+            torch.set_default_dtype(test_dtype)
+            with torch.device("npu"):
+                # input head: [remain | rope], shape (num_tokens, n_local_heads, head_dim)
+                kv = torch.randn(NUM_TOKENS, n_local_heads, head_dim)
+                kv_ref = kv.clone()
 
-            freqs_cis = precompute_freqs_cis(rope_dim, MAX_SEQ_LEN, ROPE_THETA)[0:NUM_TOKENS]
+                freqs_cis = precompute_freqs_cis(rope_dim, MAX_SEQ_LEN, ROPE_THETA)[0:NUM_TOKENS]
 
-            # position per token (0..NUM_TOKENS-1) and identity slot mapping
-            position = torch.arange(NUM_TOKENS, dtype=torch.int64)
-            slot_mapping = torch.arange(NUM_TOKENS, dtype=torch.int32)
+                # position per token (0..NUM_TOKENS-1) and identity slot mapping
+                position = torch.arange(NUM_TOKENS, dtype=torch.int64)
+                slot_mapping = torch.arange(NUM_TOKENS, dtype=torch.int32)
 
-            # vCache: (num_blocks, block_size, n_local_heads, vdim), zero-initialized
-            v_cache = torch.zeros(num_blocks, block_size, n_local_heads, vdim)
+                # vCache: (num_blocks, block_size, n_local_heads, vdim), zero-initialized
+                v_cache = torch.zeros(num_blocks, block_size, n_local_heads, vdim)
 
-        # ----- reference (torch) -----
-        # apply rope to the last rope_dim elements, in-place on a full-head copy.
-        kv_ref_3d = kv_ref.view(NUM_TOKENS, n_local_heads, head_dim)
-        rope_part = kv_ref_3d[..., -rope_dim:].contiguous()  # (T, H, rope_dim)
-        # apply_rotary_emb expects (bsz, seqlen, n_local_heads, rope_dim)
-        rope_in = rope_part.view(1, NUM_TOKENS, n_local_heads, rope_dim)
-        rope_out = apply_rotary_emb(rope_in, freqs_cis, interleaved=out_interleaved)
-        rope_out = rope_out.view(NUM_TOKENS, n_local_heads, rope_dim)
-        # rebuild full head: remain (unchanged) + rotated rope
-        if rope_dim == head_dim:
-            ref_head = rope_out  # rope-only, no remain
-        else:
-            remain_part = kv_ref_3d[..., :-rope_dim]
-            ref_head = torch.cat([remain_part, rope_out], dim=-1)
-        ref_head = ref_head.view(NUM_TOKENS, n_local_heads, vdim)
+            # ----- reference (torch) -----
+            # apply rope to the last rope_dim elements, in-place on a full-head copy.
+            kv_ref_3d = kv_ref.view(NUM_TOKENS, n_local_heads, head_dim)
+            rope_part = kv_ref_3d[..., -rope_dim:].contiguous()  # (T, H, rope_dim)
+            # apply_rotary_emb expects (bsz, seqlen, n_local_heads, rope_dim)
+            rope_in = rope_part.view(1, NUM_TOKENS, n_local_heads, rope_dim)
+            rope_out = apply_rotary_emb(rope_in, freqs_cis, interleaved=out_interleaved)
+            rope_out = rope_out.view(NUM_TOKENS, n_local_heads, rope_dim)
+            # rebuild full head: remain (unchanged) + rotated rope
+            if rope_dim == head_dim:
+                ref_head = rope_out  # rope-only, no remain
+            else:
+                remain_part = kv_ref_3d[..., :-rope_dim]
+                ref_head = torch.cat([remain_part, rope_out], dim=-1)
+            ref_head = ref_head.view(NUM_TOKENS, n_local_heads, vdim).float()
 
-        # reference vCache: scatter each token's full head to its slot
-        ref_v_cache = torch.zeros(num_blocks, block_size, n_local_heads, vdim)
-        for t in range(NUM_TOKENS):
-            slot = slot_mapping[t].item()
-            b = slot // block_size
-            i = slot % block_size
-            ref_v_cache[b, i] = ref_head[t]
+            # rotate (x * 1/sqrt(vdim)) after rope, before cache write. Skipped when
+            # remain == 0 (MLA-style) to mirror the kernel's fullHeadLoad guard.
+            full_head_load = (head_dim - rope_dim) > 0
+            rotate_scale = vdim ** -0.5
+            if do_rotate and full_head_load:
+                ref_head = ref_head * rotate_scale
 
-        # ----- xlite -----
-        torch.npu.synchronize()
-        rope_complex_and_cache(rt, n_local_heads, head_dim, rope_dim, offset, vdim, kv, freqs_cis,
-                               position, block_size, v_cache, slot_mapping,
-                               out_interleaved=out_interleaved)
-        torch.npu.synchronize()
+            # reference vCache: scatter each token's full head to its slot
+            ref_v_cache = torch.zeros(num_blocks, block_size, n_local_heads, vdim)
+            for t in range(NUM_TOKENS):
+                slot = slot_mapping[t].item()
+                b = slot // block_size
+                i = slot % block_size
+                ref_v_cache[b, i] = ref_head[t]
+            ref_v_cache = ref_v_cache.to(test_dtype)
 
-        lay = "interleaved" if out_interleaved else "deinterleaved"
-        tag = "CXA" if offset != 0 else "MLA-style"
-        name = f"rope_complex_and_cache ({tag}, {lay}, rope={rope_dim}, head={head_dim}, {test_dtype})"
+            # ----- xlite -----
+            torch.npu.synchronize()
+            rope_complex_and_cache(rt, n_local_heads, head_dim, rope_dim, offset, vdim, kv,
+                                   freqs_cis, position, block_size, v_cache, slot_mapping,
+                                   out_interleaved=out_interleaved, do_rotate=do_rotate)
+            torch.npu.synchronize()
 
-        ok = True
-        try:
-            # vCache matches reference (whole head per slot).
-            # Note: the op does NOT write back to the input kv tensor in-place
-            # (op.cpp passes output_ptr=nullptr), so only vCache is validated.
-            torch.testing.assert_close(v_cache.cpu(), ref_v_cache.cpu(), atol=1e-5, rtol=1e-3)
-        except AssertionError as e:
-            ok = False
-            logging.error(f"{name} vCache mismatch:\n{e}")
+            lay = "interleaved" if out_interleaved else "deinterleaved"
+            tag = "CXA" if offset != 0 else "MLA-style"
+            rot = "+rotate" if do_rotate else ""
+            name = (f"rope_complex_and_cache ({tag}, {lay}, rope={rope_dim}, "
+                    f"head={head_dim}, {test_dtype}{rot})")
 
-        if ok:
-            passed += 1
-            logging.info(f"{name} executed!")
-        else:
-            logging.error(f"{name} FAILED")
+            ok = True
+            try:
+                # vCache matches reference (whole head per slot).
+                # Note: the op does NOT write back to the input kv tensor in-place
+                # (op.cpp passes output_ptr=nullptr), so only vCache is validated.
+                torch.testing.assert_close(v_cache.cpu(), ref_v_cache.cpu(), atol=1e-5,
+                                           rtol=1e-3)
+            except AssertionError as e:
+                ok = False
+                logging.error(f"{name} vCache mismatch:\n{e}")
+
+            if ok:
+                passed += 1
+                logging.info(f"{name} executed!")
+            else:
+                logging.error(f"{name} FAILED")
 
 logging.info(f"\n==== {passed}/{total} cases passed ====")
 assert passed == total, f"{total - passed} case(s) failed"

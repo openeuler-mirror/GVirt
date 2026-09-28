@@ -13,7 +13,8 @@ __aicore__ __inline__ void rope_complex_and_cache(
     uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim, uint32_t offset,
     uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, uint32_t outOffset,
     GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size, GM_ADDR vcache, GM_ADDR slot_mapping,
-    bool inverse, bool outInterleaved, int coreOffset = 0, int *nextCoreOffset = nullptr)
+    bool inverse, bool outInterleaved, int coreOffset = 0, int *nextCoreOffset = nullptr,
+    bool doRotate = false, float rotateScale = 1.0f)
 {
     set_atomic_none();
     set_mask_norm();
@@ -55,6 +56,9 @@ __aicore__ __inline__ void rope_complex_and_cache(
     // once and written back once after the rope step. The rope region may sit at the head
     // start (offset==0) or at the tail (offset!=0, CXA)
     bool fullHeadLoad = need_v_cache && remain_blocks > 0;
+
+    int totalHeadFPBytes = vdim * nLocalHeads * sizeof(float);
+    int rotateRepeat = DIV_ROUND_UP(vdim * nLocalHeads, calcPad);
 
     int maxCnt = 256;
     uint64_t off = 0;
@@ -101,6 +105,8 @@ __aicore__ __inline__ void rope_complex_and_cache(
     off += outInterleaved ? ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE) : 0;
     UBA(uint32_t) vgatherIndicesUB = reinterpret_cast<UBA(uint32_t)>(off);
     off += outInterleaved ? ROUND_UP(ropeDim * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0;
+    UBA(float) rotateFP32 = reinterpret_cast<UBA(float)>(off);
+    off += (doRotate && fullHeadLoad) ? ROUND_UP(totalHeadFPBytes, VECTOR_MAX_BYTESIZE) : 0;
     assert(off <= UB_SIZE);
 
     UBA(Dtype) inputs[2] = {input0, input1};
@@ -241,6 +247,14 @@ __aicore__ __inline__ void rope_complex_and_cache(
         pipe_barrier(PIPE_V);
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
+        // standalone rotate_activation: scale the rope-region FP32 in place by 1/sqrt(stepDim).
+        // The nope region is scaled by the caller via muls. Cache path scales the whole head
+        // below (fullHeadLoad), so guard with !need_v_cache to avoid double-scaling.
+        if (doRotate && !need_v_cache) {
+            vmuls(inOutFP32, inOutFP32, rotateScale, totalRepeat, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
         // out FP32 -> Dtype. outInterleaved: vgather each head into [r0,i0,r1,i1,...] and
         // convert head-by-head; otherwise convert all heads at once.
@@ -281,6 +295,26 @@ __aicore__ __inline__ void rope_complex_and_cache(
         }
         pipe_barrier(PIPE_V);
 
+        // cache-path rotate: scale the whole head by 1/sqrt(vdim) after rope, before the cache
+        // write. fullHeadLoad => cache path (nLocalHeads==1), so rotateRepeat <= VECTOR_MAX_REPEAT.
+        if (doRotate && fullHeadLoad) {
+            if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+                vconv_bf162f32(rotateFP32, outs[curr], rotateRepeat, 1, 1, 8, 4);
+                pipe_barrier(PIPE_V);
+                vmuls(rotateFP32, rotateFP32, rotateScale, rotateRepeat, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+                vconv_f322bf16r(outs[curr], rotateFP32, rotateRepeat, 1, 1, 4, 8);
+                pipe_barrier(PIPE_V);
+            } else if constexpr (std::is_same_v<Dtype, float16_t>) {
+                vconv_f162f32(rotateFP32, outs[curr], rotateRepeat, 1, 1, 8, 4);
+                pipe_barrier(PIPE_V);
+                vmuls(rotateFP32, rotateFP32, rotateScale, rotateRepeat, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+                vconv_f322f16(outs[curr], rotateFP32, rotateRepeat, 1, 1, 4, 8);
+                pipe_barrier(PIPE_V);
+            }
+        }
+
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
         // out UB -> GM. vcache stores the whole head; in-place kv writes back the rope region.
@@ -317,12 +351,13 @@ __aicore__ __inline__ void rope_complex_and_cache(
         uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim,                 \
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
-        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved)           \
+        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved,           \
+        uint32_t doRotate, float rotateScale)                                                      \
     {                                                                                              \
-        rope_complex_and_cache<dtype>(nTokens, nLocalHeads, shape1, ropeDim, offset, vdim,         \
-                                      input_ptr, output_ptr, outShape1, outOffset, freqs_ptr,      \
-                                      position, block_size, vcache, slot_mapping, inverse != 0,    \
-                                      outInterleaved != 0);                                        \
+        rope_complex_and_cache<dtype>(                                                             \
+            nTokens, nLocalHeads, shape1, ropeDim, offset, vdim, input_ptr, output_ptr, outShape1, \
+            outOffset, freqs_ptr, position, block_size, vcache, slot_mapping, inverse != 0,        \
+            outInterleaved != 0, 0, nullptr, doRotate != 0, rotateScale);                          \
     }
 #else
 #define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                      \
@@ -330,7 +365,8 @@ __aicore__ __inline__ void rope_complex_and_cache(
         uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim,                 \
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
-        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved)           \
+        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved,           \
+        uint32_t doRotate, float rotateScale)                                                      \
     {                                                                                              \
     }
 #endif

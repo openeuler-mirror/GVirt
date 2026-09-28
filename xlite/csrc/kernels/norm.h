@@ -314,7 +314,11 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             copy_gm_to_ubuf(in[inCurr], (__gm__ Dtype *)weight, 0, 1, len_burst_per_norm, 0, 0);
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + inCurr);
-            convert_input(weight_calc, in[inCurr], repeat_per_norm);
+            if constexpr (std::is_same_v<Dtype, float>) {
+                copy_ubuf_to_ubuf(weight_calc, in[inCurr], 0, 1, len_burst_per_norm, 0, 0);
+            } else {
+                convert_input(weight_calc, in[inCurr], repeat_per_norm);
+            }
             inCurr = 1 - inCurr;
         }
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
