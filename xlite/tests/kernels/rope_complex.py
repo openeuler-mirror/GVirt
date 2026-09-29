@@ -30,7 +30,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 
 
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False,
-                     interleaved: bool = False) -> torch.Tensor:
+                     interleaved: bool = False, keep_fp32: bool = False) -> torch.Tensor:
     """
     Applies rotary positional embeddings to the input tensor.
     Based on tests/models/deepseek_v3.py apply_rotary_emb function.
@@ -42,6 +42,10 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = F
                (MLA/DSA kv-cache convention, matches xlite out_interleaved=False)
       True  -> interleaved layout [r0,i0,r1,i1,...]
                (torch view_as_real().flatten convention, matches xlite out_interleaved=True)
+
+    keep_fp32=True skips the final cast to the input dtype: use it when further
+    FP32 math (e.g. the rotate_activation scale) must happen before the single
+    rounding, matching the kernel's FP32 stage.
     """
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
@@ -53,7 +57,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = F
         y = y.flatten(-2)  # TWTWTW
     else:
         y = torch.cat([y[..., 0], y[..., 1]], dim=-1)  # TWTWTW -> TTTWWW
-    return y.to(dtype)
+    return y if keep_fp32 else y.to(dtype)
 
 
 rt = Runtime(0, 500)
@@ -144,17 +148,21 @@ for test_dtype, rope_dim, q_dim in test_cases:
                 position = torch.arange(SEQ_LEN, dtype=torch.int64).repeat(BATCH_SIZE)
                 rope_out = torch.randn(num_tokens, n_local_heads, rope_dim)
 
-            # reference: rotate_activation on the whole [nope | rope_rotated] head
+            # reference: rotate_activation on the whole [nope | rope_rotated] head.
+            # The kernel scales the rope region on the FP32 stage before the single
+            # Dtype conversion (and muls scales the nope region the same way), so
+            # keep the rope result in FP32 through the scale and round exactly once.
             attnQWithQr_reshaped = attnQWithQr.view(BATCH_SIZE, SEQ_LEN, n_local_heads, q_dim)
             q_pe_input = attnQWithQr_reshaped[..., -rope_dim:].contiguous()
-            q_pe_standard = apply_rotary_emb(q_pe_input, freqs_cis, inverse=inverse,
-                                             interleaved=out_interleaved)
-            q_pe_standard = q_pe_standard.view(num_tokens, n_local_heads, rope_dim)
+            q_pe_fp32 = apply_rotary_emb(q_pe_input, freqs_cis, inverse=inverse,
+                                         interleaved=out_interleaved, keep_fp32=True)
+            q_pe_fp32 = q_pe_fp32.view(num_tokens, n_local_heads, rope_dim)
             nope_part = attnQWithQr_reshaped[..., :-rope_dim].reshape(num_tokens, n_local_heads, nope_dim)
             # f32 scale to match the kernel's 1/sqrtf(stepDim).
             rotate_scale = float(np.float32(1.0) / np.sqrt(np.float32(q_dim)))
-            full_ref = (torch.cat([nope_part, q_pe_standard], dim=-1).float() * rotate_scale)
-            full_ref = full_ref.to(test_dtype)
+            rope_ref = (q_pe_fp32 * rotate_scale).to(test_dtype)
+            nope_ref = (nope_part.float() * rotate_scale).to(test_dtype)
+            full_ref = torch.cat([nope_ref, rope_ref], dim=-1)
 
             # actual: rope_complex scales the rope region; muls scales the nope region in place.
             torch.npu.synchronize()
@@ -172,8 +180,13 @@ for test_dtype, rope_dim, q_dim in test_cases:
             logging.info(f'combined ({tag}, {lay}, rope_dim={rope_dim}, q_dim={q_dim}, '
                          f'{test_dtype}) executed!')
 
+            # Strict bounds: the reference mirrors the kernel's exact rounding
+            # structure (FP32 rotation + FP32 scale, one final dtype round), so
+            # agreement should be bitwise. Bounds loose enough to absorb a bf16
+            # ULP would also mask a kernel regression to double rounding.
+            atol, rtol = 1e-5, 1e-3
             try:
-                torch.testing.assert_close(full_ref, full, atol=1e-5, rtol=1e-3)
+                torch.testing.assert_close(full_ref, full, atol=atol, rtol=rtol)
             except AssertionError as e:
                 logging.error(f'{e}')
                 logging.error(f'torch_npu: {full_ref}')

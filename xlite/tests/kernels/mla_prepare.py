@@ -14,9 +14,28 @@ from xlite._C import Runtime, mla_prepare
 
 logging.getLogger().setLevel(logging.INFO)
 
+# Per-dtype assert_close bounds. Both sides round once from FP32, but the norm
+# references cannot be bit-matched: the kernel reduces the variance in a
+# different FP32 order and applies vsqrt+vdiv where the reference uses rsqrt,
+# so occasional 1-ULP flips are inherent (fp16 <= 2^-10, bf16 <= 2^-7
+# relative).
+ATOL_RTOL = {
+    torch.float16: (2e-5, 1e-3),
+    torch.bfloat16: (1e-4, 1e-2),
+}
+
+
+def check_close(ref: torch.Tensor, actual: torch.Tensor, dtype: torch.dtype) -> None:
+    atol, rtol = ATOL_RTOL[dtype]
+    torch.testing.assert_close(ref, actual, atol=atol, rtol=rtol)
+
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    """[cos(t,0), cos(t,2), ... | sin(t,0), sin(t,2), ...] layout (TTTWWW)."""
+    """Complex freqs_cis [end, dim/2]; real view interleaved [cos0, sin0, cos1, sin1, ...].
+
+    The kernel loads dim floats per position and splits even/odd lanes into the
+    cos/sin planes, so the complex (interleaved) layout is what it expects.
+    """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu")[: (dim // 2)] / dim))
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float()
@@ -97,7 +116,6 @@ for test_dtype, q_lora_rank, kv_lora_rank, rope_head_dim in test_cases:
     pe_reshaped = pe_slice.view(BATCH_SIZE, SEQ_LEN, rope_head_dim)
     pe_rot = apply_rotary_emb(pe_reshaped, freqs_cis)
     pe_rot = pe_rot.view(num_tokens, rope_head_dim)
-    attn_qkvc_ref[:, q_lora_rank + kv_lora_rank:] = pe_rot
 
     k_cache_ref = torch.zeros(BLOCK_NUM, BLOCK_SIZE, kv_lora_rank, dtype=test_dtype, device="npu")
     pe_cache_ref = torch.zeros(BLOCK_NUM, BLOCK_SIZE, rope_head_dim, dtype=test_dtype, device="npu")
@@ -119,26 +137,27 @@ for test_dtype, q_lora_rank, kv_lora_rank, rope_head_dim in test_cases:
                  f'{test_dtype}) executed!')
 
     try:
-        torch.testing.assert_close(attn_norm_qc_ref, attn_norm_qc, atol=2e-5, rtol=1e-3)
+        check_close(attn_norm_qc_ref, attn_norm_qc, test_dtype)
     except AssertionError as e:
         logging.error(f'attn_norm_qc mismatch ({test_dtype}): {e}')
 
     try:
-        torch.testing.assert_close(attn_norm_kvc_ref, attn_norm_kvc, atol=2e-5, rtol=1e-3)
+        check_close(attn_norm_kvc_ref, attn_norm_kvc, test_dtype)
     except AssertionError as e:
         logging.error(f'attn_norm_kvc mismatch ({test_dtype}): {e}')
 
-    try:
-        torch.testing.assert_close(attn_qkvc_ref, attn_qkvc, atol=2e-5, rtol=1e-3)
-    except AssertionError as e:
-        logging.error(f'attn_qkvc (pe slice) mismatch ({test_dtype}): {e}')
+    # attn_qkvc is a read-only input: the rotated pe goes to pe_cache only (the
+    # model returns attn_qkvc to the pool right after the op and computes the
+    # q-side rope separately via rope_complex). It must be left bit-identical.
+    if not torch.equal(attn_qkvc, attn_qkvc_ref):
+        logging.error(f'attn_qkvc modified by kernel ({test_dtype})')
 
     try:
-        torch.testing.assert_close(k_cache_ref, k_cache, atol=2e-5, rtol=1e-3)
+        check_close(k_cache_ref, k_cache, test_dtype)
     except AssertionError as e:
         logging.error(f'k_cache mismatch ({test_dtype}): {e}')
 
     try:
-        torch.testing.assert_close(pe_cache_ref, pe_cache, atol=2e-5, rtol=1e-3)
+        check_close(pe_cache_ref, pe_cache, test_dtype)
     except AssertionError as e:
         logging.error(f'pe_cache mismatch ({test_dtype}): {e}')

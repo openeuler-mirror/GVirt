@@ -317,7 +317,9 @@ __aicore__ __inline__ void rope_complex_and_cache(
 
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
-        // out UB -> GM. vcache stores the whole head; in-place kv writes back the rope region.
+        // out UB -> GM. Cache path writes the whole head to vcache (plus the separate
+        // output when given); the non-cache path writes the separate output. The input
+        // is never written back.
         if (need_v_cache) {
             uint32_t slot_idx = slotMappingUB[token_idx - baseTokenIdx];
             auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) + slot_idx * nLocalHeads * vdim;

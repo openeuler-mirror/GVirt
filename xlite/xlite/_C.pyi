@@ -2271,7 +2271,8 @@ def mla_prepare(
         rt (Runtime): Native runtime handle.
         attn_qkvc (torch.Tensor): Concatenated [q_lora_rank | kv_lora_rank | rope_head_dim]
             per token, shape ``[tokens, q_lora_rank + kv_lora_rank + rope_head_dim]``,
-            fp16 or bf16 (rope slice written in place).
+            fp16 or bf16. Read-only input, left unchanged: the rotated pe goes to
+            pe_cache only.
         q_norm (torch.Tensor): RMSNorm weight for the q-lora slice, shape
             ``[q_lora_rank]``, model dtype.
         q_norm_bias (torch.Tensor): RMSNorm bias for the q-lora slice, shape
@@ -2285,7 +2286,8 @@ def mla_prepare(
         attn_norm_kvc (torch.Tensor): Output RMSNormed kv-lora slice, shape
             ``[tokens, kv_lora_rank]``, model dtype; also used as the `key` written into
             k_cache.
-        freqs (torch.Tensor): Precomputed rotary freqs_cis (TTTWWW layout), shape
+        freqs (torch.Tensor): Precomputed rotary freqs_cis (complex pairs, real view
+            interleaved [cos0, sin0, cos1, sin1, ...]), shape
             ``[max_position, rope_head_dim/2]`` complex64 (or equivalent real view
             ``[max_position, rope_head_dim]`` fp32). The kernel always reads it as
             float32 regardless of model dtype; indexed by each
@@ -2304,7 +2306,7 @@ def mla_prepare(
         norm_eps (float): RMSNorm epsilon.
 
     Returns:
-        None: Outputs are written in place into attn_norm_qc, attn_norm_kvc, k_cache, pe_cache, and the rope slice of attn_qkvc.
+        None: Outputs are written in place into attn_norm_qc, attn_norm_kvc, k_cache, and pe_cache.
     """
     ...
 
