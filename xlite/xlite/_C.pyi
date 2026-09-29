@@ -140,6 +140,8 @@ class ModelConfig:
         experts_weight_transpose (bool): Whether expert weights are transposed.
         experts_weight_nz (bool): Whether expert weights are in NZ layout.
         gate_captured(bool): Whether gate layer is captured by vllm-ascend.
+        mla_wuv_weight_nz (bool): Whether MLA W_UV weights are in NZ layout.
+        mla_wukt_weight_nz (bool): Whether MLA W_UK^T weights are in NZ layout.
         qkv_bias (bool): Whether MHA QKV has bias.
         qk_norm (bool): Whether MHA applies Q/K norm.
         qk_norm_full (bool): Whether MHA applies Q/K norm full.
@@ -253,6 +255,10 @@ class ModelConfig:
     """Whether expert weights are in NZ layout."""
     gate_captured: bool = ...
     """Whether gate layer is captured by vllm-ascend."""
+    mla_wuv_weight_nz: bool = ...
+    """Whether MLA W_UV weights are in NZ layout."""
+    mla_wukt_weight_nz: bool = ...
+    """Whether MLA W_UK^T weights are in NZ layout."""
     qkv_bias: bool = ...
     """Whether MHA QKV has bias."""
     qk_norm: bool = ...
@@ -347,7 +353,6 @@ class AttnMeta:
     """Per-sample block tables on host."""
     positions: torch.Tensor = ...
     """Position tensor for version-1 attention metadata, shape ``[batched_tokens]`` int64 device."""
-
 
 class AttnMetaV2:
     """Device-tensor attention metadata for the V2 forward path.
@@ -2528,7 +2533,7 @@ def fusion_operator_matmul_dequant_pipeline(
             int8 and ``out`` bfloat16).
     """
     ...
-    
+
 def dequant(rt: Runtime, in_: torch.Tensor, scale: torch.Tensor, out: torch.Tensor, has_scale: bool) -> None:
     """Dequantize tensor values into output precision.
 

@@ -468,8 +468,11 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
 
     XTensor &qAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
                                     hiddenState.dtype, DBG_LOC);
+    // for MLA, `mlaWUKT` could be in NZ; for DSA, `mlaWUKT` is in ND format
+    // TODO: remove `_c.attnType != XMODEL_ATTN_DSA` when vllm-ascend configures `mlaWuktWeightNZ`
     XliteOpEinsumMhtHtdMhd(rt, attnQWithQr, mlaWUKT[layer], qAbsorb, hiddenState.shape[0],
-                           nLocalHeads, _c.nopeHeadDim, _c.kvLoraRank, _c.weightNZ,
+                           nLocalHeads, _c.nopeHeadDim, _c.kvLoraRank,
+                           _c.weightNZ && (_c.mlaWuktWeightNZ || _c.attnType != XMODEL_ATTN_DSA),
                            static_cast<int>(_c.nopeHeadDim + _c.ropeHeadDim));
     rt.PutTensor(attnQWithQr);
 
@@ -542,7 +545,7 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
     XTensor &attnOutput =
         rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.vHeadDim}, hiddenState.dtype, DBG_LOC);
     XliteOpEinsumMhtHtdMhd(rt, oAbsorb, mlaWUV[layer], attnOutput, hiddenState.shape[0],
-                           nLocalHeads, _c.kvLoraRank, _c.vHeadDim, _c.weightNZ);
+                           nLocalHeads, _c.kvLoraRank, _c.vHeadDim, _c.mlaWuvWeightNZ);
     rt.PutTensor(oAbsorb);
 
     ForwardLinear(rt, layer, attnOutput, attnOut, hiddenState);
