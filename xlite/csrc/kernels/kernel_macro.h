@@ -764,14 +764,17 @@ __inline__ __aicore__ void ReduceSum(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
  * @param sort0: immediate results from `vbitsort` - with `vbitsortRepeat` blocks of 32 elements
  * @param sort1: buffer for intermediate/final; same size as `sort0`
  * @param vbitsortRepeat: number of blocks of 32 elements from `vbitsort` (regional proposal)
- * @param dstBufIdx: the index of the final sorted results in `sort0` or `sort1`
+ * @param dst: pointer to the buffer address holding the final results (topK elements)
  * @param topK: number of top K elements to sort out (0 means all elements)
+ * @param preferredDst: preferred buffer address for the final results; if provided, should differ
+ * from both `sort0` and `sort1` to avoid VEC instruction crash at runtime (**use with caution**)
  */
 __inline__ __aicore__ void MrgSort(__ubuf__ float *sort0, __ubuf__ float *sort1,
-                                   uint32_t vbitsortRepeat, uint32_t *dstBufIdx, uint32_t topK = 0)
+                                   uint32_t vbitsortRepeat, __ubuf__ float **dst, uint32_t topK = 0,
+                                   __ubuf__ float *preferredDst = nullptr)
 {
     if (vbitsortRepeat <= 1) {
-        *dstBufIdx = 0;
+        *dst = sort0;
         return;
     }
     __ubuf__ float *mrgSortBuf[2] = {sort0, sort1};
@@ -781,24 +784,26 @@ __inline__ __aicore__ void MrgSort(__ubuf__ float *sort0, __ubuf__ float *sort1,
     topK = (topK == 0 || topK > sortLen) ? sortLen : ROUND_UP(topK, BLOCK_SIZE);  /// top k to find
     uint32_t bufIdx = 0;
     uint64_t lenPerRepeatNext = 0;  // lenPerRepeat for the next iteration
-    while (sortRepeat > 1) {
+    while (1) {
+        uint64_t fullRepeat = sortLen / (lenPerRepeat * 4);  // full RPs for the next iteration
+        uint64_t remainedLen = sortLen - fullRepeat * lenPerRepeat * 4;
+        sortRepeat = fullRepeat + (remainedLen > 0 ? 1 : 0);  // sortRepeat for the next iteration
         __ubuf__ float *srcAddr = mrgSortBuf[bufIdx];
-        __ubuf__ float *dstAddr = mrgSortBuf[1 - bufIdx];
-        sortRepeat = sortLen / (lenPerRepeat * 4);  // full RPs for the next iteration
+        __ubuf__ float *dstAddr =
+            sortRepeat <= 1 && preferredDst ? preferredDst : mrgSortBuf[1 - bufIdx];
 
         uint64_t topLen = MIN(lenPerRepeat, topK);
-        if (sortRepeat > 0) {
-            uint64_t stride = sortRepeat * lenPerRepeat * 2;
+        if (fullRepeat > 0) {
+            uint64_t stride = fullRepeat * lenPerRepeat * 2;
             __ubuf__ float *addrs[4] = {srcAddr, srcAddr + stride, srcAddr + 2 * stride,
                                         srcAddr + 3 * stride};
-            uint64_t firstLen = sortRepeat > 1 ? lenPerRepeat : topLen;
+            uint64_t firstLen = fullRepeat > 1 ? lenPerRepeat : topLen;
             vmrgsort4(dstAddr, addrs, firstLen | (topLen << 16) | (topLen << 32) | (topLen << 48),
-                      sortRepeat | (0xFull << MGR_SORT_VALID_BITS_OFFSET));
+                      fullRepeat | (0xFull << MGR_SORT_VALID_BITS_OFFSET));
             lenPerRepeatNext = firstLen + topLen * 3;  // lenPerRepeat for the next iter
         }
 
-        uint64_t remainedLen = sortLen - sortRepeat * lenPerRepeat * 4;
-        sortLen = sortRepeat * lenPerRepeatNext;  // sortLen for the next iter in dstAddr
+        sortLen = fullRepeat * lenPerRepeatNext;  // sortLen for the next iter in dstAddr
         if (remainedLen > 0) {
             uint64_t remainedRepeat = DIV_ROUND_UP(remainedLen, lenPerRepeat);
             uint64_t remainedFullRepeat = remainedLen / lenPerRepeat;
@@ -806,9 +811,9 @@ __inline__ __aicore__ void MrgSort(__ubuf__ float *sort0, __ubuf__ float *sort1,
             sortLen += remainedFullRepeat * topLen + lastLen;  // for the next iteration
             lastLen = (lastLen == 0) ? topLen : lastLen;       // for the last RP (partial or full)
 
-            srcAddr += sortRepeat * lenPerRepeat * 8;  // 8 = 4 * 2 (4RPs to 1RP， 2 floats per ele)
-            dstAddr += sortRepeat * lenPerRepeatNext * 2;
-            if (remainedRepeat == 1) {  // `sortRepeat > 0` is guaranteed here
+            srcAddr += fullRepeat * lenPerRepeat * 8;  // 8 = 4 * 2 (4RPs to 1RP， 2 floats per ele)
+            dstAddr += fullRepeat * lenPerRepeatNext * 2;
+            if (remainedRepeat == 1) {  // `fullRepeat > 0` is guaranteed here
                 copy_ubuf_to_ubuf(dstAddr, srcAddr, 0, 1,
                                   DIV_ROUND_UP(lastLen * 2 * sizeof(float), BLOCK_SIZE), 0, 0);
             } else if (remainedRepeat == 2) {
@@ -827,13 +832,16 @@ __inline__ __aicore__ void MrgSort(__ubuf__ float *sort0, __ubuf__ float *sort1,
                           topLen | (topLen << 16) | (topLen << 32) | (lastLen << 48),
                           1ull | (0xFull << MGR_SORT_VALID_BITS_OFFSET));
             }
-            sortRepeat++;  // one more partial regional proposal for the next iteration
         }
         lenPerRepeat = lenPerRepeatNext;  // lenPerRepeat for the next iteration
         bufIdx = 1 - bufIdx;
         pipe_barrier(PIPE_V);
+
+        if (sortRepeat <= 1) {
+            *dst = dstAddr;
+            return;
+        }
     }
-    *dstBufIdx = bufIdx;
 }
 
 #define BITS_PER_DWORD 64

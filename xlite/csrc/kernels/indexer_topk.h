@@ -10,6 +10,10 @@
 #define MAX_N0 XLITE_MAX_M0
 #define INDEXER_KV_TILE_LEN 4096
 
+#if INDEXER_KV_TILE_LEN > MAX_INDEXER_KV_TILE_LEN
+#error "INDEXER_KV_TILE_LEN must not exceed MAX_INDEXER_KV_TILE_LEN"
+#endif
+
 template <typename Dtype>
 class IndexerTopK
 {
@@ -117,6 +121,39 @@ public:
         off = 0;
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+#endif
+#ifdef __DAV_C220_VEC__
+        // total sort & WaitPrevCore & SetNextCore use
+        uint64_t off = 0;
+        this->totalSort = reinterpret_cast<__ubuf__ float *>(off);
+        off += ROUND_UP(MAX_TOPK_NUM * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        // see `mrgSortBuf0`; separating the two mrgSort buffers to avoid bank conflict in A2/A3
+        this->mrgSortBuf1 = reinterpret_cast<__ubuf__ float *>(off);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        this->sortIndices = reinterpret_cast<__ubuf__ uint32_t *>(off);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+
+        // in
+        this->in[0] = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+        this->in[1] = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+        this->lastSort[0] = reinterpret_cast<__ubuf__ float *>(off);
+        off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        this->lastSort[1] = reinterpret_cast<__ubuf__ float *>(off);
+        off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
+
+        // out
+        this->out[0] = reinterpret_cast<__ubuf__ uint32_t *>(off);
+        off += ROUND_UP(MAX_TOPK_NUM * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        this->out[1] = reinterpret_cast<__ubuf__ uint32_t *>(off);
+        off += ROUND_UP(MAX_TOPK_NUM * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+
+        // calc
+        uint64_t invoff =
+            UB_SIZE - ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        this->mrgSortBuf0 = reinterpret_cast<__ubuf__ float *>(invoff);
+        assert(off <= invoff);
 #endif
     }
 
@@ -305,60 +342,18 @@ public:
                topK <= queryPosBase + queryLen);
         constexpr float min = FLOAT_MIN;
 
-        // total sort & WaitPrevCore & SetNextCore use
-        uint64_t off = 0;
-        __ubuf__ float *totalSortPhysical = reinterpret_cast<__ubuf__ float *>(off);
-        __ubuf__ float *totalSort = totalSortPhysical;  // can point elsewhere to reduce memcpy
-        off += ROUND_UP(MAX_TOPK_NUM * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
-        // see `mrgSortBuf0`; separating the two mrgSort buffers to avoid bank conflict in A2/A3
-        __ubuf__ float *mrgSortBuf1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
-
-        // in
-        __ubuf__ Dtype *in0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-        __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-        __ubuf__ Dtype *in[PINGPONG_BUF_NUM] = {in0, in1};
-        __ubuf__ uint32_t *sortIndices0 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
-        __ubuf__ uint32_t *sortIndices1 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
-        __ubuf__ uint32_t *sortIndices[PINGPONG_BUF_NUM] = {sortIndices0, sortIndices1};
-        __ubuf__ float *lastSort0 = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
-        __ubuf__ float *lastSort1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
-        __ubuf__ float *lastSort[PINGPONG_BUF_NUM] = {lastSort0, lastSort1};
-
-        // out
-        __ubuf__ uint32_t *out0 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(MAX_TOPK_NUM * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
-        __ubuf__ uint32_t *out1 = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(MAX_TOPK_NUM * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
-        __ubuf__ uint32_t *out[PINGPONG_BUF_NUM] = {out0, out1};
-
-        // calc
-        uint64_t invoff =
-            UB_SIZE - ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
-        __ubuf__ float *mrgSortBuf0 = reinterpret_cast<__ubuf__ float *>(invoff);
-        assert(off <= invoff);
-
         constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
         constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
         int topKSortRepeat = DIV_ROUND_UP(topK, SORT_BLOCK_SIZE);
 
         int curr = 0;
-        bool waitCoreTriggered = false;
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        bool waitCoreTriggered = false, totalSortOnHold = false;
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);  // release `in[curr]`
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);  // release `lastSort[curr]`
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID4);
-        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID5);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);  // release `out[curr]`
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
         for (int idx = 0; idx < queryLen; idx++) {
             int p0 = queryPosBase + idx;  // position of the current token in the sequence
             int validKvLen = MIN(p0 - kvOffset + 1, kvLen);  // per position valid kvLen
@@ -371,6 +366,14 @@ public:
             int fullRepeat = validKvLen / calcPad;
             int sortRepeat = DIV_ROUND_UP(validKvLen, SORT_BLOCK_SIZE);
             pipe_barrier(PIPE_V);
+
+            // prepare sortIndices for the current query position
+            int32_t idxDiff = kvOffset - sortIndicesStart;
+            if (idxDiff != 0) {
+                sortIndicesStart = kvOffset;
+                vadds((__ubuf__ int32_t *)sortIndices, (__ubuf__ int32_t *)sortIndices, idxDiff,
+                      sortIndicesRepeats, 1, 1, 8, 8);
+            }
 
             // pad the tail of `mrgSortBuf0` (incoming scores) with `FLOAT_MIN`
             int sortLen = sortRepeat * SORT_BLOCK_SIZE;
@@ -388,108 +391,92 @@ public:
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
             // convert in to float
             convert_input(mrgSortBuf0, in[curr], fullRepeat, validKvLen % calcPad);
-            pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);  // release `in[curr]`
 
-            // copy indices to sortIndices
-            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);  // acquire `sortIndices[curr]`
-            // TODO: check if the indices can be generated in ubuf instead of copying from GM
-            CopyGmToUbufAligned(sortIndices[curr], indices + kvOffset,
-                                validKvLen * sizeof(uint32_t));
-            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
-            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
             // sort local
-            vbitsort(mrgSortBuf1, mrgSortBuf0, sortIndices[curr], sortRepeat);
             pipe_barrier(PIPE_V);
-            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);  // release `sortIndices[curr]`
-
-            uint32_t dstBufIdx = 0;
-            MrgSort(mrgSortBuf1, mrgSortBuf0, sortRepeat, &dstBufIdx, topK);
-            __ubuf__ float *localSort = dstBufIdx == 0 ? mrgSortBuf1 : mrgSortBuf0;
+            vbitsort(mrgSortBuf1, mrgSortBuf0, sortIndices, sortRepeat);
             pipe_barrier(PIPE_V);
 
             // sort local & last
-            // Drain the previous iteration's async MTE3 reads of `totalSort` (lastTopk copy /
-            // finalize output) before the V pipe rewrites it.
-            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
-            totalSort = totalSortPhysical;
             uint64_t totalSortLen = MIN(topK, validKvLen);
-            if (!isFirst) {
+            __ubuf__ float *localSort;
+            if (isFirst) {
+                if (totalSortOnHold) {
+                    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);  // acquire `totalSort`
+                    totalSortOnHold = false;
+                }
+                MrgSort(mrgSortBuf1, mrgSortBuf0, sortRepeat, &localSort, topK, totalSort);
+            } else {
+                MrgSort(mrgSortBuf1, mrgSortBuf0, sortRepeat, &localSort, topK);
+                pipe_barrier(PIPE_V);
                 if (!waitCoreTriggered) {
                     WaitPrevCore();
                     waitCoreTriggered = true;
                     resetPrevCore = 1;
                 }
                 // copy last intermediate sort results (score + index) to `lastSort[curr]`
-                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID4 + curr);  // acquire `lastSort[curr]`
+                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);  // acquire `lastSort[curr]`
                 uint64_t lastSortLen = MIN(topK, kvOffset);
                 CopyGmToUbufAligned(lastSort[curr], lastTopk + idx * 2 * topK,
                                     lastSortLen * 2 * sizeof(uint32_t));
-                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID4 + curr);
-                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID4 + curr);
-                // TODO: check list order & config
+                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
+                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
                 __ubuf__ float *addrs[4] = {localSort, lastSort[curr]};
+                if (totalSortOnHold) {
+                    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);  // acquire `totalSort`
+                    totalSortOnHold = false;
+                }
                 vmrgsort4(totalSort, addrs, totalSortLen | (lastSortLen << 16),
                           1ull | (0x3ull << MGR_SORT_VALID_BITS_OFFSET));
-                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID4 + curr);  // release `lastSort[curr]`
-                totalSortLen += lastSortLen;
-            } else {
-                // isFirst: materialize localSort into `totalSortPhysical` so the MTE3 lastTopk
-                // copy / finalize reads a stable buffer not aliased to `mrgSortBuf*`.
-                copy_ubuf_to_ubuf(totalSort, localSort, 0, 1,
-                                  DIV_ROUND_UP(topK * 2 * sizeof(uint32_t), BLOCK_SIZE), 1, 1);
-                pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);  // release `lastSort[curr]`
+                totalSortLen = MIN(topK, totalSortLen + lastSortLen);
             }
             pipe_barrier(PIPE_V);
 
+            // `totalSort`: merged topK results (score + index) for the current query position
             if (!isFinal) {
                 // copy `totalSort` (intermediate score+index results) to GM for next core to merge
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
-                // copy `totalSort` (intermediate score+index results) to last
+                totalSortOnHold = true;
                 CopyUbufToGmAligned(lastTopk + idx * topK * 2, totalSort,
                                     MIN(topK, totalSortLen) * 2 * sizeof(uint32_t));
+                set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);  // release `totalSort`
                 if (idx == queryLen - 1) {
                     set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                     wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
                     SetNextCore();
                 }
-            } else {  // isFinal
-                // aggregate topK indices from totalSort, sort them from largest index to
-                // smallest, and copy to GM. `totalSort` is `totalSortPhysical` (never aliases
-                // `mrgSortBuf*`), so both calc buffers are free here.
+            } else {
+                // aggregate topK indices from totalSort, sort them from largest to smallest
                 __ubuf__ uint32_t *index0 = (__ubuf__ uint32_t *)mrgSortBuf0;
-                vreducev2(index0, (__ubuf__ uint32_t *)totalSort, (__ubuf__ uint32_t *)totalSort,
+                vreducev2(index0, (__ubuf__ uint32_t *)totalSort, nullptr,
                           DIV_ROUND_UP(topK, calcPad / 2), 1, 2, 8, 0);
                 pipe_barrier(PIPE_V);
                 // assuming `index0`'s hightest bit is 0, we can directly cast it to float for
                 // vbitsort while preserving the order of the indices
                 vbitsort(mrgSortBuf1, mrgSortBuf0, index0, topKSortRepeat);
                 pipe_barrier(PIPE_V);
-                uint32_t outDstBufIdx = 0;
-                MrgSort(mrgSortBuf1, mrgSortBuf0, topKSortRepeat, &outDstBufIdx, topK);
-                __ubuf__ uint32_t *indexSorted =
-                    (__ubuf__ uint32_t *)(outDstBufIdx == 0 ? mrgSortBuf1 : mrgSortBuf0);
+                __ubuf__ float *indexSorted;
+                MrgSort(mrgSortBuf1, mrgSortBuf0, topKSortRepeat, &indexSorted, topK);
                 pipe_barrier(PIPE_V);
                 wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);  // acquire `out[curr]`
-                vreducev2(out[curr], indexSorted, indexSorted, DIV_ROUND_UP(topK, calcPad / 2), 1,
-                          2, 8, 0);
+                vreducev2(out[curr], (__ubuf__ uint32_t *)indexSorted, nullptr,
+                          DIV_ROUND_UP(topK, calcPad / 2), 1, 2, 8, 0);
                 pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
                 CopyUbufToGmAligned(topkIndices + idx * topK, out[curr], topK * sizeof(uint32_t));
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);  // release `out[curr]`
             }
-            // Release `totalSort` for the next iteration's V-pipe writes: the async MTE3 reads
-            // issued this iteration (lastTopk copy / finalize output) are now enqueued.
-            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
             curr = 1 - curr;
         }
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+        if (totalSortOnHold) {
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
+        }
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID5);
-        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID4);
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
@@ -520,6 +507,12 @@ public:
         uint64_t sync3 = 1 | (mode << 4) | (flagIdx3 << 8);
         uint64_t a2vSyncFlag[PINGPONG_BUF_NUM] = {flagIdx0, flagIdx1};
         uint64_t v2aSyncFlag[PINGPONG_BUF_NUM] = {sync2, sync3};
+
+        uint64_t indicesBytes = ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), 8);
+        this->sortIndicesRepeats = DIV_ROUND_UP(indicesBytes, VECTOR_MAX_BYTESIZE);
+        CopyGmToUbufAligned(this->sortIndices, this->indices, indicesBytes);
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID4);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID4);
 #endif
 
         int queryTileSize = XLITE_MAX_M0 / nHeads;
@@ -618,6 +611,7 @@ public:
             ResetPrevCore();
         }
 #endif
+        PipeBarrier<PIPE_ALL>();
     }
 
 private:
@@ -649,6 +643,7 @@ private:
     uint32_t waitPrevGeneration;
     int resetPrevCore;
 
+#ifdef __DAV_C220_CUBE__
     LocalTensor<Dtype> kl1Buf[PINGPONG_BUF_NUM];   // event 0/1
     LocalTensor<Dtype> ql1Buf[PINGPONG_BUF_NUM];   // event 2/3
     LocalTensor<Dtype> wl1Buf;                     // event 4
@@ -656,6 +651,17 @@ private:
     LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];   // event 0/1
     LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];
     LocalTensor<float> l0cBuf;  // event 0
+#elif __DAV_C220_VEC__
+    __ubuf__ Dtype *in[PINGPONG_BUF_NUM];
+    __ubuf__ float *lastSort[PINGPONG_BUF_NUM];
+    __ubuf__ uint32_t *out[PINGPONG_BUF_NUM];
+    __ubuf__ float *mrgSortBuf0;
+    __ubuf__ float *mrgSortBuf1;
+    __ubuf__ float *totalSort;
+    __ubuf__ uint32_t *sortIndices;
+    uint32_t sortIndicesStart = 0;
+    uint64_t sortIndicesRepeats = 1;
+#endif
 };
 
 #define INDEXER_TOPK_FUNC_DEFINE(dtype)                                                        \

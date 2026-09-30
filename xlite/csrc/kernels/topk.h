@@ -299,9 +299,8 @@ public:
         vbitsort(scratch0, scoresIn, indicesIn, repeat);
         pipe_barrier(PIPE_V);
 
-        uint32_t dstBufIdx = 0;
-        MrgSort(scratch0, scratch1, repeat, &dstBufIdx);
-        __ubuf__ float *localSort = dstBufIdx == 0 ? scratch0 : scratch1;
+        __ubuf__ float *localSort;
+        MrgSort(scratch0, scratch1, repeat, &localSort);
 
         Merge2(topk1, topk0, localSort, 1, 2048);
     }
