@@ -94,3 +94,25 @@ UB 布局针对 220 架构 bank group 手工排布(`indexer_prepare.h:59-129`):�
 ### 长序列路径(is_long)
 
 `indexer_prepare`(`indexer_prepare.h:362-389`)先调 `norm_ropex_cache_muls` 处理 K(此时 `scale_dim = is_long ? index_n_heads : 0`),再调 `rope_complex_and_cache`(复用 `csrc/kernels/rope_complex_and_cache.h`,传入更新后的 `core_offset` 与 `minPosition = top_k`)对 Q 的 `index_n_heads` 个 head 各自做 RoPE——`minPosition` 门控使 position < top_k 的稠密 token 整行跳过(见上文"稠密注意力 token 的跳过")。`is_long` 的判定在模型层:当 paged 序列长度(`max_num_blocks * block_size`)超过 topK 时为真(测试 `tests/kernels/indexer_prepare.py:126-128`)。
+
+### C8 分支
+
+`index_k_cache` 为 INT8 时，`XliteOpIndexerPrepare` 调用 Lightning Indexer 的 C8 kernel（`csrc/op.cpp:1302`），不包含 Sparse Attention C8。
+
+`kw[T,160]` 为 BF16，K 的 LayerNorm 参数为 FP32。Indexer 使用 32 个头，head dim 为 128，RoPE dim 为 64，局部 `tpSize=1`。`T` 是 token 数。
+
+- K 先做 LayerNorm（`epsilon=1e-6`），再对前 64 维做交错 RoPE，随后做 Hadamard 和动态量化。结果按 `slot_mapping` 写入缓存，`slot=-1` 跳过。
+- `is_long` 为真时还处理 BF16 `q[T,4096]`：每个 head 做 RoPE、Hadamard 和动态量化，不做 LayerNorm。`kw`、`q` 都只读。
+
+LayerNorm、RoPE 和 Hadamard 的输出分别舍入到 BF16。Hadamard 的七级蝶形用 FP32 计算，归一化系数为 `BF16(1/√128)`。
+
+量化以变换后的每行 128 个元素 `x` 为单位，计算 `amax=max(abs(x))`。`amax!=0` 时，用向量除法计算 `factor=vdiv(127, amax)`，对 `x*factor` 取整后转为 INT8；scale 保存为 `FP16(amax × (1/127))`。`amax==0` 时，量化值和 scale 都写零。
+
+K 写入 INT8 `index_k_cache[B,BS,1,128]` 和 FP16 `k_scale_cache[B,BS,1,1]`，每个 token 一个 scale，短序列也写入两者。`B`、`BS` 分别是 cache block 数和大小。
+长序列还输出 INT8 `q8[T,4096]`、FP16 `q_scale[T,32]` 和 `scaled_weights[T,32]`。每个 Q head 一个 scale，`scaled_weights=FP16(原始头权重 × 已舍入到 FP16 的 Q scale)`，不使用传入的 `scale`。
+
+`indexer_prepare_c8`（`csrc/kernels/indexer_prepare_c8.h:372`）在一次向量 kernel 启动中处理 K/Q，导出文件为 `csrc/kernels/indexer_prepare_c8_bfloat16_t.cpp:6`。两条路径共用 `rope_hadamard_quant_c8`，RoPE、Hadamard 和量化的中间结果留在 UB，输出写入 GM。
+
+每核的 K、Q 阶段共用 13,952 字节 UB。K 处理结束后，用 `pipe_barrier(PIPE_ALL)` 等待本核流水线完成，再按 `is_long` 决定是否处理 Q。独立 K 测试入口不执行 Q。
+
+Python 接口见 `xlite/_C.pyi:2240`；测试见 `tests/kernels/indexer_k_cache_c8.py` 和 `tests/kernels/indexer_c8.py`。

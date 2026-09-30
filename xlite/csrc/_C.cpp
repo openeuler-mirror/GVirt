@@ -1947,9 +1947,22 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
                     at::Tensor &freqs, at::Tensor &position, uint32_t indexHeadDim,
                     uint32_t indexNHeads, uint32_t ropeHeadDim, uint32_t blockSize,
                     at::Tensor &indexKCache, at::Tensor &slotMapping, float normEps, at::Tensor &q,
-                    float scale, uint32_t topK, bool isLong)
+                    float scale, uint32_t topK, bool isLong,
+                    std::optional<at::Tensor> kScaleCache = std::nullopt,
+                    std::optional<at::Tensor> q8 = std::nullopt,
+                    std::optional<at::Tensor> qScale = std::nullopt,
+                    std::optional<at::Tensor> scaledWeights = std::nullopt)
 {
     XTensor _kw, _kNorm, _kNormBias, _freqs, _position, _indexKCache, _slotMapping, _q;
+    XTensor _ks, _q8, _qs, _sw;
+    if (kScaleCache)
+        InitXTensor(_ks, *kScaleCache);
+    if (q8)
+        InitXTensor(_q8, *q8);
+    if (qScale)
+        InitXTensor(_qs, *qScale);
+    if (scaledWeights)
+        InitXTensor(_sw, *scaledWeights);
     InitXTensor(_kw, kw);
     InitXTensor(_kNorm, kNorm);
     InitXTensor(_kNormBias, kNormBias);
@@ -1960,7 +1973,25 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
     InitXTensor(_q, q);
     XliteOpIndexerPrepare(rt, _kw, _kNorm, _kNormBias, _freqs, _position, indexHeadDim, indexNHeads,
                           ropeHeadDim, blockSize, _indexKCache, _slotMapping, normEps, _q, scale,
-                          topK, isLong);
+                          topK, isLong, 1, _ks, _q8, _qs, _sw);
+    rt.Synchronize();
+}
+
+void IndexerKCacheC8(XRuntime &rt, const at::Tensor &k, const at::Tensor &kNorm,
+                     const at::Tensor &kNormBias, const at::Tensor &freqs,
+                     const at::Tensor &position, const at::Tensor &slotMapping, at::Tensor &kCache,
+                     at::Tensor &scaleCache)
+{
+    XTensor x, w, b, f, pTensor, sTensor, kc, sc;
+    InitXTensor(x, k);
+    InitXTensor(w, kNorm);
+    InitXTensor(b, kNormBias);
+    InitXTensor(f, freqs);
+    InitXTensor(pTensor, position);
+    InitXTensor(sTensor, slotMapping);
+    InitXTensor(kc, kCache);
+    InitXTensor(sc, scaleCache);
+    XliteOpIndexerKCacheC8(rt, x, w, b, f, pTensor, sTensor, kc, sc);
     rt.Synchronize();
 }
 
@@ -2883,7 +2914,12 @@ PYBIND11_MODULE(_C, m)
           py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("index_head_dim"),
           py::arg("index_n_heads"), py::arg("rope_head_dim"), py::arg("block_size"),
           py::arg("index_k_cache"), py::arg("slot_mapping"), py::arg("norm_eps"), py::arg("q"),
-          py::arg("scale"), py::arg("top_k"), py::arg("is_long"));
+          py::arg("scale"), py::arg("top_k"), py::arg("is_long"),
+          py::arg("k_scale_cache") = py::none(), py::arg("q8") = py::none(),
+          py::arg("q_scale") = py::none(), py::arg("scaled_weights") = py::none());
+    m.def("indexer_k_cache_c8", &IndexerKCacheC8, py::arg("rt"), py::arg("k"), py::arg("k_norm"),
+          py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("slot_mapping"),
+          py::arg("k_cache"), py::arg("scale_cache"));
     m.def("quant", &Quant, py::arg("rt"), py::arg("x"), py::arg("scale_reciprocal"),
           py::arg("offset"), py::arg("out"));
     m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),

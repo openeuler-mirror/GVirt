@@ -2333,8 +2333,19 @@ def indexer_prepare(
     scale: float,
     top_k: int,
     is_long: bool,
+    k_scale_cache: Optional[torch.Tensor] = None,
+    q8: Optional[torch.Tensor] = None,
+    q_scale: Optional[torch.Tensor] = None,
+    scaled_weights: Optional[torch.Tensor] = None,
 ) -> None:
     """Fused DSA indexer prepare: LayerNorm + rope_complex_and_cache, optional rope_complex(q) + muls(kw).
+
+    C8 writes INT8 ``index_k_cache`` and FP16 ``k_scale_cache``.
+    Long mode also writes INT8 ``q8`` and FP16 ``q_scale`` / ``scaled_weights``.
+    ``scaled_weights`` contains head weights multiplied by Q scale.
+    C8 uses LN epsilon 1e-6, ignores ``scale``, and leaves ``kw``/``q`` unchanged.
+
+    Floating-point path:
 
     Always runs:
       * LayerNorm over ``kw[:, :index_head_dim]`` (in place).
@@ -2375,6 +2386,43 @@ def indexer_prepare(
     Returns:
         None: ``kw`` (norm+rope slices, optional muls slice), ``index_k_cache``, and (when
         ``is_long``) the rotary slice of ``q`` are written in place.
+    """
+    ...
+
+def indexer_k_cache_c8(
+    rt: Runtime,
+    k: torch.Tensor,
+    k_norm: torch.Tensor,
+    k_norm_bias: torch.Tensor,
+    freqs: torch.Tensor,
+    position: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_cache: torch.Tensor,
+    scale_cache: torch.Tensor,
+) -> None:
+    """Prepare C8 indexer keys and write keys and scales to cache.
+
+    Shares the C8 kernel with :func:`indexer_prepare`, with Q processing disabled.
+    Use contiguous tensors on rt's NPU and non-aliasing outputs.
+    Synchronize input producers before calling; this binding synchronizes on return.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        k (torch.Tensor): Projected keys ``[tokens, stride]``, bf16; stride >= 128,
+            only the first 128 columns are used.
+        k_norm (torch.Tensor): LayerNorm weight ``[128]``, fp32; epsilon is 1e-6.
+        k_norm_bias (torch.Tensor): LayerNorm bias ``[128]``, fp32.
+        freqs (torch.Tensor): Rotary frequencies: bf16/fp32 ``[P,64]``,
+            fp32 ``[P,32,2]``, or complex64 ``[P,32]``.
+        position (torch.Tensor): Position ids ``[tokens]``, int64.
+        slot_mapping (torch.Tensor): Cache slots ``[tokens]``, int32;
+            valid slots must be unique, and -1 skips both cache writes.
+        k_cache (torch.Tensor): Output key cache ``[blocks, block_size, 1, 128]``, int8.
+        scale_cache (torch.Tensor): Output per-key scales
+            ``[blocks, block_size, 1, 1]``, fp16.
+
+    Returns:
+        None: Caches are written in place; inputs and unwritten slots are unchanged.
     """
     ...
 

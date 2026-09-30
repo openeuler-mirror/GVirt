@@ -177,7 +177,17 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                            uint32_t indexHeadDim, uint32_t indexNHeads, uint32_t ropeHeadDim,
                            uint32_t blockSize, XTensor &indexKCache, const XTensor &slotMapping,
                            float normEps, const XTensor &q = XTensor(), float scale = 1.0f,
-                           uint32_t topK = 2048, bool isLong = false, uint32_t tpSize = 1);
+                           uint32_t topK = 2048, bool isLong = false, uint32_t tpSize = 1,
+                           const XTensor &kScaleCache = XTensor(), const XTensor &q8 = XTensor(),
+                           const XTensor &qScale = XTensor(),
+                           const XTensor &scaledWeights = XTensor());
+
+// LI-C8 writer only. Inputs are contiguous; K may have fused head-weight columns
+// after its first 128 elements. Valid slots must be unique, or -1 for padding.
+// Native callers validate indices and order producers/consumers on rt.stream.
+void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm,
+                            const XTensor &kNormBias, const XTensor &freqs, const XTensor &position,
+                            const XTensor &slotMapping, XTensor &kCache, const XTensor &scaleCache);
 
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
                   XTensor &out);
