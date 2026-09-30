@@ -2,13 +2,17 @@
 
 ## 功能概述
 
-DeepSeek V3.2 DSA(DeepSeek Sparse Attention)indexer 的 K/Q 预处理融合算子(核内函数 `norm_ropex_cache_muls`,见 `csrc/kernels/indexer_prepare.h:15`)。对 indexer 的 K 投影 `kw` 执行:LayerNorm → 前缀 GPT-J 交错式 RoPE → 写入 paged `index_k_cache`;当 `is_long` 为真(序列长度超过 topK 走长序列路径)时,额外对 Q 做 per-head RoPE(原地),并对 `kw` 尾部的 `index_n_heads` 个头权重列按 `scale` 缩放(仅对 position > top_k 的 token)。该算子是 `indexer_scores`/`indexer_topk` 的前置步骤,为其准备好归一化、加旋转位置编码后的 K cache 与 Q。
+DeepSeek V3.2 DSA(DeepSeek Sparse Attention)indexer 的 K/Q 预处理融合算子(核内函数 `norm_ropex_cache_muls`,见 `csrc/kernels/indexer_prepare.h:15`)。对 indexer 的 K 投影 `kw` 执行:LayerNorm → 前缀 GPT-J 交错式 RoPE → 写入 paged `index_k_cache`;当 `is_long` 为真(序列长度超过 topK 走长序列路径)时,额外对 Q 做 per-head RoPE(原地,仅稀疏注意力 token),并对 `kw` 尾部的 `index_n_heads` 个头权重列按 `scale` 缩放(仅对 position ≥ top_k 的 token)。该算子是 `indexer_scores`/`indexer_topk` 的前置步骤,为其准备好归一化、加旋转位置编码后的 K cache 与 Q。
 
 数学语义(见测试 `tests/kernels/indexer_prepare.py:169-205` 的参考实现):
 
 1. `ln = LayerNorm(kw[:, :index_head_dim], kNorm, kNormBias, eps)`;
 2. `ln[:, :rope_head_dim] = InterleavedRoPE(ln[:, :rope_head_dim], freqs_cis[position])`,并把结果按 `slot_mapping` scatter 到 `index_k_cache`;
-3. 长序列路径(`is_long`):`q` 每个 head 的 `rope_head_dim` 前缀原地 RoPE;`kw[:, index_head_dim : index_head_dim+index_n_heads] *= scale`(仅 `position > top_k` 的 token)。
+3. 长序列路径(`is_long`):`q` 每个 head 的 `rope_head_dim` 前缀原地 RoPE,**仅 position ≥ top_k 的 token**(position < top_k 的 token 走稠密注意力,见下);`kw[:, index_head_dim : index_head_dim+index_n_heads] *= scale`(仅 `position ≥ top_k` 的 token)。
+
+### 稠密注意力 token 的跳过
+
+`p0 < topK` 的 token 走稠密注意力(`indexer_topk` 对这些位置不算 topk,见 [indexer_topk.md](indexer_topk.md)),它们的 Q 不参与稀疏选路,因此 Q-RoPE 是可省的。长序列路径把 `minPosition = top_k` 传给 `rope_complex_and_cache`(`indexer_prepare.h:387`):每行先读位置,`pos_per_row < minPosition` 的行直接 `continue`(`rope_complex_and_cache.h:166-169`)——跳过该行 Q 的 RoPE 载入、旋转与写回。注意该跳过仅在**非 cache 模式**生效(`need_v_cache` 时 `minPosition` 归零,`rope_complex_and_cache.h:27-28`;K 写 cache 不能跳,否则 cache 出洞),而 indexer 的 Q-RoPE 调用恰好不传 cache 参数。同理,步骤 3 的 muls 尾列缩放由 `need_muls = scale_repeat > 0 && ipos >= top_k` 门控(`indexer_prepare.h:242`),稠密 token 的头权重列保持原值——因为它们直接走 dense 路径,不会被 `indexer_topk` 的加权求和消费。
 
 ## 输入输出参数
 
@@ -40,7 +44,7 @@ indexer_prepare_<dtype>(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR fr
 | position | 输入 | `[token_num]` | int64 | 每个 token 的绝对序列位置(= 各 batch 的 `cached_lens[i]` 起始偏移累加) |
 | index_k_cache | 输出 | `[block_num, block_size, index_head_dim]` | fp16 / bf16 | paged indexer K cache;`block_size=0` 时禁用缓存 |
 | slot_mapping | 输入 | `[token_num]` | int32 | token → cache 平坦槽位映射 |
-| q | 输入/输出 | `[token_num, index_n_heads * index_head_dim]` | fp16 / bf16 | indexer Q;仅 `is_long` 时被原地 RoPE |
+| q | 输入/输出 | `[token_num, index_n_heads * index_head_dim]` | fp16 / bf16 | indexer Q;仅 `is_long` 时被原地 RoPE,且只对 position ≥ top_k 的 token(稠密 token 跳过) |
 | index_head_dim / index_n_heads / rope_head_dim / block_size / token_num | — | 标量 | uint32 | 维度参数,`total_dim = index_head_dim + index_n_heads`;所有维度要求为 64 的倍数(`indexer_prepare.h:36` 注释) |
 | norm_eps | — | 标量 | float | LN epsilon |
 | norm_in_fp32 | — | 标量 | bool | kNorm/kNormBias 是否为 fp32(host 侧由 dtype 推断) |
@@ -74,7 +78,7 @@ uint32_t rel_block_idx = (block_idx + block_num - core_offset) % block_num;
 1. **搬入**:`kw[irow]` 的前 `calc_dim = norm_dim + scale_dim` 列 GM→UB,`convert_input` 转 fp32(`indexer_prepare.h:206-212`);
 2. **位置/槽位预取**:`position`、`slot_mapping` 分批(每批 `ub_pos_num` 个,S 管线标量读取)搬入 UB(`indexer_prepare.h:187-203`);
 3. **freqs 拆分**:`vreducev2` 从交错表中抽偶数位(cos)与奇数位(sin)(`indexer_prepare.h:230-236`);
-4. **muls**(长序列):`position > top_k` 时对尾列 `vmuls` 缩放(`indexer_prepare.h:242-246`);
+4. **muls**(长序列):`position ≥ top_k` 时对尾列 `vmuls` 缩放(`indexer_prepare.h:242-246`);
 5. **LayerNorm**(fp32 计算):`vmuls`(x/n)→ `reduce_sum`(均值)→ `duplicate_item` → `vsub` → `vmul` → `reduce_sum`(方差)→ `vadds`(eps)→ `vsqrt` → `vdiv` → weight/bias 仿射(`indexer_prepare.h:249-299`);
 6. **RoPE**(GPT-J 交错):`vreducev2` 按步长抽偶/奇元素为 `in_even`/`in_odd`,`vmul`×4 + `vsub`/`vadd` 得到 `out[0::2] = x_even*cos - x_odd*sin`、`out[1::2] = x_even*sin + x_odd*cos`(`indexer_prepare.h:301-327`);
 7. **搬出**:`convert_output` 转回 Dtype;启用 cache 时写 `index_k_cache + slot*norm_dim`(LN+RoPE 后的 `index_head_dim` 列)+ 长序列时尾列写回 `kw` 原地(`indexer_prepare.h:331-346`)。
@@ -89,4 +93,4 @@ UB 布局针对 220 架构 bank group 手工排布(`indexer_prepare.h:59-129`):�
 
 ### 长序列路径(is_long)
 
-`indexer_prepare`(`indexer_prepare.h:362-389`)先调 `norm_ropex_cache_muls` 处理 K(此时 `scale_dim = is_long ? index_n_heads : 0`),再调 `rope_complex_and_cache`(复用 `csrc/kernels/rope_complex_and_cache.h`,传入更新后的 `core_offset`)对 Q 的 `index_n_heads` 个 head 各自做 RoPE。`is_long` 的判定在模型层:当 paged 序列长度(`max_num_blocks * block_size`)超过 topK 时为真(测试 `tests/kernels/indexer_prepare.py:126-128`)。
+`indexer_prepare`(`indexer_prepare.h:362-389`)先调 `norm_ropex_cache_muls` 处理 K(此时 `scale_dim = is_long ? index_n_heads : 0`),再调 `rope_complex_and_cache`(复用 `csrc/kernels/rope_complex_and_cache.h`,传入更新后的 `core_offset` 与 `minPosition = top_k`)对 Q 的 `index_n_heads` 个 head 各自做 RoPE——`minPosition` 门控使 position < top_k 的稠密 token 整行跳过(见上文"稠密注意力 token 的跳过")。`is_long` 的判定在模型层:当 paged 序列长度(`max_num_blocks * block_size`)超过 topK 时为真(测试 `tests/kernels/indexer_prepare.py:126-128`)。

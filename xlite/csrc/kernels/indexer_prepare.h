@@ -239,7 +239,7 @@ __aicore__ void norm_ropex_cache_muls(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, 
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
         // BEGIN: muls
-        bool need_muls = scale_repeat > 0 && ipos > top_k;
+        bool need_muls = scale_repeat > 0 && ipos >= top_k;
         if (need_muls) {
             // scale: multiply by scale factor
             vmuls(out_float + norm_dim, in_float + norm_dim, scale, scale_repeat, 1, 1, 8, 8);
@@ -384,7 +384,7 @@ __aicore__ inline void indexer_prepare(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormB
     if (is_long) {
         rope_complex_and_cache<Dtype>(token_num, index_n_heads, index_head_dim, rope_head_dim, 0,
                                       rope_head_dim, q, q, index_head_dim, 0, freqs, position, 0,
-                                      nullptr, nullptr, false, false, core_offset);
+                                      nullptr, nullptr, false, false, top_k, core_offset);
     }
 }
 

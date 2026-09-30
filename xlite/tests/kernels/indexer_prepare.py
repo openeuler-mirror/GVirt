@@ -14,11 +14,12 @@ Fused DSA indexer prepare kernel (``norm_ropex_cache_muls``):
   * Interleaved (GPT-J) RoPE on the ``rope_head_dim`` prefix of ``kw`` and
     scatter of the post-LN ``index_head_dim`` slice into a paged
     ``index_k_cache`` (skipped when ``block_size == 0``).
-  * When ``is_long``:
+  * When ``is_long`` (``op.cpp`` forwards ``topK`` to the kernel as ``top_k``):
       - Interleaved RoPE on the ``rope_head_dim`` prefix of each of the
-        ``index_n_heads`` heads of ``q`` (in place).
+        ``index_n_heads`` heads of ``q`` (in place), skipped for tokens whose
+        position is below ``topK`` (dense attention needs no RoPE).
       - ``muls`` on ``kw[:, index_head_dim:index_head_dim + index_n_heads]``
-        by ``scale`` (in place), but only for tokens past ``top_k``.
+        by ``scale`` (in place), only for tokens at or beyond ``topK``.
 
 The reference is computed with plain torch (LayerNorm + complex-pair RoPE).
 """
@@ -68,8 +69,10 @@ work = [
     (4, [5012, 127, 2189, 500], [4, 2, 6, 8]),
 ]
 
-# topK values to exercise (must be <= 2048). Only affects the ``muls`` gate on
-# the long path: tokens with a position id > top_k are scaled.
+# topK values to exercise (must be <= 2048). On the long path both the
+# ``muls`` tail gate (``ipos >= top_k``) and the q-RoPE skip gate key on
+# ``topK``: tokens at or beyond ``topK`` get muls + q-RoPE, lower
+# positions are left untouched.
 topk_values = [512, 2048]
 
 # absolute/relative tolerances for torch.testing.assert_close. bf16 has ~3
@@ -184,24 +187,23 @@ def run_test(
         off = slot % BLOCK_SIZE
         index_k_cache_ref[b, off] = ln_rot[i]
 
-    # 4) Long path: q-RoPE (per-head, on the rope_head_dim prefix) in place;
-    #    muls scales kw[:, index_head_dim:index_head_dim + index_n_heads] (the
-    #    per-token head weights that indexer_topk later reads at offset
-    #    index_head_dim, see csrc/kernels/indexer_topk.h `wOffset = ... +
-    #    headDim`) IN PLACE on kw, only for tokens whose position > topK. The
-    #    kernel gates with `ipos > top_k` and runs the scale in FP32 before
-    #    casting back to dtype, so match that here.
+    # 4) Long path: muls on the kw tail and q-RoPE both gate on position >=
+    #    topK. Select per row up front -- ``q_heads`` is a view of ``q_ref``,
+    #    so writing RoPE in place before the select would clobber the un-rope'd
+    #    rows.
     if is_long:
-        need_muls_mask = torch.tensor([p > topK for p in pos_list], device="npu", dtype=torch.float32).view(
-            num_tokens, 1
-        )
+        pos_gt_topK = torch.tensor([p >= topK for p in pos_list], device="npu")
         tail = kw_ref[:, index_head_dim : index_head_dim + index_n_heads]
         scaled = (tail.float() * scale).to(test_dtype)
-        kw_ref[:, index_head_dim : index_head_dim + index_n_heads] = torch.where(need_muls_mask.bool(), scaled, tail)
+        kw_ref[:, index_head_dim : index_head_dim + index_n_heads] = torch.where(
+            pos_gt_topK.view(num_tokens, 1), scaled, tail
+        )
 
         q_heads = q_ref.reshape(num_tokens, index_n_heads, index_head_dim)
         q_rot_slice = apply_rotary_emb(q_heads[..., :rope_head_dim].contiguous(), freqs_per_token)
-        q_heads[..., :rope_head_dim] = q_rot_slice
+        q_heads[..., :rope_head_dim] = torch.where(
+            pos_gt_topK.view(num_tokens, 1, 1), q_rot_slice, q_heads[..., :rope_head_dim].clone()
+        )
         q_ref = q_heads.reshape(num_tokens, index_n_heads * index_head_dim)
 
     # ---------------- xlite ----------------

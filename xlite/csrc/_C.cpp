@@ -1883,7 +1883,8 @@ void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
 
 void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t ropeDim,
                  at::Tensor &inputWithR, at::Tensor &freqs, at::Tensor &position,
-                 at::Tensor &output, bool inverse, bool outInterleaved, bool doRotate)
+                 at::Tensor &output, bool inverse, bool outInterleaved, uint64_t minPosition = 0,
+                 bool doRotate = false)
 {
     XTensor _inputWithR, _freqs, _position, _output;
     InitXTensor(_inputWithR, inputWithR);
@@ -1894,7 +1895,8 @@ void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t 
     // the rope region at the head tail ([nope | rope]); the caller scales the nope region via muls.
     uint32_t outStepDim = ropeDim;
     XliteOpRopeComplex(rt, nLocalHeads, stepDim, outStepDim, ropeDim, stepDim - ropeDim, 0,
-                       _inputWithR, _freqs, _position, _output, inverse, outInterleaved, doRotate);
+                       _inputWithR, _freqs, _position, _output, inverse, outInterleaved,
+                       minPosition, doRotate);
     rt.Synchronize();
 }
 
@@ -2864,7 +2866,8 @@ PYBIND11_MODULE(_C, m)
     m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("n_local_heads"),
           py::arg("step_dim"), py::arg("rope_dim"), py::arg("input_with_r"), py::arg("freqs"),
           py::arg("position"), py::arg("output"), py::arg("inverse") = false,
-          py::arg("out_interleaved") = false, py::arg("do_rotate") = false);
+          py::arg("out_interleaved") = false, py::arg("min_position") = 0,
+          py::arg("do_rotate") = false);
     m.def("rope_complex_and_cache", &RopeComplexAndCache, "rope_complex_and_cache", py::arg("rt"),
           py::arg("n_local_heads"), py::arg("step_dim"), py::arg("rope_dim"), py::arg("offset"),
           py::arg("vdim"), py::arg("input_with_r"), py::arg("freqs"), py::arg("position"),

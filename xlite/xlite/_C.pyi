@@ -2149,6 +2149,7 @@ def rope_complex(
     output: torch.Tensor,
     inverse: bool = False,
     out_interleaved: bool = False,
+    min_position: int = 0,
     do_rotate: bool = False,
 ) -> None:
     """Apply complex-domain rotary embedding to the rope region, optionally scaling it.
@@ -2188,6 +2189,10 @@ def rope_complex(
             ``[r0,i0,r1,i1,...]`` (matches torch ``view_as_real().flatten``);
             otherwise write the deinterleaved half layout
             ``[r0..r(half-1) | i0..i(half-1)]`` (MLA/DSA kv-cache convention).
+        min_position (int): Rows whose ``position`` value is below ``min_position`` are
+            skipped entirely (no load, no rotation, no writeback). Used by the DSA indexer
+            to skip dense-attention query rows (``position < top_k``). Only active when no
+            v-cache is written; forced to 0 on the cache path.
         do_rotate (bool): If True, scale the rope region by ``1/sqrt(step_dim)`` after rope
             (the rope-region half of ``rotate_activation``). The nope region must be scaled
             separately by the caller via :func:`muls`. A rope-only head
