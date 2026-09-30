@@ -62,6 +62,7 @@ struct XModelConfig {
     float indexSoftmaxScale;
     bool indexRopeInterleaved = false;
     std::vector<bool> indexFullMask;  // per-layer indexer mask - true: full indexer, false: shared
+    std::vector<bool> indexC8Mask;  // per-runtime-layer C8 mask; empty disables C8
 
     // linear attention config
     uint32_t linearNumKHeads = 0;
@@ -271,7 +272,8 @@ private:
         XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
         XTensor &hiddenState);
     void ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState, XTensor &attnNormQc,
-                            XTensor &indexKCache, XTensor &freqsCis);
+                            XTensor &indexKCache, XTensor &freqsCis,
+                            const XTensor &indexKScaleCache = XTensor());
     void ForwardAttnMLAV2(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                           XTensor &freqsCis, XTensor &hiddenState);
     void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);

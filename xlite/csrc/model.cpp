@@ -152,8 +152,21 @@ void XModel::Init(void)
     }
 
     if (_c.attnType == XMODEL_ATTN_DSA) {
+        if (!_c.indexC8Mask.empty()) {
+            if (_c.indexC8Mask.size() != _c.nLayers) {
+                throw std::invalid_argument("indexC8Mask must describe every DSA runtime layer");
+            }
+            for (uint32_t i = 0; i < _c.nLayers; ++i) {
+                if (_c.indexC8Mask[i] &&
+                    i < _c.indexFullMask.size() && !_c.indexFullMask[i]) {
+                    throw std::invalid_argument("LI-C8 requires a full Indexer layer");
+                }
+            }
+        }
         _dsaIndexerScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
         _dsaIndexerScale *= 1.0f / std::sqrt(static_cast<float>(_c.indexHeadDim));
+    } else if (!_c.indexC8Mask.empty()) {
+        throw std::invalid_argument("indexC8Mask requires DSA");
     }
 
     if (_c.attnType == XMODEL_ATTN_CXA) {
@@ -360,7 +373,8 @@ void XModel::ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x,
 }
 
 void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
-                                XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis)
+                                XTensor &attnNormQc, XTensor &indexKCache, XTensor &freqsCis,
+                                const XTensor &indexKScaleCache)
 {
     // TODO not interleaved case
     if (!_c.indexRopeInterleaved) {
@@ -374,17 +388,28 @@ void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenSta
     const uint32_t maxNumBlocks = rt._attnBlockTables[0].shape[1];
     // only use sparse attention when the sequence length is long enough
     bool isLong = maxNumBlocks * _c.blockSizes[0] > _c.indexTopK;
+    const bool c8 = !_c.indexC8Mask.empty() && _c.indexC8Mask[layer];
     XTensor *qPtr = nullptr;
+    XTensor *q8 = nullptr;
+    XTensor *qScale = nullptr;
+    XTensor *scaledWeights = nullptr;
     if (isLong) {
         qPtr = &rt.GetTensor({hiddenState.shape[0], _c.indexNHeads * _c.indexHeadDim},
                              hiddenState.dtype, DBG_LOC);
         ForwardLinear(rt, layer, attnNormQc, indexQB, *qPtr);
+        if (c8) {
+            q8 = &rt.GetTensor(qPtr->shape, INT8, DBG_LOC);
+            qScale = &rt.GetTensor({hiddenState.shape[0], _c.indexNHeads}, FP16, DBG_LOC);
+            scaledWeights = &rt.GetTensor(qScale->shape, FP16, DBG_LOC); // Fold Q dequantization scales into head weights for C8.
+        }
     }
     XliteOpIndexerPrepare(rt, kw, indexKNorm[layer], indexKNormBias[layer], freqsCis,
                           rt._attnPosition, _c.indexHeadDim, _c.indexNHeads, _c.ropeHeadDim,
                           _c.blockSizes[0], indexKCache, rt._attnSlotMapping[0], _c.normEps,
                           qPtr == nullptr ? XTensor() : *qPtr, _dsaIndexerScale, _c.indexTopK,
-                          isLong);
+                          isLong, 1, indexKScaleCache, q8 == nullptr ? XTensor() : *q8,
+                          qScale == nullptr ? XTensor() : *qScale,
+                          scaledWeights == nullptr ? XTensor() : *scaledWeights);
 
     if (!isLong) {
         rt.PutTensor(kw);
@@ -393,18 +418,24 @@ void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenSta
     }
 
     XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
-                                   hiddenState.dtype, DBG_LOC);
+                                   c8 ? FP32 : hiddenState.dtype, DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
     rt._dsaTopkBuffer.View(hiddenState.shape[0]);
     rt.dsaPerLayerTopk = &rt._dsaTopkBuffer;
-    XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices,
-                       rt._dsaTopkBuffer, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
-                       rt._attnBlockTables[0], _sync, _c.indexNHeads, _c.indexHeadDim,
-                       _c.blockSizes[0], rt._batch, _c.indexTopK);
+    XliteOpIndexerTopK(rt, c8 ? *q8 : *qPtr, indexKCache, c8 ? *scaledWeights : kw, scores,
+                       lastTopk, _dsaTopkIndices, rt._dsaTopkBuffer, rt._attnQueryStartLoc,
+                       rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], _sync,
+                       _c.indexNHeads, _c.indexHeadDim, _c.blockSizes[0], rt._batch, _c.indexTopK,
+                       indexKScaleCache);
     rt.PutTensor(kw);
     rt.PutTensor(*qPtr);
     rt.PutTensor(lastTopk);
     rt.PutTensor(scores);
+    if (c8) {
+        rt.PutTensor(*scaledWeights);
+        rt.PutTensor(*qScale);
+        rt.PutTensor(*q8);
+    }
 }
 
 std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
@@ -461,7 +492,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
     if (_c.attnType == XMODEL_ATTN_DSA &&
         (layer >= _c.indexFullMask.size() || _c.indexFullMask[layer])) {
         // For shared indexer, only update the current topk for a full indexer layer
-        ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis);
+        ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis,
+                           kvCache[layer].size() == 4 ? kvCache[layer][3] : XTensor());
     }
     XTensor *topkIndices = rt.dsaPerLayerTopk;
     rt.PutTensor(attnNormQc);
@@ -2030,6 +2062,27 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                 ": pe cache's shape not match [block_num, block_size, kv_head_num, rope_head_dim]");
         }
         if (_c.attnType == XMODEL_ATTN_DSA) {
+            for (uint32_t i = 0; i < _c.nLayers; ++i) {
+                if (_c.indexC8Mask.empty() || !_c.indexC8Mask[i]) {
+                    continue;
+                }
+                if (kvCache[i].size() != 4) {
+                    throw std::invalid_argument("DSA cache tuple must match indexC8Mask");
+                }
+                if (i < _c.indexFullMask.size() && !_c.indexFullMask[i]) {
+                    continue;
+                }
+                const XTensor &ik = kvCache[i][2];
+                if (ik.shape.size() != 4 || ik.shape[1] != _c.blockSizes[0] || ik.shape[2] != 1 ||
+                    ik.shape[3] != _c.indexHeadDim || ik.dtype != INT8) {
+                    throw std::invalid_argument("DSA index K cache shape/dtype mismatch");
+                }
+                if (embed.dtype != BF16 || kvCache[i][3].dtype != FP16 ||
+                    kvCache[i][3].shape != std::vector<size_t>{ik.shape[0], ik.shape[1], 1, 1}) {
+                    throw std::invalid_argument(
+                        "LI-C8 requires BF16 input and a paired FP16 scale cache");
+                }
+            }
             XTensor &indexKCache = kvCache[0][2];
             if (indexKCache.shape[1] != _c.blockSizes[0] || indexKCache.shape[2] != 1 ||
                 indexKCache.shape[3] != _c.indexHeadDim) {
@@ -2168,9 +2221,14 @@ size_t XModel::DummyRun()
                     {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.ropeHeadDim},
                     embed.dtype, nullptr);
                 XTensor indexKCache(
-                    {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], 1, _c.indexHeadDim}, embed.dtype,
-                    nullptr);
+                    {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], 1, _c.indexHeadDim},
+                    !_c.indexC8Mask.empty() && _c.indexC8Mask[i] ? INT8 : embed.dtype, nullptr);
                 kvCache[i] = {kCache, vCache, indexKCache};
+                if (!_c.indexC8Mask.empty() && _c.indexC8Mask[i]) {
+                    kvCache[i].emplace_back( //Cache for scale
+                        std::vector<size_t>{_c.maxBatch * maxNumBlocks, _c.blockSizes[0], 1, 1},
+                        FP16, nullptr);
+                }
             } else if (_c.attnType == XMODEL_ATTN_CXA) {
                 uint32_t ratio = _c.compressRatios.empty() ? 0 : _c.compressRatios[i];
                 bool hasIndexer = (ratio == 4);

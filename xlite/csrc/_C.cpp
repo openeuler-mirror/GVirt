@@ -756,7 +756,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     _kv.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
         if (c.attnType == XMODEL_ATTN_DSA) {
-            _kv[i].resize(3);
+            _kv[i].resize(!c.indexC8Mask.empty() && c.indexC8Mask[i] ? 4 : 3);
         } else if (c.attnType == XMODEL_ATTN_CXA) {
             _kv[i].resize(5);
         } else {
@@ -2608,6 +2608,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_softmax_scale", &XModelConfig::indexSoftmaxScale)
         .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved)
         .def_readwrite("index_full_mask", &XModelConfig::indexFullMask)
+        .def_readwrite("index_c8_mask", &XModelConfig::indexC8Mask)
         .def_readwrite("linear_num_k_heads", &XModelConfig::linearNumKHeads)
         .def_readwrite("linear_num_v_heads", &XModelConfig::linearNumVHeads)
         .def_readwrite("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)

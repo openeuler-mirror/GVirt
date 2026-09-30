@@ -125,6 +125,8 @@ class ModelArgs:
     index_topk: int = 2048
     indexer_rope_interleave: bool = False
     index_full_mask: Optional[list[bool]] = None
+    # Per-runtime-layer Indexer C8 mask.
+    index_c8_mask: Optional[list[bool]] = None
     # the raw model config path
     config_path: Optional[Path] = None
 
@@ -149,6 +151,8 @@ class ModelArgs:
                 self.original_seq_len = rope_scaling["original_max_position_embeddings"]
         self.index_full_mask = self.index_full_mask[:self.n_layers] or [True] * self.n_layers
         assert len(self.index_full_mask) == self.n_layers, f"indexer mask length mismatch"
+        self.index_c8_mask = self.index_c8_mask or [False] * self.n_layers
+        assert len(self.index_c8_mask) == self.n_layers, "index_c8_mask length mismatch"
 
 
 
@@ -1403,6 +1407,8 @@ class DeepSeek_V3(nn.Module):
         assert args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
         assert args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
         assert args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+        if any(args.index_c8_mask) and (args.model_type != "glm5" or forward_backend != "xlite"):
+            raise ValueError("LI-C8 currently requires the XLite GLM-5.1 path")
 
         static_quant_weights = ("q_a_proj", "kv_a_proj_with_mqa", "wq_b", "wo")
 
@@ -1780,6 +1786,7 @@ class DeepSeek_V3(nn.Module):
             config.index_softmax_scale = self.layers[0].attn.indexer.softmax_scale
             config.index_rope_interleaved = args.indexer_rope_interleave
             config.index_full_mask = args.index_full_mask
+            config.index_c8_mask = args.index_c8_mask
             config.attn_type = AttnDSA
 
         global xlite_model
@@ -1924,13 +1931,19 @@ class DeepSeek_V3(nn.Module):
             _dummy = torch.zeros(1, dtype=torch.get_default_dtype(), device='npu')
             index_mask = args.index_full_mask or [True] * args.n_layers
             assert len(index_mask) == args.n_layers, f"index_full_mask length {len(index_mask)} != n_layers {args.n_layers}"
-            self.xlite_kv_cache = [(torch.zeros(block_num, block_size, head_num, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
-                                    torch.zeros(block_num, block_size, head_num, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'),
-                                    torch.zeros(block_num, block_size, head_num, args.index_head_dim, dtype=torch.get_default_dtype(), device='npu') if mask else _dummy)
-                                for mask in index_mask]
-            kv_size = (block_num * head_num * block_size * ((args.kv_lora_rank + args.qk_rope_head_dim) * args.n_layers
-                                                            + args.index_head_dim * sum(index_mask))
-                    * self.xlite_kv_cache[0][0].element_size())
+            self.xlite_kv_cache = []
+            kv_size = 0
+            for mask, c8 in zip(index_mask, args.index_c8_mask):
+                cache = [
+                    torch.zeros(block_num, block_size, head_num, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
+                    torch.zeros(block_num, block_size, head_num, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'),
+                    torch.zeros(block_num, block_size, head_num, args.index_head_dim,
+                                dtype=torch.int8 if c8 else torch.get_default_dtype(), device='npu') if mask else _dummy,
+                ]
+                if c8:
+                    cache.append(torch.zeros(block_num, block_size, 1, 1, dtype=torch.float16, device='npu'))
+                kv_size += sum(t.numel() * t.element_size() for t in cache if t is not _dummy)
+                self.xlite_kv_cache.append(tuple(cache))
         return kv_size
 
     def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
