@@ -1883,7 +1883,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &lastTopk, XTensor &indices, XTensor &topkIndices,
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
-                        uint32_t blockSize, uint32_t batch, uint32_t topK)
+                        uint32_t blockSize, uint32_t batch, uint32_t topK,
+                        const XTensor &kScaleCache)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1891,6 +1892,29 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     if (topK > MAX_TOPK_NUM) {
         throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
                                  std::to_string(MAX_TOPK_NUM));
+    }
+    if (kCache.dtype == INT8) {
+        if (nHeads != 32 || headDim != 128 || blockSize < 16 || blockSize > 128 ||
+            blockSize % 16 != 0 || MAX_INDEXER_KV_TILE_LEN % blockSize != 0 || batch == 0 ||
+            topK < 32 || topK % 32 != 0) {
+            throw std::invalid_argument("indexer_topk: unsupported LI-C8 configuration");
+        }
+        if (kScaleCache.shape.empty() || q.dtype != INT8 ||
+            !EachXDtype(FP16, weight, kScaleCache) || scores.dtype != FP32) {
+            throw std::invalid_argument("indexer_topk: unsupported LI-C8 inputs");
+        }
+        uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+        if (q.shape[0] != 0) {
+            aclrtlaunch_indexer_topk_int8_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
+                                            queryStartLoc.ptr, lens.ptr, cachedLens.ptr,
+                                            blockTables.ptr, scores.ptr, lastTopk.ptr, indices.ptr,
+                                            topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize,
+                                            batch, maxNumBlocks, topK, kScaleCache.ptr);
+        }
+        return;
+    }
+    if (!kScaleCache.shape.empty()) {
+        throw std::invalid_argument("indexer_topk: scale cache requires INT8 K cache");
     }
     KERNEL_PTR_TYPE(indexer_topk) * launchKernel;
     if (EachXDtype(FP16, q, kCache, weight, scores)) {

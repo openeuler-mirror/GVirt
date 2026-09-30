@@ -2969,8 +2969,12 @@ def indexer_topk(
     block_size: int,
     batch: int,
     top_k: int,
+    k_scale_cache: Optional[torch.Tensor] = None,
 ) -> None:
     """Fused DSA indexer scores + top-k selection over cached keys.
+
+    C8 uses INT8 Q/K with FP16 head weights and K scales.
+    Use contiguous tensors on rt's NPU, valid metadata and non-aliasing outputs.
 
     Combines :func:`indexer_scores` and :func:`topk` into a single kernel
     launch with pingpong buffers. Scratch buffers (scores, last_topk, sync)
@@ -2980,15 +2984,20 @@ def indexer_topk(
         rt (Runtime): Native runtime handle.
         q (torch.Tensor): Query tensor ``[total_query_len, n_heads, head_dim]``, fp16/bf16
             (must match k_cache/weight).
+            C8: ``[total_query_len, 4096]``, int8.
         k_cache (torch.Tensor): Key cache tensor ``[max_num_block*batch, block_size,
-        head_dim]``, same dtype.
+            head_dim]``, same dtype as q.
+            C8: ``[blocks, block_size, 1, 128]``, int8.
         weight (torch.Tensor): Indexer weight tensor
             ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are
-            the indexer weights), same dtype.
+            the indexer weights), same dtype as q.
+            C8: ``[total_query_len, 32]``, fp16, already multiplied by Q scale.
         indices (torch.Tensor): Input index tensor ``[max_seq_len]`` (int32),
-            pre-filled with ``0..max_seq_len-1``.
-        topk_indices (torch.Tensor): Output top-k indices tensor
+            pre-filled with ``0..max_seq_len-1``, with at least 4096 entries.
+        topk_indices (torch.Tensor): Output token indices (not score order),
             ``[total_query_len, top_k]`` (int32).
+            Rows at sequence positions >= top_k contain top_k causal indices
+            in descending index order. Dense rows are unspecified and must not be read.
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
             int32 device.
         lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
@@ -2997,14 +3006,18 @@ def indexer_topk(
             (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
             per-request max_num_blocks is derived internally from the shape
             (2-D: shape[1]; 1-D: len // batch).
-        n_heads (int): Number of heads.
-        head_dim (int): Head dimension.
+        n_heads (int): Number of heads (32 for C8).
+        head_dim (int): Head dimension (128 for C8).
         block_size (int): KV block size (must be <= 128).
+            C8 supports 16, 32, 64 or 128.
         batch (int): Batch size.
         top_k (int): Number of top-k indices to select (must be <= 2048).
+            C8 requires a multiple of 32 in [32, 2048].
+        k_scale_cache (Optional[torch.Tensor]): C8 per-key scales
+            ``[blocks, block_size, 1, 1]``, fp16; None for floating-point inputs.
 
     Returns:
-        None: ``topk_indices`` is written in place.
+        None: ``topk_indices`` is written in place. The binding synchronizes.
     """
     ...
 

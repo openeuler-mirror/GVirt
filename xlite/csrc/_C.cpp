@@ -2122,10 +2122,13 @@ void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &
 void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &weight,
                  at::Tensor &indices, at::Tensor &topkIndices, at::Tensor &queryStartLoc,
                  at::Tensor &lens, at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads,
-                 uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t topK)
+                 uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t topK,
+                 std::optional<at::Tensor> kScaleCache = std::nullopt)
 {
     XTensor _q, _kCache, _weight, _indices, _topkIndices, _queryStartLoc, _lens, _cachedLens,
-        _blockTables;
+        _blockTables, _ks;
+    if (kScaleCache)
+        InitXTensor(_ks, *kScaleCache);
 
     InitXTensor(_q, q);
     InitXTensor(_kCache, kCache);
@@ -2137,15 +2140,15 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
 
-    XTensor &scores =
-        rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN}, XDtypeOf(q), DBG_LOC);
+    XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
+                                   q.scalar_type() == at::kChar ? FP32 : XDtypeOf(q), DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({_q.shape[0], 2 * topK}, INT32, DBG_LOC);
     XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
     sync.Memset(0, rt.stream);
 
     XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, _indices, _topkIndices,
                        _queryStartLoc, _lens, _cachedLens, _blockTables, sync, nHeads, headDim,
-                       blockSize, batch, topK);
+                       blockSize, batch, topK, _ks);
     rt.Synchronize();
     rt.PutTensor(sync);
     rt.PutTensor(lastTopk);
@@ -2965,7 +2968,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("weight"), py::arg("indices"), py::arg("topk_indices"),
           py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"),
           py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"), py::arg("block_size"),
-          py::arg("batch"), py::arg("top_k"));
+          py::arg("batch"), py::arg("top_k"), py::arg("k_scale_cache") = py::none());
     m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"),
           py::arg("calc_offset") = 0, py::arg("calc_num") = UINT32_MAX);
     m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),

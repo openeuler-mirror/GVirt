@@ -14,7 +14,7 @@
 #error "INDEXER_KV_TILE_LEN must not exceed MAX_INDEXER_KV_TILE_LEN"
 #endif
 
-template <typename Dtype>
+template <typename Dtype, typename MatDtype, typename WeightDtype, typename ScoreDtype>
 class IndexerTopK
 {
 public:
@@ -27,12 +27,13 @@ public:
                                 GM_ADDR scores, GM_ADDR lastTopk, GM_ADDR indices,
                                 GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads,
                                 uint32_t headDim, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlock, uint32_t topK)
+                                uint32_t maxNumBlock, uint32_t topK, GM_ADDR kScaleCache = nullptr)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
         this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
-        this->weight.SetGlobalBuffer((__gm__ Dtype *)weight);
+        this->weight.SetGlobalBuffer((__gm__ WeightDtype *)weight);
+        this->kScaleCache = (__gm__ half *)kScaleCache;
         this->queryStartLoc = (__gm__ int32_t *)queryStartLoc;
         this->queryLens = (__gm__ int32_t *)queryLens;
         this->cachedLens = (__gm__ int32_t *)cachedLens;
@@ -55,9 +56,9 @@ public:
         this->waitPrevGeneration = 1;
         this->resetPrevCore = 0;
 
-        this->scores[0].SetGlobalBuffer(((__gm__ Dtype *)scores) +
+        this->scores[0].SetGlobalBuffer(((__gm__ ScoreDtype *)scores) +
                                         block_idx * XLITE_MAX_M0 * tileSizeOfCachedKV);
-        this->scores[1].SetGlobalBuffer(((__gm__ Dtype *)scores) +
+        this->scores[1].SetGlobalBuffer(((__gm__ ScoreDtype *)scores) +
                                         block_idx * XLITE_MAX_M0 * tileSizeOfCachedKV +
                                         block_num * XLITE_MAX_M0 * tileSizeOfCachedKV);
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
@@ -90,12 +91,12 @@ public:
             off += ql1Size;
         }
 
-        uint64_t wl1Size = XLITE_MAX_M0 * nHeads * sizeof(Dtype);
+        uint64_t wl1Size = XLITE_MAX_M0 * nHeads * sizeof(WeightDtype);
         wl1Buf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
         wl1Buf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += wl1Size;
 
-        uint64_t kql1Size = blockSize * MAX_N0 * sizeof(Dtype);
+        uint64_t kql1Size = blockSize * MAX_N0 * sizeof(WeightDtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             kql1Buf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             kql1Buf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
@@ -103,10 +104,13 @@ public:
         }
 
         off = 0;
+        // QK and weighted scores reuse the same L0A/L0B storage in sequential phases.
         uint64_t l0aSize = XLITE_MAX_M0 * k0 * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
             l0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            wl0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
+            wl0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += l0aSize;
         }
 
@@ -115,10 +119,15 @@ public:
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
             l0bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            kql0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
+            kql0bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += l0bSize;
         }
 
         off = 0;
+        // QK and weighted scores reuse the same L0C storage in sequential phases.
+        qkl0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
+        qkl0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
 #endif
@@ -134,10 +143,13 @@ public:
         off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
 
         // in
-        this->in[0] = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-        this->in[1] = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
+        this->in[0] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(WeightDtype), VECTOR_MAX_BYTESIZE);
+        this->in[1] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
+        // C8 uses in[0] for K scales; in[1] is unused.
+        if constexpr (!std::is_same<Dtype, int8_t>::value) {
+            off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(WeightDtype), VECTOR_MAX_BYTESIZE);
+        }
         this->lastSort[0] = reinterpret_cast<__ubuf__ float *>(off);
         off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
         this->lastSort[1] = reinterpret_cast<__ubuf__ float *>(off);
@@ -196,9 +208,9 @@ public:
 
 #ifdef __DAV_C220_CUBE__
     __aicore__ inline void RunAicIndexerScores(GlobalTensor<Dtype> query,
-                                               GlobalTensor<Dtype> weight, int queryLen,
+                                               GlobalTensor<WeightDtype> weight, int queryLen,
                                                __gm__ uint32_t *blockTable, int kvOffset, int kvLen,
-                                               GlobalTensor<Dtype> scores)
+                                               GlobalTensor<ScoreDtype> scores)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mIdxStart = kvOffset / blockSize;
@@ -217,12 +229,15 @@ public:
         int wnSize = blockSize;
         int wnBlockPad = ROUND_UP(wnSize, NBLOCKSIZE);
         int wnBlockNum = wnBlockPad / NBLOCKSIZE;
-        int wkBlockNum = nHeads / kBlockSize;
+        constexpr int weightBlockSize = 32 / sizeof(WeightDtype);
+        int wkBlockNum = nHeads / weightBlockSize;
 
         // copy weight (queryTaskLen, nHeads) to L1
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
-        CopyGmToL1Nd2Nz(wl1Buf, weight, wmSize, nHeads, (headDim + nHeads), wmBlockPad);
+        CopyGmToL1Nd2Nz(wl1Buf, weight, wmSize, nHeads,
+                        std::is_same<Dtype, int8_t>::value ? nHeads : (headDim + nHeads),
+                        wmBlockPad);
         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
 
@@ -272,7 +287,7 @@ public:
 
             // mmad scores (blockSize, queryTaskLen, nHeads)
             WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
-            CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, headDim, true);
+            CalMmad(qkl0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, headDim, true);
             if (mBlockNum * nBlockNum < 10) {
                 PipeBarrier<PIPE_M>();
             }
@@ -283,8 +298,14 @@ public:
 
             // copy scores (blockSize, queryTaskLen, nHeads) from L0C to L1 with ReLU filter.
             WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID0 + curr);
-            CopyL0CToL1(kql1Buf[curr], l0cBuf, mBlockPad, nBlockPad, mBlockPad,
-                        mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE, /*reluEn=*/1);
+            if constexpr (std::is_same<Dtype, int8_t>::value) {
+                // LI rounding: FP16(relu(INT32 dot) / 1024).
+                CopyL0CToL1(kql1Buf[curr], qkl0cBuf, mBlockPad, nBlockPad, mBlockPad, mBlockPad,
+                            1.0f / 1024.0f, true);
+            } else {
+                CopyL0CToL1(kql1Buf[curr], qkl0cBuf, mBlockPad, nBlockPad, mBlockPad,
+                            mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE, /*reluEn=*/1);
+            }
             SetFlag<HardEvent::FIX_M>(EVENT_ID0);
 
             SetFlag<HardEvent::FIX_MTE1>(EVENT_ID0 + curr);
@@ -293,17 +314,18 @@ public:
             for (int q = 0; q < queryLen; q++) {
                 // copy weight (1, nHeads) to L0A
                 WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-                CopyToL0ACol(l0aBuf[curr], wl1Buf[0][q * kBlockSize], 1, 0, wkBlockNum);
+                CopyToL0ACol(wl0aBuf[curr], wl1Buf[q * weightBlockSize], 1, 0, wkBlockNum);
                 // copy scores (blockSize, nHeads) to L0B
-                CopyToL0BCol(l0bBuf[curr], kql1Buf[curr][q * mBlockPad * nHeads], wnBlockNum, 0,
-                             wkBlockNum);
+                CopyToL0BCol(kql0bBuf[curr], kql1Buf[curr][q * mBlockPad * nHeads], wnBlockNum,
+                             0, wkBlockNum);
 
                 SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
 
                 // mmad index_scores (1, blockSize)
                 WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
-                CalMmad(l0cBuf, l0aBuf[curr], l0bBuf[curr], MBLOCKSIZE, wnBlockPad, nHeads, true);
+                CalMmad(l0cBuf, wl0aBuf[curr], kql0bBuf[curr], MBLOCKSIZE, wnBlockPad, nHeads,
+                        true);
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
                 if (wnBlockNum < 10) {
                     PipeBarrier<PIPE_M>();
@@ -333,16 +355,22 @@ public:
 #endif
 
 #ifdef __DAV_C220_VEC__
-    __aicore__ inline void RunAivTopk(__gm__ Dtype *scores, __gm__ uint32_t *lastTopk,
+    __aicore__ inline void RunAivTopk(__gm__ ScoreDtype *scores, __gm__ uint32_t *lastTopk,
                                       __gm__ uint32_t *indices, int queryLen, int kvOffset,
                                       int kvLen, uint32_t topK, __gm__ uint32_t *topkIndices,
-                                      int queryPosBase)
+                                      int queryPosBase, __gm__ uint32_t *blockTable)
     {
+        if constexpr (std::is_same<Dtype, int8_t>::value) {
+            // A mixed query tile can give one AIV only dense rows.
+            if (queryPosBase + queryLen <= topK) {
+                return;
+            }
+        }
         assert(kvLen <= MAX_INDEXER_KV_TILE_LEN && topK <= MAX_TOPK_NUM &&
                topK <= queryPosBase + queryLen);
         constexpr float min = FLOAT_MIN;
 
-        constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
+        constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(WeightDtype);
         constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
         int topKSortRepeat = DIV_ROUND_UP(topK, SORT_BLOCK_SIZE);
 
@@ -356,6 +384,11 @@ public:
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
         for (int idx = 0; idx < queryLen; idx++) {
             int p0 = queryPosBase + idx;  // position of the current token in the sequence
+            if constexpr (std::is_same<Dtype, int8_t>::value) {
+                if (p0 < topK) {
+                    continue;
+                }
+            }
             int validKvLen = MIN(p0 - kvOffset + 1, kvLen);  // per position valid kvLen
             if (validKvLen <= 0) {  // the last kv chunk should have concluded the topK merge
                 continue;
@@ -385,12 +418,40 @@ public:
 
             // copy scores to in
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);  // acquire `in[curr]`
-            CopyGmToUbufAligned(in[curr], scores + idx * tileSizeOfCachedKV,
-                                validKvLen * sizeof(Dtype));
+            if constexpr (std::is_same<Dtype, int8_t>::value) {
+                // Wait until the previous row releases mrgSortBuf0.
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
+                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
+                CopyGmToUbufAligned(mrgSortBuf0, scores + idx * tileSizeOfCachedKV,
+                                    validKvLen * sizeof(float));
+                for (int start = 0; start < validKvLen; start += blockSize) {
+                    int count = MIN(int(blockSize), validKvLen - start);
+                    uint32_t block = blockTable[(kvOffset + start) / blockSize];
+                    CopyGmToUbufAligned(in[0] + start, kScaleCache + block * blockSize,
+                                        count * sizeof(half));
+                }
+            } else {
+                CopyGmToUbufAligned(in[curr], scores + idx * tileSizeOfCachedKV,
+                                    validKvLen * sizeof(Dtype));
+            }
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
-            // convert in to float
-            convert_input(mrgSortBuf0, in[curr], fullRepeat, validKvLen % calcPad);
+            // Prepare FP32 scores.
+            if constexpr (std::is_same<Dtype, int8_t>::value) {
+                vconv_f162f32(mrgSortBuf1, in[0], repeat, 1, 1, 8, 4);
+                pipe_barrier(PIPE_V);
+                vmul(mrgSortBuf0, mrgSortBuf0, mrgSortBuf1, repeat, 1, 1, 1, 8, 8, 8);
+                // Restore the sort padding after DMA and rescaling.
+                int remain = validKvLen % calcPad;
+                if (remain != 0) {
+                    pipe_barrier(PIPE_V);
+                    SetMaskFromHighBit(calcPad, calcPad - remain);
+                    vector_dup(mrgSortBuf0 + fullRepeat * calcPad, float(min), 1, 1, 1, 8, 0);
+                    set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                }
+            } else {
+                convert_input(mrgSortBuf0, in[curr], fullRepeat, validKvLen % calcPad);
+            }
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);  // release `in[curr]`
 
             // sort local
@@ -569,7 +630,9 @@ public:
                 }
 #ifdef __DAV_C220_CUBE__
                 uint32_t qOffset = queryTaskOffset * nHeads * headDim;
-                uint32_t wOffset = queryTaskOffset * (headDim + nHeads) + headDim;
+                uint32_t wOffset = std::is_same<Dtype, int8_t>::value
+                                       ? queryTaskOffset * nHeads
+                                       : queryTaskOffset * (headDim + nHeads) + headDim;
                 dbg_printf("block%d: {batch %d, query start loc %u, query [%u - %u), index k [%u - "
                            "%u)} use %d buf\n",
                            blockIdx, batchIdx, queryStart, queryOffset, queryOffset + queryTaskLen,
@@ -594,9 +657,9 @@ public:
                            queryOffset + nWorkStart + nWorkCurCore, kvOffset, kvOffset + kvLen,
                            curr);
                 RunAivTopk(
-                    (__gm__ Dtype *)scores[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
+                    (__gm__ ScoreDtype *)scores[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
                     lastTopk + outOffset * 2, indices, nWorkCurCore, kvOffset, kvLen, topK,
-                    topkIndices + outOffset, queryPosBase + nWorkStart);
+                    topkIndices + outOffset, queryPosBase + nWorkStart, blockTable);
                 ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[curr]);
 #endif
                 curr = 1 - curr;
@@ -617,8 +680,9 @@ public:
 private:
     GlobalTensor<Dtype> q;
     GlobalTensor<Dtype> kCache;
-    GlobalTensor<Dtype> weight;
-    GlobalTensor<Dtype> scores[PINGPONG_BUF_NUM];
+    GlobalTensor<WeightDtype> weight;
+    GlobalTensor<ScoreDtype> scores[PINGPONG_BUF_NUM];
+    __gm__ half *kScaleCache;
     __gm__ int32_t *setNextSync;
     __gm__ int32_t *waitPrevSync;
     __gm__ int32_t *queryStartLoc;
@@ -646,13 +710,16 @@ private:
 #ifdef __DAV_C220_CUBE__
     LocalTensor<Dtype> kl1Buf[PINGPONG_BUF_NUM];   // event 0/1
     LocalTensor<Dtype> ql1Buf[PINGPONG_BUF_NUM];   // event 2/3
-    LocalTensor<Dtype> wl1Buf;                     // event 4
-    LocalTensor<Dtype> kql1Buf[PINGPONG_BUF_NUM];  // event 0/1
+    LocalTensor<WeightDtype> wl1Buf;                // event 4
+    LocalTensor<WeightDtype> kql1Buf[PINGPONG_BUF_NUM];  // event 0/1
     LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];   // event 0/1
     LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];
+    LocalTensor<WeightDtype> wl0aBuf[PINGPONG_BUF_NUM];  // event 0/1
+    LocalTensor<WeightDtype> kql0bBuf[PINGPONG_BUF_NUM];
+    LocalTensor<MatDtype> qkl0cBuf;  // event 0, shares storage with l0cBuf
     LocalTensor<float> l0cBuf;  // event 0
 #elif __DAV_C220_VEC__
-    __ubuf__ Dtype *in[PINGPONG_BUF_NUM];
+    __ubuf__ WeightDtype *in[PINGPONG_BUF_NUM];
     __ubuf__ float *lastSort[PINGPONG_BUF_NUM];
     __ubuf__ uint32_t *out[PINGPONG_BUF_NUM];
     __ubuf__ float *mrgSortBuf0;
@@ -671,9 +738,24 @@ private:
         GM_ADDR indices, GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads, uint32_t headDim, \
         uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK)               \
     {                                                                                          \
-        IndexerTopK<dtype> op;                                                                 \
+        IndexerTopK<dtype, float, dtype, dtype> op;                                            \
         op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,  \
                 lastTopk, indices, topkIndices, sync, nHeads, headDim, blockSize, batch,       \
                 maxNumBlock, topK);                                                            \
         op.Run();                                                                              \
+    }
+
+#define INDEXER_TOPK_C8_FUNC_DEFINE(dtype)                                                       \
+    extern "C" __global__ __aicore__ void indexer_topk_##dtype(                                  \
+        GM_ADDR q, GM_ADDR k_cache, GM_ADDR weight, GM_ADDR query_start_loc, GM_ADDR query_lens, \
+        GM_ADDR cached_lens, GM_ADDR block_tables, GM_ADDR scores, GM_ADDR last_topk,            \
+        GM_ADDR indices, GM_ADDR topk_indices, GM_ADDR sync, uint32_t heads, uint32_t dim,       \
+        uint32_t block_size, uint32_t batch, uint32_t max_blocks, uint32_t topk,                 \
+        GM_ADDR k_scale_cache)                                                                   \
+    {                                                                                            \
+        IndexerTopK<dtype, int32_t, half, float> op;                                              \
+        op.Init(q, k_cache, weight, query_start_loc, query_lens, cached_lens, block_tables,      \
+                scores, last_topk, indices, topk_indices, sync, heads, dim, block_size, batch,   \
+                max_blocks, topk, k_scale_cache);                                                \
+        op.Run();                                                                                \
     }
