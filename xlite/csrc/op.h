@@ -153,7 +153,8 @@ void XliteOpSoftmaxLong(XRuntime &rt, uint32_t calcLen, XTensor &x, XTensor &exp
 void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t outStepDim,
                         uint32_t ropeDim, uint32_t offset, uint32_t outOffset, XTensor &inputWithR,
                         XTensor &freqs, XTensor &position, XTensor &output, bool inverse = false,
-                        bool outInterleaved = false, bool doRotate = false);
+                        bool outInterleaved = false, uint64_t minPosition = 0,
+                        bool doRotate = false);
 void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim,
                                 uint32_t ropeDim, uint32_t offset, uint32_t vdim,
                                 XTensor &inputWithR, XTensor &freqs, XTensor &position,

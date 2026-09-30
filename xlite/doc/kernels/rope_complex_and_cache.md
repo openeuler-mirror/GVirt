@@ -33,6 +33,7 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 | block_size | 标量 | - | uint32 | cache 块大小;非 0 且 vcache/slot_mapping 非空时启用 cache 写入([csrc/kernels/rope_complex_and_cache.h:22-25](../../csrc/kernels/rope_complex_and_cache.h#L22-L25)) |
 | inverse | 标量 | - | bool | 逆向旋转(共轭),kernel 内按 `±` 选择 vadd/vsub 方向 |
 | out_interleaved | 标量 | - | bool | 输出交错布局开关 |
+| minPosition | 标量(内核参数,host 不透传) | - | uint64 | 非 cache 模式下跳过 `position < minPosition` 的行(不搬入、不旋转、不写回;[csrc/kernels/rope_complex_and_cache.h:27-28,166-169](../../csrc/kernels/rope_complex_and_cache.h#L27-L28))。cache 模式强制归零(写 cache 的行不可跳)。调用方 `indexer_prepare` 传 `top_k` 跳过稠密注意力 token 的 Q-RoPE |
 
 ## 支持的数据类型
 

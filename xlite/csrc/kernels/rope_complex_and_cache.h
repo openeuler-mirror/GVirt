@@ -13,8 +13,8 @@ __aicore__ __inline__ void rope_complex_and_cache(
     uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim, uint32_t offset,
     uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, uint32_t outOffset,
     GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size, GM_ADDR vcache, GM_ADDR slot_mapping,
-    bool inverse, bool outInterleaved, int coreOffset = 0, int *nextCoreOffset = nullptr,
-    bool doRotate = false, float rotateScale = 1.0f)
+    bool inverse, bool outInterleaved, uint64_t minPosition = 0, int coreOffset = 0,
+    int *nextCoreOffset = nullptr, bool doRotate = false, float rotateScale = 1.0f)
 {
     set_atomic_none();
     set_mask_norm();
@@ -24,6 +24,8 @@ __aicore__ __inline__ void rope_complex_and_cache(
     if (need_v_cache) {
         assert(nLocalHeads == 1);
     }
+    // skip rope computation for positions below minPosition when caching is not needed
+    minPosition = need_v_cache ? 0 : minPosition;
 
     int ropeDtypeBytes = ropeDim * sizeof(Dtype);
     int vCacheBytes = vdim * sizeof(Dtype);
@@ -161,6 +163,10 @@ __aicore__ __inline__ void rope_complex_and_cache(
             wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
             baseTokenIdx = token_idx;
         }
+        uint64_t pos_per_row = positionUB[token_idx - baseTokenIdx];
+        if (pos_per_row < minPosition) {  // skip rope computation for positions below minPosition
+            continue;
+        }
 
         // rope source/output point at the rope region within the head.
         UBA(Dtype) ropeIn = fullHeadLoad ? inputs[curr] + offset : inputs[curr];
@@ -168,8 +174,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
         auto *input_gm =
             (__gm__ Dtype *)(input_ptr) + token_idx * totalShape1 + (fullHeadLoad ? 0 : offset);
         auto *output_gm = (__gm__ Dtype *)(output_ptr) + token_idx * totalOutShape1 + outOffset;
-        auto *freqs_gm =
-            (__gm__ float *)(freqs_ptr) + positionUB[token_idx - baseTokenIdx] * ropeDim;
+        auto *freqs_gm = (__gm__ float *)(freqs_ptr) + pos_per_row * ropeDim;
 
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
         // input GM -> UB
@@ -354,12 +359,12 @@ __aicore__ __inline__ void rope_complex_and_cache(
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
         GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved,           \
-        uint32_t doRotate, float rotateScale)                                                      \
+        uint64_t minPosition, uint32_t doRotate, float rotateScale)                                \
     {                                                                                              \
         rope_complex_and_cache<dtype>(                                                             \
             nTokens, nLocalHeads, shape1, ropeDim, offset, vdim, input_ptr, output_ptr, outShape1, \
             outOffset, freqs_ptr, position, block_size, vcache, slot_mapping, inverse != 0,        \
-            outInterleaved != 0, 0, nullptr, doRotate != 0, rotateScale);                          \
+            outInterleaved != 0, minPosition, 0, nullptr, doRotate != 0, rotateScale);             \
     }
 #else
 #define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                      \
@@ -368,7 +373,7 @@ __aicore__ __inline__ void rope_complex_and_cache(
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
         GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved,           \
-        uint32_t doRotate, float rotateScale)                                                      \
+        uint64_t minPosition, uint32_t doRotate, float rotateScale)                                \
     {                                                                                              \
     }
 #endif
