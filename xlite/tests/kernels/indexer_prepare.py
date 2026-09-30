@@ -112,8 +112,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
         freqs_cis = freqs_cis.unsqueeze(-2)
     freqs_cis = freqs_cis.expand_as(x).to(x.dtype)
     y = torch.view_as_real(x * freqs_cis)
-    # interleave real/imag back to (x0', x1', x2', x3', ...)
-    y = torch.cat([y[..., 0], y[..., 1]], dim=-1)
+    y = y.reshape(*y.shape[:-2], -1)
     return y.to(dtype)
 
 
