@@ -18,9 +18,11 @@ using namespace AscendC;
 
 #define ROUND_DOWN(x, y) (((x) / (y)) * (y))
 #define ROUND_UP(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
+#define NEXT_MULTIPLE(x, y) ((x) / (y) + 1) * (y)
 #define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define CLIP(x, minVal, maxVal) ((x) < (minVal) ? (minVal) : ((x) > (maxVal) ? (maxVal) : (x)))
 
 #define BLOCK_SIZE 32
 #define VECTOR_MAX_REPEAT 255
@@ -240,7 +242,8 @@ __aicore__ inline void CalMmadWithBias(const LocalTensor<MatDtype> &c, const Loc
 
 template <typename Dtype>
 __aicore__ inline void CopyL0CToL1(const LocalTensor<Dtype> &dst, const LocalTensor<float> &src,
-                                   int mSize, int nSize, int srcStride, int dstStride)
+                                   int mSize, int nSize, int srcStride, int dstStride,
+                                   uint8_t reluEn = 0)
 {
     QuantMode_t mode;
     if constexpr (std::is_same<Dtype, float>::value) {
@@ -250,7 +253,7 @@ __aicore__ inline void CopyL0CToL1(const LocalTensor<Dtype> &dst, const LocalTen
     } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
         mode = F322BF16;
     }
-    DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, 0, 0, 0);
+    DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, mode, reluEn, 0, 0);
     DataCopy(dst, src, param);
 }
 
@@ -755,44 +758,80 @@ __inline__ __aicore__ void ReduceSum(__ubuf__ Dtype *dst, __ubuf__ Dtype *src, u
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 }
 
-__inline__ __aicore__ void MrgSort(__ubuf__ float *sort0, __ubuf__ float *sort1, int vbitsortRepeat,
-                                   int *dstBufIdx)
+/** Merge sort
+ * @brief Merge sort the results from `vbitsort` to get the final `topK` results.
+ *
+ * @param sort0: immediate results from `vbitsort` - with `vbitsortRepeat` blocks of 32 elements
+ * @param sort1: buffer for intermediate/final; same size as `sort0`
+ * @param vbitsortRepeat: number of blocks of 32 elements from `vbitsort` (regional proposal)
+ * @param dstBufIdx: the index of the final sorted results in `sort0` or `sort1`
+ * @param topK: number of top K elements to sort out (0 means all elements)
+ */
+__inline__ __aicore__ void MrgSort(__ubuf__ float *sort0, __ubuf__ float *sort1,
+                                   uint32_t vbitsortRepeat, uint32_t *dstBufIdx, uint32_t topK = 0)
 {
+    if (vbitsortRepeat <= 1) {
+        *dstBufIdx = 0;
+        return;
+    }
     __ubuf__ float *mrgSortBuf[2] = {sort0, sort1};
-    constexpr float min = FLOAT_MIN;
-    int pad = VECTOR_MAX_BYTESIZE / sizeof(float);
-    uint64_t len = SORT_BLOCK_SIZE;
-    int cnt = 4;
-    int sortRepeat = vbitsortRepeat;
-    int bufIdx = 0;
-    uint64_t validBit = 0xF;
+    uint64_t sortRepeat = vbitsortRepeat;     // number of regional proposals to sort
+    uint64_t lenPerRepeat = SORT_BLOCK_SIZE;  // number of elements per regional proposal (RP)
+    uint64_t sortLen = vbitsortRepeat * SORT_BLOCK_SIZE;  // total number of elements to sort
+    topK = (topK == 0 || topK > sortLen) ? sortLen : ROUND_UP(topK, BLOCK_SIZE);  /// top k to find
+    uint32_t bufIdx = 0;
+    uint64_t lenPerRepeatNext = 0;  // lenPerRepeat for the next iteration
     while (sortRepeat > 1) {
-        __ubuf__ float *addr = mrgSortBuf[bufIdx];
-        if (sortRepeat <= 2) {
-            cnt = 2;
-            validBit = 0x3;
-        } else if (sortRepeat <= 3) {
-            cnt = 3;
-            validBit = 0x7;
-        } else if (sortRepeat % cnt != 0) {
-            set_vector_mask(0xAAAAAAAAAAAAAAAA, 0xAAAAAAAAAAAAAAAA);
-            vector_dup(addr + sortRepeat * len * 2, 0,
-                       DIV_ROUND_UP((cnt - sortRepeat % cnt) * len * 2, pad), 1, 1, 8, 0);
-            set_vector_mask(0x5555555555555555, 0x5555555555555555);
-            vector_dup(addr + sortRepeat * len * 2, float(min),
-                       DIV_ROUND_UP((cnt - sortRepeat % cnt) * len * 2, pad), 1, 1, 8, 0);
-            pipe_barrier(PIPE_V);
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        __ubuf__ float *srcAddr = mrgSortBuf[bufIdx];
+        __ubuf__ float *dstAddr = mrgSortBuf[1 - bufIdx];
+        sortRepeat = sortLen / (lenPerRepeat * 4);  // full RPs for the next iteration
+
+        uint64_t topLen = MIN(lenPerRepeat, topK);
+        if (sortRepeat > 0) {
+            uint64_t stride = sortRepeat * lenPerRepeat * 2;
+            __ubuf__ float *addrs[4] = {srcAddr, srcAddr + stride, srcAddr + 2 * stride,
+                                        srcAddr + 3 * stride};
+            uint64_t firstLen = sortRepeat > 1 ? lenPerRepeat : topLen;
+            vmrgsort4(dstAddr, addrs, firstLen | (topLen << 16) | (topLen << 32) | (topLen << 48),
+                      sortRepeat | (0xFull << MGR_SORT_VALID_BITS_OFFSET));
+            lenPerRepeatNext = firstLen + topLen * 3;  // lenPerRepeat for the next iter
         }
-        int stride = len * 2;
-        __ubuf__ float *addrs[4] = {addr, addr + stride, addr + 2 * stride, addr + 3 * stride};
-        uint64_t lens = len | len << 16 | len << 32 | len << 48;
-        sortRepeat = DIV_ROUND_UP(sortRepeat, cnt);
-        uint64_t config = sortRepeat | validBit << MGR_SORT_VALID_BITS_OFFSET;
+
+        uint64_t remainedLen = sortLen - sortRepeat * lenPerRepeat * 4;
+        sortLen = sortRepeat * lenPerRepeatNext;  // sortLen for the next iter in dstAddr
+        if (remainedLen > 0) {
+            uint64_t remainedRepeat = DIV_ROUND_UP(remainedLen, lenPerRepeat);
+            uint64_t remainedFullRepeat = remainedLen / lenPerRepeat;
+            uint64_t lastLen = MIN(remainedLen % lenPerRepeat, topLen);
+            sortLen += remainedFullRepeat * topLen + lastLen;  // for the next iteration
+            lastLen = (lastLen == 0) ? topLen : lastLen;       // for the last RP (partial or full)
+
+            srcAddr += sortRepeat * lenPerRepeat * 8;  // 8 = 4 * 2 (4RPs to 1RP， 2 floats per ele)
+            dstAddr += sortRepeat * lenPerRepeatNext * 2;
+            if (remainedRepeat == 1) {  // `sortRepeat > 0` is guaranteed here
+                copy_ubuf_to_ubuf(dstAddr, srcAddr, 0, 1,
+                                  DIV_ROUND_UP(lastLen * 2 * sizeof(float), BLOCK_SIZE), 0, 0);
+            } else if (remainedRepeat == 2) {
+                __ubuf__ float *addrs[2] = {srcAddr, srcAddr + lenPerRepeat * 2};
+                vmrgsort4(dstAddr, addrs, topLen | (lastLen << 16),
+                          1ull | (0x3ull << MGR_SORT_VALID_BITS_OFFSET));
+            } else if (remainedRepeat == 3) {
+                __ubuf__ float *addrs[3] = {srcAddr, srcAddr + lenPerRepeat * 2,
+                                            srcAddr + lenPerRepeat * 4};
+                vmrgsort4(dstAddr, addrs, topLen | (topLen << 16) | (lastLen << 32),
+                          1ull | (0x7ull << MGR_SORT_VALID_BITS_OFFSET));
+            } else {
+                __ubuf__ float *addrs[4] = {srcAddr, srcAddr + lenPerRepeat * 2,
+                                            srcAddr + lenPerRepeat * 4, srcAddr + lenPerRepeat * 6};
+                vmrgsort4(dstAddr, addrs,
+                          topLen | (topLen << 16) | (topLen << 32) | (lastLen << 48),
+                          1ull | (0xFull << MGR_SORT_VALID_BITS_OFFSET));
+            }
+            sortRepeat++;  // one more partial regional proposal for the next iteration
+        }
+        lenPerRepeat = lenPerRepeatNext;  // lenPerRepeat for the next iteration
         bufIdx = 1 - bufIdx;
-        vmrgsort4(mrgSortBuf[bufIdx], addrs, lens, config);
         pipe_barrier(PIPE_V);
-        len *= cnt;
     }
     *dstBufIdx = bufIdx;
 }
@@ -849,22 +888,48 @@ __aicore__ inline void CopyUbufToGmAligned(__gm__ DstT *dst, __ubuf__ SrcT *src,
 }
 
 template <typename Dtype>
-__aicore__ inline void convert_input(__ubuf__ float *dst, __ubuf__ Dtype *src, uint64_t repeat)
+__aicore__ inline void convert_input(__ubuf__ float *dst, __ubuf__ Dtype *src, uint16_t fullRepeat,
+                                     uint16_t tailLen = 0)
 {
     if constexpr (std::is_same_v<Dtype, float16_t>) {
-        vconv_f162f32(dst, src, repeat, 1, 1, 8, 4);
+        vconv_f162f32(dst, src, fullRepeat, 1, 1, 8, 4);
+        if (tailLen > 0) {
+            SetMask(tailLen);
+            vconv_f162f32(dst + fullRepeat * VECTOR_MAX_NUM_OF_FP32,
+                          src + fullRepeat * VECTOR_MAX_NUM_OF_FP32, 1, 1, 1, 8, 4);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
     } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-        vconv_bf162f32(dst, src, repeat, 1, 1, 8, 4);
+        vconv_bf162f32(dst, src, fullRepeat, 1, 1, 8, 4);
+        if (tailLen > 0) {
+            SetMask(tailLen);
+            vconv_bf162f32(dst + fullRepeat * VECTOR_MAX_NUM_OF_FP32,
+                           src + fullRepeat * VECTOR_MAX_NUM_OF_FP32, 1, 1, 1, 8, 4);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
     }
 }
 
 template <typename Dtype>
-__aicore__ inline void convert_output(__ubuf__ Dtype *dst, __ubuf__ float *src, uint64_t repeat)
+__aicore__ inline void convert_output(__ubuf__ Dtype *dst, __ubuf__ float *src, uint16_t fullRepeat,
+                                      uint16_t tailLen = 0)
 {
     if constexpr (std::is_same_v<Dtype, float16_t>) {
-        vconv_f322f16(dst, src, repeat, 1, 1, 4, 8);
+        vconv_f322f16(dst, src, fullRepeat, 1, 1, 4, 8);
+        if (tailLen > 0) {
+            SetMask(tailLen);
+            vconv_f322f16(dst + fullRepeat * VECTOR_MAX_BYTESIZE / sizeof(Dtype),
+                          src + fullRepeat * VECTOR_MAX_BYTESIZE / sizeof(float), 1, 1, 1, 8, 4);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
     } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-        vconv_f322bf16r(dst, src, repeat, 1, 1, 4, 8);
+        vconv_f322bf16r(dst, src, fullRepeat, 1, 1, 4, 8);
+        if (tailLen > 0) {
+            SetMask(tailLen);
+            vconv_f322bf16r(dst + fullRepeat * VECTOR_MAX_BYTESIZE / sizeof(Dtype),
+                            src + fullRepeat * VECTOR_MAX_BYTESIZE / sizeof(float), 1, 1, 1, 8, 4);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        }
     }
 }
 

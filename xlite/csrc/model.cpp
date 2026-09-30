@@ -242,10 +242,10 @@ void XModel::Init(void)
         }
     }
 
-    size = AIC_MAX_NUM;
+    size = DIV_ROUND_UP(AIV_MAX_NUM * XDtypeBit(INT32), 8);
     CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
     CHECK_ACL(aclrtMemset(ptr, size, 0, size));
-    _sync.Init({AIC_MAX_NUM}, INT32, ptr);
+    _sync.Init({AIV_MAX_NUM}, INT32, ptr);
 
     _mropeMaskH = 0;
     _mropeMaskW = 0;

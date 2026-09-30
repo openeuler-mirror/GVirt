@@ -209,7 +209,7 @@ public:
                 // copy scores (kvLen, queryTaskLen, nHeads) from L0C to L1
                 WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID0 + curr);
                 CopyL0CToL1(kql1Buf[curr], l0cBuf, mBlockPad, nBlockPad, mBlockPad,
-                            mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE);
+                            mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE, /*reluEn=*/1);
                 SetFlag<HardEvent::FIX_M>(EVENT_ID0);
 
                 SetFlag<HardEvent::FIX_MTE1>(EVENT_ID0 + curr);
