@@ -104,6 +104,13 @@ __aicore__ void norm_ropex_cache_muls(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, 
         reinterpret_cast<UBA(float)>(off + UB_BANK_CONFLICT_OFFSET);  // group 8 or 0
     off += rope_size_row;
 
+    // Indexer K RoPE must be interleaved ([r0,i0,r1,i1,...]) to match vllm SFA's non-NeoX
+    // RoPE layout for glm_moe_dsa.
+    __ubuf__ float *rope_scratch = reinterpret_cast<UBA(float)>(off + UB_BANK_CONFLICT_OFFSET);
+    off += rope_size_row;
+    __ubuf__ uint32_t *vgather_indices = reinterpret_cast<UBA(uint32_t)>(off);
+    off += rope_size_row;
+
     // TODO: optimize for bank conflict
     uint32_t calc_size_row =
         ROUND_UP(calc_dim * sizeof(float) + UB_BANK_CONFLICT_OFFSET, UB_BANKGROUP_ROW_SIZE);
@@ -180,6 +187,20 @@ __aicore__ void norm_ropex_cache_muls(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID3);  // copy in -> freqs
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);  // copy out <- out
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);  // copy out <- out
+
+    // Fill the vgather index table once: indices[2k]=k*4 (real[k]), indices[2k+1]=(half+k)*4
+    // (imag[k]); vgather interleaves half-split [real|imag] -> [r0,i0,r1,i1,...].
+    set_flag(PIPE_V, PIPE_S, EVENT_ID4);
+    wait_flag(PIPE_V, PIPE_S, EVENT_ID4);
+    {
+        uint32_t half_rope = rope_dim / 2;
+        for (uint32_t k = 0; k < half_rope; k++) {
+            vgather_indices[2 * k] = (uint32_t)(k * sizeof(float));
+            vgather_indices[2 * k + 1] = (uint32_t)((half_rope + k) * sizeof(float));
+        }
+    }
+    set_flag(PIPE_S, PIPE_V, EVENT_ID4);
+    wait_flag(PIPE_S, PIPE_V, EVENT_ID4);
 
     uint32_t ub_pos_start = 0, ub_pos_end = 0;  // end is exclusive
     uint32_t irow_end = MIN(n_rows, (rel_block_idx + 1) * n_rows_per_core);
@@ -319,12 +340,20 @@ __aicore__ void norm_ropex_cache_muls(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, 
         vmul(calc_odd_cos, cos_float, in_odd, 1, 1, 1, 1, half_rope_blocks, half_rope_blocks, 0);
         pipe_barrier(PIPE_V);
         // real : x[0::2] * cos - x[1::2] * sin
-        vsub(out_float, calc_even_cos, calc_odd_sin, 1, 1, 1, 1, rope_blocks, half_rope_blocks,
+        vsub(rope_scratch, calc_even_cos, calc_odd_sin, 1, 1, 1, 1, rope_blocks, half_rope_blocks,
              half_rope_blocks);
         // img : x[0::2] * sin + x[1::2] * cos
-        vadd(out_float + rope_dim / 2, calc_even_sin, calc_odd_cos, 1, 1, 1, 1, rope_blocks,
+        vadd(rope_scratch + rope_dim / 2, calc_even_sin, calc_odd_cos, 1, 1, 1, 1, rope_blocks,
              half_rope_blocks, half_rope_blocks);
         pipe_barrier(PIPE_V);
+        // Interleave the half-split rope [real|imag] -> [r0,i0,r1,i1,...]
+        set_mask_count();
+        set_vector_mask(0x0, rope_dim);
+        uint32_t rope_scratch_base =
+            static_cast<uint32_t>(reinterpret_cast<uint64_t>(rope_scratch));
+        vgather((UBA(uint32_t))out_float, vgather_indices, rope_scratch_base, 0, 1);
+        pipe_barrier(PIPE_V);
+        set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
         // out_float -> out[curr] ith row
@@ -384,7 +413,7 @@ __aicore__ inline void indexer_prepare(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormB
     if (is_long) {
         rope_complex_and_cache<Dtype>(token_num, index_n_heads, index_head_dim, rope_head_dim, 0,
                                       rope_head_dim, q, q, index_head_dim, 0, freqs, position, 0,
-                                      nullptr, nullptr, false, false, top_k, core_offset);
+                                      nullptr, nullptr, false, true, top_k, core_offset);
     }
 }
 
