@@ -109,21 +109,59 @@ struct IndexerC8Buffers {
         off += ROUND_UP(hadamard_stages * dim * sizeof(float), UB_BUF_ALIGN_SIZE);
         assert(off <= UB_SIZE);
 
-        // Initialize read-only gather indices/signs once per core for both K and Q.
-        for (uint32_t i = 0; i < rope_dim; ++i) {
-            cos_indices[i] = (i / 2 * 2) * sizeof(float);
-            sin_indices[i] = (i / 2 * 2 + 1) * sizeof(float);
-            swap_indices[i] = (i ^ 1) * sizeof(float);
-            rope_sign[i] = (i & 1) ? 1.0f : -1.0f;
+        constexpr uint64_t sign_masks[] = {0xAAAAAAAAAAAAAAAA, 0xCCCCCCCCCCCCCCCC,
+                                           0xF0F0F0F0F0F0F0F0, 0xFF00FF00FF00FF00,
+                                           0xFFFF0000FFFF0000, 0xFFFFFFFF00000000};
+        // Reuse quantization scratch for the byte offsets 0, 4, ..., 508.
+        vector_dup(rounded, int32_t(0), dim / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+        for (uint32_t bit = 0; bit < hadamard_stages - 1; ++bit) {
+            set_vector_mask(0, sign_masks[bit]);
+            vadds(rounded, rounded, int32_t((1u << bit) * sizeof(float)),
+                  dim / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
         }
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        vadds(rounded + dim / 2, rounded + dim / 2, int32_t(dim / 2 * sizeof(float)),
+              1, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        auto *cos_index = reinterpret_cast<__ubuf__ int32_t *>(cos_indices);
+        auto *sin_index = reinterpret_cast<__ubuf__ int32_t *>(sin_indices);
+        auto *swap_index = reinterpret_cast<__ubuf__ int32_t *>(swap_indices);
+        vadds(cos_index, rounded, int32_t(0), 1, 1, 1, 8, 8);
+        vadds(sin_index, rounded, int32_t(sizeof(float)), 1, 1, 1, 8, 8);
+        vadds(swap_index, rounded, int32_t(sizeof(float)), 1, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        set_vector_mask(0, sign_masks[0]);
+        vadds(cos_index, rounded, -int32_t(sizeof(float)), 1, 1, 1, 8, 8);
+        vadds(sin_index, rounded, int32_t(0), 1, 1, 1, 8, 8);
+        vadds(swap_index, rounded, -int32_t(sizeof(float)), 1, 1, 1, 8, 8);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        auto *hadamard_index = reinterpret_cast<__ubuf__ int32_t *>(h_indices);
         for (uint32_t stage = 0; stage < hadamard_stages; ++stage) {
-            for (uint32_t i = 0; i < dim; ++i) {
-                h_indices[stage * dim + i] = (i ^ (1u << stage)) * sizeof(float);
-                h_sign[stage * dim + i] = (i & (1u << stage)) ? -1.0f : 1.0f;
-            }
+            vadds(hadamard_index + stage * dim, rounded,
+                  int32_t((1u << stage) * sizeof(float)),
+                  dim / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8, 8);
         }
-        set_flag(PIPE_S, PIPE_V, EVENT_ID0);
-        wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+        vector_dup(rope_sign, 1.0f, 1, 1, 1, 8, 0);
+        vector_dup(h_sign, 1.0f, hadamard_stages * dim / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+        set_vector_mask(0, 0x5555555555555555);
+        vector_dup(rope_sign, -1.0f, 1, 1, 1, 8, 0);
+
+        for (uint32_t stage = 0; stage < hadamard_stages - 1; ++stage) {
+            set_vector_mask(0, sign_masks[stage]);
+            vadds(hadamard_index + stage * dim, rounded,
+                  -int32_t((1u << stage) * sizeof(float)),
+                  dim / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8, 8);
+            vector_dup(h_sign + stage * dim, -1.0f, dim / VECTOR_MAX_NUM_OF_FP32, 1, 1, 8, 0);
+        }
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        // The last stage swaps the two 64-element halves.
+        vadds(hadamard_index + (hadamard_stages - 1) * dim + dim / 2, rounded + dim / 2,
+              -int32_t(dim / 2 * sizeof(float)), 1, 1, 1, 8, 8);
+        vector_dup(h_sign + (hadamard_stages - 1) * dim + dim / 2, -1.0f, 1, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
     }
 };
 

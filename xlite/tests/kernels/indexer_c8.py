@@ -233,6 +233,32 @@ def run_quantization_test(rt, device):
     return {"tokens": 4, "heads": N_HEADS, "native_byte_mismatches": 0}
 
 
+def run_sign_test(rt, device):
+    """Exercise RoPE signs and all Hadamard stages with basis vectors."""
+    q = torch.eye(HEAD_DIM).bfloat16().reshape(-1, N_HEADS, HEAD_DIM)
+    tokens = len(q)
+    freqs = torch.zeros(1, ROPE_DIM, dtype=torch.bfloat16)
+    freqs[:, 1::2] = 1
+    rope = q.clone()
+    rope[..., :ROPE_DIM:2] = -q[..., 1:ROPE_DIM:2]
+    rope[..., 1:ROPE_DIM:2] = q[..., :ROPE_DIM:2]
+    rotated = (rope.float() @ rotation().float()).bfloat16()
+    expected_q = rotated.sign().to(torch.int8) * 127
+    expected_scale = (rotated.float().abs().amax(-1) / 127).half()
+
+    kw = torch.zeros(tokens, HEAD_DIM + N_HEADS, dtype=torch.bfloat16)
+    kw[:, HEAD_DIM:] = 1
+    slots = torch.arange(tokens).int()
+    actual = call_prepare(rt, device, kw, torch.ones(HEAD_DIM), torch.zeros(HEAD_DIM),
+                          freqs, torch.zeros(tokens, dtype=torch.int64), slots,
+                          allocate_cache(device, slots, 32), q.reshape(tokens, -1))
+    torch.testing.assert_close(actual["q8"].reshape_as(q), expected_q, rtol=0, atol=0)
+    torch.testing.assert_close(actual["q_scale"], expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(actual["scaled_weights"], expected_scale, rtol=0, atol=0)
+    logging.info("indexer_c8 sign patterns passed")
+    return {"tokens": tokens, "heads": N_HEADS}
+
+
 def run_fixture_tests(rt, device, directory):
     paths = sorted(directory.glob("native-fixture-*.pt"))
     assert len(paths) == 4, "All four frozen native fixtures are required"
@@ -470,6 +496,7 @@ def main():
     result = {"rejected_inputs": run_invalid_tests(rt, device),
               "prepare_phases": run_prepare_tests(rt, device),
               "quantization_boundary": run_quantization_test(rt, device),
+              "sign_patterns": run_sign_test(rt, device),
               "synthetic": run_synthetic_tests(rt, device),
               "fixtures": run_fixture_tests(rt, device, args.fixtures) if args.fixtures else [],
               "causal": True,
