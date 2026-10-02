@@ -513,6 +513,72 @@ function run_glm5_w4a8()
     rm $test_config_path
 }
 
+function run_glm53_flash_w8a8()
+{
+    # GLM-5.3-Flash (glm5_next): 混合 MHC + 线性注意力(KDA) + 稀疏 MLA + MoE。
+    # 层数默认 45 (不含 MTP 层 45); 离线 bench 可裁剪。
+    local _n_layers=${XLITE_N_LAYERS:-45}
+    # moe_ep_size 须等于卡数; 默认 16, 离线 8 卡场景设 8。
+    local _moe_ep_size=${XLITE_MOE_EP_SIZE:-16}
+    # checkpoint 目录名 (不同环境挂载名可能不同); 默认 GLM-5.3-Flash-w8a8。
+    local _ckpt_dir=${XLITE_GLM53_FLASH_W8A8_CKPT:-GLM-5.3-Flash-w8a8}
+    # 贪心解码 (temp=0, 走 run.sh 全局 RUN_ARGS)。KDA 递推状态用 fp32 维护
+    # (见 glm5_next.py LinearAttention)，贪心下不再陷入重复循环。
+    echo '{
+        "vocab_size": 154880,
+        "dim": 4096,
+        "inter_dim": 12288,
+        "moe_inter_dim": 2048,
+        "n_layers": '"$_n_layers"',
+        "n_dense_layers": 3,
+        "n_heads": 64,
+        "norm_eps": 1e-05,
+        "n_routed_experts": 288,
+        "n_shared_experts": 1,
+        "n_activated_experts": 8,
+        "n_expert_groups": 1,
+        "n_limited_groups": 1,
+        "score_func": "sigmoid",
+        "route_scale": 2.5,
+        "swiglu_limit": 10.0,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 256,
+        "qk_rope_head_dim": 0,
+        "v_head_dim": 256,
+        "original_seq_len": 4096,
+        "rope_theta": 1000000.0,
+        "rope_type": "default",
+        "mscale": 1.0,
+        "la_num_heads": 64,
+        "la_head_dim": 128,
+        "short_conv_kernel_size": 4,
+        "gate_lower_bound": -5.0,
+        "hc_mult": 4,
+        "hc_sinkhorn_iters": 20,
+        "hc_eps": 1e-06,
+        "index_n_heads": 32,
+        "index_head_dim": 128,
+        "index_topk": 2048,
+        "index_kpool": 4,
+        "index_kpool_compress": true,
+        "index_kpool_always_select_tail": true,
+        "indexer_rope_interleave": true,
+        "max_batch_size": 1,
+        "max_seq_len": 1024,
+        "quantization": "w8a8",
+        "model_type": "glm5_next",
+        "dtype": "bfloat16",
+        "moe_ep_size": '"$_moe_ep_size"',
+        "moe_tp_size": 1
+    }' > $test_config_path
+    torchrun --nproc_per_node="$_moe_ep_size" --nnodes=1 --node_rank=0 \
+        --master_addr=127.0.0.1 --master_port="$MASTER_PORT" \
+        tests/generate.py --model glm5_next --ckpt-path $models_base_path/$_ckpt_dir/ \
+        ${RUN_ARGS[@]}
+    rm $test_config_path
+}
+
 function run_minimax_m2()
 {
     echo '{
@@ -676,6 +742,7 @@ else
         run_deepseek_v3_w8a8
         run_glm5_w8a8
         run_glm5_w4a8
+        run_glm53_flash_w8a8
         run_minimax_m2
         #run_qwen3_5_moe_122B
     fi
