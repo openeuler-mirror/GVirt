@@ -251,16 +251,29 @@ int XSock::AllGather(void *buf, uint32_t size, void *allBuf)
         return -EFAULT;
     }
     if (_rankId != 0) {
-        Send(_fd, buf, size);
-        Recv(_fd, allBuf, size * _rankSize);
+        int ret = Send(_fd, buf, size);
+        if (ret < 0) {
+            return ret;
+        }
+        ret = Recv(_fd, allBuf, size * _rankSize);
+        if (ret < 0) {
+            return ret;
+        }
     } else {
         for (uint32_t rank = 1; rank < _rankSize; rank++) {
             uint64_t offset = static_cast<uint64_t>(size) * rank;
-            Recv(_clientFds[rank],
-                 reinterpret_cast<void *>(reinterpret_cast<uint64_t>(allBuf) + offset), size);
+            int ret =
+                Recv(_clientFds[rank],
+                     reinterpret_cast<void *>(reinterpret_cast<uint64_t>(allBuf) + offset), size);
+            if (ret < 0) {
+                return ret;
+            }
         }
         for (uint32_t rank = 1; rank < _rankSize; rank++) {
-            Send(_clientFds[rank], allBuf, size * _rankSize);
+            int ret = Send(_clientFds[rank], allBuf, size * _rankSize);
+            if (ret < 0) {
+                return ret;
+            }
         }
     }
     return 0;
