@@ -360,12 +360,6 @@ public:
                                       int kvLen, uint32_t topK, __gm__ uint32_t *topkIndices,
                                       int queryPosBase, __gm__ uint32_t *blockTable)
     {
-        if constexpr (std::is_same<Dtype, int8_t>::value) {
-            // A mixed query tile can give one AIV only dense rows.
-            if (queryPosBase + queryLen <= topK) {
-                return;
-            }
-        }
         assert(kvLen <= MAX_INDEXER_KV_TILE_LEN && topK <= MAX_TOPK_NUM &&
                topK <= queryPosBase + queryLen);
         constexpr float min = FLOAT_MIN;
@@ -384,11 +378,6 @@ public:
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
         for (int idx = 0; idx < queryLen; idx++) {
             int p0 = queryPosBase + idx;  // position of the current token in the sequence
-            if constexpr (std::is_same<Dtype, int8_t>::value) {
-                if (p0 < topK) {
-                    continue;
-                }
-            }
             int validKvLen = MIN(p0 - kvOffset + 1, kvLen);  // per position valid kvLen
             if (validKvLen <= 0) {  // the last kv chunk should have concluded the topK merge
                 continue;
