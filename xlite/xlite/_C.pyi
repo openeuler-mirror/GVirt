@@ -2391,6 +2391,7 @@ def indexer_prepare(
     """
     ...
 
+
 def indexer_k_cache_c8(
     rt: Runtime,
     k: torch.Tensor,

@@ -1955,14 +1955,18 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
 {
     XTensor _kw, _kNorm, _kNormBias, _freqs, _position, _indexKCache, _slotMapping, _q;
     XTensor _ks, _q8, _qs, _sw;
-    if (kScaleCache)
+    if (kScaleCache) {
         InitXTensor(_ks, *kScaleCache);
-    if (q8)
+    }
+    if (q8) {
         InitXTensor(_q8, *q8);
-    if (qScale)
+    }
+    if (qScale) {
         InitXTensor(_qs, *qScale);
-    if (scaledWeights)
+    }
+    if (scaledWeights) {
         InitXTensor(_sw, *scaledWeights);
+    }
     InitXTensor(_kw, kw);
     InitXTensor(_kNorm, kNorm);
     InitXTensor(_kNormBias, kNormBias);
@@ -2127,8 +2131,9 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
 {
     XTensor _q, _kCache, _weight, _indices, _topkIndices, _queryStartLoc, _lens, _cachedLens,
         _blockTables, _ks;
-    if (kScaleCache)
+    if (kScaleCache) {
         InitXTensor(_ks, *kScaleCache);
+    }
 
     InitXTensor(_q, q);
     InitXTensor(_kCache, kCache);

@@ -188,7 +188,7 @@ def run_synthetic_tests(rt, device):
     scale_base = torch.full((32 + 2,), SCALE_CACHE_FILL, dtype=torch.float16, device=device)
     caches = (k_base[1:-1].view(1, 32, 1, HEAD_DIM), scale_base[1:-1].view(1, 32, 1, 1))
     k8, scales = call_op(rt, device, k_outlier, k_norm, k_norm_bias, freqs,
-                        torch.arange(17), torch.arange(17).int(), caches)
+                         torch.arange(17), torch.arange(17).int(), caches)
     assert bool((k_base.cpu()[[0, -1]] == K_CACHE_FILL).all())
     assert bool((scale_base.cpu()[[0, -1]] == SCALE_CACHE_FILL).all())
     assert bool((k8[17:] == K_CACHE_FILL).all()) and bool((scales[17:] == SCALE_CACHE_FILL).all())
@@ -201,7 +201,7 @@ def run_synthetic_tests(rt, device):
     positions = torch.cat((torch.arange(17), torch.full((15,), -100)))
     slots = torch.cat((torch.arange(17).int(), torch.full((15,), 32, dtype=torch.int32)))
     padded_k8, padded_scales = call_op(rt, device, k_outlier, k_norm, k_norm_bias, freqs,
-                                      positions, slots, allocate_cache(device, 1, 32))
+                                       positions, slots, allocate_cache(device, 1, 32))
     assert torch.equal(padded_k8, k8) and torch.equal(padded_scales, scales)
     logging.info("indexer_k_cache_c8 metadata-capacity passed")
     return results

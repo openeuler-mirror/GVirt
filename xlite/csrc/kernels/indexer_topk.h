@@ -316,8 +316,8 @@ public:
                 WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
                 CopyToL0ACol(wl0aBuf[curr], wl1Buf[q * weightBlockSize], 1, 0, wkBlockNum);
                 // copy scores (blockSize, nHeads) to L0B
-                CopyToL0BCol(kql0bBuf[curr], kql1Buf[curr][q * mBlockPad * nHeads], wnBlockNum,
-                             0, wkBlockNum);
+                CopyToL0BCol(kql0bBuf[curr], kql1Buf[curr][q * mBlockPad * nHeads], wnBlockNum, 0,
+                             wkBlockNum);
 
                 SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
                 WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
@@ -697,16 +697,16 @@ private:
     int resetPrevCore;
 
 #ifdef __DAV_C220_CUBE__
-    LocalTensor<Dtype> kl1Buf[PINGPONG_BUF_NUM];   // event 0/1
-    LocalTensor<Dtype> ql1Buf[PINGPONG_BUF_NUM];   // event 2/3
-    LocalTensor<WeightDtype> wl1Buf;                // event 4
+    LocalTensor<Dtype> kl1Buf[PINGPONG_BUF_NUM];         // event 0/1
+    LocalTensor<Dtype> ql1Buf[PINGPONG_BUF_NUM];         // event 2/3
+    LocalTensor<WeightDtype> wl1Buf;                     // event 4
     LocalTensor<WeightDtype> kql1Buf[PINGPONG_BUF_NUM];  // event 0/1
-    LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];   // event 0/1
+    LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];         // event 0/1
     LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];
     LocalTensor<WeightDtype> wl0aBuf[PINGPONG_BUF_NUM];  // event 0/1
     LocalTensor<WeightDtype> kql0bBuf[PINGPONG_BUF_NUM];
     LocalTensor<MatDtype> qkl0cBuf;  // event 0, shares storage with l0cBuf
-    LocalTensor<float> l0cBuf;  // event 0
+    LocalTensor<float> l0cBuf;       // event 0
 #elif __DAV_C220_VEC__
     __ubuf__ WeightDtype *in[PINGPONG_BUF_NUM];
     __ubuf__ float *lastSort[PINGPONG_BUF_NUM];
@@ -742,7 +742,7 @@ private:
         uint32_t block_size, uint32_t batch, uint32_t max_blocks, uint32_t topk,                 \
         GM_ADDR k_scale_cache)                                                                   \
     {                                                                                            \
-        IndexerTopK<dtype, int32_t, half, float> op;                                              \
+        IndexerTopK<dtype, int32_t, half, float> op;                                             \
         op.Init(q, k_cache, weight, query_start_loc, query_lens, cached_lens, block_tables,      \
                 scores, last_topk, indices, topk_indices, sync, heads, dim, block_size, batch,   \
                 max_blocks, topk, k_scale_cache);                                                \

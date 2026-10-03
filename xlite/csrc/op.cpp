@@ -1253,9 +1253,8 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                         scaledWeights.ptr == nullptr))) {
             throw std::invalid_argument("indexer_prepare: missing LI-C8 buffers");
         }
-        if (indexHeadDim != 128 || ropeHeadDim != 64 || indexNHeads != 32 ||
-            kw.dtype != BF16 || !EachXDtype(FP32, kNorm, kNormBias) ||
-            (isLong && q.dtype != BF16)) {
+        if (indexHeadDim != 128 || ropeHeadDim != 64 || indexNHeads != 32 || kw.dtype != BF16 ||
+            !EachXDtype(FP32, kNorm, kNormBias) || (isLong && q.dtype != BF16)) {
             throw std::invalid_argument("indexer_prepare: unsupported LI-C8 inputs");
         }
         aclrtlaunch_indexer_prepare_c8_bfloat16_t(

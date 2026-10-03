@@ -257,7 +257,7 @@ __aicore__ inline void CopyL0CToL1(const LocalTensor<Dtype> &dst, const LocalTen
     DataCopy(dst, src, param);
 }
 
-//INT32→FP16
+// INT32→FP16
 __aicore__ inline void CopyL0CToL1(const LocalTensor<half> &dst, const LocalTensor<int32_t> &src,
                                    int mSize, int nSize, int srcStride, int dstStride,
                                    float deqScale, bool relu)

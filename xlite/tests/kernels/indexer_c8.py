@@ -51,8 +51,8 @@ test_cases = [
 def score_reference(q8, k8, scaled_weights, k_scale):
     dot = q8.reshape(-1, HEAD_DIM).int() @ k8.int().T
     dot = dot.reshape(len(q8), N_HEADS, len(k8)).clamp_min(0)
-    return ((dot.float() / 1024).half().float() *
-            scaled_weights.float()[..., None]).sum(1) * k_scale.float()[None, :]
+    return ((dot.float() / 1024).half().float()
+            * scaled_weights.float()[..., None]).sum(1) * k_scale.float()[None, :]
 
 
 def check_topk(actual, q8, k8, scaled_weights, k_scale, key_lengths, query_lengths,
@@ -367,8 +367,8 @@ def run_synthetic_tests(rt, device):
         block_table = torch.randperm(max_num_blocks * len(key_lengths), generator=generator)
         block_table = block_table.reshape(len(key_lengths), max_num_blocks).int()
         slots = torch.cat([
-            block_table[i, torch.arange(key_len) // block_size].long() * block_size +
-            torch.arange(key_len) % block_size for i, key_len in enumerate(key_lengths)])
+            block_table[i, torch.arange(key_len) // block_size].long() * block_size
+            + torch.arange(key_len) % block_size for i, key_len in enumerate(key_lengths)])
         caches = allocate_cache(device, slots, block_size)
         q8 = torch.randint(-127, 128, (sum(query_lengths), N_HEADS, HEAD_DIM), generator=generator).char()
         k8 = torch.randint(-127, 128, (sum(key_lengths), HEAD_DIM), generator=generator).char()

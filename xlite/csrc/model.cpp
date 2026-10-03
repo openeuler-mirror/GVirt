@@ -157,8 +157,7 @@ void XModel::Init(void)
                 throw std::invalid_argument("indexC8Mask must describe every DSA runtime layer");
             }
             for (uint32_t i = 0; i < _c.nLayers; ++i) {
-                if (_c.indexC8Mask[i] &&
-                    i < _c.indexFullMask.size() && !_c.indexFullMask[i]) {
+                if (_c.indexC8Mask[i] && i < _c.indexFullMask.size() && !_c.indexFullMask[i]) {
                     throw std::invalid_argument("LI-C8 requires a full Indexer layer");
                 }
             }
@@ -400,7 +399,9 @@ void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenSta
         if (c8) {
             q8 = &rt.GetTensor(qPtr->shape, INT8, DBG_LOC);
             qScale = &rt.GetTensor({hiddenState.shape[0], _c.indexNHeads}, FP16, DBG_LOC);
-            scaledWeights = &rt.GetTensor(qScale->shape, FP16, DBG_LOC); // Fold Q dequantization scales into head weights for C8.
+            scaledWeights =
+                &rt.GetTensor(qScale->shape, FP16,
+                              DBG_LOC);  // Fold Q dequantization scales into head weights for C8.
         }
     }
     XliteOpIndexerPrepare(rt, kw, indexKNorm[layer], indexKNormBias[layer], freqsCis,
@@ -2225,7 +2226,7 @@ size_t XModel::DummyRun()
                     !_c.indexC8Mask.empty() && _c.indexC8Mask[i] ? INT8 : embed.dtype, nullptr);
                 kvCache[i] = {kCache, vCache, indexKCache};
                 if (!_c.indexC8Mask.empty() && _c.indexC8Mask[i]) {
-                    kvCache[i].emplace_back( //Cache for scale
+                    kvCache[i].emplace_back(  // Cache for scale
                         std::vector<size_t>{_c.maxBatch * maxNumBlocks, _c.blockSizes[0], 1, 1},
                         FP16, nullptr);
                 }

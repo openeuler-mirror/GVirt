@@ -62,7 +62,7 @@ struct XModelConfig {
     float indexSoftmaxScale;
     bool indexRopeInterleaved = false;
     std::vector<bool> indexFullMask;  // per-layer indexer mask - true: full indexer, false: shared
-    std::vector<bool> indexC8Mask;  // per-runtime-layer C8 mask; empty disables C8
+    std::vector<bool> indexC8Mask;    // per-runtime-layer C8 mask; empty disables C8
 
     // linear attention config
     uint32_t linearNumKHeads = 0;
