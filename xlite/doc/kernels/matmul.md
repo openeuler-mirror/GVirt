@@ -62,15 +62,15 @@ bias: GM --MTE2--> L1(C1) --MTE1--> C2(Bias Table) \
 deqScale: GM --MTE2--> L1(C1) --FIX--> C2PIPE2GM(fixpipe buffer)
 ```
 
-- A 矩阵 ND→NZ 转换由 DMA 硬件完成：`CopyGmToL1Nd2Nz` 使用 `DataCopy` 的 `Nd2NzParams`（`csrc/kernels/kernel_macro.h:138-158`），即 GM→L1 搬运时直接落成 NZ 分形布局；当 `srcDValue > 65535`（K 超过 16bit stride 上限）时退化为按行循环搬运。
+- A 矩阵 ND→NZ 转换由 DMA 硬件完成：`CopyGmToL1Nd2Nz` 使用 `DataCopy` 的 `Nd2NzParams`（`csrc/kernels/kernel_macro.h:141-160`），即 GM→L1 搬运时直接落成 NZ 分形布局；当 `srcDValue > 65535`（K 超过 16bit stride 上限）时退化为按行循环搬运。
 - B 矩阵按 `(transpose, nz)` 四种组合搬运（`csrc/kernels/matmul.h:305-318`）：
   - `transpose=0, nz=0`：`CopyGmToL1Nd2Nz`，与 A 相同的 ND→NZ 硬件转换；
   - `transpose=0, nz=1`：`CopyGmToL1` 直接按 NZ 分形块拷贝（源已是 NZ）；
   - `transpose=1, nz=0`：`CopyGmToL1Nd2Nz` 把 `[K, N]` 的 ND 矩阵按 K 为 N 维、N 为 D 维转成 NZ；
   - `transpose=1, nz=1`：`CopyGmToL1` 按转置后的 NZ 块拷贝。
-- L1→L0 搬运使用 Cube 的 `LoadData`（load2d）：`CopyToL0ACol`（`csrc/kernels/kernel_macro.h:168-179`）与 `CopyToL0BCol`（`kernel_macro.h:181-189`）；转置路径的 `CopyToL0BTCol`（`kernel_macro.h:191-212`）对 int8/int4 使用 `LoadDataWithTranspose`（B 转置时 L1→L0 的分形单元为 32x32x1B，`matmul.h:64-66`）。
-- 矩阵计算：`CalMmad`（`kernel_macro.h:214-226`）在 L0C 上沿 K 累加，首轮 `cmatrixInitVal=true` 清零；带 bias 时首轮改用 `CalMmadWithBias`（`kernel_macro.h:228-239`），bias 从 C2 Bias Table 参与累加。
-- 输出：`CopyToGmWithDequant`（`kernel_macro.h:313-340`）通过 fixpipe 把 L0C 的 NZ 数据以 `SetFixpipeNz2ndFlag` 转 ND 写回 GM；浮点路径 mode 为 `F322F16/F322BF16/NoQuant`，int32→half 量化反量化路径 mode 为 `VDEQF16` 并通过 `SetFixPipeConfig(deqScale)` 提供 per-N 反量化向量。
+- L1→L0 搬运使用 Cube 的 `LoadData`（load2d）：`CopyToL0ACol`（`csrc/kernels/kernel_macro.h:171-181`）与 `CopyToL0BCol`（`kernel_macro.h:184-191`）；转置路径的 `CopyToL0BTCol`（`kernel_macro.h:194-214`）对 int8/int4 使用 `LoadDataWithTranspose`（B 转置时 L1→L0 的分形单元为 32x32x1B，`matmul.h:64-66`）。
+- 矩阵计算：`CalMmad`（`kernel_macro.h:217-229`）在 L0C 上沿 K 累加，首轮 `cmatrixInitVal=true` 清零；带 bias 时首轮改用 `CalMmadWithBias`（`kernel_macro.h:231-242`），bias 从 C2 Bias Table 参与累加。
+- 输出：`CopyToGmWithDequant`（`kernel_macro.h:317-343`）通过 fixpipe 把 L0C 的 NZ 数据以 `SetFixpipeNz2ndFlag` 转 ND 写回 GM；浮点路径 mode 为 `F322F16/F322BF16/NoQuant`，int32→half 量化反量化路径 mode 为 `VDEQF16` 并通过 `SetFixPipeConfig(deqScale)` 提供 per-N 反量化向量。
 
 ### 分块与多核并行
 
@@ -112,8 +112,8 @@ bias 从 L1 到 C2 的搬运以 64B 数据块为单位（`C2_DATABLOCK`），deq
 
 ### 量化路径（int8 / int4）
 
-- int8（W8A8）：`Matmul<int8_t, int32_t, half>`（`matmul.h:484`）。A/B 以 int8 进入 Mmad，L0C 累加为 int32；fixpipe 阶段以 `VDEQF16` 模式将 int32 乘以 deqScale 向量后转 fp16 写 GM（`kernel_macro.h:331-336`）。
-- int4（W4A4 / W4A8 激活拆分）：`Matmul<int4b_t, int32_t, half>`。dtypeBits 按 4 计（`GetDTypeBits`，`kernel_macro.h:71`），因此 `kBlockSize=64`、`nBlockSize`（转置时）=64，`CopyGmToL1Nd2Nz` 对 int4 把 `srcDValue/dValue` 折半（int4 两两打包进一个字节，`kernel_macro.h:144-145`），B 转置路径的 `CopyToL0BTCol` 用 `LoadDataWithTranspose` 以 32x32x1B 分形、dstGap=3 解包搬运（`kernel_macro.h:196-204`）。W4A8 场景下激活先由 `unpack_activation` 拆成 `[2m, k/2]` 的 int4 打包矩阵（行交错 low/high 4bit），本算子按 int4 GEMM 计算，结果再由 `msd_merge_dequant` 合并（见 group_matmul 文档与 `tests/kernels/matmul_int4.py`）。
+- int8（W8A8）：`Matmul<int8_t, int32_t, half>`（`matmul.h:484`）。A/B 以 int8 进入 Mmad，L0C 累加为 int32；fixpipe 阶段以 `VDEQF16` 模式将 int32 乘以 deqScale 向量后转 fp16 写 GM（`kernel_macro.h:334-337`）。
+- int4（W4A4 / W4A8 激活拆分）：`Matmul<int4b_t, int32_t, half>`。dtypeBits 按 4 计（`GetDTypeBits`，`kernel_macro.h:73`），因此 `kBlockSize=64`、`nBlockSize`（转置时）=64，`CopyGmToL1Nd2Nz` 对 int4 把 `srcDValue/dValue` 折半（int4 两两打包进一个字节，`kernel_macro.h:146-147`），B 转置路径的 `CopyToL0BTCol` 用 `LoadDataWithTranspose` 以 32x32x1B 分形、dstGap=3 解包搬运（`kernel_macro.h:198-206`）。W4A8 场景下激活先由 `unpack_activation` 拆成 `[2m, k/2]` 的 int4 打包矩阵（行交错 low/high 4bit），本算子按 int4 GEMM 计算，结果再由 `msd_merge_dequant` 合并（见 group_matmul 文档与 `tests/kernels/matmul_int4.py`）。
 - deqScale 的硬件格式：fixpipe 要求以 uint64_t 存储 fp32——高 32 位为 0、低 32 位为 fp32 二进制值（`matmul.h:264` 注释）；有效精度为 TF32（低 13 位尾数忽略，`matmul.h:19` 注释）。Python 侧生成 `[2N]` fp32 数组，偶数位放 scale、奇数位补 0（`tests/kernels/matmul_int8.py:101-104`）。
 
 ### 权重 NZ 与 bias 融合

@@ -79,11 +79,11 @@ W4A8 的完整流水分三级（见 `tests/kernels/group_matmul_int4.py:41-58` �
 2. 本算子（int4 变体）：per-expert `(low4|high4) [2c, k] x W_int4` → INT32 L0C → fixpipe `VDEQF16` 乘 per-channel deq_scale → FP16 `[2c, n]`（行交错）。kernel 内 `kM = 2 * counts[i]`（`group_matmul.h:39-41`）、`off` 按翻倍后的 kM 累加，保证 low/high 行与输出行一一交错对齐；
 3. `msd_merge_dequant`：`(y_high*16 + y_low + scale_bias) * per_token_scale` 合并为 BF16 `[m, n]`，其中 `scale_bias = 8 * sum_k(W[k,col] * deq_scale[col])` 补偿 low4 的 -8 偏移。
 
-int4 的搬运细节（在 matmul.h/kernel_macro.h 中）：`dtypeBits=4` 使 `kBlockSize=64`、`nBlockSize`（transpose）=64；`CopyGmToL1Nd2Nz` 对 int4 折半 srcDValue/dValue（`kernel_macro.h:144-145`）；B 转置路径 `CopyToL0BTCol` 以 `LoadDataWithTranspose` 32x32x1B 分形、dstGap=3 解包（`kernel_macro.h:196-204`）。
+int4 的搬运细节（在 matmul.h/kernel_macro.h 中）：`dtypeBits=4` 使 `kBlockSize=64`、`nBlockSize`（transpose）=64；`CopyGmToL1Nd2Nz` 对 int4 折半 srcDValue/dValue（`kernel_macro.h:146-147`）；B 转置路径 `CopyToL0BTCol` 以 `LoadDataWithTranspose` 32x32x1B 分形、dstGap=3 解包（`kernel_macro.h:198-206`）。
 
 ### 反量化（deqScale）
 
-与 matmul 相同的 fixpipe 机制：deqScale（uint64 容器，低 32 位 fp32/TF32）先 GM→L1（C1），再以 128B 数据块搬到 C2PIPE2GM fixpipe buffer（`matmul.h:253-266`），最终在 `CopyToGmWithDequant` 中经 `SetFixPipeConfig(deqScale)` + `VDEQF16` 完成逐 N 通道反量化（`kernel_macro.h:313-340`）。每个专家的 scale 向量独立绑定（TaskTilesInit 传入该专家的 deqScale 地址）。浮点路径 `deqScales == nullptr` 时 `useDequant=false`，跳过全部 deqScale 搬运。
+与 matmul 相同的 fixpipe 机制：deqScale（uint64 容器，低 32 位 fp32/TF32）先 GM→L1（C1），再以 128B 数据块搬到 C2PIPE2GM fixpipe buffer（`matmul.h:253-266`），最终在 `CopyToGmWithDequant` 中经 `SetFixPipeConfig(deqScale)` + `VDEQF16` 完成逐 N 通道反量化（`kernel_macro.h:317-343`）。每个专家的 scale 向量独立绑定（TaskTilesInit 传入该专家的 deqScale 地址）。浮点路径 `deqScales == nullptr` 时 `useDequant=false`，跳过全部 deqScale 搬运。
 
 ### 与 matmul 的差异总结
 

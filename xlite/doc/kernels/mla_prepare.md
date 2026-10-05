@@ -14,7 +14,7 @@ mla_prepare(rt, attn_qkvc, q_norm, q_norm_bias, attn_norm_qc, kv_norm, kv_norm_b
             BLOCK_SIZE, k_cache, pe_cache, slot_mapping, NORM_EPS)
 ```
 
-host 封装 `MlaPrepare`(`csrc/_C.cpp:1914`)→ `XliteOpMlaPrepare`(`csrc/op.cpp:1168`)。kernel 签名(`csrc/kernels/mla_prepare.h:42`):
+host 封装 `MlaPrepare`(`csrc/_C.cpp:1914`)→ `XliteOpMlaPrepare`(`csrc/op.cpp:1177`)。kernel 签名(`csrc/kernels/mla_prepare.h:42`):
 
 ```cpp
 mla_prepare_<dtype>(attnQkvc, qNorm, qNormBias, attnNormQc, kvNorm, kvNormBias, attnNormKvc,
@@ -49,7 +49,7 @@ mla_prepare_<dtype>(attnQkvc, qNorm, qNormBias, attnNormQc, kvNorm, kvNormBias, 
 | float16_t | `csrc/kernels/mla_prepare_float16_t.cpp` | `mla_prepare_float16_t` |
 | bfloat16_t | `csrc/kernels/mla_prepare_bfloat16_t.cpp` | `mla_prepare_bfloat16_t` |
 
-host 按 attnQkvc.dtype 选择(`csrc/op.cpp:1180-1186`);kernel 整体在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现(`csrc/kernels/mla_prepare.h:53-62`)。
+host 按 attnQkvc.dtype 选择(`csrc/op.cpp:1189-1195`);kernel 整体在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现(`csrc/kernels/mla_prepare.h:54-63`)。
 
 ## 实现原理
 
@@ -61,11 +61,11 @@ host 按 attnQkvc.dtype 选择(`csrc/op.cpp:1180-1186`);kernel 整体在 `#ifdef
 
 **核偏移接力(coreOffset)**:三个子函数都是 grid-stride 并行(`tok = block_idx + coreOffset; tok < token_num; tok += block_num`),返回各自消耗后的 `nextCoreOffset`。mla_prepare 把上一个函数的 `nextCoreOffset` 作为下一个函数的 `coreOffset` 传入,使三个阶段在核间的任务边界连续错开,避免每个阶段都从 block 0 起算造成负载倾斜;三个阶段串行于同一 stream,天然满足写读依赖(attnQkvc 各段互不重叠,attnNormQc/Kvc 独立输出)。
 
-RoPE 细节(子函数 `csrc/kernels/rope_complex_and_cache.h:12`):UB 中 double-buffer 载入输入与 freqs,`vconv` 升 fp32 后按复数旋转(需要 `nLocalHeads == 1` 的 cache 写断言,`csrc/kernels/rope_complex_and_cache.h:24`),写回原 dtype;cache 写入按 slotMapping 的物理块号 + 块内偏移定位。
+RoPE 细节(子函数 `csrc/kernels/rope_complex_and_cache.h:12`):UB 中 double-buffer 载入输入与 freqs,`vconv` 升 fp32 后按复数旋转(需要 `nLocalHeads == 1` 的 cache 写断言,`csrc/kernels/rope_complex_and_cache.h:25`),写回原 dtype;cache 写入按 slotMapping 的物理块号 + 块内偏移定位。
 
 ## 关键代码位置
 
 - 融合主体:`csrc/kernels/mla_prepare.h:24-39`
 - 分段 RMSNorm 与 cache 直写:`csrc/kernels/norm.h:223`(norm 函数签名)
 - complex RoPE + cache:`csrc/kernels/rope_complex_and_cache.h:12`
-- host launch:`csrc/op.cpp:1168`;模型调用 `csrc/model.cpp:432`
+- host launch:`csrc/op.cpp:1177`;模型调用 `csrc/model.cpp:432`

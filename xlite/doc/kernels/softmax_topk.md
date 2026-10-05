@@ -63,7 +63,7 @@ dtype 分派见 `csrc/op.cpp:1281-1291`:要求 scores 与 weightsMap 同 dtype�
    - `vmrgsort4(sortMrgTmp, addrArray, lengths, config)`:4 路归并(`validBits=0xF`,4 队列各长 32),一次指令把整行排成降序;
    - `vreducev2` 两次(mode=2 隔 2 取索引、mode=1 取值)分别抽出 topK 的**索引载荷** `indicesTopK` 与**值载荷** `weightsTopK`;
    - `normTopKProb` 时 `ReduceSum` + `vbrcb` + `vdiv` 对 topK 权重归一化;
-5. **`FillOutMap`**(`softmax_topk.h:199-217`):S 管线标量循环 topK 次,`bitmapSet`(`csrc/kernels/kernel_macro.h:803-807`,u64 字内置位)写路由位图,并按索引 scatter 权重到 `weightsOut` 稀疏槽位;bf16 时再 `vconv_f322bf16r` 转换输出;
+5. **`FillOutMap`**(`softmax_topk.h:199-217`):S 管线标量循环 topK 次,`bitmapSet`(`csrc/kernels/kernel_macro.h:850-854`,u64 字内置位)写路由位图,并按索引 scatter 权重到 `weightsOut` 稀疏槽位;bf16 时再 `vconv_f322bf16r` 转换输出;
 6. **`CopyOutMap`**(`softmax_topk.h:219-241`):位图(`nRoutedExperts/32` 个 u32)与稀疏权重行 GM 搬出。
 
 ### UB 内存布局与同步

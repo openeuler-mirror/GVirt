@@ -12,7 +12,7 @@ out = int8(x * scale_reciprocal + offset)
 
 ## 输入输出参数
 
-Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2877`)。kernel 签名见 `csrc/kernels/quant.h:153-158`:
+Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2887`)。kernel 签名见 `csrc/kernels/quant.h:153-158`:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -29,11 +29,11 @@ Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2877`)�
 
 - 输入 `bfloat16_t` → 输出 `int8_t`([quant_bfloat16_t.cpp](../../csrc/kernels/quant_bfloat16_t.cpp))
 
-host 侧仅接受 `x.dtype == BF16`(`csrc/op.cpp:1430`),算子名即 `quant_bf16_to_i8_static`。
+host 侧仅接受 `x.dtype == BF16`(`csrc/op.cpp:1438`),kernel 入口符号为 `quant_static_bfloat16_t`(host 经 `aclrtlaunch_quant_static_bfloat16_t` 启动,`csrc/op.cpp:1440`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/quant.h](../../csrc/kernels/quant.h),函数 `quant_bf16_to_i8`(quant.h:13-151)。
+实现位于 [csrc/kernels/quant.h](../../csrc/kernels/quant.h),函数 `quant_to_i8<dtype>`(quant.h:13-151,模板;BF16 实例化见 [quant_bfloat16_t.cpp](../../csrc/kernels/quant_bfloat16_t.cpp),由 `QUANT_FUNC_DEFINE` 宏展开为入口符号 `quant_static_bfloat16_t`)。
 
 ### 分块策略
 
