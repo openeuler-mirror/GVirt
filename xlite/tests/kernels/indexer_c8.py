@@ -197,6 +197,22 @@ def run_prepare_tests(rt, device):
             assert bool((inactive[1].cpu() == SCALE_CACHE_FILL).all()), "padded K scale cache was changed"
             results.append({"tokens": tokens, "freqs_fp32": freqs_fp32})
             logging.info("indexer_c8 prepare (%d tokens, freqs_fp32=%s) passed", tokens, freqs_fp32)
+
+            if freqs_fp32:
+                # Check complex frequencies in both K-only and Q/K modes.
+                freqs_complex = torch.view_as_complex(table.view(len(table), ROPE_DIM // 2, 2))
+                for query in (None, q):
+                    caches = allocate_cache(device, allocation_slots, 32)
+                    actual = call_prepare(rt, device, kw, k_norm, k_norm_bias, freqs_complex,
+                                          positions, slots, caches, query)
+                    for name, value, expected in zip(("K8", "K scale"), caches, combined):
+                        assert torch.equal(value.cpu(), expected.cpu()), ("complex frequencies", name)
+                    for name in actual:
+                        assert torch.equal(actual[name], outputs[name]), ("complex frequencies", name)
+                    results.append({"tokens": tokens, "freqs_dtype": "complex64",
+                                    "is_long": query is not None})
+                    logging.info("indexer_c8 complex frequencies (%d tokens, is_long=%s) passed",
+                                 tokens, query is not None)
     return results
 
 

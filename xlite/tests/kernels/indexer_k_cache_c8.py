@@ -150,6 +150,8 @@ def run_synthetic_tests(rt, device):
     results = []
     k_norm, k_norm_bias = torch.ones(HEAD_DIM), torch.zeros(HEAD_DIM)
     freqs = frequencies(256)
+    freqs_fp32 = freqs.float().view(len(freqs), ROPE_DIM // 2, 2)
+    freqs_complex = torch.view_as_complex(freqs_fp32)
     for tokens in test_cases:
         k = torch.randn(tokens, HEAD_DIM + 32, generator=generator).bfloat16()
         positions = torch.arange(tokens, dtype=torch.int64) % 256
@@ -160,6 +162,16 @@ def run_synthetic_tests(rt, device):
         result, _, _ = run_test(rt, device, f"random-{tokens}", k, k_norm, k_norm_bias,
                                 freqs, positions, slots, 12, 32)
         results.append(result)
+
+        # Complex and FP32 frequencies must produce identical caches.
+        expected = call_op(rt, device, k, k_norm, k_norm_bias, freqs_fp32, positions, slots,
+                           allocate_cache(device, 12, 32))
+        actual = call_op(rt, device, k, k_norm, k_norm_bias, freqs_complex, positions, slots,
+                         allocate_cache(device, 12, 32))
+        for name, value, reference_value in zip(("K8", "K scale"), actual, expected):
+            assert torch.equal(value, reference_value), ("complex frequencies", name)
+        results.append({"case": "complex-frequencies", "tokens": tokens})
+        logging.info("indexer_k_cache_c8 complex frequencies (%d tokens) passed", tokens)
 
     edge_cases = [
         ("zero", torch.zeros(17, HEAD_DIM).bfloat16(), k_norm, k_norm_bias),
