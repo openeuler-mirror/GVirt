@@ -49,10 +49,10 @@ def rotation():
     return (h / math.sqrt(HEAD_DIM)).bfloat16()
 
 
-def reference(k, k_norm, k_norm_bias, freqs, positions):
+def reference(k, k_norm, k_norm_bias, freqs, positions, norm_eps=NORM_EPS):
     """LayerNorm, interleaved RoPE and Hadamard with BF16 output at each stage."""
     norm = F.layer_norm(k[:, :HEAD_DIM].float(), (HEAD_DIM,),
-                        k_norm.float(), k_norm_bias.float(), NORM_EPS).bfloat16()
+                        k_norm.float(), k_norm_bias.float(), norm_eps).bfloat16()
     pairs = norm[:, :ROPE_DIM].float().reshape(-1, ROPE_DIM // 2, 2)
     trig = freqs[positions].float().reshape(-1, ROPE_DIM // 2, 2)
     real = pairs[..., 0] * trig[..., 0] - pairs[..., 1] * trig[..., 1]
@@ -93,24 +93,24 @@ def allocate_cache(device, num_blocks, block_size):
                        dtype=torch.float16, device=device))
 
 
-def call_op(rt, device, k, k_norm, k_norm_bias, freqs, positions, slots, caches):
+def call_op(rt, device, k, k_norm, k_norm_bias, freqs, positions, slots, caches, norm_eps=NORM_EPS):
     from xlite._C import indexer_k_cache_c8
 
     inputs = (k, k_norm, k_norm_bias, freqs, positions, slots)
     device_inputs = [tensor.to(device) for tensor in inputs]
     torch.npu.synchronize(device)
-    indexer_k_cache_c8(rt, *device_inputs, *caches)
+    indexer_k_cache_c8(rt, *device_inputs, *caches, norm_eps=norm_eps)
     for actual, original in zip(device_inputs, inputs):
         assert torch.equal(actual.cpu(), original), "device input mutated"
     return caches[0].cpu().reshape(-1, HEAD_DIM), caches[1].cpu().flatten()
 
 
 def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
-             num_blocks, block_size, rotated=None, allow_bf16_ulp=False):
+             num_blocks, block_size, rotated=None, allow_bf16_ulp=False, norm_eps=NORM_EPS):
     caches = allocate_cache(device, num_blocks, block_size)
     inputs = (k, k_norm, k_norm_bias, freqs, positions, slots)
     before = [tensor.clone() for tensor in inputs]
-    k8, scales = call_op(rt, device, *inputs, caches)
+    k8, scales = call_op(rt, device, *inputs, caches, norm_eps=norm_eps)
     active = slots >= 0
     written = slots[active].long()
     untouched = torch.ones(len(scales), dtype=torch.bool)
@@ -123,7 +123,7 @@ def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
         assert torch.equal(actual, original), (name, "input mutated")
 
     if rotated is None:
-        rotated = reference(k[active], k_norm, k_norm_bias, freqs, positions[active])
+        rotated = reference(k[active], k_norm, k_norm_bias, freqs, positions[active], norm_eps)
     else:
         rotated = rotated[active]
     result = check_values(k8[written], scales[written], rotated, name, allow_bf16_ulp)
@@ -134,12 +134,12 @@ def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
     for start in range(0, len(k), chunk_size):
         end = start + chunk_size
         call_op(rt, device, k[start:end], k_norm, k_norm_bias, freqs,
-                positions[start:end], slots[start:end], split_cache)
+                positions[start:end], slots[start:end], split_cache, norm_eps=norm_eps)
     assert torch.equal(split_cache[0].cpu().reshape(-1, HEAD_DIM), k8), (name, "chunk K")
     assert torch.equal(split_cache[1].cpu().flatten(), scales), (name, "chunk scale")
 
     # Repeated writes must preserve the full cache.
-    k_again, scales_again = call_op(rt, device, *inputs, caches)
+    k_again, scales_again = call_op(rt, device, *inputs, caches, norm_eps=norm_eps)
     assert torch.equal(k_again, k8) and torch.equal(scales_again, scales), (name, "repeat")
     logging.info("indexer_k_cache_c8 %s (%d tokens) passed", name, len(k))
     return result, k8[written], scales[written]
@@ -180,13 +180,22 @@ def run_synthetic_tests(rt, device):
          torch.arange(HEAD_DIM).float() * 1e-10),
         ("affine-only", torch.randn(17, HEAD_DIM, generator=generator).bfloat16(), k_norm * 0,
          torch.randn(HEAD_DIM, generator=generator)),
-        ("epsilon", (torch.randn(17, HEAD_DIM, generator=generator) * 1e-4).bfloat16(),
-         k_norm, k_norm_bias),
     ]
     for name, k, weight, bias in edge_cases:
         result, _, _ = run_test(rt, device, name, k, weight, bias, freqs, torch.arange(17),
                                 torch.arange(17).int() + 31, 3, 32)
         results.append(result)
+
+    # Low-variance rows distinguish the two epsilon values.
+    k = (torch.randn(17, HEAD_DIM, generator=generator) * 1e-4).bfloat16()
+    epsilon_scales = []
+    for norm_eps in (1e-6, 1e-5):
+        result, _, scales = run_test(
+            rt, device, f"epsilon-{norm_eps:g}", k, k_norm, k_norm_bias, freqs,
+            torch.arange(17), torch.arange(17).int() + 31, 3, 32, norm_eps=norm_eps)
+        results.append(result)
+        epsilon_scales.append(scales)
+    assert not torch.equal(*epsilon_scales), "norm_eps must affect K scales"
 
     # Exercise an outlier and a row stride not aligned to 32 bytes.
     k_outlier = torch.randn(17, HEAD_DIM + 1, generator=generator).bfloat16()

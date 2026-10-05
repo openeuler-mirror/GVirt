@@ -1262,7 +1262,7 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
             slotMapping.ptr, indexKCache.ptr, kScaleCache.ptr, isLong ? q.ptr : nullptr,
             isLong ? q8.ptr : nullptr, isLong ? qScale.ptr : nullptr,
             isLong ? scaledWeights.ptr : nullptr, kw.shape[0], kw.shape[1], indexNHeads,
-            freqs.shape[0], kScaleCache.numel, freqs.dtype != BF16, isLong);
+            freqs.shape[0], kScaleCache.numel, freqs.dtype != BF16, isLong, normEps);
         return;
     }
 
@@ -1284,7 +1284,8 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
 
 void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm,
                             const XTensor &kNormBias, const XTensor &freqs, const XTensor &position,
-                            const XTensor &slotMapping, XTensor &kCache, const XTensor &scaleCache)
+                            const XTensor &slotMapping, XTensor &kCache, const XTensor &scaleCache,
+                            float normEps)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1301,7 +1302,7 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
     aclrtlaunch_indexer_prepare_c8_bfloat16_t(
         rt.aivNum, rt.stream, k.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
         slotMapping.ptr, kCache.ptr, scaleCache.ptr, nullptr, nullptr, nullptr, nullptr, k.shape[0],
-        k.shape[1], 0, freqs.shape[0], scaleCache.numel, freqs.dtype != BF16, false);
+        k.shape[1], 0, freqs.shape[0], scaleCache.numel, freqs.dtype != BF16, false, normEps);
 }
 
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)

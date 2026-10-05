@@ -97,11 +97,11 @@ UB 布局针对 220 架构 bank group 手工排布(`indexer_prepare.h:59-129`):�
 
 ### C8 分支
 
-`index_k_cache` 为 INT8 时，`XliteOpIndexerPrepare` 调用 Lightning Indexer 的 C8 kernel（`csrc/op.cpp:1302`），不包含 Sparse Attention C8。
+`index_k_cache` 为 INT8 时，`XliteOpIndexerPrepare` 调用 Lightning Indexer 的 C8 kernel，不包含 Sparse Attention C8。
 
 `kw[T,160]` 为 BF16，K 的 LayerNorm 参数为 FP32。Indexer 使用 32 个头，head dim 为 128，RoPE dim 为 64，局部 `tpSize=1`。`T` 是 token 数。
 
-- K 先做 LayerNorm（`epsilon=1e-6`），再对前 64 维做交错 RoPE，随后做 Hadamard 和动态量化。结果按 `slot_mapping` 写入缓存，`slot=-1` 跳过。
+- K 先做 LayerNorm（使用传入的 `norm_eps`），再对前 64 维做交错 RoPE，随后做 Hadamard 和动态量化。结果按 `slot_mapping` 写入缓存，`slot=-1` 跳过。
 - `is_long` 为真时还处理 BF16 `q[T,4096]`：每个 head 做 RoPE、Hadamard 和动态量化，不做 LayerNorm。`kw`、`q` 都只读。
 
 LayerNorm、RoPE 和 Hadamard 的输出分别舍入到 BF16。Hadamard 的七级蝶形用 FP32 计算，归一化系数为 `BF16(1/√128)`。
@@ -111,8 +111,8 @@ LayerNorm、RoPE 和 Hadamard 的输出分别舍入到 BF16。Hadamard 的七级
 K 写入 INT8 `index_k_cache[B,BS,1,128]` 和 FP16 `k_scale_cache[B,BS,1,1]`，每个 token 一个 scale，短序列也写入两者。`B`、`BS` 分别是 cache block 数和大小。
 长序列还输出 INT8 `q8[T,4096]`、FP16 `q_scale[T,32]` 和 `scaled_weights[T,32]`。每个 Q head 一个 scale，`scaled_weights=FP16(原始头权重 × 已舍入到 FP16 的 Q scale)`，不使用传入的 `scale`。
 
-`indexer_prepare_c8`（`csrc/kernels/indexer_prepare_c8.h:372`）在一次向量 kernel 启动中处理 K/Q，导出文件为 `csrc/kernels/indexer_prepare_c8_bfloat16_t.cpp:6`。两条路径共用 `rope_hadamard_quant_c8`，RoPE、Hadamard 和量化的中间结果留在 UB，输出写入 GM。
+`indexer_prepare_c8`（`csrc/kernels/indexer_prepare_c8.h`）在一次向量 kernel 启动中处理 K/Q，导出文件为 `csrc/kernels/indexer_prepare_c8_bfloat16_t.cpp`。两条路径共用 `rope_hadamard_quant_c8`，RoPE、Hadamard 和量化的中间结果留在 UB，输出写入 GM。
 
 每核的 K、Q 阶段共用 13,952 字节 UB。K 处理结束后，用 `pipe_barrier(PIPE_ALL)` 等待本核流水线完成，再按 `is_long` 决定是否处理 Q。独立 K 测试入口不执行 Q。
 
-Python 接口见 `xlite/_C.pyi:2240`；测试见 `tests/kernels/indexer_k_cache_c8.py` 和 `tests/kernels/indexer_c8.py`。
+Python 接口见 `xlite/_C.pyi`；测试见 `tests/kernels/indexer_k_cache_c8.py` 和 `tests/kernels/indexer_c8.py`。

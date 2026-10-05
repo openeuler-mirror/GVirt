@@ -18,7 +18,7 @@ from pathlib import Path
 
 import torch
 
-from indexer_k_cache_c8 import check_values, frequencies, rotation
+from indexer_k_cache_c8 import NORM_EPS, check_values, frequencies, reference, rotation
 
 
 HEAD_DIM = 128
@@ -100,7 +100,8 @@ def allocate_cache(device, slots, block_size):
                        dtype=torch.float16, device=device))
 
 
-def call_prepare(rt, device, kw, k_norm, k_norm_bias, freqs, positions, slots, caches, q=None):
+def call_prepare(rt, device, kw, k_norm, k_norm_bias, freqs, positions, slots, caches, q=None,
+                 norm_eps=NORM_EPS):
     from xlite._C import indexer_prepare
 
     is_long = q is not None
@@ -121,7 +122,7 @@ def call_prepare(rt, device, kw, k_norm, k_norm_bias, freqs, positions, slots, c
     torch.npu.synchronize(device)
     indexer_prepare(rt, kw_npu, norm_npu, bias_npu, freqs_npu, positions_npu,
                     HEAD_DIM, N_HEADS, ROPE_DIM, caches[0].shape[1], caches[0],
-                    slots_npu, 1e-5, q_npu, 1 / 64, TOP_K, is_long,
+                    slots_npu, norm_eps, q_npu, 1 / 64, TOP_K, is_long,
                     k_scale_cache=caches[1], **outputs)
     for actual, original in zip(device_inputs, inputs):
         assert torch.equal(actual.cpu(), original), "C8 prepare must not mutate projected inputs"
@@ -213,6 +214,31 @@ def run_prepare_tests(rt, device):
                                     "is_long": query is not None})
                     logging.info("indexer_c8 complex frequencies (%d tokens, is_long=%s) passed",
                                  tokens, query is not None)
+    # Check epsilon in K-only and Q/K modes; Q has no LayerNorm.
+    kw = torch.randn(17, HEAD_DIM + N_HEADS, generator=generator).bfloat16()
+    kw[:, :HEAD_DIM] *= 1e-4
+    q = torch.randn(17, N_HEADS * HEAD_DIM, generator=generator).bfloat16()
+    positions, slots = torch.arange(17), torch.arange(17).int()
+    k_norm, k_norm_bias = torch.ones(HEAD_DIM), torch.zeros(HEAD_DIM)
+    epsilon_scales = []
+    epsilon_outputs = []
+    for norm_eps in (1e-6, 1e-5):
+        rotated = reference(kw, k_norm, k_norm_bias, freqs, positions, norm_eps)
+        for query in (None, q):
+            caches = allocate_cache(device, slots, 32)
+            outputs = call_prepare(rt, device, kw, k_norm, k_norm_bias, freqs,
+                                   positions, slots, caches, query, norm_eps=norm_eps)
+            k8 = caches[0].cpu().view(-1, HEAD_DIM)[:len(kw)]
+            scales = caches[1].cpu().view(-1)[:len(kw)]
+            result = check_values(k8, scales, rotated, f"epsilon-{norm_eps:g}")
+            result["is_long"] = query is not None
+            results.append(result)
+            logging.info("indexer_c8 epsilon=%g (is_long=%s) passed", norm_eps, query is not None)
+        epsilon_scales.append(scales)
+        epsilon_outputs.append(outputs)
+    assert not torch.equal(*epsilon_scales), "norm_eps must affect K scales"
+    for name in epsilon_outputs[0]:
+        assert torch.equal(epsilon_outputs[0][name], epsilon_outputs[1][name]), name
     return results
 
 
@@ -419,7 +445,7 @@ def run_invalid_tests(rt, device):
         "scaled_weights": torch.zeros(2, N_HEADS).half().to(device),
     }
     base_args = [rt, kw, k_norm, k_norm_bias, freqs, positions, HEAD_DIM, N_HEADS,
-                 ROPE_DIM, 32, caches[0], slots, 1e-5, q, 1., TOP_K, True]
+                 ROPE_DIM, 32, caches[0], slots, NORM_EPS, q, 1., TOP_K, True]
     prepare_changes = [
         ({"k_scale_cache": None}, {}),
         ({"q8": None}, {}),

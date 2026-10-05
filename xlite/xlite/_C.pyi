@@ -2345,7 +2345,7 @@ def indexer_prepare(
     C8 writes INT8 ``index_k_cache`` and FP16 ``k_scale_cache``.
     Long mode also writes INT8 ``q8`` and FP16 ``q_scale`` / ``scaled_weights``.
     ``scaled_weights`` contains head weights multiplied by Q scale.
-    C8 uses LN epsilon 1e-6, ignores ``scale``, and leaves ``kw``/``q`` unchanged.
+    C8 uses ``norm_eps``, ignores ``scale``, and leaves ``kw``/``q`` unchanged.
 
     Floating-point path:
 
@@ -2402,6 +2402,7 @@ def indexer_k_cache_c8(
     slot_mapping: torch.Tensor,
     k_cache: torch.Tensor,
     scale_cache: torch.Tensor,
+    norm_eps: float = 1e-6,
 ) -> None:
     """Prepare C8 indexer keys and write keys and scales to cache.
 
@@ -2413,7 +2414,7 @@ def indexer_k_cache_c8(
         rt (Runtime): Native runtime handle.
         k (torch.Tensor): Projected keys ``[tokens, stride]``, bf16; stride >= 128,
             only the first 128 columns are used.
-        k_norm (torch.Tensor): LayerNorm weight ``[128]``, fp32; epsilon is 1e-6.
+        k_norm (torch.Tensor): LayerNorm weight ``[128]``, fp32.
         k_norm_bias (torch.Tensor): LayerNorm bias ``[128]``, fp32.
         freqs (torch.Tensor): Rotary frequencies: bf16/fp32 ``[P,64]``,
             fp32 ``[P,32,2]``, or complex64 ``[P,32]``.
@@ -2423,6 +2424,7 @@ def indexer_k_cache_c8(
         k_cache (torch.Tensor): Output key cache ``[blocks, block_size, 1, 128]``, int8.
         scale_cache (torch.Tensor): Output per-key scales
             ``[blocks, block_size, 1, 1]``, fp16.
+        norm_eps (float): LayerNorm epsilon. Defaults to 1e-6.
 
     Returns:
         None: Caches are written in place; inputs and unwritten slots are unchanged.

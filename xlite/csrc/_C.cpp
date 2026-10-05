@@ -1984,7 +1984,7 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
 void IndexerKCacheC8(XRuntime &rt, const at::Tensor &k, const at::Tensor &kNorm,
                      const at::Tensor &kNormBias, const at::Tensor &freqs,
                      const at::Tensor &position, const at::Tensor &slotMapping, at::Tensor &kCache,
-                     at::Tensor &scaleCache)
+                     at::Tensor &scaleCache, float normEps)
 {
     XTensor x, w, b, f, pTensor, sTensor, kc, sc;
     InitXTensor(x, k);
@@ -1995,7 +1995,7 @@ void IndexerKCacheC8(XRuntime &rt, const at::Tensor &k, const at::Tensor &kNorm,
     InitXTensor(sTensor, slotMapping);
     InitXTensor(kc, kCache);
     InitXTensor(sc, scaleCache);
-    XliteOpIndexerKCacheC8(rt, x, w, b, f, pTensor, sTensor, kc, sc);
+    XliteOpIndexerKCacheC8(rt, x, w, b, f, pTensor, sTensor, kc, sc, normEps);
     rt.Synchronize();
 }
 
@@ -2928,7 +2928,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("q_scale") = py::none(), py::arg("scaled_weights") = py::none());
     m.def("indexer_k_cache_c8", &IndexerKCacheC8, py::arg("rt"), py::arg("k"), py::arg("k_norm"),
           py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("slot_mapping"),
-          py::arg("k_cache"), py::arg("scale_cache"));
+          py::arg("k_cache"), py::arg("scale_cache"), py::arg("norm_eps") = 1e-6f);
     m.def("quant", &Quant, py::arg("rt"), py::arg("x"), py::arg("scale_reciprocal"),
           py::arg("offset"), py::arg("out"));
     m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),

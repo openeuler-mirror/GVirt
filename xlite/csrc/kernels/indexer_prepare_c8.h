@@ -20,7 +20,6 @@ struct IndexerC8Buffers {
     static constexpr uint32_t rope_dim = 64;
     static constexpr uint32_t hadamard_stages = 7;
     static constexpr float quant_max = 127.0f;
-    static constexpr float norm_eps = 1e-6f;  // NOT the model's RMSNorm epsilon.
     // BF16(H / sqrt(128)), as exported by the target QuaRot recipe.
     static constexpr float hadamard_coefficient = 0.08837890625f;
 
@@ -286,7 +285,7 @@ __aicore__ inline void indexer_prepare_k_c8(GM_ADDR k, GM_ADDR weight, GM_ADDR b
                                             GM_ADDR positions, GM_ADDR slots, GM_ADDR k_cache,
                                             GM_ADDR scale_cache, uint32_t tokens,
                                             uint32_t row_stride, uint32_t max_position,
-                                            uint32_t capacity, bool freqs_fp32,
+                                            uint32_t capacity, bool freqs_fp32, float norm_eps,
                                             const IndexerC8Buffers &ub)
 {
     if (block_idx >= tokens) {
@@ -333,7 +332,7 @@ __aicore__ inline void indexer_prepare_k_c8(GM_ADDR k, GM_ADDR weight, GM_ADDR b
         reduce_sum(ub.tmp, 1, ub.dim);
         pipe_barrier(PIPE_V);
         SetMask(1);
-        vadds(ub.tmp, ub.tmp, float(ub.norm_eps), 1, 1, 1, 0, 0);
+        vadds(ub.tmp, ub.tmp, norm_eps, 1, 1, 1, 0, 0);
         pipe_barrier(PIPE_V);
         vsqrt(ub.tmp, ub.tmp, 1, 1, 1, 0, 0);
         set_flag(PIPE_V, PIPE_S, EVENT_ID0);
@@ -409,7 +408,7 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
                                           GM_ADDR q_scale, GM_ADDR scaled_weights, uint32_t tokens,
                                           uint32_t row_stride, uint32_t heads,
                                           uint32_t max_position, uint32_t capacity, bool freqs_fp32,
-                                          bool is_long)
+                                          bool is_long, float norm_eps)
 {
     set_atomic_none();
     set_mask_norm();
@@ -420,7 +419,7 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
     IndexerC8Buffers ub;
     ub.Init();
     indexer_prepare_k_c8(kw, weight, bias, freqs, positions, slots, k_cache, k_scale_cache, tokens,
-                         row_stride, max_position, capacity, freqs_fp32, ub);
+                         row_stride, max_position, capacity, freqs_fp32, norm_eps, ub);
     if (is_long) {
         indexer_prepare_q_c8(q, kw, freqs, positions, q8, q_scale, scaled_weights, tokens, heads,
                              max_position, freqs_fp32, ub);
@@ -432,11 +431,11 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
         GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR freqs, GM_ADDR positions, GM_ADDR slots, \
         GM_ADDR k_cache, GM_ADDR k_scale_cache, GM_ADDR q, GM_ADDR q8, GM_ADDR q_scale,            \
         GM_ADDR scaled_weights, uint32_t tokens, uint32_t row_stride, uint32_t heads,              \
-        uint32_t max_position, uint32_t capacity, bool freqs_fp32, bool is_long)                   \
+        uint32_t max_position, uint32_t capacity, bool freqs_fp32, bool is_long, float norm_eps)   \
     {                                                                                              \
         indexer_prepare_c8(kw, weight, bias, freqs, positions, slots, k_cache, k_scale_cache, q,   \
                            q8, q_scale, scaled_weights, tokens, row_stride, heads, max_position,   \
-                           capacity, freqs_fp32, is_long);                                         \
+                           capacity, freqs_fp32, is_long, norm_eps);                               \
     }
 #else
 #define INDEXER_PREPARE_C8_FUNC_DEFINE(dtype)                                                      \
@@ -444,7 +443,7 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
         GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR freqs, GM_ADDR positions, GM_ADDR slots, \
         GM_ADDR k_cache, GM_ADDR k_scale_cache, GM_ADDR q, GM_ADDR q8, GM_ADDR q_scale,            \
         GM_ADDR scaled_weights, uint32_t tokens, uint32_t row_stride, uint32_t heads,              \
-        uint32_t max_position, uint32_t capacity, bool freqs_fp32, bool is_long)                   \
+        uint32_t max_position, uint32_t capacity, bool freqs_fp32, bool is_long, float norm_eps)   \
     {                                                                                              \
     }
 #endif

@@ -187,7 +187,8 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
 // Native callers validate indices and order producers/consumers on rt.stream.
 void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm,
                             const XTensor &kNormBias, const XTensor &freqs, const XTensor &position,
-                            const XTensor &slotMapping, XTensor &kCache, const XTensor &scaleCache);
+                            const XTensor &slotMapping, XTensor &kCache, const XTensor &scaleCache,
+                            float normEps = 1e-6f);
 
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
                   XTensor &out);
