@@ -366,7 +366,6 @@ public:
                topK <= queryPosBase + queryLen);
         constexpr float min = FLOAT_MIN;
 
-        constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(WeightDtype);
         constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
         int topKSortRepeat = DIV_ROUND_UP(topK, SORT_BLOCK_SIZE);
 
