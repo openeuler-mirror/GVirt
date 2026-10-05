@@ -145,10 +145,12 @@ public:
         // in
         this->in[0] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
         off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(WeightDtype), VECTOR_MAX_BYTESIZE);
-        this->in[1] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
         // C8 uses in[0] for K scales; in[1] is unused.
         if constexpr (!std::is_same<Dtype, int8_t>::value) {
+            this->in[1] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
             off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(WeightDtype), VECTOR_MAX_BYTESIZE);
+        } else {
+            this->in[1] = nullptr;
         }
         this->lastSort[0] = reinterpret_cast<__ubuf__ float *>(off);
         off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
