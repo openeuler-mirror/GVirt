@@ -53,7 +53,7 @@ GM → (MTE2) → UB 输入缓冲 → (V pipe) `convert_input` 转 fp32 → 向�
 ### 分块与多 Block 并行
 
 - **主路径**:一个 token(一行中 `norm_dim * cnt_per_token` 的整段)一次性搬入 UB,不按 norm_dim 切块。因此 UB 需容纳 `total_dim = norm_dim * cnt_per_token` 个元素的双缓冲,大 hidden_size(如 8192)时 fp32 计算缓冲约占大头。
-- **多 Block 并行**:按 token 循环跨 step 分配,`for (loop = first; loop < token_num; loop += block_num)`(norm.h:365),`block_idx` 不同的 AIV 处理不同 token。`coreOffset` 机制(norm.h:364,`first = (block_idx + block_num - coreOffset) % block_num`)让多次 norm 调用(如 qk_rms_norm 的 Q/K 两段、mla_prepare 的三段)在同一批核上接力,行号从上次结束位置继续轮转,避免每次都从 block 0 起跳造成负载不均;kernel 结束时通过 `nextCoreOffset = (coreOffset + token_num) % block_num` 把终点交回调用者(norm.h:359-361)。
+- **多 Block 并行**:按 token 循环跨 step 分配,`for (loop = first; loop < token_num; loop += block_num)`(norm.h:369),`block_idx` 不同的 AIV 处理不同 token。`coreOffset` 机制(norm.h:368,`first = (block_idx + block_num - coreOffset) % block_num`)让多次 norm 调用(如 qk_rms_norm 的 Q/K 两段、mla_prepare 的三段)在同一批核上接力,行号从上次结束位置继续轮转,避免每次都从 block 0 起跳造成负载不均;kernel 结束时通过 `nextCoreOffset = (coreOffset + token_num) % block_num` 把终点交回调用者(norm.h:363-365)。
 - **大维度分块路径** `rmsnorm_noaffine_tiled`:当 `useNorm && !weight && norm_dim > 6144 && cnt_per_token == 1 && kind == Rms`(norm.h:237)时启用,专用于超大 hidden_size 的无仿射 RMSNorm(如 MHA qkNormFull 的 variance 阶段)。按 `tileDim = 8192` 分两遍扫描:第一遍累加 `sum(x^2)` 得标量,第二遍重读 GM 做 `y = x * rsqrt(sum/n + eps)`(行约 32KB,重读代价低)。该路径 UB 只需约 96KB,避开单次整行搬入的 UB 压力。
 
 ### UB 内存布局(主路径,norm.h:262-306)
@@ -66,7 +66,7 @@ GM → (MTE2) → UB 输入缓冲 → (V pipe) `convert_input` 转 fp32 → 向�
 | calc0 / calc1 | `ROUND_UP(total_dim*4, 32)` ×2 | fp32 计算缓冲(calc0=x,calc1=平方和/均值) |
 | weight_calc / bias_calc | fp32 尺寸 | 仿射参数,加载一次后按 cnt_per_token 复制扩展 |
 
-weight/bias 先加载到 UB 并转 fp32(norm.h:313-327),再对 `cnt_per_token > 1` 的情况用 `copy_ubuf_to_ubuf` 在段间复制(norm.h:333-348),避免每行重复从 GM 搬运。
+weight/bias 先 `copy_gm_to_ubuf` 搬入 UB 再升 fp32:`Dtype=float` 时直接 `copy_ubuf_to_ubuf`(权重已是 fp32,无需 vconv),其余 dtype 经 `convert_input` 升 fp32(norm.h:313-331);当前 host 仅以 FP16/BF16 输入 launch(norm_float16_t / norm_bfloat16_t),故 float 分支为预留、实际走 `convert_input`。再对 `cnt_per_token > 1` 的情况用 `copy_ubuf_to_ubuf` 在段间复制(norm.h:337-352),避免每行重复从 GM 搬运。
 
 ### 流水线同步
 
@@ -76,19 +76,19 @@ MTE2(搬入)/ V(计算)/ MTE3(搬出)三管线,事件标志协议:
 - `MTE2→V`:数据就绪,可以转换/计算;
 - `V→MTE3`(EVENT_ID0/1):输出缓冲就绪;`MTE3→V`:输出缓冲已被搬出、可复用。
 
-输入、输出各自 ping-pong(`inCurr`/`outCurr` 翻转,norm.h:381-390、539),搬入下一行与搬出上一行同当前行计算重叠。kernel 末尾 `wait_flag` 收干净所有事件并 `pipe_barrier(PIPE_ALL)`(norm.h:541-545)。标量回读(如 sum 后取 `*calc`)通过 `set_flag/wait_flag(PIPE_V, PIPE_S, EVENT_ID0)` 同步 S 管线(norm.h:429-430)。
+输入、输出各自 ping-pong(`inCurr`/`outCurr` 翻转,norm.h:385-394、539),搬入下一行与搬出上一行同当前行计算重叠。kernel 末尾 `wait_flag` 收干净所有事件并 `pipe_barrier(PIPE_ALL)`(norm.h:545-549)。标量回读(如 sum 后取 `*calc`)通过 `set_flag/wait_flag(PIPE_V, PIPE_S, EVENT_ID0)` 同步 S 管线(norm.h:433-434)。
 
 ### 关键计算步骤
 
-1. **(可选)残差加**:`addInOut` 非空时搬入第二路数据,`vadd(calc0, calc1, calc0)` 后先 `convert_output` 写回 addInOut,再继续归一化(norm.h:392-417)。
-2. **LayerNorm 减均值**:`vmuls` 乘 `1/n` → `reduce_sum` 逐段求和得 mean → `duplicate_item` 把段内标量广播 → `vsub` 减去均值(norm.h:420-439)。
-3. **方差**:`vmul` 平方;`kind != L2` 时再 `vmuls` 乘 `1/n`(RMSNorm 除以维度,L2Norm 不除);`reduce_sum` 逐段归约到段首元素(norm.h:451-465)。若传入 variance,则直接读入 GM 方差并 `vmuls` 乘 `1/tpSize`(norm.h:441-450)——对应 rmsnorm_full:本 rank 方差 AllReduce 后求和,除以 tpSize 还原全局均值。
-4. **归一化**:`vadds` 加 eps → `vsqrt` → `duplicate_item` 广播 → `vdiv` 除(norm.h:468-487);`SetMask(1)` + 特殊 stride 控制只对每段首元素做 sqrt 类运算(norm.h:468-475)。
-5. **仿射**:`vmul(weight)`、`vadd(bias)`(norm.h:490-499)。
-6. **输出**:useNorm 时 `convert_output` 转 Dtype 写 GM(outFp32 时 fp32 直写);variance-only(useNorm=false)时只把每段方差(fp32)写出(norm.h:509-537)。
-7. **(可选)写 KV cache**:kcache/slot_mapping/block_size 非空时,归一化结果按 `slot_idx` 定位额外写一份到 paged cache(norm.h:522-526),该路径目前由 mla_prepare 等调用方使用,`norm_*` 导出符号固定传 nullptr(norm.h:557)。
+1. **(可选)残差加**:`addInOut` 非空时搬入第二路数据,`vadd(calc0, calc1, calc0)` 后先 `convert_output` 写回 addInOut,再继续归一化(norm.h:396-421)。
+2. **LayerNorm 减均值**:`vmuls` 乘 `1/n` → `reduce_sum` 逐段求和得 mean → `duplicate_item` 把段内标量广播 → `vsub` 减去均值(norm.h:424-443)。
+3. **方差**:`vmul` 平方;`kind != L2` 时再 `vmuls` 乘 `1/n`(RMSNorm 除以维度,L2Norm 不除);`reduce_sum` 逐段归约到段首元素(norm.h:455-469)。若传入 variance,则直接读入 GM 方差并 `vmuls` 乘 `1/tpSize`(norm.h:445-454)——对应 rmsnorm_full:本 rank 方差 AllReduce 后求和,除以 tpSize 还原全局均值。
+4. **归一化**:`vadds` 加 eps → `vsqrt` → `duplicate_item` 广播 → `vdiv` 除(norm.h:472-491);`SetMask(1)` + 特殊 stride 控制只对每段首元素做 sqrt 类运算(norm.h:472-479)。
+5. **仿射**:`vmul(weight)`、`vadd(bias)`(norm.h:494-503)。
+6. **输出**:useNorm 时 `convert_output` 转 Dtype 写 GM(outFp32 时 fp32 直写);variance-only(useNorm=false)时只把每段方差(fp32)写出(norm.h:513-541)。
+7. **(可选)写 KV cache**:kcache/slot_mapping/block_size 非空时,归一化结果按 `slot_idx` 定位额外写一份到 paged cache(norm.h:526-530),该路径目前由 mla_prepare 等调用方使用,`norm_*` 导出符号固定传 nullptr(norm.h:561)。
 
-`reduce_sum`(norm.h:11-26)对 `norm_dim == 128` 走快速路径:先一条 `vadd` 折半,再逐段 `vcadd`(`Order_t::ONLY_VALUE` 语义,结果落在段首);其他维度调用通用 `ReduceSum`(kernel_macro.h:711,二分折叠 + `vcadd` 收尾)。`duplicate_item`(norm.h:28-38)经 S 管线读段首标量后 `vector_dup` 广播整段。
+`reduce_sum`(norm.h:11-26)对 `norm_dim == 128` 走快速路径:先一条 `vadd` 折半,再逐段 `vcadd`(`Order_t::ONLY_VALUE` 语义,结果落在段首);其他维度调用通用 `ReduceSum`(kernel_macro.h:714,二分折叠 + `vcadd` 收尾)。`duplicate_item`(norm.h:28-38)经 S 管线读段首标量后 `vector_dup` 广播整段。
 
 ### 边界处理
 

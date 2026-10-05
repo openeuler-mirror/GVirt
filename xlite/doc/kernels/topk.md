@@ -12,7 +12,7 @@ Python 侧调用(`tests/kernels/topk.py:73`):
 topk(rt, scores, indices, out_indices, query_lens, cached_lens, K)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:1351`(`XliteOpTopK`):`maxSeqLen = scores.shape[1]`;`maxSeqLen <= k` 时直接跳过;`k != 2048` 抛错(注释明确 "Only topK equals 2048 is supported",`csrc/kernels/topk.h:13`)。kernel 签名(`csrc/kernels/topk.h:363`):
+host 侧 launch 见 `csrc/op.cpp:1360`(`XliteOpTopK`):`maxSeqLen = scores.shape[1]`;`maxSeqLen <= k` 时直接跳过;`k != 2048` 抛错(注释明确 "Only topK equals 2048 is supported",`csrc/kernels/topk.h:13`)。kernel 签名(`csrc/kernels/topk.h:362`):
 
 ```cpp
 topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR queryLens,
@@ -35,7 +35,7 @@ topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR outIndices, GM_ADDR queryL
 | `topk_bfloat16_t` | `csrc/kernels/topk_bfloat16_t.cpp` | scores 为 bf16(核内 `vconv_bf162f32` 转 fp32 再排序) |
 | `topk_float` | `csrc/kernels/topk_float.cpp` | scores 为 fp32 |
 
-dtype 分派见 `csrc/op.cpp:1369-1376`(要求 indices 为 INT32)。纯向量核(`__DAV_C220_VEC__`,以 `rt.aivNum` launch)。
+dtype 分派见 `csrc/op.cpp:1378-1385`(要求 indices 为 INT32)。纯向量核(`__DAV_C220_VEC__`,以 `rt.aivNum` launch)。
 
 ## 实现原理
 
@@ -47,16 +47,16 @@ dtype 分派见 `csrc/op.cpp:1369-1376`(要求 indices 为 INT32)。纯向量核
 
 每行的处理(`topk.h:164-197`):
 
-1. **`initTopk()`**(`topk.h:309-326`):把当前全局候选缓冲 `topkBuf[0]` 初始化为 topK 个 `(-inf, 0)`(值+索引)对 —— 用偶/奇 mask 的两次 `vector_dup` 分别填充 2048 个 float 的 `-inf` 与 0;
+1. **`initTopk()`**(`topk.h:308-325`):把当前全局候选缓冲 `topkBuf[0]` 初始化为 topK 个 `(-inf, 0)`(值+索引)对 —— 用偶/奇 mask 的两次 `vector_dup` 分别填充 2048 个 float 的 `-inf` 与 0;
 2. **chunk 循环**:`for (processed = 0; processed < len;)` 每次取 `length = min(len - processed, CHUNK_SIZE=2048)`(`topk.h:168-169`,常量定义 `topk.h:35`);
    - `CopyInIndices/CopyInScores`:该 chunk 的索引与得分 GM→UB(乒乓交替);
    - `PadInputs`(`topk.h:224-277`):不足 2048 时尾块用 `vector_dup` 填 `-inf`(float)或 `-3.4e38`(bf16,避免 bf16 的 inf 表示问题),mask 精确控制尾部对齐;
    - `ConvertInput`(`topk.h:279-288`):bf16 时 `vconv_bf162f32` 统一转 fp32;
-   - `Sort(CHUNK_SIZE, current)`(`topk.h:290-307`):
+   - `Sort(CHUNK_SIZE, current)`(`topk.h:290-306`):
      - `vbitsort(scratch0, scoresIn, indicesIn, 2048/32)`:64 组、每组 32 元素的位排序(值+索引成对,每组输出 64 元素);
-     - `MrgSort(scratch0, scratch1, repeat, &dstBufIdx)`(`csrc/kernels/kernel_macro.h:748-788`):`vmrgsort4` 四路归并循环把 64 组归并为整块降序序列 `localSort`;
+     - `MrgSort(scratch0, scratch1, repeat, &localSort)`(`csrc/kernels/kernel_macro.h:772-845`):`vmrgsort4` 四路归并循环把 64 组归并为整块降序序列,最终结果缓冲指针经出参 `&localSort` 直接写回(新 API 以 `dst` 指针出参取代旧 `dstBufIdx` 三元选择,默认 `topK=0` 即归并全部、`preferredDst=nullptr`);
      - `Merge2(topk1, topk0, localSort, 1, 2048)`(`topk.h:121-134`):用 `vmrgsort4`(只开 2 个有效队列,`validBits=0b11`,两队列长度均为 2048)把"上一轮的全局候选 topk0"与"本 chunk 的 localSort"二路归并成新的全局候选 `topk1` —— 归并结果天然截断在前 2048 对(队列长度编码 `blockSize | blockSize<<16`);
-3. **`FillOutScores(mIdx, current)`**(`topk.h:328-339`):最终候选在 `topkBuf[current]`,`vreducev2`(mode=2,隔 2 取 1)抽出索引载荷,`copy_ubuf_to_gm` 写到 `outIndicesGm + mIdx*topK`。
+3. **`FillOutScores(mIdx, current)`**(`topk.h:327-338`):最终候选在 `topkBuf[current]`,`vreducev2`(mode=2,隔 2 取 1)抽出索引载荷,`copy_ubuf_to_gm` 写到 `outIndicesGm + mIdx*topK`。
 
 因此本算法本质是 **k 路归并式流式 topk**:维护一个始终有序的 topK 候选集,每个 2048 chunk 完整排序后与候选集做一次二路归并,复杂度 O(len/2048 × 归并代价),无需堆或位图,完全由 `vbitsort`/`vmrgsort4` 硬件排序指令承担。
 

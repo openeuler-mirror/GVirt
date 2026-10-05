@@ -48,7 +48,7 @@ block 数由 host 侧按段数缩放：decode（约 48 段）只起几个 block�
 - 初始 `set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0/1)` 各一次，预置两个半区可用（`csrc/kernels/repeat_interleave.cpp:59-61`）；
 - 每轮：先写上一段（`wait_flag(PIPE_MTE2, PIPE_MTE3, ID0+wbuf)` 确保 wbuf 已读完 → `CopyUbufToGmAligned` → `set_flag(PIPE_MTE3, PIPE_MTE2, ID0+wbuf)` 归还 wbuf），再读当前段（`wait_flag(PIPE_MTE3, PIPE_MTE2, ID0+curr)` 等 curr 空闲 → `CopyGmToUbufAligned` → `set_flag(PIPE_MTE2, PIPE_MTE3, ID0+curr)` 通知可写）（`csrc/kernels/repeat_interleave.cpp:75-86`）；
 - 循环外 flush 最后一个 pending 段，末尾 `wait_flag(PIPE_MTE3, PIPE_MTE2, ID0/1)` + `pipe_barrier(PIPE_ALL)` 收尾（`csrc/kernels/repeat_interleave.cpp:94-104`）。
-- 搬运原语 `CopyGmToUbufAligned`/`CopyUbufToGmAligned` 按字节数 32B/2B/1B 对齐自适应选择 DMA 原语（`csrc/kernels/kernel_macro.h:813-839`）。
+- 搬运原语 `CopyGmToUbufAligned`/`CopyUbufToGmAligned` 按字节数 32B/2B/1B 对齐自适应选择 DMA 原语（`csrc/kernels/kernel_macro.h:871-896`）。
 
 ### 边界处理
 

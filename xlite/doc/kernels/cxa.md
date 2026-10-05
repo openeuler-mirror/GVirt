@@ -83,7 +83,7 @@ scores workspace 整体被切成两块 ping-pong 缓冲(`PINGPONG_BUF_NUM = 2`):
 
 入口 `csrc/kernels/cxa.h:106`,cube 核执行,按 batch 遍历,批内任务按 `firstCore = (blockIdx + blockNum - coreOffset) % blockNum` 起始、步长 `blockNum` 轮转分发(`coreOffset` 跨 batch 累积,避免所有 batch 都从 0 号核开始):
 
-1. `GetOptimalM0(queryLen, cachedLen)`(`csrc/kernels/kernel_macro.h:883`)按序列长度选择 M0(短序列 16,totalLen ≤12K 取 128,随后随长度增大在 112/96/80/64/48/32 间逐级递减,超长序列降到 16);`queryTileSize = m0 / nHeads`(即一个 tile 内所有头一起算,`mSize = queryLen * nHeads` 行)。
+1. `GetOptimalM0(queryLen, cachedLen)`(`csrc/kernels/kernel_macro.h:956`)按序列长度选择 M0(短序列 16,totalLen ≤12K 取 128,随后随长度增大在 112/96/80/64/48/32 间逐级递减,超长序列降到 16);`queryTileSize = m0 / nHeads`(即一个 tile 内所有头一起算,`mSize = queryLen * nHeads` 行)。
 2. 每个 query tile 调 `CxaAicHelper::RunAicQK` 计算本 tile 的 QK 并把分数写入 `scores[curr]`,随后 `ffts_cross_core_sync(PIPE_FIX, config)` 通知 AIV "QK 完成"(flag 0,mode 2 = 组内 AIC/AIV 同步,`csrc/kernels/cxa.h:183`)。
 3. 当前 tile 的 QK 与上一 tile 的 `RunAicSV` 流水重叠:若 `needDoSV`,先 `wait_flag_dev(1)` 等 AIV 完成上一 tile 的 softmax,再执行 `RunAicSV(scores[last], ...)`,用上一 tile 的分数做 softmax×V,把输出原位写到 `output[lastMhOffset]`(`csrc/kernels/cxa.h:193`)。`last*` 系列变量缓存上一 tile 的全部上下文(batch、GM 偏移、block table 指针、`batchCompressKCache`、calcLen 等)。
 4. 循环结束后补做最后一个 tile 的 SV(`csrc/kernels/cxa.h:225`)。

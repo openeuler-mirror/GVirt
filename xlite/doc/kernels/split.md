@@ -50,7 +50,7 @@ host 侧不做 dtype 分派；测试覆盖 float16/bfloat16/float32/int32/int8�
 
 ### 流水线同步
 
-初始 `set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0/1)` 预置两半区（`csrc/kernels/split.cpp:56-58`）；每轮"写上一段 / 读当前段"用 `PIPE_MTE2→PIPE_MTE3`、`PIPE_MTE3→PIPE_MTE2` 的对应 EVENT_ID 握手；末尾 `wait_flag` ID0/1 + `pipe_barrier(PIPE_ALL)` 收尾（`csrc/kernels/split.cpp:142-144`）。搬运原语按字节数 32B/2B/1B 对齐自适应（`csrc/kernels/kernel_macro.h:813-839`），支持任意奇数字节段。
+初始 `set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0/1)` 预置两半区（`csrc/kernels/split.cpp:56-58`）；每轮"写上一段 / 读当前段"用 `PIPE_MTE2→PIPE_MTE3`、`PIPE_MTE3→PIPE_MTE2` 的对应 EVENT_ID 握手；末尾 `wait_flag` ID0/1 + `pipe_barrier(PIPE_ALL)` 收尾（`csrc/kernels/split.cpp:142-144`）。搬运原语按字节数 32B/2B/1B 对齐自适应（`csrc/kernels/kernel_macro.h:871-896`），支持任意奇数字节段。
 
 ### 边界处理与 host 侧校验
 
