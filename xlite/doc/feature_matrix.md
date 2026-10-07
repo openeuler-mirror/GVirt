@@ -22,7 +22,7 @@
 | Dsv4 Dsa Overlap | N/A | ✅ |
 | Speculative Decoding(MTP) | ✅ | ✅ |
 | Speculative Decoding(Eager3) | ❌ | ❌ |
-| EPLB | ❌ | ❌ |
+| EPLB | ✅ | ✅ |
 | EP | ✅ | ✅ |
 | Flashcomm1 | N/A | ✅ |
 | Fuse Muls Add | N/A | ✅ |

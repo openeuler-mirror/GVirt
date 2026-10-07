@@ -18,6 +18,8 @@
 
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
+    // Physical slot count = logical + redundant; equals nRoutedExperts when EPLB is off.
+    uint32_t totalPhysicalExperts = c.nRoutedExperts + c.numRedundantExperts;
     attnNorm.resize(c.nLayers);
     attnOut.resize(c.nLayers);
     mhaQKV.resize(c.nLayers);
@@ -64,9 +66,11 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     _moeREDownDeqScale.resize(c.nLayers);
     _moeREUpGateScaleBias.resize(c.nLayers);
     _moeREDownScaleBias.resize(c.nLayers);
+    log2phy.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
-        moeREUpGate[i].resize(c.nRoutedExperts);
-        moeREDown[i].resize(c.nRoutedExperts);
+        // Indexed by GLOBAL physical slot; each EP rank fills its [start, end) slice.
+        moeREUpGate[i].resize(totalPhysicalExperts);
+        moeREDown[i].resize(totalPhysicalExperts);
     }
 
     attnSink.resize(c.nLayers);
@@ -96,15 +100,15 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mhaKNormBias.resize(c.nLayers);
     mlpNormBias.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
-        moeREUpGateDeqScale[i].resize(c.nRoutedExperts);
-        moeREDownDeqScale[i].resize(c.nRoutedExperts);
+        moeREUpGateDeqScale[i].resize(totalPhysicalExperts);
+        moeREDownDeqScale[i].resize(totalPhysicalExperts);
     }
     if (c.quantMsdW4a8) {
         moeREUpGateScaleBias.resize(c.nLayers);
         moeREDownScaleBias.resize(c.nLayers);
         for (uint32_t i = 0; i < c.nLayers; i++) {
-            moeREUpGateScaleBias[i].resize(c.nRoutedExperts);
-            moeREDownScaleBias[i].resize(c.nRoutedExperts);
+            moeREUpGateScaleBias[i].resize(totalPhysicalExperts);
+            moeREDownScaleBias[i].resize(totalPhysicalExperts);
         }
     }
 
@@ -130,9 +134,10 @@ void XModel::Init(void)
     size_t size;
     bool isWeightEmpty = true;
     void *ptr;
-    uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
-    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
-    uint32_t end = start + nLocalRoutedExperts;
+    uint32_t totalPhysicalExperts = _c.nRoutedExperts + _c.numRedundantExperts;
+    uint32_t nLocalPhysicalExperts = totalPhysicalExperts / _c.moeEpSize;
+    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalPhysicalExperts;
+    uint32_t end = start + nLocalPhysicalExperts;
 
     if (_c.nDenseLayers != _c.nLayers || _c.attnType == XMODEL_ATTN_DSA) {
         size_t maxIndices = _c.maxSeqLen > _c.nRoutedExperts ? _c.maxSeqLen : _c.nRoutedExperts;
@@ -173,25 +178,25 @@ void XModel::Init(void)
         }
     }
 
-    size = _c.nRoutedExperts * XDtypeBit(INT64) / 8;
+    size = totalPhysicalExperts * XDtypeBit(INT64) / 8;
     for (uint32_t i = _c.nDenseLayers; i < _c.nLayers; i++) {
-        weights.resize(_c.nRoutedExperts);
+        weights.resize(totalPhysicalExperts);
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-        for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
+        for (uint32_t j = 0; j < totalPhysicalExperts; j++) {
             weights[j] = reinterpret_cast<uint64_t>(moeREUpGate[i][j].ptr);
         }
         CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-        _moeREUpGate[i].Init({_c.nRoutedExperts}, INT64, ptr);
+        _moeREUpGate[i].Init({totalPhysicalExperts}, INT64, ptr);
 
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-        for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
+        for (uint32_t j = 0; j < totalPhysicalExperts; j++) {
             weights[j] = reinterpret_cast<uint64_t>(moeREDown[i][j].ptr);
         }
         CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-        _moeREDown[i].Init({_c.nRoutedExperts}, INT64, ptr);
+        _moeREDown[i].Init({totalPhysicalExperts}, INT64, ptr);
 
         isWeightEmpty = true;
-        for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
+        for (uint32_t j = 0; j < totalPhysicalExperts; j++) {
             if (j >= start && j < end) {
                 weights[j] = reinterpret_cast<uint64_t>(moeREUpGateDeqScale[i][j].ptr);
                 if (weights[j] != 0) {
@@ -204,11 +209,11 @@ void XModel::Init(void)
         if (!isWeightEmpty) {
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-            _moeREUpGateDeqScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
+            _moeREUpGateDeqScale[i].Init({totalPhysicalExperts}, INT64, ptr);
         }
 
         isWeightEmpty = true;
-        for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
+        for (uint32_t j = 0; j < totalPhysicalExperts; j++) {
             if (j >= start && j < end) {
                 weights[j] = reinterpret_cast<uint64_t>(moeREDownDeqScale[i][j].ptr);
                 if (weights[j] != 0) {
@@ -222,23 +227,23 @@ void XModel::Init(void)
         if (!isWeightEmpty) {
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-            _moeREDownDeqScale[i].Init({_c.nRoutedExperts}, INT64, ptr);
+            _moeREDownDeqScale[i].Init({totalPhysicalExperts}, INT64, ptr);
         }
 
         if (_c.quantMsdW4a8) {
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-            for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
+            for (uint32_t j = 0; j < totalPhysicalExperts; j++) {
                 weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScaleBias[i][j].ptr);
             }
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-            _moeREUpGateScaleBias[i].Init({_c.nRoutedExperts}, INT64, ptr);
+            _moeREUpGateScaleBias[i].Init({totalPhysicalExperts}, INT64, ptr);
 
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-            for (uint32_t j = 0; j < _c.nRoutedExperts; j++) {
+            for (uint32_t j = 0; j < totalPhysicalExperts; j++) {
                 weights[j] = reinterpret_cast<uint64_t>(moeREDownScaleBias[i][j].ptr);
             }
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
-            _moeREDownScaleBias[i].Init({_c.nRoutedExperts}, INT64, ptr);
+            _moeREDownScaleBias[i].Init({totalPhysicalExperts}, INT64, ptr);
         }
     }
 
@@ -1123,9 +1128,10 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
     // NOTE: the input XTensor's must already be viewed/padded to match DPs, if needed
     uint32_t m = rt.maxTokensDp;  // should equal to `tokenSorted.shape[0]`
     uint32_t mAllDp = m * _c.defDpSize;
-    uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
-    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
-    uint32_t end = start + nLocalRoutedExperts;
+    uint32_t totalPhysicalExperts = _c.nRoutedExperts + _c.numRedundantExperts;
+    uint32_t nLocalPhysicalExperts = totalPhysicalExperts / _c.moeEpSize;
+    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalPhysicalExperts;
+    uint32_t end = start + nLocalPhysicalExperts;
 
     if (_c.defDpSize > 1) {
         XTensor &inputPerDp = tokenSorted, &weightsPerDp = weights, &routingPerDp = routing;
@@ -1136,9 +1142,9 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
         // 获取最终输出用的tensor
         XTensor &inputAllDp = rt.GetTensor({mAllDp, _c.hiddenSize}, inputPerDp.dtype, DBG_LOC);
         XTensor &weightsAllDp =
-            rt.GetTensor({mAllDp, _c.nRoutedExperts}, weightsPerDp.dtype, DBG_LOC);
+            rt.GetTensor({mAllDp, totalPhysicalExperts}, weightsPerDp.dtype, DBG_LOC);
         XTensor &routingAllDp =
-            rt.GetTensor({mAllDp, _c.nRoutedExperts}, routingPerDp.dtype, DBG_LOC);
+            rt.GetTensor({mAllDp, totalPhysicalExperts}, routingPerDp.dtype, DBG_LOC);
 
         bool inGraph = rt.AllGatherInGraphActive(DP) && (m <= _c.maxBatch);
 
@@ -1183,8 +1189,8 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
             rt.PutTensor(*recvOut);
         }
 
-        XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
-        XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
+        XTensor &unpIdx = rt.GetTensor({totalPhysicalExperts, mAllDp + 1}, INT32, DBG_LOC);
+        XTensor &expertsCounts = rt.GetTensor({totalPhysicalExperts}, INT32, DBG_LOC);
         size_t shape0 = mAllDp * _c.nActExperts;
         if (mAllDp >= XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD) {
             shape0 = static_cast<size_t>(mAllDp * _c.nActExperts * rt.activeTokensRatioPerEp);
@@ -1195,8 +1201,8 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
         rt.PutTensor(inputAllDp);
         return {weightsAllDp, routingAllDp, unpIdx, expertsSorted, expertsCounts, {}};
     } else {
-        XTensor &unpIdx = rt.GetTensor({_c.nRoutedExperts, mAllDp + 1}, INT32, DBG_LOC);
-        XTensor &expertsCounts = rt.GetTensor({_c.nRoutedExperts}, INT32, DBG_LOC);
+        XTensor &unpIdx = rt.GetTensor({totalPhysicalExperts, mAllDp + 1}, INT32, DBG_LOC);
+        XTensor &expertsCounts = rt.GetTensor({totalPhysicalExperts}, INT32, DBG_LOC);
         size_t shape0 = mAllDp * _c.nActExperts;
         if (mAllDp >= XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD) {
             shape0 = static_cast<size_t>(mAllDp * _c.nActExperts * rt.activeTokensRatioPerEp);
@@ -1214,9 +1220,9 @@ void XModel::ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weig
 {
     // NOTE: the input XTensor's must already be viewed/padded to match DPs, if needed
     uint32_t m = rt.maxTokensDp, mAllDp = rt.maxTokensDp * _c.defDpSize;
-    uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
-    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
-    uint32_t end = start + nLocalRoutedExperts;
+    uint32_t nLocalPhysicalExperts = (_c.nRoutedExperts + _c.numRedundantExperts) / _c.moeEpSize;
+    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalPhysicalExperts;
+    uint32_t end = start + nLocalPhysicalExperts;
 
     if (_c.defDpSize > 1) {
         bool inGraph = rt.ReduceScatterInGraphActive(DP) && (m <= _c.maxBatch);
@@ -1491,15 +1497,34 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     // the original shape of hiddenState must not be smaller than (maxTokensDp, hiddenSize)
     size_t m = rt.currTokens, M = rt.maxTokensDp;
     uint32_t intermediateSize = _c.moeIntermediateSize / _c.moeTPSize;
-    uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
-    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
-    uint32_t end = start + nLocalRoutedExperts;
+    uint32_t totalPhysicalExperts = _c.nRoutedExperts + _c.numRedundantExperts;
+    uint32_t nLocalPhysicalExperts = totalPhysicalExperts / _c.moeEpSize;
+    uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalPhysicalExperts;
+    uint32_t end = start + nLocalPhysicalExperts;
     enum XDtype moeReDtype = moeREUpGate[layer][start].dtype;
 
+    // EPLB + MoE AllToAll is not yet supported (the AllToAll path is un-adapted for
+    // totalPhysicalExperts). EPLB + DP>1 (non-AllToAll) is supported.
+    if (_c.numRedundantExperts > 0 && rt.enableMoEAllToAll) {
+        throw std::runtime_error("EPLB + MoE AllToAll is not yet supported");
+    }
+
     auto [w, r] = ForwardMoEGate(rt, layer, hiddenState);
+    // Remap gate outputs from logical to physical columns via log2phy so Dispatch indexes the
+    // correct physical weight slots. Skipped (zero overhead) when log2phy is absent (non-EPLB).
+    XTensor *wIn = &w, *rIn = &r;
+    if (log2phy[layer].ptr != nullptr) {
+        XTensor &wPhy = rt.GetTensor({M, totalPhysicalExperts}, w.dtype, DBG_LOC);
+        XTensor &rPhy = rt.GetTensor({M, totalPhysicalExperts}, BIT1, DBG_LOC);
+        XliteOpRemapGateOutputs(rt, w, r, wPhy, rPhy, log2phy[layer]);
+        rt.PutTensor(w);
+        rt.PutTensor(r);
+        wIn = &wPhy;
+        rIn = &rPhy;
+    }
     auto [weights, routing, unpIdx, expertsSorted, expertsCounts, meta] =
-        rt.enableMoEAllToAll ? ForwardMoEDispatchAllToAll(rt, hiddenState, w, r)
-                             : ForwardMoEDispatch(rt, hiddenState.View(M), w, r);
+        rt.enableMoEAllToAll ? ForwardMoEDispatchAllToAll(rt, hiddenState, *wIn, *rIn)
+                             : ForwardMoEDispatch(rt, hiddenState.View(M), *wIn, *rIn);
     // actual token num for current rank
     XTensor num = rt.enableMoEAllToAll ? XTensor() : XTensor({1}, INT32, unpIdx.ptr);
 

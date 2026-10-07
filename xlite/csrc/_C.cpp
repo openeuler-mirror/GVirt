@@ -152,6 +152,9 @@ public:
     std::vector<at::Tensor> moeREDownDeqScale;
     std::vector<at::Tensor> moeREUpGateScaleBias;
     std::vector<at::Tensor> moeREDownScaleBias;
+    // EPLB: per-MoE-layer log2phy registered buffer (one per MoE layer, MoE-layer-major).
+    // Undefined/empty for non-EPLB layers; InitOptionalXTensor skips those.
+    std::vector<at::Tensor> log2phy;
 
     // DeepSeek-V4 (CxA)
     std::vector<at::Tensor> attnSink;
@@ -286,21 +289,22 @@ void checkLayersDims(const std::vector<LayersCheckEntry> &table, uint32_t size, 
 void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 {
     uint32_t idx = 0;
-    uint32_t nLocalRoutedExperts = c.nRoutedExperts / c.moeEpSize;
-    uint32_t expertsStartIdx = c.moeEpSize == 1 ? 0 : rankId / c.moeTPSize * nLocalRoutedExperts;
-    uint32_t expertsEndIdx = expertsStartIdx + nLocalRoutedExperts;
+    uint32_t totalPhysicalExperts = c.nRoutedExperts + c.numRedundantExperts;
+    uint32_t nLocalPhysicalExperts = totalPhysicalExperts / c.moeEpSize;
+    uint32_t expertsStartIdx = c.moeEpSize == 1 ? 0 : rankId / c.moeTPSize * nLocalPhysicalExperts;
+    uint32_t expertsEndIdx = expertsStartIdx + nLocalPhysicalExperts;
     uint32_t numMoeLayers = c.nLayers - c.nDenseLayers;
-    uint32_t nRE = numMoeLayers * nLocalRoutedExperts;
+    uint32_t nRE = numMoeLayers * nLocalPhysicalExperts;
     uint32_t tpRank = rankId % c.defTpSize;
 
-    if (c.nRoutedExperts % c.moeEpSize != 0) {
+    if (totalPhysicalExperts % c.moeEpSize != 0) {
         {
             XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
-            s << "num of routed experts per expert parallel group: " << nLocalRoutedExperts
+            s << "num of physical experts per expert parallel group: " << nLocalPhysicalExperts
               << std::endl;
         }
         throw std::invalid_argument(
-            "num of routed experts must be divisible by moe expert parallel size");
+            "num of physical experts must be divisible by moe expert parallel size");
     }
 
     attnType = c.attnType;
@@ -687,8 +691,17 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                          mlpDownQuantBias, mlpDownDeqScale, _model->mlpDown, i, true, tpRank);
     }
 
+    // EPLB (numRedundantExperts>0) requires a log2phy map for every MoE layer.
+    if (c.numRedundantExperts > 0 && log2phy.size() < numMoeLayers) {
+        throw std::invalid_argument(
+            "EPLB active (num_redundant_experts>0) but log2phy not provided for all MoE layers");
+    }
+
     for (uint32_t i = c.nDenseLayers; i < c.nLayers; i++) {
         InitXTensor(_model->moeGate[i], moeGate[i - c.nDenseLayers]);
+        // Zero-capture the per-layer log2phy buffer (skipped when undefined = non-EPLB).
+        // data_ptr stays stable across vllm-ascend in-place .copy_() rebalance updates.
+        InitOptionalXTensor(_model->log2phy[i], log2phy[i - c.nDenseLayers]);
         if (c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
             InitXTensor(_model->moeGateBias[i], moeGateBias[i - c.nDenseLayers]);
         }
@@ -1820,6 +1833,19 @@ void UnPermutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, at::Tensor
     rt.Synchronize();
 }
 
+void RemapGateOutputs(XRuntime &rt, at::Tensor &wIn, at::Tensor &rIn, at::Tensor &wOut,
+                      at::Tensor &rOut, at::Tensor &log2phy)
+{
+    XTensor _wIn, _rIn, _wOut, _rOut, _log2phy;
+    InitXTensor(_wIn, wIn);
+    InitXTensor(_rIn, rIn);
+    InitXTensor(_wOut, wOut);
+    InitXTensor(_rOut, rOut);
+    InitXTensor(_log2phy, log2phy);
+    XliteOpRemapGateOutputs(rt, _wIn, _rIn, _wOut, _rOut, _log2phy);
+    rt.Synchronize();
+}
+
 void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
                  std::vector<at::Tensor> &scales, at::Tensor &counts, uint32_t start, uint32_t end,
                  long outDim, long inDim, at::Tensor &output, bool weightNZ, bool transpose)
@@ -2535,6 +2561,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("softmax_scale", &XModelConfig::softmaxScale)
         .def_readwrite("n_dense_layers", &XModelConfig::nDenseLayers)
         .def_readwrite("n_routed_experts", &XModelConfig::nRoutedExperts)
+        .def_readwrite("num_redundant_experts", &XModelConfig::numRedundantExperts)
         .def_readwrite("n_shared_experts", &XModelConfig::nSharedExperts)
         .def_readwrite("n_expert_groups", &XModelConfig::nExpertGroups)
         .def_readwrite("n_limited_groups", &XModelConfig::nLimitedGroups)
@@ -2711,6 +2738,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("re_down_deq_scale", &_CModel::moeREDownDeqScale)
         .def_readwrite("re_up_gate_scale_bias", &_CModel::moeREUpGateScaleBias)
         .def_readwrite("re_down_scale_bias", &_CModel::moeREDownScaleBias)
+        .def_readwrite("log2phy", &_CModel::log2phy)
         // DeepSeek-V4 (CxA)
         .def_readwrite("attn_sink", &_CModel::attnSink)
         .def_readwrite("attn_wq_a", &_CModel::attnWqA)
@@ -2857,6 +2885,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"), py::arg("counts"));
     m.def("unpermutation", &UnPermutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
           py::arg("weights"), py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"));
+    m.def("remap_gate_outputs", &RemapGateOutputs, py::arg("rt"), py::arg("w_in"), py::arg("r_in"),
+          py::arg("w_out"), py::arg("r_out"), py::arg("log2phy"));
     m.def("group_matmul", &GroupMatmul, py::arg("rt"), py::arg("in_"), py::arg("weights"),
           py::arg("scales"), py::arg("counts"), py::arg("start"), py::arg("end"),
           py::arg("out_dim"), py::arg("in_dim"), py::arg("output"), py::arg("weight_nz"),
