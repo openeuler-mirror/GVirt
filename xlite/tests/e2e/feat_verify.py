@@ -220,9 +220,18 @@ FEATURES = {
     # --- MoE/专家类 ---
     "eplb": FeatureSpec(
         "eplb", "Eplb(动态专家负载均衡)",
-        extra_config={"eplb_config": {"dynamic_eplb": True}},
+        # num_redundant_experts 须显式配(=16, 与 recording/map 一致): 上游 factory 据此扩容 allocated,
+        # 不配则 allocated=16 ≠ map placement=17 触发 "EPLB local expert capacity mismatch" assert.
+        # expert_map_path 复用 recording 产出的初始分布(生产场景: dynamic 在预录分布上 rebalance).
+        extra_config={"eplb_config": {
+            "dynamic_eplb": True,
+            "num_redundant_experts": 16,
+            "expert_map_path": os.path.join(HERE, "feat_verify_logs", "eplb_map.json"),
+            "expert_heat_collection_interval": 400,
+            "algorithm_execution_interval": 30}},
         extra_env={"DYNAMIC_EPLB": "true"},
-        note="eplb_config.dynamic_eplb=true + env DYNAMIC_EPLB=true; 验证动态 EPLB 与 xlite MoE 交互",
+        note="dynamic_eplb=true + num_redundant_experts=16 + expert_map_path(预录初始分布) + env DYNAMIC_EPLB=true; "
+             "验证动态 EPLB(运行时 SwiftBalance rebalance)与 xlite MoE 交互; 需先跑 eplb_recording 生成 map",
     ),
     "eplb_recording": FeatureSpec(
         "eplb_recording", "Eplb(Recording 录制 expert map)",
@@ -240,9 +249,12 @@ FEATURES = {
     "eplb_static": FeatureSpec(
         "eplb_static", "Eplb(Static 加载预录 expert map)",
         # Static: 加载预录 map, 无需 env; 依赖 eplb_recording 产出的 map 文件。
+        # num_redundant_experts 须与 recording 生成 map 时一致(=16): 上游 factory 据此扩容 allocated,
+        # 不配则触发 "EPLB local expert capacity mismatch" assert (与 xlite 无关).
         extra_config={"eplb_config": {
-            "expert_map_path": os.path.join(HERE, "feat_verify_logs", "eplb_map.json")}},
-        note="expert_map_path; 加载预录 expert map, 需先跑 eplb_recording 生成 feat_verify_logs/eplb_map.json",
+            "expert_map_path": os.path.join(HERE, "feat_verify_logs", "eplb_map.json"),
+            "num_redundant_experts": 16}},
+        note="expert_map_path + num_redundant_experts(须与录制时一致); 加载预录 expert map, 需先跑 eplb_recording 生成 feat_verify_logs/eplb_map.json",
     ),
     "multistream_moe": FeatureSpec(
         "multistream_moe", "Multistream Moe",

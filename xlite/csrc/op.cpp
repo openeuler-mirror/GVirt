@@ -803,6 +803,18 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
                  unpIdx.ptr, weights.ptr, out.shape[0], in.shape[1], weights.shape[1], start, end);
 }
 
+void XliteOpRemapGateOutputs(XRuntime &rt, XTensor &wIn, XTensor &rIn, XTensor &wOut, XTensor &rOut,
+                             const XTensor &log2phy)
+{
+    if (IsDummyRuntime(rt) || wIn.numel == 0) {
+        return;
+    }
+    // The kernel zeroes each rOut row in-UB before bit-set, so no separate Memset is needed.
+    aclrtlaunch_remap_gate_outputs(PickMinBlockNum(rt.aivNum, wIn.shape[0]), rt.stream, wIn.ptr,
+                                   rIn.ptr, wOut.ptr, rOut.ptr, log2phy.ptr, wIn.shape[0],
+                                   wIn.shape[1], wOut.shape[1], XDtypeBit(wIn.dtype) / 8);
+}
+
 // deqScales: uint64_t, 低 32 位 TF32 格式有效, 1 符号位, 8 指数位, 10 尾数位, 后 13 位不参与计算
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,

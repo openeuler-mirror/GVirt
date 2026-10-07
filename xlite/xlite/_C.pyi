@@ -211,6 +211,9 @@ class ModelConfig:
     """Number of dense FFN layers."""
     n_routed_experts: int = ...
     """Number of routed experts."""
+    num_redundant_experts: int = ...
+    """EPLB redundant expert slots (total across EP ranks). 0 = non-EPLB; total physical slots =
+    n_routed_experts + num_redundant_experts, divided evenly across moe_ep_size ranks."""
     n_shared_experts: int = ...
     """Number of shared experts."""
     n_expert_groups: int = ...
@@ -889,6 +892,11 @@ class Model:
     re_down_deq_scale: List[torch.Tensor] = ...
     """Routed-expert down weight dequant scales, one per local expert, each shape
     ``[2*hidden_size, 1]``, fp32."""
+    log2phy: List[torch.Tensor] = ...
+    """EPLB per-MoE-layer logical→physical expert map, shape ``[n_routed_experts]``, int32. One
+    entry per MoE layer (MoE-layer-major, aligned with :attr:`moe_gate`). ``log2phy[L]`` is the
+    global physical slot for logical expert L on this rank. Undefined/empty for non-EPLB layers
+    (remap skipped)."""
 
     # DeepSeek-V4 (CxA)
     attn_sink: List[torch.Tensor] = ...
@@ -2077,6 +2085,40 @@ def unpermutation(
 
     Returns:
         None: `out` is written in place.
+    """
+    ...
+
+def remap_gate_outputs(
+    rt: Runtime,
+    w_in: torch.Tensor,
+    r_in: torch.Tensor,
+    w_out: torch.Tensor,
+    r_out: torch.Tensor,
+    log2phy: torch.Tensor,
+) -> None:
+    """Scatter ForwardMoEGate outputs from logical to physical expert columns.
+
+    Applies the EPLB ``log2phy`` (logical→physical slot) map to the gate outputs
+    so that column index becomes a physical slot id before Dispatch reads the
+    physical-slot-major weight table ``ws[j]``. ``w_out[t, log2phy[L]] = w_in[t, L]``
+    and ``r_out`` bit ``(t, log2phy[L])`` is set iff ``r_in`` bit ``(t, L)`` is set.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        w_in (torch.Tensor): Logical gate weights, shape ``[tokens, n_routed_experts]``,
+            bf16 or fp32.
+        r_in (torch.Tensor): Logical routing bitmap (BIT1 packed), shape
+            ``[tokens, ceil(n_routed_experts/8)]`` bytes (one bit per logical expert).
+        w_out (torch.Tensor): Physical gate weights output, shape
+            ``[tokens, total_physical_experts]``, same dtype as ``w_in``.
+        r_out (torch.Tensor): Physical routing bitmap output (BIT1 packed), shape
+            ``[tokens, ceil(total_physical_experts/8)]`` bytes. Each row is zeroed
+            in-UB before bit-set.
+        log2phy (torch.Tensor): Logical→physical slot map, shape ``[n_routed_experts]``,
+            int32. A bijection on this rank, so the scatter is collision-free.
+
+    Returns:
+        None: `w_out` and `r_out` are written in place.
     """
     ...
 

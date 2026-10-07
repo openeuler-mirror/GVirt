@@ -78,6 +78,11 @@ void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t st
                         XTensor &out, XTensor &unpIdx, XTensor &counts);
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing,
                           XTensor &weights, uint32_t start, uint32_t end, XTensor &out);
+// EPLB: scatter gate outputs from logical [M, nRoutedExperts] to physical [M, totalPhysicalExperts]
+// columns via log2phy (logical→physical). wIn/wOut are BF16/FP32; rIn/rOut are BIT1. rOut is
+// zeroed by the op. log2phy is [nRoutedExperts] INT32.
+void XliteOpRemapGateOutputs(XRuntime &rt, XTensor &wIn, XTensor &rIn, XTensor &wOut, XTensor &rOut,
+                             const XTensor &log2phy);
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                         long outDim, long inDim, XTensor &output, bool weightNZ = false,
