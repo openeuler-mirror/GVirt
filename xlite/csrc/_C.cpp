@@ -699,9 +699,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
     for (uint32_t i = c.nDenseLayers; i < c.nLayers; i++) {
         InitXTensor(_model->moeGate[i], moeGate[i - c.nDenseLayers]);
-        // Zero-capture the per-layer log2phy buffer (skipped when undefined = non-EPLB).
-        // data_ptr stays stable across vllm-ascend in-place .copy_() rebalance updates.
-        InitOptionalXTensor(_model->log2phy[i], log2phy[i - c.nDenseLayers]);
+        if (i - c.nDenseLayers < log2phy.size()) {
+            InitOptionalXTensor(_model->log2phy[i], log2phy[i - c.nDenseLayers]);
+        }
         if (c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
             InitXTensor(_model->moeGateBias[i], moeGateBias[i - c.nDenseLayers]);
         }
