@@ -2952,7 +2952,6 @@ def indexer_topk(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     weight: torch.Tensor,
-    indices: torch.Tensor,
     topk_indices: torch.Tensor,
     query_start_loc: torch.Tensor,
     lens: torch.Tensor,
@@ -2972,17 +2971,17 @@ def indexer_topk(
 
     Args:
         rt (Runtime): Native runtime handle.
-        q (torch.Tensor): Query tensor ``[total_query_len, n_heads, head_dim]``, fp16/bf16
-            (must match k_cache/weight).
+        q (torch.Tensor): Query tensor ``[total_query_len, n_heads, head_dim]``, fp16/bf16 (must match k_cache/weight).
         k_cache (torch.Tensor): Key cache tensor ``[max_num_block*batch, block_size,
         head_dim]``, same dtype.
         weight (torch.Tensor): Indexer weight tensor
-            ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are
-            the indexer weights), same dtype.
-        indices (torch.Tensor): Input index tensor ``[max_seq_len]`` (int32),
-            pre-filled with ``0..max_seq_len-1``.
+            ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are the indexer weights), same dtype.
         topk_indices (torch.Tensor): Output top-k indices tensor
-            ``[total_query_len, top_k]`` (int32).
+            ``[total_query_len, top_k]`` (int32), emitted in ascending index order.
+            Sparse rows (``p0 >= top_k``, ``p0 = cached_len + in-batch query offset``) hold
+            the real top-k (all indices in ``[0, p0]``); dense rows (``p0 < top_k``)
+            hold the default template ``0..top_k-1``, whose first ``p0 + 1`` entries are
+            always valid positions — consumers must ignore entries ``> p0``.
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
             int32 device.
         lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.

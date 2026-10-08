@@ -2115,22 +2115,36 @@ void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &
 }
 
 void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &weight,
-                 at::Tensor &indices, at::Tensor &topkIndices, at::Tensor &queryStartLoc,
-                 at::Tensor &lens, at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads,
-                 uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t topK)
+                 at::Tensor &topkIndices, at::Tensor &queryStartLoc, at::Tensor &lens,
+                 at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t headDim,
+                 uint32_t blockSize, uint32_t batch, uint32_t topK)
 {
-    XTensor _q, _kCache, _weight, _indices, _topkIndices, _queryStartLoc, _lens, _cachedLens,
-        _blockTables;
+    XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
     InitXTensor(_q, q);
     InitXTensor(_kCache, kCache);
     InitXTensor(_weight, weight);
-    InitXTensor(_indices, indices);
     InitXTensor(_topkIndices, topkIndices);
     InitXTensor(_queryStartLoc, queryStartLoc);
     InitXTensor(_lens, lens);
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_blockTables, blockTables);
+
+    // generate the identity index table (0..max(maxSeqLen,topK)-1)
+    XTensor seqPositions;
+    std::vector<uint32_t> host;
+    size_t maxSeqLen = static_cast<size_t>(blockSize) * DeriveMaxNumBlocks(_blockTables, batch);
+    maxSeqLen = INIT_MIN_SEQ_POS > maxSeqLen ? INIT_MIN_SEQ_POS : maxSeqLen;
+    size_t len = maxSeqLen > topK ? maxSeqLen : topK;
+    size_t size = len * sizeof(uint32_t);
+    host.resize(len);
+    for (uint32_t i = 0; i < len; i++) {
+        host[i] = i;
+    }
+    void *ptr;
+    CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+    CHECK_ACL(aclrtMemcpy(ptr, size, host.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
+    seqPositions.Init({len}, INT32, ptr);
 
     XTensor &scores =
         rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN}, XDtypeOf(q), DBG_LOC);
@@ -2138,13 +2152,14 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
     sync.Memset(0, rt.stream);
 
-    XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, _indices, _topkIndices,
+    XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, seqPositions, _topkIndices,
                        _queryStartLoc, _lens, _cachedLens, _blockTables, sync, nHeads, headDim,
-                       blockSize, batch, topK);
+                       blockSize, batch, topK, 0);
     rt.Synchronize();
     rt.PutTensor(sync);
     rt.PutTensor(lastTopk);
     rt.PutTensor(scores);
+    (void)aclrtFree(seqPositions.ptr);
 }
 
 void Muls(XRuntime &rt, at::Tensor &input, float scale, at::Tensor &output, uint32_t calcOffset = 0,
@@ -2956,10 +2971,9 @@ PYBIND11_MODULE(_C, m)
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
           py::arg("block_size"), py::arg("batch"));
     m.def("indexer_topk", &IndexerTopK, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
-          py::arg("weight"), py::arg("indices"), py::arg("topk_indices"),
-          py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"),
-          py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"), py::arg("block_size"),
-          py::arg("batch"), py::arg("top_k"));
+          py::arg("weight"), py::arg("topk_indices"), py::arg("query_start_loc"), py::arg("lens"),
+          py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
+          py::arg("block_size"), py::arg("batch"), py::arg("top_k"));
     m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"),
           py::arg("calc_offset") = 0, py::arg("calc_num") = UINT32_MAX);
     m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),

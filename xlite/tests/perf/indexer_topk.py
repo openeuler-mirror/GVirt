@@ -157,7 +157,6 @@ def max_blocks(query_lens, cached_lens, block_size):
 
 def build_case(test_dtype, batch, cached_lens_list, query_len_list, topK):
     max_num_blocks = max_blocks(query_len_list, cached_lens_list, BLOCK_SIZE)
-    max_seq_len = max_num_blocks * BLOCK_SIZE
     total_query_len = sum(query_len_list)
 
     torch.set_default_dtype(test_dtype)
@@ -177,14 +176,12 @@ def build_case(test_dtype, batch, cached_lens_list, query_len_list, topK):
         block_tables_array = batch_indices * max_num_blocks + block_indices
         block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32).flatten()
 
-        indices = torch.arange(max_seq_len, dtype=torch.int32).npu()
         topk_indices = torch.empty(total_query_len, topK, dtype=torch.int32).npu()
 
     return (
         q,
         k_cache,
         weight,
-        indices,
         topk_indices,
         query_start_loc,
         query_lens,
