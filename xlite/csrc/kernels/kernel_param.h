@@ -29,6 +29,10 @@ enum class NormKind {
     L2,
 };
 
+// harware
+#define UB_BLOCK_SIZE 32  // unified buffer block size in bytes
+// model initialization
+#define INIT_MIN_SEQ_POS 102400ull  // for the identity table 0.1.2...maxSeqLen-1
 // attention/mla/cxa/indexer
 #define XLITE_MAX_M0 128
 // mmad k/n granularity in elements for a 2-byte dtype (BLOCK_SIZE / 2); the lead-in
@@ -39,6 +43,9 @@ enum class NormKind {
 // RunAicSV reads 4*svck0 compress-score elements per call.
 #define CXA_SVCK0 64
 #define MAX_INDEXER_KV_TILE_LEN 4096
+#if MAX_INDEXER_KV_TILE_LEN > INIT_MIN_SEQ_POS
+#error "MAX_INDEXER_KV_TILE_LEN must not exceed INIT_MIN_SEQ_POS"
+#endif
 #define MAX_TOPK_NUM 2048
 #define MAX_SOFTMAX_PINGPONG_LEN 11776
 

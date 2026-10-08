@@ -140,7 +140,10 @@ void XModel::Init(void)
     uint32_t end = start + nLocalPhysicalExperts;
 
     if (_c.nDenseLayers != _c.nLayers || _c.attnType == XMODEL_ATTN_DSA) {
-        size_t maxIndices = _c.maxSeqLen > _c.nRoutedExperts ? _c.maxSeqLen : _c.nRoutedExperts;
+        // generate the identity index table 0.1.2...max(maxSeqLen,topK)-1
+        uint64_t maxSeqLen = ROUND_UP(_c.maxSeqLen, _c.blockSizes[0]);
+        maxSeqLen = INIT_MIN_SEQ_POS > maxSeqLen ? INIT_MIN_SEQ_POS : maxSeqLen;
+        uint64_t maxIndices = maxSeqLen > _c.nRoutedExperts ? maxSeqLen : _c.nRoutedExperts;
         vbitsortIndices.resize(maxIndices);
         size = maxIndices * XDtypeBit(INT32) / 8;
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
@@ -152,7 +155,7 @@ void XModel::Init(void)
             _gateIndices.Init({_c.nRoutedExperts}, INT32, ptr);
         }
         if (_c.attnType == XMODEL_ATTN_DSA) {
-            _dsaTopkIndices.Init({_c.maxSeqLen}, INT32, ptr);
+            _dsaSeqPositions.Init({maxSeqLen}, INT32, ptr);
         }
     }
 
@@ -294,10 +297,10 @@ XModel::~XModel(void)
 {
     if (_gateIndices.ptr != nullptr) {
         (void)aclrtFree(_gateIndices.ptr);
-        _dsaTopkIndices.ptr = nullptr;
+        _dsaSeqPositions.ptr = nullptr;
     }
-    if (_dsaTopkIndices.ptr != nullptr) {
-        (void)aclrtFree(_dsaTopkIndices.ptr);
+    if (_dsaSeqPositions.ptr != nullptr) {
+        (void)aclrtFree(_dsaSeqPositions.ptr);
     }
     for (uint32_t i = _c.nDenseLayers; i < _c.nLayers; i++) {
         (void)aclrtFree(_moeREUpGate[i].ptr);
@@ -402,10 +405,10 @@ void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenSta
     XTensor &lastTopk = rt.GetTensor({hiddenState.shape[0], 2 * _c.indexTopK}, INT32, DBG_LOC);
     rt._dsaTopkBuffer.View(hiddenState.shape[0]);
     rt.dsaPerLayerTopk = &rt._dsaTopkBuffer;
-    XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaTopkIndices,
+    XliteOpIndexerTopK(rt, *qPtr, indexKCache, kw, scores, lastTopk, _dsaSeqPositions,
                        rt._dsaTopkBuffer, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
                        rt._attnBlockTables[0], _sync, _c.indexNHeads, _c.indexHeadDim,
-                       _c.blockSizes[0], rt._batch, _c.indexTopK);
+                       _c.blockSizes[0], rt._batch, _c.indexTopK, 0);
     rt.PutTensor(kw);
     rt.PutTensor(*qPtr);
     rt.PutTensor(lastTopk);

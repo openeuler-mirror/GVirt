@@ -364,7 +364,7 @@ private:
     uint64_t _mropeMaskH;
     uint64_t _mropeMaskW;
     XTensor _sync;
-    XTensor _dsaTopkIndices;
+    XTensor _dsaSeqPositions;  // identity table 0...topK...maxSeqLen-1
     float _dsaIndexerScale = 1.0f;
 };
 
