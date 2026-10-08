@@ -1948,10 +1948,10 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
                     uint32_t indexNHeads, uint32_t ropeHeadDim, uint32_t blockSize,
                     at::Tensor &indexKCache, at::Tensor &slotMapping, float normEps, at::Tensor &q,
                     float scale, uint32_t topK, bool isLong,
-                    std::optional<at::Tensor> kScaleCache = std::nullopt,
-                    std::optional<at::Tensor> q8 = std::nullopt,
-                    std::optional<at::Tensor> qScale = std::nullopt,
-                    std::optional<at::Tensor> scaledWeights = std::nullopt)
+                    const std::optional<at::Tensor> &kScaleCache = std::nullopt,
+                    const std::optional<at::Tensor> &q8 = std::nullopt,
+                    const std::optional<at::Tensor> &qScale = std::nullopt,
+                    const std::optional<at::Tensor> &scaledWeights = std::nullopt)
 {
     XTensor _kw, _kNorm, _kNormBias, _freqs, _position, _indexKCache, _slotMapping, _q;
     XTensor _ks, _q8, _qs, _sw;
@@ -2119,7 +2119,7 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
                  at::Tensor &indices, at::Tensor &topkIndices, at::Tensor &queryStartLoc,
                  at::Tensor &lens, at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads,
                  uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t topK,
-                 std::optional<at::Tensor> kScaleCache = std::nullopt)
+                 const std::optional<at::Tensor> &kScaleCache = std::nullopt)
 {
     XTensor _q, _kCache, _weight, _indices, _topkIndices, _queryStartLoc, _lens, _cachedLens,
         _blockTables, _ks;
