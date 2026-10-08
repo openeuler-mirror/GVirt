@@ -7,9 +7,10 @@ xlite 支持以下大语言模型的推理部署：
 | Qwen3-32B | ✅ |
 | Qwen3-30B-A3B | ✅ |
 | Qwen3-235B-A22B | ✅ |
-| Qwen3.5-35B-A3B | (规划中) |
-| Qwen3.5-122B-A10B | (规划中) |
-| Qwen3.6-35B-A3B | (规划中) |
+| Qwen3.5-35B-A3B | ✅ |
+| Qwen3.5-122B-A10B | ✅ |
+| Qwen3.6-35B-A3B | ✅ |
+| Qwen3.8-27B | ✅ |
 | DeepSeek-V3/3.1/R1 | ✅ |
 | DeepSeek-V3.2 | ✅ |
 | DeepSeek-V4 | (规划中) |
@@ -17,6 +18,8 @@ xlite 支持以下大语言模型的推理部署：
 | GLM-4.7 | ✅ |
 | GLM-5/5.1 | ✅ |
 | GLM-5.2 | ✅ |
+| GLM-5.3 | ✅ |
+| GLM-5.3-Flash | (规划中) |
 | MiniMax-M2.5/2.7 | ✅ |
 | Qwen3-VL-8B | ✅ |
 | Qwen3-VL-30B-A3B | ✅ |
