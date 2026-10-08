@@ -15,7 +15,9 @@ __aicore__ inline void IndexerC8Gather(__ubuf__ float *dst, __ubuf__ float *src,
 }
 
 // One per-core UB workspace, reused by the K and Q phases. No GM workspace is added.
-struct IndexerC8Buffers {
+class IndexerC8Buffers
+{
+public:
     static constexpr uint32_t dim = 128;
     static constexpr uint32_t rope_dim = 64;
     static constexpr uint32_t hadamard_stages = 7;
