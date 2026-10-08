@@ -24,7 +24,6 @@ HEAD_DIM = 128
 N_HEADS = 32
 ROPE_DIM = 64
 TOP_K = 2048
-MAX_KV_TILE_LEN = 4096
 SCORE_ATOL = 1e-7
 SCORE_RTOL = 3e-6
 NATIVE_MAX_BYTE_DELTA = 1
@@ -143,13 +142,11 @@ def call_topk(rt, device, q8, scaled_weights, caches, block_table, key_lengths, 
     query_start_loc = torch.tensor([0] + query_lengths, dtype=torch.int32).cumsum(0)[:-1].int()
     query_start_loc = query_start_loc.to(device)
     block_tables = block_table.to(device)
-    capacity = max(MAX_KV_TILE_LEN, block_table.shape[1] * caches[0].shape[1])
-    indices = torch.arange(capacity, dtype=torch.int32).to(device)
     output = torch.full((len(q), topk), TOPK_FILL, dtype=torch.int32, device=device)
     torch.npu.synchronize(device)
 
     for repeat in range(4):
-        indexer_topk(rt, q, caches[0], weight, indices, output, query_start_loc,
+        indexer_topk(rt, q, caches[0], weight, output, query_start_loc,
                      lens, cached_lens, block_tables, N_HEADS, HEAD_DIM, caches[0].shape[1],
                      len(query_lengths), topk, k_scale_cache=caches[1])
         actual = output.cpu()
@@ -483,21 +480,22 @@ def run_invalid_tests(rt, device):
 
     q8 = torch.zeros(2, N_HEADS * HEAD_DIM, dtype=torch.int8).to(device)
     scaled_weights = torch.zeros(2, N_HEADS).half().to(device)
-    indices = torch.arange(32).int().to(device)
     output = torch.full((2, 32), TOPK_FILL, dtype=torch.int32).to(device)
     query_start_loc = torch.tensor([0], dtype=torch.int32).to(device)
     lens = torch.tensor([2], dtype=torch.int32).to(device)
     cached_lens = torch.tensor([0], dtype=torch.int32).to(device)
-    block_table = torch.tensor([[0]], dtype=torch.int32).to(device)
-    args = [rt, q8, caches[0], scaled_weights, indices, output, query_start_loc,
+    # Keep capacity above topK to exercise validation, not the dense-row shortcut.
+    caches = allocate_cache(device, torch.arange(TOP_K + 64), 32)
+    block_table = torch.arange(caches[0].shape[0], dtype=torch.int32).view(1, -1).to(device)
+    args = [rt, q8, caches[0], scaled_weights, output, query_start_loc,
             lens, cached_lens, block_table, N_HEADS, HEAD_DIM, 32, 1, 32]
     topk_changes = [
         ({}, None, "unsupported LI-C8 inputs"),
         ({}, caches[1].float(), "unsupported LI-C8 inputs"),
         ({1: q8.bfloat16()}, caches[1], "unsupported LI-C8 inputs"),
         ({3: scaled_weights.float()}, caches[1], "unsupported LI-C8 inputs"),
-        ({14: 31}, caches[1], "unsupported LI-C8 configuration"),
-        ({14: TOP_K + 32}, caches[1], "topK should be less than or equal"),
+        ({13: 31}, caches[1], "unsupported LI-C8 configuration"),
+        ({13: TOP_K + 32}, caches[1], "topK should be less than or equal"),
     ]
     for arg_changes, scale, message in topk_changes:
         altered = list(args)

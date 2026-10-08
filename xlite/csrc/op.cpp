@@ -803,6 +803,18 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
                  unpIdx.ptr, weights.ptr, out.shape[0], in.shape[1], weights.shape[1], start, end);
 }
 
+void XliteOpRemapGateOutputs(XRuntime &rt, XTensor &wIn, XTensor &rIn, XTensor &wOut, XTensor &rOut,
+                             const XTensor &log2phy)
+{
+    if (IsDummyRuntime(rt) || wIn.numel == 0) {
+        return;
+    }
+    // The kernel zeroes each rOut row in-UB before bit-set, so no separate Memset is needed.
+    aclrtlaunch_remap_gate_outputs(PickMinBlockNum(rt.aivNum, wIn.shape[0]), rt.stream, wIn.ptr,
+                                   rIn.ptr, wOut.ptr, rOut.ptr, log2phy.ptr, wIn.shape[0],
+                                   wIn.shape[1], wOut.shape[1], XDtypeBit(wIn.dtype) / 8);
+}
+
 // deqScales: uint64_t, 低 32 位 TF32 格式有效, 1 符号位, 8 指数位, 10 尾数位, 后 13 位不参与计算
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
@@ -1880,13 +1892,25 @@ void XliteOpRepeatInterleave(XRuntime &rt, XTensor &in, XTensor &out, uint32_t n
 }
 
 void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight, XTensor &scores,
-                        XTensor &lastTopk, XTensor &indices, XTensor &topkIndices,
+                        XTensor &lastTopk, XTensor &seqPositions, XTensor &topkIndices,
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
-                        uint32_t blockSize, uint32_t batch, uint32_t topK,
+                        uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk,
                         const XTensor &kScaleCache)
 {
     if (IsDummyRuntime(rt)) {
+        return;
+    }
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    if (topK >= maxNumBlocks * blockSize && !skipDenseTopk) {
+        // this kernel should not even be fired --- but let's pad the output anyways (inefficiently)
+        // the dense-row template is the first `topK` entries of `seqPositions` (0..topK-1)
+        size_t topkPosBytes = DIV_ROUND_UP(topK * XDtypeBit(topkIndices.dtype), 8);
+        for (uint64_t i = 0; i < topkIndices.shape[0]; i++) {
+            aclrtMemcpyAsync(static_cast<char *>(topkIndices.ptr) + i * topkPosBytes, topkPosBytes,
+                             seqPositions.ptr, topkPosBytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
+                             rt.stream);
+        }
         return;
     }
     if (topK > MAX_TOPK_NUM) {
@@ -1903,13 +1927,12 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
             !EachXDtype(FP16, weight, kScaleCache) || scores.dtype != FP32) {
             throw std::invalid_argument("indexer_topk: unsupported LI-C8 inputs");
         }
-        uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
         if (q.shape[0] != 0) {
-            aclrtlaunch_indexer_topk_int8_t(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr,
-                                            queryStartLoc.ptr, lens.ptr, cachedLens.ptr,
-                                            blockTables.ptr, scores.ptr, lastTopk.ptr, indices.ptr,
-                                            topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize,
-                                            batch, maxNumBlocks, topK, kScaleCache.ptr);
+            aclrtlaunch_indexer_topk_int8_t(
+                rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
+                cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
+                topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlocks, topK,
+                skipDenseTopk, kScaleCache.ptr);
         }
         return;
     }
@@ -1923,13 +1946,13 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
         launchKernel = aclrtlaunch_indexer_topk_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(q) + XT_STR(kCache) + XT_STR(weight) +
-                              XT_STR(scores) + XT_STR(indices) + XT_STR(topkIndices);
+                              XT_STR(scores) + XT_STR(seqPositions) + XT_STR(topkIndices);
         throw std::runtime_error(err_str + "not supported!");
     }
-    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
-                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, indices.ptr,
-                 topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlocks, topK);
+                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
+                 topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlocks, topK,
+                 skipDenseTopk);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,

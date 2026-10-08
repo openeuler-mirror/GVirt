@@ -71,7 +71,7 @@ host 侧仅接受 BF16(`csrc/op.cpp:997`);qAbsorb/qr/kCache/peCache/oAbsorb 需�
 
 ### 任务划分
 
-- `m0 = GetOptimalM0(queryLen, cachedLen)` 自适应(同 attention,`csrc/kernels/kernel_macro.h:883`),`queryTileSize = m0 / nHeads`——MLA 每 batch 一次算**全部 nHeads 个头**(无 KV 头分组),`mSize = queryTaskLen * nHeads` 行拼成 Cube 的 M 维。
+- `m0 = GetOptimalM0(queryLen, cachedLen)` 自适应(同 attention,`csrc/kernels/kernel_macro.h:956`),`queryTileSize = m0 / nHeads`——MLA 每 batch 一次算**全部 nHeads 个头**(无 KV 头分组),`mSize = queryTaskLen * nHeads` 行拼成 Cube 的 M 维。
 - 任务空间为 `queryNum`(每 batch),核间用 `firstCore = (GetBlockIdx()+GetBlockNum()-coreOffset) % GetBlockNum()` 的循环 stride 分配,`coreOffset` 跨 batch 累计保证相邻 batch 起始核轮转、负载均衡(`csrc/kernels/mla_v2.h:116-117`、`:171`)。
 - dense 模式 `calcLen` clip 到 maxSeqLen(dense cache 只存 indexTopK 个 token,`csrc/kernels/mla_v2.h:125-128`);per-batch KV 视图 dense 时取 `kCache[batchIdx * maxSeqLen * ...]` 子视图,sparse 时走 blockTable(`csrc/kernels/mla_v2.h:95-107`)。
 

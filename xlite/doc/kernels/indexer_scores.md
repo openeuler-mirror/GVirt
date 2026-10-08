@@ -20,7 +20,7 @@ indexer_scores(rt, q, k_cache, weight, scores, query_start_loc, query_lens,
                cached_lens, block_tables, n_heads, head_dim, block_size, batch)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:1783`(`XliteOpIndexerScores`,`KERNEL_TASK_TYPE_AIC_ONLY`,用 `rt.aicNum` 个 Cube 核)。kernel 签名(`csrc/kernels/indexer_scores.h:293`):
+host 侧 launch 见 `csrc/op.cpp:1787`(`XliteOpIndexerScores`,`KERNEL_TASK_TYPE_AIC_ONLY`,用 `rt.aicNum` 个 Cube 核)。kernel 签名(`csrc/kernels/indexer_scores.h:293`):
 
 ```cpp
 indexer_scores_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores,
@@ -38,7 +38,7 @@ indexer_scores_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores
 | queryStartLoc | 输入 | `[batch]` | int32 | 各 batch query 在拼接 q 中的起始偏移(前缀和) |
 | queryLens | 输入 | `[batch]` | int32 | 各 batch 的 query 长度 |
 | cachedLens | 输入 | `[batch]` | int32 | 各 batch 已缓存 KV 长度(总 KV 长度 = cachedLen + queryLen) |
-| blockTables | 输入 | `[batch, maxNumBlock]` | int32 | 逻辑块 → 物理块映射表;`maxNumBlock` 由 host 侧 `DeriveMaxNumBlocks` 推导(`csrc/op.cpp:1801`) |
+| blockTables | 输入 | `[batch, maxNumBlock]` | int32 | 逻辑块 → 物理块映射表;`maxNumBlock` 由 host 侧 `DeriveMaxNumBlocks` 推导(`csrc/op.cpp:1805`) |
 | nHeads / headDim / blockSize / batch | — | 标量 | uint32 | 测试配置:nHeads=64, headDim=128, blockSize=128;约束 `blockSize <= MAX_M0=128`、`headDim <= k0`(`indexer_scores.h:49-51`) |
 
 ## 支持的数据类型
@@ -48,7 +48,7 @@ indexer_scores_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores
 | `indexer_scores_bfloat16_t` | `csrc/kernels/indexer_scores_bfloat16_t.cpp` | q/kCache/weight/scores 全为 bf16 |
 | `indexer_scores_float16_t` | `csrc/kernels/indexer_scores_float16_t.cpp` | 全为 fp16 |
 
-dtype 分派要求四张 tensor 同 dtype(`csrc/op.cpp:1792-1799`)。无 fp32 变体。
+dtype 分派要求四张 tensor 同 dtype(`csrc/op.cpp:1796-1803`)。无 fp32 变体。
 
 ## 实现原理
 
@@ -76,7 +76,7 @@ query tile 划分:`queryTileSize = MAX_M0 / nHeads`(`indexer_scores.h:109-112`,M
 
 1. 等 `kl1Buf[curr]` 空闲 → K 块 GM→L1(通过 `blockTable[kvIdx]` 找物理块,`block * blockSize * headDim` 定位);
 2. 等 `ql1Buf[curr]` 空闲 → Q tile GM→L1;
-3. K→L0A、Q→L0B,`CalMmad(l0cBuf, l0a, l0b, mBlockPad, nBlockPad, headDim)` 得到 `[kvLen, queryTileSize*nHeads]` 的头得分,`CopyL0CToL1` 暂存到 `kql1Buf`;
+3. K→L0A、Q→L0B,`CalMmad(l0cBuf, l0a, l0b, mBlockPad, nBlockPad, headDim)` 得到 `[kvLen, queryTileSize*nHeads]` 的头得分,`CopyL0CToL1`(`reluEn=1`)暂存到 `kql1Buf`——L0C→L1 的 fixpipe 搬运同时完成 ReLU 过滤(负得分置 0,DSA indexer 要求得分非负),省去单独一次 ReLU pass(`indexer_scores.h:208-210`);
 4. weight tile GM→L1;
 5. 对 tile 内每个 query token q:weight 行(1,nHeads)→L0A、对应头得分列(kvLen,nHeads)→L0B,第二次 `CalMmad`(`m=MBLOCKSIZE`)得到 `(1, kvLen)` 的 index_score,`CopyToGm` 直接从 L0C 写 GM,目的地址 `scores[(qOffset+q) * maxNumBlock*blockSize + kvStart]`,以 `maxNumBlock*blockSize` 为 dstStride 保持行内全局位置布局(`indexer_scores.h:246-247`);
 6. `curr = 1 - curr` 切换乒乓,下一任务的搬运与本任务的 mmad/写回重叠。

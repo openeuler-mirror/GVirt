@@ -9,6 +9,7 @@
 #pragma once
 #define MAX_N0 XLITE_MAX_M0
 #define INDEXER_KV_TILE_LEN 4096
+#define AIV_TO_AIC 2u  // should be 2 for `KERNEL_TYPE_MIX_AIC_1_2`
 
 #if INDEXER_KV_TILE_LEN > MAX_INDEXER_KV_TILE_LEN
 #error "INDEXER_KV_TILE_LEN must not exceed MAX_INDEXER_KV_TILE_LEN"
@@ -24,10 +25,11 @@ public:
 
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc,
                                 GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,
-                                GM_ADDR scores, GM_ADDR lastTopk, GM_ADDR indices,
+                                GM_ADDR scores, GM_ADDR lastTopk, GM_ADDR seqPositions,
                                 GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads,
                                 uint32_t headDim, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlock, uint32_t topK, GM_ADDR kScaleCache = nullptr)
+                                uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,
+                                GM_ADDR kScaleCache = nullptr)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -39,7 +41,7 @@ public:
         this->cachedLens = (__gm__ int32_t *)cachedLens;
         this->blockTables = (__gm__ int32_t *)blockTables;
         this->lastTopk = (__gm__ uint32_t *)lastTopk;
-        this->indices = (__gm__ uint32_t *)indices;
+        this->seqPositions = (__gm__ uint32_t *)seqPositions;
         this->topkIndices = (__gm__ uint32_t *)topkIndices;
         this->nHeads = nHeads;
         this->headDim = headDim;
@@ -47,6 +49,7 @@ public:
         this->batch = batch;
         this->maxNumBlock = maxNumBlock;
         this->topK = topK;
+        this->skipDenseTopk = skipDenseTopk > 0;
         this->tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN, SORT_BLOCK_SIZE);
         this->blockIdx = block_idx;
         this->subBlockIdx = get_subblockid();
@@ -61,9 +64,9 @@ public:
         this->scores[1].SetGlobalBuffer(((__gm__ ScoreDtype *)scores) +
                                         block_idx * XLITE_MAX_M0 * tileSizeOfCachedKV +
                                         block_num * XLITE_MAX_M0 * tileSizeOfCachedKV);
-        this->setNextSync = (__gm__ int32_t *)sync + blockIdx * 2 + subBlockIdx;
-        this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * 2 + subBlockIdx;
-        assert(this->tileSizeOfCachedKV >= this->topK);
+        this->setNextSync = (__gm__ int32_t *)sync + blockIdx * AIV_TO_AIC + subBlockIdx;
+        this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * AIV_TO_AIC + subBlockIdx;
+        // assert(this->tileSizeOfCachedKV >= this->topK);
 
 #ifdef __DAV_C220_CUBE__
         /*
@@ -132,15 +135,24 @@ public:
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
 #endif
 #ifdef __DAV_C220_VEC__
+        uint64_t maxSeqLen = MAX((uint64_t)blockSize * maxNumBlock, INIT_MIN_SEQ_POS);
+        this->sortIndicesStart = (blockIdx * AIV_TO_AIC + subBlockIdx) %
+                                 MAX(1, maxSeqLen / tileSizeOfCachedKV) * tileSizeOfCachedKV;
+        this->sortIndicesBytes = MIN(tileSizeOfCachedKV, maxSeqLen) * sizeof(uint32_t);
+        this->sortIndicesRepeats = DIV_ROUND_UP(this->sortIndicesBytes, VECTOR_MAX_BYTESIZE);
         // total sort & WaitPrevCore & SetNextCore use
         uint64_t off = 0;
         this->totalSort = reinterpret_cast<__ubuf__ float *>(off);
-        off += ROUND_UP(MAX_TOPK_NUM * 4 * sizeof(float), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(MAX_TOPK_NUM * 4 * sizeof(float) + UB_BANK_CONFLICT_OFFSET,
+                        UB_BANKGROUP_ROW_SIZE) -
+               UB_BANK_CONFLICT_OFFSET;
         // see `mrgSortBuf0`; separating the two mrgSort buffers to avoid bank conflict in A2/A3
         this->mrgSortBuf1 = reinterpret_cast<__ubuf__ float *>(off);
         off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
         this->sortIndices = reinterpret_cast<__ubuf__ uint32_t *>(off);
         off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        this->defaultTopkIndices = reinterpret_cast<__ubuf__ uint32_t *>(off);
+        off += ROUND_UP(topK * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
 
         // in
         this->in[0] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
@@ -165,7 +177,7 @@ public:
 
         // calc
         uint64_t invoff =
-            UB_SIZE - ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
+            UB_SIZE - ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), UB_BANKGROUP_ROW_SIZE);
         this->mrgSortBuf0 = reinterpret_cast<__ubuf__ float *>(invoff);
         assert(off <= invoff);
 #endif
@@ -358,16 +370,17 @@ public:
 
 #ifdef __DAV_C220_VEC__
     __aicore__ inline void RunAivTopk(__gm__ ScoreDtype *scores, __gm__ uint32_t *lastTopk,
-                                      __gm__ uint32_t *indices, int queryLen, int kvOffset,
-                                      int kvLen, uint32_t topK, __gm__ uint32_t *topkIndices,
-                                      int queryPosBase, __gm__ uint32_t *blockTable)
+                                      int queryLen, int kvOffset, int kvLen, uint32_t topK,
+                                      __gm__ uint32_t *topkIndices, int queryPosBase,
+                                      __gm__ uint32_t *blockTable)
     {
-        assert(kvLen <= MAX_INDEXER_KV_TILE_LEN && topK <= MAX_TOPK_NUM &&
-               topK <= queryPosBase + queryLen);
+        assert(kvLen <= MAX_INDEXER_KV_TILE_LEN && topK <= MAX_TOPK_NUM);
         constexpr float min = FLOAT_MIN;
 
         constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
         int topKSortRepeat = DIV_ROUND_UP(topK, SORT_BLOCK_SIZE);
+        uint32_t topKCalcRepeat = DIV_ROUND_UP(topK, calcPad);
+        uint32_t topKCalcRepeatX2 = topKCalcRepeat * 2;
 
         int curr = 0;
         bool waitCoreTriggered = false, totalSortOnHold = false;
@@ -380,7 +393,7 @@ public:
         for (int idx = 0; idx < queryLen; idx++) {
             int p0 = queryPosBase + idx;  // position of the current token in the sequence
             int validKvLen = MIN(p0 - kvOffset + 1, kvLen);  // per position valid kvLen
-            if (validKvLen <= 0) {  // the last kv chunk should have concluded the topK merge
+            if (p0 < topK || validKvLen <= 0) {  // either dense, or the last chunk was final
                 continue;
             }
             bool isFirst = kvOffset <= 0;
@@ -500,21 +513,22 @@ public:
                     SetNextCore();
                 }
             } else {
-                // aggregate topK indices from totalSort, sort them from largest to smallest
+                // aggregate topK indices from totalSort, sort them from smallest to largest
                 __ubuf__ uint32_t *index0 = (__ubuf__ uint32_t *)mrgSortBuf0;
-                vreducev2(index0, (__ubuf__ uint32_t *)totalSort, nullptr,
-                          DIV_ROUND_UP(topK, calcPad / 2), 1, 2, 8, 0);
+                vreducev2(index0, (__ubuf__ uint32_t *)totalSort, nullptr, topKCalcRepeatX2, 1, 2,
+                          8, 0);
                 pipe_barrier(PIPE_V);
-                // assuming `index0`'s hightest bit is 0, we can directly cast it to float for
-                // vbitsort while preserving the order of the indices
-                vbitsort(mrgSortBuf1, mrgSortBuf0, index0, topKSortRepeat);
+                // mrgSortBuf0: top k indices; totalSort: negative of the index values as scores
+                vmuls(totalSort, (__ubuf__ float *)index0, -1.0f, topKCalcRepeat, 1, 1, 8, 8);
+                pipe_barrier(PIPE_V);
+                vbitsort(mrgSortBuf1, totalSort, index0, topKSortRepeat);
                 pipe_barrier(PIPE_V);
                 __ubuf__ float *indexSorted;
                 MrgSort(mrgSortBuf1, mrgSortBuf0, topKSortRepeat, &indexSorted, topK);
                 pipe_barrier(PIPE_V);
                 wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);  // acquire `out[curr]`
-                vreducev2(out[curr], (__ubuf__ uint32_t *)indexSorted, nullptr,
-                          DIV_ROUND_UP(topK, calcPad / 2), 1, 2, 8, 0);
+                vreducev2(out[curr], (__ubuf__ uint32_t *)indexSorted, nullptr, topKCalcRepeatX2, 1,
+                          2, 8, 0);
                 pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
@@ -559,9 +573,16 @@ public:
         uint64_t a2vSyncFlag[PINGPONG_BUF_NUM] = {flagIdx0, flagIdx1};
         uint64_t v2aSyncFlag[PINGPONG_BUF_NUM] = {sync2, sync3};
 
-        uint64_t indicesBytes = ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), 8);
-        this->sortIndicesRepeats = DIV_ROUND_UP(indicesBytes, VECTOR_MAX_BYTESIZE);
-        CopyGmToUbufAligned(this->sortIndices, this->indices, indicesBytes);
+        bool assignedDefaultTopk =
+            !skipDenseTopk && blockIdx == block_num - 1 && subBlockIdx == AIV_TO_AIC - 1;
+        uint64_t defaultTopkBytes = topK * sizeof(uint32_t);
+        if (assignedDefaultTopk) {
+            CopyGmToUbufAligned(this->defaultTopkIndices, this->seqPositions, defaultTopkBytes);
+            set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+            wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+        }
+        CopyGmToUbufAligned(this->sortIndices, this->seqPositions + this->sortIndicesStart,
+                            this->sortIndicesBytes);
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID4);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID4);
 #endif
@@ -599,16 +620,23 @@ public:
                 int queryTaskOffset = queryStart + queryOffset;
                 int queryPosBase = cachedLen + queryOffset;
                 int queryPosEnd = queryPosBase + queryTaskLen - 1;  // inclusive
-                // per-chunk token position info, skip if this chunk's attention is dense
-                if (queryPosEnd < topK) {
-                    idx = NEXT_MULTIPLE(idx, kvNumMax);  // skip KV chunks; jump to next query chunk
-                    continue;
-                }
                 // tiling infor for the indexer key matrix
                 int kvIdx = idx % kvNumMax;
                 int kvOffset = kvIdx * tileSizeOfCachedKV;
-                // skip score calculation if per-chunk last token pos < KV chunk's smallest pos
-                if (queryPosEnd < kvOffset) {
+#ifdef __DAV_C220_VEC__
+                if (assignedDefaultTopk && kvOffset == 0 && queryPosBase < topK) {
+                    __gm__ uint32_t *dst = this->topkIndices + queryTaskOffset * topK;
+                    for (int i = 0; i < queryTaskLen; i++) {
+                        if (queryPosBase + i >= topK) {
+                            break;
+                        }
+                        CopyUbufToGmAligned(dst + i * topK, this->defaultTopkIndices,
+                                            defaultTopkBytes);
+                    }
+                }
+#endif
+                // per-chunk token position info, skip if this chunk's attention is dense
+                if (queryPosEnd < topK || queryPosEnd < kvOffset) {
                     idx = NEXT_MULTIPLE(idx, kvNumMax);  // skip KV chunks; jump to next query chunk
                     continue;
                 }
@@ -648,7 +676,7 @@ public:
                            curr);
                 RunAivTopk(
                     (__gm__ ScoreDtype *)scores[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
-                    lastTopk + outOffset * 2, indices, nWorkCurCore, kvOffset, kvLen, topK,
+                    lastTopk + outOffset * 2, nWorkCurCore, kvOffset, kvLen, topK,
                     topkIndices + outOffset, queryPosBase + nWorkStart, blockTable);
                 ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[curr]);
 #endif
@@ -680,7 +708,7 @@ private:
     __gm__ int32_t *cachedLens;
     __gm__ int32_t *blockTables;
     __gm__ uint32_t *lastTopk;
-    __gm__ uint32_t *indices;
+    __gm__ uint32_t *seqPositions;
     __gm__ uint32_t *topkIndices;
     uint32_t nHeads;
     uint32_t headDim;
@@ -689,6 +717,7 @@ private:
     uint32_t maxNumBlock;
     uint32_t topK;
     uint32_t tileSizeOfCachedKV;
+    bool skipDenseTopk;
     int blockIdx;
     int subBlockIdx;
     int nextBlockIdx;
@@ -716,36 +745,39 @@ private:
     __ubuf__ float *mrgSortBuf1;
     __ubuf__ float *totalSort;
     __ubuf__ uint32_t *sortIndices;
+    __ubuf__ uint32_t *defaultTopkIndices;
     uint32_t sortIndicesStart = 0;
-    uint64_t sortIndicesRepeats = 1;
+    uint32_t sortIndicesBytes = 32;
+    uint32_t sortIndicesRepeats = 1;
 #endif
 };
 
-#define INDEXER_TOPK_FUNC_DEFINE(dtype)                                                        \
-    extern "C" __global__ __aicore__ void indexer_topk_##dtype(                                \
-        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc, GM_ADDR queryLens,   \
-        GM_ADDR cachedLens, GM_ADDR blockTables, GM_ADDR scores, GM_ADDR lastTopk,             \
-        GM_ADDR indices, GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads, uint32_t headDim, \
-        uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK)               \
-    {                                                                                          \
-        IndexerTopK<dtype, float, dtype, dtype> op;                                            \
-        op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,  \
-                lastTopk, indices, topkIndices, sync, nHeads, headDim, blockSize, batch,       \
-                maxNumBlock, topK);                                                            \
-        op.Run();                                                                              \
+#define INDEXER_TOPK_FUNC_DEFINE(dtype)                                                            \
+    extern "C" __global__ __aicore__ void indexer_topk_##dtype(                                    \
+        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc, GM_ADDR queryLens,       \
+        GM_ADDR cachedLens, GM_ADDR blockTables, GM_ADDR scores, GM_ADDR lastTopk,                 \
+        GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads,                  \
+        uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK, \
+        uint8_t skipDenseTopk)                                                                     \
+    {                                                                                              \
+        IndexerTopK<dtype, float, dtype, dtype> op;                                                \
+        op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,      \
+                lastTopk, seqPositions, topkIndices, sync, nHeads, headDim, blockSize, batch,      \
+                maxNumBlock, topK, skipDenseTopk);                                                 \
+        op.Run();                                                                                  \
     }
 
 #define INDEXER_TOPK_C8_FUNC_DEFINE(dtype)                                                       \
     extern "C" __global__ __aicore__ void indexer_topk_##dtype(                                  \
         GM_ADDR q, GM_ADDR k_cache, GM_ADDR weight, GM_ADDR query_start_loc, GM_ADDR query_lens, \
         GM_ADDR cached_lens, GM_ADDR block_tables, GM_ADDR scores, GM_ADDR last_topk,            \
-        GM_ADDR indices, GM_ADDR topk_indices, GM_ADDR sync, uint32_t heads, uint32_t dim,       \
+        GM_ADDR seq_positions, GM_ADDR topk_indices, GM_ADDR sync, uint32_t heads, uint32_t dim, \
         uint32_t block_size, uint32_t batch, uint32_t max_blocks, uint32_t topk,                 \
-        GM_ADDR k_scale_cache)                                                                   \
+        uint8_t skip_dense_topk, GM_ADDR k_scale_cache)                                          \
     {                                                                                            \
         IndexerTopK<dtype, int32_t, half, float> op;                                             \
         op.Init(q, k_cache, weight, query_start_loc, query_lens, cached_lens, block_tables,      \
-                scores, last_topk, indices, topk_indices, sync, heads, dim, block_size, batch,   \
-                max_blocks, topk, k_scale_cache);                                                \
+                scores, last_topk, seq_positions, topk_indices, sync, heads, dim, block_size,    \
+                batch, max_blocks, topk, skip_dense_topk, k_scale_cache);                        \
         op.Run();                                                                                \
     }

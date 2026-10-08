@@ -211,6 +211,9 @@ class ModelConfig:
     """Number of dense FFN layers."""
     n_routed_experts: int = ...
     """Number of routed experts."""
+    num_redundant_experts: int = ...
+    """EPLB redundant expert slots (total across EP ranks). 0 = non-EPLB; total physical slots =
+    n_routed_experts + num_redundant_experts, divided evenly across moe_ep_size ranks."""
     n_shared_experts: int = ...
     """Number of shared experts."""
     n_expert_groups: int = ...
@@ -891,6 +894,11 @@ class Model:
     re_down_deq_scale: List[torch.Tensor] = ...
     """Routed-expert down weight dequant scales, one per local expert, each shape
     ``[2*hidden_size, 1]``, fp32."""
+    log2phy: List[torch.Tensor] = ...
+    """EPLB per-MoE-layer logical→physical expert map, shape ``[n_routed_experts]``, int32. One
+    entry per MoE layer (MoE-layer-major, aligned with :attr:`moe_gate`). ``log2phy[L]`` is the
+    global physical slot for logical expert L on this rank. Undefined/empty for non-EPLB layers
+    (remap skipped)."""
 
     # DeepSeek-V4 (CxA)
     attn_sink: List[torch.Tensor] = ...
@@ -2082,6 +2090,40 @@ def unpermutation(
     """
     ...
 
+def remap_gate_outputs(
+    rt: Runtime,
+    w_in: torch.Tensor,
+    r_in: torch.Tensor,
+    w_out: torch.Tensor,
+    r_out: torch.Tensor,
+    log2phy: torch.Tensor,
+) -> None:
+    """Scatter ForwardMoEGate outputs from logical to physical expert columns.
+
+    Applies the EPLB ``log2phy`` (logical→physical slot) map to the gate outputs
+    so that column index becomes a physical slot id before Dispatch reads the
+    physical-slot-major weight table ``ws[j]``. ``w_out[t, log2phy[L]] = w_in[t, L]``
+    and ``r_out`` bit ``(t, log2phy[L])`` is set iff ``r_in`` bit ``(t, L)`` is set.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        w_in (torch.Tensor): Logical gate weights, shape ``[tokens, n_routed_experts]``,
+            bf16 or fp32.
+        r_in (torch.Tensor): Logical routing bitmap (BIT1 packed), shape
+            ``[tokens, ceil(n_routed_experts/8)]`` bytes (one bit per logical expert).
+        w_out (torch.Tensor): Physical gate weights output, shape
+            ``[tokens, total_physical_experts]``, same dtype as ``w_in``.
+        r_out (torch.Tensor): Physical routing bitmap output (BIT1 packed), shape
+            ``[tokens, ceil(total_physical_experts/8)]`` bytes. Each row is zeroed
+            in-UB before bit-set.
+        log2phy (torch.Tensor): Logical→physical slot map, shape ``[n_routed_experts]``,
+            int32. A bijection on this rank, so the scatter is collision-free.
+
+    Returns:
+        None: `w_out` and `r_out` are written in place.
+    """
+    ...
+
 def group_matmul(
     rt: Runtime,
     in_: torch.Tensor,
@@ -2963,7 +3005,6 @@ def indexer_topk(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     weight: torch.Tensor,
-    indices: torch.Tensor,
     topk_indices: torch.Tensor,
     query_start_loc: torch.Tensor,
     lens: torch.Tensor,
@@ -2997,12 +3038,12 @@ def indexer_topk(
             ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are
             the indexer weights), same dtype as q.
             C8: ``[total_query_len, 32]``, fp16, already multiplied by Q scale.
-        indices (torch.Tensor): Input index tensor ``[max_seq_len]`` (int32),
-            pre-filled with ``0..max_seq_len-1``, with at least 4096 entries.
-        topk_indices (torch.Tensor): Output token indices (not score order),
-            ``[total_query_len, top_k]`` (int32).
-            Rows at sequence positions >= top_k contain top_k causal indices
-            in descending index order. Dense rows are unspecified and must not be read.
+        topk_indices (torch.Tensor): Output top-k indices tensor
+            ``[total_query_len, top_k]`` (int32), emitted in ascending index order.
+            Sparse rows (``p0 >= top_k``, ``p0 = cached_len + in-batch query offset``) hold
+            the real top-k (all indices in ``[0, p0]``); dense rows (``p0 < top_k``)
+            hold the default template ``0..top_k-1``, whose first ``p0 + 1`` entries are
+            always valid positions — consumers must ignore entries ``> p0``.
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
             int32 device.
         lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.

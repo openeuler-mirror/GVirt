@@ -63,7 +63,7 @@ UB 偏移手工累加分配（`csrc/kernels/muls.h:21-40`），`len = ROUND_UP(c
 
 初始置 4 个 flag（V→MTE2 的 ID0/ID1、MTE3→V 的 ID0/ID1，`csrc/kernels/muls.h:48-51`）。每轮迭代（`csrc/kernels/muls.h:58-88`）：
 
-- `wait_flag(PIPE_V, PIPE_MTE2, ID0+curr)` 等输入缓冲空闲 → `CopyGmToUbufAligned` 搬入（按 actualLen 字节数自动选择 32B/16B/8B 对齐的 DMA 原语，见 `csrc/kernels/kernel_macro.h:813-823`）→ `set_flag(PIPE_MTE2, PIPE_V, ID0)`；
+- `wait_flag(PIPE_V, PIPE_MTE2, ID0+curr)` 等输入缓冲空闲 → `CopyGmToUbufAligned` 搬入（按 actualLen 字节数自动选择 32B/16B/8B 对齐的 DMA 原语，见 `csrc/kernels/kernel_macro.h:871-880`）→ `set_flag(PIPE_MTE2, PIPE_V, ID0)`；
 - vconv 完成后 `set_flag(PIPE_V, PIPE_MTE2, ID0+curr)` 归还输入缓冲；
 - `wait_flag(PIPE_MTE3, PIPE_V, ID0+curr)` 等输出缓冲空闲 → vconv 转回 dtype → `set_flag(PIPE_V, PIPE_MTE3, ID0)` → `wait_flag` 后 `CopyUbufToGmAligned` 写回 → `set_flag(PIPE_MTE3, PIPE_V, ID0+curr)` 归还输出缓冲；
 - `curr = 1 - curr` 切换 ping-pong。

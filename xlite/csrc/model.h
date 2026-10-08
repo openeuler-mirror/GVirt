@@ -76,6 +76,9 @@ struct XModelConfig {
     // mlp
     uint32_t nDenseLayers = 0;
     uint32_t nRoutedExperts = 0;
+    // EPLB redundant expert slots. totalPhysicalExperts = nRoutedExperts + numRedundantExperts.
+    // 0 ⟺ non-EPLB (logical == physical, byte-equivalent to the legacy path).
+    uint32_t numRedundantExperts = 0;
     uint32_t nSharedExperts = 0;
     uint32_t nExpertGroups = 1;
     uint32_t nLimitedGroups = 1;
@@ -230,6 +233,10 @@ public:
     std::vector<std::vector<XTensor>> moeREDownDeqScale;
     std::vector<std::vector<XTensor>> moeREUpGateScaleBias;
     std::vector<std::vector<XTensor>> moeREDownScaleBias;
+    // EPLB: per-MoE-layer logical→physical expert map, [nRoutedExperts] INT32, zero-captured
+    // from the vllm-ascend registered buffer (in-place .copy_() keeps data_ptr stable).
+    // nullptr/empty ⟺ non-EPLB layer (remap skipped in ForwardMoE).
+    std::vector<XTensor> log2phy;
 
     // ===== DeepSeek-V4 (CxA) attention weights =====
     std::vector<XTensor> attnSink;
@@ -359,7 +366,7 @@ private:
     uint64_t _mropeMaskH;
     uint64_t _mropeMaskW;
     XTensor _sync;
-    XTensor _dsaTopkIndices;
+    XTensor _dsaSeqPositions;  // identity table 0...topK...maxSeqLen-1
     float _dsaIndexerScale = 1.0f;
 };
 

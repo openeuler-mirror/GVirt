@@ -78,6 +78,11 @@ void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t st
                         XTensor &out, XTensor &unpIdx, XTensor &counts);
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing,
                           XTensor &weights, uint32_t start, uint32_t end, XTensor &out);
+// EPLB: scatter gate outputs from logical [M, nRoutedExperts] to physical [M, totalPhysicalExperts]
+// columns via log2phy (logical→physical). wIn/wOut are BF16/FP32; rIn/rOut are BIT1. rOut is
+// zeroed by the op. log2phy is [nRoutedExperts] INT32.
+void XliteOpRemapGateOutputs(XRuntime &rt, XTensor &wIn, XTensor &rIn, XTensor &wOut, XTensor &rOut,
+                             const XTensor &log2phy);
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                         long outDim, long inDim, XTensor &output, bool weightNZ = false,
@@ -226,11 +231,11 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
                           XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,
                           uint32_t headDim, uint32_t blockSize, uint32_t batch);
 void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight, XTensor &scores,
-                        XTensor &lastTopk, XTensor &indices, XTensor &topkIndices,
+                        XTensor &lastTopk, XTensor &seqPositions, XTensor &topkIndices,
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK,
-                        const XTensor &kScaleCache = XTensor());
+                        uint8_t skipDenseTopk = 0, const XTensor &kScaleCache = XTensor());
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output,
                  uint32_t calcOffset = 0, uint32_t calcNum = UINT32_MAX);
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,

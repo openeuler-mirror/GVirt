@@ -13,22 +13,27 @@
 | ACLGraph Piecewise | N/A | ✅ |
 | Async Scheduling | ✅ | ✅ |
 | Automatic Prefix Caching | ✅ | ✅ |
+| Balance Scheduling | ✅ | ✅ |
 | Chunked Prefill | ✅ | ✅ |
 | Context Parallel | ❌ | ❌ |
 | Cpu Binding | ✅ | ✅ |
 | Data Parallel | ✅ | ✅ |
 | Disaggregated Prefill | ✅ | ✅ |
+| Dsv4 Dsa Overlap | N/A | ✅ |
 | Speculative Decoding(MTP) | ✅ | ✅ |
 | Speculative Decoding(Eager3) | ❌ | ❌ |
-| EPLB | ❌ | ❌ |
+| EPLB | ✅ | ✅ |
 | EP | ✅ | ✅ |
 | Flashcomm1 | N/A | ✅ |
+| Fuse Muls Add | N/A | ✅ |
 | KV Cache Pool | ✅ | ✅ |
-| Lmhead TP | ❔ | ❔ |
+| Lmhead TP | ✅ | ✅ |
 | MLAPO | N/A | ✅ |
 | Multimodal Inputs | 🟠 | ✅ |
 | Multistream Moe | N/A | ✅ |
-| Shared Expert DP | ❔ | ✅ |
+| Npugraph Ex | N/A | ✅ |
+| Shared Expert DP | ✅ | ✅ |
+| Short Request First | ✅ | ✅ |
 | Quantization W4A8 | ❌ | ❌ |
 | Quantization W8A8 | ✅ | ✅ |
 | Tensor Parallel | ✅ | ✅ |

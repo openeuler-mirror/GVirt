@@ -142,6 +142,9 @@ def main(
     if model_type == "deepseek_v3" or model_type == "deepseek_v32" or model_type == "glm5":
         from tests.models.deepseek_v3 import ModelArgs
         from tests.models.deepseek_v3 import DeepSeek_V3 as Transformer
+    elif model_type == "glm5_next":
+        from tests.models.glm5_next import ModelArgs
+        from tests.models.glm5_next import GLM5Next as Transformer
     elif model_type == "deepseek_v4":
         from tests.models.deepseek_v4 import ModelArgs
         from tests.models.deepseek_v4 import Transformer
@@ -343,7 +346,7 @@ def main(
                 messages.clear()
                 continue
             messages.append({"role": "user", "content": prompt})
-            if model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm5", "minimax_m2"}:
+            if model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm5", "glm5_next", "minimax_m2"}:
                 prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
             elif model_type == "llama":
                 formatted_prompt = ""
@@ -374,7 +377,7 @@ def main(
         def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature, no_prefix):
             if no_prefix:
                 prompts_tokens_batch = [tokenizer.encode(item["query"]) for item in batch]
-            elif model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm5", "minimax_m2"}:
+            elif model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm5", "glm5_next", "minimax_m2"}:
                 prompts_tokens_batch = []
                 for item in batch:
                     try:
@@ -547,6 +550,7 @@ if __name__ == "__main__":
         "deepseek_v32",
         "deepseek_v4",
         "glm5",
+        "glm5_next",
         "minimax_m2",
         "llama",
         "qwen2",

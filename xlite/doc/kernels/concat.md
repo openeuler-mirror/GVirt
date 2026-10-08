@@ -52,7 +52,7 @@ host 侧不做 dtype 分派；测试覆盖 float16/bfloat16/float32/int32/int8 �
 
 ### 流水线同步
 
-初始各 `set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0/1)` 一次预置两个半区可用（`csrc/kernels/concat.cpp:64-66`）；每轮"写上一段（wait MTE2→MTE3 + CopyUbufToGmAligned + set MTE3→MTE2）/ 读当前段（wait MTE3→MTE2 + CopyGmToUbufAligned + set MTE2→MTE3）"用对应 EVENT_ID 握手；末尾 `wait_flag` ID0/1 + `pipe_barrier(PIPE_ALL)` 收尾（`csrc/kernels/concat.cpp:135-137`）。搬运原语按字节数 32B/2B/1B 对齐自适应（`csrc/kernels/kernel_macro.h:813-839`），因此任意奇数字节尾段（如 bf16 奇数宽度、int8 尾巴）都能正确搬运。
+初始各 `set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0/1)` 一次预置两个半区可用（`csrc/kernels/concat.cpp:64-66`）；每轮"写上一段（wait MTE2→MTE3 + CopyUbufToGmAligned + set MTE3→MTE2）/ 读当前段（wait MTE3→MTE2 + CopyGmToUbufAligned + set MTE2→MTE3）"用对应 EVENT_ID 握手；末尾 `wait_flag` ID0/1 + `pipe_barrier(PIPE_ALL)` 收尾（`csrc/kernels/concat.cpp:135-137`）。搬运原语按字节数 32B/2B/1B 对齐自适应（`csrc/kernels/kernel_macro.h:871-896`），因此任意奇数字节尾段（如 bf16 奇数宽度、int8 尾巴）都能正确搬运。
 
 ### 边界处理与 host 侧校验
 

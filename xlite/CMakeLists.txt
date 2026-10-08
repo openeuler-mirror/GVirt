@@ -45,6 +45,7 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/cast_bfloat16_t_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/softmax.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/permutation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/remap_gate_outputs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpermutation_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/all_reduce.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reduce_scatter.cpp
