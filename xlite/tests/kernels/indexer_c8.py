@@ -11,7 +11,6 @@
 
 Compare with PyTorch and optional native fixtures.
 """
-import argparse
 import json
 import logging
 from pathlib import Path
@@ -33,6 +32,10 @@ NATIVE_MAX_MISMATCH_FRACTION = 0.001
 K_CACHE_FILL = -101
 SCALE_CACHE_FILL = -17
 TOPK_FILL = -777
+
+npu_id = 0
+fixtures_dir = None
+output_path = None
 
 # Token counts for Q/K phase tests.
 prepare_tokens = [1, 17, 128, 129]
@@ -520,19 +523,13 @@ def run_invalid_tests(rt, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", type=int, required=True)
-    parser.add_argument("--fixtures", type=Path)
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-
     import torch_npu  # noqa: F401
     from xlite._C import Runtime
 
     logging.getLogger().setLevel(logging.INFO)
-    torch.npu.set_device(args.device)
+    torch.npu.set_device(npu_id)
     torch.set_num_threads(4)
-    device = torch.device(f"npu:{args.device}")
+    device = torch.device(f"npu:{npu_id}")
     rt = Runtime(device.index, 160)
 
     result = {"rejected_inputs": run_invalid_tests(rt, device),
@@ -540,11 +537,11 @@ def main():
               "quantization_boundary": run_quantization_test(rt, device),
               "sign_patterns": run_sign_test(rt, device),
               "synthetic": run_synthetic_tests(rt, device),
-              "fixtures": run_fixture_tests(rt, device, args.fixtures) if args.fixtures else [],
+              "fixtures": run_fixture_tests(rt, device, fixtures_dir) if fixtures_dir else [],
               "causal": True,
               "full_model_accuracy_tested": False, "performance_tested": False}
-    if args.output:
-        args.output.write_text(json.dumps(result, indent=2) + "\n")
+    if output_path:
+        Path(output_path).write_text(json.dumps(result, indent=2) + "\n")
     logging.info("indexer_c8 tests passed")
 
 

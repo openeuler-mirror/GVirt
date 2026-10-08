@@ -11,7 +11,6 @@
 
 Compare with PyTorch and optional native fixtures.
 """
-import argparse
 import json
 import logging
 import math
@@ -31,6 +30,10 @@ NATIVE_MAX_BYTE_DELTA = 1
 NATIVE_MAX_MISMATCH_FRACTION = 0.001
 K_CACHE_FILL = -101
 SCALE_CACHE_FILL = -17
+
+npu_id = 0
+fixtures_dir = None
+output_path = None
 
 # Token counts for random inputs.
 test_cases = [0, 1, 17, 129, 257]
@@ -291,26 +294,20 @@ def run_fixture_tests(rt, device, folder):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", type=int, required=True)
-    parser.add_argument("--fixtures", type=Path)
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-
     import torch_npu  # noqa: F401
     from xlite._C import Runtime
 
     logging.getLogger().setLevel(logging.INFO)
-    torch.npu.set_device(args.device)
-    device = torch.device(f"npu:{args.device}")
+    torch.npu.set_device(npu_id)
+    device = torch.device(f"npu:{npu_id}")
     rt = Runtime(device.index, 32)
 
     results = run_synthetic_tests(rt, device)
     results.append(run_invalid_tests(rt, device))
-    if args.fixtures:
-        results.extend(run_fixture_tests(rt, device, args.fixtures))
-    if args.output:
-        args.output.write_text(json.dumps({
+    if fixtures_dir:
+        results.extend(run_fixture_tests(rt, device, fixtures_dir))
+    if output_path:
+        Path(output_path).write_text(json.dumps({
             "passed": True,
             "acceptance": "bounded numerical error, not bitwise native equivalence",
             "full_model_or_topk_tested": False,
