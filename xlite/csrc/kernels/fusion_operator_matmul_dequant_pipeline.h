@@ -11,7 +11,7 @@
 using namespace AscendC;
 
 #define C2V_CROSS_CORE_FLAG 8
-#define FUSION_MATMUL_DQ_LINEAR_SWIZZLE (1ULL << 8)
+#define FUSION_MATMUL_DQ_LINEAR_SWIZZLE 0ULL
 
 template <typename Dtype, typename MatDtype, typename OutDtype>
 class FusionMatmulDequantPipeline
