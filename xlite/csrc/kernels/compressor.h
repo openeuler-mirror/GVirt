@@ -757,6 +757,7 @@ __aicore__ inline void compressor_blocks_weighted_sum(
                                       dstGapSlice, dstGapSlice);
                     copy_ubuf_to_ubuf(scoreCalcUb, scoreUb[curr], 0, mergeSize, blkPerRowSlice,
                                       dstGapSlice, dstGapSlice);
+                    pipe_barrier(PIPE_V);
                     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
                     if (hasStateRows && ape != nullptr) {
                         // Pre-add ape to the gmKv rows (abs>=cached; state rows already carry
