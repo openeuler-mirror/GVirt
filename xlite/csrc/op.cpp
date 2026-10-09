@@ -1246,7 +1246,8 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                            uint32_t indexHeadDim, uint32_t indexNHeads, uint32_t ropeHeadDim,
                            uint32_t blockSize, XTensor &indexKCache, const XTensor &slotMapping,
                            float normEps, const XTensor &q, float scale, uint32_t topK, bool isLong,
-                           uint32_t tpSize)
+                           uint32_t tpSize, const XTensor &kScaleCache, const XTensor &q8,
+                           const XTensor &qScale, const XTensor &scaledWeights)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1254,6 +1255,27 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
     if (tpSize != 1) {
         throw std::runtime_error(std::string(__func__) + ": tpSize should be 1, got " +
                                  std::to_string(tpSize));
+    }
+    if (indexKCache.dtype == INT8) {
+        if (kw.shape[0] == 0) {
+            return;
+        }
+        if (kScaleCache.ptr == nullptr ||
+            (isLong && (q.ptr == nullptr || q8.ptr == nullptr || qScale.ptr == nullptr ||
+                        scaledWeights.ptr == nullptr))) {
+            throw std::invalid_argument("indexer_prepare: missing LI-C8 buffers");
+        }
+        if (indexHeadDim != 128 || ropeHeadDim != 64 || indexNHeads != 32 || kw.dtype != BF16 ||
+            !EachXDtype(FP32, kNorm, kNormBias) || (isLong && q.dtype != BF16)) {
+            throw std::invalid_argument("indexer_prepare: unsupported LI-C8 inputs");
+        }
+        aclrtlaunch_indexer_prepare_c8_bfloat16_t(
+            rt.aivNum, rt.stream, kw.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
+            slotMapping.ptr, indexKCache.ptr, kScaleCache.ptr, isLong ? q.ptr : nullptr,
+            isLong ? q8.ptr : nullptr, isLong ? qScale.ptr : nullptr,
+            isLong ? scaledWeights.ptr : nullptr, kw.shape[0], kw.shape[1], indexNHeads,
+            freqs.shape[0], kScaleCache.numel, freqs.dtype != BF16, isLong, normEps);
+        return;
     }
 
     KERNEL_PTR_TYPE(indexer_prepare) * launchKernel;
@@ -1270,6 +1292,29 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
     launchKernel(rt.aivNum, rt.stream, kw.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
                  kw.shape[0], indexHeadDim, indexNHeads, ropeHeadDim, blockSize, normEps,
                  kNorm.dtype == FP32, indexKCache.ptr, slotMapping.ptr, q.ptr, scale, topK, isLong);
+}
+
+void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm,
+                            const XTensor &kNormBias, const XTensor &freqs, const XTensor &position,
+                            const XTensor &slotMapping, XTensor &kCache, const XTensor &scaleCache,
+                            float normEps)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (k.dtype != BF16 || !EachXDtype(FP32, kNorm, kNormBias) || kCache.dtype != INT8 ||
+        scaleCache.dtype != FP16 ||
+        (freqs.dtype != BF16 && freqs.dtype != FP32 && freqs.dtype != CPLXF)) {
+        throw std::invalid_argument("indexer_k_cache_c8: unsupported inputs");
+    }
+    if (k.shape[0] == 0) {
+        return;
+    }
+    // The standalone K test interface uses the same kernel with the Q phase disabled.
+    aclrtlaunch_indexer_prepare_c8_bfloat16_t(
+        rt.aivNum, rt.stream, k.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
+        slotMapping.ptr, kCache.ptr, scaleCache.ptr, nullptr, nullptr, nullptr, nullptr, k.shape[0],
+        k.shape[1], 0, freqs.shape[0], scaleCache.numel, freqs.dtype != BF16, false, normEps);
 }
 
 void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XTensor &ape,
@@ -1933,7 +1978,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &lastTopk, XTensor &seqPositions, XTensor &topkIndices,
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
-                        uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk)
+                        uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk,
+                        const XTensor &kScaleCache)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1953,6 +1999,28 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     if (topK > MAX_TOPK_NUM) {
         throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
                                  std::to_string(MAX_TOPK_NUM));
+    }
+    if (kCache.dtype == INT8) {
+        if (nHeads != 32 || headDim != 128 || blockSize < 16 || blockSize > 128 ||
+            blockSize % 16 != 0 || MAX_INDEXER_KV_TILE_LEN % blockSize != 0 || batch == 0 ||
+            topK < 32 || topK % 32 != 0) {
+            throw std::invalid_argument("indexer_topk: unsupported LI-C8 configuration");
+        }
+        if (kScaleCache.shape.empty() || q.dtype != INT8 ||
+            !EachXDtype(FP16, weight, kScaleCache) || scores.dtype != FP32) {
+            throw std::invalid_argument("indexer_topk: unsupported LI-C8 inputs");
+        }
+        if (q.shape[0] != 0) {
+            aclrtlaunch_indexer_topk_int8_t(
+                rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
+                cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
+                topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlocks, topK,
+                skipDenseTopk, kScaleCache.ptr);
+        }
+        return;
+    }
+    if (!kScaleCache.shape.empty()) {
+        throw std::invalid_argument("indexer_topk: scale cache requires INT8 K cache");
     }
     KERNEL_PTR_TYPE(indexer_topk) * launchKernel;
     if (EachXDtype(FP16, q, kCache, weight, scores)) {

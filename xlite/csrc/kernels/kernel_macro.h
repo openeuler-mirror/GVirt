@@ -257,6 +257,19 @@ __aicore__ inline void CopyL0CToL1(const LocalTensor<Dtype> &dst, const LocalTen
     DataCopy(dst, src, param);
 }
 
+// INT32→FP16
+__aicore__ inline void CopyL0CToL1(const LocalTensor<half> &dst, const LocalTensor<int32_t> &src,
+                                   int mSize, int nSize, int srcStride, int dstStride,
+                                   float deqScale, bool relu)
+{
+    uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<uint32_t *>(&deqScale));
+    SetFixpipePreQuantFlag(deqScalar);
+    // TODO: Verify whether this FIX barrier can be removed.
+    PipeBarrier<PIPE_FIX>();
+    DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, DEQF16, relu, 0, 0);
+    DataCopy(dst, src, param);
+}
+
 template <typename Dtype>
 inline __aicore__ void CopyToGm(const GlobalTensor<Dtype> &dst, const LocalTensor<float> &src,
                                 int mSize, int nSize, int srcStride, int dstStride,

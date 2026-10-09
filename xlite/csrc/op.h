@@ -182,7 +182,18 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                            uint32_t indexHeadDim, uint32_t indexNHeads, uint32_t ropeHeadDim,
                            uint32_t blockSize, XTensor &indexKCache, const XTensor &slotMapping,
                            float normEps, const XTensor &q = XTensor(), float scale = 1.0f,
-                           uint32_t topK = 2048, bool isLong = false, uint32_t tpSize = 1);
+                           uint32_t topK = 2048, bool isLong = false, uint32_t tpSize = 1,
+                           const XTensor &kScaleCache = XTensor(), const XTensor &q8 = XTensor(),
+                           const XTensor &qScale = XTensor(),
+                           const XTensor &scaledWeights = XTensor());
+
+// LI-C8 writer only. Inputs are contiguous; K may have fused head-weight columns
+// after its first 128 elements. Valid slots must be unique, or -1 for padding.
+// Native callers validate indices and order producers/consumers on rt.stream.
+void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm,
+                            const XTensor &kNormBias, const XTensor &freqs, const XTensor &position,
+                            const XTensor &slotMapping, XTensor &kCache, const XTensor &scaleCache,
+                            float normEps = 1e-6f);
 void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XTensor &ape,
                        const XTensor &norm, const XTensor &freqs, XTensor &weightedSum,
                        const XTensor &queryStartLoc, const XTensor &queryLens,
@@ -234,7 +245,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK,
-                        uint8_t skipDenseTopk = 0);
+                        uint8_t skipDenseTopk = 0, const XTensor &kScaleCache = XTensor());
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output,
                  uint32_t calcOffset = 0, uint32_t calcNum = UINT32_MAX);
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,

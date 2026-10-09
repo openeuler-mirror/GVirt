@@ -769,7 +769,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     _kv.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
         if (c.attnType == XMODEL_ATTN_DSA) {
-            _kv[i].resize(3);
+            _kv[i].resize(!c.indexC8Mask.empty() && c.indexC8Mask[i] ? 4 : 3);
         } else if (c.attnType == XMODEL_ATTN_CXA) {
             _kv[i].resize(5);
         } else {
@@ -1973,9 +1973,18 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
                     at::Tensor &freqs, at::Tensor &position, uint32_t indexHeadDim,
                     uint32_t indexNHeads, uint32_t ropeHeadDim, uint32_t blockSize,
                     at::Tensor &indexKCache, at::Tensor &slotMapping, float normEps, at::Tensor &q,
-                    float scale, uint32_t topK, bool isLong)
+                    float scale, uint32_t topK, bool isLong,
+                    const std::optional<at::Tensor> &kScaleCache = std::nullopt,
+                    const std::optional<at::Tensor> &q8 = std::nullopt,
+                    const std::optional<at::Tensor> &qScale = std::nullopt,
+                    const std::optional<at::Tensor> &scaledWeights = std::nullopt)
 {
     XTensor _kw, _kNorm, _kNormBias, _freqs, _position, _indexKCache, _slotMapping, _q;
+    XTensor _ks, _q8, _qs, _sw;
+    InitXTensor(_ks, kScaleCache);
+    InitXTensor(_q8, q8);
+    InitXTensor(_qs, qScale);
+    InitXTensor(_sw, scaledWeights);
     InitXTensor(_kw, kw);
     InitXTensor(_kNorm, kNorm);
     InitXTensor(_kNormBias, kNormBias);
@@ -1986,7 +1995,25 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
     InitXTensor(_q, q);
     XliteOpIndexerPrepare(rt, _kw, _kNorm, _kNormBias, _freqs, _position, indexHeadDim, indexNHeads,
                           ropeHeadDim, blockSize, _indexKCache, _slotMapping, normEps, _q, scale,
-                          topK, isLong);
+                          topK, isLong, 1, _ks, _q8, _qs, _sw);
+    rt.Synchronize();
+}
+
+void IndexerKCacheC8(XRuntime &rt, const at::Tensor &k, const at::Tensor &kNorm,
+                     const at::Tensor &kNormBias, const at::Tensor &freqs,
+                     const at::Tensor &position, const at::Tensor &slotMapping, at::Tensor &kCache,
+                     at::Tensor &scaleCache, float normEps)
+{
+    XTensor x, w, b, f, pTensor, sTensor, kc, sc;
+    InitXTensor(x, k);
+    InitXTensor(w, kNorm);
+    InitXTensor(b, kNormBias);
+    InitXTensor(f, freqs);
+    InitXTensor(pTensor, position);
+    InitXTensor(sTensor, slotMapping);
+    InitXTensor(kc, kCache);
+    InitXTensor(sc, scaleCache);
+    XliteOpIndexerKCacheC8(rt, x, w, b, f, pTensor, sTensor, kc, sc, normEps);
     rt.Synchronize();
 }
 
@@ -2168,9 +2195,12 @@ void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &
 void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &weight,
                  at::Tensor &topkIndices, at::Tensor &queryStartLoc, at::Tensor &lens,
                  at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t headDim,
-                 uint32_t blockSize, uint32_t batch, uint32_t topK)
+                 uint32_t blockSize, uint32_t batch, uint32_t topK,
+                 const std::optional<at::Tensor> &kScaleCache = std::nullopt)
 {
-    XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables;
+    XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables,
+        _ks;
+    InitXTensor(_ks, kScaleCache);
 
     InitXTensor(_q, q);
     InitXTensor(_kCache, kCache);
@@ -2197,15 +2227,15 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     CHECK_ACL(aclrtMemcpy(ptr, size, host.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     seqPositions.Init({len}, INT32, ptr);
 
-    XTensor &scores =
-        rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN}, XDtypeOf(q), DBG_LOC);
+    XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
+                                   q.scalar_type() == at::kChar ? FP32 : XDtypeOf(q), DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({_q.shape[0], 2 * topK}, INT32, DBG_LOC);
     XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
     sync.Memset(0, rt.stream);
 
     XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, seqPositions, _topkIndices,
                        _queryStartLoc, _lens, _cachedLens, _blockTables, sync, nHeads, headDim,
-                       blockSize, batch, topK, 0);
+                       blockSize, batch, topK, 0, _ks);
     rt.Synchronize();
     rt.PutTensor(sync);
     rt.PutTensor(lastTopk);
@@ -2667,6 +2697,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_softmax_scale", &XModelConfig::indexSoftmaxScale)
         .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved)
         .def_readwrite("index_full_mask", &XModelConfig::indexFullMask)
+        .def_readwrite("index_c8_mask", &XModelConfig::indexC8Mask)
         .def_readwrite("linear_num_k_heads", &XModelConfig::linearNumKHeads)
         .def_readwrite("linear_num_v_heads", &XModelConfig::linearNumVHeads)
         .def_readwrite("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)
@@ -2979,7 +3010,12 @@ PYBIND11_MODULE(_C, m)
           py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("index_head_dim"),
           py::arg("index_n_heads"), py::arg("rope_head_dim"), py::arg("block_size"),
           py::arg("index_k_cache"), py::arg("slot_mapping"), py::arg("norm_eps"), py::arg("q"),
-          py::arg("scale"), py::arg("top_k"), py::arg("is_long"));
+          py::arg("scale"), py::arg("top_k"), py::arg("is_long"),
+          py::arg("k_scale_cache") = py::none(), py::arg("q8") = py::none(),
+          py::arg("q_scale") = py::none(), py::arg("scaled_weights") = py::none());
+    m.def("indexer_k_cache_c8", &IndexerKCacheC8, py::arg("rt"), py::arg("k"), py::arg("k_norm"),
+          py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("slot_mapping"),
+          py::arg("k_cache"), py::arg("scale_cache"), py::arg("norm_eps") = 1e-6f);
     m.def("compressor", &Compressor, "compressor", py::arg("rt"), py::arg("kv"), py::arg("score"),
           py::arg("ape") = std::nullopt, py::arg("norm") = std::nullopt,
           py::arg("freqs") = std::nullopt, py::arg("weighted_sum"), py::arg("query_start_loc"),
@@ -3035,7 +3071,8 @@ PYBIND11_MODULE(_C, m)
     m.def("indexer_topk", &IndexerTopK, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
           py::arg("weight"), py::arg("topk_indices"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
-          py::arg("block_size"), py::arg("batch"), py::arg("top_k"));
+          py::arg("block_size"), py::arg("batch"), py::arg("top_k"),
+          py::arg("k_scale_cache") = py::none());
     m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"),
           py::arg("calc_offset") = 0, py::arg("calc_num") = UINT32_MAX);
     m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),

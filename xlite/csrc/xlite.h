@@ -7,6 +7,7 @@
 // Umbrella header exposing the public C++ API.
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -61,6 +62,13 @@ inline void InitXTensor(XTensor &out, const torch::Tensor &in)
     }
 
     out.Init(sizes, XDtypeOf(in), TensorPtr(in));
+}
+
+inline void InitXTensor(XTensor &out, const std::optional<torch::Tensor> &in)
+{
+    if (in) {
+        InitXTensor(out, *in);
+    }
 }
 
 #endif  // _XLITE_H_

@@ -40,16 +40,17 @@ indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR querySta
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| q | 输入 | `[total_query_len, nHeads*headDim]` | fp16 / bf16 | 拼接的 flatten query |
-| kCache | 输入 | `[kvcache_block_num, blockSize, headDim]` | fp16 / bf16 | paged indexer K cache |
-| weight | 输入 | `[total_query_len, headDim + nHeads]` | fp16 / bf16 | 头融合权重,位于每行第 headDim 列起 |
+| q | 输入 | `[total_query_len, nHeads*headDim]` | fp16 / bf16 / int8 | 拼接的 flatten query;C8 为 `[total_query_len,4096]` |
+| kCache | 输入 | `[kvcache_block_num, blockSize, headDim]` | fp16 / bf16 / int8 | paged indexer K cache;C8 为 `[kvcache_block_num,blockSize,1,128]` |
+| weight | 输入 | `[total_query_len, headDim + nHeads]` | fp16 / bf16 | 头融合权重,位于每行第 headDim 列起;C8 为独立的 fp16 `[total_query_len,32]`,已乘 Q scale |
 | queryStartLoc | 输入 | `[batch]` | int32 | 各 batch query 起始偏移 |
 | queryLens / cachedLens | 输入 | `[batch]` | int32 | 各 batch query / 已缓存长度;token 绝对位置 `p0 = cachedLens[i] + 段内偏移` |
 | blockTables | 输入 | `[batch, maxNumBlock]` | int32 | 逻辑块 → 物理块映射 |
-| scores | workspace | `[2 * block_num * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN]` 视作 `[block_num][2][XLITE_MAX_M0 * 4096]` | fp16 / bf16 | AIC→AIV 的得分中转缓冲,乒乓两份,每 block 一段(见下文布局) |
+| scores | workspace | `[2 * block_num * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN]` 视作 `[block_num][2][XLITE_MAX_M0 * 4096]` | fp16 / bf16 / fp32 | C8 使用 fp32;AIC→AIV 的得分中转缓冲,乒乓两份,每 block 一段(见下文布局) |
 | lastTopk | workspace | `[total_query_len, 2*topK]`(uint32 对) | uint32 | 跨核 topk 接力缓冲:处理非首 KV tile 的核把当前全局 topK 候选(值+索引对)写给下一个核 |
 | seqPositions | 输入 | `[max(max(blockSize*maxNumBlock, INIT_MIN_SEQ_POS), topK)]` | int32(uint32 语义) | `arange(...)` 恒等索引表,由 host 侧(`csrc/_C.cpp` `IndexerTopK` / `csrc/model.cpp` `XModel::Init`)预先生成;长度必须覆盖 kernel 侧推导的 `maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)`(`XliteOpIndexerTopK` 会校验,不足即抛错)。`XModel::Init` 按 `MAX(INIT_MIN_SEQ_POS, ROUND_UP(max_seq_len, blockSize))` 一次性预生成。AIV 每个 subblock 搬入属于自己的一段,之后按 `kvOffset` 增量推进;同时它也是稠密行模板的来源——首个 `topK` 项即 `0...topK-1`(模板 writer 核整体搬入 UB `defaultTopkIndices`,见下文) |
 | topkIndices | 输出 | `[total_query_len, topK]` | int32(uint32 语义) | 每 query token 的 topK 索引,**按索引升序**(最小 id 在前)排列,所有行有效。`p0 >= topK` 的稀疏行是真实 topK(候选满 `topK` 个,全部落在 `[0, p0]`);`p0 < topK` 的稠密行是默认模板 `0...topK-1`,其中 `> p0` 的表项无效,下游必须过滤——模板头部的前 `min(p0+1, topK)` 项恒为有效位置(`gather_sparse_kv_cache` 依赖此约定做头部有效收集) |
+| kScaleCache | 输入(C8) | `[kvcache_block_num,blockSize,1,1]` | fp16 | 与 K cache 同分页布局;Python 参数为 `k_scale_cache` |
 | sync | workspace | `[AIV_TO_AIC*block_num]` | int32 | 核间环形同步 flag 数组(每核 `AIV_TO_AIC=2` 个,对应 2 个 subblock,`indexer_topk.h:12`) |
 | nHeads / headDim / blockSize / batch / topK / skipDenseTopk | — | 标量 | uint32 / uint8 | 测试配置:nHeads=64, headDim=128, blockSize=128, topK ∈ {512, 2048};约束 `topK <= MAX_TOPK_NUM=2048`、`kvLen <= MAX_INDEXER_KV_TILE_LEN=4096`(`indexer_topk.h:346`)。`skipDenseTopk=1` 时不写稠密模板(旧行为,稠密行内容不定),默认 0 |
 
@@ -59,8 +60,11 @@ indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR querySta
 |---|---|---|
 | `indexer_topk_bfloat16_t` | `csrc/kernels/indexer_topk_bfloat16_t.cpp` | q/kCache/weight/scores 全 bf16 |
 | `indexer_topk_float16_t` | `csrc/kernels/indexer_topk_float16_t.cpp` | 全 fp16 |
+| `indexer_topk_int8_t` | `csrc/kernels/indexer_topk_int8_t.cpp` | Q/K 为 int8,weight/K scale 为 fp16,scores 为 fp32 |
 
-dtype 分派见 `csrc/op.cpp:1806-1814`,四张计算 tensor 必须同 dtype。
+dtype 分派见 `csrc/op.cpp` 的 `XliteOpIndexerTopK`。浮点路径要求 q/kCache/weight/scores 同 dtype。
+
+C8 使用 32 个 head、headDim=128,内核入口额外接收 `k_scale_cache`。QK 用 int32 累加,经 `FP16(relu(dot)/1024)` 后与 weight 相乘,得到 fp32 scores;AIV 乘 K scale 后使用相同的因果遮罩和 Top-K。
 
 ## 实现原理
 
@@ -76,7 +80,7 @@ dtype 分派见 `csrc/op.cpp:1806-1814`,四张计算 tensor 必须同 dtype。
 
 每个 (query chunk, KV chunk) 任务的**稠密模板写出与位置感知跳过**(`indexer_topk.h:569-587`),`queryPosBase = cachedLen + queryOffset` 为该 chunk 首 token 的绝对位置,`queryPosEnd`(含)为末 token 位置:
 
-1. **稠密行模板写出**:每个 AIV subblock 都会枚举到所有任务,但只有指定的模板 writer(`assignedDefaultTopk = !skipDenseTopk && blockIdx == block_num-1 && subBlockIdx == AIV_TO_AIC-1`,即最后一个核的 subblock 1,`indexer_topk.h:515-516`)在 `kvOffset == 0 && queryPosBase < topK` 时,把默认模板 `topK-1...0` 逐行复制到该 query chunk **稠密前缀**的各行(行内 `queryPosBase + i >= topK` 即 `break`,`indexer_topk.h:569-580`)——只写 `p0 < topK` 的行,混合 chunk 的稀疏行(归属其他核做真实 topk)不被覆盖。此检查在跳过判断**之前**进行,保证整块稠密的 chunk 也被覆盖;
+1. **稠密行模板写出**:每个 AIV subblock 都会枚举到所有任务,但只有指定的模板 writer(`assignedDefaultTopk = !skipDenseTopk && blockIdx == block_num-1 && subBlockIdx == AIV_TO_AIC-1`,即最后一个核的 subblock 1,`indexer_topk.h:515-516`)在 `kvOffset == 0 && queryPosBase < topK` 时,把默认模板 `0...topK-1` 逐行复制到该 query chunk **稠密前缀**的各行(行内 `queryPosBase + i >= topK` 即 `break`,`indexer_topk.h:569-580`)——只写 `p0 < topK` 的行,混合 chunk 的稀疏行(归属其他核做真实 topk)不被覆盖。此检查在跳过判断**之前**进行,保证整块稠密的 chunk 也被覆盖;
 2. **稠密/未来 chunk 跳过**:`queryPosEnd < topK`(整块稠密)或 `queryPosEnd < kvOffset`(整块全未来)—— 直接 `idx = NEXT_MULTIPLE(idx, kvNumMax)` 跳过(`indexer_topk.h:582-585`);
 3. 否则 `kvLen = MIN(tileSizeOfCachedKV, queryPosEnd - kvOffset + 1)`:KV chunk 只需覆盖到 chunk 末 token 的位置为止(最后一个 KV tile 通常不满)。混合 chunk(稠密行与稀疏行并存)不跳过,其稠密行在 `RunAivTopk` 内直接跳过(模板已由 writer 写出,见下文)。
 
@@ -111,10 +115,12 @@ dtype 分派见 `csrc/op.cpp:1806-1814`,四张计算 tensor 必须同 dtype。
 | `mrgSortBuf1` | `MAX_INDEXER_KV_TILE_LEN*2*float` | vbitsort 归并工作区(与 `mrgSortBuf0` 分置两端避免 bank conflict) |
 | `sortIndices` | `MAX_INDEXER_KV_TILE_LEN` 个 u32 | 全局索引表(单份,非乒乓;见下) |
 | `defaultTopkIndices` | `topK` 个 u32 | 稠密行默认模板 `0...topK-1`(仅模板 writer 从 `seqPositions` 前 `topK` 项整体搬入一次) |
-| `in[2]` | 各 `MAX_INDEXER_KV_TILE_LEN` 个 Dtype | 乒乓:当前 tile 得分搬入 |
+| `in[2]` | 各 `MAX_INDEXER_KV_TILE_LEN` 个 WeightDtype | 乒乓:浮点路径搬入得分,C8 搬入 K scale |
 | `lastSort[2]` | 各 `MAX_TOPK_NUM*2*float` | 乒乓:上一核传来的 topK 候选 |
 | `out[2]` | 各 `MAX_TOPK_NUM` 个 u32 | 乒乓:最终结果搬出 |
 | `mrgSortBuf0` | `MAX_INDEXER_KV_TILE_LEN*2*float` | 计算区,置于 `UB_SIZE` 向下(高地址) |
+
+C8 的 fp32 scores 直接搬入 `mrgSortBuf0`,`in[0]/in[1]` 交替暂存 fp16 K scale。先搬入当前 query 可见的 K scale,再等待排序工作区并搬入 scores,通过 MTE2→V `EVENT_ID0 + curr` 等待搬运完成。缩放后重新填充排序尾部。
 
 `MAX_TOPK_NUM=2048` 与 `MAX_INDEXER_KV_TILE_LEN=4096`(均定义于 `csrc/kernels/kernel_param.h:43-44`)正是这套 UB 布局的容量上限来源,因此 host 侧强制 `topK <= 2048`(`csrc/op.cpp:1802-1805`)。
 
@@ -129,7 +135,7 @@ dtype 分派见 `csrc/op.cpp:1806-1814`,四张计算 tensor 必须同 dtype。
    - 非 `isFirst`:先 `WaitPrevCore()` 等前一个核把它的全局候选写入本核的 `lastTopk` 段,搬入 `lastSort[curr]`(`lastSortLen = MIN(topK, kvOffset)` 对),`vmrgsort4(totalSort, {localSort, lastSort}, ...)` 二路归并(`indexer_topk.h:415-441`);
    - `isFirst`:`totalSort` 已由步骤 3 直接得到;
 5. **中间结果传递**(`!isFinal`):把 `totalSort` 的前 `MIN(topK, totalSortLen)` 对(值,索引)写入 `lastTopk + idx*topK*2` 供下一核消费;最后一个 query 处理完后 `SetNextCore()` 唤醒下一核(`indexer_topk.h:444-456`)。MTE3 异步读 `totalSort` 的释放等待用 `totalSortOnHold` 标记**推迟到下次真正要写它之前**(`indexer_topk.h:354,409-434,446-479`),避免空等;
-6. **末 tile 收尾**(`isFinal`,`indexer_topk.h:458-496`):`vreducev2` 从 `totalSort` 抽出索引载荷;由于 `vbitsort` 按 **float** 键比较(位 cast 的 int 仅在符号位为 0 时保序),而 topK id 可为任意 `[0, p0]` 值,这里对索引做**镜像键**变换 `key = 0x40000000 - id`(恒为正,位 cast 保序且其降序即 id 升序),对 topK 个候选走 `vbitsort + MrgSort` **按索引从小到大**排列,再 `vreducev2` 抽出键并还原 `id = 0x40000000 - key`,经 `out[curr]` 的 `CopyUbufToGmAligned` 写到 `topkIndices + idx*topK`。最终输出为**按索引升序**的 topK 位置列表(测试按集合比较稀疏行、稠密行按模板精确比较,`tests/kernels/indexer_topk.py`;`gather_sparse_kv_cache` 依赖该升序约定收集模板头部有效位置)。
+6. **末 tile 收尾**(`isFinal`,`indexer_topk.h:458-496`):`vreducev2` 从 `totalSort` 抽出索引载荷;由于 `vbitsort` 按 **float** 键比较(位 cast 的 int 仅在符号位为 0 时保序),而 topK id 可为任意 `[0, p0]` 值,这里将非负索引按位视作 float,乘 `-1` 作为排序键(其降序即 id 升序),对 topK 个候选走 `vbitsort + MrgSort` **按索引从小到大**排列,再 `vreducev2` 抽出原始索引,经 `out[curr]` 的 `CopyUbufToGmAligned` 写到 `topkIndices + idx*topK`。最终输出为**按索引升序**的 topK 位置列表(测试按集合比较稀疏行、稠密行按模板精确比较,`tests/kernels/indexer_topk.py`;`gather_sparse_kv_cache` 依赖该升序约定收集模板头部有效位置)。
 
 ### 核间环形同步(software pipe)
 

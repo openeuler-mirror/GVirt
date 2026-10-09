@@ -51,6 +51,7 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/reduce_scatter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/all_gather.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_int8_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_topk_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/fusion_operator_matmul_dequant_pipeline_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_int4b_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/unpack_activation_int8_t.cpp
@@ -110,6 +111,7 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_hdt_mhd_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_htd_mhd_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_prepare_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_prepare_c8_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_post_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_pre_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/compressor_bfloat16_t.cpp

@@ -305,6 +305,8 @@ class ModelConfig:
     index_full_mask: List[bool] = ...
     """Per-layer indexer mask. ``True``: full indexer layer; ``False``: shared indexer layer. Pass as an empty list to
     enable all full indexer layers; otherwise, the list length must match :data:`n_layers`."""
+    index_c8_mask: List[bool] = ...
+    """Per-runtime-layer Indexer C8 mask; empty disables C8."""
     o_groups: int = ...
     """Output projection group count (DeepSeek-V4)."""
     o_lora_rank: int = ...
@@ -2375,8 +2377,19 @@ def indexer_prepare(
     scale: float,
     top_k: int,
     is_long: bool,
+    k_scale_cache: Optional[torch.Tensor] = None,
+    q8: Optional[torch.Tensor] = None,
+    q_scale: Optional[torch.Tensor] = None,
+    scaled_weights: Optional[torch.Tensor] = None,
 ) -> None:
     """Fused DSA indexer prepare: LayerNorm + rope_complex_and_cache, optional rope_complex(q) + muls(kw).
+
+    C8 writes INT8 ``index_k_cache`` and FP16 ``k_scale_cache``.
+    Long mode also writes INT8 ``q8`` and FP16 ``q_scale`` / ``scaled_weights``.
+    ``scaled_weights`` contains head weights multiplied by Q scale.
+    C8 uses ``norm_eps``, ignores ``scale``, and leaves ``kw``/``q`` unchanged.
+
+    Floating-point path:
 
     Always runs:
       * LayerNorm over ``kw[:, :index_head_dim]`` (in place).
@@ -2417,6 +2430,46 @@ def indexer_prepare(
     Returns:
         None: ``kw`` (norm+rope slices, optional muls slice), ``index_k_cache``, and (when
         ``is_long``) the rotary slice of ``q`` are written in place.
+    """
+    ...
+
+
+def indexer_k_cache_c8(
+    rt: Runtime,
+    k: torch.Tensor,
+    k_norm: torch.Tensor,
+    k_norm_bias: torch.Tensor,
+    freqs: torch.Tensor,
+    position: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_cache: torch.Tensor,
+    scale_cache: torch.Tensor,
+    norm_eps: float = 1e-6,
+) -> None:
+    """Prepare C8 indexer keys and write keys and scales to cache.
+
+    Shares the C8 kernel with :func:`indexer_prepare`, with Q processing disabled.
+    Use contiguous tensors on rt's NPU and non-aliasing outputs.
+    Synchronize input producers before calling; this binding synchronizes on return.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        k (torch.Tensor): Projected keys ``[tokens, stride]``, bf16; stride >= 128,
+            only the first 128 columns are used.
+        k_norm (torch.Tensor): LayerNorm weight ``[128]``, fp32.
+        k_norm_bias (torch.Tensor): LayerNorm bias ``[128]``, fp32.
+        freqs (torch.Tensor): Rotary frequencies: bf16/fp32 ``[P,64]``,
+            fp32 ``[P,32,2]``, or complex64 ``[P,32]``.
+        position (torch.Tensor): Position ids ``[tokens]``, int64.
+        slot_mapping (torch.Tensor): Cache slots ``[tokens]``, int32;
+            valid slots must be unique, and -1 skips both cache writes.
+        k_cache (torch.Tensor): Output key cache ``[blocks, block_size, 1, 128]``, int8.
+        scale_cache (torch.Tensor): Output per-key scales
+            ``[blocks, block_size, 1, 1]``, fp16.
+        norm_eps (float): LayerNorm epsilon. Defaults to 1e-6.
+
+    Returns:
+        None: Caches are written in place; inputs and unwritten slots are unchanged.
     """
     ...
 
@@ -3098,8 +3151,12 @@ def indexer_topk(
     block_size: int,
     batch: int,
     top_k: int,
+    k_scale_cache: Optional[torch.Tensor] = None,
 ) -> None:
     """Fused DSA indexer scores + top-k selection over cached keys.
+
+    C8 uses INT8 Q/K with FP16 head weights and K scales.
+    Use contiguous tensors on rt's NPU, valid metadata and non-aliasing outputs.
 
     Combines :func:`indexer_scores` and :func:`topk` into a single kernel
     launch with pingpong buffers. Scratch buffers (scores, last_topk, sync)
@@ -3107,11 +3164,16 @@ def indexer_topk(
 
     Args:
         rt (Runtime): Native runtime handle.
-        q (torch.Tensor): Query tensor ``[total_query_len, n_heads, head_dim]``, fp16/bf16 (must match k_cache/weight).
+        q (torch.Tensor): Query tensor ``[total_query_len, n_heads, head_dim]``, fp16/bf16
+            (must match k_cache/weight).
+            C8: ``[total_query_len, 4096]``, int8.
         k_cache (torch.Tensor): Key cache tensor ``[max_num_block*batch, block_size,
-        head_dim]``, same dtype.
+            head_dim]``, same dtype as q.
+            C8: ``[blocks, block_size, 1, 128]``, int8.
         weight (torch.Tensor): Indexer weight tensor
-            ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are the indexer weights), same dtype.
+            ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are
+            the indexer weights), same dtype as q.
+            C8: ``[total_query_len, 32]``, fp16, already multiplied by Q scale.
         topk_indices (torch.Tensor): Output top-k indices tensor
             ``[total_query_len, top_k]`` (int32), emitted in ascending index order.
             Sparse rows (``p0 >= top_k``, ``p0 = cached_len + in-batch query offset``) hold
@@ -3126,14 +3188,18 @@ def indexer_topk(
             (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
             per-request max_num_blocks is derived internally from the shape
             (2-D: shape[1]; 1-D: len // batch).
-        n_heads (int): Number of heads.
-        head_dim (int): Head dimension.
+        n_heads (int): Number of heads (32 for C8).
+        head_dim (int): Head dimension (128 for C8).
         block_size (int): KV block size (must be <= 128).
+            C8 supports 16, 32, 64 or 128.
         batch (int): Batch size.
         top_k (int): Number of top-k indices to select (must be <= 2048).
+            C8 requires a multiple of 32 in [32, 2048].
+        k_scale_cache (Optional[torch.Tensor]): C8 per-key scales
+            ``[blocks, block_size, 1, 1]``, fp16; None for floating-point inputs.
 
     Returns:
-        None: ``topk_indices`` is written in place.
+        None: ``topk_indices`` is written in place. The binding synchronizes.
     """
     ...
 
