@@ -1996,14 +1996,14 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
                 std::optional<at::Tensor> cachedLens, uint32_t batch, uint32_t nTotalBlocks,
                 uint32_t ratio, uint32_t overlap, uint32_t headDim, uint32_t ropeHeadDim,
                 float normEps, at::Tensor &compressKv, at::Tensor &compressPositions,
-                at::Tensor &compressSlots, uint32_t compressBlockSize,
+                at::Tensor &compressSlotMapping, uint32_t compressBlockSize,
                 std::optional<at::Tensor> state, std::optional<at::Tensor> stateSlotMapping,
                 std::optional<at::Tensor> stateBlockTable, uint32_t stateBlockSize,
                 uint64_t stateCacheStrideDim0, bool doRotate = false)
 {
-    XTensor _kv, _score, _ape, _norm, _freqs, _weightedSum, _compressPositions, _compressSlots,
-        _queryStartLoc, _queryLens, _cachedLens, _compressKv, _state, _stateSlotMapping,
-        _stateBlockTable;
+    XTensor _kv, _score, _ape, _norm, _freqs, _weightedSum, _compressPositions,
+        _compressSlotMapping, _queryStartLoc, _queryLens, _cachedLens, _compressKv, _state,
+        _stateSlotMapping, _stateBlockTable;
     InitXTensor(_kv, kv);
     InitXTensor(_score, score);
     if (ape.has_value()) {
@@ -2017,7 +2017,7 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
     }
     InitXTensor(_weightedSum, weightedSum);
     InitXTensor(_compressPositions, compressPositions);
-    InitXTensor(_compressSlots, compressSlots);
+    InitXTensor(_compressSlotMapping, compressSlotMapping);
     InitXTensor(_queryStartLoc, queryStartLoc);
     InitXTensor(_queryLens, queryLens);
     if (cachedLens.has_value()) {
@@ -2035,7 +2035,7 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
     }
     XliteOpCompressor(rt, _kv, _score, _ape, _norm, _freqs, _weightedSum, _queryStartLoc,
                       _queryLens, _cachedLens, batch, nTotalBlocks, ratio, overlap, headDim,
-                      ropeHeadDim, normEps, _compressKv, _compressPositions, _compressSlots,
+                      ropeHeadDim, normEps, _compressKv, _compressPositions, _compressSlotMapping,
                       compressBlockSize, _state, _stateSlotMapping, _stateBlockTable,
                       stateBlockSize, stateCacheStrideDim0, doRotate);
     rt.Synchronize();
@@ -2986,10 +2986,11 @@ PYBIND11_MODULE(_C, m)
           py::arg("query_lens"), py::arg("cached_lens") = std::nullopt, py::arg("batch"),
           py::arg("n_total_blocks"), py::arg("ratio"), py::arg("overlap"), py::arg("head_dim"),
           py::arg("rope_head_dim"), py::arg("norm_eps"), py::arg("compress_kv"),
-          py::arg("compress_positions"), py::arg("compress_slots"), py::arg("compress_block_size"),
-          py::arg("state") = std::nullopt, py::arg("state_slot_mapping") = std::nullopt,
-          py::arg("state_block_table") = std::nullopt, py::arg("state_block_size"),
-          py::arg("state_cache_stride_dim0") = 0, py::arg("do_rotate") = false);
+          py::arg("compress_positions"), py::arg("compress_slot_mapping"),
+          py::arg("compress_block_size"), py::arg("state") = std::nullopt,
+          py::arg("state_slot_mapping") = std::nullopt, py::arg("state_block_table") = std::nullopt,
+          py::arg("state_block_size"), py::arg("state_cache_stride_dim0") = 0,
+          py::arg("do_rotate") = false);
     m.def("quant", &Quant, py::arg("rt"), py::arg("x"), py::arg("scale_reciprocal"),
           py::arg("offset"), py::arg("out"));
     m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),

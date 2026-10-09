@@ -1278,9 +1278,10 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
                        const XTensor &cachedLens, uint32_t batch, uint32_t nTotalBlocks,
                        uint32_t ratio, uint32_t overlap, uint32_t headDim, uint32_t ropeHeadDim,
                        float normEps, XTensor &compressKv, const XTensor &compressPositions,
-                       const XTensor &compressSlots, uint32_t compressBlockSize, XTensor &state,
-                       const XTensor &stateSlotMapping, const XTensor &stateBlockTable,
-                       uint32_t stateBlockSize, uint64_t stateCacheStrideDim0, bool doRotate)
+                       const XTensor &compressSlotMapping, uint32_t compressBlockSize,
+                       XTensor &state, const XTensor &stateSlotMapping,
+                       const XTensor &stateBlockTable, uint32_t stateBlockSize,
+                       uint64_t stateCacheStrideDim0, bool doRotate)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1307,8 +1308,8 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
               "weightedSum must be bf16 [nTotalBlocks, headDim]");
     compCheck(compressPositions.dtype == INT64 && compressPositions.numel == nTotalBlocks,
               "compressPositions must be int64 [nTotalBlocks]");
-    compCheck(compressSlots.dtype == INT32 && compressSlots.numel == nTotalBlocks,
-              "compressSlots must be int32 [nTotalBlocks]");
+    compCheck(compressSlotMapping.dtype == INT32 && compressSlotMapping.numel == nTotalBlocks,
+              "compressSlotMapping must be int32 [nTotalBlocks]");
     compCheck(queryStartLoc.dtype == INT32 && queryStartLoc.numel == batch,
               "queryStartLoc must be int32 [batch]");
     compCheck(queryLens.dtype == INT32 && queryLens.numel == batch,
@@ -1348,7 +1349,7 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
     launchKernel(rt.aivNum, rt.stream, kv.ptr, score.ptr, ape.ptr, norm.ptr, freqs.ptr,
                  weightedSum.ptr, queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, batch,
                  nTotalBlocks, ratio, overlap, headDim, ropeHeadDim, normEps, compressKv.ptr,
-                 compressPositions.ptr, compressSlots.ptr, compressBlockSize, state.ptr,
+                 compressPositions.ptr, compressSlotMapping.ptr, compressBlockSize, state.ptr,
                  stateSlotMapping.ptr, stateBlockTable.ptr, stateBlockSize,
                  stateBlockTable.ptr == nullptr ? 0u : DeriveMaxNumBlocks(stateBlockTable, batch),
                  stateCacheStrideDim0, doRotate ? 1u : 0u, rotateScale);
