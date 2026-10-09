@@ -7,13 +7,6 @@
 
 #ifdef __DAV_C220_VEC__
 
-__aicore__ inline void IndexerC8Gather(__ubuf__ float *dst, __ubuf__ float *src,
-                                       __ubuf__ uint32_t *indices, uint32_t repeat)
-{
-    vgather((__ubuf__ uint32_t *)dst, indices,
-            static_cast<uint32_t>(reinterpret_cast<uint64_t>(src)), 8, repeat);
-}
-
 // One per-core UB workspace, reused by the K and Q phases. No GM workspace is added.
 class IndexerC8Buffers
 {
@@ -195,11 +188,13 @@ __aicore__ inline void rope_hadamard_quant_c8(const IndexerC8Buffers &ub)
     uint32_t calc_repeat = DIV_ROUND_UP(ub.dim, VECTOR_MAX_NUM_OF_FP32);
     uint32_t rope_repeat = DIV_ROUND_UP(ub.rope_dim, VECTOR_MAX_NUM_OF_FP32);
     uint32_t quant_repeat = DIV_ROUND_UP(ub.dim, VECTOR_MAX_NUM_OF_FP16);
+    uint32_t trig_base = static_cast<uint32_t>(reinterpret_cast<uint64_t>(ub.trig));
+    uint32_t x_base = static_cast<uint32_t>(reinterpret_cast<uint64_t>(ub.x));
 
     // RoPE: adjacent pairs in the first rope_dim coordinates; tail is unchanged.
-    IndexerC8Gather(ub.cos, ub.trig, ub.cos_indices, rope_repeat);
-    IndexerC8Gather(ub.sin, ub.trig, ub.sin_indices, rope_repeat);
-    IndexerC8Gather(ub.other, ub.x, ub.swap_indices, rope_repeat);
+    vgather((__ubuf__ uint32_t *)ub.cos, ub.cos_indices, trig_base, 8, rope_repeat);
+    vgather((__ubuf__ uint32_t *)ub.sin, ub.sin_indices, trig_base, 8, rope_repeat);
+    vgather((__ubuf__ uint32_t *)ub.other, ub.swap_indices, x_base, 8, rope_repeat);
     pipe_barrier(PIPE_V);
     vmul(ub.tmp, ub.x, ub.cos, rope_repeat, 1, 1, 1, 8, 8, 8);
     vmul(ub.other, ub.other, ub.sin, rope_repeat, 1, 1, 1, 8, 8, 8);
@@ -215,7 +210,8 @@ __aicore__ inline void rope_hadamard_quant_c8(const IndexerC8Buffers &ub)
 
     // Hadamard: FP32 butterflies, then normalize and round to BF16.
     for (uint32_t stage = 0; stage < ub.hadamard_stages; ++stage) {
-        IndexerC8Gather(ub.other, ub.x, ub.h_indices + stage * ub.dim, calc_repeat);
+        vgather((__ubuf__ uint32_t *)ub.other, ub.h_indices + stage * ub.dim, x_base, 8,
+                calc_repeat);
         vmul(ub.tmp, ub.x, ub.h_sign + stage * ub.dim, calc_repeat, 1, 1, 1, 8, 8, 8);
         pipe_barrier(PIPE_V);
         vadd(ub.x, ub.tmp, ub.other, calc_repeat, 1, 1, 1, 8, 8, 8);
