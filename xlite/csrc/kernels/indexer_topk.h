@@ -15,6 +15,7 @@
 #error "INDEXER_KV_TILE_LEN must not exceed MAX_INDEXER_KV_TILE_LEN"
 #endif
 
+// WeightDtype is shared by head weights and converted QK values.
 template <typename Dtype, typename MatDtype, typename WeightDtype, typename ScoreDtype>
 class IndexerTopK
 {
@@ -424,6 +425,7 @@ public:
                                         count * sizeof(half));
                 }
                 // Wait until the previous row releases mrgSortBuf0.
+                // TODO: Check whether mrgSortBuf0 synchronization can be simplified.
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
                 CopyGmToUbufAligned(mrgSortBuf0, scores + idx * tileSizeOfCachedKV,

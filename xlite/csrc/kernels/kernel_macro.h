@@ -264,6 +264,7 @@ __aicore__ inline void CopyL0CToL1(const LocalTensor<half> &dst, const LocalTens
 {
     uint64_t deqScalar = static_cast<uint64_t>(*reinterpret_cast<uint32_t *>(&deqScale));
     SetFixpipePreQuantFlag(deqScalar);
+    // TODO: Verify whether this FIX barrier can be removed.
     PipeBarrier<PIPE_FIX>();
     DataCopyCO12DstParams param(nSize, mSize, dstStride, srcStride, DEQF16, relu, 0, 0);
     DataCopy(dst, src, param);

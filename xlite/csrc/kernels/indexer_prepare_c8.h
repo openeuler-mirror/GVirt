@@ -161,6 +161,7 @@ __aicore__ inline void indexer_c8_load_row(GM_ADDR input, GM_ADDR freqs, uint32_
                                            uint32_t row_stride, int64_t pos, bool freqs_fp32,
                                            const IndexerC8Buffers &ub)
 {
+    // TODO: Use ping-pong input buffers to overlap row loading and computation.
     // Row addresses may not be 32-byte aligned.
     copy_gm_to_ubuf_align_b16(ub.bf, (__gm__ bfloat16_t *)input + (uint64_t)row * row_stride, 0, 1,
                               ub.dim * sizeof(bfloat16_t), 0, 0, 0, 0);
@@ -265,6 +266,7 @@ __aicore__ inline void rope_hadamard_quant_c8(const IndexerC8Buffers &ub)
 __aicore__ inline void indexer_c8_store_row(GM_ADDR quant_output, GM_ADDR scale_output,
                                             uint32_t dest, const IndexerC8Buffers &ub)
 {
+    // TODO: Signal outputs when ready and wait only before reusing their UB buffers.
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     // UB -> GM: scatter K rows into cache slots; write Q rows densely.
