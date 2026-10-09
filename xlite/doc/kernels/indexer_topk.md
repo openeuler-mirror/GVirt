@@ -115,12 +115,12 @@ C8 使用 32 个 head、headDim=128,内核入口额外接收 `k_scale_cache`。Q
 | `mrgSortBuf1` | `MAX_INDEXER_KV_TILE_LEN*2*float` | vbitsort 归并工作区(与 `mrgSortBuf0` 分置两端避免 bank conflict) |
 | `sortIndices` | `MAX_INDEXER_KV_TILE_LEN` 个 u32 | 全局索引表(单份,非乒乓;见下) |
 | `defaultTopkIndices` | `topK` 个 u32 | 稠密行默认模板 `0...topK-1`(仅模板 writer 从 `seqPositions` 前 `topK` 项整体搬入一次) |
-| `in[2]` | 各 `MAX_INDEXER_KV_TILE_LEN` 个 Dtype | 乒乓:当前 tile 得分搬入 |
+| `in[2]` | 各 `MAX_INDEXER_KV_TILE_LEN` 个 WeightDtype | 乒乓:浮点路径搬入得分,C8 搬入 K scale |
 | `lastSort[2]` | 各 `MAX_TOPK_NUM*2*float` | 乒乓:上一核传来的 topK 候选 |
 | `out[2]` | 各 `MAX_TOPK_NUM` 个 u32 | 乒乓:最终结果搬出 |
 | `mrgSortBuf0` | `MAX_INDEXER_KV_TILE_LEN*2*float` | 计算区,置于 `UB_SIZE` 向下(高地址) |
 
-C8 的 fp32 scores 直接搬入 `mrgSortBuf0`,`in[0]` 暂存 fp16 K scale,不分配 `in[1]`。只加载当前 query 可见的 K scale,缩放后重新填充排序尾部。
+C8 的 fp32 scores 直接搬入 `mrgSortBuf0`,`in[0]/in[1]` 交替暂存 fp16 K scale。先搬入当前 query 可见的 K scale,再等待排序工作区并搬入 scores,通过 MTE2→V `EVENT_ID0 + curr` 等待搬运完成。缩放后重新填充排序尾部。
 
 `MAX_TOPK_NUM=2048` 与 `MAX_INDEXER_KV_TILE_LEN=4096`(均定义于 `csrc/kernels/kernel_param.h:43-44`)正是这套 UB 布局的容量上限来源,因此 host 侧强制 `topK <= 2048`(`csrc/op.cpp:1802-1805`)。
 

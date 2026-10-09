@@ -157,13 +157,8 @@ public:
         // in
         this->in[0] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
         off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(WeightDtype), VECTOR_MAX_BYTESIZE);
-        // C8 uses in[0] for K scales; in[1] is unused.
-        if constexpr (!std::is_same<Dtype, int8_t>::value) {
-            this->in[1] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
-            off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(WeightDtype), VECTOR_MAX_BYTESIZE);
-        } else {
-            this->in[1] = nullptr;
-        }
+        this->in[1] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
+        off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(WeightDtype), VECTOR_MAX_BYTESIZE);
         this->lastSort[0] = reinterpret_cast<__ubuf__ float *>(off);
         off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
         this->lastSort[1] = reinterpret_cast<__ubuf__ float *>(off);
@@ -422,17 +417,17 @@ public:
             // copy scores to in
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);  // acquire `in[curr]`
             if constexpr (std::is_same<Dtype, int8_t>::value) {
+                for (int start = 0; start < validKvLen; start += blockSize) {
+                    int count = MIN(int(blockSize), validKvLen - start);
+                    uint32_t block = blockTable[(kvOffset + start) / blockSize];
+                    CopyGmToUbufAligned(in[curr] + start, kScaleCache + block * blockSize,
+                                        count * sizeof(half));
+                }
                 // Wait until the previous row releases mrgSortBuf0.
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
                 CopyGmToUbufAligned(mrgSortBuf0, scores + idx * tileSizeOfCachedKV,
                                     validKvLen * sizeof(float));
-                for (int start = 0; start < validKvLen; start += blockSize) {
-                    int count = MIN(int(blockSize), validKvLen - start);
-                    uint32_t block = blockTable[(kvOffset + start) / blockSize];
-                    CopyGmToUbufAligned(in[0] + start, kScaleCache + block * blockSize,
-                                        count * sizeof(half));
-                }
             } else {
                 CopyGmToUbufAligned(in[curr], scores + idx * tileSizeOfCachedKV,
                                     validKvLen * sizeof(Dtype));
@@ -441,7 +436,7 @@ public:
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
             // Prepare FP32 scores.
             if constexpr (std::is_same<Dtype, int8_t>::value) {
-                vconv_f162f32(mrgSortBuf1, in[0], repeat, 1, 1, 8, 4);
+                vconv_f162f32(mrgSortBuf1, in[curr], repeat, 1, 1, 8, 4);
                 pipe_barrier(PIPE_V);
                 vmul(mrgSortBuf0, mrgSortBuf0, mrgSortBuf1, repeat, 1, 1, 1, 8, 8, 8);
                 // Restore the sort padding after DMA and rescaling.
