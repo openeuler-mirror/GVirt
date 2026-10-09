@@ -1317,6 +1317,89 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
         k.shape[1], 0, freqs.shape[0], scaleCache.numel, freqs.dtype != BF16, false, normEps);
 }
 
+void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XTensor &ape,
+                       const XTensor &norm, const XTensor &freqs, XTensor &weightedSum,
+                       const XTensor &queryStartLoc, const XTensor &queryLens,
+                       const XTensor &cachedLens, uint32_t batch, uint32_t nTotalBlocks,
+                       uint32_t ratio, uint32_t overlap, uint32_t headDim, uint32_t ropeHeadDim,
+                       float normEps, XTensor &compressKv, const XTensor &compressPositions,
+                       const XTensor &compressSlotMapping, uint32_t compressBlockSize,
+                       XTensor &state, const XTensor &stateSlotMapping,
+                       const XTensor &stateBlockTable, uint32_t stateBlockSize,
+                       uint64_t stateCacheStrideDim0, bool doRotate)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    // 0 (the pybind default) = dense cache: resolve to the contiguous stride.
+    if (stateCacheStrideDim0 == 0) {
+        stateCacheStrideDim0 = static_cast<uint64_t>(stateBlockSize) * 2 * (1 + overlap) * headDim;
+    }
+    const std::string fnName = "XliteOpCompressor: ";
+    auto compCheck = [&](bool ok, const std::string &what) {
+        if (!ok) {
+            throw std::runtime_error(fnName + "check tensor failed! " + what + ", " + XT_STR(kv) +
+                                     XT_STR(score) + XT_STR(ape) + XT_STR(norm) + XT_STR(freqs) +
+                                     XT_STR(weightedSum) + XT_STR(compressKv) + XT_STR(state));
+        }
+    };
+    compCheck(kv.dtype == FP32, "kv must be fp32");
+    compCheck(score.dtype == FP32, "score must be fp32");
+    compCheck(kv.numel == score.numel && kv.shape == score.shape, "kv/score shape mismatch");
+    compCheck(ape.ptr == nullptr || ape.dtype == FP32, "ape must be fp32");
+    compCheck(freqs.ptr == nullptr || freqs.dtype == CPLXF, "freqs must be complex64");
+    compCheck((weightedSum.dtype == BF16 || weightedSum.dtype == FP16) &&
+                  weightedSum.numel == nTotalBlocks * headDim,
+              "weightedSum must be bf16 [nTotalBlocks, headDim]");
+    compCheck(compressPositions.dtype == INT64 && compressPositions.numel == nTotalBlocks,
+              "compressPositions must be int64 [nTotalBlocks]");
+    compCheck(compressSlotMapping.dtype == INT32 && compressSlotMapping.numel == nTotalBlocks,
+              "compressSlotMapping must be int32 [nTotalBlocks]");
+    compCheck(queryStartLoc.dtype == INT32 && queryStartLoc.numel == batch,
+              "queryStartLoc must be int32 [batch]");
+    compCheck(queryLens.dtype == INT32 && queryLens.numel == batch,
+              "queryLens must be int32 [batch]");
+    compCheck(cachedLens.ptr == nullptr || (cachedLens.dtype == INT32 && cachedLens.numel == batch),
+              "cachedLens must be int32 [batch]");
+    compCheck(stateSlotMapping.ptr == nullptr || stateSlotMapping.dtype == INT32,
+              "stateSlotMapping must be int32 [batchedTokens]");
+    compCheck(stateBlockTable.ptr == nullptr ||
+                  (stateBlockTable.dtype == INT32 && stateBlockTable.shape.size() == 2 &&
+                   stateBlockTable.shape[0] == batch),
+              "stateBlockTable must be int32 [batch, maxStateBlocks]");
+    compCheck(state.ptr == nullptr ||
+                  stateCacheStrideDim0 >=
+                      static_cast<uint64_t>(stateBlockSize) * 2 * (1 + overlap) * headDim,
+              "stateCacheStrideDim0 must cover stateBlockSize * 2*coff*headDim elements");
+    compCheck(state.ptr == nullptr || state.dtype == FP32,
+              "state must be fp32 [blocks, stateBlockSize, 1, 2*coff*headDim]");
+    compCheck(
+        compressKv.numel == 0 || (compressKv.shape.size() == 4 && compressKv.shape[3] == headDim),
+        "compressKv must be [blocks, compressBlockSize, 1, headDim]");
+    compCheck(ratio == 2 || ratio == 4 || ratio == 128, "ratio must be 2, 4 or 128");
+
+    KERNEL_PTR_TYPE(compressor) * launchKernel;
+    if (compressKv.dtype == FP16) {
+        launchKernel = aclrtlaunch_compressor_float16_t;
+    } else if (compressKv.dtype == BF16) {
+        launchKernel = aclrtlaunch_compressor_bfloat16_t;
+    } else if (compressKv.dtype == FP32) {
+        launchKernel = aclrtlaunch_compressor_float;
+    } else {
+        std::string err_str =
+            DBG_PREFIX + XT_STR(kv) + XT_STR(score) + XT_STR(weightedSum) + XT_STR(compressKv);
+        throw std::runtime_error(err_str + "not supported!");
+    }
+    float rotateScale = doRotate ? (1.0f / sqrtf(static_cast<float>(headDim))) : 1.0f;
+    launchKernel(rt.aivNum, rt.stream, kv.ptr, score.ptr, ape.ptr, norm.ptr, freqs.ptr,
+                 weightedSum.ptr, queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, batch,
+                 nTotalBlocks, ratio, overlap, headDim, ropeHeadDim, normEps, compressKv.ptr,
+                 compressPositions.ptr, compressSlotMapping.ptr, compressBlockSize, state.ptr,
+                 stateSlotMapping.ptr, stateBlockTable.ptr, stateBlockSize,
+                 stateBlockTable.ptr == nullptr ? 0u : DeriveMaxNumBlocks(stateBlockTable, batch),
+                 stateCacheStrideDim0, doRotate ? 1u : 0u, rotateScale);
+}
+
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)
 {
     if (IsDummyRuntime(rt)) {

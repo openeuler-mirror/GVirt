@@ -2473,6 +2473,142 @@ def indexer_k_cache_c8(
     """
     ...
 
+def compressor(
+    rt: Runtime,
+    kv: torch.Tensor,
+    score: torch.Tensor,
+    ape: Optional[torch.Tensor],
+    norm: Optional[torch.Tensor],
+    freqs: Optional[torch.Tensor],
+    weighted_sum: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    query_lens: torch.Tensor,
+    cached_lens: Optional[torch.Tensor],
+    batch: int,
+    n_total_blocks: int,
+    ratio: int,
+    overlap: int,
+    head_dim: int,
+    rope_head_dim: int,
+    norm_eps: float,
+    compress_kv: torch.Tensor,
+    compress_positions: torch.Tensor,
+    compress_slot_mapping: torch.Tensor,
+    compress_block_size: int,
+    state: Optional[torch.Tensor],
+    state_slot_mapping: Optional[torch.Tensor],
+    state_block_table: Optional[torch.Tensor],
+    state_block_size: int,
+    state_cache_stride_dim0: int = 0,
+    do_rotate: bool = False,
+) -> None:
+    """DeepSeek-V4 KV Compressor fused op (multi-batch): overlap + softmax-gated weighted sum + RMSNorm + rope + cache write.
+
+    Consumes the post-GEMM fp32 outputs ``kv`` (``wkv(x)``) and ``score``
+    (``wgate(x)``) and, in one launch, fuses the tail of ``Compressor.forward``
+    after the two matmuls. The batched-token stream is partitioned per request
+    via ``query_start_loc``/``query_lens`` (prefix-sum ``[batch]`` int32). Each
+    compressed block belongs to one request; overlap left-shift never crosses a
+    request boundary.
+
+      Prefill (``n_total_blocks > 0``):
+        * ``overlap == 1``: assemble ``2*ratio`` head_dim vectors per compressed
+          block (front half = previous block's first half left-shifted, back half
+          = current block's second half), else ``ratio`` vectors per block. The
+          request-local block 0 pads front-half with 0/-inf.
+        * per-channel softmax over the ``cnt`` axis, weighted sum of ``kv`` ->
+          one ``head_dim`` weightedSum vector per block (written to ``weightedSum``); per-block
+          position/slot gathered into ``compress_positions``/``compress_slot_mapping``.
+        * in-place RMSNorm of ``weightedSum`` (skipped when ``norm`` is None).
+        * rotary on the last ``rope_head_dim`` dims + scatter into paged
+          ``compress_kv`` via ``compress_slot_mapping``.
+
+      Decode: the unified block count ``((cached+qlen)/ratio) - (cached/ratio)``
+      is 1 on a decode compress step (``qlen==1``, ``cached % ratio == ratio-1``)
+      and 0 otherwise, so decode flows through the same assemble/pool/norm/rotate
+      path as prefill. On a compress step the window's ``ratio-1`` history rows
+      are read from ``state`` (absolute position < cached) and the new token from
+      ``kv``; the new token is also spilled to ``state`` so the next step's
+      front-half can read it. Non-compress decode steps yield 0 blocks and only
+      spill their token to state.
+
+      Mixed prefill+decode in one launch: the single compress pass walks requests
+      in batch order, emitting each request's completed blocks into
+      ``weightedSum`` at a running ``totalBlockIdx`` (matching the host-built
+      ``compress_positions``/``compress_slot_mapping`` order). A single norm+rope tail
+      then runs over the full ``[0, n_total_blocks)`` range.
+
+      With ``do_rotate=True``, after rotary and before the cache write each
+      compressed block's whole head is scaled by ``1/sqrt(head_dim)`` (degraded
+      Hadamard, mirroring ``deepseek_v4.py``'s ``rotate_activation``). The scale
+      is derived internally; the caller only toggles ``do_rotate``.
+
+    Cores stride over the global block index with ``totalBlockIdx % block_num ==
+    block_idx`` (cf. indexer_scores.h), and the norm/rope tail strides the same
+    space (``tok = block_idx; tok < N; tok += block_num``), so the same core
+    pools and norm/rope-s a given row — no cross-core sync between pool and
+    norm/rope.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        kv (torch.Tensor): Input ``[batchedTokens, (1+overlap)*head_dim]`` fp32 — the
+            upstream ``wkv(x)`` GEMM output (value projection of tokens).
+        score (torch.Tensor): Input ``[batchedTokens, (1+overlap)*head_dim]`` fp32 — the
+            upstream ``wgate(x)`` GEMM output (softmax gate scores of tokens).
+        weighted_sum (torch.Tensor): Scratch ``[n_total_blocks, head_dim]`` buffer
+            (bf16/fp16). Written in place.
+        compress_positions (torch.Tensor): ``[n_total_blocks]`` int64 -- rope
+            position of each compressed block's first token (COMPRESSED-token
+            space). Filled on host by the caller as
+            ``bStart = (cached // ratio + j) * ratio`` per block.
+        compress_slot_mapping (torch.Tensor): ``[n_total_blocks]`` int32 -- physical
+            slot of each compressed block in ``compress_kv`` (COMPRESSED-block
+            space: ``b * compRowsStridePerReq + cached // ratio + j``). Filled on
+            host by the caller.
+        query_start_loc (torch.Tensor): ``[batch]`` int32 prefix-sum token offsets.
+        query_lens (torch.Tensor): ``[batch]`` int32 per-request query lengths.
+        batch (int): Number of requests.
+        n_total_blocks (int): ``sum_b(((cached_b + qlen_b) // ratio) -
+            (cached_b // ratio))`` — the unified block count completed by this
+            launch. 0 on a non-compress decode step.
+        ratio (int): Compression ratio (2, 4 or 128).
+        overlap (int): 1 for the overlap_transform path (ratio==4), else 0.
+        head_dim (int): Per-head dimension (512).
+        rope_head_dim (int): Rotary dimension applied to the last dims (64).
+        norm_eps (float): RMSNorm epsilon.
+        compress_kv (torch.Tensor): Output paged compressed KV cache
+            ``[blocks, compress_block_size, 1, head_dim]``.
+        compress_block_size (int): ``compress_kv`` paged-cache block size.
+        state_block_size (int): ``state`` paged-cache block size.
+        state_cache_stride_dim0 (int): Dense stride of ``state`` along dim 0; 0
+            lets the op resolve it from the tensor's dense allocation.
+        ape (Optional[torch.Tensor]): ``[ratio, (1+overlap)*head_dim]`` additive
+            position bias; None skips the bias add.
+        norm (Optional[torch.Tensor]): ``[head_dim]`` RMSNorm weight; None skips
+            the norm pass.
+        freqs (Optional[torch.Tensor]): Precomputed rotary freqs_cis table; None
+            skips rope + the ``compress_kv`` cache write.
+        cached_lens (Optional[torch.Tensor]): ``[batch]`` int32 per-request cached
+            length (decode only).
+        state (Optional[torch.Tensor]): streaming state cache
+            ``[blocks, state_block_size, 1, 2*(1+overlap)*head_dim]`` fp32; on
+            prefill the remainder tokens (and overlap's last full window) are
+            spilled into it, on decode it holds the rolling window.
+        state_slot_mapping (Optional[torch.Tensor]): per-token paged-cache slot
+            for ``state`` (int32). Required when ``state`` is given; the kernel
+            gathers each token's state slot from it.
+        state_block_table (Optional[torch.Tensor]): ``[batch, maxStateBlocks]``
+            int32 block table for ``state``; used to resolve each slot's physical
+            block. Required when ``state`` is given.
+        do_rotate (bool): If True, scale each compressed block's whole head by
+            ``1/sqrt(head_dim)`` after rotary and before the cache write (scale
+            derived internally).
+
+    Returns:
+        None: ``weightedSum``, ``compress_kv`` and ``state`` are written in place.
+    """
+    ...
+
 def quant(
     rt: Runtime,
     x: torch.Tensor,
