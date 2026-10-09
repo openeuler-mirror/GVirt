@@ -20,7 +20,6 @@ ROPE_DIM = 64
 NORM_EPS = 1e-6
 ROPE_THETA = 1e6
 QUANT_MAX = 127
-QUANT_ATOL = 0.5001
 K_CACHE_FILL = -101
 SCALE_CACHE_FILL = -17
 
@@ -62,9 +61,8 @@ def check_values(k8, scales, rotated, name):
     expected_scale = scale.half()
     torch.testing.assert_close(scales, expected_scale, rtol=0, atol=0)
     normalized = rotated.float() * torch.where(scale == 0, 0, scale.reciprocal())[:, None]
-    error = (k8.float() - normalized).abs()
-    max_error = float(error.max()) if error.numel() else 0.0
-    assert max_error <= QUANT_ATOL, (name, "nearest-integer error", max_error)
+    expected_k8 = normalized.round().to(torch.int8)
+    torch.testing.assert_close(k8, expected_k8, atol=1, rtol=1 / 128)
     assert bool(((k8 >= -QUANT_MAX) & (k8 <= QUANT_MAX)).all()), name
 
 
