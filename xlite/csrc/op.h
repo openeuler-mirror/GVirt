@@ -183,6 +183,16 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                            uint32_t blockSize, XTensor &indexKCache, const XTensor &slotMapping,
                            float normEps, const XTensor &q = XTensor(), float scale = 1.0f,
                            uint32_t topK = 2048, bool isLong = false, uint32_t tpSize = 1);
+void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XTensor &ape,
+                       const XTensor &norm, const XTensor &freqs, XTensor &weightedSum,
+                       const XTensor &queryStartLoc, const XTensor &queryLens,
+                       const XTensor &cachedLens, uint32_t batch, uint32_t nTotalBlocks,
+                       uint32_t ratio, uint32_t overlap, uint32_t headDim, uint32_t ropeHeadDim,
+                       float normEps, XTensor &compressKv, const XTensor &compressPositions,
+                       const XTensor &compressSlots, uint32_t compressBlockSize, XTensor &state,
+                       const XTensor &stateSlotMapping, const XTensor &stateBlockTable,
+                       uint32_t stateBlockSize, uint64_t stateCacheStrideDim0,
+                       bool doRotate = false);
 
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
                   XTensor &out);
