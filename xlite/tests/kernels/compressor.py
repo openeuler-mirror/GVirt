@@ -416,17 +416,17 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
     # 3. compress tables (fresh blocks, then cont blocks, then decode blocks).
     n_blocks_per_req = []
     block_offset = 0
-    compress_slots_l, compress_positions_l = [], []
+    compress_slot_mapping_l, compress_positions_l = [], []
     for oi, (orig, ql, c) in enumerate(ordered):
         if ql > 1:                                     # prefill (fresh or cont)
             n_b = ((c + ql) // ratio) - (c // ratio)   # cont includes cross-boundary block
             for j in range(n_b):
-                compress_slots_l.append(block_offset + j)
+                compress_slot_mapping_l.append(block_offset + j)
                 compress_positions_l.append((c // ratio + j) * ratio)   # abs block first-token pos
         else:                                          # decode
             n_b = 1 if (c + 1) % ratio == 0 else 0
             for j in range(n_b):
-                compress_slots_l.append(block_offset + j)
+                compress_slot_mapping_l.append(block_offset + j)
                 compress_positions_l.append(c + 1 - ratio)
         n_blocks_per_req.append(n_b)
         block_offset += n_b
@@ -442,7 +442,7 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
     n_state_blocks = 1 + batch * state_blocks_per_req
     with torch.device("npu"):
         compress_kv = torch.zeros(max_blocks, BLOCK_SIZE, 1, HEAD_DIM, dtype=test_dtype)
-        compress_slots = torch.tensor(compress_slots_l, dtype=torch.int32)
+        compress_slot_mapping = torch.tensor(compress_slot_mapping_l, dtype=torch.int32)
         compress_positions = torch.tensor(compress_positions_l, dtype=torch.int64)
         state = torch.zeros(n_state_blocks, STATE_BLOCK_SIZE, 1, 2 * full_dim, dtype=torch.float32)
         state_block_table = (1 + torch.arange(batch * state_blocks_per_req,
@@ -544,7 +544,7 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
     freqs_arg = None if freqs_none else freqs_cis
     compressor(rt, kv, score, ape, norm_w, freqs_arg, weightedSum, query_start_loc,
                query_lens_t, cached_lens_t, batch, n_total_blocks, ratio, overlap, HEAD_DIM,
-               ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slots,
+               ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slot_mapping,
                BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE,
                STATE_BLOCK_SIZE * 2 * full_dim, do_rotate)
     torch.npu.synchronize()
@@ -553,7 +553,7 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
                  f'query_lens={query_lens} cached={cached_lens} executed!')
 
     # 8. per-request reference + compare.
-    flat = compress_slots.to(torch.int64)
+    flat = compress_slot_mapping.to(torch.int64)
     out_all = compress_kv.view(-1, 1, HEAD_DIM)[flat, 0]   # [n_total_blocks, head_dim]
     ws_out = weightedSum                                  # norope compares this
     block_base = 0
@@ -722,13 +722,13 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
         compress_kv = torch.zeros(max(max_compress_slots, BLOCK_SIZE), BLOCK_SIZE, 1,
                                   HEAD_DIM, dtype=test_dtype)
         # prefill compress tables: contiguous slots, request-local rope pos j*ratio.
-        compress_slots = torch.zeros(n_pf_blocks, dtype=torch.int32)
+        compress_slot_mapping = torch.zeros(n_pf_blocks, dtype=torch.int32)
         compress_positions = torch.zeros(n_pf_blocks, dtype=torch.int64)
         g = 0
         for b in range(batch):
             nb_b = ql_b[b] // ratio
             for j in range(nb_b):
-                compress_slots[g] = g
+                compress_slot_mapping[g] = g
                 compress_positions[g] = j * ratio
                 g += 1
         max_ql = max(ql_b)
@@ -746,7 +746,7 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
         torch.npu.synchronize()
         compressor(rt, kv, score, ape, norm_w, freqs_cis, weightedSum, query_start_loc,
                    query_lens_t, cached_lens, batch, n_pf_blocks, ratio, overlap, HEAD_DIM,
-                   ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slots,
+                   ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slot_mapping,
                    BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE,
                    STATE_BLOCK_SIZE * 2 * full_dim)
         torch.npu.synchronize()
@@ -767,7 +767,7 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
         # row counter (next compress_kv slot for this request). Each request b owns
         # a DISTINCT compress_kv slot range [n_pf_blocks + b*n_compress, ...) so
         # concurrent compresses in one launch (the cross-core barrier case) land
-        # in separate slots — matches the kernel's per-block compress_slots.
+        # in separate slots — matches the kernel's per-block compress_slot_mapping.
         cur_cached = list(ql_b)                              # post-prefill: cached = ql_b
         next_compress_row = [n_pf_blocks + b * n_compress for b in range(batch)]
         # Each step writes every request's token row at its (request-local) pos;
@@ -946,7 +946,7 @@ def run_decode_first_window_test(name, ratio, overlap, test_dtype, ape_enabled=T
         query_start_loc = torch.zeros(batch, dtype=torch.int32)
         query_lens_t = torch.tensor([ql_b], dtype=torch.int32)
         compress_kv = torch.zeros(BLOCK_SIZE, BLOCK_SIZE, 1, HEAD_DIM, dtype=test_dtype)
-        compress_slots = torch.zeros(0, dtype=torch.int32)        # prefill: 0 blocks
+        compress_slot_mapping = torch.zeros(0, dtype=torch.int32)        # prefill: 0 blocks
         compress_positions = torch.zeros(0, dtype=torch.int64)    # prefill: 0 blocks
         freqs_cis = precompute_freqs_cis(ROPE_HEAD_DIM, 2 * ratio, ROPE_THETA)
         weightedSum = torch.zeros(0, HEAD_DIM, dtype=test_dtype)
@@ -963,7 +963,7 @@ def run_decode_first_window_test(name, ratio, overlap, test_dtype, ape_enabled=T
         torch.npu.synchronize()
         compressor(rt, kv, score, ape, norm_w, freqs_cis, weightedSum, query_start_loc,
                    query_lens_t, cached_lens, batch, 0, ratio, overlap, HEAD_DIM,
-                   ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slots,
+                   ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slot_mapping,
                    BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE,
                    STATE_BLOCK_SIZE * 2 * full_dim)
         torch.npu.synchronize()

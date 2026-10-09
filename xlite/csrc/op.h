@@ -189,10 +189,10 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
                        const XTensor &cachedLens, uint32_t batch, uint32_t nTotalBlocks,
                        uint32_t ratio, uint32_t overlap, uint32_t headDim, uint32_t ropeHeadDim,
                        float normEps, XTensor &compressKv, const XTensor &compressPositions,
-                       const XTensor &compressSlots, uint32_t compressBlockSize, XTensor &state,
-                       const XTensor &stateSlotMapping, const XTensor &stateBlockTable,
-                       uint32_t stateBlockSize, uint64_t stateCacheStrideDim0,
-                       bool doRotate = false);
+                       const XTensor &compressSlotMapping, uint32_t compressBlockSize,
+                       XTensor &state, const XTensor &stateSlotMapping,
+                       const XTensor &stateBlockTable, uint32_t stateBlockSize,
+                       uint64_t stateCacheStrideDim0, bool doRotate = false);
 
 void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &offset,
                   XTensor &out);

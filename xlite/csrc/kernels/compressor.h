@@ -18,7 +18,7 @@
  *   norm        : [head_dim]              (null => skip norm)
  *   freqs       : [max_seq_len, rope_head_dim/2] complex64 (null => skip rope+cache)
  *   weightedSum : [nTotalBlocks, head_dim] scratch GM
- *   compressPositions/compressSlots : [nTotalBlocks] — COMPRESSED-token space
+ *   compressPositions/compressSlotMapping : [nTotalBlocks] — COMPRESSED-token space
  *   state       : [blocks, block_size, 1, 2*coff*head_dim] fp32 (decode state)
  *   stateSlotMapping/stateBlockTable : paged state-cache addressing (spill/decode)
  */
@@ -831,11 +831,12 @@ __aicore__ void compressor(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normW
                            GM_ADDR queryLens, GM_ADDR cachedLens, uint32_t batch,
                            uint32_t nTotalBlocks, uint32_t ratio, uint32_t overlap,
                            uint32_t head_dim, uint32_t rope_head_dim, float norm_eps,
-                           GM_ADDR compressKv, GM_ADDR compressPositions, GM_ADDR compressSlots,
-                           uint32_t compressBlockSize, GM_ADDR state, GM_ADDR stateSlotMapping,
-                           GM_ADDR stateBlockTable, uint32_t stateBlockSize,
-                           uint32_t maxStateBlocks, uint64_t stateCacheStrideDim0, bool hasNorm,
-                           bool hasRope, bool hasRotate = false, float rotateScale = 1.0f)
+                           GM_ADDR compressKv, GM_ADDR compressPositions,
+                           GM_ADDR compressSlotMapping, uint32_t compressBlockSize, GM_ADDR state,
+                           GM_ADDR stateSlotMapping, GM_ADDR stateBlockTable,
+                           uint32_t stateBlockSize, uint32_t maxStateBlocks,
+                           uint64_t stateCacheStrideDim0, bool hasNorm, bool hasRope,
+                           bool hasRotate = false, float rotateScale = 1.0f)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
     set_atomic_none();
@@ -881,7 +882,7 @@ __aicore__ void compressor(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normW
         rope_complex_and_cache<Dtype>(
             nTotalBlocks, 1, head_dim, rope_head_dim, head_dim - rope_head_dim, head_dim,
             weightedSum, nullptr, 0, 0, freqs, compressPositions, compressBlockSize, compressKv,
-            compressSlots, false, true, 0, nullptr, hasRotate, rotateScale);
+            compressSlotMapping, false, true, 0, 0, nullptr, hasRotate, rotateScale);
     }
 }
 
@@ -891,16 +892,16 @@ __aicore__ void compressor(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normW
         GM_ADDR weightedSum, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,         \
         uint32_t batch, uint32_t nTotalBlocks, uint32_t ratio, uint32_t overlap,                   \
         uint32_t head_dim, uint32_t rope_head_dim, float norm_eps, GM_ADDR compressKv,             \
-        GM_ADDR compressPositions, GM_ADDR compressSlots, uint32_t compressBlockSize,              \
+        GM_ADDR compressPositions, GM_ADDR compressSlotMapping, uint32_t compressBlockSize,        \
         GM_ADDR state, GM_ADDR stateSlotMapping, GM_ADDR stateBlockTable, uint32_t stateBlockSize, \
         uint32_t maxStateBlocks, uint64_t stateCacheStrideDim0, uint32_t doRotate,                 \
         float rotateScale)                                                                         \
     {                                                                                              \
         compressor<dtype>(kv, score, ape, normWeight, freqs, weightedSum, queryStartLoc,           \
                           queryLens, cachedLens, batch, nTotalBlocks, ratio, overlap, head_dim,    \
-                          rope_head_dim, norm_eps, compressKv, compressPositions, compressSlots,   \
-                          compressBlockSize, state, stateSlotMapping, stateBlockTable,             \
-                          stateBlockSize, maxStateBlocks, stateCacheStrideDim0,                    \
+                          rope_head_dim, norm_eps, compressKv, compressPositions,                  \
+                          compressSlotMapping, compressBlockSize, state, stateSlotMapping,         \
+                          stateBlockTable, stateBlockSize, maxStateBlocks, stateCacheStrideDim0,   \
                           normWeight != nullptr, freqs != nullptr, doRotate != 0, rotateScale);    \
     }
 #else
@@ -910,7 +911,7 @@ __aicore__ void compressor(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normW
         GM_ADDR weightedSum, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,         \
         uint32_t batch, uint32_t nTotalBlocks, uint32_t ratio, uint32_t overlap,                   \
         uint32_t head_dim, uint32_t rope_head_dim, float norm_eps, GM_ADDR compressKv,             \
-        GM_ADDR compressPositions, GM_ADDR compressSlots, uint32_t compressBlockSize,              \
+        GM_ADDR compressPositions, GM_ADDR compressSlotMapping, uint32_t compressBlockSize,        \
         GM_ADDR state, GM_ADDR stateSlotMapping, GM_ADDR stateBlockTable, uint32_t stateBlockSize, \
         uint32_t maxStateBlocks, uint64_t stateCacheStrideDim0, uint32_t doRotate,                 \
         float rotateScale)                                                                         \

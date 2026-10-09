@@ -2440,7 +2440,7 @@ def compressor(
     norm_eps: float,
     compress_kv: torch.Tensor,
     compress_positions: torch.Tensor,
-    compress_slots: torch.Tensor,
+    compress_slot_mapping: torch.Tensor,
     compress_block_size: int,
     state: Optional[torch.Tensor],
     state_slot_mapping: Optional[torch.Tensor],
@@ -2465,10 +2465,10 @@ def compressor(
           request-local block 0 pads front-half with 0/-inf.
         * per-channel softmax over the ``cnt`` axis, weighted sum of ``kv`` ->
           one ``head_dim`` weightedSum vector per block (written to ``weightedSum``); per-block
-          position/slot gathered into ``compress_positions``/``compress_slots``.
+          position/slot gathered into ``compress_positions``/``compress_slot_mapping``.
         * in-place RMSNorm of ``weightedSum`` (skipped when ``norm`` is None).
         * rotary on the last ``rope_head_dim`` dims + scatter into paged
-          ``compress_kv`` via ``compress_slots``.
+          ``compress_kv`` via ``compress_slot_mapping``.
 
       Decode: the unified block count ``((cached+qlen)/ratio) - (cached/ratio)``
       is 1 on a decode compress step (``qlen==1``, ``cached % ratio == ratio-1``)
@@ -2482,7 +2482,7 @@ def compressor(
       Mixed prefill+decode in one launch: the single compress pass walks requests
       in batch order, emitting each request's completed blocks into
       ``weightedSum`` at a running ``totalBlockIdx`` (matching the host-built
-      ``compress_positions``/``compress_slots`` order). A single norm+rope tail
+      ``compress_positions``/``compress_slot_mapping`` order). A single norm+rope tail
       then runs over the full ``[0, n_total_blocks)`` range.
 
       With ``do_rotate=True``, after rotary and before the cache write each
@@ -2508,7 +2508,7 @@ def compressor(
             position of each compressed block's first token (COMPRESSED-token
             space). Filled on host by the caller as
             ``bStart = (cached // ratio + j) * ratio`` per block.
-        compress_slots (torch.Tensor): ``[n_total_blocks]`` int32 -- physical
+        compress_slot_mapping (torch.Tensor): ``[n_total_blocks]`` int32 -- physical
             slot of each compressed block in ``compress_kv`` (COMPRESSED-block
             space: ``b * compRowsStridePerReq + cached // ratio + j``). Filled on
             host by the caller.
