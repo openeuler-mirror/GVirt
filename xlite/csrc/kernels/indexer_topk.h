@@ -30,7 +30,7 @@ public:
                                 GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads,
                                 uint32_t headDim, uint32_t blockSize, uint32_t batch,
                                 uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,
-                                GM_ADDR kScaleCache = nullptr)
+                                GM_ADDR kScaleCache = nullptr, uint32_t compressRatio = 1)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -51,6 +51,7 @@ public:
         this->maxNumBlock = maxNumBlock;
         this->topK = topK;
         this->skipDenseTopk = skipDenseTopk > 0;
+        this->compressRatio = compressRatio > 0 ? compressRatio : 1;
         this->tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN, SORT_BLOCK_SIZE);
         this->blockIdx = block_idx;
         this->subBlockIdx = get_subblockid();
@@ -387,9 +388,11 @@ public:
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);  // release `out[curr]`
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
         for (int idx = 0; idx < queryLen; idx++) {
-            int p0 = queryPosBase + idx;  // position of the current token in the sequence
+            // p0 = KV-space causal boundary (token when ratio==1, compressed block when >1).
+            int p0 = MapPosToKv(queryPosBase + idx);
             int validKvLen = MIN(p0 - kvOffset + 1, kvLen);  // per position valid kvLen
-            if (p0 < topK || validKvLen <= 0) {  // either dense, or the last chunk was final
+            if (p0 < (int32_t)topK ||
+                validKvLen <= 0) {  // either dense, or the last chunk was final
                 continue;
             }
             bool isFirst = kvOffset <= 0;
@@ -546,6 +549,20 @@ public:
     }
 #endif
 
+    // Map token pos P to the KV-space causal boundary p0 (inclusive last valid index).
+    //   ratio==1: includes own position -> p0 = P.
+    //   ratio>1: excludes own incomplete block -> p0 = (P+1)/ratio - 1, so a token whose
+    //   block is incomplete (e.g. first block, clen==0) yields -1 ("no valid KV").
+    //   Compare against a SIGNED topK: -1 < uint32_t(topK) promotes to a huge value and
+    //   wrongly reads as "not dense", skipping the template write and leaving rows unset.
+    __aicore__ inline int32_t MapPosToKv(int32_t pos) const
+    {
+        if (compressRatio <= 1) {
+            return pos;
+        }
+        return (pos + 1) / static_cast<int32_t>(compressRatio) - 1;
+    }
+
     __aicore__ inline void Run()
     {
         uint64_t flagIdx0 = 0;
@@ -604,7 +621,10 @@ public:
                                     batchIdx * maxNumBlock * sizeof(uint32_t));
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
-            int kvNumMax = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
+            // nKv = completed KV blocks visible to the last query token; kCache holds one row
+            // per block (compressed-block space when ratio>1, token space when ==1).
+            int nKv = MapPosToKv(cachedLen + queryLen - 1) + 1;
+            int kvNumMax = DIV_ROUND_UP(nKv, tileSizeOfCachedKV);
             int taskNum = queryNum * kvNumMax;
             for (int idx = 0; idx < taskNum;) {  // each loop handles a chunk of one sequence/batch
                 // tiling infor for the indexer query matrix
@@ -616,15 +636,19 @@ public:
                 }
                 int queryTaskOffset = queryStart + queryOffset;
                 int queryPosBase = cachedLen + queryOffset;
-                int queryPosEnd = queryPosBase + queryTaskLen - 1;  // inclusive
+                int queryPosEnd = queryPosBase + queryTaskLen - 1;  // inclusive (token space)
+                // KV-space causal boundary for the tile's last token; gates the dense/skip
+                // check and kvLen so the tile never reads KV past the valid range.
+                int queryPosEndKvBound = MapPosToKv(queryPosEnd);
                 // tiling infor for the indexer key matrix
                 int kvIdx = idx % kvNumMax;
                 int kvOffset = kvIdx * tileSizeOfCachedKV;
 #ifdef __DAV_C220_VEC__
-                if (assignedDefaultTopk && kvOffset == 0 && queryPosBase < topK) {
+                if (assignedDefaultTopk && kvOffset == 0 &&
+                    MapPosToKv(queryPosBase) < (int32_t)topK) {
                     __gm__ uint32_t *dst = this->topkIndices + queryTaskOffset * topK;
                     for (int i = 0; i < queryTaskLen; i++) {
-                        if (queryPosBase + i >= topK) {
+                        if (MapPosToKv(queryPosBase + i) >= (int32_t)topK) {
                             break;
                         }
                         CopyUbufToGmAligned(dst + i * topK, this->defaultTopkIndices,
@@ -633,11 +657,11 @@ public:
                 }
 #endif
                 // per-chunk token position info, skip if this chunk's attention is dense
-                if (queryPosEnd < topK || queryPosEnd < kvOffset) {
+                if (queryPosEndKvBound < (int32_t)topK || queryPosEndKvBound < kvOffset) {
                     idx = NEXT_MULTIPLE(idx, kvNumMax);  // skip KV chunks; jump to next query chunk
                     continue;
                 }
-                int kvLen = MIN(tileSizeOfCachedKV, queryPosEnd - kvOffset + 1);
+                int kvLen = MIN(tileSizeOfCachedKV, queryPosEndKvBound - kvOffset + 1);
                 idx++;
                 totalIdx++;  // only increase the global task index when the current task is valid
                 if (totalIdx % block_num != block_idx) {
@@ -715,6 +739,7 @@ private:
     uint32_t topK;
     uint32_t tileSizeOfCachedKV;
     bool skipDenseTopk;
+    uint32_t compressRatio;  // 1 = token-level KV; >1 = compressed-block-level KV
     int blockIdx;
     int subBlockIdx;
     int nextBlockIdx;
@@ -755,12 +780,12 @@ private:
         GM_ADDR cachedLens, GM_ADDR blockTables, GM_ADDR scores, GM_ADDR lastTopk,                 \
         GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads,                  \
         uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK, \
-        uint8_t skipDenseTopk)                                                                     \
+        uint8_t skipDenseTopk, uint32_t compressRatio)                                             \
     {                                                                                              \
         IndexerTopK<dtype, float, dtype, dtype> op;                                                \
         op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,      \
                 lastTopk, seqPositions, topkIndices, sync, nHeads, headDim, blockSize, batch,      \
-                maxNumBlock, topK, skipDenseTopk);                                                 \
+                maxNumBlock, topK, skipDenseTopk, nullptr, compressRatio);                         \
         op.Run();                                                                                  \
     }
 

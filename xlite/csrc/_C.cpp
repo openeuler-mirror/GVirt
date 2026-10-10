@@ -2196,7 +2196,8 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
                  at::Tensor &topkIndices, at::Tensor &queryStartLoc, at::Tensor &lens,
                  at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t headDim,
                  uint32_t blockSize, uint32_t batch, uint32_t topK,
-                 const std::optional<at::Tensor> &kScaleCache = std::nullopt)
+                 const std::optional<at::Tensor> &kScaleCache = std::nullopt,
+                 uint32_t compressRatio = 1)
 {
     XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables,
         _ks;
@@ -2235,7 +2236,7 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
 
     XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, seqPositions, _topkIndices,
                        _queryStartLoc, _lens, _cachedLens, _blockTables, sync, nHeads, headDim,
-                       blockSize, batch, topK, 0, _ks);
+                       blockSize, batch, topK, 0, _ks, compressRatio);
     rt.Synchronize();
     rt.PutTensor(sync);
     rt.PutTensor(lastTopk);
@@ -3072,7 +3073,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("weight"), py::arg("topk_indices"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
           py::arg("block_size"), py::arg("batch"), py::arg("top_k"),
-          py::arg("k_scale_cache") = py::none());
+          py::arg("k_scale_cache") = py::none(), py::arg("compress_ratio") = 1);
     m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"),
           py::arg("calc_offset") = 0, py::arg("calc_num") = UINT32_MAX);
     m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),

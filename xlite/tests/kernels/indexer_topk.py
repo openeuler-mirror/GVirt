@@ -46,10 +46,19 @@ work = [
     (2, [0] * 2, [4, 8]),
     (2, [8123, 0], [1, 8231]),
     (4, [5012, 127, 2189, 500], [4, 2, 6, 8]),
+    # ratio==4 edges: MapPosToKv (first-block p0=-1, dense/sparse mix, clen not div by ratio)
+    (1, [0], [3]),            # qlen<ratio -> first block incomplete, p0=-1
+    (1, [0], [2048]),         # 512 blocks == topK -> dense boundary
+    (1, [0], [4096]),         # 1024 blocks -> sparse+dense mix, 1 tile
+    (1, [0], [8192]),         # 2048 blocks, 1 KV tile, sparse
+    (1, [0], [16388]),        # 4097 blocks -> 2 KV tiles (cross-core lastTopk relay)
+    (1, [98], [1]),           # decode mid-seq, clen not div by ratio
+    (1, [98], [4096]),        # clen not div by ratio + 4096 -> 1048 blocks
+    (2, [0, 98], [4096, 8192]),  # multi-batch, mixed dense/sparse
 ]
 
-# topK values to exercise (must be <= MAX_TOPK_NUM=2048)
 topk_values = [512, 2048]
+topk_values_compressed = [512]
 
 # Max percentage of differing indices tolerated per row. Computation order
 # and precision can swap near-tie indices, so we compare as sets (position
@@ -58,13 +67,17 @@ topk_values = [512, 2048]
 DIFF_PCT_THRESHOLD = 3.0  # percent
 
 
-def max_blocks(query_lens, cached_lens, block_size):
-    max_sum = max(a + b for a, b in zip(query_lens, cached_lens))
+def max_blocks(query_lens, cached_lens, block_size, compress_ratio=1):
+    # When compress_ratio > 1 the KV cache holds one row per compressed block, so
+    # the paged-block count derives from (clen+qlen)//ratio, not the token count.
+    max_sum = max((a + b) // compress_ratio for a, b in zip(query_lens, cached_lens))
     return (max_sum + block_size - 1) // block_size
 
 
-def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK):
-    max_num_blocks = max_blocks(query_len_list, cached_lens_list, BLOCK_SIZE)
+def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK,
+             compress_ratio=1):
+    ratio = compress_ratio
+    max_num_blocks = max_blocks(query_len_list, cached_lens_list, BLOCK_SIZE, ratio)
     max_seq_len = max_num_blocks * BLOCK_SIZE
     total_query_len = sum(query_len_list)
 
@@ -107,7 +120,7 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query
     for i in range(batch):
         qlen = query_len_list[i]
         clen = cached_lens_list[i]
-        seq_len = clen + qlen
+        seq_len = (clen + qlen) // ratio if ratio > 1 else clen + qlen
         q_chunk = q_std_cpu[offset : offset + qlen].view(qlen, n_heads, head_dim)
         weight_chunk = weight_std_cpu[offset : offset + qlen, head_dim : head_dim + n_heads]
         offset += qlen
@@ -127,7 +140,7 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query
     # per sample; blocks are contiguous so flatten to [nblk*BLOCK, head_dim]).
     for i in range(batch):
         clen = cached_lens_list[i]
-        total_len = clen + query_len_list[i]
+        total_len = (clen + query_len_list[i]) // ratio if ratio > 1 else clen + query_len_list[i]
         num_blocks_needed = (total_len + BLOCK_SIZE - 1) // BLOCK_SIZE
         start = i * max_num_blocks
         dst = k_cache_xlite[start : start + num_blocks_needed].view(-1, head_dim)
@@ -144,12 +157,17 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query
     for i in range(batch):
         qlen = query_len_list[i]
         clen = cached_lens_list[i]
-        seq_len = clen + qlen
+        # index_scores width is the compressed-block count when ratio > 1
+        # (one column per KV block), not the token count.
+        seq_len = (clen + qlen) // ratio if ratio > 1 else clen + qlen
         s = index_scores_standard_list[i]  # [qlen, seq_len]
         if seq_len < score_dim:
             s = torch.cat([s, torch.full((qlen, score_dim - seq_len), float("-inf"))], dim=1)
         padded_scores.append(s)
-        p0_per_row.append(torch.arange(clen, clen + qlen, dtype=torch.int64))
+        P = torch.arange(clen, clen + qlen, dtype=torch.int64)
+        # ratio==1: causal includes own position (p0 = P).
+        # ratio>1: causal excludes own incomplete block (p0 = (P+1)//ratio - 1).
+        p0_per_row.append((P + 1) // ratio - 1 if ratio > 1 else P)
     all_scores = torch.cat(padded_scores, dim=0)  # [total_query_len, score_dim]
     p0_all = torch.cat(p0_per_row)  # [total_query_len]
     pos_grid = torch.arange(score_dim, dtype=torch.int64).unsqueeze(0)
@@ -159,7 +177,7 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query
     standard_topk = standard_topk.to(dtype=torch.int32)
 
     logging.info(
-        "indexer_topk %s (%d heads, %d head_dim, %s) work (%d batch, cached_lens=%s, query_lens=%s, topK=%d) executed!",
+        "indexer_topk %s (%d heads, %d head_dim, %s) work (%d batch, cached_lens=%s, query_lens=%s, topK=%d, compress_ratio=%d) executed!",
         name,
         n_heads,
         head_dim,
@@ -168,6 +186,7 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query
         cached_lens_list,
         query_len_list,
         topK,
+        compress_ratio,
     )
 
     torch.npu.synchronize()
@@ -186,6 +205,7 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query
         BLOCK_SIZE,
         batch,
         topK,
+        compress_ratio=ratio,
     )
     torch.npu.synchronize()
 
@@ -270,10 +290,13 @@ def main():
         for batch, cached_lens_list, query_len_list in work:
             assert len(cached_lens_list) == batch
             assert len(query_len_list) == batch
+            # DSA indexer (ratio==1)
             for topK in topk_values:
-                # skip configurations where topK is larger than the
-                # scratch constraint MAX_TOPK_NUM or doesn't make sense
                 run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK)
+            # Compressed-block indexer (ratio==4)
+            for topK in topk_values_compressed:
+                run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK,
+                         compress_ratio=4)
 
 
 if __name__ == "__main__":
