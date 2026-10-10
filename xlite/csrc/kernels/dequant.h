@@ -8,6 +8,9 @@
 #define GMA(T) __gm__ T *
 #define PINGPONG 2
 #define AIC_AIV_RATIO 2
+// Elements per column tile: the PINGPONG buffer sets (in dtype + f32 tmp + bf16
+// out = 8B/elem each) exactly fill the 192KB UB.
+#define DEQUANT_N_TILE 12288
 
 #ifdef __DAV_C220_VEC__
 
@@ -25,8 +28,8 @@ public:
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-        this->nTile = 12288;
-        this->nPad = ROUND_UP(this->nTile, (256 / sizeof(dtype)));
+        this->nTile = DEQUANT_N_TILE;
+        this->nPad = ROUND_UP(this->nTile, (VECTOR_MAX_BYTESIZE / sizeof(dtype)));
         this->m0 = m0;
         this->n0 = n0;
         this->hasScale = hasScale;
@@ -106,57 +109,90 @@ public:
                 this->outGmBuf + rowOffset * this->n + colOffset, actualRows, localCols);
     }
 
+    // Row-batched tile processing (any tile: strided or full-width). Column
+    // chunks of at most nTile elements; inside a chunk, rows are batched: one
+    // 2D DMA per group moves [r, colChunk] — r bursts of colChunk elements,
+    // gaps skipping the GM row stride (n - colChunk) and the UB row pad
+    // (colsPad - colChunk). Full 256B-aligned chunks have no pad and
+    // back-to-back bursts, i.e. one long contiguous transfer. The pad aligns
+    // every per-row vector operand to 256B and lets repeats round up over it
+    // (pad garbage is converted and scaled but never stored: the store gap
+    // skips it). Burst lengths and gaps are byte-granular, so colChunk and
+    // (n - colChunk) must be 32B-aligned (all producer shapes are).
     __aicore__ inline void RunTile(GMA(dtype) tileInGm, GMA(float32_t) tileScaleGm,
                                    GMA(dtype) tileOutGm, uint32_t localRows, uint32_t localCols)
     {
         if (localRows == 0 || localCols == 0) {
             return;
         }
-        uint32_t nLoop = DIV_ROUND_UP(localCols, this->nTile);
+        assert(localCols % (BLOCK_SIZE / sizeof(dtype)) == 0 &&
+               (this->n - localCols) % (BLOCK_SIZE / sizeof(dtype)) == 0);
+        constexpr uint32_t colAlign = VECTOR_MAX_BYTESIZE / sizeof(dtype);
         float scaleValue;
-        for (uint32_t row = 0; row < localRows; row++) {
-            if (this->hasScale) {
-                scaleValue = *(tileScaleGm + row);
-                set_flag(PIPE_S, PIPE_V, EVENT_ID0);
-                wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
-            }
-            for (uint32_t loop = 0; loop < nLoop; loop++) {
-                uint32_t nOffset = loop * this->nTile;
-                uint32_t nSize = (loop == nLoop - 1) ? (localCols - nOffset) : this->nTile;
-                uint32_t nSizePad = ROUND_UP(nSize, (256 / sizeof(dtype)));
-                uint32_t nRepeats = DIV_ROUND_UP(nSizePad, VECTOR_MAX_NUM_OF_FP32);
+        uint32_t colOff = 0;
+        while (colOff < localCols) {
+            uint32_t colRemain = localCols - colOff;
+            uint32_t colChunk = colRemain < colAlign
+                                    ? colRemain
+                                    : MIN(colRemain, this->nTile) / colAlign * colAlign;
+            uint32_t colsPad = ROUND_UP(colChunk, colAlign);
+            uint32_t rows = MIN(localRows, this->nTile / colsPad);
+            uint32_t kRepeats = colsPad / VECTOR_MAX_NUM_OF_FP32;
+            uint32_t numGroups = DIV_ROUND_UP(localRows, rows);
+            // __set_dmi_config expresses lenBurst and both gaps in 32B units, so
+            // colChunk and (n - colChunk) must be 32B-expressible — the %16
+            // contract above (align_b16's expanded-arg form was tried and its
+            // gap units match neither bytes nor 16/32B; config form is the one
+            // quant.h/rope_and_cache.h rely on)
+            uint32_t strideGap = (this->n - colChunk) * sizeof(dtype) / BLOCK_SIZE;  // GM row gap
+            uint32_t padGap = (colsPad - colChunk) * sizeof(dtype) / BLOCK_SIZE;     // UB row pad
+            for (uint32_t g = 0; g < numGroups; g++) {
+                uint32_t base = g * rows;
+                uint32_t r = MIN(rows, localRows - base);
+                uint32_t rRepeats = r * kRepeats;
                 int eventId = this->eventId;
+                GMA(dtype) chunkInGm = tileInGm + (uint64_t)base * this->n + colOff;
+                GMA(dtype) chunkOutGm = tileOutGm + (uint64_t)base * this->n + colOff;
 
+                // in: GM rows strided (srcGap) -> UB rows padded (dstGap);
+                // out: UB rows padded (srcGap) -> GM rows strided (dstGap)
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + eventId);
-                copy_gm_to_ubuf_align_b16(this->inUbBuf[eventId],
-                                          tileInGm + row * this->n + nOffset, 0, 1,
-                                          nSize * sizeof(dtype), 0, 0, 0, 0);
+                copy_gm_to_ubuf(this->inUbBuf[eventId], chunkInGm,
+                                __set_dmi_config(0, r, colChunk * sizeof(dtype) / BLOCK_SIZE,
+                                                 strideGap, padGap));
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + eventId);
 
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + eventId);
-                vconv_f162f32(this->tmpUbBuf[eventId], this->inUbBuf[eventId], nRepeats, 1, 1, 8,
+                vconv_f162f32(this->tmpUbBuf[eventId], this->inUbBuf[eventId], rRepeats, 1, 1, 8,
                               4);
                 pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + eventId);
 
                 if (this->hasScale) {
-                    vmuls(this->tmpUbBuf[eventId], this->tmpUbBuf[eventId], scaleValue, nRepeats, 1,
-                          1, 8, 8);
+                    for (uint32_t row = 0; row < r; row++) {
+                        scaleValue = *(tileScaleGm + base + row);
+                        set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                        wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                        vmuls(this->tmpUbBuf[eventId] + row * colsPad,
+                              this->tmpUbBuf[eventId] + row * colsPad, scaleValue, kRepeats, 1, 1,
+                              8, 8);
+                    }
                     pipe_barrier(PIPE_V);
                 }
 
                 wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + eventId);
-                vconv_f322bf16r(this->outUbBuf[eventId], this->tmpUbBuf[eventId], nRepeats, 1, 1, 4,
+                vconv_f322bf16r(this->outUbBuf[eventId], this->tmpUbBuf[eventId], rRepeats, 1, 1, 4,
                                 8);
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + eventId);
 
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + eventId);
-                copy_ubuf_to_gm_align_b16(tileOutGm + row * this->n + nOffset,
-                                          this->outUbBuf[eventId], 0, 1, nSize * sizeof(bfloat16_t),
-                                          0, 0, 0, 0);
+                copy_ubuf_to_gm(chunkOutGm, this->outUbBuf[eventId],
+                                __set_dmi_config(0, r, colChunk * sizeof(bfloat16_t) / BLOCK_SIZE,
+                                                 padGap, strideGap));
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + eventId);
                 this->eventId = 1 - eventId;
             }
+            colOff += colChunk;
         }
     }
 
@@ -177,6 +213,19 @@ public:
             RunTileByIdx(idx);
         }
         WaitFlags();
+    }
+
+    // Rows per tile. Aim for ~4 tiles per block (grid-stride balance), capped
+    // at groupRows — the rows one full 2D batch holds (nTile / colsPad) — so a
+    // full tile is exactly one full batch. TP-sharded widths (128..768) give
+    // groupRows 16..96, far above what any fixed cap could serve.
+    static __aicore__ inline uint64_t PickM0(uint64_t m, uint64_t n)
+    {
+        constexpr uint64_t colAlign = VECTOR_MAX_BYTESIZE / sizeof(dtype);
+        uint64_t colChunk = ROUND_UP(MIN(n, DEQUANT_N_TILE), colAlign);
+        uint64_t groupRows = DEQUANT_N_TILE / colChunk;
+        uint64_t m0 = DIV_ROUND_UP(m, (uint64_t)GetBlockNum() * 4);
+        return MAX(MIN(m0, groupRows), 1);
     }
 
 private:
@@ -204,7 +253,7 @@ private:
         GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens, uint32_t m, uint32_t n) \
     {                                                                                        \
         Dequant<dtype> op;                                                                   \
-        op.Init(scale != nullptr);                                                           \
+        op.Init(scale != nullptr, Dequant<dtype>::PickM0(m, n));                             \
         op.Run(in, scale, out, pnum_tokens, m, n);                                           \
     }
 #else

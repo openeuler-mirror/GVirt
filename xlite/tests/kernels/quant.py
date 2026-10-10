@@ -49,6 +49,10 @@ test_cases = [
     [8192, 2048],
     [20000, 96],
     [20000, 12288],
+    # ---- batched multi-row path (k % 32 == 0, k <= k_tile, m > 2 * blocks) ----
+    [8190, 2048],    # rows=8, tail group r=6
+    [8192, 4096],    # k == k_tile boundary, rows=3, tail group r=2
+    [20003, 96],     # rows=16, tail group r=3
     # ---- boundary cases (k_tile = 4096) ----
     [1, 1],          # minimal m and k
     [1, 4096],       # single row, k == k_tile (single tile, no tail)
