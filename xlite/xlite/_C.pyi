@@ -3139,8 +3139,9 @@ def indexer_topk(
     batch: int,
     top_k: int,
     k_scale_cache: Optional[torch.Tensor] = None,
+    compress_ratio: int = 1,
 ) -> None:
-    """Fused DSA indexer scores + top-k selection over cached keys.
+    """Fused indexer scores + top-k selection over cached keys.
 
     C8 uses INT8 Q/K with FP16 head weights and K scales.
     Use contiguous tensors on rt's NPU, valid metadata and non-aliasing outputs.
@@ -3157,16 +3158,19 @@ def indexer_topk(
         k_cache (torch.Tensor): Key cache tensor ``[max_num_block*batch, block_size,
             head_dim]``, same dtype as q.
             C8: ``[blocks, block_size, 1, 128]``, int8.
+            With ``compress_ratio > 1`` each block holds one compressed KV row (one
+            per ``compress_ratio`` tokens), so ``max_num_block`` derives from the
+            compressed-block count, not the token count.
         weight (torch.Tensor): Indexer weight tensor
             ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are
             the indexer weights), same dtype as q.
             C8: ``[total_query_len, 32]``, fp16, already multiplied by Q scale.
         topk_indices (torch.Tensor): Output top-k indices tensor
             ``[total_query_len, top_k]`` (int32), emitted in ascending index order.
-            Sparse rows (``p0 >= top_k``, ``p0 = cached_len + in-batch query offset``) hold
-            the real top-k (all indices in ``[0, p0]``); dense rows (``p0 < top_k``)
-            hold the default template ``0..top_k-1``, whose first ``p0 + 1`` entries are
-            always valid positions — consumers must ignore entries ``> p0``.
+            Sparse rows (``p0 >= top_k``) hold the real top-k (all indices in
+            ``[0, p0]``); dense rows (``p0 < top_k``) hold the default template
+            ``0..top_k-1``, whose first ``p0 + 1`` entries are always valid
+            positions — consumers must ignore entries ``> p0``.
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
             int32 device.
         lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
@@ -3184,6 +3188,13 @@ def indexer_topk(
             C8 requires a multiple of 32 in [32, 2048].
         k_scale_cache (Optional[torch.Tensor]): C8 per-key scales
             ``[blocks, block_size, 1, 1]``, fp16; None for floating-point inputs.
+        compress_ratio (int): KV compression ratio. ``1`` = token-level causal
+            (``p0 = cached_len + in-batch query offset``, includes the query's own
+            position). ``>1`` = compressed-block causal: ``p0 = (P+1)//ratio - 1``
+            where ``P`` is the query's absolute token position, excluding the
+            query's own incomplete block (yields ``-1`` when that block is not yet
+            complete). ``block_tables``/``cached_lens``/``lens`` stay token-grained;
+            only the KV count and causal boundary move to compressed-block space.
 
     Returns:
         None: ``topk_indices`` is written in place. The binding synchronizes.

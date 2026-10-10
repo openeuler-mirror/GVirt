@@ -2003,7 +2003,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk,
-                        const XTensor &kScaleCache)
+                        const XTensor &kScaleCache, uint32_t compressRatio)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -2059,7 +2059,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                  topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlocks, topK,
-                 skipDenseTopk);
+                 skipDenseTopk, compressRatio);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,
