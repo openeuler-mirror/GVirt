@@ -593,7 +593,7 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         if (rt.multiTaskParallel) {
             rt.NotifyRecordPeerStream();
         }
-        if (rt.enableCommOptimize || rt.enableMoEAllToAll) {
+        if (rt.enableCommOptimize) {
             XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, false, DBG_LOC);
         } else {
             XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
@@ -708,7 +708,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         if (rt.multiTaskParallel) {
             rt.NotifyRecordPeerStream();
         }
-        if (rt.enableCommOptimize || rt.enableMoEAllToAll) {
+        if (rt.enableCommOptimize) {
             XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, false, DBG_LOC);
         } else {
             XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
@@ -958,7 +958,7 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
             if (rt.multiTaskParallel) {
                 rt.NotifyRecordPeerStream();
             }
-            if (rt.enableCommOptimize || rt.enableMoEAllToAll) {
+            if (rt.enableCommOptimize) {
                 XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, false,
                                      DBG_LOC);
             } else {
