@@ -135,7 +135,7 @@ C8 的 fp32 scores 直接搬入 `mrgSortBuf0`,`in[0]/in[1]` 交替暂存 fp16 K 
    - 非 `isFirst`:先 `WaitPrevCore()` 等前一个核把它的全局候选写入本核的 `lastTopk` 段,搬入 `lastSort[curr]`(`lastSortLen = MIN(topK, kvOffset)` 对),`vmrgsort4(totalSort, {localSort, lastSort}, ...)` 二路归并(`indexer_topk.h:415-441`);
    - `isFirst`:`totalSort` 已由步骤 3 直接得到;
 5. **中间结果传递**(`!isFinal`):把 `totalSort` 的前 `MIN(topK, totalSortLen)` 对(值,索引)写入 `lastTopk + idx*topK*2` 供下一核消费;最后一个 query 处理完后 `SetNextCore()` 唤醒下一核(`indexer_topk.h:444-456`)。MTE3 异步读 `totalSort` 的释放等待用 `totalSortOnHold` 标记**推迟到下次真正要写它之前**(`indexer_topk.h:354,409-434,446-479`),避免空等;
-6. **末 tile 收尾**(`isFinal`,`indexer_topk.h:458-496`):`vreducev2` 从 `totalSort` 抽出索引载荷;由于 `vbitsort` 按 **float** 键比较(位 cast 的 int 仅在符号位为 0 时保序),而 topK id 可为任意 `[0, p0]` 值,这里将非负索引按位视作 float,乘 `-1` 作为排序键(其降序即 id 升序),对 topK 个候选走 `vbitsort + MrgSort` **按索引从小到大**排列,再 `vreducev2` 抽出原始索引,经 `out[curr]` 的 `CopyUbufToGmAligned` 写到 `topkIndices + idx*topK`。最终输出为**按索引升序**的 topK 位置列表(测试按集合比较稀疏行、稠密行按模板精确比较,`tests/kernels/indexer_topk.py`;`gather_sparse_kv_cache` 依赖该升序约定收集模板头部有效位置)。
+6. **末 tile 收尾**(`isFinal`,`indexer_topk.h:458-496`):`vreducev2` 从 `totalSort` 抽出索引载荷;由于 `vbitsort` 按 **float** 键比较(位 cast 的 int 仅在符号位为 0 时保序),而 topK id 可为任意 `[0, p0]` 值,这里将非负索引按位视作 float,乘 `-1` 作为排序键(其降序即 id 升序),对 topK 个候选走 `vbitsort + MrgSort` **按索引从小到大**排列,再 `vreducev2` 抽出原始索引,经 `out[curr]` 的 `CopyUbufToGmAligned` 写到 `topkIndices + idx*topK`。最终输出为**按索引升序**的 topK 位置列表(测试按集合比较稀疏行、稠密行按模板精确比较,`tests/kernels/indexer_topk.py`;`gather_sparse_kv_cache` 顺序无关地消费稀疏行——升序/降序/乱序均可,运行时检测连续段组 burst——稠密行则依赖模板头部 `[0, p0]` 有效这一约定)。
 
 ### 核间环形同步(software pipe)
 

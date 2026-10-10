@@ -31,6 +31,11 @@ enum class NormKind {
 
 // harware
 #define UB_BLOCK_SIZE 32  // unified buffer block size in bytes
+// performance tuning
+#define GM_UB_BURST_SIZE 16384  // 16KB, recommended burst size for GM <--> UB copy bandwidth-wise
+// gather_sparse_kv_cache tiling (top-k slots per chunk task, rotating buffer count)
+#define GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP 32
+#define GATHER_SPARSE_KV_CACHE_BUF_NUM 4
 // model initialization
 #define INIT_MIN_SEQ_POS 102400ull  // for the identity table 0.1.2...maxSeqLen-1
 // attention/mla/cxa/indexer

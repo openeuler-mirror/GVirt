@@ -2887,7 +2887,6 @@ def gather_sparse_kv_cache(
     pe_cache: torch.Tensor,
     block_tables: torch.Tensor,
     topk_indices: torch.Tensor,
-    query_lens: torch.Tensor,
     cached_lens: torch.Tensor,
     k_dense_cache: torch.Tensor,
     pe_dense_cache: torch.Tensor,
@@ -2897,72 +2896,60 @@ def gather_sparse_kv_cache(
     kv_lora_rank: int,
     rope_head_dim: int,
     kv_heads: int = 1,
+    compress_ratio: int = 1,
+    burst_copy_size: int = 16 * 1024,
 ) -> None:
-    """Gather sparse KV cache into a contiguous dense cache per batch.
+    """Gather sparse KV cache into a contiguous dense cache per batch
+    (decode-only: query length 1 per batch; ``index_topk > 0``).
 
-    For each ``(b, i)`` pair, reads the token index ``tok = topk_indices[b, i]``
-    (token-index semantics), maps it to the physical block via
-    ``block_tables[b * max_num_blocks + tok // block_size]`` and offset
-    ``tok % block_size``, and copies one row from paged ``k_cache`` /
-    ``pe_cache`` into the contiguous ``k_dense_cache`` / ``pe_dense_cache``.
-
-    The valid slot count per batch is ``min(total_len, index_topk)`` where
-    ``total_len`` follows the host-side ``compress_ratio`` (not a Python
-    parameter; defaults to 1 internally, and is the actual compression ratio
-    when :func:`cxa` calls this in dense mode):
-    ``compress_ratio == 0`` -> ``query_lens[b] + cached_lens[b]``;
-    otherwise ``(query_lens[b] + cached_lens[b]) // compress_ratio`` (compressed
-    tokens). Slots beyond ``total_len`` (topk_indices padding tail) are
-    **skipped** (left as-is, typically zero-initialized by the caller).
-    :func:`mla_v2` / :func:`cxa` with ``dense=True`` read only those valid slots
-    and mask the rest in softmax, so the skipped slots do not affect output.
-
-    Each channel (``k_cache``/``k_dense_cache`` and ``pe_cache``/``pe_dense_cache``)
-    is skipped independently when its source/destination tensor is empty, so a
-    caller may gather the K channel only (e.g. :func:`cxa` dense mode passes an
-    empty ``pe_cache``/``pe_dense_cache``).
-
-    Used by the decode + DSA long-sequence path to feed a contiguous dense cache
-    to :func:`mla_v2` (``dense=True``) instead of the paged layout, and by
-    :func:`cxa` (``dense=True``) to build the contiguous compressed-KV cache.
+    Sparse rows (``num_candidates = (cached_lens[b] + 1) // compress_ratio >
+    index_topk``) are gathered from ``topk_indices`` in any order: consecutive
+    ascending/descending runs in one block form one burst (bounded by
+    ``burst_copy_size``), a descending run lands in ascending token order, and
+    the output holds the top-k **set** (set-semantics consumers). Dense rows
+    gather their causal prefix via the identity template without reading
+    ``topk_indices``, leaving suffix slots untouched (zero-init the output).
+    Either channel may be empty (a single-channel kernel variant then runs); at
+    least one must be present. Feeds :func:`mla_v2` (``dense=True``) and
+    :func:`cxa` (``dense=True``).
 
     Args:
         rt (Runtime): Native runtime handle.
-        k_cache (torch.Tensor): Paged KV cache (kv_lora_rank slice), shape
-            (kvcache_block_num, block_size, kv_heads, kv_lora_rank), bf16. May be
-            empty to skip the K channel.
-        pe_cache (torch.Tensor): Paged RoPE key cache (rope_head_dim slice),
-            shape (kvcache_block_num, block_size, kv_heads, rope_head_dim), bf16.
-            May be empty to skip the PE channel (e.g. when only the K channel is
-            gathered).
-        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
-            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
-            per-request max_num_blocks is derived internally from the shape
-            (2-D: shape[1]; 1-D: len // batch).
-        topk_indices (torch.Tensor): Top-k token indices from IndexerTopK, shape
-            (batch, index_topk), dtype int32.
-        query_lens (torch.Tensor): Per-batch current query lengths, shape
-            (batch,), dtype int32. Decode = 1 per batch.
-        cached_lens (torch.Tensor): Per-batch cached token lengths, shape
-            (batch,), dtype int32. Used with query_lens to derive the valid
-            slot count per batch (see ``total_len`` above).
-        k_dense_cache (torch.Tensor): Output contiguous K cache, shape
-            (batch, index_topk, kv_heads, kv_lora_rank), bf16; written in place.
-            May be empty to skip the K channel.
-        pe_dense_cache (torch.Tensor): Output contiguous PE cache, shape
-            (batch, index_topk, kv_heads, rope_head_dim), bf16; written in place.
-            May be empty to skip the PE channel.
+        k_cache (torch.Tensor): Paged KV cache, (kvcache_block_num, block_size,
+            kv_heads, kv_lora_rank), bf16; may be empty to skip the K channel.
+        pe_cache (torch.Tensor): Paged RoPE key cache, (kvcache_block_num,
+            block_size, kv_heads, rope_head_dim), bf16; may be empty to skip
+            the PE channel.
+        block_tables (torch.Tensor): Block table, 1-D ``[batch *
+            max_num_blocks]`` or 2-D ``[batch, max_num_blocks]`` int32;
+            ``max_num_blocks`` is derived internally (2-D: ``shape[1]``,
+            1-D: ``len // batch``).
+        topk_indices (torch.Tensor): Top-k token indices, (batch, index_topk),
+            int32, any order for sparse rows; dense rows hold unread dummies.
+        cached_lens (torch.Tensor): Per-batch cached lengths, (batch,), int32.
+        k_dense_cache (torch.Tensor): Output contiguous K cache, (batch,
+            index_topk, kv_heads, kv_lora_rank), bf16, written in place.
+        pe_dense_cache (torch.Tensor): Output contiguous PE cache, (batch,
+            index_topk, kv_heads, rope_head_dim), bf16, written in place.
         batch (int): Batch size.
-        index_topk (int): Number of top-k tokens per batch (dense length). Host
-            requires ``index_topk <= 2048`` (``MAX_TOPK_NUM``).
-        block_size (int): KV block size.
-        kv_lora_rank (int): KV LoRA rank. When :func:`cxa` calls this internally
-            (dense mode) this is ``head_dim`` and ``rope_head_dim`` is 0 (K only).
-        rope_head_dim (int): Rotary head dimension. ``0`` skips the PE channel.
-        kv_heads (int): Number of KV heads (must be 1; defaults to 1 for MLA).
+        index_topk (int): Top-k tokens per batch (dense length), > 0; chunked
+            in 32-slot tasks, any positive value works (2048 is the
+            indexer_topk producer convention, not a check).
+        block_size (int): KV block size, multiple of 32.
+        kv_lora_rank (int): KV LoRA rank, multiple of 16 (:func:`cxa` passes
+            ``head_dim`` with ``rope_head_dim`` 0).
+        rope_head_dim (int): Rotary head dimension, multiple of 16; 0 skips PE.
+        kv_heads (int): Number of KV heads (must be 1).
+        compress_ratio (int): Compression ratio >= 1; each index represents
+            ``compress_ratio`` cached tokens (CXA dense mode). Defaults to 1.
+        burst_copy_size (int): Per-burst copy-in bound in bytes (effective
+            ``min(burst_copy_size, 16384, 8192)``; below one token's bytes
+            degenerates to token-by-token). Defaults to 16KB.
 
-    Returns:
-        None: `k_dense_cache` and `pe_dense_cache` are written in place.
+    Raises:
+        RuntimeError: Non-BF16 inputs, kv_heads != 1, channel input/output
+            emptiness mismatch, or malformed block_tables (rank not 1-D/2-D,
+            or 1-D length not divisible by batch).
     """
     ...
 

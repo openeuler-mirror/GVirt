@@ -22,7 +22,7 @@ using namespace AscendC;
 #define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
-#define CLIP(x, minVal, maxVal) ((x) < (minVal) ? (minVal) : ((x) > (maxVal) ? (maxVal) : (x)))
+#define CLAMP(x, minVal, maxVal) ((x) < (minVal) ? (minVal) : ((x) > (maxVal) ? (maxVal) : (x)))
 
 #define BLOCK_SIZE 32
 #define VECTOR_MAX_REPEAT 255
@@ -35,8 +35,7 @@ using namespace AscendC;
 #define VECTOR_MAX_NUM_OF_INT8 256   // The maximum num of int8 dtype in one vector repeat
 #define AIC_CACHE_LINE_SIZE 512
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
-#define GM_UB_BURST_SIZE 16384  // 16KB, recommended burst size for GM <--> UB copy
-#define UB_BUF_ALIGN_SIZE 32    // The align size of UB buffer address; i.e., BLOCK_SIZE
+#define UB_BUF_ALIGN_SIZE 32  // The align size of UB buffer address; i.e., BLOCK_SIZE
 #if __NPU_ARCH__ != 3510
 // the following is architecture specific (NpuArch 2201)
 #define UB_SIZE 196608     // 192KB, total size of unified buffer (UB), = UB_BANK_SIZE * UB_BANK_NUM

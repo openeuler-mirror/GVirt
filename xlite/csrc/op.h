@@ -135,11 +135,11 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                        uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE, uint32_t topK = 0,
                        const XTensor &topkIndices = XTensor());
 void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &peCache,
-                                XTensor &blockTables, XTensor &topkIndices, XTensor &queryLens,
-                                XTensor &cachedLens, XTensor &kDenseCache,
-                                const XTensor &peDenseCache, uint32_t batch, uint32_t indexTopK,
-                                uint32_t blockSize, uint32_t kvLoraRank, uint32_t ropeHeadDim,
-                                uint32_t kvHeads, uint32_t compressRatio = 1);
+                                XTensor &blockTables, XTensor &topkIndices, XTensor &cachedLens,
+                                XTensor &kDenseCache, const XTensor &peDenseCache, uint32_t seqNum,
+                                uint32_t indexTopK, uint32_t blockSize, uint32_t kvLoraRank,
+                                uint32_t ropeHeadDim, uint32_t kvHeads, uint32_t compressRatio = 1,
+                                uint32_t burstCopySize = GM_UB_BURST_SIZE);
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
                           float normEps, XTensor &out, const XTensor &normBias = XTensor());

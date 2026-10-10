@@ -538,9 +538,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
             rt.GetTensor({static_cast<size_t>(rt._batch), _c.indexTopK, _c.ropeHeadDim},
                          hiddenState.dtype, DBG_LOC);
         XliteOpGatherSparseKVCache(rt, kCache, peCache, rt._attnBlockTables[0], *topkIndices,
-                                   rt._attnLens, rt._attnCachedLens, kDense, peDense, rt._batch,
-                                   _c.indexTopK, _c.blockSizes[0], _c.kvLoraRank, _c.ropeHeadDim,
-                                   _c.nKvHeads);
+                                   rt._attnCachedLens, kDense, peDense, rt._batch, _c.indexTopK,
+                                   _c.blockSizes[0], _c.kvLoraRank, _c.ropeHeadDim, _c.nKvHeads);
         XTensor &qkDense =
             rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._attnQueryStartLoc,

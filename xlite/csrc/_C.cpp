@@ -1559,9 +1559,9 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
                                        XDtypeOf(qWithQr), DBG_LOC);
         XTensor &peDense = rt.GetTensor({static_cast<size_t>(batch), topK, ropeHeadDim},
                                         XDtypeOf(qWithQr), DBG_LOC);
-        XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices, _lens,
-                                   _cachedLens, kDense, peDense, batch, topK, blockSize, kvLoraRank,
-                                   ropeHeadDim, 1);
+        XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices, _cachedLens,
+                                   kDense, peDense, batch, topK, blockSize, kvLoraRank, ropeHeadDim,
+                                   1);
         XTensor &qk =
             rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, topK}, XDtypeOf(qWithQr), DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, _qr, kDense, peDense, qk, oAbsorb, _queryStartLoc, _lens,
@@ -1610,24 +1610,23 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
 }
 
 void GatherSparseKVCache(XRuntime &rt, at::Tensor &kCache, at::Tensor &peCache,
-                         at::Tensor &blockTables, at::Tensor &topkIndices, at::Tensor &queryLens,
-                         at::Tensor &cachedLens, at::Tensor &kDenseCache, at::Tensor &peDenseCache,
-                         uint32_t batch, uint32_t indexTopK, uint32_t blockSize,
-                         uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t kvHeads)
+                         at::Tensor &blockTables, at::Tensor &topkIndices, at::Tensor &cachedLens,
+                         at::Tensor &kDenseCache, at::Tensor &peDenseCache, uint32_t batch,
+                         uint32_t indexTopK, uint32_t blockSize, uint32_t kvLoraRank,
+                         uint32_t ropeHeadDim, uint32_t kvHeads, uint32_t compressRatio,
+                         uint32_t burstCopySize)
 {
-    XTensor _kCache, _peCache, _blockTables, _topkIndices, _queryLens, _cachedLens, _kDenseCache,
-        _peDenseCache;
+    XTensor _kCache, _peCache, _blockTables, _topkIndices, _cachedLens, _kDenseCache, _peDenseCache;
     InitXTensor(_kCache, kCache);
     InitXTensor(_peCache, peCache);
     InitXTensor(_blockTables, blockTables);
     InitXTensor(_topkIndices, topkIndices);
-    InitXTensor(_queryLens, queryLens);
     InitXTensor(_cachedLens, cachedLens);
     InitXTensor(_kDenseCache, kDenseCache);
     InitXTensor(_peDenseCache, peDenseCache);
-    XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices, _queryLens,
-                               _cachedLens, _kDenseCache, _peDenseCache, batch, indexTopK,
-                               blockSize, kvLoraRank, ropeHeadDim, kvHeads);
+    XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices, _cachedLens,
+                               _kDenseCache, _peDenseCache, batch, indexTopK, blockSize, kvLoraRank,
+                               ropeHeadDim, kvHeads, compressRatio, burstCopySize);
     rt.Synchronize();
 }
 
@@ -1662,9 +1661,8 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
         XTensor &compressKCacheDense =
             rt.GetTensor({static_cast<size_t>(batch), indexTopK, headDim}, XDtypeOf(q), DBG_LOC);
         XliteOpGatherSparseKVCache(rt, _compressKCache, XTensor(), _compressBlockTables,
-                                   _topkIndices, _lens, _cachedLens, compressKCacheDense, XTensor(),
-                                   batch, indexTopK, compressBlockSize, headDim, 0, 1,
-                                   compressRatio);
+                                   _topkIndices, _cachedLens, compressKCacheDense, XTensor(), batch,
+                                   indexTopK, compressBlockSize, headDim, 0, 1, compressRatio);
         XTensor &scores = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize},
                                        XDtypeOf(q), DBG_LOC);
         XliteOpCXA(rt, _q, _swaKCache, compressKCacheDense, _swaBlockTables, _compressBlockTables,
@@ -3053,9 +3051,10 @@ PYBIND11_MODULE(_C, m)
           py::arg("tile_size_of_cached_kv") = 8192, py::arg("dense") = false);
     m.def("gather_sparse_kv_cache", &GatherSparseKVCache, py::arg("rt"), py::arg("k_cache"),
           py::arg("pe_cache"), py::arg("block_tables"), py::arg("topk_indices"),
-          py::arg("query_lens"), py::arg("cached_lens"), py::arg("k_dense_cache"),
-          py::arg("pe_dense_cache"), py::arg("batch"), py::arg("index_topk"), py::arg("block_size"),
-          py::arg("kv_lora_rank"), py::arg("rope_head_dim"), py::arg("kv_heads") = 1);
+          py::arg("cached_lens"), py::arg("k_dense_cache"), py::arg("pe_dense_cache"),
+          py::arg("batch"), py::arg("index_topk"), py::arg("block_size"), py::arg("kv_lora_rank"),
+          py::arg("rope_head_dim"), py::arg("kv_heads") = 1, py::arg("compress_ratio") = 1,
+          py::arg("burst_copy_size") = GM_UB_BURST_SIZE);
     m.def("cxa", &CXA, "cxa", py::arg("rt"), py::arg("q"), py::arg("swa_k_cache"),
           py::arg("compress_k_cache"), py::arg("swa_block_tables"),
           py::arg("compress_block_tables"), py::arg("swa_block_size"),
