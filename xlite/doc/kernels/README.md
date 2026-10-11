@@ -60,10 +60,12 @@
 | mla_prepare | [mla_prepare.md](mla_prepare.md) | MLA 前处理 |
 | gather_sparse_kv_cache | [gather_sparse_kv_cache.md](gather_sparse_kv_cache.md) | 稀疏 KV Cache 收集 |
 | indexer_prepare | [indexer_prepare.md](indexer_prepare.md) | Indexer 前处理(DSA 稀疏注意力) |
+| indexer_prepare_c8 | [indexer_prepare_c8.md](indexer_prepare_c8.md) | Lightning Indexer C8 K/Q 前处理(LN/RoPE/Hadamard/动态量化→INT8,GLM-5.1) |
 | indexer_scores | [indexer_scores.md](indexer_scores.md) | Indexer 分数计算 |
 | indexer_topk | [indexer_topk.md](indexer_topk.md) | Indexer TopK 选路 |
 | cxa | [cxa.md](cxa.md) | C4A/C128A 滑窗+压缩稀疏注意力(DeepSeek-V4) |
 | flash_cxa | [flash_cxa.md](flash_cxa.md) | CXA 的 flash 在线 softmax 变体(KV-len 分 tile 合并,长 prefill/topk 行) |
+| compressor | [compressor.md](compressor.md) | DeepSeek-V4 KV 压缩(overlap_transform + softmax 加权求和 + RMSNorm + RoPE + cache 写) |
 | einsum_mht_hdt_mhd | [einsum_mht_hdt_mhd.md](einsum_mht_hdt_mhd.md) | 线性注意力 einsum |
 | einsum_mht_htd_mhd | [einsum_mht_htd_mhd.md](einsum_mht_htd_mhd.md) | 线性注意力 einsum |
 | recurrent_gated_delta_rule | [recurrent_gated_delta_rule.md](recurrent_gated_delta_rule.md) | 门控 Delta Rule 循环核 |
@@ -94,6 +96,7 @@
 | reorder_moe | [reorder_moe.md](reorder_moe.md) | MoE Token 重排 |
 | repeat_interleave | [repeat_interleave.md](repeat_interleave.md) | 重复扩展 |
 | experts_counts_sum | [experts_counts_sum.md](experts_counts_sum.md) | 专家计数求和 |
+| remap_gate_outputs | [remap_gate_outputs.md](remap_gate_outputs.md) | EPLB 门控输出逻辑→物理专家列散列(权重 + 路由位) |
 
 ### 通信
 
