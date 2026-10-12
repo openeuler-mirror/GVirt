@@ -19,6 +19,8 @@ supported_dtype_list = [torch.bfloat16]  # add torch.float16 here once fp16 kern
 
 test_cases = [
     [8192, 2048],
+    [8190, 2048],    # batched path rows=9, tail group r=2
+    [8192, 4096],    # batched path boundary k=4096, rows=4
     [40, 96],
     [200000, 96],
     # k > QUANT_DYN_K_TILE(8192): exercises the k-tiling path.
@@ -77,10 +79,17 @@ for in_type in supported_dtype_list:
          "zero-input [8, 8192] (fast path)"),
         (torch.zeros(4, 8193, dtype=in_type, device=f"npu:{npu_devid}"),
          "zero-input [4, 8193] (tiled path)"),
+        (torch.zeros(8192, 2048, dtype=in_type, device=f"npu:{npu_devid}"),
+         "zero-input [8192, 2048] (batched path, incl. tail group)"),
     ]
     x_sparse = torch.zeros(4, 8193, dtype=in_type, device=f"npu:{npu_devid}")
     x_sparse[1, 5000] = 100.0
     special_inputs.append((x_sparse, "sparse-input [4, 8193]"))
+    # sparse rows inside the batched path: per-row absmax must not leak across rows
+    x_sparse_b = torch.zeros(8192, 2048, dtype=in_type, device=f"npu:{npu_devid}")
+    x_sparse_b[3, 1000] = 100.0
+    x_sparse_b[7, 2000] = -50.0
+    special_inputs.append((x_sparse_b, "sparse-input [8192, 2048] (batched path)"))
 
     for x_sp, label in special_inputs:
         m, n = x_sp.shape
