@@ -7,7 +7,7 @@
 | Skill | 文件 | 用途 |
 |---|---|---|
 | debug-accuracy | [skills/debug-accuracy.md](skills/debug-accuracy.md) | 通过对比 xlite 与 torch_npu 后端输出,系统性定位 xlite 精度问题 |
-| update-kernel-docs | [skills/update-kernel-docs.md](skills/update-kernel-docs.md) | 生成 / 刷新 `xlite/doc/kernels/` 下的算子实现原理文档 |
+| update-kernel-docs | [skills/update-kernel-docs.md](skills/update-kernel-docs.md) | 生成 / 刷新 `xlite/doc/developer_guide/kernels/` 下的算子实现原理文档 |
 
 ## 使用方式
 

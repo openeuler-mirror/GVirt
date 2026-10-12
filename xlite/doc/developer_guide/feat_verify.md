@@ -113,7 +113,7 @@ python3 feat_verify.py --feature cpu_binding --xlite-mode xlite_full_mode
 **精度校验规则**：输出须为与主题相关的有意义中文，非乱码/非退化重复；multi_batch 须 7 个响应全正确，取最差场景为综合结论。
 校验等级：✅PASS > ⚠️SUSPECT（偏题/疑似异常）> ❌FAIL（乱码/退化重复/报错）。
 
-**修改测试场景**：编辑 [feat_verify.py](../tests/e2e/feat_verify.py) 的 `TEST_SCENARIOS` 或 `MM_TEST_SCENARIOS`。
+**修改测试场景**：编辑 [feat_verify.py](../../tests/e2e/feat_verify.py) 的 `TEST_SCENARIOS` 或 `MM_TEST_SCENARIOS`。
 
 ## 六、批量运行
 
@@ -172,5 +172,5 @@ done
 
 | 文件 | 说明 |
 |---|---|
-| [feat_verify.py](../tests/e2e/feat_verify.py) | 主验证脚本（参数化特性开关 + xlite 模式 + 多场景测试 + 精度校验） |
-| [feat_verify_batch.sh](../tests/e2e/feat_verify_batch.sh) | 批量运行脚本 |
+| [feat_verify.py](../../tests/e2e/feat_verify.py) | 主验证脚本（参数化特性开关 + xlite 模式 + 多场景测试 + 精度校验） |
+| [feat_verify_batch.sh](../../tests/e2e/feat_verify_batch.sh) | 批量运行脚本 |

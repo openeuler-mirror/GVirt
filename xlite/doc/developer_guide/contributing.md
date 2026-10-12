@@ -4,10 +4,10 @@
 
 | 硬件型号 | CPU架构 | 容器镜像 | Dockerfile |
 | --------- | --------- | --------- | ----------- |
-| Atlas 800I/T A2 | aarch64 | hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20251219 | [openeuler_torch_ascend_arm.Dockerfile](../docker/openeuler_torch_ascend_arm.Dockerfile) |
-| Atlas 800I/T A2 | x86_64 | hub.oepkgs.net/oedeploy/openeuler/x86_64/gvirt:20251219 | [openeuler_torch_ascend_x86.Dockerfile](../docker/openeuler_torch_ascend_x86.Dockerfile) |
-| Atlas 800I/T A3 | aarch64 | hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20260324 | [openeuler_torch_ascend_a3_arm.Dockerfile](../docker/openeuler_torch_ascend_a3_arm.Dockerfile) |
-| Atlas 800I/T A3 | x86_64 | hub.oepkgs.net/oedeploy/openeuler/x86_64/gvirt:20260324 | [openeuler_torch_ascend_a3_x86.Dockerfile](../docker/openeuler_torch_ascend_a3_x86.Dockerfile) |
+| Atlas 800I/T A2 | aarch64 | hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20251219 | [openeuler_torch_ascend_arm.Dockerfile](../../docker/openeuler_torch_ascend_arm.Dockerfile) |
+| Atlas 800I/T A2 | x86_64 | hub.oepkgs.net/oedeploy/openeuler/x86_64/gvirt:20251219 | [openeuler_torch_ascend_x86.Dockerfile](../../docker/openeuler_torch_ascend_x86.Dockerfile) |
+| Atlas 800I/T A3 | aarch64 | hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20260324 | [openeuler_torch_ascend_a3_arm.Dockerfile](../../docker/openeuler_torch_ascend_a3_arm.Dockerfile) |
+| Atlas 800I/T A3 | x86_64 | hub.oepkgs.net/oedeploy/openeuler/x86_64/gvirt:20260324 | [openeuler_torch_ascend_a3_x86.Dockerfile](../../docker/openeuler_torch_ascend_a3_x86.Dockerfile) |
 
 创建容器：
 
@@ -72,7 +72,7 @@ XLITE_DEBUG_ON=forward,tuner cmake -B build && cmake --build build -j
 XLITE_DEBUG_ON=all cmake -B build && cmake --build build -j
 ```
 
-支持的类别 token（逗号分隔、不区分大小写）及对应编译宏见 [环境变量说明文档](ENVIRONMENT_VARIABLES.md#xlite_debug_on)。机制上，CMake 将该变量解析为编译宏（`XLITE_DEBUG_ON` 基础宏 + 每个 token 的 `XLITE_DEBUG_ON_<TOK>`），具体哪个宏控制哪段调试代码由 `csrc/debug.h` 决定，因此 `forward` 与 `tuner`/`gettensor` 相互独立、可按需组合。
+支持的类别 token（逗号分隔、不区分大小写）及对应编译宏见 [环境变量说明文档](../user_guide/ENVIRONMENT_VARIABLES.md#xlite_debug_on)。机制上，CMake 将该变量解析为编译宏（`XLITE_DEBUG_ON` 基础宏 + 每个 token 的 `XLITE_DEBUG_ON_<TOK>`），具体哪个宏控制哪段调试代码由 `csrc/debug.h` 决定，因此 `forward` 与 `tuner`/`gettensor` 相互独立、可按需组合。
 
 > **wheel 构建说明**：`setup.py` 在非可编辑（wheel）构建时会从 cmake 子进程环境中剥离 `XLITE_DEBUG_ON`，确保发布包不带调试代码。开发可编辑安装（`pip install -e .`）会保留该变量，故可如上携带。
 
@@ -84,7 +84,7 @@ bash tests/run_accuracy.sh
 
 ## 性能测试
 
-vllm_ascend + xlite在线服务的性能测试及性能对比分析，请参考 [e2e_test.md](doc/e2e_test.md)
+vllm_ascend + xlite在线服务的性能测试及性能对比分析，请参考 [e2e_test.md](e2e_test.md)
 
 ## 代码提交
 

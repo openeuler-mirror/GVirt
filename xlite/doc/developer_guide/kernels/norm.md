@@ -33,18 +33,18 @@ Python 侧入口:`rmsnorm / rmsnorm_with_bias / rmsnorm_variance_only / layernor
 | tpSize | 标量 | - | uint32_t | 张量并行规模,用于把 AllReduce 后的方差和除回均值 |
 | outFp32 | 标量 | - | bool | 输出是否为 fp32 |
 
-测试参考:[tests/kernels/rmsnorm.py](../../tests/kernels/rmsnorm.py)(`[64, 8192]`、带 stride 的 `DIM=128, CNT=8`)、[tests/kernels/layernorm.py](../../tests/kernels/layernorm.py)、[tests/kernels/l2norm.py](../../tests/kernels/l2norm.py)、[tests/kernels/rmsnorm_full.py](../../tests/kernels/rmsnorm_full.py)(variance-only + all_reduce + apply 三步)。
+测试参考:[tests/kernels/rmsnorm.py](../../../tests/kernels/rmsnorm.py)(`[64, 8192]`、带 stride 的 `DIM=128, CNT=8`)、[tests/kernels/layernorm.py](../../../tests/kernels/layernorm.py)、[tests/kernels/l2norm.py](../../../tests/kernels/l2norm.py)、[tests/kernels/rmsnorm_full.py](../../../tests/kernels/rmsnorm_full.py)(variance-only + all_reduce + apply 三步)。
 
 ## 支持的数据类型
 
-- `float16_t`([norm_float16_t.cpp](../../csrc/kernels/norm_float16_t.cpp))
-- `bfloat16_t`([norm_bfloat16_t.cpp](../../csrc/kernels/bfloat16_t.cpp))
+- `float16_t`([norm_float16_t.cpp](../../../csrc/kernels/norm_float16_t.cpp))
+- `bfloat16_t`([norm_bfloat16_t.cpp](../../../csrc/kernels/norm_bfloat16_t.cpp))
 
 host 侧要求输入为 FP16/BF16,输出为同 dtype 或 FP32(`csrc/op.cpp:526-529`);计算全程在 fp32 进行。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/norm.h](../../csrc/kernels/norm.h),模板函数 `norm<Dtype>`(norm.h:222)。另有一个大维度分块变体 `rmsnorm_noaffine_tiled`(norm.h:43-220)。
+实现位于 [csrc/kernels/norm.h](../../../csrc/kernels/norm.h),模板函数 `norm<Dtype>`(norm.h:222)。另有一个大维度分块变体 `rmsnorm_noaffine_tiled`(norm.h:43-220)。
 
 ### 总体数据流
 

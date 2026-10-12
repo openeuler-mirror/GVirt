@@ -1,6 +1,6 @@
 # xlite 算子实现原理文档
 
-本目录包含 [csrc/kernels](../../csrc/kernels) 下所有 NPU 算子的实现原理说明文档。
+本目录包含 [csrc/kernels](../../../csrc/kernels) 下所有 NPU 算子的实现原理说明文档。
 
 每份文档包含:
 
@@ -119,5 +119,5 @@
 
 - 算子实现在 `csrc/kernels/<name>.h`(模板)或 `csrc/kernels/<name>.cpp`
 - dtype 实例化在 `csrc/kernels/<name>_<dtype>.cpp`,文件名即对应支持的 dtype
-- 算子正确性测试在 [tests/kernels](../../tests/kernels)
+- 算子正确性测试在 [tests/kernels](../../../tests/kernels)
 - host 侧启动与参数封装在 `csrc/op.cpp`、`csrc/ccl.cpp`

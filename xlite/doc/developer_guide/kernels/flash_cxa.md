@@ -4,7 +4,7 @@
 
 CXA 的 flash(online-softmax)变体,是 cxa 的长序列路径:当某行压缩 KV 总宽 `compressTotalLen = (cachedLen + queryLen) / compressRatio` 超过 PingPong UB 预算(`MAX_SOFTMAX_PINGPONG_LEN = 11776`,`csrc/kernels/kernel_param.h:43`)时,由 Python 侧 `enable_flash_attention=True` 路由进入(`csrc/_C.cpp:1663` 的 `else if (enableFlashAttention && compressRatio != 0)` 分支)。它把 KV-len(压缩 token)维度切成 `tileSizeOfCachedKV` 宽的 tile,每 tile 上 AIC 算 `QK = (q · swaK^T) | (q · compressK^T)` 与 `sv = softmax_local(QK) · K^T`,AIV 用 online softmax 跨 tile 增量合并,最终 `output = softmax_causal(QK) · K^T`。支持 DSA top-k token 选择(`topkIndices`)。
 
-与 cxa(单遍)的关系:cxa 把整行 `[swaSegWidth, kvSize]` 分数一次性算进 softmax,行宽受 UB 预算限制;flash_cxa 把压缩段切成 `tileSizeOfCachedKV` 个 tile,SWA 段**只挂在第一个 KV tile**(`kvIdx == 0`)上,其余 tile 是纯压缩段。每个 tile 的 QK/SV/softmax 五级流水重叠,跨 tile 用 online softmax 合并 max/sum 与 output。数学上两者等价(容差 `atol=5e-5, rtol=5e-2`,见 [tests/kernels/cxa.py:414](../../tests/kernels/cxa.py#L414))。
+与 cxa(单遍)的关系:cxa 把整行 `[swaSegWidth, kvSize]` 分数一次性算进 softmax,行宽受 UB 预算限制;flash_cxa 把压缩段切成 `tileSizeOfCachedKV` 个 tile,SWA 段**只挂在第一个 KV tile**(`kvIdx == 0`)上,其余 tile 是纯压缩段。每个 tile 的 QK/SV/softmax 五级流水重叠,跨 tile 用 online softmax 合并 max/sum 与 output。数学上两者等价(容差 `atol=5e-5, rtol=5e-2`,见 [tests/kernels/cxa.py:414](../../../tests/kernels/cxa.py#L414))。
 
 SWA 段语义、压缩段分页寻址、attn_sink 并入分母、topk gather/scatter 等均与 cxa 完全一致,详见 [cxa.md](cxa.md);本文仅描述 flash 变体的差异部分。
 
