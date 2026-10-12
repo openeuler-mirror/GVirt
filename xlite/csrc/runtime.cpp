@@ -2,6 +2,7 @@
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include <cmath>
+#include <memory>
 #include <sstream>
 #include "ascend.h"
 #include "base.h"
@@ -307,7 +308,7 @@ int XRuntime::InitHcclComm(void)
 {
     std::string ip;
     uint32_t port;
-    HcclRootInfo rootInfo;
+    HcclRootInfo rootInfo = {};
 
     int ret = GetNodeIps();
     if (ret) {
@@ -322,9 +323,11 @@ int XRuntime::InitHcclComm(void)
         if (_rankId % _tpSize == 0) {
             CHECK_HCCL(HcclGetRootInfo(&rootInfo));
         }
-        XSock *sock = new XSock(_rankId % _tpSize, _tpSize, ip, port);
-        sock->Broadcast(&rootInfo, sizeof(rootInfo));
-        delete sock;
+        auto sock = std::make_unique<XSock>(_rankId % _tpSize, _tpSize, ip, port);
+        ret = sock->Broadcast(&rootInfo, sizeof(rootInfo));
+        if (ret != 0) {
+            return ret;
+        }
         CHECK_HCCL(HcclCommInitRootInfo(_tpSize, &rootInfo, _rankId % _tpSize, &_tpComm));
     }
 
@@ -335,9 +338,11 @@ int XRuntime::InitHcclComm(void)
         if (_rankId / _tpSize == 0) {
             CHECK_HCCL(HcclGetRootInfo(&rootInfo));
         }
-        XSock *sock = new XSock(_rankId / _tpSize, _dpSize, ip, port);
-        sock->Broadcast(&rootInfo, sizeof(rootInfo));
-        delete sock;
+        auto sock = std::make_unique<XSock>(_rankId / _tpSize, _dpSize, ip, port);
+        ret = sock->Broadcast(&rootInfo, sizeof(rootInfo));
+        if (ret != 0) {
+            return ret;
+        }
         CHECK_HCCL(HcclCommInitRootInfo(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm));
     }
 
@@ -348,9 +353,11 @@ int XRuntime::InitHcclComm(void)
         if (_rankId / _moeTpSize == 0) {
             CHECK_HCCL(HcclGetRootInfo(&rootInfo));
         }
-        XSock *sock = new XSock(_rankId / _moeTpSize, _moeEpSize, ip, port);
-        sock->Broadcast(&rootInfo, sizeof(rootInfo));
-        delete sock;
+        auto sock = std::make_unique<XSock>(_rankId / _moeTpSize, _moeEpSize, ip, port);
+        ret = sock->Broadcast(&rootInfo, sizeof(rootInfo));
+        if (ret != 0) {
+            return ret;
+        }
         CHECK_HCCL(HcclCommInitRootInfo(_moeEpSize, &rootInfo, _rankId / _moeTpSize, &_epComm));
     }
     portOffset += 500;
