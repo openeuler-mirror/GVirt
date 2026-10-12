@@ -33,7 +33,7 @@ Run before submitting a PR: `python tests/run_static_checks.py`. Use `--cpp-only
 
 ## Documentation
 
-- `doc/` contains project documentation; kernel documentation is under `doc/kernels/`.
+- `doc/` contains project documentation; kernel documentation is under `doc/developer_guide/kernels/`.
 - Update documentation when behavior, interfaces, configuration, or supported functionality changes.
 - Prefer function names and descriptions over exact source line numbers.
 - Comments should explain non-obvious logic, invariants, hardware assumptions, or synchronization requirements. Avoid comments that merely restate the code.

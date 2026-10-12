@@ -40,7 +40,7 @@ For detailed performance data, refer to [PR #7935](https://github.com/vllm-proje
 
 xlite has been adapted for vllm_ascend and can be quickly enabled through xlite_graph_config configuration. For usage instructions, refer to the [official guide documentation](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html).
 
-For supported models, see [Model List](doc/models.md).
+For supported models, see [Model List](doc/user_guide/models.md).
 
 
 ## Quick Start
@@ -72,7 +72,7 @@ vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xli
 
 ## Development Guide
 
-For build and compilation, container images, source installation and other development-related content, please refer to [Development Guide](doc/contributing.md)
+For build and compilation, container images, source installation and other development-related content, please refer to [Development Guide](doc/developer_guide/contributing.md)
 
 ## Directory Structure
 

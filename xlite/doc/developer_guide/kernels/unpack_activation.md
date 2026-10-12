@@ -20,17 +20,17 @@ Python 入口 `unpack_activation(rt, input, output)`(`csrc/_C.cpp:2960`)。kerne
 | m | 标量 | - | uint32_t | 输入行数,host 传 `input.shape[0]` |
 | k | 标量 | - | uint32_t | 输入列数(字节数),host 传 `input.shape[1]`,要求偶数(host 校验) |
 
-测试参考:[tests/kernels/unpack_activation.py](../../tests/kernels/unpack_activation.py),覆盖 `[20, 64]`、`[100, 6144]`、`[20000, 2048]`;参考实现强调高 nibble 必须用算术右移(floor)而非截断除法,否则负数会破坏 `x = high×16 + (low&0xF)` 恒等式。
+测试参考:[tests/kernels/unpack_activation.py](../../../tests/kernels/unpack_activation.py),覆盖 `[20, 64]`、`[100, 6144]`、`[20000, 2048]`;参考实现强调高 nibble 必须用算术右移(floor)而非截断除法,否则负数会破坏 `x = high×16 + (low&0xF)` 恒等式。
 
 ## 支持的数据类型
 
-- `int8_t`(INT8 → INT4-packed INT8;[unpack_activation_int8_t.cpp](../../csrc/kernels/unpack_activation_int8_t.cpp))
+- `int8_t`(INT8 → INT4-packed INT8;[unpack_activation_int8_t.cpp](../../../csrc/kernels/unpack_activation_int8_t.cpp))
 
 host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.cpp:2278`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/unpack_activation.h](../../csrc/kernels/unpack_activation.h),函数 `unpack_activation`(unpack_activation.h:30-153)。
+实现位于 [csrc/kernels/unpack_activation.h](../../../csrc/kernels/unpack_activation.h),函数 `unpack_activation`(unpack_activation.h:30-153)。
 
 ### 分块与多 Block 并行
 

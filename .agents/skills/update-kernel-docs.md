@@ -1,11 +1,11 @@
 ---
 name: update-kernel-docs
-description: Generate or refresh operator implementation-principle docs in xlite/doc/kernels/ based on current kernel source code
+description: Generate or refresh operator implementation-principle docs in xlite/doc/developer_guide/kernels/ based on current kernel source code
 ---
 
 # xlite 算子文档生成与刷新 Skill
 
-本 skill 用于为 `xlite/csrc/kernels/` 下的 NPU 算子生成或刷新实现原理文档。文档位于 `xlite/doc/kernels/`,每个算子一份 markdown,索引在 `xlite/doc/kernels/README.md`。
+本 skill 用于为 `xlite/csrc/kernels/` 下的 NPU 算子生成或刷新实现原理文档。文档位于 `xlite/doc/developer_guide/kernels/`,每个算子一份 markdown,索引在 `xlite/doc/developer_guide/kernels/README.md`。
 
 ## 使用方法
 
@@ -19,7 +19,7 @@ description: Generate or refresh operator implementation-principle docs in xlite
 
 ## 文档规范
 
-每份算子文档(中文,文件名 `doc/kernels/<算子名>.md`)必须包含以下章节:
+每份算子文档(中文,文件名 `doc/developer_guide/kernels/<算子名>.md`)必须包含以下章节:
 
 ```markdown
 # <算子名>
@@ -51,7 +51,7 @@ description: Generate or refresh operator implementation-principle docs in xlite
 - **避免堆砌**:不要把所有函数都列出,也不要列纯 boilerplate(如构造函数、Run 派发壳);每条引用应指向读者定位核心逻辑时最想跳转的那一行
 ```
 
-引用代码位置统一使用相对 `xlite/` 的路径 + 行号,如 `csrc/kernels/add.h:33`(markdown 中写成 `` `csrc/kernels/add.h:33` `` 或链接形式 `[add.h:33](../../csrc/kernels/add.h#L33)`)。
+引用代码位置统一使用相对 `xlite/` 的路径 + 行号,如 `csrc/kernels/add.h:33`(markdown 中写成 `` `csrc/kernels/add.h:33` `` 或链接形式 `[add.h:33](../../../csrc/kernels/add.h#L33)`)。
 
 ## 信息来源(按优先级)
 
@@ -70,8 +70,8 @@ description: Generate or refresh operator implementation-principle docs in xlite
 ### 生成新算子文档
 
 1. 按上述信息来源依次读取代码,确认:参数列表与语义、支持的 dtype、tiling/流水线结构、host 侧约束
-2. 写 `doc/kernels/<name>.md`
-3. 在 `doc/kernels/README.md` 对应功能分组表中登记:`| <name> | [<name>.md](<name>.md) | <一句话说明> |`
+2. 写 `doc/developer_guide/kernels/<name>.md`
+3. 在 `doc/developer_guide/kernels/README.md` 对应功能分组表中登记:`| <name> | [<name>.md](<name>.md) | <一句话说明> |`
 4. 用 Write 后回读抽查引用行号是否与代码一致
 
 ### 刷新已有文档(代码变更后)
@@ -87,7 +87,7 @@ description: Generate or refresh operator implementation-principle docs in xlite
 
 ```bash
 # 1. README 链接与实际文件一一对应
-cd xlite/doc/kernels
+cd xlite/doc/developer_guide/kernels
 grep -o '([a-z0-9_]*\.md)' README.md | tr -d '()' | sort -u | while read f; do [ -f "$f" ] || echo "BROKEN: $f"; done
 
 # 2. 每份文档包含必要章节
@@ -99,7 +99,7 @@ grep -rn "<已删除的算子/宏名>" *.md
 
 ## 容易出错的点
 
-- **行号偏移**:公共头(`softmax_attn_aiv.h`、`kernel_param.h`、`kernel_macro.h`)被多份文档引用,任何增删行都会让这些引用同时失效;改动这些头文件后必须全量检查 `grep -l "kernel_param.h:" doc/kernels/*.md` 等
+- **行号偏移**:公共头(`softmax_attn_aiv.h`、`kernel_param.h`、`kernel_macro.h`)被多份文档引用,任何增删行都会让这些引用同时失效;改动这些头文件后必须全量检查 `grep -l "kernel_param.h:" doc/developer_guide/kernels/*.md` 等
 - **dtype 实例化文件 vs 算子**:文件名匹配 `<name>_*.cpp` 时注意 `cast_float_bfloat16_t.cpp` 这类双 dtype 文件,不要误拆成两个算子
 - **shape 推断**:优先以 `_C.pyi` docstring 和测试代码为准,kernel 签名中的裸指针参数(如 `GM_ADDR q`)需结合 host 侧封装还原 shape
 - **文档语言**:文档为中文,代码注释是中英混合,统一用中文表述;术语(算子名、指令名、宏名)保留英文原文

@@ -10,7 +10,7 @@ x_scaled   = x_row * (127 / abs_max)
 out        = int8(x_scaled)              (vconv_f162s8 舍入)
 ```
 
-与 `torch_npu.npu_dynamic_quant` 语义一致(测试直接与其对齐)。它是 MSD W4A8 MoE 管线第一步 "QuantDyn"([csrc/model.cpp:1465-1467](../../csrc/model.cpp)),输出供后续 unpack_activation 与 group_matmul 使用;也可独立用于 W8A8 动态量化(`csrc/model.cpp:347`)。
+与 `torch_npu.npu_dynamic_quant` 语义一致(测试直接与其对齐)。它是 MSD W4A8 MoE 管线第一步 "QuantDyn"([csrc/model.cpp:1465-1467](../../../csrc/model.cpp)),输出供后续 unpack_activation 与 group_matmul 使用;也可独立用于 W8A8 动态量化(`csrc/model.cpp:347`)。
 
 ## 输入输出参数
 
@@ -25,17 +25,17 @@ Python 入口 `quant_dynamic(rt, x, scale, out)`(`csrc/_C.cpp:2889`)。kernel �
 | m | 标量 | - | uint32_t | 行数上限,host 传 `x.shape[0]` |
 | k | 标量 | - | uint32_t | 列数,host 传 `x.shape[1]` |
 
-测试参考:[tests/kernels/quant_dyn.py](../../tests/kernels/quant_dyn.py),覆盖 `[8192, 2048]`、`[40, 96]`、`[200000, 96]`,z 与 scale 同时与 `torch_npu.npu_dynamic_quant` 对比。
+测试参考:[tests/kernels/quant_dyn.py](../../../tests/kernels/quant_dyn.py),覆盖 `[8192, 2048]`、`[40, 96]`、`[200000, 96]`,z 与 scale 同时与 `torch_npu.npu_dynamic_quant` 对比。
 
 ## 支持的数据类型
 
-- 输入 `bfloat16_t` → 输出 `int8_t` + `float` scale([quant_dyn_bfloat16_t.cpp](../../csrc/kernels/quant_dyn_bfloat16_t.cpp))
+- 输入 `bfloat16_t` → 输出 `int8_t` + `float` scale([quant_dyn_bfloat16_t.cpp](../../../csrc/kernels/quant_dyn_bfloat16_t.cpp))
 
 host 仅接受 `x.dtype == BF16`(`csrc/op.cpp:1457`),kernel 入口符号为 `quant_dynamic_bfloat16_t`(host 经 `aclrtlaunch_quant_dynamic_bfloat16_t` 启动,`csrc/op.cpp:1460`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/quant_dyn.h](../../csrc/kernels/quant_dyn.h),函数 `quant_dyn_to_i8<dtype>`(quant_dyn.h:22-231,模板;BF16 实例化见 [quant_dyn_bfloat16_t.cpp](../../csrc/kernels/quant_dyn_bfloat16_t.cpp),由 `QUANT_DYN_FUNC_DEFINE` 宏展开为入口符号 `quant_dynamic_bfloat16_t`)。
+实现位于 [csrc/kernels/quant_dyn.h](../../../csrc/kernels/quant_dyn.h),函数 `quant_dyn_to_i8<dtype>`(quant_dyn.h:22-231,模板;BF16 实例化见 [quant_dyn_bfloat16_t.cpp](../../../csrc/kernels/quant_dyn_bfloat16_t.cpp),由 `QUANT_DYN_FUNC_DEFINE` 宏展开为入口符号 `quant_dynamic_bfloat16_t`)。
 
 ### 分块策略
 
@@ -85,7 +85,7 @@ UB 容量与 ReduceMax 维度上限由两条 `static_assert` 守护(quant_dyn.h:
 2. `V→S` 读回 `*rowAbsUb` 算 scale/scaleRec,写 scale 到 GM(quant_dyn.h:173-188,同 fast path);
 3. phase2:逐 tile 重新读 x → `vmuls` → `vconv_f322f16` → `vconv_f162s8` 转 INT8 → 写回 GM(quant_dyn.h:190-222)。
 
-通用归约实现见 [kernel_macro.h:658](../../csrc/kernels/kernel_macro.h)(二分折叠 + `vcmax`)。两路径均用非 `a` 后缀的 `vconv_f322f16`/`vconv_f162s8`:量化值已按 scale 压缩到 [-127, 127] 范围内,无需显式饱和(quant_dyn.h:122-124、210-213)。
+通用归约实现见 [kernel_macro.h:658](../../../csrc/kernels/kernel_macro.h)(二分折叠 + `vcmax`)。两路径均用非 `a` 后缀的 `vconv_f322f16`/`vconv_f162s8`:量化值已按 scale 压缩到 [-127, 127] 范围内,无需显式饱和(quant_dyn.h:122-124、210-213)。
 
 ### 边界处理
 

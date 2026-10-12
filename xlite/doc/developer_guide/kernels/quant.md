@@ -8,7 +8,7 @@
 out = int8(x * scale_reciprocal + offset)
 ```
 
-其中 `scale_reciprocal` 是量化 scale 的倒数(`1/scale`,由离线校准给出),`offset` 为量化偏置;host 语义上等价 `clamp(round(x/scale + offset), -128, 127)`(饱和由 `vconv_f162s8a` 的饱和舍入指令完成)。scale/offset 与激活同一 k 维按列对齐,属于 W8A8 推理管线的激活量化步骤([csrc/model.cpp:354](../../csrc/model.cpp))。
+其中 `scale_reciprocal` 是量化 scale 的倒数(`1/scale`,由离线校准给出),`offset` 为量化偏置;host 语义上等价 `clamp(round(x/scale + offset), -128, 127)`(饱和由 `vconv_f162s8a` 的饱和舍入指令完成)。scale/offset 与激活同一 k 维按列对齐,属于 W8A8 推理管线的激活量化步骤([csrc/model.cpp:354](../../../csrc/model.cpp))。
 
 ## 输入输出参数
 
@@ -23,17 +23,17 @@ Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2887`)�
 | m | 标量 | - | uint32_t | 行数,host 传 `x.shape[0]` |
 | k | 标量 | - | uint32_t | 列数,host 传 `x.shape[1]` |
 
-测试参考:[tests/kernels/quant.py](../../tests/kernels/quant.py),覆盖 `[8192, 2048]`、`[20000, 96]`、`[20000, 12288]`,与 `clamp(round(x*scale+offset))` 的 CPU 参考对齐(atol=1, rtol=1/128)。
+测试参考:[tests/kernels/quant.py](../../../tests/kernels/quant.py),覆盖 `[8192, 2048]`、`[20000, 96]`、`[20000, 12288]`,与 `clamp(round(x*scale+offset))` 的 CPU 参考对齐(atol=1, rtol=1/128)。
 
 ## 支持的数据类型
 
-- 输入 `bfloat16_t` → 输出 `int8_t`([quant_bfloat16_t.cpp](../../csrc/kernels/quant_bfloat16_t.cpp))
+- 输入 `bfloat16_t` → 输出 `int8_t`([quant_bfloat16_t.cpp](../../../csrc/kernels/quant_bfloat16_t.cpp))
 
 host 侧仅接受 `x.dtype == BF16`(`csrc/op.cpp:1438`),kernel 入口符号为 `quant_static_bfloat16_t`(host 经 `aclrtlaunch_quant_static_bfloat16_t` 启动,`csrc/op.cpp:1440`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/quant.h](../../csrc/kernels/quant.h),函数 `quant_to_i8<dtype>`(quant.h:13-151,模板;BF16 实例化见 [quant_bfloat16_t.cpp](../../csrc/kernels/quant_bfloat16_t.cpp),由 `QUANT_FUNC_DEFINE` 宏展开为入口符号 `quant_static_bfloat16_t`)。
+实现位于 [csrc/kernels/quant.h](../../../csrc/kernels/quant.h),函数 `quant_to_i8<dtype>`(quant.h:13-151,模板;BF16 实例化见 [quant_bfloat16_t.cpp](../../../csrc/kernels/quant_bfloat16_t.cpp),由 `QUANT_FUNC_DEFINE` 宏展开为入口符号 `quant_static_bfloat16_t`)。
 
 ### 分块策略
 

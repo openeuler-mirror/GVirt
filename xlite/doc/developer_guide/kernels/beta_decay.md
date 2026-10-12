@@ -9,7 +9,7 @@ beta = sigmoid(b)                          # 门控系数
 g    = -exp(A_log) * softplus(a + dt_bias) # 衰减系数
 ```
 
-即 `Beta()` 与 `Decay()` 两个阶段(`csrc/kernels/beta_decay.h:79-252`)。模型前向中用于 `beta = sigmoid(Bx)`, `g = -exp(A_log) * softplus(Ax + dt_bias)` 的 fused 计算([csrc/model.cpp:786-787](../../csrc/model.cpp))。
+即 `Beta()` 与 `Decay()` 两个阶段(`csrc/kernels/beta_decay.h:79-252`)。模型前向中用于 `beta = sigmoid(Bx)`, `g = -exp(A_log) * softplus(Ax + dt_bias)` 的 fused 计算([csrc/model.cpp:786-787](../../../csrc/model.cpp))。
 
 ## 输入输出参数
 
@@ -27,19 +27,19 @@ Python 入口 `beta_decay(rt, b, a, A_log, dt_bias, beta, g, bsz, seqlen, num_v_
 | seqlen | 标量 | - | uint32_t | 序列长度;总行数 = bsz × seqlen |
 | num_v_heads | 标量 | - | uint32_t | v head 数(每行元素数) |
 
-测试参考:[tests/kernels/beta_decay.py](../../tests/kernels/beta_decay.py):batch 1~8 × seq_len 2^0~2^12 × fp32/fp16/bf16 全组合,与 `torch.sigmoid` / `-A_log.exp() * F.softplus(a + dt_bias)` 对比。
+测试参考:[tests/kernels/beta_decay.py](../../../tests/kernels/beta_decay.py):batch 1~8 × seq_len 2^0~2^12 × fp32/fp16/bf16 全组合,与 `torch.sigmoid` / `-A_log.exp() * F.softplus(a + dt_bias)` 对比。
 
 ## 支持的数据类型
 
-- `float`([beta_decay_float.cpp](../../csrc/kernels/beta_decay_float.cpp))
-- `float16_t`([beta_decay_float16_t.cpp](../../csrc/kernels/beta_decay_float16_t.cpp))
-- `bfloat16_t`([beta_decay_bfloat16_t.cpp](../../csrc/kernels/beta_decay_bfloat16_t.cpp))
+- `float`([beta_decay_float.cpp](../../../csrc/kernels/beta_decay_float.cpp))
+- `float16_t`([beta_decay_float16_t.cpp](../../../csrc/kernels/beta_decay_float16_t.cpp))
+- `bfloat16_t`([beta_decay_bfloat16_t.cpp](../../../csrc/kernels/beta_decay_bfloat16_t.cpp))
 
 host 要求 b、a 同 dtype 且为 FP32/FP16/BF16(`csrc/op.cpp:2118-2123`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/beta_decay.h](../../csrc/kernels/beta_decay.h),采用类封装(`BetaDecay<Dtype>`,Init / Beta / Decay)。
+实现位于 [csrc/kernels/beta_decay.h](../../../csrc/kernels/beta_decay.h),采用类封装(`BetaDecay<Dtype>`,Init / Beta / Decay)。
 
 ### 数据流与 UB 布局(Init,beta_decay.h:31-77)
 

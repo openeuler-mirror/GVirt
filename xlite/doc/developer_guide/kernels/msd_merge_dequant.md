@@ -30,17 +30,17 @@ Python 入口 `msd_merge_dequant(rt, y_merged, scale_biases, counts, per_token_s
 | counts | 输入 | `[numExperts]` | uint32 | 每专家 token 数(未翻倍,与 out 行轴一致);按全局专家 id 索引,仅 `[startIdx, endIdx)` 有 token |
 | startIdx / endIdx | 标量 | - | uint32_t | 本次 pass 处理的专家范围(EP 分片);numExperts = endIdx - startIdx ≤ 8 |
 
-测试参考:[tests/kernels/msd_dequant.py](../../tests/kernels/msd_dequant.py),覆盖 `[8, 96]`、`[40, 512]`、`[200, 2048]`、`[1, 2048]`、`[8192, 6144]`,单专家 counts=[m],与纯 torch 参考对齐。
+测试参考:[tests/kernels/msd_dequant.py](../../../tests/kernels/msd_dequant.py),覆盖 `[8, 96]`、`[40, 512]`、`[200, 2048]`、`[1, 2048]`、`[8192, 6144]`,单专家 counts=[m],与纯 torch 参考对齐。
 
 ## 支持的数据类型
 
-- `int8_t` 实例(算子语义为 fp16 输入 → bf16 输出;[msd_merge_dequant_int8_t.cpp](../../csrc/kernels/msd_merge_dequant_int8_t.cpp))
+- `int8_t` 实例(算子语义为 fp16 输入 → bf16 输出;[msd_merge_dequant_int8_t.cpp](../../../csrc/kernels/msd_merge_dequant_int8_t.cpp))
 
 host 校验 `yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype == BF16`,且 yMerged 为 2D、行数为偶数(`csrc/op.cpp:1474-1475`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/msd_merge_dequant.h](../../csrc/kernels/msd_merge_dequant.h),函数 `msd_merge_dequant`(msd_merge_dequant.h:43-186)。
+实现位于 [csrc/kernels/msd_merge_dequant.h](../../../csrc/kernels/msd_merge_dequant.h),函数 `msd_merge_dequant`(msd_merge_dequant.h:43-186)。
 
 ### 分块与多 Block 并行
 
@@ -80,4 +80,4 @@ host 校验 `yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype =
 
 - `pnum_tokens` 非空时 clamp m(msd_merge_dequant.h:52-55),host 当前传 null;
 - n 非 128 整数倍时 `n_pad` 补齐计算,搬运按真实 `n * sizeof(half/float/bfloat16)` 字节;
-- host 侧行数为奇数直接抛错(op.cpp:1475);Python 绑定固定 `start=0, end=numExperts`(`csrc/_C.cpp:2005`),EP 分片范围由模型侧 `XliteOpMSDMergeDequant` 直接调用时传入([csrc/model.cpp:1478](../../csrc/model.cpp))。
+- host 侧行数为奇数直接抛错(op.cpp:1475);Python 绑定固定 `start=0, end=numExperts`(`csrc/_C.cpp:2005`),EP 分片范围由模型侧 `XliteOpMSDMergeDequant` 直接调用时传入([csrc/model.cpp:1478](../../../csrc/model.cpp))。

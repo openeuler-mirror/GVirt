@@ -11,7 +11,7 @@
 
 ## 输入输出参数
 
-Python/模型侧无单独绑定,由 `XliteOpQkRmsNorm`(`csrc/op.cpp:1194-1221`)在模型前向中调用([csrc/model.cpp:594-616](../../csrc/model.cpp))。kernel 签名见 `csrc/kernels/qk_rms_norm.h:54-66`:
+Python/模型侧无单独绑定,由 `XliteOpQkRmsNorm`(`csrc/op.cpp:1194-1221`)在模型前向中调用([csrc/model.cpp:594-616](../../../csrc/model.cpp))。kernel 签名见 `csrc/kernels/qk_rms_norm.h:54-66`:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -31,18 +31,18 @@ Python/模型侧无单独绑定,由 `XliteOpQkRmsNorm`(`csrc/op.cpp:1194-1221`)�
 | qVariance / kVariance | 输入/输出 | `[token_num, 1]` | float32 | apply 阶段作输入(预归约方差),variance-only 阶段作输出 |
 | tpSize | 标量 | - | uint32_t | 张量并行规模 |
 
-测试:无独立测试文件;行为由 [tests/kernels/rmsnorm_full.py](../../tests/kernels/rmsnorm_full.py) 覆盖的同一 norm 语义及 [tests/kernels/attention.py](../../tests/kernels/attention.py) 端到端覆盖。
+测试:无独立测试文件;行为由 [tests/kernels/rmsnorm_full.py](../../../tests/kernels/rmsnorm_full.py) 覆盖的同一 norm 语义及 [tests/kernels/attention.py](../../../tests/kernels/attention.py) 端到端覆盖。
 
 ## 支持的数据类型
 
-- `float16_t`([qk_rms_norm_float16_t.cpp](../../csrc/kernels/qk_rms_norm_float16_t.cpp))
-- `bfloat16_t`([qk_rms_norm_bfloat16_t.cpp](../../csrc/kernels/qk_rms_norm_bfloat16_t.cpp))
+- `float16_t`([qk_rms_norm_float16_t.cpp](../../../csrc/kernels/qk_rms_norm_float16_t.cpp))
+- `bfloat16_t`([qk_rms_norm_bfloat16_t.cpp](../../../csrc/kernels/qk_rms_norm_bfloat16_t.cpp))
 
 host 要求 `in.dtype` 为 FP16/BF16 且 `out.dtype` 为同 dtype 或 FP32(`csrc/op.cpp:1204-1207`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/qk_rms_norm.h](../../csrc/kernels/qk_rms_norm.h),函数 `qk_rms_norm<Dtype>`(qk_rms_norm.h:30-52)。**本身不做新计算,是 `norm<Dtype>` 模板(norm.h:222)的双段编排器**:
+实现位于 [csrc/kernels/qk_rms_norm.h](../../../csrc/kernels/qk_rms_norm.h),函数 `qk_rms_norm<Dtype>`(qk_rms_norm.h:30-52)。**本身不做新计算,是 `norm<Dtype>` 模板(norm.h:222)的双段编排器**:
 
 ### coreOffset 接力
 
@@ -65,4 +65,4 @@ host 要求 `in.dtype` 为 FP16/BF16 且 `out.dtype` 为同 dtype 或 FP32(`csrc
 
 ### host 侧要点
 
-`XliteOpQkRmsNorm`(op.cpp:1194-1221):`useNorm` 时 qOut/kOut 都指向 `out.ptr`、variance 张量作为参数传入;`!useNorm` 时 qOut/kOut 改指向各自 variance 张量、variance 参数传 null,从而用同一个 kernel 签名表达两个阶段。qkNormFull 的完整三步编排(两次 variance-only + 一次 AllReduce + 一次 apply)见 [csrc/model.cpp:598-617](../../csrc/model.cpp)。
+`XliteOpQkRmsNorm`(op.cpp:1194-1221):`useNorm` 时 qOut/kOut 都指向 `out.ptr`、variance 张量作为参数传入;`!useNorm` 时 qOut/kOut 改指向各自 variance 张量、variance 参数传 null,从而用同一个 kernel 签名表达两个阶段。qkNormFull 的完整三步编排(两次 variance-only + 一次 AllReduce + 一次 apply)见 [csrc/model.cpp:598-617](../../../csrc/model.cpp)。

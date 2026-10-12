@@ -41,7 +41,7 @@ xlite通过以下技术手段解决上述问题：
 
 xlite已适配vllm_ascend，可通过xlite_graph_config配置快速使能xlite加速效果，使用方法参考[官方指导文档](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html)。
 
-xlite支持模型见[模型列表](doc/models.md)。
+xlite支持模型见[模型列表](doc/user_guide/models.md)。
 
 
 ## 快速开始
@@ -73,11 +73,11 @@ vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xli
 
 ## 开发指南
 
-编译构建、容器镜像、源码安装等开发相关内容，请参考 [开发指南](doc/contributing.md)
+编译构建、容器镜像、源码安装等开发相关内容，请参考 [开发指南](doc/developer_guide/contributing.md)
 
 ## 环境变量
 
-xlite使用的环境变量及其配置方法，请参考 [环境变量](doc/ENVIRONMENT_VARIABLES.md)
+xlite使用的环境变量及其配置方法，请参考 [环境变量](doc/user_guide/ENVIRONMENT_VARIABLES.md)
 
 ## 目录结构
 
