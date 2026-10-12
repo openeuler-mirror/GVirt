@@ -56,6 +56,7 @@ public:
         this->hasDeqScale = hasDeqScale;
         this->transpose = transpose;
         this->nz = nz;
+        this->swizzle = swizzle;
         this->swizzlCount = static_cast<int32_t>(swizzle >> 8);
         this->swizzleDirection = static_cast<int32_t>(swizzle & 0xFF);
 
@@ -182,8 +183,10 @@ public:
     {
         int64_t midx = idx / nLoop;
         int64_t nidx = idx % nLoop;
-        GetMNBlockIdx(static_cast<int32_t>(idx), mLoop, nLoop, swizzleDirection, swizzlCount, midx,
-                      nidx);
+        if (this->swizzle != 0) {
+            GetMNBlockIdx(static_cast<int32_t>(idx), mLoop, nLoop, swizzleDirection, swizzlCount,
+                          midx, nidx);
+        }
         RunTileBody(midx, nidx);
     }
 
@@ -465,6 +468,7 @@ private:
     int dstDValue;
     int kDtileSize;
     int kQtileSize;
+    uint64_t swizzle;
     int32_t swizzlCount;
     int32_t swizzleDirection;
     int mLoop;
