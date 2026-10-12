@@ -21,7 +21,10 @@
 | Disaggregated Prefill | ✅ | ✅ |
 | Dsv4 Dsa Overlap | N/A | ✅ |
 | Speculative Decoding(MTP) | ✅ | ✅ |
-| Speculative Decoding(Eager3) | ❌ | ❌ |
+| Speculative Decoding(Eagle3) | ✅ | ✅ |
+| Speculative Decoding(ExtractHiddenStates) | ✅ | ✅ |
+| Speculative Decoding(DSpark) | ✅ | ✅ |
+| Speculative Decoding(DFlash) | ✅ | ✅ |
 | EPLB | ✅ | ✅ |
 | EP | ✅ | ✅ |
 | Flashcomm1 | N/A | ✅ |

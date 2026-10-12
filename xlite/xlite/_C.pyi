@@ -335,6 +335,17 @@ class ModelConfig:
     """Number of hash-routed MoE layers (DeepSeek-V4)."""
     compress_ratios: List[int] = ...
     """Per-layer KV compression ratios (DeepSeek-V4)."""
+    aux_layer_ids: List[int] = ...
+    """EAGLE3 aux capture layer ids (0-indexed global). Set before :meth:`Model.init`
+    (the native model copies ``ModelConfig`` at init, so post-init updates don't propagate).
+    Empty disables aux capture. MaybeCaptureAuxHidden reads these live at forward time.
+
+    Semantics (aligned with vLLM ``aux_hidden_state_layers``): a layer id ``k`` captures
+    the raw (un-normalized) residual stream entering layer ``k`` — i.e. the input to layer
+    ``k`` = the output of layer ``k-1`` — *before* layer ``k``'s attention/FFN executes.
+    ``k == n_layers`` captures the final residual (before the last RMSNorm), matching vLLM's
+    ``end_layer``. The Eagle3 draft applies its own RMSNorm in ``combine_hidden_states``,
+    so aux states must be raw; capturing normalized values would double-norm."""
 
 class AttnMeta:
     """Attention metadata for the native runtime forward path.
@@ -1018,12 +1029,22 @@ class Model:
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: torch.Tensor,
         output: torch.Tensor,
+        aux_outputs: Optional[Sequence[torch.Tensor]] = None,
         curr_stream: int = 0,
     ) -> None:
         """Run forward pass with host/vLLM-compatible attention metadata (V1).
 
         ``freqs_cis`` is a single tensor shared across all layers. For per-layer
         freqs tensors or device-side attention metadata, use :meth:`forward_v2`.
+
+        When ``aux_outputs`` is supplied (non-None), the forward additionally captures
+        each layer listed in ``aux_layer_ids`` (set on :attr:`ModelConfig.aux_layer_ids`
+        before :meth:`init`) by an
+        on-stream device-to-device memcpy of that layer's input raw (un-normalized)
+        residual stream (viewed to ``rt.curr_tokens`` rows) — captured before the layer's
+        attention/FFN executes — into the matching entry of ``aux_outputs``. The Eagle3
+        draft model's ``combine_hidden_states`` then fuses these aux states to drive
+        proposal. Omit ``aux_outputs`` for a regular forward (no capture, no overhead).
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1045,10 +1066,15 @@ class Model:
                 so it must cover the full ``max_seq_len`` range.
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
+            aux_outputs (Optional[Sequence[torch.Tensor]], default None): When non-None,
+                aux hidden-state capture buffers, one per entry in ``aux_layer_ids``, each
+                shape ``[max_tokens, hidden_size]`` model dtype; only the first
+                ``num_tokens`` rows of each are written. Requires ``aux_layer_ids`` to be
+                set on the config (before :meth:`init`).
             curr_stream (int): Optional ACL stream pointer cast to integer.
 
         Returns:
-            None: Output is written in place.
+            None: Output (and ``aux_outputs`` when supplied) are written in place.
 
         Raises:
             RuntimeError: On invalid shapes or cache mismatch.
@@ -1128,11 +1154,19 @@ class Model:
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: torch.Tensor,
         output: torch.Tensor,
+        aux_outputs: Optional[Sequence[torch.Tensor]] = None,
         curr_stream: int = 0,
         deepstack_input: Sequence[torch.Tensor] = ...,
         input_ids: Optional[torch.Tensor] = None,
     ) -> None:
         """Run forward pass with deepstack input embeddings (host metadata).
+
+        When ``aux_outputs`` is supplied (non-None), behaves like the EAGLE3 aux path of
+        :meth:`forward`: each layer listed in ``aux_layer_ids`` (set on
+        :attr:`ModelConfig.aux_layer_ids` before :meth:`init`) has its input raw
+        (un-normalized) residual stream — captured before the layer executes — captured
+        into the matching entry of ``aux_outputs``. Omit ``aux_outputs`` for a
+        regular forward.
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1145,6 +1179,9 @@ class Model:
                 concatenated, indexed by token position value).
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
+            aux_outputs (Optional[Sequence[torch.Tensor]], default None): When non-None,
+                aux hidden-state capture buffers, one per entry in ``aux_layer_ids`` (see
+                :meth:`forward`).
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
             deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings,
                 each shape ``[num_tokens, hidden_size]``, model dtype; length must equal
@@ -1154,7 +1191,7 @@ class Model:
                 when scoring_func is sqrtsoftplus, otherwise may be left unset (defaults to None).
 
         Returns:
-            None: Output is written in place.
+            None: Output (and ``aux_outputs`` when supplied) are written in place.
 
         Raises:
             RuntimeError: On KV-cache/deepstack shape mismatch or other native execution failures.
@@ -1168,6 +1205,7 @@ class Model:
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: Sequence[torch.Tensor],
         output: torch.Tensor,
+        aux_outputs: Optional[Sequence[torch.Tensor]] = None,
         curr_stream: int = 0,
     ) -> None:
         """Run forward pass with device-tensor attention metadata (V2).
@@ -1175,6 +1213,13 @@ class Model:
         Unlike :meth:`forward` (V1), this path takes ``query_start_loc``,
         ``slot_mapping`` and ``block_tables`` as pre-built device tensors on
         ``attn_meta``; the native side skips host computation and H2D copies.
+
+        When ``aux_outputs`` is supplied (non-None), behaves like the EAGLE3 aux path of
+        :meth:`forward` but on the V2 device-metadata path: each layer listed in
+        ``aux_layer_ids`` (set on :attr:`ModelConfig.aux_layer_ids` before :meth:`init`) has
+        its input raw (un-normalized) residual stream — captured before the layer executes —
+        captured into the matching entry of ``aux_outputs`` via an on-stream device-to-device
+        memcpy. Omit ``aux_outputs`` for a regular forward.
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1187,10 +1232,15 @@ class Model:
                 non-CXA reads only freqs_cis[0]).
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
+            aux_outputs (Optional[Sequence[torch.Tensor]], default None): When non-None,
+                aux hidden-state capture buffers, one per entry in ``aux_layer_ids``, each
+                shape ``[max_tokens, hidden_size]`` model dtype; only the first
+                ``num_tokens`` rows of each are written. Requires ``aux_layer_ids`` to be
+                set on the config (before :meth:`init`).
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:
-            None: Output is written in place.
+            None: Output (and ``aux_outputs`` when supplied) are written in place.
 
         Raises:
             RuntimeError: On shape mismatch or other native execution failures.
@@ -1237,11 +1287,16 @@ class Model:
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: torch.Tensor,
         output: torch.Tensor,
+        aux_outputs: Optional[Sequence[torch.Tensor]] = None,
         curr_stream: int = 0,
         deepstack_input: Sequence[torch.Tensor] = ...,
         input_ids: Optional[torch.Tensor] = None,
     ) -> None:
         """Run forward pass with deepstack input embeddings (device metadata, V2).
+
+        When ``aux_outputs`` is supplied (non-None), behaves like the EAGLE3 aux path of
+        :meth:`forward` (capture of post-FFN hidden states for the layers in
+        ``aux_layer_ids``). Omit ``aux_outputs`` for a regular forward.
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1254,6 +1309,9 @@ class Model:
                 concatenated, indexed by token position value; single tensor, not a list).
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
+            aux_outputs (Optional[Sequence[torch.Tensor]], default None): When non-None,
+                aux hidden-state capture buffers, one per entry in ``aux_layer_ids`` (see
+                :meth:`forward`).
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
             deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings,
                 each shape ``[num_tokens, hidden_size]``, model dtype; length must equal
@@ -1263,7 +1321,7 @@ class Model:
                 when scoring_func is sqrtsoftplus, otherwise may be left unset (defaults to None).
 
         Returns:
-            None: Output is written in place.
+            None: Output (and ``aux_outputs`` when supplied) are written in place.
 
         Raises:
             RuntimeError: On shape mismatch or other native execution failures.

@@ -58,11 +58,29 @@ public:
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
                                    std::vector<at::Tensor> &deepstackInput,
                                    const std::optional<at::Tensor> &inputIds);
+    void ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                                   std::vector<std::vector<at::Tensor>> &kvCache,
+                                   at::Tensor &freqsCis, at::Tensor &output,
+                                   std::vector<at::Tensor> &auxOutputs, uint64_t currStream,
+                                   std::vector<at::Tensor> &deepstackInput,
+                                   const std::optional<at::Tensor> &inputIds);
     void ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnMeta,
                                    std::vector<std::vector<at::Tensor>> &kvCache,
                                    at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
                                    std::vector<at::Tensor> &deepstackInput,
                                    const std::optional<at::Tensor> &inputIds);
+    void ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnMeta,
+                                   std::vector<std::vector<at::Tensor>> &kvCache,
+                                   at::Tensor &freqsCis, at::Tensor &output,
+                                   std::vector<at::Tensor> &auxOutputs, uint64_t currStream,
+                                   std::vector<at::Tensor> &deepstackInput,
+                                   const std::optional<at::Tensor> &inputIds);
+    void ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                   std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                   at::Tensor &output, std::vector<at::Tensor> &auxOutputs, uint64_t currStream);
+    void ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnMeta,
+                   std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
+                   at::Tensor &output, std::vector<at::Tensor> &auxOutputs, uint64_t currStream);
     size_t GetTensorPoolSize(int dbg);
 
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
@@ -946,6 +964,29 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
                             deepstackInput, ids);
 }
 
+void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnMeta,
+                                        std::vector<std::vector<at::Tensor>> &kvCache,
+                                        at::Tensor &freqsCis, at::Tensor &output,
+                                        std::vector<at::Tensor> &auxOutputs, uint64_t currStream,
+                                        std::vector<at::Tensor> &deepstackInput,
+                                        const std::optional<at::Tensor> &inputIds)
+{
+    std::vector<XTensor> auxXs(auxOutputs.size());
+    for (size_t i = 0; i < auxOutputs.size(); i++) {
+        InitXTensor(auxXs[i], auxOutputs[i]);
+    }
+    struct AuxGuard {
+        XModel *m;
+        ~AuxGuard()
+        {
+            m->ClearAuxOutputs();
+        }
+    } guard{_model};
+    _model->SetAuxOutputs(auxXs);
+    ForwardWithInputsEmbedsV2(rt, input, attnMeta, kvCache, freqsCis, output, currStream,
+                              deepstackInput, inputIds);
+}
+
 void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indices,
                                at::Tensor &output, uint64_t currStream)
 {
@@ -1146,6 +1187,69 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
     at::Tensor ids = inputIds.value_or(at::Tensor());
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
                             deepstackInput, ids);
+}
+
+void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                                        std::vector<std::vector<at::Tensor>> &kvCache,
+                                        at::Tensor &freqsCis, at::Tensor &output,
+                                        std::vector<at::Tensor> &auxOutputs, uint64_t currStream,
+                                        std::vector<at::Tensor> &deepstackInput,
+                                        const std::optional<at::Tensor> &inputIds)
+{
+    std::vector<XTensor> auxXs(auxOutputs.size());
+    for (size_t i = 0; i < auxOutputs.size(); i++) {
+        InitXTensor(auxXs[i], auxOutputs[i]);
+    }
+    struct AuxGuard {
+        XModel *m;
+        ~AuxGuard()
+        {
+            m->ClearAuxOutputs();
+        }
+    } guard{_model};
+    _model->SetAuxOutputs(auxXs);
+    ForwardWithInputsEmbedsV1(rt, input, attnMeta, kvCache, freqsCis, output, currStream,
+                              deepstackInput, inputIds);
+}
+
+void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
+                        std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
+                        at::Tensor &output, std::vector<at::Tensor> &auxOutputs,
+                        uint64_t currStream)
+{
+    std::vector<XTensor> auxXs(auxOutputs.size());
+    for (size_t i = 0; i < auxOutputs.size(); i++) {
+        InitXTensor(auxXs[i], auxOutputs[i]);
+    }
+    struct AuxGuard {
+        XModel *m;
+        ~AuxGuard()
+        {
+            m->ClearAuxOutputs();
+        }
+    } guard{_model};
+    _model->SetAuxOutputs(auxXs);
+    ForwardV1(rt, input, attnMeta, kvCache, freqsCis, output, currStream);
+}
+
+void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnMeta,
+                        std::vector<std::vector<at::Tensor>> &kvCache,
+                        std::vector<at::Tensor> &freqsCis, at::Tensor &output,
+                        std::vector<at::Tensor> &auxOutputs, uint64_t currStream)
+{
+    std::vector<XTensor> auxXs(auxOutputs.size());
+    for (size_t i = 0; i < auxOutputs.size(); i++) {
+        InitXTensor(auxXs[i], auxOutputs[i]);
+    }
+    struct AuxGuard {
+        XModel *m;
+        ~AuxGuard()
+        {
+            m->ClearAuxOutputs();
+        }
+    } guard{_model};
+    _model->SetAuxOutputs(auxXs);
+    ForwardV2(rt, input, attnMeta, kvCache, freqsCis, output, currStream);
 }
 
 size_t _CModel::GetTensorPoolSize(int dbg)
@@ -2716,7 +2820,8 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("hc_eps", &XModelConfig::hcEps)
         .def_readwrite("swiglu_limit", &XModelConfig::swigluLimit)
         .def_readwrite("n_hash_layers", &XModelConfig::nHashLayers)
-        .def_readwrite("compress_ratios", &XModelConfig::compressRatios);
+        .def_readwrite("compress_ratios", &XModelConfig::compressRatios)
+        .def_readwrite("aux_layer_ids", &XModelConfig::auxLayerIds);
 
     py::class_<CModelAttnMeta>(m, "AttnMeta")
         .def(py::init<>())
@@ -2873,9 +2978,20 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("hc_head_base", &_CModel::hcHeadBase)
         .def_readwrite("hc_head_scale", &_CModel::hcHeadScale)
         .def("init", &_CModel::Init, "model init", py::arg("config"), py::arg("rank") = 0)
-        .def("forward", &_CModel::ForwardV1, "forward", py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+        .def("forward",
+             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
+                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
+                               std::vector<at::Tensor> &, uint64_t>(&_CModel::ForwardV1),
+             "forward", py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+             py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("forward",
+             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
+                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
+                               uint64_t>(&_CModel::ForwardV1),
+             "forward", py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
+             py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
+             py::call_guard<py::gil_scoped_release>())
         .def("forward_get_logits", &_CModel::ForwardGetLogits, "forward_get_logits", py::arg("rt"),
              py::arg("input"), py::arg("indices"), py::arg("output"), py::arg("curr_stream") = 0,
              py::call_guard<py::gil_scoped_release>())
@@ -2883,19 +2999,61 @@ PYBIND11_MODULE(_C, m)
              py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
              py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds", &_CModel::ForwardWithInputsEmbedsV1,
+        .def("forward_with_inputs_embeds",
+             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
+                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
+                               std::vector<at::Tensor> &, uint64_t, std::vector<at::Tensor> &,
+                               const std::optional<at::Tensor> &>(
+                 &_CModel::ForwardWithInputsEmbedsV1),
+             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
+             py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
+             py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
+        .def("forward_with_inputs_embeds",
+             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
+                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
+                               uint64_t, std::vector<at::Tensor> &,
+                               const std::optional<at::Tensor> &>(
+                 &_CModel::ForwardWithInputsEmbedsV1),
              "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
              py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
-        .def("forward_v2", &_CModel::ForwardV2, "forward_v2", py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+        .def("forward_v2",
+             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
+                               std::vector<std::vector<at::Tensor>> &, std::vector<at::Tensor> &,
+                               at::Tensor &, std::vector<at::Tensor> &, uint64_t>(
+                 &_CModel::ForwardV2),
+             "forward_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
+             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("forward_v2",
+             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
+                               std::vector<std::vector<at::Tensor>> &, std::vector<at::Tensor> &,
+                               at::Tensor &, uint64_t>(&_CModel::ForwardV2),
+             "forward_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits_v2", &_CModel::ForwardAndGetLogitsV2,
              "forward_and_get_logits_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds_v2", &_CModel::ForwardWithInputsEmbedsV2,
+        .def("forward_with_inputs_embeds_v2",
+             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
+                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
+                               std::vector<at::Tensor> &, uint64_t, std::vector<at::Tensor> &,
+                               const std::optional<at::Tensor> &>(
+                 &_CModel::ForwardWithInputsEmbedsV2),
+             "forward_with_inputs_embeds_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
+             py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
+             py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
+        .def("forward_with_inputs_embeds_v2",
+             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
+                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
+                               uint64_t, std::vector<at::Tensor> &,
+                               const std::optional<at::Tensor> &>(
+                 &_CModel::ForwardWithInputsEmbedsV2),
              "forward_with_inputs_embeds_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},

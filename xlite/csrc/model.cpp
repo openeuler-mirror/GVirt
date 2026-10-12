@@ -1711,6 +1711,28 @@ void XModel::ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     }
 }
 
+void XModel::MaybeCaptureAuxHidden(XRuntime &rt, uint32_t layer, XTensor &layerOut)
+{
+    if (_auxOutputs.empty() || _c.auxLayerIds.empty()) {
+        return;
+    }
+    for (size_t k = 0; k < _c.auxLayerIds.size(); ++k) {
+        if (_c.auxLayerIds[k] != layer) {
+            continue;
+        }
+        size_t copyBytes = rt.currTokens * _c.hiddenSize * XDtypeBit(layerOut.dtype) / 8;
+        aclrtMemcpyAsync(_auxOutputs[k].ptr, _auxOutputs[k].bytes, layerOut.ptr, copyBytes,
+                         ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream);
+        break;
+    }
+}
+
+bool XModel::IsAuxLayer(uint32_t layer) const
+{
+    return std::any_of(_c.auxLayerIds.begin(), _c.auxLayerIds.end(),
+                       [layer](uint32_t id) { return id == layer; });
+}
+
 void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
                                        std::vector<std::vector<XTensor>> &kvCache,
                                        std::vector<XTensor> &deepstackInputEmbeds,
@@ -1742,6 +1764,10 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         if (i == 0) {
             XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], true, attnNormBias[i]);
         }
+        if (IsAuxLayer(i)) {
+            XliteOpAllGather(rt, xSlice, xPad, TP, false, DBG_LOC);
+            MaybeCaptureAuxHidden(rt, i, xPad);
+        }
         XDEBUG_SET_STATE(_rankId == 0 && (i == 0 || i == _c.nDenseLayers));
         XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
         ForwardAttn(rt, i, kvCache, freqsCis, h);
@@ -1770,6 +1796,10 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
     }
     XliteOpAddAndRmsNorm(rt, rt.hiddenStateSlice, xSlice, norm, _c.normEps, rt.hiddenStateSlice,
                          normBias);
+    if (IsAuxLayer(_c.nLayers)) {
+        XliteOpAllGather(rt, xSlice, xPad, TP, false, DBG_LOC);
+        MaybeCaptureAuxHidden(rt, _c.nLayers, xPad);
+    }
     XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP, false, DBG_LOC);
     aclrtMemcpyAsync(output.ptr, output.bytes, rt.hiddenStatePad.ptr, output.bytes,
                      ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream);
@@ -1787,6 +1817,7 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
         if (i == 0) {
             XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], true, attnNormBias[i]);
         }
+        MaybeCaptureAuxHidden(rt, i, x);
         XDEBUG_SET_STATE(_rankId == 0 && (i == 0 || i == _c.nDenseLayers));
         XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
         ForwardAttn(rt, i, kvCache, freqsCis, h);
@@ -1802,6 +1833,7 @@ void XModel::ForwardLayersNaive(XRuntime &rt, XTensor &x,
         }
     }
     XliteOpAddAndRmsNorm(rt, h, x, norm, _c.normEps, output, normBias);
+    MaybeCaptureAuxHidden(rt, _c.nLayers, x);
     rt.PutTensor(h);
 }
 

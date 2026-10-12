@@ -48,6 +48,9 @@ RUN_LIST=(
   "weight_nz2 xlite_decode_only"
   "speculative_mtp xlite_decode_only"
   "speculative_eagle3 xlite_decode_only"
+  "speculative_extract_hidden_states xlite_decode_only"
+  "speculative_dspark xlite_decode_only"
+  "speculative_dflash xlite_decode_only"
   "disaggregated_prefill xlite_decode_only"
   "multimodal xlite_decode_only"
   # full_mode 组(后)
@@ -80,6 +83,9 @@ RUN_LIST=(
   "weight_nz2 xlite_full_mode"
   "speculative_mtp xlite_full_mode"
   "speculative_eagle3 xlite_full_mode"
+  "speculative_extract_hidden_states xlite_full_mode"
+  "speculative_dspark xlite_full_mode"
+  "speculative_dflash xlite_full_mode"
   "disaggregated_prefill xlite_full_mode"
   "multimodal xlite_full_mode"
 )
