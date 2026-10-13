@@ -1,14 +1,14 @@
-### xlite与vllm ascend的特性交互矩阵
+# xlite与vllm ascend的特性交互矩阵
 
-符号说明
+符号说明：
+
 - ✅ = Full compatibility
 - 🟠 = Partial compatibility
 - ❌ = No compatibility
 - ❔ = Unknown or TBD
 
-
 | 特性 | xlite full mode | xlite decode only mode |
-|---|---|---|
+| --- | --- | --- |
 | ACLGraph Full_Decode_Only | N/A | ✅ |
 | ACLGraph Piecewise | N/A | ✅ |
 | Async Scheduling | ✅ | ✅ |
@@ -37,10 +37,10 @@
 | Quantization W4A8 | ❌ | ❌ |
 | Quantization W8A8 | ✅ | ✅ |
 | Tensor Parallel | ✅ | ✅ |
-| Weight NZ | 🟠 | 🟠 |
-
+| Weight NZ | ✅ | ✅ |
 
 备注说明：
-* KV Cache Pool/Disaggregated Prefill：kv connector仅支持非layerwise方式
-* Speculative Decoding：仅支持线性因果关系的投机推理，暂不支持树形投机；draft model依赖vllm-ascend的实现
-* N/A: 由于xlite full mode已经接管了全部forward流程，对应特性在xlite中有相关实现，因此无需再手动开启vllm ascend的特性
+
+- KV Cache Pool/Disaggregated Prefill：kv connector仅支持非layerwise方式
+- Speculative Decoding：仅支持线性因果关系的投机推理，暂不支持树形投机；draft model依赖vllm-ascend的实现
+- N/A: 由于xlite full mode已经接管了全部forward流程，对应特性在xlite中有相关实现，因此无需再手动开启vllm ascend的特性
