@@ -358,11 +358,79 @@ FEATURES = {
     ),
     "speculative_eagle3": FeatureSpec(
         "speculative_eagle3", "Eagle3",
-        skip_reason="缺少 eagle3 draft 模型(Eagle3 为单实例特性, 文档无多实例要求; "
-                    "待补充 draft 模型后用 --speculative-config "
-                    "{method:eagle3, model:<draft>, draft_tensor_parallel_size:1} 实测)",
-        note="Eagle3 需专用 draft 模型(--speculative-config 的 model 字段 required); "
-             "单实例 target+draft 同进程, 非多实例场景",
+        # target=Qwen3-30B-A3B-Instruct-2507(BF16 MoE, hidden_size=2048, 48 layers, arch Qwen3MoeForCausalLM).
+        # draft=Qwen3-a3B_eagle3(arch LlamaForCausalLMEagle3 → Eagle3LlamaForCausalLM,
+        # hidden_size=2048, 1 layer, draft_vocab_size=32000). 旧式 eagle3(非 speculators 接口).
+        # draft_tensor_parallel_size=1(draft 小, 单卡); target TP=8(BF16 30B 需多卡).
+        # BF16 无 quant_model_description.json → 不加 --quantization ascend(disable_quantization=True).
+        model_override="/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507",
+        tp_override=8,
+        disable_quantization=True,
+        max_model_len_override=8192,
+        scenario_input_override={"long_single": 4096},
+        extra_cli=["--speculative-config",
+                   json.dumps({"method": "eagle3",
+                               "model": "/mnt/nvme0n1/models/Qwen3-a3B_eagle3",
+                               "draft_tensor_parallel_size": 1,
+                               "num_speculative_tokens": 3})],
+        note="Eagle3: target=Qwen3-30B-A3B-Instruct-2507(BF16 MoE, TP=8) + "
+             "draft=Qwen3-a3B_eagle3(LlamaForCausalLMEagle3, draft_tp=1, num_speculative_tokens=3); "
+             "xlite target 走 SupportsEagle3 接口(set_aux_hidden_state_layers + forward aux 重载返回元组), "
+             "aux 捕获第 k 层输入的 raw(未归一化)残差流(对齐 vLLM aux_hidden_state_layers 语义,k=n 捕最终残差)",
+    ),
+    "speculative_extract_hidden_states": FeatureSpec(
+        "speculative_extract_hidden_states", "ExtractHiddenStates",
+        # extract_hidden_states 无需独立 draft model(self.model="extract_hidden_states" 轻量 drafter),
+        # use_aux=True → target 走 SupportsEagle3 接口返回 (h,[aux...]); drafter 用 target aux hidden states 预测.
+        model_override="/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507",
+        tp_override=8,
+        disable_quantization=True,
+        max_model_len_override=8192,
+        scenario_input_override={"long_single": 4096},
+        extra_cli=["--speculative-config",
+                   json.dumps({"method": "extract_hidden_states",
+                               "num_speculative_tokens": 1,
+                               "draft_model_config": {
+                                   "hf_config": {
+                                       "eagle_aux_hidden_state_layer_ids": [2, 24, 45]
+                                   }
+                               }})],
+        note="ExtractHiddenStates: xlite target 通过 SupportsEagle3 接口提供 aux hidden states; "
+             "draft_model_config 配置轻量 drafter(无独立 draft model);",
+    ),
+    "speculative_dspark": FeatureSpec(
+        "speculative_dspark", "DSpark",
+        # DSpark: use_aux=True → target 走 SupportsEagle3 接口返回 (h,[aux...]); draft=Qwen3DSparkModel
+        # 用 target 的 aux hidden states 预测. draft config 的 target_layer_ids=[1,9,17,25,33]→aux layers +1=[2,10,18,26,34].
+        model_override="/mnt/nvme0n1/models/Qwen3-8B",
+        tp_override=2,
+        disable_expert_parallel=True,
+        disable_quantization=True,
+        max_model_len_override=8192,
+        scenario_input_override={"long_single": 4096},
+        extra_cli=["--speculative-config",
+                   json.dumps({"method": "dspark",
+                               "model": "/mnt/nvme0n1/models/dspark_qwen3_8b_block7",
+                               "num_speculative_tokens": 7})],
+        note="DSpark: xlite target 通过 SupportsEagle3 接口提供 aux hidden states(use_aux=True); "
+             "draft=Qwen3DSparkModel(target_layer_ids=[1,9,17,25,33], block_size=7); "
+             "同 extract_hidden_states 走 aux 路径; Qwen3-8B dense 无 EP",
+    ),
+    "speculative_dflash": FeatureSpec(
+        "speculative_dflash", "DFlash",
+        # DFlash: use_aux=False(只用 last-layer hidden state, 非 aux); draft=Qwen3-8B-DFlash-b16.
+        model_override="/mnt/nvme0n1/models/Qwen3-8B",
+        tp_override=2,
+        disable_expert_parallel=True,
+        disable_quantization=True,
+        max_model_len_override=8192,
+        scenario_input_override={"long_single": 4096},
+        extra_cli=["--speculative-config",
+                   json.dumps({"method": "dflash",
+                               "model": "/mnt/nvme0n1/models/Qwen3-8B-DFlash-b16",
+                               "num_speculative_tokens": 8})],
+        note="DFlash: use_aux=False(只用 last-layer hidden state, 非 aux); draft=Qwen3-8B-DFlash-b16"
+             "(DFlashDraftModel, block_size=16, target_layer_ids=[1,9,17,25,33]);",
     ),
 
     # --- Disaggregated 类 ---

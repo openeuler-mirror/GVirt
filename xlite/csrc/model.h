@@ -122,6 +122,8 @@ struct XModelConfig {
     float swigluLimit = 0.0f;
     uint32_t nHashLayers = 0;
     std::vector<uint32_t> compressRatios;
+
+    std::vector<uint32_t> auxLayerIds;
 };
 
 struct MoEAlltoAllMeta {
@@ -161,6 +163,14 @@ public:
                                  std::vector<std::vector<XTensor>> &kvCache,
                                  std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                  XTensor &inputIds, XTensor &output);
+    void SetAuxOutputs(std::vector<XTensor> &aux)
+    {
+        _auxOutputs = aux;
+    }
+    void ClearAuxOutputs()
+    {
+        _auxOutputs.clear();
+    }
     size_t GetTensorPoolSize(int dbg);
     // whether to use communication optimization
     void ConfigRtCommOptimize(XRuntime &rt, size_t tokenNum)
@@ -342,6 +352,8 @@ private:
                                    std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                    XTensor &output);
     void CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &kvCache);
+    void MaybeCaptureAuxHidden(XRuntime &rt, uint32_t layer, XTensor &layerOut);
+    [[nodiscard]] bool IsAuxLayer(uint32_t layer) const;
     size_t DummyRun();
     void ForwardLinear(XRuntime &rt, uint32_t layer, XTensor &x, std::vector<MatmulWeight> &weights,
                        XTensor &out, const std::vector<XTensor> &weightBias = {});
@@ -368,6 +380,8 @@ private:
     XTensor _sync;
     XTensor _dsaSeqPositions;  // identity table 0...topK...maxSeqLen-1
     float _dsaIndexerScale = 1.0f;
+
+    std::vector<XTensor> _auxOutputs;
 };
 
 #endif
