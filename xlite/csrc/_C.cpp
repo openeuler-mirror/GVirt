@@ -837,8 +837,11 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
+        // Only attention types whose cache consumers address a dim-0 pitch may
+        // carry one through the bridge (MHA/GQA k/v caches so far).
+        bool allowPitch = attnType == XMODEL_ATTN_MHA;
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
-            InitXTensor(_kv[i][j], kvCache[i][j]);
+            InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
     }
 
@@ -1045,8 +1048,11 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
+        // Only attention types whose cache consumers address a dim-0 pitch may
+        // carry one through the bridge (MHA/GQA k/v caches so far).
+        bool allowPitch = attnType == XMODEL_ATTN_MHA;
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
-            InitXTensor(_kv[i][j], kvCache[i][j]);
+            InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
     }
 
@@ -1131,8 +1137,11 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
+        // Only attention types whose cache consumers address a dim-0 pitch may
+        // carry one through the bridge (MHA/GQA k/v caches so far).
+        bool allowPitch = attnType == XMODEL_ATTN_MHA;
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
-            InitXTensor(_kv[i][j], kvCache[i][j]);
+            InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
     }
 
@@ -1564,8 +1573,8 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
     XTensor _inout, _kCache, _vCache, _position, _cossin, _slotMapping;
 
     InitXTensor(_inout, inout);
-    InitXTensor(_kCache, kCache);
-    InitXTensor(_vCache, vCache);
+    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
+    InitXTensor(_vCache, vCache, /*allowPitched=*/true);
     InitXTensor(_position, position);
     InitXTensor(_cossin, cossin);
     InitXTensor(_slotMapping, slotMapping);
@@ -1583,8 +1592,8 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     XTensor _qkv, _kCache, _vCache, _qk, _output, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
     InitXTensor(_qkv, qkv);
-    InitXTensor(_kCache, kCache);
-    InitXTensor(_vCache, vCache);
+    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
+    InitXTensor(_vCache, vCache, /*allowPitched=*/true);
     InitXTensor(_output, output);
     InitXTensor(_queryStartLoc, queryStartLoc);
     InitXTensor(_lens, lens);

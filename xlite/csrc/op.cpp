@@ -885,9 +885,9 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
     }
 
     launchKernel(rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr, kCache.ptr,
-                 vCache.ptr, slotMapping.ptr, inout.shape[0], rotDim, inout.shape[1],
-                 inout.shape[1], inout.shape[1], localHeads, localKvHeads, headDim, blockSize,
-                 scale, mropeMaskH, mropeMaskW, cossinInFp32);
+                 vCache.ptr, slotMapping.ptr, kCache.stride[0], vCache.stride[0], inout.shape[0],
+                 rotDim, inout.shape[1], inout.shape[1], inout.shape[1], localHeads, localKvHeads,
+                 headDim, blockSize, scale, mropeMaskH, mropeMaskW, cossinInFp32);
 }
 
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk,
@@ -910,8 +910,8 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     }
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, output.ptr,
-                 queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads,
-                 headDim, blockSize, batch, maxNumBlocks);
+                 queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, kCache.stride[0],
+                 vCache.stride[0], nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlocks);
 }
 
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
@@ -938,8 +938,8 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr,
                  sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
-                 lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, nKvHeads, headDim, blockSize,
-                 batch, maxNumBlocks, tileSizeOfCachedKV);
+                 lens.ptr, cachedLens.ptr, blockTables.ptr, kCache.stride[0], vCache.stride[0],
+                 nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlocks, tileSizeOfCachedKV);
 }
 
 // Unified CXA decode kernel entry. dense=false walks the paged compress-KV cache via

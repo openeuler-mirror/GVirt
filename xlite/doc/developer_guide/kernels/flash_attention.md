@@ -14,13 +14,13 @@ attention(rt, qkv, k_cache, v_cache, output, query_start_loc, query_lens,
           BLOCK_SIZE, batch, enable_flash=True, tile_size)
 ```
 
-host 封装 `Attention(enableFlashAttention=true)` 分支 → `XliteOpFlashAttention`(`csrc/_C.cpp:1485-1506`、`csrc/op.cpp:903`)。kernel 签名(`csrc/kernels/flash_attention.h:428`):
+host 封装 `Attention(enableFlashAttention=true)` 分支 → `XliteOpFlashAttention`(`csrc/_C.cpp:1485-1506`、`csrc/op.cpp:903`)。kernel 签名(`csrc/kernels/flash_attention.h:430`):
 
 ```cpp
 flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum,
                         sync, output, queryStartLoc, queryLens, cachedLens, blockTables,
-                        nHeads, nKVHeads, headSize, blockSize, batch, maxNumBlocks,
-                        tileSizeOfCachedKV)
+                        kCacheStride, vCacheStride, nHeads, nKVHeads, headSize,
+                        blockSize, batch, maxNumBlocks, tileSizeOfCachedKV)
 ```
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
@@ -35,6 +35,7 @@ flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSu
 | output | 输出 | `[total_tokens, nHeads * headSize]` | FP16/BF16 | 最终注意力输出 |
 | queryStartLoc / queryLens / cachedLens | 输入 | `[batch]` | INT32 | 同 attention |
 | blockTables | 输入 | `[batch, maxNumBlocks]` | INT32 | 逻辑块→物理块映射 |
+| kCacheStride / vCacheStride | 标量 | - | uint32 | 同 attention:K/V cache 的 dim-0 跨度(元素数),host 传 `XTensor.stride[0]` |
 | nHeads / nKVHeads / headSize / blockSize / batch / maxNumBlocks | 标量 | - | uint32 | 同 attention |
 | tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 侧经 `csrc/op.h:13` 的 static_assert 保证 `MAX_KV_TILE_SIZE(8192) ≤ MAX_SOFTMAX_PINGPONG_LEN(11776)`,由 auto-tuner 在 8192 内选取 |
 
@@ -49,7 +50,7 @@ host 校验 qkv/qk/kCache/vCache/output dtype 一致(`csrc/op.cpp:915-923`)。
 
 ## 实现原理
 
-混合 AIC/AIV kernel,`KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2)`(`csrc/kernels/flash_attention.h:30`)。相对 attention 的核心差异:任务空间多了 KV tile 维(`taskNum = queryNum * nKVHeads * kvNum`,`kvNum = ceil((cachedLen+queryLen)/tileSizeOfCachedKV)`,`csrc/kernels/flash_attention.h:108-110`),并且多出 AIV 的 **online softmax update** 阶段。
+混合 AIC/AIV kernel,`KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2)`(`csrc/kernels/flash_attention.h:31`)。相对 attention 的核心差异:任务空间多了 KV tile 维(`taskNum = queryNum * nKVHeads * kvNum`,`kvNum = ceil((cachedLen+queryLen)/tileSizeOfCachedKV)`,`csrc/kernels/flash_attention.h:110-112`),并且多出 AIV 的 **online softmax update** 阶段。
 
 ### 五级软件流水
 
@@ -60,7 +61,7 @@ host 校验 qkv/qk/kCache/vCache/output dtype 一致(`csrc/op.cpp:915-923`)。
 3. AIC `wait_flag_dev(2)` 等 softmax 完成,`RunAicSV`(gqaScatter=false,紧凑写 sv,行距 headSize)算出 `Σ softmax_local(qk)·V` → `ffts_cross_core_sync(PIPE_FIX, flag1)`;
 4. AIV `wait_flag_dev(1)` 等 SV 完成,`RunAivSoftmaxUpdate` 把 sv/max/sum 并入 output/lastMax/lastSum。
 
-相邻任务错峰:AIC 发起任务 i+1 的 QK 后回头做任务 i 的 SV;AIV 做完任务 i+1 的 softmax 后回头做任务 i 的 update(`csrc/kernels/flash_attention.h:149-165`、`:291-329`),QK/SV 在 Cube、softmax/update 在 Vector 各自成流水。
+相邻任务错峰:AIC 发起任务 i+1 的 QK 后回头做任务 i 的 SV;AIV 做完任务 i+1 的 softmax 后回头做任务 i 的 update(`csrc/kernels/flash_attention.h:151-167`、`:293-331`),QK/SV 在 Cube、softmax/update 在 Vector 各自成流水。
 
 ### online softmax 合并(RunAivSoftmaxUpdate,softmax_attn_aiv.h 并入)
 
@@ -82,18 +83,18 @@ output  = sv_out / new_sum
 
 ### 跨核 RingSync
 
-一个 query 块的连续 KV tile 会被 `totalIdx % block_num` 轮转分到不同核,而 update 需要读前一 tile 写入的 output/lastMax/lastSum。`RingSync`(`csrc/kernels/ring_sync.h`)用 GM 计数器解决:每核在 `sync[blockIdx*2+subBlockIdx]` 写递增 generation,做 update 前 `WaitPrevCore()` 自旋等待前一个核的 generation 到位;最后一个 tile 不再 `SetNextCore()`,收尾 `ResetPrevCore()` 清零供下次使用(`csrc/kernels/flash_attention.h:301-304`、`:324-328`、`:380-383`)。
+一个 query 块的连续 KV tile 会被 `totalIdx % block_num` 轮转分到不同核,而 update 需要读前一 tile 写入的 output/lastMax/lastSum。`RingSync`(`csrc/kernels/ring_sync.h`)用 GM 计数器解决:每核在 `sync[blockIdx*2+subBlockIdx]` 写递增 generation,做 update 前 `WaitPrevCore()` 自旋等待前一个核的 generation 到位;最后一个 tile 不再 `SetNextCore()`,收尾 `ResetPrevCore()` 清零供下次使用(`csrc/kernels/flash_attention.h:303-306`、`:326-330`、`:382-385`)。
 
 ### 任务分配与 GQA
 
-- `queryTileSize = XLITE_MAX_M0 / headNumInGroup`(固定 m0=128,不分档),GQA 组内 query 头拼满 Cube 的 M 维(`csrc/kernels/flash_attention.h:93`)。
-- AIV 按 `get_subblockid()` 把 `queryTaskLen * headNumInGroup` 行对半分给 2 个 subblock;max/sum workspace 因此按 `block_idx * M0 * 2 + subblock * M0` 布局(`csrc/kernels/flash_attention.h:61-70`)。
-- causal:每个 query tile 的 `calcLen = cachedLen + queryTaskStart + queryTaskLen`,整 tile 落在 calcLen 之外的 KV tile 直接跳过(`calcLen <= kvOffset` continue,`csrc/kernels/flash_attention.h:122-124`)。
+- `queryTileSize = XLITE_MAX_M0 / headNumInGroup`(固定 m0=128,不分档),GQA 组内 query 头拼满 Cube 的 M 维(`csrc/kernels/flash_attention.h:95`)。
+- AIV 按 `get_subblockid()` 把 `queryTaskLen * headNumInGroup` 行对半分给 2 个 subblock;max/sum workspace 因此按 `block_idx * M0 * 2 + subblock * M0` 布局(`csrc/kernels/flash_attention.h:63-72`)。
+- causal:每个 query tile 的 `calcLen = cachedLen + queryTaskStart + queryTaskLen`,整 tile 落在 calcLen 之外的 KV tile 直接跳过(`calcLen <= kvOffset` continue,`csrc/kernels/flash_attention.h:124-126`)。
 
 ### 关键代码位置
 
-- 主类与流水调度:`csrc/kernels/flash_attention.h:77`(RunAic)、`:196`(RunAiv)
-- QK/SV:`csrc/kernels/attention_aic_helper.h`(与 attention 共用;SV 的 flash 紧凑写分支 `:270-272`)
+- 主类与流水调度:`csrc/kernels/flash_attention.h:79`(RunAic)、`:198`(RunAiv)
+- QK/SV:`csrc/kernels/attention_aic_helper.h`(与 attention 共用;SV 的 flash 紧凑写分支 `:277-279`)
 - tile 内 softmax(ping-pong 单趟):`csrc/kernels/softmax_attn_aiv.h:65`
 - online softmax update:`csrc/kernels/softmax_attn_aiv.h:570`
 - 跨核同步:`csrc/kernels/ring_sync.h`

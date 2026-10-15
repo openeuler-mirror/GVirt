@@ -24,9 +24,10 @@ public:
 
     __aicore__ inline void Init(GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk,
                                 GM_ADDR output, GM_ADDR queryStartLoc, GM_ADDR queryLens,
-                                GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads,
-                                uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize,
-                                uint32_t batch, uint32_t maxNumBlocks)
+                                GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t kCacheStride,
+                                uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,
+                                uint32_t headSize, uint32_t blockSize, uint32_t batch,
+                                uint32_t maxNumBlocks)
     {
         this->input.SetGlobalBuffer((__gm__ Dtype *)input);
         this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
@@ -53,7 +54,8 @@ public:
         this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * XLITE_MAX_M0 * maxSeqLen +
                                     block_num * XLITE_MAX_M0 * maxSeqLen);
 
-        aicHelper.Init(nHeads, nKVHeads, headNumInGroup, headSize, blockSize, maxSeqLen);
+        aicHelper.Init(nHeads, nKVHeads, headNumInGroup, headSize, blockSize, kCacheStride,
+                       vCacheStride, maxSeqLen);
     }
 
     __aicore__ inline void RunAic()
@@ -277,15 +279,16 @@ private:
     AicHelper<Dtype> aicHelper;
 };
 
-#define ATTN_FUNC_DEFINE(dtype)                                                                    \
-    extern "C" __global__ __aicore__ void attention_##dtype(                                       \
-        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output,                 \
-        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,         \
-        uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize, uint32_t batch, \
-        uint32_t maxNumBlocks)                                                                     \
-    {                                                                                              \
-        Attention<dtype> op;                                                                       \
-        op.Init(input, kCache, vCache, qk, output, queryStartLoc, queryLens, cachedLens,           \
-                blockTables, nHeads, nKVHeads, headSize, blockSize, batch, maxNumBlocks);          \
-        op.Run();                                                                                  \
+#define ATTN_FUNC_DEFINE(dtype)                                                                 \
+    extern "C" __global__ __aicore__ void attention_##dtype(                                    \
+        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output,              \
+        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,      \
+        uint32_t kCacheStride, uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,       \
+        uint32_t headSize, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks)           \
+    {                                                                                           \
+        Attention<dtype> op;                                                                    \
+        op.Init(input, kCache, vCache, qk, output, queryStartLoc, queryLens, cachedLens,        \
+                blockTables, kCacheStride, vCacheStride, nHeads, nKVHeads, headSize, blockSize, \
+                batch, maxNumBlocks);                                                           \
+        op.Run();                                                                               \
     }
