@@ -27,8 +27,10 @@ public:
 
     // Bind L1/L0 buffers and scalar geometry; return svk0 for the kernel's RunAiv.
     // dense: dense (contiguous) KV cache and blockTable is unused (block id == logical index).
+    // kCacheStride/peCacheStride: dim-0 pitches (elements) of the paged caches.
     __aicore__ inline int Init(uint32_t nHeadsV, uint32_t ropeHeadDimV, uint32_t kvLoraRankV,
-                               uint32_t blockSizeV, uint32_t qkStrideV, bool denseV)
+                               uint32_t blockSizeV, uint32_t kCacheStrideV, uint32_t peCacheStrideV,
+                               uint32_t qkStrideV, bool denseV)
     {
         nHeads = nHeadsV;
         ropeHeadDim = ropeHeadDimV;
@@ -36,6 +38,8 @@ public:
         dense = denseV;
         qkStride = qkStrideV;
         blockSize = blockSizeV;
+        kCacheStride = MAX(kCacheStrideV, blockSizeV * kvLoraRankV);
+        peCacheStride = MAX(peCacheStrideV, blockSizeV * ropeHeadDimV);
         qkn0 = dense ? MAX_N0 : blockSizeV;
         qkk0 = 256 / sizeof(Dtype);
         svn0 = 256;
@@ -196,6 +200,10 @@ public:
         SetFlag<HardEvent::FIX_M>(EVENT_ID1);
         for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // kvLen
             uint32_t block = !dense ? blockTable[nIdx + nIdxStart] : nIdx + nIdxStart;
+            // sparse: block is a physical block id, so its GM pitch is the cache's
+            // dim-0 stride; dense: block is a token-tile index in the batch segment
+            uint32_t kPitch = !dense ? kCacheStride : qkn0 * kvLoraRank;
+            uint32_t pePitch = !dense ? peCacheStride : qkn0 * ropeHeadDim;
             int nOffset = nIdx * qkn0;
             if (nOffset + nSize > kvLen) {
                 nSize = kvLen - nOffset;
@@ -223,9 +231,8 @@ public:
                         kRemSize = kvLoraRank - kOffset;
                     }
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + pingpongL1B);
-                    CopyGmToL1Nd2Nz(akl1bBuf[pingpongL1B],
-                                    kCache[block * qkn0 * kvLoraRank + kOffset], nSize, kRemSize,
-                                    kvLoraRank, nBlockPad);
+                    CopyGmToL1Nd2Nz(akl1bBuf[pingpongL1B], kCache[block * kPitch + kOffset], nSize,
+                                    kRemSize, kvLoraRank, nBlockPad);
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + pingpongL1B);
                 }
@@ -262,8 +269,8 @@ public:
             kBlockNum = kBlockPad / kBlockSize;
             // copy KR (qkn0, ropeHeadDim) to L1
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
-            CopyGmToL1Nd2Nz(akrl1bBuf[curr], peCache[block * qkn0 * ropeHeadDim], nSize,
-                            ropeHeadDim, ropeHeadDim, nBlockPad);
+            CopyGmToL1Nd2Nz(akrl1bBuf[curr], peCache[block * pePitch], nSize, ropeHeadDim,
+                            ropeHeadDim, nBlockPad);
 
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curr);
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curr);
@@ -408,10 +415,10 @@ public:
                                 kRemSizeTmp = kRemSize - kOffsetTmp;
                                 kRemBlockPadTmp = ROUND_UP(kRemSizeTmp, kBlockSize);
                             }
-                            CopyGmToL1Nd2Nz(
-                                aktl1bBuf[pingpongL1B][bid * blockSize * kBlockSize],
-                                kCache[(block * blockSize + blockRemainder) * kvLoraRank + nOffset],
-                                kRemBlockPadTmp, nSize, kvLoraRank, L1BkRemBlockPad);
+                            CopyGmToL1Nd2Nz(aktl1bBuf[pingpongL1B][bid * blockSize * kBlockSize],
+                                            kCache[block * kCacheStride +
+                                                   blockRemainder * kvLoraRank + nOffset],
+                                            kRemBlockPadTmp, nSize, kvLoraRank, L1BkRemBlockPad);
                         }
                     }
 
@@ -488,6 +495,8 @@ private:
     uint32_t ropeHeadDim;
     uint32_t kvLoraRank;
     uint32_t blockSize;
+    uint32_t kCacheStride;
+    uint32_t peCacheStride;
     uint32_t qkStride;
     bool dense;
     int qkn0;

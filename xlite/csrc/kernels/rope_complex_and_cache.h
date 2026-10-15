@@ -13,8 +13,9 @@ __aicore__ __inline__ void rope_complex_and_cache(
     uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim, uint32_t offset,
     uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, uint32_t outOffset,
     GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size, GM_ADDR vcache, GM_ADDR slot_mapping,
-    bool inverse, bool outInterleaved, uint64_t minPosition = 0, int coreOffset = 0,
-    int *nextCoreOffset = nullptr, bool doRotate = false, float rotateScale = 1.0f)
+    uint32_t vcacheStride, bool inverse, bool outInterleaved, uint64_t minPosition = 0,
+    int coreOffset = 0, int *nextCoreOffset = nullptr, bool doRotate = false,
+    float rotateScale = 1.0f)
 {
     set_atomic_none();
     set_mask_norm();
@@ -327,7 +328,11 @@ __aicore__ __inline__ void rope_complex_and_cache(
         // is never written back.
         if (need_v_cache) {
             uint32_t slot_idx = slotMappingUB[token_idx - baseTokenIdx];
-            auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) + slot_idx * nLocalHeads * vdim;
+            // flat slot = block * block_size + offsetInBlock; vcacheStride is the dim-0 pitch
+            auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) +
+                               (uint64_t)(slot_idx / block_size) *
+                                   MAX(vcacheStride, block_size * nLocalHeads * vdim) +
+                               (uint64_t)(slot_idx % block_size) * nLocalHeads * vdim;
             CopyUbufToGmAligned(vcache_ptr, outs[curr], vCacheBytes);
             if (output_ptr != nullptr) {
                 copy_ubuf_to_gm(output_gm, ropeOut, 0, nLocalHeads, output_blocks, 0, dstStride);
@@ -358,22 +363,23 @@ __aicore__ __inline__ void rope_complex_and_cache(
         uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim,                 \
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
-        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved,           \
-        uint64_t minPosition, uint32_t doRotate, float rotateScale)                                \
+        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t vcacheStride, uint32_t inverse,             \
+        uint32_t outInterleaved, uint64_t minPosition, uint32_t doRotate, float rotateScale)       \
     {                                                                                              \
-        rope_complex_and_cache<dtype>(                                                             \
-            nTokens, nLocalHeads, shape1, ropeDim, offset, vdim, input_ptr, output_ptr, outShape1, \
-            outOffset, freqs_ptr, position, block_size, vcache, slot_mapping, inverse != 0,        \
-            outInterleaved != 0, minPosition, 0, nullptr, doRotate != 0, rotateScale);             \
+        rope_complex_and_cache<dtype>(nTokens, nLocalHeads, shape1, ropeDim, offset, vdim,         \
+                                      input_ptr, output_ptr, outShape1, outOffset, freqs_ptr,      \
+                                      position, block_size, vcache, slot_mapping, vcacheStride,    \
+                                      inverse != 0, outInterleaved != 0, minPosition, 0, nullptr,  \
+                                      doRotate != 0, rotateScale);                                 \
     }
 #else
 #define ROPE_COMPLEX_CACHE_FUNC_DEFINE(dtype)                                                      \
-    extern "C" __global__ __aicore__ void rope_complex_##dtype(                                    \
+    extern "C" __global__ __aicore__ void rope_complex_and_cache_##dtype(                          \
         uint32_t nTokens, uint32_t nLocalHeads, uint32_t shape1, uint32_t ropeDim,                 \
         uint32_t offset, uint32_t vdim, GM_ADDR input_ptr, GM_ADDR output_ptr, uint32_t outShape1, \
         uint32_t outOffset, GM_ADDR freqs_ptr, GM_ADDR position, uint32_t block_size,              \
-        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t inverse, uint32_t outInterleaved,           \
-        uint64_t minPosition, uint32_t doRotate, float rotateScale)                                \
+        GM_ADDR vcache, GM_ADDR slot_mapping, uint32_t vcacheStride, uint32_t inverse,             \
+        uint32_t outInterleaved, uint64_t minPosition, uint32_t doRotate, float rotateScale)       \
     {                                                                                              \
     }
 #endif

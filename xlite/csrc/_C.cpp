@@ -838,8 +838,8 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v caches so far).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA;
+        // carry one through the bridge (MHA/GQA k/v and MLA k/pe caches so far).
+        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA;
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
@@ -1049,8 +1049,8 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v caches so far).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA;
+        // carry one through the bridge (MHA/GQA k/v and MLA k/pe caches so far).
+        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA;
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
@@ -1138,8 +1138,8 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v caches so far).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA;
+        // carry one through the bridge (MHA/GQA k/v and MLA k/pe caches so far).
+        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA;
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
@@ -1644,8 +1644,8 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
         _cachedLens, _blockTables, _topkIndices;
     InitXTensor(_qWithQr, qWithQr);
     InitXTensor(_qr, qr);
-    InitXTensor(_kCache, kCache);
-    InitXTensor(_peCache, peCache);
+    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
+    InitXTensor(_peCache, peCache, /*allowPitched=*/true);
     InitXTensor(_wukT, wukT);
     InitXTensor(_wuv, wuv);
     InitXTensor(_output, output);
@@ -1730,13 +1730,13 @@ void GatherSparseKVCache(XRuntime &rt, at::Tensor &kCache, at::Tensor &peCache,
                          uint32_t burstCopySize)
 {
     XTensor _kCache, _peCache, _blockTables, _topkIndices, _cachedLens, _kDenseCache, _peDenseCache;
-    InitXTensor(_kCache, kCache);
-    InitXTensor(_peCache, peCache);
+    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
+    InitXTensor(_peCache, peCache, /*allowPitched=*/true);
     InitXTensor(_blockTables, blockTables);
     InitXTensor(_topkIndices, topkIndices);
     InitXTensor(_cachedLens, cachedLens);
-    InitXTensor(_kDenseCache, kDenseCache);
-    InitXTensor(_peDenseCache, peDenseCache);
+    InitXTensor(_kDenseCache, kDenseCache, /*allowPitched=*/true);
+    InitXTensor(_peDenseCache, peDenseCache, /*allowPitched=*/true);
     XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices, _cachedLens,
                                _kDenseCache, _peDenseCache, batch, indexTopK, blockSize, kvLoraRank,
                                ropeHeadDim, kvHeads, compressRatio, burstCopySize);
@@ -2046,7 +2046,7 @@ void RopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, u
     InitXTensor(_inputWithR, inputWithR);
     InitXTensor(_freqs, freqs);
     InitXTensor(_position, position);
-    InitXTensor(_vCache, vCache);
+    InitXTensor(_vCache, vCache, /*allowPitched=*/true);
     InitXTensor(_slotMapping, slotMapping);
     XliteOpRopeComplexAndCache(rt, nLocalHeads, stepDim, ropeDim, offset, vdim, _inputWithR, _freqs,
                                _position, blockSize, _vCache, _slotMapping, outInterleaved,
@@ -2071,8 +2071,8 @@ void MlaPrepare(XRuntime &rt, at::Tensor &attnQkvc, at::Tensor &qNorm, at::Tenso
     InitXTensor(_attnNormKvc, attnNormKvc);
     InitXTensor(_freqs, freqs);
     InitXTensor(_position, position);
-    InitXTensor(_kCache, kCache);
-    InitXTensor(_peCache, peCache);
+    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
+    InitXTensor(_peCache, peCache, /*allowPitched=*/true);
     InitXTensor(_slotMapping, slotMapping);
     XliteOpMlaPrepare(rt, _attnQkvc, _qNorm, _qNormBias, _attnNormQc, _kvNorm, _kvNormBias, _freqs,
                       _position, qLoraRank, kvLoraRank, ropeHeadDim, blockSize, _kCache, _peCache,

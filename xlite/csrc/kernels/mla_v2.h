@@ -31,7 +31,8 @@ public:
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                                 uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxSeqLen, float scale, uint32_t topK, uint32_t dense)
+                                uint32_t maxSeqLen, float scale, uint32_t topK,
+                                uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qAbsorb.SetGlobalBuffer((__gm__ Dtype *)qAbsorb);
@@ -51,6 +52,8 @@ public:
         this->kvLoraRank = kvLoraRank;
         this->batch = batch;
         this->maxSeqLen = maxSeqLen;
+        this->kCacheStride = MAX(kCacheStride, maxSeqLen * kvLoraRank);
+        this->peCacheStride = MAX(peCacheStride, maxSeqLen * ropeHeadDim);
         this->qkStride = maxSeqLen;
         this->scale = scale;
         this->dense = dense != 0;
@@ -62,7 +65,7 @@ public:
                                     block_num * XLITE_MAX_M0 * qkStride);
 
         svk0 = aicHelper.Init(nHeads, ropeHeadDim, kvLoraRank, this->dense ? 0 : blockSize,
-                              qkStride, this->dense);
+                              kCacheStride, peCacheStride, qkStride, this->dense);
     }
 
     __aicore__ inline void RunAic()
@@ -92,15 +95,15 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            // per-batch KV view: dense mode takes a subview of the contiguous
-            // cache (batch b starts at b * maxSeqLen tokens); sparse mode walks
-            // the full paged cache through this batch's block table.
+            // per-batch KV view: dense mode takes a subview of the cache
+            // (batch b starts at its dim-0 pitch, kCacheStride/peCacheStride);
+            // sparse mode walks the full paged cache through this batch's block table.
             GlobalTensor<Dtype> batchKCache = kCache;
             GlobalTensor<Dtype> batchPeCache = peCache;
             __gm__ uint32_t *blockTable = nullptr;
             if (dense) {
-                batchKCache = kCache[batchIdx * maxSeqLen * kvLoraRank];
-                batchPeCache = peCache[batchIdx * maxSeqLen * ropeHeadDim];
+                batchKCache = kCache[batchIdx * kCacheStride];
+                batchPeCache = peCache[batchIdx * peCacheStride];
             } else {
                 blockTable = (__gm__ uint32_t *)((uint64_t)blockTables +
                                                  batchIdx * maxNumBlocks * sizeof(uint32_t));
@@ -320,6 +323,8 @@ private:
     uint32_t maxSeqLen;
     float scale;
     uint32_t topK;
+    uint32_t kCacheStride;
+    uint32_t peCacheStride;
     uint32_t qkStride;
     int svk0;
     bool dense;
@@ -331,11 +336,11 @@ private:
         GM_ADDR qk, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, \
         GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank,           \
         uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen, float scale, uint32_t topK,        \
-        uint32_t dense)                                                                            \
+        uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense)                             \
     {                                                                                              \
         MLAV2<dtype> op;                                                                           \
         op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb, queryStartLoc, queryLens,  \
                 cachedLens, blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,        \
-                maxSeqLen, scale, topK, dense);                                                    \
+                maxSeqLen, scale, topK, kCacheStride, peCacheStride, dense);                       \
         op.Run();                                                                                  \
     }

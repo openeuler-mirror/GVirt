@@ -57,7 +57,10 @@ models = [
     ("glm5", 8, 64, 192, 256, 512, torch.bfloat16),
 ]
 
-# work configurations: batch_size, cached_lens, query_lens
+# work configurations: batch_size, cached_lens, query_lens, [pitched]
+# pitched=True allocates the paged caches as buf[::2] views so each physical
+# block's dim-0 stride is double the contiguous pitch — exercises the
+# stride-aware block addressing in mla_v2 / flash_mla_v2 / gather.
 work = [
     (1, [0], [1]),
     (1, [0], [30]),
@@ -80,6 +83,9 @@ work = [
     (1, [131071], [1]),
     (1, [127], [1]),
     (1, [4096], [1]),
+    (1, [0], [30], True),
+    (1, [127], [1], True),
+    (2, [4000] * 2, [1] * 2, True),
 ]
 
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
@@ -98,7 +104,9 @@ def rms_norm_last_dim(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
 
 for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_dtype in models:
     scale = (nope_head_dim + rope_head_dim) ** -0.5
-    for batch, cached_lens_list, query_len_list in work:
+    for work_cfg in work:
+        batch, cached_lens_list, query_len_list = work_cfg[:3]
+        pitched = len(work_cfg) > 3 and bool(work_cfg[3])
         max_num_blocks = max_blocks(query_len_list, cached_lens_list, BLOCK_SIZE)
         max_seq_len = max_num_blocks * BLOCK_SIZE
         total_query_len = sum(query_len_list)
@@ -129,8 +137,12 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             qWithQr_xlite = qWithQr_standard.clone()
 
             kvcache_block_num = max_num_blocks * batch
-            k_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, kv_lora_rank)
-            pe_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, rope_head_dim)
+            if pitched:
+                k_cache_xlite = torch.zeros(kvcache_block_num * 2, BLOCK_SIZE, kv_lora_rank)[::2]
+                pe_cache_xlite = torch.zeros(kvcache_block_num * 2, BLOCK_SIZE, rope_head_dim)[::2]
+            else:
+                k_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, kv_lora_rank)
+                pe_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, rope_head_dim)
 
             query_lens = torch.tensor(query_len_list, dtype=torch.int32).flatten()
             cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
@@ -253,9 +265,10 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
 
         logging.info(
             "mla_v2 %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, "
-            "%d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s) executed!",
+            "%d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s, "
+            "pitched=%s) executed!",
             name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_dtype,
-            batch, cached_lens_list, query_len_list,
+            batch, cached_lens_list, query_len_list, pitched,
         )
 
         try:

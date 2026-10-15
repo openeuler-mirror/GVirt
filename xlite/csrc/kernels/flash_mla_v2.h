@@ -26,7 +26,8 @@ public:
                                 GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads,
                                 uint32_t ropeHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
                                 uint32_t batch, uint32_t maxNumBlocks, float scale,
-                                uint32_t tileSizeOfCachedKV, uint32_t topK)
+                                uint32_t tileSizeOfCachedKV, uint32_t topK,
+                                uint32_t kCacheStride = 0, uint32_t peCacheStride = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qAbsorb.SetGlobalBuffer((__gm__ Dtype *)qAbsorb);
@@ -46,6 +47,8 @@ public:
         this->kvLoraRank = kvLoraRank;
         this->batch = batch;
         this->maxNumBlocks = maxNumBlocks;
+        this->kCacheStride = MAX(kCacheStride, blockSize * kvLoraRank);
+        this->peCacheStride = MAX(peCacheStride, blockSize * ropeHeadDim);
         this->scale = scale;
         this->topK = (topkIndices == nullptr) ? 0 : topK;
         this->tileSizeOfCachedKV = tileSizeOfCachedKV;
@@ -71,7 +74,8 @@ public:
         this->lastMax.SetGlobalBuffer((__gm__ float *)lastMax);
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
 
-        svk0 = aicHelper.Init(nHeads, ropeHeadDim, kvLoraRank, blockSize, qkStride, false);
+        svk0 = aicHelper.Init(nHeads, ropeHeadDim, kvLoraRank, blockSize, kCacheStride,
+                              peCacheStride, qkStride, false);
     }
 
     __aicore__ inline void RunAic()
@@ -426,6 +430,8 @@ private:
     uint32_t maxNumBlocks;
     float scale;
     uint32_t topK;
+    uint32_t kCacheStride;
+    uint32_t peCacheStride;
     uint32_t qkStride;
     uint32_t tileSizeOfCachedKV;
     int svk0;
@@ -438,12 +444,13 @@ private:
         GM_ADDR sync, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens,               \
         GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,        \
         uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,        \
-        float scale, uint32_t tileSizeOfCachedKV, uint32_t topK)                               \
+        float scale, uint32_t tileSizeOfCachedKV, uint32_t topK, uint32_t kCacheStride,        \
+        uint32_t peCacheStride)                                                                \
     {                                                                                          \
         FLASHMLAV2<dtype> op;                                                                  \
         op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum, lastMax, lastSum, \
                 sync, oAbsorb, queryStartLoc, queryLens, cachedLens, blockTables, nHeads,      \
                 ropeHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, scale,                \
-                tileSizeOfCachedKV, topK);                                                     \
+                tileSizeOfCachedKV, topK, kCacheStride, peCacheStride);                        \
         op.Run();                                                                              \
     }

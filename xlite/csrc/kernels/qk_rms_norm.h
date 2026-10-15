@@ -41,14 +41,14 @@ __aicore__ void qk_rms_norm(GM_ADDR input, GM_ADDR qNorm, GM_ADDR qNormBias, GM_
     // Q segment: starts at column 0.
     norm<Dtype>(input, nullptr, qNorm, qNormBias, qOut, token_num, q_norm_dim, norm_eps, kind,
                 q_cnt_per_token, in_step, out_step, 0, 0, useNorm, qVariance, tpSize, nullptr,
-                nullptr, 0, coreOffset, &nextCoreOffset);
+                nullptr, 0, 0, coreOffset, &nextCoreOffset);
 
     coreOffset = nextCoreOffset;
     // K segment: offset to the K column range of the same row.
     uint32_t k_out_start_offset = useNorm ? k_start_offset : 0;
     norm<Dtype>(input, nullptr, kNorm, kNormBias, kOut, token_num, k_norm_dim, norm_eps, kind,
                 k_cnt_per_token, in_step, out_step, k_start_offset, k_out_start_offset, useNorm,
-                kVariance, tpSize, nullptr, nullptr, 0, coreOffset, &nextCoreOffset);
+                kVariance, tpSize, nullptr, nullptr, 0, 0, coreOffset, &nextCoreOffset);
 }
 
 #define QK_RMS_NORM_FUNC_DEFINE(dtype)                                                             \
