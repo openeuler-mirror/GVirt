@@ -10,21 +10,50 @@
 #include "debug.h"
 
 XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
-                       enum XTensorType type)
+                       enum XTensorType type, std::optional<std::vector<size_t>> stride)
 {
-    size_t numel = 1;
-
     if (shape.empty()) {
-        numel = 0;
+        throw std::invalid_argument(DBG_PREFIX + "shape is empty");
     }
 
-    for (uint32_t i = 0; i < shape.size(); i++) {
-        numel *= shape[i];
+    const std::vector<size_t> contigStride = ContiguousStride(shape);
+    if (!stride.has_value()) {
+        // Absent stride: the caller guarantees the contiguous layout.
+        this->stride = contigStride;
+        this->isContiguous = true;
+    } else {
+        if (stride->size() != shape.size()) {
+            throw std::invalid_argument(
+                DBG_PREFIX + "stride dim " + std::to_string(stride->size()) +
+                " does not match shape dim " + std::to_string(shape.size()));
+        }
+        // Only a dim-0 stride deviation from the contiguous layout is supported: higher
+        // dimensions must stay contiguous so every dim-0 slice is a contiguous run, and
+        // the dim-0 pitch must cover the full row so rows never overlap.
+        for (size_t i = 1; i < shape.size(); i++) {
+            if ((*stride)[i] != contigStride[i]) {
+                std::string msg = DBG_PREFIX + "only dim-0 stride mismatch is supported, but dim " +
+                                  std::to_string(i) + " stride " + std::to_string((*stride)[i]) +
+                                  " != contiguous " + std::to_string(contigStride[i]);
+                throw std::invalid_argument(msg);
+            }
+        }
+        // A single (or zero) row cannot overlap itself, so its dim-0 stride is unconstrained.
+        if (shape[0] > 1 && (*stride)[0] < contigStride[0]) {
+            throw std::invalid_argument(DBG_PREFIX + "dim-0 stride " +
+                                        std::to_string((*stride)[0]) +
+                                        " is smaller than the row length " +
+                                        std::to_string(contigStride[0]) + " (overlapping rows)");
+        }
+        this->stride = *stride;
+        this->isContiguous = (*stride == contigStride);
     }
 
+    size_t numel = shape[0] * contigStride[0];
     this->origNumel = numel;                                      // store original numel
     this->origBytes = DIV_ROUND_UP(numel * XDtypeBit(dtype), 8);  // store original bytes
     this->origShape = shape;                                      // store original shape
+    this->origStride = this->stride;                              // store original stride
     this->origDtype = dtype;                                      // store original dtype
     this->numel = numel;
     this->bytes = DIV_ROUND_UP(numel * XDtypeBit(dtype), 8);
@@ -35,14 +64,16 @@ XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
     return *this;
 }
 
-XTensor::XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr)
+XTensor::XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
+                 std::optional<std::vector<size_t>> stride)
 {
-    Init(std::move(shape), dtype, ptr, XTENSOR_STATIC);
+    Init(std::move(shape), dtype, ptr, XTENSOR_STATIC, std::move(stride));
 }
 
-XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr)
+XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
+                       std::optional<std::vector<size_t>> stride)
 {
-    return Init(std::move(shape), dtype, ptr, XTENSOR_STATIC);
+    return Init(std::move(shape), dtype, ptr, XTENSOR_STATIC, std::move(stride));
 }
 
 void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &os)
@@ -228,20 +259,21 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream
         oss << name << ": ";
     }
 
-    if (bytes == 0) {
+    size_t spanBytes = DIV_ROUND_UP(SpanNumel() * XDtypeBit(dtype), 8);
+    if (spanBytes == 0) {
         oss << "empty tensor" << endingNoteStr << std::endl;
         os << oss.str() << std::flush;
         return;
     }
 
-    void *p = malloc(bytes);
+    void *p = malloc(spanBytes);
     if (!p) {
         oss << "failed to allocate memory" << endingNoteStr << std::endl;
         os << oss.str() << std::flush;
         return;
     }
 
-    err = aclrtMemcpy(p, bytes, ptr, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    err = aclrtMemcpy(p, spanBytes, ptr, spanBytes, ACL_MEMCPY_DEVICE_TO_HOST);
     if (err != ACL_ERROR_NONE) {
         free(p);
         oss << "failed to copy data from device to host" << endingNoteStr << std::endl;
@@ -256,9 +288,18 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream
 
     size_t col = shape[shape.size() - 1];
     size_t row = numel / col;
+    // Offset of element (j, i) in the 2D flattening below. Dims >= 1 are contiguous, so only
+    // dim 0 contributes a row pitch; for 1-D tensors dim 0 is the last dim itself.
+    size_t inner = (shape.size() == 1) ? 0 : row / shape[0];
+    auto elemOff = [&](size_t j, size_t i) -> size_t {
+        if (shape.size() == 1) {
+            return i * stride[0];
+        }
+        return (j / inner) * stride[0] + (j % inner) * col + i;
+    };
     for (j = 0; j < row && j < hRow; j++) {
         for (i = 0; i < col && i < hCol; i++) {
-            PrintMemoryVal(p, j * col + i, dtype, oss);
+            PrintMemoryVal(p, elemOff(j, i), dtype, oss);
             if (i != col - 1) {
                 oss << ", ";
             }
@@ -270,7 +311,7 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream
         }
 
         for (; i < col; i++) {
-            PrintMemoryVal(p, j * col + i, dtype, oss);
+            PrintMemoryVal(p, elemOff(j, i), dtype, oss);
             if (i != col - 1) {
                 oss << ", ";
             }
@@ -297,7 +338,7 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream
 
     for (; j < row; j++) {
         for (i = 0; i < col && i < hCol; i++) {
-            PrintMemoryVal(p, j * col + i, dtype, oss);
+            PrintMemoryVal(p, elemOff(j, i), dtype, oss);
             if (i != col - 1) {
                 oss << ", ";
             }
@@ -309,7 +350,7 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream
         }
 
         for (; i < col; i++) {
-            PrintMemoryVal(p, j * col + i, dtype, oss);
+            PrintMemoryVal(p, elemOff(j, i), dtype, oss);
             if (i != col - 1) {
                 oss << ", ";
             }
@@ -366,14 +407,15 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os,
         return false;
     }
 
-    void *p = malloc(bytes);
+    size_t spanBytes = DIV_ROUND_UP(SpanNumel() * XDtypeBit(dtype), 8);
+    void *p = malloc(spanBytes);
     if (!p) {
         oss << "failed to allocate memory" << endingNoteStr << std::endl;
         os << oss.str() << std::flush;
         return false;
     }
 
-    aclError err = aclrtMemcpy(p, bytes, ptr, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    aclError err = aclrtMemcpy(p, spanBytes, ptr, spanBytes, ACL_MEMCPY_DEVICE_TO_HOST);
     if (err != ACL_ERROR_NONE) {
         free(p);
         oss << "failed to copy data from device to host" << endingNoteStr << std::endl;
@@ -383,28 +425,33 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os,
 
     size_t nanCount = 0, infCount = 0, largeCount = 0;
     size_t firstNanIdx = 0, firstInfIdx = 0, firstLargeIdx = 0;
+    // Dims >= 1 are contiguous, so dim 0 only contributes a row pitch to the element offset;
+    // the reported first-anomaly indices stay logical (element order) positions.
+    size_t rowElems = numel / shape[0];
+    size_t pitch = stride[0];
 
     for (size_t i = 0; i < numel; i++) {
+        size_t off = (i / rowElems) * pitch + i % rowElems;
         float val;
         switch (dtype) {
             case FP16: {
-                __fp16 raw = (static_cast<__fp16 *>(p))[i];
+                __fp16 raw = (static_cast<__fp16 *>(p))[off];
                 val = static_cast<float>(raw);
                 break;
             }
             case BF16: {
-                uint16_t data = (static_cast<uint16_t *>(p))[i];
+                uint16_t data = (static_cast<uint16_t *>(p))[off];
                 uint32_t float32Data = static_cast<uint32_t>(data) << 16;
                 std::memcpy(&val, &float32Data, sizeof(float));
                 break;
             }
             case FP32: {
-                val = (static_cast<float *>(p))[i];
+                val = (static_cast<float *>(p))[off];
                 break;
             }
             case CPLXF: {
                 // Check both real and imaginary parts
-                std::complex<float> cval = (static_cast<std::complex<float> *>(p))[i];
+                std::complex<float> cval = (static_cast<std::complex<float> *>(p))[off];
                 if (std::isnan(cval.real()) || std::isnan(cval.imag())) {
                     nanCount++;
                     firstNanIdx = (nanCount == 1) ? i : firstNanIdx;
@@ -480,6 +527,7 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os,
 
 XTensor &XTensor::Memset(int32_t value, aclrtStream stream, size_t offset, bool roundUp)
 {
+    CheckContiguous(__func__);
     if (!ptr || offset >= numel) {
         return *this;  // No operation needed if ptr is null or offset is out of bounds
     }
@@ -513,6 +561,13 @@ std::string XTensor::ToStr(const char *name) const
         oss << (i ? ", " : "") << shape[i];
     }
     oss << "]";
+    if (!isContiguous) {
+        oss << " stride=[";
+        for (size_t i = 0; i < dims; i++) {
+            oss << (i ? ", " : "") << stride[i];
+        }
+        oss << "]";
+    }
     if (ptr == nullptr) {
         oss << "(null)";
     }
@@ -521,6 +576,7 @@ std::string XTensor::ToStr(const char *name) const
 
 XTensor &XTensor::View(std::vector<size_t> shape)
 {
+    CheckContiguous(__func__);
     size_t newNumel = shape.empty() ? 0 : 1;
     for (uint64_t i = 0; i < shape.size(); i++) {
         newNumel *= shape[i];
@@ -533,11 +589,13 @@ XTensor &XTensor::View(std::vector<size_t> shape)
     this->shape = shape;
     this->numel = newNumel;
     this->bytes = newBytes;
+    this->stride = ContiguousStride(this->shape);
     return *this;
 }
 
 XTensor &XTensor::View(enum XDtype type)
 {
+    CheckContiguous(__func__);
     size_t oldBit = XDtypeBit(dtype);
     size_t newBit = XDtypeBit(type);
 
@@ -554,12 +612,14 @@ XTensor &XTensor::View(enum XDtype type)
         this->numel = this->numel * oldBit / newBit;
     }
     this->dtype = type;
+    this->stride = ContiguousStride(this->shape);
     return *this;
 }
 
 // Change the size of a specific dimension while keeping the other dimensions unchanged
 XTensor &XTensor::View(size_t newDim, uint32_t dim)
 {
+    CheckContiguous(__func__);
     if (shape.size() <= dim) {
         throw std::runtime_error("Invalid dimension index for View operation.");
     }
@@ -582,11 +642,13 @@ XTensor &XTensor::View(size_t newDim, uint32_t dim)
     this->shape[dim] = newDim;
     this->numel = newNumel;
     this->bytes = newBytes;
+    this->stride = ContiguousStride(this->shape);
     return *this;
 }
 
 XTensor &XTensor::ResetView(bool resetShape, bool resetDtype)
 {
+    CheckContiguous(__func__);
     if (resetShape) {
         View(origShape);
     }
@@ -598,9 +660,11 @@ XTensor &XTensor::ResetView(bool resetShape, bool resetDtype)
 
 XTensor &XTensor::MakeOriginal()
 {
+    CheckContiguous(__func__);
     this->origNumel = this->numel;
     this->origBytes = this->bytes;
     this->origShape = this->shape;
+    this->origStride = this->stride;
     this->origDtype = this->dtype;
     return *this;
 }
@@ -609,7 +673,10 @@ void XTensor::Save(const std::string &path)
 {
 #ifdef XLITE_DEBUG_ON
     auto options = at::TensorOptions().dtype(ToScalarType(dtype)).device(at::Device("npu"));
-    at::Tensor t = at::from_blob(ptr, std::vector<int64_t>(shape.begin(), shape.end()), options);
+    // from_blob takes the layout as-is; torch's own .cpu().contiguous() adapts the
+    // stride, so no custom device-side gather is needed for pitched tensors.
+    at::Tensor t = at::from_blob(ptr, std::vector<int64_t>(shape.begin(), shape.end()),
+                                 std::vector<int64_t>(stride.begin(), stride.end()), options);
     torch::save(t.cpu().contiguous(), path);
 #endif
 }

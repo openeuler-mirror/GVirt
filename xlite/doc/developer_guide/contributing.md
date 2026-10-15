@@ -82,6 +82,11 @@ XLITE_DEBUG_ON=all cmake -B build && cmake --build build -j
 bash tests/run_accuracy.sh
 ```
 
+## 张量布局语义
+
+`csrc/base.h` 中 `XTensor` 的 shape/stride/bytes/连续性语义(含 torch 张量包装规则与非连续
+张量的限制)见 [xtensor.md](xtensor.md)。
+
 ## 性能测试
 
 vllm_ascend + xlite在线服务的性能测试及性能对比分析，请参考 [e2e_test.md](e2e_test.md)

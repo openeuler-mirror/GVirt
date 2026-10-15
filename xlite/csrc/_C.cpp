@@ -1371,7 +1371,7 @@ void Print(at::Tensor &x, const char *name, uint32_t nRow, uint32_t nCol)
 {
     XTensor _x;
 
-    InitXTensor(_x, x);
+    InitXTensor(_x, x, /*allowPitched=*/true);  // debug output reads pitched layouts correctly
     _x.Print(name, nRow, nCol);
 }
 
