@@ -27,10 +27,11 @@ public:
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc,
                                 GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,
                                 GM_ADDR scores, GM_ADDR lastTopk, GM_ADDR seqPositions,
-                                GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads,
-                                uint32_t headDim, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,
-                                GM_ADDR kScaleCache = nullptr, uint32_t compressRatio = 1)
+                                GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,
+                                uint32_t nHeads, uint32_t headDim, uint32_t blockSize,
+                                uint32_t batch, uint32_t maxNumBlock, uint32_t topK,
+                                uint8_t skipDenseTopk, GM_ADDR kScaleCache = nullptr,
+                                uint32_t compressRatio = 1)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -47,6 +48,7 @@ public:
         this->nHeads = nHeads;
         this->headDim = headDim;
         this->blockSize = blockSize;
+        this->kCacheStride = MAX(kCacheStride, blockSize * headDim);
         this->batch = batch;
         this->maxNumBlock = maxNumBlock;
         this->topK = topK;
@@ -277,8 +279,8 @@ public:
             // copy k (blockSize, headDim) to L1
             uint32_t block = blockTable[mIdx + mIdxStart];
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
-            CopyGmToL1Nd2Nz(kl1Buf[curr], kCache[block * blockSize * headDim], mSize, headDim,
-                            headDim, mBlockPad);
+            CopyGmToL1Nd2Nz(kl1Buf[curr], kCache[block * kCacheStride], mSize, headDim, headDim,
+                            mBlockPad);
             // copy q (queryTaskLen, nHeads, headDim) to L1
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
             CopyGmToL1Nd2Nz(ql1Buf[curr], query, nSize, headDim, headDim, nBlockPad);
@@ -734,6 +736,7 @@ private:
     uint32_t nHeads;
     uint32_t headDim;
     uint32_t blockSize;
+    uint32_t kCacheStride;
     uint32_t batch;
     uint32_t maxNumBlock;
     uint32_t topK;
@@ -774,32 +777,32 @@ private:
 #endif
 };
 
-#define INDEXER_TOPK_FUNC_DEFINE(dtype)                                                            \
-    extern "C" __global__ __aicore__ void indexer_topk_##dtype(                                    \
-        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc, GM_ADDR queryLens,       \
-        GM_ADDR cachedLens, GM_ADDR blockTables, GM_ADDR scores, GM_ADDR lastTopk,                 \
-        GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads,                  \
-        uint32_t headDim, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlock, uint32_t topK, \
-        uint8_t skipDenseTopk, uint32_t compressRatio)                                             \
-    {                                                                                              \
-        IndexerTopK<dtype, float, dtype, dtype> op;                                                \
-        op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,      \
-                lastTopk, seqPositions, topkIndices, sync, nHeads, headDim, blockSize, batch,      \
-                maxNumBlock, topK, skipDenseTopk, nullptr, compressRatio);                         \
-        op.Run();                                                                                  \
+#define INDEXER_TOPK_FUNC_DEFINE(dtype)                                                       \
+    extern "C" __global__ __aicore__ void indexer_topk_##dtype(                               \
+        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc, GM_ADDR queryLens,  \
+        GM_ADDR cachedLens, GM_ADDR blockTables, GM_ADDR scores, GM_ADDR lastTopk,            \
+        GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,       \
+        uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                \
+        uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk, uint32_t compressRatio)   \
+    {                                                                                         \
+        IndexerTopK<dtype, float, dtype, dtype> op;                                           \
+        op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores, \
+                lastTopk, seqPositions, topkIndices, sync, kCacheStride, nHeads, headDim,     \
+                blockSize, batch, maxNumBlock, topK, skipDenseTopk, nullptr, compressRatio);  \
+        op.Run();                                                                             \
     }
 
 #define INDEXER_TOPK_C8_FUNC_DEFINE(dtype)                                                       \
     extern "C" __global__ __aicore__ void indexer_topk_##dtype(                                  \
         GM_ADDR q, GM_ADDR k_cache, GM_ADDR weight, GM_ADDR query_start_loc, GM_ADDR query_lens, \
         GM_ADDR cached_lens, GM_ADDR block_tables, GM_ADDR scores, GM_ADDR last_topk,            \
-        GM_ADDR seq_positions, GM_ADDR topk_indices, GM_ADDR sync, uint32_t heads, uint32_t dim, \
-        uint32_t block_size, uint32_t batch, uint32_t max_blocks, uint32_t topk,                 \
-        uint8_t skip_dense_topk, GM_ADDR k_scale_cache)                                          \
+        GM_ADDR seq_positions, GM_ADDR topk_indices, GM_ADDR sync, uint32_t k_cache_stride,      \
+        uint32_t heads, uint32_t dim, uint32_t block_size, uint32_t batch, uint32_t max_blocks,  \
+        uint32_t topk, uint8_t skip_dense_topk, GM_ADDR k_scale_cache)                           \
     {                                                                                            \
         IndexerTopK<dtype, int32_t, half, float> op;                                             \
         op.Init(q, k_cache, weight, query_start_loc, query_lens, cached_lens, block_tables,      \
-                scores, last_topk, seq_positions, topk_indices, sync, heads, dim, block_size,    \
-                batch, max_blocks, topk, skip_dense_topk, k_scale_cache);                        \
+                scores, last_topk, seq_positions, topk_indices, sync, k_cache_stride, heads,     \
+                dim, block_size, batch, max_blocks, topk, skip_dense_topk, k_scale_cache);       \
         op.Run();                                                                                \
     }

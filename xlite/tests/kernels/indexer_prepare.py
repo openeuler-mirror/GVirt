@@ -163,8 +163,9 @@ def run_test(
 
     # ---------------- reference ----------------
     # When block_size>0 the kernel writes the LayerNorm+RoPE result into the
-    # paged index_k_cache (output_norm_gm = kcache + slot*norm_dim) and does
-    # NOT modify kw in place. kw[:, :index_head_dim] is read as the norm input
+    # paged index_k_cache (output_norm_gm = kcache + (slot//block_size)*stride0
+    # + (slot%block_size)*norm_dim) and does NOT modify kw in place.
+    # kw[:, :index_head_dim] is read as the norm input
     # and is otherwise left untouched. Build the cache reference accordingly.
     freqs_per_token = freqs_cis.cpu()[pos_list].to("npu")
 

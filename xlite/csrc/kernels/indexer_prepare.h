@@ -17,9 +17,9 @@ __aicore__ void norm_ropex_cache_muls(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, 
                                       uint32_t n_rows, uint32_t n_cols, uint32_t norm_dim,
                                       uint32_t rope_dim, GM_ADDR kcache = nullptr,
                                       GM_ADDR slot_mapping = nullptr, uint32_t block_size = 0,
-                                      uint32_t scale_dim = 0, float scale = 1.0f,
-                                      uint32_t top_k = 2048, int core_offset = 0,
-                                      int *next_core_offset = nullptr)
+                                      uint32_t kcache_stride = 0, uint32_t scale_dim = 0,
+                                      float scale = 1.0f, uint32_t top_k = 2048,
+                                      int core_offset = 0, int *next_core_offset = nullptr)
 {
     /*
      * | <----------------------------- n_cols ------------------------------> |
@@ -237,8 +237,11 @@ __aicore__ void norm_ropex_cache_muls(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, 
         auto *freqs_gm = (__gm__ float *)(freqs) + ipos * rope_dim;
         __gm__ Dtype *output_norm_gm = input_gm;
         if (needs_cache) {
+            uint32_t slot = ub_slot_mapping[irow - ub_pos_start];
             output_norm_gm =
-                (__gm__ Dtype *)(kcache) + ub_slot_mapping[irow - ub_pos_start] * norm_dim;
+                (__gm__ Dtype *)(kcache) +
+                (uint64_t)(slot / block_size) * MAX(kcache_stride, block_size * norm_dim) +
+                (slot % block_size) * norm_dim;
         }
 
         // ub_freqs[curr]: GM -> UB
@@ -389,14 +392,12 @@ __aicore__ void norm_ropex_cache_muls(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, 
 }
 
 template <typename Dtype>
-__aicore__ inline void indexer_prepare(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR freqs,
-                                       GM_ADDR position, uint32_t token_num,
-                                       uint32_t index_head_dim, uint32_t index_n_heads,
-                                       uint32_t rope_head_dim, uint32_t block_size, float norm_eps,
-                                       bool norm_in_fp32 = false, GM_ADDR index_k_cache = nullptr,
-                                       GM_ADDR slot_mapping = nullptr, GM_ADDR q = nullptr,
-                                       float scale = 1.0f, uint32_t top_k = 2048,
-                                       bool is_long = false)
+__aicore__ inline void indexer_prepare(
+    GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR freqs, GM_ADDR position,
+    uint32_t token_num, uint32_t index_head_dim, uint32_t index_n_heads, uint32_t rope_head_dim,
+    uint32_t block_size, float norm_eps, bool norm_in_fp32 = false, GM_ADDR index_k_cache = nullptr,
+    GM_ADDR slot_mapping = nullptr, uint32_t index_k_cache_stride = 0, GM_ADDR q = nullptr,
+    float scale = 1.0f, uint32_t top_k = 2048, bool is_long = false)
 {
     set_atomic_none();
     set_mask_norm();
@@ -405,10 +406,10 @@ __aicore__ inline void indexer_prepare(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormB
     uint32_t total_dim = index_head_dim + index_n_heads;
     int core_offset = 0;
 
-    norm_ropex_cache_muls<Dtype>(kw, kNorm, kNormBias, position, norm_eps, norm_in_fp32, freqs,
-                                 token_num, total_dim, index_head_dim, rope_head_dim, index_k_cache,
-                                 slot_mapping, block_size, is_long ? index_n_heads : 0, scale,
-                                 top_k, core_offset, &core_offset);
+    norm_ropex_cache_muls<Dtype>(
+        kw, kNorm, kNormBias, position, norm_eps, norm_in_fp32, freqs, token_num, total_dim,
+        index_head_dim, rope_head_dim, index_k_cache, slot_mapping, block_size,
+        index_k_cache_stride, is_long ? index_n_heads : 0, scale, top_k, core_offset, &core_offset);
 
     if (is_long) {
         rope_complex_and_cache<Dtype>(token_num, index_n_heads, index_head_dim, rope_head_dim, 0,
@@ -417,26 +418,27 @@ __aicore__ inline void indexer_prepare(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormB
     }
 }
 
-#define INDEXER_PREPARE_FUNC_DEFINE(dtype)                                                       \
-    extern "C" __global__ __aicore__ void indexer_prepare_##dtype(                               \
-        GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR freqs, GM_ADDR position,           \
-        uint32_t token_num, uint32_t index_head_dim, uint32_t index_n_heads,                     \
-        uint32_t rope_head_dim, uint32_t block_size, float norm_eps, bool norm_in_fp32,          \
-        GM_ADDR index_k_cache, GM_ADDR slot_mapping, GM_ADDR q, float scale, uint32_t top_k,     \
-        bool is_long)                                                                            \
-    {                                                                                            \
-        indexer_prepare<dtype>(kw, kNorm, kNormBias, freqs, position, token_num, index_head_dim, \
-                               index_n_heads, rope_head_dim, block_size, norm_eps, norm_in_fp32, \
-                               index_k_cache, slot_mapping, q, scale, top_k, is_long);           \
+#define INDEXER_PREPARE_FUNC_DEFINE(dtype)                                                         \
+    extern "C" __global__ __aicore__ void indexer_prepare_##dtype(                                 \
+        GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR freqs, GM_ADDR position,             \
+        uint32_t token_num, uint32_t index_head_dim, uint32_t index_n_heads,                       \
+        uint32_t rope_head_dim, uint32_t block_size, float norm_eps, bool norm_in_fp32,            \
+        GM_ADDR index_k_cache, GM_ADDR slot_mapping, uint32_t index_k_cache_stride, GM_ADDR q,     \
+        float scale, uint32_t top_k, bool is_long)                                                 \
+    {                                                                                              \
+        indexer_prepare<dtype>(kw, kNorm, kNormBias, freqs, position, token_num, index_head_dim,   \
+                               index_n_heads, rope_head_dim, block_size, norm_eps, norm_in_fp32,   \
+                               index_k_cache, slot_mapping, index_k_cache_stride, q, scale, top_k, \
+                               is_long);                                                           \
     }
 #else
-#define INDEXER_PREPARE_FUNC_DEFINE(dtype)                                                   \
-    extern "C" __global__ __aicore__ void indexer_prepare_##dtype(                           \
-        GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR freqs, GM_ADDR position,       \
-        uint32_t token_num, uint32_t index_head_dim, uint32_t index_n_heads,                 \
-        uint32_t rope_head_dim, uint32_t block_size, float norm_eps, bool norm_in_fp32,      \
-        GM_ADDR index_k_cache, GM_ADDR slot_mapping, GM_ADDR q, float scale, uint32_t top_k, \
-        bool is_long)                                                                        \
-    {                                                                                        \
+#define INDEXER_PREPARE_FUNC_DEFINE(dtype)                                                     \
+    extern "C" __global__ __aicore__ void indexer_prepare_##dtype(                             \
+        GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR freqs, GM_ADDR position,         \
+        uint32_t token_num, uint32_t index_head_dim, uint32_t index_n_heads,                   \
+        uint32_t rope_head_dim, uint32_t block_size, float norm_eps, bool norm_in_fp32,        \
+        GM_ADDR index_k_cache, GM_ADDR slot_mapping, uint32_t index_k_cache_stride, GM_ADDR q, \
+        float scale, uint32_t top_k, bool is_long)                                             \
+    {                                                                                          \
     }
 #endif

@@ -1320,7 +1320,8 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
     }
     launchKernel(rt.aivNum, rt.stream, kw.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
                  kw.shape[0], indexHeadDim, indexNHeads, ropeHeadDim, blockSize, normEps,
-                 kNorm.dtype == FP32, indexKCache.ptr, slotMapping.ptr, q.ptr, scale, topK, isLong);
+                 kNorm.dtype == FP32, indexKCache.ptr, slotMapping.ptr, indexKCache.stride[0],
+                 q.ptr, scale, topK, isLong);
 }
 
 void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm,
@@ -1973,8 +1974,8 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
     }
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, scores.ptr, queryStartLoc.ptr,
-                 lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, headDim, blockSize, batch,
-                 maxNumBlocks);
+                 lens.ptr, cachedLens.ptr, blockTables.ptr, kCache.stride[0], nHeads, headDim,
+                 blockSize, batch, maxNumBlocks);
 }
 
 void XliteOpRepeatInterleave(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numTokens,
@@ -2043,8 +2044,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
             aclrtlaunch_indexer_topk_int8_t(
                 rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
-                topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlocks, topK,
-                skipDenseTopk, kScaleCache.ptr);
+                topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
+                maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr);
         }
         return;
     }
@@ -2063,8 +2064,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     }
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
-                 topkIndices.ptr, sync.ptr, nHeads, headDim, blockSize, batch, maxNumBlocks, topK,
-                 skipDenseTopk, compressRatio);
+                 topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
+                 maxNumBlocks, topK, skipDenseTopk, compressRatio);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,

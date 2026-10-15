@@ -838,8 +838,11 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v and MLA k/pe caches so far).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA;
+        // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
+        // caches so far — C8 DSA int8 index/scale caches stay contiguous).
+        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
+                          (attnType == XMODEL_ATTN_DSA &&
+                           kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
@@ -1049,8 +1052,11 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v and MLA k/pe caches so far).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA;
+        // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
+        // caches so far — C8 DSA int8 index/scale caches stay contiguous).
+        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
+                          (attnType == XMODEL_ATTN_DSA &&
+                           kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
@@ -1138,8 +1144,11 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v and MLA k/pe caches so far).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA;
+        // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
+        // caches so far — C8 DSA int8 index/scale caches stay contiguous).
+        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
+                          (attnType == XMODEL_ATTN_DSA &&
+                           kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
@@ -2101,7 +2110,9 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
     InitXTensor(_kNormBias, kNormBias);
     InitXTensor(_freqs, freqs);
     InitXTensor(_position, position);
-    InitXTensor(_indexKCache, indexKCache);
+    // C8 (int8) index caches stay contiguous until the C8 kernels address a pitch.
+    bool indexC8 = indexKCache.scalar_type() == at::kChar;
+    InitXTensor(_indexKCache, indexKCache, /*allowPitched=*/!indexC8);
     InitXTensor(_slotMapping, slotMapping);
     InitXTensor(_q, q);
     XliteOpIndexerPrepare(rt, _kw, _kNorm, _kNormBias, _freqs, _position, indexHeadDim, indexNHeads,
@@ -2291,7 +2302,7 @@ void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &
     XTensor _q, _kCache, _weight, _scores, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
     InitXTensor(_q, q);
-    InitXTensor(_kCache, kCache);
+    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
     InitXTensor(_weight, weight);
     InitXTensor(_scores, scores);
     InitXTensor(_queryStartLoc, queryStartLoc);
@@ -2315,7 +2326,7 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     InitXTensor(_ks, kScaleCache);
 
     InitXTensor(_q, q);
-    InitXTensor(_kCache, kCache);
+    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
     InitXTensor(_weight, weight);
     InitXTensor(_topkIndices, topkIndices);
     InitXTensor(_queryStartLoc, queryStartLoc);
