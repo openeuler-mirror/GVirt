@@ -882,11 +882,11 @@ __aicore__ void compressor(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normW
     if (hasRope) {
         // compressKv stays bridge-enforced contiguous here, so the flat-slot
         // pitch matches the kernel's block addressing.
-        rope_complex_and_cache<Dtype>(
-            nTotalBlocks, 1, head_dim, rope_head_dim, head_dim - rope_head_dim, head_dim,
-            weightedSum, nullptr, 0, 0, freqs, compressPositions, compressBlockSize, compressKv,
-            compressSlotMapping, compressBlockSize * head_dim, false, true, 0, 0, nullptr,
-            hasRotate, rotateScale);
+        rope_complex_and_cache<Dtype>(nTotalBlocks, 1, head_dim, rope_head_dim,
+                                      head_dim - rope_head_dim, head_dim, weightedSum, nullptr, 0,
+                                      0, freqs, compressPositions, compressBlockSize, compressKv,
+                                      compressSlotMapping, compressBlockSize * head_dim, false,
+                                      true, 0, 0, nullptr, hasRotate, rotateScale);
     }
 }
 
