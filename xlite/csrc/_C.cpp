@@ -841,8 +841,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
         // caches so far — C8 DSA int8 index/scale caches stay contiguous).
         bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
-                          (attnType == XMODEL_ATTN_DSA &&
-                           kvCache[i][2].scalar_type() != at::kChar);
+                          (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
@@ -1055,8 +1054,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
         // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
         // caches so far — C8 DSA int8 index/scale caches stay contiguous).
         bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
-                          (attnType == XMODEL_ATTN_DSA &&
-                           kvCache[i][2].scalar_type() != at::kChar);
+                          (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
@@ -1147,8 +1145,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
         // caches so far — C8 DSA int8 index/scale caches stay contiguous).
         bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
-                          (attnType == XMODEL_ATTN_DSA &&
-                           kvCache[i][2].scalar_type() != at::kChar);
+                          (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
         }
