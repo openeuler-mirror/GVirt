@@ -284,6 +284,14 @@ class CMakeBuild(build_ext):
             f"-DXLITE_EDITABLE_BUILD={'ON' if is_editable else 'OFF'}",
         ]
         configure_cmd.append(f"-DXLITE_VERSION={_read_version()}")
+
+        # XLITE_BENCH_TIMED env var -> cmake -DXLITE_BENCH_TIMED=ON, enabling the
+        # timed micro-benchmark kernels (bench_timed/bench_mte/bench_vec/bench_cube).
+        # The CMake option defaults to OFF; only flip it when the env var is set.
+        if os.environ.get("XLITE_BENCH_TIMED", "").upper() in ("ON", "1", "TRUE", "YES"):
+            configure_cmd.append("-DXLITE_BENCH_TIMED=ON")
+            print("DXLITE_BENCH_TIMED has been set")
+
         build_cmd = ["cmake", "--build", str(build_temp), "-j"]
         install_cmd = ["cmake", "--install", str(build_temp)]
 

@@ -16,6 +16,17 @@ message(STATUS "RUN_MODE: ${RUN_MODE}")
 message(STATUS "SOC_VERSION: ${SOC_VERSION}")
 message(STATUS "ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
 
+# In-kernel timed micro-benchmark variants (SYS_CNT sampling via the
+# BENCH_TICK* macros in csrc/kernels/kernel_macro.h). ON: bench_{aiv,aic}.cpp
+# additionally instantiate the *_timed twins, bench_aiv.cpp also instantiates
+# the MTE and vector families (BENCH_MTE_ITEMS / BENCH_VEC_ITEMS), and the
+# host exposes the bench_timed / bench_mte / bench_vec entry points.
+# OFF (default): the timed kernels, stubs and host API do not exist at all,
+# and the bench TUs stay token-identical to the calibrated 7-kernel layout.
+# The macro reaches the kernels via ascendc_compile_definitions (below) and
+# the host targets via target_compile_definitions.
+option(XLITE_BENCH_TIMED "Build in-kernel timed micro-benchmark variants" OFF)
+
 find_program(CCACHE_FOUND ccache)
 if (CCACHE_FOUND)
     set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
@@ -69,6 +80,9 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/msd_merge_dequant_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_act_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/compressor_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bench_aiv.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bench_aic.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bench_mix.cpp
 )
 
 # xlite_kernels_bf16_${RUN_MODE}
@@ -233,6 +247,15 @@ if(NOT _xlite_dbg_enabled)
     ascendc_compile_definitions(xlite_kernels_f16_${RUN_MODE} PRIVATE ASCENDC_DUMP=0)
 endif()
 
+# Thread MICROBENCH_TIMED into the ascendc kernel build the same way as
+# ASCENDC_DUMP above: the definition must reach the precompile step (which
+# extracts the kernel stubs from the preprocessed sources) and both device
+# channels, not just the host objects.
+if(XLITE_BENCH_TIMED)
+    message(STATUS "XLITE_BENCH_TIMED=ON -> MICROBENCH_TIMED=1 (timed micro-bench kernels + bench_timed API)")
+    ascendc_compile_definitions(xlite_kernels_common_${RUN_MODE} PRIVATE MICROBENCH_TIMED=1)
+endif()
+
 # xlite
 add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.cpp
@@ -366,6 +389,13 @@ pybind11_add_module(
 target_compile_options(_C PRIVATE
     -std=c++17 -O3 -Wall -Werror -fPIC
 )
+
+# Host side of XLITE_BENCH_TIMED: gates XliteOpBenchTimed in op.cpp/op.h and
+# the bench_timed pybind entry in _C.cpp.
+if(XLITE_BENCH_TIMED)
+    target_compile_definitions(xlite PRIVATE MICROBENCH_TIMED=1)
+    target_compile_definitions(_C PRIVATE MICROBENCH_TIMED=1)
+endif()
 
 target_include_directories(_C PRIVATE
     ${pybind11_INCLUDE_DIRS}

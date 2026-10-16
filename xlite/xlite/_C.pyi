@@ -1479,6 +1479,417 @@ def add(rt: Runtime, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> None:
     """
     ...
 
+def empty_aiv(rt: Runtime, block_num: int = 0) -> int:
+    """Launch an empty (no-op) kernel on AIV cores to probe launch overhead.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        block_num (int): Number of AIV blocks; 0 = all vector cores.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+def empty_aic(rt: Runtime, block_num: int = 0) -> int:
+    """Launch an empty (no-op) kernel on AIC cores to probe launch overhead.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        block_num (int): Number of AIC blocks; 0 = all cube cores.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+def empty_mix(rt: Runtime, block_num: int = 0) -> int:
+    """Launch an empty (no-op) mix kernel (AIC:AIV = 1:2) to probe launch overhead.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        block_num (int): Number of AIC blocks, each paired with 2 AIV blocks;
+            0 = all cube cores (vector cores are scheduled 2x that).
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_add_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                   block_num: int = 0) -> int:
+    """Run a dependent scalar add chain on an AIV core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value; the operand is entangled as seed^i to defeat
+            compiler reassociation (uint32).
+        iters (int): Number of scalar adds in the chain.
+        block_num (int): Number of AIV blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_xor_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                   block_num: int = 0) -> int:
+    """Run a dependent scalar xor chain on an AIV core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value; the operand is seed^i (uint32).
+        iters (int): Number of scalar xors in the chain.
+        block_num (int): Number of AIV blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_mul_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                   block_num: int = 0) -> int:
+    """Run a dependent scalar mul chain on an AIV core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value and mul operand (uint32); odd values keep the
+            chain from collapsing to 0 immediately.
+        iters (int): Number of scalar muls in the chain.
+        block_num (int): Number of AIV blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_div_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                   block_num: int = 0) -> int:
+    """Run a dependent scalar div chain on an AIV core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value and divisor (uint32); must not be 0.
+        iters (int): Number of scalar divisions in the chain.
+        block_num (int): Number of AIV blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_fadd_aiv(rt: Runtime, out: torch.Tensor, seed: float = 1e-30, iters: int = 1000000,
+                    block_num: int = 0) -> int:
+    """Run a dependent scalar fp32 add chain on an AIV core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element float32 tensor receiving the final accumulator.
+        seed (float): Initial value and add operand; the default keeps values in
+            the normal fp32 range for any iters.
+        iters (int): Number of scalar fp32 adds in the chain.
+        block_num (int): Number of AIV blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_add_unroll4_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                           block_num: int = 0) -> int:
+    """Run a scalar add chain on an AIV core, unrolled by 4 (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value and add operand (uint32).
+        iters (int): Total number of scalar adds; must be divisible by 4.
+        block_num (int): Number of AIV blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_add_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                   block_num: int = 0) -> int:
+    """Run a dependent scalar add chain on an AIC core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value; the operand is entangled as seed^i to defeat
+            compiler reassociation (uint32).
+        iters (int): Number of scalar adds in the chain.
+        block_num (int): Number of AIC blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_xor_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                   block_num: int = 0) -> int:
+    """Run a dependent scalar xor chain on an AIC core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value; the operand is seed^i (uint32).
+        iters (int): Number of scalar xors in the chain.
+        block_num (int): Number of AIC blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_mul_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                   block_num: int = 0) -> int:
+    """Run a dependent scalar mul chain on an AIC core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value and mul operand (uint32); odd values keep the
+            chain from collapsing to 0 immediately.
+        iters (int): Number of scalar muls in the chain.
+        block_num (int): Number of AIC blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_div_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                   block_num: int = 0) -> int:
+    """Run a dependent scalar div chain on an AIC core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value and divisor (uint32); must not be 0.
+        iters (int): Number of scalar divisions in the chain.
+        block_num (int): Number of AIC blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_fadd_aic(rt: Runtime, out: torch.Tensor, seed: float = 1e-30, iters: int = 1000000,
+                    block_num: int = 0) -> int:
+    """Run a dependent scalar fp32 add chain on an AIC core (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element float32 tensor receiving the final accumulator.
+        seed (float): Initial value and add operand; the default keeps values in
+            the normal fp32 range for any iters.
+        iters (int): Number of scalar fp32 adds in the chain.
+        block_num (int): Number of AIC blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+
+def scalar_add_unroll4_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
+                           block_num: int = 0) -> int:
+    """Run a scalar add chain on an AIC core, unrolled by 4 (micro-benchmark).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
+        seed (int): Initial value and add operand (uint32).
+        iters (int): Total number of scalar adds; must be divisible by 4.
+        block_num (int): Number of AIC blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+def bench_timed(rt: Runtime, variant: str, out: torch.Tensor, ticks: torch.Tensor, seed: float = 3,
+                iters: int = 1000000, block_num: int = 0) -> int:
+    """Run a timed scalar micro-benchmark with in-kernel cycle sampling.
+
+    Only present in builds configured with XLITE_BENCH_TIMED=ON; in the
+    default build this entry point (and the timed kernels) do not exist.
+
+    Same dependent chains as the scalar_* functions, wrapped with SYS_CNT
+    sampling (fixed 50 MHz counter, cycles / 50 = microseconds). One entry for
+    the whole timed family; `variant` picks the operation and core type.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        variant (str): "<op>_<aiv|aic>" with op in add / xor / mul / div /
+            fadd / add_unroll4 (e.g. "add_aiv").
+        out (torch.Tensor): 1-element tensor receiving the final accumulator
+            (int32, or fp32 for fadd).
+        ticks (torch.Tensor): Caller-pre-allocated int64 tensor with at least
+            3 elements, receiving [region start, loop issued, after
+            PIPE_ALL drain] in SYS_CNT cycles. Written in one batch by the
+            kernel after the closing tick, so no store lands inside the
+            measured window.
+        seed (float): Initial value and operand (cast to the variant's dtype).
+        iters (int): Number of scalar ops in the chain.
+        block_num (int): Number of blocks; 0 = single block.
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+def bench_mte(rt: Runtime, variant: str, src: torch.Tensor, dst: torch.Tensor,
+              ticks: torch.Tensor, bytes: int, iters: int = 1, block_num: int = 0) -> int:
+    """Run an MTE memory micro-benchmark with in-kernel cycle sampling.
+
+    Only present in builds configured with XLITE_BENCH_TIMED=ON; in the
+    default build this entry point (and the MTE kernels) do not exist.
+
+    lmbench-style memory benchmark: read / write / copy stream `bytes` per
+    repetition (grid-strided over the launched blocks) for bandwidth, chase
+    walks a dependent 64B-granular pointer chain on a single block for
+    load-to-use latency through the MTE path. Per-block [region start, loop
+    issued, after PIPE_ALL drain] SYS_CNT cycles land in `ticks` (fixed
+    50 MHz counter, cycles / 50 = microseconds).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        variant (str): "<op>_aiv" with op in read / write / copy / chase
+            (e.g. "read_aiv"); MTE lives on the vector core, no _aic form.
+        src (torch.Tensor): int8 GM working set with at least `bytes` elements
+            (write only reads the first min(bytes, 96KB) pattern bytes).
+        dst (torch.Tensor): Verification data - read / chase: int32 with at
+            least 16 * block_num elements (per-block acc word at element
+            16 * b, i.e. 64B stride); write / copy: int8 with at least
+            `bytes` elements.
+        ticks (torch.Tensor): Caller-pre-allocated int64 tensor with at least
+            8 * block_num elements, receiving per-block [region start, loop
+            issued, after PIPE_ALL drain] cycles at byte offset 64 * b.
+            Outputs are 64B strided per block because scalar GM stores from
+            different cores sharing a 64B line race line-granularly
+            (BENCH_MTE_STRIDE in csrc/kernels/microbench.h).
+        bytes (int): Working-set size in bytes; non-zero multiple of 32
+            (64 for chase).
+        iters (int): Repetitions (chase: pointer-chase steps); at least 1.
+        block_num (int): Number of blocks; 0 = all AIV blocks (chase always
+            pins 1).
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+def bench_vec(
+    rt: Runtime,
+    variant: str,
+    src: torch.Tensor,
+    out: torch.Tensor,
+    ticks: torch.Tensor,
+    elems: int,
+    iters: int = 1,
+    block_num: int = 0,
+) -> int:
+    """Vector-op micro-benchmark with in-kernel cycle sampling.
+
+    Only present in builds configured with XLITE_BENCH_TIMED=ON; in the
+    default build this entry point (and the vector-op kernels) do not exist.
+
+    Pure vector-pipe throughput vs vector length: every block runs a dependent
+    chain of `iters` vector-op applications over `elems` UB-resident elements
+    (no GM traffic inside the measured window), then copies its final chain
+    value to its own `out` region. Binary variants (add_f32 / mul_f32 /
+    add_i32 / add_f16) chain `dst = dst op c`; the transcendental variants
+    (sqrt_f32 / exp_f32) carry the dependency with a mul and fold op(c) into
+    a scratch tile - cost(op) is recovered by subtracting mul_f32 at the same
+    elems/iters (see the VEC section of csrc/kernels/microbench.h). Per-block
+    [region start, loop issued, after PIPE_ALL drain] SYS_CNT cycles land in
+    `ticks` (fixed 50 MHz counter, cycles / 50 = microseconds).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        variant (str): "<op>_aiv" with op in add_f32 / mul_f32 / add_i32 /
+            add_f16 / sqrt_f32 / exp_f32 (e.g. "add_f32_aiv"); the vector
+            pipe lives on the vector core, no _aic form.
+        src (torch.Tensor): [x0; c] concatenated - x0 seeds the chain, c is
+            the constant operand vector. Dtype float32 (f32 variants), int32
+            (add_i32) or float16 (add_f16); at least 2 * elems elements.
+        out (torch.Tensor): Same dtype as src, at least block_num * elems
+            elements; block b's final chain value lands at element b * elems.
+        ticks (torch.Tensor): Caller-pre-allocated int64 tensor with at least
+            8 * block_num elements, receiving per-block [region start, loop
+            issued, after PIPE_ALL drain] cycles at byte offset 64 * b
+            (BENCH_MTE_STRIDE 64B-line contract).
+        elems (int): Elements per op application; non-zero multiple of 64
+            (4B dtypes) / 128 (float16) and within the UB budget (at most
+            16384 at 4B, 32768 at 2B).
+        iters (int): Chain iterations; at least 1.
+        block_num (int): Number of blocks; 0 = all AIV blocks. Every block
+            runs the same chain (per-core throughput probe).
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
+def bench_cube(
+    rt: Runtime,
+    variant: str,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    ticks: torch.Tensor,
+    m0: int,
+    n0: int,
+    k0: int,
+    block_num: int = 0,
+) -> int:
+    """Cube matmul micro-benchmark with in-kernel cycle sampling.
+
+    Only present in builds configured with XLITE_BENCH_TIMED=ON; in the
+    default build this entry point (and the cube kernel) does not exist.
+
+    A single A@B.T matmul per launch via the Matmul class (FP16 input, FP32
+    accumulation, FP16 output). The dependent-chain measurement is done by
+    the host issuing the kernel multiple times (wall-clock), not by looping
+    inside the kernel. Per-block [start, issued, drained] SYS_CNT cycles land
+    in ``ticks`` (fixed 50 MHz, cycles / 50 = microseconds).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        variant (str): "cube_mmad_aic".
+        a (torch.Tensor): FP16, at least m0*k0 elements (row-major A[m0,k0]).
+        b (torch.Tensor): FP16, at least n0*k0 elements (row-major B[n0,k0]).
+        c (torch.Tensor): FP16, at least m0*n0 elements (output C[m0,n0]).
+        ticks (torch.Tensor): int64, at least 8 elements.
+        m0 (int): M dimension, multiple of 16.
+        n0 (int): N dimension, multiple of 16.
+        k0 (int): K dimension, multiple of 16.
+        block_num (int): 0 = 1 (serial chain).
+
+    Returns:
+        int: The block count actually launched with.
+    """
+    ...
+
 def matmul(
     rt: Runtime,
     x: torch.Tensor,
