@@ -21,7 +21,8 @@ public:
     }
 
     __aicore__ inline void Init(uint32_t nHeadsV, uint32_t nKVHeadsV, uint32_t headNumInGroupV,
-                                uint32_t headSizeV, uint32_t blockSizeV, uint32_t qkStrideV)
+                                uint32_t headSizeV, uint32_t blockSizeV, uint32_t kCacheStrideV,
+                                uint32_t vCacheStrideV, uint32_t qkStrideV)
     {
         nHeads = nHeadsV;
         nKVHeads = nKVHeadsV;
@@ -30,7 +31,9 @@ public:
         blockSize = blockSizeV;
         kvMemSize = nKVHeads * headSize;
         qkvMemSize = (nHeads + 2 * nKVHeads) * headSize;
-        blockMemSize = blockSize * kvMemSize;
+        // V suffix avoids param-shadowing self-assignment of the stride members.
+        kCacheStride = MAX(kCacheStrideV, blockSize * kvMemSize);
+        vCacheStride = MAX(vCacheStrideV, blockSize * kvMemSize);
         qkStride = qkStrideV;
 
         // Shrink the Cube KV tile so 2 * tile * headSize * sizeof(Dtype) fits in
@@ -138,7 +141,7 @@ public:
 
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
             CopyGmToL1Nd2Nz(l1bBuf[curIdx],
-                            kCache[block * blockMemSize + rowInBlock * kvMemSize + kvHeadOffset],
+                            kCache[block * kCacheStride + rowInBlock * kvMemSize + kvHeadOffset],
                             nSize, headSize, kvMemSize, nBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
 
@@ -221,7 +224,7 @@ public:
 
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
             CopyGmToL1Nd2Nz(l1bBuf[curIdx],
-                            vCache[block * blockMemSize + rowInBlock * kvMemSize + kvHeadOffset],
+                            vCache[block * vCacheStride + rowInBlock * kvMemSize + kvHeadOffset],
                             kBlockPad, headSize, kvMemSize, kBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
 
@@ -289,7 +292,8 @@ private:
     uint32_t blockSize;
     uint32_t cubeKvTile;
     uint32_t kvMemSize;
-    uint32_t blockMemSize;
+    uint32_t kCacheStride;
+    uint32_t vCacheStride;
     uint32_t qkvMemSize;
     uint32_t qkStride;
 };

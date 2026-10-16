@@ -287,5 +287,69 @@ for use_fp32 in (True, False):
             failed += 1
             logging.error(f"{e}")
 
+# ---------------------------------------------------------------------------
+# Pitched (non-contiguous dim-0) cache regression: k/v caches are buf[::2]
+# views, so each cache's dim-0 stride is double the contiguous pitch and the
+# two caches differ in no other way. rope_and_cache must decompose the flat
+# slot via block_size and address each cache with its own stride; the K/V side
+# effects are checked at [slot//block_size, slot%block_size] on the views.
+# ---------------------------------------------------------------------------
+for test_dtype in (torch.bfloat16, torch.float16):
+    torch.set_default_dtype(test_dtype)
+    n_heads, n_kv_heads = 8, 2
+    head_dim = rot_dim_test
+    out_features = (n_heads + 2 * n_kv_heads) * head_dim
+    num_tokens = 512
+    block_size = 128
+    block_num = num_tokens // block_size
+
+    with torch.device("npu"):
+        qkv = torch.randn(num_tokens, out_features)
+        freqs_cis = precompute_freqs_cis(rot_dim_test, 1024, ROPE_THETA)
+        k_cache = torch.zeros(block_num * 2, block_size, n_kv_heads, head_dim)[::2]
+        v_cache = torch.zeros(block_num * 2, block_size, n_kv_heads, head_dim)[::2]
+        position = torch.arange(num_tokens, dtype=torch.int64).unsqueeze(0)
+        slot_mapping = torch.arange(num_tokens, dtype=torch.int32)
+
+    q, k, v = qkv.split(
+        [n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim], dim=1
+    )
+
+    k4 = k.view(1, num_tokens, n_kv_heads, head_dim).transpose(1, 2)
+    k_std = apply_rotary_emb(k4, 0, freqs_cis)
+    k_std = k_std.transpose(1, 2).reshape(num_tokens, n_kv_heads * head_dim).to(test_dtype)
+
+    torch.npu.synchronize()
+    rope_and_cache(
+        rt=rt,
+        inout=qkv,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        position=position,
+        cosin=freqs_cis,
+        slot_mapping=slot_mapping,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        head_dim=head_dim,
+        rot_dim=rot_dim_test,
+        block_size=block_size,
+        is_neox=True,
+    )
+    torch.npu.synchronize()
+
+    logging.info(f"rope and cache (pitched caches, {test_dtype}) executed!")
+
+    # cache side effects: rotated K lands at [slot//bs, slot%bs]; V lands raw
+    try:
+        slots = slot_mapping.long()
+        k_landed = k_cache[slots // block_size, slots % block_size].reshape(num_tokens, -1)
+        v_landed = v_cache[slots // block_size, slots % block_size].reshape(num_tokens, -1)
+        torch.testing.assert_close(k_landed, k_std, atol=1e-5, rtol=1e-3)
+        torch.testing.assert_close(v_landed, v.to(test_dtype), atol=1e-5, rtol=1e-3)
+        passed += 2
+    except AssertionError as e:
+        failed += 1
+        logging.error(f"{e}")
+
 logging.info(f"rope_and_cache: {passed} passed, {failed} failed")
 assert failed == 0, f"{failed} test(s) failed"

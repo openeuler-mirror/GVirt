@@ -23,17 +23,18 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 | freqs | 输入 | `[max_pos, rope_dim]` | float32 | 复数频率表,交错存 `cos(pos·θ_k), sin(pos·θ_k)`(`torch.polar` 实部/虚部 flatten,见测试 [tests/kernels/rope_complex.py:19-34](../../../tests/kernels/rope_complex.py#L19-L34)) |
 | position | 输入 | `[num_tokens]` | int64 | 每 token 的位置 id,用于索引 freqs 行 |
 | v_cache | 输出 | `[num_blocks, block_size, n_local_heads, vdim]` | 同 input | 每 slot 存一个完整 head(vdim);CXA 场景 vdim=step_dim 包含 remain,MLA pe cache 场景 vdim=rope_dim 只存 rope 区 |
-| slot_mapping | 输入 | `[num_tokens]` | int32 | token 的平坦 slot 索引;`v_cache + slot * n_local_heads * vdim` 寻址 |
+| slot_mapping | 输入 | `[num_tokens]` | int32 | token 的平坦 slot 索引;按 `v_cache + (slot / block_size) * vcacheStride + (slot % block_size) * n_local_heads * vdim` 分解寻址 |
 | output | 输出(纯计算模式) | `[num_tokens, n_local_heads, rope_dim]` | 同 input | 仅 `rope_complex` 入口使用;cache 入口 host 传 `nullptr`([csrc/op.cpp:1143-1163](../../../csrc/op.cpp#L1143-L1163)) |
 | n_local_heads | 标量 | - | uint32 | 头数;cache 模式断言为 1 |
 | step_dim | 标量 | - | uint32 | input 第 2 维(完整 head 维度) |
 | rope_dim | 标量 | - | uint32 | rope 区长度(偶数),测试覆盖 64/128/192/576 |
 | offset | 标量 | - | uint32 | rope 区在 head 内的起始偏移,`step_dim - rope_dim` |
 | vdim | 标量 | - | uint32 | vCache 每 slot 的 head 宽度 |
-| block_size | 标量 | - | uint32 | cache 块大小;非 0 且 vcache/slot_mapping 非空时启用 cache 写入([csrc/kernels/rope_complex_and_cache.h:22-25](../../../csrc/kernels/rope_complex_and_cache.h#L22-L25)) |
+| block_size | 标量 | - | uint32 | cache 块大小,用于把平坦 slot 分解为块号与块内偏移;非 0 且 vcache/slot_mapping 非空时启用 cache 写入([csrc/kernels/rope_complex_and_cache.h:24-27](../../../csrc/kernels/rope_complex_and_cache.h#L24-L27)) |
+| vcacheStride | 标量(host 推导) | - | uint32 | vCache 的 dim-0 跨度(元素数),host 传 `vCache.stride[0]`;连续 cache 时等于 block_size × n_local_heads × vdim 的乘积,非连续时为宿主传入的真实跨距 |
 | inverse | 标量 | - | bool | 逆向旋转(共轭),kernel 内按 `±` 选择 vadd/vsub 方向 |
 | out_interleaved | 标量 | - | bool | 输出交错布局开关 |
-| minPosition | 标量(内核参数,host 不透传) | - | uint64 | 非 cache 模式下跳过 `position < minPosition` 的行(不搬入、不旋转、不写回;[csrc/kernels/rope_complex_and_cache.h:27-28,166-169](../../../csrc/kernels/rope_complex_and_cache.h#L27-L28))。cache 模式强制归零(写 cache 的行不可跳)。调用方 `indexer_prepare` 传 `top_k` 跳过稠密注意力 token 的 Q-RoPE |
+| minPosition | 标量(内核参数,host 不透传) | - | uint64 | 非 cache 模式下跳过 `position < minPosition` 的行(不搬入、不旋转、不写回;[csrc/kernels/rope_complex_and_cache.h:28-29,167-170](../../../csrc/kernels/rope_complex_and_cache.h#L28-L29))。cache 模式强制归零(写 cache 的行不可跳)。调用方 `indexer_prepare` 传 `top_k` 跳过稠密注意力 token 的 Q-RoPE |
 
 ## 支持的数据类型
 
@@ -48,7 +49,7 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 
 ### UB 内存布局
 
-从地址 0 顺序排布([csrc/kernels/rope_complex_and_cache.h:59-104](../../../csrc/kernels/rope_complex_and_cache.h#L59-L104)),全部按 `VECTOR_MAX_BYTESIZE` 对齐:
+从地址 0 顺序排布([csrc/kernels/rope_complex_and_cache.h:60-105](../../../csrc/kernels/rope_complex_and_cache.h#L60-L105)),全部按 `VECTOR_MAX_BYTESIZE` 对齐:
 
 - `input0/input1`、`out0/out1`:输入/输出乒乓对,大小 `nLocalHeads * headBytes`(cache 模式为整 head 宽度,非 cache 模式仅 rope 宽度);
 - `freqs0/freqs1`:频率表乒乓对;
@@ -63,17 +64,17 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 
 每 token 一次乒乓切换(`curr = 1 - curr`),用 4 组事件(`EVENT_ID0+curr` 数据链、`EVENT_ID2+curr` freqs 链)驱动 MTE2→V→MTE3 三级流水([csrc/kernels/rope_complex_and_cache.h:128-135](../../../csrc/kernels/rope_complex_and_cache.h#L128-L135) 预置初始 flags):
 
-1. **索引批量预取**:每 256 个 token 从 GM 搬一批 `position`(及 cache 模式的 `slot_mapping`)到 UB,标量单元直接 `positionUB[idx]` 取用([csrc/kernels/rope_complex_and_cache.h:141-157](../../../csrc/kernels/rope_complex_and_cache.h#L141-L157)),用 `PIPE_S↔PIPE_MTE2` 事件同步;
+1. **索引批量预取**:每 256 个 token 从 GM 搬一批 `position`(及 cache 模式的 `slot_mapping`)到 UB,标量单元直接 `positionUB[idx]` 取用([csrc/kernels/rope_complex_and_cache.h:142-158](../../../csrc/kernels/rope_complex_and_cache.h#L142-L158)),用 `PIPE_S↔PIPE_MTE2` 事件同步;
 2. **输入搬入**:`copy_gm_to_ubuf` 按 `nLocalHeads` 个 head、块步长 `srcStride` 装载([csrc/kernels/rope_complex_and_cache.h:170-171](../../../csrc/kernels/rope_complex_and_cache.h#L170-L171));cache 模式且 remain>0 时整 head 装载(`fullHeadLoad`),否则只装 rope 区;
 3. **freqs 搬入**:`freqs_gm = freqs + pos * ropeDim`([csrc/kernels/rope_complex_and_cache.h:165-176](../../../csrc/kernels/rope_complex_and_cache.h#L165-L176));
 4. **升精度**:`vconv_f162f32` / `vconv_bf162f32` 把 rope 区升到 fp32([csrc/kernels/rope_complex_and_cache.h:178-183](../../../csrc/kernels/rope_complex_and_cache.h#L178-L183));`fullHeadLoad` 时同时把 remain 区 `copy_ubuf_to_ubuf` 暂存到 `vRemain`([csrc/kernels/rope_complex_and_cache.h:184-193](../../../csrc/kernels/rope_complex_and_cache.h#L184-L193));
 5. **计算**(纯向量指令,见下节);
 6. **降精度写回**:非交错路径一次 `vconv_f322f16`/`vconv_f322bf16r` 转换全部头;交错路径逐头 `vgather` 重排后转换([csrc/kernels/rope_complex_and_cache.h:244-272](../../../csrc/kernels/rope_complex_and_cache.h#L244-L272));`fullHeadLoad` 时把 remain 区拷回输出缓冲;
-7. **写出**([csrc/kernels/rope_complex_and_cache.h:284-297](../../../csrc/kernels/rope_complex_and_cache.h#L284-L297)):cache 模式把整 head 写到 `v_cache + slot * nLocalHeads * vdim`,若 `output_ptr` 非空再把 rope 区写到 output;非 cache 模式直接写 output。
+7. **写出**([csrc/kernels/rope_complex_and_cache.h:284-297](../../../csrc/kernels/rope_complex_and_cache.h#L284-L297)):cache 模式把整 head 写到 `v_cache + (slot / block_size) * vcacheStride + (slot % block_size) * nLocalHeads * vdim`,若 `output_ptr` 非空再把 rope 区写到 output;非 cache 模式直接写 output。
 
 ### 关键计算步骤
 
-全部在 fp32 域完成([csrc/kernels/rope_complex_and_cache.h:197-241](../../../csrc/kernels/rope_complex_and_cache.h#L197-L241)):
+全部在 fp32 域完成([csrc/kernels/rope_complex_and_cache.h:198-242](../../../csrc/kernels/rope_complex_and_cache.h#L198-L242)):
 
 1. **奇偶分离**:`vreducev2` 以 step=1/2 分别抽取偶数 lane(`x0,x2,...` → real)与奇数 lane(`x1,x3,...` → imag)——同时用于 freqs 表(得到交错的 cos/sin 序列)与输入([csrc/kernels/rope_complex_and_cache.h:200-212](../../../csrc/kernels/rope_complex_and_cache.h#L200-L212));
 2. **四组乘积**:`vmul` 计算 `x_even*cos`、`x_odd*sin`、`x_even*sin`、`x_odd*cos`(head 间块步长 `half_rope_blocks`,[csrc/kernels/rope_complex_and_cache.h:215-223](../../../csrc/kernels/rope_complex_and_cache.h#L215-L223));

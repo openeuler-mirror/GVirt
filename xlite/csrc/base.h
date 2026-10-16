@@ -14,6 +14,7 @@
 #include <functional>
 #include <numeric>
 #include <list>
+#include <optional>
 #include <cstdint>
 #include <complex>
 #include <algorithm>
@@ -154,6 +155,20 @@ inline std::string ToSizeStr(size_t size)
     }
 }
 
+// Deduce the row-major contiguous stride for a shape: stride[i] = product of shape[i+1:],
+// last dim 1. An empty shape yields an empty stride.
+inline std::vector<size_t> ContiguousStride(const std::vector<size_t> &shape)
+{
+    if (shape.empty()) {
+        return {};
+    }
+    std::vector<size_t> stride(shape.size(), 1);
+    for (size_t i = shape.size() - 1; i > 0; i--) {
+        stride[i - 1] = stride[i] * shape[i];
+    }
+    return stride;
+}
+
 #ifdef XLITE_DEBUG_ON
 at::ScalarType inline ToScalarType(enum XDtype dtype)
 {
@@ -213,8 +228,10 @@ class XTensor
 {
 public:
     XTensor() {};
-    XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
-    XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr);
+    XTensor(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
+            std::optional<std::vector<size_t>> stride = std::nullopt);
+    XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
+                  std::optional<std::vector<size_t>> stride = std::nullopt);
     // The os parameter lets callers (e.g. the debug module) capture the output into a
     // stream so it can be flushed atomically with a rank/color prefix. Defaults to
     // std::cout to keep legacy direct callers unchanged.
@@ -255,20 +272,48 @@ public:
     {
         return type;
     };
-    std::vector<size_t> shape;  // DO NOT MODIFY shape directly, use View() to change shape
-    size_t numel;               // DO NOT MODIFY numel directly, use View() to change shape
-    enum XDtype dtype;          // DO NOT MODIFY dtype directly, use View() to change dtype
-    size_t bytes;               // DO NOT MODIFY bytes directly, use View() to change shape/dtype
-    void *ptr = nullptr;        // DO NOT MODIFY ptr directly unless you know what you are doing
+    [[nodiscard]] bool IsContiguous() const
+    {
+        return isContiguous;
+    };
+    std::vector<size_t> shape;   // DO NOT MODIFY shape directly, use View() to change shape
+    std::vector<size_t> stride;  // DO NOT MODIFY stride directly, in elements; matches the
+                                 // contiguous layout unless IsContiguous() is false (dim-0 pitch)
+    size_t numel;                // DO NOT MODIFY numel directly, use View() to change shape
+    enum XDtype dtype;           // DO NOT MODIFY dtype directly, use View() to change dtype
+    size_t bytes;                // DO NOT MODIFY bytes directly, use View() to change shape/dtype
+    void *ptr = nullptr;         // DO NOT MODIFY ptr directly unless you know what you are doing
 
 private:
-    XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type);
+    XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type,
+                  std::optional<std::vector<size_t>> stride = std::nullopt);
     void PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &os = std::cout);
+    // True iff stride matches ContiguousStride(shape); if false only dim 0 deviates (row pitch)
+    // and layout-restricted operations are rejected.
+    bool isContiguous = true;
+    // Shared guard for layout-restricted operations (View/ResetView/MakeOriginal/Memset):
+    // non-contiguous tensors must be consumed via shape + stride instead of being re-viewed.
+    void CheckContiguous(const char *op) const
+    {
+        if (!isContiguous) {
+            throw std::runtime_error(std::string(op) +
+                                     ": Operation not supported for non-contiguous tensors.");
+        }
+    };
+    // Elements spanned in memory between the first and the last element (for debug printing)
+    [[nodiscard]] size_t SpanNumel() const
+    {
+        if (numel == 0 || isContiguous) {
+            return numel;
+        }
+        return (shape[0] - 1) * stride[0] + numel / shape[0];
+    };
     enum XTensorType type = XTENSOR_STATIC;
-    std::vector<size_t> origShape;  // original shape, unaffected by view operation
-    size_t origNumel = 0;           // original numel, unaffected by view operation
-    enum XDtype origDtype;          // original dtype, unaffected by view operation
-    size_t origBytes;               // original bytes, unaffected by view operation
+    std::vector<size_t> origShape;   // original shape, unaffected by view operation
+    std::vector<size_t> origStride;  // original stride, unaffected by view operation
+    size_t origNumel = 0;            // original numel, unaffected by view operation
+    enum XDtype origDtype;           // original dtype, unaffected by view operation
+    size_t origBytes;                // original bytes, unaffected by view operation
     friend class XTensorPool;
     friend class XDummyTensorPool;
 };
@@ -280,7 +325,7 @@ public:
     virtual ~XTensorPool(void);
     virtual int Init(void);
     virtual XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
-    void PutTensor(XTensor &t);
+    virtual void PutTensor(XTensor &t);
     virtual bool TensorInPool(XTensor &t);
     void *Ptr()
     {

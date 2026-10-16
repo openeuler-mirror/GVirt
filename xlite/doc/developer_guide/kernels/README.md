@@ -121,3 +121,4 @@
 - dtype 实例化在 `csrc/kernels/<name>_<dtype>.cpp`,文件名即对应支持的 dtype
 - 算子正确性测试在 [tests/kernels](../../../tests/kernels)
 - host 侧启动与参数封装在 `csrc/op.cpp`、`csrc/ccl.cpp`
+- 算子输入张量的 shape/stride/连续性语义见 [XTensor 布局与 stride 语义](../xtensor.md)

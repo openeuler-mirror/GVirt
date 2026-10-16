@@ -19,23 +19,24 @@ MroPE 模式下 `cos/sin` 为文本、h、w 三路表按 lane 掩码逐元素相
 
 ## 输入输出参数
 
-Python 接口:`rope_and_cache(rt, inout, k_cache, v_cache, position, cosin, slot_mapping, n_heads, n_kv_heads, head_dim, rot_dim, block_size, is_neox, mrope_mask_h=0, mrope_mask_w=0)`。`cossinInFp32` 不是 Python 参数,由 host 从 `cossin.dtype` 推导。
+Python 接口:`rope_and_cache(rt, inout, k_cache, v_cache, position, cosin, slot_mapping, n_heads, n_kv_heads, head_dim, rot_dim, block_size, is_neox, mrope_mask_h=0, mrope_mask_w=0)`。`cossinInFp32` 不是 Python 参数,由 host 从 `cossin.dtype` 推导;K/V cache 的 dim-0 跨度 `key_cache_stride` / `value_cache_stride` 亦非 Python 参数,由 host 从 `k_cache.stride[0]` / `v_cache.stride[0]` 读取传入。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
 | inout | 输入/输出 | `[num_tokens, (num_heads + 2 * num_kv_heads) * head_dim]` | float16 / bfloat16 | 融合 QKV。host 侧按 TP 切分后的头数拆出 q/k/v 三个指针([csrc/op.cpp:850-855](../../../csrc/op.cpp#L850-L855)),q 在行首,k、v 依次随其后;Q/K 旋转后原地写回 |
 | k_cache | 输出 | `[block_num, block_size, num_kv_heads, head_dim]` | 同 inout | KV cache 的 K 平面,按 slot 展开寻址 |
 | v_cache | 输出 | 同 k_cache | 同 inout | KV cache 的 V 平面,V 不做旋转,直接搬运写入 |
-| position | 输入 | `[num_tokens]`(MroPE 为 `[3, num_tokens]`) | int64 | 每 token 的位置 id;MroPE 时第 2/3 行为 h/w 位置([csrc/kernels/rope_and_cache.h:478-480](../../../csrc/kernels/rope_and_cache.h#L478-L480)) |
+| position | 输入 | `[num_tokens]`(MroPE 为 `[3, num_tokens]`) | int64 | 每 token 的位置 id;MroPE 时第 2/3 行为 h/w 位置([csrc/kernels/rope_and_cache.h:479-481](../../../csrc/kernels/rope_and_cache.h#L479-L481)) |
 | cossin | 输入 | `[max_pos, rot_dim]` | **float32(推荐)** 或同 inout | 预计算表,前 `rot_dim/2` 列为 cos、后 `rot_dim/2` 列为 sin(见测试 `precompute_freqs_cis` 的 `cat((cos, sin), dim=-1)`)。FP32 时走精度优先的 fp32 旋转路径;与 inout 同 dtype 时走已废弃的 model-dtype 路径(bf16 舍入回退仿真 / fp16 直接计算) |
 | slot_mapping | 输入 | `[num_tokens]` | int32 | 每 token 在 cache 中的平坦 slot 索引 |
+| key_cache_stride / value_cache_stride | 标量(host 推导) | - | uint32 | K/V cache 的 dim-0 跨度(元素数),host 传 `kCache.stride[0]` / `vCache.stride[0]`;连续 cache 时等于 block_size × num_kv_heads × head_dim 的乘积,非连续时为宿主传入的真实跨距 |
 | n_heads / n_kv_heads | 标量 | - | uint32 | **全局** Q 头数与 KV 头数(host 内部除以 tpSize 得本 rank 头数,见 [csrc/op.cpp:847-849](../../../csrc/op.cpp#L847-L849)) |
 | head_dim | 标量 | - | uint32 | 每头维度,支持 64 / 128 |
 | rot_dim | 标量 | - | uint32 | 旋转维度,支持 64 / 128(可小于 head_dim,如 head_dim=128 + rot_dim=64) |
-| block_size | 标量 | - | uint32 | cache 块大小(kernel 内不直接使用,slot_mapping 已是平坦索引) |
+| block_size | 标量 | - | uint32 | cache 块大小;kernel 将 slot_mapping 的平坦 slot 按 block_size 分解为块号与块内偏移,结合 cache 跨度寻址 |
 | is_neox | 标量 | - | bool | 仅支持 NeoX 风格,gptj 会抛错([csrc/op.cpp:859-860](../../../csrc/op.cpp#L859-L860)) |
 | mrope_mask_h / mrope_mask_w | 标量 | - | uint64 | MroPE 的向量 lane 掩码,非 0 时启用三路位置模式 |
-| cossinInFp32 | 标量(host 推导) | - | bool / uint32 | cos/sin 表是否按 FP32 读取以提升精度。host 侧 `cossinInFp32 = cossin.dtype == FP32`([csrc/op.cpp:863](../../../csrc/op.cpp#L863)),kernel 据此在 `rope_and_cache<Dtype, COSSIN_FP32>` 的两条模板实例间分派([csrc/kernels/rope_and_cache.h:687-706](../../../csrc/kernels/rope_and_cache.h#L687-L706))。true 时旋转全程 fp32、仅末尾一次舍入;false 时走已废弃的 model-dtype 路径 |
+| cossinInFp32 | 标量(host 推导) | - | bool / uint32 | cos/sin 表是否按 FP32 读取以提升精度。host 侧 `cossinInFp32 = cossin.dtype == FP32`([csrc/op.cpp:863](../../../csrc/op.cpp#L863)),kernel 据此在 `rope_and_cache<Dtype, COSSIN_FP32>` 的两条模板实例间分派([csrc/kernels/rope_and_cache.h:693-712](../../../csrc/kernels/rope_and_cache.h#L693-L712))。true 时旋转全程 fp32、仅末尾一次舍入;false 时走已废弃的 model-dtype 路径 |
 
 `scale = 1.0 / sqrt(headDim)` 由 host 计算传入([csrc/op.cpp:857](../../../csrc/op.cpp#L857));q/k/v 的行 stride 均为 `inout.shape[1]`(整行 QKV 宽度)。
 
@@ -50,14 +51,14 @@ inout、kCache、vCache 三者必须同为 `float16_t` 或 `bfloat16_t`;cossin �
 
 ## 实现原理
 
-实现位于 [csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h),为 C220 向量核(`__DAV_C220_VEC__`)上的标量 C 风格 kernel,由 `XliteOpRopeCache`([csrc/op.cpp:839-879](../../../csrc/op.cpp#L839-L879))以 `rt.aivNum` 个 AIV block 启动。kernel 主体 `rope_and_cache<Dtype, COSSIN_FP32>`([csrc/kernels/rope_and_cache.h:221-685](../../../csrc/kernels/rope_and_cache.h#L221-L685))以 `COSSIN_FP32` 模板参数在两条路径间静态分派,封装宏 `ROPEANDCACHE_FUNC_DEFINE` 根据 host 传入的 `cossinInFp32` 运行时选择实例([csrc/kernels/rope_and_cache.h:687-706](../../../csrc/kernels/rope_and_cache.h#L687-L706))。
+实现位于 [csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h),为 C220 向量核(`__DAV_C220_VEC__`)上的标量 C 风格 kernel,由 `XliteOpRopeCache`([csrc/op.cpp:839-879](../../../csrc/op.cpp#L839-L879))以 `rt.aivNum` 个 AIV block 启动。kernel 主体 `rope_and_cache<Dtype, COSSIN_FP32>`([csrc/kernels/rope_and_cache.h:221-691](../../../csrc/kernels/rope_and_cache.h#L221-L691))以 `COSSIN_FP32` 模板参数在两条路径间静态分派,封装宏 `ROPEANDCACHE_FUNC_DEFINE` 根据 host 传入的 `cossinInFp32` 运行时选择实例([csrc/kernels/rope_and_cache.h:693-712](../../../csrc/kernels/rope_and_cache.h#L693-L712))。
 
 ### 两级循环与多 Block 并行
 
 - 外层按批搬运 `positions`/`slot_mapping`(Mrope 还包括 pos_h/pos_w)到 UB 尾部暂存区,批量大小 `iter_posslot_num` 由剩余 UB 空间动态推出([csrc/kernels/rope_and_cache.h:418-422](../../../csrc/kernels/rope_and_cache.h#L418-L422));
-- 内层将 token 条带化分配到各 block:`loop1 = block_idx + processed_num_tokens`,步长 `block_num`([csrc/kernels/rope_and_cache.h:487-488](../../../csrc/kernels/rope_and_cache.h#L487-L488)),即 token 级多核并行。
+- 内层将 token 条带化分配到各 block:`loop1 = block_idx + processed_num_tokens`,步长 `block_num`([csrc/kernels/rope_and_cache.h:488-489](../../../csrc/kernels/rope_and_cache.h#L488-L489)),即 token 级多核并行。
 
-每个 token 的 GM 地址由标量单元从 UB 暂存区读出 position/slot 计算得到:cos/sin 表偏移 `pos * rot_dim`(sin 再加 `rot_dim/2`),cache 偏移 `slot * num_kv_heads * head_dim`([csrc/kernels/rope_and_cache.h:493-502](../../../csrc/kernels/rope_and_cache.h#L493-L502))。
+每个 token 的 GM 地址由标量单元从 UB 暂存区读出 position/slot 计算得到:cos/sin 表偏移 `pos * rot_dim`(sin 再加 `rot_dim/2`);cache 侧把平坦 slot 按 `block_size` 分解为块号与块内偏移,K/V cache 各自按 `slot / block_size * key_cache_stride(value_cache_stride) + slot % block_size * num_kv_heads * head_dim` 寻址,连续 cache 时等价于 `slot * num_kv_heads * head_dim`([csrc/kernels/rope_and_cache.h:494-509](../../../csrc/kernels/rope_and_cache.h#L494-L509))。
 
 ### UB 内存布局
 
@@ -77,12 +78,12 @@ inout、kCache、vCache 三者必须同为 `float16_t` 或 `bfloat16_t`;cossin �
 
 ### 数据流与流水线同步
 
-每 token 按顺序执行,全程通过事件标志驱动 MTE2(搬入)→ V(计算)→ MTE3(搬出)三级流水,乒乓两组事件(`EVENT_ID0`/`EVENT_ID1`,[csrc/kernels/rope_and_cache.h:487-490](../../../csrc/kernels/rope_and_cache.h#L487-L490)):
+每 token 按顺序执行,全程通过事件标志驱动 MTE2(搬入)→ V(计算)→ MTE3(搬出)三级流水,乒乓两组事件(`EVENT_ID0`/`EVENT_ID1`,[csrc/kernels/rope_and_cache.h:488-491](../../../csrc/kernels/rope_and_cache.h#L488-L491)):
 
-1. **V 写 cache**:value 经 GM→UB→GM 中继写回 `gm_vcache`([csrc/kernels/rope_and_cache.h:508-512](../../../csrc/kernels/rope_and_cache.h#L508-L512));
-2. **加载 cos/sin**:`COSSIN_FP32` 时按 fp32 直接搬入 `cos_fp32_*`/`sin_fp32_*` 缓冲([csrc/kernels/rope_and_cache.h:514-523](../../../csrc/kernels/rope_and_cache.h#L514-L523));否则按 Dtype 搬入 `cos_dtype_*`/`sin_dtype_*`,bf16 路径再 `vconv_bf162f32` 升精度([csrc/kernels/rope_and_cache.h:540-559](../../../csrc/kernels/rope_and_cache.h#L540-L559))。每份 `d/2` 数据加载两次分别落在缓冲前/后半,拼成全宽表;MroPE 模式额外加载 h/w 两路表(fp32 路径 [csrc/kernels/rope_and_cache.h:524-539](../../../csrc/kernels/rope_and_cache.h#L524-L539),legacy 路径 [csrc/kernels/rope_and_cache.h:560-594](../../../csrc/kernels/rope_and_cache.h#L560-L594));
-3. **K 旋转**:`COSSIN_FP32 || is_bf16` 调 `calc_cossin_cast<Dtype, COSSIN_FP32>`,legacy fp16 调 `calc_cossin`;`COSSIN_FP32` 时旋转后 `convert_output<Dtype>` 做唯一一次舍入写回 `key_dtype_ubuf`,然后 `copy_ubuf_to_gm` 同时写回 `gm_key`(原地)与 `gm_kcache`([csrc/kernels/rope_and_cache.h:597-626](../../../csrc/kernels/rope_and_cache.h#L597-L626));
-4. **Q 旋转 + 缩放**:再次调用旋转函数;`COSSIN_FP32` 时先 `vmuls ... scale_fp32` 在 fp32 域缩放,再 `convert_output<Dtype>` 一次舍入写回 `gm_query`([csrc/kernels/rope_and_cache.h:628-675](../../../csrc/kernels/rope_and_cache.h#L628-L675));legacy bf16 路径则把已舍入的 Q 再升回 fp32 缩放、再次舍入,以匹配 torch_npu 的逐算子舍入;legacy fp16 路径直接 `vmuls ... scale` 在 fp16 域缩放。
+1. **V 写 cache**:value 经 GM→UB→GM 中继写回 `gm_vcache`([csrc/kernels/rope_and_cache.h:514-518](../../../csrc/kernels/rope_and_cache.h#L514-L518));
+2. **加载 cos/sin**:`COSSIN_FP32` 时按 fp32 直接搬入 `cos_fp32_*`/`sin_fp32_*` 缓冲([csrc/kernels/rope_and_cache.h:520-529](../../../csrc/kernels/rope_and_cache.h#L520-L529));否则按 Dtype 搬入 `cos_dtype_*`/`sin_dtype_*`,bf16 路径再 `vconv_bf162f32` 升精度([csrc/kernels/rope_and_cache.h:546-565](../../../csrc/kernels/rope_and_cache.h#L546-L565))。每份 `d/2` 数据加载两次分别落在缓冲前/后半,拼成全宽表;MroPE 模式额外加载 h/w 两路表(fp32 路径 [csrc/kernels/rope_and_cache.h:530-545](../../../csrc/kernels/rope_and_cache.h#L530-L545),legacy 路径 [csrc/kernels/rope_and_cache.h:566-600](../../../csrc/kernels/rope_and_cache.h#L566-L600));
+3. **K 旋转**:`COSSIN_FP32 || is_bf16` 调 `calc_cossin_cast<Dtype, COSSIN_FP32>`,legacy fp16 调 `calc_cossin`;`COSSIN_FP32` 时旋转后 `convert_output<Dtype>` 做唯一一次舍入写回 `key_dtype_ubuf`,然后 `copy_ubuf_to_gm` 同时写回 `gm_key`(原地)与 `gm_kcache`([csrc/kernels/rope_and_cache.h:603-632](../../../csrc/kernels/rope_and_cache.h#L603-L632));
+4. **Q 旋转 + 缩放**:再次调用旋转函数;`COSSIN_FP32` 时先 `vmuls ... scale_fp32` 在 fp32 域缩放,再 `convert_output<Dtype>` 一次舍入写回 `gm_query`([csrc/kernels/rope_and_cache.h:634-681](../../../csrc/kernels/rope_and_cache.h#L634-L681));legacy bf16 路径则把已舍入的 Q 再升回 fp32 缩放、再次舍入,以匹配 torch_npu 的逐算子舍入;legacy fp16 路径直接 `vmuls ... scale` 在 fp16 域缩放。
 
 同步链:`PIPE_S → PIPE_MTE2`(标量读 pos/slot 对 MTE2 可见)→ `PIPE_MTE3 → PIPE_MTE2`(上一 token 搬出完成、缓冲可复用)→ `PIPE_MTE2 → PIPE_V`(数据就绪)→ `PIPE_V → PIPE_MTE3`(结果就绪)。外层批间用 `wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0/1)` 等全部搬出完成。
 

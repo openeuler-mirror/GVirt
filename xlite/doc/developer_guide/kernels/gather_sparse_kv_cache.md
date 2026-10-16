@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-DSA(Dual Sparse Attention)decode 长序列路径的 KV 收集算子,**仅限 decode 批次**(每 batch query 长度恒为 1,不做 spec decode):按 indexer 给出的每 batch top-k token 下标(`topkIndices`),把 paged(分页)cache 中的 `kCache`(kvLoraRank)与 `peCache`(ropeHeadDim)收集到每 batch 连续的 dense cache 中,供 mla_v2 / cxa 的 dense 模式连续读取。本质上是一次 `dense[b, i] = paged[blockTable[b][tok/bs]*bs + tok%bs]` 的双通道 gather,host 侧要求 `kvHeads == 1`(`XliteOpGatherSparseKVCache`,`csrc/op.cpp`)。
+DSA(Dual Sparse Attention)decode 长序列路径的 KV 收集算子,**仅限 decode 批次**(每 batch query 长度恒为 1,不做 spec decode):按 indexer 给出的每 batch top-k token 下标(`topkIndices`),把 paged(分页)cache 中的 `kCache`(kvLoraRank)与 `peCache`(ropeHeadDim)收集到每 batch 连续的 dense cache 中,供 mla_v2 / cxa 的 dense 模式连续读取。本质上是一次 `dense[b, i] = paged[blockTable[b][tok/bs]*stride + (tok%bs)*dim]` 的双通道 gather(stride 为 paged cache 的 dim-0 跨度,dim 为该通道的向量宽),host 侧要求 `kvHeads == 1`(`XliteOpGatherSparseKVCache`,`csrc/op.cpp`)。
 
 每 batch 行按候选 token 数 `numCandidates = (cachedLens[b] + 1) / compressRatio` 分两类(+1 即 decode 自身 token):
 
@@ -27,8 +27,8 @@ Python 绑定 `gather_sparse_kv_cache`(`csrc/_C.cpp`)→ `GatherSparseKVCache`(`
 ```cpp
 gather_sparse_kv_cache_<dtype>(kCache, peCache, blockTables, topkIndices, cachedLens,
                                kDenseCache, peDenseCache, seqNum, indexTopK, blockSize,
-                               maxNumBlocks, kvLoraRank, ropeHeadDim,
-                               compressRatio = 1, burstCopySize = GM_UB_BURST_SIZE)
+                               maxNumBlocks, kvLoraRank, ropeHeadDim, kCacheStride,
+                               peCacheStride, compressRatio = 1, burstCopySize = GM_UB_BURST_SIZE)
 ```
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
@@ -45,6 +45,7 @@ gather_sparse_kv_cache_<dtype>(kCache, peCache, blockTables, topkIndices, cached
 | blockSize | 标量 | - | uint32 | KV cache 块大小(128);须为 `CNT_ONE_LOOP=32` 的倍数(kernel 前置条件) |
 | maxNumBlocks | 标量 | - | uint32 | host 由 blockTables 推得(`DeriveMaxNumBlocks`,`csrc/op.cpp`) |
 | kvLoraRank / ropeHeadDim | 标量 | - | uint32 | 两通道向量宽,均须为 16 的倍数(每 token 字节 32B 对齐)且不超出 kernel 的 UB 容量(kernel 前置条件);kernel 要求第一通道不小于第二,host 保证:两通道都在且 `kvLoraRank < ropeHeadDim` 时换位传入,单通道时活动通道作第一通道 |
+| kCacheStride / peCacheStride | 标量 | - | uint32 | 两通道 paged cache 的 dim-0 跨度(元素数),块基址 = 物理块号 × 跨度;连续时等于 blockSize×kvLoraRank / blockSize×ropeHeadDim,非连续时由宿主传入真实跨距。跨距随通道一同换位;nope 变体仅第一跨距有效,第二跨距传 0 |
 | compressRatio | 标量 | - | uint32 | 压缩比,`>= 1`(kernel 前置条件);默认 1。cxa dense 模式内部传入实际压缩比 |
 | burstCopySize | 标量 | - | uint32 | burst 拷入大小上限(字节),`GM_UB_BURST_SIZE` 的运行时替代,只能收紧、不能放大;详见下文 |
 
@@ -67,7 +68,7 @@ host 仅 BF16;kernel 在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空�
 
 1. **载入下标**:sparse 行把 32 个 `topkIndices` 拷入 UB 当前轮转槽,MTE2 完成后通知标量核(EVENT_ID0..3 按缓冲编号);dense 行跳过(恒等模板无需下标)。
 2. **地址计算(标量核)**:对每个 token 求 `physBlock[i] = blockTable[tok/blockSize]`、`physInBlockOffset[i] = tok % blockSize`(blockTable 为 GM 指针,逐元素标量读,DCache 摊薄重复块);dense 行直接 `blk = blockTable[offsetInBatch/blockSize]`、`base = offsetInBatch % blockSize`、`physInBlockOffset[i] = base + i`(`blockSize % CNT_ONE_LOOP == 0` 保证整个 chunk 落在同一物理块)。
-3. **burst 拷入(GM→UB,组段)**:在 slot `i` 处比较 slot `i+1` 判定方向(`+1` 升序段、`-1` 降序段、否则单 token),向后延伸:同物理块、同方向等差、且段长 < `burstCopyCnt`。一次 burst 只取该段的 token 区间(升序内存序),降序段取 `[blkOffset+1-iBurst, blkOffset]`,落位后自然为升序——**消费方(mla_v2/cxa dense)对收集结果按集合语义做注意力,槽位成员正确即可,次序无关**。段内约束:不跨物理块(构造保证)、不跨 chunk(`i+iBurst < cnt`)、不超 `burstCopyCnt`(超长逻辑段拆成多次 burst);无 UB→UB 搬运,未选中的 cache 不读 GM。burst 计数按第一通道(K,per-token 更大)推导,K 与 PE 的 burst 覆盖同一 token 段。
+3. **burst 拷入(GM→UB,组段)**:在 slot `i` 处比较 slot `i+1` 判定方向(`+1` 升序段、`-1` 降序段、否则单 token),向后延伸:同物理块、同方向等差、且段长 < `burstCopyCnt`。一次 burst 只取该段的 token 区间(升序内存序),源地址 = `blk × 该通道 cache 的 dim-0 跨度 + srcTok × 通道宽`(blk 为物理块号,srcTok 为块内 token 偏移),降序段取 `[blkOffset+1-iBurst, blkOffset]`,落位后自然为升序——**消费方(mla_v2/cxa dense)对收集结果按集合语义做注意力,槽位成员正确即可,次序无关**。段内约束:不跨物理块(构造保证)、不跨 chunk(`i+iBurst < cnt`)、不超 `burstCopyCnt`(超长逻辑段拆成多次 burst);无 UB→UB 搬运,未选中的 cache 不读 GM。burst 计数按第一通道(K,per-token 更大)推导,K 与 PE 的 burst 覆盖同一 token 段。
 4. **整段拷出(UB→GM)**:整个 chunk 一次 `CopyUbufToGmAligned` 连续写出 `cnt * perKBytes`(PE 同理)——随机访存收敛为"读侧多段 burst、写侧整段连续"。
 
 **burst 计数推导**:`burstSize = MIN(MIN(burstCopySize, GM_UB_BURST_SIZE=16KB), GM_UB_BURST_SIZE_TILING=8KB)`,`burstCopyCnt = CLAMP(burstSize / perKBytes, 1, MIN(CNT_ONE_LOOP, blockSize))`。`GM_UB_BURST_SIZE_TILING`(定义于 `csrc/kernels/gather_sparse_kv_cache.h`)是拷入的编译期最优值:每次 burst 只取被选中的 token,burst 也要足够小,以便与其它轮转缓冲上正在进行的拷出交错(单次过大拷入会独占 GM 带宽、阻塞拷出)。运行时 `burstCopySize` 只能收紧:glm5(kvLoraRank=512,BF16,perKBytes=1024)默认 16KB 被 TILING 压到 8KB,即每 burst 8 token;`burstCopySize <= perKBytes`(如 512)时 `burstCopyCnt == 1`,退化为逐 token 拷入——dense 行亦然,与移除 burst 窗口前的实现完全一致。

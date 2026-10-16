@@ -27,19 +27,19 @@ indexer_topk(rt, q, k_cache, weight, topk_indices, query_start_loc,
              block_size, batch, topK)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:2001` 的 `XliteOpIndexerTopK`:`topK >= maxNumBlocks*blockSize` 且非 `skipDenseTopk` 时全部行都是稠密,kernel 不必启动,host 侧直接把 `seqPositions` 模板前 `topK` 项 D2D 广播进 `topkIndices` 后返回(`csrc/op.cpp:2012-2022`);否则校验 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp:2023`)。`maxSeqLen` 不再是参数,host 用 `blockSize * maxNumBlocks`(`DeriveMaxNumBlocks`,下限 `INIT_MIN_SEQ_POS=102400`)推导,并校验 `seqPositions` 覆盖该范围。kernel 签名(`csrc/kernels/indexer_topk.h:777` 的 `INDEXER_TOPK_FUNC_DEFINE`):
+host 侧 launch 见 `csrc/op.cpp:2001` 的 `XliteOpIndexerTopK`:`topK >= maxNumBlocks*blockSize` 且非 `skipDenseTopk` 时全部行都是稠密,kernel 不必启动,host 侧直接把 `seqPositions` 模板前 `topK` 项 D2D 广播进 `topkIndices` 后返回(`csrc/op.cpp:2012-2022`);否则校验 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp:2023`)。`maxSeqLen` 不再是参数,host 用 `blockSize * maxNumBlocks`(`DeriveMaxNumBlocks`,下限 `INIT_MIN_SEQ_POS=102400`)推导,并校验 `seqPositions` 覆盖该范围。kernel 签名(`csrc/kernels/indexer_topk.h:780` 的 `INDEXER_TOPK_FUNC_DEFINE`):
 
 ```cpp
 indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc,
                      GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,
                      GM_ADDR scores, GM_ADDR lastTopk, GM_ADDR seqPositions,
-                     GM_ADDR topkIndices, GM_ADDR sync, uint32_t nHeads,
-                     uint32_t headDim, uint32_t blockSize, uint32_t batch,
+                     GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,
+                     uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,
                      uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,
                      uint32_t compressRatio)
 ```
 
-C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`indexer_topk.h:792`)签名不同:末参为 `GM_ADDR k_scale_cache`(无 `compressRatio`,C8 固定按 token 级 KV)。
+C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`indexer_topk.h:795`)签名不同:同样在 `sync` 后接收 `uint32_t k_cache_stride`,末参为 `GM_ADDR k_scale_cache`(无 `compressRatio`,C8 固定按 token 级 KV)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -55,6 +55,7 @@ C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`indexer_topk.h:792`)签名不�
 | topkIndices | 输出 | `[total_query_len, topK]` | int32(uint32 语义) | 每 query token 的 topK 索引,**按索引升序**(最小 id 在前)排列,所有行有效。`p0 >= topK` 的稀疏行是真实 topK(候选满 `topK` 个,全部落在 `[0, p0]`);`p0 < topK` 的稠密行是默认模板 `0...topK-1`,其中 `> p0` 的表项无效,下游必须过滤——模板头部的前 `min(p0+1, topK)` 项恒为有效位置(`gather_sparse_kv_cache` 依赖此约定做头部有效收集) |
 | kScaleCache | 输入(C8) | `[kvcache_block_num,blockSize,1,1]` | fp16 | 与 K cache 同分页布局;Python 参数为 `k_scale_cache` |
 | sync | workspace | `[AIV_TO_AIC*block_num]` | int32 | 核间环形同步 flag 数组(每核 `AIV_TO_AIC=2` 个,对应 2 个 subblock,`indexer_topk.h:12`) |
+| kCacheStride | — | 标量 | uint32 | kCache 的 dim-0 跨度(元素数);连续时等于 blockSize×headDim(C8 为 blockSize×128),非连续时由宿主传入真实跨距 |
 | nHeads / headDim / blockSize / batch / topK / skipDenseTopk | — | 标量 | uint32 / uint8 | 测试配置:nHeads=64, headDim=128, blockSize=128, topK ∈ {512, 2048};约束 `topK <= MAX_TOPK_NUM=2048`、`kvLen <= MAX_INDEXER_KV_TILE_LEN=4096`(`indexer_topk.h:374`)。`skipDenseTopk=1` 时不写稠密模板(旧行为,稠密行内容不定),默认 0 |
 | compressRatio | — | 标量 | uint32 | KV 压缩比:`1`=token 级 KV(因果含自身);`>1`=压缩块级 KV,`MapPosToKv` 把 token 位置映射到已完成压缩块边界(因果排除自身未完成块)。host 默认 `compressRatio` 由模型层传入(`csrc/op.cpp:2062`);C8 路径不传(固定 token 级) |
 

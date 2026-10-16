@@ -226,7 +226,8 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
                             uint32_t in_start_offset, uint32_t out_start_offset, bool useNorm,
                             GM_ADDR variance, uint32_t tpSize, GM_ADDR kcache = nullptr,
                             GM_ADDR slot_mapping = nullptr, uint32_t block_size = 0,
-                            int coreOffset = 0, int *nextCoreOffset = nullptr, bool outFp32 = false)
+                            uint32_t kcacheStride = 0, int coreOffset = 0,
+                            int *nextCoreOffset = nullptr, bool outFp32 = false)
 {
     set_atomic_none();
     set_mask_norm();
@@ -524,8 +525,9 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
                 copy_ubuf_to_gm(gm_out_dtype, out[outCurr], 0, 1, len_burst, 0, 0);
             }
             if (need_cache) {
-                auto *kcache_ptr = ((__gm__ Dtype *)(kcache)) + block * block_size * total_dim +
-                                   block_offset * total_dim;
+                auto *kcache_ptr = ((__gm__ Dtype *)(kcache)) +
+                                   (uint64_t)block * MAX(kcacheStride, block_size * total_dim) +
+                                   (uint64_t)block_offset * total_dim;
                 copy_ubuf_to_gm(kcache_ptr, out[outCurr], 0, 1, len_burst, 0, 0);
             }
         } else if (useNorm && outFp32) {
@@ -558,7 +560,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     {                                                                                             \
         norm<dtype>(input, addInOut, weight, bias, out, token_num, norm_dim, norm_eps, kind,      \
                     cnt_per_token, in_step, out_step, in_start_offset, out_start_offset, useNorm, \
-                    variance, tpSize, nullptr, nullptr, 0, 0, nullptr, outFp32);                  \
+                    variance, tpSize, nullptr, nullptr, 0, 0, 0, nullptr, outFp32);               \
     }
 #else
 #define NORM_FUNC_DEFINE(dtype)                                                                   \

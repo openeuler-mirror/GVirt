@@ -228,6 +228,7 @@ def run_test(
     pattern=False,
     shared_single_block=False,
     permuted_blocks=False,
+    pitched=False,
 ):
     max_num_blocks = max_blocks(cached_lens_list, BLOCK_SIZE)
     kv_heads = 1
@@ -245,15 +246,23 @@ def run_test(
     with torch.device("npu"):
         # shared_single_block: every row maps to physical block 0 (huge batch, one block)
         kvcache_block_num = 1 if shared_single_block else max_num_blocks * batch
+        # pitched: keep every other physical block so dim-0 stride doubles — the
+        # kernels must address blocks via the passed cache stride, not the
+        # contiguous pitch (InitXTensor forwards the non-contiguous stride)
+        pitch = 2 if pitched else 1
         if channels == "pe":
             k_cache_xlite = torch.zeros(0, dtype=test_dtype)
-            pe_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, 1, rope_head_dim)
+            pe_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1,
+                                         rope_head_dim)[::pitch]
         elif channels == "k":
-            k_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, 1, kv_lora_rank)
+            k_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1,
+                                        kv_lora_rank)[::pitch]
             pe_cache_xlite = torch.zeros(0, dtype=test_dtype)
         else:
-            k_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, 1, kv_lora_rank)
-            pe_cache_xlite = torch.randn(kvcache_block_num, BLOCK_SIZE, 1, rope_head_dim)
+            k_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1,
+                                        kv_lora_rank)[::pitch]
+            pe_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1,
+                                         rope_head_dim)[::pitch]
 
         # block_tables: batch x max_num_blocks (contiguous / all-zero / random permutation)
         if shared_single_block:
@@ -384,16 +393,17 @@ def run_test(
         # token rows as a byte multiset (catches bugs mirrored into the reference)
         k_out = k_dense_xlite.cpu() if channels != "pe" else None
         pe_out = pe_dense_xlite.cpu() if channels != "k" else None
-        if k_out is not None:
-            k_flat = k_cache_src.reshape(-1, kv_lora_rank)
-        if pe_out is not None:
-            pe_flat = pe_cache_src.reshape(-1, rope_head_dim)
         for b in range(batch):
+            # index by (block, offset): row_flat_idx holds contiguous-layout flat
+            # slots, which resolve to the same rows on a pitched cache view too
             flat = torch.tensor(row_flat_idx[b], dtype=torch.int64)
+            blk_idx, off_idx = flat // BLOCK_SIZE, flat % BLOCK_SIZE
             if k_out is not None:
-                assert_row_set(k_out[b, : row_valid[b]].reshape(-1, kv_lora_rank), k_flat[flat])
+                k_rows = k_cache_src[blk_idx, off_idx].reshape(-1, kv_lora_rank)
+                assert_row_set(k_out[b, : row_valid[b]].reshape(-1, kv_lora_rank), k_rows)
             if pe_out is not None:
-                assert_row_set(pe_out[b, : row_valid[b]].reshape(-1, rope_head_dim), pe_flat[flat])
+                pe_rows = pe_cache_src[blk_idx, off_idx].reshape(-1, rope_head_dim)
+                assert_row_set(pe_out[b, : row_valid[b]].reshape(-1, rope_head_dim), pe_rows)
         logging.info(
             "gather_sparse_kv_cache case passed (exact match + set semantics; %d dense rows).",
             dense_rows,
@@ -565,6 +575,30 @@ def main():
         "k",
         shared_single_block=True,
     )
+
+    # pitched caches: dim-0 stride double the contiguous pitch (buf[::2] views);
+    # kernels must address blocks via the passed stride — mixed sparse/dense rows,
+    # every order, the swapped-channel and single-channel (nope) variants
+    for order, channels, swapped in (
+        ("asc", "both", False),
+        ("random", "both", False),
+        ("desc", "pe", False),
+        ("random", "k", True),
+    ):
+        run_test(
+            "swapped" if swapped else name,
+            64 if swapped else kv_lora_rank,
+            512 if swapped else rope_head_dim,
+            test_dtype,
+            3,
+            [2047, 8191, 45841],
+            2048,
+            order,
+            1,
+            8192,
+            channels,
+            pitched=True,
+        )
 
     run_host_check_cases()
 

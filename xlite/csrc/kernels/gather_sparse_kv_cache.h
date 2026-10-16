@@ -18,12 +18,16 @@ template <typename Dtype>
 __aicore__ __inline__ void gather_sparse_kv_cache(
     GM_ADDR kCache, GM_ADDR peCache, GM_ADDR blockTables, GM_ADDR topkIndices, GM_ADDR cachedLens,
     GM_ADDR kDenseCache, GM_ADDR peDenseCache, uint32_t seqNum, uint32_t topK, uint32_t blockSize,
-    uint32_t maxNumBlocks, uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t compressRatio = 1,
+    uint32_t maxNumBlocks, uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t kCacheStride = 0,
+    uint32_t peCacheStride = 0, uint32_t compressRatio = 1,
     uint32_t burstCopySize = GM_UB_BURST_SIZE)
 {
     // NOTE: decode-only batches (all query lengths are 1); topK indices may arrive in
     // any order (consecutive runs are detected at runtime); kvLoraRank >= ropeHeadDim,
-    // so the burst count derived from the first channel bounds both channels
+    // so the burst count derived from the first channel bounds both channels. The
+    // paged sources honor their dim-0 strides, but the dense outputs are written with
+    // the contiguous [batch, topK, dim] pitch, so callers must pass contiguous
+    // dense-output buffers (all current producers are pool- or torch-allocated).
     set_atomic_none();
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
@@ -170,14 +174,19 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
                    (int32_t)physInBlockOffset[i + iBurst] == (int32_t)blkOffset + dir * iBurst) {
                 iBurst++;
             }
-            // Source token range: [srcTok, srcTok + iBurst) of `blk`, ascending
+            // Source token range: [srcTok, srcTok + iBurst) of `blk`, ascending;
+            // `blk` is a physical block id, so its GM pitch is the cache's dim-0 stride
             uint32_t srcTok = dir >= 0 ? blkOffset : blkOffset + 1 - iBurst;
             CopyGmToUbufAligned(kBufs[curr] + i * kvLoraRank,
-                                kCacheGm + (uint64_t)(blk * blockSize + srcTok) * kvLoraRank,
+                                kCacheGm +
+                                    (uint64_t)blk * MAX(kCacheStride, blockSize * kvLoraRank) +
+                                    (uint64_t)srcTok * kvLoraRank,
                                 iBurst * perKBytes);
 #ifndef XLITE_GATHER_SPARSE_KV_CACHE_NOPE
             CopyGmToUbufAligned(peBufs[curr] + i * ropeHeadDim,
-                                peCacheGm + (uint64_t)(blk * blockSize + srcTok) * ropeHeadDim,
+                                peCacheGm +
+                                    (uint64_t)blk * MAX(peCacheStride, blockSize * ropeHeadDim) +
+                                    (uint64_t)srcTok * ropeHeadDim,
                                 iBurst * perPeBytes);
 #endif
         }
@@ -206,24 +215,26 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
         GM_ADDR kCache, GM_ADDR peCache, GM_ADDR blockTables, GM_ADDR topkIndices,           \
         GM_ADDR cachedLens, GM_ADDR kDenseCache, GM_ADDR peDenseCache, uint32_t seqNum,      \
         uint32_t topK, uint32_t blockSize, uint32_t maxNumBlocks, uint32_t kvLoraRank,       \
-        uint32_t ropeHeadDim, uint32_t compressRatio, uint32_t burstCopySize)                \
+        uint32_t ropeHeadDim, uint32_t kCacheStride, uint32_t peCacheStride,                 \
+        uint32_t compressRatio, uint32_t burstCopySize)                                      \
     {                                                                                        \
         gather_sparse_kv_cache<dtype>(kCache, peCache, blockTables, topkIndices, cachedLens, \
                                       kDenseCache, peDenseCache, seqNum, topK, blockSize,    \
-                                      maxNumBlocks, kvLoraRank, ropeHeadDim, compressRatio,  \
-                                      burstCopySize);                                        \
+                                      maxNumBlocks, kvLoraRank, ropeHeadDim, kCacheStride,   \
+                                      peCacheStride, compressRatio, burstCopySize);          \
     }
 #define GATHER_SPARSE_KV_CACHE_NOPE_FUNC_DEFINE(dtype)                                       \
     extern "C" __global__ __aicore__ void gather_sparse_kv_cache_nope_##dtype(               \
         GM_ADDR kCache, GM_ADDR peCache, GM_ADDR blockTables, GM_ADDR topkIndices,           \
         GM_ADDR cachedLens, GM_ADDR kDenseCache, GM_ADDR peDenseCache, uint32_t seqNum,      \
         uint32_t topK, uint32_t blockSize, uint32_t maxNumBlocks, uint32_t kvLoraRank,       \
-        uint32_t ropeHeadDim, uint32_t compressRatio, uint32_t burstCopySize)                \
+        uint32_t ropeHeadDim, uint32_t kCacheStride, uint32_t peCacheStride,                 \
+        uint32_t compressRatio, uint32_t burstCopySize)                                      \
     {                                                                                        \
         gather_sparse_kv_cache<dtype>(kCache, peCache, blockTables, topkIndices, cachedLens, \
                                       kDenseCache, peDenseCache, seqNum, topK, blockSize,    \
-                                      maxNumBlocks, kvLoraRank, ropeHeadDim, compressRatio,  \
-                                      burstCopySize);                                        \
+                                      maxNumBlocks, kvLoraRank, ropeHeadDim, kCacheStride,   \
+                                      peCacheStride, compressRatio, burstCopySize);          \
     }
 #else
 #define GATHER_SPARSE_KV_CACHE_FUNC_DEFINE(dtype)                                       \
@@ -231,7 +242,8 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
         GM_ADDR kCache, GM_ADDR peCache, GM_ADDR blockTables, GM_ADDR topkIndices,      \
         GM_ADDR cachedLens, GM_ADDR kDenseCache, GM_ADDR peDenseCache, uint32_t seqNum, \
         uint32_t topK, uint32_t blockSize, uint32_t maxNumBlocks, uint32_t kvLoraRank,  \
-        uint32_t ropeHeadDim, uint32_t compressRatio, uint32_t burstCopySize)           \
+        uint32_t ropeHeadDim, uint32_t kCacheStride, uint32_t peCacheStride,            \
+        uint32_t compressRatio, uint32_t burstCopySize)                                 \
     {                                                                                   \
     }
 #define GATHER_SPARSE_KV_CACHE_NOPE_FUNC_DEFINE(dtype)                                  \
@@ -239,7 +251,8 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
         GM_ADDR kCache, GM_ADDR peCache, GM_ADDR blockTables, GM_ADDR topkIndices,      \
         GM_ADDR cachedLens, GM_ADDR kDenseCache, GM_ADDR peDenseCache, uint32_t seqNum, \
         uint32_t topK, uint32_t blockSize, uint32_t maxNumBlocks, uint32_t kvLoraRank,  \
-        uint32_t ropeHeadDim, uint32_t compressRatio, uint32_t burstCopySize)           \
+        uint32_t ropeHeadDim, uint32_t kCacheStride, uint32_t peCacheStride,            \
+        uint32_t compressRatio, uint32_t burstCopySize)                                 \
     {                                                                                   \
     }
 #endif
