@@ -6,9 +6,9 @@ ReduceScatter(SUM)集合通信算子:每个 rank 持有形状相同的完整输�
 
 ## 输入输出参数
 
-Python 侧调用:`reduce_scatter(rt, z, y, comm_type)`(`tests/kernels/reduce_scatter.py:55`),host 侧 launch 见 `csrc/op.cpp:242`(`XliteOpReduceScatter`)。
+Python 侧调用:`reduce_scatter(rt, z, y, comm_type)`(`tests/kernels/reduce_scatter.py` 中 `reduce_scatter(rt, z, y, comm_type)` 调用),host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpReduceScatter`。
 
-kernel 签名(`csrc/kernels/reduce_scatter.cpp:314`):
+kernel 签名(`csrc/kernels/reduce_scatter.cpp` 的 `reduce_scatter_##dtype` 入口,由宏 `REDUCE_SCATTER_FUNC_DEFINE` 定义):
 
 ```cpp
 reduce_scatter_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId,
@@ -18,20 +18,20 @@ reduce_scatter_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t r
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| input | 输入 | `[rankSize * N]`(逻辑上任意形状,N = count/rankSize) | FP16 / BF16 / INT8 / INT32 / FP32 | 本 rank 的完整输入。要求 `in.numel == out.numel * rankSize`(`csrc/op.cpp:246`) |
+| input | 输入 | `[rankSize * N]`(逻辑上任意形状,N = count/rankSize) | FP16 / BF16 / INT8 / INT32 / FP32 | 本 rank 的完整输入。要求 `in.numel == out.numel * rankSize`(`csrc/op.cpp` 的 `XliteOpReduceScatter` 中张量校验) |
 | output | 输出 | `[N]` | 同 input | 全 rank 求和后的第 rankId 块 |
-| count | 标量 | - | uint64 | 输入总元素数 `in.numel`;kernel 内 `countPerRank = DIV_ROUND_UP(count, rankSize)`(`csrc/kernels/reduce_scatter.cpp:41`) |
-| rankId / rankSize | 标量 | - | uint32 | 通信域内编号与总 rank 数(TP 取 `rankId % tpSize`,DP 取 `rankId / tpSize`,`csrc/op.cpp:258`) |
-| generation | 标量 | - | uint64 | 通信代数,每次调用递增(`csrc/op.cpp:343`),用于 IPC flag 单调比较 |
-| param | 输入 | - | `XcclParam` | 所有 rank 的 `ipcMems` / `ipcXTensorMems` 基址(`csrc/kernels/kernel_param.h:20`) |
-| copySize | 标量 | - | uint32 | 每次 UB 搬运的目标字节数,默认 `COPY_SIZE`(32768),host 侧按核数调整(`csrc/op.cpp:310-316`) |
-| fetchOffset | 标量 | - | bool | true 时通过 IPC 内存发布/获取各 rank 张量偏移;DP 域恒为 true(`csrc/op.cpp:343`) |
+| count | 标量 | - | uint64 | 输入总元素数 `in.numel`;kernel 内 `countPerRank = DIV_ROUND_UP(count, rankSize)`(`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::Init` 中 `countPerRank` 计算) |
+| rankId / rankSize | 标量 | - | uint32 | 通信域内编号与总 rank 数(TP 取 `rankId % tpSize`,DP 取 `rankId / tpSize`,`csrc/op.cpp` 的 `XliteOpReduceScatter` 中 TP/DP 分支) |
+| generation | 标量 | - | uint64 | 通信代数,每次调用递增(`csrc/op.cpp` 的 `XliteOpReduceScatter` 中 `launchKernel` 调用,关键字 `xcclComm->generation++`),用于 IPC flag 单调比较 |
+| param | 输入 | - | `XcclParam` | 所有 rank 的 `ipcMems` / `ipcXTensorMems` 基址(`csrc/kernels/kernel_param.h` 的 `struct XcclParam`) |
+| copySize | 标量 | - | uint32 | 每次 UB 搬运的目标字节数,默认 `COPY_SIZE`(32768),host 侧按核数调整(`csrc/op.cpp` 的 `XliteOpReduceScatter` 中 `copySize` 调整段) |
+| fetchOffset | 标量 | - | bool | true 时通过 IPC 内存发布/获取各 rank 张量偏移;DP 域恒为 true(`csrc/op.cpp` 的 `XliteOpReduceScatter` 中 `launchKernel` 调用,关键字 `fetchOffset || type == DP`) |
 
-测试 shape 约定(`tests/kernels/reduce_scatter.py:44-55`):每 rank 输入 `y = cat(x_list, dim=0)` 形状 `[dim1*world_size, dim2]`,输出 `[dim1, dim2]`,`count = dim1*world_size*dim2`。注意 kernel 把 `count` 向上取整分块,故 `count` 最好能被 rankSize 整除;否则最后一块较短(`countCurrRank` 钳位,`csrc/kernels/reduce_scatter.cpp:124-126`)。
+测试 shape 约定(`tests/kernels/reduce_scatter.py` 中 shape 循环,关键字 `for dim1, dim2 in zip([1, 1, 2, 4, 8, 32, 512]`):每 rank 输入 `y = cat(x_list, dim=0)` 形状 `[dim1*world_size, dim2]`,输出 `[dim1, dim2]`,`count = dim1*world_size*dim2`。注意 kernel 把 `count` 向上取整分块,故 `count` 最好能被 rankSize 整除;否则最后一块较短(`countCurrRank` 钳位,`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::Init` 中 `countCurrRank` 钳位段)。
 
 ## 支持的数据类型
 
-单一模板实现 `csrc/kernels/reduce_scatter.cpp`,统一实例化 6 个变体(`csrc/kernels/reduce_scatter.cpp:326-331`):
+单一模板实现 `csrc/kernels/reduce_scatter.cpp`,统一实例化 6 个变体(`csrc/kernels/reduce_scatter.cpp` 末尾的 `REDUCE_SCATTER_FUNC_DEFINE` 实例化列表):
 
 | dtype 变体 | kernel 符号 |
 |---|---|
@@ -42,7 +42,7 @@ reduce_scatter_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t r
 | bfloat16_t | `reduce_scatter_bfloat16_t` |
 | float | `reduce_scatter_float` |
 
-host 侧 dispatch FP16/BF16/INT8/INT32/FP32(`csrc/op.cpp:320-340`);INT16 有实例化但未启用,INT64 走 HCCL 回退。
+host 侧 dispatch FP16/BF16/INT8/INT32/FP32(`csrc/op.cpp` 的 `XliteOpReduceScatter` 中 dtype dispatch `switch (in.dtype)`);INT16 有实例化但未启用,INT64 走 HCCL 回退。
 
 ## 实现原理
 
@@ -50,22 +50,22 @@ host 侧 dispatch FP16/BF16/INT8/INT32/FP32(`csrc/op.cpp:320-340`);INT16 有实�
 
 与 all_gather / all_reduce 共用同一套 IPC 基础设施(详见 [all_gather.md](all_gather.md)):
 
-- host 侧 `XcclComm::Init`(`csrc/ccl.cpp:34`)通过 socket 交换 IPC key 并互相导入两组内存:大块张量池 `ipcXTensorMems` 与 2MB 同步/偏移区 `ipcMems`,基址打包进 `XcclParam` 传给 kernel。
-- `Init`(`csrc/kernels/reduce_scatter.cpp:23`)中 block 0 在 `fetchOffset` 时把本 rank input/output 相对 `ipcXTensorMems[myRankId]` 的偏移写入 `ipcMems[myRankId]` 头部 `XcclIpcMemData`(`csrc/kernels/kernel_param.h:15`)并刷 cache,随后置起始 flag 0;各核 `WorkSplit` 均摊等待其余 rank 的 flag 0(`csrc/kernels/reduce_scatter.cpp:86-89`)。
-- 就绪后每核为每个远端 rank 构造 GlobalTensor:远端地址 = `ipcXTensorMems[r] + {inputOffset 或 outputOffset}`(`csrc/kernels/reduce_scatter.cpp:95-120`)。`skipMyRank`(`input + myRankId*countPerRank*sizeof(Dtype) == output`,即输出正好是输入中间一段,in-place 切分)时跳过自身块的预写(`csrc/kernels/reduce_scatter.cpp:210`)。
-- `SetIpcFlag` / `WaitIpcFlag`(`csrc/kernels/reduce_scatter.cpp:130-155`)用 `DataCopyPad` 搬 4 字节 flag 做 GM 信号量,`flagValue >= generation` 判完成;generation 单调递增防止跨调用误判。
+- host 侧 `XcclComm::Init`(`csrc/ccl.cpp` 的 `XcclComm::Init`)通过 socket 交换 IPC key 并互相导入两组内存:大块张量池 `ipcXTensorMems` 与 2MB 同步/偏移区 `ipcMems`,基址打包进 `XcclParam` 传给 kernel。
+- `Init`(`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::Init`)中 block 0 在 `fetchOffset` 时把本 rank input/output 相对 `ipcXTensorMems[myRankId]` 的偏移写入 `ipcMems[myRankId]` 头部 `XcclIpcMemData`(`csrc/kernels/kernel_param.h` 的 `struct XcclIpcMemData`)并刷 cache,随后置起始 flag 0;各核 `WorkSplit` 均摊等待其余 rank 的 flag 0(`ReduceScatter::Init` 中 `WorkSplit` 等待 flag 0 段)。
+- 就绪后每核为每个远端 rank 构造 GlobalTensor:远端地址 = `ipcXTensorMems[r] + {inputOffset 或 outputOffset}`(`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::Init` 中重建远端 GlobalTensor 的循环)。`skipMyRank`(`input + myRankId*countPerRank*sizeof(Dtype) == output`,即输出正好是输入中间一段,in-place 切分)时跳过自身块的预写(`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::Init`,关键字 `this->skipMyRank = (input + offsetCurrRank * sizeof(Dtype)) == output`)。
+- `SetIpcFlag` / `WaitIpcFlag`(`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::SetIpcFlag` / `ReduceScatter::WaitIpcFlag`)用 `DataCopyPad` 搬 4 字节 flag 做 GM 信号量,`flagValue >= generation` 判完成;generation 单调递增防止跨调用误判。
 
 ### 数据搬运:自身块预写 + 原子累加
 
-`Run`(`csrc/kernels/reduce_scatter.cpp:202`)与 all_reduce 阶段 1 几乎相同:
+`Run`(`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::Run`)与 all_reduce 阶段 1 几乎相同:
 
-1. **自身块预写**(非 skipMyRank):本 rank 输出的第 `myRankId` 块对应本地 input 的 `[offsetCurrRank, offsetCurrRank + countCurrRank)`,每核取 `countCurrRank / coreNum` 的一片,经 UB ping-pong(`CopyGMtoUbuf` → `CopyUbufToGM`,非 32B 对齐尾巴走 `DataCopyPad` 分支,`csrc/kernels/reduce_scatter.cpp:174-200`)从本地 input 搬到本地 output,完成后 `CrossCoreSetFlag/CrossCoreWaitFlag` 全核汇合(`csrc/kernels/reduce_scatter.cpp:210-237`)。
-2. **原子累加**:`SetAtomicAdd<Dtype>()` 开启 GM 原子加(`csrc/kernels/reduce_scatter.cpp:238`),各核按 `(processRankIdx, taskIdx)` 分工——rankSize > coreNum 时一核串多个 rank,否则 `corePerRank = coreNum / rankSize` 个核分摊一个对端 rank(`csrc/kernels/reduce_scatter.cpp:240-247`)。对每个对端,从其 `inputBuf[processRankIdx]` 的第 `myRankId*countCurrRank + taskOffset` 起、按 `copyCount`(= `ROUND_DOWN(copySize,32)/sizeof(Dtype)`)一块读入 UB,原子加写到本地 output 的 `[taskOffset, ...)`(`csrc/kernels/reduce_scatter.cpp:249-280`)。所有 rank 对同一块的原子加在本 rank output 上汇总出全量和。
+1. **自身块预写**(非 skipMyRank):本 rank 输出的第 `myRankId` 块对应本地 input 的 `[offsetCurrRank, offsetCurrRank + countCurrRank)`,每核取 `countCurrRank / coreNum` 的一片,经 UB ping-pong(`CopyGMtoUbuf` → `CopyUbufToGM`,非 32B 对齐尾巴走 `DataCopyPad` 分支,`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::CopyGMtoUbuf` / `ReduceScatter::CopyUbufToGM`)从本地 input 搬到本地 output,完成后 `CrossCoreSetFlag/CrossCoreWaitFlag` 全核汇合(`ReduceScatter::Run` 中 `if (!skipMyRank)` 自身块预写段)。
+2. **原子累加**:`SetAtomicAdd<Dtype>()` 开启 GM 原子加(`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::Run` 中 `SetAtomicAdd<Dtype>()` 段),各核按 `(processRankIdx, taskIdx)` 分工——rankSize > coreNum 时一核串多个 rank,否则 `corePerRank = coreNum / rankSize` 个核分摊一个对端 rank(`ReduceScatter::Run` 中 `rankPerCore` / `corePerRank` 分工段)。对每个对端,从其 `inputBuf[processRankIdx]` 的第 `myRankId*countCurrRank + taskOffset` 起、按 `copyCount`(= `ROUND_DOWN(copySize,32)/sizeof(Dtype)`)一块读入 UB,原子加写到本地 output 的 `[taskOffset, ...)`(`ReduceScatter::Run` 中对端 rank 原子加搬运循环)。所有 rank 对同一块的原子加在本 rank output 上汇总出全量和。
 
-与 all_reduce 不同,reduce_scatter 没有第二阶段:结束前只做 `SetAtomicNone()` + `PipeBarrier<PIPE_ALL>()`(`csrc/kernels/reduce_scatter.cpp:282-286`),不含置/等完成 flag 1 的跨 rank 收尾握手。
+与 all_reduce 不同,reduce_scatter 没有第二阶段:结束前只做 `SetAtomicNone()` + `PipeBarrier<PIPE_ALL>()`(`csrc/kernels/reduce_scatter.cpp` 的 `ReduceScatter::Run` 末尾 `SetAtomicNone()` 段),不含置/等完成 flag 1 的跨 rank 收尾握手。
 
-host 侧核数选择:launch 核数上限 `rank`(每 rank 数据 ≥ `DOUBLE_AIVNUM_SIZE_BOUND` 327680 字节时翻倍为 `2*rank`),并 `ROUND_DOWN(coreNum, rank)` 对齐(`csrc/op.cpp:299-316`);与 kernel 内 `corePerRank = coreNum / rankSize` 的整除假设匹配。
+host 侧核数选择:launch 核数上限 `rank`(每 rank 数据 ≥ `DOUBLE_AIVNUM_SIZE_BOUND` 327680 字节时翻倍为 `2*rank`),并 `ROUND_DOWN(coreNum, rank)` 对齐(`csrc/op.cpp` 的 `XliteOpReduceScatter` 中核数选择段);与 kernel 内 `corePerRank = coreNum / rankSize` 的整除假设匹配。
 
 ### 回退路径
 
-单卡退化为 `aclrtMemcpyAsync`(`csrc/op.cpp:273-280`);无 XcclComm、INT64 或张量不在共享池时走 HCCL `HcclReduceScatter`(`csrc/op.cpp:354-357`)。
+单卡退化为 `aclrtMemcpyAsync`(`csrc/op.cpp` 的 `XliteOpReduceScatter` 中 `rankSize <= 1` 分支);无 XcclComm、INT64 或张量不在共享池时走 HCCL `HcclReduceScatter`(`csrc/op.cpp` 的 `XliteOpReduceScatter` 末尾 HCCL 回退,关键字 `HcclReduceScatter`)。

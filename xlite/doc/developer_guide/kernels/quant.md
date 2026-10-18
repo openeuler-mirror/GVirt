@@ -8,11 +8,11 @@
 out = int8(x * scale_reciprocal + offset)
 ```
 
-其中 `scale_reciprocal` 是量化 scale 的倒数(`1/scale`,由离线校准给出),`offset` 为量化偏置;host 语义上等价 `clamp(round(x/scale + offset), -128, 127)`(饱和由 `vconv_f162s8a` 的饱和舍入指令完成)。scale/offset 与激活同一 k 维按列对齐,属于 W8A8 推理管线的激活量化步骤([csrc/model.cpp:354](../../../csrc/model.cpp))。
+其中 `scale_reciprocal` 是量化 scale 的倒数(`1/scale`,由离线校准给出),`offset` 为量化偏置;host 语义上等价 `clamp(round(x/scale + offset), -128, 127)`(饱和由 `vconv_f162s8a` 的饱和舍入指令完成)。scale/offset 与激活同一 k 维按列对齐,属于 W8A8 推理管线的激活量化步骤([csrc/model.cpp](../../../csrc/model.cpp) 的 `XModel::ForwardLinear`)。
 
 ## 输入输出参数
 
-Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2887`)。kernel 签名见 `csrc/kernels/quant.h:153-158`:
+Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp` 的 `Quant`,关键字 `m.def("quant"`)。kernel 签名见 `csrc/kernels/quant.h` 的 `quant_to_i8`:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -29,18 +29,18 @@ Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2887`)�
 
 - 输入 `bfloat16_t` → 输出 `int8_t`([quant_bfloat16_t.cpp](../../../csrc/kernels/quant_bfloat16_t.cpp))
 
-host 侧仅接受 `x.dtype == BF16`(`csrc/op.cpp:1438`),kernel 入口符号为 `quant_static_bfloat16_t`(host 经 `aclrtlaunch_quant_static_bfloat16_t` 启动,`csrc/op.cpp:1440`)。
+host 侧仅接受 `x.dtype == BF16`,kernel 入口符号为 `quant_static_bfloat16_t`(host 经 `aclrtlaunch_quant_static_bfloat16_t` 启动,见 `csrc/op.cpp` 的 `XliteOpQuant`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/quant.h](../../../csrc/kernels/quant.h),函数 `quant_to_i8<dtype>`(quant.h:13-151,模板;BF16 实例化见 [quant_bfloat16_t.cpp](../../../csrc/kernels/quant_bfloat16_t.cpp),由 `QUANT_FUNC_DEFINE` 宏展开为入口符号 `quant_static_bfloat16_t`)。
+实现位于 [csrc/kernels/quant.h](../../../csrc/kernels/quant.h),函数 `quant_to_i8<dtype>`(模板;BF16 实例化见 [quant_bfloat16_t.cpp](../../../csrc/kernels/quant_bfloat16_t.cpp),由 `QUANT_FUNC_DEFINE` 宏展开为入口符号 `quant_static_bfloat16_t`)。
 
 ### 分块策略
 
-- **k 维切块**:固定 `k_tile = 4096`(quant.h:27),`k_loop = ceil(k / k_tile)`,防止 UB 溢出。scale/offset 也按同样 tile 切。
-- **m 维多 Block 并行**:每个 k_tile 内,`for (row = block_idx; row < m; row += block_num)`(quant.h:96),各 AIV 轮转处理不同行。
+- **k 维切块**:固定 `k_tile = 4096`(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `k_tile = 4096`),`k_loop = ceil(k / k_tile)`,防止 UB 溢出。scale/offset 也按同样 tile 切。
+- **m 维多 Block 并行**:每个 k_tile 内,`for (row = block_idx; row < m; row += block_num)`(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `for (uint32_t row = block_idx`),各 AIV 轮转处理不同行。
 
-### UB 内存布局(quant.h:30-51)
+### UB 内存布局(`csrc/kernels/quant.h` 的 `quant_to_i8`)
 
 按 ping-pong 成对分配(k_tile 为单位):
 
@@ -58,15 +58,15 @@ scale/offset 使用独立的 ping-pong(事件 EVENT_ID2/ID3),与行数据的事�
 
 三管线事件协议,两组事件ID:
 
-- 行数据链:`V→MTE2(EVENT_ID0/1)` 释放 x 缓冲 → `copy_gm_to_ubuf_align_b16` → `MTE2→V` 就绪 → `vconv_bf162f32` 后 `V→MTE2` 再释放;量化完成 `V→MTE3` → z 缓冲写出 GM 后 `MTE3→V` 回收(quant.h:99-135)。
-- scale/offset 链:同样以 EVENT_ID2/ID3 ping-pong,跨 tile 预取(quant.h:80-93、140-141)。
+- 行数据链:`V→MTE2(EVENT_ID0/1)` 释放 x 缓冲 → `copy_gm_to_ubuf_align_b16` → `MTE2→V` 就绪 → `vconv_bf162f32` 后 `V→MTE2` 再释放;量化完成 `V→MTE3` → z 缓冲写出 GM 后 `MTE3→V` 回收(`csrc/kernels/quant.h` 的 `quant_to_i8`)。
+- scale/offset 链:同样以 EVENT_ID2/ID3 ping-pong,跨 tile 预取(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `scale_offset_event_id`)。
 
-行间 `event_id = 1 - event_id` 翻转,搬入下一行与写出上一行重叠。收尾统一 wait + `pipe_barrier(PIPE_ALL)`(quant.h:144-150)。
+行间 `event_id = 1 - event_id` 翻转,搬入下一行与写出上一行重叠。收尾统一 wait + `pipe_barrier(PIPE_ALL)`(`csrc/kernels/quant.h` 的 `quant_to_i8`,收尾 drain)。
 
-### 关键计算步骤(quant.h:104-135)
+### 关键计算步骤(`csrc/kernels/quant.h` 的 `quant_to_i8`)
 
 1. `copy_gm_to_ubuf_align_b16` 搬入 `k_size` 个 BF16(按字节长度,b16 对齐变体);
-2. `vconv_bf162f32`:BF16 → FP32(注意 repeat 以较宽 dtype 计,`k_size_pad / VECTOR_MAX_NUM_OF_FP32`,quant.h:106-107);
+2. `vconv_bf162f32`:BF16 → FP32(注意 repeat 以较宽 dtype 计,`k_size_pad / VECTOR_MAX_NUM_OF_FP32`,见 `csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `k_repeats`);
 3. `vmul` 乘 scale_reciprocal(fp32),`vadd` 加 offset(fp32);
 4. `vconv_f322f16a`:FP32 → FP16;
 5. `vconv_f162s8a`:FP16 → INT8(`a` 后缀为饱和舍入变体,负溢出/正溢出截到 [-128, 127],替代显式 clamp+round);
@@ -74,5 +74,5 @@ scale/offset 使用独立的 ping-pong(事件 EVENT_ID2/ID3),与行数据的事�
 
 ### 边界处理
 
-- 尾部 tile(`k_size < k_tile`):搬运按实际 `k_size` 字节;计算侧 `k_size_pad = ROUND_UP(k_size, VECTOR_MAX_NUM_OF_BF16)` 补齐到向量指令粒度(quant.h:77-78)。
+- 尾部 tile(`k_size < k_tile`):搬运按实际 `k_size` 字节;计算侧 `k_size_pad = ROUND_UP(k_size, VECTOR_MAX_NUM_OF_BF16)` 补齐到向量指令粒度(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `k_size_pad = ROUND_UP`)。
 - m 不足 block_num 时循环自然跳过空闲核。

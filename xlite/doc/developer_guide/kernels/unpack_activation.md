@@ -11,7 +11,7 @@ MSD(Mixed-precision Split-activation Decomposition,W4A8)管线的第二步:把 I
 
 ## 输入输出参数
 
-Python 入口 `unpack_activation(rt, input, output)`(`csrc/_C.cpp:2960`)。kernel 签名见 `csrc/kernels/unpack_activation.h:155-160`:
+Python 入口 `unpack_activation(rt, input, output)`(`csrc/_C.cpp` 的 `UnpackActivation`,关键字 `m.def("unpack_activation"`)。kernel 签名见 `csrc/kernels/unpack_activation.h` 的 `unpack_activation`:
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -26,18 +26,18 @@ Python 入口 `unpack_activation(rt, input, output)`(`csrc/_C.cpp:2960`)。kerne
 
 - `int8_t`(INT8 → INT4-packed INT8;[unpack_activation_int8_t.cpp](../../../csrc/kernels/unpack_activation_int8_t.cpp))
 
-host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.cpp:2278`)。
+host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.cpp` 的 `XliteOpUnpackActivation`,关键字 `input.shape[1] % 2 == 0`)。
 
 ## 实现原理
 
-实现位于 [csrc/kernels/unpack_activation.h](../../../csrc/kernels/unpack_activation.h),函数 `unpack_activation`(unpack_activation.h:30-153)。
+实现位于 [csrc/kernels/unpack_activation.h](../../../csrc/kernels/unpack_activation.h),函数 `unpack_activation`(入口符号 `unpack_activation_int8_t` 由 `UNPACK_ACTIVATION_FUNC_DEFINE` 宏展开)。
 
 ### 分块与多 Block 并行
 
 - 无 k 切块,整行一次搬入(`k_pad = ROUND_UP(k, 256)` 按 INT8 向量粒度对齐);
-- 行间轮转:`for (row = block_idx; row < m; row += block_num)`(unpack_activation.h:88),输入/输出各 ping-pong。
+- 行间轮转:`for (row = block_idx; row < m; row += block_num)`(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `for (uint32_t row = block_idx`),输入/输出各 ping-pong。
 
-### UB 内存布局(unpack_activation.h:49-74)
+### UB 内存布局(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`)
 
 | 缓冲 | 大小 | 用途 |
 |---|---|---|
@@ -52,12 +52,12 @@ host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.
 
 标准三管线事件协议(EVENT_ID0/1 ping-pong):
 
-- `V→MTE2` 释放 in 缓冲 → 搬入 → `MTE2→V` 就绪;`vand`/`vconv` 完成后 `V→MTE2` 再释放(unpack_activation.h:102-115);
-- INT4 打包 `V→MTE3` → 两行写出 GM → `MTE3→V` 回收 out 缓冲(unpack_activation.h:127-143)。
+- `V→MTE2` 释放 in 缓冲 → 搬入 → `MTE2→V` 就绪;`vand`/`vconv` 完成后 `V→MTE2` 再释放(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `vand`);
+- INT4 打包 `V→MTE3` → 两行写出 GM → `MTE3→V` 回收 out 缓冲(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `vconv_f162s4`)。
 
-`vand_mask` 常量在循环外一次性 `vector_dup` 生成:以 int16 视图写 0x0F0F,使 int8 数据按 16bit 字与掩码对齐做按位与(unpack_activation.h:76-79)。
+`vand_mask` 常量在循环外一次性 `vector_dup` 生成:以 int16 视图写 0x0F0F,使 int8 数据按 16bit 字与掩码对齐做按位与(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `0x0f0f`)。
 
-### 关键计算步骤(unpack_activation.h:102-143)
+### 关键计算步骤(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`)
 
 对输入行 x(int8,k 字节,每字节两个 INT4):
 

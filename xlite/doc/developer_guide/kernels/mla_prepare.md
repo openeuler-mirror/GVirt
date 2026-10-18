@@ -2,11 +2,11 @@
 
 ## 功能概述
 
-MLA 注意力的前置准备算子(单 AIV 融合 kernel):对 `mlaQKVA` 线性层输出的 `attnQkvc = [q_lora | kv_lora | pe]` 逐 token 做三件事——(1) q_lora 段 RMSNorm(+bias) 输出 `attnNormQc`(后续 mlaQB 上投影的输入);(2) kv_lora 段 RMSNorm(+bias) 输出 `attnNormKvc` 并按 slotMapping 写入 paged `kCache`;(3) pe 段做 complex RoPE 后原地写回 attnQkvc 并写入 paged `peCache`。即一次 launch 融合两次分段 norm + RoPE + 双路 cache 写入。模型侧调用在 `csrc/model.cpp:432`(ForwardAttnMLACommonV2 内,紧跟 mlaQKVA 线性层 `csrc/model.cpp:430` 的 ForwardLinear)。
+MLA 注意力的前置准备算子(单 AIV 融合 kernel):对 `mlaQKVA` 线性层输出的 `attnQkvc = [q_lora | kv_lora | pe]` 逐 token 做三件事——(1) q_lora 段 RMSNorm(+bias) 输出 `attnNormQc`(后续 mlaQB 上投影的输入);(2) kv_lora 段 RMSNorm(+bias) 输出 `attnNormKvc` 并按 slotMapping 写入 paged `kCache`;(3) pe 段做 complex RoPE 后原地写回 attnQkvc 并写入 paged `peCache`。即一次 launch 融合两次分段 norm + RoPE + 双路 cache 写入。模型侧调用在 `csrc/model.cpp` 的 `XModel::ForwardAttnMLACommonV2` 内(关键字 `XliteOpMlaPrepare`),紧跟 mlaQKVA 线性层的 `ForwardLinear`(同一函数内,关键字 `mlaQKVA, attnQkvc`)。
 
 ## 输入输出参数
 
-Python 侧调用(`tests/kernels/mla_prepare.py:113`):
+Python 侧调用(见 `tests/kernels/mla_prepare.py`,关键字 `mla_prepare(rt,`):
 
 ```python
 mla_prepare(rt, attn_qkvc, q_norm, q_norm_bias, attn_norm_qc, kv_norm, kv_norm_bias,
@@ -14,7 +14,7 @@ mla_prepare(rt, attn_qkvc, q_norm, q_norm_bias, attn_norm_qc, kv_norm, kv_norm_b
             BLOCK_SIZE, k_cache, pe_cache, slot_mapping, NORM_EPS)
 ```
 
-host 封装 `MlaPrepare`(`csrc/_C.cpp:1914`)→ `XliteOpMlaPrepare`(`csrc/op.cpp:1177`)。kernel 签名(`csrc/kernels/mla_prepare.h:42`):
+host 封装 `MlaPrepare`(见 `csrc/_C.cpp` 的 `MlaPrepare`)→ `XliteOpMlaPrepare`(见 `csrc/op.cpp` 的 `XliteOpMlaPrepare`)。kernel 签名(见 `csrc/kernels/mla_prepare.h` 的 `mla_prepare` 模板函数):
 
 ```cpp
 mla_prepare_<dtype>(attnQkvc, qNorm, qNormBias, attnNormQc, kvNorm, kvNormBias, attnNormKvc,
@@ -50,11 +50,11 @@ mla_prepare_<dtype>(attnQkvc, qNorm, qNormBias, attnNormQc, kvNorm, kvNormBias, 
 | float16_t | `csrc/kernels/mla_prepare_float16_t.cpp` | `mla_prepare_float16_t` |
 | bfloat16_t | `csrc/kernels/mla_prepare_bfloat16_t.cpp` | `mla_prepare_bfloat16_t` |
 
-host 按 attnQkvc.dtype 选择(`csrc/op.cpp:1189-1195`);kernel 整体在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现(`csrc/kernels/mla_prepare.h:55-64`)。
+host 按 attnQkvc.dtype 选择(见 `csrc/op.cpp` 的 `XliteOpMlaPrepare`,关键字 `attnQkvc.dtype == FP16`);kernel 整体在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现(见 `csrc/kernels/mla_prepare.h` 的 `MLA_PREPARE_FUNC_DEFINE` 宏 `#else` 分支)。
 
 ## 实现原理
 
-纯 AIV 向量 kernel,本身不做计算,而是把三个已有 kernel 函数按"核偏移接力"的方式串成一个 launch(`csrc/kernels/mla_prepare.h:24-39`):
+纯 AIV 向量 kernel,本身不做计算,而是把三个已有 kernel 函数按"核偏移接力"的方式串成一个 launch(见 `csrc/kernels/mla_prepare.h` 的 `mla_prepare` 模板函数,融合主体):
 
 1. **q_lora 段 norm**:`norm<Dtype>(attnQkvc, nullptr, qNorm, qNormBias, attnNormQc, token_num, qLoraRank, normEps, NormKind::Rms, cntPerToken=1, inStep=totalDim, outStep=qLoraRank, inOffset=0, ..., tpSize, ...)`——对每个 token 的前 qLoraRank 列做 RMSNorm(带 weight/bias),从 totalDim 宽的行中按 inStep 步长取样;
 2. **kv_lora 段 norm + 写 cache**:`norm<Dtype>(attnQkvc, nullptr, kvNorm, kvNormBias, attnNormKvc, ..., kvLoraRank, inOffset=qLoraRank, ..., kCache, slotMapping, blockSize, kCacheStride)`——同样的分段 RMSNorm,但子函数带 kcache/slot_mapping 参数时会把 norm 结果按 slot 直接写入 paged cache,块基址 = 物理块号 × kCacheStride(norm 的 cache 直写分支);
@@ -62,11 +62,11 @@ host 按 attnQkvc.dtype 选择(`csrc/op.cpp:1189-1195`);kernel 整体在 `#ifdef
 
 **核偏移接力(coreOffset)**:三个子函数都是 grid-stride 并行(`tok = block_idx + coreOffset; tok < token_num; tok += block_num`),返回各自消耗后的 `nextCoreOffset`。mla_prepare 把上一个函数的 `nextCoreOffset` 作为下一个函数的 `coreOffset` 传入,使三个阶段在核间的任务边界连续错开,避免每个阶段都从 block 0 起算造成负载倾斜;三个阶段串行于同一 stream,天然满足写读依赖(attnQkvc 各段互不重叠,attnNormQc/Kvc 独立输出)。
 
-RoPE 细节(子函数 `csrc/kernels/rope_complex_and_cache.h:12`):UB 中 double-buffer 载入输入与 freqs,`vconv` 升 fp32 后按复数旋转(需要 `nLocalHeads == 1` 的 cache 写断言,`csrc/kernels/rope_complex_and_cache.h:26`),写回原 dtype;cache 写入按 slot 分解定位:`(slot/blockSize)*peCacheStride + (slot%blockSize)*ropeHeadDim`(物理块号 × dim-0 跨度 + 块内偏移 × 通道宽)。
+RoPE 细节(子函数见 `csrc/kernels/rope_complex_and_cache.h` 的 `rope_complex_and_cache` 模板函数):UB 中 double-buffer 载入输入与 freqs,`vconv` 升 fp32 后按复数旋转(需要 `nLocalHeads == 1` 的 cache 写断言,同函数内关键字 `assert(nLocalHeads == 1)`),写回原 dtype;cache 写入按 slot 分解定位:`(slot/blockSize)*peCacheStride + (slot%blockSize)*ropeHeadDim`(物理块号 × dim-0 跨度 + 块内偏移 × 通道宽)。
 
 ## 关键代码位置
 
-- 融合主体:`csrc/kernels/mla_prepare.h:24-39`
-- 分段 RMSNorm 与 cache 直写:`csrc/kernels/norm.h:223`(norm 函数签名)
-- complex RoPE + cache:`csrc/kernels/rope_complex_and_cache.h:12`
-- host launch:`csrc/op.cpp:1177`;模型调用 `csrc/model.cpp:432`
+- 融合主体:`csrc/kernels/mla_prepare.h` 的 `mla_prepare` 模板函数
+- 分段 RMSNorm 与 cache 直写:`csrc/kernels/norm.h` 的 `norm` 函数(模板函数,带 `kcache`/`slot_mapping`/`coreOffset` 参数)
+- complex RoPE + cache:`csrc/kernels/rope_complex_and_cache.h` 的 `rope_complex_and_cache` 模板函数
+- host launch:`csrc/op.cpp` 的 `XliteOpMlaPrepare`;模型调用 `csrc/model.cpp` 的 `XModel::ForwardAttnMLACommonV2`

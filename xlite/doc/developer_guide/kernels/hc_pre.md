@@ -12,9 +12,9 @@ y[m, hidden] = Σ_h pre[m, h] * xResid[m, h, hidden]      # fp32 累加, bf16 �
 
 ## 输入输出参数
 
-Python 侧调用:`hc_pre(rt, x_resid, pre, output, m, hc_mult, hidden)`(`xlite/_C.pyi`),host 侧封装 `XliteOpHcPre`(`csrc/op.cpp:2366`),以 `hc_pre_bfloat16_t` 启动(`csrc/op.cpp:2377-2378`)。
+Python 侧调用:`hc_pre(rt, x_resid, pre, output, m, hc_mult, hidden)`(`xlite/_C.pyi`),host 侧封装 `XliteOpHcPre`(`csrc/op.cpp` 的 `XliteOpHcPre`),以 `hc_pre_bfloat16_t` 启动(同函数内 `aclrtlaunch_hc_pre_bfloat16_t` 调用)。
 
-kernel 签名(模板 `csrc/kernels/hc_pre.h:13-15`,入口宏 `csrc/kernels/hc_pre.h:113-119`):
+kernel 签名(模板 `csrc/kernels/hc_pre.h` 的 `hc_pre`,入口宏 `HC_PRE_FUNC_DEFINE` 导出 `hc_pre_bfloat16_t`):
 
 ```cpp
 hc_pre_bfloat16_t(GM_ADDR pre, GM_ADDR xResid, GM_ADDR yOut, uint32_t m, uint32_t hcMult, uint32_t hidden)
@@ -31,42 +31,42 @@ hc_pre_bfloat16_t(GM_ADDR pre, GM_ADDR xResid, GM_ADDR yOut, uint32_t m, uint32_
 | hcMult | 标量 | - | uint32 | Hyper-Connection 流数 K |
 | hidden | 标量 | - | uint32 | 每流特征维 D |
 
-host 校验 `xResid`/`yOut` 为 BF16、`pre` 为 FP32(`csrc/op.cpp:2373-2376`)。
+host 校验 `xResid`/`yOut` 为 BF16、`pre` 为 FP32(`csrc/op.cpp` 的 `XliteOpHcPre`,关键字 `xResid.dtype != BF16 || output.dtype != BF16 || pre.dtype != FP32`)。
 
 ## 支持的数据类型
 
 - 模板 `csrc/kernels/hc_pre.h`(模板参数 Dtype 只影响 `xResid`/`yOut`)。
 - 实例化文件 `csrc/kernels/hc_pre_bfloat16_t.cpp`,导出 `hc_pre_bfloat16_t`,固定 `Dtype = bfloat16_t`,即 **pre FP32、残差/输出 BF16、累加 FP32** 的单一组合。
-- kernel 整体用 `#ifdef __DAV_C220_VEC__` 保护,非 C220 向量核平台编译为空实现(`csrc/kernels/hc_pre.h:120-126`)。
+- kernel 整体用 `#ifdef __DAV_C220_VEC__` 保护,非 C220 向量核平台编译为空实现(`csrc/kernels/hc_pre.h` 的 `#else` 分支 `HC_PRE_FUNC_DEFINE`)。
 
 ## 实现原理
 
-单 AIV 向量核 kernel,`m` 个 token 按 `process = block_idx; process < m; process += block_num` 网格切分(`csrc/kernels/hc_pre.h:66`),每 token 全流程在 UB 内完成,双缓冲(`curr = 0/1`)流水重叠 MTE2 载入与 V 计算。
+单 AIV 向量核 kernel,`m` 个 token 按 `process = block_idx; process < m; process += block_num` 网格切分(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `process = block_idx`),每 token 全流程在 UB 内完成,双缓冲(`curr = 0/1`)流水重叠 MTE2 载入与 V 计算。
 
 ### UB 布局
 
-`csrc/kernels/hc_pre.h:31-53` 依次分配:`inDtype0/1`(残差 bf16 双缓冲,`[K, hidden]`)、`outDtype0/1`(y bf16 双缓冲,`[hidden]`)、`preStage0/1`(pre fp32 双缓冲)、`preCalc`(ub2ub 中转目标,供标量核读取)、`xFp32`([K, hidden] 残差 fp32)、`yCalc`(累加器)。pre 经 MTE2 载入到 `preStage`,再由 `copy_ubuf_to_ubuf`(PIPE_V)中转到 `preCalc`,最后由标量核逐元素读取——这条 ub2ub 中转是让标量核安全访问 vector 写入值的关键(`copy_ubuf_to_ubuf` 是 PIPE_V 指令)。
+`csrc/kernels/hc_pre.h` 的 `hc_pre`(关键字 `inDtype0`/`preStage0`/`preCalc` 的 UB 分配段)依次分配:`inDtype0/1`(残差 bf16 双缓冲,`[K, hidden]`)、`outDtype0/1`(y bf16 双缓冲,`[hidden]`)、`preStage0/1`(pre fp32 双缓冲)、`preCalc`(ub2ub 中转目标,供标量核读取)、`xFp32`([K, hidden] 残差 fp32)、`yCalc`(累加器)。pre 经 MTE2 载入到 `preStage`,再由 `copy_ubuf_to_ubuf`(PIPE_V)中转到 `preCalc`,最后由标量核逐元素读取——这条 ub2ub 中转是让标量核安全访问 vector 写入值的关键(`copy_ubuf_to_ubuf` 是 PIPE_V 指令)。
 
 ### 计算步骤
 
-每 token(`csrc/kernels/hc_pre.h:70-105`):
+每 token(`csrc/kernels/hc_pre.h` 的 `hc_pre` 的 token 循环体,关键字 `process = block_idx`):
 
-1. MTE2 载入 `preStage[curr]`(K 个 fp32)与 `inDtypeArr[curr]`(K×hidden bf16 残差,逐 h 载入,`csrc/kernels/hc_pre.h:71-74`);
-2. `copy_ubuf_to_ubuf(preCalc, preStage[curr])` 把 pre 中转到标量可读区(`csrc/kernels/hc_pre.h:78`);
-3. bf16 残差整块转 fp32(`convert_input`,按 `VECTOR_MAX_REPEAT`(255)次 repeat 分块,`csrc/kernels/hc_pre.h:79-83`),`vector_dup(yCalc, 0)` 清零累加器;
-4. `pipe_barrier(PIPE_V)` 排空上述 V 操作,随后 `set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0+curr)` 释放 mixesUb 给下一轮 MTE2(`csrc/kernels/hc_pre.h:85-86`);
-5. 经 `set_flag/wait_flag(PIPE_V, PIPE_S, EVENT_ID4)` 让 V→S 可见(`csrc/kernels/hc_pre.h:88-89`),标量核从 `preCalc[h]` 逐个读出 `preH`,对 fp32 残差做 `vaxpy(yCalc, xFp32 + h*hidden, preH, vecRep)` 累加 K 次(`csrc/kernels/hc_pre.h:90-94`);
-6. `convert_output` 把 `yCalc` 转 bf16,MTE3 写 `yRow`(`csrc/kernels/hc_pre.h:97-103`)。
+1. MTE2 载入 `preStage[curr]`(K 个 fp32)与 `inDtypeArr[curr]`(K×hidden bf16 残差,逐 h 载入,`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `CopyGmToUbufAligned(preStage[curr]`);
+2. `copy_ubuf_to_ubuf(preCalc, preStage[curr])` 把 pre 中转到标量可读区(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `copy_ubuf_to_ubuf(preCalc, preStage[curr]`);
+3. bf16 残差整块转 fp32(`convert_input`,按 `VECTOR_MAX_REPEAT`(255)次 repeat 分块,`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `convert_input(xFp32`、`VECTOR_MAX_REPEAT`),`vector_dup(yCalc, 0)` 清零累加器;
+4. `pipe_barrier(PIPE_V)` 排空上述 V 操作,随后 `set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0+curr)` 释放 mixesUb 给下一轮 MTE2(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `pipe_barrier(PIPE_V)` 与紧随其后的 `set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr)`);
+5. 经 `set_flag/wait_flag(PIPE_V, PIPE_S, EVENT_ID4)` 让 V→S 可见(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `set_flag(PIPE_V, PIPE_S, EVENT_ID4)`/`wait_flag(PIPE_V, PIPE_S, EVENT_ID4)`),标量核从 `preCalc[h]` 逐个读出 `preH`,对 fp32 残差做 `vaxpy(yCalc, xFp32 + h*hidden, preH, vecRep)` 累加 K 次(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `vaxpy(yCalc, xFp32 + h * hidden, preH`);
+6. `convert_output` 把 `yCalc` 转 bf16,MTE3 写 `yRow`(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `convert_output(outDtypeArr[curr], yCalc` 与 `CopyUbufToGmAligned(yRow`)。
 
 ### 流水线同步
 
-`EVENT_ID0/1+curr` 管理 pre+残差载入与 V 计算的交接(`csrc/kernels/hc_pre.h:70-76`、`csrc/kernels/hc_pre.h:86`),`EVENT_ID2/3+curr` 管理 y 的 bf16 转换与写出(`csrc/kernels/hc_pre.h:97-103`),`EVENT_ID4` 做 V→S 事件往返让标量核安全读取 `preCalc`(`csrc/kernels/hc_pre.h:88-89`)。收尾 wait 与启动 set 一一对应(`csrc/kernels/hc_pre.h:107-110`)。每轮 `curr = 1 - curr` 翻转缓冲。
+`EVENT_ID0/1+curr` 管理 pre+残差载入与 V 计算的交接(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr)` 与 `set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr)`),`EVENT_ID2/3+curr` 管理 y 的 bf16 转换与写出(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `convert_output(outDtypeArr[curr], yCalc` 与 `CopyUbufToGmAligned(yRow`),`EVENT_ID4` 做 V→S 事件往返让标量核安全读取 `preCalc`(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `set_flag(PIPE_V, PIPE_S, EVENT_ID4)`/`wait_flag(PIPE_V, PIPE_S, EVENT_ID4)`)。收尾 wait 与启动 set 一一对应(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3)` 收尾段)。每轮 `curr = 1 - curr` 翻转缓冲。
 
 ## 关键代码位置
 
-- 模板入口:`csrc/kernels/hc_pre.h:13`
-- `hc_pre_bfloat16_t` 导出宏:`csrc/kernels/hc_pre.h:113`
-- token 循环:`csrc/kernels/hc_pre.h:66`
-- ub2ub pre 中转:`csrc/kernels/hc_pre.h:78`
-- vaxpy pre-sum:`csrc/kernels/hc_pre.h:90`
-- host 封装 `XliteOpHcPre`:`csrc/op.cpp:2366`
+- 模板入口:`csrc/kernels/hc_pre.h` 的 `hc_pre` 模板函数
+- `hc_pre_bfloat16_t` 导出宏:`csrc/kernels/hc_pre.h` 的 `HC_PRE_FUNC_DEFINE`
+- token 循环:`csrc/kernels/hc_pre.h` 的 `hc_pre`(关键字 `process = block_idx`)
+- ub2ub pre 中转:`csrc/kernels/hc_pre.h` 的 `hc_pre`(关键字 `copy_ubuf_to_ubuf(preCalc, preStage[curr]`)
+- vaxpy pre-sum:`csrc/kernels/hc_pre.h` 的 `hc_pre`(关键字 `vaxpy(yCalc, xFp32 + h * hidden, preH`)
+- host 封装 `XliteOpHcPre`:`csrc/op.cpp` 的 `XliteOpHcPre`

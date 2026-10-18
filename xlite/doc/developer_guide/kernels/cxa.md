@@ -6,7 +6,7 @@ cxa 是 DeepSeek-V4 使用的统一注意力算子(C4A and C128A attention,即�
 
 - **滑动窗口段(SWA)**:query 位于绝对位置 `q` 时,只能看到窗口 `[max(0, q - window_size + 1), q]` 内的 SWA token;超出当前已生成长度的位置 mask 为 `-inf`。SWA cache 始终分页,两种模式均经 `swaBlockTables` 查页。
 - **压缩稀疏段**:对压缩 KV(每 `compress_ratio` 个 token 压缩成 1 个),仅保留 `topk_indices` 引用的位置;`topk_indices` 中为 `-1` 的项 mask 为 `-inf`(其 exp 贡献为 0)。
-- **attn_sink**:每头一个可学习的 sink 偏置(fp32),`exp(attn_sink - row_max)` 被加进 softmax 分母(见 `csrc/kernels/softmax_attn_aiv.h:375`)。
+- **attn_sink**:每头一个可学习的 sink 偏置(fp32),`exp(attn_sink - row_max)` 被加进 softmax 分母(见 `csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `*sink = attnSink[headIdx]`))。
 
 两种压缩 cache 布局(`dense` 标志区分):
 
@@ -22,7 +22,7 @@ cxa 是 DeepSeek-V4 使用的统一注意力算子(C4A and C128A attention,即�
 
 ## 输入输出参数
 
-Python 签名见 `xlite/_C.pyi:2658`(`def cxa(...)`),kernel 侧入口见 `csrc/kernels/cxa.h:387`(`CXA_FUNC_DEFINE`)。
+Python 签名见 `xlite/_C.pyi` 的 `def cxa(...)`,kernel 侧入口见 `csrc/kernels/cxa.h` 的 `CXA_FUNC_DEFINE`(关键字 `cxa_##dtype`)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -51,22 +51,22 @@ Python 签名见 `xlite/_C.pyi:2658`(`def cxa(...)`),kernel 侧入口见 `csrc/k
 另有内部 scores workspace(由 binding 侧分配):
 
 - **scores**:`[aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize]`,dtype 同 q;
-  - `swaSegWidth = windowSize == 0 ? 0 : windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B`(`csrc/_C.cpp:1642`、`csrc/kernels/cxa.h:92`):一个 query tile 的因果窗并集宽 `windowSize + XLITE_MAX_M0`,再加 `K_BLOCK_SIZE_2B`(=16,`csrc/kernels/kernel_param.h:36`)吸收 `windowStart` 向下取整产生的前导列;
-  - `kvSize`:压缩段宽度。dense 模式取 `ROUND_UP(indexTopK, 4 * CXA_SVCK0)`(`csrc/_C.cpp:1648`):单 batch 连续 cache 仅含 `indexTopK` 个压缩 token,与 batch 数无关;sparse 模式取 `ROUND_UP(compressMaxNumBlocks * compressBlockSize, 4 * CXA_SVCK0)`(`csrc/_C.cpp:1690`),均按 `4 * CXA_SVCK0` 对齐(见下文 scores 布局)。
+  - `swaSegWidth = windowSize == 0 ? 0 : windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B`(`csrc/_C.cpp` 的 `CXA`(关键字 `swaSegWidth`)、`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `swaSegWidth`)):一个 query tile 的因果窗并集宽 `windowSize + XLITE_MAX_M0`,再加 `K_BLOCK_SIZE_2B`(=16,`csrc/kernels/kernel_param.h` 的 `K_BLOCK_SIZE_2B` 宏)吸收 `windowStart` 向下取整产生的前导列;
+  - `kvSize`:压缩段宽度。dense 模式取 `ROUND_UP(indexTopK, 4 * CXA_SVCK0)`(`csrc/_C.cpp` 的 `CXA`(关键字 `ROUND_UP((uint64_t)indexTopK, 4 * CXA_SVCK0)`)):单 batch 连续 cache 仅含 `indexTopK` 个压缩 token,与 batch 数无关;sparse 模式取 `ROUND_UP(compressMaxNumBlocks * compressBlockSize, 4 * CXA_SVCK0)`(`csrc/_C.cpp` 的 `CXA`(关键字 `ROUND_UP(compressMaxNumBlocks * compressBlockSize, 4 * CXA_SVCK0)`)),均按 `4 * CXA_SVCK0` 对齐(见下文 scores 布局)。
 
 ## 支持的数据类型
 
-仅 **bfloat16_t**:`csrc/kernels/cxa_bfloat16_t.cpp` 只实例化 `cxa_bfloat16_t`,host 侧 `XliteOpCXA`(`csrc/op.cpp:936`)也仅接受 BF16 分支,否则抛异常。
+仅 **bfloat16_t**:`csrc/kernels/cxa_bfloat16_t.cpp` 只实例化 `cxa_bfloat16_t`,host 侧 `XliteOpCXA`(`csrc/op.cpp` 的 `XliteOpCXA`)也仅接受 BF16 分支,否则抛异常。
 
-调度类型为 `KERNEL_TYPE_MIX_AIC_1_2`(`csrc/kernels/cxa.h:63`):1 个 AIC(cube 核)配 2 个 AIV(vector 核)混合调度,AIC 负责 QK/SV 两个 cube GEMM,AIV 负责 softmax;AIC 与 AIV 之间用 `ffts_cross_core_sync` / `wait_flag_dev`(inner-group 同步,flag 0 = AIC→AIV 的 QK 完成,flag 1 = AIV→AIC 的 softmax 完成)做跨核握手。
+调度类型为 `KERNEL_TYPE_MIX_AIC_1_2`(`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `KERNEL_TYPE_MIX_AIC_1_2`)):1 个 AIC(cube 核)配 2 个 AIV(vector 核)混合调度,AIC 负责 QK/SV 两个 cube GEMM,AIV 负责 softmax;AIC 与 AIV 之间用 `ffts_cross_core_sync` / `wait_flag_dev`(inner-group 同步,flag 0 = AIC→AIV 的 QK 完成,flag 1 = AIV→AIC 的 softmax 完成)做跨核握手。
 
-host 侧约束(`csrc/op.cpp:947-954`):dense 模式要求 `compressRatio > 0` 且 `indexTopK > 0`(dense cache 长度)。
+host 侧约束(`csrc/op.cpp` 的 `XliteOpCXA`(关键字 `dense=True requires` 约束)):dense 模式要求 `compressRatio > 0` 且 `indexTopK > 0`(dense cache 长度)。
 
 ## 实现原理
 
 ### scores workspace 布局
 
-每行分数的 stride 为 `qkStride = swaSegWidth + kvSize`(`csrc/kernels/cxa.h:93`),一段连续内存中两个段前后拼接:
+每行分数的 stride 为 `qkStride = swaSegWidth + kvSize`(`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `qkStride = swaSegWidth + kvSize`)),一段连续内存中两个段前后拼接:
 
 ```
 列 0                                              swaSegWidth        qkStride
@@ -74,51 +74,51 @@ host 侧约束(`csrc/op.cpp:947-954`):dense 模式要求 `compressRatio > 0` 且
    [lead-in | 因果可见窗 [windowStart, windowEnd]]
 ```
 
-- **SWA 段**(列 0 起):`RunAicQK` 把窗起点 `windowStart` **向下取整到 `kBlockSize`(32/sizeof(Dtype)=16)倍数**得到 `alignStart`,scores 列 0 对应绝对位置 `alignStart`(`csrc/kernels/cxa_aic_helper.h:166`)。这样保证每个 tile 的 nSize 都是 `kBlockSize` 的倍数,没有列跨 tile 边界,SV 路径不会重复统计边界 token;lead-in 列 `[0, windowStart - alignStart)` 由 `RunAivSoftmax` mask 成 `-inf`。lead-in 宽度恒小于 `K_BLOCK_SIZE_2B = 16`,这就是 `swaSegWidth` 中 `+ K_BLOCK_SIZE_2B` 的来源。
-- **压缩段**(列 `swaSegWidth` 起,无 SWA 段时从列 0 起):`RunAicQK` 把压缩段分数写到 `scores[swaSegWidthEff + nOffset]`(`swaSegWidthEff = hasSwa ? swaSegWidth : 0`,`csrc/kernels/cxa_aic_helper.h:333`),按 `qkcn0`(dense 模式 `MAX_N0`=128,否则 `compressBlockSize`)分 tile;host 侧把 `kvSize` pad 到 `4 * CXA_SVCK0` 的倍数,因为 `RunAicSV` 每次读 `4 * svck0` 个压缩段分数(`csrc/kernels/kernel_param.h:40` 注释、`csrc/kernels/cxa_aic_helper.h:492`)。
+- **SWA 段**(列 0 起):`RunAicQK` 把窗起点 `windowStart` **向下取整到 `kBlockSize`(32/sizeof(Dtype)=16)倍数**得到 `alignStart`,scores 列 0 对应绝对位置 `alignStart`(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicQK`(关键字 `alignStart = ROUND_DOWN(windowStart, kBlockSize)`))。这样保证每个 tile 的 nSize 都是 `kBlockSize` 的倍数,没有列跨 tile 边界,SV 路径不会重复统计边界 token;lead-in 列 `[0, windowStart - alignStart)` 由 `RunAivSoftmax` mask 成 `-inf`。lead-in 宽度恒小于 `K_BLOCK_SIZE_2B = 16`,这就是 `swaSegWidth` 中 `+ K_BLOCK_SIZE_2B` 的来源。
+- **压缩段**(列 `swaSegWidth` 起,无 SWA 段时从列 0 起):`RunAicQK` 把压缩段分数写到 `scores[swaSegWidthEff + nOffset]`(`swaSegWidthEff = hasSwa ? swaSegWidth : 0`,`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicQK`(关键字 `swaSegWidthEff = hasSwa ? (int)swaSegWidth : 0`)),按 `qkcn0`(dense 模式 `MAX_N0`=128,否则 `compressBlockSize`)分 tile;host 侧把 `kvSize` pad 到 `4 * CXA_SVCK0` 的倍数,因为 `RunAicSV` 每次读 `4 * svck0` 个压缩段分数(`csrc/kernels/kernel_param.h` 的 `CXA_SVCK0` 宏注释、`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicSV`(关键字 `4 * svck0`))。
 
-scores workspace 整体被切成两块 ping-pong 缓冲(`PINGPONG_BUF_NUM = 2`):每个 AIC 核占用 `block_idx * XLITE_MAX_M0 * qkStride` 起的第一块,以及偏移 `block_num * XLITE_MAX_M0 * qkStride` 的第二块,交替用于相邻两个 tile(`csrc/kernels/cxa.h:95`),使 QK(本 tile)与 SV(上一 tile)能同时使用不同的缓冲。
+scores workspace 整体被切成两块 ping-pong 缓冲(`PINGPONG_BUF_NUM = 2`):每个 AIC 核占用 `block_idx * XLITE_MAX_M0 * qkStride` 起的第一块,以及偏移 `block_num * XLITE_MAX_M0 * qkStride` 的第二块,交替用于相邻两个 tile(`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `scores[0].SetGlobalBuffer`)),使 QK(本 tile)与 SV(上一 tile)能同时使用不同的缓冲。
 
 ### AIC 路径(RunAic)
 
-入口 `csrc/kernels/cxa.h:106`,cube 核执行,按 batch 遍历,批内任务按 `firstCore = (blockIdx + blockNum - coreOffset) % blockNum` 起始、步长 `blockNum` 轮转分发(`coreOffset` 跨 batch 累积,避免所有 batch 都从 0 号核开始):
+入口 `csrc/kernels/cxa.h` 的 `CXA::RunAic`,cube 核执行,按 batch 遍历,批内任务按 `firstCore = (blockIdx + blockNum - coreOffset) % blockNum` 起始、步长 `blockNum` 轮转分发(`coreOffset` 跨 batch 累积,避免所有 batch 都从 0 号核开始):
 
-1. `GetOptimalM0(queryLen, cachedLen)`(`csrc/kernels/kernel_macro.h:956`)按序列长度选择 M0(短序列 16,totalLen ≤12K 取 128,随后随长度增大在 112/96/80/64/48/32 间逐级递减,超长序列降到 16);`queryTileSize = m0 / nHeads`(即一个 tile 内所有头一起算,`mSize = queryLen * nHeads` 行)。
-2. 每个 query tile 调 `CxaAicHelper::RunAicQK` 计算本 tile 的 QK 并把分数写入 `scores[curr]`,随后 `ffts_cross_core_sync(PIPE_FIX, config)` 通知 AIV "QK 完成"(flag 0,mode 2 = 组内 AIC/AIV 同步,`csrc/kernels/cxa.h:183`)。
-3. 当前 tile 的 QK 与上一 tile 的 `RunAicSV` 流水重叠:若 `needDoSV`,先 `wait_flag_dev(1)` 等 AIV 完成上一 tile 的 softmax,再执行 `RunAicSV(scores[last], ...)`,用上一 tile 的分数做 softmax×V,把输出原位写到 `output[lastMhOffset]`(`csrc/kernels/cxa.h:193`)。`last*` 系列变量缓存上一 tile 的全部上下文(batch、GM 偏移、block table 指针、`batchCompressKCache`、calcLen 等)。
-4. 循环结束后补做最后一个 tile 的 SV(`csrc/kernels/cxa.h:225`)。
+1. `GetOptimalM0(queryLen, cachedLen)`(`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0`)按序列长度选择 M0(短序列 16,totalLen ≤12K 取 128,随后随长度增大在 112/96/80/64/48/32 间逐级递减,超长序列降到 16);`queryTileSize = m0 / nHeads`(即一个 tile 内所有头一起算,`mSize = queryLen * nHeads` 行)。
+2. 每个 query tile 调 `CxaAicHelper::RunAicQK` 计算本 tile 的 QK 并把分数写入 `scores[curr]`,随后 `ffts_cross_core_sync(PIPE_FIX, config)` 通知 AIV "QK 完成"(flag 0,mode 2 = 组内 AIC/AIV 同步,`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `ffts_cross_core_sync(PIPE_FIX, config)`))。
+3. 当前 tile 的 QK 与上一 tile 的 `RunAicSV` 流水重叠:若 `needDoSV`,先 `wait_flag_dev(1)` 等 AIV 完成上一 tile 的 softmax,再执行 `RunAicSV(scores[last], ...)`,用上一 tile 的分数做 softmax×V,把输出原位写到 `output[lastMhOffset]`(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `RunAicSV(scores[last]`))。`last*` 系列变量缓存上一 tile 的全部上下文(batch、GM 偏移、block table 指针、`batchCompressKCache`、calcLen 等)。
+4. 循环结束后补做最后一个 tile 的 SV(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `do last softmax * V`))。
 
-dense 模式下每 batch 取 compress cache 子视图 `compressKCache[batchIdx * maxSeqLen * headDim]`(`csrc/kernels/cxa.h:144`),`compressBt = nullptr`、`compressMaxNumBlocks = 0`;sparse 模式取该 batch 的 block table 指针(`csrc/kernels/cxa.h:146`)。
+dense 模式下每 batch 取 compress cache 子视图 `compressKCache[batchIdx * maxSeqLen * headDim]`(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `batchCompressKCache = compressKCache[batchIdx * maxSeqLen`)),`compressBt = nullptr`、`compressMaxNumBlocks = 0`;sparse 模式取该 batch 的 block table 指针(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `compressBt =` ... `compressBlockTables`))。
 
 ### AIV 路径(RunAiv)
 
-入口 `csrc/kernels/cxa.h:231`,vector 核执行,任务划分与 AIC 完全一致(同样的 batch 遍历、`GetOptimalM0`、轮转起点),保证 AIC/AIV 对同一 tile 的编号一一对应。每个 tile:
+入口 `csrc/kernels/cxa.h` 的 `CXA::RunAiv`,vector 核执行,任务划分与 AIC 完全一致(同样的 batch 遍历、`GetOptimalM0`、轮转起点),保证 AIC/AIV 对同一 tile 的编号一一对应。每个 tile:
 
 1. 拆分:`nWork = queryTaskLen * nHeads` 行 softmax 工作,均分给本 AIC 配对的 2 个 AIV 子核(`get_subblockid()`),每个子核处理 `nWorkPerCore` 行,起点偏移 `qkOffset = nWorkStart * qkStride`。
 2. 计算 mask 相关量:
    - `calcSoftmaxLen = cachedLen + queryTaskStart + 1`:该 tile 第一行的因果可见长度(绝对坐标);
-   - `winStart = max(0, calcSoftmaxLen - windowSize)`:第一行因果窗起点;`winCalcLen = calcSoftmaxLen - ROUND_DOWN(winStart, K_BLOCK_SIZE_2B)`(`csrc/kernels/cxa.h:288`):scores 列 0 对应 `alignStart`,故可见 SWA 列数是 `calcSoftmaxLen - alignStart`,窗滑动时比 `windowSize` 多出的部分就是 lead-in(<16);
-   - `ncCalcLen = compressRatio == 0 ? 0 : calcLen / compressRatio`(`csrc/kernels/cxa.h:295`);`outN = swaSegWidth + ROUND_UP(ncCalcLen, 4 * svk0)`(上限 `qkStride`(`csrc/kernels/cxa.h:299`),压缩比为 0 时无压缩段):本 tile 需要处理/回写的分数列数。dense 模式下 `ncCalcLen` 不再单独 clamp 到 `maxSeqLen`,而是靠 `outN` 被 `qkStride = swaSegWidth + ROUND_UP(maxSeqLen, 4 * svk0)` 兜底,把压缩段约束到 `maxSeqLen` 个 token。
+   - `winStart = max(0, calcSoftmaxLen - windowSize)`:第一行因果窗起点;`winCalcLen = calcSoftmaxLen - ROUND_DOWN(winStart, K_BLOCK_SIZE_2B)`(`csrc/kernels/cxa.h` 的 `CXA::RunAiv`(关键字 `winCalcLen`)):scores 列 0 对应 `alignStart`,故可见 SWA 列数是 `calcSoftmaxLen - alignStart`,窗滑动时比 `windowSize` 多出的部分就是 lead-in(<16);
+   - `ncCalcLen = compressRatio == 0 ? 0 : calcLen / compressRatio`(`csrc/kernels/cxa.h` 的 `CXA::RunAiv`(关键字 `ncCalcLen`));`outN = swaSegWidth + ROUND_UP(ncCalcLen, 4 * svk0)`(上限 `qkStride`(`csrc/kernels/cxa.h` 的 `CXA::RunAiv`(关键字 `outN = qkStride`)),压缩比为 0 时无压缩段):本 tile 需要处理/回写的分数列数。dense 模式下 `ncCalcLen` 不再单独 clamp 到 `maxSeqLen`,而是靠 `outN` 被 `qkStride = swaSegWidth + ROUND_UP(maxSeqLen, 4 * svk0)` 兜底,把压缩段约束到 `maxSeqLen` 个 token。
 3. `wait_flag_dev(0)` 等 AIC 的 QK 完成,然后:
-   - **无 topk 路径**(`indexTopK == 0`,dense 模式恒走此路径):`RunAivSoftmax`(内部转 `RunAivSoftmaxLong`,`csrc/kernels/softmax_attn_aiv.h:1184`)直接在 scores 上做在线 softmax;`m0 > XLITE_MAX_M0 - 4` 时无 expBuf 暂存(传 nullptr)。
-   - **topk 路径**:调 `RunAivSoftmaxPingPong`(`csrc/kernels/softmax_attn_aiv.h:65`),传入 `topkIndices + indexTopK * queryTaskOffset`(`ncCalcLen > indexTopK` 时,否则视为无 topk)。压缩段分数不再整段参与 softmax,而是用 `vgather` 按 topk 索引从 GM 收集到 UB(`csrc/kernels/softmax_attn_aiv.h:198`),与 SWA 段拼成 `[swaSegWidth + topK]` 行做 softmax,再按 64-slot 粒度的 hit-mask scatter 回 scores workspace 对应压缩位置(`csrc/kernels/softmax_attn_aiv.h:270`),供 AIC 的 SV 读取。索引为 `-1` 的位置通过 `vcmpvs_ge`/`vcmpvs_lt` 边界比较(`csrc/kernels/softmax_attn_aiv.h:219-220`)被排除在 gather/scatter 之外,等效 mask 为 `-inf`。
+   - **无 topk 路径**(`indexTopK == 0`,dense 模式恒走此路径):`RunAivSoftmax`(内部转 `RunAivSoftmaxLong`,`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmax`)直接在 scores 上做在线 softmax;`m0 > XLITE_MAX_M0 - 4` 时无 expBuf 暂存(传 nullptr)。
+   - **topk 路径**:调 `RunAivSoftmaxPingPong`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`),传入 `topkIndices + indexTopK * queryTaskOffset`(`ncCalcLen > indexTopK` 时,否则视为无 topk)。压缩段分数不再整段参与 softmax,而是用 `vgather` 按 topk 索引从 GM 收集到 UB(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `CopyGmToUbufAligned(indices[curr], topkIndices`)),与 SWA 段拼成 `[swaSegWidth + topK]` 行做 softmax,再按 64-slot 粒度的 hit-mask scatter 回 scores workspace 对应压缩位置(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `CopyUbufToGmAligned(buf + idx * n`)),供 AIC 的 SV 读取。索引为 `-1` 的位置通过 `vcmpvs_ge`/`vcmpvs_lt` 边界比较(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vcmpvs_ge` / `vcmpvs_lt`))被排除在 gather/scatter 之外,等效 mask 为 `-inf`。
 4. softmax 完成后 `ffts_cross_core_sync(PIPE_MTE3, config)` 通知 AIC(flag 1),并翻转 ping-pong 缓冲 `curr`。
 
-**窗口 causal mask**(`RunAivSoftmaxPingPong` 内):分数先转 fp32(`vconv_bf162f32`,`csrc/kernels/softmax_attn_aiv.h:294`),再对 SWA 段 `[0, swaSegWidth)` 做双向 mask,均用 `vector_dup` 写 `-3.4028235e38`(fp32 最小值,≈-inf):
+**窗口 causal mask**(`RunAivSoftmaxPingPong` 内):分数先转 fp32(`vconv_bf162f32`,`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vconv_bf162f32`)),再对 SWA 段 `[0, swaSegWidth)` 做双向 mask,均用 `vector_dup` 写 `-3.4028235e38`(fp32 最小值,≈-inf):
 
-- **右 mask**:每行可见窗宽 `actualWinLen = min(winCalcLen + seqIdx, swaSegWidth)`,将 `[actualWinLen, swaSegWidth)` 填 `-inf`。按 64 元素(VECTOR_MAX_BYTESIZE/4)的 repeat 对齐处理:区间落在单个 repeat 内用 `SetMaskRange(lo, hi)` 精确置位(`csrc/kernels/softmax_attn_aiv.h:314`),跨 repeat 则首块用 `SetMaskFromHighBit`(`csrc/kernels/softmax_attn_aiv.h:321`)、尾块用 `SetMask(wtail)` 位级控制(`csrc/kernels/softmax_attn_aiv.h:325`)。
-- **左 mask**:lead-in 列 `[0, lEnd)` 填 `-inf`,其中 `lEnd = actualWinLen > winSize ? actualWinLen - winSize : 0`,即窗起点之前的取整前导列,整 repeat 用普通 `vector_dup`(`csrc/kernels/softmax_attn_aiv.h:340`),余数用 `SetMask(lRem)`(`csrc/kernels/softmax_attn_aiv.h:344`)。
+- **右 mask**:每行可见窗宽 `actualWinLen = min(winCalcLen + seqIdx, swaSegWidth)`,将 `[actualWinLen, swaSegWidth)` 填 `-inf`。按 64 元素(VECTOR_MAX_BYTESIZE/4)的 repeat 对齐处理:区间落在单个 repeat 内用 `SetMaskRange(lo, hi)` 精确置位(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `SetMaskRange(lo, hi)`)),跨 repeat 则首块用 `SetMaskFromHighBit`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `SetMaskFromHighBit`))、尾块用 `SetMask(wtail)` 位级控制(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `SetMask(wtail)`))。
+- **左 mask**:lead-in 列 `[0, lEnd)` 填 `-inf`,其中 `lEnd = actualWinLen > winSize ? actualWinLen - winSize : 0`,即窗起点之前的取整前导列,整 repeat 用普通 `vector_dup`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vector_dup(cal, min, lFull`)),余数用 `SetMask(lRem)`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `SetMask(lRem)`))。
 - 该行 causally 不可见(`actualCalcLen <= 0`)或 topk 全被 mask 且无 SWA 段时,直接清零输出并跳过计算。
 
-**attn_sink 并入分母**(`csrc/kernels/softmax_attn_aiv.h:375`):在线 softmax 得到 row_max 后,从 GM 读 `attnSink[headIdx]` 到 UB(`csrc/kernels/softmax_attn_aiv.h:375`),与分数同样地做 `sink - max`(`vsub`,`csrc/kernels/softmax_attn_aiv.h:383`)→ `vexp`(`csrc/kernels/softmax_attn_aiv.h:390`),并把 `vexp(sink)` 加到 `ReduceSumV2` 的结果上(`csrc/kernels/softmax_attn_aiv.h:399`),即分母 `s = Σ exp(sᵢ - max) + exp(sink - max)`;最后 `vdiv` 归一化(`csrc/kernels/softmax_attn_aiv.h:412`)只作用于分数部分,sink 不进入输出。
+**attn_sink 并入分母**(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `*sink = attnSink[headIdx]`)):在线 softmax 得到 row_max 后,从 GM 读 `attnSink[headIdx]` 到 UB(同处 `*sink = attnSink[headIdx]` 一行),与分数同样地做 `sink - max`(`vsub`,`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vsub(sink, sink, temp`))→ `vexp`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vexp(sink, sink`)),并把 `vexp(sink)` 加到 `ReduceSumV2` 的结果上(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vadd(temp, temp, sink`)),即分母 `s = Σ exp(sᵢ - max) + exp(sink - max)`;最后 `vdiv` 归一化(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vdiv(cal, cal, temp`))只作用于分数部分,sink 不进入输出。
 
-`RunAivSoftmaxLong`(`csrc/kernels/softmax_attn_aiv.h:817`)与 PingPong 版逻辑相同,区别在于 UB 布局:`Long` 版按 `MAX_SUB_CONTEXT_SIZE` 分子块支持超长行(上限见 `csrc/kernels/softmax_attn_aiv.h:40` 的 `static_assert`,`MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH` 规模必须放进 UB);PingPong 版用双缓冲 in/out 加速常规长度。两版此前接收 `compressCap` 参数用于 dense 模式 clamp 压缩段因果长度,现已移除:dense 模式改由调用方 `outN` 被 `qkStride` 兜底(见 AIV 路径第 2 步)约束压缩段到 `maxSeqLen`。
+`RunAivSoftmaxLong`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`)与 PingPong 版逻辑相同,区别在于 UB 布局:`Long` 版按 `MAX_SUB_CONTEXT_SIZE` 分子块支持超长行(上限见 `csrc/kernels/softmax_attn_aiv.h` 的 `static_assert`(关键字 `MAX_TOPK_NUM or MAX_SWA_SEG_WIDTH too large`),`MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH` 规模必须放进 UB);PingPong 版用双缓冲 in/out 加速常规长度。两版此前接收 `compressCap` 参数用于 dense 模式 clamp 压缩段因果长度,现已移除:dense 模式改由调用方 `outN` 被 `qkStride` 兜底(见 AIV 路径第 2 步)约束压缩段到 `maxSeqLen`。
 
 ### CxaAicHelper(QK / SV cube 计算)
 
-`csrc/kernels/cxa_aic_helper.h:12`,封装 AIC 的两个 cube GEMM 及 L1/L0 缓冲管理。
+`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper` 类,封装 AIC 的两个 cube GEMM 及 L1/L0 缓冲管理。
 
-**tiling 常量**(`Init`,`csrc/kernels/cxa_aic_helper.h:17`):
+**tiling 常量**(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::Init`):
 
 | 常量 | 含义 | 取值 |
 |---|---|---|
@@ -127,15 +127,15 @@ dense 模式下每 batch 取 compress cache 子视图 `compressKCache[batchIdx *
 | `qkk0` | QK 的 k 方向 tile | `256 / sizeof(Dtype)`(bf16 为 128) |
 | `svn0` | SV 的 n 方向 tile(headDim 方向) | 256 |
 | `svwk0` | SV 的 SWA 段 k 方向 tile | `swaBlockSize` |
-| `svck0` | SV 的压缩段 k 方向 tile | `CXA_SVCK0 = 64`(`csrc/kernels/kernel_param.h:40`) |
+| `svck0` | SV 的压缩段 k 方向 tile | `CXA_SVCK0 = 64`(`csrc/kernels/kernel_param.h` 的 `CXA_SVCK0` 宏) |
 
 **L1(A1/A2)/L0 缓冲布局**(`Init` 中手动排布 bufferAddr):QK 部分有 `ql1aBuf`(A1,`XLITE_MAX_M0 * headDim`)、双缓冲 `kl1bBuf`(A1,`(max(qkwn0,qkcn0) * 4 * qkk0)`,按 `kIdx4 == 0` 时一次搬 4 个 k-tile)、双缓冲 `qkl0aBuf`/`qkl0bBuf`(A2/B2,`MAX_N0 * qkk0`)、单缓冲 `qkl0cBuf`(CO1,`XLITE_MAX_M0 * MAX_N0 * float`);SV 部分有双缓冲 `scoresl1aBuf`(A1,分数源,大小按 `max(svwk0, svck0)` 的 4 倍留)、双缓冲 `ktl1bBuf`(A1,K^T,SWA 段 `svwk0` / 压缩段一次搬 `2 * svck0`)、双缓冲 `svl0aBuf`/`svl0bBuf`(A2/B2)、单缓冲 `svl0cBuf`(CO1,`XLITE_MAX_M0 * svn0 * float`)。所有双缓冲通过 `HardEvent`(MTE1_MTE2 / MTE2_MTE1 / M_MTE1 / MTE1_M / M_FIX / FIX_M)的手工 Set/WaitFlag 做 GM→L1→L0→MMAD→L0C→GM 的逐级流水。
 
-**RunAicQK**(`csrc/kernels/cxa_aic_helper.h:130`,`scores = Q * K`,签名新增 `bool hasSwa`):Q 一次整拷进 L1;SWA 段仅当 `hasSwa && windowSize != 0` 时沿 `nwIdx` 遍历窗内 block(swaBlockTables 查页),否则跳过整个 SWA 段(无 SWA 时该 tile 不写 SWA 分数);压缩段沿 `nIdx` 遍历压缩 block(dense 模式 `block = nIdx + nIdxStart` 连续布局不查页,sparse 模式 `compressBlockTables[nIdx + nIdxStart]` 查页,`csrc/kernels/cxa_aic_helper.h:267`),每 tile 内沿 headDim 按 `qkk0` 分 k 循环,`kIdx4`(每 4 个 k-tile)触发 ping-pong 换 L1B 缓冲。`CalMmad` 累加到 L0C 后 `CopyToGm` 写回 scores 对应列偏移:列偏移用 `swaSegWidthEff = hasSwa ? swaSegWidth : 0`(`csrc/kernels/cxa_aic_helper.h:333`),即无 SWA 段时压缩段分数从列 0 起写,避免 SWA 段预留空白列。压缩段长度 `ncTotalLen = kvLen / compressRatio`,dense 模式 clamp 到 `compressTotalLen`(`csrc/kernels/cxa_aic_helper.h:257-260`);压缩段 nIdx 起点按 `nIdxStart = (kvOffset / compressRatio) / qkcn0`(`csrc/kernels/cxa_aic_helper.h:261`)换算到压缩坐标。
+**RunAicQK**(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicQK`,`scores = Q * K`,签名新增 `bool hasSwa`):Q 一次整拷进 L1;SWA 段仅当 `hasSwa && windowSize != 0` 时沿 `nwIdx` 遍历窗内 block(swaBlockTables 查页),否则跳过整个 SWA 段(无 SWA 时该 tile 不写 SWA 分数);压缩段沿 `nIdx` 遍历压缩 block(dense 模式 `block = nIdx + nIdxStart` 连续布局不查页,sparse 模式 `compressBlockTables[nIdx + nIdxStart]` 查页,`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicQK`(关键字 `compressBlockTables[nIdx + nIdxStart]`)),每 tile 内沿 headDim 按 `qkk0` 分 k 循环,`kIdx4`(每 4 个 k-tile)触发 ping-pong 换 L1B 缓冲。`CalMmad` 累加到 L0C 后 `CopyToGm` 写回 scores 对应列偏移:列偏移用 `swaSegWidthEff = hasSwa ? swaSegWidth : 0`(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicQK`(关键字 `swaSegWidthEff = hasSwa ? (int)swaSegWidth : 0`)),即无 SWA 段时压缩段分数从列 0 起写,避免 SWA 段预留空白列。压缩段长度 `ncTotalLen = kvLen / compressRatio`,dense 模式 clamp 到 `compressTotalLen`(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicQK`(关键字 `ncTotalLen = kvLen / compressRatio`));压缩段 nIdx 起点按 `nIdxStart = (kvOffset / compressRatio) / qkcn0`(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicQK`(关键字 `nIdxStart = (kvOffset / compressRatio) / qkcn0`))换算到压缩坐标。
 
-**RunAicSV**(`csrc/kernels/cxa_aic_helper.h:354`,`output = softmax(scores) * K^T`,签名新增 `bool hasSwa`):n 方向沿 headDim 按 `svn0 = 256` 分 tile;k 方向先遍历 SWA 段(仅 `hasSwa && windowSize != 0` 时,分数 tile 与 K^T tile 都从 `alignStart` 起对齐,保证 `[kOffset, kOffset + kBlockPad)` 区间两两不相交),再遍历压缩段:分数按 `4 * svck0` 粒度搬入 L1(`kIdx4`,源列偏移同样用 `swaSegWidthEff`,`csrc/kernels/cxa_aic_helper.h:501`),K^T 按 `2 * svck0` 粒度搬入 L1(`kIdx2`);压缩段 K^T 在 dense 模式下连续单次拷贝(`csrc/kernels/cxa_aic_helper.h:517`),sparse 模式按 block table 逐 block 多块拷贝(`csrc/kernels/cxa_aic_helper.h:534`)。若 `(!hasSwa || windowSize == 0) && kcTotalLen == 0` 直接返回(`csrc/kernels/cxa_aic_helper.h:392`)。所有 tile 的 mmad 累加到同一 `svl0cBuf`(`init` 标志控制首 tile 清零),每轮 n-tile 结束后 `CopyToGm` 写 `output[nOffset]`。
+**RunAicSV**(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicSV`,`output = softmax(scores) * K^T`,签名新增 `bool hasSwa`):n 方向沿 headDim 按 `svn0 = 256` 分 tile;k 方向先遍历 SWA 段(仅 `hasSwa && windowSize != 0` 时,分数 tile 与 K^T tile 都从 `alignStart` 起对齐,保证 `[kOffset, kOffset + kBlockPad)` 区间两两不相交),再遍历压缩段:分数按 `4 * svck0` 粒度搬入 L1(`kIdx4`,源列偏移同样用 `swaSegWidthEff`,`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicSV`(关键字 `scores[swaSegWidthEff + kOffset]`)),K^T 按 `2 * svck0` 粒度搬入 L1(`kIdx2`);压缩段 K^T 在 dense 模式下连续单次拷贝(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicSV`(关键字 `dense cache: contiguous layout, single copy`)),sparse 模式按 block table 逐 block 多块拷贝(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicSV`(关键字 `paged cache: per-block lookup, multi-block copy`))。若 `(!hasSwa || windowSize == 0) && kcTotalLen == 0` 直接返回(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicSV`(关键字 `(!hasSwa || windowSize == 0) && kcTotalLen == 0`))。所有 tile 的 mmad 累加到同一 `svl0cBuf`(`init` 标志控制首 tile 清零),每轮 n-tile 结束后 `CopyToGm` 写 `output[nOffset]`。
 
-`hasSwa` 由调用方传入:cxa(非 flash)始终 `hasSwa = windowSize != 0`(`csrc/kernels/cxa.h` 的 RunAicQK/SV 调用);flash_cxa 仅在第一个 KV tile(`kvIdx == 0`)传 `true`,其余 tile 传 `false`(SWA 段只属于第一个 tile)。`dense` 成员(`csrc/kernels/cxa.h:82` 由 host `dense` 参数设置)区分 paged/dense cache 布局,dense 时压缩段 block table 不参与寻址、AIC 侧压缩段长度 clamp 到 `maxSeqLen`(`cxa_aic_helper.h:258`、`:387`)。
+`hasSwa` 由调用方传入:cxa(非 flash)始终 `hasSwa = windowSize != 0`(`csrc/kernels/cxa.h` 的 RunAicQK/SV 调用);flash_cxa 仅在第一个 KV tile(`kvIdx == 0`)传 `true`,其余 tile 传 `false`(SWA 段只属于第一个 tile)。`dense` 成员(`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `this->dense = dense != 0`) 由 host `dense` 参数设置)区分 paged/dense cache 布局,dense 时压缩段 block table 不参与寻址、AIC 侧压缩段长度 clamp 到 `maxSeqLen`(`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::RunAicQK`(关键字 `ncTotalLen = compressTotalLen`)与 `CxaAicHelper::RunAicSV`(关键字 `kcTotalLen = compressTotalLen`))。
 
 ### 校验
 
