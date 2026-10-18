@@ -820,6 +820,23 @@ def check_output_quality(blocks: list, multi: bool = False,
     return worst, summary
 
 
+def _procs_alive(patterns) -> bool:
+    """检查任一目标进程是否仍存活(pgrep -f 命中即返回 True).
+
+    pgrep 不存在时保守返回 True, 由调用方的超时上限兜底, 避免假性提前退出.
+    """
+    for pat in patterns:
+        try:
+            r = subprocess.run(["pgrep", "-f", pat],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            return True
+        if r.returncode == 0:
+            return True
+    return False
+
+
 def kill_server(proc: subprocess.Popen, port: int):
     """停服务: 先 SIGTERM 主进程组, 再杀占用端口的残留进程."""
     if proc.poll() is None:
@@ -847,9 +864,17 @@ def kill_server(proc: subprocess.Popen, port: int):
     subprocess.run("pkill -9 -f 'multiprocessing.resource_tracker' || true",
                    shell=True)
     subprocess.run("pkill -9 -f 'multiprocessing.spawn' || true", shell=True)
-    # 等待显存释放
-    for _ in range(12):
-        time.sleep(10)
+    # 等待残留进程完全退出(替代固定 120s 盲等): 轮询目标进程, 全部退出即提前结束;
+    # 保留 120s 上限兜底, 兼顾 kill -9 后 NPU HBM 异步释放.
+    # pattern 须与上方 pkill 列表保持一致.
+    residual_patterns = ("vllm.entrypoints.openai.api_server", "vllm_ascend",
+                         "VLLM::", "multiprocessing.resource_tracker",
+                         "multiprocessing.spawn")
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        if not _procs_alive(residual_patterns):
+            break
+        time.sleep(3)
 
 
 def append_result(spec: FeatureSpec, mode: str, port: int,
