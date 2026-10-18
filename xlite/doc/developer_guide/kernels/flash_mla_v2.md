@@ -6,11 +6,11 @@ MLA 吸收式注意力的 flash(在线 softmax)版本,是 mla_v2 的长序列路
 
 ## 输入输出参数
 
-Python 侧经 `mla_v2(..., enable_flash=True, tile_size)` 进入 host 分支(`tests/kernels/mla.py` 的 `enable_flash`/`tile_size`,关键字 `enable_flash = True`/`tile_size = 8192`):
+Python 侧经 `mla_v2(..., enable_flash_attention=True)` 进入 host 分支(规范签名见 `xlite/_C.pyi` 的 `mla_v2`,关键字参数 `nz: bool = False`、`enable_flash_attention: bool = False`、`tile_size_of_cached_kv: int = 8192`、`dense: bool = False`;`tests/kernels/mla.py` 以局部变量 `enable_flash`/`tile_size`/`weight_nz` 按位置传入,关键字 `enable_flash = True`/`tile_size = 8192`):
 
 ```python
 mla_v2(rt, q_with_qr, qr, k_cache, pe_cache, wuk_t, wuv, output, ..., topk_indices,
-       top_k, weight_nz, enable_flash=True, tile_size)
+       top_k, nz, enable_flash_attention=True, tile_size_of_cached_kv=8192)
 ```
 
 host 封装 `MLAV2` 的 flash 分支(`csrc/_C.cpp` 的 `MLAV2`,`enableFlashAttention=true` 分支)→ `XliteOpFlashMLAV2`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`)。kernel 签名(`csrc/kernels/flash_mla_v2.h` 的 `flash_mla_v2_<dtype>` 入口,宏 `FLASH_MLA_V2_FUNC_DEFINE`):

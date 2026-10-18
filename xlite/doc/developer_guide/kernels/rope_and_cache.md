@@ -109,4 +109,4 @@ inout、kCache、vCache 三者必须同为 `float16_t` 或 `bfloat16_t`;cossin �
 
 ### 测试参考
 
-[tests/kernels/rope_and_cache.py](../../../tests/kernels/rope_and_cache.py):以 `use_fp32` 开关分别覆盖 FP32 cossin(默认)与 model-dtype cossin(已废弃)两条路径,fp16/bf16 × (head_dim, rot_dim) ∈ {(64,64), (128,128), (128,64)},batch 8 × seq 10,与 torch 的 NeoX 风格 `apply_rotary_emb` + Q 缩放 + cache 写入对比;另含 MroPE 三路位置交织用例。
+[tests/kernels/rope_and_cache.py](../../../tests/kernels/rope_and_cache.py):以 `use_fp32` 开关分别覆盖 FP32 cossin(默认)与 model-dtype cossin(已废弃)两条路径,fp16/bf16 × (head_dim, rot_dim) ∈ {(64,64), (128,128), (128,64)},batch 8 × seq 10,与 torch 的 NeoX 风格 `apply_rotary_emb` + Q 缩放 + cache 写入对比;另含 MroPE 三路位置交织用例,以及 dim-0 pitched(非连续)cache 回归用例(K/V cache 为 `buf[::2]` 视图,dim-0 stride 为连续 pitch 的两倍,验证按 `slot/block_size*key_cache_stride + slot%block_size*kv_size` 的 stride 寻址)。

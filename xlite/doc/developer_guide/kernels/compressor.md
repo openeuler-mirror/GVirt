@@ -77,7 +77,7 @@ host 校验见 `csrc/op.cpp` 的 `XliteOpCompressor` 的 `compCheck` 校验 lamb
 |---|---|---|
 | `compressor_float16_t` | `csrc/kernels/compressor_float16_t.cpp` | compressKv/weightedSum 为 fp16(kv/score 仍 fp32) |
 | `compressor_bfloat16_t` | `csrc/kernels/compressor_bfloat16_t.cpp` | compressKv/weightedSum 为 bf16 |
-| `compressor_float` | `csrc/kernels/compressor_float.cpp` | compressKv/weightedSum 为 fp32 |
+| `compressor_float` | `csrc/kernels/compressor_float.cpp` | compressKv 为 fp32(kv/score 仍 fp32);weightedSum 仍为 bf16/fp16(host `compCheck` 强制 `weightedSum.dtype == BF16 || FP16`,不接受 fp32) |
 
 dtype 分派见 `csrc/op.cpp` 的 `XliteOpCompressor`(关键字 `compressKv.dtype`,按 `compressKv.dtype` 选)。kernel 为 `__DAV_C220_VEC__`、任务类型 `KERNEL_TYPE_MIX_AIV_1_0`(`csrc/kernels/compressor.h` 的 `compressor`(关键字 `KERNEL_TYPE_MIX_AIV_1_0`),纯 AIV)。
 

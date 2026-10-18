@@ -28,7 +28,7 @@ mla_v2(rt, q_with_qr, qr, k_cache, pe_cache, wuk_t, wuv, output, query_start_loc
        dense=False)
 ```
 
-host 封装 `MLAV2`(`csrc/_C.cpp` 的 `MLAV2`)在 paged 路径下先做 `qAbsorb = einsum(q_nope, wukT)` 再调 `XliteOpMLAV2`,最后 `output = einsum(oAbsorb, wuv)`;dense 路径(`dense=True`,host 侧先经 `gather_sparse_kv_cache` 收集,见 `csrc/_C.cpp` 的 `MLAV2` `dense` 分支,关键字 `XliteOpGatherSparseKVCache`)qWithQr 直接是预吸收的 q_absorb,输出止于 o_absorb。接口完整 docstring 见 `xlite/_C.pyi` 的 `mla_v2`。kernel 签名(`csrc/kernels/mla_v2.h` 的 `mla_v2_<dtype>` 入口,宏 `MLA_V2_FUNC_DEFINE`):
+host 封装 `MLAV2`(`csrc/_C.cpp` 的 `MLAV2`)的 `qAbsorb = einsum(q_nope, wukT)` 与 `output = einsum(oAbsorb, wuv)` 在 paged / dense 两条路径**均无条件执行**(对应 `XliteOpEinsumMhtHtdMhd` 分别位于 `if (dense)` 之前与所有分支之后);两条路径唯一区别是 dense(`dense=True`)在吸收前多一步 `gather_sparse_kv_cache` 收集 top-k token 到连续 `kDense`/`peDense`(见 `csrc/_C.cpp` 的 `MLAV2` `dense` 分支,关键字 `XliteOpGatherSparseKVCache`),随后以 `topK` 为 `maxSeqLen`、内核 `topK=0` 调 `XliteOpMLAV2`,输入/输出契约与 paged 相同。接口完整 docstring 见 `xlite/_C.pyi` 的 `mla_v2`。kernel 签名(`csrc/kernels/mla_v2.h` 的 `mla_v2_<dtype>` 入口,宏 `MLA_V2_FUNC_DEFINE`):
 
 ```cpp
 mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,

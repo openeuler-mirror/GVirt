@@ -8,11 +8,11 @@
 - **Layer(LayerNorm)**:`y = (x - mean) / sqrt(variance + eps) * weight + bias`,先减均值再除以标准差;
 - **L2(L2Norm)**:`y = x / sqrt(sum(x^2) + eps)`,不除以 n,直接按 L2 范数归一化,无仿射。
 
-同一 kernel 还支持多种模式:纯归一化、带 weight/bias 仿射、variance-only(只算方差,供 TP 先 AllReduce 再归一化的两阶段 rmsnorm_full 流程)、AddAndRmsNorm 融合(残差加 + 归一化)、以及可选的 fp32 输出。
+同一 kernel 还支持多种模式:纯归一化、带 weight/bias 仿射、variance-only(只算方差,供 TP 先 AllReduce 再归一化的两阶段 rmsnorm_full 流程)、AddAndRmsNorm 融合(残差加 + 归一化)、以及可选的 fp32 输出;`useNorm && !outFp32` 时还可选地把归一化结果按 paged slot 写一份到 KV cache(供 `mla_prepare` 等融合算子复用,支持 dim-0 pitch,见下文「(可选)写 KV cache」步骤)。
 
 ## 输入输出参数
 
-Python 侧入口:`rmsnorm / rmsnorm_with_bias / rmsnorm_variance_only / layernorm / l2norm`(`csrc/_C.cpp` 的 pybind `m.def("rmsnorm"` 等 norm 绑定块)。以 kernel 签名(`csrc/kernels/norm.h` 的 `norm<Dtype>` 签名)为准:
+Python 侧入口:`rmsnorm / rmsnorm_with_bias / rmsnorm_variance_only / layernorm / l2norm`(`csrc/_C.cpp` 的 pybind `m.def("rmsnorm"` 等 norm 绑定块)。以 kernel 签名(`csrc/kernels/norm.h` 的 `norm<Dtype>` 签名)为准(下表仅列公开/Python 侧参数;内部模板的 `kcache`/`slot_mapping`/`block_size`/`coreOffset`/`nextCoreOffset` 等 plumbing 参数见下文「(可选)写 KV cache」步骤,公开 `norm_*` 导出符号经 `NORM_FUNC_DEFINE` 固定传 `nullptr/nullptr/0/0/0/nullptr` 不暴露):
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -31,7 +31,7 @@ Python 侧入口:`rmsnorm / rmsnorm_with_bias / rmsnorm_variance_only / layernor
 | in_start_offset / out_start_offset | 标量 | - | uint32_t | 行内起始列偏移,支持在同一行内对不同列段做归一化 |
 | useNorm | 标量 | - | bool | true=完整归一化;false=variance-only 模式 |
 | tpSize | 标量 | - | uint32_t | 张量并行规模,用于把 AllReduce 后的方差和除回均值 |
-| kcacheStride | 标量 | - | uint32_t | 写 cache 路径的 kcache dim-0 跨度(元素数),与 kcache/slot_mapping/block_size(默认传 nullptr/nullptr/0)配套;连续 cache 时等于 block_size × norm_dim × cnt_per_token(即 total_dim)的乘积,非连续时由宿主(如 mla_prepare 传 `kCache.stride[0]`)传入真实跨距 |
+| kcacheStride | 标量 | - | uint32_t | 写 cache 路径的 kcache dim-0 跨度(元素数),与 kcache/slot_mapping/block_size(默认传 nullptr/nullptr/0)配套;连续 cache 时等于 block_size × norm_dim × cnt_per_token(即 total_dim)的乘积,非连续时由宿主(如 mla_prepare 传 `MAX(kCache.stride[0], blockSize*kvLoraRank)`)传入,kernel 内层再做 `MAX(kcacheStride, block_size*total_dim)` 钳制 |
 | outFp32 | 标量 | - | bool | 输出是否为 fp32 |
 
 测试参考:[tests/kernels/rmsnorm.py](../../../tests/kernels/rmsnorm.py)(`[64, 8192]`、带 stride 的 `DIM=128, CNT=8`)、[tests/kernels/layernorm.py](../../../tests/kernels/layernorm.py)、[tests/kernels/l2norm.py](../../../tests/kernels/l2norm.py)、[tests/kernels/rmsnorm_full.py](../../../tests/kernels/rmsnorm_full.py)(variance-only + all_reduce + apply 三步)。
@@ -87,7 +87,7 @@ MTE2(搬入)/ V(计算)/ MTE3(搬出)三管线,事件标志协议:
 4. **归一化**:`vadds` 加 eps → `vsqrt` → `duplicate_item` 广播 → `vdiv` 除(`csrc/kernels/norm.h` 的 `norm<Dtype>` 中 `vadds`/`vsqrt`/`vdiv` 归一化段);`SetMask(1)` + 特殊 stride 控制只对每段首元素做 sqrt 类运算(`csrc/kernels/norm.h` 的 `norm<Dtype>` 中 `SetMask(1)` 段)。
 5. **仿射**:`vmul(weight)`、`vadd(bias)`(`csrc/kernels/norm.h` 的 `norm<Dtype>` 中 `vmul(weight)`/`vadd(bias)` 仿射段)。
 6. **输出**:useNorm 时 `convert_output` 转 Dtype 写 GM(outFp32 时 fp32 直写);variance-only(useNorm=false)时只把每段方差(fp32)写出(`csrc/kernels/norm.h` 的 `norm<Dtype>` 中输出写出段)。
-7. **(可选)写 KV cache**:kcache/slot_mapping/block_size 非空时,归一化结果按 `slot_mapping` 的平坦 `slot_idx` 以 `block_size` 分解为块号/块内偏移,按 `block * kcacheStride + block_offset * total_dim` 定位,额外写一份到 paged cache(`csrc/kernels/norm.h` 的 `norm<Dtype>` 中 need_cache 写 KV cache 段);`kcacheStride` 为 kcache 的 dim-0 跨度(元素数),连续 cache 时等于 `block_size * total_dim`,非连续时由宿主传入(如 mla_prepare 传 `kCache.stride[0]`)。该路径目前由 mla_prepare 等调用方使用,`norm_*` 导出符号固定传 nullptr(`csrc/kernels/norm.h` 的 `NORM_FUNC_DEFINE` 宏,关键字 `nullptr, nullptr, 0, 0, 0, nullptr`)。
+7. **(可选)写 KV cache**:kcache/slot_mapping/block_size 非空时,归一化结果按 `slot_mapping` 的平坦 `slot_idx` 以 `block_size` 分解为块号/块内偏移,按 `block * MAX(kcacheStride, block_size*total_dim) + block_offset * total_dim` 定位,额外写一份到 paged cache(`csrc/kernels/norm.h` 的 `norm<Dtype>` 中 need_cache 写 KV cache 段);`kcacheStride` 为 kcache 的 dim-0 跨度(元素数),连续 cache 时等于 `block_size * total_dim`,非连续时由宿主传入(mla_prepare 传 `MAX(kCache.stride[0], blockSize*kvLoraRank)`,kernel 内层再做一次 `MAX(kcacheStride, block_size*total_dim)` 钳制)。该路径目前由 mla_prepare 等调用方使用,`norm_*` 导出符号固定传 nullptr(`csrc/kernels/norm.h` 的 `NORM_FUNC_DEFINE` 宏,关键字 `nullptr, nullptr, 0, 0, 0, nullptr`)。
 
 `reduce_sum`(`csrc/kernels/norm.h` 的 `reduce_sum`)对 `norm_dim == 128` 走快速路径:先一条 `vadd` 折半,再逐段 `vcadd`(`Order_t::ONLY_VALUE` 语义,结果落在段首);其他维度调用通用 `ReduceSum`(`csrc/kernels/kernel_macro.h` 的 `ReduceSum`,二分折叠 + `vcadd` 收尾)。`duplicate_item`(`csrc/kernels/norm.h` 的 `duplicate_item`)经 S 管线读段首标量后 `vector_dup` 广播整段。
 
@@ -99,4 +99,4 @@ MTE2(搬入)/ V(计算)/ MTE3(搬出)三管线,事件标志协议:
 
 ### Host 侧调用
 
-`csrc/op.cpp` 的 `XliteOpRmsNorm` / `XliteOpLayerNorm` / `XliteOpL2Norm` / `XliteOpAddAndRmsNorm`:`XliteOpRmsNorm` / `XliteOpLayerNorm` / `XliteOpL2Norm` / `XliteOpAddAndRmsNorm` 分别以不同 `kind`、`useNorm`、仿射参数组合 launch 同一个 `norm_<dtype>` kernel,grid 为 `rt.aivNum`,`outFp32 = (out.dtype == FP32)`。
+`csrc/op.cpp` 的 `XliteOpRmsNorm` / `XliteOpLayerNorm` / `XliteOpL2Norm` / `XliteOpAddAndRmsNorm`:`XliteOpRmsNorm` / `XliteOpLayerNorm` / `XliteOpL2Norm` / `XliteOpAddAndRmsNorm` 分别以不同 `kind`、`useNorm`、仿射参数组合 launch 同一个 `norm_<dtype>` kernel,grid 为 `PickMinBlockNum(rt.aivNum, in.shape[0])`(即 `min(aivNum, token_num)`,token 数少于核数时按 token 数收敛;`XliteOpRmsNorm`/`XliteOpLayerNorm`/`XliteOpL2Norm`/`XliteOpAddAndRmsNorm` 一致,见 `csrc/auto_tuner.h` 的 `PickMinBlockNum`),`outFp32 = (out.dtype == FP32)`。
