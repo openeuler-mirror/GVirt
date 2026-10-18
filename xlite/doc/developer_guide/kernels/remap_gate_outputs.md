@@ -26,7 +26,7 @@ Python 侧调用(`xlite/_C.pyi`,`remap_gate_outputs`):
 remap_gate_outputs(rt, w_in, r_in, w_out, r_out, log2phy)
 ```
 
-host 侧 launch 见 `csrc/op.cpp:806`(`XliteOpRemapGateOutputs`,以 `PickMinBlockNum(rt.aivNum, M)` 个 block 启动,`elemBytes = XDtypeBit(wIn.dtype) / 8`)。kernel 签名(`csrc/kernels/remap_gate_outputs.cpp:96`):
+host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpRemapGateOutputs`(以 `PickMinBlockNum(rt.aivNum, M)` 个 block 启动,`elemBytes = XDtypeBit(wIn.dtype) / 8`)。kernel 签名(`csrc/kernels/remap_gate_outputs.cpp` 的 `remap_gate_outputs` 入口):
 
 ```cpp
 remap_gate_outputs(GM_ADDR wIn, GM_ADDR rIn, GM_ADDR wOut, GM_ADDR rOut,
@@ -46,17 +46,17 @@ remap_gate_outputs(GM_ADDR wIn, GM_ADDR rIn, GM_ADDR wOut, GM_ADDR rOut,
 | totalPhysicalExperts | — | 标量 | uint32 | 物理专家数(`wOut.shape[1]`) |
 | elemBytes | — | 标量 | uint32 | 单个权重元素字节数(host 由 dtype 推断) |
 
-`M == 0 || nRoutedExperts == 0 || totalPhysicalExperts == 0 || elemBytes == 0` 时 kernel 直接返回(`remap_gate_outputs.cpp:29`)。
+`M == 0 || nRoutedExperts == 0 || totalPhysicalExperts == 0 || elemBytes == 0` 时 kernel 直接返回(`csrc/kernels/remap_gate_outputs.cpp` 的 `remap_gate_outputs_kernel`,关键字 `if (M == 0 || nRoutedExperts == 0`)。
 
 ## 支持的数据类型
 
-本算子为单文件 `csrc/kernels/remap_gate_outputs.cpp`(非模板),通过 `elemBytes` 标量对任意元素宽度的 `wIn/wOut` 做字节级拷贝,因此**无 dtype 实例化文件**。host 侧约束(`csrc/op.cpp:806`):`wIn`/`wOut` 为 BF16 或 FP32(`XDtypeBit` 推断 `elemBytes`),`rIn`/`rOut` 为 BIT1,`log2phy` 为 uint32。kernel 仅在 `__DAV_C220_VEC__` 下编译,任务类型 `KERNEL_TYPE_MIX_AIV_1_0`(`remap_gate_outputs.cpp:102`,纯 AIV)。
+本算子为单文件 `csrc/kernels/remap_gate_outputs.cpp`(非模板),通过 `elemBytes` 标量对任意元素宽度的 `wIn/wOut` 做字节级拷贝,因此**无 dtype 实例化文件**。host 侧约束(`csrc/op.cpp` 的 `XliteOpRemapGateOutputs`):`wIn`/`wOut` 为 BF16 或 FP32(`XDtypeBit` 推断 `elemBytes`),`rIn`/`rOut` 为 BIT1,`log2phy` 为 uint32。kernel 仅在 `__DAV_C220_VEC__` 下编译,任务类型 `KERNEL_TYPE_MIX_AIV_1_0`(`csrc/kernels/remap_gate_outputs.cpp` 的 `remap_gate_outputs` 入口,关键字 `KERNEL_TYPE_MIX_AIV_1_0`,纯 AIV)。
 
 ## 实现原理
 
 ### 数据流与并行
 
-核心函数 `remap_gate_outputs_kernel`(`remap_gate_outputs.cpp:20`)。token 维度按 block 轮询切分:`for (t = block_idx; t < M; t += block_num)`,每个 block 独立处理若干 token 行,无块间依赖。每行内串行执行"权重散列 → 路由位散列"两个阶段。
+核心函数 `remap_gate_outputs_kernel`(`csrc/kernels/remap_gate_outputs.cpp` 的 `remap_gate_outputs_kernel`)。token 维度按 block 轮询切分:`for (t = block_idx; t < M; t += block_num)`,每个 block 独立处理若干 token 行,无块间依赖。每行内串行执行"权重散列 → 路由位散列"两个阶段。
 
 ### UB 内存布局
 
@@ -66,15 +66,15 @@ UB 分五段,每段向上取整到 `VECTOR_MAX_BYTESIZE`(256B),使 `vector_dup` 
 log2phy | wInRow | wOutRow | rInRow | rOutRow
 ```
 
-`log2phy` 在循环前由 MTE2 一次性搬入(`nRoutedExperts * 4B`,小),随后 `pipe_barrier(PIPE_ALL)` 保证落 UB,供 S 管线标量在循环内读取(`remap_gate_outputs.cpp:51-52`)。
+`log2phy` 在循环前由 MTE2 一次性搬入(`nRoutedExperts * 4B`,小),随后 `pipe_barrier(PIPE_ALL)` 保证落 UB,供 S 管线标量在循环内读取(`csrc/kernels/remap_gate_outputs.cpp` 的 `remap_gate_outputs_kernel`,关键字 `CopyGmToUbufAligned((__ubuf__ uint8_t *)log2phyUbuf`、`pipe_barrier(PIPE_ALL)` 之后的首次)。
 
 ### 权重散列
 
-每行:MTE2 搬入 `wInRow`(`wInRowBytes = nRoutedExperts*elemBytes`),`vector_dup` 清零 `wOutRow`(`wOutRowBytes = totalPhysicalExperts*elemBytes`),`pipe_barrier(PIPE_ALL)` 后由 **S 管线标量**逐 expert 拷贝 `elemBytes` 字节:`dst = wOutRow + phy*elemBytes`、`src = wInRow + L*elemBytes`(`remap_gate_outputs.cpp:58-71`)。完成后 `pipe_barrier(PIPE_ALL)` 再 MTE3 写回 GM。
+每行:MTE2 搬入 `wInRow`(`wInRowBytes = nRoutedExperts*elemBytes`),`vector_dup` 清零 `wOutRow`(`wOutRowBytes = totalPhysicalExperts*elemBytes`),`pipe_barrier(PIPE_ALL)` 后由 **S 管线标量**逐 expert 拷贝 `elemBytes` 字节:`dst = wOutRow + phy*elemBytes`、`src = wInRow + L*elemBytes`(`csrc/kernels/remap_gate_outputs.cpp` 的 `remap_gate_outputs_kernel`,关键字 `dst = wOutRow + (uint64_t)phy * elemBytes`、`src = wInRow + (uint64_t)L * elemBytes`)。完成后 `pipe_barrier(PIPE_ALL)` 再 MTE3 写回 GM。
 
 ### 路由位散列
 
-每行:MTE2 搬入 `rInRow`(`ceil(nRoutedExperts/8)` 字节),`vector_dup` 清零 `rOutRow`,`pipe_barrier(PIPE_ALL)` 后用 `bitmapTest`/`bitmapSet`(按 `uint64_t` 行指针)做 test-set:`if (bitmapTest(rInRow64, L)) bitmapSet(rOutRow64, log2phy[L])`(`remap_gate_outputs.cpp:77-88`)。完成后写回 GM。
+每行:MTE2 搬入 `rInRow`(`ceil(nRoutedExperts/8)` 字节),`vector_dup` 清零 `rOutRow`,`pipe_barrier(PIPE_ALL)` 后用 `bitmapTest`/`bitmapSet`(按 `uint64_t` 行指针)做 test-set:`if (bitmapTest(rInRow64, L)) bitmapSet(rOutRow64, log2phy[L])`(`csrc/kernels/remap_gate_outputs.cpp` 的 `remap_gate_outputs_kernel`,关键字 `bitmapTest(rInRow64, L)`、`bitmapSet(rOutRow64, log2phyUbuf[L])`)。完成后写回 GM。
 
 ### 流水线同步
 

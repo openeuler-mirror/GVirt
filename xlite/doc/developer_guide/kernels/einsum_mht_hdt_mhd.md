@@ -6,7 +6,7 @@
 
 ## 输入输出参数
 
-Python 接口:`einsum_mht_hdt_mhd(rt, mht, hdt, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHdtMhd`,[csrc/op.cpp:2225-2247](../../../csrc/op.cpp#L2225-L2247))。
+Python 接口:`einsum_mht_hdt_mhd(rt, mht, hdt, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHdtMhd`,见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHdtMhd`)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -18,16 +18,16 @@ Python 接口:`einsum_mht_hdt_mhd(rt, mht, hdt, mhd, m, h, t, d, weight_nz=False
 | t | 标量 | - | uint32 | 收缩维(GEMM 的 K 维),如 MLA 的 nopeHeadDim/kvLoraRank |
 | d | 标量 | - | uint32 | 输出维(GEMM 的 N 维) |
 | weight_nz | 标量 | - | bool | 右操作数是否为 NZ 分形布局 |
-| T / D | 标量(可选) | - | int | mht 行宽 / mhd 行宽的对齐覆盖;缺省(`-1`)时取 t / d。MLA 流程中传入 `nopeHeadDim + ropeHeadDim` 以跳过 head 中不参与计算的 rope 区(见 [csrc/model.cpp:469-471](../../../csrc/model.cpp#L469-L471) 对 htd 变体的用法) |
+| T / D | 标量(可选) | - | int | mht 行宽 / mhd 行宽的对齐覆盖;缺省(`-1`)时取 t / d。MLA 流程中传入 `nopeHeadDim + ropeHeadDim` 以跳过 head 中不参与计算的 rope 区(见 `csrc/model.cpp` 的 `XModel::ForwardAttnMLACommonV2`,关键字 `_c.nopeHeadDim + _c.ropeHeadDim`,对 htd 变体的用法) |
 
-host 侧 swizzle 策略由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选([csrc/op.cpp:2241-2243](../../../csrc/op.cpp#L2241-L2243));`m0/n0/k0` 取 `MATMUL_M0_N0_K0_DEFAULT_VALUE`(即 128/256/按 dtype)。
+host 侧 swizzle 策略由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选(见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHdtMhd`,关键字 `XlitePickSwizzle`);`m0/n0/k0` 取 `MATMUL_M0_N0_K0_DEFAULT_VALUE`(即 128/256/按 dtype)。
 
 ## 支持的数据类型
 
 - `float16_t`([einsum_mht_hdt_mhd_float16_t.cpp](../../../csrc/kernels/einsum_mht_hdt_mhd_float16_t.cpp))
 - `bfloat16_t`([einsum_mht_hdt_mhd_bfloat16_t.cpp](../../../csrc/kernels/einsum_mht_hdt_mhd_bfloat16_t.cpp))
 
-实例化形态为 `Matmul<dtype, float, dtype>`(bias 为 float 类型形参但未启用,[csrc/kernels/einsum_mht_hdt_mhd.h:54](../../../csrc/kernels/einsum_mht_hdt_mhd.h#L54));三个张量 dtype 须一致。
+实例化形态为 `Matmul<dtype, float, dtype>`(bias 为 float 类型形参但未启用,见 `csrc/kernels/einsum_mht_hdt_mhd.h` 的 `EINSUM_MHT_HDT_MHD_FUNC_DEFINE` 宏);三个张量 dtype 须一致。
 
 ## 实现原理
 
@@ -46,7 +46,7 @@ for hIdx in 0..h:
     coreOffset = (coreOffset + tiles) % blockNum
 ```
 
-([csrc/kernels/einsum_mht_hdt_mhd.h:33-44](../../../csrc/kernels/einsum_mht_hdt_mhd.h#L33-L44))
+(见 `csrc/kernels/einsum_mht_hdt_mhd.h` 的 `einsum_mht_hdt_mhd` 模板函数,关键字 `coreOffset`)
 
 - 每头的 GEMM 被切成 `ceil(m/m0) × ceil(d/n0)` 个输出 tile,`TaskTilesInit` 返回 tile 总数;
 - 头与头之间用 `coreOffset` 累计错开起始 block:每个头处理完后把该头 tile 数累加到偏移,使下一头的第一个 tile 落到"轮到"的核上,避免按头整块切分造成的小头尾负载不均;
@@ -54,10 +54,10 @@ for hIdx in 0..h:
 
 ### 单 tile 数据流(Matmul 类)
 
-每个 `(m0=128) × (n0=256)` 输出 tile 在 Cube 核内执行标准五级流水([csrc/kernels/matmul.h:200-378](../../../csrc/kernels/matmul.h#L200-L378)):
+每个 `(m0=128) × (n0=256)` 输出 tile 在 Cube 核内执行标准五级流水(见 `csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`):
 
 1. **A GM→L1**:`CopyGmToL1Nd2Nz` 把 `[mActual, kRem]` 的 A 转成 NZ 分形进 `l1aBuf`(K 方向双缓冲,K 预取 `kDtileSize = 2*k0`);
-2. **B GM→L1**:本算子 `transpose=0` 且 `nz=0` 时走 `CopyGmToL1Nd2Nz(bGmBuf[nOffset*k + kOffset], nActual, kRemSize, k, ...)`——注意 B 逻辑上是 `[d, t]`(N×K),以 k 为行距 ND2NZ 装载,等效完成 Bᵀ 的分形化([csrc/kernels/matmul.h:306-307](../../../csrc/kernels/matmul.h#L306-L307));`nz=1` 时直接 `CopyGmToL1` 拷贝现成 NZ 分形;
+2. **B GM→L1**:本算子 `transpose=0` 且 `nz=0` 时走 `CopyGmToL1Nd2Nz(bGmBuf[nOffset*k + kOffset], nActual, kRemSize, k, ...)`——注意 B 逻辑上是 `[d, t]`(N×K),以 k 为行距 ND2NZ 装载,等效完成 Bᵀ 的分形化(见 `csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`,关键字 `transpose == 0 && nz == 0`);`nz=1` 时直接 `CopyGmToL1` 拷贝现成 NZ 分形;
 3. **L1→L0A/L0B**:`CopyToL0ACol` / `CopyToL0BCol` 分形下搬,均带 ping-pong 双缓冲;
 4. **Mmad**:K 方向按 `kQtileSize` 分段累加到 L0C(`CalMmad`,kIdx==0 时初始化累加器);
 5. **L0C→GM**:`CopyToGmWithDequant` 写回 C tile(本算子无 bias/dequant)。
@@ -66,7 +66,7 @@ for hIdx in 0..h:
 
 ### tiling/swizzle
 
-tile 遍历顺序由 `GetMNBlockIdx` 按 host 传入的 swizzle(方向 Zn/Nz + 块计数)重排,改善 L2/L1 命中率([csrc/kernels/matmul.h:380-419](../../../csrc/kernels/matmul.h#L380-L419))。
+tile 遍历顺序由 `GetMNBlockIdx` 按 host 传入的 swizzle(方向 Zn/Nz + 块计数)重排,改善 L2/L1 命中率(见 `csrc/kernels/matmul.h` 的 `Matmul::GetMNBlockIdx`)。
 
 ### 测试参考
 

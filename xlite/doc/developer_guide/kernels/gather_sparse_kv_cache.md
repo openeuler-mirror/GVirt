@@ -26,7 +26,7 @@ Python 绑定 `gather_sparse_kv_cache`(`csrc/_C.cpp`)→ `GatherSparseKVCache`(`
 
 ```cpp
 gather_sparse_kv_cache_<dtype>(kCache, peCache, blockTables, topkIndices, cachedLens,
-                               kDenseCache, peDenseCache, seqNum, indexTopK, blockSize,
+                               kDenseCache, peDenseCache, seqNum, topK, blockSize,
                                maxNumBlocks, kvLoraRank, ropeHeadDim, kCacheStride,
                                peCacheStride, compressRatio = 1, burstCopySize = GM_UB_BURST_SIZE)
 ```
@@ -41,7 +41,7 @@ gather_sparse_kv_cache_<dtype>(kCache, peCache, blockTables, topkIndices, cached
 | kDenseCache | 输出 | `[batch, indexTopK, 1, kvLoraRank]` | BF16 | 收集后的连续 K(零初始化,槽位 ≥ min(numCandidates, topK) 不写) |
 | peDenseCache | 输出 | `[batch, indexTopK, 1, ropeHeadDim]` | BF16 | 收集后的连续 PE / RoPE K;cxa dense 模式内部调用时传空 |
 | seqNum | 标量 | - | uint32 | batch 数 |
-| indexTopK | 标量 | - | uint32 | 每 batch 收集的 token 数上限,`> 0`(kernel 前置条件);kernel 按 32 槽位分 chunk,任意正值均可。`2048`(`MAX_TOPK_NUM`,`csrc/kernels/kernel_param.h`)是上游 `indexer_topk` 的约定上限,本算子不作限制;测试覆盖 1/16/100/512/2048 |
+| indexTopK | 标量 | - | uint32 | 每 batch 收集的 token 数上限,`> 0`(kernel 前置条件;kernel 内形参名为 `topK`,host/Python 侧称 `indexTopK`/`index_topk`);kernel 按 32 槽位分 chunk,任意正值均可。`2048`(`MAX_TOPK_NUM`,`csrc/kernels/kernel_param.h`)是上游 `indexer_topk` 的约定上限,本算子不作限制;测试覆盖 1/16/100/512/2048 |
 | blockSize | 标量 | - | uint32 | KV cache 块大小(128);须为 `CNT_ONE_LOOP=32` 的倍数(kernel 前置条件) |
 | maxNumBlocks | 标量 | - | uint32 | host 由 blockTables 推得(`DeriveMaxNumBlocks`,`csrc/op.cpp`) |
 | kvLoraRank / ropeHeadDim | 标量 | - | uint32 | 两通道向量宽,均须为 16 的倍数(每 token 字节 32B 对齐)且不超出 kernel 的 UB 容量(kernel 前置条件);kernel 要求第一通道不小于第二,host 保证:两通道都在且 `kvLoraRank < ropeHeadDim` 时换位传入,单通道时活动通道作第一通道 |
