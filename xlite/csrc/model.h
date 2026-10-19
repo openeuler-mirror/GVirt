@@ -92,8 +92,6 @@ struct XModelConfig {
     bool expertsWeightNZ = false;
     // For GLM4/GLM5, vllm-ascend doesn't capture the Gate layer, so its gate won't use NZ format
     bool gateCaptured = true;
-    // MSD W4A8 flag
-    bool quantMsdW4a8 = false;
 
     // MLA related weight format
     bool mlaWuvWeightNZ = false;
