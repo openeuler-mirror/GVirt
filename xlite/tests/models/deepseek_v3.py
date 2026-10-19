@@ -1900,7 +1900,6 @@ class DeepSeek_V3(nn.Module):
                                               for i in range(args.n_dense_layers, args.n_layers)
                                               for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
         if args.quantization == "w4a8":
-            config.quant_msd_w4a8 = True
             config.experts_weight_transpose = True
             config.experts_weight_nz = True
             self.xlite_model.re_up_gate = [_pack_w4a8_weight_for_xlite(self.layers[i].ffn.experts[j].w13.weight)

@@ -99,17 +99,13 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mhaQNormBias.resize(c.nLayers);
     mhaKNormBias.resize(c.nLayers);
     mlpNormBias.resize(c.nLayers);
+    moeREUpGateScaleBias.resize(c.nLayers);
+    moeREDownScaleBias.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
         moeREUpGateDeqScale[i].resize(totalPhysicalExperts);
         moeREDownDeqScale[i].resize(totalPhysicalExperts);
-    }
-    if (c.quantMsdW4a8) {
-        moeREUpGateScaleBias.resize(c.nLayers);
-        moeREDownScaleBias.resize(c.nLayers);
-        for (uint32_t i = 0; i < c.nLayers; i++) {
-            moeREUpGateScaleBias[i].resize(totalPhysicalExperts);
-            moeREDownScaleBias[i].resize(totalPhysicalExperts);
-        }
+        moeREUpGateScaleBias[i].resize(totalPhysicalExperts);
+        moeREDownScaleBias[i].resize(totalPhysicalExperts);
     }
 
     if (c.attnType == XMODEL_ATTN_HYBRID) {
@@ -245,17 +241,28 @@ void XModel::Init(void)
             _moeREDownDeqScale[i].Init({totalPhysicalExperts}, INT64, ptr);
         }
 
-        if (_c.quantMsdW4a8) {
+        // MSD W4A8 is auto-detected from weight dtype (INT4) and scale_bias presence.
+        // When weights are INT4-packed and scale_bias tensors are bound, build the
+        // scale_bias pointer arrays for the merge_dequant kernel.
+        if (moeREUpGate[i][start].dtype == INT4 && moeREUpGateScaleBias[i][start].ptr != nullptr) {
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
             for (uint32_t j = 0; j < totalPhysicalExperts; j++) {
-                weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScaleBias[i][j].ptr);
+                if (j >= start && j < end) {
+                    weights[j] = reinterpret_cast<uint64_t>(moeREUpGateScaleBias[i][j].ptr);
+                } else {
+                    weights[j] = 0;
+                }
             }
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
             _moeREUpGateScaleBias[i].Init({totalPhysicalExperts}, INT64, ptr);
 
             CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
             for (uint32_t j = 0; j < totalPhysicalExperts; j++) {
-                weights[j] = reinterpret_cast<uint64_t>(moeREDownScaleBias[i][j].ptr);
+                if (j >= start && j < end) {
+                    weights[j] = reinterpret_cast<uint64_t>(moeREDownScaleBias[i][j].ptr);
+                } else {
+                    weights[j] = 0;
+                }
             }
             CHECK_ACL(aclrtMemcpy(ptr, size, weights.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
             _moeREDownScaleBias[i].Init({totalPhysicalExperts}, INT64, ptr);
