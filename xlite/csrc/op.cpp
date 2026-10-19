@@ -1105,11 +1105,11 @@ void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &comp
 }
 
 void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &peCache,
-                                XTensor &blockTables, XTensor &topkIndices, XTensor &cachedLens,
-                                XTensor &kDenseCache, const XTensor &peDenseCache, uint32_t seqNum,
-                                uint32_t indexTopK, uint32_t blockSize, uint32_t kvLoraRank,
-                                uint32_t ropeHeadDim, uint32_t kvHeads, uint32_t compressRatio,
-                                uint32_t burstCopySize)
+                                XTensor &blockTables, XTensor &topkIndices, XTensor &queryStartLoc,
+                                XTensor &queryLens, XTensor &cachedLens, XTensor &kDenseCache,
+                                const XTensor &peDenseCache, uint32_t batch, uint32_t indexTopK,
+                                uint32_t blockSize, uint32_t kvLoraRank, uint32_t ropeHeadDim,
+                                uint32_t kvHeads, uint32_t compressRatio, uint32_t burstCopySize)
 {
     const bool useK = kCache.ptr != nullptr, usePe = peCache.ptr != nullptr;
     if (IsDummyRuntime(rt) || (!useK && !usePe)) {
@@ -1125,9 +1125,10 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
         throw std::runtime_error(std::string(__func__) +
                                  ": cache and dense cache channel emptiness must match");
     }
-    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, seqNum);
-    uint32_t aivNum =
-        PickMinBlockNum(rt.aivNum, static_cast<uint64_t>(seqNum) * DIV_ROUND_UP(indexTopK, 16));
+    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    uint32_t aivNum = PickMinBlockNum(
+        rt.aivNum, static_cast<uint64_t>(batch) *
+                       DIV_ROUND_UP(indexTopK, GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP));
     if ((useK && !EachXDtype(BF16, kCache, kDenseCache)) ||
         (usePe && !EachXDtype(BF16, peCache, peDenseCache))) {
         std::string err_str = DBG_PREFIX + XT_STR(kCache) + XT_STR(peCache) + XT_STR(kDenseCache) +
@@ -1137,8 +1138,8 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
         // the kernel op assumes the first cache is always present; the second is optional
         aclrtlaunch_gather_sparse_kv_cache_nope_bfloat16_t(
             aivNum, rt.stream, useK ? kCache.ptr : peCache.ptr, useK ? peCache.ptr : nullptr,
-            blockTables.ptr, topkIndices.ptr, cachedLens.ptr,
-            useK ? kDenseCache.ptr : peDenseCache.ptr, usePe ? peDenseCache.ptr : nullptr, seqNum,
+            blockTables.ptr, topkIndices.ptr, queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr,
+            useK ? kDenseCache.ptr : peDenseCache.ptr, usePe ? peDenseCache.ptr : nullptr, batch,
             indexTopK, blockSize, maxNumBlocks, useK ? kvLoraRank : ropeHeadDim,
             usePe ? ropeHeadDim : 0, useK ? kCache.stride[0] : peCache.stride[0], 0u, compressRatio,
             burstCopySize);
@@ -1146,15 +1147,15 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
         // the kernel op also assumes the first cache's dimension is no smaller than the second
         aclrtlaunch_gather_sparse_kv_cache_bfloat16_t(
             aivNum, rt.stream, kCache.ptr, peCache.ptr, blockTables.ptr, topkIndices.ptr,
-            cachedLens.ptr, kDenseCache.ptr, peDenseCache.ptr, seqNum, indexTopK, blockSize,
-            maxNumBlocks, kvLoraRank, ropeHeadDim, kCache.stride[0], peCache.stride[0],
-            compressRatio, burstCopySize);
+            queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, kDenseCache.ptr, peDenseCache.ptr,
+            batch, indexTopK, blockSize, maxNumBlocks, kvLoraRank, ropeHeadDim, kCache.stride[0],
+            peCache.stride[0], compressRatio, burstCopySize);
     } else {
         aclrtlaunch_gather_sparse_kv_cache_bfloat16_t(
             aivNum, rt.stream, peCache.ptr, kCache.ptr, blockTables.ptr, topkIndices.ptr,
-            cachedLens.ptr, peDenseCache.ptr, kDenseCache.ptr, seqNum, indexTopK, blockSize,
-            maxNumBlocks, ropeHeadDim, kvLoraRank, peCache.stride[0], kCache.stride[0],
-            compressRatio, burstCopySize);
+            queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, peDenseCache.ptr, kDenseCache.ptr,
+            batch, indexTopK, blockSize, maxNumBlocks, ropeHeadDim, kvLoraRank, peCache.stride[0],
+            kCache.stride[0], compressRatio, burstCopySize);
     }
 }
 

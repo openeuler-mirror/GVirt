@@ -35,18 +35,19 @@ MODELS = {
     "glm5": (512, 64),
 }
 
-# default work configurations: (batch, cached_lens); decode => query_len=1 per
-# batch. cached_lens[b] < topK rows exercise the dense-template gather path.
-# Kept small so all cases fit in device memory at once (built before the delay).
+# default work configurations: (batch, cached_lens, query_lens); decode => the
+# default query_len=1 per batch. cached_lens[b] < topK rows exercise the
+# dense-template gather path. Kept small so all cases fit in device memory at
+# once (built before the delay).
 DEFAULT_WORK = [
-    (1, [16384]),
-    (3, [32751] * 3),
-    (3, [2047, 8191, 45841]),  # mixed: 2047 < topK=2048 => row 0 dense (template)
-    (4, [2047] * 4),  # all rows dense (template) for topK=2048
-    (1, [131071]),
-    (1, [127]),  # dense (dummy indices must not be read)
-    (1, [4096]),
-    (2, [2048, 2049]),  # boundary: 2048 >= 2048 processed, 2049 processed
+    (1, [16384], [1]),
+    (3, [32751] * 3, [1] * 3),
+    (3, [2047, 8191, 45841], [1, 1, 1]),  # mixed: 2047 < topK=2048 => row 0 dense (template)
+    (4, [2047] * 4, [1] * 4),  # all rows dense (template) for topK=2048
+    (1, [131071], [1]),
+    (1, [127], [1]),  # dense (dummy indices must not be read)
+    (1, [4096], [1]),
+    (2, [2048, 2049], [1, 1]),  # boundary: 2048 >= 2048 processed, 2049 processed
 ]
 DEFAULT_TOPK = [2048]
 
@@ -142,7 +143,8 @@ def parse_args():
     if args.cached_lens is not None:
         if any(cl <= 0 for cl in args.cached_lens):
             raise SystemExit("[FATAL] cached lens must be > 0")
-        args.work = [(len(args.cached_lens), list(args.cached_lens))]
+        batch = len(args.cached_lens)
+        args.work = [(batch, list(args.cached_lens), [1] * batch)]
     else:
         args.work = DEFAULT_WORK
     return args
@@ -195,6 +197,7 @@ def build_case(
     rope_head_dim,
     batch,
     cached_lens_list,
+    query_lens_list,
     topK,
     order="asc",
     burst_size=16 * 1024,
@@ -225,12 +228,21 @@ def build_case(
         k_dense = torch.zeros(batch, topK, kv_heads, kv_lora_rank, dtype=test_dtype)
         pe_dense = torch.zeros(batch, topK, kv_heads, rope_head_dim, dtype=test_dtype)
         cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
+        query_lens = torch.tensor(query_lens_list, dtype=torch.int32).flatten()
+        # query_start_loc: exclusive prefix sum (cumsum - lens), as in mla_v2;
+        # decode (all-1) => [0, 1, ..., batch-1]
+        query_lens_np = np.array(query_lens_list)
+        query_start_loc = torch.tensor(
+            (np.cumsum(query_lens_np) - query_lens_np).tolist(), dtype=torch.int32
+        ).flatten()
 
     return (
         k_cache,
         pe_cache,
         block_tables,
         topk_indices,
+        query_start_loc,
+        query_lens,
         cached_lens,
         k_dense,
         pe_dense,
@@ -257,7 +269,7 @@ def main(
     burst_size=16 * 1024,
 ):
     cases = []
-    for batch, cached_lens_list in work:
+    for batch, cached_lens_list, query_lens_list in work:
         for topK in topk_values:
             cases.append(
                 build_case(
@@ -266,6 +278,7 @@ def main(
                     rope_head_dim,
                     batch,
                     cached_lens_list,
+                    query_lens_list,
                     topK,
                     order,
                     burst_size,
