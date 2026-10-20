@@ -335,9 +335,12 @@ __aicore__ inline void indexer_prepare_k_c8(GM_ADDR k, GM_ADDR weight, GM_ADDR b
         vadds(ub.tmp, ub.tmp, norm_eps, 1, 1, 1, 0, 0);
         pipe_barrier(PIPE_V);
         vsqrt(ub.tmp, ub.tmp, 1, 1, 1, 0, 0);
+        vector_dup(ub.other, 1.0f, 1, 1, 1, 8, 0);
+        pipe_barrier(PIPE_V);
+        vdiv(ub.tmp, ub.other, ub.tmp, 1, 1, 1, 1, 8, 8, 8);
         set_flag(PIPE_V, PIPE_S, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
-        float inv_std = 1.0f / *ub.tmp;
+        float inv_std = *ub.tmp;
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
         vmuls(ub.x, ub.x, inv_std, norm_repeat, 1, 1, 8, 8);
         pipe_barrier(PIPE_V);

@@ -105,7 +105,7 @@ UB 布局针对 220 架构 bank group 手工排布(`csrc/kernels/indexer_prepare
 - K 先做 LayerNorm（使用传入的 `norm_eps`），再对前 64 维做交错 RoPE，随后做 Hadamard 和动态量化。结果按 `slot_mapping` 写入缓存，`slot=-1` 跳过。
 - `is_long` 为真时还处理 BF16 `q[T,4096]`：每个 head 做 RoPE、Hadamard 和动态量化，不做 LayerNorm。`kw`、`q` 都只读。
 
-LayerNorm、RoPE 和 Hadamard 的输出分别舍入到 BF16。Hadamard 的七级蝶形用 FP32 计算，归一化系数为 `BF16(1/√128)`。
+LayerNorm、RoPE 和 Hadamard 的输出分别舍入到 BF16。LayerNorm 用 `vsqrt` 和 `vdiv` 计算 `1/√(variance + norm_eps)`。Hadamard 的七级蝶形用 FP32 计算，归一化系数为 `BF16(1/√128)`。
 
 量化以变换后的每行 128 个元素 `x` 为单位，计算 `amax=max(abs(x))`。`amax!=0` 时，用向量除法计算 `factor=vdiv(127, amax)`，对 `x*factor` 取整后转为 INT8；scale 保存为 `FP16(amax × (1/127))`。`amax==0` 时，量化值和 scale 都写零。
 
