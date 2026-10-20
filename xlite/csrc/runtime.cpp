@@ -159,6 +159,9 @@ XRuntime::~XRuntime(void)
     if (notify) {
         (void)aclrtDestroyNotify(notify);
     }
+    if (_indexerHadamard.ptr) {
+        (void)aclrtFree(_indexerHadamard.ptr);
+    }
     if (stream) {
         (void)aclrtDestroyStream(stream);
     }
@@ -989,6 +992,25 @@ void XRuntime::ReduceScatterInGraph(void *send, void *recv, uint32_t m, int hccl
         return;
     }
     RunHcclReduceScatterInGraph(send, recv, m, hcclDtype, type);
+}
+
+void XRuntime::InitIndexerHadamard()
+{
+    if (_indexerHadamard.ptr == nullptr) {
+        constexpr uint32_t dim = 128;
+        std::vector<uint16_t> matrix(dim * dim);
+        for (uint32_t i = 0; i < dim; ++i) {
+            for (uint32_t j = 0; j < dim; ++j) {
+                // BF16 coefficients of the normalized Sylvester matrix.
+                matrix[i * dim + j] = __builtin_parity(i & j) ? 0xbdb5 : 0x3db5;
+            }
+        }
+        size_t size = matrix.size() * sizeof(uint16_t);
+        void *ptr;
+        CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
+        _indexerHadamard.Init({dim, dim}, BF16, ptr);
+        MemcpyH2D(ptr, matrix.data(), size);
+    }
 }
 
 void XRuntime::MemcpyH2D(void *dst, void *src, size_t size)

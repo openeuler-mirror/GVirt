@@ -118,6 +118,7 @@ public:
 
     int InitTensorPool(size_t sizeMB);
     XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
+    void InitIndexerHadamard();
     void PutTensor(XTensor &t);
     bool TensorInPool(XTensor &t);
     int64_t GetTensorOffset(XTensor &t);
@@ -186,6 +187,7 @@ public:
     double activeTokensRatioPerEp = 1.0f;
 
     // cross-layer buffer
+    XTensor _indexerHadamard;
     XTensor _dsaTopkBuffer;  // int32, buffer for storing topk results, allocated via aclrtMalloc
     XTensor *dsaPerLayerTopk = nullptr;  // ptr to the **current** layer's topk result, either a
                                          // nullptr (no topk needed) or a ptr to _dsaTopkBuffer

@@ -1270,6 +1270,34 @@ void XliteOpQkRmsNorm(XRuntime &rt, XTensor &in, const XTensor &qNorm, const XTe
                  kVarArg, rt.tpSize());
 }
 
+static void RunIndexerPrepareC8(XRuntime &rt, const XTensor &kw, const XTensor &kNorm,
+                                const XTensor &kNormBias, const XTensor &freqs,
+                                const XTensor &position, const XTensor &slotMapping,
+                                XTensor &kCache, const XTensor &kScaleCache, const XTensor &q,
+                                const XTensor &q8, const XTensor &qScale,
+                                const XTensor &scaledWeights, uint32_t heads, bool isLong,
+                                float normEps)
+{
+    if (kw.shape[0] == 0) {
+        return;
+    }
+    size_t tasks = DIV_ROUND_UP(kw.shape[0], INDEXER_C8_TILE_ROWS) + (isLong ? kw.shape[0] : 0);
+    uint32_t cores = PickMinBlockNum(rt.aicNum, tasks);
+    XTensor &workspace = rt.GetTensor({4, cores, INDEXER_C8_TILE_ROWS, 128}, BF16, DBG_LOC);
+    if (!IsDummyRuntime(rt)) {
+        rt.InitIndexerHadamard();
+        XTensor &hadamard = rt._indexerHadamard;
+        aclrtlaunch_indexer_prepare_c8_bfloat16_t(
+            cores, rt.stream, kw.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
+            slotMapping.ptr, kCache.ptr, kScaleCache.ptr, isLong ? q.ptr : nullptr,
+            isLong ? q8.ptr : nullptr, isLong ? qScale.ptr : nullptr,
+            isLong ? scaledWeights.ptr : nullptr, hadamard.ptr, workspace.ptr, kw.shape[0],
+            kw.shape[1], heads, freqs.shape[0], kScaleCache.numel, freqs.dtype != BF16, isLong,
+            normEps);
+    }
+    rt.PutTensor(workspace);
+}
+
 void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                            const XTensor &kNormBias, const XTensor &freqs, const XTensor &position,
                            uint32_t indexHeadDim, uint32_t indexNHeads, uint32_t ropeHeadDim,
@@ -1279,6 +1307,11 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                            const XTensor &qScale, const XTensor &scaledWeights)
 {
     if (IsDummyRuntime(rt)) {
+        if (indexKCache.dtype == INT8) {
+            RunIndexerPrepareC8(rt, kw, kNorm, kNormBias, freqs, position, slotMapping, indexKCache,
+                                kScaleCache, q, q8, qScale, scaledWeights, indexNHeads, isLong,
+                                normEps);
+        }
         return;
     }
     if (tpSize != 1) {
@@ -1298,12 +1331,9 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
             !EachXDtype(FP32, kNorm, kNormBias) || (isLong && q.dtype != BF16)) {
             throw std::invalid_argument("indexer_prepare: unsupported LI-C8 inputs");
         }
-        aclrtlaunch_indexer_prepare_c8_bfloat16_t(
-            rt.aivNum, rt.stream, kw.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
-            slotMapping.ptr, indexKCache.ptr, kScaleCache.ptr, isLong ? q.ptr : nullptr,
-            isLong ? q8.ptr : nullptr, isLong ? qScale.ptr : nullptr,
-            isLong ? scaledWeights.ptr : nullptr, kw.shape[0], kw.shape[1], indexNHeads,
-            freqs.shape[0], kScaleCache.numel, freqs.dtype != BF16, isLong, normEps);
+        RunIndexerPrepareC8(rt, kw, kNorm, kNormBias, freqs, position, slotMapping, indexKCache,
+                            kScaleCache, q, q8, qScale, scaledWeights, indexNHeads, isLong,
+                            normEps);
         return;
     }
 
@@ -1330,6 +1360,9 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
                             float normEps)
 {
     if (IsDummyRuntime(rt)) {
+        RunIndexerPrepareC8(rt, k, kNorm, kNormBias, freqs, position, slotMapping, kCache,
+                            scaleCache, XTensor(), XTensor(), XTensor(), XTensor(), 0, false,
+                            normEps);
         return;
     }
     if (k.dtype != BF16 || !EachXDtype(FP32, kNorm, kNormBias) || kCache.dtype != INT8 ||
@@ -1340,11 +1373,8 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
     if (k.shape[0] == 0) {
         return;
     }
-    // The standalone K test interface uses the same kernel with the Q phase disabled.
-    aclrtlaunch_indexer_prepare_c8_bfloat16_t(
-        rt.aivNum, rt.stream, k.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
-        slotMapping.ptr, kCache.ptr, scaleCache.ptr, nullptr, nullptr, nullptr, nullptr, k.shape[0],
-        k.shape[1], 0, freqs.shape[0], scaleCache.numel, freqs.dtype != BF16, false, normEps);
+    RunIndexerPrepareC8(rt, k, kNorm, kNormBias, freqs, position, slotMapping, kCache, scaleCache,
+                        XTensor(), XTensor(), XTensor(), XTensor(), 0, false, normEps);
 }
 
 void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XTensor &ape,

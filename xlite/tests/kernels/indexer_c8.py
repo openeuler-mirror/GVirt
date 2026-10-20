@@ -58,7 +58,7 @@ def reference_q(q, weight, freqs, positions, device):
     imag = pairs[..., 1] * trig[..., 0] + pairs[..., 0] * trig[..., 1]
     rope = q.clone()
     rope[..., :ROPE_DIM] = torch.stack((real, imag), -1).flatten(-2).bfloat16()
-    rotated = (rope.float() @ rotation().float()).bfloat16()
+    rotated = (rope.to(device) @ rotation().to(device)).cpu()
 
     active = rotated.float().abs().amax(-1) != 0
     q8 = torch.zeros_like(q, dtype=torch.int8)
@@ -111,7 +111,7 @@ def run_prepare_test(rt, device, case, tokens):
 
     active = slots >= 0
     written = slots[active].long()
-    rotated_k = reference(kw[active], k_norm, k_norm_bias, freqs, positions[active], norm_eps)
+    rotated_k = reference(kw[active], k_norm, k_norm_bias, freqs, positions[active], device, norm_eps)
     rotated_q, q8_ref, q_scale_ref, weights_ref = reference_q(
         q, kw[:, HEAD_DIM:], freqs, positions, device)
     block_size = 32
