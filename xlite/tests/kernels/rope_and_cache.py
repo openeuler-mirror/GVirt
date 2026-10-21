@@ -288,6 +288,87 @@ for use_fp32 in (True, False):
             logging.error(f"{e}")
 
 # ---------------------------------------------------------------------------
+# Non-contiguous / oversized 2D mrope positions regression: the H/W rows are
+# addressed through the dim-0 row pitch (stride[0]), not num_tokens. Case A
+# slices [3, 2*num_tokens] down to [3, num_tokens] (pitch = 2*num_tokens);
+# case B passes a contiguous [3, num_tokens + pad] buffer whose column count
+# exceeds num_tokens. Both must match the reference on the logical
+# [3, num_tokens] content; a row offset hardcoded to num_tokens reads garbage.
+# ---------------------------------------------------------------------------
+for test_dtype in (torch.bfloat16, torch.float16):
+    torch.set_default_dtype(test_dtype)
+    n_heads, n_kv_heads = 8, 2
+    head_dim = rot_dim_test
+    out_features = (n_heads + 2 * n_kv_heads) * head_dim
+    num_tokens = 512
+    block_size = 128
+    block_num = num_tokens // block_size
+
+    with torch.device("npu"):
+        qkv = torch.randn(num_tokens, out_features)
+        freqs_cis = precompute_freqs_cis(rot_dim_test, 1024, ROPE_THETA)
+        k_cache = torch.zeros(block_num, block_size, n_kv_heads, head_dim)
+        v_cache = torch.zeros(block_num, block_size, n_kv_heads, head_dim)
+        # T/H/W streams: temporal advances 1:1, spatial coords stay bounded
+        pos_rows = torch.stack(
+            [
+                torch.arange(num_tokens, dtype=torch.int64) % 1000,
+                torch.arange(num_tokens, dtype=torch.int64) % 30,
+                torch.arange(num_tokens, dtype=torch.int64) % 40,
+            ]
+        )
+        pos_pitched = torch.zeros(3, num_tokens * 2, dtype=torch.int64)
+        pos_pitched[:, :num_tokens] = pos_rows
+        pos_pitched = pos_pitched[:, :num_tokens]
+        pos_padded = torch.zeros(3, num_tokens + 64, dtype=torch.int64)
+        pos_padded[:, :num_tokens] = pos_rows
+        slot_mapping = torch.arange(num_tokens, dtype=torch.int32)
+
+    q, k, v = qkv.split([n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim], dim=1)
+
+    q4 = q.view(1, num_tokens, n_heads, head_dim).transpose(1, 2)  # [1, h, s, d]
+    k4 = k.view(1, num_tokens, n_kv_heads, head_dim).transpose(1, 2)
+    q_std = apply_mrope_interleaved(q4, freqs_cis, MROPE_SECTION, pos_rows)
+    k_std = apply_mrope_interleaved(k4, freqs_cis, MROPE_SECTION, pos_rows)
+    q_std = q_std.transpose(1, 2).reshape(num_tokens, n_heads * head_dim) * head_dim**-0.5
+    q_std = q_std.to(test_dtype)  # single final rounding
+    k_std = k_std.transpose(1, 2).reshape(num_tokens, n_kv_heads * head_dim).to(test_dtype)
+    qkv_standard_out = torch.cat([q_std, k_std, v], dim=1)
+
+    for label, position in (("pitched", pos_pitched), ("padded", pos_padded)):
+        inout = qkv.clone()
+        torch.npu.synchronize()
+        rope_and_cache(
+            rt=rt,
+            inout=inout,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            position=position,
+            cosin=freqs_cis,
+            slot_mapping=slot_mapping,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            head_dim=head_dim,
+            rot_dim=rot_dim_test,
+            block_size=block_size,
+            is_neox=True,
+            mrope_mask_h=mrope_mask_h,
+            mrope_mask_w=mrope_mask_w,
+        )
+        torch.npu.synchronize()
+
+        logging.info(f"rope and cache (mrope {label} positions, {test_dtype}) executed!")
+
+        try:
+            torch.testing.assert_close(qkv_standard_out, inout, atol=1e-5, rtol=1e-3)
+            passed += 1
+        except AssertionError as e:
+            failed += 1
+            logging.error(f"{e}")
+            logging.error(f"torch_npu: {qkv_standard_out}")
+            logging.error(f"xlite: {inout}")
+
+# ---------------------------------------------------------------------------
 # Pitched (non-contiguous dim-0) cache regression: k/v caches are buf[::2]
 # views, so each cache's dim-0 stride is double the contiguous pitch and the
 # two caches differ in no other way. rope_and_cache must decompose the flat

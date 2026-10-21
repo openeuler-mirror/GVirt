@@ -215,8 +215,8 @@ public:
     uint32_t _maxTotalLens;
     uint32_t _maxQueryLen;  // max query length across the batch this step (1 = pure decode)
     uint32_t _tileSizeOfCachedKV;
-    XTensor
-        _attnPosition;  // [batchedTokens] int64, ref: v0/1 -> _position, v2 -> attnMeta.position
+    XTensor _attnPosition;  // [batchedTokens] or [num_dims, batchedTokens] (mrope) int64, ref:
+                            // v0/1 -> _position, v2 -> attnMeta.position
     std::vector<XTensor> _attnBlockTables;  // [batch, maxNumBlocks] int32, per-kv-cache, ref: v0/1
                                             // -> {_blockTables}, v2 -> attnMeta.blockTables
     std::vector<XTensor> _attnSlotMapping;  // [batchedTokens] int32, per-kv-cache, ref: v0/1 ->

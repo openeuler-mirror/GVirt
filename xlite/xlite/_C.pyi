@@ -375,7 +375,9 @@ class AttnMeta:
         cached_lens (List[int]): Per-sample cached lengths.
         block_tables_cpu (List[List[int]]): Per-sample block tables on host.
         positions (torch.Tensor): Position tensor for version-1 attention metadata,
-            shape ``[batched_tokens]`` int64 device.
+            shape ``[batched_tokens]`` or ``[num_dims, batched_tokens]`` (mrope) int64
+            device; the token (last) dim may exceed ``batched_tokens``, and 2D tensors
+            may carry a dim-0 row pitch (non-contiguous).
     """
 
     lens: List[int] = ...
@@ -385,7 +387,9 @@ class AttnMeta:
     block_tables_cpu: List[List[int]] = ...
     """Per-sample block tables on host."""
     positions: torch.Tensor = ...
-    """Position tensor for version-1 attention metadata, shape ``[batched_tokens]`` int64 device."""
+    """Position tensor for version-1 attention metadata, shape ``[batched_tokens]`` or
+    ``[num_dims, batched_tokens]`` (mrope) int64 device; the token (last) dim may exceed
+    ``batched_tokens``, and 2D tensors may carry a dim-0 row pitch (non-contiguous)."""
 
 class AttnMetaV2:
     """Device-tensor attention metadata for the V2 forward path.
@@ -401,7 +405,9 @@ class AttnMetaV2:
     Attributes:
         lens (torch.Tensor): Per-sample query lengths, shape ``[batch]`` int32 device.
         cached_lens (torch.Tensor): Per-sample cached lengths, shape ``[batch]`` int32 device.
-        positions (torch.Tensor): Position tensor, shape ``[batched_tokens]`` int64.
+        positions (torch.Tensor): Position tensor, shape ``[batched_tokens]`` or
+            ``[num_dims, batched_tokens]`` (mrope) int64; the token (last) dim may
+            exceed ``batched_tokens``, and 2D tensors may carry a dim-0 row pitch.
         lens_cpu (List[int]): Per-sample query lengths (host, for tile-size selection).
         cached_lens_cpu (List[int]): Per-sample cached lengths (host, for tile-size selection).
         query_start_loc (torch.Tensor): Prefix-sum of lens, shape ``[batch]`` int32.
@@ -416,7 +422,9 @@ class AttnMetaV2:
     cached_lens: torch.Tensor = ...
     """Per-sample cached lengths, shape ``[batch]`` int32 device."""
     positions: torch.Tensor = ...
-    """Position tensor, shape ``[batched_tokens]`` int64."""
+    """Position tensor, shape ``[batched_tokens]`` or ``[num_dims, batched_tokens]``
+    (mrope) int64; the token (last) dim may exceed ``batched_tokens``, and 2D tensors
+    may carry a dim-0 row pitch."""
     lens_cpu: List[int] = ...
     """Per-sample query lengths (host, for tile-size selection)."""
     cached_lens_cpu: List[int] = ...
@@ -2044,7 +2052,9 @@ def rope_and_cache(
         v_cache (torch.Tensor): Paged value cache, shape
             ``[num_blocks, block_size, n_kv_heads, head_dim]``, same dtype.
         position (torch.Tensor): Per-token position indices, shape ``[tokens]``, int64
-            (mRoPE: flattened ``[3, tokens]`` int64 — base, height, width planes).
+            (mRoPE: ``[3, tokens]`` int64 — base, height, width rows; may be
+            non-contiguous with a dim-0 row pitch, and ``tokens`` may exceed this
+            call's token count).
         cosin (torch.Tensor): Rotary cosine/sine table, shape ``[max_position, rot_dim]``,
             fp32 (recommended); each row is ``[cos | sin]`` concatenated (``cos`` at
             ``position*rot_dim``, ``sin`` right after), indexed by each token's

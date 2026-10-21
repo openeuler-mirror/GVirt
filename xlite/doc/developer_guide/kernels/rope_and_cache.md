@@ -19,14 +19,15 @@ MroPE 模式下 `cos/sin` 为文本、h、w 三路表按 lane 掩码逐元素相
 
 ## 输入输出参数
 
-Python 接口:`rope_and_cache(rt, inout, k_cache, v_cache, position, cosin, slot_mapping, n_heads, n_kv_heads, head_dim, rot_dim, block_size, is_neox, mrope_mask_h=0, mrope_mask_w=0)`。`cossinInFp32` 不是 Python 参数,由 host 从 `cossin.dtype` 推导;K/V cache 的 dim-0 跨度 `key_cache_stride` / `value_cache_stride` 亦非 Python 参数,由 host 从 `k_cache.stride[0]` / `v_cache.stride[0]` 读取传入。
+Python 接口:`rope_and_cache(rt, inout, k_cache, v_cache, position, cosin, slot_mapping, n_heads, n_kv_heads, head_dim, rot_dim, block_size, is_neox, mrope_mask_h=0, mrope_mask_w=0)`。`cossinInFp32` 不是 Python 参数,由 host 从 `cossin.dtype` 推导;K/V cache 的 dim-0 跨度 `key_cache_stride` / `value_cache_stride` 以及 2D position 的 dim-0 跨度 `positions_stride` 亦非 Python 参数,由 host 从 `k_cache.stride[0]` / `v_cache.stride[0]` / `position.stride[0]` 读取传入。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
 | inout | 输入/输出 | `[num_tokens, (num_heads + 2 * num_kv_heads) * head_dim]` | float16 / bfloat16 | 融合 QKV。host 侧按 TP 切分后的头数拆出 q/k/v 三个指针([csrc/op.cpp](../../../csrc/op.cpp) 的 `XliteOpRopeCache` 中 q/k/v 指针拆分段),q 在行首,k、v 依次随其后;Q/K 旋转后原地写回 |
 | k_cache | 输出 | `[block_num, block_size, num_kv_heads, head_dim]` | 同 inout | KV cache 的 K 平面,按 slot 展开寻址 |
 | v_cache | 输出 | 同 k_cache | 同 inout | KV cache 的 V 平面,V 不做旋转,直接搬运写入 |
-| position | 输入 | `[num_tokens]`(MroPE 为 `[3, num_tokens]`) | int64 | 每 token 的位置 id;MroPE 时第 2/3 行为 h/w 位置([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `rope_and_cache` 中 MroPE 三路位置搬入段,关键字 `gm_pos + num_tokens`) |
+| position | 输入 | `[num_tokens]`(MroPE 为 `[3, num_tokens]`) | int64 | 每 token 的位置 id;MroPE 时第 2/3 行为 h/w 位置。2D 时各行按 dim-0 跨度寻址,支持非连续(列切片产生的 pitch)且列数可超过 num_tokens(预分配缓冲);文本 1D 路按平坦连续读取,不消费跨度([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `rope_and_cache` 中 MroPE 三路位置搬入段,关键字 `gm_pos + positions_stride`) |
+| positions_stride | 标量(host 推导) | - | uint32 | 2D position 的 dim-0 跨度(元素数),host 传 `position.stride[0]`;仅 MroPE 的 h/w 行寻址消费,1D 平坦读取路径不使用 |
 | cossin | 输入 | `[max_pos, rot_dim]` | **float32(推荐)** 或同 inout | 预计算表,前 `rot_dim/2` 列为 cos、后 `rot_dim/2` 列为 sin(见测试 `precompute_freqs_cis` 的 `cat((cos, sin), dim=-1)`)。FP32 时走精度优先的 fp32 旋转路径;与 inout 同 dtype 时走已废弃的 model-dtype 路径(bf16 舍入回退仿真 / fp16 直接计算) |
 | slot_mapping | 输入 | `[num_tokens]` | int32 | 每 token 在 cache 中的平坦 slot 索引 |
 | key_cache_stride / value_cache_stride | 标量(host 推导) | - | uint32 | K/V cache 的 dim-0 跨度(元素数),host 传 `kCache.stride[0]` / `vCache.stride[0]`;连续 cache 时等于 block_size × num_kv_heads × head_dim 的乘积,非连续时为宿主传入的真实跨距 |
@@ -55,7 +56,7 @@ inout、kCache、vCache 三者必须同为 `float16_t` 或 `bfloat16_t`;cossin �
 
 ### 两级循环与多 Block 并行
 
-- 外层按批搬运 `positions`/`slot_mapping`(Mrope 还包括 pos_h/pos_w)到 UB 尾部暂存区,批量大小 `iter_posslot_num` 由剩余 UB 空间动态推出([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `rope_and_cache` 中 `iter_posslot_num` 推导段);
+- 外层按批搬运 `positions`/`slot_mapping`(Mrope 还包括 pos_h/pos_w)到 UB 尾部暂存区,批量大小 `iter_posslot_num` 由剩余 UB 空间动态推出([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `rope_and_cache` 中 `iter_posslot_num` 推导段);Mrope 的 h/w 行按 `gm_pos + positions_stride` / `gm_pos + 2 * positions_stride` 定位(文本行与 1D 路为 `gm_pos` 平坦读取),`positions_stride` 为 2D position 的 dim-0 跨度,非连续与列数超出 num_tokens 的缓冲均正确;
 - 内层将 token 条带化分配到各 block:`loop1 = block_idx + processed_num_tokens`,步长 `block_num`([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `rope_and_cache` 中 `loop1 = block_idx + processed_num_tokens` 内层循环),即 token 级多核并行。
 
 每个 token 的 GM 地址由标量单元从 UB 暂存区读出 position/slot 计算得到:cos/sin 表偏移 `pos * rot_dim`(sin 再加 `rot_dim/2`);cache 侧把平坦 slot 按 `block_size` 分解为块号与块内偏移,K/V cache 各自按 `slot / block_size * key_cache_stride(value_cache_stride) + slot % block_size * num_kv_heads * head_dim` 寻址,连续 cache 时等价于 `slot * num_kv_heads * head_dim`([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `rope_and_cache` 中 slot/kcache 寻址段)。
@@ -109,4 +110,4 @@ inout、kCache、vCache 三者必须同为 `float16_t` 或 `bfloat16_t`;cossin �
 
 ### 测试参考
 
-[tests/kernels/rope_and_cache.py](../../../tests/kernels/rope_and_cache.py):以 `use_fp32` 开关分别覆盖 FP32 cossin(默认)与 model-dtype cossin(已废弃)两条路径,fp16/bf16 × (head_dim, rot_dim) ∈ {(64,64), (128,128), (128,64)},batch 8 × seq 10,与 torch 的 NeoX 风格 `apply_rotary_emb` + Q 缩放 + cache 写入对比;另含 MroPE 三路位置交织用例,以及 dim-0 pitched(非连续)cache 回归用例(K/V cache 为 `buf[::2]` 视图,dim-0 stride 为连续 pitch 的两倍,验证按 `slot/block_size*key_cache_stride + slot%block_size*kv_size` 的 stride 寻址)。
+[tests/kernels/rope_and_cache.py](../../../tests/kernels/rope_and_cache.py):以 `use_fp32` 开关分别覆盖 FP32 cossin(默认)与 model-dtype cossin(已废弃)两条路径,fp16/bf16 × (head_dim, rot_dim) ∈ {(64,64), (128,128), (128,64)},batch 8 × seq 10,与 torch 的 NeoX 风格 `apply_rotary_emb` + Q 缩放 + cache 写入对比;另含 MroPE 三路位置交织用例、dim-0 pitched(非连续)cache 回归用例(K/V cache 为 `buf[::2]` 视图,dim-0 stride 为连续 pitch 的两倍,验证按 `slot/block_size*key_cache_stride + slot%block_size*kv_size` 的 stride 寻址),以及 2D MroPE position 非连续/超宽回归用例(pitched 列切片 `[3, 2N][:, :N]` 与列数超出 num_tokens 的 `[3, N+64]` 连续缓冲,验证按 dim-0 跨度定位 h/w 行)。
