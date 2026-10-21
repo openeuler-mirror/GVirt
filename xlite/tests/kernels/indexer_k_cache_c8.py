@@ -42,7 +42,7 @@ def rotation():
     return (h / math.sqrt(HEAD_DIM)).bfloat16()
 
 
-def reference(k, k_norm, k_norm_bias, freqs, positions, norm_eps=NORM_EPS):
+def reference(k, k_norm, k_norm_bias, freqs, positions, device, norm_eps=NORM_EPS):
     """LayerNorm, interleaved RoPE and Hadamard with BF16 output at each stage."""
     norm = F.layer_norm(k[:, :HEAD_DIM].float(), (HEAD_DIM,),
                         k_norm.float(), k_norm_bias.float(), norm_eps).bfloat16()
@@ -51,7 +51,7 @@ def reference(k, k_norm, k_norm_bias, freqs, positions, norm_eps=NORM_EPS):
     real = pairs[..., 0] * trig[..., 0] - pairs[..., 1] * trig[..., 1]
     imag = pairs[..., 1] * trig[..., 0] + pairs[..., 0] * trig[..., 1]
     rope = torch.cat((torch.stack((real, imag), -1).flatten(1).bfloat16(), norm[:, ROPE_DIM:]), 1)
-    return (rope.float() @ rotation().float()).bfloat16()
+    return (rope.to(device) @ rotation().to(device)).cpu()
 
 
 def check_values(k8, scales, rotated, name):
@@ -100,7 +100,8 @@ def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
         assert bool((k_base[[0, -1]] == K_CACHE_FILL).all()), (name, "K guard")
         assert bool((scale_base[[0, -1]] == SCALE_CACHE_FILL).all()), (name, "scale guard")
     ref_freqs = torch.view_as_real(freqs) if freqs.is_complex() else freqs
-    rotated = reference(k[active], k_norm, k_norm_bias, ref_freqs, positions[:len(k)][active], norm_eps)
+    rotated = reference(k[active], k_norm, k_norm_bias, ref_freqs,
+                        positions[:len(k)][active], device, norm_eps)
     check_values(k8[written], scales[written], rotated, name)
     logging.info("indexer_k_cache_c8 %s (%d tokens) passed", name, len(k))
     return k8, scales

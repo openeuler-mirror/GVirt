@@ -105,15 +105,15 @@ UB 布局针对 220 架构 bank group 手工排布(`csrc/kernels/indexer_prepare
 - K 先做 LayerNorm（使用传入的 `norm_eps`），再对前 64 维做交错 RoPE，随后做 Hadamard 和动态量化。结果按 `slot_mapping` 写入缓存，`slot=-1` 跳过。
 - `is_long` 为真时还处理 BF16 `q[T,4096]`：每个 head 做 RoPE、Hadamard 和动态量化，不做 LayerNorm。`kw`、`q` 都只读。
 
-LayerNorm、RoPE 和 Hadamard 的输出分别舍入到 BF16。Hadamard 的七级蝶形用 FP32 计算，归一化系数为 `BF16(1/√128)`。
+LayerNorm、RoPE 和 Hadamard 的输出分别舍入到 BF16。LayerNorm 用 `vsqrt` 和 `vdiv` 计算 `1/√(variance + norm_eps)`。Hadamard 复用 BF16 Matmul，矩阵元素为 `±BF16(1/√128)`。
 
 量化以变换后的每行 128 个元素 `x` 为单位，计算 `amax=max(abs(x))`。`amax!=0` 时，用向量除法计算 `factor=vdiv(127, amax)`，对 `x*factor` 取整后转为 INT8；scale 保存为 `FP16(amax × (1/127))`。`amax==0` 时，量化值和 scale 都写零。
 
 K 写入 INT8 `index_k_cache[B,BS,1,128]` 和 FP16 `k_scale_cache[B,BS,1,1]`，每个 token 一个 scale，短序列也写入两者。`B`、`BS` 分别是 cache block 数和大小。
 长序列还输出 INT8 `q8[T,4096]`、FP16 `q_scale[T,32]` 和 `scaled_weights[T,32]`。每个 Q head 一个 scale，`scaled_weights=FP16(原始头权重 × 已舍入到 FP16 的 Q scale)`，不使用传入的 `scale`。
 
-`indexer_prepare_c8`（`csrc/kernels/indexer_prepare_c8.h`）在一次向量 kernel 启动中处理 K/Q，导出文件为 `csrc/kernels/indexer_prepare_c8_bfloat16_t.cpp`。两条路径共用 `rope_hadamard_quant_c8`，RoPE、Hadamard 和量化的中间结果留在 UB，输出写入 GM。
+Host 的 `RunIndexerPrepareC8` 启动一个 AIC/AIV 融合核：AIV 做 LN/RoPE，AIC 复用 BF16 Matmul 做 Hadamard，AIV 量化并写回。每个 tile 最多处理 32 条 K，或一个 token 的 32 个 Q head；独立 K 入口使用相同流程。
 
-每核的 K、Q 阶段共用 13,952 字节 UB。K 处理结束后，用 `pipe_barrier(PIPE_ALL)` 等待本核流水线完成，再按 `is_long` 决定是否处理 Q。独立 K 测试入口不执行 Q。
+每个 AIV 处理半个 tile，K、Q 共用 69,568 字节 UB。AIC/AIV 通过跨核事件交接 GM 双缓冲。Runtime 复用一份 32 KiB Hadamard 矩阵；`[4,cores,32,128]` BF16 临时空间由内存池分配、归还，并计入 DummyRun，24 个 AIC 时为 768 KiB，不随 token 数继续增长。
 
 Python 接口见 `xlite/_C.pyi`；测试见 `tests/kernels/indexer_k_cache_c8.py` 和 `tests/kernels/indexer_c8.py`。
