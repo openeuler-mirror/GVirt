@@ -58,18 +58,18 @@ stride[0] ≥ 行长"。行距填充(padding)、按 dim 0 抽行(`x[::k]`)、2D 
 
 ## torch 张量包装(csrc/xlite.h `InitXTensor`)
 
-`InitXTensor` 始终转发 torch 张量的 stride,并按调用方声明的策略校验:
+`InitXTensor` 以 torch 的 `is_contiguous()` 作为布局依据先行分流,再按调用方声明的策略处理:
 
-- 默认(`allowPitched = false`):要求 stride 与 `ContiguousStride(shape)` 严格一致,否则抛
-  `std::invalid_argument`,报错信息同时给出实际与期望 stride。torch 的 `is_contiguous()` 对
-  size-1 维的判定比该严格规则宽松,因此不能用它预判包装结果;对 torch 判定为连续但含 size-1
-  维的布局,`.contiguous()` 是空操作,需重新物化(如 `x = x.reshape(-1).reshape(x.shape)`)。
-- numel == 0 的张量不校验 stride,直接按连续布局包装:torch 对含 0 尺寸维的形状给出的规范
-  stride(0 尺寸维按 1 钳位)永远无法匹配行主序布局,而空张量不含数据。
-- `allowPitched = true`(cache 包装与调试输出):接受合法的 dim-0 行距(不重叠、高维连续),
-  其余布局仍抛错。负 stride/负 size 一律抛错。
+- torch 判定为连续的张量(含 size-1 维步长偏差——size-1 维的 stride 不参与元素寻址,内存
+  布局仍与行主序逐字节一致)以及 numel == 0 的张量,直接按连续布局包装,不转发 stride。
+- 其余非连续张量在默认(`allowPitched = false`)下抛 `std::invalid_argument`,报错信息同时
+  给出实际与期望 stride,补救为 `.contiguous()`(此处 torch 已判定非连续,`.contiguous()`
+  必然重新物化)。
+- `allowPitched = true`(cache 包装与调试输出):将 torch stride 转发给 `XTensor::Init` 校验,
+  接受合法的 dim-0 行距(不重叠、高维连续),其余布局仍抛错。负 stride/负 size 一律抛错。
 
 ## 测试参考
 
-- [tests/funcs/stride.py](../../tests/funcs/stride.py):Print 的 stride 语义、包装期拒绝规则
-  (transpose/内层切片/expand/size-1 维特例),以及非 cache 入口的连续性守卫的功能测试。
+- [tests/funcs/stride.py](../../tests/funcs/stride.py):Print 的 stride 语义、size-1 维张量的
+  连续包装、包装期拒绝规则(transpose/内层切片/expand),以及非 cache 入口的连续性守卫的
+  功能测试。

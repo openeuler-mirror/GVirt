@@ -48,66 +48,74 @@ inline void *TensorPtr(const torch::Tensor &t)
                                     t.storage_offset() * t.dtype().itemsize());
 }
 
-// Wrap a torch tensor as an XTensor. The layout must be exactly contiguous (torch's
-// is_contiguous() is looser around size-1 dims, so the strides are checked directly);
-// callers must .contiguous() anything else. Zero-element tensors carry no data and are
-// wrapped as contiguous regardless of stride. allowPitched additionally accepts a dim-0
-// row pitch for consumers that address memory through stride[0]: kv caches
-// (MHA/GQA/MLA/DSA/CXA) and debug output (Print/Save).
-inline void InitXTensor(XTensor &out, const torch::Tensor &in, bool allowPitched = false)
+/**
+ * Effects: Initializes out to wrap in (shape, dtype, data pointer). A torch-contiguous or
+ *   empty in yields a contiguous out; any other in needs allowPitched, which forwards
+ *   torch's strides for a dim-0 row pitch check.
+ * Throws: std::invalid_argument if allowPitched is false and in is non-contiguous, or the
+ *   strides are not a valid dim-0 pitch; std::runtime_error on a negative size/stride or
+ *   an unknown dtype. All messages are prefixed with loc.
+ * Remarks: in's storage must outlive out. See doc/developer_guide/xtensor.md for the
+ *   layout policy and its consumers.
+ */
+inline void InitXTensor(XTensor &out, const torch::Tensor &in, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
+                        bool allowPitched = false)
 {
-    auto sizesVec = in.sizes().vec();
-    std::vector<size_t> sizes;
-    sizes.reserve(sizesVec.size());
+    try {
+        auto sizesVec = in.sizes().vec();
+        std::vector<size_t> sizes;
+        sizes.reserve(sizesVec.size());
 
-    for (auto s : sizesVec) {
-        if (s < 0) {
-            throw std::runtime_error("Negative size detected: " + std::to_string(s));
+        for (auto s : sizesVec) {
+            if (s < 0) {
+                throw std::runtime_error("Negative size detected: " + std::to_string(s));
+            }
+            sizes.push_back(static_cast<size_t>(s));
         }
-        sizes.push_back(static_cast<size_t>(s));
-    }
 
-    auto stridesVec = in.strides().vec();
-    std::vector<size_t> strides;
-    strides.reserve(stridesVec.size());
-
-    for (auto s : stridesVec) {
-        if (s < 0) {
-            throw std::runtime_error("Negative stride detected: " + std::to_string(s));
+        if (in.numel() == 0 || in.is_contiguous()) {
+            out.Init(sizes, XDtypeOf(in), TensorPtr(in));
+            return;
         }
-        strides.push_back(static_cast<size_t>(s));
-    }
 
-    if (in.numel() == 0) {
-        out.Init(sizes, XDtypeOf(in), TensorPtr(in));
-        return;
-    }
-    auto contigStride = ContiguousStride(sizes);
-    if (!allowPitched && strides != contigStride) {
-        std::string strideStr, contigStr;
-        for (size_t i = 0; i < strides.size(); i++) {
-            strideStr += (i == 0 ? "" : ", ") + std::to_string(strides[i]);
-            contigStr += (i == 0 ? "" : ", ") + std::to_string(contigStride[i]);
+        auto stridesVec = in.strides().vec();
+        std::vector<size_t> strides;
+        strides.reserve(stridesVec.size());
+        for (auto s : stridesVec) {
+            if (s < 0) {
+                throw std::runtime_error("Negative stride detected: " + std::to_string(s));
+            }
+            strides.push_back(static_cast<size_t>(s));
         }
-        // torch's is_contiguous() accepts size-1-dim layouts this check rejects, and
-        // .contiguous() is a no-op for those, so the remedy is to re-materialize.
-        std::string remedy = in.is_contiguous()
-                                 ? "torch reports it contiguous (size-1 dims); re-materialize it, "
-                                   "e.g. x = x.reshape(-1).reshape(x.shape)"
-                                 : "call .contiguous() first";
-        throw std::invalid_argument(
-            std::string(__func__) +
-            ": torch tensor must be contiguous for this operation: stride [" + strideStr +
-            "] does not match the row-major layout [" + contigStr + "]; " + remedy);
+
+        if (!allowPitched) {
+            // Only torch-non-contiguous tensors reach here (numel > 0), so the wrap must
+            // fail; report both strides to help the caller diagnose.
+            auto contigStride = ContiguousStride(sizes);
+            std::string strideStr, contigStr, shapeStr;
+            for (size_t i = 0; i < strides.size(); i++) {
+                strideStr += (i == 0 ? "" : ", ") + std::to_string(strides[i]);
+                contigStr += (i == 0 ? "" : ", ") + std::to_string(contigStride[i]);
+                shapeStr += (i == 0 ? "" : ", ") + std::to_string(sizes[i]);
+            }
+            throw std::invalid_argument(
+                "torch tensor must be contiguous for this operation: tensor stride [" + strideStr +
+                "] does not match the row-major layout [" + contigStr + "] for tensor shape [" +
+                shapeStr + "]; call .contiguous() first.");
+        }
+        out.Init(sizes, XDtypeOf(in), TensorPtr(in), std::move(strides));
+    } catch (const std::invalid_argument &e) {
+        throw std::invalid_argument(loc.ToStr() + std::string(__func__) + ": " + e.what());
+    } catch (const std::runtime_error &e) {
+        throw std::runtime_error(loc.ToStr() + std::string(__func__) + ": " + e.what());
     }
-    out.Init(sizes, XDtypeOf(in), TensorPtr(in), std::move(strides));
 }
 
 inline void InitXTensor(XTensor &out, const std::optional<torch::Tensor> &in,
-                        bool allowPitched = false)
+                        DebugSrcLoc loc = UNKNOWN_DBG_LOC, bool allowPitched = false)
 {
     if (in) {
-        InitXTensor(out, *in, allowPitched);
+        InitXTensor(out, *in, loc, allowPitched);
     }
 }
 

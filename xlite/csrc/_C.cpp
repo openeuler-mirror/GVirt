@@ -239,10 +239,10 @@ static bool TensorUsable(const at::Tensor &t)
     return t.defined() && t.numel() > 0;
 }
 
-static void InitOptionalXTensor(XTensor &out, at::Tensor &in)
+static void InitOptionalXTensor(XTensor &out, at::Tensor &in, DebugSrcLoc loc)
 {
     if (TensorUsable(in)) {
-        InitXTensor(out, in);
+        InitXTensor(out, in, loc);
     }
 }
 
@@ -524,23 +524,23 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
     _model = new XModel(c, rankId);
 
-    InitXTensor(_model->embed, embed);
-    InitXTensor(_model->norm, norm);
-    InitXTensor(_model->head, head);
+    InitXTensor(_model->embed, embed, DBG_LOC);
+    InitXTensor(_model->norm, norm, DBG_LOC);
+    InitXTensor(_model->head, head, DBG_LOC);
     if (normBias.defined()) {
-        InitXTensor(_model->normBias, normBias);
+        InitXTensor(_model->normBias, normBias, DBG_LOC);
     }
 
     std::vector<uint32_t> layerTypes = ResolveLayerTypes(c);
     for (uint32_t i = 0; i < c.nLayers; i++) {
-        InitXTensor(_model->attnNorm[i], attnNorm[i]);
+        InitXTensor(_model->attnNorm[i], attnNorm[i], DBG_LOC);
         if (!attnNormBias.empty()) {
-            InitXTensor(_model->attnNormBias[i], attnNormBias[i]);
+            InitXTensor(_model->attnNormBias[i], attnNormBias[i], DBG_LOC);
         }
         if (!mlpNormBias.empty()) {
-            InitXTensor(_model->mlpNormBias[i], mlpNormBias[i]);
+            InitXTensor(_model->mlpNormBias[i], mlpNormBias[i], DBG_LOC);
         }
-        InitXTensor(_model->mlpNorm[i], mlpNorm[i]);
+        InitXTensor(_model->mlpNorm[i], mlpNorm[i], DBG_LOC);
 
         bool isFullLayer = IsConfigLayerFullAttention(c, i, layerTypes);
         if (c.attnType == XMODEL_ATTN_HYBRID) {
@@ -551,16 +551,16 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitMatmulWeight("mhaQKV", mhaQKV, mhaQKVInputScale, mhaQKVInputOffset,
                                  mhaQKVQuantBias, mhaQKVDeqScale, _model->mhaQKV, i, false, tpRank);
                 if (c.addBias) {
-                    InitOptionalXTensor(_model->mhaQKVBias[i], mhaQKVBias[i]);
+                    InitOptionalXTensor(_model->mhaQKVBias[i], mhaQKVBias[i], DBG_LOC);
                 }
                 if (c.qkNorm) {
-                    InitOptionalXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
-                    InitOptionalXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
+                    InitOptionalXTensor(_model->mhaQNorm[i], mhaQNorm[i], DBG_LOC);
+                    InitOptionalXTensor(_model->mhaKNorm[i], mhaKNorm[i], DBG_LOC);
                     if (!mhaQNormBias.empty()) {
-                        InitOptionalXTensor(_model->mhaQNormBias[i], mhaQNormBias[i]);
+                        InitOptionalXTensor(_model->mhaQNormBias[i], mhaQNormBias[i], DBG_LOC);
                     }
                     if (!mhaKNormBias.empty()) {
-                        InitOptionalXTensor(_model->mhaKNormBias[i], mhaKNormBias[i]);
+                        InitOptionalXTensor(_model->mhaKNormBias[i], mhaKNormBias[i], DBG_LOC);
                     }
                 }
             } else {
@@ -579,10 +579,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitMatmulWeight("linearInProjA", linearInProjA, mhaQKVInputScale,
                                  mhaQKVInputOffset, mhaQKVQuantBias, mhaQKVDeqScale,
                                  _model->linearInProjA, i, false, tpRank);
-                InitOptionalXTensor(_model->linearConv1d[i], linearConv1d[i]);
-                InitOptionalXTensor(_model->linearALog[i], linearALog[i]);
-                InitOptionalXTensor(_model->linearDtBias[i], linearDtBias[i]);
-                InitOptionalXTensor(_model->linearNorm[i], linearNorm[i]);
+                InitOptionalXTensor(_model->linearConv1d[i], linearConv1d[i], DBG_LOC);
+                InitOptionalXTensor(_model->linearALog[i], linearALog[i], DBG_LOC);
+                InitOptionalXTensor(_model->linearDtBias[i], linearDtBias[i], DBG_LOC);
+                InitOptionalXTensor(_model->linearNorm[i], linearNorm[i], DBG_LOC);
             }
         } else {
             if (c.attnType == XMODEL_ATTN_MLA) {
@@ -594,15 +594,15 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                                  tpRank);
                 InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
                                  mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
-                InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+                InitXTensor(_model->mlaQNorm[i], mlaQNorm[i], DBG_LOC);
                 if (!mlaQNormBias.empty()) {
-                    InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
+                    InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i], DBG_LOC);
                 }
-                InitXTensor(_model->mlaWUV[i], mlaWUV[i]);
-                InitXTensor(_model->mlaWUKT[i], mlaWUKT[i]);
-                InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+                InitXTensor(_model->mlaWUV[i], mlaWUV[i], DBG_LOC);
+                InitXTensor(_model->mlaWUKT[i], mlaWUKT[i], DBG_LOC);
+                InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i], DBG_LOC);
                 if (!mlaKVNormBias.empty()) {
-                    InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
+                    InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i], DBG_LOC);
                 }
             } else if (c.attnType == XMODEL_ATTN_MHA) {
                 InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
@@ -611,16 +611,16 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitMatmulWeight("mhaQKV", mhaQKV, mhaQKVInputScale, mhaQKVInputOffset,
                                  mhaQKVQuantBias, mhaQKVDeqScale, _model->mhaQKV, i, false, tpRank);
                 if (c.addBias) {
-                    InitXTensor(_model->mhaQKVBias[i], mhaQKVBias[i]);
+                    InitXTensor(_model->mhaQKVBias[i], mhaQKVBias[i], DBG_LOC);
                 }
                 if (c.qkNorm) {
-                    InitXTensor(_model->mhaQNorm[i], mhaQNorm[i]);
-                    InitXTensor(_model->mhaKNorm[i], mhaKNorm[i]);
+                    InitXTensor(_model->mhaQNorm[i], mhaQNorm[i], DBG_LOC);
+                    InitXTensor(_model->mhaKNorm[i], mhaKNorm[i], DBG_LOC);
                     if (!mhaQNormBias.empty()) {
-                        InitXTensor(_model->mhaQNormBias[i], mhaQNormBias[i]);
+                        InitXTensor(_model->mhaQNormBias[i], mhaQNormBias[i], DBG_LOC);
                     }
                     if (!mhaKNormBias.empty()) {
-                        InitXTensor(_model->mhaKNormBias[i], mhaKNormBias[i]);
+                        InitXTensor(_model->mhaKNormBias[i], mhaKNormBias[i], DBG_LOC);
                     }
                 }
             } else if (c.attnType == XMODEL_ATTN_DSA) {
@@ -632,24 +632,24 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                                  tpRank);
                 InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
                                  mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
-                InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+                InitXTensor(_model->mlaQNorm[i], mlaQNorm[i], DBG_LOC);
                 if (!mlaQNormBias.empty()) {
-                    InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
+                    InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i], DBG_LOC);
                 }
-                InitXTensor(_model->mlaWUV[i], mlaWUV[i]);
-                InitXTensor(_model->mlaWUKT[i], mlaWUKT[i]);
-                InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+                InitXTensor(_model->mlaWUV[i], mlaWUV[i], DBG_LOC);
+                InitXTensor(_model->mlaWUKT[i], mlaWUKT[i], DBG_LOC);
+                InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i], DBG_LOC);
                 if (!mlaKVNormBias.empty()) {
-                    InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
+                    InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i], DBG_LOC);
                 }
                 // DSA top-k sharing: skip indexer weight binding on shared layers.
                 if (i >= c.indexFullMask.size() || c.indexFullMask[i]) {
                     InitMatmulWeight("indexQB", indexQB, indexQBInputScale, indexQBInputOffset,
                                      indexQBQuantBias, indexQBDeqScale, _model->indexQB, i, false,
                                      tpRank);
-                    InitXTensor(_model->indexKWeightsProj[i], indexKWeightsProj[i]);
-                    InitXTensor(_model->indexKNorm[i], indexKNorm[i]);
-                    InitXTensor(_model->indexKNormBias[i], indexKNormBias[i]);
+                    InitXTensor(_model->indexKWeightsProj[i], indexKWeightsProj[i], DBG_LOC);
+                    InitXTensor(_model->indexKNorm[i], indexKNorm[i], DBG_LOC);
+                    InitXTensor(_model->indexKNormBias[i], indexKNormBias[i], DBG_LOC);
                 }
             } else if (c.attnType == XMODEL_ATTN_CXA) {
                 InitMatmulWeight("attnWqA", attnWqA, attnWqAInputScale, attnWqAInputOffset,
@@ -662,41 +662,41 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
                                  mlaQBDeqScale, _model->mlaQB, i, false, tpRank);
                 // q_norm/kv_norm reuse MLA's mlaQNorm/mlaKVNorm fields.
-                InitXTensor(_model->mlaQNorm[i], mlaQNorm[i]);
+                InitXTensor(_model->mlaQNorm[i], mlaQNorm[i], DBG_LOC);
                 if (!mlaQNormBias.empty()) {
-                    InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i]);
+                    InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i], DBG_LOC);
                 }
-                InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i]);
+                InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i], DBG_LOC);
                 if (!mlaKVNormBias.empty()) {
-                    InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i]);
+                    InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i], DBG_LOC);
                 }
                 // v4 attention output projection (replaces v3 attnOut).
-                InitXTensor(_model->attnWoA[i], attnWoA[i]);
-                InitXTensor(_model->attnWoB[i], attnWoB[i]);
-                InitXTensor(_model->attnSink[i], attnSink[i]);
+                InitXTensor(_model->attnWoA[i], attnWoA[i], DBG_LOC);
+                InitXTensor(_model->attnWoB[i], attnWoB[i], DBG_LOC);
+                InitXTensor(_model->attnSink[i], attnSink[i], DBG_LOC);
                 // Compressor (per-layer; may be empty when compress_ratio == 0).
-                InitOptionalXTensor(_model->compWKv[i], compWKv[i]);
-                InitOptionalXTensor(_model->compWGate[i], compWGate[i]);
-                InitOptionalXTensor(_model->compApe[i], compApe[i]);
-                InitOptionalXTensor(_model->compNorm[i], compNorm[i]);
+                InitOptionalXTensor(_model->compWKv[i], compWKv[i], DBG_LOC);
+                InitOptionalXTensor(_model->compWGate[i], compWGate[i], DBG_LOC);
+                InitOptionalXTensor(_model->compApe[i], compApe[i], DBG_LOC);
+                InitOptionalXTensor(_model->compNorm[i], compNorm[i], DBG_LOC);
                 // Indexer's weights (only on compress_ratio==4 layers)
                 if (c.compressRatios[i] == 4) {
                     InitMatmulWeight("idxWqB", idxWqB, idxWqBInputScale, idxWqBInputOffset,
                                      idxWqBQuantBias, idxWqBDeqScale, _model->idxWqB, i, false,
                                      tpRank);
-                    InitXTensor(_model->idxWeightsProj[i], idxWeightsProj[i]);
-                    InitXTensor(_model->idxCompWKv[i], idxCompWKv[i]);
-                    InitXTensor(_model->idxCompWGate[i], idxCompWGate[i]);
-                    InitXTensor(_model->idxCompApe[i], idxCompApe[i]);
-                    InitXTensor(_model->idxCompNorm[i], idxCompNorm[i]);
+                    InitXTensor(_model->idxWeightsProj[i], idxWeightsProj[i], DBG_LOC);
+                    InitXTensor(_model->idxCompWKv[i], idxCompWKv[i], DBG_LOC);
+                    InitXTensor(_model->idxCompWGate[i], idxCompWGate[i], DBG_LOC);
+                    InitXTensor(_model->idxCompApe[i], idxCompApe[i], DBG_LOC);
+                    InitXTensor(_model->idxCompNorm[i], idxCompNorm[i], DBG_LOC);
                 }
                 // MHC (per-layer).
-                InitXTensor(_model->hcAttnFn[i], hcAttnFn[i]);
-                InitXTensor(_model->hcFfnFn[i], hcFfnFn[i]);
-                InitXTensor(_model->hcAttnBase[i], hcAttnBase[i]);
-                InitXTensor(_model->hcFfnBase[i], hcFfnBase[i]);
-                InitXTensor(_model->hcAttnScale[i], hcAttnScale[i]);
-                InitXTensor(_model->hcFfnScale[i], hcFfnScale[i]);
+                InitXTensor(_model->hcAttnFn[i], hcAttnFn[i], DBG_LOC);
+                InitXTensor(_model->hcFfnFn[i], hcFfnFn[i], DBG_LOC);
+                InitXTensor(_model->hcAttnBase[i], hcAttnBase[i], DBG_LOC);
+                InitXTensor(_model->hcFfnBase[i], hcFfnBase[i], DBG_LOC);
+                InitXTensor(_model->hcAttnScale[i], hcAttnScale[i], DBG_LOC);
+                InitXTensor(_model->hcFfnScale[i], hcFfnScale[i], DBG_LOC);
             }
         }
     }
@@ -716,20 +716,20 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     }
 
     for (uint32_t i = c.nDenseLayers; i < c.nLayers; i++) {
-        InitXTensor(_model->moeGate[i], moeGate[i - c.nDenseLayers]);
+        InitXTensor(_model->moeGate[i], moeGate[i - c.nDenseLayers], DBG_LOC);
         if (i - c.nDenseLayers < log2phy.size()) {
-            InitOptionalXTensor(_model->log2phy[i], log2phy[i - c.nDenseLayers]);
+            InitOptionalXTensor(_model->log2phy[i], log2phy[i - c.nDenseLayers], DBG_LOC);
         }
         if (c.scoringFunc == XMODEL_SCORING_FUNC_SIGMOID) {
-            InitXTensor(_model->moeGateBias[i], moeGateBias[i - c.nDenseLayers]);
+            InitXTensor(_model->moeGateBias[i], moeGateBias[i - c.nDenseLayers], DBG_LOC);
         }
         if (c.scoringFunc == XMODEL_SCORING_FUNC_SQRTSOFTPLUS) {
-            InitOptionalXTensor(_model->moeGateBias[i], moeGateBias[i - c.nDenseLayers]);
+            InitOptionalXTensor(_model->moeGateBias[i], moeGateBias[i - c.nDenseLayers], DBG_LOC);
         }
         if (c.scoringFunc == XMODEL_SCORING_FUNC_SQRTSOFTPLUS &&
             i < c.nDenseLayers + c.nHashLayers) {
             InitOptionalXTensor(_model->moeTid2Eid[i - c.nDenseLayers],
-                                moeTid2Eid[i - c.nDenseLayers]);
+                                moeTid2Eid[i - c.nDenseLayers], DBG_LOC);
         }
         std::vector<at::Tensor> emptyWeights = {};
         if (c.nSharedExperts != 0) {
@@ -740,13 +740,13 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                              moeSEDownDeqScale, _model->moeSEDown, i, true, tpRank, c.nDenseLayers);
             uint32_t seIdx = i - c.nDenseLayers;
             if (seIdx < moeSEGate.size()) {
-                InitOptionalXTensor(_model->moeSEGate[i], moeSEGate[seIdx]);
+                InitOptionalXTensor(_model->moeSEGate[i], moeSEGate[seIdx], DBG_LOC);
             }
         }
 
         for (uint32_t j = expertsStartIdx; j < expertsEndIdx; j++) {
-            InitXTensor(_model->moeREUpGate[i][j], moeREUpGate[idx]);
-            InitXTensor(_model->moeREDown[i][j], moeREDown[idx]);
+            InitXTensor(_model->moeREUpGate[i][j], moeREUpGate[idx], DBG_LOC);
+            InitXTensor(_model->moeREDown[i][j], moeREDown[idx], DBG_LOC);
             // for w4a8 quantization: weights will arrive as int4pack (int32 dtype)
             if (_model->moeREUpGate[i][j].dtype == INT32) {
                 _model->moeREUpGate[i][j].View(INT4);
@@ -755,25 +755,25 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 _model->moeREDown[i][j].View(INT4);
             }
             if (!moeREUpGateDeqScale.empty()) {
-                InitXTensor(_model->moeREUpGateDeqScale[i][j], moeREUpGateDeqScale[idx]);
+                InitXTensor(_model->moeREUpGateDeqScale[i][j], moeREUpGateDeqScale[idx], DBG_LOC);
             }
             if (!moeREDownDeqScale.empty()) {
-                InitXTensor(_model->moeREDownDeqScale[i][j], moeREDownDeqScale[idx]);
+                InitXTensor(_model->moeREDownDeqScale[i][j], moeREDownDeqScale[idx], DBG_LOC);
             }
             if (!moeREUpGateScaleBias.empty()) {
-                InitXTensor(_model->moeREUpGateScaleBias[i][j], moeREUpGateScaleBias[idx]);
+                InitXTensor(_model->moeREUpGateScaleBias[i][j], moeREUpGateScaleBias[idx], DBG_LOC);
             }
             if (!moeREDownScaleBias.empty()) {
-                InitXTensor(_model->moeREDownScaleBias[i][j], moeREDownScaleBias[idx]);
+                InitXTensor(_model->moeREDownScaleBias[i][j], moeREDownScaleBias[idx], DBG_LOC);
             }
             idx++;
         }
     }
 
     if (c.attnType == XMODEL_ATTN_CXA) {
-        InitXTensor(_model->hcHeadFn, hcHeadFn);
-        InitXTensor(_model->hcHeadBase, hcHeadBase);
-        InitXTensor(_model->hcHeadScale, hcHeadScale);
+        InitXTensor(_model->hcHeadFn, hcHeadFn, DBG_LOC);
+        InitXTensor(_model->hcHeadBase, hcHeadBase, DBG_LOC);
+        InitXTensor(_model->hcHeadScale, hcHeadScale, DBG_LOC);
     }
 
     _model->Init();
@@ -813,11 +813,11 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     std::vector<XTensor> _freqsCis;
     aclrtStream currAclStream = nullptr;
 
-    InitXTensor(_input, input);
-    InitXTensor(_output, output);
+    InitXTensor(_input, input, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
     _freqsCis.resize(freqsCis.size());
     for (size_t i = 0; i < freqsCis.size(); i++) {
-        InitXTensor(_freqsCis[i], freqsCis[i]);
+        InitXTensor(_freqsCis[i], freqsCis[i], DBG_LOC);
     }
 
     if (kvCache.size() < _kv.size()) {
@@ -843,7 +843,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
-            InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
+            InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
         }
     }
 
@@ -886,7 +886,7 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
-    InitXTensor(_attnMeta.position, attnMeta.positions);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
     std::vector<at::Tensor> freqsCisVec = {freqsCis};
     Forward(rt, input, _attnMeta, kvCache, freqsCisVec, output, currStream);
 }
@@ -900,17 +900,17 @@ void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
-    InitXTensor(_attnMeta.position, attnMeta.positions);
-    InitXTensor(_attnMeta.lens, attnMeta.lens);
-    InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens);
-    InitXTensor(_attnMeta.queryStartLoc, attnMeta.queryStartLoc);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
+    InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
+    InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
+    InitXTensor(_attnMeta.queryStartLoc, attnMeta.queryStartLoc, DBG_LOC);
     _attnMeta.slotMapping.resize(attnMeta.slotMapping.size());
     for (size_t i = 0; i < attnMeta.slotMapping.size(); i++) {
-        InitXTensor(_attnMeta.slotMapping[i], attnMeta.slotMapping[i]);
+        InitXTensor(_attnMeta.slotMapping[i], attnMeta.slotMapping[i], DBG_LOC);
     }
     _attnMeta.blockTables.resize(attnMeta.blockTables.size());
     for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
-        InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i]);
+        InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i], DBG_LOC);
     }
     Forward(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
@@ -925,17 +925,17 @@ void _CModel::ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
-    InitXTensor(_attnMeta.position, attnMeta.positions);
-    InitXTensor(_attnMeta.lens, attnMeta.lens);
-    InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens);
-    InitXTensor(_attnMeta.queryStartLoc, attnMeta.queryStartLoc);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
+    InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
+    InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
+    InitXTensor(_attnMeta.queryStartLoc, attnMeta.queryStartLoc, DBG_LOC);
     _attnMeta.slotMapping.resize(attnMeta.slotMapping.size());
     for (size_t i = 0; i < attnMeta.slotMapping.size(); i++) {
-        InitXTensor(_attnMeta.slotMapping[i], attnMeta.slotMapping[i]);
+        InitXTensor(_attnMeta.slotMapping[i], attnMeta.slotMapping[i], DBG_LOC);
     }
     _attnMeta.blockTables.resize(attnMeta.blockTables.size());
     for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
-        InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i]);
+        InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i], DBG_LOC);
     }
     ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCis, indices, output, currStream);
 }
@@ -952,17 +952,17 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
-    InitXTensor(_attnMeta.position, attnMeta.positions);
-    InitXTensor(_attnMeta.lens, attnMeta.lens);
-    InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens);
-    InitXTensor(_attnMeta.queryStartLoc, attnMeta.queryStartLoc);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
+    InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
+    InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
+    InitXTensor(_attnMeta.queryStartLoc, attnMeta.queryStartLoc, DBG_LOC);
     _attnMeta.slotMapping.resize(attnMeta.slotMapping.size());
     for (size_t i = 0; i < attnMeta.slotMapping.size(); i++) {
-        InitXTensor(_attnMeta.slotMapping[i], attnMeta.slotMapping[i]);
+        InitXTensor(_attnMeta.slotMapping[i], attnMeta.slotMapping[i], DBG_LOC);
     }
     _attnMeta.blockTables.resize(attnMeta.blockTables.size());
     for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
-        InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i]);
+        InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i], DBG_LOC);
     }
     at::Tensor ids = inputIds.value_or(at::Tensor());
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
@@ -978,7 +978,7 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
 {
     std::vector<XTensor> auxXs(auxOutputs.size());
     for (size_t i = 0; i < auxOutputs.size(); i++) {
-        InitXTensor(auxXs[i], auxOutputs[i]);
+        InitXTensor(auxXs[i], auxOutputs[i], DBG_LOC);
     }
     struct AuxGuard {
         XModel *m;
@@ -998,9 +998,9 @@ void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indi
     XTensor _input, _indices, _output;
     aclrtStream currAclStream = nullptr;
 
-    InitXTensor(_input, input);
-    InitXTensor(_indices, indices);
-    InitXTensor(_output, output);
+    InitXTensor(_input, input, DBG_LOC);
+    InitXTensor(_indices, indices, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
 
     if (input.size(0) == 0) {
         return;
@@ -1029,12 +1029,12 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
     std::vector<XTensor> _freqsCis;
     aclrtStream currAclStream = nullptr;
 
-    InitXTensor(_input, input);
-    InitXTensor(_indices, indices);
-    InitXTensor(_output, output);
+    InitXTensor(_input, input, DBG_LOC);
+    InitXTensor(_indices, indices, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
     _freqsCis.resize(freqsCis.size());
     for (size_t i = 0; i < freqsCis.size(); i++) {
-        InitXTensor(_freqsCis[i], freqsCis[i]);
+        InitXTensor(_freqsCis[i], freqsCis[i], DBG_LOC);
     }
 
     if (kvCache.size() != _kv.size()) {
@@ -1056,7 +1056,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
         bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
-            InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
+            InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
         }
     }
 
@@ -1101,7 +1101,7 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnM
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
-    InitXTensor(_attnMeta.position, attnMeta.positions);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
     std::vector<at::Tensor> freqsCisVec = {freqsCis};
     ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCisVec, indices, output, currStream);
 }
@@ -1115,10 +1115,10 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
     XTensor _input, _output, _freqsCis, _inputIds;
     aclrtStream currAclStream = nullptr;
 
-    InitXTensor(_input, input);
-    InitXTensor(_output, output);
-    InitXTensor(_freqsCis, freqsCis);
-    InitOptionalXTensor(_inputIds, inputIds);
+    InitXTensor(_input, input, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
+    InitXTensor(_freqsCis, freqsCis, DBG_LOC);
+    InitOptionalXTensor(_inputIds, inputIds, DBG_LOC);
 
     if (kvCache.size() != _kv.size()) {
         throw std::runtime_error(std::string(__func__) + ": check kv cache failed!");
@@ -1147,12 +1147,12 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
-            InitXTensor(_kv[i][j], kvCache[i][j], /*allowPitched=*/allowPitch);
+            InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
         }
     }
 
     for (uint32_t i = 0; i < deepstackInput.size(); i++) {
-        InitXTensor(_deepstackInputEmbeds[i], deepstackInput[i]);
+        InitXTensor(_deepstackInputEmbeds[i], deepstackInput[i], DBG_LOC);
     }
 
     if (currStream != 0 && rt.taskId == 0) {
@@ -1198,7 +1198,7 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
-    InitXTensor(_attnMeta.position, attnMeta.positions);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
     at::Tensor ids = inputIds.value_or(at::Tensor());
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
                             deepstackInput, ids);
@@ -1213,7 +1213,7 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
 {
     std::vector<XTensor> auxXs(auxOutputs.size());
     for (size_t i = 0; i < auxOutputs.size(); i++) {
-        InitXTensor(auxXs[i], auxOutputs[i]);
+        InitXTensor(auxXs[i], auxOutputs[i], DBG_LOC);
     }
     struct AuxGuard {
         XModel *m;
@@ -1234,7 +1234,7 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
 {
     std::vector<XTensor> auxXs(auxOutputs.size());
     for (size_t i = 0; i < auxOutputs.size(); i++) {
-        InitXTensor(auxXs[i], auxOutputs[i]);
+        InitXTensor(auxXs[i], auxOutputs[i], DBG_LOC);
     }
     struct AuxGuard {
         XModel *m;
@@ -1254,7 +1254,7 @@ void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnM
 {
     std::vector<XTensor> auxXs(auxOutputs.size());
     for (size_t i = 0; i < auxOutputs.size(); i++) {
-        InitXTensor(auxXs[i], auxOutputs[i]);
+        InitXTensor(auxXs[i], auxOutputs[i], DBG_LOC);
     }
     struct AuxGuard {
         XModel *m;
@@ -1286,7 +1286,7 @@ void _CModel::InitMatmulWeight(const std::string &name, std::vector<at::Tensor> 
         throw std::invalid_argument(DBG_PREFIX + ": " + wXT.name +
                                     " weight tensor is required but not provided");
     }
-    InitXTensor(wXT.weight, w[weightLayer]);
+    InitXTensor(wXT.weight, w[weightLayer], DBG_LOC);
     if (wXT.weight.dtype ==
         INT32) {  // for int4 matmul: weights will arrive as int4pack (int32 dtype)
         wXT.weight.View(INT4);
@@ -1298,17 +1298,17 @@ void _CModel::InitMatmulWeight(const std::string &name, std::vector<at::Tensor> 
         throw std::invalid_argument(errStr);
     }
     if (weightLayer < iScale.size()) {
-        InitXTensor(wXT.inputScale, iScale[weightLayer]);
+        InitXTensor(wXT.inputScale, iScale[weightLayer], DBG_LOC);
     }
     if (weightLayer < iOffset.size()) {
-        InitXTensor(wXT.inputOffset, iOffset[weightLayer]);
+        InitXTensor(wXT.inputOffset, iOffset[weightLayer], DBG_LOC);
     }
     // Notice: only tpRank == 0 in RowParallelLinear need to add quant_bias
     if (weightLayer < qBias.size() && (!isRowParallel || tpRank == 0)) {
-        InitXTensor(wXT.quantBias, qBias[weightLayer]);
+        InitXTensor(wXT.quantBias, qBias[weightLayer], DBG_LOC);
     }
     if (weightLayer < dScale.size()) {
-        InitXTensor(wXT.deqScale, dScale[weightLayer]);
+        InitXTensor(wXT.deqScale, dScale[weightLayer], DBG_LOC);
     }
 }
 
@@ -1316,8 +1316,8 @@ void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType 
 {
     XTensor _in, _out;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
 
     enum commType type = commType == 1 ? DP : TP;
     XliteOpAllGather(rt, _in, _out, type, type == DP, DBG_LOC);
@@ -1328,8 +1328,8 @@ void ReduceScatter(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commT
 {
     XTensor _in, _out;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
 
     enum commType type = commType == 1 ? DP : TP;
     XliteOpReduceScatter(rt, _in, _out, type, type == DP, DBG_LOC);
@@ -1340,8 +1340,8 @@ void AllReduce(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType 
 {
     XTensor _in, _out;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
 
     enum commType type = commType == 1 ? DP : TP;
     XliteOpAllReduceSum(rt, _in, _out, type, type == DP, DBG_LOC);
@@ -1354,12 +1354,12 @@ void AlltoAllV(XRuntime &rt, at::Tensor &out, at::Tensor &in, at::Tensor &sendCo
 {
     XTensor _in, _out, _sendCounts, _recvCounts, _sdispls, _rdispls;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
-    InitXTensor(_sendCounts, sendCounts);
-    InitXTensor(_recvCounts, recvCounts);
-    InitXTensor(_sdispls, sdispls);
-    InitXTensor(_rdispls, rdispls);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_sendCounts, sendCounts, DBG_LOC);
+    InitXTensor(_recvCounts, recvCounts, DBG_LOC);
+    InitXTensor(_sdispls, sdispls, DBG_LOC);
+    InitXTensor(_rdispls, rdispls, DBG_LOC);
 
     enum commType type = TP;
     if (commType == 1) {
@@ -1375,9 +1375,9 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
 {
     XTensor _x, _y, _z;
 
-    InitXTensor(_x, x);
-    InitXTensor(_y, y);
-    InitXTensor(_z, z);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_y, y, DBG_LOC);
+    InitXTensor(_z, z, DBG_LOC);
     XliteOpAdd(rt, _x, _y, _z);
     rt.Synchronize();
 }
@@ -1386,7 +1386,8 @@ void Print(at::Tensor &x, const char *name, uint32_t nRow, uint32_t nCol)
 {
     XTensor _x;
 
-    InitXTensor(_x, x, /*allowPitched=*/true);  // debug output reads pitched layouts correctly
+    // debug output reads pitched layouts correctly
+    InitXTensor(_x, x, DBG_LOC, /*allowPitched=*/true);
     _x.Print(name, nRow, nCol);
 }
 
@@ -1395,9 +1396,9 @@ void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weig
 {
     XTensor _x, _y, _z, _bias, _deqScale;
 
-    InitXTensor(_x, x);
-    InitXTensor(_y, y);
-    InitXTensor(_z, z);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_y, y, DBG_LOC);
+    InitXTensor(_z, z, DBG_LOC);
     if (_x.dtype == INT32 && _y.dtype == INT32) {  // for int4 matmul
         _x.View(INT4);
         _y.View(INT4);
@@ -1411,13 +1412,13 @@ uint64_t MatmulBench(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z,
 {
     XTensor _x, _y, _z, _x_warmup, _y_warmup, _z_warmup, _bias, _deqScale;
 
-    InitXTensor(_x, x);
-    InitXTensor(_y, y);
-    InitXTensor(_z, z);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_y, y, DBG_LOC);
+    InitXTensor(_z, z, DBG_LOC);
 
-    InitXTensor(_x_warmup, x_warmup);
-    InitXTensor(_y_warmup, y_warmup);
-    InitXTensor(_z_warmup, z_warmup);
+    InitXTensor(_x_warmup, x_warmup, DBG_LOC);
+    InitXTensor(_y_warmup, y_warmup, DBG_LOC);
+    InitXTensor(_z_warmup, z_warmup, DBG_LOC);
 
     for (int i = 0; i < warmup_iterations; i++) {
         XliteOpMatmul(rt, _x_warmup, _y_warmup, _z_warmup, weightNZ, _bias, _deqScale, transpose);
@@ -1440,10 +1441,10 @@ void MatmulWithBias(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, a
 {
     XTensor _x, _y, _z, _bias, _deqSacle;
 
-    InitXTensor(_x, x);
-    InitXTensor(_y, y);
-    InitXTensor(_z, z);
-    InitXTensor(_bias, bias);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_y, y, DBG_LOC);
+    InitXTensor(_z, z, DBG_LOC);
+    InitXTensor(_bias, bias, DBG_LOC);
     if (_x.dtype == INT32 && _y.dtype == INT32) {  // for int4 matmul
         _x.View(INT4);
         _y.View(INT4);
@@ -1457,9 +1458,9 @@ void Embed(XRuntime &rt, at::Tensor &weight, at::Tensor &in, at::Tensor &out, ui
 {
     XTensor _in, _out, _weight;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
-    InitXTensor(_weight, weight);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_weight, weight, DBG_LOC);
     XliteOpEmbed(rt, _in, _weight, start, end, _out);
     rt.Synchronize();
 }
@@ -1470,8 +1471,8 @@ void RMSNormVarianceOnly(XRuntime &rt, at::Tensor &in, at::Tensor &out, float no
 {
     XTensor _in, _out;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
     XliteOpRmsNorm(rt, _in, XTensor(), _out, normEps, normDim == 0 ? _in.shape[1] : normDim, false,
                    XTensor(), cntPerToken, inStartOffset, outStartOffset, XTensor());
     rt.Synchronize();
@@ -1483,9 +1484,9 @@ void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, fl
 {
     XTensor _in, _out, _norm, _normBias, _variance;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
-    InitOptionalXTensor(_norm, norm);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitOptionalXTensor(_norm, norm, DBG_LOC);
     if (variance.has_value()) {
 #ifdef XLITE_DEBUG_ON_MISC
         {
@@ -1493,7 +1494,7 @@ void RMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &out, fl
             s << "variance: " << variance.value() << std::endl;
         }
 #endif
-        InitXTensor(_variance, variance.value());
+        InitXTensor(_variance, variance.value(), DBG_LOC);
     }
     XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, true,
                    _normBias, cntPerToken, inStartOffset, outStartOffset, _variance);
@@ -1506,10 +1507,10 @@ void RMSNormWithBias(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor 
 {
     XTensor _in, _out, _norm, _normBias;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
-    InitXTensor(_norm, norm);
-    InitXTensor(_normBias, normBias);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_norm, norm, DBG_LOC);
+    InitXTensor(_normBias, normBias, DBG_LOC);
     XliteOpRmsNorm(rt, _in, _norm, _out, normEps, normDim == 0 ? _in.shape[1] : normDim, true,
                    _normBias, cntPerToken, inStartOffset, outStartOffset);
     rt.Synchronize();
@@ -1519,8 +1520,8 @@ void L2Norm(XRuntime &rt, at::Tensor &in, at::Tensor &out, float normEps, uint32
 {
     XTensor _in, _out;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
     XliteOpL2Norm(rt, _in, _out, normEps, normDim == 0 ? _in.shape[1] : normDim);
 
     rt.Synchronize();
@@ -1531,10 +1532,10 @@ void LayerNorm(XRuntime &rt, at::Tensor &in, at::Tensor &norm, at::Tensor &normB
 {
     XTensor _in, _out, _norm, _normBias;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
-    InitXTensor(_norm, norm);
-    InitXTensor(_normBias, normBias);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_norm, norm, DBG_LOC);
+    InitXTensor(_normBias, normBias, DBG_LOC);
     XliteOpLayerNorm(rt, _in, _norm, _normBias, _out, normEps, normDim);
     rt.Synchronize();
 }
@@ -1543,9 +1544,9 @@ void AddBias(XRuntime &rt, at::Tensor &in, at::Tensor &weight, at::Tensor &out)
 {
     XTensor _in, _out, _weight;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
-    InitXTensor(_weight, weight);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_weight, weight, DBG_LOC);
     XliteOpAddBias(rt, _in, _weight, _out);
     rt.Synchronize();
 }
@@ -1553,8 +1554,8 @@ void AddBias(XRuntime &rt, at::Tensor &in, at::Tensor &weight, at::Tensor &out)
 void SiluAndMul(XRuntime &rt, at::Tensor &in, at::Tensor &out, float swigluLimit)
 {
     XTensor _in, _out;
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
 
     XliteOpSiluAndMul(rt, _in, _out, XTensor(), swigluLimit);
     rt.Synchronize();
@@ -1563,9 +1564,9 @@ void SiluAndMul(XRuntime &rt, at::Tensor &in, at::Tensor &out, float swigluLimit
 void SigmoidGateMul(XRuntime &rt, at::Tensor &attn, at::Tensor &gate, at::Tensor &out)
 {
     XTensor _attn, _gate, _out;
-    InitXTensor(_attn, attn);
-    InitXTensor(_gate, gate);
-    InitXTensor(_out, out);
+    InitXTensor(_attn, attn, DBG_LOC);
+    InitXTensor(_gate, gate, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
 
     XliteOpSigmoidGateMul(rt, _attn, _gate, _out);
     rt.Synchronize();
@@ -1578,12 +1579,12 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
 {
     XTensor _inout, _kCache, _vCache, _position, _cossin, _slotMapping;
 
-    InitXTensor(_inout, inout);
-    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
-    InitXTensor(_vCache, vCache, /*allowPitched=*/true);
-    InitXTensor(_position, position);
-    InitXTensor(_cossin, cossin);
-    InitXTensor(_slotMapping, slotMapping);
+    InitXTensor(_inout, inout, DBG_LOC);
+    InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_vCache, vCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_position, position, DBG_LOC);
+    InitXTensor(_cossin, cossin, DBG_LOC);
+    InitXTensor(_slotMapping, slotMapping, DBG_LOC);
     XliteOpRopeCache(rt, _inout, _kCache, _vCache, _position, _cossin, _slotMapping, nHeads,
                      nKvHeads, headDim, rotDim, blockSize, isNeox, mropeMaskH, mropeMaskW);
     rt.Synchronize();
@@ -1597,14 +1598,14 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
 {
     XTensor _qkv, _kCache, _vCache, _qk, _output, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
-    InitXTensor(_qkv, qkv);
-    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
-    InitXTensor(_vCache, vCache, /*allowPitched=*/true);
-    InitXTensor(_output, output);
-    InitXTensor(_queryStartLoc, queryStartLoc);
-    InitXTensor(_lens, lens);
-    InitXTensor(_cachedLens, cachedLens);
-    InitXTensor(_blockTables, blockTables);
+    InitXTensor(_qkv, qkv, DBG_LOC);
+    InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_vCache, vCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_output, output, DBG_LOC);
+    InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
+    InitXTensor(_lens, lens, DBG_LOC);
+    InitXTensor(_cachedLens, cachedLens, DBG_LOC);
+    InitXTensor(_blockTables, blockTables, DBG_LOC);
     uint32_t maxNumBlock = DeriveMaxNumBlocks(_blockTables, batch);
 
     if (!enableFlashAttention) {
@@ -1648,18 +1649,18 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
 {
     XTensor _qWithQr, _qr, _kCache, _peCache, _wukT, _wuv, _output, _queryStartLoc, _lens,
         _cachedLens, _blockTables, _topkIndices;
-    InitXTensor(_qWithQr, qWithQr);
-    InitXTensor(_qr, qr);
-    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
-    InitXTensor(_peCache, peCache, /*allowPitched=*/true);
-    InitXTensor(_wukT, wukT);
-    InitXTensor(_wuv, wuv);
-    InitXTensor(_output, output);
-    InitXTensor(_queryStartLoc, queryStartLoc);
-    InitXTensor(_lens, lens);
-    InitXTensor(_cachedLens, cachedLens);
-    InitXTensor(_blockTables, blockTables);
-    InitXTensor(_topkIndices, topkIndices);
+    InitXTensor(_qWithQr, qWithQr, DBG_LOC);
+    InitXTensor(_qr, qr, DBG_LOC);
+    InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_peCache, peCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_wukT, wukT, DBG_LOC);
+    InitXTensor(_wuv, wuv, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
+    InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
+    InitXTensor(_lens, lens, DBG_LOC);
+    InitXTensor(_cachedLens, cachedLens, DBG_LOC);
+    InitXTensor(_blockTables, blockTables, DBG_LOC);
+    InitXTensor(_topkIndices, topkIndices, DBG_LOC);
     uint32_t maxNumBlocks = dense ? 0 : DeriveMaxNumBlocks(_blockTables, batch);
 
     XTensor &qAbsorb =
@@ -1738,15 +1739,15 @@ void GatherSparseKVCache(XRuntime &rt, at::Tensor &kCache, at::Tensor &peCache,
 {
     XTensor _kCache, _peCache, _blockTables, _topkIndices, _queryStartLoc, _lens, _cachedLens,
         _kDenseCache, _peDenseCache;
-    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
-    InitXTensor(_peCache, peCache, /*allowPitched=*/true);
-    InitXTensor(_blockTables, blockTables);
-    InitXTensor(_topkIndices, topkIndices);
-    InitXTensor(_queryStartLoc, queryStartLoc);
-    InitXTensor(_lens, lens);
-    InitXTensor(_cachedLens, cachedLens);
-    InitXTensor(_kDenseCache, kDenseCache, /*allowPitched=*/true);
-    InitXTensor(_peDenseCache, peDenseCache, /*allowPitched=*/true);
+    InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_peCache, peCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_blockTables, blockTables, DBG_LOC);
+    InitXTensor(_topkIndices, topkIndices, DBG_LOC);
+    InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
+    InitXTensor(_lens, lens, DBG_LOC);
+    InitXTensor(_cachedLens, cachedLens, DBG_LOC);
+    InitXTensor(_kDenseCache, kDenseCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_peDenseCache, peDenseCache, DBG_LOC, /*allowPitched=*/true);
     XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices, _queryStartLoc,
                                _lens, _cachedLens, _kDenseCache, _peDenseCache, batch, indexTopK,
                                blockSize, kvLoraRank, ropeHeadDim, kvHeads, compressRatio,
@@ -1764,17 +1765,17 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
 {
     XTensor _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables, _attnSink,
         _output, _queryStartLoc, _lens, _cachedLens, _topkIndices;
-    InitXTensor(_q, q);
-    InitXTensor(_swaKCache, swaKCache);
-    InitXTensor(_compressKCache, compressKCache);
-    InitXTensor(_swaBlockTables, swaBlockTables);
-    InitXTensor(_compressBlockTables, compressBlockTables);
-    InitXTensor(_attnSink, attnSink);
-    InitXTensor(_output, output);
-    InitXTensor(_queryStartLoc, queryStartLoc);
-    InitXTensor(_lens, lens);
-    InitXTensor(_cachedLens, cachedLens);
-    InitXTensor(_topkIndices, topkIndices);
+    InitXTensor(_q, q, DBG_LOC);
+    InitXTensor(_swaKCache, swaKCache, DBG_LOC);
+    InitXTensor(_compressKCache, compressKCache, DBG_LOC);
+    InitXTensor(_swaBlockTables, swaBlockTables, DBG_LOC);
+    InitXTensor(_compressBlockTables, compressBlockTables, DBG_LOC);
+    InitXTensor(_attnSink, attnSink, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
+    InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
+    InitXTensor(_lens, lens, DBG_LOC);
+    InitXTensor(_cachedLens, cachedLens, DBG_LOC);
+    InitXTensor(_topkIndices, topkIndices, DBG_LOC);
     uint32_t swaSegWidth = windowSize == 0 ? 0 : windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B;
     // kvSize = compress-segment capacity of the scores workspace (compressed tokens):
     // dense mode holds indexTopK contiguous compressed tokens per batch; sparse mode
@@ -1840,10 +1841,10 @@ void AddAndRMSNorm(XRuntime &rt, at::Tensor &in, at::Tensor &addInOut, at::Tenso
 {
     XTensor _in, _addInOut, _out, _norm;
 
-    InitXTensor(_in, in);
-    InitXTensor(_addInOut, addInOut);
-    InitXTensor(_out, out);
-    InitXTensor(_norm, norm);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_addInOut, addInOut, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_norm, norm, DBG_LOC);
     XliteOpAddAndRmsNorm(rt, _in, _addInOut, _norm, normEps, _out);
     rt.Synchronize();
 }
@@ -1853,9 +1854,9 @@ void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
 {
     XTensor _scores, _indices, _outWeights, _outRouting;
 
-    InitXTensor(_scores, scores);
-    InitXTensor(_indices, indices);
-    InitXTensor(_outWeights, outWeights);
+    InitXTensor(_scores, scores, DBG_LOC);
+    InitXTensor(_indices, indices, DBG_LOC);
+    InitXTensor(_outWeights, outWeights, DBG_LOC);
     std::vector<size_t> sizes(scores.sizes().vec().begin(), scores.sizes().vec().end());
     _outRouting.Init(sizes, BIT1, TensorPtr(outRouting));
     XliteOpSoftmaxTopK(rt, _scores, _indices, _outWeights, _outRouting, topK, normTopKProb);
@@ -1868,10 +1869,10 @@ void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
 {
     XTensor _scores, _indices, _bias, _outWeights, _outRouting;
 
-    InitXTensor(_scores, scores);
-    InitXTensor(_bias, bias);
-    InitXTensor(_indices, indices);
-    InitXTensor(_outWeights, outWeights);
+    InitXTensor(_scores, scores, DBG_LOC);
+    InitXTensor(_bias, bias, DBG_LOC);
+    InitXTensor(_indices, indices, DBG_LOC);
+    InitXTensor(_outWeights, outWeights, DBG_LOC);
     std::vector<size_t> sizes(scores.sizes().vec().begin(), scores.sizes().vec().end());
     _outRouting.Init(sizes, BIT1, TensorPtr(outRouting));
     XliteOpSigmoidTopK(rt, _scores, _indices, _bias, scale, _outWeights, _outRouting, nGroup,
@@ -1885,12 +1886,12 @@ void SqrtsoftplusHashTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices,
 {
     XTensor _scores, _indices, _bias, _inputIds, _tid2eid, _outWeights, _routingMap;
 
-    InitXTensor(_scores, scores);
-    InitXTensor(_indices, indices);
-    InitXTensor(_bias, bias);
-    InitXTensor(_inputIds, inputIds);
-    InitXTensor(_tid2eid, tid2eid);
-    InitXTensor(_outWeights, outWeights);
+    InitXTensor(_scores, scores, DBG_LOC);
+    InitXTensor(_indices, indices, DBG_LOC);
+    InitXTensor(_bias, bias, DBG_LOC);
+    InitXTensor(_inputIds, inputIds, DBG_LOC);
+    InitXTensor(_tid2eid, tid2eid, DBG_LOC);
+    InitXTensor(_outWeights, outWeights, DBG_LOC);
     auto scoresSizesVec = scores.sizes().vec();
     std::vector<size_t> sizes(scoresSizesVec.begin(), scoresSizesVec.end());
     _routingMap.Init(sizes, BIT1, TensorPtr(routingMap));
@@ -1904,11 +1905,11 @@ void TopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tensor &out
 {
     XTensor _scores, _indices, _outIndices, _queryLens, _cachedLens;
 
-    InitXTensor(_scores, scores);
-    InitXTensor(_indices, indices);
-    InitXTensor(_outIndices, outIndices);
-    InitXTensor(_queryLens, queryLens);
-    InitXTensor(_cachedLens, cachedLens);
+    InitXTensor(_scores, scores, DBG_LOC);
+    InitXTensor(_indices, indices, DBG_LOC);
+    InitXTensor(_outIndices, outIndices, DBG_LOC);
+    InitXTensor(_queryLens, queryLens, DBG_LOC);
+    InitXTensor(_cachedLens, cachedLens, DBG_LOC);
 
     XliteOpTopK(rt, _scores, _indices, _outIndices, _queryLens, _cachedLens, _queryLens.shape[0],
                 k);
@@ -1921,8 +1922,8 @@ void CastUp(XRuntime &rt, at::Tensor &in, at::Tensor &out)
     XTensor _in, _out;
     XTensor &inScale = rt.GetTensor({1}, XDtypeOf(in), DBG_LOC);
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
     XliteOpCastUp(rt, _in, inScale, _out);
     rt.Synchronize();
     rt.PutTensor(inScale);
@@ -1933,11 +1934,11 @@ void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t sta
 {
     XTensor _in, _routing, _out, _unpIdx, _counts;
 
-    InitXTensor(_in, in);
-    InitXTensor(_routing, routing);
-    InitXTensor(_out, out);
-    InitXTensor(_unpIdx, unpIdx);
-    InitXTensor(_counts, counts);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_routing, routing, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_unpIdx, unpIdx, DBG_LOC);
+    InitXTensor(_counts, counts, DBG_LOC);
     XliteOpPermutation(rt, _in, _routing, start, end, _out, _unpIdx, _counts);
     rt.Synchronize();
 }
@@ -1946,11 +1947,11 @@ void UnPermutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, at::Tensor
                    uint32_t start, uint32_t end, at::Tensor &out, at::Tensor &unpIdx)
 {
     XTensor _in, _routing, _weights, _out, _unpIdx;
-    InitXTensor(_in, in);
-    InitXTensor(_routing, routing);
-    InitXTensor(_weights, weights);
-    InitXTensor(_out, out);
-    InitXTensor(_unpIdx, unpIdx);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_routing, routing, DBG_LOC);
+    InitXTensor(_weights, weights, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_unpIdx, unpIdx, DBG_LOC);
 
     XliteOpUnpermutation(rt, _in, _unpIdx, _routing, _weights, start, end, _out);
     rt.Synchronize();
@@ -1960,11 +1961,11 @@ void RemapGateOutputs(XRuntime &rt, at::Tensor &wIn, at::Tensor &rIn, at::Tensor
                       at::Tensor &rOut, at::Tensor &log2phy)
 {
     XTensor _wIn, _rIn, _wOut, _rOut, _log2phy;
-    InitXTensor(_wIn, wIn);
-    InitXTensor(_rIn, rIn);
-    InitXTensor(_wOut, wOut);
-    InitXTensor(_rOut, rOut);
-    InitXTensor(_log2phy, log2phy);
+    InitXTensor(_wIn, wIn, DBG_LOC);
+    InitXTensor(_rIn, rIn, DBG_LOC);
+    InitXTensor(_wOut, wOut, DBG_LOC);
+    InitXTensor(_rOut, rOut, DBG_LOC);
+    InitXTensor(_log2phy, log2phy, DBG_LOC);
     XliteOpRemapGateOutputs(rt, _wIn, _rIn, _wOut, _rOut, _log2phy);
     rt.Synchronize();
 }
@@ -1979,9 +1980,9 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
     uint32_t i, num = counts.size(0);
     bool hasScale = (scales.size() == num);
 
-    InitXTensor(_in, in);
-    InitXTensor(_counts, counts);
-    InitXTensor(_output, output);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_counts, counts, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
     if (!weights.empty() && XDtypeOf(weights[0]) == INT32 &&
         (_in.dtype == INT32 || _in.dtype == INT8)) {
         // for the w4a8 matmul, activation and weight will be viewed as int4
@@ -2019,7 +2020,7 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
 void Softmax(XRuntime &rt, at::Tensor &x, uint32_t calcLen, bool isLong)
 {
     XTensor _x;
-    InitXTensor(_x, x);
+    InitXTensor(_x, x, DBG_LOC);
     if (isLong) {
         XTensor &expBuf = rt.GetTensor({1, _x.shape[1]}, FP32, DBG_LOC);
         XliteOpSoftmaxLong(rt, calcLen, _x, expBuf);
@@ -2036,10 +2037,10 @@ void RopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t 
                  bool doRotate = false)
 {
     XTensor _inputWithR, _freqs, _position, _output;
-    InitXTensor(_inputWithR, inputWithR);
-    InitXTensor(_freqs, freqs);
-    InitXTensor(_position, position);
-    InitXTensor(_output, output);
+    InitXTensor(_inputWithR, inputWithR, DBG_LOC);
+    InitXTensor(_freqs, freqs, DBG_LOC);
+    InitXTensor(_position, position, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
     // outStepDim = ropeDim: the standalone op writes only the rope region. offset/outOffset keep
     // the rope region at the head tail ([nope | rope]); the caller scales the nope region via muls.
     uint32_t outStepDim = ropeDim;
@@ -2055,11 +2056,11 @@ void RopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, u
                          at::Tensor &slotMapping, bool outInterleaved, bool doRotate = false)
 {
     XTensor _inputWithR, _freqs, _position, _vCache, _slotMapping;
-    InitXTensor(_inputWithR, inputWithR);
-    InitXTensor(_freqs, freqs);
-    InitXTensor(_position, position);
-    InitXTensor(_vCache, vCache, /*allowPitched=*/true);
-    InitXTensor(_slotMapping, slotMapping);
+    InitXTensor(_inputWithR, inputWithR, DBG_LOC);
+    InitXTensor(_freqs, freqs, DBG_LOC);
+    InitXTensor(_position, position, DBG_LOC);
+    InitXTensor(_vCache, vCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_slotMapping, slotMapping, DBG_LOC);
     XliteOpRopeComplexAndCache(rt, nLocalHeads, stepDim, ropeDim, offset, vdim, _inputWithR, _freqs,
                                _position, blockSize, _vCache, _slotMapping, outInterleaved,
                                doRotate);
@@ -2074,18 +2075,18 @@ void MlaPrepare(XRuntime &rt, at::Tensor &attnQkvc, at::Tensor &qNorm, at::Tenso
 {
     XTensor _attnQkvc, _qNorm, _qNormBias, _attnNormQc, _kvNorm, _kvNormBias, _attnNormKvc, _freqs,
         _position, _kCache, _peCache, _slotMapping;
-    InitXTensor(_attnQkvc, attnQkvc);
-    InitXTensor(_qNorm, qNorm);
-    InitXTensor(_qNormBias, qNormBias);
-    InitXTensor(_attnNormQc, attnNormQc);
-    InitXTensor(_kvNorm, kvNorm);
-    InitXTensor(_kvNormBias, kvNormBias);
-    InitXTensor(_attnNormKvc, attnNormKvc);
-    InitXTensor(_freqs, freqs);
-    InitXTensor(_position, position);
-    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
-    InitXTensor(_peCache, peCache, /*allowPitched=*/true);
-    InitXTensor(_slotMapping, slotMapping);
+    InitXTensor(_attnQkvc, attnQkvc, DBG_LOC);
+    InitXTensor(_qNorm, qNorm, DBG_LOC);
+    InitXTensor(_qNormBias, qNormBias, DBG_LOC);
+    InitXTensor(_attnNormQc, attnNormQc, DBG_LOC);
+    InitXTensor(_kvNorm, kvNorm, DBG_LOC);
+    InitXTensor(_kvNormBias, kvNormBias, DBG_LOC);
+    InitXTensor(_attnNormKvc, attnNormKvc, DBG_LOC);
+    InitXTensor(_freqs, freqs, DBG_LOC);
+    InitXTensor(_position, position, DBG_LOC);
+    InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_peCache, peCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_slotMapping, slotMapping, DBG_LOC);
     XliteOpMlaPrepare(rt, _attnQkvc, _qNorm, _qNormBias, _attnNormQc, _kvNorm, _kvNormBias, _freqs,
                       _position, qLoraRank, kvLoraRank, ropeHeadDim, blockSize, _kCache, _peCache,
                       _slotMapping, normEps, _attnNormKvc);
@@ -2104,20 +2105,20 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
 {
     XTensor _kw, _kNorm, _kNormBias, _freqs, _position, _indexKCache, _slotMapping, _q;
     XTensor _ks, _q8, _qs, _sw;
-    InitXTensor(_ks, kScaleCache);
-    InitXTensor(_q8, q8);
-    InitXTensor(_qs, qScale);
-    InitXTensor(_sw, scaledWeights);
-    InitXTensor(_kw, kw);
-    InitXTensor(_kNorm, kNorm);
-    InitXTensor(_kNormBias, kNormBias);
-    InitXTensor(_freqs, freqs);
-    InitXTensor(_position, position);
+    InitXTensor(_ks, kScaleCache, DBG_LOC);
+    InitXTensor(_q8, q8, DBG_LOC);
+    InitXTensor(_qs, qScale, DBG_LOC);
+    InitXTensor(_sw, scaledWeights, DBG_LOC);
+    InitXTensor(_kw, kw, DBG_LOC);
+    InitXTensor(_kNorm, kNorm, DBG_LOC);
+    InitXTensor(_kNormBias, kNormBias, DBG_LOC);
+    InitXTensor(_freqs, freqs, DBG_LOC);
+    InitXTensor(_position, position, DBG_LOC);
     // C8 (int8) index caches stay contiguous until the C8 kernels address a pitch.
     bool indexC8 = indexKCache.scalar_type() == at::kChar;
-    InitXTensor(_indexKCache, indexKCache, /*allowPitched=*/!indexC8);
-    InitXTensor(_slotMapping, slotMapping);
-    InitXTensor(_q, q);
+    InitXTensor(_indexKCache, indexKCache, DBG_LOC, /*allowPitched=*/!indexC8);
+    InitXTensor(_slotMapping, slotMapping, DBG_LOC);
+    InitXTensor(_q, q, DBG_LOC);
     XliteOpIndexerPrepare(rt, _kw, _kNorm, _kNormBias, _freqs, _position, indexHeadDim, indexNHeads,
                           ropeHeadDim, blockSize, _indexKCache, _slotMapping, normEps, _q, scale,
                           topK, isLong, 1, _ks, _q8, _qs, _sw);
@@ -2130,14 +2131,14 @@ void IndexerKCacheC8(XRuntime &rt, const at::Tensor &k, const at::Tensor &kNorm,
                      at::Tensor &scaleCache, float normEps)
 {
     XTensor x, w, b, f, pTensor, sTensor, kc, sc;
-    InitXTensor(x, k);
-    InitXTensor(w, kNorm);
-    InitXTensor(b, kNormBias);
-    InitXTensor(f, freqs);
-    InitXTensor(pTensor, position);
-    InitXTensor(sTensor, slotMapping);
-    InitXTensor(kc, kCache);
-    InitXTensor(sc, scaleCache);
+    InitXTensor(x, k, DBG_LOC);
+    InitXTensor(w, kNorm, DBG_LOC);
+    InitXTensor(b, kNormBias, DBG_LOC);
+    InitXTensor(f, freqs, DBG_LOC);
+    InitXTensor(pTensor, position, DBG_LOC);
+    InitXTensor(sTensor, slotMapping, DBG_LOC);
+    InitXTensor(kc, kCache, DBG_LOC);
+    InitXTensor(sc, scaleCache, DBG_LOC);
     XliteOpIndexerKCacheC8(rt, x, w, b, f, pTensor, sTensor, kc, sc, normEps);
     rt.Synchronize();
 }
@@ -2156,34 +2157,34 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
     XTensor _kv, _score, _ape, _norm, _freqs, _weightedSum, _compressPositions,
         _compressSlotMapping, _queryStartLoc, _queryLens, _cachedLens, _compressKv, _state,
         _stateSlotMapping, _stateBlockTable;
-    InitXTensor(_kv, kv);
-    InitXTensor(_score, score);
+    InitXTensor(_kv, kv, DBG_LOC);
+    InitXTensor(_score, score, DBG_LOC);
     if (ape.has_value()) {
-        InitOptionalXTensor(_ape, ape.value());
+        InitOptionalXTensor(_ape, ape.value(), DBG_LOC);
     }
     if (norm.has_value()) {
-        InitOptionalXTensor(_norm, norm.value());
+        InitOptionalXTensor(_norm, norm.value(), DBG_LOC);
     }
     if (freqs.has_value()) {
-        InitOptionalXTensor(_freqs, freqs.value());
+        InitOptionalXTensor(_freqs, freqs.value(), DBG_LOC);
     }
-    InitXTensor(_weightedSum, weightedSum);
-    InitXTensor(_compressPositions, compressPositions);
-    InitXTensor(_compressSlotMapping, compressSlotMapping);
-    InitXTensor(_queryStartLoc, queryStartLoc);
-    InitXTensor(_queryLens, queryLens);
+    InitXTensor(_weightedSum, weightedSum, DBG_LOC);
+    InitXTensor(_compressPositions, compressPositions, DBG_LOC);
+    InitXTensor(_compressSlotMapping, compressSlotMapping, DBG_LOC);
+    InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
+    InitXTensor(_queryLens, queryLens, DBG_LOC);
     if (cachedLens.has_value()) {
-        InitOptionalXTensor(_cachedLens, cachedLens.value());
+        InitOptionalXTensor(_cachedLens, cachedLens.value(), DBG_LOC);
     }
-    InitXTensor(_compressKv, compressKv);
+    InitXTensor(_compressKv, compressKv, DBG_LOC);
     if (state.has_value()) {
-        InitOptionalXTensor(_state, state.value());
+        InitOptionalXTensor(_state, state.value(), DBG_LOC);
     }
     if (stateSlotMapping.has_value()) {
-        InitOptionalXTensor(_stateSlotMapping, stateSlotMapping.value());
+        InitOptionalXTensor(_stateSlotMapping, stateSlotMapping.value(), DBG_LOC);
     }
     if (stateBlockTable.has_value()) {
-        InitOptionalXTensor(_stateBlockTable, stateBlockTable.value());
+        InitOptionalXTensor(_stateBlockTable, stateBlockTable.value(), DBG_LOC);
     }
     XliteOpCompressor(rt, _kv, _score, _ape, _norm, _freqs, _weightedSum, _queryStartLoc,
                       _queryLens, _cachedLens, batch, nTotalBlocks, ratio, overlap, headDim,
@@ -2197,10 +2198,10 @@ void Quant(XRuntime &rt, at::Tensor &x, at::Tensor &scaleReciprocal, at::Tensor 
            at::Tensor &out)
 {
     XTensor _x, _scaleRec, _offset, _out;
-    InitXTensor(_x, x);
-    InitXTensor(_scaleRec, scaleReciprocal);
-    InitXTensor(_offset, offset);
-    InitXTensor(_out, out);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_scaleRec, scaleReciprocal, DBG_LOC);
+    InitXTensor(_offset, offset, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
     XliteOpQuant(rt, _x, _scaleRec, _offset, _out);
     rt.Synchronize();
 }
@@ -2208,9 +2209,9 @@ void Quant(XRuntime &rt, at::Tensor &x, at::Tensor &scaleReciprocal, at::Tensor 
 void QuantDyn(XRuntime &rt, at::Tensor &x, at::Tensor &scale, at::Tensor &out)
 {
     XTensor _x, _scale, _out;
-    InitXTensor(_x, x);
-    InitXTensor(_scale, scale);
-    InitXTensor(_out, out);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_scale, scale, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
     XliteOpQuantDyn(rt, _x, _scale, _out);
     rt.Synchronize();
 }
@@ -2219,10 +2220,10 @@ void MSDMergeDequant(XRuntime &rt, at::Tensor &yMerged, std::vector<at::Tensor> 
                      at::Tensor &counts, at::Tensor &perTokenScale, at::Tensor &out)
 {
     XTensor _yMerged, _perTokenScale, _out, _counts;
-    InitXTensor(_yMerged, yMerged);
-    InitXTensor(_counts, counts);
-    InitXTensor(_perTokenScale, perTokenScale);
-    InitXTensor(_out, out);
+    InitXTensor(_yMerged, yMerged, DBG_LOC);
+    InitXTensor(_counts, counts, DBG_LOC);
+    InitXTensor(_perTokenScale, perTokenScale, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
 
     // Build an INT64 [numExperts] pointer array of per-expert scale_bias pointers
     uint32_t numExperts = scaleBiases.size();
@@ -2248,11 +2249,11 @@ void MatmulDeQuant(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &bias,
 {
     XTensor _x, _y, _z, _bias, _deqScale;
 
-    InitXTensor(_x, x);
-    InitXTensor(_y, y);
-    InitXTensor(_bias, bias);
-    InitXTensor(_deqScale, deqScale);
-    InitXTensor(_z, z);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_y, y, DBG_LOC);
+    InitXTensor(_bias, bias, DBG_LOC);
+    InitXTensor(_deqScale, deqScale, DBG_LOC);
+    InitXTensor(_z, z, DBG_LOC);
     if (_x.dtype == INT32 && _y.dtype == INT32) {  // for int4 matmul
         _x.View(INT4);
         _y.View(INT4);
@@ -2265,10 +2266,10 @@ void DeQuant(XRuntime &rt, at::Tensor &in, at::Tensor &scale, at::Tensor &out, b
 {
     XTensor _in, _scale, _out;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
     if (hasScale) {
-        InitXTensor(_scale, scale);
+        InitXTensor(_scale, scale, DBG_LOC);
     }
     XliteOpDeQuant(rt, _in, _out, _scale);
     rt.Synchronize();
@@ -2281,16 +2282,16 @@ void FusionOperatorMatmulDequantPipeline(XRuntime &rt, at::Tensor &x, at::Tensor
 {
     XTensor _x, _weight, _out, _bias, _deqScale, _outScale, _num;
 
-    InitXTensor(_x, x);
-    InitXTensor(_weight, weight);
-    InitXTensor(_out, out);
-    InitXTensor(_bias, bias);
-    InitXTensor(_deqScale, deqScale);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_weight, weight, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_bias, bias, DBG_LOC);
+    InitXTensor(_deqScale, deqScale, DBG_LOC);
     if (outScale.numel() > 0) {
-        InitXTensor(_outScale, outScale);
+        InitXTensor(_outScale, outScale, DBG_LOC);
     }
     if (num.numel() > 0) {
-        InitXTensor(_num, num);
+        InitXTensor(_num, num, DBG_LOC);
     }
     XliteOpFusionOperatorMatmulDequantPipeline(rt, _x, _weight, _out, _bias, _deqScale, weightNZ,
                                                transpose, _outScale, _num);
@@ -2304,14 +2305,14 @@ void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &
 {
     XTensor _q, _kCache, _weight, _scores, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
-    InitXTensor(_q, q);
-    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
-    InitXTensor(_weight, weight);
-    InitXTensor(_scores, scores);
-    InitXTensor(_queryStartLoc, queryStartLoc);
-    InitXTensor(_lens, lens);
-    InitXTensor(_cachedLens, cachedLens);
-    InitXTensor(_blockTables, blockTables);
+    InitXTensor(_q, q, DBG_LOC);
+    InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_weight, weight, DBG_LOC);
+    InitXTensor(_scores, scores, DBG_LOC);
+    InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
+    InitXTensor(_lens, lens, DBG_LOC);
+    InitXTensor(_cachedLens, cachedLens, DBG_LOC);
+    InitXTensor(_blockTables, blockTables, DBG_LOC);
     XliteOpIndexerScores(rt, _q, _kCache, _weight, _scores, _queryStartLoc, _lens, _cachedLens,
                          _blockTables, nHeads, headDim, blockSize, batch);
     rt.Synchronize();
@@ -2326,16 +2327,16 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
 {
     XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables,
         _ks;
-    InitXTensor(_ks, kScaleCache);
+    InitXTensor(_ks, kScaleCache, DBG_LOC);
 
-    InitXTensor(_q, q);
-    InitXTensor(_kCache, kCache, /*allowPitched=*/true);
-    InitXTensor(_weight, weight);
-    InitXTensor(_topkIndices, topkIndices);
-    InitXTensor(_queryStartLoc, queryStartLoc);
-    InitXTensor(_lens, lens);
-    InitXTensor(_cachedLens, cachedLens);
-    InitXTensor(_blockTables, blockTables);
+    InitXTensor(_q, q, DBG_LOC);
+    InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_weight, weight, DBG_LOC);
+    InitXTensor(_topkIndices, topkIndices, DBG_LOC);
+    InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
+    InitXTensor(_lens, lens, DBG_LOC);
+    InitXTensor(_cachedLens, cachedLens, DBG_LOC);
+    InitXTensor(_blockTables, blockTables, DBG_LOC);
 
     // generate the identity index table (0..max(maxSeqLen,topK)-1)
     XTensor seqPositions;
@@ -2373,8 +2374,8 @@ void Muls(XRuntime &rt, at::Tensor &input, float scale, at::Tensor &output, uint
           uint32_t calcNum = UINT32_MAX)
 {
     XTensor _input, _output;
-    InitXTensor(_input, input);
-    InitXTensor(_output, output);
+    InitXTensor(_input, input, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
     XliteOpMuls(rt, _input, scale, _output, calcOffset, calcNum);
     rt.Synchronize();
 }
@@ -2384,9 +2385,9 @@ void ExpertsCountsSum(XRuntime &rt, at::Tensor &expertsCountsInput, at::Tensor &
 {
     XTensor _expertsCountsInput, _tokensPerEpgroup, _expertsCountsOutput;
 
-    InitXTensor(_expertsCountsInput, expertsCountsInput);
-    InitXTensor(_tokensPerEpgroup, tokensPerEpgroup);
-    InitXTensor(_expertsCountsOutput, expertsCountsOutput);
+    InitXTensor(_expertsCountsInput, expertsCountsInput, DBG_LOC);
+    InitXTensor(_tokensPerEpgroup, tokensPerEpgroup, DBG_LOC);
+    InitXTensor(_expertsCountsOutput, expertsCountsOutput, DBG_LOC);
     XliteOpExpertsCountsSum(rt, _expertsCountsInput, _tokensPerEpgroup, _expertsCountsOutput,
                             nRoutedExperts);
     rt.Synchronize();
@@ -2397,9 +2398,9 @@ void ReorderMoE(XRuntime &rt, at::Tensor &in, at::Tensor &out, at::Tensor &count
 {
     XTensor _in, _out, _counts;
 
-    InitXTensor(_in, in);
-    InitXTensor(_out, out);
-    InitXTensor(_counts, counts);
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    InitXTensor(_counts, counts, DBG_LOC);
     XliteOpReorderMoE(rt, _in, _out, _counts, hiddenSize, localStart, localEnd, forward);
     rt.Synchronize();
 }
@@ -2412,16 +2413,16 @@ void LinearAttProj(XRuntime &rt, at::Tensor &x, at::Tensor &W_qkv, at::Tensor &W
     XTensor _mix_qkv, _z, _b, _a;
     XTensor bias, deqScale;
 
-    InitXTensor(_x, x);
-    InitXTensor(_W_qkv, W_qkv);
-    InitXTensor(_W_z, W_z);
-    InitXTensor(_W_b, W_b);
-    InitXTensor(_W_a, W_a);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_W_qkv, W_qkv, DBG_LOC);
+    InitXTensor(_W_z, W_z, DBG_LOC);
+    InitXTensor(_W_b, W_b, DBG_LOC);
+    InitXTensor(_W_a, W_a, DBG_LOC);
 
-    InitXTensor(_mix_qkv, mix_qkv);
-    InitXTensor(_z, z);
-    InitXTensor(_b, b);
-    InitXTensor(_a, a);
+    InitXTensor(_mix_qkv, mix_qkv, DBG_LOC);
+    InitXTensor(_z, z, DBG_LOC);
+    InitXTensor(_b, b, DBG_LOC);
+    InitXTensor(_a, a, DBG_LOC);
 
     std::vector<XTensor> inputs = {_W_qkv, _W_z, _W_b, _W_a};
     XTensor &W = rt.GetTensor({k, n + v + h + h}, XDtypeOf(x), DBG_LOC);
@@ -2440,8 +2441,8 @@ void LinearAttProj(XRuntime &rt, at::Tensor &x, at::Tensor &W_qkv, at::Tensor &W
 void Transpose_1_2(XRuntime &rt, at::Tensor &input, at::Tensor &output)
 {
     XTensor _input, _output;
-    InitXTensor(_input, input);
-    InitXTensor(_output, output);
+    InitXTensor(_input, input, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
     XliteOpTranspose_1_2(rt, _input, _output);
     rt.Synchronize();
 }
@@ -2452,16 +2453,16 @@ void LinearAttConv1dAndSiLU(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_
                             std::optional<at::Tensor> query_lens = std::nullopt)
 {
     XTensor _mix_qkv, _conv_state, _weight, _output, _start, _lens;
-    InitXTensor(_mix_qkv, mix_qkv);
-    InitXTensor(_conv_state, conv_state);
-    InitXTensor(_weight, weight);
-    InitXTensor(_output, output);
+    InitXTensor(_mix_qkv, mix_qkv, DBG_LOC);
+    InitXTensor(_conv_state, conv_state, DBG_LOC);
+    InitXTensor(_weight, weight, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
     XTensor *startPtr = nullptr;
     XTensor *lensPtr = nullptr;
     if (query_start_loc.has_value() && query_lens.has_value() && query_start_loc->defined() &&
         query_lens->defined() && query_start_loc->numel() > 0 && query_lens->numel() > 0) {
-        InitXTensor(_start, *query_start_loc);
-        InitXTensor(_lens, *query_lens);
+        InitXTensor(_start, *query_start_loc, DBG_LOC);
+        InitXTensor(_lens, *query_lens, DBG_LOC);
         startPtr = &_start;
         lensPtr = &_lens;
     }
@@ -2474,10 +2475,10 @@ void LinearAttConv1dAndSiLUToken(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &
                                  at::Tensor &weight, at::Tensor &output, int64_t seq_len)
 {
     XTensor _mix_qkv, _conv_state, _weight, _output;
-    InitXTensor(_mix_qkv, mix_qkv);
-    InitXTensor(_conv_state, conv_state);
-    InitXTensor(_weight, weight);
-    InitXTensor(_output, output);
+    InitXTensor(_mix_qkv, mix_qkv, DBG_LOC);
+    InitXTensor(_conv_state, conv_state, DBG_LOC);
+    InitXTensor(_weight, weight, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
     XliteOpConv1dAndSiLUToken(rt, _conv_state, _mix_qkv, _weight, _output,
                               static_cast<uint32_t>(seq_len), /*updateState=*/true);
     rt.Synchronize();
@@ -2487,11 +2488,11 @@ void SplitCol(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs)
 {
     XTensor _in;
     std::vector<XTensor> _outputs;
-    InitXTensor(_in, in);
+    InitXTensor(_in, in, DBG_LOC);
     uint32_t totalWidth = 0;
     for (auto &output : outputs) {
         XTensor x;
-        InitXTensor(x, output);
+        InitXTensor(x, output, DBG_LOC);
         _outputs.push_back(x);
         totalWidth += x.shape.back();
     }
@@ -2510,11 +2511,11 @@ void Concat(XRuntime &rt, std::vector<at::Tensor> &inputs, at::Tensor &out)
     std::vector<XTensor> _inputs;
     for (auto &input : inputs) {
         XTensor x;
-        InitXTensor(x, input);
+        InitXTensor(x, input, DBG_LOC);
         _inputs.push_back(x);
     }
     XTensor _out;
-    InitXTensor(_out, out);
+    InitXTensor(_out, out, DBG_LOC);
 
     // Validate byte sizes: the output must hold exactly the concatenated bytes.
     size_t inBytes = 0;
@@ -2540,12 +2541,12 @@ void ConcatCol(XRuntime &rt, std::vector<at::Tensor> &inputs, at::Tensor &out)
     size_t totalWidth = 0;
     for (auto &input : inputs) {
         XTensor x;
-        InitXTensor(x, input);
+        InitXTensor(x, input, DBG_LOC);
         _inputs.push_back(x);
         totalWidth += x.shape.back();
     }
     XTensor _out;
-    InitXTensor(_out, out);
+    InitXTensor(_out, out, DBG_LOC);
     if (totalWidth != _out.shape.back()) {
         throw std::runtime_error(std::string(__func__) + ": out last dim (" +
                                  std::to_string(_out.shape.back()) + ") != sum(inputs last dim) (" +
@@ -2568,10 +2569,10 @@ void Split(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &outputs,
     }
     XTensor _in;
     std::vector<XTensor> _outputs;
-    InitXTensor(_in, in);
+    InitXTensor(_in, in, DBG_LOC);
     for (auto &output : outputs) {
         XTensor x;
-        InitXTensor(x, output);
+        InitXTensor(x, output, DBG_LOC);
         _outputs.push_back(x);
     }
     std::vector<size_t> _sizes(sizes.begin(), sizes.end());
@@ -2605,12 +2606,12 @@ void BetaDecay(XRuntime &rt, at::Tensor &b, at::Tensor &a, at::Tensor &A_log, at
                at::Tensor &beta, at::Tensor &g, uint32_t bsz, uint32_t seqlen, uint32_t num_v_heads)
 {
     XTensor _b, _a, _A_log, _dt_bias, _beta, _g;
-    InitXTensor(_b, b);
-    InitXTensor(_a, a);
-    InitXTensor(_A_log, A_log);
-    InitXTensor(_dt_bias, dt_bias);
-    InitXTensor(_beta, beta);
-    InitXTensor(_g, g);
+    InitXTensor(_b, b, DBG_LOC);
+    InitXTensor(_a, a, DBG_LOC);
+    InitXTensor(_A_log, A_log, DBG_LOC);
+    InitXTensor(_dt_bias, dt_bias, DBG_LOC);
+    InitXTensor(_beta, beta, DBG_LOC);
+    InitXTensor(_g, g, DBG_LOC);
 
     XliteOpBetaDecay(rt, _b, _a, _A_log, _dt_bias, _beta, _g, bsz, seqlen, num_v_heads);
     rt.Synchronize();
@@ -2624,19 +2625,19 @@ void RecurrentGatedDeltaRule(XRuntime &rt, at::Tensor &query, at::Tensor &key, a
                              std::optional<at::Tensor> query_lens = std::nullopt)
 {
     XTensor _query, _key, _value, _beta, _g, _state, _out, _start, _lens;
-    InitXTensor(_query, query);
-    InitXTensor(_key, key);
-    InitXTensor(_value, value);
-    InitXTensor(_beta, beta);
-    InitXTensor(_g, g);
-    InitXTensor(_state, state);
-    InitXTensor(_out, out);
+    InitXTensor(_query, query, DBG_LOC);
+    InitXTensor(_key, key, DBG_LOC);
+    InitXTensor(_value, value, DBG_LOC);
+    InitXTensor(_beta, beta, DBG_LOC);
+    InitXTensor(_g, g, DBG_LOC);
+    InitXTensor(_state, state, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
     XTensor *startPtr = nullptr;
     XTensor *lensPtr = nullptr;
     if (query_start_loc.has_value() && query_lens.has_value() && query_start_loc->defined() &&
         query_lens->defined() && query_start_loc->numel() > 0 && query_lens->numel() > 0) {
-        InitXTensor(_start, *query_start_loc);
-        InitXTensor(_lens, *query_lens);
+        InitXTensor(_start, *query_start_loc, DBG_LOC);
+        InitXTensor(_lens, *query_lens, DBG_LOC);
         startPtr = &_start;
         lensPtr = &_lens;
     }
@@ -2649,9 +2650,9 @@ void EinsumMhtHdtMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &hdt, at::Tensor 
                      uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
 {
     XTensor _mht, _hdt, _mhd;
-    InitXTensor(_mht, mht);
-    InitXTensor(_hdt, hdt);
-    InitXTensor(_mhd, mhd);
+    InitXTensor(_mht, mht, DBG_LOC);
+    InitXTensor(_hdt, hdt, DBG_LOC);
+    InitXTensor(_mhd, mhd, DBG_LOC);
     XliteOpEinsumMhtHdtMhd(rt, _mht, _hdt, _mhd, m, h, t, d, weightNZ);
     rt.Synchronize();
 }
@@ -2660,9 +2661,9 @@ void EinsumMhtHtdMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &htd, at::Tensor 
                      uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
 {
     XTensor _mht, _htd, _mhd;
-    InitXTensor(_mht, mht);
-    InitXTensor(_htd, htd);
-    InitXTensor(_mhd, mhd);
+    InitXTensor(_mht, mht, DBG_LOC);
+    InitXTensor(_htd, htd, DBG_LOC);
+    InitXTensor(_mhd, mhd, DBG_LOC);
     XliteOpEinsumMhtHtdMhd(rt, _mht, _htd, _mhd, m, h, t, d, weightNZ);
     rt.Synchronize();
 }
@@ -2670,8 +2671,8 @@ void EinsumMhtHtdMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &htd, at::Tensor 
 void UnpackActivation(XRuntime &rt, at::Tensor &input, at::Tensor &output)
 {
     XTensor _input, _output;
-    InitXTensor(_input, input);
-    InitXTensor(_output, output);
+    InitXTensor(_input, input, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
 
     XliteOpUnpackActivation(rt, _input, _output);
     rt.Synchronize();
@@ -2683,16 +2684,16 @@ void HcAct(XRuntime &rt, at::Tensor &mixes, at::Tensor &hcScale, at::Tensor &hcB
 {
     XTensor _mixes, _hcScale, _hcBase, _post, _comb, _xResid, _output;
 
-    InitXTensor(_mixes, mixes);
-    InitXTensor(_hcScale, hcScale);
-    InitXTensor(_hcBase, hcBase);
-    InitXTensor(_post, post);
-    InitXTensor(_comb, comb);
+    InitXTensor(_mixes, mixes, DBG_LOC);
+    InitXTensor(_hcScale, hcScale, DBG_LOC);
+    InitXTensor(_hcBase, hcBase, DBG_LOC);
+    InitXTensor(_post, post, DBG_LOC);
+    InitXTensor(_comb, comb, DBG_LOC);
     if (TensorUsable(xResid)) {
-        InitXTensor(_xResid, xResid);
+        InitXTensor(_xResid, xResid, DBG_LOC);
     }
     if (TensorUsable(output)) {
-        InitXTensor(_output, output);
+        InitXTensor(_output, output, DBG_LOC);
     }
     XliteOpHcAct(rt, _mixes, _hcScale, _hcBase, _post, _comb, hcMult, eps, sinkhornIters, false,
                  _xResid, _output);
@@ -2703,11 +2704,11 @@ void HcPost(XRuntime &rt, at::Tensor &x, at::Tensor &post, at::Tensor &comb, at:
             at::Tensor &y, uint32_t m, uint32_t hcMult, uint32_t hidden)
 {
     XTensor _x, _post, _comb, _residual, _y;
-    InitXTensor(_x, x);
-    InitXTensor(_post, post);
-    InitXTensor(_comb, comb);
-    InitXTensor(_residual, residual);
-    InitXTensor(_y, y);
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_post, post, DBG_LOC);
+    InitXTensor(_comb, comb, DBG_LOC);
+    InitXTensor(_residual, residual, DBG_LOC);
+    InitXTensor(_y, y, DBG_LOC);
     XliteOpHcPost(rt, _x, _post, _comb, _residual, _y, m, hcMult, hidden);
     rt.Synchronize();
 }
@@ -2717,15 +2718,15 @@ void HcSplitSinkhorn(XRuntime &rt, at::Tensor &mixes, at::Tensor &hcScale, at::T
                      float eps, uint32_t sinkhornIters)
 {
     XTensor _mixes, _hcScale, _hcBase, _pre, _post, _comb;
-    InitXTensor(_mixes, mixes);
-    InitXTensor(_hcScale, hcScale);
-    InitXTensor(_hcBase, hcBase);
-    InitXTensor(_pre, pre);
+    InitXTensor(_mixes, mixes, DBG_LOC);
+    InitXTensor(_hcScale, hcScale, DBG_LOC);
+    InitXTensor(_hcBase, hcBase, DBG_LOC);
+    InitXTensor(_pre, pre, DBG_LOC);
     if (TensorUsable(post)) {
-        InitXTensor(_post, post);
+        InitXTensor(_post, post, DBG_LOC);
     }
     if (TensorUsable(comb)) {
-        InitXTensor(_comb, comb);
+        InitXTensor(_comb, comb, DBG_LOC);
     }
     // hc_split_sinkhorn has no head path; headOnly is ignored (always non-head).
     XliteOpHcSplitSinkhorn(rt, _mixes, _hcScale, _hcBase, _pre, _post, _comb, hcMult, eps,
@@ -2737,9 +2738,9 @@ void HcPre(XRuntime &rt, at::Tensor &xResid, at::Tensor &pre, at::Tensor &output
            uint32_t hcMult, uint32_t hidden)
 {
     XTensor _xResid, _pre, _output;
-    InitXTensor(_xResid, xResid);
-    InitXTensor(_pre, pre);
-    InitXTensor(_output, output);
+    InitXTensor(_xResid, xResid, DBG_LOC);
+    InitXTensor(_pre, pre, DBG_LOC);
+    InitXTensor(_output, output, DBG_LOC);
     XliteOpHcPre(rt, _xResid, _pre, _output, m, hcMult, hidden);
     rt.Synchronize();
 }
