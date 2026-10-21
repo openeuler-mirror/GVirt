@@ -49,6 +49,9 @@ tile_size = 8192
 
 BLOCK_SIZE = 128
 MAX_SOFTMAX_PINGPONG_LEN = 11776
+# dense (gather) path supports decode and small prefill; mirrors the model's
+# XLITE_SMALL_PREFILL_THRESHOLD gating (csrc/model.cpp).
+MAX_DENSE_QUERY_LEN = 6
 
 # model configurations: name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, dtype
 models = [
@@ -86,6 +89,13 @@ work = [
     (1, [0], [30], True),
     (1, [127], [1], True),
     (2, [4000] * 2, [1] * 2, True),
+    # small-prefill (MTP) cases: long cached + query_len <= MAX_DENSE_QUERY_LEN,
+    # exercising the per-query-token dense gather path. Mixed dense/sparse rows
+    # (short cached stays dense, long cached goes sparse) within one batch.
+    (1, [8191], [5]),
+    (2, [8191, 127], [3, 3]),
+    (3, [99, 8191, 45841], [4, 3, 2]),
+    (2, [4096, 4097], [2, 6]),
 ]
 
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
@@ -405,37 +415,41 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                 )
 
             # ----- xlite dense mode: gather the same topk_indices into a
-            # contiguous dense cache, then run mla_v2 in dense mode on it.
-            if any(qlen != 1 for qlen in query_len_list):
+            # contiguous per-query-token dense cache, then run mla_v2 in dense
+            # mode on it. Supports decode (query_len == 1) and small prefill
+            # (query_len > 1); each query token owns its own dense cache row and
+            # its own topk_indices row (already generated above with the causal
+            # offset valid_len = clen + q_idx + 1).
+            max_qlen = max(query_len_list)
+            if max_qlen > MAX_DENSE_QUERY_LEN:
                 logging.info(
                     "mla_v2 dense %s work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) "
-                    "skipped: dense mode requires query_len == 1 per batch",
-                    name, batch, cached_lens_list, query_len_list, topk,
+                    "skipped: dense mode requires max query_len <= %d",
+                    name, batch, cached_lens_list, query_len_list, topk, MAX_DENSE_QUERY_LEN,
                 )
-                continue
+            else:
+                output_xlite_dense = torch.zeros(
+                    total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
 
-            output_xlite_dense = torch.zeros(
-                total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
+                torch.npu.synchronize()
+                mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite,
+                       wuv_xlite, output_xlite_dense, query_start_loc, query_lens, cached_lens,
+                       block_tables, n_heads, rope_head_dim, nope_head_dim, v_head_dim,
+                       kv_lora_rank, BLOCK_SIZE, batch, scale, topk_indices_tensor, topk,
+                       weight_nz, enable_flash, tile_size, True)
 
-            torch.npu.synchronize()
-            mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite,
-                   wuv_xlite, output_xlite_dense, query_start_loc, query_lens, cached_lens,
-                   block_tables, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank,
-                   BLOCK_SIZE, batch, scale, topk_indices_tensor, topk, weight_nz, enable_flash,
-                   tile_size, True)
+                logging.info(
+                    "mla_v2 dense %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d "
+                    "v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, "
+                    "query_lens=%s, topk=%d) executed!",
+                    name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank,
+                    test_dtype, batch, cached_lens_list, query_len_list, topk,
+                )
 
-            logging.info(
-                "mla_v2 dense %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, "
-                "%d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) "
-                "executed!",
-                name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_dtype,
-                batch, cached_lens_list, query_len_list, topk,
-            )
-
-            try:
-                torch.testing.assert_close(
-                    output_xlite_dense, output_standard_with_topk, atol=1e-5, rtol=5e-02)
-            except AssertionError as e:
-                logging.error(f'mla_v2 dense test failed: {e}')
-                logging.error(f'Standard mla_v2 with topk mask: {output_standard_with_topk}')
-                logging.error(f'xlite mla_v2 dense: {output_xlite_dense}')
+                try:
+                    torch.testing.assert_close(
+                        output_xlite_dense, output_standard_with_topk, atol=1e-5, rtol=5e-02)
+                except AssertionError as e:
+                    logging.error(f'mla_v2 dense test failed: {e}')
+                    logging.error(f'Standard mla_v2 with topk mask: {output_standard_with_topk}')
+                    logging.error(f'xlite mla_v2 dense: {output_xlite_dense}')

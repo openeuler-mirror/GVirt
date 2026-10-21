@@ -942,11 +942,6 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                  nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlocks, tileSizeOfCachedKV);
 }
 
-// Unified CXA decode kernel entry. dense=false walks the paged compress-KV cache via
-// compressBlockTables (with optional top-k token selection); dense=true reads a
-// per-batch contiguous compress-KV cache (batch b occupies compressed tokens
-// [b * indexTopK, (b + 1) * indexTopK)), where top-k masking is disabled and the
-// SWA cache stays paged (swaBlockTables still used).
 void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressKCache,
                 XTensor &swaBlockTables, XTensor &compressBlockTables, uint32_t swaBlockSize,
                 uint32_t compressBlockSize, XTensor &attnSink, XTensor &scores, XTensor &output,

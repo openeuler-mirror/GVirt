@@ -1674,10 +1674,10 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
             throw std::runtime_error(std::string(__func__) +
                                      ": dense=True requires topK > 0 (dense cache length)");
         }
-        XTensor &kDense = rt.GetTensor({static_cast<size_t>(batch), topK, kvLoraRank},
-                                       XDtypeOf(qWithQr), DBG_LOC);
-        XTensor &peDense = rt.GetTensor({static_cast<size_t>(batch), topK, ropeHeadDim},
-                                        XDtypeOf(qWithQr), DBG_LOC);
+        XTensor &kDense =
+            rt.GetTensor({_qWithQr.shape[0], topK, kvLoraRank}, XDtypeOf(qWithQr), DBG_LOC);
+        XTensor &peDense =
+            rt.GetTensor({_qWithQr.shape[0], topK, ropeHeadDim}, XDtypeOf(qWithQr), DBG_LOC);
         XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices,
                                    _queryStartLoc, _lens, _cachedLens, kDense, peDense, batch, topK,
                                    blockSize, kvLoraRank, ropeHeadDim, 1);
@@ -1783,7 +1783,7 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
     if (dense) {
         kvSize = compressRatio == 0 ? 0 : ROUND_UP((uint64_t)indexTopK, 4 * CXA_SVCK0);
         XTensor &compressKCacheDense =
-            rt.GetTensor({static_cast<size_t>(batch), indexTopK, headDim}, XDtypeOf(q), DBG_LOC);
+            rt.GetTensor({_q.shape[0], indexTopK, headDim}, XDtypeOf(q), DBG_LOC);
         XliteOpGatherSparseKVCache(rt, _compressKCache, XTensor(), _compressBlockTables,
                                    _topkIndices, _queryStartLoc, _lens, _cachedLens,
                                    compressKCacheDense, XTensor(), batch, indexTopK,
