@@ -41,6 +41,8 @@ from __future__ import absolute_import
 import logging
 import math
 import numpy as np
+import os
+import re
 import torch
 from xlite._C import Runtime, cxa
 from xlite._C import print as xlite_print
@@ -61,6 +63,12 @@ tile_size = 8192
 # block sizes (per-cache, per the CXA 5-tuple; here we pick)
 swa_block_size = 64
 compress_block_size = 128
+
+# dense (gather) path mirrors the model's gate (csrc/model.cpp: ForwardAttnCXA):
+# decode (query_len == 1) or small prefill (query_len <= MAX_DENSE_QUERY_LEN), AND the
+# numCandidates guard (max(clen + qlen) // compress_ratio <= index_topk) so every row is a
+# dense row (identity gather;
+MAX_DENSE_QUERY_LEN = 6
 
 # model configurations:
 #   name, n_heads, head_dim, window_size, compress_ratio, index_topk, dtype
@@ -93,6 +101,15 @@ work = [
     # long prefill: compressTotalLen > tile_size -> multi-tile merge path (kvNum >= 2).
     (1, [131071], [257]),
     (1, [32768], [256]),
+    # small-prefill (MTP) dense cases: query_len <= MAX_DENSE_QUERY_LEN with
+    # numCandidates <= index_topk (max(clen + qlen) // compress_ratio <= index_topk),
+    # exercising the per-query-token dense gather path. Mixed cached lengths within a
+    # batch; (1, [2045], [6]) sits at the guard boundary (2045+6=2051 -> 512 == index_topk).
+    (1, [0], [6]),
+    (1, [1024], [6]),
+    (1, [2045], [6]),
+    (2, [512, 2045], [6, 4]),
+    (3, [100, 1024, 2045], [6, 5, 4]),
 ]
 
 
@@ -418,26 +435,26 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                     logging.error(f'sparse_attn ref: {output_standard}')
                     logging.error(f'xlite cxa flash:   {output_xlite_flash}')
 
-        # ----- xlite dense mode: the selected compressed tokens are gathered into a
-        # per-batch contiguous cache (batch b holds index_topk compressed tokens at
-        # [b * index_topk, (b + 1) * index_topk)), no block table inside the kernel,
-        # no top-k masking -- the compress segment is attended causally, clamped to
-        # index_topk. The reference gathers the SAME sampled selection, so both sides
-        # attend over the identical token set. SWA stays paged (unchanged caches).
+        # ----- xlite dense mode: gather the per-query-token compress selection into a
+        # contiguous dense cache (query token q holds index_topk compressed tokens at
+        # [q * index_topk, (q + 1) * index_topk)), then run cxa in dense mode -- no
+        # block table inside the kernel, no top-k masking, the compress segment is
+        # attended causally and clamped to index_topk. SWA stays paged (unchanged).
+        # Mirrors the model's ForwardAttnCXA gate: decode (query_len == 1) or small
+        # prefill (query_len <= MAX_DENSE_QUERY_LEN), AND the numCandidates guard
+        # (max(clen + qlen) // compress_ratio <= index_topk) so every row is a dense
+        # row (identity gather. The reference reuses topk_indices_list[i] verbatim
+        # (identity for dense rows), so both sides attend the identical token set.
         if compress_ratio == 0 or index_topk == 0:
             continue
-
-        # ----- xlite dense mode: gather the same topk_indices into a contiguous dense
-        # cache, then run cxa in dense mode on it. The gather kernel resolves each
-        # index in topk_indices_op through compress_block_tables, so the dense cache
-        # holds exactly the sampled top-k tokens (a random subset of [0, n_visible)
-        # when n_visible > index_topk). The reference therefore attends over the SAME
-        # subset: reuse topk_indices_list[i] verbatim. SWA stays paged (unchanged).
-        if any(qlen != 1 for qlen in query_len_list):
+        max_total = max(cl + ql for cl, ql in zip(cached_lens_list, query_len_list))
+        guard_ok = max_total // compress_ratio <= index_topk
+        ql_ok = max(query_len_list) <= MAX_DENSE_QUERY_LEN
+        if not (guard_ok and ql_ok):
             logging.info(
-                "cxa dense %s work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) "
-                "skipped: dense mode requires query_len == 1 per batch",
-                name, batch, cached_lens_list, query_len_list, index_topk,
+                "%s dense skipped: %s (mirror ForwardAttnCXA gate)",
+                case_desc,
+                "ql > MAX_DENSE_QUERY_LEN" if not ql_ok else "numCandidates > index_topk",
             )
             continue
 

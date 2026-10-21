@@ -351,7 +351,7 @@ FEATURES = {
     "speculative_mtp": FeatureSpec(
         "speculative_mtp", "Speculative Decoding(MTP)",
         extra_cli=["--speculative-config",
-                   '{"num_speculative_tokens": 1, "method": "mtp"}'],
+                   '{"num_speculative_tokens": 3, "method": "mtp"}'],
         note="GLM-5-w8a8 自带 MTP(num_nextn_predict_layers=1); method=mtp"
              "(deepseek_mtp 为 vLLM 上游已 deprecated 旧写法, 运行时归一化为 mtp); "
              "full_mode+speculative 走 FULL_DECODE_ONLY",

@@ -15,6 +15,9 @@
 // Per-seq cached-KV token threshold for routing decode+DSA to the dense
 // (sparse gather) path vs the paged path; see ForwardAttnMLAV2.
 #define XLITE_MLA_DENSE_THRESHOLD 280
+// Max query length for still routing a non-decode (MTP / small prefill) step through
+// the dense (sparse gather) path.
+#define XLITE_SMALL_PREFILL_THRESHOLD 6
 
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
@@ -526,24 +529,23 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
 
     XTensor &oAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
                                     hiddenState.dtype, DBG_LOC);
-    // Route decode+DSA to the dense (sparse gather) path only when it
-    // pays off. Below ~280 tokens/seq the gather overhead dominates and the
-    // dense path regresses by up to 9% on short-prompt + large-batch cases
-    // (see paged vs dense perf sweep).
+    // Route DSA to the dense (sparse gather) path only when it pays off. Below ~280
+    // tokens/seq the gather overhead dominates and the dense path regresses by up to 9%
+    // on short-prompt + large-batch cases (see paged vs dense perf sweep).
     // Cond 1 (cached KV > tile): long-seq fallback where dense is consistently faster.
     // Cond 2 (per-seq cached KV > 280 * batch): perf-derived threshold that steers
     //   degenerate short-prompt + large-batch cases back to paged to avoid regression.
-    if (rt._decodeStep && _c.attnType == XMODEL_ATTN_DSA && topkIndices != nullptr &&
+    // Decode always qualifies; a non-decode (MTP / small prefill) step also qualifies
+    // when its max query length is small enough that the per-query-token dense cache
+    // (forced queryTileSize=1) still beats the paged path on long sequences.
+    if (_c.attnType == XMODEL_ATTN_DSA && topkIndices != nullptr &&
         (maxNumBlocks * _c.blockSizes[0] > rt._tileSizeOfCachedKV ||
-         maxNumBlocks * _c.blockSizes[0] > XLITE_MLA_DENSE_THRESHOLD * rt._batch)) {
-        // Decode + DSA long-sequence path: gather sparse top-k tokens into a
-        // contiguous dense cache, then run mla_v2 in dense mode on it.
-        XTensor &kDense =
-            rt.GetTensor({static_cast<size_t>(rt._batch), _c.indexTopK, _c.kvLoraRank},
-                         hiddenState.dtype, DBG_LOC);
-        XTensor &peDense =
-            rt.GetTensor({static_cast<size_t>(rt._batch), _c.indexTopK, _c.ropeHeadDim},
-                         hiddenState.dtype, DBG_LOC);
+         maxNumBlocks * _c.blockSizes[0] > XLITE_MLA_DENSE_THRESHOLD * rt._batch) &&
+        rt._maxQueryLen <= XLITE_SMALL_PREFILL_THRESHOLD) {
+        XTensor &kDense = rt.GetTensor({hiddenState.shape[0], _c.indexTopK, _c.kvLoraRank},
+                                       hiddenState.dtype, DBG_LOC);
+        XTensor &peDense = rt.GetTensor({hiddenState.shape[0], _c.indexTopK, _c.ropeHeadDim},
+                                        hiddenState.dtype, DBG_LOC);
         XliteOpGatherSparseKVCache(rt, kCache, peCache, rt._attnBlockTables[0], *topkIndices,
                                    rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens, kDense,
                                    peDense, rt._batch, _c.indexTopK, _c.blockSizes[0],

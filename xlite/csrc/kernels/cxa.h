@@ -20,11 +20,13 @@
 // cache is always paged and walked via swaBlockTables in both modes:
 //   - sparse: paged compressKCache walked via compressBlockTables, with
 //     optional top-k token selection (DSA) driven by topkIndices.
-//   - dense : per-batch contiguous compressKCache; batch b occupies compressed
-//     tokens [b * maxSeqLen, (b + 1) * maxSeqLen) with maxSeqLen == indexTopK,
-//     and compressBlockTables is unused (block id == logical index). The
-//     compress segment is attended causally without top-k masking, clamped to
-//     maxSeqLen.
+//   - dense : per-query-token contiguous compressKCache gathered by
+//     gather_sparse_kv_cache; query token q occupies compressed tokens
+//     [q * maxSeqLen, (q + 1) * maxSeqLen) with maxSeqLen == indexTopK, and
+//     compressBlockTables is unused (block id == logical index). The compress
+//     segment is attended causally without top-k masking, clamped to maxSeqLen.
+//     Decode (query_len == 1) and small prefill (query_len <=
+//     XLITE_SMALL_PREFILL_THRESHOLD) are both supported, gated by the model.
 //
 // Inputs:
 //   q:    [totalQ, nLocalHeads, headDim]    query
@@ -134,21 +136,16 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            // per-batch compress KV view: dense mode takes a subview of the contiguous
-            // cache (batch b starts at b * maxSeqLen compressed tokens, maxSeqLen ==
-            // indexTopK); sparse mode walks the full paged cache through this batch's
-            // block table.
-            GlobalTensor<Dtype> batchCompressKCache = compressKCache;
             __gm__ uint32_t *compressBt = nullptr;
-            if (dense) {
-                batchCompressKCache = compressKCache[batchIdx * maxSeqLen * headDim];
-            } else {
+            if (!dense) {
                 compressBt =
                     (__gm__ uint32_t *)((uint64_t)compressBlockTables +
                                         batchIdx * compressMaxNumBlocks * sizeof(uint32_t));
             }
 
-            uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
+            // dense mode: each query token has its own dense cache row, so tile one
+            // query token at a time (queryTileSize = m0 / nHeads = 1 -> m0 = nHeads).
+            uint32_t m0 = dense ? nHeads : GetOptimalM0(queryLen, cachedLen);
             int queryTileSize = m0 / nHeads;
             if (queryTileSize == 0) {
                 queryTileSize = m0;
@@ -169,6 +166,9 @@ public:
                     queryStart = queryStartLoc[batchIdx];
                 }
                 int queryTaskOffset = queryStart + queryTaskStart;
+
+                GlobalTensor<Dtype> batchCompressKCache =
+                    dense ? compressKCache[queryTaskOffset * maxSeqLen * headDim] : compressKCache;
 
                 // do queryIdx & (0, nHeads)'s QK
                 uint32_t mhOffset = queryTaskOffset * nHeads * headDim;
@@ -249,7 +249,9 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
+            // dense mode: each query token has its own dense cache row, so tile one
+            // query token at a time (queryTileSize = m0 / nHeads = 1 -> m0 = nHeads)
+            uint32_t m0 = dense ? nHeads : GetOptimalM0(queryLen, cachedLen);
             int queryTileSize = m0 / nHeads;
             if (queryTileSize == 0) {
                 queryTileSize = m0;

@@ -2945,6 +2945,8 @@ def gather_sparse_kv_cache(
     pe_cache: torch.Tensor,
     block_tables: torch.Tensor,
     topk_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    lens: torch.Tensor,
     cached_lens: torch.Tensor,
     k_dense_cache: torch.Tensor,
     pe_dense_cache: torch.Tensor,
@@ -2957,15 +2959,17 @@ def gather_sparse_kv_cache(
     compress_ratio: int = 1,
     burst_copy_size: int = 16 * 1024,
 ) -> None:
-    """Gather sparse KV cache into a contiguous dense cache per batch
-    (decode-only: query length 1 per batch; ``index_topk > 0``).
+    """Gather sparse KV cache into a contiguous dense cache per query token
+    (decode (query length 1) and small prefill; ``index_topk > 0``).
 
-    Sparse rows (``num_candidates = (cached_lens[b] + 1) // compress_ratio >
-    index_topk``) are gathered from ``topk_indices`` in any order: consecutive
-    ascending/descending runs in one block form one burst (bounded by
-    ``burst_copy_size``), a descending run lands in ascending token order, and
-    the output holds the top-k **set** (set-semantics consumers). Dense rows
-    gather their causal prefix via the identity template without reading
+    Each query token owns its own dense cache row (``index_topk`` slots). Sparse
+    rows (``num_candidates = (cached_lens[b] + q_idx + 1) // compress_ratio >
+    index_topk``, where ``q_idx`` is the query token's position within its
+    batch) are gathered from its own ``topk_indices`` row in any order:
+    consecutive ascending/descending runs in one block form one burst (bounded
+    by ``burst_copy_size``), a descending run lands in ascending token order,
+    and the output holds the top-k **set** (set-semantics consumers). Dense
+    rows gather their causal prefix via the identity template without reading
     ``topk_indices``, leaving suffix slots untouched (zero-init the output).
     Either channel may be empty (a single-channel kernel variant then runs); at
     least one must be present. Feeds :func:`mla_v2` (``dense=True``) and
@@ -2982,16 +2986,25 @@ def gather_sparse_kv_cache(
             max_num_blocks]`` or 2-D ``[batch, max_num_blocks]`` int32;
             ``max_num_blocks`` is derived internally (2-D: ``shape[1]``,
             1-D: ``len // batch``).
-        topk_indices (torch.Tensor): Top-k token indices, (batch, index_topk),
-            int32, any order for sparse rows; dense rows hold unread dummies.
+        topk_indices (torch.Tensor): Top-k token indices, (total_query_len,
+            index_topk), int32, any order for sparse rows; dense rows hold
+            unread dummies.
+        query_start_loc (torch.Tensor): Per-batch query start offsets into the
+            flattened query-token axis, (batch,), int32 (prefix sum of
+            ``lens``).
+        lens (torch.Tensor): Per-batch query lengths, (batch,), int32;
+            decode is all-ones. The dense cache has ``sum(lens)`` rows
+            (``total_query_len``, one per query token; not a parameter).
         cached_lens (torch.Tensor): Per-batch cached lengths, (batch,), int32.
-        k_dense_cache (torch.Tensor): Output contiguous K cache, (batch,
-            index_topk, kv_heads, kv_lora_rank), bf16, written in place.
-        pe_dense_cache (torch.Tensor): Output contiguous PE cache, (batch,
-            index_topk, kv_heads, rope_head_dim), bf16, written in place.
+        k_dense_cache (torch.Tensor): Output contiguous K cache,
+            (total_query_len, index_topk, kv_heads, kv_lora_rank), bf16,
+            written in place.
+        pe_dense_cache (torch.Tensor): Output contiguous PE cache,
+            (total_query_len, index_topk, kv_heads, rope_head_dim), bf16,
+            written in place.
         batch (int): Batch size.
-        index_topk (int): Top-k tokens per batch (dense length), > 0; chunked
-            in 32-slot tasks, any positive value works (2048 is the
+        index_topk (int): Top-k tokens per query token (dense length), > 0;
+            chunked in 32-slot tasks, any positive value works (2048 is the
             indexer_topk producer convention, not a check).
         block_size (int): KV block size, multiple of 32.
         kv_lora_rank (int): KV LoRA rank, multiple of 16 (:func:`cxa` passes

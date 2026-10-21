@@ -95,21 +95,15 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            // per-batch KV view: dense mode takes a subview of the cache
-            // (batch b starts at its dim-0 pitch, kCacheStride/peCacheStride);
-            // sparse mode walks the full paged cache through this batch's block table.
-            GlobalTensor<Dtype> batchKCache = kCache;
-            GlobalTensor<Dtype> batchPeCache = peCache;
             __gm__ uint32_t *blockTable = nullptr;
-            if (dense) {
-                batchKCache = kCache[batchIdx * kCacheStride];
-                batchPeCache = peCache[batchIdx * peCacheStride];
-            } else {
+            if (!dense) {
                 blockTable = (__gm__ uint32_t *)((uint64_t)blockTables +
                                                  batchIdx * maxNumBlocks * sizeof(uint32_t));
             }
 
-            uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
+            // dense mode: each query token has its own dense cache row, so tile one
+            // query token at a time (queryTileSize = m0 / nHeads = 1 -> m0 = nHeads).
+            uint32_t m0 = dense ? nHeads : GetOptimalM0(queryLen, cachedLen);
             int queryTileSize = m0 / nHeads;
             if (queryTileSize == 0) {
                 queryTileSize = m0;
@@ -133,6 +127,11 @@ public:
                     queryStart = queryStartLoc[batchIdx];
                 }
                 int queryTaskOffset = queryStart + queryTaskStart;
+
+                GlobalTensor<Dtype> batchKCache =
+                    dense ? kCache[queryTaskOffset * kCacheStride] : kCache;
+                GlobalTensor<Dtype> batchPeCache =
+                    dense ? peCache[queryTaskOffset * peCacheStride] : peCache;
 
                 // do queryIdx & (0，nHeads)'s QK
                 uint32_t mhOffset = queryTaskOffset * nHeads;
@@ -208,7 +207,9 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
+            // dense mode: each query token has its own dense cache row, so tile one
+            // query token at a time (queryTileSize = m0 / nHeads = 1 -> m0 = nHeads).
+            uint32_t m0 = dense ? nHeads : GetOptimalM0(queryLen, cachedLen);
             int queryTileSize = m0 / nHeads;
             if (queryTileSize == 0) {
                 queryTileSize = m0;

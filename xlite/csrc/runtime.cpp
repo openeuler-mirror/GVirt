@@ -681,6 +681,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
 
     batchedTokens = 0;
     _maxTotalLens = 0;
+    _maxQueryLen = 0;
     _batch = batch;
     queryStart = 0;
     bool allCached = true;
@@ -692,6 +693,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         queryStartLoc[i] = queryStart;
         queryStart += lens[i];
         _maxTotalLens = totalLens[i] > _maxTotalLens ? totalLens[i] : _maxTotalLens;
+        _maxQueryLen = lens[i] > _maxQueryLen ? lens[i] : _maxQueryLen;
         batchedTokens += lens[i];
         numBlocks[i] = DIV_ROUND_UP(totalLens[i], blockSizes[0]);
         if (cachedLens[i] == 0) {
@@ -702,7 +704,6 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         }
     }
     _hostLens = lens;
-    _decodeStep = !anyMultiToken;
     // Decode only when every request has cache and this step is a single token.
     _linearDecodeStep = allCached && !anyMultiToken && batch > 0;
     _cachedLensHost = cachedLens;

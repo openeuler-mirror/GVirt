@@ -204,7 +204,6 @@ public:
 
     // ATTN
     bool _attnInitialized = false;
-    bool _decodeStep = false;
     // Host-side: true when this step is decode (seqlen==1 and all cached_lens>0).
     // Avoids D2H sync via GetFirstAttnPosition in every linear layer.
     bool _linearDecodeStep = false;
@@ -214,6 +213,7 @@ public:
     std::vector<uint32_t> _cachedLensHost;
     uint32_t _batch;
     uint32_t _maxTotalLens;
+    uint32_t _maxQueryLen;  // max query length across the batch this step (1 = pure decode)
     uint32_t _tileSizeOfCachedKV;
     XTensor
         _attnPosition;  // [batchedTokens] int64, ref: v0/1 -> _position, v2 -> attnMeta.position
