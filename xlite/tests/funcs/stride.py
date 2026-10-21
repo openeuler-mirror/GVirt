@@ -95,11 +95,11 @@ def check_contiguous_guard(x, name):
 x = torch.arange(24, dtype=torch.float32, device="npu:0").reshape(3, 8)
 check_print(x, x.flatten(), "contiguous 2D")
 
-# torch calls this contiguous (size-1 dim), but xlite's strict stride rule does not:
-# the wrap is rejected instead of silently re-deriving a different stride.
+# torch calls this contiguous (size-1 dim); a size-1 dim's stride never affects element
+# addressing, so the wrap derives the contiguous stride and prints the logical values.
 x = torch.arange(12, dtype=torch.float32, device="npu:0").reshape(1, 4, 3).transpose(0, 1)
 assert x.is_contiguous()
-check_rejected(x, "torch-contiguous size-1-dim 3D")
+check_print(x, x.flatten(), "torch-contiguous size-1-dim 3D")
 
 # Dim-0 strided (row pitch) layouts print their logical values (debug output accepts
 # pitches; ops other than the kv-cache paths do not, see the guard tests below).
