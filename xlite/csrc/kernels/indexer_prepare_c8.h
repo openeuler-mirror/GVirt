@@ -352,15 +352,6 @@ __aicore__ inline void indexer_c8_prepare_tile(GM_ADDR kw, GM_ADDR freqs, GM_ADD
     if (isKey) {
         ub.LayerNorm(count, normEps);
     }
-    // TODO: Evaluate removing invalid-row zeroing.
-    for (uint32_t r = 0; r < count; ++r) {
-        int64_t pos = ub.position[curr][isKey ? r : 0];
-        bool valid = isKey ? indexer_c8_valid(pos, ub.slot[curr][r], maxPosition, capacity)
-                           : pos >= 0 && static_cast<uint64_t>(pos) < maxPosition;
-        if (!valid) {
-            vector_dup(ub.x + r * ub.dim, 0.0f, 2, 1, 1, 8, 0);
-        }
-    }
     pipe_barrier(PIPE_V);
     ub.RoPE(count, isKey);
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
