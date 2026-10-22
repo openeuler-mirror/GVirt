@@ -251,6 +251,7 @@ public:
             vdiv(factor, numerator, stats, 1, 1, 1, 1, 8, 8, 8);
         }
         SetMask(count);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
         vconv_f322f16(scale_half, scale, 1, 1, 1, 4, 8);
         set_flag(PIPE_V, PIPE_S, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
@@ -419,11 +420,7 @@ __aicore__ inline void indexer_c8_store_tile(__gm__ bfloat16_t *rotated, GM_ADDR
         CopyUbufToGmAligned((__gm__ half *)scaledWeights + row, ub.scaled_weights,
                             count * sizeof(half));
     }
-    // TODO: Wait for output DMA only when its UB buffers are reused.
-    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-    set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
-    wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
 }
 #endif
 
@@ -472,6 +469,7 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
     IndexerC8Buffers ub;
     ub.Init(weight, bias);
+    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     // Prime both slots; reuse a slot only after its consumer finishes.
     for (uint32_t i = 0; i < MIN(PINGPONG_BUF_NUM, perCore); ++i) {
         indexer_c8_prepare_tile(kw, freqs, positions, slots, q, prepared[i],
@@ -493,6 +491,7 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
             ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | ((curr + 2) << 8));
         }
     }
+    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     pipe_barrier(PIPE_ALL);
 #endif
 }
