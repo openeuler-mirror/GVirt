@@ -26,13 +26,14 @@ public:
                                 GM_ADDR blockTables, uint32_t kCacheStride, uint32_t vCacheStride,
                                 uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize,
                                 uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,
-                                uint32_t tileSizeOfCachedKV)
+                                uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->input.SetGlobalBuffer((__gm__ Dtype *)input);
         this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
         this->vCache.SetGlobalBuffer((__gm__ Dtype *)vCache);
         this->output.SetGlobalBuffer((__gm__ Dtype *)output);
+        this->zeroGm.SetGlobalBuffer((__gm__ Dtype *)zeroGm);
 
         this->queryStartLoc = (__gm__ int32_t *)queryStartLoc;
         this->queryLens = (__gm__ int32_t *)queryLens;
@@ -73,7 +74,7 @@ public:
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
 
         aicHelper.Init(nHeads, nKVHeads, headNumInGroup, headSize, blockSize, kCacheStride,
-                       vCacheStride, tileSizeOfCachedKV);
+                       vCacheStride, tileSizeOfCachedKV, this->zeroGm);
     }
 
     __aicore__ inline void RunAic()
@@ -162,7 +163,8 @@ public:
                                lastQueryTaskOffset + lastQueryTaskLen, lastkvHeadIdx, lastKvOffset,
                                lastKvOffset + lastKvLen, last);
                     aicHelper.RunAicSV(qk[last], this->vCache, lastQueryTaskLen, lastkvHeadIdx,
-                                       lastBlockTable, lastKvOffset, lastKvLen, sv[last], false);
+                                       lastBlockTable, lastKvOffset, lastKvLen, sv[last], false,
+                                       this->zeroGm);
                     ffts_cross_core_sync(PIPE_FIX, updateConfig);
                 }
 
@@ -190,7 +192,8 @@ public:
                        lastQueryTaskOffset + lastQueryTaskLen, lastkvHeadIdx, lastKvOffset,
                        lastKvOffset + lastKvLen, last);
             aicHelper.RunAicSV(qk[last], this->vCache, lastQueryTaskLen, lastkvHeadIdx,
-                               lastBlockTable, lastKvOffset, lastKvLen, sv[last], false);
+                               lastBlockTable, lastKvOffset, lastKvLen, sv[last], false,
+                               this->zeroGm);
             ffts_cross_core_sync(PIPE_FIX, updateConfig);
         }
     }
@@ -406,6 +409,7 @@ private:
     GlobalTensor<float> lastMax;
     GlobalTensor<float> lastSum;
     GlobalTensor<Dtype> output;
+    GlobalTensor<Dtype> zeroGm;
 
     __gm__ int32_t *queryStartLoc;
     __gm__ int32_t *queryLens;
@@ -426,18 +430,19 @@ private:
     AicHelper<Dtype> aicHelper;
 };
 
-#define FLASH_ATTN_FUNC_DEFINE(dtype)                                                            \
-    extern "C" __global__ __aicore__ void flash_attention_##dtype(                               \
-        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR sv, GM_ADDR max,      \
-        GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync, GM_ADDR output,             \
-        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,       \
-        uint32_t kCacheStride, uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,        \
-        uint32_t headSize, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,            \
-        uint32_t tileSizeOfCachedKV)                                                             \
-    {                                                                                            \
-        FlashAttention<dtype> op;                                                                \
-        op.Init(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, sync, output,         \
-                queryStartLoc, queryLens, cachedLens, blockTables, kCacheStride, vCacheStride,   \
-                nHeads, nKVHeads, headSize, blockSize, batch, maxNumBlocks, tileSizeOfCachedKV); \
-        op.Run();                                                                                \
+#define FLASH_ATTN_FUNC_DEFINE(dtype)                                                           \
+    extern "C" __global__ __aicore__ void flash_attention_##dtype(                              \
+        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR sv, GM_ADDR max,     \
+        GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync, GM_ADDR output,            \
+        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,      \
+        uint32_t kCacheStride, uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,       \
+        uint32_t headSize, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,           \
+        uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)                                            \
+    {                                                                                           \
+        FlashAttention<dtype> op;                                                               \
+        op.Init(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, sync, output,        \
+                queryStartLoc, queryLens, cachedLens, blockTables, kCacheStride, vCacheStride,  \
+                nHeads, nKVHeads, headSize, blockSize, batch, maxNumBlocks, tileSizeOfCachedKV, \
+                zeroGm);                                                                        \
+        op.Run();                                                                               \
     }

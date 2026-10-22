@@ -191,6 +191,7 @@ public:
     XTensor _dsaTopkBuffer;  // int32, buffer for storing topk results, allocated via aclrtMalloc
     XTensor *dsaPerLayerTopk = nullptr;  // ptr to the **current** layer's topk result, either a
                                          // nullptr (no topk needed) or a ptr to _dsaTopkBuffer
+    XTensor _attnZeroBuffer;
 
     XcclComm *_tpXcclComm = nullptr;
     XcclComm *_dpXcclComm = nullptr;
