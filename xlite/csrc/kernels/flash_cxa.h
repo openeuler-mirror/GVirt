@@ -37,13 +37,14 @@ public:
                                 uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,
                                 GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale,
                                 uint32_t windowSize, uint32_t compressRatio, uint32_t indexTopK,
-                                GM_ADDR topkIndices, uint32_t tileSizeOfCachedKV)
+                                GM_ADDR topkIndices, uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
         this->swaKCache.SetGlobalBuffer((__gm__ Dtype *)swaKCache);
         this->compressKCache.SetGlobalBuffer((__gm__ Dtype *)compressKCache);
         this->output.SetGlobalBuffer((__gm__ Dtype *)output);
+        this->zeroGm.SetGlobalBuffer((__gm__ Dtype *)zeroGm);
 
         this->swaBlockTables = (__gm__ int32_t *)swaBlockTables;
         this->compressBlockTables = (__gm__ int32_t *)compressBlockTables;
@@ -87,7 +88,7 @@ public:
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
 
         svk0 = aicHelper.Init(nHeads, headDim, swaBlockSize, compressBlockSize, windowSize,
-                              compressRatio, qkStride, swaSegWidth, false);
+                              compressRatio, qkStride, swaSegWidth, false, this->zeroGm);
     }
 
     __aicore__ inline void RunAic()
@@ -453,6 +454,7 @@ private:
     GlobalTensor<float> lastMax;
     GlobalTensor<float> lastSum;
     GlobalTensor<Dtype> output;
+    GlobalTensor<Dtype> zeroGm;
 
     CxaAicHelper<Dtype> aicHelper;
 
@@ -488,13 +490,13 @@ private:
         GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,                 \
         GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,  \
         uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices,                          \
-        uint32_t tileSizeOfCachedKV)                                                              \
+        uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)                                              \
     {                                                                                             \
         FlashCXA<dtype> op;                                                                       \
         op.Init(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables, swaBlockSize,  \
                 compressBlockSize, swaMaxNumBlocks, compressMaxNumBlocks, attnSink, qk, sv, max,  \
                 sum, lastMax, lastSum, sync, output, batch, queryStartLoc, queryLens, cachedLens, \
                 nHeads, headDim, scale, windowSize, compressRatio, indexTopK, topkIndices,        \
-                tileSizeOfCachedKV);                                                              \
+                tileSizeOfCachedKV, zeroGm);                                                      \
         op.Run();                                                                                 \
     }

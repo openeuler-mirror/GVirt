@@ -911,7 +911,8 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, output.ptr,
                  queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, kCache.stride[0],
-                 vCache.stride[0], nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlocks);
+                 vCache.stride[0], nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlocks,
+                 rt._attnZeroBuffer.ptr);
 }
 
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
@@ -939,7 +940,8 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr,
                  sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, kCache.stride[0], vCache.stride[0],
-                 nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlocks, tileSizeOfCachedKV);
+                 nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlocks, tileSizeOfCachedKV,
+                 rt._attnZeroBuffer.ptr);
 }
 
 void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressKCache,
@@ -975,7 +977,8 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
                  compressBlockTables.ptr, swaBlockSize, dense ? 0 : compressBlockSize,
                  swaMaxNumBlocks, compressMaxNumBlocks, attnSink.ptr, scores.ptr, output.ptr, batch,
                  queryStartLoc.ptr, lens.ptr, cachedLens.ptr, nHeads, headDim, scale, windowSize,
-                 kvSize, compressRatio, indexTopK, topkIndices.ptr, dense ? 1u : 0u);
+                 kvSize, compressRatio, indexTopK, topkIndices.ptr, dense ? 1u : 0u,
+                 rt._attnZeroBuffer.ptr);
 }
 
 // Unified MLA decode kernel entry. dense=false walks the paged KV cache via
@@ -1008,7 +1011,7 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
             rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
             qk.ptr, oAbsorb.ptr, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
             nHeads, ropeHeadDim, kvLoraRank, blockSize, batch, maxSeqLen, scale, topK,
-            kCache.stride[0], peCache.stride[0], dense ? 1u : 0u);
+            kCache.stride[0], peCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1043,7 +1046,7 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
             qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, oAbsorb.ptr,
             queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
             kvLoraRank, blockSize, batch, maxNumBlocks, scale, tileSizeOfCachedKV, topK,
-            kCache.stride[0], peCache.stride[0]);
+            kCache.stride[0], peCache.stride[0], rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1091,7 +1094,7 @@ void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &comp
             compressMaxNumBlocks, attnSink.ptr, qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr,
             lastSum.ptr, sync.ptr, output.ptr, batch, queryStartLoc.ptr, lens.ptr, cachedLens.ptr,
             nHeads, headDim, scale, windowSize, compressRatio, indexTopK, topkIndices.ptr,
-            tileSizeOfCachedKV);
+            tileSizeOfCachedKV, rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(q) + XT_STR(swaKCache) + XT_STR(compressKCache) +
                               XT_STR(qk) + XT_STR(sv) + XT_STR(output);

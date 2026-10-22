@@ -60,13 +60,14 @@ public:
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
                                 uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK,
-                                GM_ADDR topkIndices, uint32_t dense)
+                                GM_ADDR topkIndices, uint32_t dense, GM_ADDR zeroGm)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
         this->swaKCache.SetGlobalBuffer((__gm__ Dtype *)swaKCache);
         this->compressKCache.SetGlobalBuffer((__gm__ Dtype *)compressKCache);
         this->output.SetGlobalBuffer((__gm__ Dtype *)output);
+        this->zeroGm.SetGlobalBuffer((__gm__ Dtype *)zeroGm);
 
         this->swaBlockTables = (__gm__ int32_t *)swaBlockTables;
         this->compressBlockTables = (__gm__ int32_t *)compressBlockTables;
@@ -100,9 +101,9 @@ public:
                                         block_idx * XLITE_MAX_M0 * qkStride +
                                         block_num * XLITE_MAX_M0 * qkStride);
 
-        this->svk0 =
-            aicHelper.Init(nHeads, headDim, swaBlockSize, this->dense ? 0 : compressBlockSize,
-                           windowSize, compressRatio, qkStride, swaSegWidth, this->dense);
+        this->svk0 = aicHelper.Init(nHeads, headDim, swaBlockSize,
+                                    this->dense ? 0 : compressBlockSize, windowSize, compressRatio,
+                                    qkStride, swaSegWidth, this->dense, this->zeroGm);
     }
 
     __aicore__ inline void RunAic()
@@ -358,6 +359,7 @@ private:
     GlobalTensor<Dtype> compressKCache;
     GlobalTensor<Dtype> scores[PINGPONG_BUF_NUM];
     GlobalTensor<Dtype> output;
+    GlobalTensor<Dtype> zeroGm;
 
     __gm__ int32_t *queryStartLoc;
     __gm__ int32_t *queryLens;
@@ -394,12 +396,12 @@ private:
         GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,                  \
         GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,   \
         uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices,          \
-        uint32_t dense)                                                                            \
+        uint32_t dense, GM_ADDR zeroGm)                                                            \
     {                                                                                              \
         CXA<dtype> op;                                                                             \
         op.Init(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables, swaBlockSize,   \
                 compressBlockSize, swaMaxNumBlocks, compressMaxNumBlocks, attnSink, scores,        \
                 output, batch, queryStartLoc, queryLens, cachedLens, nHeads, headDim, scale,       \
-                windowSize, kvSize, compressRatio, indexTopK, topkIndices, dense);                 \
+                windowSize, kvSize, compressRatio, indexTopK, topkIndices, dense, zeroGm);         \
         op.Run();                                                                                  \
     }

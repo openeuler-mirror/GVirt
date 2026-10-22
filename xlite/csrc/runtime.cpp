@@ -121,6 +121,13 @@ void XRuntime::Init(size_t sizeMB)
         _graphCommEnabled = false;
     }
 
+    uint64_t zeroSize = 1ull << 20;  // 1M bytes, enough for 128*512*2=131072 bytes (bf16) or
+                                     // 128*512*4=262144 bytes (fp16)
+    void *zeroPtr = nullptr;
+    CHECK_ACL(aclrtMalloc(&zeroPtr, zeroSize, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _attnZeroBuffer.Init({zeroSize / sizeof(BF16)}, BF16, zeroPtr);
+    CHECK_ACL(aclrtMemset(zeroPtr, zeroSize, 0, zeroSize));
+
     _inited = true;
 }
 
@@ -196,6 +203,9 @@ XRuntime::~XRuntime(void)
     }
     if (_dsaTopkBuffer.ptr) {
         (void)aclrtFree(_dsaTopkBuffer.ptr);
+    }
+    if (_attnZeroBuffer.ptr) {
+        (void)aclrtFree(_attnZeroBuffer.ptr);
     }
 
     if (!_initOutside) {

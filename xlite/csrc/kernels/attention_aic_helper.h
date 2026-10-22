@@ -22,7 +22,8 @@ public:
 
     __aicore__ inline void Init(uint32_t nHeadsV, uint32_t nKVHeadsV, uint32_t headNumInGroupV,
                                 uint32_t headSizeV, uint32_t blockSizeV, uint32_t kCacheStrideV,
-                                uint32_t vCacheStrideV, uint32_t qkStrideV)
+                                uint32_t vCacheStrideV, uint32_t qkStrideV,
+                                GlobalTensor<Dtype> zeroGm)
     {
         nHeads = nHeadsV;
         nKVHeads = nKVHeadsV;
@@ -82,6 +83,18 @@ public:
         off = 0;
         l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+
+#ifdef __DAV_C220_CUBE__
+        constexpr int kBs = 32 / sizeof(Dtype);
+        int kBlockPad = ROUND_UP(cubeKvTile, kBs);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + i);
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + i);
+            CopyGmToL1Nd2Nz(l1bBuf[i], zeroGm, kBlockPad, headSize, headSize, kBlockPad);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + i);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + i);
+        }
+#endif
     }
 
     /*
@@ -182,7 +195,7 @@ public:
     __aicore__ inline void RunAicSV(GlobalTensor<Dtype> qk, GlobalTensor<Dtype> vCache,
                                     int queryLen, int kvHeadIdx, __gm__ uint32_t *blockTable,
                                     int kvOffset, int kvLen, GlobalTensor<Dtype> out,
-                                    bool gqaScatter)
+                                    bool gqaScatter, GlobalTensor<Dtype> zeroGm)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mActual = queryLen * headNumInGroup;
@@ -225,7 +238,7 @@ public:
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curIdx);
             CopyGmToL1Nd2Nz(l1bBuf[curIdx],
                             vCache[block * vCacheStride + rowInBlock * kvMemSize + kvHeadOffset],
-                            kBlockPad, headSize, kvMemSize, kBlockPad);
+                            kSize, headSize, kvMemSize, kBlockPad);
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curIdx);
 
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curIdx);

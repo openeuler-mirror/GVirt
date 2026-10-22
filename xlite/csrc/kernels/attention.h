@@ -27,12 +27,13 @@ public:
                                 GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t kCacheStride,
                                 uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,
                                 uint32_t headSize, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlocks)
+                                uint32_t maxNumBlocks, GM_ADDR zeroGm)
     {
         this->input.SetGlobalBuffer((__gm__ Dtype *)input);
         this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
         this->vCache.SetGlobalBuffer((__gm__ Dtype *)vCache);
         this->output.SetGlobalBuffer((__gm__ Dtype *)output);
+        this->zeroGm.SetGlobalBuffer((__gm__ Dtype *)zeroGm);
 
         this->queryStartLoc = (__gm__ int32_t *)queryStartLoc;
         this->queryLens = (__gm__ int32_t *)queryLens;
@@ -55,7 +56,7 @@ public:
                                     block_num * XLITE_MAX_M0 * maxSeqLen);
 
         aicHelper.Init(nHeads, nKVHeads, headNumInGroup, headSize, blockSize, kCacheStride,
-                       vCacheStride, maxSeqLen);
+                       vCacheStride, maxSeqLen, this->zeroGm);
     }
 
     __aicore__ inline void RunAic()
@@ -134,7 +135,8 @@ public:
                     dbg_printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n",
                                GetBlockIdx(), lastkvHeadIdx, lastCalcLen, lastQkIdx);
                     aicHelper.RunAicSV(qk[lastQkIdx], this->vCache, lastQueryTaskLen, lastkvHeadIdx,
-                                       lastBlockTable, 0, lastCalcLen, output[lastOutOffset], true);
+                                       lastBlockTable, 0, lastCalcLen, output[lastOutOffset], true,
+                                       this->zeroGm);
                 }
 
                 lastOutOffset = queryTaskOffset * headSize * nHeads + kvHeadOffset;
@@ -157,7 +159,8 @@ public:
             dbg_printf("block%d: do SV kvHeadIdx %u calcLen %u, use %d qk buf\n", GetBlockIdx(),
                        lastkvHeadIdx, lastCalcLen, lastQkIdx);
             aicHelper.RunAicSV(qk[lastQkIdx], this->vCache, lastQueryTaskLen, lastkvHeadIdx,
-                               lastBlockTable, 0, lastCalcLen, output[lastOutOffset], true);
+                               lastBlockTable, 0, lastCalcLen, output[lastOutOffset], true,
+                               this->zeroGm);
         }
     }
 
@@ -259,6 +262,7 @@ private:
     GlobalTensor<Dtype> vCache;
     GlobalTensor<Dtype> qk[PINGPONG_BUF_NUM];
     GlobalTensor<Dtype> output;
+    GlobalTensor<Dtype> zeroGm;
 
     __gm__ int32_t *queryStartLoc;
     __gm__ int32_t *queryLens;
@@ -284,11 +288,12 @@ private:
         GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output,              \
         GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,      \
         uint32_t kCacheStride, uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,       \
-        uint32_t headSize, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks)           \
+        uint32_t headSize, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,           \
+        GM_ADDR zeroGm)                                                                         \
     {                                                                                           \
         Attention<dtype> op;                                                                    \
         op.Init(input, kCache, vCache, qk, output, queryStartLoc, queryLens, cachedLens,        \
                 blockTables, kCacheStride, vCacheStride, nHeads, nKVHeads, headSize, blockSize, \
-                batch, maxNumBlocks);                                                           \
+                batch, maxNumBlocks, zeroGm);                                                   \
         op.Run();                                                                               \
     }

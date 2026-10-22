@@ -17,7 +17,7 @@ public:
     __aicore__ inline int Init(uint32_t nHeadsV, uint32_t headDimV, uint32_t swaBlockSizeV,
                                uint32_t compressBlockSizeV, uint32_t windowSizeV,
                                uint32_t compressRatioV, uint32_t qkStrideV, uint32_t swaSegWidthV,
-                               bool denseV)
+                               bool denseV, GlobalTensor<Dtype> zeroGm)
     {
         nHeads = nHeadsV;
         headDim = headDimV;
@@ -115,6 +115,17 @@ public:
         svl0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
         off += svL0cSize;
 
+#ifdef __DAV_C220_CUBE__
+        constexpr int kBs = 32 / sizeof(Dtype);
+        int kBlockPad = ROUND_UP(svwk0 > 2 * svck0 ? svwk0 : 2 * svck0, kBs);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + i);
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + i);
+            CopyGmToL1Nd2Nz(ktl1bBuf[i], zeroGm, kBlockPad, svn0, svn0, kBlockPad);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + i);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + i);
+        }
+#endif
         return svck0;
     }
 
@@ -446,7 +457,7 @@ public:
                     // copy SWK(T) (svwn0, kSize) to L1
                     CopyGmToL1Nd2Nz(ktl1bBuf[pingpongL1B],
                                     swaKCache[(block * svwk0 + blockOffset) * headDim + nOffset],
-                                    kBlockPad, nSize, headDim, kBlockPad);
+                                    kSize, nSize, headDim, kBlockPad);
 
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
@@ -523,8 +534,8 @@ public:
                             // dense cache: contiguous layout, single copy
                             CopyGmToL1Nd2Nz(
                                 ktl1bBuf[pingpongL1B],
-                                compressKCache[(kvOffset + kOffset) * headDim + nOffset],
-                                kRemBlockPad, nSize, headDim, L1BkRemBlockPad);
+                                compressKCache[(kvOffset + kOffset) * headDim + nOffset], kRemSize,
+                                nSize, headDim, L1BkRemBlockPad);
                         } else {
                             // paged cache: per-block lookup, multi-block copy
                             for (int bid = 0; bid < DIV_ROUND_UP(kRemSize, compressBlockSize);
@@ -542,7 +553,7 @@ public:
                                     compressKCache[(block * compressBlockSize + blockRemainder) *
                                                        headDim +
                                                    nOffset],
-                                    kRemBlockPadTmp, nSize, headDim, L1BkRemBlockPad);
+                                    kRemSizeTmp, nSize, headDim, L1BkRemBlockPad);
                             }
                         }
 

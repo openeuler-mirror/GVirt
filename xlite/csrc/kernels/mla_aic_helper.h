@@ -30,7 +30,7 @@ public:
     // kCacheStride/peCacheStride: dim-0 pitches (elements) of the paged caches.
     __aicore__ inline int Init(uint32_t nHeadsV, uint32_t ropeHeadDimV, uint32_t kvLoraRankV,
                                uint32_t blockSizeV, uint32_t kCacheStrideV, uint32_t peCacheStrideV,
-                               uint32_t qkStrideV, bool denseV)
+                               uint32_t qkStrideV, bool denseV, GlobalTensor<Dtype> zeroGm)
     {
         nHeads = nHeadsV;
         ropeHeadDim = ropeHeadDimV;
@@ -140,6 +140,17 @@ public:
         svl0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
         svl0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
 
+#ifdef __DAV_C220_CUBE__
+        constexpr int kBs = 32 / sizeof(Dtype);
+        int kRemBlockPad = ROUND_UP(2 * svk0, kBs);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + i);
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + i);
+            CopyGmToL1Nd2Nz(aktl1bBuf[i], zeroGm, kRemBlockPad, svn0, svn0, kRemBlockPad);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + i);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + i);
+        }
+#endif
         return svk0;
     }
 
@@ -403,7 +414,7 @@ public:
                         // dense cache: contiguous layout, single copy
                         CopyGmToL1Nd2Nz(aktl1bBuf[pingpongL1B],
                                         kCache[(kvOffset + kOffset) * kvLoraRank + nOffset],
-                                        kRemBlockPad, nSize, kvLoraRank, L1BkRemBlockPad);
+                                        kRemSize, nSize, kvLoraRank, L1BkRemBlockPad);
                     } else {
                         // paged cache: per-block lookup, multi-block copy
                         for (int bid = 0; bid < DIV_ROUND_UP(kRemSize, blockSize); bid++) {
@@ -418,7 +429,7 @@ public:
                             CopyGmToL1Nd2Nz(aktl1bBuf[pingpongL1B][bid * blockSize * kBlockSize],
                                             kCache[block * kCacheStride +
                                                    blockRemainder * kvLoraRank + nOffset],
-                                            kRemBlockPadTmp, nSize, kvLoraRank, L1BkRemBlockPad);
+                                            kRemSizeTmp, nSize, kvLoraRank, L1BkRemBlockPad);
                         }
                     }
 

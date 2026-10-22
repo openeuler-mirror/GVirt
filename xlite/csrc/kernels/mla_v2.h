@@ -32,7 +32,8 @@ public:
                                 GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                                 uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
                                 uint32_t maxSeqLen, float scale, uint32_t topK,
-                                uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense)
+                                uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense,
+                                GM_ADDR zeroGm)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qAbsorb.SetGlobalBuffer((__gm__ Dtype *)qAbsorb);
@@ -41,6 +42,7 @@ public:
         this->peCache.SetGlobalBuffer((__gm__ Dtype *)peCache);
         this->topkIndices = (__gm__ int32_t *)topkIndices;
         this->oAbsorb.SetGlobalBuffer((__gm__ Dtype *)oAbsorb);
+        this->zeroGm.SetGlobalBuffer((__gm__ Dtype *)zeroGm);
 
         this->queryStartLoc = (__gm__ int32_t *)queryStartLoc;
         this->queryLens = (__gm__ int32_t *)queryLens;
@@ -65,7 +67,7 @@ public:
                                     block_num * XLITE_MAX_M0 * qkStride);
 
         svk0 = aicHelper.Init(nHeads, ropeHeadDim, kvLoraRank, this->dense ? 0 : blockSize,
-                              kCacheStride, peCacheStride, qkStride, this->dense);
+                              kCacheStride, peCacheStride, qkStride, this->dense, this->zeroGm);
     }
 
     __aicore__ inline void RunAic()
@@ -308,6 +310,7 @@ private:
     __gm__ int32_t *topkIndices;
     GlobalTensor<Dtype> oAbsorb;
     GlobalTensor<Dtype> qk[PINGPONG_BUF_NUM];
+    GlobalTensor<Dtype> zeroGm;
 
     MlaAicHelper<Dtype> aicHelper;
 
@@ -337,11 +340,11 @@ private:
         GM_ADDR qk, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, \
         GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank,           \
         uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen, float scale, uint32_t topK,        \
-        uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense)                             \
+        uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense, GM_ADDR zeroGm)             \
     {                                                                                              \
         MLAV2<dtype> op;                                                                           \
         op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb, queryStartLoc, queryLens,  \
                 cachedLens, blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,        \
-                maxSeqLen, scale, topK, kCacheStride, peCacheStride, dense);                       \
+                maxSeqLen, scale, topK, kCacheStride, peCacheStride, dense, zeroGm);               \
         op.Run();                                                                                  \
     }
