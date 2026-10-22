@@ -12,7 +12,7 @@ out = int8(x * scale_reciprocal + offset)
 
 ## 输入输出参数
 
-Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp` 的 `Quant`,关键字 `m.def("quant"`)。kernel 签名见 `csrc/kernels/quant.h` 的 `quant_to_i8`:
+Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2887`)。kernel 签名见 `QUANT_FUNC_DEFINE` 宏([csrc/kernels/quant.h](../../csrc/kernels/quant.h)):
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -47,17 +47,19 @@ host 侧仅接受 `x.dtype == BF16`,kernel 入口符号为 `quant_static_bfloat1
 
 | 缓冲 | dtype | 用途 |
 |---|---|---|
-| x_ping / x_pong | bfloat16 | 激活行数据 |
-| xf32_ping / xf32_pong | float | BF16→FP32 中间 |
-| xf16_ping / xf16_pong | half | FP32→FP16 中间(量化前中转) |
-| z_ping / z_pong | int8 | INT8 结果 |
-| scale/offset(_fp32)_ping/pong | bfloat16 / float | 每 tile 的 scale/offset 原值及 fp32 转换 |
+| x1 / x2 | bfloat16 | 行/tile 输入 ping-pong |
+| xf32 | float | BF16→FP32 转换结果(单份,phase1/phase2 串行复用) |
+| xAbs | float | abs 中间,ReduceMax 结果落点;两路径均复用为 `scaleUb` 标量中转 |
+| zf16 | half | FP32→FP16 中转(单份) |
+| z1 / z2 | int8 | INT8 输出 ping-pong |
+| rowAbsUb | float(1 个) | tiled path 跨 tile absmax 归约累点(`vmax` 合并;fast path 不使用) |
+| sum_addr | - | UB 末尾指针对齐断言 |
 
-scale/offset 使用独立的 ping-pong(事件 EVENT_ID2/ID3),与行数据的事件(ID0/ID1)解耦:进入新 k_tile 时,当前 tile 的 scale/offset 在所有行间复用,同时预取下一 tile 的 scale/offset。
+UB 容量与 ReduceMax 维度上限由两条 `static_assert` 守护(quant.h:28-36)。
 
-### 流水线同步(MTE2 / V / MTE3)
+### 流水线同步
 
-三管线事件协议,两组事件ID:
+每行进入前预置 4 个 ping-pong flag(`V→MTE2` ID0/ID1、`MTE3→V` ID0/ID1,quant.h:73-76),函数末尾统一 drain(quant.h:226-229)。
 
 - 行数据链:`V→MTE2(EVENT_ID0/1)` 释放 x 缓冲 → `copy_gm_to_ubuf_align_b16` → `MTE2→V` 就绪 → `vconv_bf162f32` 后 `V→MTE2` 再释放;量化完成 `V→MTE3` → z 缓冲写出 GM 后 `MTE3→V` 回收(`csrc/kernels/quant.h` 的 `quant_to_i8`)。
 - scale/offset 链:同样以 EVENT_ID2/ID3 ping-pong,跨 tile 预取(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `scale_offset_event_id`)。
@@ -77,3 +79,5 @@ scale/offset 使用独立的 ping-pong(事件 EVENT_ID2/ID3),与行数据的事�
 
 - 尾部 tile(`k_size < k_tile`):搬运按实际 `k_size` 字节;计算侧 `k_size_pad = ROUND_UP(k_size, VECTOR_MAX_NUM_OF_BF16)` 补齐到向量指令粒度(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `k_size_pad = ROUND_UP`)。
 - m 不足 block_num 时循环自然跳过空闲核。
+- host 侧 `x.numel == 0` 直接返回(op.cpp:1450)。
+- host 侧拒绝 `k % 32 != 0`(ragged k),kernel 内 `assert(this->k % 32 == 0)` 守护。

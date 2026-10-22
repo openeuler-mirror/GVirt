@@ -2302,6 +2302,35 @@ void FusionOperatorMatmulDequantPipeline(XRuntime &rt, at::Tensor &x, at::Tensor
                                                transpose, _outScale, _num);
     rt.Synchronize();
 }
+void FusedQuantMatmulDequant(XRuntime &rt, at::Tensor &x,
+                             const std::optional<at::Tensor> &quantScaleRec,
+                             const std::optional<at::Tensor> &quantOffset, at::Tensor &weight,
+                             at::Tensor &out, const std::optional<at::Tensor> &bias,
+                             const std::optional<at::Tensor> &deqScale, at::Tensor &xQuant,
+                             const std::optional<at::Tensor> &outScale,
+                             const std::optional<at::Tensor> &num, bool dynQuant, bool weightNZ,
+                             bool transpose)
+{
+    XTensor _x, _quantScaleRec, _quantOffset, _weight, _out, _bias, _deqScale, _xQuant, _outScale,
+        _num;
+
+    // The std::optional overload of InitXTensor is a no-op for nullopt, which
+    // leaves the XTensor ptr-null ("absent") for the op-level gates.
+    InitXTensor(_x, x);
+    InitXTensor(_quantScaleRec, quantScaleRec);
+    InitXTensor(_quantOffset, quantOffset);
+    InitXTensor(_weight, weight);
+    InitXTensor(_out, out);
+    InitXTensor(_xQuant, xQuant);
+    InitXTensor(_bias, bias);
+    InitXTensor(_deqScale, deqScale);
+    InitXTensor(_outScale, outScale);
+    InitXTensor(_num, num);
+    XliteOpFusedQuantMatmulDequant(rt, _x, _quantScaleRec, _quantOffset, _weight, _out, _bias,
+                                   _deqScale, _xQuant, _outScale, _num, dynQuant, weightNZ,
+                                   transpose);
+    rt.Synchronize();
+}
 
 void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &weight,
                    at::Tensor &scores, at::Tensor &queryStartLoc, at::Tensor &lens,
@@ -3226,6 +3255,12 @@ PYBIND11_MODULE(_C, m)
           "fusion_operator_matmul_dequant_pipeline", py::arg("rt"), py::arg("x"), py::arg("weight"),
           py::arg("out"), py::arg("bias"), py::arg("deq_scale"), py::arg("weight_nz") = false,
           py::arg("transpose") = false, py::arg("out_scale"), py::arg("num"));
+    m.def("fused_quant_matmul_dequant", &FusedQuantMatmulDequant, "fused_quant_matmul_dequant",
+          py::arg("rt"), py::arg("x"), py::arg("quant_scale_rec") = std::nullopt,
+          py::arg("quant_offset") = std::nullopt, py::arg("weight"), py::arg("out"),
+          py::arg("bias") = std::nullopt, py::arg("deq_scale") = std::nullopt, py::arg("x_quant"),
+          py::arg("out_scale") = std::nullopt, py::arg("num") = std::nullopt, py::arg("dyn_quant"),
+          py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("dequant", &DeQuant, py::arg("rt"), py::arg("in_"), py::arg("scale"), py::arg("out"),
           py::arg("has_scale"));
     m.def("mla_v2", &MLAV2, py::arg("rt"), py::arg("q_with_qr"), py::arg("qr"), py::arg("k_cache"),
