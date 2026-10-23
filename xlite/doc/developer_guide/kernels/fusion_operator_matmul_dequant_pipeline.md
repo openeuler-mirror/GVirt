@@ -29,7 +29,9 @@ fusion_operator_matmul_dequant_pipeline_##dtype(x, weight, out, bias, weightScal
 
 Python 调用方式（`tests/kernels/fusion_operator_matmul_dequant_pipeline.py` 的 `run_case`，调用 `fusion_operator_matmul_dequant_pipeline`，关键字 `fused_out`）：`fusion_operator_matmul_dequant_pipeline(rt, x, weight, out, bias, scale, weight_nz, transpose, out_scale, num)`。host 侧 `XliteOpFusionOperatorMatmulDequantPipeline`（`csrc/op.cpp` 的 `XliteOpFusionOperatorMatmulDequantPipeline`）做 dtype/shape/参数完整性校验后直接 launch，不经过任何 dtype 视图转换。
 
-模型路径开关：`XliteOpMatmulDeQuant` 中 `enableFused = rt.enableFusedDenseW8A8 && shape 为 2D && weightScale 非空`（`csrc/op.cpp` 的 `XliteOpMatmulDeQuant`，关键字 `enableFused = rt.enableFusedDenseW8A8`），运行时由环境变量 `XLITE_FUSED_DENSE_W8A8` 开启（`csrc/runtime.cpp` 的 `XRuntime::Init`，关键字 `XLITE_FUSED_DENSE_W8A8`）；关闭时走串行 `matmul_dequant → dequant` fallback。
+模型路径开关：`XliteOpMatmulDeQuant`（`csrc/op.cpp`）按 shape **自动**决定走融合还是串行路径，不再由环境变量控制。判定条件为收益门限 `FusedMatmulDeQuantBeneficial(m, k, dynQuant)`（替代原 `XLITE_FUSED_DENSE_W8A8` 全局开关，门限来自 910B3 气泡校准的单算子收益实测——融合 MIX 核有 ~3µs 固定气泡，小 shape 收益为负）：`m ≥ 8192` 恒融合；动态量化（outScale 非空，per-token dequant）时 `m ≥ 2048 && k ≥ 2048` 融合；静态量化时 `m ≥ 6144 && k ≥ 1024` 融合。
+
+门限不满足即走串行 `matmul_dequant → dequant` fallback。
 
 ## 支持的数据类型
 
@@ -114,6 +116,6 @@ AIV 2b/2b+1:  CrossCoreWaitFlag(8)
 | AIV 成对 mTiles（needPad） | `csrc/kernels/dequant.h` 的 `Dequant::TaskTilesInit` |
 | kernel 入口（MIX_AIC_1_2） | `csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的宏 `FUSION_OPERATOR_MATMUL_DEQUANT_PIPELINE_FUNC_DEFINE` |
 | host 侧封装与校验 | `csrc/op.cpp` 的 `XliteOpFusionOperatorMatmulDequantPipeline` |
-| 模型路由开关（enableFused） | `csrc/op.cpp` 的 `XliteOpMatmulDeQuant`、`csrc/runtime.cpp` 的 `XRuntime::Init`（关键字 `XLITE_FUSED_DENSE_W8A8`） |
+| 模型路由开关（enableFused）与收益门限 | `csrc/op.cpp` 的 `XliteOpMatmulDeQuant`、`FusedMatmulDeQuantBeneficial` |
 | Python 绑定 | `csrc/_C.cpp` 的 `FusionOperatorMatmulDequantPipeline` 与 `m.def("fusion_operator_matmul_dequant_pipeline", ...)` 绑定、`xlite/_C.pyi` 的 `fusion_operator_matmul_dequant_pipeline` |
 | 正确性测试 | `tests/kernels/fusion_operator_matmul_dequant_pipeline.py` |
