@@ -1857,7 +1857,10 @@ void SoftmaxTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
     InitXTensor(_scores, scores, DBG_LOC);
     InitXTensor(_indices, indices, DBG_LOC);
     InitXTensor(_outWeights, outWeights, DBG_LOC);
-    std::vector<size_t> sizes(scores.sizes().vec().begin(), scores.sizes().vec().end());
+    // .vec() returns a temporary; taking begin()/end() from two separate temporaries is UB
+    // (garbage distance -> length_error). Materialise one named vector first.
+    auto scoresSizesVec = scores.sizes().vec();
+    std::vector<size_t> sizes(scoresSizesVec.begin(), scoresSizesVec.end());
     _outRouting.Init(sizes, BIT1, TensorPtr(outRouting));
     XliteOpSoftmaxTopK(rt, _scores, _indices, _outWeights, _outRouting, topK, normTopKProb);
     rt.Synchronize();
@@ -1873,7 +1876,9 @@ void SigmoidTopK(XRuntime &rt, at::Tensor &scores, at::Tensor &indices, at::Tens
     InitXTensor(_bias, bias, DBG_LOC);
     InitXTensor(_indices, indices, DBG_LOC);
     InitXTensor(_outWeights, outWeights, DBG_LOC);
-    std::vector<size_t> sizes(scores.sizes().vec().begin(), scores.sizes().vec().end());
+    // Same UB fix as SoftmaxTopK: one named vector, not two temporaries' iterators.
+    auto scoresSizesVec = scores.sizes().vec();
+    std::vector<size_t> sizes(scoresSizesVec.begin(), scoresSizesVec.end());
     _outRouting.Init(sizes, BIT1, TensorPtr(outRouting));
     XliteOpSigmoidTopK(rt, _scores, _indices, _bias, scale, _outWeights, _outRouting, nGroup,
                        nTopkGroup, topK, normTopKProb);

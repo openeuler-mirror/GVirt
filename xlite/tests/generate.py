@@ -169,6 +169,9 @@ def main(
     elif model_type == "glm4_moe":
         from tests.models.glm4_moe import ModelArgs
         from tests.models.glm4_moe import GLM4MoE as Transformer
+    elif model_type == "glm4_moe_flash":
+        from tests.models.glm4_moe_lite import ModelArgs
+        from tests.models.glm4_moe_lite import GLM4MoELite as Transformer
     elif model_type == "minimax_m2":
         from tests.models.minimax_m2 import ModelArgs
         from tests.models.glm4_moe import GLM4MoE as Transformer
@@ -235,13 +238,17 @@ def main(
     torch.npu.config.allow_internal_format = True
     torch.set_num_threads(8)
     torch.manual_seed(965)
+    _config_path = Path(config)  # save before variable shadow
     with open(config) as f:
         config = json.load(f)
-        config["config_path"] = Path(ckpt_path) / "config.json"
+        config["config_path"] = _config_path
         if mode == "bench":
             config["max_batch_size"] = max(config.get("max_batch_size", 1), bench_batch_size)
             config["max_seq_len"] = max(config.get("max_seq_len", 1024), bench_prompt_len + bench_new_tokens)
-        args = ModelArgs(**config)
+        # Filter config to only ModelArgs fields to avoid TypeError from extra keys
+        from dataclasses import fields as _dc_fields
+        _valid_keys = {f.name for f in _dc_fields(ModelArgs)}
+        args = ModelArgs(**{k: v for k, v in config.items() if k in _valid_keys})
     print(args)
     dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
     torch.set_default_dtype(dtype)
@@ -346,7 +353,7 @@ def main(
                 messages.clear()
                 continue
             messages.append({"role": "user", "content": prompt})
-            if model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm5", "glm5_next", "minimax_m2"}:
+            if model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm4_moe_flash", "glm5", "glm5_next", "minimax_m2"}:
                 prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
             elif model_type == "llama":
                 formatted_prompt = ""
@@ -377,7 +384,7 @@ def main(
         def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature, no_prefix):
             if no_prefix:
                 prompts_tokens_batch = [tokenizer.encode(item["query"]) for item in batch]
-            elif model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm5", "glm5_next", "minimax_m2"}:
+            elif model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm4_moe_flash", "glm5", "glm5_next", "minimax_m2"}:
                 prompts_tokens_batch = []
                 for item in batch:
                     try:
@@ -559,6 +566,7 @@ if __name__ == "__main__":
         "qwen3_5",
         "qwen3_5_moe",
         "glm4_moe",
+        "glm4_moe_flash",
     ], f"{args.model} not supported!"
     assert args.input_file or args.mode != "single", "Either input-file or interactive mode must be specified"
     main(

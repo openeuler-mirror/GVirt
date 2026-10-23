@@ -113,7 +113,11 @@ public:
 
         int queryTileSize = XLITE_MAX_M0 / nHeads;
         if (queryTileSize == 0) {
-            queryTileSize = XLITE_MAX_M0;
+            // nHeads > XLITE_MAX_M0: one query token per tile (mirrors
+            // indexer_scores.h:110). The old `queryTileSize = XLITE_MAX_M0` fallback
+            // packed XLITE_MAX_M0 * nHeads rows into one tile, overrunning every
+            // XLITE_MAX_M0-row buffer.
+            queryTileSize = 1;
         }
         int needDoSV = 0;
         int totalIdx = 0;
@@ -247,7 +251,11 @@ public:
 
         int queryTileSize = XLITE_MAX_M0 / nHeads;
         if (queryTileSize == 0) {
-            queryTileSize = XLITE_MAX_M0;
+            // nHeads > XLITE_MAX_M0: one query token per tile (mirrors
+            // indexer_scores.h:110). The old `queryTileSize = XLITE_MAX_M0` fallback
+            // packed XLITE_MAX_M0 * nHeads rows into one tile, overrunning every
+            // XLITE_MAX_M0-row buffer.
+            queryTileSize = 1;
         }
         int needDoUpdate = 0;
         int totalIdx = 0;

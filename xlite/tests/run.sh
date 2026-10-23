@@ -323,6 +323,30 @@ function run_glm4_moe()
     rm $test_config_path
 }
 
+function run_glm4_moe_flash()
+{
+    # GLM-4.7-Flash has 20 attention heads: TP size (= XLITE_DEVS_PER_NODE unless
+    # XLITE_DP_SIZE splits it) must divide 20 (4 or 5 per rank on 4 davinci cards).
+    # MoE uses EP across the same world (64 experts / devs per rank), matching the
+    # deepseek_v3 run_* style. The old hardcoded moe_tp_size=16 could never work
+    # (20 % 16 != 0) and assumed a 16-card node.
+    local devs=${XLITE_DEVS_PER_NODE:-4}
+    # Path must be container-visible: the podman mount maps
+    # /mnt/nvme1/home/kylin/GVirt_test -> /workspace/GVirt_test, so the host
+    # path does NOT exist inside the container (prepare_hf_model_weights would
+    # then treat it as an HF repo id and fail with HFValidationError).
+    local glm47_flash_ckpt=${GLM47_FLASH_CKPT:-/workspace/GVirt_test/models/GLM-4.7-Flash}
+    echo "{
+        \"moe_ep_size\": $devs,
+        \"moe_tp_size\": 1,
+        \"dtype\": \"bfloat16\",
+        \"max_batch_size\": 1,
+        \"max_seq_len\": 1024
+    }" > $test_config_path
+    torchrun --nproc_per_node=$devs --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe_flash --ckpt-path $glm47_flash_ckpt ${RUN_ARGS[@]}
+    rm $test_config_path
+}
+
 function run_deepseek_v32()
 {
     echo '{

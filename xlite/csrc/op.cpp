@@ -898,6 +898,21 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
     if (IsDummyRuntime(rt)) {
         return;
     }
+    // attention.h tiles the query dimension per KV group as mSize = queryTaskLen *
+    // (nHeads / nKvHeads) rows into an XLITE_MAX_M0-row L1 A buffer / qk workspace
+    // (see XliteFitM0ToHeads), so one query token's heads within a KV group must
+    // already fit one tile.
+    if (nKvHeads == 0 || nHeads % nKvHeads != 0) {
+        throw std::runtime_error(std::string(__func__) + ": nHeads (" + std::to_string(nHeads) +
+                                 ") is not a multiple of nKvHeads (" + std::to_string(nKvHeads) +
+                                 ")");
+    }
+    if (nHeads / nKvHeads > XLITE_MAX_M0) {
+        throw std::runtime_error(std::string(__func__) + ": nHeads / nKvHeads (" +
+                                 std::to_string(nHeads / nKvHeads) + ") > XLITE_MAX_M0 (" +
+                                 std::to_string(XLITE_MAX_M0) +
+                                 "): one cube M0 tile cannot hold every head of a query token");
+    }
     KERNEL_PTR_TYPE(attention) * launchKernel;
     if (EachXDtype(FP16, qkv, qk, kCache, vCache, output)) {
         launchKernel = aclrtlaunch_attention_float16_t;
@@ -924,6 +939,19 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
 {
     if (IsDummyRuntime(rt)) {
         return;
+    }
+    // See XliteOpAttention: attention.h tiles the query dimension per KV group, so
+    // one query token's heads within a KV group must fit a single XLITE_MAX_M0-row tile.
+    if (nKvHeads == 0 || nHeads % nKvHeads != 0) {
+        throw std::runtime_error(std::string(__func__) + ": nHeads (" + std::to_string(nHeads) +
+                                 ") is not a multiple of nKvHeads (" + std::to_string(nKvHeads) +
+                                 ")");
+    }
+    if (nHeads / nKvHeads > XLITE_MAX_M0) {
+        throw std::runtime_error(std::string(__func__) + ": nHeads / nKvHeads (" +
+                                 std::to_string(nHeads / nKvHeads) + ") > XLITE_MAX_M0 (" +
+                                 std::to_string(XLITE_MAX_M0) +
+                                 "): one cube M0 tile cannot hold every head of a query token");
     }
 
     KERNEL_PTR_TYPE(flash_attention) * launchKernel;
@@ -954,6 +982,13 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
 {
     if (IsDummyRuntime(rt)) {
         return;
+    }
+    // See XliteOpMLAV2: cxa.h tiles the query dimension as mSize = queryTaskLen * nHeads
+    // rows, so one query token's heads must fit a single XLITE_MAX_M0-row tile.
+    if (nHeads > XLITE_MAX_M0) {
+        throw std::runtime_error(std::string(__func__) + ": nHeads (" + std::to_string(nHeads) +
+                                 ") > XLITE_MAX_M0 (" + std::to_string(XLITE_MAX_M0) +
+                                 "): one cube M0 tile cannot hold every head of a query token");
     }
     if (dense && compressRatio == 0) {
         throw std::runtime_error(std::string(__func__) +
@@ -1006,6 +1041,14 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                                      std::to_string(MAX_TOPK_NUM));
         }
     }
+    // The cube tiles the query dimension as mSize = queryTaskLen * nHeads rows into an
+    // XLITE_MAX_M0-row L1 A buffer / qk workspace (see XliteFitM0ToHeads), so a single
+    // query token's heads must already fit one tile.
+    if (nHeads > XLITE_MAX_M0) {
+        throw std::runtime_error(std::string(__func__) + ": nHeads (" + std::to_string(nHeads) +
+                                 ") > XLITE_MAX_M0 (" + std::to_string(XLITE_MAX_M0) +
+                                 "): one cube M0 tile cannot hold every head of a query token");
+    }
     if (EachXDtype(BF16, qAbsorb, qr, kCache, peCache, oAbsorb)) {
         aclrtlaunch_mla_v2_bfloat16_t(
             rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
@@ -1039,6 +1082,12 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
         throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
                                  std::to_string(MAX_TOPK_NUM));
     }
+    // See XliteOpMLAV2: one query token's heads must fit a single XLITE_MAX_M0-row tile.
+    if (nHeads > XLITE_MAX_M0) {
+        throw std::runtime_error(std::string(__func__) + ": nHeads (" + std::to_string(nHeads) +
+                                 ") > XLITE_MAX_M0 (" + std::to_string(XLITE_MAX_M0) +
+                                 "): one cube M0 tile cannot hold every head of a query token");
+    }
     uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
     if (EachXDtype(BF16, qAbsorb, qr, kCache, peCache, oAbsorb)) {
         aclrtlaunch_flash_mla_v2_bfloat16_t(
@@ -1069,6 +1118,13 @@ void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &comp
 {
     if (IsDummyRuntime(rt)) {
         return;
+    }
+    // See XliteOpMLAV2: cxa.h tiles the query dimension as mSize = queryTaskLen * nHeads
+    // rows, so one query token's heads must fit a single XLITE_MAX_M0-row tile.
+    if (nHeads > XLITE_MAX_M0) {
+        throw std::runtime_error(std::string(__func__) + ": nHeads (" + std::to_string(nHeads) +
+                                 ") > XLITE_MAX_M0 (" + std::to_string(XLITE_MAX_M0) +
+                                 "): one cube M0 tile cannot hold every head of a query token");
     }
     if (tileSizeOfCachedKV > MAX_SOFTMAX_PINGPONG_LEN) {
         throw std::runtime_error(std::string(__func__) + ": tile size of kv " +

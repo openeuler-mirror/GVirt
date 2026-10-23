@@ -51,8 +51,20 @@ public:
         this->hash = hash;
         this->scale = scale;
         this->calcRepeat = DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32);
+        // SelectTopK() 4-way merges via vmrgsort4 and derives its tail length as `nBlocks - 4`.
+        // With fewer than 4 * SORT_BLOCK_SIZE routed experts that uint64 subtraction underflows and
+        // the tail loop walks `addrArray[1] = sortTmp + i * SORT_RESULT_BLOCK_SIZE` far out of
+        // bounds. Pad the sort width up and size every sort-touched buffer for it. Mirrors the fix
+        // already in sigmoid_topk.h.
+        this->nSortScores = MAX(numRoutedExperts, (uint32_t)(4 * SORT_BLOCK_SIZE));
 
         uint32_t padN = ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
+        uint32_t sortPadN = ROUND_UP(nSortScores, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
+        // indicesIn is DMA'd as nRoutedExperts entries but consumed as nSortScores sort keys, and
+        // calc feeds vbitsort at the padded width. nSortScores >= nRoutedExperts, so padSortN >=
+        // padN, and they are equal for every nRoutedExperts >= 4 * SORT_BLOCK_SIZE: existing shapes
+        // (256/384 routed experts) keep their exact UB layout.
+        uint32_t padSortN = MAX(padN, sortPadN);
         uint32_t padNDtype =
             ROUND_UP(nRoutedExperts, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
         // topK bufs padded to a full 256B block (ReduceSum/vbrcb/vreducev2 assume block-aligned).
@@ -69,7 +81,7 @@ public:
         biasIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);  // shared across tokens
         off += padN;
         indicesIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);  // identity 0..N-1
-        off += padN;
+        off += padSortN;
         tid2eidRow[0] =
             reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);  // hash: [topK] row, ping-pong
         off += padK;
@@ -79,15 +91,15 @@ public:
             reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);  // hash: prefetched window
         off += ROUND_UP(HASH_INPUT_IDS_BATCH * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         calc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += padN;
+        off += padSortN;
         calc_unbiased = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += padN;
         reduceTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += VECTOR_MAX_BYTESIZE;
         sortTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += 2 * padN;
+        off += 2 * padSortN;
         sortMrgTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += 2 * padN;
+        off += 2 * padSortN;
         // COMPUTE (single, V/S-private; slot-reuse hazard handled at OUTPUT DMA stage).
         weightsTopK = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += VECTOR_MAX_BYTESIZE;
@@ -124,6 +136,7 @@ public:
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
         pipe_barrier(PIPE_V);
+        InitSortTail();
 
         // Pre-arm the ping-pong slot-free flags so the first token's wait doesn't hang.
         //   scores : V<->MTE2 ID0+curr.   output : V<->MTE3 ID0+curr.
@@ -238,6 +251,47 @@ public:
         }
     }
 
+    // vmrgsort4 always merges 4 * SORT_BLOCK_SIZE lanes, so the sort width is padded up to
+    // nSortScores. indicesIn is the sort key vector and is DMA'd once for nRoutedExperts entries,
+    // so zero the padding lanes here (one-time). index 0 duplicates a real expert but can never be
+    // selected, because PadCalcTail() pins its score to FLOAT_MIN, which always sorts last -- so it
+    // also never reaches GatherWeights' vgather into calc_unbiased.
+    __aicore__ inline void InitSortTail()
+    {
+        // Early-returns when no padding (nRoutedExperts >= 4 * SORT_BLOCK_SIZE): the loop body
+        // and its PIPE_ALL fence are only needed when sort-width padding exists.
+        if (nSortScores <= nRoutedExperts) {
+            return;
+        }
+        for (uint32_t i = nRoutedExperts; i < nSortScores; i++) {
+            *(indicesIn + i) = 0;
+        }
+        // S-pipe scalar stores must be fenced before the V-pipe sort reads them; PIPE_V is V-only.
+        pipe_barrier(PIPE_ALL);
+    }
+
+    // CalcScores() rewrites calc every token over calcRepeat = DIV_ROUND_UP(nRoutedExperts,
+    // VECTOR_MAX_NUM_OF_FP32) repeats, which can reach past nRoutedExperts yet never covers the
+    // whole padded width, so the padding lanes are re-pinned per token. FLOAT_MIN (finite
+    // -3.4e38) rather than -inf keeps vbitsort's bitwise ordering well defined, matching the
+    // convention in topk.h / sigmoid_topk.h. sqrtsoftplus + bias is bounded well above it.
+    // Early-returns for every nRoutedExperts >= 4 * SORT_BLOCK_SIZE: no cost on existing shapes.
+    __aicore__ inline void PadCalcTail()
+    {
+        if (nSortScores <= nRoutedExperts) {
+            return;
+        }
+        // Fence CalcScores()'s V-pipe writes first. When calcRepeat * VECTOR_MAX_NUM_OF_FP32
+        // reaches past nRoutedExperts (e.g. 96 experts -> 2 repeats -> 128 lanes), those V writes
+        // overlap the padding lanes: without this barrier the S-pipe stores below can retire
+        // before them and be overwritten with in-flight garbage, silently polluting topK.
+        pipe_barrier(PIPE_ALL);
+        for (uint32_t i = nRoutedExperts; i < nSortScores; i++) {
+            *(calc + i) = FLOAT_MIN;
+        }
+        pipe_barrier(PIPE_ALL);
+    }
+
     // All copy/DMA for one token. PrefetchInputIds must run before CopyIn (CopyIn's hash half reads
     // inputIdsArr via S, gated by PrefetchInputIds's MTE2->S).
     __aicore__ inline void FetchInputs(int tokenIdx, int curr)
@@ -272,7 +326,9 @@ public:
     // via vmrgsort4 (arbitrary N; N=256 -> tailLen=4).
     __aicore__ inline void SelectTopK()
     {
-        vbitsort(sortTmp, calc, indicesIn, nRoutedExperts / SORT_BLOCK_SIZE);
+        // 排序前把补齐段压成 FLOAT_MIN，否则 vmrgsort4 会读到未初始化的 lane
+        PadCalcTail();
+        vbitsort(sortTmp, calc, indicesIn, nSortScores / SORT_BLOCK_SIZE);
         pipe_barrier(PIPE_V);
         uint64_t mrgRepeat = 1;
         uint64_t validBits = 0xF;
@@ -287,7 +343,12 @@ public:
         vmrgsort4(sortMrgTmp, addrArray, lengths, config);
         pipe_barrier(PIPE_V);
 
-        uint64_t tailLen = nRoutedExperts / SORT_BLOCK_SIZE - 4;
+        // nSortScores >= 4 * SORT_BLOCK_SIZE by construction, so this can no longer underflow.
+        // For every nRoutedExperts >= 4 * SORT_BLOCK_SIZE, nSortScores == nRoutedExperts and
+        // tailLen is exactly what it used to be (256 -> 4, 384 -> 8); below that it clamps to 0 and
+        // the loop is skipped, since the 4-way merge already covered the whole padded width.
+        uint64_t nSortBlocks = nSortScores / SORT_BLOCK_SIZE;
+        uint64_t tailLen = nSortBlocks > 4 ? nSortBlocks - 4 : 0;
         copy_ubuf_to_ubuf(sortTmp, sortMrgTmp, 0, 1,
                           DIV_ROUND_UP(4 * SORT_RESULT_BLOCK_SIZE * sizeof(uint32_t), BLOCK_SIZE),
                           0, 0);
@@ -395,6 +456,7 @@ public:
 private:
     uint32_t nTokens;
     uint32_t nRoutedExperts;
+    uint32_t nSortScores;  // nRoutedExperts padded up to >= 4 * SORT_BLOCK_SIZE for vmrgsort4
     uint32_t topK;
     uint8_t hash;
     float scale;

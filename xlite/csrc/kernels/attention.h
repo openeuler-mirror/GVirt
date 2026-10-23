@@ -88,10 +88,15 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
+            uint32_t m0 = XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), headNumInGroup);
             int queryTileSize = m0 / headNumInGroup;
             if (queryTileSize == 0) {
-                queryTileSize = m0;
+                // headNumInGroup > XLITE_MAX_M0: one query token per tile (mirrors
+                // indexer_scores.h:110). The old `queryTileSize = m0` fallback packed
+                // m0 * headNumInGroup rows into one tile, overrunning the XLITE_MAX_M0-row L1 A
+                // buffers and the qk workspace, and colliding with the softmax
+                // scratch parked at rows [m0, m0 + 4). See XliteFitM0ToHeads.
+                queryTileSize = 1;
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
@@ -187,10 +192,15 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            uint32_t m0 = GetOptimalM0(queryLen, cachedLen);
+            uint32_t m0 = XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), headNumInGroup);
             int queryTileSize = m0 / headNumInGroup;
             if (queryTileSize == 0) {
-                queryTileSize = m0;
+                // headNumInGroup > XLITE_MAX_M0: one query token per tile (mirrors
+                // indexer_scores.h:110). The old `queryTileSize = m0` fallback packed
+                // m0 * headNumInGroup rows into one tile, overrunning the XLITE_MAX_M0-row L1 A
+                // buffers and the qk workspace, and colliding with the softmax
+                // scratch parked at rows [m0, m0 + 4). See XliteFitM0ToHeads.
+                queryTileSize = 1;
             }
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);

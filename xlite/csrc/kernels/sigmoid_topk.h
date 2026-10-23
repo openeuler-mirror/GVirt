@@ -46,12 +46,23 @@ public:
         this->nTopkGroup = nTopkGroup;
         this->nExpertsPerGroup = numRoutedExperts / nGroup;
         this->nScores = nGroup == 1 ? numRoutedExperts : (nTopkGroup * nExpertsPerGroup);
+        // SelectTopK() unconditionally 4-way merges (vmrgsort4), so the bitonic sort needs at
+        // least 4 * SORT_BLOCK_SIZE candidates. Models with few routed experts -- GLM-4.7-Flash
+        // has 64 with nGroup=1, so nScores=64 -- would otherwise underflow `tailLen` and make
+        // vmrgsort4 read and write past sortTmp/sortMrgTmp. Pad the sort width up and size every
+        // buffer the sort touches for the padded width. For all previously supported shapes
+        // sortPad <= pad, so the layout is unchanged (DeepSeek-V3: nScores=128 -> no regression).
+        this->nSortScores = MAX(nScores, (uint32_t)(4 * SORT_BLOCK_SIZE));
         this->topK = topK;
         this->normTopKProb = normTopKProb;
         this->scale = scale;
         this->calcRepeat = DIV_ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32);
 
         uint32_t pad = ROUND_UP(numRoutedExperts, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
+        uint32_t sortPad = ROUND_UP(nSortScores, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
+        // indicesIn is DMA'd as numRoutedExperts entries but consumed as nSortScores sort keys,
+        // so it (and the other sort-touched buffers) must cover the wider of the two.
+        uint32_t idxPad = MAX(pad, sortPad);
         uint32_t padDtype =
             ROUND_UP(numRoutedExperts, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
         uint64_t off = 0;
@@ -60,7 +71,7 @@ public:
         biasIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += pad;
         indicesIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        off += pad;
+        off += idxPad;
         routingMapOut = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
         off += pad;
         weightsOut = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
@@ -70,9 +81,9 @@ public:
         calc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += pad;
         this->scores = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += pad;
+        off += idxPad;
         this->indices = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        off += pad;
+        off += idxPad;
         groupScores = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += VECTOR_MAX_BYTESIZE;
         groupIndices = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
@@ -80,9 +91,9 @@ public:
         reduceTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += pad;
         sortTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += 2 * pad;
+        off += 2 * idxPad;
         sortMrgTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += 2 * pad;
+        off += 2 * idxPad;
         weightsTopK = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += VECTOR_MAX_BYTESIZE;
         indicesTopK = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
@@ -102,6 +113,14 @@ public:
         copy_gm_to_ubuf_align_b32(indicesIn, indicesGm, 0, 1, nRoutedExperts * sizeof(uint32_t), 0,
                                   0, 0, 0);
         pipe_barrier(PIPE_ALL);
+        if (biasGm == nullptr) {
+            // Models with no e_score_correction_bias (GLM-4.7-Flash routes on plain sigmoid) pass
+            // a null bias. Zero the UB bias once so the unconditional bias adds in
+            // CalcGroupScores() stay exact no-ops instead of DMA'ing an invalid GM address.
+            vector_dup(biasIn, float(0), calcRepeat, 1, 0, 8, 0);
+            pipe_barrier(PIPE_V);
+        }
+        InitSortTail();
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
@@ -117,6 +136,50 @@ public:
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+        pipe_barrier(PIPE_ALL);
+    }
+
+    // vmrgsort4 always merges 4 blocks, so when nScores < 4 * SORT_BLOCK_SIZE the sort width is
+    // padded up to nSortScores. The score/indices padding lanes are pinned once here with
+    // FLOAT_MIN / index 0: they always sort last, can never claim a top-K slot, and never feed
+    // vgather an out-of-range index. The nGroup > 1 gather loop writes exactly nScores lanes, so
+    // this one-time fill holds for the whole run; the nGroup == 1 vadd, however, spans
+    // calcRepeat * VECTOR_MAX_NUM_OF_FP32 lanes and for a non-64-multiple nRoutedExperts (e.g. 96
+    // -> 128 lanes) rewrites the padding every token -- PadScoresTail() re-pins it per token.
+    // FLOAT_MIN (finite -3.4e38) rather than -inf, matching the padding convention already used by
+    // topk.h and by groupScores above, so vbitsort's bitwise ordering stays well defined.
+    // indicesIn is the sort key vector when nGroup == 1; the DMA in Run() only filled
+    // nRoutedExperts entries, so its padding is zeroed here once (it is never rewritten).
+    __aicore__ inline void InitSortTail()
+    {
+        if (nSortScores <= nScores) {
+            return;
+        }
+        for (uint32_t i = nScores; i < nSortScores; i++) {
+            *(scores + i) = FLOAT_MIN;
+            *(indices + i) = 0;
+        }
+        for (uint32_t i = nRoutedExperts; i < nSortScores; i++) {
+            *(indicesIn + i) = 0;
+        }
+        pipe_barrier(PIPE_ALL);
+    }
+
+    // nGroup == 1: CalcGroupScores()'s vadd rewrites `scores` every token over calcRepeat repeats,
+    // which for a non-64-multiple nRoutedExperts reaches into the sort padding and clobbers the
+    // one-time FLOAT_MIN fill from InitSortTail(). Re-pin those lanes per token, fenced against
+    // the V-pipe writes (leading barrier) and before the V-pipe sort reads them (trailing
+    // barrier). nGroup > 1 shapes never rewrite the padding and nSortScores <= nScore shapes have
+    // none at all: both early-return at zero cost.
+    __aicore__ inline void PadScoresTail()
+    {
+        if (nGroup != 1 || nSortScores <= nScores) {
+            return;
+        }
+        pipe_barrier(PIPE_ALL);
+        for (uint32_t i = nScores; i < nSortScores; i++) {
+            *(scores + i) = FLOAT_MIN;
+        }
         pipe_barrier(PIPE_ALL);
     }
 
@@ -143,7 +206,10 @@ public:
                                       nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
             pipe_barrier(PIPE_V);
         }
-        copy_gm_to_ubuf_align_b32(biasIn, biasGm, 0, 1, nRoutedExperts * sizeof(float), 0, 0, 0, 0);
+        if (biasGm != nullptr) {
+            copy_gm_to_ubuf_align_b32(biasIn, biasGm, 0, 1, nRoutedExperts * sizeof(float), 0, 0, 0,
+                                      0);
+        }
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     }
 
@@ -239,7 +305,9 @@ public:
 
     __aicore__ inline void SelectTopK()
     {
-        vbitsort(sortTmp, scores, nGroup > 1 ? indices : indicesIn, nScores / SORT_BLOCK_SIZE);
+        // 排序前把补齐段重钉成 FLOAT_MIN（nGroup==1 且专家数非 64 整数倍时 vadd 会覆写它）
+        PadScoresTail();
+        vbitsort(sortTmp, scores, nGroup > 1 ? indices : indicesIn, nSortScores / SORT_BLOCK_SIZE);
         pipe_barrier(PIPE_V);
         uint64_t mrgRepeat = 1;
         uint64_t validBits = 0xF;
@@ -254,7 +322,9 @@ public:
         vmrgsort4(sortMrgTmp, addrArray, lengths, config);
         pipe_barrier(PIPE_V);
 
-        uint64_t tailLen = nScores / SORT_BLOCK_SIZE - 4;
+        // nSortScores >= 4 * SORT_BLOCK_SIZE by construction, so this cannot underflow.
+        uint64_t nSortBlocks = nSortScores / SORT_BLOCK_SIZE;
+        uint64_t tailLen = nSortBlocks > 4 ? nSortBlocks - 4 : 0;
 
         DumpBuffer(sortTmp, "sortTmp 0", 160, 2);
 
@@ -353,6 +423,7 @@ private:
     uint32_t nTopkGroup;
     uint32_t nExpertsPerGroup;
     uint32_t nScores;
+    uint32_t nSortScores;  // nScores padded up to >= 4 * SORT_BLOCK_SIZE for vmrgsort4
     uint32_t topK;
     bool normTopKProb;
     float scale;

@@ -146,10 +146,18 @@ public:
 
             // dense mode: each query token has its own dense cache row, so tile one
             // query token at a time (queryTileSize = m0 / nHeads = 1 -> m0 = nHeads).
-            uint32_t m0 = dense ? nHeads : GetOptimalM0(queryLen, cachedLen);
+            // Sparse mode fits m0 to the head count so queryTileSize stays >= 1
+            // (and clamps to XLITE_MAX_M0) even when nHeads exceeds XLITE_MAX_M0.
+            uint32_t m0 =
+                dense ? nHeads : XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), nHeads);
             int queryTileSize = m0 / nHeads;
             if (queryTileSize == 0) {
-                queryTileSize = m0;
+                // nHeads > XLITE_MAX_M0: one query token per tile (mirrors
+                // indexer_scores.h:110). The old `queryTileSize = m0` fallback packed
+                // m0 * nHeads rows into one tile, overrunning the XLITE_MAX_M0-row L1 A
+                // buffers and the qk workspace, and colliding with the softmax
+                // scratch parked at rows [m0, m0 + 4). See XliteFitM0ToHeads.
+                queryTileSize = 1;
             }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum;
@@ -251,11 +259,19 @@ public:
             }
 
             // dense mode: each query token has its own dense cache row, so tile one
-            // query token at a time (queryTileSize = m0 / nHeads = 1 -> m0 = nHeads)
-            uint32_t m0 = dense ? nHeads : GetOptimalM0(queryLen, cachedLen);
+            // query token at a time (queryTileSize = m0 / nHeads = 1 -> m0 = nHeads).
+            // Sparse mode fits m0 to the head count so queryTileSize stays >= 1
+            // (and clamps to XLITE_MAX_M0) even when nHeads exceeds XLITE_MAX_M0.
+            uint32_t m0 =
+                dense ? nHeads : XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), nHeads);
             int queryTileSize = m0 / nHeads;
             if (queryTileSize == 0) {
-                queryTileSize = m0;
+                // nHeads > XLITE_MAX_M0: one query token per tile (mirrors
+                // indexer_scores.h:110). The old `queryTileSize = m0` fallback packed
+                // m0 * nHeads rows into one tile, overrunning the XLITE_MAX_M0-row L1 A
+                // buffers and the qk workspace, and colliding with the softmax
+                // scratch parked at rows [m0, m0 + 4). See XliteFitM0ToHeads.
+                queryTileSize = 1;
             }
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int taskNum = queryNum;
