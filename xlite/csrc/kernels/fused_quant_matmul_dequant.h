@@ -16,7 +16,6 @@ using namespace AscendC;
 // intra-core set_flag/wait_flag ids used by matmul/dequant/quant).
 #define C2V_CROSS_CORE_FLAG 8  // AIC tile done -> paired AIVs run one dequant tile (per tile)
 #define V2C_CROSS_CORE_FLAG 9  // AIV quant done -> paired AIC starts matmul (once per AIV)
-#define V2C_DONE_FLAG 10       // AIV fully done -> paired AIC may exit (once per AIV)
 #define FUSION_MATMUL_DQ_LINEAR_SWIZZLE 0ULL
 
 // Fused bf16-activation quant -> int8 matmul (+fixpipe deq_scale) -> dequant,
@@ -82,11 +81,6 @@ public:
             CrossCoreSetFlag<0x2, PIPE_FIX>(C2V_CROSS_CORE_FLAG);
         }
         this->matmulOp.WaitFlags();
-        // A mixed block may only retire once its AIV sub-blocks are done: the
-        // AIC's WaitFlags only covers its FIX pipe, which fires while the
-        // paired AIVs are still running their last dequant tiles.
-        CrossCoreWaitFlag(V2C_DONE_FLAG);
-        CrossCoreWaitFlag(V2C_DONE_FLAG);
 #elif defined(__DAV_C220_VEC__)
         // AIV block id = get_block_idx()*2 + subblockid: t in [0, 2N), paired
         // AIC = t/2, sub selects which row-half of each m-tile this core
@@ -132,8 +126,6 @@ public:
             this->dequantOp.RunTileByIdx(tileIdx);
         }
         this->dequantOp.WaitFlags();
-        // Completion receipt so the paired AIC can retire (see AIC side).
-        CrossCoreSetFlag<0x3, PIPE_MTE3>(V2C_DONE_FLAG);
 #endif
     }
 

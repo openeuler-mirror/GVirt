@@ -155,7 +155,7 @@ def run_config(label, m, n, k, is_dyn, has_bias):
     x_quant = torch.empty(m, k, dtype=torch.int8, device=f"npu:{dev_id}")
     out_scale_ws = torch.empty(m, dtype=torch.float32, device=f"npu:{dev_id}")
 
-    safe = fused_safe(m, n, k)
+    safe = True  # force run all configs to test functionality
 
     # 新三段融合的可选参数按需传入, 其余省略 (接口侧默认 None)
     fused3_opt = {}
@@ -210,7 +210,7 @@ def run_config(label, m, n, k, is_dyn, has_bias):
 for label, n, k, is_dyn, has_bias, _ in CONFIGS:
     for m in M_VALUES:
         try:
-            safe = fused_safe(m, n, k)
+            safe = True  # force run all configs to test functionality
             if not safe:
                 print(f"[skip-fused] {label} m={m} n={n} k={k} (ffts flag 积压安全边界)")
             run_config(label, m, n, k, is_dyn, has_bias)

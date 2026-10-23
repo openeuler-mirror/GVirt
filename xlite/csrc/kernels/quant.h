@@ -44,6 +44,7 @@ public:
         this->m = m;
         this->k = k;
         this->tileRows = DIV_ROUND_UP(m, GetBlockNum() * taskRatio);
+        this->isSingleRow = (this->tileRows == 1);
 
         constexpr uint32_t align = VECTOR_REPEAT_BYTESIZE / sizeof(dtype);
         // rowMax = (UB_SIZE - 12*kPad) / (12*kPad)
@@ -51,6 +52,58 @@ public:
             ROUND_DOWN(UB_SIZE / 24, VECTOR_REPEAT_BYTESIZE / sizeof(dtype));
         this->kLoop = DIV_ROUND_UP((uint32_t)k, maxOneRowKTile);
         this->kPad = ROUND_UP(DIV_ROUND_UP((uint32_t)k, this->kLoop), align);
+
+        if (this->isSingleRow) {
+            TaskTilesInitSingleRow();
+        } else {
+            TaskTilesInitMultiRow();
+        }
+        return static_cast<int64_t>(DIV_ROUND_UP(m, this->tileRows));
+    }
+
+    __aicore__ inline void RunTileByIdx(int64_t idx)
+    {
+        if (this->isSingleRow) {
+            RunTileByIdxSingleRow(idx);
+        } else {
+            RunTileByIdxMultiRow(idx);
+        }
+    }
+
+    __aicore__ inline void Run(GM_ADDR in, GM_ADDR scaleReciprocal, GM_ADDR offset, GM_ADDR out,
+                               uint32_t m, uint32_t k)
+    {
+        int64_t tiles = TaskTilesInit(in, scaleReciprocal, offset, out, m, k);
+        SetFlags();
+        for (int64_t idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum()) {
+            RunTileByIdx(idx);
+        }
+        WaitFlags();
+    }
+
+    __aicore__ inline void SetFlags()
+    {
+        if (this->isSingleRow) {
+            SetFlagsSingleRow();
+        } else {
+            SetFlagsMultiRow();
+        }
+    }
+
+    __aicore__ inline void WaitFlags()
+    {
+        if (this->isSingleRow) {
+            WaitFlagsSingleRow();
+        } else {
+            WaitFlagsMultiRow();
+        }
+    }
+
+private:
+    // ---- multi-row path (existing logic, unchanged) ----
+
+    __aicore__ inline void TaskTilesInitMultiRow()
+    {
         uint32_t rMax = MAX(1, (UB_SIZE - 12 * this->kPad) / (12 * this->kPad));
         this->rows = MIN(rMax, (uint32_t)this->tileRows);
 
@@ -59,24 +112,24 @@ public:
         // so small k gets more rows.
         // Per-row items: 12 * Rows * kPad
         //   x1,x2 [rows,kPad] dtype, xf32 [rows,kPad] float,
-        //   z1,z2 [rows,kPad] int8, xf16 [rows,kPad] half   →
+        //   xf16 [rows,kPad] half, z1,z2 [rows,kPad] int8
         // Fixed (one-shot) items: 12 * kPad
         //   scale,offset [kPad] dtype
         //   scale_f32,offset_f32 [kPad] float
         // Total = 12*(R+1)*kPad, and rMax guarantees this <= UB_SIZE.
+        // xf16 is placed before z1 so that vconv hardware overread has
+        // padding (z1/z2 and fixed buffers follow it).
         this->x1 = reinterpret_cast<__ubuf__ dtype *>((uintptr_t)0);
         this->x2 = this->x1 + this->rows * this->kPad;
         this->xf32 = reinterpret_cast<__ubuf__ float *>(this->x2 + this->rows * this->kPad);
-        this->z1 = reinterpret_cast<__ubuf__ int8_t *>(this->xf32 + this->rows * this->kPad);
+        this->xf16 = reinterpret_cast<__ubuf__ half *>(this->xf32 + this->rows * this->kPad);
+        this->z1 = reinterpret_cast<__ubuf__ int8_t *>(this->xf16 + this->rows * this->kPad);
         this->z2 = this->z1 + this->rows * this->kPad;
         this->scale = reinterpret_cast<__ubuf__ dtype *>(this->z2 + this->rows * this->kPad);
         this->offset = this->scale + this->kPad;
         this->scale_f32 = reinterpret_cast<__ubuf__ float *>(this->offset + this->kPad);
         this->offset_f32 = this->scale_f32 + this->kPad;
-        this->xf16 = reinterpret_cast<__ubuf__ half *>(this->offset_f32 + this->kPad);
-        assert((uint64_t)(this->xf16 + this->rows * this->kPad) <= UB_SIZE);
-
-        return static_cast<int64_t>(DIV_ROUND_UP(m, this->tileRows));
+        assert((uint64_t)(this->offset_f32 + this->kPad) <= UB_SIZE);
     }
 
     // After TaskTilesInit initializes a batch of loads, each idx processes one tile.
@@ -85,7 +138,7 @@ public:
     // If k is small, multiple rows can be processed at a time.
     // The stride of MTE2/MTE3 requires that k be 32-byte aligned, so that data
     // can be efficiently transferred.
-    __aicore__ inline void RunTileByIdx(int64_t idx)
+    __aicore__ inline void RunTileByIdxMultiRow(int64_t idx)
     {
         uint64_t rowStart = static_cast<uint64_t>(idx) * this->tileRows;
         if (rowStart >= this->m) {  // skip when tile out of range
@@ -162,17 +215,13 @@ public:
                     pipe_barrier(PIPE_V);
                 }
 
-                // Three-step fp32→int32→fp16→int8 chain, matching ascend_quant_v2
-                // CastOut on 910C: RINT for both fp32→int32 and fp16→int8, with
-                // SetDeqScale(1.0) for the int32→fp16 dequantize step. The int32
-                // intermediate reuses xf32 in-place (same 4-byte element width),
-                // so the UB layout is unchanged.
-                vconv_f322s32r(reinterpret_cast<__ubuf__ int32_t *>(xf32), xf32, rRepeats, 1, 1, 8,
-                               8);
-                pipe_barrier(PIPE_V);
-                set_deqscale(static_cast<half>(1.0f));
-                pipe_barrier(PIPE_V);
-                vconv_deq(xf16, reinterpret_cast<__ubuf__ int32_t *>(xf32), rRepeats, 1, 1, 4, 8);
+                // fp32→fp16(ODD)→int8(RINT) cast chain.
+                // ODD rounding keeps the fp16 value on the same side of k.5 as x
+                // (k.5 has even mantissa LSB; ODD avoids even LSB), so
+                // RINT(ODD(x)) == RINT(x) == RINT(int16(x)) for all int8-range x.
+                // This is numerically equivalent to the former three-step chain
+                // fp32→int16(RINT)→fp16(ROUND)→int8(RINT) with one fewer vconv.
+                vconv_f322f16o(xf16, xf32, rRepeats, 1, 1, 4, 8);
                 pipe_barrier(PIPE_V);
                 wait_flag(PIPE_MTE3, PIPE_V,
                           EVENT_ID0 + eventId);  // zBufs[eventId] free from prev MTE3
@@ -189,18 +238,7 @@ public:
         }
     }
 
-    __aicore__ inline void Run(GM_ADDR in, GM_ADDR scaleReciprocal, GM_ADDR offset, GM_ADDR out,
-                               uint32_t m, uint32_t k)
-    {
-        SetFlags();
-        int64_t tiles = TaskTilesInit(in, scaleReciprocal, offset, out, m, k);
-        for (int64_t idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum()) {
-            RunTileByIdx(idx);
-        }
-        WaitFlags();
-    }
-
-    __aicore__ inline void SetFlags()
+    __aicore__ inline void SetFlagsMultiRow()
     {
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
@@ -209,7 +247,7 @@ public:
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     }
 
-    __aicore__ inline void WaitFlags()
+    __aicore__ inline void WaitFlagsMultiRow()
     {
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
@@ -218,18 +256,122 @@ public:
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     }
 
-private:
+    // ---- single-row path (tileRows == 1: no ping-pong, no batching loop) ----
+
+    __aicore__ inline void TaskTilesInitSingleRow()
+    {
+        // UB layout (single buffer, no ping-pong, no multi-row arrays):
+        //   s_x [kPad] dtype, s_xf32 [kPad] float, s_z [kPad] int8,
+        //   s_xf16 [kPad] half, s_scale [kPad] dtype, s_offset [kPad] dtype,
+        //   s_scale_f32 [kPad] float, s_offset_f32 [kPad] float
+        // Total = (2+4+1+2+2+2+4+4)*kPad = 21*kPad < multi-row minimum 24*kPad
+        this->s_x = reinterpret_cast<__ubuf__ dtype *>((uintptr_t)0);
+        this->s_xf32 = reinterpret_cast<__ubuf__ float *>(this->s_x + this->kPad);
+        this->s_z = reinterpret_cast<__ubuf__ int8_t *>(this->s_xf32 + this->kPad);
+        this->s_xf16 = reinterpret_cast<__ubuf__ half *>(this->s_z + this->kPad);
+        this->s_scale = reinterpret_cast<__ubuf__ dtype *>(this->s_xf16 + this->kPad);
+        this->s_offset = this->s_scale + this->kPad;
+        this->s_scale_f32 = reinterpret_cast<__ubuf__ float *>(this->s_offset + this->kPad);
+        this->s_offset_f32 = this->s_scale_f32 + this->kPad;
+        assert((uint64_t)(this->s_offset_f32 + this->kPad) <= UB_SIZE);
+    }
+
+    __aicore__ inline void RunTileByIdxSingleRow(int64_t idx)
+    {
+        uint64_t rowStart = static_cast<uint64_t>(idx) * this->tileRows;  // == idx
+        if (rowStart >= this->m) {
+            return;
+        }
+        const uint32_t row = static_cast<uint32_t>(rowStart);
+
+        assert(this->k % 32 == 0);
+        const uint32_t k = (uint32_t)this->k;
+        const uint32_t kLoop = this->kLoop;
+        const uint32_t kPad = this->kPad;
+
+        // Single row — no ping-pong, no row batching loop.
+        // kLoop outer loop remains (k may still exceed one UB chunk).
+        for (uint32_t loop = 0; loop < kLoop; loop++) {
+            uint32_t kOffset = loop * kPad;
+            uint32_t kSize = MIN(kPad, k - kOffset);
+            uint32_t kRepeats = kPad / VECTOR_MAX_NUM_OF_FP32;
+
+            // Load scale/offset (shared across all rows, one load per k chunk)
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+            copy_gm_to_ubuf_align_b16(this->s_scale, this->scaleReciprocalGm + kOffset, 0, 1,
+                                      kSize * sizeof(dtype), 0, 0, 0, 0);
+            copy_gm_to_ubuf_align_b16(this->s_offset, this->offsetGm + kOffset, 0, 1,
+                                      kSize * sizeof(dtype), 0, 0, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+            convert_input<dtype>(this->s_scale_f32, this->s_scale, kRepeats);
+            convert_input<dtype>(this->s_offset_f32, this->s_offset, kRepeats);
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+
+            // Load x (single row, single buffer, 1D DMA)
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+            copy_gm_to_ubuf(this->s_x, this->inGm + (uint64_t)row * k + kOffset, 0, 1,
+                            kSize * sizeof(dtype) / 32, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            convert_input<dtype>(this->s_xf32, this->s_x, kRepeats);
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+
+            // vmul scale, vadd offset (single row, no per-row loop)
+            vmul(this->s_xf32, this->s_xf32, this->s_scale_f32, kRepeats, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vadd(this->s_xf32, this->s_xf32, this->s_offset_f32, kRepeats, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+
+            // fp32→fp16(ODD)→int8(RINT) cast chain (same as multi-row).
+            vconv_f322f16o(this->s_xf16, this->s_xf32, kRepeats, 1, 1, 4, 8);
+            pipe_barrier(PIPE_V);
+
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);  // s_z free from prev MTE3
+            vconv_f162s8r(this->s_z, this->s_xf16, kPad / VECTOR_MAX_NUM_OF_FP16, 1, 1, 4, 8);
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            copy_ubuf_to_gm(this->outGm + (uint64_t)row * k + kOffset, this->s_z, 0, 1, kSize / 32,
+                            0, 0);
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        }
+    }
+
+    __aicore__ inline void SetFlagsSingleRow()
+    {
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);  // s_x slot ready for first MTE2 load
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);  // s_z slot ready for first V→MTE3 store
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);  // scale/offset slot ready for first MTE2 load
+    }
+
+    __aicore__ inline void WaitFlagsSingleRow()
+    {
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+    }
+
+    // ---- shared members ----
     uint64_t m = 0;
     uint64_t k = 0;
     uint64_t tileRows = 1;
+    bool isSingleRow = false;
     // Per-launch group plan + UB layout, derived once in TaskTilesInit.
-    uint32_t rows = 1;
     uint32_t kLoop = 1;
     uint32_t kPad = 1;
     __gm__ dtype *inGm = nullptr;
     __gm__ dtype *scaleReciprocalGm = nullptr;
     __gm__ dtype *offsetGm = nullptr;
     __gm__ int8_t *outGm = nullptr;
+
+    // ---- multi-row members ----
+    uint32_t rows = 1;
     __ubuf__ dtype *x1 = nullptr;
     __ubuf__ dtype *x2 = nullptr;
     __ubuf__ float *xf32 = nullptr;
@@ -240,6 +382,16 @@ private:
     __ubuf__ float *scale_f32 = nullptr;
     __ubuf__ float *offset_f32 = nullptr;
     __ubuf__ half *xf16 = nullptr;
+
+    // ---- single-row members ----
+    __ubuf__ dtype *s_x = nullptr;
+    __ubuf__ float *s_xf32 = nullptr;
+    __ubuf__ int8_t *s_z = nullptr;
+    __ubuf__ half *s_xf16 = nullptr;
+    __ubuf__ dtype *s_scale = nullptr;
+    __ubuf__ dtype *s_offset = nullptr;
+    __ubuf__ float *s_scale_f32 = nullptr;
+    __ubuf__ float *s_offset_f32 = nullptr;
 };
 
 #define QUANT_FUNC_DEFINE(dtype)                                                                   \

@@ -48,11 +48,67 @@ public:
         }
         this->k = k;
         this->tileRows = DIV_ROUND_UP(this->m, GetBlockNum() * taskRatio);
+        this->isSingleRow = (this->tileRows == 1);
 
         constexpr uint32_t align = VECTOR_REPEAT_BYTESIZE / sizeof(dtype);
         uint32_t maxOneRowKTile = ROUND_DOWN((UB_SIZE - 32) / 16, align);
         this->kLoop = DIV_ROUND_UP((uint32_t)k, maxOneRowKTile);
         this->kPad = ROUND_UP(DIV_ROUND_UP((uint32_t)k, this->kLoop), align);
+
+        if (this->isSingleRow) {
+            TaskTilesInitSingleRow();
+        } else {
+            TaskTilesInitMultiRow();
+        }
+        return static_cast<int64_t>(DIV_ROUND_UP(this->m, this->tileRows));
+    }
+
+    __aicore__ inline void RunTileByIdx(int64_t idx)
+    {
+        if (this->isSingleRow) {
+            RunTileByIdxSingleRow(idx);
+        } else {
+            RunTileByIdxMultiRow(idx);
+        }
+    }
+
+    // Thin dispatcher: bind + derive tile geometry (pnumTokens is read once
+    // inside TaskTilesInit), then grid-stride the tiles. The host launches
+    // min(m, aivNum) blocks, so each block runs at most one tile.
+    __aicore__ inline void Run(GM_ADDR x, GM_ADDR scale, GM_ADDR out, GM_ADDR pnumTokens,
+                               uint32_t m, uint32_t k)
+    {
+        int64_t tiles = TaskTilesInit(x, scale, out, pnumTokens, m, k);
+        SetFlags();
+        for (int64_t idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum()) {
+            RunTileByIdx(idx);
+        }
+        WaitFlags();
+    }
+
+    __aicore__ inline void SetFlags()
+    {
+        if (this->isSingleRow) {
+            SetFlagsSingleRow();
+        } else {
+            SetFlagsMultiRow();
+        }
+    }
+
+    __aicore__ inline void WaitFlags()
+    {
+        if (this->isSingleRow) {
+            WaitFlagsSingleRow();
+        } else {
+            WaitFlagsMultiRow();
+        }
+    }
+
+private:
+    // ---- multi-row path (existing logic, unchanged) ----
+
+    __aicore__ inline void TaskTilesInitMultiRow()
+    {
         // rowMax must cover rowAbs (rows * 8 floats = 32*R bytes) and
         // scaleStage (2*R floats = 8*R bytes), totalling 40*R bytes.
         uint32_t rowMax = MAX(1, (UB_SIZE - 4 * this->kPad) / (12 * this->kPad + 40));
@@ -71,8 +127,6 @@ public:
         this->rowAbs = reinterpret_cast<__ubuf__ float *>(this->xf16 + this->rows * this->kPad);
         this->scaleStage = reinterpret_cast<__ubuf__ float *>(this->rowAbs + this->rows * 8);
         assert((uint64_t)(this->scaleStage + 2 * this->rows) <= UB_SIZE);
-
-        return static_cast<int64_t>(DIV_ROUND_UP(this->m, this->tileRows));
     }
 
     // After TaskTilesInit initializes a batch of loads, each idx processes one tile.
@@ -81,7 +135,7 @@ public:
     // If k is small, multiple rows can be processed at a time.
     // The stride of MTE2/MTE3 requires that k be 32-byte aligned, so that data
     // can be efficiently transferred.
-    __aicore__ inline void RunTileByIdx(int64_t idx)
+    __aicore__ inline void RunTileByIdxMultiRow(int64_t idx)
     {
         uint64_t rowStart = static_cast<uint64_t>(idx) * this->tileRows;
         if (rowStart >= this->m) {  // skip when tile out of range
@@ -199,23 +253,16 @@ public:
                 }
 
                 // per-row re-scale from the (resident or reloaded) xf32 chunk, then
-                // three-step fp32→int16→fp16→int8 chain matching dynamic_quant's
-                // symmetric path: RINT for fp32→int16, ROUND(away) for int16→fp16,
-                // TRUNC for fp16→int8. The int16 intermediate reuses xf16 in-place
-                // (int16 and half are both 2 bytes), so the UB layout is unchanged.
+                // fp32→fp16(ODD)→int8(RINT) cast chain
                 for (uint32_t i = 0; i < r; i++) {
                     float scaleRec = float(*(scaleStage + this->rows + i));
                     vmuls(xf32 + i * kPad, xf32 + i * kPad, scaleRec, kRepeats, 1, 1, 8, 8);
                     pipe_barrier(PIPE_V);
                 }
-                vconv_f322s16r(reinterpret_cast<__ubuf__ int16_t *>(xf16), xf32, r * kRepeats, 1, 1,
-                               4, 8);
-                pipe_barrier(PIPE_V);
-                vconv_s162f16a(xf16, reinterpret_cast<__ubuf__ int16_t *>(xf16), r * kRepeats, 1, 1,
-                               4, 4);
+                vconv_f322f16o(xf16, xf32, r * kRepeats, 1, 1, 4, 8);
                 pipe_barrier(PIPE_V);
                 wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + eId);  // zBufs[eId] free from prev MTE3
-                vconv_f162s8z(zBufs[eId], xf16, r * kPad / VECTOR_MAX_NUM_OF_FP16, 1, 1, 4, 8);
+                vconv_f162s8r(zBufs[eId], xf16, r * kPad / VECTOR_MAX_NUM_OF_FP16, 1, 1, 4, 8);
                 pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + eId);  // zBufs[eId] ready for MTE3
 
@@ -230,21 +277,7 @@ public:
         }
     }
 
-    // Thin dispatcher: bind + derive tile geometry (pnumTokens is read once
-    // inside TaskTilesInit), then grid-stride the tiles. The host launches
-    // min(m, aivNum) blocks, so each block runs at most one tile.
-    __aicore__ inline void Run(GM_ADDR x, GM_ADDR scale, GM_ADDR out, GM_ADDR pnumTokens,
-                               uint32_t m, uint32_t k)
-    {
-        int64_t tiles = TaskTilesInit(x, scale, out, pnumTokens, m, k);
-        SetFlags();
-        for (int64_t idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum()) {
-            RunTileByIdx(idx);
-        }
-        WaitFlags();
-    }
-
-    __aicore__ inline void SetFlags()
+    __aicore__ inline void SetFlagsMultiRow()
     {
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
@@ -252,7 +285,7 @@ public:
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     }
 
-    __aicore__ inline void WaitFlags()
+    __aicore__ inline void WaitFlagsMultiRow()
     {
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
@@ -260,17 +293,158 @@ public:
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     }
 
-private:
+    // ---- single-row path (tileRows == 1: no ping-pong, no batching, ----
+    // ---- S-pipe scalar optimization: scaleRec as float, not UB array) ----
+
+    __aicore__ inline void TaskTilesInitSingleRow()
+    {
+        // UB layout (single buffer, no ping-pong, no multi-row arrays):
+        //   s_x [kPad] dtype, s_xf32 [kPad] float, s_z [kPad] int8,
+        //   s_xf16 [kPad] half, s_xAbs [kPad] float, s_scaleUbuf [8] float (32B aligned)
+        // Total = (2+4+1+2+4)*kPad + 32  <  multi-row minimum
+        this->s_x = reinterpret_cast<__ubuf__ dtype *>((uintptr_t)0);
+        this->s_xf32 = reinterpret_cast<__ubuf__ float *>(this->s_x + this->kPad);
+        this->s_z = reinterpret_cast<__ubuf__ int8_t *>(this->s_xf32 + this->kPad);
+        this->s_xf16 = reinterpret_cast<__ubuf__ half *>(this->s_z + this->kPad);
+        this->s_xAbs = reinterpret_cast<__ubuf__ float *>(this->s_xf16 + this->kPad);
+        // 32B-aligned for copy_ubuf_to_gm_align_b32
+        this->s_scaleUbuf = reinterpret_cast<__ubuf__ float *>(
+            (uintptr_t)ROUND_UP((uintptr_t)(this->s_xAbs + this->kPad), 32));
+        assert((uint64_t)(this->s_scaleUbuf + 8) <= UB_SIZE);
+    }
+
+    __aicore__ inline void RunTileByIdxSingleRow(int64_t idx)
+    {
+        uint64_t rowStart = static_cast<uint64_t>(idx) * this->tileRows;  // == idx
+        if (rowStart >= this->m) {
+            return;
+        }
+        const uint32_t row = static_cast<uint32_t>(rowStart);
+
+        assert(this->k % 32 == 0);
+        const uint32_t k = (uint32_t)this->k;
+        const uint32_t kLoop = this->kLoop;
+        const uint32_t kPad = this->kPad;
+
+        // ---- phase 1: walk k chunks, merge absmax into s_scaleUbuf[0] ----
+        // s_xAbs is ReduceMax scratch (overwritten each chunk); s_scaleUbuf
+        // is the persistent accumulator (unused until phase 1 finishes).
+        for (uint32_t loop = 0; loop < kLoop; loop++) {
+            uint32_t kOffset = loop * kPad;
+            uint32_t kSize = MIN(kPad, k - kOffset);
+            uint32_t kRepeats = kPad / VECTOR_MAX_NUM_OF_FP32;
+
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+            copy_gm_to_ubuf(this->s_x, this->xGm + (uint64_t)row * k + kOffset, 0, 1,
+                            kSize * sizeof(dtype) / 32, 0, 0);
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            convert_input<dtype>(this->s_xf32, this->s_x, kRepeats);
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+
+            // vabs → ReduceMax (result in s_xAbs[0]) → merge into s_scaleUbuf[0]
+            vabs(this->s_xAbs, this->s_xf32, kRepeats, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+            ReduceMax(this->s_xAbs, this->s_xAbs, kSize);
+            SetMask(1);
+            if (loop == 0) {
+                vmax(this->s_scaleUbuf, this->s_xAbs, this->s_xAbs, 1, 1, 1, 1, 8, 8, 8);
+            } else {
+                vmax(this->s_scaleUbuf, this->s_scaleUbuf, this->s_xAbs, 1, 1, 1, 1, 8, 8, 8);
+            }
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+            pipe_barrier(PIPE_V);
+        }
+
+        // V→S: absmax scalar visible to S pipe
+        set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+
+        // ---- S pipe: compute scale and scaleRec as scalars ----
+        // scale = absmax / 127 → overwrite s_scaleUbuf[0] for MTE3 DMA to GM
+        // (PIPE_S direct GM write is unreliable on 910B for small data).
+        // scaleRec = 127 / absmax → kept as S-pipe scalar, passed to vmuls.
+        float absmax = float(*this->s_scaleUbuf);
+        float scale = absmax / float(127);
+        this->s_scaleRec = float(127) / absmax;
+        *this->s_scaleUbuf = scale;
+
+        // S→MTE3: DMA scale to GM
+        set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+        copy_ubuf_to_gm_align_b32(this->scalesGm + row, this->s_scaleUbuf, 0, 1, sizeof(float), 0,
+                                  0, 0, 0);
+        set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);  // gates V: scale DMA done
+
+        // ---- phase 2: rescale and emit ----
+        for (uint32_t loop = 0; loop < kLoop; loop++) {
+            uint32_t kOffset = loop * kPad;
+            uint32_t kSize = MIN(kPad, k - kOffset);
+            uint32_t kRepeats = kPad / VECTOR_MAX_NUM_OF_FP32;
+
+            if (kLoop > 1) {
+                // Reload x chunk (kLoop==1: xf32 still resident from phase 1)
+                wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+                copy_gm_to_ubuf(this->s_x, this->xGm + (uint64_t)row * k + kOffset, 0, 1,
+                                kSize * sizeof(dtype) / 32, 0, 0);
+                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+                convert_input<dtype>(this->s_xf32, this->s_x, kRepeats);
+                pipe_barrier(PIPE_V);
+                set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+            }
+
+            // Single-row vmuls with scalar scaleRec (S→V sync for scalar visibility)
+            set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+            vmuls(this->s_xf32, this->s_xf32, this->s_scaleRec, kRepeats, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+
+            // fp32→fp16(ODD)→int8(RINT) cast chain (same as multi-row)
+            vconv_f322f16o(this->s_xf16, this->s_xf32, kRepeats, 1, 1, 4, 8);
+            pipe_barrier(PIPE_V);
+
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+            vconv_f162s8r(this->s_z, this->s_xf16, kPad / VECTOR_MAX_NUM_OF_FP16, 1, 1, 4, 8);
+            pipe_barrier(PIPE_V);
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            copy_ubuf_to_gm(this->zGm + (uint64_t)row * k + kOffset, this->s_z, 0, 1, kSize / 32, 0,
+                            0);
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        }
+    }
+
+    __aicore__ inline void SetFlagsSingleRow()
+    {
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+    }
+
+    __aicore__ inline void WaitFlagsSingleRow()
+    {
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+    }
+
+    // ---- shared members ----
     uint64_t m = 0;
     uint64_t k = 0;
     uint64_t tileRows = 1;
+    bool isSingleRow = false;
     // Per-launch group plan + UB layout, derived once in TaskTilesInit.
-    uint32_t rows = 1;
     uint32_t kLoop = 1;
     uint32_t kPad = 1;
     __gm__ dtype *xGm = nullptr;
     __gm__ int8_t *zGm = nullptr;
     __gm__ float *scalesGm = nullptr;
+
+    // ---- multi-row members ----
+    uint32_t rows = 1;
     __ubuf__ dtype *x1 = nullptr;
     __ubuf__ dtype *x2 = nullptr;
     __ubuf__ float *xf32 = nullptr;
@@ -280,6 +454,15 @@ private:
     __ubuf__ half *xf16 = nullptr;
     __ubuf__ float *rowAbs = nullptr;
     __ubuf__ float *scaleStage = nullptr;
+
+    // ---- single-row members ----
+    __ubuf__ dtype *s_x = nullptr;
+    __ubuf__ float *s_xf32 = nullptr;
+    __ubuf__ int8_t *s_z = nullptr;
+    __ubuf__ half *s_xf16 = nullptr;
+    __ubuf__ float *s_xAbs = nullptr;
+    __ubuf__ float *s_scaleUbuf = nullptr;  // 32B-aligned, 1 float repack for MTE3 DMA
+    float s_scaleRec = 0.0f;                // S-pipe scalar, passed directly to vmuls
 };
 
 #define QUANT_DYN_FUNC_DEFINE(dtype)                                                         \
