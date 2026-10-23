@@ -62,6 +62,12 @@ struct XModelAttnMeta {
     XTensor queryStartLoc;
     XTensor lens;
     XTensor cachedLens;
+    // Resolved GDN metadata, indexed by model layer; caller owns all storage.
+    std::vector<XTensor> gdnConvIndices;
+    std::vector<XTensor> gdnSsmIndices;
+    std::vector<XTensor> gdnQueryStarts;
+    std::vector<XTensor> gdnConvInitial;
+    std::vector<XTensor> gdnSsmInitial;
 };
 
 enum commType {
@@ -207,9 +213,13 @@ public:
     // Host-side: true when this step is decode (seqlen==1 and all cached_lens>0).
     // Avoids D2H sync via GetFirstAttnPosition in every linear layer.
     bool _linearDecodeStep = false;
-    // Host copy of cached_lens from PrepareAttn. Linear layers clear conv/ssm
-    // only for requests with cached==0 (fresh prefill); chunked-prefill
-    // continuation (cached>0, multi-token) reuses state via recurrent GDN.
+    std::vector<XTensor> _gdnConvIndices;
+    std::vector<XTensor> _gdnSsmIndices;
+    std::vector<XTensor> _gdnQueryStarts;
+    std::vector<XTensor> _gdnConvInitial;
+    std::vector<XTensor> _gdnSsmInitial;
+
+    // Host copy from PrepareAttn, used to distinguish initialized decode queries.
     std::vector<uint32_t> _cachedLensHost;
     uint32_t _batch;
     uint32_t _maxTotalLens;

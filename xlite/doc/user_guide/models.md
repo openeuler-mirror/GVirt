@@ -31,3 +31,14 @@ xlite 支持以下大语言模型的推理部署：
 
 - Ascend A2
 - Ascend A3
+## Qwen3.5 原生分页 GDN 调用契约
+
+Conv state 使用 `[P,W-1,C]`，SSM state 使用 `[P,Hv,V,K]`，保留页零作为 null。
+AttnMeta 和 AttnMetaV2 的 `gdn_conv_indices` / `gdn_ssm_indices` 为逐层设备 INT32 页号列表；
+full-attention 层放空 tensor。Conv 与 SSM 页面由调用者独立分配和映射，禁止将 batch 行号
+直接当作生产环境页号。初次请求及多 token 调用还必须提供逐层 `gdn_query_starts[B+1]`、
+`gdn_conv_initial[B]`、`gdn_ssm_initial[B]`。前缀和须对应 packed query 长度；
+initial=0 表示从零状态开始，非零表示使用当前页，空段不写页。
+
+旧 dense Conv、token Conv 和 recurrent 算子接口已删除。测试模型的 helper 只负责
+固定 batch 的演示页面映射；生产调度器负责请求生命周期、页面恢复及 metadata 正确性。

@@ -6,6 +6,7 @@
 #include <torch/torch.h>
 #include <torch/extension.h>
 #include <optional>
+#include <initializer_list>
 #include "xlite.h"
 #include "core_assigner.h"
 #include "op.h"
@@ -19,6 +20,11 @@ struct CModelAttnMeta {
     std::vector<uint32_t> cachedLens;
     std::vector<std::vector<uint32_t>> blockTablesList;
     at::Tensor positions;
+    std::vector<at::Tensor> gdnConvIndices;
+    std::vector<at::Tensor> gdnSsmIndices;
+    std::vector<at::Tensor> gdnQueryStarts;
+    std::vector<at::Tensor> gdnConvInitial;
+    std::vector<at::Tensor> gdnSsmInitial;
 };
 
 struct CModelAttnMetaV2 {
@@ -30,6 +36,11 @@ struct CModelAttnMetaV2 {
     at::Tensor queryStartLoc;  // [batch] int32 device, prefix-sum of lens
     std::vector<at::Tensor> slotMapping;  // [batchedTokens] int32 device, per-kv-cache
     std::vector<at::Tensor> blockTables;  // [batch, maxNumBlocks] int32 device, per-kv-cache
+    std::vector<at::Tensor> gdnConvIndices;
+    std::vector<at::Tensor> gdnSsmIndices;
+    std::vector<at::Tensor> gdnQueryStarts;
+    std::vector<at::Tensor> gdnConvInitial;
+    std::vector<at::Tensor> gdnSsmInitial;
 };
 
 class _CModel
@@ -838,9 +849,10 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
-        // caches so far — C8 DSA int8 index/scale caches stay contiguous).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
+        // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
+        // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
+        bool allowPitch = attnType == XMODEL_ATTN_HYBRID || attnType == XMODEL_ATTN_MHA ||
+                          attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
@@ -876,6 +888,33 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     }
 }
 
+template <typename Meta>
+static void InitGdnMetadata(XRuntime &rt, XModelAttnMeta &out, const Meta &in)
+{
+    rt.SetCurrentContext();
+    int32_t device;
+    CHECK_ACL(aclrtGetDevice(&device));
+    const DebugSrcLoc loc = DBG_LOC;
+    auto copy = [device, loc](std::vector<XTensor> &dst, const std::vector<at::Tensor> &tensors) {
+        dst.resize(tensors.size());
+        for (size_t i = 0; i < tensors.size(); ++i) {
+            if (!tensors[i].defined() || tensors[i].numel() == 0) {
+                continue;
+            }
+            if (tensors[i].device().type() != c10::DeviceType::PrivateUse1 ||
+                tensors[i].device().index() != device) {
+                throw std::runtime_error("GDN metadata must reside on the runtime NPU");
+            }
+            InitXTensor(dst[i], tensors[i], loc);
+        }
+    };
+    copy(out.gdnConvIndices, in.gdnConvIndices);
+    copy(out.gdnSsmIndices, in.gdnSsmIndices);
+    copy(out.gdnQueryStarts, in.gdnQueryStarts);
+    copy(out.gdnConvInitial, in.gdnConvInitial);
+    copy(out.gdnSsmInitial, in.gdnSsmInitial);
+}
+
 void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                         std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                         at::Tensor &output, uint64_t currStream)
@@ -885,6 +924,7 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
+    InitGdnMetadata(rt, _attnMeta, attnMeta);
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     std::vector<at::Tensor> freqsCisVec = {freqsCis};
@@ -900,6 +940,7 @@ void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
+    InitGdnMetadata(rt, _attnMeta, attnMeta);
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
     InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
@@ -925,6 +966,7 @@ void _CModel::ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
+    InitGdnMetadata(rt, _attnMeta, attnMeta);
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
     InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
@@ -952,6 +994,7 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
+    InitGdnMetadata(rt, _attnMeta, attnMeta);
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
     InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
@@ -1051,9 +1094,10 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
-        // caches so far — C8 DSA int8 index/scale caches stay contiguous).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
+        // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
+        // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
+        bool allowPitch = attnType == XMODEL_ATTN_HYBRID || attnType == XMODEL_ATTN_MHA ||
+                          attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
@@ -1100,6 +1144,7 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
+    InitGdnMetadata(rt, _attnMeta, attnMeta);
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     std::vector<at::Tensor> freqsCisVec = {freqsCis};
@@ -1142,9 +1187,10 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
-        // caches so far — C8 DSA int8 index/scale caches stay contiguous).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
+        // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
+        // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
+        bool allowPitch = attnType == XMODEL_ATTN_HYBRID || attnType == XMODEL_ATTN_MHA ||
+                          attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
@@ -1197,6 +1243,7 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
+    InitGdnMetadata(rt, _attnMeta, attnMeta);
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     at::Tensor ids = inputIds.value_or(at::Tensor());
@@ -1693,7 +1740,7 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
                at::Tensor &output, at::Tensor &queryStartLoc, at::Tensor &lens,
                at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t nKvHeads,
                uint32_t headDim, uint32_t blockSize, uint32_t batch, bool enableFlashAttention,
-               uint32_t tileSizeOfCachedKV)
+               uint32_t tileSizeOfCachedKV, bool fp32Scores)
 {
     XTensor _qkv, _kCache, _vCache, _qk, _output, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
@@ -1707,9 +1754,12 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     InitXTensor(_blockTables, blockTables, DBG_LOC);
     uint32_t maxNumBlock = DeriveMaxNumBlocks(_blockTables, batch);
 
+    if (fp32Scores && enableFlashAttention) {
+        throw std::invalid_argument("FP32 scores cannot use tiled flash attention");
+    }
     if (!enableFlashAttention) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, maxNumBlock * blockSize},
-                                   XDtypeOf(qkv), DBG_LOC);
+                                   fp32Scores ? FP32 : XDtypeOf(qkv), DBG_LOC);
         XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _queryStartLoc, _lens,
                          _cachedLens, _blockTables, nHeads, nKvHeads, headDim, blockSize, batch);
         rt.Synchronize();
@@ -2580,40 +2630,41 @@ void Transpose_1_2(XRuntime &rt, at::Tensor &input, at::Tensor &output)
     rt.Synchronize();
 }
 
-void LinearAttConv1dAndSiLU(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_state,
-                            at::Tensor &weight, at::Tensor &output,
-                            std::optional<at::Tensor> query_start_loc = std::nullopt,
-                            std::optional<at::Tensor> query_lens = std::nullopt)
+static void CheckGdnDevices(XRuntime &rt, std::initializer_list<const at::Tensor *> tensors)
 {
-    XTensor _mix_qkv, _conv_state, _weight, _output, _start, _lens;
-    InitXTensor(_mix_qkv, mix_qkv, DBG_LOC);
-    InitXTensor(_conv_state, conv_state, DBG_LOC);
-    InitXTensor(_weight, weight, DBG_LOC);
-    InitXTensor(_output, output, DBG_LOC);
-    XTensor *startPtr = nullptr;
-    XTensor *lensPtr = nullptr;
-    if (query_start_loc.has_value() && query_lens.has_value() && query_start_loc->defined() &&
-        query_lens->defined() && query_start_loc->numel() > 0 && query_lens->numel() > 0) {
-        InitXTensor(_start, *query_start_loc, DBG_LOC);
-        InitXTensor(_lens, *query_lens, DBG_LOC);
-        startPtr = &_start;
-        lensPtr = &_lens;
+    rt.SetCurrentContext();
+    int32_t device;
+    CHECK_ACL(aclrtGetDevice(&device));
+    for (const at::Tensor *tensor : tensors) {
+        if (tensor != nullptr && (tensor->device().type() != c10::DeviceType::PrivateUse1 ||
+                                  tensor->device().index() != device)) {
+            throw std::runtime_error("paged GDN tensors must be on the runtime NPU");
+        }
     }
-    XliteOpConv1dAndSiLU(rt, _conv_state, _mix_qkv, _weight, _output, /*updateState=*/true,
-                         startPtr, lensPtr);
-    rt.Synchronize();
 }
 
-void LinearAttConv1dAndSiLUToken(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_state,
-                                 at::Tensor &weight, at::Tensor &output, int64_t seq_len)
+void LinearAttConv1dAndSiLUPaged(XRuntime &rt, at::Tensor &input, at::Tensor &state,
+                                 at::Tensor &weight, at::Tensor &output, at::Tensor &indices,
+                                 const std::optional<at::Tensor> &cachedLens,
+                                 uint32_t stateBlockSize, bool aligned)
 {
-    XTensor _mix_qkv, _conv_state, _weight, _output;
-    InitXTensor(_mix_qkv, mix_qkv, DBG_LOC);
-    InitXTensor(_conv_state, conv_state, DBG_LOC);
-    InitXTensor(_weight, weight, DBG_LOC);
-    InitXTensor(_output, output, DBG_LOC);
-    XliteOpConv1dAndSiLUToken(rt, _conv_state, _mix_qkv, _weight, _output,
-                              static_cast<uint32_t>(seq_len), /*updateState=*/true);
+    CheckGdnDevices(rt, {&input, &state, &weight, &output, &indices,
+                         cachedLens.has_value() ? &cachedLens.value() : nullptr});
+    if (!input.is_contiguous() || !weight.is_contiguous() || !output.is_contiguous()) {
+        throw std::runtime_error("paged conv requires contiguous activation, weight and output");
+    }
+    XTensor x, c, w, y, pages;
+    InitXTensor(x, input);
+    InitXTensor(c, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(w, weight);
+    InitXTensor(y, output);
+    InitXTensor(pages, indices, DBG_LOC, /*allowPitched=*/true);
+    XTensor cached;
+    if (cachedLens.has_value()) {
+        InitXTensor(cached, cachedLens.value());
+    }
+    XliteOpConv1dAndSiLUPaged(rt, c, x, w, y, pages, cachedLens.has_value() ? &cached : nullptr,
+                              stateBlockSize, aligned);
     rt.Synchronize();
 }
 
@@ -2750,32 +2801,32 @@ void BetaDecay(XRuntime &rt, at::Tensor &b, at::Tensor &a, at::Tensor &A_log, at
     rt.Synchronize();
 }
 
-void RecurrentGatedDeltaRule(XRuntime &rt, at::Tensor &query, at::Tensor &key, at::Tensor &value,
-                             at::Tensor &beta, at::Tensor &g, at::Tensor &state, at::Tensor &out,
-                             uint32_t batch, uint32_t seqlen, uint32_t num_heads, uint32_t k_dim,
-                             uint32_t v_dim,
-                             std::optional<at::Tensor> query_start_loc = std::nullopt,
-                             std::optional<at::Tensor> query_lens = std::nullopt)
+void RecurrentGatedDeltaRulePaged(XRuntime &rt, at::Tensor &query, at::Tensor &key,
+                                  at::Tensor &value, at::Tensor &beta, at::Tensor &g,
+                                  at::Tensor &state, at::Tensor &out, at::Tensor &state_indices,
+                                  uint32_t num_key_heads, uint32_t num_value_heads, uint32_t k_dim,
+                                  uint32_t v_dim, const std::optional<at::Tensor> &cachedLens,
+                                  uint32_t stateBlockSize, bool aligned)
 {
-    XTensor _query, _key, _value, _beta, _g, _state, _out, _start, _lens;
-    InitXTensor(_query, query, DBG_LOC);
-    InitXTensor(_key, key, DBG_LOC);
-    InitXTensor(_value, value, DBG_LOC);
-    InitXTensor(_beta, beta, DBG_LOC);
-    InitXTensor(_g, g, DBG_LOC);
-    InitXTensor(_state, state, DBG_LOC);
-    InitXTensor(_out, out, DBG_LOC);
-    XTensor *startPtr = nullptr;
-    XTensor *lensPtr = nullptr;
-    if (query_start_loc.has_value() && query_lens.has_value() && query_start_loc->defined() &&
-        query_lens->defined() && query_start_loc->numel() > 0 && query_lens->numel() > 0) {
-        InitXTensor(_start, *query_start_loc, DBG_LOC);
-        InitXTensor(_lens, *query_lens, DBG_LOC);
-        startPtr = &_start;
-        lensPtr = &_lens;
+    CheckGdnDevices(rt, {&query, &key, &value, &beta, &g, &state, &out, &state_indices,
+                         cachedLens.has_value() ? &cachedLens.value() : nullptr});
+    XTensor q, k, v, b, decay, s, o, indices;
+    InitXTensor(q, query);
+    InitXTensor(k, key);
+    InitXTensor(v, value);
+    InitXTensor(b, beta);
+    InitXTensor(decay, g);
+    InitXTensor(s, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(o, out);
+    InitXTensor(indices, state_indices, DBG_LOC, /*allowPitched=*/true);
+    XTensor cached;
+    if (cachedLens.has_value()) {
+        InitXTensor(cached, cachedLens.value());
     }
-    XliteOpRecurrentGatedDeltaRule(rt, _query, _key, _value, _beta, _g, _state, _out, batch, seqlen,
-                                   num_heads, k_dim, v_dim, startPtr, lensPtr);
+    uint32_t batch = query.dim() == 2 ? static_cast<uint32_t>(query.size(0)) : 0;
+    XliteOpRecurrentGatedDeltaRulePaged(
+        rt, q, k, v, b, decay, s, o, &indices, batch, num_key_heads, num_value_heads, k_dim, v_dim,
+        cachedLens.has_value() ? &cached : nullptr, stateBlockSize, aligned);
     rt.Synchronize();
 }
 
@@ -2875,6 +2926,57 @@ void HcPre(XRuntime &rt, at::Tensor &xResid, at::Tensor &pre, at::Tensor &output
     InitXTensor(_pre, pre, DBG_LOC);
     InitXTensor(_output, output, DBG_LOC);
     XliteOpHcPre(rt, _xResid, _pre, _output, m, hcMult, hidden);
+    rt.Synchronize();
+}
+
+void SiluGateMul(XRuntime &rt, at::Tensor &normed, at::Tensor &gate, at::Tensor &out)
+{
+    XTensor n, g, o;
+    InitXTensor(n, normed);
+    InitXTensor(g, gate);
+    InitXTensor(o, out);
+    XliteOpSiluGateMul(rt, n, g, o);
+    rt.Synchronize();
+}
+
+void RecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, at::Tensor &query, at::Tensor &key,
+                                         at::Tensor &value, at::Tensor &beta, at::Tensor &g,
+                                         at::Tensor &state, at::Tensor &out, at::Tensor &indices,
+                                         at::Tensor &starts, at::Tensor &initial, uint32_t kh,
+                                         uint32_t vh, uint32_t kd, uint32_t vd)
+{
+    CheckGdnDevices(rt,
+                    {&query, &key, &value, &beta, &g, &state, &out, &indices, &starts, &initial});
+    XTensor q, k, v, b, decay, st, o, ids, bounds, init;
+    InitXTensor(q, query);
+    InitXTensor(k, key);
+    InitXTensor(v, value);
+    InitXTensor(b, beta);
+    InitXTensor(decay, g);
+    InitXTensor(st, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(o, out);
+    InitXTensor(ids, indices);
+    InitXTensor(bounds, starts);
+    InitXTensor(init, initial);
+    XliteOpRecurrentGatedDeltaRulePrefillPaged(rt, q, k, v, b, decay, st, o, ids, bounds, init, kh,
+                                               vh, kd, vd);
+    rt.Synchronize();
+}
+
+void Conv1dAndSiLUPrefillPaged(XRuntime &rt, at::Tensor &input, at::Tensor &state,
+                               at::Tensor &weight, at::Tensor &output, at::Tensor &indices,
+                               at::Tensor &starts, at::Tensor &initial)
+{
+    CheckGdnDevices(rt, {&input, &state, &weight, &output, &indices, &starts, &initial});
+    XTensor x, st, w, o, ids, bounds, init;
+    InitXTensor(x, input);
+    InitXTensor(st, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(w, weight);
+    InitXTensor(o, output);
+    InitXTensor(ids, indices);
+    InitXTensor(bounds, starts);
+    InitXTensor(init, initial);
+    XliteOpConv1dAndSiLUPrefillPaged(rt, st, x, w, o, ids, bounds, init);
     rt.Synchronize();
 }
 
@@ -2984,7 +3086,12 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("lens", &CModelAttnMeta::lens)
         .def_readwrite("cached_lens", &CModelAttnMeta::cachedLens)
         .def_readwrite("block_tables_cpu", &CModelAttnMeta::blockTablesList)
-        .def_readwrite("positions", &CModelAttnMeta::positions);
+        .def_readwrite("positions", &CModelAttnMeta::positions)
+        .def_readwrite("gdn_conv_indices", &CModelAttnMeta::gdnConvIndices)
+        .def_readwrite("gdn_ssm_indices", &CModelAttnMeta::gdnSsmIndices)
+        .def_readwrite("gdn_query_starts", &CModelAttnMeta::gdnQueryStarts)
+        .def_readwrite("gdn_conv_initial", &CModelAttnMeta::gdnConvInitial)
+        .def_readwrite("gdn_ssm_initial", &CModelAttnMeta::gdnSsmInitial);
 
     py::class_<CModelAttnMetaV2>(m, "AttnMetaV2")
         .def(py::init<>())
@@ -2995,7 +3102,12 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("cached_lens_cpu", &CModelAttnMetaV2::cachedLensCpu)
         .def_readwrite("query_start_loc", &CModelAttnMetaV2::queryStartLoc)
         .def_readwrite("slot_mapping", &CModelAttnMetaV2::slotMapping)
-        .def_readwrite("block_tables", &CModelAttnMetaV2::blockTables);
+        .def_readwrite("block_tables", &CModelAttnMetaV2::blockTables)
+        .def_readwrite("gdn_conv_indices", &CModelAttnMetaV2::gdnConvIndices)
+        .def_readwrite("gdn_ssm_indices", &CModelAttnMetaV2::gdnSsmIndices)
+        .def_readwrite("gdn_query_starts", &CModelAttnMetaV2::gdnQueryStarts)
+        .def_readwrite("gdn_conv_initial", &CModelAttnMetaV2::gdnConvInitial)
+        .def_readwrite("gdn_ssm_initial", &CModelAttnMetaV2::gdnSsmInitial);
 
     py::enum_<XModelAttnType>(m, "AttnType")
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
@@ -3299,7 +3411,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("v_cache"), py::arg("output"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"),
           py::arg("n_kv_heads"), py::arg("head_dim"), py::arg("block_size"), py::arg("batch"),
-          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192);
+          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192,
+          py::arg("fp32_scores") = false);
     m.def("add_and_rmsnorm", &AddAndRMSNorm, py::arg("rt"), py::arg("in_"), py::arg("add_in_out"),
           py::arg("norm"), py::arg("out"), py::arg("norm_eps"));
     m.def("softmax_topk", &SoftmaxTopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
@@ -3432,12 +3545,10 @@ PYBIND11_MODULE(_C, m)
           py::arg("b"), py::arg("a"), py::arg("m"), py::arg("n"), py::arg("v"), py::arg("h"),
           py::arg("k"));
     m.def("transpose_1_2", &Transpose_1_2, py::arg("rt"), py::arg("input"), py::arg("output"));
-    m.def("linear_att_conv_and_silu", &LinearAttConv1dAndSiLU, py::arg("rt"), py::arg("mix_qkv"),
-          py::arg("conv_state"), py::arg("weight"), py::arg("output"),
-          py::arg("query_start_loc") = py::none(), py::arg("query_lens") = py::none());
-    m.def("linear_att_conv_and_silu_token", &LinearAttConv1dAndSiLUToken, py::arg("rt"),
+    m.def("linear_att_conv_and_silu_paged", &LinearAttConv1dAndSiLUPaged, py::arg("rt"),
           py::arg("mix_qkv"), py::arg("conv_state"), py::arg("weight"), py::arg("output"),
-          py::arg("seq_len"));
+          py::arg("state_indices"), py::arg("cached_lens") = std::nullopt,
+          py::arg("state_block_size") = 0, py::arg("aligned") = false);
     m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::arg("outputs"));
     m.def("concat", &Concat, py::arg("rt"), py::arg("inputs"), py::arg("out"));
     m.def("concat_col", &ConcatCol, py::arg("rt"), py::arg("inputs"), py::arg("out"));
@@ -3446,11 +3557,15 @@ PYBIND11_MODULE(_C, m)
     m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
           py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
           py::arg("num_v_heads"));
-    m.def("recurrent_gated_delta_rule", &RecurrentGatedDeltaRule, py::arg("rt"), py::arg("query"),
-          py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"), py::arg("state"),
-          py::arg("out"), py::arg("batch"), py::arg("seqlen"), py::arg("num_heads"),
-          py::arg("k_dim"), py::arg("v_dim"), py::arg("query_start_loc") = py::none(),
-          py::arg("query_lens") = py::none());
+    m.def("silu_gate_mul", &SiluGateMul);
+    m.def("recurrent_gated_delta_rule_prefill_paged", &RecurrentGatedDeltaRulePrefillPaged);
+    m.def("conv1d_and_silu_prefill_paged", &Conv1dAndSiLUPrefillPaged);
+    m.def("recurrent_gated_delta_rule_paged", &RecurrentGatedDeltaRulePaged, py::arg("rt"),
+          py::arg("query"), py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"),
+          py::arg("state"), py::arg("out"), py::arg("state_indices"), py::arg("num_key_heads"),
+          py::arg("num_value_heads"), py::arg("k_dim"), py::arg("v_dim"),
+          py::arg("cached_lens") = std::nullopt, py::arg("state_block_size") = 0,
+          py::arg("aligned") = false);
     m.def("einsum_mht_hdt_mhd", &EinsumMhtHdtMhd, "einsum_mht_hdt_mhd", py::arg("rt"),
           py::arg("mht"), py::arg("hdt"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
           py::arg("d"), py::arg("weight_nz") = false);

@@ -35,7 +35,7 @@ if forward_backend == "xlite":
         Runtime, ModelConfig, AttnMeta, AttnMetaV2, AttnHybrid, Model,
     )
     import numpy as np
-    from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
+    from tests.models.xlite_utils import prepare_xlite_attnmeta_v2, prepare_xlite_gdn_metadata
 
 
 def _mha_qkv_weight(attn, head_dim: int, n_heads: int):
@@ -1190,10 +1190,10 @@ class Qwen3_5(nn.Module):
                 kv_size += block_num * head_num * block_size * args.head_dim * 2 * k.element_size()
             else:
                 conv_state = torch.zeros(
-                    args.max_batch_size, conv_dim, args.linear_conv_kernel_dim,
+                    args.max_batch_size + 1, args.linear_conv_kernel_dim - 1, conv_dim,
                     dtype=torch.get_default_dtype(), device="npu")
                 ssm_state = torch.zeros(
-                    args.max_batch_size, n_local_v, args.linear_key_head_dim, args.linear_value_head_dim,
+                    args.max_batch_size + 1, n_local_v, args.linear_value_head_dim, args.linear_key_head_dim,
                     dtype=torch.get_default_dtype(), device="npu")
                 self.xlite_kv_cache.append([conv_state, ssm_state])
                 kv_size += conv_state.numel() * conv_state.element_size()
@@ -1213,9 +1213,10 @@ class Qwen3_5(nn.Module):
         attn_meta.block_tables_cpu = batch_indices * step + block_indices
         attn_meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
             .repeat(batch).to(tokens.device)
-        return attn_meta
+        return prepare_xlite_gdn_metadata(attn_meta, tokens, start_pos, self.layers)
 
     def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
-        return prepare_xlite_attnmeta_v2(
+        meta = prepare_xlite_attnmeta_v2(
             AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size]
         )
+        return prepare_xlite_gdn_metadata(meta, tokens, start_pos, self.layers)

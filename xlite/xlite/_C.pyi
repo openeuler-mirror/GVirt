@@ -382,6 +382,10 @@ class AttnMeta:
 
     lens: List[int] = ...
     """Per-sample query lengths."""
+    gdn_conv_indices: List[torch.Tensor] = ...
+    """Native conv page indices, aligned with model layers; no cache allocation."""
+    gdn_ssm_indices: List[torch.Tensor] = ...
+    """Native SSM page indices for this step, aligned with model layers."""
     cached_lens: List[int] = ...
     """Per-sample cached lengths."""
     block_tables_cpu: List[List[int]] = ...
@@ -390,6 +394,15 @@ class AttnMeta:
     """Position tensor for version-1 attention metadata, shape ``[batched_tokens]`` or
     ``[num_dims, batched_tokens]`` (mrope) int64 device; the token (last) dim may exceed
     ``batched_tokens``, and 2D tensors may carry a dim-0 row pitch (non-contiguous)."""
+
+    gdn_query_starts: List[torch.Tensor] = ...
+    """Per-layer contiguous INT32[B+1] packed query boundaries, required for fresh/multi-token queries."""
+
+    gdn_conv_initial: List[torch.Tensor] = ...
+    """Per-layer INT32[B] flags: zero resets Conv history; nonzero retains it."""
+
+    gdn_ssm_initial: List[torch.Tensor] = ...
+    """Per-layer INT32[B] flags: zero resets SSM state; nonzero retains it."""
 
 class AttnMetaV2:
     """Device-tensor attention metadata for the V2 forward path.
@@ -435,6 +448,19 @@ class AttnMetaV2:
     """Slot indices, each shape ``[batched_tokens]`` int32 device, per kv cache."""
     block_tables: Sequence[torch.Tensor] = ...
     """Padded block tables, each shape ``[batch, max_num_blocks]`` int32 device, per kv cache."""
+
+    gdn_conv_indices: List[torch.Tensor] = ...
+
+    gdn_ssm_indices: List[torch.Tensor] = ...
+
+    gdn_query_starts: List[torch.Tensor] = ...
+    """Per-layer contiguous INT32[B+1] packed query boundaries, required for fresh/multi-token queries."""
+
+    gdn_conv_initial: List[torch.Tensor] = ...
+    """Per-layer INT32[B] flags: zero resets Conv history; nonzero retains it."""
+
+    gdn_ssm_initial: List[torch.Tensor] = ...
+    """Per-layer INT32[B] flags: zero resets SSM state; nonzero retains it."""
 
 class AttnType(Enum):
     """Attention type enum exported by the native extension."""
@@ -1093,9 +1119,9 @@ class Model:
                 MLA/DSA k-nope ``[blocks, block_size, n_local_kv_heads, kv_lora_rank]`` +
                 pe ``[blocks, block_size, n_local_kv_heads, rope_head_dim]`` (DSA adds
                 indexer k ``[blocks, block_size, 1, index_head_dim]``);
-                HYBRID linear layers hold conv state ``[max_batch, conv_dim,
-                linear_conv_kernel_dim]`` + ssm state ``[max_batch, n_local_v,
-                linear_key_head_dim, linear_value_head_dim]``;
+                HYBRID linear layers hold conv state ``[pages, linear_conv_kernel_dim-1,
+                conv_dim]`` + ssm state ``[pages, n_local_v, linear_value_head_dim,
+                linear_key_head_dim]``; page zero is null and per-layer GDN metadata is required;
                 CXA holds the 5-tuple (indexer_state, indexer_k, compress_kv, state, swa_kv).
             freqs_cis (torch.Tensor): Rotary frequency table shared by all layers, shape
                 ``[max_position, rope_head_dim]``, model dtype (per row ``[cos | sin]``
@@ -2095,6 +2121,7 @@ def attention(
     batch: int,
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
+    fp32_scores: bool = False,
 ) -> None:
     """Run paged attention for cached KV tensors.
 
@@ -3679,70 +3706,20 @@ def transpose_1_2(rt: Runtime, input: torch.Tensor, output: torch.Tensor) -> Non
     """
     ...
 
-def linear_att_conv_and_silu(
-    rt: Runtime,
-    mix_qkv: torch.Tensor,
-    conv_state: torch.Tensor,
-    weight: torch.Tensor,
-    output: torch.Tensor,
-    query_start_loc: Optional[torch.Tensor] = None,
-    query_lens: Optional[torch.Tensor] = None,
+def linear_att_conv_and_silu_paged(
+    rt: Runtime, mix_qkv: torch.Tensor, conv_state: torch.Tensor,
+    weight: torch.Tensor, output: torch.Tensor, state_indices: torch.Tensor,
+    cached_lens: Optional[torch.Tensor] = None,
+    state_block_size: int = 0,
+    aligned: bool = False,
 ) -> None:
-    """Fused causal conv1d + SiLU for linear attention (no host concat).
+    """Update native SD pages selected by INT32 indices or raw block tables.
 
-    Two modes. Uniform: ``mix_qkv``/``output`` are ``[B, S, C]`` and both
-    optional tensors are omitted. Packed: ``mix_qkv``/``output`` are
-    token-major ``[T, C]`` (``T = sum of per-request lengths``, ``T <= 256``
-    requests), and ``query_start_loc``/``query_lens`` (both ``[batch]``,
-    int32) describe the per-request segments; ``S <= 4096`` per request.
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        mix_qkv (torch.Tensor): Input mixed QKV tensor, ``[B, S, C]`` (uniform)
-            or ``[T, C]`` (packed), fp32/fp16/bf16 (all operands same dtype).
-        conv_state (torch.Tensor): Convolution state tensor, shape ``[B, C, K]``,
-            same dtype; updated in place (K = kernel size, <= 16).
-        weight (torch.Tensor): Kernel weight tensor, shape ``[C, 1, K]`` or
-            ``[C, K]``, same dtype.
-        output (torch.Tensor): Output tensor, same shape as ``mix_qkv``, same dtype.
-        query_start_loc (Optional[torch.Tensor]): Packed mode only: exclusive
-            prefix-sum segment starts, shape ``[batch]``, int32.
-        query_lens (Optional[torch.Tensor]): Packed mode only: per-request token
-            counts, shape ``[batch]``, int32.
-
-    Returns:
-        None: `output` is written in place. State is always updated.
-    """
-    ...
-
-def linear_att_conv_and_silu_token(
-    rt: Runtime,
-    mix_qkv: torch.Tensor,
-    conv_state: torch.Tensor,
-    weight: torch.Tensor,
-    output: torch.Tensor,
-    seq_len: int,
-) -> None:
-    """Fused causal conv1d + SiLU on token-major input (uniform seqlen).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        mix_qkv (torch.Tensor): Input mixed QKV tensor, token-major
-            ``[T, C]`` with ``T = batch * seq_len``, fp32/fp16/bf16
-            (all operands same dtype).
-        conv_state (torch.Tensor): Convolution state tensor, shape
-            ``[B, C, K]``, same dtype; updated in place. ``K`` (kernel
-            dim) must be in ``{1, 2, 4}``; ``seq_len >= K``.
-        weight (torch.Tensor): Kernel weight tensor, shape ``[C, 1, K]`` or
-            ``[C, K]``, same dtype.
-        output (torch.Tensor): Output tensor, shape ``[T, C]``, same dtype.
-        seq_len (int): Per-request sequence length; ``batch * seq_len``
-            must equal ``mix_qkv.shape[0]``. ``C`` must be a multiple of
-            1024.
-
-    Returns:
-        None: `output` is written in place. State is updated via a separate
-        kernel launch.
+    Resolved indices are 1D. Raw tables are 2D with contiguous columns and require
+    contiguous INT32 ``cached_lens`` and a positive ``state_block_size``.
+    ``aligned=False`` selects column zero; otherwise column ``cached_lens // state_block_size``.
+    All tensors must reside on the runtime's NPU. Null pages are never updated.
+    Raw-table rows with nonpositive ``cached_lens`` are padding and never access state.
     """
     ...
 
@@ -3856,7 +3833,8 @@ def beta_decay(
         dt_bias (torch.Tensor): Time bias, shape ``[num_v_heads]``.
         beta (torch.Tensor): beta output tensor, shape ``[bsz, seqlen, num_v_heads]``.
         g (torch.Tensor): g(decay) output tensor ``g = -exp(A_log) * softplus(a + dt_bias)``,
-            shape ``[bsz, seqlen, num_v_heads]``.
+            shape ``[bsz, seqlen, num_v_heads]``; activation dtype or FP32.
+            With FP32 g, A_log/dt_bias may independently use activation dtype or FP32.
         bsz (int): Batch size.
         seqlen (int): Sequence length.
         num_v_heads (int): Number of value heads.
@@ -3866,7 +3844,7 @@ def beta_decay(
     """
     ...
 
-def recurrent_gated_delta_rule(
+def recurrent_gated_delta_rule_paged(
     rt: Runtime,
     query: torch.Tensor,
     key: torch.Tensor,
@@ -3875,44 +3853,28 @@ def recurrent_gated_delta_rule(
     g: torch.Tensor,
     state: torch.Tensor,
     out: torch.Tensor,
-    batch: int,
-    seqlen: int,
-    num_heads: int,
+    state_indices: torch.Tensor,
+    num_key_heads: int,
+    num_value_heads: int,
     k_dim: int,
     v_dim: int,
-    query_start_loc: Optional[torch.Tensor] = None,
-    query_lens: Optional[torch.Tensor] = None,
+    cached_lens: Optional[torch.Tensor] = None,
+    state_block_size: int = 0,
+    aligned: bool = False,
 ) -> None:
-    """Recurrent gated delta rule (GDN linear-attention core).
+    """Single-token GDN on native [P, Hv, V, K] pages, updated in place.
 
-    Two modes. Uniform: rows are ``[B*seqlen, ...]`` in batch-major order and
-    both optional tensors are omitted. Packed: ``query_start_loc``/``query_lens``
-    (both ``[batch]``, int32) describe per-request row segments
-    (``[start[b], start[b]+lens[b])``) within the ``[T, ...]`` rows, and
-    ``seqlen`` is ignored.
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        query (torch.Tensor): [B*S, H*k_dim], L2-normalized, fp32/fp16/bf16 (all operands
-            same dtype).
-        key (torch.Tensor): [B*S, H*k_dim], L2-normalized, same dtype.
-        value (torch.Tensor): [B*S, H*v_dim], same dtype.
-        beta (torch.Tensor): [B*S, H], same dtype.
-        g (torch.Tensor): [B*S, H], log-space decay (kernel applies exp), same dtype.
-        state (torch.Tensor): [B, H, k_dim, v_dim], same dtype, updated in-place.
-        out (torch.Tensor): [B*S, H*v_dim], same dtype.
-        batch (int): Batch size.
-        seqlen (int): Sequence length.
-        num_heads (int): Number of heads.
-        k_dim (int): Key head dim (<=128).
-        v_dim (int): Value head dim (<=128).
-        query_start_loc (Optional[torch.Tensor]): Packed mode only: exclusive prefix-sum
-            segment starts, shape ``[batch]``, int32.
-        query_lens (Optional[torch.Tensor]): Packed mode only: per-request token counts,
-            shape ``[batch]``, int32.
-
-    Returns:
-        None: Output and state are written in place.
+    Q/K are [B, Hk*K], value/out [B, Hv*V], beta/log-decay g [B, Hv].
+    Activations are contiguous FP32/FP16/BF16; state has the same dtype or FP32; g may independently be FP32.
+    Hk must divide Hv, K is a multiple of 16 up to 128, V is 64 or 128.
+    Physical page padding and storage offsets are supported. INT32 page IDs
+    <= 0 produce zero output and never access/update state. Q/K must already
+    be normalized. The binding synchronizes; model execution launches directly.
+    Resolved indices are 1D. Raw tables are 2D with contiguous columns and require
+    contiguous INT32 ``cached_lens`` and a positive ``state_block_size``.
+    ``aligned=False`` selects column zero; otherwise column ``cached_lens // state_block_size``.
+    All tensors must reside on the runtime's NPU.
+    Raw-table rows with nonpositive ``cached_lens`` are padding and never access state.
     """
     ...
 
@@ -4210,5 +4172,30 @@ def hc_pre(
 
     Returns:
         None: `output` written in place.
+    """
+    ...
+
+def silu_gate_mul(rt: Runtime, normed: torch.Tensor, gate: torch.Tensor, out: torch.Tensor) -> None:
+    """FP32 normed times SiLU(gate), rounded once to BF16/FP16 out; all [T,D]."""
+    ...
+
+def recurrent_gated_delta_rule_prefill_paged(
+    rt: Runtime, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+    beta: torch.Tensor, g: torch.Tensor, state: torch.Tensor, out: torch.Tensor,
+    indices: torch.Tensor, starts: torch.Tensor, initial: torch.Tensor,
+    num_key_heads: int, num_value_heads: int, k_dim: int, v_dim: int,
+) -> None: ...
+
+
+
+def conv1d_and_silu_prefill_paged(
+    rt: Runtime, input: torch.Tensor, state: torch.Tensor, weight: torch.Tensor,
+    output: torch.Tensor, indices: torch.Tensor, starts: torch.Tensor, initial: torch.Tensor,
+) -> None:
+    """Packed [T,C] Conv/SiLU on native [P,W-1,C] pages.
+
+    Starts is contiguous INT32[B+1], initial is INT32[B]. Initial zero ignores
+    prior state. Empty segments and null pages leave all state unchanged.
+    Conv rounds to activation dtype before SiLU in this Prefill path.
     """
     ...

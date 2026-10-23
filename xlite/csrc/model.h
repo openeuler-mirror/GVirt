@@ -349,6 +349,7 @@ private:
                                    std::vector<std::vector<XTensor>> &kvCache,
                                    std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                    XTensor &output);
+    void PrepareHybridMetadata(XRuntime &rt, XModelAttnMeta &attnMeta);
     void CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &kvCache);
     void MaybeCaptureAuxHidden(XRuntime &rt, uint32_t layer, XTensor &layerOut);
     [[nodiscard]] bool IsAuxLayer(uint32_t layer) const;

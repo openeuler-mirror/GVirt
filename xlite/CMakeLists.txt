@@ -43,6 +43,9 @@ message(STATUS "CMAKE_INSTALL_PATH: ${CMAKE_INSTALL_PATH}")
 
 # xlite_kernels_common_${RUN_MODE}
 file(GLOB KERNEL_FILES_COMMON
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_prefill_paged_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_prefill_paged_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_native_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/matmul_float.cpp
@@ -72,10 +75,9 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/concat.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/split.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/repeat_interleave.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_float.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_token_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_paged_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_paged_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/msd_merge_dequant_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_act_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/compressor_float.cpp
@@ -92,6 +94,11 @@ list(APPEND KERNEL_FILES_COMMON ${BENCH_KERNEL_FILES_COMMON})
 
 # xlite_kernels_bf16_${RUN_MODE}
 file(GLOB KERNEL_FILES_BF16
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_native_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_prefill_paged_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/attention_fp32_scores_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_prefill_paged_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_gate_mul_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/cast_float_bfloat16_t.cpp
@@ -121,11 +128,10 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/flash_mla_v2_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/gather_sparse_kv_cache_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/gather_sparse_kv_cache_nope_bfloat16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_bfloat16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_token_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_paged_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sigmoid_gate_mul_bfloat16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_paged_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_topk_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_hdt_mhd_bfloat16_t.cpp
@@ -139,6 +145,11 @@ file(GLOB KERNEL_FILES_BF16
 
 # xlite_kernels_f16_${RUN_MODE}
 file(GLOB KERNEL_FILES_F16
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_native_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_prefill_paged_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_prefill_paged_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_gate_mul_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/attention_fp32_scores_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/embed_kernel_float16_t.cpp
@@ -155,11 +166,10 @@ file(GLOB KERNEL_FILES_F16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_prepare_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_scores_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/muls_float16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_float16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_token_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_paged_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sigmoid_gate_mul_float16_t.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_paged_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_topk_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_hdt_mhd_float16_t.cpp

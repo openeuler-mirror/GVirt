@@ -14,7 +14,7 @@
 #include "softmax_attn_aiv.h"
 #include "attention_aic_helper.h"
 
-template <typename Dtype>
+template <typename Dtype, typename ScoreType = Dtype>
 class Attention
 {
 public:
@@ -27,7 +27,8 @@ public:
                                 GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t kCacheStride,
                                 uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,
                                 uint32_t headSize, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlocks, GM_ADDR zeroGm)
+                                uint32_t maxNumBlocks, GM_ADDR zeroGm,
+                                GM_ADDR probabilities = nullptr)
     {
         this->input.SetGlobalBuffer((__gm__ Dtype *)input);
         this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
@@ -51,8 +52,13 @@ public:
         this->maxSeqLen = maxNumBlocks * blockSize;
         this->groupMemSize = headNumInGroup * headSize;
 
-        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * XLITE_MAX_M0 * maxSeqLen);
-        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * XLITE_MAX_M0 * maxSeqLen +
+        GM_ADDR prob = probabilities == nullptr ? qk : probabilities;
+        this->scores[0].SetGlobalBuffer(((__gm__ ScoreType *)qk) +
+                                        block_idx * XLITE_MAX_M0 * maxSeqLen);
+        this->scores[1].SetGlobalBuffer(((__gm__ ScoreType *)qk) +
+                                        (block_idx + block_num) * XLITE_MAX_M0 * maxSeqLen);
+        this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)prob) + block_idx * XLITE_MAX_M0 * maxSeqLen);
+        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)prob) + block_idx * XLITE_MAX_M0 * maxSeqLen +
                                     block_num * XLITE_MAX_M0 * maxSeqLen);
 
         aicHelper.Init(nHeads, nKVHeads, headNumInGroup, headSize, blockSize, kCacheStride,
@@ -130,7 +136,7 @@ public:
                            GetBlockIdx(), batchIdx, queryStart, queryTaskOffset,
                            queryTaskOffset + queryTaskLen, kvHeadIdx, calcLen, curr);
                 aicHelper.RunAicQK(input[qOffset], this->kCache, queryTaskLen, kvHeadIdx,
-                                   blockTable, 0, calcLen, qk[curr]);
+                                   blockTable, 0, calcLen, scores[curr]);
                 ffts_cross_core_sync(PIPE_FIX, config);
 
                 if (needDoSV != 0) {
@@ -243,12 +249,18 @@ public:
                     "%u mask off %u, use %d qk buf\n",
                     dbgBlockIdx, subIdx, batchIdx, kvHeadIdx, nWorkCurCore, calcLen, outN,
                     nWorkStart, curr);
-                RunAivSoftmax(
-                    (__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(),
-                    m0 > (XLITE_MAX_M0 - 4)
-                        ? 0
-                        : (__gm__ float *)qk[curr][(m0 + subIdx * 2) * maxSeqLen].GetPhyAddr(),
-                    nWorkCurCore, maxSeqLen, calcLen, outN, true, nWorkStart, headNumInGroup);
+                if constexpr (std::is_same_v<ScoreType, float>) {
+                    RunSoftmaxScores((__gm__ float *)scores[curr][qkOffset].GetPhyAddr(),
+                                     (__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(), nWorkCurCore,
+                                     calcLen, outN, nWorkStart);
+                } else {
+                    RunAivSoftmax(
+                        (__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(),
+                        m0 > (XLITE_MAX_M0 - 4)
+                            ? 0
+                            : (__gm__ float *)qk[curr][(m0 + subIdx * 2) * maxSeqLen].GetPhyAddr(),
+                        nWorkCurCore, maxSeqLen, calcLen, outN, true, nWorkStart, headNumInGroup);
+                }
 
                 ffts_cross_core_sync(PIPE_MTE3, config);
                 curr = 1 - curr;
@@ -267,10 +279,65 @@ public:
     }
 
 private:
+    // Keep Cube accumulation in FP32 until softmax; only probabilities feeding
+    // the BF16/FP16 SV matmul are rounded. One row fits in UB (<=8192 tokens).
+    __aicore__ inline void RunSoftmaxScores(__gm__ float *score, __gm__ Dtype *prob, uint32_t rows,
+                                            uint32_t firstValid, uint32_t outN, uint32_t rowOffset)
+    {
+#ifdef __DAV_C220_VEC__
+        __ubuf__ float *cal = (__ubuf__ float *)0;
+        __ubuf__ float *temp = cal + ROUND_UP(outN, 64);
+        __ubuf__ Dtype *out = (__ubuf__ Dtype *)(temp + ROUND_UP(outN, 64));
+        uint32_t repeat = DIV_ROUND_UP(outN, 64);
+        for (uint32_t row = 0; row < rows; ++row) {
+            uint32_t valid = firstValid + (rowOffset + row) / headNumInGroup;
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+            CopyGmToUbufAligned(cal, score + row * maxSeqLen, outN * sizeof(float));
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+            // Explicitly mask the partial vector; DMA padding must not turn
+            // unavailable/future keys into zero-valued attention scores.
+            uint32_t tail = valid % 64;
+            if (tail != 0) {
+                set_vector_mask(0, ~((uint64_t(1) << tail) - 1));
+                vector_dup(cal + ROUND_DOWN(valid, 64), -3.4028235e+38f, 1, 1, 0, 8, 0);
+                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+            }
+            uint32_t maskStart = ROUND_UP(valid, 64);
+            if (maskStart < outN) {
+                vector_dup(cal + maskStart, -3.4028235e+38f, (outN - maskStart) / 64, 1, 0, 8, 0);
+            }
+            pipe_barrier(PIPE_V);
+            ReduceMaxV2(temp, cal, outN);
+            pipe_barrier(PIPE_V);
+            vbrcb((__ubuf__ uint32_t *)temp, (__ubuf__ uint32_t *)temp, 0, 0, 1);
+            pipe_barrier(PIPE_V);
+            vsub(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
+            vexp(cal, cal, repeat, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+            ReduceSumV2(temp, cal, outN);
+            pipe_barrier(PIPE_V);
+            vbrcb((__ubuf__ uint32_t *)temp, (__ubuf__ uint32_t *)temp, 0, 0, 1);
+            pipe_barrier(PIPE_V);
+            vdiv(cal, cal, temp, repeat, 1, 1, 0, 8, 8, 0);
+            pipe_barrier(PIPE_V);
+            convert_output(out, cal, repeat);
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            CopyUbufToGmAligned(prob + row * maxSeqLen, out, outN * sizeof(Dtype));
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        }
+#endif
+    }
+
     GlobalTensor<Dtype> input;
     GlobalTensor<Dtype> kCache;
     GlobalTensor<Dtype> vCache;
     GlobalTensor<Dtype> qk[PINGPONG_BUF_NUM];
+    GlobalTensor<ScoreType> scores[PINGPONG_BUF_NUM];
     GlobalTensor<Dtype> output;
     GlobalTensor<Dtype> zeroGm;
 
@@ -305,5 +372,20 @@ private:
         op.Init(input, kCache, vCache, qk, output, queryStartLoc, queryLens, cachedLens,        \
                 blockTables, kCacheStride, vCacheStride, nHeads, nKVHeads, headSize, blockSize, \
                 batch, maxNumBlocks, zeroGm);                                                   \
+        op.Run();                                                                               \
+    }
+
+#define ATTN_FP32_SCORES_FUNC_DEFINE(dtype)                                                     \
+    extern "C" __global__ __aicore__ void attention_fp32_scores_##dtype(                        \
+        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR probabilities,       \
+        GM_ADDR output, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,           \
+        GM_ADDR blockTables, uint32_t kCacheStride, uint32_t vCacheStride, uint32_t nHeads,     \
+        uint32_t nKVHeads, uint32_t headSize, uint32_t blockSize, uint32_t batch,               \
+        uint32_t maxNumBlocks, GM_ADDR zeroGm)                                                  \
+    {                                                                                           \
+        Attention<dtype, float> op;                                                             \
+        op.Init(input, kCache, vCache, qk, output, queryStartLoc, queryLens, cachedLens,        \
+                blockTables, kCacheStride, vCacheStride, nHeads, nKVHeads, headSize, blockSize, \
+                batch, maxNumBlocks, zeroGm, probabilities);                                    \
         op.Run();                                                                               \
     }

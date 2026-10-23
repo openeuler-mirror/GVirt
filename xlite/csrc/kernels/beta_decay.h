@@ -29,7 +29,8 @@ public:
     }
 
     __aicore__ inline void Init(GM_ADDR b, GM_ADDR a, GM_ADDR A_log, GM_ADDR dt_bias, GM_ADDR beta,
-                                GM_ADDR g, uint32_t bsz, uint32_t seqlen, uint32_t num_v_heads)
+                                GM_ADDR g, uint32_t bsz, uint32_t seqlen, uint32_t num_v_heads,
+                                uint32_t logFp32 = 0, uint32_t biasFp32 = 0, uint32_t gFp32 = 0)
     {
         set_atomic_none();
         set_mask_norm();
@@ -44,6 +45,9 @@ public:
         this->bsz = bsz;
         this->seqlen = seqlen;
         this->num_v_heads = num_v_heads;
+        this->logFp32 = logFp32;
+        this->biasFp32 = biasFp32;
+        this->gFp32 = gFp32;
 
         num = DIV_ROUND_UP(num_v_heads * sizeof(Dtype), 32);
         calcRepeat = DIV_ROUND_UP(num, 8);
@@ -100,7 +104,7 @@ public:
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
                 if constexpr (std::is_same<Dtype, float16_t>::value) {
                     vconv_f162f32(b_buf, conv_b, calcRepeat, 1, 1, 8, 8);
-                } else {
+                } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                     vconv_bf162f32(b_buf, conv_b, calcRepeat, 1, 1, 8, 8);
                 }
                 pipe_barrier(PIPE_V);
@@ -130,7 +134,7 @@ public:
             } else {
                 if constexpr (std::is_same<Dtype, float16_t>::value) {
                     vconv_f322f16(conv_b, b_buf, calcRepeat, 1, 1, 8, 8);
-                } else {
+                } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                     vconv_f322bf16r(conv_b, b_buf, calcRepeat, 1, 1, 8, 8);
                 }
                 pipe_barrier(PIPE_V);
@@ -145,8 +149,8 @@ public:
     __aicore__ inline void Decay()
     {
         // load A_log
-        if constexpr (std::is_same<Dtype, float>::value) {
-            copy_gm_to_ubuf(A_log_buf, A_log, 0, num, 1, 0, 0);
+        if (logFp32 || std::is_same<Dtype, float>::value) {
+            CopyGmToUbufAligned(A_log_buf, (__gm__ float *)A_log, num_v_heads * sizeof(float));
             pipe_barrier(PIPE_MTE2);
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
@@ -157,7 +161,7 @@ public:
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
             if constexpr (std::is_same<Dtype, float16_t>::value) {
                 vconv_f162f32(A_log_buf, conv_A_log, calcRepeat, 1, 1, 8, 8);
-            } else {
+            } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                 vconv_bf162f32(A_log_buf, conv_A_log, calcRepeat, 1, 1, 8, 8);
             }
             pipe_barrier(PIPE_V);
@@ -171,8 +175,8 @@ public:
         pipe_barrier(PIPE_V);
 
         // load dt_bias
-        if constexpr (std::is_same<Dtype, float>::value) {
-            copy_gm_to_ubuf(dt_bias_buf, dt_bias, 0, num, 1, 0, 0);
+        if (biasFp32 || std::is_same<Dtype, float>::value) {
+            CopyGmToUbufAligned(dt_bias_buf, (__gm__ float *)dt_bias, num_v_heads * sizeof(float));
             pipe_barrier(PIPE_MTE2);
         } else {
             copy_gm_to_ubuf(conv_dt_bias, dt_bias, 0, num, 1, 0, 0);
@@ -181,7 +185,7 @@ public:
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
             if constexpr (std::is_same<Dtype, float16_t>::value) {
                 vconv_f162f32(dt_bias_buf, conv_dt_bias, calcRepeat, 1, 1, 8, 8);
-            } else {
+            } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                 vconv_bf162f32(dt_bias_buf, conv_dt_bias, calcRepeat, 1, 1, 8, 8);
             }
             pipe_barrier(PIPE_V);
@@ -205,7 +209,7 @@ public:
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
                 if constexpr (std::is_same<Dtype, float16_t>::value) {
                     vconv_f162f32(a_buf, conv_a, calcRepeat, 1, 1, 8, 8);
-                } else {
+                } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                     vconv_bf162f32(a_buf, conv_a, calcRepeat, 1, 1, 8, 8);
                 }
                 pipe_barrier(PIPE_V);
@@ -231,15 +235,16 @@ public:
             vmul(a_buf, a_buf, A_log_buf, calcRepeat, 1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
 
-            if constexpr (std::is_same<Dtype, float>::value) {
+            if (gFp32 || std::is_same<Dtype, float>::value) {
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-                copy_ubuf_to_gm(g + aOffset, a_buf, 0, num, 1, 0, 0);
+                CopyUbufToGmAligned((__gm__ float *)g + aOffset, a_buf,
+                                    num_v_heads * sizeof(float));
                 pipe_barrier(PIPE_MTE3);
             } else {
                 if constexpr (std::is_same<Dtype, float16_t>::value) {
                     vconv_f322f16(conv_a, a_buf, calcRepeat, 1, 1, 8, 8);
-                } else {
+                } else if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
                     vconv_f322bf16r(conv_a, a_buf, calcRepeat, 1, 1, 8, 8);
                 }
                 pipe_barrier(PIPE_V);
@@ -274,6 +279,7 @@ private:
     uint32_t bsz;
     uint32_t seqlen;
     uint32_t num_v_heads;
+    uint32_t logFp32, biasFp32, gFp32;
 
     int num;
     int calcRepeat;
@@ -297,3 +303,20 @@ private:
     {                                                                                  \
     }
 #endif
+
+#ifdef __DAV_C220_VEC__
+#define BETA_DECAY_NATIVE_BODY(dtype)                                                  \
+    BetaDecay<dtype> op;                                                               \
+    op.Init(b, a, A_log, dt_bias, beta, g, bsz, seqlen, heads, logFp32, biasFp32, 1u); \
+    op.Beta();                                                                         \
+    op.Decay();
+#else
+#define BETA_DECAY_NATIVE_BODY(dtype)
+#endif
+#define BETA_DECAY_NATIVE_FUNC_DEFINE(dtype)                                                \
+    extern "C" __global__ __aicore__ void beta_decay_native_##dtype(                        \
+        GM_ADDR b, GM_ADDR a, GM_ADDR A_log, GM_ADDR dt_bias, GM_ADDR beta, GM_ADDR g,      \
+        uint32_t bsz, uint32_t seqlen, uint32_t heads, uint32_t logFp32, uint32_t biasFp32) \
+    {                                                                                       \
+        BETA_DECAY_NATIVE_BODY(dtype)                                                       \
+    }

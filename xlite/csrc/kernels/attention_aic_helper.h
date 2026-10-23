@@ -102,9 +102,10 @@ public:
      * n: headSize
      * k: cachedTokens (kvLen, from kvOffset)
      */
+    template <typename ScoreType>
     __aicore__ inline void RunAicQK(GlobalTensor<Dtype> query, GlobalTensor<Dtype> kCache,
                                     int queryLen, int kvHeadIdx, __gm__ uint32_t *blockTable,
-                                    int kvOffset, int kvLen, GlobalTensor<Dtype> qk)
+                                    int kvOffset, int kvLen, GlobalTensor<ScoreType> qk)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
         int mActual = queryLen * headNumInGroup;
