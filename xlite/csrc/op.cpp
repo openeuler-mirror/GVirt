@@ -1761,6 +1761,17 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scal
     }
 }
 
+static bool FusedMatmulDeQuantBeneficial(uint64_t m, uint64_t k, bool dynQuant)
+{
+    if (m >= 8192) {
+        return true;
+    }
+    if (dynQuant) {
+        return m >= 2048 && k >= 2048;
+    }
+    return m >= 6144 && k >= 1024;
+}
+
 void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
                           const XTensor &quantBias, const XTensor &weightScale, bool weightNZ,
                           bool transpose, const XTensor &outScale, const XTensor &num)
@@ -1769,8 +1780,10 @@ void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
         return;
     }
     if (in.dtype == INT8 && weight.dtype == INT8 && out.dtype == BF16) {
-        bool enableFused = rt.enableFusedDenseW8A8 && in.shape.size() == 2 &&
-                           out.shape.size() == 2 && weightScale.ptr != nullptr;
+        bool enableFused =
+            in.shape.size() == 2 && out.shape.size() == 2 && weightScale.ptr != nullptr &&
+            FusedMatmulDeQuantBeneficial(in.shape[0], in.shape[1], outScale.ptr != nullptr);
+
         if (enableFused) {
             XliteOpFusionOperatorMatmulDequantPipeline(rt, in, weight, out, quantBias, weightScale,
                                                        weightNZ, transpose, outScale, num);
