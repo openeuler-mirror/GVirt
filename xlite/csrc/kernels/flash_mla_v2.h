@@ -97,7 +97,10 @@ public:
 
         int queryTileSize = XLITE_MAX_M0 / nHeads;
         if (queryTileSize == 0) {
-            queryTileSize = XLITE_MAX_M0;
+            // nHeads > XLITE_MAX_M0: one query token per tile, matching mla_v2.h.
+            // Rejected host-side in XliteOpFlashMLAV2 (mSize = nHeads would overrun
+            // the XLITE_MAX_M0-row qk workspace).
+            queryTileSize = 1;
         }
         int needDoSV = 0;
         int totalIdx = 0;
@@ -215,7 +218,10 @@ public:
 
         int queryTileSize = XLITE_MAX_M0 / nHeads;
         if (queryTileSize == 0) {
-            queryTileSize = XLITE_MAX_M0;
+            // nHeads > XLITE_MAX_M0: one query token per tile, matching mla_v2.h.
+            // Rejected host-side in XliteOpFlashMLAV2 (mSize = nHeads would overrun
+            // the XLITE_MAX_M0-row qk workspace).
+            queryTileSize = 1;
         }
         int needDoUpdate = 0;
         int totalIdx = 0;

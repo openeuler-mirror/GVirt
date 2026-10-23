@@ -42,6 +42,22 @@ def ref_gate(scores, bias, input_ids, tid2eid, top_k, scale, use_hash):
 # Coverage: (n_tokens, n_routed_experts, top_k, use_hash). hash=False steers topk by biased
 # scores; hash=True gathers indices from tid2eid[input_ids].
 configs = [
+    # Below 4 * SORT_BLOCK_SIZE = 128 routed experts, SelectTopK's sort width is padded up to 128
+    # so vmrgsort4's fixed 4-way merge and the `nBlocks - 4` tail loop stay in bounds. 64 is
+    # GLM-4.7-Flash's routed-expert count, and the case that actually exercises PadCalcTail():
+    # CalcScores runs DIV_ROUND_UP(64, VECTOR_MAX_NUM_OF_FP32=64) = 1 repeat, writing lanes
+    # [0,64) only, so the [64,128) padding is never touched by the activation and must be
+    # re-pinned to FLOAT_MIN on every token or vmrgsort4 merges uninitialised lanes into topK.
+    # 96 is the complementary case: DIV_ROUND_UP(96, 64) = 2 repeats already covers all 128
+    # lanes, so it validates the padded sort width and the non-underflowing tail length instead.
+    # NB only hash=False reaches SelectTopK (Run() dispatches hash=True to GatherWeights, which
+    # takes indices from tid2eid and never sorts); the hash=True variants are here because they
+    # still allocate the widened indicesIn/calc (padSortN > padN) and so guard that larger UB
+    # layout against regressions in the non-sorting path.
+    (9, 64, 6, False),
+    (9, 64, 6, True),
+    (9, 96, 6, False),
+    (9, 96, 6, True),
     (9, 256, 6, False),
     (9, 256, 6, True),
     (9, 384, 6, False),
@@ -106,15 +122,22 @@ for dtype in [torch.bfloat16, torch.float32]:
               f'dtype={dtype}) executed!')
 
         close_err = None
+        # Dtype-tiered tolerance, mirroring softmax_topk.py: the kernel computes the whole
+        # sqrt(softplus) -> topk -> normalise -> scale chain in fp32 and rounds to bf16 only on
+        # the way out, while the reference rounds through bf16 at every step, so bf16 weights can
+        # sit ~1-2 ULP (rel ~2^-8) apart without anything being wrong. A single 1e-5 tolerance
+        # would flag that pre-existing rounding rather than a real defect.
+        w_atol = 1e-5 if dtype == torch.float32 else 4e-3
         try:
             torch.testing.assert_close(ref_sparse.to(dtype).npu(), out_weights,
-                                        atol=1e-5, rtol=1e-3)
+                                        atol=w_atol, rtol=1e-3)
             torch.testing.assert_close(ref_bitmap.npu(), routing_map)
         except AssertionError as e:
             close_err = e
             print(f'{e}')
         # Per-token nonzero-slot diff; only mismatched tokens print (torch folds the wide row).
-        diff_tol = 1e-5
+        # Same dtype tiering as w_atol above: 1 bf16 ULP at the weight scale is ~2e-3.
+        diff_tol = 1e-5 if dtype == torch.float32 else 4e-3
         n_mismatch = 0
         for m in range(n_tokens):
             rw = ref_sparse[m].to(out_weights.dtype).cpu()

@@ -14,6 +14,7 @@
 #ifdef CCE_STUB
 #include "cce_stub.h"
 #endif
+#include "kernel_param.h"
 using namespace AscendC;
 
 #define ROUND_DOWN(x, y) (((x) / (y)) * (y))
@@ -989,6 +990,42 @@ inline __aicore__ uint32_t GetOptimalM0(int queryLen, int cachedLen)
             return 16;
         }
     }
+}
+
+/*
+ * Fit the adaptive cube M0 returned by GetOptimalM0 to the head count.
+ *
+ * attention/mla_v2/cxa tile the query dimension as `queryTileSize = m0 / nHeads`, and
+ * one tile then occupies `mSize = queryTaskLen * nHeads` cube M rows. Every L1/L0 A
+ * buffer is sized for XLITE_MAX_M0 rows (mla_aic_helper.h:47,52,76,119) and so is the
+ * per-core qk GM workspace (model.cpp:510,519), while RunAivSoftmax parks its max/sum
+ * scratch at qk rows [m0, m0 + 4) (mla_v2.h:271-273). The invariant all of that relies
+ * on is therefore
+ *     queryTaskLen * nHeads <= m0 <= XLITE_MAX_M0.
+ *
+ * GetOptimalM0 picks m0 purely from the sequence length and knows nothing about nHeads,
+ * so it returns 16 for any queryLen <= SEQLEN_64. For a model with more than 16 local
+ * heads that makes `m0 / nHeads` zero, and the historic `queryTileSize = m0` fallback
+ * then packs m0 * nHeads rows into a tile -- GLM-4.7-Flash (nHeads = 20) reaches 320
+ * rows against a 128-row L1 buffer and a 256-row qk workspace. The resulting
+ * out-of-bounds writes corrupt device memory and only surface later as a stream failure
+ * (aclError:507057) on the next synchronize.
+ *
+ * Rounding m0 up to the smallest MBLOCKSIZE multiple that still holds every head in one
+ * tile restores queryTileSize >= 1, hence mSize <= m0. The round-up keeps mSize a whole
+ * number of cube M-blocks, and because GetOptimalM0's own values (128/112/96/80/64/48/
+ * 32/16) are all MBLOCKSIZE multiples, this is a no-op for every head count that
+ * already fits -- DeepSeek-V3 at TP16 (8 heads) keeps m0 = 16, queryTileSize = 2.
+ * nHeads > XLITE_MAX_M0 cannot be served by a single tile and is rejected host side in
+ * XliteOpMLAV2 / XliteOpFlashMLAV2; the XLITE_MAX_M0 clamp here only keeps the helper
+ * total.
+ */
+inline __aicore__ uint32_t XliteFitM0ToHeads(uint32_t m0, uint32_t nHeads)
+{
+    const uint32_t minM0 = ROUND_UP(nHeads, MBLOCKSIZE);
+    const uint32_t fitted = (minM0 > m0) ? minM0 : m0;
+    return (fitted > static_cast<uint32_t>(XLITE_MAX_M0)) ? static_cast<uint32_t>(XLITE_MAX_M0)
+                                                          : fitted;
 }
 
 #endif
