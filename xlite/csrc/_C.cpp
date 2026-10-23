@@ -1382,148 +1382,21 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
     rt.Synchronize();
 }
 
-// Empty-kernel launch-overhead probes (AIV / AIC / MIX), see csrc/kernels/empty.cpp.
+// Untimed micro-benchmark dispatch (variant-based, mirrors the timed family).
 // Return the block count actually launched with.
-uint32_t EmptyAiv(XRuntime &rt, uint32_t blockNum)
+uint32_t BenchEmpty(XRuntime &rt, const std::string &variant, uint32_t blockNum)
 {
-    uint32_t n = XliteOpEmptyAiv(rt, blockNum);
+    uint32_t n = XliteOpBenchEmpty(rt, variant, blockNum);
     rt.Synchronize();
     return n;
 }
 
-uint32_t EmptyAic(XRuntime &rt, uint32_t blockNum)
-{
-    uint32_t n = XliteOpEmptyAic(rt, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t EmptyMix(XRuntime &rt, uint32_t blockNum)
-{
-    uint32_t n = XliteOpEmptyMix(rt, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-// Scalar micro-benchmarks (AIV / AIC), see csrc/kernels/microbench.h. Run a
-// dependent chain of `iters` scalar ops seeded by `seed`, store the final
-// accumulator to `out`, return the block count actually launched with.
-uint32_t ScalarAddAiv(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                      uint32_t blockNum)
+uint32_t BenchScalar(XRuntime &rt, const std::string &variant, at::Tensor &outTensor, double seed,
+                     uint32_t iters, uint32_t blockNum)
 {
     XTensor out;
     InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarAddAiv(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarXorAiv(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                      uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarXorAiv(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarMulAiv(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                      uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarMulAiv(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarDivAiv(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                      uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarDivAiv(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarFaddAiv(XRuntime &rt, at::Tensor &outTensor, float seed, uint32_t iters,
-                       uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarFaddAiv(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarAddUnroll4Aiv(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarAddUnroll4Aiv(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarAddAic(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                      uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarAddAic(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarXorAic(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                      uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarXorAic(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarMulAic(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                      uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarMulAic(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarDivAic(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                      uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarDivAic(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarFaddAic(XRuntime &rt, at::Tensor &outTensor, float seed, uint32_t iters,
-                       uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarFaddAic(rt, out, seed, iters, blockNum);
-    rt.Synchronize();
-    return n;
-}
-
-uint32_t ScalarAddUnroll4Aic(XRuntime &rt, at::Tensor &outTensor, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    XTensor out;
-    InitXTensor(out, outTensor);
-    uint32_t n = XliteOpScalarAddUnroll4Aic(rt, out, seed, iters, blockNum);
+    uint32_t n = XliteOpBenchScalar(rt, variant, out, seed, iters, blockNum);
     rt.Synchronize();
     return n;
 }
@@ -3330,60 +3203,13 @@ PYBIND11_MODULE(_C, m)
           py::arg("send_counts"), py::arg("recv_counts"), py::arg("sdispls"), py::arg("rdispls"),
           py::arg("comm_type") = 0);
     m.def("add", &Add, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"));
-    m.def("empty_aiv", &EmptyAiv, "empty kernel on AIV cores (launch overhead probe)",
-          py::arg("rt"), py::arg("block_num") = 0);
-    m.def("empty_aic", &EmptyAic, "empty kernel on AIC cores (launch overhead probe)",
-          py::arg("rt"), py::arg("block_num") = 0);
-    m.def("empty_mix", &EmptyMix, "empty kernel on AIC+AIV mix 1:2 (launch overhead probe)",
-          py::arg("rt"), py::arg("block_num") = 0);
-    m.def("scalar_add_aiv", &ScalarAddAiv,
-          "scalar add dependent chain on AIV (micro-benchmark, returns block count)", py::arg("rt"),
-          py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_xor_aiv", &ScalarXorAiv,
-          "scalar xor dependent chain on AIV (micro-benchmark, returns block count)", py::arg("rt"),
-          py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_mul_aiv", &ScalarMulAiv,
-          "scalar mul dependent chain on AIV (micro-benchmark, returns block count)", py::arg("rt"),
-          py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_div_aiv", &ScalarDivAiv,
-          "scalar div dependent chain on AIV (micro-benchmark, returns block count)", py::arg("rt"),
-          py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_fadd_aiv", &ScalarFaddAiv,
-          "scalar fp32 add dependent chain on AIV (micro-benchmark, returns block count)",
-          py::arg("rt"), py::arg("out"), py::arg("seed") = 1e-30f, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_add_unroll4_aiv", &ScalarAddUnroll4Aiv,
-          "scalar add chain unrolled by 4 on AIV (micro-benchmark, returns block count)",
-          py::arg("rt"), py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_add_aic", &ScalarAddAic,
-          "scalar add dependent chain on AIC (micro-benchmark, returns block count)", py::arg("rt"),
-          py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_xor_aic", &ScalarXorAic,
-          "scalar xor dependent chain on AIC (micro-benchmark, returns block count)", py::arg("rt"),
-          py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_mul_aic", &ScalarMulAic,
-          "scalar mul dependent chain on AIC (micro-benchmark, returns block count)", py::arg("rt"),
-          py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_div_aic", &ScalarDivAic,
-          "scalar div dependent chain on AIC (micro-benchmark, returns block count)", py::arg("rt"),
-          py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_fadd_aic", &ScalarFaddAic,
-          "scalar fp32 add dependent chain on AIC (micro-benchmark, returns block count)",
-          py::arg("rt"), py::arg("out"), py::arg("seed") = 1e-30f, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
-    m.def("scalar_add_unroll4_aic", &ScalarAddUnroll4Aic,
-          "scalar add chain unrolled by 4 on AIC (micro-benchmark, returns block count)",
-          py::arg("rt"), py::arg("out"), py::arg("seed") = 3, py::arg("iters") = 1000000,
-          py::arg("block_num") = 0);
+    m.def("bench_empty", &BenchEmpty,
+          "empty kernel launch overhead probe (variant: aiv/aic/mix, returns block count)",
+          py::arg("rt"), py::arg("variant"), py::arg("block_num") = 0);
+    m.def("bench_scalar", &BenchScalar,
+          "scalar dependent-chain micro-benchmark (variant: <op>_aiv|_aic, returns block count)",
+          py::arg("rt"), py::arg("variant"), py::arg("out"), py::arg("seed") = 3,
+          py::arg("iters") = 1000000, py::arg("block_num") = 0);
 #ifdef MICROBENCH_TIMED
     m.def("bench_timed", &BenchTimed,
           "timed scalar micro-benchmark with in-kernel cycle sampling (returns block count)",

@@ -1479,37 +1479,15 @@ def add(rt: Runtime, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> None:
     """
     ...
 
-def empty_aiv(rt: Runtime, block_num: int = 0) -> int:
-    """Launch an empty (no-op) kernel on AIV cores to probe launch overhead.
+def bench_empty(rt: Runtime, variant: str, block_num: int = 0) -> int:
+    """Launch an empty (no-op) kernel to probe launch overhead.
 
     Args:
         rt (Runtime): Native runtime handle.
-        block_num (int): Number of AIV blocks; 0 = all vector cores.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-def empty_aic(rt: Runtime, block_num: int = 0) -> int:
-    """Launch an empty (no-op) kernel on AIC cores to probe launch overhead.
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        block_num (int): Number of AIC blocks; 0 = all cube cores.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-def empty_mix(rt: Runtime, block_num: int = 0) -> int:
-    """Launch an empty (no-op) mix kernel (AIC:AIV = 1:2) to probe launch overhead.
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        block_num (int): Number of AIC blocks, each paired with 2 AIV blocks;
-            0 = all cube cores (vector cores are scheduled 2x that).
+        variant (str): Core kind - "aiv" (vector cores), "aic" (cube cores),
+            or "mix" (AIC:AIV = 1:2).
+        block_num (int): Number of blocks; 0 = all cores of the primary kind
+            (AIV: aivNum, AIC/MIX: aicNum, each paired with 2 AIV by hardware).
 
     Returns:
         int: The block count actually launched with.
@@ -1517,209 +1495,21 @@ def empty_mix(rt: Runtime, block_num: int = 0) -> int:
     ...
 
 
-def scalar_add_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                   block_num: int = 0) -> int:
-    """Run a dependent scalar add chain on an AIV core (micro-benchmark).
+def bench_scalar(rt: Runtime, variant: str, out: torch.Tensor, seed: float = 3,
+                 iters: int = 1000000, block_num: int = 0) -> int:
+    """Run a dependent scalar-op chain micro-benchmark.
 
     Args:
         rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value; the operand is entangled as seed^i to defeat
-            compiler reassociation (uint32).
-        iters (int): Number of scalar adds in the chain.
-        block_num (int): Number of AIV blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_xor_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                   block_num: int = 0) -> int:
-    """Run a dependent scalar xor chain on an AIV core (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value; the operand is seed^i (uint32).
-        iters (int): Number of scalar xors in the chain.
-        block_num (int): Number of AIV blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_mul_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                   block_num: int = 0) -> int:
-    """Run a dependent scalar mul chain on an AIV core (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value and mul operand (uint32); odd values keep the
-            chain from collapsing to 0 immediately.
-        iters (int): Number of scalar muls in the chain.
-        block_num (int): Number of AIV blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_div_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                   block_num: int = 0) -> int:
-    """Run a dependent scalar div chain on an AIV core (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value and divisor (uint32); must not be 0.
-        iters (int): Number of scalar divisions in the chain.
-        block_num (int): Number of AIV blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_fadd_aiv(rt: Runtime, out: torch.Tensor, seed: float = 1e-30, iters: int = 1000000,
-                    block_num: int = 0) -> int:
-    """Run a dependent scalar fp32 add chain on an AIV core (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element float32 tensor receiving the final accumulator.
-        seed (float): Initial value and add operand; the default keeps values in
-            the normal fp32 range for any iters.
-        iters (int): Number of scalar fp32 adds in the chain.
-        block_num (int): Number of AIV blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_add_unroll4_aiv(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                           block_num: int = 0) -> int:
-    """Run a scalar add chain on an AIV core, unrolled by 4 (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value and add operand (uint32).
-        iters (int): Total number of scalar adds; must be divisible by 4.
-        block_num (int): Number of AIV blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_add_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                   block_num: int = 0) -> int:
-    """Run a dependent scalar add chain on an AIC core (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value; the operand is entangled as seed^i to defeat
-            compiler reassociation (uint32).
-        iters (int): Number of scalar adds in the chain.
-        block_num (int): Number of AIC blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_xor_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                   block_num: int = 0) -> int:
-    """Run a dependent scalar xor chain on an AIC core (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value; the operand is seed^i (uint32).
-        iters (int): Number of scalar xors in the chain.
-        block_num (int): Number of AIC blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_mul_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                   block_num: int = 0) -> int:
-    """Run a dependent scalar mul chain on an AIC core (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value and mul operand (uint32); odd values keep the
-            chain from collapsing to 0 immediately.
-        iters (int): Number of scalar muls in the chain.
-        block_num (int): Number of AIC blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_div_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                   block_num: int = 0) -> int:
-    """Run a dependent scalar div chain on an AIC core (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value and divisor (uint32); must not be 0.
-        iters (int): Number of scalar divisions in the chain.
-        block_num (int): Number of AIC blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_fadd_aic(rt: Runtime, out: torch.Tensor, seed: float = 1e-30, iters: int = 1000000,
-                    block_num: int = 0) -> int:
-    """Run a dependent scalar fp32 add chain on an AIC core (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element float32 tensor receiving the final accumulator.
-        seed (float): Initial value and add operand; the default keeps values in
-            the normal fp32 range for any iters.
-        iters (int): Number of scalar fp32 adds in the chain.
-        block_num (int): Number of AIC blocks; 0 = single block.
-
-    Returns:
-        int: The block count actually launched with.
-    """
-    ...
-
-
-def scalar_add_unroll4_aic(rt: Runtime, out: torch.Tensor, seed: int = 3, iters: int = 1000000,
-                           block_num: int = 0) -> int:
-    """Run a scalar add chain on an AIC core, unrolled by 4 (micro-benchmark).
-
-    Args:
-        rt (Runtime): Native runtime handle.
-        out (torch.Tensor): 1-element int32 tensor receiving the final accumulator.
-        seed (int): Initial value and add operand (uint32).
-        iters (int): Total number of scalar adds; must be divisible by 4.
-        block_num (int): Number of AIC blocks; 0 = single block.
+        variant (str): "<op>_<aiv|aic>" where op is one of add / xor / mul / div
+            / fadd / add_unroll4. The suffix selects the core kind.
+        out (torch.Tensor): 1-element tensor receiving the final accumulator
+            (int32 for all uint32 chains, float32 for fadd).
+        seed (float): Initial value and operand; cast to uint32 for the integer
+            chains and to float32 for fadd. Must not be 0 for div.
+        iters (int): Number of scalar ops in the chain. Must be divisible by 4
+            for add_unroll4.
+        block_num (int): Number of blocks; 0 = single block.
 
     Returns:
         int: The block count actually launched with.

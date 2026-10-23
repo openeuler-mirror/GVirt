@@ -39,21 +39,8 @@ import torch_npu
 
 from xlite._C import (  # noqa: F401
     Runtime,
-    empty_aiv,
-    empty_aic,
-    empty_mix,
-    scalar_add_aiv,
-    scalar_add_aic,
-    scalar_xor_aiv,
-    scalar_xor_aic,
-    scalar_mul_aiv,
-    scalar_mul_aic,
-    scalar_div_aiv,
-    scalar_div_aic,
-    scalar_fadd_aiv,
-    scalar_fadd_aic,
-    scalar_add_unroll4_aiv,
-    scalar_add_unroll4_aic,
+    bench_empty,
+    bench_scalar,
 )
 import xlite._C as _C
 
@@ -147,12 +134,12 @@ def run_empty(rt):
     device 精确值见 --analyze [1]。"""
     print(f"[实验1] 空算子 launch floor(每核型 {EMPTY_ITERS} 次下发, wall 中位)")
     print(f"   {'kernel':<10s}{'blockNum':>9s}{'wall_med_us':>12s}")
-    for name, op in (("empty_aiv", empty_aiv), ("empty_aic", empty_aic),
-                     ("empty_mix", empty_mix)):
+    for name, variant in (("empty_aiv", "aiv"), ("empty_aic", "aic"),
+                          ("empty_mix", "mix")):
         walls, block_num = [], None
         for _ in range(EMPTY_ITERS):
             t0 = time.perf_counter()
-            n = op(rt)
+            n = bench_empty(rt, variant)
             walls.append((time.perf_counter() - t0) * 1e6)
             block_num = n if block_num is None else block_num
         print(f"   {name:<10s}{block_num:>9d}{_med_us(walls):>12.1f}")
@@ -211,18 +198,18 @@ def ref_add_unroll4(seed, iters):
 
 
 OPS = [
-    ("scalar_add_aiv", scalar_add_aiv, "i32", ref_add, INT_SEED),
-    ("scalar_xor_aiv", scalar_xor_aiv, "i32", ref_xor, INT_SEED),
-    ("scalar_mul_aiv", scalar_mul_aiv, "i32", ref_mul, INT_SEED),
-    ("scalar_div_aiv", scalar_div_aiv, "i32", ref_div, INT_SEED),
-    ("scalar_fadd_aiv", scalar_fadd_aiv, "f32", ref_fadd, FADD_SEED),
-    ("scalar_add_unroll4_aiv", scalar_add_unroll4_aiv, "i32", ref_add_unroll4, INT_SEED),
-    ("scalar_add_aic", scalar_add_aic, "i32", ref_add, INT_SEED),
-    ("scalar_xor_aic", scalar_xor_aic, "i32", ref_xor, INT_SEED),
-    ("scalar_mul_aic", scalar_mul_aic, "i32", ref_mul, INT_SEED),
-    ("scalar_div_aic", scalar_div_aic, "i32", ref_div, INT_SEED),
-    ("scalar_fadd_aic", scalar_fadd_aic, "f32", ref_fadd, FADD_SEED),
-    ("scalar_add_unroll4_aic", scalar_add_unroll4_aic, "i32", ref_add_unroll4, INT_SEED),
+    ("scalar_add_aiv", "add_aiv", "i32", ref_add, INT_SEED),
+    ("scalar_xor_aiv", "xor_aiv", "i32", ref_xor, INT_SEED),
+    ("scalar_mul_aiv", "mul_aiv", "i32", ref_mul, INT_SEED),
+    ("scalar_div_aiv", "div_aiv", "i32", ref_div, INT_SEED),
+    ("scalar_fadd_aiv", "fadd_aiv", "f32", ref_fadd, FADD_SEED),
+    ("scalar_add_unroll4_aiv", "add_unroll4_aiv", "i32", ref_add_unroll4, INT_SEED),
+    ("scalar_add_aic", "add_aic", "i32", ref_add, INT_SEED),
+    ("scalar_xor_aic", "xor_aic", "i32", ref_xor, INT_SEED),
+    ("scalar_mul_aic", "mul_aic", "i32", ref_mul, INT_SEED),
+    ("scalar_div_aic", "div_aic", "i32", ref_div, INT_SEED),
+    ("scalar_fadd_aic", "fadd_aic", "f32", ref_fadd, FADD_SEED),
+    ("scalar_add_unroll4_aic", "add_unroll4_aic", "i32", ref_add_unroll4, INT_SEED),
 ]
 
 
@@ -231,9 +218,9 @@ def run_scalar(rt, out_i32, out_f32):
     print(f"[实验2] 标量依赖链({len(OPS)} 变体 x {len(ITERS_LIST)} 规模 x {REPS} 次, block=1)")
 
     # 2a 数值核对(顺带吸收进程级 lazy init, 让后面的计时调用落在稳态)
-    for name, op, kind, ref, seed in OPS:
+    for name, variant, kind, ref, seed in OPS:
         out = out_f32 if kind == "f32" else out_i32
-        op(rt, out, seed, VERIFY_ITERS)
+        bench_scalar(rt, variant, out, seed, VERIFY_ITERS)
         got = out.item()
         if kind == "i32":
             got &= U32 - 1
@@ -243,14 +230,14 @@ def run_scalar(rt, out_i32, out_f32):
 
     # 2b wall 粗测
     print("   2b) wall 粗测(含 host 下发+同步; device 口径见 --analyze [2])")
-    for name, op, kind, _, seed in OPS:
+    for name, variant, kind, _, seed in OPS:
         out = out_f32 if kind == "f32" else out_i32
         meds, block_num = [], None
         for iters in ITERS_LIST:
             walls = []
             for _ in range(REPS):
                 t0 = time.perf_counter()
-                n = op(rt, out, seed, iters)
+                n = bench_scalar(rt, variant, out, seed, iters)
                 walls.append((time.perf_counter() - t0) * 1e6)
                 block_num = n if block_num is None else block_num
             meds.append(_med_us(walls))
@@ -264,8 +251,7 @@ def run_scalar(rt, out_i32, out_f32):
         return
     ticks = torch.zeros(3, dtype=torch.int64, device="npu:0")
     # 2c 先核对: timed kernel 的累加结果须与 untimed 参考逐位一致
-    for name, _, kind, ref, seed in OPS:
-        variant = name[len("scalar_"):]
+    for name, variant, kind, ref, seed in OPS:
         out = out_f32 if kind == "f32" else out_i32
         bench_timed(rt, variant, out, ticks, seed, VERIFY_ITERS)
         got = out.item()
@@ -283,8 +269,7 @@ def run_scalar(rt, out_i32, out_f32):
     print(f"       {'variant':<16s}{'issue@' + _fmt_iters(i_big):>12s}"
           f"{'compl@' + _fmt_iters(i_big):>12s}{'ns/op':>10s}"
           f"{'drain':>10s}{'ns/op@' + _fmt_iters(i_small):>11s}")
-    for name, _, kind, _, seed in OPS:
-        variant = name[len("scalar_"):]
+    for name, variant, kind, _, seed in OPS:
         out = out_f32 if kind == "f32" else out_i32
         meds = {}
         for iters in ITERS_LIST:
@@ -537,7 +522,7 @@ def _mte_lat_sweep(rt, sizes):
 
 def run_mte(rt, sizes):
     """实验3: MTE 访存微基准(bench_mte), lmbench 风格带宽/时延 vs size。"""
-    b_full = empty_aiv(rt)     # 空算子仅下发, 返回值即满核 AIV block 数
+    b_full = bench_empty(rt, "aiv")  # 空算子仅下发, 返回值即满核 AIV block 数
     print(f"[实验3] MTE 内存微基准(bench_mte), 满核 AIV = {b_full}")
     _mte_check(rt, b_full)
     _mte_anti_dce(rt)
@@ -770,7 +755,7 @@ def _vec_perf_sweep(rt, sizes, b_full):
 
 def run_vec(rt, sizes):
     """实验4: 向量指令微基准(bench_vec), 纯向量吞吐 vs 向量长度。"""
-    b_full = empty_aiv(rt)     # 空算子仅下发, 返回值即满核 AIV block 数
+    b_full = bench_empty(rt, "aiv")  # 空算子仅下发, 返回值即满核 AIV block 数
     print(f"[实验4] 向量指令微基准(bench_vec), 满核 AIV = {b_full}")
     _vec_check(rt, b_full)
     _vec_anti_dce(rt)
@@ -938,7 +923,7 @@ def _cube_tile_sweep(rt, tiles):
 
 def run_cube(rt, tiles):
     """实验5: cube matmul 微基准(bench_cube), 单次 Matmul::Run() + host 多次下发计时。"""
-    b_full = empty_aic(rt)     # 满核 AIC block 数(实验 5 仅用 1 block)
+    b_full = bench_empty(rt, "aic")  # 满核 AIC block 数(实验 5 仅用 1 block)
     print(f"[实验5] cube matmul 微基准(bench_cube), 满核 AIC = {b_full}")
     _cube_check(rt)
     _cube_anti_dce(rt)

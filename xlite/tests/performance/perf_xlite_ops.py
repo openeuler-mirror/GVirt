@@ -97,6 +97,15 @@ KERNEL_OP_OVERRIDES = {    # 手工指定 kernel 名 → op 名(优先于自动�
     for op in ("add", "xor", "mul", "div", "fadd", "add_unroll4")
     for ct in ("aiv", "aic")
 } | {
+    # bench_scalar 同理: untimed 变体名指回统一入口
+    f"scalar_{op}_{ct}": "bench_scalar"
+    for op in ("add", "xor", "mul", "div", "fadd", "add_unroll4")
+    for ct in ("aiv", "aic")
+} | {
+    # bench_empty 同理
+    f"empty_{ct}": "bench_empty"
+    for ct in ("aiv", "aic", "mix")
+} | {
     # bench_mte 同理: mte_read_aiv 等变体派生名指回统一入口
     f"mte_{op}_aiv": "bench_mte"
     for op in ("read", "write", "copy", "chase")

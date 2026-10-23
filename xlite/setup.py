@@ -290,7 +290,6 @@ class CMakeBuild(build_ext):
         # The CMake option defaults to OFF; only flip it when the env var is set.
         if os.environ.get("XLITE_BENCH_TIMED", "").upper() in ("ON", "1", "TRUE", "YES"):
             configure_cmd.append("-DXLITE_BENCH_TIMED=ON")
-            print("DXLITE_BENCH_TIMED has been set")
 
         build_cmd = ["cmake", "--build", str(build_temp), "-j"]
         install_cmd = ["cmake", "--install", str(build_temp)]

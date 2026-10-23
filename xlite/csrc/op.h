@@ -298,112 +298,20 @@ void XliteOpHcSplitSinkhorn(XRuntime &rt, XTensor &mixes, const XTensor &hcScale
 void XliteOpHcPre(XRuntime &rt, XTensor &xResid, const XTensor &pre, XTensor &output, uint32_t m,
                   uint32_t hcMult, uint32_t hidden);
 
-// Empty-kernel launch-overhead probes (AIV / AIC / MIX), see csrc/kernels/empty.cpp.
-// blockNum 0 = all cores of the type's primary core kind; returns the block count used.
-uint32_t XliteOpEmptyAiv(XRuntime &rt, uint32_t blockNum = 0);
-uint32_t XliteOpEmptyAic(XRuntime &rt, uint32_t blockNum = 0);
-uint32_t XliteOpEmptyMix(XRuntime &rt, uint32_t blockNum = 0);
-
-// Scalar micro-benchmarks (AIV / AIC), see csrc/kernels/microbench.h: a dependent
-// chain of `iters` scalar ops seeded by `seed`, final accumulator stored to
-// out (INT32 for the uint32 chains, FP32 for fadd). blockNum 0 = single
-// block (per-core throughput is the natural unit); returns the block count
-// used.
-uint32_t XliteOpScalarAddAiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum = 0);
-uint32_t XliteOpScalarXorAiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum = 0);
-uint32_t XliteOpScalarMulAiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum = 0);
-uint32_t XliteOpScalarDivAiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum = 0);
-uint32_t XliteOpScalarFaddAiv(XRuntime &rt, XTensor &out, float seed, uint32_t iters,
-                              uint32_t blockNum = 0);
-uint32_t XliteOpScalarAddUnroll4Aiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                                    uint32_t blockNum = 0);
-uint32_t XliteOpScalarAddAic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum = 0);
-uint32_t XliteOpScalarXorAic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum = 0);
-uint32_t XliteOpScalarMulAic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum = 0);
-uint32_t XliteOpScalarDivAic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum = 0);
-uint32_t XliteOpScalarFaddAic(XRuntime &rt, XTensor &out, float seed, uint32_t iters,
-                              uint32_t blockNum = 0);
-uint32_t XliteOpScalarAddUnroll4Aic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                                    uint32_t blockNum = 0);
-
+// Benchmarks
+uint32_t XliteOpBenchEmpty(XRuntime &rt, const std::string &variant, uint32_t blockNum = 0);
+uint32_t XliteOpBenchScalar(XRuntime &rt, const std::string &variant, XTensor &out, double seed,
+                            uint32_t iters, uint32_t blockNum = 0);
 #ifdef MICROBENCH_TIMED
-// Timed scalar micro-benchmarks: same dependent chains as the XliteOpScalar*
-// family plus in-kernel SYS_CNT cycle sampling (the BENCH_TICK* macros in
-// csrc/kernels/kernel_macro.h).
-// Compiled ONLY in XLITE_BENCH_TIMED=ON builds, where the kernels exist - in
-// the default build this declaration, the op.cpp dispatch and the Python
-// bench_timed binding are all absent. One entry for the whole timed family:
-// `variant` ("<op>_<aiv|aic>", op in add / xor / mul / div / fadd /
-// add_unroll4) picks kernel and core type, so future scalar-shaped timed
-// micro-tests (vector / cube families) extend one dispatch instead of growing
-// one host function + one binding per kernel; buffer-shaped families get
-// their own entry (the MTE memory family is XliteOpBenchMte below). `ticks` is a
-// caller-pre-allocated INT64 tensor (>= 3 elements) receiving the samples [region start, loop
-// issued, after PIPE_ALL drain]; cycles / 50 = us on the fixed 50 MHz counter. `out` receives the
-// final accumulator, `seed` is cast to the variant's dtype. Returns the block count used.
 uint32_t XliteOpBenchTimed(XRuntime &rt, const std::string &variant, XTensor &out, XTensor &ticks,
                            double seed, uint32_t iters, uint32_t blockNum = 0);
-
-// MTE memory micro-benchmarks (lmbench-style bandwidth / latency vs size), see
-// the MTE section of csrc/kernels/microbench.h (bench_aiv.cpp, timed build only).
-// Compiled only in XLITE_BENCH_TIMED=ON builds, same gate as XliteOpBenchTimed.
-// `variant` ("<op>_aiv", op in read / write / copy / chase - MTE lives on the
-// vector core, so there is no _aic form) picks the kernel. `src` is the GM
-// working set (INT8, >= bytes elements; write only reads the first
-// min(bytes, 96KB) pattern bytes); `dst` receives the verification data
-// (read / chase: INT32, >= 16 * blockNum elements, the acc word at element
-// 16 * b = byte offset 64 * b; write / copy: INT8 with >= bytes elements);
-// `ticks` is a caller-pre-allocated INT64 tensor (>= 8 * blockNum elements)
-// receiving per-block samples [region start, loop issued, after PIPE_ALL
-// drain] at byte offset 64 * b - outputs are 64B strided because scalar GM
-// stores from different cores sharing a 64B line race line-granularly
-// (BENCH_MTE_STRIDE in microbench.h); cycles / 50 = us on the
-// fixed 50 MHz counter. `bytes` must be a non-zero multiple of 32B (64B for
-// chase), `iters` >= 1 (chase: pointer-chase steps). blockNum 0 = all AIV
-// blocks (chase always pins 1 - a dependent chain has no parallelism).
-// Returns the block count used.
 uint32_t XliteOpBenchMte(XRuntime &rt, const std::string &variant, const XTensor &src, XTensor &dst,
                          XTensor &ticks, uint64_t bytes, uint32_t iters, uint32_t blockNum = 0);
-
-// Vector-op micro-benchmarks (vector-pipe throughput vs vector length), see
-// the VEC section of csrc/kernels/microbench.h (bench_aiv.cpp, timed build only).
-// Compiled only in XLITE_BENCH_TIMED=ON builds, same gate as XliteOpBenchTimed.
-// `variant` ("<op>_aiv", op in add_f32 / mul_f32 / add_i32 / add_f16 / sqrt_f32
-// / exp_f32 - the vector pipe lives on the vector core, so there is no _aic
-// form) picks the kernel. `src` holds [x0; c] concatenated (dtype FP32 for the
-// f32 variants, INT32 for add_i32, FP16 for add_f16; >= 2 * elems elements):
-// x0 seeds the chain, c is the constant operand vector. `out` receives every
-// block's final chain value (same dtype, >= block_num * elems elements, block
-// b's region starts at element b * elems); `ticks` is a caller-pre-allocated
-// INT64 tensor (>= 8 * block_num elements) receiving per-block samples
-// [region start, loop issued, after PIPE_ALL drain] at byte offset 64 * b
-// (BENCH_MTE_STRIDE line contract); cycles / 50 = us on the fixed 50 MHz
-// counter. `elems` must be a non-zero multiple of 64 (4B dtypes) / 128 (FP16)
-// and fit the UB budget (<= 16384 at 4B / 32768 at 2B), `iters` >= 1.
-// Every block runs the same chain; blockNum 0 = all AIV blocks. Returns the
-// block count used.
 uint32_t XliteOpBenchVec(XRuntime &rt, const std::string &variant, const XTensor &src, XTensor &out,
                          XTensor &ticks, uint64_t elems, uint32_t iters, uint32_t blockNum = 0);
-
-// Cube matmul micro-benchmark (single A@B.T per launch via the Matmul class),
-// see the cube section of csrc/kernels/microbench.h (bench_aic.cpp, timed
-// build only). `variant` ("cube_mmad_aic") picks the kernel. `a` is FP16
-// (m0*k0 elements, row-major A[m0,k0]); `b` is FP16 (n0*k0 elements, row-major
-// B[n0,k0], kernel computes A@B.T); `c` is FP16 (m0*n0 elements, receives the
-// matmul output after F322F16 conversion); `ticks` is INT64 (>= 8 elements,
-// receives 3 SYS_CNT samples). m0/n0/k0 must be multiples of 16 and satisfy
-// the L0/L1 budget (L0: 2*(m0+n0)*k0/4*2 <= 64KB; L1: 2*(m0*2+n0)*k0*2 <=
-// 512KB). blockNum 0 = 1 (serial dependent chain). Returns the block count.
 uint32_t XliteOpBenchCube(XRuntime &rt, const std::string &variant, const XTensor &a,
                           const XTensor &b, XTensor &c, XTensor &ticks, uint64_t m0, uint64_t n0,
                           uint64_t k0, uint32_t blockNum = 0);
 #endif  // MICROBENCH_TIMED
+
 #endif

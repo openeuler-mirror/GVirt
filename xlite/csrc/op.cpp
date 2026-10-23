@@ -2672,235 +2672,103 @@ void XliteOpHcPre(XRuntime &rt, XTensor &xResid, const XTensor &pre, XTensor &ou
                                   output.ptr, m, hcMult, hidden);
 }
 
-// Empty-kernel launch-overhead probes, see csrc/kernels/empty.cpp. blockNum==0
-// launches on all cores of the type's primary core kind (AIV: aivNum vector
-// blocks; AIC: aicNum cube blocks; MIX_AIC_1_2: aicNum cube blocks, each paired
-// with 2 vector blocks by hardware). Returns the block count actually used so
-// callers can log the launch shape.
-static uint32_t EmptyBlockNum(uint32_t blockNum, uint32_t coreNum)
-{
-    if (blockNum == 0 || blockNum > coreNum) {
-        return coreNum;
-    }
-    return blockNum;
-}
-
-uint32_t XliteOpEmptyAiv(XRuntime &rt, uint32_t blockNum)
+// Empty-kernel launch-overhead probes
+uint32_t XliteOpBenchEmpty(XRuntime &rt, const std::string &variant, uint32_t blockNum)
 {
     if (IsDummyRuntime(rt)) {
         return 0;
     }
-    blockNum = EmptyBlockNum(blockNum, rt.aivNum);
-    aclrtlaunch_empty_aiv(blockNum, rt.stream, nullptr);
+    if (variant == "aiv") {
+        blockNum = (blockNum == 0 || blockNum > rt.aivNum) ? rt.aivNum : blockNum;
+        aclrtlaunch_empty_aiv(blockNum, rt.stream, nullptr);
+    } else if (variant == "aic") {
+        blockNum = (blockNum == 0 || blockNum > rt.aicNum) ? rt.aicNum : blockNum;
+        aclrtlaunch_empty_aic(blockNum, rt.stream, nullptr);
+    } else if (variant == "mix") {
+        blockNum = (blockNum == 0 || blockNum > rt.aicNum) ? rt.aicNum : blockNum;
+        aclrtlaunch_empty_mix(blockNum, rt.stream, nullptr);
+    } else {
+        throw std::runtime_error("bench_empty: unknown variant '" + variant +
+                                 "', expected 'aiv', 'aic', or 'mix'");
+    }
     return blockNum;
 }
 
-uint32_t XliteOpEmptyAic(XRuntime &rt, uint32_t blockNum)
+// Scalar micro-benchmark launches
+uint32_t XliteOpBenchScalar(XRuntime &rt, const std::string &variant, XTensor &out, double seed,
+                            uint32_t iters, uint32_t blockNum)
 {
     if (IsDummyRuntime(rt)) {
         return 0;
     }
-    blockNum = EmptyBlockNum(blockNum, rt.aicNum);
-    aclrtlaunch_empty_aic(blockNum, rt.stream, nullptr);
-    return blockNum;
-}
-
-uint32_t XliteOpEmptyMix(XRuntime &rt, uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
+    const std::string suffix = variant.size() > 4 ? variant.substr(variant.size() - 4) : "";
+    const bool aiv = suffix == "_aiv";
+    const bool aic = suffix == "_aic";
+    if (!aiv && !aic) {
+        throw std::runtime_error("bench_scalar: unknown variant '" + variant +
+                                 "', expected '<op>_aiv' or '<op>_aic'");
     }
-    blockNum = EmptyBlockNum(blockNum, rt.aicNum);
-    aclrtlaunch_empty_mix(blockNum, rt.stream, nullptr);
-    return blockNum;
-}
-
-// Scalar micro-benchmark launches, see csrc/kernels/microbench.h. Unlike the
-// empty kernels, blockNum 0 means a single block: one core is the natural
-// unit for per-core scalar throughput. out receives the final accumulator
-// value (uint32 result -> INT32 tensor, fp32 result -> FP32 tensor).
-static uint32_t ScalarBlockNum(uint32_t blockNum, uint32_t coreNum)
-{
-    if (blockNum == 0 || blockNum > coreNum) {
-        return 1;
-    }
-    return blockNum;
-}
-
-static void ScalarCheckOut(const XTensor &out, enum XDtype dtype)
-{
+    const std::string op = variant.substr(0, variant.size() - 4);
+    const enum XDtype dtype = (op == "fadd") ? FP32 : INT32;
     if (out.dtype != dtype || out.numel < 1) {
-        std::string err_str = DBG_PREFIX + XT_STR(out);
-        throw std::runtime_error(err_str + "scalar bench expects a 1-element tensor of dtype " +
+        throw std::runtime_error(DBG_PREFIX + XT_STR(out) +
+                                 "scalar bench expects a 1-element tensor of dtype " +
                                  XDtypeStr(dtype));
     }
-}
-
-uint32_t XliteOpScalarAddAiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, INT32);
-    blockNum = ScalarBlockNum(blockNum, rt.aivNum);
-    aclrtlaunch_scalar_add_aiv(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarXorAiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, INT32);
-    blockNum = ScalarBlockNum(blockNum, rt.aivNum);
-    aclrtlaunch_scalar_xor_aiv(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarMulAiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, INT32);
-    blockNum = ScalarBlockNum(blockNum, rt.aivNum);
-    aclrtlaunch_scalar_mul_aiv(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarDivAiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, INT32);
-    if (seed == 0) {
+    if (op == "div" && seed == 0) {
         throw std::runtime_error("scalar_div: seed (divisor) must not be 0");
     }
-    blockNum = ScalarBlockNum(blockNum, rt.aivNum);
-    aclrtlaunch_scalar_div_aiv(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarFaddAiv(XRuntime &rt, XTensor &out, float seed, uint32_t iters,
-                              uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, FP32);
-    blockNum = ScalarBlockNum(blockNum, rt.aivNum);
-    aclrtlaunch_scalar_fadd_aiv(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarAddUnroll4Aiv(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                                    uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, INT32);
-    if (iters % 4 != 0) {
+    if (op == "add_unroll4" && iters % 4 != 0) {
         throw std::runtime_error("scalar_add_unroll4: iters must be divisible by 4");
     }
-    blockNum = ScalarBlockNum(blockNum, rt.aivNum);
-    aclrtlaunch_scalar_add_unroll4_aiv(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarAddAic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
+    const uint32_t coreNum = aiv ? rt.aivNum : rt.aicNum;
+    blockNum = (blockNum == 0 || blockNum > coreNum) ? 1 : blockNum;
+    const uint32_t seedU32 = static_cast<uint32_t>(seed);
+    const float seedF32 = static_cast<float>(seed);
+    if (op == "add") {
+        if (aiv) {
+            aclrtlaunch_scalar_add_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_add_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else if (op == "xor") {
+        if (aiv) {
+            aclrtlaunch_scalar_xor_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_xor_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else if (op == "mul") {
+        if (aiv) {
+            aclrtlaunch_scalar_mul_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_mul_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else if (op == "div") {
+        if (aiv) {
+            aclrtlaunch_scalar_div_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_div_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else if (op == "fadd") {
+        if (aiv) {
+            aclrtlaunch_scalar_fadd_aiv(blockNum, rt.stream, out.ptr, seedF32, iters);
+        } else {
+            aclrtlaunch_scalar_fadd_aic(blockNum, rt.stream, out.ptr, seedF32, iters);
+        }
+    } else if (op == "add_unroll4") {
+        if (aiv) {
+            aclrtlaunch_scalar_add_unroll4_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_add_unroll4_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else {
+        throw std::runtime_error("bench_scalar: unknown op '" + op + "'");
     }
-    ScalarCheckOut(out, INT32);
-    blockNum = ScalarBlockNum(blockNum, rt.aicNum);
-    aclrtlaunch_scalar_add_aic(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarXorAic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, INT32);
-    blockNum = ScalarBlockNum(blockNum, rt.aicNum);
-    aclrtlaunch_scalar_xor_aic(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarMulAic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, INT32);
-    blockNum = ScalarBlockNum(blockNum, rt.aicNum);
-    aclrtlaunch_scalar_mul_aic(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarDivAic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                             uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, INT32);
-    if (seed == 0) {
-        throw std::runtime_error("scalar_div: seed (divisor) must not be 0");
-    }
-    blockNum = ScalarBlockNum(blockNum, rt.aicNum);
-    aclrtlaunch_scalar_div_aic(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarFaddAic(XRuntime &rt, XTensor &out, float seed, uint32_t iters,
-                              uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, FP32);
-    blockNum = ScalarBlockNum(blockNum, rt.aicNum);
-    aclrtlaunch_scalar_fadd_aic(blockNum, rt.stream, out.ptr, seed, iters);
-    return blockNum;
-}
-
-uint32_t XliteOpScalarAddUnroll4Aic(XRuntime &rt, XTensor &out, uint32_t seed, uint32_t iters,
-                                    uint32_t blockNum)
-{
-    if (IsDummyRuntime(rt)) {
-        return 0;
-    }
-    ScalarCheckOut(out, INT32);
-    if (iters % 4 != 0) {
-        throw std::runtime_error("scalar_add_unroll4: iters must be divisible by 4");
-    }
-    blockNum = ScalarBlockNum(blockNum, rt.aicNum);
-    aclrtlaunch_scalar_add_unroll4_aic(blockNum, rt.stream, out.ptr, seed, iters);
     return blockNum;
 }
 
 #ifdef MICROBENCH_TIMED
-// Timed scalar micro-benchmark dispatch, see csrc/kernels/microbench.h
-// (SYS_CNT sampling via the BENCH_TICK* macros in csrc/kernels/kernel_macro.h).
-// Compiled only in XLITE_BENCH_TIMED=ON builds
-// (where the *_timed kernels and their launch stubs exist). Variant format
-// "<op>_<aiv|aic>"; per-op constraints mirror the untimed XliteOpScalar*
-// functions. The ticks buffer is written by the kernel itself (batched,
-// after the closing tick), the host only reads it back after Synchronize()
-// and converts cycles to time.
+// Timed scalar micro-benchmark dispatch
 uint32_t XliteOpBenchTimed(XRuntime &rt, const std::string &variant, XTensor &out, XTensor &ticks,
                            double seed, uint32_t iters, uint32_t blockNum)
 {
@@ -2919,14 +2787,22 @@ uint32_t XliteOpBenchTimed(XRuntime &rt, const std::string &variant, XTensor &ou
                                  "', expected '<op>_aiv' or '<op>_aic'");
     }
     const std::string op = variant.substr(0, variant.size() - 4);
-    ScalarCheckOut(out, op == "fadd" ? FP32 : INT32);
+    const enum XDtype dtype = (op == "fadd") ? FP32 : INT32;
+    if (out.dtype != dtype || out.numel < 1) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(out) +
+                                 "scalar bench expects a 1-element tensor of dtype " +
+                                 XDtypeStr(dtype));
+    }
     if (op == "div" && seed == 0) {
         throw std::runtime_error("scalar_div: seed (divisor) must not be 0");
     }
     if (op == "add_unroll4" && iters % 4 != 0) {
         throw std::runtime_error("scalar_add_unroll4: iters must be divisible by 4");
     }
-    blockNum = ScalarBlockNum(blockNum, aiv ? rt.aivNum : rt.aicNum);
+    {
+        const uint32_t coreNum = aiv ? rt.aivNum : rt.aicNum;
+        blockNum = (blockNum == 0 || blockNum > coreNum) ? 1 : blockNum;
+    }
     const uint32_t seedU32 = static_cast<uint32_t>(seed);
     const float seedF32 = static_cast<float>(seed);
     if (op == "add") {
@@ -2983,15 +2859,7 @@ uint32_t XliteOpBenchTimed(XRuntime &rt, const std::string &variant, XTensor &ou
     return blockNum;
 }
 
-// MTE memory micro-benchmark dispatch, see the MTE section of
-// csrc/kernels/microbench.h (bench_aiv.cpp, timed build only). Compiled only
-// in XLITE_BENCH_TIMED=ON builds (same gate as XliteOpBenchTimed). The four
-// kernels share one signature (src / dst / ticks / bytes / iters) but their
-// buffer contracts differ: the streaming variants (read / write / copy) move
-// `bytes` per repetition grid-strided over `blockNum` blocks, chase walks a
-// 64B-granular dependent chain on a single pinned block. The kernel writes
-// the per-block ticks itself (batched, after the closing tick); the host only
-// validates shapes and launches.
+// MTE memory micro-benchmark dispatch
 uint32_t XliteOpBenchMte(XRuntime &rt, const std::string &variant, const XTensor &src, XTensor &dst,
                          XTensor &ticks, uint64_t bytes, uint32_t iters, uint32_t blockNum)
 {
@@ -3021,7 +2889,7 @@ uint32_t XliteOpBenchMte(XRuntime &rt, const std::string &variant, const XTensor
     // A dependent chain has no parallelism to exploit, so chase always runs on
     // one block; the streaming variants grid-stride the working set over the
     // launched blocks (0 = all AIV blocks).
-    blockNum = chaseOp ? 1 : EmptyBlockNum(blockNum, rt.aivNum);
+    blockNum = chaseOp ? 1 : ((blockNum == 0 || blockNum > rt.aivNum) ? rt.aivNum : blockNum);
     // Ticks / acc outputs are strided BENCH_MTE_STRIDE (64B) per block: scalar
     // GM stores from different cores sharing a 64B line race line-granularly
     // (microbench.h BENCH_MTE_STRIDE). 64B = 8 int64 = 16 int32 elements.
@@ -3063,12 +2931,7 @@ uint32_t XliteOpBenchMte(XRuntime &rt, const std::string &variant, const XTensor
     return blockNum;
 }
 
-// Vector-op micro-benchmarks (bench_aiv.cpp, timed build only): pure vector-pipe
-// throughput vs vector length. The kernel stages [x0; c] from src into UB, runs a
-// dependent chain of iters op applications over elems elements, and copies
-// every block's final dst to its own out region; see the VEC section of
-// csrc/kernels/microbench.h for the chain / carrier semantics. The host only
-// validates shapes and launches.
+// Vector-op micro-benchmarks
 uint32_t XliteOpBenchVec(XRuntime &rt, const std::string &variant, const XTensor &src, XTensor &out,
                          XTensor &ticks, uint64_t elems, uint32_t iters, uint32_t blockNum)
 {
@@ -3116,7 +2979,7 @@ uint32_t XliteOpBenchVec(XRuntime &rt, const std::string &variant, const XTensor
     // Every block runs the same chain (per-core throughput probe); each block
     // copies its dst to a disjoint out region (>= 256B, 64B aligned) and its
     // ticks to its own 64B line (BENCH_MTE_STRIDE contract).
-    blockNum = EmptyBlockNum(blockNum, rt.aivNum);
+    blockNum = (blockNum == 0 || blockNum > rt.aivNum) ? rt.aivNum : blockNum;
     if (ticks.dtype != INT64 || ticks.numel < 8 * blockNum) {
         throw std::runtime_error(DBG_PREFIX + XT_STR(ticks) +
                                  "bench_vec expects an INT64 ticks tensor with >= 8 * block_num "
