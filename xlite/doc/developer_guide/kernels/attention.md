@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-标准 MHA/GQA 的 prefill/decode 统一注意力算子(非 flash 路径,单趟 softmax):从融合的 QKV 输入中取 Q,与 paged KV cache 中的 K 做 QK^T,对分数做 causal-mask 的行 softmax,再与 V 相乘得到输出 `out = softmax(mask(QK^T)) · V`。当 `maxNumBlocks * blockSize`(总 KV 长度)超过 host 侧 tile 阈值时,模型层改走 flash_attention 在线 softmax 版本(`csrc/model.cpp` 的 `ForwardAttnMHA`,flash 路由分支关键字 `<= rt._tileSizeOfCachedKV`);本算子假设整个 KV 范围一次算完,中间 QK 分数经 GM 中的 `qk` workspace 传递。AIC(Cube)负责两个 GEMM,QKV 分数和 SV;AIV(Vector)负责 softmax,三者通过软件流水重叠。
+标准 MHA/GQA 的 prefill/decode 统一注意力算子(非 flash 路径,单趟 softmax):从融合的 QKV 输入中取 Q,与 paged KV cache 中的 K 做 QK^T,对分数做 causal-mask 的行 softmax,再与 V 相乘得到输出 `out = softmax(mask(QK^T)) · V`。当 `blockTables.shape[1] * blockSize`(运行期总 KV 长度,即表运行期行宽,不取 block table 的分配跨度)超过 host 侧 tile 阈值时,模型层改走 flash_attention 在线 softmax 版本(`csrc/model.cpp` 的 `ForwardAttnMHA`,flash 路由分支关键字 `<= rt._tileSizeOfCachedKV`);本算子假设整个 KV 范围一次算完,中间 QK 分数经 GM 中的 `qk` workspace 传递。AIC(Cube)负责两个 GEMM,QKV 分数和 SV;AIV(Vector)负责 softmax,三者通过软件流水重叠。
 
 ## 输入输出参数
 
@@ -19,7 +19,7 @@ host 封装 `Attention` → `XliteOpAttention`(`csrc/_C.cpp` 的 `Attention`、`
 ```cpp
 attention_<dtype>(input, kCache, vCache, qk, output, queryStartLoc, queryLens,
                  cachedLens, blockTables, kCacheStride, vCacheStride, nHeads,
-                 nKVHeads, headSize, blockSize, batch, maxNumBlocks, zeroGm)
+                 nKVHeads, headSize, blockSize, batch, blockTableStride, maxSeqLen, zeroGm)
 ```
 
 末尾的 `zeroGm` 是 host 自动提供的零缓冲(`rt._attnZeroBuffer`,host launch 见 `csrc/op.cpp` 的 `XliteOpAttention`):`AicHelper::Init` 在 AIC 侧用 `CopyGmToL1Nd2Nz` 把两份 L1B ping-pong 缓冲预填零,避免 L1B 残留脏数据导致 mmad 产生 NaN(nan bug 修复,见实现原理)。
@@ -28,18 +28,19 @@ attention_<dtype>(input, kCache, vCache, qk, output, queryStartLoc, queryLens,
 |---|---|---|---|---|
 | input (qkv) | 输入 | `[total_tokens, (nHeads + 2*nKVHeads)*headSize]` | FP16/BF16 | 融合 QKV,布局 [Q \| K \| V];本算子只读 Q 段(K/V 已由 rope_and_cache 写入缓存) |
 | kCache / vCache | 输入 | `[numBlocks, blockSize, nKVHeads, headSize]` | FP16/BF16 | paged KV cache,物理块号由 blockTables 给出 |
-| qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, maxSeqLen]` | FP16/BF16 | QK^T 分数缓冲(host 分配,见 `csrc/_C.cpp` 的 `Attention`(`!enableFlashAttention` 分支);`maxSeqLen = maxNumBlocks * blockSize`),按 block_idx 双缓冲 |
+| qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, maxSeqLen]` | FP16/BF16 | QK^T 分数缓冲(host 分配,见 `csrc/_C.cpp` 的 `Attention`(`!enableFlashAttention` 分支);行宽 `maxSeqLen = blockTables.shape[1] * blockSize`(`shape[1]` 为运行期宽度:V2 由 PrepareAttn 收窄,standalone 由 lens 推导收窄)),按 block_idx 双缓冲 |
 | output | 输出 | `[total_tokens, nHeads * headSize]` | FP16/BF16 | attention 输出,`[token, head, headDim]` 展平 |
 | queryStartLoc | 输入 | `[batch]` | INT32 | 每 batch 在 total_tokens 中的起始偏移 |
 | queryLens | 输入 | `[batch]` | INT32 | 每 batch 的 query token 数 |
 | cachedLens | 输入 | `[batch]` | INT32 | 每 batch 已缓存的 KV 长度(causal mask 基准) |
-| blockTables | 输入 | `[batch, maxNumBlocks]` | INT32 | 逻辑块 → 物理块映射表 |
+| blockTables | 输入 | `[rows >= batch, blockTableStride]` | INT32 | 逻辑块 → 物理块映射表;行为持久化缓冲,行跨度(blockTableStride)为分配跨度 `blockTables.stride[0]`,行宽为每步运行期宽度 `shape[1]`,仅每行前 `ceil((cachedLens[i]+queryLens[i])/blockSize)` 列有效,行/列尾为残留数据,不被读取 |
 | kCacheStride / vCacheStride | 标量 | - | uint32 | K/V cache 的 dim-0 跨度(元素数),host 传 `XTensor.stride[0]`;连续 cache 时等于 `blockSize * nKVHeads * headSize`,非连续 cache 时为真实跨距 |
 | nHeads / nKVHeads | 标量 | - | uint32 | 本卡 query / KV 头数,支持 GQA(`headNumInGroup = nHeads/nKVHeads`)与 MHA(二者相等) |
 | headSize | 标量 | - | uint32 | 头维(测试覆盖 64/128) |
 | blockSize | 标量 | - | uint32 | KV cache 块大小(128) |
 | batch | 标量 | - | uint32 | batch 数 |
-| maxNumBlocks | 标量 | - | uint32 | host 由 `csrc/op.h` 的 `DeriveMaxNumBlocks` 推得 |
+| blockTableStride | 标量 | - | uint32 | blockTables 的行跨度(元素数),host 取 `blockTables.stride[0]`(XTensor 的 dim-0 跨距;持久化 V2 表为分配跨度,V1/standalone 紧凑表等于行宽),仅用于行寻址 |
+| maxSeqLen | 标量 | - | uint32 | qk workspace 的行宽,host 取 `blockTables.shape[1] * blockSize`(`shape[1]` 为运行期宽度:V2 由 PrepareAttn 收窄,standalone 由 lens 推导收窄) |
 | zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`AicHelper::Init` 用它预填零 L1B(见实现原理) |
 
 `total_tokens = sum(queryLens)`。测试中覆盖的典型配置见 `tests/kernels/attention.py` 的 `models`/`work` 配置列表(关键字 `models = [`):从 (1,1) decode 到 batch=8 混合 prefill、cached_len 最大 131071。

@@ -398,9 +398,10 @@ class AttnMetaV2:
     ``cached_lens``, ``query_start_loc``, ``slot_mapping`` and
     ``block_tables`` as pre-built device tensors. The C++ side skips host
     computation and H2D copies, only shape-checking and aliasing these tensors
-    (zero-copy). Per-sample block tables are flattened into a 1D tensor padded
-    to ``max_num_blocks``. The host ``lens_cpu``/``cached_lens_cpu`` lists are
-    still required for C++-side tile-size selection (``GetTileSizeOfCachedKV``).
+    (zero-copy). Block tables are persistent buffers of width
+    ``ceil(max_seq_len / block_size)``; entries beyond this step's lens are
+    stale. The host ``lens_cpu``/``cached_lens_cpu`` lists are still required
+    for C++-side tile-size selection (``GetTileSizeOfCachedKV``).
 
     Attributes:
         lens (torch.Tensor): Per-sample query lengths, shape ``[batch]`` int32 device.
@@ -414,10 +415,13 @@ class AttnMetaV2:
         slot_mapping (Sequence[torch.Tensor]): Main-KV token slot table(s), each
             ``[batched_tokens]`` int32 device. Hybrid layouts use one table;
             per-cache layouts use one table per blockSizes entry.
-        block_tables (Sequence[torch.Tensor]): Block tables, each
-            ``[batch, max_num_blocks]`` int32 device. Hybrid layouts:
-            ``[0]``=main KV, ``[1..]``=mamba state indices (plus an optional tail
-            ring); per-cache layouts: one table per blockSizes entry.
+        block_tables (Sequence[torch.Tensor]): Persistent
+            ``[rows >= batch, ceil(max_seq_len / block_size)]`` int32 buffers; entries
+            beyond this step's lens are never read. Hybrid family slots: ``[0]``=main
+            KV, ``[1..]``=mamba state page ids (``[batch, 1]``) plus an optional KDA
+            tail ring; per-cache layouts: one table per blockSizes entry.
+        block_tables_seq_mapping (None): Reserved sequence-to-row mapping for
+            block tables; NOT supported yet, must stay ``None``.
     """
 
     lens: torch.Tensor = ...
@@ -438,8 +442,13 @@ class AttnMetaV2:
     """Main-KV token slot table(s), each ``[batched_tokens]`` int32 device; one table for
     hybrid layouts, one per blockSizes entry for per-cache layouts."""
     block_tables: Sequence[torch.Tensor] = ...
-    """Block tables, each ``[batch, max_num_blocks]`` int32 device; hybrid layouts use
-    main + mamba [+ tail], per-cache layouts one per blockSizes entry."""
+    """Persistent ``[rows >= batch, ceil(max_seq_len / block_size)]`` int32 buffers;
+    entries beyond this step's lens are never read. Hybrid family slots: ``[0]``=main
+    KV, ``[1..]``=mamba state page ids (``[batch, 1]``) plus an optional KDA tail ring;
+    per-cache layouts: one table per blockSizes entry."""
+    block_tables_seq_mapping: None = ...
+    """Reserved sequence-to-row mapping for block tables; NOT supported yet,
+    must stay ``None``."""
 
 class AttnType(Enum):
     """Attention type enum exported by the native extension."""
@@ -2121,10 +2130,9 @@ def attention(
             int32 device.
         lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
         cached_lens (torch.Tensor): Cached token lengths, shape ``[batch]``, int32 device.
-        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
-            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
-            per-request max_num_blocks is derived internally from the shape
-            (2-D: shape[1]; 1-D: len // batch).
+        block_tables (torch.Tensor): 2-D ``[rows, cols]`` int32 (1-D = single row); ``stride[0]``
+            may exceed ``cols`` (persistent buffers accepted) and is narrowed to the
+            lens-derived width. Sizes the internal qk workspace.
         n_heads (int): Number of query heads.
         n_kv_heads (int): Number of KV heads.
         head_dim (int): Head dimension.
@@ -3160,10 +3168,9 @@ def mla_v2(
             int32 device.
         lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
         cached_lens (torch.Tensor): Cached token lengths, shape ``[batch]``, int32 device.
-        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
-            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
-            per-request max_num_blocks is derived internally from the shape
-            (2-D: shape[1]; 1-D: len // batch).
+        block_tables (torch.Tensor): 2-D ``[rows, cols]`` int32 (1-D = single row);
+            ``stride[0]`` may exceed ``cols`` (persistent buffers accepted) and is
+            narrowed to the lens-derived width, which sizes qk / ``max_seq_len``.
         n_heads (int): Number of query heads.
         rope_head_dim (int): Rotary head dimension.
         nope_head_dim (int): Non-rotary head dimension.
@@ -3233,10 +3240,9 @@ def gather_sparse_kv_cache(
         pe_cache (torch.Tensor): Paged RoPE key cache, (kvcache_block_num,
             block_size, kv_heads, rope_head_dim), bf16; may be empty to skip
             the PE channel.
-        block_tables (torch.Tensor): Block table, 1-D ``[batch *
-            max_num_blocks]`` or 2-D ``[batch, max_num_blocks]`` int32;
-            ``max_num_blocks`` is derived internally (2-D: ``shape[1]``,
-            1-D: ``len // batch``).
+        block_tables (torch.Tensor): 2-D ``[rows, cols]`` int32 (1-D = single row);
+            ``stride[0]`` may exceed ``cols`` (persistent buffers accepted). Gathers
+            are bounded by ``topk_indices``, not the table width.
         topk_indices (torch.Tensor): Top-k token indices, (total_query_len,
             index_topk), int32, any order for sparse rows; dense rows hold
             unread dummies.
@@ -3339,16 +3345,12 @@ def cxa(
             ``compress_block_tables``), where batch ``b`` occupies compressed
             tokens ``[b * index_topk, (b + 1) * index_topk)``. Unused when
             ``compress_ratio == 0`` (may be empty).
-        swa_block_tables (torch.Tensor): Block table for the SWA cache, 1-D
-            ``[batch * swa_max_num_blocks]`` or 2-D
-            ``[batch, swa_max_num_blocks]`` int32. The SWA cache is paged and
-            walked via this table in both modes.
-        compress_block_tables (torch.Tensor): Block table for the compressed
-            cache, 1-D or 2-D int32 (same convention as ``swa_block_tables``).
-            Paged mode: used to walk the paged compress cache. Dense mode: used
-            by the internal :func:`gather_sparse_kv_cache` call to build the
-            contiguous dense cache, then unused by the kernel itself (may be
-            empty otherwise).
+        swa_block_tables (torch.Tensor): 2-D ``[rows, cols]`` int32 block table for
+            the SWA cache; ``stride[0]`` may exceed ``cols`` (persistent buffers
+            accepted). Walked in both modes.
+        compress_block_tables (torch.Tensor): Block table for the compressed cache,
+            same convention as ``swa_block_tables``; the internal scores workspace is
+            sized from the lens-derived compressed width.
         swa_block_size (int): Block size of the SWA cache.
         compress_block_size (int): Block size of the compressed cache. In dense
             mode this is the block size of the source paged cache the top-k
@@ -3426,15 +3428,15 @@ def indexer_scores(
         weight (torch.Tensor): Indexer weight tensor, shape ``[tokens, head_dim + n_heads]``,
             same dtype — the kernel strides rows by ``head_dim + n_heads`` and consumes
             only the trailing ``n_heads`` columns of each row.
-        scores (torch.Tensor): Output score tensor, shape ``[tokens, ...]``, same dtype.
+        scores (torch.Tensor): Output score tensor, ``[tokens, lens-derived width
+            * block_size]``.
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
             int32 device.
         lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
         cached_lens (torch.Tensor): Cached token lengths, shape ``[batch]``, int32 device.
-        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
-            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
-            per-request max_num_blocks is derived internally from the shape
-            (2-D: shape[1]; 1-D: len // batch).
+        block_tables (torch.Tensor): 2-D ``[rows, cols]`` int32 (1-D = single row);
+            ``stride[0]`` may exceed ``cols`` (persistent buffers accepted) and is
+            narrowed to the lens-derived width; ``scores``' row width must match it.
         n_heads (int): Number of heads.
         head_dim (int): Head dimension.
         block_size (int): KV block size.
@@ -3497,10 +3499,9 @@ def indexer_topk(
             int32 device.
         lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
         cached_lens (torch.Tensor): Cached token lengths, shape ``[batch]``, int32 device.
-        block_tables (torch.Tensor): Block table, 1-D ``[batch * max_num_blocks]``
-            (legacy flattened) or 2-D ``[batch, max_num_blocks]`` int32. The
-            per-request max_num_blocks is derived internally from the shape
-            (2-D: shape[1]; 1-D: len // batch).
+        block_tables (torch.Tensor): 2-D ``[rows, cols]`` int32 (1-D = single row);
+            ``stride[0]`` may exceed ``cols`` (persistent buffers accepted) and is
+            narrowed to the lens-derived width, which also sizes the identity table.
         n_heads (int): Number of heads (32 for C8).
         head_dim (int): Head dimension (128 for C8).
         block_size (int): KV block size (must be <= 128).

@@ -23,7 +23,7 @@ host 封装 `XliteOpFlashCXA`(`csrc/op.cpp` 的 `XliteOpFlashCXA`)→ kernel `fl
 
 ```cpp
 flash_cxa_<dtype>(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables,
-                  swaBlockSize, compressBlockSize, swaMaxNumBlocks, compressMaxNumBlocks,
+                  swaBlockSize, compressBlockSize, swaBlockTableStride, compressBlockTableStride,
                   attnSink, qk, sv, max, sum, lastMax, lastSum, sync, output, batch,
                   queryStartLoc, queryLens, cachedLens, nHeads, headDim, scale, windowSize,
                   compressRatio, indexTopK, topkIndices, tileSizeOfCachedKV, zeroGm)
@@ -36,7 +36,7 @@ flash_cxa_<dtype>(q, swaKCache, compressKCache, swaBlockTables, compressBlockTab
 | q | 输入 | `[totalQ, nHeads, headDim]` | BF16 | query |
 | swa_k_cache | 输入 | `[swaBlockNum, swaBlockSize, headDim]` | BF16 | 分页滑动窗口 KV cache(始终分页) |
 | compress_k_cache | 输入 | `[compressBlockNum, compressBlockSize, headDim]` | BF16 | 分页压缩 KV cache(flash 仅走 sparse 分页路径,不分页由非 flash 的 dense 路径处理) |
-| swa_block_tables / compress_block_tables | 输入 | `[batch, maxNumBlocks]` | INT32 | 分页 block table |
+| swa_block_tables / compress_block_tables | 输入 | `[rows >= batch, 对应表行跨度]` | INT32 | 分页 block table;持久化缓冲,行跨度为对应表 `stride[0]`(分配跨度),持久化 V2 表的 `shape[1]` 已由 PrepareAttn 收窄到运行期宽度,仅每行 lens 推导的有效前缀被读取 |
 | swa_block_size / compress_block_size | 标量 | - | uint32 | cache block 大小 |
 | attn_sink | 输入 | `[nHeads]` | FP32 | 每头注意力 sink 偏置;kernel 仅在第一个 KV tile(`kvIdx == 0`)读入 softmax 分母 |
 | qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, qkStride]`,`qkStride = swaSegWidth + tileSizeOfCachedKV` | BF16 | 当前 KV tile 的 QK 分数,按核双缓冲 |

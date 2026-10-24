@@ -249,9 +249,13 @@ def run_test(
     shared_single_block=False,
     permuted_blocks=False,
     pitched=False,
+    persistent_table=False,
 ):
     total_query_len = sum(query_lens_list)
     max_num_blocks = max_blocks(cached_lens_list, query_lens_list, BLOCK_SIZE)
+    # persistent_table: wider buffer, stale trails, pitched column view handed to
+    # the op (row stride != per-step row width)
+    bt_width = max_num_blocks + 4 if persistent_table else max_num_blocks
     kv_heads = 1
     # the burst count derives from the first channel (active channel for nope,
     # larger of the two otherwise — the host swaps so the first is never smaller)
@@ -285,18 +289,24 @@ def run_test(
             pe_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1,
                                          rope_head_dim)[::pitch]
 
-        # block_tables: batch x max_num_blocks (contiguous / all-zero / random permutation)
+        # block_tables: 2-D [batch, width]; persistent_table pads the width with
+        # stale trails (the op narrows to the lens-derived width, pitch unchanged)
         if shared_single_block:
-            block_tables = torch.zeros(batch * max_num_blocks, dtype=torch.int32)
+            block_tables = torch.zeros(batch, bt_width, dtype=torch.int32)
         elif permuted_blocks:
-            block_tables = (
-                torch.randperm(max_num_blocks * batch).to(torch.int32).flatten()
+            block_tables = torch.randperm(max_num_blocks * batch).to(torch.int32).reshape(
+                batch, max_num_blocks
             )
         else:
             batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
             block_indices = np.arange(max_num_blocks, dtype=np.uint32)
-            block_tables_array = batch_indices * max_num_blocks + block_indices
-            block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32).flatten()
+            block_tables = torch.tensor(
+                (batch_indices * max_num_blocks + block_indices).tolist(), dtype=torch.int32
+            )
+        if persistent_table:
+            padded = torch.zeros(batch, bt_width, dtype=torch.int32)
+            padded[:, :max_num_blocks] = block_tables
+            block_tables = padded
 
         # topk_indices: [total_query_len, topK] (packed, one row per query token);
         # for query token q of batch b the causal candidate range is
@@ -344,7 +354,8 @@ def run_test(
     # stage the caches on host once: the reference below gathers group by group
     k_cache_src = k_cache_xlite.cpu()
     pe_cache_src = pe_cache_xlite.cpu()
-    bt = block_tables.tolist()  # plain list: the reference below hits it per token
+    bt_row = block_tables.shape[1]  # logical row width (pitched views flatten to this)
+    bt = block_tables.reshape(-1).tolist()  # flat host view: hit per token below
     sparse_rows = 0
     dense_rows = 0
     row_valid = []  # per query-token valid slot count, for the set-semantics oracle
@@ -363,7 +374,7 @@ def run_test(
                 sparse_rows += 1
                 toks = topk_indices_tensor[in_offset].tolist()
             phys = [
-                bt[b * max_num_blocks + (t if toks is None else toks[t]) // BLOCK_SIZE]
+                bt[b * bt_row + (t if toks is None else toks[t]) // BLOCK_SIZE]
                 for t in range(valid_cnt)
             ]
             off = [(t if toks is None else toks[t]) % BLOCK_SIZE for t in range(valid_cnt)]
@@ -573,6 +584,41 @@ def main():
             8192,
             permuted_blocks=True,
         )
+
+    # persistent block tables: over-wide 1-D flat tables whose per-row trails
+    # hold stale in-bounds ids (physical block 0) — the kernel must stride rows
+    # by the table width and never follow a trail id; mixed sparse/dense rows,
+    # plus the fragmented-mapping variant padded the same way
+    for order in ("asc", "random"):
+        run_test(
+            name,
+            kv_lora_rank,
+            rope_head_dim,
+            test_dtype,
+            3,
+            [2047, 8191, 45841],
+            [1, 1, 1],
+            2048,
+            order,
+            1,
+            8192,
+            persistent_table=True,
+        )
+    run_test(
+        name,
+        kv_lora_rank,
+        rope_head_dim,
+        test_dtype,
+        2,
+        [8191, 2047],
+        [1, 1],
+        2048,
+        "random",
+        1,
+        8192,
+        permuted_blocks=True,
+        persistent_table=True,
+    )
 
     # swapped channels: kv_lora_rank < rope_head_dim exercises the host swap
     for order, burst_copy_size in itertools.product(orders, burst_sizes):

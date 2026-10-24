@@ -12,31 +12,6 @@
 
 static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN);
 
-// Derive maxNumBlocks from blockTables: 2-D [batch, maxNumBlocks] -> shape[1];
-// 1-D [batch * maxNumBlocks] -> len / batch. Avoids shape[1] UB on 1-D input.
-static inline uint32_t DeriveMaxNumBlocks(const XTensor &blockTables, uint32_t batch)
-{
-    const auto &shape = blockTables.shape;
-    if (shape.size() == 2) {
-        return static_cast<uint32_t>(shape[1]);
-    }
-    if (shape.size() == 1) {
-        if (batch == 0) {
-            throw std::runtime_error(
-                std::string(__func__) +
-                ": batch == 0 when deriving maxNumBlocks from 1-D blockTables");
-        }
-        if (shape[0] % batch != 0) {
-            throw std::runtime_error(std::string(__func__) + ": 1-D blockTables length (" +
-                                     std::to_string(shape[0]) + ") is not divisible by batch (" +
-                                     std::to_string(batch) + ")");
-        }
-        return static_cast<uint32_t>(shape[0] / batch);
-    }
-    throw std::runtime_error(std::string(__func__) + ": blockTables must be 1-D or 2-D, got rank " +
-                             std::to_string(shape.size()));
-}
-
 HcclDataType XDtype2HcclDtype(enum XDtype dtype);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,

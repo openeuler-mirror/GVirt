@@ -31,9 +31,9 @@ public:
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                                 uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxSeqLen, float scale, uint32_t topK,
-                                uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense,
-                                GM_ADDR zeroGm)
+                                uint32_t blockTableStride, uint32_t maxSeqLen, float scale,
+                                uint32_t topK, uint32_t kCacheStride, uint32_t peCacheStride,
+                                uint32_t dense, GM_ADDR zeroGm)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qAbsorb.SetGlobalBuffer((__gm__ Dtype *)qAbsorb);
@@ -59,7 +59,7 @@ public:
         this->qkStride = maxSeqLen;
         this->scale = scale;
         this->dense = dense != 0;
-        this->maxNumBlocks = this->dense ? 0 : DIV_ROUND_UP(maxSeqLen, blockSize);
+        this->blockTableStride = this->dense ? 0 : blockTableStride;
         this->topK = (!this->dense && topkIndices != nullptr) ? topK : 0;
 
         this->qk[0].SetGlobalBuffer((__gm__ Dtype *)qk + block_idx * XLITE_MAX_M0 * qkStride);
@@ -100,7 +100,7 @@ public:
             __gm__ uint32_t *blockTable = nullptr;
             if (!dense) {
                 blockTable = (__gm__ uint32_t *)((uint64_t)blockTables +
-                                                 batchIdx * maxNumBlocks * sizeof(uint32_t));
+                                                 batchIdx * blockTableStride * sizeof(uint32_t));
             }
 
             // dense mode: each query token has its own dense cache row, so tile one
@@ -333,7 +333,7 @@ private:
     uint32_t ropeHeadDim;
     uint32_t kvLoraRank;
     uint32_t batch;
-    uint32_t maxNumBlocks;
+    uint32_t blockTableStride;
     uint32_t maxSeqLen;
     float scale;
     uint32_t topK;
@@ -349,12 +349,14 @@ private:
         GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache, GM_ADDR topkIndices,         \
         GM_ADDR qk, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, \
         GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank,           \
-        uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen, float scale, uint32_t topK,        \
-        uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense, GM_ADDR zeroGm)             \
+        uint32_t blockSize, uint32_t batch, uint32_t blockTableStride, uint32_t maxSeqLen,         \
+        float scale, uint32_t topK, uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense, \
+        GM_ADDR zeroGm)                                                                            \
     {                                                                                              \
         MLAV2<dtype> op;                                                                           \
         op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb, queryStartLoc, queryLens,  \
                 cachedLens, blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,        \
-                maxSeqLen, scale, topK, kCacheStride, peCacheStride, dense, zeroGm);               \
+                blockTableStride, maxSeqLen, scale, topK, kCacheStride, peCacheStride, dense,      \
+                zeroGm);                                                                           \
         op.Run();                                                                                  \
     }

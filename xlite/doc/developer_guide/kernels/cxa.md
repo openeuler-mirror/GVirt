@@ -29,8 +29,8 @@ Python 签名见 `xlite/_C.pyi` 的 `def cxa(...)`,kernel 侧入口见 `csrc/ker
 | q | 输入 | [totalQ, nHeads, headDim] | bfloat16 | query |
 | swa_k_cache | 输入 | [swaBlockNum, swaBlockSize, headDim] | bfloat16 | 分页滑动窗口 KV cache(两种模式均分页) |
 | compress_k_cache | 输入 | [compressBlockNum, compressBlockSize, headDim] | bfloat16 | 分页压缩 KV cache;sparse 模式下分页,`compress_ratio == 0` 时不使用(可为空);dense 模式下为已 gather 的连续 cache `[batch, indexTopK, headDim]` |
-| swa_block_tables | 输入 | [batch, swaMaxNumBlocks](或展平 1-D) | int32 | SWA cache 的 block table |
-| compress_block_tables | 输入 | [batch, compressMaxNumBlocks](或展平 1-D) | int32 | 压缩 cache 的 block table;dense 模式不使用(可为空) |
+| swa_block_tables | 输入 | [rows >= batch, swaBlockTableStride](1-D 表视作单行) | int32 | SWA cache 的 block table;持久化缓冲,行跨度为对应表 `stride[0]`(分配跨度),持久化 V2 表的 `shape[1]` 已由 PrepareAttn 收窄到运行期宽度,仅每行 lens 推导的有效前缀被读取 |
+| compress_block_tables | 输入 | [rows >= batch, compressBlockTableStride](1-D 表视作单行) | int32 | 压缩 cache 的 block table;持久化缓冲,行跨度/行宽语义同上;dense 模式不使用(可为空) |
 | swa_block_size | 输入 | 标量 | - | SWA cache block 大小 |
 | compress_block_size | 输入 | 标量 | - | 压缩 cache block 大小 |
 | attn_sink | 输入 | [nHeads] | float32 | 每头注意力 sink 偏置 |
@@ -55,7 +55,7 @@ Python 签名见 `xlite/_C.pyi` 的 `def cxa(...)`,kernel 侧入口见 `csrc/ker
 
 - **scores**:`[aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize]`,dtype 同 q;
   - `swaSegWidth = windowSize == 0 ? 0 : windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B`(`csrc/_C.cpp` 的 `CXA`(关键字 `swaSegWidth`)、`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `swaSegWidth`)):一个 query tile 的因果窗并集宽 `windowSize + XLITE_MAX_M0`,再加 `K_BLOCK_SIZE_2B`(=16,`csrc/kernels/kernel_param.h` 的 `K_BLOCK_SIZE_2B` 宏)吸收 `windowStart` 向下取整产生的前导列;
-  - `kvSize`:压缩段宽度。dense 模式取 `ROUND_UP(indexTopK, 4 * CXA_SVCK0)`(`csrc/_C.cpp` 的 `CXA`(关键字 `ROUND_UP((uint64_t)indexTopK, 4 * CXA_SVCK0)`)):单 batch 连续 cache 仅含 `indexTopK` 个压缩 token,与 batch 数无关;sparse 模式取 `ROUND_UP(compressMaxNumBlocks * compressBlockSize, 4 * CXA_SVCK0)`(`csrc/_C.cpp` 的 `CXA`(关键字 `ROUND_UP(compressMaxNumBlocks * compressBlockSize, 4 * CXA_SVCK0)`)),均按 `4 * CXA_SVCK0` 对齐(见下文 scores 布局)。
+  - `kvSize`:压缩段宽度。dense 模式取 `ROUND_UP(indexTopK, 4 * CXA_SVCK0)`(`csrc/_C.cpp` 的 `CXA`(关键字 `ROUND_UP((uint64_t)indexTopK, 4 * CXA_SVCK0)`)):单 batch 连续 cache 仅含 `indexTopK` 个压缩 token,与 batch 数无关;sparse 模型层取 `ROUND_UP(rt._maxTotalLens / compressRatio, 4 * CXA_SVCK0)`(由 lens 推导);standalone 入口取 `ROUND_UP(DeriveMaxSeqLen / compressRatio, 4 * CXA_SVCK0)`(由 lens 推导,同模型层),均按 `4 * CXA_SVCK0` 对齐(见下文 scores 布局)。
 
 ## 支持的数据类型
 
@@ -91,7 +91,7 @@ scores workspace 整体被切成两块 ping-pong 缓冲(`PINGPONG_BUF_NUM = 2`):
 3. 当前 tile 的 QK 与上一 tile 的 `RunAicSV` 流水重叠:若 `needDoSV`,先 `wait_flag_dev(1)` 等 AIV 完成上一 tile 的 softmax,再执行 `RunAicSV(scores[last], ...)`,用上一 tile 的分数做 softmax×V,把输出原位写到 `output[lastMhOffset]`(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `RunAicSV(scores[last]`))。`last*` 系列变量缓存上一 tile 的全部上下文(batch、GM 偏移、block table 指针、`batchCompressKCache`、calcLen 等)。
 4. 循环结束后补做最后一个 tile 的 SV(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `do last softmax * V`))。
 
-dense 模式下每 batch 取 compress cache 子视图 `compressKCache[batchIdx * maxSeqLen * headDim]`(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `batchCompressKCache = compressKCache[batchIdx * maxSeqLen`)),`compressBt = nullptr`、`compressMaxNumBlocks = 0`;sparse 模式取该 batch 的 block table 指针(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `compressBt =` ... `compressBlockTables`))。
+dense 模式下每 batch 取 compress cache 子视图 `compressKCache[batchIdx * maxSeqLen * headDim]`(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `batchCompressKCache = compressKCache[batchIdx * maxSeqLen`)),`compressBt = nullptr`、`compressBlockTableStride = 0`;sparse 模式按表行跨度取该 batch 的 block table 指针(`csrc/kernels/cxa.h` 的 `CXA::RunAic`(关键字 `compressBt =` ... `compressBlockTables`))。
 
 ### AIV 路径(RunAiv)
 

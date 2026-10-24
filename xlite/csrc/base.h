@@ -246,6 +246,10 @@ public:
     XTensor &View(std::vector<size_t> shape);
     XTensor &View(enum XDtype type);
     XTensor &View(size_t newDim, uint32_t dim = 0);
+    XTensor &SliceView(size_t start, std::optional<size_t> end = std::nullopt,
+                       size_t dim = 0);  // python-style [start, end) view on one dim
+    XTensor &AtLeast2D();                // view a 1-D tensor as a single row [1, numel]
+    XTensor &ResetOriginal();  // undo all views: restore shape/stride/numel/dtype/bytes/ptr
     XTensor &ResetView(bool resetShape = true, bool resetDtype = true);
     XTensor &MakeOriginal();  // update origShape, origNumel, origDtype, origBytes, etc. to current
     void Save(const std::string &path);
@@ -274,7 +278,7 @@ public:
     };
     [[nodiscard]] bool IsContiguous() const
     {
-        return isContiguous;
+        return contiguity;
     };
     std::vector<size_t> shape;   // DO NOT MODIFY shape directly, use View() to change shape
     std::vector<size_t> stride;  // DO NOT MODIFY stride directly, in elements; matches the
@@ -288,14 +292,16 @@ private:
     XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type,
                   std::optional<std::vector<size_t>> stride = std::nullopt);
     void PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &os = std::cout);
-    // True iff stride matches ContiguousStride(shape); if false only dim 0 deviates (row pitch)
-    // and layout-restricted operations are rejected.
-    bool isContiguous = true;
+    // True iff the memory layout is dense row-major: every dim > 1 must match
+    // ContiguousStride; a single-row dim-0 pitch stays contiguous. Views keep it
+    // up to date directly (SliceView reasons per case).
+    bool contiguity = true;
+    bool origContiguity = true;  // restored by ResetOriginal
     // Shared guard for layout-restricted operations (View/ResetView/MakeOriginal/Memset):
     // non-contiguous tensors must be consumed via shape + stride instead of being re-viewed.
     void CheckContiguous(const char *op) const
     {
-        if (!isContiguous) {
+        if (!contiguity) {
             throw std::runtime_error(std::string(op) +
                                      ": Operation not supported for non-contiguous tensors.");
         }
@@ -303,7 +309,7 @@ private:
     // Elements spanned in memory between the first and the last element (for debug printing)
     [[nodiscard]] size_t SpanNumel() const
     {
-        if (numel == 0 || isContiguous) {
+        if (numel == 0 || contiguity) {
             return numel;
         }
         return (shape[0] - 1) * stride[0] + numel / shape[0];
@@ -314,6 +320,7 @@ private:
     size_t origNumel = 0;            // original numel, unaffected by view operation
     enum XDtype origDtype;           // original dtype, unaffected by view operation
     size_t origBytes;                // original bytes, unaffected by view operation
+    void *origPtr = nullptr;         // original base ptr, restored by ResetOriginal
     friend class XTensorPool;
     friend class XDummyTensorPool;
 };

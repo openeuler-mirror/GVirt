@@ -27,7 +27,7 @@ public:
                                 GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t kCacheStride,
                                 uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,
                                 uint32_t headSize, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlocks, GM_ADDR zeroGm)
+                                uint32_t blockTableStride, uint32_t maxSeqLen, GM_ADDR zeroGm)
     {
         this->input.SetGlobalBuffer((__gm__ Dtype *)input);
         this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
@@ -47,8 +47,8 @@ public:
         this->headSize = headSize;
         this->blockSize = blockSize;
         this->batch = batch;
-        this->maxNumBlocks = maxNumBlocks;
-        this->maxSeqLen = maxNumBlocks * blockSize;
+        this->blockTableStride = blockTableStride;
+        this->maxSeqLen = maxSeqLen;
         this->groupMemSize = headNumInGroup * headSize;
 
         this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * XLITE_MAX_M0 * maxSeqLen);
@@ -82,7 +82,7 @@ public:
             int queryLen = queryLens[batchIdx];
             __gm__ uint32_t *blockTable =
                 (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
+                                    batchIdx * blockTableStride * sizeof(uint32_t));
 
             if (cachedLen < 0) {
                 cachedLen = cachedLens[batchIdx];
@@ -186,7 +186,7 @@ public:
             int queryLen = queryLens[batchIdx];
             __gm__ uint32_t *blockTable =
                 (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
+                                    batchIdx * blockTableStride * sizeof(uint32_t));
 
             if (cachedLen < 0) {
                 cachedLen = cachedLens[batchIdx];
@@ -286,7 +286,7 @@ private:
     uint32_t headSize;
     uint32_t blockSize;
     uint32_t batch;
-    uint32_t maxNumBlocks;
+    uint32_t blockTableStride;
     uint32_t maxSeqLen;
     uint32_t groupMemSize;
 
@@ -298,12 +298,12 @@ private:
         GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR output,              \
         GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,      \
         uint32_t kCacheStride, uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,       \
-        uint32_t headSize, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,           \
-        GM_ADDR zeroGm)                                                                         \
+        uint32_t headSize, uint32_t blockSize, uint32_t batch, uint32_t blockTableStride,       \
+        uint32_t maxSeqLen, GM_ADDR zeroGm)                                                     \
     {                                                                                           \
         Attention<dtype> op;                                                                    \
         op.Init(input, kCache, vCache, qk, output, queryStartLoc, queryLens, cachedLens,        \
                 blockTables, kCacheStride, vCacheStride, nHeads, nKVHeads, headSize, blockSize, \
-                batch, maxNumBlocks, zeroGm);                                                   \
+                batch, blockTableStride, maxSeqLen, zeroGm);                                    \
         op.Run();                                                                               \
     }

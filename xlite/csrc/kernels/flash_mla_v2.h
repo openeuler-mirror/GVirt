@@ -25,7 +25,7 @@ public:
                                 GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens,
                                 GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads,
                                 uint32_t ropeHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
-                                uint32_t batch, uint32_t maxNumBlocks, float scale,
+                                uint32_t batch, uint32_t blockTableStride, float scale,
                                 uint32_t tileSizeOfCachedKV, uint32_t topK,
                                 uint32_t kCacheStride = 0, uint32_t peCacheStride = 0,
                                 GM_ADDR zeroGm = 0)
@@ -48,7 +48,7 @@ public:
         this->ropeHeadDim = ropeHeadDim;
         this->kvLoraRank = kvLoraRank;
         this->batch = batch;
-        this->maxNumBlocks = maxNumBlocks;
+        this->blockTableStride = blockTableStride;
         this->kCacheStride = MAX(kCacheStride, blockSize * kvLoraRank);
         this->peCacheStride = MAX(peCacheStride, blockSize * ropeHeadDim);
         this->scale = scale;
@@ -111,7 +111,7 @@ public:
             int cachedLen = cachedLens[batchIdx];
             __gm__ uint32_t *blockTable =
                 (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
+                                    batchIdx * blockTableStride * sizeof(uint32_t));
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int kvNum = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
@@ -436,7 +436,7 @@ private:
     uint32_t ropeHeadDim;
     uint32_t kvLoraRank;
     uint32_t batch;
-    uint32_t maxNumBlocks;
+    uint32_t blockTableStride;
     float scale;
     uint32_t topK;
     uint32_t kCacheStride;
@@ -452,14 +452,14 @@ private:
         GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum,    \
         GM_ADDR sync, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens,               \
         GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,        \
-        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,        \
+        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t blockTableStride,    \
         float scale, uint32_t tileSizeOfCachedKV, uint32_t topK, uint32_t kCacheStride,        \
         uint32_t peCacheStride, GM_ADDR zeroGm)                                                \
     {                                                                                          \
         FLASHMLAV2<dtype> op;                                                                  \
         op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum, lastMax, lastSum, \
                 sync, oAbsorb, queryStartLoc, queryLens, cachedLens, blockTables, nHeads,      \
-                ropeHeadDim, kvLoraRank, blockSize, batch, maxNumBlocks, scale,                \
+                ropeHeadDim, kvLoraRank, blockSize, batch, blockTableStride, scale,            \
                 tileSizeOfCachedKV, topK, kCacheStride, peCacheStride, zeroGm);                \
         op.Run();                                                                              \
     }

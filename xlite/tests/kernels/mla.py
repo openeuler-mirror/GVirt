@@ -163,7 +163,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
             block_indices = np.arange(max_num_blocks, dtype=np.uint32)
             block_tables_array = batch_indices * max_num_blocks + block_indices
-            block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32).flatten()
+            block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32)
 
             # mla_v2 inputs: pre-absorbed q_absorb + split qr (built after standard loop)
             q_absorb_xlite = torch.empty(total_query_len, n_heads, kv_lora_rank)

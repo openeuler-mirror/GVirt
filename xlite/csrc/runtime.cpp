@@ -750,7 +750,6 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     std::vector<uint32_t> lens(batch);
     std::vector<uint32_t> cachedLens(batch);
     std::vector<uint32_t> queryStartLoc(batch);
-    std::vector<uint32_t> numBlocks(batch);
     std::vector<uint32_t> totalLens(batch);
     std::vector<uint32_t> slotMapping, blockTables;
     std::vector<uint64_t> position;
@@ -784,7 +783,6 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
         _maxTotalLens = totalLens[i] > _maxTotalLens ? totalLens[i] : _maxTotalLens;
         _maxQueryLen = lens[i] > _maxQueryLen ? lens[i] : _maxQueryLen;
         batchedTokens += lens[i];
-        numBlocks[i] = DIV_ROUND_UP(totalLens[i], blockSizes[0]);
         if (cachedLens[i] == 0) {
             allCached = false;
         }
@@ -844,12 +842,12 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                                          std::to_string(attnMeta.blockTablesCpu.size()) + ")");
             }
             for (uint32_t i = 0; i < batch; i++) {
-                if (attnMeta.blockTablesCpu[i].size() < numBlocks[i]) {
-                    throw std::runtime_error(std::string(__FILE__) + ":" +
-                                             std::to_string(__LINE__) +
-                                             ": block table too small (" +
-                                             std::to_string(attnMeta.blockTablesCpu[i].size()) +
-                                             " < " + std::to_string(numBlocks[i]) + ")");
+                if (attnMeta.blockTablesCpu[i].size() < DIV_ROUND_UP(totalLens[i], blockSizes[0])) {
+                    throw std::runtime_error(
+                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                        ": block table too small (" +
+                        std::to_string(attnMeta.blockTablesCpu[i].size()) + " < " +
+                        std::to_string(DIV_ROUND_UP(totalLens[i], blockSizes[0])) + ")");
                 }
                 for (uint32_t j = 0; j < lens[i]; j++) {
                     position[k] = cachedLens[i] + j;
@@ -865,7 +863,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
 
             blockTables.resize(batch * maxNumBlocks);
             for (uint32_t i = 0; i < batch; i++) {
-                for (uint32_t j = 0; j < numBlocks[i]; j++) {
+                for (uint32_t j = 0; j < DIV_ROUND_UP(totalLens[i], blockSizes[0]); j++) {
                     blockTables[i * maxNumBlocks + j] = attnMeta.blockTablesCpu[i][j];
                 }
             }
@@ -896,6 +894,10 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             _attnQueryStartLoc = attnMeta.queryStartLoc;
             _attnSlotMapping = attnMeta.slotMapping;
             _attnBlockTables = attnMeta.blockTables;
+            const size_t nKvTables = IsHybridAttn(attnMeta.attnType) ? 1 : _attnBlockTables.size();
+            for (size_t i = 0; i < nKvTables; i++) {
+                _attnBlockTables[i].SliceView(0, DIV_ROUND_UP(_maxTotalLens, blockSizes[i]), 1);
+            }
             _attnPosition = attnMeta.position;
             PrepareHybridMetadata(layerTypes, attnMeta);
             break;

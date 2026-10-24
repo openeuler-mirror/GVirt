@@ -306,8 +306,7 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
             batch_indices_swa = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
             abs_indices_swa = np.arange(swa_abs_blocks, dtype=np.uint32).reshape(1, -1)
             swa_block_tables_array = (batch_indices_swa * swa_max_num_blocks + abs_indices_swa)
-            swa_block_tables = torch.tensor(swa_block_tables_array.tolist(),
-                                            dtype=torch.int32).flatten()
+            swa_block_tables = torch.tensor(swa_block_tables_array.tolist(), dtype=torch.int32)
 
             if kv_size > 0:
                 batch_indices_comp = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
@@ -315,9 +314,9 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 compress_block_tables_array = (batch_indices_comp * compress_max_num_blocks
                                                + block_indices_comp)
                 compress_block_tables = torch.tensor(compress_block_tables_array.tolist(),
-                                                     dtype=torch.int32).flatten()
+                                                     dtype=torch.int32)
             else:
-                compress_block_tables = torch.zeros(batch, dtype=torch.int32)
+                compress_block_tables = torch.zeros(1, batch, dtype=torch.int32)
 
             for i in range(batch):
                 tl = total_lens[i]

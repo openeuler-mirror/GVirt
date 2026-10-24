@@ -31,9 +31,22 @@ struct CModelAttnMetaV2 {
     at::Tensor queryStartLoc;  // [batch+1] int32 device, 0-prefixed prefix-sum of lens
     std::vector<at::Tensor> slotMapping;  // hybrid: one main-KV table;
                                           // per-cache: one per blockSizes entry
-    std::vector<at::Tensor> blockTables;  // hybrid: [0]=main, [1..]=mamba [+ tail];
-                                          // per-cache: one per blockSizes entry
+    // [rows >= batch, ceil(maxSeqLen/blockSize)] int32 device, per kv cache; entries
+    // beyond this step's lens are stale. Hybrid family slots: [0]=main KV,
+    // [1..]=mamba state page ids ([batch, 1]) [+ KDA tail ring].
+    std::vector<at::Tensor> blockTables;
+    // TODO: device int32 [num_seqs]; seq i reads block-table row [i] instead of row i
+    std::optional<at::Tensor> blockTablesSeqMapping;
 };
+
+// Reserved (see blockTablesSeqMapping): not consumed yet, reject at the bridge
+static void CheckBlockTablesSeqMapping(const CModelAttnMetaV2 &attnMeta)
+{
+    if (attnMeta.blockTablesSeqMapping.has_value()) {
+        throw std::runtime_error(
+            "AttnMetaV2.block_tables_seq_mapping is not supported yet, expect None");
+    }
+}
 
 class _CModel
 {
@@ -899,6 +912,7 @@ void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnM
                         std::vector<std::vector<at::Tensor>> &kvCache,
                         std::vector<at::Tensor> &freqsCis, at::Tensor &output, uint64_t currStream)
 {
+    CheckBlockTablesSeqMapping(attnMeta);
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 2;
     _attnMeta.attnType = attnType;
@@ -924,6 +938,7 @@ void _CModel::ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnM
                                     std::vector<at::Tensor> &freqsCis, at::Tensor &indices,
                                     at::Tensor &output, uint64_t currStream)
 {
+    CheckBlockTablesSeqMapping(attnMeta);
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 2;
     _attnMeta.attnType = attnType;
@@ -951,6 +966,7 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
                                         std::vector<at::Tensor> &deepstackInput,
                                         const std::optional<at::Tensor> &inputIds)
 {
+    CheckBlockTablesSeqMapping(attnMeta);
     XModelAttnMeta _attnMeta;
     _attnMeta.version = 2;
     _attnMeta.attnType = attnType;
@@ -1695,6 +1711,34 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
     rt.Synchronize();
 }
 
+// max(lens + cachedLens) over the batch (sync D2H; standalone/test path)
+static uint32_t DeriveMaxSeqLen(const XTensor &lens, const XTensor &cachedLens)
+{
+    uint32_t batch = static_cast<uint32_t>(lens.shape[0]);
+    std::vector<int32_t> l(batch), c(batch);
+    size_t bytes = batch * sizeof(int32_t);
+    CHECK_ACL(aclrtMemcpy(l.data(), bytes, lens.ptr, bytes, ACL_MEMCPY_DEVICE_TO_HOST));
+    CHECK_ACL(aclrtMemcpy(c.data(), bytes, cachedLens.ptr, bytes, ACL_MEMCPY_DEVICE_TO_HOST));
+    uint32_t maxSeqLen = 0;
+    for (uint32_t i = 0; i < batch; i++) {
+        maxSeqLen = std::max(maxSeqLen, static_cast<uint32_t>(l[i] + c[i]));
+    }
+    return maxSeqLen;
+}
+
+// Narrow a persistent block table to the lens-derived block count; returns it
+static uint32_t SliceBlockTableToLens(XTensor &blockTables, const XTensor &lens,
+                                      const XTensor &cachedLens, uint32_t blockSize,
+                                      uint32_t compressRatio = 1)
+{
+    blockTables.AtLeast2D();
+    uint32_t blocks = DIV_ROUND_UP(DeriveMaxSeqLen(lens, cachedLens) / compressRatio, blockSize);
+    if (blocks > 0) {  // 0 = no complete compressed block: nothing valid to narrow
+        blockTables.SliceView(0, blocks, 1);
+    }
+    return blocks;
+}
+
 void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vCache,
                at::Tensor &output, at::Tensor &queryStartLoc, at::Tensor &lens,
                at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t nKvHeads,
@@ -1710,8 +1754,8 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
     InitXTensor(_lens, lens, DBG_LOC);
     InitXTensor(_cachedLens, cachedLens, DBG_LOC);
-    InitXTensor(_blockTables, blockTables, DBG_LOC);
-    uint32_t maxNumBlock = DeriveMaxNumBlocks(_blockTables, batch);
+    InitXTensor(_blockTables, blockTables, DBG_LOC, /*allowPitched=*/true);
+    uint32_t maxNumBlock = SliceBlockTableToLens(_blockTables, _lens, _cachedLens, blockSize);
 
     if (!enableFlashAttention) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, maxNumBlock * blockSize},
@@ -1764,9 +1808,10 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
     InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
     InitXTensor(_lens, lens, DBG_LOC);
     InitXTensor(_cachedLens, cachedLens, DBG_LOC);
-    InitXTensor(_blockTables, blockTables, DBG_LOC);
+    InitXTensor(_blockTables, blockTables, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_topkIndices, topkIndices, DBG_LOC);
-    uint32_t maxNumBlocks = dense ? 0 : DeriveMaxNumBlocks(_blockTables, batch);
+    uint32_t maxNumBlocks =
+        dense ? 0 : SliceBlockTableToLens(_blockTables, _lens, _cachedLens, blockSize);
 
     XTensor &qAbsorb =
         rt.GetTensor({_qWithQr.shape[0], nHeads * kvLoraRank}, XDtypeOf(qWithQr), DBG_LOC);
@@ -1846,7 +1891,7 @@ void GatherSparseKVCache(XRuntime &rt, at::Tensor &kCache, at::Tensor &peCache,
         _kDenseCache, _peDenseCache;
     InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_peCache, peCache, DBG_LOC, /*allowPitched=*/true);
-    InitXTensor(_blockTables, blockTables, DBG_LOC);
+    InitXTensor(_blockTables, blockTables, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_topkIndices, topkIndices, DBG_LOC);
     InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
     InitXTensor(_lens, lens, DBG_LOC);
@@ -1873,8 +1918,8 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
     InitXTensor(_q, q, DBG_LOC);
     InitXTensor(_swaKCache, swaKCache, DBG_LOC);
     InitXTensor(_compressKCache, compressKCache, DBG_LOC);
-    InitXTensor(_swaBlockTables, swaBlockTables, DBG_LOC);
-    InitXTensor(_compressBlockTables, compressBlockTables, DBG_LOC);
+    InitXTensor(_swaBlockTables, swaBlockTables, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_compressBlockTables, compressBlockTables, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnSink, attnSink, DBG_LOC);
     InitXTensor(_output, output, DBG_LOC);
     InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
@@ -1926,10 +1971,9 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
         rt.PutTensor(sv);
         rt.PutTensor(qk);
     } else {
-        uint32_t compressMaxNumBlocks = DeriveMaxNumBlocks(_compressBlockTables, batch);
-        kvSize = compressRatio == 0 || compressMaxNumBlocks == 0
+        kvSize = compressRatio == 0
                      ? 0
-                     : ROUND_UP(compressMaxNumBlocks * compressBlockSize, 4 * CXA_SVCK0);
+                     : ROUND_UP(DeriveMaxSeqLen(_lens, _cachedLens) / compressRatio, 4 * CXA_SVCK0);
         XTensor &scores = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize},
                                        XDtypeOf(q), DBG_LOC);
         XliteOpCXA(rt, _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables,
@@ -2451,7 +2495,8 @@ void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &
     InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
     InitXTensor(_lens, lens, DBG_LOC);
     InitXTensor(_cachedLens, cachedLens, DBG_LOC);
-    InitXTensor(_blockTables, blockTables, DBG_LOC);
+    InitXTensor(_blockTables, blockTables, DBG_LOC, /*allowPitched=*/true);
+    SliceBlockTableToLens(_blockTables, _lens, _cachedLens, blockSize);
     XliteOpIndexerScores(rt, _q, _kCache, _weight, _scores, _queryStartLoc, _lens, _cachedLens,
                          _blockTables, nHeads, headDim, blockSize, batch);
     rt.Synchronize();
@@ -2475,12 +2520,14 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     InitXTensor(_queryStartLoc, queryStartLoc, DBG_LOC);
     InitXTensor(_lens, lens, DBG_LOC);
     InitXTensor(_cachedLens, cachedLens, DBG_LOC);
-    InitXTensor(_blockTables, blockTables, DBG_LOC);
+    InitXTensor(_blockTables, blockTables, DBG_LOC, /*allowPitched=*/true);
 
+    uint32_t maxNumBlock =
+        SliceBlockTableToLens(_blockTables, _lens, _cachedLens, blockSize, compressRatio);
     // generate the identity index table (0..max(maxSeqLen,topK)-1)
     XTensor seqPositions;
     std::vector<uint32_t> host;
-    size_t maxSeqLen = static_cast<size_t>(blockSize) * DeriveMaxNumBlocks(_blockTables, batch);
+    size_t maxSeqLen = static_cast<size_t>(blockSize) * maxNumBlock;
     maxSeqLen = INIT_MIN_SEQ_POS > maxSeqLen ? INIT_MIN_SEQ_POS : maxSeqLen;
     size_t len = maxSeqLen > topK ? maxSeqLen : topK;
     size_t size = len * sizeof(uint32_t);
@@ -3053,7 +3100,8 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("cached_lens_cpu", &CModelAttnMetaV2::cachedLensCpu)
         .def_readwrite("query_start_loc", &CModelAttnMetaV2::queryStartLoc)
         .def_readwrite("slot_mapping", &CModelAttnMetaV2::slotMapping)
-        .def_readwrite("block_tables", &CModelAttnMetaV2::blockTables);
+        .def_readwrite("block_tables", &CModelAttnMetaV2::blockTables)
+        .def_readwrite("block_tables_seq_mapping", &CModelAttnMetaV2::blockTablesSeqMapping);
 
     py::enum_<XModelAttnType>(m, "AttnType")
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
