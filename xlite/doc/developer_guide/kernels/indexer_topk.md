@@ -48,7 +48,7 @@ C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` �
 | weight | 输入 | `[total_query_len, headDim + nHeads]` | fp16 / bf16 | 头融合权重,位于每行第 headDim 列起;C8 为独立的 fp16 `[total_query_len,32]`,已乘 Q scale |
 | queryStartLoc | 输入 | `[batch]` | int32 | 各 batch query 起始偏移 |
 | queryLens / cachedLens | 输入 | `[batch]` | int32 | 各 batch query / 已缓存长度;token 绝对位置 `pos = cachedLens[i] + 段内偏移`,经 `MapPosToKv` 映射为 KV 空间因果边界 `p0` |
-| blockTables | 输入 | `[batch, maxNumBlock]` | int32 | 逻辑块 → 物理块映射 |
+| blockTables | 输入 | `[batch, maxNumBlock]`(2-D)或 `[batch * maxNumBlock]`(1-D 扁平) | int32 | 逻辑块 → 物理块映射;`maxNumBlock` 由 host 侧 `DeriveMaxNumBlocks` 推导(2-D 取 `shape[1]`,1-D 取 `len // batch`,`csrc/op.h` 的 `DeriveMaxNumBlocks`) |
 | scores | workspace | `[2 * block_num * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN]` 视作 `[block_num][2][XLITE_MAX_M0 * 4096]` | fp16 / bf16 / fp32 | C8 使用 fp32;AIC→AIV 的得分中转缓冲,乒乓两份,每 block 一段(见下文布局) |
 | lastTopk | workspace | `[total_query_len, 2*topK]`(uint32 对) | uint32 | 跨核 topk 接力缓冲:处理非首 KV tile 的核把当前全局 topK 候选(值+索引对)写给下一个核 |
 | seqPositions | 输入 | `[max(max(blockSize*maxNumBlock, INIT_MIN_SEQ_POS), topK)]` | int32(uint32 语义) | `arange(...)` 恒等索引表,由 host 侧(`csrc/_C.cpp` `IndexerTopK` / `csrc/model.cpp` `XModel::Init`)预先生成;长度必须覆盖 kernel 侧推导的 `maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)`(host 侧 `XliteOpIndexerTopK` 不校验长度,由 `XModel::Init` 预生成保证覆盖)。`XModel::Init` 按 `MAX(INIT_MIN_SEQ_POS, ROUND_UP(max_seq_len, blockSize))` 一次性预生成。AIV 每个 subblock 搬入属于自己的一段,之后按 `kvOffset` 增量推进;同时它也是稠密行模板的来源——首个 `topK` 项即 `0...topK-1`(模板 writer 核整体搬入 UB `defaultTopkIndices`,见下文) |
@@ -69,7 +69,7 @@ C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` �
 
 dtype 分派见 `csrc/op.cpp` 的 `XliteOpIndexerTopK`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 浮点 dtype 分派段 `EachXDtype(FP16, q, kCache, weight, scores)` / `EachXDtype(BF16, ...)`;C8 路径段关键字 `if (kCache.dtype == INT8)`)。浮点路径要求 q/kCache/weight/scores 同 dtype。
 
-C8 使用 32 个 head、headDim=128,内核入口额外接收 `k_scale_cache`。QK 用 int32 累加,经 `FP16(relu(dot)/1024)` 后与 weight 相乘,得到 fp32 scores;AIV 乘 K scale 后使用相同的因果遮罩和 Top-K。
+C8 使用 32 个 head、headDim=128,并要求 `block_size ∈ {16,32,64,128}`(须整除 `MAX_INDEXER_KV_TILE_LEN=4096`)、`topK` 为 32 的倍数且 ∈ [32, `MAX_TOPK_NUM`=2048](`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 C8 校验段 `if (kCache.dtype == INT8)` 内 `blockSize < 16 || blockSize > 128 || blockSize % 16 != 0 || MAX_INDEXER_KV_TILE_LEN % blockSize != 0 || topK < 32 || topK % 32 != 0`);内核入口额外接收 `k_scale_cache`。QK 用 int32 累加,经 `FP16(relu(dot)/1024)` 后与 weight 相乘,得到 fp32 scores;AIV 乘 K scale 后使用相同的因果遮罩和 Top-K。
 
 ## 实现原理
 
@@ -79,7 +79,7 @@ C8 使用 32 个 head、headDim=128,内核入口额外接收 `k_scale_cache`。Q
 
 `Run`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`)按 batch 枚举任务:
 
-- `queryTileSize = XLITE_MAX_M0 / nHeads`(nHeads=64 时为 2;若 nHeads > XLITE_MAX_M0 则退化为整块,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `int queryTileSize = XLITE_MAX_M0 / nHeads` / fallback `queryTileSize = XLITE_MAX_M0`);
+- `queryTileSize = XLITE_MAX_M0 / nHeads`(nHeads=64 时为 2;若 nHeads > XLITE_MAX_M0 则退化为单 token per tile,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `int queryTileSize = XLITE_MAX_M0 / nHeads` / fallback `queryTileSize = 1`);
 - KV 块数以**因果边界**计:`nKv = MapPosToKv(cachedLen + queryLen - 1) + 1`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `int nKv = MapPosToKv(cachedLen + queryLen - 1) + 1`),`kvNumMax = DIV_ROUND_UP(nKv, tileSizeOfCachedKV)`,其中 `tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN=4096, SORT_BLOCK_SIZE=32)`(`csrc/kernels/indexer_topk.h` 的 `INDEXER_KV_TILE_LEN` 宏 与 `IndexerTopK::Init` 中 `tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN, SORT_BLOCK_SIZE)`,带编译期检查 `INDEXER_KV_TILE_LEN ≤ MAX_INDEXER_KV_TILE_LEN`,`csrc/kernels/indexer_topk.h` 的 `INDEXER_KV_TILE_LEN` 编译期断言,关键字 `#if INDEXER_KV_TILE_LEN > MAX_INDEXER_KV_TILE_LEN` / `#error`)。即 KV 维按 4096 切大 tile;`compressRatio>1` 时 kCache 每行对应一个压缩块,`MapPosToKv` 把 token 末位映射到压缩块空间;
 - 任务总数上界 `taskNum = queryNum * kvNumMax`,但**跳过的 chunk 不消耗全局任务号**:`totalIdx` 只在任务有效时递增,再按 `totalIdx % block_num == block_idx` 静态分配(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `totalIdx++; if (totalIdx % block_num != block_idx) continue;`),稠密/未来 chunk 不会在核间留下"空任务"空洞。
 

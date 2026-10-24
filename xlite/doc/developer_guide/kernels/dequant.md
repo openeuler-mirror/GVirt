@@ -33,11 +33,11 @@ Python 调用方式（`tests/kernels/dequant.py` 测试主循环）：`dequant(r
 
 ### 任务切分与数据流
 
-- `TaskTilesInit`（`csrc/kernels/dequant.h` 的 `Dequant::TaskTilesInit`）：记录 in/scale/out 的 GM 指针；若有 pnum_tokens 用其修正实际行数 m；返回 m 作为 tile 总数；
-- 主循环 `for (idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum())`：以"行"为 tile，跨 block 并行（`csrc/kernels/dequant.h` 的 `Dequant::Run`，关键字 `GetBlockIdx()`）；
-- `RunTileByIdx` 把第 idx 行交给 `RunTile(in + idx*n, scale + idx, out + idx*n, 1, n)`（`csrc/kernels/dequant.h` 的 `Dequant::RunTileByIdx`）。
+- `TaskTilesInit`（`csrc/kernels/dequant.h` 的 `Dequant::TaskTilesInit`）：记录 in/scale/out 的 GM 指针；若有 pnum_tokens 用其修正实际行数 m；返回 `mTiles * nTiles` 作为 tile 总数（`mTiles = DIV_ROUND_UP(m, m0)`，`m0` 由 `Dequant::PickM0(m, n)` 选取；standalone 路径 `n0=0` 故 `nTiles=1`）；
+- 主循环 `for (idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum())`：以 `m0` 行 × `n0` 列块为 tile（standalone 路径 `n0=0` 即整行宽），跨 block 并行（`csrc/kernels/dequant.h` 的 `Dequant::Run`，关键字 `GetBlockIdx()`）；
+- `RunTileByIdx` 把第 idx 个 `(mIdx, nIdx)` 块交给 `RunTile(in + rowOffset*n + colOffset, scale + rowOffset, out + rowOffset*n + colOffset, actualRows, localCols)`，其中 `actualRows = MIN(m-rowOffset, m0)`、`localCols = MIN(n-colOffset, n0)`（`csrc/kernels/dequant.h` 的 `Dequant::RunTileByIdx`）。
 
-每行内部再按列分块：`nTile = 12288`，`nLoop = DIV_ROUND_UP(n, 12288)`，逐块处理（`csrc/kernels/dequant.h` 的 `DEQUANT_N_TILE` 与 `Dequant::RunTile`）。单个行内分块的数据流：
+每个 tile 内部按列分块：`nTile = 12288`（`DEQUANT_N_TILE`），列块内做多行批量——一组行共享一次 2D DMA（`rows = MIN(localRows, nTile/colsPad)`、`numGroups = DIV_ROUND_UP(localRows, rows)`，`colsPad = ROUND_UP(colChunk, 256/sizeof(dtype))`；`csrc/kernels/dequant.h` 的 `Dequant::RunTile`，关键字 `Row-batched tile processing`）。单个列块的数据流：
 
 GM(fp16 行块) --MTE2--> UB(inUbBuf) --V: vconv--> UB(tmpUbBuf) --V: vmuls(scale, 原地)--> UB(tmpUbBuf) --V: vconv 舍入--> UB(outUbBuf, bf16) --MTE3--> GM(out 行块)
 

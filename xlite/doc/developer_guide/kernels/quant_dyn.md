@@ -39,7 +39,8 @@ host 仅接受 `x.dtype == BF16`,kernel 入口符号为 `quant_dynamic_bfloat16_
 
 ### 分块策略
 
-- **k 维切块**:`QUANT_DYN_K_TILE = 8192`(`csrc/kernels/quant_dyn.h` 的 `QUANT_DYN_K_TILE` 宏),`k_loop = ceil(k / k_tile)`(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `k_loop = DIV_ROUND_UP`)。整行 absmax 必须先于缩放完成,故每行分两阶段执行,按 `k_loop` 取两条路径(见 `csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8` 头部注释,关键字 `k_loop == 1`):
+- **对齐 k 的批量多行快速路径**（`quant_dyn_to_i8_rows`）：当 `k % 32 == 0`、`k ≤ QUANT_DYN_K_TILE(8192)` 且 rows ≥ 2 时优先走此路径——一组连续 token 共享一次 2D MTE2/MTE3 突发，并以一组一次的 V→S/S→MTE3 同步取代逐行同步（phase1 把每行 absmax 归约进 32B 槽表，S 一次性算出全组 scale，phase2 再从仍驻留的 xf32 块逐行重缩放；`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`，关键字 `quant_dyn_to_i8_rows`）。
+- **k 维切块（fallback）**:`QUANT_DYN_K_TILE = 8192`(`csrc/kernels/quant_dyn.h` 的 `QUANT_DYN_K_TILE` 宏),`k_loop = ceil(k / k_tile)`(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `k_loop = DIV_ROUND_UP`)。整行 absmax 必须先于缩放完成,故每行分两阶段执行,按 `k_loop` 取两条路径(见 `csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8` 头部注释,关键字 `k_loop == 1`):
   - **fast path**(`k_loop == 1`,即 k ≤ K_TILE):整行一次搬入 UB,x 只读一次;phase1(absmax)与 phase2(缩放/转 INT8)串行复用同一 `xf32_buf`,无需第二次 GM 读(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `if (k_loop == 1)`)。
   - **tiled path**(`k_loop > 1`,即 k > K_TILE):phase1 逐 tile 做 `vabs`+`ReduceMax`,再用 `vmax` 跨 tile 合并到 `rowAbsUb`;phase2 重新从 GM 读每个 x tile 做缩放与 INT8 转换(x 不再常驻 UB,见 `csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `*rowAbsUb = float(0)`)。
 - **m 维多 Block 并行**:`for (row = block_idx; row < m; row += block_num)`(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `for (int row = block_idx`),行间轮转。行内两阶段串行,行间用 x/z 双缓冲 ping-pong 流水。

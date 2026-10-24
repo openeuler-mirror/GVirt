@@ -26,8 +26,10 @@ flash_cxa_<dtype>(q, swaKCache, compressKCache, swaBlockTables, compressBlockTab
                   swaBlockSize, compressBlockSize, swaMaxNumBlocks, compressMaxNumBlocks,
                   attnSink, qk, sv, max, sum, lastMax, lastSum, sync, output, batch,
                   queryStartLoc, queryLens, cachedLens, nHeads, headDim, scale, windowSize,
-                  compressRatio, indexTopK, topkIndices, tileSizeOfCachedKV)
+                  compressRatio, indexTopK, topkIndices, tileSizeOfCachedKV, zeroGm)
 ```
+
+末尾的 `zeroGm` 是 host 自动提供的零缓冲(`rt._attnZeroBuffer`,host launch 见 `csrc/op.cpp` 的 `XliteOpFlashCXA`),`CxaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -47,6 +49,7 @@ flash_cxa_<dtype>(q, swaKCache, compressKCache, swaBlockTables, compressBlockTab
 | n_heads / head_dim / scale / window_size / compress_ratio / index_topk | 标量 | - | uint32/float | 同 cxa;flash 要求 `compressRatio != 0` |
 | topk_indices | 输入(可选) | `[totalQ, indexTopK]` | INT32 | DSA top-k 压缩索引;`indexTopK == 0` 时禁用 |
 | tile_size_of_cached_kv | 标量 | - | uint32 | KV-len(压缩 token)tile 宽度;host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN = 11776`(`csrc/op.cpp` 的 `XliteOpFlashCXA`(关键字 `tileSizeOfCachedKV > MAX_SOFTMAX_PINGPONG_LEN`)),默认 `MAX_KV_TILE_SIZE = 8192`(`csrc/auto_tuner.h` 的 `MAX_KV_TILE_SIZE` 宏) |
+| zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`CxaAicHelper::Init` 用它预填零 L1B(见上文) |
 
 workspace 由 `csrc/_C.cpp` 的 `CXA`(关键字 `qkWidth = swaSegWidth + tileSizeOfCachedKV`,workspace 分配)分配:`qk`/`sv` 宽度分别为 `qkWidth = swaSegWidth + tileSizeOfCachedKV` 与 `headDim`,`max`/`sum` 各 `aivNum * XLITE_MAX_M0 * 2`,`lastMax`/`lastSum` 为 `[totalQ, nHeads]`,`sync` 为 `[1, aivNum]` 并 `Memset(0)`。
 

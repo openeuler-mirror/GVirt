@@ -20,8 +20,10 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
                      lastMax, lastSum, sync, oAbsorb, queryStartLoc, queryLens,
                      cachedLens, blockTables, nHeads, ropeHeadDim, kvLoraRank,
                      blockSize, batch, maxNumBlocks, scale, tileSizeOfCachedKV, topK,
-                     kCacheStride, peCacheStride)
+                     kCacheStride, peCacheStride, zeroGm)
 ```
+
+末尾的 `zeroGm` 是 host 自动提供的零缓冲(`rt._attnZeroBuffer`,host launch 见 `csrc/op.cpp` 的 `XliteOpFlashMLAV2`),`MlaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -40,6 +42,7 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
 | tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN=11776`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`) |
 | kCacheStride / peCacheStride | 标量 | - | uint32 | paged kCache / peCache 的 dim-0 跨度(元素数),块寻址 `block * stride`;连续时等于 blockSize×kvLoraRank / blockSize×ropeHeadDim,非连续时由宿主传入真实跨距 |
+| zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`MlaAicHelper::Init` 用它预填零 L1B(见上文) |
 
 ## 支持的数据类型
 
