@@ -42,7 +42,7 @@ indexer_prepare_<dtype>(GM_ADDR kw, GM_ADDR kNorm, GM_ADDR kNormBias, GM_ADDR fr
 | kNormBias | 输入 | `[index_head_dim]` | fp32(或与 kw 同 dtype) | LayerNorm bias |
 | freqs | 输入 | `[max_seq_len, rope_head_dim/2]` complex(即 `[max_seq_len, rope_head_dim]` float 交错 cos/sin) | fp32 | 预计算的 RoPE 频率表,按 token 绝对位置索引 |
 | position | 输入 | `[token_num]` | int64 | 每个 token 的绝对序列位置(= 各 batch 的 `cached_lens[i]` 起始偏移累加) |
-| index_k_cache | 输出 | `[block_num, block_size, index_head_dim]` | fp16 / bf16 | paged indexer K cache;`block_size=0` 时禁用缓存 |
+| index_k_cache | 输出 | `[num_blocks, block_size, 1, index_head_dim]` | fp16 / bf16 | paged indexer K cache(末维前的 `1` 为单 head 维);`block_size=0` 时禁用缓存 |
 | slot_mapping | 输入 | `[token_num]` | int32 | token → cache 平坦槽位映射 |
 | index_k_cache_stride | — | 标量 | uint32 | index_k_cache 的 dim-0 跨度(元素数);连续时等于 block_size×index_head_dim,非连续时由宿主传入真实跨距 |
 | q | 输入/输出 | `[token_num, index_n_heads * index_head_dim]` | fp16 / bf16 | indexer Q;仅 `is_long` 时被原地 RoPE,且只对 position ≥ top_k 的 token(稠密 token 跳过) |

@@ -116,6 +116,9 @@ class ModelConfig:
         softmax_scale (float): Attention softmax scale.
         n_dense_layers (int): Number of dense FFN layers.
         n_routed_experts (int): Number of routed experts.
+        num_redundant_experts (int): EPLB redundant expert slots (total across EP ranks).
+            0 = non-EPLB; total physical slots = n_routed_experts + num_redundant_experts,
+            divided evenly across moe_ep_size ranks.
         n_shared_experts (int): Number of shared experts.
         n_expert_groups (int): Number of expert groups.
         n_limited_groups (int): Number of limited routing groups.
@@ -147,6 +150,12 @@ class ModelConfig:
         qk_norm_full (bool): Whether MHA applies Q/K norm full.
         attn_output_gate (bool): Whether full MHA applies sigmoid output gate (Qwen3.5).
             When true, fused mha_qkv layout is [Q | K | V | Gate].
+        linear_num_k_heads (int): Number of key heads for linear attention layers.
+        linear_num_v_heads (int): Number of value heads for linear attention layers.
+        linear_key_head_dim (int): Key head dim for linear attention layers.
+        linear_value_head_dim (int): Value head dim for linear attention layers.
+        linear_conv_kernel_dim (int): Causal conv1d kernel size for linear attention layers.
+        full_attention_interval (int): Interval between full-attention layers in hybrid models.
         scoring_func (ScoringFuncType): MoE scoring function.
         norm_topk_prob (bool): Whether top-k probabilities are normalized.
         mrope_section (List[int]): mRoPE section layout values.
@@ -157,6 +166,10 @@ class ModelConfig:
         index_topk (int): Indexer top-k size.
         index_softmax_scale (float): Indexer softmax scale.(deprecated)
         index_rope_interleaved (bool): Whether indexer RoPE is interleaved.
+        index_full_mask (List[bool]): Per-layer indexer mask. ``True``: full indexer layer;
+            ``False``: shared indexer layer. Empty enables all full indexer layers;
+            otherwise length must match ``n_layers``.
+        index_c8_mask (List[bool]): Per-runtime-layer Indexer C8 mask; empty disables C8.
         o_groups (int): Output projection group count (DeepSeek-V4).
         o_lora_rank (int): Output projection LoRA rank (DeepSeek-V4).
         window_size (int): Sliding window attention size (DeepSeek-V4).
@@ -171,6 +184,10 @@ class ModelConfig:
         swiglu_limit (float): SwiGLU clamp limit; 0 disables (DeepSeek-V4).
         n_hash_layers (int): Number of hash-routed MoE layers (DeepSeek-V4).
         compress_ratios (List[int]): Per-layer KV compression ratios (DeepSeek-V4).
+        aux_layer_ids (List[int]): EAGLE3 aux capture layer ids (0-indexed global); empty
+            disables aux capture. ``k`` captures the raw (un-normalized) residual entering
+            layer ``k``; ``k == n_layers`` captures the final residual. See
+            :attr:`aux_layer_ids` and :meth:`Model.forward`.
     """
 
     vocab_size: int = ...
@@ -905,6 +922,18 @@ class Model:
     re_down_deq_scale: List[torch.Tensor] = ...
     """Routed-expert down weight dequant scales, one per local expert, each shape
     ``[2*hidden_size, 1]``, fp32."""
+    re_up_gate_scale_bias: List[torch.Tensor] = ...
+    """MSD W4A8 routed-expert up-gate per-channel scale_bias, one per local expert,
+    same flat layer-major ordering as :attr:`re_up_gate`. Each
+    ``[2*(moe_intermediate_size/moe_tp_size), 1]`` fp32
+    (``= 8 × Σ_k W_int4[k] × deq_scale[k]``). Bound only when the up-gate weight is
+    INT4-packed (W4A8); auto-detected from weight dtype + non-null scale_bias. Empty
+    for non-W4A8 layers; presence drives the MSD merge_dequant path."""
+    re_down_scale_bias: List[torch.Tensor] = ...
+    """MSD W4A8 routed-expert down per-channel scale_bias, one per local expert,
+    same flat ordering as :attr:`re_down`. Each ``[hidden_size, 1]`` fp32. Bound only
+    when the down weight is INT4-packed (W4A8); auto-detected from weight dtype +
+    non-null scale_bias. Empty for non-W4A8 layers."""
     log2phy: List[torch.Tensor] = ...
     """EPLB per-MoE-layer logical→physical expert map, shape ``[n_routed_experts]``, int32. One
     entry per MoE layer (MoE-layer-major, aligned with :attr:`moe_gate`). ``log2phy[L]`` is the
@@ -2759,10 +2788,12 @@ def msd_merge_dequant(
         y_merged (torch.Tensor): Row-merged int8 mid-stage result, shape
             ``[2*m, n]`` (float16). Row ``2*r`` is the low nibble and row
             ``2*r + 1`` the high nibble of token ``r``.
+        scale_biases (Sequence[torch.Tensor]): Per-expert per-column bias added
+            after merge, one ``[n]`` fp32 tensor per expert (length must equal
+            ``counts.size(0)``). Each entry is the per-channel scale_bias
+            (``= 8 × Σ_k W_int4[k] × deq_scale[k]``) consumed by the merge step.
         counts (torch.Tensor): Per-expert merged row counts, shape
             ``[num_experts]``, int32 (read as uint32 by the kernel).
-        scale_bias (torch.Tensor): Per-column bias added after merge, shape
-            ``[n]`` (float32).
         per_token_scale (torch.Tensor): Per-token dequantization scale, shape
             ``[m]`` (float32).
         out (torch.Tensor): Output tensor, shape ``[m, n]`` (bfloat16).
@@ -2784,10 +2815,10 @@ def fusion_operator_matmul_dequant_pipeline(
     out: torch.Tensor,
     bias: torch.Tensor,
     deq_scale: torch.Tensor,
-    out_scale: torch.Tensor,
-    num: torch.Tensor,
     weight_nz: bool = False,
     transpose: bool = False,
+    out_scale: torch.Tensor = ...,
+    num: torch.Tensor = ...,
 ) -> None:
     """Matmul on quantized weights with fused tile-pipeline dequantization.
 
@@ -3534,6 +3565,27 @@ def concat(rt: Runtime, inputs: List[torch.Tensor], out: torch.Tensor) -> None:
             and shapes may differ).
         out (torch.Tensor): Flat output buffer holding all inputs concatenated; its total
             byte size must equal the sum of the input byte sizes.
+
+    Returns:
+        None: ``out`` is written in place.
+    """
+    ...
+
+def concat_col(rt: Runtime, inputs: List[torch.Tensor], out: torch.Tensor) -> None:
+    """Concatenate input tensors along the last (column) dimension.
+
+    Unlike :func:`concat` (a flat byte pack), this is a typed column concat:
+    inputs must share dtype and leading dims. Each input's leading-dim product
+    (``times``) is identical; the last dim is the per-input column width. The
+    output is ``[times, sum(inputs last dim)]`` with the per-input column chunks
+    gathered into each row by a single fused kernel launch (1..8 inputs).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        inputs (List[torch.Tensor]): Input tensors, each with the same dtype and
+            leading dims (``times``); the last dim is the per-input column width.
+        out (torch.Tensor): Output tensor, shape ``[times, sum(inputs last dim)]``,
+            same dtype as the inputs.
 
     Returns:
         None: ``out`` is written in place.

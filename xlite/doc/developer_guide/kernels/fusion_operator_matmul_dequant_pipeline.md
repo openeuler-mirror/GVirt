@@ -105,17 +105,3 @@ AIV 2b/2b+1:  CrossCoreWaitFlag(8)
 - **尾部行列**：AIC 侧 `mActual/nActual` + 分形 pad（见 matmul.md）；AIV 侧 `actualRows = min(m-rowOffset, m0_aiv)`、`localCols = min(n-colOffset, n0)`（`csrc/kernels/dequant.h` 的 `Dequant::RunTileByIdx`，关键字 `actualRows = MIN`），行内列尾块按精确字节数走 `*_align_b16` 原语（见 dequant.md）；
 - **num 动态 token**：`pnumTokens` 非空时 AIV 的 m 收缩为 min(*num, m)（`csrc/kernels/dequant.h` 的 `Dequant::TaskTilesInit`，关键字 `pnumTokensValue < m`），跳过 padding 行。
 
-## 关键代码位置
-
-| 内容 | 位置 |
-|------|------|
-| 编排类与跨核同步 | `csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的 `FusionMatmulDequantPipeline` 类 |
-| AIC→AIV 通知 / AIV 等待 | `csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的 `FusionMatmulDequantPipeline::RunTileByIdx` |
-| AIV m0 减半 | `csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的 `FusionMatmulDequantPipeline::Init`（AIV 分支） |
-| AIV 锁步 tile 映射 | `csrc/kernels/dequant.h` 的 `Dequant::RunTileByIdx`（fused 分支） |
-| AIV 成对 mTiles（needPad） | `csrc/kernels/dequant.h` 的 `Dequant::TaskTilesInit` |
-| kernel 入口（MIX_AIC_1_2） | `csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的宏 `FUSION_OPERATOR_MATMUL_DEQUANT_PIPELINE_FUNC_DEFINE` |
-| host 侧封装与校验 | `csrc/op.cpp` 的 `XliteOpFusionOperatorMatmulDequantPipeline` |
-| 模型路由开关（enableFused）与收益门限 | `csrc/op.cpp` 的 `XliteOpMatmulDeQuant`、`FusedMatmulDeQuantBeneficial` |
-| Python 绑定 | `csrc/_C.cpp` 的 `FusionOperatorMatmulDequantPipeline` 与 `m.def("fusion_operator_matmul_dequant_pipeline", ...)` 绑定、`xlite/_C.pyi` 的 `fusion_operator_matmul_dequant_pipeline` |
-| 正确性测试 | `tests/kernels/fusion_operator_matmul_dequant_pipeline.py` |

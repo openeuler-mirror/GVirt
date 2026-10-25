@@ -53,7 +53,7 @@ indexer_prepare_c8_<dtype>(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR fre
 | kw / k | 输入(只读) | `[tokens, 160]` | bf16 | Indexer K 投影;`160 = 128(head_dim) + 32(heads)` |
 | weight(kNorm) | 输入 | `[128]` | fp32 | LayerNorm weight |
 | bias(kNormBias) | 输入 | `[128]` | fp32 | LayerNorm bias |
-| freqs | 输入 | `[max_position, 64]` 交错 cos/sin | fp32 或 bf16 | 预计算 RoPE 频率表;`freqs_fp32` 由 host 按 dtype 推断 |
+| freqs | 输入 | `[max_position, 64]`(bf16/fp32 交错 cos/sin)或等价的 `[max_position, 32, 2]`(fp32)/`[max_position, 32]`(complex64) | bf16 / fp32 / complex64 | 预计算 RoPE 频率表;host 按 dtype 推断 `freqs_fp32`(`dtype != BF16` 即真,fp32 与 complex64 同走 fp32 路径) |
 | positions | 输入 | `[tokens]` | int64 | 每个 token 的绝对序列位置 |
 | slots(slot_mapping) | 输入 | `[tokens]` | int32 | token → cache 平坦槽位;`-1` 跳过(padding) |
 | k_cache(index_k_cache) | 输出 | `[num_blocks, block_size, 1, 128]` | int8 | paged INT8 K cache;`capacity = num_blocks*block_size` |

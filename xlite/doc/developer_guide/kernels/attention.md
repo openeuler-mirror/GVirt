@@ -19,8 +19,10 @@ host 封装 `Attention` → `XliteOpAttention`(`csrc/_C.cpp` 的 `Attention`、`
 ```cpp
 attention_<dtype>(input, kCache, vCache, qk, output, queryStartLoc, queryLens,
                  cachedLens, blockTables, kCacheStride, vCacheStride, nHeads,
-                 nKVHeads, headSize, blockSize, batch, maxNumBlocks)
+                 nKVHeads, headSize, blockSize, batch, maxNumBlocks, zeroGm)
 ```
+
+末尾的 `zeroGm` 是 host 自动提供的零缓冲(`rt._attnZeroBuffer`,host launch 见 `csrc/op.cpp` 的 `XliteOpAttention`):`AicHelper::Init` 在 AIC 侧用 `CopyGmToL1Nd2Nz` 把两份 L1B ping-pong 缓冲预填零,避免 L1B 残留脏数据导致 mmad 产生 NaN(nan bug 修复,见实现原理)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -38,6 +40,7 @@ attention_<dtype>(input, kCache, vCache, qk, output, queryStartLoc, queryLens,
 | blockSize | 标量 | - | uint32 | KV cache 块大小(128) |
 | batch | 标量 | - | uint32 | batch 数 |
 | maxNumBlocks | 标量 | - | uint32 | host 由 `csrc/op.h` 的 `DeriveMaxNumBlocks` 推得 |
+| zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`AicHelper::Init` 用它预填零 L1B(见实现原理) |
 
 `total_tokens = sum(queryLens)`。测试中覆盖的典型配置见 `tests/kernels/attention.py` 的 `models`/`work` 配置列表(关键字 `models = [`):从 (1,1) decode 到 batch=8 混合 prefill、cached_len 最大 131071。
 
@@ -57,7 +60,7 @@ host 侧要求 qkv/qk/kCache/vCache/output 五者 dtype 一致(`csrc/op.cpp` 的
 ### 任务划分与 M0 自适应
 
 - 每个 batch 按 `queryTileSize` 切 query 块,任务空间为 `queryNum * nKVHeads`(`csrc/kernels/attention.h` 的 `RunAic`,关键字 `taskNum = queryNum * nKVHeads`)。
-- `m0 = GetOptimalM0(queryLen, cachedLen)`(`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0`):queryLen≤64 取 16,否则按总长 12K/20K/24K/30K/48K/60K/96K 分档取 128/112/96/80/64/48/32/16。`m0` 是 Cube 单次 mmad 的 M 维(tokens × headNumInGroup),长序列时压缩 m0 以控制 qk workspace 的 GM 占用(qk 行宽为 maxSeqLen)。`queryTileSize = m0 / headNumInGroup`,GQA 组内多 query 头拼成 m0 行一起算。
+- `m0 = XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), headNumInGroup)`(`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0` + `XliteFitM0ToHeads`):queryLen≤64 取 16,否则按总长 12K/20K/24K/30K/48K/60K/96K 分档取 128/112/96/80/64/48/32/16;`XliteFitM0ToHeads` 再把 m0 向上对齐到 `ROUND_UP(headNumInGroup, MBLOCKSIZE)`,确保 `queryTileSize = m0/headNumInGroup ≥ 1`(nHeads > m0 的退化头数,如 GLM-4.7-Flash 20 头,queryLen≤64 时原始 m0=16 不够装一个 tile 会让 L1A/qk workspace 越界)。`m0` 是 Cube 单次 mmad 的 M 维(tokens × headNumInGroup),长序列时压缩 m0 以控制 qk workspace 的 GM 占用(qk 行宽为 maxSeqLen)。GQA 组内多 query 头拼成 m0 行一起算。
 - 任务按 `totalIdx % block_num` 轮转分配到各核,并用 `(totalIdx/block_num)%2` 交替正反序以均衡负载(`csrc/kernels/attention.h` 的 `RunAic`,关键字 `totalIdx % block_num`)。
 - AIV 侧每个核再按 `get_subblockid()`(2 个 subblock)把 `queryTaskLen * headNumInGroup` 行对半分(`csrc/kernels/attention.h` 的 `RunAiv`,关键字 `get_subblockid()`)。
 
@@ -65,7 +68,7 @@ host 侧要求 qkv/qk/kCache/vCache/output 五者 dtype 一致(`csrc/op.cpp` 的
 
 `AicHelper`(`csrc/kernels/attention_aic_helper.h`)是 attention/flash_attention 共用的 Cube 侧矩阵乘助手,在 `Init()` 中静态布局 L1(A1/B1)与 L0(A2/B2/CO1)的 ping-pong 缓冲:
 
-- `cubeKvTile` 从 blockSize 起逐次减半,直到 2 份 KV tile(含 L0B 的 `tile×headSize` 与 L0A 的 `M0×tile`)同时放进 64KB L0,避免 headDim=256、blockSize=128 时 L0 溢出(`csrc/kernels/attention_aic_helper.h` 的 `AicHelper::Init`,关键字 `cubeKvTile`)。
+- `cubeKvTile` 从 blockSize 起逐次减半,直到 2 份 KV tile(含 L0B 的 `tile×headSize` 与 L0A 的 `M0×tile`)同时放进 64KB L0,避免 headDim=256、blockSize=128 时 L0 溢出(`csrc/kernels/attention_aic_helper.h` 的 `AicHelper::Init`,关键字 `cubeKvTile`)。`Init` 末尾(仅 `__DAV_C220_CUBE__`)用 `CopyGmToL1Nd2Nz` 把两份 L1B ping-pong 缓冲从 host 提供的 `zeroGm` 预填零,防止上一 tile 残留的 K 数据在 mmad 累加时混入产生 NaN(nan bug 修复)。
 - **RunAicQK**(`csrc/kernels/attention_aic_helper.h` 的 `AicHelper::RunAicQK`):`Q(m0×headSize) × K^T(headSize×kvLen)`。Q 经 `DataCopy` Nd2Nz 进 L1A 再 `CopyToL0ACol`;K 沿 KV 维按 `cubeKvTile` 分块,通过 blockTable 查物理块、按 `block * kCacheStride + rowInBlock * kvMemSize` 寻址(kvMemSize = nKVHeads*headSize),`CopyGmToL1Nd2Nz` + `CopyToL0BCol` 双缓冲进 L0B;`CalMmad` 累加后 `CopyToGm` 写回 qk workspace(行距 qkStride=maxSeqLen)。M/N 维按 MBLOCKSIZE/NBLOCKSIZE=16 对齐,分块边界随 blockSize 截断。
 - **RunAicSV**(`csrc/kernels/attention_aic_helper.h` 的 `AicHelper::RunAicSV`):`softmax(QK)(m0×kvLen) × V(kvLen×headSize)`。此时 A 矩阵是 GM 里的 softmax 结果,V 与 K 同样按 `block * vCacheStride + rowInBlock * kvMemSize` 寻址,L1A/L1B 双 ping-pong,`CalMmad` 以 `first` 标志控制首块清零(K 维分块累加);输出按 GQA scatter 写回:`headNumInGroup==1` 时按 `nHeads*headSize` 行距直写,否则逐 token 搬 `headNumInGroup` 行(`gqaScatter=true` 分支,见 `AicHelper::RunAicSV`,关键字 `gqaScatter`)。
 

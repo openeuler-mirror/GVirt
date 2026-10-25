@@ -20,8 +20,10 @@ host 封装 `Attention(enableFlashAttention=true)` 分支 → `XliteOpFlashAtten
 flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum,
                         sync, output, queryStartLoc, queryLens, cachedLens, blockTables,
                         kCacheStride, vCacheStride, nHeads, nKVHeads, headSize,
-                        blockSize, batch, maxNumBlocks, tileSizeOfCachedKV)
+                        blockSize, batch, maxNumBlocks, tileSizeOfCachedKV, zeroGm)
 ```
+
+末尾的 `zeroGm` 与 attention 同源(host 自动提供的 `rt._attnZeroBuffer`),`AicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(nan bug 修复,见 attention 文档)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -38,6 +40,7 @@ flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSu
 | kCacheStride / vCacheStride | 标量 | - | uint32 | 同 attention:K/V cache 的 dim-0 跨度(元素数),host 传 `XTensor.stride[0]` |
 | nHeads / nKVHeads / headSize / blockSize / batch / maxNumBlocks | 标量 | - | uint32 | 同 attention |
 | tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 侧经 `csrc/op.h` 的 `static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN)` 保证 `MAX_KV_TILE_SIZE(8192) ≤ MAX_SOFTMAX_PINGPONG_LEN(11776)`,由 auto-tuner 在 8192 内选取 |
+| zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`AicHelper::Init` 用它预填零 L1B(见上文) |
 
 ## 支持的数据类型
 

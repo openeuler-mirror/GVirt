@@ -23,19 +23,20 @@ Python 侧调用(`tests/kernels/mla.py` 的 `mla_v2(rt, qWithQr_xlite, ...)` 调
 ```python
 mla_v2(rt, q_with_qr, qr, k_cache, pe_cache, wuk_t, wuv, output, query_start_loc,
        query_lens, cached_lens, block_tables, n_heads, rope_head_dim, nope_head_dim,
-       v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, max_seq_len, scale,
-       topk_indices, top_k, weight_nz, enable_flash=False, tile_size,
-       dense=False)
+       v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, scale, topk_indices, top_k,
+       weight_nz, enable_flash_attention=False, tile_size_of_cached_kv=8192, dense=False)
 ```
 
-host 封装 `MLAV2`(`csrc/_C.cpp` 的 `MLAV2`)的 `qAbsorb = einsum(q_nope, wukT)` 与 `output = einsum(oAbsorb, wuv)` 在 paged / dense 两条路径**均无条件执行**(对应 `XliteOpEinsumMhtHtdMhd` 分别位于 `if (dense)` 之前与所有分支之后);两条路径唯一区别是 dense(`dense=True`)在吸收前多一步 `gather_sparse_kv_cache` 收集 top-k token 到连续 `kDense`/`peDense`(见 `csrc/_C.cpp` 的 `MLAV2` `dense` 分支,关键字 `XliteOpGatherSparseKVCache`),随后以 `topK` 为 `maxSeqLen`、内核 `topK=0` 调 `XliteOpMLAV2`,输入/输出契约与 paged 相同。接口完整 docstring 见 `xlite/_C.pyi` 的 `mla_v2`。kernel 签名(`csrc/kernels/mla_v2.h` 的 `mla_v2_<dtype>` 入口,宏 `MLA_V2_FUNC_DEFINE`):
+host 封装 `MLAV2`(`csrc/_C.cpp` 的 `MLAV2`)的 `qAbsorb = einsum(q_nope, wukT)` 与 `output = einsum(oAbsorb, wuv)` 在 paged / dense 两条路径**均无条件执行**(对应 `XliteOpEinsumMhtHtdMhd` 分别位于 `if (dense)` 之前与所有分支之后);两条路径唯一区别是 dense(`dense=True`)在吸收前多一步 `gather_sparse_kv_cache` 收集 top-k token 到连续 `kDense`/`peDense`(见 `csrc/_C.cpp` 的 `MLAV2` `dense` 分支,关键字 `XliteOpGatherSparseKVCache`),随后以 `topK` 为 `maxSeqLen`、内核 `topK=0` 调 `XliteOpMLAV2`,输入/输出契约与 paged 相同。接口完整 docstring 见 `xlite/_C.pyi` 的 `mla_v2`(注意 Python API 不含 `max_seq_len`,host 由 `block_tables` 经 `DeriveMaxNumBlocks` 推得 `maxNumBlocks`,`maxSeqLen = maxNumBlocks * blockSize`,再传给 kernel)。kernel 签名(`csrc/kernels/mla_v2.h` 的 `mla_v2_<dtype>` 入口,宏 `MLA_V2_FUNC_DEFINE`):
 
 ```cpp
 mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
                queryStartLoc, queryLens, cachedLens, blockTables, nHeads, ropeHeadDim,
                kvLoraRank, blockSize, batch, maxSeqLen, scale, topK, kCacheStride,
-               peCacheStride, dense)
+               peCacheStride, dense, zeroGm)
 ```
+
+末尾的 `zeroGm` 是 host 自动提供的零缓冲(`rt._attnZeroBuffer`,host launch 见 `csrc/op.cpp` 的 `XliteOpMLAV2`),`MlaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -58,6 +59,7 @@ mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
 | topK | 标量 | - | uint32 | DSA top-k;host 限制仅 sparse 模式生效:`maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=11776` 且 `topK ≤ MAX_TOPK_NUM=2048`(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`/`MAX_TOPK_NUM`);dense 模式 host 要求 topK > 0 且其值即 dense cache 长度 indexTopK(见 `csrc/_C.cpp` 的 `MLAV2`,关键字 `dense=True requires topK > 0`),内核内部将其用作 maxSeqLen 并把 softmax topK 置 0(`csrc/kernels/mla_v2.h` 的 `MLAV2::Init`,关键字 `this->topK`) |
 | kCacheStride / peCacheStride | 标量 | - | uint32 | kCache / peCache 的 dim-0 跨度(元素数),块或 batch 基址 = 序号 × 跨度:sparse 为每物理块跨度(连续时等于 blockSize×kvLoraRank / blockSize×ropeHeadDim),dense 为每 batch 跨度(连续时等于 maxSeqLen×kvLoraRank / maxSeqLen×ropeHeadDim);非连续时由宿主传入真实跨距 |
 | dense | 标量 | - | uint32 | 1=dense cache(`[batch, maxSeqLen, ...]`,batch 起点 = b×kCacheStride,由 gather_sparse_kv_cache 收集,blockTable 不使用),0=paged(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `dense`) |
+| zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`MlaAicHelper::Init` 用它预填零 L1B(见上文) |
 
 ## 支持的数据类型
 
@@ -73,7 +75,7 @@ host 侧仅接受 BF16(`csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `EachXDtype(BF
 
 ### 任务划分
 
-- `m0 = GetOptimalM0(queryLen, cachedLen)` 自适应(同 attention,`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0`),`queryTileSize = m0 / nHeads`——MLA 每 batch 一次算**全部 nHeads 个头**(无 KV 头分组),`mSize = queryTaskLen * nHeads` 行拼成 Cube 的 M 维。
+- `m0 = dense ? nHeads : XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), nHeads)` 自适应(同 attention,`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0` + `XliteFitM0ToHeads`;dense 模式直接取 nHeads,一个 tile 一 token),`queryTileSize = m0 / nHeads`——MLA 每 batch 一次算**全部 nHeads 个头**(无 KV 头分组),`mSize = queryTaskLen * nHeads` 行拼成 Cube 的 M 维。
 - 任务空间为 `queryNum`(每 batch),核间用 `firstCore = (GetBlockIdx()+GetBlockNum()-coreOffset) % GetBlockNum()` 的循环 stride 分配,`coreOffset` 跨 batch 累计保证相邻 batch 起始核轮转、负载均衡(`csrc/kernels/mla_v2.h` 的 `RunAic`,关键字 `firstCore`/`coreOffset`)。
 - dense 模式 `calcLen` clip 到 maxSeqLen(dense cache 只存 indexTopK 个 token,见 `csrc/kernels/mla_v2.h` 的 `RunAic`,关键字 `dense cache only holds maxSeqLen`);per-batch KV 视图 dense 时按 dim-0 跨度取 `kCache[batchIdx * kCacheStride]` 子视图,sparse 时走 blockTable(`csrc/kernels/mla_v2.h` 的 `RunAic`,关键字 `batchKCache = kCache[batchIdx * kCacheStride]`)。
 

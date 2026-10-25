@@ -33,13 +33,13 @@ indexer_scores_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
 | q | 输入 | `[total_query_len, nHeads*headDim]` | fp16 / bf16 | 所有 batch 拼接的 flatten query |
-| kCache | 输入 | `[kvcache_block_num, blockSize, headDim]` | fp16 / bf16 | paged indexer K cache,物理块号由 blockTables 索引 |
+| kCache | 输入 | `[num_blocks, blockSize, 1, headDim]` | fp16 / bf16 | paged indexer K cache(末维前的 `1` 为单 head 维),物理块号由 blockTables 索引 |
 | weight | 输入 | `[total_query_len, headDim + nHeads]` | fp16 / bf16 | 每 token 的融合权重取自第 `headDim` 列起的 `nHeads` 列(与 Q 同投影输出拼接存放) |
 | scores | 输出 | `[total_query_len, maxNumBlock*blockSize]` | fp16 / bf16 | 每行一个 query token 对全部 KV 位置的 index_score(行内按全局 token 位置布局,valid 长度 = cachedLens[i]+queryLens[i]) |
 | queryStartLoc | 输入 | `[batch]` | int32 | 各 batch query 在拼接 q 中的起始偏移(前缀和) |
 | queryLens | 输入 | `[batch]` | int32 | 各 batch 的 query 长度 |
 | cachedLens | 输入 | `[batch]` | int32 | 各 batch 已缓存 KV 长度(总 KV 长度 = cachedLen + queryLen) |
-| blockTables | 输入 | `[batch, maxNumBlock]` | int32 | 逻辑块 → 物理块映射表;`maxNumBlock` 由 host 侧 `DeriveMaxNumBlocks` 推导(`csrc/op.h` 的 `DeriveMaxNumBlocks`) |
+| blockTables | 输入 | `[batch, maxNumBlock]`(2-D)或 `[batch * maxNumBlock]`(1-D 扁平) | int32 | 逻辑块 → 物理块映射表;`maxNumBlock` 由 host 侧 `DeriveMaxNumBlocks` 推导(2-D 取 `shape[1]`,1-D 取 `len // batch`,`csrc/op.h` 的 `DeriveMaxNumBlocks`) |
 | kCacheStride | — | 标量 | uint32 | kCache 的 dim-0 跨度(元素数);连续时等于 blockSize×headDim,非连续时由宿主传入真实跨距 |
 | nHeads / headDim / blockSize / batch | — | 标量 | uint32 | 测试配置:nHeads=64, headDim=128, blockSize=128;约束 `blockSize <= MAX_M0=128`、`headDim <= k0`(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Init`,关键字 `assert(blockSize <= MAX_M0)` / `assert(headDim <= k0)`) |
 

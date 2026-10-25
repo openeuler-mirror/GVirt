@@ -37,7 +37,8 @@ host 侧仅接受 `x.dtype == BF16`,kernel 入口符号为 `quant_static_bfloat1
 
 ### 分块策略
 
-- **k 维切块**:固定 `k_tile = 4096`(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `k_tile = 4096`),`k_loop = ceil(k / k_tile)`,防止 UB 溢出。scale/offset 也按同样 tile 切。
+- **对齐 k 的批量多行快速路径**（`quant_to_i8_rows`）：当 `k % 32 == 0` 且 `k ≤ QUANT_K_TILE(4096)` 且可用行数 ≥ 2 时优先走此路径——一组连续 token 共享一次 2D MTE2/MTE3 突发，rows 受 UB 预算与单向量指令上限（`r*kPad ≤ 255×64 fp32`）钳制（`csrc/kernels/quant.h` 的 `quant_to_i8`，关键字 `quant_to_i8_rows`）。
+- **k 维切块（fallback）**:固定 `k_tile = 4096`(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `k_tile = 4096`),`k_loop = ceil(k / k_tile)`,防止 UB 溢出。scale/offset 也按同样 tile 切。
 - **m 维多 Block 并行**:每个 k_tile 内,`for (row = block_idx; row < m; row += block_num)`(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `for (uint32_t row = block_idx`),各 AIV 轮转处理不同行。
 
 ### UB 内存布局(`csrc/kernels/quant.h` 的 `quant_to_i8`)
