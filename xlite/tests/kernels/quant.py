@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu
 from xlite._C import Runtime, quant
 
 npu_devid = 0
@@ -16,51 +17,33 @@ torch.npu.set_device(npu_devid)
 
 supported_dtype_list = [torch.bfloat16]  # add torch.float16 here once fp16 kernel is instantiated
 
-def quantize_cpu(
-    x: torch.Tensor,
-    input_scale_reciprocal: torch.Tensor,
-    aclnn_input_offset: torch.Tensor,
-) -> torch.Tensor:
-    """
-    公式: q = clamp(round(x * (1/scale) + offset), -128, 127)
-    """
-    x_fp32 = x.float()
-    scale = input_scale_reciprocal.float()
-
-    if scale.dim() == 1 and x.dim() > 1:
-        # x: [batch, seq, hidden] 或 [batch, hidden]
-        # scale: [hidden] -> [1, ..., 1, hidden]
-        target_shape = [1] * (x.dim() - 1) + [-1]
-        scale = scale.view(target_shape)
-    
-    if aclnn_input_offset is not None:
-        offset = aclnn_input_offset.float()
-        if offset.dim() == 1 and x.dim() > 1:
-            offset = offset.view(target_shape)
-    
-    # round(x / scale + offset)
-    x_quant = torch.round(x_fp32 * scale + offset)
-    x_quant = torch.clamp(x_quant, -128, 127)
-    return x_quant.to(torch.int8)
-
-m = 8192
-n = 2048
+# All aligned cases (k % 32 == 0) go through the batched engine via the
+# standalone tile dispatch (tileRows = ceil(m / block_num), one tile per
+# block); the launch plan comes from tileRows under the actual-k kPad.
+# K_TILE_MAX bounds kPad (k above it splits into kLoop chunks).
 test_cases = [
-    [8192, 2048],
-    [20000, 96],
-    [20000, 12288],
-    # ---- batched multi-row path (k % 32 == 0, k <= k_tile, m > 2 * blocks) ----
-    [8190, 2048],    # rows=8, tail group r=6
-    [8192, 4096],    # k == k_tile boundary, rows=3, tail group r=2
-    [20003, 96],     # rows=16, tail group r=3
-    # ---- boundary cases (k_tile = 4096) ----
-    [1, 1],          # minimal m and k
-    [1, 4096],       # single row, k == k_tile (single tile, no tail)
-    [1, 4097],       # single row, first tiled path (tail k_size=1)
-    [8, 8192],       # exactly 2 tiles, no tail
-    [8, 4095],       # single tile, k not multiple of 128 (tail padding)
-    [8, 100],        # small k, not multiple of 128
+    # ---- multi-row tiles (rows >= 2) ----
+    [8192, 2048],    # kPad=2048, rows=7, tail group r=2
+    [20000, 96],     # kPad=96,  rows=32, tail group r=16
+    [20000, 12288],  # kLoop=2,  kPad=6144, rows=2, tail group r=2
+    [8190, 2048],    # kPad=2048, rows=7, tail tile r=6
+    [8192, 4096],    # kPad=4096, rows=3, full groups
+    [20003, 96],     # kPad=96,  rows=32, tail group r=3
+    [8192, 6144],    # kLoop=2,  kPad=3072, rows=5, 2D DMA row stride
+    [2000, 6272],    # kLoop=2,  kPad=3136, rows=4, 50 full tiles
+    [64, 6144],      # tileRows=2, kPad=3072, rows=2
+    [99, 6144],      # tileRows=2, last tile single row inside a rows=2 plan
+    [100, 6144],     # tileRows=2, full 50 tiles
+    [2048, 6144],    # tileRows=41, rows=5, tail tile r=8
+    # ---- one-row tiles (rows == 1, kPad > K_TILE_ONE_LINE) ----
+    [1, 8192],       # kPad=8192, single chunk, rows=1
+    [2, 8192],       # 2 blocks x one-row tiles, single chunk
+    [1, 9216],       # kLoop=2, kPad=4608, rows=1
+    [2, 6912],       # one-row tiles, kPad=3456, rows=1
+    [8, 6144],       # 8 blocks x one-row tiles, 2 chunks each
+    [8, 8192],       # 8 blocks x one-row tiles, 2 chunks (4096/4096)
 ]
+
 for in_type in supported_dtype_list:
     for m, n in test_cases:
         out_type = torch.int8
@@ -69,17 +52,15 @@ for in_type in supported_dtype_list:
         scale = torch.randn(n, dtype=in_type, device=f"npu:{npu_devid}")
         offset = torch.randn(n, dtype=in_type, device=f"npu:{npu_devid}")
 
-        expected_z = quantize_cpu(x.to("cpu"), scale.to("cpu"), offset.to("cpu"))
+        expected_z = torch_npu.npu_quantize(x, scale, offset, dtype=torch.qint8, div_mode=False)
 
         torch.npu.synchronize()
         quant(rt, x, scale, offset, z)
         torch.npu.synchronize()
 
-        # torch.set_printoptions(threshold=1000000)
-
         try:
-            torch.testing.assert_close(expected_z, z.to("cpu"), atol=1, rtol=1/128)
-            print(f'Quant({in_type} -> i8) [{m}, {n}] executed!')
+            torch.testing.assert_close(expected_z, z, atol=0, rtol=0)
+            print(f'Quant({in_type} -> i8) [{m}, {n}] check passed')
         except AssertionError as e:
             print(f'{e}')
             print(f'x: {x}, shape: {x.shape}')

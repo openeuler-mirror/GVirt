@@ -115,6 +115,12 @@
 | hc_post | [hc_post.md](hc_post.md) | HC 模型后处理融合 |
 | hc_pre | [hc_pre.md](hc_pre.md) | HC pre sum操作(消费 hc_split_sinkhorn 的 pre) |
 
+### 融合算子范式
+
+| 文档 | 说明 |
+|---|---|
+| [fusion_operator_paradigm.md](fusion_operator_paradigm.md) | MIX 融合算子编写范式规范：子算子接口、融合算子接口、调用约定、tiles 划分、跨核同步、坑点记录 |
+
 ## 目录约定
 
 - 算子实现在 `csrc/kernels/<name>.h`(模板)或 `csrc/kernels/<name>.cpp`

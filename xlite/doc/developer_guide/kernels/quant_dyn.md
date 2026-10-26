@@ -14,7 +14,7 @@ out        = int8(x_scaled)              (vconv_f162s8 舍入)
 
 ## 输入输出参数
 
-Python 入口 `quant_dynamic(rt, x, scale, out)`(`csrc/_C.cpp` 的 `QuantDyn`,关键字 `m.def("quant_dynamic"`)。kernel 签名见 `csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`:
+Python 入口 `quant_dynamic(rt, x, scale, out)`(`csrc/_C.cpp:2889`)。kernel 签名见 `QUANT_DYN_FUNC_DEFINE` 宏([csrc/kernels/quant_dyn.h](../../csrc/kernels/quant_dyn.h)):
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -35,16 +35,21 @@ host 仅接受 `x.dtype == BF16`,kernel 入口符号为 `quant_dynamic_bfloat16_
 
 ## 实现原理
 
-实现位于 [csrc/kernels/quant_dyn.h](../../../csrc/kernels/quant_dyn.h),函数 `quant_dyn_to_i8<dtype>`(模板;BF16 实例化见 [quant_dyn_bfloat16_t.cpp](../../../csrc/kernels/quant_dyn_bfloat16_t.cpp),由 `QUANT_DYN_FUNC_DEFINE` 宏展开为入口符号 `quant_dynamic_bfloat16_t`)。
+实现位于 [csrc/kernels/quant_dyn.h](../../csrc/kernels/quant_dyn.h),类模板 `QuantDyn<dtype>`(BF16 实例化见 [quant_dyn_bfloat16_t.cpp](../../csrc/kernels/quant_dyn_bfloat16_t.cpp),由 `QUANT_DYN_FUNC_DEFINE` 宏展开为入口符号 `quant_dynamic_bfloat16_t`,入口依次调用 `Init()` + `Run()`)。类接口与 `Dequant`/`Quant` 一致,可独立启动也可作为融合算子的子算子:
+
+- `Init()`:原子/掩码设置与 UB 布局;
+- `SetFlags()`/`WaitFlags()`:预置与排空事件 flag;
+- `TaskTilesInit(x, scales, z, pnumTokens, m, k)`:绑定 GM 地址(`pnumTokens` 非空时收缩 m),返回行 tile 数;
+- `RunTileByIdx(idx)`:独立启动的 tile 分发,即 `RunRow(idx)`;
+- `RunRows(rowStart, rowCount)`:量化连续行段,融合原语(`eventId` 跨行持久化衔接 ping-pong);
+- `CanBatchRows(rowCount)`/`RunRowsBatch(rowStart, rowCount)`:批量多行段入口(gate + 自包含执行)。**自带 flag 预挂/排空,不得与 SetFlags/WaitFlags 混用**;
+- `Run(...)`:独立入口,优先走批量 fast path,否则 SetFlags → tile 分发 → WaitFlags。
 
 ### 分块策略
 
-- **对齐 k 的批量多行快速路径**（`quant_dyn_to_i8_rows`）：当 `k % 32 == 0`、`k ≤ QUANT_DYN_K_TILE(8192)` 且 rows ≥ 2 时优先走此路径——一组连续 token 共享一次 2D MTE2/MTE3 突发，并以一组一次的 V→S/S→MTE3 同步取代逐行同步（phase1 把每行 absmax 归约进 32B 槽表，S 一次性算出全组 scale，phase2 再从仍驻留的 xf32 块逐行重缩放；`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`，关键字 `quant_dyn_to_i8_rows`）。
-- **k 维切块（fallback）**:`QUANT_DYN_K_TILE = 8192`(`csrc/kernels/quant_dyn.h` 的 `QUANT_DYN_K_TILE` 宏),`k_loop = ceil(k / k_tile)`(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `k_loop = DIV_ROUND_UP`)。整行 absmax 必须先于缩放完成,故每行分两阶段执行,按 `k_loop` 取两条路径(见 `csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8` 头部注释,关键字 `k_loop == 1`):
-  - **fast path**(`k_loop == 1`,即 k ≤ K_TILE):整行一次搬入 UB,x 只读一次;phase1(absmax)与 phase2(缩放/转 INT8)串行复用同一 `xf32_buf`,无需第二次 GM 读(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `if (k_loop == 1)`)。
-  - **tiled path**(`k_loop > 1`,即 k > K_TILE):phase1 逐 tile 做 `vabs`+`ReduceMax`,再用 `vmax` 跨 tile 合并到 `rowAbsUb`;phase2 重新从 GM 读每个 x tile 做缩放与 INT8 转换(x 不再常驻 UB,见 `csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `*rowAbsUb = float(0)`)。
-- **m 维多 Block 并行**:`for (row = block_idx; row < m; row += block_num)`(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `for (int row = block_idx`),行间轮转。行内两阶段串行,行间用 x/z 双缓冲 ping-pong 流水。
-- **对齐**:`k_pad = ROUND_UP(k_tile, 256/sizeof(dtype))`(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `k_pad = ROUND_UP`,BF16 下为 128 元素 = 256B 粒度);fast path 另有 `k_pad_row = ROUND_UP(k, 256/sizeof(dtype))`(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`,关键字 `k_pad_row`)用于整行向量计算。
+- **k 维切块**:`K_TILE_MAX = ROUND_DOWN(UB_SIZE/16, 256/sizeof(dtype))`(quant.h:20),`k_loop = ceil(k / K_TILE_MAX)`。整行 absmax 必须先于缩放完成,故每行分两阶段执行,按 `k_loop` 取两条路径。host 侧拒绝 ragged k(`k % 32 != 0`),kernel 内 `assert` 守护,故只有 2D block DMA 路径。
+- **m 维多 Block 并行**:`for (row = block_idx; row < m; row += block_num)`(quant_dyn.h:79),行间轮转。行内两阶段串行,行间用 x/z 双缓冲 ping-pong 流水。
+- **rows 适配**:`rows = MIN(rMax, repMax, maxRows)`,其中 `rMax = (UB - 4*kPad) / (12*kPad + 40)`,`repMax = 255*64 / kPad`;UB 公式为 `12*R*kPad + 4*kPad + 40*R`,rMax 保证 ≤ UB_SIZE,repMax(向量指令上限)在 910C 上为有效约束。
 
 ### UB 内存布局(`csrc/kernels/quant_dyn.h` 的 `quant_dyn_to_i8`)
 

@@ -12,7 +12,7 @@ out = int8(x * scale_reciprocal + offset)
 
 ## 输入输出参数
 
-Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp` 的 `Quant`,关键字 `m.def("quant"`)。kernel 签名见 `csrc/kernels/quant.h` 的 `quant_to_i8`:
+Python 入口 `quant(rt, x, scale_reciprocal, offset, out)`(`csrc/_C.cpp:2887`)。kernel 签名见 `QUANT_FUNC_DEFINE` 宏([csrc/kernels/quant.h](../../csrc/kernels/quant.h)):
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -33,47 +33,59 @@ host 侧仅接受 `x.dtype == BF16`,kernel 入口符号为 `quant_static_bfloat1
 
 ## 实现原理
 
-实现位于 [csrc/kernels/quant.h](../../../csrc/kernels/quant.h),函数 `quant_to_i8<dtype>`(模板;BF16 实例化见 [quant_bfloat16_t.cpp](../../../csrc/kernels/quant_bfloat16_t.cpp),由 `QUANT_FUNC_DEFINE` 宏展开为入口符号 `quant_static_bfloat16_t`)。
+实现位于 [csrc/kernels/quant.h](../../csrc/kernels/quant.h),类模板 `Quant<dtype>`(BF16 实例化见 [quant_bfloat16_t.cpp](../../csrc/kernels/quant_bfloat16_t.cpp),由 `QUANT_FUNC_DEFINE` 宏展开为入口符号 `quant_static_bfloat16_t`,入口依次调用 `Init()` + `Run()`)。类接口与 `Dequant` 一致,可独立启动也可作为融合算子的子算子:
+
+- `Init()`:原子/掩码设置与 UB ping-pong 布局;
+- `SetFlags()`/`WaitFlags()`:预置与排空事件 flag;
+- `TaskTilesInit(in, scaleReciprocal, offset, out, m, k)`:绑定 GM 地址,返回行 tile 数;
+- `RunTileByIdx(idx)`:独立启动的 tile 分发;
+- `RunRows(rowStart, rowCount)`:量化 `[rowStart, rowStart+rowCount)` 连续行段,核心原语——独立分发与融合算子共用;
+- `CanBatchRows(rowCount)`/`RunRowsBatch(rowStart, rowCount)`:批量多行段入口(gate + 自包含执行)。**自带 flag 预挂/排空,不得与 SetFlags/WaitFlags 混用**;
+- `Run(...)`:独立入口,优先走批量多行 fast path,否则 SetFlags → tile 分发 → WaitFlags。
 
 ### 分块策略
 
-- **对齐 k 的批量多行快速路径**（`quant_to_i8_rows`）：当 `k % 32 == 0` 且 `k ≤ QUANT_K_TILE(4096)` 且可用行数 ≥ 2 时优先走此路径——一组连续 token 共享一次 2D MTE2/MTE3 突发，rows 受 UB 预算与单向量指令上限（`r*kPad ≤ 255×64 fp32`）钳制（`csrc/kernels/quant.h` 的 `quant_to_i8`，关键字 `quant_to_i8_rows`）。
-- **k 维切块（fallback）**:固定 `k_tile = 4096`(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `k_tile = 4096`),`k_loop = ceil(k / k_tile)`,防止 UB 溢出。scale/offset 也按同样 tile 切。
-- **m 维多 Block 并行**:每个 k_tile 内,`for (row = block_idx; row < m; row += block_num)`(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `for (uint32_t row = block_idx`),各 AIV 轮转处理不同行。
+- **k 维切块**:`K_TILE_MAX = ROUND_DOWN(UB_SIZE/16, VECTOR_REPEAT_BYTESIZE / sizeof(dtype))`(quant.h:20),`k_loop = ceil(k / K_TILE_MAX)`。scale/offset 也按同样 tile 切。
+- **m 维多 Block 并行**:`for (row = block_idx; row < m; row += block_num)`(quant.h:79),行间轮转。行内两阶段串行,行间用 x/z 双缓冲 ping-pong 流水。
+- **rows 适配**:`rows = MIN(rMax, (uint32_t)this->tileRows)`,其中 `rMax = (UB_SIZE - 12*kPad) / (12*kPad)`;UB 公式为 `12*R*kPad + 4*kPad + 40*R`,rMax 保证 ≤ UB_SIZE。
 
-### UB 内存布局(`csrc/kernels/quant.h` 的 `quant_to_i8`)
-
-按 ping-pong 成对分配(k_tile 为单位):
+### UB 内存布局(quant.h:54-63)
 
 | 缓冲 | dtype | 用途 |
 |---|---|---|
-| x_ping / x_pong | bfloat16 | 激活行数据 |
-| xf32_ping / xf32_pong | float | BF16→FP32 中间 |
-| xf16_ping / xf16_pong | half | FP32→FP16 中间(量化前中转) |
-| z_ping / z_pong | int8 | INT8 结果 |
-| scale/offset(_fp32)_ping/pong | bfloat16 / float | 每 tile 的 scale/offset 原值及 fp32 转换 |
+| x1 / x2 | bfloat16 | 行/tile 输入 ping-pong |
+| xf32 | float | BF16→FP32 转换结果(单份,phase1/phase2 串行复用) |
+| xAbs | float | abs 中间,ReduceMax 结果落点;两路径均复用为 `scaleUb` 标量中转 |
+| zf16 | half | FP32→FP16 中转(单份) |
+| z1 / z2 | int8 | INT8 输出 ping-pong |
+| rowAbsUb | float(1 个) | tiled path 跨 tile absmax 归约累点(`vmax` 合并;fast path 不使用) |
+| sum_addr | - | UB 末尾指针对齐断言 |
 
-scale/offset 使用独立的 ping-pong(事件 EVENT_ID2/ID3),与行数据的事件(ID0/ID1)解耦:进入新 k_tile 时,当前 tile 的 scale/offset 在所有行间复用,同时预取下一 tile 的 scale/offset。
+UB 容量与 ReduceMax 维度上限由两条 `static_assert` 守护(quant.h:28-36)。
 
-### 流水线同步(MTE2 / V / MTE3)
+### 流水线同步
 
-三管线事件协议,两组事件ID:
+每行进入前预置 4 个 ping-pong flag(`V→MTE2` ID0/ID1、`MTE3→V` ID0/ID1,quant.h:73-76),函数末尾统一 drain(quant.h:226-229)。
 
-- 行数据链:`V→MTE2(EVENT_ID0/1)` 释放 x 缓冲 → `copy_gm_to_ubuf_align_b16` → `MTE2→V` 就绪 → `vconv_bf162f32` 后 `V→MTE2` 再释放;量化完成 `V→MTE3` → z 缓冲写出 GM 后 `MTE3→V` 回收(`csrc/kernels/quant.h` 的 `quant_to_i8`)。
-- scale/offset 链:同样以 EVENT_ID2/ID3 ping-pong,跨 tile 预取(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `scale_offset_event_id`)。
+- **行/tile 数据链**:MTE2/V 用 `eId`(EVENT_ID0/ID1)ping-pong。2D block DMA 一次 burst 搬运整组 `[r, kSize]`,x 只读一次。phase1(absmax)与 phase2(缩放/转 INT8)串行复用同一 `xf32_buf`,无需第二次 GM 读。
+- **scale 写出链走 S 管线**:`ReduceMax` 后 `V→S` 同步读回 absmax 标量,S 管线算 `scale = absmax/127`、`scaleRec = 127/absmax`,把 `xAbs_buf` 复用为 `scaleUb` 单元素缓冲,`S→MTE3` 后 `copy_ubuf_to_gm_align_b32` 写到 `scales[row]`,再 `MTE3→S` 回收。
 
-行间 `event_id = 1 - event_id` 翻转,搬入下一行与写出上一行重叠。收尾统一 wait + `pipe_barrier(PIPE_ALL)`(`csrc/kernels/quant.h` 的 `quant_to_i8`,收尾 drain)。
+### 关键计算步骤
 
-### 关键计算步骤(`csrc/kernels/quant.h` 的 `quant_to_i8`)
+两路径共享 phase1(absmax)/phase2(缩放)框架,差异在 absmax 的归约范围与 x 是否常驻 UB。
 
-1. `copy_gm_to_ubuf_align_b16` 搬入 `k_size` 个 BF16(按字节长度,b16 对齐变体);
-2. `vconv_bf162f32`:BF16 → FP32(注意 repeat 以较宽 dtype 计,`k_size_pad / VECTOR_MAX_NUM_OF_FP32`,见 `csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `k_repeats`);
-3. `vmul` 乘 scale_reciprocal(fp32),`vadd` 加 offset(fp32);
-4. `vconv_f322f16a`:FP32 → FP16;
-5. `vconv_f162s8a`:FP16 → INT8(`a` 后缀为饱和舍入变体,负溢出/正溢出截到 [-128, 127],替代显式 clamp+round);
-6. `copy_ubuf_to_gm_align_b8` 写回 GM INT8。
+**fast path**(`k_loop == 1`):
+
+1. 整行 BF16 搬入,`copy_gm_to_ubuf`(2D block DMA,`nB=r, lenBurst=kSize*sizeof(dtype)/32, srcGap=..., dstGap=...`)转 FP32;
+2. `vabs` 取绝对值,`ReduceMax(xAbs_buf, xAbs_buf, k)` 归约整行 absmax;
+3. S 管线读回 `*xAbs_buf`,标量算 `scale = absmax/127`、`scaleRec = 127/absmax`;
+4. `xAbs_buf` 复用为 `scaleUb`,经 S→MTE3→`copy_ubuf_to_gm_align_b32` 写到 `scales[row]`;
+5. `vmuls` 把 `xf32_buf` 乘 scaleRec(复用同一缓冲),`vconv_f322f16` 转 FP16,`vconv_f162s8` 转 INT8;
+6. `copy_ubuf_to_gm`(2D block DMA)写回 GM。
 
 ### 边界处理
 
-- 尾部 tile(`k_size < k_tile`):搬运按实际 `k_size` 字节;计算侧 `k_size_pad = ROUND_UP(k_size, VECTOR_MAX_NUM_OF_BF16)` 补齐到向量指令粒度(`csrc/kernels/quant.h` 的 `quant_to_i8`,关键字 `k_size_pad = ROUND_UP`)。
+- 尾部 tile(`k_size < k_pad`)按实际 `k_size` 处理,计算侧仍按 `kPad` 宽度做向量运算(超出 `k_size` 的 stale lane 不参与 `ReduceMax` 和 store)。
 - m 不足 block_num 时循环自然跳过空闲核。
+- host 侧 `x.numel == 0` 直接返回(op.cpp:1450)。
+- host 侧拒绝 `k % 32 != 0`(ragged k),kernel 内 `assert(this->k % 32 == 0)` 守护。

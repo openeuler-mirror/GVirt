@@ -1691,6 +1691,12 @@ void XliteOpQuant(XRuntime &rt, XTensor &x, XTensor &scale_reciprocal, XTensor &
     }
     size_t m = x.shape[0];
     size_t n = x.shape[1];
+    if (n % 32 != 0) {
+        // The batched engine uses 2D DMA in 32B units; ragged k would silently
+        // corrupt the output (the kernel assert is compiled out under NDEBUG).
+        std::string err_str = DBG_PREFIX + XT_STR(x);
+        throw std::runtime_error(err_str + " k (=shape[1]) must be a multiple of 32!");
+    }
     if (x.dtype == BF16) {
         aclrtlaunch_quant_static_bfloat16_t(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream,
                                             x.ptr, scale_reciprocal.ptr, offset.ptr, out.ptr, m, n);
@@ -1711,6 +1717,12 @@ void XliteOpQuantDyn(XRuntime &rt, XTensor &x, XTensor &scale, XTensor &out, con
     }
     size_t m = x.shape[0];
     size_t n = x.shape[1];
+    if (n % 32 != 0) {
+        // The batched engine uses 2D DMA in 32B units; ragged k would silently
+        // corrupt the output (the kernel assert is compiled out under NDEBUG).
+        std::string err_str = DBG_PREFIX + XT_STR(x);
+        throw std::runtime_error(err_str + " k (=shape[1]) must be a multiple of 32!");
+    }
     if (x.dtype == BF16) {
         aclrtlaunch_quant_dynamic_bfloat16_t(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream,
                                              x.ptr, scale.ptr, out.ptr, num.ptr, m, n);
@@ -1830,6 +1842,50 @@ void XliteOpFusionOperatorMatmulDequantPipeline(XRuntime &rt, XTensor &in, XTens
     }
 }
 
+void XliteOpFusedQuantMatmulDequant(XRuntime &rt, XTensor &x, const XTensor &quantScaleRec,
+                                    const XTensor &quantOffset, XTensor &weight, XTensor &out,
+                                    const XTensor &quantBias, const XTensor &weightScale,
+                                    XTensor &xQuant, XTensor &outScale, const XTensor &num,
+                                    bool dynQuant, bool weightNZ, bool transpose, uint64_t m0,
+                                    uint64_t n0, uint64_t k0)
+{
+    if (IsDummyRuntime(rt) || x.numel == 0) {
+        return;
+    }
+
+    uint64_t m = x.shape[0];
+    uint64_t k = x.shape[1];
+    uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
+    uint32_t aicNum;
+
+    if (k % 32 != 0) {
+        // Both the static and dyn-quant stages are batched-engine only (2D DMA
+        // needs 32B units); ragged k is rejected on the host in both entries.
+        std::string err_str = DBG_PREFIX + XT_STR(x);
+        throw std::runtime_error(err_str + " k (=shape[1]) must be a multiple of 32!");
+    }
+
+    // Keep the AIC matmul tiling identical to XliteOpMatmul so the fused
+    // kernel never changes matmul's tiling policy.
+    PickMatmulTiling(rt.aicNum, m, n, k, XDtypeBit(weight.dtype), quantBias.ptr != nullptr,
+                     weightScale.ptr != nullptr, m0, n0, k0, aicNum);
+
+    if (x.dtype == BF16 && weight.dtype == INT8 && out.dtype == BF16 && xQuant.dtype == INT8 &&
+        (!dynQuant || (outScale.dtype == FP32 && outScale.ptr != nullptr)) &&
+        (dynQuant || (quantScaleRec.ptr != nullptr && quantOffset.ptr != nullptr &&
+                      quantScaleRec.dtype == BF16 && quantOffset.dtype == BF16))) {
+        // In dyn mode, quantScaleRec is null so the kernel infers the mode
+        // from the pointer; in static mode, quantScaleRec is always non-null.
+        aclrtlaunch_fused_quant_matmul_dequant_int8_t(
+            aicNum, rt.stream, x.ptr, quantScaleRec.ptr, quantOffset.ptr, weight.ptr, xQuant.ptr,
+            out.ptr, quantBias.ptr, weightScale.ptr, outScale.ptr, num.ptr, m, n, k, weightNZ,
+            transpose, m0, n0, k0);
+    } else {
+        std::string err_str =
+            DBG_PREFIX + XT_STR(x) + XT_STR(weight) + XT_STR(out) + XT_STR(xQuant);
+        throw std::runtime_error(err_str + "not supported!");
+    }
+}
 void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                                XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                                long outDim, long inDim, XTensor &output, XTensor &outScale,

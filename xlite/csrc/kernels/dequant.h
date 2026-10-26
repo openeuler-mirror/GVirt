@@ -22,7 +22,7 @@ public:
     {
     }
 
-    __aicore__ inline void Init(bool hasScale, uint64_t m0 = 1, uint64_t n0 = 0)
+    __aicore__ inline void Init(uint64_t m0 = 1, uint64_t n0 = 0)
     {
         set_atomic_none();
         set_mask_norm();
@@ -32,7 +32,6 @@ public:
         this->nPad = ROUND_UP(this->nTile, (VECTOR_MAX_BYTESIZE / sizeof(dtype)));
         this->m0 = m0;
         this->n0 = n0;
-        this->hasScale = hasScale;
 
         this->inUbBuf[0] = reinterpret_cast<UBA(dtype)>((uintptr_t)0);
         this->inUbBuf[1] = reinterpret_cast<UBA(dtype)>((uintptr_t)(this->inUbBuf[0] + this->nPad));
@@ -64,6 +63,7 @@ public:
         this->m = m;
         this->n = n;
         this->eventId = 0;
+        this->hasScale = (scale != nullptr);
         if (pnumTokens != nullptr) {
             uint32_t pnumTokensValue = *((__gm__ uint32_t *)pnumTokens);
             this->m = pnumTokensValue < m ? pnumTokensValue : m;
@@ -253,7 +253,7 @@ private:
         GM_ADDR in, GM_ADDR scale, GM_ADDR out, GM_ADDR pnum_tokens, uint32_t m, uint32_t n) \
     {                                                                                        \
         Dequant<dtype> op;                                                                   \
-        op.Init(scale != nullptr, Dequant<dtype>::PickM0(m, n));                             \
+        op.Init(Dequant<dtype>::PickM0(m, n));                                               \
         op.Run(in, scale, out, pnum_tokens, m, n);                                           \
     }
 #else

@@ -25,7 +25,7 @@ public:
                          FUSION_MATMUL_DQ_LINEAR_SWIZZLE);
 #elif defined(__DAV_C220_VEC__)
         // AIC:AIV = 1:2, so m0 shrinked to m0 / 2, wish m0 to be even
-        this->subOp.Init(hasOutScale, m0 / GetTaskRatio() == 0 ? 1 : m0 / GetTaskRatio(), n0);
+        this->subOp.Init(m0 / GetTaskRatio() == 0 ? 1 : m0 / GetTaskRatio(), n0);
 #endif
     }
 

@@ -225,6 +225,19 @@ void XliteOpFusionOperatorMatmulDequantPipeline(
     const XTensor &outScale = XTensor(), const XTensor &num = XTensor(),
     uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE, uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
     uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE);
+// Fused bf16 quant (static per-channel or dynamic per-token) -> int8 matmul
+// (+fixpipe deqScale) -> dequant.  xQuant ([m,k] INT8) is the quant output
+// workspace the AIVs fill and the AICs consume; outScale ([m] FP32) carries
+// the per-token scales in dynQuant mode (workspace, written by quant and read
+// back by dequant inside the kernel).
+void XliteOpFusedQuantMatmulDequant(XRuntime &rt, XTensor &x, const XTensor &quantScaleRec,
+                                    const XTensor &quantOffset, XTensor &weight, XTensor &out,
+                                    const XTensor &quantBias, const XTensor &weightScale,
+                                    XTensor &xQuant, XTensor &outScale, const XTensor &num,
+                                    bool dynQuant, bool weightNZ = false, bool transpose = false,
+                                    uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
+                                    uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
+                                    uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE);
 void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                                XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                                long outDim, long inDim, XTensor &output, XTensor &outScale,

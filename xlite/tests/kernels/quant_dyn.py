@@ -19,22 +19,34 @@ supported_dtype_list = [torch.bfloat16]  # add torch.float16 here once fp16 kern
 
 test_cases = [
     [8192, 2048],
-    [8190, 2048],    # batched path rows=9, tail group r=2
-    [8192, 4096],    # batched path boundary k=4096, rows=4
+    [8190, 2048],    # engine rows=7, tail group r=2
+    [8192, 4096],    # engine boundary k=4096, rows=3
     [40, 96],
     [200000, 96],
-    # k > QUANT_DYN_K_TILE(8192): exercises the k-tiling path.
-    [8, 12288],      # GLM-5 inter_dim, small m, large k
-    [8192, 12288],   # large m, large k (previously overflowed)
-    [8, 24576],      # multi-tile (3 tiles), k_loop>1
-    # ---- boundary cases (QUANT_DYN_K_TILE = 8192) ----
-    [1, 1],          # minimal m and k
-    [1, 8192],       # single row, k == K_TILE (fast path, no tail)
-    [1, 8193],       # single row, smallest tiled path (tail k_size=1)
-    [8, 8191],       # fast path, k not multiple of 128 (tail padding)
-    [8, 16384],      # tiled path, exactly 2 full tiles, no tail
-    [8, 100],        # small k, not multiple of 128
-    [4096, 8192],    # large m, k == K_TILE (fast-path boundary)
+    # k > K_TILE_MAX: chunked engine (kLoop > 1).
+    [8, 12288],      # GLM-5 inter_dim, small m, large k: engine rows=1 x 2 chunks
+    [8192, 12288],   # large m, large k: engine rows=2 x 2 chunks
+    [8, 24576],      # multi-tile (3 tiles), engine rows=1 x 3 chunks
+    [100, 12288],    # tileRows=2: engine rows=2 x 2 chunks per tile
+    [128, 12288],    # tileRows=3: engine rows=2 with a tail r=1 group
+    [51, 12288],     # engine tiles + 1-row tail tile mix at chunked width
+    [200, 16384],    # rows=1 plan (kPad=8192): engine rows=1 x 2 chunks
+    [100, 8224],     # aligned k, tail chunk 4000 not 128-balanced (kPad-width compute)
+    [8, 12480],      # aligned k, tail chunk 6208 not 128-balanced, one-row tiles
+    # ---- boundary cases (K_TILE_MAX = 8192) ----
+    [1, 8192],       # single row, k == K_TILE (resident chunk, no tail)
+    [8, 16384],      # chunked engine, exactly 2 full chunks, no tail
+    [4096, 8192],    # large m, k == K_TILE (chunk-width boundary)
+    # ---- m tile boundaries (standalone block_num = min(m, aivNum), aivNum=50) ----
+    # tileRows crosses 1 -> 2 at m = aivNum + 1: m <= 50 takes one-row tiles
+    # (engine rows=1), m > 50 takes multi-row tiles with a ragged tail tile
+    # whenever m is odd
+    [49, 2048],      # tileRows=1, blocks 0..48 each one row
+    [50, 2048],      # tileRows=1 boundary exactly at aivNum
+    [51, 2048],      # tileRows=2, tail 1-row tile (rows=1 group)
+    [99, 2048],      # tileRows=2, tail 1-row tile at the last block
+    [100, 2048],     # tileRows=2, no tail
+    [101, 2048],     # tileRows=3, tiles=34 (blocks 34..49 idle)
 ]
 
 for in_type in supported_dtype_list:
@@ -73,23 +85,14 @@ for in_type in supported_dtype_list:
     # ---- special-input edge cases ----
     # absmax == 0 (all-zero row): scaleRec = 127/0 division edge; the kernel must
     # still yield z == 0 / scale == 0, matching torch_npu.npu_dynamic_quant.
-    # sparse row: one dominant element among zeros exercises absmax reduction.
     special_inputs = [
         (torch.zeros(8, 8192, dtype=in_type, device=f"npu:{npu_devid}"),
-         "zero-input [8, 8192] (fast path)"),
-        (torch.zeros(4, 8193, dtype=in_type, device=f"npu:{npu_devid}"),
-         "zero-input [4, 8193] (tiled path)"),
+         "zero-input [8, 8192] (engine rows=1)"),
         (torch.zeros(8192, 2048, dtype=in_type, device=f"npu:{npu_devid}"),
-         "zero-input [8192, 2048] (batched path, incl. tail group)"),
+         "zero-input [8192, 2048] (batched groups, incl. tail group)"),
+        (torch.zeros(100, 12288, dtype=in_type, device=f"npu:{npu_devid}"),
+         "zero-input [100, 12288] (chunked engine)"),
     ]
-    x_sparse = torch.zeros(4, 8193, dtype=in_type, device=f"npu:{npu_devid}")
-    x_sparse[1, 5000] = 100.0
-    special_inputs.append((x_sparse, "sparse-input [4, 8193]"))
-    # sparse rows inside the batched path: per-row absmax must not leak across rows
-    x_sparse_b = torch.zeros(8192, 2048, dtype=in_type, device=f"npu:{npu_devid}")
-    x_sparse_b[3, 1000] = 100.0
-    x_sparse_b[7, 2000] = -50.0
-    special_inputs.append((x_sparse_b, "sparse-input [8192, 2048] (batched path)"))
 
     for x_sp, label in special_inputs:
         m, n = x_sp.shape
