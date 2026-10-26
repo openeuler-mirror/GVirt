@@ -429,8 +429,7 @@ public:
                     CopyGmToUbufAligned(in[curr] + start, kScaleCache + block * blockSize,
                                         count * sizeof(half));
                 }
-                // Wait until the previous row releases mrgSortBuf0.
-                // TODO: Check whether mrgSortBuf0 synchronization can be simplified.
+                // in[curr] is released before sorting; mrgSortBuf0 needs its own fence.
                 set_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID6);
                 CopyGmToUbufAligned(mrgSortBuf0, scores + idx * tileSizeOfCachedKV,
