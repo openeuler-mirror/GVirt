@@ -485,32 +485,34 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
                                  ": position shape mismatch, expect 1D len or 2D cols >= " +
                                  std::to_string(batchedTokens));
     }
-    uint32_t expectedKvCacheNum = blockSizes.size();
-    if (attnMeta.slotMapping.size() != expectedKvCacheNum) {
+    // slotMapping carries exactly one table (main KV token slots; state pages update in place
+    // and tail slots are computed in C++). blockTables[0] is the main KV block table validated
+    // against blockSizes[0]; every further family slot ([1]=mamba state indices, [2]=GLM tail
+    // ring, ...) is a per-request table of at least one column.
+    if (attnMeta.slotMapping.size() != 1) {
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": slotMapping size mismatch, expect " +
-                                 std::to_string(expectedKvCacheNum) + " got " +
+                                 ": slotMapping size mismatch, expect 1 got " +
                                  std::to_string(attnMeta.slotMapping.size()));
     }
-    if (attnMeta.blockTables.size() != expectedKvCacheNum) {
+    if (attnMeta.blockTables.empty()) {
         throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                 ": blockTables size mismatch, expect " +
-                                 std::to_string(expectedKvCacheNum) + " got " +
-                                 std::to_string(attnMeta.blockTables.size()));
+                                 ": blockTables must carry at least the main KV table");
     }
-    for (size_t i = 0; i < expectedKvCacheNum; i++) {
+    for (size_t i = 0; i < attnMeta.slotMapping.size(); i++) {
         if (attnMeta.slotMapping[i].shape.size() != 1 ||
             attnMeta.slotMapping[i].shape[0] < batchedTokens) {
             throw std::runtime_error(
                 std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                 ": slotMapping shape mismatch, expect 1D len >= " + std::to_string(batchedTokens));
         }
-        uint32_t maxNumBlocks = DIV_ROUND_UP(maxTotalLens, blockSizes[i]);
+    }
+    for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
+        uint32_t minNumBlocks = i == 0 ? DIV_ROUND_UP(maxTotalLens, blockSizes[0]) : 1;
         if (attnMeta.blockTables[i].shape.size() != 2 || attnMeta.blockTables[i].shape[0] < batch ||
-            attnMeta.blockTables[i].shape[1] < maxNumBlocks) {
+            attnMeta.blockTables[i].shape[1] < minNumBlocks) {
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                      ": blockTables shape mismatch, expect 2D [batch, >= " +
-                                     std::to_string(maxNumBlocks) + "]");
+                                     std::to_string(minNumBlocks) + "]");
         }
     }
 }
@@ -564,8 +566,10 @@ void XRuntime::VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, std::vector<uint
 
     // queryStartLoc
     {
-        std::vector<uint32_t> host(batch);
-        size_t bytes = batch * XDtypeBit(INT32) / 8;
+        const uint32_t qslLen = attnMeta.queryStartLoc.shape[0];
+        const uint32_t nCheck = qslLen > batch + 1 ? batch + 1 : qslLen;
+        std::vector<uint32_t> host(nCheck);
+        size_t bytes = nCheck * XDtypeBit(INT32) / 8;
         CHECK_ACL(aclrtMemcpyAsync(host.data(), bytes, attnMeta.queryStartLoc.ptr, bytes,
                                    ACL_MEMCPY_DEVICE_TO_HOST, stream));
         CHECK_ACL(aclrtSynchronizeStream(stream));
@@ -575,6 +579,9 @@ void XRuntime::VerifyAttnMetaV2(const XModelAttnMeta &attnMeta, std::vector<uint
                 fail("queryStartLoc", i, host[i], acc, __LINE__);
             }
             acc += attnMeta.lensCpu[i];
+        }
+        if (nCheck > batch && host[batch] != acc) {
+            fail("queryStartLoc", batch, host[batch], acc, __LINE__);
         }
     }
 

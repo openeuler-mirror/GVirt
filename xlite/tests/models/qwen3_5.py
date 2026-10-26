@@ -32,10 +32,9 @@ forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     block_size = 128
     from xlite._C import (
-        Runtime, ModelConfig, AttnMeta, AttnMetaV2, AttnHybrid, Model,
+        Runtime, ModelConfig, AttnMetaV2, AttnHybrid, Model,
     )
-    import numpy as np
-    from tests.models.xlite_utils import prepare_xlite_attnmeta_v2, prepare_xlite_gdn_metadata
+    from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
 
 
 def _mha_qkv_weight(attn, head_dim: int, n_heads: int):
@@ -701,7 +700,7 @@ class Qwen3_5(nn.Module):
                 args, event = task
                 tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream = args
                 self.xlite_rt.multi_task_parallel = True
-                self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream)
+                self.xlite_model.forward_and_get_logits_v2(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, [freqs_cis], logits_indices, logits, stream)
                 event.set()
 
     @torch.inference_mode()
@@ -711,8 +710,8 @@ class Qwen3_5(nn.Module):
         tokens1 = tokens[:, mid:]
         tokens0 = tokens0.contiguous().view(tokens0.size(0), tokens0.size(1))
         tokens1 = tokens1.contiguous().view(tokens1.size(0), tokens1.size(1))
-        attn_meta0 = self.prepare_xlite_attnmeta(tokens0, start_pos)
-        attn_meta1 = self.prepare_xlite_attnmeta(tokens1, start_pos + mid)
+        attn_meta0 = self.prepare_xlite_attnmeta_v2(tokens0, start_pos)
+        attn_meta1 = self.prepare_xlite_attnmeta_v2(tokens1, start_pos + mid)
         stream = torch.npu.current_stream().npu_stream
         logits0 = torch.empty(world_size, tokens0.size(0), self.args.vocab_size // world_size, device=tokens.device)
         logits1 = torch.empty(world_size, tokens1.size(0), self.args.vocab_size // world_size, device=tokens.device)
@@ -996,8 +995,12 @@ class Qwen3_5(nn.Module):
         if self.args.tie_word_embeddings:
             self.lm_head.weight.data = self.embed_tokens.weight.data
 
+        # CopyGmToL1 DataCopyParams strides are uint16_t: n - n0 > 65535 overflows,
+        # so large-vocab lm_head (e.g. 248320) must stay ND for the head matmul.
+        head_nz = self.xlite_weight_nz and self.args.vocab_size <= 65536
         if self.xlite_weight_nz:
-            self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
+            if head_nz:
+                self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
             for layer_id, layer in enumerate(self.layers):
                 if layer.is_full_attention:
                     # q/k/v stay ND until packed as [Q|K|V|Gate] in init_xlite_model.
@@ -1200,23 +1203,11 @@ class Qwen3_5(nn.Module):
                 kv_size += ssm_state.numel() * ssm_state.element_size()
         return kv_size
 
-    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
-        batch = tokens.size(0)
-        seqlen = tokens.size(1)
-        step = (self.args.max_seq_len + block_size - 1) // block_size
-        block_num = (seqlen + start_pos + block_size - 1) // block_size
-        attn_meta = AttnMeta()
-        attn_meta.lens = [seqlen] * batch
-        attn_meta.cached_lens = [start_pos] * batch
-        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-        block_indices = np.arange(block_num, dtype=np.uint32)
-        attn_meta.block_tables_cpu = batch_indices * step + block_indices
-        attn_meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
-            .repeat(batch).to(tokens.device)
-        return prepare_xlite_gdn_metadata(attn_meta, tokens, start_pos, self.layers)
-
     def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
-        meta = prepare_xlite_attnmeta_v2(
-            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size]
+        # Hybrid family-slot contract: stable nonzero mamba state pages per
+        # request; C++ derives the per-layer paged GDN operands internally.
+        pages = torch.arange(1, tokens.size(0) + 1, dtype=torch.int32)
+        return prepare_xlite_attnmeta_v2(
+            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size],
+            gdn_state_pages=pages.to(tokens.device),
         )
-        return prepare_xlite_gdn_metadata(meta, tokens, start_pos, self.layers)

@@ -518,6 +518,11 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
     if (IsDummyRuntime(rt)) {
         return;
     }
+    // embed kernel reads ids as int32; an int64 tensor would be silently misparsed.
+    if (in.dtype != INT32) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(in) + " embed ids must be INT32 (got dtype " +
+                                 std::to_string(static_cast<int>(in.dtype)) + ")");
+    }
     KERNEL_PTR_TYPE(embed_kernel) * launchKernel;
     if (EachXDtype(FP16, embed, out)) {
         launchKernel = aclrtlaunch_embed_kernel_float16_t;

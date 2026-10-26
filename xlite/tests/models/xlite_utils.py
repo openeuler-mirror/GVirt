@@ -16,16 +16,19 @@ def prepare_xlite_attnmeta_v2(
     start_pos: int,
     max_seq_len: int,
     block_sizes,
+    gdn_state_pages: torch.Tensor | None = None,
 ):
     """Build AttnMetaV2 with device-tensor query_start_loc / slot_mapping /
     block_tables. The C++ side skips host computation and H2D copies.
 
     Uniform batch (lens==seqlen, cached_lens==start_pos): query_start_loc ==
-    arange(batch)*seqlen, and the contiguous block table makes the slot gather
-    collapse to i*step*block_size + pos.
+    arange(batch+1)*seqlen (0-prefixed prefix sum), and the contiguous block
+    table makes the slot gather collapse to i*step*block_size + pos.
 
     One block_tables / slot_mapping entry per block_sizes element, matching
-    C++'s per-kv-cache slotMapping/blockTables vectors.
+    C++'s per-kv-cache slotMapping/blockTables vectors. Hybrid models pass
+    gdn_state_pages ([batch] int32, nonzero) which is appended as
+    block_tables[1] = mamba state indices [batch, 1] (block id == state slot).
     """
     batch = tokens.size(0)
     seqlen = tokens.size(1)
@@ -38,8 +41,8 @@ def prepare_xlite_attnmeta_v2(
     meta.cached_lens = torch.full((batch,), start_pos, dtype=torch.int32) \
         .to(tokens.device, non_blocking=True)
 
-    # Uniform batch: cumsum([seqlen]*batch) == arange(batch)*seqlen.
-    meta.query_start_loc = (torch.arange(batch, dtype=torch.int32) * seqlen) \
+    # 0-prefixed cumsum of lens for a uniform batch == arange(batch+1)*seqlen.
+    meta.query_start_loc = (torch.arange(batch + 1, dtype=torch.int32) * seqlen) \
         .to(tokens.device, non_blocking=True)
 
     meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
@@ -71,28 +74,16 @@ def prepare_xlite_attnmeta_v2(
             torch.from_numpy(slot_mapping_2d.reshape(-1)).to(tokens.device, non_blocking=True)
         )
 
+    # Hybrid family-slot contract: block_tables[1] = mamba state indices
+    # [batch, 1] int32 (block id == state slot, page 0 reserved). The C++
+    # side derives the per-layer paged GDN operands from this, cachedLens
+    # and queryStartLoc — no separate gdn_* metadata fields anymore.
+    # NOTE: pybind def_readwrite assignment copies the list in — the table
+    # list must be complete BEFORE assigning meta.block_tables.
+    if gdn_state_pages is not None:
+        block_tables.append(
+            gdn_state_pages.to(torch.int32).to(tokens.device, non_blocking=True).reshape(-1, 1)
+        )
     meta.block_tables = block_tables
     meta.slot_mapping = slot_mapping
-    return meta
-
-
-def prepare_xlite_gdn_metadata(meta, tokens, start_pos, layers):
-    """Select stable native state pages for this uniform standalone model batch.
-
-    Page zero is reserved. Real serving integrations supply their scheduler's
-    independent Conv/SSM page mappings instead of this test-only row mapping.
-    """
-    batch, length = tokens.shape
-    pages = torch.arange(1, batch + 1, dtype=torch.int32, device=tokens.device)
-    starts = torch.arange(batch + 1, dtype=torch.int32, device=tokens.device) * length
-    initial = torch.full((batch,), int(start_pos > 0), dtype=torch.int32, device=tokens.device)
-    empty = torch.empty(0, dtype=torch.int32, device=tokens.device)
-    active = [not layer.is_full_attention for layer in layers]
-    meta.gdn_conv_indices = [pages if linear else empty for linear in active]
-    meta.gdn_ssm_indices = [pages if linear else empty for linear in active]
-    # Use the Prefill API for first-token initialization as well as multi-token queries.
-    if length != 1 or start_pos == 0:
-        meta.gdn_query_starts = [starts if linear else empty for linear in active]
-        meta.gdn_conv_initial = [initial if linear else empty for linear in active]
-        meta.gdn_ssm_initial = [initial if linear else empty for linear in active]
     return meta

@@ -751,8 +751,10 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
         throw std::runtime_error(
             "ForwardAttnLinear: host lens not populated; PrepareAttn must run first");
     }
-    bool prefill = !rt._gdnQueryStarts.empty();
-    if (!rt.IsDummyRuntime() && !prefill && (m != batch || !rt._linearDecodeStep)) {
+    // prefill vs decode is decided host-side in PrepareAttn (_linearDecodeStep = every request
+    // single-token with cached state); anything else runs the packed prefill path.
+    bool prefill = !rt._linearDecodeStep;
+    if (!rt.IsDummyRuntime() && !prefill && m != batch) {
         throw std::runtime_error("multi-token native GDN requires prefill metadata");
     }
 
@@ -1836,10 +1838,10 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XT
     if (batch < input.shape[0]) {
         XTensor &x = rt.GetTensor({batch, _c.hiddenSize}, input.dtype, DBG_LOC);
         XliteOpEmbed(rt, indices, input, 0, input.shape[0], x);
-        XliteOpMatmul(rt, x, head, localOutput, _c.weightNZ);
+        XliteOpMatmul(rt, x, head, localOutput, _c.weightNZ && _c.vocabSize <= 65536);
         rt.PutTensor(x);
     } else {
-        XliteOpMatmul(rt, input, head, localOutput, _c.weightNZ);
+        XliteOpMatmul(rt, input, head, localOutput, _c.weightNZ && _c.vocabSize <= 65536);
     }
 
     if (_c.defTpSize > 1) {
@@ -1858,43 +1860,56 @@ void XModel::PrepareHybridMetadata(XRuntime &rt, XModelAttnMeta &attnMeta)
         return;
     }
     const size_t batch = attnMeta.lensCpu.size();
-    if (batch == 0 || batch != attnMeta.cachedLensCpu.size() ||
-        attnMeta.gdnConvIndices.size() != _c.nLayers ||
-        attnMeta.gdnSsmIndices.size() != _c.nLayers) {
-        throw std::runtime_error("hybrid forward requires resolved per-layer GDN metadata");
+    if (batch == 0 || batch != attnMeta.cachedLensCpu.size()) {
+        throw std::runtime_error("hybrid forward requires resolved lens/cachedLens");
     }
-    bool prefill = !attnMeta.gdnQueryStarts.empty();
-    if (prefill && (attnMeta.gdnQueryStarts.size() != _c.nLayers ||
-                    attnMeta.gdnConvInitial.size() != _c.nLayers ||
-                    attnMeta.gdnSsmInitial.size() != _c.nLayers)) {
-        throw std::runtime_error("GDN prefill requires per-layer starts and initial flags");
+    // blockTables[1..] = mamba state indices [batch, 1], one table per mamba cache group;
+    // zero-copy aliases of the caller's V2 metadata.
+    if (attnMeta.blockTables.size() < 2) {
+        throw std::runtime_error(
+            "hybrid forward requires family blockTables ([0]=main KV, [1..]=mamba state indices)");
     }
-    for (size_t b = 0; b < batch; ++b) {
-        if (!prefill && (attnMeta.lensCpu[b] != 1 || attnMeta.cachedLensCpu[b] == 0)) {
-            throw std::runtime_error("fresh or multi-token GDN queries require prefill metadata");
+    const size_t nTables = attnMeta.blockTables.size() - 1;
+    // KDA position p belongs to table 1 + p % nTables (vLLM assigns groups round-robin).
+    for (size_t g = 0; g < nTables; ++g) {
+        const XTensor &tbl = attnMeta.blockTables[1 + g];
+        if (tbl.dtype != INT32 || tbl.shape.size() != 2 || tbl.shape[0] < batch ||
+            tbl.shape[1] != 1 || tbl.ptr == nullptr) {
+            throw std::runtime_error(
+                "hybrid forward requires blockTables[1..] mamba state indices [batch, 1] int32");
         }
     }
-    auto vectorMatches = [](const XTensor &t, size_t count) {
-        return t.dtype == INT32 && t.shape == std::vector<size_t>{count} &&
-               t.stride == std::vector<size_t>{1} && t.ptr != nullptr;
-    };
+    if (attnMeta.queryStartLoc.dtype != INT32 || attnMeta.queryStartLoc.shape.size() != 1 ||
+        attnMeta.queryStartLoc.shape[0] < batch + 1 || attnMeta.queryStartLoc.ptr == nullptr) {
+        throw std::runtime_error(
+            "hybrid forward requires queryStartLoc [batch+1] int32 (0-prefixed)");
+    }
+    if (attnMeta.cachedLens.dtype != INT32 || attnMeta.cachedLens.shape.size() != 1 ||
+        attnMeta.cachedLens.shape[0] < batch || attnMeta.cachedLens.ptr == nullptr) {
+        throw std::runtime_error("hybrid forward requires cachedLens [batch] int32");
+    }
+    // Flatten the single-column [batch, 1] state table to 1D page ids. Pass an explicit
+    // std::vector — a bare `{batch}` binds to View(size_t newDim, uint32_t dim), a dim-resize
+    // and a silent no-op when newDim == shape[0].
+    size_t kdaPos = 0;
     for (uint32_t i = 0; i < _c.nLayers; ++i) {
         if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
+            rt._gdnConvIndices.emplace_back();
+            rt._gdnSsmIndices.emplace_back();
+            rt._gdnQueryStarts.emplace_back();
+            rt._gdnConvInitial.emplace_back();
+            rt._gdnSsmInitial.emplace_back();
             continue;
         }
-        if (!vectorMatches(attnMeta.gdnConvIndices[i], batch) ||
-            !vectorMatches(attnMeta.gdnSsmIndices[i], batch) ||
-            (prefill && (!vectorMatches(attnMeta.gdnQueryStarts[i], batch + 1) ||
-                         !vectorMatches(attnMeta.gdnConvInitial[i], batch) ||
-                         !vectorMatches(attnMeta.gdnSsmInitial[i], batch)))) {
-            throw std::runtime_error("invalid per-layer GDN metadata descriptor");
-        }
+        XTensor statePages = attnMeta.blockTables[1 + kdaPos % nTables];
+        statePages.View(std::vector<size_t>{batch});
+        rt._gdnConvIndices.push_back(statePages);
+        rt._gdnSsmIndices.push_back(statePages);
+        rt._gdnQueryStarts.push_back(attnMeta.queryStartLoc);
+        rt._gdnConvInitial.push_back(attnMeta.cachedLens);
+        rt._gdnSsmInitial.push_back(attnMeta.cachedLens);
+        ++kdaPos;
     }
-    rt._gdnConvIndices = attnMeta.gdnConvIndices;
-    rt._gdnSsmIndices = attnMeta.gdnSsmIndices;
-    rt._gdnQueryStarts = attnMeta.gdnQueryStarts;
-    rt._gdnConvInitial = attnMeta.gdnConvInitial;
-    rt._gdnSsmInitial = attnMeta.gdnSsmInitial;
 }
 
 void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
@@ -1971,7 +1986,6 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
 {
     PrepareHybridMetadata(rt, attnMeta);
     CheckForwardParam(rt, kvCache);
-
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
                    _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
@@ -2320,8 +2334,8 @@ size_t XModel::DummyRun()
     };
 
     // v2 attnMeta for DummyRun: device tensors only need shape to pass CheckAttnMetaV2
-    // (dummy runtime never dereferences their nullptr payloads). One block_tables /
-    // slot_mapping entry per blockSizes element, sized to the per-cache maxNumBlocks.
+    // (dummy runtime never dereferences their nullptr payloads). Family slots: one main-KV
+    // block table + single slot mapping, plus a mamba state-index table for hybrid models.
     auto buildV2AttnMeta = [&](uint32_t batchSize, uint32_t seqLen, uint32_t cachedLen) {
         XModelAttnMeta attnMeta;
         attnMeta.version = 2;
@@ -2334,14 +2348,17 @@ size_t XModel::DummyRun()
         }
         attnMeta.lens.Init({batchSize}, INT32, nullptr);
         attnMeta.cachedLens.Init({batchSize}, INT32, nullptr);
-        attnMeta.queryStartLoc.Init({batchSize}, INT32, nullptr);
+        attnMeta.queryStartLoc.Init({batchSize + 1}, INT32, nullptr);
         attnMeta.position.Init({batchedTokens}, INT64, nullptr);
         for (uint32_t bs : _c.blockSizes) {
             uint32_t maxNumBlocks = DIV_ROUND_UP(totalLens, bs);
             attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, maxNumBlocks}, INT32,
                                               nullptr);
-            attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);
         }
+        if (_c.attnType == XMODEL_ATTN_HYBRID && attnMeta.blockTables.size() < 2) {
+            attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, 1}, INT32, nullptr);
+        }
+        attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);
         return attnMeta;
     };
 

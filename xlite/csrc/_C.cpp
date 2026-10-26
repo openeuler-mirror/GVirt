@@ -20,11 +20,6 @@ struct CModelAttnMeta {
     std::vector<uint32_t> cachedLens;
     std::vector<std::vector<uint32_t>> blockTablesList;
     at::Tensor positions;
-    std::vector<at::Tensor> gdnConvIndices;
-    std::vector<at::Tensor> gdnSsmIndices;
-    std::vector<at::Tensor> gdnQueryStarts;
-    std::vector<at::Tensor> gdnConvInitial;
-    std::vector<at::Tensor> gdnSsmInitial;
 };
 
 struct CModelAttnMetaV2 {
@@ -33,14 +28,15 @@ struct CModelAttnMetaV2 {
     at::Tensor positions;      // [batchedTokens] or [num_dims, batchedTokens] (mrope) int64 device
     at::Tensor lens;           // [batch] int32 device
     at::Tensor cachedLens;     // [batch] int32 device
-    at::Tensor queryStartLoc;  // [batch] int32 device, prefix-sum of lens
-    std::vector<at::Tensor> slotMapping;  // [batchedTokens] int32 device, per-kv-cache
-    std::vector<at::Tensor> blockTables;  // [batch, maxNumBlocks] int32 device, per-kv-cache
-    std::vector<at::Tensor> gdnConvIndices;
-    std::vector<at::Tensor> gdnSsmIndices;
-    std::vector<at::Tensor> gdnQueryStarts;
-    std::vector<at::Tensor> gdnConvInitial;
-    std::vector<at::Tensor> gdnSsmInitial;
+    at::Tensor queryStartLoc;  // [batch+1] int32 device, 0-prefixed prefix-sum of lens
+    std::vector<at::Tensor> slotMapping;  // [batchedTokens] int32 device; always a single table:
+                                          // [0]=main KV token slots (state pages update in place;
+                                          // tail slots are computed in C++ from the paging formula)
+    std::vector<at::Tensor> blockTables;  // [batch, maxNumBlocks] int32 device; family slots
+                                          // (globally enumerated by cache kind):
+                                          // [0]=main KV block table (all models);
+                                          // [1]=mamba state indices (linear-attention models);
+                                          // [2]=tail ring block table (GLM-5.3-Flash only)
 };
 
 class _CModel
@@ -888,33 +884,6 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
     }
 }
 
-template <typename Meta>
-static void InitGdnMetadata(XRuntime &rt, XModelAttnMeta &out, const Meta &in)
-{
-    rt.SetCurrentContext();
-    int32_t device;
-    CHECK_ACL(aclrtGetDevice(&device));
-    const DebugSrcLoc loc = DBG_LOC;
-    auto copy = [device, loc](std::vector<XTensor> &dst, const std::vector<at::Tensor> &tensors) {
-        dst.resize(tensors.size());
-        for (size_t i = 0; i < tensors.size(); ++i) {
-            if (!tensors[i].defined() || tensors[i].numel() == 0) {
-                continue;
-            }
-            if (tensors[i].device().type() != c10::DeviceType::PrivateUse1 ||
-                tensors[i].device().index() != device) {
-                throw std::runtime_error("GDN metadata must reside on the runtime NPU");
-            }
-            InitXTensor(dst[i], tensors[i], loc);
-        }
-    };
-    copy(out.gdnConvIndices, in.gdnConvIndices);
-    copy(out.gdnSsmIndices, in.gdnSsmIndices);
-    copy(out.gdnQueryStarts, in.gdnQueryStarts);
-    copy(out.gdnConvInitial, in.gdnConvInitial);
-    copy(out.gdnSsmInitial, in.gdnSsmInitial);
-}
-
 void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                         std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
                         at::Tensor &output, uint64_t currStream)
@@ -924,7 +893,6 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
-    InitGdnMetadata(rt, _attnMeta, attnMeta);
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     std::vector<at::Tensor> freqsCisVec = {freqsCis};
@@ -940,7 +908,6 @@ void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
-    InitGdnMetadata(rt, _attnMeta, attnMeta);
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
     InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
@@ -966,7 +933,6 @@ void _CModel::ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
-    InitGdnMetadata(rt, _attnMeta, attnMeta);
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
     InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
@@ -994,7 +960,6 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
-    InitGdnMetadata(rt, _attnMeta, attnMeta);
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
     InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
@@ -1144,7 +1109,6 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
-    InitGdnMetadata(rt, _attnMeta, attnMeta);
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     std::vector<at::Tensor> freqsCisVec = {freqsCis};
@@ -1243,7 +1207,6 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
-    InitGdnMetadata(rt, _attnMeta, attnMeta);
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
     InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     at::Tensor ids = inputIds.value_or(at::Tensor());
@@ -3086,12 +3049,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("lens", &CModelAttnMeta::lens)
         .def_readwrite("cached_lens", &CModelAttnMeta::cachedLens)
         .def_readwrite("block_tables_cpu", &CModelAttnMeta::blockTablesList)
-        .def_readwrite("positions", &CModelAttnMeta::positions)
-        .def_readwrite("gdn_conv_indices", &CModelAttnMeta::gdnConvIndices)
-        .def_readwrite("gdn_ssm_indices", &CModelAttnMeta::gdnSsmIndices)
-        .def_readwrite("gdn_query_starts", &CModelAttnMeta::gdnQueryStarts)
-        .def_readwrite("gdn_conv_initial", &CModelAttnMeta::gdnConvInitial)
-        .def_readwrite("gdn_ssm_initial", &CModelAttnMeta::gdnSsmInitial);
+        .def_readwrite("positions", &CModelAttnMeta::positions);
 
     py::class_<CModelAttnMetaV2>(m, "AttnMetaV2")
         .def(py::init<>())
@@ -3102,12 +3060,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("cached_lens_cpu", &CModelAttnMetaV2::cachedLensCpu)
         .def_readwrite("query_start_loc", &CModelAttnMetaV2::queryStartLoc)
         .def_readwrite("slot_mapping", &CModelAttnMetaV2::slotMapping)
-        .def_readwrite("block_tables", &CModelAttnMetaV2::blockTables)
-        .def_readwrite("gdn_conv_indices", &CModelAttnMetaV2::gdnConvIndices)
-        .def_readwrite("gdn_ssm_indices", &CModelAttnMetaV2::gdnSsmIndices)
-        .def_readwrite("gdn_query_starts", &CModelAttnMetaV2::gdnQueryStarts)
-        .def_readwrite("gdn_conv_initial", &CModelAttnMetaV2::gdnConvInitial)
-        .def_readwrite("gdn_ssm_initial", &CModelAttnMetaV2::gdnSsmInitial);
+        .def_readwrite("block_tables", &CModelAttnMetaV2::blockTables);
 
     py::enum_<XModelAttnType>(m, "AttnType")
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)

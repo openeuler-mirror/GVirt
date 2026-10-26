@@ -57,17 +57,12 @@ struct XModelAttnMeta {
     XTensor position;
 
     /* only for version 2 */
-    std::vector<XTensor> blockTables;
-    std::vector<XTensor> slotMapping;
+    std::vector<XTensor> blockTables;  // family slots: [0]=main KV, [1]=mamba state indices
+                                       // (hybrid), [2]=tail ring (GLM only)
+    std::vector<XTensor> slotMapping;  // single main-KV token slot table
     XTensor queryStartLoc;
     XTensor lens;
     XTensor cachedLens;
-    // Resolved GDN metadata, indexed by model layer; caller owns all storage.
-    std::vector<XTensor> gdnConvIndices;
-    std::vector<XTensor> gdnSsmIndices;
-    std::vector<XTensor> gdnQueryStarts;
-    std::vector<XTensor> gdnConvInitial;
-    std::vector<XTensor> gdnSsmInitial;
 };
 
 enum commType {
@@ -213,6 +208,9 @@ public:
     // Host-side: true when this step is decode (seqlen==1 and all cached_lens>0).
     // Avoids D2H sync via GetFirstAttnPosition in every linear layer.
     bool _linearDecodeStep = false;
+    // Per-layer GDN kernel operands, derived zero-copy in XModel::PrepareHybridMetadata from the
+    // family metadata (blockTables[1] state pages, queryStartLoc, cachedLens); full-attention
+    // layer entries stay default-constructed. Indexed by model layer.
     std::vector<XTensor> _gdnConvIndices;
     std::vector<XTensor> _gdnSsmIndices;
     std::vector<XTensor> _gdnQueryStarts;
@@ -233,8 +231,8 @@ public:
                                             // {_slotMapping}, v2 -> attnMeta.slotMapping
     XTensor _attnLens;        // [batch] int32, ref: v0/1 -> _lens, v2 -> attnMeta.lens
     XTensor _attnCachedLens;  // [batch] int32, ref: v0/1 -> _cachedLens, v2 -> attnMeta.cachedLens
-    XTensor _attnQueryStartLoc;  // [batch] int32, ref: v0/1 -> _queryStartLoc, v2 ->
-                                 // attnMeta.queryStartLoc
+    XTensor _attnQueryStartLoc;  // [batch] (v0/1 exclusive prefix) / [batch+1] (v2, 0-prefixed)
+                                 // int32, ref: v0/1 -> _queryStartLoc, v2 -> attnMeta.queryStartLoc
     XTensor _position;           // [maxBatchedTokens] int64, internal buffer (malloc+free in dtor)
     XTensor _blockTables;  // [maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)] int32, internal buffer
     XTensor _slotMapping;  // [maxBatchedTokens] int32, internal buffer

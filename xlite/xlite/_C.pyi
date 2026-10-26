@@ -382,10 +382,6 @@ class AttnMeta:
 
     lens: List[int] = ...
     """Per-sample query lengths."""
-    gdn_conv_indices: List[torch.Tensor] = ...
-    """Native conv page indices, aligned with model layers; no cache allocation."""
-    gdn_ssm_indices: List[torch.Tensor] = ...
-    """Native SSM page indices for this step, aligned with model layers."""
     cached_lens: List[int] = ...
     """Per-sample cached lengths."""
     block_tables_cpu: List[List[int]] = ...
@@ -394,15 +390,6 @@ class AttnMeta:
     """Position tensor for version-1 attention metadata, shape ``[batched_tokens]`` or
     ``[num_dims, batched_tokens]`` (mrope) int64 device; the token (last) dim may exceed
     ``batched_tokens``, and 2D tensors may carry a dim-0 row pitch (non-contiguous)."""
-
-    gdn_query_starts: List[torch.Tensor] = ...
-    """Per-layer contiguous INT32[B+1] packed query boundaries, required for fresh/multi-token queries."""
-
-    gdn_conv_initial: List[torch.Tensor] = ...
-    """Per-layer INT32[B] flags: zero resets Conv history; nonzero retains it."""
-
-    gdn_ssm_initial: List[torch.Tensor] = ...
-    """Per-layer INT32[B] flags: zero resets SSM state; nonzero retains it."""
 
 class AttnMetaV2:
     """Device-tensor attention metadata for the V2 forward path.
@@ -423,11 +410,13 @@ class AttnMetaV2:
             exceed ``batched_tokens``, and 2D tensors may carry a dim-0 row pitch.
         lens_cpu (List[int]): Per-sample query lengths (host, for tile-size selection).
         cached_lens_cpu (List[int]): Per-sample cached lengths (host, for tile-size selection).
-        query_start_loc (torch.Tensor): Prefix-sum of lens, shape ``[batch]`` int32.
-        slot_mapping (Sequence[torch.Tensor]): Slot indices, each shape
-            ``[batched_tokens]`` int32 device, one per kv cache.
-        block_tables (Sequence[torch.Tensor]): Padded block tables, each shape
-            ``[batch, max_num_blocks]`` int32 device, one per kv cache.
+        query_start_loc (torch.Tensor): Prefix-sum of lens, shape ``[batch+1]`` int32.
+        slot_mapping (Sequence[torch.Tensor]): Main-KV token slot table, shape
+            ``[batched_tokens]`` int32 device; always a single table.
+        block_tables (Sequence[torch.Tensor]): Family block tables, each shape
+            ``[batch, max_num_blocks]`` int32 device: ``[0]``=main KV (all models),
+            ``[1]``=mamba state indices (linear-attention models),
+            ``[2]``=tail ring (GLM-5.3-Flash only).
     """
 
     lens: torch.Tensor = ...
@@ -443,24 +432,11 @@ class AttnMetaV2:
     cached_lens_cpu: List[int] = ...
     """Per-sample cached lengths (host, for tile-size selection)."""
     query_start_loc: torch.Tensor = ...
-    """Prefix-sum of lens, shape ``[batch]`` int32."""
+    """Prefix-sum of lens, shape ``[batch+1]`` int32."""
     slot_mapping: Sequence[torch.Tensor] = ...
-    """Slot indices, each shape ``[batched_tokens]`` int32 device, per kv cache."""
+    """Main-KV token slot table, shape ``[batched_tokens]`` int32 device; always a single table."""
     block_tables: Sequence[torch.Tensor] = ...
-    """Padded block tables, each shape ``[batch, max_num_blocks]`` int32 device, per kv cache."""
-
-    gdn_conv_indices: List[torch.Tensor] = ...
-
-    gdn_ssm_indices: List[torch.Tensor] = ...
-
-    gdn_query_starts: List[torch.Tensor] = ...
-    """Per-layer contiguous INT32[B+1] packed query boundaries, required for fresh/multi-token queries."""
-
-    gdn_conv_initial: List[torch.Tensor] = ...
-    """Per-layer INT32[B] flags: zero resets Conv history; nonzero retains it."""
-
-    gdn_ssm_initial: List[torch.Tensor] = ...
-    """Per-layer INT32[B] flags: zero resets SSM state; nonzero retains it."""
+    """Family block tables, each shape ``[batch, max_num_blocks]`` int32 device."""
 
 class AttnType(Enum):
     """Attention type enum exported by the native extension."""
