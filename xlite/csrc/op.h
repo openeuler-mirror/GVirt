@@ -310,4 +310,21 @@ void XliteOpHcSplitSinkhorn(XRuntime &rt, XTensor &mixes, const XTensor &hcScale
                             uint32_t hcMult, float eps, uint32_t sinkhornIters, bool headOnly);
 void XliteOpHcPre(XRuntime &rt, XTensor &xResid, const XTensor &pre, XTensor &output, uint32_t m,
                   uint32_t hcMult, uint32_t hidden);
+
+// Benchmarks
+uint32_t XliteOpBenchEmpty(XRuntime &rt, const std::string &variant, uint32_t blockNum = 0);
+uint32_t XliteOpBenchScalar(XRuntime &rt, const std::string &variant, XTensor &out, double seed,
+                            uint32_t iters, uint32_t blockNum = 0);
+#ifdef MICROBENCH_TIMED
+uint32_t XliteOpBenchTimed(XRuntime &rt, const std::string &variant, XTensor &out, XTensor &ticks,
+                           double seed, uint32_t iters, uint32_t blockNum = 0);
+uint32_t XliteOpBenchMte(XRuntime &rt, const std::string &variant, const XTensor &src, XTensor &dst,
+                         XTensor &ticks, uint64_t bytes, uint32_t iters, uint32_t blockNum = 0);
+uint32_t XliteOpBenchVec(XRuntime &rt, const std::string &variant, const XTensor &src, XTensor &out,
+                         XTensor &ticks, uint64_t elems, uint32_t iters, uint32_t blockNum = 0);
+uint32_t XliteOpBenchCube(XRuntime &rt, const std::string &variant, const XTensor &a,
+                          const XTensor &b, XTensor &c, XTensor &ticks, uint64_t m0, uint64_t n0,
+                          uint64_t k0, uint32_t blockNum = 0);
+#endif  // MICROBENCH_TIMED
+
 #endif

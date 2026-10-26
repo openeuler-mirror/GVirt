@@ -2740,3 +2740,399 @@ void XliteOpHcPre(XRuntime &rt, XTensor &xResid, const XTensor &pre, XTensor &ou
     aclrtlaunch_hc_pre_bfloat16_t(PickMinBlockNum(rt.aivNum, m), rt.stream, pre.ptr, xResid.ptr,
                                   output.ptr, m, hcMult, hidden);
 }
+
+// Empty-kernel launch-overhead probes
+uint32_t XliteOpBenchEmpty(XRuntime &rt, const std::string &variant, uint32_t blockNum)
+{
+    if (IsDummyRuntime(rt)) {
+        return 0;
+    }
+    if (variant == "aiv") {
+        blockNum = (blockNum == 0 || blockNum > rt.aivNum) ? rt.aivNum : blockNum;
+        aclrtlaunch_empty_aiv(blockNum, rt.stream, nullptr);
+    } else if (variant == "aic") {
+        blockNum = (blockNum == 0 || blockNum > rt.aicNum) ? rt.aicNum : blockNum;
+        aclrtlaunch_empty_aic(blockNum, rt.stream, nullptr);
+    } else if (variant == "mix") {
+        blockNum = (blockNum == 0 || blockNum > rt.aicNum) ? rt.aicNum : blockNum;
+        aclrtlaunch_empty_mix(blockNum, rt.stream, nullptr);
+    } else {
+        throw std::runtime_error("bench_empty: unknown variant '" + variant +
+                                 "', expected 'aiv', 'aic', or 'mix'");
+    }
+    return blockNum;
+}
+
+// Scalar micro-benchmark launches
+uint32_t XliteOpBenchScalar(XRuntime &rt, const std::string &variant, XTensor &out, double seed,
+                            uint32_t iters, uint32_t blockNum)
+{
+    if (IsDummyRuntime(rt)) {
+        return 0;
+    }
+    const std::string suffix = variant.size() > 4 ? variant.substr(variant.size() - 4) : "";
+    const bool aiv = suffix == "_aiv";
+    const bool aic = suffix == "_aic";
+    if (!aiv && !aic) {
+        throw std::runtime_error("bench_scalar: unknown variant '" + variant +
+                                 "', expected '<op>_aiv' or '<op>_aic'");
+    }
+    const std::string op = variant.substr(0, variant.size() - 4);
+    const enum XDtype dtype = (op == "fadd") ? FP32 : INT32;
+    if (out.dtype != dtype || out.numel < 1) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(out) +
+                                 "scalar bench expects a 1-element tensor of dtype " +
+                                 XDtypeStr(dtype));
+    }
+    if (op == "div" && seed == 0) {
+        throw std::runtime_error("scalar_div: seed (divisor) must not be 0");
+    }
+    if (op == "add_unroll4" && iters % 4 != 0) {
+        throw std::runtime_error("scalar_add_unroll4: iters must be divisible by 4");
+    }
+    const uint32_t coreNum = aiv ? rt.aivNum : rt.aicNum;
+    blockNum = (blockNum == 0 || blockNum > coreNum) ? 1 : blockNum;
+    const uint32_t seedU32 = static_cast<uint32_t>(seed);
+    const float seedF32 = static_cast<float>(seed);
+    if (op == "add") {
+        if (aiv) {
+            aclrtlaunch_scalar_add_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_add_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else if (op == "xor") {
+        if (aiv) {
+            aclrtlaunch_scalar_xor_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_xor_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else if (op == "mul") {
+        if (aiv) {
+            aclrtlaunch_scalar_mul_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_mul_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else if (op == "div") {
+        if (aiv) {
+            aclrtlaunch_scalar_div_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_div_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else if (op == "fadd") {
+        if (aiv) {
+            aclrtlaunch_scalar_fadd_aiv(blockNum, rt.stream, out.ptr, seedF32, iters);
+        } else {
+            aclrtlaunch_scalar_fadd_aic(blockNum, rt.stream, out.ptr, seedF32, iters);
+        }
+    } else if (op == "add_unroll4") {
+        if (aiv) {
+            aclrtlaunch_scalar_add_unroll4_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_add_unroll4_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
+        }
+    } else {
+        throw std::runtime_error("bench_scalar: unknown op '" + op + "'");
+    }
+    return blockNum;
+}
+
+#ifdef MICROBENCH_TIMED
+// Timed scalar micro-benchmark dispatch
+uint32_t XliteOpBenchTimed(XRuntime &rt, const std::string &variant, XTensor &out, XTensor &ticks,
+                           double seed, uint32_t iters, uint32_t blockNum)
+{
+    if (IsDummyRuntime(rt)) {
+        return 0;
+    }
+    if (ticks.dtype != INT64 || ticks.numel < 3) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(ticks) +
+                                 "bench_timed expects an INT64 ticks tensor with >= 3 elements");
+    }
+    const std::string suffix = variant.size() > 4 ? variant.substr(variant.size() - 4) : "";
+    const bool aiv = suffix == "_aiv";
+    const bool aic = suffix == "_aic";
+    if (!aiv && !aic) {
+        throw std::runtime_error("bench_timed: unknown variant '" + variant +
+                                 "', expected '<op>_aiv' or '<op>_aic'");
+    }
+    const std::string op = variant.substr(0, variant.size() - 4);
+    const enum XDtype dtype = (op == "fadd") ? FP32 : INT32;
+    if (out.dtype != dtype || out.numel < 1) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(out) +
+                                 "scalar bench expects a 1-element tensor of dtype " +
+                                 XDtypeStr(dtype));
+    }
+    if (op == "div" && seed == 0) {
+        throw std::runtime_error("scalar_div: seed (divisor) must not be 0");
+    }
+    if (op == "add_unroll4" && iters % 4 != 0) {
+        throw std::runtime_error("scalar_add_unroll4: iters must be divisible by 4");
+    }
+    {
+        const uint32_t coreNum = aiv ? rt.aivNum : rt.aicNum;
+        blockNum = (blockNum == 0 || blockNum > coreNum) ? 1 : blockNum;
+    }
+    const uint32_t seedU32 = static_cast<uint32_t>(seed);
+    const float seedF32 = static_cast<float>(seed);
+    if (op == "add") {
+        if (aiv) {
+            aclrtlaunch_scalar_add_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
+                                             iters);
+        } else {
+            aclrtlaunch_scalar_add_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
+                                             iters);
+        }
+    } else if (op == "xor") {
+        if (aiv) {
+            aclrtlaunch_scalar_xor_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
+                                             iters);
+        } else {
+            aclrtlaunch_scalar_xor_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
+                                             iters);
+        }
+    } else if (op == "mul") {
+        if (aiv) {
+            aclrtlaunch_scalar_mul_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
+                                             iters);
+        } else {
+            aclrtlaunch_scalar_mul_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
+                                             iters);
+        }
+    } else if (op == "div") {
+        if (aiv) {
+            aclrtlaunch_scalar_div_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
+                                             iters);
+        } else {
+            aclrtlaunch_scalar_div_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
+                                             iters);
+        }
+    } else if (op == "fadd") {
+        if (aiv) {
+            aclrtlaunch_scalar_fadd_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedF32,
+                                              iters);
+        } else {
+            aclrtlaunch_scalar_fadd_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedF32,
+                                              iters);
+        }
+    } else if (op == "add_unroll4") {
+        if (aiv) {
+            aclrtlaunch_scalar_add_unroll4_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr,
+                                                     seedU32, iters);
+        } else {
+            aclrtlaunch_scalar_add_unroll4_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr,
+                                                     seedU32, iters);
+        }
+    } else {
+        throw std::runtime_error("bench_timed: unknown op '" + op + "'");
+    }
+    return blockNum;
+}
+
+// MTE memory micro-benchmark dispatch
+uint32_t XliteOpBenchMte(XRuntime &rt, const std::string &variant, const XTensor &src, XTensor &dst,
+                         XTensor &ticks, uint64_t bytes, uint32_t iters, uint32_t blockNum)
+{
+    if (IsDummyRuntime(rt)) {
+        return 0;
+    }
+    const std::string suffix = variant.size() > 4 ? variant.substr(variant.size() - 4) : "";
+    if (suffix != "_aiv") {
+        throw std::runtime_error("bench_mte: unknown variant '" + variant +
+                                 "', expected '<op>_aiv' with op in read / write / copy / chase");
+    }
+    const std::string op = variant.substr(0, variant.size() - 4);
+    const bool readOp = op == "read";
+    const bool writeOp = op == "write";
+    const bool copyOp = op == "copy";
+    const bool chaseOp = op == "chase";
+    if (!readOp && !writeOp && !copyOp && !chaseOp) {
+        throw std::runtime_error("bench_mte: unknown op '" + op + "'");
+    }
+    if (iters < 1) {
+        throw std::runtime_error("bench_mte: iters must be >= 1");
+    }
+    if (bytes == 0 || bytes % 32 != 0 || (chaseOp && bytes % 64 != 0)) {
+        throw std::runtime_error(
+            "bench_mte: bytes must be a non-zero multiple of 32 (64 for chase)");
+    }
+    // A dependent chain has no parallelism to exploit, so chase always runs on
+    // one block; the streaming variants grid-stride the working set over the
+    // launched blocks (0 = all AIV blocks).
+    blockNum = chaseOp ? 1 : ((blockNum == 0 || blockNum > rt.aivNum) ? rt.aivNum : blockNum);
+    // Ticks / acc outputs are strided BENCH_MTE_STRIDE (64B) per block: scalar
+    // GM stores from different cores sharing a 64B line race line-granularly
+    // (microbench.h BENCH_MTE_STRIDE). 64B = 8 int64 = 16 int32 elements.
+    if (ticks.dtype != INT64 || ticks.numel < 8 * blockNum) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(ticks) +
+                                 "bench_mte expects an INT64 ticks tensor with >= 8 * block_num "
+                                 "elements (64B per block)");
+    }
+    // Keep in sync with BENCH_MTE_TILE (UB_SIZE / 2) in csrc/kernels/microbench.h:
+    // write fills a single UB tile from src before streaming it out.
+    const uint64_t tileBytes = 98304;
+    const uint64_t srcNeed = writeOp ? (bytes < tileBytes ? bytes : tileBytes) : bytes;
+    if (src.dtype != INT8 || src.numel < srcNeed) {
+        std::string err_str = DBG_PREFIX + XT_STR(src);
+        throw std::runtime_error(err_str + "bench_mte expects an INT8 src with >= " +
+                                 std::to_string(srcNeed) + " elements (" + op + ")");
+    }
+    if (readOp || chaseOp) {
+        if (dst.dtype != INT32 || dst.numel < 16 * blockNum) {
+            std::string err_str = DBG_PREFIX + XT_STR(dst);
+            throw std::runtime_error(err_str + "bench_mte " + op +
+                                     " expects an INT32 dst with >= 16 * block_num elements "
+                                     "(acc word at 64B stride per block)");
+        }
+    } else if (dst.dtype != INT8 || dst.numel < bytes) {
+        std::string err_str = DBG_PREFIX + XT_STR(dst);
+        throw std::runtime_error(err_str + "bench_mte " + op +
+                                 " expects an INT8 dst with >= bytes elements");
+    }
+    if (readOp) {
+        aclrtlaunch_mte_read_aiv(blockNum, rt.stream, src.ptr, dst.ptr, ticks.ptr, bytes, iters);
+    } else if (writeOp) {
+        aclrtlaunch_mte_write_aiv(blockNum, rt.stream, src.ptr, dst.ptr, ticks.ptr, bytes, iters);
+    } else if (copyOp) {
+        aclrtlaunch_mte_copy_aiv(blockNum, rt.stream, src.ptr, dst.ptr, ticks.ptr, bytes, iters);
+    } else {
+        aclrtlaunch_mte_chase_aiv(blockNum, rt.stream, src.ptr, dst.ptr, ticks.ptr, bytes, iters);
+    }
+    return blockNum;
+}
+
+// Vector-op micro-benchmarks
+uint32_t XliteOpBenchVec(XRuntime &rt, const std::string &variant, const XTensor &src, XTensor &out,
+                         XTensor &ticks, uint64_t elems, uint32_t iters, uint32_t blockNum)
+{
+    if (IsDummyRuntime(rt)) {
+        return 0;
+    }
+    const std::string suffix = variant.size() > 4 ? variant.substr(variant.size() - 4) : "";
+    if (suffix != "_aiv") {
+        throw std::runtime_error("bench_vec: unknown variant '" + variant +
+                                 "', expected '<op>_aiv' with op in add_f32 / mul_f32 / add_i32 / "
+                                 "add_f16 / sqrt_f32 / exp_f32");
+    }
+    const std::string op = variant.substr(0, variant.size() - 4);
+    const bool addF32 = op == "add_f32";
+    const bool mulF32 = op == "mul_f32";
+    const bool addI32 = op == "add_i32";
+    const bool addF16 = op == "add_f16";
+    const bool sqrtF32 = op == "sqrt_f32";
+    const bool expF32 = op == "exp_f32";
+    if (!addF32 && !mulF32 && !addI32 && !addF16 && !sqrtF32 && !expF32) {
+        throw std::runtime_error("bench_vec: unknown op '" + op + "'");
+    }
+    const XDtype dtype = addF16 ? FP16 : (addI32 ? INT32 : FP32);
+    const uint64_t itemBytes = addF16 ? 2 : 4;
+    if (iters < 1) {
+        throw std::runtime_error("bench_vec: iters must be >= 1");
+    }
+    // Whole 256B repeats only: the kernels run with a full mask and no tail
+    // handling. Keep in sync with VECTOR_MAX_BYTESIZE in csrc/kernels/microbench.h.
+    const uint64_t quantum = 256 / itemBytes;
+    if (elems == 0 || elems % quantum != 0) {
+        throw std::runtime_error("bench_vec: elems must be a non-zero multiple of " +
+                                 std::to_string(quantum) + " (" + op + ")");
+    }
+    // UB budget (microbench.h): dst + cst (2 * bytes) plus the transcendental
+    // scratch tile (BENCH_VEC_TMP_BYTES = 255 * 256) must fit in the 196608B
+    // UB. Binary variants never touch the scratch tile, but one uniform cap
+    // keeps the kernel/host/Python contract simple.
+    const uint64_t bytes = elems * itemBytes;
+    if (2 * bytes + 65280 > 196608) {
+        throw std::runtime_error("bench_vec: elems too large for UB - max 16384 at 4B dtypes, "
+                                 "32768 at 2B (" +
+                                 op + ")");
+    }
+    // Every block runs the same chain (per-core throughput probe); each block
+    // copies its dst to a disjoint out region (>= 256B, 64B aligned) and its
+    // ticks to its own 64B line (BENCH_MTE_STRIDE contract).
+    blockNum = (blockNum == 0 || blockNum > rt.aivNum) ? rt.aivNum : blockNum;
+    if (ticks.dtype != INT64 || ticks.numel < 8 * blockNum) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(ticks) +
+                                 "bench_vec expects an INT64 ticks tensor with >= 8 * block_num "
+                                 "elements (64B per block)");
+    }
+    if (src.dtype != dtype || src.numel < 2 * elems) {
+        std::string err_str = DBG_PREFIX + XT_STR(src);
+        throw std::runtime_error(err_str + "bench_vec " + op +
+                                 " expects an src tensor of matching dtype with >= 2 * elems "
+                                 "elements ([x0; c])");
+    }
+    if (out.dtype != dtype || out.numel < (uint64_t)blockNum * elems) {
+        std::string err_str = DBG_PREFIX + XT_STR(out);
+        throw std::runtime_error(err_str + "bench_vec " + op +
+                                 " expects an out tensor of matching dtype with >= block_num * "
+                                 "elems elements (per-block regions)");
+    }
+    if (addF32) {
+        aclrtlaunch_vec_add_f32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+    } else if (mulF32) {
+        aclrtlaunch_vec_mul_f32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+    } else if (addI32) {
+        aclrtlaunch_vec_add_i32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+    } else if (addF16) {
+        aclrtlaunch_vec_add_f16_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+    } else if (sqrtF32) {
+        aclrtlaunch_vec_sqrt_f32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems,
+                                     iters);
+    } else {
+        aclrtlaunch_vec_exp_f32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+    }
+    return blockNum;
+}
+
+uint32_t XliteOpBenchCube(XRuntime &rt, const std::string &variant, const XTensor &a,
+                          const XTensor &b, XTensor &c, XTensor &ticks, uint64_t m0, uint64_t n0,
+                          uint64_t k0, uint32_t blockNum)
+{
+    if (IsDummyRuntime(rt)) {
+        return 0;
+    }
+    if (variant != "cube_mmad_aic") {
+        throw std::runtime_error("bench_cube: unknown variant '" + variant +
+                                 "', expected 'cube_mmad_aic'");
+    }
+    // L0/L1 budget (derived from Matmul::Init for Matmul<half,float,half>):
+    //   L0A = m0*k0 (2 bufs * m0*(k0/4)*2B),  L0B = n0*k0,  each <= 64KB
+    //   L0C = 4*m0*n0 (FP32 accumulate),       L0C <= 64KB
+    //   L1  = 4*k0*(2*m0+n0) (2 bufs * (m0*2*k0 + n0*k0)*2B), L1 <= 512KB
+    uint64_t l0a = m0 * k0;
+    uint64_t l0b = n0 * k0;
+    uint64_t l0c = 4 * m0 * n0;
+    uint64_t l1Bytes = 4 * k0 * (2 * m0 + n0);
+    if (l0a > 64 * 1024 || l0b > 64 * 1024 || l0c > 64 * 1024 || l1Bytes > 512 * 1024) {
+        std::stringstream ss;
+        ss << "bench_cube: tile " << m0 << "x" << n0 << "x" << k0
+           << " exceeds L0/L1 budget (L0A=" << l0a << "B/64KB, L0B=" << l0b << "B/64KB, L0C=" << l0c
+           << "B/64KB, L1=" << l1Bytes << "B/512KB)";
+        throw std::runtime_error(ss.str());
+    }
+    if (m0 == 0 || m0 % 16 || n0 % 16 || k0 % 16) {
+        throw std::runtime_error("bench_cube: m0/n0/k0 must be non-zero multiples of 16");
+    }
+    blockNum = blockNum == 0 ? 1 : blockNum;
+    if (blockNum != 1) {
+        throw std::runtime_error("bench_cube: blockNum must be 0 (auto=1) or 1 (serial chain)");
+    }
+    if (a.dtype != FP16 || a.numel < m0 * k0) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(a) +
+                                 "bench_cube expects an FP16 a tensor with >= m0*k0 elements");
+    }
+    if (b.dtype != FP16 || b.numel < n0 * k0) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(b) +
+                                 "bench_cube expects an FP16 b tensor with >= n0*k0 elements");
+    }
+    if (c.dtype != FP16 || c.numel < m0 * n0) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(c) +
+                                 "bench_cube expects an FP16 c tensor with >= m0*n0 elements");
+    }
+    if (ticks.dtype != INT64 || ticks.numel < 8) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(ticks) +
+                                 "bench_cube expects an INT64 ticks tensor with >= 8 elements");
+    }
+    aclrtlaunch_cube_mmad_aic(blockNum, rt.stream, a.ptr, b.ptr, c.ptr, ticks.ptr, m0, n0, k0);
+    return blockNum;
+}
+#endif  // MICROBENCH_TIMED

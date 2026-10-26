@@ -1028,4 +1028,61 @@ inline __aicore__ uint32_t XliteFitM0ToHeads(uint32_t m0, uint32_t nHeads)
                                                           : fitted;
 }
 
+// ---- Generic in-kernel SYS_CNT cycle sampling (micro-benchmarks) ----
+// Usable for any instruction class (scalar / vector / cube / MTE): GetSystemCycle()
+// (kernel_operator_sys_var_intf.h) reads the SYS_CNT counter, which ticks at a
+// fixed 50 MHz - NOT at the core clock - so cycles / 50 = microseconds (20 ns
+// resolution: plenty for aggregate regions, meaningless for a single op; per-op
+// costs still come from an iters slope).
+//
+// Usage pattern inside a kernel:
+//   BENCH_TICKS_DECL;          // uint64_t benchTicks[BENCH_TICK_MAX]
+//   BENCH_TICK(0);             // region start
+//   <measured code>            // may capture more slots mid-region (phases)
+//   BENCH_TICK(1);             // issue-side end (in-order pipes only)
+//   pipe_barrier(PIPE_ALL);    // drain ALL pipes: true completion
+//   BENCH_TICK(2);             // completion cycle
+//   <store region results>     // e.g. the accumulator, anti-DCE
+//   BENCH_TICKS_FLUSH(gm, 3);  // batch-write the slots to pre-allocated GM
+//
+// Two load-bearing details:
+// - the PIPE_ALL barrier before the closing tick: the scalar / vector / cube /
+//   MTE pipes run in parallel and instruction ISSUE is not COMPLETION. A tick
+//   right after the last instruction timestamps "issued", not "retired"; the
+//   tick after the barrier is the true completion time, and the tick1->tick2
+//   gap is the in-flight drain.
+// - register slots plus one batched flush: storing each sample to GM as it is
+//   taken would put MTE3 stores inside the measured window. All slots live in
+//   registers during the region and are written only after the closing tick;
+//   the flush is a plain scalar store loop, which compiles on both the vec and
+//   cube channels (unlike MTE copy intrinsics).
+// See doc/kernels/microbench.md for the measured zero-point calibration.
+
+#define BENCH_TICK_MAX 8        // slots per kernel, enough for phase timing
+#define BENCH_CYCLES_PER_US 50  // SYS_CNT ticks at a fixed 50 MHz
+
+#define BENCH_TICKS_DECL uint64_t benchTicks[BENCH_TICK_MAX]
+
+#define BENCH_TICK(i) (void)(benchTicks[(i)] = (uint64_t)GetSystemCycle())
+#define BENCH_TICK_PTR(tk, i) (void)((tk)[(i)] = (uint64_t)GetSystemCycle())
+
+// Batch write n slots to the pre-allocated GM buffer (host passes int64[n]).
+#define BENCH_TICKS_FLUSH(gm, n)                                               \
+    do {                                                                       \
+        for (uint32_t i_ = 0; i_ < (n); i_++) {                                \
+            *(__gm__ uint64_t *)(gm + i_ * sizeof(uint64_t)) = benchTicks[i_]; \
+        }                                                                      \
+        pipe_barrier(PIPE_ALL);                                                \
+    } while (0)
+
+// Pointer-parameterized variants for use in __aicore__ inline helper
+// functions that receive benchTicks as a parameter.
+#define BENCH_TICKS_FLUSH_PTR(tk, gm, n)                                   \
+    do {                                                                   \
+        for (uint32_t i_ = 0; i_ < (n); i_++) {                            \
+            *(__gm__ uint64_t *)((gm) + i_ * sizeof(uint64_t)) = (tk)[i_]; \
+        }                                                                  \
+        pipe_barrier(PIPE_ALL);                                            \
+    } while (0)
+
 #endif

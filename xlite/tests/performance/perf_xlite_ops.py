@@ -79,7 +79,8 @@ OUT_DIR = "xlite_prof_results"  # CSV 结果目录(始终保留)
 KEEP_PROF_DIR = False      # False(默认): 运行结束清理 CANN profiling 落盘目录
                            # export_only_prof_dir/(profiler 原始数据, 跨运行累积);
                            # True: 保留该目录供排查
-MAX_ARG_REPR = 64          # 明细 CSV 入参描述截断长度
+MAX_ARG_REPR = 96          # 明细 CSV 入参描述截断长度(64 会截掉 bench_mte 尾部的
+                            # bytes/iters/block_num 裸标量, --analyze [8] 段要解析它们)
 
 # ---- device 归因参数(见 attribute_device 注释) ----
 # 实测 torch_npu chrome trace 中 kernel 事件的 ts 系统性偏晚 ~30us(疑似 profiler
@@ -89,7 +90,30 @@ MAX_ARG_REPR = 64          # 明细 CSV 入参描述截断长度
 ATTR_GAP_US = 200          # kernel ts 晚于窗口结束多少 us 内仍认 belong 该窗口
 ATTR_VOTE_MIN = 0.8        # name→op 多数票接受阈值
 ATTR_PREFIX_MIN = 5        # kernel 名与 op 名共享前缀最小长度(防串扰, 如 aclnn* → op)
-KERNEL_OP_OVERRIDES = {}   # 手工指定 kernel 名 → op 名(优先于自动发现), 键为全名或前缀
+KERNEL_OP_OVERRIDES = {    # 手工指定 kernel 名 → op 名(优先于自动发现), 键为全名或前缀
+    # bench_timed 的 kernel 名按变体派生(scalar_add_aiv_timed 等), 与 op 名
+    # 无共享前缀, 自动归因的步骤 2 必拒; 手工指回统一入口
+    f"scalar_{op}_{ct}_timed": "bench_timed"
+    for op in ("add", "xor", "mul", "div", "fadd", "add_unroll4")
+    for ct in ("aiv", "aic")
+} | {
+    # bench_scalar 同理: untimed 变体名指回统一入口
+    f"scalar_{op}_{ct}": "bench_scalar"
+    for op in ("add", "xor", "mul", "div", "fadd", "add_unroll4")
+    for ct in ("aiv", "aic")
+} | {
+    # bench_empty 同理
+    f"empty_{ct}": "bench_empty"
+    for ct in ("aiv", "aic", "mix")
+} | {
+    # bench_mte 同理: mte_read_aiv 等变体派生名指回统一入口
+    f"mte_{op}_aiv": "bench_mte"
+    for op in ("read", "write", "copy", "chase")
+} | {
+    # bench_vec 同理: vec_add_f32_aiv 等变体派生名指回统一入口
+    f"vec_{op}_aiv": "bench_vec"
+    for op in ("add_f32", "mul_f32", "add_i32", "add_f16", "sqrt_f32", "exp_f32")
+}
 
 # 归因防串扰: 名字明显非 xlite 的 device 事件(调用窗口后紧跟的 torch kernel 拖尾
 # 执行会就近落到刚结束的窗口), 不参与投票与归因, 仅计数
@@ -124,19 +148,25 @@ def fmt_us(us):
 
 
 def describe_args(args, kwargs):
-    """入参摘要: tensor 记 shape×dtype, 标量记值, 其余记类型名."""
+    """入参摘要: tensor 记 shape×dtype, 标量/字符串记值, 其余记类型名."""
     parts = []
     for a in args:
         if isinstance(a, torch.Tensor):
             shape = "x".join(str(d) for d in a.shape)
             parts.append(f"{shape}:{str(a.dtype).removeprefix('torch.')}")
+        elif isinstance(a, str):
+            parts.append(repr(a))  # 如 bench_timed 的 variant, 分析时按名分组
         elif isinstance(a, (bool, int, float)):
             parts.append(str(a))
         else:
             parts.append(type(a).__name__)
     for k, v in kwargs.items():
-        parts.append(f"{k}={v}" if isinstance(v, (bool, int, float))
-                     else f"{k}={type(v).__name__}")
+        if isinstance(v, str):
+            parts.append(f"{k}={v!r}")
+        elif isinstance(v, (bool, int, float)):
+            parts.append(f"{k}={v}")
+        else:
+            parts.append(f"{k}={type(v).__name__}")
     return ", ".join(parts)[:MAX_ARG_REPR]
 
 

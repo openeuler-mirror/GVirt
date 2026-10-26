@@ -1382,6 +1382,102 @@ void Add(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z)
     rt.Synchronize();
 }
 
+// Untimed micro-benchmark dispatch (variant-based, mirrors the timed family).
+// Return the block count actually launched with.
+uint32_t BenchEmpty(XRuntime &rt, const std::string &variant, uint32_t blockNum)
+{
+    uint32_t n = XliteOpBenchEmpty(rt, variant, blockNum);
+    rt.Synchronize();
+    return n;
+}
+
+uint32_t BenchScalar(XRuntime &rt, const std::string &variant, at::Tensor &outTensor, double seed,
+                     uint32_t iters, uint32_t blockNum)
+{
+    XTensor out;
+    InitXTensor(out, outTensor);
+    uint32_t n = XliteOpBenchScalar(rt, variant, out, seed, iters, blockNum);
+    rt.Synchronize();
+    return n;
+}
+
+#ifdef MICROBENCH_TIMED
+// Timed scalar micro-benchmarks (SYS_CNT sampling via the BENCH_TICK* macros
+// in csrc/kernels/kernel_macro.h): same dependent
+// chains as the scalar_* family, plus in-kernel SYS_CNT sampling written to
+// the caller-pre-allocated `ticks` int64 tensor as [start, issued, drained]
+// cycles. One entry for the whole timed family; `variant` picks kernel and
+// core type. Callers read `ticks` back after this returns (Synchronize inside).
+// Compiled only in XLITE_BENCH_TIMED=ON builds.
+uint32_t BenchTimed(XRuntime &rt, const std::string &variant, at::Tensor &outTensor,
+                    at::Tensor &ticksTensor, double seed, uint32_t iters, uint32_t blockNum)
+{
+    XTensor out, ticks;
+    InitXTensor(out, outTensor);
+    InitXTensor(ticks, ticksTensor);
+    uint32_t n = XliteOpBenchTimed(rt, variant, out, ticks, seed, iters, blockNum);
+    rt.Synchronize();
+    return n;
+}
+
+// MTE memory micro-benchmarks (lmbench-style bandwidth / latency vs size, see
+// the MTE section of csrc/kernels/microbench.h): read / write / copy stream
+// `bytes` per repetition, chase walks a dependent 64B-granular chain. One
+// entry for the whole family; `variant` picks the kernel. Per-block [start,
+// issued, drained] cycles land in the caller-pre-allocated `ticks` int64
+// tensor (3 per block), verification data in `dst`. Compiled only in
+// XLITE_BENCH_TIMED=ON builds.
+uint32_t BenchMte(XRuntime &rt, const std::string &variant, at::Tensor &srcTensor,
+                  at::Tensor &dstTensor, at::Tensor &ticksTensor, uint64_t bytes, uint32_t iters,
+                  uint32_t blockNum)
+{
+    XTensor src, dst, ticks;
+    InitXTensor(src, srcTensor);
+    InitXTensor(dst, dstTensor);
+    InitXTensor(ticks, ticksTensor);
+    uint32_t n = XliteOpBenchMte(rt, variant, src, dst, ticks, bytes, iters, blockNum);
+    rt.Synchronize();
+    return n;
+}
+
+// Vector-op micro-benchmarks (vector-pipe throughput vs vector length, see
+// the VEC section of csrc/kernels/microbench.h): a dependent chain of `iters`
+// op applications over `elems` UB-resident elements per block. One entry for
+// the whole family; `variant` picks the kernel. Per-block [start, issued,
+// drained] cycles land in the caller-pre-allocated `ticks` int64 tensor,
+// every block's final chain value in `out`. Compiled only in
+// XLITE_BENCH_TIMED=ON builds.
+uint32_t BenchVec(XRuntime &rt, const std::string &variant, at::Tensor &srcTensor,
+                  at::Tensor &outTensor, at::Tensor &ticksTensor, uint64_t elems, uint32_t iters,
+                  uint32_t blockNum)
+{
+    XTensor src, out, ticks;
+    InitXTensor(src, srcTensor);
+    InitXTensor(out, outTensor);
+    InitXTensor(ticks, ticksTensor);
+    uint32_t n = XliteOpBenchVec(rt, variant, src, out, ticks, elems, iters, blockNum);
+    rt.Synchronize();
+    return n;
+}
+
+// Cube matmul micro-benchmark (single A@B.T per launch via the Matmul class):
+// FP16 inputs A[m0,k0] and B[n0,k0], FP16 output C[m0,n0]. Per-block [start,
+// issued, drained] cycles land in `ticks`. Compiled only in XLITE_BENCH_TIMED=ON.
+uint32_t BenchCube(XRuntime &rt, const std::string &variant, at::Tensor &aTensor,
+                   at::Tensor &bTensor, at::Tensor &cTensor, at::Tensor &ticksTensor, uint64_t m0,
+                   uint64_t n0, uint64_t k0, uint32_t blockNum)
+{
+    XTensor a, b, c, ticks;
+    InitXTensor(a, aTensor);
+    InitXTensor(b, bTensor);
+    InitXTensor(c, cTensor);
+    InitXTensor(ticks, ticksTensor);
+    uint32_t n = XliteOpBenchCube(rt, variant, a, b, c, ticks, m0, n0, k0, blockNum);
+    rt.Synchronize();
+    return n;
+}
+#endif  // MICROBENCH_TIMED
+
 void Print(at::Tensor &x, const char *name, uint32_t nRow, uint32_t nCol)
 {
     XTensor _x;
@@ -3136,6 +3232,31 @@ PYBIND11_MODULE(_C, m)
           py::arg("send_counts"), py::arg("recv_counts"), py::arg("sdispls"), py::arg("rdispls"),
           py::arg("comm_type") = 0);
     m.def("add", &Add, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"));
+    m.def("bench_empty", &BenchEmpty,
+          "empty kernel launch overhead probe (variant: aiv/aic/mix, returns block count)",
+          py::arg("rt"), py::arg("variant"), py::arg("block_num") = 0);
+    m.def("bench_scalar", &BenchScalar,
+          "scalar dependent-chain micro-benchmark (variant: <op>_aiv|_aic, returns block count)",
+          py::arg("rt"), py::arg("variant"), py::arg("out"), py::arg("seed") = 3,
+          py::arg("iters") = 1000000, py::arg("block_num") = 0);
+#ifdef MICROBENCH_TIMED
+    m.def("bench_timed", &BenchTimed,
+          "timed scalar micro-benchmark with in-kernel cycle sampling (returns block count)",
+          py::arg("rt"), py::arg("variant"), py::arg("out"), py::arg("ticks"), py::arg("seed") = 3,
+          py::arg("iters") = 1000000, py::arg("block_num") = 0);
+    m.def("bench_mte", &BenchMte,
+          "MTE memory micro-benchmark with in-kernel cycle sampling (returns block count)",
+          py::arg("rt"), py::arg("variant"), py::arg("src"), py::arg("dst"), py::arg("ticks"),
+          py::arg("bytes"), py::arg("iters") = 1, py::arg("block_num") = 0);
+    m.def("bench_vec", &BenchVec,
+          "vector-op micro-benchmark with in-kernel cycle sampling (returns block count)",
+          py::arg("rt"), py::arg("variant"), py::arg("src"), py::arg("out"), py::arg("ticks"),
+          py::arg("elems"), py::arg("iters") = 1, py::arg("block_num") = 0);
+    m.def("bench_cube", &BenchCube,
+          "cube matmul micro-benchmark with in-kernel cycle sampling (returns block count)",
+          py::arg("rt"), py::arg("variant"), py::arg("a"), py::arg("b"), py::arg("c"),
+          py::arg("ticks"), py::arg("m0"), py::arg("n0"), py::arg("k0"), py::arg("block_num") = 0);
+#endif  // MICROBENCH_TIMED
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("matmul_bench", &MatmulBench, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
