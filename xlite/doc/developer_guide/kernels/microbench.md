@@ -5,8 +5,9 @@
 标量 / 向量指令或一次 matmul 的 device 侧成本（实验 2、4、5）；经 MTE 数据通路的
 带宽与时延如何随工作集变化（实验 3）。
 
-kernel 源文件只有一套：默认构建只含 untimed kernel；`XLITE_BENCH_TIMED=ON` 构建在
-同一批 TU 内追加 kernel 内计时家族（`GetSystemCycle()` 读 SYS_CNT，不依赖 profiler）。
+kernel 源文件只有一套（每核型一个合并 kernel，共 3 个 TU）：默认构建只编译 untimed
+case（EMPTY + 6 标量链）；`XLITE_BENCH_TIMED=ON` 构建在同一批 3 个 TU 内追加编译
+kernel 内计时家族（`GetSystemCycle()` 读 SYS_CNT，不依赖 profiler）。
 
 ## 1. 实验总览
 
@@ -214,23 +215,27 @@ sqrt 不在依赖链上，差分量是“mul 链上再加一条超越指令”�
 
 | 文件 | 职责 |
 |------|------|
-| `csrc/kernels/microbench.h` | 全部实现：五族生成宏、循环体、核型路由、测试项与四个 timed 聚合宏 |
+| `csrc/kernels/microbench.h` | 全部实现：五族 body 宏、核型路由、双风味守卫、`cube_mmad_body` 模板 |
+| `csrc/kernels/kernel_param.h` | 共享常量与枚举；`BenchOp` 枚举（`BENCH_OP_*`），host 与 kernel 共用 |
 | `csrc/kernels/kernel_macro.h` | 通用 kernel 内 SYS_CNT 采样（`BENCH_TICK*`） |
-| `csrc/kernels/bench_aiv.cpp` | 7 条 plain + 12 个 timed 孪生 + 4 条 MTE + 6 条向量 |
-| `csrc/kernels/bench_aic.cpp` | 7 条 plain + 12 个 timed 孪生 + 1 条 Cube |
-| `csrc/kernels/bench_mix.cpp` | 1 条 empty |
+| `csrc/kernels/bench_aic.cpp` | 1 个 `bench_aic` kernel，`switch(op)` 分发 AIC 有效 op |
+| `csrc/kernels/bench_aiv.cpp` | 1 个 `bench_aiv` kernel，`switch(op)` 分发 AIV 有效 op |
+| `csrc/kernels/bench_mix.cpp` | 1 个 `bench_mix` kernel，仅 EMPTY case |
 
-- `MICROBENCH_TIMED` 由 CMake 选项 `XLITE_BENCH_TIMED` 控制（默认 OFF）。OFF 时
-  四个 `*_ITEMS` 展开为空，timed / MTE / 向量 / Cube kernel、host 入口与 Python
-  绑定均不存在，三个 TU 与定标布局逐 token 一致。
-- ON 时在同一批 .cpp 内追加实例化，不新增 TU；宏经
-  `ascendc_compile_definitions` 送进 precompile / preprocess / aic / aiv 四个阶段，
+- 每个核型一个合并 kernel（`bench_aic` / `bench_aiv` / `bench_mix`），kernel 内按
+  `uint32_t op` 参数 `switch` 分发到对应 body 宏；op 枚举单源在 `kernel_param.h`
+  的 `BenchOp`，host（`op.cpp`）与 kernel 共用，dispatch 不会失配。host 6 个
+  `XliteOpBench*` 函数按变体名选 `BENCH_OP_*` 常量，末尾单发
+  `aclrtlaunch_bench_<ct>(..., op)`。
+- `MICROBENCH_TIMED` 由 CMake 选项 `XLITE_BENCH_TIMED` 控制（默认 OFF）。两种构建都是
+  同一批 3 个 TU：OFF 时只编译 untimed case（EMPTY + 6 scalar）；ON 时同一批 kernel
+  内追加编译 timed 孪生、Cube、MTE、向量族 case（case 标签与 host 入口均由
+  `MICROBENCH_TIMED` 门控），不新增 TU。
+- 宏经 `ascendc_compile_definitions` 送进 precompile / preprocess / aic / aiv 四个阶段，
   host 侧由 `target_compile_definitions` 给 `xlite` 与 `_C`。
-- timed kernel 名必须在一次 `BENCH_CAT3` 粘贴中拼出；否则 CANN auto_gen 的改名
-  机制会拼出与包装器不一致的符号。
-- 不同核型不能共用 TU：precompile 按文件取第一个 `KERNEL_TASK_TYPE_DEFAULT`。
-  默认构建的 TU 构成必须冻结；timed 构建是另一套代码生成上下文，数值自成基线，
-  切换构建或增删 timed 项后须重新定标。
+- 合并后各 body 的代码生成上下文与原 per-TU 基线不同（switch 与兄弟 body 对编译器
+  可见），数值自成基线；切换构建或增删 op 后须重新定标，不得与旧 per-TU 数或跨构建
+  互比。
 
 ## 4. 实测经验
 

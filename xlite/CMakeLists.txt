@@ -16,15 +16,13 @@ message(STATUS "RUN_MODE: ${RUN_MODE}")
 message(STATUS "SOC_VERSION: ${SOC_VERSION}")
 message(STATUS "ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
 
-# In-kernel timed micro-benchmark variants (SYS_CNT sampling via the
-# BENCH_TICK* macros in csrc/kernels/kernel_macro.h). ON: bench_{aiv,aic}.cpp
-# additionally instantiate the *_timed twins, bench_aiv.cpp also instantiates
-# the MTE and vector families (BENCH_MTE_ITEMS / BENCH_VEC_ITEMS), and the
-# host exposes the bench_timed / bench_mte / bench_vec entry points.
-# OFF (default): the timed kernels, stubs and host API do not exist at all,
-# and the bench TUs stay token-identical to the calibrated 7-kernel layout.
-# The macro reaches the kernels via ascendc_compile_definitions (below) and
-# the host targets via target_compile_definitions.
+# In-kernel timed micro-benchmark variants (SYS_CNT sampling via BENCH_TICK*
+# in kernel_macro.h). ON: the merged bench_aic/aiv/mix kernels additionally
+# compile their timed switch cases (scalar *_timed twins, cube mmad, and on AIV
+# the MTE/vector families) plus the bench_timed / bench_mte / bench_vec /
+# bench_cube host entry points. OFF (default): only EMPTY + the six scalar
+# chains. The timed cases are gated inside each .cpp by MICROBENCH_TIMED, so
+# BENCH_KERNEL_FILES_COMMON stays at 3 TUs for both builds.
 option(XLITE_BENCH_TIMED "Build in-kernel timed micro-benchmark variants" OFF)
 
 find_program(CCACHE_FOUND ccache)
@@ -81,10 +79,16 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/msd_merge_dequant_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_act_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/compressor_float.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bench_aiv.cpp
+)
+
+# Bench kernels live one-per-TU - see csrc/kernels/microbench.h
+# ("Translation unit layout") for the AIC/AIV multi-kernel TU registration bug.
+set(BENCH_KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bench_aic.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bench_aiv.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bench_mix.cpp
 )
+list(APPEND KERNEL_FILES_COMMON ${BENCH_KERNEL_FILES_COMMON})
 
 # xlite_kernels_bf16_${RUN_MODE}
 file(GLOB KERNEL_FILES_BF16
