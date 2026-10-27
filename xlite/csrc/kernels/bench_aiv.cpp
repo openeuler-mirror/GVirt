@@ -3,24 +3,91 @@
  */
 #include "microbench.h"
 
-// AIV micro-benchmark item list - implementation lives entirely in
-// microbench.h. The three no-semicolon macros below expand to NOTHING in
-// the default build, so the 7-kernel TU stays token-identical to the
-// calibrated layout (frozen TU, see microbench.h). A build configured with
-// CMake XLITE_BENCH_TIMED=ON additionally gets, in this same TU:
-//   BENCH_TIMED_ITEMS  the *_timed scalar twins (experiment 2)
-//   BENCH_MTE_ITEMS    the MTE memory probes (experiment 3; AIV only - the
-//                      MTE pipes live on the vector core)
-//   BENCH_VEC_ITEMS    the vector-op probes (experiment 4; AIV only - the
-//                      vector pipe lives on the vector core)
-
-BENCH_EMPTY(aiv);
-BENCH_SCALAR_ADD(aiv);
-BENCH_SCALAR_XOR(aiv);
-BENCH_SCALAR_MUL(aiv);
-BENCH_SCALAR_DIV(aiv);
-BENCH_SCALAR_FADD(aiv);
-BENCH_SCALAR_ADD_UNROLL4(aiv);
-BENCH_TIMED_ITEMS(aiv)
-BENCH_MTE_ITEMS(aiv)
-BENCH_VEC_ITEMS(aiv)
+// Merged AIV micro-benchmark kernel (one kernel per TU - see microbench.h
+// "Translation unit layout"). Valid ops: EMPTY + six scalar chains (both
+// builds); MICROBENCH_TIMED adds the scalar timed twins, the four MTE memory
+// probes and the six vector-op probes. MTE/VEC bodies are double-flavoured
+// (real under __DAV_C220_VEC__, empty stub otherwise) so this common file
+// compiles in both channels.
+extern "C" __global__ __aicore__ void bench_aiv(GM_ADDR p0, GM_ADDR p1, GM_ADDR p2, GM_ADDR p3,
+                                                GM_ADDR ticks, uint32_t seed, uint64_t sz0,
+                                                uint64_t sz1, uint64_t sz2, uint32_t iters,
+                                                uint32_t op)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    switch (op) {
+        case BENCH_OP_EMPTY:
+            BENCH_EMPTY_BODY();
+            break;
+        case BENCH_OP_SCALAR_ADD:
+            BENCH_SCALAR_ADD_BODY();
+            break;
+        case BENCH_OP_SCALAR_XOR:
+            BENCH_SCALAR_XOR_BODY();
+            break;
+        case BENCH_OP_SCALAR_MUL:
+            BENCH_SCALAR_MUL_BODY();
+            break;
+        case BENCH_OP_SCALAR_DIV:
+            BENCH_SCALAR_DIV_BODY();
+            break;
+        case BENCH_OP_SCALAR_FADD:
+            BENCH_SCALAR_FADD_BODY();
+            break;
+        case BENCH_OP_SCALAR_ADD_UNROLL4:
+            BENCH_SCALAR_ADD_UNROLL4_BODY();
+            break;
+#if MICROBENCH_TIMED
+        case BENCH_OP_SCALAR_ADD_TIMED:
+            BENCH_SCALAR_ADD_TIMED_BODY();
+            break;
+        case BENCH_OP_SCALAR_XOR_TIMED:
+            BENCH_SCALAR_XOR_TIMED_BODY();
+            break;
+        case BENCH_OP_SCALAR_MUL_TIMED:
+            BENCH_SCALAR_MUL_TIMED_BODY();
+            break;
+        case BENCH_OP_SCALAR_DIV_TIMED:
+            BENCH_SCALAR_DIV_TIMED_BODY();
+            break;
+        case BENCH_OP_SCALAR_FADD_TIMED:
+            BENCH_SCALAR_FADD_TIMED_BODY();
+            break;
+        case BENCH_OP_SCALAR_ADD_UNROLL4_TIMED:
+            BENCH_SCALAR_ADD_UNROLL4_TIMED_BODY();
+            break;
+        case BENCH_OP_MTE_READ:
+            BENCH_MTE_READ_BODY();
+            break;
+        case BENCH_OP_MTE_WRITE:
+            BENCH_MTE_WRITE_BODY();
+            break;
+        case BENCH_OP_MTE_COPY:
+            BENCH_MTE_COPY_BODY();
+            break;
+        case BENCH_OP_MTE_CHASE:
+            BENCH_MTE_CHASE_BODY();
+            break;
+        case BENCH_OP_VEC_ADD_F32:
+            BENCH_VEC_ADD_F32_BODY();
+            break;
+        case BENCH_OP_VEC_MUL_F32:
+            BENCH_VEC_MUL_F32_BODY();
+            break;
+        case BENCH_OP_VEC_ADD_I32:
+            BENCH_VEC_ADD_I32_BODY();
+            break;
+        case BENCH_OP_VEC_ADD_F16:
+            BENCH_VEC_ADD_F16_BODY();
+            break;
+        case BENCH_OP_VEC_SQRT_F32:
+            BENCH_VEC_SQRT_F32_BODY();
+            break;
+        case BENCH_OP_VEC_EXP_F32:
+            BENCH_VEC_EXP_F32_BODY();
+            break;
+#endif
+        default:
+            break;
+    }
+}

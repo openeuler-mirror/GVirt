@@ -2749,13 +2749,16 @@ uint32_t XliteOpBenchEmpty(XRuntime &rt, const std::string &variant, uint32_t bl
     }
     if (variant == "aiv") {
         blockNum = (blockNum == 0 || blockNum > rt.aivNum) ? rt.aivNum : blockNum;
-        aclrtlaunch_empty_aiv(blockNum, rt.stream, nullptr);
+        aclrtlaunch_bench_aiv(blockNum, rt.stream, nullptr, nullptr, nullptr, nullptr, nullptr, 0,
+                              0, 0, 0, 0, BENCH_OP_EMPTY);
     } else if (variant == "aic") {
         blockNum = (blockNum == 0 || blockNum > rt.aicNum) ? rt.aicNum : blockNum;
-        aclrtlaunch_empty_aic(blockNum, rt.stream, nullptr);
+        aclrtlaunch_bench_aic(blockNum, rt.stream, nullptr, nullptr, nullptr, nullptr, nullptr, 0,
+                              0, 0, 0, 0, BENCH_OP_EMPTY);
     } else if (variant == "mix") {
         blockNum = (blockNum == 0 || blockNum > rt.aicNum) ? rt.aicNum : blockNum;
-        aclrtlaunch_empty_mix(blockNum, rt.stream, nullptr);
+        aclrtlaunch_bench_mix(blockNum, rt.stream, nullptr, nullptr, nullptr, nullptr, nullptr, 0,
+                              0, 0, 0, 0, BENCH_OP_EMPTY);
     } else {
         throw std::runtime_error("bench_empty: unknown variant '" + variant +
                                  "', expected 'aiv', 'aic', or 'mix'");
@@ -2777,61 +2780,57 @@ uint32_t XliteOpBenchScalar(XRuntime &rt, const std::string &variant, XTensor &o
         throw std::runtime_error("bench_scalar: unknown variant '" + variant +
                                  "', expected '<op>_aiv' or '<op>_aic'");
     }
-    const std::string op = variant.substr(0, variant.size() - 4);
-    const enum XDtype dtype = (op == "fadd") ? FP32 : INT32;
+    const std::string opStr = variant.substr(0, variant.size() - 4);
+    const enum XDtype dtype = (opStr == "fadd") ? FP32 : INT32;
     if (out.dtype != dtype || out.numel < 1) {
         throw std::runtime_error(DBG_PREFIX + XT_STR(out) +
                                  "scalar bench expects a 1-element tensor of dtype " +
                                  XDtypeStr(dtype));
     }
-    if (op == "div" && seed == 0) {
+    if (opStr == "div" && seed == 0) {
         throw std::runtime_error("scalar_div: seed (divisor) must not be 0");
     }
-    if (op == "add_unroll4" && iters % 4 != 0) {
+    if (opStr == "add_unroll4" && iters % 4 != 0) {
         throw std::runtime_error("scalar_add_unroll4: iters must be divisible by 4");
     }
     const uint32_t coreNum = aiv ? rt.aivNum : rt.aicNum;
     blockNum = (blockNum == 0 || blockNum > coreNum) ? 1 : blockNum;
-    const uint32_t seedU32 = static_cast<uint32_t>(seed);
-    const float seedF32 = static_cast<float>(seed);
-    if (op == "add") {
-        if (aiv) {
-            aclrtlaunch_scalar_add_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
-        } else {
-            aclrtlaunch_scalar_add_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
-        }
-    } else if (op == "xor") {
-        if (aiv) {
-            aclrtlaunch_scalar_xor_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
-        } else {
-            aclrtlaunch_scalar_xor_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
-        }
-    } else if (op == "mul") {
-        if (aiv) {
-            aclrtlaunch_scalar_mul_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
-        } else {
-            aclrtlaunch_scalar_mul_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
-        }
-    } else if (op == "div") {
-        if (aiv) {
-            aclrtlaunch_scalar_div_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
-        } else {
-            aclrtlaunch_scalar_div_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
-        }
-    } else if (op == "fadd") {
-        if (aiv) {
-            aclrtlaunch_scalar_fadd_aiv(blockNum, rt.stream, out.ptr, seedF32, iters);
-        } else {
-            aclrtlaunch_scalar_fadd_aic(blockNum, rt.stream, out.ptr, seedF32, iters);
-        }
-    } else if (op == "add_unroll4") {
-        if (aiv) {
-            aclrtlaunch_scalar_add_unroll4_aiv(blockNum, rt.stream, out.ptr, seedU32, iters);
-        } else {
-            aclrtlaunch_scalar_add_unroll4_aic(blockNum, rt.stream, out.ptr, seedU32, iters);
-        }
+    // seed crosses host->device as a uint32_t bit pattern (see microbench.h);
+    // fadd carries the float's bits.
+    uint32_t seedArg;
+    if (opStr == "fadd") {
+        float f = static_cast<float>(seed);
+        union {
+            uint32_t u;
+            float f;
+        } cv;
+        cv.f = f;
+        seedArg = cv.u;
     } else {
-        throw std::runtime_error("bench_scalar: unknown op '" + op + "'");
+        seedArg = static_cast<uint32_t>(seed);
+    }
+    uint32_t op;
+    if (opStr == "add") {
+        op = BENCH_OP_SCALAR_ADD;
+    } else if (opStr == "xor") {
+        op = BENCH_OP_SCALAR_XOR;
+    } else if (opStr == "mul") {
+        op = BENCH_OP_SCALAR_MUL;
+    } else if (opStr == "div") {
+        op = BENCH_OP_SCALAR_DIV;
+    } else if (opStr == "fadd") {
+        op = BENCH_OP_SCALAR_FADD;
+    } else if (opStr == "add_unroll4") {
+        op = BENCH_OP_SCALAR_ADD_UNROLL4;
+    } else {
+        throw std::runtime_error("bench_scalar: unknown op '" + opStr + "'");
+    }
+    if (aiv) {
+        aclrtlaunch_bench_aiv(blockNum, rt.stream, out.ptr, nullptr, nullptr, nullptr, nullptr,
+                              seedArg, 0, 0, 0, iters, op);
+    } else {
+        aclrtlaunch_bench_aic(blockNum, rt.stream, out.ptr, nullptr, nullptr, nullptr, nullptr,
+                              seedArg, 0, 0, 0, iters, op);
     }
     return blockNum;
 }
@@ -2855,75 +2854,57 @@ uint32_t XliteOpBenchTimed(XRuntime &rt, const std::string &variant, XTensor &ou
         throw std::runtime_error("bench_timed: unknown variant '" + variant +
                                  "', expected '<op>_aiv' or '<op>_aic'");
     }
-    const std::string op = variant.substr(0, variant.size() - 4);
-    const enum XDtype dtype = (op == "fadd") ? FP32 : INT32;
+    const std::string opStr = variant.substr(0, variant.size() - 4);
+    const enum XDtype dtype = (opStr == "fadd") ? FP32 : INT32;
     if (out.dtype != dtype || out.numel < 1) {
         throw std::runtime_error(DBG_PREFIX + XT_STR(out) +
                                  "scalar bench expects a 1-element tensor of dtype " +
                                  XDtypeStr(dtype));
     }
-    if (op == "div" && seed == 0) {
+    if (opStr == "div" && seed == 0) {
         throw std::runtime_error("scalar_div: seed (divisor) must not be 0");
     }
-    if (op == "add_unroll4" && iters % 4 != 0) {
+    if (opStr == "add_unroll4" && iters % 4 != 0) {
         throw std::runtime_error("scalar_add_unroll4: iters must be divisible by 4");
     }
     {
         const uint32_t coreNum = aiv ? rt.aivNum : rt.aicNum;
         blockNum = (blockNum == 0 || blockNum > coreNum) ? 1 : blockNum;
     }
-    const uint32_t seedU32 = static_cast<uint32_t>(seed);
-    const float seedF32 = static_cast<float>(seed);
-    if (op == "add") {
-        if (aiv) {
-            aclrtlaunch_scalar_add_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
-                                             iters);
-        } else {
-            aclrtlaunch_scalar_add_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
-                                             iters);
-        }
-    } else if (op == "xor") {
-        if (aiv) {
-            aclrtlaunch_scalar_xor_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
-                                             iters);
-        } else {
-            aclrtlaunch_scalar_xor_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
-                                             iters);
-        }
-    } else if (op == "mul") {
-        if (aiv) {
-            aclrtlaunch_scalar_mul_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
-                                             iters);
-        } else {
-            aclrtlaunch_scalar_mul_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
-                                             iters);
-        }
-    } else if (op == "div") {
-        if (aiv) {
-            aclrtlaunch_scalar_div_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
-                                             iters);
-        } else {
-            aclrtlaunch_scalar_div_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedU32,
-                                             iters);
-        }
-    } else if (op == "fadd") {
-        if (aiv) {
-            aclrtlaunch_scalar_fadd_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedF32,
-                                              iters);
-        } else {
-            aclrtlaunch_scalar_fadd_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr, seedF32,
-                                              iters);
-        }
-    } else if (op == "add_unroll4") {
-        if (aiv) {
-            aclrtlaunch_scalar_add_unroll4_aiv_timed(blockNum, rt.stream, out.ptr, ticks.ptr,
-                                                     seedU32, iters);
-        } else {
-            aclrtlaunch_scalar_add_unroll4_aic_timed(blockNum, rt.stream, out.ptr, ticks.ptr,
-                                                     seedU32, iters);
-        }
+    uint32_t seedArg;
+    if (opStr == "fadd") {
+        float f = static_cast<float>(seed);
+        union {
+            uint32_t u;
+            float f;
+        } cv;
+        cv.f = f;
+        seedArg = cv.u;
     } else {
-        throw std::runtime_error("bench_timed: unknown op '" + op + "'");
+        seedArg = static_cast<uint32_t>(seed);
+    }
+    uint32_t op;
+    if (opStr == "add") {
+        op = BENCH_OP_SCALAR_ADD_TIMED;
+    } else if (opStr == "xor") {
+        op = BENCH_OP_SCALAR_XOR_TIMED;
+    } else if (opStr == "mul") {
+        op = BENCH_OP_SCALAR_MUL_TIMED;
+    } else if (opStr == "div") {
+        op = BENCH_OP_SCALAR_DIV_TIMED;
+    } else if (opStr == "fadd") {
+        op = BENCH_OP_SCALAR_FADD_TIMED;
+    } else if (opStr == "add_unroll4") {
+        op = BENCH_OP_SCALAR_ADD_UNROLL4_TIMED;
+    } else {
+        throw std::runtime_error("bench_timed: unknown op '" + opStr + "'");
+    }
+    if (aiv) {
+        aclrtlaunch_bench_aiv(blockNum, rt.stream, out.ptr, nullptr, nullptr, nullptr, ticks.ptr,
+                              seedArg, 0, 0, 0, iters, op);
+    } else {
+        aclrtlaunch_bench_aic(blockNum, rt.stream, out.ptr, nullptr, nullptr, nullptr, ticks.ptr,
+                              seedArg, 0, 0, 0, iters, op);
     }
     return blockNum;
 }
@@ -2988,15 +2969,19 @@ uint32_t XliteOpBenchMte(XRuntime &rt, const std::string &variant, const XTensor
         throw std::runtime_error(err_str + "bench_mte " + op +
                                  " expects an INT8 dst with >= bytes elements");
     }
+    uint32_t benchOp;
     if (readOp) {
-        aclrtlaunch_mte_read_aiv(blockNum, rt.stream, src.ptr, dst.ptr, ticks.ptr, bytes, iters);
+        benchOp = BENCH_OP_MTE_READ;
     } else if (writeOp) {
-        aclrtlaunch_mte_write_aiv(blockNum, rt.stream, src.ptr, dst.ptr, ticks.ptr, bytes, iters);
+        benchOp = BENCH_OP_MTE_WRITE;
     } else if (copyOp) {
-        aclrtlaunch_mte_copy_aiv(blockNum, rt.stream, src.ptr, dst.ptr, ticks.ptr, bytes, iters);
+        benchOp = BENCH_OP_MTE_COPY;
     } else {
-        aclrtlaunch_mte_chase_aiv(blockNum, rt.stream, src.ptr, dst.ptr, ticks.ptr, bytes, iters);
+        benchOp = BENCH_OP_MTE_CHASE;
     }
+    // p0=src, p1=dst, ticks, sz0=bytes
+    aclrtlaunch_bench_aiv(blockNum, rt.stream, src.ptr, dst.ptr, nullptr, nullptr, ticks.ptr, 0,
+                          bytes, 0, 0, iters, benchOp);
     return blockNum;
 }
 
@@ -3066,20 +3051,23 @@ uint32_t XliteOpBenchVec(XRuntime &rt, const std::string &variant, const XTensor
                                  " expects an out tensor of matching dtype with >= block_num * "
                                  "elems elements (per-block regions)");
     }
+    uint32_t benchOp;
     if (addF32) {
-        aclrtlaunch_vec_add_f32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+        benchOp = BENCH_OP_VEC_ADD_F32;
     } else if (mulF32) {
-        aclrtlaunch_vec_mul_f32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+        benchOp = BENCH_OP_VEC_MUL_F32;
     } else if (addI32) {
-        aclrtlaunch_vec_add_i32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+        benchOp = BENCH_OP_VEC_ADD_I32;
     } else if (addF16) {
-        aclrtlaunch_vec_add_f16_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+        benchOp = BENCH_OP_VEC_ADD_F16;
     } else if (sqrtF32) {
-        aclrtlaunch_vec_sqrt_f32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems,
-                                     iters);
+        benchOp = BENCH_OP_VEC_SQRT_F32;
     } else {
-        aclrtlaunch_vec_exp_f32_aiv(blockNum, rt.stream, src.ptr, out.ptr, ticks.ptr, elems, iters);
+        benchOp = BENCH_OP_VEC_EXP_F32;
     }
+    // p0=src, p1=out, ticks, sz0=elems
+    aclrtlaunch_bench_aiv(blockNum, rt.stream, src.ptr, out.ptr, nullptr, nullptr, ticks.ptr, 0,
+                          elems, 0, 0, iters, benchOp);
     return blockNum;
 }
 
@@ -3132,7 +3120,10 @@ uint32_t XliteOpBenchCube(XRuntime &rt, const std::string &variant, const XTenso
         throw std::runtime_error(DBG_PREFIX + XT_STR(ticks) +
                                  "bench_cube expects an INT64 ticks tensor with >= 8 elements");
     }
-    aclrtlaunch_cube_mmad_aic(blockNum, rt.stream, a.ptr, b.ptr, c.ptr, ticks.ptr, m0, n0, k0);
+    // p0=a, p1=b, p2=c, ticks, sz0=m0, sz1=n0, sz2=k0; iters unused (host re-issues
+    // for the dependent chain).
+    aclrtlaunch_bench_aic(blockNum, rt.stream, a.ptr, b.ptr, c.ptr, nullptr, ticks.ptr, 0, m0, n0,
+                          k0, 0, BENCH_OP_CUBE_MMAD);
     return blockNum;
 }
 #endif  // MICROBENCH_TIMED

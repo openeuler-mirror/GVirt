@@ -57,4 +57,40 @@ enum class NormKind {
 
 // muls
 #define MAX_MULS_CALC_NUM 16320
+
+// bench micro-benchmark op selector. Each merged bench_<ct> kernel (bench_aic
+// / bench_aiv / bench_mix) takes a uint32_t op and dispatches on it; only the
+// ops valid for that core type appear in the kernel's switch. Host (op.cpp) and
+// kernel (microbench.h) share this enum so the dispatch stays in sync.
+enum BenchOp : uint32_t {
+    // ---- AIC / AIV / MIX ----
+    BENCH_OP_EMPTY = 0,  // empty launch-floor probe (all 3 core types)
+    // ---- AIC / AIV (no MIX): scalar dependent chains, default build ----
+    BENCH_OP_SCALAR_ADD = 1,
+    BENCH_OP_SCALAR_XOR = 2,
+    BENCH_OP_SCALAR_MUL = 3,
+    BENCH_OP_SCALAR_DIV = 4,
+    BENCH_OP_SCALAR_FADD = 5,  // float variant
+    BENCH_OP_SCALAR_ADD_UNROLL4 = 6,
+    // ---- Timed twins (MICROBENCH_TIMED only) ----
+    BENCH_OP_SCALAR_ADD_TIMED = 7,
+    BENCH_OP_SCALAR_XOR_TIMED = 8,
+    BENCH_OP_SCALAR_MUL_TIMED = 9,
+    BENCH_OP_SCALAR_DIV_TIMED = 10,
+    BENCH_OP_SCALAR_FADD_TIMED = 11,
+    BENCH_OP_SCALAR_ADD_UNROLL4_TIMED = 12,
+    // ---- AIC only (MICROBENCH_TIMED) ----
+    BENCH_OP_CUBE_MMAD = 13,
+    // ---- AIV only (MICROBENCH_TIMED) ----
+    BENCH_OP_MTE_READ = 14,
+    BENCH_OP_MTE_WRITE = 15,
+    BENCH_OP_MTE_COPY = 16,
+    BENCH_OP_MTE_CHASE = 17,
+    BENCH_OP_VEC_ADD_F32 = 18,
+    BENCH_OP_VEC_MUL_F32 = 19,
+    BENCH_OP_VEC_ADD_I32 = 20,
+    BENCH_OP_VEC_ADD_F16 = 21,
+    BENCH_OP_VEC_SQRT_F32 = 22,
+    BENCH_OP_VEC_EXP_F32 = 23,
+};
 #endif
