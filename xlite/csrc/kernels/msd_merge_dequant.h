@@ -63,7 +63,6 @@ __aicore__ inline void msd_merge_dequant(GM_ADDR y_merged, GM_ADDR scaleBiasPtrs
     uint32_t numExperts = endIdx - startIdx;
 
     uint32_t n_pad = ROUND_UP(n, VECTOR_MAX_NUM_OF_FP16);
-    uint32_t fp16_rep = DIV_ROUND_UP(n_pad, VECTOR_MAX_NUM_OF_FP16);
     uint32_t fp32_rep = DIV_ROUND_UP(n_pad, VECTOR_MAX_NUM_OF_FP32);
 
     auto *low0 = reinterpret_cast<UBA(half)>((uintptr_t)(0));
@@ -71,19 +70,13 @@ __aicore__ inline void msd_merge_dequant(GM_ADDR y_merged, GM_ADDR scaleBiasPtrs
     auto *low1 = reinterpret_cast<UBA(half)>((uintptr_t)(high0 + n_pad));
     auto *high1 = reinterpret_cast<UBA(half)>((uintptr_t)(low1 + n_pad));
     auto *low_fp32_buf = reinterpret_cast<UBA(float)>((uintptr_t)(high1 + n_pad));
-    auto *high_fp32_buf = reinterpret_cast<UBA(float)>((uintptr_t)(low_fp32_buf + n_pad));
-    auto *merged_fp32 = reinterpret_cast<UBA(float)>((uintptr_t)(high_fp32_buf + n_pad));
+    auto *merged_fp32 = reinterpret_cast<UBA(float)>((uintptr_t)(low_fp32_buf + n_pad));
     auto *bias_buf = reinterpret_cast<UBA(float)>((uintptr_t)(merged_fp32 + n_pad));
     auto *out0 = reinterpret_cast<UBA(bfloat16_t)>((uintptr_t)(bias_buf + n_pad));
     auto *out1 = reinterpret_cast<UBA(bfloat16_t)>((uintptr_t)(out0 + n_pad));
-    auto *scale_buf = reinterpret_cast<UBA(float)>((uintptr_t)(out1 + n_pad));
-    // align per-token scale by 32B and pad the size.
-    uintptr_t counts_start = reinterpret_cast<uintptr_t>(scale_buf + 32);
+    auto *counts_buf = reinterpret_cast<UBA(uint32_t)>(ROUND_UP((uintptr_t)(out1 + n_pad), 32));
     uint32_t counts_pad = ROUND_UP(numExperts * sizeof(uint32_t), 32);
-    auto *counts_buf = reinterpret_cast<UBA(uint32_t)>(counts_start);
-    auto *end_addr = reinterpret_cast<UBA(int8_t)>(counts_start + counts_pad);
-
-    assert((uint64_t)end_addr <= UB_SIZE);
+    auto *end_addr = reinterpret_cast<UBA(int8_t)>(counts_buf + counts_pad / sizeof(uint32_t));
 
     UBA(half) high_bufs[PINGPONG] = {high0, high1};
     UBA(half) low_bufs[PINGPONG] = {low0, low1};
@@ -91,14 +84,21 @@ __aicore__ inline void msd_merge_dequant(GM_ADDR y_merged, GM_ADDR scaleBiasPtrs
 
     int event_id = 0;
 
-    // counts, GM -> UB
-    copy_gm_to_ubuf_align_b32(counts_buf, counts_gm + startIdx, 0, 1, numExperts * sizeof(uint32_t),
-                              0, 0, 0, 0);
-    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
-    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+    // Rolling expert locator: rows advance monotonically and experts partition
+    // the row axis by counts prefix sums, so a block's expert id only ever
+    // moves forward.
+    uint32_t expert_id = 0;
+    uint32_t curr_expert_row = 0;
+
+    // counts, GM -> UB; fence to the S pipe, whose scalar expert scan reads
+    // counts_buf every row (cross-pipe UB reads need an explicit event flag).
+    CopyGmToUbufAligned(counts_buf, counts_gm + startIdx, numExperts * sizeof(uint32_t));
+    set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
 
@@ -106,60 +106,61 @@ __aicore__ inline void msd_merge_dequant(GM_ADDR y_merged, GM_ADDR scaleBiasPtrs
         uint32_t low_row_offset = (2 * row) * n;
         uint32_t high_row_offset = (2 * row + 1) * n;
 
-        // low, high, from GM -> UB
-        // Interleaved layout: token r's low is row 2r, high is row 2r+1.
+        // per-token scale of this row
+        float tokenScale = *(scale_gm + row);
+
+        // Rolling expert locator: resume from where the previous row's scan
+        // stopped and advance to this row's expert. Rows advance monotonically
+        // and experts partition the row axis by counts prefix sums, so the
+        // scan only ever moves forward — amortized O(1) per row.
+        while (expert_id + 1 < numExperts && row >= curr_expert_row + counts_buf[expert_id]) {
+            curr_expert_row += counts_buf[expert_id];
+            expert_id++;
+        }
+
+        // low, high, from GM -> UB. Interleaved layout: token r's low is row
+        // 2r, high is row 2r+1. GM rows 2r and 2r+1 are contiguous, and the UB
+        // low/high buffers are adjacent (high = low + n_pad), so when n is a
+        // multiple of the 128-element vector granularity (no pad between the
+        // halves) one 2-row block copy moves both; otherwise the pad forces
+        // two copies.
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
-        copy_gm_to_ubuf_align_b16(low_bufs[event_id], merged_gm + low_row_offset, 0, 1,
-                                  n * sizeof(half), 0, 0, 0, 0);
-        copy_gm_to_ubuf_align_b16(high_bufs[event_id], merged_gm + high_row_offset, 0, 1,
-                                  n * sizeof(half), 0, 0, 0, 0);
+        if (n % VECTOR_MAX_NUM_OF_FP16 == 0) {  // n_pad(for vconv) == n, only need one copy
+            CopyGmToUbufAligned(low_bufs[event_id], merged_gm + low_row_offset,
+                                2 * n * sizeof(half));
+        } else {
+            CopyGmToUbufAligned(low_bufs[event_id], merged_gm + low_row_offset, n * sizeof(half));
+            CopyGmToUbufAligned(high_bufs[event_id], merged_gm + high_row_offset, n * sizeof(half));
+        }
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + event_id);
 
-        // vconv(Y_low), bf16 -> f32
+        // vconv(Y_low, Y_high), fp16 -> f32: one shot fills [low_fp32 | merged]
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + event_id);
         vconv_f162f32(low_fp32_buf, low_bufs[event_id], fp32_rep * 2, 1, 1, 8, 4);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
         pipe_barrier(PIPE_V);
 
-        // Y_high = Y_high × 16
-        vmuls(high_fp32_buf, high_fp32_buf, float(MSD_MERGE_SCALE), fp32_rep, 1, 1, 8, 8);
-        pipe_barrier(PIPE_V);
+        // scale_bias, GM -> UB. Single buffer: the reload waits until the
+        // previous expert cycle's last reader releases the buffer, then the
+        // copy-done flag hands it to this row's vadd.
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
+        GMA(float) bias_gm_row = reinterpret_cast<GMA(float)>(bias_ptrs_gm[startIdx + expert_id]);
+        CopyGmToUbufAligned(bias_buf, bias_gm_row, n * sizeof(float));
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
 
         // merged = Y_high × 16 + Y_low
-        vadd(merged_fp32, high_fp32_buf, low_fp32_buf, fp32_rep, 1, 1, 1, 8, 8, 8);
+        vmuls(merged_fp32, merged_fp32, float(MSD_MERGE_SCALE), fp32_rep, 1, 1, 8, 8);
         pipe_barrier(PIPE_V);
-
-        // find the target expert
-        uint32_t expertId = 0;
-        uint32_t acc = 0;
-        for (uint32_t e = 0; e < numExperts; e++) {
-            uint32_t c = counts_buf[e];
-            if (row < acc + c) {
-                expertId = e;
-                break;
-            }
-            acc += c;
-        }
-        GMA(float) bias_gm_row = reinterpret_cast<GMA(float)>(bias_ptrs_gm[startIdx + expertId]);
-        set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
-        wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
-
-        // scale_bias, GM -> UB
-        copy_gm_to_ubuf_align_b32(bias_buf, bias_gm_row, 0, 1, n * sizeof(float), 0, 0, 0, 0);
-        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
-        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
+        vadd(merged_fp32, merged_fp32, low_fp32_buf, fp32_rep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
 
         // merged = merged + scale_bias
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
         vadd(merged_fp32, merged_fp32, bias_buf, fp32_rep, 1, 1, 1, 8, 8, 8);
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
         pipe_barrier(PIPE_V);
 
-        // scale, GM -> UB
-        copy_gm_to_ubuf_align_b16(scale_buf, scale_gm + row, 0, 1, sizeof(float), 0, 0, 0, 0);
-        set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-        wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
-
         // merged = merged * scale
-        float tokenScale = float(*reinterpret_cast<__ubuf__ float *>(scale_buf));
         vmuls(merged_fp32, merged_fp32, tokenScale, fp32_rep, 1, 1, 8, 8);
         pipe_barrier(PIPE_V);
 
@@ -171,8 +172,7 @@ __aicore__ inline void msd_merge_dequant(GM_ADDR y_merged, GM_ADDR scaleBiasPtrs
 
         // out_buf UB -> GM (output is [m, n]: write the merged result to row r)
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + event_id);
-        copy_ubuf_to_gm_align_b16(out_gm + row * n, out_bufs[event_id], 0, 1,
-                                  n * sizeof(bfloat16_t), 0, 0, 0, 0);
+        CopyUbufToGmAligned(out_gm + row * n, out_bufs[event_id], n * sizeof(bfloat16_t));
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + event_id);
 
         event_id = 1 - event_id;
@@ -180,9 +180,9 @@ __aicore__ inline void msd_merge_dequant(GM_ADDR y_merged, GM_ADDR scaleBiasPtrs
 
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
+    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-    pipe_barrier(PIPE_ALL);
 }
 
 #define MSD_MERGE_DEQUANT_FUNC_DEFINE(dtype)                                                    \
