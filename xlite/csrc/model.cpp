@@ -299,7 +299,8 @@ void XModel::Init(void)
         }
     }
 
-    if (_c.nSharedExperts != 0 && !moeSEUpGate[_c.nDenseLayers].weight.shape.empty() &&
+    if (_c.nDenseLayers < _c.nLayers && _c.nSharedExperts != 0 &&
+        !moeSEUpGate[_c.nDenseLayers].weight.shape.empty() &&
         !moeSEDown[_c.nDenseLayers].weight.shape.empty()) {
         if (_c.quantAttnWeightTrans) {
             _isSharedExpertWeightFull =
