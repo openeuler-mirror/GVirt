@@ -11,11 +11,13 @@ import re
 import shlex
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
@@ -202,22 +204,247 @@ def get_xlite_version() -> str:
     return xlite_version
 
 
-def prepare_env(
-    ais_bench_dir: Path | None = None,
-    aisbench_git_url: str = "https://github.com/AISBench/benchmark.git",
-    aisbench_git_branch: str = "v3.1-20260330-master",
-    ceval_dataset_url: str = "https://www.modelscope.cn/datasets/opencompass/ceval-exam/resolve/master/ceval-exam.zip",
-):
+def _gitignore_added_lines(ais_bench_dir: Path) -> list[str]:
+    """Collect the lines locally added to the ais_bench repo's .gitignore (vs HEAD)."""
+    res = subprocess.run(
+        ["git", "-C", str(ais_bench_dir), "diff", "HEAD", "--", ".gitignore"],
+        capture_output=True,
+        text=True,
+    )
+    return [line[1:] for line in res.stdout.splitlines() if line.startswith("+") and not line.startswith("+++")]
+
+
+def _sync_aisbench_repo(ais_bench_dir: Path, tag: str) -> None:
+    """Hard-reset an existing ais_bench checkout to ``tag``.
+
+    Tracked modifications are discarded (the harness rewrites the model config files
+    with ``sed`` on every run), untracked files (outputs, reports, datasets) are kept.
+    Local ``.gitignore`` additions (output dirs, dataset entries) survive the reset:
+    they are captured as added lines before the reset and re-appended afterwards — a
+    line-level re-apply that cannot conflict, unlike a stash pop, when a tag rewrites
+    .gitignore. Line removals are not preserved.
+    """
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(ais_bench_dir), *args], capture_output=True)
+
+    added_gitignore_lines = _gitignore_added_lines(ais_bench_dir)
+
+    res = git("fetch", "--depth", "1", "--force", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
+    if res.returncode != 0 and git("rev-parse", "--quiet", "--verify", f"{tag}^{{commit}}").returncode != 0:
+        check_subprocess_result(res, f"Failed to fetch ais_bench tag {tag}")
+
+    check_subprocess_result(git("reset", "--hard", tag), f"Failed to reset ais_bench repo to {tag}")
+
+    if added_gitignore_lines:
+        gitignore = ais_bench_dir / ".gitignore"
+        current = gitignore.read_text().splitlines() if gitignore.exists() else []
+        missing = [line for line in added_gitignore_lines if line not in current]
+        if missing:
+            with open(gitignore, "a") as f:
+                if current and current[-1].strip():
+                    f.write("\n")
+                f.write("\n".join(missing) + "\n")
+            print(f"Re-applied {len(missing)} local .gitignore line(s) after reset to {tag}")
+
+
+def _require_git_lfs() -> None:
+    if subprocess.run(["git", "lfs", "version"], capture_output=True).returncode != 0:
+        raise RuntimeError("git-lfs is required for this dataset; install it (e.g. `apt install git-lfs`) and rerun")
+
+
+def _wget(url: str, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    check_subprocess_result(subprocess.run(["wget", "-O", str(target), url]), f"Failed to download {url}")
+
+
+def _git_clone_dataset(url: str, target: Path) -> None:
+    """Shallow-clone a dataset repo (LFS assets included) into ``target``."""
+    _require_git_lfs()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    check_subprocess_result(
+        subprocess.run(["git", "clone", "--depth", "1", url, str(target)]), f"Failed to clone dataset from {url}"
+    )
+
+
+def _download_ceval(ais_bench_dir: Path, download_url: str) -> None:
+    dataset_dir = ais_bench_dir / "ais_bench" / "datasets" / "ceval" / "formal_ceval"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = dataset_dir / "ceval-exam.zip"
+    _wget(download_url, zip_path)
+    with zipfile.ZipFile(zip_path) as zip_file:
+        zip_file.extractall(dataset_dir)
+    zip_path.unlink(missing_ok=True)
+    if not (dataset_dir / "test").exists():
+        raise RuntimeError(f"Unexpected ceval archive layout; `{dataset_dir}/test` not found")
+
+
+def _download_gsm8k(ais_bench_dir: Path, download_url: str) -> None:
+    datasets_root = ais_bench_dir / "ais_bench" / "datasets"
+    _wget(download_url, datasets_root / "gsm8k.zip")
+    with zipfile.ZipFile(datasets_root / "gsm8k.zip") as zip_file:
+        zip_file.extractall(datasets_root)
+    (datasets_root / "gsm8k.zip").unlink(missing_ok=True)
+    if not (datasets_root / "gsm8k" / "test.jsonl").exists():
+        raise RuntimeError("Unexpected gsm8k archive layout; `ais_bench/datasets/gsm8k/test.jsonl` not found")
+
+
+def _download_textvqa(ais_bench_dir: Path, download_url: str) -> None:
+    # the source must ship the json/jsonl files under `textvqa_json/` (the config's layout)
+    _git_clone_dataset(download_url, ais_bench_dir / "ais_bench" / "datasets" / "textvqa")
+
+
+def _download_mmmu(ais_bench_dir: Path, download_url: str) -> None:
+    _git_clone_dataset(download_url, ais_bench_dir / "ais_bench" / "datasets" / "mmmu")
+
+
+def _download_mmstar(ais_bench_dir: Path, download_url: str) -> None:
+    _wget(download_url, ais_bench_dir / "ais_bench" / "datasets" / "mmstar" / "MMStar.tsv")
+
+
+def _download_realworldqa(ais_bench_dir: Path, download_url: str) -> None:
+    _git_clone_dataset(download_url, ais_bench_dir / "ais_bench" / "datasets" / "RealworldQA")
+
+
+def _download_bfcl(ais_bench_dir: Path, download_url: str) -> None:
+    # the BFCL data ships inside the `bfcl-eval` dependency package; nothing to download
+    del download_url  # unused: the data comes from the pip package, not a URL
+    res = subprocess.run(
+        f"{VENV_ACTIVATE_CMD} && pip install -r requirements/datasets/bfcl_dependencies.txt --no-deps",
+        shell=True,
+        executable="/bin/bash",
+        cwd=ais_bench_dir,
+        capture_output=True,
+    )
+    check_subprocess_result(res, "Failed to install bfcl-eval dependencies")
+
+
+@dataclass(frozen=True)
+class DatasetSpec:
+    """Everything the harness needs to set up, run and parse one ais_bench dataset."""
+
+    task: str  # value forwarded to `ais_bench --datasets`
+    model_config: str  # ais_bench model config (file stem under configs/models/vllm_api)
+    score_column: str  # summary CSV column holding the score (the model config's `abbr`)
+    row_filter: tuple[str, str]  # (dataset, metric) regexes selecting the summary rows to average
+    metric_name: str  # metric label used in reports
+    downloader: Callable[[Path, str], None]  # populates the dataset under ais_bench_dir
+    merge_ds: bool = True  # whether `--merge-ds` may be passed to ais_bench
+    ready_path: str | None = None  # repo-relative file/dir whose existence means "already downloaded"
+    # All sources are China-accessible (ModelScope / Aliyun OSS) — huggingface.co is not
+    # reliably reachable from where this harness runs.
+    download_url: str = ""  # primary source URL (zip/TSV/git repo); "" = nothing to download (bfcl ships via pip)
+
+
+DATASETS: dict[str, DatasetSpec] = {
+    # text-only datasets
+    "ceval": DatasetSpec(
+        task="ceval_gen_0_shot_cot_chat_prompt",
+        model_config="vllm_api_general_chat",
+        score_column="vllm-api-general-chat",
+        row_filter=(r"^ceval-weighted$", r"^weighted_average$"),
+        metric_name="weighted_average",
+        downloader=_download_ceval,
+        ready_path="ais_bench/datasets/ceval/formal_ceval/test",
+        download_url="https://www.modelscope.cn/datasets/opencompass/ceval-exam/resolve/master/ceval-exam.zip",
+    ),
+    "gsm8k": DatasetSpec(
+        task="gsm8k_gen_0_shot_cot_chat_prompt",
+        model_config="vllm_api_general_chat",
+        score_column="vllm-api-general-chat",
+        row_filter=(r"^gsm8k$", r"^accuracy$"),
+        metric_name="accuracy",
+        downloader=_download_gsm8k,
+        ready_path="ais_bench/datasets/gsm8k/test.jsonl",
+        download_url="http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip",
+    ),
+    # multimodal datasets (need a multimodal-capable served model)
+    "textvqa": DatasetSpec(
+        task="textvqa_gen_base64",
+        model_config="vllm_api_general_chat",
+        score_column="vllm-api-general-chat",
+        row_filter=(r"^textvqa$", r"^accuracy$"),
+        metric_name="accuracy",
+        downloader=_download_textvqa,
+        ready_path="ais_bench/datasets/textvqa/textvqa_json/textvqa_val.jsonl",
+        # vllm-ascend's mirror already ships the `textvqa_json/` layout the config reads
+        download_url="https://www.modelscope.cn/datasets/vllm-ascend/textvqa_subset.git",
+    ),
+    "mmmu": DatasetSpec(
+        task="mmmu_gen",
+        model_config="vllm_api_general_chat",
+        score_column="vllm-api-general-chat",
+        row_filter=(r"^mmmu$", r"^\[validation\]: Overall$"),
+        metric_name="accuracy",
+        downloader=_download_mmmu,
+        ready_path="ais_bench/datasets/mmmu",
+        download_url="https://www.modelscope.cn/datasets/AI-ModelScope/MMMU.git",
+    ),
+    "mmstar": DatasetSpec(
+        task="mmstar_gen",
+        model_config="vllm_api_general_chat",
+        score_column="vllm-api-general-chat",
+        row_filter=(r"^mmstar$", r"^Overall$"),
+        metric_name="accuracy",
+        downloader=_download_mmstar,
+        ready_path="ais_bench/datasets/mmstar/MMStar.tsv",
+        download_url="https://www.modelscope.cn/datasets/evalscope/MMStar/resolve/master/MMStar.tsv",
+    ),
+    "realworldqa": DatasetSpec(
+        task="realworldqa_gen_base64",
+        model_config="vllm_api_general_chat",
+        score_column="vllm-api-general-chat",
+        row_filter=(r"^realworldqa$", r"^accuracy$"),
+        metric_name="accuracy",
+        downloader=_download_realworldqa,
+        ready_path="ais_bench/datasets/RealworldQA/data/test-00000-of-00002.parquet",
+        # mirror of huggingface.co/datasets/xai-community/realworldqa with the same layout
+        download_url="https://www.modelscope.cn/datasets/xai-org/RealworldQA.git",
+    ),
+    # tool/function-calling dataset (needs the vllm_api_function_call_chat model config)
+    "bfcl": DatasetSpec(
+        task="BFCL_gen_all",
+        model_config="vllm_api_function_call_chat",
+        score_column="vllm-api-function-call-chat",
+        row_filter=(r"^BFCL", r"^accuracy$"),
+        metric_name="accuracy",
+        downloader=_download_bfcl,
+        merge_ds=False,  # BFCL sub-datasets use different evaluators and cannot be merged
+    ),
+}
+
+
+def _ensure_dataset(key: str, ais_bench_dir: Path) -> None:
+    """Download and set up one dataset (idempotent); see :data:`DATASETS`."""
+    if key not in DATASETS:
+        raise ValueError(f"Unknown dataset `{key}`; available datasets: {sorted(DATASETS)}")
+    spec = DATASETS[key]
+    # the ais_bench .gitignore already excludes everything under ais_bench/datasets/
+    # except the tracked .py sources, so downloaded data needs no extra ignore entries
+    if spec.ready_path and (ais_bench_dir / spec.ready_path).exists():
+        print(f"Dataset `{key}` is already set up, skipping download...")
+        return
+    print(f"Setting up dataset `{key}`...")
+    spec.downloader(ais_bench_dir, spec.download_url)
+
+
+def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = None):
+    aisbench_git_url = os.environ.get("AISBENCH_GIT_URL", "https://github.com/AISBench/benchmark.git")
+    aisbench_git_tag = os.environ.get("AISBENCH_GIT_TAG", "v3.1-20261013-master")
     global VENV_ACTIVATE_CMD
     ais_bench_dir = ais_bench_dir or AIS_BENCH_DIR
+    datasets = list(datasets or ["ceval"])
+    if "all" in datasets:
+        datasets = list(DATASETS.keys())
 
-    # check if benchmark repo exists, if not, clone it
+    # check if benchmark repo exists; if so, hard-reset it to the wanted tag
     if not ais_bench_dir.exists():
-        print(f"Cloning ais_bench repo to {ais_bench_dir}...")
-        res = subprocess.run(
-            ["git", "clone", "--depth", "1", "-b", aisbench_git_branch, aisbench_git_url, ais_bench_dir]
-        )
+        print(f"Cloning ais_bench repo ({aisbench_git_tag}) to {ais_bench_dir}...")
+        res = subprocess.run(["git", "clone", "--depth", "1", "-b", aisbench_git_tag, aisbench_git_url, ais_bench_dir])
         check_subprocess_result(res, "Failed to clone ais_bench repo")
+    else:
+        print(f"Syncing existing ais_bench repo at {ais_bench_dir} to tag {aisbench_git_tag}...")
+        _sync_aisbench_repo(ais_bench_dir, aisbench_git_tag)
 
     # make a `.venv` in the benchmark repo for ais_bench, and install requirements.
     # the venv is namespaced by Python version (e.g. `.venv_py39`, `.venv_py310`) so that
@@ -247,18 +474,9 @@ def prepare_env(
     else:
         print("ais_bench already installed, skipping installation...")
 
-    # check if the ceval dataset is downloaded
-    dataset_dir = ais_bench_dir / "ais_bench" / "datasets" / "ceval" / "formal_ceval"
-    if not dataset_dir.exists() or not (dataset_dir / "test").exists():
-        print(f"Downloading ceval dataset to {dataset_dir}...")
-        dataset_dir.mkdir(parents=True, exist_ok=True)
-        zip_path = dataset_dir / "ceval-exam.zip"
-        res = subprocess.run(["wget", "-O", str(zip_path), ceval_dataset_url])
-        if res.returncode == 0:
-            with zipfile.ZipFile(zip_path) as zip_file:
-                zip_file.extractall(dataset_dir)
-            zip_path.unlink(missing_ok=True)
-        check_subprocess_result(res, "Failed to download ceval dataset")
+    # download / set up every dataset the run needs (idempotent)
+    for dataset_key in dict.fromkeys(datasets):
+        _ensure_dataset(dataset_key, ais_bench_dir)
 
 
 def cleanup_on_exit():
@@ -290,6 +508,42 @@ def find_available_port(start_port: int = 8241, n: int = 20000) -> int:
         if check_port_available(port, 0):
             return port
     raise RuntimeError(f"No available port found in range {start_port}-{end_port}")
+
+
+@lru_cache(maxsize=1)
+def detect_hccl_network() -> tuple[str, str]:
+    """Return the ``(nic, ipv4)`` of the interface owning the default route.
+
+    Gloo and HCCL pick their bind address from ``GLOO_SOCKET_IFNAME`` /
+    ``HCCL_SOCKET_IFNAME`` / ``HCCL_IF_IP``. Without them both resolve the local
+    hostname instead, which is not guaranteed to be resolvable inside a
+    container: Gloo then degrades to loopback with a ~10s DNS stall per rank,
+    and HCCL fails outright with ``hcclGetRootInfo ... error code is 19
+    (call network api fail)``. ``vllm_xlite.sh`` pins these variables for the
+    same reason; this mirrors it so the harness is self-sufficient.
+    """
+    try:
+        with open("/proc/net/route") as fh:
+            rows = [line.split() for line in fh.read().splitlines()[1:]]
+    except OSError:
+        return "", ""
+    for row in rows:
+        # little-endian hex fields; the default route has Destination == 0.0.0.0
+        if len(row) > 7 and row[1] == "00000000":
+            nic, gateway = row[0], row[2]
+            try:
+                peer = socket.inet_ntoa(struct.pack("<I", int(gateway, 16)))
+            except (ValueError, struct.error, OSError):
+                peer = ""
+            if peer in ("", "0.0.0.0"):
+                peer = "223.5.5.5"  # any routed address works; nothing is sent
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.connect((peer, 9))  # route lookup only, no packet
+                    return nic, sock.getsockname()[0]
+            except OSError:
+                return nic, ""
+    return "", ""
 
 
 def start_vllm_server(
@@ -347,6 +601,16 @@ def start_vllm_server(
 
     env_copy = os.environ.copy()
     env_copy.update(envs)
+
+    # Pin the NICs Gloo/HCCL bind to (mirrors vllm_xlite.sh); see detect_hccl_network().
+    # Variables already present in the caller's environment take precedence.
+    nic, nic_ip = detect_hccl_network()
+    if nic:
+        env_copy.setdefault("GLOO_SOCKET_IFNAME", nic)
+        env_copy.setdefault("TP_SOCKET_IFNAME", nic)
+        env_copy.setdefault("HCCL_SOCKET_IFNAME", nic)
+    env_copy.setdefault("HCCL_IF_IP", nic_ip or "127.0.0.1")
+    print(f"Pinning Gloo/HCCL to NIC {nic or '<unset>'} ({nic_ip or '127.0.0.1'})")
 
     model_name = model_name or Path(model_path).stem or "model"
     quantization = (Path(model_path) / "quant_model_description.json").exists()
@@ -442,6 +706,7 @@ def run_ais_bench(
     ais_bench_num_prompts: int = 128,
     model_path: str = "",
     model_name: str | None = None,
+    dataset: str = "ceval",
     port: int = 8384,
     tp_size: int = 1,
     ep: bool = True,
@@ -462,6 +727,7 @@ def run_ais_bench(
     retry: int = 3,
     vllm_timeout: int = 1800,
 ) -> BenchResult:
+    spec = DATASETS[dataset]
     model_name = model_name or Path(model_path).stem or "model"
     quantization = (Path(model_path) / "quant_model_description.json").exists()
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
@@ -469,14 +735,14 @@ def run_ais_bench(
     port = find_available_port(port)
     bench_result = BenchResult(
         model_name=model_name,
-        dataset="ceval-weighted",
+        dataset=dataset,
         tp_size=tp_size,
         ep=ep,
         dp_size=dp_size,
         mtp_tokens=mtp_tokens,
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
-        metric="weighted_average",
+        metric=spec.metric_name,
         accuracy=0.0,
     )
 
@@ -489,12 +755,13 @@ def run_ais_bench(
     print()
     print(SEC_SEP_1)
     print(
-        f"Running ais_bench for model {model_name} on port {port}, using the `ceval` dataset with the first "
+        f"Running ais_bench for model {model_name} on port {port}, using the `{dataset}` dataset with the first "
         f"{ais_bench_num_prompts} prompts from each subset..."
     )
     print(SEC_SEP_2)
     print(f"Model path: {model_path}")
     print(f"Model name: {model_name}")
+    print(f"Dataset: {dataset} (ais_bench task: {spec.task})")
     print(f"ASCEND_RT_VISIBLE_DEVICES: {','.join(map(str, device_ids)) if device_ids else 'Not set'}")
     print(f"Quantization: {'Yes' if quantization else 'No'}")
     print(f"Tensor parallel size: {tp_size}")
@@ -513,7 +780,7 @@ def run_ais_bench(
 
     ais_bench_dir = ais_bench_dir or AIS_BENCH_DIR
     ais_bench_script = (
-        ais_bench_dir / "ais_bench" / "benchmark" / "configs" / "models" / "vllm_api" / "vllm_api_general_chat.py"
+        ais_bench_dir / "ais_bench" / "benchmark" / "configs" / "models" / "vllm_api" / f"{spec.model_config}.py"
     )
     if not ais_bench_script.exists():
         raise FileNotFoundError(f"ais_bench script not found at {ais_bench_script}")
@@ -525,7 +792,8 @@ def run_ais_bench(
     suffix_deployment = f"TP{tp_size}DP{dp_size}{'EP' if ep else ''}{f'-MTP{mtp_tokens}' if mtp_tokens > 0 else ''}"
     suffix = f"-{suffix_deployment}-{suffix_backend}"
     ais_bench_output_parent_dir = ais_bench_output_dir or ais_bench_dir / "outputs" / get_xlite_version()
-    ais_bench_output_dir = ais_bench_output_parent_dir / model_name / suffix_backend / suffix_deployment
+    # keep the dataset in the path so different datasets never share (and confuse) work dirs
+    ais_bench_output_dir = ais_bench_output_parent_dir / model_name / dataset / suffix_backend / suffix_deployment
     if not ais_bench_output_dir.exists():
         ais_bench_output_dir.mkdir(parents=True)
     print(f"ais_bench output directory: {ais_bench_output_dir}")
@@ -588,9 +856,9 @@ def run_ais_bench(
         max_cpu_workers = int(os.environ.get("XLITE_AISBENCH_WORKERS", 16))
         aisbench_cmd_lst: list[str] = [
             f"{VENV_ACTIVATE_CMD} &&",
-            "ais_bench --models vllm_api_general_chat",
-            "--datasets ceval_gen_0_shot_cot_chat_prompt",
-            "--mode all --dump-eval-details --merge-ds",
+            f"ais_bench --models {spec.model_config}",
+            f"--datasets {spec.task}",
+            "--mode all --dump-eval-details" + (" --merge-ds" if spec.merge_ds else ""),
             f'--max-num-workers "{min(os.cpu_count() or 4, max_cpu_workers, max_num_seqs)}"',
             f'--work-dir "{ais_bench_output_dir}"',
             f'--num-prompts "{ais_bench_num_prompts}"',
@@ -630,14 +898,19 @@ def run_ais_bench(
         # from the output directory, find the latest ais_bench_output_dir/*datetime*/summary/summary_*.csv
         summary_path = max(ais_bench_output_dir.glob("*/summary/summary_*.csv"), key=os.path.getmtime)
         df = pd.read_csv(summary_path, index_col=None)
-        mask = (df["dataset"] == "ceval-weighted") & (df["metric"] == "weighted_average")
+        dataset_re, metric_re = spec.row_filter
+        mask = df["dataset"].astype(str).str.match(dataset_re) & df["metric"].astype(str).str.match(metric_re)
         if not mask.any():
-            raise ValueError(f"Could not find weighted average accuracy in summary csv at {summary_path}")
-        weighted_accuracy = float(df.loc[mask, "vllm-api-general-chat"].values[-1])  # type: ignore[index]
+            raise ValueError(
+                f"Could not find rows with dataset~{dataset_re!r} and metric~{metric_re!r} in summary csv at "
+                f"{summary_path} (columns: {list(df.columns)})"
+            )
+        # average the matched rows: a single row for most datasets, one per subset for e.g. BFCL
+        accuracy = float(df.loc[mask, spec.score_column].astype(float).mean())  # type: ignore[index]
 
-        print(f"Finished ais_bench for model {model_name} with weighted accuracy {weighted_accuracy:.2f}")
+        print(f"Finished ais_bench for model {model_name} with {spec.metric_name} accuracy {accuracy:.2f}")
 
-        bench_result.accuracy = weighted_accuracy
+        bench_result.accuracy = accuracy
         bench_result.error = None
     except KeyboardInterrupt as e:
         print(f"KeyboardInterrupt received, stopping vLLM server for model {model_name}...")
@@ -657,11 +930,11 @@ if __name__ == "__main__":
     epilog = """
 Example usage::
 
-    python batch_aisbench.py /path/to/benchmark --num-prompts 64 --model-dir /dir/to/models --models model1 model2 --tps 2 4 --eps 0 1 --xlite 1 0
+    python batch_aisbench.py /path/to/benchmark --num-prompts 64 --model-dir /dir/to/models --models model1 model2 --tps 2 4 --eps 0 1 --xlite 1 0 --datasets ceval gsm8k
 
-This will run the benchmark for (model1, TP2EP0, xlite decode-only), and (model2, TP4EP4, aclgraph). If `--output-dir` is\
-not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-xlite-decode-only` and\
-`/path/to/ais_bench_dir/outputs/model2-aclgraph` respectively.\
+This will run the benchmark for (model1, TP2EP0, xlite decode-only, ceval), and (model2, TP4EP4, aclgraph, gsm8k). If\
+`--output-dir` is not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1/ceval/xlite-decode-only`\
+and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
     """
     __doc__ = f"{__doc__}\n\n{epilog}"
 
@@ -673,7 +946,11 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "ais_bench_dir", type=Path, default=AIS_BENCH_DIR, help="Path to clone ais_bench repo and store datasets"
+        "ais_bench_dir",
+        type=Path,
+        nargs="?",
+        default=AIS_BENCH_DIR,
+        help="Path to clone ais_bench repo and store datasets",
     )
     parser.add_argument(
         "--output-dir",
@@ -759,6 +1036,21 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         help="List of MTP speculative decode token numbers for each model (last value used for padding)",
     )
     parser.add_argument(
+        "-DS",
+        "--datasets",
+        dest="datasets",
+        type=str,
+        nargs="+",
+        choices=sorted(DATASETS) + ["all"],
+        default=["ceval"],
+        help=(
+            "List of datasets to benchmark for each model (last value used for padding). Datasets are downloaded "
+            "and set up automatically; multimodal datasets (textvqa/mmmu/mmstar/realworldqa) require a "
+            "multimodal-capable served model, bfcl requires the vllm_api_function_call_chat model config. *all* is only"
+            "valid for `--env-only` and will download all datasets, but will not run any benchmarks."
+        ),
+    )
+    parser.add_argument(
         "-MNS",
         "--max-num-seqs",
         type=int,
@@ -796,6 +1088,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         help="Whether to NOT use the vLLM Model Runner V2 for model execution (default: False)",
     )
     parser.add_argument(
+        "-xargs",
         "--extra-aisbench-args",
         type=str,
         nargs="+",
@@ -848,8 +1141,8 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     print(f"Running batch AISBench with arguments: {args}")
 
     if not args.dry_run or args.env_only:
-        # prepare the environment: clone ais_bench repo, create virtual environment, install requirements, download dataset
-        prepare_env(args.ais_bench_dir)
+        # prepare the environment: clone ais_bench repo, create virtual environment, install requirements, download datasets
+        prepare_env(args.ais_bench_dir, datasets=args.datasets)
     if args.env_only:
         print("Environment preparation complete, exiting as --env-only was specified.")
         sys.exit(0)
@@ -863,6 +1156,9 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     args_eps: list[bool] = args.eps + [args.eps[-1]] * (n_models - len(args.eps))
     args_dps: list[int] = args.dps + [args.dps[-1]] * (n_models - len(args.dps))
     args_mtps: list[int] = args.mtps + [args.mtps[-1]] * (n_models - len(args.mtps))
+    if any(ds not in DATASETS for ds in args.datasets):
+        raise ValueError(f"Invalid dataset(s) specified: {[ds for ds in args.datasets if ds not in DATASETS]}")
+    args_datasets: list[str] = args.datasets + [args.datasets[-1]] * (n_models - len(args.datasets))
     args_max_num_seqs: list[int] = args.max_num_seqs + [args.max_num_seqs[-1]] * (n_models - len(args.max_num_seqs))
     args_max_model_len: list[int] = args.max_model_len + [args.max_model_len[-1]] * (n_models - len(args.max_model_len))
     args_max_num_batched_tokens: list[int] = args.max_num_batched_tokens + [args.max_num_batched_tokens[-1]] * (
@@ -885,14 +1181,17 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         args_eps = [ep for ep in args_eps for _ in range(n_xlite)]
         args_dps = [dp for dp in args_dps for _ in range(n_xlite)]
         args_mtps = [m for m in args_mtps for _ in range(n_xlite)]
+        args_datasets = [d for d in args_datasets for _ in range(n_xlite)]
         args_max_num_seqs = [m for m in args_max_num_seqs for _ in range(n_xlite)]
         args_max_model_len = [m for m in args_max_model_len for _ in range(n_xlite)]
         args_max_num_batched_tokens = [m for m in args_max_num_batched_tokens for _ in range(n_xlite)]
         args_extra_aisbench_args = [a for a in args_extra_aisbench_args for _ in range(n_xlite)]
 
     combinations = [
-        (model, int(tp), ep, int(dp), int(mtp), xlite > 0, xlite > 1)
-        for model, tp, ep, dp, mtp, xlite in zip(args_models, args_tps, args_eps, args_dps, args_mtps, args_xlite)
+        (model, int(tp), ep, int(dp), int(mtp), xlite > 0, xlite > 1, dataset)
+        for model, tp, ep, dp, mtp, xlite, dataset in zip(
+            args_models, args_tps, args_eps, args_dps, args_mtps, args_xlite, args_datasets
+        )
     ]
     if len(set(combinations)) != len(combinations):
         # find the duplicate combinations
@@ -906,7 +1205,8 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         for dup in duplicates:
             print(
                 f"Duplicate combination found: Model={dup[0]}, TP={dup[1]}, EP={'Y' if dup[2] else 'N'}, DP={dup[3]}, "
-                f"MTP={dup[4]}, Xlite={'full' if dup[6] else ('decode-only' if dup[5] else 'aclgraph')}"
+                f"MTP={dup[4]}, Xlite={'full' if dup[6] else ('decode-only' if dup[5] else 'aclgraph')}, "
+                f"Dataset={dup[7]}"
             )
         raise ValueError("The combination of models, tps, eps, dps, mtps, etc., must be unique for each model")
 
@@ -923,10 +1223,11 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
 
     if args.dry_run:
         print("Dry run enabled, not actually running benchmarks. The following combinations would be benchmarked:")
-        for i, (model, tp, ep, dp, mtp, xlite, xlite_full) in enumerate(combinations):
+        for i, (model, tp, ep, dp, mtp, xlite, xlite_full, dataset) in enumerate(combinations):
             backend_str = "xlite full" if xlite_full else ("xlite decode-only" if xlite else "aclgraph")
             print(
-                f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, MTP: {mtp}, Backend: {backend_str}"
+                f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, MTP: {mtp}, "
+                f"Backend: {backend_str}, Dataset: {dataset}"
             )
         sys.exit(0)
 
@@ -948,7 +1249,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
     with open(log_csv_path, "w") as f:
         f.write("model_name,dataset,tp_size,ep,dp_size,mtp_tokens,xlite,xlite_full_mode,metric,accuracy,error\n")
 
-    for i, (model, tp, ep, dp, mtp, xlite, xlite_full) in enumerate(combinations):
+    for i, (model, tp, ep, dp, mtp, xlite, xlite_full, dataset) in enumerate(combinations):
         print(f"\n>>> Running benchmark task {i + 1}/{len(combinations)}")
         model_path: Path = args.model_dir / model
         try:
@@ -958,6 +1259,7 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
                 ais_bench_num_prompts=args.num_prompts,
                 model_path=str(model_path),
                 model_name=model,
+                dataset=dataset,
                 port=args.port,
                 tp_size=tp,
                 ep=ep,
@@ -980,14 +1282,14 @@ not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1-
         except Exception as e:
             result = BenchResult(
                 model_name=model,
-                dataset="ceval-weighted",
+                dataset=dataset,
                 tp_size=tp,
                 ep=ep,
                 dp_size=dp,
                 mtp_tokens=mtp,
                 xlite=xlite,
                 xlite_full_mode=xlite_full,
-                metric="weighted_average",
+                metric=DATASETS[dataset].metric_name,
                 accuracy=0.0,
             )
             result.error = str(e)

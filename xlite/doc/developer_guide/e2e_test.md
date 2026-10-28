@@ -106,7 +106,7 @@ python process_data.py ./result_input_512_output_512_aclgraph ./result_input_512
 ```bash
 # 运行精度测试脚本
 # 以下脚本会比较（Qwen3-30B-A3B, TP4EP4, xlite decode-only）和（Qwen3-30B-A3B, TP4EP4, aclgraph）两种配置在ceval数据集上的输出差异
-# 通过修改(--models, --tps, --eps, --dps, --xlite)参数，可以测试不同配置的性能和输出差异
+# 通过修改(--models, --tps, --eps, --dps, --xlite, --datasets)参数，可以测试不同配置的性能和输出差异
 cd tests/e2e/
 python batch_aisbench.py --help # 查看参数说明
 python batch_aisbench.py "/workspace/benchmark" \
@@ -118,6 +118,8 @@ python batch_aisbench.py "/workspace/benchmark" \
 --dps 1 1 \
 --xlite 1 0
 ```
+
+数据集通过 `--datasets`（`-DS`）按模型指定，格式与 `--tps`/`--dps` 等一致（不足时用最后一个值补齐）。当前支持: `ceval`、`gsm8k`（文本），`textvqa`、`mmmu`、`mmstar`、`realworldqa`（多模态，需服务端支持图片输入），`bfcl`（工具调用，使用 `vllm_api_function_call_chat` 模型配置）。
 
 ## 每日自动化测试机器人
 

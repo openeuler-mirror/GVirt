@@ -100,9 +100,9 @@ from daily_bot_utils import (
     detect_model_device,
     # 版本信息
     get_last_release_tag,
-    get_xlite_version,
-    get_xlite_commit,
     get_vllm_ascend_version,
+    get_xlite_commit,
+    get_xlite_version,
     install_wheel,
     log_error,
     # 日志工具
@@ -150,8 +150,8 @@ def run_aisbench_benchmark(
     在测试容器中执行精度基准测试脚本 (batch_aisbench.py)
 
     参数:
-        model_args: 模型参数字符串，格式为 "--models model1 model2 --tps tp1 tp2 --eps ep1 ep2 ..."，参考 batch_aisbench.py
-            的参数格式
+        model_args: 模型参数字符串，格式为 "--models model1 model2 --tps tp1 tp2 --eps ep1 ep2 ... --datasets ds1 ds2 ..."，
+            参考 batch_aisbench.py 的参数格式
         debug: 是否为调试模式，调试模式下会直接将测试过程输出到stdout，非调试模式下会将错误输出到日志文件
         reference_commit: 指定复用前期某个 xlite commit hash 测试；仅当 model_args 中包含 --reuse 或 -r 参数时生效
         timeout: ais_bench 子进程超时时间（秒）
@@ -279,12 +279,14 @@ def parse_aisbench_report(report_path: Path) -> Dict:
                     backend = "aclgraph"
 
                 model_name = row.get("model_name", "unknown-model")
+                dataset = row.get("dataset", "")
                 tp: int = int(row.get("tp_size", 0))
                 ep: bool = row.get("ep", "").strip().lower() in ["true", "y", "yes", "1"]
                 dp: int = int(row.get("dp_size", 0))
                 mtp: int = int(row.get("mtp_tokens", 0))
                 result = {
                     "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}{f'+MTP{mtp}' if mtp > 0 else ''}",
+                    "dataset": dataset,
                     "backend": backend,
                     "accuracy": float(row.get("accuracy", 0.0)),
                     "error": row.get("error", "") if row.get("error") else None,
@@ -326,12 +328,14 @@ def parse_aisbench_markdown_report(report_path: Path) -> Dict:
     for match in table_pattern.finditer(content):
         backend = match.group(7).strip()
         model_name = match.group(1).strip()
+        dataset = match.group(2).strip()
         tp: int = int(match.group(3).strip())
         ep: bool = match.group(4).strip().upper() == "Y"
         dp: int = int(match.group(5).strip())
         mtp: int = int(match.group(6).strip())
         result = {
             "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}{f'+MTP{mtp}' if mtp > 0 else ''}",
+            "dataset": dataset,
             "backend": backend,
             "accuracy": float(match.group(9)),
             "error": match.group(10).strip() if match.group(10).strip() else None,
@@ -343,6 +347,16 @@ def parse_aisbench_markdown_report(report_path: Path) -> Dict:
 
 
 # ====================== 单次运行内精度对比函数 ======================
+def _result_group_key(result: Dict) -> str:
+    """Group results by model+deployment, plus the dataset when present.
+
+    Without the dataset in the key, results for the same model+backend measured on
+    different datasets would overwrite each other in the ``{group: {backend: acc}}`` maps.
+    """
+    dataset = result.get("dataset", "")
+    return f"{result['model_name']}+{dataset}" if dataset else result["model_name"]
+
+
 def analyze_accuracy_within_run(metrics: Dict, xlite_threshold: float, min_accuracy: float) -> Dict:
     """
     在单次运行内对比 xlite 与 aclgraph 的精度，并检查最低精度阈值
@@ -377,10 +391,10 @@ def analyze_accuracy_within_run(metrics: Dict, xlite_threshold: float, min_accur
     """
     analysis = {"timestamp": metrics.get("timestamp", ""), "warnings": []}
 
-    # 按模型名称分组结果
+    # 按模型名称分组结果 (同模型多数据集时，分组键包含数据集名)
     model_results: Dict[str, Dict[str, float]] = {}  # {model_name: {backend: accuracy}}
     for result in metrics.get("results", []):
-        model_name = result["model_name"]
+        model_name = _result_group_key(result)
         backend = result["backend"]
         accuracy = result.get("accuracy", 0.0)
         error = result.get("error")
@@ -485,10 +499,10 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
         f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite 版本: {xlite_version}",
     ]
 
-    # 按模型名称分组结果
+    # 按模型名称分组结果 (同模型多数据集时，分组键包含数据集名)
     model_results: Dict[str, Dict[str, float]] = {}
     for result in metrics.get("results", []):
-        model_name = result["model_name"]
+        model_name = _result_group_key(result)
         backend = result["backend"]
         accuracy = result.get("accuracy", 0.0)
         error = result.get("error")
@@ -686,7 +700,7 @@ def main():
     10. 返回退出码
     """
     # 解析命令行参数
-    default_model_args = "--models Qwen3-30B-A3B --tps 8 --eps 1 --dps 1 --xlite 2 1 0 --broadcast-xlite"
+    default_model_args = "--models Qwen3-30B-A3B --tps 8 --eps 1 --dps 1 --datasets ceval --xlite 2 1 0 --broadcast-xlite"
     parser = argparse.ArgumentParser(description="xlite 每日自动化精度测试机器人")
     parser.add_argument(
         "-args",

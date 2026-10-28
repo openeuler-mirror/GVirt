@@ -278,6 +278,7 @@ def main():
         "--dps 1 1 1 2 1 2 1 2",
         "--eps 0 0 1",  # will expand the rest of the eps values with 1
         "--mtps 0",
+        f"--datasets {os.environ.get('XLITE_AISBENCH_DATASETS', 'ceval')}",  # space-separated dataset names
         "--xlite 2 1 0",
         "--broadcast-xlite",
         f"--num-prompts {int(os.environ.get('XLITE_AISBENCH_NUM_PROMPTS', 128))}",

@@ -22,12 +22,12 @@ xlite 每日自动化测试机器人共享工具模块
     )
 """
 
-import os
-import sys
-import re
 import json
-import subprocess
+import os
+import re
 import shutil
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
