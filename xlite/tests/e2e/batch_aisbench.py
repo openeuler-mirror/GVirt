@@ -733,6 +733,8 @@ def run_ais_bench(
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
     xlite_full_mode = xlite_full_mode and xlite  # full mode can only be enabled when xlite is enabled
     port = find_available_port(port)
+    # failed/absent runs keep accuracy=NaN (never overwritten on the failure paths) so the
+    # reports never show a misleading real-looking 0.00% for a run that produced no result
     bench_result = BenchResult(
         model_name=model_name,
         dataset=dataset,
@@ -743,7 +745,7 @@ def run_ais_bench(
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
         metric=spec.metric_name,
-        accuracy=0.0,
+        accuracy=float("nan"),
     )
 
     if not model_path or not Path(model_path).exists():
@@ -1290,7 +1292,7 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
                 xlite=xlite,
                 xlite_full_mode=xlite_full,
                 metric=DATASETS[dataset].metric_name,
-                accuracy=0.0,
+                accuracy=float("nan"),
             )
             result.error = str(e)
         except KeyboardInterrupt:
