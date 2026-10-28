@@ -30,6 +30,9 @@ CWD = Path(__file__).parent.resolve()  # current working directory
 
 AIS_BENCH_DIR = TMP_DIR / "benchmark"  # path to clone ais_bench repo and store datasets
 VENV_ACTIVATE_CMD: str = ""
+# CPU-only torch wheel index: ais_bench requires an unpinned `torch`, which PyPI resolves
+# to the multi-GB CUDA build (plus its nvidia-* dependencies) on Linux
+TORCH_INDEX_URL = "https://download.pytorch.org/whl/cpu/"
 
 _PROCESS_GROUPS: set[subprocess.Popen] = set()  # to keep track of started subprocesses for cleanup on exit
 
@@ -219,6 +222,8 @@ def _sync_aisbench_repo(ais_bench_dir: Path, tag: str) -> None:
 
     Tracked modifications are discarded (the harness rewrites the model config files
     with ``sed`` on every run), untracked files (outputs, reports, datasets) are kept.
+    The tag is fetched from origin only when still missing locally: tag names embed
+    their date, so an existing tag is final and hitting the network for it is wasted.
     Local ``.gitignore`` additions (output dirs, dataset entries) survive the reset:
     they are captured as added lines before the reset and re-appended afterwards — a
     line-level re-apply that cannot conflict, unlike a stash pop, when a tag rewrites
@@ -230,8 +235,12 @@ def _sync_aisbench_repo(ais_bench_dir: Path, tag: str) -> None:
 
     added_gitignore_lines = _gitignore_added_lines(ais_bench_dir)
 
-    res = git("fetch", "--depth", "1", "--force", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
-    if res.returncode != 0 and git("rev-parse", "--quiet", "--verify", f"{tag}^{{commit}}").returncode != 0:
+    # tag names embed their date (e.g. v3.1-20261013-master), so a locally existing tag is
+    # final — only hit the network when it is still missing
+    if git("rev-parse", "--quiet", "--verify", f"refs/tags/{tag}^{{commit}}").returncode == 0:
+        print(f"Tag {tag} already exists locally, skipping fetch...")
+    else:
+        res = git("fetch", "--depth", "1", "--force", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
         check_subprocess_result(res, f"Failed to fetch ais_bench tag {tag}")
 
     check_subprocess_result(git("reset", "--hard", tag), f"Failed to reset ais_bench repo to {tag}")
@@ -428,6 +437,37 @@ def _ensure_dataset(key: str, ais_bench_dir: Path) -> None:
     spec.downloader(ais_bench_dir, spec.download_url)
 
 
+def _aisbench_pkg_version(venv_python: Path) -> str | None:
+    """Version of `ais_bench_benchmark` recorded in the venv, or None if not installed.
+
+    Editable installs record the version at install time only — it does not follow later
+    re-syncs of the source tree, which is exactly the staleness the reinstall check below
+    needs to detect.
+    """
+    try:
+        res = subprocess.run(
+            [str(venv_python), "-c", "from importlib.metadata import version; print(version('ais_bench_benchmark'))"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:  # broken venv (interpreter missing) counts as not installed
+        return None
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def _tag_to_pkg_version(tag: str) -> str:
+    """Mirror ais_bench's setup.py ``get_latest_version()``: 'v3.1-20261013-master' -> '3.1.20261013'.
+
+    A tag without the ``-master`` suffix maps to a ``.dev`` version, like setup.py.
+    Returns '' when nothing can be derived (e.g. AISBENCH_GIT_TAG overridden to a branch
+    name); the caller then falls back to a presence-only check.
+    """
+    parts = tag.removeprefix("v").replace("-", ".").replace("_", ".").split(".")
+    if len(parts) < 2:
+        return ""
+    return ".".join(parts[:-1]) if parts[-1] == "master" else ".".join(parts[:-1]) + ".dev"
+
+
 def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = None):
     aisbench_git_url = os.environ.get("AISBENCH_GIT_URL", "https://github.com/AISBench/benchmark.git")
     aisbench_git_tag = os.environ.get("AISBENCH_GIT_TAG", "v3.1-20261013-master")
@@ -449,30 +489,42 @@ def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = 
     # make a `.venv` in the benchmark repo for ais_bench, and install requirements.
     # the venv is namespaced by Python version (e.g. `.venv_py39`, `.venv_py310`) so that
     # different interpreters don't share — or clobber — each other's installed packages.
-    os.chdir(ais_bench_dir)
-    venv_path = ais_bench_dir / f".venv_py{sys.version_info.major}{sys.version_info.minor}"
-    if not venv_path.exists():
-        print(f"Creating virtual environment for ais_bench at {venv_path}...")
-        res = subprocess.run([sys.executable, "-m", "venv", str(venv_path)])
+    venv_path: str = f".venv_py{sys.version_info.major}{sys.version_info.minor}"
+    venv_abspath = (ais_bench_dir / venv_path).resolve()
+    if not venv_abspath.exists():
+        print(f"Creating virtual environment for ais_bench at {venv_abspath}...")
+        res = subprocess.run([sys.executable, "-m", "venv", str(venv_abspath)])
         check_subprocess_result(res, "Failed to create virtual environment")
 
-    # activate the virtual environment and install requirements
-    activate_script = venv_path / "bin" / "activate"
+    # activate the virtual environment, then (re)install ais_bench when the installed
+    # package version does not match the synced tag: editable installs keep the version
+    # recorded at install time, so re-syncing the repo alone never refreshes it
+    activate_script = venv_abspath / "bin" / "activate"
     VENV_ACTIVATE_CMD = f"source {activate_script}"
-    print(f"Activating virtual environment and installing ais_bench to {venv_path}...")
 
-    res = subprocess.run(f"{VENV_ACTIVATE_CMD} && command -v ais_bench", shell=True, executable="/bin/bash")
-    if res.returncode != 0:
-        print("ais_bench not found, installing requirements...")
+    installed_version = _aisbench_pkg_version(venv_abspath / "bin" / "python")
+    expected_version = _tag_to_pkg_version(aisbench_git_tag)
+    if installed_version is not None and (not expected_version or installed_version == expected_version):
+        print(f"ais_bench {installed_version} matches tag {aisbench_git_tag}, skipping installation...")
+    else:
+        reason = (
+            "not installed"
+            if installed_version is None
+            else f"version {installed_version} != {expected_version or '<unknown>'} expected for tag {aisbench_git_tag}"
+        )
+        print(f"Installing ais_bench to {venv_abspath} ({reason})...")
+        # TORCH_INDEX_URL steers the unpinned `torch` in runtime.txt (pulled in by the
+        # editable install's install_requires) to the CPU build instead of the CUDA one
         res = subprocess.run(
-            f"{VENV_ACTIVATE_CMD} && pip install -r requirements/api.txt && pip install -r requirements/extra.txt "
-            "&& pip install -e ./ --use-pep517",
+            f"{VENV_ACTIVATE_CMD} && export PIP_RETRIES=30 PIP_TIMEOUT=120 PIP_RESUME_RETRIES=60 && "
+            f'pip install --extra-index-url "{TORCH_INDEX_URL}" -r requirements/api.txt '
+            f'&& pip install --extra-index-url "{TORCH_INDEX_URL}" -r requirements/extra.txt '
+            f'&& pip install --extra-index-url "{TORCH_INDEX_URL}" -v -e ./ --use-pep517',
             shell=True,
             executable="/bin/bash",
+            cwd=ais_bench_dir,
         )
         check_subprocess_result(res, "Failed to install ais_bench requirements")
-    else:
-        print("ais_bench already installed, skipping installation...")
 
     # download / set up every dataset the run needs (idempotent)
     for dataset_key in dict.fromkeys(datasets):
