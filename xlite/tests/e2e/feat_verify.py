@@ -290,10 +290,11 @@ FEATURES = {
     ),
     "cpu_binding": FeatureSpec(
         "cpu_binding", "Cpu Binding",
-        # enable_cpu_binding 代码默认 True; 显式设 True 与默认无差, 故改测关闭路径。
-        extra_config={"enable_cpu_binding": False},
-        note="enable_cpu_binding 代码默认 True; 本用例改测关闭路径 enable_cpu_binding=False"
-             "(该特性交互测试测试的是关闭的场景)",
+        # enable_cpu_binding 代码默认 True; 但 baseline 默认显式关闭(避免绑核影响其他用例对照),
+        # 故本用例显式开启测 CPU 绑核路径与 xlite 交互(baseline 走关闭, 本用例走开启, 形成对照)。
+        extra_config={"enable_cpu_binding": True},
+        note="enable_cpu_binding=True; 代码默认 True, baseline 显式关闭, 本用例显式开启测 CPU 绑核路径与 xlite 交互"
+             "(该特性交互测试测试的是开启的场景)",
     ),
     "fuse_muls_add_off": FeatureSpec(
         "fuse_muls_add_off", "Fuse Muls Add(关闭)",
@@ -323,13 +324,11 @@ FEATURES = {
     ),
     "quant_w4a8": FeatureSpec(
         "quant_w4a8", "Quantization W4A8",
-        model_override="/mnt/nvme0n1/models/GLM-5.2-W4A8",
-        skip_reason="可用 GLM-5.2-W4A8 为 mixed_precision_w4 格式(config.json, 非 vllm-ascend 合法值), "
-                    "无 quant_model_description.json → 既非 ModelSlim(ascend) 也非 compressed-tensors; "
-                    "强制 --quantization ascend 会走期望读取描述文件的 ModelSlim 路径而失败; "
-                    "官方 W4A8 为 GLM-5.2-w4a8c8(ModelSlim), 待获取正确格式模型后实测",
-        note="config.json quant_method=mixed_precision_w4 + 无 quant_model_description.json, "
-             "非 vllm-ascend 支持的量化格式",
+        model_override="/mnt/nvme0n1/models/GLM-5-w4a8",
+        note="GLM-5-w4a8(ModelSlim 混合精度: MoE 专家 W4A8_DYNAMIC + 稠密部分 W8A8_DYNAMIC, "
+             "含 quant_model_description.json → 自动 --quantization ascend); "
+             "GLM-5 架构(78层, 256专家, 无 MTP, 单机 A3, TP=16); config.json 无 quantization_config, "
+             "量化格式仅由 quant_model_description.json 标识",
     ),
     "weight_nz0": FeatureSpec(
         "weight_nz0", "Weight NZ(关闭 mode=0)",
@@ -485,13 +484,19 @@ def base_env_init() -> dict:
 
 def build_additional_config(mode: str, spec: FeatureSpec) -> dict:
     """构建 additional_config.
-    最小默认(baseline): 仅 xlite_graph_config(模式相关). 不显式配置额外参数
+
+    最小默认(baseline): xlite_graph_config(模式相关) + enable_cpu_binding=False.
+    enable_cpu_binding 代码默认 True, 但 CPU 绑核会改变调度/性能基线,
+    故 baseline 默认显式关闭, 避免影响其他用例的对照; 仅 cpu_binding 用例
+    经 extra_config 覆盖开启, 测绑核路径与 xlite 交互.
     """
     base = {}
     if mode != "none":
         base["xlite_graph_config"] = {"enabled": True}
         if mode == "xlite_full_mode":
             base["xlite_graph_config"]["full_mode"] = True
+    # 默认关闭: spec.extra_config 可覆盖(如 cpu_binding 用例显式开启).
+    base["enable_cpu_binding"] = False
     if spec.extra_config:
         base.update(spec.extra_config)
     return base
