@@ -290,10 +290,11 @@ FEATURES = {
     ),
     "cpu_binding": FeatureSpec(
         "cpu_binding", "Cpu Binding",
-        # enable_cpu_binding 代码默认 True; 显式设 True 与默认无差, 故改测关闭路径。
-        extra_config={"enable_cpu_binding": False},
-        note="enable_cpu_binding 代码默认 True; 本用例改测关闭路径 enable_cpu_binding=False"
-             "(该特性交互测试测试的是关闭的场景)",
+        # enable_cpu_binding 代码默认 True; 但 baseline 默认显式关闭(避免绑核影响其他用例对照),
+        # 故本用例显式开启测 CPU 绑核路径与 xlite 交互(baseline 走关闭, 本用例走开启, 形成对照)。
+        extra_config={"enable_cpu_binding": True},
+        note="enable_cpu_binding=True; 代码默认 True, baseline 显式关闭, 本用例显式开启测 CPU 绑核路径与 xlite 交互"
+             "(该特性交互测试测试的是开启的场景)",
     ),
     "fuse_muls_add_off": FeatureSpec(
         "fuse_muls_add_off", "Fuse Muls Add(关闭)",
@@ -323,13 +324,11 @@ FEATURES = {
     ),
     "quant_w4a8": FeatureSpec(
         "quant_w4a8", "Quantization W4A8",
-        model_override="/mnt/nvme0n1/models/GLM-5.2-W4A8",
-        skip_reason="可用 GLM-5.2-W4A8 为 mixed_precision_w4 格式(config.json, 非 vllm-ascend 合法值), "
-                    "无 quant_model_description.json → 既非 ModelSlim(ascend) 也非 compressed-tensors; "
-                    "强制 --quantization ascend 会走期望读取描述文件的 ModelSlim 路径而失败; "
-                    "官方 W4A8 为 GLM-5.2-w4a8c8(ModelSlim), 待获取正确格式模型后实测",
-        note="config.json quant_method=mixed_precision_w4 + 无 quant_model_description.json, "
-             "非 vllm-ascend 支持的量化格式",
+        model_override="/mnt/nvme0n1/models/GLM-5-w4a8",
+        note="GLM-5-w4a8(ModelSlim 混合精度: MoE 专家 W4A8_DYNAMIC + 稠密部分 W8A8_DYNAMIC, "
+             "含 quant_model_description.json → 自动 --quantization ascend); "
+             "GLM-5 架构(78层, 256专家, 无 MTP, 单机 A3, TP=16); config.json 无 quantization_config, "
+             "量化格式仅由 quant_model_description.json 标识",
     ),
     "weight_nz0": FeatureSpec(
         "weight_nz0", "Weight NZ(关闭 mode=0)",
@@ -485,13 +484,19 @@ def base_env_init() -> dict:
 
 def build_additional_config(mode: str, spec: FeatureSpec) -> dict:
     """构建 additional_config.
-    最小默认(baseline): 仅 xlite_graph_config(模式相关). 不显式配置额外参数
+
+    最小默认(baseline): xlite_graph_config(模式相关) + enable_cpu_binding=False.
+    enable_cpu_binding 代码默认 True, 但 CPU 绑核会改变调度/性能基线,
+    故 baseline 默认显式关闭, 避免影响其他用例的对照; 仅 cpu_binding 用例
+    经 extra_config 覆盖开启, 测绑核路径与 xlite 交互.
     """
     base = {}
     if mode != "none":
         base["xlite_graph_config"] = {"enabled": True}
         if mode == "xlite_full_mode":
             base["xlite_graph_config"]["full_mode"] = True
+    # 默认关闭: spec.extra_config 可覆盖(如 cpu_binding 用例显式开启).
+    base["enable_cpu_binding"] = False
     if spec.extra_config:
         base.update(spec.extra_config)
     return base
@@ -710,14 +715,17 @@ def run_one_scenario(port: int, sc: Scenario, tag: str,
     return blocks, error
 
 
-def run_test_scenarios(port: int, tag: str, spec: FeatureSpec = None) -> tuple:
-    """跑全部测试场景; 返回 (all_ok, list_of (scenario, verdict, evidence))."""
+def run_test_scenarios(port: int, tag: str, spec: FeatureSpec = None,
+                       scenario: str = None) -> tuple:
+    """跑测试场景; scenario 指定则只跑该场景, 否则全部; 返回 (all_ok, list_of (scenario, verdict, evidence))."""
     results = []
     all_ok = True
     is_mm = bool(spec and spec.multimodal)
     scenarios = MM_TEST_SCENARIOS if is_mm else TEST_SCENARIOS
     prompt = "请描述这张图片的内容" if is_mm else TEST_PROMPT
     for sc in scenarios:
+        if scenario and sc.name != scenario:
+            continue
         # 显存受限时缩短长输入, 避免 input-too-long
         if spec and spec.scenario_input_override and sc.name in spec.scenario_input_override:
             sc = replace(sc, input_length=spec.scenario_input_override[sc.name])
@@ -752,6 +760,56 @@ def aggregate_verdicts(results: list) -> tuple:
 
 
 
+# 退化检测阈值: 依据 396 块历史 multi_batch 日志标定, 落在正常/退化分离带内.
+# n-gram 限定含中文字符: 排除纯数字串(随机种子场景重复种子数字属正常), 聚焦语义重复.
+_DEGEN_NGRAM_N = 6
+_DEGEN_FULL_REPEAT = 12      # 全文中文 n-gram 重复次数 FAIL 阈值
+_DEGEN_TAIL_REPEAT = 8       # 尾部 n-gram 重复次数 FAIL 阈值
+_DEGEN_TAIL_REPEAT_SOFT = 6  # 尾部 n-gram 重复次数(联合低多样性)
+_DEGEN_TAIL_DIVERSITY = 0.15  # 尾部字符多样性(联合阈值)
+_DEGEN_TAIL_FRACTION = 1 / 3  # 退化多发于长输出尾部, 单独考察后 1/3
+
+
+def _cn_ngrams(text: str, n: int = _DEGEN_NGRAM_N) -> list:
+    """text 中含至少一个中文字符的 n-gram 列表."""
+    return [text[i:i + n] for i in range(len(text) - n + 1)
+            if any("一" <= c <= "鿿" for c in text[i:i + n])]
+
+
+def _top_ngram(text: str, n: int = _DEGEN_NGRAM_N) -> tuple:
+    """返回 (最频繁中文 n-gram, 次数); 无中文 n-gram 时返回 ("", 0)."""
+    grams = _cn_ngrams(text, n)
+    if not grams:
+        return "", 0
+    g, c = collections.Counter(grams).most_common(1)[0]
+    return g, c
+
+
+def _detect_degeneration(text: str) -> tuple:
+    """检测输出退化; 返回 (reason, detail), reason 空串表示未检出.
+
+    字符级 n-gram 补齐原跨行检查的漏检: 原按句号换行切分片段, 对"一行内
+    短语重复 N 次"整行计作单一片段而漏检.
+    """
+    full_g, full_c = _top_ngram(text)
+    if full_c >= _DEGEN_FULL_REPEAT:
+        return ("退化重复",
+                f"全文{_DEGEN_NGRAM_N}-gram'{full_g}'重复{full_c}次"
+                f"(阈值{_DEGEN_FULL_REPEAT})")
+    tail = text[-max(int(len(text) * _DEGEN_TAIL_FRACTION), 1):]
+    tail_g, tail_c = _top_ngram(tail)
+    tail_div = len(set(tail)) / max(len(tail), 1)
+    if tail_c >= _DEGEN_TAIL_REPEAT:
+        return ("尾部退化重复",
+                f"尾部{_DEGEN_NGRAM_N}-gram'{tail_g}'重复{tail_c}次"
+                f"(阈值{_DEGEN_TAIL_REPEAT}), 多样性{tail_div:.2f}")
+    if tail_c >= _DEGEN_TAIL_REPEAT_SOFT and tail_div < _DEGEN_TAIL_DIVERSITY:
+        return ("尾部退化",
+                f"尾部{_DEGEN_NGRAM_N}-gram'{tail_g}'重复{tail_c}次, "
+                f"多样性{tail_div:.2f}<{_DEGEN_TAIL_DIVERSITY}")
+    return ("", "")
+
+
 def _judge_block(block: tuple, multimodal: bool = False) -> tuple:
     """校验单个响应块; block=(idx, total, prompt, in_tok, out_tok, result); 返回 (verdict, evidence)."""
     _, _, _, _, out_tok, result_text = block
@@ -765,6 +823,9 @@ def _judge_block(block: tuple, multimodal: bool = False) -> tuple:
                         if not c.isprintable() and c not in "\n\t ")
     if non_printable / max(len(result_text), 1) > 0.1:
         return "FAIL", "疑似乱码, 非可打印字符占比高"
+    reason, detail = _detect_degeneration(result_text)
+    if reason:
+        return "FAIL", f"疑似{reason}: {detail}; 前60字: {preview}"
     # 单行退化重复: 字符种类过少
     for ln in result_text.splitlines():
         if len(ln) > 12 and len(set(ln)) < max(len(ln) // 10, 3):
@@ -931,7 +992,7 @@ def append_result(spec: FeatureSpec, mode: str, port: int,
 
 def run_case(spec: FeatureSpec, mode: str, port: int, model_path: str,
              tp: int, max_num_batched_tokens: int, max_num_seqs: int,
-             max_model_len: int, startup_timeout: int):
+             max_model_len: int, startup_timeout: int, scenario: str = None):
     print(f"\n{'='*70}\n[用例] {spec.label} × {mode} (port={port})\n{'='*70}")
     tag = f"{spec.name}_{mode}_{port}"
     cdir = case_dir(tag)
@@ -975,7 +1036,7 @@ def run_case(spec: FeatureSpec, mode: str, port: int, model_path: str,
             evidence = extract_fatal(log_path) or detail or "超时/未就绪"
             startup_ok = False
         if startup_ok:
-            all_ok, results = run_test_scenarios(port, tag, spec=spec)
+            all_ok, results = run_test_scenarios(port, tag, spec=spec, scenario=scenario)
             if all_ok:
                 quality, evidence = aggregate_verdicts(results)
             else:
@@ -1027,11 +1088,13 @@ def main():
     ap.add_argument("--max-model-len", type=int, default=20480)
     ap.add_argument("--startup-timeout", type=int, default=1500,
                     help="服务启动超时(秒), GLM-5-w8a8 16卡加载较慢, 默认25分钟")
+    ap.add_argument("--scenario", default=None,
+                    help="只跑指定场景(如 multi_batch); 默认跑全部场景")
     args = ap.parse_args()
     spec = FEATURES[args.feature]
     ok = run_case(spec, args.xlite_mode, args.port, args.model, args.tp,
                   args.max_num_batched_tokens, args.max_num_seqs,
-                  args.max_model_len, args.startup_timeout)
+                  args.max_model_len, args.startup_timeout, args.scenario)
     sys.exit(0 if ok else 1)
 
 
