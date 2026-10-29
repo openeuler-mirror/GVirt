@@ -167,6 +167,16 @@ public:
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
     }
 
+    __aicore__ inline void FinishStore()
+    {
+        // The next task can reuse the state staging buffer through either
+        // MTE2 (FP32 history loads) or V (BF16/FP16 state conversion).
+        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+    }
+
     // silu(out_f) -> 64 Dtype lanes at out_buf (out_f/calc_buf are 64-lane fp32).
     __aicore__ inline void SiLU64(bool roundConv = false)
     {
@@ -214,7 +224,7 @@ public:
     {
         int K = (int)kernelDim;
         int rows = K - 1;
-        if (K < 2 || K > kMaxK || rows < 1 || (channels % kChanTile) != 0 || batch == 0) {
+        if (K < 2 || K > kMaxK || (channels % kChanTile) != 0 || batch == 0) {
             return;
         }
         int totalTiles = (int)(channels / kChanTile);
@@ -241,12 +251,12 @@ public:
                                             tableColumns, stateBlockSize, aligned != 0);
                 if (page <= 0) {
                     vector_dup(out_f, 0.0f, 1, 1, 0, 8, 0);
+                    pipe_barrier(PIPE_V);
                     SiLU64();
-                    set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-                    wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
                     CopyUbufToGmAligned(output + (uint64_t)b * channels + c0, out_buf,
                                         kChanTile * sizeof(Dtype));
-                    pipe_barrier(PIPE_ALL);
+                    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+                    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
                     continue;
                 }
                 assert((uint32_t)page < numPages);
@@ -291,7 +301,6 @@ public:
                 SiLU64();
                 CopyUbufToGmAligned(output + (uint64_t)b * channels + c0, out_buf,
                                     (uint32_t)(kChanTile * sizeof(Dtype)));
-                pipe_barrier(PIPE_MTE3);
 
                 if (updateState) {
                     // New page rows are s_f[kChanTile .. K*kChanTile) = [row1..,input].
@@ -308,16 +317,16 @@ public:
                             vconv_f322bf16r(st_stage, s_f + kChanTile, rows, 1, 1, 4, 8);
                         }
                         XLITE_V_FENCE();
+                        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+                        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
                         for (int r = 0; r < rows; ++r) {
                             CopyUbufToGmAligned(base + (uint64_t)r * channels + c0,
                                                 st_stage + r * kChanTile,
                                                 (uint32_t)(kChanTile * sizeof(Dtype)));
                         }
                     }
-                    pipe_barrier(PIPE_MTE3);
                 }
-                XLITE_V_FENCE();
-                pipe_barrier(PIPE_ALL);
+                FinishStore();
             }
         }
     }
@@ -362,8 +371,11 @@ public:
                         CopyUbufToGmAligned(output + (uint64_t)t * channels + c0, out_buf,
                                             kChanTile * sizeof(Dtype));
                     }
-                    pipe_barrier(PIPE_ALL);
                 }
+                // All stores read the same unchanged zero tile. Wait once,
+                // before a following task can overwrite out_f/out_buf on V.
+                set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
                 continue;
             }
             if constexpr (std::is_same<Dtype, float>::value) {
@@ -417,6 +429,9 @@ public:
                 SiLU64(true);
                 CopyUbufToGmAligned(output + (uint64_t)t * channels + c0, out_buf,
                                     kChanTile * sizeof(Dtype));
+                // The token loop reuses s_f/out_buf across MTE2, V and MTE3.
+                // Keep the full fence until per-pipeline dependencies are proven
+                // for the FP32 path as well as the converted BF16/FP16 paths.
                 pipe_barrier(PIPE_ALL);
                 for (uint32_t r = 0; r < rows; ++r) {
                     vadds(s_f + r * kChanTile, s_f + (r + 1) * kChanTile, 0.0f, 1, 1, 1, 8, 8);
@@ -442,7 +457,7 @@ public:
                                         kChanTile * sizeof(Dtype));
                 }
             }
-            pipe_barrier(PIPE_ALL);
+            FinishStore();
         }
     }
 
