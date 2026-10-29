@@ -507,8 +507,7 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + outCurr);
             if (outFp32) {
                 // FP32 output contains every head/group, not only the first norm segment.
-                copy_ubuf_to_ubuf(out_float[outCurr], calc1, 0, 1,
-                                  len_burst_float_per_norm * cnt_per_token, 0, 0);
+                copy_ubuf_to_ubuf(out_float[outCurr], calc1, 0, 1, len_burst_float, 0, 0);
             } else {
                 convert_output(out[outCurr], calc1, repeat);
             }
