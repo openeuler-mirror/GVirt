@@ -411,12 +411,13 @@ class AttnMetaV2:
         lens_cpu (List[int]): Per-sample query lengths (host, for tile-size selection).
         cached_lens_cpu (List[int]): Per-sample cached lengths (host, for tile-size selection).
         query_start_loc (torch.Tensor): Prefix-sum of lens, shape ``[batch+1]`` int32.
-        slot_mapping (Sequence[torch.Tensor]): Main-KV token slot table, shape
-            ``[batched_tokens]`` int32 device; always a single table.
-        block_tables (Sequence[torch.Tensor]): Family block tables, each shape
-            ``[batch, max_num_blocks]`` int32 device: ``[0]``=main KV (all models),
-            ``[1]``=mamba state indices (linear-attention models),
-            ``[2]``=tail ring (GLM-5.3-Flash only).
+        slot_mapping (Sequence[torch.Tensor]): Main-KV token slot table(s), each
+            ``[batched_tokens]`` int32 device. Hybrid layouts use one table;
+            per-cache layouts use one table per blockSizes entry.
+        block_tables (Sequence[torch.Tensor]): Block tables, each
+            ``[batch, max_num_blocks]`` int32 device. Hybrid layouts:
+            ``[0]``=main KV, ``[1..]``=mamba state indices (plus an optional tail
+            ring); per-cache layouts: one table per blockSizes entry.
     """
 
     lens: torch.Tensor = ...
@@ -434,9 +435,11 @@ class AttnMetaV2:
     query_start_loc: torch.Tensor = ...
     """Prefix-sum of lens, shape ``[batch+1]`` int32."""
     slot_mapping: Sequence[torch.Tensor] = ...
-    """Main-KV token slot table, shape ``[batched_tokens]`` int32 device; always a single table."""
+    """Main-KV token slot table(s), each ``[batched_tokens]`` int32 device; one table for
+    hybrid layouts, one per blockSizes entry for per-cache layouts."""
     block_tables: Sequence[torch.Tensor] = ...
-    """Family block tables, each shape ``[batch, max_num_blocks]`` int32 device."""
+    """Block tables, each ``[batch, max_num_blocks]`` int32 device; hybrid layouts use
+    main + mamba [+ tail], per-cache layouts one per blockSizes entry."""
 
 class AttnType(Enum):
     """Attention type enum exported by the native extension."""
@@ -447,8 +450,10 @@ class AttnType(Enum):
     """Multi-head latent attention."""
     AttnDSA = ...
     """Dual sparse attention."""
-    AttnHybrid = ...
-    """Hybrid full + linear attention (Qwen3.5)."""
+    AttnHybridGdn = ...
+    """Hybrid GDN linear attention + full attention."""
+    AttnHybridKda = ...
+    """Hybrid KDA linear attention + sparse MLA."""
     AttnCxA = ...
     """C4A / C128A attention (DeepSeek-V4)."""
 
@@ -464,8 +469,10 @@ class ScoringFuncType(Enum):
 
 AttnMHA: AttnType = ...
 """Alias for :attr:`AttnType.AttnMHA`."""
-AttnHybrid: AttnType = ...
-"""Alias for :attr:`AttnType.AttnHybrid`."""
+AttnHybridGdn: AttnType = ...
+"""Alias for :attr:`AttnType.AttnHybridGdn`."""
+AttnHybridKda: AttnType = ...
+"""Alias for :attr:`AttnType.AttnHybridKda`."""
 AttnMLA: AttnType = ...
 """Alias for :attr:`AttnType.AttnMLA`."""
 AttnDSA: AttnType = ...

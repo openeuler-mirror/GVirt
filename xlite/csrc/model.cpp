@@ -111,7 +111,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
         moeREDownScaleBias[i].resize(totalPhysicalExperts);
     }
 
-    if (c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(c.attnType)) {
         if (c.fullAttentionInterval == 0) {
             throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
         }
@@ -971,7 +971,7 @@ void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<XTensor> &
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
-    if (_c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(_c.attnType)) {
         if (_layerTypes[layer] == XMODEL_LAYER_ATTN_FULL) {
             ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
         } else {
@@ -1857,22 +1857,24 @@ void XModel::PrepareHybridMetadata(XRuntime &rt, XModelAttnMeta &attnMeta)
     rt._gdnQueryStarts.clear();
     rt._gdnConvInitial.clear();
     rt._gdnSsmInitial.clear();
-    if (_c.attnType != XMODEL_ATTN_HYBRID || rt.IsDummyRuntime()) {
+    if (!IsHybridAttn(_c.attnType) || rt.IsDummyRuntime()) {
         return;
     }
     const size_t batch = attnMeta.lensCpu.size();
     if (batch == 0 || batch != attnMeta.cachedLensCpu.size()) {
         throw std::runtime_error("hybrid forward requires resolved lens/cachedLens");
     }
-    // blockTables[1..] = mamba state indices [batch, 1], one table per mamba cache group;
-    // zero-copy aliases of the caller's V2 metadata.
-    if (attnMeta.blockTables.size() < 2) {
+    // Family slots: [0]=main KV, [1..1+nMambaTables)=mamba state indices;
+    // HYBRID_KDA appends a tail-ring table at the end.
+    const bool hasTail = _c.attnType == XMODEL_ATTN_HYBRID_KDA;
+    const size_t minBlockTables = 2 + (hasTail ? 1 : 0);
+    if (attnMeta.blockTables.size() < minBlockTables) {
         throw std::runtime_error(
-            "hybrid forward requires family blockTables ([0]=main KV, [1..]=mamba state indices)");
+            "hybrid forward requires family blockTables (main + mamba [+ tail])");
     }
-    const size_t nTables = attnMeta.blockTables.size() - 1;
-    // KDA position p belongs to table 1 + p % nTables (vLLM assigns groups round-robin).
-    for (size_t g = 0; g < nTables; ++g) {
+    const size_t nMambaTables = attnMeta.blockTables.size() - 1 - (hasTail ? 1 : 0);
+    // Linear-attention position p uses mamba table 1 + p % nMambaTables (round-robin).
+    for (size_t g = 0; g < nMambaTables; ++g) {
         const XTensor &tbl = attnMeta.blockTables[1 + g];
         if (tbl.dtype != INT32 || tbl.shape.size() != 2 || tbl.shape[0] < batch ||
             tbl.shape[1] != 1 || tbl.ptr == nullptr) {
@@ -1902,7 +1904,7 @@ void XModel::PrepareHybridMetadata(XRuntime &rt, XModelAttnMeta &attnMeta)
             rt._gdnSsmInitial.emplace_back();
             continue;
         }
-        XTensor statePages = attnMeta.blockTables[1 + kdaPos % nTables];
+        XTensor statePages = attnMeta.blockTables[1 + kdaPos % nMambaTables];
         statePages.View(std::vector<size_t>{batch});
         rt._gdnConvIndices.push_back(statePages);
         rt._gdnSsmIndices.push_back(statePages);
@@ -2027,7 +2029,7 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                                  ": state cache size must equal nLayers");
     }
 
-    if (_c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(_c.attnType)) {
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
         uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
         uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
@@ -2229,7 +2231,7 @@ size_t XModel::DummyRun()
         for (uint32_t i = 0; i < _c.nLayers; i++) {
             uint32_t expectedKvHeads =
                 std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-            if (_c.attnType == XMODEL_ATTN_HYBRID) {
+            if (IsHybridAttn(_c.attnType)) {
                 if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
                     XTensor kCache(
                         {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.headDim},
@@ -2356,7 +2358,7 @@ size_t XModel::DummyRun()
             attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, maxNumBlocks}, INT32,
                                               nullptr);
         }
-        if (_c.attnType == XMODEL_ATTN_HYBRID && attnMeta.blockTables.size() < 2) {
+        if (IsHybridAttn(_c.attnType) && attnMeta.blockTables.size() < 2) {
             attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, 1}, INT32, nullptr);
         }
         attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);

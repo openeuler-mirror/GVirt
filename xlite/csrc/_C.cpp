@@ -29,14 +29,10 @@ struct CModelAttnMetaV2 {
     at::Tensor lens;           // [batch] int32 device
     at::Tensor cachedLens;     // [batch] int32 device
     at::Tensor queryStartLoc;  // [batch+1] int32 device, 0-prefixed prefix-sum of lens
-    std::vector<at::Tensor> slotMapping;  // [batchedTokens] int32 device; always a single table:
-                                          // [0]=main KV token slots (state pages update in place;
-                                          // tail slots are computed in C++ from the paging formula)
-    std::vector<at::Tensor> blockTables;  // [batch, maxNumBlocks] int32 device; family slots
-                                          // (globally enumerated by cache kind):
-                                          // [0]=main KV block table (all models);
-                                          // [1]=mamba state indices (linear-attention models);
-                                          // [2]=tail ring block table (GLM-5.3-Flash only)
+    std::vector<at::Tensor> slotMapping;  // hybrid: one main-KV table;
+                                          // per-cache: one per blockSizes entry
+    std::vector<at::Tensor> blockTables;  // hybrid: [0]=main, [1..]=mamba [+ tail];
+                                          // per-cache: one per blockSizes entry
 };
 
 class _CModel
@@ -256,7 +252,7 @@ static void InitOptionalXTensor(XTensor &out, at::Tensor &in, DebugSrcLoc loc)
 static std::vector<uint32_t> ResolveLayerTypes(const XModelConfig &c)
 {
     std::vector<uint32_t> layerTypes;
-    if (c.attnType != XMODEL_ATTN_HYBRID) {
+    if (!IsHybridAttn(c.attnType)) {
         return layerTypes;
     }
     if (c.fullAttentionInterval == 0) {
@@ -273,7 +269,7 @@ static std::vector<uint32_t> ResolveLayerTypes(const XModelConfig &c)
 static bool IsConfigLayerFullAttention(XModelConfig &c, uint32_t layer,
                                        const std::vector<uint32_t> &layerTypes)
 {
-    if (c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(c.attnType)) {
         return layerTypes[layer] == XMODEL_LAYER_ATTN_FULL;
     }
     return c.attnType == XMODEL_ATTN_MHA;
@@ -344,7 +340,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             "num of layers must be greater than or equal to num of dense layers");
     }
 
-    if (c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(c.attnType)) {
         if (c.linearNumKHeads == 0 || c.linearNumVHeads == 0 || c.linearKeyHeadDim == 0 ||
             c.linearValueHeadDim == 0 || c.linearConvKernelDim == 0) {
             throw std::invalid_argument("Linear attention config is incomplete");
@@ -366,7 +362,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     bool isAttnMLA = c.attnType == XMODEL_ATTN_MLA;
     bool isAttnMHA = c.attnType == XMODEL_ATTN_MHA;
     bool isAttnDSA = c.attnType == XMODEL_ATTN_DSA;
-    bool isAttnHybrid = c.attnType == XMODEL_ATTN_HYBRID;
+    bool isAttnHybrid = IsHybridAttn(c.attnType);
     bool isAttnCxA = c.attnType == XMODEL_ATTN_CXA;
     const std::vector<LayersCheckEntry> layersTable = {
         // Tensors, Message, allowEmpty, Predicate
@@ -550,7 +546,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         InitXTensor(_model->mlpNorm[i], mlpNorm[i], DBG_LOC);
 
         bool isFullLayer = IsConfigLayerFullAttention(c, i, layerTypes);
-        if (c.attnType == XMODEL_ATTN_HYBRID) {
+        if (IsHybridAttn(c.attnType)) {
             if (isFullLayer) {
                 InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
                                  attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true,
@@ -847,7 +843,7 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         // Only attention types whose cache consumers address a dim-0 pitch may
         // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
         // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
-        bool allowPitch = attnType == XMODEL_ATTN_HYBRID || attnType == XMODEL_ATTN_MHA ||
+        bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
                           attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
@@ -1061,7 +1057,7 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
         // Only attention types whose cache consumers address a dim-0 pitch may
         // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
         // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
-        bool allowPitch = attnType == XMODEL_ATTN_HYBRID || attnType == XMODEL_ATTN_MHA ||
+        bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
                           attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
@@ -1153,7 +1149,7 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
         // Only attention types whose cache consumers address a dim-0 pitch may
         // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
         // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
-        bool allowPitch = attnType == XMODEL_ATTN_HYBRID || attnType == XMODEL_ATTN_MHA ||
+        bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
                           attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
@@ -3063,7 +3059,8 @@ PYBIND11_MODULE(_C, m)
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
         .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
         .value("AttnDSA", XModelAttnType::XMODEL_ATTN_DSA)
-        .value("AttnHybrid", XModelAttnType::XMODEL_ATTN_HYBRID)
+        .value("AttnHybridGdn", XModelAttnType::XMODEL_ATTN_HYBRID_GDN)
+        .value("AttnHybridKda", XModelAttnType::XMODEL_ATTN_HYBRID_KDA)
         .value("AttnCxA", XModelAttnType::XMODEL_ATTN_CXA)
         .export_values();
 

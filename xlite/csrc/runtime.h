@@ -24,10 +24,16 @@ enum XModelAttnType {
     XMODEL_ATTN_MHA,
     XMODEL_ATTN_MLA,
     XMODEL_ATTN_DSA,
-    XMODEL_ATTN_HYBRID,
+    XMODEL_ATTN_HYBRID_GDN,  // GDN linear attention + full attention
+    XMODEL_ATTN_HYBRID_KDA,  // KDA linear attention + sparse MLA
     XMODEL_ATTN_CXA,
     XMODEL_ATTN_MAX_TYPE,
 };
+
+inline bool IsHybridAttn(XModelAttnType type)
+{
+    return type == XMODEL_ATTN_HYBRID_GDN || type == XMODEL_ATTN_HYBRID_KDA;
+}
 
 enum XModelLayerAttnType {
     XMODEL_LAYER_ATTN_FULL = 0,

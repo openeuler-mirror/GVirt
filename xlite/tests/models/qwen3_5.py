@@ -32,7 +32,7 @@ forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     block_size = 128
     from xlite._C import (
-        Runtime, ModelConfig, AttnMetaV2, AttnHybrid, Model,
+        Runtime, ModelConfig, AttnMetaV2, AttnHybridGdn, Model,
     )
     from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
 
@@ -1063,7 +1063,7 @@ class Qwen3_5(nn.Module):
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size
         config.max_num_batched_tokens = args.max_num_batched_tokens
-        config.attn_type = AttnHybrid
+        config.attn_type = AttnHybridGdn
         config.full_attention_interval = args.full_attention_interval
         config.linear_num_k_heads = args.linear_num_key_heads
         config.linear_num_v_heads = args.linear_num_value_heads
