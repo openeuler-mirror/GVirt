@@ -159,6 +159,9 @@ __aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst,
     }
 }
 
+// TODO: DataCopyParams.srcStride is uint16_t. The NZ B-matrix load passes
+// (nStride - nValue), which overflows for n > 65535 + nValue (e.g. a large-vocab
+// lm_head with n = 248320). Split the copy into chunks or fall back to ND until fixed.
 template <typename Dtype>
 __aicore__ inline void CopyGmToL1(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src,
                                   int nValue, int kBlockNum, int nStride)
