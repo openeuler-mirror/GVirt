@@ -59,6 +59,21 @@ class FeatureSpec:
     note: str = ""                       # 备注(写入结果表)
     skip_reason: str = ""                # 非空则跳过实测(原因)
     scenario_input_override: dict = field(default_factory=dict)  # {场景: 输入词数}
+    # --- PD 分离等多实例相关 ---
+    instances: list = field(default_factory=list)   # 非空→走多实例分支; list[InstanceSpec]
+    proxy_port: int = 0                 # >0→起 load_balance_proxy; 请求发此 port
+    proxy_script: str = ""              # proxy 脚本路径
+    needs_kv_transfer: bool = False     # True→build_launch_cmd 加 --kv-transfer-config
+
+
+@dataclass
+class InstanceSpec:
+    """PD 分离的单个 vllm serve 实例描述(producer/consumer)."""
+    role: str          # "kv_producer" / "kv_consumer"
+    cards: str         # ASCEND_RT_VISIBLE_DEVICES, 如 "0,1,2,3,4,5,6,7"
+    port: int          # HTTP --port
+    kv_port: str       # mooncake kv_port (TP=N 时占 kv_port..kv_port+N-1)
+    engine_id: str     # "0" producer / "1" consumer
 
 
 FEATURES = {
@@ -435,8 +450,28 @@ FEATURES = {
     # --- Disaggregated 类 ---
     "disaggregated_prefill": FeatureSpec(
         "disaggregated_prefill", "Disaggregated Prefill",
-        needs_multi_instance=True,
-        note="PD 分离需 producer+consumer 两实例 + kv_transfer_config; 单机可起2实例但复杂, 暂标记",
+        model_override="/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507",
+        tp_override=8,
+        disable_quantization=True,   # BF16 无 quant_model_description.json
+        max_model_len_override=8192,  # PD 显存紧张(同 dp/lmhead_tp 做法)
+        scenario_input_override={"long_single": 4096},  # 适配 max_model_len=8192
+        needs_kv_transfer=True,
+        # instances.port 为相对主 port 的偏移(run_case_multi_instance 里 +port 求实际);
+        # kv_port ≥ 36000 规避 16 卡 Mooncake AscendDirectTransport 随机占 [20000,36000).
+        instances=[
+            InstanceSpec("kv_producer", "0,1,2,3,4,5,6,7", 1, "36000", "0"),
+            InstanceSpec("kv_consumer", "8,9,10,11,12,13,14,15", 2, "36100", "1"),
+        ],
+        proxy_port=0,  # 相对主 port 偏移 0 = 主 port 本身作 proxy port
+        proxy_script=("/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/"
+                      "load_balance_proxy_server_example.py"),
+        extra_env={"HCCL_IF_IP": "127.0.0.1", "GLOO_SOCKET_IFNAME": "lo",
+                   "TP_SOCKET_IFNAME": "lo", "HCCL_SOCKET_IFNAME": "lo"},
+        note="PD分离(P/D disaggregation): prefill(TP=8,kv_producer,卡0-7)+"
+             "decode(TP=8,kv_consumer,卡8-15)+load_balance_proxy; "
+             "MooncakeConnectorV1 P2P(非layerwise,无mooncake_master); "
+             "GLM-5.2-w8a8单机TP=8装不下(721GB/8>61GB)故换Qwen3-30B-A3B(BF16); "
+             "max_model_len=8192+long_single降至4096适配显存",
     ),
 
     # --- 多模态类 ---
@@ -504,7 +539,8 @@ def build_additional_config(mode: str, spec: FeatureSpec) -> dict:
 
 def build_launch_cmd(spec: FeatureSpec, mode: str, model_path: str, port: int,
                     tp: int, max_num_batched_tokens: int,
-                    max_num_seqs: int, max_model_len: int) -> list:
+                    max_num_seqs: int, max_model_len: int,
+                    instance: "InstanceSpec" = None) -> list:
     additional_config = build_additional_config(mode, spec)
     if spec.model_override:
         model_path = spec.model_override
@@ -554,6 +590,20 @@ def build_launch_cmd(spec: FeatureSpec, mode: str, model_path: str, port: int,
     if not spec.disable_quantization and os.path.exists(
             os.path.join(model_path, "quant_model_description.json")):
         cli += ["--quantization", "ascend"]
+    # PD 分离: 多实例模式下注入 --kv-transfer-config(MooncakeConnectorV1 P2P, 非 layerwise,
+    # 与 feature_matrix "kv connector 仅支持非 layerwise" 一致; 无 mooncake_master).
+    # kv_port ≥ 36000 规避 16 卡 Mooncake AscendDirectTransport 随机占 [20000,36000).
+    if instance is not None:
+        kv_cfg = {
+            "kv_connector": "MooncakeConnectorV1",
+            "kv_role": instance.role,
+            "kv_port": instance.kv_port,
+            "kv_connector_extra_config": {
+                "prefill": {"dp_size": 1, "tp_size": tp},
+                "decode": {"dp_size": 1, "tp_size": tp},
+            },
+        }
+        cli += ["--kv-transfer-config", json.dumps(kv_cfg)]
     cli += spec.extra_cli
     return cli
 
@@ -990,6 +1040,130 @@ def append_result(spec: FeatureSpec, mode: str, port: int,
           f"{qual if startup_ok else '启动失败'} (日志: {log_ref})")
 
 
+def run_case_multi_instance(spec: FeatureSpec, mode: str, port: int, model_path: str,
+                            tp: int, max_num_batched_tokens: int, max_num_seqs: int,
+                            max_model_len: int, startup_timeout: int,
+                            scenario: str = None):
+    """多实例启动分支(PD 分离等).
+
+    逐实例 build_launch_cmd(注入 --kv-transfer-config)→ Popen(ASCEND_RT_VISIBLE_DEVICES
+    按实例隔离)→ wait_for_server; 全部就绪后起 load_balance_proxy(若 proxy_port>0);
+    请求发 proxy_port(或首个实例 port); 复用 run_test_scenarios 跑场景 + 精度校验;
+    kill_server 逐实例停 + proxy 停.
+    """
+    print(f"\n{'='*70}\n[用例-多实例] {spec.label} × {mode} (proxy_port={port})\n{'='*70}")
+    tag = f"{spec.name}_{mode}_{port}"
+    cdir = case_dir(tag)
+    # 实例实际 port = 主 port + instance.port 偏移; proxy_port = 主 port + spec.proxy_port 偏移
+    proxy_port = port + spec.proxy_port
+    inst_specs = [replace(i, port=port + i.port) for i in spec.instances]
+    # 写实例配置概览到 launch_cmd.txt
+    with open(os.path.join(cdir, "launch_cmd.txt"), "w", encoding="utf-8") as f:
+        f.write(f"[多实例 PD] proxy_port={proxy_port}\n")
+        for i in inst_specs:
+            f.write(f"  role={i.role} cards={i.cards} port={i.port} "
+                    f"kv_port={i.kv_port} engine_id={i.engine_id}\n")
+    procs = {}  # name → Popen
+    log_paths = {}  # name → log_path
+    start = time.time()
+    startup_ok = False
+    evidence = ""
+    quality = "N/A"
+    try:
+        # 逐实例启动(producer 先, consumer 后)
+        for idx, inst in enumerate(inst_specs):
+            name = "prefill" if inst.role == "kv_producer" else "decode"
+            env = base_env_init()
+            env.update(spec.extra_env)
+            env["ASCEND_RT_VISIBLE_DEVICES"] = inst.cards
+            # xlite_rt 的 InitHcclComm 用 XSock(TCP, bind (127.0.0.1, XLITE_DEFAULT_PORT=10266),
+            # SO_REUSEADDR 非 SO_REUSEPORT)broadcast rootInfo. PD 多实例下 prefill+decode 的 rank0
+            # 都 bind 同 (127.0.0.1, 10266) → 竞态冲突(connect reset by peer); pool 越大两进程
+            # init_tensor_pool 越同步越易触发(full_mode 519MB 必撞, decode-only 97MB 侥幸错峰).
+            # per-instance XLITE_PORT 隔离(GetNodeIps 读此 env 覆盖 _port), 间隔 1000 > offset 范围
+            # (tp0/dp200/ep300/ccl400/portOffset500). 单实例用例不走此分支, 默认 10266 不受影响.
+            env["XLITE_PORT"] = str(10266 + idx * 1000)
+            cmd = build_launch_cmd(spec, mode, model_path, inst.port, tp,
+                                   max_num_batched_tokens, max_num_seqs,
+                                   max_model_len, instance=inst)
+            log_path = os.path.join(cdir, f"{name}_server.log")
+            log_paths[name] = log_path
+            with open(log_path, "w", encoding="utf-8") as logf:
+                procs[name] = subprocess.Popen(
+                    cmd, stdout=logf, stderr=subprocess.STDOUT,
+                    env=env, start_new_session=True)
+            print(f"[{name}] PID={procs[name].pid} role={inst.role} "
+                  f"cards={inst.cards} port={inst.port} kv_port={inst.kv_port}", flush=True)
+        # 等待所有实例就绪
+        print(f"[等待] {len(inst_specs)} 实例就绪 (timeout={startup_timeout}s)...", flush=True)
+        for inst in inst_specs:
+            name = "prefill" if inst.role == "kv_producer" else "decode"
+            ok, detail = wait_for_server(inst.port, startup_timeout,
+                                         log_paths[name], procs[name])
+            print(f"[{name}] {'✅就绪' if ok else '❌失败'}: {detail}", flush=True)
+            if not ok:
+                fatal = extract_fatal(log_paths[name])
+                evidence = f"{name}启动失败: {fatal or detail}"[:300]
+                raise RuntimeError(evidence)
+        startup_ok = True  # 全部实例就绪
+        # 起 proxy(若配置): 请求经 proxy 转发到 prefill/decode; 否则直发首个实例
+        target_port = inst_specs[0].port
+        if spec.proxy_script:
+            print(f"[proxy] 启动 → prefill:{inst_specs[0].port} "
+                  f"decode:{inst_specs[-1].port} (port={proxy_port})", flush=True)
+            cmd_proxy = [
+                "python", spec.proxy_script,
+                "--host", "127.0.0.1", "--port", str(proxy_port),
+                "--prefiller-hosts", "127.0.0.1",
+                "--prefiller-ports", str(inst_specs[0].port),
+                "--decoder-hosts", "127.0.0.1",
+                "--decoder-ports", str(inst_specs[-1].port),
+            ]
+            log_proxy = os.path.join(cdir, "proxy.log")
+            log_paths["proxy"] = log_proxy
+            with open(log_proxy, "w", encoding="utf-8") as logf:
+                procs["proxy"] = subprocess.Popen(
+                    cmd_proxy, stdout=logf, stderr=subprocess.STDOUT,
+                    env=base_env_init(), start_new_session=True)
+            ok, detail = wait_for_server(proxy_port, 120, log_proxy, procs["proxy"])
+            print(f"[proxy] {'✅就绪' if ok else '❌失败'}: {detail}", flush=True)
+            if not ok:
+                evidence = f"proxy启动失败: {detail}"[:300]
+                startup_ok = False
+                raise RuntimeError(evidence)
+            target_port = proxy_port  # 请求经 proxy 转发
+        # 跑测试场景(请求发 target_port)
+        print(f"[就绪] 全部实例就绪, 启动耗时 {time.time()-start:.0f}s. "
+              f"跑场景(请求 → port={target_port})", flush=True)
+        all_ok, results = run_test_scenarios(target_port, tag, spec=spec, scenario=scenario)
+        if all_ok:
+            quality, evidence = aggregate_verdicts(results)
+        else:
+            quality = "FAIL"
+            evidence = aggregate_verdicts(results)[1]
+        with open(os.path.join(cdir, "scenario_summary.txt"), "w", encoding="utf-8") as f:
+            for name, v, ev in results:
+                f.write(f"[{name}] {v}: {ev}\n")
+    except Exception as e:
+        if not evidence:
+            evidence = str(e)[:300]
+        # 实例已就绪(startup_ok=True)但后续步骤(proxy/场景)异常: 保留 startup_ok,
+        # quality 记录实际; 实例未就绪的异常: startup_ok=False
+        if not startup_ok:
+            quality = "N/A"
+    finally:
+        elapsed = time.time() - start
+        # 逐实例 + proxy 停服(复用 kill_server: 内部做进程组停 + vllm/VLLM::/proxy 残留清理)
+        for name in ("proxy", "decode", "prefill"):
+            p = procs.get(name)
+            if p is not None:
+                kill_server(p, port + (0 if name == "proxy" else
+                                       (1 if name == "prefill" else 2)))
+    append_result(spec, mode, port, startup_ok, quality, evidence,
+                  elapsed, spec.note, cdir)
+    return startup_ok
+
+
 def run_case(spec: FeatureSpec, mode: str, port: int, model_path: str,
              tp: int, max_num_batched_tokens: int, max_num_seqs: int,
              max_model_len: int, startup_timeout: int, scenario: str = None):
@@ -1008,6 +1182,11 @@ def run_case(spec: FeatureSpec, mode: str, port: int, model_path: str,
                       skip_msg + "; " + spec.note, 0.0, spec.note, cdir)
         print(f"[跳过] {spec.label}: {skip_msg}")
         return False
+    # 多实例分支(PD 分离等): spec.instances 非空则走多实例启动流程, 不走下方单实例流程.
+    if spec.instances:
+        return run_case_multi_instance(spec, mode, port, model_path, tp,
+                                       max_num_batched_tokens, max_num_seqs,
+                                       max_model_len, startup_timeout, scenario)
     log_path = os.path.join(cdir, "server.log")
     env = base_env_init()
     env.update(spec.extra_env)
