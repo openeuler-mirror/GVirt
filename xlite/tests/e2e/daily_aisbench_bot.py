@@ -85,6 +85,7 @@ xlite 每日自动化精度测试机器人
 """
 
 import argparse
+import math
 import os
 import re
 import subprocess
@@ -100,9 +101,9 @@ from daily_bot_utils import (
     detect_model_device,
     # 版本信息
     get_last_release_tag,
-    get_xlite_version,
-    get_xlite_commit,
     get_vllm_ascend_version,
+    get_xlite_commit,
+    get_xlite_version,
     install_wheel,
     log_error,
     # 日志工具
@@ -150,8 +151,8 @@ def run_aisbench_benchmark(
     在测试容器中执行精度基准测试脚本 (batch_aisbench.py)
 
     参数:
-        model_args: 模型参数字符串，格式为 "--models model1 model2 --tps tp1 tp2 --eps ep1 ep2 ..."，参考 batch_aisbench.py
-            的参数格式
+        model_args: 模型参数字符串，格式为 "--models model1 model2 --tps tp1 tp2 --eps ep1 ep2 ... --datasets ds1 ds2 ..."，
+            参考 batch_aisbench.py 的参数格式
         debug: 是否为调试模式，调试模式下会直接将测试过程输出到stdout，非调试模式下会将错误输出到日志文件
         reference_commit: 指定复用前期某个 xlite commit hash 测试；仅当 model_args 中包含 --reuse 或 -r 参数时生效
         timeout: ais_bench 子进程超时时间（秒）
@@ -232,6 +233,37 @@ def run_aisbench_benchmark(
 
 
 # ====================== 报告解析函数 ======================
+def _parse_accuracy(value: object) -> float:
+    """Parse a report accuracy cell; unparseable/empty cells become NaN.
+
+    NaN flows into the analysis as a dedicated ``nan_accuracy`` warning instead of
+    crashing the parser or silently passing the accuracy thresholds.
+    """
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _parse_spec_decode(value: object) -> Tuple[str, int]:
+    """Parse a spec-decode cell into ``(method, num_speculative_tokens)``.
+
+    Accepts the `<method>:<num>` format (e.g. ``mtp:3``) written by current
+    batch_aisbench runs, ``n/a`` for runs without spec decode, and a bare integer
+    from legacy ``mtp_tokens`` columns (meaning MTP). Empty/invalid cells mean
+    spec decode disabled.
+    """
+    text = str(value or "").strip()
+    if text.lower() in ("n/a", "n.a.", "na"):
+        return "", 0
+    parts = text.split(":")
+    if len(parts) >= 2 and parts[0].strip():
+        method = parts[0].strip().lower()
+        num = parts[1].strip()
+        return method, int(num) if num.isdigit() else 0
+    return "mtp", int(text) if text.isdigit() else 0
+
+
 def parse_aisbench_report(report_path: Path) -> Dict:
     """
     解析精度基准测试报告文件 (CSV格式)
@@ -279,14 +311,22 @@ def parse_aisbench_report(report_path: Path) -> Dict:
                     backend = "aclgraph"
 
                 model_name = row.get("model_name", "unknown-model")
+                dataset = row.get("dataset", "")
                 tp: int = int(row.get("tp_size", 0))
                 ep: bool = row.get("ep", "").strip().lower() in ["true", "y", "yes", "1"]
                 dp: int = int(row.get("dp_size", 0))
-                mtp: int = int(row.get("mtp_tokens", 0))
+                # `spec_decode` is the current column; fall back to the legacy `mtp_tokens` column
+                spec_method, spec_tokens = _parse_spec_decode(row.get("spec_decode") or row.get("mtp_tokens"))
                 result = {
-                    "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}{f'+MTP{mtp}' if mtp > 0 else ''}",
+                    "model_name": (
+                        f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}"
+                        f"{f'+{spec_method}{spec_tokens}' if spec_tokens > 0 else ''}"
+                    ),
+                    "dataset": dataset,
                     "backend": backend,
-                    "accuracy": float(row.get("accuracy", 0.0)),
+                    # missing/empty/non-numeric cells become NaN: batch_aisbench records failed
+                    # runs as NaN too, and a real 0.00% must stay distinguishable from "no result"
+                    "accuracy": _parse_accuracy(row.get("accuracy")),
                     "error": row.get("error", "") if row.get("error") else None,
                 }
                 metrics["results"].append(result)
@@ -317,23 +357,29 @@ def parse_aisbench_markdown_report(report_path: Path) -> Dict:
     content = report_path.read_text(encoding="utf-8")
 
     # 定义表格行的正则表达式
-    # 格式: | Model | Dataset | TP | EP | DP | MTP | Backend | Metric | Accuracy | Error |
+    # 格式: | Model | Dataset | TP | EP | DP | Spec | Backend | Metric | Accuracy | Error |
+    # Spec 单元格为 `<method>:<num>` (如 mtp:3) 或 n/a (未启用), 旧报告为纯数字 (MTP tokens)
     table_pattern = re.compile(
         r"\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*(\d+)\s*\|\s*([YN])\s*\|\s*(\d+)\s*\|"
-        r"\s*(\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([\d.]+)\s*\|\s*([^|]*)\s*\|"
+        r"\s*([A-Za-z_]\w*:\d+|n/a|\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([\d.]+|[Nn]a[Nn])\s*\|\s*([^|]*)\s*\|"
     )
 
     for match in table_pattern.finditer(content):
         backend = match.group(7).strip()
         model_name = match.group(1).strip()
+        dataset = match.group(2).strip()
         tp: int = int(match.group(3).strip())
         ep: bool = match.group(4).strip().upper() == "Y"
         dp: int = int(match.group(5).strip())
-        mtp: int = int(match.group(6).strip())
+        spec_method, spec_tokens = _parse_spec_decode(match.group(6))
         result = {
-            "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}{f'+MTP{mtp}' if mtp > 0 else ''}",
+            "model_name": (
+                f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}"
+                f"{f'+{spec_method}{spec_tokens}' if spec_tokens > 0 else ''}"
+            ),
+            "dataset": dataset,
             "backend": backend,
-            "accuracy": float(match.group(9)),
+            "accuracy": _parse_accuracy(match.group(9)),
             "error": match.group(10).strip() if match.group(10).strip() else None,
         }
         metrics["results"].append(result)
@@ -343,6 +389,16 @@ def parse_aisbench_markdown_report(report_path: Path) -> Dict:
 
 
 # ====================== 单次运行内精度对比函数 ======================
+def _result_group_key(result: Dict) -> str:
+    """Group results by model+deployment, plus the dataset when present.
+
+    Without the dataset in the key, results for the same model+backend measured on
+    different datasets would overwrite each other in the ``{group: {backend: acc}}`` maps.
+    """
+    dataset = result.get("dataset", "")
+    return f"{result['model_name']}+{dataset}" if dataset else result["model_name"]
+
+
 def analyze_accuracy_within_run(metrics: Dict, xlite_threshold: float, min_accuracy: float) -> Dict:
     """
     在单次运行内对比 xlite 与 aclgraph 的精度，并检查最低精度阈值
@@ -358,7 +414,7 @@ def analyze_accuracy_within_run(metrics: Dict, xlite_threshold: float, min_accur
             "timestamp": "测试时间",
             "warnings": [
                 {
-                    "type": "xlite_vs_aclgraph" | "low_accuracy",
+                    "type": "xlite_vs_aclgraph" | "low_accuracy" | "nan_accuracy",
                     "model_name": "模型名称",
                     "backend": "backend类型",
                     "xlite_accuracy": 精度值 (仅 xlite_vs_aclgraph 类型),
@@ -374,15 +430,17 @@ def analyze_accuracy_within_run(metrics: Dict, xlite_threshold: float, min_accur
         - xlite full 和 xlite decode-only 分别与对应的 aclgraph 对比
         - 如果 xlite 精度比 aclgraph 低超过 xlite_threshold，视为警告
         - 如果任何模型精度低于 min_accuracy，视为警告
+        - 如果精度结果为 NaN（评测未产生有效数值），单独归为 nan_accuracy 警告，
+          不参与差值/阈值比较
     """
     analysis = {"timestamp": metrics.get("timestamp", ""), "warnings": []}
 
-    # 按模型名称分组结果
+    # 按模型名称分组结果 (同模型多数据集时，分组键包含数据集名)
     model_results: Dict[str, Dict[str, float]] = {}  # {model_name: {backend: accuracy}}
     for result in metrics.get("results", []):
-        model_name = result["model_name"]
+        model_name = _result_group_key(result)
         backend = result["backend"]
-        accuracy = result.get("accuracy", 0.0)
+        accuracy = result.get("accuracy", float("nan"))
         error = result.get("error")
 
         model_results.setdefault(model_name, {})
@@ -433,9 +491,20 @@ def analyze_accuracy_within_run(metrics: Dict, xlite_threshold: float, min_accur
                     f"diff={difference:.2f}% [警告: xlite比aclgraph低超过{xlite_threshold}%]"
                 )
 
-        # 检查所有 backend 的最低精度阈值
+        # 检查所有 backend 的最低精度阈值 (NaN 单独归为 nan_accuracy，不参与数值比较)
         for backend, accuracy in backends.items():
-            if accuracy is not None and accuracy < min_accuracy:
+            if accuracy is None:
+                continue
+            if math.isnan(accuracy):
+                analysis["warnings"].append(
+                    {
+                        "type": "nan_accuracy",
+                        "model_name": model_name,
+                        "backend": backend,
+                    }
+                )
+                log_warning(f"{model_name} ({backend}): accuracy=NaN [警告: 精度结果无效]")
+            elif accuracy < min_accuracy:
                 analysis["warnings"].append(
                     {
                         "type": "low_accuracy",
@@ -452,11 +521,15 @@ def analyze_accuracy_within_run(metrics: Dict, xlite_threshold: float, min_accur
 # ====================== 报告生成函数 ======================
 def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) -> Tuple[str, Optional[str]]:
     """
-    生成精度测试报告 (HTML格式，用于企业微信通知)
+    生成精度测试报告 (HTML格式，用于通知消息)
 
     返回两个字符串，分成两条通知发送:
     - 第一条: 标题 + 汇总 + 详细数据表格 (不含警告详情)
     - 第二条 (可选): 标题 + 警告详情 (仅在有警告时生成)
+
+    警告按类别分档: xlite_vs_aclgraph (精度回退) / low_accuracy (低精度) / nan_accuracy (精度结果为 NaN)。
+    配色与 daily_benchmark_bot.py 保持一致: blue 标题、green 正常值、red 警告值；
+    emoji 标记: ✅ 正常值、🔥 警告值、❓ NaN、N/A 为普通文本。
 
     参数:
         metrics: 当前测试指标数据
@@ -478,36 +551,30 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
         if match:
             current_date = match.group(1)
 
-    # 构建标题块 (两条报告共用)
-    header_lines = [
-        f'<font color="blue"><b>xlite {current_date} 精度测试报告</b></font>',
-        "",
-        f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite 版本: {xlite_version}",
-    ]
-
-    # 按模型名称分组结果
+    # 按模型名称分组结果 (同模型多数据集时，分组键包含数据集名)
     model_results: Dict[str, Dict[str, float]] = {}
     for result in metrics.get("results", []):
-        model_name = result["model_name"]
+        model_name = _result_group_key(result)
         backend = result["backend"]
-        accuracy = result.get("accuracy", 0.0)
+        accuracy = result.get("accuracy", float("nan"))
         error = result.get("error")
 
         model_results.setdefault(model_name, {})
         model_results[model_name][backend] = None if error else accuracy  # type: ignore[assignment]
 
-    # 统计警告数量
+    # 统计警告数量（按类别分档）
     warnings = analysis.get("warnings", [])
     xlite_warnings = [w for w in warnings if w["type"] == "xlite_vs_aclgraph"]
     low_acc_warnings = [w for w in warnings if w["type"] == "low_accuracy"]
+    nan_warnings = [w for w in warnings if w["type"] == "nan_accuracy"]
     total_warnings = len(warnings)
 
-    # 汇总摘要
-    status_icon = "⚠️" if total_warnings > 0 else "✅"
-    if total_warnings > 0:
-        status_text = f"发现精度问题 ({total_warnings}项警告)，请关注！"
-    else:
-        status_text = "精度正常，所有模型符合要求"
+    # 有效精度判定: None 与 NaN 都视为无效
+    has_valid_metric = any(
+        accuracy is not None and not math.isnan(accuracy)
+        for backends in model_results.values()
+        for accuracy in backends.values()
+    )
 
     # 添加报告路径
     ip_address = os.environ.get("MACHINE_IP", "")
@@ -521,31 +588,79 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
     ip_address = ip_address or "unknown-ip"
     report_path = f"{ip_address}:{report_dir}" if report_dir else ""
 
-    # 所有精度指标均为 N/A（无有效数据）时，发送简短的异常活动说明，而非生成空数据表格
-    has_valid_metric = any(
-        accuracy is not None for backends in model_results.values() for accuracy in backends.values()
-    )
-    if not has_valid_metric:
-        note_lines = list(header_lines)
-        note_lines.append("⚠️ <b>未获取到有效精度数据</b>")
-        note_lines.append("本次测试所有精度指标均为 N/A，未产生实际数据，请检查测试日志确认是否存在异常。")
-        if report_path:
-            note_lines.append(f"报告保存路径: {report_path}")
-        note_lines.append("")
-        report_main = "\n".join(note_lines)
-        return report_main, None
-
-    # ====== 第一条通知: 标题 + 汇总 + 详细数据 ======
-    header_lines.append(f"📊 精度统计: <b>警告项: {total_warnings}</b>")
-    header_lines.append(f"{status_icon} {status_text}")
+    # 构建标题块 (两条消息共用)；配色与性能机器人一致: blue 标题，状态随结果用 green/red
+    header_lines = [
+        f'<font color="blue"><b>xlite {current_date} 精度测试报告</b></font>',
+        "",
+        f"📌 vllm-ascend 版本: {vllm_ascend_version} ｜ xlite 版本: {xlite_version}",
+    ]
+    if total_warnings > 0:
+        category_text = " ｜ ".join(
+            part
+            for part in (
+                f"📉 精度回退 {len(xlite_warnings)}" if xlite_warnings else "",
+                f"🚫 低精度 {len(low_acc_warnings)}" if low_acc_warnings else "",
+                f"❓ NaN {len(nan_warnings)}" if nan_warnings else "",
+            )
+            if part
+        )
+        header_lines.append(
+            f'📊 <font color="blue"><b>精度统计</b></font>: 🔥 <font color="red"><b>警告 {total_warnings} 项</b></font>（{category_text}）'
+        )
+        header_lines.append('🔥 <font color="red"><b>发现精度问题，请关注！</b></font>')
+    else:
+        header_lines.append('📊 <font color="blue"><b>精度统计</b></font>: 🎉 <font color="green"><b>零警告 · 全线绿灯</b></font> 💯')
+        header_lines.append('✅ <font color="green"><b>精度正常</b></font>，所有模型符合要求')
     if report_path:
         header_lines.append(f"报告保存路径: {report_path}")
     header_lines.append("")
 
+    # ====== 第二条通知: 标题 + 警告详情 (仅在有警告时生成；NaN 项也要上报) ======
+    report_warnings: Optional[str] = None
+    if total_warnings > 0:
+        warning_lines = list(header_lines)
+
+        if xlite_warnings:
+            warning_lines.append(f'📉 <font color="red"><b>xlite 精度显著低于 aclgraph（{len(xlite_warnings)}项）</b></font> 🔥')
+            for w in xlite_warnings:
+                warning_lines.append(
+                    f"  - 📉 {w['model_name']} ({str(w['backend']).lstrip('xlite ')}): "
+                    f"xlite={w['xlite_accuracy']:.2f}%, aclgraph={w['aclgraph_accuracy']:.2f}%, "
+                    f"<font color=\"red\"><b>差异 {w['difference']:.2f}%</b></font>"
+                )
+            warning_lines.append("")
+
+        if low_acc_warnings:
+            warning_lines.append(f'🚫 <font color="red"><b>精度低于最低阈值（{len(low_acc_warnings)}项）</b></font> ⬇️')
+            for w in low_acc_warnings:
+                warning_lines.append(
+                    f"  - 🚫 {w['model_name']} ({str(w['backend']).lstrip('xlite ')}): "
+                    f"accuracy=<font color=\"red\"><b>{w['accuracy']:.2f}%</b></font>"
+                )
+            warning_lines.append("")
+
+        if nan_warnings:
+            warning_lines.append(f'❓ <font color="red"><b>精度结果为 NaN（{len(nan_warnings)}项）</b></font> 🤖')
+            warning_lines.append("> 评测未产生有效精度数值（常见原因：模型输出格式异常、评测解析失败、摘要统计缺失），请检查服务器与评测日志。")
+            for w in nan_warnings:
+                warning_lines.append(f"  - ❓ {w['model_name']} ({str(w['backend']).lstrip('xlite ')})")
+            warning_lines.append("")
+
+        report_warnings = "\n".join(warning_lines)
+
+    # 所有精度指标均为 N/A 或 NaN（无有效数据）时，发送简短的异常活动说明，而非生成空数据表格
+    if not has_valid_metric:
+        note_lines = list(header_lines)
+        note_lines.append('🚨 <font color="red"><b>未获取到有效精度数据</b></font> 👀')
+        note_lines.append("本次测试所有精度指标均为 N/A 或 NaN，未产生有效数据，请检查测试日志确认是否存在异常。")
+        note_lines.append("")
+        report_main = "\n".join(note_lines)
+        return report_main, report_warnings
+
     # 详细数据表格
     main_lines = list(header_lines)
     if model_results:
-        main_lines.append("【详细数据】")
+        main_lines.append("📋【详细数据】")
         main_lines.append(" | 模型 | xlite full | xlite decode-only | aclgraph |")
         main_lines.append(" |------|------|------|------|")
 
@@ -554,19 +669,18 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
 
             def format_accuracy(value: Optional[float], backend_name: str) -> str:
                 if value is None:
-                    return "N/A"
-                has_xlite_warning = any(
-                    w["model_name"] == model_name and w["backend"] == backend_name and w["type"] == "xlite_vs_aclgraph"
-                    for w in xlite_warnings
+                    return 'N/A'
+                if math.isnan(value):
+                    return '❓ <font color="red"><b>NaN</b></font>'
+                has_warning = any(
+                    w["model_name"] == model_name
+                    and w["backend"] == backend_name
+                    and w["type"] in ("xlite_vs_aclgraph", "low_accuracy")
+                    for w in warnings
                 )
-                has_low_acc_warning = any(
-                    w["model_name"] == model_name and w["backend"] == backend_name and w["type"] == "low_accuracy"
-                    for w in low_acc_warnings
-                )
-                formatted = f"{value:.2f}"
-                if has_xlite_warning or has_low_acc_warning:
-                    return f'<font color="red"><b>{formatted}</b></font>'
-                return formatted
+                if has_warning:
+                    return f'🔥 <font color="red"><b>{value:.2f}</b></font>'
+                return f'✅ <font color="green"><b>{value:.2f}</b></font>'
 
             xlite_full_str = format_accuracy(backends.get("xlite full"), "xlite full")
             xlite_decode_str = format_accuracy(backends.get("xlite decode-only"), "xlite decode-only")
@@ -576,31 +690,6 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
         main_lines.append("")
 
     report_main = "\n".join(main_lines)
-
-    # ====== 第二条通知: 标题 + 警告详情 (仅在有警告时生成) ======
-    if total_warnings > 0:
-        warning_lines = list(header_lines)
-        if xlite_warnings:
-            warning_lines.append(f"⚠️ <b>xlite 精度显著低于 aclgraph ({len(xlite_warnings)}项)</b>")
-            for w in xlite_warnings:
-                warning_lines.append(
-                    f"  - {w['model_name']} ({str(w['backend']).lstrip('xlite ')}): "
-                    f"xlite={w['xlite_accuracy']:.2f}%, aclgraph={w['aclgraph_accuracy']:.2f}%, "
-                    f"差异 {w['difference']:.2f}%"
-                )
-            warning_lines.append("")
-
-        if low_acc_warnings:
-            warning_lines.append(f"⚠️ <b>精度低于最低阈值 ({len(low_acc_warnings)}项)</b>")
-            for w in low_acc_warnings:
-                warning_lines.append(
-                    f"  - {w['model_name']} ({str(w['backend']).lstrip('xlite ')}): accuracy={w['accuracy']:.2f}%"
-                )
-            warning_lines.append("")
-
-        report_warnings = "\n".join(warning_lines)
-    else:
-        report_warnings = None
 
     return report_main, report_warnings
 
@@ -644,6 +733,7 @@ def generate_summary_report(analysis: Dict, report_dir: Path, xlite_threshold: f
         # 分类警告
         xlite_warnings = [w for w in warnings if w["type"] == "xlite_vs_aclgraph"]
         low_acc_warnings = [w for w in warnings if w["type"] == "low_accuracy"]
+        nan_warnings = [w for w in warnings if w["type"] == "nan_accuracy"]
 
         if xlite_warnings:
             report_lines.append("\n  xlite 精度低于 aclgraph:")
@@ -658,6 +748,11 @@ def generate_summary_report(analysis: Dict, report_dir: Path, xlite_threshold: f
             report_lines.append("\n  精度低于最低阈值:")
             for w in low_acc_warnings:
                 report_lines.append(f"    - {w['model_name']} ({w['backend']}): accuracy={w['accuracy']:.2f}%")
+
+        if nan_warnings:
+            report_lines.append("\n  精度结果为 NaN (未产生有效数值):")
+            for w in nan_warnings:
+                report_lines.append(f"    - {w['model_name']} ({w['backend']}): accuracy=NaN")
     else:
         report_lines.append("\n[正常] 所有模型精度符合要求")
 
@@ -686,7 +781,7 @@ def main():
     10. 返回退出码
     """
     # 解析命令行参数
-    default_model_args = "--models Qwen3-30B-A3B --tps 8 --eps 1 --dps 1 --xlite 2 1 0 --broadcast-xlite"
+    default_model_args = "--models Qwen3-30B-A3B --tps 8 --eps 1 --dps 1 --datasets ceval --xlite 2 1 0 --broadcast-xlite"
     parser = argparse.ArgumentParser(description="xlite 每日自动化精度测试机器人")
     parser.add_argument(
         "-args",
