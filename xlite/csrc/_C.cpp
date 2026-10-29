@@ -24,10 +24,10 @@ struct CModelAttnMeta {
 struct CModelAttnMetaV2 {
     std::vector<uint32_t> lensCpu;        // [batch] host
     std::vector<uint32_t> cachedLensCpu;  // [batch] host
-    at::Tensor positions;                 // [batchedTokens] int64 device
-    at::Tensor lens;                      // [batch] int32 device
-    at::Tensor cachedLens;                // [batch] int32 device
-    at::Tensor queryStartLoc;             // [batch] int32 device, prefix-sum of lens
+    at::Tensor positions;      // [batchedTokens] or [num_dims, batchedTokens] (mrope) int64 device
+    at::Tensor lens;           // [batch] int32 device
+    at::Tensor cachedLens;     // [batch] int32 device
+    at::Tensor queryStartLoc;  // [batch] int32 device, prefix-sum of lens
     std::vector<at::Tensor> slotMapping;  // [batchedTokens] int32 device, per-kv-cache
     std::vector<at::Tensor> blockTables;  // [batch, maxNumBlocks] int32 device, per-kv-cache
 };
@@ -886,7 +886,7 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
-    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     std::vector<at::Tensor> freqsCisVec = {freqsCis};
     Forward(rt, input, _attnMeta, kvCache, freqsCisVec, output, currStream);
 }
@@ -900,7 +900,7 @@ void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
-    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
     InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
     InitXTensor(_attnMeta.queryStartLoc, attnMeta.queryStartLoc, DBG_LOC);
@@ -925,7 +925,7 @@ void _CModel::ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnM
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
-    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
     InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
     InitXTensor(_attnMeta.queryStartLoc, attnMeta.queryStartLoc, DBG_LOC);
@@ -952,7 +952,7 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.attnType = attnType;
     _attnMeta.lensCpu = attnMeta.lensCpu;
     _attnMeta.cachedLensCpu = attnMeta.cachedLensCpu;
-    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnMeta.lens, attnMeta.lens, DBG_LOC);
     InitXTensor(_attnMeta.cachedLens, attnMeta.cachedLens, DBG_LOC);
     InitXTensor(_attnMeta.queryStartLoc, attnMeta.queryStartLoc, DBG_LOC);
@@ -1101,7 +1101,7 @@ void _CModel::ForwardAndGetLogitsV1(XRuntime &rt, at::Tensor &input, CModelAttnM
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
-    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     std::vector<at::Tensor> freqsCisVec = {freqsCis};
     ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCisVec, indices, output, currStream);
 }
@@ -1198,7 +1198,7 @@ void _CModel::ForwardWithInputsEmbedsV1(XRuntime &rt, at::Tensor &input, CModelA
     _attnMeta.lensCpu = attnMeta.lens;
     _attnMeta.cachedLensCpu = attnMeta.cachedLens;
     _attnMeta.blockTablesCpu = attnMeta.blockTablesList;
-    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC);
+    InitXTensor(_attnMeta.position, attnMeta.positions, DBG_LOC, /*allowPitched=*/true);
     at::Tensor ids = inputIds.value_or(at::Tensor());
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
                             deepstackInput, ids);
@@ -1678,7 +1678,10 @@ void RopeAndCache(XRuntime &rt, at::Tensor &inout, at::Tensor &kCache, at::Tenso
     InitXTensor(_inout, inout, DBG_LOC);
     InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_vCache, vCache, DBG_LOC, /*allowPitched=*/true);
-    InitXTensor(_position, position, DBG_LOC);
+    // Pitched positions are only consumed on the mrope path (H/W rows at the dim-0 pitch);
+    // elsewhere the kernel reads positions flat, so contiguity is still required there.
+    InitXTensor(_position, position, DBG_LOC,
+                /*allowPitched=*/position.dim() == 2 && (mropeMaskH != 0 || mropeMaskW != 0));
     InitXTensor(_cossin, cossin, DBG_LOC);
     InitXTensor(_slotMapping, slotMapping, DBG_LOC);
     XliteOpRopeCache(rt, _inout, _kCache, _vCache, _position, _cossin, _slotMapping, nHeads,

@@ -479,10 +479,11 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
                                                     : attnMeta.queryStartLoc.shape[0]) +
                                  ", expect 1D len >= " + std::to_string(batch));
     }
-    if (attnMeta.position.shape.size() != 1 || attnMeta.position.shape[0] < batchedTokens) {
-        throw std::runtime_error(
-            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-            ": position shape mismatch, expect 1D len >= " + std::to_string(batchedTokens));
+    if ((attnMeta.position.shape.size() != 1 && attnMeta.position.shape.size() != 2) ||
+        attnMeta.position.shape.back() < batchedTokens) {
+        throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                 ": position shape mismatch, expect 1D len or 2D cols >= " +
+                                 std::to_string(batchedTokens));
     }
     uint32_t expectedKvCacheNum = blockSizes.size();
     if (attnMeta.slotMapping.size() != expectedKvCacheNum) {

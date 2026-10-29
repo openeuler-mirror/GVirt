@@ -13,11 +13,26 @@
 #include "trace/trace.h"
 #include "trace/msprof_shape.h"
 
+#include <set>
+
 #define KERNEL_PTR_TYPE(name) decltype(aclrtlaunch_##name##_bfloat16_t)
 
 static inline bool IsDummyRuntime(const XRuntime &rt)
 {
     return rt.IsDummyRuntime();
+}
+
+// Kernels that index `positions` as a flat 1D array read only the first row of a 2D
+// (mrope) input; warn once per op so a wrong-layout call stays visible in per-step logs.
+static void WarnPositions2D(const char *op)
+{
+    static std::set<std::string> warned;
+    if (warned.insert(op).second) {
+        std::cout << "xlite: " << op
+                  << " op received `positions` in 2D shape but only consumes "
+                     "its first row. Double check for correctness."
+                  << std::endl;
+    }
 }
 
 // Pick how many AIV blocks to launch for a byte-wise copy kernel (concat/split)
@@ -885,9 +900,10 @@ void XliteOpRopeCache(XRuntime &rt, XTensor &inout, XTensor &kCache, XTensor &vC
     }
 
     launchKernel(rt.aivNum, rt.stream, position.ptr, inout.ptr, k, v, cossin.ptr, kCache.ptr,
-                 vCache.ptr, slotMapping.ptr, kCache.stride[0], vCache.stride[0], inout.shape[0],
-                 rotDim, inout.shape[1], inout.shape[1], inout.shape[1], localHeads, localKvHeads,
-                 headDim, blockSize, scale, mropeMaskH, mropeMaskW, cossinInFp32);
+                 vCache.ptr, slotMapping.ptr, position.stride[0], kCache.stride[0],
+                 vCache.stride[0], inout.shape[0], rotDim, inout.shape[1], inout.shape[1],
+                 inout.shape[1], localHeads, localKvHeads, headDim, blockSize, scale, mropeMaskH,
+                 mropeMaskW, cossinInFp32);
 }
 
 void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache, XTensor &qk,
@@ -1218,6 +1234,10 @@ void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, ui
                         XTensor &freqs, XTensor &position, XTensor &output, bool inverse,
                         bool outInterleaved, uint64_t minPosition, bool doRotate)
 {
+    // TODO: support 2D [num_dims, num_tokens] `positions` (mrope); only the first row is read.
+    if (position.shape.size() == 2 && position.shape[0] > 1) {
+        WarnPositions2D("rope_complex");
+    }
     if (IsDummyRuntime(rt)) {
         return;
     }
@@ -1248,6 +1268,10 @@ void XliteOpRopeComplexAndCache(XRuntime &rt, uint32_t nLocalHeads, uint32_t ste
                                 uint32_t blockSize, XTensor &vCache, XTensor &slotMapping,
                                 bool outInterleaved, bool doRotate)
 {
+    // TODO: support 2D [num_dims, num_tokens] `positions` (mrope); only the first row is read.
+    if (position.shape.size() == 2 && position.shape[0] > 1) {
+        WarnPositions2D("rope_complex_and_cache");
+    }
     if (IsDummyRuntime(rt)) {
         return;
     }
@@ -1276,6 +1300,10 @@ void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
                        uint32_t blockSize, XTensor &kCache, XTensor &peCache,
                        const XTensor &slotMapping, float normEps, const XTensor &attnNormKvc)
 {
+    // TODO: support 2D [num_dims, num_tokens] `positions` (mrope); only the first row is read.
+    if (position.shape.size() == 2 && position.shape[0] > 1) {
+        WarnPositions2D("mla_prepare");
+    }
     if (IsDummyRuntime(rt)) {
         return;
     }
@@ -1361,6 +1389,10 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                            uint32_t tpSize, const XTensor &kScaleCache, const XTensor &q8,
                            const XTensor &qScale, const XTensor &scaledWeights)
 {
+    // TODO: support 2D [num_dims, num_tokens] `positions` (mrope); only the first row is read.
+    if (position.shape.size() == 2 && position.shape[0] > 1) {
+        WarnPositions2D("indexer_prepare");
+    }
     if (IsDummyRuntime(rt)) {
         if (indexKCache.dtype == INT8) {
             RunIndexerPrepareC8(rt, kw, kNorm, kNormBias, freqs, position, slotMapping, indexKCache,
@@ -1414,6 +1446,10 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
                             const XTensor &slotMapping, XTensor &kCache, const XTensor &scaleCache,
                             float normEps)
 {
+    // TODO: support 2D [num_dims, num_tokens] `positions` (mrope); only the first row is read.
+    if (position.shape.size() == 2 && position.shape[0] > 1) {
+        WarnPositions2D("indexer_k_cache_c8");
+    }
     if (IsDummyRuntime(rt)) {
         RunIndexerPrepareC8(rt, k, kNorm, kNormBias, freqs, position, slotMapping, kCache,
                             scaleCache, XTensor(), XTensor(), XTensor(), XTensor(), 0, false,

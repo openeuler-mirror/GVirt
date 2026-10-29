@@ -221,11 +221,11 @@ __aicore__ inline void calc_cossin(__gm__ Dtype *gm_buf_loop, __ubuf__ Dtype *lo
 template <typename Dtype, bool COSSIN_FP32>
 __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR key, GM_ADDR value,
                                       GM_ADDR cos_sin_cache, GM_ADDR key_cache, GM_ADDR value_cache,
-                                      GM_ADDR slot_mapping, uint32_t key_cache_stride,
-                                      uint32_t value_cache_stride, uint32_t num_tokens,
-                                      uint32_t rot_dim, uint32_t query_stride, uint32_t key_stride,
-                                      uint32_t value_stride, uint32_t num_heads,
-                                      uint32_t num_kv_heads, uint32_t head_size,
+                                      GM_ADDR slot_mapping, uint32_t positions_stride,
+                                      uint32_t key_cache_stride, uint32_t value_cache_stride,
+                                      uint32_t num_tokens, uint32_t rot_dim, uint32_t query_stride,
+                                      uint32_t key_stride, uint32_t value_stride,
+                                      uint32_t num_heads, uint32_t num_kv_heads, uint32_t head_size,
                                       uint32_t block_size, float scale_, uint64_t mrope_mask_h,
                                       uint64_t mrope_mask_w)
 {
@@ -478,8 +478,9 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
         // copy positions and slotmapping
         copy_gm_to_ubuf(pos_int_ubuf_addr0, gm_pos, dmi_cfg_pos);
         if (pos_dim > 1) {
-            copy_gm_to_ubuf(pos_h_ubuf_addr0, gm_pos + num_tokens, dmi_cfg_pos);
-            copy_gm_to_ubuf(pos_w_ubuf_addr0, gm_pos + 2 * num_tokens, dmi_cfg_pos);
+            // mrope rows are contiguous runs; only the row-to-row jump uses the dim-0 pitch
+            copy_gm_to_ubuf(pos_h_ubuf_addr0, gm_pos + positions_stride, dmi_cfg_pos);
+            copy_gm_to_ubuf(pos_w_ubuf_addr0, gm_pos + 2 * (uint64_t)positions_stride, dmi_cfg_pos);
         }
         copy_gm_to_ubuf(slot_int_ubuf_addr0, gm_slot, dmi_cfg_slot);
         pipe_barrier(PIPE_ALL);
@@ -695,35 +696,35 @@ __aicore__ inline void rope_and_cache(GM_ADDR positions, GM_ADDR query, GM_ADDR 
 #define ROPEANDCACHE_FUNC_DEFINE(dtype)                                                            \
     extern "C" __global__ __aicore__ void rope_and_cache_##dtype(                                  \
         GM_ADDR positions, GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR cossinCache,         \
-        GM_ADDR keyCache, GM_ADDR valueCache, GM_ADDR slotMapping, uint32_t keyCacheStride,        \
-        uint32_t valueCacheStride, uint32_t numTokens, uint32_t rotDim, uint32_t queryStride,      \
-        uint32_t keyStride, uint32_t valueStride, uint32_t numHeads, uint32_t numKVHeads,          \
-        uint32_t headDim, uint32_t blockSize, float scaleIn, uint64_t mropeMaskH,                  \
-        uint64_t mropeMaskW, bool cossinInFp32)                                                    \
+        GM_ADDR keyCache, GM_ADDR valueCache, GM_ADDR slotMapping, uint32_t positionsStride,       \
+        uint32_t keyCacheStride, uint32_t valueCacheStride, uint32_t numTokens, uint32_t rotDim,   \
+        uint32_t queryStride, uint32_t keyStride, uint32_t valueStride, uint32_t numHeads,         \
+        uint32_t numKVHeads, uint32_t headDim, uint32_t blockSize, float scaleIn,                  \
+        uint64_t mropeMaskH, uint64_t mropeMaskW, bool cossinInFp32)                               \
     {                                                                                              \
         if (cossinInFp32) {                                                                        \
             rope_and_cache<dtype, true>(positions, query, key, value, cossinCache, keyCache,       \
-                                        valueCache, slotMapping, keyCacheStride, valueCacheStride, \
-                                        numTokens, rotDim, queryStride, keyStride, valueStride,    \
-                                        numHeads, numKVHeads, headDim, blockSize, scaleIn,         \
-                                        mropeMaskH, mropeMaskW);                                   \
+                                        valueCache, slotMapping, positionsStride, keyCacheStride,  \
+                                        valueCacheStride, numTokens, rotDim, queryStride,          \
+                                        keyStride, valueStride, numHeads, numKVHeads, headDim,     \
+                                        blockSize, scaleIn, mropeMaskH, mropeMaskW);               \
         } else {                                                                                   \
             rope_and_cache<dtype, false>(positions, query, key, value, cossinCache, keyCache,      \
-                                         valueCache, slotMapping, keyCacheStride,                  \
+                                         valueCache, slotMapping, positionsStride, keyCacheStride, \
                                          valueCacheStride, numTokens, rotDim, queryStride,         \
                                          keyStride, valueStride, numHeads, numKVHeads, headDim,    \
                                          blockSize, scaleIn, mropeMaskH, mropeMaskW);              \
         }                                                                                          \
     }
 #else
-#define ROPEANDCACHE_FUNC_DEFINE(dtype)                                                       \
-    extern "C" __global__ __aicore__ void rope_and_cache_##dtype(                             \
-        GM_ADDR positions, GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR cossinCache,    \
-        GM_ADDR keyCache, GM_ADDR valueCache, GM_ADDR slotMapping, uint32_t keyCacheStride,   \
-        uint32_t valueCacheStride, uint32_t numTokens, uint32_t rotDim, uint32_t queryStride, \
-        uint32_t keyStride, uint32_t valueStride, uint32_t numHeads, uint32_t numKVHeads,     \
-        uint32_t headDim, uint32_t blockSize, float scaleIn, uint64_t mropeMaskH,             \
-        uint64_t mropeMaskW, bool cossinInFp32)                                               \
-    {                                                                                         \
+#define ROPEANDCACHE_FUNC_DEFINE(dtype)                                                          \
+    extern "C" __global__ __aicore__ void rope_and_cache_##dtype(                                \
+        GM_ADDR positions, GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR cossinCache,       \
+        GM_ADDR keyCache, GM_ADDR valueCache, GM_ADDR slotMapping, uint32_t positionsStride,     \
+        uint32_t keyCacheStride, uint32_t valueCacheStride, uint32_t numTokens, uint32_t rotDim, \
+        uint32_t queryStride, uint32_t keyStride, uint32_t valueStride, uint32_t numHeads,       \
+        uint32_t numKVHeads, uint32_t headDim, uint32_t blockSize, float scaleIn,                \
+        uint64_t mropeMaskH, uint64_t mropeMaskW, bool cossinInFp32)                             \
+    {                                                                                            \
     }
 #endif
