@@ -238,10 +238,9 @@ def main(
     torch.npu.config.allow_internal_format = True
     torch.set_num_threads(8)
     torch.manual_seed(965)
-    _config_path = Path(config)  # save before variable shadow
     with open(config) as f:
         config = json.load(f)
-        config["config_path"] = _config_path
+        config["config_path"] = Path(ckpt_path) / "config.json"
         if mode == "bench":
             config["max_batch_size"] = max(config.get("max_batch_size", 1), bench_batch_size)
             config["max_seq_len"] = max(config.get("max_seq_len", 1024), bench_prompt_len + bench_new_tokens)
