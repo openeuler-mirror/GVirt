@@ -136,9 +136,9 @@ public:
                 int queryTaskOffset = queryStart + queryTaskStart;
 
                 GlobalTensor<Dtype> batchKCache =
-                    dense ? kCache[queryTaskOffset * kCacheStride] : kCache;
+                    dense ? kCache[(uint64_t)queryTaskOffset * kCacheStride] : kCache;
                 GlobalTensor<Dtype> batchPeCache =
-                    dense ? peCache[queryTaskOffset * peCacheStride] : peCache;
+                    dense ? peCache[(uint64_t)queryTaskOffset * peCacheStride] : peCache;
 
                 // do queryIdx & (0，nHeads)'s QK
                 uint32_t mhOffset = queryTaskOffset * nHeads;

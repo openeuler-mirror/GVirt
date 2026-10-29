@@ -154,7 +154,7 @@ __aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst,
         Nd2NzParams nd2nzParams(1 /* NdNum */, 1, dValue, 0 /* srcNdMatrixStride */, srcDValue,
                                 dstNzC0Stride, 1 /* dstNzNStride */, 0 /* dstNzMatrixStride */);
         for (int i = 0; i < nValue; i++) {
-            DataCopy(dst[i * kBlockSize], src[i * srcDValue], nd2nzParams);
+            DataCopy(dst[i * kBlockSize], src[(uint64_t)i * srcDValue], nd2nzParams);
         }
     }
 }

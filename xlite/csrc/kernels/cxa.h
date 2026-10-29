@@ -184,7 +184,8 @@ public:
                 int queryTaskOffset = queryStart + queryTaskStart;
 
                 GlobalTensor<Dtype> batchCompressKCache =
-                    dense ? compressKCache[queryTaskOffset * compressKCacheStride] : compressKCache;
+                    dense ? compressKCache[(uint64_t)queryTaskOffset * compressKCacheStride]
+                          : compressKCache;
 
                 // do queryIdx & (0, nHeads)'s QK
                 uint32_t mhOffset = queryTaskOffset * nHeads * headDim;

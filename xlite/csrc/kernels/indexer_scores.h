@@ -174,12 +174,12 @@ public:
                 // copy k (kvLen, headDim) to L1
                 uint32_t block = blockTable[kvIdx];
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
-                CopyGmToL1Nd2Nz(kl1Buf[curr], kCache[block * kCacheStride], kvLen, headDim, headDim,
-                                mBlockPad);
+                CopyGmToL1Nd2Nz(kl1Buf[curr], kCache[(uint64_t)block * kCacheStride], kvLen,
+                                headDim, headDim, mBlockPad);
                 // copy q (queryTaskLen, nHeads, headDim) to L1
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
-                CopyGmToL1Nd2Nz(ql1Buf[curr], q[qOffset * nHeads * headDim], nSize, headDim,
-                                headDim, nBlockPad);
+                CopyGmToL1Nd2Nz(ql1Buf[curr], q[(uint64_t)qOffset * nHeads * headDim], nSize,
+                                headDim, headDim, nBlockPad);
 
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
@@ -220,8 +220,9 @@ public:
 
                 // copy weight (queryTaskLen, nHeads) to L1
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
-                CopyGmToL1Nd2Nz(wl1Buf[curr], weight[qOffset * (headDim + nHeads) + headDim],
-                                wmSize, nHeads, (headDim + nHeads), wmBlockPad);
+                CopyGmToL1Nd2Nz(wl1Buf[curr],
+                                weight[(uint64_t)qOffset * (headDim + nHeads) + headDim], wmSize,
+                                nHeads, (headDim + nHeads), wmBlockPad);
 
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4 + curr);
@@ -250,8 +251,8 @@ public:
                     WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
 
                     // copy index_scores (1, kvLen) from L0C to GM
-                    CopyToGm(scores[(qOffset + q) * maxNumBlock * blockSize + kvStart], l0cBuf, 1,
-                             kvLen, MBLOCKSIZE, maxNumBlock * blockSize);
+                    CopyToGm(scores[(uint64_t)(qOffset + q) * maxNumBlock * blockSize + kvStart],
+                             l0cBuf, 1, kvLen, MBLOCKSIZE, maxNumBlock * blockSize);
                     SetFlag<HardEvent::FIX_M>(EVENT_ID0);
                 }
                 SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4 + curr);
