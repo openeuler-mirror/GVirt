@@ -44,7 +44,7 @@ class BenchResult:
     tp_size: int
     ep: bool
     dp_size: int
-    mtp_tokens: int
+    spec_decode: tuple[str, int, str]  # (method, num_spec_tokens, draft dir); num_spec_tokens == 0 disables
     xlite: bool
     xlite_full_mode: bool
     metric: str
@@ -69,9 +69,14 @@ class BenchResult:
             value = f"{value[: self._n_chars]}..."
         self._error = value
 
+    @property
+    def spec_label(self) -> str:
+        """Cell representation of the spec decode config, e.g. `mtp:3` (disabled = `n/a`)."""
+        return format_spec_decode(self.spec_decode)
+
     @staticmethod
     def markdown_header() -> str:
-        fields = ["Model", "Dataset", "TP", "EP", "DP", "MTP", "Backend", "Metric", "Accuracy", "Error"]
+        fields = ["Model", "Dataset", "TP", "EP", "DP", "Spec", "Backend", "Metric", "Accuracy", "Error"]
         return f"| {' | '.join(fields)} |\n| {' | '.join(['---'] * len(fields))} |"
 
     def markdown_row(self) -> str:
@@ -89,7 +94,7 @@ class BenchResult:
             str(self.tp_size),
             "Y" if self.ep else "N",
             str(self.dp_size),
-            str(self.mtp_tokens),
+            self.spec_label,
             backend_str,
             self.metric,
             f"{self.accuracy:.2f}",
@@ -165,29 +170,73 @@ def _read_tail(handle: object, max_bytes: int = 16 * 1024) -> str:
         return "No error message available"
 
 
-_RE_REPEAT_MODEL = re.compile(r"^([1-9]\d*)\s*[~\*]\s*(.+)\s*$")
+_RE_REPEAT_ENTRY = re.compile(r"^([1-9]\d*)\s*[~\*]\s*(.+)\s*$")
 
 
-def expand_model_list(models: list[str]) -> list[str]:
-    """Expand ``N~<model>`` entries in the model list into N copies of ``<model>``.
+def expand_repeated_entries(entries: list[str]) -> list[str]:
+    """Expand ``N~<entry>`` / ``N*<entry>`` entries into N copies of ``<entry>``.
 
-    Format: ``N~<model>`` where N is a positive integer (``\\d+~`` prefix, optional).
-    If no ``N~`` prefix is present, the model appears once (default N=1).
+    Format: ``N~<entry>`` where N is a positive integer (optional). If no ``N~`` prefix
+    is present, the entry appears once (default N=1).
 
     Examples:
         ``["3~Qwen3-30B-A3B", "Qwen3-32B"]`` → ``["Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-32B"]``
+        ``["2~mtp:3", "0"]`` → ``["mtp:3", "mtp:3", "0"]``
 
     Note: technically, you can use `*` to replace `~` to achieve the same effect, but `~` is preferred to avoid
     confusion with shell globbing.
     """
     expanded: list[str] = []
-    for entry in models:
-        match = _RE_REPEAT_MODEL.match(entry)
+    for entry in entries:
+        match = _RE_REPEAT_ENTRY.match(entry)
         if match:
             expanded.extend([match.group(2)] * int(match.group(1)))
         else:
             expanded.append(entry)
     return expanded
+
+
+def format_spec_decode(spec_decode: tuple[str, int, str]) -> str:
+    """Label of a spec decode config for reports and notifications.
+
+    `method:num_spec_tokens` (e.g. `mtp:3`); spec decode disabled renders as `n/a` —
+    with no tokens requested there is no method to name. The draft weights dir is
+    deliberately not part of the label.
+    """
+    method, num_spec_tokens, _ = spec_decode
+    return f"{method}:{num_spec_tokens}" if num_spec_tokens > 0 else "n/a"
+
+
+def parse_spec_decode(entry: str) -> tuple[str, int, str]:
+    """Parse a ``--specs`` entry into ``(method, num_speculative_tokens, draft_weights_dir)``.
+
+    Format: ``<method>:<num>[:<dir>]`` (e.g. ``mtp:3``, ``eagle3:2:Qwen3-a3B_eagle3``); a
+    bare number ``N`` means ``mtp:N``. Zero tokens disables spec decode and normalizes to
+    ``("", 0, "")`` — no method or draft dir concept applies then. An omitted dir means
+    the main model's own weights (e.g. integrated MTP heads); otherwise ``<dir>`` is a
+    single directory name, resolved at server start as a sibling of the main model dir
+    (``<main_model_dir>/../<dir>``).
+    """
+    parts = entry.strip().split(":")
+    if len(parts) == 1 and parts[0].isdigit():
+        num = int(parts[0])
+        return ("mtp" if num else ""), num, ""
+    if len(parts) in (2, 3):
+        method, num = parts[0].strip().lower(), parts[1].strip()
+        if method and num.isdigit():
+            num = int(num)
+            if num == 0:
+                return "", 0, ""  # disabled: neither method nor draft dir applies
+            if len(parts) == 2:
+                return method, num, ""
+            draft_dir = parts[2].strip()
+            if re.fullmatch(r"[\w.-]+", draft_dir):  # a single directory name: no `/`, spaces or colons
+                return method, num, draft_dir
+    raise ValueError(
+        f"Invalid spec decode entry `{entry}`; expected `<method>:<num_spec_tokens>[:<draft_weights_dir>]` "
+        "or a bare number of MTP tokens (e.g. `3`), where <draft_weights_dir> is a single directory "
+        "name resolved as a sibling of the main model dir (e.g. `eagle3:2:Qwen3-a3B_eagle3`)"
+    )
 
 
 @lru_cache(maxsize=1)
@@ -606,7 +655,7 @@ def start_vllm_server(
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
-    mtp_tokens: int = 0,
+    spec_decode: tuple[str, int, str] = ("", 0, ""),
     max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
@@ -692,8 +741,24 @@ def start_vllm_server(
     ]
     if quantization:
         vllm_cmd_lst.append("--quantization ascend")
-    if mtp_tokens > 0:
-        vllm_cmd_lst.append(f'--speculative-config \'{{"method": "mtp","num_speculative_tokens": {mtp_tokens}}}\'')
+    # draft weights default to the main model's own (integrated draft heads, e.g. MTP — the
+    # same config `vllm_xlite.sh` uses); otherwise the entry names a sibling dir of the main
+    # model dir, and methods like eagle3/dspark/dflash (see bd5020ad6) need it passed as
+    # `model` in the speculative config
+    spec_method, num_spec_tokens, draft_dir = spec_decode
+    if num_spec_tokens > 0:
+        if draft_dir:
+            draft_path = Path(model_path).parent / draft_dir
+            if not draft_path.exists():
+                raise ValueError(f"Speculative draft weights not found at {draft_path}")
+            vllm_cmd_lst.append(
+                f'--speculative-config \'{{"method": "{spec_method}","num_speculative_tokens": {num_spec_tokens},'
+                f'"model": "{draft_path}"}}\''
+            )
+        else:
+            vllm_cmd_lst.append(
+                f'--speculative-config \'{{"method": "{spec_method}","num_speculative_tokens": {num_spec_tokens}}}\''
+            )
     vllm_cmd = " ".join(vllm_cmd_lst)
 
     env_copy["XLITE_NODE_IPS"] = ",".join(["127.0.0.1"] * dp_size)
@@ -763,7 +828,7 @@ def run_ais_bench(
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
-    mtp_tokens: int = 0,
+    spec_decode: tuple[str, int, str] = ("", 0, ""),
     max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
@@ -793,7 +858,7 @@ def run_ais_bench(
         tp_size=tp_size,
         ep=ep,
         dp_size=dp_size,
-        mtp_tokens=mtp_tokens,
+        spec_decode=spec_decode,
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
         metric=spec.metric_name,
@@ -821,7 +886,7 @@ def run_ais_bench(
     print(f"Tensor parallel size: {tp_size}")
     print(f"Expert parallel: {'Yes' if ep else 'No'}")
     print(f"Data parallel size: {dp_size}")
-    print(f"MTP speculative decode tokens: {mtp_tokens}")
+    print(f"Speculative decoding: {format_spec_decode(spec_decode)}")
     print(f"Max number of sequences: {max_num_seqs}")
     print(f"Max model length: {max_model_len}")
     print(f"Max number of batched tokens: {max_num_batched_tokens}")
@@ -843,7 +908,13 @@ def run_ais_bench(
         suffix_backend = "xlite-full" if xlite_full_mode else "xlite-decode-only"
     else:
         suffix_backend = "aclgraph"
-    suffix_deployment = f"TP{tp_size}DP{dp_size}{'EP' if ep else ''}{f'-MTP{mtp_tokens}' if mtp_tokens > 0 else ''}"
+    # the draft dir is part of the deployment config: two different drafts with the same
+    # method and token count must not share an ais_bench output directory
+    spec_method, num_spec_tokens, draft_dir = spec_decode
+    spec_suffix = ""
+    if num_spec_tokens > 0:
+        spec_suffix = f"-{spec_method.upper()}{num_spec_tokens}{f'-{draft_dir}' if draft_dir else ''}"
+    suffix_deployment = f"TP{tp_size}DP{dp_size}{'EP' if ep else ''}{spec_suffix}"
     suffix = f"-{suffix_deployment}-{suffix_backend}"
     ais_bench_output_parent_dir = ais_bench_output_dir or ais_bench_dir / "outputs" / get_xlite_version()
     # keep the dataset in the path so different datasets never share (and confuse) work dirs
@@ -889,7 +960,7 @@ def run_ais_bench(
         tp_size=tp_size,
         ep=ep,
         dp_size=dp_size,
-        mtp_tokens=mtp_tokens,
+        spec_decode=spec_decode,
         max_num_seqs=max_num_seqs,
         max_model_len=int(max_model_len * 1.5),
         max_num_batched_tokens=max_num_batched_tokens,
@@ -1079,15 +1150,20 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         help="List of data parallel sizes for each model (last value used for padding)",
     )
     parser.add_argument(
-        "-MTP",
-        "--mtps",
-        "--mtp-nums",
-        dest="mtps",
-        type=int,
+        "-SPEC",
+        "--specs",
+        dest="specs",
+        type=str,
         nargs="+",
-        choices=list(range(16)),
-        default=[0],
-        help="List of MTP speculative decode token numbers for each model (last value used for padding)",
+        default=["0"],
+        help=(
+            "List of spec decode configs for each model, formatted "
+            "`<spec_decode_method>:<num_spec_tokens>[:<draft_weights_dir>]` (e.g. `mtp:3`); a bare number N "
+            "means `mtp:N` (`0` disables spec decode); an omitted <draft_weights_dir> uses the main model's "
+            "own weights, otherwise it is a single directory name resolved as `<main_model_dir>/../<dir>` "
+            "(needed by draft-based methods like eagle3/dspark/dflash); entries also support `N~`/`N*` "
+            "repeat expansion like --models (last value used for padding)"
+        ),
     )
     parser.add_argument(
         "-DS",
@@ -1204,12 +1280,13 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
     if not args.models:
         raise ValueError("No models specified for benchmarking, please provide model subdirectory names using --models")
 
-    args_models: list[str] = expand_model_list(args.models)
+    args_models: list[str] = expand_repeated_entries(args.models)
     n_models = len(args_models)
     args_tps: list[int] = args.tps + [args.tps[-1]] * (n_models - len(args.tps))
     args_eps: list[bool] = args.eps + [args.eps[-1]] * (n_models - len(args.eps))
     args_dps: list[int] = args.dps + [args.dps[-1]] * (n_models - len(args.dps))
-    args_mtps: list[int] = args.mtps + [args.mtps[-1]] * (n_models - len(args.mtps))
+    args_specs: list[tuple[str, int, str]] = [parse_spec_decode(s) for s in expand_repeated_entries(args.specs)]
+    args_specs = args_specs + [args_specs[-1]] * (n_models - len(args_specs))
     if any(ds not in DATASETS for ds in args.datasets):
         raise ValueError(f"Invalid dataset(s) specified: {[ds for ds in args.datasets if ds not in DATASETS]}")
     args_datasets: list[str] = args.datasets + [args.datasets[-1]] * (n_models - len(args.datasets))
@@ -1234,7 +1311,7 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         args_tps = [tp for tp in args_tps for _ in range(n_xlite)]
         args_eps = [ep for ep in args_eps for _ in range(n_xlite)]
         args_dps = [dp for dp in args_dps for _ in range(n_xlite)]
-        args_mtps = [m for m in args_mtps for _ in range(n_xlite)]
+        args_specs = [s for s in args_specs for _ in range(n_xlite)]
         args_datasets = [d for d in args_datasets for _ in range(n_xlite)]
         args_max_num_seqs = [m for m in args_max_num_seqs for _ in range(n_xlite)]
         args_max_model_len = [m for m in args_max_model_len for _ in range(n_xlite)]
@@ -1242,9 +1319,9 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         args_extra_aisbench_args = [a for a in args_extra_aisbench_args for _ in range(n_xlite)]
 
     combinations = [
-        (model, int(tp), ep, int(dp), int(mtp), xlite > 0, xlite > 1, dataset)
-        for model, tp, ep, dp, mtp, xlite, dataset in zip(
-            args_models, args_tps, args_eps, args_dps, args_mtps, args_xlite, args_datasets
+        (model, int(tp), ep, int(dp), spec, xlite > 0, xlite > 1, dataset)
+        for model, tp, ep, dp, spec, xlite, dataset in zip(
+            args_models, args_tps, args_eps, args_dps, args_specs, args_xlite, args_datasets
         )
     ]
     if len(set(combinations)) != len(combinations):
@@ -1259,10 +1336,10 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         for dup in duplicates:
             print(
                 f"Duplicate combination found: Model={dup[0]}, TP={dup[1]}, EP={'Y' if dup[2] else 'N'}, DP={dup[3]}, "
-                f"MTP={dup[4]}, Xlite={'full' if dup[6] else ('decode-only' if dup[5] else 'aclgraph')}, "
+                f"Spec={format_spec_decode(dup[4])}, Xlite={'full' if dup[6] else ('decode-only' if dup[5] else 'aclgraph')}, "
                 f"Dataset={dup[7]}"
             )
-        raise ValueError("The combination of models, tps, eps, dps, mtps, etc., must be unique for each model")
+        raise ValueError("The combination of models, tps, eps, dps, specs, etc., must be unique for each model")
 
     max_num_devices = max(tp * dp for tp, dp in zip(args_tps, args_dps))
     device_ids_env = filter(None, os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "").split(","))
@@ -1277,10 +1354,10 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
 
     if args.dry_run:
         print("Dry run enabled, not actually running benchmarks. The following combinations would be benchmarked:")
-        for i, (model, tp, ep, dp, mtp, xlite, xlite_full, dataset) in enumerate(combinations):
+        for i, (model, tp, ep, dp, spec, xlite, xlite_full, dataset) in enumerate(combinations):
             backend_str = "xlite full" if xlite_full else ("xlite decode-only" if xlite else "aclgraph")
             print(
-                f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, MTP: {mtp}, "
+                f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, Spec: {format_spec_decode(spec)}, "
                 f"Backend: {backend_str}, Dataset: {dataset}"
             )
         sys.exit(0)
@@ -1301,9 +1378,9 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         f.write("## Final Benchmark Results:\n\n")
         f.write(f"{BenchResult.markdown_header()}\n")
     with open(log_csv_path, "w") as f:
-        f.write("model_name,dataset,tp_size,ep,dp_size,mtp_tokens,xlite,xlite_full_mode,metric,accuracy,error\n")
+        f.write("model_name,dataset,tp_size,ep,dp_size,spec_decode,xlite,xlite_full_mode,metric,accuracy,error\n")
 
-    for i, (model, tp, ep, dp, mtp, xlite, xlite_full, dataset) in enumerate(combinations):
+    for i, (model, tp, ep, dp, spec, xlite, xlite_full, dataset) in enumerate(combinations):
         print(f"\n>>> Running benchmark task {i + 1}/{len(combinations)}")
         model_path: Path = args.model_dir / model
         try:
@@ -1318,7 +1395,7 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
                 tp_size=tp,
                 ep=ep,
                 dp_size=dp,
-                mtp_tokens=mtp,
+                spec_decode=spec,
                 max_num_seqs=args_max_num_seqs[i],
                 max_model_len=args_max_model_len[i],
                 max_num_batched_tokens=args_max_num_batched_tokens[i],
@@ -1340,7 +1417,7 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
                 tp_size=tp,
                 ep=ep,
                 dp_size=dp,
-                mtp_tokens=mtp,
+                spec_decode=spec,
                 xlite=xlite,
                 xlite_full_mode=xlite_full,
                 metric=DATASETS[dataset].metric_name,
@@ -1361,7 +1438,7 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         with open(log_csv_path, "a") as f:
             f.write(
                 f"{result.model_name},{result.dataset},{result.tp_size},{result.ep},{result.dp_size},"
-                f"{result.mtp_tokens},{result.xlite},{result.xlite_full_mode},{result.metric},{result.accuracy},"
+                f"{result.spec_label},{result.xlite},{result.xlite_full_mode},{result.metric},{result.accuracy},"
                 f"{result.error or ''}\n"
             )
         print(result.markdown_row())

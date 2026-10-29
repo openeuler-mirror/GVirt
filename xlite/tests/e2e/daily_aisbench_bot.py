@@ -245,6 +245,25 @@ def _parse_accuracy(value: object) -> float:
         return float("nan")
 
 
+def _parse_spec_decode(value: object) -> Tuple[str, int]:
+    """Parse a spec-decode cell into ``(method, num_speculative_tokens)``.
+
+    Accepts the `<method>:<num>` format (e.g. ``mtp:3``) written by current
+    batch_aisbench runs, ``n/a`` for runs without spec decode, and a bare integer
+    from legacy ``mtp_tokens`` columns (meaning MTP). Empty/invalid cells mean
+    spec decode disabled.
+    """
+    text = str(value or "").strip()
+    if text.lower() in ("n/a", "n.a.", "na"):
+        return "", 0
+    parts = text.split(":")
+    if len(parts) >= 2 and parts[0].strip():
+        method = parts[0].strip().lower()
+        num = parts[1].strip()
+        return method, int(num) if num.isdigit() else 0
+    return "mtp", int(text) if text.isdigit() else 0
+
+
 def parse_aisbench_report(report_path: Path) -> Dict:
     """
     解析精度基准测试报告文件 (CSV格式)
@@ -296,9 +315,13 @@ def parse_aisbench_report(report_path: Path) -> Dict:
                 tp: int = int(row.get("tp_size", 0))
                 ep: bool = row.get("ep", "").strip().lower() in ["true", "y", "yes", "1"]
                 dp: int = int(row.get("dp_size", 0))
-                mtp: int = int(row.get("mtp_tokens", 0))
+                # `spec_decode` is the current column; fall back to the legacy `mtp_tokens` column
+                spec_method, spec_tokens = _parse_spec_decode(row.get("spec_decode") or row.get("mtp_tokens"))
                 result = {
-                    "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}{f'+MTP{mtp}' if mtp > 0 else ''}",
+                    "model_name": (
+                        f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}"
+                        f"{f'+{spec_method}{spec_tokens}' if spec_tokens > 0 else ''}"
+                    ),
                     "dataset": dataset,
                     "backend": backend,
                     # missing/empty/non-numeric cells become NaN: batch_aisbench records failed
@@ -334,10 +357,11 @@ def parse_aisbench_markdown_report(report_path: Path) -> Dict:
     content = report_path.read_text(encoding="utf-8")
 
     # 定义表格行的正则表达式
-    # 格式: | Model | Dataset | TP | EP | DP | MTP | Backend | Metric | Accuracy | Error |
+    # 格式: | Model | Dataset | TP | EP | DP | Spec | Backend | Metric | Accuracy | Error |
+    # Spec 单元格为 `<method>:<num>` (如 mtp:3) 或 n/a (未启用), 旧报告为纯数字 (MTP tokens)
     table_pattern = re.compile(
         r"\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*(\d+)\s*\|\s*([YN])\s*\|\s*(\d+)\s*\|"
-        r"\s*(\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([\d.]+|[Nn]a[Nn])\s*\|\s*([^|]*)\s*\|"
+        r"\s*([A-Za-z_]\w*:\d+|n/a|\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([\d.]+|[Nn]a[Nn])\s*\|\s*([^|]*)\s*\|"
     )
 
     for match in table_pattern.finditer(content):
@@ -347,9 +371,12 @@ def parse_aisbench_markdown_report(report_path: Path) -> Dict:
         tp: int = int(match.group(3).strip())
         ep: bool = match.group(4).strip().upper() == "Y"
         dp: int = int(match.group(5).strip())
-        mtp: int = int(match.group(6).strip())
+        spec_method, spec_tokens = _parse_spec_decode(match.group(6))
         result = {
-            "model_name": f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}{f'+MTP{mtp}' if mtp > 0 else ''}",
+            "model_name": (
+                f"{model_name}+TP{tp}DP{dp}{'EP' if ep else ''}"
+                f"{f'+{spec_method}{spec_tokens}' if spec_tokens > 0 else ''}"
+            ),
             "dataset": dataset,
             "backend": backend,
             "accuracy": _parse_accuracy(match.group(9)),
