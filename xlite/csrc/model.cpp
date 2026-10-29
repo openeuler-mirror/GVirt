@@ -751,8 +751,10 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
         throw std::runtime_error(
             "ForwardAttnLinear: host lens not populated; PrepareAttn must run first");
     }
-    // prefill vs decode is decided host-side in PrepareAttn (_linearDecodeStep = every request
-    // single-token with cached state); anything else runs the packed prefill path.
+    // Pure decode = every request has one query token and cached state (host-side
+    // _linearDecodeStep). Multi-token steps, including speculative verification, take the
+    // packed prefill path; the check below only rejects decode metadata whose token count
+    // is not one per request.
     bool prefill = !rt._linearDecodeStep;
     if (!rt.IsDummyRuntime() && !prefill && m != batch) {
         throw std::runtime_error("multi-token native GDN requires prefill metadata");
