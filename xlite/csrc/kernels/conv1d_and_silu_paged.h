@@ -14,7 +14,7 @@
 
 #ifdef __DAV_C220_VEC__
 
-// Fence vector writes before scalar reads and scalar writes before vector use.
+// Fence vconv UB writeback before a following V-pipe instruction reads it.
 #ifndef XLITE_V_FENCE
 #define XLITE_V_FENCE()                       \
     do {                                      \
@@ -287,7 +287,8 @@ public:
                 for (int j = 0; j < K; ++j) {
                     uint64_t wBase = (uint64_t)w_f + (uint64_t)j * sizeof(float);
                     vgather((__ubuf__ uint32_t *)r_f, off_k, (uint32_t)wBase, 8, 1);
-                    XLITE_V_FENCE();
+                    // off_k was handed to V above; vgather and its consumers are V-pipe ops.
+                    pipe_barrier(PIPE_V);
                     if (j == 0) {
                         vmul(out_f, s_f, r_f, 1, 1, 1, 1, 8, 8, 8);
                     } else {
@@ -341,6 +342,7 @@ public:
         for (int c = 0; c < kBlock; ++c) {
             off_k[c] = c * K * sizeof(float);
         }
+        // Hand the scalar-written table to V once for the whole prefill task loop.
         set_flag(PIPE_S, PIPE_V, EVENT_ID1);
         wait_flag(PIPE_S, PIPE_V, EVENT_ID1);
         for (uint32_t task = GetBlockIdx(); task < batch * tiles; task += GetBlockNum()) {
@@ -416,7 +418,8 @@ public:
                 for (uint32_t j = 0; j < K; ++j) {
                     vgather((__ubuf__ uint32_t *)r_f, off_k,
                             (uint32_t)((uint64_t)w_f + j * sizeof(float)), 8, 1);
-                    XLITE_V_FENCE();
+                    // off_k is already visible to V; only order vgather before vmul.
+                    pipe_barrier(PIPE_V);
                     vmul(calc_buf, s_f + j * kChanTile, r_f, 1, 1, 1, 1, 8, 8, 8);
                     pipe_barrier(PIPE_V);
                     if (j == 0) {
