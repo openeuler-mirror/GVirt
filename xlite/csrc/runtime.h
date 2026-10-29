@@ -90,7 +90,8 @@ public:
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                      uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads,
                      std::vector<uint32_t> blockSizes, uint32_t hiddenSize, uint32_t nRoutedExperts,
-                     uint32_t defDpSize, int inputDtype, int weightsDtype, uint32_t indexTopK);
+                     uint32_t defDpSize, int inputDtype, int weightsDtype, uint32_t indexTopK,
+                     const std::vector<uint32_t> &layerTypes);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -214,8 +215,8 @@ public:
     // Host-side: true when this step is decode (seqlen==1 and all cached_lens>0).
     // Avoids D2H sync via GetFirstAttnPosition in every linear layer.
     bool _linearDecodeStep = false;
-    // Per-layer GDN kernel operands, derived zero-copy in XModel::PrepareHybridMetadata from the
-    // family metadata (blockTables[1] state pages, queryStartLoc, cachedLens); full-attention
+    // Per-layer GDN kernel operands, derived zero-copy in XRuntime::PrepareAttn from the
+    // family metadata (blockTables[1..] state pages, queryStartLoc, cachedLens); full-attention
     // layer entries stay default-constructed. Indexed by model layer.
     std::vector<XTensor> _gdnConvIndices;
     std::vector<XTensor> _gdnSsmIndices;
@@ -262,6 +263,8 @@ protected:
     int InitHcclComm(void);
     int InitXcclComm(void);
     void FiniXcclComm(void);
+    void PrepareHybridMetadata(const std::vector<uint32_t> &layerTypes,
+                               const XModelAttnMeta &attnMeta);
     uint32_t _devid;
     aclrtEvent _event = nullptr;
     aclrtContext context = nullptr;

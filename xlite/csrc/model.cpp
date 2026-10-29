@@ -1850,84 +1850,18 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XT
     }
 }
 
-void XModel::PrepareHybridMetadata(XRuntime &rt, XModelAttnMeta &attnMeta)
-{
-    rt._gdnConvIndices.clear();
-    rt._gdnSsmIndices.clear();
-    rt._gdnQueryStarts.clear();
-    rt._gdnConvInitial.clear();
-    rt._gdnSsmInitial.clear();
-    if (!IsHybridAttn(_c.attnType) || rt.IsDummyRuntime()) {
-        return;
-    }
-    const size_t batch = attnMeta.lensCpu.size();
-    if (batch == 0 || batch != attnMeta.cachedLensCpu.size()) {
-        throw std::runtime_error("hybrid forward requires resolved lens/cachedLens");
-    }
-    // Family slots: [0]=main KV, [1..1+nMambaTables)=mamba state indices;
-    // HYBRID_KDA appends a tail-ring table at the end.
-    const bool hasTail = _c.attnType == XMODEL_ATTN_HYBRID_KDA;
-    const size_t minBlockTables = 2 + (hasTail ? 1 : 0);
-    if (attnMeta.blockTables.size() < minBlockTables) {
-        throw std::runtime_error(
-            "hybrid forward requires family blockTables (main + mamba [+ tail])");
-    }
-    const size_t nMambaTables = attnMeta.blockTables.size() - 1 - (hasTail ? 1 : 0);
-    // Linear-attention position p uses mamba table 1 + p % nMambaTables (round-robin).
-    for (size_t g = 0; g < nMambaTables; ++g) {
-        const XTensor &tbl = attnMeta.blockTables[1 + g];
-        if (tbl.dtype != INT32 || tbl.shape.size() != 2 || tbl.shape[0] < batch ||
-            tbl.shape[1] != 1 || tbl.ptr == nullptr) {
-            throw std::runtime_error(
-                "hybrid forward requires blockTables[1..] mamba state indices [batch, 1] int32");
-        }
-    }
-    if (attnMeta.queryStartLoc.dtype != INT32 || attnMeta.queryStartLoc.shape.size() != 1 ||
-        attnMeta.queryStartLoc.shape[0] < batch + 1 || attnMeta.queryStartLoc.ptr == nullptr) {
-        throw std::runtime_error(
-            "hybrid forward requires queryStartLoc [batch+1] int32 (0-prefixed)");
-    }
-    if (attnMeta.cachedLens.dtype != INT32 || attnMeta.cachedLens.shape.size() != 1 ||
-        attnMeta.cachedLens.shape[0] < batch || attnMeta.cachedLens.ptr == nullptr) {
-        throw std::runtime_error("hybrid forward requires cachedLens [batch] int32");
-    }
-    // Flatten the single-column [batch, 1] state table to 1D page ids. Pass an explicit
-    // std::vector — a bare `{batch}` binds to View(size_t newDim, uint32_t dim), a dim-resize
-    // and a silent no-op when newDim == shape[0].
-    size_t kdaPos = 0;
-    for (uint32_t i = 0; i < _c.nLayers; ++i) {
-        if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
-            rt._gdnConvIndices.emplace_back();
-            rt._gdnSsmIndices.emplace_back();
-            rt._gdnQueryStarts.emplace_back();
-            rt._gdnConvInitial.emplace_back();
-            rt._gdnSsmInitial.emplace_back();
-            continue;
-        }
-        XTensor statePages = attnMeta.blockTables[1 + kdaPos % nMambaTables];
-        statePages.View(std::vector<size_t>{batch});
-        rt._gdnConvIndices.push_back(statePages);
-        rt._gdnSsmIndices.push_back(statePages);
-        rt._gdnQueryStarts.push_back(attnMeta.queryStartLoc);
-        rt._gdnConvInitial.push_back(attnMeta.cachedLens);
-        rt._gdnSsmInitial.push_back(attnMeta.cachedLens);
-        ++kdaPos;
-    }
-}
-
 void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                                      std::vector<std::vector<XTensor>> &kvCache,
                                      std::vector<XTensor> &deepstackInputEmbeds, XTensor &freqsCis,
                                      XTensor &inputIds, XTensor &output)
 {
-    PrepareHybridMetadata(rt, attnMeta);
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
                    _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK);
+                   _c.indexTopK, _layerTypes);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
         inputIds.View(rt.batchedTokens);
@@ -1963,14 +1897,13 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                      std::vector<XTensor> &deepstackInputEmbeds, std::vector<XTensor> &freqsCis,
                      XTensor &output)
 {
-    PrepareHybridMetadata(rt, attnMeta);
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
                    _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK);
+                   _c.indexTopK, _layerTypes);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -1987,14 +1920,13 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
                                  std::vector<XTensor> &deepstackInputEmbeds,
                                  std::vector<XTensor> &freqsCis, XTensor &indices, XTensor &output)
 {
-    PrepareHybridMetadata(rt, attnMeta);
     CheckForwardParam(rt, kvCache);
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
                    _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK);
+                   _c.indexTopK, _layerTypes);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -2057,13 +1989,6 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                 }
             } else {
                 if (!rt.IsDummyRuntime()) {
-                    if (rt._gdnConvIndices.size() != _c.nLayers ||
-                        rt._gdnSsmIndices.size() != _c.nLayers) {
-                        throw std::runtime_error(
-                            "hybrid forward requires native GDN page metadata");
-                    }
-                    const XTensor &ci = rt._gdnConvIndices[i];
-                    const XTensor &si = rt._gdnSsmIndices[i];
                     uint32_t width = _c.linearConvKernelDim;
                     if (width < 2 || width > 4 || convDim % 64 != 0 ||
                         _c.linearKeyHeadDim % 16 != 0 || _c.linearValueHeadDim % 64 != 0 ||
@@ -2078,12 +2003,9 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                         c1.stride[1] != _c.linearKeyHeadDim * _c.linearValueHeadDim ||
                         c1.stride[0] < nLocalVHeads * _c.linearKeyHeadDim * _c.linearValueHeadDim ||
                         c0.shape[0] < 2 || c1.shape[0] < 2 || c0.dtype != embed.dtype ||
-                        (c1.dtype != embed.dtype && c1.dtype != FP32) || ci.dtype != INT32 ||
-                        si.dtype != INT32 || ci.numel != si.numel || ci.ptr == nullptr ||
-                        si.ptr == nullptr || ci.numel == 0 || ci.stride != std::vector<size_t>{1} ||
-                        si.stride != std::vector<size_t>{1}) {
+                        (c1.dtype != embed.dtype && c1.dtype != FP32)) {
                         throw std::runtime_error(
-                            "unsupported native GDN cache/metadata descriptor at layer " +
+                            "unsupported native GDN cache descriptor at layer " +
                             std::to_string(i));
                     }
                 }
@@ -2390,7 +2312,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype),
-                       _c.indexTopK);
+                       _c.indexTopK, _layerTypes);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
@@ -2424,7 +2346,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype),
-                       _c.indexTopK);
+                       _c.indexTopK, _layerTypes);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
