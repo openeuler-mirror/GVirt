@@ -1,6 +1,10 @@
 """
 This script uses `ais_bench` to benchmark the accuracy (correctness on predefined datasets) of served models.
 
+Every per-model parameter (--models, --tps, --eps, --dps, --specs, --datasets, -MNS, -MML, -MNT, -GMU, -X, ...)
+is a list aligned by position and padded with its last entry; entries may repeat via the `N~<value>` prefix
+(e.g. `2~ceval:52` benchmarks two models on ceval with 52 prompts each).
+
 Only works for *nix systems with `bash` available, as it relies on `source` to activate the Python virtual environment.
 Additionally, the script is designed to run within a container with `git`, `vllm`, `vllm_ascend`, and `xlite` installed.
 Using `vllm-ascend`'s official container image is recommended.
@@ -10,6 +14,7 @@ import os
 import re
 import shlex
 import signal
+import json
 import socket
 import struct
 import subprocess
@@ -24,6 +29,8 @@ from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
+
+from daily_bot_utils import expand_values, pad_to_last, tile_each
 
 TMP_DIR = Path(tempfile.gettempdir())  # per-OS temp base path
 CWD = Path(__file__).parent.resolve()  # current working directory
@@ -170,32 +177,6 @@ def _read_tail(handle: object, max_bytes: int = 16 * 1024) -> str:
         return "No error message available"
 
 
-_RE_REPEAT_ENTRY = re.compile(r"^([1-9]\d*)\s*[~\*]\s*(.+)\s*$")
-
-
-def expand_repeated_entries(entries: list[str]) -> list[str]:
-    """Expand ``N~<entry>`` / ``N*<entry>`` entries into N copies of ``<entry>``.
-
-    Format: ``N~<entry>`` where N is a positive integer (optional). If no ``N~`` prefix
-    is present, the entry appears once (default N=1).
-
-    Examples:
-        ``["3~Qwen3-30B-A3B", "Qwen3-32B"]`` → ``["Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-30B-A3B", "Qwen3-32B"]``
-        ``["2~mtp:3", "0"]`` → ``["mtp:3", "mtp:3", "0"]``
-
-    Note: technically, you can use `*` to replace `~` to achieve the same effect, but `~` is preferred to avoid
-    confusion with shell globbing.
-    """
-    expanded: list[str] = []
-    for entry in entries:
-        match = _RE_REPEAT_ENTRY.match(entry)
-        if match:
-            expanded.extend([match.group(2)] * int(match.group(1)))
-        else:
-            expanded.append(entry)
-    return expanded
-
-
 def format_spec_decode(spec_decode: tuple[str, int, str]) -> str:
     """Label of a spec decode config for reports and notifications.
 
@@ -207,35 +188,40 @@ def format_spec_decode(spec_decode: tuple[str, int, str]) -> str:
     return f"{method}:{num_spec_tokens}" if num_spec_tokens > 0 else "n/a"
 
 
+# `<method>:<num>[:<draft_dir>]` with every part but <num> optional; a bare `<num>` means mtp
+_RE_SPEC_DECODE = re.compile(r"^(?:(?P<method>\w+):)?(?P<num>\d+)(?::(?P<draft_dir>[\w.-]+))?$")
+
+
 def parse_spec_decode(entry: str) -> tuple[str, int, str]:
     """Parse a ``--specs`` entry into ``(method, num_speculative_tokens, draft_weights_dir)``.
 
-    Format: ``<method>:<num>[:<dir>]`` (e.g. ``mtp:3``, ``eagle3:2:Qwen3-a3B_eagle3``); a
-    bare number ``N`` means ``mtp:N``. Zero tokens disables spec decode and normalizes to
-    ``("", 0, "")`` — no method or draft dir concept applies then. An omitted dir means
-    the main model's own weights (e.g. integrated MTP heads); otherwise ``<dir>`` is a
-    single directory name, resolved at server start as a sibling of the main model dir
-    (``<main_model_dir>/../<dir>``).
+    A bare number ``N`` means ``mtp:N``; zero tokens disables spec decode (no method or
+    draft dir applies); an omitted dir uses the main model's own weights, otherwise it is
+    a single directory name resolved at server start as a sibling of the main model dir.
     """
-    parts = entry.strip().split(":")
-    if len(parts) == 1 and parts[0].isdigit():
-        num = int(parts[0])
-        return ("mtp" if num else ""), num, ""
-    if len(parts) in (2, 3):
-        method, num = parts[0].strip().lower(), parts[1].strip()
-        if method and num.isdigit():
-            num = int(num)
-            if num == 0:
-                return "", 0, ""  # disabled: neither method nor draft dir applies
-            if len(parts) == 2:
-                return method, num, ""
-            draft_dir = parts[2].strip()
-            if re.fullmatch(r"[\w.-]+", draft_dir):  # a single directory name: no `/`, spaces or colons
-                return method, num, draft_dir
+    match = _RE_SPEC_DECODE.match(entry.strip())
+    if match:
+        num = int(match.group("num"))
+        if num == 0:
+            return "", 0, ""
+        return (match.group("method") or "mtp").lower(), num, match.group("draft_dir") or ""
     raise ValueError(
         f"Invalid spec decode entry `{entry}`; expected `<method>:<num_spec_tokens>[:<draft_weights_dir>]` "
-        "or a bare number of MTP tokens (e.g. `3`), where <draft_weights_dir> is a single directory "
-        "name resolved as a sibling of the main model dir (e.g. `eagle3:2:Qwen3-a3B_eagle3`)"
+        "or a bare number of MTP tokens (e.g. `eagle3:2:Qwen3-a3B_eagle3` or `3`)"
+    )
+
+
+# `<dataset>[:<num_prompts>]` — the prompt count is optional
+_RE_DATASET_ENTRY = re.compile(r"^(?P<dataset>\w+)(?::(?P<num_prompts>\d+))?$")
+
+
+def parse_dataset_entry(entry: str, default_num_prompts: int) -> tuple[str, int]:
+    """Parse a ``--datasets`` entry; the prompt count defaults to ``--num-prompts``."""
+    match = _RE_DATASET_ENTRY.match(entry.strip())
+    if match:
+        return match.group("dataset"), int(match.group("num_prompts") or default_num_prompts)
+    raise ValueError(
+        f"Invalid dataset entry `{entry}`; expected `<n_dups>~<dataset>[:<num_prompts>]` (e.g. `2~ceval:52`)"
     )
 
 
@@ -316,13 +302,56 @@ def _wget(url: str, target: Path) -> None:
     check_subprocess_result(subprocess.run(["wget", "-O", str(target), url]), f"Failed to download {url}")
 
 
-def _git_clone_dataset(url: str, target: Path) -> None:
-    """Shallow-clone a dataset repo (LFS assets included) into ``target``."""
+def _git_clone_dataset(url: str, target: Path, lfs_exclude: str = "") -> None:
+    """Clone (or refresh an existing clone of) a dataset repo and materialize its LFS assets.
+
+    A plain clone can leave LFS files as pointer stubs (missing smudge filter, or the
+    mirror dropping downloads mid-checkout) — the stubs sit on disk like real data until
+    eval crashes on them (e.g. "Parquet magic bytes not found"), so ``git lfs pull``
+    re-fetches explicitly and any stub remaining in the pulled scope fails setup loudly.
+    An already-existing clone (e.g. from an older setup revision) is refreshed in place.
+    """
     _require_git_lfs()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    check_subprocess_result(
-        subprocess.run(["git", "clone", "--depth", "1", url, str(target)]), f"Failed to clone dataset from {url}"
-    )
+    pull_args = ["git", "-C", str(target), "lfs", "pull"]
+    ls_args = ["git", "-C", str(target), "lfs", "ls-files"]
+    if lfs_exclude:
+        pull_args += ["--exclude", lfs_exclude]
+        ls_args += ["--exclude", lfs_exclude]
+    if target.exists():
+        print(f"Refreshing LFS assets of the existing dataset repo at {target}...")
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # skip the automatic LFS smudge during clone — it fetches every LFS object, while the
+        # explicit `git lfs pull` below fetches only the scope this dataset actually needs
+        env = {**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"}
+        check_subprocess_result(
+            subprocess.run(["git", "clone", "--depth", "1", url, str(target)], env=env),
+            f"Failed to clone dataset from {url}",
+        )
+    check_subprocess_result(subprocess.run(pull_args), f"Failed to pull LFS assets from {url}")
+    res = subprocess.run(ls_args, capture_output=True, text=True)
+    check_subprocess_result(res, f"Failed to list LFS assets of {target}")
+    # `lfs ls-files` flags a `-` entry both for pointer stubs and for locally modified files
+    # (e.g. textvqa's path-rewritten jsonl) — only a file actually holding pointer text
+    # (or missing outright) is a defect
+    pointer_magic = b"version https://git-lfs"
+    stubs = []
+    for line in res.stdout.splitlines():
+        parts = line.split(maxsplit=2)
+        if len(parts) > 2 and parts[1] == "-":
+            stub_path = target / parts[2]
+            try:
+                with open(stub_path, "rb") as f:
+                    is_stub = f.read(len(pointer_magic)) == pointer_magic
+            except OSError:  # deleted from the worktree = not materialized either
+                is_stub = True
+            if is_stub:
+                stubs.append(parts[2])
+    if stubs:
+        raise RuntimeError(
+            f"{len(stubs)} LFS file(s) in {target} are still pointer stubs (e.g. {stubs[:3]}); "
+            "the LFS download failed — fix access to the mirror and rerun dataset setup"
+        )
 
 
 def _download_ceval(ais_bench_dir: Path, download_url: str) -> None:
@@ -349,11 +378,38 @@ def _download_gsm8k(ais_bench_dir: Path, download_url: str) -> None:
 
 def _download_textvqa(ais_bench_dir: Path, download_url: str) -> None:
     # the source must ship the json/jsonl files under `textvqa_json/` (the config's layout)
-    _git_clone_dataset(download_url, ais_bench_dir / "ais_bench" / "datasets" / "textvqa")
+    target = ais_bench_dir / "ais_bench" / "datasets" / "textvqa"
+    _git_clone_dataset(download_url, target)
+    # the shipped jsonl refers to images via a checkout-relative `benchmark/...` prefix that
+    # only resolves when the run cwd is the clone's parent — rewrite to absolute paths so
+    # the base64 loader finds the images from any cwd
+    stale_prefix = "benchmark/ais_bench/datasets/textvqa/"
+    for jsonl in (target / "textvqa_json").glob("*.jsonl"):
+        text = jsonl.read_text()
+        if stale_prefix in text:
+            jsonl.write_text(text.replace(f'"{stale_prefix}', f'"{target}/'))
+    # the subset mirror can lack a handful of val images; a missing image would kill a whole
+    # inference run, so drop those records instead — but a mass of missing images means the
+    # mirror is broken and must fail the setup
+    val_jsonl = target / "textvqa_json" / "textvqa_val.jsonl"
+    kept, dropped = [], 0
+    with open(val_jsonl) as f:
+        for line in f:
+            if line.strip() and Path(json.loads(line)["image"]).exists():
+                kept.append(line)
+            else:
+                dropped += 1
+    if dropped > len(kept) * 0.05:
+        raise RuntimeError(f"{dropped} of {len(kept) + dropped} textvqa val records reference missing images")
+    if dropped:
+        val_jsonl.write_text("".join(kept))
+        print(f"textvqa: dropped {dropped} val record(s) with missing images, {len(kept)} kept")
 
 
 def _download_mmmu(ais_bench_dir: Path, download_url: str) -> None:
-    _git_clone_dataset(download_url, ais_bench_dir / "ais_bench" / "datasets" / "mmmu")
+    # mmmu_gen evaluates the validation split only; excluding the test split skips
+    # several GB of LFS download that would never be read
+    _git_clone_dataset(download_url, ais_bench_dir / "ais_bench" / "datasets" / "mmmu", lfs_exclude="*test*")
 
 
 def _download_mmstar(ais_bench_dir: Path, download_url: str) -> None:
@@ -389,6 +445,9 @@ class DatasetSpec:
     downloader: Callable[[Path, str], None]  # populates the dataset under ais_bench_dir
     merge_ds: bool = True  # whether `--merge-ds` may be passed to ais_bench
     ready_path: str | None = None  # repo-relative file/dir whose existence means "already downloaded"
+    # bumped whenever this dataset's downloader behavior changes, so previously downloaded
+    # data is refreshed to the current standard instead of being skipped as "ready"
+    setup_revision: int = 1
     # All sources are China-accessible (ModelScope / Aliyun OSS) — huggingface.co is not
     # reliably reachable from where this harness runs.
     download_url: str = ""  # primary source URL (zip/TSV/git repo); "" = nothing to download (bfcl ships via pip)
@@ -425,6 +484,7 @@ DATASETS: dict[str, DatasetSpec] = {
         metric_name="accuracy",
         downloader=_download_textvqa,
         ready_path="ais_bench/datasets/textvqa/textvqa_json/textvqa_val.jsonl",
+        setup_revision=2,  # r2: absolute image paths + dropping records whose image is missing
         # vllm-ascend's mirror already ships the `textvqa_json/` layout the config reads
         download_url="https://www.modelscope.cn/datasets/vllm-ascend/textvqa_subset.git",
     ),
@@ -436,6 +496,7 @@ DATASETS: dict[str, DatasetSpec] = {
         metric_name="accuracy",
         downloader=_download_mmmu,
         ready_path="ais_bench/datasets/mmmu",
+        setup_revision=2,  # r2: LFS materialization (pointer stubs crashed eval) + test-split exclusion
         download_url="https://www.modelscope.cn/datasets/AI-ModelScope/MMMU.git",
     ),
     "mmstar": DatasetSpec(
@@ -456,6 +517,7 @@ DATASETS: dict[str, DatasetSpec] = {
         metric_name="accuracy",
         downloader=_download_realworldqa,
         ready_path="ais_bench/datasets/RealworldQA/data/test-00000-of-00002.parquet",
+        setup_revision=2,  # r2: LFS refresh via the shared git-clone helper
         # mirror of huggingface.co/datasets/xai-community/realworldqa with the same layout
         download_url="https://www.modelscope.cn/datasets/xai-org/RealworldQA.git",
     ),
@@ -473,17 +535,28 @@ DATASETS: dict[str, DatasetSpec] = {
 
 
 def _ensure_dataset(key: str, ais_bench_dir: Path) -> None:
-    """Download and set up one dataset (idempotent); see :data:`DATASETS`."""
+    """Download and set up one dataset, refreshing older downloads to the current standard.
+
+    A dataset counts as ready only when its ``ready_path`` exists *and* its recorded setup
+    revision (stamp under ``ais_bench/datasets/.setup_revisions/``, gitignored like the
+    data itself) matches the spec's ``setup_revision``. A missing stamp reads as revision
+    1 (downloaded before revisions existed), so bumping a downloader's revision re-processes
+    existing data instead of skipping it as ready.
+    """
     if key not in DATASETS:
         raise ValueError(f"Unknown dataset `{key}`; available datasets: {sorted(DATASETS)}")
     spec = DATASETS[key]
     # the ais_bench .gitignore already excludes everything under ais_bench/datasets/
     # except the tracked .py sources, so downloaded data needs no extra ignore entries
-    if spec.ready_path and (ais_bench_dir / spec.ready_path).exists():
-        print(f"Dataset `{key}` is already set up, skipping download...")
+    revision_file = ais_bench_dir / "ais_bench" / "datasets" / ".setup_revisions" / key
+    installed_revision = int(revision_file.read_text().strip()) if revision_file.exists() else 1
+    if spec.ready_path and (ais_bench_dir / spec.ready_path).exists() and installed_revision >= spec.setup_revision:
+        print(f"Dataset `{key}` is already set up (revision {installed_revision}), skipping download...")
         return
-    print(f"Setting up dataset `{key}`...")
+    print(f"Setting up dataset `{key}` (revision {spec.setup_revision}, found {installed_revision})...")
     spec.downloader(ais_bench_dir, spec.download_url)
+    revision_file.parent.mkdir(parents=True, exist_ok=True)
+    revision_file.write_text(str(spec.setup_revision))
 
 
 def _aisbench_pkg_version(venv_python: Path) -> str | None:
@@ -522,9 +595,9 @@ def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = 
     aisbench_git_tag = os.environ.get("AISBENCH_GIT_TAG", "v3.1-20261013-master")
     global VENV_ACTIVATE_CMD
     ais_bench_dir = ais_bench_dir or AIS_BENCH_DIR
+    # dataset *names* only — `--datasets` entries (with their `N~`/`:<num_prompts>`
+    # parts) are resolved by the caller before reaching here
     datasets = list(datasets or ["ceval"])
-    if "all" in datasets:
-        datasets = list(DATASETS.keys())
 
     # check if benchmark repo exists; if so, hard-reset it to the wanted tag
     if not ais_bench_dir.exists():
@@ -730,6 +803,7 @@ def start_vllm_server(
         "--data-parallel-rpc-port 15973",
         "--async-scheduling",
         "--trust-remote-code",
+        f'--allowed-local-media-path "{os.environ.get("AISBENCH_ALLOW_PATH", "/")}"',
         f'--max-num-seqs "{max_num_seqs}"',
         f'--max-model-len "{max_model_len}"',
         f'--max-num-batched-tokens "{max_num_batched_tokens}"',
@@ -908,17 +982,15 @@ def run_ais_bench(
         suffix_backend = "xlite-full" if xlite_full_mode else "xlite-decode-only"
     else:
         suffix_backend = "aclgraph"
-    # the draft dir is part of the deployment config: two different drafts with the same
-    # method and token count must not share an ais_bench output directory
-    spec_method, num_spec_tokens, draft_dir = spec_decode
+    spec_method, num_spec_tokens, _ = spec_decode
     spec_suffix = ""
     if num_spec_tokens > 0:
-        spec_suffix = f"-{spec_method.upper()}{num_spec_tokens}{f'-{draft_dir}' if draft_dir else ''}"
-    suffix_deployment = f"TP{tp_size}DP{dp_size}{'EP' if ep else ''}{spec_suffix}"
+        spec_suffix = f"-{spec_method.upper()}.{num_spec_tokens}"
+    suffix_deployment = f"TP{tp_size}DP{dp_size}{'EP' if ep else ''}{spec_suffix}-{dataset}"
     suffix = f"-{suffix_deployment}-{suffix_backend}"
     ais_bench_output_parent_dir = ais_bench_output_dir or ais_bench_dir / "outputs" / get_xlite_version()
-    # keep the dataset in the path so different datasets never share (and confuse) work dirs
-    ais_bench_output_dir = ais_bench_output_parent_dir / model_name / dataset / suffix_backend / suffix_deployment
+    # the dataset rides in `suffix_deployment` so different datasets never share (and confuse) work dirs
+    ais_bench_output_dir = ais_bench_output_parent_dir / model_name / suffix_backend / suffix_deployment
     if not ais_bench_output_dir.exists():
         ais_bench_output_dir.mkdir(parents=True)
     print(f"ais_bench output directory: {ais_bench_output_dir}")
@@ -1057,9 +1129,9 @@ Example usage::
 
     python batch_aisbench.py /path/to/benchmark --num-prompts 64 --model-dir /dir/to/models --models model1 model2 --tps 2 4 --eps 0 1 --xlite 1 0 --datasets ceval gsm8k
 
-This will run the benchmark for (model1, TP2EP0, xlite decode-only, ceval), and (model2, TP4EP4, aclgraph, gsm8k). If\
-`--output-dir` is not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1/ceval/xlite-decode-only`\
-and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
+This will run the benchmark for (model1, TP2DP1, xlite decode-only, ceval), and (model2, TP4DP1+EP, aclgraph, gsm8k). If\
+`--output-dir` is not specified, the outputs will be stored in `/path/to/benchmark/outputs/model1/xlite-decode-only/TP2DP1-ceval`\
+and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively.\
     """
     __doc__ = f"{__doc__}\n\n{epilog}"
 
@@ -1100,16 +1172,23 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
     parser.add_argument(
         "-GMU",
         "--gpu-memory-utilization",
-        type=float,
-        default=0.92,
-        help="GPU memory utilization for vLLM server, between 0 and 1 (e.g., 0.95 for 95%% utilization)",
+        type=str,
+        nargs="+",
+        default=["0.92"],
+        help=(
+            "GPU memory utilization for vLLM server, between 0 and 1, for each model (e.g., 0.95 for 95%% "
+            "utilization; last value used for padding)"
+        ),
     )
     parser.add_argument(
         "-N",
         "--num-prompts",
         type=int,
         default=128,
-        help="Number of prompts within each subset of datasets to use for ais_bench evaluation",
+        help=(
+            "Default number of prompts within each subset of a dataset for ais_bench evaluation; "
+            "a `--datasets` entry overrides it per dataset via `:<num_prompts>`"
+        ),
     )
     parser.add_argument(
         "--models",
@@ -1123,35 +1202,33 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         "--tps",
         "--tp-sizes",
         dest="tps",
-        type=int,
+        type=str,
         nargs="+",
-        choices=[1, 2, 4, 8, 16],
-        default=[1],
-        help="List of tensor parallel sizes for each model (last value used for padding)",
+        default=["1"],
+        help="Tensor parallel sizes for each model, one of 1/2/4/8/16 (last value used for padding)",
     )
     parser.add_argument(
         "-EP",
         "--eps",
         dest="eps",
-        type=int,
+        type=str,
         nargs="+",
-        choices=[0, 1],
-        default=[1],
-        help="Whether to enable expert parallelism for each model (1 for yes, 0 for no; last value used for padding)",
+        default=["1"],
+        help="Whether to enable expert parallelism for each model, 1 for yes and 0 for no (last value used for padding)",
     )
     parser.add_argument(
         "-DP",
         "--dps",
         "--dp-sizes",
         dest="dps",
-        type=int,
+        type=str,
         nargs="+",
-        default=[1],
-        help="List of data parallel sizes for each model (last value used for padding)",
+        default=["1"],
+        help="Data parallel sizes for each model (last value used for padding)",
     )
+    speculative_flags: tuple[str, ...] = ("-MTP", "--mtps", "-SPEC", "--specs")
     parser.add_argument(
-        "-SPEC",
-        "--specs",
+        *speculative_flags,
         dest="specs",
         type=str,
         nargs="+",
@@ -1171,11 +1248,13 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         dest="datasets",
         type=str,
         nargs="+",
-        choices=sorted(DATASETS) + ["all"],
         default=["ceval"],
         help=(
-            "List of datasets to benchmark for each model (last value used for padding). Datasets are downloaded "
-            "and set up automatically; multimodal datasets (textvqa/mmmu/mmstar/realworldqa) require a "
+            "List of dataset entries for each model, formatted `<n_dups>~<dataset>:<num_prompts>`: the "
+            "`<n_dups>~` repeat prefix and the `:<num_prompts>` suffix are optional (prompts default to "
+            "--num-prompts; last entry used for padding). num_prompts is not part of the benchmark identity — "
+            "entries differing only in their prompt count count as duplicates. Datasets are downloaded and set "
+            "up automatically; multimodal datasets (textvqa/mmmu/mmstar/realworldqa) require a "
             "multimodal-capable served model, bfcl requires the vllm_api_function_call_chat model config. *all* is only"
             "valid for `--env-only` and will download all datasets, but will not run any benchmarks."
         ),
@@ -1183,25 +1262,25 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
     parser.add_argument(
         "-MNS",
         "--max-num-seqs",
-        type=int,
+        type=str,
         nargs="+",
-        default=[512],
+        default=["512"],
         help="Max number of sequences for vLLM server and ais_bench (last value used for padding)",
     )
     parser.add_argument(
         "-MML",
         "--max-model-len",
-        type=int,
+        type=str,
         nargs="+",
-        default=[8192],
+        default=["8192"],
         help="Max model length for vLLM server and ais_bench (last value used for padding)",
     )
     parser.add_argument(
         "-MNT",
         "--max-num-batched-tokens",
-        type=int,
+        type=str,
         nargs="+",
-        default=[8192],
+        default=["8192"],
         help="Max number of batched tokens for vLLM server (last value used for padding)",
     )
     parser.set_defaults(use_mrv2=False)
@@ -1223,15 +1302,17 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         type=str,
         nargs="+",
         default=[""],
-        help="Extra arguments to pass to ais_bench command (last value used for padding)",
+        help=(
+            "Extra arguments to pass to the ais_bench command, for each model (last value used for padding). "
+            "Values starting with `-` (e.g. `--reuse`) must use the `=` form: `--extra-aisbench-args=\"--reuse\"`"
+        ),
     )
     parser.add_argument(
         "-X",
         "--xlite",
-        type=int,
+        type=str,
         nargs="+",
-        choices=[0, 1, 2],
-        default=[2],
+        default=["2"],
         help=(
             "Whether to use xlite full mode (2), xlite decode-only mode (1), or aclgraph (0) for each model (last "
             "value used for padding when `--broadcast-xlite` is not set; otherwise, values must be unique)"
@@ -1270,9 +1351,22 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
 
     print(f"Running batch AISBench with arguments: {args}")
 
+    # dataset entries `<n_dups>~<dataset>:<num_prompts>` (both suffixes optional); `all`
+    # stays the env-only token meaning "every dataset"
+    raw_dataset_entries = expand_values(args.datasets)
+    if "all" in raw_dataset_entries:
+        if not args.env_only:
+            raise ValueError("`all` is only valid for --env-only and will not run any benchmarks")
+        dataset_entries: list[tuple[str, int]] = [(key, args.num_prompts) for key in DATASETS]
+    else:
+        dataset_entries = [parse_dataset_entry(e, args.num_prompts) for e in raw_dataset_entries]
+        invalid = sorted({name for name, _ in dataset_entries if name not in DATASETS})
+        if invalid:
+            raise ValueError(f"Invalid dataset(s) specified: {invalid}; available datasets: {sorted(DATASETS)}")
+
     if not args.dry_run or args.env_only:
         # prepare the environment: clone ais_bench repo, create virtual environment, install requirements, download datasets
-        prepare_env(args.ais_bench_dir, datasets=args.datasets)
+        prepare_env(args.ais_bench_dir, datasets=[name for name, _ in dataset_entries])
     if args.env_only:
         print("Environment preparation complete, exiting as --env-only was specified.")
         sys.exit(0)
@@ -1280,43 +1374,55 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
     if not args.models:
         raise ValueError("No models specified for benchmarking, please provide model subdirectory names using --models")
 
-    args_models: list[str] = expand_repeated_entries(args.models)
+    # every per-model parameter accepts `N~<value>` expansion and pads to n_models
+    args_models: list[str] = expand_values(args.models)
     n_models = len(args_models)
-    args_tps: list[int] = args.tps + [args.tps[-1]] * (n_models - len(args.tps))
-    args_eps: list[bool] = args.eps + [args.eps[-1]] * (n_models - len(args.eps))
-    args_dps: list[int] = args.dps + [args.dps[-1]] * (n_models - len(args.dps))
-    args_specs: list[tuple[str, int, str]] = [parse_spec_decode(s) for s in expand_repeated_entries(args.specs)]
-    args_specs = args_specs + [args_specs[-1]] * (n_models - len(args_specs))
-    if any(ds not in DATASETS for ds in args.datasets):
-        raise ValueError(f"Invalid dataset(s) specified: {[ds for ds in args.datasets if ds not in DATASETS]}")
-    args_datasets: list[str] = args.datasets + [args.datasets[-1]] * (n_models - len(args.datasets))
-    args_max_num_seqs: list[int] = args.max_num_seqs + [args.max_num_seqs[-1]] * (n_models - len(args.max_num_seqs))
-    args_max_model_len: list[int] = args.max_model_len + [args.max_model_len[-1]] * (n_models - len(args.max_model_len))
-    args_max_num_batched_tokens: list[int] = args.max_num_batched_tokens + [args.max_num_batched_tokens[-1]] * (
-        n_models - len(args.max_num_batched_tokens)
+    args_tps: list[int] = pad_to_last(expand_values(args.tps, int, "--tps"), n_models)
+    args_eps: list[int] = pad_to_last(expand_values(args.eps, int, "--eps"), n_models)
+    args_dps: list[int] = pad_to_last(expand_values(args.dps, int, "--dps"), n_models)
+    args_specs: list[tuple[str, int, str]] = pad_to_last(
+        [parse_spec_decode(s) for s in expand_values(args.specs)], n_models
     )
-    args_extra_aisbench_args: list[str] = args.extra_aisbench_args + [args.extra_aisbench_args[-1]] * (
-        n_models - len(args.extra_aisbench_args)
+    dataset_entries = pad_to_last(dataset_entries, n_models)
+    args_datasets: list[str] = [d for d, _ in dataset_entries]
+    args_num_prompts: list[int] = [n for _, n in dataset_entries]
+    args_max_num_seqs: list[int] = pad_to_last(expand_values(args.max_num_seqs, int, "--max-num-seqs"), n_models)
+    args_max_model_len: list[int] = pad_to_last(expand_values(args.max_model_len, int, "--max-model-len"), n_models)
+    args_max_num_batched_tokens: list[int] = pad_to_last(
+        expand_values(args.max_num_batched_tokens, int, "--max-num-batched-tokens"), n_models
     )
+    args_gpu_memory_utilization: list[float] = pad_to_last(
+        expand_values(args.gpu_memory_utilization, float, "--gpu-memory-utilization"), n_models
+    )
+    args_extra_aisbench_args: list[str] = pad_to_last(expand_values(args.extra_aisbench_args), n_models)
+    if bad := sorted(set(args_tps) - {1, 2, 4, 8, 16}):
+        raise ValueError(f"--tps values must be one of 1/2/4/8/16, got {bad}")
+    if bad := sorted(set(args_eps) - {0, 1}):
+        raise ValueError(f"--eps values must be 0 or 1, got {bad}")
+    args_xlite: list[int] = expand_values(args.xlite, int, "--xlite")
+    if bad := sorted(set(args_xlite) - {0, 1, 2}):
+        raise ValueError(f"--xlite values must be one of 0/1/2, got {bad}")
     if not args.broadcast_xlite:
-        args_xlite = args.xlite + [args.xlite[-1]] * (n_models - len(args.xlite))
-    elif len(set(args.xlite)) != len(args.xlite):
+        args_xlite = pad_to_last(args_xlite, n_models)
+    elif len(set(args_xlite)) != len(args_xlite):
         raise ValueError("When using --broadcast-xlite, the values in --xlite must be unique to avoid duplications")
     else:
-        n_xlite = len(args.xlite)
-        # Tile xlite values for each model: [1,0] * 3 = [1,0,1,0,1,0]
-        args_xlite = args.xlite * n_models
-        # Repeat each model's args n_xlite times: [A,B,C] with n_xlite=2 -> [A,A,B,B,C,C]
-        args_models = [m for m in args_models for _ in range(n_xlite)]
-        args_tps = [tp for tp in args_tps for _ in range(n_xlite)]
-        args_eps = [ep for ep in args_eps for _ in range(n_xlite)]
-        args_dps = [dp for dp in args_dps for _ in range(n_xlite)]
-        args_specs = [s for s in args_specs for _ in range(n_xlite)]
-        args_datasets = [d for d in args_datasets for _ in range(n_xlite)]
-        args_max_num_seqs = [m for m in args_max_num_seqs for _ in range(n_xlite)]
-        args_max_model_len = [m for m in args_max_model_len for _ in range(n_xlite)]
-        args_max_num_batched_tokens = [m for m in args_max_num_batched_tokens for _ in range(n_xlite)]
-        args_extra_aisbench_args = [a for a in args_extra_aisbench_args for _ in range(n_xlite)]
+        n_xlite = len(args_xlite)
+        # tile xlite values for each model: [2,1,0] * 3 models = [2,1,0,2,1,0,2,1,0]
+        args_xlite = args_xlite * n_models
+        # repeat every per-model list n_xlite times: [A,B] with n_xlite=2 -> [A,A,B,B]
+        args_models = tile_each(args_models, n_xlite)
+        args_tps = tile_each(args_tps, n_xlite)
+        args_eps = tile_each(args_eps, n_xlite)
+        args_dps = tile_each(args_dps, n_xlite)
+        args_specs = tile_each(args_specs, n_xlite)
+        args_datasets = tile_each(args_datasets, n_xlite)
+        args_num_prompts = tile_each(args_num_prompts, n_xlite)
+        args_max_num_seqs = tile_each(args_max_num_seqs, n_xlite)
+        args_max_model_len = tile_each(args_max_model_len, n_xlite)
+        args_max_num_batched_tokens = tile_each(args_max_num_batched_tokens, n_xlite)
+        args_gpu_memory_utilization = tile_each(args_gpu_memory_utilization, n_xlite)
+        args_extra_aisbench_args = tile_each(args_extra_aisbench_args, n_xlite)
 
     combinations = [
         (model, int(tp), ep, int(dp), spec, xlite > 0, xlite > 1, dataset)
@@ -1325,15 +1431,7 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
         )
     ]
     if len(set(combinations)) != len(combinations):
-        # find the duplicate combinations
-        duplicates = set()
-        seen = set()
-        for combo in combinations:
-            if combo in seen:
-                duplicates.add(combo)
-            else:
-                seen.add(combo)
-        for dup in duplicates:
+        for dup in {c for c in combinations if combinations.count(c) > 1}:
             print(
                 f"Duplicate combination found: Model={dup[0]}, TP={dup[1]}, EP={'Y' if dup[2] else 'N'}, DP={dup[3]}, "
                 f"Spec={format_spec_decode(dup[4])}, Xlite={'full' if dup[6] else ('decode-only' if dup[5] else 'aclgraph')}, "
@@ -1358,7 +1456,7 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
             backend_str = "xlite full" if xlite_full else ("xlite decode-only" if xlite else "aclgraph")
             print(
                 f"  {i + 1}. Model: {model}, TP: {tp}, EP: {'Y' if ep else 'N'}, DP: {dp}, Spec: {format_spec_decode(spec)}, "
-                f"Backend: {backend_str}, Dataset: {dataset}"
+                f"Backend: {backend_str}, Dataset: {dataset}, Num Prompts: {args_num_prompts[i]}"
             )
         sys.exit(0)
 
@@ -1387,7 +1485,7 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
             result = run_ais_bench(
                 ais_bench_dir=args.ais_bench_dir,
                 ais_bench_output_dir=args.output_dir,
-                ais_bench_num_prompts=args.num_prompts,
+                ais_bench_num_prompts=args_num_prompts[i],
                 model_path=str(model_path),
                 model_name=model,
                 dataset=dataset,
@@ -1400,7 +1498,7 @@ and `/path/to/ais_bench_dir/outputs/model2/gsm8k/aclgraph` respectively.\
                 max_model_len=args_max_model_len[i],
                 max_num_batched_tokens=args_max_num_batched_tokens[i],
                 seed=args.seed,
-                gpu_memory_utilization=args.gpu_memory_utilization,
+                gpu_memory_utilization=args_gpu_memory_utilization[i],
                 use_mrv2=args.use_mrv2,
                 xlite=xlite,
                 xlite_full_mode=xlite_full,

@@ -18,7 +18,8 @@ xlite 每日自动化测试机器人共享工具模块
         pull_latest_code, build_project, install_wheel,
         get_xlite_version, get_xlite_commit,
         save_metrics_json, load_metrics_json,
-        send_notification, should_disable_xccl, detect_model_device
+        send_notification, should_disable_xccl, detect_model_device,
+        expand_values, pad_to_last, tile_each
     )
 """
 
@@ -30,7 +31,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # ====================== 路径配置 ======================
 # 项目根目录 (容器内路径)
@@ -156,6 +157,45 @@ def log_error(msg: str):
     formatted_msg = f"[ERROR] {msg}"
     print(f"{Colors.RED}{formatted_msg}{Colors.RESET}")
     _write_to_file(formatted_msg)
+
+
+# ====================== 参数列表处理工具 ======================
+# batch_aisbench.py 按模型参数 (--models/--tps/--datasets 等) 共用的列表处理工具
+
+_RE_REPEAT_ENTRY = re.compile(r"^([1-9]\d*)\s*[~\*]\s*(.+)\s*$")
+
+
+def expand_values(values: List[str], cast: Callable[[str], Any] = str, name: str = "entry") -> List[Any]:
+    """
+    展开 `N~<value>` / `N*<value>` 条目为 N 份, 并把每个值转换为 cast 类型
+
+    `N~` 前缀可省略 (默认 1 份). 例如:
+        ["3~Qwen3-30B", "Qwen3-32B"] -> ["Qwen3-30B"] * 3 + ["Qwen3-32B"]
+        (["2~4", "8"], int) -> [4, 4, 8]
+
+    注意: 也可用 `*` 代替 `~`, 但 `~` 更不易与 shell 通配符混淆.
+    """
+    expanded: List[str] = []
+    for entry in values:
+        match = _RE_REPEAT_ENTRY.match(entry)
+        if match:
+            expanded.extend([match.group(2)] * int(match.group(1)))
+        else:
+            expanded.append(entry)
+    try:
+        return [cast(v) for v in expanded]
+    except ValueError as e:
+        raise ValueError(f"Invalid {name} value: {e}") from e
+
+
+def pad_to_last(values: List[Any], n: int) -> List[Any]:
+    """用最后一个条目把列表补齐到长度 n"""
+    return values + [values[-1]] * (n - len(values))
+
+
+def tile_each(values: List[Any], n: int) -> List[Any]:
+    """把每个条目重复 n 次: [A, B] n=2 -> [A, A, B, B]"""
+    return [v for v in values for _ in range(n)]
 
 
 # ====================== 配置设置函数 ======================
@@ -305,19 +345,27 @@ def pull_latest_code() -> bool:
 
     REPO_URL = os.environ.get("XLITE_REPO_URL", "https://atomgit.com/openeuler/GVirt.git")
     REPO_BRANCH = os.environ.get("XLITE_REPO_BRANCH", "master")
+    # 可选: 拉取后 checkout 到指定 commit/branch/tag; 默认使用最新 master
+    REPO_COMMIT = os.environ.get("XLITE_REPO_COMMIT", "")
 
     # 根据环境类型决定是否 source env.sh
     env_prefix = ""
     if ENV_TYPE == "yellow" and os.path.exists("/home/env.sh"):
         env_prefix = "source /home/env.sh && "
 
+    def clone_repo(container: str) -> None:
+        """在指定容器中删除并重新克隆项目仓库, 可选 checkout 到 REPO_COMMIT."""
+        run_in_container(container, f"rm -rf {PROJECT_ROOT}")
+        run_in_container(container, f"mkdir -p {PROJECT_ROOT.parent}")
+        run_in_container(container, f"{env_prefix}git clone -b {REPO_BRANCH} {REPO_URL} {PROJECT_ROOT}")
+        if REPO_COMMIT:
+            run_in_container(container, f"{env_prefix}git -C {PROJECT_ROOT} checkout {REPO_COMMIT}")
+
     try:
         # 在编译容器中拉取代码
         log_info("在编译容器中拉取代码...")
         log_info(f"BUILD_CONTAINER: {BUILD_CONTAINER}")
-        run_in_container(BUILD_CONTAINER, f"rm -rf {PROJECT_ROOT}")
-        run_in_container(BUILD_CONTAINER, f"mkdir -p {PROJECT_ROOT.parent}")
-        run_in_container(BUILD_CONTAINER, f"{env_prefix}git clone -b {REPO_BRANCH} {REPO_URL} {PROJECT_ROOT}")
+        clone_repo(BUILD_CONTAINER)
         log_success("编译容器仓库克隆成功!")
 
         if TEST_CONTAINER == BUILD_CONTAINER:
@@ -326,9 +374,7 @@ def pull_latest_code() -> bool:
 
         # 在测试容器中拉取代码
         log_info("在测试容器中拉取代码...")
-        run_in_container(TEST_CONTAINER, f"rm -rf {PROJECT_ROOT}")
-        run_in_container(TEST_CONTAINER, f"mkdir -p {PROJECT_ROOT.parent}")
-        run_in_container(TEST_CONTAINER, f"{env_prefix}git clone -b {REPO_BRANCH} {REPO_URL} {PROJECT_ROOT}")
+        clone_repo(TEST_CONTAINER)
         log_success("测试容器仓库克隆成功!")
 
         return True

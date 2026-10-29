@@ -272,22 +272,27 @@ def main():
         help="*性能*测试模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)，默认 moe；仅 bench 模式有效",
     )
     default_model_args = (
-        "--models Qwen3-32B-w8a8-nopdmix Qwen3-VL-8B-Instruct",
-        "2~Qwen3-30B-A3B-Instruct-2507 2~GLM-4.7-W8A8-floatmtp 2~MiniMax-M2.7-w8a8-QuaRot",
-        "--tps 4 4 4 2 8 4 8 4",
-        "--dps 1 1 1 2 1 2 1 2",
-        "--eps 0 0 1",  # will expand the rest of the eps values with 1
-        "--specs 0",
-        f"--datasets {os.environ.get('XLITE_AISBENCH_DATASETS', 'ceval')}",  # space-separated dataset names
-        "--xlite 2 1 0",
-        "--broadcast-xlite",
+        "--models Qwen3-VL-30B-A3B-Instruct Qwen3-32B-w8a8-nopdmix",
+        "2~Qwen3-30B-A3B-Instruct-2507 2~MiniMax-M2.7-w8a8-QuaRot 2~GLM-4.7-W8A8-floatmtp",
+        "--tps 2 4 4 2 8 4 8 8",
+        "--dps 2 1 1 2 1 2 1 1",
+        "--eps 1 0 1",  # will expand the rest of the eps values with 1
+        "--specs 7~0 3", # the last GLM-4.7 run enabled with MTP + 3 speculative tokens
+        # per-model dataset entries: the VL model runs mmmu with 256 prompts, the rest default to ceval
+        f"--datasets {os.environ.get('XLITE_AISBENCH_DATASETS', 'mmmu:256 ceval')}",
         f"--num-prompts {int(os.environ.get('XLITE_AISBENCH_NUM_PROMPTS', 128))}",
         f"--max-num-seqs {int(os.environ.get('XLITE_AISBENCH_MNS', 512))}",
         f"--max-model-len {int(os.environ.get('XLITE_AISBENCH_MML', 8192))}",
         f"--max-num-batched-tokens {int(os.environ.get('XLITE_AISBENCH_MNT', 8192))}",
         f"--gpu-memory-utilization {float(os.environ.get('XLITE_AISBENCH_GMU', 0.92))}",
         "--no-use-mrv2" if os.environ.get("XLITE_AISBENCH_USE_MRV2", "0") == "0" else "--use-mrv2",
+        "--xlite 2 1 0",
+        "--broadcast-xlite",
     )
+    if aisbench_xargs := os.environ.get("XLITE_AISBENCH_EXTRA_ARGS", "").strip().strip('"').strip("'"):
+        # `=` form is required: a value starting with `-` (e.g. `--reuse`) would otherwise be
+        # parsed as an (unknown) flag of batch_aisbench.py instead of the option's value
+        default_model_args += (f"--extra-aisbench-args=\"{aisbench_xargs}\"",)
     parser.add_argument(
         "-args",
         "--model-args",
