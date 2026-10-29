@@ -95,10 +95,6 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
             pipe_barrier(PIPE_V);
             vdiv(gateF[curr], ones, gateF[curr], 1, 1, 1, 1, 8, 8, 8);
             pipe_barrier(PIPE_V);
-            convert_output((__ubuf__ Dtype *)rawGate, gateF[curr], 1);
-            pipe_barrier(PIPE_V);
-            convert_input(gateF[curr], (__ubuf__ Dtype *)rawGate, 1);
-            pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_S, EVENT_ID2);
             wait_flag(PIPE_V, PIPE_S, EVENT_ID2);
             sig = gateF[curr][0];
@@ -174,13 +170,8 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
                 if (siluGate) {
                     vmul(gateF[curr], gateF[curr], rawGate, repeat, 1, 1, 1, 8, 8, 8);
                     pipe_barrier(PIPE_V);
-                } else {
-                    // Native MHA evaluates sigmoid in the gate dtype before multiplication.
-                    convert_output((__ubuf__ Dtype *)rawGate, gateF[curr], repeat);
-                    pipe_barrier(PIPE_V);
-                    convert_input(gateF[curr], (__ubuf__ Dtype *)rawGate, repeat);
-                    pipe_barrier(PIPE_V);
                 }
+                // Keep the gate activation and attention multiply in FP32.
                 vmul(attnF[curr], attnF[curr], gateF[curr], repeat, 1, 1, 1, 8, 8, 8);
             }
             pipe_barrier(PIPE_V);
