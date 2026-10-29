@@ -18,6 +18,7 @@ import os
 import random
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -64,6 +65,7 @@ class FeatureSpec:
     proxy_port: int = 0                 # >0→起 load_balance_proxy; 请求发此 port
     proxy_script: str = ""              # proxy 脚本路径
     needs_kv_transfer: bool = False     # True→build_launch_cmd 加 --kv-transfer-config
+    kv_pool: str = ""                   # 非空("mooncake")→单实例 run_case 起外部 KV 池服务(AscendStoreConnector)
 
 
 @dataclass
@@ -129,12 +131,30 @@ FEATURES = {
     ),
     "kv_cache_pool": FeatureSpec(
         "kv_cache_pool", "KV Cache Pool",
-        skip_reason="需 --kv-transfer-config 指定 AscendStoreConnector(backend mooncake/memcache/yuanrong)"
-                    " 或 MooncakeConnectorV1(MultiConnector 内) + 起外部 mooncake_master 服务; "
-                    "PD-Mixed(kv_both)可单实例, PD-Disaggregation 需 producer+consumer+proxy; "
-                    "本脚本无法自动起外部服务, 待手动实测",
-        note="当前有效名: AscendStoreConnector(池化)+MooncakeConnectorV1(P2P, MultiConnector 内); "
-             "VLLM_USE_KV_CACHE_POOL 环境变量不存在(非废弃, 系从未存在)",
+        # AscendStoreConnector(kv_both, PD-Mixed 单实例) + mooncake backend: vllm 经
+        # MOONCAKE_CONFIG_PATH/MOONCAKE_MASTER env 连接外部 mooncake_master 池服务。
+        # 对标 vllm-ascend tests/e2e/cases/features/kv_pool/test_qwen3_30b_acc.py 的
+        # MooncakeLauncher + 单实例 kv_both 路径(kv_both 既是 producer 又是 consumer,
+        # 单实例 prefill 存/decode 取, 无需 producer+consumer 双实例)。
+        # use_layerwise=False → requires_piecewise_for_cudagraph 返回 False, 不强制 PIECEWISE,
+        # full_mode 的 FULL_DECODE_ONLY cudagraph 路径不受影响。
+        # kv-transfer-config JSON 本身静态(无端口); mooncake_master 端口经 mooncake.json
+        # (MOONCAKE_CONFIG_PATH 指向) + MOONCAKE_MASTER env 下发, 故 run_case 运行时起服务。
+        kv_pool="mooncake",
+        extra_cli=["--kv-transfer-config", json.dumps({
+            "kv_connector": "AscendStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "register_buffer": True,
+                "use_layerwise": False,
+                "mooncake_rpc_port": "0",
+            },
+        })],
+        note="AscendStoreConnector(kv_both, PD-Mixed 单实例) + mooncake backend; "
+             "脚本自动起 mooncake_master 作外部 KV 池服务(MOONCAKE_CONFIG_PATH/MOONCAKE_MASTER env 透传 vllm); "
+             "use_layerwise=False(不强制 PIECEWISE); 对标 vllm-ascend test_qwen3_30b_acc.py 单实例 kv_both 路径; "
+             "GLM-5.2-w8a8 TP=16 单机装得下(721GB/16≈45GB<61GB)无需换模型; "
+             "当前有效名: AscendStoreConnector(池化) + MooncakeConnectorV1(P2P, MultiConnector 内)",
     ),
     "kv_cache_cpu_offload": FeatureSpec(
         "kv_cache_cpu_offload", "KV Cache CPU Offload",
@@ -988,6 +1008,128 @@ def kill_server(proc: subprocess.Popen, port: int):
         time.sleep(3)
 
 
+def _find_free_port() -> int:
+    """获取一个本机可用 TCP 端口(bind 0 后取端口)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+def start_mooncake_pool(cdir: str, ready_timeout: int = 60) -> tuple:
+    """启动单节点 mooncake_master 作为 AscendStoreConnector(mooncake backend) 的 KV 池服务.
+
+    对标 vllm-ascend test_qwen3_30b_acc.py 的 MooncakeLauncher + 单实例 kv_both 路径:
+    mooncake_master 作外部池服务, vllm 经 MOONCAKE_CONFIG_PATH(指向 mooncake.json)/
+    MOONCAKE_MASTER env 连接。mooncake.json 端口运行时分配, 故 kv-transfer-config 保持静态。
+    返回 (proc, env_dict, detail): proc=None 表示启动失败; env_dict 供 vllm 进程继承。
+    """
+    master_port = _find_free_port()
+    metrics_port = _find_free_port()
+    master_addr = f"127.0.0.1:{master_port}"
+    cfg = {
+        "local_hostname": "localhost",
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "ascend",
+        "device_name": "",
+        "master_server_address": master_addr,
+        "global_segment_size": 8589934592,
+    }
+    cfg_path = os.path.join(cdir, "mooncake.json")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    cmd = [
+        "mooncake_master",
+        "--port", str(master_port),
+        "--metrics_port", str(metrics_port),
+        "--eviction_high_watermark_ratio", "0.9",
+        "--eviction_ratio", "0.1",
+        "--default_kv_lease_ttl", "11000",
+    ]
+    # mooncake Python 包目录(含 libmooncake_*.so): 加入 LD_LIBRARY_PATH 供 master/worker 加载。
+    # find_spec 不触发 import 副作用; 包不存在则留空(master 二进制仍可能经自身 RPATH 找到 lib)。
+    mooncake_dir = ""
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("mooncake")
+        if spec and spec.origin:
+            mooncake_dir = os.path.dirname(spec.origin)
+    except Exception:
+        pass
+    ld_paths = [p for p in [mooncake_dir] if p]
+    curr_ld = os.environ.get("LD_LIBRARY_PATH", "")
+    if curr_ld:
+        ld_paths.append(curr_ld)
+    ld_path = os.pathsep.join(ld_paths)
+    master_env = os.environ.copy()
+    if ld_path:
+        master_env["LD_LIBRARY_PATH"] = ld_path
+    log_path = os.path.join(cdir, "mooncake_master.log")
+    try:
+        with open(log_path, "w", encoding="utf-8") as logf:
+            proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                                    env=master_env, start_new_session=True)
+    except FileNotFoundError:
+        return None, {}, "mooncake_master 二进制未找到(需安装 mooncake)"
+    print(f"[kv_pool] mooncake_master PID={proc.pid} port={master_port} "
+          f"metrics={metrics_port} (config={cfg_path})", flush=True)
+    # 等待 master 端口就绪(TCP 连通即就绪)
+    deadline = time.time() + ready_timeout
+    ready = False
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return None, {}, f"mooncake_master 进程退出(code={proc.returncode})"
+        try:
+            with socket.create_connection(("127.0.0.1", master_port), timeout=2):
+                ready = True
+                break
+        except OSError:
+            time.sleep(2)
+    if not ready:
+        stop_kv_pool(proc)
+        return None, {}, f"mooncake_master {ready_timeout}s 未就绪"
+    pool_env = {
+        "MOONCAKE_CONFIG_PATH": cfg_path,
+        "MOONCAKE_MASTER": master_addr,
+        "ASCEND_AUTO_CONNECT": "1",
+        "ASCEND_ENABLE_USE_FABRIC_MEM": "1",
+        # mooncake ascend 直连传输超时(P2P 握手/建链), 对齐 test_qwen3_30b_acc env
+        "ASCEND_CONNECT_TIMEOUT": "10000",
+        "ASCEND_TRANSFER_TIMEOUT": "10000",
+    }
+    if ld_path:
+        pool_env["LD_LIBRARY_PATH"] = ld_path
+    return proc, pool_env, f"mooncake_master 就绪(port={master_port})"
+
+
+def start_kv_pool(backend: str, cdir: str) -> tuple:
+    """按 backend 启动 KV 池外部服务; 返回 (proc, env_dict, detail)."""
+    if backend == "mooncake":
+        return start_mooncake_pool(cdir)
+    return None, {}, f"不支持的 kv_pool backend: {backend}(当前仅支持 mooncake)"
+
+
+def stop_kv_pool(proc):
+    """停止 KV 池外部服务(进程组 SIGTERM→SIGKILL, backend 无关)."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    for _ in range(5):
+        if proc.poll() is not None:
+            break
+        time.sleep(2)
+    if proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 def append_result(spec: FeatureSpec, mode: str, port: int,
                   startup_ok: bool, quality_verdict: str, evidence: str,
                   elapsed: float, note_extra: str, log_subdir: str = ""):
@@ -1190,6 +1332,17 @@ def run_case(spec: FeatureSpec, mode: str, port: int, model_path: str,
     log_path = os.path.join(cdir, "server.log")
     env = base_env_init()
     env.update(spec.extra_env)
+    # KV 池外部服务(AscendStoreConnector mooncake backend): vllm 连接此前置启动, vllm 停止后关闭。
+    # 单实例 kv_both 路径, 非 producer+consumer 双实例, 故走单实例 run_case 而非 run_case_multi_instance。
+    pool_proc = None
+    if spec.kv_pool:
+        pool_proc, pool_env, pool_detail = start_kv_pool(spec.kv_pool, cdir)
+        if pool_proc is None:
+            append_result(spec, mode, port, False, "N/A",
+                          f"KV pool启动失败: {pool_detail}", 0.0, spec.note, cdir)
+            print(f"[失败] {spec.label}: KV pool启动失败: {pool_detail}")
+            return False
+        env.update(pool_env)
     cmd = build_launch_cmd(spec, mode, model_path, port, tp,
                            max_num_batched_tokens, max_num_seqs, max_model_len)
     with open(os.path.join(cdir, "launch_cmd.txt"), "w", encoding="utf-8") as f:
@@ -1229,6 +1382,9 @@ def run_case(spec: FeatureSpec, mode: str, port: int, model_path: str,
     finally:
         elapsed = time.time() - start
         kill_server(proc, port)
+        # KV 池外部服务在 vllm 停止后关闭(mooncake_master 等不持 NPU HBM, 仅释放端口/CPU)
+        if pool_proc is not None:
+            stop_kv_pool(pool_proc)
     append_result(spec, mode, port, startup_ok, quality, evidence,
                   elapsed, spec.note, cdir)
     return startup_ok
