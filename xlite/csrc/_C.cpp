@@ -1703,7 +1703,7 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
                at::Tensor &output, at::Tensor &queryStartLoc, at::Tensor &lens,
                at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t nKvHeads,
                uint32_t headDim, uint32_t blockSize, uint32_t batch, bool enableFlashAttention,
-               uint32_t tileSizeOfCachedKV, bool fp32Scores)
+               uint32_t tileSizeOfCachedKV)
 {
     XTensor _qkv, _kCache, _vCache, _qk, _output, _queryStartLoc, _lens, _cachedLens, _blockTables;
 
@@ -1717,12 +1717,9 @@ void Attention(XRuntime &rt, at::Tensor &qkv, at::Tensor &kCache, at::Tensor &vC
     InitXTensor(_blockTables, blockTables, DBG_LOC);
     uint32_t maxNumBlock = DeriveMaxNumBlocks(_blockTables, batch);
 
-    if (fp32Scores && enableFlashAttention) {
-        throw std::invalid_argument("FP32 scores cannot use tiled flash attention");
-    }
     if (!enableFlashAttention) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, maxNumBlock * blockSize},
-                                   fp32Scores ? FP32 : XDtypeOf(qkv), DBG_LOC);
+                                   XDtypeOf(qkv), DBG_LOC);
         XliteOpAttention(rt, _qkv, _kCache, _vCache, qk, _output, _queryStartLoc, _lens,
                          _cachedLens, _blockTables, nHeads, nKvHeads, headDim, blockSize, batch);
         rt.Synchronize();
@@ -3364,8 +3361,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("v_cache"), py::arg("output"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"),
           py::arg("n_kv_heads"), py::arg("head_dim"), py::arg("block_size"), py::arg("batch"),
-          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192,
-          py::arg("fp32_scores") = false);
+          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192);
     m.def("add_and_rmsnorm", &AddAndRMSNorm, py::arg("rt"), py::arg("in_"), py::arg("add_in_out"),
           py::arg("norm"), py::arg("out"), py::arg("norm_eps"));
     m.def("softmax_topk", &SoftmaxTopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),

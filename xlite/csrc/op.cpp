@@ -916,28 +916,6 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                       XTensor &blockTables, uint32_t nHeads, uint32_t nKvHeads, uint32_t headDim,
                       uint32_t blockSize, uint32_t batch)
 {
-    if (qk.dtype == FP32) {
-        uint32_t cols = DeriveMaxNumBlocks(blockTables, batch) * blockSize;
-        if (cols > 8192 || qk.shape != std::vector<size_t>{rt.aicNum * XLITE_MAX_M0 * 2, cols} ||
-            !(EachXDtype(BF16, qkv, kCache, vCache, output) ||
-              EachXDtype(FP16, qkv, kCache, vCache, output))) {
-            throw std::invalid_argument(
-                "FP32 attention scores require BF16/FP16 activations and <=8192 KV tokens");
-        }
-        XTensor &prob = rt.GetTensor(qk.shape, qkv.dtype, DBG_LOC);
-        if (!IsDummyRuntime(rt)) {
-            KERNEL_PTR_TYPE(attention_fp32_scores) *launch =
-                qkv.dtype == BF16 ? aclrtlaunch_attention_fp32_scores_bfloat16_t
-                                  : aclrtlaunch_attention_fp32_scores_float16_t;
-            launch(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, prob.ptr,
-                   output.ptr, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
-                   kCache.stride[0], vCache.stride[0], nHeads, nKvHeads, headDim, blockSize, batch,
-                   cols / blockSize, rt._attnZeroBuffer.ptr);
-        }
-        rt.PutTensor(prob);
-        return;
-    }
-
     if (IsDummyRuntime(rt)) {
         return;
     }

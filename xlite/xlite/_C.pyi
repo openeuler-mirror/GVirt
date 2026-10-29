@@ -2097,7 +2097,6 @@ def attention(
     batch: int,
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
-    fp32_scores: bool = False,
 ) -> None:
     """Run paged attention for cached KV tensors.
 

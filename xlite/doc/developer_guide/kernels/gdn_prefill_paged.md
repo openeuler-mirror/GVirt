@@ -42,25 +42,6 @@ is sequential within each state tile, so removing state conversion does not
 imply faster long-prompt Prefill. Compare measured latency before choosing a
 production mode.
 
-## Full-attention score precision
-
-The standalone attention binding accepts `fp32_scores=True` for BF16/FP16
-and at most 8192 KV tokens. QK accumulation stays FP32 through causal softmax;
-probabilities round once to activation dtype for SV. Tiled Flash attention
-cannot be enabled simultaneously. Model attention dispatch retains its existing
-policy. Both variants use upstream K/V page strides and zero-buffer tail protection.
-
-The FP32 score and activation-dtype probability workspaces are transient,
-profiled by DummyRun, and reused across layers. At 24 Cube cores and 8192 KV
-tokens their combined size is approximately 288 MiB. This is additional compute
-scratch, not persistent KV state. Callers choose the existing attention paths for other configurations.
-
-`tests/kernels/attention_fp32_scores.py` compares against CPU FP32 QK/softmax
-with activation-dtype probability rounding, including ragged mixed queries,
-continuation, shuffled physical pages, head dimension 256 and the 8192-token bound.
-Model-level numerical alignment is a separate acceptance check; isolated kernel
-correctness does not establish end-to-end Full-mode precision.
-
 ## Validation
 
 `tests/kernels/gdn_prefill_paged.py` checks fresh state, continuation, ragged and
