@@ -124,6 +124,7 @@ from daily_bot_utils import (
     setup_logging,
     should_disable_xccl,
 )
+
 # 数据集规格 (每个数据集的精度阈值定义于此)
 from dataset_spec import DATASETS
 
@@ -476,8 +477,7 @@ def analyze_accuracy_within_run(metrics: Dict) -> Dict:
                         }
                     )
                     log_warning(
-                        f"{model_name} ({backend}): accuracy={accuracy:.2f}% "
-                        f"[警告: 精度低于{spec.min_accuracy:g}%阈值]"
+                        f"{model_name} ({backend}): accuracy={accuracy:.2f}% [警告: 精度低于{spec.min_accuracy:g}%阈值]"
                     )
                 if (
                     aclgraph_acc is not None
@@ -586,6 +586,7 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
         return "\n".join(
             [f'<font color="{state_color}"><b>{prefix} xlite {current_date} 精度测试报告</b></font>', *lines]
         )
+
     if total_warnings > 0:
         category_text = " ｜ ".join(
             part
@@ -601,7 +602,9 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
         )
         header_lines.append('🔥 <font color="red"><b>发现精度问题，请关注！</b></font>')
     else:
-        header_lines.append('📊 <font color="green"><b>精度统计</b></font>: 🎉 <font color="green"><b>零警告 · 全线绿灯</b></font> 💯')
+        header_lines.append(
+            '📊 <font color="green"><b>精度统计</b></font>: 🎉 <font color="green"><b>零警告 · 全线绿灯</b></font> 💯'
+        )
         header_lines.append('✅ <font color="green"><b>精度正常</b></font>，所有模型符合要求')
     if report_path:
         header_lines.append(f"报告保存路径: {report_path}")
@@ -613,12 +616,14 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
         warning_lines = list(header_lines)
 
         if xlite_warnings:
-            warning_lines.append(f'📉 <font color="red"><b>xlite 精度显著低于 aclgraph（{len(xlite_warnings)}项）</b></font> 🔥')
+            warning_lines.append(
+                f'📉 <font color="red"><b>xlite 精度显著低于 aclgraph（{len(xlite_warnings)}项）</b></font> 🔥'
+            )
             for w in xlite_warnings:
                 warning_lines.append(
                     f"- {w['model_name']} ({str(w['backend']).lstrip('xlite ')}): "
                     f"xlite={w['xlite_accuracy']:.2f}%, aclgraph={w['aclgraph_accuracy']:.2f}%, "
-                    f"<font color=\"red\"><b>差异 {w['difference']:.2f}%</b></font>（阈值 {w['gap_threshold']:g}%）"
+                    f'<font color="red"><b>差异 {w["difference"]:.2f}%</b></font>（阈值 {w["gap_threshold"]:g}%）'
                 )
             warning_lines.append("")
 
@@ -627,13 +632,15 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
             for w in low_acc_warnings:
                 warning_lines.append(
                     f"- {w['model_name']} ({str(w['backend']).lstrip('xlite ')}): "
-                    f"accuracy=<font color=\"red\"><b>{w['accuracy']:.2f}%</b></font>（阈值 {w['threshold']:g}%）"
+                    f'accuracy=<font color="red"><b>{w["accuracy"]:.2f}%</b></font>（阈值 {w["threshold"]:g}%）'
                 )
             warning_lines.append("")
 
         if nan_warnings:
             warning_lines.append(f'❓ <font color="red"><b>精度结果为 NaN（{len(nan_warnings)}项）</b></font> 🤖')
-            warning_lines.append("> 评测未产生有效精度数值（常见原因：模型输出格式异常、评测解析失败、摘要统计缺失），请检查服务器与评测日志。")
+            warning_lines.append(
+                "> 评测未产生有效精度数值（常见原因：模型输出格式异常、评测解析失败、摘要统计缺失），请检查服务器与评测日志。"
+            )
             for w in nan_warnings:
                 warning_lines.append(f"- {w['model_name']} ({str(w['backend']).lstrip('xlite ')})")
             warning_lines.append("")
@@ -644,7 +651,9 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
     if not has_valid_metric:
         note_lines = list(header_lines)
         note_lines.append('🚨 <font color="red"><b>未获取到有效精度数据</b></font> 👀')
-        note_lines.append("本次测试所有精度指标均为 n/a (未运行) 或 NaN，未产生有效数据，请检查测试日志确认是否存在异常。")
+        note_lines.append(
+            "本次测试所有精度指标均为 n/a (未运行) 或 NaN，未产生有效数据，请检查测试日志确认是否存在异常。"
+        )
         note_lines.append("")
         report_main = _with_title("[1/2]" if report_warnings else "[1/1]", note_lines)
         return report_main, report_warnings
@@ -661,7 +670,7 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
 
             def format_accuracy(value: Optional[float], backend_name: str) -> str:
                 if value is None:
-                    return 'n/a'  # not run
+                    return "n/a"  # not run
                 if math.isnan(value):
                     return '❓<font color="red"><b>NaN</b></font>'
                 has_warning = any(
@@ -672,7 +681,7 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
                 )
                 if has_warning:
                     return f'🔥<font color="red"><b>{value:.2f}</b></font>'
-                return f'{value:.2f}'
+                return f"{value:.2f}"
 
             xlite_full_str = format_accuracy(backends.get("xlite full"), "xlite full")
             xlite_decode_str = format_accuracy(backends.get("xlite decode-only"), "xlite decode-only")
@@ -773,7 +782,9 @@ def main():
     10. 返回退出码
     """
     # 解析命令行参数
-    default_model_args = "--models Qwen3-30B-A3B --tps 8 --eps 1 --dps 1 --datasets ceval --xlite 2 1 0 --broadcast-xlite"
+    default_model_args = (
+        "--models Qwen3-30B-A3B --tps 8 --eps 1 --dps 1 --datasets ceval --xlite 2 1 0 --broadcast-xlite"
+    )
     parser = argparse.ArgumentParser(description="xlite 每日自动化精度测试机器人")
     parser.add_argument(
         "-args",

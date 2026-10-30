@@ -7,6 +7,7 @@ xlite 每日自动化测试机器人共享工具模块
 - 日志输出工具
 - 命令执行工具
 - 容器操作工具
+- 代理设置 (联网命令使用)
 - 代码拉取和项目编译
 - 版本信息获取
 - 通知发送
@@ -19,7 +20,8 @@ xlite 每日自动化测试机器人共享工具模块
         get_xlite_version, get_xlite_commit,
         save_metrics_json, load_metrics_json,
         send_notification, should_disable_xccl, detect_model_device,
-        expand_values, pad_to_last, tile_each
+        expand_values, pad_to_last, tile_each,
+        get_proxy_source_cmd, env_with_proxy
     )
 """
 
@@ -54,9 +56,10 @@ CONTAINER_WHEEL_DIR = "/workspaces/code/opencode/GVirt/xlite/dist"
 WEBHOOK_URL = "http://cid-service.huawei.com/service-ldap/msg/espace"
 # 机器IP地址
 MACHINE_IP = ""
-# 环境类型: blue 或 yellow，默认 yellow
+# 环境类型: blue 或 yellow，默认 yellow (可用 XLITE_ENV_TYPE 环境变量覆盖，便于传递给
+# batch_aisbench 等独立子进程)
 # yellow 环境需要 source /home/env.sh，blue 环境不需要
-ENV_TYPE = "yellow"
+ENV_TYPE = os.environ.get("XLITE_ENV_TYPE", "yellow")
 
 
 # ====================== 日志输出工具类 ======================
@@ -230,6 +233,11 @@ def set_env_type(env_type: str):
     """
     global ENV_TYPE
     ENV_TYPE = env_type
+    # 同步到环境变量，让独立子进程 (如 batch_aisbench.py) 也感知环境类型
+    os.environ["XLITE_ENV_TYPE"] = env_type
+    # 环境类型变化后，已缓存的代理变量不再有效
+    global _PROXY_ENV_VARS
+    _PROXY_ENV_VARS = None
 
 
 def set_machine_ip(ip: str):
@@ -241,6 +249,74 @@ def set_machine_ip(ip: str):
     """
     global MACHINE_IP
     MACHINE_IP = ip
+
+
+# ====================== 代理设置工具 ======================
+# yellow 环境的联网代理脚本路径；blue 环境可直接访问外网，无需 source
+PROXY_ENV_SCRIPT = "/home/env.sh"
+
+_PROXY_ENV_VARS: Optional[Dict[str, str]] = None
+
+
+def get_proxy_source_cmd() -> str:
+    """shell 命令前缀: yellow 环境下先 source 代理脚本，其余环境返回空串.
+
+    仅用于 run_in_container 场景: docker exec 不会继承调用方的环境变量，无法用
+    env_with_proxy() 注入，只能在容器内 source 容器自己的代理脚本::
+
+        run_in_container(container, f"{get_proxy_source_cmd()}git clone ...")
+    """
+    if ENV_TYPE == "yellow" and os.path.exists(PROXY_ENV_SCRIPT):
+        return f"source {PROXY_ENV_SCRIPT} && "
+    return ""
+
+
+def proxy_env() -> Dict[str, str]:
+    """代理脚本设置的环境变量字典 (供 env_with_proxy() 合并，一般不直接使用).
+
+    yellow 环境且代理脚本存在时，在 bash 中 source 该脚本并提取新增/变更的
+    环境变量 (结果缓存)；否则返回空 dict。
+    """
+    global _PROXY_ENV_VARS
+    if _PROXY_ENV_VARS is None:
+        _PROXY_ENV_VARS = {}
+        if ENV_TYPE == "yellow" and os.path.exists(PROXY_ENV_SCRIPT):
+            try:
+                res = subprocess.run(
+                    ["bash", "-c", f"set -a; source {PROXY_ENV_SCRIPT} >/dev/null 2>&1; env -0"],
+                    capture_output=True,
+                )
+                if res.returncode == 0:
+                    current = dict(os.environ)
+                    for entry in res.stdout.split(b"\0"):
+                        key, sep, value = entry.partition(b"=")
+                        if sep:
+                            key_s = key.decode(errors="replace")
+                            value_s = value.decode(errors="replace")
+                            # `_` is the child bash's last-command artifact, not proxy config
+                            if key_s != "_" and current.get(key_s) != value_s:
+                                _PROXY_ENV_VARS[key_s] = value_s
+            except Exception as e:
+                log_warning(f"解析代理脚本 {PROXY_ENV_SCRIPT} 失败: {e}")
+                _PROXY_ENV_VARS = {}
+    return dict(_PROXY_ENV_VARS)
+
+
+def env_with_proxy() -> Dict[str, str]:
+    """当前环境变量 + 代理脚本补充的代理变量，作为 subprocess 调用的 env 使用.
+
+    代理变量以 setdefault 方式合并: 调用方环境中已存在的变量优先 (如启动进程时
+    已指定代理，则沿用之)，代理脚本只补缺。回环地址始终不走代理 (评测客户端需
+    直连本地 vLLM 服务)::
+
+        subprocess.run(["git", "clone", url], env=env_with_proxy())
+    """
+    env = dict(os.environ)
+    for key, value in proxy_env().items():
+        env.setdefault(key, value)
+    env.setdefault("no_proxy", "localhost,127.0.0.1,::1")
+    env.setdefault("NO_PROXY", "localhost,127.0.0.1,::1")
+    return env
 
 
 # ====================== 命令执行工具函数 ======================
@@ -355,9 +431,7 @@ def pull_latest_code() -> bool:
     REPO_COMMIT = os.environ.get("XLITE_REPO_COMMIT", "")
 
     # 根据环境类型决定是否 source env.sh
-    env_prefix = ""
-    if ENV_TYPE == "yellow" and os.path.exists("/home/env.sh"):
-        env_prefix = "source /home/env.sh && "
+    env_prefix = get_proxy_source_cmd()
 
     def clone_repo(container: str) -> None:
         """在指定容器中删除并重新克隆项目仓库, 可选 checkout 到 REPO_COMMIT."""
@@ -456,9 +530,7 @@ def build_project(report_dir: Path) -> Tuple[bool, Optional[Path]]:
     log_info("开始编译项目...")
     try:
         # 根据环境类型决定是否 source env.sh
-        env_prefix = ""
-        if ENV_TYPE == "yellow" and os.path.exists("/home/env.sh"):
-            env_prefix = "source /home/env.sh && "
+        env_prefix = get_proxy_source_cmd()
 
         # 清理共享目录中的 Python 缓存，避免多容器环境冲突
         log_info("清理共享目录中的 Python 缓存...")

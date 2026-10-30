@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from daily_bot_utils import check_subprocess_result
+from daily_bot_utils import check_subprocess_result, env_with_proxy
 
 
 def venv_activate_cmd(ais_bench_dir: Path) -> str:
@@ -36,7 +36,7 @@ def _wget(url: str, target: Path) -> None:
     args: list[str] = ["wget", "-O", str(target), url]
     if os.environ.get("XLITE_AISBENCH_NO_CHECK_CERT", "0") == "1":
         args.insert(1, "--no-check-certificate")
-    check_subprocess_result(subprocess.run(args), f"Failed to download {url}")
+    check_subprocess_result(subprocess.run(args, env=env_with_proxy()), f"Failed to download {url}")
 
 
 def _git_clone_dataset(url: str, target: Path, lfs_exclude: str = "") -> None:
@@ -60,12 +60,14 @@ def _git_clone_dataset(url: str, target: Path, lfs_exclude: str = "") -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         # skip the automatic LFS smudge during clone — it fetches every LFS object, while the
         # explicit `git lfs pull` below fetches only the scope this dataset actually needs
-        env = {**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"}
+        env = {**env_with_proxy(), "GIT_LFS_SKIP_SMUDGE": "1"}
         check_subprocess_result(
             subprocess.run(["git", "clone", "--depth", "1", url, str(target)], env=env),
             f"Failed to clone dataset from {url}",
         )
-    check_subprocess_result(subprocess.run(pull_args), f"Failed to pull LFS assets from {url}")
+    check_subprocess_result(
+        subprocess.run(pull_args, env=env_with_proxy()), f"Failed to pull LFS assets from {url}"
+    )
     res = subprocess.run(ls_args, capture_output=True, text=True)
     check_subprocess_result(res, f"Failed to list LFS assets of {target}")
     # `lfs ls-files` flags a `-` entry both for pointer stubs and for locally modified files
@@ -165,6 +167,7 @@ def _download_bfcl(ais_bench_dir: Path, download_url: str) -> None:
         shell=True,
         executable="/bin/bash",
         cwd=ais_bench_dir,
+        env=env_with_proxy(),
         capture_output=True,
     )
     check_subprocess_result(res, "Failed to install bfcl-eval dependencies")

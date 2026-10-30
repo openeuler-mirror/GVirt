@@ -14,6 +14,7 @@ import os
 import math
 import re
 import shlex
+import shutil
 import signal
 import socket
 import struct
@@ -29,13 +30,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from daily_bot_utils import check_subprocess_result, expand_values, pad_to_last, tile_each
+from daily_bot_utils import check_subprocess_result, env_with_proxy, expand_values, pad_to_last, tile_each
 from dataset_spec import DATASETS, ensure_dataset, parse_dataset_entry, venv_activate_cmd
 
-TMP_DIR = Path(tempfile.gettempdir())  # per-OS temp base path
-CWD = Path(__file__).parent.resolve()  # current working directory
 
-AIS_BENCH_DIR = TMP_DIR / "benchmark"  # path to clone ais_bench repo and store datasets
+CWD = Path(__file__).parent.resolve()  # current working directory
+AIS_BENCH_DIR = Path.home() / "benchmark"  # path to clone ais_bench repo and store datasets
 # CPU-only torch wheel index: ais_bench requires an unpinned `torch`, which PyPI resolves
 # to the multi-GB CUDA build (plus its nvidia-* dependencies) on Linux
 TORCH_INDEX_URL = "https://download.pytorch.org/whl/cpu/"
@@ -257,7 +257,8 @@ def _sync_aisbench_repo(ais_bench_dir: Path, tag: str) -> None:
     """
 
     def git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", "-C", str(ais_bench_dir), *args], capture_output=True)
+        # proxy env merged for the (rare) network path; local git operations ignore it
+        return subprocess.run(["git", "-C", str(ais_bench_dir), *args], capture_output=True, env=env_with_proxy())
 
     added_gitignore_lines = _gitignore_added_lines(ais_bench_dir)
 
@@ -325,7 +326,10 @@ def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = 
     # check if benchmark repo exists; if so, hard-reset it to the wanted tag
     if not ais_bench_dir.exists():
         print(f"Cloning ais_bench repo ({aisbench_git_tag}) to {ais_bench_dir}...")
-        res = subprocess.run(["git", "clone", "-b", aisbench_git_tag, aisbench_git_url, ais_bench_dir])
+        res = subprocess.run(
+            ["git", "clone", "-b", aisbench_git_tag, aisbench_git_url, ais_bench_dir],
+            env=env_with_proxy(),
+        )
         check_subprocess_result(res, "Failed to clone ais_bench repo")
     else:
         print(f"Syncing existing ais_bench repo at {ais_bench_dir} to tag {aisbench_git_tag}...")
@@ -340,6 +344,14 @@ def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = 
         print(f"Creating virtual environment for ais_bench at {venv_abspath}...")
         res = subprocess.run([sys.executable, "-m", "venv", str(venv_abspath)])
         check_subprocess_result(res, "Failed to create virtual environment")
+    else:
+        print(f"Updating virtual environment for ais_bench at {venv_abspath}...")
+        res = subprocess.run([sys.executable, "-m", "venv", "--upgrade", str(venv_abspath)])
+        if res.returncode != 0:
+            # try remove `.venv/bin/python` and then upgrade again
+            shutil.rmtree(venv_abspath / "bin" / "python", ignore_errors=True)
+            res = subprocess.run([sys.executable, "-m", "venv", "--upgrade", str(venv_abspath)])
+        check_subprocess_result(res, "Failed to upgrade virtual environment")
 
     # (re)install ais_bench when the installed package version does not match the synced
     # tag: editable installs keep the version recorded at install time, so re-syncing the
@@ -365,6 +377,7 @@ def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = 
             shell=True,
             executable="/bin/bash",
             cwd=ais_bench_dir,
+            env=env_with_proxy(),
         )
         check_subprocess_result(res, "Failed to install ais_bench requirements")
 
@@ -792,7 +805,9 @@ def run_ais_bench(
             if i > 1 and " --reuse" not in aisbench_cmd and " -r" not in aisbench_cmd:
                 aisbench_cmd += " --reuse"  # add --reuse flag for subsequent attempts
                 print(f"{retry_str}ais_bench failed on previous attempt(s), retrying with --reuse...")
-            process = subprocess.Popen(aisbench_cmd, shell=True, start_new_session=True, executable="/bin/bash")
+            process = subprocess.Popen(
+                aisbench_cmd, shell=True, start_new_session=True, executable="/bin/bash", env=env_with_proxy()
+            )
             _PROCESS_GROUPS.add(process)
             print(f"{retry_str}ais_bench started with PID {process.pid} (completion timeout={timeout}s)...")
             try:

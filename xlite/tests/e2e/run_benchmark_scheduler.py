@@ -277,7 +277,7 @@ def main():
         "--tps 2 4 4 2 8 4 8 8",
         "--dps 2 1 1 2 1 2 1 1",
         "--eps 1 0 1",  # will expand the rest of the eps values with 1
-        "--specs 7~0 3", # the last GLM-4.7 run enabled with MTP + 3 speculative tokens
+        "--specs 7~0 3",  # the last GLM-4.7 run enabled with MTP + 3 speculative tokens
         # per-model dataset entries: the VL model runs mmmu with 256 prompts, the rest default to ceval
         f"--datasets {os.environ.get('XLITE_AISBENCH_DATASETS', 'mmmu:256 ceval')}",
         f"--num-prompts {int(os.environ.get('XLITE_AISBENCH_NUM_PROMPTS', 128))}",
@@ -292,7 +292,7 @@ def main():
     if aisbench_xargs := os.environ.get("XLITE_AISBENCH_EXTRA_ARGS", "").strip().strip('"').strip("'"):
         # `=` form is required: a value starting with `-` (e.g. `--reuse`) would otherwise be
         # parsed as an (unknown) flag of batch_aisbench.py instead of the option's value
-        default_model_args += (f"--extra-aisbench-args=\"{aisbench_xargs}\"",)
+        default_model_args += (f'--extra-aisbench-args="{aisbench_xargs}"',)
     parser.add_argument(
         "-args",
         "--model-args",
