@@ -336,6 +336,19 @@ XModel::~XModel(void)
     (void)aclrtFree(_sync.ptr);
 }
 
+static void DispatchAllReduceSum(XRuntime &rt, XTensor &t, enum commType type, DebugSrcLoc loc)
+{
+    uint32_t arM = 0;
+    bool inGraph = rt.AllReduceSumInGraphActive(type) &&
+                   rt.AllReduceSumInGraphMatch(type, t.dtype, t.numel, &arM);
+    if (inGraph) {
+        rt.AllReduceSumInGraph(t.ptr, t.ptr, arM, static_cast<int>(XDtype2HcclDtype(t.dtype)),
+                               type);
+    } else {
+        XliteOpAllReduceSum(rt, t, t, type, false, loc);
+    }
+}
+
 void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output)
 {
     uint32_t vocabPerTp = DIV_ROUND_UP(_c.vocabSize, _c.defTpSize);
@@ -345,7 +358,7 @@ void XModel::ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, 
 
     XliteOpEmbed(rt, input, embed, start, end, output);
     if (_c.defTpSize > 1) {
-        XliteOpAllReduceSum(rt, output, output, TP, false, DBG_LOC);
+        DispatchAllReduceSum(rt, output, TP, DBG_LOC);
     }
 }
 
@@ -607,7 +620,7 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         if (rt.enableCommOptimize) {
             XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, false, DBG_LOC);
         } else {
-            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
+            DispatchAllReduceSum(rt, hiddenState, TP, DBG_LOC);
         }
     }
     rt.PutTensor(attnOutput);
@@ -667,7 +680,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
                        XTensor(), 1, qHeads * _c.headDim);
         if (_c.defTpSize > 1) {
             // Single AllReduceSum over the packed buffer reduces both variances in place.
-            XliteOpAllReduceSum(rt, packedVar, packedVar, TP, false, DBG_LOC);
+            DispatchAllReduceSum(rt, packedVar, TP, DBG_LOC);
         }
         XliteOpQkRmsNorm(rt, qkv, mhaQNorm[layer], XTensor(), mhaKNorm[layer], XTensor(), qkv,
                          _c.normEps, _c.headDim * qHeads, 1, _c.headDim * kHeads, 1,
@@ -722,7 +735,7 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
         if (rt.enableCommOptimize) {
             XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, false, DBG_LOC);
         } else {
-            XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
+            DispatchAllReduceSum(rt, hiddenState, TP, DBG_LOC);
         }
     }
     rt.PutTensor(qkv);
@@ -864,7 +877,7 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
                 XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, false,
                                      DBG_LOC);
             } else {
-                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
+                DispatchAllReduceSum(rt, hiddenState, TP, DBG_LOC);
             }
         }
     }
@@ -966,7 +979,7 @@ void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<XTensor> &
     rt.PutTensor(oa);
 
     if (_c.defTpSize > 1) {
-        XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
+        DispatchAllReduceSum(rt, hiddenState, TP, DBG_LOC);
     }
 }
 
@@ -1011,7 +1024,7 @@ void XModel::ForwardMLP(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
                 XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, false,
                                      DBG_LOC);
             } else {
-                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
+                DispatchAllReduceSum(rt, hiddenState, TP, DBG_LOC);
             }
         }
     }
@@ -1598,7 +1611,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
                 XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, false,
                                      DBG_LOC);
             } else {
-                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
+                DispatchAllReduceSum(rt, hiddenState, TP, DBG_LOC);
             }
         }
     }
