@@ -215,6 +215,21 @@ public:
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     }
 
+    // Gather the weight tile's columns into [K][64] form: dst[j*64 + c] =
+    // w_f[c*K + j]. The inner tap loop then reduces with a contiguous
+    // multiply-add per tap instead of re-running the same per-tap gather for
+    // every batch element (decode) or token (prefill). Caller must have loaded
+    // w_f and handed off_k to V before calling.
+    __aicore__ inline void GatherWeightCols(__ubuf__ float *dst)
+    {
+        int K = (int)kernelDim;
+        for (int j = 0; j < K; ++j) {
+            vgather((__ubuf__ uint32_t *)(dst + j * kBlock), off_k,
+                    (uint32_t)((uint64_t)w_f + (uint64_t)j * sizeof(float)), 8, 1);
+        }
+        pipe_barrier(PIPE_V);
+    }
+
     // Paged path: vLLM-Ascend GDN conv pages. Per page layout is
     // [stateRows, channels] (stateRows = K-1) with channels contiguous, which
     // is the SD orientation used on Ascend. window = [row0..row(K-2), input];
@@ -245,6 +260,7 @@ public:
                 ConvUbToFloat(w_raw, kChanTile * K, w_f);
                 XLITE_V_FENCE();
             }
+            GatherWeightCols(win_f);
 
             for (int b = 0; b < (int)batch; ++b) {
                 int32_t page = GdnStatePage(stateIndices, cachedLens, b, tableRowStride,
@@ -283,16 +299,12 @@ public:
                     XLITE_V_FENCE();
                 }
 
-                // acc[c] = sum_j s_f[j*64 + c] * w_f[c*K + j]
+                // acc[c] = sum_j s_f[j*64 + c] * win_f[j*64 + c]
                 for (int j = 0; j < K; ++j) {
-                    uint64_t wBase = (uint64_t)w_f + (uint64_t)j * sizeof(float);
-                    vgather((__ubuf__ uint32_t *)r_f, off_k, (uint32_t)wBase, 8, 1);
-                    // off_k was handed to V above; vgather and its consumers are V-pipe ops.
-                    pipe_barrier(PIPE_V);
                     if (j == 0) {
-                        vmul(out_f, s_f, r_f, 1, 1, 1, 1, 8, 8, 8);
+                        vmul(out_f, s_f, win_f, 1, 1, 1, 1, 8, 8, 8);
                     } else {
-                        vmul(calc_buf, s_f + j * kBlock, r_f, 1, 1, 1, 1, 8, 8, 8);
+                        vmul(calc_buf, s_f + j * kBlock, win_f + j * kBlock, 1, 1, 1, 1, 8, 8, 8);
                         pipe_barrier(PIPE_V);
                         vadd(out_f, out_f, calc_buf, 1, 1, 1, 1, 8, 8, 8);
                     }
@@ -387,6 +399,7 @@ public:
                 ConvUbToFloat(w_raw, kChanTile * K, w_f);
                 XLITE_V_FENCE();
             }
+            GatherWeightCols(win_f);
             __gm__ Dtype *base = state + (uint64_t)page * statePageStride;
             if (hasInitial[b]) {
                 for (uint32_t r = 0; r < rows; ++r) {
@@ -416,11 +429,7 @@ public:
                     XLITE_V_FENCE();
                 }
                 for (uint32_t j = 0; j < K; ++j) {
-                    vgather((__ubuf__ uint32_t *)r_f, off_k,
-                            (uint32_t)((uint64_t)w_f + j * sizeof(float)), 8, 1);
-                    // off_k is already visible to V; only order vgather before vmul.
-                    pipe_barrier(PIPE_V);
-                    vmul(calc_buf, s_f + j * kChanTile, r_f, 1, 1, 1, 1, 8, 8, 8);
+                    vmul(calc_buf, s_f + j * kChanTile, win_f + j * kBlock, 1, 1, 1, 1, 8, 8, 8);
                     pipe_barrier(PIPE_V);
                     if (j == 0) {
                         vadds(out_f, calc_buf, 0.0f, 1, 1, 1, 8, 8);
