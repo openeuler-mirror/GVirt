@@ -35,8 +35,7 @@ global_world_size = 1
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     block_size = 128
-    from xlite._C import Runtime, ModelConfig, AttnMeta, AttnMetaV2, AttnHybrid, Model, ScoringFuncSoftmax
-    import numpy as np
+    from xlite._C import Runtime, ModelConfig, AttnMetaV2, AttnHybridGdn, Model, ScoringFuncSoftmax
     from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
 
 
@@ -603,6 +602,21 @@ class MLP(nn.Module):
         return self.down_proj(F.silu(y1) * y3)
 
 
+class SharedExpertMLP(nn.Module):
+    """Full-weight shared expert, replicated per rank; added after the EP
+    all_reduce (cf. deepseek_v3.SharedExpertMLP)."""
+
+    def __init__(self, dim: int, inter_dim: int):
+        super().__init__()
+        self.gate_up_proj = Linear(dim, inter_dim * 2)
+        self.down_proj = Linear(inter_dim, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.gate_up_proj(x)
+        y1, y3 = torch.split(y, y.shape[-1] // 2, dim=-1)
+        return self.down_proj(F.silu(y1) * y3)
+
+
 class Gate(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -671,7 +685,7 @@ class MoE(nn.Module):
         self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args) if self.experts_start_idx <= i < self.experts_end_idx else None
                                       for i in range(self.n_routed_experts)])
         if args.n_shared_experts > 0:
-            self.shared_expert = MLP(args.dim, args.shared_expert_inter_dim)
+            self.shared_expert = SharedExpertMLP(args.dim, args.shared_expert_inter_dim)
             self.shared_expert_gate = Linear(args.dim, 1, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -786,7 +800,6 @@ class Qwen3_5MoE(nn.Module):
         self.freqs_cis = precompute_freqs_cis(args.rotary_dim, args.max_seq_len, args.rope_theta)
         self.multi_task_parallel = (os.getenv("MULTI_TASK_PARALLEL", "0") == "1")
 
-
     @torch.inference_mode()
     def forward_naive(self, tokens: torch.Tensor, start_pos: int = 0):
         _bsz, seqlen = tokens.shape
@@ -844,7 +857,7 @@ class Qwen3_5MoE(nn.Module):
                 args, event = task
                 tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream = args
                 self.xlite_rt.multi_task_parallel = True
-                self.xlite_model.forward_and_get_logits(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream)
+                self.xlite_model.forward_and_get_logits_v2(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, [freqs_cis], logits_indices, logits, stream)
                 event.set()
 
     @torch.inference_mode()
@@ -854,8 +867,8 @@ class Qwen3_5MoE(nn.Module):
         tokens1 = tokens[:, mid:]
         tokens0 = tokens0.contiguous().view(tokens0.size(0), tokens0.size(1))
         tokens1 = tokens1.contiguous().view(tokens1.size(0), tokens1.size(1))
-        attn_meta0 = self.prepare_xlite_attnmeta(tokens0, start_pos)
-        attn_meta1 = self.prepare_xlite_attnmeta(tokens1, start_pos + mid)
+        attn_meta0 = self.prepare_xlite_attnmeta_v2(tokens0, start_pos)
+        attn_meta1 = self.prepare_xlite_attnmeta_v2(tokens1, start_pos + mid)
         stream = torch.npu.current_stream().npu_stream
         logits0 = torch.empty(world_size, tokens0.size(0), self.args.vocab_size // world_size, device=tokens.device)
         logits1 = torch.empty(world_size, tokens1.size(0), self.args.vocab_size // world_size, device=tokens.device)
@@ -1037,6 +1050,8 @@ class Qwen3_5MoE(nn.Module):
 
             if "experts.gate_up_proj" in name:
                 layer_id = int(name.split(".")[2])
+                if layer_id >= len(self.layers):
+                    continue
                 experts_start = moe_ep_id * n_local_experts
                 experts_end = (moe_ep_id + 1) * n_local_experts
                 loaded_weight = loaded_weight[experts_start:experts_end]
@@ -1052,6 +1067,8 @@ class Qwen3_5MoE(nn.Module):
 
             if "experts.down_proj" in name:
                 layer_id = int(name.split(".")[2])
+                if layer_id >= len(self.layers):
+                    continue
                 experts_start = moe_ep_id * n_local_experts
                 experts_end = (moe_ep_id + 1) * n_local_experts
                 loaded_weight = loaded_weight[experts_start:experts_end]
@@ -1094,6 +1111,20 @@ class Qwen3_5MoE(nn.Module):
                 break
 
             if is_attention_weight:
+                continue
+
+            # Shared experts are replicated: load FULL weights per rank.
+            if "shared_expert.gate_proj" in name or "shared_expert.up_proj" in name:
+                weight_type = "gate_proj" if "gate_proj" in name else "up_proj"
+                param_name = name.replace(weight_type, "gate_up_proj")
+                if param_name not in param_dict:
+                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    continue
+                param = param_dict[param_name]
+                half = param.shape[0] // 2
+                offset = 0 if weight_type == "gate_proj" else half
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                param.data[offset:offset + loaded_weight.shape[0]].copy_(loaded_weight)
                 continue
 
             is_gate_up_weight = False
@@ -1142,12 +1173,9 @@ class Qwen3_5MoE(nn.Module):
                                              name, True, True, rank, world_size)
                 continue
 
-            # Handle shared_expert down_proj - RowParallelLinear with special sharding
+            # Shared expert down_proj is replicated too (full [dim, shared_inter] per rank).
             if "shared_expert.down_proj" in name:
-                # For TP: checkpoint: [dim, shared_inter_dim], model: [dim, shared_inter_dim//world_size]
-                # For EP: shared_expert is replicated across EP ranks, only TP sharding applies
-                shard_size = self.args.shared_expert_inter_dim // world_size
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight[:, shard_size * rank:shard_size * (rank + 1)])
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 param.data.copy_(loaded_weight)
                 continue
 
@@ -1183,8 +1211,11 @@ class Qwen3_5MoE(nn.Module):
                         layer.mlp.experts[i].gate_up_proj.weight.data = layer.mlp.experts[i].gate_up_proj.weight.data.transpose(0,1).contiguous()
                         layer.mlp.experts[i].down_proj.weight.data = layer.mlp.experts[i].down_proj.weight.data.transpose(0,1).contiguous()
 
+        # CopyGmToL1 DataCopyParams strides are uint16: vocab > 65535 overflows; keep lm_head ND.
+        head_nz = self.xlite_weight_nz and self.args.vocab_size <= 65536
         if self.xlite_weight_nz:
-            self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
+            if head_nz:
+                self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
             for layer_id, layer in enumerate(self.layers):
                 if layer.is_full_attention:
                     # q/k/v stay ND until packed as [Q|K|V|Gate] in init_xlite_model.
@@ -1204,7 +1235,7 @@ class Qwen3_5MoE(nn.Module):
                     if hasattr(layer.mlp, 'shared_expert'):
                         layer.mlp.shared_expert.gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.shared_expert.gate_up_proj.weight)
                         layer.mlp.shared_expert.down_proj.weight.data = matrix_nd2nz(layer.mlp.shared_expert.down_proj.weight)
-                        layer.mlp.shared_expert_gate.weight.data = matrix_nd2nz(layer.mlp.shared_expert_gate.weight)
+                        # se_gate is [1, H]: C++ matmul assumes ND; NZ garbles the logits.
             torch.npu.empty_cache()
 
         if forward_backend == "xlite":
@@ -1253,7 +1284,6 @@ class Qwen3_5MoE(nn.Module):
         config.n_act_experts = args.n_activated_experts
         config.intermediate_size = args.inter_dim
         config.moe_intermediate_size = args.moe_inter_dim
-        config.shared_expert_intermediate_size = args.shared_expert_inter_dim
         config.def_tp_size = self.tp_size
         config.def_dp_size = self.dp_size
         config.moe_ep_size = args.moe_ep_size
@@ -1262,7 +1292,7 @@ class Qwen3_5MoE(nn.Module):
         config.max_seq_len = args.max_seq_len
         config.max_batch_size = args.max_batch_size
         config.max_num_batched_tokens = args.max_num_batched_tokens
-        config.attn_type = AttnHybrid
+        config.attn_type = AttnHybridGdn
         config.full_attention_interval = args.full_attention_interval
         config.linear_num_k_heads = args.linear_num_key_heads
         config.linear_num_v_heads = args.linear_num_value_heads
@@ -1429,32 +1459,21 @@ class Qwen3_5MoE(nn.Module):
                 kv_size += block_num * head_num * block_size * args.head_dim * 2 * k.element_size()
             else:
                 conv_state = torch.zeros(
-                    args.max_batch_size, conv_dim, args.linear_conv_kernel_dim,
+                    args.max_batch_size + 1, args.linear_conv_kernel_dim - 1, conv_dim,
                     dtype=torch.get_default_dtype(), device="npu")
                 ssm_state = torch.zeros(
-                    args.max_batch_size, n_local_v, args.linear_key_head_dim, args.linear_value_head_dim,
+                    args.max_batch_size + 1, n_local_v, args.linear_value_head_dim, args.linear_key_head_dim,
                     dtype=torch.get_default_dtype(), device="npu")
                 self.xlite_kv_cache.append([conv_state, ssm_state])
                 kv_size += conv_state.numel() * conv_state.element_size()
                 kv_size += ssm_state.numel() * ssm_state.element_size()
         return kv_size
 
-    def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
-        batch = tokens.size(0)
-        seqlen = tokens.size(1)
-        step = (self.args.max_seq_len + block_size - 1) // block_size
-        block_num = (seqlen + start_pos + block_size - 1) // block_size
-        attn_meta = AttnMeta()
-        attn_meta.lens = [seqlen] * batch
-        attn_meta.cached_lens = [start_pos] * batch
-        batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-        block_indices = np.arange(block_num, dtype=np.uint32)
-        attn_meta.block_tables_cpu = batch_indices * step + block_indices
-        attn_meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
-            .repeat(batch).to(tokens.device)
-        return attn_meta
-
     def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
+        # Hybrid family-slot contract: stable nonzero mamba state pages per
+        # request; C++ derives the per-layer paged GDN operands internally.
+        pages = torch.arange(1, tokens.size(0) + 1, dtype=torch.int32)
         return prepare_xlite_attnmeta_v2(
-            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size]
+            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size],
+            gdn_state_pages=pages.to(tokens.device),
         )

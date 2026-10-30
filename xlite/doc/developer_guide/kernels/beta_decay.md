@@ -88,3 +88,10 @@ fp32 直接在计算缓冲上搬运;fp16/bf16 先搬入 conv 缓冲再 `vconv_f1
 - `num_v_heads` 非 32B 块整数倍时,`num` 向上取整搬运(尾部会多搬补齐字节,但向量计算 `calcRepeat` 覆盖有效元素;写出同样按对齐块数);
 - bsz × seqlen 不是 block_num 整数倍时轮转条件自然跳过空闲核;
 - 每行元素数(num_v_heads)须 ≤ 向量一次 repeat 能覆盖的范围(calcRepeat 由 num 派生,16 头场景远在限内)。
+
+## FP32 native gate 变体
+
+当 activation 为 BF16/FP16 且 g 输出为 FP32 时，host 选择 `beta_decay_native_*`。
+beta 保留 activation dtype；A_log 和 dt_bias 可分别为 activation dtype 或 FP32，
+按真实 dtype 读取。原同精度入口保留，FP32 activation 使用原 FP32 实例。
+`tests/kernels/beta_decay_native.py` 覆盖这些组合。

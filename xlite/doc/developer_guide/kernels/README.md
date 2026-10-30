@@ -19,6 +19,7 @@
 | add_bias | [add_bias.md](add_bias.md) | 逐元素加 bias |
 | muls | [muls.md](muls.md) | 逐元素标量乘 |
 | silu_and_mul | [silu_and_mul.md](silu_and_mul.md) | SiLU 激活与门控乘融合 |
+| silu_gate_mul | [sigmoid_gate_mul.md](sigmoid_gate_mul.md) | FP32 norm 与 SiLU gate 融合 |
 | sigmoid_gate_mul | [sigmoid_gate_mul.md](sigmoid_gate_mul.md) | Sigmoid 门控乘融合 |
 | cast | [cast.md](cast.md) | dtype 类型转换 |
 | softmax | [softmax.md](softmax.md) | Softmax |
@@ -46,8 +47,7 @@
 | matmul | [matmul.md](matmul.md) | 矩阵乘(含 int8/int4 量化变体) |
 | fusion_operator_matmul_dequant_pipeline | [fusion_operator_matmul_dequant_pipeline.md](fusion_operator_matmul_dequant_pipeline.md) | W8A8 matmul+dequant 跨核流水融合(AIC 算 / AIV 反量化,单 MIX kernel) |
 | group_matmul | [group_matmul.md](group_matmul.md) | 分组矩阵乘(MoE) |
-| conv1d_and_silu | [conv1d_and_silu.md](conv1d_and_silu.md) | 1D 卷积与 SiLU 融合 |
-| conv1d_and_silu_token | [conv1d_and_silu_token.md](conv1d_and_silu_token.md) | token 维 1D 卷积与 SiLU 融合 |
+| conv1d_and_silu_paged | [conv1d_and_silu_paged.md](conv1d_and_silu_paged.md) | 原生分页 Conv decode/prefill |
 
 ### 注意力
 
@@ -68,7 +68,8 @@
 | compressor | [compressor.md](compressor.md) | DeepSeek-V4 KV 压缩(overlap_transform + softmax 加权求和 + RMSNorm + RoPE + cache 写) |
 | einsum_mht_hdt_mhd | [einsum_mht_hdt_mhd.md](einsum_mht_hdt_mhd.md) | 线性注意力 einsum |
 | einsum_mht_htd_mhd | [einsum_mht_htd_mhd.md](einsum_mht_htd_mhd.md) | 线性注意力 einsum |
-| recurrent_gated_delta_rule | [recurrent_gated_delta_rule.md](recurrent_gated_delta_rule.md) | 门控 Delta Rule 循环核 |
+| recurrent_gated_delta_rule_paged | [recurrent_gated_delta_rule_paged.md](recurrent_gated_delta_rule_paged.md) | 原生 VK 分页 GDN decode/prefill |
+| gdn_prefill_paged | [gdn_prefill_paged.md](gdn_prefill_paged.md) | packed Prefill 契约与验证 |
 
 ### 位置编码与 embedding
 

@@ -85,3 +85,11 @@ sigmoid 用 `1 / (1 + exp(-x))` 分解（`csrc/kernels/sigmoid_gate_mul.h` 的 `
 - tile 对齐：`tile = ROUND_DOWN(min(dim, 2048), 64)`；若 dim < 64 则 tile 取 64（此时 tile > dim，按实际 calcNum 处理）；
 - 行内尾 tile：`calcNum = min(dim - col, tile)`，搬运与写回均用精确字节数 `calcNum * sizeof(Dtype)`，`CopyGmToUbufAligned`/`CopyUbufToGmAligned` 按 32B/2B/1B 对齐自动选择 DMA 原语；
 - repeat 数按 `DIV_ROUND_UP(calcNum, 64)` 计算，UB 中 padding 数据不参与写回。
+
+## SiLU gate 入口
+
+`silu_gate_mul(rt, normed, gate, out)` 计算 `out = normed * silu(gate)`。
+三个张量为连续同形 `[T,D]`，normed 为 FP32，gate/out 为 BF16 或 FP16。
+FP32 norm 保留到 gate 乘法后再舍入，不支持 sigmoid 入口的单列广播。
+实现复用本 header，实例为 `silu_gate_mul_{bfloat16_t,float16_t}.cpp`。
+该入口不改变 `sigmoid_gate_mul` 的数学语义。测试见 `tests/kernels/silu_gate_mul.py`。

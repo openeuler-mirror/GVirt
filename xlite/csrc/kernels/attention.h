@@ -52,8 +52,8 @@ public:
         this->groupMemSize = headNumInGroup * headSize;
 
         this->qk[0].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * XLITE_MAX_M0 * maxSeqLen);
-        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) + block_idx * XLITE_MAX_M0 * maxSeqLen +
-                                    block_num * XLITE_MAX_M0 * maxSeqLen);
+        this->qk[1].SetGlobalBuffer(((__gm__ Dtype *)qk) +
+                                    (block_idx + block_num) * XLITE_MAX_M0 * maxSeqLen);
 
         aicHelper.Init(nHeads, nKVHeads, headNumInGroup, headSize, blockSize, kCacheStride,
                        vCacheStride, maxSeqLen, this->zeroGm);

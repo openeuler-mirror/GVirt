@@ -6,6 +6,7 @@
 #include <torch/torch.h>
 #include <torch/extension.h>
 #include <optional>
+#include <initializer_list>
 #include "xlite.h"
 #include "core_assigner.h"
 #include "op.h"
@@ -27,9 +28,11 @@ struct CModelAttnMetaV2 {
     at::Tensor positions;      // [batchedTokens] or [num_dims, batchedTokens] (mrope) int64 device
     at::Tensor lens;           // [batch] int32 device
     at::Tensor cachedLens;     // [batch] int32 device
-    at::Tensor queryStartLoc;  // [batch] int32 device, prefix-sum of lens
-    std::vector<at::Tensor> slotMapping;  // [batchedTokens] int32 device, per-kv-cache
-    std::vector<at::Tensor> blockTables;  // [batch, maxNumBlocks] int32 device, per-kv-cache
+    at::Tensor queryStartLoc;  // [batch+1] int32 device, 0-prefixed prefix-sum of lens
+    std::vector<at::Tensor> slotMapping;  // hybrid: one main-KV table;
+                                          // per-cache: one per blockSizes entry
+    std::vector<at::Tensor> blockTables;  // hybrid: [0]=main, [1..]=mamba [+ tail];
+                                          // per-cache: one per blockSizes entry
 };
 
 class _CModel
@@ -249,7 +252,7 @@ static void InitOptionalXTensor(XTensor &out, at::Tensor &in, DebugSrcLoc loc)
 static std::vector<uint32_t> ResolveLayerTypes(const XModelConfig &c)
 {
     std::vector<uint32_t> layerTypes;
-    if (c.attnType != XMODEL_ATTN_HYBRID) {
+    if (!IsHybridAttn(c.attnType)) {
         return layerTypes;
     }
     if (c.fullAttentionInterval == 0) {
@@ -266,7 +269,7 @@ static std::vector<uint32_t> ResolveLayerTypes(const XModelConfig &c)
 static bool IsConfigLayerFullAttention(XModelConfig &c, uint32_t layer,
                                        const std::vector<uint32_t> &layerTypes)
 {
-    if (c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(c.attnType)) {
         return layerTypes[layer] == XMODEL_LAYER_ATTN_FULL;
     }
     return c.attnType == XMODEL_ATTN_MHA;
@@ -337,7 +340,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             "num of layers must be greater than or equal to num of dense layers");
     }
 
-    if (c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(c.attnType)) {
         if (c.linearNumKHeads == 0 || c.linearNumVHeads == 0 || c.linearKeyHeadDim == 0 ||
             c.linearValueHeadDim == 0 || c.linearConvKernelDim == 0) {
             throw std::invalid_argument("Linear attention config is incomplete");
@@ -359,7 +362,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     bool isAttnMLA = c.attnType == XMODEL_ATTN_MLA;
     bool isAttnMHA = c.attnType == XMODEL_ATTN_MHA;
     bool isAttnDSA = c.attnType == XMODEL_ATTN_DSA;
-    bool isAttnHybrid = c.attnType == XMODEL_ATTN_HYBRID;
+    bool isAttnHybrid = IsHybridAttn(c.attnType);
     bool isAttnCxA = c.attnType == XMODEL_ATTN_CXA;
     const std::vector<LayersCheckEntry> layersTable = {
         // Tensors, Message, allowEmpty, Predicate
@@ -543,7 +546,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         InitXTensor(_model->mlpNorm[i], mlpNorm[i], DBG_LOC);
 
         bool isFullLayer = IsConfigLayerFullAttention(c, i, layerTypes);
-        if (c.attnType == XMODEL_ATTN_HYBRID) {
+        if (IsHybridAttn(c.attnType)) {
             if (isFullLayer) {
                 InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
                                  attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true,
@@ -838,9 +841,10 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
-        // caches so far — C8 DSA int8 index/scale caches stay contiguous).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
+        // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
+        // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
+        bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
+                          attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
@@ -1051,9 +1055,10 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
-        // caches so far — C8 DSA int8 index/scale caches stay contiguous).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
+        // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
+        // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
+        bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
+                          attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
@@ -1142,9 +1147,10 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                                      std::to_string(i));
         }
         // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (MHA/GQA k/v, MLA k/pe, and non-C8 DSA
-        // caches so far — C8 DSA int8 index/scale caches stay contiguous).
-        bool allowPitch = attnType == XMODEL_ATTN_MHA || attnType == XMODEL_ATTN_MLA ||
+        // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
+        // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
+        bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
+                          attnType == XMODEL_ATTN_MLA ||
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
@@ -2580,40 +2586,41 @@ void Transpose_1_2(XRuntime &rt, at::Tensor &input, at::Tensor &output)
     rt.Synchronize();
 }
 
-void LinearAttConv1dAndSiLU(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_state,
-                            at::Tensor &weight, at::Tensor &output,
-                            std::optional<at::Tensor> query_start_loc = std::nullopt,
-                            std::optional<at::Tensor> query_lens = std::nullopt)
+static void CheckGdnDevices(XRuntime &rt, std::initializer_list<const at::Tensor *> tensors)
 {
-    XTensor _mix_qkv, _conv_state, _weight, _output, _start, _lens;
-    InitXTensor(_mix_qkv, mix_qkv, DBG_LOC);
-    InitXTensor(_conv_state, conv_state, DBG_LOC);
-    InitXTensor(_weight, weight, DBG_LOC);
-    InitXTensor(_output, output, DBG_LOC);
-    XTensor *startPtr = nullptr;
-    XTensor *lensPtr = nullptr;
-    if (query_start_loc.has_value() && query_lens.has_value() && query_start_loc->defined() &&
-        query_lens->defined() && query_start_loc->numel() > 0 && query_lens->numel() > 0) {
-        InitXTensor(_start, *query_start_loc, DBG_LOC);
-        InitXTensor(_lens, *query_lens, DBG_LOC);
-        startPtr = &_start;
-        lensPtr = &_lens;
+    rt.SetCurrentContext();
+    int32_t device;
+    CHECK_ACL(aclrtGetDevice(&device));
+    for (const at::Tensor *tensor : tensors) {
+        if (tensor != nullptr && (tensor->device().type() != c10::DeviceType::PrivateUse1 ||
+                                  tensor->device().index() != device)) {
+            throw std::runtime_error("paged GDN tensors must be on the runtime NPU");
+        }
     }
-    XliteOpConv1dAndSiLU(rt, _conv_state, _mix_qkv, _weight, _output, /*updateState=*/true,
-                         startPtr, lensPtr);
-    rt.Synchronize();
 }
 
-void LinearAttConv1dAndSiLUToken(XRuntime &rt, at::Tensor &mix_qkv, at::Tensor &conv_state,
-                                 at::Tensor &weight, at::Tensor &output, int64_t seq_len)
+void LinearAttConv1dAndSiLUPaged(XRuntime &rt, at::Tensor &input, at::Tensor &state,
+                                 at::Tensor &weight, at::Tensor &output, at::Tensor &indices,
+                                 const std::optional<at::Tensor> &cachedLens,
+                                 uint32_t stateBlockSize, bool aligned)
 {
-    XTensor _mix_qkv, _conv_state, _weight, _output;
-    InitXTensor(_mix_qkv, mix_qkv, DBG_LOC);
-    InitXTensor(_conv_state, conv_state, DBG_LOC);
-    InitXTensor(_weight, weight, DBG_LOC);
-    InitXTensor(_output, output, DBG_LOC);
-    XliteOpConv1dAndSiLUToken(rt, _conv_state, _mix_qkv, _weight, _output,
-                              static_cast<uint32_t>(seq_len), /*updateState=*/true);
+    CheckGdnDevices(rt, {&input, &state, &weight, &output, &indices,
+                         cachedLens.has_value() ? &cachedLens.value() : nullptr});
+    if (!input.is_contiguous() || !weight.is_contiguous() || !output.is_contiguous()) {
+        throw std::runtime_error("paged conv requires contiguous activation, weight and output");
+    }
+    XTensor x, c, w, y, pages;
+    InitXTensor(x, input);
+    InitXTensor(c, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(w, weight);
+    InitXTensor(y, output);
+    InitXTensor(pages, indices, DBG_LOC, /*allowPitched=*/true);
+    XTensor cached;
+    if (cachedLens.has_value()) {
+        InitXTensor(cached, cachedLens.value());
+    }
+    XliteOpConv1dAndSiLUPaged(rt, c, x, w, y, pages, cachedLens.has_value() ? &cached : nullptr,
+                              stateBlockSize, aligned);
     rt.Synchronize();
 }
 
@@ -2750,32 +2757,32 @@ void BetaDecay(XRuntime &rt, at::Tensor &b, at::Tensor &a, at::Tensor &A_log, at
     rt.Synchronize();
 }
 
-void RecurrentGatedDeltaRule(XRuntime &rt, at::Tensor &query, at::Tensor &key, at::Tensor &value,
-                             at::Tensor &beta, at::Tensor &g, at::Tensor &state, at::Tensor &out,
-                             uint32_t batch, uint32_t seqlen, uint32_t num_heads, uint32_t k_dim,
-                             uint32_t v_dim,
-                             std::optional<at::Tensor> query_start_loc = std::nullopt,
-                             std::optional<at::Tensor> query_lens = std::nullopt)
+void RecurrentGatedDeltaRulePaged(XRuntime &rt, at::Tensor &query, at::Tensor &key,
+                                  at::Tensor &value, at::Tensor &beta, at::Tensor &g,
+                                  at::Tensor &state, at::Tensor &out, at::Tensor &state_indices,
+                                  uint32_t num_key_heads, uint32_t num_value_heads, uint32_t k_dim,
+                                  uint32_t v_dim, const std::optional<at::Tensor> &cachedLens,
+                                  uint32_t stateBlockSize, bool aligned)
 {
-    XTensor _query, _key, _value, _beta, _g, _state, _out, _start, _lens;
-    InitXTensor(_query, query, DBG_LOC);
-    InitXTensor(_key, key, DBG_LOC);
-    InitXTensor(_value, value, DBG_LOC);
-    InitXTensor(_beta, beta, DBG_LOC);
-    InitXTensor(_g, g, DBG_LOC);
-    InitXTensor(_state, state, DBG_LOC);
-    InitXTensor(_out, out, DBG_LOC);
-    XTensor *startPtr = nullptr;
-    XTensor *lensPtr = nullptr;
-    if (query_start_loc.has_value() && query_lens.has_value() && query_start_loc->defined() &&
-        query_lens->defined() && query_start_loc->numel() > 0 && query_lens->numel() > 0) {
-        InitXTensor(_start, *query_start_loc, DBG_LOC);
-        InitXTensor(_lens, *query_lens, DBG_LOC);
-        startPtr = &_start;
-        lensPtr = &_lens;
+    CheckGdnDevices(rt, {&query, &key, &value, &beta, &g, &state, &out, &state_indices,
+                         cachedLens.has_value() ? &cachedLens.value() : nullptr});
+    XTensor q, k, v, b, decay, s, o, indices;
+    InitXTensor(q, query);
+    InitXTensor(k, key);
+    InitXTensor(v, value);
+    InitXTensor(b, beta);
+    InitXTensor(decay, g);
+    InitXTensor(s, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(o, out);
+    InitXTensor(indices, state_indices, DBG_LOC, /*allowPitched=*/true);
+    XTensor cached;
+    if (cachedLens.has_value()) {
+        InitXTensor(cached, cachedLens.value());
     }
-    XliteOpRecurrentGatedDeltaRule(rt, _query, _key, _value, _beta, _g, _state, _out, batch, seqlen,
-                                   num_heads, k_dim, v_dim, startPtr, lensPtr);
+    uint32_t batch = query.dim() == 2 ? static_cast<uint32_t>(query.size(0)) : 0;
+    XliteOpRecurrentGatedDeltaRulePaged(
+        rt, q, k, v, b, decay, s, o, &indices, batch, num_key_heads, num_value_heads, k_dim, v_dim,
+        cachedLens.has_value() ? &cached : nullptr, stateBlockSize, aligned);
     rt.Synchronize();
 }
 
@@ -2875,6 +2882,57 @@ void HcPre(XRuntime &rt, at::Tensor &xResid, at::Tensor &pre, at::Tensor &output
     InitXTensor(_pre, pre, DBG_LOC);
     InitXTensor(_output, output, DBG_LOC);
     XliteOpHcPre(rt, _xResid, _pre, _output, m, hcMult, hidden);
+    rt.Synchronize();
+}
+
+void SiluGateMul(XRuntime &rt, at::Tensor &normed, at::Tensor &gate, at::Tensor &out)
+{
+    XTensor n, g, o;
+    InitXTensor(n, normed);
+    InitXTensor(g, gate);
+    InitXTensor(o, out);
+    XliteOpSiluGateMul(rt, n, g, o);
+    rt.Synchronize();
+}
+
+void RecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, at::Tensor &query, at::Tensor &key,
+                                         at::Tensor &value, at::Tensor &beta, at::Tensor &g,
+                                         at::Tensor &state, at::Tensor &out, at::Tensor &indices,
+                                         at::Tensor &starts, at::Tensor &initial, uint32_t kh,
+                                         uint32_t vh, uint32_t kd, uint32_t vd)
+{
+    CheckGdnDevices(rt,
+                    {&query, &key, &value, &beta, &g, &state, &out, &indices, &starts, &initial});
+    XTensor q, k, v, b, decay, st, o, ids, bounds, init;
+    InitXTensor(q, query);
+    InitXTensor(k, key);
+    InitXTensor(v, value);
+    InitXTensor(b, beta);
+    InitXTensor(decay, g);
+    InitXTensor(st, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(o, out);
+    InitXTensor(ids, indices);
+    InitXTensor(bounds, starts);
+    InitXTensor(init, initial);
+    XliteOpRecurrentGatedDeltaRulePrefillPaged(rt, q, k, v, b, decay, st, o, ids, bounds, init, kh,
+                                               vh, kd, vd);
+    rt.Synchronize();
+}
+
+void Conv1dAndSiLUPrefillPaged(XRuntime &rt, at::Tensor &input, at::Tensor &state,
+                               at::Tensor &weight, at::Tensor &output, at::Tensor &indices,
+                               at::Tensor &starts, at::Tensor &initial)
+{
+    CheckGdnDevices(rt, {&input, &state, &weight, &output, &indices, &starts, &initial});
+    XTensor x, st, w, o, ids, bounds, init;
+    InitXTensor(x, input);
+    InitXTensor(st, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(w, weight);
+    InitXTensor(o, output);
+    InitXTensor(ids, indices);
+    InitXTensor(bounds, starts);
+    InitXTensor(init, initial);
+    XliteOpConv1dAndSiLUPrefillPaged(rt, st, x, w, o, ids, bounds, init);
     rt.Synchronize();
 }
 
@@ -3001,7 +3059,8 @@ PYBIND11_MODULE(_C, m)
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
         .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
         .value("AttnDSA", XModelAttnType::XMODEL_ATTN_DSA)
-        .value("AttnHybrid", XModelAttnType::XMODEL_ATTN_HYBRID)
+        .value("AttnHybridGdn", XModelAttnType::XMODEL_ATTN_HYBRID_GDN)
+        .value("AttnHybridKda", XModelAttnType::XMODEL_ATTN_HYBRID_KDA)
         .value("AttnCxA", XModelAttnType::XMODEL_ATTN_CXA)
         .export_values();
 
@@ -3432,12 +3491,10 @@ PYBIND11_MODULE(_C, m)
           py::arg("b"), py::arg("a"), py::arg("m"), py::arg("n"), py::arg("v"), py::arg("h"),
           py::arg("k"));
     m.def("transpose_1_2", &Transpose_1_2, py::arg("rt"), py::arg("input"), py::arg("output"));
-    m.def("linear_att_conv_and_silu", &LinearAttConv1dAndSiLU, py::arg("rt"), py::arg("mix_qkv"),
-          py::arg("conv_state"), py::arg("weight"), py::arg("output"),
-          py::arg("query_start_loc") = py::none(), py::arg("query_lens") = py::none());
-    m.def("linear_att_conv_and_silu_token", &LinearAttConv1dAndSiLUToken, py::arg("rt"),
+    m.def("linear_att_conv_and_silu_paged", &LinearAttConv1dAndSiLUPaged, py::arg("rt"),
           py::arg("mix_qkv"), py::arg("conv_state"), py::arg("weight"), py::arg("output"),
-          py::arg("seq_len"));
+          py::arg("state_indices"), py::arg("cached_lens") = std::nullopt,
+          py::arg("state_block_size") = 0, py::arg("aligned") = false);
     m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::arg("outputs"));
     m.def("concat", &Concat, py::arg("rt"), py::arg("inputs"), py::arg("out"));
     m.def("concat_col", &ConcatCol, py::arg("rt"), py::arg("inputs"), py::arg("out"));
@@ -3446,11 +3503,15 @@ PYBIND11_MODULE(_C, m)
     m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
           py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
           py::arg("num_v_heads"));
-    m.def("recurrent_gated_delta_rule", &RecurrentGatedDeltaRule, py::arg("rt"), py::arg("query"),
-          py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"), py::arg("state"),
-          py::arg("out"), py::arg("batch"), py::arg("seqlen"), py::arg("num_heads"),
-          py::arg("k_dim"), py::arg("v_dim"), py::arg("query_start_loc") = py::none(),
-          py::arg("query_lens") = py::none());
+    m.def("silu_gate_mul", &SiluGateMul);
+    m.def("recurrent_gated_delta_rule_prefill_paged", &RecurrentGatedDeltaRulePrefillPaged);
+    m.def("conv1d_and_silu_prefill_paged", &Conv1dAndSiLUPrefillPaged);
+    m.def("recurrent_gated_delta_rule_paged", &RecurrentGatedDeltaRulePaged, py::arg("rt"),
+          py::arg("query"), py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"),
+          py::arg("state"), py::arg("out"), py::arg("state_indices"), py::arg("num_key_heads"),
+          py::arg("num_value_heads"), py::arg("k_dim"), py::arg("v_dim"),
+          py::arg("cached_lens") = std::nullopt, py::arg("state_block_size") = 0,
+          py::arg("aligned") = false);
     m.def("einsum_mht_hdt_mhd", &EinsumMhtHdtMhd, "einsum_mht_hdt_mhd", py::arg("rt"),
           py::arg("mht"), py::arg("hdt"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
           py::arg("d"), py::arg("weight_nz") = false);

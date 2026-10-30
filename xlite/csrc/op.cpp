@@ -518,6 +518,11 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
     if (IsDummyRuntime(rt)) {
         return;
     }
+    // embed kernel reads ids as int32; an int64 tensor would be silently misparsed.
+    if (in.dtype != INT32) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(in) + " embed ids must be INT32 (got dtype " +
+                                 std::to_string(static_cast<int>(in.dtype)) + ")");
+    }
     KERNEL_PTR_TYPE(embed_kernel) * launchKernel;
     if (EachXDtype(FP16, embed, out)) {
         launchKernel = aclrtlaunch_embed_kernel_float16_t;
@@ -2342,169 +2347,71 @@ void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output)
                  input.shape[2]);
 }
 
-void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
-                          XTensor &output, bool updateState, XTensor *queryStartLoc,
-                          XTensor *queryLens)
+static void CheckGdnPageMetadata(const XTensor &indices, const XTensor *cachedLens, uint32_t batch,
+                                 uint32_t blockSize)
 {
-    if (IsDummyRuntime(rt)) {
-        return;
-    }
-    bool packed = queryStartLoc != nullptr && queryLens != nullptr;
-    uint32_t kernelDim = weight.shape.size() >= 3 ? weight.shape[2] : weight.shape.back();
-    uint32_t batch;
-    uint32_t channels;
-    uint32_t seqLen = 0;
-
-    if (packed) {
-        if (state.shape.size() != 3 || input.shape.size() != 2 || output.shape.size() != 2) {
-            throw std::runtime_error(
-                "XliteOpConv1dAndSiLU: packed mode expects state [B,C,K] and input/output [T,C]");
-        }
-        if (queryStartLoc->dtype != INT32 || queryLens->dtype != INT32) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: queryStartLoc/queryLens must be int32");
-        }
-        batch = state.shape[0];
-        channels = state.shape[1];
-        if (queryStartLoc->numel < batch || queryLens->numel < batch) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: queryStartLoc/queryLens too small");
-        }
-        if (batch > 256) {
-            throw std::runtime_error(
-                "XliteOpConv1dAndSiLU: packed batch exceeds kernel meta limit");
-        }
-        if (input.shape[1] != channels || output.shape[1] != channels ||
-            input.shape[0] != output.shape[0]) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: packed input/output channel mismatch");
-        }
-        if (state.shape[2] != kernelDim) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: state last dim != kernelDim");
-        }
-        if (weight.shape[0] != channels) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: weight channels mismatch");
-        }
-        if (kernelDim > 16) {
-            throw std::runtime_error(
-                "XliteOpConv1dAndSiLU: require kernelDim<=16 for fused kernel");
-        }
+    bool valid = indices.dtype == INT32;
+    if (cachedLens == nullptr) {
+        valid = valid && indices.shape.size() == 1 && indices.numel >= batch &&
+                indices.stride == std::vector<size_t>{1};
     } else {
-        if (state.shape.size() != 3 || input.shape.size() != 3 || output.shape.size() != 3) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: state/input/output must be 3D [B,*,C]");
-        }
-        if (state.shape[0] != input.shape[0] || output.shape[0] != input.shape[0]) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: batch shape mismatch");
-        }
-        if (state.shape[1] != input.shape[2] || output.shape[2] != input.shape[2]) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: channel shape mismatch");
-        }
-        if (output.shape[1] != input.shape[1]) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: seq shape mismatch");
-        }
-        if (state.shape[2] != kernelDim) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: state last dim != kernelDim");
-        }
-        if (weight.shape[0] != input.shape[2]) {
-            throw std::runtime_error("XliteOpConv1dAndSiLU: weight channels mismatch");
-        }
-        batch = input.shape[0];
-        channels = input.shape[2];
-        seqLen = input.shape[1];
-        if (kernelDim > 16 || seqLen > 4096) {
-            throw std::runtime_error(
-                "XliteOpConv1dAndSiLU: require kernelDim<=16 and seqLen<=4096 for fused kernel");
-        }
+        valid = valid && blockSize != 0 && cachedLens->dtype == INT32 &&
+                cachedLens->shape.size() == 1 && cachedLens->numel >= batch &&
+                cachedLens->stride == std::vector<size_t>{1} && indices.shape.size() == 2 &&
+                indices.shape[0] >= batch && indices.shape[1] > 0 &&
+                indices.shape[1] <= UINT32_MAX && indices.stride.size() == 2 &&
+                indices.stride[1] == 1 && indices.stride[0] >= indices.shape[1];
     }
-
-    KERNEL_PTR_TYPE(conv1d_and_silu) * launchKernel;
-    if (EachXDtype(FP32, state, input, weight, output)) {
-        launchKernel = aclrtlaunch_conv1d_and_silu_float;
-    } else if (EachXDtype(FP16, state, input, weight, output)) {
-        launchKernel = aclrtlaunch_conv1d_and_silu_float16_t;
-    } else if (EachXDtype(BF16, state, input, weight, output)) {
-        launchKernel = aclrtlaunch_conv1d_and_silu_bfloat16_t;
-    } else {
-        std::string err_str =
-            DBG_PREFIX + XT_STR(state) + XT_STR(input) + XT_STR(weight) + XT_STR(output);
-        throw std::runtime_error(err_str + "not supported!");
+    if (!valid) {
+        throw std::runtime_error(
+            "GDN requires resolved indices or raw block tables with cached lens");
     }
-
-    launchKernel(rt.aivNum, rt.stream, state.ptr, input.ptr, weight.ptr, output.ptr, batch,
-                 channels, seqLen, kernelDim, updateState ? 1u : 0u,
-                 packed ? queryStartLoc->ptr : nullptr, packed ? queryLens->ptr : nullptr);
 }
 
-void XliteOpConv1dAndSiLUToken(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
-                               XTensor &output, uint32_t seqLen, bool updateState)
+void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
+                               XTensor &output, XTensor &stateIndices, XTensor *cachedLens,
+                               uint32_t stateBlockSize, bool aligned)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    // input/output must be token-major 2D [T, C]; state [B, C, K].
-    if (state.shape.size() != 3 || input.shape.size() != 2 || output.shape.size() != 2) {
-        throw std::runtime_error(
-            "XliteOpConv1dAndSiLUToken: expects state [B,C,K] and input/output [T,C]");
+    if (input.shape.size() != 2 || input.shape[0] == 0 || input.shape[1] == 0 ||
+        (weight.shape.size() != 2 && weight.shape.size() != 3) ||
+        (weight.shape.size() == 3 && weight.shape[1] != 1)) {
+        throw std::runtime_error("conv decode: invalid activation/weight shape");
     }
-    uint32_t batch = state.shape[0];
-    uint32_t channels = state.shape[1];
-    if (input.shape[1] != channels || output.shape[1] != channels ||
-        input.shape[0] != output.shape[0]) {
-        throw std::runtime_error("XliteOpConv1dAndSiLUToken: channel/token mismatch");
+    CheckGdnPageMetadata(stateIndices, cachedLens, input.shape.at(0), stateBlockSize);
+    uint32_t channels = input.shape.at(1);
+    uint32_t width = weight.shape.back();
+    if (input.shape.size() != 2 || output.shape != input.shape || width < 2 || width > 4 ||
+        input.stride != std::vector<size_t>{channels, 1} ||
+        output.stride != std::vector<size_t>{channels, 1} ||
+        weight.stride != (weight.shape.size() == 2 ? std::vector<size_t>{width, 1}
+                                                   : std::vector<size_t>{width, width, 1}) ||
+        channels % 64 != 0 || state.shape.size() != 3 || state.shape[1] != width - 1 ||
+        state.shape[0] < 2 || state.shape[0] > UINT32_MAX || state.shape[2] != channels ||
+        state.stride.size() != 3 || state.stride[2] != 1 || state.stride[1] != channels ||
+        state.stride[0] < (width - 1) * channels || stateIndices.dtype != INT32 ||
+        weight.shape[0] != channels) {
+        throw std::runtime_error("conv: unsupported native SD page descriptor");
     }
-    uint32_t kernelDim = state.shape[2];
-    if (kernelDim < 1 || kernelDim > 4 || kernelDim == 3) {
-        throw std::runtime_error(
-            "XliteOpConv1dAndSiLUToken: require kernelDim in {1,2,4} (kernelDim=" +
-            std::to_string(kernelDim) + ")");
-    }
-    if (seqLen == 0 || seqLen < kernelDim || batch * seqLen != input.shape[0]) {
-        throw std::runtime_error("XliteOpConv1dAndSiLUToken: invalid uniform seqLen (seqLen=" +
-                                 std::to_string(seqLen) + " batch=" + std::to_string(batch) +
-                                 " input[0]=" + std::to_string(input.shape[0]) + ")");
-    }
-    if (channels % 1024 != 0) {
-        throw std::runtime_error(
-            "XliteOpConv1dAndSiLUToken: channels must be multiple of 1024 (channels=" +
-            std::to_string(channels) + ")");
-    }
-    // Weight layout [C,1,K] (or [C,K]): kernel reads weight + cb*kChanBlock*K
-    // contiguously, so a mismatched weight would over-read GM.
-    if (weight.shape[0] != channels) {
-        throw std::runtime_error("XliteOpConv1dAndSiLUToken: weight channels mismatch");
-    }
-    uint32_t weightKernelDim = weight.shape.size() >= 3 ? weight.shape[2] : weight.shape.back();
-    if (weightKernelDim != kernelDim) {
-        throw std::runtime_error("XliteOpConv1dAndSiLUToken: weight kernel dim mismatch");
-    }
-
-    KERNEL_PTR_TYPE(conv1d_and_silu_token) * launchKernel;
-    KERNEL_PTR_TYPE(conv1d_state_update) * launchStateKernel;
-    if (EachXDtype(FP32, state, input, weight, output)) {
-        launchKernel = aclrtlaunch_conv1d_and_silu_token_float;
-        launchStateKernel = aclrtlaunch_conv1d_state_update_float;
+    KERNEL_PTR_TYPE(conv1d_and_silu_paged) * launchKernel;
+    if (EachXDtype(BF16, state, input, weight, output)) {
+        launchKernel = aclrtlaunch_conv1d_and_silu_paged_bfloat16_t;
     } else if (EachXDtype(FP16, state, input, weight, output)) {
-        launchKernel = aclrtlaunch_conv1d_and_silu_token_float16_t;
-        launchStateKernel = aclrtlaunch_conv1d_state_update_float16_t;
-    } else if (EachXDtype(BF16, state, input, weight, output)) {
-        launchKernel = aclrtlaunch_conv1d_and_silu_token_bfloat16_t;
-        launchStateKernel = aclrtlaunch_conv1d_state_update_bfloat16_t;
+        launchKernel = aclrtlaunch_conv1d_and_silu_paged_float16_t;
+    } else if (EachXDtype(FP32, state, input, weight, output)) {
+        launchKernel = aclrtlaunch_conv1d_and_silu_paged_float;
     } else {
-        std::string err_str =
-            DBG_PREFIX + XT_STR(state) + XT_STR(input) + XT_STR(weight) + XT_STR(output);
-        throw std::runtime_error(err_str + " unsupported!");
+        throw std::runtime_error("conv: unsupported state dtype");
     }
-
-    uint32_t totalRows = batch * seqLen;
-    uint32_t coreNum = rt.aivNum < totalRows ? rt.aivNum : totalRows;
-    launchKernel(coreNum, rt.stream, state.ptr, input.ptr, weight.ptr, output.ptr, batch, channels,
-                 seqLen, kernelDim);
-    if (updateState) {
-        // State update is a separate launch: conv cores read state GM for the
-        // window context, so an in-kernel update would race them. The launch
-        // boundary is the inter-core barrier.
-        uint32_t units = batch * (channels / 1024);
-        uint32_t stateCores = rt.aivNum < units ? rt.aivNum : units;
-        launchStateKernel(stateCores, rt.stream, state.ptr, input.ptr, batch, channels, seqLen,
-                          kernelDim);
-    }
+    launchKernel(rt.aivNum, rt.stream, state.ptr, input.ptr, weight.ptr, output.ptr,
+                 static_cast<uint32_t>(input.shape[0]), channels, width, 1u, stateIndices.ptr,
+                 state.stride[0], 1u, static_cast<uint32_t>(state.shape[0]),
+                 cachedLens == nullptr ? nullptr : cachedLens->ptr,
+                 cachedLens == nullptr ? 0 : stateIndices.stride[0],
+                 cachedLens == nullptr ? 0 : static_cast<uint32_t>(stateIndices.shape[1]),
+                 stateBlockSize, aligned ? 1u : 0u);
 }
 
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
@@ -2513,6 +2420,27 @@ void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTen
 {
     if (IsDummyRuntime(rt)) {
         return;
+    }
+    if (g.dtype == FP32 && b.dtype != FP32) {
+        if (a.dtype != b.dtype || beta.dtype != b.dtype ||
+            (A_log.dtype != a.dtype && A_log.dtype != FP32) ||
+            (dt_bias.dtype != a.dtype && dt_bias.dtype != FP32)) {
+            throw std::runtime_error("native GDN gating: unsupported dtype combination");
+        }
+        KERNEL_PTR_TYPE(beta_decay_native) * kernel;
+        if (b.dtype == BF16) {
+            kernel = aclrtlaunch_beta_decay_native_bfloat16_t;
+        } else if (b.dtype == FP16) {
+            kernel = aclrtlaunch_beta_decay_native_float16_t;
+        } else {
+            throw std::runtime_error("native GDN gating: unsupported activation dtype");
+        }
+        kernel(rt.aivNum, rt.stream, b.ptr, a.ptr, A_log.ptr, dt_bias.ptr, beta.ptr, g.ptr, bsz,
+               seqlen, num_v_heads, A_log.dtype == FP32, dt_bias.dtype == FP32);
+        return;
+    }
+    if (!EachXDtype(a.dtype, b, A_log, dt_bias, beta, g)) {
+        throw std::runtime_error("GDN gating requires matching dtypes or FP32 native gates");
     }
     KERNEL_PTR_TYPE(beta_decay) * launchKernel;
     if (EachXDtype(FP32, b, a)) {
@@ -2559,67 +2487,60 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
                  static_cast<uint32_t>(gate.shape[1]));
 }
 
-void XliteOpRecurrentGatedDeltaRule(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
-                                    XTensor &beta, XTensor &g, XTensor &state, XTensor &out,
-                                    uint32_t batch, uint32_t seqlen, uint32_t numHeads,
-                                    uint32_t kDim, uint32_t vDim, XTensor *queryStartLoc,
-                                    XTensor *queryLens)
+void XliteOpRecurrentGatedDeltaRulePaged(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
+                                         XTensor &beta, XTensor &g, XTensor &state, XTensor &out,
+                                         XTensor *stateIndices, uint32_t batch, uint32_t kHeads,
+                                         uint32_t vHeads, uint32_t kDim, uint32_t vDim,
+                                         XTensor *cachedLens, uint32_t stateBlockSize, bool aligned)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    bool packed = queryStartLoc != nullptr && queryLens != nullptr;
-    if (kDim == 0 || vDim == 0 || numHeads == 0 || batch == 0) {
-        throw std::runtime_error(std::string(__func__) + ": invalid dims");
+    if (batch == 0 || kHeads == 0 || vHeads == 0 || vHeads % kHeads != 0 || kDim == 0 ||
+        kDim > 128 || kDim % 16 != 0 || vDim == 0 || vDim > 128 || vDim % 64 != 0) {
+        throw std::runtime_error("paged recurrent: unsupported dimensions/head grouping");
     }
-    if (!packed && seqlen == 0) {
-        throw std::runtime_error(std::string(__func__) + ": invalid dims");
+    auto matrixMatches = [batch](const XTensor &t, uint32_t features) {
+        return t.shape.size() == 2 && t.shape[0] == batch && t.shape[1] == features &&
+               t.stride == std::vector<size_t>{features, 1};
+    };
+    if (!matrixMatches(query, kHeads * kDim) || !matrixMatches(key, kHeads * kDim) ||
+        !matrixMatches(value, vHeads * vDim) || !matrixMatches(out, vHeads * vDim) ||
+        !matrixMatches(beta, vHeads) || !matrixMatches(g, vHeads)) {
+        throw std::runtime_error("paged recurrent: activation shape/stride mismatch");
     }
-    if (kDim > 128 || vDim > 128) {
-        throw std::runtime_error(std::string(__func__) +
-                                 ": kDim/vDim must be <= 128 for current kernel");
+    if (state.shape.size() != 4 || state.shape[0] < 2 || state.shape[0] > UINT32_MAX ||
+        state.shape[1] != vHeads || state.shape[2] != vDim || state.shape[3] != kDim ||
+        state.stride.size() != 4 || state.stride[3] != 1 || state.stride[2] != kDim ||
+        state.stride[1] != vDim * kDim ||
+        state.stride[0] < static_cast<uint64_t>(vHeads) * vDim * kDim || stateIndices == nullptr) {
+        throw std::runtime_error("paged recurrent: unsupported native page descriptor");
     }
-    uint32_t tokens = packed ? static_cast<uint32_t>(query.shape[0]) : batch * seqlen;
-    if (query.shape[0] != tokens || key.shape[0] != tokens || value.shape[0] != tokens ||
-        out.shape[0] != tokens || beta.shape[0] != tokens || g.shape[0] != tokens) {
-        throw std::runtime_error(std::string(__func__) + ": token dim mismatch");
+    CheckGdnPageMetadata(*stateIndices, cachedLens, batch, stateBlockSize);
+    if (g.dtype != query.dtype && g.dtype != FP32) {
+        throw std::runtime_error("paged GDN: unsupported gate dtype");
     }
-    if (query.shape.size() < 2 || key.shape.size() < 2 || value.shape.size() < 2 ||
-        out.shape.size() < 2 || query.shape[1] != numHeads * kDim ||
-        key.shape[1] != numHeads * kDim || value.shape[1] != numHeads * vDim ||
-        out.shape[1] != numHeads * vDim) {
-        throw std::runtime_error(std::string(__func__) + ": feature dim mismatch");
+    if (state.dtype != query.dtype && state.dtype != FP32) {
+        throw std::runtime_error("paged recurrent: unsupported state dtype");
     }
-    if (beta.shape.size() < 2 || g.shape.size() < 2 || beta.shape[1] != numHeads ||
-        g.shape[1] != numHeads) {
-        throw std::runtime_error(std::string(__func__) + ": beta/g head dim mismatch");
-    }
-    if (state.shape.size() != 4 || state.shape[0] < batch || state.shape[1] != numHeads ||
-        state.shape[2] != kDim || state.shape[3] != vDim) {
-        throw std::runtime_error(std::string(__func__) + ": state shape mismatch");
-    }
-    if (packed) {
-        if (queryStartLoc->dtype != INT32 || queryLens->dtype != INT32 ||
-            queryStartLoc->numel < batch || queryLens->numel < batch) {
-            throw std::runtime_error(std::string(__func__) +
-                                     ": queryStartLoc/queryLens must be int32[B]");
-        }
-    }
-    KERNEL_PTR_TYPE(recurrent_gated_delta_rule) * launchKernel;
-    if (EachXDtype(FP32, query, key, value, beta, g, state, out)) {
-        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_float;
-    } else if (EachXDtype(FP16, query, key, value, beta, g, state, out)) {
-        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_float16_t;
-    } else if (EachXDtype(BF16, query, key, value, beta, g, state, out)) {
-        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_bfloat16_t;
+    KERNEL_PTR_TYPE(recurrent_gated_delta_rule_paged) * launchKernel;
+    if (EachXDtype(FP32, query, key, value, beta, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_paged_float;
+    } else if (EachXDtype(FP16, query, key, value, beta, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_paged_float16_t;
+    } else if (EachXDtype(BF16, query, key, value, beta, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_paged_bfloat16_t;
     } else {
-        std::string err_str = DBG_PREFIX + XT_STR(query) + XT_STR(key) + XT_STR(value);
-        throw std::runtime_error(err_str + "not supported!");
+        throw std::runtime_error("paged recurrent: unsupported activation dtype");
     }
-    launchKernel(rt.aivNum, rt.stream, query.ptr, key.ptr, value.ptr, beta.ptr, g.ptr, state.ptr,
-                 out.ptr, batch, packed ? 0u : seqlen, numHeads, kDim, vDim,
-                 1.0f / sqrtf(static_cast<float>(kDim)), packed ? queryStartLoc->ptr : nullptr,
-                 packed ? queryLens->ptr : nullptr);
+    launchKernel(std::min(rt.aivNum, batch * vHeads), rt.stream, query.ptr, key.ptr, value.ptr,
+                 beta.ptr, g.ptr, state.ptr, out.ptr, stateIndices->ptr, batch, kHeads, vHeads,
+                 kDim, vDim, state.stride[0], static_cast<uint32_t>(state.shape[0]),
+                 state.dtype == FP32 ? 1u : 0u, 1.0f / sqrtf(static_cast<float>(kDim)),
+                 cachedLens == nullptr ? nullptr : cachedLens->ptr,
+                 cachedLens == nullptr ? 0 : stateIndices->stride[0],
+                 cachedLens == nullptr ? 0 : static_cast<uint32_t>(stateIndices->shape[1]),
+                 stateBlockSize, aligned ? 1u : 0u, g.dtype == FP32 ? 1u : 0u);
 }
 
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
@@ -3164,3 +3085,165 @@ uint32_t XliteOpBenchCube(XRuntime &rt, const std::string &variant, const XTenso
     return blockNum;
 }
 #endif  // MICROBENCH_TIMED
+
+void XliteOpSiluGateMul(XRuntime &rt, XTensor &normed, XTensor &gate, XTensor &out)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (normed.dtype != FP32 || normed.shape.size() != 2 || gate.shape != normed.shape ||
+        out.shape != normed.shape || gate.dtype != out.dtype ||
+        normed.stride != std::vector<size_t>{normed.shape[1], 1} || gate.stride != normed.stride ||
+        out.stride != normed.stride) {
+        throw std::runtime_error(
+            "GDN output gate requires contiguous FP32 norm and matching gate/output");
+    }
+    KERNEL_PTR_TYPE(silu_gate_mul) * kernel;
+    if (gate.dtype == BF16) {
+        kernel = aclrtlaunch_silu_gate_mul_bfloat16_t;
+    } else if (gate.dtype == FP16) {
+        kernel = aclrtlaunch_silu_gate_mul_float16_t;
+    } else {
+        throw std::runtime_error("GDN output gate: unsupported activation dtype");
+    }
+    kernel(PickMinBlockNum(rt.aivNum, normed.shape[0]), rt.stream, normed.ptr, gate.ptr, out.ptr,
+           normed.shape[0], normed.shape[1]);
+}
+
+static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
+                              XTensor &output, XTensor &stateIndices, XTensor *starts,
+                              XTensor *initial)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (input.shape.size() != 2 || (weight.shape.size() != 2 && weight.shape.size() != 3) ||
+        (weight.shape.size() == 3 && weight.shape[1] != 1)) {
+        throw std::runtime_error("conv: invalid activation/weight rank");
+    }
+    uint32_t batch = starts ? starts->numel - 1 : input.shape.at(0);
+    if (starts &&
+        (starts->dtype != INT32 || starts->shape.size() != 1 || starts->numel < 2 ||
+         starts->stride != std::vector<size_t>{1} || !initial || initial->dtype != INT32 ||
+         initial->numel != batch || initial->stride != std::vector<size_t>{1})) {
+        throw std::runtime_error("conv prefill: invalid sequence metadata");
+    }
+    uint32_t channels = input.shape.at(1);
+    uint32_t width = weight.shape.back();
+    if (input.shape.size() != 2 || output.shape != input.shape || width < 2 || width > 4 ||
+        input.stride != std::vector<size_t>{channels, 1} ||
+        output.stride != std::vector<size_t>{channels, 1} ||
+        weight.stride != (weight.shape.size() == 2 ? std::vector<size_t>{width, 1}
+                                                   : std::vector<size_t>{width, width, 1}) ||
+        channels == 0 || channels % 64 != 0 || state.shape.size() != 3 ||
+        state.shape[1] != width - 1 || state.shape[0] < 2 || state.shape[0] > UINT32_MAX ||
+        state.shape[2] != channels || state.stride.size() != 3 || state.stride[2] != 1 ||
+        state.stride[1] != channels || state.stride[0] < (width - 1) * channels ||
+        stateIndices.dtype != INT32 || stateIndices.numel < batch ||
+        stateIndices.stride != std::vector<size_t>{1} || weight.shape[0] != channels) {
+        throw std::runtime_error("conv: unsupported native SD page descriptor");
+    }
+    if (starts) {
+        KERNEL_PTR_TYPE(conv1d_and_silu_prefill_paged) * kernel;
+        if (EachXDtype(BF16, state, input, weight, output)) {
+            kernel = aclrtlaunch_conv1d_and_silu_prefill_paged_bfloat16_t;
+        } else if (EachXDtype(FP16, state, input, weight, output)) {
+            kernel = aclrtlaunch_conv1d_and_silu_prefill_paged_float16_t;
+        } else if (EachXDtype(FP32, state, input, weight, output)) {
+            kernel = aclrtlaunch_conv1d_and_silu_prefill_paged_float;
+        } else {
+            throw std::runtime_error("conv prefill: unsupported dtype");
+        }
+        kernel(std::min(rt.aivNum, batch * (channels / 64)), rt.stream, state.ptr, input.ptr,
+               weight.ptr, output.ptr, batch, channels, width, stateIndices.ptr, state.stride[0],
+               state.shape[0], starts->ptr, initial->ptr, input.shape[0]);
+        return;
+    }
+}
+
+static void RecurrentPrefillImpl(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
+                                 XTensor &beta, XTensor &g, XTensor &state, XTensor &out,
+                                 XTensor *stateIndices, uint32_t batch, uint32_t kHeads,
+                                 uint32_t vHeads, uint32_t kDim, uint32_t vDim, XTensor *starts,
+                                 XTensor *initial)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (batch == 0 || kHeads == 0 || vHeads == 0 || vHeads % kHeads != 0 || kDim == 0 ||
+        kDim > 128 || kDim % 16 != 0 || vDim == 0 || vDim > 128 || vDim % 64 != 0) {
+        throw std::runtime_error("paged recurrent: unsupported dimensions/head grouping");
+    }
+    if (starts &&
+        (starts->dtype != INT32 || starts->shape.size() != 1 || starts->numel != batch + 1 ||
+         starts->stride != std::vector<size_t>{1} || !initial || initial->dtype != INT32 ||
+         initial->numel != batch || initial->stride != std::vector<size_t>{1})) {
+        throw std::runtime_error("GDN prefill: invalid sequence metadata");
+    }
+    uint32_t tokens = starts ? query.shape.at(0) : batch;
+    auto matrixMatches = [tokens](const XTensor &t, uint32_t features) {
+        return t.shape.size() == 2 && t.shape[0] == tokens && t.shape[1] == features &&
+               t.stride == std::vector<size_t>{features, 1};
+    };
+    if (!matrixMatches(query, kHeads * kDim) || !matrixMatches(key, kHeads * kDim) ||
+        !matrixMatches(value, vHeads * vDim) || !matrixMatches(out, vHeads * vDim) ||
+        !matrixMatches(beta, vHeads) || !matrixMatches(g, vHeads)) {
+        throw std::runtime_error("paged recurrent: activation shape/stride mismatch");
+    }
+    if (state.shape.size() != 4 || state.shape[0] < 2 || state.shape[0] > UINT32_MAX ||
+        state.shape[1] != vHeads || state.shape[2] != vDim || state.shape[3] != kDim ||
+        state.stride.size() != 4 || state.stride[3] != 1 || state.stride[2] != kDim ||
+        state.stride[1] != vDim * kDim ||
+        state.stride[0] < static_cast<uint64_t>(vHeads) * vDim * kDim || stateIndices == nullptr ||
+        stateIndices->dtype != INT32 || stateIndices->shape.size() != 1 ||
+        stateIndices->numel < batch || stateIndices->stride != std::vector<size_t>{1}) {
+        throw std::runtime_error("paged recurrent: unsupported native page descriptor");
+    }
+    if (g.dtype != query.dtype && g.dtype != FP32) {
+        throw std::runtime_error("paged GDN: unsupported gate dtype");
+    }
+    if (state.dtype != query.dtype && state.dtype != FP32) {
+        throw std::runtime_error("paged recurrent: unsupported state dtype");
+    }
+    if (starts) {
+        KERNEL_PTR_TYPE(recurrent_gated_delta_rule_prefill_paged) * kernel;
+        if (EachXDtype(FP32, query, key, value, beta, out)) {
+            kernel = aclrtlaunch_recurrent_gated_delta_rule_prefill_paged_float;
+        } else if (EachXDtype(FP16, query, key, value, beta, out)) {
+            kernel = aclrtlaunch_recurrent_gated_delta_rule_prefill_paged_float16_t;
+        } else if (EachXDtype(BF16, query, key, value, beta, out)) {
+            kernel = aclrtlaunch_recurrent_gated_delta_rule_prefill_paged_bfloat16_t;
+        } else {
+            throw std::runtime_error("GDN prefill: unsupported activation dtype");
+        }
+        kernel(std::min(rt.aivNum, batch * vHeads * (vDim / 64)), rt.stream, query.ptr, key.ptr,
+               value.ptr, beta.ptr, g.ptr, state.ptr, out.ptr, stateIndices->ptr, batch, kHeads,
+               vHeads, kDim, vDim, state.stride[0], state.shape[0], state.dtype == FP32 ? 1u : 0u,
+               1.0f / sqrtf(static_cast<float>(kDim)), g.dtype == FP32 ? 1u : 0u, starts->ptr,
+               initial->ptr, tokens);
+        return;
+    }
+}
+
+void XliteOpConv1dAndSiLUPrefillPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
+                                      XTensor &output, XTensor &indices, XTensor &starts,
+                                      XTensor &initial)
+{
+    Conv1dPrefillImpl(rt, state, input, weight, output, indices, &starts, &initial);
+}
+
+void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,
+                                                XTensor &value, XTensor &beta, XTensor &g,
+                                                XTensor &state, XTensor &out, XTensor &indices,
+                                                XTensor &starts, XTensor &initial, uint32_t kHeads,
+                                                uint32_t vHeads, uint32_t kDim, uint32_t vDim)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (starts.shape.size() != 1 || starts.numel < 2 || starts.numel > UINT32_MAX) {
+        throw std::runtime_error("GDN prefill requires starts[B+1] with a nonempty batch");
+    }
+    RecurrentPrefillImpl(rt, query, key, value, beta, g, state, out, &indices, starts.numel - 1,
+                         kHeads, vHeads, kDim, vDim, &starts, &initial);
+}

@@ -268,31 +268,20 @@ void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor 
 void XliteOpReorderMoE(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &counts,
                        uint32_t hiddenSize, uint32_t localStart, uint32_t localEnd, bool forward);
 void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output);
-void XliteOpConv1dAndSiLU(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
-                          XTensor &output, bool updateState = true,
-                          XTensor *queryStartLoc = nullptr, XTensor *queryLens = nullptr);
-// Token-row-parallel conv1d+SiLU for uniform prefill (P3-A v2). input/output are
-// [T,C] token-major; parallelizes over contiguous token-row segments with a
-// sliding window (chunked strided DMA) and a vgather-based weight tap
-// transpose. When updateState is true the conv state update runs as a separate
-// kernel launch right after the conv kernel (the conv cores read state GM for
-// the window context, so an in-kernel update would race them; the launch
-// boundary is the inter-core barrier). Constraints: kernelDim in {1,2,4},
-// seqLen >= kernelDim, channels % 1024 == 0.
-void XliteOpConv1dAndSiLUToken(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
-                               XTensor &output, uint32_t seqLen, bool updateState = true);
+void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
+                               XTensor &output, XTensor &stateIndices,
+                               XTensor *cachedLens = nullptr, uint32_t stateBlockSize = 0,
+                               bool aligned = false);
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
                       XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
                       uint32_t num_v_heads);
-// Recurrent gated delta rule. q/k: [T, H*kDim], v/out: [T, H*vDim],
-// beta/g: [T, H], state: [B, H, kDim, vDim] (updated in-place).
-// g is log-space (from BetaDecay); kernel applies exp(g). Q/K should already be L2-normalized.
-// queryStartLoc/queryLens: optional packed mixed-length layout ([B] int32).
-void XliteOpRecurrentGatedDeltaRule(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
-                                    XTensor &beta, XTensor &g, XTensor &state, XTensor &out,
-                                    uint32_t batch, uint32_t seqlen, uint32_t numHeads,
-                                    uint32_t kDim, uint32_t vDim, XTensor *queryStartLoc = nullptr,
-                                    XTensor *queryLens = nullptr);
+// Single-token decode on native [P, Hv, V, K] pages; Q/K retain their Hk heads.
+void XliteOpRecurrentGatedDeltaRulePaged(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
+                                         XTensor &beta, XTensor &g, XTensor &state, XTensor &out,
+                                         XTensor *stateIndices, uint32_t batch, uint32_t kHeads,
+                                         uint32_t vHeads, uint32_t kDim, uint32_t vDim,
+                                         XTensor *cachedLens = nullptr, uint32_t stateBlockSize = 0,
+                                         bool aligned = false);
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
                             uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T = -1,
                             int D = -1);
@@ -310,7 +299,6 @@ void XliteOpHcSplitSinkhorn(XRuntime &rt, XTensor &mixes, const XTensor &hcScale
                             uint32_t hcMult, float eps, uint32_t sinkhornIters, bool headOnly);
 void XliteOpHcPre(XRuntime &rt, XTensor &xResid, const XTensor &pre, XTensor &output, uint32_t m,
                   uint32_t hcMult, uint32_t hidden);
-
 // Benchmarks
 uint32_t XliteOpBenchEmpty(XRuntime &rt, const std::string &variant, uint32_t blockNum = 0);
 uint32_t XliteOpBenchScalar(XRuntime &rt, const std::string &variant, XTensor &out, double seed,
@@ -327,4 +315,13 @@ uint32_t XliteOpBenchCube(XRuntime &rt, const std::string &variant, const XTenso
                           uint64_t k0, uint32_t blockNum = 0);
 #endif  // MICROBENCH_TIMED
 
+void XliteOpSiluGateMul(XRuntime &rt, XTensor &normed, XTensor &gate, XTensor &out);
+void XliteOpConv1dAndSiLUPrefillPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
+                                      XTensor &output, XTensor &indices, XTensor &starts,
+                                      XTensor &initial);
+void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,
+                                                XTensor &value, XTensor &beta, XTensor &g,
+                                                XTensor &state, XTensor &out, XTensor &indices,
+                                                XTensor &starts, XTensor &initial, uint32_t kHeads,
+                                                uint32_t vHeads, uint32_t kDim, uint32_t vDim);
 #endif

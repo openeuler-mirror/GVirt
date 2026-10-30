@@ -111,7 +111,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
         moeREDownScaleBias[i].resize(totalPhysicalExperts);
     }
 
-    if (c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(c.attnType)) {
         if (c.fullAttentionInterval == 0) {
             throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
         }
@@ -729,40 +729,6 @@ void XModel::ForwardAttnMHA(XRuntime &rt, uint32_t layer,
     rt.PutTensor(attn);
 }
 
-namespace
-{
-
-void ExpandLinearHeads(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numTokens,
-                       uint32_t nKHeads, uint32_t nVHeads, uint32_t headDim)
-{
-    if (rt.IsDummyRuntime()) {
-        return;
-    }
-    if (nKHeads == nVHeads) {
-        if (in.ptr != out.ptr) {
-            size_t bytes = in.numel * XDtypeBit(in.dtype) / 8;
-            CHECK_ACL(aclrtMemcpyAsync(out.ptr, bytes, in.ptr, bytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
-                                       rt.stream));
-        }
-        return;
-    }
-    if (nVHeads % nKHeads != 0) {
-        throw std::runtime_error("ForwardAttnLinear: num_v_heads must be divisible by num_k_heads");
-    }
-    uint32_t headBytes = headDim * XDtypeBit(in.dtype) / 8;
-    XliteOpRepeatInterleave(rt, in, out, numTokens, nKHeads, nVHeads, headBytes);
-}
-
-void ZeroLinearStateSlot(XRuntime &rt, XTensor &state, uint32_t batchIdx, uint32_t slotElems)
-{
-    size_t elemBytes = XDtypeBit(state.dtype) / 8;
-    size_t slotBytes = static_cast<size_t>(slotElems) * elemBytes;
-    auto *ptr = static_cast<uint8_t *>(state.ptr) + static_cast<size_t>(batchIdx) * slotBytes;
-    CHECK_ACL(aclrtMemsetAsync(ptr, slotBytes, 0, slotBytes, rt.stream));
-}
-
-}  // namespace
-
 void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
                                std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
                                XTensor &hiddenState)
@@ -785,30 +751,13 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
         throw std::runtime_error(
             "ForwardAttnLinear: host lens not populated; PrepareAttn must run first");
     }
-    uint32_t seqlen = rt._hostLens[0];
-    bool uniform = true;
-    uint32_t tokenSum = 0;
-    uint32_t maxSeqlen = 0;
-    for (uint32_t i = 0; i < batch; ++i) {
-        uint32_t li = rt._hostLens[i];
-        tokenSum += li;
-        if (li != seqlen) {
-            uniform = false;
-        }
-        if (li > maxSeqlen) {
-            maxSeqlen = li;
-        }
-    }
-    if (seqlen == 0) {
-        uniform = false;
-    }
-    if (tokenSum != m) {
-        throw std::runtime_error("ForwardAttnLinear: packed token count mismatch (got " +
-                                 std::to_string(m) + ", expected " + std::to_string(tokenSum) +
-                                 ")");
-    }
-    if (!rt.IsDummyRuntime() && maxSeqlen > 4096) {
-        throw std::runtime_error("ForwardAttnLinear: per-request seqlen exceeds conv kernel limit");
+    // Pure decode = every request has one query token and cached state (host-side
+    // _linearDecodeStep). Multi-token steps, including speculative verification, take the
+    // packed prefill path; the check below only rejects decode metadata whose token count
+    // is not one per request.
+    bool prefill = !rt._linearDecodeStep;
+    if (!rt.IsDummyRuntime() && !prefill && m != batch) {
+        throw std::runtime_error("multi-token native GDN requires prefill metadata");
     }
 
     uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
@@ -839,66 +788,30 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
 
     // Step 2: beta = sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias)
     XTensor &beta = rt.GetTensor({m, nLocalVHeads}, hiddenState.dtype, DBG_LOC);
-    XTensor &g = rt.GetTensor({m, nLocalVHeads}, hiddenState.dtype, DBG_LOC);
+    XTensor &g = rt.GetTensor({m, nLocalVHeads}, FP32, DBG_LOC);
     XliteOpBetaDecay(rt, b, a, linearALog[layer], linearDtBias[layer], beta, g, m, 1, nLocalVHeads);
     rt.PutTensor(b);
     rt.PutTensor(a);
 
-    // Step 3: causal conv1d + SiLU on mixed qkv
-    // Clear conv/ssm only for fresh prefill (cached_lens==0). Decode and
-    // chunked-prefill continuation (cached>0) must reuse state: xlite has no
-    // chunk_gated_delta_rule, so recurrent resumes from the previous step.
+    // Native pages already contain prefill/restored state. Never clear a batch row.
     XTensor &convPacked = rt.GetTensor({m, convDim}, hiddenState.dtype, DBG_LOC);
     if (!rt.IsDummyRuntime()) {
-        uint32_t convSlot = convDim * _c.linearConvKernelDim;
-        for (uint32_t i = 0; i < batch; ++i) {
-            if (i < rt._cachedLensHost.size() && rt._cachedLensHost[i] != 0) {
-                continue;
-            }
-            ZeroLinearStateSlot(rt, convState, i, convSlot);
+        if (prefill) {
+            XliteOpConv1dAndSiLUPrefillPaged(rt, convState, mixQkv, linearConv1d[layer], convPacked,
+                                             rt._gdnConvIndices.at(layer),
+                                             rt._gdnQueryStarts.at(layer),
+                                             rt._gdnConvInitial.at(layer));
+        } else {
+            XliteOpConv1dAndSiLUPaged(rt, convState, mixQkv, linearConv1d[layer], convPacked,
+                                      rt._gdnConvIndices.at(layer));
         }
     }
-    XTensor convStateBatch;
-    convStateBatch.Init({batch, convDim, _c.linearConvKernelDim}, convState.dtype, convState.ptr);
-    // Decode (seqlen==1) uses the packed 2D path: [B,1,C] and [B,C,1] are
-    // memory-identical for contiguous tensors, so the two Transpose_1_2 are
-    // identity ops. Skip them and use the packed 2D path.
-    //
-    // Prefill (seqlen>1, uniform) uses the token-row-parallel kernel when its
-    // constraints hold (K in {1,2,4}, seqlen >= K, convDim % 1024 == 0).
-    // Otherwise the fused conv kernel consumes/produces the token-major
-    // [B,S,C] layout directly, so no Transpose passes are needed either.
-    // Decode/mixed -> packed.
-    bool decodeStep = (seqlen == 1);
-    uint32_t convK = _c.linearConvKernelDim;
-    bool useToken = uniform && !decodeStep && seqlen >= convK &&
-                    (convK == 1 || convK == 2 || convK == 4) && (convDim % 1024 == 0);
-    if (useToken) {
-        XliteOpConv1dAndSiLUToken(rt, convStateBatch, mixQkv, linearConv1d[layer], convPacked,
-                                  seqlen, /*updateState=*/true);
-        rt.PutTensor(mixQkv);
-    } else if (uniform && !decodeStep) {
-        XTensor mix3d;
-        mix3d.Init({batch, seqlen, qkvDim}, mixQkv.dtype, mixQkv.ptr);
-        XTensor convSeq3d;
-        convSeq3d.Init({batch, seqlen, convDim}, convPacked.dtype, convPacked.ptr);
-        XliteOpConv1dAndSiLU(rt, convStateBatch, mix3d, linearConv1d[layer], convSeq3d,
-                             /*updateState=*/true);
-        rt.PutTensor(mixQkv);
-    } else {
-        XliteOpConv1dAndSiLU(rt, convStateBatch, mixQkv, linearConv1d[layer], convPacked,
-                             /*updateState=*/true, &rt._attnQueryStartLoc, &rt._attnLens);
-        rt.PutTensor(mixQkv);
-    }
+    rt.PutTensor(mixQkv);
 
-    // Step 4-7: split / L2 / expand / gated delta
+    // Step 4-7: split / L2 / grouped-head gated delta
     XTensor &query = rt.GetTensor({m, localKeyDim}, hiddenState.dtype, DBG_LOC);
     XTensor &key = rt.GetTensor({m, localKeyDim}, hiddenState.dtype, DBG_LOC);
     XTensor &value = rt.GetTensor({m, localValueDim}, hiddenState.dtype, DBG_LOC);
-    XTensor &queryExp =
-        rt.GetTensor({m, nLocalVHeads * _c.linearKeyHeadDim}, hiddenState.dtype, DBG_LOC);
-    XTensor &keyExp =
-        rt.GetTensor({m, nLocalVHeads * _c.linearKeyHeadDim}, hiddenState.dtype, DBG_LOC);
     XTensor &coreAttn = rt.GetTensor({m, localValueDim}, hiddenState.dtype, DBG_LOC);
     {
         std::vector<XTensor> qkvSplit = {query, key, value};
@@ -908,36 +821,19 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
         XliteOpL2Norm(rt, query, query, _c.normEps, _c.linearKeyHeadDim, nLocalKHeads);
         XliteOpL2Norm(rt, key, key, _c.normEps, _c.linearKeyHeadDim, nLocalKHeads);
 
-        ExpandLinearHeads(rt, query, queryExp, m, nLocalKHeads, nLocalVHeads, _c.linearKeyHeadDim);
-        ExpandLinearHeads(rt, key, keyExp, m, nLocalKHeads, nLocalVHeads, _c.linearKeyHeadDim);
+        if (prefill && !rt.IsDummyRuntime()) {
+            XliteOpRecurrentGatedDeltaRulePrefillPaged(
+                rt, query, key, value, beta, g, ssmState, coreAttn, rt._gdnSsmIndices.at(layer),
+                rt._gdnQueryStarts.at(layer), rt._gdnSsmInitial.at(layer), nLocalKHeads,
+                nLocalVHeads, _c.linearKeyHeadDim, _c.linearValueHeadDim);
+        } else {
+            XliteOpRecurrentGatedDeltaRulePaged(
+                rt, query, key, value, beta, g, ssmState, coreAttn,
+                rt.IsDummyRuntime() ? nullptr : &rt._gdnSsmIndices.at(layer), batch, nLocalKHeads,
+                nLocalVHeads, _c.linearKeyHeadDim, _c.linearValueHeadDim);
+        }
         rt.PutTensor(query);
         rt.PutTensor(key);
-
-        if (!rt.IsDummyRuntime()) {
-            if (ssmState.shape.empty() || ssmState.shape[0] == 0) {
-                throw std::runtime_error("ForwardAttnLinear: invalid ssmState batch dim");
-            }
-            uint32_t ssmSlot = nLocalVHeads * _c.linearKeyHeadDim * _c.linearValueHeadDim;
-            for (uint32_t i = 0; i < batch; ++i) {
-                if (i < rt._cachedLensHost.size() && rt._cachedLensHost[i] != 0) {
-                    continue;
-                }
-                ZeroLinearStateSlot(rt, ssmState, i, ssmSlot);
-            }
-        }
-
-        if (uniform) {
-            XliteOpRecurrentGatedDeltaRule(rt, queryExp, keyExp, value, beta, g, ssmState, coreAttn,
-                                           batch, seqlen, nLocalVHeads, _c.linearKeyHeadDim,
-                                           _c.linearValueHeadDim);
-        } else {
-            XliteOpRecurrentGatedDeltaRule(rt, queryExp, keyExp, value, beta, g, ssmState, coreAttn,
-                                           batch, /*seqlen=*/0, nLocalVHeads, _c.linearKeyHeadDim,
-                                           _c.linearValueHeadDim, &rt._attnQueryStartLoc,
-                                           &rt._attnLens);
-        }
-        rt.PutTensor(queryExp);
-        rt.PutTensor(keyExp);
         rt.PutTensor(beta);
         rt.PutTensor(g);
         rt.PutTensor(value);
@@ -946,17 +842,12 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     // Step 8: RMSNormGated(core, z) = rmsnorm(core) * silu(z)
     XTensor &gated = rt.GetTensor({m, localValueDim}, hiddenState.dtype, DBG_LOC);
     {
-        XTensor &normed = rt.GetTensor({m, localValueDim}, hiddenState.dtype, DBG_LOC);
+        XTensor &normed = rt.GetTensor({m, localValueDim}, FP32, DBG_LOC);
         XliteOpRmsNorm(rt, coreAttn, linearNorm[layer], normed, _c.normEps, _c.linearValueHeadDim,
                        true, XTensor(), nLocalVHeads);
-        XTensor &siluIn = rt.GetTensor({m, localValueDim * 2}, hiddenState.dtype, DBG_LOC);
-        std::vector<XTensor> normGateInputs = {z, normed};
-        XliteOpConcatCol(rt, normGateInputs, siluIn);
+        XliteOpSiluGateMul(rt, normed, z, gated);
         rt.PutTensor(z);
         rt.PutTensor(normed);
-
-        XliteOpSiluAndMul(rt, siluIn, gated);
-        rt.PutTensor(siluIn);
         rt.PutTensor(coreAttn);
     }
 
@@ -1082,7 +973,7 @@ void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<XTensor> &
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
-    if (_c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(_c.attnType)) {
         if (_layerTypes[layer] == XMODEL_LAYER_ATTN_FULL) {
             ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
         } else {
@@ -1946,13 +1837,14 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XT
     uint32_t batch = rt._batch;
     XTensor localOutput({output.shape[1], output.shape[2]}, output.dtype, output.ptr);
 
+    // TODO: drop the vocabSize cutoff once CopyGmToL1 handles srcStride > 65535 for NZ.
     if (batch < input.shape[0]) {
         XTensor &x = rt.GetTensor({batch, _c.hiddenSize}, input.dtype, DBG_LOC);
         XliteOpEmbed(rt, indices, input, 0, input.shape[0], x);
-        XliteOpMatmul(rt, x, head, localOutput, _c.weightNZ);
+        XliteOpMatmul(rt, x, head, localOutput, _c.weightNZ && _c.vocabSize <= 65536);
         rt.PutTensor(x);
     } else {
-        XliteOpMatmul(rt, input, head, localOutput, _c.weightNZ);
+        XliteOpMatmul(rt, input, head, localOutput, _c.weightNZ && _c.vocabSize <= 65536);
     }
 
     if (_c.defTpSize > 1) {
@@ -1971,7 +1863,7 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK);
+                   _c.indexTopK, _layerTypes);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
         inputIds.View(rt.batchedTokens);
@@ -2013,7 +1905,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK);
+                   _c.indexTopK, _layerTypes);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -2031,13 +1923,12 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
                                  std::vector<XTensor> &freqsCis, XTensor &indices, XTensor &output)
 {
     CheckForwardParam(rt, kvCache);
-
     rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
                    _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK);
+                   _c.indexTopK, _layerTypes);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -2072,10 +1963,14 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                                  ": state cache size must equal nLayers");
     }
 
-    if (_c.attnType == XMODEL_ATTN_HYBRID) {
+    if (IsHybridAttn(_c.attnType)) {
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
         uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
         uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
+        if (_c.linearNumKHeads % _c.defTpSize != 0 || _c.linearNumVHeads % _c.defTpSize != 0 ||
+            nLocalKHeads == 0 || nLocalVHeads == 0 || nLocalVHeads % nLocalKHeads != 0) {
+            throw std::runtime_error("hybrid GDN requires divisible TP and grouped heads");
+        }
         uint32_t convDim =
             nLocalKHeads * _c.linearKeyHeadDim * 2 + nLocalVHeads * _c.linearValueHeadDim;
         for (uint32_t i = 0; i < _c.nLayers; i++) {
@@ -2095,13 +1990,26 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                         ": full-attention cache shape mismatch at layer " + std::to_string(i));
                 }
             } else {
-                if (c0.shape.size() != 3 || c0.shape[0] != _c.maxBatch || c0.shape[1] != convDim ||
-                    c0.shape[2] != _c.linearConvKernelDim || c1.shape.size() != 4 ||
-                    c1.shape[0] != _c.maxBatch || c1.shape[1] != nLocalVHeads ||
-                    c1.shape[2] != _c.linearKeyHeadDim || c1.shape[3] != _c.linearValueHeadDim) {
-                    throw std::runtime_error(
-                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                        ": linear-attention state shape mismatch at layer " + std::to_string(i));
+                if (!rt.IsDummyRuntime()) {
+                    uint32_t width = _c.linearConvKernelDim;
+                    if (width < 2 || width > 4 || convDim % 64 != 0 ||
+                        _c.linearKeyHeadDim % 16 != 0 || _c.linearValueHeadDim % 64 != 0 ||
+                        _c.linearKeyHeadDim > 128 || _c.linearValueHeadDim > 128 ||
+                        c0.shape.size() != 3 || c0.shape[1] != width - 1 ||
+                        c0.shape[2] != convDim || c0.stride.size() != 3 || c0.stride[2] != 1 ||
+                        c0.stride[1] != convDim || c0.stride[0] < (width - 1) * convDim ||
+                        c1.shape.size() != 4 || c1.shape[1] != nLocalVHeads ||
+                        c1.shape[2] != _c.linearValueHeadDim ||
+                        c1.shape[3] != _c.linearKeyHeadDim || c1.stride.size() != 4 ||
+                        c1.stride[3] != 1 || c1.stride[2] != _c.linearKeyHeadDim ||
+                        c1.stride[1] != _c.linearKeyHeadDim * _c.linearValueHeadDim ||
+                        c1.stride[0] < nLocalVHeads * _c.linearKeyHeadDim * _c.linearValueHeadDim ||
+                        c0.shape[0] < 2 || c1.shape[0] < 2 || c0.dtype != embed.dtype ||
+                        (c1.dtype != embed.dtype && c1.dtype != FP32)) {
+                        throw std::runtime_error(
+                            "unsupported native GDN cache descriptor at layer " +
+                            std::to_string(i));
+                    }
                 }
             }
         }
@@ -2247,7 +2155,7 @@ size_t XModel::DummyRun()
         for (uint32_t i = 0; i < _c.nLayers; i++) {
             uint32_t expectedKvHeads =
                 std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-            if (_c.attnType == XMODEL_ATTN_HYBRID) {
+            if (IsHybridAttn(_c.attnType)) {
                 if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
                     XTensor kCache(
                         {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.headDim},
@@ -2261,10 +2169,10 @@ size_t XModel::DummyRun()
                     uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
                     uint32_t convDim = nLocalKHeads * _c.linearKeyHeadDim * 2 +
                                        nLocalVHeads * _c.linearValueHeadDim;
-                    XTensor convState({_c.maxBatch, convDim, _c.linearConvKernelDim}, embed.dtype,
-                                      nullptr);
+                    XTensor convState({_c.maxBatch + 1, _c.linearConvKernelDim - 1, convDim},
+                                      embed.dtype, nullptr);
                     XTensor ssmState(
-                        {_c.maxBatch, nLocalVHeads, _c.linearKeyHeadDim, _c.linearValueHeadDim},
+                        {_c.maxBatch + 1, nLocalVHeads, _c.linearValueHeadDim, _c.linearKeyHeadDim},
                         embed.dtype, nullptr);
                     kvCache[i] = {convState, ssmState};
                 }
@@ -2353,8 +2261,8 @@ size_t XModel::DummyRun()
     };
 
     // v2 attnMeta for DummyRun: device tensors only need shape to pass CheckAttnMetaV2
-    // (dummy runtime never dereferences their nullptr payloads). One block_tables /
-    // slot_mapping entry per blockSizes element, sized to the per-cache maxNumBlocks.
+    // (dummy runtime never dereferences their nullptr payloads). Family slots: one main-KV
+    // block table + single slot mapping, plus a mamba state-index table for hybrid models.
     auto buildV2AttnMeta = [&](uint32_t batchSize, uint32_t seqLen, uint32_t cachedLen) {
         XModelAttnMeta attnMeta;
         attnMeta.version = 2;
@@ -2367,14 +2275,17 @@ size_t XModel::DummyRun()
         }
         attnMeta.lens.Init({batchSize}, INT32, nullptr);
         attnMeta.cachedLens.Init({batchSize}, INT32, nullptr);
-        attnMeta.queryStartLoc.Init({batchSize}, INT32, nullptr);
+        attnMeta.queryStartLoc.Init({batchSize + 1}, INT32, nullptr);
         attnMeta.position.Init({batchedTokens}, INT64, nullptr);
         for (uint32_t bs : _c.blockSizes) {
             uint32_t maxNumBlocks = DIV_ROUND_UP(totalLens, bs);
             attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, maxNumBlocks}, INT32,
                                               nullptr);
-            attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);
         }
+        if (IsHybridAttn(_c.attnType) && attnMeta.blockTables.size() < 2) {
+            attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, 1}, INT32, nullptr);
+        }
+        attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);
         return attnMeta;
     };
 
@@ -2403,7 +2314,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype),
-                       _c.indexTopK);
+                       _c.indexTopK, _layerTypes);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
@@ -2437,7 +2348,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype),
-                       _c.indexTopK);
+                       _c.indexTopK, _layerTypes);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);

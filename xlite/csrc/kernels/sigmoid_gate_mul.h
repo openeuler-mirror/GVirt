@@ -11,7 +11,8 @@
 // gate:     [num_tokens, dim] elementwise, or [num_tokens, 1] broadcast (gateDim == 1).
 template <typename Dtype>
 __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ Dtype *out,
-                                 uint32_t numTokens, uint32_t dim, uint32_t gateDim)
+                                 uint32_t numTokens, uint32_t dim, uint32_t gateDim,
+                                 bool attnFp32 = false, bool siluGate = false)
 {
     set_atomic_none();
     set_mask_norm();
@@ -33,7 +34,7 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
 
     uint64_t off = 0;
     __ubuf__ Dtype *attnIn0 = (__ubuf__ Dtype *)off;
-    off += dtypeLen;
+    off += attnFp32 ? f32Len : dtypeLen;
     __ubuf__ Dtype *gateIn0 = (__ubuf__ Dtype *)off;
     off += dtypeLen;
     __ubuf__ float *attnF0 = (__ubuf__ float *)off;
@@ -44,7 +45,7 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
     off += dtypeLen;
 
     __ubuf__ Dtype *attnIn1 = (__ubuf__ Dtype *)off;
-    off += dtypeLen;
+    off += attnFp32 ? f32Len : dtypeLen;
     __ubuf__ Dtype *gateIn1 = (__ubuf__ Dtype *)off;
     off += dtypeLen;
     __ubuf__ float *attnF1 = (__ubuf__ float *)off;
@@ -54,6 +55,8 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
     __ubuf__ Dtype *out1 = (__ubuf__ Dtype *)off;
     off += dtypeLen;
 
+    __ubuf__ float *rawGate = (__ubuf__ float *)off;
+    off += f32Len;
     __ubuf__ float *ones = (__ubuf__ float *)off;
     vector_dup(ones, float(1), DIV_ROUND_UP(tile, calcPad), 1, 0, 8, 0);
     pipe_barrier(PIPE_V);
@@ -69,7 +72,7 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     int curr = 0;
-    const bool broadcast = (gateDim == 1);
+    const bool broadcast = (gateDim == 1 && !siluGate);
 
     for (uint32_t token = block_idx; token < numTokens; token += uint32_t(block_num)) {
         float sig = 0.0f;
@@ -112,7 +115,13 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
             __gm__ Dtype *outPtr = out + token * dim + col;
 
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
-            CopyGmToUbufAligned(attnIn[curr], attnPtr, actualLen);
+            if (attnFp32) {
+                CopyGmToUbufAligned((__ubuf__ float *)attnIn[curr],
+                                    (__gm__ float *)attn + token * dim + col,
+                                    calcNum * sizeof(float));
+            } else {
+                CopyGmToUbufAligned(attnIn[curr], attnPtr, actualLen);
+            }
             if (!broadcast) {
                 __gm__ Dtype *gatePtr = gate + token * dim + col;
                 CopyGmToUbufAligned(gateIn[curr], gatePtr, actualLen);
@@ -122,15 +131,22 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
             if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-                vconv_bf162f32(attnF[curr], attnIn[curr], repeat, 1, 1, 8, 4);
+                if (!attnFp32) {
+                    vconv_bf162f32(attnF[curr], attnIn[curr], repeat, 1, 1, 8, 4);
+                }
                 if (!broadcast) {
                     vconv_bf162f32(gateF[curr], gateIn[curr], repeat, 1, 1, 8, 4);
                 }
             } else {
-                vconv_f162f32(attnF[curr], attnIn[curr], repeat, 1, 1, 8, 4);
+                if (!attnFp32) {
+                    vconv_f162f32(attnF[curr], attnIn[curr], repeat, 1, 1, 8, 4);
+                }
                 if (!broadcast) {
                     vconv_f162f32(gateF[curr], gateIn[curr], repeat, 1, 1, 8, 4);
                 }
+            }
+            if (attnFp32) {
+                vadds(attnF[curr], (__ubuf__ float *)attnIn[curr], 0.0f, repeat, 1, 1, 8, 8);
             }
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);
@@ -138,6 +154,10 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
             if (broadcast) {
                 vmuls(attnF[curr], attnF[curr], sig, repeat, 1, 1, 8, 8);
             } else {
+                if (siluGate) {
+                    vadds(rawGate, gateF[curr], 0.0f, repeat, 1, 1, 8, 8);
+                    pipe_barrier(PIPE_V);
+                }
                 // sigmoid(gate) = 1 / (1 + exp(-gate))
                 vmuls(gateF[curr], gateF[curr], (float)-1.0, repeat, 1, 1, 8, 8);
                 pipe_barrier(PIPE_V);
@@ -147,6 +167,11 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
                 pipe_barrier(PIPE_V);
                 vdiv(gateF[curr], ones, gateF[curr], repeat, 1, 1, 1, 8, 8, 8);
                 pipe_barrier(PIPE_V);
+                if (siluGate) {
+                    vmul(gateF[curr], gateF[curr], rawGate, repeat, 1, 1, 1, 8, 8, 8);
+                    pipe_barrier(PIPE_V);
+                }
+                // Keep the gate activation and attention multiply in FP32.
                 vmul(attnF[curr], attnF[curr], gateF[curr], repeat, 1, 1, 1, 8, 8, 8);
             }
             pipe_barrier(PIPE_V);
@@ -181,11 +206,26 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
         sigmoid_gate_mul((__gm__ dtype *)attn, (__gm__ dtype *)gate, (__gm__ dtype *)out, \
                          numTokens, dim, gateDim);                                        \
     }
+#define SILU_GATE_MUL_FUNC_DEFINE(dtype)                                                          \
+    extern "C" __global__ __aicore__ void silu_gate_mul_##dtype(                                  \
+        GM_ADDR attn, GM_ADDR gate, GM_ADDR out, uint32_t tokens, uint32_t dim)                   \
+    {                                                                                             \
+        sigmoid_gate_mul((__gm__ dtype *)attn, (__gm__ dtype *)gate, (__gm__ dtype *)out, tokens, \
+                         dim, dim, true, true);                                                   \
+    }
 #else
 #define SIGMOID_GATE_MUL_FUNC_DEFINE(dtype)                                        \
     extern "C" __global__ __aicore__ void sigmoid_gate_mul_##dtype(                \
         GM_ADDR attn, GM_ADDR gate, GM_ADDR out, uint32_t numTokens, uint32_t dim, \
         uint32_t gateDim)                                                          \
     {                                                                              \
+    }
+#endif
+
+#ifndef __DAV_C220_VEC__
+#define SILU_GATE_MUL_FUNC_DEFINE(dtype)                                        \
+    extern "C" __global__ __aicore__ void silu_gate_mul_##dtype(                \
+        GM_ADDR attn, GM_ADDR gate, GM_ADDR out, uint32_t tokens, uint32_t dim) \
+    {                                                                           \
     }
 #endif

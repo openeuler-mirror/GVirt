@@ -100,3 +100,9 @@ MTE2(搬入)/ V(计算)/ MTE3(搬出)三管线,事件标志协议:
 ### Host 侧调用
 
 `csrc/op.cpp` 的 `XliteOpRmsNorm` / `XliteOpLayerNorm` / `XliteOpL2Norm` / `XliteOpAddAndRmsNorm`:`XliteOpRmsNorm` / `XliteOpLayerNorm` / `XliteOpL2Norm` / `XliteOpAddAndRmsNorm` 分别以不同 `kind`、`useNorm`、仿射参数组合 launch 同一个 `norm_<dtype>` kernel,grid 为 `PickMinBlockNum(rt.aivNum, in.shape[0])`(即 `min(aivNum, token_num)`,token 数少于核数时按 token 数收敛;`XliteOpRmsNorm`/`XliteOpLayerNorm`/`XliteOpL2Norm`/`XliteOpAddAndRmsNorm` 一致,见 `csrc/auto_tuner.h` 的 `PickMinBlockNum`),`outFp32 = (out.dtype == FP32)`。
+
+## 多组 FP32 输出
+
+`outFp32` 路径按 `cnt_per_token` 拷贝全部 head/group 的归一化结果。
+多组 RMSNorm 输出可直接交给 `silu_gate_mul`，避免先舍入到 BF16/FP16。
+`tests/kernels/silu_gate_mul.py` 校验多组 norm/gate 组合。

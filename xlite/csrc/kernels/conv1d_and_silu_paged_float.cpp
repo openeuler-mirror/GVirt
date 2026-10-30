@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
  */
-#include "conv1d_and_silu_token.h"
+#include "conv1d_and_silu_paged.h"
 
-CONV1D_AND_SILU_TOKEN_FUNC_DEFINE(float16_t);
+CONV1D_AND_SILU_PAGED_FUNC_DEFINE(float);
