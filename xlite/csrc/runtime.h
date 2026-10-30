@@ -56,7 +56,7 @@ struct XModelAttnMeta {
     std::vector<uint32_t> lensCpu;
     std::vector<uint32_t> cachedLensCpu;
 
-    /* only for version 0 */
+    /* for version 0/1 */
     std::vector<std::vector<uint32_t>> blockTablesCpu;
 
     /* for version 1/2 */
@@ -232,8 +232,8 @@ public:
     uint32_t _tileSizeOfCachedKV;
     XTensor _attnPosition;  // [batchedTokens] or [num_dims, batchedTokens] (mrope) int64, ref:
                             // v0/1 -> _position, v2 -> attnMeta.position
-    std::vector<XTensor> _attnBlockTables;  // [batch, maxNumBlocks] int32, per-kv-cache, ref: v0/1
-                                            // -> {_blockTables}, v2 -> attnMeta.blockTables
+    std::vector<XTensor> _attnBlockTables;  // int32 2-D, per-kv-cache; v0/1 -> compact pack,
+                                            // v2 -> persistent (narrowed, pitched) view
     std::vector<XTensor> _attnSlotMapping;  // [batchedTokens] int32, per-kv-cache, ref: v0/1 ->
                                             // {_slotMapping}, v2 -> attnMeta.slotMapping
     XTensor _attnLens;        // [batch] int32, ref: v0/1 -> _lens, v2 -> attnMeta.lens

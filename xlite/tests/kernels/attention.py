@@ -130,10 +130,14 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
             query_start_loc_np = np.cumsum(query_lens_np) - query_lens_np
             query_start_loc = torch.tensor(query_start_loc_np.tolist(), dtype=torch.int32).flatten()
 
+            # persistent buffer with stale trails (the op narrows to the
+            # lens-derived width, pitch unchanged)
             batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
             block_indices = np.arange(max_num_blocks, dtype=np.uint32)
-            block_tables_array = batch_indices * max_num_blocks + block_indices
-            block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32).flatten()
+            valid = batch_indices * max_num_blocks + block_indices
+            padded = torch.zeros(batch, max_num_blocks + 3, dtype=torch.int32)
+            padded[:, :max_num_blocks] = torch.tensor(valid.tolist(), dtype=torch.int32)
+            block_tables = padded
 
         # standard GQA forward: process each sample with its own query_len and cached_len
         outputs = []

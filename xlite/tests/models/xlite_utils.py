@@ -60,9 +60,12 @@ def prepare_xlite_attnmeta_v2(
         step = (max_seq_len + bs - 1) // bs
         block_num = (seqlen + start_pos + bs - 1) // bs
 
-        # Contiguous block table: block_tables[i, k] = i*step + k.
-        block_indices = np.arange(block_num, dtype=np.int32)
-        block_tables_2d = batch_indices * step + block_indices  # (batch, block_num)
+        # Persistent-width block table [batch, step]: only the first block_num
+        # columns per row are valid (block_tables[i, k] = i*step + k); the trail
+        # stays stale garbage (in-bounds id 0, points at real data of row 0) that
+        # must never be followed.
+        block_tables_2d = np.zeros((batch, step), dtype=np.int32)
+        block_tables_2d[:, :block_num] = batch_indices * step + np.arange(block_num, dtype=np.int32)
         block_tables.append(
             torch.from_numpy(block_tables_2d).to(tokens.device, non_blocking=True)
         )

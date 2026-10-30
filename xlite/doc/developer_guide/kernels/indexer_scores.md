@@ -39,7 +39,8 @@ indexer_scores_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores
 | queryStartLoc | 输入 | `[batch]` | int32 | 各 batch query 在拼接 q 中的起始偏移(前缀和) |
 | queryLens | 输入 | `[batch]` | int32 | 各 batch 的 query 长度 |
 | cachedLens | 输入 | `[batch]` | int32 | 各 batch 已缓存 KV 长度(总 KV 长度 = cachedLen + queryLen) |
-| blockTables | 输入 | `[batch, maxNumBlock]`(2-D)或 `[batch * maxNumBlock]`(1-D 扁平) | int32 | 逻辑块 → 物理块映射表;`maxNumBlock` 由 host 侧 `DeriveMaxNumBlocks` 推导(2-D 取 `shape[1]`,1-D 取 `len // batch`,`csrc/op.h` 的 `DeriveMaxNumBlocks`) |
+| blockTables | 输入 | `[rows >= batch, blockTableStride]` | int32 | 逻辑块 → 物理块映射表;持久化缓冲,行跨度为分配跨度,仅每行 lens 推导的有效前缀被读取;行跨度由 host 取 `blockTables.stride[0]` |
+| maxNumBlock | 标量 | - | uint32 | scores 输出行宽对应的块数,host 取 `blockTables.shape[1]`(scores 由调用方按运行期宽度分配) |
 | kCacheStride | — | 标量 | uint32 | kCache 的 dim-0 跨度(元素数);连续时等于 blockSize×headDim,非连续时由宿主传入真实跨距 |
 | nHeads / headDim / blockSize / batch | — | 标量 | uint32 | 测试配置:nHeads=64, headDim=128, blockSize=128;约束 `blockSize <= MAX_M0=128`、`headDim <= k0`(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Init`,关键字 `assert(blockSize <= MAX_M0)` / `assert(headDim <= k0)`) |
 
@@ -80,7 +81,7 @@ query tile 划分:`queryTileSize = MAX_M0 / nHeads`(`csrc/kernels/indexer_scores
 2. 等 `ql1Buf[curr]` 空闲 → Q tile GM→L1;
 3. K→L0A、Q→L0B,`CalMmad(l0cBuf, l0a, l0b, mBlockPad, nBlockPad, headDim)` 得到 `[kvLen, queryTileSize*nHeads]` 的头得分,`CopyL0CToL1`(`reluEn=1`)暂存到 `kql1Buf`——L0C→L1 的 fixpipe 搬运同时完成 ReLU 过滤(负得分置 0,DSA indexer 要求得分非负),省去单独一次 ReLU pass(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Run`,关键字 `CopyL0CToL1(kql1Buf[curr], l0cBuf, mBlockPad, nBlockPad, mBlockPad, mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE, /*reluEn=*/1)`);
 4. weight tile GM→L1;
-5. 对 tile 内每个 query token q:weight 行(1,nHeads)→L0A、对应头得分列(kvLen,nHeads)→L0B,第二次 `CalMmad`(`m=MBLOCKSIZE`)得到 `(1, kvLen)` 的 index_score,`CopyToGm` 直接从 L0C 写 GM,目的地址 `scores[(qOffset+q) * maxNumBlock*blockSize + kvStart]`,以 `maxNumBlock*blockSize` 为 dstStride 保持行内全局位置布局(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Run`,关键字 `CopyToGm(scores[(qOffset + q) * maxNumBlock * blockSize + kvStart]`);
+5. 对 tile 内每个 query token q:weight 行(1,nHeads)→L0A、对应头得分列(kvLen,nHeads)→L0B,第二次 `CalMmad`(`m=MBLOCKSIZE`)得到 `(1, kvLen)` 的 index_score,`CopyToGm` 直接从 L0C 写 GM,目的地址 `scores[(qOffset+q) * maxNumBlock*blockSize + kvStart]`,以 `maxNumBlock*blockSize`(来自 scores 自身行宽)为 dstStride 保持行内全局位置布局(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Run`,关键字 `CopyToGm(scores[(qOffset + q) * maxNumBlock * blockSize + kvStart]`);
 6. `curr = 1 - curr` 切换乒乓,下一任务的搬运与本任务的 mmad/写回重叠。
 
 块尺寸对齐:kvLen 尾块按 `MBLOCKSIZE`/`NBLOCKSIZE` 向上取整(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Run`,关键字 `mBlockPad = ROUND_UP(kvLen, MBLOCKSIZE)` / `wnBlockPad = ROUND_UP(kvLen, NBLOCKSIZE)`),mmad 的 m/n/k 均为 `kBlockSize = 32/sizeof(Dtype)` 的倍数(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Run`,关键字 `constexpr int kBlockSize = 32 / sizeof(Dtype)` / `int kBlockNum = headDim / kBlockSize`)。

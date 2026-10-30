@@ -27,7 +27,7 @@ indexer_topk(rt, q, k_cache, weight, topk_indices, query_start_loc,
              block_size, batch, topK)
 ```
 
-host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpIndexerTopK`:`topK >= maxNumBlocks*blockSize` 且非 `skipDenseTopk` 时全部行都是稠密,kernel 不必启动,host 侧直接把 `seqPositions` 模板前 `topK` 项 D2D 广播进 `topkIndices` 后返回(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `topK >= maxNumBlocks * blockSize` dense-skip D2D 广播段);否则校验 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `if (topK > MAX_TOPK_NUM)` throw)。`maxSeqLen` 不再是 launch 参数:host 经 `DeriveMaxNumBlocks`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `maxNumBlocks = DeriveMaxNumBlocks`)仅推导 `maxNumBlock` 传入;`maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)` 由 kernel 侧(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `maxSeqLen = MAX((uint64_t)blockSize * maxNumBlock, INIT_MIN_SEQ_POS)`)推导。host 不校验 `seqPositions` 长度,覆盖范围由 `XModel::Init` 预生成保证(见下)。kernel 签名(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_FUNC_DEFINE`):
+host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpIndexerTopK`:`topK >= maxNumBlocks*blockSize` 且非 `skipDenseTopk` 时全部行都是稠密,kernel 不必启动,host 侧直接把 `seqPositions` 模板前 `topK` 项 D2D 广播进 `topkIndices` 后返回(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `topK >= maxNumBlocks * blockSize` dense-skip D2D 广播段);否则校验 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `if (topK > MAX_TOPK_NUM)` throw)。`maxSeqLen` 不再是 launch 参数:`maxNumBlock`(运行期块数)由 host 取 `blockTables.shape[1]` 传入(V2 表已由 PrepareAttn 收窄到运行期宽度,模型层 `ForwardAttnIndexer` 关键字 `rt._attnBlockTables[0].shape[1]`;standalone/测试入口由 `SliceBlockTableToLens` 从 lens 推导收窄),`blockTableStride = blockTables.stride[0]` 一并传入;`maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)` 由 kernel 侧(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `maxSeqLen = MAX((uint64_t)blockSize * maxNumBlock, INIT_MIN_SEQ_POS)`)推导。host 不校验 `seqPositions` 长度,覆盖范围由 `XModel::Init` 预生成保证(见下)。kernel 签名(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_FUNC_DEFINE`):
 
 ```cpp
 indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc,
@@ -35,7 +35,7 @@ indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR querySta
                      GM_ADDR scores, GM_ADDR lastTopk, GM_ADDR seqPositions,
                      GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,
                      uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,
-                     uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,
+                     uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,
                      uint32_t compressRatio)
 ```
 
@@ -48,7 +48,7 @@ C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` �
 | weight | 输入 | `[total_query_len, headDim + nHeads]` | fp16 / bf16 | 头融合权重,位于每行第 headDim 列起;C8 为独立的 fp16 `[total_query_len,32]`,已乘 Q scale |
 | queryStartLoc | 输入 | `[batch]` | int32 | 各 batch query 起始偏移 |
 | queryLens / cachedLens | 输入 | `[batch]` | int32 | 各 batch query / 已缓存长度;token 绝对位置 `pos = cachedLens[i] + 段内偏移`,经 `MapPosToKv` 映射为 KV 空间因果边界 `p0` |
-| blockTables | 输入 | `[batch, maxNumBlock]`(2-D)或 `[batch * maxNumBlock]`(1-D 扁平) | int32 | 逻辑块 → 物理块映射;`maxNumBlock` 由 host 侧 `DeriveMaxNumBlocks` 推导(2-D 取 `shape[1]`,1-D 取 `len // batch`,`csrc/op.h` 的 `DeriveMaxNumBlocks`) |
+| blockTables | 输入 | `[rows >= batch, blockTableStride]` | int32 | 逻辑块 → 物理块映射;持久化缓冲,行跨度为分配跨度,仅每行 lens 推导的有效前缀被读取;行跨度 `blockTableStride` 仅用于行寻址 |
 | scores | workspace | `[2 * block_num * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN]` 视作 `[block_num][2][XLITE_MAX_M0 * 4096]` | fp16 / bf16 / fp32 | C8 使用 fp32;AIC→AIV 的得分中转缓冲,乒乓两份,每 block 一段(见下文布局) |
 | lastTopk | workspace | `[total_query_len, 2*topK]`(uint32 对) | uint32 | 跨核 topk 接力缓冲:处理非首 KV tile 的核把当前全局 topK 候选(值+索引对)写给下一个核 |
 | seqPositions | 输入 | `[max(max(blockSize*maxNumBlock, INIT_MIN_SEQ_POS), topK)]` | int32(uint32 语义) | `arange(...)` 恒等索引表,由 host 侧(`csrc/_C.cpp` `IndexerTopK` / `csrc/model.cpp` `XModel::Init`)预先生成;长度必须覆盖 kernel 侧推导的 `maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)`(host 侧 `XliteOpIndexerTopK` 不校验长度,由 `XModel::Init` 预生成保证覆盖)。`XModel::Init` 按 `MAX(INIT_MIN_SEQ_POS, ROUND_UP(max_seq_len, blockSize))` 一次性预生成。AIV 每个 subblock 搬入属于自己的一段,之后按 `kvOffset` 增量推进;同时它也是稠密行模板的来源——首个 `topK` 项即 `0...topK-1`(模板 writer 核整体搬入 UB `defaultTopkIndices`,见下文) |
@@ -129,7 +129,7 @@ C8 的 fp32 scores 直接搬入 `mrgSortBuf0`,`in[0]/in[1]` 交替暂存 fp16 K 
 
 `MAX_TOPK_NUM=2048` 与 `MAX_INDEXER_KV_TILE_LEN=4096`(均定义于 `csrc/kernels/kernel_param.h` 的 `MAX_INDEXER_KV_TILE_LEN` / `MAX_TOPK_NUM`)正是这套 UB 布局的容量上限来源,因此 host 侧强制 `topK <= 2048`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `if (topK > MAX_TOPK_NUM)` throw)。
 
-**索引表分段搬入 + 增量推进**:`Run` 启动时,每个 subblock 依据 `(blockIdx*2 + subBlockIdx) % max(1, maxSeqLen/4096)` 从 `seqPositions` 搬入**属于自己的** `MIN(4096, maxSeqLen)` 项(`sortIndicesStart`/`sortIndicesBytes`;`maxSeqLen < 4096` 时所有核共享首段),其中 `maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS)` 由核内从 block table 容量推导(不再是 launch 参数),再通过 EVENT_ID4 搬入同步;之后每个任务若 `kvOffset` 相对 `sortIndicesStart` 推进了 `idxDiff`,用一条 `vadds` 给整个表加上 `idxDiff`(起点窗口落在恒等表内任意位置都正确,`vadds` 会把它重定位到 `kvOffset`),不再逐任务从 GM 重复拷贝索引表。同时,模板 writer 把 `seqPositions` 的首个 `topK` 项(`0...topK-1`)搬入 `defaultTopkIndices` 一次,用 MTE2→MTE3 EVENT_ID0 自等待确保 MTE3 读模板时已就绪。
+**索引表分段搬入 + 增量推进**:`Run` 启动时,每个 subblock 依据 `(blockIdx*2 + subBlockIdx) % max(1, maxSeqLen/4096)` 从 `seqPositions` 搬入**属于自己的** `MIN(4096, maxSeqLen)` 项(`sortIndicesStart`/`sortIndicesBytes`;`maxSeqLen < 4096` 时所有核共享首段),其中 `maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS)` 由核内从 launch 参数 `maxNumBlock`(运行期块数,由 lens 推导)计算,再通过 EVENT_ID4 搬入同步;之后每个任务若 `kvOffset` 相对 `sortIndicesStart` 推进了 `idxDiff`,用一条 `vadds` 给整个表加上 `idxDiff`(起点窗口落在恒等表内任意位置都正确,`vadds` 会把它重定位到 `kvOffset`),不再逐任务从 GM 重复拷贝索引表。同时,模板 writer 把 `seqPositions` 的首个 `topK` 项(`0...topK-1`)搬入 `defaultTopkIndices` 一次,用 MTE2→MTE3 EVENT_ID0 自等待确保 MTE3 读模板时已就绪。
 
 **topk 算法**(基于硬件排序指令,非堆、非位图):
 

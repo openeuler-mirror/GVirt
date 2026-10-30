@@ -944,11 +944,12 @@ void XliteOpAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCac
                               XT_STR(qk) + XT_STR(output);
         throw std::runtime_error(err_str + "not supported!");
     }
-    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    blockTables.AtLeast2D();
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, output.ptr,
                  queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, kCache.stride[0],
-                 vCache.stride[0], nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlocks,
-                 rt._attnZeroBuffer.ptr);
+                 vCache.stride[0], nHeads, nKvHeads, headDim, blockSize, batch,
+                 static_cast<uint32_t>(blockTables.stride[0]),
+                 static_cast<uint32_t>(blockTables.shape[1]) * blockSize, rt._attnZeroBuffer.ptr);
 }
 
 void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor &vCache,
@@ -985,11 +986,12 @@ void XliteOpFlashAttention(XRuntime &rt, XTensor &qkv, XTensor &kCache, XTensor 
                               XT_STR(qk) + XT_STR(output);
         throw std::runtime_error(err_str + "not supported!");
     }
-    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    blockTables.AtLeast2D();
     launchKernel(rt.aicNum, rt.stream, qkv.ptr, kCache.ptr, vCache.ptr, qk.ptr, sv.ptr, max.ptr,
                  sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, kCache.stride[0], vCache.stride[0],
-                 nHeads, nKvHeads, headDim, blockSize, batch, maxNumBlocks, tileSizeOfCachedKV,
+                 nHeads, nKvHeads, headDim, blockSize, batch,
+                 static_cast<uint32_t>(blockTables.stride[0]), tileSizeOfCachedKV,
                  rt._attnZeroBuffer.ptr);
 }
 
@@ -1027,14 +1029,15 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
                               XT_STR(scores) + XT_STR(output);
         throw std::runtime_error(err_str + " unsupported!");
     }
-    uint32_t swaMaxNumBlocks = DeriveMaxNumBlocks(swaBlockTables, batch);
-    uint32_t compressMaxNumBlocks = dense ? 0 : DeriveMaxNumBlocks(compressBlockTables, batch);
+    swaBlockTables.AtLeast2D();
+    compressBlockTables.AtLeast2D();
     launchKernel(rt.aicNum, rt.stream, q.ptr, swaKCache.ptr, compressKCache.ptr, swaBlockTables.ptr,
                  compressBlockTables.ptr, swaBlockSize, dense ? 0 : compressBlockSize,
-                 swaMaxNumBlocks, compressMaxNumBlocks, attnSink.ptr, scores.ptr, output.ptr, batch,
-                 queryStartLoc.ptr, lens.ptr, cachedLens.ptr, nHeads, headDim, scale, windowSize,
-                 kvSize, compressRatio, indexTopK, topkIndices.ptr, dense ? 1u : 0u,
-                 rt._attnZeroBuffer.ptr);
+                 static_cast<uint32_t>(swaBlockTables.stride[0]),
+                 dense ? 0 : static_cast<uint32_t>(compressBlockTables.stride[0]), attnSink.ptr,
+                 scores.ptr, output.ptr, batch, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, nHeads,
+                 headDim, scale, windowSize, kvSize, compressRatio, indexTopK, topkIndices.ptr,
+                 dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
 }
 
 // Unified MLA decode kernel entry. dense=false walks the paged KV cache via
@@ -1070,12 +1073,14 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                                  ") > XLITE_MAX_M0 (" + std::to_string(XLITE_MAX_M0) +
                                  "): one cube M0 tile cannot hold every head of a query token");
     }
+    blockTables.AtLeast2D();
     if (EachXDtype(BF16, qAbsorb, qr, kCache, peCache, oAbsorb)) {
         aclrtlaunch_mla_v2_bfloat16_t(
             rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
             qk.ptr, oAbsorb.ptr, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
-            nHeads, ropeHeadDim, kvLoraRank, blockSize, batch, maxSeqLen, scale, topK,
-            kCache.stride[0], peCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
+            nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
+            static_cast<uint32_t>(blockTables.stride[0]), maxSeqLen, scale, topK, kCache.stride[0],
+            peCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1109,14 +1114,14 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                                  ") > XLITE_MAX_M0 (" + std::to_string(XLITE_MAX_M0) +
                                  "): one cube M0 tile cannot hold every head of a query token");
     }
-    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    blockTables.AtLeast2D();
     if (EachXDtype(BF16, qAbsorb, qr, kCache, peCache, oAbsorb)) {
         aclrtlaunch_flash_mla_v2_bfloat16_t(
             rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
             qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, oAbsorb.ptr,
             queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
-            kvLoraRank, blockSize, batch, maxNumBlocks, scale, tileSizeOfCachedKV, topK,
-            kCache.stride[0], peCache.stride[0], rt._attnZeroBuffer.ptr);
+            kvLoraRank, blockSize, batch, static_cast<uint32_t>(blockTables.stride[0]), scale,
+            tileSizeOfCachedKV, topK, kCache.stride[0], peCache.stride[0], rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1162,16 +1167,17 @@ void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &comp
         throw std::runtime_error(std::string(__func__) +
                                  ": compressRatio should be greater than 0");
     }
-    uint32_t swaMaxNumBlocks = DeriveMaxNumBlocks(swaBlockTables, batch);
-    uint32_t compressMaxNumBlocks = DeriveMaxNumBlocks(compressBlockTables, batch);
+    swaBlockTables.AtLeast2D();
+    compressBlockTables.AtLeast2D();
     if (EachXDtype(BF16, q, swaKCache, compressKCache, qk, sv, output)) {
         aclrtlaunch_flash_cxa_bfloat16_t(
             rt.aicNum, rt.stream, q.ptr, swaKCache.ptr, compressKCache.ptr, swaBlockTables.ptr,
-            compressBlockTables.ptr, swaBlockSize, compressBlockSize, swaMaxNumBlocks,
-            compressMaxNumBlocks, attnSink.ptr, qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr,
-            lastSum.ptr, sync.ptr, output.ptr, batch, queryStartLoc.ptr, lens.ptr, cachedLens.ptr,
-            nHeads, headDim, scale, windowSize, compressRatio, indexTopK, topkIndices.ptr,
-            tileSizeOfCachedKV, rt._attnZeroBuffer.ptr);
+            compressBlockTables.ptr, swaBlockSize, compressBlockSize,
+            static_cast<uint32_t>(swaBlockTables.stride[0]),
+            static_cast<uint32_t>(compressBlockTables.stride[0]), attnSink.ptr, qk.ptr, sv.ptr,
+            max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, batch,
+            queryStartLoc.ptr, lens.ptr, cachedLens.ptr, nHeads, headDim, scale, windowSize,
+            compressRatio, indexTopK, topkIndices.ptr, tileSizeOfCachedKV, rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(q) + XT_STR(swaKCache) + XT_STR(compressKCache) +
                               XT_STR(qk) + XT_STR(sv) + XT_STR(output);
@@ -1200,7 +1206,8 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
         throw std::runtime_error(std::string(__func__) +
                                  ": cache and dense cache channel emptiness must match");
     }
-    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    blockTables.AtLeast2D();
+    uint32_t blockTableStride = static_cast<uint32_t>(blockTables.stride[0]);
     uint32_t aivNum = PickMinBlockNum(
         rt.aivNum, static_cast<uint64_t>(batch) *
                        DIV_ROUND_UP(indexTopK, GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP));
@@ -1215,7 +1222,7 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
             aivNum, rt.stream, useK ? kCache.ptr : peCache.ptr, useK ? peCache.ptr : nullptr,
             blockTables.ptr, topkIndices.ptr, queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr,
             useK ? kDenseCache.ptr : peDenseCache.ptr, usePe ? peDenseCache.ptr : nullptr, batch,
-            indexTopK, blockSize, maxNumBlocks, useK ? kvLoraRank : ropeHeadDim,
+            indexTopK, blockSize, blockTableStride, useK ? kvLoraRank : ropeHeadDim,
             usePe ? ropeHeadDim : 0, useK ? kCache.stride[0] : peCache.stride[0], 0u, compressRatio,
             burstCopySize);
     } else if (kvLoraRank >= ropeHeadDim) {
@@ -1223,14 +1230,14 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
         aclrtlaunch_gather_sparse_kv_cache_bfloat16_t(
             aivNum, rt.stream, kCache.ptr, peCache.ptr, blockTables.ptr, topkIndices.ptr,
             queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, kDenseCache.ptr, peDenseCache.ptr,
-            batch, indexTopK, blockSize, maxNumBlocks, kvLoraRank, ropeHeadDim, kCache.stride[0],
-            peCache.stride[0], compressRatio, burstCopySize);
+            batch, indexTopK, blockSize, blockTableStride, kvLoraRank, ropeHeadDim,
+            kCache.stride[0], peCache.stride[0], compressRatio, burstCopySize);
     } else {
         aclrtlaunch_gather_sparse_kv_cache_bfloat16_t(
             aivNum, rt.stream, peCache.ptr, kCache.ptr, blockTables.ptr, topkIndices.ptr,
             queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, peDenseCache.ptr, kDenseCache.ptr,
-            batch, indexTopK, blockSize, maxNumBlocks, ropeHeadDim, kvLoraRank, peCache.stride[0],
-            kCache.stride[0], compressRatio, burstCopySize);
+            batch, indexTopK, blockSize, blockTableStride, ropeHeadDim, kvLoraRank,
+            peCache.stride[0], kCache.stride[0], compressRatio, burstCopySize);
     }
 }
 
@@ -1547,13 +1554,14 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
         throw std::runtime_error(err_str + "not supported!");
     }
     float rotateScale = doRotate ? (1.0f / sqrtf(static_cast<float>(headDim))) : 1.0f;
-    launchKernel(rt.aivNum, rt.stream, kv.ptr, score.ptr, ape.ptr, norm.ptr, freqs.ptr,
-                 weightedSum.ptr, queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, batch,
-                 nTotalBlocks, ratio, overlap, headDim, ropeHeadDim, normEps, compressKv.ptr,
-                 compressPositions.ptr, compressSlotMapping.ptr, compressBlockSize, state.ptr,
-                 stateSlotMapping.ptr, stateBlockTable.ptr, stateBlockSize,
-                 stateBlockTable.ptr == nullptr ? 0u : DeriveMaxNumBlocks(stateBlockTable, batch),
-                 stateCacheStrideDim0, doRotate ? 1u : 0u, rotateScale);
+    launchKernel(
+        rt.aivNum, rt.stream, kv.ptr, score.ptr, ape.ptr, norm.ptr, freqs.ptr, weightedSum.ptr,
+        queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, batch, nTotalBlocks, ratio, overlap,
+        headDim, ropeHeadDim, normEps, compressKv.ptr, compressPositions.ptr,
+        compressSlotMapping.ptr, compressBlockSize, state.ptr, stateSlotMapping.ptr,
+        stateBlockTable.ptr, stateBlockSize,
+        stateBlockTable.ptr == nullptr ? 0u : static_cast<uint32_t>(stateBlockTable.stride[0]),
+        stateCacheStrideDim0, doRotate ? 1u : 0u, rotateScale);
 }
 
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output)
@@ -2168,10 +2176,11 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
             DBG_PREFIX + XT_STR(q) + XT_STR(kCache) + XT_STR(weight) + XT_STR(scores);
         throw std::runtime_error(err_str + "not supported!");
     }
-    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    blockTables.AtLeast2D();
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, scores.ptr, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, blockTables.ptr, kCache.stride[0], nHeads, headDim,
-                 blockSize, batch, maxNumBlocks);
+                 blockSize, batch, static_cast<uint32_t>(blockTables.stride[0]),
+                 static_cast<uint32_t>(blockTables.shape[1]));
 }
 
 void XliteOpRepeatInterleave(XRuntime &rt, XTensor &in, XTensor &out, uint32_t numTokens,
@@ -2210,7 +2219,9 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     if (IsDummyRuntime(rt)) {
         return;
     }
-    uint32_t maxNumBlocks = DeriveMaxNumBlocks(blockTables, batch);
+    blockTables.AtLeast2D();
+    uint32_t blockTableStride = static_cast<uint32_t>(blockTables.stride[0]);
+    uint32_t maxNumBlocks = static_cast<uint32_t>(blockTables.shape[1]);
     if (topK >= maxNumBlocks * blockSize && !skipDenseTopk) {
         // this kernel should not even be fired --- but let's pad the output anyways (inefficiently)
         // the dense-row template is the first `topK` entries of `seqPositions` (0..topK-1)
@@ -2241,7 +2252,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                 rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                 topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
-                maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr);
+                blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr);
         }
         return;
     }
@@ -2261,7 +2272,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                  topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
-                 maxNumBlocks, topK, skipDenseTopk, compressRatio);
+                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,

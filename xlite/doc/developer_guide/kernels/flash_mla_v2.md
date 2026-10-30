@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-MLA 吸收式注意力的 flash(在线 softmax)版本,是 mla_v2 的长序列路径:当 paged KV 总长 `maxNumBlocks * blockSize > tileSizeOfCachedKV` 时由模型层路由(`csrc/model.cpp` 的 `ForwardAttnMLAV2`,flash 路由分支关键字 `XliteOpFlashMLAV2`)。KV 维按 `tileSizeOfCachedKV` 分块,每块上 AIC 算 `QK = (qAbsorb·kCache^T + qr·peCache^T)*scale` 与 `sv = softmax_local(QK)·kCache`(注意 MLA 的 V 也是 latent kCache),AIV 用 online softmax 跨 tile 增量合并,最终 `oAbsorb = softmax_causal(QK) · kCache`。支持 DSA top-k token 选择(topkIndices),始终走 paged KV cache。
+MLA 吸收式注意力的 flash(在线 softmax)版本,是 mla_v2 的长序列路径:当 paged KV 运行期总长 `ceil(maxTotalLens/blockSize) * blockSize > tileSizeOfCachedKV`(即 `blockTables.shape[1] * blockSize`,运行期行宽,不取 block table 分配跨度)时由模型层路由(`csrc/model.cpp` 的 `ForwardAttnMLAV2`,flash 路由分支关键字 `XliteOpFlashMLAV2`)。KV 维按 `tileSizeOfCachedKV` 分块,每块上 AIC 算 `QK = (qAbsorb·kCache^T + qr·peCache^T)*scale` 与 `sv = softmax_local(QK)·kCache`(注意 MLA 的 V 也是 latent kCache),AIV 用 online softmax 跨 tile 增量合并,最终 `oAbsorb = softmax_causal(QK) · kCache`。支持 DSA top-k token 选择(topkIndices),始终走 paged KV cache。
 
 ## 输入输出参数
 
@@ -19,7 +19,7 @@ host 封装 `MLAV2` 的 flash 分支(`csrc/_C.cpp` 的 `MLAV2`,`enableFlashAtten
 flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum,
                      lastMax, lastSum, sync, oAbsorb, queryStartLoc, queryLens,
                      cachedLens, blockTables, nHeads, ropeHeadDim, kvLoraRank,
-                     blockSize, batch, maxNumBlocks, scale, tileSizeOfCachedKV, topK,
+                     blockSize, batch, blockTableStride, scale, tileSizeOfCachedKV, topK,
                      kCacheStride, peCacheStride, zeroGm)
 ```
 
@@ -37,8 +37,8 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 | lastMax / lastSum | workspace | `[total_tokens, nHeads]` | FP32 | 跨 tile 全局 max / Σexp |
 | sync | workspace | `[1, aivNum]` | INT32 | RingSync 计数器(host Memset(0)) |
 | oAbsorb | 输出 | `[total_tokens, nHeads, kvLoraRank]` | BF16 | 最终吸收式输出(WUV 投影在 host) |
-| queryStartLoc / queryLens / cachedLens / blockTables | 输入 | `[batch]` / `[batch, maxNumBlocks]` | INT32 | 同 mla_v2 |
-| nHeads / ropeHeadDim / kvLoraRank / blockSize / batch / maxNumBlocks | 标量 | - | uint32 | 同 mla_v2 |
+| queryStartLoc / queryLens / cachedLens / blockTables | 输入 | `[batch]` / `[rows >= batch, blockTableStride]` | INT32 | 同 mla_v2(持久化表,仅每行有效前缀被读取) |
+| nHeads / ropeHeadDim / kvLoraRank / blockSize / batch / blockTableStride | 标量 | - | uint32 | 同 mla_v2(blockTableStride 为表行跨度,仅用于行寻址) |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
 | tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN=11776`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`) |
 | kCacheStride / peCacheStride | 标量 | - | uint32 | paged kCache / peCache 的 dim-0 跨度(元素数),块寻址 `block * stride`;连续时等于 blockSize×kvLoraRank / blockSize×ropeHeadDim,非连续时由宿主传入真实跨距 |

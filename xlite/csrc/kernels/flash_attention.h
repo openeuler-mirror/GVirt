@@ -25,7 +25,7 @@ public:
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 GM_ADDR blockTables, uint32_t kCacheStride, uint32_t vCacheStride,
                                 uint32_t nHeads, uint32_t nKVHeads, uint32_t headSize,
-                                uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,
+                                uint32_t blockSize, uint32_t batch, uint32_t blockTableStride,
                                 uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
@@ -47,7 +47,7 @@ public:
         this->headSize = headSize;
         this->blockSize = blockSize;
         this->batch = batch;
-        this->maxNumBlocks = maxNumBlocks;
+        this->blockTableStride = blockTableStride;
         this->tileSizeOfCachedKV = tileSizeOfCachedKV;
         this->groupMemSize = headNumInGroup * headSize;
         ringSync.Init(sync);
@@ -110,7 +110,7 @@ public:
             int cachedLen = cachedLens[batchIdx];
             __gm__ uint32_t *blockTable =
                 (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlocks * sizeof(uint32_t));
+                                    batchIdx * blockTableStride * sizeof(uint32_t));
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int kvNum = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
@@ -431,26 +431,26 @@ private:
     uint32_t headSize;
     uint32_t blockSize;
     uint32_t batch;
-    uint32_t maxNumBlocks;
+    uint32_t blockTableStride;
     uint32_t tileSizeOfCachedKV;
     uint32_t groupMemSize;
 
     AicHelper<Dtype> aicHelper;
 };
 
-#define FLASH_ATTN_FUNC_DEFINE(dtype)                                                           \
-    extern "C" __global__ __aicore__ void flash_attention_##dtype(                              \
-        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR sv, GM_ADDR max,     \
-        GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync, GM_ADDR output,            \
-        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,      \
-        uint32_t kCacheStride, uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,       \
-        uint32_t headSize, uint32_t blockSize, uint32_t batch, uint32_t maxNumBlocks,           \
-        uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)                                            \
-    {                                                                                           \
-        FlashAttention<dtype> op;                                                               \
-        op.Init(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, sync, output,        \
-                queryStartLoc, queryLens, cachedLens, blockTables, kCacheStride, vCacheStride,  \
-                nHeads, nKVHeads, headSize, blockSize, batch, maxNumBlocks, tileSizeOfCachedKV, \
-                zeroGm);                                                                        \
-        op.Run();                                                                               \
+#define FLASH_ATTN_FUNC_DEFINE(dtype)                                                          \
+    extern "C" __global__ __aicore__ void flash_attention_##dtype(                             \
+        GM_ADDR input, GM_ADDR kCache, GM_ADDR vCache, GM_ADDR qk, GM_ADDR sv, GM_ADDR max,    \
+        GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync, GM_ADDR output,           \
+        GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,     \
+        uint32_t kCacheStride, uint32_t vCacheStride, uint32_t nHeads, uint32_t nKVHeads,      \
+        uint32_t headSize, uint32_t blockSize, uint32_t batch, uint32_t blockTableStride,      \
+        uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)                                           \
+    {                                                                                          \
+        FlashAttention<dtype> op;                                                              \
+        op.Init(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum, sync, output,       \
+                queryStartLoc, queryLens, cachedLens, blockTables, kCacheStride, vCacheStride, \
+                nHeads, nKVHeads, headSize, blockSize, batch, blockTableStride,                \
+                tileSizeOfCachedKV, zeroGm);                                                   \
+        op.Run();                                                                              \
     }

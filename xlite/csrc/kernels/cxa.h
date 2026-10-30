@@ -32,10 +32,10 @@
 //   q:    [totalQ, nLocalHeads, headDim]    query
 //   swaKCache:    [block, swaBlockSize, headDim]    sliding-window KV cache
 //   compressKCache:    [block, compressBlockSize, headDim]    compressed KV cache
-//   swaBlockTables:    [batch, swaMaxNumBlocks] int32    block table for sliding-window cache
-//   compressBlockTables:    [batch, compressMaxNumBlocks] int32    block table for compressed cache
-//   attnSink:    [nHeads] fp32    per-head attention sink bias
-//   scores:    [aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize]    workspace for QK scores
+//   swaBlockTables:    [batch, swaBlockTableStride] int32    block table for sliding-window cache
+//   compressBlockTables:    [batch, compressBlockTableStride] int32    block table for compressed
+//   cache attnSink:    [nHeads] fp32    per-head attention sink bias scores:    [aicNum *
+//   XLITE_MAX_M0 * 2, swaSegWidth + kvSize]    workspace for QK scores
 //              where swaSegWidth = windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B (0 when
 //              windowSize is 0) is a fixed host/device contract (see Init).
 //   queryStartLoc:    [batch] int32    cumulative query start offsets
@@ -55,7 +55,7 @@ public:
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR swaKCache, GM_ADDR compressKCache,
                                 GM_ADDR swaBlockTables, GM_ADDR compressBlockTables,
                                 uint32_t swaBlockSize, uint32_t compressBlockSize,
-                                uint32_t swaMaxNumBlocks, uint32_t compressMaxNumBlocks,
+                                uint32_t swaBlockTableStride, uint32_t compressBlockTableStride,
                                 GM_ADDR attnSink, GM_ADDR scores, GM_ADDR output, uint32_t batch,
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
@@ -87,8 +87,8 @@ public:
         // is attended causally, so topkIndices is ignored.
         this->indexTopK = (!this->dense && topkIndices != nullptr) ? indexTopK : 0;
         this->maxSeqLen = indexTopK;
-        this->swaMaxNumBlocks = swaMaxNumBlocks;
-        this->compressMaxNumBlocks = this->dense ? 0 : compressMaxNumBlocks;
+        this->swaBlockTableStride = swaBlockTableStride;
+        this->compressBlockTableStride = this->dense ? 0 : compressBlockTableStride;
         this->windowSize = windowSize;
         // the causal-window union of one query tile is windowSize + XLITE_MAX_M0 wide;
         // +K_BLOCK_SIZE_2B absorbs the windowStart round-down lead-in.
@@ -131,7 +131,7 @@ public:
             int queryLen = queryLens[batchIdx];
             __gm__ uint32_t *swaBt =
                 (__gm__ uint32_t *)((uint64_t)swaBlockTables +
-                                    batchIdx * swaMaxNumBlocks * sizeof(uint32_t));
+                                    batchIdx * swaBlockTableStride * sizeof(uint32_t));
 
             if (cachedLen < 0) {
                 cachedLen = cachedLens[batchIdx];
@@ -141,7 +141,7 @@ public:
             if (!dense) {
                 compressBt =
                     (__gm__ uint32_t *)((uint64_t)compressBlockTables +
-                                        batchIdx * compressMaxNumBlocks * sizeof(uint32_t));
+                                        batchIdx * compressBlockTableStride * sizeof(uint32_t));
             }
 
             // dense mode: each query token has its own dense cache row, so tile one
@@ -394,8 +394,8 @@ private:
     uint32_t kvSize;
     uint32_t qkStride;
     uint32_t swaSegWidth;
-    uint32_t swaMaxNumBlocks;
-    uint32_t compressMaxNumBlocks;
+    uint32_t swaBlockTableStride;
+    uint32_t compressBlockTableStride;
     uint32_t windowSize;
     float scale;
     bool dense;
@@ -404,20 +404,20 @@ private:
     CxaAicHelper<Dtype> aicHelper;
 };
 
-#define CXA_FUNC_DEFINE(dtype)                                                                     \
-    extern "C" __global__ __aicore__ void cxa_##dtype(                                             \
-        GM_ADDR q, GM_ADDR swaKCache, GM_ADDR compressKCache, GM_ADDR swaBlockTables,              \
-        GM_ADDR compressBlockTables, uint32_t swaBlockSize, uint32_t compressBlockSize,            \
-        uint32_t swaMaxNumBlocks, uint32_t compressMaxNumBlocks, GM_ADDR attnSink, GM_ADDR scores, \
-        GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,                  \
-        GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,   \
-        uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices,          \
-        uint32_t dense, GM_ADDR zeroGm)                                                            \
-    {                                                                                              \
-        CXA<dtype> op;                                                                             \
-        op.Init(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables, swaBlockSize,   \
-                compressBlockSize, swaMaxNumBlocks, compressMaxNumBlocks, attnSink, scores,        \
-                output, batch, queryStartLoc, queryLens, cachedLens, nHeads, headDim, scale,       \
-                windowSize, kvSize, compressRatio, indexTopK, topkIndices, dense, zeroGm);         \
-        op.Run();                                                                                  \
+#define CXA_FUNC_DEFINE(dtype)                                                                    \
+    extern "C" __global__ __aicore__ void cxa_##dtype(                                            \
+        GM_ADDR q, GM_ADDR swaKCache, GM_ADDR compressKCache, GM_ADDR swaBlockTables,             \
+        GM_ADDR compressBlockTables, uint32_t swaBlockSize, uint32_t compressBlockSize,           \
+        uint32_t swaBlockTableStride, uint32_t compressBlockTableStride, GM_ADDR attnSink,        \
+        GM_ADDR scores, GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens, \
+        GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,  \
+        uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices,         \
+        uint32_t dense, GM_ADDR zeroGm)                                                           \
+    {                                                                                             \
+        CXA<dtype> op;                                                                            \
+        op.Init(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables, swaBlockSize,  \
+                compressBlockSize, swaBlockTableStride, compressBlockTableStride, attnSink,       \
+                scores, output, batch, queryStartLoc, queryLens, cachedLens, nHeads, headDim,     \
+                scale, windowSize, kvSize, compressRatio, indexTopK, topkIndices, dense, zeroGm); \
+        op.Run();                                                                                 \
     }

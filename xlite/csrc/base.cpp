@@ -17,10 +17,10 @@ XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
     }
 
     const std::vector<size_t> contigStride = ContiguousStride(shape);
+    bool contig = true;
     if (!stride.has_value()) {
         // Absent stride: the caller guarantees the contiguous layout.
         this->stride = contigStride;
-        this->isContiguous = true;
     } else {
         if (stride->size() != shape.size()) {
             throw std::invalid_argument(
@@ -46,8 +46,12 @@ XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
                                         std::to_string(contigStride[0]) + " (overlapping rows)");
         }
         this->stride = *stride;
-        this->isContiguous = (*stride == contigStride);
+        // dims >= 1 are validated contiguous above; a single row makes the dim-0
+        // stride inert, otherwise dim 0 decides
+        contig = (shape[0] == 1) || ((*stride)[0] == contigStride[0]);
     }
+    this->contiguity = contig;
+    this->origContiguity = contig;
 
     size_t numel = shape[0] * contigStride[0];
     this->origNumel = numel;                                      // store original numel
@@ -60,6 +64,7 @@ XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
     this->shape = shape;
     this->dtype = dtype;
     this->ptr = ptr;
+    this->origPtr = ptr;
     this->type = type;
     return *this;
 }
@@ -561,7 +566,7 @@ std::string XTensor::ToStr(const char *name) const
         oss << (i ? ", " : "") << shape[i];
     }
     oss << "]";
-    if (!isContiguous) {
+    if (!contiguity) {
         oss << " stride=[";
         for (size_t i = 0; i < dims; i++) {
             oss << (i ? ", " : "") << stride[i];
@@ -590,6 +595,69 @@ XTensor &XTensor::View(std::vector<size_t> shape)
     this->numel = newNumel;
     this->bytes = newBytes;
     this->stride = ContiguousStride(this->shape);
+    return *this;
+}
+
+XTensor &XTensor::SliceView(size_t start, std::optional<size_t> end, size_t dim)
+{
+    if (dim >= shape.size()) {
+        throw std::runtime_error(std::string(__func__) + ": dim " + std::to_string(dim) +
+                                 " >= rank " + std::to_string(shape.size()));
+    }
+    if (dim > 1) {
+        // slicing an inner dim (>= 2) would pitch dims 1..dim-1, breaking the
+        // "only dim 0 may be pitched" invariant
+        throw std::runtime_error(std::string(__func__) +
+                                 ": only dim 0/1 slicing is supported, got dim " +
+                                 std::to_string(dim));
+    }
+    start = std::min(start, shape[dim]);
+    size_t stop = std::min(end.value_or(shape[dim]), shape[dim]);
+    if (start >= stop) {
+        throw std::runtime_error(std::string(__func__) + ": empty slice");
+    }
+    size_t oldDim = shape[dim];
+    ptr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(ptr) +
+                                   start * stride[dim] * XDtypeBit(dtype) / 8);
+    shape[dim] = stop - start;
+    numel = 1;
+    for (size_t d : shape) {
+        numel *= d;
+    }
+    bytes = DIV_ROUND_UP(numel * XDtypeBit(dtype), 8);
+    if (dim == 0) {
+        // row subsetting never changes the row-pitch match; a single row makes the
+        // dim-0 stride inert (only dim 0 may deviate)
+        if (shape[0] == 1) {
+            contiguity = true;
+        }
+    } else if (start != 0 || stop != oldDim) {
+        // narrowing dim 1 turns stride[0] into a pitch, inert for a single row
+        contiguity = (shape[0] == 1);
+    }
+    return *this;
+}
+
+XTensor &XTensor::AtLeast2D()
+{
+    if (shape.size() == 1) {
+        // single row: the new dim-0 stride is inert, dim-1 keeps the element step,
+        // so contiguity is unchanged
+        shape.insert(shape.begin(), 1);
+        stride.insert(stride.begin(), stride[0]);
+    }
+    return *this;
+}
+
+XTensor &XTensor::ResetOriginal()
+{
+    shape = origShape;
+    stride = origStride;
+    numel = origNumel;
+    dtype = origDtype;
+    bytes = origBytes;
+    ptr = origPtr;
+    contiguity = origContiguity;
     return *this;
 }
 
@@ -660,12 +728,13 @@ XTensor &XTensor::ResetView(bool resetShape, bool resetDtype)
 
 XTensor &XTensor::MakeOriginal()
 {
-    CheckContiguous(__func__);
     this->origNumel = this->numel;
     this->origBytes = this->bytes;
     this->origShape = this->shape;
     this->origStride = this->stride;
     this->origDtype = this->dtype;
+    this->origPtr = this->ptr;
+    this->origContiguity = this->contiguity;
     return *this;
 }
 

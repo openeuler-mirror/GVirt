@@ -20,7 +20,7 @@ public:
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 GM_ADDR blockTables, uint32_t kCacheStride, uint32_t nHeads,
                                 uint32_t headDim, uint32_t blockSize, uint32_t batch,
-                                uint32_t maxNumBlock)
+                                uint32_t blockTableStride, uint32_t maxNumBlock)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -36,6 +36,7 @@ public:
         this->blockSize = blockSize;
         this->kCacheStride = MAX(kCacheStride, blockSize * headDim);
         this->batch = batch;
+        this->blockTableStride = blockTableStride;
         this->maxNumBlock = maxNumBlock;
 
         /*
@@ -134,7 +135,7 @@ public:
             int queryLen = queryLens[batchIdx];
             __gm__ uint32_t *blockTable =
                 (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * maxNumBlock * sizeof(uint32_t));
+                                    batchIdx * blockTableStride * sizeof(uint32_t));
             int cachedLen = cachedLens[batchIdx];
             int queryStart = queryStartLoc[batchIdx];
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
@@ -285,6 +286,7 @@ private:
     uint32_t blockSize;
     uint32_t kCacheStride;
     uint32_t batch;
+    uint32_t blockTableStride;
     uint32_t maxNumBlock;
 
     LocalTensor<Dtype> kl1Buf[PINGPONG_BUF_NUM];   // event 0/1
@@ -296,15 +298,15 @@ private:
     LocalTensor<float> l0cBuf;  // event 0
 };
 
-#define INDEXER_SCORES_FUNC_DEFINE(dtype)                                                     \
-    extern "C" __global__ __aicore__ void indexer_scores_##dtype(                             \
-        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores, GM_ADDR queryStartLoc,     \
-        GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t kCacheStride,    \
-        uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                \
-        uint32_t maxNumBlock)                                                                 \
-    {                                                                                         \
-        IndexerScores<dtype> op;                                                              \
-        op.Init(q, kCache, weight, scores, queryStartLoc, queryLens, cachedLens, blockTables, \
-                kCacheStride, nHeads, headDim, blockSize, batch, maxNumBlock);                \
-        op.Run();                                                                             \
+#define INDEXER_SCORES_FUNC_DEFINE(dtype)                                                        \
+    extern "C" __global__ __aicore__ void indexer_scores_##dtype(                                \
+        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR scores, GM_ADDR queryStartLoc,        \
+        GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t kCacheStride,       \
+        uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                   \
+        uint32_t blockTableStride, uint32_t maxNumBlock)                                         \
+    {                                                                                            \
+        IndexerScores<dtype> op;                                                                 \
+        op.Init(q, kCache, weight, scores, queryStartLoc, queryLens, cachedLens, blockTables,    \
+                kCacheStride, nHeads, headDim, blockSize, batch, blockTableStride, maxNumBlock); \
+        op.Run();                                                                                \
     }

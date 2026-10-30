@@ -64,7 +64,7 @@ compressor_<dtype>(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, G
 | stateSlotMapping | 输入 | `[batchedTokens]` | int32 / null | prefill token → state 平坦槽位(FLAT id) |
 | stateBlockTable | 输入 | `[batch, maxStateBlocks]` | int32 / null | paged state-cache 块表;条目 0 = 未分配哨兵 |
 | batch / nTotalBlocks / ratio / overlap / head_dim / rope_head_dim / compressBlockSize / stateBlockSize | — | 标量 | uint32 | `ratio ∈ {2,4,128}`;`overlap ∈ {0,1}` |
-| maxStateBlocks | — | 标量 | uint32 | host 由 `stateBlockTable` 推断(`DeriveMaxNumBlocks`) |
+| maxStateBlocks | — | 标量 | uint32 | host 取 `stateBlockTable.stride[0]` |
 | stateCacheStrideDim0 | — | 标量 | uint64 | state 的 dim0 步长;0(pybind 默认)→ 解析为 `stateBlockSize*2*coff*head_dim` |
 | norm_eps | — | 标量 | float | RMSNorm epsilon |
 | doRotate / rotateScale | — | 标量 | bool / float | `doRotate` 时 `rotateScale = 1/√head_dim`,传给 `rope_complex_and_cache` |

@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-MHA/GQA 的 flash(在线 softmax)注意力算子,是 attention 的长序列版本:当 KV 总长 `maxNumBlocks * blockSize` 超过 host 侧 tile 阈值(`_tileSizeOfCachedKV`,默认 `MAX_KV_TILE_SIZE=8192`,`csrc/auto_tuner.h` 的 `MAX_KV_TILE_SIZE`)时,模型层路由到本算子(`csrc/model.cpp` 的 `ForwardAttnMHA`,flash 路由分支关键字 `XliteOpFlashAttention`)。KV 维按 `tileSizeOfCachedKV` 分块,AIC/AIV 流水地在每个 KV tile 上做 QK^T → 局部 softmax → SV,AIV 再用 online softmax 增量合并各 tile 的部分和,最终 `out = softmax(mask(QK^T)) · V` 与 attention 完全等价,但 qk workspace 只需一个 tile 的宽度。
+MHA/GQA 的 flash(在线 softmax)注意力算子,是 attention 的长序列版本:当 KV 运行期总长 `blockTables.shape[1] * blockSize`(即表运行期行宽,不取 block table 分配跨度)超过 host 侧 tile 阈值(`_tileSizeOfCachedKV`,默认 `MAX_KV_TILE_SIZE=8192`,`csrc/auto_tuner.h` 的 `MAX_KV_TILE_SIZE`)时,模型层路由到本算子(`csrc/model.cpp` 的 `ForwardAttnMHA`,flash 路由分支关键字 `XliteOpFlashAttention`)。KV 维按 `tileSizeOfCachedKV` 分块,AIC/AIV 流水地在每个 KV tile 上做 QK^T → 局部 softmax → SV,AIV 再用 online softmax 增量合并各 tile 的部分和,最终 `out = softmax(mask(QK^T)) · V` 与 attention 完全等价,但 qk workspace 只需一个 tile 的宽度。
 
 ## 输入输出参数
 
@@ -20,7 +20,7 @@ host 封装 `Attention(enableFlashAttention=true)` 分支 → `XliteOpFlashAtten
 flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSum,
                         sync, output, queryStartLoc, queryLens, cachedLens, blockTables,
                         kCacheStride, vCacheStride, nHeads, nKVHeads, headSize,
-                        blockSize, batch, maxNumBlocks, tileSizeOfCachedKV, zeroGm)
+                        blockSize, batch, blockTableStride, tileSizeOfCachedKV, zeroGm)
 ```
 
 末尾的 `zeroGm` 与 attention 同源(host 自动提供的 `rt._attnZeroBuffer`),`AicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(nan bug 修复,见 attention 文档)。
@@ -36,9 +36,9 @@ flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSu
 | sync | workspace | `[1, aivNum]` | INT32 | RingSync 跨核同步计数器(host Memset(0),见 `csrc/_C.cpp` 的 `Attention` flash 分支,关键字 `sync.Memset(0)`) |
 | output | 输出 | `[total_tokens, nHeads * headSize]` | FP16/BF16 | 最终注意力输出 |
 | queryStartLoc / queryLens / cachedLens | 输入 | `[batch]` | INT32 | 同 attention |
-| blockTables | 输入 | `[batch, maxNumBlocks]` | INT32 | 逻辑块→物理块映射 |
+| blockTables | 输入 | `[rows >= batch, blockTableStride]` | INT32 | 逻辑块→物理块映射;持久化缓冲,行跨度为分配跨度(`blockTables.stride[0]`),行宽为每步运行期宽度 `shape[1]`,仅每行 lens 推导的有效前缀被读取(同 attention) |
 | kCacheStride / vCacheStride | 标量 | - | uint32 | 同 attention:K/V cache 的 dim-0 跨度(元素数),host 传 `XTensor.stride[0]` |
-| nHeads / nKVHeads / headSize / blockSize / batch / maxNumBlocks | 标量 | - | uint32 | 同 attention |
+| nHeads / nKVHeads / headSize / blockSize / batch / blockTableStride | 标量 | - | uint32 | 同 attention(blockTableStride 为表行跨度,仅用于行寻址) |
 | tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 侧经 `csrc/op.h` 的 `static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN)` 保证 `MAX_KV_TILE_SIZE(8192) ≤ MAX_SOFTMAX_PINGPONG_LEN(11776)`,由 auto-tuner 在 8192 内选取 |
 | zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`AicHelper::Init` 用它预填零 L1B(见上文) |
 
