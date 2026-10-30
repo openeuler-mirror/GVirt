@@ -72,12 +72,16 @@ public:
         off += kMaxWin * sizeof(Dtype);
         s_raw = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
         off += kRawLen * sizeof(Dtype);
+        s_raw2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += kRawLen * sizeof(Dtype);
         if (off % 32 != 0) {
             off = (off + 31) / 32 * 32;
         }
         w_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += kMaxWin * sizeof(float);
         s_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kRawLen * sizeof(float);
+        s_f2 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += kRawLen * sizeof(float);
         win_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
         off += kMaxWin * sizeof(float);
@@ -230,6 +234,125 @@ public:
         pipe_barrier(PIPE_V);
     }
 
+    // Resolve the page for batch row b and issue the history+input DMA into
+    // staging buffer `buf`, leaving the ready event set for the compute step.
+    // This MTE2 load of row b overlaps with the V/MTE3 work of row b-1.
+    __aicore__ inline int32_t PrefetchWindow(uint32_t b, int buf, uint64_t c0)
+    {
+        int K = (int)kernelDim;
+        int rows = K - 1;
+        int id = buf == 0 ? EVENT_ID3 : EVENT_ID4;
+        __ubuf__ float *sf = buf == 0 ? s_f : s_f2;
+        __ubuf__ Dtype *sr = buf == 0 ? s_raw : s_raw2;
+
+        // Wait for the b-2 compute/writeback to release this buffer to MTE2.
+        wait_flag(PIPE_MTE3, PIPE_MTE2, id);
+
+        int32_t page = GdnStatePage(stateIndices, cachedLens, b, tableRowStride, tableColumns,
+                                    stateBlockSize, aligned != 0);
+        if (page > 0 && (uint32_t)page < numPages) {
+            __gm__ Dtype *base = state + (uint64_t)page * statePageStride;
+            if constexpr (std::is_same<Dtype, float>::value) {
+                for (int r = 0; r < rows; ++r) {
+                    CopyGmToUbufAligned(sf + r * kChanTile, base + (uint64_t)r * channels + c0,
+                                        kChanTile * sizeof(float));
+                }
+                CopyGmToUbufAligned(sf + rows * kChanTile, input + (uint64_t)b * channels + c0,
+                                    kChanTile * sizeof(float));
+            } else {
+                for (int r = 0; r < rows; ++r) {
+                    CopyGmToUbufAligned(sr + r * kChanTile, base + (uint64_t)r * channels + c0,
+                                        kChanTile * sizeof(Dtype));
+                }
+                CopyGmToUbufAligned(sr + rows * kChanTile, input + (uint64_t)b * channels + c0,
+                                    kChanTile * sizeof(Dtype));
+            }
+        }
+        set_flag(PIPE_MTE2, PIPE_V, id);
+        return page;
+    }
+
+    // Wait for the staged window, then compute SiLU(conv1d) for row b, store the
+    // output and shift the history back. Signals the staging buffer free at the
+    // end so the b+2 prefetch can reuse it.
+    __aicore__ inline void ComputeWindow(uint32_t b, int buf, int32_t page, uint64_t c0)
+    {
+        int K = (int)kernelDim;
+        int rows = K - 1;
+        int id = buf == 0 ? EVENT_ID3 : EVENT_ID4;
+        __ubuf__ float *sf = buf == 0 ? s_f : s_f2;
+        __ubuf__ Dtype *sr = buf == 0 ? s_raw : s_raw2;
+
+        wait_flag(PIPE_MTE2, PIPE_V, id);  // staging loaded
+
+        if (page <= 0 || (uint32_t)page >= numPages) {
+            assert(page <= 0 || (uint32_t)page < numPages);
+            // Null/corrupt page: zero output, never touch cache storage.
+            vector_dup(out_f, 0.0f, 1, 1, 0, 8, 0);
+            pipe_barrier(PIPE_V);
+            SiLU64();
+            CopyUbufToGmAligned(output + (uint64_t)b * channels + c0, out_buf,
+                                kChanTile * sizeof(Dtype));
+            set_flag(PIPE_MTE3, PIPE_MTE2, id);  // buffer free (unused)
+            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+            return;
+        }
+
+        __gm__ Dtype *base = state + (uint64_t)page * statePageStride;
+        if constexpr (!std::is_same<Dtype, float>::value) {
+            ConvUbToFloat(sr, kChanTile * K, sf);
+            XLITE_V_FENCE();
+        }
+
+        // acc[c] = sum_j sf[j*64 + c] * win_f[j*64 + c]
+        for (int j = 0; j < K; ++j) {
+            if (j == 0) {
+                vmul(out_f, sf, win_f, 1, 1, 1, 1, 8, 8, 8);
+            } else {
+                vmul(calc_buf, sf + j * kBlock, win_f + j * kBlock, 1, 1, 1, 1, 8, 8, 8);
+                pipe_barrier(PIPE_V);
+                vadd(out_f, out_f, calc_buf, 1, 1, 1, 1, 8, 8, 8);
+            }
+            pipe_barrier(PIPE_V);
+        }
+
+        SiLU64();
+        CopyUbufToGmAligned(output + (uint64_t)b * channels + c0, out_buf,
+                            (uint32_t)(kChanTile * sizeof(Dtype)));
+
+        if (updateState) {
+            // New page rows are sf[kChanTile .. K*kChanTile) = [row1..,input].
+            if constexpr (std::is_same<Dtype, float>::value) {
+                for (int r = 0; r < rows; ++r) {
+                    CopyUbufToGmAligned(base + (uint64_t)r * channels + c0,
+                                        sf + (r + 1) * kChanTile,
+                                        (uint32_t)(kChanTile * sizeof(float)));
+                }
+            } else {
+                if constexpr (std::is_same<Dtype, float16_t>::value) {
+                    vconv_f322f16(st_stage, sf + kChanTile, rows, 1, 1, 4, 8);
+                } else {
+                    vconv_f322bf16r(st_stage, sf + kChanTile, rows, 1, 1, 4, 8);
+                }
+                XLITE_V_FENCE();
+                set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+                wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+                for (int r = 0; r < rows; ++r) {
+                    CopyUbufToGmAligned(base + (uint64_t)r * channels + c0,
+                                        st_stage + r * kChanTile,
+                                        (uint32_t)(kChanTile * sizeof(Dtype)));
+                }
+            }
+        }
+
+        // Release the staging buffer for the b+2 prefetch, and protect out_buf/
+        // st_stage reuse on V from the next element's SiLU/conversion.
+        set_flag(PIPE_MTE3, PIPE_MTE2, id);
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+    }
+
     // Paged path: vLLM-Ascend GDN conv pages. Per page layout is
     // [stateRows, channels] (stateRows = K-1) with channels contiguous, which
     // is the SD orientation used on Ascend. window = [row0..row(K-2), input];
@@ -238,7 +361,6 @@ public:
     __aicore__ inline void ProcessPaged()
     {
         int K = (int)kernelDim;
-        int rows = K - 1;
         if (K < 2 || K > kMaxK || (channels % kChanTile) != 0 || batch == 0) {
             return;
         }
@@ -262,85 +384,24 @@ public:
             }
             GatherWeightCols(win_f);
 
+            // Ping-pong staging: prefetch row b+1's history+input (MTE2) while
+            // row b computes (V) and stores (MTE3). EVENT_ID3/ID4 gate the two
+            // buffers' load/free handshakes.
+            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID3);  // buffer 0 free initially
+            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);  // buffer 1 free initially
+            int32_t pages[2] = {0, 0};
+            pages[0] = PrefetchWindow(0, 0, c0);
             for (int b = 0; b < (int)batch; ++b) {
-                int32_t page = GdnStatePage(stateIndices, cachedLens, b, tableRowStride,
-                                            tableColumns, stateBlockSize, aligned != 0);
-                if (page <= 0) {
-                    vector_dup(out_f, 0.0f, 1, 1, 0, 8, 0);
-                    pipe_barrier(PIPE_V);
-                    SiLU64();
-                    CopyUbufToGmAligned(output + (uint64_t)b * channels + c0, out_buf,
-                                        kChanTile * sizeof(Dtype));
-                    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-                    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-                    continue;
+                int cur = b & 1;
+                int nxt = cur ^ 1;
+                if (b + 1 < (int)batch) {
+                    pages[nxt] = PrefetchWindow((uint32_t)(b + 1), nxt, c0);
                 }
-                assert((uint32_t)page < numPages);
-                if ((uint32_t)page >= numPages) {
-                    return;
-                }
-                __gm__ Dtype *base = state + (uint64_t)page * statePageStride;
-                // Stage (K-1) history rows + input row: s_f[0 .. K*64).
-                if constexpr (std::is_same<Dtype, float>::value) {
-                    for (int r = 0; r < rows; ++r) {
-                        DmaIn(base + (uint64_t)r * channels + c0, s_f + r * kChanTile,
-                              (uint32_t)(kChanTile * sizeof(float)));
-                    }
-                    DmaIn(input + (uint64_t)b * channels + c0, s_f + rows * kChanTile,
-                          (uint32_t)(kChanTile * sizeof(float)));
-                } else {
-                    for (int r = 0; r < rows; ++r) {
-                        DmaIn(base + (uint64_t)r * channels + c0, s_raw + r * kChanTile,
-                              (uint32_t)(kChanTile * sizeof(Dtype)));
-                    }
-                    DmaIn(input + (uint64_t)b * channels + c0, s_raw + rows * kChanTile,
-                          (uint32_t)(kChanTile * sizeof(Dtype)));
-                    ConvUbToFloat(s_raw, kChanTile * K, s_f);
-                    XLITE_V_FENCE();
-                }
-
-                // acc[c] = sum_j s_f[j*64 + c] * win_f[j*64 + c]
-                for (int j = 0; j < K; ++j) {
-                    if (j == 0) {
-                        vmul(out_f, s_f, win_f, 1, 1, 1, 1, 8, 8, 8);
-                    } else {
-                        vmul(calc_buf, s_f + j * kBlock, win_f + j * kBlock, 1, 1, 1, 1, 8, 8, 8);
-                        pipe_barrier(PIPE_V);
-                        vadd(out_f, out_f, calc_buf, 1, 1, 1, 1, 8, 8, 8);
-                    }
-                    pipe_barrier(PIPE_V);
-                }
-
-                SiLU64();
-                CopyUbufToGmAligned(output + (uint64_t)b * channels + c0, out_buf,
-                                    (uint32_t)(kChanTile * sizeof(Dtype)));
-
-                if (updateState) {
-                    // New page rows are s_f[kChanTile .. K*kChanTile) = [row1..,input].
-                    if constexpr (std::is_same<Dtype, float>::value) {
-                        for (int r = 0; r < rows; ++r) {
-                            CopyUbufToGmAligned(base + (uint64_t)r * channels + c0,
-                                                s_f + (r + 1) * kChanTile,
-                                                (uint32_t)(kChanTile * sizeof(float)));
-                        }
-                    } else {
-                        if constexpr (std::is_same<Dtype, float16_t>::value) {
-                            vconv_f322f16(st_stage, s_f + kChanTile, rows, 1, 1, 4, 8);
-                        } else {
-                            vconv_f322bf16r(st_stage, s_f + kChanTile, rows, 1, 1, 4, 8);
-                        }
-                        XLITE_V_FENCE();
-                        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-                        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-                        for (int r = 0; r < rows; ++r) {
-                            CopyUbufToGmAligned(base + (uint64_t)r * channels + c0,
-                                                st_stage + r * kChanTile,
-                                                (uint32_t)(kChanTile * sizeof(Dtype)));
-                        }
-                    }
-                }
-                FinishStore();
+                ComputeWindow((uint32_t)b, cur, pages[cur], c0);
             }
+            // Drain the last elements' pending free flags before the next tile.
+            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID3);
+            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
         }
     }
 
@@ -493,8 +554,10 @@ private:
 
     __ubuf__ Dtype *w_raw;
     __ubuf__ Dtype *s_raw;
+    __ubuf__ Dtype *s_raw2;
     __ubuf__ float *w_f;
     __ubuf__ float *s_f;
+    __ubuf__ float *s_f2;
     __ubuf__ float *win_f;
     __ubuf__ float *acc_f;
     __ubuf__ float *r_f;
