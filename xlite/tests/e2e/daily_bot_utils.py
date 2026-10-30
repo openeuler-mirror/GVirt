@@ -277,6 +277,12 @@ def run_command(
         return result.returncode, result.stdout, result.stderr
 
 
+def check_subprocess_result(res: subprocess.CompletedProcess, error_message: str):
+    """Raise with the captured stderr when a subprocess exited non-zero."""
+    if res.returncode != 0:
+        raise RuntimeError(f"{error_message}: {res.stderr.decode('utf-8') if res.stderr else 'No error message'}")
+
+
 # ====================== 容器操作工具函数 ======================
 def run_in_container(
     container_name: str, cmd: str, check: bool = True, show_output: bool = False
