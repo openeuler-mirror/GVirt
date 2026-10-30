@@ -1811,13 +1811,14 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scal
 
 static bool FusedMatmulDeQuantBeneficial(uint64_t m, uint64_t k, bool dynQuant)
 {
-    if (m >= 8192) {
-        return true;
-    }
-    if (dynQuant) {
-        return m >= 2048 && k >= 2048;
-    }
-    return m >= 6144 && k >= 1024;
+    return false;
+    // if (m >= 8192) {
+    //     return true;
+    // }
+    // if (dynQuant) {
+    //     return m >= 2048 && k >= 2048;
+    // }
+    // return m >= 6144 && k >= 1024;
 }
 
 void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
