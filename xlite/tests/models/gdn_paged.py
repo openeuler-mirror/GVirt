@@ -1,11 +1,9 @@
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
-"""Small random hybrid model: V1/V2 metadata and Prefill/continuation/Decode.
+"""Small random hybrid model: V2 metadata and Prefill/continuation/Decode.
 
 Run from xlite with FORWARD_BACKEND=xlite and the newly built extension on
-PYTHONPATH; invoke --version 1 and --version 2 in separate processes.
-No checkpoint, tokenizer or serving process is required.
+PYTHONPATH. No checkpoint, tokenizer or serving process is required.
 """
-import argparse
 import os
 
 os.environ["FORWARD_BACKEND"] = "xlite"
@@ -18,7 +16,7 @@ from tests.models.qwen3_5 import ModelArgs, Qwen3_5
 
 
 @torch.inference_mode()
-def main(version):
+def main():
     for name in ("linear_att_conv_and_silu", "linear_att_conv_and_silu_token",
                  "recurrent_gated_delta_rule"):
         assert not hasattr(_C, name), f"obsolete operator still exported: {name}"
@@ -62,35 +60,26 @@ def main(version):
 
     tokens = torch.randint(0, args.vocab_size, (2, 9), dtype=torch.int32)
 
-    def run(part, start, version):
+    def run(part, start):
         part = part.contiguous()
         out = torch.empty(part.numel(), args.dim)
-        if version == 2:
-            meta = model.prepare_xlite_attnmeta_v2(part, start)
-            # Fetch the raw stream after metadata work has entered TorchNPU's queue.
-            stream = torch.npu.current_stream().npu_stream
-            model.xlite_model.forward_v2(
-                model.xlite_rt, part.flatten(), meta, model.xlite_kv_cache,
-                [model.freqs_cis], out, stream,
-            )
-        else:
-            meta = model.prepare_xlite_attnmeta(part, start)
-            # Fetch the raw stream after metadata work has entered TorchNPU's queue.
-            stream = torch.npu.current_stream().npu_stream
-            model.xlite_model.forward(
-                model.xlite_rt, part.flatten(), meta, model.xlite_kv_cache,
-                model.freqs_cis, out, stream,
-            )
+        meta = model.prepare_xlite_attnmeta_v2(part, start)
+        # Fetch the raw stream after metadata work has entered TorchNPU's queue.
+        stream = torch.npu.current_stream().npu_stream
+        model.xlite_model.forward_v2(
+            model.xlite_rt, part.flatten(), meta, model.xlite_kv_cache,
+            [model.freqs_cis], out, stream,
+        )
         torch.npu.synchronize()
         return out.view(2, part.shape[1], args.dim).cpu()
 
-    full = run(tokens, 0, version)
+    full = run(tokens, 0)
     expected = [x.cpu().clone() for x in model.xlite_kv_cache[0]]
     for cache in model.xlite_kv_cache[0]:
         cache.zero_()
-    first = run(tokens[:, :3], 0, version)
-    continuation = run(tokens[:, 3:8], 3, version)
-    decode = run(tokens[:, 8:], 8, version)
+    first = run(tokens[:, :3], 0)
+    continuation = run(tokens[:, 3:8], 3)
+    decode = run(tokens[:, 8:], 8)
     actual = torch.cat((first, continuation, decode), 1)
     assert torch.isfinite(actual).all()
     # Prefill rounds Conv before SiLU; Decode keeps the fused rounding
@@ -103,11 +92,9 @@ def main(version):
     for cache, reference in zip(model.xlite_kv_cache[0], expected):
         torch.testing.assert_close(cache.cpu(), reference, rtol=0.03, atol=0.002)
         assert torch.count_nonzero(cache[0]).item() == 0, "null page changed"
-    print(f"PASS hybrid V{version}: Prefill -> continuation -> Decode "
+    print(f"PASS hybrid V2: Prefill -> continuation -> Decode "
           f"relative_l2={decode_error.item():.6g}", flush=True)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--version", type=int, choices=(1, 2), default=2)
-    main(parser.parse_args().version)
+    main()
