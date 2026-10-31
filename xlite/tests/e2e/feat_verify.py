@@ -604,8 +604,14 @@ def build_launch_cmd(spec: FeatureSpec, mode: str, model_path: str, port: int,
         cli.append("--no-enable-prefix-caching")
     if spec.disable_chunked_prefill:
         cli.append("--no-enable-chunked-prefill")
+    # Add --enable-expert-parallel only for MoE models (detected via config.json);
+    # dense models must not receive this flag.
     if not spec.disable_expert_parallel:
-        cli.append("--enable-expert-parallel")
+        config_file = os.path.join(model_path, "config.json")
+        if os.path.isfile(config_file):
+            with open(config_file, "r") as f:
+                if any(k in f.read() for k in ("num_experts", "moe_intermediate_size")):
+                    cli.append("--enable-expert-parallel")
     # quant_model_description.json 存在则加 --quantization ascend
     if not spec.disable_quantization and os.path.exists(
             os.path.join(model_path, "quant_model_description.json")):
