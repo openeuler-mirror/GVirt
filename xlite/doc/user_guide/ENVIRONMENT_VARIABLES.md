@@ -12,6 +12,7 @@
 | `XLITE_COMM_OPTIMIZE_LEN` | 整数 | `6144` | 通信优化阈值长度。用于优化prefill阶段长序列的通信性能。 |
 | `XLITE_DISABLE_XCCL` | 布尔 | `false` | 是否禁用 XCCL（XLite 自定义通信算子）。设置为 `true` 时禁用，回退到 HCCL。注意：外部环境变量 `HCCL_DETERMINISTIC` 被设为 `true` 时同样会禁用 XCCL（因 xccl 非确定性，与确定性模式冲突，见 `runtime.cpp` 的 `InitXcclComm`/`InitDummyXcclComm`）。 |
 | `XLITE_ENABLE_GRAPH_COMM` | 布尔 | `false` | 是否启用 HCCL 通信算子入图（ACL Graph 捕获+重放，主流上 capture 与 replay）。开启时：DP 路径的 AllGather/ReduceScatter 入图（且此时 DP XCCL 不初始化，xccl self-kernel 不可被 ACL Graph 捕获）；TP 路径的 AllReduce 在 `tpSize>1` 时仍走 eager XCCL。如需让 TP AllReduce 也入图，另设 `XLITE_DISABLE_XCCL=true`（全局禁用 xccl，含 TP，则 ar 也入图）。设为 `true`/`1`/`yes`/`on`（不区分大小写）时启用。dummy runtime 评估 `get_tensor_pool_size` 时恒走 eager（不入图）。 |
+| `XLITE_FORWARD_THREAD` | 布尔 | `true` | 是否将模型前向卸载到专用 forward 线程异步执行。异步路径仅在同时满足以下三条件时才走：① forward 线程已启用；② `multiTaskParallel` 为假；③ 调用方提供了非默认 stream（`currStream != 0`）；否则静默回退到同步路径。PyTorch stream 与 `rt.stream` 之间的同步顺序由调用方（Python 侧）负责，需在调用后插入相应的stream sync。 |
 | `XLITE_MOE_ALLTOALL` | 布尔 | `false` | 是否启用 MoE AlltoAll 通信模式。启用后，MoE 的 dispatch/combine 阶段使用 AlltoAllV 集合通信替代默认的 AllGather + ReduceScatter 方式，跨 EP（Expert Parallel）rank 分发/收集 token，并消除 MoE 后的 TP AllReduce。 |
 | `XLITE_ACTIVE_TOKENS_RATIO_PER_EP` | double | `1.0f` | 影响开启EP后单卡按专家排序后激活Tensor的内存占用。该环境变量有效配置范围为[1/ep_size ... 1.0f]。默认1.0f含义为单卡极端情况需要处理所有激活的Token，因此专家排序后激活Tensor的shape为[token个数 * num_experts_per_tok, hidden_size]; 配置为1/ep_size含义为单卡只需要处理所有激活的Token的1/ep_size，因此专家排序后激活Tensor的shape为[token个数 * num_experts_per_tok /ep_size, hidden_size]。该值越小代表EP负载越均衡，排序后激活Tensor预占内存越小，配置过小可能导致算子报错，建议按照实际负载均衡度评估合理值。注意：该配置仅当输入token个数（所有DP的batched token总和）>= 1024个时才生效，小于1024的情况使用默认1.0f进行计算。 |
 
@@ -33,7 +34,9 @@ xlite 用 `isEnvironmentVariableTrue` / `isEnvironmentVariableFalse`（`base.h`�
 - `no`
 - `off`
 
-> 注意：规则按变量语义分两类。`XLITE_DISABLE_XCCL`、`XLITE_MOE_ALLTOALL`、`XLITE_ENABLE_GRAPH_COMM` 等“启用型”变量用 `isEnvironmentVariableTrue`——未设置或任意非真值均视为 `false`，仅当值匹配 `true`/`1`/`yes`/`on` 时才置为 `true`。
+> 注意：规则按变量语义分两类。`XLITE_DISABLE_XCCL`、`XLITE_MOE_ALLTOALL`、`XLITE_ENABLE_GRAPH_COMM` 等”启用型”变量用 `isEnvironmentVariableTrue`——未设置或任意非真值均视为 `false`，仅当值匹配 `true`/`1`/`yes`/`on` 时才置为 `true`。
+>
+> `XLITE_FORWARD_THREAD` 是相反方向的特例：它用 `isEnvironmentVariableFalse` 解析——未设置或任意非假值均视为 `true`，仅当值匹配 `false`/`0`/`no`/`off` 时才置为 `false`（即默认开启）。
 
 ## 端口分配说明
 

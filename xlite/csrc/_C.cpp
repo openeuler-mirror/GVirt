@@ -243,6 +243,7 @@ private:
                                  std::vector<std::vector<at::Tensor>> &kvCache,
                                  at::Tensor &freqsCis, at::Tensor &output, uint64_t currStream,
                                  std::vector<at::Tensor> &deepstackInput, at::Tensor &inputIds);
+    void EnsureForwardHandlers(XRuntime &rt);
     void InitMatmulWeight(const std::string &name, std::vector<at::Tensor> &w,
                           std::vector<at::Tensor> &iScale, std::vector<at::Tensor> &iOffset,
                           std::vector<at::Tensor> &qBias, std::vector<at::Tensor> &dScale,
@@ -821,6 +822,13 @@ _CModel::~_CModel(void)
     }
 }
 
+void _CModel::EnsureForwardHandlers(XRuntime &rt)
+{
+    if (!rt.ForwardTaskHandlersReady()) {
+        _model->RegisterForwardHandlers(rt);
+    }
+}
+
 void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                       std::vector<std::vector<at::Tensor>> &kvCache,
                       std::vector<at::Tensor> &freqsCis, at::Tensor &output, uint64_t currStream)
@@ -862,6 +870,25 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
         }
+    }
+
+    bool async = rt.ForwardThreadEnabled() && !rt.multiTaskParallel && currStream != 0;
+    if (async) {
+        ForwardTask task;
+        task.kind = ForwardTask::FORWARD;
+        task.input = _input;
+        task.output = _output;
+        task.attnMeta = attnMeta;
+        task.kvCache = _kv;
+        task.deepstackInputEmbeds = _deepstackInputEmbeds;
+        task.freqsCis = _freqsCis;
+        task.auxOutputs = _model->StealAuxOutputs();
+        EnsureForwardHandlers(rt);
+        task.seq = rt.AllocFwdSeq();
+        rt.RecordInputEvent(reinterpret_cast<aclrtStream>(currStream), task.seq);
+        rt.WaitOutputEvent(reinterpret_cast<aclrtStream>(currStream), task.seq);
+        rt.SubmitForward(std::move(task));
+        return;
     }
 
     if (currStream != 0 && rt.taskId == 0) {
@@ -1026,6 +1053,21 @@ void _CModel::ForwardGetLogits(XRuntime &rt, at::Tensor &input, at::Tensor &indi
         return;
     }
 
+    bool async = rt.ForwardThreadEnabled() && !rt.multiTaskParallel && currStream != 0;
+    if (async) {
+        ForwardTask task;
+        task.kind = ForwardTask::FORWARD_GET_LOGITS;
+        task.input = _input;
+        task.indices = _indices;
+        task.output = _output;
+        EnsureForwardHandlers(rt);
+        task.seq = rt.AllocFwdSeq();
+        rt.RecordInputEvent(reinterpret_cast<aclrtStream>(currStream), task.seq);
+        rt.WaitOutputEvent(reinterpret_cast<aclrtStream>(currStream), task.seq);
+        rt.SubmitForward(std::move(task));
+        return;
+    }
+
     if (currStream != 0) {
         currAclStream = reinterpret_cast<aclrtStream>(currStream);
         rt.EventWaitCurrStream(currAclStream);
@@ -1079,6 +1121,26 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
         }
+    }
+
+    bool async = rt.ForwardThreadEnabled() && !rt.multiTaskParallel && currStream != 0;
+    if (async) {
+        ForwardTask task;
+        task.kind = ForwardTask::FORWARD_AND_GET_LOGITS;
+        task.input = _input;
+        task.output = _output;
+        task.attnMeta = attnMeta;
+        task.kvCache = _kv;
+        task.deepstackInputEmbeds = _deepstackInputEmbeds;
+        task.freqsCis = _freqsCis;
+        task.indices = _indices;
+        task.auxOutputs = _model->StealAuxOutputs();
+        EnsureForwardHandlers(rt);
+        task.seq = rt.AllocFwdSeq();
+        rt.RecordInputEvent(reinterpret_cast<aclrtStream>(currStream), task.seq);
+        rt.WaitOutputEvent(reinterpret_cast<aclrtStream>(currStream), task.seq);
+        rt.SubmitForward(std::move(task));
+        return;
     }
 
     if (currStream != 0 && rt.taskId == 0) {
@@ -1175,6 +1237,26 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
 
     for (uint32_t i = 0; i < deepstackInput.size(); i++) {
         InitXTensor(_deepstackInputEmbeds[i], deepstackInput[i], DBG_LOC);
+    }
+
+    bool async = rt.ForwardThreadEnabled() && !rt.multiTaskParallel && currStream != 0;
+    if (async) {
+        ForwardTask task;
+        task.kind = ForwardTask::FORWARD_WITH_INPUTS_EMBEDS;
+        task.input = _input;
+        task.output = _output;
+        task.attnMeta = attnMeta;
+        task.kvCache = _kv;
+        task.deepstackInputEmbeds = _deepstackInputEmbeds;
+        task.freqsCisSingle = _freqsCis;
+        task.inputIds = _inputIds;
+        task.auxOutputs = _model->StealAuxOutputs();
+        EnsureForwardHandlers(rt);
+        task.seq = rt.AllocFwdSeq();
+        rt.RecordInputEvent(reinterpret_cast<aclrtStream>(currStream), task.seq);
+        rt.WaitOutputEvent(reinterpret_cast<aclrtStream>(currStream), task.seq);
+        rt.SubmitForward(std::move(task));
+        return;
     }
 
     if (currStream != 0 && rt.taskId == 0) {

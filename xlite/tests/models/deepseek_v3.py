@@ -1325,7 +1325,7 @@ class DeepSeek_V3(nn.Module):
         h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
         self.xlite_model.forward_v2(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache,
                                     [self.freqs_cis], h, stream)
-        self.xlite_model.forward_get_logits(self.xlite_rt, h, logits_indices, logits)
+        self.xlite_model.forward_get_logits(self.xlite_rt, h, logits_indices, logits, stream)
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
