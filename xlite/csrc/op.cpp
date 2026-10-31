@@ -1486,6 +1486,87 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
                         XTensor(), XTensor(), XTensor(), XTensor(), 0, false, normEps);
 }
 
+void XliteOpQuantCacheC8(XRuntime &rt, const XTensor &x, const XTensor &slotMapping,
+                         XTensor &kCache, XTensor &kScaleCache, uint32_t blockSize)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    const std::string fnName = "XliteOpQuantCacheC8: ";
+    auto quantCheck = [&](bool ok, const std::string &what) {
+        if (!ok) {
+            throw std::runtime_error(fnName + "check tensor failed! " + what + ", " + XT_STR(x) +
+                                     XT_STR(slotMapping) + XT_STR(kCache) + XT_STR(kScaleCache));
+        }
+    };
+    quantCheck(x.dtype == BF16 && x.shape.size() == 2, "x must be bf16 [rows, dim]");
+    uint32_t dim = x.shape[1];
+    quantCheck(dim != 0 && dim % 64 == 0 && dim <= QUANT_CACHE_C8_MAX_DIM,
+               "dim must be a nonzero multiple of 64, at most QUANT_CACHE_C8_MAX_DIM");
+    quantCheck(slotMapping.dtype == INT32 && slotMapping.numel == x.shape[0],
+               "slotMapping must be int32 [rows]");
+    quantCheck(kScaleCache.dtype == FP16, "kScaleCache must be fp16 [capacity]");
+    quantCheck(kCache.dtype == INT8 && kCache.numel == kScaleCache.numel * dim,
+               "kCache must be int8 [capacity, dim]");
+    quantCheck(blockSize != 0 && kScaleCache.numel % blockSize == 0,
+               "blockSize must divide the cache capacity");
+    // Paged pool (rank > 2): block pitch from stride[0]. Flat pool: one
+    // synthetic block per blockSize rows (stride defaults to blockSize*dim).
+    uint32_t kCacheStride = blockSize * dim;
+    if (kCache.shape.size() > 2) {
+        quantCheck(kCache.stride[1] == dim, "kCache rows must be contiguous inside a block");
+        kCacheStride = static_cast<uint32_t>(kCache.stride[0]);
+    } else if (kCache.shape.size() == 2) {
+        quantCheck(kCache.stride[0] == dim, "2-D kCache must be row-contiguous");
+    } else if (kCache.shape.size() == 1) {
+        quantCheck(kCache.stride[0] == 1, "1-D kCache must be contiguous");
+    }
+    uint32_t kScaleCacheStride = blockSize;
+    if (kScaleCache.shape.size() > 1) {
+        quantCheck(kScaleCache.stride[1] == 1, "kScaleCache must be contiguous inside a block");
+        kScaleCacheStride = static_cast<uint32_t>(kScaleCache.stride[0]);
+    } else if (kScaleCache.shape.size() == 1) {
+        quantCheck(kScaleCache.stride[0] == 1, "1-D kScaleCache must be contiguous");
+    }
+    if (x.shape[0] == 0) {
+        return;
+    }
+    aclrtlaunch_quant_cache_c8_bfloat16_t(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream, x.ptr,
+                                          slotMapping.ptr, kCache.ptr, kScaleCache.ptr, x.shape[0],
+                                          dim, static_cast<uint32_t>(kScaleCache.numel), blockSize,
+                                          kCacheStride, kScaleCacheStride);
+}
+
+void XliteOpQuantQC8(XRuntime &rt, const XTensor &q, const XTensor &headWeight, XTensor &q8,
+                     XTensor &scaledWeights, float rotateScale)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    const std::string fnName = "XliteOpQuantQC8: ";
+    auto quantCheck = [&](bool ok, const std::string &what) {
+        if (!ok) {
+            throw std::runtime_error(fnName + "check tensor failed! " + what + ", " + XT_STR(q) +
+                                     XT_STR(headWeight) + XT_STR(q8) + XT_STR(scaledWeights));
+        }
+    };
+    quantCheck(q.dtype == BF16 && q.shape.size() == 2, "q must be bf16 [rows, dim]");
+    uint32_t dim = q.shape[1];
+    quantCheck(dim != 0 && dim % 64 == 0 && dim <= QUANT_Q_C8_MAX_DIM,
+               "dim must be a nonzero multiple of 64, at most QUANT_Q_C8_MAX_DIM");
+    quantCheck(headWeight.dtype == BF16 && headWeight.numel == q.shape[0],
+               "headWeight must be bf16 [rows]");
+    quantCheck(q8.dtype == INT8 && q8.numel == q.shape[0] * dim, "q8 must be int8 [rows, dim]");
+    quantCheck(scaledWeights.dtype == FP16 && scaledWeights.numel == q.shape[0],
+               "scaledWeights must be fp16 [rows]");
+    if (q.shape[0] == 0) {
+        return;
+    }
+    aclrtlaunch_quant_q_c8_bfloat16_t(PickMinBlockNum(rt.aivNum, q.shape[0]), rt.stream, q.ptr,
+                                      headWeight.ptr, q8.ptr, scaledWeights.ptr, q.shape[0], dim,
+                                      rotateScale);
+}
+
 void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XTensor &ape,
                        const XTensor &norm, const XTensor &freqs, XTensor &weightedSum,
                        const XTensor &queryStartLoc, const XTensor &queryLens,

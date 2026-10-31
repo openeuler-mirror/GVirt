@@ -2379,6 +2379,32 @@ void IndexerKCacheC8(XRuntime &rt, const at::Tensor &k, const at::Tensor &kNorm,
     rt.Synchronize();
 }
 
+void QuantCacheC8(XRuntime &rt, const at::Tensor &x, const at::Tensor &slotMapping,
+                  at::Tensor &kCache, at::Tensor &kScaleCache, uint32_t blockSize)
+{
+    XTensor _x, _slotMapping, _kCache, _kScaleCache;
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_slotMapping, slotMapping, DBG_LOC);
+    // The DSV4 pool hands us page-strided as_strided views (K and scales packed
+    // per page); quant_cache_c8 addresses both via stride[0].
+    InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_kScaleCache, kScaleCache, DBG_LOC, /*allowPitched=*/true);
+    XliteOpQuantCacheC8(rt, _x, _slotMapping, _kCache, _kScaleCache, blockSize);
+    rt.Synchronize();
+}
+
+void QuantQC8(XRuntime &rt, at::Tensor &q, at::Tensor &headWeight, at::Tensor &q8,
+              at::Tensor &scaledWeights, float rotateScale)
+{
+    XTensor _q, _headWeight, _q8, _scaledWeights;
+    InitXTensor(_q, q, DBG_LOC);
+    InitXTensor(_headWeight, headWeight, DBG_LOC);
+    InitXTensor(_q8, q8, DBG_LOC);
+    InitXTensor(_scaledWeights, scaledWeights, DBG_LOC);
+    XliteOpQuantQC8(rt, _q, _headWeight, _q8, _scaledWeights, rotateScale);
+    rt.Synchronize();
+}
+
 void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<at::Tensor> ape,
                 std::optional<at::Tensor> norm, std::optional<at::Tensor> freqs,
                 at::Tensor &weightedSum, at::Tensor &queryStartLoc, at::Tensor &queryLens,
@@ -3545,6 +3571,10 @@ PYBIND11_MODULE(_C, m)
     m.def("indexer_k_cache_c8", &IndexerKCacheC8, py::arg("rt"), py::arg("k"), py::arg("k_norm"),
           py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("slot_mapping"),
           py::arg("k_cache"), py::arg("scale_cache"), py::arg("norm_eps") = 1e-6f);
+    m.def("quant_cache_c8", &QuantCacheC8, py::arg("rt"), py::arg("x"), py::arg("slot_mapping"),
+          py::arg("k_cache"), py::arg("k_scale_cache"), py::arg("block_size"));
+    m.def("quant_q_c8", &QuantQC8, py::arg("rt"), py::arg("q"), py::arg("head_weight"),
+          py::arg("q8"), py::arg("scaled_weights"), py::arg("rotate_scale"));
     m.def("compressor", &Compressor, "compressor", py::arg("rt"), py::arg("kv"), py::arg("score"),
           py::arg("ape") = std::nullopt, py::arg("norm") = std::nullopt,
           py::arg("freqs") = std::nullopt, py::arg("weighted_sum"), py::arg("query_start_loc"),
