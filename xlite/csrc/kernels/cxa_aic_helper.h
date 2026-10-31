@@ -32,7 +32,11 @@ public:
         qkwn0 = swaBlockSize;
         qkcn0 = dense ? MAX_N0 : compressBlockSizeV;
         qkk0 = 256 / sizeof(Dtype);
-        svn0 = 256;
+        // SV L0b = svn0 * svwkMax * sizeof(Dtype) * PINGPONG_BUF_NUM, svwkMax =
+        // max(swaBlockSize, CXA_SVCK0). At swaBlockSize=128, svn0=256 → 128KB >
+        // 64KB L0b (overflow). Halve svn0 to 128 when swaBlockSize > CXA_SVCK0 so
+        // it fits (64KB).
+        svn0 = (swaBlockSize <= CXA_SVCK0) ? 256 : 128;
         svwk0 = swaBlockSize;
         svck0 = CXA_SVCK0;
         uint64_t off = 0;

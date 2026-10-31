@@ -353,7 +353,18 @@ def main(
                 continue
             messages.append({"role": "user", "content": prompt})
             if model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm4_moe_flash", "glm5", "glm5_next", "minimax_m2"}:
-                prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
+                try:
+                    prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
+                except (ValueError, TypeError):
+                    # Tokenizer has no chat_template (e.g. DeepSeek-V4-Flash ckpt);
+                    # see the single-mode fallback below for the rationale.
+                    bos = tokenizer.bos_token_id
+                    bos_list = [bos] if bos is not None else []
+                    if model_type in {"deepseek_v3", "deepseek_v4"}:
+                        wrapped = "<｜User｜>" + prompt + "<｜Assistant｜>"
+                        prompt_tokens = bos_list + tokenizer.encode(wrapped, add_special_tokens=False)
+                    else:
+                        prompt_tokens = bos_list + tokenizer.encode(prompt)
             elif model_type == "llama":
                 formatted_prompt = ""
                 for message in messages:
@@ -391,9 +402,14 @@ def main(
                             [{"role": "user", "content": item["query"]}], add_generation_prompt=True, return_dict=False
                         )
                     except (ValueError, TypeError):
-                        # Tokenizer has no chat_template (e.g. DeepSeek-V4-Flash ckpt) -> raw encode.
+                        # No chat_template: wrap DeepSeek-V3/V4 queries in <｜User｜>/<｜Assistant｜> delimiters.
                         bos = tokenizer.bos_token_id
-                        toks = ([bos] if bos is not None else []) + tokenizer.encode(item["query"])
+                        bos_list = [bos] if bos is not None else []
+                        if model_type in {"deepseek_v3", "deepseek_v4"}:
+                            wrapped = "<｜User｜>" + item["query"] + "<｜Assistant｜>"
+                            toks = bos_list + tokenizer.encode(wrapped, add_special_tokens=False)
+                        else:
+                            toks = bos_list + tokenizer.encode(item["query"])
                     prompts_tokens_batch.append(toks)
             elif model_type == "llama":
                 prompts_tokens_batch = [tokenizer.encode(f"<s>[INST] {item['query']} [/INST] ") for item in batch]

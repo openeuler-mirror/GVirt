@@ -51,7 +51,6 @@ if forward_backend == "xlite":
         ScoringFuncSoftmax,
         ScoringFuncSqrtsoftplus,
     )
-    import numpy as np
     from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
 
 
@@ -785,15 +784,20 @@ class Transformer(nn.Module):
         return logits
 
     def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
-        return prepare_xlite_attnmeta_v2(
-            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, cxa_block_sizes
+        # Per-layer compress ratios: the helper derives the CXA plane overrides
+        # (state planes, indexer_k, per-ratio compress slots) and the per-layer
+        # rows the C++ consumers read directly.
+        meta = prepare_xlite_attnmeta_v2(
+            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, cxa_block_sizes,
+            compress_ratios=self.args.compress_ratios,
         )
+        return meta
 
     @torch.inference_mode()
     def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
         """Forward using V2 device-tensor attention metadata (zero-copy path)."""
         logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size,
-                             device=tokens.device)
+                             device=tokens.device, dtype=torch.float32)
         tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
         batch = tokens.size(0)
         seqlen = tokens.size(1)
@@ -1162,8 +1166,11 @@ class Transformer(nn.Module):
             lambda L, _idx: L.attn.compressor.wkv.weight if L.attn.compress_ratio else None)
         self.xlite_model.comp_w_gate = _per_layer(
             lambda L, _idx: L.attn.compressor.wgate.weight if L.attn.compress_ratio else None)
+        # Cast to bf16: the norm kernel reads the weight as bf16, matching native
+        # RMSNorm's weight.to(dtype); raw fp32 would be byte-reinterpreted and corrupt.
         self.xlite_model.comp_norm = _per_layer(
-            lambda L, _idx: L.attn.compressor.norm.weight if L.attn.compress_ratio else None)
+            lambda L, _idx: L.attn.compressor.norm.weight.to(torch.bfloat16).contiguous()
+            if L.attn.compress_ratio else None)
 
         # Indexer fields (exists iff compress_ratio == 4). v4 indexer.wq_b has a
         # different shape from DSA's index_q_b, so it's a separate v4 field.
@@ -1180,8 +1187,11 @@ class Transformer(nn.Module):
             lambda L, idx: idx.compressor.wkv.weight if idx is not None else None)
         self.xlite_model.idx_comp_w_gate = _per_layer(
             lambda L, idx: idx.compressor.wgate.weight if idx is not None else None)
+        # Indexer compressor norm: cast fp32 -> bf16 to match the kernel's bf16
+        # weight read (same rationale as the main compressor norm above).
         self.xlite_model.idx_comp_norm = _per_layer(
-            lambda L, idx: idx.compressor.norm.weight if idx is not None else None)
+            lambda L, idx: idx.compressor.norm.weight.to(torch.bfloat16).contiguous()
+            if idx is not None else None)
 
         # Multi-stage Hyper-Connections (per-layer)
         self.xlite_model.hc_attn_fn = [layer.hc_attn_fn for layer in self.layers]
@@ -1275,8 +1285,10 @@ class Transformer(nn.Module):
             if has_indexer:
                 idx_kv_blocks = _blocks(args.max_seq_len // ratio, bs_indexer_k)
                 idx_state_blocks = _blocks(args.max_seq_len, bs_indexer_state)
+                # indexer-compressor kv_state + score_state; kernel keeps state fp32
+                # regardless of model dtype (same as main `state` below).
                 indexer_state = torch.zeros(idx_state_blocks, bs_indexer_state, head_num, indexer_state_dim,
-                                            dtype=dtype, device=device)
+                                            dtype=torch.float32, device=device)
                 indexer_k = torch.zeros(idx_kv_blocks, bs_indexer_k, head_num, args.index_head_dim,
                                         dtype=dtype, device=device)
             else:
@@ -1284,12 +1296,21 @@ class Transformer(nn.Module):
                 indexer_k = _empty()
 
             if has_compress:
-                comp_kv_blocks = _blocks(args.max_seq_len // ratio, bs_compress_kv)
+                # compress_kv pool is paged by a single block_tables[2] shared
+                # across all ratios (full-deletion: no per-ratio host table).
+                # Size it to the generic stride ceil(max_seq_len / comp_bs) *
+                # max_batch so the generic identity block_tables[2] (built in
+                # prepare_xlite_attnmeta_v2) never overflows for any ratio — the
+                # kernel bounds its block walk by calcLen/r, so high-ratio layers
+                # use a sparse subset of this pool. (Was per-ratio
+                # max_seq_len//ratio, which only fit a per-ratio table.)
+                comp_kv_blocks = _blocks(args.max_seq_len, bs_compress_kv)
                 comp_state_blocks = _blocks(args.max_seq_len, bs_state)
                 compress_kv = torch.zeros(comp_kv_blocks, bs_compress_kv, head_num, args.head_dim,
                                           dtype=dtype, device=device)
+                # compressor kv_state + score_state; kernel keeps state fp32.
                 state = torch.zeros(comp_state_blocks, bs_state, head_num, state_dim,
-                                    dtype=dtype, device=device)
+                                    dtype=torch.float32, device=device)
             else:
                 compress_kv = _empty()
                 state = _empty()

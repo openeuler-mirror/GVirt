@@ -419,7 +419,10 @@ class AttnMetaV2:
             ``[rows >= batch, ceil(max_seq_len / block_size)]`` int32 buffers; entries
             beyond this step's lens are never read. Hybrid family slots: ``[0]``=main
             KV, ``[1..]``=mamba state page ids (``[batch, 1]``) plus an optional KDA
-            tail ring; per-cache layouts: one table per blockSizes entry.
+            tail ring; per-cache layouts: one table per blockSizes entry. For CXA,
+            ``block_tables[2]`` (COMPRESS_KV) carries the compress_kv pool's own
+            paged block table (read path); compressor positions/slot_mapping are
+            runtime-derived, not host fields.
         block_tables_seq_mapping (None): Reserved sequence-to-row mapping for
             block tables; NOT supported yet, must stay ``None``.
     """
@@ -449,6 +452,15 @@ class AttnMetaV2:
     block_tables_seq_mapping: None = ...
     """Reserved sequence-to-row mapping for block tables; NOT supported yet,
     must stay ``None``."""
+    block_tables_per_layer: Sequence[Sequence[torch.Tensor]] = ...
+    """CXA per-layer rows, each ``[5]`` planes. Rows are references — layers of
+    one ratio>0 share a template row, while ratio==0 layers carry their own row
+    (a layer with no metadata entry gets an all-empty row). Empty under V1 /
+    non-CXA."""
+    slot_mapping_per_layer: Sequence[Sequence[torch.Tensor]] = ...
+    """CXA per-layer slot-mapping rows, parallel to ``block_tables_per_layer``.
+    Each row's ``[2]`` (compress_kv) plane carries the per-block write slots of
+    that row's ratio."""
 
 class AttnType(Enum):
     """Attention type enum exported by the native extension."""
