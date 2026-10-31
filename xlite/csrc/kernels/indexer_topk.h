@@ -31,13 +31,17 @@ public:
                                 uint32_t nHeads, uint32_t headDim, uint32_t blockSize,
                                 uint32_t batch, uint32_t blockTableStride, uint32_t maxNumBlock,
                                 uint32_t topK, uint8_t skipDenseTopk, GM_ADDR kScaleCache = nullptr,
-                                uint32_t compressRatio = 1)
+                                uint32_t kScaleCacheStride = 0, uint32_t compressRatio = 1,
+                                uint32_t weightCols = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
         this->kCache.SetGlobalBuffer((__gm__ Dtype *)kCache);
         this->weight.SetGlobalBuffer((__gm__ WeightDtype *)weight);
         this->kScaleCache = (__gm__ half *)kScaleCache;
+        // Packed pages: scale pool's own block stride; dense (stride 0/blockSize)
+        // → flat addressing via MAX.
+        this->kScaleCacheStride = MAX(kScaleCacheStride, blockSize);
         this->queryStartLoc = (__gm__ int32_t *)queryStartLoc;
         this->queryLens = (__gm__ int32_t *)queryLens;
         this->cachedLens = (__gm__ int32_t *)cachedLens;
@@ -47,6 +51,8 @@ public:
         this->topkIndices = (__gm__ uint32_t *)topkIndices;
         this->nHeads = nHeads;
         this->headDim = headDim;
+        // weight row pitch; head weights sit at column (weightCols - nHeads).
+        this->weightCols = weightCols;
         this->blockSize = blockSize;
         this->kCacheStride = MAX(kCacheStride, blockSize * headDim);
         this->batch = batch;
@@ -246,12 +252,10 @@ public:
         constexpr int weightBlockSize = 32 / sizeof(WeightDtype);
         int wkBlockNum = nHeads / weightBlockSize;
 
-        // copy weight (queryTaskLen, nHeads) to L1
+        // copy weight [queryTaskLen, nHeads] to L1; weightCols is the GM row pitch.
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
-        CopyGmToL1Nd2Nz(wl1Buf, weight, wmSize, nHeads,
-                        std::is_same<Dtype, int8_t>::value ? nHeads : (headDim + nHeads),
-                        wmBlockPad);
+        CopyGmToL1Nd2Nz(wl1Buf, weight, wmSize, nHeads, weightCols, wmBlockPad);
         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
 
@@ -427,7 +431,7 @@ public:
                 for (int start = 0; start < validKvLen; start += blockSize) {
                     int count = MIN(int(blockSize), validKvLen - start);
                     uint32_t block = blockTable[(kvOffset + start) / blockSize];
-                    CopyGmToUbufAligned(in[curr] + start, kScaleCache + block * blockSize,
+                    CopyGmToUbufAligned(in[curr] + start, kScaleCache + block * kScaleCacheStride,
                                         count * sizeof(half));
                 }
                 // in[curr] is released before sorting; mrgSortBuf0 needs its own fence.
@@ -675,9 +679,8 @@ public:
                 }
 #ifdef __DAV_C220_CUBE__
                 uint32_t qOffset = queryTaskOffset * nHeads * headDim;
-                uint32_t wOffset = std::is_same<Dtype, int8_t>::value
-                                       ? queryTaskOffset * nHeads
-                                       : queryTaskOffset * (headDim + nHeads) + headDim;
+                // head weights tail-aligned at (weightCols - nHeads).
+                uint32_t wOffset = queryTaskOffset * weightCols + (weightCols - nHeads);
                 dbg_printf("block%d: {batch %d, query start loc %u, query [%u - %u), index k [%u - "
                            "%u)} use %d buf\n",
                            blockIdx, batchIdx, queryStart, queryOffset, queryOffset + queryTaskLen,
@@ -728,6 +731,7 @@ private:
     GlobalTensor<WeightDtype> weight;
     GlobalTensor<ScoreDtype> scores[PINGPONG_BUF_NUM];
     __gm__ half *kScaleCache;
+    uint32_t kScaleCacheStride;
     __gm__ int32_t *setNextSync;
     __gm__ int32_t *waitPrevSync;
     __gm__ int32_t *queryStartLoc;
@@ -739,6 +743,7 @@ private:
     __gm__ uint32_t *topkIndices;
     uint32_t nHeads;
     uint32_t headDim;
+    uint32_t weightCols;
     uint32_t blockSize;
     uint32_t kCacheStride;
     uint32_t batch;
@@ -789,13 +794,13 @@ private:
         GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,        \
         uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                 \
         uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk, \
-        uint32_t compressRatio)                                                                \
+        uint32_t compressRatio, uint32_t weightCols)                                            \
     {                                                                                          \
         IndexerTopK<dtype, float, dtype, dtype> op;                                            \
         op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,  \
                 lastTopk, seqPositions, topkIndices, sync, kCacheStride, nHeads, headDim,      \
                 blockSize, batch, blockTableStride, maxNumBlock, topK, skipDenseTopk, nullptr, \
-                compressRatio);                                                                \
+                0, compressRatio, weightCols);                                                  \
         op.Run();                                                                              \
     }
 
@@ -806,12 +811,13 @@ private:
         GM_ADDR seq_positions, GM_ADDR topk_indices, GM_ADDR sync, uint32_t k_cache_stride,       \
         uint32_t heads, uint32_t dim, uint32_t block_size, uint32_t batch,                        \
         uint32_t block_table_stride, uint32_t max_blocks, uint32_t topk, uint8_t skip_dense_topk, \
-        GM_ADDR k_scale_cache)                                                                    \
+        GM_ADDR k_scale_cache, uint32_t k_scale_cache_stride, uint32_t compress_ratio,            \
+        uint32_t weight_cols)                                                                     \
     {                                                                                             \
         IndexerTopK<dtype, int32_t, half, float> op;                                              \
         op.Init(q, k_cache, weight, query_start_loc, query_lens, cached_lens, block_tables,       \
                 scores, last_topk, seq_positions, topk_indices, sync, k_cache_stride, heads, dim, \
                 block_size, batch, block_table_stride, max_blocks, topk, skip_dense_topk,         \
-                k_scale_cache);                                                                   \
+                k_scale_cache, k_scale_cache_stride, compress_ratio, weight_cols);                \
         op.Run();                                                                                 \
     }

@@ -36,16 +36,16 @@ indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR querySta
                      GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,
                      uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,
                      uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,
-                     uint32_t compressRatio)
+                     uint32_t compressRatio, uint32_t weightCols)
 ```
 
-C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_C8_FUNC_DEFINE`)签名不同:同样在 `sync` 后接收 `uint32_t k_cache_stride`,末参为 `GM_ADDR k_scale_cache`(无 `compressRatio`,C8 固定按 token 级 KV)。
+C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_C8_FUNC_DEFINE`)签名不同:同样在 `sync` 后接收 `uint32_t k_cache_stride`,末四参为 `GM_ADDR k_scale_cache`、`uint32_t k_scale_cache_stride`、`uint32_t compress_ratio` 与 `uint32_t weight_cols`(因果边界语义与浮点路径相同,C8 同样支持压缩块级 KV)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| q | 输入 | `[total_query_len, nHeads*headDim]` | fp16 / bf16 / int8 | 拼接的 flatten query;C8 为 `[total_query_len,4096]` |
+| q | 输入 | `[total_query_len, nHeads*headDim]` | fp16 / bf16 / int8 | 拼接的 flatten query;C8 为 `[total_query_len, nHeads*128]` |
 | kCache | 输入 | `[kvcache_block_num, blockSize, headDim]` | fp16 / bf16 / int8 | paged indexer K cache;C8 为 `[kvcache_block_num,blockSize,1,128]` |
-| weight | 输入 | `[total_query_len, headDim + nHeads]` | fp16 / bf16 | 头融合权重,位于每行第 headDim 列起;C8 为独立的 fp16 `[total_query_len,32]`,已乘 Q scale |
+| weight | 输入 | `[total_query_len, nHeads]` 或 `[total_query_len, headDim + nHeads]` | fp16 / bf16 | 头权重,行距由 `weightCols = shape[1]` 决定(op.cpp 派生并校验):稠密 `[T, nHeads]` 从每行第 0 列起(C8 的 scaledWeights 已乘 Q scale;CXA bf16 的独立 head weights);DSA 融合 kw `[T, headDim+nHeads]` 尾对齐于每行第 headDim 列起。内核按 `wOffset = qto*weightCols + (weightCols-nHeads)` 寻址 |
 | queryStartLoc | 输入 | `[batch]` | int32 | 各 batch query 起始偏移 |
 | queryLens / cachedLens | 输入 | `[batch]` | int32 | 各 batch query / 已缓存长度;token 绝对位置 `pos = cachedLens[i] + 段内偏移`,经 `MapPosToKv` 映射为 KV 空间因果边界 `p0` |
 | blockTables | 输入 | `[rows >= batch, blockTableStride]` | int32 | 逻辑块 → 物理块映射;持久化缓冲,行跨度为分配跨度,仅每行 lens 推导的有效前缀被读取;行跨度 `blockTableStride` 仅用于行寻址 |
@@ -53,11 +53,12 @@ C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` �
 | lastTopk | workspace | `[total_query_len, 2*topK]`(uint32 对) | uint32 | 跨核 topk 接力缓冲:处理非首 KV tile 的核把当前全局 topK 候选(值+索引对)写给下一个核 |
 | seqPositions | 输入 | `[max(max(blockSize*maxNumBlock, INIT_MIN_SEQ_POS), topK)]` | int32(uint32 语义) | `arange(...)` 恒等索引表,由 host 侧(`csrc/_C.cpp` `IndexerTopK` / `csrc/model.cpp` `XModel::Init`)预先生成;长度必须覆盖 kernel 侧推导的 `maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)`(host 侧 `XliteOpIndexerTopK` 不校验长度,由 `XModel::Init` 预生成保证覆盖)。`XModel::Init` 按 `MAX(INIT_MIN_SEQ_POS, ROUND_UP(max_seq_len, blockSize))` 一次性预生成。AIV 每个 subblock 搬入属于自己的一段,之后按 `kvOffset` 增量推进;同时它也是稠密行模板的来源——首个 `topK` 项即 `0...topK-1`(模板 writer 核整体搬入 UB `defaultTopkIndices`,见下文) |
 | topkIndices | 输出 | `[total_query_len, topK]` | int32(uint32 语义) | 每 query token 的 topK 索引,**按索引升序**(最小 id 在前)排列,所有行有效。`p0 >= topK` 的稀疏行是真实 topK(候选满 `topK` 个,全部落在 `[0, p0]`);`p0 < topK` 的稠密行是默认模板 `0...topK-1`,其中 `> p0` 的表项无效,下游必须过滤——模板头部的前 `min(p0+1, topK)` 项恒为有效位置(`gather_sparse_kv_cache` 依赖此约定做头部有效收集) |
-| kScaleCache | 输入(C8) | `[kvcache_block_num,blockSize,1,1]` | fp16 | 与 K cache 同分页布局;Python 参数为 `k_scale_cache` |
+| kScaleCache | 输入(C8) | `[kvcache_block_num,blockSize,1,1]` | fp16 | 与 K cache 同分页布局;Python 参数为 `k_scale_cache`。DSV4 的 vllm 原生池把 K 与 scale 按页打包进同一分配(scale 视图带 storage_offset、stride[0] = 每 block 字节数/2),允许 pitch |
 | sync | workspace | `[AIV_TO_AIC*block_num]` | int32 | 核间环形同步 flag 数组(每核 `AIV_TO_AIC=2` 个,对应 2 个 subblock,`csrc/kernels/indexer_topk.h` 的 `AIV_TO_AIC` 宏,关键字 `#define AIV_TO_AIC 2u`) |
 | kCacheStride | — | 标量 | uint32 | kCache 的 dim-0 跨度(元素数);连续时等于 blockSize×headDim(C8 为 blockSize×128),非连续时由宿主传入真实跨距 |
+| kScaleCacheStride | — | 标量(C8) | uint32 | kScaleCache 的 dim-0 跨度(fp16 元素数);dense 池传 0,内核以 `MAX(kScaleCacheStride, blockSize)` 守护后退化为 block 内连续寻址。核内 scale 读取为 `kScaleCache + block*kScaleCacheStride`(块内连续),vllm 打包页的 storage_offset 常量偏移由基指针吸收 |
 | nHeads / headDim / blockSize / batch / topK / skipDenseTopk | — | 标量 | uint32 / uint8 | 测试配置:nHeads=64, headDim=128, blockSize=128, topK ∈ {512, 2048};约束 `topK <= MAX_TOPK_NUM=2048`、`kvLen <= MAX_INDEXER_KV_TILE_LEN=4096`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `assert(kvLen <= MAX_INDEXER_KV_TILE_LEN && topK <= MAX_TOPK_NUM)`)。`skipDenseTopk=1` 时不写稠密模板(旧行为,稠密行内容不定),默认 0 |
-| compressRatio | — | 标量 | uint32 | KV 压缩比:`1`=token 级 KV(因果含自身);`>1`=压缩块级 KV,`MapPosToKv` 把 token 位置映射到已完成压缩块边界(因果排除自身未完成块)。host 默认 `compressRatio` 由模型层传入(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 浮点路径 `launchKernel(rt.aicNum, ...)` 末尾 `compressRatio` 实参);C8 路径不传(固定 token 级) |
+| compressRatio | — | 标量 | uint32 | KV 压缩比:`1`=token 级 KV(因果含自身);`>1`=压缩块级 KV,`MapPosToKv` 把 token 位置映射到已完成压缩块边界(因果排除自身未完成块)。host 由模型层传入(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,浮点路径 `launchKernel(rt.aicNum, ...)` 与 C8 路径 `aclrtlaunch_indexer_topk_int8_t` 末尾均传 `compressRatio` 实参) |
 
 ## 支持的数据类型
 

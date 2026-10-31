@@ -2593,7 +2593,9 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
 {
     XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables,
         _ks;
-    InitXTensor(_ks, kScaleCache, DBG_LOC);
+    // The int8 branch reads the fp16 scale pool page-strided (DSV4 packs K and
+    // scales per page); dense pools keep the contiguous fast path.
+    InitXTensor(_ks, kScaleCache, DBG_LOC, /*allowPitched=*/true);
 
     InitXTensor(_q, q, DBG_LOC);
     InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);

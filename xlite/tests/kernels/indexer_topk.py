@@ -75,7 +75,9 @@ def max_blocks(query_lens, cached_lens, block_size, compress_ratio=1):
 
 
 def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK,
-             compress_ratio=1):
+             compress_ratio=1, dense_weight=False):
+    if dense_weight:
+        name = name + "_dense_w"
     ratio = compress_ratio
     max_num_blocks = max_blocks(query_len_list, cached_lens_list, BLOCK_SIZE, ratio)
     max_seq_len = max_num_blocks * BLOCK_SIZE
@@ -85,7 +87,11 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query
     with torch.device("npu"):
         q_standard = torch.randn(total_query_len, n_heads * head_dim)
         k_cache = torch.randn(batch, max_seq_len, head_dim)
-        weight_standard = torch.randn(total_query_len, head_dim + n_heads)
+        if dense_weight:
+            # CXA-style dense head weights: [T, nHeads] with no fused K columns.
+            weight_standard = torch.randn(total_query_len, n_heads)
+        else:
+            weight_standard = torch.randn(total_query_len, head_dim + n_heads)
 
         q_xlite = q_standard.clone()
         weight_xlite = weight_standard.clone()
@@ -126,7 +132,10 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query
         clen = cached_lens_list[i]
         seq_len = (clen + qlen) // ratio if ratio > 1 else clen + qlen
         q_chunk = q_std_cpu[offset : offset + qlen].view(qlen, n_heads, head_dim)
-        weight_chunk = weight_std_cpu[offset : offset + qlen, head_dim : head_dim + n_heads]
+        if dense_weight:
+            weight_chunk = weight_std_cpu[offset : offset + qlen]
+        else:
+            weight_chunk = weight_std_cpu[offset : offset + qlen, head_dim : head_dim + n_heads]
         offset += qlen
 
         k_slice = k_cache_cpu[i, :seq_len]  # [seq_len, head_dim]
@@ -301,6 +310,14 @@ def main():
             for topK in topk_values_compressed:
                 run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK,
                          compress_ratio=4)
+
+    # Dense [T, nHeads] weight layout (CXA bf16 path): the kernel derives the
+    # row pitch from weight.shape[1]; verify it matches the fused-layout
+    # reference on both ratio=1 and ratio=4.
+    for name, n_heads, head_dim, test_dtype in models:
+        run_test(name, n_heads, head_dim, test_dtype, 1, [3542], [1], 2048, dense_weight=True)
+        run_test(name, n_heads, head_dim, test_dtype, 1, [0], [8192], 512, compress_ratio=4,
+                 dense_weight=True)
 
 
 if __name__ == "__main__":

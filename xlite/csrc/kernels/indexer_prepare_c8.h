@@ -285,19 +285,33 @@ __aicore__ inline void indexer_c8_prepare_tile(GM_ADDR kw, GM_ADDR freqs, GM_ADD
                                                uint32_t keyTiles, uint32_t tokens,
                                                uint32_t rowStride, uint32_t maxPosition,
                                                uint32_t capacity, bool freqsFp32, float normEps,
-                                               uint32_t curr, IndexerC8Buffers &ub)
+                                               uint32_t heads, uint32_t curr, IndexerC8Buffers &ub)
 {
     bool isKey = task < keyTiles;
     uint32_t rowOffset = get_subblockid() * ub.rows;
-    uint32_t first = isKey ? task * INDEXER_C8_TILE_ROWS + rowOffset : task - keyTiles;
-    uint32_t count = isKey ? (first < tokens ? MIN(ub.rows, tokens - first) : 0) : ub.rows;
+    // Key tiles walk whole tokens (INDEXER_C8_TILE_ROWS rows per tile, split across the two
+    // vector subblocks). Query tiles walk one token's head rows: heads beyond a single tile
+    // span additional chunk tasks per token, so first is a head row inside the token.
+    uint32_t token;
+    uint32_t first;
+    uint32_t count;
+    if (isKey) {
+        token = task * INDEXER_C8_TILE_ROWS + rowOffset;
+        first = token;
+        count = token < tokens ? MIN(ub.rows, tokens - token) : 0;
+    } else {
+        uint32_t qChunks = DIV_ROUND_UP(heads, INDEXER_C8_TILE_ROWS);
+        token = (task - keyTiles) / qChunks;
+        first = (task - keyTiles) % qChunks * INDEXER_C8_TILE_ROWS + rowOffset;
+        count = first < heads ? MIN(ub.rows, heads - first) : 0;
+    }
     if (count == 0) {
         return;
     }
     // TODO: Use ping-pong UB input buffers to overlap loading and vector computation.
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
-    CopyGmToUbufAligned(ub.position[curr], (__gm__ int64_t *)positions + first,
+    CopyGmToUbufAligned(ub.position[curr], (__gm__ int64_t *)positions + token,
                         (isKey ? count : 1) * sizeof(int64_t));
     if (isKey) {
         CopyGmToUbufAligned(ub.slot[curr], (__gm__ int32_t *)slots + first,
@@ -307,11 +321,11 @@ __aicore__ inline void indexer_c8_prepare_tile(GM_ADDR kw, GM_ADDR freqs, GM_ADD
                                   (rowStride - ub.dim) * sizeof(bfloat16_t), 0);
     } else {
         CopyGmToUbufAligned(ub.bf,
-                            (__gm__ bfloat16_t *)q + ((uint64_t)first * 32 + rowOffset) * ub.dim,
+                            (__gm__ bfloat16_t *)q + ((uint64_t)token * heads + first) * ub.dim,
                             count * ub.dim * sizeof(bfloat16_t));
         copy_gm_to_ubuf_align_b16(
             ub.head_weight[curr],
-            (__gm__ bfloat16_t *)kw + (uint64_t)first * rowStride + ub.dim + rowOffset, 0, 1,
+            (__gm__ bfloat16_t *)kw + (uint64_t)token * rowStride + ub.dim + first, 0, 1,
             count * sizeof(bfloat16_t), 0, 0, 0, 0);
     }
     set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
@@ -367,13 +381,25 @@ __aicore__ inline void indexer_c8_store_tile(__gm__ bfloat16_t *rotated, GM_ADDR
                                              GM_ADDR kScaleCache, GM_ADDR q8, GM_ADDR qScale,
                                              GM_ADDR scaledWeights, uint32_t task,
                                              uint32_t keyTiles, uint32_t tokens,
-                                             uint32_t maxPosition, uint32_t capacity, uint32_t curr,
-                                             IndexerC8Buffers &ub)
+                                             uint32_t maxPosition, uint32_t capacity,
+                                             uint32_t heads, uint32_t curr, IndexerC8Buffers &ub)
 {
     bool isKey = task < keyTiles;
     uint32_t rowOffset = get_subblockid() * ub.rows;
-    uint32_t first = isKey ? task * INDEXER_C8_TILE_ROWS + rowOffset : task - keyTiles;
-    uint32_t count = isKey ? (first < tokens ? MIN(ub.rows, tokens - first) : 0) : ub.rows;
+    // Same task decomposition as indexer_c8_prepare_tile.
+    uint32_t token;
+    uint32_t first;
+    uint32_t count;
+    if (isKey) {
+        token = task * INDEXER_C8_TILE_ROWS + rowOffset;
+        first = token;
+        count = token < tokens ? MIN(ub.rows, tokens - token) : 0;
+    } else {
+        uint32_t qChunks = DIV_ROUND_UP(heads, INDEXER_C8_TILE_ROWS);
+        token = (task - keyTiles) / qChunks;
+        first = (task - keyTiles) % qChunks * INDEXER_C8_TILE_ROWS + rowOffset;
+        count = first < heads ? MIN(ub.rows, heads - first) : 0;
+    }
     if (count == 0 || (!isKey && (ub.position[curr][0] < 0 ||
                                   static_cast<uint64_t>(ub.position[curr][0]) >= maxPosition))) {
         return;
@@ -414,7 +440,7 @@ __aicore__ inline void indexer_c8_store_tile(__gm__ bfloat16_t *rotated, GM_ADDR
                                 sizeof(half));
         }
     } else {
-        uint64_t row = (uint64_t)first * 32 + rowOffset;
+        uint64_t row = (uint64_t)token * heads + first;
         CopyUbufToGmAligned((__gm__ int8_t *)q8 + row * ub.dim, ub.quant, count * ub.dim);
         CopyUbufToGmAligned((__gm__ half *)qScale + row, ub.scale_half, count * sizeof(half));
         CopyUbufToGmAligned((__gm__ half *)scaledWeights + row, ub.scaled_weights,
@@ -433,7 +459,8 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
                                           bool freqsFp32, bool isLong, float normEps)
 {
     uint32_t keyTiles = DIV_ROUND_UP(tokens, INDEXER_C8_TILE_ROWS);
-    uint32_t tasks = keyTiles + (isLong ? tokens : 0);
+    uint32_t qChunks = DIV_ROUND_UP(heads, INDEXER_C8_TILE_ROWS);
+    uint32_t tasks = keyTiles + (isLong ? tokens * qChunks : 0);
     uint32_t perCore = block_idx < tasks ? DIV_ROUND_UP(tasks - block_idx, block_num) : 0;
     if (perCore == 0) {
         return;
@@ -455,7 +482,8 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
         uint32_t task = block_idx + i * block_num;
         uint32_t rows = task < keyTiles
                             ? MIN(INDEXER_C8_TILE_ROWS, tokens - task * INDEXER_C8_TILE_ROWS)
-                            : heads;
+                            : MIN(INDEXER_C8_TILE_ROWS,
+                                  heads - (task - keyTiles) % qChunks * INDEXER_C8_TILE_ROWS);
         wait_flag_dev(curr + 2);
         mm.TaskTilesInit((GM_ADDR)prepared[curr], hadamard, (GM_ADDR)rotated[curr], nullptr,
                          nullptr, rows, 128, 128);
@@ -474,7 +502,7 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
     for (uint32_t i = 0; i < MIN(PINGPONG_BUF_NUM, perCore); ++i) {
         indexer_c8_prepare_tile(kw, freqs, positions, slots, q, prepared[i],
                                 block_idx + i * block_num, keyTiles, tokens, rowStride, maxPosition,
-                                capacity, freqsFp32, normEps, i, ub);
+                                capacity, freqsFp32, normEps, heads, i, ub);
         ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | ((i + 2) << 8));
     }
     for (uint32_t i = 0; i < perCore; ++i) {
@@ -482,12 +510,12 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
         wait_flag_dev(curr);
         indexer_c8_store_tile(rotated[curr], kCache, kScaleCache, q8, qScale, scaledWeights,
                               block_idx + i * block_num, keyTiles, tokens, maxPosition, capacity,
-                              curr, ub);
+                              heads, curr, ub);
         if (i + PINGPONG_BUF_NUM < perCore) {
             indexer_c8_prepare_tile(kw, freqs, positions, slots, q, prepared[curr],
                                     block_idx + (i + PINGPONG_BUF_NUM) * block_num, keyTiles,
                                     tokens, rowStride, maxPosition, capacity, freqsFp32, normEps,
-                                    curr, ub);
+                                    heads, curr, ub);
             ffts_cross_core_sync(PIPE_MTE3, 1 | (2 << 4) | ((curr + 2) << 8));
         }
     }

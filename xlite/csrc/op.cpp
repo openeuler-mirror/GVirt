@@ -1376,7 +1376,10 @@ static void RunIndexerPrepareC8(XRuntime &rt, const XTensor &kw, const XTensor &
     if (kw.shape[0] == 0) {
         return;
     }
-    size_t tasks = DIV_ROUND_UP(kw.shape[0], INDEXER_C8_TILE_ROWS) + (isLong ? kw.shape[0] : 0);
+    // Query tasks are chunked: each token's heads span DIV_ROUND_UP(heads, tile) tasks.
+    uint32_t qChunks = DIV_ROUND_UP(heads, INDEXER_C8_TILE_ROWS);
+    size_t tasks =
+        DIV_ROUND_UP(kw.shape[0], INDEXER_C8_TILE_ROWS) + (isLong ? kw.shape[0] * qChunks : 0);
     uint32_t cores = PickMinBlockNum(rt.aicNum, tasks);
     XTensor &workspace = rt.GetTensor({4, cores, INDEXER_C8_TILE_ROWS, 128}, BF16, DBG_LOC);
     if (!IsDummyRuntime(rt)) {
@@ -1426,8 +1429,11 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                         scaledWeights.ptr == nullptr))) {
             throw std::invalid_argument("indexer_prepare: missing LI-C8 buffers");
         }
-        if (indexHeadDim != 128 || ropeHeadDim != 64 || indexNHeads != 32 || kw.dtype != BF16 ||
-            !EachXDtype(FP32, kNorm, kNormBias) || (isLong && q.dtype != BF16)) {
+        // The query path tiles heads in INDEXER_C8_TILE_ROWS chunks; the Top-K consumer
+        // additionally requires heads to be a multiple of 16 and at most XLITE_MAX_M0.
+        if (indexHeadDim != 128 || ropeHeadDim != 64 || indexNHeads == 0 || indexNHeads % 16 != 0 ||
+            indexNHeads > XLITE_MAX_M0 || kw.dtype != BF16 || !EachXDtype(FP32, kNorm, kNormBias) ||
+            (isLong && q.dtype != BF16)) {
             throw std::invalid_argument("indexer_prepare: unsupported LI-C8 inputs");
         }
         RunIndexerPrepareC8(rt, kw, kNorm, kNormBias, freqs, position, slotMapping, indexKCache,
@@ -2237,10 +2243,18 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
         throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
                                  std::to_string(MAX_TOPK_NUM));
     }
+    // weight layout: [T, nHeads] (int8 scaledWeights / CXA bf16 head weights)
+    // or DSA's fused kw [T, headDim + nHeads] with head weights tail-aligned
+    // at column headDim.
+    uint32_t weightCols = weight.shape.size() == 2 ? static_cast<uint32_t>(weight.shape[1]) : 0;
+    if (weightCols != nHeads && weightCols != headDim + nHeads) {
+        throw std::invalid_argument(std::string(__func__) +
+                                    ": weight must be [T, nHeads] or [T, headDim+nHeads]");
+    }
     if (kCache.dtype == INT8) {
-        if (nHeads != 32 || headDim != 128 || blockSize < 16 || blockSize > 128 ||
-            blockSize % 16 != 0 || MAX_INDEXER_KV_TILE_LEN % blockSize != 0 || batch == 0 ||
-            topK < 32 || topK % 32 != 0) {
+        if (nHeads == 0 || nHeads % 16 != 0 || nHeads > XLITE_MAX_M0 || headDim != 128 ||
+            blockSize < 16 || blockSize > 128 || blockSize % 16 != 0 ||
+            MAX_INDEXER_KV_TILE_LEN % blockSize != 0 || batch == 0 || topK < 32 || topK % 32 != 0) {
             throw std::invalid_argument("indexer_topk: unsupported LI-C8 configuration");
         }
         if (kScaleCache.shape.empty() || q.dtype != INT8 ||
@@ -2248,11 +2262,16 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
             throw std::invalid_argument("indexer_topk: unsupported LI-C8 inputs");
         }
         if (q.shape[0] != 0) {
+            // Packed pages give the scale cache its own block stride; an empty
+            // (dense) stride falls back to flat addressing in the kernel's MAX guard.
+            uint32_t kScaleCacheStride =
+                kScaleCache.stride.empty() ? 0 : static_cast<uint32_t>(kScaleCache.stride[0]);
             aclrtlaunch_indexer_topk_int8_t(
                 rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                 topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
-                blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr);
+                blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr,
+                kScaleCacheStride, compressRatio, weightCols);
         }
         return;
     }
@@ -2272,7 +2291,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                  topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
-                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio);
+                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio, weightCols);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,
