@@ -1845,6 +1845,39 @@ void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
     }
 }
 
+void XModel::RegisterForwardHandlers(XRuntime &rt)
+{
+    auto wrap = [this](auto fn) {
+        return [this, fn](XRuntime &rt, ForwardTask &t) {
+            if (!t.auxOutputs.empty()) {
+                SetAuxOutputs(t.auxOutputs);
+            }
+            fn(rt, t);
+            if (!t.auxOutputs.empty()) {
+                ClearAuxOutputs();
+            }
+        };
+    };
+    rt.RegisterForwardTaskHandler(ForwardTask::FORWARD, wrap([this](XRuntime &rt, ForwardTask &t) {
+                                      Forward(rt, t.input, t.attnMeta, t.kvCache,
+                                              t.deepstackInputEmbeds, t.freqsCis, t.output);
+                                  }));
+    rt.RegisterForwardTaskHandler(
+        ForwardTask::FORWARD_AND_GET_LOGITS, wrap([this](XRuntime &rt, ForwardTask &t) {
+            ForwardAndGetLogits(rt, t.input, t.attnMeta, t.kvCache, t.deepstackInputEmbeds,
+                                t.freqsCis, t.indices, t.output);
+        }));
+    rt.RegisterForwardTaskHandler(
+        ForwardTask::FORWARD_WITH_INPUTS_EMBEDS, wrap([this](XRuntime &rt, ForwardTask &t) {
+            ForwardWithInputsEmbeds(rt, t.input, t.attnMeta, t.kvCache, t.deepstackInputEmbeds,
+                                    t.freqsCisSingle, t.inputIds, t.output);
+        }));
+    rt.RegisterForwardTaskHandler(ForwardTask::FORWARD_GET_LOGITS,
+                                  wrap([this](XRuntime &rt, ForwardTask &t) {
+                                      ForwardGetLogits(rt, t.input, t.indices, t.output);
+                                  }));
+}
+
 void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XTensor &output)
 {
     uint32_t batch = rt._batch;

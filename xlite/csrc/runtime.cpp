@@ -1,9 +1,13 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
+#include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <memory>
 #include <sstream>
+#include <unistd.h>
+#include <sys/syscall.h>
 #include "ascend.h"
 #include "base.h"
 #include "runtime.h"
@@ -72,12 +76,17 @@ void XRuntime::Init(size_t sizeMB)
     originAicNum = aicNum;
     originAivNum = aivNum;
 
-    CHECK_ACL(aclrtCreateEvent(&_event));
     CHECK_ACL(aclrtCreateStream(&hcclSideStream));
     CHECK_ACL(aclrtCreateEventExWithFlag(&hcclStartEv, ACL_EVENT_SYNC));
     CHECK_ACL(aclrtCreateEventExWithFlag(&hcclEndEv, ACL_EVENT_SYNC));
     CHECK_ACL(aclrtCreateNotify(&notify, 0));
     CHECK_ACL(aclrtGetCurrentContext(&context));
+    _inEvents.resize(XLITE_FWD_POOL_SIZE);
+    _outNotifies.resize(XLITE_FWD_POOL_SIZE);
+    for (uint32_t i = 0; i < XLITE_FWD_POOL_SIZE; i++) {
+        CHECK_ACL(aclrtCreateEvent(&_inEvents[i]));
+        CHECK_ACL(aclrtCreateNotify(&_outNotifies[i], 0));
+    }
 
     const char *envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
     if (envCommOptimizeLen) {
@@ -124,11 +133,19 @@ void XRuntime::Init(size_t sizeMB)
     _attnZeroBuffer.Init({zeroSize / sizeof(BF16)}, BF16, zeroPtr);
     CHECK_ACL(aclrtMemset(zeroPtr, zeroSize, 0, zeroSize));
 
+    _fwdEnabled =
+        !IsDummyRuntime() && !isEnvironmentVariableFalse(std::getenv("XLITE_FORWARD_THREAD"));
+    if (_fwdEnabled) {
+        StartForwardThread();
+    }
+
     _inited = true;
 }
 
 XRuntime::~XRuntime(void)
 {
+    StopForwardThread();
+
     FiniXcclComm();
 
     if (_tpSize > 1 && _tpComm) {
@@ -142,8 +159,15 @@ XRuntime::~XRuntime(void)
     }
 
     delete _pool;
-    if (_event) {
-        (void)aclrtDestroyEvent(_event);
+    for (auto &e : _inEvents) {
+        if (e) {
+            (void)aclrtDestroyEvent(e);
+        }
+    }
+    for (auto &n : _outNotifies) {
+        if (n) {
+            (void)aclrtDestroyNotify(n);
+        }
     }
     for (auto &e : _agGraphs) {
         if (e.modelRI) {
@@ -962,16 +986,155 @@ void XRuntime::Synchronize(void)
 
 void XRuntime::EventWaitCurrStream(aclrtStream currStream)
 {
-    CHECK_ACL(aclrtRecordEvent(_event, currStream));
-    CHECK_ACL(aclrtStreamWaitEvent(stream, _event));
-    CHECK_ACL(aclrtResetEvent(_event, stream));
+    aclrtEvent ev = _inEvents[0];
+    CHECK_ACL(aclrtRecordEvent(ev, currStream));
+    CHECK_ACL(aclrtStreamWaitEvent(stream, ev));
+    CHECK_ACL(aclrtResetEvent(ev, stream));
 }
 
 void XRuntime::EventRecordCurrStream(aclrtStream currStream)
 {
-    CHECK_ACL(aclrtRecordEvent(_event, stream));
-    CHECK_ACL(aclrtStreamWaitEvent(currStream, _event));
-    CHECK_ACL(aclrtResetEvent(_event, currStream));
+    aclrtEvent ev = _inEvents[0];
+    CHECK_ACL(aclrtRecordEvent(ev, stream));
+    CHECK_ACL(aclrtStreamWaitEvent(currStream, ev));
+    CHECK_ACL(aclrtResetEvent(ev, currStream));
+}
+
+// ---- forward-thread async split (see runtime.h for the rationale) ----
+
+// ACL events/notifies are single-use binary primitives: a Record does not accumulate
+// with an unconsumed prior Record, so two in-flight tasks sharing one primitive
+// FIFO-violate and deadlock (one wait consumes the other's record).
+uint64_t XRuntime::AllocFwdSeq()
+{
+    return _fwdSeq.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Caller thread, at SubmitForward: record the slot's input-done event on currStream.
+void XRuntime::RecordInputEvent(aclrtStream currStream, uint64_t seq)
+{
+    CHECK_ACL(aclrtRecordEvent(_inEvents[seq % XLITE_FWD_POOL_SIZE], currStream));
+}
+
+// Forward thread, before Forward*: wait for the slot's event (currStream finished
+// writing the input), then reset it on rt.stream so the slot reuses cleanly.
+void XRuntime::WaitInputEvent(uint64_t seq)
+{
+    aclrtEvent ev = _inEvents[seq % XLITE_FWD_POOL_SIZE];
+    CHECK_ACL(aclrtStreamWaitEvent(stream, ev));
+    CHECK_ACL(aclrtResetEvent(ev, stream));
+}
+
+// Forward thread, after Forward*: signal the slot's notify. A notify (not RecordEvent)
+// because the caller must wait before this record exists — wait-before-signal.
+void XRuntime::RecordOutputEvent(uint64_t seq)
+{
+    CHECK_ACL(aclrtRecordNotify(_outNotifies[seq % XLITE_FWD_POOL_SIZE], stream));
+}
+
+// Caller thread, at SubmitForward: queue a wait on currStream for the slot's notify.
+// WaitAndReset pairs this wait with the forward thread's RecordOutputEvent signal
+// (which may not have fired yet — wait-before-signal). Must be queued BEFORE SubmitForward
+// so the forward thread cannot signal before the wait is pending.
+void XRuntime::WaitOutputEvent(aclrtStream currStream, uint64_t seq)
+{
+    CHECK_ACL(aclrtWaitAndResetNotify(_outNotifies[seq % XLITE_FWD_POOL_SIZE], currStream, 0));
+}
+
+void XRuntime::ForwardThreadMain()
+{
+    CHECK_ACL(aclrtSetDevice(_devid));
+    SetCurrentContext();
+    // Subscribe this thread to rt.stream so HCCL's host callbacks land here and get
+    // drained. rt.stream was created on the main thread in Init(), and ACL routes a
+    // stream's callbacks to its creating/subscribing thread — without this, HCCL
+    // collectives on the forward thread enqueue callbacks no thread drains and hang.
+    _fwdSubscribed =
+        (aclrtSubscribeReport(static_cast<uint64_t>(syscall(SYS_gettid)), stream) == ACL_SUCCESS);
+    ForwardThreadLoop();
+    if (_fwdSubscribed) {
+        (void)aclrtUnSubscribeReport(static_cast<uint64_t>(syscall(SYS_gettid)), stream);
+        _fwdSubscribed = false;
+    }
+}
+
+void XRuntime::StartForwardThread()
+{
+    _fwdThread = std::thread(&XRuntime::ForwardThreadMain, this);
+}
+
+void XRuntime::ForwardThreadLoop()
+{
+    for (;;) {
+        ForwardTask task;
+        {
+            std::unique_lock<std::mutex> lk(_fwdMtx);
+            _fwdHasWork.wait(lk, [this] { return _fwdState != FWD_IDLE; });
+            if (_fwdState == FWD_STOP) {
+                return;
+            }
+            task = std::move(_fwdQueue.front());
+            _fwdQueue.pop();
+        }
+        try {
+            WaitInputEvent(task.seq);
+            _fwdHandlers[task.kind](*this, task);
+            RecordOutputEvent(task.seq);
+        } catch (...) {
+            std::scoped_lock lk(_fwdMtx);
+            _fwdEx = std::current_exception();
+        }
+        {
+            std::scoped_lock lk(_fwdMtx);
+            if (_fwdQueue.empty()) {
+                _fwdState = FWD_IDLE;
+            }
+        }
+    }
+}
+
+void XRuntime::RegisterForwardTaskHandler(ForwardTask::Kind kind, ForwardTaskHandler handler)
+{
+    _fwdHandlers[static_cast<size_t>(kind)] = std::move(handler);
+}
+
+bool XRuntime::ForwardTaskHandlersReady() const
+{
+    return std::all_of(_fwdHandlers.begin(), _fwdHandlers.end(),
+                       [](const auto &h) { return static_cast<bool>(h); });
+}
+
+void XRuntime::SubmitForward(ForwardTask &&task)
+{
+    std::scoped_lock lk(_fwdMtx);
+    // Propagate any exception captured by the forward thread on a prior task before queuing
+    // the next one — otherwise the error is silently swallowed and later tasks run on a
+    // corrupted state.
+    if (_fwdEx) {
+        auto e = _fwdEx;
+        _fwdEx = nullptr;
+        std::rethrow_exception(e);
+    }
+    _fwdQueue.push(std::move(task));
+    _fwdState = FWD_RUNNING;
+    _fwdHasWork.notify_one();
+}
+
+void XRuntime::StopForwardThread()
+{
+    {
+        std::scoped_lock lk(_fwdMtx);
+        _fwdState = FWD_STOP;
+        if (_fwdEx) {
+            // Cannot rethrow from a destructor (would terminate); report and clear.
+            std::cerr << "XRuntime: forward thread had an uncaught exception" << std::endl;
+            _fwdEx = nullptr;
+        }
+    }
+    _fwdHasWork.notify_one();
+    if (_fwdThread.joinable()) {
+        _fwdThread.join();
+    }
 }
 
 static inline HcclComm HcclCommFor(XRuntime &rt, enum commType type)

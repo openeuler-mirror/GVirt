@@ -169,6 +169,11 @@ public:
     {
         _auxOutputs.clear();
     }
+    std::vector<XTensor> StealAuxOutputs()
+    {
+        return std::move(_auxOutputs);
+    }
+    void RegisterForwardHandlers(XRuntime &rt);
     size_t GetTensorPoolSize(int dbg);
     // whether to use communication optimization
     void ConfigRtCommOptimize(XRuntime &rt, size_t tokenNum)

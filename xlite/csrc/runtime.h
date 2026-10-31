@@ -5,11 +5,19 @@
 #define _XLITE_RUNTIME_H_
 
 #include <cstdint>
+#include <atomic>
+#include <array>
+#include <functional>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 #include "base.h"
 
 #define XLITE_DEFAULT_PORT 10266
 #define XLITE_DEFAULT_COMM_OPTIMIZE_LEN 6144
 #define XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD 1024
+#define XLITE_FWD_POOL_SIZE 8
 
 typedef void *aclrtContext;
 typedef void *aclrtNotify;
@@ -71,6 +79,29 @@ struct XModelAttnMeta {
     XTensor cachedLens;
 };
 
+struct ForwardTask {
+    enum Kind : uint8_t {
+        FORWARD,
+        FORWARD_AND_GET_LOGITS,
+        FORWARD_WITH_INPUTS_EMBEDS,
+        FORWARD_GET_LOGITS,
+    } kind;
+    XTensor input;
+    XModelAttnMeta attnMeta;
+    std::vector<std::vector<XTensor>> kvCache;
+    std::vector<XTensor> deepstackInputEmbeds;
+    std::vector<XTensor> freqsCis;
+    XTensor freqsCisSingle;
+    XTensor inputIds;
+    XTensor indices;
+    XTensor output;
+    std::vector<XTensor> auxOutputs;
+    uint64_t seq = 0;
+};
+
+class XRuntime;
+using ForwardTaskHandler = std::function<void(XRuntime &, ForwardTask &)>;
+
 enum commType {
     TP,
     EP,
@@ -95,6 +126,12 @@ public:
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
+
+    uint64_t AllocFwdSeq();
+    void RecordInputEvent(aclrtStream currStream, uint64_t seq);
+    void WaitInputEvent(uint64_t seq);
+    void RecordOutputEvent(uint64_t seq);
+    void WaitOutputEvent(aclrtStream currStream, uint64_t seq);
     void MemcpyH2D(void *dst, void *src, size_t size);
     void MemcpyD2H(void *dst, void *src, size_t size);
     void MemcpyD2HAsync(void *dst, void *src, size_t size);
@@ -106,6 +143,17 @@ public:
     void SetCurrentContext();
     void NotifyWaitPeerStream();
     void NotifyRecordPeerStream();
+
+    void StartForwardThread();
+    void StopForwardThread();
+    [[nodiscard]] bool ForwardThreadEnabled() const
+    {
+        return _fwdThread.joinable();
+    }
+    void SubmitForward(ForwardTask &&task);
+
+    void RegisterForwardTaskHandler(ForwardTask::Kind kind, ForwardTaskHandler handler);
+    [[nodiscard]] bool ForwardTaskHandlersReady() const;
 
     void PrepareCommBuffers(uint64_t maxBatch, uint32_t hiddenSize, uint32_t nRoutedExperts,
                             uint32_t defDpSize, int inputDtype, int weightsDtype);
@@ -283,7 +331,9 @@ protected:
     void PrepareHybridMetadata(const std::vector<uint32_t> &layerTypes,
                                const XModelAttnMeta &attnMeta);
     uint32_t _devid;
-    aclrtEvent _event = nullptr;
+    std::vector<aclrtEvent> _inEvents;
+    std::vector<aclrtNotify> _outNotifies;
+    std::atomic<uint64_t> _fwdSeq{0};
     aclrtContext context = nullptr;
     bool _initOutside = false;
     bool _inited = false;
@@ -298,6 +348,18 @@ protected:
     uint32_t _nDevPerNode = 0;
     uint32_t _port = XLITE_DEFAULT_PORT;
     std::vector<std::string> _ips;
+
+    void ForwardThreadMain();
+    void ForwardThreadLoop();
+    std::thread _fwdThread;
+    std::mutex _fwdMtx;
+    std::condition_variable _fwdHasWork;
+    enum { FWD_IDLE, FWD_RUNNING, FWD_STOP } _fwdState = FWD_IDLE;
+    std::queue<ForwardTask> _fwdQueue;
+    std::array<ForwardTaskHandler, 4> _fwdHandlers;  // indexed by ForwardTask::Kind
+    std::exception_ptr _fwdEx;
+    bool _fwdEnabled = false;
+    bool _fwdSubscribed = false;
 };
 
 class XDummyRuntime : public XRuntime
