@@ -18,6 +18,7 @@ weightedSum[block] = sum_k softmax(score[k] + ape[k]) * kv[k]      # k ∈ [0, m
 
 - `nTotalBlocks == 0`(decode 非压缩步、或短 prefill 段无完整 ratio 窗口):compress pass 仍写 decode token + spill 到 state,但 norm/rope 尾部区间为空,直接 return(`csrc/kernels/compressor.h` 的 `compressor`(关键字 `if (nTotalBlocks == 0)`))。
 - `ratio=128, overlap=0` 走**分块列切片**(tiled)路径;`ratio=2/4` 走非分块路径(`csrc/kernels/compressor.h` 的 `compressor_blocks_weighted_sum`(关键字 `useTiled`))。
+- **C8 模式**(`compressKv == nullptr`,Python 侧 `compress_kv=None`):rope 尾部不写 paged cache,改为**原地** rope `weightedSum`(non-cache 路径的 in-place 形态),caller 随后用 [quant_cache_c8](quant_cache_c8.md) 把行量化入 int8 + fp16 scale cache。该模式下 dtype 实例按 `weightedSum.dtype` 分派(host `csrc/op.cpp` 的 `XliteOpCompressor`,关键字 `compressKv.ptr == nullptr`),且**不应用 rotate**——rotate 是均匀行缩放,被逐行量化 scale 吸收(int8 值与排序不变),non-cache 路径的 doRotate 也只会缩放 rope 区间(`csrc/kernels/compressor.h` 的 `compressor`(关键字 `compressKv == nullptr`))。
 
 ## 输入输出参数
 
@@ -26,7 +27,7 @@ Python 侧调用(`xlite/_C.pyi`,测试 `tests/kernels/compressor.py` 的 `compre
 ```python
 compressor(rt, kv, score, ape=None, norm=None, freqs=None, weighted_sum, query_start_loc,
            query_lens, cached_lens=None, batch, n_total_blocks, ratio, overlap, head_dim,
-           rope_head_dim, norm_eps, compress_kv, compress_positions, compress_slot_mapping,
+           rope_head_dim, norm_eps, compress_kv=None, compress_positions, compress_slot_mapping,
            compress_block_size, state=None, state_slot_mapping=None, state_block_table=None,
            state_block_size, state_cache_stride_dim0, do_rotate=False)
 ```
@@ -57,7 +58,7 @@ compressor_<dtype>(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, G
 | queryStartLoc | 输入 | `[batch]` | int32 | 每 batch 请求在 batchedTokens 中的起始行 |
 | queryLens | 输入 | `[batch]` | int32 | 每 batch 请求长度(decode 为 1) |
 | cachedLens | 输入 | `[batch]` | int32 / null | 每 batch 已缓存长度;null 时按 0 处理 |
-| compressKv | 输出 | `[blocks, compressBlockSize, 1, head_dim]` | bf16 / fp16 / fp32 | paged 压缩 KV cache;RoPE 后按 `compressSlotMapping` 写入 |
+| compressKv | 输出 | `[blocks, compressBlockSize, 1, head_dim]` | bf16 / fp16 / fp32 / null | paged 压缩 KV cache;RoPE 后按 `compressSlotMapping` 写入;null(空存储)→ C8 模式(见上) |
 | compressPositions | 输入 | `[nTotalBlocks]` | int64 | 压缩块的绝对位置(压缩 token 空间) |
 | compressSlotMapping | 输入 | `[nTotalBlocks]` | int32 | 压缩块 → cache 平坦槽位 |
 | state | 输入/输出 | `[blocks, stateBlockSize, 1, 2*coff*head_dim]` | fp32 / null | 流式 state(prefill 溢写、decode 读);null 禁用 spill |
@@ -79,7 +80,7 @@ host 校验见 `csrc/op.cpp` 的 `XliteOpCompressor` 的 `compCheck` 校验 lamb
 | `compressor_bfloat16_t` | `csrc/kernels/compressor_bfloat16_t.cpp` | compressKv/weightedSum 为 bf16 |
 | `compressor_float` | `csrc/kernels/compressor_float.cpp` | compressKv 为 fp32(kv/score 仍 fp32);weightedSum 仍为 bf16/fp16(host `compCheck` 强制 `weightedSum.dtype == BF16 || FP16`,不接受 fp32) |
 
-dtype 分派见 `csrc/op.cpp` 的 `XliteOpCompressor`(关键字 `compressKv.dtype`,按 `compressKv.dtype` 选)。kernel 为 `__DAV_C220_VEC__`、任务类型 `KERNEL_TYPE_MIX_AIV_1_0`(`csrc/kernels/compressor.h` 的 `compressor`(关键字 `KERNEL_TYPE_MIX_AIV_1_0`),纯 AIV)。
+dtype 分派见 `csrc/op.cpp` 的 `XliteOpCompressor`(关键字 `compressKv.dtype`,按 `compressKv.dtype` 选;`compressKv.ptr == nullptr` 的 C8 模式改按 `weightedSum.dtype` 选)。kernel 为 `__DAV_C220_VEC__`、任务类型 `KERNEL_TYPE_MIX_AIV_1_0`(`csrc/kernels/compressor.h` 的 `compressor`(关键字 `KERNEL_TYPE_MIX_AIV_1_0`),纯 AIV)。
 
 ## 实现原理
 

@@ -2898,7 +2898,7 @@ def compressor(
     head_dim: int,
     rope_head_dim: int,
     norm_eps: float,
-    compress_kv: torch.Tensor,
+    compress_kv: Optional[torch.Tensor],
     compress_positions: torch.Tensor,
     compress_slot_mapping: torch.Tensor,
     compress_block_size: int,
@@ -2983,8 +2983,12 @@ def compressor(
         head_dim (int): Per-head dimension (512).
         rope_head_dim (int): Rotary dimension applied to the last dims (64).
         norm_eps (float): RMSNorm epsilon.
-        compress_kv (torch.Tensor): Output paged compressed KV cache
-            ``[blocks, compress_block_size, 1, head_dim]``.
+        compress_kv (Optional[torch.Tensor]): Output paged compressed KV cache
+            ``[blocks, compress_block_size, 1, head_dim]``. None switches to C8
+            mode: the rope tail writes ``weighted_sum`` in place (no cache
+            scatter) so the caller can quantize it with
+            :func:`quant_cache_c8`; the rotate scale is left out (the per-row
+            quant scale absorbs it).
         compress_block_size (int): ``compress_kv`` paged-cache block size.
         state_block_size (int): ``state`` paged-cache block size.
         state_cache_stride_dim0 (int): Dense stride of ``state`` along dim 0; 0

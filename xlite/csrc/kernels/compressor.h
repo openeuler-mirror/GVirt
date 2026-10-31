@@ -880,13 +880,26 @@ __aicore__ void compressor(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normW
                     0, 0, 0, nullptr, false);
     }
     if (hasRope) {
-        // compressKv stays bridge-enforced contiguous here, so the flat-slot
-        // pitch matches the kernel's block addressing.
-        rope_complex_and_cache<Dtype>(nTotalBlocks, 1, head_dim, rope_head_dim,
-                                      head_dim - rope_head_dim, head_dim, weightedSum, nullptr, 0,
-                                      0, freqs, compressPositions, compressBlockSize, compressKv,
-                                      compressSlotMapping, compressBlockSize * head_dim, false,
-                                      true, 0, 0, nullptr, hasRotate, rotateScale);
+        if (compressKv == nullptr) {
+            // C8 mode: rope in place on weightedSum; the caller then quantizes the
+            // rows into the int8 key cache + fp16 scale cache (quant_cache_c8).
+            // doRotate stays off: the rotate is a uniform per-row scale, which the
+            // per-row quant scale absorbs (int8 values and rankings unchanged), and
+            // the non-cache path would only scale the rope region anyway.
+            rope_complex_and_cache<Dtype>(nTotalBlocks, 1, head_dim, rope_head_dim,
+                                          head_dim - rope_head_dim, head_dim, weightedSum,
+                                          weightedSum, head_dim, head_dim - rope_head_dim, freqs,
+                                          compressPositions, 0, nullptr, nullptr, 0, false, true, 0,
+                                          0, nullptr, false, rotateScale);
+        } else {
+            // compressKv stays bridge-enforced contiguous here, so the flat-slot
+            // pitch matches the kernel's block addressing.
+            rope_complex_and_cache<Dtype>(
+                nTotalBlocks, 1, head_dim, rope_head_dim, head_dim - rope_head_dim, head_dim,
+                weightedSum, nullptr, 0, 0, freqs, compressPositions, compressBlockSize, compressKv,
+                compressSlotMapping, compressBlockSize * head_dim, false, true, 0, 0, nullptr,
+                hasRotate, rotateScale);
+        }
     }
 }
 

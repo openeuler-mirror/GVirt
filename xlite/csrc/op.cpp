@@ -1623,13 +1623,27 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
               "stateCacheStrideDim0 must cover stateBlockSize * 2*coff*headDim elements");
     compCheck(state.ptr == nullptr || state.dtype == FP32,
               "state must be fp32 [blocks, stateBlockSize, 1, 2*coff*headDim]");
-    compCheck(
-        compressKv.numel == 0 || (compressKv.shape.size() == 4 && compressKv.shape[3] == headDim),
-        "compressKv must be [blocks, compressBlockSize, 1, headDim]");
+    compCheck(compressKv.ptr == nullptr ||
+                  (compressKv.shape.size() == 4 && compressKv.shape[3] == headDim),
+              "compressKv must be [blocks, compressBlockSize, 1, headDim]");
     compCheck(ratio == 2 || ratio == 4 || ratio == 128, "ratio must be 2, 4 or 128");
 
+    // C8 mode: compressKv is absent (pybind None leaves the default-constructed
+    // XTensor with ptr == nullptr — the codebase-wide "no tensor" signal), so the
+    // kernel writes no paged cache — it ropes weightedSum in place and the caller
+    // feeds it to XliteOpQuantCacheC8. The instantiation therefore follows
+    // weightedSum instead of compressKv.
     KERNEL_PTR_TYPE(compressor) * launchKernel;
-    if (compressKv.dtype == FP16) {
+    if (compressKv.ptr == nullptr) {
+        if (weightedSum.dtype == BF16) {
+            launchKernel = aclrtlaunch_compressor_bfloat16_t;
+        } else if (weightedSum.dtype == FP16) {
+            launchKernel = aclrtlaunch_compressor_float16_t;
+        } else {
+            std::string err_str = DBG_PREFIX + XT_STR(weightedSum) + XT_STR(compressKv);
+            throw std::runtime_error(err_str + "not supported!");
+        }
+    } else if (compressKv.dtype == FP16) {
         launchKernel = aclrtlaunch_compressor_float16_t;
     } else if (compressKv.dtype == BF16) {
         launchKernel = aclrtlaunch_compressor_bfloat16_t;

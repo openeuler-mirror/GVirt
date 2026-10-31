@@ -2410,7 +2410,7 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
                 at::Tensor &weightedSum, at::Tensor &queryStartLoc, at::Tensor &queryLens,
                 std::optional<at::Tensor> cachedLens, uint32_t batch, uint32_t nTotalBlocks,
                 uint32_t ratio, uint32_t overlap, uint32_t headDim, uint32_t ropeHeadDim,
-                float normEps, at::Tensor &compressKv, at::Tensor &compressPositions,
+                float normEps, std::optional<at::Tensor> compressKv, at::Tensor &compressPositions,
                 at::Tensor &compressSlotMapping, uint32_t compressBlockSize,
                 std::optional<at::Tensor> state, std::optional<at::Tensor> stateSlotMapping,
                 std::optional<at::Tensor> stateBlockTable, uint32_t stateBlockSize,
@@ -2438,7 +2438,9 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
     if (cachedLens.has_value()) {
         InitOptionalXTensor(_cachedLens, cachedLens.value(), DBG_LOC);
     }
-    InitXTensor(_compressKv, compressKv, DBG_LOC);
+    if (compressKv.has_value()) {
+        InitOptionalXTensor(_compressKv, compressKv.value(), DBG_LOC);
+    }
     if (state.has_value()) {
         InitOptionalXTensor(_state, state.value(), DBG_LOC);
     }
@@ -3580,7 +3582,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("freqs") = std::nullopt, py::arg("weighted_sum"), py::arg("query_start_loc"),
           py::arg("query_lens"), py::arg("cached_lens") = std::nullopt, py::arg("batch"),
           py::arg("n_total_blocks"), py::arg("ratio"), py::arg("overlap"), py::arg("head_dim"),
-          py::arg("rope_head_dim"), py::arg("norm_eps"), py::arg("compress_kv"),
+          py::arg("rope_head_dim"), py::arg("norm_eps"), py::arg("compress_kv") = std::nullopt,
           py::arg("compress_positions"), py::arg("compress_slot_mapping"),
           py::arg("compress_block_size"), py::arg("state") = std::nullopt,
           py::arg("state_slot_mapping") = std::nullopt, py::arg("state_block_table") = std::nullopt,
