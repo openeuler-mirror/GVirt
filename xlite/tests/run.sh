@@ -11,20 +11,15 @@ if [ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" ]; then
     export XLITE_DEVS_PER_NODE=$(echo $ASCEND_RT_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 fi
 export XLITE_DP_SIZE=${XLITE_DP_SIZE:-1}
-if [ "${XLITE_GRAPH:-0}" = "1" ]; then
-    export XLITE_ENABLE_GRAPH_COMM=1
-else
-    export XLITE_ENABLE_GRAPH_COMM=0
-fi
 export MASTER_PORT=${MASTER_PORT:-$((29600 + RANDOM % 399))}
 
 # Usage (env-driven):
 #   XLITE_NPUS=<devs>    NPU ids (e.g. 0,1,...,15); -> ASCEND_RT_VISIBLE_DEVICES
 #   XLITE_DP_SIZE=<dp>   DP size (default 1 = pure TP)
-#   XLITE_GRAPH=<0|1>    1 = in-graph comm (default 0 = eager)
+#   XLITE_ENABLE_GRAPH_COMM=<0|1>  1 = in-graph HCCL (ag/rs/ar; default unset = eager)
 #   MODEL=<func>         run.sh function; omit for the default sweep
 #   MAX_NEW_TOKENS, TEMPERATURE, RUN_MODE, FORWARD_BACKEND as before
-# Example: XLITE_NPUS=0,1,...,15 XLITE_GRAPH=1 XLITE_DP_SIZE=2 \
+# Example: XLITE_NPUS=0,1,...,15 XLITE_ENABLE_GRAPH_COMM=1 XLITE_DP_SIZE=2 \
 #          MAX_NEW_TOKENS=16 MODEL=run_deepseek_v3_w8a8 bash tests/run.sh /mnt/sdb/models
 #
 # DP layout: world_size = tp_size * dp_size; contiguous tp_size ranks form a TP

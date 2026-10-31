@@ -116,6 +116,15 @@ public:
     void AllGatherInGraph(void *send, void *recv, uint32_t m, int hcclDtype, enum commType type);
     [[nodiscard]] bool AllGatherInGraphActive(enum commType type) const;
 
+    void CaptureHcclAllReduce(void *send, void *recv, uint32_t m, int hcclDtype,
+                              enum commType type);
+    void RunHcclAllReduceInGraph(void *send, void *recv, uint32_t m, int hcclDtype,
+                                 enum commType type);
+    void AllReduceSumInGraph(void *in, void *out, uint32_t m, int hcclDtype, enum commType type);
+    [[nodiscard]] bool AllReduceSumInGraphActive(enum commType type) const;
+    [[nodiscard]] bool AllReduceSumInGraphMatch(enum commType type, enum XDtype dtype,
+                                                uint64_t numel, uint32_t *mOut) const;
+
     void CaptureHcclReduceScatter(void *send, void *recv, uint32_t m, int hcclDtype,
                                   enum commType type);
     void RunHcclReduceScatterInGraph(void *send, void *recv, uint32_t m, int hcclDtype,
@@ -162,6 +171,9 @@ public:
         return _moeEpSize;
     };
     aclrtStream stream = nullptr;
+    aclrtStream hcclSideStream = nullptr;
+    aclrtEvent hcclStartEv = nullptr;
+    aclrtEvent hcclEndEv = nullptr;
     struct GraphCaptureEntry {
         aclmdlRI modelRI = nullptr;
         void *sendAddr = nullptr;
@@ -176,6 +188,11 @@ public:
     XTensor _rsRecvBuf;
     uint64_t _rsPerTokenBytes = 0;
     uint32_t _rsHiddenSize = 0;
+    std::vector<GraphCaptureEntry> _arGraphs;
+    XTensor _arBuf;  // single in-place buffer: HCCL AllReduce supports send==recv (capture焊死同址)
+    uint64_t _arPerTokenBytes = 0;  // hiddenSize * dtypeBytes(_arDtype)
+    uint32_t _arHiddenSize = 0;     // per-token element count captured
+    enum XDtype _arDtype = BF16;    // captured dtype (== inputDtype)
     uint32_t aicNum;
     uint32_t aivNum;
     uint32_t originAicNum;
@@ -270,7 +287,7 @@ protected:
     aclrtContext context = nullptr;
     bool _initOutside = false;
     bool _inited = false;
-    bool _graphCommEnabled = true;
+    bool _graphCommEnabled = false;
     XTensorPool *_pool = nullptr;
     uint32_t _rankId;
     uint32_t _tpSize;
