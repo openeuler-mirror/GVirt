@@ -2991,6 +2991,66 @@ def matmul_dequant(
     """
     ...
 
+def fused_quant_matmul_dequant(
+    rt: Runtime,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    x_quant: torch.Tensor,
+    dyn_quant: bool,
+    quant_scale_rec: Optional[torch.Tensor] = None,
+    quant_offset: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    deq_scale: Optional[torch.Tensor] = None,
+    out_scale: Optional[torch.Tensor] = None,
+    num: Optional[torch.Tensor] = None,
+    weight_nz: bool = False,
+    transpose: bool = False,
+) -> None:
+    """Fused W8A8 dense pipeline: quant -> matmul -> dequant in one launch.
+
+    The AIV side quantizes BF16 activation to INT8 (static per-channel when
+    ``quant_scale_rec``/``quant_offset`` are given, or dynamic per-token when
+    ``dyn_quant`` is true), the AIC side runs the INT8 matmul (FixPipe
+    dequantizes to FP16 via ``deq_scale``), and the AIV side dequantizes the
+    result back to BF16. Compared to ``matmul_dequant`` (input already INT8),
+    this absorbs the upstream quantization kernel. ``x_quant``/``out_scale``
+    are host-allocated workspaces; ``num`` shrinks the dequant row range for
+    dynamic token counts.
+
+    Note: arguments after ``x`` should be passed by keyword. The required
+    arguments are grouped before the optional ones in this stub; the C++ binding
+    declares them with interspersed defaults but exposes every parameter as a
+    keyword argument, so keyword calls are unaffected by this reordering.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        x (torch.Tensor): Activation, shape ``[m, k]``, bfloat16.
+        weight (torch.Tensor): Quantized weight, shape ``[n, k]`` (or
+            transposed/NZ per ``weight_nz``/``transpose``), int8.
+        out (torch.Tensor): Output, shape ``[m, n]``, bfloat16 (written in place).
+        x_quant (torch.Tensor): Quantized activation workspace, shape ``[m, k]``,
+            int8 (AIV writes, AIC reads).
+        dyn_quant (bool): True = dynamic per-token; False = static per-channel.
+        quant_scale_rec (Optional[torch.Tensor]): Static per-channel scale
+            reciprocal, shape ``[k]``, bfloat16; absent in dynamic mode.
+        quant_offset (Optional[torch.Tensor]): Static per-channel offset,
+            shape ``[k]``, bfloat16; absent in dynamic mode.
+        bias (Optional[torch.Tensor]): Matmul bias, shape ``[n]``, int32.
+        deq_scale (Optional[torch.Tensor]): Weight dequantization scale, flat
+            ``[2*n]`` fp32 (uint64 TF32-packed pairs).
+        out_scale (Optional[torch.Tensor]): Dynamic per-token scale workspace,
+            shape ``[m]`` fp32; absent in static mode.
+        num (Optional[torch.Tensor]): Dynamic token count, shape ``[1]`` uint32.
+        weight_nz (bool): Whether ``weight`` uses NZ layout.
+        transpose (bool): Whether to transpose the weight.
+
+    Returns:
+        None: ``out`` is written in place.
+    """
+    ...
+
+
 def msd_merge_dequant(
     rt: Runtime,
     y_merged: torch.Tensor,

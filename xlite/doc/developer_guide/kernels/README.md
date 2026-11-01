@@ -46,6 +46,7 @@
 |---|---|---|
 | matmul | [matmul.md](matmul.md) | 矩阵乘(含 int8/int4 量化变体) |
 | fusion_operator_matmul_dequant_pipeline | [fusion_operator_matmul_dequant_pipeline.md](fusion_operator_matmul_dequant_pipeline.md) | W8A8 matmul+dequant 跨核流水融合(AIC 算 / AIV 反量化,单 MIX kernel) |
+| fused_quant_matmul_dequant | [fused_quant_matmul_dequant.md](fused_quant_matmul_dequant.md) | W8A8 三段融合(quant→matmul→dequant 单 launch,吸收上游量化) |
 | group_matmul | [group_matmul.md](group_matmul.md) | 分组矩阵乘(MoE) |
 | conv1d_and_silu_paged | [conv1d_and_silu_paged.md](conv1d_and_silu_paged.md) | 原生分页 Conv decode/prefill |
 
@@ -61,6 +62,7 @@
 | gather_sparse_kv_cache | [gather_sparse_kv_cache.md](gather_sparse_kv_cache.md) | 稀疏 KV Cache 收集 |
 | indexer_prepare | [indexer_prepare.md](indexer_prepare.md) | Indexer 前处理(DSA 稀疏注意力) |
 | indexer_prepare_c8 | [indexer_prepare_c8.md](indexer_prepare_c8.md) | Lightning Indexer C8 K/Q 前处理(LN/RoPE/Hadamard/动态量化→INT8,GLM-5.1) |
+| indexer_k_cache_c8 | [indexer_prepare_c8.md](indexer_prepare_c8.md) | Indexer C8 独立 K-cache 测试入口(indexer_prepare_c8 的 Q 禁用路径) |
 | indexer_scores | [indexer_scores.md](indexer_scores.md) | Indexer 分数计算 |
 | indexer_topk | [indexer_topk.md](indexer_topk.md) | Indexer TopK 选路 |
 | cxa | [cxa.md](cxa.md) | C4A/C128A 滑窗+压缩稀疏注意力(DeepSeek-V4) |
@@ -70,6 +72,8 @@
 | einsum_mht_htd_mhd | [einsum_mht_htd_mhd.md](einsum_mht_htd_mhd.md) | 线性注意力 einsum |
 | recurrent_gated_delta_rule_paged | [recurrent_gated_delta_rule_paged.md](recurrent_gated_delta_rule_paged.md) | 原生 VK 分页 GDN decode/prefill |
 | gdn_prefill_paged | [gdn_prefill_paged.md](gdn_prefill_paged.md) | packed Prefill 契约与验证 |
+| linear_att_proj | [linear_att_proj.md](linear_att_proj.md) | 线性注意力 QKV 投影(concat→matmul→split host 融合) |
+| linear_att_conv_and_silu_paged | [conv1d_and_silu_paged.md](conv1d_and_silu_paged.md) | 线性注意力分页 Conv1d+SiLU decode 入口(conv1d_and_silu_paged 单 token 路径) |
 
 ### 位置编码与 embedding
 
@@ -77,6 +81,7 @@
 |---|---|---|
 | rope_and_cache | [rope_and_cache.md](rope_and_cache.md) | RoPE + KV Cache 写入 |
 | rope_complex_and_cache | [rope_complex_and_cache.md](rope_complex_and_cache.md) | 复数形式 RoPE + KV Cache 写入 |
+| rope_complex | [rope_complex_and_cache.md](rope_complex_and_cache.md) | 复数 RoPE 纯计算(rope_complex_and_cache 的非 cache 入口) |
 | embed_kernel | [embed_kernel.md](embed_kernel.md) | Embedding 查表 |
 
 ### TopK
@@ -113,14 +118,15 @@
 | 算子 | 文档 | 说明 |
 |---|---|---|
 | hc_act | [hc_act.md](hc_act.md) | HC 模型激活融合(preSum=1 pre sum操作 / preSum=0 写 pre) |
+| hc_split_sinkhorn | [hc_act.md](hc_act.md) | HC 拆分路径(hc_act preSum=0:写 pre,pre sum 由 hc_pre 完成) |
 | hc_post | [hc_post.md](hc_post.md) | HC 模型后处理融合 |
 | hc_pre | [hc_pre.md](hc_pre.md) | HC pre sum操作(消费 hc_split_sinkhorn 的 pre) |
 
-### 融合算子范式
+### 微基准与工具
 
 | 文档 | 说明 |
 |---|---|
-| [fusion_operator_paradigm.md](fusion_operator_paradigm.md) | MIX 融合算子编写范式规范：子算子接口、融合算子接口、调用约定、tiles 划分、跨核同步、坑点记录 |
+| [microbench.md](microbench.md) | 算子微基准套件(launch floor / 标量链 / MTE 访存 / 向量指令 / Cube matmul) |
 
 ## 目录约定
 
