@@ -833,11 +833,11 @@ __aicore__ void compressor(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normW
                            uint32_t nTotalBlocks, uint32_t ratio, uint32_t overlap,
                            uint32_t head_dim, uint32_t rope_head_dim, float norm_eps,
                            GM_ADDR compressKv, GM_ADDR compressPositions,
-                           GM_ADDR compressSlotMapping, uint32_t compressBlockSize, GM_ADDR state,
-                           GM_ADDR stateSlotMapping, GM_ADDR stateBlockTable,
-                           uint32_t stateBlockSize, uint32_t maxStateBlocks,
-                           uint64_t stateCacheStrideDim0, bool hasNorm, bool hasRope,
-                           bool hasRotate = false, float rotateScale = 1.0f)
+                           GM_ADDR compressSlotMapping, uint32_t compressBlockSize,
+                           uint32_t compressKvStride, GM_ADDR state, GM_ADDR stateSlotMapping,
+                           GM_ADDR stateBlockTable, uint32_t stateBlockSize,
+                           uint32_t maxStateBlocks, uint64_t stateCacheStrideDim0, bool hasNorm,
+                           bool hasRope, bool hasRotate = false, float rotateScale = 1.0f)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
     set_atomic_none();
@@ -892,46 +892,45 @@ __aicore__ void compressor(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normW
                                           compressPositions, 0, nullptr, nullptr, 0, false, true, 0,
                                           0, nullptr, false, rotateScale);
         } else {
-            // compressKv stays bridge-enforced contiguous here, so the flat-slot
-            // pitch matches the kernel's block addressing.
             rope_complex_and_cache<Dtype>(
                 nTotalBlocks, 1, head_dim, rope_head_dim, head_dim - rope_head_dim, head_dim,
                 weightedSum, nullptr, 0, 0, freqs, compressPositions, compressBlockSize, compressKv,
-                compressSlotMapping, compressBlockSize * head_dim, false, true, 0, 0, nullptr,
-                hasRotate, rotateScale);
+                compressSlotMapping, MAX(compressKvStride, compressBlockSize * head_dim), false,
+                true, 0, 0, nullptr, hasRotate, rotateScale);
         }
     }
 }
 
-#define COMPRESSOR_FUNC_DEFINE(dtype)                                                              \
-    extern "C" __global__ __aicore__ void compressor_##dtype(                                      \
-        GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, GM_ADDR freqs,                 \
-        GM_ADDR weightedSum, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,         \
-        uint32_t batch, uint32_t nTotalBlocks, uint32_t ratio, uint32_t overlap,                   \
-        uint32_t head_dim, uint32_t rope_head_dim, float norm_eps, GM_ADDR compressKv,             \
-        GM_ADDR compressPositions, GM_ADDR compressSlotMapping, uint32_t compressBlockSize,        \
-        GM_ADDR state, GM_ADDR stateSlotMapping, GM_ADDR stateBlockTable, uint32_t stateBlockSize, \
-        uint32_t maxStateBlocks, uint64_t stateCacheStrideDim0, uint32_t doRotate,                 \
-        float rotateScale)                                                                         \
-    {                                                                                              \
-        compressor<dtype>(kv, score, ape, normWeight, freqs, weightedSum, queryStartLoc,           \
-                          queryLens, cachedLens, batch, nTotalBlocks, ratio, overlap, head_dim,    \
-                          rope_head_dim, norm_eps, compressKv, compressPositions,                  \
-                          compressSlotMapping, compressBlockSize, state, stateSlotMapping,         \
-                          stateBlockTable, stateBlockSize, maxStateBlocks, stateCacheStrideDim0,   \
-                          normWeight != nullptr, freqs != nullptr, doRotate != 0, rotateScale);    \
+#define COMPRESSOR_FUNC_DEFINE(dtype)                                                           \
+    extern "C" __global__ __aicore__ void compressor_##dtype(                                   \
+        GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, GM_ADDR freqs,              \
+        GM_ADDR weightedSum, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,      \
+        uint32_t batch, uint32_t nTotalBlocks, uint32_t ratio, uint32_t overlap,                \
+        uint32_t head_dim, uint32_t rope_head_dim, float norm_eps, GM_ADDR compressKv,          \
+        GM_ADDR compressPositions, GM_ADDR compressSlotMapping, uint32_t compressBlockSize,     \
+        uint32_t compressKvStride, GM_ADDR state, GM_ADDR stateSlotMapping,                     \
+        GM_ADDR stateBlockTable, uint32_t stateBlockSize, uint32_t maxStateBlocks,              \
+        uint64_t stateCacheStrideDim0, uint32_t doRotate, float rotateScale)                    \
+    {                                                                                           \
+        compressor<dtype>(kv, score, ape, normWeight, freqs, weightedSum, queryStartLoc,        \
+                          queryLens, cachedLens, batch, nTotalBlocks, ratio, overlap, head_dim, \
+                          rope_head_dim, norm_eps, compressKv, compressPositions,               \
+                          compressSlotMapping, compressBlockSize, compressKvStride, state,      \
+                          stateSlotMapping, stateBlockTable, stateBlockSize, maxStateBlocks,    \
+                          stateCacheStrideDim0, normWeight != nullptr, freqs != nullptr,        \
+                          doRotate != 0, rotateScale);                                          \
     }
 #else
-#define COMPRESSOR_FUNC_DEFINE(dtype)                                                              \
-    extern "C" __global__ __aicore__ void compressor_##dtype(                                      \
-        GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, GM_ADDR freqs,                 \
-        GM_ADDR weightedSum, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,         \
-        uint32_t batch, uint32_t nTotalBlocks, uint32_t ratio, uint32_t overlap,                   \
-        uint32_t head_dim, uint32_t rope_head_dim, float norm_eps, GM_ADDR compressKv,             \
-        GM_ADDR compressPositions, GM_ADDR compressSlotMapping, uint32_t compressBlockSize,        \
-        GM_ADDR state, GM_ADDR stateSlotMapping, GM_ADDR stateBlockTable, uint32_t stateBlockSize, \
-        uint32_t maxStateBlocks, uint64_t stateCacheStrideDim0, uint32_t doRotate,                 \
-        float rotateScale)                                                                         \
-    {                                                                                              \
+#define COMPRESSOR_FUNC_DEFINE(dtype)                                                       \
+    extern "C" __global__ __aicore__ void compressor_##dtype(                               \
+        GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, GM_ADDR freqs,          \
+        GM_ADDR weightedSum, GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,  \
+        uint32_t batch, uint32_t nTotalBlocks, uint32_t ratio, uint32_t overlap,            \
+        uint32_t head_dim, uint32_t rope_head_dim, float norm_eps, GM_ADDR compressKv,      \
+        GM_ADDR compressPositions, GM_ADDR compressSlotMapping, uint32_t compressBlockSize, \
+        uint32_t compressKvStride, GM_ADDR state, GM_ADDR stateSlotMapping,                 \
+        GM_ADDR stateBlockTable, uint32_t stateBlockSize, uint32_t maxStateBlocks,          \
+        uint64_t stateCacheStrideDim0, uint32_t doRotate, float rotateScale)                \
+    {                                                                                       \
     }
 #endif

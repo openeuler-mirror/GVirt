@@ -546,14 +546,22 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
 
     # 7. the ONE compressor() launch. Sync first (ssm/state built on default
     #    stream, compressor reads on rt.stream — see [[compressor-spill-test-stream-race]]).
+    #    The kernel writes compress_kv through a dim-0 pitched view (one guard row
+    #    of padding per block); the state stride derives from the state cache's
+    #    own dim-0 stride. The copy-back feeds the comparisons below.
+    compress_kv_pitch = BLOCK_SIZE * HEAD_DIM + HEAD_DIM
+    compress_kv_kernel = torch.zeros(max_blocks * compress_kv_pitch, dtype=test_dtype,
+                                      device="npu").as_strided(
+        (max_blocks, BLOCK_SIZE, 1, HEAD_DIM), (compress_kv_pitch, HEAD_DIM, HEAD_DIM, 1))
     torch.npu.synchronize()
     freqs_arg = None if freqs_none else freqs_cis
     compressor(rt, kv, score, ape, norm_w, freqs_arg, weightedSum, query_start_loc,
                query_lens_t, cached_lens_t, batch, n_total_blocks, ratio, overlap, HEAD_DIM,
-               ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slot_mapping,
-               BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE,
-               STATE_BLOCK_SIZE * 2 * full_dim, do_rotate)
+               ROPE_HEAD_DIM, NORM_EPS, compress_kv_kernel, compress_positions,
+               compress_slot_mapping, BLOCK_SIZE, state, state_slot_mapping, state_block_table,
+               STATE_BLOCK_SIZE, do_rotate)
     torch.npu.synchronize()
+    compress_kv.copy_(compress_kv_kernel)
     cat = 'mixed' if any(ql == 1 for _, ql, _ in ordered) and any(ql > 1 for _, ql, _ in ordered) else 'batch'
     logging.info(f'compressor {cat} ({test_dtype}) ratio={ratio} overlap={overlap} '
                  f'query_lens={query_lens} cached={cached_lens} executed!')
@@ -678,8 +686,7 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
         compressor(rt, kv, score, ape, norm_w, freqs_cis, ws_c8, query_start_loc,
                    query_lens_t, cached_lens_t, batch, n_total_blocks, ratio, overlap, HEAD_DIM,
                    ROPE_HEAD_DIM, NORM_EPS, None, compress_positions, compress_slot_mapping,
-                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE,
-                   STATE_BLOCK_SIZE * 2 * full_dim)
+                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE)
         torch.npu.synchronize()
         # One block covering the whole pool keeps the dense flat addressing.
         quant_cache_c8(rt, ws_c8, compress_slot_mapping, k8_pool, k16_pool, capacity)
@@ -805,8 +812,7 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
         compressor(rt, kv, score, ape, norm_w, freqs_cis, weightedSum, query_start_loc,
                    query_lens_t, cached_lens, batch, n_pf_blocks, ratio, overlap, HEAD_DIM,
                    ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slot_mapping,
-                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE,
-                   STATE_BLOCK_SIZE * 2 * full_dim)
+                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE)
         torch.npu.synchronize()
 
         kv_cpu = [t.cpu() for t in kv_list]
@@ -864,8 +870,7 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
             compressor(rt, tok_kv, tok_sc, ape, norm_w, freqs_cis, ws_d, qsl_d,
                        qlt_d, cl_d, batch, nb, ratio, overlap, HEAD_DIM, ROPE_HEAD_DIM,
                        NORM_EPS, compress_kv, cp_d, cs_d, BLOCK_SIZE, state, ssm_d,
-                       state_block_table, STATE_BLOCK_SIZE,
-                       STATE_BLOCK_SIZE * 2 * full_dim)
+                       state_block_table, STATE_BLOCK_SIZE)
             torch.npu.synchronize()
 
             for b in range(batch):
@@ -1022,8 +1027,7 @@ def run_decode_first_window_test(name, ratio, overlap, test_dtype, ape_enabled=T
         compressor(rt, kv, score, ape, norm_w, freqs_cis, weightedSum, query_start_loc,
                    query_lens_t, cached_lens, batch, 0, ratio, overlap, HEAD_DIM,
                    ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slot_mapping,
-                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE,
-                   STATE_BLOCK_SIZE * 2 * full_dim)
+                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE)
         torch.npu.synchronize()
 
         def dstate_row(req, p):
@@ -1065,8 +1069,7 @@ def run_decode_first_window_test(name, ratio, overlap, test_dtype, ape_enabled=T
             compressor(rt, tok_kv, tok_sc, ape, norm_w, freqs_cis, ws_d, qsl_d,
                        qlt_d, cl_d, batch, nb, ratio, overlap, HEAD_DIM, ROPE_HEAD_DIM,
                        NORM_EPS, compress_kv, cp_d, cs_d, BLOCK_SIZE, state, ssm_d,
-                       state_block_table, STATE_BLOCK_SIZE,
-                       STATE_BLOCK_SIZE * 2 * full_dim)
+                       state_block_table, STATE_BLOCK_SIZE)
             torch.npu.synchronize()
             check_token_state(pos, tok_kv, tok_sc)
             if not compress:

@@ -27,8 +27,8 @@ Python 签名见 `xlite/_C.pyi` 的 `def cxa(...)`,kernel 侧入口见 `csrc/ker
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
 | q | 输入 | [totalQ, nHeads, headDim] | bfloat16 | query |
-| swa_k_cache | 输入 | [swaBlockNum, swaBlockSize, headDim] | bfloat16 | 分页滑动窗口 KV cache(两种模式均分页) |
-| compress_k_cache | 输入 | [compressBlockNum, compressBlockSize, headDim] | bfloat16 | 分页压缩 KV cache;sparse 模式下分页,`compress_ratio == 0` 时不使用(可为空);dense 模式下为已 gather 的连续 cache `[batch, indexTopK, headDim]` |
+| swa_k_cache | 输入 | [swaBlockNum, swaBlockSize, headDim] | bfloat16 | 分页滑动窗口 KV cache(两种模式均分页);支持 dim-0 跨度(内核按 `swaKCacheStride = MAX(stride[0], swaBlockSize*headDim)` 寻址) |
+| compress_k_cache | 输入 | [compressBlockNum, compressBlockSize, headDim] | bfloat16 | 分页压缩 KV cache;sparse 模式下分页,`compress_ratio == 0` 时不使用(可为空);dense 模式下为已 gather 的连续 cache `[batch, indexTopK, headDim]`;sparse 模式支持 dim-0 跨度(`compressKCacheStride = MAX(stride[0], compressBlockSize*headDim)`) |
 | swa_block_tables | 输入 | [rows >= batch, swaBlockTableStride](1-D 表视作单行) | int32 | SWA cache 的 block table;持久化缓冲,行跨度为对应表 `stride[0]`(分配跨度),持久化 V2 表的 `shape[1]` 已由 PrepareAttn 收窄到运行期宽度,仅每行 lens 推导的有效前缀被读取 |
 | compress_block_tables | 输入 | [rows >= batch, compressBlockTableStride](1-D 表视作单行) | int32 | 压缩 cache 的 block table;持久化缓冲,行跨度/行宽语义同上;dense 模式不使用(可为空) |
 | swa_block_size | 输入 | 标量 | - | SWA cache block 大小 |

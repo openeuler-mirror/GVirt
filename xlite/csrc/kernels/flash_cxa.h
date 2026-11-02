@@ -28,16 +28,15 @@ public:
     {
     }
 
-    __aicore__ inline void Init(GM_ADDR q, GM_ADDR swaKCache, GM_ADDR compressKCache,
-                                GM_ADDR swaBlockTables, GM_ADDR compressBlockTables,
-                                uint32_t swaBlockSize, uint32_t compressBlockSize,
-                                uint32_t swaBlockTableStride, uint32_t compressBlockTableStride,
-                                GM_ADDR attnSink, GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum,
-                                GM_ADDR lastMax, GM_ADDR lastSum, GM_ADDR sync, GM_ADDR output,
-                                uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,
-                                GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale,
-                                uint32_t windowSize, uint32_t compressRatio, uint32_t indexTopK,
-                                GM_ADDR topkIndices, uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)
+    __aicore__ inline void Init(
+        GM_ADDR q, GM_ADDR swaKCache, GM_ADDR compressKCache, GM_ADDR swaBlockTables,
+        GM_ADDR compressBlockTables, uint32_t swaBlockSize, uint32_t compressBlockSize,
+        uint32_t swaBlockTableStride, uint32_t compressBlockTableStride, GM_ADDR attnSink,
+        GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum,
+        GM_ADDR sync, GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,
+        GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
+        uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices, uint32_t swaKCacheStride,
+        uint32_t compressKCacheStride, uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -87,8 +86,9 @@ public:
         this->lastMax.SetGlobalBuffer((__gm__ float *)lastMax);
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
 
-        svk0 = aicHelper.Init(nHeads, headDim, swaBlockSize, compressBlockSize, windowSize,
-                              compressRatio, qkStride, swaSegWidth, false, this->zeroGm);
+        svk0 = aicHelper.Init(nHeads, headDim, swaBlockSize, compressBlockSize, swaKCacheStride,
+                              compressKCacheStride, windowSize, compressRatio, qkStride,
+                              swaSegWidth, false, this->zeroGm);
     }
 
     __aicore__ inline void RunAic()
@@ -489,22 +489,22 @@ private:
     int svk0;
 };
 
-#define FLASH_CXA_FUNC_DEFINE(dtype)                                                             \
-    extern "C" __global__ __aicore__ void flash_cxa_##dtype(                                     \
-        GM_ADDR q, GM_ADDR swaKCache, GM_ADDR compressKCache, GM_ADDR swaBlockTables,            \
-        GM_ADDR compressBlockTables, uint32_t swaBlockSize, uint32_t compressBlockSize,          \
-        uint32_t swaBlockTableStride, uint32_t compressBlockTableStride, GM_ADDR attnSink,       \
-        GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum,      \
-        GM_ADDR sync, GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,  \
-        GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize, \
-        uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices,                         \
-        uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)                                             \
-    {                                                                                            \
-        FlashCXA<dtype> op;                                                                      \
-        op.Init(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables, swaBlockSize, \
-                compressBlockSize, swaBlockTableStride, compressBlockTableStride, attnSink, qk,  \
-                sv, max, sum, lastMax, lastSum, sync, output, batch, queryStartLoc, queryLens,   \
-                cachedLens, nHeads, headDim, scale, windowSize, compressRatio, indexTopK,        \
-                topkIndices, tileSizeOfCachedKV, zeroGm);                                        \
-        op.Run();                                                                                \
+#define FLASH_CXA_FUNC_DEFINE(dtype)                                                               \
+    extern "C" __global__ __aicore__ void flash_cxa_##dtype(                                       \
+        GM_ADDR q, GM_ADDR swaKCache, GM_ADDR compressKCache, GM_ADDR swaBlockTables,              \
+        GM_ADDR compressBlockTables, uint32_t swaBlockSize, uint32_t compressBlockSize,            \
+        uint32_t swaBlockTableStride, uint32_t compressBlockTableStride, GM_ADDR attnSink,         \
+        GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum,        \
+        GM_ADDR sync, GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,    \
+        GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,   \
+        uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices, uint32_t swaKCacheStride, \
+        uint32_t compressKCacheStride, uint32_t tileSizeOfCachedKV, GM_ADDR zeroGm)                \
+    {                                                                                              \
+        FlashCXA<dtype> op;                                                                        \
+        op.Init(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables, swaBlockSize,   \
+                compressBlockSize, swaBlockTableStride, compressBlockTableStride, attnSink, qk,    \
+                sv, max, sum, lastMax, lastSum, sync, output, batch, queryStartLoc, queryLens,     \
+                cachedLens, nHeads, headDim, scale, windowSize, compressRatio, indexTopK,          \
+                topkIndices, swaKCacheStride, compressKCacheStride, tileSizeOfCachedKV, zeroGm);   \
+        op.Run();                                                                                  \
     }

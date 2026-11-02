@@ -15,7 +15,8 @@ public:
     __aicore__ inline CxaAicHelper() = default;
 
     __aicore__ inline int Init(uint32_t nHeadsV, uint32_t headDimV, uint32_t swaBlockSizeV,
-                               uint32_t compressBlockSizeV, uint32_t windowSizeV,
+                               uint32_t compressBlockSizeV, uint32_t swaKCacheStrideV,
+                               uint32_t compressKCacheStrideV, uint32_t windowSizeV,
                                uint32_t compressRatioV, uint32_t qkStrideV, uint32_t swaSegWidthV,
                                bool denseV, GlobalTensor<Dtype> zeroGm)
     {
@@ -23,6 +24,8 @@ public:
         headDim = headDimV;
         swaBlockSize = swaBlockSizeV;
         compressBlockSize = compressBlockSizeV;
+        swaKCacheStride = MAX(swaKCacheStrideV, swaBlockSize * headDim);
+        compressKCacheStride = MAX(compressKCacheStrideV, compressBlockSize * headDim);
         windowSize = windowSizeV;
         compressRatio = compressRatioV;
         qkStride = qkStrideV;
@@ -226,8 +229,8 @@ public:
                         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
                         CopyGmToL1Nd2Nz(
                             kl1bBuf[pingpongL1B],
-                            swaKCache[(block * qkwn0 + blockOffset) * headDim + kOffset], nSize,
-                            kRemSize, headDim, nBlockPad);
+                            swaKCache[block * swaKCacheStride + blockOffset * headDim + kOffset],
+                            nSize, kRemSize, headDim, nBlockPad);
                         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                     }
@@ -282,6 +285,9 @@ public:
             int nLoop = DIV_ROUND_UP(ncTotalLen, qkcn0);
             for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // compress kv len
                 uint32_t block = !dense ? compressBlockTables[nIdx + nIdxStart] : nIdx + nIdxStart;
+                // sparse: block is a physical block id, so its GM pitch is the cache's dim-0
+                // stride; dense: block is a row-tile index in the batch's contiguous segment
+                uint32_t blockPitch = !dense ? compressKCacheStride : qkcn0 * headDim;
                 int nOffset = nIdx * qkcn0;
                 nSize = qkcn0;
                 nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
@@ -313,7 +319,7 @@ public:
                         }
                         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
                         CopyGmToL1Nd2Nz(kl1bBuf[pingpongL1B],
-                                        compressKCache[block * qkcn0 * headDim + kOffset], nSize,
+                                        compressKCache[block * blockPitch + kOffset], nSize,
                                         kRemSize, headDim, nBlockPad);
                         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
@@ -459,9 +465,10 @@ public:
 
                     WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
                     // copy SWK(T) (svwn0, kSize) to L1
-                    CopyGmToL1Nd2Nz(ktl1bBuf[pingpongL1B],
-                                    swaKCache[(block * svwk0 + blockOffset) * headDim + nOffset],
-                                    kSize, nSize, headDim, kBlockPad);
+                    CopyGmToL1Nd2Nz(
+                        ktl1bBuf[pingpongL1B],
+                        swaKCache[block * swaKCacheStride + blockOffset * headDim + nOffset], kSize,
+                        nSize, headDim, kBlockPad);
 
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
@@ -554,9 +561,8 @@ public:
                                 }
                                 CopyGmToL1Nd2Nz(
                                     ktl1bBuf[pingpongL1B][bid * compressBlockSize * kBlockSize],
-                                    compressKCache[(block * compressBlockSize + blockRemainder) *
-                                                       headDim +
-                                                   nOffset],
+                                    compressKCache[block * compressKCacheStride +
+                                                   blockRemainder * headDim + nOffset],
                                     kRemSizeTmp, nSize, headDim, L1BkRemBlockPad);
                             }
                         }
@@ -623,6 +629,8 @@ private:
     uint32_t headDim;
     uint32_t swaBlockSize;
     uint32_t compressBlockSize;
+    uint32_t swaKCacheStride;
+    uint32_t compressKCacheStride;
     uint32_t windowSize;
     uint32_t compressRatio;
     uint32_t qkStride;

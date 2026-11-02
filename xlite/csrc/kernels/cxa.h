@@ -60,7 +60,8 @@ public:
                                 GM_ADDR queryStartLoc, GM_ADDR queryLens, GM_ADDR cachedLens,
                                 uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,
                                 uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK,
-                                GM_ADDR topkIndices, uint32_t dense, GM_ADDR zeroGm)
+                                GM_ADDR topkIndices, uint32_t swaKCacheStride,
+                                uint32_t compressKCacheStride, uint32_t dense, GM_ADDR zeroGm)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -83,6 +84,11 @@ public:
         this->scale = scale;
         this->compressRatio = compressRatio;
         this->dense = dense != 0;
+        // dense mode rebases into each batch's contiguous segment of indexTopK
+        // compressed tokens, so its dim-0 pitch defaults to that segment stride;
+        // sparse mode forwards the paged cache's real stride for the helper's guard.
+        this->compressKCacheStride =
+            this->dense ? MAX(compressKCacheStride, indexTopK * headDim) : compressKCacheStride;
         // top-k masking is a sparse-mode feature: in dense mode the compress cache
         // is attended causally, so topkIndices is ignored.
         this->indexTopK = (!this->dense && topkIndices != nullptr) ? indexTopK : 0;
@@ -101,9 +107,10 @@ public:
                                         block_idx * XLITE_MAX_M0 * qkStride +
                                         block_num * XLITE_MAX_M0 * qkStride);
 
-        this->svk0 = aicHelper.Init(nHeads, headDim, swaBlockSize,
-                                    this->dense ? 0 : compressBlockSize, windowSize, compressRatio,
-                                    qkStride, swaSegWidth, this->dense, this->zeroGm);
+        this->svk0 =
+            aicHelper.Init(nHeads, headDim, swaBlockSize, this->dense ? 0 : compressBlockSize,
+                           swaKCacheStride, compressKCacheStride, windowSize, compressRatio,
+                           qkStride, swaSegWidth, this->dense, this->zeroGm);
     }
 
     __aicore__ inline void RunAic()
@@ -177,7 +184,7 @@ public:
                 int queryTaskOffset = queryStart + queryTaskStart;
 
                 GlobalTensor<Dtype> batchCompressKCache =
-                    dense ? compressKCache[queryTaskOffset * maxSeqLen * headDim] : compressKCache;
+                    dense ? compressKCache[queryTaskOffset * compressKCacheStride] : compressKCache;
 
                 // do queryIdx & (0, nHeads)'s QK
                 uint32_t mhOffset = queryTaskOffset * nHeads * headDim;
@@ -388,6 +395,7 @@ private:
     uint32_t batch;
     uint32_t nHeads;
     uint32_t headDim;
+    uint32_t compressKCacheStride;
     uint32_t compressRatio;
     uint32_t indexTopK;
     uint32_t maxSeqLen;
@@ -404,20 +412,21 @@ private:
     CxaAicHelper<Dtype> aicHelper;
 };
 
-#define CXA_FUNC_DEFINE(dtype)                                                                    \
-    extern "C" __global__ __aicore__ void cxa_##dtype(                                            \
-        GM_ADDR q, GM_ADDR swaKCache, GM_ADDR compressKCache, GM_ADDR swaBlockTables,             \
-        GM_ADDR compressBlockTables, uint32_t swaBlockSize, uint32_t compressBlockSize,           \
-        uint32_t swaBlockTableStride, uint32_t compressBlockTableStride, GM_ADDR attnSink,        \
-        GM_ADDR scores, GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens, \
-        GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,  \
-        uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices,         \
-        uint32_t dense, GM_ADDR zeroGm)                                                           \
-    {                                                                                             \
-        CXA<dtype> op;                                                                            \
-        op.Init(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables, swaBlockSize,  \
-                compressBlockSize, swaBlockTableStride, compressBlockTableStride, attnSink,       \
-                scores, output, batch, queryStartLoc, queryLens, cachedLens, nHeads, headDim,     \
-                scale, windowSize, kvSize, compressRatio, indexTopK, topkIndices, dense, zeroGm); \
-        op.Run();                                                                                 \
+#define CXA_FUNC_DEFINE(dtype)                                                                     \
+    extern "C" __global__ __aicore__ void cxa_##dtype(                                             \
+        GM_ADDR q, GM_ADDR swaKCache, GM_ADDR compressKCache, GM_ADDR swaBlockTables,              \
+        GM_ADDR compressBlockTables, uint32_t swaBlockSize, uint32_t compressBlockSize,            \
+        uint32_t swaBlockTableStride, uint32_t compressBlockTableStride, GM_ADDR attnSink,         \
+        GM_ADDR scores, GM_ADDR output, uint32_t batch, GM_ADDR queryStartLoc, GM_ADDR queryLens,  \
+        GM_ADDR cachedLens, uint32_t nHeads, uint32_t headDim, float scale, uint32_t windowSize,   \
+        uint32_t kvSize, uint32_t compressRatio, uint32_t indexTopK, GM_ADDR topkIndices,          \
+        uint32_t swaKCacheStride, uint32_t compressKCacheStride, uint32_t dense, GM_ADDR zeroGm)   \
+    {                                                                                              \
+        CXA<dtype> op;                                                                             \
+        op.Init(q, swaKCache, compressKCache, swaBlockTables, compressBlockTables, swaBlockSize,   \
+                compressBlockSize, swaBlockTableStride, compressBlockTableStride, attnSink,        \
+                scores, output, batch, queryStartLoc, queryLens, cachedLens, nHeads, headDim,      \
+                scale, windowSize, kvSize, compressRatio, indexTopK, topkIndices, swaKCacheStride, \
+                compressKCacheStride, dense, zeroGm);                                              \
+        op.Run();                                                                                  \
     }

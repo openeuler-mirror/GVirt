@@ -2921,7 +2921,6 @@ def compressor(
     state_slot_mapping: Optional[torch.Tensor],
     state_block_table: Optional[torch.Tensor],
     state_block_size: int,
-    state_cache_stride_dim0: int = 0,
     do_rotate: bool = False,
 ) -> None:
     """DeepSeek-V4 KV Compressor fused op (multi-batch): overlap + softmax-gated weighted sum + RMSNorm + rope + cache write.
@@ -3006,8 +3005,6 @@ def compressor(
             quant scale absorbs it).
         compress_block_size (int): ``compress_kv`` paged-cache block size.
         state_block_size (int): ``state`` paged-cache block size.
-        state_cache_stride_dim0 (int): Dense stride of ``state`` along dim 0; 0
-            lets the op resolve it from the tensor's dense allocation.
         ape (Optional[torch.Tensor]): ``[ratio, (1+overlap)*head_dim]`` additive
             position bias; None skips the bias add.
         norm (Optional[torch.Tensor]): ``[head_dim]`` RMSNorm weight; None skips

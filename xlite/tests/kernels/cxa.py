@@ -119,6 +119,16 @@ def max_blocks(lengths, block_size):
     return (max_len + block_size - 1) // block_size
 
 
+def pitched_cache_view(cache):
+    """Dim-0 pitched copy: same logical rows, one guard row of padding per block."""
+    blocks, block, dim = cache.shape
+    pitch = (block + 1) * dim
+    view = torch.zeros(blocks * pitch, dtype=cache.dtype).as_strided(
+        (blocks, block, dim), (pitch, dim, 1))
+    view.copy_(cache)
+    return view
+
+
 def build_swa_topk(window_size, total_len, q_len, device):
     """Window-segment top-k indices for one sample.
 
@@ -342,6 +352,11 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                     phys = sample_block_start + block_id
                     compress_k_cache[phys, offset] = comp_content[j]
 
+            # The SWA cache is paged in every mode; the compress cache is paged for
+            # sparse/flash and the gathered contiguous tensor for dense.
+            swa_k_cache = pitched_cache_view(swa_k_cache)
+            compress_k_cache_paged = pitched_cache_view(compress_k_cache)
+
             # ---- query/cached length tensors ----
             query_lens = torch.tensor(query_len_list, dtype=torch.int32).flatten()
             cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
@@ -391,7 +406,7 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
         if not skip_nonflash_topk:
             try:
                 torch.npu.synchronize()
-                cxa(rt, q_standard, swa_k_cache, compress_k_cache, swa_block_tables,
+                cxa(rt, q_standard, swa_k_cache, compress_k_cache_paged, swa_block_tables,
                     compress_block_tables, swa_block_size, compress_block_size, attn_sink,
                     output_xlite, batch, query_start_loc, query_lens, cached_lens, n_heads,
                     head_dim, scale, window_size, compress_ratio, index_topk,
@@ -416,7 +431,7 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
             flash_desc = case_desc + f" [flash, tile_size={tile_size}]"
             try:
                 torch.npu.synchronize()
-                cxa(rt, q_standard, swa_k_cache, compress_k_cache, swa_block_tables,
+                cxa(rt, q_standard, swa_k_cache, compress_k_cache_paged, swa_block_tables,
                     compress_block_tables, swa_block_size, compress_block_size, attn_sink,
                     output_xlite_flash, batch, query_start_loc, query_lens, cached_lens, n_heads,
                     head_dim, scale, window_size, compress_ratio, index_topk,
