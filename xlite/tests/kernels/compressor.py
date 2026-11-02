@@ -11,7 +11,10 @@
 
 Covers prefill (overlap_transform + softmax-weighted-sum + RMSNorm + rotary +
 compress_kv cache write) and decode (streaming state machine), against a
-per-request torch reference mirroring ``Compressor.forward``.
+per-request torch reference mirroring ``Compressor.forward``. Items flagged
+``c8_quant`` additionally verify the C8 path: a second launch with
+``compress_kv=None`` ropes ``weightedSum`` in place, and ``quant_cache_c8``
+scatters the rows into int8 + fp16 caches.
 """
 from __future__ import absolute_import
 
@@ -19,7 +22,7 @@ import logging
 
 import torch
 
-from xlite._C import Runtime, compressor
+from xlite._C import Runtime, compressor, quant_cache_c8
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -31,6 +34,9 @@ ROPE_HEAD_DIM = 64
 NORM_EPS = 1e-6
 ROPE_THETA = 160000.0
 BLOCK_SIZE = 128
+QUANT_MAX_C8 = 127
+K8_FILL = -101
+K16_FILL = -17
 # state cache paged with its own block size; keep == BLOCK_SIZE here.
 STATE_BLOCK_SIZE = 128
 # bf16/fp16 round-trips through fp32 softmax/pool/norm/rope; the kernel's accumulation
@@ -72,7 +78,7 @@ work = [
     # ── PREFILL (single launch) ──
     ("prefill", "single_block", lambda r: [(r, 0)], {}),
     ("prefill", "block_spill", lambda r: [(r + 1, 0)], {}),
-    ("prefill", "two_blocks", lambda r: [(2 * r, 0)], {}),
+    ("prefill", "two_blocks", lambda r: [(2 * r, 0)], {"c8_quant": True}),
     ("prefill", "mid8", lambda r: [(8 * r, 0)], {}),
     ("prefill", "long16", lambda r: [(16 * r, 0)], {}),
     # longer block-count progressions (ratio-relative: N blocks for EVERY ratio;
@@ -82,7 +88,7 @@ work = [
     # absolute-token long sequences (ratio-INdependent: N tokens for every ratio;
     # gives genuine long-token coverage for small ratios -- ratio2/ratio4 get many
     # blocks, ratio128 stays modest). qlen>=ratio holds for all models (max r=128).
-    ("prefill", "tok1024", lambda r: [(1024, 0)], {}),
+    ("prefill", "tok1024", lambda r: [(1024, 0)], {"c8_quant": True}),
     ("prefill", "tok2048", lambda r: [(2048, 0)], {}),
     ("prefill", "tok4096", lambda r: [(4096, 0)], {}),
     ("prefill", "tok8192", lambda r: [(8192, 0)], {}),
@@ -91,13 +97,13 @@ work = [
     # tail / short prompt). ratio2/4: 64/96>=ratio -> normal prefill (still valid, not
     # the nTotalBlocks=0 case but exercises the same code path).
     ("prefill", "tok64", lambda r: [(64, 0)], {}),
-    ("prefill", "tok96", lambda r: [(96, 0)], {}),
+    ("prefill", "tok96", lambda r: [(96, 0)], {"c8_quant": True}),
     ("prefill", "remainder3", lambda r: [(8 * r + 3, 0)], {}),
-    ("prefill", "batch2_div", lambda r: [(8 * r, 0), (4 * r, 0)], {}),
+    ("prefill", "batch2_div", lambda r: [(8 * r, 0), (4 * r, 0)], {"c8_quant": True}),
     ("prefill", "batch2_mixdiv", lambda r: [(8 * r, 0), (8 * r + 2, 0)], {}),
     ("prefill", "batch3_varrem", lambda r: [(8 * r, 0), (8 * r + 2, 0), (8 * r + 4, 0)], {}),
     # single-launch continuation chunk (cached>0); C∈{r,r+2,4r} all ≥ratio.
-    ("prefill", "chunk_div", lambda r: [(r, r)], {}),          # head=0 (case b)
+    ("prefill", "chunk_div", lambda r: [(r, r)], {"c8_quant": True}),          # head=0 (case b)
     ("prefill", "chunk_nondiv", lambda r: [(r, r + 2)], {}),   # head=2 (case c)
     ("prefill", "chunk_long", lambda r: [(2 * r, 4 * r)], {}),
     ("prefill", "chunk_long8", lambda r: [(8 * r, 4 * r)], {}),  # 8 cont blocks from 4*r state
@@ -115,7 +121,7 @@ work = [
     ("prefill", "norope_noape", lambda r: [(8 * r, 0)], {"freqs_none": True, "ape_enabled": False}),
     ("prefill", "noape", lambda r: [(8 * r, 0)], {"ape_enabled": False}),
     # ── MIX (single launch: prefill req(s) + decode req(s)) ──
-    ("mix", "pure_dec1", lambda r: [(4 * r, 0), (1, 6 * r - 1)], {}),
+    ("mix", "pure_dec1", lambda r: [(4 * r, 0), (1, 6 * r - 1)], {"c8_quant": True}),
     ("mix", "pure_dec2", lambda r: [(4 * r, 0), (1, 6 * r - 1), (1, 8 * r - 1)], {}),
     ("mix", "multi_pf_dec3", lambda r: [(8 * r, 0), (4 * r, 0), (1, 6 * r - 1),
                                          (1, 8 * r - 1), (1, 10 * r - 1)], {}),
@@ -654,6 +660,58 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
         if _ckv_dump:
             torch.save({'compress_kv': compress_kv.cpu(), 'state': state.cpu(),
                         'weightedSum': weightedSum.cpu()}, _ckv_dump)
+
+    # 9. C8-mode equivalence (bf16 only): re-run with compress_kv=None — the rope
+    #    tail writes weightedSum in place — then quant_cache_c8 the rows into the
+    #    int8 + fp16 caches. The in-place rows must equal the paged launch's cache
+    #    rows bit-exactly (identical rope math; do_rotate items are excluded
+    #    because the c8 branch deliberately drops the rotate scale), and the
+    #    quantized caches must match reference quantization of those rows.
+    if flags.get("c8_quant") and test_dtype == torch.bfloat16 and not do_rotate \
+            and not freqs_none:
+        capacity = max(n_total_blocks, 1)
+        with torch.device("npu"):
+            ws_c8 = torch.zeros(n_total_blocks, HEAD_DIM, dtype=torch.bfloat16)
+            k8_pool = torch.full((capacity * HEAD_DIM,), K8_FILL, dtype=torch.int8)
+            k16_pool = torch.full((capacity,), K16_FILL, dtype=torch.float16)
+        torch.npu.synchronize()
+        compressor(rt, kv, score, ape, norm_w, freqs_cis, ws_c8, query_start_loc,
+                   query_lens_t, cached_lens_t, batch, n_total_blocks, ratio, overlap, HEAD_DIM,
+                   ROPE_HEAD_DIM, NORM_EPS, None, compress_positions, compress_slot_mapping,
+                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE,
+                   STATE_BLOCK_SIZE * 2 * full_dim)
+        torch.npu.synchronize()
+        # One block covering the whole pool keeps the dense flat addressing.
+        quant_cache_c8(rt, ws_c8, compress_slot_mapping, k8_pool, k16_pool, capacity)
+        torch.npu.synchronize()
+
+        # The c8 launch re-runs the spill with identical inputs, so state stays
+        # unchanged and the second launch sees the same data as the first.
+        try:
+            torch.testing.assert_close(ws_c8, out_all, rtol=0, atol=0)
+            logging.info(f'  PASS c8 weightedSum ({name}): in-place rope rows == paged rows')
+        except AssertionError as e:
+            logging.error(f'  FAIL c8 weightedSum ({name}): {e}')
+            logging.error(f'    max abs diff: '
+                          f'{(ws_c8.float() - out_all.float()).abs().max().item()}')
+
+        # CPU-side index for all reference comparisons below (pools are pulled to
+        # CPU before indexing; NPU indices are not valid on CPU tensors).
+        written = compress_slot_mapping.cpu().to(torch.int64)
+        untouched = torch.ones(capacity, dtype=torch.bool)
+        untouched[written] = False
+        assert bool((k8_pool.cpu().view(-1, HEAD_DIM)[untouched] == K8_FILL).all()), \
+            (name, "c8 k8 canary")
+        assert bool((k16_pool.cpu()[untouched] == K16_FILL).all()), (name, "c8 k16 canary")
+        rows = out_all.float().cpu()
+        amax = rows.abs().amax(-1)
+        scale = amax * (1.0 / QUANT_MAX_C8)
+        normalized = rows * torch.where(scale == 0, 0, scale.reciprocal())[:, None]
+        expected_k8 = normalized.round().to(torch.int8)
+        torch.testing.assert_close(k16_pool.cpu()[written], scale.half(), rtol=0, atol=0)
+        torch.testing.assert_close(k8_pool.cpu().view(-1, HEAD_DIM)[written], expected_k8,
+                                   atol=1, rtol=1 / 128)
+        logging.info(f'  PASS c8 quant ({name}): int8+fp16 caches match reference quantization')
 
 
 def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compress=1,

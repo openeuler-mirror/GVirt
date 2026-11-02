@@ -48,13 +48,15 @@ enum XModelLayerAttnType {
     XMODEL_LAYER_ATTN_LINEAR = 1,
 };
 
-// CXA 5-tuple block-size indices: (indexer_state, indexer_k, compress_kv, state, swa_kv).
+// CXA 5/6-tuple block-size indices: (indexer_state, indexer_k, compress_kv,
+// state, swa_kv, [indexer_k_scale]). 6th slot: LI-C8 layers only (fp16 int8-k scale pool).
 enum CxaCacheIndex {
     CXA_INDEXER_STATE = 0,
     CXA_INDEXER_K = 1,
     CXA_COMPRESS_KV = 2,
     CXA_STATE = 3,
     CXA_SWA_KV = 4,
+    CXA_INDEXER_K_SCALE = 5,
 };
 
 struct XModelAttnMeta {
@@ -77,6 +79,10 @@ struct XModelAttnMeta {
     XTensor queryStartLoc;
     XTensor lens;
     XTensor cachedLens;
+
+    /* CXA per-layer block_tables/slot_mapping (v2): one [5]-plane row per layer */
+    std::vector<std::vector<XTensor>> blockTablesPerLayer;
+    std::vector<std::vector<XTensor>> slotMappingPerLayer;
 };
 
 struct ForwardTask {
@@ -117,12 +123,14 @@ public:
     virtual ~XRuntime(void);
     void Init(size_t sizeMB);
     void InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
-                  uint64_t maxSeqLen, const std::vector<uint32_t> &blockSizes, uint32_t indexTopK);
+                  uint64_t maxSeqLen, const std::vector<uint32_t> &blockSizes, uint32_t indexTopK,
+                  const std::vector<uint32_t> &compressRatios = {});
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                      uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads,
                      std::vector<uint32_t> blockSizes, uint32_t hiddenSize, uint32_t nRoutedExperts,
                      uint32_t defDpSize, int inputDtype, int weightsDtype, uint32_t indexTopK,
-                     const std::vector<uint32_t> &layerTypes);
+                     const std::vector<uint32_t> &layerTypes,
+                     const std::vector<uint32_t> &compressRatios = {});
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -301,11 +309,15 @@ public:
                                             // v2 -> persistent (narrowed, pitched) view
     std::vector<XTensor> _attnSlotMapping;  // [batchedTokens] int32, per-kv-cache, ref: v0/1 ->
                                             // {_slotMapping}, v2 -> attnMeta.slotMapping
+    std::vector<std::vector<XTensor>> _attnBlockTablesPerLayer;
+    std::vector<std::vector<XTensor>> _attnSlotMappingPerLayer;
     XTensor _attnLens;        // [batch] int32, ref: v0/1 -> _lens, v2 -> attnMeta.lens
     XTensor _attnCachedLens;  // [batch] int32, ref: v0/1 -> _cachedLens, v2 -> attnMeta.cachedLens
     XTensor _attnQueryStartLoc;  // [batch] (v0/1 exclusive prefix) / [batch+1] (v2, 0-prefixed)
                                  // int32, ref: v0/1 -> _queryStartLoc, v2 -> attnMeta.queryStartLoc
-    XTensor _position;           // [maxBatchedTokens] int64, internal buffer (malloc+free in dtor)
+    std::vector<uint32_t> _distinctCompressRatios;  // [nGroups] sorted unique non-zero ratios
+    std::vector<XTensor> _compressorPosBufs;  // [nGroups][maxNBlocks_r] int64, owning device bufs
+    XTensor _position;     // [maxBatchedTokens] int64, internal buffer (malloc+free in dtor)
     XTensor _blockTables;  // [maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)] int32, internal buffer
     XTensor _slotMapping;  // [maxBatchedTokens] int32, internal buffer
     XTensor _cachedLens;   // [maxBatch] int32, internal buffer

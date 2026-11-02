@@ -228,6 +228,11 @@ XRuntime::~XRuntime(void)
     if (_blockTables.ptr) {
         (void)aclrtFree(_blockTables.ptr);
     }
+    for (auto &t : _compressorPosBufs) {
+        if (t.ptr) {
+            (void)aclrtFree(t.ptr);
+        }
+    }
     if (_tokensPerEpGroupAllEpHost.ptr) {
         (void)aclrtFreeHost(_tokensPerEpGroupAllEpHost.ptr);
     }
@@ -423,7 +428,7 @@ int XRuntime::InitHcclComm(void)
 
 void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                         uint64_t maxSeqLen, const std::vector<uint32_t> &blockSizes,
-                        uint32_t indexTopK)
+                        uint32_t indexTopK, const std::vector<uint32_t> &compressRatios)
 {
     std::vector<uint32_t> vgatherIndices;
     size_t size;
@@ -454,6 +459,31 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
             _blockTables.Init({maxBatch, DIV_ROUND_UP(maxSeqLen, blockSizes[0])}, INT32, ptr);
             break;
         case 2:
+            // V2 device tensors alias attnMeta in PrepareAttn; here we only
+            // pre-allocate (once) the per-ratio compressor positions buffers.
+            if (attnMeta.attnType == XMODEL_ATTN_CXA) {
+                _distinctCompressRatios.clear();
+                for (uint32_t r : compressRatios) {
+                    if (r != 0 &&
+                        std::find(_distinctCompressRatios.begin(), _distinctCompressRatios.end(),
+                                  r) == _distinctCompressRatios.end()) {
+                        _distinctCompressRatios.push_back(r);
+                    }
+                }
+                std::sort(_distinctCompressRatios.begin(), _distinctCompressRatios.end());
+                for (uint32_t r : _distinctCompressRatios) {
+                    uint32_t maxNBlocks =
+                        static_cast<uint32_t>(maxBatch) * DIV_ROUND_UP(maxSeqLen, r);
+                    void *posPtr = nullptr;
+                    if (!IsDummyRuntime()) {
+                        size_t posSz = static_cast<size_t>(maxNBlocks) * XDtypeBit(INT64) / 8;
+                        CHECK_ACL(aclrtMalloc(&posPtr, posSz, ACL_MEM_MALLOC_NORMAL_ONLY));
+                    }
+                    XTensor posT;
+                    posT.Init({static_cast<size_t>(maxNBlocks)}, INT64, posPtr);
+                    _compressorPosBufs.push_back(std::move(posT));
+                }
+            }
             break;
         default:
             throw std::runtime_error(std::string(__func__) +
@@ -568,8 +598,13 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
                                  std::to_string(attnMeta.blockTables.size()));
     }
     for (size_t i = 0; i < attnMeta.slotMapping.size(); i++) {
+        // CXA INDEXER_K / COMPRESS_KV are per-block caches (host-provided paged
+        // block_table; write-path slots are not per-token), so relax the
+        // per-token slot_mapping check for them.
+        bool isPerBlockCache =
+            (attnMeta.attnType == XMODEL_ATTN_CXA && (i == CXA_INDEXER_K || i == CXA_COMPRESS_KV));
         if (attnMeta.slotMapping[i].shape.size() != 1 ||
-            attnMeta.slotMapping[i].shape[0] < batchedTokens) {
+            (!isPerBlockCache && attnMeta.slotMapping[i].shape[0] < batchedTokens)) {
             throw std::runtime_error(
                 std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                 ": slotMapping shape mismatch, expect 1D len >= " + std::to_string(batchedTokens));
@@ -578,8 +613,27 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
     for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
         const uint32_t minNumBlocks =
             (familySlots && i > 0) ? 1 : DIV_ROUND_UP(maxTotalLens, blockSizes[i]);
-        if (attnMeta.blockTables[i].shape.size() != 2 || attnMeta.blockTables[i].shape[0] < batch ||
-            attnMeta.blockTables[i].shape[1] < minNumBlocks) {
+        const bool isPerBlockCache =
+            (attnMeta.attnType == XMODEL_ATTN_CXA && (i == CXA_INDEXER_K || i == CXA_COMPRESS_KV));
+        if (attnMeta.attnType == XMODEL_ATTN_CXA && i == CXA_COMPRESS_KV) {
+            // block_tables[2] = compress_kv pool's paged table, sourced from the
+            // ratio==4 layer (flat table here; the ratio==128 per-ratio table is
+            // consumed via its own shape[1] in PrepareAttn). compBs compressed-
+            // tokens/block, so blocks = DIV_ROUND_UP(maxTotalLens, ratio*compBs).
+            uint32_t compBs = blockSizes[i];
+            const uint32_t flatCompressRatio = 4;
+            uint32_t compMaxBlocks = DIV_ROUND_UP(maxTotalLens, flatCompressRatio * compBs);
+            if (attnMeta.blockTables[i].shape.size() != 2 ||
+                attnMeta.blockTables[i].shape[0] < batch ||
+                attnMeta.blockTables[i].shape[1] < compMaxBlocks) {
+                throw std::runtime_error(
+                    std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                    ": blockTables[COMPRESS_KV] shape mismatch, expect 2D [batch, >= " +
+                    std::to_string(compMaxBlocks) + "]");
+            }
+        } else if (attnMeta.blockTables[i].shape.size() != 2 ||
+                   attnMeta.blockTables[i].shape[0] < batch ||
+                   (!isPerBlockCache && attnMeta.blockTables[i].shape[1] < minNumBlocks)) {
             throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
                                      ": blockTables shape mismatch, expect 2D [batch, >= " +
                                      std::to_string(minNumBlocks) + "]");
@@ -780,10 +834,12 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                            std::vector<uint32_t> blockSizes, uint32_t hiddenSize,
                            uint32_t nRoutedExperts, uint32_t defDpSize, int inputDtype,
                            int weightsDtype, uint32_t indexTopK,
-                           const std::vector<uint32_t> &layerTypes)
+                           const std::vector<uint32_t> &layerTypes,
+                           const std::vector<uint32_t> &compressRatios)
 {
     if (!_attnInitialized) {
-        InitAttn(attnMeta, maxBatchedTokens, maxBatch, maxSeqLen, blockSizes, indexTopK);
+        InitAttn(attnMeta, maxBatchedTokens, maxBatch, maxSeqLen, blockSizes, indexTopK,
+                 compressRatios);
         bool agInGraph = defDpSize > 1 && AllGatherInGraphActive(DP);
         bool rsInGraph = defDpSize > 1 && ReduceScatterInGraphActive(DP);
         bool arInGraph = _tpSize > 1 && AllReduceSumInGraphActive(TP);
@@ -902,6 +958,8 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             _attnLens = _lens;
             _attnCachedLens = _cachedLens;
             _attnQueryStartLoc = _queryStartLoc;
+            // v0/1 is non-CXA: clear so a prior v2 forward's groups don't leak in.
+            _distinctCompressRatios.clear();
 
             position.resize(batchedTokens);
             slotMapping.resize(batchedTokens);
@@ -970,6 +1028,40 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             }
             _attnPosition = attnMeta.position;
             PrepareHybridMetadata(layerTypes, attnMeta);
+            _attnBlockTablesPerLayer = attnMeta.blockTablesPerLayer;
+            _attnSlotMappingPerLayer = attnMeta.slotMappingPerLayer;
+            // Per-ratio compressor positions: rope pos of block j = (cl/r + j) * r,
+            // pure lens arithmetic (no block table). View + H2D each group's owning
+            // buffer to this step's nTotalBlocks.
+            for (size_t g = 0; g < _compressorPosBufs.size(); g++) {
+                uint32_t r = _distinctCompressRatios[g];
+                uint32_t nTotalBlocks = 0;
+                std::vector<int64_t> posHost;
+                if (!IsDummyRuntime()) {
+                    posHost.reserve(batch);
+                    for (uint32_t b = 0; b < batch; b++) {
+                        uint32_t cl = attnMeta.cachedLensCpu[b];
+                        uint32_t nB = ((cl + attnMeta.lensCpu[b]) / r) - (cl / r);
+                        for (uint32_t j = 0; j < nB; j++) {
+                            posHost.push_back(static_cast<int64_t>((cl / r + j) * r));
+                        }
+                        nTotalBlocks += nB;
+                    }
+                } else {
+                    for (uint32_t b = 0; b < batch; b++) {
+                        uint32_t cl = attnMeta.cachedLensCpu[b];
+                        nTotalBlocks += ((cl + attnMeta.lensCpu[b]) / r) - (cl / r);
+                    }
+                }
+                // Explicit vector form: View({n}) binds the View(size_t, dim=0)
+                // overload and inflates numel.
+                _compressorPosBufs[g].View(std::vector<size_t>{static_cast<size_t>(nTotalBlocks)});
+                if (!IsDummyRuntime() && nTotalBlocks > 0) {
+                    size_t sz = static_cast<size_t>(nTotalBlocks) * XDtypeBit(INT64) / 8;
+                    CHECK_ACL(aclrtMemcpyAsync(_compressorPosBufs[g].ptr, sz, posHost.data(), sz,
+                                               ACL_MEMCPY_HOST_TO_DEVICE, stream));
+                }
+            }
             break;
         }
         default:

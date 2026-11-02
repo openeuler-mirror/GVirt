@@ -138,7 +138,8 @@ void XModel::Init(void)
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalPhysicalExperts;
     uint32_t end = start + nLocalPhysicalExperts;
 
-    if (_c.nDenseLayers != _c.nLayers || _c.attnType == XMODEL_ATTN_DSA) {
+    if (_c.nDenseLayers != _c.nLayers || _c.attnType == XMODEL_ATTN_DSA ||
+        _c.attnType == XMODEL_ATTN_CXA) {
         // generate the identity index table 0.1.2...max(maxSeqLen,topK)-1
         uint64_t maxSeqLen = ROUND_UP(_c.maxSeqLen, _c.blockSizes[0]);
         maxSeqLen = INIT_MIN_SEQ_POS > maxSeqLen ? INIT_MIN_SEQ_POS : maxSeqLen;
@@ -153,26 +154,33 @@ void XModel::Init(void)
         if (_c.nDenseLayers != _c.nLayers) {
             _gateIndices.Init({_c.nRoutedExperts}, INT32, ptr);
         }
-        if (_c.attnType == XMODEL_ATTN_DSA) {
+        if (_c.attnType == XMODEL_ATTN_DSA || _c.attnType == XMODEL_ATTN_CXA) {
             _dsaSeqPositions.Init({maxSeqLen}, INT32, ptr);
         }
     }
 
-    if (_c.attnType == XMODEL_ATTN_DSA) {
+    if (_c.attnType == XMODEL_ATTN_DSA || _c.attnType == XMODEL_ATTN_CXA) {
         if (!_c.indexC8Mask.empty()) {
-            if (_c.indexC8Mask.size() != _c.nLayers) {
-                throw std::invalid_argument("indexC8Mask must describe every DSA runtime layer");
+            // Like compress_ratios, a trailing MTP-draft entry is tolerated; the
+            // mask must still cover every runtime layer.
+            if (_c.indexC8Mask.size() < static_cast<size_t>(_c.nLayers)) {
+                throw std::invalid_argument(
+                    "indexC8Mask must describe every DSA/CXA runtime layer");
             }
-            for (uint32_t i = 0; i < _c.nLayers; ++i) {
-                if (_c.indexC8Mask[i] && i < _c.indexFullMask.size() && !_c.indexFullMask[i]) {
-                    throw std::invalid_argument("LI-C8 requires a full Indexer layer");
+            if (_c.attnType == XMODEL_ATTN_DSA) {
+                for (uint32_t i = 0; i < _c.nLayers; ++i) {
+                    if (_c.indexC8Mask[i] && i < _c.indexFullMask.size() && !_c.indexFullMask[i]) {
+                        throw std::invalid_argument("LI-C8 requires a full Indexer layer");
+                    }
                 }
             }
         }
+    }
+    if (_c.attnType == XMODEL_ATTN_DSA || _c.attnType == XMODEL_ATTN_CXA) {
         _dsaIndexerScale = 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads));
         _dsaIndexerScale *= 1.0f / std::sqrt(static_cast<float>(_c.indexHeadDim));
     } else if (!_c.indexC8Mask.empty()) {
-        throw std::invalid_argument("indexC8Mask requires DSA");
+        throw std::invalid_argument("indexC8Mask requires DSA/CXA");
     }
 
     if (_c.attnType == XMODEL_ATTN_CXA) {
@@ -883,6 +891,32 @@ void XModel::ForwardAttnLinear(XRuntime &rt, uint32_t layer,
     }
 }
 
+// CXA per-layer table access: the layer's own row when populated, else the
+// flat default (V1 / DummyRun). An empty (numel==0) row plane is EXACT data
+// for this step — it must NOT fall back to flat (which would serve another
+// ratio's layout).
+static inline XTensor &LayerPlane(std::vector<std::vector<XTensor>> &rows,
+                                  std::vector<XTensor> &flat, uint32_t layer, size_t plane)
+{
+    if (!rows.empty() && layer < rows.size() && plane < rows[layer].size()) {
+        return rows[layer][plane];
+    }
+    return flat[plane];
+}
+
+// Compressor positions for a ratio (layers of one ratio share one buffer).
+// Only called for ratio>0; throws if unregistered (V1 / non-CXA — CXA is V2-only).
+static inline const XTensor &CompressorPositions(XRuntime &rt, uint32_t ratio)
+{
+    auto it =
+        std::find(rt._distinctCompressRatios.begin(), rt._distinctCompressRatios.end(), ratio);
+    if (it == rt._distinctCompressRatios.end()) {
+        throw std::runtime_error(std::string(__func__) + ": no compressor positions for ratio " +
+                                 std::to_string(ratio));
+    }
+    return rt._compressorPosBufs[std::distance(rt._distinctCompressRatios.begin(), it)];
+}
+
 std::tuple<XTensor &, XTensor &> XModel::ForwardAttnCXACommon(XRuntime &rt, uint32_t layer,
                                                               std::vector<XTensor> &kvCache,
                                                               XTensor &freqsCis,
@@ -900,13 +934,49 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnCXACommon(XRuntime &rt, uint
     XliteOpRmsNorm(rt, qr, mlaQNorm[layer], qr, _c.normEps, _c.qLoraRank);
     XliteOpRmsNorm(rt, kv, mlaKVNorm[layer], kv, _c.normEps, _c.headDim);
 
-    XliteOpRopeComplexAndCache(rt, 1, _c.headDim, _c.ropeHeadDim, _c.headDim - _c.ropeHeadDim,
-                               _c.headDim, kv, freqsCis, rt._attnPosition,
-                               _c.blockSizes[CXA_SWA_KV], kvCache[CXA_SWA_KV],
-                               rt._attnSlotMapping[CXA_SWA_KV], true);
-
+    XliteOpRopeComplexAndCache(
+        rt, 1, _c.headDim, _c.ropeHeadDim, _c.headDim - _c.ropeHeadDim, _c.headDim, kv, freqsCis,
+        rt._attnPosition, _c.blockSizes[CXA_SWA_KV], kvCache[CXA_SWA_KV],
+        LayerPlane(rt._attnSlotMappingPerLayer, rt._attnSlotMapping, layer, CXA_SWA_KV), true);
     if (_c.compressRatios[layer] > 0) {
-        // TODO compressor hiddenState, store to compress cache
+        uint32_t ratio = _c.compressRatios[layer];
+        uint32_t overlap = (ratio == 4) ? 1 : 0;
+        uint32_t coff = 1 + overlap;
+        uint32_t fullDim = coff * _c.headDim;
+        uint32_t batch = rt._batch;
+        uint32_t batchedTokens = hiddenState.shape[0];
+
+        XTensor &compKv = rt.GetTensor({batchedTokens, fullDim}, FP32, DBG_LOC);
+        XTensor &compScore = rt.GetTensor({batchedTokens, fullDim}, FP32, DBG_LOC);
+        // compWKv/wGate are FP32 (never NZ-converted); matmul_float reads ND, so
+        // do NOT forward global weightNZ — it faults on ND fp32.
+        XliteOpMatmul(rt, hiddenState, compWKv[layer], compKv, false);
+        XliteOpMatmul(rt, hiddenState, compWGate[layer], compScore, false);
+
+        const XTensor &compPosTensor = CompressorPositions(rt, ratio);
+        XTensor &compSlotTensor =
+            LayerPlane(rt._attnSlotMappingPerLayer, rt._attnSlotMapping, layer, CXA_COMPRESS_KV);
+        uint32_t nTotalBlocks = compPosTensor.shape[0];
+
+        XTensor &weightedSum = rt.GetTensor({nTotalBlocks, _c.headDim}, BF16, DBG_LOC);
+        // State pools are paged per-ratio by the host (block size differs per
+        // ratio); the single _c.blockSizes[CXA_STATE] can't represent both, so
+        // read the actual block size from the pool tensor (shape[1]).
+        const XTensor &stateCache = kvCache[CXA_STATE];
+        uint32_t stateBs = (stateCache.ptr != nullptr && stateCache.shape.size() > 1)
+                               ? static_cast<uint32_t>(stateCache.shape[1])
+                               : _c.blockSizes[CXA_STATE];
+        XliteOpCompressor(
+            rt, compKv, compScore, compApe[layer], compNorm[layer], freqsCis, weightedSum,
+            rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens, batch, nTotalBlocks, ratio,
+            overlap, _c.headDim, _c.ropeHeadDim, _c.normEps, kvCache[CXA_COMPRESS_KV],
+            compPosTensor, compSlotTensor, _c.blockSizes[CXA_COMPRESS_KV], kvCache[CXA_STATE],
+            LayerPlane(rt._attnSlotMappingPerLayer, rt._attnSlotMapping, layer, CXA_STATE),
+            LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_STATE), stateBs,
+            kvCache[CXA_STATE].stride.empty() ? 0 : kvCache[CXA_STATE].stride[0]);
+        rt.PutTensor(weightedSum);
+        rt.PutTensor(compKv);
+        rt.PutTensor(compScore);
     }
 
     ForwardLinear(rt, layer, qr, mlaQB, q);
@@ -926,9 +996,123 @@ XTensor *XModel::ForwardAttnCXAIndexer(XRuntime &rt, uint32_t layer, XTensor &hi
                                        XTensor &qr, std::vector<XTensor> &kvCache,
                                        XTensor &freqsCis)
 {
-    XTensor &topkIndices =
-        rt.GetTensor({hiddenState.shape[0], _c.windowSize + _c.indexTopK}, INT32, DBG_LOC);
-    // TODO : implement CXA attention indexer
+    uint32_t ratio = _c.compressRatios[layer];
+    uint32_t indexerHeadDim = _c.indexHeadDim;
+    uint32_t overlap = (ratio == 4) ? 1 : 0;
+    uint32_t coff = 1 + overlap;
+    uint32_t fullDim = coff * indexerHeadDim;
+    uint32_t batch = rt._batch;
+    uint32_t batchedTokens = hiddenState.shape[0];
+    // LI-C8 (Path B): compressor ropes weightedSum in place (uniform row scale
+    // absorbed by per-row quant scale, so no rotate); Q's rotate factor folds
+    // into scaledWeights via quant_q_c8; topk runs its int8 branch.
+    const bool c8 = !_c.indexC8Mask.empty() && _c.indexC8Mask[layer];
+
+    // wkv / wgate GEMMs
+    XTensor &idxCompKv = rt.GetTensor({batchedTokens, fullDim}, FP32, DBG_LOC);
+    XTensor &idxCompScore = rt.GetTensor({batchedTokens, fullDim}, FP32, DBG_LOC);
+    // FP32 compressor weights, ND layout — see ForwardAttnCXACommon: weightNZ must be false here.
+    XliteOpMatmul(rt, hiddenState, idxCompWKv[layer], idxCompKv, false);
+    XliteOpMatmul(rt, hiddenState, idxCompWGate[layer], idxCompScore, false);
+
+    // nTotalBlocks from the row's host-computed INDEXER_K slot_mapping length.
+    uint32_t nTotalBlocks =
+        LayerPlane(rt._attnSlotMappingPerLayer, rt._attnSlotMapping, layer, CXA_INDEXER_K).shape[0];
+
+    XTensor &idxWeightedSum = rt.GetTensor({nTotalBlocks, indexerHeadDim}, BF16, DBG_LOC);
+    // C8 mode: absent compressKv (nullptr) — in-place rope leaves weightedSum
+    // un-rotated for quant_cache_c8.
+    XTensor emptyCompressKv;
+    XliteOpCompressor(
+        rt, idxCompKv, idxCompScore, idxCompApe[layer], idxCompNorm[layer], freqsCis,
+        idxWeightedSum, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens, batch,
+        nTotalBlocks, ratio, overlap, indexerHeadDim, _c.ropeHeadDim, _c.normEps,
+        c8 ? emptyCompressKv : kvCache[CXA_INDEXER_K], CompressorPositions(rt, ratio),
+        LayerPlane(rt._attnSlotMappingPerLayer, rt._attnSlotMapping, layer, CXA_INDEXER_K),
+        _c.blockSizes[CXA_INDEXER_K], kvCache[CXA_INDEXER_STATE],
+        LayerPlane(rt._attnSlotMappingPerLayer, rt._attnSlotMapping, layer, CXA_INDEXER_STATE),
+        LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_INDEXER_STATE),
+        _c.blockSizes[CXA_INDEXER_STATE],
+        kvCache[CXA_INDEXER_STATE].stride.empty() ? 0 : kvCache[CXA_INDEXER_STATE].stride[0], !c8);
+    if (c8) {
+        XliteOpQuantCacheC8(
+            rt, idxWeightedSum,
+            LayerPlane(rt._attnSlotMappingPerLayer, rt._attnSlotMapping, layer, CXA_INDEXER_K),
+            kvCache[CXA_INDEXER_K], kvCache[CXA_INDEXER_K_SCALE], _c.blockSizes[CXA_INDEXER_K]);
+    }
+
+    rt.PutTensor(idxWeightedSum);
+    rt.PutTensor(idxCompKv);
+    rt.PutTensor(idxCompScore);
+
+    const uint32_t idxNHeads = _c.indexNHeads;
+    const uint32_t maxNumBlocks =
+        LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_INDEXER_K).shape[1];
+    const bool isLong =
+        static_cast<uint64_t>(maxNumBlocks) * _c.blockSizes[CXA_INDEXER_K] > _c.indexTopK;
+    if (!isLong) {
+        // Short seq: nullptr → XliteOpCXA dense branch. Indexer K was still
+        // written by the compressor above.
+        return nullptr;
+    }
+
+    // Indexer Q. C8: un-rotated (doRotate=false, no nope Muls) — the uniform
+    // 1/sqrt(head_dim) factor folds into scaledWeights, so int8 scores differ
+    // from float only by a per-query constant (ranking/ReLU unaffected).
+    XTensor &idxQ =
+        rt.GetTensor({batchedTokens, idxNHeads * indexerHeadDim}, hiddenState.dtype, DBG_LOC);
+    ForwardLinear(rt, layer, qr, idxWqB, idxQ);
+    const float rotateScale = 1.0f / std::sqrt(static_cast<float>(indexerHeadDim));
+    XliteOpRopeComplex(rt, idxNHeads, indexerHeadDim, indexerHeadDim, _c.ropeHeadDim,
+                       indexerHeadDim - _c.ropeHeadDim, indexerHeadDim - _c.ropeHeadDim, idxQ,
+                       freqsCis, rt._attnPosition, idxQ, false, true, 0, !c8);
+    idxQ.View({static_cast<size_t>(batchedTokens) * idxNHeads, indexerHeadDim});
+    if (!c8) {
+        // Scale the nope region; the rope region is scaled by doRotate inside the rope op.
+        const uint32_t nopeDim = indexerHeadDim - _c.ropeHeadDim;
+        XliteOpMuls(rt, idxQ, rotateScale, idxQ, 0, nopeDim);
+        idxQ.View(
+            {static_cast<size_t>(batchedTokens), static_cast<size_t>(idxNHeads) * indexerHeadDim});
+    }
+
+    XTensor &topkIndices = rt.GetTensor({batchedTokens, _c.indexTopK}, INT32, DBG_LOC);
+    XTensor &lastTopk = rt.GetTensor({batchedTokens, 2 * _c.indexTopK}, INT32, DBG_LOC);
+    // headWeight = weights_proj(h) * indexer score scale. weights_proj is NZ-
+    // converted under weight_nz_mode=2 (NZ applied globally to bf16 weights),
+    // so pass the real flag here — unlike the fp32 compressor weights / wo_a.
+    XTensor &idxWeight = rt.GetTensor({batchedTokens, idxNHeads}, hiddenState.dtype, DBG_LOC);
+    XliteOpMatmul(rt, hiddenState, idxWeightsProj[layer], idxWeight, _c.weightNZ);
+    XliteOpMuls(rt, idxWeight, _dsaIndexerScale, idxWeight);
+
+    XTensor *q8 = nullptr;
+    XTensor *scaledWeights = nullptr;
+    if (c8) {
+        // Explicit vector form: View({n}) binds View(size_t, dim=0) and inflates numel.
+        idxWeight.View(std::vector<size_t>{static_cast<size_t>(batchedTokens) * idxNHeads});
+        q8 = &rt.GetTensor(idxQ.shape, INT8, DBG_LOC);
+        scaledWeights = &rt.GetTensor({batchedTokens, idxNHeads}, FP16, DBG_LOC);
+        XliteOpQuantQC8(rt, idxQ, idxWeight, *q8, *scaledWeights, rotateScale);
+    }
+
+    // The int8 topk branch requires fp32 score workspace.
+    XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
+                                   c8 ? FP32 : hiddenState.dtype, DBG_LOC);
+    XliteOpIndexerTopK(
+        rt, c8 ? *q8 : idxQ, kvCache[CXA_INDEXER_K], c8 ? *scaledWeights : idxWeight, scores,
+        lastTopk, _dsaSeqPositions, topkIndices, rt._attnQueryStartLoc, rt._attnLens,
+        rt._attnCachedLens,
+        LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_INDEXER_K), _sync,
+        idxNHeads, indexerHeadDim, _c.blockSizes[CXA_INDEXER_K], batch, _c.indexTopK, 0,
+        c8 ? kvCache[CXA_INDEXER_K_SCALE] : XTensor(), ratio);
+    rt.PutTensor(idxQ);
+    rt.PutTensor(idxWeight);
+    rt.PutTensor(scores);
+    rt.PutTensor(lastTopk);
+    if (q8 != nullptr) {
+        rt.PutTensor(*q8);
+        rt.PutTensor(*scaledWeights);
+    }
+
     return &topkIndices;
 }
 
@@ -951,12 +1135,21 @@ void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<XTensor> &
                           : ROUND_UP(rt._maxTotalLens / _c.compressRatios[layer], 4 * CXA_SVCK0);
     XTensor &scores = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvsize},
                                    hiddenState.dtype, DBG_LOC);
+    XTensor emptyBt;
+    // Read path walks the idx2 paged block_table (host-carried, no per-ratio
+    // lookup): the kernel bounds its walk by compressRatio, so one padded pool
+    // table serves every ratio.
+    XTensor *compressBt =
+        (_c.compressRatios[layer] > 0)
+            ? &LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_COMPRESS_KV)
+            : nullptr;
     XliteOpCXA(rt, q, kvCache[CXA_SWA_KV], kvCache[CXA_COMPRESS_KV],
-               rt._attnBlockTables[CXA_SWA_KV], rt._attnBlockTables[CXA_COMPRESS_KV],
-               _c.blockSizes[CXA_SWA_KV], _c.blockSizes[CXA_COMPRESS_KV], attnSink[layer], scores,
-               o, rt._batch, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens, nLocalHeads,
-               _c.headDim, _c.softmaxScale, _c.windowSize, kvsize, _c.compressRatios[layer],
-               _c.indexTopK, pTopkIndices == nullptr ? XTensor() : *pTopkIndices, false);
+               LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_SWA_KV),
+               compressBt ? *compressBt : emptyBt, _c.blockSizes[CXA_SWA_KV],
+               _c.blockSizes[CXA_COMPRESS_KV], attnSink[layer], scores, o, rt._batch,
+               rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens, nLocalHeads, _c.headDim,
+               _c.softmaxScale, _c.windowSize, kvsize, _c.compressRatios[layer], _c.indexTopK,
+               pTopkIndices == nullptr ? XTensor() : *pTopkIndices, false);
     rt.PutTensor(scores);
 
     if (pTopkIndices) {
@@ -972,7 +1165,10 @@ void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<XTensor> &
     o.View({hiddenState.shape[0], nLocalGroups, nLocalHeads * _c.headDim / nLocalGroups});
     XTensor &oa = rt.GetTensor({hiddenState.shape[0], nLocalGroups * _c.oLoraRank},
                                hiddenState.dtype, DBG_LOC);
-    XliteOpMatmul(rt, o, attnWoA[layer], oa, _c.weightNZ);
+    // wo_a is ND (skip_weight_nz_conversion=True) — pass false even when
+    // weightNZ is on, else the bf16 kernel reads ND as NZ → garbage. wo_b
+    // below is NZ-converted, so _c.weightNZ stays correct for it.
+    XliteOpMatmul(rt, o, attnWoA[layer], oa, false);
     rt.PutTensor(o);
 
     XliteOpMatmul(rt, oa, attnWoB[layer], hiddenState, _c.weightNZ);
@@ -1909,7 +2105,7 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK, _layerTypes);
+                   _c.indexTopK, _layerTypes, _c.compressRatios);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
         inputIds.View(rt.batchedTokens);
@@ -1951,7 +2147,7 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK, _layerTypes);
+                   _c.indexTopK, _layerTypes, _c.compressRatios);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -1974,7 +2170,7 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK, _layerTypes);
+                   _c.indexTopK, _layerTypes, _c.compressRatios);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -2117,13 +2313,17 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
             }
         }
     } else if (_c.attnType == XMODEL_ATTN_CXA) {
-        // Per-layer 5-tuple: (indexer_state, indexer_k, compress_kv, state, swa_kv).
-        // Each cache has its own block_num sized to the slots it actually holds.
-        // indexer_* exist only on compress_ratio==4 layers; compress_kv/state exist
-        // only on compress_ratio!=0 layers; swa_kv exists on every layer.
-        if (kvCache[0].size() != 5) {
-            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                                     ": CXA kv cache must be a 5-tuple per layer");
+        // Per-layer tuple (see CxaCacheIndex): indexer_* on ratio==4 layers,
+        // compress_kv/state on ratio!=0 layers, swa_kv on every layer; the 6th
+        // scale slot is LI-C8 layers only.
+        bool hasC8 = false;
+        for (uint32_t i = 0; i < _c.nLayers; ++i) {
+            bool c8Layer = !_c.indexC8Mask.empty() && _c.indexC8Mask[i];
+            if (kvCache[i].size() != (c8Layer ? 6 : 5)) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": CXA kv cache tuple size must match indexC8Mask");
+            }
+            hasC8 = hasC8 || c8Layer;
         }
         // check layer 2
         uint32_t checkLayer = _c.nLayers <= 2 ? 0 : 2;
@@ -2131,6 +2331,11 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
         bool hasIndexer = (ratio == 4);
         bool hasCompress = (ratio != 0);
         uint32_t coff = 1 + (hasIndexer ? 1 : 0);  // overlap == (ratio == 4)
+        bool c8CheckLayer = !_c.indexC8Mask.empty() && _c.indexC8Mask[checkLayer];
+        if (hasC8 && !hasIndexer) {
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                     ": CXA LI-C8 requires a compress_ratio==4 check layer");
+        }
 
         auto isEmpty = [](XTensor &t) { return t.numel == 0 || t.shape.empty(); };
         auto checkShape = [](XTensor &t, uint32_t blockSize, uint32_t headNum, size_t dim,
@@ -2155,6 +2360,22 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                        2 * coff * _c.indexHeadDim, "indexer state cache");
             checkShape(indexerK, _c.blockSizes[CXA_INDEXER_K], 1, _c.indexHeadDim,
                        "indexer k cache");
+            if (c8CheckLayer) {
+                // int8 k + fp16 scale packed into one page (block-strided,
+                // stride[0] >= blockSize*dim).
+                const XTensor &indexerKScale = kvCache[checkLayer][CXA_INDEXER_K_SCALE];
+                if (indexerK.dtype != INT8 || indexerKScale.dtype != FP16 ||
+                    indexerKScale.shape !=
+                        std::vector<size_t>{indexerK.shape[0], indexerK.shape[1], 1, 1}) {
+                    throw std::runtime_error(
+                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                        ": CXA LI-C8 requires an int8 indexer k cache and a paired fp16 "
+                        "scale cache [block_num, block_size, 1, 1]");
+                }
+            } else if (indexerK.dtype != BF16) {
+                throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                                         ": CXA non-C8 indexer k cache must be bf16");
+            }
         } else {
             if (!isEmpty(indexerState) || !isEmpty(indexerK)) {
                 throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
@@ -2172,7 +2393,16 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
             }
             checkShape(compressKv, _c.blockSizes[CXA_COMPRESS_KV], 1, _c.headDim,
                        "compress kv cache");
-            checkShape(state, _c.blockSizes[CXA_STATE], 1, 2 * coff * _c.headDim, "state cache");
+            // State block_size is per-ratio (host-paged), not pinned to
+            // _c.blockSizes[CXA_STATE] — validate other dims + non-zero only;
+            // the forward reads the actual size from shape[1].
+            if (state.shape.size() != 4 || state.shape[1] == 0 || state.shape[2] != 1 ||
+                state.shape[3] != 2 * coff * _c.headDim) {
+                throw std::runtime_error(
+                    std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                    ": CXA state cache shape not match [block_num, block_size(per-ratio), 1, "
+                    "2*coff*head_dim]");
+            }
         } else {
             if (!isEmpty(compressKv) || !isEmpty(state)) {
                 throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) +
@@ -2279,6 +2509,10 @@ size_t XModel::DummyRun()
 
                 auto emptyTensor = [&]() -> XTensor { return XTensor({0}, embed.dtype, nullptr); };
 
+                // LI-C8 layers carry a 6th fp16 scale slot; dummy tuples must
+                // match registration (5 vs 6) or the pool-size walk below
+                // indexes a missing slot.
+                bool c8Layer = !_c.indexC8Mask.empty() && _c.indexC8Mask[i];
                 XTensor indexerState =
                     hasIndexer ? XTensor({idxStateBlocks, _c.blockSizes[CXA_INDEXER_STATE], 1,
                                           2 * coff * _c.indexHeadDim},
@@ -2287,7 +2521,7 @@ size_t XModel::DummyRun()
                 XTensor indexerK =
                     hasIndexer
                         ? XTensor({idxKvBlocks, _c.blockSizes[CXA_INDEXER_K], 1, _c.indexHeadDim},
-                                  embed.dtype, nullptr)
+                                  c8Layer ? INT8 : embed.dtype, nullptr)
                         : emptyTensor();
                 XTensor compressKv =
                     hasCompress
@@ -2301,6 +2535,11 @@ size_t XModel::DummyRun()
                 XTensor swaKv({swaBlocks, _c.blockSizes[CXA_SWA_KV], 1, _c.headDim}, embed.dtype,
                               nullptr);
                 kvCache[i] = {indexerState, indexerK, compressKv, state, swaKv};
+                if (c8Layer) {
+                    kvCache[i].emplace_back(  // Cache for scale
+                        std::vector<size_t>{idxKvBlocks, _c.blockSizes[CXA_INDEXER_K], 1, 1}, FP16,
+                        nullptr);
+                }
             }
         }
         return kvCache;
@@ -2331,7 +2570,27 @@ size_t XModel::DummyRun()
         if (IsHybridAttn(_c.attnType) && attnMeta.blockTables.size() < 2) {
             attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, 1}, INT32, nullptr);
         }
-        attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);
+        // slotMapping: one per blockSizes entry (per-cache) for non-hybrid; hybrid
+        // carries one main-KV table (family slots live in blockTables[1..]).
+        const size_t nSlotMappings = IsHybridAttn(_c.attnType) ? 1 : _c.blockSizes.size();
+        for (size_t s = 0; s < nSlotMappings; s++) {
+            attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);
+        }
+        // CXA DummyRun (shapes only): override Indexer-K — the generic loop
+        // sizes it as per-token, but it's a per-block cache; size it ratio==4
+        // per-block so pool sizing matches the real forward.
+        if (_c.attnType == XMODEL_ATTN_CXA &&
+            std::find(_c.compressRatios.begin(), _c.compressRatios.end(), 4u) !=
+                _c.compressRatios.end()) {
+            const uint32_t compBs = _c.blockSizes[CXA_COMPRESS_KV];
+            uint32_t rowsPerReq4 = _c.maxSeqLen / 4;
+            uint32_t compBlocksPerReq4 = DIV_ROUND_UP(rowsPerReq4, compBs);
+            uint32_t nBlocksPerReq4 = ((cachedLen + seqLen) / 4) - (cachedLen / 4);
+            size_t nBlocks4 = static_cast<size_t>(batchSize) * nBlocksPerReq4;
+            attnMeta.slotMapping[CXA_INDEXER_K].Init(std::vector<size_t>{nBlocks4}, INT32, nullptr);
+            attnMeta.blockTables[CXA_INDEXER_K].Init(
+                std::vector<size_t>{batchSize, compBlocksPerReq4}, INT32, nullptr);
+        }
         return attnMeta;
     };
 
@@ -2360,7 +2619,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype),
-                       _c.indexTopK, _layerTypes);
+                       _c.indexTopK, _layerTypes, _c.compressRatios);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
@@ -2394,7 +2653,7 @@ size_t XModel::DummyRun()
                        (_c.nDenseLayers < _c.nLayers)
                            ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                            : static_cast<int>(embed.dtype),
-                       _c.indexTopK, _layerTypes);
+                       _c.indexTopK, _layerTypes, _c.compressRatios);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);

@@ -1031,13 +1031,19 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
     }
     swaBlockTables.AtLeast2D();
     compressBlockTables.AtLeast2D();
+    // ratio==0 layers pass an empty compressBt (no compress cache): stride is
+    // empty, so fall back to 0 — the kernel skips the compress walk (kvSize==0).
+    uint32_t swaStride =
+        swaBlockTables.stride.empty() ? 0 : static_cast<uint32_t>(swaBlockTables.stride[0]);
+    uint32_t compStride = (dense || compressBlockTables.stride.empty())
+                              ? 0
+                              : static_cast<uint32_t>(compressBlockTables.stride[0]);
     launchKernel(rt.aicNum, rt.stream, q.ptr, swaKCache.ptr, compressKCache.ptr, swaBlockTables.ptr,
-                 compressBlockTables.ptr, swaBlockSize, dense ? 0 : compressBlockSize,
-                 static_cast<uint32_t>(swaBlockTables.stride[0]),
-                 dense ? 0 : static_cast<uint32_t>(compressBlockTables.stride[0]), attnSink.ptr,
-                 scores.ptr, output.ptr, batch, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, nHeads,
-                 headDim, scale, windowSize, kvSize, compressRatio, indexTopK, topkIndices.ptr,
-                 dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
+                 compressBlockTables.ptr, swaBlockSize, dense ? 0 : compressBlockSize, swaStride,
+                 compStride, attnSink.ptr, scores.ptr, output.ptr, batch, queryStartLoc.ptr,
+                 lens.ptr, cachedLens.ptr, nHeads, headDim, scale, windowSize, kvSize,
+                 compressRatio, indexTopK, topkIndices.ptr, dense ? 1u : 0u,
+                 rt._attnZeroBuffer.ptr);
 }
 
 // Unified MLA decode kernel entry. dense=false walks the paged KV cache via
@@ -1376,7 +1382,10 @@ static void RunIndexerPrepareC8(XRuntime &rt, const XTensor &kw, const XTensor &
     if (kw.shape[0] == 0) {
         return;
     }
-    size_t tasks = DIV_ROUND_UP(kw.shape[0], INDEXER_C8_TILE_ROWS) + (isLong ? kw.shape[0] : 0);
+    // Query tasks are chunked: each token's heads span DIV_ROUND_UP(heads, tile) tasks.
+    uint32_t qChunks = DIV_ROUND_UP(heads, INDEXER_C8_TILE_ROWS);
+    size_t tasks =
+        DIV_ROUND_UP(kw.shape[0], INDEXER_C8_TILE_ROWS) + (isLong ? kw.shape[0] * qChunks : 0);
     uint32_t cores = PickMinBlockNum(rt.aicNum, tasks);
     XTensor &workspace = rt.GetTensor({4, cores, INDEXER_C8_TILE_ROWS, 128}, BF16, DBG_LOC);
     if (!IsDummyRuntime(rt)) {
@@ -1426,8 +1435,11 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
                         scaledWeights.ptr == nullptr))) {
             throw std::invalid_argument("indexer_prepare: missing LI-C8 buffers");
         }
-        if (indexHeadDim != 128 || ropeHeadDim != 64 || indexNHeads != 32 || kw.dtype != BF16 ||
-            !EachXDtype(FP32, kNorm, kNormBias) || (isLong && q.dtype != BF16)) {
+        // The query path tiles heads in INDEXER_C8_TILE_ROWS chunks; the Top-K consumer
+        // additionally requires heads to be a multiple of 16 and at most XLITE_MAX_M0.
+        if (indexHeadDim != 128 || ropeHeadDim != 64 || indexNHeads == 0 || indexNHeads % 16 != 0 ||
+            indexNHeads > XLITE_MAX_M0 || kw.dtype != BF16 || !EachXDtype(FP32, kNorm, kNormBias) ||
+            (isLong && q.dtype != BF16)) {
             throw std::invalid_argument("indexer_prepare: unsupported LI-C8 inputs");
         }
         RunIndexerPrepareC8(rt, kw, kNorm, kNormBias, freqs, position, slotMapping, indexKCache,
@@ -1480,6 +1492,87 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
                         XTensor(), XTensor(), XTensor(), XTensor(), 0, false, normEps);
 }
 
+void XliteOpQuantCacheC8(XRuntime &rt, const XTensor &x, const XTensor &slotMapping,
+                         XTensor &kCache, XTensor &kScaleCache, uint32_t blockSize)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    const std::string fnName = "XliteOpQuantCacheC8: ";
+    auto quantCheck = [&](bool ok, const std::string &what) {
+        if (!ok) {
+            throw std::runtime_error(fnName + "check tensor failed! " + what + ", " + XT_STR(x) +
+                                     XT_STR(slotMapping) + XT_STR(kCache) + XT_STR(kScaleCache));
+        }
+    };
+    quantCheck(x.dtype == BF16 && x.shape.size() == 2, "x must be bf16 [rows, dim]");
+    uint32_t dim = x.shape[1];
+    quantCheck(dim != 0 && dim % 64 == 0 && dim <= QUANT_CACHE_C8_MAX_DIM,
+               "dim must be a nonzero multiple of 64, at most QUANT_CACHE_C8_MAX_DIM");
+    quantCheck(slotMapping.dtype == INT32 && slotMapping.numel == x.shape[0],
+               "slotMapping must be int32 [rows]");
+    quantCheck(kScaleCache.dtype == FP16, "kScaleCache must be fp16 [capacity]");
+    quantCheck(kCache.dtype == INT8 && kCache.numel == kScaleCache.numel * dim,
+               "kCache must be int8 [capacity, dim]");
+    quantCheck(blockSize != 0 && kScaleCache.numel % blockSize == 0,
+               "blockSize must divide the cache capacity");
+    // Paged pool (rank > 2): block pitch from stride[0]. Flat pool: one
+    // synthetic block per blockSize rows (stride defaults to blockSize*dim).
+    uint32_t kCacheStride = blockSize * dim;
+    if (kCache.shape.size() > 2) {
+        quantCheck(kCache.stride[1] == dim, "kCache rows must be contiguous inside a block");
+        kCacheStride = static_cast<uint32_t>(kCache.stride[0]);
+    } else if (kCache.shape.size() == 2) {
+        quantCheck(kCache.stride[0] == dim, "2-D kCache must be row-contiguous");
+    } else if (kCache.shape.size() == 1) {
+        quantCheck(kCache.stride[0] == 1, "1-D kCache must be contiguous");
+    }
+    uint32_t kScaleCacheStride = blockSize;
+    if (kScaleCache.shape.size() > 1) {
+        quantCheck(kScaleCache.stride[1] == 1, "kScaleCache must be contiguous inside a block");
+        kScaleCacheStride = static_cast<uint32_t>(kScaleCache.stride[0]);
+    } else if (kScaleCache.shape.size() == 1) {
+        quantCheck(kScaleCache.stride[0] == 1, "1-D kScaleCache must be contiguous");
+    }
+    if (x.shape[0] == 0) {
+        return;
+    }
+    aclrtlaunch_quant_cache_c8_bfloat16_t(PickMinBlockNum(rt.aivNum, x.shape[0]), rt.stream, x.ptr,
+                                          slotMapping.ptr, kCache.ptr, kScaleCache.ptr, x.shape[0],
+                                          dim, static_cast<uint32_t>(kScaleCache.numel), blockSize,
+                                          kCacheStride, kScaleCacheStride);
+}
+
+void XliteOpQuantQC8(XRuntime &rt, const XTensor &q, const XTensor &headWeight, XTensor &q8,
+                     XTensor &scaledWeights, float rotateScale)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    const std::string fnName = "XliteOpQuantQC8: ";
+    auto quantCheck = [&](bool ok, const std::string &what) {
+        if (!ok) {
+            throw std::runtime_error(fnName + "check tensor failed! " + what + ", " + XT_STR(q) +
+                                     XT_STR(headWeight) + XT_STR(q8) + XT_STR(scaledWeights));
+        }
+    };
+    quantCheck(q.dtype == BF16 && q.shape.size() == 2, "q must be bf16 [rows, dim]");
+    uint32_t dim = q.shape[1];
+    quantCheck(dim != 0 && dim % 64 == 0 && dim <= QUANT_Q_C8_MAX_DIM,
+               "dim must be a nonzero multiple of 64, at most QUANT_Q_C8_MAX_DIM");
+    quantCheck(headWeight.dtype == BF16 && headWeight.numel == q.shape[0],
+               "headWeight must be bf16 [rows]");
+    quantCheck(q8.dtype == INT8 && q8.numel == q.shape[0] * dim, "q8 must be int8 [rows, dim]");
+    quantCheck(scaledWeights.dtype == FP16 && scaledWeights.numel == q.shape[0],
+               "scaledWeights must be fp16 [rows]");
+    if (q.shape[0] == 0) {
+        return;
+    }
+    aclrtlaunch_quant_q_c8_bfloat16_t(PickMinBlockNum(rt.aivNum, q.shape[0]), rt.stream, q.ptr,
+                                      headWeight.ptr, q8.ptr, scaledWeights.ptr, q.shape[0], dim,
+                                      rotateScale);
+}
+
 void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XTensor &ape,
                        const XTensor &norm, const XTensor &freqs, XTensor &weightedSum,
                        const XTensor &queryStartLoc, const XTensor &queryLens,
@@ -1518,8 +1611,11 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
               "compressPositions must be int64 [nTotalBlocks]");
     compCheck(compressSlotMapping.dtype == INT32 && compressSlotMapping.numel == nTotalBlocks,
               "compressSlotMapping must be int32 [nTotalBlocks]");
-    compCheck(queryStartLoc.dtype == INT32 && queryStartLoc.numel == batch,
-              "queryStartLoc must be int32 [batch]");
+    // queryStartLoc may be [batch] (v0/v1 per-batch starts) or [batch+1] (v2
+    // cu_seqlens). The compressor kernel only reads the first `batch` entries, so
+    // either layout is valid.
+    compCheck(queryStartLoc.dtype == INT32 && queryStartLoc.numel >= batch,
+              "queryStartLoc must be int32 [batch] or [batch+1]");
     compCheck(queryLens.dtype == INT32 && queryLens.numel == batch,
               "queryLens must be int32 [batch]");
     compCheck(cachedLens.ptr == nullptr || (cachedLens.dtype == INT32 && cachedLens.numel == batch),
@@ -1536,13 +1632,27 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
               "stateCacheStrideDim0 must cover stateBlockSize * 2*coff*headDim elements");
     compCheck(state.ptr == nullptr || state.dtype == FP32,
               "state must be fp32 [blocks, stateBlockSize, 1, 2*coff*headDim]");
-    compCheck(
-        compressKv.numel == 0 || (compressKv.shape.size() == 4 && compressKv.shape[3] == headDim),
-        "compressKv must be [blocks, compressBlockSize, 1, headDim]");
+    compCheck(compressKv.ptr == nullptr ||
+                  (compressKv.shape.size() == 4 && compressKv.shape[3] == headDim),
+              "compressKv must be [blocks, compressBlockSize, 1, headDim]");
     compCheck(ratio == 2 || ratio == 4 || ratio == 128, "ratio must be 2, 4 or 128");
 
+    // C8 mode: compressKv is absent (pybind None leaves the default-constructed
+    // XTensor with ptr == nullptr — the codebase-wide "no tensor" signal), so the
+    // kernel writes no paged cache — it ropes weightedSum in place and the caller
+    // feeds it to XliteOpQuantCacheC8. The instantiation therefore follows
+    // weightedSum instead of compressKv.
     KERNEL_PTR_TYPE(compressor) * launchKernel;
-    if (compressKv.dtype == FP16) {
+    if (compressKv.ptr == nullptr) {
+        if (weightedSum.dtype == BF16) {
+            launchKernel = aclrtlaunch_compressor_bfloat16_t;
+        } else if (weightedSum.dtype == FP16) {
+            launchKernel = aclrtlaunch_compressor_float16_t;
+        } else {
+            std::string err_str = DBG_PREFIX + XT_STR(weightedSum) + XT_STR(compressKv);
+            throw std::runtime_error(err_str + "not supported!");
+        }
+    } else if (compressKv.dtype == FP16) {
         launchKernel = aclrtlaunch_compressor_float16_t;
     } else if (compressKv.dtype == BF16) {
         launchKernel = aclrtlaunch_compressor_bfloat16_t;
@@ -2237,10 +2347,18 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
         throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
                                  std::to_string(MAX_TOPK_NUM));
     }
+    // weight layout: [T, nHeads] (int8 scaledWeights / CXA bf16 head weights)
+    // or DSA's fused kw [T, headDim + nHeads] with head weights tail-aligned
+    // at column headDim.
+    uint32_t weightCols = weight.shape.size() == 2 ? static_cast<uint32_t>(weight.shape[1]) : 0;
+    if (weightCols != nHeads && weightCols != headDim + nHeads) {
+        throw std::invalid_argument(std::string(__func__) +
+                                    ": weight must be [T, nHeads] or [T, headDim+nHeads]");
+    }
     if (kCache.dtype == INT8) {
-        if (nHeads != 32 || headDim != 128 || blockSize < 16 || blockSize > 128 ||
-            blockSize % 16 != 0 || MAX_INDEXER_KV_TILE_LEN % blockSize != 0 || batch == 0 ||
-            topK < 32 || topK % 32 != 0) {
+        if (nHeads == 0 || nHeads % 16 != 0 || nHeads > XLITE_MAX_M0 || headDim != 128 ||
+            blockSize < 16 || blockSize > 128 || blockSize % 16 != 0 ||
+            MAX_INDEXER_KV_TILE_LEN % blockSize != 0 || batch == 0 || topK < 32 || topK % 32 != 0) {
             throw std::invalid_argument("indexer_topk: unsupported LI-C8 configuration");
         }
         if (kScaleCache.shape.empty() || q.dtype != INT8 ||
@@ -2248,11 +2366,16 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
             throw std::invalid_argument("indexer_topk: unsupported LI-C8 inputs");
         }
         if (q.shape[0] != 0) {
+            // Packed pages give the scale cache its own block stride; an empty
+            // (dense) stride falls back to flat addressing in the kernel's MAX guard.
+            uint32_t kScaleCacheStride =
+                kScaleCache.stride.empty() ? 0 : static_cast<uint32_t>(kScaleCache.stride[0]);
             aclrtlaunch_indexer_topk_int8_t(
                 rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                 topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
-                blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr);
+                blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr,
+                kScaleCacheStride, compressRatio, weightCols);
         }
         return;
     }
@@ -2272,7 +2395,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                  topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
-                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio);
+                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio, weightCols);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,

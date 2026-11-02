@@ -8,7 +8,7 @@ GLM-5.1 Lightning Indexer(LI)的 **C8(INT8 量化)** K/Q 预处理算子。Host 
 - **Q**(`is_long`):每 head 做 RoPE → Hadamard → 量化(**不做 LayerNorm**),稠密写入 INT8 `q8`、FP16 `q_scale`,并把 Q scale 折叠进头权重 `scaled_weights`。
 - **独立 K 测试入口**(`indexer_k_cache_c8`):同一 kernel、Q 阶段禁用,用于单测 K 路径。
 
-固定配置:`dim = 128`、`rope_dim = 64`(`csrc/kernels/indexer_prepare_c8.h` 的 `IndexerC8Buffers`),量化上限为 127。`XRuntime::InitIndexerHadamard` 生成并复用归一化 Sylvester 矩阵 `H`,元素为 `±BF16(1/√128) = ±0.08837890625`。Indexer 用 32 个头、head dim 128、RoPE dim 64,局部 `tpSize = 1`。
+固定配置:`dim = 128`、`rope_dim = 64`(`csrc/kernels/indexer_prepare_c8.h` 的 `IndexerC8Buffers`),量化上限为 127。`XRuntime::InitIndexerHadamard` 生成并复用归一化 Sylvester 矩阵 `H`,元素为 `±BF16(1/√128) = ±0.08837890625`。Indexer 用 head dim 128、RoPE dim 64、**任意 16 的倍数且 ≤ `XLITE_MAX_M0`(128)个头**(如 32 或 64),局部 `tpSize = 1`;head 数超过 32 时 Q 阶段按每 32 个 head 一块分多任务处理(见下文"总体结构与并行")。
 
 数学语义:
 
@@ -35,7 +35,7 @@ indexer_prepare(rt, kw, k_norm, k_norm_bias, freqs, position, index_head_dim,
 
 host 侧有两个算子入口:
 
-- `XliteOpIndexerPrepare`(`csrc/op.cpp` 的 `XliteOpIndexerPrepare`,关键字 `if (indexKCache.dtype == INT8)` LI-C8 分支)在 `indexKCache.dtype == INT8` 时走 LI-C8:约束 `indexHeadDim==128 && ropeHeadDim==64 && indexNHeads==32 && kw 为 BF16 && kNorm/kNormBias 为 FP32 && q 为 BF16 && tpSize==1`,长序列时 `q/q8/qScale/scaledWeights` 必须非空;
+- `XliteOpIndexerPrepare`(`csrc/op.cpp` 的 `XliteOpIndexerPrepare`,关键字 `if (indexKCache.dtype == INT8)` LI-C8 分支)在 `indexKCache.dtype == INT8` 时走 LI-C8:约束 `indexHeadDim==128 && ropeHeadDim==64 && indexNHeads 为 16 的倍数且 1≤indexNHeads≤XLITE_MAX_M0(128) && kw 为 BF16 && kNorm/kNormBias 为 FP32 && q 为 BF16 && tpSize==1`,长序列时 `q/q8/qScale/scaledWeights` 必须非空;
 - `XliteOpIndexerKCacheC8`(`csrc/op.cpp` 的 `XliteOpIndexerKCacheC8`)为独立 K 测试接口,禁用 Q 阶段。两者共用 `RunIndexerPrepareC8`。融合 kernel 的签名(`csrc/kernels/indexer_prepare_c8.h` 的 `INDEXER_PREPARE_C8_FUNC_DEFINE` 宏):
 
 ```cpp
@@ -50,7 +50,7 @@ indexer_prepare_c8_<dtype>(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR fre
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| kw / k | 输入(只读) | `[tokens, 160]` | bf16 | Indexer K 投影;`160 = 128(head_dim) + 32(heads)` |
+| kw / k | 输入(只读) | `[tokens, 128 + heads]` | bf16 | Indexer K 投影;前 128 列为 K,尾部 `heads` 列为头权重(heads=32 时即 `[tokens, 160]`) |
 | weight(kNorm) | 输入 | `[128]` | fp32 | LayerNorm weight |
 | bias(kNormBias) | 输入 | `[128]` | fp32 | LayerNorm bias |
 | freqs | 输入 | `[max_position, 64]`(bf16/fp32 交错 cos/sin)或等价的 `[max_position, 32, 2]`(fp32)/`[max_position, 32]`(complex64) | bf16 / fp32 / complex64 | 预计算 RoPE 频率表;host 按 dtype 推断 `freqs_fp32`(`dtype != BF16` 即真,fp32 与 complex64 同走 fp32 路径) |
@@ -58,13 +58,13 @@ indexer_prepare_c8_<dtype>(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR fre
 | slots(slot_mapping) | 输入 | `[tokens]` | int32 | token → cache 平坦槽位;`-1` 跳过(padding) |
 | k_cache(index_k_cache) | 输出 | `[num_blocks, block_size, 1, 128]` | int8 | paged INT8 K cache;`capacity = num_blocks*block_size` |
 | k_scale_cache | 输出 | `[num_blocks, block_size, 1, 1]` | fp16 | 每 token 一个 FP16 scale;短序列也写 |
-| q | 输入(只读) | `[tokens, 4096]` | bf16 | Indexer Q(`4096 = 32*128`);仅 `is_long` 有效,否则传空 |
-| q8 | 输出 | `[tokens, 4096]` | int8 | 量化 Q;仅 `is_long` |
-| q_scale | 输出 | `[tokens, 32]` | fp16 | 每 Q head 一个 scale;仅 `is_long` |
-| scaled_weights | 输出 | `[tokens, 32]` | fp16 | `FP16(原始头权重 × FP16(q_scale))`;仅 `is_long` |
+| q | 输入(只读) | `[tokens, heads*128]` | bf16 | Indexer Q;仅 `is_long` 有效,否则传空(heads=32 时即 `[tokens, 4096]`) |
+| q8 | 输出 | `[tokens, heads*128]` | int8 | 量化 Q;仅 `is_long` |
+| q_scale | 输出 | `[tokens, heads]` | fp16 | 每 Q head 一个 scale;仅 `is_long` |
+| scaled_weights | 输出 | `[tokens, heads]` | fp16 | `FP16(原始头权重 × FP16(q_scale))`;仅 `is_long` |
 | hadamard | 输入 | `[128,128]` | bf16 | Runtime 复用的归一化 Sylvester 矩阵 |
 | workspace | 临时空间 | `[4,cores,32,128]` | bf16 | 每个 AIC 的 Matmul 输入/输出各两份;`cores=min(rt.aicNum,tasks)` |
-| tokens / row_stride / heads / max_position / capacity | — | 标量 | uint32 | `heads=32`;`max_position = freqs.shape[0]`;`capacity = k_scale_cache.numel` |
+| tokens / row_stride / heads / max_position / capacity | — | 标量 | uint32 | `heads` 为 16 的倍数且 ≤ `XLITE_MAX_M0`;`max_position = freqs.shape[0]`;`capacity = k_scale_cache.numel` |
 | freqs_fp32 | — | 标量 | bool | freqs 是否为 fp32(host 推断) |
 | is_long | — | 标量 | bool | 长序列开关,启用 Q 阶段 |
 | norm_eps | — | 标量 | float | LayerNorm epsilon |
@@ -77,7 +77,7 @@ indexer_prepare_c8_<dtype>(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR fre
 |---|---|---|
 | `indexer_prepare_c8_bfloat16_t` | `csrc/kernels/indexer_prepare_c8_bfloat16_t.cpp` | kw/q 为 bf16;kNorm/kNormBias 为 fp32;k_cache 为 int8、scale 为 fp16 |
 
-仅 BF16 一种实例化(配置固定为 32 头/128 维/64 RoPE)。dtype 分派见 `csrc/op.cpp` 的 `XliteOpIndexerPrepare` / `XliteOpIndexerKCacheC8`。kernel 使用 `KERNEL_TYPE_MIX_AIC_1_2`,每个 AIC 配对两个 AIV;Cube 部分复用 `Matmul<bfloat16_t,float,bfloat16_t>`。
+仅 BF16 一种实例化(head dim 128 / RoPE dim 64 固定;head 数为 16 的倍数且 ≤ `XLITE_MAX_M0`,见下文"多 head 支持")。dtype 分派见 `csrc/op.cpp` 的 `XliteOpIndexerPrepare` / `XliteOpIndexerKCacheC8`。kernel 使用 `KERNEL_TYPE_MIX_AIC_1_2`,每个 AIC 配对两个 AIV;Cube 部分复用 `Matmul<bfloat16_t,float,bfloat16_t>`。
 
 ## 实现原理
 
@@ -85,7 +85,28 @@ indexer_prepare_c8_<dtype>(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR fre
 
 `RunIndexerPrepareC8` 从 Runtime 内存池分配 `[4,cores,32,128]` BF16 工作区,四个平面分别为 `prepared[0/1]`、`rotated[0/1]`。每个 AIC 在每个平面中独占一个 32 行 tile,两个 AIV 各最多处理 16 行。工作区大小由启动核数决定,24 个 AIC 时共 768 KiB。临时空间计入 DummyRun;固定矩阵独立占 32 KiB,首次使用时分配,在 Runtime 析构时释放。
 
-顶层 `indexer_prepare_c8` 按 tile 分配任务。前 `ceil(tokens/32)` 个任务处理 K,长序列时再为每个 token 的 32 个 Q head 分配一个任务。任务按 `block_idx + i*block_num` 轮询分配给 AIC/AIV 组合;K 尾块只处理有效行,没有有效行的 AIV 仍参与跨核同步。K、Q 复用同一份 UB,GM 双缓冲允许下一 tile 的前处理与上一 tile 的矩阵乘重叠。
+顶层 `indexer_prepare_c8` 按 tile 分配任务。前 `ceil(tokens/32)` 个任务处理 K,长序列时再为每个 token 分配 `ceil(heads/32)` 个 Q 任务、每任务处理该 token 的一段(至多 32 个)head。任务按 `block_idx + i*block_num` 轮询分配给 AIC/AIV 组合;K 尾块与 head 数非 32 倍数的 Q 尾块只处理有效行,没有有效行的 AIV 仍参与跨核同步。K、Q 复用同一份 UB,GM 双缓冲允许下一 tile 的前处理与上一 tile 的矩阵乘重叠。
+
+### 多 head(>32)支持(chunked q-task)
+
+heads=64 需要改动 Q 侧任务分解:旧实现假设 Q **每 token 恰好一个任务**——任务序号直接当 token 序号,Q 行寻址硬编码 32(`first * 32 + rowOffset`),mm 片高直接取 `heads`(=32)。heads=64 时单个任务无法承载,物理约束有三:
+
+1. 任务片高固定 `INDEXER_C8_TILE_ROWS = 32`:AIC `TaskTilesInit` 的片形是 32×128×128,`Matmul` 分块按此设置;
+2. UB ping-pong 按 32 行分配(`IndexerC8Buffers` 的 `rows = 32/2`,两个 AIV subblock 各 16 行,`rowOffset = get_subblockid() * rows`);
+3. 一个 Q 任务还要随行携带 head weight 与 position 元数据,均为 32 行规格。
+
+改法是把"每 token 一个 Q 任务"泛化为**按 head 分块**:`qChunks = ceil(heads/32)`,每 token 展开为 `qChunks` 个任务,每任务至多 32 个 head 行(`indexer_c8_prepare_tile` / `indexer_c8_store_tile` 的 query 分支):
+
+- 任务解码:`token = (task - keyTiles) / qChunks`,`first = (task - keyTiles) % qChunks * 32 + rowOffset`;K 任务不变(一个 tile 覆盖 32 个 token);
+- Q 行寻址去掉硬编码 32:`row = token * heads + first`,head weight 改为 `token * rowStride + first`(每 token 携带 `heads` 个权重,chunk 任务只取自己的切片);
+- mm 片高改 `MIN(32, heads - chunkOffset)`,尾块只算有效行;position 每任务只搬 1 个(token 级)。
+
+`heads` 本就是 kernel 参数(host 一直传,仅用于旧校验 `indexNHeads == 32`),现在参与 kernel 内任务分解。head 数约束由 **Top-K 消费侧的 cube 分形粒度**决定。prepare 自身的下限更松:K 路径逐行 scatter + slot 哨兵,count 可为任意值(token 数运行时可变,必须如此);Q 路径任务切分同样任意,但 head weight 的搬运用裸 `copy_gm_to_ubuf_align_b16`(`count * 2` 字节),要求 count 为 8 的倍数,即 `heads % 8 == 0`。host 侧对 prepare 也检查 `%16`,是因为其输出(q8/qScale/scaledWeights)与 Top-K 同属一条流水线,在最早入口拒掉非法 head 数比留到 Top-K 截断/错位要好:
+
+- `%16 == 0`:Top-K 把 head 权重矩阵按 `weightBlockSize = 32/sizeof(WeightDtype)`(fp16 即 16)列一块做 Nd2Nz 转置搬入 L1,`wkBlockNum = nHeads / weightBlockSize` 为整除运算;同时 score mm 把 `(query, head)` 按 `queryTileSize = XLITE_MAX_M0 / nHeads` 个 query 打包成一个 tile 的行,M0 分形为 16 行——heads 非 16 倍数时前者截断、后者打包行数落在非整数个分形上;
+- `≤ XLITE_MAX_M0(128)`:同一 M0 维上限(超过时 Top-K 退化为每 tile 一个 query)。
+
+Top-K kernel 本体逐 head 行独立打分(head-generic),heads=64 只需 host 侧放宽检查,无需改动。
 
 ### IndexerC8Buffers 与 Init
 
@@ -112,7 +133,7 @@ indexer_prepare_c8_<dtype>(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR fre
 
 ### Q 前处理与权重
 
-每个 Q tile 对应一个 token,两个 AIV 各处理 16 个 head。**无 LayerNorm**,共享 position/trig,RoPE 后写入 prepared tile。对应的 16 个 BF16 head weight 一次搬入并保留到计算 `scaled_weights` 时使用;量化后将已舍入为 FP16 的 Q scale 和 BF16 头权重转为 FP32 相乘,最后舍入 FP16 写 `scaled_weights`。
+每个 Q tile 对应一个 token 的一段(≤32 个 head;heads>32 时每 token 占 `ceil(heads/32)` 个 tile),两个 AIV 各处理 16 个 head。**无 LayerNorm**,共享 position/trig,RoPE 后写入 prepared tile。对应的 BF16 head weight 切片一次搬入并保留到计算 `scaled_weights` 时使用;量化后将已舍入为 FP16 的 Q scale 和 BF16 头权重转为 FP32 相乘,最后舍入 FP16 写 `scaled_weights`。
 
 ### 流水线同步
 

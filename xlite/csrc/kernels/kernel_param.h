@@ -49,6 +49,11 @@ enum class NormKind {
 #define CXA_SVCK0 64
 #define MAX_INDEXER_KV_TILE_LEN 4096
 #define INDEXER_C8_TILE_ROWS 32
+// quant_cache_c8 row dim bound: 17B/elem UB footprint + scale staging; 64 | dim.
+#define QUANT_CACHE_C8_MAX_DIM 4096
+// quant_q_c8 row dim bound: 17B/elem UB footprint + five 64-lane staging bufs;
+// 64 | dim.
+#define QUANT_Q_C8_MAX_DIM 4096
 #if MAX_INDEXER_KV_TILE_LEN > INIT_MIN_SEQ_POS
 #error "MAX_INDEXER_KV_TILE_LEN must not exceed INIT_MIN_SEQ_POS"
 #endif

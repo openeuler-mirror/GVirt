@@ -419,7 +419,10 @@ class AttnMetaV2:
             ``[rows >= batch, ceil(max_seq_len / block_size)]`` int32 buffers; entries
             beyond this step's lens are never read. Hybrid family slots: ``[0]``=main
             KV, ``[1..]``=mamba state page ids (``[batch, 1]``) plus an optional KDA
-            tail ring; per-cache layouts: one table per blockSizes entry.
+            tail ring; per-cache layouts: one table per blockSizes entry. For CXA,
+            ``block_tables[2]`` (COMPRESS_KV) carries the compress_kv pool's own
+            paged block table (read path); compressor positions/slot_mapping are
+            runtime-derived, not host fields.
         block_tables_seq_mapping (None): Reserved sequence-to-row mapping for
             block tables; NOT supported yet, must stay ``None``.
     """
@@ -449,6 +452,15 @@ class AttnMetaV2:
     block_tables_seq_mapping: None = ...
     """Reserved sequence-to-row mapping for block tables; NOT supported yet,
     must stay ``None``."""
+    block_tables_per_layer: Sequence[Sequence[torch.Tensor]] = ...
+    """CXA per-layer rows, each ``[5]`` planes. Rows are references — layers of
+    one ratio>0 share a template row, while ratio==0 layers carry their own row
+    (a layer with no metadata entry gets an all-empty row). Empty under V1 /
+    non-CXA."""
+    slot_mapping_per_layer: Sequence[Sequence[torch.Tensor]] = ...
+    """CXA per-layer slot-mapping rows, parallel to ``block_tables_per_layer``.
+    Each row's ``[2]`` (compress_kv) plane carries the per-block write slots of
+    that row's ratio."""
 
 class AttnType(Enum):
     """Attention type enum exported by the native extension."""
@@ -2788,6 +2800,98 @@ def indexer_k_cache_c8(
     """
     ...
 
+
+def quant_cache_c8(
+    rt: Runtime,
+    x: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_cache: torch.Tensor,
+    k_scale_cache: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Quantize bf16 rows into paged int8 keys plus fp16 per-slot scales.
+
+    C8 cache writer for the compressor path: rows are the compressor's
+    post-norm/post-rope ``weightedSum``. Quantization matches
+    :func:`indexer_k_cache_c8` (scale = absmax(row)/127 as fp16,
+    int8 = round_nearest(x * 127/absmax); zero rows give zeros with a zero
+    scale), so caches written by either op are interchangeable. Use contiguous
+    tensors on rt's NPU. Synchronize the row producer before calling; this
+    binding synchronizes on return.
+
+    Slot addressing is block-strided: ``slot = block * block_size + offset``
+    puts the int8 row at ``block * k_cache.stride(0) + offset * dim`` and the
+    fp16 scale at ``block * k_scale_cache.stride(0) + offset`` — DSV4's vllm
+    pool packs K and scales into one page, while a contiguous (dense) pool
+    degenerates to flat addressing.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        x (torch.Tensor): Rows ``[rows, dim]``, bf16; dim a multiple of 64,
+            at most 4096.
+        slot_mapping (torch.Tensor): Flat cache slots ``[rows]``, int32;
+            -1 or slots at/above capacity skip both cache writes.
+        k_cache (torch.Tensor): Output key cache, int8. A paged pool
+            ``[blocks, block_size, (1,) dim]`` may be pitched (stride(0) is
+            the per-block pitch; rows contiguous inside a block); a flat pool
+            (``[capacity, dim]`` or ``[capacity * dim]``) must be contiguous
+            and degenerates to one synthetic block per ``block_size`` rows.
+        k_scale_cache (torch.Tensor): Output per-slot scales, fp16. A paged
+            pool ``[blocks, block_size, (1,) 1]`` may be pitched; a flat
+            ``[capacity]`` pool must be contiguous.
+        block_size (int): Cache rows per block; must divide the capacity
+            (``k_scale_cache.numel()``).
+
+    Returns:
+        None: Caches are written in place; inputs and unwritten slots are
+        unchanged.
+    """
+    ...
+
+
+def quant_q_c8(
+    rt: Runtime,
+    q: torch.Tensor,
+    head_weight: torch.Tensor,
+    q8: torch.Tensor,
+    scaled_weights: torch.Tensor,
+    rotate_scale: float,
+) -> None:
+    """Quantize the rope'd indexer Q to int8 plus fused fp16 scaled weights.
+
+    C8 query quantizer for the V4 indexer path: ``q`` holds the rope'd but
+    NOT rotate_activation'd Q (the caller ropes with doRotate=false and skips
+    the nope-region Muls). Each row quantizes with the
+    :func:`indexer_k_cache_c8` semantics (int8 = round_nearest(x * 127/absmax);
+    zero rows give zeros), and the uniform rotate factor is folded into the
+    de-scale instead of the data: ``scaled_weights[r] = fp16(head_weight[r] *
+    absmax(r) * rotate_scale / 127)``. Row ``r`` is
+    ``(token, head) = (r // heads, r % heads)``; ``q8``, ``head_weight`` and
+    ``scaled_weights`` all use that flat order (topk's int8 branch reads them
+    exactly this way). Use contiguous tensors on rt's NPU; synchronize the
+    rope producer before calling. This binding synchronizes on return.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        q (torch.Tensor): Roped Q rows ``[rows, dim]``, bf16; dim a multiple
+            of 64, at most 4096.
+        head_weight (torch.Tensor): Per-(token, head) projection weights
+            ``[rows]``, bf16 (weights_proj output, already scaled by the
+            indexer score scale).
+        q8 (torch.Tensor): Output quantized Q ``[rows, dim]``, int8.
+        scaled_weights (torch.Tensor): Output fused de-scale weights
+            ``[rows]``, fp16 — pass as topk's ``weight`` input.
+        rotate_scale (float): rotate_activation factor folded into
+            ``scaled_weights`` (1/sqrt(head_dim) for V4; 1.0 for pure
+            quantization).
+
+    Returns:
+        None: ``q8`` and ``scaled_weights`` are written in place; inputs are
+        unchanged.
+    """
+    ...
+
+
 def compressor(
     rt: Runtime,
     kv: torch.Tensor,
@@ -2806,7 +2910,7 @@ def compressor(
     head_dim: int,
     rope_head_dim: int,
     norm_eps: float,
-    compress_kv: torch.Tensor,
+    compress_kv: Optional[torch.Tensor],
     compress_positions: torch.Tensor,
     compress_slot_mapping: torch.Tensor,
     compress_block_size: int,
@@ -2891,8 +2995,12 @@ def compressor(
         head_dim (int): Per-head dimension (512).
         rope_head_dim (int): Rotary dimension applied to the last dims (64).
         norm_eps (float): RMSNorm epsilon.
-        compress_kv (torch.Tensor): Output paged compressed KV cache
-            ``[blocks, compress_block_size, 1, head_dim]``.
+        compress_kv (Optional[torch.Tensor]): Output paged compressed KV cache
+            ``[blocks, compress_block_size, 1, head_dim]``. None switches to C8
+            mode: the rope tail writes ``weighted_sum`` in place (no cache
+            scatter) so the caller can quantize it with
+            :func:`quant_cache_c8`; the rotate scale is left out (the per-row
+            quant scale absorbs it).
         compress_block_size (int): ``compress_kv`` paged-cache block size.
         state_block_size (int): ``state`` paged-cache block size.
         state_cache_stride_dim0 (int): Dense stride of ``state`` along dim 0; 0
@@ -3538,7 +3646,7 @@ def indexer_topk(
         rt (Runtime): Native runtime handle.
         q (torch.Tensor): Query tensor ``[total_query_len, n_heads, head_dim]``, fp16/bf16
             (must match k_cache/weight).
-            C8: ``[total_query_len, 4096]``, int8.
+            C8: ``[total_query_len, n_heads*head_dim]``, int8.
         k_cache (torch.Tensor): Key cache tensor ``[max_num_block*batch, block_size,
             head_dim]``, same dtype as q.
             C8: ``[blocks, block_size, 1, 128]``, int8.
@@ -3548,7 +3656,7 @@ def indexer_topk(
         weight (torch.Tensor): Indexer weight tensor
             ``[total_query_len, head_dim + n_heads]`` (last ``n_heads`` columns are
             the indexer weights), same dtype as q.
-            C8: ``[total_query_len, 32]``, fp16, already multiplied by Q scale.
+            C8: ``[total_query_len, n_heads]``, fp16, already multiplied by Q scale.
         topk_indices (torch.Tensor): Output top-k indices tensor
             ``[total_query_len, top_k]`` (int32), emitted in ascending index order.
             Sparse rows (``p0 >= top_k``) hold the real top-k (all indices in
@@ -3562,7 +3670,7 @@ def indexer_topk(
         block_tables (torch.Tensor): 2-D ``[rows, cols]`` int32 (1-D = single row);
             ``stride[0]`` may exceed ``cols`` (persistent buffers accepted) and is
             narrowed to the lens-derived width, which also sizes the identity table.
-        n_heads (int): Number of heads (32 for C8).
+        n_heads (int): Number of heads (C8: multiple of 16, at most 128).
         head_dim (int): Head dimension (128 for C8).
         block_size (int): KV block size (must be <= 128).
             C8 supports 16, 32, 64 or 128.
@@ -3571,6 +3679,10 @@ def indexer_topk(
             C8 requires a multiple of 32 in [32, 2048].
         k_scale_cache (Optional[torch.Tensor]): C8 per-key scales
             ``[blocks, block_size, 1, 1]``, fp16; None for floating-point inputs.
+            May be pitched: the kernel reads each block's scales contiguously
+            from ``k_scale_cache + block * stride(0)`` — DSV4's vllm pool packs
+            K and scales page-strided into one allocation (the constant
+            storage offset folds into the base pointer).
         compress_ratio (int): KV compression ratio. ``1`` = token-level causal
             (``p0 = cached_len + in-batch query offset``, includes the query's own
             position). ``>1`` = compressed-block causal: ``p0 = (P+1)//ratio - 1``

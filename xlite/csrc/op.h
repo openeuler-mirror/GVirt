@@ -170,6 +170,10 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
                             const XTensor &kNormBias, const XTensor &freqs, const XTensor &position,
                             const XTensor &slotMapping, XTensor &kCache, const XTensor &scaleCache,
                             float normEps = 1e-6f);
+void XliteOpQuantCacheC8(XRuntime &rt, const XTensor &x, const XTensor &slotMapping,
+                         XTensor &kCache, XTensor &kScaleCache, uint32_t blockSize);
+void XliteOpQuantQC8(XRuntime &rt, const XTensor &q, const XTensor &headWeight, XTensor &q8,
+                     XTensor &scaledWeights, float rotateScale);
 void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XTensor &ape,
                        const XTensor &norm, const XTensor &freqs, XTensor &weightedSum,
                        const XTensor &queryStartLoc, const XTensor &queryLens,

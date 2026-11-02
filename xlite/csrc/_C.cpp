@@ -37,6 +37,11 @@ struct CModelAttnMetaV2 {
     std::vector<at::Tensor> blockTables;
     // TODO: device int32 [num_seqs]; seq i reads block-table row [i] instead of row i
     std::optional<at::Tensor> blockTablesSeqMapping;
+    // CXA per-layer (v2): [n_layers] rows of 5-plane references. One template
+    // row per distinct ratio>0 (shared); per-layer row for ratio==0 layers.
+    // See XModelAttnMeta::blockTablesPerLayer for the full layout contract.
+    std::vector<std::vector<at::Tensor>> blockTablesPerLayer;  // [n_layers][5]
+    std::vector<std::vector<at::Tensor>> slotMappingPerLayer;  // [n_layers][5]
 };
 
 // Reserved (see blockTablesSeqMapping): not consumed yet, reject at the bridge
@@ -806,7 +811,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         if (c.attnType == XMODEL_ATTN_DSA) {
             _kv[i].resize(!c.indexC8Mask.empty() && c.indexC8Mask[i] ? 4 : 3);
         } else if (c.attnType == XMODEL_ATTN_CXA) {
-            _kv[i].resize(5);
+            // LI-C8 layers carry vllm's fp16 indexer-k scale pool as a 6th slot.
+            _kv[i].resize(!c.indexC8Mask.empty() && c.indexC8Mask[i] ? 6 : 5);
         } else {
             _kv[i].resize(2);
         }
@@ -861,11 +867,13 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
-        // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
-        // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
+        // allowPitch: cache consumers that address a dim-0 pitch (hybrid GDN
+        // state, MHA/GQA k/v, MLA k/pe, CXA, non-C8 DSA). C8 DSA int8 caches stay
+        // contiguous. CXA caches are paged-addressed; LI-C8 writers/readers
+        // consume stride[0] directly (K + scales packed page-strided in one alloc).
         bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
-                          attnType == XMODEL_ATTN_MLA ||
+                          attnType == XMODEL_ATTN_MLA || attnType == XMODEL_ATTN_CXA ||
+
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
@@ -935,6 +943,29 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
     Forward(rt, input, _attnMeta, kvCache, freqsCisVec, output, currStream);
 }
 
+// Copy the CXA per-layer (block_tables/slot_mapping) vectors from the pybind
+// view (at::Tensor) to the runtime view (XTensor). Shared by all ForwardV2
+// variants. No-op when the host did not populate them (V1, non-CXA, or
+// DummyRun) — CXA consumers then fall back to the flat
+// blockTables/slotMapping.
+static void InitAttnMetaV2PerLayer(XModelAttnMeta &dst, const CModelAttnMetaV2 &src)
+{
+    dst.blockTablesPerLayer.resize(src.blockTablesPerLayer.size());
+    for (size_t l = 0; l < src.blockTablesPerLayer.size(); l++) {
+        dst.blockTablesPerLayer[l].resize(src.blockTablesPerLayer[l].size());
+        for (size_t p = 0; p < src.blockTablesPerLayer[l].size(); p++) {
+            InitXTensor(dst.blockTablesPerLayer[l][p], src.blockTablesPerLayer[l][p]);
+        }
+    }
+    dst.slotMappingPerLayer.resize(src.slotMappingPerLayer.size());
+    for (size_t l = 0; l < src.slotMappingPerLayer.size(); l++) {
+        dst.slotMappingPerLayer[l].resize(src.slotMappingPerLayer[l].size());
+        for (size_t p = 0; p < src.slotMappingPerLayer[l].size(); p++) {
+            InitXTensor(dst.slotMappingPerLayer[l][p], src.slotMappingPerLayer[l][p]);
+        }
+    }
+}
+
 void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnMeta,
                         std::vector<std::vector<at::Tensor>> &kvCache,
                         std::vector<at::Tensor> &freqsCis, at::Tensor &output, uint64_t currStream)
@@ -957,6 +988,7 @@ void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnM
     for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
         InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i], DBG_LOC);
     }
+    InitAttnMetaV2PerLayer(_attnMeta, attnMeta);
     Forward(rt, input, _attnMeta, kvCache, freqsCis, output, currStream);
 }
 
@@ -983,6 +1015,7 @@ void _CModel::ForwardAndGetLogitsV2(XRuntime &rt, at::Tensor &input, CModelAttnM
     for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
         InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i], DBG_LOC);
     }
+    InitAttnMetaV2PerLayer(_attnMeta, attnMeta);
     ForwardAndGetLogits(rt, input, _attnMeta, kvCache, freqsCis, indices, output, currStream);
 }
 
@@ -1011,6 +1044,7 @@ void _CModel::ForwardWithInputsEmbedsV2(XRuntime &rt, at::Tensor &input, CModelA
     for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
         InitXTensor(_attnMeta.blockTables[i], attnMeta.blockTables[i], DBG_LOC);
     }
+    InitAttnMetaV2PerLayer(_attnMeta, attnMeta);
     at::Tensor ids = inputIds.value_or(at::Tensor());
     ForwardWithInputsEmbeds(rt, input, _attnMeta, kvCache, freqsCis, output, currStream,
                             deepstackInput, ids);
@@ -1112,11 +1146,13 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
-        // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
-        // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
+        // allowPitch: cache consumers that address a dim-0 pitch (hybrid GDN
+        // state, MHA/GQA k/v, MLA k/pe, CXA, non-C8 DSA). C8 DSA int8 caches stay
+        // contiguous. CXA caches are paged-addressed; LI-C8 writers/readers
+        // consume stride[0] directly (K + scales packed page-strided in one alloc).
         bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
-                          attnType == XMODEL_ATTN_MLA ||
+                          attnType == XMODEL_ATTN_MLA || attnType == XMODEL_ATTN_CXA ||
+
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
@@ -1224,11 +1260,13 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
             throw std::runtime_error(std::string(__func__) + ": check kv cache failed at layer " +
                                      std::to_string(i));
         }
-        // Only attention types whose cache consumers address a dim-0 pitch may
-        // carry one through the bridge (hybrid GDN state, MHA/GQA k/v, MLA k/pe,
-        // and non-C8 DSA; C8 DSA int8 index/scale caches stay contiguous).
+        // allowPitch: cache consumers that address a dim-0 pitch (hybrid GDN
+        // state, MHA/GQA k/v, MLA k/pe, CXA, non-C8 DSA). C8 DSA int8 caches stay
+        // contiguous. CXA caches are paged-addressed; LI-C8 writers/readers
+        // consume stride[0] directly (K + scales packed page-strided in one alloc).
         bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
-                          attnType == XMODEL_ATTN_MLA ||
+                          attnType == XMODEL_ATTN_MLA || attnType == XMODEL_ATTN_CXA ||
+
                           (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
@@ -2379,12 +2417,38 @@ void IndexerKCacheC8(XRuntime &rt, const at::Tensor &k, const at::Tensor &kNorm,
     rt.Synchronize();
 }
 
+void QuantCacheC8(XRuntime &rt, const at::Tensor &x, const at::Tensor &slotMapping,
+                  at::Tensor &kCache, at::Tensor &kScaleCache, uint32_t blockSize)
+{
+    XTensor _x, _slotMapping, _kCache, _kScaleCache;
+    InitXTensor(_x, x, DBG_LOC);
+    InitXTensor(_slotMapping, slotMapping, DBG_LOC);
+    // The DSV4 pool hands us page-strided as_strided views (K and scales packed
+    // per page); quant_cache_c8 addresses both via stride[0].
+    InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_kScaleCache, kScaleCache, DBG_LOC, /*allowPitched=*/true);
+    XliteOpQuantCacheC8(rt, _x, _slotMapping, _kCache, _kScaleCache, blockSize);
+    rt.Synchronize();
+}
+
+void QuantQC8(XRuntime &rt, at::Tensor &q, at::Tensor &headWeight, at::Tensor &q8,
+              at::Tensor &scaledWeights, float rotateScale)
+{
+    XTensor _q, _headWeight, _q8, _scaledWeights;
+    InitXTensor(_q, q, DBG_LOC);
+    InitXTensor(_headWeight, headWeight, DBG_LOC);
+    InitXTensor(_q8, q8, DBG_LOC);
+    InitXTensor(_scaledWeights, scaledWeights, DBG_LOC);
+    XliteOpQuantQC8(rt, _q, _headWeight, _q8, _scaledWeights, rotateScale);
+    rt.Synchronize();
+}
+
 void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<at::Tensor> ape,
                 std::optional<at::Tensor> norm, std::optional<at::Tensor> freqs,
                 at::Tensor &weightedSum, at::Tensor &queryStartLoc, at::Tensor &queryLens,
                 std::optional<at::Tensor> cachedLens, uint32_t batch, uint32_t nTotalBlocks,
                 uint32_t ratio, uint32_t overlap, uint32_t headDim, uint32_t ropeHeadDim,
-                float normEps, at::Tensor &compressKv, at::Tensor &compressPositions,
+                float normEps, std::optional<at::Tensor> compressKv, at::Tensor &compressPositions,
                 at::Tensor &compressSlotMapping, uint32_t compressBlockSize,
                 std::optional<at::Tensor> state, std::optional<at::Tensor> stateSlotMapping,
                 std::optional<at::Tensor> stateBlockTable, uint32_t stateBlockSize,
@@ -2412,7 +2476,9 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
     if (cachedLens.has_value()) {
         InitOptionalXTensor(_cachedLens, cachedLens.value(), DBG_LOC);
     }
-    InitXTensor(_compressKv, compressKv, DBG_LOC);
+    if (compressKv.has_value()) {
+        InitOptionalXTensor(_compressKv, compressKv.value(), DBG_LOC);
+    }
     if (state.has_value()) {
         InitOptionalXTensor(_state, state.value(), DBG_LOC);
     }
@@ -2593,7 +2659,9 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
 {
     XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables,
         _ks;
-    InitXTensor(_ks, kScaleCache, DBG_LOC);
+    // The int8 branch reads the fp16 scale pool page-strided (DSV4 packs K and
+    // scales per page); dense pools keep the contiguous fast path.
+    InitXTensor(_ks, kScaleCache, DBG_LOC, /*allowPitched=*/true);
 
     InitXTensor(_q, q, DBG_LOC);
     InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
@@ -3183,7 +3251,9 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("query_start_loc", &CModelAttnMetaV2::queryStartLoc)
         .def_readwrite("slot_mapping", &CModelAttnMetaV2::slotMapping)
         .def_readwrite("block_tables", &CModelAttnMetaV2::blockTables)
-        .def_readwrite("block_tables_seq_mapping", &CModelAttnMetaV2::blockTablesSeqMapping);
+        .def_readwrite("block_tables_seq_mapping", &CModelAttnMetaV2::blockTablesSeqMapping)
+        .def_readwrite("block_tables_per_layer", &CModelAttnMetaV2::blockTablesPerLayer)
+        .def_readwrite("slot_mapping_per_layer", &CModelAttnMetaV2::slotMappingPerLayer);
 
     py::enum_<XModelAttnType>(m, "AttnType")
         .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
@@ -3543,12 +3613,16 @@ PYBIND11_MODULE(_C, m)
     m.def("indexer_k_cache_c8", &IndexerKCacheC8, py::arg("rt"), py::arg("k"), py::arg("k_norm"),
           py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("slot_mapping"),
           py::arg("k_cache"), py::arg("scale_cache"), py::arg("norm_eps") = 1e-6f);
+    m.def("quant_cache_c8", &QuantCacheC8, py::arg("rt"), py::arg("x"), py::arg("slot_mapping"),
+          py::arg("k_cache"), py::arg("k_scale_cache"), py::arg("block_size"));
+    m.def("quant_q_c8", &QuantQC8, py::arg("rt"), py::arg("q"), py::arg("head_weight"),
+          py::arg("q8"), py::arg("scaled_weights"), py::arg("rotate_scale"));
     m.def("compressor", &Compressor, "compressor", py::arg("rt"), py::arg("kv"), py::arg("score"),
           py::arg("ape") = std::nullopt, py::arg("norm") = std::nullopt,
           py::arg("freqs") = std::nullopt, py::arg("weighted_sum"), py::arg("query_start_loc"),
           py::arg("query_lens"), py::arg("cached_lens") = std::nullopt, py::arg("batch"),
           py::arg("n_total_blocks"), py::arg("ratio"), py::arg("overlap"), py::arg("head_dim"),
-          py::arg("rope_head_dim"), py::arg("norm_eps"), py::arg("compress_kv"),
+          py::arg("rope_head_dim"), py::arg("norm_eps"), py::arg("compress_kv") = std::nullopt,
           py::arg("compress_positions"), py::arg("compress_slot_mapping"),
           py::arg("compress_block_size"), py::arg("state") = std::nullopt,
           py::arg("state_slot_mapping") = std::nullopt, py::arg("state_block_table") = std::nullopt,

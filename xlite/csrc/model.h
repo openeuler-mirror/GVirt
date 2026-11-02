@@ -179,8 +179,9 @@ public:
     void ConfigRtCommOptimize(XRuntime &rt, size_t tokenNum)
     {
         rt.enableCommOptimize =
-            (_c.defTpSize > 1 && (tokenNum >= rt.commOptimizeLen || rt.multiTaskParallel)) ||
-            (_c.defDpSize > 1 && _c.defTpSize > 1 && _c.moeEpSize > 1 && rt.enableMoEAllToAll);
+            _c.hcMult == 0 &&
+            ((_c.defTpSize > 1 && (tokenNum >= rt.commOptimizeLen || rt.multiTaskParallel)) ||
+             (_c.defDpSize > 1 && _c.defTpSize > 1 && _c.moeEpSize > 1 && rt.enableMoEAllToAll));
     }
     // whether to pad the token number to match the max tokens across DP ranks
     bool PadForDp(XRuntime &rt)
