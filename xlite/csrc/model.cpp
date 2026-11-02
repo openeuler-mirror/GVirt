@@ -1068,7 +1068,9 @@ XTensor *XModel::ForwardAttnCXAIndexer(XRuntime &rt, uint32_t layer, XTensor &hi
                        freqsCis, rt._attnPosition, idxQ, false, true, 0, !c8);
     idxQ.View({static_cast<size_t>(batchedTokens) * idxNHeads, indexerHeadDim});
     if (!c8) {
-        XliteOpMuls(rt, idxQ, rotateScale, idxQ, 0, _c.ropeHeadDim);
+        // Scale the nope region; the rope region is scaled by doRotate inside the rope op.
+        const uint32_t nopeDim = indexerHeadDim - _c.ropeHeadDim;
+        XliteOpMuls(rt, idxQ, rotateScale, idxQ, 0, nopeDim);
         idxQ.View(
             {static_cast<size_t>(batchedTokens), static_cast<size_t>(idxNHeads) * indexerHeadDim});
     }
@@ -2568,7 +2570,12 @@ size_t XModel::DummyRun()
         if (IsHybridAttn(_c.attnType) && attnMeta.blockTables.size() < 2) {
             attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, 1}, INT32, nullptr);
         }
-        attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);
+        // slotMapping: one per blockSizes entry (per-cache) for non-hybrid; hybrid
+        // carries one main-KV table (family slots live in blockTables[1..]).
+        const size_t nSlotMappings = IsHybridAttn(_c.attnType) ? 1 : _c.blockSizes.size();
+        for (size_t s = 0; s < nSlotMappings; s++) {
+            attnMeta.slotMapping.emplace_back(std::vector<size_t>{batchedTokens}, INT32, nullptr);
+        }
         // CXA DummyRun (shapes only): override Indexer-K — the generic loop
         // sizes it as per-token, but it's a per-block cache; size it ratio==4
         // per-block so pool sizing matches the real forward.

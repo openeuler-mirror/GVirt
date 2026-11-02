@@ -796,6 +796,8 @@ class Transformer(nn.Module):
     @torch.inference_mode()
     def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
         """Forward using V2 device-tensor attention metadata (zero-copy path)."""
+        # fp32: head.weight is fp32 in checkpoint (see HC-head def, l.722); XliteOpMatmul
+        # casts the bf16 hidden state to fp32 and computes logits in fp32.
         logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size,
                              device=tokens.device, dtype=torch.float32)
         tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))

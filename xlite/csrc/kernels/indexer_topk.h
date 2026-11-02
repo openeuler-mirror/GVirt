@@ -51,7 +51,9 @@ public:
         this->topkIndices = (__gm__ uint32_t *)topkIndices;
         this->nHeads = nHeads;
         this->headDim = headDim;
-        // weight row pitch; head weights sit at column (weightCols - nHeads).
+        // weight row pitch; head weights tail-align at (weightCols - nHeads), so guard
+        // against uint32 underflow for callers that bypass host validation.
+        assert(weightCols >= nHeads);
         this->weightCols = weightCols;
         this->blockSize = blockSize;
         this->kCacheStride = MAX(kCacheStride, blockSize * headDim);
@@ -787,21 +789,21 @@ private:
 #endif
 };
 
-#define INDEXER_TOPK_FUNC_DEFINE(dtype)                                                        \
-    extern "C" __global__ __aicore__ void indexer_topk_##dtype(                                \
-        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc, GM_ADDR queryLens,   \
-        GM_ADDR cachedLens, GM_ADDR blockTables, GM_ADDR scores, GM_ADDR lastTopk,             \
-        GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,        \
-        uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                 \
-        uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk, \
-        uint32_t compressRatio, uint32_t weightCols)                                            \
-    {                                                                                          \
-        IndexerTopK<dtype, float, dtype, dtype> op;                                            \
-        op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,  \
-                lastTopk, seqPositions, topkIndices, sync, kCacheStride, nHeads, headDim,      \
-                blockSize, batch, blockTableStride, maxNumBlock, topK, skipDenseTopk, nullptr, \
-                0, compressRatio, weightCols);                                                  \
-        op.Run();                                                                              \
+#define INDEXER_TOPK_FUNC_DEFINE(dtype)                                                           \
+    extern "C" __global__ __aicore__ void indexer_topk_##dtype(                                   \
+        GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc, GM_ADDR queryLens,      \
+        GM_ADDR cachedLens, GM_ADDR blockTables, GM_ADDR scores, GM_ADDR lastTopk,                \
+        GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,           \
+        uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                    \
+        uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,    \
+        uint32_t compressRatio, uint32_t weightCols)                                              \
+    {                                                                                             \
+        IndexerTopK<dtype, float, dtype, dtype> op;                                               \
+        op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,     \
+                lastTopk, seqPositions, topkIndices, sync, kCacheStride, nHeads, headDim,         \
+                blockSize, batch, blockTableStride, maxNumBlock, topK, skipDenseTopk, nullptr, 0, \
+                compressRatio, weightCols);                                                       \
+        op.Run();                                                                                 \
     }
 
 #define INDEXER_TOPK_C8_FUNC_DEFINE(dtype)                                                        \

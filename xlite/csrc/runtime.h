@@ -317,7 +317,7 @@ public:
                                  // int32, ref: v0/1 -> _queryStartLoc, v2 -> attnMeta.queryStartLoc
     std::vector<uint32_t> _distinctCompressRatios;  // [nGroups] sorted unique non-zero ratios
     std::vector<XTensor> _compressorPosBufs;  // [nGroups][maxNBlocks_r] int64, owning device bufs
-    XTensor _position;           // [maxBatchedTokens] int64, internal buffer (malloc+free in dtor)
+    XTensor _position;     // [maxBatchedTokens] int64, internal buffer (malloc+free in dtor)
     XTensor _blockTables;  // [maxBatch * DIV_ROUND_UP(maxSeqLen, blockSize)] int32, internal buffer
     XTensor _slotMapping;  // [maxBatchedTokens] int32, internal buffer
     XTensor _cachedLens;   // [maxBatch] int32, internal buffer

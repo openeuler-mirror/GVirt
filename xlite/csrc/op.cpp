@@ -1031,13 +1031,19 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
     }
     swaBlockTables.AtLeast2D();
     compressBlockTables.AtLeast2D();
+    // ratio==0 layers pass an empty compressBt (no compress cache): stride is
+    // empty, so fall back to 0 — the kernel skips the compress walk (kvSize==0).
+    uint32_t swaStride =
+        swaBlockTables.stride.empty() ? 0 : static_cast<uint32_t>(swaBlockTables.stride[0]);
+    uint32_t compStride = (dense || compressBlockTables.stride.empty())
+                              ? 0
+                              : static_cast<uint32_t>(compressBlockTables.stride[0]);
     launchKernel(rt.aicNum, rt.stream, q.ptr, swaKCache.ptr, compressKCache.ptr, swaBlockTables.ptr,
-                 compressBlockTables.ptr, swaBlockSize, dense ? 0 : compressBlockSize,
-                 static_cast<uint32_t>(swaBlockTables.stride[0]),
-                 dense ? 0 : static_cast<uint32_t>(compressBlockTables.stride[0]), attnSink.ptr,
-                 scores.ptr, output.ptr, batch, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, nHeads,
-                 headDim, scale, windowSize, kvSize, compressRatio, indexTopK, topkIndices.ptr,
-                 dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
+                 compressBlockTables.ptr, swaBlockSize, dense ? 0 : compressBlockSize, swaStride,
+                 compStride, attnSink.ptr, scores.ptr, output.ptr, batch, queryStartLoc.ptr,
+                 lens.ptr, cachedLens.ptr, nHeads, headDim, scale, windowSize, kvSize,
+                 compressRatio, indexTopK, topkIndices.ptr, dense ? 1u : 0u,
+                 rt._attnZeroBuffer.ptr);
 }
 
 // Unified MLA decode kernel entry. dense=false walks the paged KV cache via
@@ -1605,8 +1611,11 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
               "compressPositions must be int64 [nTotalBlocks]");
     compCheck(compressSlotMapping.dtype == INT32 && compressSlotMapping.numel == nTotalBlocks,
               "compressSlotMapping must be int32 [nTotalBlocks]");
-    compCheck(queryStartLoc.dtype == INT32 && queryStartLoc.numel == batch,
-              "queryStartLoc must be int32 [batch]");
+    // queryStartLoc may be [batch] (v0/v1 per-batch starts) or [batch+1] (v2
+    // cu_seqlens). The compressor kernel only reads the first `batch` entries, so
+    // either layout is valid.
+    compCheck(queryStartLoc.dtype == INT32 && queryStartLoc.numel >= batch,
+              "queryStartLoc must be int32 [batch] or [batch+1]");
     compCheck(queryLens.dtype == INT32 && queryLens.numel == batch,
               "queryLens must be int32 [batch]");
     compCheck(cachedLens.ptr == nullptr || (cachedLens.dtype == INT32 && cachedLens.numel == batch),

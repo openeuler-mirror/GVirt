@@ -601,8 +601,8 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
         // CXA INDEXER_K / COMPRESS_KV are per-block caches (host-provided paged
         // block_table; write-path slots are not per-token), so relax the
         // per-token slot_mapping check for them.
-        bool isPerBlockCache = (attnMeta.attnType == XMODEL_ATTN_CXA &&
-                                (i == CXA_INDEXER_K || i == CXA_COMPRESS_KV));
+        bool isPerBlockCache =
+            (attnMeta.attnType == XMODEL_ATTN_CXA && (i == CXA_INDEXER_K || i == CXA_COMPRESS_KV));
         if (attnMeta.slotMapping[i].shape.size() != 1 ||
             (!isPerBlockCache && attnMeta.slotMapping[i].shape[0] < batchedTokens)) {
             throw std::runtime_error(
@@ -613,8 +613,8 @@ static void CheckAttnMetaV2(const XModelAttnMeta &attnMeta, uint32_t batch, uint
     for (size_t i = 0; i < attnMeta.blockTables.size(); i++) {
         const uint32_t minNumBlocks =
             (familySlots && i > 0) ? 1 : DIV_ROUND_UP(maxTotalLens, blockSizes[i]);
-        const bool isPerBlockCache = (attnMeta.attnType == XMODEL_ATTN_CXA &&
-                                      (i == CXA_INDEXER_K || i == CXA_COMPRESS_KV));
+        const bool isPerBlockCache =
+            (attnMeta.attnType == XMODEL_ATTN_CXA && (i == CXA_INDEXER_K || i == CXA_COMPRESS_KV));
         if (attnMeta.attnType == XMODEL_ATTN_CXA && i == CXA_COMPRESS_KV) {
             // block_tables[2] = compress_kv pool's paged table, sourced from the
             // ratio==4 layer (flat table here; the ratio==128 per-ratio table is
