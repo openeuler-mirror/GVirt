@@ -49,6 +49,7 @@ struct XModelConfig {
     uint64_t maxBatchedTokens;
     uint64_t maxBatch;
     uint64_t maxSeqLen;
+    int numSpecTokens = -1;  // -1 = unset
     bool quantAttnWeightTrans = false;
     bool quantAttnWeightNz = false;
     float normEps;

@@ -134,6 +134,7 @@ class ModelConfig:
         max_batch_size (int): Maximum batch size.
         max_m (int): Maximum token count batched.
         max_num_batched_tokens (int): Maximum token count batched.
+        num_spec_tokens (int): Speculative decoding draft tokens per sequence; ``-1`` = unset.
         block_size (int): KV block size.(deprecated)
         block_sizes (List[int]): Per-attention-type KV block sizes. Single-element for
             non-CXA; for CXA one entry per 5-tuple cache in order
@@ -261,6 +262,8 @@ class ModelConfig:
     """Maximum token count batched."""
     max_num_batched_tokens: int = ...
     """Maximum token count batched."""
+    num_spec_tokens: int = ...
+    """Speculative decoding draft tokens per sequence; ``-1`` = unset."""
     block_size: int = ...
     """KV block size.(deprecated)"""
     block_sizes: List[int] = ...
