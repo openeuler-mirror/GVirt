@@ -2,7 +2,16 @@
 set -uo pipefail
 
 # ====================== 参数解析 ======================
+# 用法：$0 [model_type] [output_dir]
+#   model_type - 见下方说明，默认 moe
+#   output_dir - 主输出目录（可选）：
+#                * 不传则新建带时间戳的目录；
+#                * 传入已存在且非空的目录则进入断点续测模式：扫描其中已有产物，
+#                  跳过已完成的"场景×服务×并发度"，仅补跑未完成部分；
+#                * 传入不存在的目录则新建。
+#                也可用环境变量 MAIN_OUTPUT_DIR_OVERRIDE 指定（优先级低于位置参数）。
 MODEL_TYPE=${1:-moe}
+RESUME_DIR_ARG=${2:-}
 
 # 定义模型配置
 declare -A MODELS
@@ -24,7 +33,8 @@ elif [ "${MODEL_TYPE}" = "dense" ] || [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_
     TEST_MODELS=("${MODEL_TYPE}")
 else
     echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'dense'、'moe'、'dense_quant'、'moe_quant'、'moe_quant_a3'、'origin'、'quant' 或 'all'"
-    echo "用法：$0 [dense|moe|dense_quant|moe_quant|moe_quant_a3|origin|quant|all]"
+    echo "用法：$0 [model_type] [output_dir]"
+    echo "  model_type（可选，默认 moe）："
     echo "  dense        - 测试 Qwen3-32B 模型"
     echo "  moe          - 测试 Qwen3-30B-A3B-Instruct-2507 模型（默认）"
     echo "  dense_quant  - 测试 Qwen3-32B-w8a8 模型"
@@ -33,6 +43,7 @@ else
     echo "  origin       - 测试所有非量化模型模型"
     echo "  quant        - 测试所有量化模型"
     echo "  all          - 测试所有模型"
+    echo "  output_dir（可选）：主输出目录；传入已存在且非空的目录即进入断点续测模式"
     exit 1
 fi
 
@@ -146,6 +157,63 @@ run_bench_scripts_sequential() {
     echo -e "\n压测脚本执行完成！"
 }
 
+# ====================== 断点续测支持 ======================
+# 判断单个并发度压测日志是否已完成：
+# vllm bench 正常结束时会输出 "Request throughput (req/s):" 指标行，
+# 掐断/异常退出时该关键字缺失，据此可靠区分"已完成"与"未完成"。
+is_bench_log_complete() {
+    local log_file=$1
+    [ -f "$log_file" ] && grep -q "Request throughput (req/s)" "$log_file" 2>/dev/null
+}
+
+# 过滤出某服务下尚未完成的并发度（同步过滤 multiplier，保持一一对应）。
+# 输入：concurrency_list multiplier_list result_dir input_len output_len
+# 输出（全局变量）：FILTERED_CONCURRENCY、FILTERED_MULTIPLIER（空格分隔，已完成的被剔除）。
+# 返回码：过滤后仍需补跑的并发度数量（0 表示该服务已全部完成）。
+filter_incomplete_concurrencies() {
+    local concurrency_list=$1
+    local multiplier_list=$2
+    local result_dir=$3
+    local input_len=$4
+    local output_len=$5
+    FILTERED_CONCURRENCY=""
+    FILTERED_MULTIPLIER=""
+    local c_arr=($concurrency_list)
+    local m_arr=($multiplier_list)
+    local need_count=0
+    local i=0
+    for c in "${c_arr[@]}"; do
+        local m=${m_arr[$i]:-}
+        local log_file="${result_dir}/input_${input_len}_output_${output_len}_concurrency${c}.log"
+        if is_bench_log_complete "$log_file"; then
+            echo "    [续测] 复用已完成: concurrency${c}"
+        else
+            FILTERED_CONCURRENCY="${FILTERED_CONCURRENCY}${FILTERED_CONCURRENCY:+ }${c}"
+            FILTERED_MULTIPLIER="${FILTERED_MULTIPLIER}${FILTERED_MULTIPLIER:+ }${m}"
+            need_count=$((need_count+1))
+        fi
+        i=$((i+1))
+    done
+    return ${need_count}
+}
+
+# 判断某服务的所有并发度压测是否都已完成（用于决定是否跳过整个服务）。
+# 参数：result_dir concurrency_list input_len output_len
+is_service_bench_complete() {
+    local result_dir=$1
+    local concurrency_list=$2
+    local input_len=$3
+    local output_len=$4
+    [ -d "$result_dir" ] || return 1
+    for c in $concurrency_list; do
+        local log_file="${result_dir}/input_${input_len}_output_${output_len}_concurrency${c}.log"
+        if ! is_bench_log_complete "$log_file"; then
+            return 1
+        fi
+    done
+    return 0
+}
+
 # 执行单个场景的完整测试流程
 # 参数说明：
 #   $1 - scenario_desc: 场景描述
@@ -158,6 +226,7 @@ run_bench_scripts_sequential() {
 #   $8 - max_num_seqs: 最大序列数
 #   $9 - max_model_len: 最大模型长度
 #   $10 - tensor_parallel_size: 张量并行大小
+#   $11 - main_output_dir: 主输出目录（断点续测产物所在目录）
 run_scenario_test() {
     local scenario_desc=$1
     local input_len=$2
@@ -194,42 +263,67 @@ run_scenario_test() {
     # Xlite Decode Only 服务
     echo -e "\n>>> 测试 Xlite Decode Only 服务"
     local decode_only_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_xlite_decode_only.log"
-    start_server "online_api_server.sh" "${decode_only_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "xlite_decode_only"
-    if ! wait_server_ready "${decode_only_log}"; then
-        echo "警告：Xlite Decode Only 服务启动失败，跳过此服务"
-        cleanup_all_processes
+    local decode_only_result_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_xlite_decode_only_${model_name}"
+    # 断点续测：扫描已有产物，仅补跑未完成的并发度；全部完成则跳过该服务
+    filter_incomplete_concurrencies "${concurrency_list}" "${num_prompts_multiplier_list}" "${decode_only_result_dir}" "${input_len}" "${output_len}"
+    local decode_only_need=$?
+    if [ ${decode_only_need} -eq 0 ]; then
+        echo "[续测] Xlite Decode Only 所有并发度均已完成，跳过服务启动与压测"
     else
-        run_bench_scripts_sequential "online_server_test.sh" "xlite_decode_only_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${concurrency_list}" "${num_prompts_multiplier_list}" "${main_output_dir}"
-        wait_10s "压测脚本执行完成，准备清理进程"
-        cleanup_all_processes
+        echo "[续测] 待补跑并发度(${decode_only_need})：${FILTERED_CONCURRENCY}"
+        start_server "online_api_server.sh" "${decode_only_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "xlite_decode_only"
+        if ! wait_server_ready "${decode_only_log}"; then
+            echo "警告：Xlite Decode Only 服务启动失败，跳过此服务"
+            cleanup_all_processes
+        else
+            run_bench_scripts_sequential "online_server_test.sh" "xlite_decode_only_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${FILTERED_CONCURRENCY}" "${FILTERED_MULTIPLIER}" "${main_output_dir}"
+            wait_10s "压测脚本执行完成，准备清理进程"
+            cleanup_all_processes
+        fi
     fi
     wait_10s "Xlite Decode Only 测试完成，准备下一个服务"
-    
+
     # Xlite Full 服务
     echo -e "\n>>> 测试 Xlite Full 服务"
     local full_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_xlite_full.log"
-    start_server "online_api_server.sh" "${full_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "xlite_full_mode"
-    if ! wait_server_ready "${full_log}"; then
-        echo "警告：Xlite Full 服务启动失败，跳过此服务"
-        cleanup_all_processes
+    local full_result_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_xlite_full_${model_name}"
+    filter_incomplete_concurrencies "${concurrency_list}" "${num_prompts_multiplier_list}" "${full_result_dir}" "${input_len}" "${output_len}"
+    local full_need=$?
+    if [ ${full_need} -eq 0 ]; then
+        echo "[续测] Xlite Full 所有并发度均已完成，跳过服务启动与压测"
     else
-        run_bench_scripts_sequential "online_server_test.sh" "xlite_full_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${concurrency_list}" "${num_prompts_multiplier_list}" "${main_output_dir}"
-        wait_10s "压测脚本执行完成，准备清理进程"
-        cleanup_all_processes
+        echo "[续测] 待补跑并发度(${full_need})：${FILTERED_CONCURRENCY}"
+        start_server "online_api_server.sh" "${full_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "xlite_full_mode"
+        if ! wait_server_ready "${full_log}"; then
+            echo "警告：Xlite Full 服务启动失败，跳过此服务"
+            cleanup_all_processes
+        else
+            run_bench_scripts_sequential "online_server_test.sh" "xlite_full_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${FILTERED_CONCURRENCY}" "${FILTERED_MULTIPLIER}" "${main_output_dir}"
+            wait_10s "压测脚本执行完成，准备清理进程"
+            cleanup_all_processes
+        fi
     fi
     wait_10s "Xlite Full 测试完成，准备下一个服务"
-    
+
     # Aclgraph 服务
     echo -e "\n>>> 测试 Aclgraph 服务"
     local aclgraph_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_aclgraph.log"
-    start_server "online_api_server.sh" "${aclgraph_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "aclgraph"
-    if ! wait_server_ready "${aclgraph_log}"; then
-        echo "警告：Aclgraph 服务启动失败，跳过此服务"
-        cleanup_all_processes
+    local aclgraph_result_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_aclgraph_${model_name}"
+    filter_incomplete_concurrencies "${concurrency_list}" "${num_prompts_multiplier_list}" "${aclgraph_result_dir}" "${input_len}" "${output_len}"
+    local aclgraph_need=$?
+    if [ ${aclgraph_need} -eq 0 ]; then
+        echo "[续测] Aclgraph 所有并发度均已完成，跳过服务启动与压测"
     else
-        run_bench_scripts_sequential "online_server_test.sh" "aclgraph_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${concurrency_list}" "${num_prompts_multiplier_list}" "${main_output_dir}"
-        wait_10s "压测脚本执行完成，准备清理进程"
-        cleanup_all_processes
+        echo "[续测] 待补跑并发度(${aclgraph_need})：${FILTERED_CONCURRENCY}"
+        start_server "online_api_server.sh" "${aclgraph_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "aclgraph"
+        if ! wait_server_ready "${aclgraph_log}"; then
+            echo "警告：Aclgraph 服务启动失败，跳过此服务"
+            cleanup_all_processes
+        else
+            run_bench_scripts_sequential "online_server_test.sh" "aclgraph_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${FILTERED_CONCURRENCY}" "${FILTERED_MULTIPLIER}" "${main_output_dir}"
+            wait_10s "压测脚本执行完成，准备清理进程"
+            cleanup_all_processes
+        fi
     fi
     wait_10s "Aclgraph 测试完成，准备下一个场景"
     
@@ -310,7 +404,13 @@ process_scenario_data() {
     # 构建输出文件名（包含年月日时间信息和tensor_parallel_size）
     local date_suffix=$(date +%Y%m%d)
     local output_file="${main_output_dir}/benchmark_comparison_${model_name}_input${input_len}_output${output_len}_tp${tensor_parallel_size}_${date_suffix}.log"
-    
+
+    # 断点续测：若对比报告已存在且非空，则跳过重新生成（避免覆盖已有报告）
+    if [ -s "${output_file}" ]; then
+        echo "[续测] 对比报告已存在，跳过数据处理：${output_file}"
+        return 0
+    fi
+
     echo "调用 process_data.py 处理数据..."
     echo "  baseline-aclgraph: ${aclgraph_dir}"
     echo "  xlite-full: ${xlite_full_dir}"
@@ -327,7 +427,7 @@ process_scenario_data() {
         -o "${output_file}" \
         -m "${model_name}" \
         -d "${device_type}"
-    
+
     if [ $? -eq 0 ]; then
         echo -e "\n数据处理完成！报告已生成：${output_file}"
         return 0
@@ -344,15 +444,31 @@ echo -e "\n清理代理环境变量..."
 unset https_proxy && unset http_proxy && unset HTTPS_PROXY && unset HTTP_PROXY
 echo "代理环境变量已清理"
 
-# 创建带日期的主输出文件夹（支持环境变量覆盖）
-if [[ -n "${MAIN_OUTPUT_DIR_OVERRIDE:-}" ]]; then
+# 创建主输出文件夹：
+# 优先级：位置参数2 > 环境变量 MAIN_OUTPUT_DIR_OVERRIDE > 新建带时间戳目录。
+# 若指定目录已存在且非空，则进入断点续测模式（复用已有产物，仅补跑未完成项）。
+if [[ -n "${RESUME_DIR_ARG}" ]]; then
+    MAIN_OUTPUT_DIR="${RESUME_DIR_ARG}"
+elif [[ -n "${MAIN_OUTPUT_DIR_OVERRIDE:-}" ]]; then
     MAIN_OUTPUT_DIR="${MAIN_OUTPUT_DIR_OVERRIDE}"
 else
     MAIN_OUTPUT_DIR="benchmark_results_$(date +%Y%m%d_%H%M%S)"
 fi
 mkdir -p "${MAIN_OUTPUT_DIR}"
+
+# 断点续测模式检测：目录已存在且非空即视为续测
+RESUME_MODE=0
+if [ -d "${MAIN_OUTPUT_DIR}" ] && [ -n "$(ls -A "${MAIN_OUTPUT_DIR}" 2>/dev/null)" ]; then
+    RESUME_MODE=1
+fi
+
 echo -e "\n======================================"
 echo "主输出目录：${MAIN_OUTPUT_DIR}"
+if [ ${RESUME_MODE} -eq 1 ]; then
+    echo "运行模式：断点续测（跳过已完成的 场景×服务×并发度，仅补跑未完成项）"
+else
+    echo "运行模式：全新测试"
+fi
 echo "======================================"
 
 # 记录总测试开始时间
