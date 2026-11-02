@@ -321,6 +321,9 @@ private:
     enum XDtype origDtype;           // original dtype, unaffected by view operation
     size_t origBytes;                // original bytes, unaffected by view operation
     void *origPtr = nullptr;         // original base ptr, restored by ResetOriginal
+#ifdef XLITE_DEBUG_ON
+    DebugSrcLoc allocLoc{UNKNOWN_DBG_LOC};  // alloc site loc, for dummy-pool used-list layout dump
+#endif
     friend class XTensorPool;
     friend class XDummyTensorPool;
 };

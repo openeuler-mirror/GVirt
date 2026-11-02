@@ -890,19 +890,41 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
     }
     size = ROUND_UP(numel * XDtypeBit(dtype), XLITE_TENSOR_ALIGN_BIT) / 8;
 
+#ifdef XLITE_DEBUG_ON_GETTENSOR
+    // Visualize the pool as contiguous |size@loc| blocks, inserting a (size free) hole
+    // wherever two used tensors leave a gap. rank-0 only: every rank's dummy pool is laid
+    // out identically, so one copy keeps the log readable.
+    auto dumpLayout = [&](const char *from) {
+        XDebugStream s(_rankId, __func__, _rankId == 0);
+        s << loc.func << ":" << loc.line << ": allocate " << ToSizeStr(size) << " (" << from
+          << "), max: " << ToSizeStr(maxUsedSize) << ", layout[";
+        size_t cursor = 0;
+        for (auto it = _used.begin(); it != _used.end(); ++it) {
+            XTensor &u = it->get();
+            size_t off = reinterpret_cast<uintptr_t>(u.ptr) - reinterpret_cast<uintptr_t>(_ptr);
+            size_t asize = ROUND_UP(u.origBytes, XLITE_TENSOR_ALIGN);
+            if (off > cursor) {
+                s << "|" << ToSizeStr(off - cursor) << "(free)";
+            }
+            s << "|" << ToSizeStr(asize) << "@" << u.allocLoc.func << ":" << u.allocLoc.line;
+            cursor = off + asize;
+        }
+        s << "|]" << std::endl;
+    };
+#endif
+
     for (auto it = _used.begin(); it != _used.end(); it++) {
         XTensor &use = it->get();
         free = reinterpret_cast<uintptr_t>(use.ptr) - reinterpret_cast<uintptr_t>(ptr);
         if (free >= size) {
             t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
+#ifdef XLITE_DEBUG_ON
+            t.allocLoc = loc;
+#endif
             _free.pop_front();
             _used.insert(it, t);
 #ifdef XLITE_DEBUG_ON_GETTENSOR
-            {  // enabled at build time via XLITE_DEBUG_ON=gettensor (or =all)
-                XDebugStream s(_rankId, __func__, true);
-                s << loc.func << ":" << loc.line << ": allocate " << ToSizeStr(size) << " from used"
-                  << std::endl;
-            }
+            dumpLayout("reuse");
 #endif
             return t;
         }
@@ -911,6 +933,9 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
                                        ROUND_UP(use.origBytes, XLITE_TENSOR_ALIGN));
     }
     t.Init(shape, dtype, ptr, XTENSOR_DYNAMIC);
+#ifdef XLITE_DEBUG_ON
+    t.allocLoc = loc;
+#endif
     _free.pop_front();
     _used.push_back(t);
     currUsedSize = reinterpret_cast<uint64_t>(ptr) + size;
@@ -919,11 +944,7 @@ XTensor &XDummyTensorPool::GetTensor(std::vector<size_t> shape, enum XDtype dtyp
     }
 
 #ifdef XLITE_DEBUG_ON_GETTENSOR
-    {  // enabled at build time via XLITE_DEBUG_ON=gettensor (or =all)
-        XDebugStream s(_rankId, __func__, true);
-        s << loc.func << ":" << loc.line << ": allocate " << ToSizeStr(size)
-          << ", max size: " << ToSizeStr(maxUsedSize) << std::endl;
-    }
+    dumpLayout("append");
 #endif
 
     return t;
