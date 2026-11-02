@@ -326,22 +326,26 @@ void XModel::Init(void)
 
 XModel::~XModel(void)
 {
+    auto freeAllocated = [](void *ptr) {
+        if (ptr != nullptr) {
+            (void)aclrtFree(ptr);
+        }
+    };
     if (_gateIndices.ptr != nullptr) {
-        (void)aclrtFree(_gateIndices.ptr);
+        freeAllocated(_gateIndices.ptr);
+        // both views wrap the same identity-index allocation; free it exactly once
         _dsaSeqPositions.ptr = nullptr;
     }
-    if (_dsaSeqPositions.ptr != nullptr) {
-        (void)aclrtFree(_dsaSeqPositions.ptr);
-    }
+    freeAllocated(_dsaSeqPositions.ptr);
     for (uint32_t i = _c.nDenseLayers; i < _c.nLayers; i++) {
-        (void)aclrtFree(_moeREUpGate[i].ptr);
-        (void)aclrtFree(_moeREUpGateDeqScale[i].ptr);
-        (void)aclrtFree(_moeREDown[i].ptr);
-        (void)aclrtFree(_moeREDownDeqScale[i].ptr);
-        (void)aclrtFree(_moeREUpGateScaleBias[i].ptr);
-        (void)aclrtFree(_moeREDownScaleBias[i].ptr);
+        freeAllocated(_moeREUpGate[i].ptr);
+        freeAllocated(_moeREUpGateDeqScale[i].ptr);
+        freeAllocated(_moeREDown[i].ptr);
+        freeAllocated(_moeREDownDeqScale[i].ptr);
+        freeAllocated(_moeREUpGateScaleBias[i].ptr);
+        freeAllocated(_moeREDownScaleBias[i].ptr);
     }
-    (void)aclrtFree(_sync.ptr);
+    freeAllocated(_sync.ptr);
 }
 
 static void DispatchAllReduceSum(XRuntime &rt, XTensor &t, enum commType type, DebugSrcLoc loc)
@@ -2548,27 +2552,39 @@ size_t XModel::DummyRun()
     // v2 attnMeta for DummyRun: device tensors only need shape to pass CheckAttnMetaV2
     // (dummy runtime never dereferences their nullptr payloads). Family slots: one main-KV
     // block table + single slot mapping, plus a mamba state-index table for hybrid models.
-    auto buildV2AttnMeta = [&](uint32_t batchSize, uint32_t seqLen, uint32_t cachedLen) {
+    // Query lens fill the token budget as the scheduler would: queryLen per seq with a
+    // clamped tail; zero-length seqs are dropped, so the batch may shrink.
+    auto buildV2AttnMeta = [&](uint32_t batchSize, uint32_t queryLen, uint32_t cachedLen) {
         XModelAttnMeta attnMeta;
         attnMeta.version = 2;
         attnMeta.attnType = _c.attnType;
-        uint32_t batchedTokens = batchSize * seqLen;
-        uint32_t totalLens = seqLen + cachedLen;
+        uint64_t batchedTokens = 0;
+        uint32_t totalLens = queryLen + cachedLen;
         for (uint32_t i = 0; i < batchSize; i++) {
-            attnMeta.lensCpu.push_back(seqLen);
+            uint32_t len = 0;
+            if (batchedTokens < _c.maxBatchedTokens) {
+                len = static_cast<uint32_t>(
+                    std::min<uint64_t>(queryLen, _c.maxBatchedTokens - batchedTokens));
+            }
+            if (len == 0) {
+                break;
+            }
+            attnMeta.lensCpu.push_back(len);
             attnMeta.cachedLensCpu.push_back(cachedLen);
+            batchedTokens += len;
         }
-        attnMeta.lens.Init({batchSize}, INT32, nullptr);
-        attnMeta.cachedLens.Init({batchSize}, INT32, nullptr);
-        attnMeta.queryStartLoc.Init({batchSize + 1}, INT32, nullptr);
+        uint32_t batch = static_cast<uint32_t>(attnMeta.lensCpu.size());
+        attnMeta.lens.Init({batch}, INT32, nullptr);
+        attnMeta.cachedLens.Init({batch}, INT32, nullptr);
+        attnMeta.queryStartLoc.Init({batch + 1}, INT32, nullptr);
         attnMeta.position.Init({batchedTokens}, INT64, nullptr);
         for (uint32_t bs : _c.blockSizes) {
             uint32_t maxNumBlocks = DIV_ROUND_UP(totalLens, bs);
-            attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, maxNumBlocks}, INT32,
+            attnMeta.blockTables.emplace_back(std::vector<size_t>{batch, maxNumBlocks}, INT32,
                                               nullptr);
         }
         if (IsHybridAttn(_c.attnType) && attnMeta.blockTables.size() < 2) {
-            attnMeta.blockTables.emplace_back(std::vector<size_t>{batchSize, 1}, INT32, nullptr);
+            attnMeta.blockTables.emplace_back(std::vector<size_t>{batch, 1}, INT32, nullptr);
         }
         // slotMapping: one per blockSizes entry (per-cache) for non-hybrid; hybrid
         // carries one main-KV table (family slots live in blockTables[1..]).
@@ -2585,7 +2601,7 @@ size_t XModel::DummyRun()
             const uint32_t compBs = _c.blockSizes[CXA_COMPRESS_KV];
             uint32_t rowsPerReq4 = _c.maxSeqLen / 4;
             uint32_t compBlocksPerReq4 = DIV_ROUND_UP(rowsPerReq4, compBs);
-            uint32_t nBlocksPerReq4 = ((cachedLen + seqLen) / 4) - (cachedLen / 4);
+            uint32_t nBlocksPerReq4 = ((cachedLen + queryLen) / 4) - (cachedLen / 4);
             size_t nBlocks4 = static_cast<size_t>(batchSize) * nBlocksPerReq4;
             attnMeta.slotMapping[CXA_INDEXER_K].Init(std::vector<size_t>{nBlocks4}, INT32, nullptr);
             attnMeta.blockTables[CXA_INDEXER_K].Init(
@@ -2593,14 +2609,16 @@ size_t XModel::DummyRun()
         }
         return attnMeta;
     };
+    uint32_t spanMax =
+        static_cast<uint32_t>(DIV_ROUND_UP(_c.maxSeqLen, _c.blockSizes[0]) * _c.blockSizes[0]);
 
-    auto runPrefill = [&]() {
+    auto runPrefill = [&]() -> size_t {
         uint32_t batchSize = 1;
-        uint32_t seqLen = _c.maxBatchedTokens;
-        uint32_t cachedLen = _c.maxSeqLen > seqLen ? _c.maxSeqLen - seqLen : 0;
-        auto attnMeta = buildV2AttnMeta(batchSize, seqLen, cachedLen);
+        uint32_t queryLen = _c.maxBatchedTokens;
+        uint32_t cachedLen = _c.maxSeqLen > queryLen ? _c.maxSeqLen - queryLen : 0;
+        auto attnMeta = buildV2AttnMeta(batchSize, queryLen, cachedLen);
         // kvCache is sized off blockSizes[0] (matches _attnBlockTables[0].shape[1]).
-        uint32_t maxNumBlocks = DIV_ROUND_UP(seqLen + cachedLen, _c.blockSizes[0]);
+        uint32_t maxNumBlocks = DIV_ROUND_UP(queryLen + cachedLen, _c.blockSizes[0]);
         auto kvCache = buildKvCache(maxNumBlocks);
         std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
         for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
@@ -2624,27 +2642,27 @@ size_t XModel::DummyRun()
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
         ForwardGetLogits(rt, output, indices, logits);
+        return rt.maxUsedSize();
     };
 
-    auto runDecode = [&]() -> size_t {
-        if (_c.maxBatch == 0) {
-            return 0;
-        }
-        uint32_t batchSize = static_cast<uint32_t>(_c.maxBatch);
-        uint32_t cachedLen = _c.maxSeqLen > 0 ? static_cast<uint32_t>(_c.maxSeqLen - 1) : 0;
-        auto attnMeta = buildV2AttnMeta(batchSize, 1, cachedLen);
+    auto runDecodeAs = [&](uint32_t batchSize, uint32_t queryLen) -> size_t {
+        uint32_t cachedLen =
+            _c.maxSeqLen > queryLen ? static_cast<uint32_t>(_c.maxSeqLen - queryLen) : 0;
+        auto attnMeta = buildV2AttnMeta(batchSize, queryLen, cachedLen);
+        uint32_t batchedTokens = static_cast<uint32_t>(attnMeta.position.shape[0]);
+        uint32_t batch = static_cast<uint32_t>(attnMeta.lens.shape[0]);
         // kvCache is sized off blockSizes[0] (matches _attnBlockTables[0].shape[1]).
-        uint32_t maxNumBlocks = DIV_ROUND_UP(1 + cachedLen, _c.blockSizes[0]);
+        uint32_t maxNumBlocks = DIV_ROUND_UP(queryLen + cachedLen, _c.blockSizes[0]);
         auto kvCache = buildKvCache(maxNumBlocks);
         std::vector<XTensor> deepstackInputEmbeds(_c.deepstackNumLevel);
         for (uint32_t i = 0; i < _c.deepstackNumLevel; i++) {
-            XTensor deepstackEmbed({_c.maxBatch, _c.hiddenSize}, embed.dtype, nullptr);
+            XTensor deepstackEmbed({batchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
             deepstackInputEmbeds[i] = deepstackEmbed;
         }
-        XTensor freqsCis({_c.maxBatch, _c.ropeHeadDim}, embed.dtype, nullptr);
+        XTensor freqsCis({batchedTokens, _c.ropeHeadDim}, embed.dtype, nullptr);
         std::vector<XTensor> freqsCisVec = {freqsCis};
-        XTensor input({_c.maxBatch}, INT32, nullptr);
-        XTensor output({_c.maxBatch, _c.hiddenSize}, embed.dtype, nullptr);
+        XTensor input({batchedTokens}, INT32, nullptr);
+        XTensor output({batchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
         XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
                        nullptr);
         rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads,
@@ -2656,16 +2674,51 @@ size_t XModel::DummyRun()
                        _c.indexTopK, _layerTypes, _c.compressRatios);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
-        indices.Init({batchSize}, INT32, nullptr);
+        indices.Init({batch}, INT32, nullptr);
         ForwardGetLogits(rt, output, indices, logits);
         return rt.maxUsedSize();
     };
 
-    size_t prefillSize = 0;
-    runPrefill();
-    prefillSize = rt.maxUsedSize();
-    size_t decodeSize = runDecode();
-    return std::max(prefillSize, decodeSize);
+    auto runDecode = [&]() -> size_t {
+        if (_c.maxBatch == 0) {
+            return 0;
+        }
+        // Unset (-1): budget-derived worst case, kept inside the dense-path query gate.
+        uint32_t queryLen = 1u;
+        if (_c.numSpecTokens >= 0) {
+            queryLen = static_cast<uint32_t>(_c.numSpecTokens) + 1;
+        } else if (_c.maxBatchedTokens >= _c.maxBatch) {
+            queryLen = static_cast<uint32_t>(std::min<uint64_t>(XLITE_SMALL_PREFILL_THRESHOLD,
+                                                                _c.maxBatchedTokens / _c.maxBatch));
+        }
+        return runDecodeAs(static_cast<uint32_t>(_c.maxBatch), queryLen);
+    };
+
+    auto runDecodeDense = [&]() -> size_t {
+        if (_c.maxBatch == 0 || _c.attnType != XMODEL_ATTN_DSA) {
+            return 0;
+        }
+        if (_c.numSpecTokens >= XLITE_SMALL_PREFILL_THRESHOLD) {
+            return 0;
+        }
+        bool hasFullIndexer =
+            _c.indexFullMask.empty() ||
+            std::any_of(_c.indexFullMask.begin(), _c.indexFullMask.end(), [](bool v) { return v; });
+        if (!hasFullIndexer || spanMax <= _c.indexTopK || spanMax <= XLITE_MLA_DENSE_THRESHOLD) {
+            return 0;
+        }
+        uint32_t batch0 = static_cast<uint32_t>(
+            std::min<uint64_t>(_c.maxBatch, DIV_ROUND_UP(spanMax, XLITE_MLA_DENSE_THRESHOLD) - 1));
+        uint32_t queryLen = _c.numSpecTokens >= 0
+                                ? static_cast<uint32_t>(_c.numSpecTokens) + 1
+                                : static_cast<uint32_t>(std::max<uint64_t>(
+                                      std::min<uint64_t>(XLITE_SMALL_PREFILL_THRESHOLD,
+                                                         _c.maxBatchedTokens / batch0),
+                                      1));
+        return runDecodeAs(batch0, queryLen);
+    };
+
+    return std::max<size_t>({runPrefill(), runDecode(), runDecodeDense()});
 }
 
 size_t XModel::GetTensorPoolSize(int dbg)
