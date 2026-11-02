@@ -1042,8 +1042,8 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
                  compressBlockTables.ptr, swaBlockSize, dense ? 0 : compressBlockSize, swaStride,
                  compStride, attnSink.ptr, scores.ptr, output.ptr, batch, queryStartLoc.ptr,
                  lens.ptr, cachedLens.ptr, nHeads, headDim, scale, windowSize, kvSize,
-                 compressRatio, indexTopK, topkIndices.ptr, dense ? 1u : 0u,
-                 rt._attnZeroBuffer.ptr);
+                 compressRatio, indexTopK, topkIndices.ptr, swaKCache.stride[0],
+                 compressKCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
 }
 
 // Unified MLA decode kernel entry. dense=false walks the paged KV cache via
@@ -1183,7 +1183,8 @@ void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &comp
             static_cast<uint32_t>(compressBlockTables.stride[0]), attnSink.ptr, qk.ptr, sv.ptr,
             max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, output.ptr, batch,
             queryStartLoc.ptr, lens.ptr, cachedLens.ptr, nHeads, headDim, scale, windowSize,
-            compressRatio, indexTopK, topkIndices.ptr, tileSizeOfCachedKV, rt._attnZeroBuffer.ptr);
+            compressRatio, indexTopK, topkIndices.ptr, swaKCache.stride[0],
+            compressKCache.stride[0], tileSizeOfCachedKV, rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(q) + XT_STR(swaKCache) + XT_STR(compressKCache) +
                               XT_STR(qk) + XT_STR(sv) + XT_STR(output);
@@ -1376,8 +1377,8 @@ static void RunIndexerPrepareC8(XRuntime &rt, const XTensor &kw, const XTensor &
                                 const XTensor &position, const XTensor &slotMapping,
                                 XTensor &kCache, const XTensor &kScaleCache, const XTensor &q,
                                 const XTensor &q8, const XTensor &qScale,
-                                const XTensor &scaledWeights, uint32_t heads, bool isLong,
-                                float normEps)
+                                const XTensor &scaledWeights, uint32_t heads, uint32_t blockSize,
+                                bool isLong, float normEps)
 {
     if (kw.shape[0] == 0) {
         return;
@@ -1395,9 +1396,9 @@ static void RunIndexerPrepareC8(XRuntime &rt, const XTensor &kw, const XTensor &
             cores, rt.stream, kw.ptr, kNorm.ptr, kNormBias.ptr, freqs.ptr, position.ptr,
             slotMapping.ptr, kCache.ptr, kScaleCache.ptr, isLong ? q.ptr : nullptr,
             isLong ? q8.ptr : nullptr, isLong ? qScale.ptr : nullptr,
-            isLong ? scaledWeights.ptr : nullptr, hadamard.ptr, workspace.ptr, kw.shape[0],
-            kw.shape[1], heads, freqs.shape[0], kScaleCache.numel, freqs.dtype != BF16, isLong,
-            normEps);
+            isLong ? scaledWeights.ptr : nullptr, hadamard.ptr, workspace.ptr, kCache.stride[0],
+            kScaleCache.stride[0], blockSize, kw.shape[0], kw.shape[1], heads, freqs.shape[0],
+            kScaleCache.numel, freqs.dtype != BF16, isLong, normEps);
     }
     rt.PutTensor(workspace);
 }
@@ -1417,8 +1418,8 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
     if (IsDummyRuntime(rt)) {
         if (indexKCache.dtype == INT8) {
             RunIndexerPrepareC8(rt, kw, kNorm, kNormBias, freqs, position, slotMapping, indexKCache,
-                                kScaleCache, q, q8, qScale, scaledWeights, indexNHeads, isLong,
-                                normEps);
+                                kScaleCache, q, q8, qScale, scaledWeights, indexNHeads, blockSize,
+                                isLong, normEps);
         }
         return;
     }
@@ -1443,8 +1444,8 @@ void XliteOpIndexerPrepare(XRuntime &rt, XTensor &kw, const XTensor &kNorm,
             throw std::invalid_argument("indexer_prepare: unsupported LI-C8 inputs");
         }
         RunIndexerPrepareC8(rt, kw, kNorm, kNormBias, freqs, position, slotMapping, indexKCache,
-                            kScaleCache, q, q8, qScale, scaledWeights, indexNHeads, isLong,
-                            normEps);
+                            kScaleCache, q, q8, qScale, scaledWeights, indexNHeads, blockSize,
+                            isLong, normEps);
         return;
     }
 
@@ -1474,10 +1475,14 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
     if (position.shape.size() == 2 && position.shape[0] > 1) {
         WarnPositions2D("indexer_k_cache_c8");
     }
+    if (kCache.shape.size() < 2 || kCache.shape[1] == 0) {
+        throw std::invalid_argument(
+            "indexer_k_cache_c8: kCache must be [blocks, blockSize, 1, headDim]");
+    }
     if (IsDummyRuntime(rt)) {
         RunIndexerPrepareC8(rt, k, kNorm, kNormBias, freqs, position, slotMapping, kCache,
-                            scaleCache, XTensor(), XTensor(), XTensor(), XTensor(), 0, false,
-                            normEps);
+                            scaleCache, XTensor(), XTensor(), XTensor(), XTensor(), 0,
+                            kCache.shape[1], false, normEps);
         return;
     }
     if (k.dtype != BF16 || !EachXDtype(FP32, kNorm, kNormBias) || kCache.dtype != INT8 ||
@@ -1489,7 +1494,8 @@ void XliteOpIndexerKCacheC8(XRuntime &rt, const XTensor &k, const XTensor &kNorm
         return;
     }
     RunIndexerPrepareC8(rt, k, kNorm, kNormBias, freqs, position, slotMapping, kCache, scaleCache,
-                        XTensor(), XTensor(), XTensor(), XTensor(), 0, false, normEps);
+                        XTensor(), XTensor(), XTensor(), XTensor(), 0, kCache.shape[1], false,
+                        normEps);
 }
 
 void XliteOpQuantCacheC8(XRuntime &rt, const XTensor &x, const XTensor &slotMapping,
@@ -1581,16 +1587,14 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
                        float normEps, XTensor &compressKv, const XTensor &compressPositions,
                        const XTensor &compressSlotMapping, uint32_t compressBlockSize,
                        XTensor &state, const XTensor &stateSlotMapping,
-                       const XTensor &stateBlockTable, uint32_t stateBlockSize,
-                       uint64_t stateCacheStrideDim0, bool doRotate)
+                       const XTensor &stateBlockTable, uint32_t stateBlockSize, bool doRotate)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    // 0 (the pybind default) = dense cache: resolve to the contiguous stride.
-    if (stateCacheStrideDim0 == 0) {
-        stateCacheStrideDim0 = static_cast<uint64_t>(stateBlockSize) * 2 * (1 + overlap) * headDim;
-    }
+    uint64_t stateCacheStrideDim0 =
+        state.ptr != nullptr ? static_cast<uint64_t>(state.stride[0])
+                             : static_cast<uint64_t>(stateBlockSize) * 2 * (1 + overlap) * headDim;
     const std::string fnName = "XliteOpCompressor: ";
     auto compCheck = [&](bool ok, const std::string &what) {
         if (!ok) {
@@ -1668,8 +1672,9 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
         rt.aivNum, rt.stream, kv.ptr, score.ptr, ape.ptr, norm.ptr, freqs.ptr, weightedSum.ptr,
         queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, batch, nTotalBlocks, ratio, overlap,
         headDim, ropeHeadDim, normEps, compressKv.ptr, compressPositions.ptr,
-        compressSlotMapping.ptr, compressBlockSize, state.ptr, stateSlotMapping.ptr,
-        stateBlockTable.ptr, stateBlockSize,
+        compressSlotMapping.ptr, compressBlockSize,
+        compressKv.ptr == nullptr ? 0u : static_cast<uint32_t>(compressKv.stride[0]), state.ptr,
+        stateSlotMapping.ptr, stateBlockTable.ptr, stateBlockSize,
         stateBlockTable.ptr == nullptr ? 0u : static_cast<uint32_t>(stateBlockTable.stride[0]),
         stateCacheStrideDim0, doRotate ? 1u : 0u, rotateScale);
 }

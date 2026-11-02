@@ -67,17 +67,21 @@ def check_values(k8, scales, rotated, name):
 
 
 def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
-             num_blocks, block_size, norm_eps=NORM_EPS, cache_offset=0):
+             num_blocks, block_size, norm_eps=NORM_EPS, cache_offset=0, k_pitch=None,
+             scale_pitch=None):
     from xlite._C import indexer_k_cache_c8
 
     capacity = num_blocks * block_size
-    k_base = torch.full((capacity * HEAD_DIM + 2 * cache_offset,), K_CACHE_FILL,
+    k_pitch = block_size * HEAD_DIM if k_pitch is None else k_pitch
+    scale_pitch = block_size if scale_pitch is None else scale_pitch
+    k_base = torch.full((num_blocks * k_pitch + 2 * cache_offset,), K_CACHE_FILL,
                         dtype=torch.int8, device=device)
-    scale_base = torch.full((capacity + 2 * cache_offset,), SCALE_CACHE_FILL,
+    scale_base = torch.full((num_blocks * scale_pitch + 2 * cache_offset,), SCALE_CACHE_FILL,
                             dtype=torch.float16, device=device)
-    k_cache = k_base[cache_offset:cache_offset + capacity * HEAD_DIM].view(
-        num_blocks, block_size, 1, HEAD_DIM)
-    scale_cache = scale_base[cache_offset:cache_offset + capacity].view(num_blocks, block_size, 1, 1)
+    k_cache = k_base[cache_offset:].as_strided(
+        (num_blocks, block_size, 1, HEAD_DIM), (k_pitch, HEAD_DIM, HEAD_DIM, 1))
+    scale_cache = scale_base[cache_offset:].as_strided(
+        (num_blocks, block_size, 1, 1), (scale_pitch, 1, 1, 1))
     inputs = (k, k_norm, k_norm_bias, freqs, positions, slots)
     device_inputs = [tensor.to(device) for tensor in inputs]
     torch.npu.synchronize(device)
@@ -86,8 +90,10 @@ def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
     assert torch.equal(device_inputs[0].cpu(), k), (name, "K input mutated")
 
     k_base, scale_base = k_base.cpu(), scale_base.cpu()
-    k8 = k_base[cache_offset:cache_offset + capacity * HEAD_DIM].view(-1, HEAD_DIM)
-    scales = scale_base[cache_offset:cache_offset + capacity]
+    k8 = k_base[cache_offset:].as_strided(
+        (num_blocks, block_size, HEAD_DIM), (k_pitch, HEAD_DIM, 1)).reshape(-1, HEAD_DIM)
+    scales = scale_base[cache_offset:].as_strided(
+        (num_blocks, block_size), (scale_pitch, 1)).flatten()
     active = slots[:len(k)] >= 0
     written = slots[:len(k)][active].long()
     untouched = torch.ones(capacity, dtype=torch.bool)
@@ -99,6 +105,15 @@ def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
     if cache_offset:
         assert bool((k_base[[0, -1]] == K_CACHE_FILL).all()), (name, "K guard")
         assert bool((scale_base[[0, -1]] == SCALE_CACHE_FILL).all()), (name, "scale guard")
+    if k_pitch != block_size * HEAD_DIM:
+        k_padding = k_base.as_strided(
+            (num_blocks, k_pitch - block_size * HEAD_DIM), (k_pitch, 1),
+            cache_offset + block_size * HEAD_DIM)
+        assert bool((k_padding == K_CACHE_FILL).all()), (name, "K pitch canary")
+    if scale_pitch != block_size:
+        scale_padding = scale_base.as_strided(
+            (num_blocks, scale_pitch - block_size), (scale_pitch, 1), cache_offset + block_size)
+        assert bool((scale_padding == SCALE_CACHE_FILL).all()), (name, "scale pitch canary")
     ref_freqs = torch.view_as_real(freqs) if freqs.is_complex() else freqs
     rotated = reference(k[active], k_norm, k_norm_bias, ref_freqs,
                         positions[:len(k)][active], device, norm_eps)
@@ -176,6 +191,11 @@ def main():
                       freqs, positions, slots, 1, 32)
     for value, reference_value in zip(actual, expected):
         torch.testing.assert_close(value, reference_value, rtol=0, atol=0)
+
+    # Dim-0 pitched cache views: writes scatter through the strided rows.
+    run_test(rt, device, "pitched-cache-views", k_outlier, k_norm, k_norm_bias, freqs,
+             torch.arange(17), torch.arange(17).int() * 5 + 37, 4, 32,
+             k_pitch=35 * HEAD_DIM, scale_pitch=35)
     logging.info("indexer_k_cache_c8 tests passed")
 
 
