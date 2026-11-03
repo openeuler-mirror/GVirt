@@ -66,11 +66,11 @@ gather_sparse_kv_cache_<dtype>(kCache, peCache, blockTables, topkIndices, queryS
 
 host 仅 BF16;kernel 在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现。仅在向量核上 launch。通道选择(host,`XliteOpGatherSparseKVCache`):两通道指针均为空时直接返回;任一通道为空时 launch nope 变体(`XLITE_GATHER_SPARSE_KV_CACHE_NOPE` 编译期裁掉 PE 通道,活动通道作第一通道);两通道都在时若 `kvLoraRank < ropeHeadDim` 则换位调用双通道 kernel。
 
-**前置条件**:kernel 的设备端断言在 debug 构建中覆盖 `compressRatio >= 1`、`indexTopK > 0`、`blockSize % 32 == 0`、通道宽为 16 的倍数、4 份轮转缓冲加 cachedLens 窗口不超 192KB UB(C220;3510 的 UB 更宽但 kernel 为空实现,该界保守);release 构建中断言被 `-DNDEBUG` 编译掉,前置条件由调用方保证。host 侧仅检查 `kvHeads == 1`、BF16,以及通道输入 cache 与输出 dense cache 的空置状态一致(否则会在设备上写空指针或留下从未写入却被消费的输出)。`CNT_ONE_LOOP` 与 `GATHER_SPARSE_KV_CACHE_BUF_NUM` 定义于 `csrc/kernels/kernel_param.h`。
+**前置条件**:kernel 的设备端断言在 debug 构建中覆盖 `compressRatio >= 1`、`indexTopK > 0`、`blockSize % 32 == 0`、通道宽为 16 的倍数、2 份轮转缓冲加 cachedLens 窗口不超 192KB UB(C220;3510 的 UB 更宽但 kernel 为空实现,该界保守);release 构建中断言被 `-DNDEBUG` 编译掉,前置条件由调用方保证。host 侧仅检查 `kvHeads == 1`、BF16,以及通道输入 cache 与输出 dense cache 的空置状态一致(否则会在设备上写空指针或留下从未写入却被消费的输出)。`CNT_ONE_LOOP` 与 `GATHER_SPARSE_KV_CACHE_BUF_NUM` 定义于 `csrc/kernels/kernel_param.h`。
 
 ## 实现原理
 
-纯 AIV kernel,grid-stride 分配。每任务(32 个槽位)流水四步,`GATHER_SPARSE_KV_CACHE_BUF_NUM=4` 份轮转缓冲(`kBufs/peBufs/topks` 各 4 份)重叠相邻 chunk 之间的 GM 访问:
+纯 AIV kernel,grid-stride 分配。每任务(32 个槽位)流水四步,`GATHER_SPARSE_KV_CACHE_BUF_NUM=2` 份轮转缓冲(`kBufs/peBufs/topks` 各 2 份)重叠相邻 chunk 之间的 GM 访问:
 
 1. **载入下标**:sparse 行把 32 个 `topkIndices` 拷入 UB 当前轮转槽,MTE2 完成后通知标量核(EVENT_ID0..3 按缓冲编号);dense 行跳过(恒等模板无需下标)。
 2. **地址计算(标量核)**:对每个 token 求 `physBlock[i] = blockTable[tok/blockSize]`、`physInBlockOffset[i] = tok % blockSize`(blockTable 为 GM 指针,逐元素标量读,DCache 摊薄重复块);dense 行直接 `blk = blockTable[offsetInBatch/blockSize]`、`base = offsetInBatch % blockSize`、`physInBlockOffset[i] = base + i`(`blockSize % CNT_ONE_LOOP == 0` 保证整个 chunk 落在同一物理块)。
