@@ -1999,10 +1999,25 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
         XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
         sync.Memset(0, rt.stream);
 
-        XliteOpFlashMLAV2(rt, qAbsorb, _qr, _kCache, _peCache, qk, sv, max, sum, lastMax, lastSum,
-                          sync, oAbsorb, _queryStartLoc, _lens, _cachedLens, _blockTables, nHeads,
-                          ropeHeadDim, kvLoraRank, blockSize, batch, scale, tileSizeOfCachedKV,
-                          topK, _topkIndices);
+        if (c8) {
+            uint32_t capacity = maxNumBlocks * blockSize;
+            k = &rt.GetTensor({batch, capacity, kvLoraRank}, BF16, DBG_LOC);
+            pe = &rt.GetTensor({batch, capacity, ropeHeadDim}, BF16, DBG_LOC);
+            table = &noBlockTables;
+            XTensor noIndices;
+            XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, noIndices,
+                                       _queryStartLoc, _lens, _cachedLens, *k, *pe, batch, capacity,
+                                       blockSize, kvLoraRank, ropeHeadDim, 1, 1, GM_UB_BURST_SIZE,
+                                       _kScaleCache);
+        }
+        XliteOpFlashMLAV2(rt, qAbsorb, _qr, *k, *pe, qk, sv, max, sum, lastMax, lastSum, sync,
+                          oAbsorb, _queryStartLoc, _lens, _cachedLens, *table, nHeads, ropeHeadDim,
+                          kvLoraRank, blockSize, batch, scale, tileSizeOfCachedKV, topK,
+                          _topkIndices, c8);
+        if (c8) {
+            rt.PutTensor(*pe);
+            rt.PutTensor(*k);
+        }
         rt.PutTensor(sync);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
