@@ -342,6 +342,28 @@ function run_glm4_moe_flash()
     rm $test_config_path
 }
 
+function run_glm4_moe_flash_w8a8moe()
+{
+    # Mixed quantization: routed experts W8A8_DYNAMIC int8, attention/dense/shared
+    # bf16. Produce the checkpoint first from a bf16 GLM-4.7-Flash:
+    #   python xlite/tools/quantize_moe_w8a8.py \
+    #       --input  <GLM-4.7-Flash dir> --output <out dir>
+    # then point GLM47_FLASH_W8A8MOE_CKPT at <out dir> (container-visible path,
+    # same mount caveat as run_glm4_moe_flash above).
+    local devs=${XLITE_DEVS_PER_NODE:-4}
+    local glm47_flash_w8a8moe_ckpt=${GLM47_FLASH_W8A8MOE_CKPT:-/workspace/GVirt_test/models/GLM-4.7-Flash-w8a8-moe}
+    echo "{
+        \"moe_ep_size\": $devs,
+        \"moe_tp_size\": 1,
+        \"dtype\": \"bfloat16\",
+        \"max_batch_size\": 1,
+        \"max_seq_len\": 1024,
+        \"quantization\": \"w8a8_moe\"
+    }" > $test_config_path
+    torchrun --nproc_per_node=$devs --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model glm4_moe_flash --ckpt-path $glm47_flash_w8a8moe_ckpt ${RUN_ARGS[@]}
+    rm $test_config_path
+}
+
 function run_deepseek_v32()
 {
     echo '{
