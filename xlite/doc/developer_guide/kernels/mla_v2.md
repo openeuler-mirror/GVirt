@@ -12,7 +12,7 @@ oAbsorb = softmax_causal(QK) · kCache
 即先算两个吸收式矩阵乘之和再做 softmax,然后用同一份 latent K 左乘还原输出(oAbsorb 随后由 host/WUV 投影到 v_head_dim)。单 kernel 内统一两种 KV 布局(`dense` 标志,见 `csrc/kernels/mla_v2.h` 的 `MLAV2` 类注释,关键字 `dense`/`sparse`;原 mla_v3 的 dense 路径已合并进来,独立 mla_v3 算子已删除):
 
 - **sparse(dense=0,分页)**:经典 mla_v2 路径,KV 走 blockTables 分页寻址,可选 DSA top-k token 选择(topkIndices);
-- **dense(dense=1,连续)**:每 batch 起始于 dense cache 的 `b × dim-0 跨度` 处(连续布局时即占据 `[b*maxSeqLen, (b+1)*maxSeqLen)`,由 gather_sparse_kv_cache 收集,`maxSeqLen == indexTopK`),blockTable 不使用(块号即逻辑索引)。
+- **dense(dense=1,连续)**:每 batch 起始于 dense cache 的 `b × dim-0 跨度` 处(连续布局时即占据 `[b*maxSeqLen, (b+1)*maxSeqLen)`,由 gather_sparse_kv_cache 收集或展开),blockTable 不使用。Top-K 选择独立于缓存布局；已收集所选 token 的 Decode 路径传 `topK=0`。
 
 该算子是"短序列"路径:总 KV 长 `ceil(maxTotalLens/blockSize) * blockSize ≤ tileSizeOfCachedKV`(即 `blockTables.shape[1] * blockSize`,运行期行宽,不取 block table 的分配跨度)时模型层选用(`csrc/model.cpp` 的 `ForwardAttnMLAV2`,短序列分支关键字 `<= rt._tileSizeOfCachedKV`),更长则走 flash_mla_v2;decode+DSA 长序列另行路由到 dense 路径(见"关键代码位置")。
 
@@ -33,7 +33,7 @@ host 封装 `MLAV2`(`csrc/_C.cpp` 的 `MLAV2`)的 `qAbsorb = einsum(q_nope, wukT
 mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
                queryStartLoc, queryLens, cachedLens, blockTables, nHeads, ropeHeadDim,
                kvLoraRank, blockSize, batch, blockTableStride, maxSeqLen, scale, topK, kCacheStride,
-               peCacheStride, dense, zeroGm)
+               peCacheStride, dense, densePerQuery, zeroGm)
 ```
 
 末尾的 `zeroGm` 是 host 自动提供的零缓冲(`rt._attnZeroBuffer`,host launch 见 `csrc/op.cpp` 的 `XliteOpMLAV2`),`MlaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
@@ -42,33 +42,36 @@ mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
 |---|---|---|---|---|
 | qAbsorb | 输入 | `[total_tokens, nHeads, kvLoraRank]` | BF16 | 吸收 WUK 后的 Q latent 部分 |
 | qr | 输入 | `[total_tokens, nHeads, ropeHeadDim]` | BF16 | Q 的 RoPE 部分 |
-| kCache | 输入 | sparse: `[numBlocks, blockSize, kvLoraRank]`;dense: `[batch, maxSeqLen, kvLoraRank]`(`maxSeqLen == indexTopK`) | BF16 | latent K cache |
-| peCache | 输入 | sparse: `[numBlocks, blockSize, ropeHeadDim]`;dense: `[batch, maxSeqLen, ropeHeadDim]`(`maxSeqLen == indexTopK`) | BF16 | RoPE 后的 K cache |
-| topkIndices | 输入(可选) | `[total_tokens, topK]` | INT32 | DSA 每行 query 的 top-k token 下标(升序),仅 sparse + topK>0 时使用 |
-| qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, maxSeqLen]` | BF16 | QK 分数缓冲;sparse 时 `maxSeqLen = blockTables.shape[1] * blockSize`(运行期行宽,`shape[1]` 已由 PrepareAttn 收窄),dense 时 `maxSeqLen = indexTopK`(见 `csrc/_C.cpp` 的 `MLAV2` dense 分支,关键字 `rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, topK}`) |
+| kCache | 输入 | sparse: `[numBlocks, blockSize, kvLoraRank]`;dense: `[batch, maxSeqLen, kvLoraRank]` | BF16 | latent K cache |
+| peCache | 输入 | sparse: `[numBlocks, blockSize, ropeHeadDim]`;dense: `[batch, maxSeqLen, ropeHeadDim]` | BF16 | RoPE 后的 K cache |
+| topkIndices | 输入(可选) | `[total_tokens, topK]` | INT32 | DSA 每行 query 的 top-k token 下标(升序),topK>0 时使用，与缓存布局无关 |
+| qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, maxSeqLen]` | BF16 | QK 分数缓冲;sparse 或 C8 完整展开时 `maxSeqLen = blockTables.shape[1] * blockSize`(运行期行宽,`shape[1]` 已由 PrepareAttn 收窄),Gather Decode 时 `maxSeqLen = indexTopK`(见 `csrc/_C.cpp` 的 `MLAV2` dense 分支,关键字 `rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, topK}`) |
 | oAbsorb | 输出 | `[total_tokens, nHeads, kvLoraRank]` | BF16 | softmax(QK)·kCache |
 | queryStartLoc / queryLens / cachedLens | 输入 | `[batch]` | INT32 | 同 attention |
-| blockTables | 输入 | `[rows >= batch, blockTableStride]` | INT32 | sparse 用;dense 传原表但不使用。持久化缓冲,行跨度为分配跨度 `blockTables.stride[0]`,行宽为每步运行期宽度 `shape[1]`,仅每行 lens 推导的有效前缀被读取 |
+| blockTables | 输入 | `[rows >= batch, blockTableStride]` | INT32 | sparse 用;dense 不使用，可传空。持久化缓冲,行跨度为分配跨度 `blockTables.stride[0]`,行宽为每步运行期宽度 `shape[1]`,仅每行 lens 推导的有效前缀被读取 |
 | nHeads | 标量 | - | uint32 | 本卡头数(测试 1/8/16) |
 | ropeHeadDim | 标量 | - | uint32 | RoPE 维(64) |
 | kvLoraRank | 标量 | - | uint32 | latent 秩(16/512) |
 | blockSize | 标量 | - | uint32 | KV 块大小(128);dense 模式下传入但仅经 MlaAicHelper 的 dense 标志忽略 |
 | batch | 标量 | - | uint32 | batch |
 | blockTableStride | 标量 | - | uint32 | blockTables 的行跨度(元素数),host 取 `blockTables.stride[0]`,仅用于 sparse 行寻址(dense 置 0) |
-| maxSeqLen | 标量 | - | uint32 | qk workspace 行宽与 dense 长度:sparse 时为 `blockTables.shape[1] * blockSize`(qk workspace 行宽;V2 的 `shape[1]` 已由 PrepareAttn 收窄到运行期宽度),dense 时为 indexTopK(dense cache 每批长度) |
+| maxSeqLen | 标量 | - | uint32 | qk workspace 行宽与 dense 长度:sparse 时为 `blockTables.shape[1] * blockSize`(qk workspace 行宽;V2 的 `shape[1]` 已由 PrepareAttn 收窄到运行期宽度),dense 时为连续 cache 每批容量(Gather Decode 为 indexTopK，C8 完整展开为调用方分配的容量) |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
-| topK | 标量 | - | uint32 | DSA top-k;host 限制仅 sparse 模式生效:`maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=11776` 且 `topK ≤ MAX_TOPK_NUM=2048`(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`/`MAX_TOPK_NUM`);dense 模式 host 要求 topK > 0 且其值即 dense cache 长度 indexTopK(见 `csrc/_C.cpp` 的 `MLAV2`,关键字 `dense=True requires topK > 0`),内核内部将其用作 maxSeqLen 并把 softmax topK 置 0(`csrc/kernels/mla_v2.h` 的 `MLAV2::Init`,关键字 `this->topK`) |
+| topK | 标量 | - | uint32 | DSA top-k;启用 Top-K 选择时，host 要求 `maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=11776` 且 `topK ≤ MAX_TOPK_NUM=2048`(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`/`MAX_TOPK_NUM`)。Python `dense=True` 仍要求 topK > 0，收集后以该值为 maxSeqLen、以 `topK=0` 调用内核；C8 完整展开保留原 topK 和索引 |
 | kCacheStride / peCacheStride | 标量 | - | uint32 | kCache / peCache 的 dim-0 跨度(元素数),块或 batch 基址 = 序号 × 跨度:sparse 为每物理块跨度(连续时等于 blockSize×kvLoraRank / blockSize×ropeHeadDim),dense 为每 batch 跨度(连续时等于 maxSeqLen×kvLoraRank / maxSeqLen×ropeHeadDim);非连续时由宿主传入真实跨距 |
 | dense | 标量 | - | uint32 | 1=dense cache(`[batch, maxSeqLen, ...]`,batch 起点 = b×kCacheStride,由 gather_sparse_kv_cache 收集,blockTable 不使用),0=paged(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `dense`) |
+| densePerQuery | 标量 | - | uint32 | dense 时选择缓存行布局：1=每 query 一行，0=每请求一行；SFA-C8 完整展开使用 0 |
 | zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`MlaAicHelper::Init` 用它预填零 L1B(见上文) |
 
 ## 支持的数据类型
+
+SFA-C8 在 host 接受独立的 INT8 `kCache[numBlocks, blockSize, 1, kvLoraRank]`、BF16 `peCache[numBlocks, blockSize, 1, ropeHeadDim]` 和 FP32 `kScaleCache[numBlocks, blockSize, 1, kvLoraRank/128]`。Decode dense 路径先 gather/dequantize 所选 token；其余路径先恢复各请求的临时连续 BF16 cache，不生成新页表，并保留 Top-K 选择。之后使用同一 BF16 MLA kernel，QK 和 PV 都读取恢复后的 latent。Q、输出及 `scale` 保持原约定，GLM-5.1 的 `scale=1/16`。
 
 | dtype | 实例化文件 | kernel 符号 |
 |---|---|---|
 | bfloat16_t | `csrc/kernels/mla_v2_bfloat16_t.cpp` | `mla_v2_bfloat16_t` |
 
-host 侧仅接受 BF16(`csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `EachXDtype(BF16`);qAbsorb/qr/kCache/peCache/oAbsorb 需一致。
+底层 MLA kernel 仅接受 BF16(`csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `EachXDtype(BF16`);qAbsorb/qr/kCache/peCache/oAbsorb 需一致。SFA-C8 的 cache 在进入该 kernel 前恢复为 BF16。
 
 ## 实现原理
 
@@ -76,9 +79,9 @@ host 侧仅接受 BF16(`csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `EachXDtype(BF
 
 ### 任务划分
 
-- `m0 = dense ? nHeads : XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), nHeads)` 自适应(同 attention,`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0` + `XliteFitM0ToHeads`;dense 模式直接取 nHeads,一个 tile 一 token),`queryTileSize = m0 / nHeads`——MLA 每 batch 一次算**全部 nHeads 个头**(无 KV 头分组),`mSize = queryTaskLen * nHeads` 行拼成 Cube 的 M 维。
+- `m0 = densePerQuery ? nHeads : XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), nHeads)` 自适应(同 attention,`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0` + `XliteFitM0ToHeads`;每 query 一行的 dense 模式直接取 nHeads,一个 tile 一 token),`queryTileSize = m0 / nHeads`——MLA 每 batch 一次算**全部 nHeads 个头**(无 KV 头分组),`mSize = queryTaskLen * nHeads` 行拼成 Cube 的 M 维。
 - 任务空间为 `queryNum`(每 batch),核间用 `firstCore = (GetBlockIdx()+GetBlockNum()-coreOffset) % GetBlockNum()` 的循环 stride 分配,`coreOffset` 跨 batch 累计保证相邻 batch 起始核轮转、负载均衡(`csrc/kernels/mla_v2.h` 的 `RunAic`,关键字 `firstCore`/`coreOffset`)。
-- dense 模式 `calcLen` clip 到 maxSeqLen(dense cache 只存 indexTopK 个 token,见 `csrc/kernels/mla_v2.h` 的 `RunAic`,关键字 `dense cache only holds maxSeqLen`);per-batch KV 视图 dense 时按 dim-0 跨度取 `kCache[batchIdx * kCacheStride]` 子视图,sparse 时走 blockTable(`csrc/kernels/mla_v2.h` 的 `RunAic`,关键字 `batchKCache = kCache[batchIdx * kCacheStride]`)。
+- dense 模式 `calcLen` clip 到 maxSeqLen(连续 cache 的每请求容量,见 `csrc/kernels/mla_v2.h` 的 `RunAic`,关键字 `dense && calcLen > maxSeqLen`);per-batch KV 视图 dense 时按 dim-0 跨度取 `kCache[batchIdx * kCacheStride]` 子视图,sparse 时走 blockTable(`csrc/kernels/mla_v2.h` 的 `RunAic`,关键字 `batchKCache = kCache[batchIdx * kCacheStride]`)。
 
 ### AIC 侧:MlaAicHelper 的吸收式双 GEMM
 
@@ -90,14 +93,14 @@ host 侧仅接受 BF16(`csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `EachXDtype(BF
 2. 同一 n tile 上再算 R = qr·peCache(ropeHeadDim 一趟),`CalMmad(..., false)` 直接累加到同一 L0C,天然完成 `C+R`(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::RunAicQK`,关键字 `CalMmad(qkl0cBuf` 第二段 `false`);
 3. 每个 n tile 结束 `CopyToGm` 写 qk(行距 qkStride=maxSeqLen),L0C 双缓冲与下一 tile 的 mmad 重叠。
 
-分页寻址:`block = blockTable[nIdx + nIdxStart]`(sparse)或逻辑块号即物理号(dense,见 `csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::RunAicQK`,关键字 `!dense ? blockTable`);块基址 K 侧取 `block * kPitch`、PE 侧取 `block * pePitch`——sparse 时即传入的 dim-0 跨度 kCacheStride/peCacheStride,dense 时为 `qkn0 * kvLoraRank` / `qkn0 * ropeHeadDim`(batch 段内连续),拷贝形式相同、仅寻址不同。
+分页寻址:`block = blockTable[nIdx + nIdxStart]`(sparse)或 token 偏移 `kvOffset + nIdx * qkn0`(dense,见 `csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::RunAicQK`,关键字 `!dense ? blockTable`);块基址 K 侧取 `block * kPitch`、PE 侧取 `block * pePitch`——sparse 时即传入的 dim-0 跨度 kCacheStride/peCacheStride,dense 时为 `kvLoraRank` / `ropeHeadDim`(batch 段内连续),拷贝形式相同、仅寻址不同。
 
 **RunAicSV**(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::RunAicSV`):`oAbsorb = QK · kCache^T`,m=queryTokens*nHeads, n=kvLoraRank(按 svn0=256 分块), k=kvLen(按 svk0=64 分块)。QK 矩阵每 4*svk0 列预取进 L1A;K^T 侧每 2*svk0 预取进 L1B——dense 时单条 `CopyGmToL1Nd2Nz` 连续拷贝,sparse 时按物理块循环逐块拷(块基址 `block * kCacheStride`,见 `MlaAicHelper::RunAicSV`,关键字 `paged cache: per-block lookup`);`CopyToL0BTCol` 转置进 L0B。输出 `CopyToGm(out[nOffset], ..., kvLoraRank)` 按 kvLoraRank 行距写 oAbsorb。
 
 ### AIV 侧:softmax 与 top-k 路径
 
 - **topK == 0**:`RunAivSoftmax`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmax`,转发至 `RunAivSoftmaxLong`)(见 attention 文档),带 `hasScale=true, scale`(QK 乘 scale 在 softmax 内完成)、causal 由 `calcSoftmaxLen = cachedLen + queryTaskStart + 1` + maskOff/headStride=nHeads 实现(`csrc/kernels/mla_v2.h` 的 `RunAiv`,关键字 `calcSoftmaxLen`/`RunAivSoftmax`)。
-- **topK > 0**(sparse + DSA):`RunAivSoftmaxPingPong`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`)。该路径先用 `vcmpvs_ge/vcmpvs_lt + vand` 生成命中位图,`vgather` 按 topkIndices 从 QK 行中收集 topK 个分数(未命中的槽位填 -3.4e38),对收集后的 topK 长度做 softmax,再用标量 scatter 按 64 槽粒度把概率散回原 token 位置、其余位置清零(均见 `RunAivSoftmaxPingPong`,关键字 `vcmpvs_ge`/`vgather` 与 scatter 段)。行有效长度 `calcLen > topK` 时才启用,否则退化为全量(`csrc/kernels/mla_v2.h` 的 `RunAiv`,关键字 `calcLen > topK`)。
+- **topK > 0**(DSA，与缓存布局无关):`RunAivSoftmaxPingPong`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`)。该路径先用 `vcmpvs_ge/vcmpvs_lt + vand` 生成命中位图,`vgather` 按 topkIndices 从 QK 行中收集 topK 个分数(未命中的槽位填 -3.4e38),对收集后的 topK 长度做 softmax,再用标量 scatter 按 64 槽粒度把概率散回原 token 位置、其余位置清零(均见 `RunAivSoftmaxPingPong`,关键字 `vcmpvs_ge`/`vgather` 与 scatter 段)。行有效长度 `calcLen > topK` 时才启用,否则退化为全量(`csrc/kernels/mla_v2.h` 的 `RunAiv`,关键字 `calcLen > topK`)。
 - **outN 对齐**:softmax 输出行宽取 `ROUND_UP(calcLen, 4*svk0)`(clip 到 maxSeqLen),因为 RunAicSV 每次读 4*svk0=256 列 QK,残留脏数据会沿 KV 维混进 SV 累加(`csrc/kernels/mla_v2.h` 的 `RunAiv`,关键字 `4 * svk0`)。
 
 ### 跨核同步
