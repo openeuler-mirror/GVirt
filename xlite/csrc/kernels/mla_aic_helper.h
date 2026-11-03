@@ -210,11 +210,11 @@ public:
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
         SetFlag<HardEvent::FIX_M>(EVENT_ID1);
         for (int nIdx = 0; nIdx < nLoop; nIdx++) {  // kvLen
-            uint32_t block = !dense ? blockTable[nIdx + nIdxStart] : nIdx + nIdxStart;
+            uint32_t block = !dense ? blockTable[nIdx + nIdxStart] : kvOffset + nIdx * qkn0;
             // sparse: block is a physical block id, so its GM pitch is the cache's
-            // dim-0 stride; dense: block is a token-tile index in the batch segment
-            uint32_t kPitch = !dense ? kCacheStride : qkn0 * kvLoraRank;
-            uint32_t pePitch = !dense ? peCacheStride : qkn0 * ropeHeadDim;
+            // dim-0 stride; dense: block is a token offset in the batch segment.
+            uint32_t kPitch = !dense ? kCacheStride : kvLoraRank;
+            uint32_t pePitch = !dense ? peCacheStride : ropeHeadDim;
             int nOffset = nIdx * qkn0;
             if (nOffset + nSize > kvLen) {
                 nSize = kvLen - nOffset;
