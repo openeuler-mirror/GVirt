@@ -1359,6 +1359,27 @@ void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
                  rt.tpSize());
 }
 
+void XliteOpMlaCacheC8(XRuntime &rt, XTensor &latent, XTensor &pe, const XTensor &slotMapping,
+                       XTensor &cache, XTensor &peCache, XTensor &kScaleCache)
+{
+    if (IsDummyRuntime(rt) || latent.shape[0] == 0) {
+        return;
+    }
+    const uint32_t latentDim = latent.shape[1];
+    const uint32_t ropeDim = pe.shape[1];
+    if (!EachXDtype(BF16, latent, pe) || slotMapping.dtype != INT32 || cache.dtype != INT8 ||
+        latentDim == 0 || latentDim % 128 != 0 || ropeDim == 0 ||
+        (ropeDim * XDtypeBit(BF16) / 8) % UB_BLOCK_SIZE != 0 || cache.shape.back() != latentDim ||
+        peCache.dtype != BF16 || kScaleCache.dtype != FP32 ||
+        peCache.numel < cache.numel / latentDim * ropeDim ||
+        kScaleCache.numel < cache.numel / 128) {
+        throw std::invalid_argument("mla_cache_c8: expected INT8 K, BF16 PE and FP32 scale caches");
+    }
+    aclrtlaunch_mla_cache_c8_bfloat16_t(PickMinBlockNum(rt.aivNum, latent.shape[0]), rt.stream,
+                                        latent.ptr, pe.ptr, slotMapping.ptr, cache.ptr, peCache.ptr,
+                                        kScaleCache.ptr, latent.shape[0], latentDim, ropeDim);
+}
+
 void XliteOpQkRmsNorm(XRuntime &rt, XTensor &in, const XTensor &qNorm, const XTensor &qNormBias,
                       const XTensor &kNorm, const XTensor &kNormBias, XTensor &out, float normEps,
                       uint32_t qNormDim, uint32_t qCntPerToken, uint32_t kNormDim,

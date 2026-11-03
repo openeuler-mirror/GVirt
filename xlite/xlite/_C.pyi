@@ -2624,6 +2624,24 @@ def rope_complex_and_cache(
     """
     ...
 
+def mla_cache_c8(
+    rt: Runtime,
+    latent: torch.Tensor,
+    pe: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    cache: torch.Tensor,
+    pe_cache: torch.Tensor,
+    k_scale_cache: torch.Tensor,
+) -> None:
+    """Quantize BF16 latent[T,D] in groups of 128 and scatter separate K, PE and scale caches.
+
+    ``cache`` is INT8[B,S,1,D], ``pe_cache`` is BF16[B,S,1,R], and
+    ``k_scale_cache`` is FP32[B,S,1,D/128]. D must be a positive multiple of 128 and R of 16.
+    ``pe`` is BF16[T,R]; ``slot_mapping`` is INT32[T], with -1 entries skipped.
+    Inputs are already normalized/rotated. Active destination slots must be distinct.
+    """
+
+
 def mla_prepare(
     rt: Runtime,
     attn_qkvc: torch.Tensor,
