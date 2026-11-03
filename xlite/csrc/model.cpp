@@ -1621,6 +1621,7 @@ void XModel::ForwardMoEMSD(XRuntime &rt, uint32_t layer, XTensor &expertsSorted,
     XTensor &xInt8 = rt.GetTensor(expertsSorted.shape, INT8, DBG_LOC);
     XTensor &perTokenScale = rt.GetTensor({m}, FP32, DBG_LOC);
     XliteOpQuantDyn(rt, expertsSorted, perTokenScale, xInt8, num);
+    rt.PutTensor(expertsSorted);
 
     // Step 2: unpack INT8 → interleaved double-row INT4-packed layout [2m, k/2]
     // For input token r, row 2r = low nibbles, row 2r+1 = high nibbles
@@ -1684,10 +1685,10 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         // MSD W4A8: QuantDyn → Unpack → INT4 group_matmul → merge_dequant
         XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
                                     hiddenState.dtype, DBG_LOC);
+        // NOTE: expertsSorted is released inside ForwardMoEMSD
         ForwardMoEMSD(rt, layer, expertsSorted, expertsCounts, num, start, end,
                       intermediateSize * 2, _moeREUpGate, _moeREUpGateDeqScale,
                       _moeREUpGateScaleBias, h13);
-        rt.PutTensor(expertsSorted);
         h13Ptr = &h13;
     } else if (moeReDtype == INT8) {
         // quant(x) -> xQuanted, perChannelScale
@@ -1727,9 +1728,9 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         // MSD W4A8: QuantDyn → Unpack → INT4 group_matmul → merge_dequant (w2/down)
         XTensor &out =
             rt.GetTensor({expertsSorted.shape[0], _c.hiddenSize}, hiddenState.dtype, DBG_LOC);
+        // NOTE: h2 is released inside ForwardMoEMSD
         ForwardMoEMSD(rt, layer, h2, expertsCounts, num, start, end, _c.hiddenSize, _moeREDown,
                       _moeREDownDeqScale, _moeREDownScaleBias, out);
-        rt.PutTensor(h2);
         outPtr = &out;
     } else if (moeReDtype == INT8) {
         // quant(x) -> xQuanted, perChannelScale
