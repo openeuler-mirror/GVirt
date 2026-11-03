@@ -2673,8 +2673,14 @@ def mla_prepare(
     pe_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     norm_eps: float,
+    k_scale_cache: Optional[torch.Tensor] = None,
 ) -> None:
     """Fused MLA prepare: two RMSNorm passes followed by rope_complex_and_cache.
+
+    SFA-C8 accepts separate INT8 ``k_cache``, BF16 ``pe_cache`` and FP32 ``k_scale_cache``
+    (see :func:`mla_cache_c8`). A fused kernel prepares and writes all three caches.
+    The supplied ``norm_eps`` is unchanged.
+    SFA-C8 requires a positive ``rope_head_dim`` divisible by 16.
 
     Args:
         rt (Runtime): Native runtime handle.

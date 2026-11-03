@@ -2351,10 +2351,12 @@ void MlaPrepare(XRuntime &rt, at::Tensor &attnQkvc, at::Tensor &qNorm, at::Tenso
                 at::Tensor &attnNormQc, at::Tensor &kvNorm, at::Tensor &kvNormBias,
                 at::Tensor &attnNormKvc, at::Tensor &freqs, at::Tensor &position,
                 uint32_t qLoraRank, uint32_t kvLoraRank, uint32_t ropeHeadDim, uint32_t blockSize,
-                at::Tensor &kCache, at::Tensor &peCache, at::Tensor &slotMapping, float normEps)
+                at::Tensor &kCache, at::Tensor &peCache, at::Tensor &slotMapping, float normEps,
+                const std::optional<at::Tensor> &kScaleCache)
 {
     XTensor _attnQkvc, _qNorm, _qNormBias, _attnNormQc, _kvNorm, _kvNormBias, _attnNormKvc, _freqs,
-        _position, _kCache, _peCache, _slotMapping;
+        _position, _kCache, _peCache, _slotMapping, _kScaleCache;
+    InitXTensor(_kScaleCache, kScaleCache, DBG_LOC);
     InitXTensor(_attnQkvc, attnQkvc, DBG_LOC);
     InitXTensor(_qNorm, qNorm, DBG_LOC);
     InitXTensor(_qNormBias, qNormBias, DBG_LOC);
@@ -2369,7 +2371,7 @@ void MlaPrepare(XRuntime &rt, at::Tensor &attnQkvc, at::Tensor &qNorm, at::Tenso
     InitXTensor(_slotMapping, slotMapping, DBG_LOC);
     XliteOpMlaPrepare(rt, _attnQkvc, _qNorm, _qNormBias, _attnNormQc, _kvNorm, _kvNormBias, _freqs,
                       _position, qLoraRank, kvLoraRank, ropeHeadDim, blockSize, _kCache, _peCache,
-                      _slotMapping, normEps, _attnNormKvc);
+                      _slotMapping, normEps, _attnNormKvc, _kScaleCache);
     rt.Synchronize();
 }
 
@@ -3622,7 +3624,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("kv_norm_bias"), py::arg("attn_norm_kvc"), py::arg("freqs"), py::arg("position"),
           py::arg("q_lora_rank"), py::arg("kv_lora_rank"), py::arg("rope_head_dim"),
           py::arg("block_size"), py::arg("k_cache"), py::arg("pe_cache"), py::arg("slot_mapping"),
-          py::arg("norm_eps"));
+          py::arg("norm_eps"), py::arg("k_scale_cache") = py::none());
     m.def("mla_cache_c8", &MlaCacheC8, py::arg("rt"), py::arg("latent"), py::arg("pe"),
           py::arg("slot_mapping"), py::arg("cache"), py::arg("pe_cache"), py::arg("k_scale_cache"));
     m.def("indexer_prepare", &IndexerPrepare, py::arg("rt"), py::arg("kw"), py::arg("k_norm"),

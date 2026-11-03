@@ -1367,7 +1367,8 @@ void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
                        const XTensor &kvNormBias, const XTensor &freqs, const XTensor &position,
                        uint32_t qLoraRank, uint32_t kvLoraRank, uint32_t ropeHeadDim,
                        uint32_t blockSize, XTensor &kCache, XTensor &peCache,
-                       const XTensor &slotMapping, float normEps, const XTensor &attnNormKvc)
+                       const XTensor &slotMapping, float normEps, const XTensor &attnNormKvc,
+                       const XTensor &kScaleCache)
 {
     // TODO: support 2D [num_dims, num_tokens] `positions` (mrope); only the first row is read.
     if (position.shape.size() == 2 && position.shape[0] > 1) {
@@ -1376,21 +1377,41 @@ void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
     if (IsDummyRuntime(rt)) {
         return;
     }
-
-    KERNEL_PTR_TYPE(mla_prepare) * launchKernel;
-    if (attnQkvc.dtype == FP16) {
-        launchKernel = aclrtlaunch_mla_prepare_float16_t;
-    } else if (attnQkvc.dtype == BF16) {
-        launchKernel = aclrtlaunch_mla_prepare_bfloat16_t;
+    if (kCache.dtype == INT8) {
+        if (attnQkvc.dtype != BF16 || ropeHeadDim == 0 ||
+            (ropeHeadDim * XDtypeBit(BF16) / 8) % UB_BLOCK_SIZE != 0 || kvLoraRank == 0 ||
+            kvLoraRank % 128 != 0 || slotMapping.dtype != INT32 || !kCache.IsContiguous() ||
+            kCache.shape.back() != kvLoraRank || peCache.dtype != BF16 ||
+            kScaleCache.ptr == nullptr || kScaleCache.dtype != FP32 || !peCache.IsContiguous() ||
+            !kScaleCache.IsContiguous() ||
+            peCache.numel < kCache.numel / kvLoraRank * ropeHeadDim ||
+            kScaleCache.numel < kCache.numel / 128) {
+            throw std::invalid_argument("mla_prepare: unsupported SFA-C8 configuration");
+        }
+        if (attnQkvc.shape[0] == 0) {
+            return;
+        }
+        aclrtlaunch_mla_prepare_c8_bfloat16_t(
+            rt.aivNum, rt.stream, attnQkvc.ptr, qNorm.ptr, qNormBias.ptr, attnNormQc.ptr,
+            kvNorm.ptr, kvNormBias.ptr, attnNormKvc.numel == 0 ? nullptr : attnNormKvc.ptr,
+            freqs.ptr, position.ptr, kCache.ptr, peCache.ptr, kScaleCache.ptr, slotMapping.ptr,
+            attnQkvc.shape[0], qLoraRank, kvLoraRank, ropeHeadDim, normEps, rt.tpSize());
     } else {
-        std::string err_str = DBG_PREFIX + XT_STR(attnQkvc);
-        throw std::runtime_error(err_str + "not supported!");
+        KERNEL_PTR_TYPE(mla_prepare) * launchKernel;
+        if (attnQkvc.dtype == FP16) {
+            launchKernel = aclrtlaunch_mla_prepare_float16_t;
+        } else if (attnQkvc.dtype == BF16) {
+            launchKernel = aclrtlaunch_mla_prepare_bfloat16_t;
+        } else {
+            std::string err_str = DBG_PREFIX + XT_STR(attnQkvc);
+            throw std::runtime_error(err_str + "not supported!");
+        }
+        launchKernel(rt.aivNum, rt.stream, attnQkvc.ptr, qNorm.ptr, qNormBias.ptr, attnNormQc.ptr,
+                     kvNorm.ptr, kvNormBias.ptr, attnNormKvc.ptr, freqs.ptr, position.ptr,
+                     kCache.ptr, peCache.ptr, slotMapping.ptr, kCache.stride[0], peCache.stride[0],
+                     attnQkvc.shape[0], qLoraRank, kvLoraRank, ropeHeadDim, blockSize, normEps,
+                     rt.tpSize());
     }
-    launchKernel(rt.aivNum, rt.stream, attnQkvc.ptr, qNorm.ptr, qNormBias.ptr, attnNormQc.ptr,
-                 kvNorm.ptr, kvNormBias.ptr, attnNormKvc.ptr, freqs.ptr, position.ptr, kCache.ptr,
-                 peCache.ptr, slotMapping.ptr, kCache.stride[0], peCache.stride[0],
-                 attnQkvc.shape[0], qLoraRank, kvLoraRank, ropeHeadDim, blockSize, normEps,
-                 rt.tpSize());
 }
 
 void XliteOpMlaCacheC8(XRuntime &rt, XTensor &latent, XTensor &pe, const XTensor &slotMapping,
