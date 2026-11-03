@@ -85,7 +85,12 @@ class ModelArgs:
     beta_slow: int = 1
     mscale: float = 1.
     rope_type: str = "yarn"
-    quantization: Literal["none", "w8a8", "w4a8"] = "none"
+    # w8a8 / w4a8: whole-checkpoint quantization (attention + MoE), norm biases on.
+    # w8a8_moe: mixed quantization — routed experts W8A8_DYNAMIC (int8 weight +
+    # per-channel scale, dynamic activation quant), attention / dense mlp /
+    # shared experts / norms stay bf16. Checkpoints are produced offline by
+    # xlite/tools/quantize_moe_w8a8.py.
+    quantization: Literal["none", "w8a8", "w4a8", "w8a8_moe"] = "none"
     moe_ep_size: int = 1
     moe_tp_size: int = 1
     model_type: str = "glm4_moe_lite"
@@ -1056,6 +1061,14 @@ class Expert(nn.Module):
         elif args.quantization == "w8a8":
             self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
             self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
+        elif args.quantization == "w8a8_moe":
+            # Mixed quantization: routed experts W8A8_DYNAMIC — int8 weight with
+            # per-channel scale and dynamic per-token activation quant. Attention,
+            # dense MLP and shared experts stay bf16, so unlike the whole-model
+            # "w8a8" mode there are no norm biases and no static-quant tuples.
+            # Checkpoint produced by xlite/tools/quantize_moe_w8a8.py.
+            self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
+            self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
         else:
             self.w13 = Linear(dim, inter_dim * 2)
             self.w2 = Linear(inter_dim, dim)
@@ -1911,6 +1924,23 @@ class GLM4MoELite(nn.Module):
             self.xlite_model.re_down_deq_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
                                               for i in range(args.n_dense_layers, args.n_layers)
                                               for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+        if args.quantization == "w8a8_moe":
+            # Mixed quantization (experts-only W8A8_DYNAMIC): mirror the routed-expert
+            # half of the w8a8 binding above — fill the fixpipe xlite_scale from the
+            # per-channel scale and expose re_{up,down}_* deq_scale lists. Attention /
+            # dense mlp / shared experts keep their bf16 weights and get no deq_scale
+            # lists, so C++ InitMatmulWeight skips their quant bindings (weightLayer
+            # >= iScale.size() == 0) and runs them in bf16.
+            for i in range(args.n_dense_layers, args.n_layers):
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx):
+                    self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
+                    self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
+            self.xlite_model.re_up_gate_deq_scale = [self.layers[i].ffn.experts[j].w13.weight.xlite_scale
+                                                     for i in range(args.n_dense_layers, args.n_layers)
+                                                     for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+            self.xlite_model.re_down_deq_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
+                                                  for i in range(args.n_dense_layers, args.n_layers)
+                                                  for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
         if args.quantization == "w4a8":
             config.quant_msd_w4a8 = True
             config.experts_weight_transpose = True
