@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-MLA 注意力的前置准备算子(单 AIV 融合 kernel):对 `mlaQKVA` 线性层输出的 `attnQkvc = [q_lora | kv_lora | pe]` 逐 token 做三件事——(1) q_lora 段 RMSNorm(+bias) 输出 `attnNormQc`(后续 mlaQB 上投影的输入);(2) kv_lora 段 RMSNorm(+bias) 输出 `attnNormKvc` 并按 slotMapping 写入 paged `kCache`;(3) pe 段做 complex RoPE 后写入 paged `peCache`(`attnQkvc` 本身只读,pe 段不被写回——子函数 `rope_complex_and_cache` 的 `output_ptr` 实参传 `nullptr`,跳过写回分支)。即一次 launch 融合两次分段 norm + RoPE + 双路 cache 写入。模型侧调用在 `csrc/model.cpp` 的 `XModel::ForwardAttnMLACommonV2` 内(关键字 `XliteOpMlaPrepare`),紧跟 mlaQKVA 线性层的 `ForwardLinear`(同一函数内,关键字 `mlaQKVA, attnQkvc`)。
+MLA 注意力的前置准备算子(单 AIV 融合 kernel):浮点路径对 `mlaQKVA` 线性层输出的 `attnQkvc = [q_lora | kv_lora | pe]` 逐 token 做三件事——(1) q_lora 段 RMSNorm(+bias) 输出 `attnNormQc`(后续 mlaQB 上投影的输入);(2) kv_lora 段 RMSNorm(+bias) 输出 `attnNormKvc` 并按 slotMapping 写入 paged `kCache`;(3) pe 段做 complex RoPE 后写入 paged `peCache`(`attnQkvc` 本身只读,pe 段不被写回——子函数 `rope_complex_and_cache` 的 `output_ptr` 实参传 `nullptr`,跳过写回分支)。即一次 launch 融合两次分段 norm + RoPE + 双路 cache 写入。模型侧调用在 `csrc/model.cpp` 的 `XModel::ForwardAttnMLACommonV2` 内(关键字 `XliteOpMlaPrepare`),紧跟 mlaQKVA 线性层的 `ForwardLinear`(同一函数内,关键字 `mlaQKVA, attnQkvc`)。SFA-C8 路径见下文。
 
 ## 输入输出参数
 
@@ -45,16 +45,21 @@ mla_prepare_<dtype>(attnQkvc, qNorm, qNormBias, attnNormQc, kvNorm, kvNormBias, 
 
 ## 支持的数据类型
 
+SFA-C8 由 `kCache.dtype == INT8` 选择：INT8 `kCache`、BF16 `peCache`、FP32 `kScaleCache` 分别为 `[numBlocks, blockSize, 1, kvLoraRank]`、`[numBlocks, blockSize, 1, ropeHeadDim]`、`[numBlocks, blockSize, 1, kvLoraRank/128]`。此时 host 启动 `mla_prepare_c8_bfloat16_t`，融合 Q/KV RMSNorm、RoPE 和 [mla_cache_c8](mla_cache_c8.md) 的分组量化，输入、norm 参数和量化前结果使用 BF16。RMSNorm 使用传入的 `normEps`。C8 Prepare 的 `ropeHeadDim` 须为正的 16 倍数，并受 UB 容量限制；非 C8 路径不变。
+
+可选的 `attnNormKvc` 非空时写出 KV Norm 结果；为空时仅保留 UB 中的 BF16 结果供量化使用，不申请临时 latent/PE。浮点缓存继续走原融合 kernel。
+
 | dtype | 实例化文件 | kernel 符号 |
 |---|---|---|
 | float16_t | `csrc/kernels/mla_prepare_float16_t.cpp` | `mla_prepare_float16_t` |
 | bfloat16_t | `csrc/kernels/mla_prepare_bfloat16_t.cpp` | `mla_prepare_bfloat16_t` |
+| bfloat16_t → INT8 cache | `csrc/kernels/mla_prepare_c8_bfloat16_t.cpp` | `mla_prepare_c8_bfloat16_t` |
 
 host 按 attnQkvc.dtype 选择(见 `csrc/op.cpp` 的 `XliteOpMlaPrepare`,关键字 `attnQkvc.dtype == FP16`);kernel 整体在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现(见 `csrc/kernels/mla_prepare.h` 的 `MLA_PREPARE_FUNC_DEFINE` 宏 `#else` 分支)。
 
 ## 实现原理
 
-纯 AIV 向量 kernel,本身不做计算,而是把三个已有 kernel 函数按"核偏移接力"的方式串成一个 launch(见 `csrc/kernels/mla_prepare.h` 的 `mla_prepare` 模板函数,融合主体):
+浮点路径为纯 AIV 向量 kernel,本身不做计算,而是把三个已有 kernel 函数按"核偏移接力"的方式串成一个 launch(见 `csrc/kernels/mla_prepare.h` 的 `mla_prepare` 模板函数,融合主体):
 
 1. **q_lora 段 norm**:`norm<Dtype>(attnQkvc, nullptr, qNorm, qNormBias, attnNormQc, token_num, qLoraRank, normEps, NormKind::Rms, cntPerToken=1, inStep=totalDim, outStep=qLoraRank, inOffset=0, ..., tpSize, ...)`——对每个 token 的前 qLoraRank 列做 RMSNorm(带 weight/bias),从 totalDim 宽的行中按 inStep 步长取样;
 2. **kv_lora 段 norm + 写 cache**:`norm<Dtype>(attnQkvc, nullptr, kvNorm, kvNormBias, attnNormKvc, ..., kvLoraRank, inOffset=qLoraRank, ..., kCache, slotMapping, blockSize, kCacheStride)`——同样的分段 RMSNorm,但子函数带 kcache/slot_mapping 参数时会把 norm 结果按 slot 直接写入 paged cache,块基址 = 物理块号 × MAX(kCacheStride, blockSize×kvLoraRank)(mla_prepare 传入 norm 的有效跨距,经 MAX 钳制 ≥ 自然步长 blockSize×kvLoraRank;norm 内层再做一次 `MAX(kcacheStride, block_size*total_dim)` 钳位);
@@ -63,6 +68,8 @@ host 按 attnQkvc.dtype 选择(见 `csrc/op.cpp` 的 `XliteOpMlaPrepare`,关键�
 **核偏移接力(coreOffset)**:三个子函数都是 grid-stride 并行(`tok = block_idx + coreOffset; tok < token_num; tok += block_num`),返回各自消耗后的 `nextCoreOffset`。mla_prepare 把上一个函数的 `nextCoreOffset` 作为下一个函数的 `coreOffset` 传入,使三个阶段在核间的任务边界连续错开,避免每个阶段都从 block 0 起算造成负载倾斜;三个阶段串行于同一 stream,天然满足写读依赖(attnQkvc 各段互不重叠,attnNormQc/Kvc 独立输出)。
 
 RoPE 细节(子函数见 `csrc/kernels/rope_complex_and_cache.h` 的 `rope_complex_and_cache` 模板函数):UB 中 double-buffer 载入输入与 freqs,`vconv` 升 fp32 后按复数旋转(需要 `nLocalHeads == 1` 的 cache 写断言,同函数内关键字 `assert(nLocalHeads == 1)`),写回原 dtype;cache 写入按 slot 分解定位:`(slot/blockSize)*MAX(peCacheStride, blockSize×ropeHeadDim) + (slot%blockSize)*ropeHeadDim`(物理块号 × 经 MAX 钳制的 dim-0 有效跨距 + 块内偏移 × 通道宽;`peCacheStride` 由 mla_prepare 传入前已 MAX 钳制 ≥ 自然步长)。
+
+SFA-C8 的 Q 阶段复用 `norm`，KV 阶段在同一核内完成 RMSNorm、RoPE 和量化。每个任务处理一个 token，输入及输出暂存区使用双缓冲，计算当前 token 时预取下一条输入。KV Norm 先舍入为 BF16，再调用与独立写缓存入口共用的 `mla_cache_c8_quant`；PE 使用 FP32 旋转后转换为 BF16。V/S→MTE3 同步后按相同 slot 分别写出 INT8 K、BF16 PE 和 FP32 scale，全部 MTE3 完成后才复用相应缓冲；`slot=-1` 不写缓存，但仍保留请求的 Norm 输出。C8 通过末尾可选参数 `k_scale_cache` 传入独立 scale 缓存。
 
 ## 关键代码位置
 
