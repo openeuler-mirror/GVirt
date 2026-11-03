@@ -2,6 +2,8 @@
 
 ## 功能概述
 
+以下先说明 BF16 路径；SFA-C8 的缓存展开见下文。
+
 DSA(Dual Sparse Attention)长序列路径的 KV 收集算子,支持 **decode(query 长度 1)与 small prefill(query 长度 > 1,非仅 decode)**:按 indexer 给出的每 query token top-k token 下标(`topkIndices`),把 paged(分页)cache 中的 `kCache`(kvLoraRank)与 `peCache`(ropeHeadDim)收集到每 query token 连续的 dense cache 中,供 mla_v2 / cxa 的 dense 模式连续读取。每个 query token 拥有独立的 dense cache 行(`indexTopK` 槽位),总输出行数 = `sum(queryLens)`(`total_query_len`)。本质上是一次 `dense[q, i] = paged[blockTable[b][tok/bs]*stride + (tok%bs)*dim]` 的双通道 gather(stride 为 paged cache 的 dim-0 跨度,dim 为该通道的向量宽),host 侧要求 `kvHeads == 1`(`XliteOpGatherSparseKVCache`,`csrc/op.cpp`)。
 
 每 query token 行按候选 token 数 `numCandidates = (cachedLens[b] + q_idx + 1) / compressRatio` 分两类(+1 即该 query token 自身的 KV,`q_idx` 为该 token 在 batch 内的位置):
@@ -59,20 +61,30 @@ gather_sparse_kv_cache_<dtype>(kCache, peCache, blockTables, topkIndices, queryS
 
 ## 支持的数据类型
 
+SFA-C8 输入为分别连续存放的 INT8 `kCache[numBlocks, blockSize, 1, kvLoraRank]`、BF16 `peCache[numBlocks, blockSize, 1, ropeHeadDim]` 和 FP32 `kScaleCache[numBlocks, blockSize, 1, kvLoraRank/128]`，输出仍为连续的 BF16 latent 和 PE。`kvLoraRank` 为正且是 128 的整数倍，`ropeHeadDim` 为正且 BF16 字节数按 32 字节对齐。实例化入口为 `gather_sparse_kv_and_dequant_int8_t.cpp`；仅支持 `compressRatio=1`。
+
 | dtype | 实例化文件 | kernel 符号 |
 |---|---|---|
 | bfloat16_t | `csrc/kernels/gather_sparse_kv_cache_bfloat16_t.cpp` | `gather_sparse_kv_cache_bfloat16_t`(双通道) |
 | bfloat16_t | `csrc/kernels/gather_sparse_kv_cache_nope_bfloat16_t.cpp` | `gather_sparse_kv_cache_nope_bfloat16_t`(单通道,nope 变体) |
 
-host 仅 BF16;kernel 在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现。仅在向量核上 launch。通道选择(host,`XliteOpGatherSparseKVCache`):两通道指针均为空时直接返回;任一通道为空时 launch nope 变体(`XLITE_GATHER_SPARSE_KV_CACHE_NOPE` 编译期裁掉 PE 通道,活动通道作第一通道);两通道都在时若 `kvLoraRank < ropeHeadDim` 则换位调用双通道 kernel。
+BF16 分支的 kernel 在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空实现。仅在向量核上 launch。通道选择(host,`XliteOpGatherSparseKVCache`):两通道指针均为空时直接返回;任一通道为空时 launch nope 变体(`XLITE_GATHER_SPARSE_KV_CACHE_NOPE` 编译期裁掉 PE 通道,活动通道作第一通道);两通道都在时若 `kvLoraRank < ropeHeadDim` 则换位调用双通道 kernel。
 
 **前置条件**:kernel 的设备端断言在 debug 构建中覆盖 `compressRatio >= 1`、`indexTopK > 0`、`blockSize % 32 == 0`、通道宽为 16 的倍数、2 份轮转缓冲加 cachedLens 窗口不超 192KB UB(C220;3510 的 UB 更宽但 kernel 为空实现,该界保守);release 构建中断言被 `-DNDEBUG` 编译掉,前置条件由调用方保证。host 侧仅检查 `kvHeads == 1`、BF16,以及通道输入 cache 与输出 dense cache 的空置状态一致(否则会在设备上写空指针或留下从未写入却被消费的输出)。`CNT_ONE_LOOP` 与 `GATHER_SPARSE_KV_CACHE_BUF_NUM` 定义于 `csrc/kernels/kernel_param.h`。
 
 ## 实现原理
 
+### SFA-C8
+
+`gather_sparse_kv_and_dequant.h` 保留 C8 内核入口，内部调用 `gather_sparse_kv_cache.h` 的 `gather_sparse_kv_cache<int8_t, bfloat16_t>`，与 BF16 共用请求遍历、索引到物理页的映射和输出写回；反量化和同步仍按类型区分。C8 每个 AIV 任务最多处理 16 个 token，批量读取索引后，共用 BF16 的升降序连续段识别，分别搬入 INT8 K、BF16 PE 和 FP32 scale；降序段按升序落位。scale 由末尾可选参数 `k_scale_cache` 传入，GM 中每行 `kvLoraRank/128` 个 FP32 值，在 UB 中按 32 字节补齐行距。按组恢复 `BF16(INT8 × scale)`，合并整组的类型转换和 latent、PE 写回。两套 UB 缓冲交替使用，重叠相邻组的搬运与计算。MTE2→V/S 后计算，V→MTE3 后写出，同一套缓冲写回结束才复用。K/PE 使用连续 DMA，scale 使用多行 DMA；burst 数仍按三份输入的合计字节数计算。分组大小保持 16，维度还须满足 UB 容量和向量 repeat 上限，不自动缩小分组。
+
+Decode 根据 `topkIndices` 收集所选 token，query 长度默认为 1。稀疏行要求索引位于当前 query 的可见范围内；超过有效长度的输出尾部不写。对普通/Flash MLA 的完整展开路径，host 通过内部可选参数传入 `queryLens` 和空索引，按逻辑 token 顺序恢复当前各请求的连续缓存；MLA 连续读取并保留 Top-K 选择，不生成新页表。临时缓存由 Runtime 内存池管理，不作为跨层、跨步的 BF16 副本保留。
+
+### BF16
+
 纯 AIV kernel,grid-stride 分配。每任务(32 个槽位)流水四步,`GATHER_SPARSE_KV_CACHE_BUF_NUM=2` 份轮转缓冲(`kBufs/peBufs/topks` 各 2 份)重叠相邻 chunk 之间的 GM 访问:
 
-1. **载入下标**:sparse 行把 32 个 `topkIndices` 拷入 UB 当前轮转槽,MTE2 完成后通知标量核(EVENT_ID0..3 按缓冲编号);dense 行跳过(恒等模板无需下标)。
+1. **载入下标**:sparse 行把 32 个 `topkIndices` 拷入 UB 当前轮转槽,MTE2 完成后通知标量核(EVENT_ID0..1 按缓冲编号);dense 行跳过(恒等模板无需下标)。
 2. **地址计算(标量核)**:对每个 token 求 `physBlock[i] = blockTable[tok/blockSize]`、`physInBlockOffset[i] = tok % blockSize`(blockTable 为 GM 指针,逐元素标量读,DCache 摊薄重复块);dense 行直接 `blk = blockTable[offsetInBatch/blockSize]`、`base = offsetInBatch % blockSize`、`physInBlockOffset[i] = base + i`(`blockSize % CNT_ONE_LOOP == 0` 保证整个 chunk 落在同一物理块)。
 3. **burst 拷入(GM→UB,组段)**:在 slot `i` 处比较 slot `i+1` 判定方向(`+1` 升序段、`-1` 降序段、否则单 token),向后延伸:同物理块、同方向等差、且段长 < `burstCopyCnt`。一次 burst 只取该段的 token 区间(升序内存序),源地址 = `blk × 该通道 cache 的 dim-0 跨度 + srcTok × 通道宽`(blk 为物理块号,srcTok 为块内 token 偏移),降序段取 `[blkOffset+1-iBurst, blkOffset]`,落位后自然为升序——**消费方(mla_v2/cxa dense)对收集结果按集合语义做注意力,槽位成员正确即可,次序无关**。段内约束:不跨物理块(构造保证)、不跨 chunk(`i+iBurst < cnt`)、不超 `burstCopyCnt`(超长逻辑段拆成多次 burst);无 UB→UB 搬运,未选中的 cache 不读 GM。burst 计数按第一通道(K,per-token 更大)推导,K 与 PE 的 burst 覆盖同一 token 段。
 4. **整段拷出(UB→GM)**:整个 chunk 一次 `CopyUbufToGmAligned` 连续写出 `cnt * perKBytes`(PE 同理)——随机访存收敛为"读侧多段 burst、写侧整段连续"。
@@ -81,8 +93,8 @@ host 仅 BF16;kernel 在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空�
 
 **有效长度裁剪**:`cnt = min(32, min(numCandidates, topK) - offsetInTopk)`(`offsetInTopk` 为该 query token 在 dense cache 行内的 32-槽 chunk 偏移),`cnt <= 0` 的整 chunk(纯 dummy 槽位)直接跳过,输出尾部保持零初始化(测试按"槽位 ≥ 有效数不写"整张断言);批切换时从 GM 重新读该 batch 的 `queryStartLoc`/`queryLens`/`cachedLens` 并重算 `numCandidates`。三批元数据(queryStartLoc/queryLens/cachedLens)分窗 staging:窗口装满当前处理批次的长度(`maxBatchSize = (UB_SIZE - off) / 4`,按 UB 余量自适应),窗口耗尽才回 GM 续载(EVENT_ID4 同步)。
 
-**UB 布局**:4 份 `kBufs`(每份 `ROUND_UP(32*perKBytes, 32B)`)+ 4 份 `peBufs` + 4 份 `topks`(32×uint32)+ queryStartLoc/queryLens/cachedLens 三批元数据窗口,总占用须在 192KB UB 内(kernel 断言仅 debug 构建生效);glm5 形状下约 148KB。
+**UB 布局**:2 份 `kBufs`(每份 `ROUND_UP(32*perKBytes, 32B)`)+ 2 份 `peBufs` + 2 份 `topks`(32×uint32)+ queryStartLoc/queryLens/cachedLens 三批元数据窗口,总占用须在 192KB UB 内(kernel 断言仅 debug 构建生效);glm5 形状下数据及索引缓冲约 74KB(不含元数据窗口)。
 
-**流水同步**:事件按缓冲编号配对——`(S, MTE2)`/`(MTE2, S)` EVENT_ID0..3 管理 `topks[b]` 的可用/释放,`(MTE2, MTE3)`/`(MTE3, MTE2)` EVENT_ID0..3 管理数据缓冲 `kBufs[b]/peBufs[b]` 的写完/复用,queryStartLoc/queryLens/cachedLens 三批元数据 staging 共用 EVENT_ID4(同批一次拷入);行间 `curr = (curr + 1) % 4` 轮转,chunk `i` 的拷入与 chunk `i-3..i-1` 的拷出重叠。kernel 结束前 drain 全部 4 个缓冲的 MTE2 事件。
+**流水同步**:事件按缓冲编号配对——`(S, MTE2)`/`(MTE2, S)` EVENT_ID0..1 管理 `topks[b]` 的可用/释放,`(MTE2, MTE3)`/`(MTE3, MTE2)` EVENT_ID0..1 管理数据缓冲 `kBufs[b]/peBufs[b]` 的写完/复用,queryStartLoc/queryLens/cachedLens 三批元数据 staging 共用 EVENT_ID4(同批一次拷入);行间 `curr = (curr + 1) % GATHER_SPARSE_KV_CACHE_BUF_NUM` 轮转,chunk `i` 的拷入与 chunk `i-1` 的拷出重叠。kernel 结束前 drain 全部 2 个缓冲的 MTE2 事件。
 
 **在模型中的位置**:decode + DSA 且序列较长时(阈值 `XLITE_MLA_DENSE_THRESHOLD`,`csrc/model.cpp`),先本算子收集 dense cache,再以 `dense=True` 调 mla_v2;短序列或无 DSA 时直接走 paged mla_v2,不需要本算子。本算子自身支持 decode 与 small prefill(变长 query,每 query token 独占一行 dense cache)。cxa 的 dense 模式亦在 binding 层(`CXA`,`csrc/_C.cpp`)内部调用本算子(仅 K 通道,peCache 传空,走 nope 变体),把压缩 KV 的 top-k token 收集成连续 dense cache 后再进 cxa kernel。
