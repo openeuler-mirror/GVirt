@@ -35,6 +35,19 @@ static void WarnPositions2D(const char *op)
     }
 }
 
+// Kernel scalar params are uint32_t in the launch ABI while XTensor metadata is 64-bit;
+// fail fast instead of silently truncating an element count that no longer fits.
+static inline uint32_t LaunchNumel(uint64_t numel, const char *op)
+{
+    if (numel > UINT32_MAX) {
+        throw std::runtime_error(std::string(op) +
+                                 ": element count exceeds the uint32_t launch "
+                                 "ABI: " +
+                                 std::to_string(numel));
+    }
+    return static_cast<uint32_t>(numel);
+}
+
 // Pick how many AIV blocks to launch for a byte-wise copy kernel (concat/split)
 // based on the total bytes. Each block processes ~tilePerCore bytes in series,
 // so for small data we launch only a few blocks (avoids the multi-core launch +
@@ -235,8 +248,9 @@ void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType typ
                 throw std::runtime_error(err_str + " unsupported dtype for xccl func");
                 break;
         }
-        launchKernel(coreNum, rt.stream, inPtr, outPtr, count, localRank, rank,
-                     xcclComm->generation++, xcclComm->dParam, copySize, fetchOffset || type == DP);
+        launchKernel(coreNum, rt.stream, inPtr, outPtr, LaunchNumel(count, "XliteOpAllGather"),
+                     localRank, rank, xcclComm->generation++, xcclComm->dParam, copySize,
+                     fetchOffset || type == DP);
 
         if (needCopy) {
             TRACECHECK_ACL(aclrtMemcpyAsync(out.ptr, out.bytes, outPtr, out.bytes,
@@ -354,7 +368,8 @@ void XliteOpReduceScatter(XRuntime &rt, XTensor &in, XTensor &out, enum commType
                 throw std::runtime_error(err_str + " unsupported dtype for xccl func");
                 break;
         }
-        launchKernel(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank, rank,
+        launchKernel(coreNum, rt.stream, inPtr, outPtr,
+                     LaunchNumel(in.numel, "XliteOpReduceScatter"), localRank, rank,
                      xcclComm->generation++, xcclComm->dParam, copySize, fetchOffset || type == DP);
 
         if (needCopy) {
@@ -467,7 +482,8 @@ void XliteOpAllReduceSum(XRuntime &rt, XTensor &in, XTensor &out, enum commType 
                 throw std::runtime_error(err_str + " unsupported dtype for xccl func");
                 break;
         }
-        launchKernel(coreNum, rt.stream, inPtr, outPtr, in.numel, localRank, rank,
+        launchKernel(coreNum, rt.stream, inPtr, outPtr,
+                     LaunchNumel(in.numel, "XliteOpAllReduceSum"), localRank, rank,
                      xcclComm->generation++, xcclComm->dParam, copySize, fetchOffset || type == DP);
 
         if (needCopy) {
