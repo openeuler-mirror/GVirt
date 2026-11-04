@@ -90,8 +90,6 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
     // Each bank is reusable after all cache writes complete.
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-        set_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
     }
     int32_t slot = ((__gm__ int32_t *)slots)[block_idx];
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
@@ -125,8 +123,6 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + next);
         }
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-        wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
         if (slot >= 0) {
             auto x = xBuf[curr];
             auto tmp = tmpBuf[curr];
@@ -141,8 +137,6 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
             }
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            set_flag(PIPE_S, PIPE_MTE3, EVENT_ID1);
-            wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID1);
             CopyUbufToGmAligned((__gm__ int8_t *)cache + (uint64_t)slot * latentDim, packed[curr],
                                 latentDim);
             CopyUbufToGmAligned((__gm__ Dtype *)peCache + (uint64_t)slot * ropeDim,
@@ -151,14 +145,10 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
                                 packed[curr] + scaleOffset, groupNum * sizeof(float));
         }
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-        set_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
         slot = nextSlot;
     }
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
         wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-        wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
     }
 }
 
