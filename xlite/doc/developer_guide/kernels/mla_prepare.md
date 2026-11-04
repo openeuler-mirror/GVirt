@@ -69,7 +69,7 @@ host 按 attnQkvc.dtype 选择(见 `csrc/op.cpp` 的 `XliteOpMlaPrepare`,关键�
 
 RoPE 细节(子函数见 `csrc/kernels/rope_complex_and_cache.h` 的 `rope_complex_and_cache` 模板函数):UB 中 double-buffer 载入输入与 freqs,`vconv` 升 fp32 后按复数旋转(需要 `nLocalHeads == 1` 的 cache 写断言,同函数内关键字 `assert(nLocalHeads == 1)`),写回原 dtype;cache 写入按 slot 分解定位:`(slot/blockSize)*MAX(peCacheStride, blockSize×ropeHeadDim) + (slot%blockSize)*ropeHeadDim`(物理块号 × 经 MAX 钳制的 dim-0 有效跨距 + 块内偏移 × 通道宽;`peCacheStride` 由 mla_prepare 传入前已 MAX 钳制 ≥ 自然步长)。
 
-SFA-C8 的 Q 阶段复用 `norm`，KV 阶段在同一核内完成 RMSNorm、RoPE 和量化。每个任务处理一个 token，输入及输出暂存区使用双缓冲，计算当前 token 时预取下一条输入。KV Norm 先舍入为 BF16，再调用与独立写缓存入口共用的 `mla_cache_c8_quant`；PE 使用 FP32 旋转后转换为 BF16。V/S→MTE3 同步后按相同 slot 分别写出 INT8 K、BF16 PE 和 FP32 scale，全部 MTE3 完成后才复用相应缓冲；`slot=-1` 不写缓存，但仍保留请求的 Norm 输出。C8 通过末尾可选参数 `k_scale_cache` 传入独立 scale 缓存。
+SFA-C8 的 Q 阶段复用 `norm`，KV 阶段在同一核内完成 RMSNorm、RoPE 和量化。每个任务处理一个 token，输入及输出暂存区使用双缓冲，计算当前 token 时预取下一条输入。KV Norm 先舍入为 BF16，再调用与独立写缓存入口共用的 `mla_cache_c8_quant`；PE 使用 FP32 旋转后转换为 BF16。scale 经 S→V 同步后，由 V→MTE3 保证按相同 slot 写出 INT8 K、BF16 PE 和 FP32 scale，全部 MTE3 完成后才复用相应缓冲；`slot=-1` 不写缓存，但仍保留请求的 Norm 输出。C8 通过末尾可选参数 `k_scale_cache` 传入独立 scale 缓存。
 
 ## 关键代码位置
 

@@ -84,11 +84,10 @@ __aicore__ inline void mla_prepare_c8(GM_ADDR attnQkvc, GM_ADDR qNorm, GM_ADDR q
         convert_input(bias, inputs[1], repeat);
     }
     // Reuse the weight-loading buffers for token inputs.
-    pipe_barrier(PIPE_ALL);
+    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-        set_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
     }
     int32_t slot = ((__gm__ int32_t *)slots)[first];
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
@@ -128,8 +127,6 @@ __aicore__ inline void mla_prepare_c8(GM_ADDR attnQkvc, GM_ADDR qNorm, GM_ADDR q
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + next);
         }
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-        wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
         if (slot >= 0 || attnNormKvc) {
             // Match norm.h, including the BF16 boundary before quantization.
             convert_input(x, inputs[curr], repeat);
@@ -144,7 +141,6 @@ __aicore__ inline void mla_prepare_c8(GM_ADDR attnQkvc, GM_ADDR qNorm, GM_ADDR q
             vadds(tmp, tmp, normEps, 1, 1, 1, 8, 8);
             pipe_barrier(PIPE_V);
             vsqrt(tmp, tmp, 1, 1, 1, 8, 8);
-            pipe_barrier(PIPE_V);
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
             set_flag(PIPE_V, PIPE_S, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
@@ -161,7 +157,6 @@ __aicore__ inline void mla_prepare_c8(GM_ADDR attnQkvc, GM_ADDR qNorm, GM_ADDR q
                 pipe_barrier(PIPE_V);
             }
             convert_output(normalized[curr], tmp, repeat);
-            pipe_barrier(PIPE_V);
         }
         if (slot >= 0) {
             // RoPE: interleaved input to [real | imag], as in rope_complex_and_cache.
@@ -213,8 +208,6 @@ __aicore__ inline void mla_prepare_c8(GM_ADDR attnQkvc, GM_ADDR qNorm, GM_ADDR q
                                 normalized[curr], latentDim * sizeof(Dtype));
         }
         if (slot >= 0) {
-            set_flag(PIPE_S, PIPE_MTE3, EVENT_ID1);
-            wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID1);
             CopyUbufToGmAligned((__gm__ int8_t *)cache + (uint64_t)slot * latentDim, packed[curr],
                                 latentDim);
             CopyUbufToGmAligned((__gm__ Dtype *)peCache + (uint64_t)slot * ropeDim,
@@ -223,14 +216,10 @@ __aicore__ inline void mla_prepare_c8(GM_ADDR attnQkvc, GM_ADDR qNorm, GM_ADDR q
                                 packed[curr] + scaleOffset, groupNum * sizeof(float));
         }
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-        set_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
         slot = nextSlot;
     }
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
         wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-        wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
     }
 }
 
