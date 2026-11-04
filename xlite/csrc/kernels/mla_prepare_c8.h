@@ -219,9 +219,8 @@ __aicore__ inline void mla_prepare_c8(GM_ADDR attnQkvc, GM_ADDR qNorm, GM_ADDR q
                                 latentDim);
             CopyUbufToGmAligned((__gm__ Dtype *)peCache + (uint64_t)slot * ropeDim,
                                 packed[curr] + latentDim, ropeDim * sizeof(Dtype));
-            copy_ubuf_to_gm_align_b32((__gm__ float *)scaleCache + (uint64_t)slot * groupNum,
-                                      packed[curr] + scaleOffset, 0, 1, groupNum * sizeof(float), 0,
-                                      0, 0, 0);
+            CopyUbufToGmAligned((__gm__ float *)scaleCache + (uint64_t)slot * groupNum,
+                                packed[curr] + scaleOffset, groupNum * sizeof(float));
         }
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
