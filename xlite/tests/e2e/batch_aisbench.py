@@ -11,8 +11,10 @@ Using `vllm-ascend`'s official container image is recommended.
 """
 
 import os
+import json
 import math
 import re
+import urllib.request
 import shlex
 import shutil
 import signal
@@ -20,11 +22,10 @@ import socket
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -50,7 +51,8 @@ class BenchResult:
     tp_size: int
     ep: bool
     dp_size: int
-    spec_decode: tuple[str, int, str]  # (method, num_spec_tokens, draft dir); num_spec_tokens == 0 disables
+    # (method, num_spec_tokens, draft dir, spec-config JSON); num_spec_tokens == 0 disables spec decode
+    spec_decode: tuple[str, int, str, str]
     xlite: bool
     xlite_full_mode: bool
     metric: str
@@ -182,36 +184,44 @@ def _read_tail(handle: object, max_bytes: int = 16 * 1024) -> str:
         return "No error message available"
 
 
-def format_spec_decode(spec_decode: tuple[str, int, str]) -> str:
+def format_spec_decode(spec_decode: tuple[str, int, str, str]) -> str:
     """Label of a spec decode config for reports and notifications.
 
     `method:num_spec_tokens` (e.g. `mtp:3`); spec decode disabled renders as `n/a` —
     with no tokens requested there is no method to name. The draft weights dir is
     deliberately not part of the label.
     """
-    method, num_spec_tokens, _ = spec_decode
+    method, num_spec_tokens = spec_decode[:2]
     return f"{method}:{num_spec_tokens}" if num_spec_tokens > 0 else "n/a"
 
 
-# `<method>:<num>[:<draft_dir>]` with every part but <num> optional; a bare `<num>` means mtp
-_RE_SPEC_DECODE = re.compile(r"^(?:(?P<method>\w+):)?(?P<num>\d+)(?::(?P<draft_dir>[\w.-]+))?$")
+# `<method>:<num>[:<draft_dir>[:<json>]]` with every part but <num> optional; a bare `<num>` means mtp.
+# The trailing JSON is merged into the speculative-config (after the built fields, which win);
+# it carries method-specific extras like extract_hidden_states' draft_model_config hf overrides.
+_RE_SPEC_DECODE = re.compile(r"^(?:(?P<method>\w+):)?(?P<num>\d+)(?::(?P<draft_dir>[\w.-]+))?(?::(?P<extra>.+))?$")
 
 
-def parse_spec_decode(entry: str) -> tuple[str, int, str]:
-    """Parse a ``--specs`` entry into ``(method, num_speculative_tokens, draft_weights_dir)``.
+def parse_spec_decode(entry: str) -> tuple[str, int, str, str]:
+    """Parse a ``--specs`` entry into ``(method, num_speculative_tokens, draft_weights_dir, spec_config_json)``.
 
     A bare number ``N`` means ``mtp:N``; zero tokens disables spec decode (no method or
     draft dir applies); an omitted dir uses the main model's own weights, otherwise it is
     a single directory name resolved at server start as a sibling of the main model dir.
+    The optional trailing JSON is merged into the speculative-config fields built by the
+    harness (built fields take precedence); e.g. extract_hidden_states needs it to set
+    `draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids`.
     """
     match = _RE_SPEC_DECODE.match(entry.strip())
     if match:
         num = int(match.group("num"))
         if num == 0:
-            return "", 0, ""
-        return (match.group("method") or "mtp").lower(), num, match.group("draft_dir") or ""
+            return "", 0, "", ""
+        # `method:1::{json}` (no draft dir) leaves the extra group as `:{json}` — strip the
+        # spurious separator (a JSON object / quoted string never starts with `:`)
+        extra = (match.group("extra") or "").removeprefix(":")
+        return (match.group("method") or "mtp").lower(), num, match.group("draft_dir") or "", extra
     raise ValueError(
-        f"Invalid spec decode entry `{entry}`; expected `<method>:<num_spec_tokens>[:<draft_weights_dir>]` "
+        f"Invalid spec decode entry `{entry}`; expected `<method>:<num_spec_tokens>[:<draft_weights_dir>[:<json>]]` "
         "or a bare number of MTP tokens (e.g. `eagle3:2:Qwen3-a3B_eagle3` or `3`)"
     )
 
@@ -461,7 +471,7 @@ def start_vllm_server(
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
-    spec_decode: tuple[str, int, str] = ("", 0, ""),
+    spec_decode: tuple[str, int, str, str] = ("", 0, "", ""),
     max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
@@ -551,27 +561,44 @@ def start_vllm_server(
     # draft weights default to the main model's own (integrated draft heads, e.g. MTP — the
     # same config `vllm_xlite.sh` uses); otherwise the entry names a sibling dir of the main
     # model dir, and methods like eagle3/dspark/dflash (see bd5020ad6) need it passed as
-    # `model` in the speculative config
-    spec_method, num_spec_tokens, draft_dir = spec_decode
+    # `model` in the speculative config. The 4th tuple element is an optional JSON object
+    # merged into the speculative-config (built fields win) for method-specific extras,
+    # e.g. extract_hidden_states' `draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids`.
+    spec_method, num_spec_tokens, draft_dir, spec_extra_json = spec_decode
     if num_spec_tokens > 0:
+        spec_config: dict = {"method": spec_method, "num_speculative_tokens": num_spec_tokens}
         if draft_dir:
             draft_path = Path(model_path).parent / draft_dir
             if not draft_path.exists():
                 raise ValueError(f"Speculative draft weights not found at {draft_path}")
-            vllm_cmd_lst.append(
-                f'--speculative-config \'{{"method": "{spec_method}","num_speculative_tokens": {num_spec_tokens},'
-                f'"model": "{draft_path}"}}\''
-            )
-        else:
-            vllm_cmd_lst.append(
-                f'--speculative-config \'{{"method": "{spec_method}","num_speculative_tokens": {num_spec_tokens}}}\''
-            )
+            spec_config["model"] = str(draft_path)
+        if spec_extra_json:
+            try:
+                spec_extra = json.loads(spec_extra_json)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid spec-config JSON `{spec_extra_json}` in --specs entry: {e}") from e
+            if not isinstance(spec_extra, dict):
+                raise ValueError(f"Spec-config JSON must be an object, got: {spec_extra_json}")
+            spec_config.update(spec_extra)
+        vllm_cmd_lst.append(f"--speculative-config '{json.dumps(spec_config)}'")
     vllm_cmd = " ".join(vllm_cmd_lst)
 
     env_copy["XLITE_NODE_IPS"] = ",".join(["127.0.0.1"] * dp_size)
     env_copy["XLITE_LOCAL_IP"] = "127.0.0.1"
     env_copy["XLITE_DEVS_PER_NODE"] = str(dp_size * tp_size)
     env_copy["XLITE_FLASH_ATTENTION_ENABLE"] = "1"
+    # xlite's XRuntime binds its HCCL/XCCL bootstrap sockets at `XLITE_PORT` (+ per-domain
+    # offsets up to ~500); concurrent servers on one host must not share the base port or
+    # their inits collide (`XRuntime: HCCL initialization failed`). Space consecutive
+    # servers 1000 apart (same convention as feat_verify.py's per-instance isolation).
+    env_copy.setdefault("XLITE_PORT", str(20000 + (port - 8241) * 1000))
+    # HCCL binds its NPU network adapter sockets on the device-side default port 16666; when a
+    # stale process (e.g. an uncleanly-exited co-tenant deployment) holds it, every
+    # hcclCommInitRootInfo dies with `Communication_Error_Bind_IP_Port(EI0020): The IP address
+    # ... and port 16666 have already been bound` / error code 7 (resource unavailable).
+    # Move the adapter socket range out of the way; space per-invocation like XLITE_PORT.
+    _pb = 40000 + (port - 8241) * 200
+    env_copy.setdefault("HCCL_NPU_SOCKET_PORT_RANGE", f"{_pb}-{_pb + 99}")
 
     t1 = datetime.now()
     # by default, redirect the vllm server logs to /dev/null; otherwise, redirect them to a `print_to` file.
@@ -607,6 +634,27 @@ def start_vllm_server(
             time.sleep(1)
         else:  # if `break` was not hit and loop exhausted
             raise TimeoutError(f"vLLM server did not start within {timeout} seconds")
+
+        # uvicorn binds the listening socket before the engine finishes startup; a client
+        # that fires here hits a half-booted server and every request fails with
+        # ConnectError (surfacing later as a nan accuracy row). Wait for the app to
+        # actually serve before handing over to ais_bench.
+        health_deadline = datetime.now() + timedelta(minutes=15)
+        while True:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"vLLM server process exited unexpectedly with code {process.returncode}:\n"
+                    f"{_read_tail(stdprint_target)}"
+                )
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as resp:
+                    if resp.status == 200:
+                        break
+            except Exception:
+                pass
+            if datetime.now() > health_deadline:
+                raise TimeoutError("vLLM server /health did not return 200 within 15 minutes")
+            time.sleep(2)
     except Exception as e:
         stop_process_group(process, 0)
         raise e
@@ -635,7 +683,7 @@ def run_ais_bench(
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
-    spec_decode: tuple[str, int, str] = ("", 0, ""),
+    spec_decode: tuple[str, int, str, str] = ("", 0, "", ""),
     max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
@@ -716,7 +764,7 @@ def run_ais_bench(
         suffix_backend = "xlite-full" if xlite_full_mode else "xlite-decode-only"
     else:
         suffix_backend = "aclgraph"
-    spec_method, num_spec_tokens, _ = spec_decode
+    spec_method, num_spec_tokens = spec_decode[:2]
     spec_suffix = ""
     if num_spec_tokens > 0:
         spec_suffix = f"-{spec_method.upper()}.{num_spec_tokens}"
@@ -729,6 +777,14 @@ def run_ais_bench(
         ais_bench_output_dir.mkdir(parents=True)
     print(f"ais_bench output directory: {ais_bench_output_dir}")
 
+    # Work on a per-invocation copy of the model config: the `sed -i` edits below (host_port,
+    # model, max_out_len, batch_size) must not leak into concurrent batch_aisbench invocations
+    # sharing the same ais_bench repo (a concurrent run's client would connect to this run's
+    # port and vice versa). ais_bench resolves `--models <name>` under configs/models/vllm_api/.
+    ais_bench_model_name = f"{spec.model_config}_{port}"
+    ais_bench_script_run = ais_bench_script.parent / f"{ais_bench_model_name}.py"
+    shutil.copyfile(ais_bench_script, ais_bench_script_run)
+    ais_bench_script = ais_bench_script_run
     # find the line `host_port=xxx` in the script and replace it with the actual port
     res = subprocess.run(
         f'sed -i -E "s/(host_port[[:space:]]*=[[:space:]]*)[0-9]+/\\1{port}/" "{ais_bench_script}"',
@@ -787,7 +843,7 @@ def run_ais_bench(
         max_cpu_workers = int(os.environ.get("XLITE_AISBENCH_WORKERS", 16))
         aisbench_cmd_lst: list[str] = [
             f"{venv_activate_cmd(ais_bench_dir)} &&",
-            f"ais_bench --models {spec.model_config}",
+            f"ais_bench --models {ais_bench_model_name}",
             f"--datasets {spec.task}",
             "--mode all --dump-eval-details" + (" --merge-ds" if spec.merge_ds else ""),
             f'--max-num-workers "{min(os.cpu_count() or 4, max_cpu_workers, max_num_seqs)}"',
@@ -974,10 +1030,12 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
         default=["0"],
         help=(
             "List of spec decode configs for each model, formatted "
-            "`<spec_decode_method>:<num_spec_tokens>[:<draft_weights_dir>]` (e.g. `mtp:3`); a bare number N "
+            "`<spec_decode_method>:<num_spec_tokens>[:<draft_weights_dir>[:<json>]]` (e.g. `mtp:3`); a bare number N "
             "means `mtp:N` (`0` disables spec decode); an omitted <draft_weights_dir> uses the main model's "
             "own weights, otherwise it is a single directory name resolved as `<main_model_dir>/../<dir>` "
-            "(needed by draft-based methods like eagle3/dspark/dflash); entries also support `N~`/`N*` "
+            "(needed by draft-based methods like eagle3/dspark/dflash); the optional trailing <json> object is "
+            "merged into the speculative-config (e.g. extract_hidden_states' draft_model_config aux-layer ids); "
+            "entries also support `N~`/`N*` "
             "repeat expansion like --models (last value used for padding)"
         ),
     )

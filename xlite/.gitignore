@@ -4,6 +4,7 @@ build_cache/
 dist/
 extra-info/
 runtime/
+tmp/
 *.so
 tags
 cscope.out
