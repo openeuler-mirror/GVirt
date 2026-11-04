@@ -43,7 +43,7 @@ mla_cache_c8(rt, latent, pe, slot_mapping, cache, pe_cache, k_scale_cache)
 amax = max(abs(x))
 scale = amax * FP32(1/127)
 factor = FP32(1/amax) * 127
-q = round(clip(x * factor, -128, 127))
+q = round(x * factor)
 ```
 
 除法、乘法和舍入保持分步执行；全零组写 `q=0, scale=0`。采用 FP32→FP16(ODD)→INT8(RINT) 两段转换，避免 FP16 中间舍入改变量化值。量化值饱和到 INT8 范围。

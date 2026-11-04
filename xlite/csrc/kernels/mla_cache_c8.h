@@ -38,10 +38,6 @@ __aicore__ inline void mla_cache_c8_quant(__ubuf__ Dtype *input, __ubuf__ int8_t
     wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
     vmuls(x, x, factor, 2, 1, 1, 8, 8);
     pipe_barrier(PIPE_V);
-    vmins(x, x, 127.0f, 2, 1, 1, 8, 8);
-    pipe_barrier(PIPE_V);
-    vmaxs(x, x, -128.0f, 2, 1, 1, 8, 8);
-    pipe_barrier(PIPE_V);
     // FP32 -> FP16 (ODD) -> INT8 (RINT) avoids double rounding.
     vconv_f322f16o(halfValues, x, 2, 1, 1, 4, 8);
     pipe_barrier(PIPE_V);
