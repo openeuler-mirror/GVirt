@@ -665,7 +665,7 @@ __aicore__ inline void compressor_blocks_weighted_sum(
                 convert_output(kvOutUb[curr], kvCalcUb, DIV_ROUND_UP(head_dim, calcPad));
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2 + curr);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID2 + curr);
-                CopyUbufToGmAligned(weightedSum + totalBlockIdx * head_dim, kvOutUb[curr],
+                CopyUbufToGmAligned(weightedSum + (uint64_t)totalBlockIdx * head_dim, kvOutUb[curr],
                                     head_dim * sizeof(Dtype));
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2 + curr);
                 curr = 1 - curr;

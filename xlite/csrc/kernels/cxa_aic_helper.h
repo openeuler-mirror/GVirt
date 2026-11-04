@@ -229,7 +229,8 @@ public:
                         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
                         CopyGmToL1Nd2Nz(
                             kl1bBuf[pingpongL1B],
-                            swaKCache[block * swaKCacheStride + blockOffset * headDim + kOffset],
+                            swaKCache[((uint64_t)block * swaKCacheStride + blockOffset) * headDim +
+                                      kOffset],
                             nSize, kRemSize, headDim, nBlockPad);
                         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
@@ -319,8 +320,8 @@ public:
                         }
                         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
                         CopyGmToL1Nd2Nz(kl1bBuf[pingpongL1B],
-                                        compressKCache[block * blockPitch + kOffset], nSize,
-                                        kRemSize, headDim, nBlockPad);
+                                        compressKCache[(uint64_t)block * blockPitch + kOffset],
+                                        nSize, kRemSize, headDim, nBlockPad);
                         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                     }
@@ -467,8 +468,9 @@ public:
                     // copy SWK(T) (svwn0, kSize) to L1
                     CopyGmToL1Nd2Nz(
                         ktl1bBuf[pingpongL1B],
-                        swaKCache[block * swaKCacheStride + blockOffset * headDim + nOffset], kSize,
-                        nSize, headDim, kBlockPad);
+                        swaKCache[((uint64_t)block * swaKCacheStride + blockOffset) * headDim +
+                                  nOffset],
+                        kSize, nSize, headDim, kBlockPad);
 
                     SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
                     WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
@@ -561,7 +563,7 @@ public:
                                 }
                                 CopyGmToL1Nd2Nz(
                                     ktl1bBuf[pingpongL1B][bid * compressBlockSize * kBlockSize],
-                                    compressKCache[block * compressKCacheStride +
+                                    compressKCache[(uint64_t)block * compressKCacheStride +
                                                    blockRemainder * headDim + nOffset],
                                     kRemSizeTmp, nSize, headDim, L1BkRemBlockPad);
                             }

@@ -286,8 +286,8 @@ public:
             // copy k (blockSize, headDim) to L1
             uint32_t block = blockTable[mIdx + mIdxStart];
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
-            CopyGmToL1Nd2Nz(kl1Buf[curr], kCache[block * kCacheStride], mSize, headDim, headDim,
-                            mBlockPad);
+            CopyGmToL1Nd2Nz(kl1Buf[curr], kCache[(uint64_t)block * kCacheStride], mSize, headDim,
+                            headDim, mBlockPad);
             // copy q (queryTaskLen, nHeads, headDim) to L1
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
             CopyGmToL1Nd2Nz(ql1Buf[curr], query, nSize, headDim, headDim, nBlockPad);
