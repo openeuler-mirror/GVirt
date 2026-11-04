@@ -377,12 +377,11 @@ __aicore__ inline void indexer_c8_prepare_tile(GM_ADDR kw, GM_ADDR freqs, GM_ADD
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
 }
 
-__aicore__ inline void indexer_c8_store_tile(__gm__ bfloat16_t *rotated, GM_ADDR kCache,
-                                             GM_ADDR kScaleCache, GM_ADDR q8, GM_ADDR qScale,
-                                             GM_ADDR scaledWeights, uint32_t task,
-                                             uint32_t keyTiles, uint32_t tokens,
-                                             uint32_t maxPosition, uint32_t capacity,
-                                             uint32_t heads, uint32_t curr, IndexerC8Buffers &ub)
+__aicore__ inline void indexer_c8_store_tile(
+    __gm__ bfloat16_t *rotated, GM_ADDR kCache, GM_ADDR kScaleCache, GM_ADDR q8, GM_ADDR qScale,
+    GM_ADDR scaledWeights, uint32_t task, uint32_t keyTiles, uint32_t tokens, uint32_t maxPosition,
+    uint32_t capacity, uint32_t kCacheStride, uint32_t kScaleCacheStride, uint32_t blockSize,
+    uint32_t heads, uint32_t curr, IndexerC8Buffers &ub)
 {
     bool isKey = task < keyTiles;
     uint32_t rowOffset = get_subblockid() * ub.rows;
@@ -429,15 +428,21 @@ __aicore__ inline void indexer_c8_store_tile(__gm__ bfloat16_t *rotated, GM_ADDR
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     if (isKey) {
+        // dest is a flat slot (block * blockSize + offsetInBlock).
         for (uint32_t r = 0; r < count; ++r) {
             int32_t dest = ub.slot[curr][r];
             if (!indexer_c8_valid(ub.position[curr][r], dest, maxPosition, capacity)) {
                 continue;
             }
-            copy_ubuf_to_gm_align_b8((__gm__ int8_t *)kCache + (uint64_t)dest * ub.dim,
+            uint32_t block = static_cast<uint32_t>(dest) / blockSize;
+            uint32_t offset = static_cast<uint32_t>(dest) % blockSize;
+            copy_ubuf_to_gm_align_b8((__gm__ int8_t *)kCache +
+                                         (uint64_t)block * MAX(kCacheStride, blockSize * ub.dim) +
+                                         offset * ub.dim,
                                      ub.quant + r * ub.dim, 0, 1, ub.dim, 0, 0, 0, 0);
-            CopyUbufToGmAligned((__gm__ half *)kScaleCache + dest, ub.scale_scatter + r * 16,
-                                sizeof(half));
+            CopyUbufToGmAligned((__gm__ half *)kScaleCache +
+                                    (uint64_t)block * MAX(kScaleCacheStride, blockSize) + offset,
+                                ub.scale_scatter + r * 16, sizeof(half));
         }
     } else {
         uint64_t row = (uint64_t)token * heads + first;
@@ -454,9 +459,11 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
                                           GM_ADDR positions, GM_ADDR slots, GM_ADDR kCache,
                                           GM_ADDR kScaleCache, GM_ADDR q, GM_ADDR q8,
                                           GM_ADDR qScale, GM_ADDR scaledWeights, GM_ADDR hadamard,
-                                          GM_ADDR workspace, uint32_t tokens, uint32_t rowStride,
-                                          uint32_t heads, uint32_t maxPosition, uint32_t capacity,
-                                          bool freqsFp32, bool isLong, float normEps)
+                                          GM_ADDR workspace, uint32_t kCacheStride,
+                                          uint32_t kScaleCacheStride, uint32_t blockSize,
+                                          uint32_t tokens, uint32_t rowStride, uint32_t heads,
+                                          uint32_t maxPosition, uint32_t capacity, bool freqsFp32,
+                                          bool isLong, float normEps)
 {
     uint32_t keyTiles = DIV_ROUND_UP(tokens, INDEXER_C8_TILE_ROWS);
     uint32_t qChunks = DIV_ROUND_UP(heads, INDEXER_C8_TILE_ROWS);
@@ -510,7 +517,7 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
         wait_flag_dev(curr);
         indexer_c8_store_tile(rotated[curr], kCache, kScaleCache, q8, qScale, scaledWeights,
                               block_idx + i * block_num, keyTiles, tokens, maxPosition, capacity,
-                              heads, curr, ub);
+                              kCacheStride, kScaleCacheStride, blockSize, heads, curr, ub);
         if (i + PINGPONG_BUF_NUM < perCore) {
             indexer_c8_prepare_tile(kw, freqs, positions, slots, q, prepared[curr],
                                     block_idx + (i + PINGPONG_BUF_NUM) * block_num, keyTiles,
@@ -528,12 +535,14 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
     extern "C" __global__ __aicore__ void indexer_prepare_c8_##dtype(                              \
         GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR freqs, GM_ADDR positions, GM_ADDR slots, \
         GM_ADDR k_cache, GM_ADDR k_scale_cache, GM_ADDR q, GM_ADDR q8, GM_ADDR q_scale,            \
-        GM_ADDR scaled_weights, GM_ADDR hadamard, GM_ADDR workspace, uint32_t tokens,              \
-        uint32_t row_stride, uint32_t heads, uint32_t max_position, uint32_t capacity,             \
-        bool freqs_fp32, bool is_long, float norm_eps)                                             \
+        GM_ADDR scaled_weights, GM_ADDR hadamard, GM_ADDR workspace, uint32_t k_cache_stride,      \
+        uint32_t k_scale_cache_stride, uint32_t block_size, uint32_t tokens, uint32_t row_stride,  \
+        uint32_t heads, uint32_t max_position, uint32_t capacity, bool freqs_fp32, bool is_long,   \
+        float norm_eps)                                                                            \
     {                                                                                              \
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);                                         \
         indexer_prepare_c8(kw, weight, bias, freqs, positions, slots, k_cache, k_scale_cache, q,   \
-                           q8, q_scale, scaled_weights, hadamard, workspace, tokens, row_stride,   \
-                           heads, max_position, capacity, freqs_fp32, is_long, norm_eps);          \
+                           q8, q_scale, scaled_weights, hadamard, workspace, k_cache_stride,       \
+                           k_scale_cache_stride, block_size, tokens, row_stride, heads,            \
+                           max_position, capacity, freqs_fp32, is_long, norm_eps);                 \
     }

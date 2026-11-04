@@ -43,7 +43,8 @@ indexer_prepare_c8_<dtype>(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR fre
                            GM_ADDR positions, GM_ADDR slots, GM_ADDR k_cache,
                            GM_ADDR k_scale_cache, GM_ADDR q, GM_ADDR q8, GM_ADDR q_scale,
                            GM_ADDR scaled_weights, GM_ADDR hadamard, GM_ADDR workspace,
-                           uint32_t tokens, uint32_t row_stride,
+                           uint32_t k_cache_stride, uint32_t k_scale_cache_stride,
+                           uint32_t block_size, uint32_t tokens, uint32_t row_stride,
                            uint32_t heads, uint32_t max_position, uint32_t capacity,
                            bool freqs_fp32, bool is_long, float norm_eps)
 ```
@@ -64,6 +65,8 @@ indexer_prepare_c8_<dtype>(GM_ADDR kw, GM_ADDR weight, GM_ADDR bias, GM_ADDR fre
 | scaled_weights | 输出 | `[tokens, heads]` | fp16 | `FP16(原始头权重 × FP16(q_scale))`;仅 `is_long` |
 | hadamard | 输入 | `[128,128]` | bf16 | Runtime 复用的归一化 Sylvester 矩阵 |
 | workspace | 临时空间 | `[4,cores,32,128]` | bf16 | 每个 AIC 的 Matmul 输入/输出各两份;`cores=min(rt.aicNum,tasks)` |
+| k_cache_stride / k_scale_cache_stride | — | 标量 | uint32 | k_cache/k_scale_cache 的 dim-0 跨度(元素数);连续时分别等于 `block_size×128` 与 `block_size`,非连续时宿主传入真实跨距 |
+| block_size | — | 标量 | uint32 | cache 块大小;K 的平坦槽位按 `dest/block_size` 分解为 (block, offset) 寻址,Q 行稠密写入不受影响 |
 | tokens / row_stride / heads / max_position / capacity | — | 标量 | uint32 | `heads` 为 16 的倍数且 ≤ `XLITE_MAX_M0`;`max_position = freqs.shape[0]`;`capacity = k_scale_cache.numel` |
 | freqs_fp32 | — | 标量 | bool | freqs 是否为 fp32(host 推断) |
 | is_long | — | 标量 | bool | 长序列开关,启用 Q 阶段 |
@@ -125,7 +128,7 @@ Top-K kernel 本体逐 head 行独立打分(head-generic),heads=64 只需 host �
 2. **Hadamard**:AIC 用 `Matmul` 对当前 tile 与 BF16 归一化矩阵做乘法,FP32 累加、BF16 输出。分块和 L1/L0 搬运复用现有 BF16 Matmul。
 3. **动态量化**:`indexer_c8_store_tile` 从 GM 读取 BF16 结果、转为 FP32,调用 `IndexerC8Buffers::Quantize`:`vabs` → `ReduceMax`(每行 amax) →(非零时)`vdiv(127, amax)` 得 factor → `vmuls`(x*factor) → `vconv_f322s32r` 直接 FP32→INT32 取整(避免 FP16→INT8 二次舍入)→ `vconv_s322f32` → `vconv_f322f16` → `vconv_f162s8` 得 INT8;scale 存为 FP16(`vconv_f322f16`),`amax==0` 时 factor 为零。转换指令使用 repeat 批量处理各行。
 
-`indexer_c8_prepare_tile` 成组搬入 BF16 行与元数据,K 的 trig 按 position 逐行搬运,每个 Q tile 中,每个 AIV 只读一行 trig;freqs 为 fp32 时先舍入 BF16。`indexer_c8_store_tile` 对 K 按 slot 散列写 INT8 行与精确 2 字节 FP16 scale;对 Q,每个 AIV 连续写出 16 个 head 的 Q8、scale 和 scaled weights。
+`indexer_c8_prepare_tile` 成组搬入 BF16 行与元数据,K 的 trig 按 position 逐行搬运,每个 Q tile 中,每个 AIV 只读一行 trig;freqs 为 fp32 时先舍入 BF16。`indexer_c8_store_tile` 对 K 按 slot 散列写 INT8 行与精确 2 字节 FP16 scale——平坦槽位分解 `block = dest/block_size`、`offset = dest%block_size`,INT8 写 `k_cache + block*k_cache_stride + offset*dim`,scale 写 `k_scale_cache + block*k_scale_cache_stride + offset`;对 Q,每个 AIV 连续写出 16 个 head 的 Q8、scale 和 scaled weights。
 
 ### K 前处理
 

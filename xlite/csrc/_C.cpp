@@ -261,10 +261,11 @@ static bool TensorUsable(const at::Tensor &t)
     return t.defined() && t.numel() > 0;
 }
 
-static void InitOptionalXTensor(XTensor &out, at::Tensor &in, DebugSrcLoc loc)
+static void InitOptionalXTensor(XTensor &out, at::Tensor &in, DebugSrcLoc loc,
+                                bool allowPitched = false)
 {
     if (TensorUsable(in)) {
-        InitXTensor(out, in, loc);
+        InitXTensor(out, in, loc, allowPitched);
     }
 }
 
@@ -868,13 +869,12 @@ void _CModel::Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
                                      std::to_string(i));
         }
         // allowPitch: cache consumers that address a dim-0 pitch (hybrid GDN
-        // state, MHA/GQA k/v, MLA k/pe, CXA, non-C8 DSA). C8 DSA int8 caches stay
-        // contiguous. CXA caches are paged-addressed; LI-C8 writers/readers
-        // consume stride[0] directly (K + scales packed page-strided in one alloc).
+        // state, MHA/GQA k/v, MLA k/pe, CXA, DSA). CXA caches are paged-addressed;
+        // LI-C8 writers/readers consume stride[0] directly (K + scales packed
+        // page-strided in one alloc).
         bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
                           attnType == XMODEL_ATTN_MLA || attnType == XMODEL_ATTN_CXA ||
-
-                          (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
+                          attnType == XMODEL_ATTN_DSA;
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
         }
@@ -1147,13 +1147,12 @@ void _CModel::ForwardAndGetLogits(XRuntime &rt, at::Tensor &input, XModelAttnMet
                                      std::to_string(i));
         }
         // allowPitch: cache consumers that address a dim-0 pitch (hybrid GDN
-        // state, MHA/GQA k/v, MLA k/pe, CXA, non-C8 DSA). C8 DSA int8 caches stay
-        // contiguous. CXA caches are paged-addressed; LI-C8 writers/readers
-        // consume stride[0] directly (K + scales packed page-strided in one alloc).
+        // state, MHA/GQA k/v, MLA k/pe, CXA, DSA). CXA caches are paged-addressed;
+        // LI-C8 writers/readers consume stride[0] directly (K + scales packed
+        // page-strided in one alloc).
         bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
                           attnType == XMODEL_ATTN_MLA || attnType == XMODEL_ATTN_CXA ||
-
-                          (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
+                          attnType == XMODEL_ATTN_DSA;
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
         }
@@ -1261,13 +1260,12 @@ void _CModel::ForwardWithInputsEmbeds(XRuntime &rt, at::Tensor &input, XModelAtt
                                      std::to_string(i));
         }
         // allowPitch: cache consumers that address a dim-0 pitch (hybrid GDN
-        // state, MHA/GQA k/v, MLA k/pe, CXA, non-C8 DSA). C8 DSA int8 caches stay
-        // contiguous. CXA caches are paged-addressed; LI-C8 writers/readers
-        // consume stride[0] directly (K + scales packed page-strided in one alloc).
+        // state, MHA/GQA k/v, MLA k/pe, CXA, DSA). CXA caches are paged-addressed;
+        // LI-C8 writers/readers consume stride[0] directly (K + scales packed
+        // page-strided in one alloc).
         bool allowPitch = IsHybridAttn(attnType) || attnType == XMODEL_ATTN_MHA ||
                           attnType == XMODEL_ATTN_MLA || attnType == XMODEL_ATTN_CXA ||
-
-                          (attnType == XMODEL_ATTN_DSA && kvCache[i][2].scalar_type() != at::kChar);
+                          attnType == XMODEL_ATTN_DSA;
         for (uint64_t j = 0; j < _kv[i].size(); j++) {
             InitXTensor(_kv[i][j], kvCache[i][j], DBG_LOC, /*allowPitched=*/allowPitch);
         }
@@ -2036,8 +2034,8 @@ void CXA(XRuntime &rt, at::Tensor &q, at::Tensor &swaKCache, at::Tensor &compres
     XTensor _q, _swaKCache, _compressKCache, _swaBlockTables, _compressBlockTables, _attnSink,
         _output, _queryStartLoc, _lens, _cachedLens, _topkIndices;
     InitXTensor(_q, q, DBG_LOC);
-    InitXTensor(_swaKCache, swaKCache, DBG_LOC);
-    InitXTensor(_compressKCache, compressKCache, DBG_LOC);
+    InitXTensor(_swaKCache, swaKCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_compressKCache, compressKCache, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_swaBlockTables, swaBlockTables, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_compressBlockTables, compressBlockTables, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_attnSink, attnSink, DBG_LOC);
@@ -2379,7 +2377,7 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
 {
     XTensor _kw, _kNorm, _kNormBias, _freqs, _position, _indexKCache, _slotMapping, _q;
     XTensor _ks, _q8, _qs, _sw;
-    InitXTensor(_ks, kScaleCache, DBG_LOC);
+    InitXTensor(_ks, kScaleCache, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_q8, q8, DBG_LOC);
     InitXTensor(_qs, qScale, DBG_LOC);
     InitXTensor(_sw, scaledWeights, DBG_LOC);
@@ -2388,9 +2386,7 @@ void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor 
     InitXTensor(_kNormBias, kNormBias, DBG_LOC);
     InitXTensor(_freqs, freqs, DBG_LOC);
     InitXTensor(_position, position, DBG_LOC);
-    // C8 (int8) index caches stay contiguous until the C8 kernels address a pitch.
-    bool indexC8 = indexKCache.scalar_type() == at::kChar;
-    InitXTensor(_indexKCache, indexKCache, DBG_LOC, /*allowPitched=*/!indexC8);
+    InitXTensor(_indexKCache, indexKCache, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_slotMapping, slotMapping, DBG_LOC);
     InitXTensor(_q, q, DBG_LOC);
     XliteOpIndexerPrepare(rt, _kw, _kNorm, _kNormBias, _freqs, _position, indexHeadDim, indexNHeads,
@@ -2411,8 +2407,8 @@ void IndexerKCacheC8(XRuntime &rt, const at::Tensor &k, const at::Tensor &kNorm,
     InitXTensor(f, freqs, DBG_LOC);
     InitXTensor(pTensor, position, DBG_LOC);
     InitXTensor(sTensor, slotMapping, DBG_LOC);
-    InitXTensor(kc, kCache, DBG_LOC);
-    InitXTensor(sc, scaleCache, DBG_LOC);
+    InitXTensor(kc, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(sc, scaleCache, DBG_LOC, /*allowPitched=*/true);
     XliteOpIndexerKCacheC8(rt, x, w, b, f, pTensor, sTensor, kc, sc, normEps);
     rt.Synchronize();
 }
@@ -2452,7 +2448,7 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
                 at::Tensor &compressSlotMapping, uint32_t compressBlockSize,
                 std::optional<at::Tensor> state, std::optional<at::Tensor> stateSlotMapping,
                 std::optional<at::Tensor> stateBlockTable, uint32_t stateBlockSize,
-                uint64_t stateCacheStrideDim0, bool doRotate = false)
+                bool doRotate = false)
 {
     XTensor _kv, _score, _ape, _norm, _freqs, _weightedSum, _compressPositions,
         _compressSlotMapping, _queryStartLoc, _queryLens, _cachedLens, _compressKv, _state,
@@ -2477,10 +2473,10 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
         InitOptionalXTensor(_cachedLens, cachedLens.value(), DBG_LOC);
     }
     if (compressKv.has_value()) {
-        InitOptionalXTensor(_compressKv, compressKv.value(), DBG_LOC);
+        InitOptionalXTensor(_compressKv, compressKv.value(), DBG_LOC, /*allowPitched=*/true);
     }
     if (state.has_value()) {
-        InitOptionalXTensor(_state, state.value(), DBG_LOC);
+        InitOptionalXTensor(_state, state.value(), DBG_LOC, /*allowPitched=*/true);
     }
     if (stateSlotMapping.has_value()) {
         InitOptionalXTensor(_stateSlotMapping, stateSlotMapping.value(), DBG_LOC);
@@ -2492,7 +2488,7 @@ void Compressor(XRuntime &rt, at::Tensor &kv, at::Tensor &score, std::optional<a
                       _queryLens, _cachedLens, batch, nTotalBlocks, ratio, overlap, headDim,
                       ropeHeadDim, normEps, _compressKv, _compressPositions, _compressSlotMapping,
                       compressBlockSize, _state, _stateSlotMapping, _stateBlockTable,
-                      stateBlockSize, stateCacheStrideDim0, doRotate);
+                      stateBlockSize, doRotate);
     rt.Synchronize();
 }
 
@@ -3627,8 +3623,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("compress_positions"), py::arg("compress_slot_mapping"),
           py::arg("compress_block_size"), py::arg("state") = std::nullopt,
           py::arg("state_slot_mapping") = std::nullopt, py::arg("state_block_table") = std::nullopt,
-          py::arg("state_block_size"), py::arg("state_cache_stride_dim0") = 0,
-          py::arg("do_rotate") = false);
+          py::arg("state_block_size"), py::arg("do_rotate") = false);
     m.def("quant", &Quant, py::arg("rt"), py::arg("x"), py::arg("scale_reciprocal"),
           py::arg("offset"), py::arg("out"));
     m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),

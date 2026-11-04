@@ -29,7 +29,7 @@ compressor(rt, kv, score, ape=None, norm=None, freqs=None, weighted_sum, query_s
            query_lens, cached_lens=None, batch, n_total_blocks, ratio, overlap, head_dim,
            rope_head_dim, norm_eps, compress_kv=None, compress_positions, compress_slot_mapping,
            compress_block_size, state=None, state_slot_mapping=None, state_block_table=None,
-           state_block_size, state_cache_stride_dim0, do_rotate=False)
+           state_block_size, do_rotate=False)
 ```
 
 host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpCompressor`(以 `rt.aivNum` 个 block 启动)。kernel 签名(`csrc/kernels/compressor.h` 的 `COMPRESSOR_FUNC_DEFINE` 宏,关键字 `compressor_##dtype`):
@@ -40,9 +40,9 @@ compressor_<dtype>(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, G
                    uint32_t batch, uint32_t nTotalBlocks, uint32_t ratio, uint32_t overlap,
                    uint32_t head_dim, uint32_t rope_head_dim, float norm_eps, GM_ADDR compressKv,
                    GM_ADDR compressPositions, GM_ADDR compressSlotMapping, uint32_t compressBlockSize,
-                   GM_ADDR state, GM_ADDR stateSlotMapping, GM_ADDR stateBlockTable,
-                   uint32_t stateBlockSize, uint32_t maxStateBlocks, uint64_t stateCacheStrideDim0,
-                   uint32_t doRotate, float rotateScale)
+                   uint32_t compressKvStride, GM_ADDR state, GM_ADDR stateSlotMapping,
+                   GM_ADDR stateBlockTable, uint32_t stateBlockSize, uint32_t maxStateBlocks,
+                   uint64_t stateCacheStrideDim0, uint32_t doRotate, float rotateScale)
 ```
 
 `coff = 1 + overlap`,`full_dim = coff * head_dim`。`normWeight`/`freqs`/`ape`/`state` 等可为空(nullptr),kernel 据此跳过对应步骤。
@@ -65,8 +65,9 @@ compressor_<dtype>(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, G
 | stateSlotMapping | 输入 | `[batchedTokens]` | int32 / null | prefill token → state 平坦槽位(FLAT id) |
 | stateBlockTable | 输入 | `[batch, maxStateBlocks]` | int32 / null | paged state-cache 块表;条目 0 = 未分配哨兵 |
 | batch / nTotalBlocks / ratio / overlap / head_dim / rope_head_dim / compressBlockSize / stateBlockSize | — | 标量 | uint32 | `ratio ∈ {2,4,128}`;`overlap ∈ {0,1}` |
+| compressKvStride | — | 标量 | uint32 | compressKv 的 dim-0 跨度(元素数);连续时等于 compressBlockSize×head_dim,非连续时由宿主传入真实跨距(host 取 `compressKv.stride[0]`,C8 模式 compressKv 为空时传 0) |
 | maxStateBlocks | — | 标量 | uint32 | host 取 `stateBlockTable.stride[0]` |
-| stateCacheStrideDim0 | — | 标量 | uint64 | state 的 dim0 步长;0(pybind 默认)→ 解析为 `stateBlockSize*2*coff*head_dim` |
+| stateCacheStrideDim0 | — | 标量 | uint64 | state 的 dim0 步长;host 由 `state.stride[0]` 推导(pitched 视图经 binding 传入),无 state 时回退 `stateBlockSize*2*coff*head_dim` |
 | norm_eps | — | 标量 | float | RMSNorm epsilon |
 | doRotate / rotateScale | — | 标量 | bool / float | `doRotate` 时 `rotateScale = 1/√head_dim`,传给 `rope_complex_and_cache` |
 

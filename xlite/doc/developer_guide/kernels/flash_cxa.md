@@ -26,7 +26,8 @@ flash_cxa_<dtype>(q, swaKCache, compressKCache, swaBlockTables, compressBlockTab
                   swaBlockSize, compressBlockSize, swaBlockTableStride, compressBlockTableStride,
                   attnSink, qk, sv, max, sum, lastMax, lastSum, sync, output, batch,
                   queryStartLoc, queryLens, cachedLens, nHeads, headDim, scale, windowSize,
-                  compressRatio, indexTopK, topkIndices, tileSizeOfCachedKV, zeroGm)
+                  compressRatio, indexTopK, topkIndices, swaKCacheStride, compressKCacheStride,
+                  tileSizeOfCachedKV, zeroGm)
 ```
 
 末尾的 `zeroGm` 是 host 自动提供的零缓冲(`rt._attnZeroBuffer`,host launch 见 `csrc/op.cpp` 的 `XliteOpFlashCXA`),`CxaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
@@ -34,8 +35,8 @@ flash_cxa_<dtype>(q, swaKCache, compressKCache, swaBlockTables, compressBlockTab
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
 | q | 输入 | `[totalQ, nHeads, headDim]` | BF16 | query |
-| swa_k_cache | 输入 | `[swaBlockNum, swaBlockSize, headDim]` | BF16 | 分页滑动窗口 KV cache(始终分页) |
-| compress_k_cache | 输入 | `[compressBlockNum, compressBlockSize, headDim]` | BF16 | 分页压缩 KV cache(flash 仅走 sparse 分页路径,不分页由非 flash 的 dense 路径处理) |
+| swa_k_cache | 输入 | `[swaBlockNum, swaBlockSize, headDim]` | BF16 | 分页滑动窗口 KV cache(始终分页);支持 dim-0 跨度(内核按 `swaKCacheStride = MAX(stride[0], swaBlockSize*headDim)` 寻址) |
+| compress_k_cache | 输入 | `[compressBlockNum, compressBlockSize, headDim]` | BF16 | 分页压缩 KV cache(flash 仅走 sparse 分页路径,不分页由非 flash 的 dense 路径处理);支持 dim-0 跨度(`compressKCacheStride = MAX(stride[0], compressBlockSize*headDim)`) |
 | swa_block_tables / compress_block_tables | 输入 | `[rows >= batch, 对应表行跨度]` | INT32 | 分页 block table;持久化缓冲,行跨度为对应表 `stride[0]`(分配跨度),持久化 V2 表的 `shape[1]` 已由 PrepareAttn 收窄到运行期宽度,仅每行 lens 推导的有效前缀被读取 |
 | swa_block_size / compress_block_size | 标量 | - | uint32 | cache block 大小 |
 | attn_sink | 输入 | `[nHeads]` | FP32 | 每头注意力 sink 偏置;kernel 仅在第一个 KV tile(`kvIdx == 0`)读入 softmax 分母 |

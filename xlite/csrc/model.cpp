@@ -976,8 +976,8 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardAttnCXACommon(XRuntime &rt, uint
             overlap, _c.headDim, _c.ropeHeadDim, _c.normEps, kvCache[CXA_COMPRESS_KV],
             compPosTensor, compSlotTensor, _c.blockSizes[CXA_COMPRESS_KV], kvCache[CXA_STATE],
             LayerPlane(rt._attnSlotMappingPerLayer, rt._attnSlotMapping, layer, CXA_STATE),
-            LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_STATE), stateBs,
-            kvCache[CXA_STATE].stride.empty() ? 0 : kvCache[CXA_STATE].stride[0]);
+            LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_STATE),
+            stateBs);
         rt.PutTensor(weightedSum);
         rt.PutTensor(compKv);
         rt.PutTensor(compScore);
@@ -1036,8 +1036,7 @@ XTensor *XModel::ForwardAttnCXAIndexer(XRuntime &rt, uint32_t layer, XTensor &hi
         _c.blockSizes[CXA_INDEXER_K], kvCache[CXA_INDEXER_STATE],
         LayerPlane(rt._attnSlotMappingPerLayer, rt._attnSlotMapping, layer, CXA_INDEXER_STATE),
         LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_INDEXER_STATE),
-        _c.blockSizes[CXA_INDEXER_STATE],
-        kvCache[CXA_INDEXER_STATE].stride.empty() ? 0 : kvCache[CXA_INDEXER_STATE].stride[0], !c8);
+        _c.blockSizes[CXA_INDEXER_STATE], !c8);
     if (c8) {
         XliteOpQuantCacheC8(
             rt, idxWeightedSum,
