@@ -316,8 +316,9 @@ private:
                     std::vector<MatmulWeight> &upGate, std::vector<MatmulWeight> &down,
                     bool withAllReduce);
     std::tuple<XTensor &, XTensor &> ForwardMoEGate(XRuntime &rt, uint32_t layer, XTensor &input);
-    std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMeta>
-        ForwardMoEDispatch(XRuntime &rt, XTensor &tokenSorted, XTensor &weights, XTensor &routing);
+    std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor *, MoEAlltoAllMeta>
+        ForwardMoEDispatch(XRuntime &rt, XTensor &tokenSorted, XTensor &weights, XTensor &routing,
+                           enum XDtype moeReDtype);
     void ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weights, XTensor &routing,
                            XTensor &unpIdx, XTensor &expertsSorted, XTensor &expertsCounts);
     MoEAlltoAllMeta MoeComputeAlltoAllVMeta(const int32_t *tokensPerEpGroupAllEpHost,

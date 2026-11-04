@@ -88,6 +88,26 @@ void XRuntime::Init(size_t sizeMB)
         CHECK_ACL(aclrtCreateNotify(&_outNotifies[i], 0));
     }
 
+    ParseRuntimeEnv();
+
+    uint64_t zeroSize = 1ull << 20;  // 1M bytes, enough for 128*512*2=131072 bytes (bf16) or
+                                     // 128*512*4=262144 bytes (fp16)
+    void *zeroPtr = nullptr;
+    CHECK_ACL(aclrtMalloc(&zeroPtr, zeroSize, ACL_MEM_MALLOC_NORMAL_ONLY));
+    _attnZeroBuffer.Init({zeroSize / sizeof(BF16)}, BF16, zeroPtr);
+    CHECK_ACL(aclrtMemset(zeroPtr, zeroSize, 0, zeroSize));
+
+    _fwdEnabled =
+        !IsDummyRuntime() && !isEnvironmentVariableFalse(std::getenv("XLITE_FORWARD_THREAD"));
+    if (_fwdEnabled) {
+        StartForwardThread();
+    }
+
+    _inited = true;
+}
+
+void XRuntime::ParseRuntimeEnv(void)
+{
     const char *envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
     if (envCommOptimizeLen) {
         char *endPtr = nullptr;
@@ -126,20 +146,10 @@ void XRuntime::Init(size_t sizeMB)
         _graphCommEnabled = true;
     }
 
-    uint64_t zeroSize = 1ull << 20;  // 1M bytes, enough for 128*512*2=131072 bytes (bf16) or
-                                     // 128*512*4=262144 bytes (fp16)
-    void *zeroPtr = nullptr;
-    CHECK_ACL(aclrtMalloc(&zeroPtr, zeroSize, ACL_MEM_MALLOC_NORMAL_ONLY));
-    _attnZeroBuffer.Init({zeroSize / sizeof(BF16)}, BF16, zeroPtr);
-    CHECK_ACL(aclrtMemset(zeroPtr, zeroSize, 0, zeroSize));
-
-    _fwdEnabled =
-        !IsDummyRuntime() && !isEnvironmentVariableFalse(std::getenv("XLITE_FORWARD_THREAD"));
-    if (_fwdEnabled) {
-        StartForwardThread();
+    if (enableMoEAllToAll || _graphCommEnabled ||
+        isEnvironmentVariableTrue(std::getenv("XLITE_DISABLE_MOE_QUANT_HOIST"))) {
+        disableMoeQuantHoist = true;
     }
-
-    _inited = true;
 }
 
 XRuntime::~XRuntime(void)
@@ -1622,31 +1632,7 @@ void XDummyRuntime::InitDummyRuntime(size_t sizeMB)
     originAicNum = aicNum;
     originAivNum = aivNum;
 
-    const char *envCommOptimizeLen = std::getenv("XLITE_COMM_OPTIMIZE_LEN");
-    if (envCommOptimizeLen) {
-        char *endPtr = nullptr;
-        long val = strtol(envCommOptimizeLen, &endPtr, 10);
-        if (endPtr != envCommOptimizeLen && *endPtr == '\0' && val >= 0) {
-            commOptimizeLen = static_cast<uint32_t>(val);
-        }
-    }
-
-    const char *ratioPerEPEnv = std::getenv("XLITE_ACTIVE_TOKENS_RATIO_PER_EP");
-    if (ratioPerEPEnv) {
-        char *endPtr = nullptr;
-        double val = strtod(ratioPerEPEnv, &endPtr);
-        double min = 1 / static_cast<double>(_moeEpSize);
-        double max = 1.0f;
-        if (endPtr != ratioPerEPEnv && *endPtr == '\0' && std::isfinite(val)) {
-            activeTokensRatioPerEp = val;
-        }
-        if (activeTokensRatioPerEp < min) {
-            activeTokensRatioPerEp = min;
-        }
-        if (activeTokensRatioPerEp > max) {
-            activeTokensRatioPerEp = max;
-        }
-    }
+    ParseRuntimeEnv();
 
     _inited = true;
 }

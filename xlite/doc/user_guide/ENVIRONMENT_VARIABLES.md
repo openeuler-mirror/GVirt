@@ -2,6 +2,8 @@
 
 本文档介绍 xlite 使用的环境变量及其配置方法。
 
+> 除特别说明外，运行期环境变量在 `XRuntime` 初始化（`runtime.cpp` 的构造函数）时统一读取一次并固化为成员字段，后续前向不再重复读取 `getenv`；因此须在进程启动前设置，运行期修改不会生效。
+
 ## 核心环境变量
 
 | 环境变量 | 类型 | 默认值 | 说明 |
@@ -15,6 +17,7 @@
 | `XLITE_FORWARD_THREAD` | 布尔 | `true` | 是否将模型前向卸载到专用 forward 线程异步执行。异步路径仅在同时满足以下三条件时才走：① forward 线程已启用；② `multiTaskParallel` 为假；③ 调用方提供了非默认 stream（`currStream != 0`）；否则静默回退到同步路径。PyTorch stream 与 `rt.stream` 之间的同步顺序由调用方（Python 侧）负责，需在调用后插入相应的stream sync。 |
 | `XLITE_MOE_ALLTOALL` | 布尔 | `false` | 是否启用 MoE AlltoAll 通信模式。启用后，MoE 的 dispatch/combine 阶段使用 AlltoAllV 集合通信替代默认的 AllGather + ReduceScatter 方式，跨 EP（Expert Parallel）rank 分发/收集 token，并消除 MoE 后的 TP AllReduce。 |
 | `XLITE_ACTIVE_TOKENS_RATIO_PER_EP` | double | `1.0f` | 影响开启EP后单卡按专家排序后激活Tensor的内存占用。该环境变量有效配置范围为[1/ep_size ... 1.0f]。默认1.0f含义为单卡极端情况需要处理所有激活的Token，因此专家排序后激活Tensor的shape为[token个数 * num_experts_per_tok, hidden_size]; 配置为1/ep_size含义为单卡只需要处理所有激活的Token的1/ep_size，因此专家排序后激活Tensor的shape为[token个数 * num_experts_per_tok /ep_size, hidden_size]。该值越小代表EP负载越均衡，排序后激活Tensor预占内存越小，配置过小可能导致算子报错，建议按照实际负载均衡度评估合理值。注意：该配置仅当输入token个数（所有DP的batched token总和）>= 1024个时才生效，小于1024的情况使用默认1.0f进行计算。 |
+| `XLITE_DISABLE_MOE_QUANT_HOIST` | 布尔 | `false` | 是否禁用 w8a8 MoE dispatch 的量化前置（quant-hoist）。默认关闭（即启用 hoist）：在 `XliteOpPermutation` 之前完成 per-token `QuantDyn`，使 permutation kernel 收集 INT8 行而非收集 BF16 行。收益：`expertsSorted` 缓冲 BF16→INT8 约减半；DP>1 时 AllGather 载荷也约减半（载 INT8+scale 而非 BF16）；量化 M 行而非 M×nActExperts 行。仅当没有开启XLITE_MOE_ALLTOALL、没有开启XLITE_ENABLE_GRAPH_COMM时生效。设为 `true`/`1`/`yes`/`on`（不区分大小写）时强制走 legacy BF16 路径。 |
 
 ## 布尔值解析规则
 
@@ -34,7 +37,7 @@ xlite 用 `isEnvironmentVariableTrue` / `isEnvironmentVariableFalse`（`base.h`�
 - `no`
 - `off`
 
-> 注意：规则按变量语义分两类。`XLITE_DISABLE_XCCL`、`XLITE_MOE_ALLTOALL`、`XLITE_ENABLE_GRAPH_COMM` 等”启用型”变量用 `isEnvironmentVariableTrue`——未设置或任意非真值均视为 `false`，仅当值匹配 `true`/`1`/`yes`/`on` 时才置为 `true`。
+> 注意：规则按变量语义分两类。`XLITE_DISABLE_XCCL`、`XLITE_MOE_ALLTOALL`、`XLITE_ENABLE_GRAPH_COMM`、`XLITE_DISABLE_MOE_QUANT_HOIST` 等”启用型”变量用 `isEnvironmentVariableTrue`——未设置或任意非真值均视为 `false`，仅当值匹配 `true`/`1`/`yes`/`on` 时才置为 `true`。
 >
 > `XLITE_FORWARD_THREAD` 是相反方向的特例：它用 `isEnvironmentVariableFalse` 解析——未设置或任意非假值均视为 `true`，仅当值匹配 `false`/`0`/`no`/`off` 时才置为 `false`（即默认开启）。
 

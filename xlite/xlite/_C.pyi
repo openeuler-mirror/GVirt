@@ -2358,13 +2358,17 @@ def permutation(
     out: torch.Tensor,
     unp_idx: torch.Tensor,
     counts: torch.Tensor,
+    scale_in: Optional[torch.Tensor] = None,
+    scale_out: Optional[torch.Tensor] = None,
 ) -> None:
     """Permute token rows into expert-local layout.
 
     Args:
         rt (Runtime): Native runtime handle.
-        in_ (torch.Tensor): Input token tensor, shape ``[tokens, hidden]``, bf16 (the
-            only dtype the kernel supports; rows are moved as raw 2-byte elements).
+        in_ (torch.Tensor): Input token tensor, shape ``[tokens, hidden]``. Element
+            size is inferred from the dtype: bf16 (2 bytes, legacy) or int8 (1 byte,
+            w8a8 dispatch quant-hoist path where rows are already quantized). When
+            ``in_`` is int8, ``hidden`` must be a multiple of 32 (32B MTE row alignment).
         routing (torch.Tensor): Routing bitmap (BIT1 packed, e.g. int64), shape
             ``[tokens, ceil(n_experts/64)]``.
         start (int): Start expert index.
@@ -2380,6 +2384,14 @@ def permutation(
         counts (torch.Tensor): Per-expert count output, shape ``[n_routed_experts]``,
             int32 — indexed by absolute expert id (must be full-width even when
             ``start > 0``; experts outside ``[start, end)`` are written 0).
+        scale_in (Optional[torch.Tensor]): Per-token scales, shape ``[tokens]``, float32.
+            When provided, each token's scale is piggybacked to the same expert slot as
+            its row so the downstream :func:`group_matmul_dequant` receives bit-identical
+            inputs (per-token quant commutes with row permutation). ``None`` for the BF16
+            path.
+        scale_out (Optional[torch.Tensor]): Permuted scales, shape ``[permuted_tokens]``,
+            float32. Must be provided when ``scale_in`` is. Ignored (``None``) on the BF16
+            path.
 
     Returns:
         None: Output tensors are written in place.

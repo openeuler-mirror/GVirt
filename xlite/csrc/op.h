@@ -50,7 +50,8 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale);
 void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out);
 void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t start, uint32_t end,
-                        XTensor &out, XTensor &unpIdx, XTensor &counts);
+                        XTensor &out, XTensor &unpIdx, XTensor &counts,
+                        const XTensor &scaleIn = XTensor(), const XTensor &scaleOut = XTensor());
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing,
                           XTensor &weights, uint32_t start, uint32_t end, XTensor &out);
 // EPLB: scatter gate outputs from logical [M, nRoutedExperts] to physical [M, totalPhysicalExperts]
