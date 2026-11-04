@@ -2,6 +2,7 @@
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -20,6 +21,47 @@
 #define XLITE_DP_PORT_OFFSET 200
 #define XLITE_EP_PORT_OFFSET 300
 #define XLITE_CCL_PORT_OFFSET 400
+
+// ---------------------------------------------------------------------------
+// Overflow-cache generation counter, consumed by the generated launch stubs.
+//
+// scripts/patch_host_stub.py replaces the per-launch overflow-status device
+// malloc/free pair in CANN's host_stub.cpp with one cached 512B buffer per
+// launch wrapper (the host never reads that buffer: the stock stub frees it
+// right after launch). The cache is validated against this counter:
+// XRuntime::Init and the destructor each bump it, so the stubs re-allocate
+// their caches instead of holding pointers that went stale across
+// aclrtSetDevice / aclrtResetDevice / aclFinalize (e.g. a runtime destroyed
+// and re-created within one process, or sequential per-device runtimes).
+// Stale pointers are dropped, not freed: after a device reset the address is
+// already invalid, and on a device switch FreeAscendMemDevice would target
+// the wrong device. The leak is bounded by (launch wrappers x runtime
+// re-inits), a few hundred bytes each. Limitation: runtimes on different
+// devices must not interleave launches inside one process; no xlite code
+// path does this (one runtime per process, per rank).
+//
+// The counter is a plain exported data symbol, NOT a function: the stubs
+// reference it weakly (libxlite_kernels_*.so do not link against libxlite,
+// so a non-weak reference would need a circular DT_NEEDED) and read it with
+// a null guard. A cross-TU function call in every launch wrapper cannot be
+// inlined, clobbers the caller-saved registers of the launch setup (forcing
+// spills) and measurably regressed host-bound decode benches (PR #619
+// review, 0.7% on run_glm5_w8a8); a guarded data load does not. The stub
+// reads it with acquire semantics paired with the release bump, so a launch
+// that observes a new epoch also observes the device/context setup that
+// happened before the bump. Without libxlite in the process the weak
+// reference resolves to null and the stub-side epoch reads as 0, so the
+// cache simply persists (same fallback as the previous function form).
+// ---------------------------------------------------------------------------
+extern "C" {
+// Overflow-cache generation counter (see the comment block above).
+unsigned long long gXliteOverflowEpoch = 1;
+}
+
+static inline void BumpOverflowEpoch(void)
+{
+    __atomic_add_fetch(&gXliteOverflowEpoch, 1, __ATOMIC_RELEASE);
+}
 
 XRuntime::XRuntime(uint32_t devid, size_t sizeMB, uint32_t rankId, uint32_t tpSize, uint32_t dpSize,
                    uint32_t moeTpSize, uint32_t moeEpSize)
@@ -44,6 +86,9 @@ void XRuntime::Init(size_t sizeMB)
         CHECK_ACL(initRet);
     }
     CHECK_ACL(aclrtSetDevice(_devid));
+    // Device/context generation changed: drop the stub-side overflow caches
+    // allocated before this point (see gOverflowEpoch above).
+    BumpOverflowEpoch();
     CHECK_ACL(aclrtCreateStream(&stream));
     CHECK_ACL(aclrtGetDeviceCount(&count));
     _nDevPerNode = count;
@@ -208,6 +253,10 @@ XRuntime::~XRuntime(void)
     if (stream) {
         (void)aclrtDestroyStream(stream);
     }
+    // Bump BEFORE the device reset: the stub-side overflow caches must be
+    // dropped so no later launch in this process reuses them as addresses of
+    // memory freed by the reset (see gOverflowEpoch above).
+    BumpOverflowEpoch();
     (void)aclrtResetDevice(static_cast<int32_t>(_devid));
 
     if (_position.ptr) {
