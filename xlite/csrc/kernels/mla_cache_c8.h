@@ -10,8 +10,7 @@ template <typename Dtype>
 __aicore__ inline void mla_cache_c8_quant(__ubuf__ Dtype *input, __ubuf__ int8_t *quant,
                                           __ubuf__ float *scale, __ubuf__ float *x,
                                           __ubuf__ float *tmp, __ubuf__ float *amaxBuf,
-                                          __ubuf__ float *factorBuf, __ubuf__ int16_t *rounded,
-                                          __ubuf__ half *halfValues)
+                                          __ubuf__ float *factorBuf, __ubuf__ half *halfValues)
 {
     convert_input(x, input, 2);
     pipe_barrier(PIPE_V);
@@ -43,12 +42,10 @@ __aicore__ inline void mla_cache_c8_quant(__ubuf__ Dtype *input, __ubuf__ int8_t
     pipe_barrier(PIPE_V);
     vmaxs(x, x, -128.0f, 2, 1, 1, 8, 8);
     pipe_barrier(PIPE_V);
-    // Round before the FP16 conversion to avoid double rounding.
-    vconv_f322s16r(rounded, x, 2, 1, 1, 4, 8);
+    // FP32 -> FP16 (ODD) -> INT8 (RINT) avoids double rounding.
+    vconv_f322f16o(halfValues, x, 2, 1, 1, 4, 8);
     pipe_barrier(PIPE_V);
-    vconv_s162f16(halfValues, rounded, 1, 1, 1, 8, 8);
-    pipe_barrier(PIPE_V);
-    vconv_f162s8(quant, halfValues, 1, 1, 1, 4, 8);
+    vconv_f162s8r(quant, halfValues, 1, 1, 1, 4, 8);
 }
 
 template <typename Dtype>
@@ -73,7 +70,6 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
     __ubuf__ float *tmpBuf[PINGPONG_BUF_NUM];
     __ubuf__ float *amaxBufs[PINGPONG_BUF_NUM];
     __ubuf__ float *factorBufs[PINGPONG_BUF_NUM];
-    __ubuf__ int16_t *roundedBuf[PINGPONG_BUF_NUM];
     __ubuf__ half *halfBuf[PINGPONG_BUF_NUM];
     uint64_t off = 0;
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
@@ -89,8 +85,6 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
         off += VECTOR_REPEAT_BYTESIZE;
         factorBufs[curr] = reinterpret_cast<__ubuf__ float *>(off);
         off += VECTOR_REPEAT_BYTESIZE;
-        roundedBuf[curr] = reinterpret_cast<__ubuf__ int16_t *>(off);
-        off += ROUND_UP(groupSize * sizeof(int16_t), UB_BUF_ALIGN_SIZE);
         halfBuf[curr] = reinterpret_cast<__ubuf__ half *>(off);
         off += ROUND_UP(groupSize * sizeof(half), UB_BUF_ALIGN_SIZE);
         off = ROUND_UP(off, UB_BANKGROUP_ROW_SIZE);
@@ -144,14 +138,12 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
             auto tmp = tmpBuf[curr];
             auto amaxBuf = amaxBufs[curr];
             auto factorBuf = factorBufs[curr];
-            auto rounded = roundedBuf[curr];
             auto halfValues = halfBuf[curr];
             for (uint32_t group = 0; group < groupNum; ++group) {
                 auto input = inputs[curr] + group * groupSize;
                 auto quant = packed[curr] + group * groupSize;
                 auto scale = (__ubuf__ float *)(packed[curr] + scaleOffset) + group;
-                mla_cache_c8_quant(input, quant, scale, x, tmp, amaxBuf, factorBuf, rounded,
-                                   halfValues);
+                mla_cache_c8_quant(input, quant, scale, x, tmp, amaxBuf, factorBuf, halfValues);
             }
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
