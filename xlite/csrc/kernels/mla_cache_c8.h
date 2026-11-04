@@ -96,12 +96,11 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
     int32_t slot = ((__gm__ int32_t *)slots)[block_idx];
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
     if (slot >= 0) {
-        copy_gm_to_ubuf_align_b16(inputs[0],
-                                  (__gm__ Dtype *)latent + (uint64_t)block_idx * latentDim, 0, 1,
-                                  latentDim * sizeof(Dtype), 0, 0, 0, 0);
-        copy_gm_to_ubuf_align_b16((__ubuf__ Dtype *)(packed[0] + latentDim * sizeof(int8_t)),
-                                  (__gm__ Dtype *)pe + (uint64_t)block_idx * ropeDim, 0, 1,
-                                  ropeDim * sizeof(Dtype), 0, 0, 0, 0);
+        CopyGmToUbufAligned(inputs[0], (__gm__ Dtype *)latent + (uint64_t)block_idx * latentDim,
+                            latentDim * sizeof(Dtype));
+        CopyGmToUbufAligned((__ubuf__ Dtype *)(packed[0] + latentDim * sizeof(int8_t)),
+                            (__gm__ Dtype *)pe + (uint64_t)block_idx * ropeDim,
+                            ropeDim * sizeof(Dtype));
     }
     set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
 
@@ -116,13 +115,12 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
             nextSlot = ((__gm__ int32_t *)slots)[nextRow];
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + next);
             if (nextSlot >= 0) {
-                copy_gm_to_ubuf_align_b16(inputs[next],
-                                          (__gm__ Dtype *)latent + (uint64_t)nextRow * latentDim, 0,
-                                          1, latentDim * sizeof(Dtype), 0, 0, 0, 0);
-                copy_gm_to_ubuf_align_b16(
-                    (__ubuf__ Dtype *)(packed[next] + latentDim * sizeof(int8_t)),
-                    (__gm__ Dtype *)pe + (uint64_t)nextRow * ropeDim, 0, 1, ropeDim * sizeof(Dtype),
-                    0, 0, 0, 0);
+                CopyGmToUbufAligned(inputs[next],
+                                    (__gm__ Dtype *)latent + (uint64_t)nextRow * latentDim,
+                                    latentDim * sizeof(Dtype));
+                CopyGmToUbufAligned((__ubuf__ Dtype *)(packed[next] + latentDim * sizeof(int8_t)),
+                                    (__gm__ Dtype *)pe + (uint64_t)nextRow * ropeDim,
+                                    ropeDim * sizeof(Dtype));
             }
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + next);
         }
@@ -149,9 +147,8 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
                                 latentDim);
             CopyUbufToGmAligned((__gm__ Dtype *)peCache + (uint64_t)slot * ropeDim,
                                 packed[curr] + latentDim, ropeDim * sizeof(Dtype));
-            copy_ubuf_to_gm_align_b32((__gm__ float *)scaleCache + (uint64_t)slot * groupNum,
-                                      packed[curr] + scaleOffset, 0, 1, groupNum * sizeof(float), 0,
-                                      0, 0, 0);
+            CopyUbufToGmAligned((__gm__ float *)scaleCache + (uint64_t)slot * groupNum,
+                                packed[curr] + scaleOffset, groupNum * sizeof(float));
         }
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
