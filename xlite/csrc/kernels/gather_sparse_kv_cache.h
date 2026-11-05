@@ -158,8 +158,6 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
     for (uint32_t b = 0; b < GATHER_SPARSE_KV_CACHE_BUF_NUM; b++) {
         if constexpr (std::is_same<Dtype, int8_t>::value) {
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + b);
-            set_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + b);
-            set_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + b);
         } else {
             set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0 + b);     // topks[b]
             set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + b);  // kBufs[b]/peBufs[b]
@@ -212,8 +210,6 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
             if constexpr (std::is_same<Dtype, int8_t>::value) {
                 // Inputs and outputs share the bank until its output DMA completes.
                 wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-                wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-                wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
             }
             // Address computation (scalar core)
             __gm__ int32_t *blkTbGm = blockTablesGm + blockTableStride * curBatch;
@@ -323,8 +319,6 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
 #endif
             if constexpr (std::is_same<Dtype, int8_t>::value) {
                 set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
-                set_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + curr);
-                set_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + curr);
             } else {
                 set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + curr);  // release chunk buffers
             }
@@ -336,8 +330,6 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
     for (uint32_t b = 0; b < GATHER_SPARSE_KV_CACHE_BUF_NUM; b++) {
         if constexpr (std::is_same<Dtype, int8_t>::value) {
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + b);
-            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID4 + b);
-            wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID4 + b);
         } else {
             wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0 + b);     // topks[b]
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + b);  // chunk buffers
