@@ -11,32 +11,32 @@ Using `vllm-ascend`'s official container image is recommended.
 """
 
 import os
-import re
-import shlex
-import signal
 import json
+import math
+import re
+import urllib.request
+import shlex
+import shutil
+import signal
 import socket
 import struct
 import subprocess
 import sys
-import tempfile
 import time
-import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
 
-from daily_bot_utils import expand_values, pad_to_last, tile_each
+from daily_bot_utils import check_subprocess_result, env_with_proxy, expand_values, pad_to_last, tile_each
+from dataset_spec import DATASETS, ensure_dataset, parse_dataset_entry, venv_activate_cmd
 
-TMP_DIR = Path(tempfile.gettempdir())  # per-OS temp base path
+
 CWD = Path(__file__).parent.resolve()  # current working directory
-
-AIS_BENCH_DIR = TMP_DIR / "benchmark"  # path to clone ais_bench repo and store datasets
-VENV_ACTIVATE_CMD: str = ""
+AIS_BENCH_DIR = Path.home() / "benchmark"  # path to clone ais_bench repo and store datasets
 # CPU-only torch wheel index: ais_bench requires an unpinned `torch`, which PyPI resolves
 # to the multi-GB CUDA build (plus its nvidia-* dependencies) on Linux
 TORCH_INDEX_URL = "https://download.pytorch.org/whl/cpu/"
@@ -51,11 +51,14 @@ class BenchResult:
     tp_size: int
     ep: bool
     dp_size: int
-    spec_decode: tuple[str, int, str]  # (method, num_spec_tokens, draft dir); num_spec_tokens == 0 disables
+    # (method, num_spec_tokens, draft dir, spec-config JSON); num_spec_tokens == 0 disables spec decode
+    spec_decode: tuple[str, int, str, str]
     xlite: bool
     xlite_full_mode: bool
     metric: str
-    accuracy: float
+    # tri-state: None = not run (no eval happened), NaN = ran but produced no valid number,
+    # float = measured accuracy
+    accuracy: float | None
 
     _n_chars: int = field(default=400, init=False, repr=False)
     _error: str | None = field(default=None, init=False, repr=False)
@@ -63,6 +66,15 @@ class BenchResult:
     def __post_init__(self):
         self.xlite = self.xlite or self.xlite_full_mode
         self.xlite_full_mode = self.xlite_full_mode and self.xlite
+
+    @staticmethod
+    def accuracy_cell(value: float | None) -> str:
+        """Report cell for the accuracy column: `n/a` = not run, `nan` = ran but no valid number."""
+        if value is None:
+            return "n/a"
+        if math.isnan(value):
+            return "nan"
+        return f"{value:.2f}"
 
     @property
     def error(self) -> str | None:
@@ -104,7 +116,7 @@ class BenchResult:
             self.spec_label,
             backend_str,
             self.metric,
-            f"{self.accuracy:.2f}",
+            self.accuracy_cell(self.accuracy),
             self.error or "",
         ]
         return f"| {' | '.join(values)} |"
@@ -153,11 +165,6 @@ def _close_stream_handles(process: subprocess.Popen) -> None:
         stream.close()
 
 
-def check_subprocess_result(res: subprocess.CompletedProcess, error_message: str):
-    if res.returncode != 0:
-        raise RuntimeError(f"{error_message}: {res.stderr.decode('utf-8') if res.stderr else 'No error message'}")
-
-
 def _read_tail(handle: object, max_bytes: int = 16 * 1024) -> str:
     """Read the trailing bytes of a still-open log file handle opened for writing.
 
@@ -177,51 +184,45 @@ def _read_tail(handle: object, max_bytes: int = 16 * 1024) -> str:
         return "No error message available"
 
 
-def format_spec_decode(spec_decode: tuple[str, int, str]) -> str:
+def format_spec_decode(spec_decode: tuple[str, int, str, str]) -> str:
     """Label of a spec decode config for reports and notifications.
 
     `method:num_spec_tokens` (e.g. `mtp:3`); spec decode disabled renders as `n/a` —
     with no tokens requested there is no method to name. The draft weights dir is
     deliberately not part of the label.
     """
-    method, num_spec_tokens, _ = spec_decode
+    method, num_spec_tokens = spec_decode[:2]
     return f"{method}:{num_spec_tokens}" if num_spec_tokens > 0 else "n/a"
 
 
-# `<method>:<num>[:<draft_dir>]` with every part but <num> optional; a bare `<num>` means mtp
-_RE_SPEC_DECODE = re.compile(r"^(?:(?P<method>\w+):)?(?P<num>\d+)(?::(?P<draft_dir>[\w.-]+))?$")
+# `<method>:<num>[:<draft_dir>[:<json>]]` with every part but <num> optional; a bare `<num>` means mtp.
+# The trailing JSON is merged into the speculative-config (after the built fields, which win);
+# it carries method-specific extras like extract_hidden_states' draft_model_config hf overrides.
+_RE_SPEC_DECODE = re.compile(r"^(?:(?P<method>\w+):)?(?P<num>\d+)(?::(?P<draft_dir>[\w.-]+))?(?::(?P<extra>.+))?$")
 
 
-def parse_spec_decode(entry: str) -> tuple[str, int, str]:
-    """Parse a ``--specs`` entry into ``(method, num_speculative_tokens, draft_weights_dir)``.
+def parse_spec_decode(entry: str) -> tuple[str, int, str, str]:
+    """Parse a ``--specs`` entry into ``(method, num_speculative_tokens, draft_weights_dir, spec_config_json)``.
 
     A bare number ``N`` means ``mtp:N``; zero tokens disables spec decode (no method or
     draft dir applies); an omitted dir uses the main model's own weights, otherwise it is
     a single directory name resolved at server start as a sibling of the main model dir.
+    The optional trailing JSON is merged into the speculative-config fields built by the
+    harness (built fields take precedence); e.g. extract_hidden_states needs it to set
+    `draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids`.
     """
     match = _RE_SPEC_DECODE.match(entry.strip())
     if match:
         num = int(match.group("num"))
         if num == 0:
-            return "", 0, ""
-        return (match.group("method") or "mtp").lower(), num, match.group("draft_dir") or ""
+            return "", 0, "", ""
+        # `method:1::{json}` (no draft dir) leaves the extra group as `:{json}` — strip the
+        # spurious separator (a JSON object / quoted string never starts with `:`)
+        extra = (match.group("extra") or "").removeprefix(":")
+        return (match.group("method") or "mtp").lower(), num, match.group("draft_dir") or "", extra
     raise ValueError(
-        f"Invalid spec decode entry `{entry}`; expected `<method>:<num_spec_tokens>[:<draft_weights_dir>]` "
+        f"Invalid spec decode entry `{entry}`; expected `<method>:<num_spec_tokens>[:<draft_weights_dir>[:<json>]]` "
         "or a bare number of MTP tokens (e.g. `eagle3:2:Qwen3-a3B_eagle3` or `3`)"
-    )
-
-
-# `<dataset>[:<num_prompts>]` — the prompt count is optional
-_RE_DATASET_ENTRY = re.compile(r"^(?P<dataset>\w+)(?::(?P<num_prompts>\d+))?$")
-
-
-def parse_dataset_entry(entry: str, default_num_prompts: int) -> tuple[str, int]:
-    """Parse a ``--datasets`` entry; the prompt count defaults to ``--num-prompts``."""
-    match = _RE_DATASET_ENTRY.match(entry.strip())
-    if match:
-        return match.group("dataset"), int(match.group("num_prompts") or default_num_prompts)
-    raise ValueError(
-        f"Invalid dataset entry `{entry}`; expected `<n_dups>~<dataset>[:<num_prompts>]` (e.g. `2~ceval:52`)"
     )
 
 
@@ -266,7 +267,8 @@ def _sync_aisbench_repo(ais_bench_dir: Path, tag: str) -> None:
     """
 
     def git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", "-C", str(ais_bench_dir), *args], capture_output=True)
+        # proxy env merged for the (rare) network path; local git operations ignore it
+        return subprocess.run(["git", "-C", str(ais_bench_dir), *args], capture_output=True, env=env_with_proxy())
 
     added_gitignore_lines = _gitignore_added_lines(ais_bench_dir)
 
@@ -275,7 +277,7 @@ def _sync_aisbench_repo(ais_bench_dir: Path, tag: str) -> None:
     if git("rev-parse", "--quiet", "--verify", f"refs/tags/{tag}^{{commit}}").returncode == 0:
         print(f"Tag {tag} already exists locally, skipping fetch...")
     else:
-        res = git("fetch", "--depth", "1", "--force", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
+        res = git("fetch", "--force", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
         check_subprocess_result(res, f"Failed to fetch ais_bench tag {tag}")
 
     check_subprocess_result(git("reset", "--hard", tag), f"Failed to reset ais_bench repo to {tag}")
@@ -290,273 +292,6 @@ def _sync_aisbench_repo(ais_bench_dir: Path, tag: str) -> None:
                     f.write("\n")
                 f.write("\n".join(missing) + "\n")
             print(f"Re-applied {len(missing)} local .gitignore line(s) after reset to {tag}")
-
-
-def _require_git_lfs() -> None:
-    if subprocess.run(["git", "lfs", "version"], capture_output=True).returncode != 0:
-        raise RuntimeError("git-lfs is required for this dataset; install it (e.g. `apt install git-lfs`) and rerun")
-
-
-def _wget(url: str, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    check_subprocess_result(subprocess.run(["wget", "-O", str(target), url]), f"Failed to download {url}")
-
-
-def _git_clone_dataset(url: str, target: Path, lfs_exclude: str = "") -> None:
-    """Clone (or refresh an existing clone of) a dataset repo and materialize its LFS assets.
-
-    A plain clone can leave LFS files as pointer stubs (missing smudge filter, or the
-    mirror dropping downloads mid-checkout) — the stubs sit on disk like real data until
-    eval crashes on them (e.g. "Parquet magic bytes not found"), so ``git lfs pull``
-    re-fetches explicitly and any stub remaining in the pulled scope fails setup loudly.
-    An already-existing clone (e.g. from an older setup revision) is refreshed in place.
-    """
-    _require_git_lfs()
-    pull_args = ["git", "-C", str(target), "lfs", "pull"]
-    ls_args = ["git", "-C", str(target), "lfs", "ls-files"]
-    if lfs_exclude:
-        pull_args += ["--exclude", lfs_exclude]
-        ls_args += ["--exclude", lfs_exclude]
-    if target.exists():
-        print(f"Refreshing LFS assets of the existing dataset repo at {target}...")
-    else:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # skip the automatic LFS smudge during clone — it fetches every LFS object, while the
-        # explicit `git lfs pull` below fetches only the scope this dataset actually needs
-        env = {**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"}
-        check_subprocess_result(
-            subprocess.run(["git", "clone", "--depth", "1", url, str(target)], env=env),
-            f"Failed to clone dataset from {url}",
-        )
-    check_subprocess_result(subprocess.run(pull_args), f"Failed to pull LFS assets from {url}")
-    res = subprocess.run(ls_args, capture_output=True, text=True)
-    check_subprocess_result(res, f"Failed to list LFS assets of {target}")
-    # `lfs ls-files` flags a `-` entry both for pointer stubs and for locally modified files
-    # (e.g. textvqa's path-rewritten jsonl) — only a file actually holding pointer text
-    # (or missing outright) is a defect
-    pointer_magic = b"version https://git-lfs"
-    stubs = []
-    for line in res.stdout.splitlines():
-        parts = line.split(maxsplit=2)
-        if len(parts) > 2 and parts[1] == "-":
-            stub_path = target / parts[2]
-            try:
-                with open(stub_path, "rb") as f:
-                    is_stub = f.read(len(pointer_magic)) == pointer_magic
-            except OSError:  # deleted from the worktree = not materialized either
-                is_stub = True
-            if is_stub:
-                stubs.append(parts[2])
-    if stubs:
-        raise RuntimeError(
-            f"{len(stubs)} LFS file(s) in {target} are still pointer stubs (e.g. {stubs[:3]}); "
-            "the LFS download failed — fix access to the mirror and rerun dataset setup"
-        )
-
-
-def _download_ceval(ais_bench_dir: Path, download_url: str) -> None:
-    dataset_dir = ais_bench_dir / "ais_bench" / "datasets" / "ceval" / "formal_ceval"
-    dataset_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = dataset_dir / "ceval-exam.zip"
-    _wget(download_url, zip_path)
-    with zipfile.ZipFile(zip_path) as zip_file:
-        zip_file.extractall(dataset_dir)
-    zip_path.unlink(missing_ok=True)
-    if not (dataset_dir / "test").exists():
-        raise RuntimeError(f"Unexpected ceval archive layout; `{dataset_dir}/test` not found")
-
-
-def _download_gsm8k(ais_bench_dir: Path, download_url: str) -> None:
-    datasets_root = ais_bench_dir / "ais_bench" / "datasets"
-    _wget(download_url, datasets_root / "gsm8k.zip")
-    with zipfile.ZipFile(datasets_root / "gsm8k.zip") as zip_file:
-        zip_file.extractall(datasets_root)
-    (datasets_root / "gsm8k.zip").unlink(missing_ok=True)
-    if not (datasets_root / "gsm8k" / "test.jsonl").exists():
-        raise RuntimeError("Unexpected gsm8k archive layout; `ais_bench/datasets/gsm8k/test.jsonl` not found")
-
-
-def _download_textvqa(ais_bench_dir: Path, download_url: str) -> None:
-    # the source must ship the json/jsonl files under `textvqa_json/` (the config's layout)
-    target = ais_bench_dir / "ais_bench" / "datasets" / "textvqa"
-    _git_clone_dataset(download_url, target)
-    # the shipped jsonl refers to images via a checkout-relative `benchmark/...` prefix that
-    # only resolves when the run cwd is the clone's parent — rewrite to absolute paths so
-    # the base64 loader finds the images from any cwd
-    stale_prefix = "benchmark/ais_bench/datasets/textvqa/"
-    for jsonl in (target / "textvqa_json").glob("*.jsonl"):
-        text = jsonl.read_text()
-        if stale_prefix in text:
-            jsonl.write_text(text.replace(f'"{stale_prefix}', f'"{target}/'))
-    # the subset mirror can lack a handful of val images; a missing image would kill a whole
-    # inference run, so drop those records instead — but a mass of missing images means the
-    # mirror is broken and must fail the setup
-    val_jsonl = target / "textvqa_json" / "textvqa_val.jsonl"
-    kept, dropped = [], 0
-    with open(val_jsonl) as f:
-        for line in f:
-            if line.strip() and Path(json.loads(line)["image"]).exists():
-                kept.append(line)
-            else:
-                dropped += 1
-    if dropped > len(kept) * 0.05:
-        raise RuntimeError(f"{dropped} of {len(kept) + dropped} textvqa val records reference missing images")
-    if dropped:
-        val_jsonl.write_text("".join(kept))
-        print(f"textvqa: dropped {dropped} val record(s) with missing images, {len(kept)} kept")
-
-
-def _download_mmmu(ais_bench_dir: Path, download_url: str) -> None:
-    # mmmu_gen evaluates the validation split only; excluding the test split skips
-    # several GB of LFS download that would never be read
-    _git_clone_dataset(download_url, ais_bench_dir / "ais_bench" / "datasets" / "mmmu", lfs_exclude="*test*")
-
-
-def _download_mmstar(ais_bench_dir: Path, download_url: str) -> None:
-    _wget(download_url, ais_bench_dir / "ais_bench" / "datasets" / "mmstar" / "MMStar.tsv")
-
-
-def _download_realworldqa(ais_bench_dir: Path, download_url: str) -> None:
-    _git_clone_dataset(download_url, ais_bench_dir / "ais_bench" / "datasets" / "RealworldQA")
-
-
-def _download_bfcl(ais_bench_dir: Path, download_url: str) -> None:
-    # the BFCL data ships inside the `bfcl-eval` dependency package; nothing to download
-    del download_url  # unused: the data comes from the pip package, not a URL
-    res = subprocess.run(
-        f"{VENV_ACTIVATE_CMD} && pip install -r requirements/datasets/bfcl_dependencies.txt --no-deps",
-        shell=True,
-        executable="/bin/bash",
-        cwd=ais_bench_dir,
-        capture_output=True,
-    )
-    check_subprocess_result(res, "Failed to install bfcl-eval dependencies")
-
-
-@dataclass(frozen=True)
-class DatasetSpec:
-    """Everything the harness needs to set up, run and parse one ais_bench dataset."""
-
-    task: str  # value forwarded to `ais_bench --datasets`
-    model_config: str  # ais_bench model config (file stem under configs/models/vllm_api)
-    score_column: str  # summary CSV column holding the score (the model config's `abbr`)
-    row_filter: tuple[str, str]  # (dataset, metric) regexes selecting the summary rows to average
-    metric_name: str  # metric label used in reports
-    downloader: Callable[[Path, str], None]  # populates the dataset under ais_bench_dir
-    merge_ds: bool = True  # whether `--merge-ds` may be passed to ais_bench
-    ready_path: str | None = None  # repo-relative file/dir whose existence means "already downloaded"
-    # bumped whenever this dataset's downloader behavior changes, so previously downloaded
-    # data is refreshed to the current standard instead of being skipped as "ready"
-    setup_revision: int = 1
-    # All sources are China-accessible (ModelScope / Aliyun OSS) — huggingface.co is not
-    # reliably reachable from where this harness runs.
-    download_url: str = ""  # primary source URL (zip/TSV/git repo); "" = nothing to download (bfcl ships via pip)
-
-
-DATASETS: dict[str, DatasetSpec] = {
-    # text-only datasets
-    "ceval": DatasetSpec(
-        task="ceval_gen_0_shot_cot_chat_prompt",
-        model_config="vllm_api_general_chat",
-        score_column="vllm-api-general-chat",
-        row_filter=(r"^ceval-weighted$", r"^weighted_average$"),
-        metric_name="weighted_average",
-        downloader=_download_ceval,
-        ready_path="ais_bench/datasets/ceval/formal_ceval/test",
-        download_url="https://www.modelscope.cn/datasets/opencompass/ceval-exam/resolve/master/ceval-exam.zip",
-    ),
-    "gsm8k": DatasetSpec(
-        task="gsm8k_gen_0_shot_cot_chat_prompt",
-        model_config="vllm_api_general_chat",
-        score_column="vllm-api-general-chat",
-        row_filter=(r"^gsm8k$", r"^accuracy$"),
-        metric_name="accuracy",
-        downloader=_download_gsm8k,
-        ready_path="ais_bench/datasets/gsm8k/test.jsonl",
-        download_url="http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip",
-    ),
-    # multimodal datasets (need a multimodal-capable served model)
-    "textvqa": DatasetSpec(
-        task="textvqa_gen_base64",
-        model_config="vllm_api_general_chat",
-        score_column="vllm-api-general-chat",
-        row_filter=(r"^textvqa$", r"^accuracy$"),
-        metric_name="accuracy",
-        downloader=_download_textvqa,
-        ready_path="ais_bench/datasets/textvqa/textvqa_json/textvqa_val.jsonl",
-        setup_revision=2,  # r2: absolute image paths + dropping records whose image is missing
-        # vllm-ascend's mirror already ships the `textvqa_json/` layout the config reads
-        download_url="https://www.modelscope.cn/datasets/vllm-ascend/textvqa_subset.git",
-    ),
-    "mmmu": DatasetSpec(
-        task="mmmu_gen",
-        model_config="vllm_api_general_chat",
-        score_column="vllm-api-general-chat",
-        row_filter=(r"^mmmu$", r"^\[validation\]: Overall$"),
-        metric_name="accuracy",
-        downloader=_download_mmmu,
-        ready_path="ais_bench/datasets/mmmu",
-        setup_revision=2,  # r2: LFS materialization (pointer stubs crashed eval) + test-split exclusion
-        download_url="https://www.modelscope.cn/datasets/AI-ModelScope/MMMU.git",
-    ),
-    "mmstar": DatasetSpec(
-        task="mmstar_gen",
-        model_config="vllm_api_general_chat",
-        score_column="vllm-api-general-chat",
-        row_filter=(r"^mmstar$", r"^Overall$"),
-        metric_name="accuracy",
-        downloader=_download_mmstar,
-        ready_path="ais_bench/datasets/mmstar/MMStar.tsv",
-        download_url="https://www.modelscope.cn/datasets/evalscope/MMStar/resolve/master/MMStar.tsv",
-    ),
-    "realworldqa": DatasetSpec(
-        task="realworldqa_gen_base64",
-        model_config="vllm_api_general_chat",
-        score_column="vllm-api-general-chat",
-        row_filter=(r"^realworldqa$", r"^accuracy$"),
-        metric_name="accuracy",
-        downloader=_download_realworldqa,
-        ready_path="ais_bench/datasets/RealworldQA/data/test-00000-of-00002.parquet",
-        setup_revision=2,  # r2: LFS refresh via the shared git-clone helper
-        # mirror of huggingface.co/datasets/xai-community/realworldqa with the same layout
-        download_url="https://www.modelscope.cn/datasets/xai-org/RealworldQA.git",
-    ),
-    # tool/function-calling dataset (needs the vllm_api_function_call_chat model config)
-    "bfcl": DatasetSpec(
-        task="BFCL_gen_all",
-        model_config="vllm_api_function_call_chat",
-        score_column="vllm-api-function-call-chat",
-        row_filter=(r"^BFCL", r"^accuracy$"),
-        metric_name="accuracy",
-        downloader=_download_bfcl,
-        merge_ds=False,  # BFCL sub-datasets use different evaluators and cannot be merged
-    ),
-}
-
-
-def _ensure_dataset(key: str, ais_bench_dir: Path) -> None:
-    """Download and set up one dataset, refreshing older downloads to the current standard.
-
-    A dataset counts as ready only when its ``ready_path`` exists *and* its recorded setup
-    revision (stamp under ``ais_bench/datasets/.setup_revisions/``, gitignored like the
-    data itself) matches the spec's ``setup_revision``. A missing stamp reads as revision
-    1 (downloaded before revisions existed), so bumping a downloader's revision re-processes
-    existing data instead of skipping it as ready.
-    """
-    if key not in DATASETS:
-        raise ValueError(f"Unknown dataset `{key}`; available datasets: {sorted(DATASETS)}")
-    spec = DATASETS[key]
-    # the ais_bench .gitignore already excludes everything under ais_bench/datasets/
-    # except the tracked .py sources, so downloaded data needs no extra ignore entries
-    revision_file = ais_bench_dir / "ais_bench" / "datasets" / ".setup_revisions" / key
-    installed_revision = int(revision_file.read_text().strip()) if revision_file.exists() else 1
-    if spec.ready_path and (ais_bench_dir / spec.ready_path).exists() and installed_revision >= spec.setup_revision:
-        print(f"Dataset `{key}` is already set up (revision {installed_revision}), skipping download...")
-        return
-    print(f"Setting up dataset `{key}` (revision {spec.setup_revision}, found {installed_revision})...")
-    spec.downloader(ais_bench_dir, spec.download_url)
-    revision_file.parent.mkdir(parents=True, exist_ok=True)
-    revision_file.write_text(str(spec.setup_revision))
 
 
 def _aisbench_pkg_version(venv_python: Path) -> str | None:
@@ -593,7 +328,6 @@ def _tag_to_pkg_version(tag: str) -> str:
 def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = None):
     aisbench_git_url = os.environ.get("AISBENCH_GIT_URL", "https://github.com/AISBench/benchmark.git")
     aisbench_git_tag = os.environ.get("AISBENCH_GIT_TAG", "v3.1-20261013-master")
-    global VENV_ACTIVATE_CMD
     ais_bench_dir = ais_bench_dir or AIS_BENCH_DIR
     # dataset *names* only — `--datasets` entries (with their `N~`/`:<num_prompts>`
     # parts) are resolved by the caller before reaching here
@@ -602,7 +336,10 @@ def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = 
     # check if benchmark repo exists; if so, hard-reset it to the wanted tag
     if not ais_bench_dir.exists():
         print(f"Cloning ais_bench repo ({aisbench_git_tag}) to {ais_bench_dir}...")
-        res = subprocess.run(["git", "clone", "--depth", "1", "-b", aisbench_git_tag, aisbench_git_url, ais_bench_dir])
+        res = subprocess.run(
+            ["git", "clone", "-b", aisbench_git_tag, aisbench_git_url, ais_bench_dir],
+            env=env_with_proxy(),
+        )
         check_subprocess_result(res, "Failed to clone ais_bench repo")
     else:
         print(f"Syncing existing ais_bench repo at {ais_bench_dir} to tag {aisbench_git_tag}...")
@@ -617,13 +354,18 @@ def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = 
         print(f"Creating virtual environment for ais_bench at {venv_abspath}...")
         res = subprocess.run([sys.executable, "-m", "venv", str(venv_abspath)])
         check_subprocess_result(res, "Failed to create virtual environment")
+    else:
+        print(f"Updating virtual environment for ais_bench at {venv_abspath}...")
+        res = subprocess.run([sys.executable, "-m", "venv", "--upgrade", str(venv_abspath)])
+        if res.returncode != 0:
+            # try remove `.venv/bin/python` and then upgrade again
+            shutil.rmtree(venv_abspath / "bin" / "python", ignore_errors=True)
+            res = subprocess.run([sys.executable, "-m", "venv", "--upgrade", str(venv_abspath)])
+        check_subprocess_result(res, "Failed to upgrade virtual environment")
 
-    # activate the virtual environment, then (re)install ais_bench when the installed
-    # package version does not match the synced tag: editable installs keep the version
-    # recorded at install time, so re-syncing the repo alone never refreshes it
-    activate_script = venv_abspath / "bin" / "activate"
-    VENV_ACTIVATE_CMD = f"source {activate_script}"
-
+    # (re)install ais_bench when the installed package version does not match the synced
+    # tag: editable installs keep the version recorded at install time, so re-syncing the
+    # repo alone never refreshes it
     installed_version = _aisbench_pkg_version(venv_abspath / "bin" / "python")
     expected_version = _tag_to_pkg_version(aisbench_git_tag)
     if installed_version is not None and (not expected_version or installed_version == expected_version):
@@ -638,19 +380,20 @@ def prepare_env(ais_bench_dir: Path | None = None, datasets: list[str] | None = 
         # TORCH_INDEX_URL steers the unpinned `torch` in runtime.txt (pulled in by the
         # editable install's install_requires) to the CPU build instead of the CUDA one
         res = subprocess.run(
-            f"{VENV_ACTIVATE_CMD} && export PIP_RETRIES=30 PIP_TIMEOUT=120 PIP_RESUME_RETRIES=60 && "
+            f"{venv_activate_cmd(ais_bench_dir)} && export PIP_RETRIES=30 PIP_TIMEOUT=120 PIP_RESUME_RETRIES=60 && "
             f'pip install --extra-index-url "{TORCH_INDEX_URL}" -r requirements/api.txt '
             f'&& pip install --extra-index-url "{TORCH_INDEX_URL}" -r requirements/extra.txt '
             f'&& pip install --extra-index-url "{TORCH_INDEX_URL}" -v -e ./ --use-pep517',
             shell=True,
             executable="/bin/bash",
             cwd=ais_bench_dir,
+            env=env_with_proxy(),
         )
         check_subprocess_result(res, "Failed to install ais_bench requirements")
 
     # download / set up every dataset the run needs (idempotent)
     for dataset_key in dict.fromkeys(datasets):
-        _ensure_dataset(dataset_key, ais_bench_dir)
+        ensure_dataset(dataset_key, ais_bench_dir)
 
 
 def cleanup_on_exit():
@@ -728,7 +471,7 @@ def start_vllm_server(
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
-    spec_decode: tuple[str, int, str] = ("", 0, ""),
+    spec_decode: tuple[str, int, str, str] = ("", 0, "", ""),
     max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
@@ -818,27 +561,44 @@ def start_vllm_server(
     # draft weights default to the main model's own (integrated draft heads, e.g. MTP — the
     # same config `vllm_xlite.sh` uses); otherwise the entry names a sibling dir of the main
     # model dir, and methods like eagle3/dspark/dflash (see bd5020ad6) need it passed as
-    # `model` in the speculative config
-    spec_method, num_spec_tokens, draft_dir = spec_decode
+    # `model` in the speculative config. The 4th tuple element is an optional JSON object
+    # merged into the speculative-config (built fields win) for method-specific extras,
+    # e.g. extract_hidden_states' `draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids`.
+    spec_method, num_spec_tokens, draft_dir, spec_extra_json = spec_decode
     if num_spec_tokens > 0:
+        spec_config: dict = {"method": spec_method, "num_speculative_tokens": num_spec_tokens}
         if draft_dir:
             draft_path = Path(model_path).parent / draft_dir
             if not draft_path.exists():
                 raise ValueError(f"Speculative draft weights not found at {draft_path}")
-            vllm_cmd_lst.append(
-                f'--speculative-config \'{{"method": "{spec_method}","num_speculative_tokens": {num_spec_tokens},'
-                f'"model": "{draft_path}"}}\''
-            )
-        else:
-            vllm_cmd_lst.append(
-                f'--speculative-config \'{{"method": "{spec_method}","num_speculative_tokens": {num_spec_tokens}}}\''
-            )
+            spec_config["model"] = str(draft_path)
+        if spec_extra_json:
+            try:
+                spec_extra = json.loads(spec_extra_json)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid spec-config JSON `{spec_extra_json}` in --specs entry: {e}") from e
+            if not isinstance(spec_extra, dict):
+                raise ValueError(f"Spec-config JSON must be an object, got: {spec_extra_json}")
+            spec_config.update(spec_extra)
+        vllm_cmd_lst.append(f"--speculative-config '{json.dumps(spec_config)}'")
     vllm_cmd = " ".join(vllm_cmd_lst)
 
     env_copy["XLITE_NODE_IPS"] = ",".join(["127.0.0.1"] * dp_size)
     env_copy["XLITE_LOCAL_IP"] = "127.0.0.1"
     env_copy["XLITE_DEVS_PER_NODE"] = str(dp_size * tp_size)
     env_copy["XLITE_FLASH_ATTENTION_ENABLE"] = "1"
+    # xlite's XRuntime binds its HCCL/XCCL bootstrap sockets at `XLITE_PORT` (+ per-domain
+    # offsets up to ~500); concurrent servers on one host must not share the base port or
+    # their inits collide (`XRuntime: HCCL initialization failed`). Space consecutive
+    # servers 1000 apart (same convention as feat_verify.py's per-instance isolation).
+    env_copy.setdefault("XLITE_PORT", str(20000 + (port - 8241) * 1000))
+    # HCCL binds its NPU network adapter sockets on the device-side default port 16666; when a
+    # stale process (e.g. an uncleanly-exited co-tenant deployment) holds it, every
+    # hcclCommInitRootInfo dies with `Communication_Error_Bind_IP_Port(EI0020): The IP address
+    # ... and port 16666 have already been bound` / error code 7 (resource unavailable).
+    # Move the adapter socket range out of the way; space per-invocation like XLITE_PORT.
+    _pb = 40000 + (port - 8241) * 200
+    env_copy.setdefault("HCCL_NPU_SOCKET_PORT_RANGE", f"{_pb}-{_pb + 99}")
 
     t1 = datetime.now()
     # by default, redirect the vllm server logs to /dev/null; otherwise, redirect them to a `print_to` file.
@@ -874,6 +634,27 @@ def start_vllm_server(
             time.sleep(1)
         else:  # if `break` was not hit and loop exhausted
             raise TimeoutError(f"vLLM server did not start within {timeout} seconds")
+
+        # uvicorn binds the listening socket before the engine finishes startup; a client
+        # that fires here hits a half-booted server and every request fails with
+        # ConnectError (surfacing later as a nan accuracy row). Wait for the app to
+        # actually serve before handing over to ais_bench.
+        health_deadline = datetime.now() + timedelta(minutes=15)
+        while True:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"vLLM server process exited unexpectedly with code {process.returncode}:\n"
+                    f"{_read_tail(stdprint_target)}"
+                )
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as resp:
+                    if resp.status == 200:
+                        break
+            except Exception:
+                pass
+            if datetime.now() > health_deadline:
+                raise TimeoutError("vLLM server /health did not return 200 within 15 minutes")
+            time.sleep(2)
     except Exception as e:
         stop_process_group(process, 0)
         raise e
@@ -902,7 +683,7 @@ def run_ais_bench(
     tp_size: int = 1,
     ep: bool = True,
     dp_size: int = 1,
-    spec_decode: tuple[str, int, str] = ("", 0, ""),
+    spec_decode: tuple[str, int, str, str] = ("", 0, "", ""),
     max_num_seqs: int = 512,
     max_model_len: int = 8192,
     max_num_batched_tokens: int = 8192,
@@ -924,8 +705,9 @@ def run_ais_bench(
     xlite = xlite or xlite_full_mode  # if full mode is enabled, xlite must be enabled as well
     xlite_full_mode = xlite_full_mode and xlite  # full mode can only be enabled when xlite is enabled
     port = find_available_port(port)
-    # failed/absent runs keep accuracy=NaN (never overwritten on the failure paths) so the
-    # reports never show a misleading real-looking 0.00% for a run that produced no result
+    # accuracy stays None (-> `n/a` in the reports) until the ais_bench summary exists: every
+    # failure before that point means the test never ran, while a failure after it (summary
+    # present but unusable) marks accuracy NaN (-> `nan`, reported as a NaN warning)
     bench_result = BenchResult(
         model_name=model_name,
         dataset=dataset,
@@ -936,7 +718,7 @@ def run_ais_bench(
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
         metric=spec.metric_name,
-        accuracy=float("nan"),
+        accuracy=None,
     )
 
     if not model_path or not Path(model_path).exists():
@@ -982,7 +764,7 @@ def run_ais_bench(
         suffix_backend = "xlite-full" if xlite_full_mode else "xlite-decode-only"
     else:
         suffix_backend = "aclgraph"
-    spec_method, num_spec_tokens, _ = spec_decode
+    spec_method, num_spec_tokens = spec_decode[:2]
     spec_suffix = ""
     if num_spec_tokens > 0:
         spec_suffix = f"-{spec_method.upper()}.{num_spec_tokens}"
@@ -995,6 +777,14 @@ def run_ais_bench(
         ais_bench_output_dir.mkdir(parents=True)
     print(f"ais_bench output directory: {ais_bench_output_dir}")
 
+    # Work on a per-invocation copy of the model config: the `sed -i` edits below (host_port,
+    # model, max_out_len, batch_size) must not leak into concurrent batch_aisbench invocations
+    # sharing the same ais_bench repo (a concurrent run's client would connect to this run's
+    # port and vice versa). ais_bench resolves `--models <name>` under configs/models/vllm_api/.
+    ais_bench_model_name = f"{spec.model_config}_{port}"
+    ais_bench_script_run = ais_bench_script.parent / f"{ais_bench_model_name}.py"
+    shutil.copyfile(ais_bench_script, ais_bench_script_run)
+    ais_bench_script = ais_bench_script_run
     # find the line `host_port=xxx` in the script and replace it with the actual port
     res = subprocess.run(
         f'sed -i -E "s/(host_port[[:space:]]*=[[:space:]]*)[0-9]+/\\1{port}/" "{ais_bench_script}"',
@@ -1052,8 +842,8 @@ def run_ais_bench(
     try:
         max_cpu_workers = int(os.environ.get("XLITE_AISBENCH_WORKERS", 16))
         aisbench_cmd_lst: list[str] = [
-            f"{VENV_ACTIVATE_CMD} &&",
-            f"ais_bench --models {spec.model_config}",
+            f"{venv_activate_cmd(ais_bench_dir)} &&",
+            f"ais_bench --models {ais_bench_model_name}",
             f"--datasets {spec.task}",
             "--mode all --dump-eval-details" + (" --merge-ds" if spec.merge_ds else ""),
             f'--max-num-workers "{min(os.cpu_count() or 4, max_cpu_workers, max_num_seqs)}"',
@@ -1071,7 +861,9 @@ def run_ais_bench(
             if i > 1 and " --reuse" not in aisbench_cmd and " -r" not in aisbench_cmd:
                 aisbench_cmd += " --reuse"  # add --reuse flag for subsequent attempts
                 print(f"{retry_str}ais_bench failed on previous attempt(s), retrying with --reuse...")
-            process = subprocess.Popen(aisbench_cmd, shell=True, start_new_session=True, executable="/bin/bash")
+            process = subprocess.Popen(
+                aisbench_cmd, shell=True, start_new_session=True, executable="/bin/bash", env=env_with_proxy()
+            )
             _PROCESS_GROUPS.add(process)
             print(f"{retry_str}ais_bench started with PID {process.pid} (completion timeout={timeout}s)...")
             try:
@@ -1094,6 +886,9 @@ def run_ais_bench(
 
         # from the output directory, find the latest ais_bench_output_dir/*datetime*/summary/summary_*.csv
         summary_path = max(ais_bench_output_dir.glob("*/summary/summary_*.csv"), key=os.path.getmtime)
+        # a summary exists, so the eval has run: failures from here on mean "ran but no valid
+        # number" (NaN), not "not run" (accuracy stays None)
+        bench_result.accuracy = float("nan")
         df = pd.read_csv(summary_path, index_col=None)
         dataset_re, metric_re = spec.row_filter
         mask = df["dataset"].astype(str).str.match(dataset_re) & df["metric"].astype(str).str.match(metric_re)
@@ -1235,10 +1030,12 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
         default=["0"],
         help=(
             "List of spec decode configs for each model, formatted "
-            "`<spec_decode_method>:<num_spec_tokens>[:<draft_weights_dir>]` (e.g. `mtp:3`); a bare number N "
+            "`<spec_decode_method>:<num_spec_tokens>[:<draft_weights_dir>[:<json>]]` (e.g. `mtp:3`); a bare number N "
             "means `mtp:N` (`0` disables spec decode); an omitted <draft_weights_dir> uses the main model's "
             "own weights, otherwise it is a single directory name resolved as `<main_model_dir>/../<dir>` "
-            "(needed by draft-based methods like eagle3/dspark/dflash); entries also support `N~`/`N*` "
+            "(needed by draft-based methods like eagle3/dspark/dflash); the optional trailing <json> object is "
+            "merged into the speculative-config (e.g. extract_hidden_states' draft_model_config aux-layer ids); "
+            "entries also support `N~`/`N*` "
             "repeat expansion like --models (last value used for padding)"
         ),
     )
@@ -1304,7 +1101,7 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
         default=[""],
         help=(
             "Extra arguments to pass to the ais_bench command, for each model (last value used for padding). "
-            "Values starting with `-` (e.g. `--reuse`) must use the `=` form: `--extra-aisbench-args=\"--reuse\"`"
+            'Values starting with `-` (e.g. `--reuse`) must use the `=` form: `--extra-aisbench-args="--reuse"`'
         ),
     )
     parser.add_argument(
@@ -1519,7 +1316,7 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
                 xlite=xlite,
                 xlite_full_mode=xlite_full,
                 metric=DATASETS[dataset].metric_name,
-                accuracy=float("nan"),
+                accuracy=None,
             )
             result.error = str(e)
         except KeyboardInterrupt:
@@ -1536,8 +1333,8 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
         with open(log_csv_path, "a") as f:
             f.write(
                 f"{result.model_name},{result.dataset},{result.tp_size},{result.ep},{result.dp_size},"
-                f"{result.spec_label},{result.xlite},{result.xlite_full_mode},{result.metric},{result.accuracy},"
-                f"{result.error or ''}\n"
+                f"{result.spec_label},{result.xlite},{result.xlite_full_mode},{result.metric},"
+                f"{result.accuracy_cell(result.accuracy)},{result.error or ''}\n"
             )
         print(result.markdown_row())
         print(f"Completed benchmark task {i + 1}/{len(combinations)}")
