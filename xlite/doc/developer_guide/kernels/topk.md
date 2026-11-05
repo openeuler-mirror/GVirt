@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-对一批变长序列做 topK 选取的通用向量算子(DeepSeek V3.2 DSA indexer 的 topk 后处理路径):每个 query token 在自身 `cachedLen + queryLen` 长度的得分行上选出最大的 `topK`(仅支持 2048)个元素的**索引**。等价于 `torch.topk(scores, k=K, dim=-1)[1]`,但按 2048 元素的 chunk 流式处理,支持远大于 UB 容量的序列长度(测试覆盖到 131072)。注意与 `indexer_topk` 的区别:本算子输入是**已经算好的 scores 矩阵**,不包含得分计算与核间接力。
+对一批变长序列做 topK 选取的通用向量算子(DSA indexer 的 topk 后处理路径):每个 query token 在自身 `cachedLen + queryLen` 长度的得分行上选出最大的 `topK`(仅支持 2048)个元素的**索引**。等价于 `torch.topk(scores, k=K, dim=-1)[1]`,但按 2048 元素的 chunk 流式处理,支持远大于 UB 容量的序列长度(测试覆盖到 131072)。注意与 `indexer_topk` 的区别:本算子输入是**已经算好的 scores 矩阵**,不包含得分计算与核间接力。
 
 ## 输入输出参数
 

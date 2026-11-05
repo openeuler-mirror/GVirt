@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-DeepSeek V3.2 DSA(DeepSeek Sparse Attention)indexer 的 K/Q 预处理融合算子(核内函数 `norm_ropex_cache_muls`,见 `csrc/kernels/indexer_prepare.h` 的 `norm_ropex_cache_muls`)。对 indexer 的 K 投影 `kw` 执行:LayerNorm → 前缀 GPT-J 交错式 RoPE → 写入 paged `index_k_cache`;当 `is_long` 为真(序列长度超过 topK 走长序列路径)时,额外对 Q 做 per-head RoPE(原地,仅稀疏注意力 token),并对 `kw` 尾部的 `index_n_heads` 个头权重列按 `scale` 缩放(仅对 position ≥ top_k 的 token)。该算子是 `indexer_scores`/`indexer_topk` 的前置步骤,为其准备好归一化、加旋转位置编码后的 K cache 与 Q。
+DSA(DeepSeek Sparse Attention)indexer 的 K/Q 预处理融合算子(核内函数 `norm_ropex_cache_muls`,见 `csrc/kernels/indexer_prepare.h` 的 `norm_ropex_cache_muls`)。对 indexer 的 K 投影 `kw` 执行:LayerNorm → 前缀 GPT-J 交错式 RoPE → 写入 paged `index_k_cache`;当 `is_long` 为真(序列长度超过 topK 走长序列路径)时,额外对 Q 做 per-head RoPE(原地,仅稀疏注意力 token),并对 `kw` 尾部的 `index_n_heads` 个头权重列按 `scale` 缩放(仅对 position ≥ top_k 的 token)。该算子是 `indexer_scores`/`indexer_topk` 的前置步骤,为其准备好归一化、加旋转位置编码后的 K cache 与 Q。
 
 数学语义(见测试 `tests/kernels/indexer_prepare.py` 的 `run_test` 参考实现,关键字 `F.layer_norm(kw_ref[:, :index_head_dim]` / `apply_rotary_emb`):
 

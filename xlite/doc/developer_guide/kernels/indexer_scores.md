@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-DeepSeek V3.2 DSA indexer 的得分计算算子(纯 Cube 核)。对每个 query token 计算 indexer 头的注意力得分并与头权重融合,数学上等价于两步 einsum(见 `csrc/kernels/indexer_scores.h` 的 `IndexerScores::Init`(注释块 `scores = k * q`)与测试 `tests/kernels/indexer_scores.py` 的参考实现,关键字 `torch.einsum("bshd,btd->bsht"` / `index_score = torch.einsum("sht,sh->st"`):
+DSA indexer 的得分计算算子(纯 Cube 核)。对每个 query token 计算 indexer 头的注意力得分并与头权重融合,数学上等价于两步 einsum(见 `csrc/kernels/indexer_scores.h` 的 `IndexerScores::Init`(注释块 `scores = k * q`)与测试 `tests/kernels/indexer_scores.py` 的参考实现,关键字 `torch.einsum("bshd,btd->bsht"` / `index_score = torch.einsum("sht,sh->st"`):
 
 ```
 scores[s,h,t]      = sum_d q[s,h,d] * kCache[t,d]        # Q·K^T
