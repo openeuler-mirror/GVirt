@@ -221,25 +221,32 @@ if(DEFINED ENV{XLITE_MSPROF_RECODE_SHAPE})
     endif()
 endif()
 
-# Inject XLiteMsprofShapeHook into the generated host_stub.cpp files (see
-# scripts/patch_host_stub.py). Only done when XLITE_MSPROF_RECODE_SHAPE is on.
+# Post-process the generated host_stub.cpp files (see
+# scripts/patch_host_stub.py). Always applied: remove the per-launch
+# overflow-status device malloc/free pair (debug-only facility, disabled by
+# passing null -- the kernel-side write is null-guarded). With
+# XLITE_MSPROF_RECODE_SHAPE on, the XLiteMsprofShapeHook injection is added
+# on top via --msprof.
+set(_XLITE_AUTO_GEN_DIRS
+    ${CMAKE_CURRENT_BINARY_DIR}/auto_gen
+)
+set(_xlite_stub_patch_args)
 if(_xlite_msprof_enabled)
-    set(_XLITE_AUTO_GEN_DIRS
-        ${CMAKE_CURRENT_BINARY_DIR}/auto_gen
-    )
-    add_custom_target(xlite_patch_host_stub ALL
-        COMMAND ${CMAKE_COMMAND} -E env python3
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_host_stub.py ${_XLITE_AUTO_GEN_DIRS}
-        VERBATIM
-    )
-    foreach(_kernel_target IN ITEMS
-            xlite_kernels_common_${RUN_MODE}
-            xlite_kernels_bf16_${RUN_MODE}
-            xlite_kernels_f16_${RUN_MODE})
-        add_dependencies(xlite_patch_host_stub ${_kernel_target}_merge_obj)
-        add_dependencies(${_kernel_target}_host_stub_obj xlite_patch_host_stub)
-    endforeach()
+    list(APPEND _xlite_stub_patch_args --msprof)
 endif()
+add_custom_target(xlite_patch_host_stub ALL
+    COMMAND ${CMAKE_COMMAND} -E env python3
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_host_stub.py
+            ${_xlite_stub_patch_args} ${_XLITE_AUTO_GEN_DIRS}
+    VERBATIM
+)
+foreach(_kernel_target IN ITEMS
+        xlite_kernels_common_${RUN_MODE}
+        xlite_kernels_bf16_${RUN_MODE}
+        xlite_kernels_f16_${RUN_MODE})
+    add_dependencies(xlite_patch_host_stub ${_kernel_target}_merge_obj)
+    add_dependencies(${_kernel_target}_host_stub_obj xlite_patch_host_stub)
+endforeach()
 
 # If XLITE_DEBUG_ON env var is NOT set (empty / falsy), disable ascendc printf
 # by adding ASCENDC_DUMP=0 to the ascendc kernel compile definitions. When

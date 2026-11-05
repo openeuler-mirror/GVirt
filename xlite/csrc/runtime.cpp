@@ -2,6 +2,7 @@
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
  */
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <iostream>
 #include <memory>
