@@ -44,6 +44,7 @@ import numpy as np
 import os
 import re
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, cxa
 from xlite._C import print as xlite_print
 from tests.models.deepseek_v4_kernel import sparse_attn

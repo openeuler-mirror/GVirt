@@ -16,6 +16,7 @@ from typing import List, Literal, Tuple
 from pathlib import Path
 
 import torch
+import torch_npu  # noqa: F401
 import torch.nn as nn
 import torch.distributed as dist
 from transformers import AutoTokenizer

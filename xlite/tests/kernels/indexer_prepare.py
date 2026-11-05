@@ -30,6 +30,7 @@ import logging
 import math
 
 import torch
+import torch_npu  # noqa: F401
 import torch.nn.functional as F
 
 from xlite._C import Runtime, indexer_prepare

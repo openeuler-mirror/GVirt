@@ -21,6 +21,7 @@ must keep working with no per-runtime state of any kind.
 """
 
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, add
 
 DEVICE = 0

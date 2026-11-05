@@ -29,6 +29,7 @@ intermediate (x_norm, mixes, y) against a pure-PyTorch reference, end-to-end.
 import sys
 
 import torch
+import torch_npu  # noqa: F401
 import torch.nn.functional as F
 
 from xlite._C import Runtime, rmsnorm, matmul, hc_act

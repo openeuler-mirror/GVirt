@@ -32,6 +32,7 @@ import itertools
 import logging
 import numpy as np
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, gather_sparse_kv_cache
 
 logging.getLogger().setLevel(logging.INFO)

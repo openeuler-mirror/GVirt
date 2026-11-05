@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, cast_up
 
 rt = Runtime(0, 500)

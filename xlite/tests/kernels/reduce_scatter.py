@@ -15,6 +15,7 @@
 # ===============================================================================
 import os
 import torch
+import torch_npu  # noqa: F401
 import torch.distributed as dist
 from xlite._C import Runtime, reduce_scatter
 

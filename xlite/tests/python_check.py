@@ -5,6 +5,7 @@ Basic Python linting using flake8 and mypy
 """
 
 import os
+import ast
 import sys
 import subprocess
 import hashlib
@@ -162,6 +163,47 @@ class PythonChecker:
             self.errors.append(f"{file_path}: Error reading file: {e}")
             return False
 
+    def check_torch_npu_imports(self):
+        """Screen test scripts for proper torch_npu injection.
+
+        `torch.npu` only exists after `import torch_npu`, so any test using it must have
+        `import torch` followed by `import torch_npu`.
+        """
+        for file_path in sorted((self.root_dir / 'tests').rglob('*.py')):
+            try:
+                tree = ast.parse(file_path.read_text(encoding='utf-8'))
+            except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+                continue  # syntax errors are reported by check_syntax
+            uses_npu = False
+            torch_line = None
+            torch_npu_line = None
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == 'torch' and torch_line is None:
+                            torch_line = node.lineno
+                        if alias.name.split('.')[0] == 'torch_npu' and torch_npu_line is None:
+                            torch_npu_line = node.lineno
+                            uses_npu = True
+                elif isinstance(node, ast.ImportFrom) and node.module and node.module.split('.')[0] == 'torch_npu':
+                    if torch_npu_line is None:
+                        torch_npu_line = node.lineno
+                    uses_npu = True
+                elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                    if node.value.id == 'torch' and node.attr == 'npu':
+                        uses_npu = True
+            if not uses_npu:
+                continue
+            rel = file_path.relative_to(self.root_dir)
+            if torch_npu_line is None:
+                self.errors.append(f"{rel}: uses torch.npu/torch_npu but never imports torch_npu")
+            elif torch_line is None:
+                self.errors.append(f"{rel}:{torch_npu_line}: imports torch_npu without `import torch`")
+            elif torch_npu_line < torch_line:
+                self.errors.append(
+                    f"{rel}: `import torch_npu` (line {torch_npu_line}) must follow `import torch` (line {torch_line})"
+                )
+
     def run_checks(self, check_flake8_flag=True, check_mypy_flag=True, use_cache=False):
         """Run all checks"""
         python_files = self.find_python_files(use_cache=use_cache)
@@ -181,6 +223,9 @@ class PythonChecker:
                 all_passed = False
 
         print()
+
+        # Screen tests/ scripts for proper torch_npu injection
+        self.check_torch_npu_imports()
 
         # Run batch checks
         if (check_flake8_flag or check_mypy_flag) and python_files:

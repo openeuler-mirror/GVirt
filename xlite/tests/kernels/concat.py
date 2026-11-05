@@ -22,6 +22,7 @@ import logging
 import os
 import numpy as np
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, concat
 
 logging.getLogger().setLevel(logging.INFO)

@@ -13,6 +13,7 @@ from typing import Tuple, Optional, Literal
 
 import os
 import torch
+import torch_npu  # noqa: F401
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist

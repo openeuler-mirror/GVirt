@@ -12,6 +12,7 @@
 # dense top-k indices are internal. hash=True gathers indices from tid2eid[input_ids] and
 # passes bias as null (dead weight there). See ref_gate below.
 import torch
+import torch_npu  # noqa: F401
 import numpy as np
 
 from xlite._C import Runtime, sqrtsoftplus_hash_topk

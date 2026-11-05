@@ -12,6 +12,7 @@ import logging
 import math
 import numpy as np
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, rope_complex, muls
 
 logging.getLogger().setLevel(logging.INFO)

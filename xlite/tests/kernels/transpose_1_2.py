@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, transpose_1_2
 
 channels = 6144

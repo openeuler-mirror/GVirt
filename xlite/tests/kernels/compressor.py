@@ -21,6 +21,7 @@ from __future__ import absolute_import
 import logging
 
 import torch
+import torch_npu  # noqa: F401
 
 from xlite._C import Runtime, compressor, quant_cache_c8
 
