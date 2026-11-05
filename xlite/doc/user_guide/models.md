@@ -12,8 +12,7 @@ xlite 支持以下大语言模型的推理部署：
 | Qwen3.6-35B-A3B | ✅ |
 | Qwen3.8-27B | ✅ |
 | DeepSeek-V3/3.1/R1 | ✅ |
-| DeepSeek-V3.2 | ✅ |
-| DeepSeek-V4 | (规划中) |
+| DeepSeek-V4 | ✅ |
 | DeepSeek-V4.1 | (规划中) |
 | GLM-4.7 | ✅ |
 | GLM-4.7-Flash | ✅ |
