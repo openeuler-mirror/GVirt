@@ -91,39 +91,32 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
         set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
     }
-    int32_t slot = ((__gm__ int32_t *)slots)[block_idx];
-    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
-    if (slot >= 0) {
-        CopyGmToUbufAligned(inputs[0], (__gm__ Dtype *)latent + (uint64_t)block_idx * latentDim,
-                            latentDim * sizeof(Dtype));
-        CopyGmToUbufAligned((__ubuf__ Dtype *)(packed[0] + latentDim * sizeof(int8_t)),
-                            (__gm__ Dtype *)pe + (uint64_t)block_idx * ropeDim,
-                            ropeDim * sizeof(Dtype));
-    }
-    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2);
-
+    int32_t slot = -1;
     uint32_t taskNum = DIV_ROUND_UP(tokens - block_idx, block_num);
-    for (uint32_t task = 0; task < taskNum; ++task) {
-        uint32_t curr = task % PINGPONG_BUF_NUM;
-        uint32_t row = block_idx + task * block_num;
+    for (uint32_t task = 0; task <= taskNum; ++task) {
         int32_t nextSlot = -1;
-        if (task + 1 < taskNum) {
-            uint32_t next = 1 - curr;
-            uint32_t nextRow = row + block_num;
+        if (task < taskNum) {
+            uint32_t next = task % PINGPONG_BUF_NUM;
+            uint32_t nextRow = block_idx + task * block_num;
             nextSlot = ((__gm__ int32_t *)slots)[nextRow];
-            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + next);
             if (nextSlot >= 0) {
+                wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + next);
                 CopyGmToUbufAligned(inputs[next],
                                     (__gm__ Dtype *)latent + (uint64_t)nextRow * latentDim,
                                     latentDim * sizeof(Dtype));
                 CopyGmToUbufAligned((__ubuf__ Dtype *)(packed[next] + latentDim * sizeof(int8_t)),
                                     (__gm__ Dtype *)pe + (uint64_t)nextRow * ropeDim,
                                     ropeDim * sizeof(Dtype));
+                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + next);
             }
-            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + next);
         }
-        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
+        if (task == 0) {
+            slot = nextSlot;
+            continue;
+        }
+        uint32_t curr = (task - 1) % PINGPONG_BUF_NUM;
         if (slot >= 0) {
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
             auto x = xBuf[curr];
             auto tmp = tmpBuf[curr];
             auto amaxBuf = amaxBufs[curr];
@@ -135,16 +128,16 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
                 auto scale = (__ubuf__ float *)(packed[curr] + scaleOffset) + group;
                 mla_cache_c8_quant(input, quant, scale, x, tmp, amaxBuf, factorBuf, halfValues);
             }
-            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
             CopyUbufToGmAligned((__gm__ int8_t *)cache + (uint64_t)slot * latentDim, packed[curr],
                                 latentDim);
             CopyUbufToGmAligned((__gm__ Dtype *)peCache + (uint64_t)slot * ropeDim,
                                 packed[curr] + latentDim, ropeDim * sizeof(Dtype));
             CopyUbufToGmAligned((__gm__ float *)scaleCache + (uint64_t)slot * groupNum,
                                 packed[curr] + scaleOffset, groupNum * sizeof(float));
+            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
         }
-        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
         slot = nextSlot;
     }
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
