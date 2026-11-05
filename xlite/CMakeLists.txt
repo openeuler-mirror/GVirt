@@ -222,9 +222,9 @@ if(DEFINED ENV{XLITE_MSPROF_RECODE_SHAPE})
 endif()
 
 # Post-process the generated host_stub.cpp files (see
-# scripts/patch_host_stub.py). Always applied: replace the per-launch
-# overflow-status device malloc/free pair with one cached buffer (host never
-# reads that buffer, stock stub frees it right after launch). With
+# scripts/patch_host_stub.py). Always applied: remove the per-launch
+# overflow-status device malloc/free pair (debug-only facility, disabled by
+# passing null -- the kernel-side write is null-guarded). With
 # XLITE_MSPROF_RECODE_SHAPE on, the XLiteMsprofShapeHook injection is added
 # on top via --msprof.
 set(_XLITE_AUTO_GEN_DIRS

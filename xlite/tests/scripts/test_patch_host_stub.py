@@ -9,16 +9,17 @@
 # ===============================================================================
 """Unit test for scripts/patch_host_stub.py (pure host, no NPU needed).
 
-Synthesizes CANN-style host_stub.cpp files (stock, a stub carrying the v1
-cache block, and one carrying the v2 block with the weak-symbol epoch
-FUNCTION call), runs the patch script on them, and asserts the transformed
-text: v3 cache blocks reading the hidden data symbol gXliteOverflowEpoch
-(no call in the launch path), the hidden extern declaration, no leftover
-stock alloc/free, no orphaned constexpr, no v1/v2 leftovers, and idempotent
-re-runs.
+Synthesizes CANN-style host_stub.cpp files (stock, stubs carrying the v1 /
+v2 / v3 cache blocks), runs the patch script on them, and asserts the
+transformed text: the overflow-status buffer is removed (argument slot set
+to null, no device alloc/free left, no orphaned constexpr, no leftover
+epoch declaration or cache block), and re-runs are idempotent. Also checks
+the XLITE_NO_OVERFLOW_PATCH probe (file left stock) and the unknown-pattern
+warning path.
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -92,37 +93,39 @@ def make_stub_dir(base, name, cache_block=None, decls=""):
     return d.parent
 
 
-def run_patch(auto_gen):
+def run_patch(auto_gen, env=None):
+    run_env = None
+    if env:
+        run_env = os.environ.copy()
+        run_env.update(env)
     return subprocess.run(
         [sys.executable, str(SCRIPT), str(auto_gen)],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, env=run_env,
     )
 
 
 def check_stub(path):
     text = path.read_text()
-    assert "gXliteOverflowEpoch" in text, "v3 cache block missing"
-    assert text.count("__atomic_load_n(&gXliteOverflowEpoch") == 1, \
-        "expected one v3 block (single guarded acquire load)"
-    assert 'extern "C" unsigned long long gXliteOverflowEpoch' in text, \
-        "weak data-symbol decl missing"
-    assert "__attribute__((weak))" in text, "weak attribute missing"
-    assert "xliteOverflowEpoch()" not in text, "v2 weak function left"
-    assert "&xliteOverflowEpoch" not in text, "v2 weak guard left"
+    assert "__ascendc_args.__ascendc_overflow = nullptr" in text, \
+        "null assignment missing"
+    assert "overflow-status buffer removed" in text, "removal marker missing"
     assert "AllocAscendMemDevice(&(__ascendc_args.__ascendc_overflow)" not in text, "stock alloc left"
     assert "FreeAscendMemDevice(__ascendc_args.__ascendc_overflow)" not in text, "stock free left"
     assert "__ascendc_overflow_status_size = 8" not in text, "orphaned constexpr left"
     assert "__ascendc_overflow_cache = []" not in text, "v1 block left"
+    assert "__ascendc_overflow_cache" not in text, "cache block left"
+    assert "gXliteOverflowEpoch" not in text, "v3 epoch decl left"
+    assert "xliteOverflowEpoch" not in text, "v2 epoch decl left"
 
 
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
 
-        # Stock -> v3.
+        # Stock -> removal.
         auto_gen = make_stub_dir(base, "stock", cache_block=None)
         out = run_patch(auto_gen)
-        assert "overflow buffer cache(s)" in out.stdout, out.stdout
+        assert "removed 1 overflow buffer alloc(s)" in out.stdout, out.stdout
         check_stub(auto_gen / "stock" / "host_stub.cpp")
 
         # Idempotent re-run: no changes, no warnings.
@@ -130,31 +133,49 @@ def main():
         run_patch(auto_gen)
         assert (auto_gen / "stock" / "host_stub.cpp").read_text() == before, "not idempotent"
 
+        # A/B probe: stock file left untouched.
+        probe_gen = make_stub_dir(base / "probe", "probe", cache_block=None)
+        before = (probe_gen / "probe" / "host_stub.cpp").read_text()
+        run_patch(probe_gen, env={"XLITE_NO_OVERFLOW_PATCH": "1"})
+        assert (probe_gen / "probe" / "host_stub.cpp").read_text() == before, \
+            "probe modified the file"
+        check_stub_probe = (probe_gen / "probe" / "host_stub.cpp").read_text()
+        assert "AllocAscendMemDevice(&(__ascendc_args.__ascendc_overflow)" \
+            in check_stub_probe, "probe should keep stock alloc"
+
         # v1 upgrade path.
         v1_gen = make_stub_dir(base / "v1case", "v1", cache_block=V1_CACHE_BLOCK)
         run_patch(v1_gen)
         check_stub(v1_gen / "v1" / "host_stub.cpp")
 
-        # v2 upgrade path: weak-function epoch call -> v3 data symbol.
+        # v2 upgrade path: weak-function epoch block -> removal.
         v2_gen = make_stub_dir(
             base / "v2case", "v2",
             cache_block=MOD.OVERFLOW_V2_CACHE_BLOCK,
             decls=MOD.OVERFLOW_V2_EPOCH_DECL,
         )
         out = run_patch(v2_gen)
-        assert "overflow buffer cache(s)" in out.stdout, out.stdout
+        assert "removed 1 overflow buffer alloc(s)" in out.stdout, out.stdout
         check_stub(v2_gen / "v2" / "host_stub.cpp")
+
+        # v3 upgrade path: weak-data-symbol epoch block -> removal.
+        v3_gen = make_stub_dir(
+            base / "v3case", "v3",
+            cache_block=MOD.OVERFLOW_CACHE_BLOCK,
+            decls=MOD.OVERFLOW_EPOCH_DECL,
+        )
+        run_patch(v3_gen)
+        check_stub(v3_gen / "v3" / "host_stub.cpp")
 
         # Unknown pattern (future CANN): warn, leave file untouched.
         unk = base / "unknown" / "auto_gen" / "lib"
         unk.mkdir(parents=True)
         (unk / "host_stub.cpp").write_text("int f() { return 0; }\n")
         out = run_patch(unk.parent)
-        assert ("pattern not found" in out.stderr
-                or "declaration not found" in out.stderr), out.stderr
+        assert "pattern not found" in out.stderr, out.stderr
         assert (unk / "host_stub.cpp").read_text() == "int f() { return 0; }\n"
 
-    print("PASS: patch_host_stub stock/v1/v2/idempotent/unknown cases")
+    print("PASS: patch_host_stub stock/v1/v2/v3/probe/idempotent/unknown cases")
 
 
 if __name__ == "__main__":

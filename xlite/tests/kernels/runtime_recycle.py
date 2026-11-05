@@ -7,17 +7,17 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-"""Runtime recycle smoke test for the stub-side overflow-buffer cache.
+"""Runtime recycle smoke test for the overflow-status buffer removal.
 
-scripts/patch_host_stub.py replaces the per-launch overflow-status device
-malloc/free in the generated host stubs with one cached buffer per launch
-wrapper. The cache is validated against the gXliteOverflowEpoch data symbol,
-which libxlite bumps on XRuntime::Init and teardown, so the buffer is
-re-allocated instead of going stale across aclrtResetDevice/aclFinalize.
-This test exercises that path: destroy a runtime (device reset) and build a
-new one in the SAME process, then launch kernels again and check numerics.
-Without the epoch guard the stubs would keep passing the previous
-generation's device address to the kernel.
+scripts/patch_host_stub.py removes the per-launch overflow-status device
+malloc/free from the generated host stubs: the launch-argument slot is set
+to null and never allocated (the kernel-side write is null-guarded, so
+passing null just disables the debug-only overflow-status reporting; real
+overflow reporting goes through AICore hardware traps /
+aclrtGetOverflowStatus and does not involve this slot). This test exercises
+the sensitive path: destroy a runtime (device reset) and build a new one in
+the SAME process, then launch kernels again and check numerics -- the stubs
+must keep working with no per-runtime state of any kind.
 """
 
 import torch

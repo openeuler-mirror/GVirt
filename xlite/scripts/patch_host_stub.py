@@ -11,9 +11,9 @@
 
 Two independent, idempotent patches:
 
-1. Overflow-status buffer cache (always applied). The stock generator emits,
-   in every launch wrapper, an 8-byte device allocation plus a matching free
-   around the kernel launch:
+1. Overflow-status buffer removal (always applied). The stock generator
+   emits, in every launch wrapper, an 8-byte device allocation plus a
+   matching free around the kernel launch:
 
        constexpr uint32_t __ascendc_overflow_status_size = 8;
        AllocAscendMemDevice(&(__ascendc_args.__ascendc_overflow),
@@ -21,25 +21,20 @@ Two independent, idempotent patches:
        ... launch ...
        FreeAscendMemDevice(__ascendc_args.__ascendc_overflow);
 
-   The host never reads this buffer: the stock stub frees it immediately
-   after the launch call returns, i.e. before the kernel has even started.
-   Replacing the per-launch alloc/free pair with one cached buffer removes
-   two device-allocator round-trips from the host submission path of every
-   kernel launch. Measured (GLM-4.7-Flash, 910B2 x4, vllm bench serve,
-   192x2048/256 conc 8): the removed pair accounted for ~4.8-6.9 ms/step of
-   host aclrtMalloc+aclrtFree time; host cost per op call 27.2 -> 22.5 us.
-
-   The cache is lifetime-safe: it is validated against the
-   gXliteOverflowEpoch generation counter that libxlite bumps on every
-   XRuntime::Init / teardown, so the buffer is re-allocated instead of going
-   stale across aclrtSetDevice / aclrtResetDevice / aclFinalize (runtime
-   destroyed and re-created within one process, sequential per-device
-   runtimes). Allocation failure is retried on the next launch. The counter
-   is a weakly-referenced data symbol, so the per-launch check is a guarded
-   load plus one predicted branch -- no function call, no PLT indirection (a
-   cross-TU weak-symbol function call here clobbers the launch wrapper's
-   register allocation and regressed host-bound benches; see PR #619
-   review).
+   This buffer is a debug facility: the CCE-compiled operator checks, at
+   its exit, whether the pointer argument is non-null and then stores the
+   STATUS register's overflow bits into it (each launch gets its own
+   buffer so the overflowing operator can be identified). The host never
+   reads it back -- the stock stub frees it right after the launch call
+   returns. Per review feedback (#619) the per-launch device malloc/free
+   is pure launch-path overhead for that debug facility, so the patch
+   passes null instead: the kernel-side write is null-guarded, which
+   merely turns overflow-status reporting off until it is needed again.
+   The slot stays in the launch-argument struct -- its layout is part of
+   the host/device ABI the generator lays out on both sides -- but it is
+   set to null and never allocated. Real out-of-bounds access remains an
+   AICore hardware trap, and the public API for explicit checks is
+   aclrtGetOverflowStatus; neither goes through this buffer.
 
    If a future CANN version changes the emitted pattern, the script warns
    and leaves that stub unpatched (stock behavior: correct, just slower).
@@ -52,7 +47,7 @@ Two independent, idempotent patches:
    timestamp and merge into that node's descriptor. Inert when libxlite does
    not define the hook.
 
-Files already containing the current-version markers are left untouched;
+Files already containing the current-version marker are left untouched;
 stubs carrying an older overflow-cache block are upgraded in place.
 """
 
@@ -60,7 +55,7 @@ import re
 import sys
 from pathlib import Path
 
-# ---- patch 1: cached overflow-status buffer --------------------------------
+# ---- patch 1: overflow-status buffer removal --------------------------------
 
 # Stock generator text (constexpr line included: it would otherwise be left
 # unused after the replacement).
@@ -79,16 +74,23 @@ OVERFLOW_ALLOC_ONLY = (
 
 OVERFLOW_FREE_LINE = '    FreeAscendMemDevice(__ascendc_args.__ascendc_overflow);\n'
 
-# Declaration of libxlite's overflow-cache generation counter, inserted once
-# per stub file next to the other runtime externs. A weakly-referenced DATA
-# symbol, not a function: reading it is a load (through the GOT) plus one
-# predicted branch -- no call, no PLT indirection, no caller-saved-register
-# clobber in the launch wrapper. (A cross-TU weak-symbol function call here
-# regressed host-bound benches by 0.7%; see PR #619 review.) Weak because
-# libxlite_kernels_*.so do not link against libxlite (a non-weak reference
-# would need a circular DT_NEEDED); at runtime the kernels .so and libxlite
-# are in the same dlopen group, so the reference resolves, and without
-# libxlite it reads as null and the stub treats the epoch as 0.
+# Replacement: the buffer is removed entirely. The argument slot stays (its
+# layout is part of the generator's host/device ABI) but is set to null: the
+# CCE-compiled operator null-checks the pointer at its exit and only writes
+# the overflow status when it is non-null, so passing null just disables the
+# debug-only overflow-status reporting (see the module docstring).
+OVERFLOW_REMOVED_ASSIGN = (
+    '    __ascendc_args.__ascendc_overflow = nullptr; '
+    '/* xlite: overflow-status buffer removed (debug-only,\n'
+    '     * kernel-side write is null-guarded), see patch_host_stub.py. */\n'
+)
+
+# Marker proving the file already carries the removal (idempotency).
+OVERFLOW_MARKER = 'overflow-status buffer removed'
+
+# Legacy epoch declarations (v2 weak function / v3 weak data symbol) that
+# earlier versions of this script inserted at file scope: stripped when an
+# old cache block is upgraded to the removal.
 OVERFLOW_EPOCH_DECL = (
     '/* xlite: overflow-cache generation counter, defined by libxlite\n'
     ' * (weak data symbol, read-only in the stub); see\n'
@@ -96,7 +98,12 @@ OVERFLOW_EPOCH_DECL = (
     'extern "C" unsigned long long gXliteOverflowEpoch '
     '__attribute__((weak));\n'
 )
-OVERFLOW_EPOCH_ANCHOR = 'uint32_t AllocAscendMemDevice(void **devMem, uint64_t size);\n'
+OVERFLOW_V2_EPOCH_DECL = (
+    '/* xlite: overflow-cache generation counter, defined by libxlite\n'
+    ' (weak: the stub also works standalone); see scripts/patch_host_stub.py. */\n'
+    'extern "C" unsigned long long xliteOverflowEpoch() '
+    '__attribute__((weak));\n'
+)
 
 # v1 of this patch (magic-static init, no epoch validation): upgraded when
 # found, e.g. in a build dir patched before this version.
@@ -113,15 +120,7 @@ OVERFLOW_V1_BLOCK = (
 )
 
 # v2 of this patch (epoch check via a weak-symbol FUNCTION call): upgraded
-# when found. Kept verbatim so build dirs patched by the previous script
-# version are rewritten in place; the weak function declaration it inserted
-# at file scope is swapped for the v3 data-symbol declaration.
-OVERFLOW_V2_EPOCH_DECL = (
-    '/* xlite: overflow-cache generation counter, defined by libxlite\n'
-    ' (weak: the stub also works standalone); see scripts/patch_host_stub.py. */\n'
-    'extern "C" unsigned long long xliteOverflowEpoch() '
-    '__attribute__((weak));\n'
-)
+# when found, together with its file-scope declaration above.
 OVERFLOW_V2_CACHE_BLOCK = (
     '    /* Cached overflow-status buffer: host write-only scratch, the stock\n'
     '     * stub frees it right after launch without reading it back, so one\n'
@@ -149,25 +148,9 @@ OVERFLOW_V2_CACHE_BLOCK = (
     '    __ascendc_args.__ascendc_overflow = __ascendc_overflow_cache;\n'
 )
 
-# v3: cached buffer + generation check + retry on allocation failure. One
-# static pair per launch wrapper (a few hundred bytes of device memory per
-# kernel library in total). Padded well past the stock 8B in case the kernel
-# side writes per-block status entries. Stale buffers are dropped, not freed:
-# after a device reset the address is already invalid, and on a device switch
-# FreeAscendMemDevice would target the wrong device (see runtime.cpp). The
-# retry makes a failed allocation retry on the next launch instead of caching
-# nullptr forever; concurrent first launches may race and leak one 512B
-# buffer, which is harmless.
-#
-# v3 vs v2: the generation check reads the weak data symbol
-# gXliteOverflowEpoch directly (guarded acquire load; without libxlite it
-# resolves to null and the epoch reads as 0) and folds cache-null and
-# epoch-change into ONE __builtin_expect(..., 0) branch. The v2 form called
-# the weak-symbol function xliteOverflowEpoch() per launch; an opaque
-# cross-TU call cannot be inlined, clobbers the caller-saved registers the
-# launch setup lives in (forcing spills) and regressed host-bound benches by
-# ~0.7% (PR #619 review). The fast path is now loads + predicted branch
-# only, no call.
+# v3 of this patch (epoch check via a weak DATA symbol, no call in the hot
+# path): upgraded when found, together with its file-scope declaration
+# above.
 OVERFLOW_CACHE_BLOCK = (
     '    /* Cached overflow-status buffer: host write-only scratch, the stock\n'
     '     * stub frees it right after launch without reading it back, so one\n'
@@ -198,58 +181,45 @@ OVERFLOW_CACHE_BLOCK = (
     '    __ascendc_args.__ascendc_overflow = __ascendc_overflow_cache;\n'
 )
 
-# Marker proving the file already carries the current (v3) cache block: the
-# v3 data-symbol name. (v2 files carry the function name and are upgraded.)
-OVERFLOW_MARKER = 'gXliteOverflowEpoch'
-
 
 def patch_overflow(path: Path, text: str) -> str:
     import os
     if os.environ.get("XLITE_NO_OVERFLOW_PATCH"):
         return text  # A/B probe: keep stock per-launch alloc/free
     if OVERFLOW_MARKER in text:
-        return text  # already current version (v3)
+        return text  # already patched (buffer removed)
 
-    # File-scope epoch declaration: insert next to the other runtime externs,
-    # or swap the v2 weak-function declaration for the v3 data symbol.
-    if OVERFLOW_V2_EPOCH_DECL in text:
-        text = text.replace(OVERFLOW_V2_EPOCH_DECL, OVERFLOW_EPOCH_DECL)
-    elif OVERFLOW_EPOCH_ANCHOR in text:
-        text = text.replace(OVERFLOW_EPOCH_ANCHOR,
-                            OVERFLOW_EPOCH_ANCHOR + OVERFLOW_EPOCH_DECL, 1)
-    else:
-        print(f"warning: {path}: AllocAscendMemDevice declaration not found; "
-              "stub left unpatched (CANN generator changed?)", file=sys.stderr)
-        return text
+    # Legacy file-scope epoch declarations are stripped when upgrading.
+    for decl in (OVERFLOW_V2_EPOCH_DECL, OVERFLOW_EPOCH_DECL):
+        if decl in text:
+            text = text.replace(decl, '')
 
     if OVERFLOW_STOCK_BLOCK in text:
         count = text.count(OVERFLOW_STOCK_BLOCK)
-        text = text.replace(OVERFLOW_STOCK_BLOCK, OVERFLOW_CACHE_BLOCK)
+        text = text.replace(OVERFLOW_STOCK_BLOCK, OVERFLOW_REMOVED_ASSIGN)
     elif OVERFLOW_ALLOC_ONLY in text:
         count = text.count(OVERFLOW_ALLOC_ONLY)
-        text = text.replace(OVERFLOW_ALLOC_ONLY, OVERFLOW_CACHE_BLOCK)
-    elif OVERFLOW_V1_BLOCK in text:
-        # v1 replaced only the alloc line, so its files carry the stock
-        # constexpr line right above the v1 block; consume it too.
-        composite = CONSTEXPR_LINE + OVERFLOW_V1_BLOCK
-        if composite in text:
-            count = text.count(composite)
-            text = text.replace(composite, OVERFLOW_CACHE_BLOCK)
-        else:
-            count = text.count(OVERFLOW_V1_BLOCK)
-            text = text.replace(OVERFLOW_V1_BLOCK, OVERFLOW_CACHE_BLOCK)
-    elif OVERFLOW_V2_CACHE_BLOCK in text:
-        count = text.count(OVERFLOW_V2_CACHE_BLOCK)
-        text = text.replace(OVERFLOW_V2_CACHE_BLOCK, OVERFLOW_CACHE_BLOCK)
+        text = text.replace(OVERFLOW_ALLOC_ONLY, OVERFLOW_REMOVED_ASSIGN)
     else:
-        print(f"warning: {path}: overflow alloc/free pattern not found; "
-              "stub left unpatched (CANN generator changed?)", file=sys.stderr)
-        return text
+        # Legacy cache blocks (v1/v2/v3) upgrade to the removal in place.
+        count = 0
+        for legacy in (CONSTEXPR_LINE + OVERFLOW_V1_BLOCK,
+                       OVERFLOW_V1_BLOCK,
+                       OVERFLOW_V2_CACHE_BLOCK,
+                       OVERFLOW_CACHE_BLOCK):
+            if legacy in text:
+                count += text.count(legacy)
+                text = text.replace(legacy, OVERFLOW_REMOVED_ASSIGN)
+        if count == 0:
+            print(f"warning: {path}: overflow alloc/free pattern not found; "
+                  "stub left unpatched (CANN generator changed?)",
+                  file=sys.stderr)
+            return text
 
     frees = text.count(OVERFLOW_FREE_LINE)
     text = text.replace(OVERFLOW_FREE_LINE, '')
-    print(f"patched {path}: {count} overflow buffer cache(s), "
-          f"{frees} free(s) removed")
+    print(f"patched {path}: removed {count} overflow buffer alloc(s), "
+          f"{frees} free(s)")
     return text
 
 
