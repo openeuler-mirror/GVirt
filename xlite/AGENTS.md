@@ -16,6 +16,7 @@ The core of the project is `csrc/`, containing the C++ model/runtime code and ke
 - Use a container with the appropriate CANN installation for NPU development. If on host, check if an existing container is specified and available before proceeding in the host environment.
 - Use `pip install --force-reinstall --no-deps --no-build-isolation -v -e .` to install the package in editable mode (if failed due to missing dependencies, run `pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu`).
 - For a git worktree (no `.git` at repo root) or clean CMake build, use `cmake -B build && cmake --build build -j && cmake --install build` for isolated builds.
+- Incremental rebuilds in an existing build dir are supported: the build precleans device objects that CANN's in-place obj-text merge poisoned on the previous run (`scripts/preclean_poisoned_device_objs.cmake`), so no manual build-dir wipe is needed between builds.
 
 ## Testing
 

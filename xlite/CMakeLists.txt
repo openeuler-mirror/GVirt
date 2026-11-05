@@ -192,6 +192,27 @@ ascendc_library(xlite_kernels_common_${RUN_MODE} SHARED ${KERNEL_FILES_COMMON})
 ascendc_library(xlite_kernels_bf16_${RUN_MODE} SHARED ${KERNEL_FILES_BF16})
 ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
 
+# CANN's merge_aic/aiv_obj_text steps relink every device object in place
+# (ld.lld <f>.o -o <f>.o) to merge template text sections, flipping it from
+# ET_REL to ET_EXEC; the merge is a custom ALL target, so it re-runs on every
+# build and the already-merged objects fail the next incremental build with
+# "ld.lld: error: ...: unknown file type". Preclean them before each kernel
+# preprocess ExternalProject so incremental rebuilds self-heal instead of
+# requiring a manual build-dir wipe (trap present since the ascendc_library
+# build was introduced; the object libraries rebuild deleted objects fresh).
+set(_XLITE_PRECLEAN_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/scripts/preclean_poisoned_device_objs.cmake)
+add_custom_target(xlite_preclean_device_objs
+    COMMAND ${CMAKE_COMMAND} -DCLR_DIR=${CMAKE_BINARY_DIR} -P ${_XLITE_PRECLEAN_SCRIPT}
+    VERBATIM
+)
+foreach(_kernel_target IN ITEMS
+        xlite_kernels_common_${RUN_MODE}
+        xlite_kernels_bf16_${RUN_MODE}
+        xlite_kernels_f16_${RUN_MODE})
+    add_dependencies(${_kernel_target}_preprocess xlite_preclean_device_objs)
+endforeach()
+unset(_XLITE_PRECLEAN_SCRIPT)
+
 # Bundle all generated aclrtlaunch_*.h headers into one merged header so
 # csrc/op.cpp only needs a single #include. The individual headers are only
 # produced while the ascendc kernel libraries build (not at configure time),
