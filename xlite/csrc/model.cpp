@@ -1270,9 +1270,9 @@ std::tuple<XTensor &, XTensor &> XModel::ForwardMoEGate(XRuntime &rt, uint32_t l
     return {weights.View(M), routing.View(M)};
 }
 
-std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMeta>
+std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, XTensor *, MoEAlltoAllMeta>
     XModel::ForwardMoEDispatch(XRuntime &rt, XTensor &tokenSorted, XTensor &weights,
-                               XTensor &routing)
+                               XTensor &routing, enum XDtype moeReDtype)
 {
     // NOTE: the input XTensor's must already be viewed/padded to match DPs, if needed
     uint32_t m = rt.maxTokensDp;  // should equal to `tokenSorted.shape[0]`
@@ -1281,15 +1281,38 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
     uint32_t nLocalPhysicalExperts = totalPhysicalExperts / _c.moeEpSize;
     uint32_t start = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalPhysicalExperts;
     uint32_t end = start + nLocalPhysicalExperts;
+    bool hoistQuant = (moeReDtype == INT8) && (_c.hiddenSize % 32 == 0) && !rt.disableMoeQuantHoist;
+    XTensor *permInput = nullptr, *permRouting = nullptr, *permScale = nullptr;
+    XTensor *retWeights = nullptr, *retRouting = nullptr;
+
+    XTensor &unpIdx = rt.GetTensor({totalPhysicalExperts, mAllDp + 1}, INT32, DBG_LOC);
+    XTensor &expertsCounts = rt.GetTensor({totalPhysicalExperts}, INT32, DBG_LOC);
+    size_t shape0 = mAllDp * _c.nActExperts;
+    if (mAllDp >= XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD) {
+        shape0 = static_cast<size_t>(mAllDp * _c.nActExperts * rt.activeTokensRatioPerEp);
+    }
+    enum XDtype sortedDtype = hoistQuant ? INT8 : tokenSorted.dtype;
+    XTensor &expertsSorted = rt.GetTensor({shape0, _c.hiddenSize}, sortedDtype, DBG_LOC);
 
     if (_c.defDpSize > 1) {
         XTensor &inputPerDp = tokenSorted, &weightsPerDp = weights, &routingPerDp = routing;
-        // 计算字节大小
-        size_t totalBytes = inputPerDp.bytes + weightsPerDp.bytes + routingPerDp.bytes;
+
+        XTensor *xInt8PerDp = nullptr;
+        XTensor *scalePerDp = nullptr;
+        XTensor *scaleAllDp = nullptr;
+        if (hoistQuant) {
+            xInt8PerDp = &rt.GetTensor(inputPerDp.shape, INT8, DBG_LOC);
+            scalePerDp = &rt.GetTensor({inputPerDp.shape[0]}, FP32, DBG_LOC);
+            scaleAllDp = &rt.GetTensor({mAllDp}, FP32, DBG_LOC);
+            XliteOpQuantDyn(rt, inputPerDp, *scalePerDp, *xInt8PerDp);
+        }
+
+        size_t actBytes = hoistQuant ? (xInt8PerDp->bytes + scalePerDp->bytes) : inputPerDp.bytes;
+        size_t totalBytes = actBytes + weightsPerDp.bytes + routingPerDp.bytes;
         size_t allTotalBytes = totalBytes * _c.defDpSize;
 
-        // 获取最终输出用的tensor
-        XTensor &inputAllDp = rt.GetTensor({mAllDp, _c.hiddenSize}, inputPerDp.dtype, DBG_LOC);
+        enum XDtype actDtypeAllDp = hoistQuant ? INT8 : inputPerDp.dtype;
+        XTensor &inputAllDp = rt.GetTensor({mAllDp, _c.hiddenSize}, actDtypeAllDp, DBG_LOC);
         XTensor &weightsAllDp =
             rt.GetTensor({mAllDp, totalPhysicalExperts}, weightsPerDp.dtype, DBG_LOC);
         XTensor &routingAllDp =
@@ -1307,11 +1330,19 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
             sendOut = &rt.GetTensor({totalBytes}, INT8, DBG_LOC);
         }
 
-        // 打包tensor
-        std::vector<XTensor> inputs = {inputPerDp, weightsPerDp, routingPerDp};
+        std::vector<XTensor> inputs;
+        if (hoistQuant) {
+            inputs = {*xInt8PerDp, *scalePerDp, weightsPerDp, routingPerDp};
+        } else {
+            inputs = {inputPerDp, weightsPerDp, routingPerDp};
+        }
         XliteOpConcat(rt, inputs, *sendOut);
         rt.PutTensor(routingPerDp);
         rt.PutTensor(weightsPerDp);
+        if (hoistQuant) {
+            rt.PutTensor(*xInt8PerDp);
+            rt.PutTensor(*scalePerDp);
+        }
 
         // packedRecv: graph → bind fixed _agRecvBuf; eager → pool GetTensor.
         XTensor recvFixed;
@@ -1329,38 +1360,59 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
             XliteOpAllGather(rt, *sendOut, *recvOut, DP, true, DBG_LOC);
         }
 
-        std::vector<XTensor> outputs = {inputAllDp, weightsAllDp, routingAllDp};
-        std::vector<size_t> sizes = {inputPerDp.bytes, weightsPerDp.bytes, routingPerDp.bytes};
+        std::vector<XTensor> outputs;
+        std::vector<size_t> sizes;
+        if (hoistQuant) {
+            outputs = {inputAllDp, *scaleAllDp, weightsAllDp, routingAllDp};
+            sizes = {xInt8PerDp->bytes, scalePerDp->bytes, weightsPerDp.bytes, routingPerDp.bytes};
+        } else {
+            outputs = {inputAllDp, weightsAllDp, routingAllDp};
+            sizes = {inputPerDp.bytes, weightsPerDp.bytes, routingPerDp.bytes};
+        }
         XliteOpSplit(rt, *recvOut, outputs, sizes, _c.defDpSize);
 
         if (!inGraph) {
-            rt.PutTensor(*sendOut);  // eager: return pool; graph: fixed buffer, no Put
+            rt.PutTensor(*sendOut);
             rt.PutTensor(*recvOut);
         }
 
-        XTensor &unpIdx = rt.GetTensor({totalPhysicalExperts, mAllDp + 1}, INT32, DBG_LOC);
-        XTensor &expertsCounts = rt.GetTensor({totalPhysicalExperts}, INT32, DBG_LOC);
-        size_t shape0 = mAllDp * _c.nActExperts;
-        if (mAllDp >= XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD) {
-            shape0 = static_cast<size_t>(mAllDp * _c.nActExperts * rt.activeTokensRatioPerEp);
-        }
-        XTensor &expertsSorted = rt.GetTensor({shape0, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
-        XliteOpPermutation(rt, inputAllDp, routingAllDp, start, end, expertsSorted, unpIdx,
-                           expertsCounts);
-        rt.PutTensor(inputAllDp);
-        return {weightsAllDp, routingAllDp, unpIdx, expertsSorted, expertsCounts, {}};
+        permInput = &inputAllDp;
+        permRouting = &routingAllDp;
+        permScale = scaleAllDp;  // nullptr unless hoistQuant
+        retWeights = &weightsAllDp;
+        retRouting = &routingAllDp;
     } else {
-        XTensor &unpIdx = rt.GetTensor({totalPhysicalExperts, mAllDp + 1}, INT32, DBG_LOC);
-        XTensor &expertsCounts = rt.GetTensor({totalPhysicalExperts}, INT32, DBG_LOC);
-        size_t shape0 = mAllDp * _c.nActExperts;
-        if (mAllDp >= XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD) {
-            shape0 = static_cast<size_t>(mAllDp * _c.nActExperts * rt.activeTokensRatioPerEp);
+        if (hoistQuant) {
+            XTensor &xInt8 = rt.GetTensor(tokenSorted.shape, INT8, DBG_LOC);
+            XTensor &scale = rt.GetTensor({tokenSorted.shape[0]}, FP32, DBG_LOC);
+            XliteOpQuantDyn(rt, tokenSorted, scale, xInt8, XTensor());
+            permInput = &xInt8;
+            permScale = &scale;
+        } else {
+            permInput = &tokenSorted;
         }
-        XTensor &expertsSorted = rt.GetTensor({shape0, _c.hiddenSize}, tokenSorted.dtype, DBG_LOC);
-        XliteOpPermutation(rt, tokenSorted, routing, start, end, expertsSorted, unpIdx,
-                           expertsCounts);
-        return {weights, routing, unpIdx, expertsSorted, expertsCounts, {}};
+        permRouting = &routing;
+        retWeights = &weights;
+        retRouting = &routing;
     }
+
+    XTensor *expertsScalePtr = nullptr;
+    if (hoistQuant) {
+        XTensor &expertsScale = rt.GetTensor({shape0}, FP32, DBG_LOC);
+        expertsScalePtr = &expertsScale;
+        XliteOpPermutation(rt, *permInput, *permRouting, start, end, expertsSorted, unpIdx,
+                           expertsCounts, *permScale, expertsScale);
+    } else {
+        XliteOpPermutation(rt, *permInput, *permRouting, start, end, expertsSorted, unpIdx,
+                           expertsCounts);
+    }
+    if (hoistQuant || _c.defDpSize > 1) {
+        rt.PutTensor(*permInput);
+    }
+    if (hoistQuant) {
+        rt.PutTensor(*permScale);
+    }
+    return {*retWeights, *retRouting, unpIdx, expertsSorted, expertsCounts, expertsScalePtr, {}};
 }
 
 void XModel::ForwardMOECombine(XRuntime &rt, XTensor &tokenSorted, XTensor &weights,
@@ -1514,17 +1566,32 @@ std::tuple<XTensor &, XTensor &, XTensor &, XTensor &, XTensor &, MoEAlltoAllMet
                                 _c.nRoutedExperts);
 
         // step 4: copy tokensPerEpGroupAllEp to host, compute meta
-        rt.MemcpyD2HAsync(rt._tokensPerEpGroupAllEpHost.ptr, tokensPerEpGroupAllEp.ptr,
-                          tokensPerEpGroupAllEp.numel * sizeof(int32_t));
-        rt.Synchronize();
+        if (rt.IsDummyRuntime()) {
+            int32_t *host = static_cast<int32_t *>(rt._tokensPerEpGroupAllEpHost.ptr);
+            uint32_t currentEp = _rankId / _c.moeTPSize;
+            int32_t perEpUpper = static_cast<int32_t>(m * _c.nActExperts);
+            uint32_t moeEp = _c.moeEpSize > 0 ? _c.moeEpSize : 1;
+            size_t total = static_cast<size_t>(moeEp) * moeEp;
+            for (size_t i = 0; i < total; i++) {
+                host[i] = 0;
+            }
+            for (uint32_t ep = 0; ep < moeEp; ep++) {
+                host[ep * moeEp + currentEp] = perEpUpper;
+            }
+        } else {
+            rt.MemcpyD2HAsync(rt._tokensPerEpGroupAllEpHost.ptr, tokensPerEpGroupAllEp.ptr,
+                              tokensPerEpGroupAllEp.numel * sizeof(int32_t));
+            rt.Synchronize();
+        }
 
         MoEAlltoAllMeta meta = MoeComputeAlltoAllVMeta(
             static_cast<int32_t *>(rt._tokensPerEpGroupAllEpHost.ptr), _c.moeEpSize, _c.moeTPSize,
             _c.hiddenSize, rt.rankId(), _c.nRoutedExperts);
         meta.expertsCountsAllEpDevice = &expertsCountsAllEp;
 
-        uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
-        uint32_t localStart = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
+        uint32_t moeEpSafe = _c.moeEpSize > 0 ? _c.moeEpSize : 1;
+        uint32_t nLocalRoutedExperts = _c.nRoutedExperts / moeEpSafe;
+        uint32_t localStart = moeEpSafe == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
         uint32_t localEnd = localStart + nLocalRoutedExperts;
 
         // step 5: alltoallv — dispatch token data across EP ranks according to meta
@@ -1568,8 +1635,9 @@ void XModel::ForwardMoECombineAllToAll(XRuntime &rt, XTensor &tokenSorted, XTens
             throw std::runtime_error(std::string(__func__) +
                                      ": meta.expertsCountsAllEpDevice is nullptr");
         }
-        uint32_t nLocalRoutedExperts = _c.nRoutedExperts / _c.moeEpSize;
-        uint32_t localStart = _c.moeEpSize == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
+        uint32_t moeEpSafe = _c.moeEpSize > 0 ? _c.moeEpSize : 1;
+        uint32_t nLocalRoutedExperts = _c.nRoutedExperts / moeEpSafe;
+        uint32_t localStart = moeEpSafe == 1 ? 0 : _rankId / _c.moeTPSize * nLocalRoutedExperts;
         uint32_t localEnd = localStart + nLocalRoutedExperts;
 
         // reorder expert-grouped → source-grouped for reverse AlltoAllV
@@ -1672,11 +1740,43 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         wIn = &wPhy;
         rIn = &rPhy;
     }
-    auto [weights, routing, unpIdx, expertsSorted, expertsCounts, meta] =
-        rt.enableMoEAllToAll ? ForwardMoEDispatchAllToAll(rt, hiddenState, *wIn, *rIn)
-                             : ForwardMoEDispatch(rt, hiddenState.View(M), *wIn, *rIn);
+    // expertsScale is nullptr on non-hoist paths (AllToAll / non-INT8 / hiddenSize not a multiple
+    // of 32 / graph-comm-enabled / env-disabled); a non-null pointer marks the hoisted per-token
+    // scale the caller consumes.
+    XTensor *weightsPtr;
+    XTensor *routingPtr;
+    XTensor *unpIdxPtr;
+    XTensor *expertsSortedPtr;
+    XTensor *expertsCountsPtr;
+    XTensor *expertsScalePtr = nullptr;
+    MoEAlltoAllMeta meta;
+    if (rt.enableMoEAllToAll) {
+        auto [w, r, ui, es, ec, m] = ForwardMoEDispatchAllToAll(rt, hiddenState, *wIn, *rIn);
+        weightsPtr = &w;
+        routingPtr = &r;
+        unpIdxPtr = &ui;
+        expertsSortedPtr = &es;
+        expertsCountsPtr = &ec;
+        meta = m;
+    } else {
+        auto [w, r, ui, es, ec, sc, m] =
+            ForwardMoEDispatch(rt, hiddenState.View(M), *wIn, *rIn, moeReDtype);
+        weightsPtr = &w;
+        routingPtr = &r;
+        unpIdxPtr = &ui;
+        expertsSortedPtr = &es;
+        expertsCountsPtr = &ec;
+        expertsScalePtr = sc;
+        meta = m;
+    }
+    XTensor &weights = *weightsPtr;
+    XTensor &routing = *routingPtr;
+    XTensor &unpIdx = *unpIdxPtr;
+    XTensor &expertsSorted = *expertsSortedPtr;
+    XTensor &expertsCounts = *expertsCountsPtr;
     // actual token num for current rank
     XTensor num = rt.enableMoEAllToAll ? XTensor() : XTensor({1}, INT32, unpIdx.ptr);
+    bool quantHoisted = (expertsSorted.dtype == INT8) && (expertsScalePtr != nullptr);
 
     // routed experts
     XTensor *h13Ptr;
@@ -1690,21 +1790,30 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
                       _moeREUpGateScaleBias, h13);
         h13Ptr = &h13;
     } else if (moeReDtype == INT8) {
-        // quant(x) -> xQuanted, perChannelScale
-        XTensor &xQuanted = rt.GetTensor(expertsSorted.shape, moeReDtype, DBG_LOC);
-        XTensor &scale = rt.GetTensor({expertsSorted.shape[0]}, FP32, DBG_LOC);
-        XliteOpQuantDyn(rt, expertsSorted, scale, xQuanted, num);
-        rt.PutTensor(expertsSorted);
+        XTensor *xQuantedPtr;
+        XTensor *scalePtr;
+        if (quantHoisted) {
+            xQuantedPtr = &expertsSorted;
+            scalePtr =
+                expertsScalePtr;  // non-null: quantHoisted implies expertsScalePtr != nullptr
+        } else {
+            XTensor &xQuanted = rt.GetTensor(expertsSorted.shape, moeReDtype, DBG_LOC);
+            XTensor &scale = rt.GetTensor({expertsSorted.shape[0]}, FP32, DBG_LOC);
+            XliteOpQuantDyn(rt, expertsSorted, scale, xQuanted, num);
+            rt.PutTensor(expertsSorted);
+            xQuantedPtr = &xQuanted;
+            scalePtr = &scale;
+        }
 
-        // group_matmul(xQuanted * w13 * w13Scale) * perChannelScale -> h13
+        // group_matmul(xQuanted * w13 * w13Scale) * perTokenScale -> h13
         XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
                                     hiddenState.dtype, DBG_LOC);
-        XliteOpGroupMatmulDeQuant(rt, xQuanted, _moeREUpGate[layer], _moeREUpGateDeqScale[layer],
-                                  expertsCounts, start, end, moeREUpGate[layer][start].dtype,
-                                  intermediateSize * 2, _c.hiddenSize, h13, scale, num,
-                                  _c.weightNZ || _c.expertsWeightNZ, _c.expertsWeightTrans);
-        rt.PutTensor(xQuanted);
-        rt.PutTensor(scale);
+        XliteOpGroupMatmulDeQuant(
+            rt, *xQuantedPtr, _moeREUpGate[layer], _moeREUpGateDeqScale[layer], expertsCounts,
+            start, end, moeREUpGate[layer][start].dtype, intermediateSize * 2, _c.hiddenSize, h13,
+            *scalePtr, num, _c.weightNZ || _c.expertsWeightNZ, _c.expertsWeightTrans);
+        rt.PutTensor(*xQuantedPtr);
+        rt.PutTensor(*scalePtr);
         h13Ptr = &h13;
     } else {
         XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
@@ -1738,7 +1847,7 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         XliteOpQuantDyn(rt, h2, scale, xQuanted, num);
         rt.PutTensor(h2);
 
-        // group_matmul(xQuanted * w2 * w2Scale) * perChannelScale -> h2
+        // group_matmul(xQuanted * w2 * w2Scale) * perTokenScale -> out
         XTensor &out =
             rt.GetTensor({expertsSorted.shape[0], _c.hiddenSize}, hiddenState.dtype, DBG_LOC);
         XliteOpGroupMatmulDeQuant(rt, xQuanted, _moeREDown[layer], _moeREDownDeqScale[layer],

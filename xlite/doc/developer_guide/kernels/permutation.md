@@ -8,11 +8,13 @@ MoE token 重排（permutation）：按路由位图 `routing_map` 将每个 toke
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |------|------|-------|-------|------|
-| input (in) | 输入 | [num_tokens, dim] | bfloat16 | 原始 token hidden（permutation3 中元素大小硬编码为 `sizeof(bfloat16_t)`，`csrc/kernels/permutation.cpp` 的 `permutation3`） |
+| input (in) | 输入 | [num_tokens, dim] | bfloat16 / int8 | 原始 token hidden。元素大小由 dtype 推断（`elem_bytes = XDtypeBit(in.dtype)/8`）：bfloat16=2B（legacy），int8=1B（w8a8 dispatch 量化前置路径，行已预先量化）。int8 时 `dim` 须为 32 的倍数（32B MTE 行对齐） |
 | routing_map (routing) | 输入 | [num_tokens, n_routed_experts] 位图（BIT1，每行 n_routed_experts/8 字节） | uint8 位图 | token→专家路由结果，bit(t*n_routed_experts+e)=1 表示 token t 路由到专家 e（测试中由 int32 张量按位拼出，`tests/kernels/permutation.py` 位图构造段，关键字 `routing_xlite[batch, m] |= mask`） |
-| output (out) | 输出 | [max_expert_sorted, dim] | bfloat16 | 按专家分组排序后的 token；第 e 个专家的段起始偏移由 unp_idx 的 starts 列给出 |
+| output (out) | 输出 | [max_expert_sorted, dim] | 同 input | 按专家分组排序后的 token；第 e 个专家的段起始偏移由 unp_idx 的 starts 列给出 |
 | unp_idx | 输出 | [n_routed_experts, num_tokens+1] | int32 | 布局见下文：`[e, t]` = token t 在专家 e 段内的行号；最后一列为各专家段起始偏移；`[0,0]` 被复用存放总 token 数 |
 | counts | 输出 | [n_routed_experts, 1] | int32 | 每个专家收到的 token 数（host 侧取 `counts.shape[0]` 作 n_routed_experts，`csrc/op.cpp` 的 `XliteOpPermutation`，关键字 `counts.shape[0]`） |
+| scale_in | 输入（可选） | [num_tokens] | float32 | 逐 token 反量化 scale。提供时，每个 token 的 scale 搭带（piggyback）散射到与该 token 行相同的专家槽，使下游 `group_matmul_dequant` 拿到 bit-exact 的输入（逐 token 量化与行置换可交换）。BF16 路径传 `nullptr` |
+| scale_out | 输出（可选） | [max_expert_sorted] | float32 | 置换后的逐 token scale，与 `output` 行 1:1 对齐。提供 `scale_in` 时必须提供 |
 | n_tokens / dim | 标量 | - | uint32_t | `in.shape[0]` / `in.shape[1]` |
 | max_expert_sorted | 标量 | - | uint32_t | `out.shape[0]`，即排序缓冲区容量，kernel 内 assert 总数不超过它（`csrc/kernels/permutation.cpp` 的 `permutation2`，关键字 `assert(sum <= max_expert_sorted)`） |
 | experts_start_idx / experts_end_idx | 标量 | - | uint32_t | 本卡（EP rank）负责的专家区间 [start, end)，区间外专家不计数、不搬数 |
@@ -25,7 +27,7 @@ Python 调用方式（`tests/kernels/permutation.py` 中 `permutation(rt, x, rou
 |------|--------|-------------|
 | 纯 cpp（无模板实例化） | `csrc/kernels/permutation.cpp` | `permutation` |
 
-kernel 内部按 bfloat16 处理数据搬运（`sizeof(bfloat16_t)` 硬编码于 `csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `dmi_config`、`dim * sizeof(bfloat16_t)`），元数据（counts/unp_idx）固定 int32；仅支持 `__DAV_C220_VEC__`。
+kernel 内部按 `elem_bytes`（由 `in.dtype` 推断：bfloat16=2、int8=1）参数化行搬运粒度（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `dmi_config`、`dim * elem_bytes`）；元数据（counts/unp_idx）固定 int32；仅支持 `__DAV_C220_VEC__`。
 
 ## 实现原理
 
@@ -47,11 +49,11 @@ kernel 分三个阶段（`csrc/kernels/permutation.cpp` 的 `permutation` 入口
 
 - token 维多 block 并行：`for (curr_token = block_idx; curr_token < n_tokens; curr_token += block_num)`（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `for (curr_token = block_idx`）。
 - 每个 token：把该 token 的 routing 位图行搬入 UB（双缓冲 `routing[2]`），对 [start, end) 内每个命中专家 e：
-  - 首个命中专家时把 `input[curr_token, :]` 整行搬入 UB（双缓冲 `row[2]`），后续命中专家复用该行（一个 token 被多个专家接收时只读一次 GM，`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `first_iter`、`row[curr]`）；
-  - 读 `unp_idx[e, curr_token]` 得组内行号 j，把该行写到 `output[s[e] + j, :]`（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `copy_ubuf_to_gm(output + (s[curr_expert] + j)`；s 为阶段 2 的前缀和，从 `starts` 区域重新搬入 UB，`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `copy_gm_to_ubuf_align_b32(s, starts`）。
+  - 首个命中专家时把 `input[curr_token, :]` 整行搬入 UB（双缓冲 `row[2]`），后续命中专家复用该行（一个 token 被多个专家接收时只读一次 GM，`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `first_iter`、`row[curr]`）；当提供 `scale_in` 时，同一批次把该 token 的 FP32 scale 搬入 UB（双缓冲 `scaleSlot[2]`，与 `row[]` 共享同一 `curr` 事件 ID 序列）；
+  - 读 `unp_idx[e, curr_token]` 得组内行号 j，把该行写到 `output[s[e] + j, :]`（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `copy_ubuf_to_gm(output + (s[curr_expert] + j)`；s 为阶段 2 的前缀和，从 `starts` 区域重新搬入 UB，`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `copy_gm_to_ubuf_align_b32(s, starts`）；提供 `scale_out` 时，把该 token 的 scale 散射到 `scale_out[s[e] + j]`，使 scale 与行 1:1 对齐喂给 `GroupMatmulDeQuant`。
 
 ### 流水线同步
 
 - 阶段 1/2 内部用 MTE2/MTE3 ↔ S 的 `set_flag`/`wait_flag` 保证搬运与标量读写顺序；
-- 阶段 3 用 `routing`/`row` 双缓冲 + `PIPE_MTE3 → PIPE_MTE2` 的 EVENT_ID0/1 乒乓，使上一 token 的 MTE3 写回与下一 token 的位图读入重叠（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `routing[2]`、`row[2]`、`curr = 1 - curr`）；
+- 阶段 3 用 `routing`/`row`/`scaleSlot` 双缓冲 + `PIPE_MTE3 → PIPE_MTE2` 的 EVENT_ID0/1 乒乓，使上一 token 的 MTE3 写回与下一 token 的位图读入重叠（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `routing[2]`、`row[2]`、`scaleSlot[2]`、`curr = 1 - curr`）；`scaleSlot` 与 `row` 一样按 `curr` 索引，确保相邻 token（不同 `curr`）的 scale 槽不交叠，由同一 `curr` flag 序列串行化 MTE2 载入与 MTE3 散射；
 - 三个阶段之间 `ffts_cross_core_sync(PIPE_MTE3, config)` + `wait_flag_dev(flag_id)` 全核同步（`csrc/kernels/permutation.cpp` 的 `permutation` 入口，关键字 `ffts_cross_core_sync`），保证 counts/starts 全部就绪后再进入下一阶段。

@@ -23,7 +23,54 @@ BATCH_SIZE = 16
 for n_routed_experts in [160, 256]:
     START = 0
     END = n_routed_experts
-    for dtype in [torch.float, torch.bfloat16]:
+    for dtype in [torch.float, torch.bfloat16, torch.int8]:
+        if dtype == torch.int8:
+            # INT8 input can't go through F.linear (weight needs fp), so use a plain topk
+            # routing. Exercises the w8a8 dispatch quant-hoist path: rows gathered as INT8
+            # and each token's FP32 scale piggybacked to the same expert slot.
+            x = torch.randint(-127, 127, (BATCH_SIZE, DIM), dtype=torch.int8, device="npu:0")
+            scales_in = torch.randn(BATCH_SIZE, dtype=torch.float32, device="npu:0")
+            torch.manual_seed(0)
+            indices = torch.topk(torch.randn(BATCH_SIZE, n_routed_experts, device="npu:0"),
+                                 TOPK, dim=-1)[1]
+            counts = torch.bincount(indices.flatten(), minlength=n_routed_experts)
+            routing_xlite = torch.zeros((BATCH_SIZE, n_routed_experts // 32), dtype=torch.int32,
+                                        device=x.device)
+            for batch in range(BATCH_SIZE):
+                for k in indices[batch]:
+                    k = k.item()
+                    routing_xlite[batch, k // 32] |= torch.tensor(1 << (k % 32), dtype=torch.int64,
+                                                                   device=x.device)
+
+            experts_sorted = torch.empty(BATCH_SIZE * TOPK, DIM, dtype=torch.int8, device="npu:0")
+            scales_out = torch.empty(BATCH_SIZE * TOPK, dtype=torch.float32, device="npu:0")
+            unp_idx = torch.empty(n_routed_experts, BATCH_SIZE + 1, dtype=torch.int32, device="npu:0")
+            experts_counts = torch.empty(n_routed_experts, 1, dtype=torch.int32, device="npu:0")
+            torch.npu.synchronize()
+            permutation(rt, x, routing_xlite, START, END, experts_sorted, unp_idx, experts_counts,
+                        scales_in, scales_out)
+            torch.npu.synchronize()
+
+            experts_counts = experts_counts.view(n_routed_experts).to(dtype=torch.int64)
+            torch.testing.assert_close(counts, experts_counts, atol=1e-5, rtol=1e-3)
+
+            # reference: each output row (expert e, slot j) comes from its source token; expect
+            # that token's INT8 row and its FP32 scale, 1:1 aligned for GroupMatmulDeQuant.
+            ref_rows = []
+            ref_scales = []
+            for e in range(START, END):
+                if experts_counts[e] == 0:
+                    continue
+                src_tokens = torch.where(indices == e)[0]
+                ref_rows.append(x[src_tokens])
+                ref_scales.append(scales_in[src_tokens])
+            total = int(experts_counts.sum().item())
+            torch.testing.assert_close(experts_sorted[:total], torch.cat(ref_rows), atol=0, rtol=0)
+            torch.testing.assert_close(scales_out[:total], torch.cat(ref_scales), atol=1e-6, rtol=1e-6)
+            print(f"n_routed_experts: {n_routed_experts} dtype: int8 "
+                  "permutation + scale piggyback executed!")
+            continue
+
         x = torch.randn(BATCH_SIZE, DIM, dtype=dtype, device="npu:0")
         weight = torch.randn(n_routed_experts, DIM, dtype=dtype, device="npu:0")
         bias = torch.randn(n_routed_experts, dtype=dtype, device="npu:0")

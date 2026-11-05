@@ -132,7 +132,8 @@ __aicore__ inline void permutation3(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
                                     GM_ADDR unp_idx, GM_ADDR counts, uint32_t n_tokens,
                                     uint32_t dim, uint32_t max_expert_sorted,
                                     uint32_t n_routed_experts, uint32_t experts_start_idx,
-                                    uint32_t experts_end_idx)
+                                    uint32_t experts_end_idx, uint32_t elem_bytes, GM_ADDR scale_in,
+                                    GM_ADDR scale_out)
 {
     set_atomic_none();
     set_mask_norm();
@@ -141,8 +142,7 @@ __aicore__ inline void permutation3(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
     GM_ADDR starts = unp_idx + n_routed_experts * n_tokens * sizeof(uint32_t);
     uint64_t routing_dmi_config =
         __set_dmi_config(0, 1, DIV_ROUND_UP(n_routed_experts / 8, BLOCK_SIZE), 0, 0);
-    uint64_t dmi_config =
-        __set_dmi_config(0, 1, DIV_ROUND_UP(dim * sizeof(bfloat16_t), BLOCK_SIZE), 0, 0);
+    uint64_t dmi_config = __set_dmi_config(0, 1, DIV_ROUND_UP(dim * elem_bytes, BLOCK_SIZE), 0, 0);
     uint32_t curr_expert, curr_token;
     int first_iter;
     int curr = 0;
@@ -155,8 +155,12 @@ __aicore__ inline void permutation3(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
     __ubuf__ uint8_t *row1 = (__ubuf__ uint8_t *)get_imm(
         routing2 + ROUND_UP(n_routed_experts / 8, BLOCK_SIZE) / sizeof(uint64_t));
     __ubuf__ uint8_t *row2 =
-        (__ubuf__ uint8_t *)get_imm(row1 + ROUND_UP(dim * sizeof(bfloat16_t), BLOCK_SIZE));
+        (__ubuf__ uint8_t *)get_imm(row1 + ROUND_UP(dim * elem_bytes, BLOCK_SIZE));
     __ubuf__ uint8_t *row[2] = {row1, row2};
+    __ubuf__ uint8_t *scaleSlot0 =
+        (__ubuf__ uint8_t *)get_imm(row2 + ROUND_UP(dim * elem_bytes, BLOCK_SIZE));
+    __ubuf__ uint8_t *scaleSlot1 = (__ubuf__ uint8_t *)get_imm(scaleSlot0 + BLOCK_SIZE);
+    __ubuf__ uint8_t *scaleSlot[2] = {scaleSlot0, scaleSlot1};
 
     copy_gm_to_ubuf_align_b32(s, starts, 0, 1, n_routed_experts * sizeof(uint32_t), 0, 0, 0, 0);
     set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
@@ -178,8 +182,13 @@ __aicore__ inline void permutation3(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
                 continue;
             }
             if (first_iter) {
-                copy_gm_to_ubuf(row[curr], input + (curr_token)*dim * sizeof(bfloat16_t),
+                copy_gm_to_ubuf(row[curr], input + (uint64_t)curr_token * dim * elem_bytes,
                                 dmi_config);
+                if (scale_in != nullptr) {
+                    copy_gm_to_ubuf_align_b16(scaleSlot[curr],
+                                              scale_in + (curr_token) * sizeof(float), 0, 1,
+                                              sizeof(float), 0, 0, 0, 0);
+                }
                 set_flag(PIPE_MTE2, PIPE_MTE3, curr);
                 wait_flag(PIPE_MTE2, PIPE_MTE3, curr);
                 first_iter = 0;
@@ -187,8 +196,12 @@ __aicore__ inline void permutation3(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
             uint32_t off_T =
                 curr_expert * n_tokens * sizeof(uint32_t) + curr_token * sizeof(uint32_t);
             uint32_t j = off_T == 0 ? 0 : *((__gm__ uint32_t *)(unp_idx + off_T));
-            copy_ubuf_to_gm(output + (s[curr_expert] + j) * dim * sizeof(bfloat16_t), row[curr],
-                            dmi_config);
+            uint64_t rowOff = (uint64_t)(s[curr_expert] + j) * dim * elem_bytes;
+            copy_ubuf_to_gm(output + rowOff, row[curr], dmi_config);
+            if (scale_out != nullptr) {
+                copy_ubuf_to_gm_align_b32(scale_out + (s[curr_expert] + j) * sizeof(float),
+                                          scaleSlot[curr], 0, 1, sizeof(float), 0, 0, 0, 0);
+            }
         }
         set_flag(PIPE_MTE3, PIPE_MTE2, curr);
         curr = 1 - curr;
@@ -201,7 +214,8 @@ __aicore__ inline void permutation3(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
 extern "C" __global__ __aicore__ void permutation(
     GM_ADDR input, GM_ADDR routing_map, GM_ADDR output, GM_ADDR unp_idx, GM_ADDR counts,
     uint32_t n_tokens, uint32_t dim, uint32_t max_expert_sorted, uint32_t n_routed_experts,
-    uint32_t experts_start_idx, uint32_t experts_end_idx)
+    uint32_t experts_start_idx, uint32_t experts_end_idx, uint32_t elem_bytes, GM_ADDR scale_in,
+    GM_ADDR scale_out)
 {
     uint64_t flag_id = 0;
     uint64_t mode = 0;
@@ -221,6 +235,7 @@ extern "C" __global__ __aicore__ void permutation(
     wait_flag_dev(flag_id);
 
     permutation3(input, routing_map, output, unp_idx, counts, n_tokens, dim, max_expert_sorted,
-                 n_routed_experts, experts_start_idx, experts_end_idx);
+                 n_routed_experts, experts_start_idx, experts_end_idx, elem_bytes, scale_in,
+                 scale_out);
 }
 #endif

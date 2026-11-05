@@ -264,6 +264,7 @@ public:
     uint32_t defaultMatmulSwizzle = 0x600;
     bool disableSwizzleTable = false;
     bool enableMoEAllToAll = false;
+    bool disableMoeQuantHoist = false;
     double activeTokensRatioPerEp = 1.0f;
 
     // cross-layer buffer
@@ -340,6 +341,7 @@ protected:
     int InitHcclComm(void);
     int InitXcclComm(void);
     void FiniXcclComm(void);
+    void ParseRuntimeEnv(void);
     void PrepareHybridMetadata(const std::vector<uint32_t> &layerTypes,
                                const XModelAttnMeta &attnMeta);
     uint32_t _devid;

@@ -809,14 +809,48 @@ void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out)
 }
 
 void XliteOpPermutation(XRuntime &rt, XTensor &in, XTensor &routing, uint32_t start, uint32_t end,
-                        XTensor &out, XTensor &unpIdx, XTensor &counts)
+                        XTensor &out, XTensor &unpIdx, XTensor &counts, const XTensor &scaleIn,
+                        const XTensor &scaleOut)
 {
-    if (IsDummyRuntime(rt)) {
+    if (IsDummyRuntime(rt) || in.numel == 0) {
         return;
     }
+    if (in.ptr == nullptr || out.ptr == nullptr || routing.ptr == nullptr ||
+        unpIdx.ptr == nullptr || counts.ptr == nullptr) {
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out) + XT_STR(routing) +
+                              XT_STR(unpIdx) + XT_STR(counts);
+        throw std::runtime_error(err_str + " null pointer!");
+    }
+    if (in.dtype != out.dtype) {
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out);
+        throw std::runtime_error(err_str + "in/out dtype mismatch!");
+    }
+    if ((in.shape[1] * XDtypeBit(in.dtype) / 8) % 32 != 0) {
+        std::string err_str = DBG_PREFIX + XT_STR(in);
+        throw std::runtime_error(err_str + " dim*elemBytes must be a multiple of 32!");
+    }
+    bool hasScaleIn = scaleIn.ptr != nullptr;
+    bool hasScaleOut = scaleOut.ptr != nullptr;
+    if (hasScaleIn != hasScaleOut) {
+        std::string err_str = DBG_PREFIX + "scale_in/scale_out must be provided together";
+        throw std::runtime_error(err_str);
+    }
+    if (hasScaleIn) {
+        if (scaleIn.dtype != FP32 || scaleOut.dtype != FP32) {
+            std::string err_str = DBG_PREFIX + XT_STR(scaleIn) + XT_STR(scaleOut);
+            throw std::runtime_error(err_str + "scale_in/scale_out must be FP32!");
+        }
+        if (scaleIn.shape[0] != in.shape[0] || scaleOut.shape[0] != out.shape[0]) {
+            std::string err_str =
+                DBG_PREFIX + XT_STR(scaleIn) + XT_STR(scaleOut) + XT_STR(in) + XT_STR(out);
+            throw std::runtime_error(err_str + "scale length mismatch!");
+        }
+    }
+    uint32_t elemBytes = XDtypeBit(in.dtype) / 8;
     aclrtlaunch_permutation(rt.aivNum, rt.stream, in.ptr, routing.ptr, out.ptr, unpIdx.ptr,
                             counts.ptr, in.shape[0], in.shape[1], out.shape[0], counts.shape[0],
-                            start, end);
+                            start, end, elemBytes, hasScaleIn ? scaleIn.ptr : nullptr,
+                            hasScaleOut ? scaleOut.ptr : nullptr);
 }
 
 void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &routing,

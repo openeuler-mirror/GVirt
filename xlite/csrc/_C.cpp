@@ -2202,7 +2202,8 @@ void CastUp(XRuntime &rt, at::Tensor &in, at::Tensor &out)
 }
 
 void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t start, uint32_t end,
-                 at::Tensor &out, at::Tensor &unpIdx, at::Tensor &counts)
+                 at::Tensor &out, at::Tensor &unpIdx, at::Tensor &counts,
+                 std::optional<at::Tensor> scaleIn, std::optional<at::Tensor> scaleOut)
 {
     XTensor _in, _routing, _out, _unpIdx, _counts;
 
@@ -2211,7 +2212,14 @@ void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t sta
     InitXTensor(_out, out, DBG_LOC);
     InitXTensor(_unpIdx, unpIdx, DBG_LOC);
     InitXTensor(_counts, counts, DBG_LOC);
-    XliteOpPermutation(rt, _in, _routing, start, end, _out, _unpIdx, _counts);
+    XTensor _scaleIn, _scaleOut;
+    if (scaleIn && scaleIn->defined()) {
+        InitXTensor(_scaleIn, *scaleIn, DBG_LOC);
+    }
+    if (scaleOut && scaleOut->defined()) {
+        InitXTensor(_scaleOut, *scaleOut, DBG_LOC);
+    }
+    XliteOpPermutation(rt, _in, _routing, start, end, _out, _unpIdx, _counts, _scaleIn, _scaleOut);
     rt.Synchronize();
 }
 
@@ -3573,7 +3581,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("outIndices"), py::arg("query_lens"), py::arg("cached_lens"), py::arg("k"));
     m.def("cast_up", &CastUp, py::arg("rt"), py::arg("in_"), py::arg("out"));
     m.def("permutation", &Permutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
-          py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"), py::arg("counts"));
+          py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"), py::arg("counts"),
+          py::arg("scale_in") = py::none(), py::arg("scale_out") = py::none());
     m.def("unpermutation", &UnPermutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
           py::arg("weights"), py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"));
     m.def("remap_gate_outputs", &RemapGateOutputs, py::arg("rt"), py::arg("w_in"), py::arg("r_in"),
