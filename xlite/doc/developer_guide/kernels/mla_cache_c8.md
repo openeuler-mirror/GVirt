@@ -37,7 +37,7 @@ mla_cache_c8(rt, latent, pe, slot_mapping, cache, pe_cache, k_scale_cache)
 
 ## 实现原理
 
-每个 AIV 任务处理一个完整 token，MTE2 分别搬入 `D` 维 latent 和 `R` 维 PE。latent 分为 `D/128` 个组，逐组转换到 FP32，计算绝对值和组内最大值，再量化：
+每个 AIV 任务处理一个完整 token，MTE2 分别搬入 `D` 维 latent 和 `R` 维 PE。latent 整行转换到 FP32 后，分为 `D/128` 个组，逐组计算绝对值和组内最大值，再缩放：
 
 ```text
 amax = max(abs(x))
@@ -46,8 +46,8 @@ factor = FP32(1/amax) * 127
 q = round(x * factor)
 ```
 
-除法、乘法和舍入保持分步执行；全零组写 `q=0, scale=0`。采用 FP32→FP16(ODD)→INT8(RINT) 两段转换，避免 FP16 中间舍入改变量化值。量化值饱和到 INT8 范围。
+除法、乘法和舍入保持分步执行；全零组写 `q=0, scale=0`。各组缩放完成后，整行采用 FP32→FP16(ODD)→INT8(RINT) 两段转换，避免 FP16 中间舍入改变量化值。量化值饱和到 INT8 范围。
 
-UB 使用两套缓冲，`512/64` 配置下在 Ascend A3 上每核共 7 KiB，每套保存一个 token 的输入、连续排列的 K/PE/scale 输出暂存区、FP32 计算区和转换缓冲。每轮先将当前 token 搬入 `curr` 缓冲，再量化并写回 `prev` 缓冲中的上一 token。MTE3→MTE2→V 保证旧输出写回后才搬入并计算新输入，V→S 读取归约结果；scale 经 S→V 同步后，与量化结果一起由 V→MTE3 保证写回就绪。
+UB 使用两套缓冲，`512/64` 配置下在 Ascend A3 上每核共 12 KiB，每套保存一个 token 的输入、连续排列的 K/PE/scale 输出暂存区、整行 FP32 数据和 FP16 转换缓冲，以及单组计算临时区。每个有效 token 切换一次 `eid`，在同一套缓冲内完成搬入、量化和写回；无效 slot 直接跳过。MTE3→MTE2→V 保证旧输出写回后才搬入并计算新输入，V→S 读取归约结果；scale 经 S→V 同步后，与量化结果一起由 V→MTE3 保证写回就绪。
 
 K 和 PE 使用连续 DMA；scale 行可能不足 32 字节，使用按字节长度的 DMA。组内计算使用向量指令，外层循环分配 token，内层循环逐组独立量化。
