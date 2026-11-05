@@ -89,59 +89,55 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
 
     // Each bank is reusable after all cache writes complete.
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
-        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
+        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + curr);
     }
-    int32_t slot = -1;
+    int32_t prevSlot = -1;
     uint32_t taskNum = DIV_ROUND_UP(tokens - block_idx, block_num);
     for (uint32_t task = 0; task <= taskNum; ++task) {
-        int32_t nextSlot = -1;
+        uint32_t curr = task % PINGPONG_BUF_NUM;
+        int32_t slot = -1;
         if (task < taskNum) {
-            uint32_t next = task % PINGPONG_BUF_NUM;
-            uint32_t nextRow = block_idx + task * block_num;
-            nextSlot = ((__gm__ int32_t *)slots)[nextRow];
-            if (nextSlot >= 0) {
-                wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + next);
-                CopyGmToUbufAligned(inputs[next],
-                                    (__gm__ Dtype *)latent + (uint64_t)nextRow * latentDim,
+            uint32_t row = block_idx + task * block_num;
+            slot = ((__gm__ int32_t *)slots)[row];
+            if (slot >= 0) {
+                wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + curr);
+                CopyGmToUbufAligned(inputs[curr],
+                                    (__gm__ Dtype *)latent + (uint64_t)row * latentDim,
                                     latentDim * sizeof(Dtype));
-                CopyGmToUbufAligned((__ubuf__ Dtype *)(packed[next] + latentDim * sizeof(int8_t)),
-                                    (__gm__ Dtype *)pe + (uint64_t)nextRow * ropeDim,
+                CopyGmToUbufAligned((__ubuf__ Dtype *)(packed[curr] + latentDim * sizeof(int8_t)),
+                                    (__gm__ Dtype *)pe + (uint64_t)row * ropeDim,
                                     ropeDim * sizeof(Dtype));
-                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + next);
+                set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr);
             }
         }
-        if (task == 0) {
-            slot = nextSlot;
-            continue;
-        }
-        uint32_t curr = (task - 1) % PINGPONG_BUF_NUM;
-        if (slot >= 0) {
-            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + curr);
-            auto x = xBuf[curr];
-            auto tmp = tmpBuf[curr];
-            auto amaxBuf = amaxBufs[curr];
-            auto factorBuf = factorBufs[curr];
-            auto halfValues = halfBuf[curr];
+        uint32_t prev = 1 - curr;
+        if (prevSlot >= 0) {
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + prev);
+            auto x = xBuf[prev];
+            auto tmp = tmpBuf[prev];
+            auto amaxBuf = amaxBufs[prev];
+            auto factorBuf = factorBufs[prev];
+            auto halfValues = halfBuf[prev];
             for (uint32_t group = 0; group < groupNum; ++group) {
-                auto input = inputs[curr] + group * groupSize;
-                auto quant = packed[curr] + group * groupSize;
-                auto scale = (__ubuf__ float *)(packed[curr] + scaleOffset) + group;
+                auto input = inputs[prev] + group * groupSize;
+                auto quant = packed[prev] + group * groupSize;
+                auto scale = (__ubuf__ float *)(packed[prev] + scaleOffset) + group;
                 mla_cache_c8_quant(input, quant, scale, x, tmp, amaxBuf, factorBuf, halfValues);
             }
-            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
-            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
-            CopyUbufToGmAligned((__gm__ int8_t *)cache + (uint64_t)slot * latentDim, packed[curr],
-                                latentDim);
-            CopyUbufToGmAligned((__gm__ Dtype *)peCache + (uint64_t)slot * ropeDim,
-                                packed[curr] + latentDim, ropeDim * sizeof(Dtype));
-            CopyUbufToGmAligned((__gm__ float *)scaleCache + (uint64_t)slot * groupNum,
-                                packed[curr] + scaleOffset, groupNum * sizeof(float));
-            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
+            set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + prev);
+            wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + prev);
+            CopyUbufToGmAligned((__gm__ int8_t *)cache + (uint64_t)prevSlot * latentDim,
+                                packed[prev], latentDim);
+            CopyUbufToGmAligned((__gm__ Dtype *)peCache + (uint64_t)prevSlot * ropeDim,
+                                packed[prev] + latentDim, ropeDim * sizeof(Dtype));
+            CopyUbufToGmAligned((__gm__ float *)scaleCache + (uint64_t)prevSlot * groupNum,
+                                packed[prev] + scaleOffset, groupNum * sizeof(float));
+            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + prev);
         }
-        slot = nextSlot;
+        prevSlot = slot;
     }
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
-        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4 + curr);
+        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0 + curr);
     }
 }
 
