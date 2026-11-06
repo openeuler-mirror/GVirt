@@ -12,6 +12,7 @@ import multiprocessing as mp
 import json
 import random
 import torch
+import torch_npu  # noqa: F401
 import argparse
 import tqdm
 from xlite._C import Runtime, matmul_bench

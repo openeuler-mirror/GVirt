@@ -10,6 +10,7 @@
 from __future__ import absolute_import
 import logging
 import torch
+import torch_npu  # noqa: F401
 import math
 import numpy as np
 import warnings

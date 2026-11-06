@@ -9,6 +9,7 @@
 # ===============================================================================
 import sys
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, softmax_topk
 import numpy as np
 

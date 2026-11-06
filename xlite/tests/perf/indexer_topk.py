@@ -32,6 +32,7 @@ import time
 
 import numpy as np
 import torch
+import torch_npu  # noqa: F401
 
 from xlite._C import Runtime, indexer_topk
 

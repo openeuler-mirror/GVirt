@@ -12,6 +12,7 @@ import logging
 import os
 import random
 import torch
+import torch_npu  # noqa: F401
 import torch.distributed as dist
 import torch.nn.functional as F
 from xlite._C import Runtime, embed, all_reduce

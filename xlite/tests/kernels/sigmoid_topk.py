@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 import random
 import sys
 from xlite._C import Runtime, sigmoid_topk

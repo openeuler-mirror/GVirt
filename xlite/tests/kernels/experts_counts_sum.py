@@ -23,6 +23,7 @@
 
 import logging
 import torch
+import torch_npu  # noqa: F401
 import numpy as np
 from xlite._C import Runtime, experts_counts_sum
 

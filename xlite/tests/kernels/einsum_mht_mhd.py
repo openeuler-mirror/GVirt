@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, einsum_mht_hdt_mhd, einsum_mht_htd_mhd
 from tests.models.weight_utils import matrix_nd2nz
 

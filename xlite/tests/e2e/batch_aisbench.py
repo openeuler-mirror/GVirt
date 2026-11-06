@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import pandas as pd
@@ -234,13 +235,43 @@ def get_xlite_version() -> str:
     try:
         xlite_version = (
             subprocess.run(
-                ["python", "-c", "import xlite; print(xlite.__version__)"], capture_output=True, text=True, check=True
+                [sys.executable, "-c", "import xlite; print(xlite.__version__)"],
+                capture_output=True,
+                text=True,
+                check=True,
             ).stdout.strip()
             or "unknown"
         )
     except Exception:
         pass
     return xlite_version
+
+
+@lru_cache(maxsize=1)
+def _cann_version() -> str:
+    """CANN toolkit version from the toolkit install info file, "unknown" when absent."""
+    bases = (os.environ.get("ASCEND_TOOLKIT_HOME"), "/usr/local/Ascend/ascend-toolkit/latest")
+    for info in (Path(base) for base in bases if base):
+        for path in info.glob("*/ascend_toolkit_install.info"):
+            m = re.search(r"^version=(.+)$", path.read_text(), re.MULTILINE)
+            if m:
+                return m.group(1).strip()
+    return "unknown"
+
+
+@lru_cache(maxsize=1)
+def get_stack_versions() -> dict[str, str]:
+    """Versions of the serving stack packages and CANN, "unknown" when undetectable."""
+    versions: dict[str, str] = {}
+    for name in ("vllm", "vllm-ascend", "torch", "torch-npu", "cann", "ops-transformer"):
+        if name == "cann":
+            versions[name] = _cann_version()
+            continue
+        try:
+            versions[name] = version(name)
+        except PackageNotFoundError:
+            versions[name] = "unknown"
+    return versions
 
 
 def _gitignore_added_lines(ais_bench_dir: Path) -> list[str]:
@@ -1265,8 +1296,9 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
     # Write headers first
     with open(log_file_path, "w") as f:
         f.write(f"# Benchmark Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        # Record the Xlite version for reference
-        f.write(f"## Version Information\n\nxlite: `{get_xlite_version()}`\npython: `{sys.version}`\n\n")
+        # Record the software versions for reference
+        versions = "\n".join(f"{name}: `{ver}`" for name, ver in get_stack_versions().items())
+        f.write(f"## Version Information\n\nxlite: `{get_xlite_version()}`\npython: `{sys.version}`\n{versions}\n\n")
         # Record the shell command used to run this script for reference
         command = shlex.join(["python", str(Path(sys.argv[0]).resolve()), *sys.argv[1:]])
         f.write(f"## Command Used\n\n```bash\n{command}\n```\n\n")

@@ -14,6 +14,7 @@ from collections import defaultdict
 import logging
 import numpy as np
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, indexer_topk
 
 logging.getLogger().setLevel(logging.INFO)

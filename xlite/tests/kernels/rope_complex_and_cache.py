@@ -25,6 +25,7 @@ rope-only layout (remain == 0) skips it.
 from __future__ import absolute_import
 import logging
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, rope_complex_and_cache
 
 logging.getLogger().setLevel(logging.INFO)
