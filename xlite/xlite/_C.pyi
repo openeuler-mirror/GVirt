@@ -7,7 +7,7 @@ The typing and docstrings are designed for Python 3.9 to 3.12.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union, overload
 
 import torch
 
@@ -1091,6 +1091,7 @@ class Model:
             RuntimeError: If native initialization fails.
         """
 
+    @overload
     def forward(
         self,
         rt: Runtime,
@@ -1099,7 +1100,7 @@ class Model:
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: torch.Tensor,
         output: torch.Tensor,
-        aux_outputs: Optional[Sequence[torch.Tensor]] = None,
+        aux_outputs: Sequence[torch.Tensor],
         curr_stream: int = 0,
     ) -> None:
         """Run forward pass with host/vLLM-compatible attention metadata (V1).
@@ -1107,14 +1108,15 @@ class Model:
         ``freqs_cis`` is a single tensor shared across all layers. For per-layer
         freqs tensors or device-side attention metadata, use :meth:`forward_v2`.
 
-        When ``aux_outputs`` is supplied (non-None), the forward additionally captures
+        This overload captures aux hidden states: the forward additionally captures
         each layer listed in ``aux_layer_ids`` (set on :attr:`ModelConfig.aux_layer_ids`
         before :meth:`init`) by an
         on-stream device-to-device memcpy of that layer's input raw (un-normalized)
         residual stream (viewed to ``rt.curr_tokens`` rows) — captured before the layer's
         attention/FFN executes — into the matching entry of ``aux_outputs``. The Eagle3
         draft model's ``combine_hidden_states`` then fuses these aux states to drive
-        proposal. Omit ``aux_outputs`` for a regular forward (no capture, no overhead).
+        proposal. Use the overload without ``aux_outputs`` for a regular forward (no
+        capture, no overhead); passing ``aux_outputs=None`` is rejected by the binding.
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1136,12 +1138,12 @@ class Model:
                 so it must cover the full ``max_seq_len`` range.
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
-            aux_outputs (Optional[Sequence[torch.Tensor]], default None): When non-None,
-                aux hidden-state capture buffers, one per entry in ``aux_layer_ids``, each
-                shape ``[max_tokens, hidden_size]`` model dtype; only the first
-                ``num_tokens`` rows of each are written. Requires ``aux_layer_ids`` to be
-                set on the config (before :meth:`init`).
-            curr_stream (int): Optional ACL stream pointer cast to integer.
+            aux_outputs (Sequence[torch.Tensor]): Aux hidden-state capture buffers, one per
+                entry in ``aux_layer_ids``, each shape ``[max_tokens, hidden_size]`` model
+                dtype; only the first ``num_tokens`` rows of each are written. Requires
+                ``aux_layer_ids`` to be set on the config (before :meth:`init`). Required in
+                this overload; use the overload without it for a regular forward.
+            curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:
             None: Output (and ``aux_outputs`` when supplied) are written in place.
@@ -1149,6 +1151,19 @@ class Model:
         Raises:
             RuntimeError: On invalid shapes or cache mismatch.
         """
+
+    @overload
+    def forward(
+        self,
+        rt: Runtime,
+        input: torch.Tensor,
+        attn_meta: AttnMeta,
+        kv_cache: Sequence[Sequence[torch.Tensor]],
+        freqs_cis: torch.Tensor,
+        output: torch.Tensor,
+        curr_stream: int = 0,
+    ) -> None:
+        """Regular forward without aux capture (see the ``aux_outputs`` overload)."""
 
     def forward_get_logits(
         self,
@@ -1216,6 +1231,7 @@ class Model:
             RuntimeError: On invalid KV-cache layout or other native execution failures.
         """
 
+    @overload
     def forward_with_inputs_embeds(
         self,
         rt: Runtime,
@@ -1224,19 +1240,20 @@ class Model:
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: torch.Tensor,
         output: torch.Tensor,
-        aux_outputs: Optional[Sequence[torch.Tensor]] = None,
+        aux_outputs: Sequence[torch.Tensor],
         curr_stream: int = 0,
         deepstack_input: Sequence[torch.Tensor] = ...,
         input_ids: Optional[torch.Tensor] = None,
     ) -> None:
         """Run forward pass with deepstack input embeddings (host metadata).
 
-        When ``aux_outputs`` is supplied (non-None), behaves like the EAGLE3 aux path of
+        This overload captures aux hidden states like the EAGLE3 aux path of
         :meth:`forward`: each layer listed in ``aux_layer_ids`` (set on
         :attr:`ModelConfig.aux_layer_ids` before :meth:`init`) has its input raw
         (un-normalized) residual stream — captured before the layer executes — captured
-        into the matching entry of ``aux_outputs``. Omit ``aux_outputs`` for a
-        regular forward.
+        into the matching entry of ``aux_outputs``. Use the overload without
+        ``aux_outputs`` for a regular forward (passing ``aux_outputs=None`` is rejected
+        by the binding).
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1249,9 +1266,9 @@ class Model:
                 concatenated, indexed by token position value).
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
-            aux_outputs (Optional[Sequence[torch.Tensor]], default None): When non-None,
-                aux hidden-state capture buffers, one per entry in ``aux_layer_ids`` (see
-                :meth:`forward`).
+            aux_outputs (Sequence[torch.Tensor]): Aux hidden-state capture buffers, one per
+                entry in ``aux_layer_ids`` (see the ``aux_outputs`` overload of
+                :meth:`forward`). Required in this overload.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
             deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings,
                 each shape ``[num_tokens, hidden_size]``, model dtype; length must equal
@@ -1267,6 +1284,22 @@ class Model:
             RuntimeError: On KV-cache/deepstack shape mismatch or other native execution failures.
         """
 
+    @overload
+    def forward_with_inputs_embeds(
+        self,
+        rt: Runtime,
+        input: torch.Tensor,
+        attn_meta: AttnMeta,
+        kv_cache: Sequence[Sequence[torch.Tensor]],
+        freqs_cis: torch.Tensor,
+        output: torch.Tensor,
+        curr_stream: int = 0,
+        deepstack_input: Sequence[torch.Tensor] = ...,
+        input_ids: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Regular forward with deepstack input embeddings and no aux capture."""
+
+    @overload
     def forward_v2(
         self,
         rt: Runtime,
@@ -1275,7 +1308,7 @@ class Model:
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: Sequence[torch.Tensor],
         output: torch.Tensor,
-        aux_outputs: Optional[Sequence[torch.Tensor]] = None,
+        aux_outputs: Sequence[torch.Tensor],
         curr_stream: int = 0,
     ) -> None:
         """Run forward pass with device-tensor attention metadata (V2).
@@ -1284,12 +1317,13 @@ class Model:
         ``slot_mapping`` and ``block_tables`` as pre-built device tensors on
         ``attn_meta``; the native side skips host computation and H2D copies.
 
-        When ``aux_outputs`` is supplied (non-None), behaves like the EAGLE3 aux path of
+        This overload captures aux hidden states like the EAGLE3 aux path of
         :meth:`forward` but on the V2 device-metadata path: each layer listed in
         ``aux_layer_ids`` (set on :attr:`ModelConfig.aux_layer_ids` before :meth:`init`) has
         its input raw (un-normalized) residual stream — captured before the layer executes —
         captured into the matching entry of ``aux_outputs`` via an on-stream device-to-device
-        memcpy. Omit ``aux_outputs`` for a regular forward.
+        memcpy. Use the overload without ``aux_outputs`` for a regular forward (passing
+        ``aux_outputs=None`` is rejected by the binding).
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1302,11 +1336,11 @@ class Model:
                 non-CXA reads only freqs_cis[0]).
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
-            aux_outputs (Optional[Sequence[torch.Tensor]], default None): When non-None,
-                aux hidden-state capture buffers, one per entry in ``aux_layer_ids``, each
-                shape ``[max_tokens, hidden_size]`` model dtype; only the first
-                ``num_tokens`` rows of each are written. Requires ``aux_layer_ids`` to be
-                set on the config (before :meth:`init`).
+            aux_outputs (Sequence[torch.Tensor]): Aux hidden-state capture buffers, one per
+                entry in ``aux_layer_ids``, each shape ``[max_tokens, hidden_size]`` model
+                dtype; only the first ``num_tokens`` rows of each are written. Requires
+                ``aux_layer_ids`` to be set on the config (before :meth:`init`). Required in
+                this overload; use the overload without it for a regular forward.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:
@@ -1315,6 +1349,19 @@ class Model:
         Raises:
             RuntimeError: On shape mismatch or other native execution failures.
         """
+
+    @overload
+    def forward_v2(
+        self,
+        rt: Runtime,
+        input: torch.Tensor,
+        attn_meta: AttnMetaV2,
+        kv_cache: Sequence[Sequence[torch.Tensor]],
+        freqs_cis: Sequence[torch.Tensor],
+        output: torch.Tensor,
+        curr_stream: int = 0,
+    ) -> None:
+        """Regular forward without aux capture (see the ``aux_outputs`` overload)."""
 
     def forward_and_get_logits_v2(
         self,
@@ -1349,6 +1396,7 @@ class Model:
             RuntimeError: On shape mismatch or other native execution failures.
         """
 
+    @overload
     def forward_with_inputs_embeds_v2(
         self,
         rt: Runtime,
@@ -1357,16 +1405,17 @@ class Model:
         kv_cache: Sequence[Sequence[torch.Tensor]],
         freqs_cis: torch.Tensor,
         output: torch.Tensor,
-        aux_outputs: Optional[Sequence[torch.Tensor]] = None,
+        aux_outputs: Sequence[torch.Tensor],
         curr_stream: int = 0,
         deepstack_input: Sequence[torch.Tensor] = ...,
         input_ids: Optional[torch.Tensor] = None,
     ) -> None:
         """Run forward pass with deepstack input embeddings (device metadata, V2).
 
-        When ``aux_outputs`` is supplied (non-None), behaves like the EAGLE3 aux path of
+        This overload captures aux hidden states like the EAGLE3 aux path of
         :meth:`forward` (capture of post-FFN hidden states for the layers in
-        ``aux_layer_ids``). Omit ``aux_outputs`` for a regular forward.
+        ``aux_layer_ids``). Use the overload without ``aux_outputs`` for a regular
+        forward (passing ``aux_outputs=None`` is rejected by the binding).
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1379,9 +1428,9 @@ class Model:
                 concatenated, indexed by token position value; single tensor, not a list).
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
-            aux_outputs (Optional[Sequence[torch.Tensor]], default None): When non-None,
-                aux hidden-state capture buffers, one per entry in ``aux_layer_ids`` (see
-                :meth:`forward`).
+            aux_outputs (Sequence[torch.Tensor]): Aux hidden-state capture buffers, one per
+                entry in ``aux_layer_ids`` (see the ``aux_outputs`` overload of
+                :meth:`forward`). Required in this overload.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
             deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings,
                 each shape ``[num_tokens, hidden_size]``, model dtype; length must equal
@@ -1396,6 +1445,21 @@ class Model:
         Raises:
             RuntimeError: On shape mismatch or other native execution failures.
         """
+
+    @overload
+    def forward_with_inputs_embeds_v2(
+        self,
+        rt: Runtime,
+        input: torch.Tensor,
+        attn_meta: AttnMetaV2,
+        kv_cache: Sequence[Sequence[torch.Tensor]],
+        freqs_cis: torch.Tensor,
+        output: torch.Tensor,
+        curr_stream: int = 0,
+        deepstack_input: Sequence[torch.Tensor] = ...,
+        input_ids: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Regular forward with deepstack input embeddings and no aux capture."""
 
     def get_tensor_pool_size(self, dbg: int = 0) -> int:
         """Get tensor-pool usage information.
@@ -1856,7 +1920,8 @@ def embed(
         rt (Runtime): Native runtime handle.
         weight (torch.Tensor): Embedding table, shape ``[vocab, hidden]``, fp16 or bf16
             (``hidden`` must be divisible by 16).
-        in_ (torch.Tensor): Token IDs, shape ``[num_tokens]`` (read as uint32 row indices).
+        in_ (torch.Tensor): Token IDs, shape ``[num_tokens]``, int32 (read as
+            uint32 row indices; int64 is rejected).
         out (torch.Tensor): Output embedding tensor, shape ``[num_tokens, hidden]``, same
             dtype as ``weight``.
         start (int): Start token index (inclusive).
@@ -2958,7 +3023,10 @@ def compressor(
     Consumes the post-GEMM fp32 outputs ``kv`` (``wkv(x)``) and ``score``
     (``wgate(x)``) and, in one launch, fuses the tail of ``Compressor.forward``
     after the two matmuls. The batched-token stream is partitioned per request
-    via ``query_start_loc``/``query_lens`` (prefix-sum ``[batch]`` int32). Each
+    via ``query_start_loc``/``query_lens`` (prefix-sum ``[batch]`` or
+    ``[batch+1]`` int32; the host validates ``numel >= batch`` and the kernel
+    reads only the first ``batch`` entries, so v2 cu_seqlens layouts are
+    accepted). Each
     compressed block belongs to one request; overlap left-shift never crosses a
     request boundary.
 
@@ -3016,7 +3084,9 @@ def compressor(
             slot of each compressed block in ``compress_kv`` (COMPRESSED-block
             space: ``b * compRowsStridePerReq + cached // ratio + j``). Filled on
             host by the caller.
-        query_start_loc (torch.Tensor): ``[batch]`` int32 prefix-sum token offsets.
+        query_start_loc (torch.Tensor): ``[batch]`` or ``[batch+1]`` (v2
+            cu_seqlens) int32 prefix-sum token offsets; only the first ``batch``
+            entries are read.
         query_lens (torch.Tensor): ``[batch]`` int32 per-request query lengths.
         batch (int): Number of requests.
         n_total_blocks (int): ``sum_b(((cached_b + qlen_b) // ratio) -
@@ -3112,12 +3182,17 @@ def matmul_dequant(
 ) -> None:
     """Matmul on quantized weights with dequantization.
 
+    When ``x`` and ``y`` are both int32, they are viewed to INT4 (packed
+    nibbles) before dispatch and the int4 matmul kernel runs.
+
     Args:
         rt (Runtime): Native runtime handle.
-        x (torch.Tensor): Left matrix, shape ``[m, k]``, int8.
+        x (torch.Tensor): Left matrix, shape ``[m, k]``, int8 (or int32-packed
+            int4).
         y (torch.Tensor): Quantized right matrix, shape ``[n, k]`` (transpose=False) or
-            ``[k, n]`` (transpose=True), int8.
-        bias (torch.Tensor): Quantization bias, shape ``[n]``, int32 (optional).
+            ``[k, n]`` (transpose=True), int8 (or int32-packed int4).
+        bias (torch.Tensor): Quantization bias, shape ``[n]``, int32. Required
+            positional argument; pass an empty tensor to skip.
         deq_scale (torch.Tensor): Weight dequantization scale, flat ``[2*n]``, fp32
             (uint64 TF32-packed pairs).
         z (torch.Tensor): Output matrix, shape ``[m, n]``, fp16.
@@ -3132,16 +3207,17 @@ def matmul_dequant(
 def fused_quant_matmul_dequant(
     rt: Runtime,
     x: torch.Tensor,
-    weight: torch.Tensor,
-    out: torch.Tensor,
-    x_quant: torch.Tensor,
-    dyn_quant: bool,
+    *,
     quant_scale_rec: Optional[torch.Tensor] = None,
     quant_offset: Optional[torch.Tensor] = None,
+    weight: torch.Tensor,
+    out: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     deq_scale: Optional[torch.Tensor] = None,
+    x_quant: torch.Tensor,
     out_scale: Optional[torch.Tensor] = None,
     num: Optional[torch.Tensor] = None,
+    dyn_quant: bool,
     weight_nz: bool = False,
     transpose: bool = False,
 ) -> None:
@@ -3156,30 +3232,34 @@ def fused_quant_matmul_dequant(
     are host-allocated workspaces; ``num`` shrinks the dequant row range for
     dynamic token counts.
 
-    Note: arguments after ``x`` should be passed by keyword. The required
-    arguments are grouped before the optional ones in this stub; the C++ binding
-    declares them with interspersed defaults but exposes every parameter as a
-    keyword argument, so keyword calls are unaffected by this reordering.
+    Note: arguments after ``x`` are keyword-only in this stub. The C++ binding
+    declares the parameters with interspersed defaults (positional order
+    ``rt, x, quant_scale_rec, quant_offset, weight, out, bias, deq_scale,
+    x_quant, out_scale, num, dyn_quant, weight_nz, transpose``); positional
+    calls beyond ``rt, x`` follow that interleaved order and are rejected here
+    to prevent mis-binding. Keyword calls match the binding exactly.
 
     Args:
         rt (Runtime): Native runtime handle.
         x (torch.Tensor): Activation, shape ``[m, k]``, bfloat16.
+        quant_scale_rec (Optional[torch.Tensor]): Static per-channel scale
+            reciprocal, shape ``[k]``, bfloat16; omit in dynamic mode.
+        quant_offset (Optional[torch.Tensor]): Static per-channel offset,
+            shape ``[k]``, bfloat16; omit in dynamic mode.
         weight (torch.Tensor): Quantized weight, shape ``[n, k]`` (or
             transposed/NZ per ``weight_nz``/``transpose``), int8.
         out (torch.Tensor): Output, shape ``[m, n]``, bfloat16 (written in place).
+        bias (Optional[torch.Tensor]): Matmul bias, shape ``[n]``, int32; pass an
+            empty tensor (or omit) to skip.
+        deq_scale (Optional[torch.Tensor]): Weight dequantization scale, flat
+            ``[2*n]`` fp32 (uint64 TF32-packed pairs); pass an empty tensor (or
+            omit) to skip.
         x_quant (torch.Tensor): Quantized activation workspace, shape ``[m, k]``,
             int8 (AIV writes, AIC reads).
-        dyn_quant (bool): True = dynamic per-token; False = static per-channel.
-        quant_scale_rec (Optional[torch.Tensor]): Static per-channel scale
-            reciprocal, shape ``[k]``, bfloat16; absent in dynamic mode.
-        quant_offset (Optional[torch.Tensor]): Static per-channel offset,
-            shape ``[k]``, bfloat16; absent in dynamic mode.
-        bias (Optional[torch.Tensor]): Matmul bias, shape ``[n]``, int32.
-        deq_scale (Optional[torch.Tensor]): Weight dequantization scale, flat
-            ``[2*n]`` fp32 (uint64 TF32-packed pairs).
         out_scale (Optional[torch.Tensor]): Dynamic per-token scale workspace,
-            shape ``[m]`` fp32; absent in static mode.
+            shape ``[m]`` fp32; omit in static mode.
         num (Optional[torch.Tensor]): Dynamic token count, shape ``[1]`` uint32.
+        dyn_quant (bool): True = dynamic per-token; False = static per-channel.
         weight_nz (bool): Whether ``weight`` uses NZ layout.
         transpose (bool): Whether to transpose the weight.
 
@@ -3241,10 +3321,10 @@ def fusion_operator_matmul_dequant_pipeline(
     out: torch.Tensor,
     bias: torch.Tensor,
     deq_scale: torch.Tensor,
-    weight_nz: bool = False,
-    transpose: bool = False,
-    out_scale: torch.Tensor = ...,
-    num: torch.Tensor = ...,
+    weight_nz: bool,
+    transpose: bool,
+    out_scale: torch.Tensor,
+    num: torch.Tensor,
 ) -> None:
     """Matmul on quantized weights with fused tile-pipeline dequantization.
 
@@ -3256,6 +3336,12 @@ def fusion_operator_matmul_dequant_pipeline(
 
         Y = (x @ weight^T + bias) * deq_scale * out_scale[:, None]
 
+    Note: all ten parameters are listed in the C++ binding's positional order.
+    ``out_scale``/``num`` are required there, so ``weight_nz``/``transpose``
+    (which the binding defaults to False) are kept positional-required in this
+    stub — pass them explicitly; keyword omission of the two flags is accepted
+    at runtime but not expressible here.
+
     Args:
         rt (Runtime): Native runtime handle.
         x (torch.Tensor): Already-quantized activation matrix, shape
@@ -3265,16 +3351,18 @@ def fusion_operator_matmul_dequant_pipeline(
         out (torch.Tensor): Output tensor, shape ``[m, n]``, bfloat16.
             Written in place; the kernel internally stores the fp16
             intermediate at the same address before overwriting with bf16.
-        bias (torch.Tensor): Quantization bias, shape ``[n]``, int32
-            (optional; pass an empty tensor to skip).
+        bias (torch.Tensor): Quantization bias, shape ``[n]``, int32.
+            Required positional argument; pass an empty tensor to skip.
         deq_scale (torch.Tensor): Weight dequantization scale, flat
             ``[2*n]``, fp32 (uint64 TF32-packed pairs, even slots hold the
             scale and odd slots are zero).
         out_scale (torch.Tensor): Per-token dequantization scale, shape
-            ``[m]``, fp32 (optional; pass an empty tensor to skip).
+            ``[m]``, fp32. Required positional argument; pass an empty
+            tensor to skip.
         num (torch.Tensor): Dynamic token count, shape ``[1]``, int32
             (read as uint32; only the first ``min(num, m)`` rows are
-            processed). Pass an empty tensor to use ``m``.
+            processed). Required positional argument; pass an empty tensor
+            to use ``m``.
         weight_nz (bool): Whether `weight` uses NZ layout.
         transpose (bool): Whether to transpose the right matrix.
 
@@ -3382,11 +3470,15 @@ def mla_v2(
             (``[batch, top_k]`` in decode); may be empty when ``top_k == 0``.
         top_k (int): Number of top-k indices; 0 disables sparse attention in
             paged mode. In dense mode this is the dense cache length
-            (``index_topk``) and must be > 0.
+            (``index_topk``) and must be > 0. In paged mode with ``top_k > 0``,
+            ``max_seq_len`` (block-table width narrowed by the lens) must not
+            exceed 11776 (``MAX_SOFTMAX_PINGPONG_LEN``) and ``top_k`` must be
+            <= 2048 (``MAX_TOPK_NUM``).
         nz (bool): Whether to use nz weights.
         enable_flash_attention (bool): Whether to use the flash MLA v2 kernel
             (paged mode only; ignored when ``dense=True``).
-        tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA v2.
+        tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA v2;
+            must not exceed 11776 (``MAX_SOFTMAX_PINGPONG_LEN``).
         dense (bool): Whether to gather a contiguous dense KV cache (via
             ``topk_indices``) instead of walking the paged block-table layout.
 
@@ -3473,9 +3565,9 @@ def gather_sparse_kv_cache(
             degenerates to token-by-token). Defaults to 16KB.
 
     Raises:
-        RuntimeError: Non-BF16 inputs, kv_heads != 1, channel input/output
-            emptiness mismatch, or malformed block_tables (rank not 1-D/2-D,
-            or 1-D length not divisible by batch).
+        RuntimeError: Non-BF16 inputs, kv_heads != 1, or channel input/output
+            emptiness mismatch. A 1-D ``block_tables`` is silently viewed as a
+            single ``[1, numel]`` row (no rank/width validation).
     """
     ...
 
@@ -3753,8 +3845,10 @@ def muls(
         output (torch.Tensor): Output tensor, same shape and dtype as ``input``.
         calc_offset (int): Per-row element offset where scaling starts (default 0).
         calc_num (int): Number of elements per row to scale, starting at ``calc_offset``
-            (default ``UINT32_MAX`` = whole row). ``calc_offset + calc_num`` must not
-            exceed ``shape1``.
+            (default ``UINT32_MAX`` = whole row). Values beyond the row end are silently
+            clamped to ``shape1 - calc_offset``; ``calc_offset >= shape1``,
+            ``calc_num == 0`` or ``calc_num > MAX_MULS_CALC_NUM`` (16320) raise
+            RuntimeError.
 
     Returns:
         None: `output` is written in place.
@@ -4360,8 +4454,11 @@ def hc_pre(
     """
     ...
 
-def silu_gate_mul(rt: Runtime, normed: torch.Tensor, gate: torch.Tensor, out: torch.Tensor) -> None:
-    """FP32 normed times SiLU(gate), rounded once to BF16/FP16 out; all [T,D]."""
+def silu_gate_mul(rt: Runtime, normed: torch.Tensor, gate: torch.Tensor, out: torch.Tensor, /) -> None:
+    """FP32 normed times SiLU(gate), rounded once to BF16/FP16 out; all [T,D].
+
+    Positional-only (the binding exposes no keyword names).
+    """
     ...
 
 def recurrent_gated_delta_rule_prefill_paged(
@@ -4369,6 +4466,7 @@ def recurrent_gated_delta_rule_prefill_paged(
     beta: torch.Tensor, g: torch.Tensor, state: torch.Tensor, out: torch.Tensor,
     indices: torch.Tensor, starts: torch.Tensor, initial: torch.Tensor,
     num_key_heads: int, num_value_heads: int, k_dim: int, v_dim: int,
+    /,
 ) -> None: ...
 
 
@@ -4376,11 +4474,13 @@ def recurrent_gated_delta_rule_prefill_paged(
 def conv1d_and_silu_prefill_paged(
     rt: Runtime, input: torch.Tensor, state: torch.Tensor, weight: torch.Tensor,
     output: torch.Tensor, indices: torch.Tensor, starts: torch.Tensor, initial: torch.Tensor,
+    /,
 ) -> None:
     """Packed [T,C] Conv/SiLU on native [P,W-1,C] pages.
 
     Starts is contiguous INT32[B+1], initial is INT32[B]. Initial zero ignores
     prior state. Empty segments and null pages leave all state unchanged.
     Conv rounds to activation dtype before SiLU in this Prefill path.
+    Positional-only (the binding exposes no keyword names).
     """
     ...
