@@ -32,7 +32,7 @@ mla_prepare_<dtype>(attnQkvc, qNorm, qNormBias, attnNormQc, kvNorm, kvNormBias, 
 | kvNorm / kvNormBias | 输入 | `[kvLoraRank]` | FP16/BF16 | kv_lora 段 RMSNorm 权重/偏置 |
 | attnNormKvc | 输出 | `[token_num, kvLoraRank]` | FP16/BF16 | kv_lora 段 norm 结果 |
 | freqs | 输入 | `[maxSeqLen, ropeHeadDim/2]` | FP32(complex) | 预计算 freqs_cis |
-| position | 输入 | `[token_num]` | INT64 | 每 token 的旋转位置 |
+| position | 输入 | `[token_num]` | INT64 | 每 token 的旋转位置;二维(mrope)布局时仅消费第一行,host 打印一次性警告(`csrc/op.cpp` 的 `WarnPositions2D`) |
 | kCache | 输出 | `[numBlocks, blockSize, kvLoraRank]` | FP16/BF16 | latent K cache,按 slotMapping 写 |
 | peCache | 输出 | `[numBlocks, blockSize, ropeHeadDim]` | FP16/BF16 | RoPE 后的 K cache,按 slotMapping 写 |
 | slotMapping | 输入 | `[token_num]` | INT32 | 每 token 的目标 cache slot(物理块×blockSize+块内偏移) |

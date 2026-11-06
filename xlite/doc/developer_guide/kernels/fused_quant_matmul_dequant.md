@@ -9,7 +9,7 @@ AIV t (全部):  quant(x 行段 [t*chunk, (t+1)*chunk)) → xQuant (+ per-token 
                --SyncAll<true> → V2C flag 9 (每 AIV set 一次, AIC wait 两次)-->
 AIC b:         grid-stride matmul tiles → out (FP16 视图)
                --C2V flag 8 per tile (挂 PIPE_FIX, 骑 CopyToGm 之后)-->
-AIV 2b/2b+1:   dequant(out FP16 → BF16 原位, dyn 乘 outScale) --V2C_DONE flag 10-->
+AIV 2b/2b+1:   dequant(out FP16 → BF16 原位, dyn 乘 outScale)
 ```
 
 ## 输入输出参数
@@ -44,9 +44,9 @@ Python 入口 `fused_quant_matmul_dequant(rt, x, quant_scale_rec, quant_offset, 
 
 - **双侧均衡**：AIC 跑与独立 matmul 相同的 grid-stride（`idx ≡ b mod N`）；AIV 量化行按全 AIV 均分连续段（`chunk = ceil(m/总AIV数)`）——量化并行度与独立 kernel 相同，matmul 负载与独立 matmul 相同。
 - **V2C 粗粒度 barrier**：AIV 全部完成量化后 `AscendC::SyncAll<true>`（AIV-only 软屏障）聚合，每个 AIV 向本组 AIC set flag 9（挂 PIPE_MTE3 骑量化 store 之后——ffts 屏障是本平台唯一带数据可见性保证的跨核释放），AIC wait×2。细粒度 per-m-tile 交接在本平台不可行（无标量 atomic / MTE1 不过 L2 / ffts flag 组内路由，见 [fusion_gm_atomic_sync_experiments.md](fusion_gm_atomic_sync_experiments.md)）。
-- **C2V per tile**（flag 8 挂 PIPE_FIX）与 **V2C_DONE 退出回执**（flag 10）：与现有两段融合算子一致的已验证契约；AIC 退出前必须等配对 AIV 完成（混合核退出契约）。
+- **C2V per tile**（flag 8 挂 PIPE_FIX，骑 CopyToGm 之后）：AIC 每完成一个 matmul tile 通知配对 AIV 做 dequant；AIV 的 dequant 循环逐 tile `CrossCoreWaitFlag(C2V_CROSS_CORE_FLAG)`，结束后 `dequantOp.WaitFlags()` 只清算核内 flag。早期版本的 **V2C_DONE（flag 10）AIC 退出回执已删除**：AIC 不再等待配对 AIV 完成最后的 dequant tiles 即可退出（其全部产出经挂 PIPE_FIX 的 C2V set 保证落地后才唤醒 AIV），跨核 flag 只剩 8/9 两个。
 - **AIV 两阶段串行**：全部量化（batched 段优先，k 非 32 倍数或超 K_TILE 回退逐行）→ SyncAll → dequant 锁步，规避 quant/dequant 子算子的 UB 基址与 EVENT_ID 复用冲突。
-- **ffts mode id 路由**（实测）：`0x2`（AIC→AIV）只到同组 AIV；AIV 发起必须 `0x3`（同为组内路由）。flagId 8/9/10 与核内事件号空间独立。
+- **ffts mode id 路由**（实测）：`0x2`（AIC→AIV）只到同组 AIV；AIV 发起必须 `0x3`（同为组内路由）。flagId 8/9 与核内事件号空间独立。
 
 ## 性能特征（910C 实测，2026-10-13）
 

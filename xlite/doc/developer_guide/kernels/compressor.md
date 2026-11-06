@@ -55,7 +55,7 @@ compressor_<dtype>(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, G
 | norm(normWeight) | 输入 | `[head_dim]` | fp32 / null | RMSNorm weight;null 跳过 norm |
 | freqs | 输入 | `[max_seq_len, rope_head_dim/2]` | complex64 / null | 预计算复数 RoPE 频率;null 跳过 rope+cache 写 |
 | weightedSum | 输出(scratch GM) | `[nTotalBlocks, head_dim]` | bf16 / fp16 | 加权求和结果(norm/rope 原地更新);最终为压缩 KV 写入前的中间量 |
-| queryStartLoc | 输入 | `[batch]` | int32 | 每 batch 请求在 batchedTokens 中的起始行 |
+| queryStartLoc | 输入 | `[batch]` 或 `[batch+1]` | int32 | 每 batch 请求在 batchedTokens 中的起始行;host 校验 `numel >= batch`,故 v2 cu_seqlens 布局(带终止项)同样合法 |
 | queryLens | 输入 | `[batch]` | int32 | 每 batch 请求长度(decode 为 1) |
 | cachedLens | 输入 | `[batch]` | int32 / null | 每 batch 已缓存长度;null 时按 0 处理 |
 | compressKv | 输出 | `[blocks, compressBlockSize, 1, head_dim]` | bf16 / fp16 / fp32 / null | paged 压缩 KV cache;RoPE 后按 `compressSlotMapping` 写入;null(空存储)→ C8 模式(见上) |

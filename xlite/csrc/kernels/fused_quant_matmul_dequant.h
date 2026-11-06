@@ -27,7 +27,6 @@ using namespace AscendC;
 //   AIC b:       wait flag 9 x2 -> grid-stride matmul tiles -> out (fp16 view)
 //                -> C2V flag 8 per tile (rides PIPE_FIX, after CopyToGm)
 //   AIV 2b/2b+1: dequant(out fp16 -> bf16 in place, per-row scale in dyn mode)
-//                -> V2C_DONE flag 10
 //
 // The quant hand-off is a single coarse barrier: SyncAll<true> (AIV-only soft
 // barrier) retires every AIV's quant stores, then each AIV notifies its
