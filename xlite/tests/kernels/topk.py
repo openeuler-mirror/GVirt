@@ -78,15 +78,10 @@ def run_test(rt, cached_lens, query_lens, msg):
         torch.testing.assert_close(standard_indices, xlite_indices)
         print(f"{msg}: PASS")
     except Exception as e:
-        s = ""
         first_bad = -1
         for i, (std, xlite) in enumerate(zip(standard_indices.flatten(), xlite_indices.flatten())):
             if std != xlite and first_bad == -1:
                 first_bad = i
-            c = ' ' if std == xlite else 'x'
-            s += f'[{c}]'
-            if (i % 50 == 49):
-                s += '\n'
         print(f"{msg}: FAILED: {first_bad}")
         print("standard indices:")
         print(standard_indices)

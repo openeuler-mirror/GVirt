@@ -310,12 +310,12 @@ def build_paged_state(full_dim, batch, max_pos, tokens_total, query_lens, ratio,
         cutoff = ql - remainder
         if overlap and cutoff >= ratio:
             win_start = off + cutoff - ratio
-            for k in range(ratio):
-                state_slot_mapping[win_start + k] = cutoff - ratio + k
+            state_slot_mapping[win_start:win_start + ratio] = torch.arange(
+                cutoff - ratio, cutoff, dtype=torch.int32, device="npu")
         if remainder > 0:
             tail_start = off + cutoff
-            for k in range(remainder):
-                state_slot_mapping[tail_start + k] = cutoff + k
+            state_slot_mapping[tail_start:tail_start + remainder] = torch.arange(
+                cutoff, cutoff + remainder, dtype=torch.int32, device="npu")
         off += ql
     return state, state_block_table, state_slot_mapping
 
@@ -408,8 +408,8 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
                 chunk_score.append((torch.randn(1, full_dim, dtype=torch.float32) / 10).contiguous())
                 pred_kv.append(None); pred_score.append(None)
                 dec_kv.append(chunk_kv[-1]); dec_score.append(chunk_score[-1])
-        kv = torch.cat(chunk_kv, dim=0).contiguous()           # [batchedTokens, full_dim]
-        score = torch.cat(chunk_score, dim=0).contiguous()
+        kv = torch.cat(chunk_kv, dim=0)                           # [batchedTokens, full_dim]
+        score = torch.cat(chunk_score, dim=0)
         ape = (torch.randn(ratio, full_dim, dtype=torch.float32) / 10) if ape_enabled else None
         norm_w = torch.randn(HEAD_DIM, dtype=test_dtype) / 10
 
@@ -448,7 +448,6 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
     state_blocks_per_req = max(1, (max_state_pos + STATE_BLOCK_SIZE - 1) // STATE_BLOCK_SIZE)
     n_state_blocks = 1 + batch * state_blocks_per_req
     with torch.device("npu"):
-        compress_kv = torch.zeros(max_blocks, BLOCK_SIZE, 1, HEAD_DIM, dtype=test_dtype)
         compress_slot_mapping = torch.tensor(compress_slot_mapping_l, dtype=torch.int32)
         compress_positions = torch.tensor(compress_positions_l, dtype=torch.int64)
         state = torch.zeros(n_state_blocks, STATE_BLOCK_SIZE, 1, 2 * full_dim, dtype=torch.float32)
@@ -464,7 +463,7 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
         freqs_cis = precompute_freqs_cis(ROPE_HEAD_DIM, freqs_end, ROPE_THETA)
 
     def state_phys(b, p):
-        blk = state_block_table[b][p // STATE_BLOCK_SIZE].item()
+        blk = 1 + b * state_blocks_per_req + p // STATE_BLOCK_SIZE
         return blk * STATE_BLOCK_SIZE + p % STATE_BLOCK_SIZE
     state_flat = state.view(-1, 2 * full_dim)
 
@@ -525,11 +524,11 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
             if ql > 1 and c == 0:                          # fresh prefill spill rule
                 remainder = ql % ratio; cutoff = ql - remainder
                 if overlap and cutoff >= ratio:
-                    for k in range(ratio):
-                        state_slot_mapping[off + cutoff - ratio + k] = cutoff - ratio + k
+                    state_slot_mapping[off + cutoff - ratio:off + cutoff] = torch.arange(
+                        cutoff - ratio, cutoff, dtype=torch.int32, device="npu")
                 if remainder > 0:
-                    for k in range(remainder):
-                        state_slot_mapping[off + cutoff + k] = cutoff + k
+                    state_slot_mapping[off + cutoff:off + cutoff + remainder] = torch.arange(
+                        cutoff, cutoff + remainder, dtype=torch.int32, device="npu")
             elif ql > 1 and c > 0:                         # cont chunk spill (mirror L705-716)
                 abs_end = c + ql; cutoff = abs_end // ratio * ratio
                 spill_begin = cutoff
@@ -549,7 +548,8 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
     #    stream, compressor reads on rt.stream — see [[compressor-spill-test-stream-race]]).
     #    The kernel writes compress_kv through a dim-0 pitched view (one guard row
     #    of padding per block); the state stride derives from the state cache's
-    #    own dim-0 stride. The copy-back feeds the comparisons below.
+    #    own dim-0 stride. The comparisons below gather the needed rows directly
+    #    from the pitched kernel buffer.
     compress_kv_pitch = BLOCK_SIZE * HEAD_DIM + HEAD_DIM
     compress_kv_kernel = torch.zeros(max_blocks * compress_kv_pitch, dtype=test_dtype,
                                       device="npu").as_strided(
@@ -562,14 +562,24 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
                compress_slot_mapping, BLOCK_SIZE, state, state_slot_mapping, state_block_table,
                STATE_BLOCK_SIZE, do_rotate)
     torch.npu.synchronize()
-    compress_kv.copy_(compress_kv_kernel)
     cat = 'mixed' if any(ql == 1 for _, ql, _ in ordered) and any(ql > 1 for _, ql, _ in ordered) else 'batch'
     logging.info(f'compressor {cat} ({test_dtype}) ratio={ratio} overlap={overlap} '
                  f'query_lens={query_lens} cached={cached_lens} executed!')
 
     # 8. per-request reference + compare.
-    flat = compress_slot_mapping.to(torch.int64)
-    out_all = compress_kv.view(-1, 1, HEAD_DIM)[flat, 0]   # [n_total_blocks, head_dim]
+    # the kernel resolves each slot as a FLAT row id (block * BLOCK_SIZE +
+    # offsetInBlock — see rope_complex_and_cache.h): physical row
+    # (slot//BLOCK_SIZE)*(BLOCK_SIZE+1) + slot%BLOCK_SIZE of the flat 2D view of
+    # the pitched buffer (the dense copy+view gather the baseline used resolves
+    # the same logical (b, t) cell). slot_rows is computed on the host list —
+    # NPU int arithmetic here triggers a torch_npu internal-format UserWarning
+    # the baseline never emits.
+    slot_rows = torch.tensor(
+        [(s // BLOCK_SIZE) * (BLOCK_SIZE + 1) + s % BLOCK_SIZE for s in compress_slot_mapping_l],
+        dtype=torch.int64, device="npu")
+    out_all = compress_kv_kernel.as_strided(
+        (max_blocks * (BLOCK_SIZE + 1), HEAD_DIM), (HEAD_DIM, 1)).index_select(0, slot_rows)
+
     ws_out = weightedSum                                  # norope compares this
     block_base = 0
     off = 0
@@ -602,13 +612,10 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
                     for k in range(remainder):
                         spilled.append((off + cutoff + k, offset + k))
                 if spilled:
-                    tok_ids = torch.tensor([t for t, _ in spilled], dtype=torch.int64)
                     ref_slot_ids = torch.tensor([s for _, s in spilled], dtype=torch.int64)
-                    mapping = state_slot_mapping[tok_ids].to(torch.int64)
-                    tbl = state_block_table[oi].cpu()
+                    ssm = state_slot_mapping.cpu().tolist()
                     phys = torch.tensor(
-                        [tbl[s // STATE_BLOCK_SIZE].item() * STATE_BLOCK_SIZE + s % STATE_BLOCK_SIZE
-                         for s in mapping.tolist()], dtype=torch.int64)
+                        [state_phys(oi, ssm[t]) for t, _ in spilled], dtype=torch.int64)
                     got = state_flat[phys].to(torch.float32)
                     exp = st_rows[ref_slot_ids].to(torch.float32)
                     try:
@@ -629,7 +636,11 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
                                    f'kernel cont-chunk compress_kv vs ref[c//ratio:]; {cmp_conf}')
         else:                                            # decode
             p = c
-            sr = torch.stack([state_flat[state_phys(oi, pp)] for pp in range(p + 1)])
+            # host-built index (NPU int arithmetic on the index tensor triggers a
+            # torch_npu internal-format UserWarning the baseline never emits)
+            phys = torch.tensor([state_phys(oi, pp) for pp in range(p + 1)],
+                                dtype=torch.int64, device=state_flat.device)
+            sr = state_flat[phys]
             ref = reference_decode_compress(sr, norm_w, freqs_cis, ratio, overlap, HEAD_DIM,
                                             ROPE_HEAD_DIM, NORM_EPS, test_dtype, p)
             if n_b >= 1:                                 # compress position: 1 block written
@@ -667,6 +678,9 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
                           f'out_norm={out_all[bi].abs().max().item():.4f}')
         _ckv_dump = __import__('os').environ.get('XLITE_DUMP_CKV')
         if _ckv_dump:
+            compress_kv = torch.zeros(max_blocks, BLOCK_SIZE, 1, HEAD_DIM, dtype=test_dtype,
+                                      device="npu")
+            compress_kv.copy_(compress_kv_kernel)
             torch.save({'compress_kv': compress_kv.cpu(), 'state': state.cpu(),
                         'weightedSum': weightedSum.cpu()}, _ckv_dump)
 
@@ -706,18 +720,20 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
         # CPU-side index for all reference comparisons below (pools are pulled to
         # CPU before indexing; NPU indices are not valid on CPU tensors).
         written = compress_slot_mapping.cpu().to(torch.int64)
+        k8_pool_cpu = k8_pool.cpu()
+        k16_pool_cpu = k16_pool.cpu()
         untouched = torch.ones(capacity, dtype=torch.bool)
         untouched[written] = False
-        assert bool((k8_pool.cpu().view(-1, HEAD_DIM)[untouched] == K8_FILL).all()), \
+        assert bool((k8_pool_cpu.view(-1, HEAD_DIM)[untouched] == K8_FILL).all()), \
             (name, "c8 k8 canary")
-        assert bool((k16_pool.cpu()[untouched] == K16_FILL).all()), (name, "c8 k16 canary")
+        assert bool((k16_pool_cpu[untouched] == K16_FILL).all()), (name, "c8 k16 canary")
         rows = out_all.float().cpu()
         amax = rows.abs().amax(-1)
         scale = amax * (1.0 / QUANT_MAX_C8)
         normalized = rows * torch.where(scale == 0, 0, scale.reciprocal())[:, None]
         expected_k8 = normalized.round().to(torch.int8)
-        torch.testing.assert_close(k16_pool.cpu()[written], scale.half(), rtol=0, atol=0)
-        torch.testing.assert_close(k8_pool.cpu().view(-1, HEAD_DIM)[written], expected_k8,
+        torch.testing.assert_close(k16_pool_cpu[written], scale.half(), rtol=0, atol=0)
+        torch.testing.assert_close(k8_pool_cpu.view(-1, HEAD_DIM)[written], expected_k8,
                                    atol=1, rtol=1 / 128)
         logging.info(f'  PASS c8 quant ({name}): int8+fp16 caches match reference quantization')
 
@@ -770,8 +786,8 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
                    for q in ql_b]
         score_list = [(torch.randn(q, full_dim, dtype=torch.float32) / 10).contiguous()
                       for q in ql_b]
-        kv = torch.cat(kv_list, dim=0).contiguous()
-        score = torch.cat(score_list, dim=0).contiguous()
+        kv = torch.cat(kv_list, dim=0)
+        score = torch.cat(score_list, dim=0)
         ape = (torch.randn(ratio, full_dim, dtype=torch.float32) / 10) if ape_enabled else None
         norm_w = torch.randn(HEAD_DIM, dtype=test_dtype) / 10
         # cached_lens=0 for prefill (see NOTE above); decode steps advance it per
@@ -807,6 +823,7 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
         # keyed by absolute position — only the PREFILL requests (ql_b) are passed;
         # decode-step token rows are addressed by absolute pos, not slot mapping.
         max_pos = max_ql + n_steps + ratio
+        state_blocks_per_req = max(1, (max_pos + STATE_BLOCK_SIZE - 1) // STATE_BLOCK_SIZE)
         state, state_block_table, state_slot_mapping = build_paged_state(
             full_dim, batch, max_pos, sum(ql_b), ql_b, ratio, overlap)
         torch.npu.synchronize()
@@ -825,7 +842,7 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
             """Physical row index of absolute position ``p`` for request ``req``:
             column p // STATE_BLOCK_SIZE, row p % STATE_BLOCK_SIZE (via the req's
             block-table row)."""
-            blk = state_block_table[req][p // STATE_BLOCK_SIZE].item()
+            blk = 1 + req * state_blocks_per_req + p // STATE_BLOCK_SIZE
             return blk * STATE_BLOCK_SIZE + p % STATE_BLOCK_SIZE
 
         # per-request running cached_len (advances one per step) and compress
@@ -874,15 +891,18 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
                        state_block_table, STATE_BLOCK_SIZE)
             torch.npu.synchronize()
 
+            state_cpu = state.cpu().view(-1, 2 * full_dim)
+            tok_kv_cpu = tok_kv.cpu()[0]
+            tok_sc_cpu = tok_sc.cpu()[0]
             for b in range(batch):
                 pos = pos_list[b]
                 compressing = compress_flags[b]
                 row = pos % ratio
-                sc_ape = tok_sc.cpu()[0] + (ape_cpu[row] if ape_cpu is not None else 0)
+                sc_ape = tok_sc_cpu + (ape_cpu[row] if ape_cpu is not None else 0)
                 if not compressing:
-                    got = state.cpu().view(-1, 2 * full_dim)[dstate_row(b, pos)]
+                    got = state_cpu[dstate_row(b, pos)]
                     try:
-                        torch.testing.assert_close(got[:full_dim], tok_kv.cpu()[0],
+                        torch.testing.assert_close(got[:full_dim], tok_kv_cpu,
                                                    atol=STRICT_ATOL, rtol=STRICT_RTOL)
                         torch.testing.assert_close(got[full_dim:], sc_ape, atol=STRICT_ATOL, rtol=STRICT_RTOL)
                         logging.info(f'  PASS decode state ({name}) req={b} pos={pos}: '
@@ -893,7 +913,7 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
                         ok_all = False
                         logging.error(f'  FAIL decode state ({name}) req={b} pos={pos}: {e}')
                         logging.error(f'  kv max diff: '
-                                      f'{(got[:full_dim] - tok_kv.cpu()[0]).abs().max().item()}')
+                                      f'{(got[:full_dim] - tok_kv_cpu).abs().max().item()}')
                         logging.error(f'  sc+ape max diff: '
                                       f'{(got[full_dim:] - sc_ape).abs().max().item()}')
                 else:
@@ -903,7 +923,12 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
                     # with cached_lens=0; the bStart=0 decode first-window case is
                     # covered by run_decode_first_window_test.
                     st_now = state.view(-1, 2 * full_dim)
-                    sr = torch.stack([st_now[dstate_row(b, pp)] for pp in range(pos + 1)])
+                    # host-built index (NPU int arithmetic on the index tensor
+                    # triggers a torch_npu internal-format UserWarning the
+                    # baseline never emits)
+                    phys = torch.tensor([dstate_row(b, pp) for pp in range(pos + 1)],
+                                        dtype=torch.int64, device=st_now.device)
+                    sr = st_now[phys]
                     ref = reference_decode_compress(sr, norm_w, freqs_cis, ratio, overlap,
                                                     HEAD_DIM, ROPE_HEAD_DIM, NORM_EPS,
                                                     test_dtype, pos)
@@ -937,25 +962,22 @@ def reference_decode_compress(state_rows, norm_w, freqs_cis, ratio, overlap,
     if overlap:
         # front [0,ratio) = prev window's [:head_dim] (first window padded 0/-inf),
         # back [ratio,2*ratio) = this window's [head_dim:].
-        kv_rows, sc_rows = [], []
+        back = state_rows[win_base:win_base + ratio]
         if has_history:
-            for k in range(ratio):
-                front = state_rows[win_base - ratio + k]
-                kv_rows.append(front[:head_dim])
-                sc_rows.append(front[full_dim:full_dim + head_dim])
+            front = state_rows[win_base - ratio:win_base]
+            kv_rows = torch.cat([front[:, :head_dim], back[:, head_dim:full_dim]], dim=0)
+            sc_rows = torch.cat([front[:, full_dim:full_dim + head_dim],
+                                 back[:, full_dim + head_dim:]], dim=0)
         else:
-            for k in range(ratio):
-                kv_rows.append(torch.zeros(head_dim, dtype=torch.float32))
-                sc_rows.append(torch.full((head_dim,), float('-inf'), dtype=torch.float32))
-        for k in range(ratio):
-            back = state_rows[win_base + k]
-            kv_rows.append(back[head_dim:full_dim])
-            sc_rows.append(back[full_dim + head_dim:])
+            kv_rows = torch.cat([torch.zeros(ratio, head_dim, dtype=torch.float32),
+                                 back[:, head_dim:full_dim]], dim=0)
+            sc_rows = torch.cat([torch.full((ratio, head_dim), float('-inf'),
+                                            dtype=torch.float32),
+                                 back[:, full_dim + head_dim:]], dim=0)
     else:
-        kv_rows = [state_rows[win_base + k][:full_dim] for k in range(ratio)]
-        sc_rows = [state_rows[win_base + k][full_dim:] for k in range(ratio)]
-    kv_rows = torch.stack(kv_rows)      # [merge_size, head_dim]
-    sc_rows = torch.stack(sc_rows)      # [merge_size, head_dim]
+        win = state_rows[win_base:win_base + ratio]
+        kv_rows = win[:, :full_dim]     # [merge_size, head_dim]
+        sc_rows = win[:, full_dim:]     # [merge_size, head_dim]
     w = (kv_rows * sc_rows.softmax(dim=0)).sum(dim=0)
     # mirror the kernel's bf16 round of the weighted sum before norm.
     w = w.to(test_dtype).float()
@@ -1018,6 +1040,7 @@ def run_decode_first_window_test(name, ratio, overlap, test_dtype, ape_enabled=T
         # cutoff=0: overlap's last-window spill does not apply, only the remainder
         # [0, ql_b) spills to abs pos 0..ql_b-1 — build_paged_state reproduces this.
         max_pos = 2 * ratio
+        state_blocks_per_req = max(1, (max_pos + STATE_BLOCK_SIZE - 1) // STATE_BLOCK_SIZE)
         state, state_block_table, state_slot_mapping = build_paged_state(
             full_dim, batch, max_pos, ql_b, [ql_b], ratio, overlap)
         # state_slot_mapping (and the other int control tensors above) are built on
@@ -1032,7 +1055,7 @@ def run_decode_first_window_test(name, ratio, overlap, test_dtype, ape_enabled=T
         torch.npu.synchronize()
 
         def dstate_row(req, p):
-            blk = state_block_table[req][p // STATE_BLOCK_SIZE].item()
+            blk = 1 + req * state_blocks_per_req + p // STATE_BLOCK_SIZE
             return blk * STATE_BLOCK_SIZE + p % STATE_BLOCK_SIZE
 
         st = state.view(-1, 2 * full_dim)

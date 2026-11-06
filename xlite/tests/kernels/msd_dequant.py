@@ -200,30 +200,30 @@ def check_determinism(m, n, num_experts, token_counts, runs=DETERMINISM_RUNS):
         counts = torch.tensor(counts_list, dtype=torch.int32, device=f"npu:{npu_devid}")
 
     out = torch.empty(m, n, dtype=torch.bfloat16, device=f"npu:{npu_devid}")
-    outs = []
-    for _ in range(runs):
+    out0 = None
+    all_same = True
+    max_diff = 0.0
+    fail_msgs = []
+    for i in range(runs):
         # NaN sentinel: any row the kernel fails to write stays detectable.
         out.fill_(float("nan"))
         torch.npu.synchronize()
         msd_merge_dequant(rt, y_merged, scale_biases, counts, per_token_scale, out)
         torch.npu.synchronize()
-        outs.append(out.clone())
-
-    all_same = True
-    max_diff = 0.0
-    fail_msgs = []
-    for i in range(1, runs):
-        diff = (outs[0].float() - outs[i].float()).abs()
+        if i == 0:
+            out0 = out.clone()
+            continue
+        diff = (out0.float() - out.float()).abs()
         md = diff.max().item()
         max_diff = max(max_diff, md)
-        neq = (outs[0] != outs[i]).sum().item()
+        neq = (out0 != out).sum().item()
         if neq > 0:
             all_same = False
-            idx = torch.where(outs[0] != outs[i])
+            idx = torch.where(out0 != out)
             r0, c0 = idx[0][0].item(), idx[1][0].item()
             fail_msgs.append(f"run{i} vs run0: {neq} elems differ, max_diff={md:.6f}, "
-                             f"first at [{r0},{c0}]: run0={outs[0][r0, c0].item()} "
-                             f"run{i}={outs[i][r0, c0].item()}")
+                             f"first at [{r0},{c0}]: run0={out0[r0, c0].item()} "
+                             f"run{i}={out[r0, c0].item()}")
     return all_same, max_diff, fail_msgs
 
 

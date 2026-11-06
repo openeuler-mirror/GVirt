@@ -16,8 +16,9 @@ def check_case(rt, dtype, state_dtype, batch, kh, vh, kd, vd, mode="legacy"):
     stride = logical + 128
     raw = (torch.randn(offset + pages * stride + 32) * 0.05).to("npu", state_dtype)
     state = raw.as_strided((pages, vh, vd, kd), (stride, vd * kd, kd, 1), offset)
-    reference = raw.cpu().clone()
+    reference = raw.cpu()
     ref_state = reference.as_strided(state.shape, state.stride(), offset)
+    before = reference.clone()
     tolerance = {
         torch.bfloat16: (0.025, 6e-4),
         torch.float16: (0.004, 1e-4),
@@ -73,19 +74,21 @@ def check_case(rt, dtype, state_dtype, batch, kh, vh, kd, vd, mode="legacy"):
         beta, g = beta_cpu.to("npu"), g_cpu.to("npu")
         out = torch.full_like(v, float("nan"))
         expected = torch.zeros_like(v_cpu)
+        g_exp = g_cpu.float().exp()
+        k_rep = k_cpu.float().repeat_interleave(vh // kh, dim=1)
+        q_rep = q_cpu.float().repeat_interleave(vh // kh, dim=1) / math.sqrt(kd)
         for b, page in enumerate(order):
             if page <= 0:
                 continue
-            old = ref_state[page].float() * g_cpu[b].float().exp()[:, None, None]
-            kk = k_cpu[b].float().repeat_interleave(vh // kh, dim=0)
-            qq = q_cpu[b].float().repeat_interleave(vh // kh, dim=0) / math.sqrt(kd)
+            old = ref_state[page].float() * g_exp[b][:, None, None]
+            kk = k_rep[b]
+            qq = q_rep[b]
             delta = (v_cpu[b].float() - (old * kk[:, None, :]).sum(-1)) * beta_cpu[
                 b
             ].float()[:, None]
             updated = old + delta[:, :, None] * kk[:, None, :]
             expected[b] = (updated * qq[:, None, :]).sum(-1).to(dtype)
             ref_state[page].copy_(updated.to(state_dtype))
-        before = raw.cpu().clone()
         torch.npu.synchronize()
         recurrent_gated_delta_rule_paged(
             rt, q, k, v, beta, g, state, out, indices, kh, vh, kd, vd, **metadata
@@ -111,6 +114,7 @@ def check_case(rt, dtype, state_dtype, batch, kh, vh, kd, vd, mode="legacy"):
                 assert torch.count_nonzero(out[b]).item() == 0, (
                     "null output must be exactly zero"
                 )
+        before = actual
     print(
         f"PASS {mode} {dtype}/{state_dtype}: B={batch} Hk/Hv={kh}/{vh} K/V={kd}/{vd}",
         flush=True,

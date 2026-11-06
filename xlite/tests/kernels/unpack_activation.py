@@ -51,7 +51,7 @@ def msd_split_activation_int8(activation_int8):
     # 补码恒等式 x = high4*16 + (low4_raw & 0x0F).
     high4 = (activation_int8.to(torch.int32) >> 4).to(torch.int8)
     # 低 4bit: 先转 uint8 消除符号位干扰，再取低 4bit，值域 [0, 15]
-    low4 = (activation_int8.clone() & 0x0F).to(torch.float16) - 8
+    low4 = (activation_int8 & 0x0F).to(torch.float16) - 8
     low4 = pack_int4_to_int8(low4.to(torch.int8))
     high4 = pack_int4_to_int8(high4)
     # 同一 token 的低/高 4bit 放相邻行: row 2r = low, row 2r+1 = high

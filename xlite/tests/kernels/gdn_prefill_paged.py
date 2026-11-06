@@ -44,21 +44,30 @@ def check_case(rt, dtype, state_dtype, lengths, kh=2, vh=6, kd=128, vd=128, fp32
         expected = torch.zeros_like(v)
         x, w = (torch.randn(tokens, channels) * .2).to(dtype), torch.randn(channels, width).to(dtype)
         cy = torch.zeros_like(x)
+        k_rep = k.float().repeat_interleave(vh // kh, dim=1)
+        q_rep = q.float().repeat_interleave(vh // kh, dim=1) / math.sqrt(kd)
+        g_exp = g.float().exp()
+        v_f = v.float()
+        beta_f = beta.float()
+        x_f = x.float()
+        w_t = w.float().T
         for b, page in enumerate(pages):
             if page <= 0 or lengths[b] == 0:
                 continue
             st = ref_state[page].float().clone() if flags[b] else torch.zeros_like(ref_state[page]).float()
             history = ref_conv[page].float().clone() if flags[b] else torch.zeros_like(ref_conv[page]).float()
-            for t in range(bounds[b], bounds[b + 1]):
-                kk = k[t].float().repeat_interleave(vh // kh, dim=0)
-                qq = q[t].float().repeat_interleave(vh // kh, dim=0) / math.sqrt(kd)
-                st *= g[t].float().exp()[:, None, None]
-                delta = (v[t].float() - (st * kk[:, None]).sum(-1)) * beta[t].float()[:, None]
+            lo, hi = bounds[b], bounds[b + 1]
+            seq = torch.cat((history, x_f[lo:hi]))
+            for j, t in enumerate(range(lo, hi)):
+                kk = k_rep[t]
+                qq = q_rep[t]
+                st *= g_exp[t][:, None, None]
+                delta = (v_f[t] - (st * kk[:, None]).sum(-1)) * beta_f[t][:, None]
                 st += delta[:, :, None] * kk[:, None]
                 expected[t] = (st * qq[:, None]).sum(-1).to(dtype)
-                window = torch.cat((history, x[t:t + 1].float()))
-                cy[t] = torch.nn.functional.silu((window * w.float().T).sum(0).to(dtype).float()).to(dtype)
-                history = window[1:]
+                window = seq[j:j + width]
+                cy[t] = torch.nn.functional.silu((window * w_t).sum(0).to(dtype).float()).to(dtype)
+            history = seq[hi - lo:]
             ref_state[page].copy_(st.to(state_dtype))
             ref_conv[page].copy_(history.to(dtype))
         inputs = [t.to('npu') for t in (q.flatten(1), k.flatten(1), v.flatten(1), beta, g, x, w)]
@@ -68,18 +77,19 @@ def check_case(rt, dtype, state_dtype, lengths, kh=2, vh=6, kd=128, vd=128, fp32
         recurrent_gated_delta_rule_prefill_paged(rt, qn, kn, vn, bn, gn, state, out,
                                                 indices, starts, initial, kh, vh, kd, vd)
         conv1d_and_silu_prefill_paged(rt, xn, conv, wn, co, indices, starts, initial)
+        raw_cpu, cr_cpu = raw.cpu(), cr.cpu()
         torch.testing.assert_close(out.cpu(), expected.flatten(1), rtol=.025, atol=.001)
-        torch.testing.assert_close(raw.cpu(), ref_raw, rtol=.025, atol=.001)
+        torch.testing.assert_close(raw_cpu, ref_raw, rtol=.025, atol=.001)
         torch.testing.assert_close(co.cpu(), cy, rtol=.025, atol=.004)
-        torch.testing.assert_close(cr.cpu(), ref_cr, rtol=0, atol=0)
+        torch.testing.assert_close(cr_cpu, ref_cr, rtol=0, atol=0)
         # Check all unowned pages, null page, padding and storage guards exactly.
-        for actual, reference, tensor in ((raw, ref_raw, state), (cr, ref_cr, conv)):
+        for actual, reference, tensor in ((raw_cpu, ref_raw, state), (cr_cpu, ref_cr, conv)):
             mask = torch.zeros_like(reference, dtype=torch.bool)
             for b, page in enumerate(pages):
                 if page > 0 and lengths[b]:
                     offset = tensor.storage_offset() + page * tensor.stride(0)
                     mask[offset:offset + math.prod(tensor.shape[1:])] = True
-            assert torch.equal(actual.cpu()[~mask], reference[~mask])
+            assert torch.equal(actual[~mask], reference[~mask])
         flags = [1] * batch
         initial.fill_(1)
     # Decode directly from the same pages after prefill, without a cache conversion.
@@ -91,15 +101,19 @@ def check_case(rt, dtype, state_dtype, lengths, kh=2, vh=6, kd=128, vd=128, fp32
     gd = (-torch.rand(2, vh)).to('npu', torch.float32 if fp32_gates else dtype)
     output = torch.empty_like(vd_t)
     expected = torch.empty_like(output, device='cpu')
+    gd_f = gd.cpu().float()
+    kd_f = kd_t.cpu().float()
+    qd_f = qd.cpu().float()
+    vd_f = vd_t.cpu().float()
+    bd_f = bd.cpu().float()
     for b, page in enumerate([3, 1]):
-        st = ref_state[page].float() * gd[b].cpu().float().exp()[:, None, None]
-        kk = kd_t[b].cpu().float().repeat_interleave(vh // kh, dim=0)
-        qq = qd[b].cpu().float().repeat_interleave(vh // kh, dim=0) / math.sqrt(kd)
-        delta = (vd_t[b].cpu().float() - (st * kk[:, None]).sum(-1)) * bd[b].cpu().float()[:, None]
+        st = ref_state[page].float() * gd_f[b].exp()[:, None, None]
+        kk = kd_f[b].repeat_interleave(vh // kh, dim=0)
+        qq = qd_f[b].repeat_interleave(vh // kh, dim=0) / math.sqrt(kd)
+        delta = (vd_f[b] - (st * kk[:, None]).sum(-1)) * bd_f[b][:, None]
         st += delta[:, :, None] * kk[:, None]
         expected[b] = (st * qq[:, None]).sum(-1).to(dtype)
         ref_state[page].copy_(st.to(state_dtype))
-    torch.npu.synchronize()
     recurrent_gated_delta_rule_paged(rt, qd.flatten(1), kd_t.flatten(1), vd_t.flatten(1), bd, gd,
                                     state, output.flatten(1), ids, kh, vh, kd, vd)
     torch.testing.assert_close(output.cpu(), expected, rtol=.025, atol=.001)
@@ -114,7 +128,6 @@ def check_case(rt, dtype, state_dtype, lengths, kh=2, vh=6, kd=128, vd=128, fp32
         ref_conv[page].copy_(window[1:].to(dtype))
     xd_npu = xd.to('npu')
     yd = torch.empty_like(xd_npu)
-    torch.npu.synchronize()
     linear_att_conv_and_silu_paged(rt, xd_npu, conv, wn, yd, ids)
     torch.testing.assert_close(yd.cpu(), yd_ref, rtol=.025, atol=.004)
     torch.testing.assert_close(cr.cpu(), ref_cr, rtol=0, atol=0)

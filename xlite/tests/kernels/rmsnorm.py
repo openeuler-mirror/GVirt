@@ -38,14 +38,13 @@ for test_dtype in dtype_list:
     for has_bias in [True, False]:
         with torch.device("npu"):
             x = torch.randn(BATCH_SIZE, DIM, dtype=test_dtype)
-            x_standard = x.clone()
             weight = torch.randn(DIM, dtype=test_dtype)
             bias = torch.randn(DIM, dtype=test_dtype)
             y = torch.empty(BATCH_SIZE, DIM, dtype=test_dtype)
             z = torch.empty(BATCH_SIZE, DIM, dtype=test_dtype)
 
         # standard
-        standard = stand_rmsnorm(x_standard, weight, NORMEPS)
+        standard = stand_rmsnorm(x, weight, NORMEPS)
         if has_bias:
             standard = standard.add_(bias)
 
@@ -77,13 +76,12 @@ for test_dtype in dtype_list:
     for has_bias in [True, False]:
         with torch.device("npu"):
             x = torch.randn(BATCH_SIZE, SIZE1, dtype=test_dtype)
-            x_standard = x.clone()
             weight = torch.randn(DIM, dtype=test_dtype)
             bias1 = torch.randn(DIM, dtype=test_dtype)
             bias2 = torch.randn(DIM, dtype=test_dtype)
             y = x.clone()
 
-        x_split1, x_split2, x_split3 = x_standard.split([CNT * DIM, DIM, DIM], dim = 1)
+        x_split1, x_split2, x_split3 = x.split([CNT * DIM, DIM, DIM], dim = 1)
         x_split1 = x_split1.view(BATCH_SIZE, CNT, DIM)
         x_split2 = x_split2.view(BATCH_SIZE, 1, DIM)
         # standard

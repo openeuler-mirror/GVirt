@@ -31,9 +31,6 @@ from __future__ import absolute_import
 import logging
 import torch
 import torch_npu  # noqa: F401
-import math
-import numpy as np
-import warnings
 from typing import Iterable
 from xlite._C import Runtime, mla_v2
 from xlite._C import print as xlite_print
@@ -157,14 +154,10 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
 
             query_lens = torch.tensor(query_len_list, dtype=torch.int32).flatten()
             cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
-            query_lens_np = np.array(query_len_list)
-            query_start_loc_np = np.cumsum(query_lens_np) - query_lens_np
-            query_start_loc = torch.tensor(query_start_loc_np.tolist(), dtype=torch.int32).flatten()
+            query_start_loc = (query_lens.cumsum(0) - query_lens).int()
 
-            batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-            block_indices = np.arange(max_num_blocks, dtype=np.uint32)
-            block_tables_array = batch_indices * max_num_blocks + block_indices
-            block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32)
+            block_tables = (torch.arange(batch)[:, None] * max_num_blocks
+                            + torch.arange(max_num_blocks)).to(dtype=torch.int32)
 
             # mla_v2 inputs: pre-absorbed q_absorb + split qr (built after standard loop)
             q_absorb_xlite = torch.empty(total_query_len, n_heads, kv_lora_rank)
@@ -189,6 +182,8 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
         o_absorbs = []
         outputs = []
         q_absorb_list = []
+        qkc_list = []
+        qkr_list = []
         offset = 0
         for i in range(batch):
             qlen = query_len_list[i]
@@ -206,9 +201,11 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             q_absorb_list.append(q_absorb.squeeze(0))
 
             qkc = torch.einsum("bshc,btc->bsht", q_absorb, k_cache[i:i+1, :clen + qlen])
+            qkc_list.append(qkc)
 
             # compute QR * KR (KR is pe_cache, the RoPE'd key slice)
             qkr = torch.einsum("bshr,btr->bsht", q_rope, pe_cache[i:i+1, :clen + qlen])
+            qkr_list.append(qkr)
 
             # combine scores
             scores = qkc + qkr
@@ -243,29 +240,27 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
 
         # xlite: write per-sample KV into block cache
         for i in range(batch):
-            start = int(query_start_loc[i].item())
-            qlen = int(query_lens[i].item())
-            clen = int(cached_lens[i].item())
+            qlen = query_len_list[i]
+            clen = cached_lens_list[i]
 
             # extract this sample's k/pe
             current_k = k_cache[i:i+1, :qlen + clen]
             current_pe = pe_cache[i:i+1, :qlen + clen]
 
-            sample_cache_start = i * max_num_blocks
             total_len = clen + qlen
             num_blocks_needed = (total_len + BLOCK_SIZE - 1) // BLOCK_SIZE
-            for block_idx in range(num_blocks_needed):
-                seq_start = block_idx * BLOCK_SIZE
-                seq_end = min((block_idx + 1) * BLOCK_SIZE, total_len)
-                current_seq_len = seq_end - seq_start
-
-                cache_block_idx = sample_cache_start + block_idx
-                if cache_block_idx >= (i + 1) * max_num_blocks:
-                    warnings.warn(f"第{i}个样本的缓存块容量不足，无法容纳超长序列（需要{num_blocks_needed}块，仅分配{max_num_blocks}块）")
-                    break
-
-                k_cache_xlite[cache_block_idx, :current_seq_len] = current_k[:, seq_start:seq_end]
-                pe_cache_xlite[cache_block_idx, :current_seq_len] = current_pe[:, seq_start:seq_end]
+            sample_cache_start = i * max_num_blocks
+            if pitched:
+                for block_idx in range(num_blocks_needed):
+                    seq_start = block_idx * BLOCK_SIZE
+                    seq_end = min((block_idx + 1) * BLOCK_SIZE, total_len)
+                    k_cache_xlite[sample_cache_start + block_idx, :seq_end - seq_start] = current_k[:, seq_start:seq_end]
+                    pe_cache_xlite[sample_cache_start + block_idx, :seq_end - seq_start] = current_pe[:, seq_start:seq_end]
+            else:
+                dst_k = k_cache_xlite[sample_cache_start:sample_cache_start + num_blocks_needed].view(-1, kv_lora_rank)
+                dst_pe = pe_cache_xlite[sample_cache_start:sample_cache_start + num_blocks_needed].view(-1, rope_head_dim)
+                dst_k[:total_len] = current_k.flatten(0, 1)
+                dst_pe[:total_len] = current_pe.flatten(0, 1)
 
         # ----- mla_v2 kernel (wuk einsum + mla_v2 + wuv einsum) -----
         torch.npu.synchronize()
@@ -332,20 +327,14 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             # output_standard_with_topk (with WUV projection).
             o_absorbs_with_topk = []
             outputs_with_topk = []
-            q_offset = 0
             indices_offset = 0
             for i in range(batch):
                 qlen = query_len_list[i]
                 clen = cached_lens_list[i]
 
-                qWithQr_chunk = qWithQr_standard[q_offset: q_offset + qlen].unsqueeze(0)
-                q_offset += qlen
-
-                q_nope, q_rope = qWithQr_chunk.split([nope_head_dim, rope_head_dim], dim=-1)
-                # 复用第一个循环里已算好的 q_absorb（按 batch 索引）
-                q_absorb = q_absorb_list[i].unsqueeze(0)
-                qkc = torch.einsum("bshc,btc->bsht", q_absorb, k_cache[i:i+1, :clen + qlen])
-                qkr = torch.einsum("bshr,btr->bsht", q_rope, pe_cache[i:i+1, :clen + qlen])
+                # 复用第一个循环里已算好的 qkc/qkr（按 batch 索引）
+                qkc = qkc_list[i]
+                qkr = qkr_list[i]
                 scores = qkc + qkr
                 scores = scores * scale
 

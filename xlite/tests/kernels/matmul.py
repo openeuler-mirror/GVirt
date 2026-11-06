@@ -11,7 +11,6 @@ import torch
 import torch_npu  # noqa: F401
 from xlite._C import Runtime, matmul
 import torch.nn.functional as F
-from tests.models.weight_utils import matrix_nd2nz
 
 
 rt = Runtime(0, 500)
@@ -32,13 +31,13 @@ for weight_nz in [False, True]:
                             y_standard = y.transpose(0, 1).contiguous().reshape(n, k)
                         else:
                             y = torch.randn(n, k, dtype=dtype, device="npu:0")
-                            y_standard = y.clone()
+                            y_standard = y
                         z = torch.zeros(m, n, dtype=dtype, device="npu:0")
 
                         standard = F.linear(x, y_standard, None)
 
                         if weight_nz and dtype != torch.float:
-                            y = matrix_nd2nz(y)
+                            y = torch_npu.npu_format_cast(y, 29)
 
                         torch.npu.synchronize()
                         matmul(rt, x, y, z, weight_nz and dtype != torch.float, transpose)

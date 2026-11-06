@@ -12,7 +12,6 @@ from __future__ import absolute_import
 import logging
 import torch
 import torch_npu  # noqa: F401
-import numpy as np
 from xlite._C import Runtime, indexer_scores
 
 logging.getLogger().setLevel(logging.INFO)
@@ -73,17 +72,13 @@ for name, n_heads, head_dim, test_dtype in models:
 
             query_lens = torch.tensor(query_len_list, dtype=torch.int32).flatten()
             cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
-            query_lens_np = np.array(query_len_list)
-            query_start_loc_np = np.cumsum(query_lens_np) - query_lens_np
-            query_start_loc = torch.tensor(query_start_loc_np.tolist(), dtype=torch.int32).flatten()
+            query_start_loc = (query_lens.cumsum(0) - query_lens).int()
 
             # persistent buffer with stale trails (the op narrows to the
             # lens-derived width, pitch unchanged)
-            batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-            block_indices = np.arange(max_num_blocks, dtype=np.uint32)
-            valid = batch_indices * max_num_blocks + block_indices
+            valid = torch.arange(batch)[:, None] * max_num_blocks + torch.arange(max_num_blocks)
             padded = torch.zeros(batch, max_num_blocks + 3, dtype=torch.int32)
-            padded[:, :max_num_blocks] = torch.tensor(valid.tolist(), dtype=torch.int32)
+            padded[:, :max_num_blocks] = valid
             block_tables = padded
 
         # standard indexer_scores forward: process each sample with its own query_len and cached_len
@@ -120,19 +115,11 @@ for name, n_heads, head_dim, test_dtype in models:
             # extract this sample's k
             current_k = k_cache[i:i+1, :qlen + clen]
 
-            sample_cache_start = i * max_num_blocks
             total_len = clen + qlen
             num_blocks_needed = (total_len + BLOCK_SIZE - 1) // BLOCK_SIZE
-            for block_idx in range(num_blocks_needed):
-                seq_start = block_idx * BLOCK_SIZE
-                seq_end = min((block_idx + 1) * BLOCK_SIZE, total_len)
-                current_seq_len = seq_end - seq_start
-
-                cache_block_idx = sample_cache_start + block_idx
-                if cache_block_idx >= (i + 1) * max_num_blocks:
-                    break
-
-                k_cache_xlite[cache_block_idx, :current_seq_len] = current_k[:, seq_start:seq_end]
+            sample_cache_start = i * max_num_blocks
+            dst = k_cache_xlite[sample_cache_start:sample_cache_start + num_blocks_needed].view(-1, head_dim)
+            dst[:total_len] = current_k.flatten(0, 1)
 
         torch.npu.synchronize()
         indexer_scores(rt, q_xlite, k_cache_xlite, weight_xlite, scores_xlite,
