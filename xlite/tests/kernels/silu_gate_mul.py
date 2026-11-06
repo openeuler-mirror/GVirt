@@ -14,7 +14,7 @@ for dtype in (torch.bfloat16, torch.float16):
         out = torch.empty_like(gate)
         expected = (normed * torch.nn.functional.silu(gate.float())).to(dtype)
         torch.npu.synchronize()
-        silu_gate_mul(rt, normed, gate, out)
+        silu_gate_mul(rt=rt, normed=normed, gate=gate, out=out)
         torch.testing.assert_close(out.cpu(), expected.cpu(), rtol=.004, atol=.004)
         # Existing MHA public entry keeps its sigmoid semantics.
         attn = normed.to(dtype)

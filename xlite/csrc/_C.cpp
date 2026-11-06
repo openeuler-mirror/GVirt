@@ -3728,9 +3728,16 @@ PYBIND11_MODULE(_C, m)
     m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
           py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
           py::arg("num_v_heads"));
-    m.def("silu_gate_mul", &SiluGateMul);
-    m.def("recurrent_gated_delta_rule_prefill_paged", &RecurrentGatedDeltaRulePrefillPaged);
-    m.def("conv1d_and_silu_prefill_paged", &Conv1dAndSiLUPrefillPaged);
+    m.def("silu_gate_mul", &SiluGateMul, py::arg("rt"), py::arg("normed"), py::arg("gate"),
+          py::arg("out"));
+    m.def("recurrent_gated_delta_rule_prefill_paged", &RecurrentGatedDeltaRulePrefillPaged,
+          py::arg("rt"), py::arg("query"), py::arg("key"), py::arg("value"), py::arg("beta"),
+          py::arg("g"), py::arg("state"), py::arg("out"), py::arg("indices"), py::arg("starts"),
+          py::arg("initial"), py::arg("num_key_heads"), py::arg("num_value_heads"),
+          py::arg("k_dim"), py::arg("v_dim"));
+    m.def("conv1d_and_silu_prefill_paged", &Conv1dAndSiLUPrefillPaged, py::arg("rt"),
+          py::arg("input"), py::arg("state"), py::arg("weight"), py::arg("output"),
+          py::arg("indices"), py::arg("starts"), py::arg("initial"));
     m.def("recurrent_gated_delta_rule_paged", &RecurrentGatedDeltaRulePaged, py::arg("rt"),
           py::arg("query"), py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"),
           py::arg("state"), py::arg("out"), py::arg("state_indices"), py::arg("num_key_heads"),

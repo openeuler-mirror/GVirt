@@ -74,9 +74,13 @@ def check_case(rt, dtype, state_dtype, lengths, kh=2, vh=6, kd=128, vd=128, fp32
         qn, kn, vn, bn, gn, xn, wn = inputs
         out, co = torch.full_like(vn, float('nan')), torch.full_like(xn, float('nan'))
         torch.npu.synchronize()
-        recurrent_gated_delta_rule_prefill_paged(rt, qn, kn, vn, bn, gn, state, out,
-                                                indices, starts, initial, kh, vh, kd, vd)
-        conv1d_and_silu_prefill_paged(rt, xn, conv, wn, co, indices, starts, initial)
+        recurrent_gated_delta_rule_prefill_paged(
+            rt=rt, query=qn, key=kn, value=vn, beta=bn, g=gn, state=state, out=out,
+            indices=indices, starts=starts, initial=initial,
+            num_key_heads=kh, num_value_heads=vh, k_dim=kd, v_dim=vd)
+        conv1d_and_silu_prefill_paged(
+            rt=rt, input=xn, state=conv, weight=wn, output=co,
+            indices=indices, starts=starts, initial=initial)
         raw_cpu, cr_cpu = raw.cpu(), cr.cpu()
         torch.testing.assert_close(out.cpu(), expected.flatten(1), rtol=.025, atol=.001)
         torch.testing.assert_close(raw_cpu, ref_raw, rtol=.025, atol=.001)

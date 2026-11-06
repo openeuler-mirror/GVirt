@@ -4454,11 +4454,8 @@ def hc_pre(
     """
     ...
 
-def silu_gate_mul(rt: Runtime, normed: torch.Tensor, gate: torch.Tensor, out: torch.Tensor, /) -> None:
-    """FP32 normed times SiLU(gate), rounded once to BF16/FP16 out; all [T,D].
-
-    Positional-only (the binding exposes no keyword names).
-    """
+def silu_gate_mul(rt: Runtime, normed: torch.Tensor, gate: torch.Tensor, out: torch.Tensor) -> None:
+    """FP32 normed times SiLU(gate), rounded once to BF16/FP16 out; all [T,D]."""
     ...
 
 def recurrent_gated_delta_rule_prefill_paged(
@@ -4466,7 +4463,6 @@ def recurrent_gated_delta_rule_prefill_paged(
     beta: torch.Tensor, g: torch.Tensor, state: torch.Tensor, out: torch.Tensor,
     indices: torch.Tensor, starts: torch.Tensor, initial: torch.Tensor,
     num_key_heads: int, num_value_heads: int, k_dim: int, v_dim: int,
-    /,
 ) -> None: ...
 
 
@@ -4474,13 +4470,11 @@ def recurrent_gated_delta_rule_prefill_paged(
 def conv1d_and_silu_prefill_paged(
     rt: Runtime, input: torch.Tensor, state: torch.Tensor, weight: torch.Tensor,
     output: torch.Tensor, indices: torch.Tensor, starts: torch.Tensor, initial: torch.Tensor,
-    /,
 ) -> None:
     """Packed [T,C] Conv/SiLU on native [P,W-1,C] pages.
 
     Starts is contiguous INT32[B+1], initial is INT32[B]. Initial zero ignores
     prior state. Empty segments and null pages leave all state unchanged.
     Conv rounds to activation dtype before SiLU in this Prefill path.
-    Positional-only (the binding exposes no keyword names).
     """
     ...
