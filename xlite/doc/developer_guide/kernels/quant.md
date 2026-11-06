@@ -4,7 +4,7 @@
 
 静态 per-channel 量化:对 `[m, k]` 的 BF16 激活矩阵按列(channel)施加预先标定好的 scale/offset,转成 INT8。计算式:
 
-```
+```text
 out = int8(x * scale_reciprocal + offset)
 ```
 

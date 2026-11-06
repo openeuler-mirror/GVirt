@@ -4,7 +4,7 @@
 
 C8 缓存写入算子(compressor 路径):把连续 BF16 行——即 compressor 归一化 + rope 之后的 `weightedSum`——按行量化后散写到分页 INT8 key cache,并同步写每 slot 一个 fp16 scale。slot 寻址为 block 分层(`slot = block * blockSize + offset`,行落在 `block * kCacheStride + offset * dim`,scale 落在 `block * kScaleCacheStride + offset`)——DSV4 的 vllm 池把 K 与 scale 按页打包进同一分配(stride[0] = blockSize * (dim + 2)),dense 自建池则退化回 flat 寻址;量化语义与 [indexer_prepare_c8](indexer_prepare_c8.md) 的 K 路径逐字节一致,两个算子写出的 C8 缓存对 [indexer_topk](indexer_topk.md) 的 C8 reader 可互换:
 
-```
+```text
 scale_row  = abs_max(x_row) / 127        (fp16, 写 kScaleCache[block*kScaleCacheStride + offset])
 factor     = abs_max == 0 ? 0 : 127 / abs_max
 out        = round_nearest(x_row * factor)   (int8, 写 kCache[block*kCacheStride + offset*dim : +dim])

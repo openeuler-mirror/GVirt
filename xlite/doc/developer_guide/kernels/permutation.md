@@ -7,9 +7,9 @@ MoE token 重排（permutation）：按路由位图 `routing_map` 将每个 toke
 ## 输入输出参数
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
-|------|------|-------|-------|------|
+| ------ | ------ | ------- | ------- | ------ |
 | input (in) | 输入 | [num_tokens, dim] | bfloat16 / int8 | 原始 token hidden。元素大小由 dtype 推断（`elem_bytes = XDtypeBit(in.dtype)/8`）：bfloat16=2B（legacy），int8=1B（w8a8 dispatch 量化前置路径，行已预先量化）。int8 时 `dim` 须为 32 的倍数（32B MTE 行对齐） |
-| routing_map (routing) | 输入 | [num_tokens, n_routed_experts] 位图（BIT1，每行 n_routed_experts/8 字节） | uint8 位图 | token→专家路由结果，bit(t*n_routed_experts+e)=1 表示 token t 路由到专家 e（测试中由 int32 张量按位拼出，`tests/kernels/permutation.py` 位图构造段，关键字 `routing_xlite[batch, m] |= mask`） |
+| routing_map (routing) | 输入 | [num_tokens, n_routed_experts] 位图（BIT1，每行 n_routed_experts/8 字节） | uint8 位图 | token→专家路由结果，bit(t*n_routed_experts+e)=1 表示 token t 路由到专家 e（测试中由 int32 张量按位拼出，`tests/kernels/permutation.py` 位图构造段，关键字 `routing_xlite[batch, m] \|= mask`） |
 | output (out) | 输出 | [max_expert_sorted, dim] | 同 input | 按专家分组排序后的 token；第 e 个专家的段起始偏移由 unp_idx 的 starts 列给出 |
 | unp_idx | 输出 | [n_routed_experts, num_tokens+1] | int32 | 布局见下文：`[e, t]` = token t 在专家 e 段内的行号；最后一列为各专家段起始偏移；`[0,0]` 被复用存放总 token 数 |
 | counts | 输出 | [n_routed_experts, 1] | int32 | 每个专家收到的 token 数（host 侧取 `counts.shape[0]` 作 n_routed_experts，`csrc/op.cpp` 的 `XliteOpPermutation`，关键字 `counts.shape[0]`） |

@@ -87,7 +87,7 @@ flagId 8 的选择避开了 matmul（EVENT_ID0-5）与 dequant（EVENT_ID0-1）�
 
 ### 数据流总览
 
-```
+```text
 AIC block b:  x,y GM --MTE2--> L1 --MTE1--> L0A/L0B --Mmad--> L0C(int32)
               --FIX: ×deqScale(VDEQF16)--> GM[out 的 fp16 视图, tile (mIdx_aic, nIdx)]
               --CrossCoreSetFlag<0x2, PIPE_FIX>(8)-->

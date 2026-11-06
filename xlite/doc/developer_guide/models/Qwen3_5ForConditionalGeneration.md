@@ -245,7 +245,7 @@ flowchart TB
 - **L2Norm + 分组头**：q/k 各按 `kHD=128` 逐头 L2 归一化；`nVH > nKH` 的分组头由递推 kernel 直接寻址（value head h 读 key head `h // (nVH/nKH)`），无需 repeat_interleave 扩展 q/k。35B-A3B 分组 2（nKH=2, nVH=4），122B-A10B 分组 4（nKH=1, nVH=4）。
 - **递推（无 chunk）**：逐 token 串行递推（非 FLA chunk WY 矩阵乘算法），并行按（序列 × 头 × V tile）。每个 token（[recurrent_gated_delta_rule_paged.md](../kernels/recurrent_gated_delta_rule_paged.md)，S ∈ R^{vHD×kHD}）：
 
-```
+```text
 S ← S · exp(g_t)              状态衰减
 δ_t = β_t · (v_t − S·k_t)     预测误差
 S ← S + δ_t · k_tᵀ            状态更新

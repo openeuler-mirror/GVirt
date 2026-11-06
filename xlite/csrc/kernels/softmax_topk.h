@@ -19,12 +19,12 @@ class SoftmaxTopK
 public:
     __aicore__ inline SoftmaxTopK() = default;
 
-    __aicore__ inline void Init(GM_ADDR socres, GM_ADDR indices, GM_ADDR weightsMap,
+    __aicore__ inline void Init(GM_ADDR scores, GM_ADDR indices, GM_ADDR weightsMap,
                                 GM_ADDR routingMap, uint32_t numTokens, uint32_t numRoutedExperts,
                                 uint32_t topK, bool normTopKProb)
     {
         set_mask_norm();
-        this->socresGm = (__gm__ Dtype *)socres;
+        this->socresGm = (__gm__ Dtype *)scores;
         this->weightsMapGm = (__gm__ Dtype *)weightsMap;
         this->indicesGm = (__gm__ uint32_t *)indices;
         this->routingMapGm = (__gm__ uint32_t *)routingMap;
@@ -323,18 +323,18 @@ private:
 
 #define SOFTMAX_TOPK_FUNC_DEFINE(dtype)                                                     \
     extern "C" __global__ __aicore__ void softmax_topk_##dtype(                             \
-        GM_ADDR socres, GM_ADDR indices, GM_ADDR weightsMap, GM_ADDR routingMap,            \
+        GM_ADDR scores, GM_ADDR indices, GM_ADDR weightsMap, GM_ADDR routingMap,            \
         uint32_t numTokens, uint32_t numRoutedExperts, uint32_t topK, bool normTopKProb)    \
     {                                                                                       \
         SoftmaxTopK<dtype> op;                                                              \
-        op.Init(socres, indices, weightsMap, routingMap, numTokens, numRoutedExperts, topK, \
+        op.Init(scores, indices, weightsMap, routingMap, numTokens, numRoutedExperts, topK, \
                 normTopKProb);                                                              \
         op.Run();                                                                           \
     }
 #else
 #define SOFTMAX_TOPK_FUNC_DEFINE(dtype)                                                  \
     extern "C" __global__ __aicore__ void softmax_topk_##dtype(                          \
-        GM_ADDR socres, GM_ADDR indices, GM_ADDR weightsMap, GM_ADDR routingMap,         \
+        GM_ADDR scores, GM_ADDR indices, GM_ADDR weightsMap, GM_ADDR routingMap,         \
         uint32_t numTokens, uint32_t numRoutedExperts, uint32_t topK, bool normTopKProb) \
     {                                                                                    \
     }

@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional
 
 import torch
 import torch.distributed as dist
@@ -82,7 +82,7 @@ class ModelArgs:
     o_groups: int = 8
     o_lora_rank: int = 1024
     window_size: int = 128
-    compress_ratios: Tuple[int] = (
+    compress_ratios: tuple[int] = (
         0,
         0,
         4,
@@ -660,7 +660,7 @@ class Gate(nn.Module):
         else:
             self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32))
 
-    def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
         scores = F.linear(x.float(), self.weight.float())
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1)
@@ -956,7 +956,6 @@ class Transformer(nn.Module):
         )
 
         n_local_experts = args.n_routed_experts // args.moe_ep_size
-        moe_tp_id = global_rank % args.moe_tp_size
         moe_ep_id = global_rank // args.moe_tp_size
 
         param_dict = {name: param for name, param in self.named_parameters()}

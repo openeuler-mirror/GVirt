@@ -33,9 +33,10 @@ for dtype in (torch.bfloat16, torch.float16):
             except AssertionError:
                 print(f"FAILED MHA gate {dtype} shape={shape} gate={tuple(raw_gate.shape)}", flush=True)
                 raise
-        print(f'PASS GDN SiLU FP32 norm + MHA sigmoid: {dtype} {shape}', flush=True)
-print('PASS 10 SiLU-gate and 20 MHA sigmoid regression cases', flush=True)
-from xlite._C import rmsnorm
+        print(f"PASS GDN SiLU FP32 norm + MHA sigmoid: {dtype} {shape}", flush=True)
+print("PASS 10 SiLU-gate and 20 MHA sigmoid regression cases", flush=True)
+from xlite._C import rmsnorm  # noqa: E402 (runs after the preceding regression cases)
+
 for dtype in (torch.bfloat16, torch.float16):
     for scale in (1.0, 0.001):
         x = (torch.randn(17, 48 * 128, device="npu") * scale).to(dtype)

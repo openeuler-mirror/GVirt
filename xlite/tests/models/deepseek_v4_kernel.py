@@ -37,7 +37,6 @@ def sparse_attn(
         o: [b, s, h, d] bf16
     """
     b, s, h, d = q.size()
-    n = kv.size(1)
     topk = topk_idxs.size(-1)
 
     # Pad heads to >=16 only matters for the tilelang kernel; pure-torch path is fine with any h.

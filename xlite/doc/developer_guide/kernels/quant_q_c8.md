@@ -4,7 +4,7 @@
 
 C8 查询量化算子(V4 indexer 路径):把连续 BF16 行——rope 之后但**未**做 rotate_activation 的 indexer Q——量化为稠密 INT8 `q8`,并把逐行去量化因子与逐 (token, head) 投影权重融合成 fp16 `scaledWeights`,二者正是 [indexer_topk](indexer_topk.md) C8(int8)分支消费的 `q` 与 `weight` 输入。行号 `r` 对应 `(token, head) = (r / heads, r % heads)`,`q`、`headWeight`、`q8`、`scaledWeights` 全部使用同一扁平行序,无需 slot mapping。
 
-```
+```text
 absmax      = abs_max(q_row)                     (不施加 rotate)
 q8_row      = round_nearest(q_row * 127/absmax)  (与 indexer_prepare_c8 / quant_cache_c8 逐字节一致;零行 → 全零)
 scaledWeights[r] = fp16(headWeight[r] * absmax * rotateScale / 127)

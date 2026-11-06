@@ -79,7 +79,7 @@ flowchart TB
   x(["x [T,H]  (残差基准, 不更新)"]):::tensor
   co{"enableCommOptimize?"}:::dec
   naive["ForwardLayersNaive"]:::op
-  coo["ForwardLayersCommOptimize<br/>TP 通信切片化 (ReduceScatter + AllGather)<br/>层内计算同构"]:::op
+  commopt["ForwardLayersCommOptimize<br/>TP 通信切片化 (ReduceScatter + AllGather)<br/>层内计算同构"]:::op
 
   subgraph loop ["loop · 对每层 i = 0 .. nLayers-1 (62 层同构)"]
     direction TB
@@ -106,9 +106,9 @@ flowchart TB
 
   in --> embed --> x --> co
   co -- "否: currTokens < 6144 (run.sh)" --> naive
-  co -- "是: TP>1 且 (currTokens ≥ 6144<br/>或 multiTaskParallel)" --> coo
+  co -- "是: TP>1 且 (currTokens ≥ 6144<br/>或 multiTaskParallel)" --> commopt
   naive --> loop
-  coo --> loop
+  commopt --> loop
   loop --> finalnorm --> hs --> head --> tp2
   tp2 -- "TP=1: 跳过" --> logits
   tp2 -- "TP>1 (run.sh: TP=16)" --> ag

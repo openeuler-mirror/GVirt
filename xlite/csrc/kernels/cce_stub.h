@@ -2490,7 +2490,7 @@ int64_t get_vms4_sr();
 void hebcd_out_to_ub(__ubuf__ void *dst, __gm__ void *src, __gm__ void *src_head, uint64_t config1);
 void hebcd_out_to_ub(__ubuf__ void *dst, __gm__ void *src, __gm__ void *src_head,
                      uint8_t pictureFormat, uint8_t scrambleMode, bool readSequence, bool rawMode,
-                     uint8_t smmu_tib_hit_sid, uint16_t width, uint16_t heigth, uint8_t headerLine,
+                     uint8_t smmu_tib_hit_sid, uint16_t width, uint16_t height, uint8_t headerLine,
                      uint16_t payload);
 void hebce_l1_to_out(__gm__ void *dst_compressed, __gm__ void *dst_out, __cbuf__ void *src,
                      uint64_t config1);
@@ -6880,22 +6880,22 @@ void vcpadd(vector_f16 &dst, vector_f16 src, vector_bool pg, Literal mode);
 void vcpadd(vector_f32 &dst, vector_f32 src, vector_bool pg, Literal mode);
 void vcpadd(vector_f16 &dst, vector_f16 src, vector_bool pg, int32_t mode);
 void vcpadd(vector_f32 &dst, vector_f32 src, vector_bool pg, int32_t mode);
-void vcgmax(__ubuf__ half *dst, __ubuf__ half *src, uint64_t confg);
+void vcgmax(__ubuf__ half *dst, __ubuf__ half *src, uint64_t config);
 void vcgmax(__ubuf__ half *dst, __ubuf__ half *src, uint8_t repeat, uint16_t dstRepeatStride,
             uint16_t src0Stride, uint16_t src1Stride);
 void vcgmax(__ubuf__ half *dst, __ubuf__ half *src, uint8_t repeat, uint16_t dstRepeatStride,
             uint16_t src0Stride, uint16_t src1Stride, bool repeatStrideMode, bool strideSizeMode);
-void vcgmax(__ubuf__ float *dst, __ubuf__ float *src, uint64_t confg);
+void vcgmax(__ubuf__ float *dst, __ubuf__ float *src, uint64_t config);
 void vcgmax(__ubuf__ float *dst, __ubuf__ float *src, uint8_t repeat, uint16_t dstRepeatStride,
             uint16_t src0Stride, uint16_t src1Stride);
 void vcgmax(__ubuf__ float *dst, __ubuf__ float *src, uint8_t repeat, uint16_t dstRepeatStride,
             uint16_t src0Stride, uint16_t src1Stride, bool repeatStrideMode, bool strideSizeMode);
-void vcgmin(__ubuf__ half *dst, __ubuf__ half *src, uint64_t confg);
+void vcgmin(__ubuf__ half *dst, __ubuf__ half *src, uint64_t config);
 void vcgmin(__ubuf__ half *dst, __ubuf__ half *src, uint8_t repeat, uint16_t dstRepeatStride,
             uint16_t src0Stride, uint16_t src1Stride);
 void vcgmin(__ubuf__ half *dst, __ubuf__ half *src, uint8_t repeat, uint16_t dstRepeatStride,
             uint16_t src0Stride, uint16_t src1Stride, bool repeatStrideMode, bool strideSizeMode);
-void vcgmin(__ubuf__ float *dst, __ubuf__ float *src, uint64_t confg);
+void vcgmin(__ubuf__ float *dst, __ubuf__ float *src, uint64_t config);
 void vcgmin(__ubuf__ float *dst, __ubuf__ float *src, uint8_t repeat, uint16_t dstRepeatStride,
             uint16_t src0Stride, uint16_t src1Stride);
 void vcgmin(__ubuf__ float *dst, __ubuf__ float *src, uint8_t repeat, uint16_t dstRepeatStride,
@@ -8919,11 +8919,11 @@ void nddma_out_to_ub_b32(__ubuf__ void *dst, __gm__ void *src, uint8_t sid, uint
                          bool constant_padding_ctl, uint8_t l2_cache_ctl);
 void winograd_conv(__cc__ int32_t *dst, __ca__ int16_t *src0, __cb__ int8_t *src1, uint64_t config);
 void winograd_conv(__cc__ int32_t *dst, __ca__ int16_t *src0, __cb__ int8_t *src1, uint16_t inM,
-                   uint16_t inK, uint16_t inN, uint8_t addr_SMASK, uint8_t flag, uint8_t contrl,
+                   uint16_t inK, uint16_t inN, uint8_t addr_SMASK, uint8_t flag, uint8_t control,
                    bool acc_mode);
 void winograd_conv(__cc__ int32_t *dst, __ca__ int8_t *src0, __cb__ int8_t *src1, uint64_t config);
 void winograd_conv(__cc__ int32_t *dst, __ca__ int8_t *src0, __cb__ int8_t *src1, uint16_t inM,
-                   uint16_t inK, uint16_t inN, uint8_t addr_SMASK, uint8_t flag, uint8_t contrl,
+                   uint16_t inK, uint16_t inN, uint8_t addr_SMASK, uint8_t flag, uint8_t control,
                    bool acc_mode);
 void *get_workspace(int32_t size);
 void set_core_type(int idx);

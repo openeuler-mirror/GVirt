@@ -12,6 +12,7 @@
 import argparse
 import collections
 import concurrent.futures
+import contextlib
 import csv
 import json
 import os
@@ -1110,19 +1111,15 @@ def _procs_alive(patterns) -> bool:
 def kill_server(proc: subprocess.Popen, port: int):
     """停服务: 先 SIGTERM 主进程组, 再杀占用端口的残留进程."""
     if proc.poll() is None:
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
         for _ in range(10):
             if proc.poll() is not None:
                 break
             time.sleep(2)
         if proc.poll() is None:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
     # 残留 vllm worker 进程清理
     time.sleep(5)
     subprocess.run("pkill -9 -f 'vllm.entrypoints.openai.api_server' || true", shell=True)
@@ -1272,10 +1269,8 @@ def stop_kv_pool(proc):
             break
         time.sleep(2)
     if proc.poll() is None:
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
 
 
 def append_result(

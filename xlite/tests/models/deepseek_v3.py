@@ -13,7 +13,7 @@ import queue
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional
 
 import torch
 import torch.distributed as dist
@@ -852,12 +852,8 @@ class MLA(nn.Module):
             self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim)
             self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
             self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
-        self.q_norm = RMSNorm(
-            self.q_lora_rank, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False
-        )
-        self.kv_norm = RMSNorm(
-            self.kv_lora_rank, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False
-        )
+        self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps, bias=args.quantization in ("w8a8", "w4a8"))
+        self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps, bias=args.quantization in ("w8a8", "w4a8"))
         # wkv_b 保持 FLOAT（根据 quant_model_description.json）
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
         self.softmax_scale = self.qk_head_dim**-0.5
@@ -1069,7 +1065,7 @@ class Gate(nn.Module):
             else None
         )
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for the gating mechanism.
 
@@ -1260,8 +1256,8 @@ class Block(nn.Module):
         super().__init__()
         self.attn = MLA(layer_id, args)
         self.ffn = MLP(args.dim, args.inter_dim, args) if layer_id < args.n_dense_layers else MoE(args)
-        self.attn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
-        self.ffn_norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
+        self.attn_norm = RMSNorm(args.dim, args.norm_eps, bias=args.quantization in ("w8a8", "w4a8"))
+        self.ffn_norm = RMSNorm(args.dim, args.norm_eps, bias=args.quantization in ("w8a8", "w4a8"))
         self.n_dense_layers = args.n_dense_layers
         self.layer_id = layer_id
 
@@ -1374,7 +1370,7 @@ class DeepSeek_V3(nn.Module):
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
-        self.norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
+        self.norm = RMSNorm(args.dim, args.norm_eps, bias=args.quantization in ("w8a8", "w4a8"))
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
         self.multi_task_parallel = os.getenv("MULTI_TASK_PARALLEL", "0") == "1"
@@ -1990,13 +1986,14 @@ class DeepSeek_V3(nn.Module):
                 else torch.empty(1)
             )
 
-        self.xlite_model.index_q_b = [indexer_w(l, lambda i: i.wq_b.weight) for l in self.layers]
+        self.xlite_model.index_q_b = [indexer_w(layer, lambda i: i.wq_b.weight) for layer in self.layers]
         self.xlite_model.index_k_weights_proj = [
-            indexer_w(l, lambda i: i.wk_weights_proj.weight.to(dtype=torch.get_default_dtype())) for l in self.layers
+            indexer_w(layer, lambda i: i.wk_weights_proj.weight.to(dtype=torch.get_default_dtype()))
+            for layer in self.layers
         ]
         # indexer norm weight and bias should be in float32 or the default dtype
-        self.xlite_model.index_k_norm = [indexer_w(l, lambda i: i.k_norm.weight) for l in self.layers]
-        self.xlite_model.index_k_norm_bias = [indexer_w(l, lambda i: i.k_norm.bias) for l in self.layers]
+        self.xlite_model.index_k_norm = [indexer_w(layer, lambda i: i.k_norm.weight) for layer in self.layers]
+        self.xlite_model.index_k_norm_bias = [indexer_w(layer, lambda i: i.k_norm.bias) for layer in self.layers]
         self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [self.layers[i].ffn.w13.weight for i in range(args.n_dense_layers)]
         self.xlite_model.mlp_down = [self.layers[i].ffn.w2.weight for i in range(args.n_dense_layers)]
@@ -2032,7 +2029,7 @@ class DeepSeek_V3(nn.Module):
                 self.layers[i].attn.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.wq_b.weight.scale[0::1]
                 self.layers[i].attn.wo.weight.xlite_scale[0::2] = self.layers[i].attn.wo.weight.scale[0::1]
             self.xlite_model.index_q_b_deq_scale = [
-                indexer_w(l, lambda i: i.wq_b.weight.xlite_scale) for l in self.layers
+                indexer_w(layer, lambda i: i.wq_b.weight.xlite_scale) for layer in self.layers
             ]
             self.xlite_model.mla_qkv_a_deq_scale = [layer.attn.wqkv_a.weight.xlite_scale for layer in self.layers]
             self.xlite_model.mla_q_b_deq_scale = [layer.attn.wq_b.weight.xlite_scale for layer in self.layers]
@@ -2049,13 +2046,13 @@ class DeepSeek_V3(nn.Module):
             # InitMatmulWeight skips them (weightLayer < iScale.size() == 0).
             if args.quantization == "w8a8":
                 self.xlite_model.index_q_b_input_scale = [
-                    indexer_w(l, lambda i: i.wq_b.weight.input_scale.reciprocal()) for l in self.layers
+                    indexer_w(layer, lambda i: i.wq_b.weight.input_scale.reciprocal()) for layer in self.layers
                 ]
                 self.xlite_model.index_q_b_input_offset = [
-                    indexer_w(l, lambda i: i.wq_b.weight.input_offset) for l in self.layers
+                    indexer_w(layer, lambda i: i.wq_b.weight.input_offset) for layer in self.layers
                 ]
                 self.xlite_model.index_q_b_quant_bias = [
-                    indexer_w(l, lambda i: i.wq_b.weight.quant_bias) for l in self.layers
+                    indexer_w(layer, lambda i: i.wq_b.weight.quant_bias) for layer in self.layers
                 ]
                 self.xlite_model.mla_qkv_a_input_scale = [
                     layer.attn.wqkv_a.weight.input_scale.reciprocal() for layer in self.layers

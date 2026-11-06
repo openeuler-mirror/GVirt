@@ -244,7 +244,7 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 - profiling 数据的保存位置为测试执行路径下的 profile_<模型>\_<测试模式>\_$(date +%m%d_%H%M%S)
 - 完成测试后，需要进行数据处理，转换方式为进入 profile 文件夹后执行以下命令
 
-```
+```bash
 python -c "from torch_npu.profiler.profiler import analyse; import glob; [analyse(p) for p in glob.glob('*_ascend_pt')]"
 ```
 

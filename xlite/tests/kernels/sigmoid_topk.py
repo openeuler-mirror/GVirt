@@ -113,7 +113,7 @@ for dtype in [torch.bfloat16, torch.float32]:
         try:
             # Compare scores and weights. Score values may become very close after applying sigmoid
             # function. As long as both algorithms select elements with close sigmoid values it does
-            # not matter which ones are choosen.
+            # not matter which ones are chosen.
             torch.testing.assert_close(standard_indices.to(dtype=torch.int32), xlite_indices, atol=1e-4, rtol=1e-2)
             torch.testing.assert_close(standard_weights, xlite_weights, atol=1e-4, rtol=1e-2)
         except AssertionError as e:

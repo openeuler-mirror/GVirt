@@ -11,7 +11,7 @@ import queue
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional
 
 import torch
 import torch.distributed as dist
@@ -677,7 +677,7 @@ class Gate(nn.Module):
         self.weight = nn.Parameter(torch.zeros(args.n_routed_experts, args.dim, dtype=dtype))
         self.norm_topk_prob = args.norm_topk_prob
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         scores = linear(x, self.weight)
         scores_float = scores.softmax(dim=-1, dtype=torch.float)
 

@@ -11,7 +11,7 @@ import queue
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional
 
 import torch
 import torch.distributed as dist
@@ -414,7 +414,7 @@ class Gate(nn.Module):
         topk_indices = torch.topk(scores_for_choice, k=self.topk, dim=-1, sorted=False)[1]
         return topk_indices
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for the gating mechanism.
 
@@ -422,7 +422,7 @@ class Gate(nn.Module):
             x (torch.Tensor): Input tensor.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Routing weights and selected expert indices.
+            tuple[torch.Tensor, torch.Tensor]: Routing weights and selected expert indices.
         """
         scores = linear(x.type(torch.float32), self.weight.type(torch.float32))
         scores = scores.sigmoid()
@@ -764,7 +764,7 @@ class GLM4MoE(nn.Module):
             f"vocab_size must be divisible by world_size (world_size={world_size})"
         )
 
-        self.xlite_weight_nz = True if forward_backend == "xlite" else False
+        self.xlite_weight_nz = forward_backend == "xlite"
 
         q_proj_shard_size = self.args.head_dim * self.args.n_heads // world_size
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)

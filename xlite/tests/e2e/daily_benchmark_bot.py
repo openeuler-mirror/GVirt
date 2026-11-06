@@ -88,7 +88,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 # 导入共享工具模块
 from daily_bot_utils import (
@@ -398,7 +398,7 @@ def run_offline_bench(report_subdir: Optional[Path] = None) -> Optional[Path]:
 
 
 # ====================== 离线 bench 报告解析函数 ======================
-def parse_offline_bench_report(report_path: Path) -> Dict:
+def parse_offline_bench_report(report_path: Path) -> dict:
     """
     解析离线 bench 报告文件 (run.sh bench 模式的 stdout)
 
@@ -457,7 +457,7 @@ def parse_offline_bench_report(report_path: Path) -> Dict:
 
 
 # ====================== 离线 bench 性能对比函数 ======================
-def compare_offline_metrics(current: Dict, baseline: Dict) -> Dict:
+def compare_offline_metrics(current: dict, baseline: dict) -> dict:
     """
     对比当前版本和基线版本的离线 bench 性能指标
 
@@ -528,7 +528,7 @@ def compare_offline_metrics(current: Dict, baseline: Dict) -> Dict:
 # ====================== 离线 bench 历史报告查找函数 ======================
 def get_previous_offline_report(
     input_len: int, output_len: int, batch_size: int
-) -> Tuple[Optional[Path], Optional[str]]:
+) -> tuple[Optional[Path], Optional[str]]:
     """
     获取基线版本指定离线 bench 场景的报告文件路径
 
@@ -568,7 +568,7 @@ def get_previous_offline_report(
 # ====================== 离线 bench 报告生成函数 ======================
 def generate_offline_report(
     model_name: str,
-    comparisons: List[Dict],
+    comparisons: list[dict],
     report_dir: Optional[Path] = None,
     model_index: int = 0,
     total_models: int = 1,
@@ -710,7 +710,7 @@ def generate_offline_report(
 
 
 # ====================== 报告解析函数 ======================
-def parse_benchmark_report(report_path: Path) -> Dict:
+def parse_benchmark_report(report_path: Path) -> dict:
     """
     解析基准测试报告文件
 
@@ -795,7 +795,7 @@ def parse_benchmark_report(report_path: Path) -> Dict:
             def safe_float(val):
                 try:
                     return float(val) if val != "N/A" else None
-                except:
+                except Exception:
                     return None
 
             # 构建指标数据
@@ -824,7 +824,7 @@ def parse_benchmark_report(report_path: Path) -> Dict:
 
 
 # ====================== 性能对比函数 ======================
-def compare_metrics(current: Dict, baseline: Dict) -> Dict:
+def compare_metrics(current: dict, baseline: dict) -> dict:
     """
     对比当前版本和基线版本的性能指标
 
@@ -951,7 +951,7 @@ def compare_metrics(current: Dict, baseline: Dict) -> Dict:
 # ====================== 报告生成函数 ======================
 def generate_model_report(
     model_name: str,
-    model_comparisons: List[Dict],
+    model_comparisons: list[dict],
     report_dir: Optional[Path] = None,
     model_index: int = 0,
     total_models: int = 1,
@@ -1120,7 +1120,7 @@ def generate_model_report(
 
 
 def build_no_change_report(
-    report_dir: Optional[Path], model_names: Optional[List[str]] = None, is_offline: bool = False
+    report_dir: Optional[Path], model_names: Optional[list[str]] = None, is_offline: bool = False
 ) -> str:
     """
     所有模型性能均无显著变化时生成汇总通知
@@ -1170,7 +1170,7 @@ def build_no_change_report(
 
 
 # ====================== 历史报告查找函数 ======================
-def extract_model_info(report_path: Path) -> Optional[Dict]:
+def extract_model_info(report_path: Path) -> Optional[dict]:
     """
     从报告文件名中提取模型信息
 
@@ -1195,7 +1195,7 @@ def extract_model_info(report_path: Path) -> Optional[Dict]:
 
 def get_previous_version_report(
     model_name: str, input_len: int, output_len: int
-) -> Tuple[Optional[Path], Optional[str]]:
+) -> tuple[Optional[Path], Optional[str]]:
     """
     获取基线版本指定模型的测试报告文件路径
 
@@ -1235,7 +1235,7 @@ def get_previous_version_report(
     return None, baseline_version
 
 
-def get_baseline_info() -> Dict:
+def get_baseline_info() -> dict:
     """
     获取基线版本信息
 
@@ -1326,7 +1326,7 @@ def seed_baseline_if_release(report_dir: Path) -> None:
 
 
 # ====================== 报告处理辅助函数 ======================
-def _process_online_reports(report_dir: Path, current_reports: List[Path]) -> List[Dict]:
+def _process_online_reports(report_dir: Path, current_reports: list[Path]) -> list[dict]:
     """
     解析 online 性能测试报告并与基线对比 (报告处理阶段)
 
@@ -1390,7 +1390,7 @@ def _process_online_reports(report_dir: Path, current_reports: List[Path]) -> Li
     return all_comparison_results
 
 
-def _process_offline_reports(report_dir: Path) -> List[Dict]:
+def _process_offline_reports(report_dir: Path) -> list[dict]:
     """
     解析离线 bench 测试报告并与基线对比
 
@@ -1463,7 +1463,7 @@ def _process_offline_reports(report_dir: Path) -> List[Dict]:
 
 def _report_phase(
     report_dir: Path,
-    all_comparison_results: List[Dict],
+    all_comparison_results: list[dict],
     receiver: str,
     is_offline: bool,
 ) -> bool:

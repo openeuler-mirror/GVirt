@@ -4,7 +4,7 @@
 
 MSD W4A8 MoE 管线的收尾算子(Step 3):对 INT4×INT4 group_matmul 产出的中间结果做合并、低 nibble 偏置补偿和 per-token 反量化,一步算出最终的 BF16 输出:
 
-```
+```text
 Y[r] = (Y_high[r] × 16 + Y_low[r] + scale_bias[expert(r)][c]) × perTokenScale[r]
 ```
 

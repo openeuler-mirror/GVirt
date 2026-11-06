@@ -10,7 +10,7 @@ import stat
 import sys
 from collections import defaultdict
 from collections.abc import Iterator
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
 
 import filelock
 import numpy as np
@@ -144,7 +144,7 @@ def prepare_hf_model_weights(
     use_safetensors: bool = False,
     fall_back_to_pt: bool = True,
     revision: Optional[str] = None,
-) -> Tuple[str, List[str], bool]:
+) -> tuple[str, list[str], bool]:
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
     if use_safetensors:
@@ -164,7 +164,7 @@ def prepare_hf_model_weights(
                 tqdm_class=Disabledtqdm,
                 revision=revision,
             )
-    hf_weights_files: List[str] = []
+    hf_weights_files: list[str] = []
     for pattern in allow_patterns:
         hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
     if not use_safetensors:
@@ -184,7 +184,7 @@ def hf_model_weights_iterator(
     cache_dir: Optional[str] = None,
     load_format: str = "auto",
     revision: Optional[str] = None,
-) -> Iterator[Tuple[str, torch.Tensor]]:
+) -> Iterator[tuple[str, torch.Tensor]]:
     use_safetensors = False
     use_np_cache = False
     fall_back_to_pt = False
@@ -244,7 +244,8 @@ def hf_model_weights_iterator(
     elif use_safetensors:
         for st_file in hf_weights_files:
             with safe_open(st_file, framework="pt") as f:
-                for name in f.keys():
+                # safe_open is not iterable (SIM118's autofix would break it).
+                for name in f.keys():  # noqa: SIM118
                     param = f.get_slice(name)
                     yield name, param
     else:

@@ -46,7 +46,6 @@ def msd_merge_dequant_ref(y_merged, scale_bias, per_token_scale):
     Returns:
         bf16 [m, n]
     """
-    m = y_merged.shape[0] // 2
     y_low = y_merged[0::2].float()  # rows 0, 2, 4, ... = low
     y_high = y_merged[1::2].float()  # rows 1, 3, 5, ... = high
     merged = y_high * 16.0 + y_low  # [m, n]
@@ -70,7 +69,6 @@ def msd_merge_dequant_multi_ref(y_merged, scale_biases, counts, per_token_scale)
     """Multi-expert reference: row r's scale_bias is picked by its expert id,
     located via the per-expert token counts (rows are grouped by expert on the
     row axis, in counts order)."""
-    m = y_merged.shape[0] // 2
     num_experts = len(counts)
     y_low = y_merged[0::2].float()
     y_high = y_merged[1::2].float()

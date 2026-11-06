@@ -71,7 +71,7 @@ host 侧约束(`csrc/op.cpp` 的 `XliteOpCXA`(关键字 `dense=True requires` �
 
 每行分数的 stride 为 `qkStride = swaSegWidth + kvSize`(`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `qkStride = swaSegWidth + kvSize`)),一段连续内存中两个段前后拼接:
 
-```
+```text
 列 0                                              swaSegWidth        qkStride
 |<----------- SWA 段(含 lead-in) ----------->|<------ 压缩段 ------>|
    [lead-in | 因果可见窗 [windowStart, windowEnd]]

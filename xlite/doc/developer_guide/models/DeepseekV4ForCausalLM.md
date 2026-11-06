@@ -232,7 +232,7 @@ flowchart TB
     igemm["XliteOpMatmul(h, idxCompWKv / idxCompWGate)<br/>(FP32, ND 布局)<br/>→ idxCompKv / idxCompScore [T, coff·idxHD] FP32"]:::op
     icomp["XliteOpCompressor (headDim = idxHD, doRotate = true)<br/>softmax(score + ape) 门控池化 + RMSNorm + rope<br/>→ 写 indexer_k (blk=128)<br/>尾段 / decode 溢写 indexer_state (blk=8)"]:::op
     ik(["indexer_k cache [blkN, 128, 1, idxHD] BF16"]):::tensor
-    ist(["indexer_state [blkN, 8, 1, 2·coff·idxHD] FP32"]):::tensor
+    istate(["indexer_state [blkN, 8, 1, 2·coff·idxHD] FP32"]):::tensor
 
     islong{"isLong? (运行时)<br/>indexer_k 块表列数 × blk(128) &gt; indexTopK"}:::dec
     shortp["返回 nullptr: Step 3 压缩段<br/>全量因果参与 (XliteOpCXA 无 topk 路径)"]:::op
@@ -247,7 +247,7 @@ flowchart TB
 
   h --> igemm --> icomp
   icomp -.-> ik
-  icomp -.-> ist
+  icomp -.-> istate
   ik --> islong
   islong -- "否 (缓存容量 ≤ indexTopK)" --> shortp
   islong -- "是" --> iq

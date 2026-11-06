@@ -4,7 +4,7 @@
 
 MLA(Multi-head Latent Attention)吸收式(weight-absorbed)decode/prefill 注意力算子:Q 侧拆为 `qAbsorb = q_nope · WUK`(kvLoraRank 维,吸收了上投影)与 `qr`(RoPE 部分),K 侧拆为 latent `kCache`(kvLoraRank 维)与 `peCache`(RoPE 后的 key)。kernel 计算
 
-```
+```text
 QK = (qAbsorb · kCache^T + qr · peCache^T) * scale
 oAbsorb = softmax_causal(QK) · kCache
 ```

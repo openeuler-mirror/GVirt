@@ -4,7 +4,7 @@
 
 融合三段式 W8A8 dense 管线（quant → matmul → dequant）为单次 launch：AIV 侧先把 BF16 激活量化为 INT8（静态 per-channel 或动态 per-token 二选一），AIC 侧做 INT8 matmul（FixPipe 乘 deq_scale 反量化输出 FP16），AIV 侧再反量化为 BF16。相比 [fusion_operator_matmul_dequant_pipeline](fusion_operator_matmul_dequant_pipeline.md)（输入已是 INT8），本算子把上游量化 kernel 也吸收进来，省去两次独立 launch。数学语义与串行链路 `quant/quant_dynamic → matmul_dequant → dequant` 一致。
 
-```
+```text
 AIV t (全部):  quant(x 行段 [t*chunk, (t+1)*chunk)) → xQuant (+ per-token scale → outScale, dyn)
                --SyncAll<true> → V2C flag 9 (mode 0x2, 每 AIV set 一次, AIC wait 一次)-->
 AIC b:         grid-stride matmul tiles → out (FP16 视图)

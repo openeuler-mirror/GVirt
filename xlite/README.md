@@ -73,18 +73,7 @@ vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xli
 
 ## 开发指南
 
-编译构建、容器镜像、源码安装等开发相关内容，请参考 [开发指南](doc/developer_guide/contributing.md)
-
-### 代码检查
-
-代码检查基于 [pre-commit](https://pre-commit.com/)（配置见 `xlite/.pre-commit-config.yaml`，仓库根目录的 `.pre-commit-config.yaml` 为其符号链接），覆盖 Python、C/C++、Markdown 与拼写检查：
-
-```bash
-pre-commit install                                # 一次性安装，之后每次 commit 自动检查
-python tests/run_static_checks.py                 # 提交 PR 前运行全部检查（与 CI 一致）
-```
-
-详见 [静态检查说明](doc/developer_guide/static_checker.md)。
+编译构建、容器镜像、源码安装、代码检查等开发相关内容，请参考 [开发指南](doc/developer_guide/contributing.md)
 
 ## 环境变量
 
@@ -92,7 +81,7 @@ xlite使用的环境变量及其配置方法，请参考 [环境变量](doc/user
 
 ## 目录结构
 
-```
+```text
 .
 ├── csrc/    - 轻量化运行时的核心代码
 ├── xlite/   - python代码，包括tools等

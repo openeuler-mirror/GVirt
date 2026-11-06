@@ -132,3 +132,14 @@ PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu/ python setup.py bdist_
 ```
 
 构建后生成的whl包在`dist`目录下。
+
+## 代码检查
+
+代码检查基于 [pre-commit](https://pre-commit.com/)（配置见 `xlite/.pre-commit-config.yaml`，仓库根目录的 `.pre-commit-config.yaml` 为其符号链接），覆盖 Python、C/C++、Markdown 与拼写检查：
+
+```bash
+pre-commit install                                # 一次性安装，之后每次 commit 自动检查
+python tests/run_static_checks.py                 # 提交 PR 前运行全部检查（与 CI 一致）
+```
+
+详见 [静态检查说明](static_checker.md)。

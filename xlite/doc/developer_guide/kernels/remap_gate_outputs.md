@@ -11,7 +11,7 @@ EPLB(Expert-Level Load Balancing)场景下,将 `ForwardMoEGate` 产出的门控�
 
 伪代码:
 
-```
+```text
 for t in [0, M):              # 多 block 轮询
     for L in [0, nRoutedExperts):
         wOut[t, log2phy[L]] = wIn[t, L]            # 字节拷贝
@@ -62,7 +62,7 @@ remap_gate_outputs(GM_ADDR wIn, GM_ADDR rIn, GM_ADDR wOut, GM_ADDR rOut,
 
 UB 分五段,每段向上取整到 `VECTOR_MAX_BYTESIZE`(256B),使 `vector_dup` 清零(单次 256B repeat)不会越界写相邻段(与 `permutation.cpp` 同模式):
 
-```
+```text
 log2phy | wInRow | wOutRow | rInRow | rOutRow
 ```
 

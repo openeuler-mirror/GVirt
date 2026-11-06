@@ -10,6 +10,7 @@ Additionally, the script is designed to run within a container with `git`, `vllm
 Using `vllm-ascend`'s official container image is recommended.
 """
 
+import contextlib
 import json
 import math
 import os
@@ -230,7 +231,7 @@ def get_xlite_version() -> str:
     """Get the version of the installed xlite package."""
 
     xlite_version = "unknown"
-    try:
+    with contextlib.suppress(Exception):
         xlite_version = (
             subprocess.run(
                 [sys.executable, "-c", "import xlite; print(xlite.__version__)"],
@@ -240,8 +241,6 @@ def get_xlite_version() -> str:
             ).stdout.strip()
             or "unknown"
         )
-    except Exception:
-        pass
     return xlite_version
 
 
@@ -430,7 +429,7 @@ def cleanup_on_exit():
     for process in list(_PROCESS_GROUPS):
         try:
             stop_process_group(process, 0)
-        except:
+        except Exception:
             continue
 
 
@@ -637,7 +636,7 @@ def start_vllm_server(
     if print_to is not None:
         print_to.parent.mkdir(parents=True, exist_ok=True)
         log_path = print_to.parent / f"{print_to.name}.out.log"
-        stdprint_target = open(log_path, "w")
+        stdprint_target = open(log_path, "w")  # noqa: SIM115 (handle lives for the server process)
         print(f"Redirecting vLLM server logs to {log_path}...")
     process = subprocess.Popen(
         vllm_cmd,

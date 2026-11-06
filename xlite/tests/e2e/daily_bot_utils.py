@@ -32,7 +32,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 # ====================== 路径配置 ======================
 # 项目根目录 (容器内路径)
@@ -167,7 +167,7 @@ def log_error(msg: str):
 _RE_REPEAT_ENTRY = re.compile(r"^([1-9]\d*)\s*[~\*]\s*(.+)\s*$")
 
 
-def expand_values(values: List[str], cast: Callable[[str], Any] = str, name: str = "entry") -> List[Any]:
+def expand_values(values: list[str], cast: Callable[[str], Any] = str, name: str = "entry") -> list[Any]:
     """
     展开 `N~<value>` / `N*<value>` 条目为 N 份, 并把每个值转换为 cast 类型
 
@@ -177,7 +177,7 @@ def expand_values(values: List[str], cast: Callable[[str], Any] = str, name: str
 
     注意: 也可用 `*` 代替 `~`, 但 `~` 更不易与 shell 通配符混淆.
     """
-    expanded: List[str] = []
+    expanded: list[str] = []
     for entry in values:
         match = _RE_REPEAT_ENTRY.match(entry)
         if match:
@@ -190,12 +190,12 @@ def expand_values(values: List[str], cast: Callable[[str], Any] = str, name: str
         raise ValueError(f"Invalid {name} value: {e}") from e
 
 
-def pad_to_last(values: List[Any], n: int) -> List[Any]:
+def pad_to_last(values: list[Any], n: int) -> list[Any]:
     """用最后一个条目把列表补齐到长度 n"""
     return values + [values[-1]] * (n - len(values))
 
 
-def tile_each(values: List[Any], n: int) -> List[Any]:
+def tile_each(values: list[Any], n: int) -> list[Any]:
     """把每个条目重复 n 次: [A, B] n=2 -> [A, A, B, B]"""
     return [v for v in values for _ in range(n)]
 
@@ -254,7 +254,7 @@ def set_machine_ip(ip: str):
 # yellow 环境的联网代理脚本路径；blue 环境可直接访问外网，无需 source
 PROXY_ENV_SCRIPT = "/home/env.sh"
 
-_PROXY_ENV_VARS: Optional[Dict[str, str]] = None
+_PROXY_ENV_VARS: Optional[dict[str, str]] = None
 
 
 def get_proxy_source_cmd() -> str:
@@ -270,7 +270,7 @@ def get_proxy_source_cmd() -> str:
     return ""
 
 
-def proxy_env() -> Dict[str, str]:
+def proxy_env() -> dict[str, str]:
     """代理脚本设置的环境变量字典 (供 env_with_proxy() 合并，一般不直接使用).
 
     yellow 环境且代理脚本存在时，在 bash 中 source 该脚本并提取新增/变更的
@@ -301,7 +301,7 @@ def proxy_env() -> Dict[str, str]:
     return dict(_PROXY_ENV_VARS)
 
 
-def env_with_proxy() -> Dict[str, str]:
+def env_with_proxy() -> dict[str, str]:
     """当前环境变量 + 代理脚本补充的代理变量，作为 subprocess 调用的 env 使用.
 
     代理变量以 setdefault 方式合并: 调用方环境中已存在的变量优先 (如启动进程时
@@ -320,8 +320,8 @@ def env_with_proxy() -> Dict[str, str]:
 
 # ====================== 命令执行工具函数 ======================
 def run_command(
-    cmd: List[str], cwd: Optional[Path] = None, check: bool = True, show_output: bool = False
-) -> Tuple[int, str, str]:
+    cmd: list[str], cwd: Optional[Path] = None, check: bool = True, show_output: bool = False
+) -> tuple[int, str, str]:
     """
     执行 shell 命令并返回结果
 
@@ -361,7 +361,7 @@ def check_subprocess_result(res: subprocess.CompletedProcess, error_message: str
 # ====================== 容器操作工具函数 ======================
 def run_in_container(
     container_name: str, cmd: str, check: bool = True, show_output: bool = False
-) -> Tuple[int, str, str]:
+) -> tuple[int, str, str]:
     """
     在指定容器中执行命令
 
@@ -509,7 +509,7 @@ def get_xlite_lib_path() -> Path:
     return xlite_path
 
 
-def build_project(report_dir: Path) -> Tuple[bool, Optional[Path]]:
+def build_project(report_dir: Path) -> tuple[bool, Optional[Path]]:
     """
     在编译容器中编译 xlite 项目，并将 wheel 包复制到本地
 
@@ -811,7 +811,7 @@ def should_disable_xccl() -> bool:
 
 
 # ====================== 数据存储函数 ======================
-def save_metrics_json(metrics: Dict, json_path: Path):
+def save_metrics_json(metrics: dict, json_path: Path):
     """
     将指标数据保存为 JSON 文件
 
@@ -828,7 +828,7 @@ def save_metrics_json(metrics: Dict, json_path: Path):
         log_error(f"保存指标数据失败: {e}")
 
 
-def load_metrics_json(json_path: Path) -> Dict:
+def load_metrics_json(json_path: Path) -> dict:
     """
     从 JSON 文件加载指标数据
 

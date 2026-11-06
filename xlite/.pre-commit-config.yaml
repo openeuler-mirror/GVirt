@@ -86,6 +86,7 @@ repos:
         name: clang-tidy
         entry: python3 xlite/tests/hooks/run_clang_tidy.py
         language: python
+        require_serial: true # one process: it ensures the build tree before analyzing any file
         additional_dependencies: ['clang-tidy==22.1.8']
         files: ^xlite/csrc/.+\.(cpp|cc|c|h|hpp)$
         stages: [manual]

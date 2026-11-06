@@ -273,8 +273,6 @@ def reference_one_request_norope(kv_req, score_req, ape, norm_w, ratio, overlap,
     """
     qlen = kv_req.shape[0]
     cutoff = qlen - (qlen % ratio)
-    full_dim = kv_req.shape[1]
-    n_blocks = cutoff // ratio
     kv = kv_req[:cutoff].unsqueeze(0).unflatten(1, (-1, ratio))
     score = score_req[:cutoff].unsqueeze(0).unflatten(1, (-1, ratio))
     if ape is not None:
@@ -971,8 +969,6 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
         )
         torch.npu.synchronize()
 
-        kv_cpu = [t.cpu() for t in kv_list]
-        score_cpu = [t.cpu() for t in score_list]
         ape_cpu = ape.cpu() if ape is not None else None
         ok_all = True
 
@@ -1122,7 +1118,6 @@ def reference_decode_compress(
     RMSNorm + rotary (mirrors the unified compressor compress path).
     """
     full_dim = (1 + overlap) * head_dim
-    merge_size = (1 + overlap) * ratio
     win_base = pos + 1 - ratio  # window start T-ratio
     has_history = (pos + 1) >= 2 * ratio
     if overlap:

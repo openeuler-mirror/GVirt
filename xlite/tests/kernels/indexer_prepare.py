@@ -124,7 +124,6 @@ def run_test(
     # is_long mirrors model.cpp: when the worst-case paged length exceeds
     # topK, the long path (q-RoPE + muls) is taken.
     max_num_blocks = max((cl + ql + BLOCK_SIZE - 1) // BLOCK_SIZE for cl, ql in zip(cached_lens_list, query_len_list))
-    max_seq_len = max_num_blocks * BLOCK_SIZE
     is_long = (max_num_blocks * BLOCK_SIZE) > topK
 
     torch.set_default_dtype(test_dtype)

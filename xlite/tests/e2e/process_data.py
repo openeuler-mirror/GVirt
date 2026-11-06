@@ -101,9 +101,6 @@ def main():
     DEVICE_TYPE = args.device
     # --------------------------------------------------------------------------------
 
-    # 文件夹名称映射（用于表格中的item列，固定对应关系）
-    folder_to_item = {FOLDER1: "baseline-aclgraph", FOLDER2: "xlite-full", FOLDER3: "xlite-decode-only"}
-
     # 收集所有文件夹中的log文件（key：文件名，value：{文件夹路径: 指标}）
     file_metrics = defaultdict(dict)
     folders = [FOLDER1, FOLDER2, FOLDER3]

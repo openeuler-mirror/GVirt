@@ -4,7 +4,7 @@
 
 动态 per-token 量化:对 `[m, k]` 的 BF16 激活**逐行**统计绝对值最大值,在线计算量化 scale,输出 INT8 量化矩阵和每行一个 fp32 scale。计算式:
 
-```
+```text
 scale_row  = abs_max(x_row) / 127        (fp32, 输出)
 x_scaled   = x_row * (127 / abs_max)
 out        = int8(x_scaled)              (vconv_f162s8r 舍入)

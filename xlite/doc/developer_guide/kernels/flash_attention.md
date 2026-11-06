@@ -85,7 +85,7 @@ host 校验 qkv/qk/kCache/vCache/output dtype 一致(`csrc/op.cpp` 的 `XliteOpF
 
 `RunAivSoftmaxUpdate`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxUpdate`)实现标准 flash 在线归并,对每行:
 
-```
+```text
 new_max = max(max_prev, max_curr)
 scale_prev = exp(max_prev - new_max);  scale_curr = exp(max_curr - new_max)
 new_sum = sum_prev*scale_prev + sum_curr*scale_curr

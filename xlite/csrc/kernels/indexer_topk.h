@@ -631,7 +631,7 @@ public:
             int kvNumMax = DIV_ROUND_UP(nKv, tileSizeOfCachedKV);
             int taskNum = queryNum * kvNumMax;
             for (int idx = 0; idx < taskNum;) {  // each loop handles a chunk of one sequence/batch
-                // tiling infor for the indexer query matrix
+                // tiling info for the indexer query matrix
                 int queryIdx = idx / kvNumMax;
                 int queryTaskLen = queryTileSize;
                 int queryOffset = queryIdx * queryTileSize;
@@ -644,7 +644,7 @@ public:
                 // KV-space causal boundary for the tile's last token; gates the dense/skip
                 // check and kvLen so the tile never reads KV past the valid range.
                 int queryPosEndKvBound = MapPosToKv(queryPosEnd);
-                // tiling infor for the indexer key matrix
+                // tiling info for the indexer key matrix
                 int kvIdx = idx % kvNumMax;
                 int kvOffset = kvIdx * tileSizeOfCachedKV;
 #ifdef __DAV_C220_VEC__

@@ -72,22 +72,11 @@ vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xli
 
 ## Development Guide
 
-For build and compilation, container images, source installation and other development-related content, please refer to [Development Guide](doc/developer_guide/contributing.md)
-
-### Code checks
-
-Linting is based on [pre-commit](https://pre-commit.com/) (see `xlite/.pre-commit-config.yaml`; a symlink at the repo root keeps standard pre-commit commands working) and covers Python, C/C++, Markdown, and spelling:
-
-```bash
-pre-commit install                                # one-time setup; hooks run on every commit afterwards
-python tests/run_static_checks.py                 # run all checks before submitting a PR (same as CI)
-```
-
-See [Static Checker Documentation](doc/developer_guide/static_checker.md) for details.
+For build and compilation, container images, source installation, code checks and other development-related content, please refer to [Development Guide](doc/developer_guide/contributing.md)
 
 ## Directory Structure
 
-```
+```text
 .
 ├── csrc/    - Core code of lightweight runtime
 ├── xlite/   - Python code, including tools, etc.

@@ -751,10 +751,10 @@ def _vec_perf_sweep(rt, sizes, b_full):
                 compl = statistics.median([r[1] for r in rows])
                 drain = statistics.median([r[2] for r in rows])
                 nse = compl * 1000.0 / (iters * elems)
-                ges = B * iters * elems / compl / 1000.0
+                gbs = B * iters * elems / compl / 1000.0
                 print(
                     f"       {elems:>7d}{elems // q:>6d}{iters:>7d}{B:>4d}{issue:>9.1f}"
-                    f"{compl:>9.1f}{drain:>9.2f}{nse:>9.4f}{ges:>9.2f}"
+                    f"{compl:>9.1f}{drain:>9.2f}{nse:>9.4f}{gbs:>9.2f}"
                 )
                 if B == 1:
                     nse_b1[(variant, elems)] = nse
@@ -1017,7 +1017,7 @@ def analyze(csvs):
 
     bar = "=" * 74
     print(bar)
-    print("微基准分析报告  (数据: %s, 每算子含多次调用取中位)" % ", ".join(os.path.basename(c) for c in csvs))
+    print(f"微基准分析报告  (数据: {', '.join(os.path.basename(c) for c in csvs)}, 每算子含多次调用取中位)")
     print(bar)
 
     # [1] launch floor

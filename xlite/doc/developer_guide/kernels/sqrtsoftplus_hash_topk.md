@@ -4,7 +4,7 @@
 
 V4 MoE 路由门控算子(DeepSeek V4 风格,`sqrtsoftplus` 激活 + 可选 hash 选路),见 kernel 头注释(`csrc/kernels/sqrtsoftplus_hash_topk.h` 顶部 `SqrtsoftplusHashTopK` 类注释,关键字 `bias steers topk only`)。数学语义(测试参考 `tests/kernels/sqrtsoftplus_hash_topk.py` 的 `ref_gate`):
 
-```
+```text
 s0 = sqrt(softplus(scores))             # 原始得分(pre-bias)
 if bias:  b = s0 + bias                 # biased 得分,仅用于选路
 indices = hash ? tid2eid[input_ids] : topk(b, K)[1]   # hash 选路或 biased topk

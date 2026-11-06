@@ -12,7 +12,7 @@ import random
 import time
 from argparse import ArgumentParser
 from pathlib import Path
-from typing import List, Literal, Tuple
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -51,20 +51,20 @@ def apply_qwen_chat_template(tokenizer, messages, model_type: str):
 
 @torch.inference_mode()
 def generate(
-    model: nn.Module, prompt_tokens: List[List[int]], max_new_tokens: int, eos_id, temperature: float = 1.0
-) -> Tuple[List[List[int]], int]:
+    model: nn.Module, prompt_tokens: list[list[int]], max_new_tokens: int, eos_id, temperature: float = 1.0
+) -> tuple[list[list[int]], int]:
     """
     Generates new tokens based on the given prompt tokens using the specified model.
 
     Args:
         model (nn.Module): The model used for token generation.
-        prompt_tokens (List[List[int]]): A list of lists containing the prompt tokens for each sequence.
+        prompt_tokens (list[list[int]]): A list of lists containing the prompt tokens for each sequence.
         max_new_tokens (int): The maximum number of new tokens to generate.
-        eos_id (int | List[int]): The end-of-sequence token ID, or a list of them.
+        eos_id (int | list[int]): The end-of-sequence token ID, or a list of them.
         temperature (float, optional): The temperature value for sampling. Defaults to 1.0.
 
     Returns:
-        List[List[int]]: A list of lists containing the generated tokens for each sequence.
+        list[list[int]]: A list of lists containing the generated tokens for each sequence.
     """
     eos_set = {eos_id} if isinstance(eos_id, int) else set(eos_id)
 
@@ -211,11 +211,10 @@ def main(
     # DP subgroup: ranks sharing tp_rank across DP groups (dst=0 = dp_rank=0).
     # Kept narrow so gather_object runs only over the dp_size real DP ranks,
     # not the full world_size default group.
-    dp_group = None
     if dp_size > 1 and world_size > 1:
         tp_rank = rank % tp_size
         dp_group_ranks = [g * tp_size + tp_rank for g in range(dp_size)]
-        dp_group = dist.new_group(ranks=dp_group_ranks)
+        dist.new_group(ranks=dp_group_ranks)
 
     # DP: each DP group's root (tp_rank==0) prints its shard, prefixed [rankN]
     # so concurrent output stays readable; global summaries use _raw_print.

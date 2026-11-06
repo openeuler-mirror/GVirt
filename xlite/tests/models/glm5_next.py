@@ -27,7 +27,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Literal, Optional, Tuple
+from typing import Literal, Optional
 
 import torch
 import torch.distributed as dist
@@ -152,11 +152,11 @@ class ModelArgs:
     vision_rope_theta: float = 10000.0  # config.vision_config.rope_parameters["rope_theta"]
     image_token_id: int = 154854
     indexer_rope_interleave: bool = True
-    index_full_mask: Optional[List[bool]] = None
+    index_full_mask: Optional[list[bool]] = None
     # layer dispatch
-    layer_types: Optional[List[str]] = None
-    kda_layers: Optional[List[int]] = None
-    full_attn_layers: Optional[List[int]] = None
+    layer_types: Optional[list[str]] = None
+    kda_layers: Optional[list[int]] = None
+    full_attn_layers: Optional[list[int]] = None
     # quant / parallelism
     quantization: Literal["none", "w8a8", "w4a8"] = "w8a8"
     moe_ep_size: int = 16
@@ -218,7 +218,7 @@ class MHC(nn.Module):
         self.base = nn.Parameter(torch.empty(self.hc_mult3))
         self.scale = nn.Parameter(torch.empty(3))
 
-    def pre(self, residual: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def pre(self, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """residual: [bsz, seq, hc_mult, dim] -> (post_mix, comb_mix, layer_input).
 
         Mirrors mhc_pre_torch: RMS-normalize the flattened mix logits by the input
@@ -899,7 +899,7 @@ class Gate(nn.Module):
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim, dtype=torch.float32))
         self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32))
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         scores = ds_linear(x, self.weight)
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1, dtype=torch.float32)

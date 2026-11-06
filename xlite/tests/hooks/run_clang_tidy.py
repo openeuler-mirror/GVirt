@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """clang-tidy hook (CI / manual stage).
 
-Requires a build tree with compile_commands.json; configures and builds the
-project first when the tree is missing. Kernel sources under csrc/kernels and
-csrc/ascend.h are excluded (CCE intrinsics produce intentional warnings).
+Requires a build tree with compile_commands.json; configures the project when
+the tree is missing and always brings it current (kernel launch headers are
+build-time artifacts). Kernel sources under csrc/kernels and csrc/ascend.h are
+excluded (CCE intrinsics produce intentional warnings).
 """
 
 import re
@@ -19,32 +20,34 @@ TIDY_FINDING = re.compile(r":\d+:\d+: (?:warning|error): ")
 
 def ensure_build_tree() -> bool:
     build_dir = XLITE_ROOT / "build"
-    if (build_dir / "compile_commands.json").exists():
-        return True
+    if not (build_dir / "compile_commands.json").exists():
+        # A first configure can fail transiently (compiler ABI try_compile flake)
+        # and leave a partial tree; wipe and retry once before giving up.
+        for attempt in (1, 2):
+            configure = subprocess.run(
+                ["cmake", "-S", str(XLITE_ROOT), "-B", str(build_dir), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
+                capture_output=True,
+                text=True,
+            )
+            if configure.returncode == 0:
+                break
+            shutil.rmtree(build_dir, ignore_errors=True)
+            if attempt == 2:
+                print(f"cmake configure failed:\n{configure.stderr.strip()}")
+                return False
+            print("cmake configure failed transiently; retrying with a clean build tree ...")
 
-    # A first configure can fail transiently (compiler ABI try_compile flake)
-    # and leave a partial tree; wipe and retry once before giving up.
-    for attempt in (1, 2):
-        configure = subprocess.run(
-            ["cmake", "-S", str(XLITE_ROOT), "-B", str(build_dir), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
-            capture_output=True,
-            text=True,
-        )
-        if configure.returncode == 0:
-            break
-        shutil.rmtree(build_dir, ignore_errors=True)
-        if attempt == 2:
-            print(f"cmake configure failed:\n{configure.stderr.strip()}")
-            return False
-        print("cmake configure failed transiently; retrying with a clean build tree ...")
-
+    # Build even when the tree already exists: the kernel launch headers
+    # op.cpp includes are build-time artifacts, so a tree predating a kernel
+    # change parses stale stubs and tidy dies on aclrtlaunch_* signature
+    # errors. cmake no-ops here when everything is current.
     build = subprocess.run(
         ["cmake", "--build", str(build_dir), "-j"],
         capture_output=True,
         text=True,
     )
     if build.returncode != 0:
-        print(f"cmake build failed:\n{build.stderr.strip()}")
+        print(f"cmake build failed:\n{build.stderr.strip()[-4000:]}")
         return False
 
     return (build_dir / "compile_commands.json").exists()

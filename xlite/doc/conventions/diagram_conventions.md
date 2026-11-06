@@ -23,7 +23,7 @@
 
 本目录（`doc/conventions/`）仅存放文档规范：
 
-```
+```text
 doc/conventions/
 ├── README.md                # 目录索引
 └── diagram_conventions.md   # 本规范

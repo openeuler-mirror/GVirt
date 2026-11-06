@@ -10,7 +10,7 @@ DeepSeek-V4 Hyper-Connection 的门控激活算子(per-token activation),一次 
 
 数学定义(与 `tests/kernels/hc_act.py`、`tests/kernels/hc_split_sinkhorn.py` 参考实现一致):
 
-```
+```text
 mixHc  = (2 + hcMult) * hcMult          # hcMult=4 时为 24
 pre    = sigmoid(mixes[:, :K]           * scale[0] + base[:K])         + eps   # [K]
 post   = 2 * sigmoid(mixes[:, K:2K]     * scale[1] + base[K:2K])               # [K]

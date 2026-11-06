@@ -53,7 +53,7 @@ kernel 任务类型为 `KERNEL_TYPE_AIC_ONLY`（`csrc/kernels/matmul.h` 的宏 `
 
 单核处理一个或多个 `(m0 x n0)` 输出 tile，单个 tile 内沿 K 维循环。数据流为经典的五级 Cube 流水（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`）：
 
-```
+```text
 A(x): GM --MTE2: Nd2Nz--> L1(A1, pingpong) --MTE1: LoadData2d--> L0A(A2, pingpong) \
 B(y): GM --MTE2: Nd2Nz/CopyGmToL1--> L1(B1, pingpong) --MTE1: LoadData2d--> L0B(B2, pingpong) \
     --> M(Mmad): L0A x L0B --> L0C(CO1, int32/float累加) \

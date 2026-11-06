@@ -4,7 +4,7 @@
 
 DeepSeek-V4 Hyper-Connection 的 pre-activation **pre sum** 算子(非融合版),即 [`hc_act`](hc_act.md) 融合路径中 Step-5 pre-sum 的拆分对应物。它消费由 [`hc_split_sinkhorn`](hc_act.md)(=`hc_act` `preSum=0`)写到 GM 的 `pre` 门,把 K 份残差按 `pre` 加权求和成一份:
 
-```
+```text
 y[m, hidden] = Σ_h pre[m, h] * xResid[m, h, hidden]      # fp32 累加, bf16 输出
 ```
 
