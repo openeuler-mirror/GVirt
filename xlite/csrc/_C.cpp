@@ -3049,6 +3049,59 @@ void FusedQuantMatmulDequant(XRuntime &rt, at::Tensor &x,
     rt.Synchronize();
 }
 
+void FusedGroupMatmulDequant(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
+                             std::vector<at::Tensor> &scales, at::Tensor &counts, uint32_t start,
+                             uint32_t end, long outDim, long inDim, at::Tensor &output,
+                             const std::optional<at::Tensor> &outScale, bool weightNZ,
+                             bool transpose)
+{
+    if (weights.empty()) {
+        throw std::invalid_argument(DBG_PREFIX + ": weights must not be empty");
+    }
+    XTensor _in, _counts, _output, _outScale;
+    XTensor _scalesTensor;
+    XTensor *_scales = &_scalesTensor;
+    std::vector<void *> p;
+    uint32_t i, num = counts.size(0);
+    bool hasScale = (scales.size() == num);
+
+    InitXTensor(_in, in);
+    InitXTensor(_counts, counts);
+    InitXTensor(_output, output);
+    // Same contract as fused_quant_matmul_dequant's optional tensors: the
+    // std::optional InitXTensor overload is a no-op for nullopt, leaving the
+    // XTensor ptr-null — the kernel's no-per-token-scale (hasScale=false)
+    // path; an explicitly passed empty tensor reaches the same state.
+    InitXTensor(_outScale, outScale);
+    XTensor &_weights = rt.GetTensor({num}, INT64, DBG_LOC);
+
+    p.resize(num);
+    for (i = 0; i < num; i++) {
+        p[i] = TensorPtr(weights[i]);
+    }
+    rt.MemcpyH2D(_weights.ptr, reinterpret_cast<void *>(p.data()), num * sizeof(void *));
+
+    if (hasScale) {
+        _scales = &rt.GetTensor({num}, INT64, DBG_LOC);
+        for (i = 0; i < num; i++) {
+            p[i] = TensorPtr(scales[i]);
+        }
+        rt.MemcpyH2D(_scales->ptr, reinterpret_cast<void *>(p.data()), num * sizeof(void *));
+    }
+
+    enum XDtype weightDtype = XDtypeOf(weights[0]);
+    if (weightDtype == INT32) {
+        weightDtype = INT4;
+    }
+    XliteOpFusedGroupMatmulDequant(rt, _in, _weights, *_scales, _counts, start, end, weightDtype,
+                                   outDim, inDim, _output, _outScale, weightNZ, transpose);
+    rt.Synchronize();
+    rt.PutTensor(_weights);
+    if (hasScale) {
+        rt.PutTensor(*_scales);
+    }
+}
+
 void IndexerScores(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &weight,
                    at::Tensor &scores, at::Tensor &queryStartLoc, at::Tensor &lens,
                    at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads,
@@ -4997,6 +5050,12 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("deq_scale") = torch::arg::none(), torch::arg("x_quant"),
               torch::arg("out_scale") = torch::arg::none(), torch::arg("num") = torch::arg::none(),
               torch::arg("dyn_quant"), torch::arg("weight_nz") = false,
+              torch::arg("transpose") = false})
+        .def("fused_group_matmul_dequant", op<&FusedGroupMatmulDequant>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("weights"), torch::arg("scales"),
+              torch::arg("counts"), torch::arg("start"), torch::arg("end"), torch::arg("out_dim"),
+              torch::arg("in_dim"), torch::arg("output"),
+              torch::arg("out_scale") = torch::arg::none(), torch::arg("weight_nz") = false,
               torch::arg("transpose") = false})
         .def("dequant", op<&DeQuant>,
              {torch::arg("rt"), torch::arg("in_"), torch::arg("scale"), torch::arg("out"),

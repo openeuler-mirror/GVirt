@@ -31,6 +31,8 @@ Python 调用方式（`tests/kernels/dequant.py` 测试主循环）：`dequant(r
 
 实现为 `Dequant<dtype>` 类（`csrc/kernels/dequant.h` 的 `Dequant`），流程 `Run → SetFlags → TaskTilesInit → RunTileByIdx（跨 block）→ WaitFlags`（`csrc/kernels/dequant.h` 的 `Dequant::Run`）。
 
+融合 group 算子另有镜像入口 `Dequant::RunGroupExpertTile(GroupTileWalker &w)`（单 tile）：消费与 AIC 侧同一份共享遍历骨架 `GroupTileWalker`（`csrc/kernels/group_tile_walker.h`）；专家/tile 循环由融合壳 AIV 分支自带，每 tile 先显式 `WaitC2VFlag()` 排空一次 `CrossCoreWaitFlag(C2V_CROSS_CORE_FLAG)` 再调本方法——wait 先于方法内部的空尾跳过，per-pair wait 数恒等于 AIC set 数，本可复用算子内部不含跨核同步；方法内按半行块（`halfM0 = m0/GetTaskRatio()`、`sub = GetBlockIdx()%2`）调用 `RunTile` 原位转换（见 [fused_group_matmul_dequant.md](fused_group_matmul_dequant.md)）。
+
 ### 任务切分与数据流
 
 - `TaskTilesInit`（`csrc/kernels/dequant.h` 的 `Dequant::TaskTilesInit`）：记录 in/scale/out 的 GM 指针；若有 pnum_tokens 用其修正实际行数 m；返回 `mTiles * nTiles` 作为 tile 总数（`mTiles = DIV_ROUND_UP(m, m0)`，`m0` 由 `Dequant::PickM0(m, n)` 选取；standalone 路径 `n0=0` 故 `nTiles=1`）；

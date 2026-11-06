@@ -61,4 +61,16 @@ void PickMatmulTiling(uint32_t aicNum, uint64_t m, uint64_t n, uint64_t k, uint6
 // relatively small, performance can be improved by reducing the number of launched cores and
 // increasing the per-core workload.
 uint32_t PickMinBlockNum(uint32_t coreNum, uint64_t totalRows);
+
+// Fused-vs-serial dispatch for the dense W8A8 matmul+dequant remainder
+// (XliteOpMatmulDeQuant): fused iff m >= 8192, or m >= 6144 with k > 2048
+// (dynamic per-token quant) / k >= 1024 (static per-channel quant).
+bool FusedMatmulDeQuantBeneficial(uint64_t m, uint64_t k, bool dynQuant);
+
+// Fused-vs-serial dispatch for the routed-expert W8A8 group_matmul+dequant
+// remainder (XliteOpGroupMatmulDeQuant): fused iff m >= 4096 && k >= 1024 &&
+// n >= 2048. m is the host-side expectation of sum(counts[start:end)); the
+// full calibration audit (g in {1..32} does not move the boundary) lives in
+// the kernel doc (fused_group_matmul_dequant.md).
+bool FusedGroupMatmulDequantBeneficial(uint64_t m, uint64_t n, uint64_t k);
 #endif

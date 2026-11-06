@@ -4,6 +4,7 @@
 #pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+#include "group_tile_walker.h"
 #define UBA(T) __ubuf__ T *
 #define GMA(T) __gm__ T *
 #define PINGPONG 2
@@ -213,6 +214,46 @@ public:
             RunTileByIdx(idx);
         }
         WaitFlags();
+    }
+
+    // Grouped-matmul fused mirror, one tile: dequant this AIV's half-row-block
+    // of the parent AIC's m0 tile handed out by the shared GroupTileWalker
+    // (group_tile_walker.h). The fused shell drives the expert/tile loops and
+    // drains the parent's per-tile C2V flag (WaitC2VFlag) BEFORE this call, so
+    // the empty-tail skips inside still consume one wait per handed-out tile,
+    // matching the AIC's set count. Preconditions: TaskTilesInit has bound the
+    // GM buffers and the row stride (n = kN; its flat grid is unused), and the
+    // walker was seeded with walkBlockIdx = GetBlockIdx() / 2 (parent AIC of
+    // the MIX_AIC_1_2 pair), m0 = the AIC m-tile and n0 = this->n0. The row
+    // half is sub = GetBlockIdx() % 2.
+    __aicore__ inline void RunGroupExpertTile(GroupTileWalker &w)
+    {
+        int64_t parentM0 = w.m0;
+        int64_t halfM0 = static_cast<int64_t>(this->m0);
+        int64_t n0 = static_cast<int64_t>(this->n0);
+        int64_t kN = static_cast<int64_t>(this->n);
+        int64_t sub = GetBlockIdx() % 2;
+        // Signed locals: localRows goes negative on tail half-blocks
+        // (kM < midx*parentM0 + sub*halfM0 + 1) and must clamp to a skip —
+        // as an unsigned it would wrap to a huge row count and the
+        // halfM0 clamp would pass it through as an out-of-bounds GM access.
+        int64_t rowOffset = w.off + w.midx * parentM0 + sub * halfM0;
+        int64_t colOffset = w.nidx * n0;
+        int64_t localRows = w.kM - w.midx * parentM0 - sub * halfM0;
+        if (localRows > halfM0) {
+            localRows = halfM0;
+        }
+        int64_t localCols = kN - colOffset;
+        if (localCols > n0) {
+            localCols = n0;
+        }
+        if (localRows <= 0 || localCols <= 0) {
+            return;  // tail half-block fully past kM; the shell's wait consumed the flag
+        }
+        RunTile(this->inGmBuf + rowOffset * kN + colOffset,
+                this->scaleGmBuf == nullptr ? nullptr : this->scaleGmBuf + rowOffset,
+                this->outGmBuf + rowOffset * kN + colOffset, static_cast<uint32_t>(localRows),
+                static_cast<uint32_t>(localCols));
     }
 
     // Rows per tile. Aim for ~4 tiles per block (grid-stride balance), capped
