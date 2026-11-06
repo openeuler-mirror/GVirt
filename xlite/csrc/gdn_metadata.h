@@ -2,6 +2,10 @@
 #pragma once
 #include <cstdint>
 
+// fp32 gate-row elements buffered per prefill chunk in the recurrent GDN kernel
+// (decayRow/betaRow are each XLITE_GDN_GATE_CAP * 4 bytes)
+constexpr uint32_t XLITE_GDN_GATE_CAP = 4096;
+
 #ifdef __DAV_C220_VEC__
 #define XLITE_GDN_INLINE __aicore__ inline
 #else
