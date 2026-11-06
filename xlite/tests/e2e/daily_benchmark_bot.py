@@ -3,55 +3,16 @@
 xlite 每日自动化测试机器人
 
 功能说明:
-1. 在编译容器和测试容器中拉取最新代码
-2. 在编译容器中编译项目生成 wheel 包
-3. 在测试容器中执行基准测试脚本
+1. 拉取最新代码
+2. 编译项目生成 wheel 包
+3. 执行基准测试脚本
 4. 解析测试报告并与上一版本的数据对比
 5. 检测性能劣化 (超过阈值时告警)
 6. 发送通知到群组
 
 架构说明:
-- 定时任务在测试容器中运行
-- 编译容器: 用于拉取代码和编译项目
-- 测试容器: 用于拉取代码和运行基准测试
-- 两个容器都从远程仓库拉取代码到 /workspaces/code/opencode/GVirt
-
-容器启动方式:
-
-1. 启动编译容器 (xlite-build，不推荐在测试容器中编译，因为会影响性能):
-   docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
-     --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
-     -v /usr/local/dcmi:/usr/local/dcmi:ro \
-     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-     -v /usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/common:ro \
-     -v /usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/driver:ro \
-     -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-     -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro \
-     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
-     -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
-     -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-     --name xlite-build \
-     -v /tmp:/tmp -v /home:/home -v /mnt/sdb/:/mnt/sdb \
-     hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20260324 \
-     /bin/bash
-
-2. 启动测试容器 (daily-test，应直接再测试容器中执行定时任务):
-   docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
-     --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
-     -v /usr/local/dcmi:/usr/local/dcmi:ro \
-     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-     -v /usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/common:ro \
-     -v /usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/driver:ro \
-     -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-     -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro \
-     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
-     -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
-     -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-     --name daily-test \
-     -v /tmp:/tmp -v /home:/home -v /mnt/sdb/:/mnt/sdb \
-     -v /var/run/docker.sock:/var/run/docker.sock \
-     quay.io/ascend/vllm-ascend:v0.19.1rc1-a3 \
-     /bin/bash
+- 在单一容器中完成拉取代码、编译项目、运行基准测试
+- 从远程仓库拉取代码到 /workspaces/code/opencode/GVirt
 
 使用方法:
     python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
@@ -63,7 +24,6 @@ xlite 每日自动化测试机器人
     --receiver: 接收者ID，默认 927280411401503971
     --threshold: 性能劣化阈值，默认 0.05 (即5%)
     --offline-threshold: 离线 bench 性能劣化阈值，默认 0.025 (即2.5%)
-    --build-container: 编译容器名称
     --env-type: 环境类型 (blue/yellow)，默认 yellow
                - yellow 环境: 需要执行 source /home/env.sh
                - blue 环境: 不需要 source /home/env.sh
@@ -120,7 +80,6 @@ from daily_bot_utils import (
     # 通知发送
     send_notification,
     # 配置设置
-    set_build_container,
     set_env_type,
     set_machine_ip,
     set_test_container,
@@ -224,7 +183,7 @@ def update_model_paths(device: str) -> bool:
 
 def run_benchmark(model_type: str = "moe", report_subdir: Optional[Path] = None) -> Optional[Path]:
     """
-    在测试容器中执行基准测试脚本
+    执行基准测试脚本
 
     参数:
         model_type: 模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)
@@ -284,7 +243,7 @@ def run_benchmark(model_type: str = "moe", report_subdir: Optional[Path] = None)
 # ====================== 离线 bench 测试执行函数 ======================
 def run_offline_bench(report_subdir: Optional[Path] = None) -> Optional[Path]:
     """
-    在测试容器中执行离线 bench 测试 (run.sh bench 模式)
+    执行离线 bench 测试 (run.sh bench 模式)
 
     用 run.sh 跑 run_glm5_w8a8 的 bench 模式，只跑 OFFLINE_BENCH_N_LAYERS 层。
 
@@ -1861,8 +1820,8 @@ def main():
 
     流程:
     1. 解析命令行参数
-    2. 拉取最新代码 (编译容器)
-    3. 编译项目 (编译容器)
+    2. 拉取最新代码
+    3. 编译项目
     4. 安装 wheel 包
     5. 执行基准测试
     6. 解析测试报告
@@ -1890,7 +1849,6 @@ def main():
         default=0.025,
         help="离线 bench 性能劣化阈值 (default: 0.025 = 2.5%%); 与在线 --threshold 分离",
     )
-    parser.add_argument("--build-container", type=str, default=None, help="编译容器名称")
     parser.add_argument(
         "--report-dir", type=str, default=None, help="指定已有的报告目录（调试模式，跳过拉取、编译、测试步骤）"
     )
@@ -1922,11 +1880,6 @@ def main():
     COMPARE_TPOT_P99_METRICS = args.compare_tpot_p99
 
     # 设置配置
-    if args.build_container:
-        set_build_container(args.build_container)
-    else:
-        set_build_container(os.environ.get("BUILD_CONTAINER", ""))
-    set_test_container(os.environ.get("TEST_CONTAINER", ""))
     set_env_type(args.env_type)
     set_machine_ip(os.environ.get("MACHINE_IP", ""))
 
@@ -1938,7 +1891,6 @@ def main():
     log_info("=" * 60)
     log_info("xlite 每日自动化测试机器人启动")
     log_info(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    log_info(f"编译容器: {os.environ.get('BUILD_CONTAINER', '')}")
     log_info(f"环境类型: {args.env_type}")
     log_info("=" * 60)
 
@@ -1963,13 +1915,13 @@ def main():
             sys.exit(1)
         log_info(f"使用报告目录: {report_dir}")
     else:
-        # 步骤1: 拉取最新代码 (在编译容器中)
+        # 步骤1: 拉取最新代码
         if not args.skip_pull:
             if not pull_latest_code():
                 log_error("代码拉取失败，终止执行")
                 sys.exit(1)
 
-        # 步骤2: 编译项目 (在编译容器中)
+        # 步骤2: 编译项目
         wheel_path = None
         if not args.skip_build:
             success, wheel_path = build_project(REPORT_DIR)
@@ -1983,7 +1935,7 @@ def main():
                 log_error("wheel 包安装失败，终止执行")
                 sys.exit(1)
 
-        # 步骤4: 执行基准测试 (在测试容器中)
+        # 步骤4: 执行基准测试
         # 一次性确定报告目录 (版本+日期), 供在线/离线两阶段复用,
         # 避免跨午夜跑测试时结果分到不同日期目录。
         current_version = get_xlite_version()
