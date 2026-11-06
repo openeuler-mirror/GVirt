@@ -1362,7 +1362,15 @@ void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
 void XliteOpMlaCacheC8(XRuntime &rt, XTensor &latent, XTensor &pe, const XTensor &slotMapping,
                        XTensor &cache, XTensor &peCache, XTensor &kScaleCache)
 {
-    if (IsDummyRuntime(rt) || latent.shape[0] == 0) {
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (latent.shape.size() != 2 || pe.shape.size() != 2 || pe.shape[0] != latent.shape[0] ||
+        slotMapping.numel != latent.shape[0]) {
+        throw std::invalid_argument(
+            "mla_cache_c8: expected latent[T,D], pe[T,R] and T slot entries");
+    }
+    if (latent.shape[0] == 0) {
         return;
     }
     const uint32_t latentDim = latent.shape[1];
