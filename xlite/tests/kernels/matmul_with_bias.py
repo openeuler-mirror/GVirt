@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 for weight_nz in [False, True]:
@@ -34,7 +34,7 @@ for weight_nz in [False, True]:
                         y = torch_npu.npu_format_cast(y, 29)
 
                     torch.npu.synchronize()
-                    matmul_with_bias(rt, x, y, z, bias, weight_nz and dtype != torch.float)
+                    matmul_with_bias(rt, x, y, z, bias, weight_nz=weight_nz and dtype != torch.float)
                     torch.npu.synchronize()
 
                     print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')

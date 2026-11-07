@@ -76,7 +76,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     torch.manual_seed(20261003)
     torch.npu.set_device(npu_id)
-    rt = Runtime(npu_id, 512)
+    rt = Runtime(npu_id, size=512)
     for count in (0, 1, 17, 129, 257):
         latent = torch.randn(count, 4, 128, dtype=torch.bfloat16, device="npu")
         latent *= torch.tensor([0.001, 0.1, 1, 10], device="npu")[None, :, None]

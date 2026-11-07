@@ -810,9 +810,8 @@ class Transformer(nn.Module):
         # v4 freqs_cis is per-layer (compress vs non-compress layers differ in rope_theta);
         # pass a list, one entry per layer, instead of v3's single tensor.
         freqs_cis = [layer.attn.freqs_cis for layer in self.layers]
-        self.xlite_model.forward_v2(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache,
-                                    freqs_cis, h, stream)
-        self.xlite_model.forward_get_logits(self.xlite_rt, h, logits_indices, logits, stream)
+        self.xlite_model.forward_v2(rt=self.xlite_rt, input=tokens.flatten(), attn_meta=attn_meta, kv_cache=self.xlite_kv_cache, freqs_cis=freqs_cis, output=h, curr_stream=stream)
+        self.xlite_model.forward_get_logits(rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream)
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
@@ -1006,8 +1005,7 @@ class Transformer(nn.Module):
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = Runtime(local_rank, 0, self.global_rank, self.tp_size,
-                                    self.dp_size, 1, args.moe_ep_size)
+            self.xlite_rt = Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size, moe_tp_size=1, moe_ep_size=args.moe_ep_size)
             self.init_xlite_model(args)
             kv_size = self.init_xlite_kvcache(args)
             pool_size = self.xlite_model.get_tensor_pool_size()

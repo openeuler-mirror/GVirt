@@ -34,7 +34,7 @@ DEVICE = int(os.environ.get("XLITE_TEST_DEVICE", "0"))
 # 500 MB pool fits the minimax_m2-scale case (single concat needs ~2x totalBytes,
 # ~460 MB at m=32768). Bump XLITE_TEST_POOL_MB if you raise the size caps.
 POOL_MB = int(os.environ.get("XLITE_TEST_POOL_MB", "500"))
-rt = Runtime(DEVICE, POOL_MB)
+rt = Runtime(DEVICE, size=POOL_MB)
 torch.npu.set_device(DEVICE)
 torch.set_printoptions(threshold=torch.inf)
 

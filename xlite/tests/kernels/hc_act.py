@@ -65,7 +65,7 @@ def hc_head_ref(mixes, hc_scale, hc_base, hc_mult=4, eps=1e-6):
     return pre
 
 torch.npu.set_device(0)
-rt = Runtime(0, 2048)
+rt = Runtime(0, size=2048)
 
 HC_MULT = 4
 MIX_HC = (2 + HC_MULT) * HC_MULT  # 24 for hc_mult=4

@@ -37,7 +37,7 @@ from xlite._C import Runtime, gather_sparse_kv_cache
 
 logging.getLogger().setLevel(logging.INFO)
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 torch.npu.config.allow_internal_format = True
 
@@ -408,9 +408,7 @@ def run_test(
         BLOCK_SIZE,
         kv_lora_rank,
         rope_head_dim,
-        kv_heads,
-        compress_ratio,
-        burst_copy_size,
+        kv_heads=kv_heads, compress_ratio=compress_ratio, burst_copy_size=burst_copy_size,
     )
     torch.npu.synchronize()
 
@@ -493,9 +491,9 @@ def run_host_check_cases():
         query_start_loc = torch.tensor([0], dtype=torch.int32)
         k_dense = torch.zeros(1, topK, 1, kv, dtype=torch.bfloat16)
 
-    def expect_rejected(desc, *args):
+    def expect_rejected(desc, *args, **kwargs):
         try:
-            gather_sparse_kv_cache(rt, *args)
+            gather_sparse_kv_cache(rt, *args, **kwargs)
         except RuntimeError as e:
             logging.info("host check rejected %s as expected: %s", desc, e)
             return
@@ -503,7 +501,8 @@ def run_host_check_cases():
 
     expect_rejected(
         "channel mismatch", k_cache, pe_cache, block_tables, topk_indices, query_start_loc, query_lens,
-        cached_lens, k_dense, torch.zeros(0, dtype=torch.bfloat16), 1, topK, BLOCK_SIZE, kv, pe, 1, 1, 16 * 1024,
+        cached_lens, k_dense, torch.zeros(0, dtype=torch.bfloat16), 1, topK, BLOCK_SIZE, kv, pe,
+        kv_heads=1, compress_ratio=1, burst_copy_size=16 * 1024,
     )
 
 

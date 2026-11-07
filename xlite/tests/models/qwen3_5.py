@@ -675,15 +675,15 @@ class Qwen3_5(nn.Module):
         attn_meta = self.prepare_xlite_attnmeta_v2(tokens, start_pos)
         stream = torch.npu.current_stream().npu_stream
         h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
-        self.xlite_model.forward_v2(self.xlite_rt, tokens.flatten(), attn_meta, self.xlite_kv_cache, [self.freqs_cis], h, stream)
-        self.xlite_model.forward_get_logits(self.xlite_rt, h, logits_indices, logits, stream)
+        self.xlite_model.forward_v2(rt=self.xlite_rt, input=tokens.flatten(), attn_meta=attn_meta, kv_cache=self.xlite_kv_cache, freqs_cis=[self.freqs_cis], output=h, curr_stream=stream)
+        self.xlite_model.forward_get_logits(rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream)
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
     class PersistentThread(threading.Thread):
         def __init__(self, model, task_id):
             super().__init__(daemon=True)
-            self.xlite_model = model.xlite_model
+            self.xlite_model: Model = model.xlite_model
             self.task_queue = queue.Queue()
             self.xlite_rt = model.xlite_rt_list[task_id]
             self.xlite_rt.task_id = task_id
@@ -701,7 +701,7 @@ class Qwen3_5(nn.Module):
                 args, event = task
                 tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream = args
                 self.xlite_rt.multi_task_parallel = True
-                self.xlite_model.forward_and_get_logits_v2(self.xlite_rt, tokens, attn_meta, xlite_kv_cache, [freqs_cis], logits_indices, logits, stream)
+                self.xlite_model.forward_and_get_logits_v2(rt=self.xlite_rt, input=tokens, attn_meta=attn_meta, kv_cache=xlite_kv_cache, freqs_cis=[freqs_cis], indices=logits_indices, output=logits, curr_stream=stream)
                 event.set()
 
     @torch.inference_mode()
@@ -1017,7 +1017,7 @@ class Qwen3_5(nn.Module):
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
             # Runtime rank arg = GLOBAL rank; tp_size/dp_size explicit.
-            self.xlite_rt = Runtime(local_rank, 0, self.global_rank, self.tp_size, self.dp_size)
+            self.xlite_rt = Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size)
             self.init_xlite_model(self.args)
             kv_size = self.init_xlite_kvcache(self.args)
             pool_size = self.xlite_model.get_tensor_pool_size()
@@ -1033,8 +1033,7 @@ class Qwen3_5(nn.Module):
                       f" Tensor pool: {pool_size} MB")
 
             if self.multi_task_parallel:
-                self.xlite_rt_list = [self.xlite_rt, Runtime(local_rank, 0, self.global_rank,
-                                                             self.tp_size, self.dp_size)]
+                self.xlite_rt_list = [self.xlite_rt, Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size)]
                 self.xlite_rt_list[1].init_tensor_pool(pool_size)
                 self.xlite_rt_list[0].peer_notify = self.xlite_rt_list[1].notify
                 self.xlite_rt_list[1].peer_notify = self.xlite_rt_list[0].notify

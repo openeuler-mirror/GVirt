@@ -12,7 +12,7 @@ import torch_npu  # noqa: F401
 from xlite._C import Runtime, add
 
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 supported_dtype_list = [torch.float16, torch.bfloat16]

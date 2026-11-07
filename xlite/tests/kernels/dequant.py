@@ -11,7 +11,7 @@ import torch
 import torch_npu  # noqa: F401
 from xlite._C import Runtime, dequant
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 cases = [
     [8192, 768],

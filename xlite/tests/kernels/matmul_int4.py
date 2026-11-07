@@ -17,7 +17,7 @@ torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 dev_id=2
 debug = False
 
-rt = Runtime(dev_id, 500)
+rt = Runtime(dev_id, size=500)
 torch.npu.set_device(dev_id)
 
 # M = 64          # 输入行数
@@ -136,7 +136,7 @@ for M, N, K in test_cases:
             z = torch.zeros(M, N, dtype=torch.float16, device=f"npu:{dev_id}")
 
             torch.npu.synchronize()
-            matmul_dequant(rt, x_int4_pack, weight_int4pack, bias, scale, z, weight_nz, transpose)
+            matmul_dequant(rt, x_int4_pack, weight_int4pack, bias, scale, z, weight_nz=weight_nz, transpose=transpose)
             torch.npu.synchronize()
 
             try:

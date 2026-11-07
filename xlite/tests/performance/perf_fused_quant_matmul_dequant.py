@@ -45,7 +45,7 @@ from xlite._C import (
 torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
 dev_id = 0
-rt = Runtime(dev_id, 500)
+rt = Runtime(dev_id, size=500)
 torch.npu.set_device(dev_id)
 
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -176,7 +176,7 @@ def run_config(label, m, n, k, is_dyn, has_bias):
             else:
                 quant(rt, x, srec, soff, xq)
             time.sleep(0.001)
-            matmul_dequant(rt, xq, y_in, bias, scale, serial_tmp, True, True)
+            matmul_dequant(rt, xq, y_in, bias, scale, serial_tmp, weight_nz=True, transpose=True)
             time.sleep(0.001)
             dequant(rt, serial_tmp, out_scale, standard, is_dyn)
             time.sleep(0.001)
@@ -188,7 +188,7 @@ def run_config(label, m, n, k, is_dyn, has_bias):
                     quant(rt, x, srec, soff, xq)
                 time.sleep(0.001)
                 fusion_operator_matmul_dequant_pipeline(
-                    rt, xq, y_in, fused2_out, bias, scale, True, True, out_scale, num
+                    rt, xq, y_in, fused2_out, bias, scale, weight_nz=True, transpose=True, out_scale=out_scale, num=num
                 )
                 time.sleep(0.001)
                 # 新三段融合 (可选参数按需省略)

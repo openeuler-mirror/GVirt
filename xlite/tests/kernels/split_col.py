@@ -13,7 +13,7 @@ from xlite._C import Runtime, split_col
 
 
 if __name__ == "__main__":
-    rt = Runtime(0, 500)
+    rt = Runtime(0, size=500)
     torch.npu.set_device(0)
     torch.set_default_device("npu:0")
     torch.set_printoptions(threshold=torch.inf)

@@ -17,7 +17,7 @@ torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 dev_id=0
 debug = False
 
-rt = Runtime(dev_id, 500)
+rt = Runtime(dev_id, size=500)
 torch.npu.set_device(dev_id)
 
 def npu_quant_matmul_cpu(
@@ -102,7 +102,7 @@ for weight_nz in [True, False]:
             scale[0::2] = deqScale[0::1]
             scale[1::2] = 0
             torch.npu.synchronize()
-            matmul_dequant(rt, x, y_in, bias, scale, z, weight_nz and dtype != torch.float, transpose)
+            matmul_dequant(rt, x, y_in, bias, scale, z, weight_nz=weight_nz and dtype != torch.float, transpose=transpose)
             torch.npu.synchronize()
 
             if transpose:

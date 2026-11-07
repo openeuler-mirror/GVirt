@@ -40,7 +40,7 @@ def run_test(rt, M, N, V, H, K, rtol=1e-3, atol=1e-5):
 
 
 def main():
-    rt = Runtime(0, 500)
+    rt = Runtime(0, size=500)
     torch.npu.set_device(0)
     torch.set_default_device("npu:0")
 

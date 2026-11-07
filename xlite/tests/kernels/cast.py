@@ -11,7 +11,7 @@ import torch
 import torch_npu  # noqa: F401
 from xlite._C import Runtime, cast_up
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 x = torch.randn(8, 2048, dtype=torch.bfloat16, device="npu:0")

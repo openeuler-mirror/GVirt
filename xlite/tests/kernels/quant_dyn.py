@@ -12,7 +12,7 @@ import torch_npu
 from xlite._C import Runtime, quant_dynamic
 
 npu_devid = 0
-rt = Runtime(npu_devid, 500)
+rt = Runtime(npu_devid, size=500)
 torch.npu.set_device(npu_devid)
 
 supported_dtype_list = [torch.bfloat16]  # add torch.float16 here once fp16 kernel is instantiated

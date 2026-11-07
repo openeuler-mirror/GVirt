@@ -15,7 +15,7 @@ from xlite._C import Runtime, sigmoid_topk
 import numpy as np
 import math
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 n_tokens = 9

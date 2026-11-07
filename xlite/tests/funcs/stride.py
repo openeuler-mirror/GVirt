@@ -31,7 +31,7 @@ def printed_values(x):
         saved = os.dup(1)
         os.dup2(tmp.fileno(), 1)
         try:
-            xlite_print(x, "", 2 * rows, 2 * cols)
+            xlite_print(x, name="", row=2 * rows, col=2 * cols)
         finally:
             os.dup2(saved, 1)
             os.close(saved)

@@ -12,7 +12,7 @@ import torch_npu
 from xlite._C import Runtime, unpack_activation
 
 npu_devid = 0
-rt = Runtime(npu_devid, 500)
+rt = Runtime(npu_devid, size=500)
 torch.npu.set_device(npu_devid)
 torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 

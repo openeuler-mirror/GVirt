@@ -38,7 +38,7 @@ from tests.models.weight_utils import matrix_nd2nz
 
 logging.getLogger().setLevel(logging.INFO)
 
-rt = Runtime(0, 3000)
+rt = Runtime(0, size=3000)
 torch.npu.set_device(0)
 torch.npu.config.allow_internal_format = True
 weight_nz = True
@@ -267,7 +267,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
         mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite, wuv_xlite,
                output_xlite_v2, query_start_loc, query_lens, cached_lens, block_tables, n_heads,
                rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, BLOCK_SIZE, batch,
-               scale, topk_indices_empty, 0, weight_nz, enable_flash, tile_size)
+               scale, topk_indices_empty, top_k=0, nz=weight_nz, enable_flash_attention=enable_flash, tile_size_of_cached_kv=tile_size)
 
         logging.info(
             "mla_v2 %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, "
@@ -377,7 +377,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                        wuv_xlite, output_xlite_with_topk_v2, query_start_loc, query_lens,
                        cached_lens, block_tables, n_heads, rope_head_dim, nope_head_dim,
                        v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, scale, topk_indices_tensor,
-                       topk, weight_nz, enable_flash, tile_size)
+                       top_k=topk, nz=weight_nz, enable_flash_attention=enable_flash, tile_size_of_cached_kv=tile_size)
 
                 logging.info(
                     "mla_v2 with topkIndices %s (%d heads, %d rope_head_dim, %d nope_head_dim, "
@@ -425,8 +425,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                 mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite,
                        wuv_xlite, output_xlite_dense, query_start_loc, query_lens, cached_lens,
                        block_tables, n_heads, rope_head_dim, nope_head_dim, v_head_dim,
-                       kv_lora_rank, BLOCK_SIZE, batch, scale, topk_indices_tensor, topk,
-                       weight_nz, enable_flash, tile_size, True)
+                       kv_lora_rank, BLOCK_SIZE, batch, scale, topk_indices_tensor, top_k=topk, nz=weight_nz, enable_flash_attention=enable_flash, tile_size_of_cached_kv=tile_size, dense=True)
 
                 logging.info(
                     "mla_v2 dense %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d "

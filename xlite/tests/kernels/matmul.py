@@ -13,7 +13,7 @@ from xlite._C import Runtime, matmul
 import torch.nn.functional as F
 
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 torch.npu.config.allow_internal_format = True
 
@@ -40,7 +40,7 @@ for weight_nz in [False, True]:
                             y = torch_npu.npu_format_cast(y, 29)
 
                         torch.npu.synchronize()
-                        matmul(rt, x, y, z, weight_nz and dtype != torch.float, transpose)
+                        matmul(rt, x, y, z, weight_nz=weight_nz and dtype != torch.float, transpose=transpose)
                         torch.npu.synchronize()
 
                         if transpose:

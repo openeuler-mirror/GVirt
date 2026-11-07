@@ -76,8 +76,8 @@ def test_gather(rt, block_size, lengths, topk, latent_dim=512, rope_dim=64, quer
     torch.npu.synchronize()
     gather_sparse_kv_cache(rt, cache[0], cache[1], table, indices,
                            starts, lens, cached_lens, k_out, pe_out, batch, topk, block_size,
-                           latent_dim, rope_dim, 1, burst_copy_size=burst_copy_size,
-                           k_scale_cache=cache[2])
+                           latent_dim, rope_dim, kv_heads=1,
+                           burst_copy_size=burst_copy_size, k_scale_cache=cache[2])
     actual = torch.cat((k_out, pe_out), dim=-1).cpu()
     expected = torch.cat((expected_k, expected_pe), dim=-1).cpu()
     for row, sparse in enumerate(sparse_rows):
@@ -95,7 +95,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     torch.manual_seed(20261003)
     torch.npu.set_device(npu_id)
-    rt = Runtime(npu_id, 512)
+    rt = Runtime(npu_id, size=512)
     for block_size in (16, 128):
         test_gather(rt, block_size, [47, 129, 2049], 2048)
     test_gather(rt, 128, [47, 129, 2049], 2048, burst_copy_size=512)

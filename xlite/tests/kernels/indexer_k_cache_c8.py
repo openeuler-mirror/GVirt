@@ -96,7 +96,9 @@ def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
     inputs = (k, k_norm, k_norm_bias, freqs, positions, slots)
     device_inputs = [tensor.to(device) for tensor in inputs]
     torch.npu.synchronize(device)
-    indexer_k_cache_c8(rt, *device_inputs, k_cache, scale_cache, norm_eps=norm_eps)
+    indexer_k_cache_c8(rt, device_inputs[0], device_inputs[1], device_inputs[2],
+                       device_inputs[3], device_inputs[4], device_inputs[5],
+                       k_cache=k_cache, scale_cache=scale_cache, norm_eps=norm_eps)
     torch.npu.synchronize(device)
     assert torch.equal(device_inputs[0].cpu(), k), (name, "K input mutated")
 
@@ -140,7 +142,7 @@ def main():
     logging.getLogger().setLevel(logging.INFO)
     torch.npu.set_device(npu_id)
     device = torch.device(f"npu:{npu_id}")
-    rt = Runtime(device.index, 32)
+    rt = Runtime(device.index, size=32)
     generator = torch.Generator().manual_seed(9128)
     k_norm, k_norm_bias = torch.ones(HEAD_DIM), torch.zeros(HEAD_DIM)
     freqs = frequencies(256)

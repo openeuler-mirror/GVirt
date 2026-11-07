@@ -12,7 +12,7 @@ import torch_npu  # noqa: F401
 from xlite._C import Runtime, permutation, unpermutation
 import torch.nn.functional as F
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 DIM = 7168
@@ -49,7 +49,7 @@ for n_routed_experts in [160, 256]:
             experts_counts = torch.empty(n_routed_experts, 1, dtype=torch.int32, device="npu:0")
             torch.npu.synchronize()
             permutation(rt, x, routing_xlite, START, END, experts_sorted, unp_idx, experts_counts,
-                        scales_in, scales_out)
+                        scale_in=scales_in, scale_out=scales_out)
             torch.npu.synchronize()
 
             experts_counts = experts_counts.view(n_routed_experts).to(dtype=torch.int64)

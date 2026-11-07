@@ -46,7 +46,7 @@ def run_test(rt, num_tokens, dim, dtype, inplace, msg, broadcast=False):
 
 
 if __name__ == "__main__":
-    rt = Runtime(0, 500)
+    rt = Runtime(0, size=500)
     torch.npu.set_device(0)
     torch.set_default_device("npu:0")
 

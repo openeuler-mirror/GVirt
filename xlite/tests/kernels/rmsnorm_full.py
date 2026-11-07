@@ -25,7 +25,7 @@ rank = int(os.getenv("RANK", "0"))
 local_rank = int(os.getenv("LOCAL_RANK", "0"))
 dist.init_process_group("hccl")
 
-rt = Runtime(local_rank, 500, rank, world_size)
+rt = Runtime(local_rank, size=500, rank=rank, tp_size=world_size)
 torch.npu.set_device(local_rank)
 
 logging.getLogger().setLevel(logging.INFO)
