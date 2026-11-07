@@ -2003,10 +2003,11 @@ void GatherSparseKVCache(XRuntime &rt, at::Tensor &kCache, at::Tensor &peCache,
                          at::Tensor &kDenseCache, at::Tensor &peDenseCache, uint32_t batch,
                          uint32_t indexTopK, uint32_t blockSize, uint32_t kvLoraRank,
                          uint32_t ropeHeadDim, uint32_t kvHeads, uint32_t compressRatio,
-                         uint32_t burstCopySize)
+                         uint32_t burstCopySize, const std::optional<at::Tensor> &kScaleCache)
 {
     XTensor _kCache, _peCache, _blockTables, _topkIndices, _queryStartLoc, _lens, _cachedLens,
-        _kDenseCache, _peDenseCache;
+        _kDenseCache, _peDenseCache, _kScaleCache;
+    InitXTensor(_kScaleCache, kScaleCache, DBG_LOC);
     InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_peCache, peCache, DBG_LOC, /*allowPitched=*/true);
     InitXTensor(_blockTables, blockTables, DBG_LOC, /*allowPitched=*/true);
@@ -2019,7 +2020,7 @@ void GatherSparseKVCache(XRuntime &rt, at::Tensor &kCache, at::Tensor &peCache,
     XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices, _queryStartLoc,
                                _lens, _cachedLens, _kDenseCache, _peDenseCache, batch, indexTopK,
                                blockSize, kvLoraRank, ropeHeadDim, kvHeads, compressRatio,
-                               burstCopySize);
+                               burstCopySize, _kScaleCache);
     rt.Synchronize();
 }
 
@@ -3685,7 +3686,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("k_dense_cache"), py::arg("pe_dense_cache"), py::arg("batch"),
           py::arg("index_topk"), py::arg("block_size"), py::arg("kv_lora_rank"),
           py::arg("rope_head_dim"), py::arg("kv_heads") = 1, py::arg("compress_ratio") = 1,
-          py::arg("burst_copy_size") = GM_UB_BURST_SIZE);
+          py::arg("burst_copy_size") = GM_UB_BURST_SIZE, py::arg("k_scale_cache") = py::none());
     m.def("cxa", &CXA, "cxa", py::arg("rt"), py::arg("q"), py::arg("swa_k_cache"),
           py::arg("compress_k_cache"), py::arg("swa_block_tables"),
           py::arg("compress_block_tables"), py::arg("swa_block_size"),

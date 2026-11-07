@@ -661,12 +661,13 @@ def main():
             )
 
     # cachedLens window reload: a batch one row past the nope-k window capacity
-    # ((UB_SIZE - 4*(4096 + 128))/4) forces a mid-run GM reload; all rows share
+    # Three metadata arrays share the UB left by two chunk buffers; all rows share
     # one physical block to keep the oversized batch cheap
     ub_size = 196608  # 192KB, kernel_macro.h (NpuArch 2201)
     nope_per_buf = 4096 + 128  # kHeadBytesPad (32 slots * 64 * bf16) + topkBytesPad
-    reload_batch = (ub_size - 4 * nope_per_buf) // 4 + 1
-    assert reload_batch == 44929  # re-derive if the kernel layout changes
+    window_bytes = ((ub_size - 2 * nope_per_buf) // 3) // 32 * 32
+    reload_batch = window_bytes // 4 + 1
+    assert reload_batch == 15681  # re-derive if the kernel layout changes
     run_test(
         "swapped",
         64,

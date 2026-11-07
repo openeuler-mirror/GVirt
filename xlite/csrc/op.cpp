@@ -1247,7 +1247,8 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
                                 XTensor &queryLens, XTensor &cachedLens, XTensor &kDenseCache,
                                 const XTensor &peDenseCache, uint32_t batch, uint32_t indexTopK,
                                 uint32_t blockSize, uint32_t kvLoraRank, uint32_t ropeHeadDim,
-                                uint32_t kvHeads, uint32_t compressRatio, uint32_t burstCopySize)
+                                uint32_t kvHeads, uint32_t compressRatio, uint32_t burstCopySize,
+                                const XTensor &kScaleCache)
 {
     const bool useK = kCache.ptr != nullptr, usePe = peCache.ptr != nullptr;
     if (IsDummyRuntime(rt) || (!useK && !usePe)) {
@@ -1257,9 +1258,10 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
         throw std::runtime_error(std::string(__func__) +
                                  ": kvHeads should be less than or equal to 1");
     }
+    const bool c8 = useK && kCache.dtype == INT8;
     // an empty input channel with a non-empty output (or vice versa) is a caller
     // bug: null-pointer write or a never-written output
-    if (useK != (kDenseCache.ptr != nullptr) || usePe != (peDenseCache.ptr != nullptr)) {
+    if (!c8 && (useK != (kDenseCache.ptr != nullptr) || usePe != (peDenseCache.ptr != nullptr))) {
         throw std::runtime_error(std::string(__func__) +
                                  ": cache and dense cache channel emptiness must match");
     }
@@ -1268,8 +1270,28 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
     uint32_t aivNum = PickMinBlockNum(
         rt.aivNum, static_cast<uint64_t>(batch) *
                        DIV_ROUND_UP(indexTopK, GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP));
-    if ((useK && !EachXDtype(BF16, kCache, kDenseCache)) ||
-        (usePe && !EachXDtype(BF16, peCache, peDenseCache))) {
+    if (c8) {
+        if (kDenseCache.ptr == nullptr || peDenseCache.ptr == nullptr ||
+            !EachXDtype(BF16, kDenseCache, peDenseCache) || !kCache.IsContiguous() ||
+            !kDenseCache.IsContiguous() || !peDenseCache.IsContiguous() || kvLoraRank == 0 ||
+            kvLoraRank % 128 != 0 || ropeHeadDim == 0 ||
+            (ropeHeadDim * XDtypeBit(BF16) / 8) % UB_BLOCK_SIZE != 0 ||
+            kCache.shape.back() != kvLoraRank || peCache.dtype != BF16 ||
+            kScaleCache.ptr == nullptr || kScaleCache.dtype != FP32 || !peCache.IsContiguous() ||
+            !kScaleCache.IsContiguous() ||
+            peCache.numel < kCache.numel / kvLoraRank * ropeHeadDim ||
+            kScaleCache.numel < kCache.numel / 128 || compressRatio != 1) {
+            throw std::invalid_argument("gather_sparse_kv_cache: unsupported SFA-C8 layout");
+        }
+        aclrtlaunch_gather_sparse_kv_and_dequant_int8_t(
+            PickMinBlockNum(rt.aivNum,
+                            static_cast<uint64_t>(batch) *
+                                DIV_ROUND_UP(indexTopK, GATHER_SPARSE_KV_CACHE_C8_CNT_ONE_LOOP)),
+            rt.stream, kCache.ptr, peCache.ptr, kScaleCache.ptr, blockTables.ptr, topkIndices.ptr,
+            queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, kDenseCache.ptr, peDenseCache.ptr,
+            batch, indexTopK, blockSize, blockTableStride, kvLoraRank, ropeHeadDim, burstCopySize);
+    } else if ((useK && !EachXDtype(BF16, kCache, kDenseCache)) ||
+               (usePe && !EachXDtype(BF16, peCache, peDenseCache))) {
         std::string err_str = DBG_PREFIX + XT_STR(kCache) + XT_STR(peCache) + XT_STR(kDenseCache) +
                               XT_STR(peDenseCache);
         throw std::runtime_error(err_str + "not supported!");

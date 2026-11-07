@@ -3506,9 +3506,19 @@ def gather_sparse_kv_cache(
     kv_heads: int = 1,
     compress_ratio: int = 1,
     burst_copy_size: int = 16 * 1024,
+    k_scale_cache: Optional[torch.Tensor] = None,
 ) -> None:
     """Gather sparse KV cache into a contiguous dense cache per query token
     (decode (query length 1) and small prefill; ``index_topk > 0``).
+
+    INT8 ``k_cache`` selects SFA-C8 with BF16 ``pe_cache`` and FP32 ``k_scale_cache``
+    (see :func:`mla_cache_c8`).
+    Both outputs are BF16; latent scales are restored before rounding to BF16.
+    PE is copied from ``pe_cache``; both output buffers are required.
+    C8 caches and outputs must be contiguous.
+    Sparse rows require indices in ``[0, num_candidates)``; dense rows leave suffix slots untouched.
+    C8 may reorder sparse rows within consecutive runs, as the BF16 path does.
+    The following ordering, padding and optional-channel rules apply to BF16 caches.
 
     Each query token owns its own dense cache row (``index_topk`` slots). Sparse
     rows (``num_candidates = (cached_lens[b] + q_idx + 1) // compress_ratio >
@@ -3565,7 +3575,7 @@ def gather_sparse_kv_cache(
             degenerates to token-by-token). Defaults to 16KB.
 
     Raises:
-        RuntimeError: Non-BF16 inputs, kv_heads != 1, or channel input/output
+        RuntimeError: Unsupported input dtype, kv_heads != 1, or channel input/output
             emptiness mismatch. A 1-D ``block_tables`` is silently viewed as a
             single ``[1, numel]`` row (no rank/width validation).
     """
