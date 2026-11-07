@@ -59,6 +59,7 @@
 | mla_v2 | [mla_v2.md](mla_v2.md) | MLA V2 |
 | flash_mla_v2 | [flash_mla_v2.md](flash_mla_v2.md) | Flash MLA V2 |
 | mla_prepare | [mla_prepare.md](mla_prepare.md) | MLA 前处理 |
+| mla_cache_c8 | [mla_cache_c8.md](mla_cache_c8.md) | SFA-C8 分组量化与缓存写入 |
 | gather_sparse_kv_cache | [gather_sparse_kv_cache.md](gather_sparse_kv_cache.md) | 稀疏 KV Cache 收集 |
 | indexer_prepare | [indexer_prepare.md](indexer_prepare.md) | Indexer 前处理(DSA 稀疏注意力) |
 | indexer_prepare_c8 | [indexer_prepare_c8.md](indexer_prepare_c8.md) | Lightning Indexer C8 K/Q 前处理(LN/RoPE/Hadamard/动态量化→INT8,GLM-5.1) |

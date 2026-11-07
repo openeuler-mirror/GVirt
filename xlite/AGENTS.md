@@ -4,6 +4,8 @@ The core of the project is `csrc/`, containing the C++ model/runtime code and ke
 
 `csrc/kernels/kernel_macro.h` contains shared kernel macros, wrappers, constants, and utilities. `csrc/kernels/cce_stub.h` contains lower-level CCE stub interfaces. Consult existing implementations before adding new kernel infrastructure.
 
+If a local version of agent instructions is present as `AGENTS.local.md` and not included in the context, read it before proceeding.
+
 ## Development requirements
 
 - Work primarily under `<repo_root>/xlite` unless specified otherwise.
@@ -15,14 +17,15 @@ The core of the project is `csrc/`, containing the C++ model/runtime code and ke
 
 - Use a container with the appropriate CANN installation for NPU development. If on host, check if an existing container is specified and available before proceeding in the host environment.
 - Use `pip install --force-reinstall --no-deps --no-build-isolation -v -e .` to install the package in editable mode (if failed due to missing dependencies, run `pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu`).
-- For a git worktree (no `.git` at repo root) or clean CMake build, use `cmake -B build && cmake --build build -j && cmake --install build` for isolated builds.
+- For a git worktree (no `.git` at repo root) or clean CMake build, use `rm -rf build && cmake -B build && cmake --build build -j && cmake --install build` for isolated builds, and run with `PYTHONPATH` environment variable set accordingly.
+- Incremental rebuilds in an existing build dir are supported: the build precleans device objects that CANN's in-place obj-text merge poisoned on the previous run (`scripts/preclean_poisoned_device_objs.cmake`), so no manual build-dir wipe is needed between builds.
 
 ## Testing
 
 - `tests/kernels/` contains kernel correctness tests. Update relevant tests when modifying or adding kernels.
 - `tests/funcs/`, `tests/models/`, and `tests/e2e/` contain functional, model, and end-to-end tests.
 - `tests/performance/` contains performance tooling.
-- TODO: `tests/perf/` corresponds to `tests/kernels/` for `msprof` related performance tests. Ignore for now unless specified otherwise.
+- `tests/perf/` corresponds to `tests/kernels/` for `msprof` related performance tests.
 - Test the narrowest relevant target first, then expand coverage as appropriate.
 - Do not claim tests or benchmarks passed unless they were actually run.
 - For performance changes, measure before/after performance rather than relying on code inspection.
@@ -30,6 +33,7 @@ The core of the project is `csrc/`, containing the C++ model/runtime code and ke
 ## Static checks
 
 Run before submitting a PR: `python tests/run_static_checks.py`. Use `--cpp-only` or `--python-only` for targeted checks when appropriate.
+Only run after concluding the current task and before submitting a PR. Do not run on the fly during development unless necessary to verify a specific change.
 
 ## Documentation
 

@@ -2374,6 +2374,20 @@ void MlaPrepare(XRuntime &rt, at::Tensor &attnQkvc, at::Tensor &qNorm, at::Tenso
     rt.Synchronize();
 }
 
+void MlaCacheC8(XRuntime &rt, at::Tensor &latent, at::Tensor &pe, at::Tensor &slotMapping,
+                at::Tensor &cache, at::Tensor &peCache, at::Tensor &kScaleCache)
+{
+    XTensor _latent, _pe, _slots, _cache, _peCache, _kScaleCache;
+    InitXTensor(_latent, latent);
+    InitXTensor(_pe, pe);
+    InitXTensor(_slots, slotMapping);
+    InitXTensor(_cache, cache);
+    InitXTensor(_peCache, peCache);
+    InitXTensor(_kScaleCache, kScaleCache);
+    XliteOpMlaCacheC8(rt, _latent, _pe, _slots, _cache, _peCache, _kScaleCache);
+    rt.Synchronize();
+}
+
 void IndexerPrepare(XRuntime &rt, at::Tensor &kw, at::Tensor &kNorm, at::Tensor &kNormBias,
                     at::Tensor &freqs, at::Tensor &position, uint32_t indexHeadDim,
                     uint32_t indexNHeads, uint32_t ropeHeadDim, uint32_t blockSize,
@@ -3610,6 +3624,8 @@ PYBIND11_MODULE(_C, m)
           py::arg("q_lora_rank"), py::arg("kv_lora_rank"), py::arg("rope_head_dim"),
           py::arg("block_size"), py::arg("k_cache"), py::arg("pe_cache"), py::arg("slot_mapping"),
           py::arg("norm_eps"));
+    m.def("mla_cache_c8", &MlaCacheC8, py::arg("rt"), py::arg("latent"), py::arg("pe"),
+          py::arg("slot_mapping"), py::arg("cache"), py::arg("pe_cache"), py::arg("k_scale_cache"));
     m.def("indexer_prepare", &IndexerPrepare, py::arg("rt"), py::arg("kw"), py::arg("k_norm"),
           py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("index_head_dim"),
           py::arg("index_n_heads"), py::arg("rope_head_dim"), py::arg("block_size"),
@@ -3713,9 +3729,16 @@ PYBIND11_MODULE(_C, m)
     m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
           py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
           py::arg("num_v_heads"));
-    m.def("silu_gate_mul", &SiluGateMul);
-    m.def("recurrent_gated_delta_rule_prefill_paged", &RecurrentGatedDeltaRulePrefillPaged);
-    m.def("conv1d_and_silu_prefill_paged", &Conv1dAndSiLUPrefillPaged);
+    m.def("silu_gate_mul", &SiluGateMul, py::arg("rt"), py::arg("normed"), py::arg("gate"),
+          py::arg("out"));
+    m.def("recurrent_gated_delta_rule_prefill_paged", &RecurrentGatedDeltaRulePrefillPaged,
+          py::arg("rt"), py::arg("query"), py::arg("key"), py::arg("value"), py::arg("beta"),
+          py::arg("g"), py::arg("state"), py::arg("out"), py::arg("indices"), py::arg("starts"),
+          py::arg("initial"), py::arg("num_key_heads"), py::arg("num_value_heads"),
+          py::arg("k_dim"), py::arg("v_dim"));
+    m.def("conv1d_and_silu_prefill_paged", &Conv1dAndSiLUPrefillPaged, py::arg("rt"),
+          py::arg("input"), py::arg("state"), py::arg("weight"), py::arg("output"),
+          py::arg("indices"), py::arg("starts"), py::arg("initial"));
     m.def("recurrent_gated_delta_rule_paged", &RecurrentGatedDeltaRulePaged, py::arg("rt"),
           py::arg("query"), py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"),
           py::arg("state"), py::arg("out"), py::arg("state_indices"), py::arg("num_key_heads"),

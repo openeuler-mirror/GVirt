@@ -10,6 +10,7 @@
 from __future__ import absolute_import
 import logging
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, mla_prepare
 
 logging.getLogger().setLevel(logging.INFO)
@@ -119,12 +120,8 @@ for test_dtype, q_lora_rank, kv_lora_rank, rope_head_dim in test_cases:
 
     k_cache_ref = torch.zeros(BLOCK_NUM, BLOCK_SIZE, kv_lora_rank, dtype=test_dtype, device="npu")
     pe_cache_ref = torch.zeros(BLOCK_NUM, BLOCK_SIZE, rope_head_dim, dtype=test_dtype, device="npu")
-    for i in range(num_tokens):
-        slot = int(slot_mapping[i].item())
-        b = slot // BLOCK_SIZE
-        off = slot % BLOCK_SIZE
-        k_cache_ref[b, off] = attn_norm_kvc_ref[i]
-        pe_cache_ref[b, off] = pe_rot[i]
+    k_cache_ref.view(-1, kv_lora_rank)[:num_tokens] = attn_norm_kvc_ref
+    pe_cache_ref.view(-1, rope_head_dim)[:num_tokens] = pe_rot
 
     # ---- xlite ----
     torch.npu.synchronize()

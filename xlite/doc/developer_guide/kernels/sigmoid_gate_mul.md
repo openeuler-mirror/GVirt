@@ -69,6 +69,8 @@ sigmoid 用 `1 / (1 + exp(-x))` 分解（`csrc/kernels/sigmoid_gate_mul.h` 的 `
 
 广播模式（gateDim == 1，`csrc/kernels/sigmoid_gate_mul.h` 的 `sigmoid_gate_mul` 函数体，关键字 `const bool broadcast` 与 `if (broadcast)`）：每行只搬 1 个 gate 元素，用单个 repeat 的 vmuls/vexp/vadds/vdiv 算出 sigmoid 标量，再通过 Scalar 流水（`set_flag/wait_flag(PIPE_V, PIPE_S, EVENT_ID2)`）把 `gateF[curr][0]` 读入标量寄存器 `sig`；随后每 tile 只需对 attnF 做 `vmuls(attnF, attnF, sig)` 标量乘（`csrc/kernels/sigmoid_gate_mul.h` 的 `sigmoid_gate_mul` 函数体，关键字 `vmuls(attnF[curr], attnF[curr], sig`），省去整行 gate 的搬运与逐元素 sigmoid。
 
+两种模式下 gate 激活与 attn 乘法全程保持 FP32，sigmoid/silu 结果不做中间 dtype 舍入（区别于 native MHA 在 gate dtype 域求 sigmoid 的数值路径，是有意的精度选择）。
+
 ### 流水线同步
 
 初始 4 个 flag：V→MTE2 的 ID0/ID1（两个输入槽空闲）、MTE3→V 的 ID0/ID1（两个输出槽空闲）（`csrc/kernels/sigmoid_gate_mul.h` 的 `sigmoid_gate_mul` 函数体，关键字 `set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0)`）。每 tile 迭代：

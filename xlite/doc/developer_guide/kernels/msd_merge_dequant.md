@@ -30,7 +30,7 @@ Python 入口 `msd_merge_dequant(rt, y_merged, scale_biases, counts, per_token_s
 | counts | 输入 | `[numExperts]` | uint32 | 每专家 token 数(未翻倍,与 out 行轴一致);按全局专家 id 索引,仅 `[startIdx, endIdx)` 有 token |
 | startIdx / endIdx | 标量 | - | uint32_t | 本次 pass 处理的专家范围(EP 分片);numExperts = endIdx - startIdx ≤ 8 |
 
-测试参考:[tests/kernels/msd_dequant.py](../../../tests/kernels/msd_dequant.py),覆盖 `[8, 96]`、`[40, 512]`、`[200, 2048]`、`[1, 2048]`、`[8192, 6144]`,单专家 counts=[m],与纯 torch 参考对齐。
+测试参考:[tests/kernels/msd_dequant.py](../../../tests/kernels/msd_dequant.py),单专家覆盖 `[8, 96]`、`[40, 512]`、`[200, 2048]`、`[1, 2048]`、`[8192, 6144]`;多专家覆盖 `(200, 4096, E=4 均分)`、`(200, 4096, E=8 倾斜 [80,40,20,18,15,12,10,5])`、`(8192, 4096, E=3 [4096,3072,1024])`(倾斜分片迫使每个 block 的跨步行序列内频繁切换专家);单/多专家用例均与纯 torch 参考对齐,另有 10 次重复 launch 的 bit 级确定性验证(运行间自比对,不与 torch 参考比较;压测 bias_buf 每行重载时 MTE2 覆写与 V 读的交错)。
 
 ## 支持的数据类型
 
@@ -51,29 +51,31 @@ host 校验 `yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype =
 
 | 缓冲 | 大小 | 用途 |
 |---|---|---|
-| low0/1, high0/1 | n_pad (half) | 交错输入双行的 ping-pong |
+| low0/1, high0/1 | n_pad (half) | 交错输入双行的 ping-pong(low/high 在 UB 相邻,n 为 128 元素整数倍时可一次 DMA 搬两行) |
 | low_fp32_buf | n_pad (float) | Y_low → fp32 |
-| high_fp32_buf | n_pad (float) | Y_high ×16 的工作区 |
-| merged_fp32 | n_pad (float) | 合并 + bias + scale 的主计算缓冲 |
-| bias_buf | n_pad (float) | 专家 scale_bias 行 |
+| merged_fp32 | n_pad (float) | 合并 + bias + scale 的主计算缓冲(与 low_fp32 相邻,一次 vconv 同时填好两段) |
+| bias_buf | n_pad (float) | 专家 scale_bias 行(单缓冲,行循环内每行重载) |
 | out0/1 | n_pad (bfloat16) | 输出 ping-pong |
-| scale_buf | 32B | 当前 token 的 scale 标量 |
 | counts_buf | ROUND_UP(numExperts×4, 32) | 本地专家 counts 切片(≤8 项) |
+
+per-token scale 不占 UB:S 管线直接从 GM 标量地址读(`*(scale_gm + row)`,见 `csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `tokenScale`)。
 
 ### 流水线同步(MTE2 / V / MTE3 / S)
 
-- 低/高行数据走标准 MTE2→V→MTE3 链,EVENT_ID0/1 ping-pong(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `copy_gm_to_ubuf_align_b16(low_bufs`);
-- counts 在循环前一次性搬入 UB(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `counts_buf`);
-- 每行的 scale_bias 与 scale 标量是行内动态地址,用独立 EVENT_ID2 同步 bias 搬入(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `bias_buf`);scale 标量经 `MTE2→S→读回` 的 S 管线标量通道(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `copy_gm_to_ubuf_align_b16(scale_buf`)。
+- 低/高行数据走标准 MTE2→V→MTE3 链,EVENT_ID0/1 ping-pong(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `CopyGmToUbufAligned(low_bufs`);
+- counts 在循环前一次性搬入 UB,**栅栏到 S 管线**(MTE2→S EVENT_ID0):S 管线的标量专家扫描每行都读 counts_buf,跨管线 UB 读必须显式 event flag,只栅栏到 V 不够(本次修复的 bug 之一,关键字 `PIPE_MTE2, PIPE_S, EVENT_ID0`);
+- bias_buf 单缓冲,独立 EVENT_ID2 做 V↔MTE2 握手:行循环内每行无条件重载该行专家的 bias(同一专家的相邻行也重载),重载前等上一行的读者(消费 bias_buf 的 vadd)经 V→MTE2 释放缓冲,搬运完成后 MTE2→V flag 交给本行的 vadd(关键字 `PIPE_V, PIPE_MTE2, EVENT_ID2`);
+- scale 标量不再走 `MTE2→S→读回` 往返,S 管线直接读 GM(见上文 UB 布局说明);
+- 循环结束按轨道 drain(EVENT_ID0/1/2 的 V→MTE2 与 MTE3→V 各自 wait 清算)。
 
 ### 关键计算步骤(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`)
 
-1. 搬入 `merged_gm[2r]`(low)与 `merged_gm[2r+1]`(high);
-2. `vconv_f162f32` low → fp32(注意 `fp32_rep * 2` 的 repeat 补偿,fp32 元素数是 fp16 的一半,见 `csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `fp32_rep * 2`);
-3. `vmuls(high, 16.0)` → `vadd(merged = high + low)`;
-4. **专家定位**:在 UB 的 counts_buf 上做前缀和扫描,`row < acc + c` 即锁定本地专家 id,再 `+ startIdx` 得全局 id(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `expertId`),据此取 `bias_ptrs_gm[startIdx + expertId]`;
-5. 搬入该专家 `[n]` 的 scale_bias,`vadd` 加到 merged(低 nibble -8 偏移补偿);
-6. 搬入 `perTokenScale[row]` 标量,`vmuls` 逐元素乘(S 管线读回标量后广播进 vmuls 的立即数,见 `csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `vmuls(merged_fp32`);
+1. 搬入 `merged_gm[2r]`(low)与 `merged_gm[2r+1]`(high):n 为 128 元素(VECTOR_MAX_NUM_OF_FP16)整数倍时 GM 两行连续、UB low/high 相邻,一次 `CopyGmToUbufAligned` 搬 2n 元素;否则分两次(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `n % VECTOR_MAX_NUM_OF_FP16`);
+2. **一次 vconv 填两段**:`vconv_f162f32(low_fp32_buf, low_bufs[event_id], fp32_rep * 2)`——low/high 两行 fp16 连续、`low_fp32_buf` 与 `merged_fp32` 两段 fp32 也相邻,repeat 翻倍(`fp32_rep * 2`)一次转换同时得到 Y_low 的 fp32 与 Y_high 的 fp32(后者直接落在 `merged_fp32`,关键字 `fp32_rep * 2`);
+3. `vmuls(merged_fp32, merged_fp32, 16.0)` 原位 ×16 → `vadd(merged_fp32, merged_fp32, low_fp32_buf)` 得 `Y_high×16 + Y_low`;
+4. **滚动式专家定位**:`expert_id`/`curr_expert_row` 跨行携带(循环外初始化),行号单调递增且专家按 counts 前缀和划分行轴,扫描只前进:每行从上次的 `expert_id` 起推进 `while (expert_id + 1 < numExperts && row >= curr_expert_row + counts_buf[expert_id])`,均摊 O(1)/行(替代旧版每行从头线性扫描,关键字 `expert_id`);本地 id `+ startIdx` 得全局 id,据此取 `bias_ptrs_gm[startIdx + expert_id]`;
+5. 搬入该专家 `[n]` 的 scale_bias 到单缓冲 bias_buf(EVENT_ID2 握手,见流水线同步),`vadd` 加到 merged(低 nibble -8 偏移补偿);
+6. S 管线直接从 GM 读 `perTokenScale[row]` 标量(`tokenScale`),`vmuls` 逐元素乘(关键字 `vmuls(merged_fp32`);
 7. `vconv_f322bf16r` 转 BF16,写出 GM 第 r 行。
 
 ### 边界处理

@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, group_matmul
 import torch.nn.functional as F
 
@@ -31,6 +32,7 @@ if remaining > 0:
         diff = remaining - sum_random
         random_vals[0] += diff
     counts += random_vals
+counts_cpu = counts.cpu().tolist()
 
 for transpose in [False, True]:
     for dtype in [torch.float16, torch.bfloat16, torch.float]:
@@ -45,7 +47,7 @@ for transpose in [False, True]:
                 weight_standard = weight.transpose(0, 1).contiguous().reshape(out_dim, in_dim)
             else:
                 weight = torch.randn(out_dim, in_dim, dtype=dtype, device="npu:0")
-                weight_standard = weight.clone()
+                weight_standard = weight
             weights.append(weight)
             weights_standard.append(weight_standard)
 
@@ -53,7 +55,7 @@ for transpose in [False, True]:
         start = 0
         results = []
         for i in range(group_num):
-            end = start + counts[i].item()
+            end = start + counts_cpu[i]
             x_slice = x[start:end, :]
             result = F.linear(x_slice, weights_standard[i], None)
             results.append(result)

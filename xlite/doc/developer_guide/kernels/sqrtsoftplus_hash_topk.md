@@ -12,7 +12,7 @@ w = s0.gather(indices)                  # 权重取 pre-bias 原值
 w = w / sum(w) * scale                  # 归一化(总是执行)再乘 route_scale
 ```
 
-输出两个 GM 结果:**稀疏 `[M,N]` 权重行**(topK 个非零槽位)+ **`[M, ceil(N/32)]` BIT1 路由位图**;dense topk 索引 `indicesTopK` 是核内中间量,不落盘(`csrc/kernels/sqrtsoftplus_hash_topk.h` 顶部注释,关键字 `indicesTopK is INTERNAL`)。与 `sigmoid_topk` 的区别:激活函数不同(sqrtsoftplus vs sigmoid)、无分组限制、支持 hash 查表选路(`tid2eid[input_ids]`)且归一化总是执行(`SqrtsoftplusHashTopK::NormalizeAndScale` 内 `vdiv` 无条件)。
+输出两个 GM 结果:**稀疏 `[M,N]` 权重行**(topK 个非零槽位)+ **`[M, ceil(N/32)]` BIT1 路由位图**;dense topk 索引 `indicesTopK` 是核内中间量,不落盘(`csrc/kernels/sqrtsoftplus_hash_topk.h` 顶部注释,关键字 `indicesTopK is INTERNAL`)。与 `sigmoid_topk` 的区别:激活函数不同(sqrtsoftplus vs sigmoid)、无分组限制、支持 hash 查表选路(`tid2eid[input_ids]`)且归一化总是执行(`SqrtsoftplusHashTopK::NormalizeAndScale` 内 `vdiv` 无条件)。`numRoutedExperts` 低于 `vmrgsort4` 归并下限 `4*SORT_BLOCK_SIZE = 128`(如 GLM-4.7-Flash 的 64/96 专家)时,`SelectTopK` 的排序宽度补齐到 128——仅影响非 hash 路径,hash 路径不排序但仍按补齐宽度分配缓冲,机制见实现原理。
 
 ## 输入输出参数
 
@@ -42,7 +42,7 @@ sqrtsoftplus_hash_topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR bias,
 | outWeights | 输出 | `[numTokens, numRoutedExperts]` | 与 scores 同 dtype | 稀疏权重行:被选 topK 槽位为归一化×scale 权重,其余 0 |
 | routingMap | 输出 | `[numTokens, ceil(numRoutedExperts/32)]` | BIT1(u32 位图) | 每个被选专家置 1 bit |
 | scale | — | 标量 | float | route_scale(V4 默认 1.5) |
-| numTokens / numRoutedExperts / topK / hash | — | 标量 | uint32 / u8 | 测试配置:M ∈ {9, 4096},N ∈ {256, 384},topK=6,hash ∈ {0,1} |
+| numTokens / numRoutedExperts / topK / hash | — | 标量 | uint32 / u8 | 测试配置:M ∈ {9, 4096},N ∈ {64, 96, 256, 384}(64/96 覆盖 <128 的补齐路径),topK=6,hash ∈ {0,1} |
 
 ## 支持的数据类型
 
@@ -67,7 +67,7 @@ hash 模式的 `input_ids` 采用**窗口预取**:`PrefetchInputIds`(`Sqrtsoftpl
    - `CopyIn`(`SqrtsoftplusHashTopK::CopyIn`):得分行 DMA 到乒乓 `scoresInTmp[curr]`,V 管线接力转 fp32 到 `scoresIn`(bf16 用 `vconv_bf162f32`,fp32 用 `copy_ubuf_to_ubuf`,`SqrtsoftplusHashTopK::CopyIn` 内 scores relay 段);hash 模式下 S 管线读 `inputId = inputIdsArr[tokenIdx - baseInputIdsIdx]`,计算 `tid2eidGm + inputId * topK` 行地址,经 S→MTE2 EVENT_ID1 地址栅栏后 DMA 该行(长度 topK,不保证 32B 对齐故走 `CopyGmToUbufAligned` 的 b16 回退,`SqrtsoftplusHashTopK::CopyIn` 内 tid2eid DMA 段)到乒乓 `tid2eidRow[curr]`,再由 V 拷入 `indicesTopK` 作为"外部给定的选路索引";
    - 三条独立 flag 轨道:scores 用 MTE2↔V ID0+curr、tid2eid 用 MTE2↔V ID2+curr、地址就绪用 S→MTE2 ID1(`SqrtsoftplusHashTopK::CopyIn` 顶部注释,关键字 `Flag tracks`);
 2. **`CalcScores`**(`SqrtsoftplusHashTopK::CalcScores`):数值稳定的 softplus —— `vabs`→`vmuls(-1)`→`vexp`→`vadds(1)`→`vln` 得 `log(1+exp(-|x|))`,`vrelu` 得 `max(x,0)`,相加后 `vsqrt` 得原始得分 `calc_unbiased`;有 bias 时 `vadd` 得选路得分 `calc`;
-3. **`SelectTopK`**(仅非 hash,`SqrtsoftplusHashTopK::SelectTopK`):与 `sigmoid_topk` 相同的"vbitsort 块排序 + vmrgsort4 四路归并 + 逐块二路归并"多块循环(`tailLen = N/32 - 4`,N=256 时为 4),`vreducev2` 抽出 topK 索引 `indicesTopK`;
+3. **`SelectTopK`**(仅非 hash,`SqrtsoftplusHashTopK::SelectTopK`):与 `sigmoid_topk` 相同的"vbitsort 块排序 + vmrgsort4 四路归并 + 逐块二路归并"多块循环,`vreducev2` 抽出 topK 索引 `indicesTopK`。排序宽度 `nSortScores = max(numRoutedExperts, 4*SORT_BLOCK_SIZE)`(`SORT_BLOCK_SIZE=32`,定义于 `csrc/kernels/kernel_macro.h`):不足 4 块时 `tailLen = nBlocks - 4` 的 uint64 减法下溢、尾部归并循环走出边界,且归并会消费未初始化 lane 污染 topK,故补齐到 128。补齐段处理与 `softmax_topk` 同构:`InitSortTail`(`SqrtsoftplusHashTopK::InitSortTail`,每 Run 一次)把 `indicesIn` 补齐 lane 索引填 0 并以 `PIPE_ALL` 栅栏保序——索引 0 与真实专家重复但其得分恒为 FLOAT_MIN 排在最后,既抢不走 topK 名额,也不会把越界索引喂给 `GatherWeights` 的 `vgather`;`PadCalcTail`(`SqrtsoftplusHashTopK::PadCalcTail`,每 token)把 `calc` 补齐 lane 重钉为 `FLOAT_MIN`(`CalcScores` 按 `DIV_ROUND_UP(numRoutedExperts,64)` 个 repeat 重写 `calc`,专家数非 64 整数倍时写宽覆写补齐段,须逐 token 重钉;取有限的 `FLOAT_MIN` 而非 -inf 是为保持 vbitsort 位序良定义,sqrtsoftplus+bias 的值域远高于它),两侧 `PIPE_ALL` 栅栏将 S 标量写保序于在飞 V 读写。`numRoutedExperts >= 128` 时两函数早退、`tailLen` 与旧版完全一致(N=256 时为 4,N=384 时为 8);低于 128 时 `tailLen` 钳到 0、尾部循环整体跳过(4 路归并已覆盖全部补齐宽度);
 4. **`GatherWeights`**(`SqrtsoftplusHashTopK::GatherWeights`):`vmuls(idx*4)` 索引转字节偏移(注意注释:此处标量必须传裸 int `4`,不能是 float),`vgather` 从 `calc_unbiased`(pre-bias)收集 topK 权重 —— hash 与非 hash 两条路径在此汇合(hash 的索引来自 tid2eid,权重同样查 pre-bias 值);
 5. **`NormalizeAndScale`**(`SqrtsoftplusHashTopK::NormalizeAndScale`):`ReduceSum`+`vbrcb`+`vdiv`(无条件归一化)+ `vmuls(scale)`;
 6. **`FillRoutingMap`**(`SqrtsoftplusHashTopK::FillRoutingMap`):`vector_dup` 清零稀疏权重行 `weightsSparse[N]` 与位图 `routingMap[N/32]`,S 管线标量循环 topK 次 `bitmapSet` + 稀疏 scatter;
@@ -79,7 +79,7 @@ hash 模式的 `input_ids` 采用**窗口预取**:`PrefetchInputIds`(`Sqrtsoftpl
 
 - **输入 DMA 乒乓**:`scoresInTmp[2]`(Dtype)、`tid2eidRow[2]`(topK 个 u32);
 - **常驻**:`scoresIn`(V 私有 fp32)、`biasIn`、`indicesIn`、`inputIdsArr`(256×u32);
-- **计算区(单份,V/S 私有)**:`calc`、`calc_unbiased`、`reduceTmp`、`sortTmp`(2 倍)、`sortMrgTmp`(2 倍)、`weightsTopK`、`indicesTopK`、`weightsSparse`、`routingMap`;
+- **计算区(单份,V/S 私有)**:`calc`、`calc_unbiased`、`reduceTmp`、`sortTmp`(2 倍)、`sortMrgTmp`(2 倍)、`weightsTopK`、`indicesTopK`、`weightsSparse`、`routingMap`。其中被排序触碰的 `indicesIn`(常驻区)与 `calc`、`sortTmp`、`sortMrgTmp` 按补齐宽度定尺(`padSortN = max(padN, ROUND_UP(nSortScores,64)*4)`,`SqrtsoftplusHashTopK::Init` 内关键字 `padSortN`);`numRoutedExperts >= 128` 时 `padSortN == padN`,UB 布局与旧版逐字节一致;
 - **输出 DMA 乒乓**:`weightsOut[2]`(Dtype)、`routingMapOut[2]`。
 
 topK 相关缓冲按 256B 向量块对齐(`padK`,`SqrtsoftplusHashTopK::Init` 内 `padK` 注释:ReduceSum/vbrcb/vreducev2 假定块对齐)。

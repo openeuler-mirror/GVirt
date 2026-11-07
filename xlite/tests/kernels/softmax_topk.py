@@ -9,6 +9,7 @@
 # ===============================================================================
 import sys
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, softmax_topk
 import numpy as np
 
@@ -52,13 +53,19 @@ for n_routed_experts in expert_counts:
         standard_weights, standard_indices = torch.topk(standard_softmax, topK, dim=-1)
         standard_weights = standard_weights / standard_weights.sum(dim=-1, keepdim=True)
 
+        standard_indices_cpu = standard_indices.cpu()
+        standard_weights_cpu = standard_weights.cpu()
+        standard_indices_out_cpu = standard_indices_out.cpu()
+        standard_weights_out_cpu = standard_weights_out.cpu()
         for i in range(n_tokens):
             for j in range(topK):
-                elem = np.int64(standard_indices[i][j].cpu())
+                elem = np.int64(standard_indices_cpu[i][j])
                 idx = int(elem / 64)
-                value = np.uint64(standard_indices_out[i][idx].cpu()) | np.uint64(1 << (elem % 64))
-                standard_indices_out[i][idx] = value.view(np.int64)
-                standard_weights_out[i][elem] = standard_weights[i][j]
+                value = np.uint64(standard_indices_out_cpu[i][idx]) | np.uint64(1 << (elem % 64))
+                standard_indices_out_cpu[i][idx] = value.view(np.int64)
+                standard_weights_out_cpu[i][elem] = standard_weights_cpu[i][j]
+        standard_indices_out = standard_indices_out_cpu.to("npu:0")
+        standard_weights_out = standard_weights_out_cpu.to("npu:0")
 
         torch.npu.synchronize()
         softmax_topk(rt, scores, indices, xlite_weights_out, xlite_indices_out, topK, True)

@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, muls
 
 
@@ -60,15 +61,12 @@ for dtype in supported_dtype_list:
             muls(rt, y, scale, y, calc_offset=0, calc_num=calc_num)
             torch.npu.synchronize()
 
-            # rebuild the input from the same seed for the f32 reference
-            torch.manual_seed(seed)
-            x_ref = torch.randn(N, D, dtype=dtype, device="npu:0")
-            standard = (x_ref.float() * scale).to(dtype)
+            standard = (x.float() * scale).to(dtype)
 
             try:
                 torch.testing.assert_close(standard[:, :calc_num], y[:, :calc_num],
                                            atol=1e-5, rtol=1e-3)
-                torch.testing.assert_close(x_ref[:, calc_num:], y[:, calc_num:],
+                torch.testing.assert_close(x[:, calc_num:], y[:, calc_num:],
                                            atol=0, rtol=0)
                 print(f'muls {dtype} N={N} D={D} cn={calc_num} seed={seed} executed!')
             except AssertionError as e:

@@ -12,6 +12,7 @@ import logging
 import math
 import numpy as np
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, rope_complex, muls
 
 logging.getLogger().setLevel(logging.INFO)
@@ -78,6 +79,10 @@ test_cases = [
     (torch.bfloat16, 64, 576),
 ]
 
+with torch.device("npu"):
+    freqs_cis = precompute_freqs_cis(64, MAX_SEQ_LEN, ROPE_THETA)[0:SEQ_LEN]
+    position = torch.arange(SEQ_LEN, dtype=torch.int64).repeat(BATCH_SIZE)
+
 for test_dtype, rope_dim, q_dim in test_cases:
     for inverse in (False, True):
         for out_interleaved in (False, True):
@@ -87,12 +92,10 @@ for test_dtype, rope_dim, q_dim in test_cases:
             torch.set_default_dtype(test_dtype)
             with torch.device("npu"):
                 attnQWithQr = torch.randn(num_tokens, n_local_heads, q_dim)
-                freqs_cis = precompute_freqs_cis(rope_dim, MAX_SEQ_LEN, ROPE_THETA)[0:SEQ_LEN]
 
                 attnQWithQr_xlite = attnQWithQr.clone()
                 freqs_cis_xlite = freqs_cis.clone()
 
-                position = torch.arange(SEQ_LEN, dtype=torch.int64).repeat(BATCH_SIZE)
                 output_xlite = torch.randn(num_tokens, n_local_heads, rope_dim)
 
             # standard
@@ -141,11 +144,9 @@ for test_dtype, rope_dim, q_dim in test_cases:
             torch.set_default_dtype(test_dtype)
             with torch.device("npu"):
                 attnQWithQr = torch.randn(num_tokens, n_local_heads, q_dim)
-                freqs_cis = precompute_freqs_cis(rope_dim, MAX_SEQ_LEN, ROPE_THETA)[0:SEQ_LEN]
 
                 q = attnQWithQr.clone()
                 freqs_cis_xlite = freqs_cis.clone()
-                position = torch.arange(SEQ_LEN, dtype=torch.int64).repeat(BATCH_SIZE)
                 rope_out = torch.randn(num_tokens, n_local_heads, rope_dim)
 
             # reference: rotate_activation on the whole [nope | rope_rotated] head.

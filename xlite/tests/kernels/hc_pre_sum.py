@@ -22,6 +22,7 @@ This mirrors inference/model.py:hc_pre exactly:
 import sys
 
 import torch
+import torch_npu  # noqa: F401
 
 from xlite._C import Runtime, hc_pre
 

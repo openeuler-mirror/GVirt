@@ -22,6 +22,7 @@ tiled two-pass rmsnorm path in norm.h.
 import sys
 
 import torch
+import torch_npu  # noqa: F401
 import torch.nn.functional as F
 
 from xlite._C import Runtime, rmsnorm, matmul, hc_act

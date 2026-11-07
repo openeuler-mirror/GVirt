@@ -30,6 +30,7 @@ import logging
 import math
 
 import torch
+import torch_npu  # noqa: F401
 import torch.nn.functional as F
 
 from xlite._C import Runtime, indexer_prepare
@@ -167,7 +168,7 @@ def run_test(
     # + (slot%block_size)*norm_dim) and does NOT modify kw in place.
     # kw[:, :index_head_dim] is read as the norm input
     # and is otherwise left untouched. Build the cache reference accordingly.
-    freqs_per_token = freqs_cis.cpu()[pos_list].to("npu")
+    freqs_per_token = torch.view_as_complex(torch.view_as_real(freqs_cis)[position])
 
     # 1) LayerNorm over kw[:, :index_head_dim].
     ln_slice = F.layer_norm(kw_ref[:, :index_head_dim], (index_head_dim,), k_norm, k_norm_bias, NORM_EPS)
@@ -181,18 +182,14 @@ def run_test(
 
     # 3) Scatter the post-LN (post-rope) index_head_dim slice into the cache.
     index_k_cache_ref = torch.zeros(block_num, BLOCK_SIZE, index_head_dim, dtype=test_dtype, device="npu")
-    for i in range(num_tokens):
-        slot = int(slot_mapping[i].item())
-        b = slot // BLOCK_SIZE
-        off = slot % BLOCK_SIZE
-        index_k_cache_ref[b, off] = ln_rot[i]
+    index_k_cache_ref.view(-1, index_head_dim)[:num_tokens] = ln_rot
 
     # 4) Long path: muls on the kw tail and q-RoPE both gate on position >=
     #    topK. Select per row up front -- ``q_heads`` is a view of ``q_ref``,
     #    so writing RoPE in place before the select would clobber the un-rope'd
     #    rows.
     if is_long:
-        pos_gt_topK = torch.tensor([p >= topK for p in pos_list], device="npu")
+        pos_gt_topK = position >= topK
         tail = kw_ref[:, index_head_dim : index_head_dim + index_n_heads]
         scaled = (tail.float() * scale).to(test_dtype)
         kw_ref[:, index_head_dim : index_head_dim + index_n_heads] = torch.where(

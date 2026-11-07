@@ -11,6 +11,7 @@ from __future__ import absolute_import
 import logging
 import os
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, add_and_rmsnorm
 
 logging.getLogger().setLevel(logging.INFO)
@@ -26,14 +27,12 @@ dtype_list = [torch.float16, torch.bfloat16]
 for test_dtype in dtype_list:
     with torch.device("npu"):
         x = torch.randn(BATCH_SIZE, DIM, dtype=test_dtype) / 10
-        x_standard = x.clone()
         weight = torch.randn(DIM, dtype=test_dtype) / 10
         y = torch.randn(BATCH_SIZE, DIM, dtype=test_dtype) / 10
-        y_standard = y.clone()
 
     # standard
-    x_standard = x_standard.to(torch.float32)
-    y_standard = y_standard.to(torch.float32)
+    x_standard = x.to(torch.float32)
+    y_standard = y.to(torch.float32)
     x_standard = x_standard + y_standard
     add_standard = x_standard
     variance = x_standard.pow(2).mean(-1, keepdim=True)

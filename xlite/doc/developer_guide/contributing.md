@@ -49,7 +49,7 @@ pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/w
 编译步骤：
 
 ```bash
-# 准备
+# 准备（可选）: 清理旧的构建目录
 rm -rf build && mkdir -p build
 # 编译
 cmake -B build && cmake --build build -j

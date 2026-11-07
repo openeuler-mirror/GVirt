@@ -11,6 +11,7 @@ from __future__ import absolute_import
 import logging
 import os
 import torch
+import torch_npu  # noqa: F401
 import torch.nn.functional as F
 from xlite._C import Runtime, layernorm
 
@@ -30,13 +31,12 @@ dtype_list = [torch.float16, torch.bfloat16]
 for test_dtype in dtype_list:
     with torch.device("npu"):
         x = torch.randn(BATCH_SIZE, DIM, dtype=test_dtype)
-        x_standard = x.clone()
         weight = torch.randn(DIM, dtype=test_dtype)
         bias = torch.randn(DIM, dtype=test_dtype)
         y = torch.empty(BATCH_SIZE, DIM, dtype=test_dtype)
 
     # standard
-    standard = stand_layernorm(x_standard, weight, bias, NORMEPS)
+    standard = stand_layernorm(x, weight, bias, NORMEPS)
 
     # xlite
     torch.npu.synchronize()

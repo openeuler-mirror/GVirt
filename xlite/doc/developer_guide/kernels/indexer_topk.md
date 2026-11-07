@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-DeepSeek V3.2 DSA indexer 的核心融合算子:在单个 kernel 内完成"indexer 得分计算 + 跨核全局 topk 选取"(AIC 算分数、AIV 做 topk,通过核间同步拼接)。数学语义(见 `csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init` 注释块 `scores = k * q` 与测试 `tests/kernels/indexer_topk.py` 的 `run_test` 参考实现,关键字 `torch.einsum("chd,td->cht"` / `scores.clamp(min=0)`):
+DSA indexer 的核心融合算子:在单个 kernel 内完成"indexer 得分计算 + 跨核全局 topk 选取"(AIC 算分数、AIV 做 topk,通过核间同步拼接)。数学语义(见 `csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init` 注释块 `scores = k * q` 与测试 `tests/kernels/indexer_topk.py` 的 `run_test` 参考实现,关键字 `torch.einsum("chd,td->cht"` / `scores.clamp(min=0)`):
 
 ```plaintext
 scores[s,h,t]    = ReLU(sum_d q[s,h,d] * kCache[t,d])    # AIC 第一级 mmad + fixpipe ReLU

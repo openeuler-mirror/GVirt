@@ -19,6 +19,7 @@ No head path; hc_base is always the full [(2+K)*K] block.
 import sys
 
 import torch
+import torch_npu  # noqa: F401
 
 from xlite._C import Runtime, hc_split_sinkhorn
 

@@ -18,6 +18,7 @@
 
 import logging
 import torch
+import torch_npu  # noqa: F401
 import numpy as np
 from xlite._C import Runtime, reorder_moe
 
@@ -171,6 +172,8 @@ def generate_random_counts(rows, cols, total):
 # moe_ep_size: number of expert-parallel ranks (simulated on a single card).
 # n_routed_experts: total number of routed experts.
 
+np.set_printoptions(threshold=np.inf, linewidth=np.inf)
+
 for moe_ep_size in [8, 16]:
     for n_routed_experts in [160, 256]:
         n_local_experts = n_routed_experts // moe_ep_size
@@ -184,7 +187,6 @@ for moe_ep_size in [8, 16]:
         # Shape: [moe_ep_size, n_routed_experts].
         counts_host = generate_random_counts(moe_ep_size, n_routed_experts, total_assign)
         counts = torch.from_numpy(counts_host).to(torch.int32).to("npu:0")
-        np.set_printoptions(threshold=np.inf, linewidth=np.inf)
 
         # Iterate over local expert shards. Each shard has n_local_experts
         # consecutive experts, simulating one EP rank's responsibility.

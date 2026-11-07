@@ -73,5 +73,5 @@ UB 偏移手工累加分配（`csrc/kernels/muls.h` 的 `muls` 模板函数，�
 ### 边界处理
 
 - 搬运用 `CopyGmToUbufAligned`/`CopyUbufToGmAligned`（按字节数 32B/2B/1B 对齐自适应选择 DMA 原语），支持 calcNum 非 32B 整数倍的场景，写回长度为精确的 `calcNum * sizeof(Dtype)` 字节；
-- host 侧校验 `calcOffset < shape1`、`calcNum <= shape1 - calcOffset` 且 `calcNum <= 16320`（`csrc/op.cpp` 的 `XliteOpMuls`，关键字 `calcOffset` / `MAX_MULS_CALC_NUM` 校验段）；
+- host 侧校验 `calcOffset < shape1`（越界抛错）；`calcNum` 超出 `shape1 - calcOffset` 时**静默 clamp** 到行尾（不报错）；`calcNum == 0` 或 `> MAX_MULS_CALC_NUM = 16320` 抛错（`csrc/op.cpp` 的 `XliteOpMuls`，关键字 `calcOffset` / `MAX_MULS_CALC_NUM` 校验段）；
 - calcNum 上限 16320 = 255 repeat × 64 fp32，即单行切片需一次性放入 UB 计算缓冲（无行内二次分块）。

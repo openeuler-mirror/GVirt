@@ -112,7 +112,6 @@ for weight_nz in [True, False]:
             # fixpipe硬件要求：以uint64_t存储fp32，高位为0，低位为fp32格式的二进制值
             scale = torch.zeros(n * 2, dtype=torch.float32, device=npu_dev)
             scale[0::2] = deq_scale[0::1]
-            scale[1::2] = 0
             deq_scales.append(deq_scale)
             deq_scales_fixpipe.append(scale)
 

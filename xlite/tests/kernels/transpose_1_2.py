@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, transpose_1_2
 
 channels = 6144
@@ -16,7 +17,6 @@ channels = 6144
 def run_test(rt, batch, seq_len, msg):
     input = torch.randn(batch, seq_len, channels)
     output = torch.zeros(batch, channels, seq_len)
-    standard = torch.zeros(batch, channels, seq_len)
     torch.npu.synchronize()
     standard = input.transpose(1, 2)
     torch.npu.synchronize()

@@ -44,6 +44,7 @@ import numpy as np
 import os
 import re
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, cxa
 from xlite._C import print as xlite_print
 from tests.models.deepseek_v4_kernel import sparse_attn
@@ -257,8 +258,6 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 if compress_ratio > 0 and kv_size > 0:
                     # number of compress indices this sample contributes
                     n_comp = compressed_kv_lens[i]
-                    comp_topk = build_compress_topk(
-                        compress_ratio, n_comp, tl, ql, window_size, "npu")  # (ql, n_comp)
                     # Sparse top-k path: rows with > index_topk visible compress tokens pick a
                     # random subset (shared by ref and kernel) so gather/scatter spans the segment.
                     if index_topk > 0:
@@ -279,6 +278,8 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                         sel_np[sel_np >= 0] += tl
                         comp_topk = torch.from_numpy(sel_np).to(torch.int32).to("npu")
                     else:
+                        comp_topk = build_compress_topk(
+                            compress_ratio, n_comp, tl, ql, window_size, "npu")  # (ql, n_comp)
                         comp_topk_len = n_comp  # full causal, no padding needed
                     sample_topk = torch.cat([swa_topk, comp_topk], dim=1)  # (ql, window_size + comp_topk_len)
                 else:
@@ -313,18 +314,15 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 compress_k_cache = torch.zeros(1, compress_block_size, head_dim)  # dummy, unused
 
             swa_abs_blocks = (max_total_len + swa_block_size - 1) // swa_block_size
-            batch_indices_swa = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-            abs_indices_swa = np.arange(swa_abs_blocks, dtype=np.uint32).reshape(1, -1)
-            swa_block_tables_array = (batch_indices_swa * swa_max_num_blocks + abs_indices_swa)
-            swa_block_tables = torch.tensor(swa_block_tables_array.tolist(), dtype=torch.int32)
+            batch_indices_swa = torch.arange(batch, dtype=torch.int32).reshape(-1, 1)
+            abs_indices_swa = torch.arange(swa_abs_blocks, dtype=torch.int32).reshape(1, -1)
+            swa_block_tables = batch_indices_swa * swa_max_num_blocks + abs_indices_swa
 
             if kv_size > 0:
-                batch_indices_comp = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
-                block_indices_comp = np.arange(compress_max_num_blocks, dtype=np.uint32)
-                compress_block_tables_array = (batch_indices_comp * compress_max_num_blocks
-                                               + block_indices_comp)
-                compress_block_tables = torch.tensor(compress_block_tables_array.tolist(),
-                                                     dtype=torch.int32)
+                batch_indices_comp = torch.arange(batch, dtype=torch.int32).reshape(-1, 1)
+                block_indices_comp = torch.arange(compress_max_num_blocks, dtype=torch.int32)
+                compress_block_tables = (batch_indices_comp * compress_max_num_blocks
+                                         + block_indices_comp)
             else:
                 compress_block_tables = torch.zeros(1, batch, dtype=torch.int32)
 
@@ -332,11 +330,9 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 tl = total_lens[i]
                 swa_full = kv_list[i][:tl]  # absolute positions [0, tl)
                 sample_block_start = i * swa_max_num_blocks
-                for p in range(0, tl):
-                    block_id = p // swa_block_size
-                    offset = p % swa_block_size
-                    phys = sample_block_start + block_id
-                    swa_k_cache[phys, offset] = swa_full[p]
+                nb = (tl + swa_block_size - 1) // swa_block_size
+                swa_k_cache[sample_block_start:sample_block_start + nb].reshape(
+                    -1, head_dim)[:tl].copy_(swa_full)
 
             for i in range(batch):
                 n_compress = compressed_kv_lens[i]
@@ -346,11 +342,9 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 tl = total_lens[i]
                 comp_content = kv_list[i][tl:tl + n_compress]
                 sample_block_start = i * compress_max_num_blocks
-                for j in range(n_compress):
-                    block_id = j // compress_block_size
-                    offset = j % compress_block_size
-                    phys = sample_block_start + block_id
-                    compress_k_cache[phys, offset] = comp_content[j]
+                nb = (n_compress + compress_block_size - 1) // compress_block_size
+                compress_k_cache[sample_block_start:sample_block_start + nb].reshape(
+                    -1, head_dim)[:n_compress].copy_(comp_content)
 
             # The SWA cache is paged in every mode; the compress cache is paged for
             # sparse/flash and the gathered contiguous tensor for dense.
@@ -378,7 +372,7 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 # the op expects compress-relative coordinates (compressed token j ->
                 # index j; the kernel places it at score column swaSegWidth + j, and the
                 # dense-mode gather resolves it through compress_block_tables). -1 stays -1.
-                comp_part = topk_indices_list[i][:, window_size:].clone()  # (ql, comp_topk_len)
+                comp_part = topk_indices_list[i][:, window_size:]  # (ql, comp_topk_len)
                 mask_neg = comp_part < 0
                 comp_part = comp_part - tl
                 comp_part = torch.where(mask_neg, torch.full_like(comp_part, -1), comp_part)

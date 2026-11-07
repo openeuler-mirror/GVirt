@@ -35,6 +35,7 @@ if remaining > 0:
         diff = remaining - sum_random
         random_vals[0] += diff
     counts += random_vals
+counts_cpu = counts.cpu().tolist()
 
 def int8_linear_with_dequant(x, weights, counts, dequantize_scales, transpose=False):
     group_num = len(weights)
@@ -66,16 +67,13 @@ for weight_nz in [True, False]:
         dtype = torch.int8
         x = torch.randn(m, k, dtype=dtype, device=npu_dev)
         weights = []
-        weights_standard = []
         deq_scales = []
         deq_scales_fixpipe = []
         for i in range(group_num):
             if transpose:
                 weight = torch.randn(k, n, dtype=dtype, device=npu_dev)
-                weight_standard = weight.transpose(0, 1).contiguous().reshape(n, k)
             else:
                 weight = torch.randn(n, k, dtype=dtype, device=npu_dev)
-                weight_standard = weight.clone()
             
             if weight_nz:
                 ACL_FORMAT_FRACTAL_NZ = 29
@@ -89,13 +87,13 @@ for weight_nz in [True, False]:
             deq_scales.append(deq_scale)
             deq_scales_fixpipe.append(scale)
             weights.append(weight)
-            weights_standard.append(weight_standard)
+
 
         # standard
         start = 0
         results = []
         for i in range(group_num):
-            end = start + counts[i].item()
+            end = start + counts_cpu[i]
             x_slice = x[start:end, :].to("cpu")  # (count, k), int8
             weight = weights[i]  # int8
             if transpose:

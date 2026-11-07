@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 from xlite._C import Runtime, einsum_mht_hdt_mhd, einsum_mht_htd_mhd
 from tests.models.weight_utils import matrix_nd2nz
 
@@ -53,7 +54,6 @@ def run_case(einsum_op, weight_layout, dtype, m, h, t, d, weight_nz):
 
     torch.npu.synchronize()
     einsum_op(rt, mht, y, mhd, m, h, t, d, weight_nz)
-    torch.npu.synchronize()
 
     try:
         torch.testing.assert_close(standard, mhd, atol=1e-5, rtol=1e-3)

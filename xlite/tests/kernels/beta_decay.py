@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 import torch.nn.functional as F
 from xlite._C import Runtime, beta_decay
 
@@ -22,23 +23,17 @@ def run_test(rt, batch, seq_len, msg):
 
     my_beta = torch.zeros(batch, seq_len, num_v_heads)
     my_g = torch.zeros(batch, seq_len, num_v_heads)
-    trch_beta = torch.zeros(batch, seq_len, num_v_heads)
-    trch_g = torch.zeros(batch, seq_len, num_v_heads)
 
     torch.npu.synchronize()
 
     beta_decay(rt, b, a, A_log, dt_bias, my_beta, my_g, batch, seq_len,
                num_v_heads)
 
-    torch.npu.synchronize()
-
     trch_beta = torch.sigmoid(b.float())
     trch_beta = trch_beta.to(b.dtype)
     soft = F.softplus(a.float() + dt_bias.float().unsqueeze(0).unsqueeze(0))
     trch_g = -A_log.float().exp().unsqueeze(0).unsqueeze(0) * soft
     trch_g = trch_g.to(a.dtype)
-
-    torch.npu.synchronize()
 
     try:
         torch.testing.assert_close(trch_beta, my_beta, rtol=1e-2, atol=1e-3)

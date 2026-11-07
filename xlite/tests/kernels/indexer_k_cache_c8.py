@@ -35,11 +35,22 @@ def frequencies(length):
     return torch.stack((angles.cos(), angles.sin()), -1).flatten(1).bfloat16()
 
 
-def rotation():
-    h = torch.ones(1, 1)
-    while len(h) < HEAD_DIM:
-        h = torch.cat((torch.cat((h, h), 1), torch.cat((h, -h), 1)), 0)
-    return (h / math.sqrt(HEAD_DIM)).bfloat16()
+_ROTATION = None
+_ROTATION_CACHE = {}
+
+
+def rotation(device=None):
+    global _ROTATION
+    if _ROTATION is None:
+        h = torch.ones(1, 1)
+        while len(h) < HEAD_DIM:
+            h = torch.cat((torch.cat((h, h), 1), torch.cat((h, -h), 1)), 0)
+        _ROTATION = (h / math.sqrt(HEAD_DIM)).bfloat16()
+    if device is None:
+        return _ROTATION
+    if device not in _ROTATION_CACHE:
+        _ROTATION_CACHE[device] = _ROTATION.to(device)
+    return _ROTATION_CACHE[device]
 
 
 def reference(k, k_norm, k_norm_bias, freqs, positions, device, norm_eps=NORM_EPS):
@@ -51,7 +62,7 @@ def reference(k, k_norm, k_norm_bias, freqs, positions, device, norm_eps=NORM_EP
     real = pairs[..., 0] * trig[..., 0] - pairs[..., 1] * trig[..., 1]
     imag = pairs[..., 1] * trig[..., 0] + pairs[..., 0] * trig[..., 1]
     rope = torch.cat((torch.stack((real, imag), -1).flatten(1).bfloat16(), norm[:, ROPE_DIM:]), 1)
-    return (rope.to(device) @ rotation().to(device)).cpu()
+    return (rope.to(device) @ rotation(device)).cpu()
 
 
 def check_values(k8, scales, rotated, name):

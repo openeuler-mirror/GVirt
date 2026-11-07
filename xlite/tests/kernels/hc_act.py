@@ -20,6 +20,7 @@ auto-detected from hc_base.numel() == hc_mult.
 import sys
 
 import torch
+import torch_npu  # noqa: F401
 
 from xlite._C import Runtime, hc_act
 

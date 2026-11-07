@@ -27,6 +27,7 @@ PyTorch reference, in the in-place path (residual==y, as model.cpp:1618 calls it
 import sys
 
 import torch
+import torch_npu  # noqa: F401
 
 from xlite._C import Runtime, hc_post
 

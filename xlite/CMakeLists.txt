@@ -122,6 +122,7 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/norm_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/qk_rms_norm_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_prepare_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_cache_c8_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_scores_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/muls_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/mla_v2_bfloat16_t.cpp
@@ -193,6 +194,27 @@ ascendc_library(xlite_kernels_common_${RUN_MODE} SHARED ${KERNEL_FILES_COMMON})
 ascendc_library(xlite_kernels_bf16_${RUN_MODE} SHARED ${KERNEL_FILES_BF16})
 ascendc_library(xlite_kernels_f16_${RUN_MODE} SHARED ${KERNEL_FILES_F16})
 
+# CANN's merge_aic/aiv_obj_text steps relink every device object in place
+# (ld.lld <f>.o -o <f>.o) to merge template text sections, flipping it from
+# ET_REL to ET_EXEC; the merge is a custom ALL target, so it re-runs on every
+# build and the already-merged objects fail the next incremental build with
+# "ld.lld: error: ...: unknown file type". Preclean them before each kernel
+# preprocess ExternalProject so incremental rebuilds self-heal instead of
+# requiring a manual build-dir wipe (trap present since the ascendc_library
+# build was introduced; the object libraries rebuild deleted objects fresh).
+set(_XLITE_PRECLEAN_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/scripts/preclean_poisoned_device_objs.cmake)
+add_custom_target(xlite_preclean_device_objs
+    COMMAND ${CMAKE_COMMAND} -DCLR_DIR=${CMAKE_BINARY_DIR} -P ${_XLITE_PRECLEAN_SCRIPT}
+    VERBATIM
+)
+foreach(_kernel_target IN ITEMS
+        xlite_kernels_common_${RUN_MODE}
+        xlite_kernels_bf16_${RUN_MODE}
+        xlite_kernels_f16_${RUN_MODE})
+    add_dependencies(${_kernel_target}_preprocess xlite_preclean_device_objs)
+endforeach()
+unset(_XLITE_PRECLEAN_SCRIPT)
+
 # Bundle all generated aclrtlaunch_*.h headers into one merged header so
 # csrc/op.cpp only needs a single #include. The individual headers are only
 # produced while the ascendc kernel libraries build (not at configure time),
@@ -222,25 +244,32 @@ if(DEFINED ENV{XLITE_MSPROF_RECODE_SHAPE})
     endif()
 endif()
 
-# Inject XLiteMsprofShapeHook into the generated host_stub.cpp files (see
-# scripts/patch_host_stub.py). Only done when XLITE_MSPROF_RECODE_SHAPE is on.
+# Post-process the generated host_stub.cpp files (see
+# scripts/patch_host_stub.py). Always applied: remove the per-launch
+# overflow-status device malloc/free pair (debug-only facility, disabled by
+# passing null -- the kernel-side write is null-guarded). With
+# XLITE_MSPROF_RECODE_SHAPE on, the XLiteMsprofShapeHook injection is added
+# on top via --msprof.
+set(_XLITE_AUTO_GEN_DIRS
+    ${CMAKE_CURRENT_BINARY_DIR}/auto_gen
+)
+set(_xlite_stub_patch_args)
 if(_xlite_msprof_enabled)
-    set(_XLITE_AUTO_GEN_DIRS
-        ${CMAKE_CURRENT_BINARY_DIR}/auto_gen
-    )
-    add_custom_target(xlite_patch_host_stub ALL
-        COMMAND ${CMAKE_COMMAND} -E env python3
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_host_stub.py ${_XLITE_AUTO_GEN_DIRS}
-        VERBATIM
-    )
-    foreach(_kernel_target IN ITEMS
-            xlite_kernels_common_${RUN_MODE}
-            xlite_kernels_bf16_${RUN_MODE}
-            xlite_kernels_f16_${RUN_MODE})
-        add_dependencies(xlite_patch_host_stub ${_kernel_target}_merge_obj)
-        add_dependencies(${_kernel_target}_host_stub_obj xlite_patch_host_stub)
-    endforeach()
+    list(APPEND _xlite_stub_patch_args --msprof)
 endif()
+add_custom_target(xlite_patch_host_stub ALL
+    COMMAND ${CMAKE_COMMAND} -E env python3
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_host_stub.py
+            ${_xlite_stub_patch_args} ${_XLITE_AUTO_GEN_DIRS}
+    VERBATIM
+)
+foreach(_kernel_target IN ITEMS
+        xlite_kernels_common_${RUN_MODE}
+        xlite_kernels_bf16_${RUN_MODE}
+        xlite_kernels_f16_${RUN_MODE})
+    add_dependencies(xlite_patch_host_stub ${_kernel_target}_merge_obj)
+    add_dependencies(${_kernel_target}_host_stub_obj xlite_patch_host_stub)
+endforeach()
 
 # If XLITE_DEBUG_ON env var is NOT set (empty / falsy), disable ascendc printf
 # by adding ASCENDC_DUMP=0 to the ascendc kernel compile definitions. When

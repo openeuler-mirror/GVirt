@@ -8,6 +8,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
+import torch_npu  # noqa: F401
 import random
 import sys
 from xlite._C import Runtime, sigmoid_topk
@@ -91,20 +92,22 @@ for dtype in [torch.bfloat16, torch.float32]:
         print(f'sigmoid topK ({cfg}) executed!')
 
         # Convert Xlite outputs from bitmaps to lists of indices
-        xlite_indices = torch.zeros(*standard_indices.shape, dtype=torch.int32, device="npu:0")
+        xlite_indices_cpu = xlite_indices_out.cpu()
+        xlite_indices = torch.zeros(*standard_indices.shape, dtype=torch.int32)
 
         for i in range(n_tokens):
             bitmap = 0
-            for j in reversed(range(xlite_indices_out.shape[1])):
-                bitmap = (bitmap << 32) | int(np.uint32(xlite_indices_out[i][j].cpu()))
+            for j in reversed(range(xlite_indices_cpu.shape[1])):
+                bitmap = (bitmap << 32) | int(np.uint32(xlite_indices_cpu[i][j]))
 
             for pos in range(n_routed_experts):
                 if bitmap & (1 << pos):
                     xlite_indices[i][j] = pos
                     j += 1
+        xlite_indices = xlite_indices.to("npu:0")
 
         # Convert Xlite weights from sparse format to a sorted list
-        mask = torch.ne(torch.zeros(xlite_weights_out.shape, device="npu:0"), xlite_weights_out)
+        mask = xlite_weights_out != 0
         xlite_weights = torch.masked_select(xlite_weights_out, mask).reshape(standard_weights.shape)
 
         n_total += 1

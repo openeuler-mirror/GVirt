@@ -50,13 +50,12 @@ dtype_list = [torch.float16, torch.bfloat16]
 for test_dtype in dtype_list:
         with torch.device("npu"):
             x = torch.randn(BATCH_SIZE, DIM, dtype=test_dtype)
-            x_standard = x.clone()
             weight = torch.randn(DIM, dtype=test_dtype)
             y = torch.empty(BATCH_SIZE, DIM, dtype=test_dtype)
             variance_xlite = torch.zeros(BATCH_SIZE, 1, dtype=torch.float32)
 
         # standard
-        standard = stand_rmsnorm(x_standard, weight, NORMEPS)
+        standard = stand_rmsnorm(x, weight, NORMEPS)
 
         # xlite
         torch.npu.synchronize()
