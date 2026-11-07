@@ -86,6 +86,8 @@ MLA_CASES = [
 passed = 0
 total = 0
 
+freqs_cis = precompute_freqs_cis(64, MAX_SEQ_LEN, ROPE_THETA)[0:NUM_TOKENS]
+
 for test_dtype, rope_dim, head_dim in CXA_CASES + MLA_CASES:
     for out_interleaved in (False, True):
         for do_rotate in (False, True):
@@ -102,8 +104,6 @@ for test_dtype, rope_dim, head_dim in CXA_CASES + MLA_CASES:
                 # input head: [remain | rope], shape (num_tokens, n_local_heads, head_dim)
                 kv = torch.randn(NUM_TOKENS, n_local_heads, head_dim)
                 kv_ref = kv.clone()
-
-                freqs_cis = precompute_freqs_cis(rope_dim, MAX_SEQ_LEN, ROPE_THETA)[0:NUM_TOKENS]
 
                 # position per token (0..NUM_TOKENS-1) and identity slot mapping
                 position = torch.arange(NUM_TOKENS, dtype=torch.int64)
@@ -137,11 +137,13 @@ for test_dtype, rope_dim, head_dim in CXA_CASES + MLA_CASES:
 
             # reference vCache: scatter each token's full head to its slot
             ref_v_cache = torch.zeros(num_blocks, block_size, n_local_heads, vdim)
+            slot_cpu = slot_mapping.cpu()
+            ref_head_cpu = ref_head.cpu()
             for t in range(NUM_TOKENS):
-                slot = slot_mapping[t].item()
+                slot = slot_cpu[t].item()
                 b = slot // block_size
                 i = slot % block_size
-                ref_v_cache[b, i] = ref_head[t]
+                ref_v_cache[b, i] = ref_head_cpu[t]
             ref_v_cache = ref_v_cache.to(test_dtype)
 
             # ----- xlite -----

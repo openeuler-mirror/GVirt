@@ -54,7 +54,6 @@ def run_case(einsum_op, weight_layout, dtype, m, h, t, d, weight_nz):
 
     torch.npu.synchronize()
     einsum_op(rt, mht, y, mhd, m, h, t, d, weight_nz)
-    torch.npu.synchronize()
 
     try:
         torch.testing.assert_close(standard, mhd, atol=1e-5, rtol=1e-3)

@@ -74,7 +74,7 @@ def reference_q(q, weight, freqs, positions, device, n_heads):
     imag = pairs[..., 1] * trig[..., 0] + pairs[..., 0] * trig[..., 1]
     rope = q.clone()
     rope[..., :ROPE_DIM] = torch.stack((real, imag), -1).flatten(-2).bfloat16()
-    rotated = (rope.to(device) @ rotation().to(device)).cpu()
+    rotated = (rope.to(device) @ rotation(device)).cpu()
 
     active = rotated.float().abs().amax(-1) != 0
     q8 = torch.zeros_like(q, dtype=torch.int8)

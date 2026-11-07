@@ -17,15 +17,21 @@ from xlite._C import Runtime, rope_and_cache
 logging.getLogger().setLevel(logging.INFO)
 
 
+_freqs_cis_cache = {}
+
+
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     """fp32 [end, dim] table, row = [cos(dim/2) | sin(dim/2)] (xlite contract)."""
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu")[: (dim // 2)] / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    cos_cache = freqs.cos()
-    sin_cache = freqs.sin()
-    freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
-    return freq_cis.to("npu")
+    key = (dim, end, theta)
+    if key not in _freqs_cis_cache:
+        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu")[: (dim // 2)] / dim))
+        t = torch.arange(end, device=freqs.device)  # type: ignore
+        freqs = torch.outer(t, freqs).float()  # type: ignore
+        cos_cache = freqs.cos()
+        sin_cache = freqs.sin()
+        freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
+        _freqs_cis_cache[key] = freq_cis.to("npu")
+    return _freqs_cis_cache[key]
 
 
 def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor) -> torch.Tensor:
@@ -105,6 +111,10 @@ test_cases = {
     (torch.bfloat16, 128, 64),
 }
 
+with torch.device("npu"):
+    position = torch.arange(SEQ_LEN, dtype=torch.int64).unsqueeze(0).repeat(BATCH_SIZE, 1)
+    slot_mapping = torch.arange(SEQ_LEN, dtype=torch.int32).unsqueeze(0).repeat(BATCH_SIZE, 1)
+
 # use_fp32=True (default): fp32 cos/sin table, fp32 rotation, single final
 # rounding to the model dtype. use_fp32=False: deprecated model-dtype table
 # path (bf16 round-trip emulation / fp16 direct math); kept covered until the
@@ -119,19 +129,11 @@ for use_fp32 in (True, False):
             if not use_fp32:
                 freqs_cis_standard = freqs_cis_standard.to(test_dtype)
 
-            k_cache = torch.zeros(MAX_BATCH_SIZE, MAX_SEQ_LEN, N_KV_HEADS, head_dim)
-            v_cache = torch.zeros(MAX_BATCH_SIZE, MAX_SEQ_LEN, N_KV_HEADS, head_dim)
-
             qkv_xlite = qkv_standard.clone().view(BATCH_SIZE * SEQ_LEN, out_features)
             freqs_cis_xlite = freqs_cis_standard.clone()
 
             k_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, head_dim)
             v_cache_xlite = torch.zeros(BLOCK_NUM, BLOCK_SIZE, N_KV_HEADS, head_dim)
-
-            len = torch.arange(SEQ_LEN, dtype=torch.int64)
-            position = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
-            len = torch.arange(SEQ_LEN, dtype=torch.int32)
-            slot_mapping = len.unsqueeze(0).repeat(BATCH_SIZE, 1)
 
         # standard
         q, k, v = qkv_standard.split([N_HEADS * head_dim, N_KV_HEADS * head_dim, N_KV_HEADS * head_dim], dim=2)

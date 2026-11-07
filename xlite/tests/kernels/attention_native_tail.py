@@ -26,9 +26,10 @@ def run():
                 for b, length in enumerate(lengths):
                     keys = torch.randn(length, kv_heads, dim, device="npu", dtype=dtype)
                     values = torch.randn_like(keys)
-                    for t in range(length):
-                        k[b * blocks + t // block, t % block] = keys[t]
-                        v[b * blocks + t // block, t % block] = values[t]
+                    for blk in range((length + block - 1) // block):
+                        lo, hi = blk * block, min((blk + 1) * block, length)
+                        k[b * blocks + blk, :hi - lo] = keys[lo:hi]
+                        v[b * blocks + blk, :hi - lo] = values[lo:hi]
                     q = qkv[b, :heads * dim].view(heads, dim).float()
                     keys = keys.repeat_interleave(heads // kv_heads, dim=1).float()
                     values = values.repeat_interleave(heads // kv_heads, dim=1).float()

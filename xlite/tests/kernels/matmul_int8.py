@@ -70,6 +70,8 @@ test_sizes = [
     [103, 3072, 4096],
 ]
 
+torch.set_printoptions(sci_mode=False, precision=4, threshold=1000)
+
 for weight_nz in [True, False]:
     for transpose in [True, False]:
         for m, n, k in test_sizes:
@@ -92,8 +94,6 @@ for weight_nz in [True, False]:
             deqScale = torch.randn(n, dtype=torch.bfloat16, device=f"npu:{dev_id}").to(torch.float32)
             # print(deqScale)
             z = torch.zeros(m, n, dtype=torch.float16, device=f"npu:{dev_id}")
-
-            torch.set_printoptions(sci_mode=False, precision=4, threshold=1000)
 
             standard = npu_quant_matmul_cpu(x.to("cpu"), y.to("cpu"), deqScale.to("cpu"), bias.to("cpu"), torch.float16)
 

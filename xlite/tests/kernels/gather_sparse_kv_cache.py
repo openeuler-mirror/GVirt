@@ -355,6 +355,7 @@ def run_test(
     # stage the caches on host once: the reference below gathers group by group
     k_cache_src = k_cache_xlite.cpu()
     pe_cache_src = pe_cache_xlite.cpu()
+    topk_indices_cpu = topk_indices_tensor.cpu()
     bt_row = block_tables.shape[1]  # logical row width (pitched views flatten to this)
     bt = block_tables.reshape(-1).tolist()  # flat host view: hit per token below
     sparse_rows = 0
@@ -373,7 +374,7 @@ def run_test(
                 toks = None  # identity template: slot i -> token i
             else:
                 sparse_rows += 1
-                toks = topk_indices_tensor[in_offset].tolist()
+                toks = topk_indices_cpu[in_offset].tolist()
             phys = [
                 bt[b * bt_row + (t if toks is None else toks[t]) // BLOCK_SIZE]
                 for t in range(valid_cnt)
@@ -445,14 +446,14 @@ def run_test(
     )
 
     try:
-        if channels != "pe":
-            torch.testing.assert_close(k_dense_xlite.cpu(), k_dense_ref, atol=0, rtol=0)
-        if channels != "k":
-            torch.testing.assert_close(pe_dense_xlite.cpu(), pe_dense_ref, atol=0, rtol=0)
-        # grouping-independent oracle: gathered slots must hold the expected
-        # token rows as a byte multiset (catches bugs mirrored into the reference)
         k_out = k_dense_xlite.cpu() if channels != "pe" else None
         pe_out = pe_dense_xlite.cpu() if channels != "k" else None
+        if k_out is not None:
+            torch.testing.assert_close(k_out, k_dense_ref, atol=0, rtol=0)
+        if pe_out is not None:
+            torch.testing.assert_close(pe_out, pe_dense_ref, atol=0, rtol=0)
+        # grouping-independent oracle: gathered slots must hold the expected
+        # token rows as a byte multiset (catches bugs mirrored into the reference)
         for in_offset in range(total_query_len):
             # index by (block, offset): row_flat_idx holds contiguous-layout flat
             # slots, which resolve to the same rows on a pitched cache view too

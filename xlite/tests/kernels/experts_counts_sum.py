@@ -97,7 +97,6 @@ for n_routed_experts in [160, 256]:
 
         experts_counts_output_cpu = experts_counts_output.cpu()
         tokens_per_epgroup_cpu = tokens_per_epgroup.cpu()
-        torch.npu.synchronize()
 
         # Validate tokens_per_epgroup output.
         try:
