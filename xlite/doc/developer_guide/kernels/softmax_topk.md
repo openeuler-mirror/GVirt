@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-MoE(Mixture of Experts)路由门控算子:对每个 token 的 router 得分做 softmax,再选出 topK 个专家,输出"稀疏权重行 + 专家路由位图"两个结果(DeepSeek 系列模型 `norm_topk_prob=True` 的标准门控,`softmax → topk → 归一化` 全融合在单个向量 kernel 内)。专家数须为 64 的倍数;当 `numRoutedExperts` 低于 `vmrgsort4` 无条件 4 路归并的下限 `4*SORT_BLOCK_SIZE = 128`(如 GLM-4.7-Flash 的 64 专家)时,排序宽度补齐到 128,机制见实现原理 SelectTopK 段。数学语义(见测试 `tests/kernels/softmax_topk.py` 参考实现段,关键字 `standard_softmax`/`torch.topk`):
+MoE(Mixture of Experts)路由门控算子:对每个 token 的 router 得分做 softmax,再选出 topK 个专家,输出"稀疏权重行 + 专家路由位图"两个结果(DeepSeek 系列模型 `norm_topk_prob=True` 的标准门控,`softmax → topk → 归一化` 全融合在单个向量 kernel 内)。当 `numRoutedExperts` 低于 `vmrgsort4` 无条件 4 路归并的下限 `4*SORT_BLOCK_SIZE = 128`(如 GLM-4.7-Flash 的 64 专家)时,排序宽度补齐到 128,机制见实现原理 SelectTopK 段。数学语义(见测试 `tests/kernels/softmax_topk.py` 参考实现段,关键字 `standard_softmax`/`torch.topk`):
 
 ```
 p = softmax(scores)                       # [nRoutedExperts]
@@ -34,7 +34,7 @@ softmax_topk_<dtype>(GM_ADDR socres, GM_ADDR indices, GM_ADDR weightsMap,
 | indices | 输入 | `[numRoutedExperts]` | int32 | `arange` 恒等索引表(host 传 `indices.shape[0]` 作为专家数) |
 | weightsMap | 输出 | `[numTokens, numRoutedExperts]` | 与 scores 同 dtype | 稀疏权重行:topK 个被选槽位为归一化后的概率,其余为 0 |
 | routingMap | 输出 | `[numTokens, ceil(numRoutedExperts/32)]`(BIT1 打包) | BIT1(uint32 位图) | 每个被选专家置 1 bit。注意:BIT1 语义下每 32 个专家打包为 1 个 u32(测试 `tests/kernels/softmax_topk.py` BIT1 打包段,关键字 `elem / 64`、`1 << (elem % 64)` 是因为 BIT1 张量在 torch 侧被视作 int64 承载) |
-| numTokens / numRoutedExperts / topK / normTopKProb | — | 标量 | uint32 / bool | 测试配置:nRoutedExperts=64/128(64 覆盖 <128 的补齐路径),topK=8,normTopKProb=True |
+| numTokens / numRoutedExperts / topK / normTopKProb | — | 标量 | uint32 / bool | 测试配置:nRoutedExperts=64/128(64 覆盖 <128 的补齐路径),topK=8,normTopKProb=True。测试仅取 64 的倍数是测试侧 BIT1 位图以 int64 承载的约束:kernel 本身按 `nRoutedExperts/32` 个 u32 步进 GM、每 token DMA 精确 `nRoutedExperts/8` 字节,非 64 倍数时 int64 载体凑不成整字(`tests/kernels/sqrtsoftplus_hash_topk.py` 的 int32 载体即覆盖 96 专家) |
 
 ## 支持的数据类型
 
@@ -70,6 +70,6 @@ dtype 分派见 `csrc/op.cpp` 的 `XliteOpSoftmaxTopK`(dtype 分派分支):要�
 
 ### UB 内存布局与同步
 
-`Init`(`SoftmaxTopK::Init`)按 `nRoutedExperts` 上界分配,全部以 `pad = ROUND_UP(nRoutedExperts, 64) * 4` 字节对齐:`socresIn`/`routingMapOut`/`weightsOut`/`weightsTopK`/`indicesTopK`,bf16 额外有 `socresInTmp`/`weightsOutTmp`;`reduceTmp` 固定一个 `VECTOR_MAX_BYTESIZE`(256B)。被排序触碰的 `indicesIn`/`calc` 及 `sortTmp`/`sortMrgTmp`(各 2 倍)按补齐宽度定尺(`idxPad = max(pad, ROUND_UP(nSortScores,64)*4)`);`numRoutedExperts >= 128` 时 `idxPad == pad`,UB 布局与旧版逐字节一致。
+`Init`(`SoftmaxTopK::Init`)按 `nRoutedExperts` 上界分配:`socresIn`/`routingMapOut`/`weightsOut` 以 `pad = ROUND_UP(nRoutedExperts, 64) * 4` 字节定尺,bf16 额外有 `socresInTmp`/`weightsOutTmp`;`reduceTmp` 与 `weightsTopK` 各固定一个 `VECTOR_MAX_BYTESIZE`(256B),`indicesTopK` 则是 fp32 路径的末尾分配,其后无 off 增量。被排序触碰的 `indicesIn`/`calc` 及 `sortTmp`/`sortMrgTmp`(各 2 倍)按补齐宽度定尺(`idxPad = max(pad, ROUND_UP(nSortScores,64)*4)`);`numRoutedExperts >= 128` 时 `idxPad == pad`,UB 布局与旧版逐字节一致。
 
 同步:MTE2 搬入用 V↔MTE2 的 EVENT_ID0;搬出用 MTE3↔V 的 EVENT_ID0(位图)/EVENT_ID1(权重);S 管线消费 V 产出的 `indicesTopK` 前有 `set_flag(PIPE_V, PIPE_S)` / `wait_flag` 配对(`SelectTopK` 末尾 `set_flag(PIPE_V, PIPE_S, EVENT_ID0)` 与 `FillOutMap` 开头 `wait_flag`),保证标量读到的位图/权重已完成。循环结束统一 `wait_flag` 清算 + `pipe_barrier(PIPE_ALL)`(`SoftmaxTopK::Run` 末尾 drain 段)。

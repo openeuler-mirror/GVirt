@@ -32,8 +32,9 @@ using namespace AscendC;
 // barrier) retires every AIV's quant stores, then each AIV notifies its
 // group's AIC; the ffts set rides PIPE_MTE3 behind the stores, the only
 // cross-core release with data-visibility guarantees on this platform (a
-// fine-grained per-m-tile variant is not possible here — see
-// doc/kernels/fusion_gm_atomic_sync_experiments.md). Both sides stay
+// fine-grained per-m-tile variant is not possible here: no scalar atomics,
+// MTE1 does not go through L2, and ffts flags route only within the group).
+// Both sides stay
 // balanced: quant is split evenly across ALL AIVs (contiguous chunk each)
 // and matmul keeps the standalone grid-stride.
 //
