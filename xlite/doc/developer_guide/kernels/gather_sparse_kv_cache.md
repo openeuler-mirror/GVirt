@@ -76,7 +76,7 @@ BF16 分支的 kernel 在 `#ifdef __DAV_C220_VEC__` 下,非向量核平台为空
 
 ### SFA-C8
 
-`gather_sparse_kv_cache.h` 保留 C8 内核入口，内部调用 `gather_sparse_kv_cache.h` 的 `gather_sparse_kv_cache<int8_t, bfloat16_t>`，与 BF16 共用请求遍历、索引到物理页的映射和输出写回；反量化和同步仍按类型区分。C8 每个 AIV 任务最多处理 16 个 token，批量读取索引后，共用 BF16 的升降序连续段识别，分别搬入 INT8 K、BF16 PE 和 FP32 scale；降序段按升序落位。scale 由末尾可选参数 `k_scale_cache` 传入，GM 中每行 `kvLoraRank/128` 个 FP32 值，在 UB 中按 32 字节补齐行距。按组恢复 `BF16(INT8 × scale)`，合并整组的类型转换和 latent、PE 写回。两套 UB 缓冲交替使用，重叠相邻组的搬运与计算。MTE2→V/S 后计算，V→MTE3 后写出，同一套缓冲写回结束才复用。K/PE 使用连续 DMA，scale 使用多行 DMA；burst 数仍按三份输入的合计字节数计算。分组大小保持 16，维度还须满足 UB 容量和向量 repeat 上限，不自动缩小分组。
+`csrc/kernels/gather_sparse_kv_and_dequant_int8_t.cpp` 实例化 C8 内核入口，调用 `csrc/kernels/gather_sparse_kv_cache.h` 中的 `gather_sparse_kv_cache<int8_t, bfloat16_t>`，与 BF16 共用请求遍历、索引到物理页的映射和输出写回；反量化和同步仍按类型区分。C8 每个 AIV 任务最多处理 16 个 token，批量读取索引后，共用 BF16 的升降序连续段识别，分别搬入 INT8 K、BF16 PE 和 FP32 scale；降序段按升序落位。scale 由末尾可选参数 `k_scale_cache` 传入，GM 中每行 `kvLoraRank/128` 个 FP32 值，在 UB 中按 32 字节补齐行距。按组恢复 `BF16(INT8 × scale)`，合并整组的类型转换和 latent、PE 写回。两套 UB 缓冲交替使用，重叠相邻组的搬运与计算。MTE2→V/S 后计算，V→MTE3 后写出，同一套缓冲写回结束才复用。K/PE 使用连续 DMA，scale 使用多行 DMA；每次 burst 的 token 数按 INT8 K 每 token 的字节数计算。分组大小保持 16，维度还须满足 UB 容量和向量 repeat 上限，不自动缩小分组。
 
 Decode 根据 `topkIndices` 收集所选 token，query 长度默认为 1。稀疏行要求索引位于当前 query 的可见范围内；超过有效长度的输出尾部不写。对普通/Flash MLA 的完整展开路径，host 通过内部可选参数传入 `queryLens` 和空索引，按逻辑 token 顺序恢复当前各请求的连续缓存；MLA 连续读取并保留 Top-K 选择，不生成新页表。临时缓存由 Runtime 内存池管理，不作为跨层、跨步的 BF16 副本保留。
 

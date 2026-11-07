@@ -8,7 +8,7 @@
 #include "debug.h"
 
 #define CNT_ONE_LOOP GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP
-#define C8_CNT_ONE_LOOP 16
+#define C8_CNT_ONE_LOOP GATHER_SPARSE_KV_CACHE_C8_CNT_ONE_LOOP
 // Optimal GM->UB burst size (bytes) for the tiling gather; bursts must stay small
 // enough to interleave with the copy-outs in flight on the other chunk buffers.
 // The runtime burstCopySize parameter can only lower this.
@@ -82,13 +82,10 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
 
     constexpr uint32_t groupSize = 128;
     uint32_t groupNum = kvLoraRank / groupSize;
-    // Preserve the input UB reservation from the packed-cache layout.
-    uint32_t inputBufBytes =
-        tokensPerTask * ROUND_UP(kvLoraRank * sizeof(int8_t) + ropeHeadDim * sizeof(bfloat16_t) +
-                                     groupNum * sizeof(float),
-                                 VECTOR_REPEAT_BYTESIZE);
     uint32_t splitScaleOffset = tokensPerTask * kvLoraRank;
     uint32_t scaleStride = ROUND_UP(groupNum * sizeof(float), BLOCK_SIZE);
+    uint32_t inputBufBytes =
+        ROUND_UP(splitScaleOffset + tokensPerTask * scaleStride, VECTOR_REPEAT_BYTESIZE);
 
     // burstCopySize only confines the per-burst size (compile-time optimum
     // GM_UB_BURST_SIZE_TILING); the count uses the input K bytes per token.
@@ -300,6 +297,8 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
                 auto input = inputBuf[curr];
                 set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
                 wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+                // This scalar wait orders prior topks reads before later chunk loads.
+                // Recheck topks reuse if this wait or the index-prefetch schedule changes.
                 set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
                 dequant_c8_rows(kBufs[curr], input, halfBuf[curr], xBuf[curr], cnt, kvLoraRank,

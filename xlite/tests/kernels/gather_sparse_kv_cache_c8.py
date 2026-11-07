@@ -30,7 +30,7 @@ def dequantize(cache):
 
 
 def test_gather(rt, block_size, lengths, topk, latent_dim=512, rope_dim=64, query_lens=None,
-                burst_copy_size=16 * 1024):
+                burst_copy_size=16 * 1024, sequential=False):
     batch = len(lengths)
     if query_lens is None:
         query_lens = [1] * batch
@@ -44,25 +44,31 @@ def test_gather(rt, block_size, lengths, topk, latent_dim=512, rope_dim=64, quer
     decoded, pe = dequantize(cache)
     cache = [t.view(-1, block_size, 1, t.shape[-1]) for t in cache]
     table = torch.randperm(batch * width, device="npu").view(batch, width).int()
-    indices = torch.full((tokens, topk), -1, dtype=torch.int32, device="npu")
-    k_out = torch.ones(tokens, topk, latent_dim, dtype=torch.bfloat16, device="npu")
-    pe_out = torch.ones(tokens, topk, rope_dim, dtype=torch.bfloat16, device="npu")
+    if sequential:
+        indices = torch.empty(0, dtype=torch.int32, device="npu")
+    else:
+        indices = torch.full((tokens, topk), -1, dtype=torch.int32, device="npu")
+    rows = batch if sequential else tokens
+    k_out = torch.ones(rows, topk, latent_dim, dtype=torch.bfloat16, device="npu")
+    pe_out = torch.ones(rows, topk, rope_dim, dtype=torch.bfloat16, device="npu")
     expected_k = k_out.clone()
     expected_pe = pe_out.clone()
     sparse_rows = []
     offset = 0
     for b, (length, qlen) in enumerate(zip(lengths, query_lens)):
-        for q in range(qlen):
-            visible = length - qlen + q + 1
-            sparse_rows.append(visible > topk)
-            if visible > topk:
+        for q in range(1 if sequential else qlen):
+            row = b if sequential else offset + q
+            visible = length if sequential else length - qlen + q + 1
+            sparse = not sequential and visible > topk
+            sparse_rows.append(sparse)
+            if sparse:
                 ids = torch.arange(visible - 1, visible - topk - 1, -1, device="npu")
-                indices[offset + q] = ids.int()
+                indices[row] = ids.int()
             else:
-                ids = torch.arange(visible, device="npu")
+                ids = torch.arange(min(visible, topk), device="npu")
             slots = table[b, ids // block_size].long() * block_size + ids % block_size
-            expected_k[offset + q, :len(ids)] = decoded[slots]
-            expected_pe[offset + q, :len(ids)] = pe[slots]
+            expected_k[row, :len(ids)] = decoded[slots]
+            expected_pe[row, :len(ids)] = pe[slots]
         offset += qlen
     lens = torch.tensor(query_lens, dtype=torch.int32, device="npu")
     starts = (lens.cumsum(0) - lens).int()
@@ -96,6 +102,8 @@ def main():
     test_gather(rt, 128, [47, 129, 2051], 2048, query_lens=[3, 1, 4])
     for latent_dim, rope_dim in ((128, 32), (256, 64), (384, 64), (512, 128)):
         test_gather(rt, 16, [47, 130], 129, latent_dim, rope_dim)
+    test_gather(rt, 128, [47, 129, 2051], 2048,
+                query_lens=[3, 1, 4], sequential=True)
 
 
 if __name__ == "__main__":

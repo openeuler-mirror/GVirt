@@ -1284,7 +1284,9 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
             throw std::invalid_argument("gather_sparse_kv_cache: unsupported SFA-C8 layout");
         }
         aclrtlaunch_gather_sparse_kv_and_dequant_int8_t(
-            PickMinBlockNum(rt.aivNum, static_cast<uint64_t>(batch) * DIV_ROUND_UP(indexTopK, 16)),
+            PickMinBlockNum(rt.aivNum,
+                            static_cast<uint64_t>(batch) *
+                                DIV_ROUND_UP(indexTopK, GATHER_SPARSE_KV_CACHE_C8_CNT_ONE_LOOP)),
             rt.stream, kCache.ptr, peCache.ptr, kScaleCache.ptr, blockTables.ptr, topkIndices.ptr,
             queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr, kDenseCache.ptr, peDenseCache.ptr,
             batch, indexTopK, blockSize, blockTableStride, kvLoraRank, ropeHeadDim, burstCopySize);
