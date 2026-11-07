@@ -21,7 +21,7 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 |---|---|---|---|---|
 | input_with_r | 输入 | `[num_tokens, n_local_heads, step_dim]` | float16 / bfloat16 | 每 token 的 head 数据;`offset` 指向其中 rope 区起始(CXA:`[remain | rope]`,rope 在尾部;MLA:offset=0,rope 在头部) |
 | freqs | 输入 | `[max_pos, rope_dim]` | float32 | 复数频率表,交错存 `cos(pos·θ_k), sin(pos·θ_k)`(`torch.polar` 实部/虚部 flatten,见测试 [tests/kernels/rope_complex.py](../../../tests/kernels/rope_complex.py) 的 `precompute_freqs_cis`) |
-| position | 输入 | `[num_tokens]` | int64 | 每 token 的位置 id,用于索引 freqs 行 |
+| position | 输入 | `[num_tokens]` | int64 | 每 token 的位置 id,用于索引 freqs 行;二维(mrope)布局时仅消费第一行,host 打印一次性警告(`csrc/op.cpp` 的 `WarnPositions2D`) |
 | v_cache | 输出 | `[num_blocks, block_size, n_local_heads, vdim]` | 同 input | 每 slot 存一个完整 head(vdim);CXA 场景 vdim=step_dim 包含 remain,MLA pe cache 场景 vdim=rope_dim 只存 rope 区 |
 | slot_mapping | 输入 | `[num_tokens]` | int32 | token 的平坦 slot 索引;按 `v_cache + (slot / block_size) * MAX(vcacheStride, block_size*n_local_heads*vdim) + (slot % block_size) * n_local_heads * vdim` 分解寻址(块号方向步长经 MAX 钳制 ≥ 自然步长) |
 | output | 输出(纯计算模式) | `[num_tokens, n_local_heads, rope_dim]` | 同 input | 仅 `rope_complex` 入口使用;cache 入口 host 传 `nullptr`([csrc/op.cpp](../../../csrc/op.cpp) 的 `XliteOpRopeComplexAndCache`,cache 入口传 `output_ptr=nullptr`) |

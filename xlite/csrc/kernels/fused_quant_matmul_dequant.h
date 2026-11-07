@@ -27,14 +27,14 @@ using namespace AscendC;
 //   AIC b:       wait flag 9 x2 -> grid-stride matmul tiles -> out (fp16 view)
 //                -> C2V flag 8 per tile (rides PIPE_FIX, after CopyToGm)
 //   AIV 2b/2b+1: dequant(out fp16 -> bf16 in place, per-row scale in dyn mode)
-//                -> V2C_DONE flag 10
 //
 // The quant hand-off is a single coarse barrier: SyncAll<true> (AIV-only soft
 // barrier) retires every AIV's quant stores, then each AIV notifies its
 // group's AIC; the ffts set rides PIPE_MTE3 behind the stores, the only
 // cross-core release with data-visibility guarantees on this platform (a
-// fine-grained per-m-tile variant is not possible here — see
-// doc/kernels/fusion_gm_atomic_sync_experiments.md). Both sides stay
+// fine-grained per-m-tile variant is not possible here: no scalar atomics,
+// MTE1 does not go through L2, and ffts flags route only within the group).
+// Both sides stay
 // balanced: quant is split evenly across ALL AIVs (contiguous chunk each)
 // and matmul keeps the standalone grid-stride.
 //

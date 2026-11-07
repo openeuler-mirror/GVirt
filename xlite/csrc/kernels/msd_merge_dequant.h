@@ -140,9 +140,10 @@ __aicore__ inline void msd_merge_dequant(GM_ADDR y_merged, GM_ADDR scaleBiasPtrs
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + event_id);
         pipe_barrier(PIPE_V);
 
-        // scale_bias, GM -> UB. Single buffer: the reload waits until the
-        // previous expert cycle's last reader releases the buffer, then the
-        // copy-done flag hands it to this row's vadd.
+        // scale_bias, GM -> UB. Single buffer, reloaded every row: the reload
+        // waits until the previous row's reader (the bias-consuming vadd)
+        // releases the buffer, then the copy-done flag hands it to this row's
+        // vadd.
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
         GMA(float) bias_gm_row = reinterpret_cast<GMA(float)>(bias_ptrs_gm[startIdx + expert_id]);
         CopyGmToUbufAligned(bias_buf, bias_gm_row, n * sizeof(float));

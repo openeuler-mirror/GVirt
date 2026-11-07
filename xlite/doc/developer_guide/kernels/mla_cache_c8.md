@@ -29,7 +29,7 @@ mla_cache_c8(rt, latent, pe, slot_mapping, cache, pe_cache, k_scale_cache)
 | tokens | kernel 标量 | — | uint32_t | 本次 token 数，由 `latent.shape[0]` 得到 |
 | latentDim / ropeDim | kernel 标量 | — | uint32_t | 由 `latent.shape[1]`、`pe.shape[1]` 得到 |
 
-`D` 为正且是 128 的整数倍，`R` 为正且 BF16 字节数按 32 字节对齐；缓冲区须能放入 UB。输入和缓存连续存放；调用方保证有效 slot 不重复且在缓存范围内。输入不会被修改。
+`D` 为正且是 128 的整数倍，`R` 为正且 BF16 字节按 32 字节对齐；缓冲区须能放入 UB。输入和缓存连续存放；调用方保证有效 slot 不重复且在缓存范围内。输入不会被修改。host 侧校验 latent/pe 均为 2D、行数一致且 `slotMapping` 条目数等于 T，T=0 时直接返回（`csrc/op.cpp` 的 `XliteOpMlaCacheC8`）。
 
 ## 支持的数据类型
 
