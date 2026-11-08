@@ -14,10 +14,9 @@
 //   - sparse : paged KV cache walked via
 //     blockTables, with optional top-k token selection (DSA) driven by
 //     topkIndices.
-//   - dense : per-batch contiguous KV cache gathered
-//     by gather_sparse_kv_cache; batch b occupies tokens
-//     [b * maxSeqLen, (b + 1) * maxSeqLen) and blockTable is unused
-//     (block id == logical index, see MlaAicHelper's dense flag).
+//   - dense : contiguous KV cache per query token (gathered) or per batch (expanded).
+//     blockTable is unused; densePerQuery selects the cache row layout.
+// Top-k selection is independent of the cache layout.
 template <typename Dtype>
 class MLAV2
 {
@@ -33,7 +32,7 @@ public:
                                 uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch,
                                 uint32_t blockTableStride, uint32_t maxSeqLen, float scale,
                                 uint32_t topK, uint32_t kCacheStride, uint32_t peCacheStride,
-                                uint32_t dense, GM_ADDR zeroGm)
+                                uint32_t dense, uint32_t densePerQuery, GM_ADDR zeroGm)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qAbsorb.SetGlobalBuffer((__gm__ Dtype *)qAbsorb);
@@ -59,8 +58,9 @@ public:
         this->qkStride = maxSeqLen;
         this->scale = scale;
         this->dense = dense != 0;
+        this->densePerQuery = this->dense && densePerQuery != 0;
         this->blockTableStride = this->dense ? 0 : blockTableStride;
-        this->topK = (!this->dense && topkIndices != nullptr) ? topK : 0;
+        this->topK = topkIndices != nullptr ? topK : 0;
 
         this->qk[0].SetGlobalBuffer((__gm__ Dtype *)qk + block_idx * XLITE_MAX_M0 * qkStride);
         this->qk[1].SetGlobalBuffer((__gm__ Dtype *)qk + block_idx * XLITE_MAX_M0 * qkStride +
@@ -103,12 +103,13 @@ public:
                                                  batchIdx * blockTableStride * sizeof(uint32_t));
             }
 
-            // dense mode: each query token has its own dense cache row, so tile one
+            // Gathered dense mode: each query token has its own cache row, so tile one
             // query token at a time (queryTileSize = m0 / nHeads = 1 -> m0 = nHeads).
-            // Sparse mode fits m0 to the head count so queryTileSize stays >= 1
-            // (and clamps to XLITE_MAX_M0) even when nHeads exceeds XLITE_MAX_M0.
-            uint32_t m0 =
-                dense ? nHeads : XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), nHeads);
+            // Other modes fit m0 to the head count so queryTileSize stays >= 1
+            // (and clamp to XLITE_MAX_M0) even when nHeads exceeds XLITE_MAX_M0.
+            uint32_t m0 = densePerQuery
+                              ? nHeads
+                              : XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), nHeads);
             int queryTileSize = m0 / nHeads;
             if (queryTileSize == 0) {
                 // nHeads > XLITE_MAX_M0: one query token per tile (mirrors
@@ -127,7 +128,7 @@ public:
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
                 if (dense && calcLen > maxSeqLen) {
-                    // dense cache only holds maxSeqLen (= indexTopK) tokens
+                    // The contiguous cache holds at most maxSeqLen tokens.
                     calcLen = maxSeqLen;
                 }
                 if (queryStart < 0) {
@@ -135,10 +136,11 @@ public:
                 }
                 int queryTaskOffset = queryStart + queryTaskStart;
 
+                uint32_t cacheRow = densePerQuery ? queryTaskOffset : batchIdx;
                 GlobalTensor<Dtype> batchKCache =
-                    dense ? kCache[(uint64_t)queryTaskOffset * kCacheStride] : kCache;
+                    dense ? kCache[(uint64_t)cacheRow * kCacheStride] : kCache;
                 GlobalTensor<Dtype> batchPeCache =
-                    dense ? peCache[(uint64_t)queryTaskOffset * peCacheStride] : peCache;
+                    dense ? peCache[(uint64_t)cacheRow * peCacheStride] : peCache;
 
                 // do queryIdx & (0，nHeads)'s QK
                 uint32_t mhOffset = queryTaskOffset * nHeads;
@@ -214,12 +216,13 @@ public:
                 cachedLen = cachedLens[batchIdx];
             }
 
-            // dense mode: each query token has its own dense cache row, so tile one
+            // Gathered dense mode: each query token has its own cache row, so tile one
             // query token at a time (queryTileSize = m0 / nHeads = 1 -> m0 = nHeads).
-            // Sparse mode fits m0 to the head count so queryTileSize stays >= 1
-            // (and clamps to XLITE_MAX_M0) even when nHeads exceeds XLITE_MAX_M0.
-            uint32_t m0 =
-                dense ? nHeads : XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), nHeads);
+            // Other modes fit m0 to the head count so queryTileSize stays >= 1
+            // (and clamp to XLITE_MAX_M0) even when nHeads exceeds XLITE_MAX_M0.
+            uint32_t m0 = densePerQuery
+                              ? nHeads
+                              : XliteFitM0ToHeads(GetOptimalM0(queryLen, cachedLen), nHeads);
             int queryTileSize = m0 / nHeads;
             if (queryTileSize == 0) {
                 // nHeads > XLITE_MAX_M0: one query token per tile (mirrors
@@ -238,7 +241,7 @@ public:
                 }
                 uint32_t calcLen = cachedLen + queryTaskStart + queryTaskLen;
                 if (dense && calcLen > maxSeqLen) {
-                    // dense cache only holds maxSeqLen (= indexTopK) tokens
+                    // The contiguous cache holds at most maxSeqLen tokens.
                     calcLen = maxSeqLen;
                 }
                 if (queryStart < 0) {
@@ -342,6 +345,7 @@ private:
     uint32_t qkStride;
     int svk0;
     bool dense;
+    bool densePerQuery;
 };
 
 #define MLA_V2_FUNC_DEFINE(dtype)                                                                  \
@@ -351,12 +355,12 @@ private:
         GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t kvLoraRank,           \
         uint32_t blockSize, uint32_t batch, uint32_t blockTableStride, uint32_t maxSeqLen,         \
         float scale, uint32_t topK, uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense, \
-        GM_ADDR zeroGm)                                                                            \
+        uint32_t densePerQuery, GM_ADDR zeroGm)                                                    \
     {                                                                                              \
         MLAV2<dtype> op;                                                                           \
         op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb, queryStartLoc, queryLens,  \
                 cachedLens, blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,        \
                 blockTableStride, maxSeqLen, scale, topK, kCacheStride, peCacheStride, dense,      \
-                zeroGm);                                                                           \
+                densePerQuery, zeroGm);                                                            \
         op.Run();                                                                                  \
     }

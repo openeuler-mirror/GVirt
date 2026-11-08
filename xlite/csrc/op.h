@@ -101,7 +101,7 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                   uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen,
                   float scale, uint32_t topK = 0, const XTensor &topkIndices = XTensor(),
-                  bool dense = false);
+                  bool dense = false, bool densePerQuery = true);
 void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache,
                        XTensor &peCache, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
                        XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &oAbsorb,

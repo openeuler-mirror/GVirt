@@ -1912,10 +1912,11 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
            at::Tensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t nopeHeadDim,
            uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
            at::Tensor &topkIndices, uint32_t topK, bool weightNz, bool enableFlashAttention,
-           uint32_t tileSizeOfCachedKV, bool dense)
+           uint32_t tileSizeOfCachedKV, bool dense, const std::optional<at::Tensor> &kScaleCache)
 {
     XTensor _qWithQr, _qr, _kCache, _peCache, _wukT, _wuv, _output, _queryStartLoc, _lens,
-        _cachedLens, _blockTables, _topkIndices;
+        _cachedLens, _blockTables, _topkIndices, _kScaleCache;
+    InitXTensor(_kScaleCache, kScaleCache, DBG_LOC);
     InitXTensor(_qWithQr, qWithQr, DBG_LOC);
     InitXTensor(_qr, qr, DBG_LOC);
     InitXTensor(_kCache, kCache, DBG_LOC, /*allowPitched=*/true);
@@ -1938,6 +1939,11 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
 
     XTensor &oAbsorb =
         rt.GetTensor({_qWithQr.shape[0], nHeads * kvLoraRank}, XDtypeOf(qWithQr), DBG_LOC);
+    const bool c8 = _kCache.dtype == INT8;
+    XTensor *k = &_kCache;
+    XTensor *pe = &_peCache;
+    XTensor noBlockTables;
+    XTensor *table = &_blockTables;
     if (dense) {
         if (topK == 0) {
             throw std::runtime_error(std::string(__func__) +
@@ -1949,7 +1955,8 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
             rt.GetTensor({_qWithQr.shape[0], topK, ropeHeadDim}, XDtypeOf(qWithQr), DBG_LOC);
         XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, _topkIndices,
                                    _queryStartLoc, _lens, _cachedLens, kDense, peDense, batch, topK,
-                                   blockSize, kvLoraRank, ropeHeadDim, 1);
+                                   blockSize, kvLoraRank, ropeHeadDim, 1, 1, GM_UB_BURST_SIZE,
+                                   _kScaleCache);
         XTensor &qk =
             rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, topK}, XDtypeOf(qWithQr), DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, _qr, kDense, peDense, qk, oAbsorb, _queryStartLoc, _lens,
@@ -1961,9 +1968,24 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
     } else if (!enableFlashAttention) {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, maxNumBlocks * blockSize},
                                    XDtypeOf(qWithQr), DBG_LOC);
-        XliteOpMLAV2(rt, qAbsorb, _qr, _kCache, _peCache, qk, oAbsorb, _queryStartLoc, _lens,
-                     _cachedLens, _blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
-                     maxNumBlocks * blockSize, scale, topK, _topkIndices, dense);
+        if (c8) {
+            uint32_t capacity = maxNumBlocks * blockSize;
+            k = &rt.GetTensor({batch, capacity, kvLoraRank}, BF16, DBG_LOC);
+            pe = &rt.GetTensor({batch, capacity, ropeHeadDim}, BF16, DBG_LOC);
+            table = &noBlockTables;
+            XTensor noIndices;
+            XliteOpGatherSparseKVCache(rt, _kCache, _peCache, _blockTables, noIndices,
+                                       _queryStartLoc, _lens, _cachedLens, *k, *pe, batch, capacity,
+                                       blockSize, kvLoraRank, ropeHeadDim, 1, 1, GM_UB_BURST_SIZE,
+                                       _kScaleCache);
+        }
+        XliteOpMLAV2(rt, qAbsorb, _qr, *k, *pe, qk, oAbsorb, _queryStartLoc, _lens, _cachedLens,
+                     *table, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
+                     maxNumBlocks * blockSize, scale, topK, _topkIndices, c8, false);
+        if (c8) {
+            rt.PutTensor(*pe);
+            rt.PutTensor(*k);
+        }
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, tileSizeOfCachedKV},
@@ -3688,7 +3710,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("block_size"), py::arg("batch"), py::arg("scale"), py::arg("topk_indices"),
           py::kw_only(), py::arg("top_k") = 0, py::arg("nz") = false,
           py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192,
-          py::arg("dense") = false);
+          py::arg("dense") = false, py::arg("k_scale_cache") = py::none());
     m.def("gather_sparse_kv_cache", &GatherSparseKVCache, py::arg("rt"), py::arg("k_cache"),
           py::arg("pe_cache"), py::arg("block_tables"), py::arg("topk_indices"),
           py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"),

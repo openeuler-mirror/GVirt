@@ -3484,12 +3484,20 @@ def mla_v2(
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
     dense: bool = False,
+    k_scale_cache: Optional[torch.Tensor] = None,
 ) -> None:
     """Run MLA v2 path as three kernels: wuk einsum + mla_v2 attention + wuv einsum.
 
-    ``dense=False`` (default): the mla_v2 attention kernel walks the paged KV
-    cache via ``block_tables`` (with optional top-k token selection when
-    ``top_k > 0``); ``enable_flash_attention`` selects the flash variant for
+    INT8 ``k_cache`` selects SFA-C8 with BF16 ``pe_cache`` and FP32 ``k_scale_cache``
+    (see :func:`mla_cache_c8`).
+    The selected decode tokens, or the active paged cache for other paths, are
+    restored into temporary contiguous BF16 buffers before the existing MLA calculation.
+    Full-cache expansion retains top-k selection and does not generate a new page table.
+
+    ``dense=False`` (default): the mla_v2 attention kernel walks the BF16 paged KV
+    cache via ``block_tables``, or the expanded C8 cache contiguously (with
+    optional top-k token selection when ``top_k > 0``);
+    ``enable_flash_attention`` selects the flash variant for
     long sequences.
 
     ``dense=True``: gather the top-k tokens selected by ``topk_indices`` into

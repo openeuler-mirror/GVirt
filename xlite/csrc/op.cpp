@@ -1104,12 +1104,13 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                   XTensor &qk, XTensor &oAbsorb, XTensor &queryStartLoc, XTensor &lens,
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                   uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen,
-                  float scale, uint32_t topK, const XTensor &topkIndices, bool dense)
+                  float scale, uint32_t topK, const XTensor &topkIndices, bool dense,
+                  bool densePerQuery)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (!dense) {
+    if (!dense || (topK != 0 && topkIndices.ptr != nullptr)) {
         if (topK != 0 && maxSeqLen > MAX_SOFTMAX_PINGPONG_LEN) {
             throw std::runtime_error(
                 std::string(__func__) + ": topK > 0 is not supported when maxSeqLen (" +
@@ -1135,8 +1136,9 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
             rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
             qk.ptr, oAbsorb.ptr, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
             nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
-            static_cast<uint32_t>(blockTables.stride[0]), maxSeqLen, scale, topK, kCache.stride[0],
-            peCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
+            dense ? 0u : static_cast<uint32_t>(blockTables.stride[0]), maxSeqLen, scale, topK,
+            kCache.stride[0], peCache.stride[0], dense ? 1u : 0u, densePerQuery ? 1u : 0u,
+            rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
