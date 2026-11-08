@@ -150,7 +150,8 @@ void XliteOpMlaPrepare(XRuntime &rt, XTensor &attnQkvc, const XTensor &qNorm,
                        uint32_t qLoraRank, uint32_t kvLoraRank, uint32_t ropeHeadDim,
                        uint32_t blockSize, XTensor &kCache, XTensor &peCache,
                        const XTensor &slotMapping, float normEps,
-                       const XTensor &attnNormKvc = XTensor());
+                       const XTensor &attnNormKvc = XTensor(),
+                       const XTensor &kScaleCache = XTensor());
 void XliteOpMlaCacheC8(XRuntime &rt, XTensor &latent, XTensor &pe, const XTensor &slotMapping,
                        XTensor &cache, XTensor &peCache, XTensor &kScaleCache);
 void XliteOpQkRmsNorm(XRuntime &rt, XTensor &in, const XTensor &qNorm, const XTensor &qNormBias,

@@ -51,3 +51,5 @@ q = round(x * factor)
 UB 使用两套缓冲，`512/64` 配置下在 Ascend A3 上每核共 12 KiB，每套保存一个 token 的输入、连续排列的 K/PE/scale 输出暂存区、整行 FP32 数据和 FP16 转换缓冲，以及单组计算临时区。每个有效 token 切换一次 `eid`，在同一套缓冲内完成搬入、量化和写回；无效 slot 直接跳过。MTE3→MTE2→V 保证旧输出写回后才搬入并计算新输入，V→S 读取归约结果；scale 经 S→V 同步后，与量化结果一起由 V→MTE3 保证写回就绪。
 
 K 和 PE 使用连续 DMA；scale 行可能不足 32 字节，使用按字节长度的 DMA。组内计算使用向量指令，外层循环分配 token，内层循环逐组独立量化。
+
+`XliteOpMlaPrepare` 在 SFA-C8 模式使用融合内核，复用本文件中的 `mla_cache_c8_quant` 分组量化；RMSNorm 仍使用模型的 `normEps`。读取端见 [gather_sparse_kv_cache](gather_sparse_kv_cache.md)。
