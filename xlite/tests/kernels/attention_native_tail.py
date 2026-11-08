@@ -38,9 +38,15 @@ def run():
                 k_before, v_before = k.clone(), v.clone()
                 output = torch.empty(batch, heads * dim, device="npu", dtype=dtype)
                 meta = lambda values: torch.tensor(values, dtype=torch.int32, device="npu")
+                # Block tables are [batch, blocks] (see attention's binding docs): row b
+                # lists batch b's cache blocks. A flat 1-D table is read as a single row
+                # with element stride, so batch b would fetch blocks [b, b + blocks) and
+                # hit another batch's NaN tail whenever blocks > 1.
+                block_tables = torch.arange(batch * blocks, dtype=torch.int32,
+                                            device="npu").view(batch, blocks)
                 torch.npu.synchronize()
                 attention(rt, qkv, k, v, output, meta(list(range(batch))), meta([1] * batch),
-                          meta([n - 1 for n in lengths]), meta(list(range(batch * blocks))),
+                          meta([n - 1 for n in lengths]), block_tables,
                           heads, kv_heads, dim, block, batch, enable_flash_attention=flash, tile_size_of_cached_kv=128)
                 torch.npu.synchronize()
                 reference = torch.stack(refs)
