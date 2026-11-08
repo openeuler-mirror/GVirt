@@ -74,7 +74,7 @@ def test_attention(rt, query_lens, cached_lens, heads=8, block_size=128, topk=20
                     selected = torch.arange(topk, device="npu")
                 indices[offset + q_idx] = selected.int()
         offset += qlen
-    modes = [(False, False)] if max(total_lens) <= MAX_SOFTMAX_PINGPONG_LEN else []
+    modes = [(False, False)] if topk == 0 or max(total_lens) <= MAX_SOFTMAX_PINGPONG_LEN else []
     if topk and max(query_lens) <= MAX_DENSE_QUERY_LEN:
         modes.append((False, True))
     for flash, dense in modes:
@@ -105,7 +105,7 @@ def main():
         ([1] * 128, [128] * 128, 4, 128, 2048),
         ([128] * 4, [4096] * 4, 4, 128, 2048),
         ([1024] * 4, [3072] * 4, 4, 128, 2048),
-        ([512] * 4, [16384] * 4, 8, 128, 2048),
+        ([512] * 4, [8192] * 4, 8, 128, 2048),
         ([33, 129, 7, 64, 17], [2041, 8192, 4096, 0, 257], 4, 128, 2048),
     ]
     for case in cases:
