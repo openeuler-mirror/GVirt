@@ -16,10 +16,14 @@ for dtype in (torch.bfloat16, torch.float16):
         torch.npu.synchronize()
         silu_gate_mul(rt=rt, normed=normed, gate=gate, out=out)
         torch.testing.assert_close(out.cpu(), expected.cpu(), rtol=.004, atol=.004)
-        # Existing MHA public entry keeps its sigmoid semantics.
+        # Existing MHA public entry keeps its sigmoid semantics. Reference the
+        # kernel's single-rounding semantics (sigmoid in fp32, multiply in
+        # fp32, one cast) like the GDN expected above; casting sigmoid to the
+        # dtype before the multiply double-rounds and disagrees with the
+        # kernel by 1 ULP on a few large-magnitude elements.
         attn = normed.to(dtype)
         for raw_gate in (gate, gate[:, :1].contiguous()):
-            expected_mha = (attn * torch.sigmoid(raw_gate.float()).to(dtype))
+            expected_mha = (attn.float() * torch.sigmoid(raw_gate.float())).to(dtype)
             torch.npu.synchronize()
             sigmoid_gate_mul(rt, attn, raw_gate, out)
             try:

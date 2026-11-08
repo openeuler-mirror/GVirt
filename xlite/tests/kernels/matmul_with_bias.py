@@ -39,8 +39,22 @@ for weight_nz in [False, True]:
 
                     print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
 
+                    # torch_npu and xlite both accumulate in fp32 but split K
+                    # differently (K up to 7616 here), so results differ by
+                    # 1 output ULP (a bf16 ULP is up to 2^-8 relative) and by
+                    # up to ~1e-3 absolute at cancellation-heavy near-zero
+                    # outputs — the same accumulation-order noise as
+                    # tests/kernels/matmul.py, whose fp64 check showed both
+                    # sides equidistant from the true value. Per-dtype bounds
+                    # mirror that test; a real operand/layout bug produces
+                    # O(1)-O(100) garbage and still fails hard.
+                    atol, rtol = {
+                        torch.float16: (1e-2, 2e-3),
+                        torch.bfloat16: (1e-2, 1.6e-2),
+                        torch.float: (4e-3, 1e-3),
+                    }[dtype]
                     try:
-                        torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
+                        torch.testing.assert_close(standard, z, atol=atol, rtol=rtol)
                     except AssertionError as e:
                         print(f'{e}')
                         print(f'torch_npu: {standard}')

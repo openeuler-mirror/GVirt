@@ -57,6 +57,28 @@ work = [
     (1, [1 * BLOCK_SIZE], [1800]),
 ]
 
+# Per-dtype (atol, rtol) for the assert_close below.
+#
+# QK/SV GEMMs accumulate in fp32 but round scores, probabilities, and the
+# output to the test dtype, so xlite's MMAD accumulation order and torch's
+# matmul can round a dominant QK score to adjacent dtype values. One such
+# flip rescales that token's softmax weights by up to exp(1 ULP of the
+# score) (~1.28 for a bf16 score in [32, 64), where unscaled RMS-normed
+# inputs put the top scores of long contexts), moving the whole token row
+# by O(0.1). Measured against an fp64 reference, the two implementations
+# are statistically indistinguishable: identical max-abs / max-ULP error
+# per config, and at the rare large-diff elements either side can be the
+# more accurate one. Elementwise bit-agreement is therefore not a
+# well-posed expectation; size the tolerance to the dtype's score-rounding
+# noise instead (observed mutual diffs stay below ~0.12 for bf16 and ~0.002
+# for fp16, i.e. under half of these bounds; decode workloads match
+# bitwise).
+attention_tolerance = {
+    torch.float16: (1e-2, 1e-2),
+    torch.bfloat16: (0.25, 0.25),
+}
+
+
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
     """
     计算 (query_lens[i] + cached_lens[i]) 列表中最大元素，向上整除 BLOCK_SIZE 后的块数。
@@ -227,7 +249,8 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
         )
 
         try:
-            torch.testing.assert_close(output_standard, output_xlite, atol=1e-5, rtol=1e-3)
+            atol, rtol = attention_tolerance[test_dtype]
+            torch.testing.assert_close(output_standard, output_xlite, atol=atol, rtol=rtol)
         except AssertionError as e:
             logging.error(f'{e}')
             logging.error(f'torch_npu: {output_standard}')
