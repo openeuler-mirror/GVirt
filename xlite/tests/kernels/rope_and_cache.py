@@ -83,7 +83,7 @@ def apply_mrope_interleaved(x, freqs_cis, mrope_section, positions):
 # runtime init; lower XLITE_TEST_POOL_MB when sharing a busy device.
 DEVICE = int(os.environ.get("XLITE_TEST_DEVICE", "0"))
 POOL_MB = int(os.environ.get("XLITE_TEST_POOL_MB", "500"))
-rt = Runtime(DEVICE, POOL_MB)
+rt = Runtime(DEVICE, size=POOL_MB)
 torch.npu.set_device(DEVICE)
 
 ROPE_THETA = 10000.0

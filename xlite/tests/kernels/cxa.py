@@ -51,7 +51,7 @@ from tests.models.deepseek_v4_kernel import sparse_attn
 
 logging.getLogger().setLevel(logging.INFO)
 
-rt = Runtime(0, 3000)
+rt = Runtime(0, size=3000)
 torch.npu.set_device(0)
 torch.npu.config.allow_internal_format = True
 MAX_SOFTMAX_PINGPONG_LEN = 11776

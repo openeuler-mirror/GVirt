@@ -58,7 +58,7 @@ def hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult=4, sinkhorn_iters=20, ep
 
 
 torch.npu.set_device(0)
-rt = Runtime(0, 2048)
+rt = Runtime(0, size=2048)
 
 HC_MULT = 4
 MIX_HC = (2 + HC_MULT) * HC_MULT  # 24 for hc_mult=4

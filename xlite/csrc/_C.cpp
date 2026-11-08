@@ -3178,8 +3178,9 @@ PYBIND11_MODULE(_C, m)
 {
     py::class_<XRuntime>(m, "Runtime")
         .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>(),
-             py::arg("devid"), py::arg("size") = 0, py::arg("rank") = 0, py::arg("tp_size") = 1,
-             py::arg("dp_size") = 1, py::arg("moe_tp_size") = 1, py::arg("moe_ep_size") = 1)
+             py::arg("devid"), py::kw_only(), py::arg("size") = 0, py::arg("rank") = 0,
+             py::arg("tp_size") = 1, py::arg("dp_size") = 1, py::arg("moe_tp_size") = 1,
+             py::arg("moe_ep_size") = 1)
         .def_readwrite("task_id", &XRuntime::taskId)
         .def_readwrite("notify", &XRuntime::notify)
         .def_readwrite("peer_notify", &XRuntime::peerNotify)
@@ -3439,22 +3440,22 @@ PYBIND11_MODULE(_C, m)
              py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
                                std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
                                std::vector<at::Tensor> &, uint64_t>(&_CModel::ForwardV1),
-             "forward", py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
-             py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
+             "forward", py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward",
              py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
                                std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
                                uint64_t>(&_CModel::ForwardV1),
-             "forward", py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
-             py::arg("freqs_cis"), py::arg("output"), py::arg("curr_stream") = 0,
-             py::call_guard<py::gil_scoped_release>())
-        .def("forward_get_logits", &_CModel::ForwardGetLogits, "forward_get_logits", py::arg("rt"),
-             py::arg("input"), py::arg("indices"), py::arg("output"), py::arg("curr_stream") = 0,
-             py::call_guard<py::gil_scoped_release>())
+             "forward", py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("forward_get_logits", &_CModel::ForwardGetLogits, "forward_get_logits", py::kw_only(),
+             py::arg("rt"), py::arg("input"), py::arg("indices"), py::arg("output"),
+             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV1, "forward_and_get_logits",
-             py::arg("rt"), py::arg("input"), py::arg("attn_meta"), py::arg("kv_cache"),
-             py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
+             py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_with_inputs_embeds",
              py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
@@ -3462,9 +3463,10 @@ PYBIND11_MODULE(_C, m)
                                std::vector<at::Tensor> &, uint64_t, std::vector<at::Tensor> &,
                                const std::optional<at::Tensor> &>(
                  &_CModel::ForwardWithInputsEmbedsV1),
-             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
-             py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
+             "forward_with_inputs_embeds", py::kw_only(), py::arg("rt"), py::arg("input"),
+             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             py::arg("aux_outputs"), py::arg("curr_stream") = 0,
+             py::arg("deepstack_input") = std::vector<at::Tensor>{},
              py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
         .def("forward_with_inputs_embeds",
              py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
@@ -3472,8 +3474,8 @@ PYBIND11_MODULE(_C, m)
                                uint64_t, std::vector<at::Tensor> &,
                                const std::optional<at::Tensor> &>(
                  &_CModel::ForwardWithInputsEmbedsV1),
-             "forward_with_inputs_embeds", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             "forward_with_inputs_embeds", py::kw_only(), py::arg("rt"), py::arg("input"),
+             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
              py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
         .def("forward_v2",
@@ -3481,29 +3483,31 @@ PYBIND11_MODULE(_C, m)
                                std::vector<std::vector<at::Tensor>> &, std::vector<at::Tensor> &,
                                at::Tensor &, std::vector<at::Tensor> &, uint64_t>(
                  &_CModel::ForwardV2),
-             "forward_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             "forward_v2", py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_v2",
              py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
                                std::vector<std::vector<at::Tensor>> &, std::vector<at::Tensor> &,
                                at::Tensor &, uint64_t>(&_CModel::ForwardV2),
-             "forward_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
+             "forward_v2", py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
              py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_and_get_logits_v2", &_CModel::ForwardAndGetLogitsV2,
-             "forward_and_get_logits_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
+             "forward_and_get_logits_v2", py::kw_only(), py::arg("rt"), py::arg("input"),
+             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("indices"),
+             py::arg("output"), py::arg("curr_stream") = 0,
+             py::call_guard<py::gil_scoped_release>())
         .def("forward_with_inputs_embeds_v2",
              py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
                                std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
                                std::vector<at::Tensor> &, uint64_t, std::vector<at::Tensor> &,
                                const std::optional<at::Tensor> &>(
                  &_CModel::ForwardWithInputsEmbedsV2),
-             "forward_with_inputs_embeds_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
-             py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
+             "forward_with_inputs_embeds_v2", py::kw_only(), py::arg("rt"), py::arg("input"),
+             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             py::arg("aux_outputs"), py::arg("curr_stream") = 0,
+             py::arg("deepstack_input") = std::vector<at::Tensor>{},
              py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
         .def("forward_with_inputs_embeds_v2",
              py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
@@ -3511,12 +3515,12 @@ PYBIND11_MODULE(_C, m)
                                uint64_t, std::vector<at::Tensor> &,
                                const std::optional<at::Tensor> &>(
                  &_CModel::ForwardWithInputsEmbedsV2),
-             "forward_with_inputs_embeds_v2", py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
+             "forward_with_inputs_embeds_v2", py::kw_only(), py::arg("rt"), py::arg("input"),
+             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
              py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
              py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
         .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize, "get_tensor_pool_size",
-             py::arg("dbg") = 0);
+             py::kw_only(), py::arg("dbg") = 0);
 
     py::class_<XCoreAssigner>(m, "CoreAssigner")
         .def(py::init<float>(), py::arg("prefill_ratio"))
@@ -3526,81 +3530,84 @@ PYBIND11_MODULE(_C, m)
              py::call_guard<py::gil_scoped_release>());
 
     // kernels
-    m.def("all_gather", &AllGather, py::arg("rt"), py::arg("out"), py::arg("in_"),
+    m.def("all_gather", &AllGather, py::arg("rt"), py::arg("out"), py::arg("in_"), py::kw_only(),
           py::arg("comm_type") = 0);
     m.def("reduce_scatter", &ReduceScatter, py::arg("rt"), py::arg("out"), py::arg("in_"),
-          py::arg("comm_type") = 0);
-    m.def("all_reduce", &AllReduce, py::arg("rt"), py::arg("out"), py::arg("in_"),
+          py::kw_only(), py::arg("comm_type") = 0);
+    m.def("all_reduce", &AllReduce, py::arg("rt"), py::arg("out"), py::arg("in_"), py::kw_only(),
           py::arg("comm_type") = 0);
     m.def("alltoallv", &AlltoAllV, py::arg("rt"), py::arg("out"), py::arg("in_"),
           py::arg("send_counts"), py::arg("recv_counts"), py::arg("sdispls"), py::arg("rdispls"),
-          py::arg("comm_type") = 0);
+          py::kw_only(), py::arg("comm_type") = 0);
     m.def("add", &Add, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"));
     m.def("bench_empty", &BenchEmpty,
           "empty kernel launch overhead probe (variant: aiv/aic/mix, returns block count)",
-          py::arg("rt"), py::arg("variant"), py::arg("block_num") = 0);
+          py::arg("rt"), py::arg("variant"), py::kw_only(), py::arg("block_num") = 0);
     m.def("bench_scalar", &BenchScalar,
           "scalar dependent-chain micro-benchmark (variant: <op>_aiv|_aic, returns block count)",
-          py::arg("rt"), py::arg("variant"), py::arg("out"), py::arg("seed") = 3,
+          py::arg("rt"), py::arg("variant"), py::arg("out"), py::kw_only(), py::arg("seed") = 3,
           py::arg("iters") = 1000000, py::arg("block_num") = 0);
 #ifdef MICROBENCH_TIMED
     m.def("bench_timed", &BenchTimed,
           "timed scalar micro-benchmark with in-kernel cycle sampling (returns block count)",
-          py::arg("rt"), py::arg("variant"), py::arg("out"), py::arg("ticks"), py::arg("seed") = 3,
-          py::arg("iters") = 1000000, py::arg("block_num") = 0);
+          py::arg("rt"), py::arg("variant"), py::arg("out"), py::arg("ticks"), py::kw_only(),
+          py::arg("seed") = 3, py::arg("iters") = 1000000, py::arg("block_num") = 0);
     m.def("bench_mte", &BenchMte,
           "MTE memory micro-benchmark with in-kernel cycle sampling (returns block count)",
           py::arg("rt"), py::arg("variant"), py::arg("src"), py::arg("dst"), py::arg("ticks"),
-          py::arg("bytes"), py::arg("iters") = 1, py::arg("block_num") = 0);
+          py::arg("bytes"), py::kw_only(), py::arg("iters") = 1, py::arg("block_num") = 0);
     m.def("bench_vec", &BenchVec,
           "vector-op micro-benchmark with in-kernel cycle sampling (returns block count)",
           py::arg("rt"), py::arg("variant"), py::arg("src"), py::arg("out"), py::arg("ticks"),
-          py::arg("elems"), py::arg("iters") = 1, py::arg("block_num") = 0);
+          py::arg("elems"), py::kw_only(), py::arg("iters") = 1, py::arg("block_num") = 0);
     m.def("bench_cube", &BenchCube,
           "cube matmul micro-benchmark with in-kernel cycle sampling (returns block count)",
           py::arg("rt"), py::arg("variant"), py::arg("a"), py::arg("b"), py::arg("c"),
-          py::arg("ticks"), py::arg("m0"), py::arg("n0"), py::arg("k0"), py::arg("block_num") = 0);
+          py::arg("ticks"), py::arg("m0"), py::arg("n0"), py::arg("k0"), py::kw_only(),
+          py::arg("block_num") = 0);
 #endif  // MICROBENCH_TIMED
     m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
-          py::arg("weight_nz") = false, py::arg("transpose") = false);
+          py::kw_only(), py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("matmul_bench", &MatmulBench, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
           py::arg("x_warmup"), py::arg("y_warmup"), py::arg("z_warmup"), py::arg("iterations"),
-          py::arg("warmup_iterations"), py::arg("weight_nz") = false, py::arg("transpose") = false);
+          py::arg("warmup_iterations"), py::kw_only(), py::arg("weight_nz") = false,
+          py::arg("transpose") = false);
     m.def("matmul_with_bias", &MatmulWithBias, "matmul_with_bias", py::arg("rt"), py::arg("x"),
-          py::arg("y"), py::arg("z"), py::arg("bias"), py::arg("weight_nz") = false);
+          py::arg("y"), py::arg("z"), py::arg("bias"), py::kw_only(), py::arg("weight_nz") = false);
     m.def("embed", &Embed, py::arg("rt"), py::arg("weight"), py::arg("in_"), py::arg("out"),
           py::arg("start"), py::arg("end"));
     m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in_"), py::arg("norm"),
-          py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
+          py::arg("out"), py::arg("norm_eps"), py::kw_only(), py::arg("norm_dim") = 0,
           py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
           py::arg("out_start_offset") = 0, py::arg("variance") = std::nullopt);
     m.def("rmsnorm_variance_only", &RMSNormVarianceOnly, "rmsnorm_variance_only", py::arg("rt"),
-          py::arg("in_"), py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim") = 0,
-          py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
+          py::arg("in_"), py::arg("out"), py::arg("norm_eps"), py::kw_only(),
+          py::arg("norm_dim") = 0, py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
           py::arg("out_start_offset") = 0);
     m.def("rmsnorm_with_bias", &RMSNormWithBias, "rmsnorm_with_bias", py::arg("rt"), py::arg("in_"),
-          py::arg("norm"), py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"),
+          py::arg("norm"), py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"), py::kw_only(),
           py::arg("norm_dim") = 0, py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
           py::arg("out_start_offset") = 0);
     m.def("layernorm", &LayerNorm, py::arg("rt"), py::arg("in_"), py::arg("norm"),
           py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim"));
     m.def("l2norm", &L2Norm, py::arg("rt"), py::arg("in_"), py::arg("out"), py::arg("norm_eps"),
-          py::arg("norm_dim") = 0);
+          py::kw_only(), py::arg("norm_dim") = 0);
     m.def("add_bias", &AddBias, py::arg("rt"), py::arg("in_"), py::arg("weight"), py::arg("out"));
-    m.def("silu_and_mul", &SiluAndMul, py::arg("rt"), py::arg("in_"), py::arg("out"),
+    m.def("silu_and_mul", &SiluAndMul, py::arg("rt"), py::arg("in_"), py::arg("out"), py::kw_only(),
           py::arg("swiglu_limit") = 0.0f);
     m.def("sigmoid_gate_mul", &SigmoidGateMul, py::arg("rt"), py::arg("attn"), py::arg("gate"),
           py::arg("out"));
     m.def("rope_and_cache", &RopeAndCache, "rope_and_cache", py::arg("rt"), py::arg("inout"),
           py::arg("k_cache"), py::arg("v_cache"), py::arg("position"), py::arg("cosin"),
           py::arg("slot_mapping"), py::arg("n_heads"), py::arg("n_kv_heads"), py::arg("head_dim"),
-          py::arg("rot_dim"), py::arg("block_size"), py::arg("is_neox"),
+          py::arg("rot_dim"), py::arg("block_size"), py::arg("is_neox"), py::kw_only(),
           py::arg("mrope_mask_h") = 0, py::arg("mrope_mask_w") = 0);
     m.def("attention", &Attention, py::arg("rt"), py::arg("qkv"), py::arg("k_cache"),
           py::arg("v_cache"), py::arg("output"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"),
           py::arg("n_kv_heads"), py::arg("head_dim"), py::arg("block_size"), py::arg("batch"),
-          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192);
+          py::kw_only(), py::arg("enable_flash_attention") = false,
+          py::arg("tile_size_of_cached_kv") = 8192);
     m.def("add_and_rmsnorm", &AddAndRMSNorm, py::arg("rt"), py::arg("in_"), py::arg("add_in_out"),
           py::arg("norm"), py::arg("out"), py::arg("norm_eps"));
     m.def("softmax_topk", &SoftmaxTopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
@@ -3619,7 +3626,7 @@ PYBIND11_MODULE(_C, m)
     m.def("cast_up", &CastUp, py::arg("rt"), py::arg("in_"), py::arg("out"));
     m.def("permutation", &Permutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
           py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"), py::arg("counts"),
-          py::arg("scale_in") = py::none(), py::arg("scale_out") = py::none());
+          py::kw_only(), py::arg("scale_in") = py::none(), py::arg("scale_out") = py::none());
     m.def("unpermutation", &UnPermutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
           py::arg("weights"), py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"));
     m.def("remap_gate_outputs", &RemapGateOutputs, py::arg("rt"), py::arg("w_in"), py::arg("r_in"),
@@ -3632,13 +3639,13 @@ PYBIND11_MODULE(_C, m)
           py::arg("is_long"));
     m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("n_local_heads"),
           py::arg("step_dim"), py::arg("rope_dim"), py::arg("input_with_r"), py::arg("freqs"),
-          py::arg("position"), py::arg("output"), py::arg("inverse") = false,
+          py::arg("position"), py::arg("output"), py::kw_only(), py::arg("inverse") = false,
           py::arg("out_interleaved") = false, py::arg("min_position") = 0,
           py::arg("do_rotate") = false);
     m.def("rope_complex_and_cache", &RopeComplexAndCache, "rope_complex_and_cache", py::arg("rt"),
           py::arg("n_local_heads"), py::arg("step_dim"), py::arg("rope_dim"), py::arg("offset"),
           py::arg("vdim"), py::arg("input_with_r"), py::arg("freqs"), py::arg("position"),
-          py::arg("block_size"), py::arg("v_cache"), py::arg("slot_mapping"),
+          py::arg("block_size"), py::arg("v_cache"), py::arg("slot_mapping"), py::kw_only(),
           py::arg("out_interleaved") = false, py::arg("do_rotate") = false);
     m.def("mla_prepare", &MlaPrepare, py::arg("rt"), py::arg("attn_qkvc"), py::arg("q_norm"),
           py::arg("q_norm_bias"), py::arg("attn_norm_qc"), py::arg("kv_norm"),
@@ -3652,18 +3659,18 @@ PYBIND11_MODULE(_C, m)
           py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("index_head_dim"),
           py::arg("index_n_heads"), py::arg("rope_head_dim"), py::arg("block_size"),
           py::arg("index_k_cache"), py::arg("slot_mapping"), py::arg("norm_eps"), py::arg("q"),
-          py::arg("scale"), py::arg("top_k"), py::arg("is_long"),
+          py::arg("scale"), py::arg("top_k"), py::arg("is_long"), py::kw_only(),
           py::arg("k_scale_cache") = py::none(), py::arg("q8") = py::none(),
           py::arg("q_scale") = py::none(), py::arg("scaled_weights") = py::none());
     m.def("indexer_k_cache_c8", &IndexerKCacheC8, py::arg("rt"), py::arg("k"), py::arg("k_norm"),
           py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("slot_mapping"),
-          py::arg("k_cache"), py::arg("scale_cache"), py::arg("norm_eps") = 1e-6f);
+          py::arg("k_cache"), py::arg("scale_cache"), py::kw_only(), py::arg("norm_eps") = 1e-6f);
     m.def("quant_cache_c8", &QuantCacheC8, py::arg("rt"), py::arg("x"), py::arg("slot_mapping"),
           py::arg("k_cache"), py::arg("k_scale_cache"), py::arg("block_size"));
     m.def("quant_q_c8", &QuantQC8, py::arg("rt"), py::arg("q"), py::arg("head_weight"),
           py::arg("q8"), py::arg("scaled_weights"), py::arg("rotate_scale"));
     m.def("compressor", &Compressor, "compressor", py::arg("rt"), py::arg("kv"), py::arg("score"),
-          py::arg("ape") = std::nullopt, py::arg("norm") = std::nullopt,
+          py::kw_only(), py::arg("ape") = std::nullopt, py::arg("norm") = std::nullopt,
           py::arg("freqs") = std::nullopt, py::arg("weighted_sum"), py::arg("query_start_loc"),
           py::arg("query_lens"), py::arg("cached_lens") = std::nullopt, py::arg("batch"),
           py::arg("n_total_blocks"), py::arg("ratio"), py::arg("overlap"), py::arg("head_dim"),
@@ -3680,14 +3687,15 @@ PYBIND11_MODULE(_C, m)
           py::arg("y_merged"), py::arg("scale_biases"), py::arg("counts"),
           py::arg("per_token_scale"), py::arg("out"));
     m.def("matmul_dequant", &MatmulDeQuant, "matmul_dequant", py::arg("rt"), py::arg("x"),
-          py::arg("y"), py::arg("bias"), py::arg("deq_scale"), py::arg("z"),
+          py::arg("y"), py::arg("bias"), py::arg("deq_scale"), py::arg("z"), py::kw_only(),
           py::arg("weight_nz") = false, py::arg("transpose") = false);
     m.def("fusion_operator_matmul_dequant_pipeline", &FusionOperatorMatmulDequantPipeline,
           "fusion_operator_matmul_dequant_pipeline", py::arg("rt"), py::arg("x"), py::arg("weight"),
-          py::arg("out"), py::arg("bias"), py::arg("deq_scale"), py::arg("weight_nz") = false,
-          py::arg("transpose") = false, py::arg("out_scale"), py::arg("num"));
+          py::arg("out"), py::arg("bias"), py::arg("deq_scale"), py::kw_only(),
+          py::arg("weight_nz") = false, py::arg("transpose") = false, py::arg("out_scale"),
+          py::arg("num"));
     m.def("fused_quant_matmul_dequant", &FusedQuantMatmulDequant, "fused_quant_matmul_dequant",
-          py::arg("rt"), py::arg("x"), py::arg("quant_scale_rec") = std::nullopt,
+          py::arg("rt"), py::arg("x"), py::kw_only(), py::arg("quant_scale_rec") = std::nullopt,
           py::arg("quant_offset") = std::nullopt, py::arg("weight"), py::arg("out"),
           py::arg("bias") = std::nullopt, py::arg("deq_scale") = std::nullopt, py::arg("x_quant"),
           py::arg("out_scale") = std::nullopt, py::arg("num") = std::nullopt, py::arg("dyn_quant"),
@@ -3700,24 +3708,26 @@ PYBIND11_MODULE(_C, m)
           py::arg("block_tables"), py::arg("n_heads"), py::arg("rope_head_dim"),
           py::arg("nope_head_dim"), py::arg("v_head_dim"), py::arg("kv_lora_rank"),
           py::arg("block_size"), py::arg("batch"), py::arg("scale"), py::arg("topk_indices"),
-          py::arg("top_k") = 0, py::arg("nz") = false, py::arg("enable_flash_attention") = false,
-          py::arg("tile_size_of_cached_kv") = 8192, py::arg("dense") = false,
-          py::arg("k_scale_cache") = py::none());
+          py::kw_only(), py::arg("top_k") = 0, py::arg("nz") = false,
+          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192,
+          py::arg("dense") = false, py::arg("k_scale_cache") = py::none());
     m.def("gather_sparse_kv_cache", &GatherSparseKVCache, py::arg("rt"), py::arg("k_cache"),
           py::arg("pe_cache"), py::arg("block_tables"), py::arg("topk_indices"),
           py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"),
           py::arg("k_dense_cache"), py::arg("pe_dense_cache"), py::arg("batch"),
           py::arg("index_topk"), py::arg("block_size"), py::arg("kv_lora_rank"),
-          py::arg("rope_head_dim"), py::arg("kv_heads") = 1, py::arg("compress_ratio") = 1,
-          py::arg("burst_copy_size") = GM_UB_BURST_SIZE, py::arg("k_scale_cache") = py::none());
+          py::arg("rope_head_dim"), py::kw_only(), py::arg("kv_heads") = 1,
+          py::arg("compress_ratio") = 1, py::arg("burst_copy_size") = GM_UB_BURST_SIZE,
+          py::arg("k_scale_cache") = py::none());
     m.def("cxa", &CXA, "cxa", py::arg("rt"), py::arg("q"), py::arg("swa_k_cache"),
           py::arg("compress_k_cache"), py::arg("swa_block_tables"),
           py::arg("compress_block_tables"), py::arg("swa_block_size"),
           py::arg("compress_block_size"), py::arg("attn_sink"), py::arg("output"), py::arg("batch"),
           py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"), py::arg("n_heads"),
           py::arg("head_dim"), py::arg("scale"), py::arg("window_size"), py::arg("compress_ratio"),
-          py::arg("index_topk"), py::arg("topk_indices"), py::arg("enable_flash_attention") = false,
-          py::arg("tile_size_of_cached_kv") = 8192, py::arg("dense") = false);
+          py::arg("index_topk"), py::arg("topk_indices"), py::kw_only(),
+          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192,
+          py::arg("dense") = false);
     m.def("indexer_scores", &IndexerScores, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
           py::arg("weight"), py::arg("scores"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
@@ -3725,10 +3735,10 @@ PYBIND11_MODULE(_C, m)
     m.def("indexer_topk", &IndexerTopK, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
           py::arg("weight"), py::arg("topk_indices"), py::arg("query_start_loc"), py::arg("lens"),
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
-          py::arg("block_size"), py::arg("batch"), py::arg("top_k"),
+          py::arg("block_size"), py::arg("batch"), py::arg("top_k"), py::kw_only(),
           py::arg("k_scale_cache") = py::none(), py::arg("compress_ratio") = 1);
     m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"),
-          py::arg("calc_offset") = 0, py::arg("calc_num") = UINT32_MAX);
+          py::kw_only(), py::arg("calc_offset") = 0, py::arg("calc_num") = UINT32_MAX);
     m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),
           py::arg("tokens_per_epgroup"), py::arg("experts_counts_output"),
           py::arg("n_routed_experts"));
@@ -3742,38 +3752,38 @@ PYBIND11_MODULE(_C, m)
     m.def("transpose_1_2", &Transpose_1_2, py::arg("rt"), py::arg("input"), py::arg("output"));
     m.def("linear_att_conv_and_silu_paged", &LinearAttConv1dAndSiLUPaged, py::arg("rt"),
           py::arg("mix_qkv"), py::arg("conv_state"), py::arg("weight"), py::arg("output"),
-          py::arg("state_indices"), py::arg("cached_lens") = std::nullopt,
+          py::arg("state_indices"), py::kw_only(), py::arg("cached_lens") = std::nullopt,
           py::arg("state_block_size") = 0, py::arg("aligned") = false);
-    m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::arg("outputs"));
+    m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::pos_only(), py::arg("outputs"));
     m.def("concat", &Concat, py::arg("rt"), py::arg("inputs"), py::arg("out"));
     m.def("concat_col", &ConcatCol, py::arg("rt"), py::arg("inputs"), py::arg("out"));
-    m.def("split", &Split, py::arg("rt"), py::arg("in"), py::arg("outputs"), py::arg("sizes"),
-          py::arg("num_packets"));
+    m.def("split", &Split, py::arg("rt"), py::arg("in"), py::pos_only(), py::arg("outputs"),
+          py::arg("sizes"), py::arg("num_packets"));
     m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
           py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
           py::arg("num_v_heads"));
-    m.def("silu_gate_mul", &SiluGateMul, py::arg("rt"), py::arg("normed"), py::arg("gate"),
-          py::arg("out"));
+    m.def("silu_gate_mul", &SiluGateMul, py::kw_only(), py::arg("rt"), py::arg("normed"),
+          py::arg("gate"), py::arg("out"));
     m.def("recurrent_gated_delta_rule_prefill_paged", &RecurrentGatedDeltaRulePrefillPaged,
-          py::arg("rt"), py::arg("query"), py::arg("key"), py::arg("value"), py::arg("beta"),
-          py::arg("g"), py::arg("state"), py::arg("out"), py::arg("indices"), py::arg("starts"),
-          py::arg("initial"), py::arg("num_key_heads"), py::arg("num_value_heads"),
-          py::arg("k_dim"), py::arg("v_dim"));
-    m.def("conv1d_and_silu_prefill_paged", &Conv1dAndSiLUPrefillPaged, py::arg("rt"),
+          py::kw_only(), py::arg("rt"), py::arg("query"), py::arg("key"), py::arg("value"),
+          py::arg("beta"), py::arg("g"), py::arg("state"), py::arg("out"), py::arg("indices"),
+          py::arg("starts"), py::arg("initial"), py::arg("num_key_heads"),
+          py::arg("num_value_heads"), py::arg("k_dim"), py::arg("v_dim"));
+    m.def("conv1d_and_silu_prefill_paged", &Conv1dAndSiLUPrefillPaged, py::kw_only(), py::arg("rt"),
           py::arg("input"), py::arg("state"), py::arg("weight"), py::arg("output"),
           py::arg("indices"), py::arg("starts"), py::arg("initial"));
     m.def("recurrent_gated_delta_rule_paged", &RecurrentGatedDeltaRulePaged, py::arg("rt"),
           py::arg("query"), py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"),
           py::arg("state"), py::arg("out"), py::arg("state_indices"), py::arg("num_key_heads"),
-          py::arg("num_value_heads"), py::arg("k_dim"), py::arg("v_dim"),
+          py::arg("num_value_heads"), py::arg("k_dim"), py::arg("v_dim"), py::kw_only(),
           py::arg("cached_lens") = std::nullopt, py::arg("state_block_size") = 0,
           py::arg("aligned") = false);
     m.def("einsum_mht_hdt_mhd", &EinsumMhtHdtMhd, "einsum_mht_hdt_mhd", py::arg("rt"),
           py::arg("mht"), py::arg("hdt"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
-          py::arg("d"), py::arg("weight_nz") = false);
+          py::arg("d"), py::kw_only(), py::arg("weight_nz") = false);
     m.def("einsum_mht_htd_mhd", &EinsumMhtHtdMhd, "einsum_mht_htd_mhd", py::arg("rt"),
           py::arg("mht"), py::arg("htd"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
-          py::arg("d"), py::arg("weight_nz") = false);
+          py::arg("d"), py::kw_only(), py::arg("weight_nz") = false);
     m.def("unpack_activation", &UnpackActivation, py::arg("rt"), py::arg("input"),
           py::arg("output"));
     m.def("hc_act", &HcAct, py::arg("rt"), py::arg("mixes"), py::arg("hc_scale"),
@@ -3787,8 +3797,8 @@ PYBIND11_MODULE(_C, m)
     m.def("hc_pre", &HcPre, py::arg("rt"), py::arg("x_resid"), py::arg("pre"), py::arg("output"),
           py::arg("m"), py::arg("hc_mult"), py::arg("hidden"));
     // funcs
-    m.def("print", &Print, "print", py::arg("x"), py::arg("name") = "", py::arg("row") = 6,
-          py::arg("col") = 6);
+    m.def("print", &Print, "print", py::arg("x"), py::kw_only(), py::arg("name") = "",
+          py::arg("row") = 6, py::arg("col") = 6);
     m.def("get_tile_size_of_cached_kv", &GetTileSizeOfCachedKV,
           "Get optimal tile size for cached KV based on workload", py::arg("cached_lens"),
           py::arg("query_lens"), py::arg("head_num_in_group"), py::arg("n_kv_heads"),

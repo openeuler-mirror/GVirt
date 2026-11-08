@@ -15,7 +15,7 @@ from xlite._C import Runtime, add_bias
 
 logging.getLogger().setLevel(logging.INFO)
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 REAL_M = 1024

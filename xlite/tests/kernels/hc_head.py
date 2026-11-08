@@ -59,7 +59,7 @@ def hc_head_ref(x_3d, hc_fn, hc_scale, hc_base, hc_mult, norm_eps, hc_eps):
 
 
 torch.npu.set_device(1)
-rt = Runtime(1, 500)
+rt = Runtime(1, size=500)
 
 HC_MULT = 4
 NORM_EPS = 1e-6

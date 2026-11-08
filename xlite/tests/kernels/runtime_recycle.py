@@ -29,7 +29,7 @@ POOL_MB = 500
 
 
 def run_round(tag):
-    rt = Runtime(DEVICE, POOL_MB)
+    rt = Runtime(DEVICE, size=POOL_MB)
     x = torch.randn(8, 2048, dtype=torch.float16, device="npu:0")
     y = torch.randn(8, 2048, dtype=torch.float16, device="npu:0")
     z = torch.empty(8, 2048, dtype=torch.float16, device="npu:0")

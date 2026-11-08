@@ -32,7 +32,7 @@ logging.getLogger().setLevel(logging.INFO)
 # since the pool must hold ~2x the largest totalBytes.
 DEVICE = int(os.environ.get("XLITE_TEST_DEVICE", "0"))
 POOL_MB = int(os.environ.get("XLITE_TEST_POOL_MB", "500"))
-rt = Runtime(DEVICE, POOL_MB)
+rt = Runtime(DEVICE, size=POOL_MB)
 torch.npu.set_device(DEVICE)
 torch.set_printoptions(threshold=np.inf)
 

@@ -40,7 +40,8 @@ def run_pair(rt, q, qr, caches, table, indices, query_lens, cached_lens, wuk, wu
         mla_v2(rt, q, qr, cache, rope, wuk, wuv, output, starts, lens, cached, table,
                heads, rope_dim, nope_dim, wuv.shape[-1], latent_dim, block_size, batch,
                (nope_dim + rope_dim)**-0.5,
-               indices, topk, False, flash, kv_tile, dense, k_scale_cache=scale_cache)
+               indices, top_k=topk, nz=False, enable_flash_attention=flash,
+               tile_size_of_cached_kv=kv_tile, dense=dense, k_scale_cache=scale_cache)
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
     assert bool(torch.isfinite(out).all())
 
@@ -89,7 +90,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     torch.manual_seed(20261003)
     torch.npu.set_device(npu_id)
-    rt = Runtime(npu_id, 3000)
+    rt = Runtime(npu_id, size=3000)
     cases = [
         ([64], [0], 8, 128, 0),
         ([128], [0], 4, 16, 2048),

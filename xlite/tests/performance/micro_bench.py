@@ -106,13 +106,13 @@ def bench_mte(rt, variant, src, dst, ticks, nbytes, iters=1, block_num=0):
     不同步时 kernel 会与 torch 流上的 H2D 上传/zeros 填充双向竞态(实测均复现)。
     调用点一律经本包装, 不得直连 _C.bench_mte。"""
     torch.npu.synchronize()
-    return bench_mte_raw(rt, variant, src, dst, ticks, nbytes, iters, block_num)
+    return bench_mte_raw(rt, variant, src, dst, ticks, nbytes, iters=iters, block_num=block_num)
 
 
 def bench_vec(rt, variant, src, out, ticks, elems, iters=1, block_num=0):
     """_C.bench_vec + 前置 torch.npu.synchronize()(理由同 bench_mte)。"""
     torch.npu.synchronize()
-    return bench_vec_raw(rt, variant, src, out, ticks, elems, iters, block_num)
+    return bench_vec_raw(rt, variant, src, out, ticks, elems, iters=iters, block_num=block_num)
 
 
 def bench_cube(rt, variant, a, b, c, ticks, m0, n0, k0, block_num=0):
@@ -121,7 +121,7 @@ def bench_cube(rt, variant, a, b, c, ticks, m0, n0, k0, block_num=0):
     单次 kernel 下发做一次完整 A@B.T matmul(FP16 输入/FP32 累加/FP16 输出)。
     依赖链测量由 host 多次下发实现(同实验 2b 的 wall 粗测模式)。"""
     torch.npu.synchronize()
-    return bench_cube_raw(rt, variant, a, b, c, ticks, m0, n0, k0, block_num)
+    return bench_cube_raw(rt, variant, a, b, c, ticks, m0, n0, k0, block_num=block_num)
 
 
 # ==================== 实验 1: 空算子 launch floor ====================
@@ -220,7 +220,7 @@ def run_scalar(rt, out_i32, out_f32):
     # 2a 数值核对(顺带吸收进程级 lazy init, 让后面的计时调用落在稳态)
     for name, variant, kind, ref, seed in OPS:
         out = out_f32 if kind == "f32" else out_i32
-        bench_scalar(rt, variant, out, seed, VERIFY_ITERS)
+        bench_scalar(rt, variant, out, seed=seed, iters=VERIFY_ITERS)
         got = out.item()
         if kind == "i32":
             got &= U32 - 1
@@ -237,7 +237,7 @@ def run_scalar(rt, out_i32, out_f32):
             walls = []
             for _ in range(REPS):
                 t0 = time.perf_counter()
-                n = bench_scalar(rt, variant, out, seed, iters)
+                n = bench_scalar(rt, variant, out, seed=seed, iters=iters)
                 walls.append((time.perf_counter() - t0) * 1e6)
                 block_num = n if block_num is None else block_num
             meds.append(_med_us(walls))
@@ -253,7 +253,7 @@ def run_scalar(rt, out_i32, out_f32):
     # 2c 先核对: timed kernel 的累加结果须与 untimed 参考逐位一致
     for name, variant, kind, ref, seed in OPS:
         out = out_f32 if kind == "f32" else out_i32
-        bench_timed(rt, variant, out, ticks, seed, VERIFY_ITERS)
+        bench_timed(rt, variant, out, ticks, seed=seed, iters=VERIFY_ITERS)
         got = out.item()
         if kind == "i32":
             got &= U32 - 1
@@ -275,7 +275,7 @@ def run_scalar(rt, out_i32, out_f32):
         for iters in ITERS_LIST:
             issue, compl, drain = [], [], []
             for _ in range(REPS):
-                bench_timed(rt, variant, out, ticks, seed, iters)
+                bench_timed(rt, variant, out, ticks, seed=seed, iters=iters)
                 c0, c1, c2 = ticks.cpu().tolist()
                 issue.append(c1 - c0)
                 compl.append(c2 - c0)
@@ -934,7 +934,7 @@ def run_cube(rt, tiles):
 
 def run_bench(mte_sizes=None, mte_only=False, vec_sizes=None, vec_only=False,
               cube_tiles=None, cube_only=False):
-    rt = Runtime(0, 500)
+    rt = Runtime(0, size=500)
     torch.npu.set_device(0)
     out_i32 = torch.zeros(1, dtype=torch.int32, device="npu:0")
     out_f32 = torch.zeros(1, dtype=torch.float32, device="npu:0")

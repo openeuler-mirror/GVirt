@@ -148,29 +148,34 @@ def check_rejections(rt):
     ids = torch.ones(1, dtype=torch.int32, device='npu')
     starts = torch.tensor([0, 2], dtype=torch.int32, device='npu')
     initial = torch.zeros(1, dtype=torch.int32, device='npu')
-    conv_args = [rt, x, conv, weight, torch.empty_like(x), ids, starts, initial]
-    ssm_args = [rt, q, q, q, gates, gates, state, torch.empty_like(q),
-                ids, starts, initial, 1, 1, 64, 64]
+    # The bindings are keyword-only; the bad tensor is swapped by parameter name
+    # so the invalid descriptor still reaches kernel validation (RuntimeError),
+    # not a binding-layer TypeError.
+    conv_args = dict(rt=rt, input=x, state=conv, weight=weight, output=torch.empty_like(x),
+                     indices=ids, starts=starts, initial=initial)
+    ssm_args = dict(rt=rt, query=q, key=q, value=q, beta=gates, g=gates, state=state,
+                    out=torch.empty_like(q), indices=ids, starts=starts, initial=initial,
+                    num_key_heads=1, num_value_heads=1, k_dim=64, v_dim=64)
     cases = [
-        (conv1d_and_silu_prefill_paged, conv_args, 6, starts.long()),
-        (conv1d_and_silu_prefill_paged, conv_args, 7, initial.float()),
-        (conv1d_and_silu_prefill_paged, conv_args, 5, ids.cpu()),
-        (conv1d_and_silu_prefill_paged, conv_args, 4, x.T),
-        (recurrent_gated_delta_rule_prefill_paged, ssm_args, 9, starts.long()),
-        (recurrent_gated_delta_rule_prefill_paged, ssm_args, 10, initial.float()),
-        (recurrent_gated_delta_rule_prefill_paged, ssm_args, 8, ids.cpu()),
-        (recurrent_gated_delta_rule_prefill_paged, ssm_args, 9, starts[:1]),
+        (conv1d_and_silu_prefill_paged, conv_args, 'starts', starts.long()),
+        (conv1d_and_silu_prefill_paged, conv_args, 'initial', initial.float()),
+        (conv1d_and_silu_prefill_paged, conv_args, 'indices', ids.cpu()),
+        (conv1d_and_silu_prefill_paged, conv_args, 'output', x.T),
+        (recurrent_gated_delta_rule_prefill_paged, ssm_args, 'starts', starts.long()),
+        (recurrent_gated_delta_rule_prefill_paged, ssm_args, 'initial', initial.float()),
+        (recurrent_gated_delta_rule_prefill_paged, ssm_args, 'indices', ids.cpu()),
+        (recurrent_gated_delta_rule_prefill_paged, ssm_args, 'starts', starts[:1]),
     ]
-    for function, args, index, bad_tensor in cases:
-        args = args.copy()
-        args[index] = bad_tensor
+    for function, kwargs, name, bad_tensor in cases:
+        kwargs = dict(kwargs)
+        kwargs[name] = bad_tensor
         before_conv, before_state = conv.clone(), state.clone()
         try:
-            function(*args)
+            function(**kwargs)
         except (RuntimeError, ValueError):
             pass
         else:
-            raise AssertionError(f'invalid descriptor accepted at argument {index}')
+            raise AssertionError(f'invalid descriptor accepted at argument {name}')
         assert torch.equal(conv, before_conv), 'rejected call changed Conv state'
         assert torch.equal(state, before_state), 'rejected call changed SSM state'
     print('PASS 8 Prefill descriptor/device rejections with unchanged state', flush=True)
@@ -179,7 +184,7 @@ def check_rejections(rt):
 def main(device):
     torch.npu.set_device(device)
     torch.manual_seed(143)
-    rt = Runtime(device, 64)
+    rt = Runtime(device, size=64)
     for dtype in (torch.bfloat16, torch.float16, torch.float32):
         for state_dtype in dict.fromkeys((dtype, torch.float32)):
             for kd, vd in ((16, 64), (64, 128), (128, 128)):

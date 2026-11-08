@@ -69,8 +69,10 @@ def make_inputs(m, n, k):
 def run_matmul(rt, real_args, warmup_args, device):
     torch.npu.synchronize()
     nz = weight_nz and dtype != torch.float
-    runs_args = (BENCH_RUNS, WARMUP_RUNS)
-    t = matmul_bench(rt, *real_args, *warmup_args, *runs_args, nz, transpose)
+    x, y, z = real_args
+    x_warmup, y_warmup, z_warmup = warmup_args
+    t = matmul_bench(rt, x, y, z, x_warmup, y_warmup, z_warmup, BENCH_RUNS, WARMUP_RUNS,
+                     weight_nz=nz, transpose=transpose)
     torch.npu.synchronize()
 
     return t
@@ -78,7 +80,7 @@ def run_matmul(rt, real_args, warmup_args, device):
 
 def run_test(m, n, k, swizzle, device):
     torch.set_default_device(f'npu:{device}')
-    rt = Runtime(device, 500)
+    rt = Runtime(device, size=500)
     torch.npu.set_device(device)
 
     rt.configure_swizzle(swizzle, False)

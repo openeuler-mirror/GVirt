@@ -299,7 +299,7 @@ def main():
     torch.npu.set_device(npu_id)
     torch.set_num_threads(4)
     device = torch.device(f"npu:{npu_id}")
-    rt = Runtime(device.index, 160)
+    rt = Runtime(device.index, size=160)
 
     # 32 heads is the classic LI configuration; 64 exercises the chunked query tiling.
     for n_heads in (32, 64):

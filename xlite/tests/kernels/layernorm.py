@@ -17,7 +17,7 @@ from xlite._C import Runtime, layernorm
 
 logging.getLogger().setLevel(logging.INFO)
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 def stand_layernorm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

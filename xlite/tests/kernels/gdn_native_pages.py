@@ -13,7 +13,7 @@ from xlite._C import Runtime, linear_att_conv_and_silu_paged, recurrent_gated_de
 def run(device, metadata_mode):
     torch.npu.set_device(device)
     torch.manual_seed(7)
-    rt = Runtime(device, 64)
+    rt = Runtime(device, size=64)
     for dtype in (torch.bfloat16, torch.float16, torch.float32):
         # A storage offset and padding expose addressing bugs even when pages are reordered.
         channels, width, pages, batch = 64, 4, 8, 4

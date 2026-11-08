@@ -13,7 +13,7 @@ from xlite._C import Runtime, einsum_mht_hdt_mhd, einsum_mht_htd_mhd
 from tests.models.weight_utils import matrix_nd2nz
 
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 torch.npu.config.allow_internal_format = True
 

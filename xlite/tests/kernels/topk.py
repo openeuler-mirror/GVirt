@@ -91,7 +91,7 @@ def run_test(rt, cached_lens, query_lens, msg):
 
 
 def main():
-    rt = Runtime(0, 500)
+    rt = Runtime(0, size=500)
     torch.npu.set_device(0)
     torch.set_default_device("npu:0")
 

@@ -13,7 +13,7 @@ from xlite._C import Runtime, group_matmul
 import torch.nn.functional as F
 
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 m = 20

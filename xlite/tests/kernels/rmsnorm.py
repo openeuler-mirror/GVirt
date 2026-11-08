@@ -18,7 +18,7 @@ from xlite._C import Runtime, rmsnorm, rmsnorm_with_bias
 logging.getLogger().setLevel(logging.INFO)
 
 npu_id = 0
-rt = Runtime(npu_id, 500)
+rt = Runtime(npu_id, size=500)
 torch.npu.set_device(npu_id)
 
 def stand_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -97,11 +97,11 @@ for test_dtype in dtype_list:
         # xlite
         torch.npu.synchronize()
         if has_bias:
-            rmsnorm_with_bias(rt, x, weight, bias1, y, NORMEPS, DIM, CNT)
-            rmsnorm_with_bias(rt, x, weight, bias2, y, NORMEPS, DIM, 1, DIM * CNT, DIM * CNT)
+            rmsnorm_with_bias(rt, x, weight, bias1, y, NORMEPS, norm_dim=DIM, cnt_per_token=CNT)
+            rmsnorm_with_bias(rt, x, weight, bias2, y, NORMEPS, norm_dim=DIM, cnt_per_token=1, in_start_offset=DIM * CNT, out_start_offset=DIM * CNT)
         else:
-            rmsnorm(rt, x, weight, y, NORMEPS, DIM, CNT)
-            rmsnorm(rt, x, weight, y, NORMEPS, DIM, 1, DIM * CNT, DIM * CNT)
+            rmsnorm(rt, x, weight, y, NORMEPS, norm_dim=DIM, cnt_per_token=CNT)
+            rmsnorm(rt, x, weight, y, NORMEPS, norm_dim=DIM, cnt_per_token=1, in_start_offset=DIM * CNT, out_start_offset=DIM * CNT)
         torch.npu.synchronize()
 
         logging.info(f'rmsnorm with stride ({test_dtype}) {"with" if has_bias else "without"} bias executed!')

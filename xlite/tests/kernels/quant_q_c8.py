@@ -83,7 +83,7 @@ def main():
     logging.getLogger().setLevel(logging.INFO)
     torch.npu.set_device(npu_id)
     device = torch.device(f"npu:{npu_id}")
-    rt = Runtime(device.index, 32)
+    rt = Runtime(device.index, size=32)
     generator = torch.Generator().manual_seed(9128)
     for dim in dims:
         for tokens in test_cases:

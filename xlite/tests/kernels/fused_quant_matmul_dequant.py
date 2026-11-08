@@ -23,7 +23,7 @@ torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
 dev_id = 0
 
-rt = Runtime(dev_id, 500)
+rt = Runtime(dev_id, size=500)
 torch.npu.set_device(dev_id)
 
 # (m, n, k, weight_nz, transpose, dyn_quant)
@@ -146,7 +146,7 @@ def run_case(m, n, k, weight_nz, transpose, dyn_quant, has_bias=True, has_deq_sc
         quant_dynamic(rt, x, serial_scale, serial_xq)
     else:
         quant(rt, x, quant_scale_rec, quant_offset, serial_xq)
-    matmul_dequant(rt, serial_xq, y_in, bias, scale, serial_tmp, weight_nz, transpose)
+    matmul_dequant(rt, serial_xq, y_in, bias, scale, serial_tmp, weight_nz=weight_nz, transpose=transpose)
     dequant(rt, serial_tmp, serial_scale, standard, dyn_quant)
     torch.npu.synchronize()
 

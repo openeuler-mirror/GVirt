@@ -218,7 +218,7 @@ def main(wait_time, test_dtype, work, topk_values):
 
 if __name__ == "__main__":
     args = parse_args()
-    rt = Runtime(0, 500)
+    rt = Runtime(0, size=500)
     torch.npu.set_device(0)
     main(
         wait_time=args.time,

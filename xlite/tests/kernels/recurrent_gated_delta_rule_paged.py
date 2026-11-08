@@ -173,7 +173,7 @@ def check_rejections(rt):
 def run(device, metadata_mode):
     torch.npu.set_device(device)
     torch.manual_seed(71)
-    rt = Runtime(device, 64)
+    rt = Runtime(device, size=64)
     cases = [(3, 2, 6, kd, 64 if kd % 32 else 128) for kd in range(16, 129, 16)]
     cases += [(1, 16, 48, 128, 128), (4, 16, 48, 128, 128), (16, 16, 48, 128, 128)]
     modes = ("legacy", "none", "align") if metadata_mode == "all" else (metadata_mode,)

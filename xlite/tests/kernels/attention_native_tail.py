@@ -10,7 +10,7 @@ from xlite._C import Runtime, attention
 def run():
     torch.npu.set_device(0)
     torch.manual_seed(17)
-    rt = Runtime(0, 64)
+    rt = Runtime(0, size=64)
     heads, kv_heads, dim, block = 24, 4, 256, 128
     for dtype in (torch.bfloat16, torch.float16):
         for flash in (False, True):
@@ -41,7 +41,7 @@ def run():
                 torch.npu.synchronize()
                 attention(rt, qkv, k, v, output, meta(list(range(batch))), meta([1] * batch),
                           meta([n - 1 for n in lengths]), meta(list(range(batch * blocks))),
-                          heads, kv_heads, dim, block, batch, flash, 128)
+                          heads, kv_heads, dim, block, batch, enable_flash_attention=flash, tile_size_of_cached_kv=128)
                 torch.npu.synchronize()
                 reference = torch.stack(refs)
                 # Softmax probabilities and cube outputs are rounded to Dtype.

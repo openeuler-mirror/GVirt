@@ -42,7 +42,7 @@ def main():
             value.normal_(0, 0.04)
     model.layers[0].linear_attn.norm.weight.fill_(1.0)
     model.xlite_weight_nz = False
-    model.xlite_rt = Runtime(0, 0)
+    model.xlite_rt = Runtime(0, size=0)
     model.init_xlite_model(args)
     model.init_xlite_kvcache(args)
     # Preserve the recurrent state across scheduler splits without BF16 cache rounding.
@@ -67,8 +67,7 @@ def main():
         # Fetch the raw stream after metadata work has entered TorchNPU's queue.
         stream = torch.npu.current_stream().npu_stream
         model.xlite_model.forward_v2(
-            model.xlite_rt, part.flatten(), meta, model.xlite_kv_cache,
-            [model.freqs_cis], out, stream,
+            rt=model.xlite_rt, input=part.flatten(), attn_meta=meta, kv_cache=model.xlite_kv_cache, freqs_cis=[model.freqs_cis], output=out, curr_stream=stream,
         )
         torch.npu.synchronize()
         return out.view(2, part.shape[1], args.dim).cpu()

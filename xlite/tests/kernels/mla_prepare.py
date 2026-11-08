@@ -65,7 +65,7 @@ def stand_rmsnorm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps
     return x.to(input_dtype)
 
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 ROPE_THETA = 10000.0

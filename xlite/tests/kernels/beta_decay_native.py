@@ -6,7 +6,7 @@ from xlite._C import Runtime, beta_decay
 
 torch.npu.set_device(0)
 torch.manual_seed(31)
-rt = Runtime(0, 64)
+rt = Runtime(0, size=64)
 for dtype in (torch.bfloat16, torch.float16, torch.float32):
     for bias_dtype in dict.fromkeys((dtype, torch.float32)):
         b, a = (torch.randn(67, 48, device='npu', dtype=dtype) for _ in range(2))

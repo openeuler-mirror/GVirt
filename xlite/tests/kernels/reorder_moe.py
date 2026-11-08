@@ -25,7 +25,7 @@ from xlite._C import Runtime, reorder_moe
 logging.getLogger().setLevel(logging.INFO)
 
 # Single-card test: device 0, 500 MB tensor pool.
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 HIDDEN_SIZE = 3072

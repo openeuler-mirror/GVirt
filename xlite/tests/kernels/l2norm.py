@@ -16,7 +16,7 @@ from xlite._C import Runtime, l2norm
 logging.getLogger().setLevel(logging.INFO)
 
 npu_id = 0
-rt = Runtime(npu_id, 500)
+rt = Runtime(npu_id, size=500)
 torch.npu.set_device(npu_id)
 torch.set_default_dtype(torch.bfloat16)
 torch.set_default_device("npu")

@@ -6,7 +6,7 @@ from xlite._C import Runtime, silu_gate_mul, sigmoid_gate_mul
 
 torch.npu.set_device(0)
 torch.manual_seed(42)
-rt = Runtime(0, 64)
+rt = Runtime(0, size=64)
 for dtype in (torch.bfloat16, torch.float16):
     for shape in ((1, 1), (1, 128), (17, 6144), (129, 64), (2, 2080)):
         normed = torch.randn(shape, device='npu', dtype=torch.float32)
@@ -41,8 +41,8 @@ for dtype in (torch.bfloat16, torch.float16):
         expected = (xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + 1e-6) * weight.float())
         expected = (expected.flatten(1) * torch.nn.functional.silu(gate.float())).to(dtype)
         torch.npu.synchronize()
-        rmsnorm(rt, x, weight, normed, 1e-6, 128, 48)
+        rmsnorm(rt, x, weight, normed, 1e-6, norm_dim=128, cnt_per_token=48)
         torch.npu.synchronize()
-        silu_gate_mul(rt, normed, gate, out)
+        silu_gate_mul(rt=rt, normed=normed, gate=gate, out=out)
         torch.testing.assert_close(out.cpu(), expected.cpu(), rtol=.005, atol=.005)
         print(f'PASS end-to-end GDN norm/gate {dtype} scale={scale}', flush=True)
