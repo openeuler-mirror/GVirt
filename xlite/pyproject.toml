@@ -2,7 +2,7 @@
 # synchronize with requirements-build.txt when updating build dependencies
 requires = [
     "setuptools>=64.0.0,<82.0.0",
-    "setuptools-scm>=8.0.0",      # setup.py imports get_version at top level; required for build
+    "setuptools-scm>=10.0.0",     # write_to_source needs 10.x; setup.py imports get_version at top level
     "cmake>=3.22.0",
     "pybind11>=3.0.0",
     "torch>=2.5.1,<=2.10.0",      # use torch+cpu; make sure (torch: build version <= runtime version)
@@ -44,10 +44,8 @@ dev = [
     "transformers",
     "pyyaml>=6.0",
     "torch-npu>=2.5.1",           # make sure (torch: build version <= runtime version)
-    "clang-format==22.1.0",
-    "clang-tidy==22.1.0",
-    "flake8",
     "mypy",
+    "pre-commit",
 ]
 
 [project.urls]
@@ -70,5 +68,51 @@ write_to         = "xlite/xlite/_version.py"
 write_to_source  = true
 fallback_version = "0.0.0"
 
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Matches the rule selection used by vllm / vllm-ascend.
+select = [
+    "E",   # pycodestyle
+    "F",   # Pyflakes
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "ISC", # flake8-implicit-str-concat
+    "SIM", # flake8-simplify
+    "I",   # isort
+    "G",   # flake8-logging-format
+]
+ignore = [
+    "F403", "F405", # star imports
+    "E731",         # lambda assignment
+    "B905",         # zip() without strict=
+    "B007",         # unused loop-control variable
+    "UP032",        # f-string in format calls
+    "B904",         # raise without from
+    "SIM102",       # collapsible if
+    "SIM108",       # ternary instead of if-else block
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test scripts carry long CLI strings, URLs, and CJK messages; line length is
+# not enforced there. Side-effect imports (e.g. `import torch_npu` for backend
+# registration) are common in tests, so unused-import findings are off too.
+# f-string logging (G004) is accepted in standalone test scripts.
+# Patterns are relative to this file (the project root).
+"tests/**" = ["E501", "F401", "G004"]
+# Stub files mirror the C++ API signatures; pyupgrade rewrites are churn there.
+"**/*.pyi" = ["UP"]
+
+# docstring-code-format stays off (default): _C.pyi docstrings contain math
+# pseudo-code (e.g. weight^T) that ruff would rewrite as Python operators.
+
+[tool.codespell]
+skip = ".git,build,.mypy_cache,.pytest_cache,*.json"
+# AscendC/CCE kernel vocabulary and API parameter names.
+ignore-words-list = "clen,inout,outWeights,vor,rIn,biasIn,inH,unparseable,CANN,cann,CopyIn,EnQue,ND,nd,espace"
+
 [tool.mypy]
-mypy_path = "xlite"
+mypy_path = "."
+follow_imports = "silent"
+ignore_missing_imports = true

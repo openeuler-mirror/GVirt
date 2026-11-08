@@ -1,0 +1,114 @@
+default_install_hook_types:
+  - pre-commit
+  - prepare-commit-msg
+
+default_stages:
+  - pre-commit # Run locally
+  - manual # Run in CI (python xlite/tests/run_static_checks.py)
+
+exclude: '^(\.agents|\.claude)/.*'
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb, '1024'] # csrc/kernels/cce_stub.h
+      - id: detect-private-key
+      - id: check-ast
+      - id: debug-statements
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.4
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v22.1.8 # keep in sync with the clang-tidy hook's additional_dependencies below
+    hooks:
+      - id: clang-format
+        files: ^xlite/csrc/.+\.(c|cc|cpp|h|hpp)$
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.42.0 # newest line supporting node >=18; 0.45+/0.50+ need node 20/22
+    hooks:
+      - id: markdownlint
+        stages: [pre-commit] # local only — CI has no node dependency (container node is old; nodeenv downloads are proxy-blocked). Node-less contributors: SKIP=markdownlint git commit
+        language_version: system
+        args: [--config, xlite/.markdownlint.yaml, --fix]
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      - id: codespell
+        args: [--toml, xlite/pyproject.toml]
+        additional_dependencies: [tomli]
+
+  - repo: local
+    hooks:
+      - id: check-cpp-copyright
+        name: check-cpp-copyright
+        entry: python3 xlite/tests/hooks/check_cpp_headers.py --check-copyright
+        language: system
+        files: ^xlite/csrc/.+\.(c|cc|cpp|h|hpp)$
+
+      - id: check-cpp-header-guard
+        name: check-cpp-header-guard
+        entry: python3 xlite/tests/hooks/check_cpp_headers.py --check-header-guard
+        language: system
+        files: ^xlite/csrc/.+\.h$
+
+      - id: check-torch-npu-imports
+        name: check-torch-npu-imports
+        entry: python3 xlite/tests/hooks/check_torch_npu_imports.py
+        language: system
+        files: ^xlite/tests/.+\.py$
+
+      - id: mypy
+        name: mypy
+        entry: mypy --config-file xlite/pyproject.toml
+        language: system
+        files: ^xlite/xlite/.+\.py$
+        stages: [manual]
+
+      # clang-tidy comes from the hook env; keep in sync with the mirrors-clang-format rev.
+      - id: clang-tidy
+        name: clang-tidy
+        entry: python3 xlite/tests/hooks/run_clang_tidy.py
+        language: python
+        additional_dependencies: ['clang-tidy==22.1.8']
+        files: ^xlite/csrc/.+\.(cpp|cc|c|h|hpp)$
+        stages: [manual]
+
+      - id: signoff-commit
+        name: signoff-commit
+        entry: bash
+        args:
+          - -c
+          - |
+            if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$1"; then
+              printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$1"
+            fi
+          - --
+        language: system
+        verbose: true
+        stages: [prepare-commit-msg]
+
+      # Keep `suggestion` last
+      - id: suggestion
+        name: suggestion
+        entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+        language: system
+        verbose: true
+        pass_filenames: false
+      # Insert new entries above the `suggestion` entry

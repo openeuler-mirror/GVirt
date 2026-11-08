@@ -2,189 +2,87 @@
 
 ## Overview
 
-The xlite static checker provides automated code quality checks for both C++ and Python code. It helps maintain code consistency, detect potential bugs, and ensure adherence to coding standards.
+All xlite lint checks run through [pre-commit](https://pre-commit.com/), driven by a single
+configuration file at `xlite/.pre-commit-config.yaml` (next to the other lint configs).
+The same hooks run locally (on every commit) and in CI, so a PR that passes locally passes
+the bot. A symlink at the repo root (`.pre-commit-config.yaml` → `xlite/.pre-commit-config.yaml`)
+keeps the standard pre-commit entry points working from any checkout; edit the file under
+`xlite/`.
 
-## Features
+## Hook inventory
 
-### C++ Static Checks
+| Hook | Scope | Stage |
+| --- | --- | --- |
+| `trailing-whitespace`, `end-of-file-fixer`, `mixed-line-ending` | all files | pre-commit |
+| `check-merge-conflict`, `check-yaml`, `check-json`, `check-toml`, `check-added-large-files`, `detect-private-key`, `check-ast`, `debug-statements` | all files | pre-commit |
+| `ruff-check` (`--fix`) + `ruff-format` | Python | pre-commit |
+| `clang-format` | `xlite/csrc/**` C/C++ | pre-commit |
+| `markdownlint` (`--fix`) | Markdown (`xlite/.markdownlint.yaml`) | pre-commit |
+| `codespell` | all text files (`xlite/pyproject.toml` `[tool.codespell]`) | pre-commit |
+| `check-cpp-copyright`, `check-cpp-header-guard` | `xlite/csrc/**` | pre-commit |
+| `check-torch-npu-imports` | `xlite/tests/**` (enforces `import torch` before `import torch_npu`) | pre-commit |
+| `mypy` | `xlite/xlite/**` package | manual (CI) |
+| `clang-tidy` | `xlite/csrc/**` (skips `csrc/kernels/` and `csrc/ascend.h`; needs a build tree) | manual (CI) |
+| `signoff-commit` | appends `Signed-off-by` when missing | prepare-commit-msg |
 
-- **Code Formatting (Clang-Format)**: Checks code formatting including:
-  - Indentation (4 spaces)
-  - Bracket placement
-  - Line breaks
-  - Trailing spaces
-  - Line length (max 100 characters)
-  - Comment formatting
-
-- **Copyright Check**: Verifies that all source files contain the proper copyright header:
-  ```
-  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
-  ```
-
-- **Header Guard Check**: Ensures header files have proper include guards:
-  - Checks for `#ifndef` or `#pragma once`
-  - Verifies matching `#define` for `#ifndef` guards
-
-- **Static Analysis (Clang-Tidy)**: Performs comprehensive static analysis:
-  - Bug detection (bugprone-* checks)
-  - Security checks (cert-* checks)
-  - C++ core guidelines (cppcoreguidelines-* checks)
-  - Google style checks (google-* checks)
-  - Modern C++ suggestions (modernize-* checks)
-  - Performance optimizations (performance-* checks)
-  - Readability improvements (readability-* checks)
-
-### Python Static Checks
-
-- **Syntax Check**: Validates Python syntax
-- **Flake8**: Basic linting including:
-  - PEP 8 style compliance
-  - Code complexity
-  - Unused imports
-  - Line length (max 100 characters)
-- **MyPy**: Type checking (optional)
+Stages: `pre-commit` hooks run on every local commit; `manual` hooks run only in CI
+(`python xlite/tests/run_static_checks.py` or `pre-commit run --all-files --hook-stage manual`).
 
 ## Usage
 
-### Basic Usage
-
-Run all checks (C++ and Python):
+One-time setup (from any directory in the repo):
 
 ```bash
-cd /workspaces/code/opencode/GVirt/xlite
-python tests/run_static_checks.py
+pre-commit install
 ```
 
-### Running C++ Checks Only
+After that, hooks run automatically on `git commit`. Hooks that modify files
+(`ruff-check`, `ruff-format`, `markdownlint`) fail the commit and leave the fixes
+in the working tree — `git add` the touched files and commit again.
+
+Full pre-PR verification (CI parity, includes mypy and clang-tidy):
 
 ```bash
-python tests/run_static_checks.py --cpp-only
+python xlite/tests/run_static_checks.py            # or: pre-commit run --all-files --hook-stage manual
+python xlite/tests/run_static_checks.py --cpp-only
+python xlite/tests/run_static_checks.py --python-only
 ```
 
-### Running Python Checks Only
+Run specific hooks on specific files:
 
 ```bash
-python tests/run_static_checks.py --python-only
+pre-commit run ruff-check --files xlite/tests/pr_ci_bot.py
 ```
 
-### Fix Code Style
+## Fixing findings
 
-```bash
-clang-format -i xxx.cpp
-# or you can use git plugin
-git clang-format
-```
+- Python lint/format: most findings are fixed by `pre-commit run ruff-check ruff-format --files <files>`; the rest need manual edits.
+- C++ format: `clang-format -i <file>` under `xlite/` (or `git clang-format` for staged changes).
+- clang-tidy: `clang-tidy -p=build --fix <file>` under `xlite/` (requires a build tree).
+- Markdown: `pre-commit run markdownlint --files <file>` auto-fixes spacing/structure issues.
+- Spelling: `codespell -i 3 <file>` interactive fixes; project vocabulary lives in `[tool.codespell]` of `xlite/pyproject.toml`.
 
-### Advanced Options
+The checking hooks for clang-format and clang-tidy run from pre-commit-managed environments
+(no local install needed). For the manual fix commands above, install the binaries once with
+`pip install clang-format==22.1.8 clang-tidy==22.1.8` — the versions must match the
+`mirrors-clang-format` rev and the `clang-tidy` hook's `additional_dependencies` in
+`.pre-commit-config.yaml`.
 
-#### Skip Specific C++ Checks
+## Configuration files
 
-```bash
-# Skip code format check
-python tests/run_static_checks.py --no-cpp-format
+- `xlite/.pre-commit-config.yaml` — hook sources, versions, scopes, stages; owns the
+  clang-format and clang-tidy versions. A symlink at the repo root points to it so the
+  standard pre-commit commands (and editor integrations) keep working.
+- `xlite/pyproject.toml` — `[tool.ruff]` rules, `[tool.codespell]` vocabulary and skips, `[tool.mypy]` settings.
+- `xlite/.markdownlint.yaml` — markdownlint rule overrides.
+- `xlite/.clang-format`, `xlite/.clang-tidy` — C++ style and analysis configuration.
 
-# Skip copyright check
-python tests/run_static_checks.py --no-cpp-copyright
+Line-length policy: Python enforces 120 columns (test scripts under `xlite/tests/` are exempt
+via `per-file-ignores`); C++ stays at the `.clang-format` limit of 100 columns.
 
-# Skip header guard check
-python tests/run_static_checks.py --no-cpp-header-guard
+## CI
 
-# Skip clang-tidy analysis
-python tests/run_static_checks.py --no-cpp-tidy
-
-# Skip multiple checks
-python tests/run_static_checks.py --no-cpp-format --no-cpp-tidy
-```
-
-#### Skip Specific Python Checks
-
-```bash
-# Skip flake8 check
-python tests/run_static_checks.py --no-python-flake8
-
-# Skip mypy type check
-python tests/run_static_checks.py --no-python-mypy
-```
-
-### Individual Check Scripts
-
-You can also run the check scripts directly:
-
-#### C++ Checks
-
-```bash
-python tests/cpp_check.py
-python tests/cpp_check.py --no-tidy  # Skip clang-tidy
-python tests/cpp_check.py --no-format --no-copyright  # Skip format and copyright
-```
-
-#### Python Checks
-
-```bash
-python tests/python_check.py
-python tests/python_check.py --no-mypy  # Skip type checking
-python tests/python_check.py --no-flake8  # Skip flake8
-```
-
-## Configuration Files
-
-### .clang-format
-
-Located at `xlite/.clang-format`, this file defines the C++ code formatting rules based on Google style with customizations:
-
-- Indent width: 4 spaces
-- Max line length: 100 characters
-- Tab width: 4 spaces
-- Various style customizations for brackets, spaces, and alignment
-
-### .clang-tidy
-
-Located at `xlite/.clang-tidy`, this file configures clang-tidy checks:
-
-- Enables bugprone, cert, clang-analyzer, cppcoreguidelines, google, misc, modernize, performance, and readability checks
-- Disables overly strict or incompatible checks
-- Custom thresholds for function size and complexity
-
-## Output Format
-
-The checker provides clear output with emojis for easy identification:
-
-- ✅ **PASSED**: Check completed successfully
-- ❌ **FAILED**: Check failed with errors
-- ⚠️ **WARNING**: Check passed with warnings
-
-### Too many warnings
-
-You can disable specific checks:
-```bash
-# Skip clang-tidy if it produces too many warnings
-python run_static_checks.py --no-cpp-tidy
-
-# Skip mypy type checking
-python run_static_checks.py --no-python-mypy
-```
-
-## Best Practices
-
-1. **Run checks locally** before committing changes
-2. **Fix errors immediately** - don't accumulate technical debt
-3. **Review warnings** - they often indicate potential issues
-4. **Keep configuration updated** - adjust as project evolves
-5. **Use in CI/CD** - catch issues early in development pipeline
-
-## Contributing
-
-When contributing to xlite:
-
-1. Ensure all code passes static checks
-2. Add copyright headers to new files
-3. Use proper header guards in header files
-4. Follow the configured code style
-5. Address all warnings before submitting PRs
-
-## Support
-
-For issues or questions about the static checker:
-- Check this documentation
-- Review configuration files (.clang-format, .clang-tidy)
-- Consult tool documentation (clang-format, clang-tidy, flake8, mypy)
+`tests/pr_ci_bot.py` polls open GitCode PRs, runs `tests/run_static_checks.py` plus the
+vllm-ascend integration mypy check in an isolated worktree per PR, runs the accuracy tests
+when the static checks pass, and posts one concise comment per commit with per-check statuses
+and failure output only.
