@@ -32,6 +32,10 @@ foreach(_glob IN ITEMS
         "${CLR_DIR}/xlite_kernels_*_preprocess-prefix/src/*-build/CMakeFiles/aiv_obj.dir/**/*.o")
     file(GLOB_RECURSE _objs "${_glob}")
     foreach(_obj IN LISTS _objs)
+        # A concurrent preclean may have removed it already; that is fine.
+        if(NOT EXISTS "${_obj}")
+            continue()
+        endif()
         # First 18 bytes: 4-byte magic + 2-byte e_type at offset 16 (little
         # endian, so ET_REL reads back as the hex pair "0100").
         file(READ "${_obj}" _elf LIMIT 18 HEX)
