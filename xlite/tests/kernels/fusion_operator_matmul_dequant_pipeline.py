@@ -21,7 +21,7 @@ torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
 dev_id = 0
 
-rt = Runtime(dev_id, 500)
+rt = Runtime(dev_id, size=500)
 torch.npu.set_device(dev_id)
 
 test_sizes = [
@@ -83,12 +83,12 @@ def run_case(m, n, k, weight_nz, transpose, has_out_scale):
     fused_out = torch.empty(m, n, dtype=torch.bfloat16, device=f"npu:{dev_id}")
 
     torch.npu.synchronize()
-    matmul_dequant(rt, x, y_in, bias, scale, serial_tmp, weight_nz, transpose)
+    matmul_dequant(rt, x, y_in, bias, scale, serial_tmp, weight_nz=weight_nz, transpose=transpose)
     dequant(rt, serial_tmp, out_scale, standard, has_out_scale)
     torch.npu.synchronize()
 
     fusion_operator_matmul_dequant_pipeline(
-        rt, x, y_in, fused_out, bias, scale, weight_nz, transpose, out_scale, num
+        rt, x, y_in, fused_out, bias, scale, weight_nz=weight_nz, transpose=transpose, out_scale=out_scale, num=num
     )
     torch.npu.synchronize()
     print(

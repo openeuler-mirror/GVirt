@@ -27,7 +27,7 @@ from xlite._C import Runtime, compressor, quant_cache_c8
 
 logging.getLogger().setLevel(logging.INFO)
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 HEAD_DIM = 512
@@ -556,11 +556,7 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
         (max_blocks, BLOCK_SIZE, 1, HEAD_DIM), (compress_kv_pitch, HEAD_DIM, HEAD_DIM, 1))
     torch.npu.synchronize()
     freqs_arg = None if freqs_none else freqs_cis
-    compressor(rt, kv, score, ape, norm_w, freqs_arg, weightedSum, query_start_loc,
-               query_lens_t, cached_lens_t, batch, n_total_blocks, ratio, overlap, HEAD_DIM,
-               ROPE_HEAD_DIM, NORM_EPS, compress_kv_kernel, compress_positions,
-               compress_slot_mapping, BLOCK_SIZE, state, state_slot_mapping, state_block_table,
-               STATE_BLOCK_SIZE, do_rotate)
+    compressor(rt, kv, score, ape=ape, norm=norm_w, freqs=freqs_arg, weighted_sum=weightedSum, query_start_loc=query_start_loc, query_lens=query_lens_t, cached_lens=cached_lens_t, batch=batch, n_total_blocks=n_total_blocks, ratio=ratio, overlap=overlap, head_dim=HEAD_DIM, rope_head_dim=ROPE_HEAD_DIM, norm_eps=NORM_EPS, compress_kv=compress_kv_kernel, compress_positions=compress_positions, compress_slot_mapping=compress_slot_mapping, compress_block_size=BLOCK_SIZE, state=state, state_slot_mapping=state_slot_mapping, state_block_table=state_block_table, state_block_size=STATE_BLOCK_SIZE, do_rotate=do_rotate)
     torch.npu.synchronize()
     cat = 'mixed' if any(ql == 1 for _, ql, _ in ordered) and any(ql > 1 for _, ql, _ in ordered) else 'batch'
     logging.info(f'compressor {cat} ({test_dtype}) ratio={ratio} overlap={overlap} '
@@ -698,10 +694,7 @@ def run_batch(name, ratio, overlap, test_dtype, request_specs, flags=None):
             k8_pool = torch.full((capacity * HEAD_DIM,), K8_FILL, dtype=torch.int8)
             k16_pool = torch.full((capacity,), K16_FILL, dtype=torch.float16)
         torch.npu.synchronize()
-        compressor(rt, kv, score, ape, norm_w, freqs_cis, ws_c8, query_start_loc,
-                   query_lens_t, cached_lens_t, batch, n_total_blocks, ratio, overlap, HEAD_DIM,
-                   ROPE_HEAD_DIM, NORM_EPS, None, compress_positions, compress_slot_mapping,
-                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE)
+        compressor(rt, kv, score, ape=ape, norm=norm_w, freqs=freqs_cis, weighted_sum=ws_c8, query_start_loc=query_start_loc, query_lens=query_lens_t, cached_lens=cached_lens_t, batch=batch, n_total_blocks=n_total_blocks, ratio=ratio, overlap=overlap, head_dim=HEAD_DIM, rope_head_dim=ROPE_HEAD_DIM, norm_eps=NORM_EPS, compress_kv=None, compress_positions=compress_positions, compress_slot_mapping=compress_slot_mapping, compress_block_size=BLOCK_SIZE, state=state, state_slot_mapping=state_slot_mapping, state_block_table=state_block_table, state_block_size=STATE_BLOCK_SIZE)
         torch.npu.synchronize()
         # One block covering the whole pool keeps the dense flat addressing.
         quant_cache_c8(rt, ws_c8, compress_slot_mapping, k8_pool, k16_pool, capacity)
@@ -827,10 +820,7 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
         state, state_block_table, state_slot_mapping = build_paged_state(
             full_dim, batch, max_pos, sum(ql_b), ql_b, ratio, overlap)
         torch.npu.synchronize()
-        compressor(rt, kv, score, ape, norm_w, freqs_cis, weightedSum, query_start_loc,
-                   query_lens_t, cached_lens, batch, n_pf_blocks, ratio, overlap, HEAD_DIM,
-                   ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slot_mapping,
-                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE)
+        compressor(rt, kv, score, ape=ape, norm=norm_w, freqs=freqs_cis, weighted_sum=weightedSum, query_start_loc=query_start_loc, query_lens=query_lens_t, cached_lens=cached_lens, batch=batch, n_total_blocks=n_pf_blocks, ratio=ratio, overlap=overlap, head_dim=HEAD_DIM, rope_head_dim=ROPE_HEAD_DIM, norm_eps=NORM_EPS, compress_kv=compress_kv, compress_positions=compress_positions, compress_slot_mapping=compress_slot_mapping, compress_block_size=BLOCK_SIZE, state=state, state_slot_mapping=state_slot_mapping, state_block_table=state_block_table, state_block_size=STATE_BLOCK_SIZE)
         torch.npu.synchronize()
 
         kv_cpu = [t.cpu() for t in kv_list]
@@ -885,10 +875,7 @@ def run_decode_test(name, ratio, overlap, test_dtype, ape_enabled=True, n_compre
             # decode ignores stateSlotMapping (rows come from absolute positions).
             ssm_d = torch.zeros(batch, dtype=torch.int32)
             torch.npu.synchronize()
-            compressor(rt, tok_kv, tok_sc, ape, norm_w, freqs_cis, ws_d, qsl_d,
-                       qlt_d, cl_d, batch, nb, ratio, overlap, HEAD_DIM, ROPE_HEAD_DIM,
-                       NORM_EPS, compress_kv, cp_d, cs_d, BLOCK_SIZE, state, ssm_d,
-                       state_block_table, STATE_BLOCK_SIZE)
+            compressor(rt, tok_kv, tok_sc, ape=ape, norm=norm_w, freqs=freqs_cis, weighted_sum=ws_d, query_start_loc=qsl_d, query_lens=qlt_d, cached_lens=cl_d, batch=batch, n_total_blocks=nb, ratio=ratio, overlap=overlap, head_dim=HEAD_DIM, rope_head_dim=ROPE_HEAD_DIM, norm_eps=NORM_EPS, compress_kv=compress_kv, compress_positions=cp_d, compress_slot_mapping=cs_d, compress_block_size=BLOCK_SIZE, state=state, state_slot_mapping=ssm_d, state_block_table=state_block_table, state_block_size=STATE_BLOCK_SIZE)
             torch.npu.synchronize()
 
             state_cpu = state.cpu().view(-1, 2 * full_dim)
@@ -1048,10 +1035,7 @@ def run_decode_first_window_test(name, ratio, overlap, test_dtype, ape_enabled=T
         # sync the kernel reads a stale/unmapped mapping: rows collapse to slot 0
         # (last-writer-wins, a false "spill bug") or the vector core faults (507035).
         torch.npu.synchronize()
-        compressor(rt, kv, score, ape, norm_w, freqs_cis, weightedSum, query_start_loc,
-                   query_lens_t, cached_lens, batch, 0, ratio, overlap, HEAD_DIM,
-                   ROPE_HEAD_DIM, NORM_EPS, compress_kv, compress_positions, compress_slot_mapping,
-                   BLOCK_SIZE, state, state_slot_mapping, state_block_table, STATE_BLOCK_SIZE)
+        compressor(rt, kv, score, ape=ape, norm=norm_w, freqs=freqs_cis, weighted_sum=weightedSum, query_start_loc=query_start_loc, query_lens=query_lens_t, cached_lens=cached_lens, batch=batch, n_total_blocks=0, ratio=ratio, overlap=overlap, head_dim=HEAD_DIM, rope_head_dim=ROPE_HEAD_DIM, norm_eps=NORM_EPS, compress_kv=compress_kv, compress_positions=compress_positions, compress_slot_mapping=compress_slot_mapping, compress_block_size=BLOCK_SIZE, state=state, state_slot_mapping=state_slot_mapping, state_block_table=state_block_table, state_block_size=STATE_BLOCK_SIZE)
         torch.npu.synchronize()
 
         def dstate_row(req, p):
@@ -1090,10 +1074,7 @@ def run_decode_first_window_test(name, ratio, overlap, test_dtype, ape_enabled=T
             cl_d = torch.tensor([pos], dtype=torch.int32)
             ssm_d = torch.zeros(batch, dtype=torch.int32)
             torch.npu.synchronize()
-            compressor(rt, tok_kv, tok_sc, ape, norm_w, freqs_cis, ws_d, qsl_d,
-                       qlt_d, cl_d, batch, nb, ratio, overlap, HEAD_DIM, ROPE_HEAD_DIM,
-                       NORM_EPS, compress_kv, cp_d, cs_d, BLOCK_SIZE, state, ssm_d,
-                       state_block_table, STATE_BLOCK_SIZE)
+            compressor(rt, tok_kv, tok_sc, ape=ape, norm=norm_w, freqs=freqs_cis, weighted_sum=ws_d, query_start_loc=qsl_d, query_lens=qlt_d, cached_lens=cl_d, batch=batch, n_total_blocks=nb, ratio=ratio, overlap=overlap, head_dim=HEAD_DIM, rope_head_dim=ROPE_HEAD_DIM, norm_eps=NORM_EPS, compress_kv=compress_kv, compress_positions=cp_d, compress_slot_mapping=cs_d, compress_block_size=BLOCK_SIZE, state=state, state_slot_mapping=ssm_d, state_block_table=state_block_table, state_block_size=STATE_BLOCK_SIZE)
             torch.npu.synchronize()
             check_token_state(pos, tok_kv, tok_sc)
             if not compress:

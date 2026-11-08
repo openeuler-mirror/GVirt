@@ -33,6 +33,7 @@ class Runtime:
     def __init__(
         self,
         devid: int,
+        *,
         size: int = 0,
         rank: int = 0,
         tp_size: int = 1,
@@ -1094,6 +1095,7 @@ class Model:
     @overload
     def forward(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMeta,
@@ -1103,20 +1105,19 @@ class Model:
         aux_outputs: Sequence[torch.Tensor],
         curr_stream: int = 0,
     ) -> None:
-        """Run forward pass with host/vLLM-compatible attention metadata (V1).
+        """Run forward pass with host/vLLM-compatible attention metadata (V1), with
+        EAGLE3 aux hidden-state capture.
 
         ``freqs_cis`` is a single tensor shared across all layers. For per-layer
         freqs tensors or device-side attention metadata, use :meth:`forward_v2`.
 
-        This overload captures aux hidden states: the forward additionally captures
-        each layer listed in ``aux_layer_ids`` (set on :attr:`ModelConfig.aux_layer_ids`
-        before :meth:`init`) by an
-        on-stream device-to-device memcpy of that layer's input raw (un-normalized)
-        residual stream (viewed to ``rt.curr_tokens`` rows) — captured before the layer's
-        attention/FFN executes — into the matching entry of ``aux_outputs``. The Eagle3
-        draft model's ``combine_hidden_states`` then fuses these aux states to drive
-        proposal. Use the overload without ``aux_outputs`` for a regular forward (no
-        capture, no overhead); passing ``aux_outputs=None`` is rejected by the binding.
+        Captures each layer listed in ``aux_layer_ids`` (set on
+        :attr:`ModelConfig.aux_layer_ids` before :meth:`init`) by an on-stream
+        device-to-device memcpy of that layer's input raw (un-normalized) residual
+        stream (viewed to ``rt.curr_tokens`` rows) — captured before the layer's
+        attention/FFN executes — into the matching entry of ``aux_outputs``. The
+        Eagle3 draft model's ``combine_hidden_states`` then fuses these aux states
+        to drive proposal.
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1141,12 +1142,13 @@ class Model:
             aux_outputs (Sequence[torch.Tensor]): Aux hidden-state capture buffers, one per
                 entry in ``aux_layer_ids``, each shape ``[max_tokens, hidden_size]`` model
                 dtype; only the first ``num_tokens`` rows of each are written. Requires
-                ``aux_layer_ids`` to be set on the config (before :meth:`init`). Required in
-                this overload; use the overload without it for a regular forward.
+                ``aux_layer_ids`` to be set on the config (before
+                :meth:`init`). Passing ``aux_outputs=None`` is rejected by the binding;
+                use the overload without it for a regular forward.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:
-            None: Output (and ``aux_outputs`` when supplied) are written in place.
+            None: Output and ``aux_outputs`` are written in place.
 
         Raises:
             RuntimeError: On invalid shapes or cache mismatch.
@@ -1155,6 +1157,7 @@ class Model:
     @overload
     def forward(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMeta,
@@ -1163,10 +1166,16 @@ class Model:
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
-        """Regular forward without aux capture (see the ``aux_outputs`` overload)."""
+        """Run forward pass with host/vLLM-compatible attention metadata (V1), without
+        aux capture (no capture, no overhead).
+
+        Same contract as the aux-capture overload of :meth:`forward`, minus the
+        ``aux_outputs`` argument.
+        """
 
     def forward_get_logits(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         indices: torch.Tensor,
@@ -1195,6 +1204,7 @@ class Model:
 
     def forward_and_get_logits(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMeta,
@@ -1215,8 +1225,7 @@ class Model:
             input (torch.Tensor): Input token ids, shape ``[num_tokens]``, int32/int64 device.
             attn_meta (AttnMeta): Host-side attention metadata.
             kv_cache (Sequence[Sequence[torch.Tensor]]): Per-layer KV cache (see :meth:`forward`).
-            freqs_cis (Union[torch.Tensor, Sequence[torch.Tensor]]): Rotary
-                frequency table shared by all layers, or a per-layer sequence; each
+            freqs_cis (torch.Tensor): Rotary frequency table shared by all layers, shape
                 ``[max_position, rope_head_dim]``, model dtype (per row ``[cos | sin]``
                 concatenated, indexed by token position value).
             indices (torch.Tensor): Logits indices, shape ``[batch]``, int32 device.
@@ -1234,6 +1243,7 @@ class Model:
     @overload
     def forward_with_inputs_embeds(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMeta,
@@ -1245,15 +1255,14 @@ class Model:
         deepstack_input: Sequence[torch.Tensor] = ...,
         input_ids: Optional[torch.Tensor] = None,
     ) -> None:
-        """Run forward pass with deepstack input embeddings (host metadata).
+        """Run forward pass with deepstack input embeddings (host metadata), with
+        EAGLE3 aux hidden-state capture.
 
-        This overload captures aux hidden states like the EAGLE3 aux path of
-        :meth:`forward`: each layer listed in ``aux_layer_ids`` (set on
-        :attr:`ModelConfig.aux_layer_ids` before :meth:`init`) has its input raw
-        (un-normalized) residual stream — captured before the layer executes — captured
-        into the matching entry of ``aux_outputs``. Use the overload without
-        ``aux_outputs`` for a regular forward (passing ``aux_outputs=None`` is rejected
-        by the binding).
+        Behaves like the EAGLE3 aux path of :meth:`forward`: each layer listed in
+        ``aux_layer_ids`` (set on :attr:`ModelConfig.aux_layer_ids` before
+        :meth:`init`) has its input raw (un-normalized) residual stream — captured
+        before the layer executes — captured into the matching entry of
+        ``aux_outputs``.
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1267,8 +1276,9 @@ class Model:
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
             aux_outputs (Sequence[torch.Tensor]): Aux hidden-state capture buffers, one per
-                entry in ``aux_layer_ids`` (see the ``aux_outputs`` overload of
-                :meth:`forward`). Required in this overload.
+                entry in ``aux_layer_ids`` (see :meth:`forward`). Passing
+                ``aux_outputs=None`` is rejected by the binding; use the overload
+                without it for a regular forward.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
             deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings,
                 each shape ``[num_tokens, hidden_size]``, model dtype; length must equal
@@ -1278,7 +1288,7 @@ class Model:
                 when scoring_func is sqrtsoftplus, otherwise may be left unset (defaults to None).
 
         Returns:
-            None: Output (and ``aux_outputs`` when supplied) are written in place.
+            None: Output and ``aux_outputs`` are written in place.
 
         Raises:
             RuntimeError: On KV-cache/deepstack shape mismatch or other native execution failures.
@@ -1287,6 +1297,7 @@ class Model:
     @overload
     def forward_with_inputs_embeds(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMeta,
@@ -1297,11 +1308,17 @@ class Model:
         deepstack_input: Sequence[torch.Tensor] = ...,
         input_ids: Optional[torch.Tensor] = None,
     ) -> None:
-        """Regular forward with deepstack input embeddings and no aux capture."""
+        """Run forward pass with deepstack input embeddings (host metadata), without
+        aux capture.
+
+        Same contract as the aux-capture overload of
+        :meth:`forward_with_inputs_embeds`, minus the ``aux_outputs`` argument.
+        """
 
     @overload
     def forward_v2(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMetaV2,
@@ -1311,19 +1328,19 @@ class Model:
         aux_outputs: Sequence[torch.Tensor],
         curr_stream: int = 0,
     ) -> None:
-        """Run forward pass with device-tensor attention metadata (V2).
+        """Run forward pass with device-tensor attention metadata (V2), with EAGLE3
+        aux hidden-state capture.
 
         Unlike :meth:`forward` (V1), this path takes ``query_start_loc``,
         ``slot_mapping`` and ``block_tables`` as pre-built device tensors on
         ``attn_meta``; the native side skips host computation and H2D copies.
 
-        This overload captures aux hidden states like the EAGLE3 aux path of
-        :meth:`forward` but on the V2 device-metadata path: each layer listed in
-        ``aux_layer_ids`` (set on :attr:`ModelConfig.aux_layer_ids` before :meth:`init`) has
-        its input raw (un-normalized) residual stream — captured before the layer executes —
-        captured into the matching entry of ``aux_outputs`` via an on-stream device-to-device
-        memcpy. Use the overload without ``aux_outputs`` for a regular forward (passing
-        ``aux_outputs=None`` is rejected by the binding).
+        Behaves like the EAGLE3 aux path of :meth:`forward` but on the V2
+        device-metadata path: each layer listed in ``aux_layer_ids`` (set on
+        :attr:`ModelConfig.aux_layer_ids` before :meth:`init`) has its input raw
+        (un-normalized) residual stream — captured before the layer executes —
+        captured into the matching entry of ``aux_outputs`` via an on-stream
+        device-to-device memcpy.
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1339,12 +1356,13 @@ class Model:
             aux_outputs (Sequence[torch.Tensor]): Aux hidden-state capture buffers, one per
                 entry in ``aux_layer_ids``, each shape ``[max_tokens, hidden_size]`` model
                 dtype; only the first ``num_tokens`` rows of each are written. Requires
-                ``aux_layer_ids`` to be set on the config (before :meth:`init`). Required in
-                this overload; use the overload without it for a regular forward.
+                ``aux_layer_ids`` to be set on the config (before
+                :meth:`init`). Passing ``aux_outputs=None`` is rejected by the binding;
+                use the overload without it for a regular forward.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:
-            None: Output (and ``aux_outputs`` when supplied) are written in place.
+            None: Output and ``aux_outputs`` are written in place.
 
         Raises:
             RuntimeError: On shape mismatch or other native execution failures.
@@ -1353,6 +1371,7 @@ class Model:
     @overload
     def forward_v2(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMetaV2,
@@ -1361,10 +1380,16 @@ class Model:
         output: torch.Tensor,
         curr_stream: int = 0,
     ) -> None:
-        """Regular forward without aux capture (see the ``aux_outputs`` overload)."""
+        """Run forward pass with device-tensor attention metadata (V2), without aux
+        capture.
+
+        Same contract as the aux-capture overload of :meth:`forward_v2`, minus the
+        ``aux_outputs`` argument.
+        """
 
     def forward_and_get_logits_v2(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMetaV2,
@@ -1399,6 +1424,7 @@ class Model:
     @overload
     def forward_with_inputs_embeds_v2(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMetaV2,
@@ -1410,12 +1436,12 @@ class Model:
         deepstack_input: Sequence[torch.Tensor] = ...,
         input_ids: Optional[torch.Tensor] = None,
     ) -> None:
-        """Run forward pass with deepstack input embeddings (device metadata, V2).
+        """Run forward pass with deepstack input embeddings (device metadata, V2), with
+        EAGLE3 aux hidden-state capture.
 
-        This overload captures aux hidden states like the EAGLE3 aux path of
-        :meth:`forward` (capture of post-FFN hidden states for the layers in
-        ``aux_layer_ids``). Use the overload without ``aux_outputs`` for a regular
-        forward (passing ``aux_outputs=None`` is rejected by the binding).
+        Behaves like the EAGLE3 aux path of :meth:`forward` (capture of post-FFN
+        hidden states for the layers in ``aux_layer_ids``) on the V2 device-metadata
+        path.
 
         Args:
             rt (Runtime): Native runtime handle.
@@ -1429,8 +1455,9 @@ class Model:
             output (torch.Tensor): Output hidden-state buffer, shape
                 ``[num_tokens, hidden_size]``, model dtype.
             aux_outputs (Sequence[torch.Tensor]): Aux hidden-state capture buffers, one per
-                entry in ``aux_layer_ids`` (see the ``aux_outputs`` overload of
-                :meth:`forward`). Required in this overload.
+                entry in ``aux_layer_ids`` (see :meth:`forward`). Passing
+                ``aux_outputs=None`` is rejected by the binding; use the overload
+                without it for a regular forward.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
             deepstack_input (Sequence[torch.Tensor], default empty): Extra deepstack embeddings,
                 each shape ``[num_tokens, hidden_size]``, model dtype; length must equal
@@ -1440,7 +1467,7 @@ class Model:
                 when scoring_func is sqrtsoftplus, otherwise may be left unset (defaults to None).
 
         Returns:
-            None: Output (and ``aux_outputs`` when supplied) are written in place.
+            None: Output and ``aux_outputs`` are written in place.
 
         Raises:
             RuntimeError: On shape mismatch or other native execution failures.
@@ -1449,6 +1476,7 @@ class Model:
     @overload
     def forward_with_inputs_embeds_v2(
         self,
+        *,
         rt: Runtime,
         input: torch.Tensor,
         attn_meta: AttnMetaV2,
@@ -1459,9 +1487,14 @@ class Model:
         deepstack_input: Sequence[torch.Tensor] = ...,
         input_ids: Optional[torch.Tensor] = None,
     ) -> None:
-        """Regular forward with deepstack input embeddings and no aux capture."""
+        """Run forward pass with deepstack input embeddings (device metadata, V2),
+        without aux capture.
 
-    def get_tensor_pool_size(self, dbg: int = 0) -> int:
+        Same contract as the aux-capture overload of
+        :meth:`forward_with_inputs_embeds_v2`, minus the ``aux_outputs`` argument.
+        """
+
+    def get_tensor_pool_size(self, *, dbg: int = 0) -> int:
         """Get tensor-pool usage information.
 
         Args:
@@ -1503,7 +1536,7 @@ class CoreAssigner:
 
 """Low-level collective and kernel operator bindings."""
 
-def all_gather(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int = 0) -> None:
+def all_gather(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, *, comm_type: int = 0) -> None:
     """Collectively gather tensors from all ranks.
 
     Args:
@@ -1522,7 +1555,7 @@ def all_gather(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int
     """
     ...
 
-def reduce_scatter(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int = 0) -> None:
+def reduce_scatter(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, *, comm_type: int = 0) -> None:
     """Reduce then scatter tensors across ranks.
 
     Args:
@@ -1542,7 +1575,7 @@ def reduce_scatter(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type:
     """
     ...
 
-def all_reduce(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, comm_type: int = 0) -> None:
+def all_reduce(rt: Runtime, out: torch.Tensor, in_: torch.Tensor, *, comm_type: int = 0) -> None:
     """Collectively reduce tensors across all ranks.
 
     Args:
@@ -1569,6 +1602,7 @@ def alltoallv(
     recv_counts: torch.Tensor,
     sdispls: torch.Tensor,
     rdispls: torch.Tensor,
+    *,
     comm_type: int = 0,
 ) -> None:
     """All-to-all vectorized collective communication.
@@ -1613,7 +1647,7 @@ def add(rt: Runtime, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> None:
     """
     ...
 
-def bench_empty(rt: Runtime, variant: str, block_num: int = 0) -> int:
+def bench_empty(rt: Runtime, variant: str, *, block_num: int = 0) -> int:
     """Launch an empty (no-op) kernel to probe launch overhead.
 
     Args:
@@ -1628,9 +1662,9 @@ def bench_empty(rt: Runtime, variant: str, block_num: int = 0) -> int:
     """
     ...
 
-
-def bench_scalar(rt: Runtime, variant: str, out: torch.Tensor, seed: float = 3,
-                 iters: int = 1000000, block_num: int = 0) -> int:
+def bench_scalar(
+    rt: Runtime, variant: str, out: torch.Tensor, *, seed: float = 3, iters: int = 1000000, block_num: int = 0
+) -> int:
     """Run a dependent scalar-op chain micro-benchmark.
 
     Args:
@@ -1650,8 +1684,16 @@ def bench_scalar(rt: Runtime, variant: str, out: torch.Tensor, seed: float = 3,
     """
     ...
 
-def bench_timed(rt: Runtime, variant: str, out: torch.Tensor, ticks: torch.Tensor, seed: float = 3,
-                iters: int = 1000000, block_num: int = 0) -> int:
+def bench_timed(
+    rt: Runtime,
+    variant: str,
+    out: torch.Tensor,
+    ticks: torch.Tensor,
+    *,
+    seed: float = 3,
+    iters: int = 1000000,
+    block_num: int = 0,
+) -> int:
     """Run a timed scalar micro-benchmark with in-kernel cycle sampling.
 
     Only present in builds configured with XLITE_BENCH_TIMED=ON; in the
@@ -1681,8 +1723,17 @@ def bench_timed(rt: Runtime, variant: str, out: torch.Tensor, ticks: torch.Tenso
     """
     ...
 
-def bench_mte(rt: Runtime, variant: str, src: torch.Tensor, dst: torch.Tensor,
-              ticks: torch.Tensor, bytes: int, iters: int = 1, block_num: int = 0) -> int:
+def bench_mte(
+    rt: Runtime,
+    variant: str,
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    ticks: torch.Tensor,
+    bytes: int,
+    *,
+    iters: int = 1,
+    block_num: int = 0,
+) -> int:
     """Run an MTE memory micro-benchmark with in-kernel cycle sampling.
 
     Only present in builds configured with XLITE_BENCH_TIMED=ON; in the
@@ -1729,6 +1780,7 @@ def bench_vec(
     out: torch.Tensor,
     ticks: torch.Tensor,
     elems: int,
+    *,
     iters: int = 1,
     block_num: int = 0,
 ) -> int:
@@ -1784,6 +1836,7 @@ def bench_cube(
     m0: int,
     n0: int,
     k0: int,
+    *,
     block_num: int = 0,
 ) -> int:
     """Cube matmul micro-benchmark with in-kernel cycle sampling.
@@ -1819,6 +1872,7 @@ def matmul(
     x: torch.Tensor,
     y: torch.Tensor,
     z: torch.Tensor,
+    *,
     weight_nz: bool = False,
     transpose: bool = False,
 ) -> None:
@@ -1854,6 +1908,7 @@ def matmul_bench(
     z_warmup: torch.Tensor,
     iterations: int,
     warmup_iterations: int,
+    *,
     weight_nz: bool = False,
     transpose: bool = False,
 ) -> int:
@@ -1885,6 +1940,7 @@ def matmul_with_bias(
     y: torch.Tensor,
     z: torch.Tensor,
     bias: torch.Tensor,
+    *,
     weight_nz: bool = False,
 ) -> None:
     """Matrix multiplication followed by bias add.
@@ -1937,6 +1993,7 @@ def rmsnorm_variance_only(
     in_: torch.Tensor,
     out: torch.Tensor,
     norm_eps: float,
+    *,
     norm_dim: int = 0,
     cnt_per_token: int = 1,
     in_start_offset: int = 0,
@@ -1966,6 +2023,7 @@ def rmsnorm(
     norm: torch.Tensor,
     out: torch.Tensor,
     norm_eps: float,
+    *,
     norm_dim: int = 0,
     cnt_per_token: int = 1,
     in_start_offset: int = 0,
@@ -2001,6 +2059,7 @@ def rmsnorm_with_bias(
     norm_bias: torch.Tensor,
     out: torch.Tensor,
     norm_eps: float,
+    *,
     norm_dim: int = 0,
     cnt_per_token: int = 1,
     in_start_offset: int = 0,
@@ -2055,6 +2114,7 @@ def l2norm(
     in_: torch.Tensor,
     out: torch.Tensor,
     norm_eps: float,
+    *,
     norm_dim: int = 0,
 ) -> None:
     """Apply L2 Norm.
@@ -2089,6 +2149,7 @@ def silu_and_mul(
     rt: Runtime,
     in_: torch.Tensor,
     out: torch.Tensor,
+    *,
     swiglu_limit: float = 0.0,
 ) -> None:
     """Apply SiLU and gated multiply.
@@ -2135,6 +2196,7 @@ def rope_and_cache(
     rot_dim: int,
     block_size: int,
     is_neox: bool,
+    *,
     mrope_mask_h: int = 0,
     mrope_mask_w: int = 0,
 ) -> None:
@@ -2191,6 +2253,7 @@ def attention(
     head_dim: int,
     block_size: int,
     batch: int,
+    *,
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
 ) -> None:
@@ -2423,6 +2486,7 @@ def permutation(
     out: torch.Tensor,
     unp_idx: torch.Tensor,
     counts: torch.Tensor,
+    *,
     scale_in: Optional[torch.Tensor] = None,
     scale_out: Optional[torch.Tensor] = None,
 ) -> None:
@@ -2598,6 +2662,7 @@ def rope_complex(
     freqs: torch.Tensor,
     position: torch.Tensor,
     output: torch.Tensor,
+    *,
     inverse: bool = False,
     out_interleaved: bool = False,
     min_position: int = 0,
@@ -2667,6 +2732,7 @@ def rope_complex_and_cache(
     block_size: int,
     v_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
+    *,
     out_interleaved: bool = False,
     do_rotate: bool = False,
 ) -> None:
@@ -2802,6 +2868,7 @@ def indexer_prepare(
     scale: float,
     top_k: int,
     is_long: bool,
+    *,
     k_scale_cache: Optional[torch.Tensor] = None,
     q8: Optional[torch.Tensor] = None,
     q_scale: Optional[torch.Tensor] = None,
@@ -2858,7 +2925,6 @@ def indexer_prepare(
     """
     ...
 
-
 def indexer_k_cache_c8(
     rt: Runtime,
     k: torch.Tensor,
@@ -2869,6 +2935,7 @@ def indexer_k_cache_c8(
     slot_mapping: torch.Tensor,
     k_cache: torch.Tensor,
     scale_cache: torch.Tensor,
+    *,
     norm_eps: float = 1e-6,
 ) -> None:
     """Prepare C8 indexer keys and write keys and scales to cache.
@@ -2897,7 +2964,6 @@ def indexer_k_cache_c8(
         None: Caches are written in place; inputs and unwritten slots are unchanged.
     """
     ...
-
 
 def quant_cache_c8(
     rt: Runtime,
@@ -2946,7 +3012,6 @@ def quant_cache_c8(
     """
     ...
 
-
 def quant_q_c8(
     rt: Runtime,
     q: torch.Tensor,
@@ -2989,18 +3054,18 @@ def quant_q_c8(
     """
     ...
 
-
 def compressor(
     rt: Runtime,
     kv: torch.Tensor,
     score: torch.Tensor,
-    ape: Optional[torch.Tensor],
-    norm: Optional[torch.Tensor],
-    freqs: Optional[torch.Tensor],
+    *,
+    ape: Optional[torch.Tensor] = None,
+    norm: Optional[torch.Tensor] = None,
+    freqs: Optional[torch.Tensor] = None,
     weighted_sum: torch.Tensor,
     query_start_loc: torch.Tensor,
     query_lens: torch.Tensor,
-    cached_lens: Optional[torch.Tensor],
+    cached_lens: Optional[torch.Tensor] = None,
     batch: int,
     n_total_blocks: int,
     ratio: int,
@@ -3008,13 +3073,13 @@ def compressor(
     head_dim: int,
     rope_head_dim: int,
     norm_eps: float,
-    compress_kv: Optional[torch.Tensor],
+    compress_kv: Optional[torch.Tensor] = None,
     compress_positions: torch.Tensor,
     compress_slot_mapping: torch.Tensor,
     compress_block_size: int,
-    state: Optional[torch.Tensor],
-    state_slot_mapping: Optional[torch.Tensor],
-    state_block_table: Optional[torch.Tensor],
+    state: Optional[torch.Tensor] = None,
+    state_slot_mapping: Optional[torch.Tensor] = None,
+    state_block_table: Optional[torch.Tensor] = None,
     state_block_size: int,
     do_rotate: bool = False,
 ) -> None:
@@ -3177,6 +3242,7 @@ def matmul_dequant(
     bias: torch.Tensor,
     deq_scale: torch.Tensor,
     z: torch.Tensor,
+    *,
     weight_nz: bool = False,
     transpose: bool = False,
 ) -> None:
@@ -3232,12 +3298,10 @@ def fused_quant_matmul_dequant(
     are host-allocated workspaces; ``num`` shrinks the dequant row range for
     dynamic token counts.
 
-    Note: arguments after ``x`` are keyword-only in this stub. The C++ binding
-    declares the parameters with interspersed defaults (positional order
-    ``rt, x, quant_scale_rec, quant_offset, weight, out, bias, deq_scale,
-    x_quant, out_scale, num, dyn_quant, weight_nz, transpose``); positional
-    calls beyond ``rt, x`` follow that interleaved order and are rejected here
-    to prevent mis-binding. Keyword calls match the binding exactly.
+    Note: the C++ binding interleaves defaulted and required arguments; the stub
+    expresses this exactly via keyword-only parameters (``*``), which Python
+    requires to mix defaults and required arguments. Keyword calls bind
+    identically to the C++ parameter order.
 
     Args:
         rt (Runtime): Native runtime handle.
@@ -3267,7 +3331,6 @@ def fused_quant_matmul_dequant(
         None: ``out`` is written in place.
     """
     ...
-
 
 def msd_merge_dequant(
     rt: Runtime,
@@ -3321,8 +3384,9 @@ def fusion_operator_matmul_dequant_pipeline(
     out: torch.Tensor,
     bias: torch.Tensor,
     deq_scale: torch.Tensor,
-    weight_nz: bool,
-    transpose: bool,
+    *,
+    weight_nz: bool = False,
+    transpose: bool = False,
     out_scale: torch.Tensor,
     num: torch.Tensor,
 ) -> None:
@@ -3336,11 +3400,11 @@ def fusion_operator_matmul_dequant_pipeline(
 
         Y = (x @ weight^T + bias) * deq_scale * out_scale[:, None]
 
-    Note: all ten parameters are listed in the C++ binding's positional order.
-    ``out_scale``/``num`` are required there, so ``weight_nz``/``transpose``
-    (which the binding defaults to False) are kept positional-required in this
-    stub — pass them explicitly; keyword omission of the two flags is accepted
-    at runtime but not expressible here.
+    Note: the C++ binding defaults ``weight_nz``/``transpose`` but requires
+    ``out_scale``/``num`` after them; the stub expresses this exactly via
+    keyword-only parameters (``*``), which Python requires to mix defaults and
+    required arguments. Keyword calls bind identically to the C++ parameter
+    order.
 
     Args:
         rt (Runtime): Native runtime handle.
@@ -3357,11 +3421,11 @@ def fusion_operator_matmul_dequant_pipeline(
             ``[2*n]``, fp32 (uint64 TF32-packed pairs, even slots hold the
             scale and odd slots are zero).
         out_scale (torch.Tensor): Per-token dequantization scale, shape
-            ``[m]``, fp32. Required positional argument; pass an empty
+            ``[m]``, fp32. Required keyword-only argument; pass an empty
             tensor to skip.
         num (torch.Tensor): Dynamic token count, shape ``[1]``, int32
             (read as uint32; only the first ``min(num, m)`` rows are
-            processed). Required positional argument; pass an empty tensor
+            processed). Required keyword-only argument; pass an empty tensor
             to use ``m``.
         weight_nz (bool): Whether `weight` uses NZ layout.
         transpose (bool): Whether to transpose the right matrix.
@@ -3414,6 +3478,7 @@ def mla_v2(
     batch: int,
     scale: float,
     topk_indices: torch.Tensor,
+    *,
     top_k: int = 0,
     nz: bool = False,
     enable_flash_attention: bool = False,
@@ -3503,6 +3568,7 @@ def gather_sparse_kv_cache(
     block_size: int,
     kv_lora_rank: int,
     rope_head_dim: int,
+    *,
     kv_heads: int = 1,
     compress_ratio: int = 1,
     burst_copy_size: int = 16 * 1024,
@@ -3603,6 +3669,7 @@ def cxa(
     compress_ratio: int,
     index_topk: int,
     topk_indices: torch.Tensor,
+    *,
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
     dense: bool = False,
@@ -3762,6 +3829,7 @@ def indexer_topk(
     block_size: int,
     batch: int,
     top_k: int,
+    *,
     k_scale_cache: Optional[torch.Tensor] = None,
     compress_ratio: int = 1,
 ) -> None:
@@ -3833,6 +3901,7 @@ def muls(
     input: torch.Tensor,
     scale: float,
     output: torch.Tensor,
+    *,
     calc_offset: int = 0,
     calc_num: int = 4294967295,
 ) -> None:
@@ -3996,8 +4065,13 @@ def transpose_1_2(rt: Runtime, input: torch.Tensor, output: torch.Tensor) -> Non
     ...
 
 def linear_att_conv_and_silu_paged(
-    rt: Runtime, mix_qkv: torch.Tensor, conv_state: torch.Tensor,
-    weight: torch.Tensor, output: torch.Tensor, state_indices: torch.Tensor,
+    rt: Runtime,
+    mix_qkv: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    output: torch.Tensor,
+    state_indices: torch.Tensor,
+    *,
     cached_lens: Optional[torch.Tensor] = None,
     state_block_size: int = 0,
     aligned: bool = False,
@@ -4012,8 +4086,11 @@ def linear_att_conv_and_silu_paged(
     """
     ...
 
-def split_col(rt: Runtime, in_: torch.Tensor, outputs: List[torch.Tensor]) -> None:
+def split_col(rt: Runtime, in_: torch.Tensor, /, outputs: List[torch.Tensor]) -> None:
     """Split tensor along column dimension into multiple outputs.
+
+    ``rt`` and ``in_`` are positional-only: the binding names the input argument
+    ``in``, a Python keyword, so it can never be passed by keyword from Python.
 
     Args:
         rt (Runtime): Native runtime handle.
@@ -4072,11 +4149,15 @@ def concat_col(rt: Runtime, inputs: List[torch.Tensor], out: torch.Tensor) -> No
 def split(
     rt: Runtime,
     in_: torch.Tensor,
+    /,
     outputs: List[torch.Tensor],
     sizes: List[int],
     num_packets: int,
 ) -> None:
     """Split a contiguous byte buffer into outputs, repeated across packets.
+
+    ``rt`` and ``in_`` are positional-only: the binding names the input argument
+    ``in``, a Python keyword, so it can never be passed by keyword from Python.
 
     ``in_`` holds ``num_packets`` interleaved packets, each ``sum(sizes)``
     bytes. For packet ``i`` and output ``j``, ``sizes[j]`` bytes are copied from
@@ -4147,6 +4228,7 @@ def recurrent_gated_delta_rule_paged(
     num_value_heads: int,
     k_dim: int,
     v_dim: int,
+    *,
     cached_lens: Optional[torch.Tensor] = None,
     state_block_size: int = 0,
     aligned: bool = False,
@@ -4176,6 +4258,7 @@ def einsum_mht_hdt_mhd(
     h: int,
     t: int,
     d: int,
+    *,
     weight_nz: bool = False,
 ) -> None:
     """Batched matmul for ``mhd = einsum("mht,hdt->mhd", mht, hdt)``.
@@ -4211,6 +4294,7 @@ def einsum_mht_htd_mhd(
     h: int,
     t: int,
     d: int,
+    *,
     weight_nz: bool = False,
 ) -> None:
     """Batched matmul for ``mhd = einsum("mht,htd->mhd", mht, htd)``.
@@ -4256,7 +4340,7 @@ def unpack_activation(
     """
     ...
 
-def print(x: torch.Tensor, name: str = "", row: int = 6, col: int = 6) -> None:
+def print(x: torch.Tensor, *, name: str = "", row: int = 6, col: int = 6) -> None:
     """Print a tensor preview for debugging.
 
     Args:
@@ -4464,22 +4548,47 @@ def hc_pre(
     """
     ...
 
-def silu_gate_mul(rt: Runtime, normed: torch.Tensor, gate: torch.Tensor, out: torch.Tensor) -> None:
+def silu_gate_mul(
+    *,
+    rt: Runtime,
+    normed: torch.Tensor,
+    gate: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
     """FP32 normed times SiLU(gate), rounded once to BF16/FP16 out; all [T,D]."""
     ...
 
 def recurrent_gated_delta_rule_prefill_paged(
-    rt: Runtime, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-    beta: torch.Tensor, g: torch.Tensor, state: torch.Tensor, out: torch.Tensor,
-    indices: torch.Tensor, starts: torch.Tensor, initial: torch.Tensor,
-    num_key_heads: int, num_value_heads: int, k_dim: int, v_dim: int,
-) -> None: ...
-
-
+    *,
+    rt: Runtime,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor,
+    state: torch.Tensor,
+    out: torch.Tensor,
+    indices: torch.Tensor,
+    starts: torch.Tensor,
+    initial: torch.Tensor,
+    num_key_heads: int,
+    num_value_heads: int,
+    k_dim: int,
+    v_dim: int,
+) -> None:
+    """Recurrent gated delta rule prefill over paged state (GDN)."""
+    ...
 
 def conv1d_and_silu_prefill_paged(
-    rt: Runtime, input: torch.Tensor, state: torch.Tensor, weight: torch.Tensor,
-    output: torch.Tensor, indices: torch.Tensor, starts: torch.Tensor, initial: torch.Tensor,
+    *,
+    rt: Runtime,
+    input: torch.Tensor,
+    state: torch.Tensor,
+    weight: torch.Tensor,
+    output: torch.Tensor,
+    indices: torch.Tensor,
+    starts: torch.Tensor,
+    initial: torch.Tensor,
 ) -> None:
     """Packed [T,C] Conv/SiLU on native [P,W-1,C] pages.
 

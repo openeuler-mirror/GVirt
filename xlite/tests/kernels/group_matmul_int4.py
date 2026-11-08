@@ -16,7 +16,7 @@ torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
 npu_id = 0
 npu_dev = f"npu:{npu_id}"
-rt = Runtime(npu_id, 500)
+rt = Runtime(npu_id, size=500)
 torch.npu.set_device(npu_id)
 
 m = 20

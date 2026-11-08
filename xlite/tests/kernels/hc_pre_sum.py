@@ -28,7 +28,7 @@ from xlite._C import Runtime, hc_pre
 
 
 torch.npu.set_device(0)
-rt = Runtime(0, 2048)
+rt = Runtime(0, size=2048)
 
 HC_MULT = 4
 # Small (256) and real (4096) hidden. hidden=4096 exercises the convert chunk-split

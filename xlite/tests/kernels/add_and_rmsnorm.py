@@ -16,7 +16,7 @@ from xlite._C import Runtime, add_and_rmsnorm
 
 logging.getLogger().setLevel(logging.INFO)
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 BATCH_SIZE = 64

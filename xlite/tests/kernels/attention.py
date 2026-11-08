@@ -16,7 +16,7 @@ from xlite._C import Runtime, attention
 
 logging.getLogger().setLevel(logging.INFO)
 
-rt = Runtime(0, 3000)
+rt = Runtime(0, size=3000)
 torch.npu.set_device(0)
 enable_flash = False
 
@@ -212,7 +212,7 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
         torch.npu.synchronize()
         attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite,
                   output_xlite, query_start_loc, query_lens, cached_lens,
-                  block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, enable_flash)
+                  block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, enable_flash_attention=enable_flash)
 
         logging.info(
             "attention %s (%d heads, %d kv heads, %d head dim, %s) work (%d batch, cached_lens=%s, query_lens=%s) executed!",

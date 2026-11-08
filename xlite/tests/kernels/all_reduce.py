@@ -37,7 +37,7 @@ else:  # TP (default): all ranks in one TP group
     dp_size = 1
     ref_group = None  # default group is the TP group
 
-rt = Runtime(local_rank, 500, rank, tp_size, dp_size)
+rt = Runtime(local_rank, size=500, rank=rank, tp_size=tp_size, dp_size=dp_size)
 torch.npu.set_device(local_rank)
 
 domain = "DP" if comm_type == 1 else "TP"
@@ -51,7 +51,7 @@ for dim1, dim2 in zip([1, 1, 2, 4, 8, 32, 512], [1, 37, 4, 16, 16, 32, 7168]):
         dist.all_reduce(standard, op=dist.ReduceOp.SUM, group=ref_group)
 
         torch.npu.synchronize()
-        all_reduce(rt, z, x, comm_type)
+        all_reduce(rt, z, x, comm_type=comm_type)
         torch.npu.synchronize()
 
         try:

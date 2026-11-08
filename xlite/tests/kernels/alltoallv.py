@@ -46,7 +46,7 @@ else:  # TP (default): all ranks in one TP group
     moe_ep_size = 1
     ref_group = None  # default group is the TP group
 
-rt = Runtime(local_rank, 500, rank, tp_size, dp_size, moe_tp_size, moe_ep_size)
+rt = Runtime(local_rank, size=500, rank=rank, tp_size=tp_size, dp_size=dp_size, moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size)
 torch.npu.set_device(local_rank)
 
 send_counts = torch.tensor([rank + j + 1 for j in range(world_size)], dtype=torch.int64)
@@ -73,7 +73,7 @@ dist.all_to_all_single(
 )
 torch.npu.synchronize()
 
-alltoallv(rt, xlite, x, send_counts, recv_counts, sdispls, rdispls, comm_type)
+alltoallv(rt, xlite, x, send_counts, recv_counts, sdispls, rdispls, comm_type=comm_type)
 torch.npu.synchronize()
 
 domain = ["TP", "DP", "EP"][comm_type]

@@ -33,7 +33,7 @@ from xlite._C import Runtime, hc_post
 
 
 torch.npu.set_device(0)
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 
 HC_MULT = 4
 HC_EPS = 1e-6

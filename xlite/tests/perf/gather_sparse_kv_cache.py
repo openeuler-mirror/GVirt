@@ -237,24 +237,27 @@ def build_case(
             (np.cumsum(query_lens_np) - query_lens_np).tolist(), dtype=torch.int32
         ).flatten()
 
-    return (
-        k_cache,
-        pe_cache,
-        block_tables,
-        topk_indices,
-        query_start_loc,
-        query_lens,
-        cached_lens,
-        k_dense,
-        pe_dense,
-        batch,
-        topK,
-        BLOCK_SIZE,
-        kv_lora_rank,
-        rope_head_dim,
-        1,  # kv_heads
-        1,  # compress_ratio
-        burst_size,
+    # Keyword form matching the enforced binding contract: the positional
+    # zone ends at rope_head_dim; kv_heads/compress_ratio/burst_copy_size are
+    # keyword-only.
+    return dict(
+        k_cache=k_cache,
+        pe_cache=pe_cache,
+        block_tables=block_tables,
+        topk_indices=topk_indices,
+        query_start_loc=query_start_loc,
+        lens=query_lens,
+        cached_lens=cached_lens,
+        k_dense_cache=k_dense,
+        pe_dense_cache=pe_dense,
+        batch=batch,
+        index_topk=topK,
+        block_size=BLOCK_SIZE,
+        kv_lora_rank=kv_lora_rank,
+        rope_head_dim=rope_head_dim,
+        kv_heads=1,
+        compress_ratio=1,
+        burst_copy_size=burst_size,
     )
 
 
@@ -294,7 +297,7 @@ def main(
     t0 = time.time_ns()
     for case in cases:
         for _ in range(num_duplicates):
-            gather_sparse_kv_cache(rt, *case)
+            gather_sparse_kv_cache(rt, **case)
     torch.npu.synchronize()
     t1 = time.time_ns()
     print(f"[INFO] Done. Total time: {(t1 - t0) / 1000:.3f} us")
@@ -302,7 +305,7 @@ def main(
 
 if __name__ == "__main__":
     args = parse_args()
-    rt = Runtime(0, 500)
+    rt = Runtime(0, size=500)
     torch.npu.set_device(0)
     kv_lora_rank, rope_head_dim = MODELS[args.model]
     main(

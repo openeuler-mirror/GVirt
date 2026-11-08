@@ -19,7 +19,7 @@ from xlite._C import Runtime, sqrtsoftplus_hash_topk
 
 RUN_KERNEL = True  # both hash=False and hash=True device paths are implemented.
 
-rt = Runtime(0, 500)
+rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
 
