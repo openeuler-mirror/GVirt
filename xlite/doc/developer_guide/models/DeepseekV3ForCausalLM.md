@@ -3,6 +3,7 @@
 DeepSeek-V3 / V3.1 / R1 系列（`model_type=deepseek_v3`，生产入口 `DeepseekV3ForCausalLM`）在 xlite C++ 侧的前向流程。三者 transformer 主干完全同构（61 层，全层 **MLA 注意力**，`attn_type=AttnMLA`）：R1 是 V3 的 RL 后训练版；V3.1 的差异在 MTP 模块（由 vllm 侧投机解码使用，不进入 C++ 主循环）与量化 checkpoint 权重格式（w8a8 使 MLA 投影走静态量化路径）。FFN 为前 `n_dense_layers=3` 层 dense MLP + 后 58 层 MoE（sigmoid 打分 + shared expert）。生产适配器为 `DeepseekV3XliteModel`（`vllm_ascend/xlite/xlite.py`，继承 `Glm4MoeXliteModel`），将 HF config 转为 `ModelConfig` 后进入本图流程。
 
 **与相邻系列的区别**：
+
 - **vs Qwen3（GQA MHA，见 [Qwen3ForCausalLM.md](Qwen3ForCausalLM.md)）**：注意力为 MLA——KV cache 每层每 token 只存 `kvLR+rH` 维 latent（单 latent 头，MQA 形状），`wkv_b`（W_UK/W_UV）在推理时按头吸收进 q/o（逐头 GEMM）；无 QK-norm（改为作用在 lora 段的 `mlaQNorm/mlaKVNorm`）；RoPE 仅 `rH=64` 维 partial（complex 风格）。MoE 为 sigmoid 打分 + `e_score_correction_bias` + 分组限制（`n_expert_groups` 个组选 `n_limited_groups` 个）+ `routeScale` 加权 + **shared expert**（`n_shared_experts=1`，带可选 sigmoid 标量门控）+ **EPLB**（`num_redundant_experts` 与 `log2phy` 重映射）；Qwen3 为 softmax + normTopK、无 bias、无 shared expert、无 EPLB。
 - **vs GLM-5 系列**：本系列无 DSA indexer——attention 不做稀疏 top-k token 选择（`ForwardAttnIndexer` 与 `XliteOpGatherSparseKVCache` 仅 `attnType=AttnDSA` 生效，GLM-5 系走此路径）；MoE 侧同为 sigmoid + shared expert，差异集中在 indexer 稀疏分支与 MLA 超参（见 [GlmMoeDsaForCausalLM.md](GlmMoeDsaForCausalLM.md)）。
 - 无 hybrid 线性注意力层（每层 full attention）、无 DeepStack / M-RoPE（text-only）、`hcMult==0`（主循环恒走 `ForwardLayersNaive`）。

@@ -23,6 +23,7 @@ y      = Σ_h pre[h] * xResid[:, h, :]            # 仅 preSum=1            # [h
 ## 输入输出参数
 
 Python 侧:
+
 - 融合:`hc_act(rt, mixes, hc_scale, hc_base, post, comb, HC_MULT, eps, sinkhorn_iters, x_resid=..., output=...)`,host 侧封装 `XliteOpHcAct`(`csrc/op.cpp`),以 `preSum=1`、`pre=nullptr` 启动(同函数内 `aclrtlaunch_hc_act_float` 调用,关键字 `1u /*preSum*/`、`nullptr /*pre*/`);
 - 拆分:`hc_split_sinkhorn(rt, mixes, hc_scale, hc_base, pre, post, comb, HC_MULT, eps, sinkhorn_iters)`,host 侧封装 `XliteOpHcSplitSinkhorn`(`csrc/op.cpp`),以 `preSum=0`、`headOnly=0`、`xResid/yOut=nullptr`、`hidden=0` 启动(同函数内 `aclrtlaunch_hc_act_float` 调用,关键字 `0u /*preSum*/`、`nullptr /*xResid*/`、`nullptr /*yOut*/`、`0u`)。
 
@@ -74,6 +75,7 @@ hc_act_float(GM_ADDR mixes, GM_ADDR hcBase, GM_ADDR post, GM_ADDR comb, GM_ADDR 
 UB 共享前缀(`csrc/kernels/hc_act.h` 的 `hc_act`,关键字 `mixesUb0`/`calcUb`/`onesUb`/`offRamp` 的 UB 分配段):mixes 双缓冲、calc 计算区、postOut/combOut 双缓冲、combAlign(comb 的对齐副本,K 行每行 `hcMultAlign = ROUND_UP(K, 8)` 个元素,`csrc/kernels/hc_act.h` 的 `hc_act`,关键字 `hcMultAlign`/`combAlign`)、baseUb、colBuf/scalarBuf/brcbBuf(Sinkhorn 归一化 scratch)、onesUb(常数 1.0,用 `vdiv` 实现 1/x)、scaleUb、offRamp(`vgather` 的字节偏移斜坡)。
 
 尾部按 `preSum` 分配(`csrc/kernels/hc_act.h` 的 `hc_act`,关键字 `if (preSum)` 尾部 UB 分支):
+
 - `preSum=1`:`inDtype0/1`(残差 bf16 双缓冲)、`outDtype0/1`(y bf16 双缓冲)、`xFp32`([K, hidden] 残差 fp32)、`yCalc`(pre-sum 累加器);
 - `preSum=0`:`preOut0/1`(pre 双缓冲)、`yCalc`(pre 的 vgather 暂存,ub2ub 中转到 preOut)。两路径不重叠。
 

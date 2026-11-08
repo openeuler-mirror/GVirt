@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 xlite 每日自动化测试机器人共享工具模块
 
@@ -840,7 +839,7 @@ def load_metrics_json(json_path: Path) -> Dict:
         指标数据字典
     """
     try:
-        with open(json_path, "r", encoding="utf-8") as f:
+        with open(json_path, encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         log_error(f"加载指标数据失败: {e}")

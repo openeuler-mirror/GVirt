@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,7 +8,9 @@
 # ===============================================================================
 import torch
 import torch_npu  # noqa: F401
-from xlite._C import Runtime, topk as xlite_topk
+
+from xlite._C import Runtime
+from xlite._C import topk as xlite_topk
 
 K = 2048
 max_seq_len = 131072
@@ -36,7 +37,7 @@ work = [
 def build_xlite_input(scores):
     res = torch.zeros(len(scores), max_seq_len)
     for i, s in enumerate(scores):
-        res[i, :len(s)] = s
+        res[i, : len(s)] = s
     return res
 
 
@@ -49,7 +50,7 @@ def generate_sequences(cached_lens, query_lens):
         for _ in range(q):
             t = torch.randn(n_tokens)
             standard_scores.append(t)
-            if (n_tokens >= K):
+            if n_tokens >= K:
                 standard_indices.append(t.topk(K)[1])
             else:
                 standard_indices.append(t.topk(n_tokens)[1])
@@ -100,7 +101,7 @@ def main():
         for batch, cached_lens, query_lens in work:
             assert len(cached_lens) == batch, f"cached_lens length {len(cached_lens)} != batch {batch}"
             assert len(query_lens) == batch, f"query_lens length {len(query_lens)} != batch {batch}"
-            msg = f'{dtype}: work(batch={batch}, cached_lens={cached_lens}, query_lens={query_lens})'
+            msg = f"{dtype}: work(batch={batch}, cached_lens={cached_lens}, query_lens={query_lens})"
             run_test(rt, cached_lens, query_lens, msg)
 
 

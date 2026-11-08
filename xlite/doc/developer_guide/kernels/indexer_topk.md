@@ -22,9 +22,22 @@ topkIndices[s,:] = TopK(index_score[s, :p0+1], topK)     # AIV,因果限定候�
 Python 侧调用(`tests/kernels/indexer_topk.py`):
 
 ```python
-indexer_topk(rt, q, k_cache, weight, topk_indices, query_start_loc,
-             query_lens, cached_lens, block_tables, n_heads, head_dim,
-             block_size, batch, topK)
+indexer_topk(
+    rt,
+    q,
+    k_cache,
+    weight,
+    topk_indices,
+    query_start_loc,
+    query_lens,
+    cached_lens,
+    block_tables,
+    n_heads,
+    head_dim,
+    block_size,
+    batch,
+    topK,
+)
 ```
 
 host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpIndexerTopK`:`topK >= maxNumBlocks*blockSize` 且非 `skipDenseTopk` 时全部行都是稠密,kernel 不必启动,host 侧直接把 `seqPositions` 模板前 `topK` 项 D2D 广播进 `topkIndices` 后返回(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `topK >= maxNumBlocks * blockSize` dense-skip D2D 广播段);否则校验 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `if (topK > MAX_TOPK_NUM)` throw)。`maxSeqLen` 不再是 launch 参数:`maxNumBlock`(运行期块数)由 host 取 `blockTables.shape[1]` 传入(V2 表已由 PrepareAttn 收窄到运行期宽度,模型层 `ForwardAttnIndexer` 关键字 `rt._attnBlockTables[0].shape[1]`;standalone/测试入口由 `SliceBlockTableToLens` 从 lens 推导收窄),`blockTableStride = blockTables.stride[0]` 一并传入;`maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)` 由 kernel 侧(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `maxSeqLen = MAX((uint64_t)blockSize * maxNumBlock, INIT_MIN_SEQ_POS)`)推导。host 不校验 `seqPositions` 长度,覆盖范围由 `XModel::Init` 预生成保证(见下)。kernel 签名(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_FUNC_DEFINE`):

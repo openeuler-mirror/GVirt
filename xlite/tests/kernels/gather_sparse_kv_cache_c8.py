@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,10 +7,12 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 """Test SFA-C8 sparse KV gather against a dequantized reference."""
+
 import logging
 
 import torch
 import torch_npu
+
 from xlite._C import Runtime, gather_sparse_kv_cache
 
 npu_id = 0
@@ -20,7 +21,8 @@ npu_id = 0
 def quantize(latent, pe):
     latent_dim = latent.shape[-1]
     q, scale = torch_npu.npu_dynamic_block_quant(
-        latent.view(-1, 1, latent_dim), dst_type=torch.int8, row_block_size=1, col_block_size=128)
+        latent.view(-1, 1, latent_dim), dst_type=torch.int8, row_block_size=1, col_block_size=128
+    )
     return q.reshape(-1, latent_dim), pe, scale.reshape(-1, latent_dim // 128)
 
 
@@ -29,8 +31,17 @@ def dequantize(cache):
     return (q.float() * scale.repeat_interleave(128, -1)).bfloat16(), pe
 
 
-def test_gather(rt, block_size, lengths, topk, latent_dim=512, rope_dim=64, query_lens=None,
-                burst_copy_size=16 * 1024, sequential=False):
+def test_gather(
+    rt,
+    block_size,
+    lengths,
+    topk,
+    latent_dim=512,
+    rope_dim=64,
+    query_lens=None,
+    burst_copy_size=16 * 1024,
+    sequential=False,
+):
     batch = len(lengths)
     if query_lens is None:
         query_lens = [1] * batch
@@ -67,17 +78,33 @@ def test_gather(rt, block_size, lengths, topk, latent_dim=512, rope_dim=64, quer
             else:
                 ids = torch.arange(min(visible, topk), device="npu")
             slots = table[b, ids // block_size].long() * block_size + ids % block_size
-            expected_k[row, :len(ids)] = decoded[slots]
-            expected_pe[row, :len(ids)] = pe[slots]
+            expected_k[row, : len(ids)] = decoded[slots]
+            expected_pe[row, : len(ids)] = pe[slots]
         offset += qlen
     lens = torch.tensor(query_lens, dtype=torch.int32, device="npu")
     starts = (lens.cumsum(0) - lens).int()
     cached_lens = torch.tensor(lengths, dtype=torch.int32, device="npu") - lens
     torch.npu.synchronize()
-    gather_sparse_kv_cache(rt, cache[0], cache[1], table, indices,
-                           starts, lens, cached_lens, k_out, pe_out, batch, topk, block_size,
-                           latent_dim, rope_dim, kv_heads=1,
-                           burst_copy_size=burst_copy_size, k_scale_cache=cache[2])
+    gather_sparse_kv_cache(
+        rt,
+        cache[0],
+        cache[1],
+        table,
+        indices,
+        starts,
+        lens,
+        cached_lens,
+        k_out,
+        pe_out,
+        batch,
+        topk,
+        block_size,
+        latent_dim,
+        rope_dim,
+        kv_heads=1,
+        burst_copy_size=burst_copy_size,
+        k_scale_cache=cache[2],
+    )
     actual = torch.cat((k_out, pe_out), dim=-1).cpu()
     expected = torch.cat((expected_k, expected_pe), dim=-1).cpu()
     for row, sparse in enumerate(sparse_rows):
@@ -87,8 +114,14 @@ def test_gather(rt, block_size, lengths, topk, latent_dim=512, rope_dim=64, quer
             assert a == b, ("gathered KV rows", row)
         else:
             torch.testing.assert_close(actual[row], expected[row], rtol=0, atol=0)
-    logging.info("SFA-C8 gather block=%d lengths=%s dims=%d/%d burst=%d: passed",
-                 block_size, lengths, latent_dim, rope_dim, burst_copy_size)
+    logging.info(
+        "SFA-C8 gather block=%d lengths=%s dims=%d/%d burst=%d: passed",
+        block_size,
+        lengths,
+        latent_dim,
+        rope_dim,
+        burst_copy_size,
+    )
 
 
 def main():
@@ -102,8 +135,7 @@ def main():
     test_gather(rt, 128, [47, 129, 2051], 2048, query_lens=[3, 1, 4])
     for latent_dim, rope_dim in ((128, 32), (256, 64), (384, 64), (512, 128)):
         test_gather(rt, 16, [47, 130], 129, latent_dim, rope_dim)
-    test_gather(rt, 128, [47, 129, 2051], 2048,
-                query_lens=[3, 1, 4], sequential=True)
+    test_gather(rt, 128, [47, 129, 2051], 2048, query_lens=[3, 1, 4], sequential=True)
 
 
 if __name__ == "__main__":

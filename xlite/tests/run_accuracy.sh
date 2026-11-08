@@ -10,7 +10,7 @@ function run_qwen3_0.6B() {
     max_tokens=$3
     temperature=$4
     file=$5
-    
+
     echo '{
         "vocab_size": 151936,
         "dim": 1024,
@@ -26,7 +26,7 @@ function run_qwen3_0.6B() {
         "max_batch_size": '${bs}',
         "max_seq_len": 1024
     }' > tests/test_config.json
-    
+
     if [ ${tp} -gt 1 ]; then
         torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-0.6B/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${max_tokens} --temperature ${temperature} --no-prefix | tee tests/${file}.log
     else
@@ -43,16 +43,16 @@ function test_accuracy() {
     backend=$6
     dtype=$7
     file=${backend}_${model}_${dtype}_accuracy
-    
+
     echo '[' > tests/${file}.json
-    
+
     prompts=(
         "Hello, my name is"
         "The president of the United States is"
         "The capital of France is"
         "The future of AI is"
     )
-    
+
     for ((i=0; i<${#prompts[@]}; i++)); do
         if [ $i -ne $((${#prompts[@]} - 1)) ]; then
             echo '   {
@@ -67,11 +67,11 @@ function test_accuracy() {
         fi
     done
     echo ']' >> tests/${file}.json
-    
+
     if [[ "${model}" == "qwen3_0.6B" ]]; then
         run_qwen3_0.6B ${tp} ${bs} ${max_tokens} ${temperature} ${file}
     fi
-    
+
     python3 << 'EOF'
 import json
 

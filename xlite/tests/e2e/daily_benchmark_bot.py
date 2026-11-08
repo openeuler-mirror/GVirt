@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 xlite 每日自动化测试机器人
 
@@ -81,51 +80,51 @@ xlite 每日自动化测试机器人
     REPORT_DIR = /home/daily_reports (容器内路径)
 """
 
+import argparse
 import os
-import sys
 import re
 import shutil
 import subprocess
-import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # 导入共享工具模块
 from daily_bot_utils import (
+    # 路径常量
+    E2E_DIR,
+    XLITE_DIR,
+    build_project,
+    # 环境检测
+    detect_model_device,
+    get_last_release_tag,
+    # 版本信息
+    get_vllm_ascend_version,
+    # xlite 库路径
+    get_xlite_lib_path,
+    get_xlite_version,
+    install_wheel,
+    load_metrics_json,
+    log_error,
     # 日志工具
     log_info,
     log_success,
     log_warning,
-    log_error,
-    setup_logging,
     move_log_file,
     # 代码拉取和编译
     pull_latest_code,
-    build_project,
-    install_wheel,
-    # 版本信息
-    get_vllm_ascend_version,
-    get_xlite_version,
-    get_last_release_tag,
-    # xlite 库路径
-    get_xlite_lib_path,
-    # 环境检测
-    detect_model_device,
-    should_disable_xccl,
     # 数据存储
     save_metrics_json,
-    load_metrics_json,
     # 通知发送
     send_notification,
     # 配置设置
     set_build_container,
-    set_test_container,
     set_env_type,
     set_machine_ip,
-    # 路径常量
-    E2E_DIR,
-    XLITE_DIR,
+    set_test_container,
+    setup_logging,
+    should_disable_xccl,
 )
 
 # ====================== 本地配置 ======================
@@ -647,10 +646,7 @@ def generate_offline_report(
                     if current_v is None or baseline_v is None:
                         return "N/A"
 
-                    if change_info["is_degradation"]:
-                        change_percent = change_ratio * 100
-                        return f"{current_v:.2f} ({change_percent:+.0f}%)"
-                    elif change_info["is_improvement"]:
+                    if change_info["is_degradation"] or change_info["is_improvement"]:
                         change_percent = change_ratio * 100
                         return f"{current_v:.2f} ({change_percent:+.0f}%)"
                     else:
@@ -684,7 +680,7 @@ def generate_offline_report(
 
     status_icon = "⚠️" if total_degradations > 0 else "✅"
     if total_degradations > 0:
-        status_text = f"发现性能劣化(超过{OFFLINE_DEGRADATION_THRESHOLD*100:.1f}%阈值)，请关注！"
+        status_text = f"发现性能劣化(超过{OFFLINE_DEGRADATION_THRESHOLD * 100:.1f}%阈值)，请关注！"
     elif total_improvements > 0:
         status_text = "发现性能优化"
     else:

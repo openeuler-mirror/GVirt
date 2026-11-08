@@ -1,12 +1,12 @@
+import sys
+
 from vllm import LLM, SamplingParams
 from vllm_ascend.batch_invariant import init_batch_invariance
 
-import sys
-
 # 开启xlite/开启量化
 # example: python offline_accurracy_test.py --xlite --quant
-has_xlite = '--xlite' in sys.argv
-has_quant = '--quant' in sys.argv
+has_xlite = "--xlite" in sys.argv
+has_quant = "--quant" in sys.argv
 
 # 开启 batch 不变性，消除 batch 间数值不确定性
 init_batch_invariance()
@@ -46,11 +46,7 @@ prompts = [
 ]
 
 # 采样设置
-sampling_params = SamplingParams(
-    temperature=0.0,
-    top_p=1.0,
-    max_tokens=100
-)
+sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=100)
 
 # 模型遍历
 target_models = quant_models if has_quant else models
@@ -65,7 +61,7 @@ for name, model, tp_size in target_models:
         compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"} if has_xlite else None,
         additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}} if has_xlite else {},
         trust_remote_code=True,
-        seed=0
+        seed=0,
     )
 
     outputs = llm.generate(prompts, sampling_params)

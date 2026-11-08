@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd.
 #
@@ -26,16 +25,18 @@
 5 个算子; warmup 轮做设备侧正确性校验(串行3 vs 融合3, allclose). ffts flag 积压
 安全边界: C2V per-tile flag 与现有融合算子一致, 同式判定 ffts 积压阈值.
 """
+
 import os
 import time
 
 import torch
 import torch_npu
+
 from xlite._C import (
     Runtime,
     dequant,
-    fusion_operator_matmul_dequant_pipeline,
     fused_quant_matmul_dequant,
+    fusion_operator_matmul_dequant_pipeline,
     matmul_dequant,
     quant,
     quant_dynamic,
@@ -193,8 +194,16 @@ def run_config(label, m, n, k, is_dyn, has_bias):
                 time.sleep(0.001)
                 # 新三段融合 (可选参数按需省略)
                 fused_quant_matmul_dequant(
-                    rt, x, weight=y_in, out=fused3_out, deq_scale=scale, x_quant=x_quant,
-                    dyn_quant=is_dyn, weight_nz=True, transpose=True, **fused3_opt
+                    rt,
+                    x,
+                    weight=y_in,
+                    out=fused3_out,
+                    deq_scale=scale,
+                    x_quant=x_quant,
+                    dyn_quant=is_dyn,
+                    weight_nz=True,
+                    transpose=True,
+                    **fused3_opt,
                 )
                 time.sleep(0.001)
             if rep == 0 and safe:

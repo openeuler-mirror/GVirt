@@ -49,8 +49,8 @@ kernel 分三个阶段（`csrc/kernels/permutation.cpp` 的 `permutation` 入口
 
 - token 维多 block 并行：`for (curr_token = block_idx; curr_token < n_tokens; curr_token += block_num)`（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `for (curr_token = block_idx`）。
 - 每个 token：把该 token 的 routing 位图行搬入 UB（双缓冲 `routing[2]`），对 [start, end) 内每个命中专家 e：
-  - 首个命中专家时把 `input[curr_token, :]` 整行搬入 UB（双缓冲 `row[2]`），后续命中专家复用该行（一个 token 被多个专家接收时只读一次 GM，`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `first_iter`、`row[curr]`）；当提供 `scale_in` 时，同一批次把该 token 的 FP32 scale 搬入 UB（双缓冲 `scaleSlot[2]`，与 `row[]` 共享同一 `curr` 事件 ID 序列）；
-  - 读 `unp_idx[e, curr_token]` 得组内行号 j，把该行写到 `output[s[e] + j, :]`（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `copy_ubuf_to_gm(output + (s[curr_expert] + j)`；s 为阶段 2 的前缀和，从 `starts` 区域重新搬入 UB，`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `copy_gm_to_ubuf_align_b32(s, starts`）；提供 `scale_out` 时，把该 token 的 scale 散射到 `scale_out[s[e] + j]`，使 scale 与行 1:1 对齐喂给 `GroupMatmulDeQuant`。
+    - 首个命中专家时把 `input[curr_token, :]` 整行搬入 UB（双缓冲 `row[2]`），后续命中专家复用该行（一个 token 被多个专家接收时只读一次 GM，`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `first_iter`、`row[curr]`）；当提供 `scale_in` 时，同一批次把该 token 的 FP32 scale 搬入 UB（双缓冲 `scaleSlot[2]`，与 `row[]` 共享同一 `curr` 事件 ID 序列）；
+    - 读 `unp_idx[e, curr_token]` 得组内行号 j，把该行写到 `output[s[e] + j, :]`（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `copy_ubuf_to_gm(output + (s[curr_expert] + j)`；s 为阶段 2 的前缀和，从 `starts` 区域重新搬入 UB，`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `copy_gm_to_ubuf_align_b32(s, starts`）；提供 `scale_out` 时，把该 token 的 scale 散射到 `scale_out[s[e] + j]`，使 scale 与行 1:1 对齐喂给 `GroupMatmulDeQuant`。
 
 ### 流水线同步
 

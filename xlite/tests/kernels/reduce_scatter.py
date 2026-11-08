@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -14,11 +13,12 @@
 #   4 cards DP:   COMM_TYPE=1 torchrun --nproc_per_node=4 --master_port=29500 reduce_scatter.py
 # ===============================================================================
 import os
-import torch
-import torch_npu  # noqa: F401
-import torch.distributed as dist
-from xlite._C import Runtime, reduce_scatter
 
+import torch
+import torch.distributed as dist
+import torch_npu  # noqa: F401
+
+from xlite._C import Runtime, reduce_scatter
 
 world_size = int(os.getenv("WORLD_SIZE", "1"))
 rank = int(os.getenv("RANK", "0"))

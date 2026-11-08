@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,7 +8,8 @@
 # ===============================================================================
 import torch
 import torch_npu
-from xlite._C import Runtime, group_matmul, unpack_activation, msd_merge_dequant
+
+from xlite._C import Runtime, group_matmul, msd_merge_dequant, unpack_activation
 
 # allow weight_nz
 torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
@@ -38,8 +38,7 @@ if remaining > 0:
 counts_cpu = counts.cpu().tolist()
 
 
-def w4a8_msd_ref(x, weights, counts_list, deq_scales, scale_biases, per_token_scales,
-                 transpose=False):
+def w4a8_msd_ref(x, weights, counts_list, deq_scales, scale_biases, per_token_scales, transpose=False):
     """CPU reference for the W4A8 MSD group_matmul (Unpack + INT4 GroupMatmul + Merge).
 
     Mirrors the three-stage pipeline (XModel::ForwardMoEMSD):
@@ -64,13 +63,13 @@ def w4a8_msd_ref(x, weights, counts_list, deq_scales, scale_biases, per_token_sc
         end = start + c
         x_slice = x[start:end].to("cpu")  # [c, k] int8
         # Stage 1: floor decomposition (arithmetic shift, NOT trunc)
-        high4 = (x_slice.to(torch.int32) >> 4).to(torch.int8)          # [-8, 7]
-        low4 = ((x_slice.to(torch.int32) & 0x0F) - 8).to(torch.int8)    # [-8, 7]
+        high4 = (x_slice.to(torch.int32) >> 4).to(torch.int8)  # [-8, 7]
+        low4 = ((x_slice.to(torch.int32) & 0x0F) - 8).to(torch.int8)  # [-8, 7]
         # Stage 2: INT4 x INT4 -> INT32, then * per-channel deq_scale -> FP16
         w = weights[i].to("cpu").to(torch.int32)
         w_t = w if transpose else w.t()  # [k, n]
-        y_low_i32 = torch.matmul(low4.to(torch.int32), w_t)      # [c, n]
-        y_high_i32 = torch.matmul(high4.to(torch.int32), w_t)    # [c, n]
+        y_low_i32 = torch.matmul(low4.to(torch.int32), w_t)  # [c, n]
+        y_high_i32 = torch.matmul(high4.to(torch.int32), w_t)  # [c, n]
         scale = deq_scales[i].to("cpu").view(1, -1)
         y_low_fp16 = (y_low_i32.float() * scale).half()
         y_high_fp16 = (y_high_i32.float() * scale).half()
@@ -91,11 +90,11 @@ for weight_nz in [True, False]:
         x = torch.randint(low=-128, high=128, size=(m, k), dtype=torch.int8, device=npu_dev)
         # Per-token activation dequant scale (QuantDyn absmax scale, positive), per expert
         per_token_scales = []
-        weights_int8 = []        # int4 values in [-8, 7] as int8 (for torch ref + W8A8)
-        weights_packed = []     # npu int4pack (for xlite group_matmul)
-        deq_scales = []          # per-channel fp32 antiquant scale
+        weights_int8 = []  # int4 values in [-8, 7] as int8 (for torch ref + W8A8)
+        weights_packed = []  # npu int4pack (for xlite group_matmul)
+        deq_scales = []  # per-channel fp32 antiquant scale
         deq_scales_fixpipe = []  # fixpipe TF32 layout [2n] fp32
-        scale_biases = []        # per-expert [n] fp32 = 8 * sum(W * deq_scale)
+        scale_biases = []  # per-expert [n] fp32 = 8 * sum(W * deq_scale)
         for i in range(group_num):
             if transpose:
                 # weight stored as [k, n] (matches group_matmul_dequant.py convention);
@@ -135,8 +134,7 @@ for weight_nz in [True, False]:
         # ---------- torch W4A8 MSD reference (CPU) ----------
         # Concatenate per-expert per-token scales into [m] following counts order
         pts_cat = torch.cat(per_token_scales, dim=0).to(npu_dev)
-        result = w4a8_msd_ref(x, weights_int8, counts_cpu, deq_scales, scale_biases,
-                              per_token_scales, transpose)
+        result = w4a8_msd_ref(x, weights_int8, counts_cpu, deq_scales, scale_biases, per_token_scales, transpose)
 
         # ---------- xlite W4A8 pipeline ----------
         # Stage 1: unpack_activation  INT8 [m, k] -> INT4-packed [2m, k/2] (rows interleaved)
@@ -148,8 +146,9 @@ for weight_nz in [True, False]:
         # Stage 2: group_matmul INT4  [2m, k] x [k, n] -> FP16 [2m, n] (rows interleaved)
         z = torch.zeros(2 * m, n, dtype=torch.float16, device=npu_dev)
         torch.npu.synchronize()
-        group_matmul(rt, x_unpacked, weights_packed, deq_scales_fixpipe, counts,
-                     0, group_num, n, k, z, weight_nz, transpose)
+        group_matmul(
+            rt, x_unpacked, weights_packed, deq_scales_fixpipe, counts, 0, group_num, n, k, z, weight_nz, transpose
+        )
         torch.npu.synchronize()
 
         # Stage 3: msd_merge_dequant  [2m, n] -> BF16 [m, n]
@@ -161,11 +160,10 @@ for weight_nz in [True, False]:
         torch.npu.synchronize()
 
         try:
-            torch.testing.assert_close(result, out.to("cpu"), atol=1, rtol=1/128)
-            print(f'group_matmul_dequant_int4 (int4, transpose={transpose}, nz={weight_nz}) passed!')
+            torch.testing.assert_close(result, out.to("cpu"), atol=1, rtol=1 / 128)
+            print(f"group_matmul_dequant_int4 (int4, transpose={transpose}, nz={weight_nz}) passed!")
         except AssertionError as e:
-            print(f'group_matmul_dequant_int4 (int4, transpose={transpose}, nz={weight_nz}) failed!')
-            print(f'{e}')
-            print(f'torch_npu: {result}, shape: {result.shape}')
-            print(f'xlite: {out}, shape: {out.shape}')
-
+            print(f"group_matmul_dequant_int4 (int4, transpose={transpose}, nz={weight_nz}) failed!")
+            print(f"{e}")
+            print(f"torch_npu: {result}, shape: {result.shape}")
+            print(f"xlite: {out}, shape: {out.shape}")

@@ -1,5 +1,4 @@
 #!/usr/bin/env/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,6 +8,7 @@
 # ===============================================================================
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, transpose_1_2
 
 channels = 6144
@@ -42,5 +42,5 @@ if __name__ == "__main__":
         for batch in range(1, 9):
             for i in range(13):
                 seq_len = 2**i
-                msg = f'[{dtype}/{batch}/{seq_len}]'
+                msg = f"[{dtype}/{batch}/{seq_len}]"
                 run_test(rt, batch, seq_len, msg)

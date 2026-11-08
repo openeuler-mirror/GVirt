@@ -47,8 +47,8 @@ inout、kCache、vCache 三者必须同为 `float16_t` 或 `bfloat16_t`;cossin �
 
 - **FP32 cossin(默认/推荐路径,`cossinInFp32=true`)**:fp16 与 bf16 均适用。cos/sin 直接以 fp32 搬入 UB,旋转在 fp32 域完成,Q 缩放后由 `convert_output<Dtype>` 做唯一一次 fp32→Dtype 舍入。精度最优,见 `calc_cossin_cast<Dtype, true>`([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin_cast`)。
 - **model-dtype cossin(已废弃,`cossinInFp32=false`)**:cossin 与 inout 同 dtype,保留至旧路径移除。
-  - `bfloat16_t`([rope_and_cache_bfloat16_t.cpp](../../../csrc/kernels/rope_and_cache_bfloat16_t.cpp)):转 fp32 计算,两个乘积 `x*cos`、`x*sin` 先 `vconv_f322bf16r` 舍入回 bf16 再升回 fp32,然后才做 `vsub`/`vadd`,以仿真 torch_npu 的逐算子舍入行为(`calc_cossin_cast<Dtype, false>`,[csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin_cast` 中 bf16 往返舍入段,注释"为了保证与torch_npu计算结果一致")。
-  - `float16_t`([rope_and_cache_float16_t.cpp](../../../csrc/kernels/rope_and_cache_float16_t.cpp)):fp16 域内直接计算(`calc_cossin`,[csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin`)。
+    - `bfloat16_t`([rope_and_cache_bfloat16_t.cpp](../../../csrc/kernels/rope_and_cache_bfloat16_t.cpp)):转 fp32 计算,两个乘积 `x*cos`、`x*sin` 先 `vconv_f322bf16r` 舍入回 bf16 再升回 fp32,然后才做 `vsub`/`vadd`,以仿真 torch_npu 的逐算子舍入行为(`calc_cossin_cast<Dtype, false>`,[csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin_cast` 中 bf16 往返舍入段,注释"为了保证与torch_npu计算结果一致")。
+    - `float16_t`([rope_and_cache_float16_t.cpp](../../../csrc/kernels/rope_and_cache_float16_t.cpp)):fp16 域内直接计算(`calc_cossin`,[csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin`)。
 
 ## 实现原理
 

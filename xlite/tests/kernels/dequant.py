@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,6 +8,7 @@
 # ===============================================================================
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, dequant
 
 rt = Runtime(0, size=500)
@@ -22,10 +22,10 @@ cases = [
     [5, 12288],
     [5418, 18432],
     # ---- 2D row-batched path (n % 16 == 0 but n % 64 != 0) ----
-    [3, 48],        # minimal: colsPad=128, single-row groups
-    [17, 96],       # odd rows, single group per tile
-    [8192, 2048],   # m0 aligns to groups of 6 rows: full groups + matrix-tail r=8
-    [8192, 2064],   # colsPad=2176 -> 5 rows/group, tail group r=1
+    [3, 48],  # minimal: colsPad=128, single-row groups
+    [17, 96],  # odd rows, single group per tile
+    [8192, 2048],  # m0 aligns to groups of 6 rows: full groups + matrix-tail r=8
+    [8192, 2064],  # colsPad=2176 -> 5 rows/group, tail group r=1
     [20000, 8208],  # colsPad=8320 -> 1 row/group, multi-group loop
 ]
 
@@ -42,13 +42,13 @@ for m, n in cases:
 
         torch.npu.synchronize()
         dequant(rt, inout, scales, inout, has_scale)
-        print(f'Dequant [{m}, {n}] torch.float16 to torch.bfloat { "with scale " if has_scale else "" }executed!')
+        print(f"Dequant [{m}, {n}] torch.float16 to torch.bfloat {'with scale ' if has_scale else ''}executed!")
 
         inout = inout.view(torch.bfloat16)
         try:
             torch.testing.assert_close(standard, inout, atol=1e-5, rtol=1e-3)
         except AssertionError as e:
-            print(f'{e}')
-            print(f'scales: {scales}')
-            print(f'torch_npu: {standard}')
-            print(f'xlite: {inout}')
+            print(f"{e}")
+            print(f"scales: {scales}")
+            print(f"torch_npu: {standard}")
+            print(f"xlite: {inout}")

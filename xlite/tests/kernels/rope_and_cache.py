@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,11 +6,12 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from __future__ import absolute_import
 import logging
 import os
+
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, rope_and_cache
 
 logging.getLogger().setLevel(logging.INFO)
@@ -395,9 +395,7 @@ for test_dtype in (torch.bfloat16, torch.float16):
         position = torch.arange(num_tokens, dtype=torch.int64).unsqueeze(0)
         slot_mapping = torch.arange(num_tokens, dtype=torch.int32)
 
-    q, k, v = qkv.split(
-        [n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim], dim=1
-    )
+    q, k, v = qkv.split([n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim], dim=1)
 
     k4 = k.view(1, num_tokens, n_kv_heads, head_dim).transpose(1, 2)
     k_std = apply_rotary_emb(k4, 0, freqs_cis)

@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,26 +6,28 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-import os
-import math
-from dataclasses import dataclass
 import json
+import math
+import os
+import queue
+import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Optional, Literal
+from typing import Literal, Optional, Tuple
 
 import torch
-from torch import nn
-import torch.nn.functional as F
 import torch.distributed as dist
+import torch.nn.functional as F
 import torch_npu
-import threading
-import queue
+from torch import nn
 
 # weight_dequant not needed for GLM-4.7-Flash
-from tests.models.weight_utils import (hf_model_weights_iterator,
-                                       convert_pyslice_to_tensor,
-                                       load_tensor_parallel_weights, logger)
-
+from tests.models.weight_utils import (
+    convert_pyslice_to_tensor,
+    hf_model_weights_iterator,
+    load_tensor_parallel_weights,
+    logger,
+)
 
 debug = False
 world_size = 1
@@ -40,13 +41,16 @@ if forward_backend == "xlite":
     xlite_rt = None
     xlite_model = None
     block_size = 64
-    from xlite._C import Runtime, ModelConfig, AttnMeta, AttnMetaV2, AttnMLA, AttnDSA, Model, ScoringFuncSigmoid
     import numpy as np
+
     from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
+    from xlite._C import AttnDSA, AttnMeta, AttnMetaV2, AttnMLA, Model, ModelConfig, Runtime, ScoringFuncSigmoid
+
 
 @dataclass
 class ModelArgs:
     """Model arguments for GLM-4.7-Flash."""
+
     max_batch_size: int = 8
     max_seq_len: int = 4096
     max_num_batched_tokens: int = 4096
@@ -83,7 +87,7 @@ class ModelArgs:
     rope_factor: float = 40
     beta_fast: int = 32
     beta_slow: int = 1
-    mscale: float = 1.
+    mscale: float = 1.0
     rope_type: str = "yarn"
     # w8a8 / w4a8: whole-checkpoint quantization (attention + MoE), norm biases on.
     # w8a8_moe: mixed quantization — routed experts W8A8_DYNAMIC (int8 weight +
@@ -103,11 +107,10 @@ class ModelArgs:
     # the raw model config path
     config_path: Optional[Path] = None
 
-
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
         if self.config_path and self.config_path.exists():
-            with open(self.config_path, "r") as f:
+            with open(self.config_path) as f:
                 config = json.load(f)
             # Override defaults with config.json values for GLM-4.7-Flash
             self.vocab_size = config.get("vocab_size", self.vocab_size)
@@ -146,15 +149,12 @@ class ModelArgs:
             if rope_scaling is None:
                 self.rope_type = "default"
             elif isinstance(rope_scaling, dict):
-                self.rope_type = rope_scaling.get(
-                    "type", rope_scaling.get("rope_type", self.rope_type))
+                self.rope_type = rope_scaling.get("type", rope_scaling.get("rope_type", self.rope_type))
                 self.rope_factor = rope_scaling.get("factor", self.rope_factor)
-                self.original_seq_len = rope_scaling.get(
-                    "original_max_position_embeddings", self.original_seq_len)
+                self.original_seq_len = rope_scaling.get("original_max_position_embeddings", self.original_seq_len)
                 self.beta_fast = rope_scaling.get("beta_fast", self.beta_fast)
                 self.beta_slow = rope_scaling.get("beta_slow", self.beta_slow)
                 self.mscale = rope_scaling.get("mscale", self.mscale)
-
 
 
 class ParallelEmbedding(nn.Module):
@@ -165,12 +165,15 @@ class ParallelEmbedding(nn.Module):
         vocab_size (int): Vocabulary size.
         dim (int): Embedding dimension.
     """
+
     def __init__(self, vocab_size: int, dim: int):
         super().__init__()
         self.vocab_size = vocab_size
         self.dim = dim
-        assert vocab_size % world_size == 0, f"Vocabulary size must be divisible by world size (world_size={world_size})"
-        self.part_vocab_size = (vocab_size // world_size)
+        assert vocab_size % world_size == 0, (
+            f"Vocabulary size must be divisible by world size (world_size={world_size})"
+        )
+        self.part_vocab_size = vocab_size // world_size
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
         self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
@@ -254,13 +257,13 @@ def _pack_w4a8_weight_for_xlite(weight_packed: torch.Tensor) -> torch.Tensor:
     ACL_FORMAT_FRACTAL_NZ = 29
     # [N//2, K] -> [K, N] int4 values (int32 container, signed [-8, 7])
     W_int4 = _unpack_int4_weight_i32(weight_packed.t().contiguous())  # [K, N] int32
-    W_nz = torch_npu.npu_format_cast(
-        W_int4.to("npu").to(torch.int32).contiguous(), ACL_FORMAT_FRACTAL_NZ)
+    W_nz = torch_npu.npu_format_cast(W_int4.to("npu").to(torch.int32).contiguous(), ACL_FORMAT_FRACTAL_NZ)
     return torch_npu.npu_convert_weight_to_int4pack(W_nz)
 
 
-def w4a8_msd_linear(x: torch.Tensor, weight_packed: torch.Tensor,
-                    weight_scale: torch.Tensor, scale_bias: torch.Tensor) -> torch.Tensor:
+def w4a8_msd_linear(
+    x: torch.Tensor, weight_packed: torch.Tensor, weight_scale: torch.Tensor, scale_bias: torch.Tensor
+) -> torch.Tensor:
     """W4A8 MSD single-expert linear: QuantDyn(x) → int4 matmul → merge+dequant.
 
     Implements the Mixture-of-Sum-Decomposition pipeline for one expert weight
@@ -294,25 +297,25 @@ def w4a8_msd_linear(x: torch.Tensor, weight_packed: torch.Tensor,
     # Use float32 for the matmul (NPU Cube does not support int32 matmul; the torch
     # reference path trades exact int accumulation for device compatibility).
     x_i = x_i8.to(torch.int32)
-    high4 = (x_i >> 4).to(torch.float32)            # [-8, 7] fp32
-    low4 = ((x_i & 0x0F) - 8).to(torch.float32)     # [-8, 7] fp32 (matches unpack_activation)
+    high4 = (x_i >> 4).to(torch.float32)  # [-8, 7] fp32
+    low4 = ((x_i & 0x0F) - 8).to(torch.float32)  # [-8, 7] fp32 (matches unpack_activation)
 
     # --- Step 3: unpack weight (signed int4 values, float32 for Cube) ---
     # weight_packed stored as [N_packed, K] (output-first, matches Linear param layout
     # [out//2, in]); transpose to [K, N_packed], unpack → [K, N] for matmul(x[m,k], W[k,n]).
     # Chunked over K to bound peak memory (full [K,N] fp32 = 8× packed size; 256 experts
     # × 78 layers would OOM if materialized all at once).
-    W_packed_t = weight_packed.t().contiguous()   # [K, N_packed]
+    W_packed_t = weight_packed.t().contiguous()  # [K, N_packed]
 
     # --- Step 4: chunked matmul (fp32 accumulate) → × per-channel deq_scale ---
-    deq = weight_scale.reshape(1, -1).float()    # [1, n]
+    deq = weight_scale.reshape(1, -1).float()  # [1, n]
     k_total = W_packed_t.shape[0]
-    k_chunk = max(1, k_total // 4)                # 4 chunks to cap peak
+    k_chunk = max(1, k_total // 4)  # 4 chunks to cap peak
     y_low = None
     y_high = None
     for k0 in range(0, k_total, k_chunk):
         k1 = min(k0 + k_chunk, k_total)
-        W_chunk = unpack_int4_weight(W_packed_t[k0:k1])   # [kc, n] float32
+        W_chunk = unpack_int4_weight(W_packed_t[k0:k1])  # [kc, n] float32
         yl = torch.matmul(low4[:, k0:k1], W_chunk) * deq
         yh = torch.matmul(high4[:, k0:k1], W_chunk) * deq
         y_low = yl if y_low is None else y_low + yl
@@ -322,8 +325,8 @@ def w4a8_msd_linear(x: torch.Tensor, weight_packed: torch.Tensor,
     # --- Step 5: merge + scale_bias + per_token (FP32 mid; see §0.5 约束2) ---
     # Keep mid FP32 to avoid bf16 amplification through silu+quant. Set the env
     # var XLITE_W4A8_MID_DTYPE=bf16 to compare against the old bf16-drop path.
-    sb = scale_bias.reshape(1, -1).float()        # [1, n]
-    mid = (y_high * 16.0 + y_low + sb) * per_token   # [m, n] fp32
+    sb = scale_bias.reshape(1, -1).float()  # [1, n]
+    mid = (y_high * 16.0 + y_low + sb) * per_token  # [m, n] fp32
     if os.getenv("XLITE_W4A8_MID_DTYPE", "fp32") == "bf16":
         mid = mid.to(torch.bfloat16)
     return mid
@@ -343,7 +346,9 @@ def quantize_npu(
     return x_quant_fp32.to(torch.int8)
 
 
-def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, is_row_parallel: bool = False) -> torch.Tensor:
+def linear(
+    x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, is_row_parallel: bool = False
+) -> torch.Tensor:
     """
     Applies a linear transformation to the incoming data: y = xA^T + b.
     This function supports specialized implementations based on quantization
@@ -367,7 +372,7 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
     """
     assert gemm_impl == "bf16"
 
-    if hasattr(weight, 'input_scale') and weight.input_scale is not None:
+    if hasattr(weight, "input_scale") and weight.input_scale is not None:
         x_int8 = quantize_npu(x, weight.input_scale, weight.input_offset)
         weight_T = weight.T.contiguous()
         deq_scale = weight.scale.squeeze(-1).float()
@@ -376,10 +381,7 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
             quant_bias_to_add = None
 
         out = torch_npu.npu_quant_matmul(
-            x_int8, weight_T,
-            deq_scale,
-            bias=quant_bias_to_add,
-            output_dtype=torch.bfloat16
+            x_int8, weight_T, deq_scale, bias=quant_bias_to_add, output_dtype=torch.bfloat16
         )
 
         if bias is not None and quant_bias_to_add is None:
@@ -408,9 +410,18 @@ class Linear(nn.Module):
             When True, weight is int8 storage holding 2×int4 packed along output dim
             (physical out = out_features // 2); a scale_bias parameter is added.
     """
+
     dtype = torch.bfloat16
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False, w4a8: bool = False):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        dtype=None,
+        static_quant: bool = False,
+        w4a8: bool = False,
+    ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -419,7 +430,9 @@ class Linear(nn.Module):
             weight_out = out_features // 2
         else:
             weight_out = out_features
-        self.weight = nn.Parameter(torch.empty(weight_out, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
+        self.weight = nn.Parameter(
+            torch.empty(weight_out, in_features, dtype=dtype or Linear.dtype), requires_grad=False
+        )
         if self.weight.element_size() == 1:
             self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32))
             if forward_backend == "xlite":
@@ -427,11 +440,19 @@ class Linear(nn.Module):
 
             if w4a8:
                 # W4A8 MSD: scale_bias = 8 × Σ_k(W_int4[k] × deq_scale) (per-channel).
-                self.weight.scale_bias = self.scale_bias = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32))
+                self.weight.scale_bias = self.scale_bias = nn.Parameter(
+                    torch.empty(out_features, 1, dtype=torch.float32)
+                )
             if static_quant:
-                self.weight.input_scale = self.input_scale = nn.Parameter(torch.empty(in_features, dtype=torch.bfloat16), requires_grad=False)
-                self.weight.input_offset = self.input_offset = nn.Parameter(torch.empty(in_features, dtype=torch.bfloat16), requires_grad=False)
-                self.weight.quant_bias = self.quant_bias = nn.Parameter(torch.empty(out_features, dtype=torch.int32), requires_grad=False)
+                self.weight.input_scale = self.input_scale = nn.Parameter(
+                    torch.empty(in_features, dtype=torch.bfloat16), requires_grad=False
+                )
+                self.weight.input_offset = self.input_offset = nn.Parameter(
+                    torch.empty(in_features, dtype=torch.bfloat16), requires_grad=False
+                )
+                self.weight.quant_bias = self.quant_bias = nn.Parameter(
+                    torch.empty(out_features, dtype=torch.int32), requires_grad=False
+                )
         else:
             self.register_parameter("scale", None)
         if bias:
@@ -464,8 +485,19 @@ class ColumnParallelLinear(Linear):
         static_quant (bool): Whether to use static quantization. Defaults to False.
             Only applicable when weight is int8 (element_size() == 1).
     """
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False, w4a8: bool = False):
-        assert out_features % world_size == 0, f"Output features must be divisible by world size (world_size={world_size})"
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        dtype=None,
+        static_quant: bool = False,
+        w4a8: bool = False,
+    ):
+        assert out_features % world_size == 0, (
+            f"Output features must be divisible by world size (world_size={world_size})"
+        )
         self.part_out_features = out_features // world_size
         super().__init__(in_features, self.part_out_features, bias, dtype, static_quant, w4a8)
 
@@ -495,8 +527,19 @@ class RowParallelLinear(Linear):
         static_quant (bool): Whether to use static quantization. Defaults to False.
             Only applicable when weight is int8 (element_size() == 1).
     """
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, static_quant: bool = False, w4a8: bool = False):
-        assert in_features % world_size == 0, f"Input features must be divisible by world size (world_size={world_size})"
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        dtype=None,
+        static_quant: bool = False,
+        w4a8: bool = False,
+    ):
+        assert in_features % world_size == 0, (
+            f"Input features must be divisible by world size (world_size={world_size})"
+        )
         self.part_in_features = in_features // world_size
         super().__init__(self.part_in_features, out_features, bias, dtype, static_quant, w4a8)
 
@@ -528,6 +571,7 @@ class RMSNorm(nn.Module):
         eps (float): Epsilon value for numerical stability. Defaults to 1e-6.
         bias (bool): Whether to include a bias term. Defaults to False.
     """
+
     def __init__(self, dim: int, eps: float = 1e-6, bias: bool = False):
         super().__init__()
         self.dim = dim
@@ -604,7 +648,7 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
         """
         low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
         high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
-        return max(low, 0), min(high, dim-1)
+        return max(low, 0), min(high, dim - 1)
 
     def linear_ramp_factor(min, max, dim):
         """
@@ -667,7 +711,7 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
     """
     assert x.dtype == torch.bfloat16
     hidden_size = x.size(-1)
-    scale = hidden_size ** -0.5
+    scale = hidden_size**-0.5
 
     # Simple identity transformation as fallback
     # In production, this should use fast_hadamard_transform for better performance
@@ -678,6 +722,7 @@ class LayerNorm(nn.Module):
     """
     Layer Normalization.
     """
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.dim = dim
@@ -700,8 +745,7 @@ class Indexer(torch.nn.Module):
         self.index_topk: int = args.index_topk
         self.q_lora_rank: int = args.q_lora_rank
         if args.quantization == "w8a8":
-            self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim,
-                               dtype=torch.int8, static_quant=True)
+            self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim, dtype=torch.int8, static_quant=True)
         elif args.quantization == "w4a8":
             # W8A8_DYNAMIC (mixed-quant model): int8 weight + scale, dynamic activation
             self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim, dtype=torch.int8)
@@ -709,14 +753,19 @@ class Indexer(torch.nn.Module):
             self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim)
         self.wk_weights_proj = Linear(self.dim, self.head_dim + self.n_heads, dtype=torch.float32)
         self.k_norm = LayerNorm(self.head_dim)
-        self.softmax_scale = self.head_dim ** -0.5
+        self.softmax_scale = self.head_dim**-0.5
         self.indexer_rope_interleave = args.indexer_rope_interleave
 
         if forward_backend != "xlite":
-            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.get_default_dtype()), persistent=False)
+            self.register_buffer(
+                "k_cache",
+                torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim, dtype=torch.get_default_dtype()),
+                persistent=False,
+            )
 
-
-    def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+    def forward(
+        self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]
+    ):
         bsz, seqlen, _ = x.size()
         end_pos = start_pos + seqlen
         q = self.wq_b(qr)
@@ -726,7 +775,7 @@ class Indexer(torch.nn.Module):
         q_pe = apply_rotary_emb(q_pe, freqs_cis, self.indexer_rope_interleave)
         q = torch.cat([q_pe, q_nope], dim=-1)
         wk_weights = self.wk_weights_proj(x.float())
-        k = wk_weights[..., :self.head_dim].type_as(x)
+        k = wk_weights[..., : self.head_dim].type_as(x)
         k = self.k_norm(k)
         k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
         # rope in indexer is not interleaved
@@ -735,7 +784,7 @@ class Indexer(torch.nn.Module):
         q = rotate_activation(q)
         k = rotate_activation(k)
         self.k_cache[:bsz, start_pos:end_pos] = k
-        weights = wk_weights[..., self.head_dim:] * self.n_heads ** -0.5
+        weights = wk_weights[..., self.head_dim :] * self.n_heads**-0.5
         scores = torch.einsum("bshd, btd -> bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
         index_score = torch.einsum("bsht,bsh->bst", scores, weights)
         if mask is not None:
@@ -760,6 +809,7 @@ class MLA(nn.Module):
         v_head_dim (int): Dimensionality of value projections.
         softmax_scale (float): Scaling factor for softmax in attention computation.
     """
+
     def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
         self.dim = args.dim
@@ -780,29 +830,36 @@ class MLA(nn.Module):
         # - w4a8: 混合量化模型里 attention 是 W8A8_DYNAMIC (有 weight_scale/offset, 无静态四元组),
         #         用 dynamic int8 (static_quant=False), 走 weight_dequant + F.linear 路径
         if args.quantization == "w8a8":
-            self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
-                                 dtype=torch.int8, static_quant=True)
-            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim,
-                                              dtype=torch.int8, static_quant=True)
-            self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim,
-                                         dtype=torch.int8, static_quant=True)
+            self.wqkv_a = Linear(
+                self.dim,
+                self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+                dtype=torch.int8,
+                static_quant=True,
+            )
+            self.wq_b = ColumnParallelLinear(
+                self.q_lora_rank, self.n_heads * self.qk_head_dim, dtype=torch.int8, static_quant=True
+            )
+            self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim, dtype=torch.int8, static_quant=True)
         elif args.quantization == "w4a8":
             # W8A8_DYNAMIC: int8 weight + per-channel scale, dynamic activation quant
-            self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
-                                 dtype=torch.int8)
-            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim,
-                                              dtype=torch.int8)
-            self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim,
-                                         dtype=torch.int8)
+            self.wqkv_a = Linear(
+                self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim, dtype=torch.int8
+            )
+            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim, dtype=torch.int8)
+            self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim, dtype=torch.int8)
         else:
             self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim)
             self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
             self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
-        self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
-        self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
+        self.q_norm = RMSNorm(
+            self.q_lora_rank, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False
+        )
+        self.kv_norm = RMSNorm(
+            self.kv_lora_rank, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False
+        )
         # wkv_b 保持 FLOAT（根据 quant_model_description.json）
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
-        self.softmax_scale = self.qk_head_dim ** -0.5
+        self.softmax_scale = self.qk_head_dim**-0.5
         if args.rope_type == "yarn" and args.max_seq_len > args.original_seq_len:
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
@@ -810,11 +867,21 @@ class MLA(nn.Module):
         self.indexer = None if not self.has_dsa_indexer or not self.full_indexer else Indexer(args)
 
         if forward_backend != "xlite":
-            self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
-            self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
+            self.register_buffer(
+                "kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False
+            )
+            self.register_buffer(
+                "pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False
+            )
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor],
-                topk_cache: Optional[dict] = None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        freqs_cis: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        topk_cache: Optional[dict] = None,
+    ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
 
@@ -842,7 +909,7 @@ class MLA(nn.Module):
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
         self.kv_cache[:bsz, start_pos:end_pos] = kv
         self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
-        if mask is not None:    # MHA prefill
+        if mask is not None:  # MHA prefill
             q = torch.cat([q_nope, q_pe], dim=-1)
             kv = self.wkv_b(kv)
             kv = kv.view(bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -861,18 +928,24 @@ class MLA(nn.Module):
                     topk_indices = self.indexer(x, qr, start_pos, freqs_cis, mask)
                     if topk_cache is not None:
                         topk_cache["last"] = topk_indices
-                index_mask = torch.full((bsz, seqlen, seqlen), float("-inf"), device=x.device).scatter_(-1, topk_indices, 0)
+                index_mask = torch.full((bsz, seqlen, seqlen), float("-inf"), device=x.device).scatter_(
+                    -1, topk_indices, 0
+                )
                 index_mask += mask
                 scores += index_mask.unsqueeze(2)
 
             scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
             x = torch.einsum("bsht,bthd->bshd", scores, v)
-        else:                   # MQA decode
-            wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale)
+        else:  # MQA decode
+            wkv_b = (
+                self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale)
+            )
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
-            q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
-            scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
-                      torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
+            q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, : self.qk_nope_head_dim])
+            scores = (
+                torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos])
+                + torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])
+            ) * self.softmax_scale
 
             if self.indexer is not None:
                 if not self.full_indexer and topk_cache is not None and topk_cache.get("last") is not None:
@@ -886,7 +959,7 @@ class MLA(nn.Module):
 
             scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
             x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
-            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
+            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim :])
         x = self.wo(x.flatten(2))
         return x
 
@@ -900,6 +973,7 @@ class MLP(nn.Module):
         w2 (nn.Module): Linear layer for hidden-to-output transformation.
         w3 (nn.Module): Additional linear layer for feature transformation.
     """
+
     def __init__(self, dim: int, inter_dim: int, args: ModelArgs = None):
         """
         Initializes the MLP layer.
@@ -939,6 +1013,7 @@ class SharedExpertMLP(nn.Module):
     MLP for shared experts without tensor parallelism.
     Each rank loads complete weights instead of sharding.
     """
+
     def __init__(self, dim: int, inter_dim: int, args: ModelArgs = None):
         super().__init__()
         # shared_experts are W8A8_DYNAMIC in the GLM-5.1-w4a8 mixed-quant model
@@ -971,6 +1046,7 @@ class Gate(nn.Module):
         weight (torch.nn.Parameter): Learnable weights for the gate.
         bias (Optional[torch.nn.Parameter]): Optional bias term for the gate.
     """
+
     def __init__(self, args: ModelArgs):
         """
         Initializes the Gate module.
@@ -1023,7 +1099,7 @@ class Gate(nn.Module):
             else:
                 group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1)
             indices = group_scores.topk(self.topk_groups, dim=-1)[1]
-            mask = torch.zeros_like(scores[...,0]).scatter_(1, indices, True)
+            mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True)
             scores = (scores * mask.unsqueeze(-1)).flatten(1)
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
@@ -1044,6 +1120,7 @@ class Expert(nn.Module):
         w2 (nn.Module): Linear layer for hidden-to-output transformation.
         w3 (nn.Module): Additional linear layer for feature transformation.
     """
+
     def __init__(self, dim: int, inter_dim: int, args: ModelArgs):
         """
         Initializes the Expert layer.
@@ -1101,6 +1178,7 @@ class MoE(nn.Module):
         experts (nn.ModuleList): List of expert modules.
         shared_experts (nn.Module): Shared experts applied to all inputs.
     """
+
     def __init__(self, args: ModelArgs):
         """
         Initializes the MoE module.
@@ -1112,15 +1190,23 @@ class MoE(nn.Module):
         self.dim = args.dim
         # EP spans the FULL world (orthogonal to DP): use GLOBAL world/rank here,
         # not the TP-local values __init__ rebound. moe_ep_size == global world_size.
-        assert args.n_routed_experts % global_world_size == 0, f"Number of experts must be divisible by world size (world_size={global_world_size})"
+        assert args.n_routed_experts % global_world_size == 0, (
+            f"Number of experts must be divisible by world size (world_size={global_world_size})"
+        )
         self.n_routed_experts = args.n_routed_experts
         self.n_local_experts = args.n_routed_experts // global_world_size
         self.n_activated_experts = args.n_activated_experts
         self.experts_start_idx = global_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
-        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args) if self.experts_start_idx <= i < self.experts_end_idx else None
-                                      for i in range(self.n_routed_experts)])
+        self.experts = nn.ModuleList(
+            [
+                Expert(args.dim, args.moe_inter_dim, args)
+                if self.experts_start_idx <= i < self.experts_end_idx
+                else None
+                for i in range(self.n_routed_experts)
+            ]
+        )
         self.shared_experts = SharedExpertMLP(args.dim, args.n_shared_experts * args.moe_inter_dim, args)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1177,6 +1263,7 @@ class Block(nn.Module):
         attn_norm (nn.Module): Layer normalization for attention.
         ffn_norm (nn.Module): Layer normalization for feed-forward network.
     """
+
     def __init__(self, layer_id: int, args: ModelArgs):
         """
         Initializes the GLM4MoELite block.
@@ -1193,8 +1280,14 @@ class Block(nn.Module):
         self.n_dense_layers = args.n_dense_layers
         self.layer_id = layer_id
 
-    def forward_naive(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor],
-                      topk_cache: Optional[dict] = None) -> torch.Tensor:
+    def forward_naive(
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        freqs_cis: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        topk_cache: Optional[dict] = None,
+    ) -> torch.Tensor:
         """
         Forward pass for the GLM4MoELite block.
 
@@ -1222,8 +1315,14 @@ class Block(nn.Module):
         x = x + ffn_out
         return x
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor],
-                topk_cache: Optional[dict] = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        freqs_cis: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        topk_cache: Optional[dict] = None,
+    ) -> torch.Tensor:
         """
         Forward pass for the GLM4MoELite block.
 
@@ -1239,6 +1338,7 @@ class Block(nn.Module):
         """
         return self.forward_naive(x, start_pos, freqs_cis, mask, topk_cache)
 
+
 class GLM4MoELite(nn.Module):
     """
     GLM4MoELite model with positional embeddings, multiple layers, and output projection.
@@ -1251,6 +1351,7 @@ class GLM4MoELite(nn.Module):
         head (nn.Module): Output projection layer mapping to vocabulary size.
         freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
     """
+
     def __init__(self, args: ModelArgs):
         """
         Initializes the GLM4MoELite model.
@@ -1291,7 +1392,7 @@ class GLM4MoELite(nn.Module):
         self.norm = RMSNorm(args.dim, args.norm_eps, bias=True if args.quantization in ("w8a8", "w4a8") else False)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
-        self.multi_task_parallel = (os.getenv("MULTI_TASK_PARALLEL", "0") == "1")
+        self.multi_task_parallel = os.getenv("MULTI_TASK_PARALLEL", "0") == "1"
 
     @torch.inference_mode()
     def forward_naive(self, tokens: torch.Tensor, start_pos: int = 0):
@@ -1307,7 +1408,7 @@ class GLM4MoELite(nn.Module):
         """
         seqlen = tokens.size(1)
         h = self.embed(tokens)
-        freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
@@ -1335,8 +1436,7 @@ class GLM4MoELite(nn.Module):
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size,
-                             device=tokens.device)
+        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device)
         tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
         batch = tokens.size(0)
         seqlen = tokens.size(1)
@@ -1344,8 +1444,18 @@ class GLM4MoELite(nn.Module):
         attn_meta = self.prepare_xlite_attnmeta_v2(tokens, start_pos)
         stream = torch.npu.current_stream().npu_stream
         h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
-        self.xlite_model.forward_v2(rt=self.xlite_rt, input=tokens.flatten(), attn_meta=attn_meta, kv_cache=self.xlite_kv_cache, freqs_cis=[self.freqs_cis], output=h, curr_stream=stream)
-        self.xlite_model.forward_get_logits(rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream)
+        self.xlite_model.forward_v2(
+            rt=self.xlite_rt,
+            input=tokens.flatten(),
+            attn_meta=attn_meta,
+            kv_cache=self.xlite_kv_cache,
+            freqs_cis=[self.freqs_cis],
+            output=h,
+            curr_stream=stream,
+        )
+        self.xlite_model.forward_get_logits(
+            rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream
+        )
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
@@ -1370,7 +1480,16 @@ class GLM4MoELite(nn.Module):
                 args, event = task
                 tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream = args
                 self.xlite_rt.multi_task_parallel = True
-                self.xlite_model.forward_and_get_logits(rt=self.xlite_rt, input=tokens, attn_meta=attn_meta, kv_cache=xlite_kv_cache, freqs_cis=freqs_cis, indices=logits_indices, output=logits, curr_stream=stream)
+                self.xlite_model.forward_and_get_logits(
+                    rt=self.xlite_rt,
+                    input=tokens,
+                    attn_meta=attn_meta,
+                    kv_cache=xlite_kv_cache,
+                    freqs_cis=freqs_cis,
+                    indices=logits_indices,
+                    output=logits,
+                    curr_stream=stream,
+                )
                 event.set()
 
     @torch.inference_mode()
@@ -1391,8 +1510,12 @@ class GLM4MoELite(nn.Module):
         b1, s1 = tokens1.size(0), tokens1.size(1)
         logits_indices0 = torch.arange(b0, dtype=torch.int32, device=tokens.device) * s0 + (s0 - 1)
         logits_indices1 = torch.arange(b1, dtype=torch.int32, device=tokens.device) * s1 + (s1 - 1)
-        event0 = self.thread_pool[0].add_task(args = (tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits_indices0, logits0, stream))
-        event1 = self.thread_pool[1].add_task(args = (tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits_indices1, logits1, stream))
+        event0 = self.thread_pool[0].add_task(
+            args=(tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits_indices0, logits0, stream)
+        )
+        event1 = self.thread_pool[1].add_task(
+            args=(tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits_indices1, logits1, stream)
+        )
         event0.wait()
         event1.wait()
         logits0 = logits0.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
@@ -1421,12 +1544,14 @@ class GLM4MoELite(nn.Module):
             return self.forward_naive(tokens, start_pos)
 
     def load_weights(self, model_path: str):
-        """ load deepseek v3 or v3.2 or glm5 weight """
+        """load deepseek v3 or v3.2 or glm5 weight"""
         args = self.args
         assert args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
         assert args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
         assert args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
-        assert args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+        assert args.vocab_size % world_size == 0, (
+            f"vocab_size must be divisible by world_size (world_size={world_size})"
+        )
 
         static_quant_weights = ("q_a_proj", "kv_a_proj_with_mqa", "wq_b", "wo")
 
@@ -1481,8 +1606,8 @@ class GLM4MoELite(nn.Module):
             #   param [out_logical, 1]; down's [.,16] summed to [out_logical] on load.
             # gate/up scale_bias must be fused into w13.scale_bias [2*inter, 1] (gate first).
             if args.quantization == "w4a8" and "experts" in name and "shared_experts" not in name:
-                _is_w13_w4a8 = ("gate_proj" in name or "up_proj" in name)
-                _is_w2_w4a8 = ("w2" in name and "gate_proj" not in name and "up_proj" not in name)
+                _is_w13_w4a8 = "gate_proj" in name or "up_proj" in name
+                _is_w2_w4a8 = "w2" in name and "gate_proj" not in name and "up_proj" not in name
                 _is_sb = "scale_bias" in name
                 _is_w = name.endswith(".weight")
                 _is_scale = "weight_scale" in name
@@ -1496,7 +1621,7 @@ class GLM4MoELite(nn.Module):
                     elif _is_sb:
                         pass  # scale_bias → scale_bias (already matches param key)
                     if param_name not in param_dict:
-                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                        logger.warning("Loading model has no param named %s in checkpoints, bypass.", param_name)
                         continue
                     param = param_dict[param_name]
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -1507,13 +1632,13 @@ class GLM4MoELite(nn.Module):
                     if _is_w:
                         # weight: checkpoint [inter//2, dim] packed (N-first); param half-slot
                         # [inter//2, dim] also N-first. w4a8_msd_linear transposes internally.
-                        param.data[slot[0]:slot[1]].copy_(loaded_weight)
+                        param.data[slot[0] : slot[1]].copy_(loaded_weight)
                     elif _is_scale:
                         # weight_scale: [inter, 1] → param [2*inter, 1] slot
-                        param.data[slot[0]:slot[1], 0].copy_(loaded_weight.reshape(-1))
+                        param.data[slot[0] : slot[1], 0].copy_(loaded_weight.reshape(-1))
                     elif _is_sb:
                         # scale_bias: [inter, 1] → param [2*inter, 1] slot
-                        param.data[slot[0]:slot[1], 0].copy_(loaded_weight.reshape(-1))
+                        param.data[slot[0] : slot[1], 0].copy_(loaded_weight.reshape(-1))
                     continue
 
                 # --- w2 (down) W4A8: weight, weight_scale, scale_bias ---
@@ -1525,7 +1650,7 @@ class GLM4MoELite(nn.Module):
                     elif _is_sb:
                         pass  # scale_bias → scale_bias
                     if param_name_for_w2 not in param_dict:
-                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name_for_w2)
+                        logger.warning("Loading model has no param named %s in checkpoints, bypass.", param_name_for_w2)
                         continue
                     param = param_dict[param_name_for_w2]
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -1561,20 +1686,19 @@ class GLM4MoELite(nn.Module):
 
                 param_name = name.replace(weight_name, "wqkv_a")
                 if param_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.',
-                                   param_name)
+                    logger.warning("Loading model has no param named %s in checkpoints, bypass.", param_name)
                     continue
                 param = param_dict[param_name]
                 if ".scale" in name:
                     if stride_id == 0:
-                        param.data[:args.q_lora_rank, 0].copy_(loaded_weight[:].reshape(-1))
+                        param.data[: args.q_lora_rank, 0].copy_(loaded_weight[:].reshape(-1))
                     else:  # kv_a_proj_with_mqa
-                        param.data[args.q_lora_rank:, 0].copy_(loaded_weight[:].reshape(-1))
+                        param.data[args.q_lora_rank :, 0].copy_(loaded_weight[:].reshape(-1))
                 else:
                     if stride_id == 0:
-                        param.data[:args.q_lora_rank].copy_(loaded_weight[:])
+                        param.data[: args.q_lora_rank].copy_(loaded_weight[:])
                     else:
-                        param.data[args.q_lora_rank:].copy_(loaded_weight[:])
+                        param.data[args.q_lora_rank :].copy_(loaded_weight[:])
 
                 is_wqkv_a = True
                 break
@@ -1589,14 +1713,13 @@ class GLM4MoELite(nn.Module):
 
                 param_name = name.replace(weight_name, "indexer.wk_weights_proj.weight")
                 if param_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.',
-                                   param_name)
+                    logger.warning("Loading model has no param named %s in checkpoints, bypass.", param_name)
                     continue
                 param = param_dict[param_name]
                 if stride_id == 0:  # wk.weight -> head_dim
-                    param.data[:args.index_head_dim].copy_(loaded_weight[:])
+                    param.data[: args.index_head_dim].copy_(loaded_weight[:])
                 else:  # weights_proj.weight -> n_heads
-                    param.data[args.index_head_dim:].copy_(loaded_weight[:])
+                    param.data[args.index_head_dim :].copy_(loaded_weight[:])
 
                 is_indexer_wk_weights = True
                 break
@@ -1610,21 +1733,20 @@ class GLM4MoELite(nn.Module):
 
                 param_name = name.replace(weight_name, "w13")
                 if param_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.',
-                                   param_name)
+                    logger.warning("Loading model has no param named %s in checkpoints, bypass.", param_name)
                     continue
                 param = param_dict[param_name]
                 shard_size = param.shape[0] // 2
                 # shared_experts 不切分，每个 rank 加载完整权重
                 if "shared_experts" in name:
-                    param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
+                    param_slice = param.data[shard_size * stride_id : shard_size * (stride_id + 1)]
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                     param_slice.data.copy_(loaded_weight)
                 else:
                     gate_up_idx = moe_tp_id if "experts" in name else rank
-                    loaded_weight = loaded_weight[shard_size * gate_up_idx:shard_size * (gate_up_idx + 1)]
-                    param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
-                    param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+                    loaded_weight = loaded_weight[shard_size * gate_up_idx : shard_size * (gate_up_idx + 1)]
+                    param_slice = param.data[shard_size * stride_id : shard_size * (stride_id + 1)]
+                    param_slice.data[: loaded_weight.shape[0]].copy_(loaded_weight)
 
                 is_gate_up_weight = True
                 break
@@ -1632,7 +1754,7 @@ class GLM4MoELite(nn.Module):
                 continue
 
             if name not in param_dict:
-                logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                 continue
 
             param = param_dict[name]
@@ -1644,29 +1766,39 @@ class GLM4MoELite(nn.Module):
                     continue
 
             if "embed" in name:
-                load_tensor_parallel_weights(param, loaded_weight, args.vocab_size, args.dim, name,
-                                             True, False, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, args.vocab_size, args.dim, name, True, False, rank, world_size
+                )
                 continue
 
             if "head" in name:
-                load_tensor_parallel_weights(param, loaded_weight, args.dim, args.vocab_size, name,
-                                             False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, args.dim, args.vocab_size, name, False, True, rank, world_size
+                )
                 continue
 
             if "wq_b" in name and "indexer" not in name:
                 if ".quant_bias" in name or ".scale" in name:
                     shard_size = param.shape[0]
-                    loaded_weight_slice = loaded_weight[rank * shard_size:(rank + 1) * shard_size]
+                    loaded_weight_slice = loaded_weight[rank * shard_size : (rank + 1) * shard_size]
                     loaded_weight_slice = convert_pyslice_to_tensor(loaded_weight_slice)
                     if ".scale" in name:
-                        param.data[:loaded_weight_slice.shape[0], 0].copy_(loaded_weight_slice.reshape(-1))
+                        param.data[: loaded_weight_slice.shape[0], 0].copy_(loaded_weight_slice.reshape(-1))
                     else:
-                        param.data[:loaded_weight_slice.shape[0]].copy_(loaded_weight_slice)
+                        param.data[: loaded_weight_slice.shape[0]].copy_(loaded_weight_slice)
                     continue
 
-                load_tensor_parallel_weights(param, loaded_weight, args.q_lora_rank,
-                                             args.n_heads * (args.qk_nope_head_dim + args.qk_rope_head_dim), name,
-                                             False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    args.q_lora_rank,
+                    args.n_heads * (args.qk_nope_head_dim + args.qk_rope_head_dim),
+                    name,
+                    False,
+                    True,
+                    rank,
+                    world_size,
+                )
                 continue
 
             if "wq_b" in name and "indexer" in name:
@@ -1683,9 +1815,17 @@ class GLM4MoELite(nn.Module):
                 continue
 
             if "wkv_b" in name:
-                load_tensor_parallel_weights(param, loaded_weight, args.kv_lora_rank,
-                                             args.n_heads * (args.qk_nope_head_dim + args.v_head_dim),
-                                             name, False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    args.kv_lora_rank,
+                    args.n_heads * (args.qk_nope_head_dim + args.v_head_dim),
+                    name,
+                    False,
+                    True,
+                    rank,
+                    world_size,
+                )
                 continue
 
             if "wo" in name:
@@ -1701,8 +1841,9 @@ class GLM4MoELite(nn.Module):
                     param.data[:, 0].copy_(loaded_weight.reshape(-1))
                     continue
 
-                load_tensor_parallel_weights(param, loaded_weight, args.v_head_dim * args.n_heads,
-                                             args.dim, name, True, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, args.v_head_dim * args.n_heads, args.dim, name, True, True, rank, world_size
+                )
                 continue
 
             if "w2" in name and (int(name.split(".")[2]) < args.n_dense_layers):
@@ -1710,8 +1851,9 @@ class GLM4MoELite(nn.Module):
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                     param.copy_(loaded_weight)
                 else:
-                    load_tensor_parallel_weights(param, loaded_weight, args.inter_dim, args.dim, name,
-                                                True, True, rank, world_size)
+                    load_tensor_parallel_weights(
+                        param, loaded_weight, args.inter_dim, args.dim, name, True, True, rank, world_size
+                    )
                 continue
 
             if "w2" in name and "shared_experts" in name:
@@ -1721,8 +1863,8 @@ class GLM4MoELite(nn.Module):
 
             if "w2" in name and "experts" in name:
                 shard_size = param.shape[1]
-                loaded_weight = loaded_weight[:, shard_size * moe_tp_id:shard_size * (moe_tp_id + 1)]
-                param.data[:,:loaded_weight.shape[1]].copy_(loaded_weight)
+                loaded_weight = loaded_weight[:, shard_size * moe_tp_id : shard_size * (moe_tp_id + 1)]
+                param.data[:, : loaded_weight.shape[1]].copy_(loaded_weight)
                 continue
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -1734,7 +1876,15 @@ class GLM4MoELite(nn.Module):
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
             # Runtime rank = GLOBAL rank; tp_size/dp_size explicit. EP spans the
             # full world (moe_ep_size == world_size), orthogonal to DP.
-            self.xlite_rt = Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size, moe_tp_size=1, moe_ep_size=args.moe_ep_size)
+            self.xlite_rt = Runtime(
+                local_rank,
+                size=0,
+                rank=self.global_rank,
+                tp_size=self.tp_size,
+                dp_size=self.dp_size,
+                moe_tp_size=1,
+                moe_ep_size=args.moe_ep_size,
+            )
             self.init_xlite_model(args)
             kv_size = self.init_xlite_kvcache(args)
             pool_size = self.xlite_model.get_tensor_pool_size()
@@ -1745,12 +1895,25 @@ class GLM4MoELite(nn.Module):
                 memory_usage = param.element_size() * param.numel()
                 total_model_memory += memory_usage
             if self.global_rank == 0:
-                print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
-                      f" KV Cache: {kv_size // 1024 // 1024} MB" +
-                      f" Tensor pool: {pool_size} MB")
+                print(
+                    f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB"
+                    f" KV Cache: {kv_size // 1024 // 1024} MB"
+                    f" Tensor pool: {pool_size} MB"
+                )
 
             if self.multi_task_parallel:
-                self.xlite_rt_list = [self.xlite_rt, Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size, moe_tp_size=1, moe_ep_size=args.moe_ep_size)]
+                self.xlite_rt_list = [
+                    self.xlite_rt,
+                    Runtime(
+                        local_rank,
+                        size=0,
+                        rank=self.global_rank,
+                        tp_size=self.tp_size,
+                        dp_size=self.dp_size,
+                        moe_tp_size=1,
+                        moe_ep_size=args.moe_ep_size,
+                    ),
+                ]
                 self.xlite_rt_list[1].init_tensor_pool(pool_size)
                 self.xlite_rt_list[0].peer_notify = self.xlite_rt_list[1].notify
                 self.xlite_rt_list[1].peer_notify = self.xlite_rt_list[0].notify
@@ -1820,25 +1983,32 @@ class GLM4MoELite(nn.Module):
         self.xlite_model.mla_q_norm = [layer.attn.q_norm.weight for layer in self.layers]
         n_local_heads = args.n_heads // world_size
         self.xlite_model.mla_wuv = [
-            layer.attn.wkv_b.weight
-                .view(n_local_heads, -1, args.kv_lora_rank)
-                .split([args.qk_nope_head_dim, args.v_head_dim], dim=1)[1]
-                .permute(0, 2, 1).contiguous()
+            layer.attn.wkv_b.weight.view(n_local_heads, -1, args.kv_lora_rank)
+            .split([args.qk_nope_head_dim, args.v_head_dim], dim=1)[1]
+            .permute(0, 2, 1)
+            .contiguous()
             for layer in self.layers
         ]
         self.xlite_model.mla_wuk_t = [
-            layer.attn.wkv_b.weight
-                .view(n_local_heads, -1, args.kv_lora_rank)
-                .split([args.qk_nope_head_dim, args.v_head_dim], dim=1)[0]
-                .contiguous()
+            layer.attn.wkv_b.weight.view(n_local_heads, -1, args.kv_lora_rank)
+            .split([args.qk_nope_head_dim, args.v_head_dim], dim=1)[0]
+            .contiguous()
             for layer in self.layers
         ]
         self.xlite_model.mla_kv_norm = [layer.attn.kv_norm.weight for layer in self.layers]
+
         # DSA shared layers skip indexer weights (csrc skips binding); pass empty placeholder.
         def indexer_w(layer, fn):
-            return fn(layer.attn.indexer) if (layer.attn.indexer is not None and layer.attn.full_indexer) else torch.empty(1)
+            return (
+                fn(layer.attn.indexer)
+                if (layer.attn.indexer is not None and layer.attn.full_indexer)
+                else torch.empty(1)
+            )
+
         self.xlite_model.index_q_b = [indexer_w(l, lambda i: i.wq_b.weight) for l in self.layers]
-        self.xlite_model.index_k_weights_proj = [indexer_w(l, lambda i: i.wk_weights_proj.weight.to(dtype=torch.get_default_dtype())) for l in self.layers]
+        self.xlite_model.index_k_weights_proj = [
+            indexer_w(l, lambda i: i.wk_weights_proj.weight.to(dtype=torch.get_default_dtype())) for l in self.layers
+        ]
         # indexer norm weight and bias should be in float32 or the default dtype
         self.xlite_model.index_k_norm = [indexer_w(l, lambda i: i.k_norm.weight) for l in self.layers]
         self.xlite_model.index_k_norm_bias = [indexer_w(l, lambda i: i.k_norm.bias) for l in self.layers]
@@ -1850,17 +2020,28 @@ class GLM4MoELite(nn.Module):
         # kept only as a safety net. A real [n_routed_experts] fp32 bias reaches the
         # sigmoid_topk kernel, which adds it to the selection scores (Bug A's nullptr
         # guard still covers the empty-tensor case).
-        self.xlite_model.gate_bias = [self.layers[i].ffn.gate.bias if self.layers[i].ffn.gate.bias is not None else torch.empty(0, dtype=torch.float32) for i in range(args.n_dense_layers, args.n_layers)]
-        self.xlite_model.se_up_gate = [self.layers[i].ffn.shared_experts.w13.weight
-                                       for i in range(args.n_dense_layers, args.n_layers)]
-        self.xlite_model.se_down = [self.layers[i].ffn.shared_experts.w2.weight
-                                    for i in range(args.n_dense_layers, args.n_layers)]
-        self.xlite_model.re_up_gate = [self.layers[i].ffn.experts[j].w13.weight
-                                       for i in range(args.n_dense_layers, args.n_layers)
-                                       for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-        self.xlite_model.re_down = [self.layers[i].ffn.experts[j].w2.weight
-                                    for i in range(args.n_dense_layers, args.n_layers)
-                                    for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+        self.xlite_model.gate_bias = [
+            self.layers[i].ffn.gate.bias
+            if self.layers[i].ffn.gate.bias is not None
+            else torch.empty(0, dtype=torch.float32)
+            for i in range(args.n_dense_layers, args.n_layers)
+        ]
+        self.xlite_model.se_up_gate = [
+            self.layers[i].ffn.shared_experts.w13.weight for i in range(args.n_dense_layers, args.n_layers)
+        ]
+        self.xlite_model.se_down = [
+            self.layers[i].ffn.shared_experts.w2.weight for i in range(args.n_dense_layers, args.n_layers)
+        ]
+        self.xlite_model.re_up_gate = [
+            self.layers[i].ffn.experts[j].w13.weight
+            for i in range(args.n_dense_layers, args.n_layers)
+            for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+        ]
+        self.xlite_model.re_down = [
+            self.layers[i].ffn.experts[j].w2.weight
+            for i in range(args.n_dense_layers, args.n_layers)
+            for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+        ]
         if args.quantization in ("w8a8", "w4a8"):
             # deq_scale (fixpipe xlite_scale) + norm_bias binding is shared by w8a8 and
             # w4a8: in the mixed-quant GLM-5.1-w4a8 model, attention / dense mlp /
@@ -1868,11 +2049,15 @@ class GLM4MoELite(nn.Module):
             # activation quant).
             for i in range(self.args.n_layers):
                 if self.layers[i].attn.indexer is not None and self.layers[i].attn.full_indexer:
-                    self.layers[i].attn.indexer.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.indexer.wq_b.weight.scale[0::1]
+                    self.layers[i].attn.indexer.wq_b.weight.xlite_scale[0::2] = self.layers[
+                        i
+                    ].attn.indexer.wq_b.weight.scale[0::1]
                 self.layers[i].attn.wqkv_a.weight.xlite_scale[0::2] = self.layers[i].attn.wqkv_a.weight.scale[0::1]
                 self.layers[i].attn.wq_b.weight.xlite_scale[0::2] = self.layers[i].attn.wq_b.weight.scale[0::1]
                 self.layers[i].attn.wo.weight.xlite_scale[0::2] = self.layers[i].attn.wo.weight.scale[0::1]
-            self.xlite_model.index_q_b_deq_scale = [indexer_w(l, lambda i: i.wq_b.weight.xlite_scale) for l in self.layers]
+            self.xlite_model.index_q_b_deq_scale = [
+                indexer_w(l, lambda i: i.wq_b.weight.xlite_scale) for l in self.layers
+            ]
             self.xlite_model.mla_qkv_a_deq_scale = [layer.attn.wqkv_a.weight.xlite_scale for layer in self.layers]
             self.xlite_model.mla_q_b_deq_scale = [layer.attn.wq_b.weight.xlite_scale for layer in self.layers]
             self.xlite_model.mla_q_norm_bias = [layer.attn.q_norm.bias for layer in self.layers]
@@ -1887,41 +2072,74 @@ class GLM4MoELite(nn.Module):
             # DYNAMIC_QUANT from the absence of inputScale. Bind empty lists so C++
             # InitMatmulWeight skips them (weightLayer < iScale.size() == 0).
             if args.quantization == "w8a8":
-                self.xlite_model.index_q_b_input_scale = [indexer_w(l, lambda i: i.wq_b.weight.input_scale.reciprocal()) for l in self.layers]
-                self.xlite_model.index_q_b_input_offset = [indexer_w(l, lambda i: i.wq_b.weight.input_offset) for l in self.layers]
-                self.xlite_model.index_q_b_quant_bias = [indexer_w(l, lambda i: i.wq_b.weight.quant_bias) for l in self.layers]
-                self.xlite_model.mla_qkv_a_input_scale = [layer.attn.wqkv_a.weight.input_scale.reciprocal() for layer in self.layers]
-                self.xlite_model.mla_qkv_a_input_offset = [layer.attn.wqkv_a.weight.input_offset for layer in self.layers]
+                self.xlite_model.index_q_b_input_scale = [
+                    indexer_w(l, lambda i: i.wq_b.weight.input_scale.reciprocal()) for l in self.layers
+                ]
+                self.xlite_model.index_q_b_input_offset = [
+                    indexer_w(l, lambda i: i.wq_b.weight.input_offset) for l in self.layers
+                ]
+                self.xlite_model.index_q_b_quant_bias = [
+                    indexer_w(l, lambda i: i.wq_b.weight.quant_bias) for l in self.layers
+                ]
+                self.xlite_model.mla_qkv_a_input_scale = [
+                    layer.attn.wqkv_a.weight.input_scale.reciprocal() for layer in self.layers
+                ]
+                self.xlite_model.mla_qkv_a_input_offset = [
+                    layer.attn.wqkv_a.weight.input_offset for layer in self.layers
+                ]
                 self.xlite_model.mla_qkv_a_quant_bias = [layer.attn.wqkv_a.weight.quant_bias for layer in self.layers]
-                self.xlite_model.mla_q_b_input_scale = [layer.attn.wq_b.weight.input_scale.reciprocal() for layer in self.layers]
+                self.xlite_model.mla_q_b_input_scale = [
+                    layer.attn.wq_b.weight.input_scale.reciprocal() for layer in self.layers
+                ]
                 self.xlite_model.mla_q_b_input_offset = [layer.attn.wq_b.weight.input_offset for layer in self.layers]
                 self.xlite_model.mla_q_b_quant_bias = [layer.attn.wq_b.weight.quant_bias for layer in self.layers]
-                self.xlite_model.attn_out_input_scale = [layer.attn.wo.weight.input_scale.reciprocal() for layer in self.layers]
+                self.xlite_model.attn_out_input_scale = [
+                    layer.attn.wo.weight.input_scale.reciprocal() for layer in self.layers
+                ]
                 self.xlite_model.attn_out_input_offset = [layer.attn.wo.weight.input_offset for layer in self.layers]
                 self.xlite_model.attn_out_quant_bias = [layer.attn.wo.weight.quant_bias for layer in self.layers]
             for i in range(self.args.n_dense_layers):
                 self.layers[i].ffn.w13.weight.xlite_scale[0::2] = self.layers[i].ffn.w13.weight.scale[0::1]
                 self.layers[i].ffn.w2.weight.xlite_scale[0::2] = self.layers[i].ffn.w2.weight.scale[0::1]
-            self.xlite_model.mlp_up_gate_deq_scale = [self.layers[i].ffn.w13.weight.xlite_scale
-                                                  for i in range(args.n_dense_layers)]
-            self.xlite_model.mlp_down_deq_scale = [self.layers[i].ffn.w2.weight.xlite_scale for i in range(args.n_dense_layers)]
+            self.xlite_model.mlp_up_gate_deq_scale = [
+                self.layers[i].ffn.w13.weight.xlite_scale for i in range(args.n_dense_layers)
+            ]
+            self.xlite_model.mlp_down_deq_scale = [
+                self.layers[i].ffn.w2.weight.xlite_scale for i in range(args.n_dense_layers)
+            ]
 
             for i in range(self.args.n_dense_layers, self.args.n_layers):
-                self.layers[i].ffn.shared_experts.w13.weight.xlite_scale[0::2] = self.layers[i].ffn.shared_experts.w13.weight.scale[0::1]
-                self.layers[i].ffn.shared_experts.w2.weight.xlite_scale[0::2] = self.layers[i].ffn.shared_experts.w2.weight.scale[0::1]
+                self.layers[i].ffn.shared_experts.w13.weight.xlite_scale[0::2] = self.layers[
+                    i
+                ].ffn.shared_experts.w13.weight.scale[0::1]
+                self.layers[i].ffn.shared_experts.w2.weight.xlite_scale[0::2] = self.layers[
+                    i
+                ].ffn.shared_experts.w2.weight.scale[0::1]
                 for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx):
-                    self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
-                    self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
-            self.xlite_model.se_up_gate_deq_scale = [self.layers[i].ffn.shared_experts.w13.weight.xlite_scale
-                                                 for i in range(args.n_dense_layers, args.n_layers)]
-            self.xlite_model.se_down_deq_scale = [self.layers[i].ffn.shared_experts.w2.weight.xlite_scale
-                                                 for i in range(args.n_dense_layers, args.n_layers)]
-            self.xlite_model.re_up_gate_deq_scale = [self.layers[i].ffn.experts[j].w13.weight.xlite_scale
-                                                 for i in range(args.n_dense_layers, args.n_layers)
-                                                 for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-            self.xlite_model.re_down_deq_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
-                                              for i in range(args.n_dense_layers, args.n_layers)
-                                              for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+                    self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = (
+                        self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
+                    )
+                    self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = (
+                        self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
+                    )
+            self.xlite_model.se_up_gate_deq_scale = [
+                self.layers[i].ffn.shared_experts.w13.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+            ]
+            self.xlite_model.se_down_deq_scale = [
+                self.layers[i].ffn.shared_experts.w2.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+            ]
+            self.xlite_model.re_up_gate_deq_scale = [
+                self.layers[i].ffn.experts[j].w13.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
+            self.xlite_model.re_down_deq_scale = [
+                self.layers[i].ffn.experts[j].w2.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
         if args.quantization == "w8a8_moe":
             # Mixed quantization (experts-only W8A8_DYNAMIC): mirror the routed-expert
             # half of the w8a8 binding above — fill the fixpipe xlite_scale from the
@@ -1931,30 +2149,46 @@ class GLM4MoELite(nn.Module):
             # >= iScale.size() == 0) and runs them in bf16.
             for i in range(args.n_dense_layers, args.n_layers):
                 for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx):
-                    self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
-                    self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
-            self.xlite_model.re_up_gate_deq_scale = [self.layers[i].ffn.experts[j].w13.weight.xlite_scale
-                                                     for i in range(args.n_dense_layers, args.n_layers)
-                                                     for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-            self.xlite_model.re_down_deq_scale = [self.layers[i].ffn.experts[j].w2.weight.xlite_scale
-                                                  for i in range(args.n_dense_layers, args.n_layers)
-                                                  for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+                    self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = (
+                        self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
+                    )
+                    self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = (
+                        self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
+                    )
+            self.xlite_model.re_up_gate_deq_scale = [
+                self.layers[i].ffn.experts[j].w13.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
+            self.xlite_model.re_down_deq_scale = [
+                self.layers[i].ffn.experts[j].w2.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
         if args.quantization == "w4a8":
             config.quant_msd_w4a8 = True
             config.experts_weight_transpose = True
             config.experts_weight_nz = True
-            self.xlite_model.re_up_gate = [_pack_w4a8_weight_for_xlite(self.layers[i].ffn.experts[j].w13.weight)
-                                           for i in range(args.n_dense_layers, args.n_layers)
-                                           for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-            self.xlite_model.re_down = [_pack_w4a8_weight_for_xlite(self.layers[i].ffn.experts[j].w2.weight)
-                                        for i in range(args.n_dense_layers, args.n_layers)
-                                        for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-            self.xlite_model.re_up_gate_scale_bias = [self.layers[i].ffn.experts[j].w13.weight.scale_bias.data.reshape(-1).contiguous()
-                                                       for i in range(args.n_dense_layers, args.n_layers)
-                                                       for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
-            self.xlite_model.re_down_scale_bias = [self.layers[i].ffn.experts[j].w2.weight.scale_bias.data.reshape(-1).contiguous()
-                                                   for i in range(args.n_dense_layers, args.n_layers)
-                                                   for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)]
+            self.xlite_model.re_up_gate = [
+                _pack_w4a8_weight_for_xlite(self.layers[i].ffn.experts[j].w13.weight)
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
+            self.xlite_model.re_down = [
+                _pack_w4a8_weight_for_xlite(self.layers[i].ffn.experts[j].w2.weight)
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
+            self.xlite_model.re_up_gate_scale_bias = [
+                self.layers[i].ffn.experts[j].w13.weight.scale_bias.data.reshape(-1).contiguous()
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
+            self.xlite_model.re_down_scale_bias = [
+                self.layers[i].ffn.experts[j].w2.weight.scale_bias.data.reshape(-1).contiguous()
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
         # init() takes the GLOBAL rank (C++ derives tp_rank/ep_id from it).
         self.xlite_model.init(config, self.global_rank)
 
@@ -1962,22 +2196,79 @@ class GLM4MoELite(nn.Module):
         block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
         head_num = 1
         if args.model_type in ("deepseek_v3", "glm4_moe_lite"):
-            self.xlite_kv_cache = [(torch.zeros(block_num, block_size, head_num, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
-                                    torch.zeros(block_num, block_size, head_num, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'))
-                                for _ in range(args.n_layers)]
-            kv_size = (block_num * head_num * block_size * (args.kv_lora_rank + args.qk_rope_head_dim) *
-                    self.xlite_kv_cache[0][0].element_size() * args.n_layers)
+            self.xlite_kv_cache = [
+                (
+                    torch.zeros(
+                        block_num,
+                        block_size,
+                        head_num,
+                        args.kv_lora_rank,
+                        dtype=torch.get_default_dtype(),
+                        device="npu",
+                    ),
+                    torch.zeros(
+                        block_num,
+                        block_size,
+                        head_num,
+                        args.qk_rope_head_dim,
+                        dtype=torch.get_default_dtype(),
+                        device="npu",
+                    ),
+                )
+                for _ in range(args.n_layers)
+            ]
+            kv_size = (
+                block_num
+                * head_num
+                * block_size
+                * (args.kv_lora_rank + args.qk_rope_head_dim)
+                * self.xlite_kv_cache[0][0].element_size()
+                * args.n_layers
+            )
         else:
-            _dummy = torch.zeros(1, dtype=torch.get_default_dtype(), device='npu')
+            _dummy = torch.zeros(1, dtype=torch.get_default_dtype(), device="npu")
             index_mask = args.index_full_mask or [True] * args.n_layers
-            assert len(index_mask) == args.n_layers, f"index_full_mask length {len(index_mask)} != n_layers {args.n_layers}"
-            self.xlite_kv_cache = [(torch.zeros(block_num, block_size, head_num, args.kv_lora_rank, dtype=torch.get_default_dtype(), device='npu'),
-                                    torch.zeros(block_num, block_size, head_num, args.qk_rope_head_dim, dtype=torch.get_default_dtype(), device='npu'),
-                                    torch.zeros(block_num, block_size, head_num, args.index_head_dim, dtype=torch.get_default_dtype(), device='npu') if mask else _dummy)
-                                for mask in index_mask]
-            kv_size = (block_num * head_num * block_size * ((args.kv_lora_rank + args.qk_rope_head_dim) * args.n_layers
-                                                            + args.index_head_dim * sum(index_mask))
-                    * self.xlite_kv_cache[0][0].element_size())
+            assert len(index_mask) == args.n_layers, (
+                f"index_full_mask length {len(index_mask)} != n_layers {args.n_layers}"
+            )
+            self.xlite_kv_cache = [
+                (
+                    torch.zeros(
+                        block_num,
+                        block_size,
+                        head_num,
+                        args.kv_lora_rank,
+                        dtype=torch.get_default_dtype(),
+                        device="npu",
+                    ),
+                    torch.zeros(
+                        block_num,
+                        block_size,
+                        head_num,
+                        args.qk_rope_head_dim,
+                        dtype=torch.get_default_dtype(),
+                        device="npu",
+                    ),
+                    torch.zeros(
+                        block_num,
+                        block_size,
+                        head_num,
+                        args.index_head_dim,
+                        dtype=torch.get_default_dtype(),
+                        device="npu",
+                    )
+                    if mask
+                    else _dummy,
+                )
+                for mask in index_mask
+            ]
+            kv_size = (
+                block_num
+                * head_num
+                * block_size
+                * ((args.kv_lora_rank + args.qk_rope_head_dim) * args.n_layers + args.index_head_dim * sum(index_mask))
+                * self.xlite_kv_cache[0][0].element_size()
+            )
         return kv_size
 
     def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
@@ -1991,14 +2282,13 @@ class GLM4MoELite(nn.Module):
         batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
         block_indices = np.arange(block_num, dtype=np.uint32)
         attn_meta.block_tables_cpu = batch_indices * step + block_indices
-        attn_meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
-            .repeat(batch).to(tokens.device)
+        attn_meta.positions = (
+            torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64).repeat(batch).to(tokens.device)
+        )
         return attn_meta
 
     def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
-        return prepare_xlite_attnmeta_v2(
-            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size]
-        )
+        return prepare_xlite_attnmeta_v2(AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size])
 
 
 if __name__ == "__main__":

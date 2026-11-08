@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,12 +7,11 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 """C8 Indexer prepare and Top-K tests."""
+
 import logging
 
 import torch
-
 from indexer_k_cache_c8 import NORM_EPS, check_values, frequencies, reference, rotation
-
 
 HEAD_DIM = 128
 ROPE_DIM = 64
@@ -119,7 +117,7 @@ def run_prepare_test(rt, device, case, tokens, n_heads):
             gains = torch.arange(1, n_heads + 1).bfloat16()
             q[0, :, 0], q[0, :, 1] = 3 * gains, gains
             q[1] = -q[0]
-            q[3] = q[0] * (2.0 ** -30)
+            q[3] = q[0] * (2.0**-30)
         else:
             q = torch.eye(HEAD_DIM).bfloat16().reshape(tokens, n_heads, HEAD_DIM)
             freqs.zero_()
@@ -128,8 +126,7 @@ def run_prepare_test(rt, device, case, tokens, n_heads):
     active = slots >= 0
     written = slots[active].long()
     rotated_k = reference(kw[active], k_norm, k_norm_bias, freqs, positions[active], device, norm_eps)
-    rotated_q, q8_ref, q_scale_ref, weights_ref = reference_q(
-        q, kw[:, HEAD_DIM:], freqs, positions, device, n_heads)
+    rotated_q, q8_ref, q_scale_ref, weights_ref = reference_q(q, kw[:, HEAD_DIM:], freqs, positions, device, n_heads)
     block_size = 32
     num_blocks = (tokens + 3 + block_size - 1) // block_size
     untouched = torch.ones(num_blocks * block_size, dtype=torch.bool)
@@ -145,22 +142,39 @@ def run_prepare_test(rt, device, case, tokens, n_heads):
             else:
                 table = freqs.to(freq_type)
             kw_npu = kw.to(device)
-            q_npu = q.reshape(tokens, -1).to(device) if is_long else torch.empty(
-                0, dtype=torch.bfloat16, device=device)
-            k_cache = torch.full((num_blocks, block_size, 1, HEAD_DIM), K_CACHE_FILL,
-                                 dtype=torch.int8, device=device)
-            k_scale_cache = torch.full((num_blocks, block_size, 1, 1), SCALE_CACHE_FILL,
-                                       dtype=torch.float16, device=device)
+            q_npu = q.reshape(tokens, -1).to(device) if is_long else torch.empty(0, dtype=torch.bfloat16, device=device)
+            k_cache = torch.full((num_blocks, block_size, 1, HEAD_DIM), K_CACHE_FILL, dtype=torch.int8, device=device)
+            k_scale_cache = torch.full(
+                (num_blocks, block_size, 1, 1), SCALE_CACHE_FILL, dtype=torch.float16, device=device
+            )
             q8 = torch.empty_like(q_npu, dtype=torch.int8) if is_long else None
             q_scale = torch.empty((tokens, n_heads), dtype=torch.float16, device=device) if is_long else None
             scaled_weights = torch.empty_like(q_scale) if is_long else None
 
             torch.npu.synchronize(device)
-            indexer_prepare(rt, kw_npu, k_norm.to(device), k_norm_bias.to(device), table.to(device),
-                            positions.to(device), HEAD_DIM, n_heads, ROPE_DIM, block_size, k_cache,
-                            slots.to(device), norm_eps, q_npu, 1 / 64, TOP_K, is_long,
-                            k_scale_cache=k_scale_cache, q8=q8, q_scale=q_scale,
-                            scaled_weights=scaled_weights)
+            indexer_prepare(
+                rt,
+                kw_npu,
+                k_norm.to(device),
+                k_norm_bias.to(device),
+                table.to(device),
+                positions.to(device),
+                HEAD_DIM,
+                n_heads,
+                ROPE_DIM,
+                block_size,
+                k_cache,
+                slots.to(device),
+                norm_eps,
+                q_npu,
+                1 / 64,
+                TOP_K,
+                is_long,
+                k_scale_cache=k_scale_cache,
+                q8=q8,
+                q_scale=q_scale,
+                scaled_weights=scaled_weights,
+            )
             torch.npu.synchronize(device)
             assert torch.equal(kw_npu.cpu(), kw), "C8 prepare changed kw"
 
@@ -179,8 +193,12 @@ def run_prepare_test(rt, device, case, tokens, n_heads):
                 q_result = (q8.cpu(), q_scale.cpu(), scaled_weights.cpu())
                 if q_baseline is None:
                     if case == "random":
-                        check_values(q_result[0].reshape(-1, HEAD_DIM), q_result[1].flatten(),
-                                     rotated_q.reshape(-1, HEAD_DIM), "Q")
+                        check_values(
+                            q_result[0].reshape(-1, HEAD_DIM),
+                            q_result[1].flatten(),
+                            rotated_q.reshape(-1, HEAD_DIM),
+                            "Q",
+                        )
                     else:
                         torch.testing.assert_close(q_result[0], q8_ref, rtol=0, atol=0)
                     torch.testing.assert_close(q_result[1], q_scale_ref, rtol=0, atol=0)
@@ -189,19 +207,18 @@ def run_prepare_test(rt, device, case, tokens, n_heads):
                 else:
                     for value, expected in zip(q_result, q_baseline):
                         torch.testing.assert_close(value, expected, rtol=0, atol=0)
-            logging.info("indexer_c8 prepare %s (%d tokens, %s, is_long=%s) passed",
-                         case, tokens, freq_type, is_long)
+            logging.info("indexer_c8 prepare %s (%d tokens, %s, is_long=%s) passed", case, tokens, freq_type, is_long)
 
 
 def score_reference(q8, k8, scaled_weights, k_scale, n_heads):
     dot = q8.reshape(-1, HEAD_DIM).int() @ k8.int().T
     dot = dot.reshape(len(q8), n_heads, len(k8)).clamp_min(0)
-    return ((dot.float() / 1024).half().float()
-            * scaled_weights.float()[..., None]).sum(1) * k_scale.float()[None, :]
+    return ((dot.float() / 1024).half().float() * scaled_weights.float()[..., None]).sum(1) * k_scale.float()[None, :]
 
 
-def run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk, generator,
-                  n_heads, ratio=1, packed=False):
+def run_topk_test(
+    rt, device, case, key_lengths, query_lengths, block_size, topk, generator, n_heads, ratio=1, packed=False
+):
     from xlite._C import indexer_topk
 
     # Compressed KV holds one cache row per `ratio` tokens; the trailing incomplete
@@ -210,9 +227,12 @@ def run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk
     max_num_blocks = (max(kv_lengths) + block_size - 1) // block_size
     block_table = torch.randperm(max_num_blocks * len(key_lengths), generator=generator)
     block_table = block_table.reshape(len(key_lengths), max_num_blocks).int()
-    slots = torch.cat([
-        block_table[i, torch.arange(kv_len) // block_size].long() * block_size
-        + torch.arange(kv_len) % block_size for i, kv_len in enumerate(kv_lengths)])
+    slots = torch.cat(
+        [
+            block_table[i, torch.arange(kv_len) // block_size].long() * block_size + torch.arange(kv_len) % block_size
+            for i, kv_len in enumerate(kv_lengths)
+        ]
+    )
     num_blocks = (int(slots.max()) + block_size) // block_size if slots.numel() else 1
     if packed:
         # vllm's native DSV4 pool: each page packs the int8 K region
@@ -221,30 +241,32 @@ def run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk
         # allocation. Writes go through the flat raw buffer (1-D indexing);
         # .to(device) would flatten the pitched views.
         page = block_size * (HEAD_DIM + 2)
-        raw = torch.full((num_blocks * page,), K_CACHE_FILL & 0xFF, dtype=torch.uint8,
-                         device=device)
-        k_cache = torch.as_strided(raw.view(torch.int8), (num_blocks, block_size, 1, HEAD_DIM),
-                                   (page, HEAD_DIM, HEAD_DIM, 1))
-        k_scale_cache = torch.as_strided(raw.view(torch.float16),
-                                         (num_blocks, block_size, 1, 1), (page // 2, 1, 1, 1),
-                                         storage_offset=block_size * HEAD_DIM // 2)
+        raw = torch.full((num_blocks * page,), K_CACHE_FILL & 0xFF, dtype=torch.uint8, device=device)
+        k_cache = torch.as_strided(
+            raw.view(torch.int8), (num_blocks, block_size, 1, HEAD_DIM), (page, HEAD_DIM, HEAD_DIM, 1)
+        )
+        k_scale_cache = torch.as_strided(
+            raw.view(torch.float16),
+            (num_blocks, block_size, 1, 1),
+            (page // 2, 1, 1, 1),
+            storage_offset=block_size * HEAD_DIM // 2,
+        )
     else:
-        k_cache = torch.full((num_blocks, block_size, 1, HEAD_DIM), K_CACHE_FILL,
-                             dtype=torch.int8, device=device)
-        k_scale_cache = torch.full((num_blocks, block_size, 1, 1), SCALE_CACHE_FILL,
-                                   dtype=torch.float16, device=device)
+        k_cache = torch.full((num_blocks, block_size, 1, HEAD_DIM), K_CACHE_FILL, dtype=torch.int8, device=device)
+        k_scale_cache = torch.full((num_blocks, block_size, 1, 1), SCALE_CACHE_FILL, dtype=torch.float16, device=device)
     q8 = torch.randint(-127, 128, (sum(query_lengths), n_heads, HEAD_DIM), generator=generator).char()
     k8 = torch.randint(-127, 128, (sum(kv_lengths), HEAD_DIM), generator=generator).char()
-    k_scale = (torch.rand(sum(kv_lengths), generator=generator) * .1).half()
-    scaled_weights = (torch.randn(sum(query_lengths), n_heads, generator=generator) * .1).half()
+    k_scale = (torch.rand(sum(kv_lengths), generator=generator) * 0.1).half()
+    scaled_weights = (torch.randn(sum(query_lengths), n_heads, generator=generator) * 0.1).half()
     if case == 3:
         q8.zero_()  # Ties across KV tiles and padding.
     if packed:
         block_ids = (slots // block_size).to(device)
         offsets = (slots % block_size).to(device)
         raw_i8 = raw.view(torch.int8)
-        raw_i8[block_ids[:, None] * page + offsets[:, None] * HEAD_DIM +
-               torch.arange(HEAD_DIM, device=device)] = k8.to(device)
+        raw_i8[block_ids[:, None] * page + offsets[:, None] * HEAD_DIM + torch.arange(HEAD_DIM, device=device)] = k8.to(
+            device
+        )
         raw_h = raw.view(torch.float16)
         raw_h[block_ids * (page // 2) + block_size * HEAD_DIM // 2 + offsets] = k_scale.to(device)
     else:
@@ -256,19 +278,36 @@ def run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk
     output = torch.full((len(q8), topk), TOPK_FILL, dtype=torch.int32, device=device)
 
     torch.npu.synchronize(device)
-    indexer_topk(rt, q8.reshape(-1, n_heads * HEAD_DIM).to(device), k_cache,
-                 scaled_weights.to(device), output, query_start_loc.to(device), lens.to(device),
-                 cached_lens.to(device), block_table.to(device), n_heads, HEAD_DIM, block_size,
-                 len(query_lengths), topk, k_scale_cache=k_scale_cache, compress_ratio=ratio)
+    indexer_topk(
+        rt,
+        q8.reshape(-1, n_heads * HEAD_DIM).to(device),
+        k_cache,
+        scaled_weights.to(device),
+        output,
+        query_start_loc.to(device),
+        lens.to(device),
+        cached_lens.to(device),
+        block_table.to(device),
+        n_heads,
+        HEAD_DIM,
+        block_size,
+        len(query_lengths),
+        topk,
+        k_scale_cache=k_scale_cache,
+        compress_ratio=ratio,
+    )
     torch.npu.synchronize(device)
     actual = output.cpu()
 
     query_offset = key_offset = 0
     for key_len, query_len, kv_len in zip(key_lengths, query_lengths, kv_lengths):
         scores = score_reference(
-            q8[query_offset:query_offset + query_len], k8[key_offset:key_offset + kv_len],
-            scaled_weights[query_offset:query_offset + query_len],
-            k_scale[key_offset:key_offset + kv_len], n_heads)
+            q8[query_offset : query_offset + query_len],
+            k8[key_offset : key_offset + kv_len],
+            scaled_weights[query_offset : query_offset + query_len],
+            k_scale[key_offset : key_offset + kv_len],
+            n_heads,
+        )
         for i in range(query_len):
             visible = (key_len - query_len + i + 1) // ratio
             if visible <= topk:
@@ -276,7 +315,10 @@ def run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk
             indices = actual[query_offset + i, :topk].long()
             valid = indices[indices >= 0]
             assert len(valid) == topk and len(valid.unique()) == topk, (
-                "Top-K count/uniqueness", query_offset + i, visible)
+                "Top-K count/uniqueness",
+                query_offset + i,
+                visible,
+            )
             assert bool((valid < visible).all()), ("visibility violation", i, visible, valid.max())
             excluded = torch.ones(visible, dtype=torch.bool)
             excluded[valid] = False
@@ -287,12 +329,19 @@ def run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk
                 assert gap <= tolerance, ("Top-K score boundary", gap, tolerance)
         query_offset += query_len
         key_offset += kv_len
-    logging.info("indexer_c8 Top-K case %d (block_size=%d, topK=%d, ratio=%d, packed=%s) passed",
-                 case, block_size, topk, ratio, packed)
+    logging.info(
+        "indexer_c8 Top-K case %d (block_size=%d, topK=%d, ratio=%d, packed=%s) passed",
+        case,
+        block_size,
+        topk,
+        ratio,
+        packed,
+    )
 
 
 def main():
     import torch_npu  # noqa: F401
+
     from xlite._C import Runtime
 
     logging.getLogger().setLevel(logging.INFO)
@@ -307,18 +356,13 @@ def main():
             run_prepare_test(rt, device, case, tokens, n_heads)
         generator = torch.Generator().manual_seed(90128)
         for case, (key_lengths, query_lengths, block_size, topk) in enumerate(test_cases):
-            run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk, generator,
-                          n_heads)
-        for case, (key_lengths, query_lengths, block_size, topk, ratio) in enumerate(
-                test_cases_compressed):
-            run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk, generator,
-                          n_heads, ratio)
+            run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk, generator, n_heads)
+        for case, (key_lengths, query_lengths, block_size, topk, ratio) in enumerate(test_cases_compressed):
+            run_topk_test(rt, device, case, key_lengths, query_lengths, block_size, topk, generator, n_heads, ratio)
         # The packed pool (vllm's native DSV4 layout): ratio=1 (pure int8 topk)
         # and the real DSV4 shape (ratio=4, blockSize=128).
-        run_topk_test(rt, device, 2, [65, 8257], [3, 9], 128, 512, generator, n_heads,
-                      packed=True)
-        run_topk_test(rt, device, 1, [8257], [9], 128, 512, generator, n_heads, ratio=4,
-                      packed=True)
+        run_topk_test(rt, device, 2, [65, 8257], [3, 9], 128, 512, generator, n_heads, packed=True)
+        run_topk_test(rt, device, 1, [8257], [9], 128, 512, generator, n_heads, ratio=4, packed=True)
     logging.info("indexer_c8 tests passed")
 
 

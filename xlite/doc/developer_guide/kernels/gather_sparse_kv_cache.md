@@ -18,10 +18,26 @@ DSA(Dual Sparse Attention)长序列路径的 KV 收集算子,支持 **decode(que
 Python 侧调用(`tests/kernels/gather_sparse_kv_cache.py`):
 
 ```python
-gather_sparse_kv_cache(rt, k_cache, pe_cache, block_tables, topk_indices,
-                       query_start_loc, query_lens, cached_lens, k_dense, pe_dense,
-                       batch, index_topk, BLOCK_SIZE, kv_lora_rank, rope_head_dim,
-                       kv_heads=1, compress_ratio=1, burst_copy_size=16*1024)
+gather_sparse_kv_cache(
+    rt,
+    k_cache,
+    pe_cache,
+    block_tables,
+    topk_indices,
+    query_start_loc,
+    query_lens,
+    cached_lens,
+    k_dense,
+    pe_dense,
+    batch,
+    index_topk,
+    BLOCK_SIZE,
+    kv_lora_rank,
+    rope_head_dim,
+    kv_heads=1,
+    compress_ratio=1,
+    burst_copy_size=16 * 1024,
+)
 ```
 
 Python 绑定 `gather_sparse_kv_cache`(`csrc/_C.cpp`)→ `GatherSparseKVCache`(`csrc/_C.cpp`)→ `XliteOpGatherSparseKVCache`(`csrc/op.cpp`)。kernel 签名(`csrc/kernels/gather_sparse_kv_cache.h` 的 `GATHER_SPARSE_KV_CACHE_FUNC_DEFINE`):

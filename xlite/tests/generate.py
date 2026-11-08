@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,18 +6,18 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-import os
-import time
 import json
+import os
 import random
+import time
 from argparse import ArgumentParser
-from typing import List, Literal, Tuple
 from pathlib import Path
+from typing import List, Literal, Tuple
 
 import torch
-import torch_npu  # noqa: F401
-import torch.nn as nn
 import torch.distributed as dist
+import torch.nn as nn
+import torch_npu  # noqa: F401
 from transformers import AutoTokenizer
 
 
@@ -95,7 +94,7 @@ def generate(
         tokens[:, cur_pos] = next_token
         is_eos = torch.zeros_like(next_token, dtype=torch.bool)
         for _e in eos_set:
-            is_eos |= (next_token == _e)
+            is_eos |= next_token == _e
         finished |= torch.logical_and(~prompt_mask[:, cur_pos], is_eos)
         prev_pos = cur_pos
         step = step + 1
@@ -141,23 +140,22 @@ def main(
         bench_new_tokens (int, optional): Number of new tokens to generate for bench serve. Defaults to 1024.
     """
     if model_type == "deepseek_v3" or model_type == "deepseek_v32" or model_type == "glm5":
-        from tests.models.deepseek_v3 import ModelArgs
         from tests.models.deepseek_v3 import DeepSeek_V3 as Transformer
+        from tests.models.deepseek_v3 import ModelArgs
     elif model_type == "glm5_next":
-        from tests.models.glm5_next import ModelArgs
         from tests.models.glm5_next import GLM5Next as Transformer
+        from tests.models.glm5_next import ModelArgs
     elif model_type == "deepseek_v4":
-        from tests.models.deepseek_v4 import ModelArgs
-        from tests.models.deepseek_v4 import Transformer
+        from tests.models.deepseek_v4 import ModelArgs, Transformer
     elif model_type == "llama":
+        from tests.models.llama import Llama as Transformer
         from tests.models.llama import ModelArgs
-        from tests.models.llama import Llama as Transformer
     elif model_type == "qwen2":
+        from tests.models.llama import Llama as Transformer
         from tests.models.qwen2 import Qwen2ModelArgs as ModelArgs
-        from tests.models.llama import Llama as Transformer
     elif model_type == "qwen3":
-        from tests.models.qwen3 import Qwen3ModelArgs as ModelArgs
         from tests.models.llama import Llama as Transformer
+        from tests.models.qwen3 import Qwen3ModelArgs as ModelArgs
     elif model_type == "qwen3_moe":
         from tests.models.qwen3_moe import ModelArgs
         from tests.models.qwen3_moe import Qwen3MoE as Transformer
@@ -168,14 +166,14 @@ def main(
         from tests.models.qwen3_5_moe import ModelArgs
         from tests.models.qwen3_5_moe import Qwen3_5MoE as Transformer
     elif model_type == "glm4_moe":
+        from tests.models.glm4_moe import GLM4MoE as Transformer
         from tests.models.glm4_moe import ModelArgs
-        from tests.models.glm4_moe import GLM4MoE as Transformer
     elif model_type == "glm4_moe_flash":
-        from tests.models.glm4_moe_lite import ModelArgs
         from tests.models.glm4_moe_lite import GLM4MoELite as Transformer
+        from tests.models.glm4_moe_lite import ModelArgs
     elif model_type == "minimax_m2":
-        from tests.models.minimax_m2 import ModelArgs
         from tests.models.glm4_moe import GLM4MoE as Transformer
+        from tests.models.minimax_m2 import ModelArgs
     else:
         return
 
@@ -190,16 +188,13 @@ def main(
     # DP groups, sharded within TP; each DP rank serves a disjoint prompt subset.
     # The C++ engine handles MoE DP AllGather/ReduceScatter; dense layers per-DP.
     dp_size = int(os.getenv("XLITE_DP_SIZE", "1"))
-    assert world_size % dp_size == 0, (
-        f"WORLD_SIZE ({world_size}) must be divisible by XLITE_DP_SIZE ({dp_size})"
-    )
+    assert world_size % dp_size == 0, f"WORLD_SIZE ({world_size}) must be divisible by XLITE_DP_SIZE ({dp_size})"
     # DP is supported only on the xlite backend (its C++ engine handles the MoE
     # DP AllGather/ReduceScatter natively); the torch_npu reference path does not.
     _fb = os.getenv("FORWARD_BACKEND", "torch_npu")
     if dp_size > 1 and _fb != "xlite":
         raise NotImplementedError(
-            f"XLITE_DP_SIZE>1 requires FORWARD_BACKEND=xlite (got {_fb!r}); "
-            "torch_npu does not support DP."
+            f"XLITE_DP_SIZE>1 requires FORWARD_BACKEND=xlite (got {_fb!r}); torch_npu does not support DP."
         )
     tp_size = world_size // dp_size
     os.environ["XLITE_TP_SIZE"] = str(tp_size)
@@ -232,8 +227,10 @@ def main(
         print = lambda *_, **__: None
     elif dp_size > 1:
         _rk = rank
+
         def _print(*a, **kw):
             _raw_print(f"[rank{_rk}]", *a, **kw)
+
         print = _print
     torch.npu.set_device(local_rank)
     torch.npu.config.allow_internal_format = True
@@ -247,6 +244,7 @@ def main(
             config["max_seq_len"] = max(config.get("max_seq_len", 1024), bench_prompt_len + bench_new_tokens)
         # Filter config to only ModelArgs fields to avoid TypeError from extra keys
         from dataclasses import fields as _dc_fields
+
         _valid_keys = {f.name for f in _dc_fields(ModelArgs)}
         args = ModelArgs(**{k: v for k, v in config.items() if k in _valid_keys})
     print(args)
@@ -260,6 +258,7 @@ def main(
     tokenizer.decode(completion_tokens[0])
 
     import json as _json
+
     _eos_ids = [tokenizer.eos_token_id]
     try:
         _gc_path = os.path.join(ckpt_path, "generation_config.json")
@@ -353,9 +352,19 @@ def main(
                 messages.clear()
                 continue
             messages.append({"role": "user", "content": prompt})
-            if model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm4_moe_flash", "glm5", "glm5_next", "minimax_m2"}:
+            if model_type in {
+                "deepseek_v3",
+                "deepseek_v4",
+                "glm4_moe",
+                "glm4_moe_flash",
+                "glm5",
+                "glm5_next",
+                "minimax_m2",
+            }:
                 try:
-                    prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_dict=False)
+                    prompt_tokens = tokenizer.apply_chat_template(
+                        messages, add_generation_prompt=True, return_dict=False
+                    )
                 except (ValueError, TypeError):
                     # Tokenizer has no chat_template (e.g. DeepSeek-V4-Flash ckpt);
                     # see the single-mode fallback below for the rationale.
@@ -389,13 +398,21 @@ def main(
     else:
         if rank == 0:
             _raw_print("start to run")
-        with open(input_file, "r", encoding="utf-8") as file:
+        with open(input_file, encoding="utf-8") as file:
             data = json.load(file)
 
         def process_batch(batch, tokenizer, model, max_new_tokens, eos_token_id, temperature, no_prefix):
             if no_prefix:
                 prompts_tokens_batch = [tokenizer.encode(item["query"]) for item in batch]
-            elif model_type in {"deepseek_v3", "deepseek_v4", "glm4_moe", "glm4_moe_flash", "glm5", "glm5_next", "minimax_m2"}:
+            elif model_type in {
+                "deepseek_v3",
+                "deepseek_v4",
+                "glm4_moe",
+                "glm4_moe_flash",
+                "glm5",
+                "glm5_next",
+                "minimax_m2",
+            }:
                 prompts_tokens_batch = []
                 for item in batch:
                     try:
@@ -416,18 +433,14 @@ def main(
                 prompts_tokens_batch = [tokenizer.encode(f"<s>[INST] {item['query']} [/INST] ") for item in batch]
             elif model_type in {"qwen2", "qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe"}:
                 prompts_tokens_batch = [
-                    apply_qwen_chat_template(
-                        tokenizer, [{"role": "user", "content": item["query"]}], model_type
-                    )
+                    apply_qwen_chat_template(tokenizer, [{"role": "user", "content": item["query"]}], model_type)
                     for item in batch
                 ]
             else:
                 prompts_tokens_batch = [tokenizer.encode(item["query"]) for item in batch]
 
             s = time.monotonic_ns()
-            completion_tokens_batch, step = generate(
-                model, prompts_tokens_batch, max_new_tokens, eos_ids, temperature
-            )
+            completion_tokens_batch, step = generate(model, prompts_tokens_batch, max_new_tokens, eos_ids, temperature)
             c = time.monotonic_ns()
             d = (c - s) / 1e6
 
@@ -470,7 +483,9 @@ def main(
         local_stats = []
         for i in range(0, len(local_data), local_batch_size):
             batch = local_data[i : i + local_batch_size]
-            local_stats.append(process_batch(batch, tokenizer, model, max_new_tokens, tokenizer.eos_token_id, temperature, no_prefix))
+            local_stats.append(
+                process_batch(batch, tokenizer, model, max_new_tokens, tokenizer.eos_token_id, temperature, no_prefix)
+            )
             if dp_size > 1:
                 dist.barrier()
 
@@ -480,9 +495,7 @@ def main(
             # rank 0 picks the dp_rank=0 member of each DP group (global ranks
             # 0, tp_size, 2*tp_size, ...) — the real shards; TP ranks are replicas.
             gathered = [None] * world_size if rank == 0 else None
-            dist.gather_object(local_data,
-                               object_gather_list=gathered if rank == 0 else None,
-                               dst=0)
+            dist.gather_object(local_data, object_gather_list=gathered if rank == 0 else None, dst=0)
             if rank == 0:
                 merged = [None] * n
                 for src_dp in range(dp_size):

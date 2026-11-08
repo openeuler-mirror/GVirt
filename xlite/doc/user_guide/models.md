@@ -25,7 +25,6 @@ xlite 支持以下大语言模型的推理部署：
 | Qwen3-VL-30B-A3B | ✅ |
 | Qwen3-VL-235B-A22B | ✅ |
 
-
 ## 支持硬件
 
 - Ascend A2

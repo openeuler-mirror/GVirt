@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """AISBench dataset registry shared by batch_aisbench.py and daily_aisbench_bot.py.
 
 Holds one :class:`DatasetSpec` per supported dataset: how to download it, which
@@ -65,9 +64,7 @@ def _git_clone_dataset(url: str, target: Path, lfs_exclude: str = "") -> None:
             subprocess.run(["git", "clone", "--depth", "1", url, str(target)], env=env),
             f"Failed to clone dataset from {url}",
         )
-    check_subprocess_result(
-        subprocess.run(pull_args, env=env_with_proxy()), f"Failed to pull LFS assets from {url}"
-    )
+    check_subprocess_result(subprocess.run(pull_args, env=env_with_proxy()), f"Failed to pull LFS assets from {url}")
     res = subprocess.run(ls_args, capture_output=True, text=True)
     check_subprocess_result(res, f"Failed to list LFS assets of {target}")
     # `lfs ls-files` flags a `-` entry both for pointer stubs and for locally modified files

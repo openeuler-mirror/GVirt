@@ -9,9 +9,24 @@ MHA/GQA 的 flash(在线 softmax)注意力算子,是 attention 的长序列版�
 Python 侧调用(规范签名见 `xlite/_C.pyi` 的 `attention`,关键字参数 `enable_flash_attention: bool = False`、`tile_size_of_cached_kv: int = 8192`;置 `enable_flash_attention=True` 即路由到本算子。`tests/kernels/attention.py` 以局部变量 `enable_flash` 按位置传入该开关,关键字 `enable_flash = False`):
 
 ```python
-attention(rt, qkv, k_cache, v_cache, output, query_start_loc, query_lens,
-          cached_lens, block_tables, n_heads, n_kv_heads, head_dim,
-          BLOCK_SIZE, batch, enable_flash_attention=True, tile_size_of_cached_kv=8192)
+attention(
+    rt,
+    qkv,
+    k_cache,
+    v_cache,
+    output,
+    query_start_loc,
+    query_lens,
+    cached_lens,
+    block_tables,
+    n_heads,
+    n_kv_heads,
+    head_dim,
+    BLOCK_SIZE,
+    batch,
+    enable_flash_attention=True,
+    tile_size_of_cached_kv=8192,
+)
 ```
 
 host 封装 `Attention(enableFlashAttention=true)` 分支 → `XliteOpFlashAttention`(`csrc/_C.cpp` 的 `Attention`(`enableFlashAttention=true` 分支)、`csrc/op.cpp` 的 `XliteOpFlashAttention`)。kernel 签名(`csrc/kernels/flash_attention.h` 的 `flash_attention_<dtype>` 入口,宏 `FLASH_ATTN_FUNC_DEFINE`):

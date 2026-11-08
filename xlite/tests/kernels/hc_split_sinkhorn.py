@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -16,6 +15,7 @@ gate segments to GM —
   comb [K*K]  = sinkhorn(softmax(mixes[:, 2K:] * scale[2] + base[2K:]) + eps)
 No head path; hc_base is always the full [(2+K)*K] block.
 """
+
 import sys
 
 import torch
@@ -32,10 +32,9 @@ def hc_split_sinkhorn_ref(mixes, hc_scale, hc_base, hc_mult=4, sinkhorn_iters=20
     Sinkhorn: col-norm once, then (row-norm, col-norm) * (iters-1); denom = sum + eps.
     """
     pre = torch.sigmoid(mixes[..., :hc_mult] * hc_scale[0] + hc_base[:hc_mult]) + eps
-    post = 2.0 * torch.sigmoid(
-        mixes[..., hc_mult:2 * hc_mult] * hc_scale[1] + hc_base[hc_mult:2 * hc_mult])
+    post = 2.0 * torch.sigmoid(mixes[..., hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult])
 
-    comb = mixes[..., 2 * hc_mult:] * hc_scale[2] + hc_base[2 * hc_mult:]
+    comb = mixes[..., 2 * hc_mult :] * hc_scale[2] + hc_base[2 * hc_mult :]
     b, s, _ = comb.shape
     comb = comb.view(b, s, hc_mult, hc_mult)
     comb = torch.softmax(comb, dim=-1) + eps
@@ -74,7 +73,8 @@ def run_case(b, s, sinkhorn_iters, eps):
     mixes_flat = mixes_3d.view(n, MIX_HC).contiguous()
 
     ref_pre, ref_post, ref_comb = hc_split_sinkhorn_ref(
-        mixes_3d, hc_scale, hc_base, hc_mult=HC_MULT, sinkhorn_iters=sinkhorn_iters, eps=eps)
+        mixes_3d, hc_scale, hc_base, hc_mult=HC_MULT, sinkhorn_iters=sinkhorn_iters, eps=eps
+    )
     ref_pre = ref_pre.view(n, HC_MULT)
     ref_post = ref_post.view(n, HC_MULT)
     ref_comb = ref_comb.view(n, HC_MULT * HC_MULT)
@@ -84,8 +84,7 @@ def run_case(b, s, sinkhorn_iters, eps):
         post = torch.empty(n, HC_MULT, dtype=torch.float32)
         comb = torch.empty(n, HC_MULT * HC_MULT, dtype=torch.float32)
     torch.npu.synchronize()
-    hc_split_sinkhorn(rt, mixes_flat, hc_scale, hc_base, pre, post, comb, HC_MULT, eps,
-                      sinkhorn_iters)
+    hc_split_sinkhorn(rt, mixes_flat, hc_scale, hc_base, pre, post, comb, HC_MULT, eps, sinkhorn_iters)
     torch.npu.synchronize()
 
     tag = f"b={b} s={s} iters={sinkhorn_iters} eps={eps}"
@@ -107,7 +106,7 @@ def run_case(b, s, sinkhorn_iters, eps):
 
 if __name__ == "__main__":
     all_ok = True
-    for (b, s, iters, eps) in CASES:
+    for b, s, iters, eps in CASES:
         all_ok &= run_case(b, s, iters, eps)
     if all_ok:
         print("==== all hc_split_sinkhorn cases passed ====")

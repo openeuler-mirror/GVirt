@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,13 +6,15 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-import torch
-import torch_npu  # noqa: F401
+import math
 import random
 import sys
-from xlite._C import Runtime, sigmoid_topk
+
 import numpy as np
-import math
+import torch
+import torch_npu  # noqa: F401
+
+from xlite._C import Runtime, sigmoid_topk
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
@@ -63,18 +64,12 @@ for dtype in [torch.bfloat16, torch.float32]:
         # bf16 and only on some random draws. Match the kernel: fp32 throughout, cast at the end.
         scores_sigmoid = scores.float().sigmoid()
         standard_sigmoid = (scores_sigmoid + bias) if has_bias else scores_sigmoid
-        group_scores = (
-            standard_sigmoid.view(-1, n_group, n_routed_experts // n_group)
-            .topk(2, dim=-1)[0]
-            .sum(dim=-1)
-        )
+        group_scores = standard_sigmoid.view(-1, n_group, n_routed_experts // n_group).topk(2, dim=-1)[0].sum(dim=-1)
         group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]
         group_mask = torch.zeros_like(group_scores)
         group_mask.scatter_(1, group_idx, 1)
         score_mask = (
-            group_mask.unsqueeze(-1)
-            .expand(-1, n_group, n_routed_experts // n_group)
-            .reshape(-1, n_routed_experts)
+            group_mask.unsqueeze(-1).expand(-1, n_group, n_routed_experts // n_group).reshape(-1, n_routed_experts)
         )
         standard_sigmoid = standard_sigmoid.masked_fill(~score_mask.bool(), 0.0)
         standard_indices = torch.topk(standard_sigmoid, k=topK, dim=-1, sorted=False)[1]
@@ -85,11 +80,15 @@ for dtype in [torch.bfloat16, torch.float32]:
         standard_weights = standard_weights.to(dtype)
 
         torch.npu.synchronize()
-        sigmoid_topk(rt, scores, indices, bias, scale, xlite_weights_out, xlite_indices_out, n_group, topk_group, topK, True)
+        sigmoid_topk(
+            rt, scores, indices, bias, scale, xlite_weights_out, xlite_indices_out, n_group, topk_group, topK, True
+        )
         torch.npu.synchronize()
-        cfg = (f'n_routed_experts={n_routed_experts}, n_group={n_group}, '
-               f'topk_group={topk_group}, topK={topK}, has_bias={has_bias}, dtype={dtype}')
-        print(f'sigmoid topK ({cfg}) executed!')
+        cfg = (
+            f"n_routed_experts={n_routed_experts}, n_group={n_group}, "
+            f"topk_group={topk_group}, topK={topK}, has_bias={has_bias}, dtype={dtype}"
+        )
+        print(f"sigmoid topK ({cfg}) executed!")
 
         # Convert Xlite outputs from bitmaps to lists of indices
         xlite_indices_cpu = xlite_indices_out.cpu()
@@ -119,16 +118,16 @@ for dtype in [torch.bfloat16, torch.float32]:
             torch.testing.assert_close(standard_weights, xlite_weights, atol=1e-4, rtol=1e-2)
         except AssertionError as e:
             n_fail += 1
-            print(f'[FAIL] {cfg}')
-            print(f'{e}')
-            print(f'standard_indices:\n{standard_indices}')
-            print(f'xlite_indices:\n{xlite_indices}')
-            print(f'standard_weights:\n{standard_weights}')
-            print(f'xlite_weights:\n{xlite_weights}')
+            print(f"[FAIL] {cfg}")
+            print(f"{e}")
+            print(f"standard_indices:\n{standard_indices}")
+            print(f"xlite_indices:\n{xlite_indices}")
+            print(f"standard_weights:\n{standard_weights}")
+            print(f"xlite_weights:\n{xlite_weights}")
         else:
-            print(f'[PASS] {cfg}')
+            print(f"[PASS] {cfg}")
 
 if n_fail:
-    print(f'FAIL: {n_fail} sigmoid_topK config(s) mismatched')
+    print(f"FAIL: {n_fail} sigmoid_topK config(s) mismatched")
     sys.exit(1)
-print(f'PASS: all {n_total} sigmoid_topK configs matched')
+print(f"PASS: all {n_total} sigmoid_topK configs matched")

@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -26,13 +25,13 @@ single-channel variants, cachedLens window reload (44929 rows), and host-side
 rejection of a channel emptiness mismatch.
 """
 
-from __future__ import absolute_import
-
 import itertools
 import logging
+
 import numpy as np
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, gather_sparse_kv_cache
 
 logging.getLogger().setLevel(logging.INFO)
@@ -68,9 +67,9 @@ work = [
     # dense->sparse across its query tokens (e.g. [2047] + qlen 64 at topK=2048:
     # q=0 dense (2048==topK), q=63 sparse (2111>2048)) — exercises the packed
     # inOffset = queryStartLoc[b] + q addressing
-    (1, [0], [128]),          # pure prefill, no cached KV (always dense up to topK)
-    (1, [100], [30]),         # prefill after a prefix cache
-    (1, [2047], [64]),        # q=0 dense -> q=63 sparse at topK=2048
+    (1, [0], [128]),  # pure prefill, no cached KV (always dense up to topK)
+    (1, [100], [30]),  # prefill after a prefix cache
+    (1, [2047], [64]),  # q=0 dense -> q=63 sparse at topK=2048
     (2, [4000, 0], [1, 77]),  # mixed decode + prefill in one batch
     (2, [8191, 127], [64, 1]),
 ]
@@ -278,32 +277,24 @@ def run_test(
         pitch = 2 if pitched else 1
         if channels == "pe":
             k_cache_xlite = torch.zeros(0, dtype=test_dtype)
-            pe_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1,
-                                         rope_head_dim)[::pitch]
+            pe_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1, rope_head_dim)[::pitch]
         elif channels == "k":
-            k_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1,
-                                        kv_lora_rank)[::pitch]
+            k_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1, kv_lora_rank)[::pitch]
             pe_cache_xlite = torch.zeros(0, dtype=test_dtype)
         else:
-            k_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1,
-                                        kv_lora_rank)[::pitch]
-            pe_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1,
-                                         rope_head_dim)[::pitch]
+            k_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1, kv_lora_rank)[::pitch]
+            pe_cache_xlite = torch.randn(kvcache_block_num * pitch, BLOCK_SIZE, 1, rope_head_dim)[::pitch]
 
         # block_tables: 2-D [batch, width]; persistent_table pads the width with
         # stale trails (the op narrows to the lens-derived width, pitch unchanged)
         if shared_single_block:
             block_tables = torch.zeros(batch, bt_width, dtype=torch.int32)
         elif permuted_blocks:
-            block_tables = torch.randperm(max_num_blocks * batch).to(torch.int32).reshape(
-                batch, max_num_blocks
-            )
+            block_tables = torch.randperm(max_num_blocks * batch).to(torch.int32).reshape(batch, max_num_blocks)
         else:
             batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
             block_indices = np.arange(max_num_blocks, dtype=np.uint32)
-            block_tables = torch.tensor(
-                (batch_indices * max_num_blocks + block_indices).tolist(), dtype=torch.int32
-            )
+            block_tables = torch.tensor((batch_indices * max_num_blocks + block_indices).tolist(), dtype=torch.int32)
         if persistent_table:
             padded = torch.zeros(batch, bt_width, dtype=torch.int32)
             padded[:, :max_num_blocks] = block_tables
@@ -375,10 +366,7 @@ def run_test(
             else:
                 sparse_rows += 1
                 toks = topk_indices_cpu[in_offset].tolist()
-            phys = [
-                bt[b * bt_row + (t if toks is None else toks[t]) // BLOCK_SIZE]
-                for t in range(valid_cnt)
-            ]
+            phys = [bt[b * bt_row + (t if toks is None else toks[t]) // BLOCK_SIZE] for t in range(valid_cnt)]
             off = [(t if toks is None else toks[t]) % BLOCK_SIZE for t in range(valid_cnt)]
             row_valid.append(valid_cnt)
             row_flat_idx.append([p * BLOCK_SIZE + o for p, o in zip(phys, off)])
@@ -408,7 +396,9 @@ def run_test(
         BLOCK_SIZE,
         kv_lora_rank,
         rope_head_dim,
-        kv_heads=kv_heads, compress_ratio=compress_ratio, burst_copy_size=burst_copy_size,
+        kv_heads=kv_heads,
+        compress_ratio=compress_ratio,
+        burst_copy_size=burst_copy_size,
     )
     torch.npu.synchronize()
 
@@ -500,9 +490,24 @@ def run_host_check_cases():
         raise AssertionError(f"host check accepted invalid input: {desc}")
 
     expect_rejected(
-        "channel mismatch", k_cache, pe_cache, block_tables, topk_indices, query_start_loc, query_lens,
-        cached_lens, k_dense, torch.zeros(0, dtype=torch.bfloat16), 1, topK, BLOCK_SIZE, kv, pe,
-        kv_heads=1, compress_ratio=1, burst_copy_size=16 * 1024,
+        "channel mismatch",
+        k_cache,
+        pe_cache,
+        block_tables,
+        topk_indices,
+        query_start_loc,
+        query_lens,
+        cached_lens,
+        k_dense,
+        torch.zeros(0, dtype=torch.bfloat16),
+        1,
+        topK,
+        BLOCK_SIZE,
+        kv,
+        pe,
+        kv_heads=1,
+        compress_ratio=1,
+        burst_copy_size=16 * 1024,
     )
 
 
@@ -515,8 +520,7 @@ def main():
         for batch, cached_lens, query_lens in cases
     ]
     assert all(
-        len(cached_lens) == batch and len(query_lens) == batch
-        for _, batch, cached_lens, query_lens in work_cases
+        len(cached_lens) == batch and len(query_lens) == batch for _, batch, cached_lens, query_lens in work_cases
     )
     for (compress_ratio, batch, cached_lens, query_lens), topK, order, burst_copy_size in itertools.product(
         work_cases, topk_values, orders, burst_sizes

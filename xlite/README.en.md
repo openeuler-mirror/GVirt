@@ -8,7 +8,6 @@
 
 xlite (GVirt Frontend): A lightweight Transformer model runtime that supports diverse computing power collaboration, currently supporting efficient execution on Ascend hardware. xlite exposes the model graph construction and operators required for Transformer runtime, with all operators developed based on Ascend AscendC/CCE.
 
-
 ## Background and Motivation
 
 In large model inference scenarios, the traditional single-stream serial execution mode has the following problems:
@@ -32,8 +31,6 @@ In the GLM-4.7 dual-node inference scenario (40K input, 1K output, ~90% prefix c
 
 For detailed performance data, refer to [PR #7935](https://github.com/vllm-project/vllm-ascend/pull/7935).
 
-
-
 ## Software Architecture
 
 ![image](doc/images/architecture.png)
@@ -41,7 +38,6 @@ For detailed performance data, refer to [PR #7935](https://github.com/vllm-proje
 xlite has been adapted for vllm_ascend and can be quickly enabled through xlite_graph_config configuration. For usage instructions, refer to the [official guide documentation](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html).
 
 For supported models, see [Model List](doc/user_guide/models.md).
-
 
 ## Quick Start
 
@@ -60,7 +56,11 @@ import os
 from vllm import LLM
 
 # xlite supports decode-only mode by default, enable full mode by setting "full_mode": True
-model = LLM(model="path/to/Qwen3-32B", tensor_parallel_size=8, additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}})
+model = LLM(
+    model="path/to/Qwen3-32B",
+    tensor_parallel_size=8,
+    additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}},
+)
 outputs = model.generate("Hello, how are you?")
 ```
 

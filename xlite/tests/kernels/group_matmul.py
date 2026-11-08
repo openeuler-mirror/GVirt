@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,10 +7,10 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-import torch_npu  # noqa: F401
-from xlite._C import Runtime, group_matmul
 import torch.nn.functional as F
+import torch_npu  # noqa: F401
 
+from xlite._C import Runtime, group_matmul
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
@@ -69,7 +68,7 @@ for transpose in [False, True]:
         group_matmul(rt, x, weights, [], counts, 0, group_num, out_dim, in_dim, z, False, transpose)
         torch.npu.synchronize()
 
-        print(f'group_matmul ({dtype}, transpose={transpose}) executed!')
+        print(f"group_matmul ({dtype}, transpose={transpose}) executed!")
 
         # torch_npu and xlite both accumulate in fp32 but split K differently, so
         # results legitimately differ by 1 output ULP (bf16 ULP is up to 2^-8
@@ -79,6 +78,6 @@ for transpose in [False, True]:
         try:
             torch.testing.assert_close(result, z, atol=2e-3, rtol=1e-2)
         except AssertionError as e:
-            print(f'{e}')
-            print(f'torch_npu: {result}')
-            print(f'xlite: {z}')
+            print(f"{e}")
+            print(f"torch_npu: {result}")
+            print(f"xlite: {z}")

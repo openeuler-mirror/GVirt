@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -20,9 +19,11 @@
 
 import logging
 import os
+
 import numpy as np
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, split
 
 logging.getLogger().setLevel(logging.INFO)
@@ -60,8 +61,7 @@ def run_test(num_packets, sizes_elems, dtype, msg):
     in_host = to_numpy(in_)
 
     outputs = [
-        torch.empty(sizes_elems[j] * num_packets, dtype=dtype, device=f"npu:{DEVICE}")
-        for j in range(len(sizes_elems))
+        torch.empty(sizes_elems[j] * num_packets, dtype=dtype, device=f"npu:{DEVICE}") for j in range(len(sizes_elems))
     ]
 
     torch.npu.synchronize()
@@ -74,19 +74,16 @@ def run_test(num_packets, sizes_elems, dtype, msg):
     for i in range(num_packets):
         for j in range(len(sizes_elems)):
             n = sizes_elems[j]
-            ref[j][i * n:(i + 1) * n] = in_host[off:off + n]
+            ref[j][i * n : (i + 1) * n] = in_host[off : off + n]
             off += n
 
     for j in range(len(sizes_elems)):
         got = to_numpy(outputs[j])
         if not np.array_equal(got, ref[j]):
-            raise AssertionError(
-                f"{msg}: segment {j} mismatch\n  got={got[:16]}\n  ref={ref[j][:16]}"
-            )
+            raise AssertionError(f"{msg}: segment {j} mismatch\n  got={got[:16]}\n  ref={ref[j][:16]}")
     total_kb = total_elems * es / 1024
     logging.info(
-        f"{msg}: PASS (num_packets={num_packets}, "
-        f"sizes_elems={sizes_elems}, dtype={dtype}, total={total_kb:.0f}KB)"
+        f"{msg}: PASS (num_packets={num_packets}, sizes_elems={sizes_elems}, dtype={dtype}, total={total_kb:.0f}KB)"
     )
 
 
@@ -120,7 +117,7 @@ if __name__ == "__main__":
                 [1, 1],
                 [7, 3],
                 [16, 32, 64],
-                [1, 2, 3, 4, 5, 6, 7, 8],   # 8 segments (max supported)
+                [1, 2, 3, 4, 5, 6, 7, 8],  # 8 segments (max supported)
                 [1024, 256, 128],
             ]:
                 msg = f"[small/{dtype}/{num_packets}/{sizes_elems}]"
@@ -144,7 +141,7 @@ if __name__ == "__main__":
                 msg = f"[large/{dtype}/{num_packets}/{seg_elems}]"
                 run_test(num_packets, sizes_elems, dtype, msg)
                 cases += 1
-    logging.info(f"split large sweep done, running minimax_m2-scale case")
+    logging.info("split large sweep done, running minimax_m2-scale case")
 
     # ---- (3) minimax_m2 real workload: packedRecv scale ----
     # After AllGather, packedRecv = totalBytes * defDpSize. With defDpSize packets,
@@ -158,7 +155,7 @@ if __name__ == "__main__":
         total_bytes = sum(sizes_elems) * es * num_packets
         if total_bytes > max_bytes:
             continue
-        msg = f"[minimax_m2/m={m}/np={num_packets}/total={total_bytes/1024/1024:.0f}MB]"
+        msg = f"[minimax_m2/m={m}/np={num_packets}/total={total_bytes / 1024 / 1024:.0f}MB]"
         # all segments share dtype for the test harness; sizes in elements
         run_test(num_packets, sizes_elems, dtype_pair, msg)
         cases += 1

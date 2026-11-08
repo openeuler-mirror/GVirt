@@ -25,6 +25,7 @@ python3 feat_verify.py --feature <特性名> --xlite-mode <模式> [--port 8055]
 ```
 
 **两个必填参数**：
+
 - `--feature`：特性名，共 31 个（见第三节列表，`--help` 可查）
 - `--xlite-mode`：xlite 模式，`xlite_decode_only` / `xlite_full_mode`（另可选 `none` 跑无 xlite 的纯 vllm-ascend 基线对比）
 
@@ -46,6 +47,7 @@ python3 feat_verify.py --feature cpu_binding --xlite-mode xlite_full_mode
 共 31 个特性（× 2 模式 = 62 用例）。特性的特有配置（additional_config、环境变量、额外 CLI、模型/tp 覆盖等）已在脚本 `FEATURES` 字典里预设好，无需手动传。
 
 **配置原则**：baseline 仅含 `xlite_graph_config`（模式相关），不显式配置任何特性开关；各特性用例单独测非默认路径。
+
 - **代码默认 True**（baseline 走默认即开）→ 各用例测**关闭**场景：`fuse_muls_add`、`enable_npugraph_ex`、`enable_mlapo`、`enable_cpu_binding`、`weight_nz_mode`(默认 1)、`multistream_dsv4_dsa_overlap`、`async_scheduling`、`enable_chunked_prefill`
 - **代码默认 False**（baseline 不开）→ 各用例测**开启**场景：`enable_balance_scheduling`、`enable_flashcomm1`、`multistream_overlap_shared_expert`
 - **APC 特例**：脚本 baseline 强制 `--no-enable-prefix-caching`（关闭），`apc` 用例改测 `--enable-prefix-caching` 开启路径
@@ -137,8 +139,8 @@ done
 ## 七、结果与日志位置
 
 - **结果表**（运行时生成，每跑一个用例自动追加一行，统一写入 feat_verify_logs/）：
-  - `xlite/tests/e2e/feat_verify_logs/feat_verify.md`
-  - `xlite/tests/e2e/feat_verify_logs/feat_verify_results.csv`（同内容的 CSV 版）
+    - `xlite/tests/e2e/feat_verify_logs/feat_verify.md`
+    - `xlite/tests/e2e/feat_verify_logs/feat_verify_results.csv`（同内容的 CSV 版）
 - **详细日志**：`xlite/tests/e2e/feat_verify_logs/<特性>_<模式>_<端口>/`
 
 每个用例子目录包含：

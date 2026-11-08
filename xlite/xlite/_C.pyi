@@ -7,7 +7,7 @@ The typing and docstrings are designed for Python 3.9 to 3.12.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional, Sequence, Union, overload
+from typing import List, Optional, Sequence, overload
 
 import torch
 
@@ -2783,7 +2783,6 @@ def mla_cache_c8(
     ``pe`` is BF16[T,R]; ``slot_mapping`` is INT32[T], with -1 entries skipped.
     Inputs are already normalized/rotated. Active destination slots must be distinct.
     """
-
 
 def mla_prepare(
     rt: Runtime,

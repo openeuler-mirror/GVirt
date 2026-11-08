@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -13,6 +12,7 @@ These are simplified ports of the tilelang kernels in dsv4/inference/kernel.py s
 that the V4 reference path runs on NPU without requiring tilelang compilation.
 Correctness is preserved; performance is not optimized.
 """
+
 import torch
 import torch.nn.functional as F
 
@@ -109,11 +109,11 @@ def hc_split_sinkhorn(
     pre = torch.sigmoid(m[:, :hc_mult] * hc_scale[0] + hc_base[:hc_mult]) + eps
 
     # post: [n, hc_mult], 2 * sigmoid(mixes[:, hc_mult:2*hc_mult] * scale[1] + base[hc_mult:2*hc_mult])
-    post = 2 * torch.sigmoid(m[:, hc_mult:2 * hc_mult] * hc_scale[1] + hc_base[hc_mult:2 * hc_mult])
+    post = 2 * torch.sigmoid(m[:, hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult])
 
     # comb: [n, hc_mult, hc_mult]
-    comb = m[:, 2 * hc_mult:].view(n, hc_mult, hc_mult)
-    comb = comb * hc_scale[2] + hc_base[2 * hc_mult:].view(1, hc_mult, hc_mult)
+    comb = m[:, 2 * hc_mult :].view(n, hc_mult, hc_mult)
+    comb = comb * hc_scale[2] + hc_base[2 * hc_mult :].view(1, hc_mult, hc_mult)
 
     # comb = comb.softmax(-1) + eps
     comb = comb.softmax(dim=-1) + eps

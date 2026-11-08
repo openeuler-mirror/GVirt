@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -20,9 +19,11 @@
 
 import logging
 import os
+
 import numpy as np
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, concat
 
 logging.getLogger().setLevel(logging.INFO)
@@ -68,8 +69,7 @@ def run_test(n_inputs, dtype, seg_elems, msg):
     if not np.array_equal(got, ref):
         raise AssertionError(f"{msg}: mismatch\n  got={got[:16]}\n  ref={ref[:16]}")
     total_kb = seg_elems * n_inputs * es / 1024
-    logging.info(f"{msg}: PASS (n={n_inputs}, dtype={dtype}, "
-                 f"seg_elems={seg_elems}, total={total_kb:.0f}KB)")
+    logging.info(f"{msg}: PASS (n={n_inputs}, dtype={dtype}, seg_elems={seg_elems}, total={total_kb:.0f}KB)")
 
 
 def run_test_mixed_dtypes(input_specs, msg):
@@ -131,7 +131,7 @@ if __name__ == "__main__":
                 msg = f"[large/{dtype}/{n_inputs}/{seg_elems}]"
                 run_test(n_inputs, dtype, seg_elems, msg)
                 cases += 1
-    logging.info(f"concat large sweep done, running minimax_m2-scale case")
+    logging.info("concat large sweep done, running minimax_m2-scale case")
 
     # ---- (3) minimax_m2 real workload: packedSend scale ----
     # hiddenSize=3072, n_routed_experts=256, bfloat16, m up to 32768 tokens.
@@ -142,12 +142,12 @@ if __name__ == "__main__":
     for m in [8, 512, 4096, 32768]:
         spec = [
             (torch.bfloat16, m * 3072),  # input
-            (torch.float32, m * 256),    # weights (FP32)
-            (torch.int8, m * 32),         # routing (~ m*n_experts/8 bytes)
+            (torch.float32, m * 256),  # weights (FP32)
+            (torch.int8, m * 32),  # routing (~ m*n_experts/8 bytes)
         ]
         total_bytes = m * 3072 * 2 + m * 256 * 4 + m * 32
         if total_bytes > max_bytes:
-            logging.info(f"[minimax_m2/m={m}] skipped (total={total_bytes/1024/1024:.1f}MB > pool)")
+            logging.info(f"[minimax_m2/m={m}] skipped (total={total_bytes / 1024 / 1024:.1f}MB > pool)")
             continue
         msg = f"[minimax_m2/m={m}/total={total_bytes / 1024 / 1024:.1f}MB]"
         run_test_mixed_dtypes(spec, msg)

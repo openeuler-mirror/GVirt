@@ -19,8 +19,9 @@ w = w / sum(w) * scale                  # 归一化(总是执行)再乘 route_sc
 Python 侧调用(`tests/kernels/sqrtsoftplus_hash_topk.py` 中 `sqrtsoftplus_hash_topk(rt, ...)` 调用):
 
 ```python
-sqrtsoftplus_hash_topk(rt, scores, indices_helper, bias, input_ids, tid2eid,
-                       out_weights, routing_map, scale, top_k, use_hash)
+sqrtsoftplus_hash_topk(
+    rt, scores, indices_helper, bias, input_ids, tid2eid, out_weights, routing_map, scale, top_k, use_hash
+)
 ```
 
 host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpSqrtsoftplusHashTopK`。kernel 签名(`csrc/kernels/sqrtsoftplus_hash_topk.h` 的 `SQRTSOFTPLUS_HASH_TOPK_FUNC_DEFINE` 宏 / `sqrtsoftplus_hash_topk_<dtype>` 入口):

@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -11,9 +10,9 @@
 # sparse [M,N] weight row (K nonzero slots) + a [M,ceil(N/32)] BIT1 routing bitmap; the
 # dense top-k indices are internal. hash=True gathers indices from tid2eid[input_ids] and
 # passes bias as null (dead weight there). See ref_gate below.
+import numpy as np
 import torch
 import torch_npu  # noqa: F401
-import numpy as np
 
 from xlite._C import Runtime, sqrtsoftplus_hash_topk
 
@@ -80,28 +79,33 @@ for dtype in [torch.bfloat16, torch.float32]:
         # ops (memory: ascendc-torch-randn-npu-rng-pollution).
         scores = torch.randn(n_tokens, n_routed_experts, dtype=dtype, device="cpu").npu()
         indices_helper = torch.arange(n_routed_experts, dtype=torch.int32, device="cpu").npu()
-        bias = (torch.randn(n_routed_experts, dtype=torch.float32, device="cpu").npu()
-                if not use_hash else torch.empty(0, dtype=torch.float32, device="npu:0"))
-        input_ids = (torch.randint(0, vocab_size, (n_tokens,), dtype=torch.int32,
-                                   device="cpu").npu() if use_hash else torch.empty(
-                                       0, dtype=torch.int32, device="npu:0"))
-        tid2eid = (torch.randint(0, n_routed_experts, (vocab_size, top_k),
-                                 dtype=torch.int32, device="cpu").npu() if use_hash else
-                   torch.empty(0, 0, dtype=torch.int32, device="npu:0"))
+        bias = (
+            torch.randn(n_routed_experts, dtype=torch.float32, device="cpu").npu()
+            if not use_hash
+            else torch.empty(0, dtype=torch.float32, device="npu:0")
+        )
+        input_ids = (
+            torch.randint(0, vocab_size, (n_tokens,), dtype=torch.int32, device="cpu").npu()
+            if use_hash
+            else torch.empty(0, dtype=torch.int32, device="npu:0")
+        )
+        tid2eid = (
+            torch.randint(0, n_routed_experts, (vocab_size, top_k), dtype=torch.int32, device="cpu").npu()
+            if use_hash
+            else torch.empty(0, 0, dtype=torch.int32, device="npu:0")
+        )
 
         # Kernel outputs: sparse [M,N] weights (K nonzero slots, rest 0) + [M,ceil(N/32)] BIT1 bitmap.
         out_weights = torch.zeros(n_tokens, n_routed_experts, dtype=dtype, device="npu:0")
         n_bitmap_words = (n_routed_experts + 31) // 32
-        routing_map = torch.zeros(n_tokens, n_bitmap_words, dtype=torch.int32,
-                                  device="npu:0")
+        routing_map = torch.zeros(n_tokens, n_bitmap_words, dtype=torch.int32, device="npu:0")
 
         # Reference recompute on CPU (same data, unpolluted).
         ref_scores = scores.float().cpu()
         ref_bias = bias.cpu() if bias.numel() else None
         ref_input_ids = input_ids.cpu() if use_hash else None
         ref_tid2eid = tid2eid.cpu() if use_hash else None
-        ref_w, ref_idx = ref_gate(ref_scores, ref_bias, ref_input_ids, ref_tid2eid, top_k,
-                                  scale, use_hash)
+        ref_w, ref_idx = ref_gate(ref_scores, ref_bias, ref_input_ids, ref_tid2eid, top_k, scale, use_hash)
         # Scatter ref's dense [M,K] into the kernel's sparse [M,N] layout + matching bitmap.
         ref_sparse = torch.zeros(n_tokens, n_routed_experts, dtype=ref_w.dtype)
         ref_bitmap = torch.zeros(n_tokens, n_bitmap_words, dtype=torch.int32)
@@ -109,18 +113,21 @@ for dtype in [torch.bfloat16, torch.float32]:
             for k in range(top_k):
                 e = int(ref_idx[m, k].item())
                 ref_sparse[m, e] = ref_w[m, k]
-                ref_bitmap[m, e // 32] |= (1 << (e % 32))
+                ref_bitmap[m, e // 32] |= 1 << (e % 32)
 
         n_covered += 1
         if not RUN_KERNEL:
             continue
 
         torch.npu.synchronize()
-        sqrtsoftplus_hash_topk(rt, scores, indices_helper, bias, input_ids, tid2eid,
-                               out_weights, routing_map, scale, top_k, use_hash)
+        sqrtsoftplus_hash_topk(
+            rt, scores, indices_helper, bias, input_ids, tid2eid, out_weights, routing_map, scale, top_k, use_hash
+        )
         torch.npu.synchronize()
-        print(f'sqrtsoftplus_hash_topk (n_experts={n_routed_experts}, topk={top_k}, hash={use_hash}, '
-              f'dtype={dtype}) executed!')
+        print(
+            f"sqrtsoftplus_hash_topk (n_experts={n_routed_experts}, topk={top_k}, hash={use_hash}, "
+            f"dtype={dtype}) executed!"
+        )
 
         close_err = None
         # Dtype-tiered tolerance, mirroring softmax_topk.py: the kernel computes the whole
@@ -130,12 +137,11 @@ for dtype in [torch.bfloat16, torch.float32]:
         # would flag that pre-existing rounding rather than a real defect.
         w_atol = 1e-5 if dtype == torch.float32 else 4e-3
         try:
-            torch.testing.assert_close(ref_sparse.to(dtype).npu(), out_weights,
-                                        atol=w_atol, rtol=1e-3)
+            torch.testing.assert_close(ref_sparse.to(dtype).npu(), out_weights, atol=w_atol, rtol=1e-3)
             torch.testing.assert_close(ref_bitmap.npu(), routing_map)
         except AssertionError as e:
             close_err = e
-            print(f'{e}')
+            print(f"{e}")
         # Per-token nonzero-slot diff; only mismatched tokens print (torch folds the wide row).
         # Same dtype tiering as w_atol above: 1 bf16 ULP at the weight scale is ~2e-3.
         diff_tol = 1e-5 if dtype == torch.float32 else 4e-3
@@ -152,13 +158,13 @@ for dtype in [torch.bfloat16, torch.float32]:
             if rpos == xpos and maxdiff <= diff_tol:
                 continue
             n_mismatch += 1
-            print(f'[m={m}] ref_nonzero({len(rnz)}): {rnz}')
-            print(f'[m={m}] xlt_nonzero({len(xnz)}): {xnz}')
-            print(f'[m={m}] max_abs_diff_over_union = {maxdiff:.2e} (tol={diff_tol:.0e})')
+            print(f"[m={m}] ref_nonzero({len(rnz)}): {rnz}")
+            print(f"[m={m}] xlt_nonzero({len(xnz)}): {xnz}")
+            print(f"[m={m}] max_abs_diff_over_union = {maxdiff:.2e} (tol={diff_tol:.0e})")
         if n_mismatch == 0:
-            print(f'  all {n_tokens} tokens match (within tol {diff_tol:.0e})')
+            print(f"  all {n_tokens} tokens match (within tol {diff_tol:.0e})")
         if close_err is not None or n_mismatch > 0:
             raise AssertionError(
-                f'sqrtsoftplus_hash_topk mismatch (n_experts={n_routed_experts}, topk={top_k}, '
-                f'hash={use_hash}, dtype={dtype}): close_err={close_err}, n_mismatch={n_mismatch}'
+                f"sqrtsoftplus_hash_topk mismatch (n_experts={n_routed_experts}, topk={top_k}, "
+                f"hash={use_hash}, dtype={dtype}): close_err={close_err}, n_mismatch={n_mismatch}"
             ) from close_err

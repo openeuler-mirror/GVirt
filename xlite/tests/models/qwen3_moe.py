@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,23 +6,26 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
+import os
+import queue
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Optional, Literal
+from typing import Literal, Optional, Tuple
 
-import os
 import torch
-import torch_npu  # noqa: F401
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
-import threading
-import queue
+import torch_npu  # noqa: F401
 
-from tests.models.weight_utils import (hf_model_weights_iterator,
-                                       convert_pyslice_to_tensor,
-                                       load_tensor_parallel_weights,
-                                       matrix_nd2nz, logger)
+from tests.models.weight_utils import (
+    convert_pyslice_to_tensor,
+    hf_model_weights_iterator,
+    load_tensor_parallel_weights,
+    logger,
+    matrix_nd2nz,
+)
 
 debug = False
 world_size = 1
@@ -40,9 +42,11 @@ tp_group = None
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     block_size = 128
-    from xlite._C import Runtime, ModelConfig, AttnMeta, AttnMetaV2, AttnMHA, Model, ScoringFuncSoftmax
     import numpy as np
+
     from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
+    from xlite._C import AttnMeta, AttnMetaV2, AttnMHA, Model, ModelConfig, Runtime, ScoringFuncSoftmax
+
 
 @dataclass
 class ModelArgs:
@@ -78,6 +82,7 @@ class ModelArgs:
         if self.head_dim is None:
             self.head_dim = self.dim // self.n_heads
 
+
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
@@ -101,12 +106,15 @@ class ParallelEmbedding(nn.Module):
         vocab_size (int): Vocabulary size.
         dim (int): Embedding dimension.
     """
+
     def __init__(self, vocab_size: int, dim: int):
         super().__init__()
         self.vocab_size = vocab_size
         self.dim = dim
-        assert vocab_size % world_size == 0, f"Vocabulary size must be divisible by world size (world_size={world_size})"
-        self.part_vocab_size = (vocab_size // world_size)
+        assert vocab_size % world_size == 0, (
+            f"Vocabulary size must be divisible by world size (world_size={world_size})"
+        )
+        self.part_vocab_size = vocab_size // world_size
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
         self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
@@ -142,11 +150,13 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
 class Linear(nn.Module):
     dtype = torch.bfloat16
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
+        self.weight = nn.Parameter(
+            torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False
+        )
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
         else:
@@ -157,8 +167,10 @@ class Linear(nn.Module):
 
 
 class ColumnParallelLinear(Linear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
-        assert out_features % world_size == 0, f"Output features must be divisible by world size (world_size={world_size})"
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
+        assert out_features % world_size == 0, (
+            f"Output features must be divisible by world size (world_size={world_size})"
+        )
         self.part_out_features = out_features // world_size
         super().__init__(in_features, self.part_out_features, bias, dtype)
 
@@ -168,8 +180,10 @@ class ColumnParallelLinear(Linear):
 
 
 class RowParallelLinear(Linear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
-        assert in_features % world_size == 0, f"Input features must be divisible by world size (world_size={world_size})"
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
+        assert in_features % world_size == 0, (
+            f"Input features must be divisible by world size (world_size={world_size})"
+        )
         self.part_in_features = in_features // world_size
         super().__init__(self.part_in_features, out_features, bias, dtype)
 
@@ -193,12 +207,12 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 
 
 def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor) -> torch.Tensor:
-    seqlen = x.size(2) # [bsz, n_local_heads, seqlen, head_dim]
-    cos, sin = freqs_cis[start_pos:start_pos + seqlen, :].chunk(2, dim=-1)
-    cos = cos.repeat(1, 2) # [seqlen, head_dim]
+    seqlen = x.size(2)  # [bsz, n_local_heads, seqlen, head_dim]
+    cos, sin = freqs_cis[start_pos : start_pos + seqlen, :].chunk(2, dim=-1)
+    cos = cos.repeat(1, 2)  # [seqlen, head_dim]
     sin = sin.repeat(1, 2)
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
     x_rot = torch.cat((-x2, x1), dim=-1)
     return ((x * cos) + (x_rot * sin)).to(x.dtype)
 
@@ -213,24 +227,37 @@ class MHA(nn.Module):
         self.qk_norm = args.qk_norm
         self.n_local_heads = args.n_heads // world_size
         self.n_local_kv_heads = max(1, args.n_kv_heads // world_size)
-        self.qkv_proj = ColumnParallelLinear(args.dim, (self.n_heads + 2 * self.n_local_kv_heads * world_size) * self.head_dim, bias=args.qkv_bias)
+        self.qkv_proj = ColumnParallelLinear(
+            args.dim, (self.n_heads + 2 * self.n_local_kv_heads * world_size) * self.head_dim, bias=args.qkv_bias
+        )
         self.o_proj = RowParallelLinear(self.n_heads * self.head_dim, args.dim, bias=False)
         if args.qk_norm:
             self.q_norm = RMSNorm(args.head_dim, args.norm_eps)
             self.k_norm = RMSNorm(args.head_dim, args.norm_eps)
         if forward_backend != "xlite":
-            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
-            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
+            self.register_buffer(
+                "k_cache",
+                torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim),
+                persistent=False,
+            )
+            self.register_buffer(
+                "v_cache",
+                torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim),
+                persistent=False,
+            )
 
     def forward(self, x, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         bsz, seqlen, _ = x.shape
 
         qkv = self.qkv_proj(x)
-        q, k, v = qkv.split([
-            self.n_local_heads * self.head_dim,
-            self.n_local_kv_heads * self.head_dim,
-            self.n_local_kv_heads * self.head_dim
-        ], dim=2)
+        q, k, v = qkv.split(
+            [
+                self.n_local_heads * self.head_dim,
+                self.n_local_kv_heads * self.head_dim,
+                self.n_local_kv_heads * self.head_dim,
+            ],
+            dim=2,
+        )
 
         q = q.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         k = k.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
@@ -247,31 +274,35 @@ class MHA(nn.Module):
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
 
-        q = q * self.head_dim ** -0.5
+        q = q * self.head_dim**-0.5
 
-        self.k_cache[:bsz, start_pos:start_pos + seqlen] = k
-        self.v_cache[:bsz, start_pos:start_pos + seqlen] = v
+        self.k_cache[:bsz, start_pos : start_pos + seqlen] = k
+        self.v_cache[:bsz, start_pos : start_pos + seqlen] = v
 
-        keys = self.k_cache[:bsz, :start_pos + seqlen]
-        values = self.v_cache[:bsz, :start_pos + seqlen]
+        keys = self.k_cache[:bsz, : start_pos + seqlen]
+        values = self.v_cache[:bsz, : start_pos + seqlen]
 
         keys = keys.repeat_interleave(self.n_local_heads // self.n_local_kv_heads, dim=2)
         values = values.repeat_interleave(self.n_local_heads // self.n_local_kv_heads, dim=2)
 
         scores = torch.matmul(
             q.transpose(1, 2),  # [bsz, n_local_heads, seqlen, head_dim]
-            keys.permute(0, 2, 3, 1)  # [bsz, n_local_heads, head_dim, seqlen+start_pos]
-        ) # [bsz, n_local_heads, seqlen, seqlen+start_pos]
+            keys.permute(0, 2, 3, 1),  # [bsz, n_local_heads, head_dim, seqlen+start_pos]
+        )  # [bsz, n_local_heads, seqlen, seqlen+start_pos]
 
         if mask is not None:
             scores = scores.float() + mask.float()
 
         scores = torch.softmax(scores, dim=-1, dtype=torch.float).to(x.dtype)
 
-        output = torch.matmul(
-            scores,  # [bsz, n_local_heads, seqlen, seqlen+start_pos]
-            values.transpose(1, 2)  # [bsz, n_local_heads, seqlen+start_pos, head_dim]
-        ).transpose(1, 2).contiguous()  # [bsz, seqlen, n_local_heads, head_dim]
+        output = (
+            torch.matmul(
+                scores,  # [bsz, n_local_heads, seqlen, seqlen+start_pos]
+                values.transpose(1, 2),  # [bsz, n_local_heads, seqlen+start_pos, head_dim]
+            )
+            .transpose(1, 2)
+            .contiguous()
+        )  # [bsz, seqlen, n_local_heads, head_dim]
 
         output = output.reshape(bsz, seqlen, -1)
         return self.o_proj(output)
@@ -298,6 +329,7 @@ class Gate(nn.Module):
         topk (int): Number of top experts activated for each input.
         weight (torch.nn.Parameter): Learnable weights for the gate.
     """
+
     def __init__(self, args: ModelArgs):
         """
         Initializes the Gate module.
@@ -334,6 +366,7 @@ class Expert(nn.Module):
     Expert layer for Mixture-of-Experts (MoE) models.
 
     """
+
     def __init__(self, dim: int, inter_dim: int, args: ModelArgs):
         """
         Initializes the Expert layer.
@@ -374,6 +407,7 @@ class MoE(nn.Module):
         experts (nn.ModuleList): List of expert modules.
         shared_experts (nn.Module): Shared experts applied to all inputs.
     """
+
     def __init__(self, args: ModelArgs):
         """
         Initializes the MoE module.
@@ -382,7 +416,9 @@ class MoE(nn.Module):
             args (ModelArgs): Model arguments containing MoE parameters.
         """
         super().__init__()
-        assert args.n_routed_experts % args.moe_ep_size == 0, f"Number of experts must be divisible by moe ep size (moe_ep_size={args.moe_ep_size})"
+        assert args.n_routed_experts % args.moe_ep_size == 0, (
+            f"Number of experts must be divisible by moe ep size (moe_ep_size={args.moe_ep_size})"
+        )
         # EP spans the FULL world (orthogonal to DP): use the GLOBAL rank, not the
         # TP-local `rank` (rebound to tp_rank in Qwen3MoE.__init__).
         moe_ep_id = global_rank // args.moe_tp_size
@@ -393,8 +429,14 @@ class MoE(nn.Module):
         self.experts_start_idx = moe_ep_id * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
-        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args) if self.experts_start_idx <= i < self.experts_end_idx else None
-                                      for i in range(self.n_routed_experts)])
+        self.experts = nn.ModuleList(
+            [
+                Expert(args.dim, args.moe_inter_dim, args)
+                if self.experts_start_idx <= i < self.experts_end_idx
+                else None
+                for i in range(self.n_routed_experts)
+            ]
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -421,9 +463,12 @@ class MoE(nn.Module):
             dist.all_reduce(y)
         return y.view(shape)
 
+
 def is_layer_moe(args: ModelArgs, layer_id: int):
     return (layer_id not in args.mlp_only_layers) and (
-            args.n_routed_experts > 0 and (layer_id + 1) % args.decoder_sparse_step == 0)
+        args.n_routed_experts > 0 and (layer_id + 1) % args.decoder_sparse_step == 0
+    )
+
 
 class Block(nn.Module):
     def __init__(self, args: ModelArgs, layer_id: int):
@@ -437,7 +482,9 @@ class Block(nn.Module):
         self.post_attention_layernorm = RMSNorm(args.dim, args.norm_eps)
         self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         attn_norm_out = self.input_layernorm(x)
         if debug and rank == 0 and self.layer_id == 0:
             print(f"layer{self.layer_id} in: {attn_norm_out}")
@@ -463,7 +510,7 @@ class Qwen3MoE(nn.Module):
         # DP deployment: world_size = tp_size * dp_size. xlite handles DP natively
         # in C++ (passed via self.global_rank/tp_size/dp_size below); torch_npu does
         # NOT support DP (asserted in generate.py). Dense layers always run pure-TP.
-        global_rank = rank          # pre-rebind global, for MoE EP placement
+        global_rank = rank  # pre-rebind global, for MoE EP placement
         global_world_size = world_size
         self.global_rank = rank
         self.global_world_size = world_size
@@ -480,8 +527,10 @@ class Qwen3MoE(nn.Module):
         rank = self.tp_rank
         tp_group = None  # default group; xlite builds its own C++ comms
         self.tp_group = tp_group
-        assert args.moe_ep_size * args.moe_tp_size == self.global_world_size, (f"moe parallel size(moe_ep_size={args.moe_ep_size}, moe_tp_size={args.moe_tp_size}) "
-                                                                              f"must be same with world_size(world_size={self.global_world_size})")
+        assert args.moe_ep_size * args.moe_tp_size == self.global_world_size, (
+            f"moe parallel size(moe_ep_size={args.moe_ep_size}, moe_tp_size={args.moe_tp_size}) "
+            f"must be same with world_size(world_size={self.global_world_size})"
+        )
         Linear.dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
         super().__init__()
         self.args = args
@@ -496,8 +545,7 @@ class Qwen3MoE(nn.Module):
         self.norm = RMSNorm(args.dim, args.norm_eps)
         self.lm_head = ColumnParallelLinear(args.dim, args.vocab_size, bias=False)
         self.freqs_cis = precompute_freqs_cis(args.head_dim, args.max_seq_len, args.rope_theta)
-        self.multi_task_parallel = (os.getenv("MULTI_TASK_PARALLEL", "0") == "1")
-
+        self.multi_task_parallel = os.getenv("MULTI_TASK_PARALLEL", "0") == "1"
 
     @torch.inference_mode()
     def forward_naive(self, tokens: torch.Tensor, start_pos: int = 0):
@@ -519,7 +567,6 @@ class Qwen3MoE(nn.Module):
             logits = torch.cat(all_logits, dim=-1)
         return logits
 
-
     @torch.inference_mode()
     def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
         """Forward using V2 device-tensor attention metadata (zero-copy path)."""
@@ -531,8 +578,18 @@ class Qwen3MoE(nn.Module):
         attn_meta = self.prepare_xlite_attnmeta_v2(tokens, start_pos)
         stream = torch.npu.current_stream().npu_stream
         h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
-        self.xlite_model.forward_v2(rt=self.xlite_rt, input=tokens.flatten(), attn_meta=attn_meta, kv_cache=self.xlite_kv_cache, freqs_cis=[self.freqs_cis], output=h, curr_stream=stream)
-        self.xlite_model.forward_get_logits(rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream)
+        self.xlite_model.forward_v2(
+            rt=self.xlite_rt,
+            input=tokens.flatten(),
+            attn_meta=attn_meta,
+            kv_cache=self.xlite_kv_cache,
+            freqs_cis=[self.freqs_cis],
+            output=h,
+            curr_stream=stream,
+        )
+        self.xlite_model.forward_get_logits(
+            rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream
+        )
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
@@ -557,7 +614,16 @@ class Qwen3MoE(nn.Module):
                 args, event = task
                 tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream = args
                 self.xlite_rt.multi_task_parallel = True
-                self.xlite_model.forward_and_get_logits(rt=self.xlite_rt, input=tokens, attn_meta=attn_meta, kv_cache=xlite_kv_cache, freqs_cis=freqs_cis, indices=logits_indices, output=logits, curr_stream=stream)
+                self.xlite_model.forward_and_get_logits(
+                    rt=self.xlite_rt,
+                    input=tokens,
+                    attn_meta=attn_meta,
+                    kv_cache=xlite_kv_cache,
+                    freqs_cis=freqs_cis,
+                    indices=logits_indices,
+                    output=logits,
+                    curr_stream=stream,
+                )
                 event.set()
 
     @torch.inference_mode()
@@ -578,8 +644,12 @@ class Qwen3MoE(nn.Module):
         b1, s1 = tokens1.size(0), tokens1.size(1)
         logits_indices0 = torch.arange(b0, dtype=torch.int32, device=tokens.device) * s0 + (s0 - 1)
         logits_indices1 = torch.arange(b1, dtype=torch.int32, device=tokens.device) * s1 + (s1 - 1)
-        event0 = self.thread_pool[0].add_task(args = (tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits_indices0, logits0, stream))
-        event1 = self.thread_pool[1].add_task(args = (tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits_indices1, logits1, stream))
+        event0 = self.thread_pool[0].add_task(
+            args=(tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits_indices0, logits0, stream)
+        )
+        event1 = self.thread_pool[1].add_task(
+            args=(tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits_indices1, logits1, stream)
+        )
         event0.wait()
         event1.wait()
         logits0 = logits0.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
@@ -597,23 +667,26 @@ class Qwen3MoE(nn.Module):
         else:
             return self.forward_naive(tokens, start_pos)
 
-
     def load_weights(
-            self,
-            model_path : str,
+        self,
+        model_path: str,
     ) -> None:
-        """ load qwen3 moe weight """
+        """load qwen3 moe weight"""
         assert self.args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
         assert self.args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
-        assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
-        assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+        assert self.args.inter_dim % world_size == 0, (
+            f"inter_dim must be divisible by world_size (world_size={world_size})"
+        )
+        assert self.args.vocab_size % world_size == 0, (
+            f"vocab_size must be divisible by world_size (world_size={world_size})"
+        )
 
         self.xlite_weight_nz = True if forward_backend == "xlite" else False
 
-        q_proj_shard_size = (self.args.head_dim * self.args.n_heads // world_size)
+        q_proj_shard_size = self.args.head_dim * self.args.n_heads // world_size
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
         n_local_kv_heads = max(1, self.args.n_kv_heads // world_size)
-        kv_proj_shard_size = (self.args.head_dim * n_local_kv_heads)
+        kv_proj_shard_size = self.args.head_dim * n_local_kv_heads
         attention_weight_specs = [
             ("q_proj", q_proj_shard_size, 0),
             ("k_proj", kv_proj_shard_size, q_proj_shard_size),
@@ -642,7 +715,7 @@ class Qwen3MoE(nn.Module):
 
                 param_name = name.replace(weight_name, "qkv_proj")
                 if param_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    logger.warning("Loading model has no param named %s in checkpoints, bypass.", param_name)
                     continue
 
                 param = param_dict[param_name]
@@ -651,12 +724,14 @@ class Qwen3MoE(nn.Module):
                 else:
                     shard_id = rank
 
-                loaded_weight = loaded_weight[shard_size * shard_id: shard_size * (shard_id + 1)]
-                param_slice = param.data[offset:offset + shard_size]
+                loaded_weight = loaded_weight[shard_size * shard_id : shard_size * (shard_id + 1)]
+                param_slice = param.data[offset : offset + shard_size]
 
                 if param_slice.shape != loaded_weight.shape:
-                    raise ValueError(f"{param_name} model shape({param_slice.shape}) mismatch"
-                                     f" checkpoint shape({loaded_weight.shape})")
+                    raise ValueError(
+                        f"{param_name} model shape({param_slice.shape}) mismatch"
+                        f" checkpoint shape({loaded_weight.shape})"
+                    )
 
                 param_slice.copy_(loaded_weight)
                 is_attention_weight = True
@@ -672,15 +747,15 @@ class Qwen3MoE(nn.Module):
 
                 param_name = name.replace(weight_name, "gate_up_proj")
                 if param_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    logger.warning("Loading model has no param named %s in checkpoints, bypass.", param_name)
                     continue
                 param = param_dict[param_name]
                 shard_size = param.shape[0] // 2
                 gate_up_idx = moe_tp_id if "experts" in name else rank
 
-                loaded_weight = loaded_weight[shard_size * gate_up_idx:shard_size * (gate_up_idx + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
-                param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+                loaded_weight = loaded_weight[shard_size * gate_up_idx : shard_size * (gate_up_idx + 1)]
+                param_slice = param.data[shard_size * stride_id : shard_size * (stride_id + 1)]
+                param_slice.data[: loaded_weight.shape[0]].copy_(loaded_weight)
 
                 is_gate_up_weight = True
                 break
@@ -688,34 +763,40 @@ class Qwen3MoE(nn.Module):
                 continue
 
             if name not in param_dict:
-                logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                 continue
             param = param_dict[name]
 
             if "embed_tokens" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.vocab_size,
-                                             self.args.dim,
-                                             name, True, False, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, self.args.vocab_size, self.args.dim, name, True, False, rank, world_size
+                )
                 continue
 
             if "lm_head" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.dim,
-                                             self.args.vocab_size,
-                                             name, False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, self.args.dim, self.args.vocab_size, name, False, True, rank, world_size
+                )
                 continue
 
             if "o_proj" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.head_dim * self.args.n_heads, self.args.dim,
-                                             name, True, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    self.args.head_dim * self.args.n_heads,
+                    self.args.dim,
+                    name,
+                    True,
+                    True,
+                    rank,
+                    world_size,
+                )
                 continue
 
             if "down_proj" in name and "experts" in name:
                 shard_size = param.shape[1]
-                loaded_weight = loaded_weight[:, shard_size * moe_tp_id:shard_size * (moe_tp_id + 1)]
-                param.data[:,:loaded_weight.shape[1]].copy_(loaded_weight)
+                loaded_weight = loaded_weight[:, shard_size * moe_tp_id : shard_size * (moe_tp_id + 1)]
+                param.data[:, : loaded_weight.shape[1]].copy_(loaded_weight)
                 continue
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -726,8 +807,12 @@ class Qwen3MoE(nn.Module):
         if forward_backend == "xlite":
             for layer_id, layer in enumerate(self.layers):
                 for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
-                    layer.mlp.experts[i].gate_up_proj.weight.data = layer.mlp.experts[i].gate_up_proj.weight.data.transpose(0,1).contiguous()
-                    layer.mlp.experts[i].down_proj.weight.data = layer.mlp.experts[i].down_proj.weight.data.transpose(0,1).contiguous()
+                    layer.mlp.experts[i].gate_up_proj.weight.data = (
+                        layer.mlp.experts[i].gate_up_proj.weight.data.transpose(0, 1).contiguous()
+                    )
+                    layer.mlp.experts[i].down_proj.weight.data = (
+                        layer.mlp.experts[i].down_proj.weight.data.transpose(0, 1).contiguous()
+                    )
 
         if self.xlite_weight_nz:
             self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
@@ -739,14 +824,24 @@ class Qwen3MoE(nn.Module):
                     layer.mlp.down_proj.weight.data = matrix_nd2nz(layer.mlp.down_proj.weight)
                 layer.mlp.gate.weight.data = matrix_nd2nz(layer.mlp.gate.weight)
                 for i in range(layer.mlp.experts_start_idx, layer.mlp.experts_end_idx):
-                    layer.mlp.experts[i].gate_up_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].gate_up_proj.weight)
+                    layer.mlp.experts[i].gate_up_proj.weight.data = matrix_nd2nz(
+                        layer.mlp.experts[i].gate_up_proj.weight
+                    )
                     layer.mlp.experts[i].down_proj.weight.data = matrix_nd2nz(layer.mlp.experts[i].down_proj.weight)
             torch.npu.empty_cache()
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
             # Runtime rank arg = GLOBAL rank; tp_size/dp_size explicit.
-            self.xlite_rt = Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size, moe_tp_size=1, moe_ep_size=self.args.moe_ep_size)
+            self.xlite_rt = Runtime(
+                local_rank,
+                size=0,
+                rank=self.global_rank,
+                tp_size=self.tp_size,
+                dp_size=self.dp_size,
+                moe_tp_size=1,
+                moe_ep_size=self.args.moe_ep_size,
+            )
             self.init_xlite_model(self.args)
             kv_size = self.init_xlite_kvcache(self.args)
             pool_size = self.xlite_model.get_tensor_pool_size()
@@ -757,15 +852,28 @@ class Qwen3MoE(nn.Module):
                 memory_usage = param.element_size() * param.numel()
                 total_model_memory += memory_usage
             if self.global_rank == 0:
-                print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
-                      f" KV Cache: {kv_size // 1024 // 1024} MB" +
-                      f" Tensor pool: {pool_size} MB")
+                print(
+                    f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB"
+                    f" KV Cache: {kv_size // 1024 // 1024} MB"
+                    f" Tensor pool: {pool_size} MB"
+                )
 
             if self.multi_task_parallel:
                 # Second runtime on the same device/rank for the peer task; notify
                 # cross-pairing lets the two streams wake each other. MoE ep_size
                 # is passed so the second runtime builds the same EP comm topology.
-                self.xlite_rt_list = [self.xlite_rt, Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size, moe_tp_size=1, moe_ep_size=self.args.moe_ep_size)]
+                self.xlite_rt_list = [
+                    self.xlite_rt,
+                    Runtime(
+                        local_rank,
+                        size=0,
+                        rank=self.global_rank,
+                        tp_size=self.tp_size,
+                        dp_size=self.dp_size,
+                        moe_tp_size=1,
+                        moe_ep_size=self.args.moe_ep_size,
+                    ),
+                ]
                 self.xlite_rt_list[1].init_tensor_pool(pool_size)
                 self.xlite_rt_list[0].peer_notify = self.xlite_rt_list[1].notify
                 self.xlite_rt_list[1].peer_notify = self.xlite_rt_list[0].notify
@@ -784,7 +892,7 @@ class Qwen3MoE(nn.Module):
         config.rope_head_dim = args.head_dim
         config.norm_eps = args.norm_eps
         config.rope_theta = args.rope_theta
-        config.softmax_scale = args.head_dim ** -0.5
+        config.softmax_scale = args.head_dim**-0.5
         config.n_dense_layers = 0
         config.n_routed_experts = args.n_routed_experts
         config.n_shared_experts = 0
@@ -816,14 +924,10 @@ class Qwen3MoE(nn.Module):
         self.xlite_model.mha_qkv = [layer.self_attn.qkv_proj.weight for layer in self.layers]
         self.xlite_model.mlp_norm = [layer.post_attention_layernorm.weight for layer in self.layers]
         self.xlite_model.mlp_up_gate = [
-            self.layers[i].mlp.gate_up_proj.weight
-            for i in range(args.n_layers)
-            if not is_layer_moe(self.args, i)
+            self.layers[i].mlp.gate_up_proj.weight for i in range(args.n_layers) if not is_layer_moe(self.args, i)
         ]
         self.xlite_model.mlp_down = [
-            self.layers[i].mlp.down_proj.weight
-            for i in range(args.n_layers)
-            if not is_layer_moe(self.args, i)
+            self.layers[i].mlp.down_proj.weight for i in range(args.n_layers) if not is_layer_moe(self.args, i)
         ]
         if args.qk_norm:
             self.xlite_model.mha_q_norm = [self.layers[i].self_attn.q_norm.weight for i in range(args.n_layers)]
@@ -832,9 +936,7 @@ class Qwen3MoE(nn.Module):
             self.xlite_model.mha_qkv_bias = [layer.self_attn.qkv_proj.bias for layer in self.layers]
 
         self.xlite_model.gate = [
-            self.layers[i].mlp.gate.weight
-            for i in range(args.n_layers)
-            if is_layer_moe(self.args, i)
+            self.layers[i].mlp.gate.weight for i in range(args.n_layers) if is_layer_moe(self.args, i)
         ]
         self.xlite_model.re_up_gate = [
             self.layers[i].mlp.experts[j].gate_up_proj.weight
@@ -853,11 +955,25 @@ class Qwen3MoE(nn.Module):
     def init_xlite_kvcache(self, args: ModelArgs):
         block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
         head_num = max(args.n_kv_heads // world_size, 1)
-        self.xlite_kv_cache = [(torch.zeros(block_num, block_size, head_num, args.head_dim, dtype=torch.get_default_dtype(), device='npu'),
-                                torch.zeros(block_num, block_size, head_num, args.head_dim, dtype=torch.get_default_dtype(), device='npu'))
-                               for _ in range(args.n_layers)]
-        kv_size = (block_num * head_num * block_size * (args.head_dim + args.head_dim) *
-                   self.xlite_kv_cache[0][0].element_size() * args.n_layers)
+        self.xlite_kv_cache = [
+            (
+                torch.zeros(
+                    block_num, block_size, head_num, args.head_dim, dtype=torch.get_default_dtype(), device="npu"
+                ),
+                torch.zeros(
+                    block_num, block_size, head_num, args.head_dim, dtype=torch.get_default_dtype(), device="npu"
+                ),
+            )
+            for _ in range(args.n_layers)
+        ]
+        kv_size = (
+            block_num
+            * head_num
+            * block_size
+            * (args.head_dim + args.head_dim)
+            * self.xlite_kv_cache[0][0].element_size()
+            * args.n_layers
+        )
         return kv_size
 
     def prepare_xlite_attnmeta(self, tokens: torch.Tensor, start_pos: int):
@@ -871,11 +987,10 @@ class Qwen3MoE(nn.Module):
         batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
         block_indices = np.arange(block_num, dtype=np.uint32)
         attn_meta.block_tables_cpu = batch_indices * step + block_indices
-        attn_meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
-            .repeat(batch).to(tokens.device)
+        attn_meta.positions = (
+            torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64).repeat(batch).to(tokens.device)
+        )
         return attn_meta
 
     def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
-        return prepare_xlite_attnmeta_v2(
-            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size]
-        )
+        return prepare_xlite_attnmeta_v2(AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size])

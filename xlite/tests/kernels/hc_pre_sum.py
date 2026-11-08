@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -19,13 +18,13 @@ hc_pre collapses the hc copies into one, weighted by pre:
 This mirrors inference/model.py:hc_pre exactly:
   y = torch.sum(pre.unsqueeze(-1) * x.float(), dim=2)
 """
+
 import sys
 
 import torch
 import torch_npu  # noqa: F401
 
 from xlite._C import Runtime, hc_pre
-
 
 torch.npu.set_device(0)
 rt = Runtime(0, size=2048)
@@ -38,7 +37,7 @@ HC_MULT = 4
 # (b, s, hidden).
 CASES = [
     (2, 8, 256),
-    (1, 1, 256),    # m=1: decode single-token path
+    (1, 1, 256),  # m=1: decode single-token path
     (2, 8, 4096),  # real-scale: convert chunk-split + UB boundary
     (1, 1, 4096),
     (8, 1024, 4096),
@@ -57,12 +56,12 @@ def run_case(b, s, hidden):
 
     # ---- PyTorch reference — verbatim inference/model.py:hc_pre ----
     # y = torch.sum(pre_mix.unsqueeze(-1) * x.float(), dim=2)
-    y_ref = torch.sum(pre.unsqueeze(-1) * x_3d.float(), dim=2)   # [b, s, hidden]
+    y_ref = torch.sum(pre.unsqueeze(-1) * x_3d.float(), dim=2)  # [b, s, hidden]
     y_ref = y_ref.to(torch.bfloat16).reshape(n, hidden)
 
     # ---- xlite kernel (2D flat inputs) ----
-    x_flat = x_3d.reshape(n, HC_MULT, hidden).contiguous()    # bf16 [n, hcMult, hidden]
-    pre_flat = pre.reshape(n, HC_MULT).contiguous()          # fp32 [n, hcMult]
+    x_flat = x_3d.reshape(n, HC_MULT, hidden).contiguous()  # bf16 [n, hcMult, hidden]
+    pre_flat = pre.reshape(n, HC_MULT).contiguous()  # fp32 [n, hcMult]
     with torch.device("npu"):
         y_out = torch.empty(n, hidden, dtype=torch.bfloat16)
     torch.npu.synchronize()
@@ -84,7 +83,7 @@ def run_case(b, s, hidden):
 
 if __name__ == "__main__":
     all_ok = True
-    for (b, s, hidden) in CASES:
+    for b, s, hidden in CASES:
         all_ok &= run_case(b, s, hidden)
     if all_ok:
         print("==== all hc_pre cases passed ====")

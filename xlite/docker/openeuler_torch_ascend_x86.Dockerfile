@@ -43,7 +43,7 @@ ENV LD_PRELOAD="$LD_PRELOAD:/usr/lib64/libtcmalloc.so"
 
 ENV CC=/opt/openEuler/llvm-toolset-17/root/usr/bin/clang
 ENV CXX=/opt/openEuler/llvm-toolset-17/root/usr/bin/clang++
-    	
+
 RUN source /opt/openEuler/llvm-toolset-17/enable && clang -v && \
     wget --no-check-certificate -O Python-3.11.11.tgz \
     https://www.python.org/ftp/python/3.11.11/Python-3.11.11.tgz && \

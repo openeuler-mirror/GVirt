@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -17,9 +16,11 @@
 # ===============================================================================
 
 import logging
+
+import numpy as np
 import torch
 import torch_npu  # noqa: F401
-import numpy as np
+
 from xlite._C import Runtime, reorder_moe
 
 logging.getLogger().setLevel(logging.INFO)
@@ -79,7 +80,7 @@ def reorder_forward_ref(inp_host, counts_host, local_start, local_end):
                 continue
             src_start = chunk_run
             dst_start = expert_offsets[e]
-            out[dst_start:dst_start + cnt] = inp_host[src_start:src_start + cnt]
+            out[dst_start : dst_start + cnt] = inp_host[src_start : src_start + cnt]
             expert_offsets[e] += cnt
             chunk_run += cnt
     return out
@@ -130,7 +131,7 @@ def reorder_reverse_ref(inp_host, counts_host, local_start, local_end):
                 continue
             src_start = expert_offsets[e]
             dst_start = chunk_run
-            out[dst_start:dst_start + cnt] = inp_host[src_start:src_start + cnt]
+            out[dst_start : dst_start + cnt] = inp_host[src_start : src_start + cnt]
             expert_offsets[e] += cnt
             chunk_run += cnt
     return out
@@ -207,8 +208,7 @@ for moe_ep_size in [8, 16]:
 
                 # ---- Forward: source-grouped -> expert-grouped ----
                 torch.npu.synchronize()
-                reorder_moe(rt, inp, out_fwd, counts, HIDDEN_SIZE,
-                            local_start, local_end, True)
+                reorder_moe(rt, inp, out_fwd, counts, HIDDEN_SIZE, local_start, local_end, True)
                 torch.npu.synchronize()
                 fwd_got = out_fwd.cpu().float().numpy()
                 fwd_ref = reorder_forward_ref(inp_host, counts_host, local_start, local_end)
@@ -216,8 +216,7 @@ for moe_ep_size in [8, 16]:
                 # ---- Reverse: expert-grouped -> source-grouped ----
                 # Use forward output as input to verify round-trip consistency.
                 torch.npu.synchronize()
-                reorder_moe(rt, out_fwd, out_rev, counts, HIDDEN_SIZE,
-                            local_start, local_end, False)
+                reorder_moe(rt, out_fwd, out_rev, counts, HIDDEN_SIZE, local_start, local_end, False)
                 torch.npu.synchronize()
                 rev_got = out_rev.cpu().float().numpy()
                 rev_ref = reorder_reverse_ref(fwd_ref, counts_host, local_start, local_end)
@@ -228,8 +227,9 @@ for moe_ep_size in [8, 16]:
                 try:
                     torch.testing.assert_close(fwd_got_t, fwd_ref_t, atol=0, rtol=0)
                 except AssertionError as e:
-                    logging.error(f"\n[FORWARD] ep={moe_ep_size} dtype={test_dtype} "
-                          f"local=[{local_start},{local_end}) FAILED:")
+                    logging.error(
+                        f"\n[FORWARD] ep={moe_ep_size} dtype={test_dtype} local=[{local_start},{local_end}) FAILED:"
+                    )
                     logging.error(e)
                     logging.error(f"  [FORWARD] inp ({inp.shape}):\n{inp}")
                     logging.error(f"  [FORWARD] ref ({fwd_ref_t.shape}):\n{fwd_ref_t}")
@@ -242,13 +242,13 @@ for moe_ep_size in [8, 16]:
                 try:
                     torch.testing.assert_close(rev_got_t, rev_ref_t, atol=0, rtol=0)
                 except AssertionError as e:
-                    logging.error(f"\n[REVERSE] ep={moe_ep_size} dtype={test_dtype} "
-                          f"local=[{local_start},{local_end}) FAILED:")
+                    logging.error(
+                        f"\n[REVERSE] ep={moe_ep_size} dtype={test_dtype} local=[{local_start},{local_end}) FAILED:"
+                    )
                     logging.error(e)
                     logging.error(f"  [REVERSE] inp ({out_fwd.shape}):\n{out_fwd}")
                     logging.error(f"  [REVERSE] ref ({rev_ref_t.shape}):\n{rev_ref_t}")
                     logging.error(f"  [REVERSE] got ({rev_got_t.shape}):\n{rev_got_t}")
                     continue
 
-        logging.info(f"ep={moe_ep_size} experts={n_routed_experts} "
-                     f"dtypes={[str(d) for d in DTYPE_LIST]}  executed!")
+        logging.info(f"ep={moe_ep_size} experts={n_routed_experts} dtypes={[str(d) for d in DTYPE_LIST]}  executed!")

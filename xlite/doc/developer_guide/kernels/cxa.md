@@ -54,8 +54,8 @@ Python 签名见 `xlite/_C.pyi` 的 `def cxa(...)`,kernel 侧入口见 `csrc/ker
 另有内部 scores workspace(由 binding 侧分配):
 
 - **scores**:`[aicNum * XLITE_MAX_M0 * 2, swaSegWidth + kvSize]`,dtype 同 q;
-  - `swaSegWidth = windowSize == 0 ? 0 : windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B`(`csrc/_C.cpp` 的 `CXA`(关键字 `swaSegWidth`)、`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `swaSegWidth`)):一个 query tile 的因果窗并集宽 `windowSize + XLITE_MAX_M0`,再加 `K_BLOCK_SIZE_2B`(=16,`csrc/kernels/kernel_param.h` 的 `K_BLOCK_SIZE_2B` 宏)吸收 `windowStart` 向下取整产生的前导列;
-  - `kvSize`:压缩段宽度。dense 模式取 `ROUND_UP(indexTopK, 4 * CXA_SVCK0)`(`csrc/_C.cpp` 的 `CXA`(关键字 `ROUND_UP((uint64_t)indexTopK, 4 * CXA_SVCK0)`)):单 batch 连续 cache 仅含 `indexTopK` 个压缩 token,与 batch 数无关;sparse 模型层取 `ROUND_UP(rt._maxTotalLens / compressRatio, 4 * CXA_SVCK0)`(由 lens 推导);standalone 入口取 `ROUND_UP(DeriveMaxSeqLen / compressRatio, 4 * CXA_SVCK0)`(由 lens 推导,同模型层),均按 `4 * CXA_SVCK0` 对齐(见下文 scores 布局)。
+    - `swaSegWidth = windowSize == 0 ? 0 : windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B`(`csrc/_C.cpp` 的 `CXA`(关键字 `swaSegWidth`)、`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `swaSegWidth`)):一个 query tile 的因果窗并集宽 `windowSize + XLITE_MAX_M0`,再加 `K_BLOCK_SIZE_2B`(=16,`csrc/kernels/kernel_param.h` 的 `K_BLOCK_SIZE_2B` 宏)吸收 `windowStart` 向下取整产生的前导列;
+    - `kvSize`:压缩段宽度。dense 模式取 `ROUND_UP(indexTopK, 4 * CXA_SVCK0)`(`csrc/_C.cpp` 的 `CXA`(关键字 `ROUND_UP((uint64_t)indexTopK, 4 * CXA_SVCK0)`)):单 batch 连续 cache 仅含 `indexTopK` 个压缩 token,与 batch 数无关;sparse 模型层取 `ROUND_UP(rt._maxTotalLens / compressRatio, 4 * CXA_SVCK0)`(由 lens 推导);standalone 入口取 `ROUND_UP(DeriveMaxSeqLen / compressRatio, 4 * CXA_SVCK0)`(由 lens 推导,同模型层),均按 `4 * CXA_SVCK0` 对齐(见下文 scores 布局)。
 
 ## 支持的数据类型
 

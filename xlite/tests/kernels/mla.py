@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -26,16 +25,17 @@ reference implementation. The standard loop computes:
 — named `v_cache` historically in mla.py; semantically identical to pe_cache in
 mla_v2.py.
 """
-from __future__ import absolute_import
 
 import logging
 import math
+from collections.abc import Iterable
+
 import torch
 import torch_npu  # noqa: F401
-from typing import Iterable
+
+from tests.models.weight_utils import matrix_nd2nz
 from xlite._C import Runtime, mla_v2
 from xlite._C import print as xlite_print
-from tests.models.weight_utils import matrix_nd2nz
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -97,6 +97,7 @@ work = [
     (2, [4096, 4097], [2, 6]),
 ]
 
+
 def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE: int) -> int:
     """
     计算 (query_lens[i] + cached_lens[i]) 列表中最大元素，向上整除 BLOCK_SIZE 后的块数。
@@ -106,10 +107,12 @@ def max_blocks(query_lens: Iterable[int], cached_lens: Iterable[int], BLOCK_SIZE
     max_sum = max(a + b for a, b in zip(query_lens, cached_lens))
     return (max_sum + BLOCK_SIZE - 1) // BLOCK_SIZE
 
+
 def rms_norm_last_dim(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     # normalize over the last dimension by root-mean-square
     rms = x.pow(2).mean(dim=-1, keepdim=True).add(eps).sqrt()
     return x / rms
+
 
 for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_dtype in models:
     scale = (nope_head_dim + rope_head_dim) ** -0.5
@@ -140,8 +143,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             # keeps the scaled logits ~N(0, 1.7).
             wuk = torch.randn(n_heads, nope_head_dim, kv_lora_rank) / math.sqrt(nope_head_dim)
             wuv = torch.randn(n_heads, v_head_dim, kv_lora_rank).clamp(0.2, 1)
-            wkvb = torch.cat([wuk, wuv], dim=1).reshape(
-                n_heads * (nope_head_dim + v_head_dim), kv_lora_rank)
+            wkvb = torch.cat([wuk, wuv], dim=1).reshape(n_heads * (nope_head_dim + v_head_dim), kv_lora_rank)
             wkvb = wkvb.view(n_heads, nope_head_dim + v_head_dim, kv_lora_rank)
 
             masks = []
@@ -169,8 +171,9 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             cached_lens = torch.tensor(cached_lens_list, dtype=torch.int32).flatten()
             query_start_loc = (query_lens.cumsum(0) - query_lens).int()
 
-            block_tables = (torch.arange(batch)[:, None] * max_num_blocks
-                            + torch.arange(max_num_blocks)).to(dtype=torch.int32)
+            block_tables = (torch.arange(batch)[:, None] * max_num_blocks + torch.arange(max_num_blocks)).to(
+                dtype=torch.int32
+            )
 
             # mla_v2 inputs: pre-absorbed q_absorb + split qr (built after standard loop)
             q_absorb_xlite = torch.empty(total_query_len, n_heads, kv_lora_rank)
@@ -203,7 +206,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             clen = cached_lens_list[i]
 
             # slice this sample's flat qWithQr from concatenated qWithQr_standard
-            qWithQr_chunk = qWithQr_standard[offset: offset + qlen].unsqueeze(0)
+            qWithQr_chunk = qWithQr_standard[offset : offset + qlen].unsqueeze(0)
             offset += qlen
 
             # split into nope and rope parts
@@ -213,11 +216,11 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             q_absorb = torch.einsum("bshd,hdc->bshc", q_nope, wkvb[:, :nope_head_dim])
             q_absorb_list.append(q_absorb.squeeze(0))
 
-            qkc = torch.einsum("bshc,btc->bsht", q_absorb, k_cache[i:i+1, :clen + qlen])
+            qkc = torch.einsum("bshc,btc->bsht", q_absorb, k_cache[i : i + 1, : clen + qlen])
             qkc_list.append(qkc)
 
             # compute QR * KR (KR is pe_cache, the RoPE'd key slice)
-            qkr = torch.einsum("bshr,btr->bsht", q_rope, pe_cache[i:i+1, :clen + qlen])
+            qkr = torch.einsum("bshr,btr->bsht", q_rope, pe_cache[i : i + 1, : clen + qlen])
             qkr_list.append(qkr)
 
             # combine scores
@@ -231,7 +234,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             scores = torch.softmax(scores, dim=-1)
 
             # o_absorb = softmax(QK) @ k_cache — stop here for mla_v2 comparison
-            o_absorb = torch.einsum("bsht,btc->bshc", scores, k_cache[i:i+1, :clen + qlen])
+            o_absorb = torch.einsum("bsht,btc->bshc", scores, k_cache[i : i + 1, : clen + qlen])
             o_absorbs.append(o_absorb.squeeze(0))
 
             # output = o_absorb @ WUV — for mla comparison
@@ -245,11 +248,11 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
         offset = 0
         for i in range(batch):
             qlen = query_len_list[i]
-            qWithQr_chunk = qWithQr_standard[offset: offset + qlen].unsqueeze(0)
+            qWithQr_chunk = qWithQr_standard[offset : offset + qlen].unsqueeze(0)
             offset += qlen
             _, q_rope = qWithQr_chunk.split([nope_head_dim, rope_head_dim], dim=-1)
-            q_absorb_xlite[offset - qlen: offset] = q_absorb_list[i]
-            qr_xlite[offset - qlen: offset] = q_rope.squeeze(0)
+            q_absorb_xlite[offset - qlen : offset] = q_absorb_list[i]
+            qr_xlite[offset - qlen : offset] = q_rope.squeeze(0)
 
         # xlite: write per-sample KV into block cache
         for i in range(batch):
@@ -257,8 +260,8 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             clen = cached_lens_list[i]
 
             # extract this sample's k/pe
-            current_k = k_cache[i:i+1, :qlen + clen]
-            current_pe = pe_cache[i:i+1, :qlen + clen]
+            current_k = k_cache[i : i + 1, : qlen + clen]
+            current_pe = pe_cache[i : i + 1, : qlen + clen]
 
             total_len = clen + qlen
             num_blocks_needed = (total_len + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -267,35 +270,75 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                 for block_idx in range(num_blocks_needed):
                     seq_start = block_idx * BLOCK_SIZE
                     seq_end = min((block_idx + 1) * BLOCK_SIZE, total_len)
-                    k_cache_xlite[sample_cache_start + block_idx, :seq_end - seq_start] = current_k[:, seq_start:seq_end]
-                    pe_cache_xlite[sample_cache_start + block_idx, :seq_end - seq_start] = current_pe[:, seq_start:seq_end]
+                    k_cache_xlite[sample_cache_start + block_idx, : seq_end - seq_start] = current_k[
+                        :, seq_start:seq_end
+                    ]
+                    pe_cache_xlite[sample_cache_start + block_idx, : seq_end - seq_start] = current_pe[
+                        :, seq_start:seq_end
+                    ]
             else:
-                dst_k = k_cache_xlite[sample_cache_start:sample_cache_start + num_blocks_needed].view(-1, kv_lora_rank)
-                dst_pe = pe_cache_xlite[sample_cache_start:sample_cache_start + num_blocks_needed].view(-1, rope_head_dim)
+                dst_k = k_cache_xlite[sample_cache_start : sample_cache_start + num_blocks_needed].view(
+                    -1, kv_lora_rank
+                )
+                dst_pe = pe_cache_xlite[sample_cache_start : sample_cache_start + num_blocks_needed].view(
+                    -1, rope_head_dim
+                )
                 dst_k[:total_len] = current_k.flatten(0, 1)
                 dst_pe[:total_len] = current_pe.flatten(0, 1)
 
         # ----- mla_v2 kernel (wuk einsum + mla_v2 + wuv einsum) -----
         torch.npu.synchronize()
-        mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite, wuv_xlite,
-               output_xlite_v2, query_start_loc, query_lens, cached_lens, block_tables, n_heads,
-               rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, BLOCK_SIZE, batch,
-               scale, topk_indices_empty, top_k=0, nz=weight_nz, enable_flash_attention=enable_flash, tile_size_of_cached_kv=tile_size)
+        mla_v2(
+            rt,
+            qWithQr_xlite,
+            qr_xlite,
+            k_cache_xlite,
+            pe_cache_xlite,
+            wukT_xlite,
+            wuv_xlite,
+            output_xlite_v2,
+            query_start_loc,
+            query_lens,
+            cached_lens,
+            block_tables,
+            n_heads,
+            rope_head_dim,
+            nope_head_dim,
+            v_head_dim,
+            kv_lora_rank,
+            BLOCK_SIZE,
+            batch,
+            scale,
+            topk_indices_empty,
+            top_k=0,
+            nz=weight_nz,
+            enable_flash_attention=enable_flash,
+            tile_size_of_cached_kv=tile_size,
+        )
 
         logging.info(
             "mla_v2 %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, "
             "%d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s, "
             "pitched=%s) executed!",
-            name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_dtype,
-            batch, cached_lens_list, query_len_list, pitched,
+            name,
+            n_heads,
+            rope_head_dim,
+            nope_head_dim,
+            v_head_dim,
+            kv_lora_rank,
+            test_dtype,
+            batch,
+            cached_lens_list,
+            query_len_list,
+            pitched,
         )
 
         try:
             torch.testing.assert_close(output_xlite_v2, output_standard, atol=1e-5, rtol=5e-02)
         except AssertionError as e:
-            logging.error(f'{e}')
-            logging.error(f'torch_npu: {output_standard}')
-            logging.error(f'xlite: {output_xlite_v2}')
+            logging.error(f"{e}")
+            logging.error(f"torch_npu: {output_standard}")
+            logging.error(f"xlite: {output_xlite_v2}")
 
         # Test MLA with topkIndices: verify that MLA with topkIndices produces the same output
         # as standard MLA with -inf mask applied before softmax
@@ -308,7 +351,6 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
         run_sparse_topk = enable_flash or max_seq_len <= MAX_SOFTMAX_PINGPONG_LEN
 
         for topk in topk_values:
-
             # Generate random topk_indices for each sample in the batch
             # This simulates the indexer output that selects top-k positions
             # topk_indices is a flattened tensor of shape (total_query_len, topk)
@@ -354,7 +396,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                 # Apply topk mask: -inf for positions not in topk_indices, 0 for topk positions
                 total_len = clen + qlen
                 # Get indices for this sample: stack indices for all query positions in this sample
-                sample_indices = torch.stack(topk_indices_list[indices_offset:indices_offset + qlen])  # (qlen, topk)
+                sample_indices = torch.stack(topk_indices_list[indices_offset : indices_offset + qlen])  # (qlen, topk)
                 indices_offset += qlen
 
                 # scores shape (1, qlen, heads, total_len), topk_indices shape (qlen, topk)
@@ -370,7 +412,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
 
                 scores = torch.softmax(scores, dim=-1)
                 # o_absorb = softmax(QK) @ k_cache — stop here for mla_v2 comparison
-                o_absorb = torch.einsum("bsht,btc->bshc", scores, k_cache[i:i+1, :clen + qlen])
+                o_absorb = torch.einsum("bsht,btc->bshc", scores, k_cache[i : i + 1, : clen + qlen])
                 o_absorbs_with_topk.append(o_absorb.squeeze(0))
                 # output = o_absorb @ WUV — for mla comparison
                 x = torch.einsum("bshc,hdc->bshd", o_absorb, wkvb[:, -v_head_dim:])
@@ -383,37 +425,73 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             # -inf mask applied inside the kernel's softmax) -----
             if run_sparse_topk:
                 output_xlite_with_topk_v2 = torch.zeros(
-                    total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
+                    total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype
+                )
 
                 torch.npu.synchronize()
-                mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite,
-                       wuv_xlite, output_xlite_with_topk_v2, query_start_loc, query_lens,
-                       cached_lens, block_tables, n_heads, rope_head_dim, nope_head_dim,
-                       v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, scale, topk_indices_tensor,
-                       top_k=topk, nz=weight_nz, enable_flash_attention=enable_flash, tile_size_of_cached_kv=tile_size)
+                mla_v2(
+                    rt,
+                    qWithQr_xlite,
+                    qr_xlite,
+                    k_cache_xlite,
+                    pe_cache_xlite,
+                    wukT_xlite,
+                    wuv_xlite,
+                    output_xlite_with_topk_v2,
+                    query_start_loc,
+                    query_lens,
+                    cached_lens,
+                    block_tables,
+                    n_heads,
+                    rope_head_dim,
+                    nope_head_dim,
+                    v_head_dim,
+                    kv_lora_rank,
+                    BLOCK_SIZE,
+                    batch,
+                    scale,
+                    topk_indices_tensor,
+                    top_k=topk,
+                    nz=weight_nz,
+                    enable_flash_attention=enable_flash,
+                    tile_size_of_cached_kv=tile_size,
+                )
 
                 logging.info(
                     "mla_v2 with topkIndices %s (%d heads, %d rope_head_dim, %d nope_head_dim, "
                     "%d v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, "
                     "query_lens=%s, topk=%d) executed!",
-                    name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank,
-                    test_dtype, batch, cached_lens_list, query_len_list, topk,
+                    name,
+                    n_heads,
+                    rope_head_dim,
+                    nope_head_dim,
+                    v_head_dim,
+                    kv_lora_rank,
+                    test_dtype,
+                    batch,
+                    cached_lens_list,
+                    query_len_list,
+                    topk,
                 )
 
                 try:
                     torch.testing.assert_close(
-                        output_xlite_with_topk_v2, output_standard_with_topk, atol=1e-5,
-                        rtol=5e-02)
+                        output_xlite_with_topk_v2, output_standard_with_topk, atol=1e-5, rtol=5e-02
+                    )
                 except AssertionError as e:
-                    logging.error(f'mla_v2 with topkIndices test failed: {e}')
-                    logging.error(f'Standard mla_v2 with topk mask: {output_standard_with_topk}')
-                    logging.error(f'xlite mla_v2 with topkIndices: {output_xlite_with_topk_v2}')
+                    logging.error(f"mla_v2 with topkIndices test failed: {e}")
+                    logging.error(f"Standard mla_v2 with topk mask: {output_standard_with_topk}")
+                    logging.error(f"xlite mla_v2 with topkIndices: {output_xlite_with_topk_v2}")
             else:
                 logging.info(
                     "mla_v2 with topkIndices %s work (%d batch, cached_lens=%s, "
                     "query_lens=%s, topk=%d) skipped: non-flash kernel rejects topk > 0 "
                     "when max_seq_len > %d",
-                    name, batch, cached_lens_list, query_len_list, topk,
+                    name,
+                    batch,
+                    cached_lens_list,
+                    query_len_list,
+                    topk,
                     MAX_SOFTMAX_PINGPONG_LEN,
                 )
 
@@ -428,30 +506,66 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                 logging.info(
                     "mla_v2 dense %s work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) "
                     "skipped: dense mode requires max query_len <= %d",
-                    name, batch, cached_lens_list, query_len_list, topk, MAX_DENSE_QUERY_LEN,
+                    name,
+                    batch,
+                    cached_lens_list,
+                    query_len_list,
+                    topk,
+                    MAX_DENSE_QUERY_LEN,
                 )
             else:
-                output_xlite_dense = torch.zeros(
-                    total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
+                output_xlite_dense = torch.zeros(total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)
 
                 torch.npu.synchronize()
-                mla_v2(rt, qWithQr_xlite, qr_xlite, k_cache_xlite, pe_cache_xlite, wukT_xlite,
-                       wuv_xlite, output_xlite_dense, query_start_loc, query_lens, cached_lens,
-                       block_tables, n_heads, rope_head_dim, nope_head_dim, v_head_dim,
-                       kv_lora_rank, BLOCK_SIZE, batch, scale, topk_indices_tensor, top_k=topk, nz=weight_nz, enable_flash_attention=enable_flash, tile_size_of_cached_kv=tile_size, dense=True)
+                mla_v2(
+                    rt,
+                    qWithQr_xlite,
+                    qr_xlite,
+                    k_cache_xlite,
+                    pe_cache_xlite,
+                    wukT_xlite,
+                    wuv_xlite,
+                    output_xlite_dense,
+                    query_start_loc,
+                    query_lens,
+                    cached_lens,
+                    block_tables,
+                    n_heads,
+                    rope_head_dim,
+                    nope_head_dim,
+                    v_head_dim,
+                    kv_lora_rank,
+                    BLOCK_SIZE,
+                    batch,
+                    scale,
+                    topk_indices_tensor,
+                    top_k=topk,
+                    nz=weight_nz,
+                    enable_flash_attention=enable_flash,
+                    tile_size_of_cached_kv=tile_size,
+                    dense=True,
+                )
 
                 logging.info(
                     "mla_v2 dense %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d "
                     "v_head_dim, %d kv_lora_rank, %s) work (%d batch, cached_lens=%s, "
                     "query_lens=%s, topk=%d) executed!",
-                    name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank,
-                    test_dtype, batch, cached_lens_list, query_len_list, topk,
+                    name,
+                    n_heads,
+                    rope_head_dim,
+                    nope_head_dim,
+                    v_head_dim,
+                    kv_lora_rank,
+                    test_dtype,
+                    batch,
+                    cached_lens_list,
+                    query_len_list,
+                    topk,
                 )
 
                 try:
-                    torch.testing.assert_close(
-                        output_xlite_dense, output_standard_with_topk, atol=1e-5, rtol=5e-02)
+                    torch.testing.assert_close(output_xlite_dense, output_standard_with_topk, atol=1e-5, rtol=5e-02)
                 except AssertionError as e:
-                    logging.error(f'mla_v2 dense test failed: {e}')
-                    logging.error(f'Standard mla_v2 with topk mask: {output_standard_with_topk}')
-                    logging.error(f'xlite mla_v2 dense: {output_xlite_dense}')
+                    logging.error(f"mla_v2 dense test failed: {e}")
+                    logging.error(f"Standard mla_v2 with topk mask: {output_standard_with_topk}")
+                    logging.error(f"xlite mla_v2 dense: {output_xlite_dense}")

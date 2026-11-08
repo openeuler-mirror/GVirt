@@ -122,6 +122,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - `x` 为全程残差基准（不更新），`h` 为工作张量 `[T,H]`，循环中原地改写；量化 checkpoint（w8a8 / w4a8）下各 RmsNorm / AddAndRmsNorm 附带 bias（`attnNormBias` 等由量化 checkpoint 提供），bf16 无。
 - `ForwardAttn` 按 `attnType` 分发：GLM-5 为 `AttnDSA`，与 `AttnMLA`（GLM-4.7-Flash / DeepSeek-V3）同走 `ForwardAttnMLAV2`（§2）；`attnType` 只决定是否调用 indexer 与稀疏分支。
 - `ForwardFFN`：`layer < nDenseLayers=3` → `ForwardMLP`（§3.1，稠密，`withAllReduce=true`）；`layer >= 3` → `ForwardMoE`（§3.2，75 层稀疏）。
@@ -232,6 +233,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - **MLA 低秩结构**：`mlaQKVA` 把 hidden 压到 `[qLR | kvLR | rH]` 公共空间（`qkvcD`），`mlaQB` 上投影出每头 q；`mlaWUKT`/`mlaWUV`（来自 `wkv_b`）在 attention 前后做吸收 / 反吸收，KV cache 只存 `kvLR+rH=576` 维（vs 完整 KV `nH·(noH+rH+vH)`）。`ForwardLinear` 的 STATIC / DYNAMIC 量化 kernel 语义分别见 [quant.md](../kernels/quant.md) 与 [quant_dyn.md](../kernels/quant_dyn.md)。
 - **MlaPrepare**（[mla_prepare.md](../kernels/mla_prepare.md)）：单 kernel 融合 q 段 RMSNorm（`mlaQNorm`+bias）、kv 段 RMSNorm（`mlaKVNorm`+bias）写 `kCache`、pe 段 complex RoPE（[rope_complex_and_cache.md](../kernels/rope_complex_and_cache.md)）写 `peCache`；`attnNormQc` 作为 `mlaQB` 与 Step 2 indexer q 投影的共同输入。
 - **q rope**：`XliteOpRopeComplex` 只旋转 q 每头的 rope 段（`rH=64`，nope 段不动），输出独立的 `qPe`。
@@ -286,6 +288,7 @@ flowchart LR
 ```
 
 **关键点**：
+
 - GLM-5-w8a8（TP=1）：`dInt=12288` → `h13 [T,24576]`、`h2 [T,12288]`，仅前 3 层走此路（`withAllReduce=true`，TP=1 时跳过通信）；`swigluLimit=0` 不 clamp（GLM-5.3-Flash 为 10.0）。SiLU 融合语义见 [silu_and_mul.md](../kernels/silu_and_mul.md)。
 - 量化对比：w8a8 / w4a8 的 dense 两段与 shared expert（§3.2）同为 INT8 DYNAMIC_QUANT（仅 deqScale）——与 w8a8 下 MLA 三投影的 STATIC_QUANT（静态四元组）不同；w4a8 仅 routed expert 走 INT4，dense 投影不变。
 
@@ -366,6 +369,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - **Gate**：`XliteOpMatmul(moeGate)` 打分后 `XliteOpSigmoidTopK`（[sigmoid_topk.md](../kernels/sigmoid_topk.md)）一次完成 sigmoid、bias 选路（noaux_tc：权重取 pre-bias 值）、top-`nA=8`、normTopK 归一与 routeScale 缩放，输出 `weights [M,E]` 与 BIT1 掩码 `routing [M,E]`。glm_moe_dsa 的 routing 按 FP32 计算（vllm 对该 model_type 强制 FP32 router，适配器把 `gate_bias` 转 FP32 传入）。
 - **Dispatch（非 AllToAll）**：`enableMoEAllToAll=false`（run.sh / 默认；与 EPLB 互斥）走 `XliteOpPermutation`（[permutation.md](../kernels/permutation.md)），把 token 按 routing 重排为 expert 分组的 `expertsSorted [P,H]`。EP=16 时仅排本 rank 物理专家段 `[start, end)`（`start = rankId/moeTPSize · E_loc = rankId·16`）；`mAllDp >= 1024` 时预分配行数按 `activeTokensRatioPerEp` 压缩（`P ≤ M·nA`）。DP>1 时 dispatch 前另有打包 AllGather（`XliteOpConcat` → `AllGather` → `XliteOpSplit`，图中省略）。
 - **w8a8 quant-hoist**（`moeReDtype==INT8` 且 `hiddenSize%32==0`，非 AllToAll / graph 通信，默认启用，w8a8 变体即走此路）：`XliteOpQuantDyn` 前置到 permutation 之前（per-token 量化 hiddenState），permutation 收集 INT8 行并把 per-token scale 搭带散射到对应专家槽，`expertsSorted` 为 INT8、另有 `expertsScale [P]` FP32（`expertsSorted` 缓冲减半、量化 M 行而非 P 行、DP>1 AllGather 载荷减半）；`XLITE_DISABLE_MOE_QUANT_HOIST` 可回退 legacy BF16 收集。

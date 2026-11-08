@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,10 +7,10 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 """quant_cache_c8 row quantization and paged-write tests."""
+
 import logging
 
 import torch
-
 
 QUANT_MAX = 127
 K_CACHE_FILL = -101
@@ -41,12 +40,10 @@ def run_test(rt, device, name, rows, slots, capacity, cache_offset=0):
     from xlite._C import quant_cache_c8
 
     tokens, dim = rows.shape
-    k_base = torch.full((capacity * dim + 2 * cache_offset,), K_CACHE_FILL,
-                        dtype=torch.int8, device=device)
-    scale_base = torch.full((capacity + 2 * cache_offset,), SCALE_CACHE_FILL,
-                            dtype=torch.float16, device=device)
-    k_cache = k_base[cache_offset:cache_offset + capacity * dim].view(capacity, dim)
-    scale_cache = scale_base[cache_offset:cache_offset + capacity]
+    k_base = torch.full((capacity * dim + 2 * cache_offset,), K_CACHE_FILL, dtype=torch.int8, device=device)
+    scale_base = torch.full((capacity + 2 * cache_offset,), SCALE_CACHE_FILL, dtype=torch.float16, device=device)
+    k_cache = k_base[cache_offset : cache_offset + capacity * dim].view(capacity, dim)
+    scale_cache = scale_base[cache_offset : cache_offset + capacity]
     device_rows = rows.to(device)
     device_slots = slots.to(device)
     torch.npu.synchronize(device)
@@ -56,8 +53,8 @@ def run_test(rt, device, name, rows, slots, capacity, cache_offset=0):
     assert torch.equal(device_rows.cpu(), rows), (name, "input mutated")
 
     k_base, scale_base = k_base.cpu(), scale_base.cpu()
-    k8 = k_base[cache_offset:cache_offset + capacity * dim].view(capacity, dim)
-    scales = scale_base[cache_offset:cache_offset + capacity]
+    k8 = k_base[cache_offset : cache_offset + capacity * dim].view(capacity, dim)
+    scales = scale_base[cache_offset : cache_offset + capacity]
     written = slots[(slots >= 0) & (slots < capacity)].long()
     untouched = torch.ones(capacity, dtype=torch.bool)
     untouched[written] = False
@@ -85,8 +82,7 @@ def run_packed_test(rt, device, name, rows, slots, blocks, bs):
     page = bs * (dim + 2)  # bytes per block
     raw = torch.full((blocks * page,), K_CACHE_FILL & 0xFF, dtype=torch.uint8, device=device)
     k_cache = torch.as_strided(raw.view(torch.int8), (blocks, bs, dim), (page, dim, 1))
-    scale_cache = torch.as_strided(raw.view(torch.float16), (blocks, bs), (page // 2, 1),
-                                   storage_offset=bs * dim // 2)
+    scale_cache = torch.as_strided(raw.view(torch.float16), (blocks, bs), (page // 2, 1), storage_offset=bs * dim // 2)
     device_rows = rows.to(device)
     device_slots = slots.to(device)
     torch.npu.synchronize(device)
@@ -108,12 +104,12 @@ def run_packed_test(rt, device, name, rows, slots, blocks, bs):
     assert bool((untouched_k == K_CACHE_FILL).all()), (name, "K canary")
     assert bool((untouched_s < 0).all()), (name, "scale canary")
     check_values(k8, scales, rows, name)
-    logging.info("quant_cache_c8 %s (%d rows, dim %d, %dx%d packed) passed", name, tokens, dim,
-                 blocks, bs)
+    logging.info("quant_cache_c8 %s (%d rows, dim %d, %dx%d packed) passed", name, tokens, dim, blocks, bs)
 
 
 def main():
     import torch_npu  # noqa: F401
+
     from xlite._C import Runtime
 
     logging.getLogger().setLevel(logging.INFO)

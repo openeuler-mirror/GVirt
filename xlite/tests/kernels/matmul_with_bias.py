@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,9 +7,10 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-import torch_npu  # noqa: F401
-from xlite._C import Runtime, matmul_with_bias
 import torch.nn.functional as F
+import torch_npu  # noqa: F401
+
+from xlite._C import Runtime, matmul_with_bias
 
 torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
@@ -37,7 +37,9 @@ for weight_nz in [False, True]:
                     matmul_with_bias(rt, x, y, z, bias, weight_nz=weight_nz and dtype != torch.float)
                     torch.npu.synchronize()
 
-                    print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
+                    print(
+                        f"[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!"
+                    )
 
                     # torch_npu and xlite both accumulate in fp32 but split K
                     # differently (K up to 7616 here), so results differ by
@@ -56,6 +58,6 @@ for weight_nz in [False, True]:
                     try:
                         torch.testing.assert_close(standard, z, atol=atol, rtol=rtol)
                     except AssertionError as e:
-                        print(f'{e}')
-                        print(f'torch_npu: {standard}')
-                        print(f'xlite: {z}')
+                        print(f"{e}")
+                        print(f"torch_npu: {standard}")
+                        print(f"xlite: {z}")

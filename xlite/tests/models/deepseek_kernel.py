@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,8 +6,9 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-import torch
 from typing import Optional
+
+import torch
 
 
 def weight_dequant(x: torch.Tensor, s: torch.Tensor, offset: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -28,8 +28,8 @@ def weight_dequant(x: torch.Tensor, s: torch.Tensor, offset: Optional[torch.Tens
     Raises:
         AssertionError: If `x` or `s` are not contiguous or if their dimensions are not 2.
     """
-    assert x.is_contiguous() and s.is_contiguous(), 'Input tensors must be contiguous'
-    assert x.dim() == 2 and s.dim() == 2, 'Input tensors must have 2 dimensions'
+    assert x.is_contiguous() and s.is_contiguous(), "Input tensors must be contiguous"
+    assert x.dim() == 2 and s.dim() == 2, "Input tensors must have 2 dimensions"
     y = x.float()
     if offset is not None:
         y = y - offset.float()

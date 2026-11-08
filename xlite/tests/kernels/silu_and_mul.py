@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,8 +8,8 @@
 # ===============================================================================
 import torch
 import torch_npu  # noqa: F401
-from xlite._C import Runtime, silu_and_mul
 
+from xlite._C import Runtime, silu_and_mul
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
@@ -19,11 +18,7 @@ torch.npu.set_device(0)
 # the final rounding on a few elements — always a single output ULP. A 1-ULP
 # bf16 error reaches 2^-7 = 0.78% relative, so bf16 needs an ULP-aware rtol
 # (same as tests/kernels/rmsnorm.py).
-supported_dtype_list = [
-    (torch.float, 2e-5, 2e-3),
-    (torch.float16, 2e-5, 2e-3),
-    (torch.bfloat16, 2e-2, 1e-2)
-]
+supported_dtype_list = [(torch.float, 2e-5, 2e-3), (torch.float16, 2e-5, 2e-3), (torch.bfloat16, 2e-2, 1e-2)]
 
 for dtype, atol, rtol in supported_dtype_list:
     for dim in [2304, 6400]:
@@ -37,21 +32,20 @@ for dtype, atol, rtol in supported_dtype_list:
         # (double rounding) and disagrees with the kernel by 1 ULP on a few
         # percent of elements at larger magnitudes, so reference the
         # documented single-rounding semantics.
-        standard = (torch.nn.functional.silu(input[..., :d].float())
-                    * input[..., d:].float()).to(dtype)
+        standard = (torch.nn.functional.silu(input[..., :d].float()) * input[..., d:].float()).to(dtype)
 
         torch.npu.synchronize()
         silu_and_mul(rt, input, output)
         torch.npu.synchronize()
 
-        print(f'silu and mul {dtype} dim={dim} executed!')
+        print(f"silu and mul {dtype} dim={dim} executed!")
 
         try:
             torch.testing.assert_close(standard, output, atol=atol, rtol=rtol)
         except AssertionError as e:
-            print(f'{e}')
-            print(f'torch_npu: {standard}')
-            print(f'xlite: {output}')
+            print(f"{e}")
+            print(f"torch_npu: {standard}")
+            print(f"xlite: {output}")
 
         # SwiGLU limit clamp path: up = clamp(up, -L, L), gate = clamp(gate, max=L).
         # Output magnitude scales ~ L*L (silu(L)*up ≈ L*L for large L), so the small
@@ -80,11 +74,11 @@ for dtype, atol, rtol in supported_dtype_list:
             silu_and_mul(rt, input, output, swiglu_limit=swiglu_limit)
             torch.npu.synchronize()
 
-            print(f'silu and mul {dtype} swiglu_limit={swiglu_limit} dim={dim} executed!')
+            print(f"silu and mul {dtype} swiglu_limit={swiglu_limit} dim={dim} executed!")
 
             try:
                 torch.testing.assert_close(standard, output, atol=clamp_atol, rtol=clamp_rtol)
             except AssertionError as e:
-                print(f'{e}')
-                print(f'torch_npu: {standard}')
-                print(f'xlite: {output}')
+                print(f"{e}")
+                print(f"torch_npu: {standard}")
+                print(f"xlite: {output}")

@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -24,13 +23,13 @@ fuses term1 (vmuls) + term2 (H x vaxpy) + bf16<->fp32 cast in one AIV pass.
 This test composes the host op (hc_post) from Python and compares y against the
 PyTorch reference, in the in-place path (residual==y, as model.cpp:1618 calls it).
 """
+
 import sys
 
 import torch
 import torch_npu  # noqa: F401
 
 from xlite._C import Runtime, hc_post
-
 
 torch.npu.set_device(0)
 rt = Runtime(0, size=500)
@@ -44,7 +43,7 @@ CASES = [
     (2, 8, 256),
     (1, 4, 512),
     (8, 1024, 4096),
-    (1, 1, 256),   # m=1: decode single-token path
+    (1, 1, 256),  # m=1: decode single-token path
     (1, 1, 4096),  # m=1 real-scale
 ]
 
@@ -54,7 +53,7 @@ def run_case(b, s, hidden):
     n = b * s
     torch.manual_seed(5678)
     with torch.device("npu"):
-        x = torch.randn(b, s, hidden, dtype=torch.bfloat16)                 # submodule output
+        x = torch.randn(b, s, hidden, dtype=torch.bfloat16)  # submodule output
         residual_ref = torch.randn(b, s, HC_MULT, hidden, dtype=torch.bfloat16)
         post = 2.0 * torch.sigmoid(torch.randn(b, s, HC_MULT, dtype=torch.float32))  # in [0, 2]
         # doubly-stochastic comb via softmax + a few Sinkhorn rounds
@@ -96,8 +95,9 @@ def run_case(b, s, hidden):
         # 2^-8..2^-7 relative (e.g. 0.03125 at |y|~4). The bounds must cover
         # that 1-ULP flip; tighter ones can never hold for two independently
         # rounded fp32->bf16 paths.
-        torch.testing.assert_close(y_ref.cpu(), residual_inplace.view(b, s, HC_MULT, hidden).cpu(),
-                                  atol=1e-3, rtol=1e-2)
+        torch.testing.assert_close(
+            y_ref.cpu(), residual_inplace.view(b, s, HC_MULT, hidden).cpu(), atol=1e-3, rtol=1e-2
+        )
         print(f"hc_post {tag} passed!")
     except AssertionError as e:
         ok = False
@@ -109,7 +109,7 @@ def run_case(b, s, hidden):
 
 if __name__ == "__main__":
     all_ok = True
-    for (b, s, hidden) in CASES:
+    for b, s, hidden in CASES:
         all_ok &= run_case(b, s, hidden)
     if all_ok:
         print("==== all hc_post cases passed ====")

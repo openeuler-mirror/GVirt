@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,12 +6,13 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from __future__ import absolute_import
 import logging
 import os
+
 import torch
-import torch_npu
 import torch.distributed as dist
+import torch_npu
+
 from xlite._C import Runtime, rmsnorm, rmsnorm_with_bias
 
 logging.getLogger().setLevel(logging.INFO)
@@ -21,8 +21,8 @@ npu_id = 0
 rt = Runtime(npu_id, size=500)
 torch.npu.set_device(npu_id)
 
-def stand_rmsnorm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None,
-                  eps: float = 1e-6) -> torch.Tensor:
+
+def stand_rmsnorm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None, eps: float = 1e-6) -> torch.Tensor:
     input_dtype = x.dtype
     x = x.to(torch.float32)
     variance = x.pow(2)
@@ -36,6 +36,7 @@ def stand_rmsnorm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = No
         # double-round and differ from the kernel by 1 ULP on ~23% of elements.
         x = x + bias.float()
     return x.to(input_dtype)
+
 
 BATCH_SIZE = 64
 DIM = 8192
@@ -68,16 +69,16 @@ for test_dtype in dtype_list:
         else:
             rmsnorm(rt, x, weight, y, NORMEPS)
         torch.npu.synchronize()
-        logging.info(f'rmsnorm({test_dtype}) {"with" if has_bias else "without"} bias executed!')
+        logging.info(f"rmsnorm({test_dtype}) {'with' if has_bias else 'without'} bias executed!")
         atol, rtol = TOL[test_dtype]
         try:
             torch.testing.assert_close(standard, y, atol=atol, rtol=rtol)
         except AssertionError as e:
-            logging.error(f'{e}')
+            logging.error(f"{e}")
             print(f"standard: {standard}")
             print(f"bias: {bias}")
-            logging.error(f'torch_npu: {standard}')
-            logging.error(f'xlite: {y}')
+            logging.error(f"torch_npu: {standard}")
+            logging.error(f"xlite: {y}")
 
 BATCH_SIZE = 64
 DIM = 128
@@ -95,7 +96,7 @@ for test_dtype in dtype_list:
             bias2 = torch.randn(DIM, dtype=test_dtype)
             y = x.clone()
 
-        x_split1, x_split2, x_split3 = x.split([CNT * DIM, DIM, DIM], dim = 1)
+        x_split1, x_split2, x_split3 = x.split([CNT * DIM, DIM, DIM], dim=1)
         x_split1 = x_split1.view(BATCH_SIZE, CNT, DIM)
         x_split2 = x_split2.view(BATCH_SIZE, 1, DIM)
         # standard
@@ -109,18 +110,39 @@ for test_dtype in dtype_list:
         torch.npu.synchronize()
         if has_bias:
             rmsnorm_with_bias(rt, x, weight, bias1, y, NORMEPS, norm_dim=DIM, cnt_per_token=CNT)
-            rmsnorm_with_bias(rt, x, weight, bias2, y, NORMEPS, norm_dim=DIM, cnt_per_token=1, in_start_offset=DIM * CNT, out_start_offset=DIM * CNT)
+            rmsnorm_with_bias(
+                rt,
+                x,
+                weight,
+                bias2,
+                y,
+                NORMEPS,
+                norm_dim=DIM,
+                cnt_per_token=1,
+                in_start_offset=DIM * CNT,
+                out_start_offset=DIM * CNT,
+            )
         else:
             rmsnorm(rt, x, weight, y, NORMEPS, norm_dim=DIM, cnt_per_token=CNT)
-            rmsnorm(rt, x, weight, y, NORMEPS, norm_dim=DIM, cnt_per_token=1, in_start_offset=DIM * CNT, out_start_offset=DIM * CNT)
+            rmsnorm(
+                rt,
+                x,
+                weight,
+                y,
+                NORMEPS,
+                norm_dim=DIM,
+                cnt_per_token=1,
+                in_start_offset=DIM * CNT,
+                out_start_offset=DIM * CNT,
+            )
         torch.npu.synchronize()
 
-        logging.info(f'rmsnorm with stride ({test_dtype}) {"with" if has_bias else "without"} bias executed!')
+        logging.info(f"rmsnorm with stride ({test_dtype}) {'with' if has_bias else 'without'} bias executed!")
 
         atol, rtol = TOL[test_dtype]
         try:
             torch.testing.assert_close(standard, y, atol=atol, rtol=rtol)
         except AssertionError as e:
-            logging.error(f'{e}')
-            logging.error(f'torch_npu: {standard}')
-            logging.error(f'xlite: {y}')
+            logging.error(f"{e}")
+            logging.error(f"torch_npu: {standard}")
+            logging.error(f"xlite: {y}")

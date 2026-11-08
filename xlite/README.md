@@ -9,7 +9,6 @@
 xlite (GVirt前端)：轻量级Transformer模型运行时，支持多样性算力协同，当前支持在昇腾硬件上高效运行。
 xlite公开了Transformer运行所需的模型构图以及算子，所有算子基于昇腾AscendC/CCE开发。
 
-
 ## 背景与动机
 
 在大模型推理场景中，传统的单流串行执行模式存在以下问题：
@@ -33,8 +32,6 @@ xlite通过以下技术手段解决上述问题：
 
 详细性能数据参考 [PR #7935](https://github.com/vllm-project/vllm-ascend/pull/7935)。
 
-
-
 ## 软件架构
 
 ![image](doc/images/architecture.png)
@@ -42,7 +39,6 @@ xlite通过以下技术手段解决上述问题：
 xlite已适配vllm_ascend，可通过xlite_graph_config配置快速使能xlite加速效果，使用方法参考[官方指导文档](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html)。
 
 xlite支持模型见[模型列表](doc/user_guide/models.md)。
-
 
 ## 快速开始
 
@@ -61,7 +57,11 @@ import os
 from vllm import LLM
 
 # xlite默认支持decode-only模式, 可通过设置 "full_mode": True 使能full模式
-model = LLM(model="path/to/Qwen3-32B", tensor_parallel_size=8, additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}})
+model = LLM(
+    model="path/to/Qwen3-32B",
+    tensor_parallel_size=8,
+    additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}},
+)
 outputs = model.generate("Hello, how are you?")
 ```
 

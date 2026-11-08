@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,9 +8,9 @@
 # ===============================================================================
 import torch
 import torch_npu  # noqa: F401
-from xlite._C import Runtime, einsum_mht_hdt_mhd, einsum_mht_htd_mhd
-from tests.models.weight_utils import matrix_nd2nz
 
+from tests.models.weight_utils import matrix_nd2nz
+from xlite._C import Runtime, einsum_mht_hdt_mhd, einsum_mht_htd_mhd
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
@@ -72,13 +71,11 @@ def run_case(einsum_op, weight_layout, dtype, m, h, t, d, weight_nz):
     try:
         torch.testing.assert_close(standard, mhd, atol=atol, rtol=rtol)
     except AssertionError as e:
-        print(f'[m={m}, h={h}, t={t}, d={d}, {dtype}, layout={weight_layout}, '
-              f'weight_nz={weight_nz}] {e}')
-        print(f'torch npu: {standard}')
-        print(f'xlite: {mhd}')
+        print(f"[m={m}, h={h}, t={t}, d={d}, {dtype}, layout={weight_layout}, weight_nz={weight_nz}] {e}")
+        print(f"torch npu: {standard}")
+        print(f"xlite: {mhd}")
         return False
-    print(f'[m={m}, h={h}, t={t}, d={d}, {dtype}, layout={weight_layout}, '
-          f'weight_nz={weight_nz}] einsum executed!')
+    print(f"[m={m}, h={h}, t={t}, d={d}, {dtype}, layout={weight_layout}, weight_nz={weight_nz}] einsum executed!")
     return True
 
 

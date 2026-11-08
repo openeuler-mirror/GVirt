@@ -10,11 +10,10 @@ Additionally, the script is designed to run within a container with `git`, `vllm
 Using `vllm-ascend`'s official container image is recommended.
 """
 
-import os
 import json
 import math
+import os
 import re
-import urllib.request
 import shlex
 import shutil
 import signal
@@ -23,6 +22,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -31,10 +31,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import pandas as pd
-
 from daily_bot_utils import check_subprocess_result, env_with_proxy, expand_values, pad_to_last, tile_each
 from dataset_spec import DATASETS, ensure_dataset, parse_dataset_entry, venv_activate_cmd
-
 
 CWD = Path(__file__).parent.resolve()  # current working directory
 AIS_BENCH_DIR = Path.home() / "benchmark"  # path to clone ais_bench repo and store datasets
@@ -904,7 +902,7 @@ def run_ais_bench(
                         f"ais_bench exited with code {process.returncode}: {process.stderr.read() if process.stderr else 'no error message'}"
                     )
                 break
-            except KeyboardInterrupt as e:
+            except KeyboardInterrupt:
                 print(f"\n{retry_str}KeyboardInterrupt received, cancelling current attempt of ais_bench...")
                 process.kill()
             except subprocess.TimeoutExpired as e:

@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -51,9 +50,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 # Routed-expert weight names as laid out by HF GLM/DeepSeek MoE checkpoints.
-EXPERT_WEIGHT_RE = re.compile(
-    r"^model\.layers\.\d+\.mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.weight$"
-)
+EXPERT_WEIGHT_RE = re.compile(r"^model\.layers\.\d+\.mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.weight$")
 
 INT8_MAX = 127
 
@@ -113,7 +110,8 @@ def main():
     parser.add_argument("--input", required=True, help="bf16 checkpoint dir (safetensors)")
     parser.add_argument("--output", required=True, help="output checkpoint dir (created)")
     parser.add_argument(
-        "--report-only", action="store_true",
+        "--report-only",
+        action="store_true",
         help="only print the quantization error report, do not write the output",
     )
     args = parser.parse_args()
@@ -133,7 +131,9 @@ def main():
     # expert weight's prefix means the input is already (partly) quantized.
     weight_prefixes = {n[: -len(".weight")] + "." for n in matched}
     siblings = [
-        n for names in shard_names.values() for n in names
+        n
+        for names in shard_names.values()
+        for n in names
         if any(n.startswith(p) and not n.endswith(".weight") for p in weight_prefixes)
         and re.match(r"^model\.layers\.\d+\.mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.", n)
     ]
@@ -201,8 +201,7 @@ def main():
     if raw_index is not None:
         raw_index.setdefault("weight_map", {}).update(new_keys)
         raw_index["weight_map"] = dict(sorted(raw_index["weight_map"].items()))
-        with open(os.path.join(args.output, "model.safetensors.index.json"), "w",
-                  encoding="utf-8") as f:
+        with open(os.path.join(args.output, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
             json.dump(raw_index, f, indent=2, sort_keys=True)
 
     print(f"\ndone: {args.output} (routed experts int8, rest bf16)")

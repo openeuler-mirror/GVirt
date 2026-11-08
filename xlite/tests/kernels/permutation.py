@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,9 +7,10 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-import torch_npu  # noqa: F401
-from xlite._C import Runtime, permutation, unpermutation
 import torch.nn.functional as F
+import torch_npu  # noqa: F401
+
+from xlite._C import Runtime, permutation, unpermutation
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
@@ -32,24 +32,31 @@ for n_routed_experts in [160, 256]:
             x = torch.randint(-127, 127, (BATCH_SIZE, DIM), dtype=torch.int8, device="npu:0")
             scales_in = torch.randn(BATCH_SIZE, dtype=torch.float32, device="npu:0")
             torch.manual_seed(0)
-            indices = torch.topk(torch.randn(BATCH_SIZE, n_routed_experts, device="npu:0"),
-                                 TOPK, dim=-1)[1]
+            indices = torch.topk(torch.randn(BATCH_SIZE, n_routed_experts, device="npu:0"), TOPK, dim=-1)[1]
             counts = torch.bincount(indices.flatten(), minlength=n_routed_experts)
-            routing_xlite = torch.zeros((BATCH_SIZE, n_routed_experts // 32), dtype=torch.int32,
-                                        device=x.device)
+            routing_xlite = torch.zeros((BATCH_SIZE, n_routed_experts // 32), dtype=torch.int32, device=x.device)
             for batch in range(BATCH_SIZE):
                 for k in indices[batch]:
                     k = k.item()
-                    routing_xlite[batch, k // 32] |= torch.tensor(1 << (k % 32), dtype=torch.int64,
-                                                                   device=x.device)
+                    routing_xlite[batch, k // 32] |= torch.tensor(1 << (k % 32), dtype=torch.int64, device=x.device)
 
             experts_sorted = torch.empty(BATCH_SIZE * TOPK, DIM, dtype=torch.int8, device="npu:0")
             scales_out = torch.empty(BATCH_SIZE * TOPK, dtype=torch.float32, device="npu:0")
             unp_idx = torch.empty(n_routed_experts, BATCH_SIZE + 1, dtype=torch.int32, device="npu:0")
             experts_counts = torch.empty(n_routed_experts, 1, dtype=torch.int32, device="npu:0")
             torch.npu.synchronize()
-            permutation(rt, x, routing_xlite, START, END, experts_sorted, unp_idx, experts_counts,
-                        scale_in=scales_in, scale_out=scales_out)
+            permutation(
+                rt,
+                x,
+                routing_xlite,
+                START,
+                END,
+                experts_sorted,
+                unp_idx,
+                experts_counts,
+                scale_in=scales_in,
+                scale_out=scales_out,
+            )
             torch.npu.synchronize()
 
             experts_counts = experts_counts.view(n_routed_experts).to(dtype=torch.int64)
@@ -68,8 +75,7 @@ for n_routed_experts in [160, 256]:
             total = int(experts_counts.sum().item())
             torch.testing.assert_close(experts_sorted[:total], torch.cat(ref_rows), atol=0, rtol=0)
             torch.testing.assert_close(scales_out[:total], torch.cat(ref_scales), atol=1e-6, rtol=1e-6)
-            print(f"n_routed_experts: {n_routed_experts} dtype: int8 "
-                  "permutation + scale piggyback executed!")
+            print(f"n_routed_experts: {n_routed_experts} dtype: int8 permutation + scale piggyback executed!")
             continue
 
         x = torch.randn(BATCH_SIZE, DIM, dtype=dtype, device="npu:0")

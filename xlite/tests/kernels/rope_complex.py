@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,13 +6,14 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from __future__ import absolute_import
 import logging
 import math
+
 import numpy as np
 import torch
 import torch_npu  # noqa: F401
-from xlite._C import Runtime, rope_complex, muls
+
+from xlite._C import Runtime, muls, rope_complex
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -30,8 +30,9 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     return freqs_cis.to("npu")
 
 
-def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False,
-                     interleaved: bool = False, keep_fp32: bool = False) -> torch.Tensor:
+def apply_rotary_emb(
+    x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False, interleaved: bool = False, keep_fp32: bool = False
+) -> torch.Tensor:
     """
     Applies rotary positional embeddings to the input tensor.
     Based on tests/models/deepseek_v3.py apply_rotary_emb function.
@@ -105,33 +106,41 @@ for test_dtype, rope_dim, q_dim in test_cases:
             q_pe_input = attnQWithQr_reshaped[..., -rope_dim:]
             # Reshape to (bsz, seqlen, n_local_heads, rope_dim) for apply_rotary_emb
             q_pe_input = q_pe_input.contiguous()
-            q_pe_standard = apply_rotary_emb(q_pe_input, freqs_cis, inverse=inverse,
-                                             interleaved=out_interleaved)
+            q_pe_standard = apply_rotary_emb(q_pe_input, freqs_cis, inverse=inverse, interleaved=out_interleaved)
             # Reshape back to (num_tokens, n_local_heads, rope_dim)
             q_pe_standard = q_pe_standard.view(num_tokens, n_local_heads, rope_dim)
 
             # xlite
             torch.npu.synchronize()
-            rope_complex(rt, n_local_heads, q_dim, rope_dim, attnQWithQr_xlite,
-                         freqs_cis_xlite, position, output_xlite, inverse=inverse,
-                         out_interleaved=out_interleaved, do_rotate=False)
+            rope_complex(
+                rt,
+                n_local_heads,
+                q_dim,
+                rope_dim,
+                attnQWithQr_xlite,
+                freqs_cis_xlite,
+                position,
+                output_xlite,
+                inverse=inverse,
+                out_interleaved=out_interleaved,
+                do_rotate=False,
+            )
             torch.npu.synchronize()
 
             tag = "inverse" if inverse else "forward"
             lay = "interleaved" if out_interleaved else "deinterleaved"
-            logging.info(f'rope_complex ({tag}, {lay}, rope_dim={rope_dim}, q_dim={q_dim}, '
-                         f'{test_dtype}) executed!')
+            logging.info(f"rope_complex ({tag}, {lay}, rope_dim={rope_dim}, q_dim={q_dim}, {test_dtype}) executed!")
 
             try:
                 torch.testing.assert_close(q_pe_standard, output_xlite, atol=1e-5, rtol=1e-3)
             except AssertionError as e:
-                logging.error(f'{e}')
-                logging.error(f'torch_npu: {q_pe_standard}')
-                logging.error(f'xlite: {output_xlite}')
+                logging.error(f"{e}")
+                logging.error(f"torch_npu: {q_pe_standard}")
+                logging.error(f"xlite: {output_xlite}")
 
 
 # Combined: rope_complex(do_rotate) + muls(nope) == full rotate_activation. Needs q_dim > rope_dim.
-logging.info('=== combined: rope_complex(do_rotate) + muls(nope) == full rotate_activation ===')
+logging.info("=== combined: rope_complex(do_rotate) + muls(nope) == full rotate_activation ===")
 for test_dtype, rope_dim, q_dim in test_cases:
     if q_dim <= rope_dim:
         continue
@@ -155,8 +164,9 @@ for test_dtype, rope_dim, q_dim in test_cases:
             # keep the rope result in FP32 through the scale and round exactly once.
             attnQWithQr_reshaped = attnQWithQr.view(BATCH_SIZE, SEQ_LEN, n_local_heads, q_dim)
             q_pe_input = attnQWithQr_reshaped[..., -rope_dim:].contiguous()
-            q_pe_fp32 = apply_rotary_emb(q_pe_input, freqs_cis, inverse=inverse,
-                                         interleaved=out_interleaved, keep_fp32=True)
+            q_pe_fp32 = apply_rotary_emb(
+                q_pe_input, freqs_cis, inverse=inverse, interleaved=out_interleaved, keep_fp32=True
+            )
             q_pe_fp32 = q_pe_fp32.view(num_tokens, n_local_heads, rope_dim)
             nope_part = attnQWithQr_reshaped[..., :-rope_dim].reshape(num_tokens, n_local_heads, nope_dim)
             # f32 scale to match the kernel's 1/sqrtf(stepDim).
@@ -167,8 +177,19 @@ for test_dtype, rope_dim, q_dim in test_cases:
 
             # actual: rope_complex scales the rope region; muls scales the nope region in place.
             torch.npu.synchronize()
-            rope_complex(rt, n_local_heads, q_dim, rope_dim, q, freqs_cis_xlite, position,
-                         rope_out, inverse=inverse, out_interleaved=out_interleaved, do_rotate=True)
+            rope_complex(
+                rt,
+                n_local_heads,
+                q_dim,
+                rope_dim,
+                q,
+                freqs_cis_xlite,
+                position,
+                rope_out,
+                inverse=inverse,
+                out_interleaved=out_interleaved,
+                do_rotate=True,
+            )
             q_flat = q.view(num_tokens * n_local_heads, q_dim)
             muls(rt, q_flat, rotate_scale, q_flat, calc_offset=0, calc_num=nope_dim)
             torch.npu.synchronize()
@@ -178,8 +199,7 @@ for test_dtype, rope_dim, q_dim in test_cases:
 
             tag = "inverse" if inverse else "forward"
             lay = "interleaved" if out_interleaved else "deinterleaved"
-            logging.info(f'combined ({tag}, {lay}, rope_dim={rope_dim}, q_dim={q_dim}, '
-                         f'{test_dtype}) executed!')
+            logging.info(f"combined ({tag}, {lay}, rope_dim={rope_dim}, q_dim={q_dim}, {test_dtype}) executed!")
 
             # Strict bounds: the reference mirrors the kernel's exact rounding
             # structure (FP32 rotation + FP32 scale, one final dtype round), so
@@ -189,6 +209,6 @@ for test_dtype, rope_dim, q_dim in test_cases:
             try:
                 torch.testing.assert_close(full_ref, full, atol=atol, rtol=rtol)
             except AssertionError as e:
-                logging.error(f'{e}')
-                logging.error(f'torch_npu: {full_ref}')
-                logging.error(f'xlite: {full}')
+                logging.error(f"{e}")
+                logging.error(f"torch_npu: {full_ref}")
+                logging.error(f"xlite: {full}")

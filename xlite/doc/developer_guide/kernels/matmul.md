@@ -64,10 +64,10 @@ deqScale: GM --MTE2--> L1(C1) --FIX--> C2PIPE2GM(fixpipe buffer)
 
 - A 矩阵 ND→NZ 转换由 DMA 硬件完成：`CopyGmToL1Nd2Nz` 使用 `DataCopy` 的 `Nd2NzParams`（`csrc/kernels/kernel_macro.h` 的 `CopyGmToL1Nd2Nz`），即 GM→L1 搬运时直接落成 NZ 分形布局；当 `srcDValue > 65535`（K 超过 16bit stride 上限）时退化为按行循环搬运。
 - B 矩阵按 `(transpose, nz)` 四种组合搬运（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，B GM→L1 四组合分支，关键字 `/* B GM -> L1 */`）：
-  - `transpose=0, nz=0`：`CopyGmToL1Nd2Nz`，与 A 相同的 ND→NZ 硬件转换；
-  - `transpose=0, nz=1`：`CopyGmToL1` 直接按 NZ 分形块拷贝（源已是 NZ）；
-  - `transpose=1, nz=0`：`CopyGmToL1Nd2Nz` 把 `[K, N]` 的 ND 矩阵按 K 为 N 维、N 为 D 维转成 NZ；
-  - `transpose=1, nz=1`：`CopyGmToL1` 按转置后的 NZ 块拷贝。
+    - `transpose=0, nz=0`：`CopyGmToL1Nd2Nz`，与 A 相同的 ND→NZ 硬件转换；
+    - `transpose=0, nz=1`：`CopyGmToL1` 直接按 NZ 分形块拷贝（源已是 NZ）；
+    - `transpose=1, nz=0`：`CopyGmToL1Nd2Nz` 把 `[K, N]` 的 ND 矩阵按 K 为 N 维、N 为 D 维转成 NZ；
+    - `transpose=1, nz=1`：`CopyGmToL1` 按转置后的 NZ 块拷贝。
 - L1→L0 搬运使用 Cube 的 `LoadData`（load2d）：`CopyToL0ACol`（`csrc/kernels/kernel_macro.h` 的 `CopyToL0ACol`）与 `CopyToL0BCol`（`csrc/kernels/kernel_macro.h` 的 `CopyToL0BCol`）；转置路径的 `CopyToL0BTCol`（`csrc/kernels/kernel_macro.h` 的 `CopyToL0BTCol`，关键字 `LoadDataWithTranspose`）对 int8/int4 使用 `LoadDataWithTranspose`（B 转置时 L1→L0 的分形单元为 32x32x1B，`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `nBlockSize = 32 * BYTE_BITS / dtypeBits`）。
 - 矩阵计算：`CalMmad`（`csrc/kernels/kernel_macro.h` 的 `CalMmad`）在 L0C 上沿 K 累加，首轮 `cmatrixInitVal=true` 清零；带 bias 时首轮改用 `CalMmadWithBias`（`csrc/kernels/kernel_macro.h` 的 `CalMmadWithBias`），bias 从 C2 Bias Table 参与累加。
 - 输出：`CopyToGmWithDequant`（`csrc/kernels/kernel_macro.h` 的 `CopyToGmWithDequant`）通过 fixpipe 把 L0C 的 NZ 数据以 `SetFixpipeNz2ndFlag` 转 ND 写回 GM；浮点路径 mode 为 `F322F16/F322BF16/NoQuant`，int32→half 量化反量化路径 mode 为 `VDEQF16` 并通过 `SetFixPipeConfig(deqScale)` 提供 per-N 反量化向量。

@@ -21,10 +21,34 @@ oAbsorb = softmax_causal(QK) · kCache
 Python 侧调用(`tests/kernels/mla.py` 的 `mla_v2(rt, qWithQr_xlite, ...)` 调用点,关键字 `mla_v2(rt, qWithQr_xlite`;dense 用例在同文件的 `mla_v2 dense` 分支):
 
 ```python
-mla_v2(rt, q_with_qr, qr, k_cache, pe_cache, wuk_t, wuv, output, query_start_loc,
-       query_lens, cached_lens, block_tables, n_heads, rope_head_dim, nope_head_dim,
-       v_head_dim, kv_lora_rank, BLOCK_SIZE, batch, scale, topk_indices, top_k,
-       weight_nz, enable_flash_attention=False, tile_size_of_cached_kv=8192, dense=False)
+mla_v2(
+    rt,
+    q_with_qr,
+    qr,
+    k_cache,
+    pe_cache,
+    wuk_t,
+    wuv,
+    output,
+    query_start_loc,
+    query_lens,
+    cached_lens,
+    block_tables,
+    n_heads,
+    rope_head_dim,
+    nope_head_dim,
+    v_head_dim,
+    kv_lora_rank,
+    BLOCK_SIZE,
+    batch,
+    scale,
+    topk_indices,
+    top_k,
+    weight_nz,
+    enable_flash_attention=False,
+    tile_size_of_cached_kv=8192,
+    dense=False,
+)
 ```
 
 host 封装 `MLAV2`(`csrc/_C.cpp` 的 `MLAV2`)的 `qAbsorb = einsum(q_nope, wukT)` 与 `output = einsum(oAbsorb, wuv)` 在 paged / dense 两条路径**均无条件执行**(对应 `XliteOpEinsumMhtHtdMhd` 分别位于 `if (dense)` 之前与所有分支之后);两条路径唯一区别是 dense(`dense=True`)在吸收前多一步 `gather_sparse_kv_cache` 收集 top-k token 到连续 `kDense`/`peDense`(见 `csrc/_C.cpp` 的 `MLAV2` `dense` 分支,关键字 `XliteOpGatherSparseKVCache`),随后以 `topK` 为 `maxSeqLen`、内核 `topK=0` 调 `XliteOpMLAV2`,输入/输出契约与 paged 相同。接口完整 docstring 见 `xlite/_C.pyi` 的 `mla_v2`(注意 Python API 不含 `max_seq_len`,host 取 `maxSeqLen = block_tables.shape[1] * blockSize`(`shape[1]` 为运行期宽度:V2 持久表由 PrepareAttn 收窄,standalone 由 lens 推导收窄),再传给 kernel)。kernel 签名(`csrc/kernels/mla_v2.h` 的 `mla_v2_<dtype>` 入口,宏 `MLA_V2_FUNC_DEFINE`):

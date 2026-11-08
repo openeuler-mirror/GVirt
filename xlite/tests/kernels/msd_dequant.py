@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -28,12 +27,14 @@
 
 import torch
 import torch_npu
+
 from xlite._C import Runtime, msd_merge_dequant
 
 npu_devid = 0
 rt = Runtime(npu_devid, size=500)
 torch.npu.set_device(npu_devid)
 torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
+
 
 def msd_merge_dequant_ref(y_merged, scale_bias, per_token_scale):
     """Pure-torch reference for the MSD merge + bias + per-token dequant.
@@ -46,11 +47,11 @@ def msd_merge_dequant_ref(y_merged, scale_bias, per_token_scale):
         bf16 [m, n]
     """
     m = y_merged.shape[0] // 2
-    y_low = y_merged[0::2].float()          # rows 0, 2, 4, ... = low
-    y_high = y_merged[1::2].float()        # rows 1, 3, 5, ... = high
-    merged = y_high * 16.0 + y_low                       # [m, n]
-    merged = merged + scale_bias.float().view(1, -1)     # per-column bias
-    merged = merged * per_token_scale.float().view(-1, 1) # per-row scale
+    y_low = y_merged[0::2].float()  # rows 0, 2, 4, ... = low
+    y_high = y_merged[1::2].float()  # rows 1, 3, 5, ... = high
+    merged = y_high * 16.0 + y_low  # [m, n]
+    merged = merged + scale_bias.float().view(1, -1)  # per-column bias
+    merged = merged * per_token_scale.float().view(-1, 1)  # per-row scale
     return merged.to(torch.bfloat16)
 
 
@@ -64,6 +65,7 @@ test_cases = [
     [8192, 6144],
 ]
 
+
 def msd_merge_dequant_multi_ref(y_merged, scale_biases, counts, per_token_scale):
     """Multi-expert reference: row r's scale_bias is picked by its expert id,
     located via the per-expert token counts (rows are grouped by expert on the
@@ -72,11 +74,10 @@ def msd_merge_dequant_multi_ref(y_merged, scale_biases, counts, per_token_scale)
     num_experts = len(counts)
     y_low = y_merged[0::2].float()
     y_high = y_merged[1::2].float()
-    merged = y_high * 16.0 + y_low                                          # [m, n]
-    expert_ids = torch.repeat_interleave(
-        torch.arange(num_experts, device=y_merged.device), counts.to(y_merged.device))
-    bias_matrix = torch.cat([b.view(1, -1) for b in scale_biases], dim=0)   # [E, n]
-    merged = merged + bias_matrix[expert_ids]                               # [m, n]
+    merged = y_high * 16.0 + y_low  # [m, n]
+    expert_ids = torch.repeat_interleave(torch.arange(num_experts, device=y_merged.device), counts.to(y_merged.device))
+    bias_matrix = torch.cat([b.view(1, -1) for b in scale_biases], dim=0)  # [E, n]
+    merged = merged + bias_matrix[expert_ids]  # [m, n]
     merged = merged * per_token_scale.float().view(-1, 1)
     return merged.to(torch.bfloat16)
 
@@ -90,8 +91,7 @@ for m, n in test_cases:
     y_merged = torch.stack([y_low, y_high], dim=1).reshape(2 * m, n)
     scale_bias = torch.randn(1, n, dtype=torch.float32, device=f"npu:{npu_devid}")
     per_token_scale = torch.randn(m, dtype=torch.float32, device=f"npu:{npu_devid}")
-    per_token_scale = torch.where(per_token_scale == 0, torch.ones_like(per_token_scale),
-                                 per_token_scale)
+    per_token_scale = torch.where(per_token_scale == 0, torch.ones_like(per_token_scale), per_token_scale)
     out = torch.empty(m, n, dtype=torch.bfloat16, device=f"npu:{npu_devid}")
 
     # torch reference (compute on NPU in fp32, same as kernel's fp32 chain)
@@ -129,13 +129,9 @@ for m, n, num_experts, token_counts in multi_cases:
     y_low = torch.randn(m, n, dtype=torch.float16, device=f"npu:{npu_devid}")
     y_high = torch.randn(m, n, dtype=torch.float16, device=f"npu:{npu_devid}")
     y_merged = torch.stack([y_low, y_high], dim=1).reshape(2 * m, n)
-    scale_biases = [
-        torch.randn(1, n, dtype=torch.float32, device=f"npu:{npu_devid}")
-        for _ in range(num_experts)
-    ]
+    scale_biases = [torch.randn(1, n, dtype=torch.float32, device=f"npu:{npu_devid}") for _ in range(num_experts)]
     per_token_scale = torch.randn(m, dtype=torch.float32, device=f"npu:{npu_devid}")
-    per_token_scale = torch.where(per_token_scale == 0, torch.ones_like(per_token_scale),
-                                 per_token_scale)
+    per_token_scale = torch.where(per_token_scale == 0, torch.ones_like(per_token_scale), per_token_scale)
     counts = torch.tensor(token_counts, dtype=torch.int32, device=f"npu:{npu_devid}")
     out = torch.empty(m, n, dtype=torch.bfloat16, device=f"npu:{npu_devid}")
 
@@ -184,12 +180,8 @@ def check_determinism(m, n, num_experts, token_counts, runs=DETERMINISM_RUNS):
     torch.manual_seed(12345)
     y_merged = torch.randn(2 * m, n, dtype=torch.float16, device=f"npu:{npu_devid}")
     per_token_scale = torch.randn(m, dtype=torch.float32, device=f"npu:{npu_devid}")
-    per_token_scale = torch.where(per_token_scale == 0, torch.ones_like(per_token_scale),
-                                 per_token_scale)
-    scale_biases = [
-        torch.randn(1, n, dtype=torch.float32, device=f"npu:{npu_devid}")
-        for _ in range(num_experts)
-    ]
+    per_token_scale = torch.where(per_token_scale == 0, torch.ones_like(per_token_scale), per_token_scale)
+    scale_biases = [torch.randn(1, n, dtype=torch.float32, device=f"npu:{npu_devid}") for _ in range(num_experts)]
     if token_counts is not None:
         assert sum(token_counts) == m, f"sum(token_counts)={sum(token_counts)} != m={m}"
         counts = torch.tensor(token_counts, dtype=torch.int32, device=f"npu:{npu_devid}")
@@ -221,9 +213,11 @@ def check_determinism(m, n, num_experts, token_counts, runs=DETERMINISM_RUNS):
             all_same = False
             idx = torch.where(out0 != out)
             r0, c0 = idx[0][0].item(), idx[1][0].item()
-            fail_msgs.append(f"run{i} vs run0: {neq} elems differ, max_diff={md:.6f}, "
-                             f"first at [{r0},{c0}]: run0={out0[r0, c0].item()} "
-                             f"run{i}={out[r0, c0].item()}")
+            fail_msgs.append(
+                f"run{i} vs run0: {neq} elems differ, max_diff={md:.6f}, "
+                f"first at [{r0},{c0}]: run0={out0[r0, c0].item()} "
+                f"run{i}={out[r0, c0].item()}"
+            )
     return all_same, max_diff, fail_msgs
 
 
@@ -231,8 +225,10 @@ for m, n, num_experts, token_counts in determinism_cases:
     all_same, max_diff, fail_msgs = check_determinism(m, n, num_experts, token_counts)
     try:
         assert all_same, "\n".join(fail_msgs)
-        print(f"msd_merge_dequant determinism [{m}, {n}, E={num_experts}] check passed "
-              f"({DETERMINISM_RUNS} runs, max_diff={max_diff:.6f})")
+        print(
+            f"msd_merge_dequant determinism [{m}, {n}, E={num_experts}] check passed "
+            f"({DETERMINISM_RUNS} runs, max_diff={max_diff:.6f})"
+        )
     except AssertionError as e:
         print(f"msd_merge_dequant determinism [{m}, {n}, E={num_experts}] check failed")
         print(f"{e}")

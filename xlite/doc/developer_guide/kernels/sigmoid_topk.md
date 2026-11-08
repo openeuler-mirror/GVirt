@@ -21,8 +21,7 @@ topkW = topkW / sum(topkW) * scale     # normTopKProb 时归一,再乘 scale
 Python 侧调用(`tests/kernels/sigmoid_topk.py` 中 `sigmoid_topk(rt, ...)` 调用):
 
 ```python
-sigmoid_topk(rt, scores, indices, bias, scale, weights_out, indices_out,
-             n_group, topk_group, topK, True)
+sigmoid_topk(rt, scores, indices, bias, scale, weights_out, indices_out, n_group, topk_group, topK, True)
 ```
 
 host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpSigmoidTopK`。kernel 签名(`csrc/kernels/sigmoid_topk.h` 的 `SIGMOID_TOPK_FUNC_DEFINE` 宏 / `sigmoid_topk_<dtype>` 入口):

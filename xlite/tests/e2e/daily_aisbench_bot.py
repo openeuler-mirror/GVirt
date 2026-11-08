@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 xlite 每日自动化精度测试机器人
 
@@ -294,7 +293,7 @@ def parse_aisbench_report(report_path: Path) -> Dict:
         return metrics
 
     try:
-        with open(report_path, "r", encoding="utf-8") as f:
+        with open(report_path, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 xlite = row.get("xlite", "").lower() in ["true", "y", "yes", "1"]

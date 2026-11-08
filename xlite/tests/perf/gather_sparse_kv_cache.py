@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -233,9 +232,7 @@ def build_case(
         # query_start_loc: exclusive prefix sum (cumsum - lens), as in mla_v2;
         # decode (all-1) => [0, 1, ..., batch-1]
         query_lens_np = np.array(query_lens_list)
-        query_start_loc = torch.tensor(
-            (np.cumsum(query_lens_np) - query_lens_np).tolist(), dtype=torch.int32
-        ).flatten()
+        query_start_loc = torch.tensor((np.cumsum(query_lens_np) - query_lens_np).tolist(), dtype=torch.int32).flatten()
 
     # Keyword form matching the enforced binding contract: the positional
     # zone ends at rope_head_dim; kv_heads/compress_ratio/burst_copy_size are

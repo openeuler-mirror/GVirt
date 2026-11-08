@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,10 +7,10 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-import torch_npu  # noqa: F401
-from xlite._C import Runtime, matmul
 import torch.nn.functional as F
+import torch_npu  # noqa: F401
 
+from xlite._C import Runtime, matmul
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
@@ -59,14 +58,18 @@ for weight_nz in [False, True]:
                         torch.npu.synchronize()
 
                         if transpose:
-                            print(f'[{m}, {k}] x [{k}, {n}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
+                            print(
+                                f"[{m}, {k}] x [{k}, {n}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!"
+                            )
                         else:
-                            print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
+                            print(
+                                f"[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!"
+                            )
 
                         try:
                             atol, rtol = ATOL_RTOL[dtype]
                             torch.testing.assert_close(standard, z, atol=atol, rtol=rtol)
                         except AssertionError as e:
-                            print(f'{e}')
-                            print(f'torch_npu: {standard}')
-                            print(f'xlite: {z}')
+                            print(f"{e}")
+                            print(f"torch_npu: {standard}")
+                            print(f"xlite: {z}")

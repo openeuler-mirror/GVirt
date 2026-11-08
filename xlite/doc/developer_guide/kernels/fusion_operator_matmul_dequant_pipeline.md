@@ -104,4 +104,3 @@ AIV 2b/2b+1:  CrossCoreWaitFlag<0x2>(8)
 - **tileCount 为奇数**：`mTiles` 公式 `ceil(m/(m0_aiv*2))*2` 强制 AIV 行块成对（needPad 语义，`csrc/kernels/dequant.h` 的 `Dequant::TaskTilesInit`，关键字 `fusion operator need AIC_tilecount:AIV_tilecount=1:2` 注释），多余的空 tile 在 `RunTileByIdx` 的越界检查（`csrc/kernels/dequant.h` 的 `Dequant::RunTileByIdx`，关键字 `skip when tile out of range`）中直接返回，不会死等没有任务的 AIC flag；
 - **尾部行列**：AIC 侧 `mActual/nActual` + 分形 pad（见 matmul.md）；AIV 侧 `actualRows = min(m-rowOffset, m0_aiv)`、`localCols = min(n-colOffset, n0)`（`csrc/kernels/dequant.h` 的 `Dequant::RunTileByIdx`，关键字 `actualRows = MIN`），行内列尾块按精确字节数走 `*_align_b16` 原语（见 dequant.md）；
 - **num 动态 token**：`pnumTokens` 非空时 AIV 的 m 收缩为 min(*num, m)（`csrc/kernels/dequant.h` 的 `Dequant::TaskTilesInit`，关键字 `pnumTokensValue < m`），跳过 padding 行。
-

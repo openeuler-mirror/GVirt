@@ -69,7 +69,7 @@ format_duration() {
     local hours=$((total_seconds / 3600))
     local minutes=$(((total_seconds % 3600) / 60))
     local seconds=$((total_seconds % 60))
-    
+
     if [ ${hours} -gt 0 ]; then
         echo "${hours}小时${minutes}分钟${seconds}秒"
     else
@@ -105,10 +105,10 @@ wait_server_ready() {
     TARGET_KEYWORD="Application startup complete"
     TIMEOUT=600  # 超时时间（秒），0 表示不超时
     CHECK_INTERVAL=5  # 检查间隔（秒）
-    
+
     echo "等待服务启动完成（关键字：${TARGET_KEYWORD}）..."
     echo "超时时间：${TIMEOUT} 秒，检查间隔：${CHECK_INTERVAL} 秒"
-    
+
     local elapsed_time=0
     while [ $elapsed_time -lt $TIMEOUT ]; do
         # 检查日志文件是否存在
@@ -126,7 +126,7 @@ wait_server_ready() {
         sleep $CHECK_INTERVAL
         elapsed_time=$((elapsed_time + CHECK_INTERVAL))
     done
-    
+
     # 超时处理
     echo -e "\n错误：监控超时（超过 ${TIMEOUT} 秒未找到关键字：${TARGET_KEYWORD}）"
     if [ -f "$log_file" ]; then
@@ -150,7 +150,7 @@ run_bench_scripts_sequential() {
     echo "执行压测脚本：${bench_script}"
     echo "脚本参数：${script_args[@]}"
     echo "======================================"
-    
+
     # 执行压测脚本，并传递参数（使用数组保持参数的完整性）
     echo -e "\n启动压测：${bench_script} ${script_args[@]}"
     bash "${bench_script}" "${script_args[@]}" || echo "${bench_script} 执行返回非零状态码（不影响后续流程）"
@@ -239,14 +239,14 @@ run_scenario_test() {
     local max_model_len=$9
     local tensor_parallel_size=${10}
     local main_output_dir=${11}
-    
+
     # 提取模型名称（从路径中获取最后一部分）
     local model_name=$(basename "${model_path}")
-    
+
     # 记录开始时间
     local start_time=$(date +%s)
     local start_time_formatted=$(date "+%Y-%m-%d %H:%M:%S")
-    
+
     echo "======================================"
     echo "场景：${scenario_desc}"
     echo "输入长度：${input_len}，输出长度：${output_len}"
@@ -259,7 +259,7 @@ run_scenario_test() {
     echo "tensor_parallel_size：${tensor_parallel_size}"
     echo "开始时间：${start_time_formatted}"
     echo "======================================"
-    
+
     # Xlite Decode Only 服务
     echo -e "\n>>> 测试 Xlite Decode Only 服务"
     local decode_only_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_xlite_decode_only.log"
@@ -326,7 +326,7 @@ run_scenario_test() {
         fi
     fi
     wait_10s "Aclgraph 测试完成，准备下一个场景"
-    
+
     # 计算和和显示耗时
     local end_time=$(date +%s)
     local end_time_formatted=$(date "+%Y-%m-%d %H:%M:%S")
@@ -334,13 +334,13 @@ run_scenario_test() {
     local hours=$((duration / 3600))
     local minutes=$(((duration % 3600) / 60))
     local seconds=$((duration % 60))
-    
+
     echo -e "\n======================================"
     echo "场景 ${scenario_desc} 全部完成！"
     echo "结束时间：${end_time_formatted}"
     echo "总耗时：${hours}小时 ${minutes}分钟 ${seconds}秒（${duration}秒）"
     echo "======================================"
-    
+
     # 返回耗时（秒数）
     echo "${duration}"
 }
@@ -377,16 +377,16 @@ process_scenario_data() {
     local tensor_parallel_size=$5
     local main_output_dir=$6
     local device_type=${7:-910B3(A2)}
-    
+
     echo -e "\n======================================"
     echo "处理场景数据：${scenario_desc}"
     echo "======================================"
-    
+
     # 构建三个服务的结果目录路径
     local aclgraph_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_aclgraph_${model_name}"
     local xlite_full_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_xlite_full_${model_name}"
     local xlite_decode_only_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_xlite_decode_only_${model_name}"
-    
+
     # 检查目录是否存在
     if [ ! -d "${aclgraph_dir}" ]; then
         echo "警告：目录 ${aclgraph_dir} 不存在，跳过数据处理"
@@ -400,7 +400,7 @@ process_scenario_data() {
         echo "警告：目录 ${xlite_decode_only_dir} 不存在，跳过数据处理"
         return 1
     fi
-    
+
     # 构建输出文件名（包含年月日时间信息和tensor_parallel_size）
     local date_suffix=$(date +%Y%m%d)
     local output_file="${main_output_dir}/benchmark_comparison_${model_name}_input${input_len}_output${output_len}_tp${tensor_parallel_size}_${date_suffix}.log"
@@ -521,23 +521,23 @@ for model_type in "${TEST_MODELS[@]}"; do
     else
         for k in "${!SCENARIOS_DEFAULT[@]}"; do SCENARIOS[$k]="${SCENARIOS_DEFAULT[$k]}"; done
     fi
-    
+
     echo "======================================"
     echo "开始测试模型：${TEST_MODEL}"
     echo "测试场景数量：${MODEL_SCENARIO_LIMIT}"
     echo "======================================"
-    
+
     # 初始化当前模型的测试结果
     MODEL_TEST_RESULTS[$TEST_MODEL]=""
-    
+
     # 遍历场景执行测试
     for ((i=1; i<=MODEL_SCENARIO_LIMIT; i++)); do
         IFS='|' read -r input_len output_len concurrency_list num_prompts_multiplier_list max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size <<< "${SCENARIOS[$i]}"
-        
+
         # 记录场景测试结果
         scenario_result="失败"
         scenario_duration="N/A"
-        
+
         # 执行场景测试（捕获错误和耗时）
         scenario_output=$(run_scenario_test \
             "${TEST_MODEL}_场景${i}：输入${input_len}token,输出${output_len}token" \
@@ -552,18 +552,18 @@ for model_type in "${TEST_MODELS[@]}"; do
             "${tensor_parallel_size}" \
             "${MAIN_OUTPUT_DIR}" | tee /dev/tty)
         scenario_exit_code=${PIPESTATUS[0]}
-        
+
         # 检查场景测试是否成功
         if [ ${scenario_exit_code} -ne 0 ]; then
             echo -e "\n警告：场景${i}测试失败，跳过数据处理，继续下一个场景"
             continue
         fi
-        
+
         # 场景测试成功，标记为成功并提取耗时
         scenario_result="成功"
         scenario_duration=$(echo "${scenario_output}" | tail -n 1)
         scenario_duration_formatted=$(format_duration ${scenario_duration})
-        
+
         # 处理场景数据（捕获错误）
         # moe_quant_a3 运行于 Ascend910(A3)，其余默认 910B3(A2)
         # 此循环位于脚本顶层而非函数内，不可使用 local（set -u 下会因 unbound variable 退出）
@@ -575,11 +575,11 @@ for model_type in "${TEST_MODELS[@]}"; do
             echo -e "\n警告：场景${i}数据处理失败，继续下一个场景"
             scenario_result="数据处理失败"
         fi
-        
+
         # 记录场景测试结果
         MODEL_TEST_RESULTS[$TEST_MODEL]="${MODEL_TEST_RESULTS[$TEST_MODEL]}场景${i}：输入${input_len}token,输出${output_len}token,并发数：${concurrency_list},tensor_parallel_size：${tensor_parallel_size},耗时：${scenario_duration_formatted} - ${scenario_result}\n"
     done
-    
+
     echo -e "\n======================================"
     echo "模型 ${TEST_MODEL} 的测试场景全部执行完成！"
     echo "======================================"
@@ -606,7 +606,7 @@ echo "======================================"
 for model_type in "${TEST_MODELS[@]}"; do
     IFS='|' read -r TEST_MODEL TEST_MODEL_PATH <<< "${MODELS[$model_type]}"
     MODEL_SCENARIO_LIMIT=${MODEL_SCENARIO_COUNT[$model_type]}
-    
+
     echo ""
     echo "模型：${TEST_MODEL}"
     echo "测试场景数量：${MODEL_SCENARIO_LIMIT}"

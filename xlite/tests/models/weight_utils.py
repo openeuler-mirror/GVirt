@@ -1,26 +1,27 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2024-2024. All rights reserved.
 
 """Utilities for downloading and initializing model weights."""
+
 import glob
 import json
+import logging
 import os
 import stat
 import sys
-import logging
 from collections import defaultdict
-from typing import Any, Iterator, List, Optional, Tuple
+from collections.abc import Iterator
+from typing import Any, List, Optional, Tuple
 
 import filelock
 import numpy as np
 import torch
 import torch_npu
 from huggingface_hub import snapshot_download
-from safetensors.torch import load_file, save_file, safe_open
+from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
-
 ACL_FORMAT_FRACTAL_NZ = 29
+
 
 def _hbm_trace(tag: str, start_pos: int = 0):
     """Per-forward HBM 占用打点"""
@@ -49,12 +50,14 @@ def matrix_nd2nz(matrix):
     """nd2nz"""
     return torch_npu.npu_format_cast(matrix, ACL_FORMAT_FRACTAL_NZ)
 
+
 def load_tensor(path: str):
     data = torch.jit.load(path)
-    return data.state_dict()['0'].to("npu")
+    return data.state_dict()["0"].to("npu")
+
 
 def setup_logger():
-    """ init logger """
+    """init logger"""
     _logger = logging.getLogger(__name__)
 
     _logger.setLevel(logging.DEBUG)
@@ -71,11 +74,11 @@ def setup_logger():
 
     return _logger
 
+
 logger = setup_logger()
 
 
 class Disabledtqdm(tqdm):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, disable=True)
 
@@ -154,25 +157,23 @@ def prepare_hf_model_weights(
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
         with get_lock(model_name_or_path, cache_dir):
-            hf_folder = snapshot_download(model_name_or_path,
-                                          allow_patterns=allow_patterns,
-                                          cache_dir=cache_dir,
-                                          tqdm_class=Disabledtqdm,
-                                          revision=revision)
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                allow_patterns=allow_patterns,
+                cache_dir=cache_dir,
+                tqdm_class=Disabledtqdm,
+                revision=revision,
+            )
     hf_weights_files: List[str] = []
     for pattern in allow_patterns:
         hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
     if not use_safetensors:
-        hf_weights_files = [
-            x for x in hf_weights_files if not x.endswith("training_args.bin")
-        ]
+        hf_weights_files = [x for x in hf_weights_files if not x.endswith("training_args.bin")]
 
     if len(hf_weights_files) == 0 and use_safetensors and fall_back_to_pt:
-        out = prepare_hf_model_weights(model_name_or_path,
-                                        cache_dir=cache_dir,
-                                        use_safetensors=False,
-                                        fall_back_to_pt=False,
-                                        revision=revision)
+        out = prepare_hf_model_weights(
+            model_name_or_path, cache_dir=cache_dir, use_safetensors=False, fall_back_to_pt=False, revision=revision
+        )
     else:
         out = (hf_folder, hf_weights_files, use_safetensors)
     return out
@@ -204,7 +205,8 @@ def hf_model_weights_iterator(
         cache_dir=cache_dir,
         use_safetensors=use_safetensors,
         fall_back_to_pt=fall_back_to_pt,
-        revision=revision)
+        revision=revision,
+    )
 
     if use_np_cache:
         # Currently np_cache only support *.bin checkpoints
@@ -225,13 +227,13 @@ def hf_model_weights_iterator(
                     for name, param in state.items():
                         param_path = os.path.join(np_folder, name)
 
-                        with os.fdopen(os.open(param_path, os.O_WRONLY, stat.S_IWUSR), 'w') as f:
+                        with os.fdopen(os.open(param_path, os.O_WRONLY, stat.S_IWUSR), "w") as f:
                             np.save(f, param.cpu().detach().numpy())
                         weight_names.append(name)
-                with os.fdopen(os.open(weight_names_file, os.O_WRONLY, stat.S_IWUSR), 'w') as f:
+                with os.fdopen(os.open(weight_names_file, os.O_WRONLY, stat.S_IWUSR), "w") as f:
                     json.dump(weight_names, f)
 
-        with open(weight_names_file, "r") as f:
+        with open(weight_names_file) as f:
             weight_names = json.load(f)
 
         for name in weight_names:
@@ -304,18 +306,17 @@ def load_tensor_parallel_weights(
 
     loaded_weight_slice = convert_pyslice_to_tensor(loaded_weight_slice)
     if param.shape != loaded_weight_slice.shape:
-        logger.warning(f"%s model shape(%s) mismatch checkpoint shape(%s)",
-                       param_name,
-                       param.shape,
-                       loaded_weight_slice.shape)
+        logger.warning(
+            "%s model shape(%s) mismatch checkpoint shape(%s)", param_name, param.shape, loaded_weight_slice.shape
+        )
 
     if is_row_parallel:
         if is_transpose:
-            param.data[:, :loaded_weight_slice.shape[1]].copy_(loaded_weight_slice)
+            param.data[:, : loaded_weight_slice.shape[1]].copy_(loaded_weight_slice)
         else:
-            param.data[:loaded_weight_slice.shape[0]].copy_(loaded_weight_slice)
+            param.data[: loaded_weight_slice.shape[0]].copy_(loaded_weight_slice)
     else:
         if is_transpose:
-            param.data[:loaded_weight_slice.shape[0]].copy_(loaded_weight_slice)
+            param.data[: loaded_weight_slice.shape[0]].copy_(loaded_weight_slice)
         else:
-            param.data[:, :loaded_weight_slice.shape[1]].copy_(loaded_weight_slice)
+            param.data[:, : loaded_weight_slice.shape[1]].copy_(loaded_weight_slice)
