@@ -15,10 +15,14 @@ from xlite._C import Runtime, silu_and_mul
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
+# The fp32 op order still differs (kernel vexp/vdiv vs torch silu), flipping
+# the final rounding on a few elements — always a single output ULP. A 1-ULP
+# bf16 error reaches 2^-7 = 0.78% relative, so bf16 needs an ULP-aware rtol
+# (same as tests/kernels/rmsnorm.py).
 supported_dtype_list = [
     (torch.float, 2e-5, 2e-3),
     (torch.float16, 2e-5, 2e-3),
-    (torch.bfloat16, 2e-2, 2e-4)
+    (torch.bfloat16, 2e-2, 1e-2)
 ]
 
 for dtype, atol, rtol in supported_dtype_list:
@@ -27,7 +31,14 @@ for dtype, atol, rtol in supported_dtype_list:
         output = torch.empty(41, dim, dtype=dtype, device="npu:0")
 
         d = input.shape[-1] // 2
-        standard = torch.nn.functional.silu(input[..., :d]) * input[..., d:]
+        # The kernel computes silu in fp32 and rounds the output once (see
+        # doc/developer_guide/kernels/silu_and_mul.md). Computing silu on the
+        # dtype tensor rounds the silu result to the dtype before the multiply
+        # (double rounding) and disagrees with the kernel by 1 ULP on a few
+        # percent of elements at larger magnitudes, so reference the
+        # documented single-rounding semantics.
+        standard = (torch.nn.functional.silu(input[..., :d].float())
+                    * input[..., d:].float()).to(dtype)
 
         torch.npu.synchronize()
         silu_and_mul(rt, input, output)
@@ -47,8 +58,13 @@ for dtype, atol, rtol in supported_dtype_list:
         # atol/rtol used above (tuned for unit-magnitude randn) is far too tight for
         # the clamped path. Use scale-appropriate tolerances: a few ULPs of the output
         # dtype at the clamped magnitude.
-        clamp_atol = {torch.float: 2e-5, torch.float16: 2e-5, torch.bfloat16: 2e-2}[dtype]
-        clamp_rtol = {torch.float: 2e-3, torch.float16: 2e-3, torch.bfloat16: 2e-4}[dtype]
+        # fp16 computes silu with fp16 intermediates (documented): for
+        # gate < -ln(65504) ~= -11.09, exp(-gate) overflows fp16 and silu
+        # flushes to 0. |silu(gate)| <= 1.693e-4 there, so the output error
+        # is bounded by 1.693e-4 * limit (<= 1.69e-3 at limit=10); atol=2e-3
+        # absorbs this deterministic bound. bf16 keeps an ULP-aware rtol.
+        clamp_atol = {torch.float: 2e-5, torch.float16: 2e-3, torch.bfloat16: 2e-2}[dtype]
+        clamp_rtol = {torch.float: 2e-3, torch.float16: 2e-3, torch.bfloat16: 1e-2}[dtype]
         for swiglu_limit in [2.0, 10.0]:
             input = torch.randn(41, dim * 2, dtype=dtype, device="npu:0") * 20.0
             output = torch.empty(41, dim, dtype=dtype, device="npu:0")
@@ -58,7 +74,7 @@ for dtype, atol, rtol in supported_dtype_list:
             up = input[..., d:]
             up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
             gate = torch.clamp(gate, max=swiglu_limit)
-            standard = torch.nn.functional.silu(gate) * up
+            standard = (torch.nn.functional.silu(gate.float()) * up.float()).to(dtype)
 
             torch.npu.synchronize()
             silu_and_mul(rt, input, output, swiglu_limit=swiglu_limit)
