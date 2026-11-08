@@ -53,7 +53,7 @@ def run_case(einsum_op, weight_layout, dtype, m, h, t, d, weight_nz):
         y = matrix_nd2nz(y)
 
     torch.npu.synchronize()
-    einsum_op(rt, mht, y, mhd, m, h, t, d, weight_nz)
+    einsum_op(rt, mht, y, mhd, m, h, t, d, weight_nz=weight_nz)
 
     # torch.einsum and the kernel both accumulate in fp32 but in different
     # orders (the kernel splits K into 64-wide Mmad chunks), so a small
