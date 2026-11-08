@@ -54,8 +54,15 @@ for test_dtype in dtype_list:
         logging.error(f'torch_npu add: {add_standard}')
         logging.error(f'xlite add: {y}')
 
+    # Same story as tests/kernels/rmsnorm.py: the kernel adds and normalizes
+    # in fp32 and rounds the output once, but the fp32 op order still differs
+    # from the torch reference (variance reduction, rsqrt vs div), flipping
+    # the final rounding on a few elements — always a single output ULP. A
+    # 1-ULP fp16 error fits rtol=1e-3; a 1-ULP bf16 error reaches
+    # 2^-7 = 0.78% relative, so bf16 needs an ULP-aware rtol.
+    rms_rtol = 1e-3 if test_dtype == torch.float16 else 1e-2
     try:
-        torch.testing.assert_close(standard, x, atol=1e-5, rtol=1e-3)
+        torch.testing.assert_close(standard, x, atol=1e-5, rtol=rms_rtol)
     except AssertionError as e:
         logging.error(f'{e}')
         logging.error(f'torch_npu rmsnorm: {standard}')

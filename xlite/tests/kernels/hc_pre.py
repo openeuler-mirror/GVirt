@@ -121,9 +121,21 @@ def run_case(b, s, hidden, sinkhorn_iters):
 
     # ---- compare ----
     tag = f"b={b} s={s} hidden={hidden} iters={sinkhorn_iters}"
-    tol = {"x_norm": (1e-5, 1e-3), "mixes": (1e-5, 1e-3),
+    # x_norm is elementwise on identical inputs, and post/comb pass through the
+    # sigmoid/sinkhorn contractions that damp the mixes noise, so they stay
+    # tight. mixes is the output of TWO INDEPENDENT fp32 GEMMs (xlite matmul
+    # vs torch F.linear) over K = hc_mult*hidden (up to 16384). Their
+    # accumulation orders differ, so near-zero outputs drift by fp32
+    # accumulation noise (up to ~4.4e-4 abs at K=16384) — atol=1e-5 is
+    # unsatisfiable across GEMM implementations (same cross-GEMM noise as
+    # tests/kernels/hc_head.py and matmul.py); 1e-3 keeps >2x margin while
+    # still catching real operand/tiling bugs (O(1) errors).
+    # y is bf16 out: the mixes noise propagates through sigmoid -> pre and
+    # occasionally flips the final fp32->bf16 rounding by 1 ulp; (1e-2, 1e-2)
+    # covers any 1-ulp bf16 flip (ulp/|y| <= 2^-8 < 1e-2) with wide margin.
+    tol = {"x_norm": (1e-5, 1e-3), "mixes": (1e-3, 1e-3),
            "post": (1e-5, 1e-3), "comb": (1e-5, 1e-3),
-           "y": (1e-5, 1e-3)}
+           "y": (1e-2, 1e-2)}
     ok = True
     got_pairs = [("x_norm", x_norm, x_norm_ref), ("mixes", mixes, mixes_ref),
                  ("post", post, post_ref),

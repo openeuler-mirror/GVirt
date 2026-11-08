@@ -55,8 +55,22 @@ def run_case(einsum_op, weight_layout, dtype, m, h, t, d, weight_nz):
     torch.npu.synchronize()
     einsum_op(rt, mht, y, mhd, m, h, t, d, weight_nz)
 
+    # torch.einsum and the kernel both accumulate in fp32 but in different
+    # orders (the kernel splits K into 64-wide Mmad chunks), so a small
+    # fraction of elements straddles a bf16 rounding midpoint and the two
+    # bf16 outputs land on adjacent values: every observed mismatch is
+    # exactly 1 bf16 ULP (abs diff a power of two, rel diff in
+    # [2^-8, 2^-7]). atol=1e-5/rtol=1e-3 sits below the bf16 output
+    # resolution and cannot hold for two independently rounded fp32->bf16
+    # GEMMs. (1e-3, 1e-2) accepts any 1-ULP flip (ulp/|y| <= 2^-7 < 1e-2)
+    # while a real kernel bug (wrong tile / garbage) still fails loudly.
+    # fp16 keeps the tight bound: its 1-ULP relative error 2^-10 < 1e-3.
+    if dtype == torch.bfloat16:
+        atol, rtol = 1e-3, 1e-2
+    else:
+        atol, rtol = 1e-5, 1e-3
     try:
-        torch.testing.assert_close(standard, mhd, atol=1e-5, rtol=1e-3)
+        torch.testing.assert_close(standard, mhd, atol=atol, rtol=rtol)
     except AssertionError as e:
         print(f'[m={m}, h={h}, t={t}, d={d}, {dtype}, layout={weight_layout}, '
               f'weight_nz={weight_nz}] {e}')

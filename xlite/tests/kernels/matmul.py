@@ -15,7 +15,22 @@ import torch.nn.functional as F
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
+# Required for the NZ weight layout contract: with this flag off,
+# npu_format_cast(y, 29) writes a different physical NZ layout than the one
+# the xlite matmul kernel consumes (production sets it the same way in
+# vllm-ascend's model runner).
 torch.npu.config.allow_internal_format = True
+
+# Per-dtype comparison tolerances. For k up to ~7.6k an element's exact result
+# can land on an output-dtype rounding tie, which xlite and the torch_npu
+# reference round in opposite directions (~1 output ulp apart), so allow ~2
+# ulp relative error. The absolute floor covers fp32 accumulation-order noise
+# on near-zero (cancelled) outputs, which is ~1e-3 for the largest k here.
+ATOL_RTOL = {
+    torch.float16: (1e-2, 2e-3),
+    torch.bfloat16: (1e-2, 1.6e-2),
+    torch.float: (4e-3, 1e-3),
+}
 
 for weight_nz in [False, True]:
     for transpose in [False, True]:
@@ -49,7 +64,8 @@ for weight_nz in [False, True]:
                             print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz {weight_nz and dtype != torch.float} matmul executed!')
 
                         try:
-                            torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
+                            atol, rtol = ATOL_RTOL[dtype]
+                            torch.testing.assert_close(standard, z, atol=atol, rtol=rtol)
                         except AssertionError as e:
                             print(f'{e}')
                             print(f'torch_npu: {standard}')

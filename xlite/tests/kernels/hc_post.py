@@ -64,10 +64,13 @@ def run_case(b, s, hidden):
             comb = comb / (comb.sum(dim=-1, keepdim=True) + HC_EPS)
             comb = comb / (comb.sum(dim=-2, keepdim=True) + HC_EPS)
 
-    # PyTorch reference (fp32 throughout).
-    x_ref, resid_ref = x.float(), residual_ref.float()
-    y_ref = post.unsqueeze(-1) * x_ref.unsqueeze(-2)
-    y_ref = y_ref + torch.sum(comb.unsqueeze(-1) * resid_ref.unsqueeze(-2), dim=2)
+    # PyTorch reference (fp32 throughout). Evaluated on CPU: the broadcast
+    # product [b, s, H, H, D] fp32 alone is 2 GiB for the real-scale case,
+    # which OOMs on shared cards (CPU fp32 evaluation is bit-identical to the
+    # NPU one on every smaller case shape).
+    x_ref, resid_ref = x.cpu().float(), residual_ref.cpu().float()
+    y_ref = post.cpu().unsqueeze(-1) * x_ref.unsqueeze(-2)
+    y_ref = y_ref + torch.sum(comb.cpu().unsqueeze(-1) * resid_ref.unsqueeze(-2), dim=2)
     y_ref = y_ref.type_as(x)
 
     # Kernel takes flattened [n=b*s, ...]; view without copying.
@@ -86,8 +89,15 @@ def run_case(b, s, hidden):
     tag = f"b={b} s={s} hidden={hidden}"
     ok = True
     try:
+        # The kernel folds term1 first and accumulates the h-streams with
+        # vmuls/vaxpy, while torch reduces the h-sum before adding term1.
+        # Both are correctly-rounded fp32 orders, so a tiny fraction of
+        # elements (~1e-5) lands on adjacent bf16 values: 1 output ULP =
+        # 2^-8..2^-7 relative (e.g. 0.03125 at |y|~4). The bounds must cover
+        # that 1-ULP flip; tighter ones can never hold for two independently
+        # rounded fp32->bf16 paths.
         torch.testing.assert_close(y_ref.cpu(), residual_inplace.view(b, s, HC_MULT, hidden).cpu(),
-                                  atol=1e-5, rtol=1e-3)
+                                  atol=1e-3, rtol=1e-2)
         print(f"hc_post {tag} passed!")
     except AssertionError as e:
         ok = False

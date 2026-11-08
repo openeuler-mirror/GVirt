@@ -110,7 +110,22 @@ def run_case(b, s, hidden):
 
     # ---- compare ----
     tag = f"b={b} s={s} hidden={hidden}"
-    tol = {"x_norm": (1e-5, 1e-3), "mixes": (1e-5, 1e-3), "y": (1e-5, 1e-3)}
+    # x_norm is elementwise on identical inputs, so it stays tight (1e-5).
+    # mixes is the output of TWO INDEPENDENT fp32 GEMMs (xlite matmul vs
+    # torch F.linear) over K = hc_mult*hidden (up to 16384). Their
+    # accumulation orders differ, so outputs drift by fp32 accumulation
+    # noise; near-zero outputs (where rtol gives no slack) drift up to
+    # ~4.4e-4 abs at K=16384 (deterministic; the same cross-GEMM noise
+    # shows up in tests/kernels/matmul.py's fp32 cases). atol=1e-5 is
+    # unsatisfiable across GEMM implementations; 1e-3 keeps >2x margin
+    # over the observed noise while still catching any real operand/tiling
+    # bug (O(1) or larger errors).
+    # y is bf16 out. The mixes noise propagates through sigmoid -> pre and
+    # occasionally flips the final fp32->bf16 rounding by 1 ulp (up to
+    # ~0.07% of elements; the hc_act merge itself matches bit-exactly when
+    # fed identical mixes, see tests/kernels/hc_act.py). (1e-2, 1e-2)
+    # covers any 1-ulp bf16 flip (ulp/|y| <= 2^-8 < 1e-2) with wide margin.
+    tol = {"x_norm": (1e-5, 1e-3), "mixes": (1e-3, 1e-3), "y": (1e-2, 1e-2)}
     ok = True
     got_pairs = [("x_norm", x_norm.float(), x_norm_ref), ("mixes", mixes, mixes_ref),
                  ("y", y_merge.float(), y_ref)]
