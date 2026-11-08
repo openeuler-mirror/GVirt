@@ -29,6 +29,7 @@ mla_v2.py.
 from __future__ import absolute_import
 
 import logging
+import math
 import torch
 import torch_npu  # noqa: F401
 from typing import Iterable
@@ -128,7 +129,19 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             k_cache = rms_norm_last_dim(k_cache)
             pe_cache = torch.randn(batch, max_seq_len, rope_head_dim)
             pe_cache = rms_norm_last_dim(pe_cache)
-            wkvb = torch.randn(n_heads * (nope_head_dim + v_head_dim), kv_lora_rank).clamp(0.2, 1)
+            # WUK must stay zero-mean (fan-in scaled); WUV stays positive so
+            # outputs stay away from zero and rtol remains meaningful. With
+            # WUK also clamped positive, every key points into the positive
+            # orthant and the qk logits share a huge constant offset (~4e3):
+            # the bf16 ulp there (~2.3 after scale, larger than the whole
+            # top-score spread) lets the reference's separate bf16 roundings
+            # of qkc/qkr flip softmax ties against the kernel's single fused
+            # dot, breaking the rtol check on near-tie rows. Zero-mean WUK
+            # keeps the scaled logits ~N(0, 1.7).
+            wuk = torch.randn(n_heads, nope_head_dim, kv_lora_rank) / math.sqrt(nope_head_dim)
+            wuv = torch.randn(n_heads, v_head_dim, kv_lora_rank).clamp(0.2, 1)
+            wkvb = torch.cat([wuk, wuv], dim=1).reshape(
+                n_heads * (nope_head_dim + v_head_dim), kv_lora_rank)
             wkvb = wkvb.view(n_heads, nope_head_dim + v_head_dim, kv_lora_rank)
 
             masks = []
