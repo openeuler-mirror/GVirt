@@ -37,8 +37,8 @@ xlite 每日自动化测试机器人
     2 - 成功，但检测到性能劣化 (仅当所有场景正常完成时才可能)
 
 目录结构:
-    PROJECT_ROOT = /workspaces/code/opencode/GVirt (容器内路径)
-    REPORT_DIR = /home/daily_reports (容器内路径)
+    PROJECT_ROOT = /workspaces/code/opencode/GVirt
+    REPORT_DIR = /home/daily_reports
 """
 
 import argparse
