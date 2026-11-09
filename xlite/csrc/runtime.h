@@ -368,10 +368,16 @@ protected:
     std::thread _fwdThread;
     std::mutex _fwdMtx;
     std::condition_variable _fwdHasWork;
+    // Signals "queue empty and worker idle" so StopForwardThread can drain
+    // already-submitted tasks instead of dropping their completion notifies.
+    std::condition_variable _fwdDrained;
     enum { FWD_IDLE, FWD_RUNNING, FWD_STOP } _fwdState = FWD_IDLE;
     std::queue<ForwardTask> _fwdQueue;
     std::array<ForwardTaskHandler, 4> _fwdHandlers;  // indexed by ForwardTask::Kind
     std::exception_ptr _fwdEx;
+    // Cleared by StopForwardThread so teardown cannot race new submissions
+    // (guarded by _fwdMtx).
+    bool _fwdAccepting = true;
     bool _fwdEnabled = false;
     bool _fwdSubscribed = false;
 };
