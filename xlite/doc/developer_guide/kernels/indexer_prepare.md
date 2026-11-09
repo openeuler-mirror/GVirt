@@ -19,9 +19,25 @@ DSA(DeepSeek Sparse Attention)indexer 的 K/Q 预处理融合算子(核内函数
 Python 侧调用(`tests/kernels/indexer_prepare.py` 的 `run_test`,关键字 `indexer_prepare(` 调用段):
 
 ```python
-indexer_prepare(rt, kw, k_norm, k_norm_bias, freqs_cis, position,
-                index_head_dim, index_n_heads, rope_head_dim, block_size,
-                index_k_cache, slot_mapping, norm_eps, q, scale, topK, is_long)
+indexer_prepare(
+    rt,
+    kw,
+    k_norm,
+    k_norm_bias,
+    freqs_cis,
+    position,
+    index_head_dim,
+    index_n_heads,
+    rope_head_dim,
+    block_size,
+    index_k_cache,
+    slot_mapping,
+    norm_eps,
+    q,
+    scale,
+    topK,
+    is_long,
+)
 ```
 
 host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpIndexerPrepare`。kernel 签名(`csrc/kernels/indexer_prepare.h` 的 `INDEXER_PREPARE_FUNC_DEFINE`):

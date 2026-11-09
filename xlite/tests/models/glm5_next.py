@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -23,46 +22,51 @@
 # dequantized inside deepseek_v3.linear()). Only the torch_npu forward path is
 # implemented; the xlite C++ path raises NotImplementedError. MTP layer 45 is
 # skipped (non-speculative generation).
-import os
-import math
-from dataclasses import dataclass, field
 import json
+import math
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple, Optional, Literal, List
+from typing import Literal, Optional
 
 import torch
-from torch import nn
-import torch.nn.functional as F
 import torch.distributed as dist
+import torch.nn.functional as F
 import torch_npu
+from torch import nn
 
-# Reuse the low-level primitives from the GLM-5.2 reference (deepseek_v3.py).
-# The linear-attention / MHC / kpool pieces are GLM-5.3 only and live here.
-from tests.models.deepseek_v3 import (
-    Linear,
-    ColumnParallelLinear,
-    RowParallelLinear,
-    RMSNorm,
-    LayerNorm,
-    ParallelEmbedding,
-    quantize_npu,
-    linear as ds_linear,
-    apply_rotary_emb,
-    precompute_freqs_cis,
-    unpack_int4_weight,
-    w4a8_msd_linear,
-    load_tensor_parallel_weights,
-    convert_pyslice_to_tensor,
-    hf_model_weights_iterator,
-    logger,
-    forward_backend as ds_forward_backend,
-)
-from tests.models.deepseek_kernel import weight_dequant
 # ColumnParallelLinear / RowParallelLinear / ParallelEmbedding and the shared linear()
 # helper below are imported from deepseek_v3 and read *its* module-level world_size / rank
 # globals (not ours). Keep a handle on that module so GLM5Next.__init__ can mirror our TP
 # rebind into it; otherwise those layers allocate full-size weights and skip all_reduce.
 from tests.models import deepseek_v3 as _ds3
+from tests.models.deepseek_kernel import weight_dequant
+
+# Reuse the low-level primitives from the GLM-5.2 reference (deepseek_v3.py).
+# The linear-attention / MHC / kpool pieces are GLM-5.3 only and live here.
+from tests.models.deepseek_v3 import (
+    ColumnParallelLinear,
+    LayerNorm,
+    Linear,
+    ParallelEmbedding,
+    RMSNorm,
+    RowParallelLinear,
+    apply_rotary_emb,
+    convert_pyslice_to_tensor,
+    hf_model_weights_iterator,
+    load_tensor_parallel_weights,
+    logger,
+    precompute_freqs_cis,
+    quantize_npu,
+    unpack_int4_weight,
+    w4a8_msd_linear,
+)
+from tests.models.deepseek_v3 import (
+    forward_backend as ds_forward_backend,
+)
+from tests.models.deepseek_v3 import (
+    linear as ds_linear,
+)
 
 # Module-level globals mirror deepseek_v3's convention: rebound inside the model
 # __init__ to the TP-local view (world_size<-tp_size, rank<-tp_rank). MoE keeps
@@ -78,6 +82,7 @@ forward_backend = ds_forward_backend
 @dataclass
 class ModelArgs:
     """GLM-5.3-Flash (glm5_next) model configuration."""
+
     # general
     max_batch_size: int = 1
     max_seq_len: int = 1024
@@ -147,11 +152,11 @@ class ModelArgs:
     vision_rope_theta: float = 10000.0  # config.vision_config.rope_parameters["rope_theta"]
     image_token_id: int = 154854
     indexer_rope_interleave: bool = True
-    index_full_mask: Optional[List[bool]] = None
+    index_full_mask: Optional[list[bool]] = None
     # layer dispatch
-    layer_types: Optional[List[str]] = None
-    kda_layers: Optional[List[int]] = None
-    full_attn_layers: Optional[List[int]] = None
+    layer_types: Optional[list[str]] = None
+    kda_layers: Optional[list[int]] = None
+    full_attn_layers: Optional[list[int]] = None
     # quant / parallelism
     quantization: Literal["none", "w8a8", "w4a8"] = "w8a8"
     moe_ep_size: int = 16
@@ -162,7 +167,7 @@ class ModelArgs:
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
         if self.config_path and self.config_path.exists():
-            with open(self.config_path, "r") as f:
+            with open(self.config_path) as f:
                 cfg = json.load(f)
             tc = cfg.get("text_config", cfg)
             if not self.layer_types:
@@ -213,7 +218,7 @@ class MHC(nn.Module):
         self.base = nn.Parameter(torch.empty(self.hc_mult3))
         self.scale = nn.Parameter(torch.empty(3))
 
-    def pre(self, residual: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def pre(self, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """residual: [bsz, seq, hc_mult, dim] -> (post_mix, comb_mix, layer_input).
 
         Mirrors mhc_pre_torch: RMS-normalize the flattened mix logits by the input
@@ -236,11 +241,10 @@ class MHC(nn.Module):
         pre_logits = mixes[:, :h] * scale[0] + base[:h]
         pre_mix = torch.sigmoid(pre_logits) + self.eps  # [N, h]
 
-        post_logits = mixes[:, h:2 * h] * scale[1] + base[h:2 * h]
+        post_logits = mixes[:, h : 2 * h] * scale[1] + base[h : 2 * h]
         post_mix = torch.sigmoid(post_logits) * self.post_alpha  # [N, h]
 
-        comb_logits = (mixes[:, 2 * h:].view(N, h, h) * scale[2]
-                       + base[2 * h:].view(1, h, h))
+        comb_logits = mixes[:, 2 * h :].view(N, h, h) * scale[2] + base[2 * h :].view(1, h, h)
         comb_mix = torch.softmax(comb_logits, dim=-1) + self.eps
         comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + self.eps)
         for _ in range(self.sinkhorn_iters - 1):
@@ -248,12 +252,11 @@ class MHC(nn.Module):
             comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + self.eps)
 
         layer_input = torch.sum(pre_mix.unsqueeze(-1) * flat.to(torch.float32), dim=1).to(residual.dtype)
-        return (post_mix.view(bsz, seqlen, h, 1),
-                comb_mix.view(bsz, seqlen, h, h),
-                layer_input.view(bsz, seqlen, d))
+        return (post_mix.view(bsz, seqlen, h, 1), comb_mix.view(bsz, seqlen, h, h), layer_input.view(bsz, seqlen, d))
 
-    def post(self, x: torch.Tensor, residual: torch.Tensor, post_mix: torch.Tensor,
-             comb_mix: torch.Tensor) -> torch.Tensor:
+    def post(
+        self, x: torch.Tensor, residual: torch.Tensor, post_mix: torch.Tensor, comb_mix: torch.Tensor
+    ) -> torch.Tensor:
         """out_j = post_mix_j * x + sum_i comb_mix_ij * residual_i.
 
         Mirrors mhc_post_torch einsum "...ij,...ih->...jh".
@@ -302,7 +305,7 @@ class LinearAttention(nn.Module):
         self.proj_size = self.n_heads * self.head_dim  # 8192
         self.local_proj_size = self.n_local_heads * self.head_dim
         self.conv_k = args.short_conv_kernel_size
-        self.scale = self.head_dim ** -0.5   # applied to q after L2-norm (official KDA)
+        self.scale = self.head_dim**-0.5  # applied to q after L2-norm (official KDA)
         # safe_gate lower bound (-5.0): the forget gate is bounded, not the unbounded
         # vllm/KDA softplus form (which caused the greedy loop). See _gate.
         self.linear_lower_bound = args.gate_lower_bound
@@ -310,12 +313,12 @@ class LinearAttention(nn.Module):
         self.q_proj = ColumnParallelLinear(self.dim, self.proj_size)
         self.k_proj = ColumnParallelLinear(self.dim, self.proj_size)
         self.v_proj = ColumnParallelLinear(self.dim, self.proj_size)
-        self.f_a_proj = Linear(self.dim, self.head_dim)            # replicated
+        self.f_a_proj = Linear(self.dim, self.head_dim)  # replicated
         self.f_b_proj = ColumnParallelLinear(self.head_dim, self.proj_size)
         self.b_proj = ColumnParallelLinear(self.dim, self.n_heads)
-        self.g_a_proj = Linear(self.dim, self.head_dim)            # replicated
+        self.g_a_proj = Linear(self.dim, self.head_dim)  # replicated
         self.g_b_proj = ColumnParallelLinear(self.head_dim, self.proj_size)
-        self.wo = RowParallelLinear(self.proj_size, self.dim)   # named "wo" to match the
+        self.wo = RowParallelLinear(self.proj_size, self.dim)  # named "wo" to match the
         # global o_proj->wo rename (MLA also uses "wo"); loaded row-parallel in load_weights.
         self.o_norm = RMSNorm(self.head_dim, args.norm_eps, bias=False)
         # conv1d / A_log / dt_bias stored FULL (small); sliced to local heads in forward
@@ -329,14 +332,18 @@ class LinearAttention(nn.Module):
             # q/k/v each need their own conv state (sharing one buffer makes
             # _conv1d_decode overwrite q's state with k's then v's).
             for _n in ("conv_state_q", "conv_state_k", "conv_state_v"):
-                self.register_buffer(_n,
-                                     torch.zeros(args.max_batch_size, self.n_local_heads, self.head_dim, self.conv_k - 1),
-                                     persistent=False)
+                self.register_buffer(
+                    _n,
+                    torch.zeros(args.max_batch_size, self.n_local_heads, self.head_dim, self.conv_k - 1),
+                    persistent=False,
+                )
             # Recurrent state must be fp32: vllm's MambaStateDtypeCalculator.kda_state_dtype
             # hardcodes the KDA recurrent-state dtype to float32; conv_state stays bf16.
-            self.register_buffer("recurrent_state",
-                                 torch.zeros(args.max_batch_size, self.n_local_heads, self.head_dim, self.head_dim, dtype=torch.float32),
-                                 persistent=False)
+            self.register_buffer(
+                "recurrent_state",
+                torch.zeros(args.max_batch_size, self.n_local_heads, self.head_dim, self.head_dim, dtype=torch.float32),
+                persistent=False,
+            )
 
     def _gate(self, g1: torch.Tensor) -> torch.Tensor:
         """KDA forget gate (safe_gate, official Glm5NextTextForgetGate.forward):
@@ -348,8 +355,8 @@ class LinearAttention(nn.Module):
         vllm form (-exp(A_log)*softplus(...)) was the root cause of the
         greedy-decoding loop. Sliced to local heads; g1: [..., local_proj] -> [., H, D].
         """
-        local_A = self.A_log[rank * self.n_local_heads:(rank + 1) * self.n_local_heads]
-        local_dt = self.dt_bias[rank * self.local_proj_size:(rank + 1) * self.local_proj_size]
+        local_A = self.A_log[rank * self.n_local_heads : (rank + 1) * self.n_local_heads]
+        local_dt = self.dt_bias[rank * self.local_proj_size : (rank + 1) * self.local_proj_size]
         g = (g1.float() + local_dt).view(*g1.shape[:-1], self.n_local_heads, self.head_dim)
         decay_rate = torch.exp(local_A.float()).view(*([1] * (g1.dim() - 1)), self.n_local_heads, 1)
         return self.linear_lower_bound * torch.sigmoid(decay_rate * g)
@@ -360,9 +367,9 @@ class LinearAttention(nn.Module):
         k = self.k_proj(x)
         v = self.v_proj(x)
         beta = torch.sigmoid(self.b_proj(x).float())  # [bsz, seq, n_local_heads]
-        g1 = self.f_b_proj(self.f_a_proj(x))           # [bsz, seq, local_proj]
-        g2 = self.g_b_proj(self.g_a_proj(x))           # [bsz, seq, local_proj]
-        gate = self._gate(g1)                           # [bsz, seq, n_local_heads, head_dim]
+        g1 = self.f_b_proj(self.f_a_proj(x))  # [bsz, seq, local_proj]
+        g2 = self.g_b_proj(self.g_a_proj(x))  # [bsz, seq, local_proj]
+        gate = self._gate(g1)  # [bsz, seq, n_local_heads, head_dim]
 
         # slice conv weights to local heads
         s = slice(rank * self.local_proj_size, (rank + 1) * self.local_proj_size)
@@ -394,7 +401,7 @@ class LinearAttention(nn.Module):
             q = _l2norm(q.float()) * self.scale
             k = _l2norm(k.float())
             v = v.float()
-            core = self._delta_rule_step(q, k, v, gate, beta).to(x.dtype)     # [bsz, H, D]
+            core = self._delta_rule_step(q, k, v, gate, beta).to(x.dtype)  # [bsz, H, D]
 
         core = core.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         g2 = g2.view(bsz, seqlen, self.n_local_heads, self.head_dim)
@@ -414,20 +421,20 @@ class LinearAttention(nn.Module):
         S = self.recurrent_state[:bsz].clone()  # [bsz, H, D, D]
         out = torch.empty(bsz, seq, H, D, dtype=q.dtype, device=q.device)
         for t in range(seq):
-            qt, kt, vt = q[:, t], k[:, t], v[:, t]        # [bsz, H, D]
-            gt = gate[:, t].unsqueeze(-1)                  # [bsz, H, D, 1]
-            bt = beta[:, t, :, None, None]                 # [bsz, H, 1, 1]
+            qt, kt, vt = q[:, t], k[:, t], v[:, t]  # [bsz, H, D]
+            gt = gate[:, t].unsqueeze(-1)  # [bsz, H, D, 1]
+            bt = beta[:, t, :, None, None]  # [bsz, H, 1, 1]
             # Match the vllm fused_recurrent_gated_delta_rule kernel (IS_KDA):
             #   S <- exp(gate) * S          (decay FIRST)
             #   delta <- v - S k            (against the *decayed* S, not S_old)
             #   S <- S + beta * (delta ⊗ k)
             #   o <- S q
-            S = torch.exp(gt) * S                          # [bsz, H, D, 1] * [bsz,H,D,D]
+            S = torch.exp(gt) * S  # [bsz, H, D, 1] * [bsz,H,D,D]
             # State layout S[b,h,d,e] with d=k-index, e=v-index (so S is the transpose of
             # the vllm kernel's [v,k] state: my Sk/o einsums contract d with k). The decay
             # gt[...,d,1] therefore scales the k-index, matching b_h *= exp(b_gk[None,:]).
-            Sk = torch.einsum("bhde,bhd->bhe", S, kt)      # [bsz, H, D]  (contracts k-index d)
-            delta = vt - Sk                                 # [bsz, H, D]  (v-index)
+            Sk = torch.einsum("bhde,bhd->bhe", S, kt)  # [bsz, H, D]  (contracts k-index d)
+            delta = vt - Sk  # [bsz, H, D]  (v-index)
             # outer product delta[v] ⊗ k[k] -> S[k,v]: delta on e(v), k on d(k)
             S = S + bt * torch.einsum("bhe,bhd->bhde", delta, kt)  # [bsz, H, D, D]
             out[:, t] = torch.einsum("bhde,bhd->bhe", S, qt)
@@ -439,11 +446,11 @@ class LinearAttention(nn.Module):
         Decay-first ordering (matches vllm fused_recurrent_gated_delta_rule kernel)."""
         bsz, H, D = q.shape
         S = self.recurrent_state[:bsz]
-        gt = gate[:, 0].unsqueeze(-1)          # [bsz, H, D, 1]
-        bt = beta[:, 0, :, None, None]         # [bsz, H, 1, 1]
-        S = torch.exp(gt) * S                   # decay first
-        Sk = torch.einsum("bhde,bhd->bhe", S, k)   # contracts k-index d -> [bsz,H,D]
-        delta = v - Sk                               # [bsz, H, D] (v-index)
+        gt = gate[:, 0].unsqueeze(-1)  # [bsz, H, D, 1]
+        bt = beta[:, 0, :, None, None]  # [bsz, H, 1, 1]
+        S = torch.exp(gt) * S  # decay first
+        Sk = torch.einsum("bhde,bhd->bhe", S, k)  # contracts k-index d -> [bsz,H,D]
+        delta = v - Sk  # [bsz, H, D] (v-index)
         S = S + bt * torch.einsum("bhe,bhd->bhde", delta, k)  # delta[v] ⊗ k[k] -> S[k,v]
         self.recurrent_state[:bsz] = S
         return torch.einsum("bhde,bhd->bhe", S, q)  # [bsz, H, D]
@@ -457,29 +464,26 @@ class LinearAttention(nn.Module):
         k = self.conv_k
         take = min(k - 1, seqlen)
         H, D = self.n_local_heads, self.head_dim
-        for raw, buf in ((q_raw, self.conv_state_q),
-                         (k_raw, self.conv_state_k),
-                         (v_raw, self.conv_state_v)):
-            last = raw[:, -take:, :].reshape(bsz, take, H, D)          # oldest->newest
+        for raw, buf in ((q_raw, self.conv_state_q), (k_raw, self.conv_state_k), (v_raw, self.conv_state_v)):
+            last = raw[:, -take:, :].reshape(bsz, take, H, D)  # oldest->newest
             slot = torch.zeros(bsz, k - 1, H, D, device=raw.device, dtype=raw.dtype)
-            slot[:, :take] = last.flip(1)                              # newest at index 0
-            buf[:bsz] = slot.permute(0, 2, 3, 1)                      # [bsz, H, D, k-1]
+            slot[:, :take] = last.flip(1)  # newest at index 0
+            buf[:bsz] = slot.permute(0, 2, 3, 1)  # [bsz, H, D, k-1]
 
-    def _conv1d_decode(self, x_tok: torch.Tensor, cw: torch.Tensor,
-                       state: torch.Tensor) -> torch.Tensor:
+    def _conv1d_decode(self, x_tok: torch.Tensor, cw: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
         """Single-step causal conv with SiLU, updating `state` in place.
 
         x_tok: [bsz, local_proj]; cw: [local_proj, 1, k]; state: [bsz, H, D, k-1].
         """
         bsz = x_tok.shape[0]
         xh = x_tok.view(bsz, self.n_local_heads, self.head_dim)  # [bsz, H, D]
-        cs = state[:bsz]                                          # [bsz, H, D, k-1], newest-first
-        new = torch.cat([xh.unsqueeze(-1), cs], dim=-1)           # [bsz, H, D, k] = [x_t, x_{t-1}, ...]
+        cs = state[:bsz]  # [bsz, H, D, k-1], newest-first
+        new = torch.cat([xh.unsqueeze(-1), cs], dim=-1)  # [bsz, H, D, k] = [x_t, x_{t-1}, ...]
         # Reference causal_conv1d: out = x[t]*w[k-1] + x[t-1]*w[k-2] + ... + x[t-k+1]*w[0]
         # (w[k-1] for the current token, w[0] for the oldest). `new` is newest-first, so
         # reverse the kernel before the elementwise product.
         w = cw.view(self.n_local_heads, self.head_dim, self.conv_k).flip(-1)  # [H, D, k]
-        y = (new * w.unsqueeze(0)).sum(dim=-1)                    # [bsz, H, D]
+        y = (new * w.unsqueeze(0)).sum(dim=-1)  # [bsz, H, D]
         y = F.silu(y)
         state[:bsz] = new[..., :-1]
         return y.reshape(bsz, self.local_proj_size)
@@ -494,6 +498,7 @@ class LinearAttention(nn.Module):
 # --------------------------------------------------------------------------------------
 class VisionRMSNorm(nn.Module):
     """RMSNorm = x * rsqrt(mean(x^2)+eps) * weight (matches Glm5NextRMSNorm)."""
+
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -513,6 +518,7 @@ def _rotate_half(x):
 
 class VisionPatchEmbed(nn.Module):
     """Conv3d patch embedding: [N,3,T,P,P] -> [N, hidden]. Matches HF PatchEmbed."""
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.patch_size = args.vision_patch_size
@@ -532,6 +538,7 @@ class VisionRotaryEmbedding(nn.Module):
     """Axial 2D RoPE: inv_freq over half head_dim; cos/sin laid out as [N,2d] -> [N,2d] via
     [h,w; h,w] concatenation (recomposition_frequencies). head_dim=64 -> 32 freqs, [h,w] each 32.
     attention_scaling is 1.0 for axial rope (compute_axial_rope_parameters), so omitted."""
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         base = args.vision_rope_theta
@@ -569,13 +576,14 @@ class VisionAttention(nn.Module):
     """Vision self-attention (MQA-style fused qkv, q/k RMSNorm, rotary, no causal mask).
     HF uses flash varlen via cu_seqlens; here we process each image's tokens as one
     flattened, non-causal block (image=t=1)."""
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.num_heads = args.vision_num_heads
         self.head_dim = args.vision_hidden_size // self.num_heads
         self.qkv = nn.Linear(args.vision_hidden_size, args.vision_hidden_size * 3, bias=True)
         self.proj = nn.Linear(args.vision_hidden_size, args.vision_hidden_size, bias=True)
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         self.q_norm = VisionRMSNorm(self.head_dim, eps=args.vision_rms_norm_eps)
         self.k_norm = VisionRMSNorm(self.head_dim, eps=args.vision_rms_norm_eps)
 
@@ -606,6 +614,7 @@ class VisionAttention(nn.Module):
 
 class VisionMLP(nn.Module):
     """SwiGLU with clamp (matches Glm5NextVisionMLP)."""
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         h, i = args.vision_hidden_size, args.vision_intermediate_size
@@ -636,6 +645,7 @@ class VisionBlock(nn.Module):
 
 class VisionPatchMerger(nn.Module):
     """proj -> post_projection_norm (LayerNorm) -> GELU -> SwiGLU (matches Glm5NextVisionPatchMerger)."""
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         dim = args.vision_out_hidden_size
@@ -661,6 +671,7 @@ class VisionModel(nn.Module):
     """GLM-5.3-Flash vision tower. Forward mirrors Glm5NextVisionModel.forward.
     Input: pixel_values [N, 3, T, P, P] (already patchified), grid_thw [num_images, 3]=(T,H,W).
     Output: image_features [sum(T_i*H_i*W_i / merge^2), out_hidden_size]."""
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.spatial_merge_size = args.vision_spatial_merge_size
@@ -670,8 +681,12 @@ class VisionModel(nn.Module):
         self.rotary_pos_emb = VisionRotaryEmbedding(args)
         self.blocks = nn.ModuleList([VisionBlock(args) for _ in range(args.vision_depth)])
         self.merger = VisionPatchMerger(args)
-        self.downsample = nn.Conv2d(args.vision_hidden_size, args.vision_out_hidden_size,
-                                    kernel_size=self.spatial_merge_size, stride=self.spatial_merge_size)
+        self.downsample = nn.Conv2d(
+            args.vision_hidden_size,
+            args.vision_out_hidden_size,
+            kernel_size=self.spatial_merge_size,
+            stride=self.spatial_merge_size,
+        )
         self.post_layernorm = VisionRMSNorm(args.vision_hidden_size, eps=args.vision_rms_norm_eps)
 
     def _position_ids(self, grid_thw):
@@ -680,8 +695,7 @@ class VisionModel(nn.Module):
         m = self.spatial_merge_size
         pos = []
         for t, h, w in grid_thw.tolist():
-            hp, wp = torch.meshgrid(torch.arange(h, device=device),
-                                    torch.arange(w, device=device), indexing="ij")
+            hp, wp = torch.meshgrid(torch.arange(h, device=device), torch.arange(w, device=device), indexing="ij")
             bs = (h // m, m, w // m, m)
             hp = hp.reshape(bs).transpose(1, 2).flatten()
             wp = wp.reshape(bs).transpose(1, 2).flatten()
@@ -726,7 +740,7 @@ class Indexer(nn.Module):
         self.kpool = args.index_kpool
         self.compress = args.index_kpool_compress
         self.always_select_tail = args.index_kpool_always_select_tail
-        self.softmax_scale = self.head_dim ** -0.5
+        self.softmax_scale = self.head_dim**-0.5
         # wq_b loaded FULL (not TP-sharded), BF16. wk / weights_proj are distinct in this
         # checkpoint (the GLM-5.2 Indexer fuses them into one fp32 wk_weights_proj); kept
         # fp32 so the index scores retain precision -- the bf16 checkpoint weights copy_
@@ -739,25 +753,26 @@ class Indexer(nn.Module):
             self.index_kpool_compress_gate = nn.Parameter(torch.empty(self.head_dim, self.dim, dtype=torch.float32))
             self.index_kpool_compress_ape = nn.Parameter(torch.empty(self.kpool, self.head_dim, dtype=torch.float32))
         if forward_backend != "xlite":
-            self.register_buffer("k_cache",
-                                 torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim),
-                                 persistent=False)
+            self.register_buffer(
+                "k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim), persistent=False
+            )
 
     def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, mask) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
         end_pos = start_pos + seqlen
         q = self.wq_b(qr).view(bsz, seqlen, self.n_heads, self.head_dim)
-        wk_weights = self.wk(x.float())                              # [bsz, seq, head_dim], fp32
-        k = self.k_norm(wk_weights[..., :self.head_dim].type_as(x))
-        weights = self.weights_proj(x.float()) * (self.n_heads ** -0.5)  # [bsz, seq, n_heads], fp32
+        wk_weights = self.wk(x.float())  # [bsz, seq, head_dim], fp32
+        k = self.k_norm(wk_weights[..., : self.head_dim].type_as(x))
+        weights = self.weights_proj(x.float()) * (self.n_heads**-0.5)  # [bsz, seq, n_heads], fp32
         if self.compress and self.kpool > 1:
             # kpool compression: F.linear on the [head_dim, dim] gate yields only head_dim
             # outputs per token, so broadcast against the [kpool, head_dim] ape with unsqueeze
             # (NOT a reshape to [bsz, seq, kpool, head_dim], which would need kpool*head_dim
             # elements). Gated mean over the kpool slots then compresses back to [bsz, seq, head_dim].
-            gate = torch.sigmoid(F.linear(x.float(), self.index_kpool_compress_gate).unsqueeze(2)
-                                 + self.index_kpool_compress_ape)   # [bsz, seq, kpool, head_dim]
-            k = (k.unsqueeze(2) * gate).mean(dim=2)                  # [bsz, seq, head_dim]
+            gate = torch.sigmoid(
+                F.linear(x.float(), self.index_kpool_compress_gate).unsqueeze(2) + self.index_kpool_compress_ape
+            )  # [bsz, seq, kpool, head_dim]
+            k = (k.unsqueeze(2) * gate).mean(dim=2)  # [bsz, seq, head_dim]
         self.k_cache[:bsz, start_pos:end_pos] = k
         scores = torch.relu(torch.einsum("bshd,btd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale)
         index_score = torch.einsum("bsht,bsh->bst", scores, weights)
@@ -795,16 +810,18 @@ class MLA(nn.Module):
         self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps, bias=False)
         self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps, bias=False)
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
-        self.softmax_scale = self.qk_head_dim ** -0.5
+        self.softmax_scale = self.qk_head_dim**-0.5
         self.indexer = Indexer(args) if self.has_indexer else None
         if forward_backend != "xlite":
-            self.register_buffer("kv_cache",
-                                 torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank),
-                                 persistent=False)
+            self.register_buffer(
+                "kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False
+            )
             if self.qk_rope_head_dim > 0:
-                self.register_buffer("pe_cache",
-                                     torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim),
-                                     persistent=False)
+                self.register_buffer(
+                    "pe_cache",
+                    torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim),
+                    persistent=False,
+                )
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis, mask) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
@@ -837,19 +854,25 @@ class MLA(nn.Module):
                 scores = torch.einsum("bshd,bthd->bsht", q_nope, k_nope).mul_(self.softmax_scale)
             if self.indexer is not None:
                 topk_indices = self.indexer(x, qr, start_pos, mask)
-                index_mask = torch.full((bsz, seqlen, seqlen), float("-inf"), device=x.device).scatter_(-1, topk_indices, 0)
+                index_mask = torch.full((bsz, seqlen, seqlen), float("-inf"), device=x.device).scatter_(
+                    -1, topk_indices, 0
+                )
                 scores = scores + (index_mask + mask).unsqueeze(2)
             else:
                 scores = scores + mask.unsqueeze(1)
             scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
             x = torch.einsum("bsht,bthd->bshd", scores, v)
         else:  # decode (seqlen == 1, MQA)
-            wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale)
+            wkv_b = (
+                self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale)
+            )
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
-            q_eff = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
+            q_eff = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, : self.qk_nope_head_dim])
             scores = torch.einsum("bshc,btc->bsht", q_eff, self.kv_cache[:bsz, :end_pos]) * self.softmax_scale
             if self.qk_rope_head_dim > 0:
-                scores = scores + torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos]) * self.softmax_scale
+                scores = (
+                    scores + torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos]) * self.softmax_scale
+                )
             if self.indexer is not None:
                 # recompute top-k for the new token against the full kv_cache
                 topk_indices = self.indexer(x, qr, start_pos, mask)
@@ -857,7 +880,7 @@ class MLA(nn.Module):
                 scores = scores + index_mask.unsqueeze(2)
             scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
             x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
-            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
+            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim :])
         return self.wo(x.flatten(2))
 
 
@@ -876,7 +899,7 @@ class Gate(nn.Module):
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim, dtype=torch.float32))
         self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32))
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         scores = ds_linear(x, self.weight)
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1, dtype=torch.float32)
@@ -945,9 +968,14 @@ class MoE(nn.Module):
         self.n_local_experts = args.n_routed_experts // global_world_size
         self.swiglu_limit = args.swiglu_limit
         self.gate = Gate(args)
-        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, args)
-                                      if self.experts_start_idx <= i < self.experts_end_idx else None
-                                      for i in range(self.n_routed_experts)])
+        self.experts = nn.ModuleList(
+            [
+                Expert(args.dim, args.moe_inter_dim, args)
+                if self.experts_start_idx <= i < self.experts_end_idx
+                else None
+                for i in range(self.n_routed_experts)
+            ]
+        )
         self.shared_experts = SharedMLP(args.dim, args.n_shared_experts * args.moe_inter_dim, args)
 
     @property
@@ -994,7 +1022,11 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
-        is_sparse = (args.layer_types[layer_id] == "deepseek_sparse_attention") if args.layer_types else (layer_id in (args.full_attn_layers or []))
+        is_sparse = (
+            (args.layer_types[layer_id] == "deepseek_sparse_attention")
+            if args.layer_types
+            else (layer_id in (args.full_attn_layers or []))
+        )
         self.attn = MLA(layer_id, args) if is_sparse else LinearAttention(args)
         self.ffn = MLP(args.dim, args.inter_dim, args) if layer_id < args.n_dense_layers else MoE(args)
         self.attn_hc = MHC(args)
@@ -1062,10 +1094,14 @@ class GLM5Next(nn.Module):
             self.register_buffer("freqs_cis", torch.empty(0, 0), persistent=False)
 
     @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor = None, start_pos: int = 0,
-                inputs_embeds: torch.Tensor = None,
-                pixel_values: torch.Tensor = None,
-                image_grid_thw: torch.Tensor = None):
+    def forward(
+        self,
+        tokens: torch.Tensor = None,
+        start_pos: int = 0,
+        inputs_embeds: torch.Tensor = None,
+        pixel_values: torch.Tensor = None,
+        image_grid_thw: torch.Tensor = None,
+    ):
         if forward_backend == "xlite":
             raise NotImplementedError("GLM-5.3-Flash xlite C++ path not implemented; use FORWARD_BACKEND=torch_npu")
         if tokens is None and inputs_embeds is None:
@@ -1079,7 +1115,8 @@ class GLM5Next(nn.Module):
             img_mask = (tokens == self.args.image_token_id).unsqueeze(-1)
             n = int(img_mask.sum().item())
             assert n * inputs_embeds.shape[-1] == img_feats.numel(), (
-                f"image tokens ({n}) * dim != image_features ({img_feats.shape[0]})")
+                f"image tokens ({n}) * dim != image_features ({img_feats.shape[0]})"
+            )
             inputs_embeds = inputs_embeds.masked_scatter(img_mask, img_feats.to(inputs_embeds.dtype))
         # broadcast single stream to hc_mult residual streams
         seqlen = inputs_embeds.size(1)
@@ -1088,7 +1125,7 @@ class GLM5Next(nn.Module):
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=inputs_embeds.device).triu_(1)
         for li, layer in enumerate(self.layers):
-            residual = layer(residual, start_pos, self.freqs_cis[start_pos:start_pos + seqlen], mask)
+            residual = layer(residual, start_pos, self.freqs_cis[start_pos : start_pos + seqlen], mask)
         # weight-free collapse: mean over hc_mult streams (official "unweighted mean")
         h = residual.mean(dim=2)  # [bsz, seq, dim]
         h = self.norm(h)[:, -1]
@@ -1110,8 +1147,9 @@ class GLM5Next(nn.Module):
         n_local_experts = args.n_routed_experts // args.moe_ep_size
         moe_tp_id = global_rank % args.moe_tp_size
         moe_ep_id = global_rank // args.moe_tp_size
-        param_dict = {name if "lm_head" in name else "model." + name: name_param
-                      for name, name_param in self.named_parameters()}
+        param_dict = {
+            name if "lm_head" in name else "model." + name: name_param for name, name_param in self.named_parameters()
+        }
         for _, param in self.named_parameters():
             param.requires_grad = False
 
@@ -1201,14 +1239,14 @@ class GLM5Next(nn.Module):
                 param = param_dict[param_name]
                 if ".scale" in name:
                     if stride_id == 0:
-                        param.data[:args.q_lora_rank, 0].copy_(loaded_weight[:].reshape(-1))
+                        param.data[: args.q_lora_rank, 0].copy_(loaded_weight[:].reshape(-1))
                     else:
-                        param.data[args.q_lora_rank:, 0].copy_(loaded_weight[:].reshape(-1))
+                        param.data[args.q_lora_rank :, 0].copy_(loaded_weight[:].reshape(-1))
                 else:
                     if stride_id == 0:
-                        param.data[:args.q_lora_rank].copy_(loaded_weight[:])
+                        param.data[: args.q_lora_rank].copy_(loaded_weight[:])
                     else:
-                        param.data[args.q_lora_rank:args.q_lora_rank + args.kv_lora_rank].copy_(loaded_weight[:])
+                        param.data[args.q_lora_rank : args.q_lora_rank + args.kv_lora_rank].copy_(loaded_weight[:])
                 is_wqkv_a = True
                 break
             if is_wqkv_a:
@@ -1227,13 +1265,14 @@ class GLM5Next(nn.Module):
                 shard_size = param.shape[0] // 2
                 if "shared_experts" in name:
                     lw = convert_pyslice_to_tensor(loaded_weight)
-                    param.data[shard_size * stride_id:shard_size * (stride_id + 1)].copy_(lw)
+                    param.data[shard_size * stride_id : shard_size * (stride_id + 1)].copy_(lw)
                 else:
                     gate_up_idx = moe_tp_id if "experts" in name else rank
                     lw = convert_pyslice_to_tensor(
-                        loaded_weight[shard_size * gate_up_idx:shard_size * (gate_up_idx + 1)])
-                    slot = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
-                    slot.data[:lw.shape[0]].copy_(lw)
+                        loaded_weight[shard_size * gate_up_idx : shard_size * (gate_up_idx + 1)]
+                    )
+                    slot = param.data[shard_size * stride_id : shard_size * (stride_id + 1)]
+                    slot.data[: lw.shape[0]].copy_(lw)
                 is_gate_up = True
                 break
             if is_gate_up:
@@ -1245,42 +1284,58 @@ class GLM5Next(nn.Module):
             param = param_dict[name]
 
             if "embed" in name:
-                load_tensor_parallel_weights(param, loaded_weight, args.vocab_size, args.dim, name,
-                                             True, False, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, args.vocab_size, args.dim, name, True, False, rank, world_size
+                )
                 continue
             if "head" in name:
-                load_tensor_parallel_weights(param, loaded_weight, args.dim, args.vocab_size, name,
-                                             False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, args.dim, args.vocab_size, name, False, True, rank, world_size
+                )
                 continue
             # MLA wq_b (non-indexer): column-parallel, shard output
             if "wq_b" in name and "indexer" not in name:
-                load_tensor_parallel_weights(param, loaded_weight, args.q_lora_rank,
-                                             args.n_heads * (args.qk_nope_head_dim + args.qk_rope_head_dim),
-                                             name, False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    args.q_lora_rank,
+                    args.n_heads * (args.qk_nope_head_dim + args.qk_rope_head_dim),
+                    name,
+                    False,
+                    True,
+                    rank,
+                    world_size,
+                )
                 continue
             # indexer wq_b: replicated (full copy)
             if "wq_b" in name and "indexer" in name:
                 param.data.copy_(convert_pyslice_to_tensor(loaded_weight))
                 continue
             if "wkv_b" in name:
-                load_tensor_parallel_weights(param, loaded_weight, args.kv_lora_rank,
-                                             args.n_heads * (args.qk_nope_head_dim + args.v_head_dim),
-                                             name, False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    args.kv_lora_rank,
+                    args.n_heads * (args.qk_nope_head_dim + args.v_head_dim),
+                    name,
+                    False,
+                    True,
+                    rank,
+                    world_size,
+                )
                 continue
             if "wo" in name:
                 # row-parallel; full input dim differs by layer type (proj_size for
                 # linear-attention, v*n_heads for MLA) -> derive from the param shape.
                 in_f = param.shape[1] * world_size
-                load_tensor_parallel_weights(param, loaded_weight, in_f, args.dim, name,
-                                             True, True, rank, world_size)
+                load_tensor_parallel_weights(param, loaded_weight, in_f, args.dim, name, True, True, rank, world_size)
                 continue
 
             # ---- column-parallel linear-attention projections (output-sharded) ----
             matched_cp = False
             for suffix, in_f, out_f in cp_attn_keys:
                 if name.endswith(suffix):
-                    load_tensor_parallel_weights(param, loaded_weight, in_f, out_f, name,
-                                                 False, True, rank, world_size)
+                    load_tensor_parallel_weights(param, loaded_weight, in_f, out_f, name, False, True, rank, world_size)
                     matched_cp = True
                     break
             if matched_cp:
@@ -1291,17 +1346,17 @@ class GLM5Next(nn.Module):
                 if ".scale" in name:
                     param.data.copy_(convert_pyslice_to_tensor(loaded_weight))
                 else:
-                    load_tensor_parallel_weights(param, loaded_weight, args.inter_dim, args.dim, name,
-                                                 True, True, rank, world_size)
+                    load_tensor_parallel_weights(
+                        param, loaded_weight, args.inter_dim, args.dim, name, True, True, rank, world_size
+                    )
                 continue
             if "w2" in name and "shared_experts" in name:
                 param.data.copy_(convert_pyslice_to_tensor(loaded_weight))
                 continue
             if "w2" in name and "experts" in name:
                 shard_size = param.shape[1]
-                lw = convert_pyslice_to_tensor(
-                    loaded_weight[:, shard_size * moe_tp_id:shard_size * (moe_tp_id + 1)])
-                param.data[:, :lw.shape[1]].copy_(lw)
+                lw = convert_pyslice_to_tensor(loaded_weight[:, shard_size * moe_tp_id : shard_size * (moe_tp_id + 1)])
+                param.data[:, : lw.shape[1]].copy_(lw)
                 continue
 
             # ---- default: full copy (MHC fn/base/scale, conv1d, A_log, dt_bias, o_norm,

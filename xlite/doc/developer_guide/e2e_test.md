@@ -233,8 +233,8 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 - `--threshold`: 性能劣化阈值，默认 0.05（即5%）
 - `--build-container`: 编译容器名称
 - `--env-type`: 环境类型（blue/yellow），默认 yellow
-  - yellow 环境：需要执行 source /home/env.sh
-  - blue 环境：不需要 source /home/env.sh
+    - yellow 环境：需要执行 source /home/env.sh
+    - blue 环境：不需要 source /home/env.sh
 
 **Profiling采集：**
 
@@ -244,7 +244,7 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 - profiling 数据的保存位置为测试执行路径下的 profile_<模型>\_<测试模式>\_$(date +%m%d_%H%M%S)
 - 完成测试后，需要进行数据处理，转换方式为进入 profile 文件夹后执行以下命令
 
-```
+```bash
 python -c "from torch_npu.profiler.profiler import analyse; import glob; [analyse(p) for p in glob.glob('*_ascend_pt')]"
 ```
 
@@ -263,8 +263,8 @@ python -c "from torch_npu.profiler.profiler import analyse; import glob; [analys
 ### 性能对比规则
 
 - **劣化判断**：
-  - QPS 和 Output Speed：下降超过阈值视为劣化
-  - TTFT 和 TPOT：上升超过阈值视为劣化（延迟越高越差）
+    - QPS 和 Output Speed：下降超过阈值视为劣化
+    - TTFT 和 TPOT：上升超过阈值视为劣化（延迟越高越差）
 - **阈值设置**：默认为 5%，可通过 `--threshold` 参数调整
 - **对比基线**：自动查找同版本号的基线测试报告进行对比
 
@@ -274,15 +274,15 @@ python -c "from torch_npu.profiler.profiler import analyse; import glob; [analys
 
 - **报告目录结构**：
 
-  - `xlite-{version}-{date}/`：当前版本测试结果（带日期）
-  - `xlite-{version}/`：基线版本测试结果（不带日期）
+    - `xlite-{version}-{date}/`：当前版本测试结果（带日期）
+    - `xlite-{version}/`：基线版本测试结果（不带日期）
 - **报告文件**：
 
-  - `daily_benchmark_YYYYMMDD_HHMMSS.log`：测试执行日志（包含所有输出信息）
-  - `benchmark_comparison_*.log`：性能对比报告
-  - `metrics_*.json`：指标数据（JSON格式）
-  - `comparison_*.json`：对比结果（JSON格式）
-  - `daily_summary_*.txt`：每日测试摘要
+    - `daily_benchmark_YYYYMMDD_HHMMSS.log`：测试执行日志（包含所有输出信息）
+    - `benchmark_comparison_*.log`：性能对比报告
+    - `metrics_*.json`：指标数据（JSON格式）
+    - `comparison_*.json`：对比结果（JSON格式）
+    - `daily_summary_*.txt`：每日测试摘要
 
 **日志说明**：
 

@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,6 +8,7 @@
 # ===============================================================================
 import torch
 import torch_npu
+
 from xlite._C import Runtime, group_matmul
 
 # allow weight_nz
@@ -37,6 +37,7 @@ if remaining > 0:
     counts += random_vals
 counts_cpu = counts.cpu().tolist()
 
+
 def int8_linear_with_dequant(x, weights, counts, dequantize_scales, transpose=False):
     group_num = len(weights)
     results = []
@@ -60,6 +61,7 @@ def int8_linear_with_dequant(x, weights, counts, dequantize_scales, transpose=Fa
     result = torch.cat(results, dim=0)  # (m, n), fp16
     return result
 
+
 for weight_nz in [True, False]:
     for transpose in [False, True]:
         n = out_dim if not transpose else in_dim
@@ -74,7 +76,7 @@ for weight_nz in [True, False]:
                 weight = torch.randn(k, n, dtype=dtype, device=npu_dev)
             else:
                 weight = torch.randn(n, k, dtype=dtype, device=npu_dev)
-            
+
             if weight_nz:
                 ACL_FORMAT_FRACTAL_NZ = 29
                 weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
@@ -87,7 +89,6 @@ for weight_nz in [True, False]:
             deq_scales.append(deq_scale)
             deq_scales_fixpipe.append(scale)
             weights.append(weight)
-
 
         # standard
         start = 0
@@ -118,13 +119,13 @@ for weight_nz in [True, False]:
         group_matmul(rt, x, weights, deq_scales_fixpipe, counts, 0, group_num, n, k, z, weight_nz, transpose)
         torch.npu.synchronize()
 
-        print(f'group_matmul_dequant ({dtype}, transpose={transpose}, nz={weight_nz}) executed!')
+        print(f"group_matmul_dequant ({dtype}, transpose={transpose}, nz={weight_nz}) executed!")
 
         # torch.set_printoptions(threshold=100000)
 
         try:
             torch.testing.assert_close(result, z.to("cpu"), atol=1e-5, rtol=1e-3)
         except AssertionError as e:
-            print(f'{e}')
-            print(f'torch_npu: {result}, shape: {result.shape}')
-            print(f'xlite: {z}, shape: {z.shape}')
+            print(f"{e}")
+            print(f"torch_npu: {result}, shape: {result.shape}")
+            print(f"xlite: {z}, shape: {z.shape}")

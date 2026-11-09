@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -47,17 +46,17 @@ def prepare_xlite_attnmeta_v2(
     meta = AttnMetaV2()
     meta.lens_cpu = [seqlen] * batch
     meta.cached_lens_cpu = [start_pos] * batch
-    meta.lens = torch.full((batch,), seqlen, dtype=torch.int32) \
-        .to(tokens.device, non_blocking=True)
-    meta.cached_lens = torch.full((batch,), start_pos, dtype=torch.int32) \
-        .to(tokens.device, non_blocking=True)
+    meta.lens = torch.full((batch,), seqlen, dtype=torch.int32).to(tokens.device, non_blocking=True)
+    meta.cached_lens = torch.full((batch,), start_pos, dtype=torch.int32).to(tokens.device, non_blocking=True)
 
     # 0-prefixed cumsum of lens for a uniform batch == arange(batch+1)*seqlen.
-    meta.query_start_loc = (torch.arange(batch + 1, dtype=torch.int32) * seqlen) \
-        .to(tokens.device, non_blocking=True)
+    meta.query_start_loc = (torch.arange(batch + 1, dtype=torch.int32) * seqlen).to(tokens.device, non_blocking=True)
 
-    meta.positions = torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64) \
-        .repeat(batch).to(tokens.device, non_blocking=True)
+    meta.positions = (
+        torch.arange(start_pos, start_pos + seqlen, dtype=torch.int64)
+        .repeat(batch)
+        .to(tokens.device, non_blocking=True)
+    )
 
     batch_indices = np.arange(batch, dtype=np.int32).reshape(-1, 1)
     positions_per_sample = np.arange(start_pos, start_pos + seqlen, dtype=np.int32)
@@ -75,15 +74,11 @@ def prepare_xlite_attnmeta_v2(
         # must never be followed.
         block_tables_2d = np.zeros((batch, step), dtype=np.int32)
         block_tables_2d[:, :block_num] = batch_indices * step + np.arange(block_num, dtype=np.int32)
-        block_tables.append(
-            torch.from_numpy(block_tables_2d).to(tokens.device, non_blocking=True)
-        )
+        block_tables.append(torch.from_numpy(block_tables_2d).to(tokens.device, non_blocking=True))
 
         slot_stride = np.int32(step * bs)
         slot_mapping_2d = batch_indices * slot_stride + positions_per_sample
-        slot_mapping.append(
-            torch.from_numpy(slot_mapping_2d.reshape(-1)).to(tokens.device, non_blocking=True)
-        )
+        slot_mapping.append(torch.from_numpy(slot_mapping_2d.reshape(-1)).to(tokens.device, non_blocking=True))
 
     # Hybrid family-slot contract: block_tables[1] = mamba state indices
     # [batch, 1] int32 (block id == state slot, page 0 reserved). The C++
@@ -92,9 +87,7 @@ def prepare_xlite_attnmeta_v2(
     # NOTE: pybind def_readwrite assignment copies the list in — the table
     # list must be complete BEFORE assigning meta.block_tables.
     if gdn_state_pages is not None:
-        block_tables.append(
-            gdn_state_pages.to(torch.int32).to(tokens.device, non_blocking=True).reshape(-1, 1)
-        )
+        block_tables.append(gdn_state_pages.to(torch.int32).to(tokens.device, non_blocking=True).reshape(-1, 1))
     meta.block_tables = block_tables
     meta.slot_mapping = slot_mapping
 
@@ -110,10 +103,7 @@ def prepare_xlite_attnmeta_v2(
         # State planes (0, 3): per-token absolute position (write path derives
         # each token's state slot from its absolute position).
         state_pos = np.arange(start_pos, start_pos + seqlen, dtype=np.int32)
-        state_slot = (
-            torch.from_numpy(np.tile(state_pos, (batch, 1)).reshape(-1))
-            .to(tokens.device, non_blocking=True)
-        )
+        state_slot = torch.from_numpy(np.tile(state_pos, (batch, 1)).reshape(-1)).to(tokens.device, non_blocking=True)
         slot_mapping[0] = state_slot
         slot_mapping[3] = state_slot
 
@@ -129,19 +119,13 @@ def prepare_xlite_attnmeta_v2(
 
         # Tile (b, j) to match the kernel's totalBlockIdx stride.
         j_arange = np.arange(n_blocks_per_req, dtype=np.int64)
-        slot_per_req = (start_pos // r + j_arange.astype(np.int32))
+        slot_per_req = start_pos // r + j_arange.astype(np.int32)
         slot_2d = batch_indices * np.int32(comp_rows_stride) + slot_per_req
-        slot_mapping[1] = (
-            torch.from_numpy(slot_2d.reshape(-1).astype(np.int32))
-            .to(tokens.device, non_blocking=True)
-        )
+        slot_mapping[1] = torch.from_numpy(slot_2d.reshape(-1).astype(np.int32)).to(tokens.device, non_blocking=True)
 
         bt_k = np.arange(comp_blocks_per_req, dtype=np.int32)
         bt_2d = batch_indices * np.int32(comp_blocks_per_req) + bt_k
-        block_tables[1] = (
-            torch.from_numpy(bt_2d.astype(np.int32))
-            .to(tokens.device, non_blocking=True)
-        )
+        block_tables[1] = torch.from_numpy(bt_2d.astype(np.int32)).to(tokens.device, non_blocking=True)
 
         # Compress_kv plane (2): per-block write slots per distinct ratio —
         # byte-identical to the slots the C++ runtime used to derive from the
@@ -154,12 +138,10 @@ def prepare_xlite_attnmeta_v2(
         for ratio in sorted({x for x in compress_ratios if x > 0}):
             n_blocks = ((start_pos + seqlen) // ratio) - (start_pos // ratio)
             if n_blocks > 0:
-                row = np.arange(start_pos // ratio, start_pos // ratio + n_blocks,
-                                dtype=np.int32)
+                row = np.arange(start_pos // ratio, start_pos // ratio + n_blocks, dtype=np.int32)
                 sm_2d = batch_indices * np.int32(stride2 * comp_bs) + row
-                comp_sm[ratio] = (
-                    torch.from_numpy(sm_2d.reshape(-1).astype(np.int32))
-                    .to(tokens.device, non_blocking=True)
+                comp_sm[ratio] = torch.from_numpy(sm_2d.reshape(-1).astype(np.int32)).to(
+                    tokens.device, non_blocking=True
                 )
             else:
                 comp_sm[ratio] = empty
@@ -176,20 +158,24 @@ def prepare_xlite_attnmeta_v2(
                 sm_rows.append([empty, empty, empty, empty, slot_mapping[4]])
             else:
                 has_indexer = ratio == 4
-                bt_rows.append([
-                    block_tables[0] if has_indexer else empty,
-                    block_tables[1] if has_indexer else empty,
-                    block_tables[2],
-                    block_tables[3],
-                    block_tables[4],
-                ])
-                sm_rows.append([
-                    state_slot if has_indexer else empty,
-                    slot_mapping[1] if has_indexer else empty,
-                    comp_sm[ratio],
-                    state_slot,
-                    slot_mapping[4],
-                ])
+                bt_rows.append(
+                    [
+                        block_tables[0] if has_indexer else empty,
+                        block_tables[1] if has_indexer else empty,
+                        block_tables[2],
+                        block_tables[3],
+                        block_tables[4],
+                    ]
+                )
+                sm_rows.append(
+                    [
+                        state_slot if has_indexer else empty,
+                        slot_mapping[1] if has_indexer else empty,
+                        comp_sm[ratio],
+                        state_slot,
+                        slot_mapping[4],
+                    ]
+                )
 
         # Re-assign whole lists (pybind: index assign does not propagate).
         meta.slot_mapping = slot_mapping

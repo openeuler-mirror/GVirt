@@ -4,7 +4,7 @@
 
 线性注意力(Linear Attention / GDN)的 QKV 投影 host 融合入口,把四段权重沿列拼接、一次转置 matmul、再切分四段输出,合并为单次下发:
 
-```
+```text
 W = concat_col(W_qkv[n,k], W_z[v,k], W_b[h,k], W_a[h,k])   # [n+v+h+h, k]
 out = matmul(x[m,k], W, transpose=true)                     # [m, n+v+h+h]
 (mix_qkv, z, b, a) = split_col(out)                         # [m,n] / [m,v] / [m,h] / [m,h]

@@ -225,7 +225,7 @@ public:
     {
         __ubuf__ Dtype *buf;
         Dtype min;
-        // Nuber of elements for vector_dup
+        // Number of elements for vector_dup
         uint32_t vbatch;
 
         if constexpr (std::is_same<Dtype, float>::value) {

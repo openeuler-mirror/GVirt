@@ -9,9 +9,26 @@ MLA 注意力的前置准备算子(单 AIV 融合 kernel):浮点路径对 `mlaQK
 Python 侧调用(见 `tests/kernels/mla_prepare.py`,关键字 `mla_prepare(rt,`):
 
 ```python
-mla_prepare(rt, attn_qkvc, q_norm, q_norm_bias, attn_norm_qc, kv_norm, kv_norm_bias,
-            attn_norm_kvc, freqs_cis, position, q_lora_rank, kv_lora_rank, rope_head_dim,
-            BLOCK_SIZE, k_cache, pe_cache, slot_mapping, NORM_EPS)
+mla_prepare(
+    rt,
+    attn_qkvc,
+    q_norm,
+    q_norm_bias,
+    attn_norm_qc,
+    kv_norm,
+    kv_norm_bias,
+    attn_norm_kvc,
+    freqs_cis,
+    position,
+    q_lora_rank,
+    kv_lora_rank,
+    rope_head_dim,
+    BLOCK_SIZE,
+    k_cache,
+    pe_cache,
+    slot_mapping,
+    NORM_EPS,
+)
 ```
 
 host 封装 `MlaPrepare`(见 `csrc/_C.cpp` 的 `MlaPrepare`)→ `XliteOpMlaPrepare`(见 `csrc/op.cpp` 的 `XliteOpMlaPrepare`)。kernel 签名(见 `csrc/kernels/mla_prepare.h` 的 `mla_prepare` 模板函数):

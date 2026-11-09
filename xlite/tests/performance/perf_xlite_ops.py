@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -38,6 +37,7 @@
 
 所有实验变量在配置区修改; 命令行只有被测脚本路径.
 """
+
 import argparse
 import bisect
 import contextlib
@@ -65,60 +65,66 @@ try:
     from torch.profiler import record_function
     from torch_npu.profiler import ProfilerActivity as NpuActivity
     from torch_npu.profiler import profile as npu_profile
+
     PROFILER_OK = True
 except ImportError:
     PROFILER_OK = False
 
 # ============================== 配置区: 所有实验变量在这里改 ==============================
 
-DEVICE_TIME = True         # 采集 device kernel time(torch_npu.profiler, 约 +3s 解析开销)
+DEVICE_TIME = True  # 采集 device kernel time(torch_npu.profiler, 约 +3s 解析开销)
 EXCLUDE_FIRST_CALL = False  # 每算子首次调用含 lazy init(模块加载/descriptor 建立等),
-                            # True 时汇总统计剔除首调(明细 CSV 仍保留)
-EXCLUDE_OPS = set()        # 不 patch 不计时的算子名(如只想关注部分算子)
+# True 时汇总统计剔除首调(明细 CSV 仍保留)
+EXCLUDE_OPS = set()  # 不 patch 不计时的算子名(如只想关注部分算子)
 OUT_DIR = "xlite_prof_results"  # CSV 结果目录(始终保留)
-KEEP_PROF_DIR = False      # False(默认): 运行结束清理 CANN profiling 落盘目录
-                           # export_only_prof_dir/(profiler 原始数据, 跨运行累积);
-                           # True: 保留该目录供排查
-MAX_ARG_REPR = 96          # 明细 CSV 入参描述截断长度(64 会截掉 bench_mte 尾部的
-                            # bytes/iters/block_num 裸标量, --analyze [8] 段要解析它们)
+KEEP_PROF_DIR = False  # False(默认): 运行结束清理 CANN profiling 落盘目录
+# export_only_prof_dir/(profiler 原始数据, 跨运行累积);
+# True: 保留该目录供排查
+MAX_ARG_REPR = 96  # 明细 CSV 入参描述截断长度(64 会截掉 bench_mte 尾部的
+# bytes/iters/block_num 裸标量, --analyze [8] 段要解析它们)
 
 # ---- device 归因参数(见 attribute_device 注释) ----
 # 实测 torch_npu chrome trace 中 kernel 事件的 ts 系统性偏晚 ~30us(疑似 profiler
 # 侧时间戳而非真正设备执行时刻), 紧窗口下纯 ts 包含归因会失败/串到下一调用窗口,
 # 故采用: 就近窗口(容忍 ATTR_GAP_US) → 按 kernel 名多数投票 + kernel/op 名共享
 # 前缀校验 → 同名 kernel 按时间序与调用序一一配对(单 stream 按序执行).
-ATTR_GAP_US = 200          # kernel ts 晚于窗口结束多少 us 内仍认 belong 该窗口
-ATTR_VOTE_MIN = 0.8        # name→op 多数票接受阈值
-ATTR_PREFIX_MIN = 5        # kernel 名与 op 名共享前缀最小长度(防串扰, 如 aclnn* → op)
-KERNEL_OP_OVERRIDES = {    # 手工指定 kernel 名 → op 名(优先于自动发现), 键为全名或前缀
-    # bench_timed 的 kernel 名按变体派生(scalar_add_aiv_timed 等), 与 op 名
-    # 无共享前缀, 自动归因的步骤 2 必拒; 手工指回统一入口
-    f"scalar_{op}_{ct}_timed": "bench_timed"
-    for op in ("add", "xor", "mul", "div", "fadd", "add_unroll4")
-    for ct in ("aiv", "aic")
-} | {
-    # bench_scalar 同理: untimed 变体名指回统一入口
-    f"scalar_{op}_{ct}": "bench_scalar"
-    for op in ("add", "xor", "mul", "div", "fadd", "add_unroll4")
-    for ct in ("aiv", "aic")
-} | {
-    # bench_empty 同理
-    f"empty_{ct}": "bench_empty"
-    for ct in ("aiv", "aic", "mix")
-} | {
-    # bench_mte 同理: mte_read_aiv 等变体派生名指回统一入口
-    f"mte_{op}_aiv": "bench_mte"
-    for op in ("read", "write", "copy", "chase")
-} | {
-    # bench_vec 同理: vec_add_f32_aiv 等变体派生名指回统一入口
-    f"vec_{op}_aiv": "bench_vec"
-    for op in ("add_f32", "mul_f32", "add_i32", "add_f16", "sqrt_f32", "exp_f32")
-}
+ATTR_GAP_US = 200  # kernel ts 晚于窗口结束多少 us 内仍认 belong 该窗口
+ATTR_VOTE_MIN = 0.8  # name→op 多数票接受阈值
+ATTR_PREFIX_MIN = 5  # kernel 名与 op 名共享前缀最小长度(防串扰, 如 aclnn* → op)
+KERNEL_OP_OVERRIDES = (
+    {  # 手工指定 kernel 名 → op 名(优先于自动发现), 键为全名或前缀
+        # bench_timed 的 kernel 名按变体派生(scalar_add_aiv_timed 等), 与 op 名
+        # 无共享前缀, 自动归因的步骤 2 必拒; 手工指回统一入口
+        f"scalar_{op}_{ct}_timed": "bench_timed"
+        for op in ("add", "xor", "mul", "div", "fadd", "add_unroll4")
+        for ct in ("aiv", "aic")
+    }
+    | {
+        # bench_scalar 同理: untimed 变体名指回统一入口
+        f"scalar_{op}_{ct}": "bench_scalar"
+        for op in ("add", "xor", "mul", "div", "fadd", "add_unroll4")
+        for ct in ("aiv", "aic")
+    }
+    | {
+        # bench_empty 同理
+        f"empty_{ct}": "bench_empty"
+        for ct in ("aiv", "aic", "mix")
+    }
+    | {
+        # bench_mte 同理: mte_read_aiv 等变体派生名指回统一入口
+        f"mte_{op}_aiv": "bench_mte"
+        for op in ("read", "write", "copy", "chase")
+    }
+    | {
+        # bench_vec 同理: vec_add_f32_aiv 等变体派生名指回统一入口
+        f"vec_{op}_aiv": "bench_vec"
+        for op in ("add_f32", "mul_f32", "add_i32", "add_f16", "sqrt_f32", "exp_f32")
+    }
+)
 
 # 归因防串扰: 名字明显非 xlite 的 device 事件(调用窗口后紧跟的 torch kernel 拖尾
 # 执行会就近落到刚结束的窗口), 不参与投票与归因, 仅计数
-NON_XLITE_KERNEL_PATTERNS = ("aten::", "Memcpy", "Memset", "Distribution",
-                             "TransData", "aclnn")
+NON_XLITE_KERNEL_PATTERNS = ("aten::", "Memcpy", "Memset", "Distribution", "TransData", "aclnn")
 
 # torch_npu profiler 会把 CANN 原始数据落在 cwd 下 export_only_prof_dir/, 结束后
 # 不自动清理且跨运行累积; 默认整目录移除(KEEP_PROF_DIR=True 时保留)
@@ -187,8 +193,8 @@ def make_wrapper(orig, name):
             raise
         finally:
             wall = (time.perf_counter_ns() - t0) / 1e3
-            CALLS.append(Call(len(CALLS) + 1, name, wall,
-                              describe_args(args, kwargs), err))
+            CALLS.append(Call(len(CALLS) + 1, name, wall, describe_args(args, kwargs), err))
+
     return wrapper
 
 
@@ -225,8 +231,7 @@ def parse_trace(path):
         if ts is None or dur is None:
             continue
         if name.startswith("xlite::"):
-            anns.append((name.removeprefix("xlite::"), float(ts),
-                         float(ts) + float(dur)))
+            anns.append((name.removeprefix("xlite::"), float(ts), float(ts) + float(dur)))
         elif "Task Type" in (e.get("args") or {}):
             devs.append((name, float(ts), float(dur)))
     return anns, devs
@@ -258,8 +263,7 @@ def attribute_device(anns, devs):
 
     返回 (per_call: (op, 第几次调用) -> [(kernel, dur)], 诊断信息 dict).
     """
-    diag = {"excluded": [], "unattributed": [], "vote_failed": Counter(),
-            "count_mismatch": []}
+    diag = {"excluded": [], "unattributed": [], "vote_failed": Counter(), "count_mismatch": []}
     anns_sorted = sorted(anns, key=lambda a: a[1])
     starts = [a[1] for a in anns_sorted]
     op_ann_idx, win_key = Counter(), []
@@ -287,12 +291,9 @@ def attribute_device(anns, devs):
         op, cnt = counter.most_common(1)[0]
         overridden = any(name.startswith(k) or k == name for k in KERNEL_OP_OVERRIDES)
         if overridden:
-            name_to_op[name] = next(
-                v for k, v in KERNEL_OP_OVERRIDES.items()
-                if name.startswith(k) or k == name)
+            name_to_op[name] = next(v for k, v in KERNEL_OP_OVERRIDES.items() if name.startswith(k) or k == name)
             continue
-        if (cnt / sum(counter.values()) >= ATTR_VOTE_MIN
-                and len(os.path.commonprefix([name, op])) >= ATTR_PREFIX_MIN):
+        if cnt / sum(counter.values()) >= ATTR_VOTE_MIN and len(os.path.commonprefix([name, op])) >= ATTR_PREFIX_MIN:
             name_to_op[name] = op
         else:
             diag["vote_failed"][name] += cnt
@@ -341,11 +342,12 @@ def summarize_calls(calls):
     walls = [c.wall_us for c in stat]
     devs = [c.device_us for c in stat if c.kernels]
     kers = Counter(name for c in stat for name, _ in c.kernels)
-    return (stat, (statistics.median(walls), statistics.mean(walls), min(walls),
-                   max(walls), sum(walls)),
-            (statistics.median(devs), statistics.mean(devs), max(devs), sum(devs))
-            if devs else None,
-            kers)
+    return (
+        stat,
+        (statistics.median(walls), statistics.mean(walls), min(walls), max(walls), sum(walls)),
+        (statistics.median(devs), statistics.mean(devs), max(devs), sum(devs)) if devs else None,
+        kers,
+    )
 
 
 def print_summary():
@@ -355,32 +357,31 @@ def print_summary():
     for c in CALLS:
         by_op.setdefault(c.op, []).append(c)
 
-    print(f"\n== per-op: wall=pybind+launch+sync+kernel | dev=kernel | w-d≈launch+sync ==")
+    print("\n== per-op: wall=pybind+launch+sync+kernel | dev=kernel | w-d≈launch+sync ==")
     name_w = min(40, max(len(op) for op in by_op)) + 1
-    hdr = (f"{'op':<{name_w}}{'n':>5}{'wall_med':>11}{'wall_min':>11}"
-           f"{'wall_max':>11}")
+    hdr = f"{'op':<{name_w}}{'n':>5}{'wall_med':>11}{'wall_min':>11}{'wall_max':>11}"
     if DEVICE_TIME:
         hdr += f"{'dev_med':>11}{'dev_max':>11}{'w-d':>10}  kernels"
     print(hdr)
     rows = sorted(by_op.items(), key=lambda kv: -sum(c.wall_us for c in kv[1]))
     for op, calls in rows:
         _, (w_med, _w_mean, w_min, w_max, _w_sum), dev, kers = summarize_calls(calls)
-        line = (f"{op:<{name_w}}{len(calls):>5}{fmt_us(w_med):>11}"
-                f"{fmt_us(w_min):>11}{fmt_us(w_max):>11}")
+        line = f"{op:<{name_w}}{len(calls):>5}{fmt_us(w_med):>11}{fmt_us(w_min):>11}{fmt_us(w_max):>11}"
         if DEVICE_TIME:
             if dev is None:
                 line += f"{'-':>11}{'-':>11}{'-':>10}"
             else:
                 d_med, _d_mean, d_max, _d_sum = dev
-                line += (f"{fmt_us(d_med):>11}{fmt_us(d_max):>11}"
-                         f"{fmt_us(w_med - d_med):>10}")
+                line += f"{fmt_us(d_med):>11}{fmt_us(d_max):>11}{fmt_us(w_med - d_med):>10}"
             line += "  " + ", ".join(f"{n}x{cnt}" for n, cnt in kers.most_common())
         print(line)
         # 归因完整性: wall 调用数 vs 归因到 kernel 的调用数
         n_attr = len([c for c in calls if c.kernels])
         if DEVICE_TIME and n_attr < len(calls):
-            print(f"[warn] {op}: {n_attr}/{len(calls)} 调用归因到 device kernel"
-                  f"(调用抛异常, 或封装无内建 Synchronize; wall 口径不受影响)")
+            print(
+                f"[warn] {op}: {n_attr}/{len(calls)} 调用归因到 device kernel"
+                f"(调用抛异常, 或封装无内建 Synchronize; wall 口径不受影响)"
+            )
 
 
 def write_csv():
@@ -395,32 +396,45 @@ def write_csv():
         w = csv.writer(f, lineterminator="\n")
         w.writerow(["seq", "op", "wall_us", "device_us", "kernels", "args", "error"])
         for c in CALLS:
-            w.writerow([c.seq, c.op, f"{c.wall_us:.1f}", f"{c.device_us:.1f}",
-                        ";".join(f"{n}:{d:.1f}" for n, d in c.kernels),
-                        c.args, c.error])
+            w.writerow(
+                [
+                    c.seq,
+                    c.op,
+                    f"{c.wall_us:.1f}",
+                    f"{c.device_us:.1f}",
+                    ";".join(f"{n}:{d:.1f}" for n, d in c.kernels),
+                    c.args,
+                    c.error,
+                ]
+            )
         f.write("\n# ---- summary per op (comment lines) ----\n")
-        f.write("# op,calls,wall_med_us,wall_mean_us,wall_min_us,wall_max_us,"
-                "wall_total_ms,device_calls,device_med_us,device_mean_us,"
-                "device_max_us,device_total_ms,launch_sync_med_us,kernels\n")
+        f.write(
+            "# op,calls,wall_med_us,wall_mean_us,wall_min_us,wall_max_us,"
+            "wall_total_ms,device_calls,device_med_us,device_mean_us,"
+            "device_max_us,device_total_ms,launch_sync_med_us,kernels\n"
+        )
         for op, calls in sorted(by_op.items()):
             _, (w_med, w_mean, w_min, w_max, w_sum), dev, kers = summarize_calls(calls)
             if dev is None:
-                f.write(f"# {op},{len(calls)},{w_med:.1f},{w_mean:.1f},{w_min:.1f},"
-                        f"{w_max:.1f},{w_sum / 1000:.3f},0,-,-,-,-,-,-\n")
+                f.write(
+                    f"# {op},{len(calls)},{w_med:.1f},{w_mean:.1f},{w_min:.1f},"
+                    f"{w_max:.1f},{w_sum / 1000:.3f},0,-,-,-,-,-,-\n"
+                )
                 continue
             d_med, d_mean, d_max, d_sum = dev
-            f.write(f"# {op},{len(calls)},{w_med:.1f},{w_mean:.1f},{w_min:.1f},"
-                    f"{w_max:.1f},{w_sum / 1000:.3f},"
-                    f"{len([c for c in calls if c.kernels])},"
-                    f"{d_med:.1f},{d_mean:.1f},{d_max:.1f},{d_sum / 1000:.3f},"
-                    f"{w_med - d_med:.1f},"
-                    f"{';'.join(f'{n}x{cnt}' for n, cnt in kers.most_common())}\n")
+            f.write(
+                f"# {op},{len(calls)},{w_med:.1f},{w_mean:.1f},{w_min:.1f},"
+                f"{w_max:.1f},{w_sum / 1000:.3f},"
+                f"{len([c for c in calls if c.kernels])},"
+                f"{d_med:.1f},{d_mean:.1f},{d_max:.1f},{d_sum / 1000:.3f},"
+                f"{w_med - d_med:.1f},"
+                f"{';'.join(f'{n}x{cnt}' for n, cnt in kers.most_common())}\n"
+            )
     return path
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="抓取现成测试用例中 xlite 算子的执行耗时(变量见脚本内配置区)")
+    parser = argparse.ArgumentParser(description="抓取现成测试用例中 xlite 算子的执行耗时(变量见脚本内配置区)")
     parser.add_argument("script", help="被测测试脚本路径, 如 tests/kernels/dequant.py")
     opts = parser.parse_args()
     script = os.path.abspath(opts.script)
@@ -433,11 +447,12 @@ def main():
         DEVICE_TIME = False
 
     patched = patch_xlite_ops()
-    print(f"[prof] {len(patched)} xlite ops | device_time={DEVICE_TIME} "
-          f"excl_first={EXCLUDE_FIRST_CALL} keep_prof_dir={KEEP_PROF_DIR}")
+    print(
+        f"[prof] {len(patched)} xlite ops | device_time={DEVICE_TIME} "
+        f"excl_first={EXCLUDE_FIRST_CALL} keep_prof_dir={KEEP_PROF_DIR}"
+    )
     if DEVICE_TIME:
-        print("[prof] 注: profiler 使 wall +~100us/调用, "
-              "干净 wall 请置 DEVICE_TIME=False 再跑")
+        print("[prof] 注: profiler 使 wall +~100us/调用, 干净 wall 请置 DEVICE_TIME=False 再跑")
 
     trace_path = os.path.join(tempfile.gettempdir(), f"xlite_prof_trace_{os.getpid()}.json")
     prof, test_exc, status = None, None, "OK"
@@ -467,19 +482,19 @@ def main():
             per_call, diag = attribute_device(anns, devs)
             fill_calls_with_device(per_call)
             n_attr = sum(len(v) for v in per_call.values())
-            print(f"[prof] device: {len(devs)} events → {n_attr} kernels 归因 | "
-                  f"排除非 xlite {len(diag['excluded'])} | "
-                  f"未归因 {len(diag['unattributed'])}(torch 侧)")
+            print(
+                f"[prof] device: {len(devs)} events → {n_attr} kernels 归因 | "
+                f"排除非 xlite {len(diag['excluded'])} | "
+                f"未归因 {len(diag['unattributed'])}(torch 侧)"
+            )
             if diag["vote_failed"]:
-                print(f"[prof] [warn] 投票未过阈值不归因: "
-                      f"{diag['vote_failed'].most_common(3)}")
+                print(f"[prof] [warn] 投票未过阈值不归因: {diag['vote_failed'].most_common(3)}")
             for msg in diag["count_mismatch"]:
                 print(f"[prof] [warn] kernel 数≠调用数, 逐事件归因: {msg}")
         except Exception as e:
             print(f"[warn] trace 解析失败({type(e).__name__}: {e}), device 口径缺失")
 
-    print(f"\n[prof] {os.path.basename(script)} | {status} | {elapsed:.2f}s | "
-          f"{len(CALLS)} calls")
+    print(f"\n[prof] {os.path.basename(script)} | {status} | {elapsed:.2f}s | {len(CALLS)} calls")
     if CALLS:
         print_summary()
         print(f"[prof] csv: {write_csv()}")

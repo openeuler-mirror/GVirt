@@ -4,7 +4,7 @@
 
 MoE(Mixture of Experts)路由门控算子:对每个 token 的 router 得分做 softmax,再选出 topK 个专家,输出"稀疏权重行 + 专家路由位图"两个结果(DeepSeek 系列模型 `norm_topk_prob=True` 的标准门控,`softmax → topk → 归一化` 全融合在单个向量 kernel 内)。当 `numRoutedExperts` 低于 `vmrgsort4` 无条件 4 路归并的下限 `4*SORT_BLOCK_SIZE = 128`(如 GLM-4.7-Flash 的 64 专家)时,排序宽度补齐到 128,机制见实现原理 SelectTopK 段。数学语义(见测试 `tests/kernels/softmax_topk.py` 参考实现段,关键字 `standard_softmax`/`torch.topk`):
 
-```
+```text
 p = softmax(scores)                       # [nRoutedExperts]
 topkW, topkI = topk(p, topK)              # 取 topK
 topkW = topkW / sum(topkW)                # normTopKProb 时
@@ -23,14 +23,14 @@ softmax_topk(rt, scores, indices, weights_out, indices_out, topK, normTopKProb)
 host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpSoftmaxTopK`。kernel 签名(`csrc/kernels/softmax_topk.h` 的 `SOFTMAX_TOPK_FUNC_DEFINE` 宏 / `softmax_topk_<dtype>` 入口):
 
 ```cpp
-softmax_topk_<dtype>(GM_ADDR socres, GM_ADDR indices, GM_ADDR weightsMap,
+softmax_topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR weightsMap,
                      GM_ADDR routingMap, uint32_t numTokens, uint32_t numRoutedExperts,
                      uint32_t topK, bool normTopKProb)
 ```
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
-|---|---|---|---|---|
-| scores(即 socres) | 输入 | `[numTokens, numRoutedExperts]` | fp32 / bf16 | router logits |
+| --- | --- | --- | --- | --- |
+| scores(即 scores) | 输入 | `[numTokens, numRoutedExperts]` | fp32 / bf16 | router logits |
 | indices | 输入 | `[numRoutedExperts]` | int32 | `arange` 恒等索引表(host 传 `indices.shape[0]` 作为专家数) |
 | weightsMap | 输出 | `[numTokens, numRoutedExperts]` | 与 scores 同 dtype | 稀疏权重行:topK 个被选槽位为归一化后的概率,其余为 0 |
 | routingMap | 输出 | `[numTokens, ceil(numRoutedExperts/32)]`(BIT1 打包) | BIT1(uint32 位图) | 每个被选专家置 1 bit。注意:BIT1 语义下每 32 个专家打包为 1 个 u32(测试 `tests/kernels/softmax_topk.py` BIT1 打包段,关键字 `elem / 64`、`1 << (elem % 64)` 是因为 BIT1 张量在 torch 侧被视作 int64 承载) |
@@ -39,7 +39,7 @@ softmax_topk_<dtype>(GM_ADDR socres, GM_ADDR indices, GM_ADDR weightsMap,
 ## 支持的数据类型
 
 | dtype 变体 | 源文件 | 说明 |
-|---|---|---|
+| --- | --- | --- |
 | `softmax_topk_float` | `csrc/kernels/softmax_topk_float.cpp` | scores/weightsMap 为 fp32 |
 | `softmax_topk_bfloat16_t` | `csrc/kernels/softmax_topk_bfloat16_t.cpp` | scores/weightsMap 为 bf16(核内转 fp32 计算,输出转回 bf16) |
 

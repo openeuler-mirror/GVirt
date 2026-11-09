@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -11,14 +10,14 @@
 #   2 cards: torchrun --nproc_per_node=2 --master_port=29500 rmsnorm_full.py
 #   4 cards: torchrun --nproc_per_node=4 --master_port=29500 rmsnorm_full.py
 # ===============================================================================
-from __future__ import absolute_import
 import logging
 import os
-import torch
-import torch_npu
-import torch.distributed as dist
-from xlite._C import Runtime, rmsnorm, rmsnorm_variance_only, all_reduce
 
+import torch
+import torch.distributed as dist
+import torch_npu
+
+from xlite._C import Runtime, all_reduce, rmsnorm, rmsnorm_variance_only
 
 world_size = int(os.getenv("WORLD_SIZE", "1"))
 rank = int(os.getenv("RANK", "0"))
@@ -42,32 +41,33 @@ def stand_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> t
     x = x * torch.rsqrt(variance + eps)
     return (weight.float() * x).to(input_dtype)
 
+
 BATCH_SIZE = 64
 DIM = 384
 NORMEPS = 1e-6
 dtype_list = [torch.float16, torch.bfloat16]
 
 for test_dtype in dtype_list:
-        with torch.device("npu"):
-            x = torch.randn(BATCH_SIZE, DIM, dtype=test_dtype)
-            weight = torch.randn(DIM, dtype=test_dtype)
-            y = torch.empty(BATCH_SIZE, DIM, dtype=test_dtype)
-            variance_xlite = torch.zeros(BATCH_SIZE, 1, dtype=torch.float32)
+    with torch.device("npu"):
+        x = torch.randn(BATCH_SIZE, DIM, dtype=test_dtype)
+        weight = torch.randn(DIM, dtype=test_dtype)
+        y = torch.empty(BATCH_SIZE, DIM, dtype=test_dtype)
+        variance_xlite = torch.zeros(BATCH_SIZE, 1, dtype=torch.float32)
 
-        # standard
-        standard = stand_rmsnorm(x, weight, NORMEPS)
+    # standard
+    standard = stand_rmsnorm(x, weight, NORMEPS)
 
-        # xlite
-        torch.npu.synchronize()
-        rmsnorm_variance_only(rt, x, variance_xlite, NORMEPS, norm_dim=DIM, cnt_per_token=1)
-        all_reduce(rt, variance_xlite, variance_xlite)
-        rmsnorm(rt, x, weight, y, NORMEPS, norm_dim=DIM, cnt_per_token=1, variance=variance_xlite)
-        torch.npu.synchronize()
-        if rank == 0:
-            logging.info(f'rmsnorm({test_dtype}) executed!')
-            try:
-                torch.testing.assert_close(standard, y, atol=1e-5, rtol=1e-3)
-            except AssertionError as e:
-                logging.error(f'{e}')
-                logging.error(f'torch_npu: {standard}')
-                logging.error(f'xlite: {y}')
+    # xlite
+    torch.npu.synchronize()
+    rmsnorm_variance_only(rt, x, variance_xlite, NORMEPS, norm_dim=DIM, cnt_per_token=1)
+    all_reduce(rt, variance_xlite, variance_xlite)
+    rmsnorm(rt, x, weight, y, NORMEPS, norm_dim=DIM, cnt_per_token=1, variance=variance_xlite)
+    torch.npu.synchronize()
+    if rank == 0:
+        logging.info(f"rmsnorm({test_dtype}) executed!")
+        try:
+            torch.testing.assert_close(standard, y, atol=1e-5, rtol=1e-3)
+        except AssertionError as e:
+            logging.error(f"{e}")
+            logging.error(f"torch_npu: {standard}")
+            logging.error(f"xlite: {y}")

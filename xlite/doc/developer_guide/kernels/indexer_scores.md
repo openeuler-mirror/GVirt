@@ -4,7 +4,7 @@
 
 DSA indexer 的得分计算算子(纯 Cube 核)。对每个 query token 计算 indexer 头的注意力得分并与头权重融合,数学上等价于两步 einsum(见 `csrc/kernels/indexer_scores.h` 的 `IndexerScores::Init`(注释块 `scores = k * q`)与测试 `tests/kernels/indexer_scores.py` 的参考实现,关键字 `torch.einsum("bshd,btd->bsht"` / `index_score = torch.einsum("sht,sh->st"`):
 
-```
+```text
 scores[s,h,t]      = sum_d q[s,h,d] * kCache[t,d]        # Q·K^T
 index_score[s,t]   = sum_h scores[s,h,t] * weight[s,h]    # 加权头融合
 ```
@@ -16,8 +16,21 @@ index_score[s,t]   = sum_h scores[s,h,t] * weight[s,h]    # 加权头融合
 Python 侧调用(`tests/kernels/indexer_scores.py` 的参考实现段,关键字 `indexer_scores(rt, q_xlite, k_cache_xlite`):
 
 ```python
-indexer_scores(rt, q, k_cache, weight, scores, query_start_loc, query_lens,
-               cached_lens, block_tables, n_heads, head_dim, block_size, batch)
+indexer_scores(
+    rt,
+    q,
+    k_cache,
+    weight,
+    scores,
+    query_start_loc,
+    query_lens,
+    cached_lens,
+    block_tables,
+    n_heads,
+    head_dim,
+    block_size,
+    batch,
+)
 ```
 
 host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpIndexerScores`(`KERNEL_TASK_TYPE_AIC_ONLY`,用 `rt.aicNum` 个 Cube 核)。kernel 签名(`csrc/kernels/indexer_scores.h` 的 `INDEXER_SCORES_FUNC_DEFINE`):

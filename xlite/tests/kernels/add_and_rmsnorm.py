@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,11 +6,12 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from __future__ import absolute_import
 import logging
 import os
+
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, add_and_rmsnorm
 
 logging.getLogger().setLevel(logging.INFO)
@@ -45,14 +45,14 @@ for test_dtype in dtype_list:
     add_and_rmsnorm(rt, x, y, weight, x, NORMEPS)
     torch.npu.synchronize()
 
-    logging.info(f'rmsnorm({test_dtype}) executed!')
+    logging.info(f"rmsnorm({test_dtype}) executed!")
 
     try:
         torch.testing.assert_close(add_standard, y, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
-        logging.error(f'{e}')
-        logging.error(f'torch_npu add: {add_standard}')
-        logging.error(f'xlite add: {y}')
+        logging.error(f"{e}")
+        logging.error(f"torch_npu add: {add_standard}")
+        logging.error(f"xlite add: {y}")
 
     # Same story as tests/kernels/rmsnorm.py: the kernel adds and normalizes
     # in fp32 and rounds the output once, but the fp32 op order still differs
@@ -64,6 +64,6 @@ for test_dtype in dtype_list:
     try:
         torch.testing.assert_close(standard, x, atol=1e-5, rtol=rms_rtol)
     except AssertionError as e:
-        logging.error(f'{e}')
-        logging.error(f'torch_npu rmsnorm: {standard}')
-        logging.error(f'xlite rmsnorm: {x}')
+        logging.error(f"{e}")
+        logging.error(f"torch_npu rmsnorm: {standard}")
+        logging.error(f"xlite rmsnorm: {x}")

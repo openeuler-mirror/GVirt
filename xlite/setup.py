@@ -1,15 +1,14 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 
 import hashlib
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 from setuptools import Command, Extension, setup
 from setuptools.command.build_ext import build_ext
@@ -78,7 +77,6 @@ def _get_torch_cmake_dir() -> str:
 
 def _get_pybind11_cmake_dir() -> str:
     return subprocess.check_output([sys.executable, "-m", "pybind11", "--cmakedir"], text=True).strip()
-
 
 
 if _bdist_wheel is not None:

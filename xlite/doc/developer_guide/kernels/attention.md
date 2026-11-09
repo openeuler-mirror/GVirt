@@ -9,9 +9,23 @@
 Python 侧调用(`tests/kernels/attention.py` 的 `attention(rt, qkv_xlite, ...)` 调用点,关键字 `attention(rt, qkv_xlite`):
 
 ```python
-attention(rt, qkv, k_cache, v_cache, output, query_start_loc, query_lens,
-          cached_lens, block_tables, n_heads, n_kv_heads, head_dim,
-          BLOCK_SIZE, batch, enable_flash=False)
+attention(
+    rt,
+    qkv,
+    k_cache,
+    v_cache,
+    output,
+    query_start_loc,
+    query_lens,
+    cached_lens,
+    block_tables,
+    n_heads,
+    n_kv_heads,
+    head_dim,
+    BLOCK_SIZE,
+    batch,
+    enable_flash=False,
+)
 ```
 
 host 封装 `Attention` → `XliteOpAttention`(`csrc/_C.cpp` 的 `Attention`、`csrc/op.cpp` 的 `XliteOpAttention`)。kernel 签名(`csrc/kernels/attention.h` 的 `attention_<dtype>` 入口,宏 `ATTN_FUNC_DEFINE`):

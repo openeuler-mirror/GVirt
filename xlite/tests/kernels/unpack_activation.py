@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,6 +8,7 @@
 # ===============================================================================
 import torch
 import torch_npu
+
 from xlite._C import Runtime, unpack_activation
 
 npu_devid = 0
@@ -24,6 +24,7 @@ test_cases = [
     [20000, 2048],
 ]
 
+
 def pack_int4_to_int8(x):
     if x.dtype != torch.int8:
         raise TypeError(f"dtype of x should be int8, but get: {x.dtype}")
@@ -34,8 +35,9 @@ def pack_int4_to_int8(x):
     b = x[..., 0::2]
     b_adjusted = torch.where(b < 0, b + 16, b)
 
-    result = (a * 16 + b_adjusted)
+    result = a * 16 + b_adjusted
     return result
+
 
 def msd_split_activation_int8(activation_int8):
     """将 INT8 激活拆分为高 4bit 和低 4bit (interleaved per token, adjacent rows).
@@ -74,11 +76,10 @@ for m, n in test_cases:
     torch.npu.synchronize()
 
     try:
-        torch.testing.assert_close(expected_z, z, atol=1, rtol=1/128)
-        print(f'unpack_activation [{m}, {n}] output check passed')
+        torch.testing.assert_close(expected_z, z, atol=1, rtol=1 / 128)
+        print(f"unpack_activation [{m}, {n}] output check passed")
     except AssertionError as e:
-        print(f'{e}')
-        print(f'x: {x}, shape: {x.shape}')
-        print(f'expected_z: {expected_z}, shape: {expected_z.shape}')
-        print(f'xlite z: {z}, shape: {z.shape}')
-
+        print(f"{e}")
+        print(f"x: {x}, shape: {x.shape}")
+        print(f"expected_z: {expected_z}, shape: {expected_z.shape}")
+        print(f"xlite z: {z}, shape: {z.shape}")

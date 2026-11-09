@@ -32,7 +32,8 @@ If a local version of agent instructions is present as `AGENTS.local.md` and not
 
 ## Static checks
 
-Run before submitting a PR: `python tests/run_static_checks.py`. Use `--cpp-only` or `--python-only` for targeted checks when appropriate.
+Linting runs through `pre-commit` (`xlite/.pre-commit-config.yaml`; a symlink at the repo root keeps standard pre-commit commands working). Install once with `pre-commit install`.
+Run before submitting a PR: `python tests/run_static_checks.py` (CI parity). Use `--cpp-only` or `--python-only` for targeted checks when appropriate.
 Only run after concluding the current task and before submitting a PR. Do not run on the fly during development unless necessary to verify a specific change.
 
 ## Documentation

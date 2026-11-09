@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,15 +6,16 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from __future__ import absolute_import
 import logging
 import os
 import random
+
 import torch
-import torch_npu  # noqa: F401
 import torch.distributed as dist
 import torch.nn.functional as F
-from xlite._C import Runtime, embed, all_reduce
+import torch_npu  # noqa: F401
+
+from xlite._C import Runtime, all_reduce, embed
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -61,11 +61,11 @@ for test_dtype in dtype_list:
     torch.npu.synchronize()
 
     if rank == 0:
-        logging.info(f'embed({test_dtype}) executed!')
+        logging.info(f"embed({test_dtype}) executed!")
 
     try:
         torch.testing.assert_close(standard, y, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
-        logging.error(f'{e}')
-        logging.error(f'torch_npu: {standard}')
-        logging.error(f'xlite: {y}')
+        logging.error(f"{e}")
+        logging.error(f"torch_npu: {standard}")
+        logging.error(f"xlite: {y}")

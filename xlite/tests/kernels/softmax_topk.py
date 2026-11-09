@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,10 +7,12 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import sys
+
+import numpy as np
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, softmax_topk
-import numpy as np
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
@@ -70,8 +71,8 @@ for n_routed_experts in expert_counts:
         torch.npu.synchronize()
         softmax_topk(rt, scores, indices, xlite_weights_out, xlite_indices_out, topK, True)
         torch.npu.synchronize()
-        tag = f'n_routed_experts={n_routed_experts}, dtype={dtype}'
-        print(f'softmax topK ({tag}) executed!')
+        tag = f"n_routed_experts={n_routed_experts}, dtype={dtype}"
+        print(f"softmax topK ({tag}) executed!")
 
         # The kernel computes softmax entirely in fp32 and only rounds at the output DMA,
         # whereas the reference above rounds through `dtype` at every step. For bf16 that
@@ -82,17 +83,17 @@ for n_routed_experts in expert_counts:
             torch.testing.assert_close(standard_indices_out, xlite_indices_out, atol=0, rtol=0)
             torch.testing.assert_close(standard_weights_out, xlite_weights_out, atol=w_atol, rtol=1e-3)
         except AssertionError as e:
-            print(f'FAIL ({tag})')
-            print(f'{e}')
-            print(f'standard_indices_out: {standard_indices_out}')
-            print(f'xlite_indices_out: {xlite_indices_out}')
-            print(f'standard_weights_out: {standard_weights_out}')
-            print(f'xlite_weights_out: {xlite_weights_out}')
+            print(f"FAIL ({tag})")
+            print(f"{e}")
+            print(f"standard_indices_out: {standard_indices_out}")
+            print(f"xlite_indices_out: {xlite_indices_out}")
+            print(f"standard_weights_out: {standard_weights_out}")
+            print(f"xlite_weights_out: {xlite_weights_out}")
             failed.append(tag)
 
 if failed:
-    print(f'FAIL: {len(failed)} softmax_topk config(s) mismatched:')
+    print(f"FAIL: {len(failed)} softmax_topk config(s) mismatched:")
     for tag in failed:
-        print(f'  - {tag}')
+        print(f"  - {tag}")
     sys.exit(1)
-print(f'PASS: all {len(expert_counts) * 2} softmax_topk configs matched')
+print(f"PASS: all {len(expert_counts) * 2} softmax_topk configs matched")

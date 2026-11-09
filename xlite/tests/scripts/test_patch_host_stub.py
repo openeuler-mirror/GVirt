@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -100,14 +99,16 @@ def run_patch(auto_gen, env=None):
         run_env.update(env)
     return subprocess.run(
         [sys.executable, str(SCRIPT), str(auto_gen)],
-        check=True, capture_output=True, text=True, env=run_env,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=run_env,
     )
 
 
 def check_stub(path):
     text = path.read_text()
-    assert "__ascendc_args.__ascendc_overflow = nullptr" in text, \
-        "null assignment missing"
+    assert "__ascendc_args.__ascendc_overflow = nullptr" in text, "null assignment missing"
     assert "overflow-status buffer removed" in text, "removal marker missing"
     assert "AllocAscendMemDevice(&(__ascendc_args.__ascendc_overflow)" not in text, "stock alloc left"
     assert "FreeAscendMemDevice(__ascendc_args.__ascendc_overflow)" not in text, "stock free left"
@@ -137,11 +138,11 @@ def main():
         probe_gen = make_stub_dir(base / "probe", "probe", cache_block=None)
         before = (probe_gen / "probe" / "host_stub.cpp").read_text()
         run_patch(probe_gen, env={"XLITE_NO_OVERFLOW_PATCH": "1"})
-        assert (probe_gen / "probe" / "host_stub.cpp").read_text() == before, \
-            "probe modified the file"
+        assert (probe_gen / "probe" / "host_stub.cpp").read_text() == before, "probe modified the file"
         check_stub_probe = (probe_gen / "probe" / "host_stub.cpp").read_text()
-        assert "AllocAscendMemDevice(&(__ascendc_args.__ascendc_overflow)" \
-            in check_stub_probe, "probe should keep stock alloc"
+        assert "AllocAscendMemDevice(&(__ascendc_args.__ascendc_overflow)" in check_stub_probe, (
+            "probe should keep stock alloc"
+        )
 
         # v1 upgrade path.
         v1_gen = make_stub_dir(base / "v1case", "v1", cache_block=V1_CACHE_BLOCK)
@@ -150,7 +151,8 @@ def main():
 
         # v2 upgrade path: weak-function epoch block -> removal.
         v2_gen = make_stub_dir(
-            base / "v2case", "v2",
+            base / "v2case",
+            "v2",
             cache_block=MOD.OVERFLOW_V2_CACHE_BLOCK,
             decls=MOD.OVERFLOW_V2_EPOCH_DECL,
         )
@@ -160,7 +162,8 @@ def main():
 
         # v3 upgrade path: weak-data-symbol epoch block -> removal.
         v3_gen = make_stub_dir(
-            base / "v3case", "v3",
+            base / "v3case",
+            "v3",
             cache_block=MOD.OVERFLOW_CACHE_BLOCK,
             decls=MOD.OVERFLOW_EPOCH_DECL,
         )

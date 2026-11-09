@@ -7,6 +7,7 @@ import math
 
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, recurrent_gated_delta_rule_paged
 
 
@@ -43,15 +44,11 @@ def check_case(rt, dtype, state_dtype, batch, kh, vh, kd, vd, mode="legacy"):
                 cached[-1] = 0
             columns = cached // 64 if mode == "align" else torch.zeros_like(cached)
             table = torch.full((batch, 3), pages - 1, dtype=torch.int32)
-            table[torch.arange(batch), columns.long()] = torch.tensor(
-                order, dtype=torch.int32
-            )
+            table[torch.arange(batch), columns.long()] = torch.tensor(order, dtype=torch.int32)
             if batch >= 3:
                 # Padding must ignore a stale positive page in the raw table.
                 table[-1, 0] = pages - 1
-            storage = torch.full(
-                (32 + batch * 7 + 32,), -1, dtype=torch.int32, device="npu"
-            )
+            storage = torch.full((32 + batch * 7 + 32,), -1, dtype=torch.int32, device="npu")
             indices = storage.as_strided((batch, 3), (7, 1), 32)
             indices.copy_(table)
             metadata = {
@@ -59,12 +56,8 @@ def check_case(rt, dtype, state_dtype, batch, kh, vh, kd, vd, mode="legacy"):
                 "state_block_size": 64,
                 "aligned": mode == "align",
             }
-        q_cpu = torch.nn.functional.normalize(torch.randn(batch, kh, kd), dim=-1).to(
-            dtype
-        )
-        k_cpu = torch.nn.functional.normalize(torch.randn(batch, kh, kd), dim=-1).to(
-            dtype
-        )
+        q_cpu = torch.nn.functional.normalize(torch.randn(batch, kh, kd), dim=-1).to(dtype)
+        k_cpu = torch.nn.functional.normalize(torch.randn(batch, kh, kd), dim=-1).to(dtype)
         v_cpu = (torch.randn(batch, vh, vd) * 0.1).to(dtype)
         beta_cpu = torch.rand(batch, vh).to(dtype)
         g_cpu = (-torch.rand(batch, vh)).to(dtype)
@@ -83,37 +76,23 @@ def check_case(rt, dtype, state_dtype, batch, kh, vh, kd, vd, mode="legacy"):
             old = ref_state[page].float() * g_exp[b][:, None, None]
             kk = k_rep[b]
             qq = q_rep[b]
-            delta = (v_cpu[b].float() - (old * kk[:, None, :]).sum(-1)) * beta_cpu[
-                b
-            ].float()[:, None]
+            delta = (v_cpu[b].float() - (old * kk[:, None, :]).sum(-1)) * beta_cpu[b].float()[:, None]
             updated = old + delta[:, :, None] * kk[:, None, :]
             expected[b] = (updated * qq[:, None, :]).sum(-1).to(dtype)
             ref_state[page].copy_(updated.to(state_dtype))
         torch.npu.synchronize()
-        recurrent_gated_delta_rule_paged(
-            rt, q, k, v, beta, g, state, out, indices, kh, vh, kd, vd, **metadata
-        )
+        recurrent_gated_delta_rule_paged(rt, q, k, v, beta, g, state, out, indices, kh, vh, kd, vd, **metadata)
         actual = raw.cpu()
-        torch.testing.assert_close(
-            out.cpu(), expected.flatten(1), rtol=tolerance[0], atol=tolerance[1]
-        )
-        torch.testing.assert_close(
-            actual, reference, rtol=state_tolerance[0], atol=state_tolerance[1]
-        )
+        torch.testing.assert_close(out.cpu(), expected.flatten(1), rtol=tolerance[0], atol=tolerance[1])
+        torch.testing.assert_close(actual, reference, rtol=state_tolerance[0], atol=state_tolerance[1])
         modified = torch.zeros_like(before, dtype=torch.bool)
         for page in order:
             if page > 0:
-                modified[offset + page * stride : offset + page * stride + logical] = (
-                    True
-                )
-        assert torch.equal(actual[~modified], before[~modified]), (
-            "unselected page/padding/guard changed"
-        )
+                modified[offset + page * stride : offset + page * stride + logical] = True
+        assert torch.equal(actual[~modified], before[~modified]), "unselected page/padding/guard changed"
         for b, page in enumerate(order):
             if page <= 0:
-                assert torch.count_nonzero(out[b]).item() == 0, (
-                    "null output must be exactly zero"
-                )
+                assert torch.count_nonzero(out[b]).item() == 0, "null output must be exactly zero"
         before = actual
     print(
         f"PASS {mode} {dtype}/{state_dtype}: B={batch} Hk/Hv={kh}/{vh} K/V={kd}/{vd}",
@@ -184,8 +163,7 @@ def run(device, metadata_mode):
                     check_case(rt, dtype, state_dtype, *case, mode=mode)
     check_rejections(rt)
     print(
-        f"PASS native VK paged recurrent: {55 * len(modes)} cases, "
-        f"{165 * len(modes)} recurrent steps",
+        f"PASS native VK paged recurrent: {55 * len(modes)} cases, {165 * len(modes)} recurrent steps",
         flush=True,
     )
 
@@ -193,8 +171,6 @@ def run(device, metadata_mode):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument(
-        "--metadata-mode", choices=("all", "legacy", "none", "align"), default="all"
-    )
+    parser.add_argument("--metadata-mode", choices=("all", "legacy", "none", "align"), default="all")
     args = parser.parse_args()
     run(args.device, args.metadata_mode)

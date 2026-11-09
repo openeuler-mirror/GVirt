@@ -29,7 +29,7 @@ enum class NormKind {
     L2,
 };
 
-// harware
+// hardware
 #define UB_BLOCK_SIZE 32  // unified buffer block size in bytes
 // performance tuning
 #define GM_UB_BURST_SIZE 16384  // 16KB, recommended burst size for GM <--> UB copy bandwidth-wise

@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,6 +8,7 @@
 # ===============================================================================
 import torch
 import torch_npu
+
 from xlite._C import (
     Runtime,
     dequant,
@@ -92,18 +92,16 @@ def run_case(m, n, k, weight_nz, transpose, has_out_scale):
     )
     torch.npu.synchronize()
     print(
-        f'[{m}, {k}] x [{k}, {n}] weight_nz:{weight_nz} transpose:{transpose} '
-        f'has_out_scale:{has_out_scale} fusion matmul dequant executed!'
+        f"[{m}, {k}] x [{k}, {n}] weight_nz:{weight_nz} transpose:{transpose} "
+        f"has_out_scale:{has_out_scale} fusion matmul dequant executed!"
     )
 
     try:
-        torch.testing.assert_close(
-            standard.to("cpu"), fused_out.to("cpu"), atol=1e-2, rtol=1e-2
-        )
+        torch.testing.assert_close(standard.to("cpu"), fused_out.to("cpu"), atol=1e-2, rtol=1e-2)
     except AssertionError as e:
-        print(f'{e}')
-        print(f'serial: {standard}')
-        print(f'fused: {fused_out}')
+        print(f"{e}")
+        print(f"serial: {standard}")
+        print(f"fused: {fused_out}")
 
 
 for weight_nz in [True, False]:

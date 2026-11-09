@@ -79,7 +79,7 @@ flowchart TB
   x(["x [T,H]  (残差基准, 不更新)"]):::tensor
   co{"enableCommOptimize?"}:::dec
   naive["ForwardLayersNaive"]:::op
-  coo["ForwardLayersCommOptimize<br/>TP 通信切片化 (ReduceScatter + AllGather)<br/>层内计算同构"]:::op
+  commopt["ForwardLayersCommOptimize<br/>TP 通信切片化 (ReduceScatter + AllGather)<br/>层内计算同构"]:::op
 
   subgraph loop ["loop · 对每层 i = 0 .. nLayers-1 (62 层同构)"]
     direction TB
@@ -106,9 +106,9 @@ flowchart TB
 
   in --> embed --> x --> co
   co -- "否: currTokens < 6144 (run.sh)" --> naive
-  co -- "是: TP>1 且 (currTokens ≥ 6144<br/>或 multiTaskParallel)" --> coo
+  co -- "是: TP>1 且 (currTokens ≥ 6144<br/>或 multiTaskParallel)" --> commopt
   naive --> loop
-  coo --> loop
+  commopt --> loop
   loop --> finalnorm --> hs --> head --> tp2
   tp2 -- "TP=1: 跳过" --> logits
   tp2 -- "TP>1 (run.sh: TP=16)" --> ag
@@ -119,6 +119,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - `x` 为全程残差基准（不更新），`h` 为工作张量 `[T,H]`，循环中原地改写；层结构「Attention → 残差+RMSNorm → MoE → 残差+RMSNorm」交替，与 Qwen3 相同。
 - **全层 MoE**：`n_dense_layers=0`（适配器与测试两侧硬编码），FFN 恒展开为 `ForwardMoE`（§3），无 Qwen3 dense 变体的 `ForwardMLP` 路径；MoE 权重 BF16 走 NO_QUANT（run.sh 配置）。
 - **lm_head**：`B < T`（如 prefill）时先 `XliteOpEmbed` 按 `indices` 采集每 request 末 token 行得 `[B,H]`，`B == T`（decode）时跳过；`Matmul(head)` 输出本 rank `[B, V/tp]` 分片，TP>1 时 AllGather 拼成 `[B, V]`。
@@ -184,6 +185,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - **QK-norm 为 full-variance 式（与 Qwen3 逐 head QK-norm 的差异）**：MiniMax 在**整段 Q / 整段 K** 上求方差（HF 参考实现：`q_norm = RMSNorm(head_dim·num_attention_heads)` 全局 6144、`k_norm = RMSNorm(head_dim·num_key_value_heads)` 全局 1024）；Qwen3 逐 head 按 `headDim` 归一化，单 kernel、TP 无额外通信。`qkNormFull` 与 plain qkNorm 路径互斥：MiniMax 恒走本路径（`qk_norm_full=True` 硬编码），Qwen3 恒走 plain 路径（`qkNorm && !qkNormFull`）。
 - **局部方差**：两次 `XliteOpRmsNorm`（`useNorm=false`，只算方差不归一化）分别对 Q 段（`normDim=hD·nH=384`）与 K 段（`normDim=hD·kvH=128`，`inStartOffset=hD·nH`）计算每 token 局部 mean-of-squares，写入 `packedVar` 前后两半（`kLocalVariance` 以字节偏移挂同一缓冲）。
 - **单次通信**：`DispatchAllReduceSum` 对整个 `packedVar` 做一次 TP 组 AllReduceSum，q/k 两段方差同时归约（代码注释 "Single AllReduceSum over the packed buffer reduces both variances in place"）；各 rank 局部均值之和恰为 `tp×全局均值`（Q 段不重叠均分显然成立；K 段 kv head 复制时同样成立），故 apply 阶段核内 `×1/tpSize`（[norm.md](../kernels/norm.md) 的 `divTpSize`）即还原全局方差——与 vLLM `MiniMaxText01RMSNormTP` 的 allreduce + `var/tp_world` 语义一致。TP=1 时该步跳过。
@@ -264,6 +266,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - **恒定项（不画分支）**：`norm_topk_prob=True`（normTopK 归一）；无分组路由（`n_group=topk_group=1`）、`routeScale=1`；无 EPLB 冗余专家（gate 后 log→physical 重映射 `XliteOpRemapGateOutputs` 零开销跳过）。
 - **打分 dtype**：`XliteOpSigmoidTopK` 语义见 [sigmoid_topk.md](../kernels/sigmoid_topk.md)；生产 vLLM `GateLinear` 为 FP32，run.sh 测试为 BF16（核内 FP32 计算）；`_gateIndices` 为 host 侧预置 `[0..E)` 恒等索引表。
 - **e_score_correction_bias 加载**：生产适配器从 `block_sparse_moe.e_score_correction_bias` 捕获（`_decoder_layer_mlp_module="block_sparse_moe"`，即代码 "for MiniMax-2.x compatibility" 的回落名——vLLM 把 bias 注册在 MoE 块上而非 gate 下）并转 FP32；`moeGateBias` 由 sigmoid（及 sqrtsoftplus）分支消费，softmax 分支不消费。

@@ -4,33 +4,43 @@
 Run from xlite with FORWARD_BACKEND=xlite and the newly built extension on
 PYTHONPATH. No checkpoint, tokenizer or serving process is required.
 """
+
 import os
 
 os.environ["FORWARD_BACKEND"] = "xlite"
 
 import torch
 import torch_npu  # noqa: F401
+
+from tests.models.qwen3_5 import ModelArgs, Qwen3_5
 from xlite import _C
 from xlite._C import Runtime
-from tests.models.qwen3_5 import ModelArgs, Qwen3_5
 
 
 @torch.inference_mode()
 def main():
-    for name in ("linear_att_conv_and_silu", "linear_att_conv_and_silu_token",
-                 "recurrent_gated_delta_rule"):
+    for name in ("linear_att_conv_and_silu", "linear_att_conv_and_silu_token", "recurrent_gated_delta_rule"):
         assert not hasattr(_C, name), f"obsolete operator still exported: {name}"
     torch.npu.set_device(0)
     torch.manual_seed(565)
     torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device("npu")
     args = ModelArgs(
-        dim=128, inter_dim=256, vocab_size=128, n_layers=2,
-        n_heads=2, n_kv_heads=1, head_dim=256,
+        dim=128,
+        inter_dim=256,
+        vocab_size=128,
+        n_layers=2,
+        n_heads=2,
+        n_kv_heads=1,
+        head_dim=256,
         # The existing RoPE kernel supports rotary widths 64/128.
-        linear_num_key_heads=2, linear_num_value_heads=16,
-        linear_key_head_dim=64, linear_value_head_dim=64,
-        full_attention_interval=2, max_batch_size=2, max_seq_len=128,
+        linear_num_key_heads=2,
+        linear_num_value_heads=16,
+        linear_key_head_dim=64,
+        linear_value_head_dim=64,
+        full_attention_interval=2,
+        max_batch_size=2,
+        max_seq_len=128,
     )
     model = Qwen3_5(args).eval()
     for name, value in model.named_parameters():
@@ -67,7 +77,13 @@ def main():
         # Fetch the raw stream after metadata work has entered TorchNPU's queue.
         stream = torch.npu.current_stream().npu_stream
         model.xlite_model.forward_v2(
-            rt=model.xlite_rt, input=part.flatten(), attn_meta=meta, kv_cache=model.xlite_kv_cache, freqs_cis=[model.freqs_cis], output=out, curr_stream=stream,
+            rt=model.xlite_rt,
+            input=part.flatten(),
+            attn_meta=meta,
+            kv_cache=model.xlite_kv_cache,
+            freqs_cis=[model.freqs_cis],
+            output=out,
+            curr_stream=stream,
         )
         torch.npu.synchronize()
         return out.view(2, part.shape[1], args.dim).cpu()
@@ -91,8 +107,7 @@ def main():
     for cache, reference in zip(model.xlite_kv_cache[0], expected):
         torch.testing.assert_close(cache.cpu(), reference, rtol=0.03, atol=0.002)
         assert torch.count_nonzero(cache[0]).item() == 0, "null page changed"
-    print(f"PASS hybrid V2: Prefill -> continuation -> Decode "
-          f"relative_l2={decode_error.item():.6g}", flush=True)
+    print(f"PASS hybrid V2: Prefill -> continuation -> Decode relative_l2={decode_error.item():.6g}", flush=True)
 
 
 if __name__ == "__main__":

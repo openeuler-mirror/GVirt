@@ -61,6 +61,7 @@ GM(gate tile) --MTE2--> UB(gateIn[curr]) --V: vconv--> UB(gateF[curr]) \
 sigmoid 用 `1 / (1 + exp(-x))` 分解（`csrc/kernels/sigmoid_gate_mul.h` 的 `sigmoid_gate_mul` 函数体，关键字 `sigmoid(gate) = 1 / (1 + exp(-gate))`）：
 
 逐元素模式（gateDim == dim）：
+
 1. `vconv_f162f32` / `vconv_bf162f32`：attn、gate 分别升精度；
 2. `vmuls(gateF, gateF, -1.0)` → `vexp` → `vadds(gateF, gateF, 1.0)`：得 1 + e^-gate；
 3. `vdiv(gateF, ones, gateF)`：得 sigmoid(gate) = 1 / (1 + e^-gate)；

@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,10 +6,11 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from __future__ import absolute_import
 import logging
+
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, mla_prepare
 
 logging.getLogger().setLevel(logging.INFO)
@@ -108,8 +108,8 @@ for test_dtype, q_lora_rank, kv_lora_rank, rope_head_dim in test_cases:
 
     # ---- reference ----
     q_slice = attn_qkvc_ref[:, :q_lora_rank]
-    kv_slice = attn_qkvc_ref[:, q_lora_rank:q_lora_rank + kv_lora_rank]
-    pe_slice = attn_qkvc_ref[:, q_lora_rank + kv_lora_rank:]
+    kv_slice = attn_qkvc_ref[:, q_lora_rank : q_lora_rank + kv_lora_rank]
+    pe_slice = attn_qkvc_ref[:, q_lora_rank + kv_lora_rank :]
 
     attn_norm_qc_ref = stand_rmsnorm(q_slice, q_norm, q_norm_bias, NORM_EPS)
     attn_norm_kvc_ref = stand_rmsnorm(kv_slice, kv_norm, kv_norm_bias, NORM_EPS)
@@ -125,36 +125,52 @@ for test_dtype, q_lora_rank, kv_lora_rank, rope_head_dim in test_cases:
 
     # ---- xlite ----
     torch.npu.synchronize()
-    mla_prepare(rt, attn_qkvc, q_norm, q_norm_bias, attn_norm_qc, kv_norm, kv_norm_bias,
-                attn_norm_kvc, freqs_cis, position, q_lora_rank, kv_lora_rank, rope_head_dim,
-                BLOCK_SIZE, k_cache, pe_cache, slot_mapping, NORM_EPS)
+    mla_prepare(
+        rt,
+        attn_qkvc,
+        q_norm,
+        q_norm_bias,
+        attn_norm_qc,
+        kv_norm,
+        kv_norm_bias,
+        attn_norm_kvc,
+        freqs_cis,
+        position,
+        q_lora_rank,
+        kv_lora_rank,
+        rope_head_dim,
+        BLOCK_SIZE,
+        k_cache,
+        pe_cache,
+        slot_mapping,
+        NORM_EPS,
+    )
     torch.npu.synchronize()
 
-    logging.info(f'mla_prepare (q={q_lora_rank}, kv={kv_lora_rank}, rope={rope_head_dim}, '
-                 f'{test_dtype}) executed!')
+    logging.info(f"mla_prepare (q={q_lora_rank}, kv={kv_lora_rank}, rope={rope_head_dim}, {test_dtype}) executed!")
 
     try:
         check_close(attn_norm_qc_ref, attn_norm_qc, test_dtype)
     except AssertionError as e:
-        logging.error(f'attn_norm_qc mismatch ({test_dtype}): {e}')
+        logging.error(f"attn_norm_qc mismatch ({test_dtype}): {e}")
 
     try:
         check_close(attn_norm_kvc_ref, attn_norm_kvc, test_dtype)
     except AssertionError as e:
-        logging.error(f'attn_norm_kvc mismatch ({test_dtype}): {e}')
+        logging.error(f"attn_norm_kvc mismatch ({test_dtype}): {e}")
 
     # attn_qkvc is a read-only input: the rotated pe goes to pe_cache only (the
     # model returns attn_qkvc to the pool right after the op and computes the
     # q-side rope separately via rope_complex). It must be left bit-identical.
     if not torch.equal(attn_qkvc, attn_qkvc_ref):
-        logging.error(f'attn_qkvc modified by kernel ({test_dtype})')
+        logging.error(f"attn_qkvc modified by kernel ({test_dtype})")
 
     try:
         check_close(k_cache_ref, k_cache, test_dtype)
     except AssertionError as e:
-        logging.error(f'k_cache mismatch ({test_dtype}): {e}')
+        logging.error(f"k_cache mismatch ({test_dtype}): {e}")
 
     try:
         check_close(pe_cache_ref, pe_cache, test_dtype)
     except AssertionError as e:
-        logging.error(f'pe_cache mismatch ({test_dtype}): {e}')
+        logging.error(f"pe_cache mismatch ({test_dtype}): {e}")

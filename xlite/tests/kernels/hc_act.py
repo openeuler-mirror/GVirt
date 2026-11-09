@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -17,6 +16,7 @@ hc_act computes, per token, for hc_mult = K:
 head mode (hc_head): mixes is [m, K], hc_scale is [1], hc_base is [K]. Only pre runs;
 auto-detected from hc_base.numel() == hc_mult.
 """
+
 import sys
 
 import torch
@@ -35,10 +35,9 @@ def hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult=4, sinkhorn_iters=20, ep
     denom = sum + eps.
     """
     pre = torch.sigmoid(mixes[..., :hc_mult] * hc_scale[0] + hc_base[:hc_mult]) + eps
-    post = 2.0 * torch.sigmoid(
-        mixes[..., hc_mult:2 * hc_mult] * hc_scale[1] + hc_base[hc_mult:2 * hc_mult])
+    post = 2.0 * torch.sigmoid(mixes[..., hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult])
 
-    comb = mixes[..., 2 * hc_mult:] * hc_scale[2] + hc_base[2 * hc_mult:]
+    comb = mixes[..., 2 * hc_mult :] * hc_scale[2] + hc_base[2 * hc_mult :]
     b, s, _ = comb.shape
     comb = comb.view(b, s, hc_mult, hc_mult)
     # row softmax + eps
@@ -63,6 +62,7 @@ def hc_head_ref(mixes, hc_scale, hc_base, hc_mult=4, eps=1e-6):
     """
     pre = torch.sigmoid(mixes * hc_scale[0] + hc_base) + eps
     return pre
+
 
 torch.npu.set_device(0)
 rt = Runtime(0, size=2048)
@@ -106,13 +106,13 @@ def run_case(b, s, sinkhorn_iters, eps, merge_hidden=MERGE_HIDDEN_SMALL):
 
     # ---- PyTorch reference (3D input) ----
     ref_pre, ref_post, ref_comb = hc_split_sinkhorn(
-        mixes_3d, hc_scale, hc_base, hc_mult=HC_MULT, sinkhorn_iters=sinkhorn_iters, eps=eps)
+        mixes_3d, hc_scale, hc_base, hc_mult=HC_MULT, sinkhorn_iters=sinkhorn_iters, eps=eps
+    )
     # [b,s,K], [b,s,K], [b,s,K,K] -> flatten to [n,*] for kernel comparison
     ref_pre = ref_pre.view(n, HC_MULT)
     ref_post = ref_post.view(n, HC_MULT)
     ref_comb = ref_comb.view(n, HC_MULT * HC_MULT)
-    y_ref = torch.sum(ref_pre.unsqueeze(-1) * x_resid.view(n, HC_MULT, merge_hidden).float(),
-                     dim=1)
+    y_ref = torch.sum(ref_pre.unsqueeze(-1) * x_resid.view(n, HC_MULT, merge_hidden).float(), dim=1)
     y_ref = y_ref.to(torch.bfloat16)
 
     # ---- xlite kernel (2D input) ----
@@ -121,8 +121,7 @@ def run_case(b, s, sinkhorn_iters, eps, merge_hidden=MERGE_HIDDEN_SMALL):
         comb = torch.empty(n, HC_MULT * HC_MULT, dtype=torch.float32)
         y_out = torch.empty(n, merge_hidden, dtype=torch.bfloat16)
     torch.npu.synchronize()
-    hc_act(rt, mixes_flat, hc_scale, hc_base, post, comb, HC_MULT, eps, sinkhorn_iters,
-           x_resid=x_resid, output=y_out)
+    hc_act(rt, mixes_flat, hc_scale, hc_base, post, comb, HC_MULT, eps, sinkhorn_iters, x_resid=x_resid, output=y_out)
     torch.npu.synchronize()
 
     # ---- compare ----
@@ -130,8 +129,7 @@ def run_case(b, s, sinkhorn_iters, eps, merge_hidden=MERGE_HIDDEN_SMALL):
 
     tol = {"post": (1e-5, 1e-3), "comb": (1e-5, 1e-3), "y": (1e-5, 1e-3)}
     ok = True
-    got_pairs = [("post", post, ref_post), ("comb", comb, ref_comb),
-                 ("y", y_out, y_ref)]
+    got_pairs = [("post", post, ref_post), ("comb", comb, ref_comb), ("y", y_out, y_ref)]
     for name, got, want in got_pairs:
         atol, rtol = tol[name]
         try:
@@ -166,7 +164,7 @@ def run_head_case(b, s, eps, merge_hidden=MERGE_HIDDEN_SMALL):
     with torch.device("npu"):
         # mixes [b, s, hc_mult] fp32 (head: pre segment only); kernel takes flat [n, hc_mult].
         mixes_3d = torch.randn(b, s, HC_MULT, dtype=torch.float32)
-        hc_scale = torch.randn(1, dtype=torch.float32)   # [1] scalar for pre
+        hc_scale = torch.randn(1, dtype=torch.float32)  # [1] scalar for pre
         hc_base = torch.randn(HC_MULT, dtype=torch.float32)  # [hc_mult] pre bias
         x_resid = torch.randn(n, HC_MULT, merge_hidden, dtype=torch.bfloat16)
 
@@ -175,8 +173,7 @@ def run_head_case(b, s, eps, merge_hidden=MERGE_HIDDEN_SMALL):
     # ---- PyTorch reference (3D input) ----
     ref_pre = hc_head_ref(mixes_3d, hc_scale, hc_base, hc_mult=HC_MULT, eps=eps)
     ref_pre = ref_pre.view(n, HC_MULT)
-    y_ref = torch.sum(ref_pre.unsqueeze(-1) * x_resid.view(n, HC_MULT, merge_hidden).float(),
-                     dim=1)
+    y_ref = torch.sum(ref_pre.unsqueeze(-1) * x_resid.view(n, HC_MULT, merge_hidden).float(), dim=1)
     y_ref = y_ref.to(torch.bfloat16)
 
     # ---- xlite kernel (head mode, auto-detected from hc_base.numel()==hc_mult) ----
@@ -186,8 +183,7 @@ def run_head_case(b, s, eps, merge_hidden=MERGE_HIDDEN_SMALL):
         comb = torch.empty(n, HC_MULT * HC_MULT, dtype=torch.float32)
         y_out = torch.empty(n, merge_hidden, dtype=torch.bfloat16)
     torch.npu.synchronize()
-    hc_act(rt, mixes_flat, hc_scale, hc_base, post, comb, HC_MULT, eps, 20,
-           x_resid=x_resid, output=y_out)
+    hc_act(rt, mixes_flat, hc_scale, hc_base, post, comb, HC_MULT, eps, 20, x_resid=x_resid, output=y_out)
     torch.npu.synchronize()
 
     # ---- compare ----
@@ -210,13 +206,13 @@ def run_head_case(b, s, eps, merge_hidden=MERGE_HIDDEN_SMALL):
 
 if __name__ == "__main__":
     all_ok = True
-    for (b, s, iters, eps) in CASES:
+    for b, s, iters, eps in CASES:
         all_ok &= run_case(b, s, iters, eps)
-    for (b, s, iters, eps) in MERGE_CASES:
+    for b, s, iters, eps in MERGE_CASES:
         all_ok &= run_case(b, s, iters, eps, merge_hidden=MERGE_HIDDEN)
-    for (b, s, eps) in HEAD_CASES:
+    for b, s, eps in HEAD_CASES:
         all_ok &= run_head_case(b, s, eps)
-    for (b, s, eps) in HEAD_MERGE_CASES:
+    for b, s, eps in HEAD_MERGE_CASES:
         all_ok &= run_head_case(b, s, eps, merge_hidden=MERGE_HIDDEN)
     if all_ok:
         print("==== all hc_act cases passed ====")

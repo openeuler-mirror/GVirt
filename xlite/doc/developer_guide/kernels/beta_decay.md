@@ -4,7 +4,7 @@
 
 线性注意力/RWKV 类模型的门控预处理算子,一次 kernel 同时计算两个逐元素公式(按 v_head 维度并行,`num_v_heads` 很小,典型 16):
 
-```
+```text
 beta = sigmoid(b)                          # 门控系数
 g    = -exp(A_log) * softplus(a + dt_bias) # 衰减系数
 ```

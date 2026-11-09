@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,8 +8,8 @@
 # ===============================================================================
 import torch
 import torch_npu  # noqa: F401
-from xlite._C import Runtime, add
 
+from xlite._C import Runtime, add
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
@@ -27,13 +26,13 @@ for dtype in supported_dtype_list:
     torch.npu.synchronize()
     add(rt, x, y, z)
     torch.npu.synchronize()
-    print(f'add {dtype} executed!')
+    print(f"add {dtype} executed!")
 
     try:
         torch.testing.assert_close(standard, z, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
-        print(f'{e}')
-        print(f'x: {x}')
-        print(f'y: {y}')
-        print(f'torch_npu: {standard}')
-        print(f'xlite: {z}')
+        print(f"{e}")
+        print(f"x: {x}")
+        print(f"y: {y}")
+        print(f"torch_npu: {standard}")
+        print(f"xlite: {z}")

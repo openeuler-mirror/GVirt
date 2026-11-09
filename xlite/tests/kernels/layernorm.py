@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,12 +6,13 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from __future__ import absolute_import
 import logging
 import os
+
 import torch
-import torch_npu  # noqa: F401
 import torch.nn.functional as F
+import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, layernorm
 
 logging.getLogger().setLevel(logging.INFO)
@@ -20,8 +20,10 @@ logging.getLogger().setLevel(logging.INFO)
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
 
+
 def stand_layernorm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return F.layer_norm(x, (x.size(-1),), weight, bias, eps)
+
 
 BATCH_SIZE = 64
 DIM = 128
@@ -43,11 +45,11 @@ for test_dtype in dtype_list:
     layernorm(rt, x, weight, bias, y, NORMEPS, DIM)
     torch.npu.synchronize()
 
-    logging.info(f'layernorm({test_dtype}) executed!')
+    logging.info(f"layernorm({test_dtype}) executed!")
 
     try:
         torch.testing.assert_close(standard, y, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
-        logging.error(f'{e}')
-        logging.error(f'torch_npu: {standard}')
-        logging.error(f'xlite: {y}')
+        logging.error(f"{e}")
+        logging.error(f"torch_npu: {standard}")
+        logging.error(f"xlite: {y}")

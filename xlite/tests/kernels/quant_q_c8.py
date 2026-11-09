@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8 -*-
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,11 +7,11 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 """quant_q_c8 query quantization and fused scaled-weights tests."""
+
 import logging
 import math
 
 import torch
-
 
 QUANT_MAX = 127
 Q8_FILL = -101
@@ -51,11 +50,10 @@ def run_test(rt, device, name, rows, head_weight, rotate_scale, out_offset=0):
     from xlite._C import quant_q_c8
 
     tokens, dim = rows.shape
-    q8_base = torch.full((tokens * dim + 2 * out_offset,), Q8_FILL, dtype=torch.int8,
-                         device=device)
+    q8_base = torch.full((tokens * dim + 2 * out_offset,), Q8_FILL, dtype=torch.int8, device=device)
     sw_base = torch.full((tokens + 2 * out_offset,), SW_FILL, dtype=torch.float16, device=device)
-    q8 = q8_base[out_offset:out_offset + tokens * dim].view(tokens, dim)
-    scaled_weights = sw_base[out_offset:out_offset + tokens]
+    q8 = q8_base[out_offset : out_offset + tokens * dim].view(tokens, dim)
+    scaled_weights = sw_base[out_offset : out_offset + tokens]
     device_rows = rows.to(device)
     device_hw = head_weight.to(device)
     torch.npu.synchronize(device)
@@ -65,19 +63,19 @@ def run_test(rt, device, name, rows, head_weight, rotate_scale, out_offset=0):
     assert torch.equal(device_hw.cpu(), head_weight), (name, "head_weight mutated")
 
     q8_base, sw_base = q8_base.cpu(), sw_base.cpu()
-    q8 = q8_base[out_offset:out_offset + tokens * dim].view(tokens, dim)
-    scaled_weights = sw_base[out_offset:out_offset + tokens]
+    q8 = q8_base[out_offset : out_offset + tokens * dim].view(tokens, dim)
+    scaled_weights = sw_base[out_offset : out_offset + tokens]
     if tokens:
         check_values(q8, scaled_weights, rows, head_weight, rotate_scale, name)
     if out_offset:
         assert bool((q8_base[[0, -1]] == Q8_FILL).all()), (name, "q8 guard")
         assert bool((sw_base[[0, -1]] == SW_FILL).all()), (name, "sw guard")
-    logging.info("quant_q_c8 %s (%d rows, dim %d, rotate %s) passed", name, tokens, dim,
-                 rotate_scale)
+    logging.info("quant_q_c8 %s (%d rows, dim %d, rotate %s) passed", name, tokens, dim, rotate_scale)
 
 
 def main():
     import torch_npu  # noqa: F401
+
     from xlite._C import Runtime
 
     logging.getLogger().setLevel(logging.INFO)
@@ -90,8 +88,7 @@ def main():
             rows = torch.randn(tokens, dim, generator=generator).bfloat16()
             head_weight = torch.randn(tokens, generator=generator).bfloat16()
             for rotate_scale in rotate_scales:
-                run_test(rt, device, f"random-dim{dim}-{tokens}", rows, head_weight,
-                         rotate_scale)
+                run_test(rt, device, f"random-dim{dim}-{tokens}", rows, head_weight, rotate_scale)
 
     # Per-row edge cases: zero row (zeros + zero fused weight), constant row,
     # and a single large outlier dominating one row's absmax. head_weight edge
@@ -110,8 +107,7 @@ def main():
 
     # Guard both ends of the output views (the 2-byte fused-weight store takes
     # the b16 path; q8 rows stay 32B-aligned because dim is a multiple of 64).
-    run_test(rt, device, "offset-views", rows, head_weight, 1.0 / math.sqrt(128.0),
-             out_offset=1)
+    run_test(rt, device, "offset-views", rows, head_weight, 1.0 / math.sqrt(128.0), out_offset=1)
 
     logging.info("quant_q_c8 tests passed")
 

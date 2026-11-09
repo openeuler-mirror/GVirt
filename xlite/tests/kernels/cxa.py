@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -36,18 +35,19 @@ both sides attend over the same per-query KV, so outputs are directly
 comparable.
 
 """
-from __future__ import absolute_import
 
 import logging
 import math
-import numpy as np
 import os
 import re
+
+import numpy as np
 import torch
 import torch_npu  # noqa: F401
+
+from tests.models.deepseek_v4_kernel import sparse_attn
 from xlite._C import Runtime, cxa
 from xlite._C import print as xlite_print
-from tests.models.deepseek_v4_kernel import sparse_attn
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -124,8 +124,7 @@ def pitched_cache_view(cache):
     """Dim-0 pitched copy: same logical rows, one guard row of padding per block."""
     blocks, block, dim = cache.shape
     pitch = (block + 1) * dim
-    view = torch.zeros(blocks * pitch, dtype=cache.dtype).as_strided(
-        (blocks, block, dim), (pitch, dim, 1))
+    view = torch.zeros(blocks * pitch, dtype=cache.dtype).as_strided((blocks, block, dim), (pitch, dim, 1))
     view.copy_(cache)
     return view
 
@@ -142,13 +141,13 @@ def build_swa_topk(window_size, total_len, q_len, device):
     [0, window_size) of the concatenated KV.
     """
     base_pos = total_len - q_len  # absolute position of query row 0
-    rows = torch.arange(q_len, device=device).unsqueeze(1)          # (q_len, 1)
-    pos = base_pos + rows                                         # (q_len, 1) abs pos
+    rows = torch.arange(q_len, device=device).unsqueeze(1)  # (q_len, 1)
+    pos = base_pos + rows  # (q_len, 1) abs pos
     # visible window start for each row
-    win_start = (pos - window_size + 1).clamp(min=0)               # (q_len, 1)
+    win_start = (pos - window_size + 1).clamp(min=0)  # (q_len, 1)
     # columns: offsets 0..window_size-1 relative to win_start
     cols = torch.arange(window_size, device=device).unsqueeze(0)  # (1, window_size)
-    abs_idx = win_start + cols                                    # (q_len, window_size)
+    abs_idx = win_start + cols  # (q_len, window_size)
     invalid = (abs_idx >= total_len) | (abs_idx < 0) | (abs_idx > pos)
     abs_idx = abs_idx.clamp(min=0)
     return torch.where(invalid, torch.full_like(abs_idx, -1), abs_idx).to(torch.int32)
@@ -168,16 +167,16 @@ def build_compress_topk(compress_ratio, compressed_kv_len, total_len, q_len, win
     index_topk (with -1) happens at the caller.
     """
     base_pos = total_len - q_len
-    rows = torch.arange(q_len, device=device).unsqueeze(1)          # (q_len, 1)
-    abs_pos = base_pos + rows                                      # (q_len, 1)
+    rows = torch.arange(q_len, device=device).unsqueeze(1)  # (q_len, 1)
+    abs_pos = base_pos + rows  # (q_len, 1)
     # number of compressed tokens visible to row r (causal)
-    n_visible = (abs_pos + 1) // compress_ratio                   # (q_len, 1)
+    n_visible = (abs_pos + 1) // compress_ratio  # (q_len, 1)
     n_visible = n_visible.clamp(min=0)
     max_k = compressed_kv_len
     # build a (q_len, max_k) matrix of compressed-token indices
-    cols = torch.arange(max_k, device=device).unsqueeze(0)         # (1, max_k)
-    comp_idx = cols                                               # global compressed idx
-    invalid = cols >= n_visible                                   # (q_len, max_k)
+    cols = torch.arange(max_k, device=device).unsqueeze(0)  # (1, max_k)
+    comp_idx = cols  # global compressed idx
+    invalid = cols >= n_visible  # (q_len, max_k)
     comp_idx = comp_idx.clamp(min=0)
     # offset into the concatenated KV: compress segment starts at total_len
     comp_idx = comp_idx + total_len
@@ -185,7 +184,7 @@ def build_compress_topk(compress_ratio, compressed_kv_len, total_len, q_len, win
 
 
 for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype in models:
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
     for batch, cached_lens_list, query_len_list in work:
         total_lens = [cl + ql for cl, ql in zip(cached_lens_list, query_len_list)]
         max_total_len = max(total_lens)
@@ -193,10 +192,7 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
         skip_nonflash_topk = False
         if index_topk > 0 and compress_ratio > 0:
             swa_seg_width = 0 if window_size == 0 else window_size + 128 + 16
-            max_row = max(
-                swa_seg_width + -(-(tl // compress_ratio) // 256) * 256
-                for tl in total_lens
-            )
+            max_row = max(swa_seg_width + -(-(tl // compress_ratio) // 256) * 256 for tl in total_lens)
             max_row = max(max_row, index_topk + swa_seg_width)
             if max_row > MAX_SOFTMAX_PINGPONG_LEN:
                 if not enable_flash:
@@ -204,13 +200,20 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                         "cxa %s SKIP work (batch %d, cached_lens=%s, query_lens=%s): "
                         "topk path row width %d exceeds PingPong UB budget "
                         "MAX_SOFTMAX_PINGPONG_LEN and flash is disabled",
-                        name, batch, cached_lens_list, query_len_list, max_row)
+                        name,
+                        batch,
+                        cached_lens_list,
+                        query_len_list,
+                        max_row,
+                    )
                     continue
                 skip_nonflash_topk = True
                 logging.info(
                     "cxa %s non-flash topk path skipped (row width %d > "
                     "MAX_SOFTMAX_PINGPONG_LEN); flash path will run instead",
-                    name, max_row)
+                    name,
+                    max_row,
+                )
 
         # compressed KV length per sample (== total_len // compress_ratio).
         if compress_ratio > 0:
@@ -223,7 +226,9 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
 
         swa_num_blocks_per_sample = (max_total_len + swa_block_size - 1) // swa_block_size
         swa_max_num_blocks = swa_num_blocks_per_sample
-        compress_num_blocks_per_sample = (kv_size + compress_block_size - 1) // compress_block_size if kv_size > 0 else 0
+        compress_num_blocks_per_sample = (
+            (kv_size + compress_block_size - 1) // compress_block_size if kv_size > 0 else 0
+        )
         compress_max_num_blocks = compress_num_blocks_per_sample
 
         torch.set_default_dtype(test_dtype)
@@ -269,23 +274,22 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                         for r in range(ql):
                             nv = int(n_visible_np[r])
                             if nv > index_topk and int(calc_len_np[r]) > index_topk:
-                                chosen = np.sort(np.random.choice(
-                                    nv, index_topk, replace=False))
+                                chosen = np.sort(np.random.choice(nv, index_topk, replace=False))
                             else:
                                 chosen = np.arange(min(nv, index_topk))
-                            sel_np[r, :len(chosen)] = chosen
+                            sel_np[r, : len(chosen)] = chosen
                         # offset into the concatenated KV [SWA(total_len) | compress]
                         sel_np[sel_np >= 0] += tl
                         comp_topk = torch.from_numpy(sel_np).to(torch.int32).to("npu")
                     else:
                         comp_topk = build_compress_topk(
-                            compress_ratio, n_comp, tl, ql, window_size, "npu")  # (ql, n_comp)
+                            compress_ratio, n_comp, tl, ql, window_size, "npu"
+                        )  # (ql, n_comp)
                         comp_topk_len = n_comp  # full causal, no padding needed
                     sample_topk = torch.cat([swa_topk, comp_topk], dim=1)  # (ql, window_size + comp_topk_len)
                 else:
                     # no compress segment; pad compress part with -1 so total width matches
-                    comp_pad = torch.full((ql, index_topk), -1,
-                                          dtype=torch.int32, device="npu")
+                    comp_pad = torch.full((ql, index_topk), -1, dtype=torch.int32, device="npu")
                     sample_topk = torch.cat([swa_topk, comp_pad], dim=1)
                 topk_indices_list.append(sample_topk)
 
@@ -294,11 +298,16 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
             q_offset = 0
             for i in range(batch):
                 ql = query_len_list[i]
-                q_chunk = q_standard[q_offset:q_offset + ql].unsqueeze(0)  # (1, ql, h, d)
+                q_chunk = q_standard[q_offset : q_offset + ql].unsqueeze(0)  # (1, ql, h, d)
                 q_offset += ql
                 # sparse_attn expects [b, s, h, d]; kv [b, n, d]; topk [b, s, topk]
-                o = sparse_attn(q_chunk.float(), kv_list[i].unsqueeze(0).float(),
-                                attn_sink, topk_indices_list[i].unsqueeze(0), scale).to(test_dtype)
+                o = sparse_attn(
+                    q_chunk.float(),
+                    kv_list[i].unsqueeze(0).float(),
+                    attn_sink,
+                    topk_indices_list[i].unsqueeze(0),
+                    scale,
+                ).to(test_dtype)
                 ref_outputs.append(o.squeeze(0))  # (ql, h, d)
             output_standard = torch.cat(ref_outputs, dim=0)  # (total_query_len, h, d)
 
@@ -321,8 +330,7 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
             if kv_size > 0:
                 batch_indices_comp = torch.arange(batch, dtype=torch.int32).reshape(-1, 1)
                 block_indices_comp = torch.arange(compress_max_num_blocks, dtype=torch.int32)
-                compress_block_tables = (batch_indices_comp * compress_max_num_blocks
-                                         + block_indices_comp)
+                compress_block_tables = batch_indices_comp * compress_max_num_blocks + block_indices_comp
             else:
                 compress_block_tables = torch.zeros(1, batch, dtype=torch.int32)
 
@@ -331,8 +339,7 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 swa_full = kv_list[i][:tl]  # absolute positions [0, tl)
                 sample_block_start = i * swa_max_num_blocks
                 nb = (tl + swa_block_size - 1) // swa_block_size
-                swa_k_cache[sample_block_start:sample_block_start + nb].reshape(
-                    -1, head_dim)[:tl].copy_(swa_full)
+                swa_k_cache[sample_block_start : sample_block_start + nb].reshape(-1, head_dim)[:tl].copy_(swa_full)
 
             for i in range(batch):
                 n_compress = compressed_kv_lens[i]
@@ -340,11 +347,12 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                     continue
                 # compress content is kv_list[i][total_len:total_len+n_compress]
                 tl = total_lens[i]
-                comp_content = kv_list[i][tl:tl + n_compress]
+                comp_content = kv_list[i][tl : tl + n_compress]
                 sample_block_start = i * compress_max_num_blocks
                 nb = (n_compress + compress_block_size - 1) // compress_block_size
-                compress_k_cache[sample_block_start:sample_block_start + nb].reshape(
-                    -1, head_dim)[:n_compress].copy_(comp_content)
+                compress_k_cache[sample_block_start : sample_block_start + nb].reshape(-1, head_dim)[:n_compress].copy_(
+                    comp_content
+                )
 
             # The SWA cache is paged in every mode; the compress cache is paged for
             # sparse/flash and the gathered contiguous tensor for dense.
@@ -377,8 +385,7 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 comp_part = comp_part - tl
                 comp_part = torch.where(mask_neg, torch.full_like(comp_part, -1), comp_part)
                 if comp_part.shape[1] < op_topk_width:
-                    pad = torch.full((ql, op_topk_width - comp_part.shape[1]), -1,
-                                     dtype=torch.int32, device="npu")
+                    pad = torch.full((ql, op_topk_width - comp_part.shape[1]), -1, dtype=torch.int32, device="npu")
                     comp_part = torch.cat([comp_part, pad], dim=1)
                 op_topk_list.append(comp_part)
             if op_topk_width > 0:
@@ -400,14 +407,32 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
         if not skip_nonflash_topk:
             try:
                 torch.npu.synchronize()
-                cxa(rt, q_standard, swa_k_cache, compress_k_cache_paged, swa_block_tables,
-                    compress_block_tables, swa_block_size, compress_block_size, attn_sink,
-                    output_xlite, batch, query_start_loc, query_lens, cached_lens, n_heads,
-                    head_dim, scale, window_size, compress_ratio, index_topk,
-                    topk_indices_op)
+                cxa(
+                    rt,
+                    q_standard,
+                    swa_k_cache,
+                    compress_k_cache_paged,
+                    swa_block_tables,
+                    compress_block_tables,
+                    swa_block_size,
+                    compress_block_size,
+                    attn_sink,
+                    output_xlite,
+                    batch,
+                    query_start_loc,
+                    query_lens,
+                    cached_lens,
+                    n_heads,
+                    head_dim,
+                    scale,
+                    window_size,
+                    compress_ratio,
+                    index_topk,
+                    topk_indices_op,
+                )
                 torch.npu.synchronize()
             except Exception as e:
-                logging.error(f'{case_desc} KERNEL FAILED: {e}')
+                logging.error(f"{case_desc} KERNEL FAILED: {e}")
                 continue
 
             logging.info("%s executed!", case_desc)
@@ -421,9 +446,9 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
                 # Same bf16-attention tolerance rationale as attention_native_tail.
                 torch.testing.assert_close(output_xlite, output_standard, atol=2e-2, rtol=5e-02)
             except AssertionError as e:
-                logging.error(f'cxa mismatch: {e}')
-                logging.error(f'sparse_attn ref: {output_standard}')
-                logging.error(f'xlite cxa:        {output_xlite}')
+                logging.error(f"cxa mismatch: {e}")
+                logging.error(f"sparse_attn ref: {output_standard}")
+                logging.error(f"xlite cxa:        {output_xlite}")
 
         # ---- flash (online-softmax, KV-len tiled) sparse path ----
         if enable_flash:
@@ -431,23 +456,42 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
             flash_desc = case_desc + f" [flash, tile_size={tile_size}]"
             try:
                 torch.npu.synchronize()
-                cxa(rt, q_standard, swa_k_cache, compress_k_cache_paged, swa_block_tables,
-                    compress_block_tables, swa_block_size, compress_block_size, attn_sink,
-                    output_xlite_flash, batch, query_start_loc, query_lens, cached_lens, n_heads,
-                    head_dim, scale, window_size, compress_ratio, index_topk,
-                    topk_indices_op, enable_flash_attention=True, tile_size_of_cached_kv=tile_size)
+                cxa(
+                    rt,
+                    q_standard,
+                    swa_k_cache,
+                    compress_k_cache_paged,
+                    swa_block_tables,
+                    compress_block_tables,
+                    swa_block_size,
+                    compress_block_size,
+                    attn_sink,
+                    output_xlite_flash,
+                    batch,
+                    query_start_loc,
+                    query_lens,
+                    cached_lens,
+                    n_heads,
+                    head_dim,
+                    scale,
+                    window_size,
+                    compress_ratio,
+                    index_topk,
+                    topk_indices_op,
+                    enable_flash_attention=True,
+                    tile_size_of_cached_kv=tile_size,
+                )
                 torch.npu.synchronize()
             except Exception as e:
-                logging.error(f'{flash_desc} KERNEL FAILED: {e}')
+                logging.error(f"{flash_desc} KERNEL FAILED: {e}")
             else:
                 logging.info("%s executed!", flash_desc)
                 try:
-                    torch.testing.assert_close(output_xlite_flash, output_standard, atol=2e-2,
-                                               rtol=5e-02)
+                    torch.testing.assert_close(output_xlite_flash, output_standard, atol=2e-2, rtol=5e-02)
                 except AssertionError as e:
-                    logging.error(f'cxa flash mismatch: {e}')
-                    logging.error(f'sparse_attn ref: {output_standard}')
-                    logging.error(f'xlite cxa flash:   {output_xlite_flash}')
+                    logging.error(f"cxa flash mismatch: {e}")
+                    logging.error(f"sparse_attn ref: {output_standard}")
+                    logging.error(f"xlite cxa flash:   {output_xlite_flash}")
 
         # ----- xlite dense mode: gather the per-query-token compress selection into a
         # contiguous dense cache (query token q holds index_topk compressed tokens at
@@ -477,10 +521,11 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
         q_offset = 0
         for i in range(batch):
             ql = query_len_list[i]
-            q_chunk = q_standard[q_offset:q_offset + ql].unsqueeze(0)
+            q_chunk = q_standard[q_offset : q_offset + ql].unsqueeze(0)
             q_offset += ql
-            o = sparse_attn(q_chunk.float(), kv_list[i].unsqueeze(0).float(),
-                            attn_sink, topk_indices_list[i].unsqueeze(0), scale).to(test_dtype)
+            o = sparse_attn(
+                q_chunk.float(), kv_list[i].unsqueeze(0).float(), attn_sink, topk_indices_list[i].unsqueeze(0), scale
+            ).to(test_dtype)
             dense_ref_outputs.append(o.squeeze(0))
         output_dense_standard = torch.cat(dense_ref_outputs, dim=0)
 
@@ -488,23 +533,40 @@ for name, n_heads, head_dim, window_size, compress_ratio, index_topk, test_dtype
 
         try:
             torch.npu.synchronize()
-            cxa(rt, q_standard, swa_k_cache, compress_k_cache, swa_block_tables,
-                compress_block_tables, swa_block_size, compress_block_size, attn_sink,
-                output_xlite_dense, batch, query_start_loc, query_lens, cached_lens, n_heads,
-                head_dim, scale, window_size, compress_ratio, index_topk,
-                topk_indices_op, dense=True)
+            cxa(
+                rt,
+                q_standard,
+                swa_k_cache,
+                compress_k_cache,
+                swa_block_tables,
+                compress_block_tables,
+                swa_block_size,
+                compress_block_size,
+                attn_sink,
+                output_xlite_dense,
+                batch,
+                query_start_loc,
+                query_lens,
+                cached_lens,
+                n_heads,
+                head_dim,
+                scale,
+                window_size,
+                compress_ratio,
+                index_topk,
+                topk_indices_op,
+                dense=True,
+            )
             torch.npu.synchronize()
         except Exception as e:
-            logging.error(f'{case_desc} DENSE KERNEL FAILED: {e}')
+            logging.error(f"{case_desc} DENSE KERNEL FAILED: {e}")
             continue
 
         logging.info("%s dense executed!", case_desc)
 
         try:
-            torch.testing.assert_close(output_xlite_dense, output_dense_standard, atol=2e-2,
-                                       rtol=5e-02)
+            torch.testing.assert_close(output_xlite_dense, output_dense_standard, atol=2e-2, rtol=5e-02)
         except AssertionError as e:
-            logging.error(f'cxa dense mismatch: {e}')
-            logging.error(f'sparse_attn dense ref: {output_dense_standard}')
-            logging.error(f'xlite cxa dense:        {output_xlite_dense}')
-
+            logging.error(f"cxa dense mismatch: {e}")
+            logging.error(f"sparse_attn dense ref: {output_dense_standard}")
+            logging.error(f"xlite cxa dense:        {output_xlite_dense}")

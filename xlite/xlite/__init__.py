@@ -25,7 +25,7 @@ def _resolve_version() -> str:
     except ImportError:
         pass
     try:
-        from importlib.metadata import version, PackageNotFoundError
+        from importlib.metadata import PackageNotFoundError, version
 
         return version("xlite")
     except (ImportError, PackageNotFoundError):

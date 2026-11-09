@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 xlite 每日自动化精度测试机器人
 
@@ -91,7 +90,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 # 导入共享工具模块
 from daily_bot_utils import (
@@ -244,7 +243,7 @@ def _parse_accuracy(value: object) -> Optional[float]:
         return float("nan")
 
 
-def _parse_spec_decode(value: object) -> Tuple[str, int]:
+def _parse_spec_decode(value: object) -> tuple[str, int]:
     """Parse a spec-decode cell into ``(method, num_speculative_tokens)``.
 
     Accepts the `<method>:<num>` format (e.g. ``mtp:3``) written by current
@@ -263,7 +262,7 @@ def _parse_spec_decode(value: object) -> Tuple[str, int]:
     return "mtp", int(text) if text.isdigit() else 0
 
 
-def parse_aisbench_report(report_path: Path) -> Dict:
+def parse_aisbench_report(report_path: Path) -> dict:
     """
     解析精度基准测试报告文件 (CSV格式)
 
@@ -294,7 +293,7 @@ def parse_aisbench_report(report_path: Path) -> Dict:
         return metrics
 
     try:
-        with open(report_path, "r", encoding="utf-8") as f:
+        with open(report_path, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 xlite = row.get("xlite", "").lower() in ["true", "y", "yes", "1"]
@@ -337,7 +336,7 @@ def parse_aisbench_report(report_path: Path) -> Dict:
     return metrics
 
 
-def parse_aisbench_markdown_report(report_path: Path) -> Dict:
+def parse_aisbench_markdown_report(report_path: Path) -> dict:
     """
     解析精度基准测试报告文件 (Markdown格式)
 
@@ -388,7 +387,7 @@ def parse_aisbench_markdown_report(report_path: Path) -> Dict:
 
 
 # ====================== 单次运行内精度对比函数 ======================
-def _result_group_key(result: Dict) -> str:
+def _result_group_key(result: dict) -> str:
     """Group results by model+deployment, plus the dataset when present.
 
     Without the dataset in the key, results for the same model+backend measured on
@@ -398,7 +397,7 @@ def _result_group_key(result: Dict) -> str:
     return f"{result['model_name']}+{dataset}" if dataset else result["model_name"]
 
 
-def analyze_accuracy_within_run(metrics: Dict) -> Dict:
+def analyze_accuracy_within_run(metrics: dict) -> dict:
     """
     在单次运行内对比 xlite 与 aclgraph 的精度，并按数据集阈值检查
 
@@ -435,8 +434,8 @@ def analyze_accuracy_within_run(metrics: Dict) -> Dict:
     analysis = {"timestamp": metrics.get("timestamp", ""), "warnings": []}
 
     # 按模型名称分组结果 (同模型多数据集时，分组键包含数据集名)，并记录各分组的数据集名
-    model_results: Dict[str, Dict[str, Optional[float]]] = {}  # {model_name: {backend: accuracy}}
-    group_dataset: Dict[str, str] = {}
+    model_results: dict[str, dict[str, Optional[float]]] = {}  # {model_name: {backend: accuracy}}
+    group_dataset: dict[str, str] = {}
     for result in metrics.get("results", []):
         model_name = _result_group_key(result)
         backend = result["backend"]
@@ -506,7 +505,7 @@ def analyze_accuracy_within_run(metrics: Dict) -> Dict:
 
 
 # ====================== 报告生成函数 ======================
-def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) -> Tuple[str, Optional[str]]:
+def generate_accuracy_report(metrics: dict, analysis: dict, report_dir: Path) -> tuple[str, Optional[str]]:
     """
     生成精度测试报告 (HTML格式，用于通知消息)
 
@@ -540,7 +539,7 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
 
     # 按模型名称分组结果 (同模型多数据集时，分组键包含数据集名)
     # 与 analyze_accuracy_within_run 一致: None = not run (表格记 n/a)、NaN = 已运行但无效 (红色 NaN)
-    model_results: Dict[str, Dict[str, Optional[float]]] = {}
+    model_results: dict[str, dict[str, Optional[float]]] = {}
     for result in metrics.get("results", []):
         model_name = _result_group_key(result)
         backend = result["backend"]
@@ -668,7 +667,7 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
         for model_name in sorted(model_results.keys()):
             backends = model_results[model_name]
 
-            def format_accuracy(value: Optional[float], backend_name: str) -> str:
+            def format_accuracy(value: Optional[float], backend_name: str, model_name: str) -> str:
                 if value is None:
                     return "n/a"  # not run
                 if math.isnan(value):
@@ -683,9 +682,9 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
                     return f'🔥<font color="red"><b>{value:.2f}</b></font>'
                 return f"{value:.2f}"
 
-            xlite_full_str = format_accuracy(backends.get("xlite full"), "xlite full")
-            xlite_decode_str = format_accuracy(backends.get("xlite decode-only"), "xlite decode-only")
-            aclgraph_str = format_accuracy(backends.get("aclgraph"), "aclgraph")
+            xlite_full_str = format_accuracy(backends.get("xlite full"), "xlite full", model_name)
+            xlite_decode_str = format_accuracy(backends.get("xlite decode-only"), "xlite decode-only", model_name)
+            aclgraph_str = format_accuracy(backends.get("aclgraph"), "aclgraph", model_name)
 
             main_lines.append(f" | {model_name} | {xlite_full_str} | {xlite_decode_str} | {aclgraph_str} |")
         main_lines.append("")
@@ -695,7 +694,7 @@ def generate_accuracy_report(metrics: Dict, analysis: Dict, report_dir: Path) ->
     return report_main, report_warnings
 
 
-def generate_summary_report(analysis: Dict, report_dir: Path) -> str:
+def generate_summary_report(analysis: dict, report_dir: Path) -> str:
     """
     生成精度测试总结报告 (纯文本格式，用于保存到文件)
 

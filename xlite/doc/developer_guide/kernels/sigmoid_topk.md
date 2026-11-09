@@ -4,7 +4,7 @@
 
 带分组限制(group-limited)的 MoE 路由门控算子(DeepSeek-V2/V3 风格):对 router 得分做 sigmoid,加上 bias 后先按专家分组选出 top `nTopkGroup` 个组,再在选中组的专家里选 topK,输出"稀疏权重行 + 路由位图"。数学语义(见测试 `tests/kernels/sigmoid_topk.py` 参考实现段,关键字 `scores_sigmoid`/`group_scores`):
 
-```
+```text
 s = sigmoid(scores)                    # 未加 bias 的"原始"得分
 b = s + bias                           # biased 得分,仅用于选路
 groupScores[g] = sum(top2(b[g*nEpg : (g+1)*nEpg]))   # 组得分 = 组内 top2 之和
@@ -21,8 +21,7 @@ topkW = topkW / sum(topkW) * scale     # normTopKProb 时归一,再乘 scale
 Python 侧调用(`tests/kernels/sigmoid_topk.py` 中 `sigmoid_topk(rt, ...)` 调用):
 
 ```python
-sigmoid_topk(rt, scores, indices, bias, scale, weights_out, indices_out,
-             n_group, topk_group, topK, True)
+sigmoid_topk(rt, scores, indices, bias, scale, weights_out, indices_out, n_group, topk_group, topK, True)
 ```
 
 host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpSigmoidTopK`。kernel 签名(`csrc/kernels/sigmoid_topk.h` 的 `SIGMOID_TOPK_FUNC_DEFINE` 宏 / `sigmoid_topk_<dtype>` 入口):

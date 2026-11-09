@@ -7,7 +7,7 @@ The typing and docstrings are designed for Python 3.9 to 3.12.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional, Sequence, Union, overload
+from typing import List, Optional, Sequence, overload
 
 import torch
 
@@ -585,7 +585,8 @@ class Model:
         mla_q_norm_bias (List[torch.Tensor]): MLA Q norm bias per layer, each
             ``[q_lora_rank]``, model dtype. Optional.
         mla_wuv (List[torch.Tensor]): MLA W_UV weights per layer, shape (n_local_heads, kv_lora_rank, v_head_dim).
-        mla_wuk_t (List[torch.Tensor]): MLA W_UK^T weights per layer, shape (n_local_heads, qk_nope_head_dim, kv_lora_rank).
+        mla_wuk_t (List[torch.Tensor]): MLA W_UK^T weights per layer, shape
+            (n_local_heads, qk_nope_head_dim, kv_lora_rank).
         mla_kv_norm (List[torch.Tensor]): MLA KV norm weights per layer, each
             ``[kv_lora_rank]`` (MLA/DSA) or ``[head_dim]`` (CxA), model dtype.
         mla_kv_norm_bias (List[torch.Tensor]): MLA KV norm bias per layer, same shape as
@@ -2784,7 +2785,6 @@ def mla_cache_c8(
     Inputs are already normalized/rotated. Active destination slots must be distinct.
     """
 
-
 def mla_prepare(
     rt: Runtime,
     attn_qkvc: torch.Tensor,
@@ -3089,7 +3089,8 @@ def compressor(
     state_block_size: int,
     do_rotate: bool = False,
 ) -> None:
-    """DeepSeek-V4 KV Compressor fused op (multi-batch): overlap + softmax-gated weighted sum + RMSNorm + rope + cache write.
+    """DeepSeek-V4 KV Compressor fused op (multi-batch): overlap + softmax-gated
+    weighted sum + RMSNorm + rope + cache write.
 
     Consumes the post-GEMM fp32 outputs ``kv`` (``wkv(x)``) and ``score``
     (``wgate(x)``) and, in one launch, fuses the tail of ``Compressor.forward``

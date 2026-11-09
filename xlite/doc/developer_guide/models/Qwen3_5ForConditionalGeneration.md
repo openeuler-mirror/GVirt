@@ -135,6 +135,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - `x` 为全程残差基准（不更新），`h` 为工作张量 `[T,H]`，循环中原地改写。
 - 层型交错：`(i+1) % fullAttentionInterval == 0` 的层走 `ForwardAttnMHA`，其余走 `ForwardAttnLinear`。`_layerTypes` 在 XModel 构造函数预计算；35B-A3B 为 10 full + 30 linear（共 40 层），122B-A10B 为 12 full + 36 linear（共 48 层）。
 - `ForwardFFN`：`layer < nDenseLayers` → `ForwardMLP`；否则 `ForwardMoE`。dense 变体全层 MLP，MoE 变体全层 MoE。
@@ -236,6 +237,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - **四路独立 ND 投影**：`in_proj_qkv`（→ `mixQkv`，含 q/k/v 三段）、`in_proj_z`（→门控）、`in_proj_b`（→β 输入）、`in_proj_a`（→g 输入）；per-rank 权重行数分别为 `convD` / `nVH·vHD` / `nVH` / `nVH`。
 - **β/g**：`XliteOpBetaDecay` 一次产出两者（log-space 衰减，kernel 内取 `exp(g)`；g 走 FP32 native gate 变体，见 [beta_decay.md](../kernels/beta_decay.md)）。
 - **conv1d+SiLU 融合**（`convK=4`，depthwise，`groups=convD`）：对 `mixQkv` 做因果卷积 + SiLU 并原位更新 `convState` 页；prefill 先把卷积结果舍入 activation dtype 再 SiLU，decode 保留融合 FP32 SiLU 后舍入（见 [conv1d_and_silu_paged.md](../kernels/conv1d_and_silu_paged.md)）。
@@ -243,7 +245,7 @@ flowchart TB
 - **L2Norm + 分组头**：q/k 各按 `kHD=128` 逐头 L2 归一化；`nVH > nKH` 的分组头由递推 kernel 直接寻址（value head h 读 key head `h // (nVH/nKH)`），无需 repeat_interleave 扩展 q/k。35B-A3B 分组 2（nKH=2, nVH=4），122B-A10B 分组 4（nKH=1, nVH=4）。
 - **递推（无 chunk）**：逐 token 串行递推（非 FLA chunk WY 矩阵乘算法），并行按（序列 × 头 × V tile）。每个 token（[recurrent_gated_delta_rule_paged.md](../kernels/recurrent_gated_delta_rule_paged.md)，S ∈ R^{vHD×kHD}）：
 
-```
+```text
 S ← S · exp(g_t)              状态衰减
 δ_t = β_t · (v_t − S·k_t)     预测误差
 S ← S + δ_t · k_tᵀ            状态更新
@@ -304,6 +306,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - **QKV 投影无 bias**（`qkv_bias=False`），权重 BF16 走 NO_QUANT。HF checkpoint 的 `q_proj` 每头交错输出 `[q|gate]`，加载时重排为 `[Q|K|V|Gate]` 四段（[qwen3_5.py](../../../tests/models/qwen3_5.py) 的 `_mha_qkv_weight`），故 gate 段与 q 同宽 `qD`。
 - **QK-norm**（`qk_norm=True`，`qkNormFull=False`）：q、k 各自按 `headDim=256` 做 RMSNorm；Gemma 式权重已在加载时转为标准 `x*w`。
 - **Partial RoPE**：`rope_head_dim=64`，仅前 64 维旋转，NeoX 风格非交错；`XliteOpRopeCache` 同时完成 q/k 的 RoPE 与 paged KV cache 写入。
@@ -432,6 +435,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - **Gate**（BF16 权重）：`XliteOpSoftmaxTopK` 一次完成 softmax 打分、top-`nA` 与 `normTopK` 归一化，输出归一化系数 `weights [M,E]` 与 BIT1 掩码 `routing [M,E]`。**无 gate bias**（softmax 路径不消费 `e_score_correction_bias`，与 GLM5.2 的 sigmoid 路径不同）。
 - **Dispatch（非 AllToAll）**：`enableMoEAllToAll=false`（run.sh / 默认）走 `XliteOpPermutation`，把 token 按 routing 重排为 expert 分组的 `expertsSorted [P,H]`（`mAllDp` 超过阈值 1024 时按 `activeTokensRatioPerEp` 压缩预分配行数）。EP>1 时仅排本 rank 物理专家段 `[start, end)`（`start = rankId/moeTPSize · E_loc`；`moeTPSize=1` 时即 `rankId·E_loc`，每 rank `E_loc=32/16` 个专家）。DP>1 时 dispatch 前另有 AllGather 打包分发（`XliteOpConcat` → `AllGather` → `XliteOpSplit`，图中省略；run.sh DP=1）。**w8a8 quant-hoist**（`moeReDtype==INT8` 且 `hiddenSize%32==0`，非 AllToAll / graph 通信，默认启用）：`XliteOpQuantDyn` 前置到 permutation 之前（per-token 量化 hiddenState），permutation 收集 INT8 行并把 per-token scale 搭带散射到对应专家槽，`expertsSorted` 为 INT8、另有 `expertsScale [P]` FP32（`expertsSorted` 缓冲减半、量化 M 行而非 P 行、DP>1 AllGather 载荷减半）；`XLITE_DISABLE_MOE_QUANT_HOIST` 可回退 legacy BF16 收集。
 - **Expert 计算**：按 `moeReDtype` 三分支——BF16（run.sh 测试，expert 权重加载时转置为 `[in,out]`，`experts_weight_transpose=True`）直接 `XliteOpGroupMatmul`（按 expert 分组的 batched matmul，语义见 [group_matmul.md](../kernels/group_matmul.md)）；INT8（生产 w8a8）up/gate 段 quant-hoist 生效时直接 `XliteOpGroupMatmulDeQuant`（`expertsScale` 参与解量化），未 hoist（AllToAll / graph 通信 / 显式禁用）才段内 `XliteOpQuantDyn`；INT4（W4A8）走 `ForwardMoEMSD`。up/gate 与 down 两段各自独立走该分支（down 段 `h2` 恒段内 `QuantDyn`）。

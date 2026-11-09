@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -12,9 +11,9 @@ import tempfile
 
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, all_reduce, matmul
 from xlite._C import print as xlite_print
-
 
 torch.npu.set_device(0)
 
@@ -37,7 +36,7 @@ def printed_values(x):
             os.close(saved)
         tmp.seek(0)
         out = tmp.read()
-    body = out[out.index("XTensor(") + len("XTensor("):out.index(", shape=")]
+    body = out[out.index("XTensor(") + len("XTensor(") : out.index(", shape=")]
     return [float(t) for t in body.replace("[", " ").replace("]", " ").split(",") if t.strip()]
 
 
@@ -45,9 +44,7 @@ def check_print(x, expected, name, atol=0.0, rtol=0.0):
     got = printed_values(x)
     assert len(got) == x.numel(), f"{name}: printed {len(got)} values, expected {x.numel()}"
     expected_vals = torch.tensor(expected.cpu().tolist(), dtype=torch.float64)
-    torch.testing.assert_close(
-        torch.tensor(got, dtype=torch.float64), expected_vals, atol=atol, rtol=rtol
-    )
+    torch.testing.assert_close(torch.tensor(got, dtype=torch.float64), expected_vals, atol=atol, rtol=rtol)
     print(f"PASS: {name} ({tuple(x.shape)}, stride={tuple(x.stride())})")
 
 
@@ -126,9 +123,7 @@ check_rejected(x, "2D broadcast expand (stride 0)")
 
 # Strides mismatching the contiguous layout in dims >= 1 are rejected at wrap time.
 check_rejected(torch.randn(4, 8, dtype=torch.float32, device="npu:0").t(), "transposed 2D")
-check_rejected(
-    torch.randn(4, 16, dtype=torch.float32, device="npu:0")[:, ::2], "inner-dim sliced 2D"
-)
+check_rejected(torch.randn(4, 16, dtype=torch.float32, device="npu:0")[:, ::2], "inner-dim sliced 2D")
 
 # Zero-element tensors carry no data, so any stride is accepted at wrap time (torch's
 # canonical strides for size-0 dims, e.g. (5, 0) -> (1, 1), never match the row-major
@@ -149,9 +144,7 @@ rt = Runtime(0)
 # .contiguous()'d by the caller instead of being misread as packed rows.
 src = torch.arange(48, dtype=torch.float32, device="npu:0").reshape(6, 8)
 check_contiguous_guard(src[::2], "pitched all_reduce input")
-check_contiguous_guard(
-    torch.randn(4, 8, dtype=torch.float32, device="npu:0").t(), "transposed all_reduce input"
-)
+check_contiguous_guard(torch.randn(4, 8, dtype=torch.float32, device="npu:0").t(), "transposed all_reduce input")
 
 # The matmul binding rejects a pitched input at the bridge as well; it previously kept
 # the pitched stride at wrap time and only rejected the tensor later, inside the op, at

@@ -119,6 +119,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - `x` 为全程残差基准（不更新），`h` 为工作张量 `[T,H]`，循环中原地改写；层内残差回收与归一化由 `XliteOpAddAndRmsNorm` 单算子完成。
 - dense 变体全层走 §3.1、MoE 变体全层走 §3.2（`decoder_sparse_step=1`，无 MLP/MoE 混合层）。
 - lm_head：`head` 为 vocab-parallel 权重，per-rank 输出 `[B, V/tp]`，AllGather 沿 TP 拼回完整 logits；`B < M` 时先按 `indices` 采样出 B 行再投影（M 行含 DP pad / prefill 多 token）。
@@ -168,6 +169,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - QKV 投影无 bias（`qkv_bias=False`）；无输出门控故无 SplitCol（区别见概述段）。
 - QK-norm：`qk_norm=True`、`qkNormFull=False`，q/k 各按 `hD=128` 归一化并原地改写 qkv。
 - 全维 RoPE：`rH=hD=128`（无 partial），NeoX 非交错；`XliteOpRopeCache` 同时完成 q/k 旋转与 paged cache 写入（虚线）。
@@ -220,6 +222,7 @@ flowchart LR
 ```
 
 **关键点**：
+
 - run.sh 两变体 dense 权重均 BF16（NO_QUANT 直连 Matmul）；INT8 w8a8 权重（`deqScale` 有、`inputScale/Offset` 无 → DYNAMIC_QUANT）按右臂 per-token 量化。静态量化权重（`inputScale/Offset` 齐 → STATIC_QUANT）为 `XliteOpQuant` + `XliteOpMatmulDeQuant`（无 per-token scale），本系列未用。
 - `ForwardLinear` 量化分支同样覆盖 attention 的 QKV/o 投影（§2，本系列权重均 BF16）。
 - 以 Qwen3-32B（TP=8）为例：`IS=25600/8=3200`，`h13 [T,6400]`、`h2 [T,3200]`，64 层全走此路；SiLU 融合语义见 [silu_and_mul.md](../kernels/silu_and_mul.md)。
@@ -314,6 +317,7 @@ flowchart TB
 ```
 
 **关键点**：
+
 - Gate：`XliteOpSoftmaxTopK` 一次完成 softmax 打分、top-`nA` 选路与 normTopK 归一化，输出归一化系数 `weights` 与 BIT1 掩码 `routing`；softmax 路径无 `e_score_correction_bias`（不消费 gate bias）。
 - 无 shared expert（`nSharedExperts=0` 直接跳过；GLM5.2 等架构在此处还有 `routed + sigmoid(se_gate)·shared` 路径）；无 EPLB 冗余专家（`log2phy` 缺席，gate 后的 log→physical 重映射 `XliteOpRemapGateOutputs` 零开销跳过）。
 - Dispatch：`P ≈ M·nA`；`mAllDp` 超过阈值（1024）时按 `activeTokensRatioPerEp` 压缩预分配行数。EP>1 时仅排本 rank 物理专家段 `[start, end)`（`start = rankId/moeTPSize · E_loc`；`moeTPSize=1` 时即 `rankId·E_loc`，每 rank 16 个专家）。

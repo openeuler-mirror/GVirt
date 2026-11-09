@@ -1,5 +1,4 @@
 #!/usr/bin/env/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,8 +8,8 @@
 # ===============================================================================
 import torch
 import torch_npu  # noqa: F401
-from xlite._C import Runtime, split_col
 
+from xlite._C import Runtime, split_col
 
 if __name__ == "__main__":
     rt = Runtime(0, size=500)

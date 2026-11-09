@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,12 +8,13 @@
 # ===============================================================================
 import torch
 import torch_npu
-from xlite._C import Runtime, matmul_dequant, matmul, matmul_with_bias
+
+from xlite._C import Runtime, matmul, matmul_dequant, matmul_with_bias
 
 # allow weight_nz
 torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
-dev_id=2
+dev_id = 2
 debug = False
 
 rt = Runtime(dev_id, size=500)
@@ -40,6 +40,7 @@ test_cases = [
 
 DEVICE = f"npu:{dev_id}"
 
+
 def pack_int4_to_int8(x):
     if x.dtype != torch.int8:
         raise TypeError(f"dtype of x should be int8, but get: {x.dtype}")
@@ -53,6 +54,7 @@ def pack_int4_to_int8(x):
     result = (a * 16 + b_adjusted).clone().contiguous()
     return result
 
+
 def get_low_4bits_int8(activation_int8):
     """将 INT8 激活拆分为高 4bit 和低 4bit"""
     # 低 4bit: 先转 uint8 消除符号位干扰，再取低 4bit，值域 [0, 15]
@@ -62,12 +64,12 @@ def get_low_4bits_int8(activation_int8):
 
 
 def npu_quant_matmul_cpu(
-    x: torch.Tensor,                    # INT8 [M, K]
-    weight: torch.Tensor,               # INT8 [N, K] (注意 NPU 通常存储为 [N, K])
-    deq_scale: torch.Tensor,            # FP32, shape 可广播到 [M, N]
-    bias: torch.Tensor,                 # INT32 量化偏置 [N]
+    x: torch.Tensor,  # INT8 [M, K]
+    weight: torch.Tensor,  # INT8 [N, K] (注意 NPU 通常存储为 [N, K])
+    deq_scale: torch.Tensor,  # FP32, shape 可广播到 [M, N]
+    bias: torch.Tensor,  # INT32 量化偏置 [N]
     output_dtype: torch.dtype = torch.float16,
-    transpose: bool = False
+    transpose: bool = False,
 ) -> torch.Tensor:
     """
     模拟 torch_npu.npu_quant_matmul
@@ -100,16 +102,16 @@ def block_sum_16x16_torch(tensor):
     m_valid = m // 16 * 16
     n_valid = n // 16 * 16
     padded = tensor[:m_valid, :n_valid]
-    
+
     M = padded.shape[0] // 16
     N = padded.shape[1] // 16
     reshaped = padded.reshape(M, 16, N, 16)
     return reshaped.sum(dim=(1, 3))  # shape (M, N)
 
+
 for M, N, K in test_cases:
     for transpose in [True, False]:
         for weight_nz in [True, False]:
-
             x = torch.randint(low=-8, high=8, size=(M, K), dtype=torch.int8, device=DEVICE)
             x_i32 = x.to(torch.int32)
 
@@ -141,9 +143,9 @@ for M, N, K in test_cases:
 
             try:
                 torch.testing.assert_close(standard, z.to("cpu"), atol=1, rtol=1e-2)
-                print(f'[{M}, {K}] x [{K}, {N}](transpose = {transpose}) int4 weight_nz: {weight_nz} matmul passed!')
+                print(f"[{M}, {K}] x [{K}, {N}](transpose = {transpose}) int4 weight_nz: {weight_nz} matmul passed!")
             except AssertionError as e:
-                print(f'[{M}, {K}] x [{K}, {N}](transpose = {transpose}) int4 weight_nz: {weight_nz} matmul failed!')
-                print(f'{e}')
-                print(f'torch_npu: {standard}')
-                print(f'xlite: {z}')
+                print(f"[{M}, {K}] x [{K}, {N}](transpose = {transpose}) int4 weight_nz: {weight_nz} matmul failed!")
+                print(f"{e}")
+                print(f"torch_npu: {standard}")
+                print(f"xlite: {z}")

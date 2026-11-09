@@ -1,5 +1,4 @@
 #!/usr/bin/env/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,6 +8,7 @@
 # ===============================================================================
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, linear_att_proj
 
 
@@ -30,8 +30,7 @@ def run_test(rt, M, N, V, H, K, rtol=1e-3, atol=1e-5):
     b = torch.empty(M, H)
     a = torch.empty(M, H)
 
-    linear_att_proj(rt, x, W_qkv, W_z, W_b, W_a, mix_qkv, z, b, a,
-                    M, N, V, H, K)
+    linear_att_proj(rt, x, W_qkv, W_z, W_b, W_a, mix_qkv, z, b, a, M, N, V, H, K)
 
     torch.testing.assert_close(torch_qkv, mix_qkv, rtol=rtol, atol=atol)
     torch.testing.assert_close(torch_z, z, rtol=rtol, atol=atol)
@@ -59,8 +58,7 @@ def main():
                             try:
                                 run_test(rt, M, N, V, H, K)
                             except Exception as e:
-                                print(f"FAILED for dtype={dtype}, M={M}, ",
-                                      f"N={N}, V={V}, H={H}, K={K}: {e}")
+                                print(f"FAILED for dtype={dtype}, M={M}, ", f"N={N}, V={V}, H={H}, K={K}: {e}")
                                 raise e
                             print("-" * 60)
 

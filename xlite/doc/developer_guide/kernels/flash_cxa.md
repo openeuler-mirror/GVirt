@@ -13,10 +13,31 @@ SWA 段语义、压缩段分页寻址、attn_sink 并入分母、topk gather/sca
 Python 侧经 `cxa(..., enable_flash_attention=True, tile_size_of_cached_kv=8192)` 进入(`xlite/_C.pyi` 的 `def cxa(...)`,flash 参数说明见其 docstring(关键字 `enable_flash_attention` / `tile_size_of_cached_kv`)):
 
 ```python
-cxa(rt, q, swa_k_cache, compress_k_cache, swa_block_tables, compress_block_tables,
-    swa_block_size, compress_block_size, attn_sink, output, batch, query_start_loc,
-    query_lens, cached_lens, n_heads, head_dim, scale, window_size, compress_ratio,
-    index_topk, topk_indices, enable_flash_attention=True, tile_size_of_cached_kv=8192)
+cxa(
+    rt,
+    q,
+    swa_k_cache,
+    compress_k_cache,
+    swa_block_tables,
+    compress_block_tables,
+    swa_block_size,
+    compress_block_size,
+    attn_sink,
+    output,
+    batch,
+    query_start_loc,
+    query_lens,
+    cached_lens,
+    n_heads,
+    head_dim,
+    scale,
+    window_size,
+    compress_ratio,
+    index_topk,
+    topk_indices,
+    enable_flash_attention=True,
+    tile_size_of_cached_kv=8192,
+)
 ```
 
 host 封装 `XliteOpFlashCXA`(`csrc/op.cpp` 的 `XliteOpFlashCXA`)→ kernel `flash_cxa_bfloat16_t`(`csrc/kernels/flash_cxa.h` 的 `FLASH_CXA_FUNC_DEFINE`(关键字 `flash_cxa_##dtype`))。kernel 签名(`csrc/kernels/flash_cxa.h` 的 `FlashCXA::Init`):

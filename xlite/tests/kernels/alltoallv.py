@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -14,9 +13,11 @@
 # ===============================================================================
 
 import os
+
 import torch
-import torch_npu  # noqa: F401
 import torch.distributed as dist
+import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, alltoallv
 
 world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -46,13 +47,13 @@ else:  # TP (default): all ranks in one TP group
     moe_ep_size = 1
     ref_group = None  # default group is the TP group
 
-rt = Runtime(local_rank, size=500, rank=rank, tp_size=tp_size, dp_size=dp_size, moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size)
+rt = Runtime(
+    local_rank, size=500, rank=rank, tp_size=tp_size, dp_size=dp_size, moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size
+)
 torch.npu.set_device(local_rank)
 
 send_counts = torch.tensor([rank + j + 1 for j in range(world_size)], dtype=torch.int64)
-recv_counts = torch.tensor(
-    [sum(j + i + 1 for j in range(world_size)) for i in range(world_size)], dtype=torch.int64
-)
+recv_counts = torch.tensor([sum(j + i + 1 for j in range(world_size)) for i in range(world_size)], dtype=torch.int64)
 
 sdispls = torch.zeros_like(send_counts)
 rdispls = torch.zeros_like(recv_counts)
@@ -68,9 +69,7 @@ with torch.device("npu"):
     standard = torch.zeros(total_recv, dtype=torch.float)
     xlite = torch.zeros(total_recv, dtype=torch.float)
 
-dist.all_to_all_single(
-    standard, x, recv_counts.tolist(), send_counts.tolist(), group=ref_group
-)
+dist.all_to_all_single(standard, x, recv_counts.tolist(), send_counts.tolist(), group=ref_group)
 torch.npu.synchronize()
 
 alltoallv(rt, xlite, x, send_counts, recv_counts, sdispls, rdispls, comm_type=comm_type)
@@ -84,10 +83,10 @@ print(
 )
 
 if rank == 1:
-    print(f'alltoallv ({domain}) executed!')
+    print(f"alltoallv ({domain}) executed!")
     try:
         torch.testing.assert_close(standard, xlite, atol=1e-5, rtol=1e-3)
     except AssertionError as e:
-        print(f'FAIL: {e}')
-        print(f'torch_npu: {standard.shape}, {standard}')
-        print(f'xlite: {xlite.shape}, {xlite}')
+        print(f"FAIL: {e}")
+        print(f"torch_npu: {standard.shape}, {standard}")
+        print(f"xlite: {xlite.shape}, {xlite}")

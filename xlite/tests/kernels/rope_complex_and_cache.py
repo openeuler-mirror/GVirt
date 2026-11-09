@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -22,10 +21,12 @@ whole head after rope and before the cache write (scale derived internally).
 rotate only fires on the fullHeadLoad path (CXA: remain > 0); the MLA-style
 rope-only layout (remain == 0) skips it.
 """
-from __future__ import absolute_import
+
 import logging
+
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, rope_complex_and_cache
 
 logging.getLogger().setLevel(logging.INFO)
@@ -131,7 +132,7 @@ for test_dtype, rope_dim, head_dim in CXA_CASES + MLA_CASES:
             # rotate (x * 1/sqrt(vdim)) after rope, before cache write. Skipped when
             # remain == 0 (MLA-style) to mirror the kernel's fullHeadLoad guard.
             full_head_load = (head_dim - rope_dim) > 0
-            rotate_scale = vdim ** -0.5
+            rotate_scale = vdim**-0.5
             if do_rotate and full_head_load:
                 ref_head = ref_head * rotate_scale
 
@@ -148,24 +149,35 @@ for test_dtype, rope_dim, head_dim in CXA_CASES + MLA_CASES:
 
             # ----- xlite -----
             torch.npu.synchronize()
-            rope_complex_and_cache(rt, n_local_heads, head_dim, rope_dim, offset, vdim, kv,
-                                   freqs_cis, position, block_size, v_cache, slot_mapping,
-                                   out_interleaved=out_interleaved, do_rotate=do_rotate)
+            rope_complex_and_cache(
+                rt,
+                n_local_heads,
+                head_dim,
+                rope_dim,
+                offset,
+                vdim,
+                kv,
+                freqs_cis,
+                position,
+                block_size,
+                v_cache,
+                slot_mapping,
+                out_interleaved=out_interleaved,
+                do_rotate=do_rotate,
+            )
             torch.npu.synchronize()
 
             lay = "interleaved" if out_interleaved else "deinterleaved"
             tag = "CXA" if offset != 0 else "MLA-style"
             rot = "+rotate" if do_rotate else ""
-            name = (f"rope_complex_and_cache ({tag}, {lay}, rope={rope_dim}, "
-                    f"head={head_dim}, {test_dtype}{rot})")
+            name = f"rope_complex_and_cache ({tag}, {lay}, rope={rope_dim}, head={head_dim}, {test_dtype}{rot})"
 
             ok = True
             try:
                 # vCache matches reference (whole head per slot).
                 # Note: the op does NOT write back to the input kv tensor in-place
                 # (op.cpp passes output_ptr=nullptr), so only vCache is validated.
-                torch.testing.assert_close(v_cache.cpu(), ref_v_cache.cpu(), atol=1e-5,
-                                           rtol=1e-3)
+                torch.testing.assert_close(v_cache.cpu(), ref_v_cache.cpu(), atol=1e-5, rtol=1e-3)
             except AssertionError as e:
                 ok = False
                 logging.error(f"{name} vCache mismatch:\n{e}")

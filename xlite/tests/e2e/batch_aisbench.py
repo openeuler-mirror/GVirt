@@ -10,11 +10,11 @@ Additionally, the script is designed to run within a container with `git`, `vllm
 Using `vllm-ascend`'s official container image is recommended.
 """
 
-import os
+import contextlib
 import json
 import math
+import os
 import re
-import urllib.request
 import shlex
 import shutil
 import signal
@@ -23,6 +23,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -31,10 +32,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import pandas as pd
-
 from daily_bot_utils import check_subprocess_result, env_with_proxy, expand_values, pad_to_last, tile_each
 from dataset_spec import DATASETS, ensure_dataset, parse_dataset_entry, venv_activate_cmd
-
 
 CWD = Path(__file__).parent.resolve()  # current working directory
 AIS_BENCH_DIR = Path.home() / "benchmark"  # path to clone ais_bench repo and store datasets
@@ -232,7 +231,7 @@ def get_xlite_version() -> str:
     """Get the version of the installed xlite package."""
 
     xlite_version = "unknown"
-    try:
+    with contextlib.suppress(Exception):
         xlite_version = (
             subprocess.run(
                 [sys.executable, "-c", "import xlite; print(xlite.__version__)"],
@@ -242,8 +241,6 @@ def get_xlite_version() -> str:
             ).stdout.strip()
             or "unknown"
         )
-    except Exception:
-        pass
     return xlite_version
 
 
@@ -432,7 +429,7 @@ def cleanup_on_exit():
     for process in list(_PROCESS_GROUPS):
         try:
             stop_process_group(process, 0)
-        except:
+        except Exception:
             continue
 
 
@@ -639,7 +636,7 @@ def start_vllm_server(
     if print_to is not None:
         print_to.parent.mkdir(parents=True, exist_ok=True)
         log_path = print_to.parent / f"{print_to.name}.out.log"
-        stdprint_target = open(log_path, "w")
+        stdprint_target = open(log_path, "w")  # noqa: SIM115 (handle lives for the server process)
         print(f"Redirecting vLLM server logs to {log_path}...")
     process = subprocess.Popen(
         vllm_cmd,
@@ -904,7 +901,7 @@ def run_ais_bench(
                         f"ais_bench exited with code {process.returncode}: {process.stderr.read() if process.stderr else 'no error message'}"
                     )
                 break
-            except KeyboardInterrupt as e:
+            except KeyboardInterrupt:
                 print(f"\n{retry_str}KeyboardInterrupt received, cancelling current attempt of ais_bench...")
                 process.kill()
             except subprocess.TimeoutExpired as e:

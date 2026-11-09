@@ -6,7 +6,7 @@
 
 数学语义(NeoX 半旋转,`half = rotDim / 2`):
 
-```
+```text
 q_out[:half]   = (q[:half] * cos - q[half:] * sin) * scale
 q_out[half:]   = (q[half:] * cos + q[:half] * sin) * scale
 k_out[:half]   = k[:half] * cos - k[half:] * sin
@@ -22,7 +22,7 @@ MroPE 模式下 `cos/sin` 为文本、h、w 三路表按 lane 掩码逐元素相
 Python 接口:`rope_and_cache(rt, inout, k_cache, v_cache, position, cosin, slot_mapping, n_heads, n_kv_heads, head_dim, rot_dim, block_size, is_neox, mrope_mask_h=0, mrope_mask_w=0)`。`cossinInFp32` 不是 Python 参数,由 host 从 `cossin.dtype` 推导;K/V cache 的 dim-0 跨度 `key_cache_stride` / `value_cache_stride` 以及 2D position 的 dim-0 跨度 `positions_stride` 亦非 Python 参数,由 host 从 `k_cache.stride[0]` / `v_cache.stride[0]` / `position.stride[0]` 读取传入。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | inout | 输入/输出 | `[num_tokens, (num_heads + 2 * num_kv_heads) * head_dim]` | float16 / bfloat16 | 融合 QKV。host 侧按 TP 切分后的头数拆出 q/k/v 三个指针([csrc/op.cpp](../../../csrc/op.cpp) 的 `XliteOpRopeCache` 中 q/k/v 指针拆分段),q 在行首,k、v 依次随其后;Q/K 旋转后原地写回 |
 | k_cache | 输出 | `[block_num, block_size, num_kv_heads, head_dim]` | 同 inout | KV cache 的 K 平面,按 slot 展开寻址 |
 | v_cache | 输出 | 同 k_cache | 同 inout | KV cache 的 V 平面,V 不做旋转,直接搬运写入 |
@@ -47,8 +47,8 @@ inout、kCache、vCache 三者必须同为 `float16_t` 或 `bfloat16_t`;cossin �
 
 - **FP32 cossin(默认/推荐路径,`cossinInFp32=true`)**:fp16 与 bf16 均适用。cos/sin 直接以 fp32 搬入 UB,旋转在 fp32 域完成,Q 缩放后由 `convert_output<Dtype>` 做唯一一次 fp32→Dtype 舍入。精度最优,见 `calc_cossin_cast<Dtype, true>`([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin_cast`)。
 - **model-dtype cossin(已废弃,`cossinInFp32=false`)**:cossin 与 inout 同 dtype,保留至旧路径移除。
-  - `bfloat16_t`([rope_and_cache_bfloat16_t.cpp](../../../csrc/kernels/rope_and_cache_bfloat16_t.cpp)):转 fp32 计算,两个乘积 `x*cos`、`x*sin` 先 `vconv_f322bf16r` 舍入回 bf16 再升回 fp32,然后才做 `vsub`/`vadd`,以仿真 torch_npu 的逐算子舍入行为(`calc_cossin_cast<Dtype, false>`,[csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin_cast` 中 bf16 往返舍入段,注释"为了保证与torch_npu计算结果一致")。
-  - `float16_t`([rope_and_cache_float16_t.cpp](../../../csrc/kernels/rope_and_cache_float16_t.cpp)):fp16 域内直接计算(`calc_cossin`,[csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin`)。
+    - `bfloat16_t`([rope_and_cache_bfloat16_t.cpp](../../../csrc/kernels/rope_and_cache_bfloat16_t.cpp)):转 fp32 计算,两个乘积 `x*cos`、`x*sin` 先 `vconv_f322bf16r` 舍入回 bf16 再升回 fp32,然后才做 `vsub`/`vadd`,以仿真 torch_npu 的逐算子舍入行为(`calc_cossin_cast<Dtype, false>`,[csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin_cast` 中 bf16 往返舍入段,注释"为了保证与torch_npu计算结果一致")。
+    - `float16_t`([rope_and_cache_float16_t.cpp](../../../csrc/kernels/rope_and_cache_float16_t.cpp)):fp16 域内直接计算(`calc_cossin`,[csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `calc_cossin`)。
 
 ## 实现原理
 
@@ -66,12 +66,12 @@ inout、kCache、vCache 三者必须同为 `float16_t` 或 `bfloat16_t`;cossin �
 以 `PINGPONG_BUF_NUM = 2` 组乒乓缓冲组织,从地址 0 起依次排布([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `rope_and_cache` 中 UB 布局分配段):
 
 | 区域 | 份数 | 大小 | 用途 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | query | 2 | `num_heads * head_dim` | Q 暂存 |
 | key / value | 各 2 | `num_kv_heads * head_dim` | K/V 暂存 |
 | cos / sin(Dtype 暂存) | 各 2 | `rot_dim`(对齐 32B) | model-dtype 路径的 cos/sin 暂存;FP32 路径下空闲 |
 | cos/sin h、w(MroPE,Dtype) | 各 2 | 同上 | 三路位置表的 Dtype 暂存;FP32 路径下空闲 |
-| fp32 工作区 | query/key/cos/sin 各 2 + mrope 各 2 + 计算区 | fp32 字节数 | `COSSIN_FP32 || is_bf16` 时启用:FP32 路径下 cos/sin 行为 GM→UB 直接落点;bf16 旧路径下为 `vconv_bf162f32` 的目标 |
+| fp32 工作区 | query/key/cos/sin 各 2 + mrope 各 2 + 计算区 | fp32 字节数 | `COSSIN_FP32 \|\| is_bf16` 时启用:FP32 路径下 cos/sin 行为 GM→UB 直接落点;bf16 旧路径下为 `vconv_bf162f32` 的目标 |
 | fp16 计算区 | 2 | `q_bytesize` | 仅 legacy fp16 直接计算路径使用(`calc_cossin` 的 `x*sin` 中间结果) |
 | 尾部 params 区 | 1 | 剩余空间 | positions(pos/pos_h/pos_w)与 slot_mapping 分批暂存 |
 

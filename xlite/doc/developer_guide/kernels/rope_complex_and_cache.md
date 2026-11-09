@@ -2,11 +2,11 @@
 
 ## 功能概述
 
-复数风格的旋转位置编码(complex RoPE,DeepSeek MLA 系约定):把每个 head 中长度为 `ropeDim` 的 rope 区视为 `ropeDim/2` 个复数,与 `e^{i·pos·θ_k}` 相乘完成旋转,并把整个 head(含 rope 区前的 remain 部分)按 `slot_mapping` 写入 vCache。支持正向/逆向(`inverse`,共轭旋转)与输出交错/半分两种布局(`outInterleaved`),兼容 rope 区位于 head 头部(MLA pe cache)或尾部(CXA swa kv `[remain | rope]` 布局)两种排布。非 cache 的纯计算入口 `rope_complex` 复用同一 kernel(host 传 `output_ptr` 非 null、`vcache=nullptr`,见 [csrc/op.cpp](../../../csrc/op.cpp) 的 `XliteOpRopeComplex`)。另支持可选的整 head 缩放(`do_rotate` 开关):启用时按 host 推导的 `rotateScale`(cache 路径 `1/sqrt(vdim)`、非 cache 路径 `1/sqrt(stepDim)`)对 rope 区做 `vmuls`,用于 `rotate_activation` 类融合(详见参数表 `do_rotate`/`rotateScale`)。
+复数风格的旋转位置编码(complex RoPE,DeepSeek MLA 系约定):把每个 head 中长度为 `ropeDim` 的 rope 区视为 `ropeDim/2` 个复数,与 `e^{i·pos·θ_k}` 相乘完成旋转,并把整个 head(含 rope 区前的 remain 部分)按 `slot_mapping` 写入 vCache。支持正向/逆向(`inverse`,共轭旋转)与输出交错/半分两种布局(`outInterleaved`),兼容 rope 区位于 head 头部(MLA pe cache)或尾部(CXA swa kv `[remain \| rope]` 布局)两种排布。非 cache 的纯计算入口 `rope_complex` 复用同一 kernel(host 传 `output_ptr` 非 null、`vcache=nullptr`,见 [csrc/op.cpp](../../../csrc/op.cpp) 的 `XliteOpRopeComplex`)。另支持可选的整 head 缩放(`do_rotate` 开关):启用时按 host 推导的 `rotateScale`(cache 路径 `1/sqrt(vdim)`、非 cache 路径 `1/sqrt(stepDim)`)对 rope 区做 `vmuls`,用于 `rotate_activation` 类融合(详见参数表 `do_rotate`/`rotateScale`)。
 
 数学语义(输入按 `(r0, i0, r1, i1, ...)` 交错解释,`half = ropeDim/2`):
 
-```
+```text
 real[k] = x[2k]  * cos_k ∓ x[2k+1] * sin_k     (正向 -, 逆向 +)
 imag[k] = x[2k+1] * cos_k ± x[2k]   * sin_k     (正向 +, 逆向 -)
 ```
@@ -18,8 +18,8 @@ imag[k] = x[2k+1] * cos_k ± x[2k]   * sin_k     (正向 +, 逆向 -)
 Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim, rope_dim, offset, vdim, input_with_r, freqs, position, block_size, v_cache, slot_mapping, out_interleaved, do_rotate)`(完整签名见 `xlite/_C.pyi` 的 `rope_complex_and_cache`,末参 `out_interleaved: bool = False`、`do_rotate: bool = False`)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
-|---|---|---|---|---|
-| input_with_r | 输入 | `[num_tokens, n_local_heads, step_dim]` | float16 / bfloat16 | 每 token 的 head 数据;`offset` 指向其中 rope 区起始(CXA:`[remain | rope]`,rope 在尾部;MLA:offset=0,rope 在头部) |
+| --- | --- | --- | --- | --- |
+| input_with_r | 输入 | `[num_tokens, n_local_heads, step_dim]` | float16 / bfloat16 | 每 token 的 head 数据;`offset` 指向其中 rope 区起始(CXA:`[remain \| rope]`,rope 在尾部;MLA:offset=0,rope 在头部) |
 | freqs | 输入 | `[max_pos, rope_dim]` | float32 | 复数频率表,交错存 `cos(pos·θ_k), sin(pos·θ_k)`(`torch.polar` 实部/虚部 flatten,见测试 [tests/kernels/rope_complex.py](../../../tests/kernels/rope_complex.py) 的 `precompute_freqs_cis`) |
 | position | 输入 | `[num_tokens]` | int64 | 每 token 的位置 id,用于索引 freqs 行;二维(mrope)布局时仅消费第一行,host 打印一次性警告(`csrc/op.cpp` 的 `WarnPositions2D`) |
 | v_cache | 输出 | `[num_blocks, block_size, n_local_heads, vdim]` | 同 input | 每 slot 存一个完整 head(vdim);CXA 场景 vdim=step_dim 包含 remain,MLA pe cache 场景 vdim=rope_dim 只存 rope 区 |

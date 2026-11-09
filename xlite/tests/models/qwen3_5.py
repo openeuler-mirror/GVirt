@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,23 +6,26 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
+import os
+import queue
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Literal, Optional
 
-import os
 import torch
-import torch_npu  # noqa: F401
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
-import threading
-import queue
+import torch_npu  # noqa: F401
 
-from tests.models.weight_utils import (hf_model_weights_iterator,
-                                       convert_pyslice_to_tensor,
-                                       load_tensor_parallel_weights,
-                                       matrix_nd2nz, logger)
+from tests.models.weight_utils import (
+    convert_pyslice_to_tensor,
+    hf_model_weights_iterator,
+    load_tensor_parallel_weights,
+    logger,
+    matrix_nd2nz,
+)
 
 debug = False
 world_size = 1
@@ -32,10 +34,14 @@ rank = 0
 forward_backend = os.getenv("FORWARD_BACKEND", "torch_npu")
 if forward_backend == "xlite":
     block_size = 128
-    from xlite._C import (
-        Runtime, ModelConfig, AttnMetaV2, AttnHybridGdn, Model,
-    )
     from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
+    from xlite._C import (
+        AttnHybridGdn,
+        AttnMetaV2,
+        Model,
+        ModelConfig,
+        Runtime,
+    )
 
 
 def _mha_qkv_weight(attn, head_dim: int, n_heads: int):
@@ -122,12 +128,15 @@ class ParallelEmbedding(nn.Module):
         vocab_size (int): Vocabulary size.
         dim (int): Embedding dimension.
     """
+
     def __init__(self, vocab_size: int, dim: int):
         super().__init__()
         self.vocab_size = vocab_size
         self.dim = dim
-        assert vocab_size % world_size == 0, f"Vocabulary size must be divisible by world size (world_size={world_size})"
-        self.part_vocab_size = (vocab_size // world_size)
+        assert vocab_size % world_size == 0, (
+            f"Vocabulary size must be divisible by world size (world_size={world_size})"
+        )
+        self.part_vocab_size = vocab_size // world_size
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
         self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
@@ -163,11 +172,13 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
 class Linear(nn.Module):
     dtype = torch.bfloat16
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
+        self.weight = nn.Parameter(
+            torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False
+        )
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
         else:
@@ -178,8 +189,10 @@ class Linear(nn.Module):
 
 
 class ColumnParallelLinear(Linear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
-        assert out_features % world_size == 0, f"Output features must be divisible by world size (world_size={world_size})"
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
+        assert out_features % world_size == 0, (
+            f"Output features must be divisible by world size (world_size={world_size})"
+        )
         self.part_out_features = out_features // world_size
         super().__init__(in_features, self.part_out_features, bias, dtype)
 
@@ -189,8 +202,10 @@ class ColumnParallelLinear(Linear):
 
 
 class RowParallelLinear(Linear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
-        assert in_features % world_size == 0, f"Input features must be divisible by world size (world_size={world_size})"
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
+        assert in_features % world_size == 0, (
+            f"Input features must be divisible by world size (world_size={world_size})"
+        )
         self.part_in_features = in_features // world_size
         super().__init__(self.part_in_features, out_features, bias, dtype)
 
@@ -222,7 +237,7 @@ def rotate_half(x):
 
 def apply_rotary_emb(x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, rotary_dim: int) -> torch.Tensor:
     seqlen = x.size(2)
-    cos, sin = freqs_cis[start_pos:start_pos + seqlen, :].chunk(2, dim=-1)
+    cos, sin = freqs_cis[start_pos : start_pos + seqlen, :].chunk(2, dim=-1)
     x_rot = x[..., :rotary_dim]
     x_pass = x[..., rotary_dim:]
     cos = cos.unsqueeze(0).unsqueeze(0)
@@ -246,15 +261,27 @@ class MHA(nn.Module):
         # q_proj outputs both query and gate (2x head_dim)
         self.q_proj = ColumnParallelLinear(args.dim, args.n_heads * args.head_dim * 2, bias=args.qkv_bias)
         # k_proj/v_proj use ColumnParallelLinear with replication
-        self.k_proj = ColumnParallelLinear(args.dim, self.n_local_kv_heads * world_size * args.head_dim, bias=args.qkv_bias)
-        self.v_proj = ColumnParallelLinear(args.dim, self.n_local_kv_heads * world_size * args.head_dim, bias=args.qkv_bias)
+        self.k_proj = ColumnParallelLinear(
+            args.dim, self.n_local_kv_heads * world_size * args.head_dim, bias=args.qkv_bias
+        )
+        self.v_proj = ColumnParallelLinear(
+            args.dim, self.n_local_kv_heads * world_size * args.head_dim, bias=args.qkv_bias
+        )
         self.o_proj = RowParallelLinear(args.n_heads * args.head_dim, args.dim, bias=False)
         if args.qk_norm:
             self.q_norm = RMSNorm(args.head_dim, args.norm_eps)
             self.k_norm = RMSNorm(args.head_dim, args.norm_eps)
         if forward_backend != "xlite":
-            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
-            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim), persistent=False)
+            self.register_buffer(
+                "k_cache",
+                torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim),
+                persistent=False,
+            )
+            self.register_buffer(
+                "v_cache",
+                torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_kv_heads, self.head_dim),
+                persistent=False,
+            )
 
     def forward(self, x, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         bsz, seqlen, _ = x.shape
@@ -282,31 +309,25 @@ class MHA(nn.Module):
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
 
-        q = q * self.head_dim ** -0.5
+        q = q * self.head_dim**-0.5
 
-        self.k_cache[:bsz, start_pos:start_pos + seqlen] = k
-        self.v_cache[:bsz, start_pos:start_pos + seqlen] = v
+        self.k_cache[:bsz, start_pos : start_pos + seqlen] = k
+        self.v_cache[:bsz, start_pos : start_pos + seqlen] = v
 
-        keys = self.k_cache[:bsz, :start_pos + seqlen]
-        values = self.v_cache[:bsz, :start_pos + seqlen]
+        keys = self.k_cache[:bsz, : start_pos + seqlen]
+        values = self.v_cache[:bsz, : start_pos + seqlen]
 
         keys = keys.repeat_interleave(self.n_local_heads // self.n_local_kv_heads, dim=2)
         values = values.repeat_interleave(self.n_local_heads // self.n_local_kv_heads, dim=2)
 
-        scores = torch.matmul(
-            q.transpose(1, 2),
-            keys.permute(0, 2, 3, 1)
-        )
+        scores = torch.matmul(q.transpose(1, 2), keys.permute(0, 2, 3, 1))
 
         if mask is not None:
             scores = scores.float() + mask.float()
 
         scores = torch.softmax(scores, dim=-1, dtype=torch.float).to(x.dtype)
 
-        output = torch.matmul(
-            scores,
-            values.transpose(1, 2)
-        ).transpose(1, 2).contiguous()
+        output = torch.matmul(scores, values.transpose(1, 2)).transpose(1, 2).contiguous()
 
         # Apply sigmoid gate
         gate = gate.reshape(bsz, seqlen, self.n_local_heads * self.head_dim)
@@ -359,14 +380,20 @@ class LinearAttn(nn.Module):
         self.norm = RMSNorm(self.head_v_dim, args.norm_eps)
         self.out_proj = RowParallelLinear(value_dim, args.dim, bias=False)
         if forward_backend != "xlite":
-            self.register_buffer("conv_state", torch.zeros(args.max_batch_size, self.conv_dim, self.conv_kernel_dim), persistent=False)
-            self.register_buffer("ssm_state", torch.zeros(args.max_batch_size, self.num_local_v_heads, self.head_k_dim, self.head_v_dim), persistent=False)
+            self.register_buffer(
+                "conv_state", torch.zeros(args.max_batch_size, self.conv_dim, self.conv_kernel_dim), persistent=False
+            )
+            self.register_buffer(
+                "ssm_state",
+                torch.zeros(args.max_batch_size, self.num_local_v_heads, self.head_k_dim, self.head_v_dim),
+                persistent=False,
+            )
 
     def _l2norm(self, x, dim=-1, eps=1e-6):
         inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
         return x * inv_norm
 
-    def _torch_causal_conv1d_update(self, hidden_states, conv_state, weight, activation='silu'):
+    def _torch_causal_conv1d_update(self, hidden_states, conv_state, weight, activation="silu"):
         _, hidden_size, seq_len = hidden_states.shape
         state_len = conv_state.shape[-1]
 
@@ -379,7 +406,9 @@ class LinearAttn(nn.Module):
         out = F.silu(out[:, :, -seq_len:])
         return out.to(hidden_states.dtype)
 
-    def _torch_chunk_gated_delta_rule(self, query, key, value, g, beta, initial_state=None, output_final_state=False, use_qk_l2norm=True):
+    def _torch_chunk_gated_delta_rule(
+        self, query, key, value, g, beta, initial_state=None, output_final_state=False, use_qk_l2norm=True
+    ):
         initial_dtype = query.dtype
 
         if use_qk_l2norm:
@@ -448,12 +477,16 @@ class LinearAttn(nn.Module):
 
         if not output_final_state:
             last_recurrent_state = None
-        core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1])
+        core_attn_out = core_attn_out.reshape(
+            core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1]
+        )
         core_attn_out = core_attn_out[:, :, :sequence_length]
         core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
         return core_attn_out, last_recurrent_state
 
-    def _torch_recurrent_gated_delta_rule(self, query, key, value, g, beta, initial_state=None, output_final_state=False, use_qk_l2norm=True):
+    def _torch_recurrent_gated_delta_rule(
+        self, query, key, value, g, beta, initial_state=None, output_final_state=False, use_qk_l2norm=True
+    ):
         initial_dtype = query.dtype
 
         if use_qk_l2norm:
@@ -506,7 +539,9 @@ class LinearAttn(nn.Module):
         z = z.view(bsz, seqlen, self.num_local_v_heads, self.head_v_dim)
 
         beta = torch.sigmoid(b.float())
-        g = -self.A_log.float().exp().unsqueeze(0).unsqueeze(0) * F.softplus(a.float() + self.dt_bias.float().unsqueeze(0).unsqueeze(0))
+        g = -self.A_log.float().exp().unsqueeze(0).unsqueeze(0) * F.softplus(
+            a.float() + self.dt_bias.float().unsqueeze(0).unsqueeze(0)
+        )
         g = g.to(x.dtype)
         beta = beta.to(x.dtype)
 
@@ -540,7 +575,11 @@ class LinearAttn(nn.Module):
 
         if not use_precomputed_states:
             core_attn_out, last_recurrent_state = self._torch_chunk_gated_delta_rule(
-                query, key, value, g, beta,
+                query,
+                key,
+                value,
+                g,
+                beta,
                 initial_state=None,
                 output_final_state=True,
                 use_qk_l2norm=True,
@@ -549,7 +588,11 @@ class LinearAttn(nn.Module):
                 self.ssm_state[:bsz] = last_recurrent_state
         else:
             core_attn_out, last_recurrent_state = self._torch_recurrent_gated_delta_rule(
-                query, key, value, g, beta,
+                query,
+                key,
+                value,
+                g,
+                beta,
                 initial_state=self.ssm_state[:bsz],
                 output_final_state=True,
                 use_qk_l2norm=True,
@@ -599,7 +642,9 @@ class Block(nn.Module):
         self.post_attention_layernorm = RMSNorm(args.dim, args.norm_eps)
         self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         if self.is_full_attention:
             x = x + self.self_attn(self.input_layernorm(x), start_pos, freqs_cis, mask)
         else:
@@ -639,7 +684,7 @@ class Qwen3_5(nn.Module):
         self.norm = RMSNorm(args.dim, args.norm_eps)
         self.lm_head = ColumnParallelLinear(args.dim, args.vocab_size, bias=False)
         self.freqs_cis = precompute_freqs_cis(args.rotary_dim, args.max_seq_len, args.rope_theta)
-        self.multi_task_parallel = (os.getenv("MULTI_TASK_PARALLEL", "0") == "1")
+        self.multi_task_parallel = os.getenv("MULTI_TASK_PARALLEL", "0") == "1"
 
     @torch.inference_mode()
     def forward_naive(self, tokens: torch.Tensor, start_pos: int = 0):
@@ -675,8 +720,18 @@ class Qwen3_5(nn.Module):
         attn_meta = self.prepare_xlite_attnmeta_v2(tokens, start_pos)
         stream = torch.npu.current_stream().npu_stream
         h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
-        self.xlite_model.forward_v2(rt=self.xlite_rt, input=tokens.flatten(), attn_meta=attn_meta, kv_cache=self.xlite_kv_cache, freqs_cis=[self.freqs_cis], output=h, curr_stream=stream)
-        self.xlite_model.forward_get_logits(rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream)
+        self.xlite_model.forward_v2(
+            rt=self.xlite_rt,
+            input=tokens.flatten(),
+            attn_meta=attn_meta,
+            kv_cache=self.xlite_kv_cache,
+            freqs_cis=[self.freqs_cis],
+            output=h,
+            curr_stream=stream,
+        )
+        self.xlite_model.forward_get_logits(
+            rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream
+        )
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
@@ -701,7 +756,16 @@ class Qwen3_5(nn.Module):
                 args, event = task
                 tokens, attn_meta, xlite_kv_cache, freqs_cis, logits_indices, logits, stream = args
                 self.xlite_rt.multi_task_parallel = True
-                self.xlite_model.forward_and_get_logits_v2(rt=self.xlite_rt, input=tokens, attn_meta=attn_meta, kv_cache=xlite_kv_cache, freqs_cis=[freqs_cis], indices=logits_indices, output=logits, curr_stream=stream)
+                self.xlite_model.forward_and_get_logits_v2(
+                    rt=self.xlite_rt,
+                    input=tokens,
+                    attn_meta=attn_meta,
+                    kv_cache=xlite_kv_cache,
+                    freqs_cis=[freqs_cis],
+                    indices=logits_indices,
+                    output=logits,
+                    curr_stream=stream,
+                )
                 event.set()
 
     @torch.inference_mode()
@@ -722,8 +786,12 @@ class Qwen3_5(nn.Module):
         b1, s1 = tokens1.size(0), tokens1.size(1)
         logits_indices0 = torch.arange(b0, dtype=torch.int32, device=tokens.device) * s0 + (s0 - 1)
         logits_indices1 = torch.arange(b1, dtype=torch.int32, device=tokens.device) * s1 + (s1 - 1)
-        event0 = self.thread_pool[0].add_task(args = (tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits_indices0, logits0, stream))
-        event1 = self.thread_pool[1].add_task(args = (tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits_indices1, logits1, stream))
+        event0 = self.thread_pool[0].add_task(
+            args=(tokens0.flatten(), attn_meta0, self.xlite_kv_cache, self.freqs_cis, logits_indices0, logits0, stream)
+        )
+        event1 = self.thread_pool[1].add_task(
+            args=(tokens1.flatten(), attn_meta1, self.xlite_kv_cache, self.freqs_cis, logits_indices1, logits1, stream)
+        )
         event0.wait()
         event1.wait()
         logits0 = logits0.permute(1, 0, 2).reshape(tokens0.size(0), self.args.vocab_size)
@@ -744,8 +812,12 @@ class Qwen3_5(nn.Module):
     def load_weights(self, model_path: str) -> None:
         assert self.args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
         assert self.args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
-        assert self.args.inter_dim % world_size == 0, f"inter_dim must be divisible by world_size (world_size={world_size})"
-        assert self.args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+        assert self.args.inter_dim % world_size == 0, (
+            f"inter_dim must be divisible by world_size (world_size={world_size})"
+        )
+        assert self.args.vocab_size % world_size == 0, (
+            f"vocab_size must be divisible by world_size (world_size={world_size})"
+        )
         assert self.args.linear_num_key_heads % world_size == 0, (
             f"linear_num_key_heads ({self.args.linear_num_key_heads}) must be divisible by world_size ({world_size})"
         )
@@ -758,7 +830,7 @@ class Qwen3_5(nn.Module):
 
         n_kv_heads_replicas = max(1, world_size // self.args.n_kv_heads)
         n_local_kv_heads = max(1, self.args.n_kv_heads // world_size)
-        q_proj_shard_size = (self.args.head_dim * 2 * self.args.n_heads // world_size)
+        q_proj_shard_size = self.args.head_dim * 2 * self.args.n_heads // world_size
         kv_proj_shard_size = self.args.head_dim * n_local_kv_heads
 
         attention_weight_specs = [
@@ -792,7 +864,7 @@ class Qwen3_5(nn.Module):
                 if "conv1d.weight" in name:
                     # name after prefix replacement already has .weight suffix
                     if name not in param_dict:
-                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                        logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                         continue
                     param = param_dict[name]
                     # conv1d weight: [total_conv_dim, 1, kernel_dim]
@@ -809,22 +881,28 @@ class Qwen3_5(nn.Module):
                         local_key_dim = key_dim // world_size
                         local_value_dim = value_dim // world_size
 
-                        q_shard = loaded_weight_tensor[local_key_dim * rank:local_key_dim * (rank + 1), :, :]
-                        k_shard = loaded_weight_tensor[key_dim + local_key_dim * rank:key_dim + local_key_dim * (rank + 1), :, :]
-                        v_shard = loaded_weight_tensor[key_dim * 2 + local_value_dim * rank:key_dim * 2 + local_value_dim * (rank + 1), :, :]
+                        q_shard = loaded_weight_tensor[local_key_dim * rank : local_key_dim * (rank + 1), :, :]
+                        k_shard = loaded_weight_tensor[
+                            key_dim + local_key_dim * rank : key_dim + local_key_dim * (rank + 1), :, :
+                        ]
+                        v_shard = loaded_weight_tensor[
+                            key_dim * 2 + local_value_dim * rank : key_dim * 2 + local_value_dim * (rank + 1), :, :
+                        ]
 
                         # Concatenate shards: [q_shard, k_shard, v_shard]
                         loaded_weight = torch.cat([q_shard, k_shard, v_shard], dim=0)
 
                     if param.shape != loaded_weight.shape:
-                        logger.warning(f'{name} model shape({param.shape}) mismatch checkpoint slice({loaded_weight.shape})')
+                        logger.warning(
+                            f"{name} model shape({param.shape}) mismatch checkpoint slice({loaded_weight.shape})"
+                        )
                         continue
                     param.data.copy_(loaded_weight)
                     continue
 
                 if "in_proj_qkv" in name:
                     if name not in param_dict:
-                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                        logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                         continue
                     param = param_dict[name]
                     key_dim = self.args.linear_num_key_heads * self.args.linear_key_head_dim
@@ -837,9 +915,13 @@ class Qwen3_5(nn.Module):
 
                     # Extract shards from each component
                     loaded_weight_tensor = convert_pyslice_to_tensor(loaded_weight)
-                    q_shard = loaded_weight_tensor[local_key_dim * rank:local_key_dim * (rank + 1), :]
-                    k_shard = loaded_weight_tensor[key_dim + local_key_dim * rank:key_dim + local_key_dim * (rank + 1), :]
-                    v_shard = loaded_weight_tensor[key_dim * 2 + local_value_dim * rank:key_dim * 2 + local_value_dim * (rank + 1), :]
+                    q_shard = loaded_weight_tensor[local_key_dim * rank : local_key_dim * (rank + 1), :]
+                    k_shard = loaded_weight_tensor[
+                        key_dim + local_key_dim * rank : key_dim + local_key_dim * (rank + 1), :
+                    ]
+                    v_shard = loaded_weight_tensor[
+                        key_dim * 2 + local_value_dim * rank : key_dim * 2 + local_value_dim * (rank + 1), :
+                    ]
 
                     # Concatenate shards: [q_shard, k_shard, v_shard]
                     loaded_weight_shard = torch.cat([q_shard, k_shard, v_shard], dim=0)
@@ -848,54 +930,64 @@ class Qwen3_5(nn.Module):
 
                 if "in_proj_z" in name:
                     if name not in param_dict:
-                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                        logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                         continue
                     param = param_dict[name]
                     value_dim = self.args.linear_num_value_heads * self.args.linear_value_head_dim
                     shard_size = value_dim // world_size
-                    loaded_weight = convert_pyslice_to_tensor(loaded_weight[shard_size * rank:shard_size * (rank + 1), :])
+                    loaded_weight = convert_pyslice_to_tensor(
+                        loaded_weight[shard_size * rank : shard_size * (rank + 1), :]
+                    )
                     param.data.copy_(loaded_weight)
                     continue
 
                 if "out_proj" in name:
                     if name not in param_dict:
-                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                        logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                         continue
                     param = param_dict[name]
                     value_dim = self.args.linear_num_value_heads * self.args.linear_value_head_dim
                     shard_size = value_dim // world_size
-                    loaded_weight = convert_pyslice_to_tensor(loaded_weight[:, shard_size * rank:shard_size * (rank + 1)])
+                    loaded_weight = convert_pyslice_to_tensor(
+                        loaded_weight[:, shard_size * rank : shard_size * (rank + 1)]
+                    )
                     param.data.copy_(loaded_weight)
                     continue
 
                 if "in_proj_a" in name or "in_proj_b" in name:
                     if name not in param_dict:
-                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                        logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                         continue
                     param = param_dict[name]
                     num_v_heads = self.args.linear_num_value_heads
                     shard_size = num_v_heads // world_size
-                    loaded_weight = convert_pyslice_to_tensor(loaded_weight[shard_size * rank:shard_size * (rank + 1), :])
+                    loaded_weight = convert_pyslice_to_tensor(
+                        loaded_weight[shard_size * rank : shard_size * (rank + 1), :]
+                    )
                     if param.shape != loaded_weight.shape:
-                        logger.warning(f'{name} model shape({param.shape}) mismatch checkpoint slice({loaded_weight.shape})')
+                        logger.warning(
+                            f"{name} model shape({param.shape}) mismatch checkpoint slice({loaded_weight.shape})"
+                        )
                         continue
                     param.data.copy_(loaded_weight)
                     continue
 
                 if "A_log" in name or "dt_bias" in name:
                     if name not in param_dict:
-                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                        logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                         continue
                     param = param_dict[name]
                     num_v_heads = self.args.linear_num_value_heads
                     shard_size = num_v_heads // world_size
-                    loaded_weight = convert_pyslice_to_tensor(loaded_weight[shard_size * rank:shard_size * (rank + 1)])
+                    loaded_weight = convert_pyslice_to_tensor(
+                        loaded_weight[shard_size * rank : shard_size * (rank + 1)]
+                    )
                     param.data.copy_(loaded_weight)
                     continue
 
                 if "linear_attn.norm" in name:
                     if name not in param_dict:
-                        logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                        logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                         continue
                     param = param_dict[name]
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -912,7 +1004,7 @@ class Qwen3_5(nn.Module):
 
                 param_name = name
                 if param_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    logger.warning("Loading model has no param named %s in checkpoints, bypass.", param_name)
                     continue
 
                 param = param_dict[param_name]
@@ -922,12 +1014,14 @@ class Qwen3_5(nn.Module):
                 else:
                     shard_id = rank
 
-                loaded_weight_slice = loaded_weight[shard_size * shard_id: shard_size * (shard_id + 1)]
+                loaded_weight_slice = loaded_weight[shard_size * shard_id : shard_size * (shard_id + 1)]
                 loaded_weight_slice = convert_pyslice_to_tensor(loaded_weight_slice)
 
                 if param.shape != loaded_weight_slice.shape:
-                    raise ValueError(f"{param_name} model shape({param.shape}) mismatch"
-                                     f" checkpoint shape({loaded_weight_slice.shape})")
+                    raise ValueError(
+                        f"{param_name} model shape({param.shape}) mismatch"
+                        f" checkpoint shape({loaded_weight_slice.shape})"
+                    )
 
                 param.data.copy_(loaded_weight_slice)
                 is_attention_weight = True
@@ -944,14 +1038,14 @@ class Qwen3_5(nn.Module):
 
                 param_name = name.replace(weight_name, "gate_up_proj")
                 if param_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.', param_name)
+                    logger.warning("Loading model has no param named %s in checkpoints, bypass.", param_name)
                     continue
                 param = param_dict[param_name]
                 shard_size = param.shape[0] // 2
 
-                loaded_weight = loaded_weight[shard_size * rank:shard_size * (rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
-                param_slice.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+                loaded_weight = loaded_weight[shard_size * rank : shard_size * (rank + 1)]
+                param_slice = param.data[shard_size * stride_id : shard_size * (stride_id + 1)]
+                param_slice.data[: loaded_weight.shape[0]].copy_(loaded_weight)
 
                 is_gate_up_weight = True
                 break
@@ -959,34 +1053,40 @@ class Qwen3_5(nn.Module):
                 continue
 
             if name not in param_dict:
-                logger.warning('Loading model has no param named %s in checkpoints, bypass.', name)
+                logger.warning("Loading model has no param named %s in checkpoints, bypass.", name)
                 continue
             param = param_dict[name]
 
             if "embed_tokens" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.vocab_size,
-                                             self.args.dim,
-                                             name, True, False, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, self.args.vocab_size, self.args.dim, name, True, False, rank, world_size
+                )
                 continue
 
             if "lm_head" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.dim,
-                                             self.args.vocab_size,
-                                             name, False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, self.args.dim, self.args.vocab_size, name, False, True, rank, world_size
+                )
                 continue
 
             if "o_proj" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.head_dim * self.args.n_heads, self.args.dim,
-                                             name, True, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    self.args.head_dim * self.args.n_heads,
+                    self.args.dim,
+                    name,
+                    True,
+                    True,
+                    rank,
+                    world_size,
+                )
                 continue
 
             if "down_proj" in name:
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             self.args.inter_dim, self.args.dim,
-                                             name, True, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, self.args.inter_dim, self.args.dim, name, True, True, rank, world_size
+                )
                 continue
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -1017,7 +1117,9 @@ class Qwen3_5(nn.Module):
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
             # Runtime rank arg = GLOBAL rank; tp_size/dp_size explicit.
-            self.xlite_rt = Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size)
+            self.xlite_rt = Runtime(
+                local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size
+            )
             self.init_xlite_model(self.args)
             kv_size = self.init_xlite_kvcache(self.args)
             pool_size = self.xlite_model.get_tensor_pool_size()
@@ -1028,12 +1130,17 @@ class Qwen3_5(nn.Module):
                 memory_usage = param.element_size() * param.numel()
                 total_model_memory += memory_usage
             if self.global_rank == 0:
-                print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
-                      f" KV Cache: {kv_size // 1024 // 1024} MB" +
-                      f" Tensor pool: {pool_size} MB")
+                print(
+                    f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB"
+                    f" KV Cache: {kv_size // 1024 // 1024} MB"
+                    f" Tensor pool: {pool_size} MB"
+                )
 
             if self.multi_task_parallel:
-                self.xlite_rt_list = [self.xlite_rt, Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size)]
+                self.xlite_rt_list = [
+                    self.xlite_rt,
+                    Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size),
+                ]
                 self.xlite_rt_list[1].init_tensor_pool(pool_size)
                 self.xlite_rt_list[0].peer_notify = self.xlite_rt_list[1].notify
                 self.xlite_rt_list[1].peer_notify = self.xlite_rt_list[0].notify
@@ -1052,7 +1159,7 @@ class Qwen3_5(nn.Module):
         config.rope_head_dim = args.rotary_dim
         config.norm_eps = args.norm_eps
         config.rope_theta = args.rope_theta
-        config.softmax_scale = args.head_dim ** -0.5
+        config.softmax_scale = args.head_dim**-0.5
         config.n_dense_layers = args.n_layers
         config.intermediate_size = args.inter_dim
         config.def_tp_size = self.tp_size
@@ -1082,9 +1189,7 @@ class Qwen3_5(nn.Module):
         self._xlite_norm_weights = [_gemma_norm_to_xlite(self.norm.weight)]
         self.xlite_model.norm = self._xlite_norm_weights[0]
         self.xlite_model.head = self.lm_head.weight
-        self._xlite_attn_norm_weights = [
-            _gemma_norm_to_xlite(layer.input_layernorm.weight) for layer in self.layers
-        ]
+        self._xlite_attn_norm_weights = [_gemma_norm_to_xlite(layer.input_layernorm.weight) for layer in self.layers]
         self._xlite_mlp_norm_weights = [
             _gemma_norm_to_xlite(layer.post_attention_layernorm.weight) for layer in self.layers
         ]
@@ -1157,13 +1262,11 @@ class Qwen3_5(nn.Module):
 
         if args.qk_norm:
             self._xlite_mha_q_norm_weights = [
-                _gemma_norm_to_xlite(layer.self_attn.q_norm.weight)
-                if layer.is_full_attention else empty_weight
+                _gemma_norm_to_xlite(layer.self_attn.q_norm.weight) if layer.is_full_attention else empty_weight
                 for layer in self.layers
             ]
             self._xlite_mha_k_norm_weights = [
-                _gemma_norm_to_xlite(layer.self_attn.k_norm.weight)
-                if layer.is_full_attention else empty_weight
+                _gemma_norm_to_xlite(layer.self_attn.k_norm.weight) if layer.is_full_attention else empty_weight
                 for layer in self.layers
             ]
             self.xlite_model.mha_q_norm = self._xlite_mha_q_norm_weights
@@ -1185,19 +1288,30 @@ class Qwen3_5(nn.Module):
         kv_size = 0
         for layer in self.layers:
             if layer.is_full_attention:
-                k = torch.zeros(block_num, block_size, head_num, args.head_dim,
-                                dtype=torch.get_default_dtype(), device="npu")
-                v = torch.zeros(block_num, block_size, head_num, args.head_dim,
-                                dtype=torch.get_default_dtype(), device="npu")
+                k = torch.zeros(
+                    block_num, block_size, head_num, args.head_dim, dtype=torch.get_default_dtype(), device="npu"
+                )
+                v = torch.zeros(
+                    block_num, block_size, head_num, args.head_dim, dtype=torch.get_default_dtype(), device="npu"
+                )
                 self.xlite_kv_cache.append([k, v])
                 kv_size += block_num * head_num * block_size * args.head_dim * 2 * k.element_size()
             else:
                 conv_state = torch.zeros(
-                    args.max_batch_size + 1, args.linear_conv_kernel_dim - 1, conv_dim,
-                    dtype=torch.get_default_dtype(), device="npu")
+                    args.max_batch_size + 1,
+                    args.linear_conv_kernel_dim - 1,
+                    conv_dim,
+                    dtype=torch.get_default_dtype(),
+                    device="npu",
+                )
                 ssm_state = torch.zeros(
-                    args.max_batch_size + 1, n_local_v, args.linear_value_head_dim, args.linear_key_head_dim,
-                    dtype=torch.get_default_dtype(), device="npu")
+                    args.max_batch_size + 1,
+                    n_local_v,
+                    args.linear_value_head_dim,
+                    args.linear_key_head_dim,
+                    dtype=torch.get_default_dtype(),
+                    device="npu",
+                )
                 self.xlite_kv_cache.append([conv_state, ssm_state])
                 kv_size += conv_state.numel() * conv_state.element_size()
                 kv_size += ssm_state.numel() * ssm_state.element_size()
@@ -1208,6 +1322,10 @@ class Qwen3_5(nn.Module):
         # request; C++ derives the per-layer paged GDN operands internally.
         pages = torch.arange(1, tokens.size(0) + 1, dtype=torch.int32)
         return prepare_xlite_attnmeta_v2(
-            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, [block_size],
+            AttnMetaV2,
+            tokens,
+            start_pos,
+            self.args.max_seq_len,
+            [block_size],
             gdn_state_pages=pages.to(tokens.device),
         )

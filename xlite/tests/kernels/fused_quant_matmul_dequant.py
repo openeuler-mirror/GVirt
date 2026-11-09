@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,6 +8,7 @@
 # ===============================================================================
 import torch
 import torch_npu
+
 from xlite._C import (
     Runtime,
     dequant,
@@ -94,9 +94,8 @@ opt_sizes = [
 ]
 
 
-def run_case(m, n, k, weight_nz, transpose, dyn_quant, has_bias=True, has_deq_scale=True,
-             num=None):
-    x = (torch.randn(m, k, dtype=torch.bfloat16, device=f"npu:{dev_id}") * 2.0)
+def run_case(m, n, k, weight_nz, transpose, dyn_quant, has_bias=True, has_deq_scale=True, num=None):
+    x = torch.randn(m, k, dtype=torch.bfloat16, device=f"npu:{dev_id}") * 2.0
     # without fixpipe deq_scale the int32 accumulator lands in fp16 unscaled;
     # narrow the weight so |acc| <= 127 * 2 * k stays finite (see opt_sizes)
     w_hi = 8 if has_deq_scale else 2
@@ -126,8 +125,8 @@ def run_case(m, n, k, weight_nz, transpose, dyn_quant, has_bias=True, has_deq_sc
         scale = torch.empty(0, dtype=torch.float32, device=f"npu:{dev_id}")
 
     if not dyn_quant:
-        quant_scale_rec = (torch.rand(k, dtype=torch.bfloat16, device=f"npu:{dev_id}") * 0.05 + 0.01)
-        quant_offset = (torch.randn(k, dtype=torch.bfloat16, device=f"npu:{dev_id}") * 0.5)
+        quant_scale_rec = torch.rand(k, dtype=torch.bfloat16, device=f"npu:{dev_id}") * 0.05 + 0.01
+        quant_offset = torch.randn(k, dtype=torch.bfloat16, device=f"npu:{dev_id}") * 0.5
 
     # reference: serial three-kernel chain quant -> matmul_dequant -> dequant
     serial_xq = torch.empty(m, k, dtype=torch.int8, device=f"npu:{dev_id}")
@@ -166,14 +165,21 @@ def run_case(m, n, k, weight_nz, transpose, dyn_quant, has_bias=True, has_deq_sc
     if num is not None:
         fused_opt["num"] = torch.tensor([num], dtype=torch.int32, device=f"npu:{dev_id}")
     fused_quant_matmul_dequant(
-        rt, x, weight=y_in, out=fused_out, x_quant=x_quant, dyn_quant=dyn_quant,
-        weight_nz=weight_nz, transpose=transpose, **fused_opt
+        rt,
+        x,
+        weight=y_in,
+        out=fused_out,
+        x_quant=x_quant,
+        dyn_quant=dyn_quant,
+        weight_nz=weight_nz,
+        transpose=transpose,
+        **fused_opt,
     )
     torch.npu.synchronize()
     print(
-        f'[{m}, {k}] x [{k}, {n}] weight_nz:{weight_nz} transpose:{transpose} '
-        f'dyn_quant:{dyn_quant} bias:{has_bias} deq_scale:{has_deq_scale} num:{num} '
-        f'fusion quant matmul dequant executed!'
+        f"[{m}, {k}] x [{k}, {n}] weight_nz:{weight_nz} transpose:{transpose} "
+        f"dyn_quant:{dyn_quant} bias:{has_bias} deq_scale:{has_deq_scale} num:{num} "
+        f"fusion quant matmul dequant executed!"
     )
 
     # num shrinks only the dequant stage (rows [0, min(num, m)) are written);
@@ -183,13 +189,11 @@ def run_case(m, n, k, weight_nz, transpose, dyn_quant, has_bias=True, has_deq_sc
     if rows == 0:
         return
     try:
-        torch.testing.assert_close(
-            standard[:rows].to("cpu"), fused_out[:rows].to("cpu"), atol=1e-2, rtol=1e-2
-        )
+        torch.testing.assert_close(standard[:rows].to("cpu"), fused_out[:rows].to("cpu"), atol=1e-2, rtol=1e-2)
     except AssertionError as e:
-        print(f'{e}')
-        print(f'serial: {standard[:rows]}')
-        print(f'fused: {fused_out[:rows]}')
+        print(f"{e}")
+        print(f"serial: {standard[:rows]}")
+        print(f"fused: {fused_out[:rows]}")
 
 
 for m, n, k, weight_nz, transpose, dyn_quant in test_sizes:
@@ -200,4 +204,3 @@ for m, n, k, weight_nz, transpose, dyn_quant in long_seq_sizes:
 
 for m, n, k, weight_nz, transpose, dyn_quant, has_bias, has_deq_scale, num in opt_sizes:
     run_case(m, n, k, weight_nz, transpose, dyn_quant, has_bias, has_deq_scale, num)
-

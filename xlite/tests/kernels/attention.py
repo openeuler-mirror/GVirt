@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,11 +6,12 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from __future__ import absolute_import
 import logging
+from collections.abc import Iterable
+
 import torch
 import torch_npu  # noqa: F401
-from typing import Iterable
+
 from xlite._C import Runtime, attention
 
 logging.getLogger().setLevel(logging.INFO)
@@ -163,11 +163,13 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
             clen = cached_lens_list[i]
 
             # slice this sample's flat qkv from concatenated qkv_standard
-            qkv_chunk = qkv_standard[offset: offset + qlen]
+            qkv_chunk = qkv_standard[offset : offset + qlen]
             offset += qlen
 
             # split features (q,k,v) along feature dim
-            q_chunk, k_chunk, v_chunk = qkv_chunk.split([n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim], dim=1)
+            q_chunk, k_chunk, v_chunk = qkv_chunk.split(
+                [n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim], dim=1
+            )
 
             # reshape to per-sample tensors
             q_chunk = q_chunk.view(1, qlen, n_heads, head_dim)
@@ -175,21 +177,18 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
             v_chunk = v_chunk.view(1, qlen, n_kv_heads, head_dim)
 
             # write into cache at the sample's cached_len offset
-            k_cache[i:i+1, clen:clen + qlen] = k_chunk
-            v_cache[i:i+1, clen:clen + qlen] = v_chunk
+            k_cache[i : i + 1, clen : clen + qlen] = k_chunk
+            v_cache[i : i + 1, clen : clen + qlen] = v_chunk
 
             # read keys/values for this sample (cached + current)
-            keys = k_cache[i:i+1, :clen + qlen]
-            values = v_cache[i:i+1, :clen + qlen]
+            keys = k_cache[i : i + 1, : clen + qlen]
+            values = v_cache[i : i + 1, : clen + qlen]
 
             keys = keys.repeat_interleave(n_heads // n_kv_heads, dim=2)
             values = values.repeat_interleave(n_heads // n_kv_heads, dim=2)
 
             # compute scores [1, n_heads, qlen, qlen+clen]
-            scores = torch.matmul(
-                q_chunk.transpose(1, 2),
-                keys.permute(0, 2, 3, 1)
-            )
+            scores = torch.matmul(q_chunk.transpose(1, 2), keys.permute(0, 2, 3, 1))
 
             # add per-sample mask if present
             if masks is not None:
@@ -197,14 +196,18 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
 
             probs = torch.softmax(scores, dim=-1)
 
-            out = torch.matmul(probs, values.transpose(1, 2)).transpose(1, 2).contiguous()  # [1, qlen, n_heads, head_dim]
+            out = (
+                torch.matmul(probs, values.transpose(1, 2)).transpose(1, 2).contiguous()
+            )  # [1, qlen, n_heads, head_dim]
 
             outputs.append(out.view(qlen, n_heads * head_dim))
 
         output_standard = torch.cat(outputs, dim=0)
 
         # xlite: split flat qkv and write per-sample KV into block cache
-        q_xlite_all, k_xlite_all, v_xlite_all = qkv_xlite.split([n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim], dim=1)
+        q_xlite_all, k_xlite_all, v_xlite_all = qkv_xlite.split(
+            [n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim], dim=1
+        )
 
         for i in range(batch):
             # per-sample start and lengths
@@ -213,12 +216,16 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
             clen = cached_lens_list[i]
 
             # extract this sample's k/v and reshape
-            current_k = k_xlite_all[start:start + qlen].view(1, qlen, n_kv_heads, head_dim)
-            current_v = v_xlite_all[start:start + qlen].view(1, qlen, n_kv_heads, head_dim)
+            current_k = k_xlite_all[start : start + qlen].view(1, qlen, n_kv_heads, head_dim)
+            current_v = v_xlite_all[start : start + qlen].view(1, qlen, n_kv_heads, head_dim)
 
             # also copy existing cached KV (from k_cache/v_cache) before current tokens
-            cached_k_part = k_cache[i:i+1, :clen] if clen > 0 else torch.empty(1, 0, n_kv_heads, head_dim, device="npu:0")
-            cached_v_part = v_cache[i:i+1, :clen] if clen > 0 else torch.empty(1, 0, n_kv_heads, head_dim, device="npu:0")
+            cached_k_part = (
+                k_cache[i : i + 1, :clen] if clen > 0 else torch.empty(1, 0, n_kv_heads, head_dim, device="npu:0")
+            )
+            cached_v_part = (
+                v_cache[i : i + 1, :clen] if clen > 0 else torch.empty(1, 0, n_kv_heads, head_dim, device="npu:0")
+            )
 
             full_k = torch.cat([cached_k_part, current_k], dim=1)
             full_v = torch.cat([cached_v_part, current_v], dim=1)
@@ -226,15 +233,33 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
             total_len = clen + qlen
             num_blocks_needed = (total_len + BLOCK_SIZE - 1) // BLOCK_SIZE
             sample_cache_start = i * max_num_blocks
-            dst_k = k_cache_xlite[sample_cache_start:sample_cache_start + num_blocks_needed].view(-1, n_kv_heads, head_dim)
-            dst_v = v_cache_xlite[sample_cache_start:sample_cache_start + num_blocks_needed].view(-1, n_kv_heads, head_dim)
+            dst_k = k_cache_xlite[sample_cache_start : sample_cache_start + num_blocks_needed].view(
+                -1, n_kv_heads, head_dim
+            )
+            dst_v = v_cache_xlite[sample_cache_start : sample_cache_start + num_blocks_needed].view(
+                -1, n_kv_heads, head_dim
+            )
             dst_k[:total_len] = full_k.flatten(0, 1)
             dst_v[:total_len] = full_v.flatten(0, 1)
 
         torch.npu.synchronize()
-        attention(rt, qkv_xlite, k_cache_xlite, v_cache_xlite,
-                  output_xlite, query_start_loc, query_lens, cached_lens,
-                  block_tables, n_heads, n_kv_heads, head_dim, BLOCK_SIZE, batch, enable_flash_attention=enable_flash)
+        attention(
+            rt,
+            qkv_xlite,
+            k_cache_xlite,
+            v_cache_xlite,
+            output_xlite,
+            query_start_loc,
+            query_lens,
+            cached_lens,
+            block_tables,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            BLOCK_SIZE,
+            batch,
+            enable_flash_attention=enable_flash,
+        )
 
         logging.info(
             "attention %s (%d heads, %d kv heads, %d head dim, %s) work (%d batch, cached_lens=%s, query_lens=%s) executed!",
@@ -252,6 +277,6 @@ for name, n_heads, n_kv_heads, head_dim, test_dtype in models:
             atol, rtol = attention_tolerance[test_dtype]
             torch.testing.assert_close(output_standard, output_xlite, atol=atol, rtol=rtol)
         except AssertionError as e:
-            logging.error(f'{e}')
-            logging.error(f'torch_npu: {output_standard}')
-            logging.error(f'xlite: {output_xlite}')
+            logging.error(f"{e}")
+            logging.error(f"torch_npu: {output_standard}")
+            logging.error(f"xlite: {output_xlite}")

@@ -6,7 +6,7 @@ DeepSeek-V4 KV Compressor 融合算子(核内模板 `compressor`,见 `csrc/kerne
 
 核心数学:对每个压缩块(mergeSize = `(1+overlap)*ratio` 行)计算
 
-```
+```text
 weightedSum[block] = sum_k softmax(score[k] + ape[k]) * kv[k]      # k ∈ [0, mergeSize)
 ```
 
@@ -48,7 +48,7 @@ compressor_<dtype>(GM_ADDR kv, GM_ADDR score, GM_ADDR ape, GM_ADDR normWeight, G
 `coff = 1 + overlap`,`full_dim = coff * head_dim`。`normWeight`/`freqs`/`ape`/`state` 等可为空(nullptr),kernel 据此跳过对应步骤。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | kv | 输入 | `[batchedTokens, coff*head_dim]` | fp32 | 压缩前 KV(每行前半 KV、后半 overlap KV) |
 | score | 输入 | `[batchedTokens, coff*head_dim]` | fp32 | 压缩前 score;与 kv 同 shape |
 | ape | 输入 | `[ratio, coff*head_dim]` | fp32 / null | 绝对位置编码;null 表示用原始 score(不加 ape) |
@@ -76,10 +76,10 @@ host 校验见 `csrc/op.cpp` 的 `XliteOpCompressor` 的 `compCheck` 校验 lamb
 ## 支持的数据类型
 
 | dtype 变体 | 源文件 | 说明 |
-|---|---|---|
+| --- | --- | --- |
 | `compressor_float16_t` | `csrc/kernels/compressor_float16_t.cpp` | compressKv/weightedSum 为 fp16(kv/score 仍 fp32) |
 | `compressor_bfloat16_t` | `csrc/kernels/compressor_bfloat16_t.cpp` | compressKv/weightedSum 为 bf16 |
-| `compressor_float` | `csrc/kernels/compressor_float.cpp` | compressKv 为 fp32(kv/score 仍 fp32);weightedSum 仍为 bf16/fp16(host `compCheck` 强制 `weightedSum.dtype == BF16 || FP16`,不接受 fp32) |
+| `compressor_float` | `csrc/kernels/compressor_float.cpp` | compressKv 为 fp32(kv/score 仍 fp32);weightedSum 仍为 bf16/fp16(host `compCheck` 强制 `weightedSum.dtype == BF16 \|\| FP16`,不接受 fp32) |
 
 dtype 分派见 `csrc/op.cpp` 的 `XliteOpCompressor`(关键字 `compressKv.dtype`,按 `compressKv.dtype` 选;`compressKv.ptr == nullptr` 的 C8 模式改按 `weightedSum.dtype` 选)。kernel 为 `__DAV_C220_VEC__`、任务类型 `KERNEL_TYPE_MIX_AIV_1_0`(`csrc/kernels/compressor.h` 的 `compressor`(关键字 `KERNEL_TYPE_MIX_AIV_1_0`),纯 AIV)。
 

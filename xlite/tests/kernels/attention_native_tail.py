@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Native cache tail can contain NaNs: attention must read only valid tokens."""
+
 import math
 
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, attention
 
 
@@ -19,7 +21,7 @@ def run():
                 blocks = math.ceil(max(lengths) / block)
                 qkv = torch.randn(batch, (heads + 2 * kv_heads) * dim, device="npu", dtype=dtype)
                 # Model RoPE scales Q before this standalone attention entry.
-                qkv[:, :heads * dim].div_(math.sqrt(dim))
+                qkv[:, : heads * dim].div_(math.sqrt(dim))
                 k = torch.full((batch * blocks, block, kv_heads, dim), float("nan"), device="npu", dtype=dtype)
                 v = torch.full_like(k, float("nan"))
                 refs = []
@@ -28,9 +30,9 @@ def run():
                     values = torch.randn_like(keys)
                     for blk in range((length + block - 1) // block):
                         lo, hi = blk * block, min((blk + 1) * block, length)
-                        k[b * blocks + blk, :hi - lo] = keys[lo:hi]
-                        v[b * blocks + blk, :hi - lo] = values[lo:hi]
-                    q = qkv[b, :heads * dim].view(heads, dim).float()
+                        k[b * blocks + blk, : hi - lo] = keys[lo:hi]
+                        v[b * blocks + blk, : hi - lo] = values[lo:hi]
+                    q = qkv[b, : heads * dim].view(heads, dim).float()
                     keys = keys.repeat_interleave(heads // kv_heads, dim=1).float()
                     values = values.repeat_interleave(heads // kv_heads, dim=1).float()
                     probs = torch.softmax(torch.einsum("hd,thd->ht", q, keys), dim=-1)
@@ -42,12 +44,26 @@ def run():
                 # lists batch b's cache blocks. A flat 1-D table is read as a single row
                 # with element stride, so batch b would fetch blocks [b, b + blocks) and
                 # hit another batch's NaN tail whenever blocks > 1.
-                block_tables = torch.arange(batch * blocks, dtype=torch.int32,
-                                            device="npu").view(batch, blocks)
+                block_tables = torch.arange(batch * blocks, dtype=torch.int32, device="npu").view(batch, blocks)
                 torch.npu.synchronize()
-                attention(rt, qkv, k, v, output, meta(list(range(batch))), meta([1] * batch),
-                          meta([n - 1 for n in lengths]), block_tables,
-                          heads, kv_heads, dim, block, batch, enable_flash_attention=flash, tile_size_of_cached_kv=128)
+                attention(
+                    rt,
+                    qkv,
+                    k,
+                    v,
+                    output,
+                    meta(list(range(batch))),
+                    meta([1] * batch),
+                    meta([n - 1 for n in lengths]),
+                    block_tables,
+                    heads,
+                    kv_heads,
+                    dim,
+                    block,
+                    batch,
+                    enable_flash_attention=flash,
+                    tile_size_of_cached_kv=128,
+                )
                 torch.npu.synchronize()
                 reference = torch.stack(refs)
                 # Softmax probabilities and cube outputs are rounded to Dtype.

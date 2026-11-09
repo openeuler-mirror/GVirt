@@ -35,7 +35,7 @@ host 侧 swizzle 策略由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选
 
 ### 逐头批处理与跨头负载均衡
 
-```
+```text
 for hIdx in 0..h:
     x = mht + hIdx * T * sizeof(Dtype)        // A: 头内 [m, t],行距 T
     y = hdt + hIdx * d * t * sizeof(Dtype)    // B: 头内 [d, t]

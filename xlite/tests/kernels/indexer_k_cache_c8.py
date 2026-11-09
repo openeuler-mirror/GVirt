@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -8,12 +7,12 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 """K-side C8 prepare and cache-write tests."""
+
 import logging
 import math
 
 import torch
 import torch.nn.functional as F
-
 
 HEAD_DIM = 128
 ROPE_DIM = 64
@@ -55,8 +54,7 @@ def rotation(device=None):
 
 def reference(k, k_norm, k_norm_bias, freqs, positions, device, norm_eps=NORM_EPS):
     """LayerNorm, interleaved RoPE and Hadamard with BF16 output at each stage."""
-    norm = F.layer_norm(k[:, :HEAD_DIM].float(), (HEAD_DIM,),
-                        k_norm.float(), k_norm_bias.float(), norm_eps).bfloat16()
+    norm = F.layer_norm(k[:, :HEAD_DIM].float(), (HEAD_DIM,), k_norm.float(), k_norm_bias.float(), norm_eps).bfloat16()
     pairs = norm[:, :ROPE_DIM].float().reshape(-1, ROPE_DIM // 2, 2)
     trig = freqs[positions].float().reshape(-1, ROPE_DIM // 2, 2)
     real = pairs[..., 0] * trig[..., 0] - pairs[..., 1] * trig[..., 1]
@@ -77,38 +75,61 @@ def check_values(k8, scales, rotated, name):
     assert bool(((k8 >= -QUANT_MAX) & (k8 <= QUANT_MAX)).all()), name
 
 
-def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
-             num_blocks, block_size, norm_eps=NORM_EPS, cache_offset=0, k_pitch=None,
-             scale_pitch=None):
+def run_test(
+    rt,
+    device,
+    name,
+    k,
+    k_norm,
+    k_norm_bias,
+    freqs,
+    positions,
+    slots,
+    num_blocks,
+    block_size,
+    norm_eps=NORM_EPS,
+    cache_offset=0,
+    k_pitch=None,
+    scale_pitch=None,
+):
     from xlite._C import indexer_k_cache_c8
 
     capacity = num_blocks * block_size
     k_pitch = block_size * HEAD_DIM if k_pitch is None else k_pitch
     scale_pitch = block_size if scale_pitch is None else scale_pitch
-    k_base = torch.full((num_blocks * k_pitch + 2 * cache_offset,), K_CACHE_FILL,
-                        dtype=torch.int8, device=device)
-    scale_base = torch.full((num_blocks * scale_pitch + 2 * cache_offset,), SCALE_CACHE_FILL,
-                            dtype=torch.float16, device=device)
-    k_cache = k_base[cache_offset:].as_strided(
-        (num_blocks, block_size, 1, HEAD_DIM), (k_pitch, HEAD_DIM, HEAD_DIM, 1))
-    scale_cache = scale_base[cache_offset:].as_strided(
-        (num_blocks, block_size, 1, 1), (scale_pitch, 1, 1, 1))
+    k_base = torch.full((num_blocks * k_pitch + 2 * cache_offset,), K_CACHE_FILL, dtype=torch.int8, device=device)
+    scale_base = torch.full(
+        (num_blocks * scale_pitch + 2 * cache_offset,), SCALE_CACHE_FILL, dtype=torch.float16, device=device
+    )
+    k_cache = k_base[cache_offset:].as_strided((num_blocks, block_size, 1, HEAD_DIM), (k_pitch, HEAD_DIM, HEAD_DIM, 1))
+    scale_cache = scale_base[cache_offset:].as_strided((num_blocks, block_size, 1, 1), (scale_pitch, 1, 1, 1))
     inputs = (k, k_norm, k_norm_bias, freqs, positions, slots)
     device_inputs = [tensor.to(device) for tensor in inputs]
     torch.npu.synchronize(device)
-    indexer_k_cache_c8(rt, device_inputs[0], device_inputs[1], device_inputs[2],
-                       device_inputs[3], device_inputs[4], device_inputs[5],
-                       k_cache=k_cache, scale_cache=scale_cache, norm_eps=norm_eps)
+    indexer_k_cache_c8(
+        rt,
+        device_inputs[0],
+        device_inputs[1],
+        device_inputs[2],
+        device_inputs[3],
+        device_inputs[4],
+        device_inputs[5],
+        k_cache=k_cache,
+        scale_cache=scale_cache,
+        norm_eps=norm_eps,
+    )
     torch.npu.synchronize(device)
     assert torch.equal(device_inputs[0].cpu(), k), (name, "K input mutated")
 
     k_base, scale_base = k_base.cpu(), scale_base.cpu()
-    k8 = k_base[cache_offset:].as_strided(
-        (num_blocks, block_size, HEAD_DIM), (k_pitch, HEAD_DIM, 1)).reshape(-1, HEAD_DIM)
-    scales = scale_base[cache_offset:].as_strided(
-        (num_blocks, block_size), (scale_pitch, 1)).flatten()
-    active = slots[:len(k)] >= 0
-    written = slots[:len(k)][active].long()
+    k8 = (
+        k_base[cache_offset:]
+        .as_strided((num_blocks, block_size, HEAD_DIM), (k_pitch, HEAD_DIM, 1))
+        .reshape(-1, HEAD_DIM)
+    )
+    scales = scale_base[cache_offset:].as_strided((num_blocks, block_size), (scale_pitch, 1)).flatten()
+    active = slots[: len(k)] >= 0
+    written = slots[: len(k)][active].long()
     untouched = torch.ones(capacity, dtype=torch.bool)
     untouched[written] = False
 
@@ -120,16 +141,16 @@ def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
         assert bool((scale_base[[0, -1]] == SCALE_CACHE_FILL).all()), (name, "scale guard")
     if k_pitch != block_size * HEAD_DIM:
         k_padding = k_base.as_strided(
-            (num_blocks, k_pitch - block_size * HEAD_DIM), (k_pitch, 1),
-            cache_offset + block_size * HEAD_DIM)
+            (num_blocks, k_pitch - block_size * HEAD_DIM), (k_pitch, 1), cache_offset + block_size * HEAD_DIM
+        )
         assert bool((k_padding == K_CACHE_FILL).all()), (name, "K pitch canary")
     if scale_pitch != block_size:
         scale_padding = scale_base.as_strided(
-            (num_blocks, scale_pitch - block_size), (scale_pitch, 1), cache_offset + block_size)
+            (num_blocks, scale_pitch - block_size), (scale_pitch, 1), cache_offset + block_size
+        )
         assert bool((scale_padding == SCALE_CACHE_FILL).all()), (name, "scale pitch canary")
     ref_freqs = torch.view_as_real(freqs) if freqs.is_complex() else freqs
-    rotated = reference(k[active], k_norm, k_norm_bias, ref_freqs,
-                        positions[:len(k)][active], device, norm_eps)
+    rotated = reference(k[active], k_norm, k_norm_bias, ref_freqs, positions[: len(k)][active], device, norm_eps)
     check_values(k8[written], scales[written], rotated, name)
     logging.info("indexer_k_cache_c8 %s (%d tokens) passed", name, len(k))
     return k8, scales
@@ -137,6 +158,7 @@ def run_test(rt, device, name, k, k_norm, k_norm_bias, freqs, positions, slots,
 
 def main():
     import torch_npu  # noqa: F401
+
     from xlite._C import Runtime
 
     logging.getLogger().setLevel(logging.INFO)
@@ -157,8 +179,9 @@ def main():
             positions[::7] = -100  # Padding must not read the RoPE table.
         expected = None
         for table in (freqs, freqs_fp32, freqs_complex):
-            actual = run_test(rt, device, f"random-{tokens}-{table.dtype}", k, k_norm, k_norm_bias,
-                              table, positions, slots, 12, 32)
+            actual = run_test(
+                rt, device, f"random-{tokens}-{table.dtype}", k, k_norm, k_norm_bias, table, positions, slots, 12, 32
+            )
             if expected is None:
                 expected = actual
             else:
@@ -168,47 +191,94 @@ def main():
     edge_cases = [
         ("zero", torch.zeros(17, HEAD_DIM).bfloat16(), k_norm, k_norm_bias),
         ("constant", torch.full((17, HEAD_DIM), 4, dtype=torch.bfloat16), k_norm, k_norm_bias),
-        ("tiny-scale", torch.zeros(17, HEAD_DIM).bfloat16(), k_norm,
-         torch.arange(HEAD_DIM).float() * 1e-10),
-        ("affine-only", torch.randn(17, HEAD_DIM, generator=generator).bfloat16(), k_norm * 0,
-         torch.randn(HEAD_DIM, generator=generator)),
+        ("tiny-scale", torch.zeros(17, HEAD_DIM).bfloat16(), k_norm, torch.arange(HEAD_DIM).float() * 1e-10),
+        (
+            "affine-only",
+            torch.randn(17, HEAD_DIM, generator=generator).bfloat16(),
+            k_norm * 0,
+            torch.randn(HEAD_DIM, generator=generator),
+        ),
     ]
     for name, k, weight, bias in edge_cases:
-        run_test(rt, device, name, k, weight, bias, freqs, torch.arange(17),
-                 torch.arange(17).int() + 31, 3, 32)
+        run_test(rt, device, name, k, weight, bias, freqs, torch.arange(17), torch.arange(17).int() + 31, 3, 32)
 
     # Low-variance rows distinguish the two epsilon values.
     k = (torch.randn(17, HEAD_DIM, generator=generator) * 1e-4).bfloat16()
     epsilon_scales = []
     for norm_eps in (1e-6, 1e-5):
         _, scales = run_test(
-            rt, device, f"epsilon-{norm_eps:g}", k, k_norm, k_norm_bias, freqs,
-            torch.arange(17), torch.arange(17).int() + 31, 3, 32, norm_eps=norm_eps)
+            rt,
+            device,
+            f"epsilon-{norm_eps:g}",
+            k,
+            k_norm,
+            k_norm_bias,
+            freqs,
+            torch.arange(17),
+            torch.arange(17).int() + 31,
+            3,
+            32,
+            norm_eps=norm_eps,
+        )
         epsilon_scales.append(scales)
     assert not torch.equal(*epsilon_scales), "norm_eps must affect K scales"
 
     # Exercise an outlier and a row stride not aligned to 32 bytes.
     k_outlier = torch.randn(17, HEAD_DIM + 1, generator=generator).bfloat16()
     k_outlier[:, 0] = 1024
-    run_test(rt, device, "odd-stride-outlier", k_outlier, k_norm, k_norm_bias,
-             freqs, torch.arange(17), torch.arange(17).int() + 31, 3, 32)
+    run_test(
+        rt,
+        device,
+        "odd-stride-outlier",
+        k_outlier,
+        k_norm,
+        k_norm_bias,
+        freqs,
+        torch.arange(17),
+        torch.arange(17).int() + 31,
+        3,
+        32,
+    )
 
     # Guard both ends of cache views with unaligned addresses.
-    expected = run_test(rt, device, "offset-cache-views", k_outlier, k_norm, k_norm_bias, freqs,
-                        torch.arange(17), torch.arange(17).int(), 1, 32, cache_offset=1)
+    expected = run_test(
+        rt,
+        device,
+        "offset-cache-views",
+        k_outlier,
+        k_norm,
+        k_norm_bias,
+        freqs,
+        torch.arange(17),
+        torch.arange(17).int(),
+        1,
+        32,
+        cache_offset=1,
+    )
 
     # Unused metadata capacity is ignored.
     positions = torch.cat((torch.arange(17), torch.full((15,), -100)))
     slots = torch.cat((torch.arange(17).int(), torch.full((15,), 32, dtype=torch.int32)))
-    actual = run_test(rt, device, "metadata-capacity", k_outlier, k_norm, k_norm_bias,
-                      freqs, positions, slots, 1, 32)
+    actual = run_test(rt, device, "metadata-capacity", k_outlier, k_norm, k_norm_bias, freqs, positions, slots, 1, 32)
     for value, reference_value in zip(actual, expected):
         torch.testing.assert_close(value, reference_value, rtol=0, atol=0)
 
     # Dim-0 pitched cache views: writes scatter through the strided rows.
-    run_test(rt, device, "pitched-cache-views", k_outlier, k_norm, k_norm_bias, freqs,
-             torch.arange(17), torch.arange(17).int() * 5 + 37, 4, 32,
-             k_pitch=35 * HEAD_DIM, scale_pitch=35)
+    run_test(
+        rt,
+        device,
+        "pitched-cache-views",
+        k_outlier,
+        k_norm,
+        k_norm_bias,
+        freqs,
+        torch.arange(17),
+        torch.arange(17).int() * 5 + 37,
+        4,
+        32,
+        k_pitch=35 * HEAD_DIM,
+        scale_pitch=35,
+    )
     logging.info("indexer_k_cache_c8 tests passed")
 
 

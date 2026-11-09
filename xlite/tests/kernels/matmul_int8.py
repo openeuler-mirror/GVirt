@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -9,23 +8,25 @@
 # ===============================================================================
 import torch
 import torch_npu
+
 from xlite._C import Runtime, matmul_dequant
 
 # allow weight_nz
 torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
 
-dev_id=0
+dev_id = 0
 debug = False
 
 rt = Runtime(dev_id, size=500)
 torch.npu.set_device(dev_id)
 
+
 def npu_quant_matmul_cpu(
-    x: torch.Tensor,                    # INT8 [M, K]
-    weight: torch.Tensor,               # INT8 [N, K] (注意 NPU 通常存储为 [N, K])
-    deq_scale: torch.Tensor,            # FP32, shape 可广播到 [M, N]
-    bias: torch.Tensor,                 # INT32 量化偏置 [N]
-    output_dtype: torch.dtype = torch.float16
+    x: torch.Tensor,  # INT8 [M, K]
+    weight: torch.Tensor,  # INT8 [N, K] (注意 NPU 通常存储为 [N, K])
+    deq_scale: torch.Tensor,  # FP32, shape 可广播到 [M, N]
+    bias: torch.Tensor,  # INT32 量化偏置 [N]
+    output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """
     模拟 torch_npu.npu_quant_matmul
@@ -55,14 +56,16 @@ def npu_quant_matmul_cpu(
 
     return output.to(output_dtype)
 
-def gen_tf32_rand(n, device='cpu'):
+
+def gen_tf32_rand(n, device="cpu"):
     """
     fixpipe 采用 TF32 格式, 1 符号位, 8 指数位, 10 尾数位, 后 13 位要清零
     """
-    sign = torch.randint(0, 2, (n,), dtype=torch.int32, device=device) << 31      # bit 31
-    exp  = torch.randint(125, 130, (n,), dtype=torch.int32, device=device) << 23    # bits 23-30
-    mant = torch.randint(0, 512, (n,), dtype=torch.int32, device=device) << 13   # bits 13-22
+    sign = torch.randint(0, 2, (n,), dtype=torch.int32, device=device) << 31  # bit 31
+    exp = torch.randint(125, 130, (n,), dtype=torch.int32, device=device) << 23  # bits 23-30
+    mant = torch.randint(0, 512, (n,), dtype=torch.int32, device=device) << 13  # bits 13-22
     return (sign | exp | mant).view(torch.float32).clone()
+
 
 test_sizes = [
     [8192, 768, 2048],
@@ -79,12 +82,12 @@ for weight_nz in [True, False]:
 
             x = torch.randn(m, k, dtype=dtype, device=f"npu:{dev_id}")
             y = torch.randn(k, n, dtype=dtype, device=f"npu:{dev_id}")
-            
+
             if transpose:
                 y_in = y.clone()
             else:
                 y_in = y.transpose(0, 1).contiguous().reshape(n, k)
-                
+
             if weight_nz:
                 ACL_FORMAT_FRACTAL_NZ = 29
                 y_in = torch_npu.npu_format_cast(y_in, ACL_FORMAT_FRACTAL_NZ)
@@ -102,16 +105,22 @@ for weight_nz in [True, False]:
             scale[0::2] = deqScale[0::1]
             scale[1::2] = 0
             torch.npu.synchronize()
-            matmul_dequant(rt, x, y_in, bias, scale, z, weight_nz=weight_nz and dtype != torch.float, transpose=transpose)
+            matmul_dequant(
+                rt, x, y_in, bias, scale, z, weight_nz=weight_nz and dtype != torch.float, transpose=transpose
+            )
             torch.npu.synchronize()
 
             if transpose:
-                print(f'[{m}, {k}] x [{k}, {n}] {dtype} weight_nz:{weight_nz and dtype != torch.float} matmul executed!')
+                print(
+                    f"[{m}, {k}] x [{k}, {n}] {dtype} weight_nz:{weight_nz and dtype != torch.float} matmul executed!"
+                )
             else:
-                print(f'[{m}, {k}] x [{n}, {k}] {dtype} weight_nz:{weight_nz and dtype != torch.float} matmul executed!')
+                print(
+                    f"[{m}, {k}] x [{n}, {k}] {dtype} weight_nz:{weight_nz and dtype != torch.float} matmul executed!"
+                )
             try:
                 torch.testing.assert_close(standard, z.to("cpu"), atol=1e-5, rtol=1e-3)
             except AssertionError as e:
-                print(f'{e}')
-                print(f'torch_npu: {standard}')
-                print(f'xlite: {z}')
+                print(f"{e}")
+                print(f"torch_npu: {standard}")
+                print(f"xlite: {z}")

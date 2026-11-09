@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -27,6 +26,7 @@
 
 实验2c/3/4/5 仅 XLITE_BENCH_TIMED=ON 构建提供(默认构建自动跳过并提示)。
 """
+
 import os
 import re
 import statistics
@@ -37,12 +37,12 @@ import numpy as np
 import torch
 import torch_npu
 
+import xlite._C as _C
 from xlite._C import (  # noqa: F401
     Runtime,
     bench_empty,
     bench_scalar,
 )
-import xlite._C as _C
 
 # ==================== 公共设施(全实验共用) ====================
 
@@ -53,8 +53,8 @@ bench_mte_raw = getattr(_C, "bench_mte", None)
 bench_vec_raw = getattr(_C, "bench_vec", None)
 bench_cube_raw = getattr(_C, "bench_cube", None)
 
-REPS = 5                              # 每配置重复次数, 取中位
-BENCH_CYCLES_PER_US = 50              # SYS_CNT 固定 50MHz: cycles/50 = us
+REPS = 5  # 每配置重复次数, 取中位
+BENCH_CYCLES_PER_US = 50  # SYS_CNT 固定 50MHz: cycles/50 = us
 U32 = 1 << 32
 
 # kernel 侧 BENCH_MTE_STRIDE: 每 block 的标量输出(ticks/acc)独占一条 64B GM line
@@ -89,13 +89,11 @@ def _mte_ticks_us(ticks, nblock):
     """ticks 前 nblock 组(每 block 3 槽 t0/t1/t2, MTE_STRIDE 字节步距) ->
     [(issue, complete, drain)] us. MTE/VEC 两家族共用。"""
     v = ticks.cpu().tolist()
-    w = MTE_STRIDE // 8                 # 每 block 占的 int64 槽数
+    w = MTE_STRIDE // 8  # 每 block 占的 int64 槽数
     out = []
     for b in range(nblock):
-        t0, t1, t2 = v[w * b:w * b + 3]
-        out.append(((t1 - t0) / BENCH_CYCLES_PER_US,
-                    (t2 - t0) / BENCH_CYCLES_PER_US,
-                    (t2 - t1) / BENCH_CYCLES_PER_US))
+        t0, t1, t2 = v[w * b : w * b + 3]
+        out.append(((t1 - t0) / BENCH_CYCLES_PER_US, (t2 - t0) / BENCH_CYCLES_PER_US, (t2 - t1) / BENCH_CYCLES_PER_US))
     return out
 
 
@@ -126,7 +124,7 @@ def bench_cube(rt, variant, a, b, c, ticks, m0, n0, k0, block_num=0):
 
 # ==================== 实验 1: 空算子 launch floor ====================
 
-EMPTY_ITERS = 5                       # 每核型下发次数
+EMPTY_ITERS = 5  # 每核型下发次数
 
 
 def run_empty(rt):
@@ -134,8 +132,7 @@ def run_empty(rt):
     device 精确值见 --analyze [1]。"""
     print(f"[实验1] 空算子 launch floor(每核型 {EMPTY_ITERS} 次下发, wall 中位)")
     print(f"   {'kernel':<10s}{'blockNum':>9s}{'wall_med_us':>12s}")
-    for name, variant in (("empty_aiv", "aiv"), ("empty_aic", "aic"),
-                          ("empty_mix", "mix")):
+    for name, variant in (("empty_aiv", "aiv"), ("empty_aic", "aic"), ("empty_mix", "mix")):
         walls, block_num = [], None
         for _ in range(EMPTY_ITERS):
             t0 = time.perf_counter()
@@ -147,13 +144,14 @@ def run_empty(rt):
 
 # ==================== 实验 2: 标量依赖链(2a 核对/2b wall/2c SYS_CNT) ====================
 
-INT_SEED = 3                          # 奇数: mul 链不会立刻塌缩到 0
-FADD_SEED = 1e-30                     # 1e6 次累加后仍远小于 fp32 上限
-VERIFY_ITERS = 1000                   # 小规模先核对数值, 确认测的不是被优化掉的循环
+INT_SEED = 3  # 奇数: mul 链不会立刻塌缩到 0
+FADD_SEED = 1e-30  # 1e6 次累加后仍远小于 fp32 上限
+VERIFY_ITERS = 1000  # 小规模先核对数值, 确认测的不是被优化掉的循环
 ITERS_LIST = [10_000, 100_000, 1_000_000]
 
 
 # 标量参考模型: 与 kernel 逐位等价的 Python 实现(核对测量有效性用)
+
 
 def ref_add(seed, iters):
     # acc += (seed ^ i): 操作数与计数器纠缠, 无闭式解, 须逐次模拟
@@ -264,11 +262,15 @@ def run_scalar(rt, out_i32, out_f32):
     # compl(=t2-t0) 为主口径, drain(=t2-t1) 为在飞排空
     i_big = ITERS_LIST[-1]
     i_small = ITERS_LIST[0]
+
     def _fmt_iters(n):
         return f"{n // 1000}K" if n < 1_000_000 else f"{n // 1_000_000}M"
-    print(f"       {'variant':<16s}{'issue@' + _fmt_iters(i_big):>12s}"
-          f"{'compl@' + _fmt_iters(i_big):>12s}{'ns/op':>10s}"
-          f"{'drain':>10s}{'ns/op@' + _fmt_iters(i_small):>11s}")
+
+    print(
+        f"       {'variant':<16s}{'issue@' + _fmt_iters(i_big):>12s}"
+        f"{'compl@' + _fmt_iters(i_big):>12s}{'ns/op':>10s}"
+        f"{'drain':>10s}{'ns/op@' + _fmt_iters(i_small):>11s}"
+    )
     for name, variant, kind, _, seed in OPS:
         out = out_f32 if kind == "f32" else out_i32
         meds = {}
@@ -280,22 +282,23 @@ def run_scalar(rt, out_i32, out_f32):
                 issue.append(c1 - c0)
                 compl.append(c2 - c0)
                 drain.append(c2 - c1)
-            meds[iters] = (statistics.median(issue) / BENCH_CYCLES_PER_US,
-                           statistics.median(compl) / BENCH_CYCLES_PER_US,
-                           statistics.median(drain) / BENCH_CYCLES_PER_US)
+            meds[iters] = (
+                statistics.median(issue) / BENCH_CYCLES_PER_US,
+                statistics.median(compl) / BENCH_CYCLES_PER_US,
+                statistics.median(drain) / BENCH_CYCLES_PER_US,
+            )
         ib, cbm, db = meds[i_big]
         nsop_b = cbm * 1000.0 / i_big
         nsop_s = meds[i_small][1] * 1000.0 / i_small
-        print(f"       {variant:<16s}{ib:>12.2f}{cbm:>12.2f}{nsop_b:>10.3f}"
-              f"{db:>10.2f}{nsop_s:>11.3f}")
+        print(f"       {variant:<16s}{ib:>12.2f}{cbm:>12.2f}{nsop_b:>10.3f}{db:>10.2f}{nsop_s:>11.3f}")
 
 
 # ==================== 实验 3: MTE 访存(3a 核对/3b 反消解/3c 带宽/3d 时延) ====================
 
-MTE_TILE = 98304                       # kernel 侧 BENCH_MTE_TILE(=UB_SIZE/2), 须同步
+MTE_TILE = 98304  # kernel 侧 BENCH_MTE_TILE(=UB_SIZE/2), 须同步
 MTE_VARIANTS = ("read", "write", "copy")
-MTE_CHASE_ITERS = 2048                 # chase 每次调用的追逐步数
-MTE_TARGET_BYTES = 64 << 20            # iters 自适应目标: 总搬运量恒定, 小 size 多重复
+MTE_CHASE_ITERS = 2048  # chase 每次调用的追逐步数
+MTE_TARGET_BYTES = 64 << 20  # iters 自适应目标: 总搬运量恒定, 小 size 多重复
 MTE_SIZES_DEFAULT = [64 << 10, 256 << 10, 1 << 20, 4 << 20, 16 << 20, 64 << 20, 256 << 20]
 
 
@@ -343,9 +346,9 @@ def _mte_ring(size, rng):
     succ = np.empty(n, dtype=np.uint32)
     succ[perm[:-1]] = perm[1:]
     succ[perm[-1]] = perm[0]
-    succ_off = succ * 64                    # 块 i 首 u32 = 64 * succ[i]
+    succ_off = succ * 64  # 块 i 首 u32 = 64 * succ[i]
     buf = np.zeros(size, dtype=np.uint8)
-    buf.view(np.uint32)[::16] = succ_off    # 每 64B 块的第 0 个 u32
+    buf.view(np.uint32)[::16] = succ_off  # 每 64B 块的第 0 个 u32
     return buf, succ_off
 
 
@@ -369,7 +372,7 @@ def _mte_read_expect(src_np, size, nblock):
             exp.append(0)
             continue
         gbo = g0 + (size - 1 - g0) // (nblock * MTE_TILE) * (nblock * MTE_TILE)
-        exp.append(int.from_bytes(src_np[gbo:gbo + 4].tobytes(), "little"))
+        exp.append(int.from_bytes(src_np[gbo : gbo + 4].tobytes(), "little"))
     return exp
 
 
@@ -380,7 +383,7 @@ def _mte_write_expect(src_np, size, nblock):
         gbo = b * MTE_TILE
         while gbo < size:
             ln = min(MTE_TILE, size - gbo)
-            exp[gbo:gbo + ln] = src_np[0:ln]
+            exp[gbo : gbo + ln] = src_np[0:ln]
             gbo += nblock * MTE_TILE
     return exp
 
@@ -405,8 +408,9 @@ def _mte_check(rt, b_full):
         assert torch.equal(dst, src), "copy_aiv: dst != src"
         dst = torch.zeros(size, dtype=torch.int8, device="npu:0")
         bench_mte(rt, "write_aiv", src, dst, ticks, size, 1, block)
-        assert np.array_equal(dst.cpu().numpy().view(np.uint8),
-                              _mte_write_expect(src_np, size, B)), "write_aiv: 平铺不符"
+        assert np.array_equal(dst.cpu().numpy().view(np.uint8), _mte_write_expect(src_np, size, B)), (
+            "write_aiv: 平铺不符"
+        )
         dst32 = torch.zeros((MTE_STRIDE // 4) * B, dtype=torch.int32, device="npu:0")
         bench_mte(rt, "read_aiv", src, dst32, ticks, size, 1, block)
         got = _mte_accs(dst32, B)
@@ -418,8 +422,10 @@ def _mte_check(rt, b_full):
     got = _mte_accs(dst, 1)[0]
     exp = _mte_chase_fold(succ_off, 100)
     assert got == exp, f"chase_aiv: got {got}, expected {exp}"
-    print(f"   3a) 数值核对(size=1MiB, iters=1): copy 全等 / write 平铺 / "
-          f"read 末 tile 首 u32 / chase 折叠, B=1,{b_full} 全部一致")
+    print(
+        f"   3a) 数值核对(size=1MiB, iters=1): copy 全等 / write 平铺 / "
+        f"read 末 tile 首 u32 / chase 折叠, B=1,{b_full} 全部一致"
+    )
 
 
 def _mte_anti_dce(rt):
@@ -437,9 +443,11 @@ def _mte_anti_dce(rt):
             compls.append(_mte_ticks_us(ticks, 1)[0][1])
         res[tag] = (it, statistics.median(compls))
     (i1, c1), (i2, c2) = res["I"], res["2I"]
-    print(f"   3b) 反消解(read@4MiB): I={i1}: compl={c1:8.1f}us "
-          f"({i1 * size / c1 / 1000:6.1f} GB/s)   2I={i2}: compl={c2:8.1f}us "
-          f"({i2 * size / c2 / 1000:6.1f} GB/s)   ratio={c2 / c1:.2f}")
+    print(
+        f"   3b) 反消解(read@4MiB): I={i1}: compl={c1:8.1f}us "
+        f"({i1 * size / c1 / 1000:6.1f} GB/s)   2I={i2}: compl={c2:8.1f}us "
+        f"({i2 * size / c2 / 1000:6.1f} GB/s)   ratio={c2 / c1:.2f}"
+    )
     assert 1.6 <= c2 / c1 <= 2.4, f"反消解失败: iters 翻倍 complete 比值 {c2 / c1:.2f}"
 
 
@@ -449,9 +457,11 @@ def _mte_bw_sweep(rt, sizes, b_full):
     聚合 GB/s = iters*size/compl(引擎计, copy 的字节只计一遍); 每核 = 聚合/actB。
     每 (size, B) 组合顺带数值抽验, 覆盖 3a 未及的多段/block 形态。"""
     print(f"   3c) 带宽 sweep({len(sizes)} 个 size x 3 变体 x block={{1,满核}}):")
-    print(f"       {'size':>6s} {'variant':>6s} {'B':>3s}{'actB':>5s}{'I':>5s}"
-          f"{'issue_us':>9s}{'compl_us':>9s}{'drain_us':>9s}{'agg GB/s':>9s}"
-          f"{'per-core':>9s}")
+    print(
+        f"       {'size':>6s} {'variant':>6s} {'B':>3s}{'actB':>5s}{'I':>5s}"
+        f"{'issue_us':>9s}{'compl_us':>9s}{'drain_us':>9s}{'agg GB/s':>9s}"
+        f"{'per-core':>9s}"
+    )
     for size in sizes:
         iters = _mte_iters(size)
         src_np = np.random.default_rng(1).integers(0, 256, size=size, dtype=np.uint8)
@@ -470,27 +480,31 @@ def _mte_bw_sweep(rt, sizes, b_full):
                 for _ in range(REPS):
                     n = bench_mte(rt, f"{variant}_aiv", src, dst, ticks, size, iters, block)
                     tk = _mte_ticks_us(ticks, n)
-                    rows.append((max(t[0] for t in tk), max(t[1] for t in tk),
-                                 max(t[2] for t in tk)))
+                    rows.append((max(t[0] for t in tk), max(t[1] for t in tk), max(t[2] for t in tk)))
                 issue = statistics.median([r[0] for r in rows])
                 compl = statistics.median([r[1] for r in rows])
                 drain = statistics.median([r[2] for r in rows])
                 agg = iters * size / compl / 1000
-                print(f"       {_mte_fmt_size(size):>6s} {variant:>6s} {n:>3d}{active:>5d}"
-                      f"{iters:>5d}{issue:>9.1f}{compl:>9.1f}{drain:>9.1f}{agg:>9.1f}"
-                      f"{agg / active:>9.1f}")
+                print(
+                    f"       {_mte_fmt_size(size):>6s} {variant:>6s} {n:>3d}{active:>5d}"
+                    f"{iters:>5d}{issue:>9.1f}{compl:>9.1f}{drain:>9.1f}{agg:>9.1f}"
+                    f"{agg / active:>9.1f}"
+                )
                 if variant == "copy":
                     assert torch.equal(dst_i8, src), f"copy {size} B={n}: dst != src"
                 elif variant == "write":
-                    assert np.array_equal(dst_i8.cpu().numpy().view(np.uint8), exp_write), \
+                    assert np.array_equal(dst_i8.cpu().numpy().view(np.uint8), exp_write), (
                         f"write {size} B={n}: 平铺不符"
+                    )
                 else:
                     # read 的期望依赖 MTE2 同目标有序完成, 大规模下仅告警不中断
                     # (3a 已对基础形态硬校验)
                     got = _mte_accs(dst_i32, n)
                     if got != exp_read:
-                        print(f"       [warn] read {size} B={n}: 末 tile 首 u32 不符"
-                              "(MTE2 完成序假设该规模不成立, 属引擎次序发现)")
+                        print(
+                            f"       [warn] read {size} B={n}: 末 tile 首 u32 不符"
+                            "(MTE2 完成序假设该规模不成立, 属引擎次序发现)"
+                        )
 
 
 def _mte_lat_sweep(rt, sizes):
@@ -498,8 +512,7 @@ def _mte_lat_sweep(rt, sizes):
     ns/step = complete/iters = 经 MTE 的 load-to-use 时延(MTE 下发 + GM 时延 +
     MTE2->S 握手), 每步消费上一步数据 -> 无法预取, lat_mem_rd 的忠实映射。"""
     print(f"   3d) 时延 sweep(chase 依赖链, {MTE_CHASE_ITERS} 步/次, 单 block):")
-    print(f"       {'size':>6s}{'steps':>7s}{'issue_us':>10s}{'compl_us':>10s}"
-          f"{'drain_us':>10s}{'ns/step':>9s}")
+    print(f"       {'size':>6s}{'steps':>7s}{'issue_us':>10s}{'compl_us':>10s}{'drain_us':>10s}{'ns/step':>9s}")
     rng = np.random.default_rng(7)
     for size in sizes:
         ring, succ_off = _mte_ring(size, rng)
@@ -516,8 +529,10 @@ def _mte_lat_sweep(rt, sizes):
         issue = statistics.median([r[0] for r in rows])
         compl = statistics.median([r[1] for r in rows])
         drain = statistics.median([r[2] for r in rows])
-        print(f"       {_mte_fmt_size(size):>6s}{MTE_CHASE_ITERS:>7d}{issue:>10.1f}"
-              f"{compl:>10.1f}{drain:>10.2f}{compl * 1000.0 / MTE_CHASE_ITERS:>9.1f}")
+        print(
+            f"       {_mte_fmt_size(size):>6s}{MTE_CHASE_ITERS:>7d}{issue:>10.1f}"
+            f"{compl:>10.1f}{drain:>10.2f}{compl * 1000.0 / MTE_CHASE_ITERS:>9.1f}"
+        )
 
 
 def run_mte(rt, sizes):
@@ -533,15 +548,20 @@ def run_mte(rt, sizes):
 # ==================== 实验 4: 向量指令(4a 核对/4b 反消解/4c 吞吐 sweep) ====================
 
 VEC_VARIANTS = ("add_f32", "mul_f32", "add_i32", "add_f16", "sqrt_f32", "exp_f32")
-VEC_TORCH = {"add_f32": torch.float32, "mul_f32": torch.float32, "add_i32": torch.int32,
-             "add_f16": torch.float16, "sqrt_f32": torch.float32, "exp_f32": torch.float32}
-VEC_ITEM_BYTES = {"add_f32": 4, "mul_f32": 4, "add_i32": 4, "add_f16": 2,
-                  "sqrt_f32": 4, "exp_f32": 4}
-VEC_REP_BYTES = 256                    # kernel 侧 VECTOR_MAX_BYTESIZE: 一条指令一个 repeat 搬 256B
-VEC_UB_BYTES = 196608                  # kernel 侧 UB_SIZE; 2*elems*sz + 65280(超越函数
-                                       # scratch tile, BENCH_VEC_TMP_BYTES) <= UB, 三侧同步
-VEC_REPS_DEFAULT = (1, 4, 16, 64, 256) # 默认 elems 档位 = repeats 阶梯 x 每 repeat 元素数
-VEC_TARGET_ELEMS = 8 << 20             # iters 自适应目标: 总元素量恒定, 小向量多迭代
+VEC_TORCH = {
+    "add_f32": torch.float32,
+    "mul_f32": torch.float32,
+    "add_i32": torch.int32,
+    "add_f16": torch.float16,
+    "sqrt_f32": torch.float32,
+    "exp_f32": torch.float32,
+}
+VEC_ITEM_BYTES = {"add_f32": 4, "mul_f32": 4, "add_i32": 4, "add_f16": 2, "sqrt_f32": 4, "exp_f32": 4}
+VEC_REP_BYTES = 256  # kernel 侧 VECTOR_MAX_BYTESIZE: 一条指令一个 repeat 搬 256B
+VEC_UB_BYTES = 196608  # kernel 侧 UB_SIZE; 2*elems*sz + 65280(超越函数
+# scratch tile, BENCH_VEC_TMP_BYTES) <= UB, 三侧同步
+VEC_REPS_DEFAULT = (1, 4, 16, 64, 256)  # 默认 elems 档位 = repeats 阶梯 x 每 repeat 元素数
+VEC_TARGET_ELEMS = 8 << 20  # iters 自适应目标: 总元素量恒定, 小向量多迭代
 VEC_ITERS_MAX = 131072
 
 
@@ -610,9 +630,8 @@ def _vec_inputs(variant, elems, rng):
         c = np.full(elems, 3, dtype=np.int32)
     else:
         dt = np.float16 if variant == "add_f16" else np.float32
-        x0 = (rng.random(elems) + 1.0).astype(dt)          # [1, 2)
-        cvals = {"add_f32": 2.0 ** -13, "mul_f32": 1.0 + 2.0 ** -12,
-                 "add_f16": 2.0 ** -10, "sqrt_f32": 1.0, "exp_f32": 0.0}
+        x0 = (rng.random(elems) + 1.0).astype(dt)  # [1, 2)
+        cvals = {"add_f32": 2.0**-13, "mul_f32": 1.0 + 2.0**-12, "add_f16": 2.0**-10, "sqrt_f32": 1.0, "exp_f32": 0.0}
         c = np.full(elems, cvals[variant], dtype=dt)
     return np.concatenate([x0, c])
 
@@ -639,7 +658,7 @@ def _vec_fold(variant, x0, c, iters):
     elif variant == "sqrt_f32":
         for _ in range(iters):
             x = x * np.sqrt(np.float32(c[0]))
-    else:                                                  # exp_f32
+    else:  # exp_f32
         for _ in range(iters):
             x = x * np.exp(np.float32(c[0]))
     return x
@@ -665,13 +684,15 @@ def _vec_check(rt, b_full):
                 # np.array_equal 严格比较 shape(不广播), expect 须先广播到 (B, elems)
                 expect_b = np.broadcast_to(expect, (B, elems))
                 if variant == "exp_f32":
-                    assert np.allclose(got, expect_b, rtol=1e-5, atol=1e-6), \
-                        f"exp_f32 elems={elems} B={B}: 折叠不符"
+                    assert np.allclose(got, expect_b, rtol=1e-5, atol=1e-6), f"exp_f32 elems={elems} B={B}: 折叠不符"
                 else:
-                    assert np.array_equal(got, expect_b), \
+                    assert np.array_equal(got, expect_b), (
                         f"{variant} elems={elems} B={B}: 折叠不符(链结果/chunk 偏移/mask 有误)"
-    print(f"   4a) 数值核对(最小/最大 elems x B=1/{b_full}, 每 block 全数组比对): "
-          f"{len(VEC_VARIANTS)} 变体全部一致(exp 容差, 其余逐位)")
+                    )
+    print(
+        f"   4a) 数值核对(最小/最大 elems x B=1/{b_full}, 每 block 全数组比对): "
+        f"{len(VEC_VARIANTS)} 变体全部一致(exp 容差, 其余逐位)"
+    )
 
 
 def _vec_anti_dce(rt):
@@ -693,8 +714,7 @@ def _vec_anti_dce(rt):
                 compls.append(_mte_ticks_us(ticks, 1)[0][1])
             res[tag] = (itr, statistics.median(compls))
         (i1, c1), (i2, c2) = res["I"], res["2I"]
-        print(f"       {variant}: I={i1}: compl={c1:8.1f}us   2I={i2}: compl={c2:8.1f}us"
-              f"   ratio={c2 / c1:.2f}")
+        print(f"       {variant}: I={i1}: compl={c1:8.1f}us   2I={i2}: compl={c2:8.1f}us   ratio={c2 / c1:.2f}")
         assert 1.6 <= c2 / c1 <= 2.4, f"{variant} 反消解失败: 比值 {c2 / c1:.2f}"
 
 
@@ -705,14 +725,16 @@ def _vec_perf_sweep(rt, sizes, b_full):
     差分表: sqrt/exp 的边际成本 = 同 elems/iters 下 (变体 - mul_f32)。"""
     print(f"   4c) 吞吐 sweep({len(VEC_VARIANTS)} 变体 x elems 档位 x block={{1,满核}}):")
     rng = np.random.default_rng(13)
-    nse_b1 = {}                          # (variant, elems) -> B=1 的 ns/elem
-    mul_base = {}                        # elems -> mul_f32 的 ns/elem(差分基线)
+    nse_b1 = {}  # (variant, elems) -> B=1 的 ns/elem
+    mul_base = {}  # elems -> mul_f32 的 ns/elem(差分基线)
     for variant in VEC_VARIANTS:
         dt_t = VEC_TORCH[variant]
         q = _vec_quantum(variant)
         print(f"\n       -- {variant} --")
-        print(f"       {'elems':>7s}{'reps':>6s}{'I':>7s}{'B':>4s}{'issue_us':>9s}"
-              f"{'compl_us':>9s}{'drain_us':>9s}{'ns/elem':>9s}{'Gelem/s':>9s}")
+        print(
+            f"       {'elems':>7s}{'reps':>6s}{'I':>7s}{'B':>4s}{'issue_us':>9s}"
+            f"{'compl_us':>9s}{'drain_us':>9s}{'ns/elem':>9s}{'Gelem/s':>9s}"
+        )
         for elems in _vec_sizes(variant, sizes):
             iters = _vec_iters(elems)
             src = torch.from_numpy(_vec_inputs(variant, elems, rng)).to("npu:0")
@@ -724,15 +746,16 @@ def _vec_perf_sweep(rt, sizes, b_full):
                 for _ in range(REPS):
                     bench_vec(rt, f"{variant}_aiv", src, out, ticks, elems, iters, block)
                     tk = _mte_ticks_us(ticks, B)
-                    rows.append((max(t[0] for t in tk), max(t[1] for t in tk),
-                                 max(t[2] for t in tk)))
+                    rows.append((max(t[0] for t in tk), max(t[1] for t in tk), max(t[2] for t in tk)))
                 issue = statistics.median([r[0] for r in rows])
                 compl = statistics.median([r[1] for r in rows])
                 drain = statistics.median([r[2] for r in rows])
                 nse = compl * 1000.0 / (iters * elems)
-                ges = B * iters * elems / compl / 1000.0
-                print(f"       {elems:>7d}{elems // q:>6d}{iters:>7d}{B:>4d}{issue:>9.1f}"
-                      f"{compl:>9.1f}{drain:>9.2f}{nse:>9.4f}{ges:>9.2f}")
+                gbs = B * iters * elems / compl / 1000.0
+                print(
+                    f"       {elems:>7d}{elems // q:>6d}{iters:>7d}{B:>4d}{issue:>9.1f}"
+                    f"{compl:>9.1f}{drain:>9.2f}{nse:>9.4f}{gbs:>9.2f}"
+                )
                 if B == 1:
                     nse_b1[(variant, elems)] = nse
                     if variant == "mul_f32":
@@ -767,13 +790,12 @@ def run_vec(rt, sizes):
 # kernel 侧 Matmul::Init 的 tile 预算公式(Matmul<half,float,half>, 须同步):
 #   L0A = m0*k0 <= 64KB; L0B = n0*k0 <= 64KB; L0C = 4*m0*n0 <= 64KB; L1 = 4*k0*(2*m0+n0) <= 512KB
 # m0/n0/k0 须为 16 的倍数。tile = (m0, n0, k0), matmul 为 A[m0,k0] @ B[n0,k0].T -> C[m0,n0]
-CUBE_TILES_DEFAULT = [(128, 128, 128), (128, 128, 256), (64, 128, 256),
-                      (128, 64, 256), (64, 256, 256)]
-CUBE_TICK_SLOTS = 8               # kernel 每 block 写 3 槽 + 5 空位(步距 8 int64)
-CUBE_WARMUP_ITERS = 10            # 反消解/吞吐测量前的 host 下发预热次数
-CUBE_LAUNCH_ITERS = 200           # 反消解/吞吐测量的 host 下发次数
-CUBE_ANTI_DCE_RATIO_LO = 1.6      # iters 翻倍 wall 时间比值下界
-CUBE_ANTI_DCE_RATIO_HI = 2.4      # iters 翻倍 wall 时间比值上界
+CUBE_TILES_DEFAULT = [(128, 128, 128), (128, 128, 256), (64, 128, 256), (128, 64, 256), (64, 256, 256)]
+CUBE_TICK_SLOTS = 8  # kernel 每 block 写 3 槽 + 5 空位(步距 8 int64)
+CUBE_WARMUP_ITERS = 10  # 反消解/吞吐测量前的 host 下发预热次数
+CUBE_LAUNCH_ITERS = 200  # 反消解/吞吐测量的 host 下发次数
+CUBE_ANTI_DCE_RATIO_LO = 1.6  # iters 翻倍 wall 时间比值下界
+CUBE_ANTI_DCE_RATIO_HI = 2.4  # iters 翻倍 wall 时间比值上界
 
 
 def _cube_l0_l1_bytes(m0, n0, k0):
@@ -792,8 +814,10 @@ def _cube_check_tile(m0, n0, k0):
         raise ValueError(f"cube tile {m0}x{n0}x{k0}: m0/n0/k0 must be non-zero multiples of 16")
     l0a, l0b, l0c, l1 = _cube_l0_l1_bytes(m0, n0, k0)
     if l0a > 64 * 1024 or l0b > 64 * 1024 or l0c > 64 * 1024 or l1 > 512 * 1024:
-        raise ValueError(f"cube tile {m0}x{n0}x{k0}: exceeds L0/L1 budget "
-                         f"(L0A={l0a}B/64KB, L0B={l0b}B/64KB, L0C={l0c}B/64KB, L1={l1}B/512KB)")
+        raise ValueError(
+            f"cube tile {m0}x{n0}x{k0}: exceeds L0/L1 budget "
+            f"(L0A={l0a}B/64KB, L0B={l0b}B/64KB, L0C={l0c}B/64KB, L1={l1}B/512KB)"
+        )
 
 
 def _parse_cube_tiles(spec):
@@ -818,9 +842,7 @@ def _cube_ticks_us(ticks):
     """单 block ticks(3 槽 t0/t1/t2, 步距 8 int64) -> (issue, complete, drain) us。"""
     v = ticks.cpu().tolist()
     t0, t1, t2 = v[0], v[1], v[2]
-    return ((t1 - t0) / BENCH_CYCLES_PER_US,
-            (t2 - t0) / BENCH_CYCLES_PER_US,
-            (t2 - t1) / BENCH_CYCLES_PER_US)
+    return ((t1 - t0) / BENCH_CYCLES_PER_US, (t2 - t0) / BENCH_CYCLES_PER_US, (t2 - t1) / BENCH_CYCLES_PER_US)
 
 
 def _cube_check(rt):
@@ -837,10 +859,10 @@ def _cube_check(rt):
         ticks = torch.zeros(CUBE_TICK_SLOTS, dtype=torch.int64, device="npu:0")
         bench_cube(rt, "cube_mmad_aic", a, b, c, ticks, m0, n0, k0, 0)
         got = c.cpu().numpy().reshape(m0, n0)
-        assert np.allclose(got, expect, rtol=1e-2, atol=1e-2), \
+        assert np.allclose(got, expect, rtol=1e-2, atol=1e-2), (
             f"cube_mmad_aic {m0}x{n0}x{k0}: C != A@B.T (max diff {np.max(np.abs(got - expect))})"
-    print(f"   5a) 数值核对({len(CUBE_TILES_DEFAULT)} 个 tile): C == A@B.T "
-          f"(FP16 容差 rtol=atol=1e-2) 全部一致")
+        )
+    print(f"   5a) 数值核对({len(CUBE_TILES_DEFAULT)} 个 tile): C == A@B.T (FP16 容差 rtol=atol=1e-2) 全部一致")
 
 
 def _cube_anti_dce(rt):
@@ -869,11 +891,12 @@ def _cube_anti_dce(rt):
         res[tag] = (iters, _med_us(walls))
     (i1, w1), (i2, w2) = res["I"], res["2I"]
     ratio = w2 / w1
-    print(f"   5b) 反消解(host 下发 {m0}x{n0}x{k0}): "
-          f"I={i1}: wall={w1:8.1f}us ({w1 / i1:.2f} us/launch)   "
-          f"2I={i2}: wall={w2:8.1f}us ({w2 / i2:.2f} us/launch)   ratio={ratio:.2f}")
-    assert CUBE_ANTI_DCE_RATIO_LO <= ratio <= CUBE_ANTI_DCE_RATIO_HI, \
-        f"反消解失败: iters 翻倍 wall 比值 {ratio:.2f}"
+    print(
+        f"   5b) 反消解(host 下发 {m0}x{n0}x{k0}): "
+        f"I={i1}: wall={w1:8.1f}us ({w1 / i1:.2f} us/launch)   "
+        f"2I={i2}: wall={w2:8.1f}us ({w2 / i2:.2f} us/launch)   ratio={ratio:.2f}"
+    )
+    assert CUBE_ANTI_DCE_RATIO_LO <= ratio <= CUBE_ANTI_DCE_RATIO_HI, f"反消解失败: iters 翻倍 wall 比值 {ratio:.2f}"
 
 
 def _cube_tile_sweep(rt, tiles):
@@ -883,8 +906,7 @@ def _cube_tile_sweep(rt, tiles):
     SYS_CNT 口径: 单次下发的核内 3 槽(t0=before Run, t1=after Run, t2=after PIPE_ALL),
     compl = t2-t0 为单次 matmul 的核内完成时间。"""
     print(f"   5c) tile sweep({len(tiles)} 个 tile, host 下发 {CUBE_LAUNCH_ITERS} 次/测量):")
-    print(f"       {'tile':>14s}{'us/launch':>10s}{'issue_us':>10s}"
-          f"{'compl_us':>10s}{'drain_us':>10s}{'TFLOPS':>9s}")
+    print(f"       {'tile':>14s}{'us/launch':>10s}{'issue_us':>10s}{'compl_us':>10s}{'drain_us':>10s}{'TFLOPS':>9s}")
     rng = np.random.default_rng(99)
     for m0, n0, k0 in tiles:
         a = torch.from_numpy(rng.standard_normal((m0, k0)).astype(np.float16)).to("npu:0")
@@ -917,8 +939,9 @@ def _cube_tile_sweep(rt, tiles):
         drain = statistics.median(drains)
         # TFLOPS = 2*m*n*k / (compl_us * 1e6) * 1e-12 = 2*m*n*k / compl_us / 1e6
         tflops = 2.0 * m0 * n0 * k0 / compl / 1e6
-        print(f"       {f'{m0}x{n0}x{k0}':>14s}{wall_per:>10.2f}{issue:>10.2f}"
-              f"{compl:>10.2f}{drain:>10.2f}{tflops:>9.2f}")
+        print(
+            f"       {f'{m0}x{n0}x{k0}':>14s}{wall_per:>10.2f}{issue:>10.2f}{compl:>10.2f}{drain:>10.2f}{tflops:>9.2f}"
+        )
 
 
 def run_cube(rt, tiles):
@@ -932,8 +955,8 @@ def run_cube(rt, tiles):
 
 # ==================== 编排与分析 ====================
 
-def run_bench(mte_sizes=None, mte_only=False, vec_sizes=None, vec_only=False,
-              cube_tiles=None, cube_only=False):
+
+def run_bench(mte_sizes=None, mte_only=False, vec_sizes=None, vec_only=False, cube_tiles=None, cube_only=False):
     rt = Runtime(0, size=500)
     torch.npu.set_device(0)
     out_i32 = torch.zeros(1, dtype=torch.int32, device="npu:0")
@@ -977,7 +1000,7 @@ def run_bench(mte_sizes=None, mte_only=False, vec_sizes=None, vec_only=False,
         run_cube(rt, cube_tiles if cube_tiles else CUBE_TILES_DEFAULT)
 
 
-FIT_MIN = 10_000        # 拟合/分析只取 >= 该值 的调用(更小规模截距占比大)
+FIT_MIN = 10_000  # 拟合/分析只取 >= 该值 的调用(更小规模截距占比大)
 
 
 def analyze(csvs):
@@ -990,14 +1013,11 @@ def analyze(csvs):
         frames.append(d)
     df = pd.concat(frames, ignore_index=True)
     is_scalar = df.op.str.startswith("scalar_")
-    df.loc[is_scalar, "iters"] = (
-        df[is_scalar].args.str.extract(r"(\d+)\s*$", expand=False).astype(int)
-    )
+    df.loc[is_scalar, "iters"] = df[is_scalar].args.str.extract(r"(\d+)\s*$", expand=False).astype(int)
 
     bar = "=" * 74
     print(bar)
-    print("微基准分析报告  (数据: %s, 每算子含多次调用取中位)" %
-          ", ".join(os.path.basename(c) for c in csvs))
+    print(f"微基准分析报告  (数据: {', '.join(os.path.basename(c) for c in csvs)}, 每算子含多次调用取中位)")
     print(bar)
 
     # [1] launch floor
@@ -1006,8 +1026,10 @@ def analyze(csvs):
     if len(empt):
         g = empt.groupby("op").device_us.agg(["median", "min", "max", "count"])
         for op, row in g.iterrows():
-            print(f"    {op:12s} med = {row['median']:5.1f} us   "
-                  f"(min {row['min']:.1f} / max {row['max']:.1f}, n={int(row['count'])})")
+            print(
+                f"    {op:12s} med = {row['median']:5.1f} us   "
+                f"(min {row['min']:.1f} / max {row['max']:.1f}, n={int(row['count'])})"
+            )
     else:
         print("    (本 CSV 无 empty 算子数据, 跳过)")
 
@@ -1021,8 +1043,8 @@ def analyze(csvs):
         for op in OPS:
             d = sc[sc.op == op[0]]
             a, b = np.polyfit(d.iters, d.device_us, 1)
-            slope[op[0]] = a * 1000.0            # ns/op
-            intercept[op[0]] = b                 # us, launch floor
+            slope[op[0]] = a * 1000.0  # ns/op
+            intercept[op[0]] = b  # us, launch floor
         med = sc.groupby(["op", "iters"]).device_us.median().unstack()
         ns1m = (med[1_000_000] * 1000.0 / 1_000_000).to_dict()
 
@@ -1031,14 +1053,12 @@ def analyze(csvs):
         print(f"    {'运算':<26s}{'@100K':>8s}{'@1M':>8s}{'拟合斜率':>10s}{'截距(us)':>10s}")
         for name, _, _, _, _ in OPS:
             n100 = med.loc[name, 100_000] * 1000.0 / 100_000
-            print(f"    {name:<26s}{n100:>8.3f}{ns1m[name]:>8.3f}"
-                  f"{slope[name]:>10.3f}{intercept[name]:>10.2f}")
+            print(f"    {name:<26s}{n100:>8.3f}{ns1m[name]:>8.3f}{slope[name]:>10.3f}{intercept[name]:>10.2f}")
 
         # [3] 槽模型: 以 add 链 = 3 槽为基准, 看其余运算是否落在整数槽上
         slot = ns1m["scalar_add_aiv"] / 3.0
         print("\n[3] 槽模型 -- 以 add 链 = 3 槽定基准槽宽, 其余运算折合槽数(接近整数")
-        print(f"    则说明所有成本同为该槽宽的整数倍; 槽宽 = {slot:.4f} ns "
-              f"(~{1.0 / slot:.2f} G 槽/s, 由时序反推)")
+        print(f"    则说明所有成本同为该槽宽的整数倍; 槽宽 = {slot:.4f} ns (~{1.0 / slot:.2f} G 槽/s, 由时序反推)")
         for base in ["add", "xor", "add_unroll4", "mul", "fadd", "div"]:
             v = ns1m[f"scalar_{base}_aiv"]
             print(f"    {base:<12s} {v:6.3f} ns  =  {v / slot:5.2f} 槽")
@@ -1076,7 +1096,7 @@ def analyze(csvs):
             print("    3 槽批量回写 + 额外 barrier), 应为 sub-us 级")
             devs = []
             for name, _, _, _, _ in OPS:
-                variant = name[len("scalar_"):]
+                variant = name[len("scalar_") :]
                 if variant not in medt.index or 1_000_000 not in medt.columns:
                     continue
                 if name not in med.index or 1_000_000 not in med.columns:
@@ -1087,13 +1107,14 @@ def analyze(csvs):
                 print(f"    {variant:<16s} timed={tu:8.1f}  untimed={un:8.1f}  diff={tu - un:+5.1f} us")
             small = [abs(d) for _, d in devs if abs(d) <= 5.0]
             if small:
-                print(f"    机制开销判读: {len(small)}/{len(devs)} 变体 |diff|<=5us, 中位 "
-                      f"{statistics.median(small):.2f} us -> 打点机制自身开销 ≈ 0")
+                print(
+                    f"    机制开销判读: {len(small)}/{len(devs)} 变体 |diff|<=5us, 中位 "
+                    f"{statistics.median(small):.2f} us -> 打点机制自身开销 ≈ 0"
+                )
             for v, d in devs:
                 if abs(d) > 5.0:
                     print(f"    {v}: diff={d:+.1f} us 非机制开销 -- timed/untimed 分属不同编译")
-                    print("      单元, 1 槽级整数运算对 TU 代码生成上下文敏感(mul 曾在"
-                          "3↔2 槽间漂移),")
+                    print("      单元, 1 槽级整数运算对 TU 代码生成上下文敏感(mul 曾在3↔2 槽间漂移),")
                     print("      延迟 bound 的 fadd/div 不敏感; 见报告 TU 漂移一节")
             print("    (50MHz 换算自洽: 运行输出 2c) 的 compl_us@1M 应略小于本表 timed 列,")
             print("     差值 = kernel 前后缀 -- 打点前的 prologue + 回写/收尾的 epilogue)")
@@ -1106,18 +1127,20 @@ def analyze(csvs):
         for name, _, _, _, _ in OPS:
             n100 = med.loc[name, 100_000] * 1000.0 / 100_000
             lin_dev = max(lin_dev, abs(n100 - ns1m[name]) / ns1m[name] * 100)
-        print(f"    - 线性自检: ns/op @100K vs @1M 最大偏差 {lin_dev:.1f}% "
-              f"({'OK, 循环真实执行' if lin_dev < 5 else '超 5%, 数据可疑'})")
-        print(f"    - AIV vs AIC: 最大差异 {max_diff:.1f}% "
-              f"({'一致, 标量单元同构' if max_diff < 2 else '存在差异'})")
-        b_aiv = 4 * (ns1m['scalar_add_aiv'] - ns1m['scalar_add_unroll4_aiv']) / 3
-        print(f"    - for 循环控制开销 b = {b_aiv:.3f} ns (占 add 链 "
-              f"{b_aiv / ns1m['scalar_add_aiv'] * 100:.0f}%), 展开无收益 -> 循环控制"
-              "被流水隐藏")
+        print(
+            f"    - 线性自检: ns/op @100K vs @1M 最大偏差 {lin_dev:.1f}% "
+            f"({'OK, 循环真实执行' if lin_dev < 5 else '超 5%, 数据可疑'})"
+        )
+        print(f"    - AIV vs AIC: 最大差异 {max_diff:.1f}% ({'一致, 标量单元同构' if max_diff < 2 else '存在差异'})")
+        b_aiv = 4 * (ns1m["scalar_add_aiv"] - ns1m["scalar_add_unroll4_aiv"]) / 3
+        print(
+            f"    - for 循环控制开销 b = {b_aiv:.3f} ns (占 add 链 "
+            f"{b_aiv / ns1m['scalar_add_aiv'] * 100:.0f}%), 展开无收益 -> 循环控制"
+            "被流水隐藏"
+        )
         if len(empt):
             lo, hi = min(intercept.values()), max(intercept.values())
-            print(f"    - launch floor: 拟合截距 {lo:.1f}~{hi:.1f} us, 与 [1] empty "
-                  "实测互相印证")
+            print(f"    - launch floor: 拟合截距 {lo:.1f}~{hi:.1f} us, 与 [1] empty 实测互相印证")
         print(f"    - 槽模型: add/xor/mul=3 槽, fadd=4 槽, div=8 槽, 槽宽 {slot:.3f} ns")
 
     # [8] bench_mte 外部视角
@@ -1160,9 +1183,15 @@ def analyze(csvs):
             # 结尾前瞻 (?=,|$) 同 [8] 的坑(吞逗号会隔个跳过相邻裸整数)
             nums = re.findall(r"(?:^|, )(\d+)(?=,|$)", str(row.args))
             if len(nums) >= 1 and row.device_us > 0:
-                recs.append((row.variant, int(nums[0]),
-                             int(nums[1]) if len(nums) >= 2 else 1,
-                             int(nums[2]) if len(nums) >= 3 else 1, row.device_us))
+                recs.append(
+                    (
+                        row.variant,
+                        int(nums[0]),
+                        int(nums[1]) if len(nums) >= 2 else 1,
+                        int(nums[2]) if len(nums) >= 3 else 1,
+                        row.device_us,
+                    )
+                )
         if recs:
             t = pd.DataFrame(recs, columns=["variant", "elems", "iters", "block", "device_us"])
             g = t.groupby(["variant", "elems", "block"]).device_us.median()
@@ -1198,9 +1227,11 @@ def main():
             i += 1
         elif a == "--mte-sizes":
             if i + 1 >= len(args):
-                sys.exit("usage: micro_bench.py [--mte-sizes 64k,1m,...] [--mte-only] "
-                         "[--vec-sizes 64,256,...] [--vec-only] "
-                         "[--cube-sizes 128,128,128;...] [--cube-only]")
+                sys.exit(
+                    "usage: micro_bench.py [--mte-sizes 64k,1m,...] [--mte-only] "
+                    "[--vec-sizes 64,256,...] [--vec-only] "
+                    "[--cube-sizes 128,128,128;...] [--cube-only]"
+                )
             spec = args[i + 1]
             i += 2
         elif a.startswith("--mte-sizes="):
@@ -1211,9 +1242,11 @@ def main():
             i += 1
         elif a == "--vec-sizes":
             if i + 1 >= len(args):
-                sys.exit("usage: micro_bench.py [--mte-sizes 64k,1m,...] [--mte-only] "
-                         "[--vec-sizes 64,256,...] [--vec-only] "
-                         "[--cube-sizes 128,128,128;...] [--cube-only]")
+                sys.exit(
+                    "usage: micro_bench.py [--mte-sizes 64k,1m,...] [--mte-only] "
+                    "[--vec-sizes 64,256,...] [--vec-only] "
+                    "[--cube-sizes 128,128,128;...] [--cube-only]"
+                )
             vspec = args[i + 1]
             i += 2
         elif a.startswith("--vec-sizes="):
@@ -1237,9 +1270,11 @@ def main():
             rest.append(a)
             i += 1
     if rest:
-        sys.exit(f"unknown args: {' '.join(rest)} "
-                 "(支持 --quick / --mte-sizes / --mte-only / --vec-sizes / --vec-only / "
-                 "--cube-sizes / --cube-only)")
+        sys.exit(
+            f"unknown args: {' '.join(rest)} "
+            "(支持 --quick / --mte-sizes / --mte-only / --vec-sizes / --vec-only / "
+            "--cube-sizes / --cube-only)"
+        )
     if spec is not None:
         try:
             mte_sizes = _parse_mte_sizes(spec)

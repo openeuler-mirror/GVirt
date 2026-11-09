@@ -4,7 +4,7 @@
 
 DeepSeek-V4 Hyper-Connection 的后融合算子(post-attn/FFN merge):注意力或 FFN 子模块输出后,用 `hc_act` 算出的 `post`/`comb` 门控把被 hc_pre 压缩的 H 条残差流重新展开。数学定义(`tests/kernels/hc_post.py` 模块 docstring,关键字 `term1`/`term2`):
 
-```
+```text
 y[m, k, d] = post[m, k] * x[m, d] + Σ_h comb[m, h*K + k] * residual[m, h, d]
 ```
 

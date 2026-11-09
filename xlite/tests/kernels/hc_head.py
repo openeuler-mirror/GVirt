@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -26,13 +25,14 @@ kernel-level A/B.
 This test composes the same host ops from Python and compares every observable
 intermediate (x_norm, mixes, y) against a pure-PyTorch reference, end-to-end.
 """
+
 import sys
 
 import torch
-import torch_npu  # noqa: F401
 import torch.nn.functional as F
+import torch_npu  # noqa: F401
 
-from xlite._C import Runtime, rmsnorm, matmul, hc_act
+from xlite._C import Runtime, hc_act, matmul, rmsnorm
 
 
 def hc_head_ref(x_3d, hc_fn, hc_scale, hc_base, hc_mult, norm_eps, hc_eps):
@@ -51,9 +51,9 @@ def hc_head_ref(x_3d, hc_fn, hc_scale, hc_base, hc_mult, norm_eps, hc_eps):
     shape = x_3d.size()
     x = x_3d.flatten(2).float()
     rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + norm_eps)
-    mixes = F.linear(x, hc_fn) * rsqrt                  # [b, s, hc_mult]
+    mixes = F.linear(x, hc_fn) * rsqrt  # [b, s, hc_mult]
     pre = torch.sigmoid(mixes * hc_scale[0] + hc_base) + hc_eps
-    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)   # [b, s, hidden]
+    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)  # [b, s, hidden]
     x_norm = (x * rsqrt).reshape(n, hc_dim)
     return x_norm, mixes.reshape(n, hc_mult), pre.reshape(n, hc_mult), y.reshape(n, hidden)
 
@@ -81,31 +81,31 @@ def run_case(b, s, hidden):
     with torch.device("npu"):
         # x [b, s, hc_mult, hidden] bf16 (residual). hc_fn/scale/base stay fp32.
         x_3d = torch.randn(b, s, HC_MULT, hidden, dtype=torch.bfloat16)
-        hc_fn = torch.randn(HC_MULT, hc_dim, dtype=torch.float32)   # [outFeatures=hc_mult, hcDim]
-        hc_scale = torch.randn(1, dtype=torch.float32)              # [1] scalar for pre
-        hc_base = torch.randn(HC_MULT, dtype=torch.float32)         # [hc_mult] pre bias
+        hc_fn = torch.randn(HC_MULT, hc_dim, dtype=torch.float32)  # [outFeatures=hc_mult, hcDim]
+        hc_scale = torch.randn(1, dtype=torch.float32)  # [1] scalar for pre
+        hc_base = torch.randn(HC_MULT, dtype=torch.float32)  # [hc_mult] pre bias
 
     # ---- PyTorch reference (fp32 throughout; the ground truth) ----
     x_norm_ref, mixes_ref, _, y_ref = hc_head_ref(
-        x_3d, hc_fn, hc_scale, hc_base, hc_mult=HC_MULT, norm_eps=NORM_EPS, hc_eps=HC_EPS)
+        x_3d, hc_fn, hc_scale, hc_base, hc_mult=HC_MULT, norm_eps=NORM_EPS, hc_eps=HC_EPS
+    )
     y_ref = y_ref.to(torch.bfloat16).float()
 
     # ---- xlite host-op chain (same order as ForwardHcPre, head path) ----
     with torch.device("npu"):
-        x_flat = x_3d.reshape(n, hc_dim).contiguous()             # bf16
-        x_norm = torch.empty(n, hc_dim, dtype=torch.float32)     # bf16, as in model.cpp
-        mixes = torch.empty(n, HC_MULT, dtype=torch.float32)      # [n, hc_mult]
+        x_flat = x_3d.reshape(n, hc_dim).contiguous()  # bf16
+        x_norm = torch.empty(n, hc_dim, dtype=torch.float32)  # bf16, as in model.cpp
+        mixes = torch.empty(n, HC_MULT, dtype=torch.float32)  # [n, hc_mult]
         post = torch.empty(n, HC_MULT, dtype=torch.float32)
         comb = torch.empty(n, HC_MULT * HC_MULT, dtype=torch.float32)
         y_merge = torch.empty(n, hidden, dtype=torch.bfloat16)
-        x_residual = x_3d.reshape(n, HC_MULT, hidden).contiguous()   # bf16 [n, hc_mult, hidden]
-        empty_norm = torch.empty(0, dtype=torch.float32)           # no-affine placeholder
+        x_residual = x_3d.reshape(n, HC_MULT, hidden).contiguous()  # bf16 [n, hc_mult, hidden]
+        empty_norm = torch.empty(0, dtype=torch.float32)  # no-affine placeholder
     torch.npu.synchronize()
 
     rmsnorm(rt, x_flat, empty_norm, x_norm, NORM_EPS, norm_dim=hc_dim, cnt_per_token=1)
     matmul(rt, x_norm, hc_fn, mixes, weight_nz=False, transpose=False)
-    hc_act(rt, mixes, hc_scale, hc_base, post, comb, HC_MULT, HC_EPS, 20,
-           x_resid=x_residual, output=y_merge)
+    hc_act(rt, mixes, hc_scale, hc_base, post, comb, HC_MULT, HC_EPS, 20, x_resid=x_residual, output=y_merge)
     torch.npu.synchronize()
 
     # ---- compare ----
@@ -127,8 +127,7 @@ def run_case(b, s, hidden):
     # covers any 1-ulp bf16 flip (ulp/|y| <= 2^-8 < 1e-2) with wide margin.
     tol = {"x_norm": (1e-5, 1e-3), "mixes": (1e-3, 1e-3), "y": (1e-2, 1e-2)}
     ok = True
-    got_pairs = [("x_norm", x_norm.float(), x_norm_ref), ("mixes", mixes, mixes_ref),
-                 ("y", y_merge.float(), y_ref)]
+    got_pairs = [("x_norm", x_norm.float(), x_norm_ref), ("mixes", mixes, mixes_ref), ("y", y_merge.float(), y_ref)]
     for name, got, want in got_pairs:
         atol, rtol = tol.get(name, (1e-5, 1e-3))
         try:
@@ -144,7 +143,7 @@ def run_case(b, s, hidden):
 
 if __name__ == "__main__":
     all_ok = True
-    for (b, s, hidden) in CASES:
+    for b, s, hidden in CASES:
         all_ok &= run_case(b, s, hidden)
     if all_ok:
         print("==== all hc_head cases passed ====")

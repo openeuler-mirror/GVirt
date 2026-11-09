@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,14 +6,14 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-from __future__ import absolute_import
-
-from collections import defaultdict
 
 import logging
+from collections import defaultdict
+
 import numpy as np
 import torch
 import torch_npu  # noqa: F401
+
 from xlite._C import Runtime, indexer_topk
 
 logging.getLogger().setLevel(logging.INFO)
@@ -48,13 +47,13 @@ work = [
     (2, [8123, 0], [1, 8231]),
     (4, [5012, 127, 2189, 500], [4, 2, 6, 8]),
     # ratio==4 edges: MapPosToKv (first-block p0=-1, dense/sparse mix, clen not div by ratio)
-    (1, [0], [3]),            # qlen<ratio -> first block incomplete, p0=-1
-    (1, [0], [2048]),         # 512 blocks == topK -> dense boundary
-    (1, [0], [4096]),         # 1024 blocks -> sparse+dense mix, 1 tile
-    (1, [0], [8192]),         # 2048 blocks, 1 KV tile, sparse
-    (1, [0], [16388]),        # 4097 blocks -> 2 KV tiles (cross-core lastTopk relay)
-    (1, [98], [1]),           # decode mid-seq, clen not div by ratio
-    (1, [98], [4096]),        # clen not div by ratio + 4096 -> 1048 blocks
+    (1, [0], [3]),  # qlen<ratio -> first block incomplete, p0=-1
+    (1, [0], [2048]),  # 512 blocks == topK -> dense boundary
+    (1, [0], [4096]),  # 1024 blocks -> sparse+dense mix, 1 tile
+    (1, [0], [8192]),  # 2048 blocks, 1 KV tile, sparse
+    (1, [0], [16388]),  # 4097 blocks -> 2 KV tiles (cross-core lastTopk relay)
+    (1, [98], [1]),  # decode mid-seq, clen not div by ratio
+    (1, [98], [4096]),  # clen not div by ratio + 4096 -> 1048 blocks
     (2, [0, 98], [4096, 8192]),  # multi-batch, mixed dense/sparse
 ]
 
@@ -75,8 +74,18 @@ def max_blocks(query_lens, cached_lens, block_size, compress_ratio=1):
     return (max_sum + block_size - 1) // block_size
 
 
-def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK,
-             compress_ratio=1, dense_weight=False):
+def run_test(
+    name,
+    n_heads,
+    head_dim,
+    test_dtype,
+    batch,
+    cached_lens_list,
+    query_len_list,
+    topK,
+    compress_ratio=1,
+    dense_weight=False,
+):
     if dense_weight:
         name = name + "_dense_w"
     ratio = compress_ratio
@@ -264,10 +273,7 @@ def run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query
             p0_q = clen + q
             all_match = False
             errors[i][q] = 100.0
-            logging.error(
-                f"\tSample {i} row {q} (p0={p0_q}) has non-causal topk indices: "
-                f"{xlite_cpu_np[offset + q]}"
-            )
+            logging.error(f"\tSample {i} row {q} (p0={p0_q}) has non-causal topk indices: {xlite_cpu_np[offset + q]}")
 
         ok = ~batch_fail
         compared += int(ok.sum())
@@ -305,16 +311,16 @@ def main():
                 run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK)
             # Compressed-block indexer (ratio==4)
             for topK in topk_values_compressed:
-                run_test(name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK,
-                         compress_ratio=4)
+                run_test(
+                    name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK, compress_ratio=4
+                )
 
     # Dense [T, nHeads] weight layout (CXA bf16 path): the kernel derives the
     # row pitch from weight.shape[1]; verify it matches the fused-layout
     # reference on both ratio=1 and ratio=4.
     for name, n_heads, head_dim, test_dtype in models:
         run_test(name, n_heads, head_dim, test_dtype, 1, [3542], [1], 2048, dense_weight=True)
-        run_test(name, n_heads, head_dim, test_dtype, 1, [0], [8192], 512, compress_ratio=4,
-                 dense_weight=True)
+        run_test(name, n_heads, head_dim, test_dtype, 1, [0], [8192], 512, compress_ratio=4, dense_weight=True)
 
 
 if __name__ == "__main__":

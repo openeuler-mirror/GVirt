@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,28 +6,27 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-import os
 import math
+import os
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Tuple, Optional, Literal
 from functools import lru_cache
+from pathlib import Path
+from typing import Literal, Optional
 
 import torch
-from torch import nn
-import torch.nn.functional as F
 import torch.distributed as dist
+import torch.nn.functional as F
 import torch_npu
+from torch import nn
 
 from tests.models.deepseek_kernel import weight_dequant
-from tests.models.deepseek_v4_kernel import sparse_attn, hc_split_sinkhorn
+from tests.models.deepseek_v4_kernel import hc_split_sinkhorn, sparse_attn
 from tests.models.weight_utils import (
-    hf_model_weights_iterator,
     convert_pyslice_to_tensor,
+    hf_model_weights_iterator,
     load_tensor_parallel_weights,
     logger,
 )
-
 
 world_size = 1
 rank = 0
@@ -41,22 +39,23 @@ if forward_backend == "xlite":
     xlite_model = None
     # CXA 5-tuple per-cache block sizes: (indexer_state, indexer_k, compress_kv, state, swa_kv)
     cxa_block_sizes = [8, 128, 128, 32, 64]
+    from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
     from xlite._C import (
-        Runtime,
-        ModelConfig,
+        AttnCxA,
         AttnMeta,
         AttnMetaV2,
-        AttnCxA,
         Model,
+        ModelConfig,
+        Runtime,
         ScoringFuncSoftmax,
         ScoringFuncSqrtsoftplus,
     )
-    from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
 
 
 @dataclass
 class ModelArgs:
     """Model hyperparameters. Field names match the config JSON keys."""
+
     max_batch_size: int = 4
     max_seq_len: int = 4096
     temperature: float = 1
@@ -83,7 +82,52 @@ class ModelArgs:
     o_groups: int = 8
     o_lora_rank: int = 1024
     window_size: int = 128
-    compress_ratios: Tuple[int] = (0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0)
+    compress_ratios: tuple[int] = (
+        0,
+        0,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        0,
+    )
     # yarn
     compress_rope_theta: float = 160000.0
     original_seq_len: int = 65536
@@ -109,11 +153,14 @@ class ModelArgs:
 
 class ParallelEmbedding(nn.Module):
     """Embedding sharded along the vocab dimension."""
+
     def __init__(self, vocab_size: int, dim: int):
         super().__init__()
         self.vocab_size = vocab_size
         self.dim = dim
-        assert vocab_size % world_size == 0, f"Vocabulary size must be divisible by world size (world_size={world_size})"
+        assert vocab_size % world_size == 0, (
+            f"Vocabulary size must be divisible by world size (world_size={world_size})"
+        )
         self.part_vocab_size = vocab_size // world_size
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
@@ -155,8 +202,12 @@ class Linear(nn.Module):
         dtype = dtype or torch.bfloat16
         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype), requires_grad=False)
         if self.weight.element_size() == 1:
-            self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32), requires_grad=False)
-            self.weight.weight_offset = self.weight_offset = nn.Parameter(torch.empty(out_features, 1, dtype=torch.float32), requires_grad=False)
+            self.weight.scale = self.scale = nn.Parameter(
+                torch.empty(out_features, 1, dtype=torch.float32), requires_grad=False
+            )
+            self.weight.weight_offset = self.weight_offset = nn.Parameter(
+                torch.empty(out_features, 1, dtype=torch.float32), requires_grad=False
+            )
         else:
             self.register_parameter("scale", None)
             self.register_parameter("weight_offset", None)
@@ -171,8 +222,11 @@ class Linear(nn.Module):
 
 class ColumnParallelLinear(Linear):
     """Shards output dim across TP ranks. No all-reduce needed on output."""
+
     def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
-        assert out_features % world_size == 0, f"Output features must be divisible by world size (world_size={world_size})"
+        assert out_features % world_size == 0, (
+            f"Output features must be divisible by world size (world_size={world_size})"
+        )
         self.part_out_features = out_features // world_size
         super().__init__(in_features, self.part_out_features, bias, dtype)
 
@@ -182,8 +236,11 @@ class ColumnParallelLinear(Linear):
 
 class RowParallelLinear(Linear):
     """Shards input dim across TP ranks. All-reduce on output to sum partials."""
+
     def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
-        assert in_features % world_size == 0, f"Input features must be divisible by world size (world_size={world_size})"
+        assert in_features % world_size == 0, (
+            f"Input features must be divisible by world size (world_size={world_size})"
+        )
         self.part_in_features = in_features // world_size
         super().__init__(self.part_in_features, out_features, bias, dtype)
 
@@ -265,6 +322,7 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
     assert x.dtype == torch.bfloat16
     try:
         from fast_hadamard_transform import hadamard_transform
+
         return hadamard_transform(x, scale=x.size(-1) ** -0.5)
     except ImportError:
         return x * (x.size(-1) ** -0.5)
@@ -315,8 +373,18 @@ class Compressor(nn.Module):
         self.wgate = Linear(self.dim, coff * self.head_dim, dtype=torch.float32)
         self.norm = RMSNorm(self.head_dim, args.norm_eps)
         self.kv_cache: torch.Tensor = None
-        self.register_buffer("kv_state", torch.zeros(args.max_batch_size, coff * compress_ratio, coff * self.head_dim, dtype=torch.float32), persistent=False)
-        self.register_buffer("score_state", torch.full((args.max_batch_size, coff * compress_ratio, coff * self.head_dim), float("-inf"), dtype=torch.float32), persistent=False)
+        self.register_buffer(
+            "kv_state",
+            torch.zeros(args.max_batch_size, coff * compress_ratio, coff * self.head_dim, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "score_state",
+            torch.full(
+                (args.max_batch_size, coff * compress_ratio, coff * self.head_dim), float("-inf"), dtype=torch.float32
+            ),
+            persistent=False,
+        )
         self.freqs_cis: torch.Tensor = None
 
     def overlap_transform(self, tensor: torch.Tensor, value=0):
@@ -341,11 +409,11 @@ class Compressor(nn.Module):
             cutoff = seqlen - remainder
             offset = ratio if overlap else 0
             if overlap and cutoff >= ratio:
-                self.kv_state[:bsz, :ratio] = kv[:, cutoff - ratio: cutoff]
-                self.score_state[:bsz, :ratio] = score[:, cutoff - ratio: cutoff] + self.ape
+                self.kv_state[:bsz, :ratio] = kv[:, cutoff - ratio : cutoff]
+                self.score_state[:bsz, :ratio] = score[:, cutoff - ratio : cutoff] + self.ape
             if remainder > 0:
-                kv, self.kv_state[:bsz, offset: offset + remainder] = kv.split([cutoff, remainder], dim=1)
-                self.score_state[:bsz, offset: offset + remainder] = score[:, cutoff:] + self.ape[:remainder]
+                kv, self.kv_state[:bsz, offset : offset + remainder] = kv.split([cutoff, remainder], dim=1)
+                self.score_state[:bsz, offset : offset + remainder] = score[:, cutoff:] + self.ape[:remainder]
                 score = score[:, :cutoff]
             kv = kv.unflatten(1, (-1, ratio))
             score = score.unflatten(1, (-1, ratio)) + self.ape
@@ -361,7 +429,9 @@ class Compressor(nn.Module):
                 self.score_state[:bsz, ratio + start_pos % ratio] = score.squeeze(1)
                 if should_compress:
                     kv_state = torch.cat([self.kv_state[:bsz, :ratio, :d], self.kv_state[:bsz, ratio:, d:]], dim=1)
-                    score_state = torch.cat([self.score_state[:bsz, :ratio, :d], self.score_state[:bsz, ratio:, d:]], dim=1)
+                    score_state = torch.cat(
+                        [self.score_state[:bsz, :ratio, :d], self.score_state[:bsz, ratio:, d:]], dim=1
+                    )
                     kv = (kv_state * score_state.softmax(dim=1)).sum(dim=1, keepdim=True)
                     self.kv_state[:bsz, :ratio] = self.kv_state[:bsz, ratio:]
                     self.score_state[:bsz, :ratio] = self.score_state[:bsz, ratio:]
@@ -382,7 +452,7 @@ class Compressor(nn.Module):
             kv = rotate_activation(kv)
         # FP4/FP8 simulation skipped (w8a8 dynamic reference path keeps bf16).
         if start_pos == 0:
-            self.kv_cache[:bsz, :seqlen // ratio] = kv
+            self.kv_cache[:bsz, : seqlen // ratio] = kv
         else:
             self.kv_cache[:bsz, start_pos // ratio] = kv.squeeze(1)
         return kv
@@ -402,16 +472,20 @@ class Indexer(torch.nn.Module):
         self.q_lora_rank = args.q_lora_rank
         self.wq_b = Linear(self.q_lora_rank, self.n_heads * self.head_dim, dtype=torch.int8)
         self.weights_proj = Linear(self.dim, self.n_heads, dtype=torch.bfloat16)
-        self.softmax_scale = self.head_dim ** -0.5
+        self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
 
         self.compressor = Compressor(args, compress_ratio, self.head_dim, True)
-        self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len // compress_ratio, self.head_dim, dtype=torch.bfloat16), persistent=False)
+        self.register_buffer(
+            "kv_cache",
+            torch.zeros(args.max_batch_size, args.max_seq_len // compress_ratio, self.head_dim, dtype=torch.bfloat16),
+            persistent=False,
+        )
         self.freqs_cis: torch.Tensor = None
 
     def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, offset: int):
         bsz, seqlen, _ = x.size()
-        freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
         ratio = self.compress_ratio
         rd = self.rope_head_dim
         end_pos = start_pos + seqlen
@@ -424,12 +498,15 @@ class Indexer(torch.nn.Module):
         q = rotate_activation(q)
         # FP4 simulation skipped.
         self.compressor(x, start_pos)
-        weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads ** -0.5)
+        weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
         # QAT-quant simulation skipped: kv stays bf16.
-        index_score = torch.einsum("bshd,btd->bsht", q, self.kv_cache[:bsz, :end_pos // ratio])
+        index_score = torch.einsum("bshd,btd->bsht", q, self.kv_cache[:bsz, : end_pos // ratio])
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
         if start_pos == 0:
-            mask = torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1) >= torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1) // ratio
+            mask = (
+                torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1)
+                >= torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1) // ratio
+            )
             index_score += torch.where(mask, float("-inf"), 0)
         topk_idxs = index_score.topk(min(self.index_topk, end_pos // ratio), dim=-1)[1]
         if start_pos == 0:
@@ -468,9 +545,11 @@ class Attention(nn.Module):
         self.wkv = Linear(self.dim, self.head_dim, dtype=torch.int8)
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
         # wo_a / wo_b: FLOAT -> bf16
-        self.wo_a = ColumnParallelLinear(self.n_heads * self.head_dim // self.n_groups, self.n_groups * args.o_lora_rank, dtype=torch.bfloat16)
+        self.wo_a = ColumnParallelLinear(
+            self.n_heads * self.head_dim // self.n_groups, self.n_groups * args.o_lora_rank, dtype=torch.bfloat16
+        )
         self.wo_b = RowParallelLinear(self.n_groups * args.o_lora_rank, self.dim, dtype=torch.bfloat16)
-        self.softmax_scale = self.head_dim ** -0.5
+        self.softmax_scale = self.head_dim**-0.5
 
         if self.compress_ratio:
             self.compressor = Compressor(args, self.compress_ratio, self.head_dim)
@@ -480,18 +559,29 @@ class Attention(nn.Module):
                 self.indexer = None
 
         kv_cache_size = args.window_size + (args.max_seq_len // self.compress_ratio if self.compress_ratio else 0)
-        self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, kv_cache_size, self.head_dim, dtype=torch.bfloat16), persistent=False)
+        self.register_buffer(
+            "kv_cache",
+            torch.zeros(args.max_batch_size, kv_cache_size, self.head_dim, dtype=torch.bfloat16),
+            persistent=False,
+        )
         if self.compress_ratio:
             original_seq_len, rope_theta = args.original_seq_len, args.compress_rope_theta
         else:
             original_seq_len, rope_theta = 0, args.rope_theta
-        freqs_cis = precompute_freqs_cis(self.rope_head_dim, args.max_seq_len, original_seq_len,
-                                         rope_theta, args.rope_factor, args.beta_fast, args.beta_slow)
+        freqs_cis = precompute_freqs_cis(
+            self.rope_head_dim,
+            args.max_seq_len,
+            original_seq_len,
+            rope_theta,
+            args.rope_factor,
+            args.beta_fast,
+            args.beta_slow,
+        )
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
     def forward(self, x: torch.Tensor, start_pos: int):
         bsz, seqlen, _ = x.size()
-        freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
         win = self.window_size
         ratio = self.compress_ratio
         rd = self.rope_head_dim
@@ -528,7 +618,9 @@ class Attention(nn.Module):
                 self.kv_cache[:bsz, :seqlen] = kv
             else:
                 cutoff = seqlen % win
-                self.kv_cache[:bsz, cutoff: win], self.kv_cache[:bsz, :cutoff] = kv[:, -win:].split([win - cutoff, cutoff], dim=1)
+                self.kv_cache[:bsz, cutoff:win], self.kv_cache[:bsz, :cutoff] = kv[:, -win:].split(
+                    [win - cutoff, cutoff], dim=1
+                )
             if self.compress_ratio:
                 if (kv_compress := self.compressor(x, start_pos)) is not None:
                     kv = torch.cat([kv, kv_compress], dim=1)
@@ -561,12 +653,14 @@ class Gate(nn.Module):
         # gate.weight is FLOAT (bf16) in checkpoint; cast to fp32 for scoring stability (matches V3).
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim, dtype=torch.float32))
         if self.hash:
-            self.tid2eid = nn.Parameter(torch.empty(args.vocab_size, args.n_activated_experts, dtype=torch.int32), requires_grad=False)
+            self.tid2eid = nn.Parameter(
+                torch.empty(args.vocab_size, args.n_activated_experts, dtype=torch.int32), requires_grad=False
+            )
             self.bias = None
         else:
             self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32))
 
-    def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
         scores = F.linear(x.float(), self.weight.float())
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1)
@@ -592,6 +686,7 @@ class Expert(nn.Module):
     """Single MoE expert: SwiGLU FFN. w13/w2 are W8A8_DYNAMIC -> int8.
     w13 merges the gate (w1) and up (w3) projections into one Linear so the
     forward issues a single GEMM and splits the result for SwiGLU."""
+
     def __init__(self, dim: int, inter_dim: int, swiglu_limit: float = 0):
         super().__init__()
         self.w13 = Linear(dim, inter_dim * 2, dtype=torch.int8)
@@ -613,19 +708,28 @@ class Expert(nn.Module):
 
 class MoE(nn.Module):
     """Mixture-of-Experts with EP across the full world."""
+
     def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
         self.layer_id = layer_id
         self.dim = args.dim
-        assert args.n_routed_experts % global_world_size == 0, f"Number of experts must be divisible by world size (world_size={global_world_size})"
+        assert args.n_routed_experts % global_world_size == 0, (
+            f"Number of experts must be divisible by world size (world_size={global_world_size})"
+        )
         self.n_routed_experts = args.n_routed_experts
         self.n_local_experts = args.n_routed_experts // global_world_size
         self.n_activated_experts = args.n_activated_experts
         self.experts_start_idx = global_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(layer_id, args)
-        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim, swiglu_limit=args.swiglu_limit) if self.experts_start_idx <= i < self.experts_end_idx else None
-                                       for i in range(self.n_routed_experts)])
+        self.experts = nn.ModuleList(
+            [
+                Expert(args.dim, args.moe_inter_dim, swiglu_limit=args.swiglu_limit)
+                if self.experts_start_idx <= i < self.experts_end_idx
+                else None
+                for i in range(self.n_routed_experts)
+            ]
+        )
         assert args.n_shared_experts == 1
         # V4 shared expert is the same SwiGLU structure as routed experts.
         self.shared_experts = Expert(args.dim, args.moe_inter_dim, swiglu_limit=args.swiglu_limit)
@@ -650,6 +754,7 @@ class MoE(nn.Module):
 
 class Block(nn.Module):
     """Transformer block with Multi-stage Hyper-Connections (MHC)."""
+
     attention_cls = Attention
 
     def __init__(self, layer_id: int, args: ModelArgs):
@@ -788,7 +893,11 @@ class Transformer(nn.Module):
         # (state planes, indexer_k, per-ratio compress slots) and the per-layer
         # rows the C++ consumers read directly.
         meta = prepare_xlite_attnmeta_v2(
-            AttnMetaV2, tokens, start_pos, self.args.max_seq_len, cxa_block_sizes,
+            AttnMetaV2,
+            tokens,
+            start_pos,
+            self.args.max_seq_len,
+            cxa_block_sizes,
             compress_ratios=self.args.compress_ratios,
         )
         return meta
@@ -798,8 +907,9 @@ class Transformer(nn.Module):
         """Forward using V2 device-tensor attention metadata (zero-copy path)."""
         # fp32: head.weight is fp32 in checkpoint (see HC-head def, l.722); XliteOpMatmul
         # casts the bf16 hidden state to fp32 and computes logits in fp32.
-        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size,
-                             device=tokens.device, dtype=torch.float32)
+        logits = torch.empty(
+            world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device, dtype=torch.float32
+        )
         tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
         batch = tokens.size(0)
         seqlen = tokens.size(1)
@@ -810,8 +920,18 @@ class Transformer(nn.Module):
         # v4 freqs_cis is per-layer (compress vs non-compress layers differ in rope_theta);
         # pass a list, one entry per layer, instead of v3's single tensor.
         freqs_cis = [layer.attn.freqs_cis for layer in self.layers]
-        self.xlite_model.forward_v2(rt=self.xlite_rt, input=tokens.flatten(), attn_meta=attn_meta, kv_cache=self.xlite_kv_cache, freqs_cis=freqs_cis, output=h, curr_stream=stream)
-        self.xlite_model.forward_get_logits(rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream)
+        self.xlite_model.forward_v2(
+            rt=self.xlite_rt,
+            input=tokens.flatten(),
+            attn_meta=attn_meta,
+            kv_cache=self.xlite_kv_cache,
+            freqs_cis=freqs_cis,
+            output=h,
+            curr_stream=stream,
+        )
+        self.xlite_model.forward_get_logits(
+            rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream
+        )
         logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
         return logits
 
@@ -827,12 +947,15 @@ class Transformer(nn.Module):
         args = self.args
         assert args.dim % world_size == 0, f"dim must be divisible by world_size (world_size={world_size})"
         assert args.n_heads % world_size == 0, f"n_heads must be divisible by world_size (world_size={world_size})"
-        assert args.vocab_size % world_size == 0, f"vocab_size must be divisible by world_size (world_size={world_size})"
+        assert args.vocab_size % world_size == 0, (
+            f"vocab_size must be divisible by world_size (world_size={world_size})"
+        )
         assert args.o_groups % world_size == 0, f"o_groups must be divisible by world_size (world_size={world_size})"
-        assert args.index_n_heads % world_size == 0, f"index_n_heads must be divisible by world_size (world_size={world_size})"
+        assert args.index_n_heads % world_size == 0, (
+            f"index_n_heads must be divisible by world_size (world_size={world_size})"
+        )
 
         n_local_experts = args.n_routed_experts // args.moe_ep_size
-        moe_tp_id = global_rank % args.moe_tp_size
         moe_ep_id = global_rank // args.moe_tp_size
 
         param_dict = {name: param for name, param in self.named_parameters()}
@@ -870,9 +993,9 @@ class Transformer(nn.Module):
             is_scale = name.endswith(".weight_scale")
             is_offset = name.endswith(".weight_offset")
             if is_scale:
-                target_name = name[:-len("weight_scale")] + "scale"
+                target_name = name[: -len("weight_scale")] + "scale"
             elif is_offset:
-                target_name = name[:-len("weight_offset")] + "weight_offset"
+                target_name = name[: -len("weight_offset")] + "weight_offset"
             else:
                 target_name = name
 
@@ -887,32 +1010,42 @@ class Transformer(nn.Module):
                 segs[-2] = "w13"
                 merged_name = ".".join(segs)
                 if merged_name not in param_dict:
-                    logger.warning('Loading model has no param named %s in checkpoints, bypass.',
-                                   merged_name)
+                    logger.warning("Loading model has no param named %s in checkpoints, bypass.", merged_name)
                     continue
                 merged_param = param_dict[merged_name]
                 half = merged_param.shape[0] // 2
                 slot = half * stride_id
                 loaded_t = convert_pyslice_to_tensor(loaded_weight)
-                merged_param.data[slot:slot + half].copy_(loaded_t[:half])
+                merged_param.data[slot : slot + half].copy_(loaded_t[:half])
                 continue
 
             if target_name not in param_dict:
-                logger.warning('Loading model has no param named %s in checkpoints, bypass.',
-                               target_name)
+                logger.warning("Loading model has no param named %s in checkpoints, bypass.", target_name)
                 continue
 
             param = param_dict[target_name]
 
             # ===== Embed / Head (vocab parallel) =====
-            if "embed" in target_name and "weight" in target_name and "weight_offset" not in target_name and "weight_scale" not in target_name:
-                load_tensor_parallel_weights(param, loaded_weight, args.vocab_size, args.dim,
-                                             target_name, True, False, rank, world_size)
+            if (
+                "embed" in target_name
+                and "weight" in target_name
+                and "weight_offset" not in target_name
+                and "weight_scale" not in target_name
+            ):
+                load_tensor_parallel_weights(
+                    param, loaded_weight, args.vocab_size, args.dim, target_name, True, False, rank, world_size
+                )
                 continue
-            if "head" in target_name and "weight" in target_name and "weight_offset" not in target_name and "weight_scale" not in target_name:
+            if (
+                "head" in target_name
+                and "weight" in target_name
+                and "weight_offset" not in target_name
+                and "weight_scale" not in target_name
+            ):
                 # head.weight: param shape [part_vocab, dim], stored as fp32. Shard vocab dim.
-                load_tensor_parallel_weights(param, loaded_weight, args.dim, args.vocab_size,
-                                             target_name, False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param, loaded_weight, args.dim, args.vocab_size, target_name, False, True, rank, world_size
+                )
                 continue
 
             # ===== Per-row scale/offset for int8 Linear (shard along output dim) =====
@@ -924,30 +1057,38 @@ class Transformer(nn.Module):
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 # Determine if this layer is ColumnParallel (shard output dim).
                 col_parallel_names = ("wq_b", "wo_a")
-                is_col_parallel = (any(s in target_name for s in col_parallel_names)
-                                   and "wo_b" not in target_name
-                                   and "indexer" not in target_name)
+                is_col_parallel = (
+                    any(s in target_name for s in col_parallel_names)
+                    and "wo_b" not in target_name
+                    and "indexer" not in target_name
+                )
                 if is_col_parallel:
                     shard_size = param.shape[0]
-                    loaded_weight = loaded_weight[rank * shard_size:(rank + 1) * shard_size]
+                    loaded_weight = loaded_weight[rank * shard_size : (rank + 1) * shard_size]
                     loaded_weight = loaded_weight.contiguous()
                     if loaded_weight.shape[0] < shard_size:
                         # Pad in case of uneven sharding (shouldn't happen with proper asserts).
-                        pad = torch.zeros(shard_size - loaded_weight.shape[0], param.shape[1],
-                                           dtype=loaded_weight.dtype, device=loaded_weight.device)
+                        pad = torch.zeros(
+                            shard_size - loaded_weight.shape[0],
+                            param.shape[1],
+                            dtype=loaded_weight.dtype,
+                            device=loaded_weight.device,
+                        )
                         loaded_weight = torch.cat([loaded_weight, pad], dim=0)
                 param.data.copy_(loaded_weight)
                 continue
 
             # ===== int8 weight tensor (or bf16 weight tensor) =====
             # experts w13/w2 EP-shard on output dim (w13) or input dim (w2).
-            if "experts" in target_name and "shared_experts" not in target_name and ".weight" in target_name and target_name.rsplit(".", 1)[-1] == "weight":
+            if (
+                "experts" in target_name
+                and "shared_experts" not in target_name
+                and ".weight" in target_name
+                and target_name.rsplit(".", 1)[-1] == "weight"
+            ):
                 # Determine w13/w2 by suffix. (w1/w3 already merged above.)
                 last_tok = target_name.split(".")[-2]
-                if last_tok == "w13":
-                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                    param.data.copy_(loaded_weight)
-                elif last_tok == "w2":
+                if last_tok == "w13" or last_tok == "w2":
                     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                     param.data.copy_(loaded_weight)
                 else:
@@ -958,22 +1099,46 @@ class Transformer(nn.Module):
             # ===== Dense layer TP sharding =====
             # wq_b: ColumnParallel (shard output dim).
             if target_name.endswith(".wq_b.weight") and "indexer" not in target_name:
-                load_tensor_parallel_weights(param, loaded_weight, args.q_lora_rank,
-                                             args.n_heads * args.head_dim,
-                                             target_name, False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    args.q_lora_rank,
+                    args.n_heads * args.head_dim,
+                    target_name,
+                    False,
+                    True,
+                    rank,
+                    world_size,
+                )
                 continue
             # wo_a: ColumnParallel (shard output dim). Input dim is n_heads*head_dim/o_groups.
             if target_name.endswith(".wo_a.weight"):
                 in_features = args.n_heads * args.head_dim // args.o_groups
-                load_tensor_parallel_weights(param, loaded_weight, in_features,
-                                             args.o_groups * args.o_lora_rank,
-                                             target_name, False, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    in_features,
+                    args.o_groups * args.o_lora_rank,
+                    target_name,
+                    False,
+                    True,
+                    rank,
+                    world_size,
+                )
                 continue
             # wo_b: RowParallel (shard input dim).
             if target_name.endswith(".wo_b.weight"):
-                load_tensor_parallel_weights(param, loaded_weight,
-                                             args.o_groups * args.o_lora_rank, args.dim,
-                                             target_name, True, True, rank, world_size)
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    args.o_groups * args.o_lora_rank,
+                    args.dim,
+                    target_name,
+                    True,
+                    True,
+                    rank,
+                    world_size,
+                )
                 continue
             # indexer.wq_b: Replicated
             if target_name.endswith("indexer.wq_b.weight"):
@@ -990,22 +1155,34 @@ class Transformer(nn.Module):
             if target_name.endswith(".attn.attn_sink"):
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 shard_size = param.shape[0]
-                loaded_weight = loaded_weight[rank * shard_size:(rank + 1) * shard_size]
+                loaded_weight = loaded_weight[rank * shard_size : (rank + 1) * shard_size]
                 param.data.copy_(loaded_weight)
                 continue
 
             # Fallback: direct copy.
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
             if param.shape != loaded_weight.shape:
-                logger.warning('shape mismatch for %s: param=%s ckpt=%s',
-                               target_name, tuple(param.shape), tuple(loaded_weight.shape))
+                logger.warning(
+                    "shape mismatch for %s: param=%s ckpt=%s",
+                    target_name,
+                    tuple(param.shape),
+                    tuple(loaded_weight.shape),
+                )
             param.data.copy_(loaded_weight)
 
         torch.npu.empty_cache()
 
         if forward_backend == "xlite":
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            self.xlite_rt = Runtime(local_rank, size=0, rank=self.global_rank, tp_size=self.tp_size, dp_size=self.dp_size, moe_tp_size=1, moe_ep_size=args.moe_ep_size)
+            self.xlite_rt = Runtime(
+                local_rank,
+                size=0,
+                rank=self.global_rank,
+                tp_size=self.tp_size,
+                dp_size=self.dp_size,
+                moe_tp_size=1,
+                moe_ep_size=args.moe_ep_size,
+            )
             self.init_xlite_model(args)
             kv_size = self.init_xlite_kvcache(args)
             pool_size = self.xlite_model.get_tensor_pool_size()
@@ -1015,9 +1192,11 @@ class Transformer(nn.Module):
             for _, param in self.named_parameters():
                 total_model_memory += param.element_size() * param.numel()
             if self.global_rank == 0:
-                print(f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB" +
-                      f" KV Cache: {kv_size // 1024 // 1024} MB" +
-                      f" Tensor pool: {pool_size} MB")
+                print(
+                    f"Memory usage: Model: {total_model_memory // 1024 // 1024} MB"
+                    f" KV Cache: {kv_size // 1024 // 1024} MB"
+                    f" Tensor pool: {pool_size} MB"
+                )
 
     def init_xlite_model(self, args: ModelArgs):
         """Wire v4 weights into xlite Model and run C++ init (param passing only)."""
@@ -1121,8 +1300,7 @@ class Transformer(nn.Module):
                     t = getter(L, idx)
                 except (AttributeError, TypeError):
                     t = None
-                if t is not None and t.numel() > 0 and t.element_size() == 1 \
-                        and hasattr(t, "scale"):
+                if t is not None and t.numel() > 0 and t.element_size() == 1 and hasattr(t, "scale"):
                     out.append(_xlite_scale_of(t))
                 else:
                     out.append(torch.empty(0))
@@ -1160,38 +1338,45 @@ class Transformer(nn.Module):
         # Attention.compressor (exists iff compress_ratio != 0)
         # Attention.compressor (exists iff compress_ratio != 0). wkv/wgate are
         # fp32 Linear in v4 — no w8a8 four-pack, only the weight tensor is needed.
-        self.xlite_model.comp_ape = _per_layer(
-            lambda L, _idx: L.attn.compressor.ape if L.attn.compress_ratio else None)
+        self.xlite_model.comp_ape = _per_layer(lambda L, _idx: L.attn.compressor.ape if L.attn.compress_ratio else None)
         self.xlite_model.comp_w_kv = _per_layer(
-            lambda L, _idx: L.attn.compressor.wkv.weight if L.attn.compress_ratio else None)
+            lambda L, _idx: L.attn.compressor.wkv.weight if L.attn.compress_ratio else None
+        )
         self.xlite_model.comp_w_gate = _per_layer(
-            lambda L, _idx: L.attn.compressor.wgate.weight if L.attn.compress_ratio else None)
+            lambda L, _idx: L.attn.compressor.wgate.weight if L.attn.compress_ratio else None
+        )
         # Cast to bf16: the norm kernel reads the weight as bf16, matching native
         # RMSNorm's weight.to(dtype); raw fp32 would be byte-reinterpreted and corrupt.
         self.xlite_model.comp_norm = _per_layer(
-            lambda L, _idx: L.attn.compressor.norm.weight.to(torch.bfloat16).contiguous()
-            if L.attn.compress_ratio else None)
+            lambda L, _idx: (
+                L.attn.compressor.norm.weight.to(torch.bfloat16).contiguous() if L.attn.compress_ratio else None
+            )
+        )
 
         # Indexer fields (exists iff compress_ratio == 4). v4 indexer.wq_b has a
         # different shape from DSA's index_q_b, so it's a separate v4 field.
-        self.xlite_model.idx_wq_b = _per_layer(
-            lambda L, idx: idx.wq_b.weight if idx is not None else None)
+        self.xlite_model.idx_wq_b = _per_layer(lambda L, idx: idx.wq_b.weight if idx is not None else None)
         self.xlite_model.idx_wq_b_deq_scale = _per_layer_deq_scale(
-            lambda L, idx: idx.wq_b.weight if idx is not None else None)
+            lambda L, idx: idx.wq_b.weight if idx is not None else None
+        )
         self.xlite_model.idx_weights_proj = _per_layer(
-            lambda L, idx: idx.weights_proj.weight if idx is not None else None)
+            lambda L, idx: idx.weights_proj.weight if idx is not None else None
+        )
         # Indexer's internal Compressor (fp32 Linear — weight only, no 4-pack).
         self.xlite_model.idx_comp_ape = _per_layer(
-            lambda L, idx: getattr(idx.compressor, "ape", None) if idx is not None else None)
+            lambda L, idx: getattr(idx.compressor, "ape", None) if idx is not None else None
+        )
         self.xlite_model.idx_comp_w_kv = _per_layer(
-            lambda L, idx: idx.compressor.wkv.weight if idx is not None else None)
+            lambda L, idx: idx.compressor.wkv.weight if idx is not None else None
+        )
         self.xlite_model.idx_comp_w_gate = _per_layer(
-            lambda L, idx: idx.compressor.wgate.weight if idx is not None else None)
+            lambda L, idx: idx.compressor.wgate.weight if idx is not None else None
+        )
         # Indexer compressor norm: cast fp32 -> bf16 to match the kernel's bf16
         # weight read (same rationale as the main compressor norm above).
         self.xlite_model.idx_comp_norm = _per_layer(
-            lambda L, idx: idx.compressor.norm.weight.to(torch.bfloat16).contiguous()
-            if idx is not None else None)
+            lambda L, idx: idx.compressor.norm.weight.to(torch.bfloat16).contiguous() if idx is not None else None
+        )
 
         # Multi-stage Hyper-Connections (per-layer)
         self.xlite_model.hc_attn_fn = [layer.hc_attn_fn for layer in self.layers]
@@ -1208,13 +1393,9 @@ class Transformer(nn.Module):
         # MoE: reuse existing gate/se_*/re_* fields.
         self.xlite_model.gate = [layer.ffn.gate.weight for layer in self.layers]
         self.xlite_model.gate_bias = [
-            layer.ffn.gate.bias if layer.ffn.gate.bias is not None else torch.empty(0)
-            for layer in self.layers
+            layer.ffn.gate.bias if layer.ffn.gate.bias is not None else torch.empty(0) for layer in self.layers
         ]
-        self.xlite_model.tid2eid = [
-            layer.ffn.gate.tid2eid
-            for layer in self.layers if layer.ffn.gate.hash
-        ]
+        self.xlite_model.tid2eid = [layer.ffn.gate.tid2eid for layer in self.layers if layer.ffn.gate.hash]
         # v4 shared/routed experts are SwiGLU FFNs with merged w13 (gate+up)
         # and w2 (down). se_up_gate/re_up_gate hold the merged w13 weight,
         # se_down/re_down hold w2.
@@ -1262,7 +1443,7 @@ class Transformer(nn.Module):
         block_size from ``cxa_block_sizes``.
         """
         dtype = torch.get_default_dtype()
-        device = 'npu'
+        device = "npu"
         head_num = 1
         ratios = args.compress_ratios
         bs_indexer_state, bs_indexer_k, bs_compress_kv, bs_state, bs_swa = cxa_block_sizes
@@ -1287,10 +1468,12 @@ class Transformer(nn.Module):
                 idx_state_blocks = _blocks(args.max_seq_len, bs_indexer_state)
                 # indexer-compressor kv_state + score_state; kernel keeps state fp32
                 # regardless of model dtype (same as main `state` below).
-                indexer_state = torch.zeros(idx_state_blocks, bs_indexer_state, head_num, indexer_state_dim,
-                                            dtype=torch.float32, device=device)
-                indexer_k = torch.zeros(idx_kv_blocks, bs_indexer_k, head_num, args.index_head_dim,
-                                        dtype=dtype, device=device)
+                indexer_state = torch.zeros(
+                    idx_state_blocks, bs_indexer_state, head_num, indexer_state_dim, dtype=torch.float32, device=device
+                )
+                indexer_k = torch.zeros(
+                    idx_kv_blocks, bs_indexer_k, head_num, args.index_head_dim, dtype=dtype, device=device
+                )
             else:
                 indexer_state = _empty()
                 indexer_k = _empty()
@@ -1306,25 +1489,21 @@ class Transformer(nn.Module):
                 # max_seq_len//ratio, which only fit a per-ratio table.)
                 comp_kv_blocks = _blocks(args.max_seq_len, bs_compress_kv)
                 comp_state_blocks = _blocks(args.max_seq_len, bs_state)
-                compress_kv = torch.zeros(comp_kv_blocks, bs_compress_kv, head_num, args.head_dim,
-                                          dtype=dtype, device=device)
+                compress_kv = torch.zeros(
+                    comp_kv_blocks, bs_compress_kv, head_num, args.head_dim, dtype=dtype, device=device
+                )
                 # compressor kv_state + score_state; kernel keeps state fp32.
-                state = torch.zeros(comp_state_blocks, bs_state, head_num, state_dim,
-                                    dtype=torch.float32, device=device)
+                state = torch.zeros(
+                    comp_state_blocks, bs_state, head_num, state_dim, dtype=torch.float32, device=device
+                )
             else:
                 compress_kv = _empty()
                 state = _empty()
 
             swa_blocks = _blocks(args.max_seq_len, bs_swa)
-            swa_kv = torch.zeros(swa_blocks, bs_swa, head_num, args.head_dim,
-                                 dtype=dtype, device=device)
+            swa_kv = torch.zeros(swa_blocks, bs_swa, head_num, args.head_dim, dtype=dtype, device=device)
 
-            self.xlite_kv_cache.append(
-                (indexer_state, indexer_k, compress_kv, state, swa_kv))
+            self.xlite_kv_cache.append((indexer_state, indexer_k, compress_kv, state, swa_kv))
 
-        kv_size = sum(
-            t.numel() * t.element_size()
-            for layer_cache in self.xlite_kv_cache
-            for t in layer_cache
-        )
+        kv_size = sum(t.numel() * t.element_size() for layer_cache in self.xlite_kv_cache for t in layer_cache)
         return kv_size

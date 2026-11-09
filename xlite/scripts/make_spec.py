@@ -13,6 +13,7 @@ Usage::
     python scripts/make_spec.py            # write xlite.spec
     python scripts/make_spec.py --check   # exit 1 if xlite.spec is stale
 """
+
 import argparse
 import datetime
 import sys
@@ -48,9 +49,7 @@ def _changelog_entry(version: str) -> str:
 def render(version: str) -> str:
     """Render the spec template with ``version`` and a changelog entry."""
     template = SPEC_IN.read_text(encoding="utf-8")
-    return template.replace("@VERSION@", version).replace(
-        "@CHANGELOG@", _changelog_entry(version)
-    )
+    return template.replace("@VERSION@", version).replace("@CHANGELOG@", _changelog_entry(version))
 
 
 def write_spec(version: str) -> Path:
@@ -83,8 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         if is_stale(version):
             print(
-                f"xlite.spec is stale; regenerate with `python {Path(__file__).name}` "
-                f"(current version: {version})",
+                f"xlite.spec is stale; regenerate with `python {Path(__file__).name}` (current version: {version})",
                 file=sys.stderr,
             )
             return 1

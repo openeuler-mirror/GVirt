@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -24,14 +23,12 @@ Fused DSA indexer prepare kernel (``norm_ropex_cache_muls``):
 The reference is computed with plain torch (LayerNorm + complex-pair RoPE).
 """
 
-from __future__ import absolute_import
-
 import logging
 import math
 
 import torch
-import torch_npu  # noqa: F401
 import torch.nn.functional as F
+import torch_npu  # noqa: F401
 
 from xlite._C import Runtime, indexer_prepare
 
@@ -127,7 +124,6 @@ def run_test(
     # is_long mirrors model.cpp: when the worst-case paged length exceeds
     # topK, the long path (q-RoPE + muls) is taken.
     max_num_blocks = max((cl + ql + BLOCK_SIZE - 1) // BLOCK_SIZE for cl, ql in zip(cached_lens_list, query_len_list))
-    max_seq_len = max_num_blocks * BLOCK_SIZE
     is_long = (max_num_blocks * BLOCK_SIZE) > topK
 
     torch.set_default_dtype(test_dtype)

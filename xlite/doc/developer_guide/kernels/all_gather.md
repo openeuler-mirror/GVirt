@@ -17,7 +17,7 @@ allgather_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId
 ```
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | input | 输入 | `[N]`(逻辑上任意形状,展开后 N = count 个元素) | FP16 / BF16 / INT8 / BIT1(打包为 INT8) / INT32 / FP32 | 本 rank 的输入张量。BIT1 时 host 侧将 count 折算为打包字节数(`csrc/op.cpp` 的 `XliteOpAllGather` 中 `case BIT1` 分支) |
 | output | 输出 | `[rankSize * N]` | 同 input | 拼接结果,第 r 段为 rank r 的数据;要求 `out.numel == in.numel * rankSize`(`csrc/op.cpp` 的 `XliteOpAllGather` 中张量校验) |
 | count | 标量 | - | uint64 | 单个 rank 的元素个数(`in.numel`;BIT1 为 `in.numel / 8`) |
@@ -25,7 +25,7 @@ allgather_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId
 | generation | 标量 | - | uint64 | 通信代数,每次调用递增(`xcclComm->generation++`,见 `csrc/op.cpp` 的 `XliteOpAllGather` 中 `launchKernel` 调用),用于 IPC flag 的单调比较,避免跨调用残留信号 |
 | param | 输入 | - | `XcclParam` | 设备侧指针,含所有 rank 的 `ipcMems` / `ipcXTensorMems` 基址(`csrc/kernels/kernel_param.h` 的 `struct XcclParam`) |
 | copySize | 标量 | - | uint32 | 每次 UB 搬运的目标字节数,默认 `COPY_SIZE`(32768),host 侧按 `MAX_TOTAL_COPY_SIZE / corePerRank` 向下调整(`csrc/op.cpp` 的 `XliteOpAllGather` 中 `copySize` 调整段) |
-| fetchOffset | 标量 | - | bool | 为 true 时 kernel 先把自己的 input/output 相对 `ipcXTensorMems` 的偏移发布到 IPC 内存再互相同步;host 侧在 DP 域或上层显式要求时置 true(`csrc/op.cpp` 的 `XliteOpAllGather` 中 `launchKernel` 调用,关键字 `fetchOffset || type == DP`) |
+| fetchOffset | 标量 | - | bool | 为 true 时 kernel 先把自己的 input/output 相对 `ipcXTensorMems` 的偏移发布到 IPC 内存再互相同步;host 侧在 DP 域或上层显式要求时置 true(`csrc/op.cpp` 的 `XliteOpAllGather` 中 `launchKernel` 调用,关键字 `fetchOffset \|\| type == DP`) |
 
 测试中的 shape 约定(`tests/kernels/all_gather.py` 中 shape 循环,关键字 `for dim1, dim2 in zip([1, 1, 2, 4, 8, 32, 512]`):输入 `[dim1, dim2]`(如 `[1,1]`、`[1,37]`、`[512,7168]`,含非 32B 对齐的 37),输出 `[dim1*world_size, dim2]`,`count = dim1*dim2`,按行展开后逐 rank 拼接。
 
@@ -34,7 +34,7 @@ allgather_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId
 单一模板实现 `csrc/kernels/all_gather.cpp`,文件末尾统一实例化 6 个变体(`csrc/kernels/all_gather.cpp` 末尾的 `ALLGATHER_FUNC_DEFINE` 实例化列表):
 
 | dtype 变体 | kernel 符号 |
-|---|---|
+| --- | --- |
 | int8_t | `allgather_int8_t` |
 | int16_t | `allgather_int16_t` |
 | int32_t | `allgather_int32_t` |

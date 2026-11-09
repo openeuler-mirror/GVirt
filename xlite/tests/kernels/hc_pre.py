@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2026. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -19,13 +18,14 @@ does bf16-in -> fp32-out (null weight = no-affine path); matmul then runs fp32-i
 fp32-weight -> fp32-out (transpose=false == F.linear). hc_dim > 6144 exercises the
 tiled two-pass rmsnorm path in norm.h.
 """
+
 import sys
 
 import torch
-import torch_npu  # noqa: F401
 import torch.nn.functional as F
+import torch_npu  # noqa: F401
 
-from xlite._C import Runtime, rmsnorm, matmul, hc_act
+from xlite._C import Runtime, hc_act, matmul, rmsnorm
 
 
 def hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult=4, sinkhorn_iters=20, eps=1e-6):
@@ -40,10 +40,9 @@ def hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult=4, sinkhorn_iters=20, ep
     returns (pre [b,s,hc_mult], post [b,s,hc_mult], comb [b,s,hc_mult,hc_mult])
     """
     pre = torch.sigmoid(mixes[..., :hc_mult] * hc_scale[0] + hc_base[:hc_mult]) + eps
-    post = 2.0 * torch.sigmoid(
-        mixes[..., hc_mult:2 * hc_mult] * hc_scale[1] + hc_base[hc_mult:2 * hc_mult])
+    post = 2.0 * torch.sigmoid(mixes[..., hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult])
 
-    comb = mixes[..., 2 * hc_mult:] * hc_scale[2] + hc_base[2 * hc_mult:]
+    comb = mixes[..., 2 * hc_mult :] * hc_scale[2] + hc_base[2 * hc_mult :]
     b, s, _ = comb.shape
     comb = comb.view(b, s, hc_mult, hc_mult)
     comb = comb.softmax(dim=-1) + eps
@@ -80,7 +79,7 @@ def run_case(b, s, hidden, sinkhorn_iters):
     hc_dim = HC_MULT * hidden
     torch.manual_seed(1234)
     x_3d = torch.randn(b, s, HC_MULT, hidden, dtype=torch.bfloat16).npu()
-    hc_fn = torch.randn(MIX_HC, hc_dim, dtype=torch.float32).npu()   # [outFeatures, hcDim]
+    hc_fn = torch.randn(MIX_HC, hc_dim, dtype=torch.float32).npu()  # [outFeatures, hcDim]
     hc_scale = torch.randn(3, dtype=torch.float32).npu()
     hc_base = torch.randn(MIX_HC, dtype=torch.float32).npu()
 
@@ -90,8 +89,8 @@ def run_case(b, s, hidden, sinkhorn_iters):
     rsqrt = torch.rsqrt(x_ref.square().mean(-1, keepdim=True) + NORM_EPS)
     mixes_ref = F.linear(x_ref, hc_fn) * rsqrt
     pre_ref, post_ref, comb_ref = hc_split_sinkhorn(
-        mixes_ref, hc_scale, hc_base, hc_mult=HC_MULT,
-        sinkhorn_iters=sinkhorn_iters, eps=HC_EPS)
+        mixes_ref, hc_scale, hc_base, hc_mult=HC_MULT, sinkhorn_iters=sinkhorn_iters, eps=HC_EPS
+    )
     y_ref = torch.sum(pre_ref.unsqueeze(-1) * x_ref.view(shape), dim=2)
 
     # Flatten the 3D model-shape refs to 2D to match the xlite op outputs.
@@ -103,20 +102,19 @@ def run_case(b, s, hidden, sinkhorn_iters):
     y_ref = y_ref.reshape(n, hidden).to(torch.bfloat16)
 
     # ---- xlite host-op chain (same order as ForwardHcPre) ----
-    x_flat = x_3d.reshape(n, hc_dim).contiguous()             # bf16
+    x_flat = x_3d.reshape(n, hc_dim).contiguous()  # bf16
     x_norm = torch.empty(n, hc_dim, dtype=torch.float32).npu()  # fp32, now that norm.h supports it
     mixes = torch.empty(n, MIX_HC, dtype=torch.float32).npu()
     post = torch.empty(n, HC_MULT, dtype=torch.float32).npu()
     comb = torch.empty(n, HC_MULT * HC_MULT, dtype=torch.float32).npu()
-    x_residual = x_3d.reshape(n, HC_MULT, hidden).contiguous()   # bf16 [n, hc_mult, hidden]
+    x_residual = x_3d.reshape(n, HC_MULT, hidden).contiguous()  # bf16 [n, hc_mult, hidden]
     y = torch.empty(n, hidden, dtype=torch.bfloat16).npu()
     empty_norm = torch.empty(0, dtype=torch.float32, device="npu")
     torch.npu.synchronize()
 
     rmsnorm(rt, x_flat, empty_norm, x_norm, NORM_EPS, norm_dim=hc_dim, cnt_per_token=1)
     matmul(rt, x_norm, hc_fn, mixes, weight_nz=False, transpose=False)
-    hc_act(rt, mixes, hc_scale, hc_base, post, comb,
-           HC_MULT, HC_EPS, sinkhorn_iters, x_resid=x_residual, output=y)
+    hc_act(rt, mixes, hc_scale, hc_base, post, comb, HC_MULT, HC_EPS, sinkhorn_iters, x_resid=x_residual, output=y)
     torch.npu.synchronize()
 
     # ---- compare ----
@@ -133,13 +131,15 @@ def run_case(b, s, hidden, sinkhorn_iters):
     # y is bf16 out: the mixes noise propagates through sigmoid -> pre and
     # occasionally flips the final fp32->bf16 rounding by 1 ulp; (1e-2, 1e-2)
     # covers any 1-ulp bf16 flip (ulp/|y| <= 2^-8 < 1e-2) with wide margin.
-    tol = {"x_norm": (1e-5, 1e-3), "mixes": (1e-3, 1e-3),
-           "post": (1e-5, 1e-3), "comb": (1e-5, 1e-3),
-           "y": (1e-2, 1e-2)}
+    tol = {"x_norm": (1e-5, 1e-3), "mixes": (1e-3, 1e-3), "post": (1e-5, 1e-3), "comb": (1e-5, 1e-3), "y": (1e-2, 1e-2)}
     ok = True
-    got_pairs = [("x_norm", x_norm, x_norm_ref), ("mixes", mixes, mixes_ref),
-                 ("post", post, post_ref),
-                 ("comb", comb, comb_ref), ("y", y, y_ref)]
+    got_pairs = [
+        ("x_norm", x_norm, x_norm_ref),
+        ("mixes", mixes, mixes_ref),
+        ("post", post, post_ref),
+        ("comb", comb, comb_ref),
+        ("y", y, y_ref),
+    ]
     for name, got, want in got_pairs:
         atol, rtol = tol[name]
         try:
@@ -155,7 +155,7 @@ def run_case(b, s, hidden, sinkhorn_iters):
 
 if __name__ == "__main__":
     all_ok = True
-    for (b, s, hidden, iters) in CASES:
+    for b, s, hidden, iters in CASES:
         all_ok &= run_case(b, s, hidden, iters)
     if all_ok:
         print("==== all hc_pre cases passed ====")

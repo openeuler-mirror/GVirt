@@ -17,7 +17,7 @@ allreduce_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId
 ```
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | input | 输入 | `[N]`(逻辑上任意形状,N = count 个元素) | FP16 / BF16 / INT8 / INT32 / FP32 | 本 rank 输入。要求 `in.numel == out.numel` 且 dtype 一致(`csrc/op.cpp` 的 `XliteOpAllReduceSum` 中张量校验) |
 | output | 输出 | `[N]` | 同 input | 全 rank 求和结果。`skipMyRank`(input == output,in-place)时省去自身块的先写(`csrc/kernels/all_reduce.cpp` 的 `AllReduce::Init`,关键字 `this->skipMyRank = input == output`) |
 | count | 标量 | - | uint64 | 元素总数 `in.numel`,被切成 rankSize 块 |
@@ -25,7 +25,7 @@ allreduce_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId
 | generation | 标量 | - | uint64 | 通信代数,host 侧每次调用递增(`csrc/op.cpp` 的 `XliteOpAllReduceSum` 中 `launchKernel` 调用,关键字 `xcclComm->generation++`),用于 IPC flag 单调比较 |
 | param | 输入 | - | `XcclParam` | 所有 rank 的 `ipcMems` / `ipcXTensorMems` 基址(`csrc/kernels/kernel_param.h` 的 `struct XcclParam`) |
 | copySize | 标量 | - | uint32 | 每次 UB 搬运的目标字节数,默认 `COPY_SIZE`(32768),host 侧按核数调整(`csrc/op.cpp` 的 `XliteOpAllReduceSum` 中 `copySize` 调整段) |
-| fetchOffset | 标量 | - | bool | true 时通过 IPC 内存发布/获取各 rank 张量偏移;DP 域恒为 true(`csrc/op.cpp` 的 `XliteOpAllReduceSum` 中 `launchKernel` 调用,关键字 `fetchOffset || type == DP`) |
+| fetchOffset | 标量 | - | bool | true 时通过 IPC 内存发布/获取各 rank 张量偏移;DP 域恒为 true(`csrc/op.cpp` 的 `XliteOpAllReduceSum` 中 `launchKernel` 调用,关键字 `fetchOffset \|\| type == DP`) |
 
 测试 shape 约定(`tests/kernels/all_reduce.py` 中 shape 循环,关键字 `for dim1, dim2 in zip([1, 1, 2, 4, 8, 32, 512]`):`x`/`z` 均为 `[dim1, dim2]`(从 `[1,1]` 到 `[512,7168]`,含非对齐 37),`count = dim1*dim2`。
 
@@ -34,7 +34,7 @@ allreduce_<dtype>(GM_ADDR input, GM_ADDR output, uint64_t count, uint32_t rankId
 单一模板实现 `csrc/kernels/all_reduce.cpp`,统一实例化 6 个变体(`csrc/kernels/all_reduce.cpp` 末尾的 `ALLREDUCE_FUNC_DEFINE` 实例化列表):
 
 | dtype 变体 | kernel 符号 |
-|---|---|
+| --- | --- |
 | int8_t | `allreduce_int8_t` |
 | int16_t | `allreduce_int16_t` |
 | int32_t | `allreduce_int32_t` |

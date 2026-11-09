@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# coding=utf-8
 #
 # Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
 #
@@ -7,15 +6,15 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
-import os
 import json
+import os
 import shutil
 from argparse import ArgumentParser
 from glob import glob
-from tqdm import tqdm
 
 import torch
 from safetensors.torch import load_file, save_file
+from tqdm import tqdm
 
 
 def weight_dequant_preblock(weight: torch.Tensor, scale: torch.Tensor, block_size: int = 128) -> torch.Tensor:
@@ -40,8 +39,7 @@ def weight_dequant_preblock(weight: torch.Tensor, scale: torch.Tensor, block_siz
     # Compute the effective block dimensions for scale
     scale_m, scale_n = scale.shape
     assert scale_m == (M + block_size - 1) // block_size, "Mismatch in scale rows and weight rows."
-    assert scale_n == (
-        N + block_size - 1) // block_size, "Mismatch in scale columns and weight columns."
+    assert scale_n == (N + block_size - 1) // block_size, "Mismatch in scale columns and weight columns."
 
     # Convert weight to float32 for calculations
     weight = weight.to(torch.float32)
@@ -84,7 +82,7 @@ def main(fp8_path, bf16_path):
     torch.set_default_dtype(torch.bfloat16)
     os.makedirs(bf16_path, exist_ok=True)
     model_index_file = os.path.join(fp8_path, "model.safetensors.index.json")
-    with open(model_index_file, "r") as f:
+    with open(model_index_file) as f:
         model_index = json.load(f)
     weight_map = model_index["weight_map"]
 
@@ -131,8 +129,7 @@ def main(fp8_path, bf16_path):
                     fp8_weight_names.append(weight_name)
                     new_state_dict[weight_name] = weight_dequant_preblock(weight, scale_inv)
                 except KeyError:
-                    print(
-                        f"Warning: Missing scale_inv tensor for {weight_name}, skipping conversion")
+                    print(f"Warning: Missing scale_inv tensor for {weight_name}, skipping conversion")
                     new_state_dict[weight_name] = weight
             else:
                 new_state_dict[weight_name] = weight
