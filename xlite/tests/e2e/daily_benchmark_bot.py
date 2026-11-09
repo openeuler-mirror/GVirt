@@ -1978,6 +1978,12 @@ def main():
     offline_failures: list[str] = []
 
     if run_online:
+        # 无条件收集失败场景: 即使零对比报告 (如所有服务未起, online_server_compare.sh
+        # 仍 exit 0), 也能据此发 ⚠️ 失败明细通知, 与离线侧对齐, 避免 exit 1 之外无群通知。
+        online_failures = _collect_online_failures(report_dir)
+        if online_failures:
+            log_warning(f"在线测试发现 {len(online_failures)} 个失败场景")
+            has_infra_failure = True
         current_reports = list(report_dir.glob("benchmark_comparison_*.log"))
         if not current_reports:
             log_error("未找到在线测试报告文件")
@@ -1987,11 +1993,6 @@ def main():
             log_info("=" * 60)
             log_info("在线性能测试: 生成报告与通知")
             log_info("=" * 60)
-            # 先收集失败场景, 把数量透传给 _report_phase (避免"无变化"通知与失败矛盾)
-            online_failures = _collect_online_failures(report_dir)
-            if online_failures:
-                log_warning(f"在线测试发现 {len(online_failures)} 个失败场景")
-                has_infra_failure = True
             if _report_phase(
                 report_dir,
                 all_comparison_results,
