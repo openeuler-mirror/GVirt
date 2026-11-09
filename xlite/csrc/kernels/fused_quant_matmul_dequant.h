@@ -13,7 +13,10 @@
 using namespace AscendC;
 
 // Cross-core flag ids live in a dedicated 16-entry space (independent of the
-// intra-core set_flag/wait_flag ids used by matmul/dequant/quant).
+// intra-core set_flag/wait_flag ids used by matmul/dequant/quant). Both
+// directions use ffts mode 0x2 (MIX sub-block sync, the same mode CANN's own
+// SyncAll uses for cube<->vector notifies); the set/wait template args must
+// match, and an un-templated CrossCoreWaitFlag falls back to mode 0.
 #define C2V_CROSS_CORE_FLAG 8  // AIC tile done -> paired AIVs run one dequant tile (per tile)
 #define V2C_CROSS_CORE_FLAG 9  // AIV quant done -> paired AIC starts matmul (once per AIV)
 #define FUSION_MATMUL_DQ_LINEAR_SWIZZLE 0ULL
@@ -24,7 +27,7 @@ using namespace AscendC;
 //   AIV t (all): quant rows [t*chunk, (t+1)*chunk) -> GM xQuant
 //                [+ per-token scales -> GM outScale, dyn mode]
 //                -> SyncAll<true> -> V2C flag 9 (rides PIPE_MTE3)
-//   AIC b:       wait flag 9 x2 -> grid-stride matmul tiles -> out (fp16 view)
+//   AIC b:       wait flag 9 -> grid-stride matmul tiles -> out (fp16 view)
 //                -> C2V flag 8 per tile (rides PIPE_FIX, after CopyToGm)
 //   AIV 2b/2b+1: dequant(out fp16 -> bf16 in place, per-row scale in dyn mode)
 //
@@ -65,11 +68,13 @@ public:
                                uint64_t n, uint64_t k, uint64_t m0, uint64_t n0)
     {
 #if defined(__DAV_C220_CUBE__)
-        // Coarse V2C barrier: the paired AIVs each set flag 9 once after their
-        // quant stage, so waiting twice means every row this core will read
-        // has been quantized with its stores visible.
-        CrossCoreWaitFlag(V2C_CROSS_CORE_FLAG);
-        CrossCoreWaitFlag(V2C_CROSS_CORE_FLAG);
+        // Coarse V2C barrier in mode 0x2 (MIX sub-block sync): this wait
+        // fires only after BOTH paired AIVs have set flag 9, and each set
+        // is in turn ordered behind SyncAll<true> (the all-AIV soft barrier
+        // — quant rows are spread over the whole AIV array, not just this
+        // group). Both sets landing therefore implies every row this core
+        // will read is quantized with its stores visible.
+        CrossCoreWaitFlag<0x2>(V2C_CROSS_CORE_FLAG);
 
         this->matmulOp.TaskTilesInit(xQuant, weight, out, bias, deqScale, m, n, k);
         this->matmulOp.SetFlags();
@@ -111,9 +116,11 @@ public:
 
         // Aggregate release: SyncAll<true> is an AIV-only soft barrier — every
         // AIV's quant stores have retired when it returns; each AIV then
-        // notifies its own group's AIC (the AIC waits for both of its AIVs).
+        // notifies its own group's AIC in mode 0x2, whose single wait needs
+        // BOTH of this group's sets — and by SyncAll, either set already
+        // implies the whole array's quant is complete and visible.
         AscendC::SyncAll<true>();
-        CrossCoreSetFlag<0x3, PIPE_MTE3>(V2C_CROSS_CORE_FLAG);
+        CrossCoreSetFlag<0x2, PIPE_MTE3>(V2C_CROSS_CORE_FLAG);
 
         // ---- stage 2: dequant — same loop structure as
         // fusion_operator_matmul_dequant_pipeline. TaskTilesInit returns the
@@ -122,7 +129,7 @@ public:
         int64_t tiles = this->dequantOp.TaskTilesInit(out, outScale, out, num, m, n, true);
         this->dequantOp.SetFlags();
         for (int64_t tileIdx = t; tileIdx < tiles; tileIdx += GetBlockNum() * GetTaskRatio()) {
-            CrossCoreWaitFlag(C2V_CROSS_CORE_FLAG);
+            CrossCoreWaitFlag<0x2>(C2V_CROSS_CORE_FLAG);
             this->dequantOp.RunTileByIdx(tileIdx);
         }
         this->dequantOp.WaitFlags();
