@@ -64,7 +64,9 @@ public:
         // to the paired AIVs when they wake up.
         CrossCoreSetFlag<0x2, PIPE_FIX>(C2V_CROSS_CORE_FLAG);
 #elif defined(__DAV_C220_VEC__)
-        CrossCoreWaitFlag(C2V_CROSS_CORE_FLAG);
+        // Mode 0x2 (MIX sub-block sync) pairs with the AIC's set above; an
+        // un-templated call would fall back to the default mode 0.
+        CrossCoreWaitFlag<0x2>(C2V_CROSS_CORE_FLAG);
         this->subOp.RunTileByIdx(tileIdx);
 #endif
     }

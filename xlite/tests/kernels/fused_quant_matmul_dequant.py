@@ -44,7 +44,8 @@ test_sizes = [
     [64, 256, 8192, False, False, False],
     # AIC-ahead-of-AIV race: mLoop=1 with a large nLoop makes one AIC run all
     # n-tiles and retire while the paired AIVs are still in their last
-    # dequant tiles (regression guard for the V2C_DONE_FLAG exit barrier)
+    # dequant tiles (regression guard for the AIC early-exit path: no
+    # completion receipt, AIVs must only read C2V-flagged, landed GM data)
     [128, 6144, 768, False, False, True],
     [128, 3072, 768, False, False, True],
     # mLoop=2 boundary: partial tail m-tile through the grid-stride matmul

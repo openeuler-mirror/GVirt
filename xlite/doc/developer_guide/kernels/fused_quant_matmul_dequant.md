@@ -6,7 +6,7 @@
 
 ```
 AIV t (全部):  quant(x 行段 [t*chunk, (t+1)*chunk)) → xQuant (+ per-token scale → outScale, dyn)
-               --SyncAll<true> → V2C flag 9 (每 AIV set 一次, AIC wait 两次)-->
+               --SyncAll<true> → V2C flag 9 (mode 0x2, 每 AIV set 一次, AIC wait 一次)-->
 AIC b:         grid-stride matmul tiles → out (FP16 视图)
                --C2V flag 8 per tile (挂 PIPE_FIX, 骑 CopyToGm 之后)-->
 AIV 2b/2b+1:   dequant(out FP16 → BF16 原位, dyn 乘 outScale)
@@ -43,10 +43,10 @@ Python 入口 `fused_quant_matmul_dequant(rt, x, quant_scale_rec, quant_offset, 
 实现位于 [csrc/kernels/fused_quant_matmul_dequant.h](../../../csrc/kernels/fused_quant_matmul_dequant.h)，类模板 `FusedQuantMatmulDequant<int8_t, int32_t, half, bfloat16_t>`，AIC 侧复用 `Matmul`，AIV 侧复用 `Quant`/`QuantDyn`/`Dequant` 子算子原语。
 
 - **双侧均衡**：AIC 跑与独立 matmul 相同的 grid-stride（`idx ≡ b mod N`）；AIV 量化行按全 AIV 均分连续段（`chunk = ceil(m/总AIV数)`）——量化并行度与独立 kernel 相同，matmul 负载与独立 matmul 相同。
-- **V2C 粗粒度 barrier**：AIV 全部完成量化后 `AscendC::SyncAll<true>`（AIV-only 软屏障）聚合，每个 AIV 向本组 AIC set flag 9（挂 PIPE_MTE3 骑量化 store 之后——ffts 屏障是本平台唯一带数据可见性保证的跨核释放），AIC wait×2。细粒度 per-m-tile 交接在本平台不可行（无标量 atomic / MTE1 不过 L2 / ffts flag 组内路由）。
-- **C2V per tile**（flag 8 挂 PIPE_FIX，骑 CopyToGm 之后）：AIC 每完成一个 matmul tile 通知配对 AIV 做 dequant；AIV 的 dequant 循环逐 tile `CrossCoreWaitFlag(C2V_CROSS_CORE_FLAG)`，结束后 `dequantOp.WaitFlags()` 只清算核内 flag。早期版本的 **V2C_DONE（flag 10）AIC 退出回执已删除**：AIC 不再等待配对 AIV 完成最后的 dequant tiles 即可退出（其全部产出经挂 PIPE_FIX 的 C2V set 保证落地后才唤醒 AIV），跨核 flag 只剩 8/9 两个。
+- **V2C 粗粒度 barrier**：AIV 全部完成量化后 `AscendC::SyncAll<true>`（AIV-only 软屏障）聚合，每个 AIV 向本组 AIC set flag 9（挂 PIPE_MTE3 骑量化 store 之后——ffts 屏障是本平台唯一带数据可见性保证的跨核释放），AIC 单次 `CrossCoreWaitFlag<0x2>` 即可：mode 2 在 AIC 侧的 wait 是聚合语义——本组**两个 AIV 都 set** 后才放行；每个 set 又被 SyncAll<true> 排在全体量化完成之后（量化行段跨全体 AIV 均分，非仅本组），故两个 set 落地即代表全部行段就绪（与 CANN 自身 `SyncAll` 的 cube↔vector 分层栅栏同范式：mode 0 管"全体完成"，mode 2 管"组内通知"）。细粒度 per-m-tile 交接在本平台不可行（无标量 atomic / MTE1 不过 L2 / ffts flag 组内路由）。
+- **C2V per tile**（flag 8 挂 PIPE_FIX，骑 CopyToGm 之后）：AIC 每完成一个 matmul tile 通知配对 AIV 做 dequant；AIV 的 dequant 循环逐 tile `CrossCoreWaitFlag<0x2>(C2V_CROSS_CORE_FLAG)`，结束后 `dequantOp.WaitFlags()` 只清算核内 flag。早期版本的 **V2C_DONE（flag 10）AIC 退出回执已删除**：AIC 不再等待配对 AIV 完成最后的 dequant tiles 即可退出（其全部产出经挂 PIPE_FIX 的 C2V set 保证落地后才唤醒 AIV），跨核 flag 只剩 8/9 两个。
 - **AIV 两阶段串行**：全部量化（行段跨 AIV 均分；行内 k 按 UB 容量分 chunk，每 AIV 仅分得单行时走无 ping-pong 的单行路径）→ SyncAll → dequant 锁步，规避 quant/dequant 子算子的 UB 基址与 EVENT_ID 复用冲突。
-- **ffts mode id 路由**（实测）：`0x2`（AIC→AIV）只到同组 AIV；AIV 发起必须 `0x3`（同为组内路由）。flagId 8/9 与核内事件号空间独立。
+- **ffts 同步模式与 flagId**：`CrossCoreSetFlag/WaitFlag` 的模板参数是 ffts 同步模式 modeId，函数实参才是 flagId（CANN 接口签名 `CrossCoreSetFlag<uint8_t modeId, pipe_t pipe>(uint16_t flagId)`）。本平台 MIX 块内 AIC↔AIV 双向统一用 mode `0x2`（子块同步模式，CANN 自身 `SyncAll` 的 cube↔vector 通知同款），set/wait 两侧模板参数须一致——`CrossCoreWaitFlag` 不写模板参数会落到默认 mode 0。flagId 8/9 为 0~15 编号空间，与核内事件号空间独立。
 
 ## 性能特征（910C 实测，2026-10-13）
 

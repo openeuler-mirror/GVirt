@@ -80,18 +80,18 @@ nIdx   = aicIdx % nTiles;                   // 列块与 AIC tile 相同
 
 每个 tile 的同步时序（`csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的 `FusionMatmulDequantPipeline::RunTileByIdx`，关键字 `CrossCoreSetFlag`/`CrossCoreWaitFlag`）：
 
-- **AIC**：`subOp.RunTileByIdx(tileIdx)` 完成（含 `CopyToGmWithDequant` 把 fp16 结果写 GM）后执行 `CrossCoreSetFlag<0x2, PIPE_FIX>(C2V_CROSS_CORE_FLAG)`（flagId=8，`csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的 `C2V_CROSS_CORE_FLAG` 宏）。通知指令挂在 FIX 管线队列尾，天然排在 CopyToGm 之后发出——被唤醒的 AIV 看到的 GM 数据必然已落地，无需额外的标量流等待；
-- **AIV**：`CrossCoreWaitFlag(C2V_CROSS_CORE_FLAG)` 阻塞至同组 AIC 的通知，再执行 `subOp.RunTileByIdx(tileIdx)`（GM fp16 → UB → vconv/vmuls/vconv → GM bf16，见 [dequant.md](dequant.md)）。
+- **AIC**：`subOp.RunTileByIdx(tileIdx)` 完成（含 `CopyToGmWithDequant` 把 fp16 结果写 GM）后执行 `CrossCoreSetFlag<0x2, PIPE_FIX>(C2V_CROSS_CORE_FLAG)`（模板参数 0x2 为 ffts 同步模式 modeId——MIX 子块同步，AIC↔AIV 双向通用；实参才是 flagId=8，`csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的 `C2V_CROSS_CORE_FLAG` 宏）。通知指令挂在 FIX 管线队列尾，天然排在 CopyToGm 之后发出——被唤醒的 AIV 看到的 GM 数据必然已落地，无需额外的标量流等待；
+- **AIV**：`CrossCoreWaitFlag<0x2>(C2V_CROSS_CORE_FLAG)` 阻塞至同组 AIC 的通知（模板参数与 set 侧配对，均须显式写 0x2——`CrossCoreWaitFlag` 省略模板参数会落到默认 mode 0），再执行 `subOp.RunTileByIdx(tileIdx)`（GM fp16 → UB → vconv/vmuls/vconv → GM bf16，见 [dequant.md](dequant.md)）。
 
-flagId 8 的选择避开了 matmul（EVENT_ID0-5）与 dequant（EVENT_ID0-1）内部已占用的事件号；跨核 flag 是独立的 16 个编号空间，与核内 `set_flag/wait_flag` 不冲突。
+flagId 8 的选择避开了 matmul（EVENT_ID0-5）与 dequant（EVENT_ID0-1）内部已占用的事件号；跨核 flag 是独立的 16 个编号空间（CANN ffts 消息按 `flagId & 0xf` 编码），与核内 `set_flag/wait_flag` 不冲突。modeId 则与 flagId 无关：MIX 块内跨核同步统一走 0x2（子块同步模式）。
 
 ### 数据流总览
 
 ```
 AIC block b:  x,y GM --MTE2--> L1 --MTE1--> L0A/L0B --Mmad--> L0C(int32)
               --FIX: ×deqScale(VDEQF16)--> GM[out 的 fp16 视图, tile (mIdx_aic, nIdx)]
-              --CrossCoreSetFlag(8)-->
-AIV 2b/2b+1:  CrossCoreWaitFlag(8)
+              --CrossCoreSetFlag<0x2, PIPE_FIX>(8)-->
+AIV 2b/2b+1:  CrossCoreWaitFlag<0x2>(8)
               GM fp16 半块 --MTE2--> UB --V: vconv_f162f32--> --V: vmuls(outScale)-->
               --V: vconv_f322bf16r--> UB bf16 --MTE3--> GM[out 同一地址, 原位覆盖]
 ```
