@@ -204,6 +204,7 @@ def check_rejections(rt):
         (recurrent_gated_delta_rule_prefill_paged, ssm_args, "initial", initial.float()),
         (recurrent_gated_delta_rule_prefill_paged, ssm_args, "indices", ids.cpu()),
         (recurrent_gated_delta_rule_prefill_paged, ssm_args, "starts", starts[:1]),
+        (recurrent_gated_delta_rule_prefill_paged, ssm_args, "num_value_heads", 4097),
     ]
     for function, kwargs, name, bad_tensor in cases:
         kwargs = dict(kwargs)
@@ -217,7 +218,7 @@ def check_rejections(rt):
             raise AssertionError(f"invalid descriptor accepted at argument {name}")
         assert torch.equal(conv, before_conv), "rejected call changed Conv state"
         assert torch.equal(state, before_state), "rejected call changed SSM state"
-    print("PASS 8 Prefill descriptor/device rejections with unchanged state", flush=True)
+    print("PASS 9 Prefill descriptor/device rejections with unchanged state", flush=True)
 
 
 def main(device):

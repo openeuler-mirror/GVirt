@@ -8,6 +8,7 @@
 #include "op.h"
 #include "swizzle.h"
 #include "aclrtlaunch_all.h"
+#include "gdn_metadata.h"
 
 #include "kernels/kernel_param.h"
 #include "trace/trace.h"
@@ -3433,8 +3434,9 @@ static void RecurrentPrefillImpl(XRuntime &rt, XTensor &query, XTensor &key, XTe
     if (IsDummyRuntime(rt)) {
         return;
     }
-    if (batch == 0 || kHeads == 0 || vHeads == 0 || vHeads % kHeads != 0 || kDim == 0 ||
-        kDim > 128 || kDim % 16 != 0 || vDim == 0 || vDim > 128 || vDim % 64 != 0) {
+    if (batch == 0 || kHeads == 0 || vHeads == 0 || vHeads > XLITE_GDN_GATE_CAP ||
+        vHeads % kHeads != 0 || kDim == 0 || kDim > 128 || kDim % 16 != 0 || vDim == 0 ||
+        vDim > 128 || vDim % 64 != 0) {
         throw std::runtime_error("paged recurrent: unsupported dimensions/head grouping");
     }
     if (starts &&
