@@ -101,11 +101,9 @@ public:
         }
 
         uint64_t ql1Size = MAX_N0 * headDim * sizeof(Dtype);
-        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
-            ql1Buf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
-            ql1Buf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += ql1Size;
-        }
+        ql1Buf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+        ql1Buf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off += ql1Size;
 
         uint64_t wl1Size = XLITE_MAX_M0 * nHeads * sizeof(WeightDtype);
         wl1Buf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
@@ -254,9 +252,11 @@ public:
         constexpr int weightBlockSize = 32 / sizeof(WeightDtype);
         int wkBlockNum = nHeads / weightBlockSize;
 
-        // copy weight [queryTaskLen, nHeads] to L1; weightCols is the GM row pitch.
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+        // copy q (queryTaskLen, nHeads, headDim) to L1
+        CopyGmToL1Nd2Nz(ql1Buf, query, nSize, headDim, headDim, nBlockPad);
+        // copy weight [queryTaskLen, nHeads] to L1; weightCols is the GM row pitch.
         CopyGmToL1Nd2Nz(wl1Buf, weight, wmSize, nHeads, weightCols, wmBlockPad);
         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
@@ -264,8 +264,6 @@ public:
         int curr = 0;
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
-        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
-        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
@@ -288,9 +286,6 @@ public:
             WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
             CopyGmToL1Nd2Nz(kl1Buf[curr], kCache[(uint64_t)block * kCacheStride], mSize, headDim,
                             headDim, mBlockPad);
-            // copy q (queryTaskLen, nHeads, headDim) to L1
-            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
-            CopyGmToL1Nd2Nz(ql1Buf[curr], query, nSize, headDim, headDim, nBlockPad);
 
             SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
             WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
@@ -299,8 +294,7 @@ public:
             CopyToL0ACol(l0aBuf[curr], kl1Buf[curr], mBlockNum, 0, kBlockNum);
             SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
 
-            CopyToL0BCol(l0bBuf[curr], ql1Buf[curr], nBlockNum, 0, kBlockNum);
-            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
+            CopyToL0BCol(l0bBuf[curr], ql1Buf, nBlockNum, 0, kBlockNum);
 
             SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
             WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
@@ -367,8 +361,6 @@ public:
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
-        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID3);
-        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
     }
@@ -765,11 +757,11 @@ private:
 
 #ifdef __DAV_C220_CUBE__
     LocalTensor<Dtype> kl1Buf[PINGPONG_BUF_NUM];         // event 0/1
-    LocalTensor<Dtype> ql1Buf[PINGPONG_BUF_NUM];         // event 2/3
+    LocalTensor<Dtype> ql1Buf;                           // event 4
     LocalTensor<WeightDtype> wl1Buf;                     // event 4
     LocalTensor<WeightDtype> kql1Buf[PINGPONG_BUF_NUM];  // event 0/1
     LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];         // event 0/1
-    LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];
+    LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];         // event 0/1
     LocalTensor<WeightDtype> wl0aBuf[PINGPONG_BUF_NUM];  // event 0/1
     LocalTensor<WeightDtype> kql0bBuf[PINGPONG_BUF_NUM];
     LocalTensor<MatDtype> qkl0cBuf;  // event 0, shares storage with l0cBuf
