@@ -259,8 +259,8 @@ def main():
         "--model",
         type=str,
         default="moe",
-        choices=["dense", "moe", "dense_quant", "moe_quant", "origin", "quant", "all"],
-        help="*性能*测试模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)，默认 moe；仅 bench 模式有效",
+        choices=["moe", "moe_quant", "moe_quant_a3", "moe_mix", "quant", "all"],
+        help="*性能*测试模型类型 (moe/moe_quant/moe_quant_a3/moe_mix/quant/all)，默认 moe；仅 bench 模式有效",
     )
     default_model_args = (
         "--models Qwen3-VL-30B-A3B-Instruct Qwen3-32B-w8a8-nopdmix",

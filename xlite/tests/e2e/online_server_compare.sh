@@ -15,32 +15,28 @@ RESUME_DIR_ARG=${2:-}
 
 # 定义模型配置
 declare -A MODELS
-MODELS[dense]="Qwen3-32B|/mnt/nvme0n1/models/Qwen3-32B"
 MODELS[moe]="Qwen3-30B-A3B-Instruct-2507|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507"
-MODELS[dense_quant]="Qwen3-32B-w8a8-nopdmix|/mnt/nvme0n1/models/Qwen3-32B-w8a8-nopdmix"
 MODELS[moe_quant]="Qwen3-30B-A3B-Instruct-2507-w8a8|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507-w8a8"
 MODELS[moe_quant_a3]="GLM-5.2-w8a8|/mnt/nvme0n1/models/GLM-5.2-w8a8/"
 
 # 确定要测试的模型列表
 declare -a TEST_MODELS
 if [ "${MODEL_TYPE}" = "all" ]; then
-    TEST_MODELS=("dense" "moe" "dense_quant" "moe_quant" "moe_quant_a3")
-elif [ "${MODEL_TYPE}" = "origin" ]; then
-    TEST_MODELS=("dense" "moe")
+    TEST_MODELS=("moe" "moe_quant" "moe_quant_a3")
+elif [ "${MODEL_TYPE}" = "moe_mix" ]; then
+    TEST_MODELS=("moe" "moe_quant")
 elif [ "${MODEL_TYPE}" = "quant" ]; then
-    TEST_MODELS=("dense_quant" "moe_quant" "moe_quant_a3")
-elif [ "${MODEL_TYPE}" = "dense" ] || [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "dense_quant" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ]; then
+    TEST_MODELS=("moe_quant" "moe_quant_a3")
+elif [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ]; then
     TEST_MODELS=("${MODEL_TYPE}")
 else
-    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'dense'、'moe'、'dense_quant'、'moe_quant'、'moe_quant_a3'、'origin'、'quant' 或 'all'"
+    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'moe'、'moe_quant'、'moe_quant_a3'、'moe_mix'、'quant' 或 'all'"
     echo "用法：$0 [model_type] [output_dir]"
     echo "  model_type（可选，默认 moe）："
-    echo "  dense        - 测试 Qwen3-32B 模型"
     echo "  moe          - 测试 Qwen3-30B-A3B-Instruct-2507 模型（默认）"
-    echo "  dense_quant  - 测试 Qwen3-32B-w8a8 模型"
     echo "  moe_quant    - 测试 Qwen3-30B-A3B-Instruct-2507-w8a8 模型"
     echo "  moe_quant_a3 - 测试 GLM-5.2-w8a8 模型"
-    echo "  origin       - 测试所有非量化模型模型"
+    echo "  moe_mix      - 测试 moe + moe_quant（量化前后对比）"
     echo "  quant        - 测试所有量化模型"
     echo "  all          - 测试所有模型"
     echo "  output_dir（可选）：主输出目录；传入已存在且非空的目录即进入断点续测模式"
@@ -496,9 +492,6 @@ declare -A SCENARIOS
 
 # 定义每个模型的场景数量
 declare -A MODEL_SCENARIO_COUNT
-# Due to the limitation of max_position_embeddings, the max_model_len of Qwen3 dense models should be less than 40960.
-MODEL_SCENARIO_COUNT[dense]=4
-MODEL_SCENARIO_COUNT[dense_quant]=4
 MODEL_SCENARIO_COUNT[moe]=5
 MODEL_SCENARIO_COUNT[moe_quant]=5
 MODEL_SCENARIO_COUNT[moe_quant_a3]=3

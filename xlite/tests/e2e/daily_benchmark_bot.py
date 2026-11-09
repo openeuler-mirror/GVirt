@@ -18,7 +18,7 @@ xlite 每日自动化测试机器人
     python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
 
     可选参数:
-    --model: 测试模型类型 (dense/moe/all)，默认 moe
+    --model: 测试模型类型 (moe/moe_quant/moe_quant_a3/moe_mix/quant/all)，默认 moe
     --skip-pull: 跳过代码拉取
     --skip-build: 跳过编译
     --receiver: 接收者ID，默认 927280411401503971
@@ -186,7 +186,7 @@ def run_benchmark(model_type: str = "moe", report_subdir: Optional[Path] = None)
     执行基准测试脚本
 
     参数:
-        model_type: 模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)
+        model_type: 模型类型 (moe/moe_quant/moe_quant_a3/moe_mix/quant/all)
         report_subdir: 报告目录路径。传入则复用, 否则按当前版本+日期新建。
 
     返回:
@@ -1834,7 +1834,7 @@ def main():
     parser.add_argument(
         "--model",
         default="moe",
-        choices=["dense", "moe", "dense_quant", "moe_quant", "origin", "quant", "all"],
+        choices=["moe", "moe_quant", "moe_quant_a3", "moe_mix", "quant", "all"],
         help="测试模型类型 (default: moe)",
     )
     parser.add_argument("--skip-pull", action="store_true", help="跳过代码拉取")
