@@ -1452,6 +1452,37 @@ void _CModel::InitMatmulWeight(const std::string &name, std::vector<at::Tensor> 
     }
 }
 
+void DsaCpMetadata(XRuntime &rt, at::Tensor &queryStartLoc, at::Tensor &queryLens,
+                   at::Tensor &cachedLens, at::Tensor &localQueryStartLoc,
+                   at::Tensor &localQueryLens, at::Tensor &localCachedLens,
+                   at::Tensor &localSlotMapping, uint32_t shardBegin, uint32_t shardEnd)
+{
+    XTensor queryStartLocXT, queryLensXT, cachedLensXT, localQueryStartLocXT, localQueryLensXT,
+        localCachedLensXT, localSlotMappingXT;
+    InitXTensor(queryStartLocXT, queryStartLoc);
+    InitXTensor(queryLensXT, queryLens);
+    InitXTensor(cachedLensXT, cachedLens);
+    InitXTensor(localQueryStartLocXT, localQueryStartLoc);
+    InitXTensor(localQueryLensXT, localQueryLens);
+    InitXTensor(localCachedLensXT, localCachedLens);
+    InitXTensor(localSlotMappingXT, localSlotMapping);
+    XliteOpDsaCpMetadata(rt, queryStartLocXT, queryLensXT, cachedLensXT, localQueryStartLocXT,
+                         localQueryLensXT, localCachedLensXT, localSlotMappingXT, queryLens.numel(),
+                         shardBegin, shardEnd);
+    rt.Synchronize();
+}
+
+void DsaCpWriteKVCacheBySlot(XRuntime &rt, at::Tensor &input, at::Tensor &cache,
+                             at::Tensor &slotMapping, uint32_t numTokens, uint32_t blockSize)
+{
+    XTensor inputXT, cacheXT, slotMappingXT;
+    InitXTensor(inputXT, input, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(cacheXT, cache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(slotMappingXT, slotMapping);
+    XliteOpDsaCpWriteKVCacheBySlot(rt, inputXT, cacheXT, slotMappingXT, numTokens, blockSize);
+    rt.Synchronize();
+}
+
 void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType = 0)
 {
     XTensor _in, _out;
@@ -3538,6 +3569,13 @@ PYBIND11_MODULE(_C, m)
           py::kw_only(), py::arg("comm_type") = 0);
     m.def("all_reduce", &AllReduce, py::arg("rt"), py::arg("out"), py::arg("in_"), py::kw_only(),
           py::arg("comm_type") = 0);
+    m.def("dsa_cp_metadata", &DsaCpMetadata, py::arg("rt"), py::arg("query_start_loc"),
+          py::arg("query_lens"), py::arg("cached_lens"), py::arg("local_query_start_loc"),
+          py::arg("local_query_lens"), py::arg("local_cached_lens"), py::arg("local_slot_mapping"),
+          py::arg("shard_begin"), py::arg("shard_end"));
+    m.def("dsa_cp_write_kv_cache_by_slot", &DsaCpWriteKVCacheBySlot, py::arg("rt"),
+          py::arg("input"), py::arg("cache"), py::arg("slot_mapping"), py::arg("num_tokens"),
+          py::arg("block_size"));
     m.def("alltoallv", &AlltoAllV, py::arg("rt"), py::arg("out"), py::arg("in_"),
           py::arg("send_counts"), py::arg("recv_counts"), py::arg("sdispls"), py::arg("rdispls"),
           py::kw_only(), py::arg("comm_type") = 0);

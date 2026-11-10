@@ -3567,6 +3567,42 @@ def mla_v2(
     """
     ...
 
+def dsa_cp_metadata(
+    rt: Runtime,
+    query_start_loc: torch.Tensor,
+    query_lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    local_query_start_loc: torch.Tensor,
+    local_query_lens: torch.Tensor,
+    local_cached_lens: torch.Tensor,
+    local_slot_mapping: torch.Tensor,
+    shard_begin: int,
+    shard_end: int,
+) -> None:
+    """Build local request metadata for the token window [shard_begin, shard_end).
+
+    Metadata tensors are int32. Local query starts are relative to the shard;
+    local cached lengths include the request prefix before the shard. The slot
+    mapping is the identity mapping for the temporary local KV buffer.
+    Only rows covered by local_query_lens are consumed. Outputs are written in place.
+    """
+    ...
+
+def dsa_cp_write_kv_cache_by_slot(
+    rt: Runtime,
+    input: torch.Tensor,
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    num_tokens: int,
+    block_size: int,
+) -> None:
+    """Write gathered DSA-CP KV rows into the persistent paged cache.
+
+    Input rows and cache blocks may have a dim-0 pitch. Only num_tokens rows
+    are considered; negative int32 slot_mapping entries are skipped.
+    """
+    ...
+
 def gather_sparse_kv_cache(
     rt: Runtime,
     k_cache: torch.Tensor,

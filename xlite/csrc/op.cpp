@@ -36,6 +36,37 @@ static void WarnPositions2D(const char *op)
     }
 }
 
+void XliteOpDsaCpMetadata(XRuntime &rt, XTensor &queryStartLoc, XTensor &queryLens,
+                          XTensor &cachedLens, XTensor &localQueryStartLoc, XTensor &localQueryLens,
+                          XTensor &localCachedLens, XTensor &localSlotMapping, uint32_t batch,
+                          uint32_t shardBegin, uint32_t shardEnd)
+{
+    if (!IsDummyRuntime(rt)) {
+        aclrtlaunch_dsa_cp_metadata(1, rt.stream, queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr,
+                                    localQueryStartLoc.ptr, localQueryLens.ptr, localCachedLens.ptr,
+                                    localSlotMapping.ptr, batch, shardBegin, shardEnd,
+                                    localSlotMapping.numel);
+    }
+}
+
+void XliteOpDsaCpWriteKVCacheBySlot(XRuntime &rt, XTensor &input, XTensor &cache,
+                                    XTensor &slotMapping, uint32_t numTokens, uint32_t blockSize)
+{
+    if (!IsDummyRuntime(rt) && numTokens > 0) {
+        if (input.dtype != cache.dtype || numTokens > input.shape[0] ||
+            numTokens > slotMapping.numel) {
+            throw std::invalid_argument(
+                "DsaCpWriteKVCacheBySlot: incompatible input/cache/slot mapping");
+        }
+        const size_t elementBytes = XDtypeBit(input.dtype) / 8;
+        const size_t blockStride = std::max(cache.stride[0], blockSize * input.shape[1]);
+        aclrtlaunch_dsa_cp_write_kv_cache_by_slot(
+            rt.aivNum, rt.stream, input.ptr, cache.ptr, slotMapping.ptr, numTokens,
+            input.shape[1] * elementBytes, input.stride[0] * elementBytes, blockSize,
+            blockStride * elementBytes);
+    }
+}
+
 // Kernel scalar params are uint32_t in the launch ABI while XTensor metadata is 64-bit;
 // fail fast instead of silently truncating an element count that no longer fits.
 static inline uint32_t LaunchNumel(uint64_t numel, const char *op)

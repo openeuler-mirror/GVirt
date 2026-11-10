@@ -13,6 +13,18 @@
 static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN);
 
 HcclDataType XDtype2HcclDtype(enum XDtype dtype);
+// Intersect each request with [shardBegin, shardEnd) in the
+// flattened batch. Local query starts index the rank-local token buffer;
+// local cached lengths include preceding tokens from the same request.
+// localSlotMapping addresses a contiguous temporary KV buffer (block size 1).
+void XliteOpDsaCpMetadata(XRuntime &rt, XTensor &queryStartLoc, XTensor &queryLens,
+                          XTensor &cachedLens, XTensor &localQueryStartLoc, XTensor &localQueryLens,
+                          XTensor &localCachedLens, XTensor &localSlotMapping, uint32_t batch,
+                          uint32_t shardBegin, uint32_t shardEnd);
+// Write the valid rows of gathered new KV to this rank's paged cache using
+// global slots. Negative slots are skipped; numTokens excludes gather padding.
+void XliteOpDsaCpWriteKVCacheBySlot(XRuntime &rt, XTensor &input, XTensor &cache,
+                                    XTensor &slotMapping, uint32_t numTokens, uint32_t blockSize);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
                       uint32_t copySize = COPY_SIZE);
