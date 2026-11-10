@@ -48,6 +48,9 @@ enum class NormKind {
 // compress segment of the scores workspace is padded to a multiple of 4*svck0 because
 // RunAicSV reads 4*svck0 compress-score elements per call.
 #define CXA_SVCK0 64
+
+// indexer
+#define MAX_INDEXER_Q_TILE_LEN 24
 #define MAX_INDEXER_KV_TILE_LEN 4096
 #define INDEXER_C8_TILE_ROWS 32
 // quant_cache_c8 row dim bound: 17B/elem UB footprint + scale staging; 64 | dim.

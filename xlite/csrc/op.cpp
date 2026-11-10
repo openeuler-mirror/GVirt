@@ -2487,11 +2487,14 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
         throw std::invalid_argument(std::string(__func__) +
                                     ": weight must be [T, nHeads] or [T, headDim+nHeads]");
     }
+    if (nHeads == 0 || nHeads % 16 != 0 || nHeads > 64 || blockSize == 0 || blockSize % 16 != 0 ||
+        blockSize > 128 || MAX_INDEXER_KV_TILE_LEN % blockSize != 0 || headDim == 0 ||
+        headDim % 16 != 0 || headDim > 128) {
+        throw std::invalid_argument("indexer_topk: unsupported indexer topk configuration");
+    }
     if (kCache.dtype == INT8) {
-        if (nHeads == 0 || nHeads % 16 != 0 || nHeads > XLITE_MAX_M0 || headDim != 128 ||
-            blockSize < 16 || blockSize > 128 || blockSize % 16 != 0 ||
-            MAX_INDEXER_KV_TILE_LEN % blockSize != 0 || batch == 0 || topK < 32 || topK % 32 != 0) {
-            throw std::invalid_argument("indexer_topk: unsupported LI-C8 configuration");
+        if (headDim % 32 != 0) {
+            throw std::invalid_argument("indexer_topk: INT8 K cache requires headDim % 32 == 0");
         }
         if (kScaleCache.shape.empty() || q.dtype != INT8 ||
             !EachXDtype(FP16, weight, kScaleCache) || scores.dtype != FP32) {

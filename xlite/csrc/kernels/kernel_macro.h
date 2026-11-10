@@ -172,25 +172,37 @@ __aicore__ inline void CopyGmToL1(const LocalTensor<Dtype> &dst, const GlobalTen
 
 template <typename Dtype>
 __aicore__ inline void CopyToL0ACol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src,
-                                    int mBlockNum, int kBlockStart, int kBlockNum)
+                                    int mBlockNum, int kBlockStart, int kBlockNum,
+                                    int srcNzC0Stride = 0)
 {
     int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
     int cubeSize = 512 * 8 / dtypeBits;
+    int mSrcStride =
+        srcNzC0Stride == 0 ? mBlockNum * cubeSize : (srcNzC0Stride * (32 / sizeof(Dtype)));
     LoadData2dParams params(0 /* startIndex */, mBlockNum /* repeatTimes */, 1 /* srcStride */,
                             0 /* sid */, kBlockNum - 1 /* dstGap */, 0, inc);
     for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
-        LoadData(dst[(k - kBlockStart) * cubeSize], src[k * mBlockNum * cubeSize], params);
+        LoadData(dst[(k - kBlockStart) * cubeSize], src[k * mSrcStride], params);
     }
 }
 
 template <typename Dtype>
 __aicore__ inline void CopyToL0BCol(const LocalTensor<Dtype> &dst, const LocalTensor<Dtype> &src,
-                                    int nBlockNum, int kBlockStart, int kBlockNum)
+                                    int nBlockNum, int kBlockStart, int kBlockNum,
+                                    int srcNzC0Stride = 0)
 {
     int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
     int cubeSize = 512 * 8 / dtypeBits;
-    LoadData2dParams params(0, kBlockNum * nBlockNum, 1, 0, 0, 0, inc);
-    LoadData(dst, src[kBlockStart * nBlockNum * cubeSize], params);
+    if (srcNzC0Stride == 0) {
+        LoadData2dParams params(0, kBlockNum * nBlockNum, 1, 0, 0, 0, inc);
+        LoadData(dst, src[kBlockStart * nBlockNum * cubeSize], params);
+    } else {
+        LoadData2dParams params(0, nBlockNum, 1, 0, 0, 0, inc);
+        for (int k = kBlockStart; k < kBlockStart + kBlockNum; k++) {
+            LoadData(dst[(k - kBlockStart) * nBlockNum * cubeSize],
+                     src[k * srcNzC0Stride * (32 / sizeof(Dtype))], params);
+        }
+    }
 }
 
 template <typename Dtype>

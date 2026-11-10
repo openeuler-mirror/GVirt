@@ -7,7 +7,6 @@
 #include "debug.h"
 
 #pragma once
-#define MAX_N0 XLITE_MAX_M0
 #define INDEXER_KV_TILE_LEN 4096
 #define AIV_TO_AIC 2u  // should be 2 for `KERNEL_TYPE_MIX_AIC_1_2`
 
@@ -85,13 +84,15 @@ public:
         /*
          * scores = k * q
          *     m: cachedTokens, n: queryLen * nHeads, k: headDim
-         *     m0: blockSize, n0: MAX_N0, k0: MAX_K0
+         *     m0: blockSize, n0: nHeads, k0: headDim
          * index_scores = weights * scores
          *     m: queryLen, n: cachedTokens, k: nHeads
-         *     m0: 16, n0: blockSize, k0: MAX_K0
+         *     m0: 16, n0: blockSize, k0: nHeads
          */
-        constexpr uint32_t k0 = 256 / sizeof(Dtype);
-        assert(headDim <= k0 && nHeads <= k0);
+        // Consider L0C capacity, limit heads and blockSize
+        assert(nHeads <= 64 && blockSize <= 128);
+        assert(headDim <= 256 / sizeof(Dtype));
+        constexpr uint32_t wsm0 = MBLOCKSIZE;
         uint64_t off = 0;
         uint64_t kl1Size = blockSize * headDim * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
@@ -100,50 +101,66 @@ public:
             off += kl1Size;
         }
 
-        uint64_t ql1Size = MAX_N0 * headDim * sizeof(Dtype);
-        ql1Buf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
-        ql1Buf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-        off += ql1Size;
-
-        uint64_t wl1Size = XLITE_MAX_M0 * nHeads * sizeof(WeightDtype);
-        wl1Buf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
-        wl1Buf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-        off += wl1Size;
-
-        uint64_t kql1Size = blockSize * MAX_N0 * sizeof(WeightDtype);
+        uint64_t kql1Size = blockSize * nHeads * sizeof(WeightDtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             kql1Buf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
             kql1Buf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             off += kql1Size;
         }
 
+        uint64_t ql1Size = MAX_INDEXER_Q_TILE_LEN * nHeads * headDim * sizeof(Dtype);
+        ql1Buf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+        ql1Buf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off += ql1Size;
+
+        uint64_t wl1Size =
+            ROUND_UP(MAX_INDEXER_Q_TILE_LEN, MBLOCKSIZE) * nHeads * sizeof(WeightDtype);
+        wl1Buf.address_.logicPos = static_cast<uint8_t>(TPosition::A1);
+        wl1Buf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off += wl1Size;
+
         off = 0;
         // QK and weighted scores reuse the same L0A/L0B storage in sequential phases.
-        uint64_t l0aSize = XLITE_MAX_M0 * k0 * sizeof(Dtype);
+        uint64_t kql0aSize = blockSize * headDim * sizeof(Dtype);
+        l0aBuf.address_.logicPos = static_cast<uint8_t>(TPosition::A2);
+        l0aBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        off += kql0aSize;
+
+        uint64_t wsl0aSize = wsm0 * nHeads * sizeof(WeightDtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
-            l0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
-            l0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
             wl0aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A2);
             wl0aBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l0aSize;
+            off += wsl0aSize;
         }
 
         off = 0;
-        uint64_t l0bSize = MAX_N0 * k0 * sizeof(Dtype);
+        uint64_t kql0bSize = nHeads * headDim * sizeof(Dtype);
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
             l0bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += kql0bSize;
+        }
+
+        uint64_t wsl0bSize = blockSize * nHeads * sizeof(WeightDtype);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             kql0bBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::B2);
             kql0bBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-            off += l0bSize;
+            off += wsl0bSize;
         }
 
         off = 0;
-        // QK and weighted scores reuse the same L0C storage in sequential phases.
-        qkl0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
-        qkl0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
-        l0cBuf.address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
-        l0cBuf.address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+        uint64_t qkl0cSize = blockSize * nHeads * sizeof(MatDtype);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            qkl0cBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
+            qkl0cBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += qkl0cSize;
+        }
+        uint64_t scoresSize = wsm0 * blockSize * sizeof(float);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            l0cBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::CO1);
+            l0cBuf[i].address_.bufferAddr = reinterpret_cast<uint64_t>(off);
+            off += scoresSize;
+        }
 #endif
 #ifdef __DAV_C220_VEC__
         uint64_t maxSeqLen = MAX((uint64_t)blockSize * maxNumBlock, INIT_MIN_SEQ_POS);
@@ -239,13 +256,13 @@ public:
         int mBlockPad = ROUND_UP(mSize, MBLOCKSIZE);
         int mBlockNum = mBlockPad / MBLOCKSIZE;
         int nSize = queryLen * nHeads;
-        int nBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+        int nTotalBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+        int nBlockPad = ROUND_UP(nHeads, NBLOCKSIZE);
         int nBlockNum = nBlockPad / NBLOCKSIZE;
         int kBlockNum = headDim / kBlockSize;
 
         int wmSize = queryLen;
         int wmBlockPad = ROUND_UP(wmSize, MBLOCKSIZE);
-        int wmBlockNum = wmBlockPad / MBLOCKSIZE;
         int wnSize = blockSize;
         int wnBlockPad = ROUND_UP(wnSize, NBLOCKSIZE);
         int wnBlockNum = wnBlockPad / NBLOCKSIZE;
@@ -255,20 +272,27 @@ public:
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
         // copy q (queryTaskLen, nHeads, headDim) to L1
-        CopyGmToL1Nd2Nz(ql1Buf, query, nSize, headDim, headDim, nBlockPad);
+        CopyGmToL1Nd2Nz(ql1Buf, query, nSize, headDim, headDim, nTotalBlockPad);
         // copy weight [queryTaskLen, nHeads] to L1; weightCols is the GM row pitch.
         CopyGmToL1Nd2Nz(wl1Buf, weight, wmSize, nHeads, weightCols, wmBlockPad);
         SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
         WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
 
+        int kPingpong = 0;
         int curr = 0;
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
         SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID2);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID3);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
-        SetFlag<HardEvent::MTE1_FIX>(EVENT_ID0);
-        SetFlag<HardEvent::MTE1_FIX>(EVENT_ID1);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID1);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID2);
+        SetFlag<HardEvent::FIX_M>(EVENT_ID3);
+        SetFlag<HardEvent::MTE1_FIX>(EVENT_ID2);
+        SetFlag<HardEvent::MTE1_FIX>(EVENT_ID3);
         // do queryTileSize's QK^T * weight
         for (int mIdx = 0; mIdx < mLoop; mIdx++) {  // kvLen
             int mOffset = mIdx * blockSize;
@@ -283,82 +307,138 @@ public:
 
             // copy k (blockSize, headDim) to L1
             uint32_t block = blockTable[mIdx + mIdxStart];
-            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
-            CopyGmToL1Nd2Nz(kl1Buf[curr], kCache[(uint64_t)block * kCacheStride], mSize, headDim,
-                            headDim, mBlockPad);
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + kPingpong);
+            CopyGmToL1Nd2Nz(kl1Buf[kPingpong], kCache[(uint64_t)block * kCacheStride], mSize,
+                            headDim, headDim, mBlockPad);
 
-            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
-            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + curr);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + kPingpong);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + kPingpong);
 
-            WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-            CopyToL0ACol(l0aBuf[curr], kl1Buf[curr], mBlockNum, 0, kBlockNum);
-            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + curr);
+            // copy k (blockSize, headDim) to L0A
+            WaitFlag<HardEvent::M_MTE1>(EVENT_ID4);
+            CopyToL0ACol(l0aBuf, kl1Buf[kPingpong], mBlockNum, 0, kBlockNum);
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + kPingpong);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
 
-            CopyToL0BCol(l0bBuf[curr], ql1Buf, nBlockNum, 0, kBlockNum);
-
-            SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
-            WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
-
-            // mmad scores (blockSize, queryTaskLen, nHeads)
-            WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
-            CalMmad(qkl0cBuf, l0aBuf[curr], l0bBuf[curr], mBlockPad, nBlockPad, headDim, true);
-            if (mBlockNum * nBlockNum < 10) {
-                PipeBarrier<PIPE_M>();
-            }
-            SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-
-            SetFlag<HardEvent::M_FIX>(EVENT_ID0);
-            WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
-
-            // copy scores (blockSize, queryTaskLen, nHeads) from L0C to L1 with ReLU filter.
-            WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID0 + curr);
-            if constexpr (std::is_same<Dtype, int8_t>::value) {
-                // LI rounding: FP16(relu(INT32 dot) / 1024).
-                CopyL0CToL1(kql1Buf[curr], qkl0cBuf, mBlockPad, nBlockPad, mBlockPad, mBlockPad,
-                            1.0f / 1024.0f, true);
-            } else {
-                CopyL0CToL1(kql1Buf[curr], qkl0cBuf, mBlockPad, nBlockPad, mBlockPad,
-                            mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE, /*reluEn=*/1);
-            }
-            SetFlag<HardEvent::FIX_M>(EVENT_ID0);
-
-            SetFlag<HardEvent::FIX_MTE1>(EVENT_ID0 + curr);
-            WaitFlag<HardEvent::FIX_MTE1>(EVENT_ID0 + curr);
-
-            for (int q = 0; q < queryLen; q++) {
-                // copy weight (1, nHeads) to L0A
+            if (queryLen != 0) {
+                // copy q (heads, headDim) to L0B
                 WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-                CopyToL0ACol(wl0aBuf[curr], wl1Buf[q * weightBlockSize], 1, 0, wkBlockNum);
-                // copy scores (blockSize, nHeads) to L0B
-                CopyToL0BCol(kql0bBuf[curr], kql1Buf[curr][q * mBlockPad * nHeads], wnBlockNum, 0,
-                             wkBlockNum);
-
+                CopyToL0BCol(l0bBuf[curr], ql1Buf, nBlockNum, 0, kBlockNum, nTotalBlockPad);
                 SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
-                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
 
-                // mmad index_scores (1, blockSize)
-                WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
-                CalMmad(l0cBuf, wl0aBuf[curr], kql0bBuf[curr], MBLOCKSIZE, wnBlockPad, nHeads,
-                        true);
+                // copy weight (1, nHeads) to L0A
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID2 + curr);
+                CopyToL0ACol(wl0aBuf[curr], wl1Buf, 1, 0, wkBlockNum, wmBlockPad);
+
+                // mmad qk (blockSize, nHeads)
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+                WaitFlag<HardEvent::FIX_M>(EVENT_ID0 + curr);
+                CalMmad(qkl0cBuf[curr], l0aBuf, l0bBuf[curr], mBlockPad, nBlockPad, headDim, true);
+                if (mBlockNum * nBlockNum < 10) {
+                    PipeBarrier<PIPE_M>();
+                }
                 SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+
+                SetFlag<HardEvent::M_FIX>(EVENT_ID0 + curr);
+                WaitFlag<HardEvent::M_FIX>(EVENT_ID0 + curr);
+
+                // copy qk (blockSize, nHeads) from L0C to L1 with ReLU filter.
+                WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID2 + curr);
+                if constexpr (std::is_same<Dtype, int8_t>::value) {
+                    // LI rounding: FP16(relu(INT32 dot) / 1024).
+                    CopyL0CToL1(kql1Buf[curr], qkl0cBuf[curr], mBlockPad, nBlockPad, mBlockPad,
+                                mBlockPad, 1.0f / 1024.0f, true);
+                } else {
+                    CopyL0CToL1(kql1Buf[curr], qkl0cBuf[curr], mBlockPad, nBlockPad, mBlockPad,
+                                mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE, /*reluEn=*/1);
+                }
+                SetFlag<HardEvent::FIX_M>(EVENT_ID0 + curr);
+
+                SetFlag<HardEvent::FIX_MTE1>(EVENT_ID2 + curr);
+            }
+            for (int q = 0; q < queryLen; q++) {
+                if (q + 1 < queryLen) {
+                    int next = 1 - curr;
+                    // copy q (heads, headDim) to L0B
+                    WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + next);
+                    CopyToL0BCol(l0bBuf[next], ql1Buf[(q + 1) * nHeads * kBlockSize], nBlockNum, 0,
+                                 kBlockNum, nTotalBlockPad);
+                    SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + next);
+
+                    // copy weight (1, nHeads) to L0A
+                    WaitFlag<HardEvent::M_MTE1>(EVENT_ID2 + next);
+                    CopyToL0ACol(wl0aBuf[next], wl1Buf[(q + 1) * weightBlockSize], 1, 0, wkBlockNum,
+                                 wmBlockPad);
+
+                    // mmad qk (blockSize, nHeads)
+                    WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + next);
+                    WaitFlag<HardEvent::FIX_M>(EVENT_ID0 + next);
+                    CalMmad(qkl0cBuf[next], l0aBuf, l0bBuf[next], mBlockPad, nBlockPad, headDim,
+                            true);
+                    if (mBlockNum * nBlockNum < 10) {
+                        PipeBarrier<PIPE_M>();
+                    }
+                    SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + next);
+
+                    SetFlag<HardEvent::M_FIX>(EVENT_ID0 + next);
+                    WaitFlag<HardEvent::M_FIX>(EVENT_ID0 + next);
+
+                    // copy qk (blockSize, nHeads) from L0C to L1 with ReLU filter.
+                    WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID2 + next);
+                    if constexpr (std::is_same<Dtype, int8_t>::value) {
+                        // LI rounding: FP16(relu(INT32 dot) / 1024).
+                        CopyL0CToL1(kql1Buf[next], qkl0cBuf[next], mBlockPad, nBlockPad, mBlockPad,
+                                    mBlockPad, 1.0f / 1024.0f, true);
+                    } else {
+                        CopyL0CToL1(kql1Buf[next], qkl0cBuf[next], mBlockPad, nBlockPad, mBlockPad,
+                                    mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE,
+                                    /*reluEn=*/1);
+                    }
+                    SetFlag<HardEvent::FIX_M>(EVENT_ID0 + next);
+
+                    SetFlag<HardEvent::FIX_MTE1>(EVENT_ID2 + next);
+                }
+
+                WaitFlag<HardEvent::FIX_MTE1>(EVENT_ID2 + curr);
+
+                // copy qk (blockSize, nHeads) to L0B
+                CopyToL0BCol(kql0bBuf[curr], kql1Buf[curr], wnBlockNum, 0, wkBlockNum);
+                SetFlag<HardEvent::MTE1_FIX>(EVENT_ID2 + curr);
+
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID2 + curr);
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID2 + curr);
+
+                // mmad scores (1, blockSize)
+                WaitFlag<HardEvent::FIX_M>(EVENT_ID2 + curr);
+                CalMmad(l0cBuf[curr], wl0aBuf[curr], kql0bBuf[curr], MBLOCKSIZE, wnBlockPad, nHeads,
+                        true);
+                SetFlag<HardEvent::M_MTE1>(EVENT_ID2 + curr);
                 if (wnBlockNum < 10) {
                     PipeBarrier<PIPE_M>();
                 }
 
-                SetFlag<HardEvent::M_FIX>(EVENT_ID0);
-                WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
+                SetFlag<HardEvent::M_FIX>(EVENT_ID2 + curr);
+                WaitFlag<HardEvent::M_FIX>(EVENT_ID2 + curr);
 
-                // copy index_scores (1, blockSize) from L0C to GM
-                CopyToGm(scores[q * tileSizeOfCachedKV + mOffset], l0cBuf, 1, mSize, MBLOCKSIZE,
-                         tileSizeOfCachedKV);
-                SetFlag<HardEvent::FIX_M>(EVENT_ID0);
+                // copy scores (1, blockSize) from L0C to GM
+                CopyToGm(scores[q * tileSizeOfCachedKV + mOffset], l0cBuf[curr], 1, mSize,
+                         MBLOCKSIZE, tileSizeOfCachedKV);
+                SetFlag<HardEvent::FIX_M>(EVENT_ID2 + curr);
+                curr = 1 - curr;
             }
-            SetFlag<HardEvent::MTE1_FIX>(EVENT_ID0 + curr);
-            curr = 1 - curr;
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
+            kPingpong = 1 - kPingpong;
         }
-        WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID1);
-        WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID3);
+        WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID2);
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID3);
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID2);
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID1);
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID4);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID3);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID2);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID1);
         WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
         WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID1);
@@ -601,14 +681,7 @@ public:
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID4);
 #endif
 
-        int queryTileSize = XLITE_MAX_M0 / nHeads;
-        if (queryTileSize == 0) {
-            // nHeads > XLITE_MAX_M0: one query token per tile (mirrors
-            // indexer_scores.h:110). The old `queryTileSize = XLITE_MAX_M0` fallback
-            // packed XLITE_MAX_M0 * nHeads rows into one tile, overrunning every
-            // XLITE_MAX_M0-row buffer.
-            queryTileSize = 1;
-        }
+        int queryTileSize = MAX_INDEXER_Q_TILE_LEN;
 
         int totalIdx = 0;
         int curr = 0;
@@ -756,16 +829,16 @@ private:
     int resetPrevCore;
 
 #ifdef __DAV_C220_CUBE__
-    LocalTensor<Dtype> kl1Buf[PINGPONG_BUF_NUM];         // event 0/1
-    LocalTensor<Dtype> ql1Buf;                           // event 4
-    LocalTensor<WeightDtype> wl1Buf;                     // event 4
-    LocalTensor<WeightDtype> kql1Buf[PINGPONG_BUF_NUM];  // event 0/1
-    LocalTensor<Dtype> l0aBuf[PINGPONG_BUF_NUM];         // event 0/1
-    LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];         // event 0/1
-    LocalTensor<WeightDtype> wl0aBuf[PINGPONG_BUF_NUM];  // event 0/1
-    LocalTensor<WeightDtype> kql0bBuf[PINGPONG_BUF_NUM];
-    LocalTensor<MatDtype> qkl0cBuf;  // event 0, shares storage with l0cBuf
-    LocalTensor<float> l0cBuf;       // event 0
+    LocalTensor<Dtype> ql1Buf;                            // event 4
+    LocalTensor<WeightDtype> wl1Buf;                      // event 4
+    LocalTensor<Dtype> kl1Buf[PINGPONG_BUF_NUM];          // event 0/1
+    LocalTensor<WeightDtype> kql1Buf[PINGPONG_BUF_NUM];   // event 2/3
+    LocalTensor<Dtype> l0aBuf;                            // event 4
+    LocalTensor<Dtype> l0bBuf[PINGPONG_BUF_NUM];          // event 0/1
+    LocalTensor<WeightDtype> wl0aBuf[PINGPONG_BUF_NUM];   // event 2/3
+    LocalTensor<WeightDtype> kql0bBuf[PINGPONG_BUF_NUM];  // event 2/3
+    LocalTensor<MatDtype> qkl0cBuf[PINGPONG_BUF_NUM];     // event 0/1
+    LocalTensor<float> l0cBuf[PINGPONG_BUF_NUM];          // event 2/3
 #elif __DAV_C220_VEC__
     __ubuf__ WeightDtype *in[PINGPONG_BUF_NUM];
     __ubuf__ float *lastSort[PINGPONG_BUF_NUM];
