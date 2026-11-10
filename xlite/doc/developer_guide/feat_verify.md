@@ -67,6 +67,7 @@ python3 feat_verify.py --feature cpu_binding --xlite-mode xlite_full_mode
 | piecewise | ACLGraph Piecewise | cudagraph_mode=PIECEWISE（以启动日志 effective cudagraph_mode 为准） |
 | dp | Data Parallel(单机2×8) | `--data-parallel-size 2`, tp=8, max_model_len=28672(decode)/16384(full), env: XLITE_DEVS_PER_NODE=16 |
 | context_parallel | Context Parallel | `--prefill-context-parallel-size 1 --decode-context-parallel-size 8`, tp=8, enable_dsa_cp+enable_flashcomm1 |
+| dsacp | DSA Context Parallel | `--prefill-context-parallel-size 1 --decode-context-parallel-size 1`, tp=16, enable_dsa_cp+enable_flashcomm1 |
 | lmhead_tp | Lmhead TP(Fine-grained TP) | finegrained_tp_config: lmhead_tp=4, dp=4/tp=4, max_model_len=3584(decode)/2048(full), max_num_batched_tokens=2048；注: full_mode max_model_len=2048 < long_single=2816，long_single 因输入超长失败（非启动问题） |
 | shared_expert_dp | Shared Expert DP | additional_config: enable_shared_expert_dp（full max_model_len=16384） |
 | eplb | Eplb(动态专家负载均衡) | eplb_config.dynamic_eplb + env: DYNAMIC_EPLB=true |

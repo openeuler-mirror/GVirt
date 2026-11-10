@@ -138,3 +138,36 @@ SFA-C8 在 host 接受独立的 INT8 `kCache[numBlocks, blockSize, 1, kvLoraRank
 - softmax 全量/top-k:`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmax` / `RunAivSoftmaxPingPong`(其内部实现 `RunAivSoftmaxLong` 新增 SWA 段/压缩比/attnSink 参数为 cxa 算子服务,mla_v2 调用时均取默认值、行为不变)
 - host launch 与限制:`csrc/op.cpp` 的 `XliteOpMLAV2`(dense 校验关键字 `MAX_TOPK_NUM`);路由 `csrc/model.cpp` 的 `ForwardAttnMLAV2`(短序列分支)与 dense gather 路径(decode+DSA 长序列时启用,关键字 `XliteOpGatherSparseKVCache`,阈值 `XLITE_MLA_DENSE_THRESHOLD=280`,见 `csrc/model.cpp` 的 `XLITE_MLA_DENSE_THRESHOLD`)
 - 常量:`csrc/kernels/kernel_param.h`(`XLITE_MAX_M0`/`MAX_TOPK_NUM`/`MAX_SOFTMAX_PINGPONG_LEN`)
+
+## DSA-CP MLA
+
+`XliteOpDsaCpGatherMLA` 将 逐 query Gather 与已有 dense MLAV2 组合，用于 DSACP 的
+prefill／混合批次。纯 decode 批次由 `ForwardAttnMLAV2DsaCpDecode` 使用本卡 head 的 TP 权重计算，
+随后执行输出归约。
+
+公共 MLA 的计算原理见前面的[实现原理](#实现原理)。
+
+### 逐 query Gather
+
+1. `dsa_cp_gather_metadata` 将局部请求元数据展开为逐 query 的独立记录：
+   `queryStartLoc[i]=i`、`queryLens[i]=1`，`cachedLens[i]` 为该 query 之前的因果长度；
+   同时记录所属请求编号，Gather 按 `blockTables.stride[0]` 查询原请求的 `blockTables` 行，
+   支持带额外行容量和列裁剪的持久缓冲，不再逐 query 复制 `blockTables`。
+2. `gather_sparse_kv_cache_per_query_bfloat16_t` 调用独立的
+   `gather_sparse_kv_cache_per_query.h` 实现，
+   将各 query 选中的 latent KV 与 RoPE K
+   写入连续 `[queries, topK, dim]` 缓冲。因果长度不超过 Top-K 时读取全部有效历史；
+   更长的行沿用原有 Gather 的契约，要求 Top-K 中均为互不重复的有效因果位置。
+3. `XliteOpMLAV2(dense=true)` 将每个 query 看作一条单 query 请求，
+   对紧凑 KV 执行 QK、Softmax、SV。WUK/WUV 和 Wᴼ 仍由原模型流程处理。
+
+每组 query 数不超过 AIC 核数的两倍，使同一 AIC 能将前一个 query 的 Softmax
+与后一个 query 的 QK 重叠。组间顺序复用元数据、紧凑 KV 和 QK 缓冲，
+避免按全部 prefill token 展开临时 KV。Gather 按核直接分配 KV chunk，并在写出时
+将不足 Top-K 的尾部补零，保证短历史的 SV 对齐读取不会遇到未初始化的 NaN；
+满 Top-K 的行不再额外清零。常规 Gather 的实现和接口保持上游版本。
+该路径沿用当前 stream，不增加主机同步或跨卡通信。
+
+`python -m tests.kernels.mla --dsa-cp` 可单独验证这一组合路径，覆盖
+短历史、Top-K 边界、长历史、空请求、混合请求、分组边界、不同 cache stride 和 `blockTables` 行间距。
+纯 decode、无 Top-K 和非 DSACP 的模型分支保留原有调用。

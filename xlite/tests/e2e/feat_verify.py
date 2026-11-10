@@ -240,6 +240,15 @@ FEATURES = {
         "DCP=8==TP=8; enable_dsa_cp 依赖 FlashComm1, 需同时开; "
         "full_mode 下被 xlite 接管 prefill 覆盖, 主要 decode-only 生效",
     ),
+    "dsacp": FeatureSpec(
+        "dsacp",
+        "DSA Context Parallel",
+        extra_cli=["--prefill-context-parallel-size", "1", "--decode-context-parallel-size", "1"],
+        extra_config={"enable_dsa_cp": True, "enable_flashcomm1": True},
+        note="GLM-5.2 W8A8 独立 DSACP: PCP=1, DCP=1, TP 使用 --tp（默认16）; "
+        "enable_dsa_cp 依赖 FlashComm1; 两种 xlite 模式均按 token 预算整批分流; "
+        "xlite 内 prefill/混合批次走 DSACP, 纯 decode 批次复用 TP Attention",
+    ),
     "lmhead_tp": FeatureSpec(
         "lmhead_tp",
         "Lmhead TP(Fine-grained TP)",
