@@ -6,6 +6,7 @@
 #include "runtime.h"
 #include "ccl.h"
 #include "op.h"
+#include "dsa_cp_weight.h"
 #include "swizzle.h"
 #include "aclrtlaunch_all.h"
 #include "gdn_metadata.h"
@@ -65,6 +66,61 @@ void XliteOpDsaCpWriteKVCacheBySlot(XRuntime &rt, XTensor &input, XTensor &cache
             input.shape[1] * elementBytes, input.stride[0] * elementBytes, blockSize,
             blockStride * elementBytes);
     }
+}
+
+XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool transposed)
+{
+    const size_t tp = rt.tpSize();
+    const auto storageShape = DsaCpWeightStorageShape(weight, nz);
+    XTensor storage(storageShape, weight.dtype, weight.ptr);
+    const size_t storageLen = storage.numel;
+    auto fullShape = weight.shape;
+    fullShape[transposed ? 0 : 1] *= tp;
+    if (nz) {
+        const size_t block = transposed ? DSA_CP_NZ_ROWS : storageShape.back();
+        if (weight.shape[transposed ? 0 : 1] % block != 0) {
+            throw std::invalid_argument("DsaCpGatherWeight: TP shard must contain whole NZ blocks");
+        }
+    }
+    auto &gathered = rt.GetTensor({tp, storageLen}, weight.dtype, DBG_LOC);
+    XTensor input({storageLen}, weight.dtype, weight.ptr);
+    if (rt._tpXcclComm != nullptr) {
+        // Keep the view's pool provenance for dummy runtime accounting too.
+        input = gathered;
+        const size_t rank = rt.rankId() % tp;
+        input.SliceView(rank, rank + 1).View(std::vector<size_t>{storageLen});
+        if (!IsDummyRuntime(rt)) {
+            CHECK_ACL(aclrtMemcpyAsync(input.ptr, input.bytes, weight.ptr, input.bytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        }
+    }
+    // HCCL uses the persistent, disjoint input directly; only XCCL uses the
+    // own-rank region of the receive buffer and skips its local copy.
+    XliteOpAllGather(rt, input, gathered, TP, true, DBG_LOC);
+    if (nz && transposed) {
+        auto &full = rt.GetTensor({tp, storageLen}, weight.dtype, DBG_LOC);
+        if (!IsDummyRuntime(rt)) {
+            const size_t columnBlocks = storageShape[0];
+            const size_t blockBytes = storageLen / columnBlocks * XDtypeBit(weight.dtype) / 8;
+            aclrtlaunch_dsa_cp_reorder_wo(rt.aivNum, rt.stream, gathered.ptr, full.ptr, tp,
+                                          columnBlocks, blockBytes);
+        }
+        rt.PutTensor(gathered);
+        return full.View(fullShape);
+    }
+    if (!nz && !transposed) {
+        auto &full = rt.GetTensor(fullShape, weight.dtype, DBG_LOC);
+        std::vector<XTensor> shards;
+        for (size_t rank = 0; rank < tp; ++rank) {
+            auto shard = gathered;
+            shard.SliceView(rank, rank + 1).View(weight.shape);
+            shards.push_back(shard);
+        }
+        XliteOpConcatCol(rt, shards, full);
+        rt.PutTensor(gathered);
+        return full;
+    }
+    return gathered.View(fullShape);
 }
 
 // Kernel scalar params are uint32_t in the launch ABI while XTensor metadata is 64-bit;

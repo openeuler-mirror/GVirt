@@ -78,6 +78,7 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/dsa_cp_gather_metadata.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/gather_sparse_kv_cache_per_query_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/dsa_cp_write_kv_cache_by_slot.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/dsa_cp_reorder_wo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/split.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/repeat_interleave.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_paged_float.cpp

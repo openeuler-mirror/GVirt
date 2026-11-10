@@ -25,6 +25,9 @@ void XliteOpDsaCpMetadata(XRuntime &rt, XTensor &queryStartLoc, XTensor &queryLe
 // global slots. Negative slots are skipped; numTokens excludes gather padding.
 void XliteOpDsaCpWriteKVCacheBySlot(XRuntime &rt, XTensor &input, XTensor &cache,
                                     XTensor &slotMapping, uint32_t numTokens, uint32_t blockSize);
+// Gather TP input-channel shards in their original format. The returned pool
+// tensor contains a full weight; the caller releases it after projection.
+XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool transposed);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
                       uint32_t copySize = COPY_SIZE);
