@@ -5,7 +5,6 @@ xlite 每日自动化测试机器人共享工具模块
 本模块提供两个机器人脚本共享的基础功能:
 - 日志输出工具
 - 命令执行工具
-- 容器操作工具
 - 代理设置 (联网命令使用)
 - 代码拉取和项目编译
 - 版本信息获取
@@ -14,7 +13,7 @@ xlite 每日自动化测试机器人共享工具模块
 使用方法:
     from daily_bot_utils import (
         Colors, log_info, log_success, log_warning, log_error,
-        setup_logging, run_command, run_in_container, copy_from_container,
+        setup_logging, run_command,
         pull_latest_code, build_project, install_wheel,
         get_xlite_version, get_xlite_commit,
         save_metrics_json, load_metrics_json,
@@ -35,20 +34,12 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 # ====================== 路径配置 ======================
-# 项目根目录 (容器内路径)
+# 项目根目录
 PROJECT_ROOT = Path("/workspaces/code/opencode/GVirt")
 # xlite 项目目录
 XLITE_DIR = PROJECT_ROOT / "xlite"
-# e2e 测试脚本目录 (使用容器内路径，用于运行测试)
+# e2e 测试脚本目录
 E2E_DIR = XLITE_DIR / "tests" / "e2e"
-
-# ====================== 容器配置 ======================
-# 编译容器名称 (需要在使用时设置)
-BUILD_CONTAINER = ""
-# 测试容器名称 (需要在使用时设置)
-TEST_CONTAINER = ""
-# 容器内 wheel 包存放路径
-CONTAINER_WHEEL_DIR = "/workspaces/code/opencode/GVirt/xlite/dist"
 
 # ====================== 全局配置 ======================
 # Webhook URL
@@ -201,28 +192,6 @@ def tile_each(values: list[Any], n: int) -> list[Any]:
 
 
 # ====================== 配置设置函数 ======================
-def set_build_container(container_name: str):
-    """
-    设置编译容器名称
-
-    参数:
-        container_name: 容器名称
-    """
-    global BUILD_CONTAINER
-    BUILD_CONTAINER = container_name
-
-
-def set_test_container(container_name: str):
-    """
-    设置测试容器名称
-
-    参数:
-        container_name: 容器名称
-    """
-    global TEST_CONTAINER
-    TEST_CONTAINER = container_name
-
-
 def set_env_type(env_type: str):
     """
     设置环境类型
@@ -260,10 +229,8 @@ _PROXY_ENV_VARS: Optional[dict[str, str]] = None
 def get_proxy_source_cmd() -> str:
     """shell 命令前缀: yellow 环境下先 source 代理脚本，其余环境返回空串.
 
-    仅用于 run_in_container 场景: docker exec 不会继承调用方的环境变量，无法用
-    env_with_proxy() 注入，只能在容器内 source 容器自己的代理脚本::
-
-        run_in_container(container, f"{get_proxy_source_cmd()}git clone ...")
+    用于在本地 bash 子进程中执行联网命令时注入代理 (git clone 等):
+    ``run_command(["bash", "-c", f"{get_proxy_source_cmd()}git clone ..."])``
     """
     if ENV_TYPE == "yellow" and os.path.exists(PROXY_ENV_SCRIPT):
         return f"source {PROXY_ENV_SCRIPT} && "
@@ -358,15 +325,12 @@ def check_subprocess_result(res: subprocess.CompletedProcess, error_message: str
         raise RuntimeError(f"{error_message}: {res.stderr.decode('utf-8') if res.stderr else 'No error message'}")
 
 
-# ====================== 容器操作工具函数 ======================
-def run_in_container(
-    container_name: str, cmd: str, check: bool = True, show_output: bool = False
-) -> tuple[int, str, str]:
+# ====================== 本地命令执行工具函数 ======================
+def run_local(cmd: str, check: bool = True, show_output: bool = False) -> tuple[int, str, str]:
     """
-    在指定容器中执行命令
+    在本地执行 shell 命令
 
     参数:
-        container_name: 容器名称
         cmd: 要执行的命令
         check: 是否检查返回码
         show_output: 是否实时显示输出
@@ -374,35 +338,25 @@ def run_in_container(
     返回:
         (返回码, 标准输出, 标准错误)
     """
-    if container_name:
-        log_info(f"在容器 {container_name} 中执行: {cmd}")
-        docker_cmd = ["docker", "exec", container_name, "bash", "-c", cmd]
-        return run_command(docker_cmd, check=check, show_output=show_output)
-    else:
-        log_info(f"在本地执行: {cmd}")
-        return run_command(["bash", "-c", cmd], check=check, show_output=show_output)
+    log_info(f"在本地执行: {cmd}")
+    return run_command(["bash", "-c", cmd], check=check, show_output=show_output)
 
 
-def copy_from_container(container_name: str, container_path: str, local_path: Path) -> bool:
+def copy_local(src: str, dst: Path) -> bool:
     """
-    从容器复制文件到本地
+    在本地复制文件
 
     参数:
-        container_name: 容器名称
-        container_path: 容器内文件路径
-        local_path: 本地目标路径
+        src: 源文件路径
+        dst: 目标文件路径
 
     返回:
         True - 成功, False - 失败
     """
     try:
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        if container_name:
-            log_info(f"从容器 {container_name} 复制 {container_path} 到 {local_path}")
-            run_command(["docker", "cp", f"{container_name}:{container_path}", str(local_path)])
-        else:
-            log_info(f"复制 {container_path} 到 {local_path}")
-            run_command(["cp", f"{container_path}", str(local_path)])
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        log_info(f"复制 {src} 到 {dst}")
+        run_command(["cp", src, str(dst)])
         return True
     except Exception as e:
         log_error(f"复制文件失败: {e}")
@@ -412,11 +366,11 @@ def copy_from_container(container_name: str, container_path: str, local_path: Pa
 # ====================== 代码拉取函数 ======================
 def pull_latest_code() -> bool:
     """
-    在编译容器和测试容器中从远程仓库拉取最新代码
+    在本地从远程仓库拉取最新代码
 
     执行步骤:
-    1. 在编译容器中删除项目根目录并克隆远程仓库
-    2. 在测试容器中删除项目根目录并克隆远程仓库
+    1. 删除项目根目录并克隆远程仓库
+    2. 可选 checkout 到指定 commit/branch/tag
 
     返回:
         True - 拉取成功
@@ -432,30 +386,14 @@ def pull_latest_code() -> bool:
     # 根据环境类型决定是否 source env.sh
     env_prefix = get_proxy_source_cmd()
 
-    def clone_repo(container: str) -> None:
-        """在指定容器中删除并重新克隆项目仓库, 可选 checkout 到 REPO_COMMIT."""
-        run_in_container(container, f"rm -rf {PROJECT_ROOT}")
-        run_in_container(container, f"mkdir -p {PROJECT_ROOT.parent}")
-        run_in_container(container, f"{env_prefix}git clone -b {REPO_BRANCH} {REPO_URL} {PROJECT_ROOT}")
-        if REPO_COMMIT:
-            run_in_container(container, f"{env_prefix}git -C {PROJECT_ROOT} checkout {REPO_COMMIT}")
-
     try:
-        # 在编译容器中拉取代码
-        log_info("在编译容器中拉取代码...")
-        log_info(f"BUILD_CONTAINER: {BUILD_CONTAINER}")
-        clone_repo(BUILD_CONTAINER)
-        log_success("编译容器仓库克隆成功!")
-
-        if TEST_CONTAINER == BUILD_CONTAINER:
-            log_info("编译容器和测试容器相同，跳过测试容器的代码拉取")
-            return True
-
-        # 在测试容器中拉取代码
-        log_info("在测试容器中拉取代码...")
-        clone_repo(TEST_CONTAINER)
-        log_success("测试容器仓库克隆成功!")
-
+        log_info("在本地拉取代码...")
+        run_local(f"rm -rf {PROJECT_ROOT}")
+        run_local(f"mkdir -p {PROJECT_ROOT.parent}")
+        run_local(f"{env_prefix}git clone -b {REPO_BRANCH} {REPO_URL} {PROJECT_ROOT}")
+        if REPO_COMMIT:
+            run_local(f"{env_prefix}git -C {PROJECT_ROOT} checkout {REPO_COMMIT}")
+        log_success("仓库克隆成功!")
         return True
     except Exception as e:
         log_error(f"仓库克隆失败: {e}")
@@ -511,14 +449,14 @@ def get_xlite_lib_path() -> Path:
 
 def build_project(report_dir: Path) -> tuple[bool, Optional[Path]]:
     """
-    在编译容器中编译 xlite 项目，并将 wheel 包复制到本地
+    在本地编译 xlite 项目，并将 wheel 包复制到报告目录
 
     执行步骤:
-    1. 清理共享目录中的 Python 缓存
-    2. 在编译容器中卸载旧版本
-    3. 使用容器内独立目录构建 wheel 包
+    1. 清理项目目录中的 Python 缓存
+    2. 卸载旧版本
+    3. 使用独立目录构建 wheel 包
     4. 清理编译缓存
-    5. 将 wheel 包复制到本地
+    5. 将 wheel 包复制到报告目录
 
     参数:
         report_dir: 报告目录 (用于存储 wheel 包)
@@ -531,58 +469,53 @@ def build_project(report_dir: Path) -> tuple[bool, Optional[Path]]:
         # 根据环境类型决定是否 source env.sh
         env_prefix = get_proxy_source_cmd()
 
-        # 清理共享目录中的 Python 缓存，避免多容器环境冲突
-        log_info("清理共享目录中的 Python 缓存...")
-        run_in_container(
-            BUILD_CONTAINER,
+        # 清理项目目录中的 Python 缓存
+        log_info("清理项目目录中的 Python 缓存...")
+        run_local(
             f"find {XLITE_DIR} -type d -name '__pycache__' -exec rm -rf {{}} + 2>/dev/null || true",
             check=False,
         )
-        run_in_container(BUILD_CONTAINER, f"find {XLITE_DIR} -name '*.pyc' -delete 2>/dev/null || true", check=False)
-        run_in_container(
-            BUILD_CONTAINER,
+        run_local(f"find {XLITE_DIR} -name '*.pyc' -delete 2>/dev/null || true", check=False)
+        run_local(
             f"rm -rf {XLITE_DIR}/build {XLITE_DIR}/dist {XLITE_DIR}/*.egg-info 2>/dev/null || true",
             check=False,
         )
 
-        # 在编译容器中卸载旧版本
-        run_in_container(BUILD_CONTAINER, "pip uninstall --yes xlite", check=False)
+        # 卸载旧版本
+        run_local("pip uninstall --yes xlite", check=False)
 
-        # 使用容器内独立目录构建 wheel 包，避免污染共享卷
+        # 使用独立构建目录构建 wheel 包
         build_dir = "/tmp/xlite_build"
 
         log_info(f"使用独立构建目录: {build_dir}")
-        run_in_container(BUILD_CONTAINER, f"rm -rf {build_dir} && mkdir -p {build_dir}", check=False)
+        run_local(f"rm -rf {build_dir} && mkdir -p {build_dir}", check=False)
 
-        # 在编译容器中构建 wheel 包
+        # 构建 wheel 包
         ascend_lib_path = "/usr/local/Ascend/ascend-toolkit/8.3.RC2/fwkacllib/lib64:/usr/local/Ascend/ascend-toolkit/8.3.RC2/atc/lib64:/usr/local/Ascend/ascend-toolkit/8.3.RC2/aarch64-linux/lib64:/usr/local/Ascend/ascend-toolkit/8.3.RC2/runtime/lib64:/usr/local/Ascend/ascend-toolkit/8.3.RC2/aarch64-linux/devlib"
         ascend_bin_path = "/usr/local/Ascend/ascend-toolkit/8.3.RC2/atc/bin:/usr/local/Ascend/ascend-toolkit/8.3.RC2/aarch64-linux/bin:/usr/local/Ascend/ascend-toolkit/8.3.RC2/compiler/bin:/usr/local/Ascend/ascend-toolkit/8.3.RC2/aarch64-linux/ccec_compiler/bin"
-        run_in_container(
-            BUILD_CONTAINER,
+        run_local(
             f"{env_prefix}cd {XLITE_DIR} && PATH={ascend_bin_path}:$PATH LD_LIBRARY_PATH={ascend_lib_path}:$LD_LIBRARY_PATH PYTHONPYCACHEPREFIX={build_dir}/pycache python setup.py bdist_wheel --dist-dir {build_dir}/dist",
             show_output=True,
         )
 
         # 查找生成的 wheel 文件
-        exitcode, stdout, _ = run_in_container(
-            BUILD_CONTAINER, f"ls {build_dir}/dist/xlite-*.whl 2>/dev/null || echo 'NOT_FOUND'"
-        )
+        exitcode, stdout, _ = run_local(f"ls {build_dir}/dist/xlite-*.whl 2>/dev/null || echo 'NOT_FOUND'")
 
         if "NOT_FOUND" in stdout or not stdout.strip():
             log_error("未找到生成的 wheel 文件")
             return False, None
 
         wheel_name = stdout.strip().split("/")[-1]
-        container_wheel_path = f"{build_dir}/dist/{wheel_name}"
+        wheel_src_path = f"{build_dir}/dist/{wheel_name}"
 
-        # 复制 wheel 包到本地
+        # 复制 wheel 包到报告目录
         local_wheel_path = Path(report_dir) / "wheels" / wheel_name
-        if not copy_from_container(BUILD_CONTAINER, container_wheel_path, local_wheel_path):
+        if not copy_local(wheel_src_path, local_wheel_path):
             log_error("复制 wheel 包失败")
             return False, None
 
-        # 清理容器内的临时构建目录
-        run_in_container(BUILD_CONTAINER, f"rm -rf {build_dir}", check=False)
+        # 清理临时构建目录
+        run_local(f"rm -rf {build_dir}", check=False)
 
         log_success(f"项目编译成功! wheel 包: {local_wheel_path}")
         return True, local_wheel_path

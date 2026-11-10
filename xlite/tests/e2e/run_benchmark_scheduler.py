@@ -36,7 +36,6 @@ PYTHON_CMD = sys.executable
 
 # 默认配置
 DEFAULT_RECEIVER = "927280411401503971"
-DEFAULT_BUILD_CONTAINER = ""  # 默认在当前容器构建 xlite 包
 DEFAULT_RUN_TIME = "20:00"  # 默认晚上 8:00
 
 
@@ -49,7 +48,6 @@ class BenchmarkScheduler:
         script: Path = SCRIPT_DIR / "daily_benchmark_bot.py",
         model: str = "moe",
         receiver: str = DEFAULT_RECEIVER,
-        build_container: str = DEFAULT_BUILD_CONTAINER,
         run_time: str = DEFAULT_RUN_TIME,
         log_file: Path = SCRIPT_DIR / "scheduler.log",
         debug: bool = False,
@@ -62,7 +60,6 @@ class BenchmarkScheduler:
         self.script = script.resolve()
         self.model = model
         self.receiver = receiver
-        self.build_container = build_container
         self.run_time = run_time
         self.running = True
         self.log_file = log_file
@@ -108,8 +105,6 @@ class BenchmarkScheduler:
                 self.model,
                 "--receiver",
                 self.receiver,
-                "--build-container",
-                self.build_container,
             ]
             if self.offline_only:
                 # offline_only=True => 跳过在线, 仅跑离线 bench (透传 bot 的 --offline-bench)
@@ -155,8 +150,6 @@ class BenchmarkScheduler:
                 self.model,
                 "--receiver",
                 self.receiver,
-                "--build-container",
-                self.build_container,
                 "--timeout",
                 str(self.timeout),
                 "--retry",
@@ -213,7 +206,6 @@ class BenchmarkScheduler:
         self.log(f"测试脚本: {self.script}")
         self.log(f"模型类型: {self.model}")
         self.log(f"接收者ID: {self.receiver}")
-        self.log(f"编译容器: {self.build_container}")
         self.log(f"执行时间: 每天 {self.run_time}")
         self.log(f"日志文件: {self.log_file}")
         if self.type == "bench":
@@ -267,8 +259,8 @@ def main():
         "--model",
         type=str,
         default="moe",
-        choices=["dense", "moe", "dense_quant", "moe_quant", "origin", "quant", "all"],
-        help="*性能*测试模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)，默认 moe；仅 bench 模式有效",
+        choices=["moe", "moe_quant", "moe_quant_a3", "moe_mix", "quant", "all"],
+        help="*性能*测试模型类型 (moe/moe_quant/moe_quant_a3/moe_mix/quant/all)，默认 moe；仅 bench 模式有效",
     )
     default_model_args = (
         "--models Qwen3-VL-30B-A3B-Instruct Qwen3-32B-w8a8-nopdmix",
@@ -302,9 +294,6 @@ def main():
     parser.add_argument(
         "-r", "--receiver", type=str, default=DEFAULT_RECEIVER, help="接收者ID，默认 927280411401503971"
     )
-    parser.add_argument(
-        "-bc", "--build-container", type=str, default=DEFAULT_BUILD_CONTAINER, help="编译容器名称，默认在当前容器构建"
-    )
     parser.add_argument("-rt", "--run-time", type=str, default=DEFAULT_RUN_TIME, help="执行时间 (HH:MM)，默认 02:00")
     parser.add_argument("-rn", "--run-now", action="store_true", help="立即执行一次测试，然后启动调度器")
     parser.add_argument("-d", "--debug", action="store_true", help="调试模式，直接输出测试过程到stdout")
@@ -332,7 +321,6 @@ def main():
         script=script_path,
         model=args.model if args.script == "bench" else args.model_args,
         receiver=args.receiver,
-        build_container=str(args.build_container).strip(),
         run_time=args.run_time,
         log_file=log_file,
         debug=args.debug,

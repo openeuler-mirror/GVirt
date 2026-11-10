@@ -15,32 +15,28 @@ RESUME_DIR_ARG=${2:-}
 
 # 定义模型配置
 declare -A MODELS
-MODELS[dense]="Qwen3-32B|/mnt/nvme0n1/models/Qwen3-32B"
 MODELS[moe]="Qwen3-30B-A3B-Instruct-2507|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507"
-MODELS[dense_quant]="Qwen3-32B-w8a8-nopdmix|/mnt/nvme0n1/models/Qwen3-32B-w8a8-nopdmix"
 MODELS[moe_quant]="Qwen3-30B-A3B-Instruct-2507-w8a8|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507-w8a8"
 MODELS[moe_quant_a3]="GLM-5.2-w8a8|/mnt/nvme0n1/models/GLM-5.2-w8a8/"
 
 # 确定要测试的模型列表
 declare -a TEST_MODELS
 if [ "${MODEL_TYPE}" = "all" ]; then
-    TEST_MODELS=("dense" "moe" "dense_quant" "moe_quant" "moe_quant_a3")
-elif [ "${MODEL_TYPE}" = "origin" ]; then
-    TEST_MODELS=("dense" "moe")
+    TEST_MODELS=("moe" "moe_quant" "moe_quant_a3")
+elif [ "${MODEL_TYPE}" = "moe_mix" ]; then
+    TEST_MODELS=("moe" "moe_quant")
 elif [ "${MODEL_TYPE}" = "quant" ]; then
-    TEST_MODELS=("dense_quant" "moe_quant" "moe_quant_a3")
-elif [ "${MODEL_TYPE}" = "dense" ] || [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "dense_quant" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ]; then
+    TEST_MODELS=("moe_quant" "moe_quant_a3")
+elif [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ]; then
     TEST_MODELS=("${MODEL_TYPE}")
 else
-    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'dense'、'moe'、'dense_quant'、'moe_quant'、'moe_quant_a3'、'origin'、'quant' 或 'all'"
+    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'moe'、'moe_quant'、'moe_quant_a3'、'moe_mix'、'quant' 或 'all'"
     echo "用法：$0 [model_type] [output_dir]"
     echo "  model_type（可选，默认 moe）："
-    echo "  dense        - 测试 Qwen3-32B 模型"
     echo "  moe          - 测试 Qwen3-30B-A3B-Instruct-2507 模型（默认）"
-    echo "  dense_quant  - 测试 Qwen3-32B-w8a8 模型"
     echo "  moe_quant    - 测试 Qwen3-30B-A3B-Instruct-2507-w8a8 模型"
     echo "  moe_quant_a3 - 测试 GLM-5.2-w8a8 模型"
-    echo "  origin       - 测试所有非量化模型模型"
+    echo "  moe_mix      - 测试 moe + moe_quant（量化前后对比）"
     echo "  quant        - 测试所有量化模型"
     echo "  all          - 测试所有模型"
     echo "  output_dir（可选）：主输出目录；传入已存在且非空的目录即进入断点续测模式"
@@ -479,13 +475,12 @@ total_start_time_formatted=$(date "+%Y-%m-%d %H:%M:%S")
 # 格式：input_len|output_len|concurrency_list|num_prompts_multiplier_list|max_num_batched_tokens|max_num_seqs|max_model_len|tensor_parallel_size
 # num_prompts_multiplier_list 与 concurrency_list 一一对应，每个并发数对应各自的 multiplier
 declare -A SCENARIOS_DEFAULT
-SCENARIOS_DEFAULT[1]="512|512|1 16 32 48 64|10 10 10 10 10|65536|96|7168|8"
-SCENARIOS_DEFAULT[2]="3584|1536|1 16 32|10 10 10|65536|32|7168|8"
-SCENARIOS_DEFAULT[3]="8192|1024|1 16 32|10 10 10|65536|32|11264|8"
-SCENARIOS_DEFAULT[4]="16384|1536|1 16|10 10|65536|32|32768|8"
-SCENARIOS_DEFAULT[5]="32768|3072|1 8|10 10|136192|24|65536|8"
-SCENARIOS_DEFAULT[6]="73728|8192|1 4|4 4|136192|16|102400|8"
-SCENARIOS_DEFAULT[7]="102400|10240|1 4|4 4|136192|8|136192|8"
+SCENARIOS_DEFAULT[1]="512|512|1 16 32 48 64|10 10 10 10 10|8192|96|7168|8"
+SCENARIOS_DEFAULT[2]="3584|1536|1 16 32|10 10 10|8192|32|7168|8"
+SCENARIOS_DEFAULT[3]="8192|1024|1 16 32|10 10 10|8192|32|11264|8"
+SCENARIOS_DEFAULT[4]="16384|1536|1 16|10 10|8192|32|32768|8"
+SCENARIOS_DEFAULT[5]="32768|3072|1 8|10 10|8192|24|65536|8"
+SCENARIOS_DEFAULT[6]="65536|6144|1 4|10 10|8192|24|89600|8"
 
 # moe_quant_a3（GLM-5.2-w8a8）运行于 Ascend910(A3)，tp=16、max_num_batched_tokens=8192、A3 专属 max_model_len
 declare -A SCENARIOS_A3
@@ -498,11 +493,8 @@ declare -A SCENARIOS
 
 # 定义每个模型的场景数量
 declare -A MODEL_SCENARIO_COUNT
-# Due to the limitation of max_position_embeddings, the max_model_len of Qwen3 dense models should be less than 40960.
-MODEL_SCENARIO_COUNT[dense]=4
-MODEL_SCENARIO_COUNT[dense_quant]=4
-MODEL_SCENARIO_COUNT[moe]=7
-MODEL_SCENARIO_COUNT[moe_quant]=7
+MODEL_SCENARIO_COUNT[moe]=6
+MODEL_SCENARIO_COUNT[moe_quant]=6
 MODEL_SCENARIO_COUNT[moe_quant_a3]=3
 
 # 用于存储每个模型的场景测试结果

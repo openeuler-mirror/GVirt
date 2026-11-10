@@ -71,15 +71,20 @@ bash online_server_compare.sh [MODEL_TYPE]
 
 # 参数说明：
 # - MODEL_TYPE: 模型类型（可选，默认moe）
-#   - dense: 测试 Qwen3-32B 模型（3个场景）
-#   - moe: 测试 Qwen3-30B-A3B-Instruct-2507 模型（4个场景，默认）
+#   - moe: 测试 Qwen3-30B-A3B-Instruct-2507 模型（6个场景，默认）
+#   - moe_quant: 测试 Qwen3-30B-A3B-Instruct-2507-w8a8 模型（6个场景）
+#   - moe_quant_a3: 测试 GLM-5.2-w8a8 模型（3个场景，A3 专属参数）
+#   - moe_mix: 测试 moe + moe_quant（量化前后对比）
+#   - quant: 测试所有量化模型
 #   - all: 测试所有模型
 
-# 测试场景说明：
-# - 场景1：输入512 token，输出512 token，并发数：1 16 32 48 64 96
-# - 场景2：输入3584 token，输出1536 token，并发数：1 16 32 48 64
-# - 场景3：输入8192 token，输出1024 token，并发数：1 16 32 48 64
-# - 场景4：输入102400 token，输出10240 token，并发数：1 16（仅moe模型）
+# 测试场景说明（moe / moe_quant）：
+# - 场景1：输入512 token，输出512 token，并发数：1 16 32 48 64
+# - 场景2：输入3584 token，输出1536 token，并发数：1 16 32
+# - 场景3：输入8192 token，输出1024 token，并发数：1 16 32
+# - 场景4：输入16384 token，输出1536 token，并发数：1 16
+# - 场景5：输入32768 token，输出3072 token，并发数：1 8
+# - 场景6：输入65536 token，输出6144 token，并发数：1 4
 
 # 输出结果：
 # - 所有测试结果保存在 benchmark_results_<timestamp> 目录
@@ -125,50 +130,7 @@ python batch_aisbench.py "/workspace/benchmark" \
 
 每日自动化测试机器人用于定时执行性能测试、对比版本差异、检测性能劣化并发送通知。
 
-### 容器准备
-
-需要准备两个容器：编译容器和测试容器。
-
-**启动编译容器 (xlite-build):**
-
-```bash
-docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
-  --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi:ro \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-  -v /usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/common:ro \
-  -v /usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/driver:ro \
-  -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-  -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
-  -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
-  -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-  --name xlite-build \
-  -v /tmp:/tmp -v /home:/home -v /mnt/sdb/:/mnt/sdb \
-  hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20260324 \
-  /bin/bash -c "while true;do echo hello;sleep 5;done"
-```
-
-### 启动测试容器 (daily-test)
-
-```bash
-docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
-  --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi:ro \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-  -v /usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/common:ro \
-  -v /usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/driver:ro \
-  -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-  -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
-  -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
-  -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-  --name daily-test \
-  -v /tmp:/tmp -v /home:/home -v /mnt/sdb/:/mnt/sdb \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  quay.io/ascend/vllm-ascend:v0.17.0rc1-a3 \
-  /bin/bash -c "while true;do echo hello;sleep 5;done"
-```
+拉取代码、编译、安装与测试均在单一容器内完成，无需预先准备独立的编译容器与测试容器。
 
 ### 安装定时任务
 
@@ -198,7 +160,6 @@ python3 run_benchmark_scheduler.py --run-now
 python3 run_benchmark_scheduler.py \
     --model moe \
     --receiver "1234567890" \
-    --build-container xlite-build \
     --run-time 02:00
 ```
 
@@ -226,12 +187,11 @@ python3 daily_benchmark_bot.py --model moe --receiver 1234567890
 
 **可选参数：**
 
-- `--model`: 测试模型类型（dense/moe/all），默认 moe
+- `--model`: 测试模型类型（moe/moe_quant/moe_quant_a3/moe_mix/quant/all），默认 moe
 - `--skip-pull`: 跳过代码拉取
 - `--skip-build`: 跳过编译
 - `--receiver`: 接收者ID，welink 群号
 - `--threshold`: 性能劣化阈值，默认 0.05（即5%）
-- `--build-container`: 编译容器名称
 - `--env-type`: 环境类型（blue/yellow），默认 yellow
     - yellow 环境：需要执行 source /home/env.sh
     - blue 环境：不需要 source /home/env.sh
@@ -252,10 +212,10 @@ python -c "from torch_npu.profiler.profiler import analyse; import glob; [analys
 
 自动化测试机器人执行以下流程：
 
-1. **代码拉取**：在编译容器和测试容器中从远程仓库拉取最新代码
-2. **项目编译**：在编译容器中编译项目生成 wheel 包
+1. **代码拉取**：从远程仓库拉取最新代码
+2. **项目编译**：编译项目生成 wheel 包
 3. **安装部署**：在本地安装 wheel 包
-4. **基准测试**：在测试容器中执行基准测试脚本
+4. **基准测试**：执行基准测试脚本
 5. **报告解析**：解析测试报告并与上一版本的数据对比
 6. **性能检测**：检测性能劣化（超过阈值时告警）
 7. **通知发送**：发送测试结果到群组

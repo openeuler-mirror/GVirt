@@ -3,67 +3,27 @@
 xlite 每日自动化测试机器人
 
 功能说明:
-1. 在编译容器和测试容器中拉取最新代码
-2. 在编译容器中编译项目生成 wheel 包
-3. 在测试容器中执行基准测试脚本
+1. 拉取最新代码
+2. 编译项目生成 wheel 包
+3. 执行基准测试脚本
 4. 解析测试报告并与上一版本的数据对比
 5. 检测性能劣化 (超过阈值时告警)
 6. 发送通知到群组
 
 架构说明:
-- 定时任务在测试容器中运行
-- 编译容器: 用于拉取代码和编译项目
-- 测试容器: 用于拉取代码和运行基准测试
-- 两个容器都从远程仓库拉取代码到 /workspaces/code/opencode/GVirt
-
-容器启动方式:
-
-1. 启动编译容器 (xlite-build，不推荐在测试容器中编译，因为会影响性能):
-   docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
-     --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
-     -v /usr/local/dcmi:/usr/local/dcmi:ro \
-     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-     -v /usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/common:ro \
-     -v /usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/driver:ro \
-     -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-     -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro \
-     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
-     -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
-     -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-     --name xlite-build \
-     -v /tmp:/tmp -v /home:/home -v /mnt/sdb/:/mnt/sdb \
-     hub.oepkgs.net/oedeploy/openeuler/aarch64/gvirt:20260324 \
-     /bin/bash
-
-2. 启动测试容器 (daily-test，应直接再测试容器中执行定时任务):
-   docker run -itd --shm-size=10.24gb --net=host --privileged --cap-add=SYS_PTRACE --user root \
-     --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
-     -v /usr/local/dcmi:/usr/local/dcmi:ro \
-     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-     -v /usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/common:ro \
-     -v /usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/driver:ro \
-     -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-     -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro \
-     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
-     -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
-     -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-     --name daily-test \
-     -v /tmp:/tmp -v /home:/home -v /mnt/sdb/:/mnt/sdb \
-     -v /var/run/docker.sock:/var/run/docker.sock \
-     quay.io/ascend/vllm-ascend:v0.19.1rc1-a3 \
-     /bin/bash
+- 在单一容器中完成拉取代码、编译项目、运行基准测试
+- 从远程仓库拉取代码到 /workspaces/code/opencode/GVirt
 
 使用方法:
     python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
 
     可选参数:
-    --model: 测试模型类型 (dense/moe/all)，默认 moe
+    --model: 测试模型类型 (moe/moe_quant/moe_quant_a3/moe_mix/quant/all)，默认 moe
     --skip-pull: 跳过代码拉取
     --skip-build: 跳过编译
     --receiver: 接收者ID，默认 927280411401503971
     --threshold: 性能劣化阈值，默认 0.05 (即5%)
     --offline-threshold: 离线 bench 性能劣化阈值，默认 0.025 (即2.5%)
-    --build-container: 编译容器名称
     --env-type: 环境类型 (blue/yellow)，默认 yellow
                - yellow 环境: 需要执行 source /home/env.sh
                - blue 环境: 不需要 source /home/env.sh
@@ -71,13 +31,14 @@ xlite 每日自动化测试机器人
     --compare-tpot-p99: 启用TPOT P99指标作为对比指标（默认不比较TPOT P99）
 
 退出码:
-    0 - 成功，无性能劣化
-    1 - 执行失败
-    2 - 成功，但检测到性能劣化
+    0 - 成功，无性能劣化，且所有场景正常完成
+    1 - 执行失败 (含: 拉取/编译/安装失败、测试阶段崩溃、对比报告缺失、
+        或存在服务未起/压测报错等失败场景 —— 这些失败会单独发一条 ⚠️ 通知)
+    2 - 成功，但检测到性能劣化 (仅当所有场景正常完成时才可能)
 
 目录结构:
-    PROJECT_ROOT = /workspaces/code/opencode/GVirt (容器内路径)
-    REPORT_DIR = /home/daily_reports (容器内路径)
+    PROJECT_ROOT = /workspaces/code/opencode/GVirt
+    REPORT_DIR = /home/daily_reports
 """
 
 import argparse
@@ -119,10 +80,8 @@ from daily_bot_utils import (
     # 通知发送
     send_notification,
     # 配置设置
-    set_build_container,
     set_env_type,
     set_machine_ip,
-    set_test_container,
     setup_logging,
     should_disable_xccl,
 )
@@ -223,10 +182,10 @@ def update_model_paths(device: str) -> bool:
 
 def run_benchmark(model_type: str = "moe", report_subdir: Optional[Path] = None) -> Optional[Path]:
     """
-    在测试容器中执行基准测试脚本
+    执行基准测试脚本
 
     参数:
-        model_type: 模型类型 (dense/moe/dense_quant/moe_quant/origin/quant/all)
+        model_type: 模型类型 (moe/moe_quant/moe_quant_a3/moe_mix/quant/all)
         report_subdir: 报告目录路径。传入则复用, 否则按当前版本+日期新建。
 
     返回:
@@ -283,7 +242,7 @@ def run_benchmark(model_type: str = "moe", report_subdir: Optional[Path] = None)
 # ====================== 离线 bench 测试执行函数 ======================
 def run_offline_bench(report_subdir: Optional[Path] = None) -> Optional[Path]:
     """
-    在测试容器中执行离线 bench 测试 (run.sh bench 模式)
+    执行离线 bench 测试 (run.sh bench 模式)
 
     用 run.sh 跑 run_glm5_w8a8 的 bench 模式，只跑 OFFLINE_BENCH_N_LAYERS 层。
 
@@ -1120,7 +1079,10 @@ def generate_model_report(
 
 
 def build_no_change_report(
-    report_dir: Optional[Path], model_names: Optional[list[str]] = None, is_offline: bool = False
+    report_dir: Optional[Path],
+    model_names: Optional[list[str]] = None,
+    is_offline: bool = False,
+    failure_count: int = 0,
 ) -> str:
     """
     所有模型性能均无显著变化时生成汇总通知
@@ -1157,7 +1119,13 @@ def build_no_change_report(
     models_text = ""
     if model_names:
         models_text = f" (共 {len(model_names)} 个模型: {', '.join(model_names)})"
-    lines.append(f"✅ 测试模型性能均无变化{models_text}")
+    if failure_count > 0:
+        # 有失败场景时, "无变化"仅覆盖成功完成的场景, 避免与单独的失败通知矛盾、误导排查
+        lines.append(
+            f"✅ 成功完成的场景性能均无变化{models_text} (另有 {failure_count} 个场景未能正常完成, 见单独的失败通知)"
+        )
+    else:
+        lines.append(f"✅ 测试模型性能均无变化{models_text}")
 
     # 添加报告路径
     ip_address = os.environ.get("MACHINE_IP", "")
@@ -1326,6 +1294,283 @@ def seed_baseline_if_release(report_dir: Path) -> None:
 
 
 # ====================== 报告处理辅助函数 ======================
+# ---- 失败场景收集 ----
+# 服务起不来 / 压测报错时, 在线脚本 (online_server_compare.sh) 不 exit 1, 而是
+# 跳过该服务或并发度继续跑, 导致对应 result_*/ 目录缺失或日志不含完成关键字;
+# process_data.py 在任一服务目录缺失时整体中止, 该场景的 benchmark_comparison_*.log
+# 不会生成。这些失败不会被 _process_online_reports 反映 (它只看成功生成的对比报告),
+# 故单独扫描三类失败: 服务未就绪 / 压测未完成(含"假成功") / 结果目录有但对比报告缺失。
+# "假成功"指压测日志含完成关键字 "Request throughput (req/s)", 但 Failed requests != 0
+# 或 Mean TPOT == 0 —— vllm bench 仍打印指标块(值多为 0), 实为压测实质失败(请求没拿到
+# 正常响应/模型无 decode 输出), 不能当作有效性能结果。
+# 此外, 各类失败若日志含显存 OOM 串 ("NPU out of memory" 等, 见 _detect_oom), 会在
+# 失败描述中标注 "(疑似显存 OOM)", 便于在通知里直接定位根因而非笼统的"未完成"。
+_ONLINE_SERVER_READY_KEYWORD = "Application startup complete"
+_ONLINE_BENCH_COMPLETE_KEYWORD = "Request throughput (req/s)"
+
+
+def _bench_log_anomaly(content: str) -> Optional[str]:
+    """
+    检测一份在线压测日志是否为"假成功" (有完成关键字但压测实质失败)。
+
+    判据 (任一命中即判异常, 返回原因; 无异常返回 None):
+    - Failed requests != 0: vllm bench 的请求失败数, 非零说明有请求没拿到响应
+      (如 OOM、超时、连接被拒)。注意压测可能只跑了部分请求就出错, 但仍打印完整指标块。
+    - Mean TPOT (ms) == 0: 每输出 token 平均耗时为 0, 说明模型实际没产生 decode 输出
+      (Total generated tokens 极少), 指标块是 vllm bench 兜底打印的零值, 非真实性能。
+
+    仅在日志已含完成关键字 (_ONLINE_BENCH_COMPLETE_KEYWORD) 时调用才有意义;
+    未含完成关键字的日志由调用方直接判"压测未完成", 不进这里。
+    """
+    failed_match = re.search(r"Failed requests:\s+(\d+)", content)
+    if failed_match and int(failed_match.group(1)) > 0:
+        return f"请求失败 {int(failed_match.group(1))} 个"
+
+    tpot_match = re.search(r"Mean TPOT \(ms\):\s+([\d.]+)", content)
+    if tpot_match:
+        try:
+            if float(tpot_match.group(1)) == 0.0:
+                return "Mean TPOT 为 0 (无有效输出)"
+        except ValueError:
+            pass
+
+    return None
+
+
+# NPU/CUDA 显存 OOM 关键字。vllm-ascend 报 "NPU out of memory", GPU 环境报
+# "CUDA out of memory" / "OutOfMemoryError"; 统一匹配, 任一命中即判定为显存 OOM。
+# 用 compiled 模式一次扫多种串, 比多次 in 更省; 大小写不敏感 (OOM 错误信息大小写不一)。
+_OOM_PATTERN = re.compile(r"(NPU out of memory|CUDA out of memory|OutOfMemoryError|out of memory)", re.IGNORECASE)
+
+
+def _detect_oom(content: str) -> bool:
+    """
+    检测日志内容是否含显存 OOM 错误。
+
+    匹配 vllm-ascend 的 "NPU out of memory" 及常见 PyTorch/GPU 的 "CUDA out of memory"
+    / "OutOfMemoryError" 串。用于把"服务未起/压测未完成/无有效结果"等笼统失败进一步
+    细化为"显存 OOM", 便于在失败通知中直接定位根因。
+    """
+    return bool(_OOM_PATTERN.search(content))
+
+
+def _collect_online_failures(report_dir: Path) -> list[str]:
+    """
+    扫描在线测试产物, 收集未能正常完成的场景。
+
+    判据 (与 online_server_compare.sh 的 wait_server_ready / is_bench_log_complete 对齐):
+    1. server_*.log 存在但不含启动就绪关键字 -> 服务未起来
+    2. result_*/ 目录下某并发度日志缺失完成关键字 -> 该并发度压测未完成;
+       或含完成关键字但"假成功" (Failed requests != 0 或 Mean TPOT == 0) -> 压测异常
+    3. 三个服务 result_*/ 目录都齐全但无对应 benchmark_comparison_*.log -> process_data.py 中止
+       (此处"齐全"指各含至少一份真正完成的并发度日志, 假成功的不计入)
+
+    返回:
+        失败描述字符串列表 (可直接渲染进通知)
+    """
+    failures: list[str] = []
+
+    # 1. 服务未就绪: server_<model>_input<in>_output<out>_<service>.log
+    #    未含就绪关键字即判失败; 若同时含 OOM, 标注为 OOM 以便直接定位根因。
+    for server_log in sorted(report_dir.glob("server_*_input*_output*_*.log")):
+        try:
+            content = server_log.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            failures.append(f"服务日志读取失败: {server_log.name}")
+            continue
+        if _ONLINE_SERVER_READY_KEYWORD not in content:
+            reason = " (疑似显存 OOM)" if _detect_oom(content) else ""
+            failures.append(f"服务未启动就绪{reason}: {server_log.name}")
+
+    # 2. 压测未完成/异常: result_input_<in>_output_<out>_<service>_<model>/
+    #    目录下 input_<in>_output_<out>_concurrency<c>.log 应含完成关键字,
+    #    且不出现"假成功" (Failed requests != 0 或 Mean TPOT == 0)。
+    #    不含完成关键字时, 若日志含 OOM 则标注 (压测中被 OOM 打断的常见形态)。
+    for result_dir in sorted(report_dir.glob("result_input_*_output_*_*_*")):
+        if not result_dir.is_dir():
+            continue
+        for bench_log in sorted(result_dir.glob("input_*_output_*_concurrency*.log")):
+            try:
+                content = bench_log.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                failures.append(f"压测日志读取失败: {result_dir.name}/{bench_log.name}")
+                continue
+            if _ONLINE_BENCH_COMPLETE_KEYWORD not in content:
+                reason = " (疑似显存 OOM)" if _detect_oom(content) else ""
+                failures.append(f"压测未完成{reason}: {result_dir.name}/{bench_log.name}")
+                continue
+            anomaly = _bench_log_anomaly(content)
+            if anomaly:
+                # 假成功时也顺带查 OOM: 很多 OOM 场景请求失败 + TPOT=0, 但日志里有 OOM 串
+                if _detect_oom(content):
+                    anomaly = f"{anomaly}, 显存 OOM"
+                failures.append(f"压测异常 ({anomaly}): {result_dir.name}/{bench_log.name}")
+
+    # 3. process_data.py 中止: 三服务结果目录都存在 (各含至少一份完成的并发度日志),
+    #    却没有对应的 benchmark_comparison_*.log -> 数据处理阶段失败。
+    #    按场景 (model + input + output) 聚合判定, 复用上面的完成判据。
+    completed_by_scenario: dict[tuple[str, int, int], dict[str, int]] = {}
+    for result_dir in sorted(report_dir.glob("result_input_*_output_*_*_*")):
+        if not result_dir.is_dir():
+            continue
+        m = re.match(r"result_input_(\d+)_output_(\d+)_(aclgraph|xlite_full|xlite_decode_only)_(.+)", result_dir.name)
+        if not m:
+            continue
+        in_len, out_len, service, model_name = (
+            int(m.group(1)),
+            int(m.group(2)),
+            m.group(3),
+            m.group(4),
+        )
+        # 仅统计真正完成 (含完成关键字且无假成功) 的并发度, 与第 2 类判据对齐,
+        # 避免假成功日志被算作"完成"从而掩盖 process_data.py 中止。
+        completed = 0
+        for log in result_dir.glob("input_*_output_*_concurrency*.log"):
+            try:
+                content = log.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if _ONLINE_BENCH_COMPLETE_KEYWORD in content and not _bench_log_anomaly(content):
+                completed += 1
+        if completed > 0:
+            key = (model_name, in_len, out_len)
+            completed_by_scenario.setdefault(key, {})[service] = completed
+
+    for (model_name, in_len, out_len), services in completed_by_scenario.items():
+        if {"aclgraph", "xlite_full", "xlite_decode_only"}.issubset(services.keys()):
+            pattern = f"benchmark_comparison_{model_name}_input{in_len}_output{out_len}_*.log"
+            if not list(report_dir.glob(pattern)):
+                failures.append(f"对比报告未生成 (process_data.py 中止): {model_name} input={in_len} output={out_len}")
+
+    return failures
+
+
+def _collect_offline_failures(report_dir: Path) -> list[str]:
+    """
+    扫描离线 bench 产物, 收集未能正常完成的场景。
+
+    判据 (与 run_offline_bench 的 "tokens/s" in stdout 对齐):
+    OFFLINE_BENCH_SCENARIOS 中每个期望场景都应产出
+    offline_bench_<model>_in<in>_out<out>_bs<bs>_*.log 且含 "tokens/s"。
+    日志缺失 (场景未跑/中途崩溃且未落盘) 或不含完成关键字均记为失败;
+    不含完成关键字时若日志含显存 OOM 串, 标注为 OOM 以便直接定位根因。
+    """
+    failures: list[str] = []
+
+    for input_len, output_len, bs in OFFLINE_BENCH_SCENARIOS:
+        pattern = f"offline_bench_{OFFLINE_BENCH_MODEL}_in{input_len}_out{output_len}_bs{bs}_*.log"
+        logs = list(report_dir.glob(pattern))
+        if not logs:
+            failures.append(f"离线 bench 场景未产出日志: in={input_len} out={output_len} bs={bs}")
+            continue
+        log_file = logs[0]
+        try:
+            content = log_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            failures.append(f"离线 bench 日志读取失败: {log_file.name}")
+            continue
+        if "tokens/s" not in content:
+            if _detect_oom(content):
+                reason = "显存 OOM"
+            else:
+                reason = "无有效结果 (疑似崩溃)"
+            failures.append(f"离线 bench 场景{reason}: in={input_len} out={output_len} bs={bs}")
+
+    return failures
+
+
+def build_failure_report(
+    report_dir: Path,
+    online_failures: list[str],
+    offline_failures: list[str],
+) -> str:
+    """
+    汇总本次运行的失败场景, 生成独立的 ⚠️ 通知。
+
+    仅在确实收集到失败时调用 (无失败时调用方不会触发)。
+    单独成条发送, 与各阶段性能报告解耦: 即使某阶段性能报告正常, 失败仍可见。
+    """
+    vllm_ascend_version = get_vllm_ascend_version()
+    xlite_version = get_xlite_version()
+
+    current_date = "unknown"
+    match = re.search(r"xlite-[\w.\+]+-(\d{8})$", str(report_dir))
+    if match:
+        current_date = match.group(1)
+
+    lines = [
+        f'<font color="orange"><b>⚠️ xlite {current_date} 测试失败场景汇总</b></font>',
+        "",
+        f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite 版本: {xlite_version}",
+    ]
+
+    ip_address = os.environ.get("MACHINE_IP", "")
+    report_path = f"{ip_address}:{report_dir}" if report_dir else ""
+    if report_path:
+        lines.append(f"报告保存路径: {report_path}")
+        lines.append("")
+
+    total = len(online_failures) + len(offline_failures)
+    lines.append(f"❗ 共发现 <b>{total}</b> 个失败项, 性能报告仅反映成功完成的场景, 请排查以下失败:")
+    lines.append("")
+
+    if online_failures:
+        lines.append(f"<b>在线性能测试 ({len(online_failures)} 项):</b>")
+        for item in online_failures:
+            lines.append(f"  • {item}")
+        lines.append("")
+
+    if offline_failures:
+        lines.append(f"<b>离线 bench 测试 ({len(offline_failures)} 项):</b>")
+        for item in offline_failures:
+            lines.append(f"  • {item}")
+        lines.append("")
+
+    lines.append(
+        "提示: 服务未启动就绪请查 server_*.log; 压测未完成请查 result_*/ 下 *concurrency*.log; "
+        "对比报告未生成说明 process_data.py 中止, 请查 process_data.py 的报错。"
+    )
+
+    return "\n".join(lines)
+
+
+def _send_phase_crash_notification(report_dir: Path, receiver: str, phase_name: str, reason: str) -> None:
+    """
+    某阶段整体崩溃 (run_benchmark/run_offline_bench 返回 None) 时发送的通知。
+
+    到达这里说明测试脚本自身非零退出或异常, 报告阶段根本进不去, 故单独发一条,
+    避免每日任务静默挂掉、用户无感知。发送失败仅记日志, 不影响已决定的 sys.exit(1)。
+    """
+    try:
+        vllm_ascend_version = get_vllm_ascend_version()
+        xlite_version = get_xlite_version()
+    except Exception:
+        vllm_ascend_version = "N/A"
+        xlite_version = "N/A"
+
+    ip_address = os.environ.get("MACHINE_IP", "")
+    report_path = f"{ip_address}:{report_dir}" if report_dir else ""
+
+    lines = [
+        f'<font color="red"><b>❌ xlite {phase_name}阶段崩溃，任务终止</b></font>',
+        "",
+        f"【当前版本】 vllm-ascend 版本: {vllm_ascend_version}, xlite 版本: {xlite_version}",
+        f"【失败原因】 {reason}",
+    ]
+    if report_path:
+        lines.append(f"报告保存路径: {report_path}")
+    lines.append("")
+    lines.append("该阶段未能完成, 未生成性能对比报告, 请查 daily_benchmark 日志排查。")
+
+    try:
+        crash_file = report_dir / f"crash_{phase_name}.txt"
+        crash_file.write_text("\n".join(lines), encoding="utf-8")
+    except Exception:
+        pass
+
+    send_notification("\n".join(lines), receiver)
+
+
 def _process_online_reports(report_dir: Path, current_reports: list[Path]) -> list[dict]:
     """
     解析 online 性能测试报告并与基线对比 (报告处理阶段)
@@ -1466,6 +1711,7 @@ def _report_phase(
     all_comparison_results: list[dict],
     receiver: str,
     is_offline: bool,
+    failure_count: int = 0,
 ) -> bool:
     """
     对一组对比结果 (online 或 offline) 生成报告并发送通知。
@@ -1532,7 +1778,7 @@ def _report_phase(
             send_notification(model_report, receiver)
     else:
         log_info("测试模型性能均无变化")
-        no_change_report = build_no_change_report(report_dir, list(model_groups.keys()), is_offline)
+        no_change_report = build_no_change_report(report_dir, list(model_groups.keys()), is_offline, failure_count)
         send_notification(no_change_report, receiver)
 
     # 该阶段是否检测到劣化
@@ -1557,8 +1803,8 @@ def main():
 
     流程:
     1. 解析命令行参数
-    2. 拉取最新代码 (编译容器)
-    3. 编译项目 (编译容器)
+    2. 拉取最新代码
+    3. 编译项目
     4. 安装 wheel 包
     5. 执行基准测试
     6. 解析测试报告
@@ -1571,7 +1817,7 @@ def main():
     parser.add_argument(
         "--model",
         default="moe",
-        choices=["dense", "moe", "dense_quant", "moe_quant", "origin", "quant", "all"],
+        choices=["moe", "moe_quant", "moe_quant_a3", "moe_mix", "quant", "all"],
         help="测试模型类型 (default: moe)",
     )
     parser.add_argument("--skip-pull", action="store_true", help="跳过代码拉取")
@@ -1586,7 +1832,6 @@ def main():
         default=0.025,
         help="离线 bench 性能劣化阈值 (default: 0.025 = 2.5%%); 与在线 --threshold 分离",
     )
-    parser.add_argument("--build-container", type=str, default=None, help="编译容器名称")
     parser.add_argument(
         "--report-dir", type=str, default=None, help="指定已有的报告目录（调试模式，跳过拉取、编译、测试步骤）"
     )
@@ -1618,11 +1863,6 @@ def main():
     COMPARE_TPOT_P99_METRICS = args.compare_tpot_p99
 
     # 设置配置
-    if args.build_container:
-        set_build_container(args.build_container)
-    else:
-        set_build_container(os.environ.get("BUILD_CONTAINER", ""))
-    set_test_container(os.environ.get("TEST_CONTAINER", ""))
     set_env_type(args.env_type)
     set_machine_ip(os.environ.get("MACHINE_IP", ""))
 
@@ -1634,7 +1874,6 @@ def main():
     log_info("=" * 60)
     log_info("xlite 每日自动化测试机器人启动")
     log_info(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    log_info(f"编译容器: {os.environ.get('BUILD_CONTAINER', '')}")
     log_info(f"环境类型: {args.env_type}")
     log_info("=" * 60)
 
@@ -1659,13 +1898,13 @@ def main():
             sys.exit(1)
         log_info(f"使用报告目录: {report_dir}")
     else:
-        # 步骤1: 拉取最新代码 (在编译容器中)
+        # 步骤1: 拉取最新代码
         if not args.skip_pull:
             if not pull_latest_code():
                 log_error("代码拉取失败，终止执行")
                 sys.exit(1)
 
-        # 步骤2: 编译项目 (在编译容器中)
+        # 步骤2: 编译项目
         wheel_path = None
         if not args.skip_build:
             success, wheel_path = build_project(REPORT_DIR)
@@ -1679,7 +1918,7 @@ def main():
                 log_error("wheel 包安装失败，终止执行")
                 sys.exit(1)
 
-        # 步骤4: 执行基准测试 (在测试容器中)
+        # 步骤4: 执行基准测试
         # 一次性确定报告目录 (版本+日期), 供在线/离线两阶段复用,
         # 避免跨午夜跑测试时结果分到不同日期目录。
         current_version = get_xlite_version()
@@ -1695,6 +1934,11 @@ def main():
             online_report_dir = run_benchmark(args.model, report_dir)
             if not online_report_dir:
                 log_error("在线基准测试失败，终止执行")
+                # 在线阶段整体失败 (online_server_compare.sh 非零退出) 前必发通知,
+                # 否则每日任务静默挂掉、用户无感知。
+                _send_phase_crash_notification(
+                    report_dir, args.receiver, "在线性能测试", "online_server_compare.sh 执行失败"
+                )
                 sys.exit(1)
 
         if run_offline:
@@ -1704,13 +1948,23 @@ def main():
             offline_report_dir = run_offline_bench(report_dir)
             if not offline_report_dir:
                 log_error("离线 bench 测试失败，终止执行")
+                _send_phase_crash_notification(report_dir, args.receiver, "离线 bench 测试", "run.sh bench 执行异常")
                 sys.exit(1)
 
     # 步骤5: 处理报告 + 发送通知 (在线/离线各一份)
     has_any_degradation = False
     has_infra_failure = False  # 报告缺失/无效等基础设施故障 (与"有劣化"区分, 走 exit 1)
+    # 收集各阶段"服务未起 / 压测报错 / 报告未生成"等失败场景, 单独发一条通知。
+    online_failures: list[str] = []
+    offline_failures: list[str] = []
 
     if run_online:
+        # 无条件收集失败场景: 即使零对比报告 (如所有服务未起, online_server_compare.sh
+        # 仍 exit 0), 也能据此发 ⚠️ 失败明细通知, 与离线侧对齐, 避免 exit 1 之外无群通知。
+        online_failures = _collect_online_failures(report_dir)
+        if online_failures:
+            log_warning(f"在线测试发现 {len(online_failures)} 个失败场景")
+            has_infra_failure = True
         current_reports = list(report_dir.glob("benchmark_comparison_*.log"))
         if not current_reports:
             log_error("未找到在线测试报告文件")
@@ -1720,7 +1974,13 @@ def main():
             log_info("=" * 60)
             log_info("在线性能测试: 生成报告与通知")
             log_info("=" * 60)
-            if _report_phase(report_dir, all_comparison_results, args.receiver, is_offline=False):
+            if _report_phase(
+                report_dir,
+                all_comparison_results,
+                args.receiver,
+                is_offline=False,
+                failure_count=len(online_failures),
+            ):
                 has_any_degradation = True
 
     if run_offline:
@@ -1728,11 +1988,34 @@ def main():
         log_info("=" * 60)
         log_info("离线 bench 测试: 生成报告与通知")
         log_info("=" * 60)
+        # 先收集失败场景, 以便把数量透传给 _report_phase (避免"无变化"通知与失败矛盾)
+        offline_failures = _collect_offline_failures(report_dir)
+        if offline_failures:
+            log_warning(f"离线 bench 测试发现 {len(offline_failures)} 个失败场景")
+            has_infra_failure = True
         if not all_comparison_results:
             # 一个有效场景都没有 = 基础设施故障 (单个场景 OOM 已在 _process_offline 内跳过)
             has_infra_failure = True
-        elif _report_phase(report_dir, all_comparison_results, args.receiver, is_offline=True):
+        elif _report_phase(
+            report_dir,
+            all_comparison_results,
+            args.receiver,
+            is_offline=True,
+            failure_count=len(offline_failures),
+        ):
             has_any_degradation = True
+
+    # 失败场景汇总: 单独发一条 ⚠️ 通知, 与各阶段性能报告解耦。
+    # 即使某阶段"无变化", 失败仍可见; 调度器靠 has_infra_failure->exit 1 触发 ❌。
+    if online_failures or offline_failures:
+        failure_report = build_failure_report(report_dir, online_failures, offline_failures)
+        failure_report_file = report_dir / "failure_summary.txt"
+        try:
+            failure_report_file.write_text(failure_report, encoding="utf-8")
+            log_info(f"失败汇总已保存至: {failure_report_file}")
+        except Exception as e:
+            log_warning(f"保存失败汇总失败: {e}")
+        send_notification(failure_report, args.receiver)
 
     # 报告阶段后: 若本次恰为发布 tag 构建，镜像本次结果为基线，供后续 dev 构建对比。
     # 仅在非调试模式 (有真实本次运行报告目录) 时触发。
@@ -1740,9 +2023,17 @@ def main():
         seed_baseline_if_release(report_dir)
 
     # 步骤6: 设置退出码
-    #   0=成功无劣化 | 1=基础设施故障(报告缺失等) | 2=成功但有劣化
+    #   0=成功无劣化 | 1=基础设施故障(报告缺失/场景失败/服务未起等) | 2=成功但有劣化
+    #   有失败场景时走 exit 1, 使调度器 (run_benchmark_scheduler.py) 标记任务失败并关注;
+    #   此时即便存在劣化也以 exit 1 优先 (失败场景下的劣化对比不可信)。
     if has_infra_failure:
-        log_error(f"测试基础设施故障。报告已保存至: {report_dir}")
+        if online_failures or offline_failures:
+            log_error(
+                f"测试存在失败场景 (在线 {len(online_failures)} / 离线 {len(offline_failures)})。"
+                f"报告已保存至: {report_dir}"
+            )
+        else:
+            log_error(f"测试基础设施故障。报告已保存至: {report_dir}")
         log_success("自动化测试完成!")
         return 1
     if has_any_degradation:
