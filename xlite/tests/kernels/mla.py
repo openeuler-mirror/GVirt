@@ -28,6 +28,7 @@ mla_v2.py.
 
 import logging
 import math
+import sys
 from collections.abc import Iterable
 
 import torch
@@ -112,6 +113,114 @@ def rms_norm_last_dim(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     # normalize over the last dimension by root-mean-square
     rms = x.pow(2).mean(dim=-1, keepdim=True).add(eps).sqrt()
     return x / rms
+
+
+def check_dsa_cp_gather_mla():
+    from xlite._C import dsa_cp_gather_mla
+
+    torch.manual_seed(42)
+    # cached_lens already include the prefix preceding this rank's local queries.
+    cases = [
+        (64, [0], [19], 2048),
+        (64, [2030], [39], 2048),
+        (64, [32768], [64], 2048),
+        (64, [4096, 0, 131000, 16], [13, 0, 33, 3], 2048),
+        (128, [4096, 1], [1, 2], 128),
+        (2, [8192], [3], 128),
+        (1, [127], [1], 128),
+        (64, [0, 0], [0, 0], 2048),
+        (64, [2176, 17, 4096], [11, 29, 27], 2048),
+        # Multiple two-query-per-core groups on A3, including short-history
+        # rows, a request boundary and an incomplete final group.
+        (64, [4096, 17, 8192], [31, 17, 81], 2048),
+        # Gather chunk/padding boundaries and different original page tables.
+        (64, [0, 30, 31, 32, 126, 127, 128, 2048], [1] * 8, 128),
+        # Persistent blockTables retain extra rows and the original row pitch
+        # after the runtime narrows columns to this step's context length.
+        (64, [4096, 17, 8192], [31, 17, 81], 2048, True),
+    ]
+    latent_dim, rope_dim = 512, 64
+    scale = 256**-0.5
+    for case in cases:
+        heads, histories, lengths, top_k = case[:4]
+        pitched_blocks = len(case) > 4 and case[4]
+        total_queries = sum(lengths)
+        contexts = [history + length for history, length in zip(histories, lengths)]
+        pages = [(length + BLOCK_SIZE - 1) // BLOCK_SIZE for length in contexts]
+        num_pages = max(1, sum(pages))
+        max_pages = max(1, max(pages))
+        with torch.device("npu"):
+            q = torch.randn(total_queries, heads, latent_dim, dtype=torch.bfloat16)
+            qr = torch.randn(total_queries, heads, rope_dim, dtype=torch.bfloat16)
+            out = torch.full_like(q, float("nan"))
+            expected = torch.zeros_like(q)
+            # Different block pitches for K and RoPE; untouched rows are NaNs,
+            # so reading unselected KV in SV is observable even at zero probability.
+            k_cache = torch.full((num_pages * 2, BLOCK_SIZE, latent_dim), float("nan"), dtype=torch.bfloat16)[::2]
+            pe_cache = torch.full((num_pages * 3, BLOCK_SIZE, rope_dim), float("nan"), dtype=torch.bfloat16)[::3]
+            if pitched_blocks:
+                blocks = torch.full((len(lengths) + 2, max_pages + 8), -1, dtype=torch.int32)[:, :max_pages]
+            else:
+                blocks = torch.full((len(lengths), max_pages), -1, dtype=torch.int32)
+            physical_pages = torch.randperm(num_pages)
+            topk = torch.full((total_queries, top_k), -1, dtype=torch.int32)
+            lens = torch.tensor(lengths, dtype=torch.int32)
+            cached = torch.tensor(histories, dtype=torch.int32)
+            starts = torch.cumsum(lens, 0, dtype=torch.int32) - lens
+            query_offset, page_offset = 0, 0
+            for request, (history, length, context, page_count) in enumerate(zip(histories, lengths, contexts, pages)):
+                blocks[request, :page_count] = physical_pages[page_offset : page_offset + page_count]
+                page_offset += page_count
+                logical_k = torch.randn(context, latent_dim, dtype=torch.bfloat16)
+                logical_pe = torch.randn(context, rope_dim, dtype=torch.bfloat16)
+                needed = []
+                for local_query in range(length):
+                    row = query_offset + local_query
+                    causal = history + local_query + 1
+                    if causal <= top_k:
+                        selected = torch.arange(causal)
+                    else:
+                        indices = torch.randperm(causal)[:top_k]
+                        if row % 2 == 0:
+                            indices = indices.sort().values
+                        # Long rows follow the existing indexer/gather contract:
+                        # top_k distinct, valid causal positions in arbitrary order.
+                        if row % 3 == 0:
+                            indices = indices.sort(descending=True).values
+                        topk[row] = indices.to(torch.int32)
+                        selected = indices
+                    needed.append(selected)
+                    if selected.numel():
+                        keys, positions = logical_k[selected], logical_pe[selected]
+                        # Match the kernel's BF16 QK and probability round trips.
+                        scores = (q[row].float() @ keys.float().T + qr[row].float() @ positions.float().T).to(
+                            torch.bfloat16
+                        )
+                        probability = (scores.float() * scale).softmax(-1).to(torch.bfloat16)
+                        expected[row] = (probability.float() @ keys.float()).to(torch.bfloat16)
+                if needed:
+                    selected = torch.unique(torch.cat(needed))
+                    physical = blocks[request, selected // BLOCK_SIZE].long()
+                    within_page = selected % BLOCK_SIZE
+                    k_cache[physical, within_page] = logical_k[selected]
+                    pe_cache[physical, within_page] = logical_pe[selected]
+                query_offset += length
+            torch.npu.synchronize()
+            dsa_cp_gather_mla(rt, q, qr, k_cache, pe_cache, out, starts, lens, cached, blocks, topk, scale)
+            torch.testing.assert_close(out, expected, rtol=5e-2, atol=5e-3)
+        logging.info(
+            "DSA-CP gather + dense MLA passed: heads=%s cached=%s queries=%s top_k=%s pitched_blocks=%s",
+            heads,
+            histories,
+            lengths,
+            top_k,
+            pitched_blocks,
+        )
+
+
+if "--dsa-cp" in sys.argv:
+    check_dsa_cp_gather_mla()
+    raise SystemExit(0)
 
 
 for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_dtype in models:

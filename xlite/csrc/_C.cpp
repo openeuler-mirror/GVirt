@@ -2050,6 +2050,34 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
     rt.PutTensor(oAbsorb);
 }
 
+void DsaCpGatherMLA(XRuntime &rt, at::Tensor &qAbsorb, at::Tensor &qr, at::Tensor &kCache,
+                    at::Tensor &peCache, at::Tensor &output, at::Tensor &queryStartLoc,
+                    at::Tensor &queryLens, at::Tensor &cachedLens, at::Tensor &blockTables,
+                    at::Tensor &topkIndices, float scale)
+{
+    XTensor qAbsorbXT, qPeXT, kCacheXT, peCacheXT, outputXT, queryStartLocXT, queryLensXT,
+        cachedLensXT, blockTablesXT, topkIndicesXT;
+    InitXTensor(qAbsorbXT, qAbsorb);
+    InitXTensor(qPeXT, qr);
+    InitXTensor(kCacheXT, kCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(peCacheXT, peCache, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(outputXT, output);
+    InitXTensor(queryStartLocXT, queryStartLoc);
+    InitXTensor(queryLensXT, queryLens);
+    InitXTensor(cachedLensXT, cachedLens);
+    InitXTensor(blockTablesXT, blockTables, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(topkIndicesXT, topkIndices);
+    if (qAbsorbXT.shape.size() != 3 || qPeXT.shape.size() != 3 || kCacheXT.shape.size() != 3 ||
+        topkIndicesXT.shape.size() != 2) {
+        throw std::invalid_argument("DsaCpGatherMLA: expected 3-D Q/KV and 2-D Top-K indices");
+    }
+    XliteOpDsaCpGatherMLA(rt, qAbsorbXT, qPeXT, kCacheXT, peCacheXT, outputXT, queryStartLocXT,
+                          queryLensXT, cachedLensXT, blockTablesXT, topkIndicesXT,
+                          qAbsorbXT.shape[1], qPeXT.shape[2], qAbsorbXT.shape[2], kCacheXT.shape[1],
+                          queryLensXT.numel, topkIndicesXT.shape[1], scale);
+    rt.Synchronize();
+}
+
 void GatherSparseKVCache(XRuntime &rt, at::Tensor &kCache, at::Tensor &peCache,
                          at::Tensor &blockTables, at::Tensor &topkIndices,
                          at::Tensor &queryStartLoc, at::Tensor &lens, at::Tensor &cachedLens,
@@ -3751,6 +3779,10 @@ PYBIND11_MODULE(_C, m)
           py::kw_only(), py::arg("top_k") = 0, py::arg("nz") = false,
           py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192,
           py::arg("dense") = false, py::arg("k_scale_cache") = py::none());
+    m.def("dsa_cp_gather_mla", &DsaCpGatherMLA, py::arg("rt"), py::arg("q_absorb"), py::arg("qr"),
+          py::arg("k_cache"), py::arg("pe_cache"), py::arg("output"), py::arg("query_start_loc"),
+          py::arg("query_lens"), py::arg("cached_lens"), py::arg("block_tables"),
+          py::arg("topk_indices"), py::arg("scale"));
     m.def("gather_sparse_kv_cache", &GatherSparseKVCache, py::arg("rt"), py::arg("k_cache"),
           py::arg("pe_cache"), py::arg("block_tables"), py::arg("topk_indices"),
           py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"),

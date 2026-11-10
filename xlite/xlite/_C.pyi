@@ -3603,6 +3603,34 @@ def dsa_cp_write_kv_cache_by_slot(
     """
     ...
 
+def dsa_cp_gather_mla(
+    rt: Runtime,
+    q_absorb: torch.Tensor,
+    qr: torch.Tensor,
+    k_cache: torch.Tensor,
+    pe_cache: torch.Tensor,
+    output: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    query_lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    topk_indices: torch.Tensor,
+    scale: float,
+) -> None:
+    """Gather each DSA-CP query's selected KV and run the existing dense MLA v2.
+
+    Q/output are BF16 [queries, heads, latent_dim]; QR is BF16
+    [queries, heads, rope_dim]. The paged caches may have pitched blocks.
+    block_tables is int32 [rows >= batch, max_blocks]; its actual row stride
+    is preserved, including when columns are narrowed from a persistent buffer.
+    Request metadata describes the local queries; cached_lens includes the
+    prefix before this rank's shard. Top-K is int32 [queries, top_k].
+    Rows with causal length <= top_k use all causal tokens and ignore indices.
+    Longer rows require top_k distinct valid causal indices, as produced by
+    the indexer. KV workspace is reused over bounded groups of queries.
+    """
+    ...
+
 def gather_sparse_kv_cache(
     rt: Runtime,
     k_cache: torch.Tensor,

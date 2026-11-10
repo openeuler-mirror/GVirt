@@ -131,6 +131,12 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
                                 uint32_t kvHeads, uint32_t compressRatio = 1,
                                 uint32_t burstCopySize = GM_UB_BURST_SIZE,
                                 const XTensor &kScaleCache = XTensor());
+void XliteOpDsaCpGatherMLA(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache,
+                           XTensor &peCache, XTensor &oAbsorb, XTensor &queryStartLoc,
+                           XTensor &queryLens, XTensor &cachedLens, XTensor &blockTables,
+                           XTensor &topkIndices, uint32_t nHeads, uint32_t ropeHeadDim,
+                           uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t topK,
+                           float scale);
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
                           float normEps, XTensor &out, const XTensor &normBias = XTensor());
