@@ -172,6 +172,7 @@ class ModelConfig:
             ``False``: shared indexer layer. Empty enables all full indexer layers;
             otherwise length must match ``n_layers``.
         index_c8_mask (List[bool]): Per-runtime-layer Indexer C8 mask; empty disables C8.
+        enable_dsa_cp (bool): Whether DSA attention uses context parallelism across TP ranks.
         o_groups (int): Output projection group count (DeepSeek-V4).
         o_lora_rank (int): Output projection LoRA rank (DeepSeek-V4).
         window_size (int): Sliding window attention size (DeepSeek-V4).
@@ -328,6 +329,8 @@ class ModelConfig:
     enable all full indexer layers; otherwise, the list length must match :data:`n_layers`."""
     index_c8_mask: List[bool] = ...
     """Per-runtime-layer Indexer C8 mask; empty disables C8."""
+    enable_dsa_cp: bool = ...
+    """Whether DSA attention uses context parallelism across TP ranks."""
     o_groups: int = ...
     """Output projection group count (DeepSeek-V4)."""
     o_lora_rank: int = ...

@@ -917,6 +917,7 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     }
 
     batchedTokens = 0;
+    dsaPerLayerTopk = nullptr;
     _maxTotalLens = 0;
     _maxQueryLen = 0;
     _batch = batch;

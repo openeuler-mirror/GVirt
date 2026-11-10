@@ -5,9 +5,11 @@
 #include <pybind11/stl.h>
 #include <torch/torch.h>
 #include <torch/extension.h>
+#include <ATen/core/dispatch/Dispatcher.h>
 #include <optional>
 #include <initializer_list>
 #include "xlite.h"
+#include "dsa_cp_weight.h"
 #include "core_assigner.h"
 #include "op.h"
 #include "auto_tuner.h"
@@ -235,6 +237,10 @@ public:
 
 private:
     XModel *_model = nullptr;
+    // Original weights own contiguous views. Retain only materialized local
+    // shards here when their physical blocks are not adjacent in the source.
+    std::vector<at::Tensor> dsaCpDecodeWeightStorage;
+    void PrepareDsaCpDecodeWeights(const XModelConfig &c, uint32_t tpRank, uint32_t layer);
     std::vector<std::vector<XTensor>> _kv;
     std::vector<XTensor> _deepstackInputEmbeds;
     void Forward(XRuntime &rt, at::Tensor &input, XModelAttnMeta &attnMeta,
@@ -297,6 +303,15 @@ static bool IsConfigLayerFullAttention(XModelConfig &c, uint32_t layer,
 
 namespace
 {
+bool DsaCpWeightIsNZ(const at::Tensor &weight)
+{
+    // Query the native format without linking the bridge against libtorch_npu.
+    static const auto getFormat = c10::Dispatcher::singleton()
+                                      .findSchemaOrThrow("npu::get_npu_format", "")
+                                      .typed<int64_t(const at::Tensor &)>();
+    return getFormat.call(weight) == ACL_FORMAT_FRACTAL_NZ;
+}
+
 using TensorsRef = std::reference_wrapper<std::vector<at::Tensor>>;
 struct LayersCheckEntry {
     TensorsRef weights;
@@ -648,8 +663,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 }
             } else if (c.attnType == XMODEL_ATTN_DSA) {
                 InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
-                                 attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true,
-                                 tpRank);
+                                 attnOutQuantBias, attnOutDeqScale, _model->attnOut, i,
+                                 !c.enableDsaCp, tpRank);
                 InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
                                  mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false,
                                  tpRank);
@@ -664,6 +679,9 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i], DBG_LOC);
                 if (!mlaKVNormBias.empty()) {
                     InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i], DBG_LOC);
+                }
+                if (c.enableDsaCp) {
+                    PrepareDsaCpDecodeWeights(c, tpRank, i);
                 }
                 // DSA top-k sharing: skip indexer weight binding on shared layers.
                 if (i >= c.indexFullMask.size() || c.indexFullMask[i]) {
@@ -1410,6 +1428,95 @@ void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnM
 size_t _CModel::GetTensorPoolSize(int dbg)
 {
     return _model->GetTensorPoolSize(dbg);
+}
+
+void _CModel::PrepareDsaCpDecodeWeights(const XModelConfig &c, uint32_t tpRank, uint32_t layer)
+{
+    at::NoGradGuard noGrad;
+    auto headShard = [&](XTensor &out, const at::Tensor &weight, size_t dim, bool nz) {
+        XTensor source;
+        InitXTensor(source, weight, DBG_LOC);
+        auto shape = source.shape;
+        if (shape[dim] % c.defTpSize != 0) {
+            throw std::invalid_argument("DSA-CP decode weight head axis must be divisible by TP");
+        }
+        shape[dim] /= c.defTpSize;
+        if (!nz) {
+            // Only a non-contiguous ND column slice needs a local copy.
+            auto shard = weight.narrow(dim, tpRank * shape[dim], shape[dim]).contiguous();
+            InitXTensor(out, shard, DBG_LOC);
+            dsaCpDecodeWeightStorage.push_back(std::move(shard));
+            return;
+        }
+        const auto storageShape = DsaCpWeightStorageShape(source, true);
+        size_t storageDim = dim;
+        size_t shardLen = shape[dim];
+        if (dim + 2 >= shape.size()) {
+            const bool columns = dim + 1 == shape.size();
+            const size_t block = columns ? storageShape.back() : DSA_CP_NZ_ROWS;
+            if (shardLen % block != 0) {
+                throw std::invalid_argument(
+                    "DSA-CP decode head shard must contain whole NZ blocks");
+            }
+            shardLen /= block;
+            storageDim = columns ? dim - 1 : dim + 1;
+        }
+        size_t outer = 1, inner = 1;
+        for (size_t i = 0; i < storageDim; ++i) {
+            outer *= storageShape[i];
+        }
+        for (size_t i = storageDim + 1; i < storageShape.size(); ++i) {
+            inner *= storageShape[i];
+        }
+        const size_t shardBytes = shardLen * inner * weight.element_size();
+        auto *src = static_cast<uint8_t *>(source.ptr) + tpRank * shardBytes;
+        if (outer == 1) {
+            // W8A8 transposed QB and leading-head WUKT/WUV slices share storage.
+            out.Init(shape, source.dtype, src);
+            return;
+        }
+        // Non-transposed NZ QB slices row blocks inside each column block.
+        // Materialize only this rank's blocks, keeping their NZ byte layout.
+        auto shard = at::empty({int64_t(outer * shardLen * inner)}, weight.options());
+        auto *dst = static_cast<uint8_t *>(TensorPtr(shard));
+        CHECK_ACL(aclrtSynchronizeDevice());
+        const size_t sourceStride = storageShape[storageDim] * inner * weight.element_size();
+        for (size_t i = 0; i < outer; ++i) {
+            CHECK_ACL(aclrtMemcpy(dst + i * shardBytes, shardBytes, src + i * sourceStride,
+                                  shardBytes, ACL_MEMCPY_DEVICE_TO_DEVICE));
+        }
+        out.Init(shape, source.dtype, dst);
+        dsaCpDecodeWeightStorage.push_back(std::move(shard));
+    };
+    auto outputParameterShard = [&](XTensor &parameter, size_t elementsPerChannel) {
+        if (parameter.ptr != nullptr && parameter.numel > elementsPerChannel) {
+            const size_t shardLen = parameter.numel / c.defTpSize;
+            parameter.View(std::vector<size_t>{parameter.numel});
+            parameter.SliceView(tpRank * shardLen, (tpRank + 1) * shardLen);
+        }
+    };
+
+    const bool qbNZ = DsaCpWeightIsNZ(mlaQB[layer]);
+    const bool wuktNZ = DsaCpWeightIsNZ(mlaWUKT[layer]);
+    const bool wuvNZ = DsaCpWeightIsNZ(mlaWUV[layer]);
+    _model->dsaCpWUKTWeightNZ[layer] = wuktNZ;
+    _model->dsaCpWUVWeightNZ[layer] = wuvNZ;
+    _model->dsaCpOutWeightNZ[layer] = DsaCpWeightIsNZ(attnOut[layer]);
+    InitMatmulWeight("mlaQBDecodeTp", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
+                     mlaQBDeqScale, _model->mlaQBDecodeTp, layer, false, tpRank);
+    auto &qb = _model->mlaQBDecodeTp[layer];
+    const bool transposed = mlaQB[layer].scalar_type() == at::kChar && c.quantAttnWeightTrans;
+    headShard(qb.weight, mlaQB[layer], transposed ? 1 : 0, qbNZ);
+    headShard(_model->mlaWUKTDecodeTp[layer], mlaWUKT[layer], 0, wuktNZ);
+    headShard(_model->mlaWUVDecodeTp[layer], mlaWUV[layer], 0, wuvNZ);
+    outputParameterShard(qb.quantBias, 1);
+    // Each dequantization channel is packed as two FP32 elements.
+    outputParameterShard(qb.deqScale, 2);
+    // O is already TP-sharded; decode uses the same native storage with bias
+    // on rank zero only, while prefill needs the full bias on every token shard.
+    InitMatmulWeight("attnOutDecodeTp", attnOut, attnOutInputScale, attnOutInputOffset,
+                     attnOutQuantBias, attnOutDeqScale, _model->attnOutDecodeTp, layer, true,
+                     tpRank);
 }
 
 void _CModel::InitMatmulWeight(const std::string &name, std::vector<at::Tensor> &w,
@@ -3316,6 +3423,7 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved)
         .def_readwrite("index_full_mask", &XModelConfig::indexFullMask)
         .def_readwrite("index_c8_mask", &XModelConfig::indexC8Mask)
+        .def_readwrite("enable_dsa_cp", &XModelConfig::enableDsaCp)
         .def_readwrite("linear_num_k_heads", &XModelConfig::linearNumKHeads)
         .def_readwrite("linear_num_v_heads", &XModelConfig::linearNumVHeads)
         .def_readwrite("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)

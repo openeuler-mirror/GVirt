@@ -40,6 +40,8 @@ enum class NormKind {
 // model initialization
 #define INIT_MIN_SEQ_POS 102400ull  // for the identity table 0.1.2...maxSeqLen-1
 // attention/mla/cxa/indexer
+// Conservative BF16 Q RoPE budget for 192 KiB UB (178.5 KiB at ropeDim=64).
+#define ROPE_COMPLEX_MAX_ELEMENTS_PER_TOKEN 4096
 #define XLITE_MAX_M0 128
 // mmad k/n granularity in elements for a 2-byte dtype (BLOCK_SIZE / 2); the lead-in
 // RunAicQK/RunAicSV round windowStart down to is always less than this.
