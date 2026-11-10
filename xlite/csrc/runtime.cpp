@@ -3,7 +3,9 @@
  */
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -156,6 +158,16 @@ void XRuntime::ParseRuntimeEnv(void)
 XRuntime::~XRuntime(void)
 {
     StopForwardThread();
+
+    // Kernels already launched by the forward thread may still be running on the device:
+    // drain the stream before releasing the pool memory and the sync primitives they
+    // reference. Teardown follows reverse construction order.
+    if (stream != nullptr) {
+        aclError drainRet = aclrtSynchronizeStream(stream);
+        if (drainRet != ACL_ERROR_NONE) {
+            std::cerr << "XRuntime: stream drain failed during teardown: " << drainRet << std::endl;
+        }
+    }
 
     FiniXcclComm();
 
@@ -1166,6 +1178,22 @@ void XRuntime::StartForwardThread()
     _fwdThread = std::thread(&XRuntime::ForwardThreadMain, this);
 }
 
+// Best-effort description of a captured exception. Used by the forward thread and
+// by teardown, neither of which may propagate exceptions.
+static std::string DescribeException(const std::exception_ptr &ep)
+{
+    if (!ep) {
+        return "(none)";
+    }
+    try {
+        std::rethrow_exception(ep);
+    } catch (const std::exception &e) {
+        return e.what();
+    } catch (...) {
+        return "(non-standard exception)";
+    }
+}
+
 void XRuntime::ForwardThreadLoop()
 {
     for (;;) {
@@ -1184,13 +1212,28 @@ void XRuntime::ForwardThreadLoop()
             _fwdHandlers[task.kind](*this, task);
             RecordOutputEvent(task.seq);
         } catch (...) {
+            // The caller queued a wait on this slot's notify before submitting
+            // (wait-before-signal). Signal completion even on failure, otherwise that
+            // stream blocks forever and the error never surfaces.
+            try {
+                RecordOutputEvent(task.seq);
+            } catch (...) {
+                std::cerr << "XRuntime: failed to signal completion for forward task " << task.seq
+                          << std::endl;
+            }
             std::scoped_lock lk(_fwdMtx);
-            _fwdEx = std::current_exception();
+            if (!_fwdEx) {
+                // Keep the first failure: later tasks often fail for a derived reason.
+                _fwdEx = std::current_exception();
+            }
+            std::cerr << "XRuntime: forward task " << task.seq
+                      << " failed: " << DescribeException(std::current_exception()) << std::endl;
         }
         {
             std::scoped_lock lk(_fwdMtx);
-            if (_fwdQueue.empty()) {
+            if (_fwdState != FWD_STOP && _fwdQueue.empty()) {
                 _fwdState = FWD_IDLE;
+                _fwdDrained.notify_all();
             }
         }
     }
@@ -1210,13 +1253,27 @@ bool XRuntime::ForwardTaskHandlersReady() const
 void XRuntime::SubmitForward(ForwardTask &&task)
 {
     std::scoped_lock lk(_fwdMtx);
+    auto backfillCompletion = [this](uint64_t seq) {
+        try {
+            RecordOutputEvent(seq);
+        } catch (...) {
+            std::cerr << "XRuntime: failed to signal completion for rejected task " << seq
+                      << std::endl;
+        }
+    };
     // Propagate any exception captured by the forward thread on a prior task before queuing
     // the next one — otherwise the error is silently swallowed and later tasks run on a
     // corrupted state.
     if (_fwdEx) {
         auto e = _fwdEx;
         _fwdEx = nullptr;
+        backfillCompletion(task.seq);
         std::rethrow_exception(e);
+    }
+    if (!_fwdAccepting) {
+        backfillCompletion(task.seq);
+        throw std::runtime_error(std::string(__func__) +
+                                 ": runtime is shutting down; forward task rejected");
     }
     _fwdQueue.push(std::move(task));
     _fwdState = FWD_RUNNING;
@@ -1225,19 +1282,31 @@ void XRuntime::SubmitForward(ForwardTask &&task)
 
 void XRuntime::StopForwardThread()
 {
+    if (!_fwdThread.joinable()) {
+        return;
+    }
     {
-        std::scoped_lock lk(_fwdMtx);
+        std::unique_lock<std::mutex> lk(_fwdMtx);
+        _fwdAccepting = false;
+        // Drain what is already queued. Every queued task has a caller waiting on its
+        // output notify, so dropping it would leave that stream blocked forever.
+        constexpr auto kDrainTimeout = std::chrono::seconds(10);
+        if (!_fwdDrained.wait_for(lk, kDrainTimeout, [this]() -> bool {
+                return _fwdQueue.empty() && _fwdState == FWD_IDLE;
+            })) {
+            std::cerr << "XRuntime: forward thread did not drain within " << kDrainTimeout.count()
+                      << "s; a queued task may be left without a completion signal" << std::endl;
+        }
         _fwdState = FWD_STOP;
         if (_fwdEx) {
             // Cannot rethrow from a destructor (would terminate); report and clear.
-            std::cerr << "XRuntime: forward thread had an uncaught exception" << std::endl;
+            std::cerr << "XRuntime: forward thread had an uncaught exception: "
+                      << DescribeException(_fwdEx) << std::endl;
             _fwdEx = nullptr;
         }
     }
-    _fwdHasWork.notify_one();
-    if (_fwdThread.joinable()) {
-        _fwdThread.join();
-    }
+    _fwdHasWork.notify_all();
+    _fwdThread.join();
 }
 
 static inline HcclComm HcclCommFor(XRuntime &rt, enum commType type)
