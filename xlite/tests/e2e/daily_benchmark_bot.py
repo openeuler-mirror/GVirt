@@ -82,7 +82,6 @@ from daily_bot_utils import (
     # 配置设置
     set_env_type,
     set_machine_ip,
-    set_test_container,
     setup_logging,
     should_disable_xccl,
 )
@@ -1123,8 +1122,7 @@ def build_no_change_report(
     if failure_count > 0:
         # 有失败场景时, "无变化"仅覆盖成功完成的场景, 避免与单独的失败通知矛盾、误导排查
         lines.append(
-            f"✅ 成功完成的场景性能均无变化{models_text} "
-            f"(另有 {failure_count} 个场景未能正常完成, 见单独的失败通知)"
+            f"✅ 成功完成的场景性能均无变化{models_text} (另有 {failure_count} 个场景未能正常完成, 见单独的失败通知)"
         )
     else:
         lines.append(f"✅ 测试模型性能均无变化{models_text}")
@@ -1342,9 +1340,7 @@ def _bench_log_anomaly(content: str) -> Optional[str]:
 # NPU/CUDA 显存 OOM 关键字。vllm-ascend 报 "NPU out of memory", GPU 环境报
 # "CUDA out of memory" / "OutOfMemoryError"; 统一匹配, 任一命中即判定为显存 OOM。
 # 用 compiled 模式一次扫多种串, 比多次 in 更省; 大小写不敏感 (OOM 错误信息大小写不一)。
-_OOM_PATTERN = re.compile(
-    r"(NPU out of memory|CUDA out of memory|OutOfMemoryError|out of memory)", re.IGNORECASE
-)
+_OOM_PATTERN = re.compile(r"(NPU out of memory|CUDA out of memory|OutOfMemoryError|out of memory)", re.IGNORECASE)
 
 
 def _detect_oom(content: str) -> bool:
@@ -1417,9 +1413,7 @@ def _collect_online_failures(report_dir: Path) -> list[str]:
     for result_dir in sorted(report_dir.glob("result_input_*_output_*_*_*")):
         if not result_dir.is_dir():
             continue
-        m = re.match(
-            r"result_input_(\d+)_output_(\d+)_(aclgraph|xlite_full|xlite_decode_only)_(.+)", result_dir.name
-        )
+        m = re.match(r"result_input_(\d+)_output_(\d+)_(aclgraph|xlite_full|xlite_decode_only)_(.+)", result_dir.name)
         if not m:
             continue
         in_len, out_len, service, model_name = (
@@ -1446,10 +1440,7 @@ def _collect_online_failures(report_dir: Path) -> list[str]:
         if {"aclgraph", "xlite_full", "xlite_decode_only"}.issubset(services.keys()):
             pattern = f"benchmark_comparison_{model_name}_input{in_len}_output{out_len}_*.log"
             if not list(report_dir.glob(pattern)):
-                failures.append(
-                    f"对比报告未生成 (process_data.py 中止): "
-                    f"{model_name} input={in_len} output={out_len}"
-                )
+                failures.append(f"对比报告未生成 (process_data.py 中止): {model_name} input={in_len} output={out_len}")
 
     return failures
 
@@ -1470,9 +1461,7 @@ def _collect_offline_failures(report_dir: Path) -> list[str]:
         pattern = f"offline_bench_{OFFLINE_BENCH_MODEL}_in{input_len}_out{output_len}_bs{bs}_*.log"
         logs = list(report_dir.glob(pattern))
         if not logs:
-            failures.append(
-                f"离线 bench 场景未产出日志: in={input_len} out={output_len} bs={bs}"
-            )
+            failures.append(f"离线 bench 场景未产出日志: in={input_len} out={output_len} bs={bs}")
             continue
         log_file = logs[0]
         try:
@@ -1485,9 +1474,7 @@ def _collect_offline_failures(report_dir: Path) -> list[str]:
                 reason = "显存 OOM"
             else:
                 reason = "无有效结果 (疑似崩溃)"
-            failures.append(
-                f"离线 bench 场景{reason}: in={input_len} out={output_len} bs={bs}"
-            )
+            failures.append(f"离线 bench 场景{reason}: in={input_len} out={output_len} bs={bs}")
 
     return failures
 
@@ -1547,9 +1534,7 @@ def build_failure_report(
     return "\n".join(lines)
 
 
-def _send_phase_crash_notification(
-    report_dir: Path, receiver: str, phase_name: str, reason: str
-) -> None:
+def _send_phase_crash_notification(report_dir: Path, receiver: str, phase_name: str, reason: str) -> None:
     """
     某阶段整体崩溃 (run_benchmark/run_offline_bench 返回 None) 时发送的通知。
 
@@ -1793,9 +1778,7 @@ def _report_phase(
             send_notification(model_report, receiver)
     else:
         log_info("测试模型性能均无变化")
-        no_change_report = build_no_change_report(
-            report_dir, list(model_groups.keys()), is_offline, failure_count
-        )
+        no_change_report = build_no_change_report(report_dir, list(model_groups.keys()), is_offline, failure_count)
         send_notification(no_change_report, receiver)
 
     # 该阶段是否检测到劣化
@@ -1965,9 +1948,7 @@ def main():
             offline_report_dir = run_offline_bench(report_dir)
             if not offline_report_dir:
                 log_error("离线 bench 测试失败，终止执行")
-                _send_phase_crash_notification(
-                    report_dir, args.receiver, "离线 bench 测试", "run.sh bench 执行异常"
-                )
+                _send_phase_crash_notification(report_dir, args.receiver, "离线 bench 测试", "run.sh bench 执行异常")
                 sys.exit(1)
 
     # 步骤5: 处理报告 + 发送通知 (在线/离线各一份)
