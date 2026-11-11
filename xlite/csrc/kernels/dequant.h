@@ -71,7 +71,7 @@ public:
         // fusion operator need AIC_tilecount:AIV_tilecount=1:2
         this->isInFused = isInFused;
         if (isInFused) {
-            this->mTiles = DIV_ROUND_UP(this->m, this->m0 * AIC_AIV_RATIO) * AIC_AIV_RATIO;
+            this->mTiles = DIV_ROUND_UP(m, this->m0 * AIC_AIV_RATIO) * AIC_AIV_RATIO;
         } else {
             this->mTiles = DIV_ROUND_UP(this->m, this->m0);
         }

@@ -11,6 +11,9 @@
 using namespace AscendC;
 
 #define C2V_CROSS_CORE_FLAG 8
+#define V2C_CROSS_CORE_FLAG 9
+#define V2C_SYNC_INTERVAL 4
+#define FUSION_PIPELINE_DEPTH 1
 #define FUSION_MATMUL_DQ_LINEAR_SWIZZLE 0ULL
 
 template <typename Dtype, typename MatDtype, typename OutDtype>
@@ -39,6 +42,21 @@ public:
         this->subOp.WaitFlags();
     }
 
+    // Drain the remaining V2C acks after the main loop.  AIC was still DEPTH
+    // sync periods ahead when the loop ended; consume those acks here.
+    __aicore__ inline void DrainBatchedV2CSync(int64_t tilesProcessed)
+    {
+#if defined(__DAV_C220_CUBE__)
+        if (tilesProcessed <= 0) {
+            return;
+        }
+
+        for (int64_t i = 0; i < FUSION_PIPELINE_DEPTH; i++) {
+            CrossCoreWaitFlag<0x2>(V2C_CROSS_CORE_FLAG);
+        }
+#endif
+    }
+
     // The return value of AIV is double compared to AIC
     __aicore__ inline int64_t TaskTilesInit(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR bias,
                                             GM_ADDR deqScale, GM_ADDR outScale, GM_ADDR num,
@@ -55,19 +73,25 @@ public:
         return this->tileCount;
     }
 
-    __aicore__ inline void RunTileByIdx(int64_t tileIdx)
+    __aicore__ inline void RunTileByIdx(int64_t tileIdx, int64_t tilesProcessed)
     {
 #if defined(__DAV_C220_CUBE__)
+        // Cross-core synchronization is performed every V2C_SYNC_INTERVAL times,
+        // and synchronization is delayed for FUSION_PIPELINE_DEPTH times.
+        if (tilesProcessed % V2C_SYNC_INTERVAL == 0 &&
+            tilesProcessed >= FUSION_PIPELINE_DEPTH * V2C_SYNC_INTERVAL) {
+            CrossCoreWaitFlag<0x2>(V2C_CROSS_CORE_FLAG);
+        }
         this->subOp.RunTileByIdx(tileIdx);
-        // The notification rides the FIX pipe queue (PIPE_FIX), so it only
-        // fires after this tile's CopyToGm has retired -> GM data is visible
-        // to the paired AIVs when they wake up.
         CrossCoreSetFlag<0x2, PIPE_FIX>(C2V_CROSS_CORE_FLAG);
 #elif defined(__DAV_C220_VEC__)
         // Mode 0x2 (MIX sub-block sync) pairs with the AIC's set above; an
         // un-templated call would fall back to the default mode 0.
         CrossCoreWaitFlag<0x2>(C2V_CROSS_CORE_FLAG);
         this->subOp.RunTileByIdx(tileIdx);
+        if (tilesProcessed % V2C_SYNC_INTERVAL == 0) {
+            CrossCoreSetFlag<0x2, PIPE_MTE2>(V2C_CROSS_CORE_FLAG);
+        }
 #endif
     }
 
@@ -78,10 +102,13 @@ public:
         SetFlags();
         int64_t tileCount =
             TaskTilesInit(x, y, z, bias, deqScale, outScale, num, m, n, k, xSrcDValue, zDstDValue);
+        int64_t tilesProcessed = 0;
         for (int64_t tileIdx = GetBlockIdx(); tileIdx < tileCount;
              tileIdx += GetBlockNum() * GetTaskRatio()) {
-            RunTileByIdx(tileIdx);
+            RunTileByIdx(tileIdx, tilesProcessed);
+            tilesProcessed++;
         }
+        DrainBatchedV2CSync(tilesProcessed);
         WaitFlags();
     }
 
