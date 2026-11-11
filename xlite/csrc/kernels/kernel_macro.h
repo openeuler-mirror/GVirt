@@ -45,7 +45,7 @@ using namespace AscendC;
 #define UB_BANKGROUP_UNUM 16         // The number of unique UB bank groups
 #define UB_BANKGROUP_BATCH 3         // The number of UB bank group batches
 #define UB_BANKGROUP_ROW_SIZE 512    // 512B, UB_BUF_ALIGN_SIZE * UB_BANK_GROUP_NUM
-#define UB_BANKGROUP_SIZE 65526      // 64KB, UB_BANK_SIZE * UB_BANK_GROUP_NUM
+#define UB_BANKGROUP_SIZE 65536      // 64KB, UB_BANK_SIZE * UB_BANK_GROUP_NUM
 #define UB_BANK_CONFLICT_OFFSET 256  // recommended offset trick in bytes to avoid UB bank conflict
 #else                                // NpuArch 3510
 #define UB_SIZE 262144               // 256 KB
