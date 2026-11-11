@@ -429,6 +429,11 @@ def compare_offline_metrics(current: dict, baseline: dict) -> dict:
         "date_baseline": baseline.get("timestamp", ""),
         "model": current.get("model", ""),
         "row_changes": [],
+        # 保留场景字段, 使 error 路径 (基线存在但无 decode_tps/step_latency_ms) 在
+        # 通知里能定位到具体场景 (离线共 22 个场景, 缺字段会全部渲染成 N/A 无法排查)。
+        "input_len": current.get("input_len"),
+        "output_len": current.get("output_len"),
+        "batch_size": current.get("batch_size"),
     }
 
     if not baseline.get("decode_tps") and not baseline.get("step_latency_ms"):
@@ -571,8 +576,17 @@ def generate_offline_report(
     scenario_idx = 0
     for comparison in comparisons:
         row_changes = comparison.get("row_changes", [])
-        if row_changes:
+        if row_changes or comparison.get("error"):
             scenario_idx += 1
+            if comparison.get("error"):
+                # 无基线数据等 error: 无 row_changes, 用 comparison 自身的场景字段渲染
+                input_len = comparison.get("input_len", "N/A")
+                output_len = comparison.get("output_len", "N/A")
+                bs = comparison.get("batch_size", "N/A")
+                detail_lines.append(f"{scenario_idx}. in={input_len} out={output_len} bs={bs}")
+                detail_lines.append(f"  ⚠️  {comparison['error']}")
+                detail_lines.append("")
+                continue
             for row in row_changes:
                 service = row["service"]
                 concurrency = row["concurrency"]
@@ -581,11 +595,6 @@ def generate_offline_report(
                 output_len = row.get("output_len")
 
                 detail_lines.append(f"{scenario_idx}. {service} in={input_len} out={output_len} bs={concurrency}")
-
-                if comparison.get("error"):
-                    detail_lines.append(f"  ⚠️  {comparison['error']}")
-                    detail_lines.append("")
-                    continue
 
                 detail_lines.append(" | 场景 | throughput(tokens/s) | step latency(ms) | total(ms) |")
                 detail_lines.append(" |------|------|------|------|")
@@ -662,7 +671,9 @@ def generate_offline_report(
         lines.append(f"报告保存路径: {report_path}")
         lines.append("")
 
-    if total_degradations > 0 or total_improvements > 0:
+    # 添加详细数据（性能异常/提升, 或存在无基线数据等 error 时显示）
+    has_error = any(c.get("error") for c in comparisons)
+    if total_degradations > 0 or total_improvements > 0 or has_error:
         lines.extend(detail_lines)
 
     return "\n".join(lines)
@@ -959,7 +970,7 @@ def generate_model_report(
     scenario_idx = 0
     for comparison in sorted_comparisons:
         row_changes = comparison.get("row_changes", [])
-        if row_changes:
+        if row_changes or comparison.get("error"):
             scenario_idx += 1
             input_len = comparison.get("input_len", "N/A")
             output_len = comparison.get("output_len", "N/A")
@@ -1071,8 +1082,9 @@ def generate_model_report(
         lines.append(f"报告保存路径: {report_path}")
         lines.append("")
 
-    # 添加详细数据（仅在性能异常或提升时显示）
-    if total_degradations > 0 or total_improvements > 0:
+    # 添加详细数据（性能异常/提升, 或存在无基线数据等 error 时显示）
+    has_error = any(c.get("error") for c in sorted_comparisons)
+    if total_degradations > 0 or total_improvements > 0 or has_error:
         lines.extend(detail_lines)
 
     return "\n".join(lines)
@@ -1479,6 +1491,40 @@ def _collect_offline_failures(report_dir: Path) -> list[str]:
     return failures
 
 
+def _collect_baseline_missing(comparison_results: list[dict]) -> list[str]:
+    """
+    从对比结果中提取带 error 的场景 (基线缺失/不可解析等), 转成失败描述行。
+
+    带 error 的 comparison_result 有三类来源, 均为本次跑成功但对比未完成:
+      - "无基线数据": 基线目录不存在或基线无对应 model×input×output 报告
+        (_process_online_reports / _process_offline_reports 的无基线分支)
+      - "缺少对比数据": 基线报告存在但解析不出 scenarios (compare_metrics 早退)
+      - "缺少基线对比数据": 基线日志存在但无 decode_tps/step_latency_ms
+        (compare_offline_metrics 早退)
+    后两类基线实际存在、只是内容不可解析, 故直接引用 comparison["error"] 的真实文案,
+    而非统一写"无基线数据", 避免误导排查方向。
+
+    不触发 has_infra_failure (非执行失败, 场景本身跑成功了), 仅并入 failure_count
+    使 build_no_change_report / build_failure_report 显式列出, 与"服务未起/压测报错"
+    等失败场景共用同一套汇总通知通道。
+    """
+    failures: list[str] = []
+    for c in comparison_results:
+        error = c.get("error")
+        if not error:
+            continue
+        model = c.get("model", "?") or "?"
+        in_len = c.get("input_len")
+        out_len = c.get("output_len")
+        bs = c.get("batch_size")
+        # 在线场景无 batch_size, 离线场景有; 按有无 bs 拼不同描述
+        if bs is not None:
+            failures.append(f"{error}、未对比: {model} in={in_len} out={out_len} bs={bs}")
+        else:
+            failures.append(f"{error}、未对比: {model} input={in_len} output={out_len}")
+    return failures
+
+
 def build_failure_report(
     report_dir: Path,
     online_failures: list[str],
@@ -1628,6 +1674,8 @@ def _process_online_reports(report_dir: Path, current_reports: list[Path]) -> li
                 "date_current": current_metrics.get("timestamp", ""),
                 "model": current_metrics.get("model", ""),
                 "baseline_version": baseline_version or "unknown",
+                "input_len": input_len,
+                "output_len": output_len,
             }
 
         all_comparison_results.append(comparison_result)
@@ -1699,6 +1747,9 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
                 "date_current": current_metrics.get("timestamp", ""),
                 "model": current_metrics.get("model", ""),
                 "baseline_version": baseline_version or "unknown",
+                "input_len": input_len,
+                "output_len": output_len,
+                "batch_size": batch_size,
             }
 
         all_comparison_results.append(comparison_result)
@@ -1974,6 +2025,13 @@ def main():
             log_info("=" * 60)
             log_info("在线性能测试: 生成报告与通知")
             log_info("=" * 60)
+            # 无基线数据 (基线目录缺失或该场景无对应基线) 并入 failure_count:
+            # 场景本身跑成功但无法对比, 性能是否劣化未知, 不显式提示会被 "无变化" 掩盖。
+            # 不触发 has_infra_failure (非执行失败), 仅使通知显式列出 "未对比" 的场景。
+            baseline_missing = _collect_baseline_missing(all_comparison_results)
+            if baseline_missing:
+                log_warning(f"在线测试有 {len(baseline_missing)} 个场景无基线数据、未对比")
+                online_failures.extend(baseline_missing)
             if _report_phase(
                 report_dir,
                 all_comparison_results,
@@ -1993,6 +2051,11 @@ def main():
         if offline_failures:
             log_warning(f"离线 bench 测试发现 {len(offline_failures)} 个失败场景")
             has_infra_failure = True
+        # 无基线数据并入 failure_count (与在线侧同理, 不触发 has_infra_failure)
+        baseline_missing = _collect_baseline_missing(all_comparison_results)
+        if baseline_missing:
+            log_warning(f"离线 bench 测试有 {len(baseline_missing)} 个场景无基线数据、未对比")
+            offline_failures.extend(baseline_missing)
         if not all_comparison_results:
             # 一个有效场景都没有 = 基础设施故障 (单个场景 OOM 已在 _process_offline 内跳过)
             has_infra_failure = True
