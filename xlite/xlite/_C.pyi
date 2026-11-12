@@ -3556,7 +3556,7 @@ def mla_v2(
             <= 2048 (``MAX_TOPK_NUM``).
         nz (bool): Whether to use nz weights.
         enable_flash_attention (bool): Whether to use the flash MLA v2 kernel
-            (paged mode only; ignored when ``dense=True``).
+            (ignored when ``dense=True``).
         tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA v2;
             must not exceed 11776 (``MAX_SOFTMAX_PINGPONG_LEN``).
         dense (bool): Whether to gather a contiguous dense KV cache (via

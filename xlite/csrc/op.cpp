@@ -1153,7 +1153,8 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                        XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                        XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
-                       uint32_t tileSizeOfCachedKV, uint32_t topK, const XTensor &topkIndices)
+                       uint32_t tileSizeOfCachedKV, uint32_t topK, const XTensor &topkIndices,
+                       bool dense)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1179,8 +1180,9 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
             rt.aicNum, rt.stream, qAbsorb.ptr, qr.ptr, kCache.ptr, peCache.ptr, topkIndices.ptr,
             qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, oAbsorb.ptr,
             queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
-            kvLoraRank, blockSize, batch, static_cast<uint32_t>(blockTables.stride[0]), scale,
-            tileSizeOfCachedKV, topK, kCache.stride[0], peCache.stride[0], rt._attnZeroBuffer.ptr);
+            kvLoraRank, blockSize, batch, dense ? 0u : static_cast<uint32_t>(blockTables.stride[0]),
+            scale, tileSizeOfCachedKV, topK, kCache.stride[0], peCache.stride[0], dense ? 1u : 0u,
+            rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);

@@ -28,7 +28,7 @@ public:
                                 uint32_t batch, uint32_t blockTableStride, float scale,
                                 uint32_t tileSizeOfCachedKV, uint32_t topK,
                                 uint32_t kCacheStride = 0, uint32_t peCacheStride = 0,
-                                GM_ADDR zeroGm = 0)
+                                uint32_t dense = 0, GM_ADDR zeroGm = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->qAbsorb.SetGlobalBuffer((__gm__ Dtype *)qAbsorb);
@@ -48,6 +48,7 @@ public:
         this->ropeHeadDim = ropeHeadDim;
         this->kvLoraRank = kvLoraRank;
         this->batch = batch;
+        this->dense = dense != 0;
         this->blockTableStride = blockTableStride;
         this->kCacheStride = MAX(kCacheStride, blockSize * kvLoraRank);
         this->peCacheStride = MAX(peCacheStride, blockSize * ropeHeadDim);
@@ -76,8 +77,8 @@ public:
         this->lastMax.SetGlobalBuffer((__gm__ float *)lastMax);
         this->lastSum.SetGlobalBuffer((__gm__ float *)lastSum);
 
-        svk0 = aicHelper.Init(nHeads, ropeHeadDim, kvLoraRank, blockSize, kCacheStride,
-                              peCacheStride, qkStride, false, this->zeroGm);
+        svk0 = aicHelper.Init(nHeads, ropeHeadDim, kvLoraRank, this->dense ? 0 : blockSize,
+                              kCacheStride, peCacheStride, qkStride, this->dense, this->zeroGm);
     }
 
     __aicore__ inline void RunAic()
@@ -93,6 +94,7 @@ public:
         uint64_t updateConfig = 1 | (mode << 4) | (flagIdx << 8);
 
         int lastBatchIdx, lastQueryTaskOffset, lastQueryTaskLen, last, lastKvOffset, lastKvLen;
+        GlobalTensor<Dtype> lastKCache;
         __gm__ uint32_t *lastBlockTable;
 
         int queryTileSize = XLITE_MAX_M0 / nHeads;
@@ -109,9 +111,16 @@ public:
         for (int batchIdx = 0; batchIdx < batch; batchIdx++) {
             int queryLen = queryLens[batchIdx];
             int cachedLen = cachedLens[batchIdx];
-            __gm__ uint32_t *blockTable =
-                (__gm__ uint32_t *)((uint64_t)blockTables +
-                                    batchIdx * blockTableStride * sizeof(uint32_t));
+            GlobalTensor<Dtype> batchKCache = kCache;
+            GlobalTensor<Dtype> batchPeCache = peCache;
+            __gm__ uint32_t *blockTable = nullptr;
+            if (dense) {
+                batchKCache = kCache[(uint64_t)batchIdx * kCacheStride];
+                batchPeCache = peCache[(uint64_t)batchIdx * peCacheStride];
+            } else {
+                blockTable = (__gm__ uint32_t *)((uint64_t)blockTables +
+                                                 batchIdx * blockTableStride * sizeof(uint32_t));
+            }
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
             int kvNum = DIV_ROUND_UP(cachedLen + queryLen, tileSizeOfCachedKV);
@@ -154,7 +163,7 @@ public:
                            "kv [%u - %u)} use %d temp buf: QK\n",
                            GetBlockIdx(), batchIdx, queryTaskOffset, queryTaskOffset + queryTaskLen,
                            nHeads, kvOffset, kvOffset + kvLen, curr);
-                aicHelper.RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], kCache, peCache,
+                aicHelper.RunAicQK(qAbsorb[absorbOffset], qr[qrOffset], batchKCache, batchPeCache,
                                    queryTaskLen, blockTable, kvOffset, kvLen, qk[curr]);
                 ffts_cross_core_sync(PIPE_FIX, softmaxConfig);
 
@@ -167,7 +176,7 @@ public:
                                GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
                                lastQueryTaskOffset + lastQueryTaskLen, nHeads, kvOffset,
                                kvOffset + kvLen, last);
-                    aicHelper.RunAicSV(qk[last], kCache, lastQueryTaskLen, lastBlockTable,
+                    aicHelper.RunAicSV(qk[last], lastKCache, lastQueryTaskLen, lastBlockTable,
                                        lastKvOffset, lastKvLen, sv[last]);
                     ffts_cross_core_sync(PIPE_FIX, updateConfig);
                 }
@@ -175,6 +184,7 @@ public:
                 lastBatchIdx = batchIdx;
                 lastQueryTaskOffset = queryTaskOffset;
                 lastQueryTaskLen = queryTaskLen;
+                lastKCache = batchKCache;
                 lastBlockTable = blockTable;
                 lastKvOffset = kvOffset;
                 lastKvLen = kvLen;
@@ -194,7 +204,7 @@ public:
                        GetBlockIdx(), lastBatchIdx, lastQueryTaskOffset,
                        lastQueryTaskOffset + lastQueryTaskLen, nHeads, lastKvOffset,
                        lastKvOffset + lastKvLen, last);
-            aicHelper.RunAicSV(qk[last], kCache, lastQueryTaskLen, lastBlockTable, lastKvOffset,
+            aicHelper.RunAicSV(qk[last], lastKCache, lastQueryTaskLen, lastBlockTable, lastKvOffset,
                                lastKvLen, sv[last]);
             ffts_cross_core_sync(PIPE_FIX, updateConfig);
         }
@@ -443,6 +453,7 @@ private:
     uint32_t peCacheStride;
     uint32_t qkStride;
     uint32_t tileSizeOfCachedKV;
+    bool dense;
     int svk0;
 };
 
@@ -454,12 +465,12 @@ private:
         GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,        \
         uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t blockTableStride,    \
         float scale, uint32_t tileSizeOfCachedKV, uint32_t topK, uint32_t kCacheStride,        \
-        uint32_t peCacheStride, GM_ADDR zeroGm)                                                \
+        uint32_t peCacheStride, uint32_t dense, GM_ADDR zeroGm)                                \
     {                                                                                          \
         FLASHMLAV2<dtype> op;                                                                  \
         op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum, lastMax, lastSum, \
                 sync, oAbsorb, queryStartLoc, queryLens, cachedLens, blockTables, nHeads,      \
                 ropeHeadDim, kvLoraRank, blockSize, batch, blockTableStride, scale,            \
-                tileSizeOfCachedKV, topK, kCacheStride, peCacheStride, zeroGm);                \
+                tileSizeOfCachedKV, topK, kCacheStride, peCacheStride, dense, zeroGm);         \
         op.Run();                                                                              \
     }

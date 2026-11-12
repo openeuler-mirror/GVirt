@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-MLA 吸收式注意力的 flash(在线 softmax)版本,是 mla_v2 的长序列路径:当 paged KV 运行期总长 `ceil(maxTotalLens/blockSize) * blockSize > tileSizeOfCachedKV`(即 `blockTables.shape[1] * blockSize`,运行期行宽,不取 block table 分配跨度)时由模型层路由(`csrc/model.cpp` 的 `ForwardAttnMLAV2`,flash 路由分支关键字 `XliteOpFlashMLAV2`)。KV 维按 `tileSizeOfCachedKV` 分块,每块上 AIC 算 `QK = (qAbsorb·kCache^T + qr·peCache^T)*scale` 与 `sv = softmax_local(QK)·kCache`(注意 MLA 的 V 也是 latent kCache),AIV 用 online softmax 跨 tile 增量合并,最终 `oAbsorb = softmax_causal(QK) · kCache`。支持 DSA top-k token 选择(topkIndices),始终走 paged KV cache。
+MLA 吸收式注意力的 flash(在线 softmax)版本,是 mla_v2 的长序列路径:当 paged KV 运行期总长 `ceil(maxTotalLens/blockSize) * blockSize > tileSizeOfCachedKV`(即 `blockTables.shape[1] * blockSize`,运行期行宽,不取 block table 分配跨度)时由模型层路由(`csrc/model.cpp` 的 `ForwardAttnMLAV2`,flash 路由分支关键字 `XliteOpFlashMLAV2`)。KV 维按 `tileSizeOfCachedKV` 分块,每块上 AIC 算 `QK = (qAbsorb·kCache^T + qr·peCache^T)*scale` 与 `sv = softmax_local(QK)·kCache`(注意 MLA 的 V 也是 latent kCache),AIV 用 online softmax 跨 tile 增量合并,最终 `oAbsorb = softmax_causal(QK) · kCache`。支持 DSA top-k token 选择(topkIndices)，支持 paged 和 per-batch 连续 KV cache。
 
 ## 输入输出参数
 
@@ -34,7 +34,7 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
                      lastMax, lastSum, sync, oAbsorb, queryStartLoc, queryLens,
                      cachedLens, blockTables, nHeads, ropeHeadDim, kvLoraRank,
                      blockSize, batch, blockTableStride, scale, tileSizeOfCachedKV, topK,
-                     kCacheStride, peCacheStride, zeroGm)
+                     kCacheStride, peCacheStride, dense, zeroGm)
 ```
 
 末尾的 `zeroGm` 是 host 自动提供的零缓冲(`rt._attnZeroBuffer`,host launch 见 `csrc/op.cpp` 的 `XliteOpFlashMLAV2`),`MlaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
@@ -43,7 +43,7 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 |---|---|---|---|---|
 | qAbsorb | 输入 | `[total_tokens, nHeads, kvLoraRank]` | BF16 | host 已做 WUK 吸收的 Q latent |
 | qr | 输入 | `[total_tokens, nHeads, ropeHeadDim]` | BF16 | Q 的 RoPE 部分 |
-| kCache / peCache | 输入 | `[numBlocks, blockSize, kvLoraRank]` / `[..., ropeHeadDim]` | BF16 | paged latent K / RoPE K cache |
+| kCache / peCache | 输入 | paged: `[numBlocks, blockSize, kvLoraRank]`;dense: `[batch, capacity, kvLoraRank]` / `[..., ropeHeadDim]` | BF16 | latent K / RoPE K cache |
 | topkIndices | 输入(可选) | `[total_tokens, topK]` | INT32 | DSA top-k token 下标(升序);host 限制 `topK ≤ MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_TOPK_NUM`) |
 | qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, tileSizeOfCachedKV]` | BF16 | 当前 KV tile 的 QK 分数,按核双缓冲 |
 | sv | workspace | `[aicNum * XLITE_MAX_M0 * 2, kvLoraRank]` | BF16 | 当前 tile 的 softmax·kCache 部分和 |
@@ -51,20 +51,23 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 | lastMax / lastSum | workspace | `[total_tokens, nHeads]` | FP32 | 跨 tile 全局 max / Σexp |
 | sync | workspace | `[1, aivNum]` | INT32 | RingSync 计数器(host Memset(0)) |
 | oAbsorb | 输出 | `[total_tokens, nHeads, kvLoraRank]` | BF16 | 最终吸收式输出(WUV 投影在 host) |
-| queryStartLoc / queryLens / cachedLens / blockTables | 输入 | `[batch]` / `[rows >= batch, blockTableStride]` | INT32 | 同 mla_v2(持久化表,仅每行有效前缀被读取) |
+| queryStartLoc / queryLens / cachedLens / blockTables | 输入 | `[batch]` / `[rows >= batch, blockTableStride]` | INT32 | 同 mla_v2(持久化表,仅每行有效前缀被读取)；dense 时不使用 blockTables |
 | nHeads / ropeHeadDim / kvLoraRank / blockSize / batch / blockTableStride | 标量 | - | uint32 | 同 mla_v2(blockTableStride 为表行跨度,仅用于行寻址) |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
 | tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN=11776`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`) |
-| kCacheStride / peCacheStride | 标量 | - | uint32 | paged kCache / peCache 的 dim-0 跨度(元素数),块寻址 `block * stride`;连续时等于 blockSize×kvLoraRank / blockSize×ropeHeadDim,非连续时由宿主传入真实跨距 |
+| kCacheStride / peCacheStride | 标量 | - | uint32 | kCache / peCache 的 dim-0 跨度(元素数)：paged 为每物理块跨度，dense 为每请求跨度 |
+| dense | 标量 | - | uint32 | 0=paged(默认)，1=per-batch 连续缓存；两种布局都保留 Top-K 选择 |
 | zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`MlaAicHelper::Init` 用它预填零 L1B(见上文) |
 
 ## 支持的数据类型
+
+SFA-C8 在 host 接受独立的 INT8 `kCache[numBlocks, blockSize, 1, kvLoraRank]`、BF16 `peCache[numBlocks, blockSize, 1, ropeHeadDim]` 和 FP32 `kScaleCache[numBlocks, blockSize, 1, kvLoraRank/128]`，先通过 [gather_sparse_kv_cache](gather_sparse_kv_cache.md) 恢复临时连续 BF16 latent、PE，不生成新页表，再运行 Flash MLA 并保留 Top-K 选择。临时缓存按请求的页表容量分配，使用后归还 Runtime 内存池；当前不是逐 tile 反量化。
 
 | dtype | 实例化文件 | kernel 符号 |
 |---|---|---|
 | bfloat16_t | `csrc/kernels/flash_mla_v2_bfloat16_t.cpp` | `flash_mla_v2_bfloat16_t` |
 
-host 侧仅 BF16(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `EachXDtype(BF16`)。
+底层 Flash MLA kernel 仅使用 BF16(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `EachXDtype(BF16`)；SFA-C8 的 cache 在进入该 kernel 前恢复为 BF16。
 
 ## 实现原理
 
@@ -74,9 +77,9 @@ host 侧仅 BF16(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `EachXDtype(BF1
 
 每个 (query tile, kv tile) 任务:
 
-1. AIC `RunAicQK(qAbsorb, qr, kCache, peCache, ..., kvOffset, kvLen, qk[curr])`——KV tile 窗口由 kvOffset/kvLen 表达,分页寻址 blockTable,块基址 = 物理块号 × dim-0 跨度(kCacheStride/peCacheStride);完成 `ffts_cross_core_sync(PIPE_FIX, flag0)`(`csrc/kernels/flash_mla_v2.h` 的 `RunAic`,关键字 `ffts_cross_core_sync(PIPE_FIX, softmaxConfig`);
+1. AIC `RunAicQK(qAbsorb, qr, batchKCache, batchPeCache, ..., kvOffset, kvLen, qk[curr])`——KV tile 窗口由 kvOffset/kvLen 表达；paged 查 blockTable，块基址 = 物理块号 × dim-0 跨度(kCacheStride/peCacheStride)；dense 先按请求跨度取子视图，再按 token 偏移读取。完成 `ffts_cross_core_sync(PIPE_FIX, flag0)`(`csrc/kernels/flash_mla_v2.h` 的 `RunAic`,关键字 `ffts_cross_core_sync(PIPE_FIX, softmaxConfig`);
 2. AIV `RunAivSoftmaxPingPong`:对 tile 内行做带 scale 的 softmax,行有效长度 `actualCalcSoftmaxLen = cachedLen + queryTaskStart + 1 - kvOffset`(clip 到 kvLen);输出行宽 `ROUND_UP(kvLen, 4*svk0)`(SV 每次 256 列预取,防残留脏数据,见 `csrc/kernels/flash_mla_v2.h` 的 `RunAiv`,关键字 `4 * svk0`);若 `calcLen > topK` 且 topK>0,走 vgather/scatter 的 top-k softmax 路径(见 `RunAiv`,关键字 `calcLen > topK`);局部 max/sum 写 workspace → `ffts_cross_core_sync(PIPE_MTE3, flag2)`;
-3. AIC `wait_flag_dev(2)` 后 `RunAicSV(qk[last], kCache, ..., kvOffset, kvLen, sv[last])`:`sv = softmax_local(QK)·kCache` → `ffts_cross_core_sync(PIPE_FIX, flag1)`;
+3. AIC `wait_flag_dev(2)` 后 `RunAicSV(qk[last], lastKCache, ..., lastKvOffset, lastKvLen, sv[last])`:`sv = softmax_local(QK)·kCache` → `ffts_cross_core_sync(PIPE_FIX, flag1)`；lastKCache 保留上一任务的请求视图；
 4. AIV `wait_flag_dev(1)` 后 `RunAivSoftmaxUpdate`:把 sv/max/sum 与 output/lastMax/lastSum 在线合并(算法见 flash_attention 文档;此处 headSize 参数为 kvLoraRank,maskStride=nHeads)。
 
 相邻任务错峰(QK 先行、SV/update 滞后一个任务),末尾补做,与 flash_attention 完全一致(`csrc/kernels/flash_mla_v2.h` 的 `RunAic`(关键字 `RunAicQK`/`RunAicSV`)与 `RunAiv`(关键字 `RunAivSoftmaxPingPong`/`RunAivSoftmaxUpdate`))。
