@@ -4,6 +4,7 @@
 #pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 // out = attn * sigmoid(gate_raw).
@@ -32,40 +33,27 @@ __aicore__ void sigmoid_gate_mul(__gm__ Dtype *attn, __gm__ Dtype *gate, __gm__ 
     uint64_t dtypeLen = ROUND_UP(actualTileBytes, UB_BUF_ALIGN_SIZE);
     uint64_t f32Len = ROUND_UP(tile * sizeof(float), UB_BUF_ALIGN_SIZE);
 
-    uint64_t off = 0;
-    __ubuf__ Dtype *attnIn0 = (__ubuf__ Dtype *)off;
-    off += attnFp32 ? f32Len : dtypeLen;
-    __ubuf__ Dtype *gateIn0 = (__ubuf__ Dtype *)off;
-    off += dtypeLen;
-    __ubuf__ float *attnF0 = (__ubuf__ float *)off;
-    off += f32Len;
-    __ubuf__ float *gateF0 = (__ubuf__ float *)off;
-    off += f32Len;
-    __ubuf__ Dtype *out0 = (__ubuf__ Dtype *)off;
-    off += dtypeLen;
+    UbAlloc ub;
+    __ubuf__ Dtype *attnIn[2];
+    __ubuf__ Dtype *gateIn[2];
+    __ubuf__ float *attnF[2];
+    __ubuf__ float *gateF[2];
+    __ubuf__ Dtype *outBuf[2];
+    attnIn[0] = ub.AllocBytesAs<Dtype>(attnFp32 ? f32Len : dtypeLen);
+    gateIn[0] = ub.Alloc<Dtype>(tile);
+    attnF[0] = ub.Alloc<float>(tile);
+    gateF[0] = ub.Alloc<float>(tile);
+    outBuf[0] = ub.Alloc<Dtype>(tile);
+    attnIn[1] = ub.AllocBytesAs<Dtype>(attnFp32 ? f32Len : dtypeLen);
+    gateIn[1] = ub.Alloc<Dtype>(tile);
+    attnF[1] = ub.Alloc<float>(tile);
+    gateF[1] = ub.Alloc<float>(tile);
+    outBuf[1] = ub.Alloc<Dtype>(tile);
 
-    __ubuf__ Dtype *attnIn1 = (__ubuf__ Dtype *)off;
-    off += attnFp32 ? f32Len : dtypeLen;
-    __ubuf__ Dtype *gateIn1 = (__ubuf__ Dtype *)off;
-    off += dtypeLen;
-    __ubuf__ float *attnF1 = (__ubuf__ float *)off;
-    off += f32Len;
-    __ubuf__ float *gateF1 = (__ubuf__ float *)off;
-    off += f32Len;
-    __ubuf__ Dtype *out1 = (__ubuf__ Dtype *)off;
-    off += dtypeLen;
-
-    __ubuf__ float *rawGate = (__ubuf__ float *)off;
-    off += f32Len;
-    __ubuf__ float *ones = (__ubuf__ float *)off;
+    __ubuf__ float *rawGate = ub.Alloc<float>(tile);
+    __ubuf__ float *ones = ub.Alloc<float>(tile);
     vector_dup(ones, float(1), DIV_ROUND_UP(tile, calcPad), 1, 0, 8, 0);
     pipe_barrier(PIPE_V);
-
-    __ubuf__ Dtype *attnIn[2] = {attnIn0, attnIn1};
-    __ubuf__ Dtype *gateIn[2] = {gateIn0, gateIn1};
-    __ubuf__ float *attnF[2] = {attnF0, attnF1};
-    __ubuf__ float *gateF[2] = {gateF0, gateF1};
-    __ubuf__ Dtype *outBuf[2] = {out0, out1};
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);

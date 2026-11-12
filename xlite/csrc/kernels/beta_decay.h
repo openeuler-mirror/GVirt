@@ -8,6 +8,7 @@
 #pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+#include "ub_alloc.h"
 
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
@@ -52,32 +53,20 @@ public:
         num = DIV_ROUND_UP(num_v_heads * sizeof(Dtype), 32);
         calcRepeat = DIV_ROUND_UP(num, 8);
 
-        uint64_t off = 0;
-        uint64_t stride = DIV_ROUND_UP(num_v_heads * sizeof(Dtype), 256) * 256;
+        UbAlloc ub;
         if constexpr (!(std::is_same<Dtype, float>::value)) {
-            conv_b = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-            off += stride;
-            conv_a = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-            off += stride;
-            conv_A_log = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-            off += stride;
-            conv_dt_bias = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-            off += stride;
+            conv_b = ub.Alloc<Dtype>(num_v_heads, VECTOR_MAX_BYTESIZE);
+            conv_a = ub.Alloc<Dtype>(num_v_heads, VECTOR_MAX_BYTESIZE);
+            conv_A_log = ub.Alloc<Dtype>(num_v_heads, VECTOR_MAX_BYTESIZE);
+            conv_dt_bias = ub.Alloc<Dtype>(num_v_heads, VECTOR_MAX_BYTESIZE);
         }
-        stride = DIV_ROUND_UP(num_v_heads * sizeof(float), 256) * 256;
-        b_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += stride;
-        a_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += stride;
-        A_log_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += stride;
-        dt_bias_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += stride;
-        beta_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += stride;
-        g_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += stride;
-        ones_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        b_buf = ub.Alloc<float>(num_v_heads, VECTOR_MAX_BYTESIZE);
+        a_buf = ub.Alloc<float>(num_v_heads, VECTOR_MAX_BYTESIZE);
+        A_log_buf = ub.Alloc<float>(num_v_heads, VECTOR_MAX_BYTESIZE);
+        dt_bias_buf = ub.Alloc<float>(num_v_heads, VECTOR_MAX_BYTESIZE);
+        beta_buf = ub.Alloc<float>(num_v_heads, VECTOR_MAX_BYTESIZE);
+        g_buf = ub.Alloc<float>(num_v_heads, VECTOR_MAX_BYTESIZE);
+        ones_buf = ub.Alloc<float>(num_v_heads, VECTOR_MAX_BYTESIZE);
     }
 
     __aicore__ inline void Beta()

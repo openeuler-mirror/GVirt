@@ -4,6 +4,7 @@
 #pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
+#include "ub_alloc.h"
 
 // hc_pre: y[m,hidden] = Σ_h pre[h] * x[m,h,hidden]  (non-fused counterpart of hc_act's
 // merge).  x bf16, pre fp32 (from GM, the hc_split_sinkhorn output), y bf16 out.
@@ -23,34 +24,20 @@ __aicore__ inline void hc_pre(__gm__ float *pre, __gm__ Dtype *xResid, __gm__ Dt
     const uint32_t preBytes = hcMult * sizeof(float);
     const uint64_t lenPre = ROUND_UP(preBytes, VECTOR_MAX_BYTESIZE);
 
-    const uint64_t residDtypeLen = ROUND_UP(hcMult * hidden * sizeof(Dtype), UB_BUF_ALIGN_SIZE);
-    const uint64_t yDtypeLen = ROUND_UP(hidden * sizeof(Dtype), UB_BUF_ALIGN_SIZE);
-    const uint64_t residFp32Len = ROUND_UP(hcMult * hidden * sizeof(float), UB_BUF_ALIGN_SIZE);
-    const uint64_t mergeFp32Len = ROUND_UP(hidden * sizeof(float), UB_BUF_ALIGN_SIZE);
-
-    uint64_t off = 0;
-    __ubuf__ Dtype *inDtype0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += residDtypeLen;
-    __ubuf__ Dtype *outDtype0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += yDtypeLen;
-    __ubuf__ Dtype *inDtype1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += residDtypeLen;
-    __ubuf__ Dtype *outDtype1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += yDtypeLen;
-    __ubuf__ float *preStage0 = (__ubuf__ float *)off;
-    off += lenPre;
-    __ubuf__ float *preStage1 = (__ubuf__ float *)off;
-    off += lenPre;
-    __ubuf__ float *preStage[2] = {preStage0, preStage1};
-    __ubuf__ float *preCalc = (__ubuf__ float *)off;  // ub2ub target; scalar-read by vaxpy
-    off += lenPre;
-    __ubuf__ float *xFp32 = (__ubuf__ float *)off;  // [hcMult, hidden] residual as fp32
-    off += residFp32Len;
-    __ubuf__ float *yCalc = (__ubuf__ float *)off;  // accumulator: Σ_h pre[h]*x
-    off += mergeFp32Len;
-    __ubuf__ Dtype *inDtypeArr[2] = {inDtype0, inDtype1};
-    __ubuf__ Dtype *outDtypeArr[2] = {outDtype0, outDtype1};
-    assert(off <= UB_SIZE);
+    UbAlloc ub;
+    __ubuf__ Dtype *inDtypeArr[2];
+    __ubuf__ Dtype *outDtypeArr[2];
+    __ubuf__ float *preStage[2];
+    inDtypeArr[0] = ub.Alloc<Dtype>(hcMult * hidden);
+    outDtypeArr[0] = ub.Alloc<Dtype>(hidden);
+    inDtypeArr[1] = ub.Alloc<Dtype>(hcMult * hidden);
+    outDtypeArr[1] = ub.Alloc<Dtype>(hidden);
+    preStage[0] = ub.Alloc<float>(hcMult, VECTOR_MAX_BYTESIZE);
+    preStage[1] = ub.Alloc<float>(hcMult, VECTOR_MAX_BYTESIZE);
+    // ub2ub target; scalar-read by vaxpy
+    __ubuf__ float *preCalc = ub.Alloc<float>(hcMult, VECTOR_MAX_BYTESIZE);
+    __ubuf__ float *xFp32 = ub.Alloc<float>(hcMult * hidden);  // [hcMult, hidden] residual as fp32
+    __ubuf__ float *yCalc = ub.Alloc<float>(hidden);  // accumulator: Σ_h pre[h]*x
 
     const int vecRep = DIV_ROUND_UP(hidden, calcPad);  // vector repeats over hidden
     const int totalRep = hcMult * vecRep;              // fp32 repeats over [hcMult, hidden]

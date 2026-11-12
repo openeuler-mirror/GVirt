@@ -6,6 +6,7 @@
 #include "kernel_param.h"
 #include "matmul.h"
 #include "norm.h"
+#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 
@@ -47,66 +48,37 @@ public:
 
     __aicore__ inline void Init(GM_ADDR normWeight, GM_ADDR normBias)
     {
-        uint64_t off = 0;
-        ub_weight = reinterpret_cast<__ubuf__ float *>(off);
-        off += dim * sizeof(float);
-        ub_bias = reinterpret_cast<__ubuf__ float *>(off);
-        off += dim * sizeof(float);
-        x = reinterpret_cast<__ubuf__ float *>(off);
-        off += rows * dim * sizeof(float);
-        tmp = reinterpret_cast<__ubuf__ float *>(off);
-        off += rows * dim * sizeof(float);
-        other = reinterpret_cast<__ubuf__ float *>(off);
-        off += rows * rope_dim * sizeof(float);
-        trig = reinterpret_cast<__ubuf__ float *>(off);
-        off += rows * rope_dim * sizeof(float);
-        cos = reinterpret_cast<__ubuf__ float *>(off);
-        off += rows * rope_dim * sizeof(float);
-        sin = reinterpret_cast<__ubuf__ float *>(off);
-        off += rows * rope_dim * sizeof(float);
-        bf = reinterpret_cast<__ubuf__ bfloat16_t *>(off);
-        off += rows * dim * sizeof(bfloat16_t);
-        trig_bf = reinterpret_cast<__ubuf__ bfloat16_t *>(off);
-        off += rows * rope_dim * sizeof(bfloat16_t);
-        rounded = reinterpret_cast<__ubuf__ int32_t *>(off);
-        off += rows * dim * sizeof(int32_t);
-        half_values = reinterpret_cast<__ubuf__ half *>(off);
-        off += rows * dim * sizeof(half);
-        quant = reinterpret_cast<__ubuf__ int8_t *>(off);
-        off += rows * dim * sizeof(int8_t);
-        stats = reinterpret_cast<__ubuf__ float *>(off);
-        off += VECTOR_MAX_BYTESIZE;
-        scale = reinterpret_cast<__ubuf__ float *>(off);
-        off += VECTOR_MAX_BYTESIZE;
-        factor = reinterpret_cast<__ubuf__ float *>(off);
-        off += VECTOR_MAX_BYTESIZE;
-        numerator = reinterpret_cast<__ubuf__ float *>(off);
-        off += VECTOR_MAX_BYTESIZE;
-        scale_half = reinterpret_cast<__ubuf__ half *>(off);
-        off += VECTOR_MAX_BYTESIZE;
-        scale_scatter = reinterpret_cast<__ubuf__ half *>(off);
-        off += rows * UB_BUF_ALIGN_SIZE;
-        scaled_weights = reinterpret_cast<__ubuf__ half *>(off);
-        off += VECTOR_MAX_BYTESIZE;
+        UbAlloc ub;
+        ub_weight = ub.Alloc<float>(dim);
+        ub_bias = ub.Alloc<float>(dim);
+        x = ub.Alloc<float>(rows * dim);
+        tmp = ub.Alloc<float>(rows * dim);
+        other = ub.Alloc<float>(rows * rope_dim);
+        trig = ub.Alloc<float>(rows * rope_dim);
+        cos = ub.Alloc<float>(rows * rope_dim);
+        sin = ub.Alloc<float>(rows * rope_dim);
+        bf = ub.Alloc<bfloat16_t>(rows * dim);
+        trig_bf = ub.Alloc<bfloat16_t>(rows * rope_dim);
+        rounded = ub.Alloc<int32_t>(rows * dim);
+        half_values = ub.Alloc<half>(rows * dim);
+        quant = ub.Alloc<int8_t>(rows * dim);
+        stats = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        scale = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        factor = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        numerator = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        scale_half = ub.AllocBytesAs<half>(VECTOR_MAX_BYTESIZE);
+        scale_scatter = ub.AllocBytesAs<half>(rows * UB_BUF_ALIGN_SIZE);
+        scaled_weights = ub.AllocBytesAs<half>(VECTOR_MAX_BYTESIZE);
         for (uint32_t i = 0; i < PINGPONG_BUF_NUM; ++i) {
-            position[i] = reinterpret_cast<__ubuf__ int64_t *>(off);
-            off += rows * sizeof(int64_t);
-            slot[i] = reinterpret_cast<__ubuf__ int32_t *>(off);
-            off += rows * sizeof(int32_t);
-            head_weight[i] = reinterpret_cast<__ubuf__ bfloat16_t *>(off);
-            off += rows * sizeof(bfloat16_t);
+            position[i] = ub.Alloc<int64_t>(rows);
+            slot[i] = ub.Alloc<int32_t>(rows);
+            head_weight[i] = ub.Alloc<bfloat16_t>(rows);
         }
-        cos_indices = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += rows * rope_dim * sizeof(uint32_t);
-        sin_indices = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += rows * rope_dim * sizeof(uint32_t);
-        swap_indices = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += rows * rope_dim * sizeof(uint32_t);
-        row_indices = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += VECTOR_MAX_BYTESIZE;
-        rope_sign = reinterpret_cast<__ubuf__ float *>(off);
-        off += VECTOR_MAX_BYTESIZE;
-        assert(off <= UB_SIZE);
+        cos_indices = ub.Alloc<uint32_t>(rows * rope_dim);
+        sin_indices = ub.Alloc<uint32_t>(rows * rope_dim);
+        swap_indices = ub.Alloc<uint32_t>(rows * rope_dim);
+        row_indices = ub.AllocBytesAs<uint32_t>(VECTOR_MAX_BYTESIZE);
+        rope_sign = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
 
         constexpr uint64_t sign_masks[] = {0xAAAAAAAAAAAAAAAA, 0xCCCCCCCCCCCCCCCC,
                                            0xF0F0F0F0F0F0F0F0, 0xFF00FF00FF00FF00,

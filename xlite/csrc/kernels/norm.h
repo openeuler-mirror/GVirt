@@ -5,6 +5,7 @@
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 #include "kernel_param.h"
+#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 
@@ -60,46 +61,23 @@ __aicore__ inline void rmsnorm_noaffine_tiled(__gm__ Dtype *input, __gm__ Dtype 
     const uint32_t tileDim = 8192;
     const uint32_t nTile = DIV_ROUND_UP(norm_dim, tileDim);
 
-    const uint64_t dtypeLen = ROUND_UP(tileDim * sizeof(Dtype), UB_BUF_ALIGN_SIZE);
-    const uint64_t fp32Len = ROUND_UP(tileDim * sizeof(float), UB_BUF_ALIGN_SIZE);
-
-    uint64_t off = 0;
-    __ubuf__ Dtype *in0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += dtypeLen;
-    __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += dtypeLen;
-    __ubuf__ Dtype *inArr[2] = {in0, in1};
-    __ubuf__ float *calc = reinterpret_cast<__ubuf__ float *>(off);
-    off += fp32Len;
+    UbAlloc ub;
+    __ubuf__ Dtype *inArr[2] = {ub.Alloc<Dtype>(tileDim), ub.Alloc<Dtype>(tileDim)};
+    __ubuf__ float *calc = ub.Alloc<float>(tileDim);
     // out buffer: fp32-sized when outFp32 (result staged as fp32 before GM
     // store), else Dtype-sized (cast path). Always ping-pong (ID2/ID3) so the
     // MTE3 GM store is decoupled from V's next-tile load+convert on calc.
-    const uint64_t outLen = outFp32 ? fp32Len : dtypeLen;
-    __ubuf__ Dtype *out0 = nullptr;
-    __ubuf__ Dtype *out1 = nullptr;
     __ubuf__ Dtype *outArr[2] = {nullptr, nullptr};
-    __ubuf__ float *outFp0 = nullptr;
-    __ubuf__ float *outFp1 = nullptr;
     __ubuf__ float *outFpArr[2] = {nullptr, nullptr};
     if (outFp32) {
-        outFp0 = reinterpret_cast<__ubuf__ float *>(off);
-        off += outLen;
-        outFp1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += outLen;
-        outFpArr[0] = outFp0;
-        outFpArr[1] = outFp1;
+        outFpArr[0] = ub.Alloc<float>(tileDim);
+        outFpArr[1] = ub.Alloc<float>(tileDim);
     } else {
-        out0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += outLen;
-        out1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += outLen;
-        outArr[0] = out0;
-        outArr[1] = out1;
+        outArr[0] = ub.Alloc<Dtype>(tileDim);
+        outArr[1] = ub.Alloc<Dtype>(tileDim);
     }
-    __ubuf__ float *scalar =
-        reinterpret_cast<__ubuf__ float *>(off);  // vector_dup/vsqrt landing (32B)
-    off += ROUND_UP(sizeof(float), UB_BUF_ALIGN_SIZE);
-    assert(off <= UB_SIZE);
+    // vector_dup/vsqrt landing (32B)
+    __ubuf__ float *scalar = ub.Alloc<float>(1);
 
     const float inv_n = (float)1.0 / norm_dim;
 
@@ -250,26 +228,12 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     uint32_t total_dim = norm_dim * cnt_per_token;
     uint64_t len_burst = DIV_ROUND_UP(total_dim * sizeof(Dtype), BLOCK_SIZE);
     uint64_t len_burst_per_norm = DIV_ROUND_UP(norm_dim * sizeof(Dtype), BLOCK_SIZE);
-    uint32_t inout_blocksize = ROUND_UP(total_dim * sizeof(Dtype), BLOCK_SIZE);
-    uint32_t inout_blocksize_float = ROUND_UP(total_dim * sizeof(float), BLOCK_SIZE);
-    uint32_t calc_blocksize = ROUND_UP(total_dim * sizeof(float), BLOCK_SIZE);
     int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     uint64_t repeat = DIV_ROUND_UP(total_dim, calcPad);
     uint64_t repeat_per_norm = DIV_ROUND_UP(norm_dim, calcPad);
     uint64_t len_burst_float_per_norm = DIV_ROUND_UP(norm_dim * sizeof(float), BLOCK_SIZE);
     uint64_t len_burst_float = DIV_ROUND_UP(total_dim * sizeof(float), BLOCK_SIZE);
     uint64_t repeat_stride = DIV_ROUND_UP(norm_dim * sizeof(float), BLOCK_SIZE);
-
-    uint64_t off = 0;
-    __ubuf__ Dtype *in0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += inout_blocksize;
-    __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-    off += inout_blocksize;
-    __ubuf__ Dtype *in[2] = {in0, in1};
-
-    __ubuf__ Dtype *out[2];
-    __ubuf__ float *out_float[2];
-    __ubuf__ float *in_variance_float[2];
 
     // When useNorm is set to false, only variance is calculated, so no need for bias or weight
     assert(useNorm || (!weight && !bias));
@@ -278,33 +242,29 @@ __aicore__ inline void norm(GM_ADDR input, GM_ADDR addInOut, GM_ADDR weight, GM_
     // so outFp32 (which leaves out unallocated) must never combine with a non-null addInOut.
     assert(!(addInOut && outFp32));
 
+    UbAlloc ub;
+    __ubuf__ Dtype *in[2] = {ub.Alloc<Dtype>(total_dim), ub.Alloc<Dtype>(total_dim)};
+
+    __ubuf__ Dtype *out[2] = {nullptr, nullptr};
+    __ubuf__ float *out_float[2] = {nullptr, nullptr};
+    __ubuf__ float *in_variance_float[2] = {nullptr, nullptr};
+
     if (useNorm && !outFp32) {
-        out[0] = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += inout_blocksize;
-        out[1] = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += inout_blocksize;
+        out[0] = ub.Alloc<Dtype>(total_dim);
+        out[1] = ub.Alloc<Dtype>(total_dim);
     } else {
-        out_float[0] = reinterpret_cast<__ubuf__ float *>(off);
-        off += inout_blocksize_float;
-        out_float[1] = reinterpret_cast<__ubuf__ float *>(off);
-        off += inout_blocksize_float;
+        out_float[0] = ub.Alloc<float>(total_dim);
+        out_float[1] = ub.Alloc<float>(total_dim);
     }
     if (variance) {
-        in_variance_float[0] = reinterpret_cast<__ubuf__ float *>(off);
-        off += inout_blocksize_float;
-        in_variance_float[1] = reinterpret_cast<__ubuf__ float *>(off);
-        off += inout_blocksize_float;
+        in_variance_float[0] = ub.Alloc<float>(total_dim);
+        in_variance_float[1] = ub.Alloc<float>(total_dim);
     }
 
-    __ubuf__ float *calc0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += calc_blocksize;
-    __ubuf__ float *calc1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += calc_blocksize;
-    __ubuf__ float *weight_calc = reinterpret_cast<__ubuf__ float *>(off);
-    off += calc_blocksize;
-    __ubuf__ float *bias_calc = reinterpret_cast<__ubuf__ float *>(off);
-    off += calc_blocksize;
-    assert(off <= UB_SIZE);
+    __ubuf__ float *calc0 = ub.Alloc<float>(total_dim);
+    __ubuf__ float *calc1 = ub.Alloc<float>(total_dim);
+    __ubuf__ float *weight_calc = ub.Alloc<float>(total_dim);
+    __ubuf__ float *bias_calc = ub.Alloc<float>(total_dim);
 
     int inCurr = 0;
     int outCurr = 0;

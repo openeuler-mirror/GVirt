@@ -24,6 +24,7 @@
 #pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
+#include "ub_alloc.h"
 #include <limits>
 
 // #define XLITE_KERNEL_DEBUG
@@ -63,43 +64,23 @@ public:
 
         uint32_t pad = ROUND_UP(topK, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
         uint32_t padDtype = ROUND_UP(topK, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
-        uint64_t off = 0;
+        UbAlloc ub;
+        scoresIn = ub.AllocBytesAs<float>(pad);
+        indicesIn = ub.AllocBytesAs<uint32_t>(pad);
+        this->indices = ub.AllocBytesAs<uint32_t>(pad);
 
-        scoresIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        dbg_printf("scoresIn: %lx\n", off);
-        off += pad;
-        indicesIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        dbg_printf("indicesIn: %lx\n", off);
-        off += pad;
-        this->indices = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        dbg_printf("indices: %lx\n", off);
-        off += pad;
-
-        this->topkBuf[0] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        dbg_printf("topk0: %lx\n", off);
-        off += 4 * pad;
-        this->topkBuf[1] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        dbg_printf("topk1: %lx\n", off);
-        off += 4 * pad;
-        this->scratch[0] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        dbg_printf("scratch0: %lx\n", off);
-        off += 2 * pad;
-        this->scratch[1] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        dbg_printf("scratch1: %lx\n", off);
-        off += 2 * pad;
+        this->topkBuf[0] = ub.AllocBytesAs<float>(4 * pad);
+        this->topkBuf[1] = ub.AllocBytesAs<float>(4 * pad);
+        this->scratch[0] = ub.AllocBytesAs<float>(2 * pad);
+        this->scratch[1] = ub.AllocBytesAs<float>(2 * pad);
 
         if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            scoresInTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-            dbg_printf("scoresInTmp: %lx\n", off);
-            off += pad / 2;
+            scoresInTmp = ub.AllocBytesAs<Dtype>(pad / 2);
         }
-        this->queryLensIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        dbg_printf("queryLensIn: %lx\n", off);
-        off += ROUND_UP(numBatches * sizeof(uint32_t), UB_BUF_ALIGN_SIZE);
-        this->cachedLensIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        dbg_printf("cachedLensIn: %lx\n", off);
-        off += ROUND_UP(numBatches * sizeof(uint32_t), UB_BUF_ALIGN_SIZE);
-        dbg_printf("Allocated in UB: %lu\n", off);
+        this->queryLensIn =
+            ub.AllocBytesAs<uint32_t>(ROUND_UP(numBatches * sizeof(uint32_t), UB_BUF_ALIGN_SIZE));
+        this->cachedLensIn =
+            ub.AllocBytesAs<uint32_t>(ROUND_UP(numBatches * sizeof(uint32_t), UB_BUF_ALIGN_SIZE));
     }
 
     __aicore__ inline void Merge4(__ubuf__ float *dst, __ubuf__ float *src, uint64_t mrgRepeat,

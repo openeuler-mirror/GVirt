@@ -4,6 +4,7 @@
 #pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
+#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 // Per-group quantization: vabs → ReduceMax → factor → vmuls.
@@ -53,11 +54,7 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    uint32_t inputSize = ROUND_UP(latentDim * sizeof(Dtype), VECTOR_REPEAT_BYTESIZE);
     uint32_t packedSize = ROUND_UP(cacheBytes, VECTOR_REPEAT_BYTESIZE);
-    uint32_t xBufSize = ROUND_UP(latentDim * sizeof(float), UB_BUF_ALIGN_SIZE);
-    uint32_t halfBufSize = ROUND_UP(latentDim * sizeof(half), UB_BUF_ALIGN_SIZE);
-    constexpr uint32_t calcSize = ROUND_UP(groupSize * sizeof(float), UB_BUF_ALIGN_SIZE);
     __ubuf__ Dtype *inputs[PINGPONG_BUF_NUM];
     __ubuf__ int8_t *packed[PINGPONG_BUF_NUM];
     __ubuf__ float *xBuf[PINGPONG_BUF_NUM];
@@ -65,25 +62,17 @@ __aicore__ inline void mla_cache_c8(GM_ADDR latent, GM_ADDR pe, GM_ADDR slots, G
     __ubuf__ float *amaxBufs[PINGPONG_BUF_NUM];
     __ubuf__ float *factorBufs[PINGPONG_BUF_NUM];
     __ubuf__ half *halfBuf[PINGPONG_BUF_NUM];
-    uint64_t off = 0;
+    UbAlloc ub;
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
-        inputs[curr] = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += inputSize;
-        packed[curr] = reinterpret_cast<__ubuf__ int8_t *>(off);
-        off += packedSize;
-        xBuf[curr] = reinterpret_cast<__ubuf__ float *>(off);
-        off += xBufSize;
-        tmpBuf[curr] = reinterpret_cast<__ubuf__ float *>(off);
-        off += calcSize;
-        amaxBufs[curr] = reinterpret_cast<__ubuf__ float *>(off);
-        off += VECTOR_REPEAT_BYTESIZE;
-        factorBufs[curr] = reinterpret_cast<__ubuf__ float *>(off);
-        off += VECTOR_REPEAT_BYTESIZE;
-        halfBuf[curr] = reinterpret_cast<__ubuf__ half *>(off);
-        off += halfBufSize;
-        off = ROUND_UP(off, UB_BANKGROUP_ROW_SIZE);
+        inputs[curr] = ub.Alloc<Dtype>(latentDim, VECTOR_REPEAT_BYTESIZE);
+        packed[curr] = ub.AllocBytesAs<int8_t>(packedSize);
+        xBuf[curr] = ub.Alloc<float>(latentDim);
+        tmpBuf[curr] = ub.Alloc<float>(groupSize);
+        amaxBufs[curr] = ub.AllocBytesAs<float>(VECTOR_REPEAT_BYTESIZE);
+        factorBufs[curr] = ub.AllocBytesAs<float>(VECTOR_REPEAT_BYTESIZE);
+        halfBuf[curr] = ub.Alloc<half>(latentDim);
+        ub.Align(UB_BANKGROUP_ROW_SIZE);
     }
-    assert(off <= UB_SIZE);
 
     // Each bank is reusable after all cache writes complete.
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
