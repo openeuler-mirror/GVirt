@@ -366,7 +366,7 @@ int XRuntime::InitXcclComm(void)
 
     static uint32_t portOffset = 0;
     if (enableTpXccl) {
-        ip = _ips[ROUND_DOWN(_rankId, _tpSize) / _nDevPerNode];
+        ip = _ips.at(ROUND_DOWN(_rankId, _tpSize) / _nDevPerNode);
         port = _port + XLITE_CCL_PORT_OFFSET + _rankId / _tpSize + portOffset;
         _tpXcclComm = new XcclComm(_rankId % _tpSize, _tpSize);
         if (_tpXcclComm->Init(ip, port, myXTensorPtr, ipcXTensorKey)) {
@@ -375,7 +375,7 @@ int XRuntime::InitXcclComm(void)
     }
 
     if (enableDpXccl) {
-        ip = _ips[_rankId % _tpSize / _nDevPerNode];
+        ip = _ips.at(_rankId % _tpSize / _nDevPerNode);
         port =
             _port + XLITE_CCL_PORT_OFFSET + XLITE_DP_PORT_OFFSET + _rankId % _tpSize + portOffset;
         _dpXcclComm = new XcclComm(_rankId / _tpSize, _dpSize);
@@ -399,9 +399,13 @@ int XRuntime::InitHcclComm(void)
         return ret;
     }
 
+    // Node-ip lookups are bounds-checked: _ips holds one entry per node, so a wrong
+    // node index must abort the bootstrap with index/size in the message instead of
+    // reading past the vector (a silent OOB here hands a garbage std::string to XSock,
+    // which then looks like a network fault).
     static uint32_t portOffset = 0;
     if (_tpSize > 1) {
-        ip = _ips[ROUND_DOWN(_rankId, _tpSize) / _nDevPerNode];
+        ip = _ips.at(ROUND_DOWN(_rankId, _tpSize) / _nDevPerNode);
         port = _port + _rankId / _tpSize + portOffset;
 
         if (_rankId % _tpSize == 0) {
@@ -416,7 +420,7 @@ int XRuntime::InitHcclComm(void)
     }
 
     if (_dpSize > 1) {
-        ip = _ips[_rankId % _tpSize / _nDevPerNode];
+        ip = _ips.at(_rankId % _tpSize / _nDevPerNode);
         port = _port + XLITE_DP_PORT_OFFSET + _rankId % _tpSize + portOffset;
 
         if (_rankId / _tpSize == 0) {
@@ -431,7 +435,7 @@ int XRuntime::InitHcclComm(void)
     }
 
     if (_moeEpSize > 1) {
-        ip = _ips[_rankId % _moeTpSize];
+        ip = _ips.at((_rankId % _moeTpSize) / _nDevPerNode);
         port = _port + XLITE_EP_PORT_OFFSET + _rankId % _moeTpSize + portOffset;
 
         if (_rankId / _moeTpSize == 0) {
