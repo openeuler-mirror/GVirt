@@ -1,1 +1,1 @@
-../../.agents/skills/debug-accuracy.md
+../../.agents/skills/debug-accuracy/SKILL.md

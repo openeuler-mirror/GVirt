@@ -6,8 +6,10 @@
 
 | Skill | 文件 | 用途 |
 |---|---|---|
-| debug-accuracy | [skills/debug-accuracy.md](skills/debug-accuracy.md) | 通过对比 xlite 与 torch_npu 后端输出,系统性定位 xlite 精度问题 |
-| update-kernel-docs | [skills/update-kernel-docs.md](skills/update-kernel-docs.md) | 生成 / 刷新 `xlite/doc/developer_guide/kernels/` 下的算子实现原理文档 |
+| debug-accuracy | [skills/debug-accuracy/SKILL.md](skills/debug-accuracy/SKILL.md) | 通过对比 xlite 与 torch_npu 后端输出,系统性定位 xlite 精度问题 |
+| update-kernel-docs | [skills/update-kernel-docs/SKILL.md](skills/update-kernel-docs/SKILL.md) | 生成 / 刷新 `xlite/doc/developer_guide/kernels/` 下的算子实现原理文档 |
+| optimize-vector-kernel | [skills/optimize-vector-kernel/SKILL.md](skills/optimize-vector-kernel/SKILL.md) | 优化昇腾 910B3(arch 2201)向量核算子的 UB bank 冲突(constexpr 布局、多行批处理、A/B 位一致验证) |
+| transfer-larger-blocks | [skills/transfer-larger-blocks/SKILL.md](skills/transfer-larger-blocks/SKILL.md) | 通过单次 DataCopy 搬运更大数据块(≥16KB)最大化 AscendC 算子的 MTE 搬运带宽 |
 
 ## 使用方式
 
@@ -16,9 +18,9 @@
 
 ## 新增 Skill 约定
 
-1. 在 `skills/` 下新增 `<skill-name>.md`,frontmatter 必须包含 `name` 与 `description`
+1. 在 `skills/` 下新增 `<skill-name>/SKILL.md`,frontmatter 必须包含 `name` 与 `description`
 2. 在 `.claude/skills/` 建立**相对路径软链接**(单一来源,避免副本不同步):
    ```bash
-   ln -s ../../.agents/skills/<skill-name>.md .claude/skills/<skill-name>.md
+   ln -s ../../.agents/skills/<skill-name>/SKILL.md .claude/skills/<skill-name>.md
    ```
 3. 在上方 Skills 列表中登记

@@ -1,1 +1,1 @@
-../../.agents/skills/update-kernel-docs.md
+../../.agents/skills/update-kernel-docs/SKILL.md
