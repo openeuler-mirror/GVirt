@@ -34,6 +34,8 @@
 | norm | [norm.md](norm.md) | RMSNorm / LayerNorm / L2Norm |
 | qk_rms_norm | [qk_rms_norm.md](qk_rms_norm.md) | Q、K 联合 RMSNorm |
 | quant | [quant.md](quant.md) | 量化 |
+| quant_cache_c8 | [quant_cache_c8.md](quant_cache_c8.md) | C8 缓存写入(compressor 路径):BF16 行量化 INT8 写分页 key cache + 每 slot fp16 scale |
+| quant_q_c8 | [quant_q_c8.md](quant_q_c8.md) | C8 Indexer Q 量化(INT8 q8 + 融合逐行 scale 的 fp16 scaledWeights) |
 | quant_dyn | [quant_dyn.md](quant_dyn.md) | 动态量化 |
 | dequant | [dequant.md](dequant.md) | 反量化 |
 | msd_merge_dequant | [msd_merge_dequant.md](msd_merge_dequant.md) | MSD 多份合并反量化 |
@@ -69,10 +71,13 @@
 | cxa | [cxa.md](cxa.md) | C4A/C128A 滑窗+压缩稀疏注意力(DeepSeek-V4) |
 | flash_cxa | [flash_cxa.md](flash_cxa.md) | CXA 的 flash 在线 softmax 变体(KV-len 分 tile 合并,长 prefill/topk 行) |
 | compressor | [compressor.md](compressor.md) | DeepSeek-V4 KV 压缩(overlap_transform + softmax 加权求和 + RMSNorm + RoPE + cache 写) |
+| dsa_cp | [dsa_cp.md](dsa_cp.md) | DSA-CP 上下文并行 prefill 算子族(分片元数据 / 复制写 cache / 每 query Top-K 收集 + dense MLA) |
+| dsa_cp_metadata | [dsa_cp.md](dsa_cp.md) | 全局请求元数据 → 本卡 token shard 局部元数据 |
+| dsa_cp_write_kv_cache_by_slot | [dsa_cp.md](dsa_cp.md) | AllGather 复制后的新 KV 按全局 slot 写入持久 paged cache |
+| dsa_cp_gather_mla | [dsa_cp.md](dsa_cp.md) | 每 query Top-K KV 收集 + dense-per-query MLA 注意力 |
 | einsum_mht_hdt_mhd | [einsum_mht_hdt_mhd.md](einsum_mht_hdt_mhd.md) | 线性注意力 einsum |
 | einsum_mht_htd_mhd | [einsum_mht_htd_mhd.md](einsum_mht_htd_mhd.md) | 线性注意力 einsum |
 | recurrent_gated_delta_rule_paged | [recurrent_gated_delta_rule_paged.md](recurrent_gated_delta_rule_paged.md) | 原生 VK 分页 GDN decode/prefill |
-| gdn_prefill_paged | [gdn_prefill_paged.md](gdn_prefill_paged.md) | packed Prefill 契约与验证 |
 | linear_att_proj | [linear_att_proj.md](linear_att_proj.md) | 线性注意力 QKV 投影(concat→matmul→split host 融合) |
 | linear_att_conv_and_silu_paged | [conv1d_and_silu_paged.md](conv1d_and_silu_paged.md) | 线性注意力分页 Conv1d+SiLU decode 入口(conv1d_and_silu_paged 单 token 路径) |
 

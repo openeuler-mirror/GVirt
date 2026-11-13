@@ -35,7 +35,11 @@ host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.
 ### 分块与多 Block 并行
 
 - 无 k 切块,整行一次搬入(`k_pad = ROUND_UP(k, 256)` 按 INT8 向量粒度对齐);
-- 行间轮转:`for (row = block_idx; row < m; row += block_num)`(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `for (uint32_t row = block_idx`),输入/输出各 ping-pong。
+- 行间按 block 跨步认领:每个 block 处理 `n = ceil((m - block_idx) / block_num)` 行,行号自 `block_idx` 起按 `block_num` 跨步推进(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `uint32_t n = (m - block_idx + block_num - 1) / block_num`),输入/输出各 ping-pong。
+
+### tile overlap 三级解耦流水
+
+每个 block 对自己认领的行做三级重叠:迭代 `i` 同时执行 `store(i-1)` ∥ `load(i+1)` ∥ `compute(i)`(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `store row (i-1)`/`Load row (i+1)`/`Compute row (i)` 注释块)。关键在于 **MTE2/MTE3 的 DMA 指令先于 V 的 `wait_flag` 下发**:V 即便阻塞在等待上,已派发的 load/store 仍在推进,使访存与计算真正重叠。结构为 prologue(载入第 0、1 行并算第 0 行)→ 稳态循环(store 上一行 + 预取下一行 + 计算当前行)→ epilogue(store 末行)→ drain 清算残留 flag(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `Prologue`/`Steady state`/`Epilogue`/`Drain` 注释块)。
 
 ### UB 内存布局(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`)
 
@@ -50,10 +54,11 @@ host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.
 
 ### 流水线同步(MTE2 / V / MTE3)
 
-标准三管线事件协议(EVENT_ID0/1 ping-pong):
+三管线事件协议,`eid = EVENT_ID0/1` ping-pong,循环前预置 4 条 `set_flag`(每 eid 两个方向):`V→MTE2` 各一条把两个 in 缓冲标记为已释放(首次 `unpack_load` 不阻塞),`MTE3→V` 各一条把两个 out 缓冲标记为空闲(首次 `unpack_compute` 不阻塞);结尾对称地以 4 条 `wait_flag` 排空残余事件:
 
-- `V→MTE2` 释放 in 缓冲 → 搬入 → `MTE2→V` 就绪;`vand`/`vconv` 完成后 `V→MTE2` 再释放(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `vand`);
-- INT4 打包 `V→MTE3` → 两行写出 GM → `MTE3→V` 回收 out 缓冲(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `vconv_f162s4`)。
+- `unpack_load`:`wait_flag(V→MTE2, eid)` 等 V 释放 in 缓冲 → GM→UB → `set_flag(MTE2→V, eid)` 就绪;
+- `unpack_compute`:`wait_flag(MTE2→V, eid)` 等输入就绪;`vand`/`vconv` 读完输入后 `set_flag(V→MTE2, eid)` 释放 in 缓冲;`wait_flag(MTE3→V, eid)` 等上一轮 store 回收 out 缓冲,INT4 打包(`vconv_f162s4`/`vconv_f162s4f`)后 `set_flag(V→MTE3, eid)` 交给写出;
+- `unpack_store`:`wait_flag(V→MTE3, eid)` 等输出就绪 → 两行 UB→GM → `set_flag(MTE3→V, eid)` 回收 out 缓冲。
 
 `vand_mask` 常量在循环外一次性 `vector_dup` 生成:以 int16 视图写 0x0F0F,使 int8 数据按 16bit 字与掩码对齐做按位与(`csrc/kernels/unpack_activation.h` 的 `unpack_activation`,关键字 `0x0f0f`)。
 
@@ -64,7 +69,7 @@ host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.
 1. **低 nibble 路径**:`vand(low_and, x, 0x0F0F)`(int16 视图)得每字节两个 [0,15] 的 nibble → `vconv_s82f16` 转 fp16([0.0, 15.0])→ `vadds(-8.0)` 平移到 [-8, 7];
 2. **高 nibble 路径**:`vconv_s82f16(x)` 转 fp16 → `vmuls(0.0625)` 即除以 16,fp16 除法配合 vconv 的舍入实现 floor 语义,得 [-8, 7];
 3. **INT4 打包**:`vconv_f162s4` 把低 nibble fp16 打包为 INT4-packed(`out_low`),`vconv_f162s4f` 把高 nibble fp16 打包(`out_high`;`f` 变体带 floor 舍入);
-4. **写出**:`copy_ubuf_to_gm_align_b8` 把低/高两行分别写到 `act_out + (2r)·(k/2)` 与 `act_out + (2r+1)·(k/2)`。
+4. **写出**:`unpack_store` 经 `CopyUbufToGmAligned` 把低/高两行分别写到 `act_out + (2r)·(k/2)` 与 `act_out + (2r+1)·(k/2)`(`csrc/kernels/unpack_activation.h` 的 `unpack_store`)。
 
 注意 k_pad 与 fp16 缓冲按 k 字节分配:一个 int8 字节展开成一个 fp16 值(两个 nibble 各一个),fp16 视图下 `fp16_rep = k_pad / VECTOR_MAX_NUM_OF_FP16`。
 

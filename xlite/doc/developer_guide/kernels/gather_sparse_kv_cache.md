@@ -13,6 +13,8 @@ DSA(Dual Sparse Attention)长序列路径的 KV 收集算子,支持 **decode(que
 
 `compressRatio` 控制候选 token 的统计粒度(`>= 1`,kernel 前置条件,见下):`numCandidates = (cachedLens[b] + q_idx + 1) / compressRatio`。默认 1,即按原始 token 收集(MLA 场景);cxa 的 dense 模式以实际压缩比调用本算子收集压缩 KV(`CXA`,`csrc/_C.cpp`)。旧实现中 `compressRatio == 0` 表示按原始 token 统计的特殊取值已移除(cxa 传 0 表示不压缩,走 sparse 路径,此时不会调用本算子;若强行传 0 到本算子,设备侧除零,release 构建的断言被 `-DNDEBUG` 编译掉、无保护)。
 
+同族变体:`csrc/kernels/gather_sparse_kv_cache_per_query.h` 的 `gather_sparse_kv_cache_per_query` 为 DSA-CP 每 query Top-K 收集的内循环(一个 query 的全部 heads 共享一行 dense cache,任务按 query×topK chunk 分核,稠密行同样走恒等模板短路);由 [dsa_cp](dsa_cp.md) 的 `dsa_cp_gather_mla` host 组装调用,无独立 Python 入口。
+
 ## 输入输出参数
 
 Python 侧调用(`tests/kernels/gather_sparse_kv_cache.py`):

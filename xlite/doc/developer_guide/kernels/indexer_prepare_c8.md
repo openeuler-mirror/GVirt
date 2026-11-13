@@ -106,8 +106,8 @@ heads=64 需要改动 Q 侧任务分解:旧实现假设 Q **每 token 恰好一�
 
 `heads` 本就是 kernel 参数(host 一直传,仅用于旧校验 `indexNHeads == 32`),现在参与 kernel 内任务分解。head 数约束由 **Top-K 消费侧的 cube 分形粒度**决定。prepare 自身的下限更松:K 路径逐行 scatter + slot 哨兵,count 可为任意值(token 数运行时可变,必须如此);Q 路径任务切分同样任意,但 head weight 的搬运用裸 `copy_gm_to_ubuf_align_b16`(`count * 2` 字节),要求 count 为 8 的倍数,即 `heads % 8 == 0`。host 侧对 prepare 也检查 `%16`,是因为其输出(q8/qScale/scaledWeights)与 Top-K 同属一条流水线,在最早入口拒掉非法 head 数比留到 Top-K 截断/错位要好:
 
-- `%16 == 0`:Top-K 把 head 权重矩阵按 `weightBlockSize = 32/sizeof(WeightDtype)`(fp16 即 16)列一块做 Nd2Nz 转置搬入 L1,`wkBlockNum = nHeads / weightBlockSize` 为整除运算;同时 score mm 把 `(query, head)` 按 `queryTileSize = XLITE_MAX_M0 / nHeads` 个 query 打包成一个 tile 的行,M0 分形为 16 行——heads 非 16 倍数时前者截断、后者打包行数落在非整数个分形上;
-- `≤ XLITE_MAX_M0(128)`:同一 M0 维上限(超过时 Top-K 退化为每 tile 一个 query)。
+- `%16 == 0`:Top-K 把 head 权重矩阵按 `weightBlockSize = 32/sizeof(WeightDtype)`(fp16 即 16)列一块做 Nd2Nz 转置搬入 L1,`wkBlockNum = nHeads / weightBlockSize` 为整除运算;其 QK mmad 逐 query token 发起,n 维为 `nHeads`(N0 分形 16 列)——heads 非 16 倍数时前者截断、后者落在非整数个分形上;
+- `≤ XLITE_MAX_M0(128)`:沿用历史 M0 维上限作为入口宽上界;现行 Top-K 因 L0C 容量把有效上限收紧到 **nHeads ≤ 64**(`csrc/op.cpp` 的 `XliteOpIndexerTopK` 共通校验 `nHeads > 64` + `csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init` 断言 `nHeads <= 64 && blockSize <= 128`),head 数 > 64 的配置会在 Top-K 处被直接拒绝。
 
 Top-K kernel 本体逐 head 行独立打分(head-generic),heads=64 只需 host 侧放宽检查,无需改动。
 
