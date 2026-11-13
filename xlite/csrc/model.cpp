@@ -1727,6 +1727,23 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         throw std::runtime_error("EPLB + MoE AllToAll is not yet supported");
     }
 
+    // AllToAll + TP>1 is run in commOptimize mode with row-sliced tokens and no
+    // end-of-FFN TP reduction (ConfigRtCommOptimize forces it). Shared experts must
+    // then be computed by every TP rank for its own rows, which only full
+    // (TP-replicated) shared expert weights allow; TP-sharded shared weights produce
+    // partial sums that the skipped TP reduction can no longer combine.
+    if (rt.enableMoEAllToAll && _c.defTpSize > 1 && _c.nSharedExperts != 0 &&
+        !_isSharedExpertWeightFull) {
+        throw std::runtime_error(
+            "MoE AllToAll with TP > 1 requires full (TP-replicated) shared expert weights");
+    }
+    // Hyper-connection models never enable commOptimize, so AllToAll + TP>1 would run
+    // the naive layout with per-rank full-token dispatch instead of the row-sliced
+    // layout the AllToAll path is built for; reject it instead of computing garbage.
+    if (rt.enableMoEAllToAll && _c.defTpSize > 1 && _c.hcMult != 0) {
+        throw std::runtime_error("MoE AllToAll with TP > 1 is not supported for hcMult != 0");
+    }
+
     auto [w, r] = ForwardMoEGate(rt, layer, hiddenState);
     // Remap gate outputs from logical to physical columns via log2phy so Dispatch indexes the
     // correct physical weight slots. Skipped (zero overhead) when log2phy is absent (non-EPLB).
@@ -1870,13 +1887,17 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
 
     // Check if shared experts should be processed on this rank:
     // 1. Shared experts are enabled (nSharedExperts != 0)
-    // 2. Either the weight is not full (all ranks process), or only rank 0 processes when weight is
-    // full
+    // 2. Either the weight is not full (all ranks process their partial sum, combined by the
+    //    end-of-FFN TP reduction), or the weight is full and:
+    //    - MoE AllToAll: all ranks process — tokens are row-sliced across TP
+    //      (commOptimize mode) and no TP reduction follows, so each rank must compute
+    //      the shared expert for its own rows with the replicated weights.
+    //    - otherwise: only rank 0 of each TP group processes (all TP ranks hold
+    //      identical rows); the end-of-FFN TP reduction spreads the result.
     if (_c.nSharedExperts != 0 &&
-        ((_isSharedExpertWeightFull && ((rt.rankId() % rt.tpSize()) == 0)) ||
-         !_isSharedExpertWeightFull)) {
+        (!_isSharedExpertWeightFull || rt.enableMoEAllToAll || (rt.rankId() % rt.tpSize()) == 0)) {
         XTensor &h = rt.GetTensor(hiddenState.shape, hiddenState.dtype, DBG_LOC);
-        if (rt.enableMoEAllToAll) {  // hiddenState of shape (currTokens = m, hiddenSize)
+        if (rt.enableMoEAllToAll) {  // hiddenState holds exactly this rank's token rows
             ForwardMoECombineAllToAll(rt, h, weights, routing, unpIdx, *outPtr, expertsCounts,
                                       meta);
         } else {  // hiddenState of shape (maxTokensDp, hiddenSize)
@@ -1885,20 +1906,25 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         // share experts: y = routed + sigmoid(se_gate(x)) * shared(x)
         // ForwardMLP overwrites hiddenState, so compute the scalar gate from x first.
         // se_gate is Linear(H->1) in ND (never NZ-converted); do not pass weightNZ.
+        // Row count of hiddenState: AllToAll mode always feeds exactly this rank's
+        // rows (currTokens in the naive layout, the TP row slice in commOptimize
+        // mode); otherwise hiddenState is padded to maxTokensDp and must be viewed
+        // down to currTokens.
+        size_t mShared = rt.enableMoEAllToAll ? hiddenState.shape[0] : m;
         XTensor *seGateLogits = nullptr;
         if (moeSEGate[layer].ptr != nullptr) {
-            seGateLogits = &rt.GetTensor({m, 1}, hiddenState.dtype, DBG_LOC);
-            XliteOpMatmul(rt, hiddenState.View(m), moeSEGate[layer], *seGateLogits, false);
+            seGateLogits = &rt.GetTensor({mShared, 1}, hiddenState.dtype, DBG_LOC);
+            XliteOpMatmul(rt, hiddenState.View(mShared), moeSEGate[layer], *seGateLogits, false);
         }
-        ForwardMLP(rt, layer, hiddenState.View(m), moeSEUpGate, moeSEDown, false);
+        ForwardMLP(rt, layer, hiddenState.View(mShared), moeSEUpGate, moeSEDown, false);
         if (seGateLogits != nullptr) {
             XliteOpSigmoidGateMul(rt, hiddenState, *seGateLogits, hiddenState);
             rt.PutTensor(*seGateLogits);
         }
-        XliteOpAdd(rt, hiddenState, h.View(m), hiddenState);
+        XliteOpAdd(rt, hiddenState, h.View(mShared), hiddenState);
         rt.PutTensor(h);
     } else {
-        if (rt.enableMoEAllToAll) {  // hiddenState of shape (currTokens = m, hiddenSize)
+        if (rt.enableMoEAllToAll) {  // hiddenState holds exactly this rank's token rows
             ForwardMoECombineAllToAll(rt, hiddenState, weights, routing, unpIdx, *outPtr,
                                       expertsCounts, meta);
         } else {  // hiddenState of shape (maxTokensDp, hiddenSize)

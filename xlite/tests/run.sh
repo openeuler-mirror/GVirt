@@ -364,6 +364,26 @@ function run_glm4_moe_flash_w8a8moe()
     rm $test_config_path
 }
 
+function run_glm4_moe_flash_a2a()
+{
+    # MoE AllToAll on GLM-4.7-Flash, 4 devs. XLITE_DP_SIZE=2 (set at
+    # invocation; there is no in-function default) runs TP2+DP2+EP4: the
+    # commOptimize row-sliced combo (DP>1 && TP>1 && EP>1
+    # + AllToAll) that needs shared experts on every TP rank — before that fix
+    # it deadlocked at the first decode step and non-zero TP ranks silently
+    # lost the shared contribution. XLITE_DP_SIZE=4 covers the TP1+DP4
+    # regression layout. DP must be set at invocation: run.sh reads it at
+    # startup to replicate the single-mode queries per DP rank:
+    #   XLITE_NPUS=0,1,2,3 XLITE_DP_SIZE=2 MODEL=run_glm4_moe_flash_a2a \
+    #       bash tests/run.sh
+    # Regression reference without AllToAll: XLITE_DP_SIZE=2 MODEL=run_glm4_moe_flash.
+    if [ "${XLITE_DP_SIZE:-1}" -le 1 ]; then
+        echo "run_glm4_moe_flash_a2a: set XLITE_DP_SIZE=2 (TP2+DP2+EP4) or 4 (TP1+DP4); running TP${XLITE_DEVS_PER_NODE:-4}+DP1 + AllToAll instead" >&2
+    fi
+    export XLITE_MOE_ALLTOALL=1
+    run_glm4_moe_flash
+}
+
 function run_deepseek_v32()
 {
     echo '{
