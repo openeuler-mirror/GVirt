@@ -172,6 +172,7 @@ class ModelConfig:
             ``False``: shared indexer layer. Empty enables all full indexer layers;
             otherwise length must match ``n_layers``.
         index_c8_mask (List[bool]): Per-runtime-layer Indexer C8 mask; empty disables C8.
+        enable_dsa_cp (bool): Whether DSA attention uses context parallelism across TP ranks.
         o_groups (int): Output projection group count (DeepSeek-V4).
         o_lora_rank (int): Output projection LoRA rank (DeepSeek-V4).
         window_size (int): Sliding window attention size (DeepSeek-V4).
@@ -328,6 +329,8 @@ class ModelConfig:
     enable all full indexer layers; otherwise, the list length must match :data:`n_layers`."""
     index_c8_mask: List[bool] = ...
     """Per-runtime-layer Indexer C8 mask; empty disables C8."""
+    enable_dsa_cp: bool = ...
+    """Whether DSA attention uses context parallelism across TP ranks."""
     o_groups: int = ...
     """Output projection group count (DeepSeek-V4)."""
     o_lora_rank: int = ...
@@ -3564,6 +3567,70 @@ def mla_v2(
 
     Returns:
         None: `output` is written in place.
+    """
+    ...
+
+def dsa_cp_metadata(
+    rt: Runtime,
+    query_start_loc: torch.Tensor,
+    query_lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    local_query_start_loc: torch.Tensor,
+    local_query_lens: torch.Tensor,
+    local_cached_lens: torch.Tensor,
+    local_slot_mapping: torch.Tensor,
+    shard_begin: int,
+    shard_end: int,
+) -> None:
+    """Build local request metadata for the token window [shard_begin, shard_end).
+
+    Metadata tensors are int32. Local query starts are relative to the shard;
+    local cached lengths include the request prefix before the shard. The slot
+    mapping is the identity mapping for the temporary local KV buffer.
+    Only rows covered by local_query_lens are consumed. Outputs are written in place.
+    """
+    ...
+
+def dsa_cp_write_kv_cache_by_slot(
+    rt: Runtime,
+    input: torch.Tensor,
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    num_tokens: int,
+    block_size: int,
+) -> None:
+    """Write gathered DSA-CP KV rows into the persistent paged cache.
+
+    Input rows and cache blocks may have a dim-0 pitch. Only num_tokens rows
+    are considered; negative int32 slot_mapping entries are skipped.
+    """
+    ...
+
+def dsa_cp_gather_mla(
+    rt: Runtime,
+    q_absorb: torch.Tensor,
+    qr: torch.Tensor,
+    k_cache: torch.Tensor,
+    pe_cache: torch.Tensor,
+    output: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    query_lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    topk_indices: torch.Tensor,
+    scale: float,
+) -> None:
+    """Gather each DSA-CP query's selected KV and run the existing dense MLA v2.
+
+    Q/output are BF16 [queries, heads, latent_dim]; QR is BF16
+    [queries, heads, rope_dim]. The paged caches may have pitched blocks.
+    block_tables is int32 [rows >= batch, max_blocks]; its actual row stride
+    is preserved, including when columns are narrowed from a persistent buffer.
+    Request metadata describes the local queries; cached_lens includes the
+    prefix before this rank's shard. Top-K is int32 [queries, top_k].
+    Rows with causal length <= top_k use all causal tokens and ignore indices.
+    Longer rows require top_k distinct valid causal indices, as produced by
+    the indexer. KV workspace is reused over bounded groups of queries.
     """
     ...
 

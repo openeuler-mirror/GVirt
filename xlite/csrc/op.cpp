@@ -6,6 +6,7 @@
 #include "runtime.h"
 #include "ccl.h"
 #include "op.h"
+#include "dsa_cp_weight.h"
 #include "swizzle.h"
 #include "aclrtlaunch_all.h"
 #include "gdn_metadata.h"
@@ -34,6 +35,92 @@ static void WarnPositions2D(const char *op)
                      "its first row. Double check for correctness."
                   << std::endl;
     }
+}
+
+void XliteOpDsaCpMetadata(XRuntime &rt, XTensor &queryStartLoc, XTensor &queryLens,
+                          XTensor &cachedLens, XTensor &localQueryStartLoc, XTensor &localQueryLens,
+                          XTensor &localCachedLens, XTensor &localSlotMapping, uint32_t batch,
+                          uint32_t shardBegin, uint32_t shardEnd)
+{
+    if (!IsDummyRuntime(rt)) {
+        aclrtlaunch_dsa_cp_metadata(1, rt.stream, queryStartLoc.ptr, queryLens.ptr, cachedLens.ptr,
+                                    localQueryStartLoc.ptr, localQueryLens.ptr, localCachedLens.ptr,
+                                    localSlotMapping.ptr, batch, shardBegin, shardEnd,
+                                    localSlotMapping.numel);
+    }
+}
+
+void XliteOpDsaCpWriteKVCacheBySlot(XRuntime &rt, XTensor &input, XTensor &cache,
+                                    XTensor &slotMapping, uint32_t numTokens, uint32_t blockSize)
+{
+    if (!IsDummyRuntime(rt) && numTokens > 0) {
+        if (input.dtype != cache.dtype || numTokens > input.shape[0] ||
+            numTokens > slotMapping.numel) {
+            throw std::invalid_argument(
+                "DsaCpWriteKVCacheBySlot: incompatible input/cache/slot mapping");
+        }
+        const size_t elementBytes = XDtypeBit(input.dtype) / 8;
+        const size_t blockStride = std::max(cache.stride[0], blockSize * input.shape[1]);
+        aclrtlaunch_dsa_cp_write_kv_cache_by_slot(
+            rt.aivNum, rt.stream, input.ptr, cache.ptr, slotMapping.ptr, numTokens,
+            input.shape[1] * elementBytes, input.stride[0] * elementBytes, blockSize,
+            blockStride * elementBytes);
+    }
+}
+
+XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool transposed)
+{
+    const size_t tp = rt.tpSize();
+    const auto storageShape = DsaCpWeightStorageShape(weight, nz);
+    XTensor storage(storageShape, weight.dtype, weight.ptr);
+    const size_t storageLen = storage.numel;
+    auto fullShape = weight.shape;
+    fullShape[transposed ? 0 : 1] *= tp;
+    if (nz) {
+        const size_t block = transposed ? DSA_CP_NZ_ROWS : storageShape.back();
+        if (weight.shape[transposed ? 0 : 1] % block != 0) {
+            throw std::invalid_argument("DsaCpGatherWeight: TP shard must contain whole NZ blocks");
+        }
+    }
+    auto &gathered = rt.GetTensor({tp, storageLen}, weight.dtype, DBG_LOC);
+    XTensor input({storageLen}, weight.dtype, weight.ptr);
+    if (rt._tpXcclComm != nullptr) {
+        // Keep the view's pool provenance for dummy runtime accounting too.
+        input = gathered;
+        const size_t rank = rt.rankId() % tp;
+        input.SliceView(rank, rank + 1).View(std::vector<size_t>{storageLen});
+        if (!IsDummyRuntime(rt)) {
+            CHECK_ACL(aclrtMemcpyAsync(input.ptr, input.bytes, weight.ptr, input.bytes,
+                                       ACL_MEMCPY_DEVICE_TO_DEVICE, rt.stream));
+        }
+    }
+    // HCCL uses the persistent, disjoint input directly; only XCCL uses the
+    // own-rank region of the receive buffer and skips its local copy.
+    XliteOpAllGather(rt, input, gathered, TP, true, DBG_LOC);
+    if (nz && transposed) {
+        auto &full = rt.GetTensor({tp, storageLen}, weight.dtype, DBG_LOC);
+        if (!IsDummyRuntime(rt)) {
+            const size_t columnBlocks = storageShape[0];
+            const size_t blockBytes = storageLen / columnBlocks * XDtypeBit(weight.dtype) / 8;
+            aclrtlaunch_dsa_cp_reorder_wo(rt.aivNum, rt.stream, gathered.ptr, full.ptr, tp,
+                                          columnBlocks, blockBytes);
+        }
+        rt.PutTensor(gathered);
+        return full.View(fullShape);
+    }
+    if (!nz && !transposed) {
+        auto &full = rt.GetTensor(fullShape, weight.dtype, DBG_LOC);
+        std::vector<XTensor> shards;
+        for (size_t rank = 0; rank < tp; ++rank) {
+            auto shard = gathered;
+            shard.SliceView(rank, rank + 1).View(weight.shape);
+            shards.push_back(shard);
+        }
+        XliteOpConcatCol(rt, shards, full);
+        rt.PutTensor(gathered);
+        return full;
+    }
+    return gathered.View(fullShape);
 }
 
 // Kernel scalar params are uint32_t in the launch ABI while XTensor metadata is 64-bit;
@@ -1323,6 +1410,100 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
             batch, indexTopK, blockSize, blockTableStride, ropeHeadDim, kvLoraRank,
             peCache.stride[0], kCache.stride[0], compressRatio, burstCopySize);
     }
+}
+
+void XliteOpDsaCpGatherMLA(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache,
+                           XTensor &peCache, XTensor &oAbsorb, XTensor &queryStartLoc,
+                           XTensor &queryLens, XTensor &cachedLens, XTensor &blockTables,
+                           XTensor &topkIndices, uint32_t nHeads, uint32_t ropeHeadDim,
+                           uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t topK,
+                           float scale)
+{
+    const size_t shardLen = qAbsorb.shape[0];
+    if (shardLen == 0) {
+        return;
+    }
+    if (nHeads == 0 || nHeads > XLITE_MAX_M0 || rt.aicNum == 0 || topK == 0 ||
+        topK > MAX_TOPK_NUM || topK % 128 != 0 || blockSize == 0 ||
+        blockSize % GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP != 0 ||
+        !EachXDtype(BF16, qAbsorb, qr, kCache, peCache, oAbsorb) ||
+        !EachXDtype(INT32, queryStartLoc, queryLens, cachedLens, blockTables, topkIndices) ||
+        qAbsorb.numel != shardLen * nHeads * kvLoraRank || oAbsorb.numel != qAbsorb.numel ||
+        qr.numel != shardLen * nHeads * ropeHeadDim ||
+        topkIndices.shape != std::vector<size_t>{shardLen, topK} || blockTables.shape.size() != 2 ||
+        blockTables.shape[0] < batch || queryStartLoc.numel < batch || queryLens.numel < batch ||
+        cachedLens.numel < batch) {
+        throw std::invalid_argument(
+            "DsaCpGatherMLA: incompatible query, cache or metadata geometry");
+    }
+    // Dense MLA pipelines one query's softmax with the next query's QK on
+    // each cube core. Keep two queries per core in a group to enable that
+    // overlap while bounding the expanded KV workspace.
+    const size_t groupCapacity = std::min<size_t>(shardLen, size_t(rt.aicNum) * 2);
+    const uint32_t blockTableStride = static_cast<uint32_t>(blockTables.stride[0]);
+    auto &groupQueryStartLoc = rt.GetTensor({groupCapacity}, INT32, DBG_LOC);
+    auto &groupQueryLens = rt.GetTensor({groupCapacity}, INT32, DBG_LOC);
+    auto &groupCachedLens = rt.GetTensor({groupCapacity}, INT32, DBG_LOC);
+    auto &groupRequestIds = rt.GetTensor({groupCapacity}, INT32, DBG_LOC);
+    auto &kDense = rt.GetTensor({groupCapacity, topK, kvLoraRank}, BF16, DBG_LOC);
+    auto &peDense = rt.GetTensor({groupCapacity, topK, ropeHeadDim}, BF16, DBG_LOC);
+    auto &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, topK}, BF16, DBG_LOC);
+    for (size_t groupBegin = 0; groupBegin < shardLen; groupBegin += groupCapacity) {
+        const size_t groupEnd = std::min(groupBegin + groupCapacity, shardLen);
+        const size_t groupLen = groupEnd - groupBegin;
+        groupQueryStartLoc.View(groupLen);
+        groupQueryLens.View(groupLen);
+        groupCachedLens.View(groupLen);
+        groupRequestIds.View(groupLen);
+        kDense.View(groupLen);
+        peDense.View(groupLen);
+        if (!IsDummyRuntime(rt)) {
+            aclrtlaunch_dsa_cp_gather_metadata(1, rt.stream, queryStartLoc.ptr, queryLens.ptr,
+                                               cachedLens.ptr, groupQueryStartLoc.ptr,
+                                               groupQueryLens.ptr, groupCachedLens.ptr,
+                                               groupRequestIds.ptr, batch, groupBegin, groupEnd);
+        }
+        XTensor groupTopkIndices(
+            {groupLen, topK}, INT32,
+            reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(topkIndices.ptr) +
+                                     groupBegin * topK * sizeof(int32_t)));
+        XTensor groupQAbsorb(
+            {groupLen, nHeads * kvLoraRank}, BF16,
+            reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(qAbsorb.ptr) +
+                                     groupBegin * nHeads * kvLoraRank * sizeof(uint16_t)));
+        XTensor groupQPe(
+            {groupLen, nHeads * ropeHeadDim}, BF16,
+            reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(qr.ptr) +
+                                     groupBegin * nHeads * ropeHeadDim * sizeof(uint16_t)));
+        XTensor groupOAbsorb(
+            {groupLen, nHeads * kvLoraRank}, BF16,
+            reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(oAbsorb.ptr) +
+                                     groupBegin * nHeads * kvLoraRank * sizeof(uint16_t)));
+        if (!IsDummyRuntime(rt)) {
+            const uint32_t aivNum = PickMinBlockNum(
+                rt.aivNum, groupLen * DIV_ROUND_UP(topK, GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP));
+            // The Gather implementation requires the wider channel first.
+            const bool swap = kvLoraRank < ropeHeadDim;
+            aclrtlaunch_gather_sparse_kv_cache_per_query_bfloat16_t(
+                aivNum, rt.stream, swap ? peCache.ptr : kCache.ptr, swap ? kCache.ptr : peCache.ptr,
+                blockTables.ptr, groupTopkIndices.ptr, groupCachedLens.ptr, groupRequestIds.ptr,
+                swap ? peDense.ptr : kDense.ptr, swap ? kDense.ptr : peDense.ptr, groupLen, topK,
+                blockSize, blockTableStride, swap ? ropeHeadDim : kvLoraRank,
+                swap ? kvLoraRank : ropeHeadDim, swap ? peCache.stride[0] : kCache.stride[0],
+                swap ? kCache.stride[0] : peCache.stride[0]);
+        }
+        XliteOpMLAV2(rt, groupQAbsorb, groupQPe, kDense, peDense, qk, groupOAbsorb,
+                     groupQueryStartLoc, groupQueryLens, groupCachedLens, blockTables, nHeads,
+                     ropeHeadDim, kvLoraRank, blockSize, groupLen, topK, scale, 0, XTensor(),
+                     /*dense=*/true, /*densePerQuery=*/true);
+    }
+    rt.PutTensor(qk);
+    rt.PutTensor(peDense);
+    rt.PutTensor(kDense);
+    rt.PutTensor(groupRequestIds);
+    rt.PutTensor(groupCachedLens);
+    rt.PutTensor(groupQueryLens);
+    rt.PutTensor(groupQueryStartLoc);
 }
 
 void XliteOpRopeComplex(XRuntime &rt, uint32_t nLocalHeads, uint32_t stepDim, uint32_t outStepDim,

@@ -64,6 +64,8 @@ struct XModelConfig {
     bool indexRopeInterleaved = false;
     std::vector<bool> indexFullMask;  // per-layer indexer mask - true: full indexer, false: shared
     std::vector<bool> indexC8Mask;    // per-runtime-layer C8 mask; empty disables C8
+    // Native DSA-CP layout: local tokens, all attention heads, replicated KV.
+    bool enableDsaCp = false;
 
     // linear attention config
     uint32_t linearNumKHeads = 0;
@@ -181,7 +183,8 @@ public:
     {
         rt.enableCommOptimize =
             _c.hcMult == 0 &&
-            ((_c.defTpSize > 1 && (tokenNum >= rt.commOptimizeLen || rt.multiTaskParallel)) ||
+            ((_c.defTpSize > 1 &&
+              (_c.enableDsaCp || tokenNum >= rt.commOptimizeLen || rt.multiTaskParallel)) ||
              (_c.defDpSize > 1 && _c.defTpSize > 1 && _c.moeEpSize > 1 && rt.enableMoEAllToAll));
     }
     // whether to pad the token number to match the max tokens across DP ranks
@@ -213,6 +216,15 @@ public:
     std::vector<XTensor> mlaQNormBias;
     std::vector<XTensor> mlaWUV;
     std::vector<XTensor> mlaWUKT;
+    // Pure decode uses TP head shards of QB/WUV/WUKT when DSA-CP is enabled.
+    // Native weight formats are retained in both prefill and decode.
+    std::vector<MatmulWeight> mlaQBDecodeTp;
+    std::vector<MatmulWeight> attnOutDecodeTp;
+    std::vector<XTensor> mlaWUVDecodeTp;
+    std::vector<XTensor> mlaWUKTDecodeTp;
+    std::vector<bool> dsaCpWUKTWeightNZ;
+    std::vector<bool> dsaCpWUVWeightNZ;
+    std::vector<bool> dsaCpOutWeightNZ;
     std::vector<XTensor> mlaKVNorm;
     std::vector<XTensor> mlaKVNormBias;
 
@@ -289,6 +301,14 @@ public:
     XTensor hcHeadScale;
 
 private:
+    // Prefill receives a token shard; pure decode receives all batch tokens.
+    // Positions, request metadata and persistent KV caches remain global.
+    void ForwardAttnMLAV2DsaCp(XRuntime &rt, uint32_t layer,
+                               std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
+                               XTensor &hiddenState);
+    bool RunDsaCp(const XRuntime &rt) const;
+    void ForwardAttnMLAV2DsaCpOutput(XRuntime &rt, uint32_t layer, XTensor &localOutput,
+                                     size_t shardLen);
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);
     std::tuple<XTensor &, XTensor &, XTensor &> ForwardAttnMLACommonV2(
         XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,

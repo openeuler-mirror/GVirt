@@ -138,3 +138,21 @@ SFA-C8 在 host 接受独立的 INT8 `kCache[numBlocks, blockSize, 1, kvLoraRank
 - softmax 全量/top-k:`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmax` / `RunAivSoftmaxPingPong`(其内部实现 `RunAivSoftmaxLong` 新增 SWA 段/压缩比/attnSink 参数为 cxa 算子服务,mla_v2 调用时均取默认值、行为不变)
 - host launch 与限制:`csrc/op.cpp` 的 `XliteOpMLAV2`(dense 校验关键字 `MAX_TOPK_NUM`);路由 `csrc/model.cpp` 的 `ForwardAttnMLAV2`(短序列分支)与 dense gather 路径(decode+DSA 长序列时启用,关键字 `XliteOpGatherSparseKVCache`,阈值 `XLITE_MLA_DENSE_THRESHOLD=280`,见 `csrc/model.cpp` 的 `XLITE_MLA_DENSE_THRESHOLD`)
 - 常量:`csrc/kernels/kernel_param.h`(`XLITE_MAX_M0`/`MAX_TOPK_NUM`/`MAX_SOFTMAX_PINGPONG_LEN`)
+
+## DSA-CP MLA
+
+DSACP 面向 prefill，在 TP 组内按 query token 分担 Indexer 和主 Attention。
+其关键设计如下：
+
+1. **按 token 划分计算。** Indexer 和主 Attention 使用相同的 token 分片，
+   每卡计算本卡 query 的全部 heads，保留各 query 所属请求的位置和因果关系。
+2. **各卡保留完整 KV cache。** 各卡生成本卡 token 的 main KV 和 index K，
+   通过 AllGather 同步增量并写入完整缓存，使本卡 query 能访问所属请求的有效历史。
+3. **按 Top-K 组织稀疏计算。** Indexer 为每个 query 选择 KV 位置，主 Attention 读取对应的
+   latent KV 和 RoPE K，完成 QK、Softmax、SV。同一 query 的全部 heads 共享选中的 KV，
+   不同 query 独立选择；有效历史不超过 Top-K 时使用全部有效历史。
+   Query 分组处理，复用临时空间以控制峰值显存。
+4. **本卡完成输出投影。** 汇集完整 Wᴼ，对本卡 token 的全部 heads 执行投影，
+   得到本卡 token 的完整 Attention 输出，衔接按 token 分片的 residual/Norm。
+
+MLA 的计算原理见前面的[实现原理](#实现原理)。

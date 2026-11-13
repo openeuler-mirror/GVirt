@@ -16,6 +16,7 @@
 | Balance Scheduling | ✅ | ✅ |
 | Chunked Prefill | ✅ | ✅ |
 | Context Parallel | ❌ | ❌ |
+| DSACP | ✅ | ✅ |
 | Cpu Binding | ✅ | ✅ |
 | Data Parallel | ✅ | ✅ |
 | Disaggregated Prefill | ✅ | ✅ |

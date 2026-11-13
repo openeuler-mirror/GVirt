@@ -13,6 +13,21 @@
 static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN);
 
 HcclDataType XDtype2HcclDtype(enum XDtype dtype);
+// Intersect each request with [shardBegin, shardEnd) in the
+// flattened batch. Local query starts index the rank-local token buffer;
+// local cached lengths include preceding tokens from the same request.
+// localSlotMapping addresses a contiguous temporary KV buffer (block size 1).
+void XliteOpDsaCpMetadata(XRuntime &rt, XTensor &queryStartLoc, XTensor &queryLens,
+                          XTensor &cachedLens, XTensor &localQueryStartLoc, XTensor &localQueryLens,
+                          XTensor &localCachedLens, XTensor &localSlotMapping, uint32_t batch,
+                          uint32_t shardBegin, uint32_t shardEnd);
+// Write the valid rows of gathered new KV to this rank's paged cache using
+// global slots. Negative slots are skipped; numTokens excludes gather padding.
+void XliteOpDsaCpWriteKVCacheBySlot(XRuntime &rt, XTensor &input, XTensor &cache,
+                                    XTensor &slotMapping, uint32_t numTokens, uint32_t blockSize);
+// Gather TP input-channel shards in their original format. The returned pool
+// tensor contains a full weight; the caller releases it after projection.
+XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool transposed);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
                       uint32_t copySize = COPY_SIZE);
@@ -119,6 +134,12 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
                                 uint32_t kvHeads, uint32_t compressRatio = 1,
                                 uint32_t burstCopySize = GM_UB_BURST_SIZE,
                                 const XTensor &kScaleCache = XTensor());
+void XliteOpDsaCpGatherMLA(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache,
+                           XTensor &peCache, XTensor &oAbsorb, XTensor &queryStartLoc,
+                           XTensor &queryLens, XTensor &cachedLens, XTensor &blockTables,
+                           XTensor &topkIndices, uint32_t nHeads, uint32_t ropeHeadDim,
+                           uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t topK,
+                           float scale);
 void XliteOpAddBias(XRuntime &rt, XTensor &input, XTensor &weight, XTensor &output);
 void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor &norm,
                           float normEps, XTensor &out, const XTensor &normBias = XTensor());

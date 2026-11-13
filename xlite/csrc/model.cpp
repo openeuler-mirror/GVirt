@@ -18,6 +18,8 @@
 // Max query length for still routing a non-decode (MTP / small prefill) step through
 // the dense (sparse gather) path.
 #define XLITE_SMALL_PREFILL_THRESHOLD 6
+// Small DSA-CP batches use head TP to avoid full W^O gathering.
+#define XLITE_DSA_CP_TP_TOKEN_THRESHOLD 1024
 
 XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 {
@@ -31,6 +33,15 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     mhaKNorm.resize(c.nLayers);
     mlaQKVA.resize(c.nLayers);
     mlaQB.resize(c.nLayers);
+    if (c.enableDsaCp) {
+        mlaQBDecodeTp.resize(c.nLayers);
+        attnOutDecodeTp.resize(c.nLayers);
+        mlaWUVDecodeTp.resize(c.nLayers);
+        mlaWUKTDecodeTp.resize(c.nLayers);
+        dsaCpWUKTWeightNZ.resize(c.nLayers, c.mlaWuktWeightNZ);
+        dsaCpWUVWeightNZ.resize(c.nLayers, c.mlaWuvWeightNZ);
+        dsaCpOutWeightNZ.resize(c.nLayers, c.weightNZ || c.quantAttnWeightNz);
+    }
     mlaQNorm.resize(c.nLayers);
     mlaQNormBias.resize(c.nLayers);
     mlaWUV.resize(c.nLayers);
@@ -483,6 +494,357 @@ void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenSta
     }
 }
 
+namespace
+{
+
+XTensor DsaCpTensorRows(const XTensor &tensor, size_t rowBegin, size_t rowEnd)
+{
+    // Non-owning view of contiguous rows; the caller retains the source buffer.
+    auto shape = tensor.shape;
+    shape[0] = rowEnd - rowBegin;
+    return XTensor(
+        shape, tensor.dtype,
+        reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(tensor.ptr) +
+                                 rowBegin * tensor.stride[0] * XDtypeBit(tensor.dtype) / 8));
+}
+
+}  // namespace
+
+bool XModel::RunDsaCp(const XRuntime &rt) const
+{
+    const uint32_t verifyQueryLen = static_cast<uint32_t>(std::max(_c.numSpecTokens, 0)) + 1;
+    return _c.enableDsaCp && rt._maxQueryLen > verifyQueryLen &&
+           rt.batchedTokens > XLITE_DSA_CP_TP_TOKEN_THRESHOLD;
+}
+
+void XModel::ForwardAttnMLAV2DsaCp(XRuntime &rt, uint32_t layer,
+                                   std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
+                                   XTensor &hiddenState)
+{
+    if (_c.attnType != XMODEL_ATTN_DSA || _c.defTpSize < 2) {
+        throw std::invalid_argument("MLA DSA-CP requires DSA attention and defTpSize > 1");
+    }
+    // The regular MLA path checks this in ForwardAttnMLACommonV2, which this path bypasses.
+    if (_c.nHeads == 0 || _c.nHeads % _c.defTpSize != 0) {
+        throw std::invalid_argument("MLA DSA-CP requires positive nHeads divisible by defTpSize");
+    }
+    // MLA tiles must hold all heads of at least one local query token.
+    if (_c.nHeads > XLITE_MAX_M0) {
+        throw std::invalid_argument("MLA DSA-CP nHeads exceeds the MLA tile capacity XLITE_MAX_M0");
+    }
+    // Select this rank's token shard and retain global request coordinates.
+    const size_t localTokenCapacity = hiddenState.shape[0];
+    const size_t paddedTokens = localTokenCapacity * _c.defTpSize;
+    const size_t rankOffset = (_rankId % _c.defTpSize) * localTokenCapacity;
+    const size_t shardBegin = std::min<size_t>(rankOffset, rt.batchedTokens);
+    const size_t shardEnd = std::min<size_t>(rankOffset + localTokenCapacity, rt.batchedTokens);
+    const size_t shardLen = shardEnd - shardBegin;
+    const auto dtype = hiddenState.dtype;
+    // The comm path already owns this rank's token shard. Only positions and
+    // request metadata remain global; do not apply the rank offset twice.
+    auto hidden = DsaCpTensorRows(hiddenState, 0, shardLen);
+    auto positionTokens = rt._attnPosition;
+    if (positionTokens.dtype != INT64 ||
+        !(positionTokens.shape.size() == 1 ||
+          (positionTokens.shape.size() == 2 && positionTokens.shape[0] == 1)) ||
+        positionTokens.numel < rt.batchedTokens) {
+        throw std::invalid_argument(
+            "MLA DSA-CP requires INT64 positions shaped [N] or [1, N] covering all batch tokens");
+    }
+    // The Python adapter supplies [1, N]. Slice tokens, not rows of width N;
+    // View also checks contiguity and leaves the runtime's original metadata intact.
+    positionTokens.View(std::vector<size_t>{positionTokens.numel});
+    auto position = DsaCpTensorRows(positionTokens, shardBegin, shardEnd);
+    auto &localQueryStartLoc = rt.GetTensor({rt._batch}, INT32, DBG_LOC);
+    auto &localQueryLens = rt.GetTensor({rt._batch}, INT32, DBG_LOC);
+    auto &localCachedLens = rt.GetTensor({rt._batch}, INT32, DBG_LOC);
+    auto &localSlotMapping = rt.GetTensor({localTokenCapacity}, INT32, DBG_LOC);
+    XliteOpDsaCpMetadata(rt, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
+                         localQueryStartLoc, localQueryLens, localCachedLens, localSlotMapping,
+                         rt._batch, shardBegin, shardEnd);
+
+    // Prepare local latent KV and K PE directly in the packed AllGather buffer.
+    const size_t packedWidth = _c.kvLoraRank + _c.ropeHeadDim;
+    const size_t elementBytes = XDtypeBit(dtype) / 8;
+    auto &attnQkvc = rt.GetTensor({localTokenCapacity, _c.qLoraRank + packedWidth}, dtype, DBG_LOC);
+    auto &attnNormQc = rt.GetTensor({localTokenCapacity, _c.qLoraRank}, dtype, DBG_LOC);
+    auto &gatheredBuffer = rt.GetTensor({paddedTokens, packedWidth}, dtype, DBG_LOC);
+    auto packedNewKV = DsaCpTensorRows(gatheredBuffer, rankOffset, rankOffset + localTokenCapacity);
+    XTensor localNewKV({localTokenCapacity, _c.kvLoraRank}, dtype, packedNewKV.ptr,
+                       std::vector<size_t>{packedWidth, 1});
+    XTensor localNewKPe({localTokenCapacity, _c.ropeHeadDim}, dtype,
+                        reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(packedNewKV.ptr) +
+                                                 _c.kvLoraRank * elementBytes),
+                        std::vector<size_t>{packedWidth, 1});
+    attnQkvc.View(shardLen);
+    attnNormQc.View(shardLen);
+    if (shardLen > 0) {
+        ForwardLinear(rt, layer, hidden, mlaQKVA, attnQkvc);
+        // Block size 1 makes the cache stride the distance between packed token rows.
+        XliteOpMlaPrepare(rt, attnQkvc, mlaQNorm[layer], mlaQNormBias[layer], attnNormQc,
+                          mlaKVNorm[layer], mlaKVNormBias[layer], freqsCis, position, _c.qLoraRank,
+                          _c.kvLoraRank, _c.ropeHeadDim, 1, localNewKV, localNewKPe,
+                          localSlotMapping, _c.normEps);
+    }
+    rt.PutTensor(attnQkvc);
+
+    // Replicate new KV and write only real tokens to the persistent caches.
+    // Gather padding is never consumed by attention and needs no initialization.
+    XliteOpAllGather(rt, packedNewKV, gatheredBuffer, TP, true, DBG_LOC);
+    XTensor gatheredNewKV({paddedTokens, _c.kvLoraRank}, dtype, gatheredBuffer.ptr,
+                          std::vector<size_t>{packedWidth, 1});
+    XTensor gatheredNewKPe(
+        {paddedTokens, _c.ropeHeadDim}, dtype,
+        reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(gatheredBuffer.ptr) +
+                                 _c.kvLoraRank * elementBytes),
+        std::vector<size_t>{packedWidth, 1});
+    XliteOpDsaCpWriteKVCacheBySlot(rt, gatheredNewKV, kvCache[layer][0], rt._attnSlotMapping[0],
+                                   rt.batchedTokens, _c.blockSizes[0]);
+    XliteOpDsaCpWriteKVCacheBySlot(rt, gatheredNewKPe, kvCache[layer][1], rt._attnSlotMapping[0],
+                                   rt.batchedTokens, _c.blockSizes[0]);
+    rt.PutTensor(gatheredBuffer);
+
+    const bool useTopK = rt._attnBlockTables[0].shape[1] * _c.blockSizes[0] > _c.indexTopK;
+    if (layer >= _c.indexFullMask.size() || _c.indexFullMask[layer]) {
+        const bool c8 = !_c.indexC8Mask.empty() && _c.indexC8Mask[layer];
+        // Indexer workspace: generate K in this rank's final Gather region.
+        auto &indexKW =
+            rt.GetTensor({localTokenCapacity, _c.indexHeadDim + _c.indexNHeads}, dtype, DBG_LOC);
+        auto &indexQ =
+            rt.GetTensor({localTokenCapacity, _c.indexNHeads * _c.indexHeadDim}, dtype, DBG_LOC);
+        auto &gatheredIndexK =
+            rt.GetTensor({paddedTokens, _c.indexHeadDim}, c8 ? INT8 : dtype, DBG_LOC);
+        auto localIndexK =
+            DsaCpTensorRows(gatheredIndexK, rankOffset, rankOffset + localTokenCapacity);
+        indexKW.View(shardLen);
+        indexQ.View(shardLen);
+        XTensor *gatheredIndexKScale = nullptr;
+        XTensor localIndexKScale({0}, FP16, nullptr);
+        XTensor *indexQ8 = nullptr, *indexQScale = nullptr, *indexScaledWeights = nullptr;
+        if (c8) {
+            gatheredIndexKScale = &rt.GetTensor({paddedTokens, 1}, FP16, DBG_LOC);
+            localIndexKScale =
+                DsaCpTensorRows(*gatheredIndexKScale, rankOffset, rankOffset + localTokenCapacity);
+            if (useTopK) {
+                indexQ8 = &rt.GetTensor(indexQ.shape, INT8, DBG_LOC);
+                indexQScale = &rt.GetTensor({shardLen, _c.indexNHeads}, FP16, DBG_LOC);
+                indexScaledWeights = &rt.GetTensor(indexQScale->shape, FP16, DBG_LOC);
+            }
+        }
+
+        // Prepare local index Q/K; K is updated even when Top-K is unnecessary.
+        if (shardLen > 0) {
+            XliteOpMatmul(rt, hidden, indexKWeightsProj[layer], indexKW, _c.weightNZ);
+            if (useTopK) {
+                ForwardLinear(rt, layer, attnNormQc, indexQB, indexQ);
+            }
+            XliteOpIndexerPrepare(
+                rt, indexKW, indexKNorm[layer], indexKNormBias[layer], freqsCis, position,
+                _c.indexHeadDim, _c.indexNHeads, _c.ropeHeadDim, 1, localIndexK, localSlotMapping,
+                _c.normEps, useTopK ? indexQ : XTensor(), _dsaIndexerScale, _c.indexTopK, useTopK,
+                1, localIndexKScale, indexQ8 == nullptr ? XTensor() : *indexQ8,
+                indexQScale == nullptr ? XTensor() : *indexQScale,
+                indexScaledWeights == nullptr ? XTensor() : *indexScaledWeights);
+        }
+
+        // Replicate new index K before scoring against the complete history.
+        XliteOpAllGather(rt, localIndexK, gatheredIndexK, TP, true, DBG_LOC);
+        XliteOpDsaCpWriteKVCacheBySlot(rt, gatheredIndexK, kvCache[layer][2],
+                                       rt._attnSlotMapping[0], rt.batchedTokens, _c.blockSizes[0]);
+        rt.PutTensor(gatheredIndexK);
+        if (c8) {
+            // K and its dequantization scale must address the same global slots.
+            // Empty shards still participate in both collectives.
+            XliteOpAllGather(rt, localIndexKScale, *gatheredIndexKScale, TP, true, DBG_LOC);
+            XliteOpDsaCpWriteKVCacheBySlot(rt, *gatheredIndexKScale, kvCache[layer][3],
+                                           rt._attnSlotMapping[0], rt.batchedTokens,
+                                           _c.blockSizes[0]);
+            rt.PutTensor(*gatheredIndexKScale);
+        }
+
+        // Score this rank's queries and retain their Top-K for shared indexer layers.
+        rt.dsaPerLayerTopk = nullptr;
+        if (useTopK) {
+            rt._dsaTopkBuffer.View(shardLen);
+            rt.dsaPerLayerTopk = &rt._dsaTopkBuffer;
+            if (shardLen > 0) {
+                auto &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
+                                            c8 ? FP32 : dtype, DBG_LOC);
+                auto &lastTopk =
+                    rt.GetTensor({localTokenCapacity, 2 * _c.indexTopK}, INT32, DBG_LOC);
+                XliteOpIndexerTopK(rt, c8 ? *indexQ8 : indexQ, kvCache[layer][2],
+                                   c8 ? *indexScaledWeights : indexKW, scores, lastTopk,
+                                   _dsaSeqPositions, rt._dsaTopkBuffer, localQueryStartLoc,
+                                   localQueryLens, localCachedLens, rt._attnBlockTables[0], _sync,
+                                   _c.indexNHeads, _c.indexHeadDim, _c.blockSizes[0], rt._batch,
+                                   _c.indexTopK, 0, c8 ? kvCache[layer][3] : XTensor());
+                rt.PutTensor(lastTopk);
+                rt.PutTensor(scores);
+            }
+        }
+        if (c8 && useTopK) {
+            rt.PutTensor(*indexScaledWeights);
+            rt.PutTensor(*indexQScale);
+            rt.PutTensor(*indexQ8);
+        }
+        rt.PutTensor(indexQ);
+        rt.PutTensor(indexKW);
+    }
+    rt.PutTensor(localSlotMapping);
+
+    // Prepare all attention heads for each local query, then absorb WUK into Q.
+    XTensor *oAbsorb = nullptr;
+    if (shardLen > 0) {
+        auto &q =
+            rt.GetTensor({shardLen, _c.nHeads * (_c.nopeHeadDim + _c.ropeHeadDim)}, dtype, DBG_LOC);
+        auto &qPe = rt.GetTensor({shardLen, _c.nHeads * _c.ropeHeadDim}, dtype, DBG_LOC);
+        auto &qAbsorb = rt.GetTensor({shardLen, _c.nHeads * _c.kvLoraRank}, dtype, DBG_LOC);
+        oAbsorb = &rt.GetTensor({shardLen, _c.nHeads * _c.kvLoraRank}, dtype, DBG_LOC);
+        ForwardLinear(rt, layer, attnNormQc, mlaQB, q);
+        const size_t headsPerTile =
+            std::max<size_t>(1, ROPE_COMPLEX_MAX_ELEMENTS_PER_TOKEN / _c.ropeHeadDim);
+        if (_c.nHeads <= headsPerTile) {
+            XliteOpRopeComplex(rt, _c.nHeads, _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim,
+                               _c.ropeHeadDim, _c.nopeHeadDim, 0, q, freqsCis, position, qPe);
+        } else {
+            std::vector<XTensor> qParts, peParts;
+            std::vector<XTensor *> qPartBuffers, pePartBuffers;
+            for (size_t h = 0; h < _c.nHeads; h += headsPerTile) {
+                size_t heads = std::min(headsPerTile, _c.nHeads - h);
+                auto &qPart = rt.GetTensor({shardLen, heads * (_c.nopeHeadDim + _c.ropeHeadDim)},
+                                           dtype, DBG_LOC);
+                auto &pePart = rt.GetTensor({shardLen, heads * _c.ropeHeadDim}, dtype, DBG_LOC);
+                qParts.push_back(qPart);
+                peParts.push_back(pePart);
+                qPartBuffers.push_back(&qPart);
+                pePartBuffers.push_back(&pePart);
+            }
+            XliteOpSplitCol(rt, q, qParts);
+            for (size_t i = 0; i < qParts.size(); ++i) {
+                XliteOpRopeComplex(rt, peParts[i].shape[1] / _c.ropeHeadDim,
+                                   _c.nopeHeadDim + _c.ropeHeadDim, _c.ropeHeadDim, _c.ropeHeadDim,
+                                   _c.nopeHeadDim, 0, qParts[i], freqsCis, position, peParts[i]);
+            }
+            XliteOpConcatCol(rt, peParts, qPe);
+            for (size_t i = 0; i < qPartBuffers.size(); ++i) {
+                rt.PutTensor(*pePartBuffers[i]);
+                rt.PutTensor(*qPartBuffers[i]);
+            }
+        }
+        XliteOpEinsumMhtHtdMhd(rt, q, mlaWUKT[layer], qAbsorb, shardLen, _c.nHeads, _c.nopeHeadDim,
+                               _c.kvLoraRank, dsaCpWUKTWeightNZ[layer],
+                               _c.nopeHeadDim + _c.ropeHeadDim);
+
+        rt.PutTensor(q);
+        // Run sparse prefill on gathered Top-K KV; retain the existing paged fallbacks.
+        auto topkIndices = rt.dsaPerLayerTopk == nullptr ? XTensor() : *rt.dsaPerLayerTopk;
+        if (useTopK) {
+            XliteOpDsaCpGatherMLA(rt, qAbsorb, qPe, kvCache[layer][0], kvCache[layer][1], *oAbsorb,
+                                  localQueryStartLoc, localQueryLens, localCachedLens,
+                                  rt._attnBlockTables[0], topkIndices, _c.nHeads, _c.ropeHeadDim,
+                                  _c.kvLoraRank, _c.blockSizes[0], rt._batch, _c.indexTopK,
+                                  _c.softmaxScale);
+        } else {
+            const size_t maxLen = rt._attnBlockTables[0].shape[1] * _c.blockSizes[0];
+            const size_t tile = std::min(maxLen, size_t(rt._tileSizeOfCachedKV));
+            auto &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, tile}, dtype, DBG_LOC);
+            if (maxLen <= tile) {
+                XliteOpMLAV2(rt, qAbsorb, qPe, kvCache[layer][0], kvCache[layer][1], qk, *oAbsorb,
+                             localQueryStartLoc, localQueryLens, localCachedLens,
+                             rt._attnBlockTables[0], _c.nHeads, _c.ropeHeadDim, _c.kvLoraRank,
+                             _c.blockSizes[0], rt._batch, maxLen, _c.softmaxScale,
+                             useTopK ? _c.indexTopK : 0, topkIndices);
+            } else {
+                auto &sv =
+                    rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.kvLoraRank}, dtype, DBG_LOC);
+                auto &softmaxMax = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
+                auto &softmaxSum = rt.GetTensor({rt.aivNum * XLITE_MAX_M0 * 2}, FP32, DBG_LOC);
+                auto &lastSoftmaxMax = rt.GetTensor({shardLen, _c.nHeads}, FP32, DBG_LOC);
+                auto &lastSoftmaxSum = rt.GetTensor({shardLen, _c.nHeads}, FP32, DBG_LOC);
+                XliteOpFlashMLAV2(rt, qAbsorb, qPe, kvCache[layer][0], kvCache[layer][1], qk, sv,
+                                  softmaxMax, softmaxSum, lastSoftmaxMax, lastSoftmaxSum, _sync,
+                                  *oAbsorb, localQueryStartLoc, localQueryLens, localCachedLens,
+                                  rt._attnBlockTables[0], _c.nHeads, _c.ropeHeadDim, _c.kvLoraRank,
+                                  _c.blockSizes[0], rt._batch, _c.softmaxScale, tile,
+                                  useTopK ? _c.indexTopK : 0, topkIndices);
+                rt.PutTensor(lastSoftmaxSum);
+                rt.PutTensor(lastSoftmaxMax);
+                rt.PutTensor(softmaxSum);
+                rt.PutTensor(softmaxMax);
+                rt.PutTensor(sv);
+            }
+            rt.PutTensor(qk);
+        }
+        rt.PutTensor(qAbsorb);
+        rt.PutTensor(qPe);
+    }
+    rt.PutTensor(attnNormQc);
+    rt.PutTensor(localCachedLens);
+    rt.PutTensor(localQueryLens);
+    rt.PutTensor(localQueryStartLoc);
+
+    // Expand the latent attention output with WUV, then apply the output projection.
+    auto &attnOutput = rt.GetTensor({localTokenCapacity, _c.nHeads * _c.vHeadDim}, dtype, DBG_LOC);
+    if (shardLen > 0) {
+        auto validAttnOutput = DsaCpTensorRows(attnOutput, 0, shardLen);
+        XliteOpEinsumMhtHtdMhd(rt, *oAbsorb, mlaWUV[layer], validAttnOutput, shardLen, _c.nHeads,
+                               _c.kvLoraRank, _c.vHeadDim, dsaCpWUVWeightNZ[layer]);
+        rt.PutTensor(*oAbsorb);
+    }
+    ForwardAttnMLAV2DsaCpOutput(rt, layer, attnOutput, shardLen);
+    rt.PutTensor(attnOutput);
+}
+
+void XModel::ForwardAttnMLAV2DsaCpOutput(XRuntime &rt, uint32_t layer, XTensor &localOutput,
+                                         size_t shardLen)
+{
+    const size_t tp = _c.defTpSize;
+    std::vector<MatmulWeight> weights{attnOut[layer]};
+    MatmulWeight &weight = weights[0];
+    const auto quant = weight.GetQuantType();
+    const bool transposed = quant != NO_QUANT && _c.quantAttnWeightTrans;
+    auto &fullWeight =
+        XliteOpDsaCpGatherWeight(rt, weight.weight, dsaCpOutWeightNZ[layer], transposed);
+    weight.weight = fullWeight;
+    XTensor *fullInputScale = nullptr, *fullInputOffset = nullptr;
+    if (quant == STATIC_QUANT) {
+        // Native static W8A8 repeats the input-channel quantization vectors.
+        auto expand = [&](XTensor &tensor) -> XTensor * {
+            if (tensor.numel <= 1) {
+                return nullptr;
+            }
+            auto &full = rt.GetTensor({1, tensor.numel * tp}, tensor.dtype, DBG_LOC);
+            XTensor row({1, tensor.numel}, tensor.dtype, tensor.ptr);
+            XliteOpConcatCol(rt, std::vector<XTensor>(tp, row), full);
+            full.View(std::vector<size_t>{tensor.numel * tp});
+            tensor = full;
+            return &full;
+        };
+        fullInputScale = expand(weight.inputScale);
+        fullInputOffset = expand(weight.inputOffset);
+    }
+    // Valid rows are overwritten by the full projection. Clear only
+    // padding, which is still consumed by the following residual/Norm.
+    if (!rt.IsDummyRuntime()) {
+        rt.hiddenStateSlice.Memset(0, rt.stream, shardLen * _c.hiddenSize);
+    }
+    if (shardLen > 0) {
+        auto input = DsaCpTensorRows(localOutput, 0, shardLen);
+        auto attnOutput = DsaCpTensorRows(rt.hiddenStateSlice, 0, shardLen);
+        ForwardLinear(rt, 0, input, weights, attnOutput);
+    }
+    if (fullInputOffset != nullptr) {
+        rt.PutTensor(*fullInputOffset);
+    }
+    if (fullInputScale != nullptr) {
+        rt.PutTensor(*fullInputScale);
+    }
+    rt.PutTensor(fullWeight);
+    if (rt.multiTaskParallel) {
+        rt.NotifyRecordPeerStream();
+    }
+}
+
 std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
     XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
     XTensor &hiddenState)
@@ -511,7 +873,7 @@ std::tuple<XTensor &, XTensor &, XTensor &> XModel::ForwardAttnMLACommonV2(
                       peCache, rt._attnSlotMapping[0], _c.normEps);
     rt.PutTensor(attnQkvc);
 
-    ForwardLinear(rt, layer, attnNormQc, mlaQB, attnQWithQr);
+    ForwardLinear(rt, layer, attnNormQc, _c.enableDsaCp ? mlaQBDecodeTp : mlaQB, attnQWithQr);
 
     XTensor &qPe = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.ropeHeadDim},
                                 hiddenState.dtype, DBG_LOC);
@@ -526,6 +888,10 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                               std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
                               XTensor &hiddenState)
 {
+    if (RunDsaCp(rt)) {
+        ForwardAttnMLAV2DsaCp(rt, layer, kvCache, freqsCis, hiddenState);
+        return;
+    }
     XTensor &kCache = kvCache[layer][0];
     XTensor &peCache = kvCache[layer][1];
     uint32_t nLocalHeads = _c.nHeads / _c.defTpSize;
@@ -547,10 +913,12 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                                     hiddenState.dtype, DBG_LOC);
     // for MLA, `mlaWUKT` could be in NZ; for DSA, `mlaWUKT` is in ND format
     // TODO: remove `_c.attnType != XMODEL_ATTN_DSA` when vllm-ascend configures `mlaWuktWeightNZ`
-    XliteOpEinsumMhtHtdMhd(rt, attnQWithQr, mlaWUKT[layer], qAbsorb, hiddenState.shape[0],
-                           nLocalHeads, _c.nopeHeadDim, _c.kvLoraRank,
-                           _c.weightNZ && (_c.mlaWuktWeightNZ || _c.attnType != XMODEL_ATTN_DSA),
-                           static_cast<int>(_c.nopeHeadDim + _c.ropeHeadDim));
+    XliteOpEinsumMhtHtdMhd(
+        rt, attnQWithQr, _c.enableDsaCp ? mlaWUKTDecodeTp[layer] : mlaWUKT[layer], qAbsorb,
+        hiddenState.shape[0], nLocalHeads, _c.nopeHeadDim, _c.kvLoraRank,
+        _c.enableDsaCp ? dsaCpWUKTWeightNZ[layer]
+                       : _c.weightNZ && (_c.mlaWuktWeightNZ || _c.attnType != XMODEL_ATTN_DSA),
+        static_cast<int>(_c.nopeHeadDim + _c.ropeHeadDim));
     rt.PutTensor(attnQWithQr);
 
     XTensor &oAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
@@ -620,11 +988,13 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
 
     XTensor &attnOutput =
         rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.vHeadDim}, hiddenState.dtype, DBG_LOC);
-    XliteOpEinsumMhtHtdMhd(rt, oAbsorb, mlaWUV[layer], attnOutput, hiddenState.shape[0],
-                           nLocalHeads, _c.kvLoraRank, _c.vHeadDim, _c.mlaWuvWeightNZ);
+    XliteOpEinsumMhtHtdMhd(rt, oAbsorb, _c.enableDsaCp ? mlaWUVDecodeTp[layer] : mlaWUV[layer],
+                           attnOutput, hiddenState.shape[0], nLocalHeads, _c.kvLoraRank,
+                           _c.vHeadDim,
+                           _c.enableDsaCp ? dsaCpWUVWeightNZ[layer] : _c.mlaWuvWeightNZ);
     rt.PutTensor(oAbsorb);
 
-    ForwardLinear(rt, layer, attnOutput, attnOut, hiddenState);
+    ForwardLinear(rt, layer, attnOutput, _c.enableDsaCp ? attnOutDecodeTp : attnOut, hiddenState);
     if (_c.defTpSize > 1) {
         if (rt.multiTaskParallel) {
             rt.NotifyRecordPeerStream();
@@ -1995,7 +2365,12 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
     XTensor xSlice;
     size_t m = rt.currTokens, mPad = xPad.shape[0], M = std::max(mPad, rt.maxTokensDp);
     size_t mPadPerTp = mPad / _c.defTpSize;
+    // Token CP completes local tokens; head TP needs complete input activations.
+    const bool useLocalAttnInput = RunDsaCp(rt);
     size_t sizePerTp = mPad * _c.hiddenSize / _c.defTpSize * XDtypeBit(embed.dtype) / 8;
+    if (_c.enableDsaCp && !rt.IsDummyRuntime()) {
+        xPad.Memset(0, rt.stream, m * _c.hiddenSize);
+    }
     XTensor x, h;
     x.Init({m, _c.hiddenSize}, embed.dtype, xPad.ptr);
 
@@ -2010,18 +2385,25 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
                                         (rt.rankId() % _c.defTpSize) * sizePerTp);
     xSlice.Init({mPadPerTp, _c.hiddenSize}, xPad.dtype, slicePtr);
 
+    XTensor &attnInput = useLocalAttnInput ? rt.hiddenStateSlice : h;
     for (uint32_t i = 0; i < _c.nLayers; i++) {
         if (i == 0) {
-            XliteOpRmsNorm(rt, x, attnNorm[i], h, _c.normEps, x.shape[1], true, attnNormBias[i]);
+            XTensor &normInput = useLocalAttnInput ? xSlice : x;
+            XliteOpRmsNorm(rt, normInput, attnNorm[i], attnInput, _c.normEps, _c.hiddenSize, true,
+                           attnNormBias[i]);
         }
         if (IsAuxLayer(i)) {
             XliteOpAllGather(rt, xSlice, xPad, TP, false, DBG_LOC);
             MaybeCaptureAuxHidden(rt, i, xPad);
         }
         XDEBUG_SET_STATE(_rankId == 0 && (i == 0 || i == _c.nDenseLayers));
-        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
-        ForwardAttn(rt, i, kvCache, freqsCis, h);
-        XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
+        XDEBUG_PRINT_X(rt, attnInput, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
+        if (useLocalAttnInput) {
+            ForwardAttnMLAV2DsaCp(rt, i, kvCache, freqsCis, attnInput);
+        } else {
+            ForwardAttn(rt, i, kvCache, freqsCis, h);
+        }
+        XDEBUG_PRINT_X(rt, attnInput, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
         XliteOpAddAndRmsNorm(rt, rt.hiddenStateSlice, xSlice, mlpNorm[i], _c.normEps,
                              rt.hiddenStateSlice, mlpNormBias[i]);
         if (!rt.enableMoEAllToAll) {
@@ -2038,7 +2420,9 @@ void XModel::ForwardLayersCommOptimize(XRuntime &rt, XTensor &xPad,
         if (i < (_c.nLayers - 1)) {
             XliteOpAddAndRmsNorm(rt, rt.hiddenStateSlice, xSlice, attnNorm[i + 1], _c.normEps,
                                  rt.hiddenStateSlice, attnNormBias[i + 1]);
-            XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP, false, DBG_LOC);
+            if (!useLocalAttnInput) {
+                XliteOpAllGather(rt, rt.hiddenStateSlice, rt.hiddenStatePad, TP, false, DBG_LOC);
+            }
         }
         if (rt.multiTaskParallel) {
             rt.NotifyWaitPeerStream();
@@ -2689,7 +3073,9 @@ size_t XModel::DummyRun()
     // block table + single slot mapping, plus a mamba state-index table for hybrid models.
     // Query lens fill the token budget as the scheduler would: queryLen per seq with a
     // clamped tail; zero-length seqs are dropped, so the batch may shrink.
-    auto buildV2AttnMeta = [&](uint32_t batchSize, uint32_t queryLen, uint32_t cachedLen) {
+    auto buildV2AttnMeta = [&](uint32_t batchSize, uint32_t queryLen, uint32_t cachedLen,
+                               uint64_t tokenBudget = 0) {
+        tokenBudget = tokenBudget == 0 ? _c.maxBatchedTokens : tokenBudget;
         XModelAttnMeta attnMeta;
         attnMeta.version = 2;
         attnMeta.attnType = _c.attnType;
@@ -2697,9 +3083,9 @@ size_t XModel::DummyRun()
         uint32_t totalLens = queryLen + cachedLen;
         for (uint32_t i = 0; i < batchSize; i++) {
             uint32_t len = 0;
-            if (batchedTokens < _c.maxBatchedTokens) {
+            if (batchedTokens < tokenBudget) {
                 len = static_cast<uint32_t>(
-                    std::min<uint64_t>(queryLen, _c.maxBatchedTokens - batchedTokens));
+                    std::min<uint64_t>(queryLen, tokenBudget - batchedTokens));
             }
             if (len == 0) {
                 break;
@@ -2780,10 +3166,11 @@ size_t XModel::DummyRun()
         return rt.maxUsedSize();
     };
 
-    auto runDecodeAs = [&](uint32_t batchSize, uint32_t queryLen) -> size_t {
+    auto runDecodeAs = [&](uint32_t batchSize, uint32_t queryLen,
+                           uint64_t tokenBudget = 0) -> size_t {
         uint32_t cachedLen =
             _c.maxSeqLen > queryLen ? static_cast<uint32_t>(_c.maxSeqLen - queryLen) : 0;
-        auto attnMeta = buildV2AttnMeta(batchSize, queryLen, cachedLen);
+        auto attnMeta = buildV2AttnMeta(batchSize, queryLen, cachedLen, tokenBudget);
         uint32_t batchedTokens = static_cast<uint32_t>(attnMeta.position.shape[0]);
         uint32_t batch = static_cast<uint32_t>(attnMeta.lens.shape[0]);
         // kvCache is sized off blockSizes[0] (matches _attnBlockTables[0].shape[1]).
@@ -2833,7 +3220,7 @@ size_t XModel::DummyRun()
         if (_c.maxBatch == 0 || _c.attnType != XMODEL_ATTN_DSA) {
             return 0;
         }
-        if (_c.numSpecTokens >= XLITE_SMALL_PREFILL_THRESHOLD) {
+        if (!_c.enableDsaCp && _c.numSpecTokens >= XLITE_SMALL_PREFILL_THRESHOLD) {
             return 0;
         }
         bool hasFullIndexer =
@@ -2844,6 +3231,30 @@ size_t XModel::DummyRun()
         }
         uint32_t batch0 = static_cast<uint32_t>(
             std::min<uint64_t>(_c.maxBatch, DIV_ROUND_UP(spanMax, XLITE_MLA_DENSE_THRESHOLD) - 1));
+        if (_c.enableDsaCp) {
+            // Probe each dense query width at its largest eligible TP batch.
+            // MTP may exceed the small-batch threshold; other queries may not.
+            size_t size = 0;
+            if (spanMax > rt._tileSizeOfCachedKV) {
+                batch0 = static_cast<uint32_t>(_c.maxBatch);
+            }
+            const uint32_t verifyQueryLen =
+                static_cast<uint32_t>(std::max(_c.numSpecTokens, 0)) + 1;
+            for (uint32_t queryLen = 1; queryLen <= XLITE_SMALL_PREFILL_THRESHOLD; queryLen++) {
+                if (queryLen > _c.maxSeqLen || queryLen > _c.maxBatchedTokens) {
+                    break;
+                }
+                uint64_t tokenBudget = _c.maxBatchedTokens;
+                if (queryLen > verifyQueryLen) {
+                    tokenBudget = std::min<uint64_t>(tokenBudget, XLITE_DSA_CP_TP_TOKEN_THRESHOLD);
+                }
+                uint32_t batch = std::min<uint64_t>(batch0, DIV_ROUND_UP(tokenBudget, queryLen));
+                if (batch > 0) {
+                    size = std::max(size, runDecodeAs(batch, queryLen, tokenBudget));
+                }
+            }
+            return size;
+        }
         uint32_t queryLen = _c.numSpecTokens >= 0
                                 ? static_cast<uint32_t>(_c.numSpecTokens) + 1
                                 : static_cast<uint32_t>(std::max<uint64_t>(
@@ -2853,7 +3264,18 @@ size_t XModel::DummyRun()
         return runDecodeAs(batch0, queryLen);
     };
 
-    return std::max<size_t>({runPrefill(), runDecode(), runDecodeDense()});
+    size_t maxSize = std::max<size_t>({runPrefill(), runDecode(), runDecodeDense()});
+    if (_c.enableDsaCp && _c.maxBatch > 0) {
+        // The largest prefill probe may take CP. Also cover head TP at the
+        // small-batch boundary, with long history for paged/flash workspaces.
+        const uint32_t queryLen = std::min<uint64_t>(XLITE_DSA_CP_TP_TOKEN_THRESHOLD,
+                                                     std::min(_c.maxBatchedTokens, _c.maxSeqLen));
+        if (queryLen > 0) {
+            maxSize = std::max(maxSize, runDecodeAs(1, queryLen));
+        }
+        maxSize = std::max(maxSize, runDecodeAs(static_cast<uint32_t>(_c.maxBatch), 1));
+    }
+    return maxSize;
 }
 
 size_t XModel::GetTensorPoolSize(int dbg)
