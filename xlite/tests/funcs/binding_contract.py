@@ -90,6 +90,55 @@ def main(_device):
     )
     print(f"PASS {checked} contract wrappers probed (shape violations + pass-through)")
 
+    # Class-proxy probes: Model/ModelConfig are Python proxies over ScriptObjects
+    # (torch::class_ can't be subclassed). Each def_rw field is a _Fwd descriptor
+    # so downstream's AttributeSetterMixin gate (hasattr(type(self), name))
+    # passes. Failure is silent and invisible to the op probes above: a
+    # pyi-declared field not registered in C++ def_rw (e.g. enable_dsa_cp once
+    # drifted) makes reads raise AttributeError; a missing descriptor makes the
+    # mixin silently drop writes. Probe the class surface directly.
+
+    def _probe_class_proxy(class_name, real_cls):
+        # Exercise the downstream mixin pattern (mixin first in MRO).
+        class _Gate:
+            def __setattr__(self, name, value):
+                if not (hasattr(type(self), name) or name in self.__dict__):
+                    return
+                super().__setattr__(name, value)
+
+        Proxy = type(class_name, (_Gate, real_cls), {})
+        proxy = Proxy()
+        for a in _C._class_specs.get(class_name, {}).get("attrs", []):
+            # Descriptor present (gate would pass) ...
+            assert isinstance(getattr(type(proxy), a, None), _C._Fwd), (
+                f"{class_name}.{a}: no _Fwd descriptor (pyi lists it but _class_proxy didn't build one)"
+            )
+            # ... and the ScriptObject actually has the field (write round-trips).
+            try:
+                setattr(proxy, a, getattr(proxy, a))
+            except (AttributeError, RuntimeError) as e:
+                raise AssertionError(
+                    f"{class_name}.{a}: pyi declares it but the ScriptObject rejects it (C++ def_rw drift?): {e}"
+                ) from e
+            assert getattr(proxy, a) == getattr(proxy._inner, a), (
+                f"{class_name}.{a}: write didn't reach the underlying ScriptObject"
+            )
+        return proxy
+
+    cfg_proxy = _probe_class_proxy("ModelConfig", _C.ModelConfig)
+    model_proxy = _probe_class_proxy("Model", _C.Model)
+
+    # Model.init must unwrap a proxy config before handing it to C++ (a proxy
+    # straight to intrusive_ptr<T> is UB). Confirm it reaches C++ (RuntimeError
+    # from an under-configured model), not a TypeError type rejection.
+    try:
+        model_proxy.init(cfg_proxy, 0)
+    except RuntimeError:
+        pass  # reached C++ Init — the unwrap worked
+    except TypeError as e:
+        raise AssertionError(f"Model.init rejected a proxy config (unwrap missing?): {e}") from e
+    print("PASS class proxies probed (ModelConfig + Model fields, init unwrap)")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
