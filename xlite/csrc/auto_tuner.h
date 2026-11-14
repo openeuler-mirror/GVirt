@@ -20,6 +20,18 @@ uint32_t GetTileSizeOfCachedKV(std::vector<uint32_t> &cachedLens, std::vector<ui
                                uint32_t headNumInGroup, uint32_t nKVHeads, uint32_t blockSize,
                                uint32_t aicNum);
 
+// Pick the indexer_topk partitioning mode: kvSplit=0 schedules one (batch,
+// query tile) task per block (serial KV-chunk walk), so it fills the blocks
+// only when the sparse tiles (last-token causal boundary p0End >= topK, with
+// p0End in token space for compressRatio<=1 and completed-block space
+// otherwise) reach blockNum - counting chunks instead would wrongly keep
+// few-tile/many-chunk decode in the serial mode. Otherwise return 1: (tile,
+// chunk) tasks with the cross-core topK relay. Called once per forward from
+// XRuntime::PrepareAttn on the host lens (no D2H).
+uint8_t PickIndexerKvSplit(const std::vector<uint32_t> &cachedLens,
+                           const std::vector<uint32_t> &queryLens, uint32_t blockNum, uint32_t topK,
+                           uint32_t compressRatio);
+
 // Pick the AIC matmul tiling (m0, n0, k0) and the number of AIC blocks to
 // launch, shared by XliteOpMatmul and the fused matmul+dequant pipeline so
 // both paths always use the same tiling policy. Pass m0/n0/k0 as

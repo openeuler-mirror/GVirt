@@ -482,7 +482,7 @@ void XModel::ForwardAttnIndexer(XRuntime &rt, uint32_t layer, XTensor &hiddenSta
                        lastTopk, _dsaSeqPositions, rt._dsaTopkBuffer, rt._attnQueryStartLoc,
                        rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], _sync,
                        _c.indexNHeads, _c.indexHeadDim, _c.blockSizes[0], rt._batch, _c.indexTopK,
-                       0, indexKScaleCache);
+                       0, indexKScaleCache, 1, rt._indexerKvSplit);
     rt.PutTensor(kw);
     rt.PutTensor(*qPtr);
     rt.PutTensor(lastTopk);
@@ -672,12 +672,15 @@ void XModel::ForwardAttnMLAV2DsaCp(XRuntime &rt, uint32_t layer,
                                             c8 ? FP32 : dtype, DBG_LOC);
                 auto &lastTopk =
                     rt.GetTensor({localTokenCapacity, 2 * _c.indexTopK}, INT32, DBG_LOC);
+                // Partitioning mode from PrepareAttn (global lens; the CP shard
+                // slicing only shrinks the per-rank tile count).
                 XliteOpIndexerTopK(rt, c8 ? *indexQ8 : indexQ, kvCache[layer][2],
                                    c8 ? *indexScaledWeights : indexKW, scores, lastTopk,
                                    _dsaSeqPositions, rt._dsaTopkBuffer, localQueryStartLoc,
                                    localQueryLens, localCachedLens, rt._attnBlockTables[0], _sync,
                                    _c.indexNHeads, _c.indexHeadDim, _c.blockSizes[0], rt._batch,
-                                   _c.indexTopK, 0, c8 ? kvCache[layer][3] : XTensor());
+                                   _c.indexTopK, 0, c8 ? kvCache[layer][3] : XTensor(), 1,
+                                   rt._indexerKvSplit);
                 rt.PutTensor(lastTopk);
                 rt.PutTensor(scores);
             }
@@ -1476,7 +1479,7 @@ XTensor *XModel::ForwardAttnCXAIndexer(XRuntime &rt, uint32_t layer, XTensor &hi
         rt._attnCachedLens,
         LayerPlane(rt._attnBlockTablesPerLayer, rt._attnBlockTables, layer, CXA_INDEXER_K), _sync,
         idxNHeads, indexerHeadDim, _c.blockSizes[CXA_INDEXER_K], batch, _c.indexTopK, 0,
-        c8 ? kvCache[CXA_INDEXER_K_SCALE] : XTensor(), ratio);
+        c8 ? kvCache[CXA_INDEXER_K_SCALE] : XTensor(), ratio, rt._indexerKvSplit);
     rt.PutTensor(idxQ);
     rt.PutTensor(idxWeight);
     rt.PutTensor(scores);

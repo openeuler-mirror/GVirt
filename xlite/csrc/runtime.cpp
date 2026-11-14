@@ -963,6 +963,11 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             aicNum);
     }
 
+    // indexer_topk partitioning mode, decided once per forward from the host
+    // lens. CXA indexer layers are the compress_ratio==4 ones (block-space KV).
+    _indexerKvSplit = PickIndexerKvSplit(_cachedLensHost, _hostLens, aicNum, indexTopK,
+                                         attnMeta.attnType == XMODEL_ATTN_CXA ? 4 : 1);
+
     size = batch * XDtypeBit(INT32) / 8;
 
     if (attnMeta.version != 2 && IsHybridAttn(attnMeta.attnType)) {
