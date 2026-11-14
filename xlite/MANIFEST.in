@@ -12,7 +12,7 @@ include xlite.spec.in
 # project source code and headers
 recursive-include csrc *
 recursive-include xlite *.py *.pyi *.typed
-recursive-include scripts *.py
+recursive-include scripts *.py *.cmake
 
 # recursive-include csrc * re-adds this lint config; drop it again.
 recursive-exclude csrc .clang-tidy

@@ -1999,7 +1999,7 @@ void XliteOpCompressor(XRuntime &rt, XTensor &kv, const XTensor &score, const XT
               "compressKv must be [blocks, compressBlockSize, 1, headDim]");
     compCheck(ratio == 2 || ratio == 4 || ratio == 128, "ratio must be 2, 4 or 128");
 
-    // C8 mode: compressKv is absent (pybind None leaves the default-constructed
+    // C8 mode: compressKv is absent (a Python None leaves the default-constructed
     // XTensor with ptr == nullptr — the codebase-wide "no tensor" signal), so the
     // kernel writes no paged cache — it ropes weightedSum in place and the caller
     // feeds it to XliteOpQuantCacheC8. The instantiation therefore follows

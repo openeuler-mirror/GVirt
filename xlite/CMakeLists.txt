@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.26)  # Python3_add_library(... USE_SABI) + Development.SABIModule need >= 3.26
 project(xlite)
 
 set(RUN_MODE "npu" CACHE STRING "sim/npu")
@@ -411,8 +411,10 @@ target_link_libraries(xlite PRIVATE
     torch
 )
 
-# _C
-find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
+# Python bindings: the abi3 SABI module (xlite_sabi) is the sole binding.
+# Development.SABIModule is required by Python3_add_library(... USE_SABI ...);
+# Development.Module is kept for any in-tree tooling that probes the interpreter.
+find_package(Python3 COMPONENTS Interpreter Development.Module Development.SABIModule REQUIRED)
 
 execute_process(
     COMMAND ${Python3_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_path('purelib'))"
@@ -424,47 +426,17 @@ if(PYTHON_SYS_DIR)
   list(PREPEND CMAKE_PREFIX_PATH "${PYTHON_SYS_DIR}")
 endif()
 
-find_package(pybind11 REQUIRED)
 find_package(Torch COMPONENTS Development REQUIRED)
 
 message(STATUS "Python3 executable: ${Python3_EXECUTABLE}")
-message(STATUS "pybind11 include: ${pybind11_INCLUDE_DIRS}")
 message(STATUS "torch cpp_extension include: ${TORCH_INCLUDE_DIRS}")
 message(STATUS "torch cpp_extension lib: ${TORCH_INSTALL_PREFIX}/lib")
 
-pybind11_add_module(
-    _C
-    csrc/_C.cpp
-)
-
-target_compile_options(_C PRIVATE
-    -std=c++17 -O3 -Wall -Werror -fPIC
-)
-
 # Host side of XLITE_BENCH_TIMED: gates XliteOpBenchTimed in op.cpp/op.h and
-# the bench_timed pybind entry in _C.cpp.
+# the bench_timed entry in the SABI module (via _C.cpp wrappers -> xlite lib).
 if(XLITE_BENCH_TIMED)
     target_compile_definitions(xlite PRIVATE MICROBENCH_TIMED=1)
-    target_compile_definitions(_C PRIVATE MICROBENCH_TIMED=1)
 endif()
-
-target_include_directories(_C PRIVATE
-    ${pybind11_INCLUDE_DIRS}
-    ${TORCH_INCLUDE_DIRS}
-    ${ASCEND_CANN_PACKAGE_PATH}/include
-)
-
-target_link_directories(_C PRIVATE
-    ${TORCH_INSTALL_PREFIX}/lib
-)
-
-target_link_libraries(_C PRIVATE
-    xlite
-    c10
-    torch
-    torch_python
-    torch_cpu
-)
 
 set(XLITE_EDITABLE_BUILD "OFF" CACHE STRING "Enable editable build and include torch from source path")
 if (XLITE_EDITABLE_BUILD STREQUAL "ON")
@@ -477,15 +449,60 @@ message(STATUS "TORCH_RPATH: ${TORCH_RPATH}")
 set_target_properties(xlite PROPERTIES
     LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:${TORCH_RPATH}"
 )
-set_target_properties(_C PROPERTIES
-    LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:${TORCH_RPATH}"
-)
 
 install(TARGETS xlite_kernels_common_${RUN_MODE} xlite_kernels_bf16_${RUN_MODE} xlite_kernels_f16_${RUN_MODE} xlite
     LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite/lib
 )
 
-install(TARGETS _C
+# ---------------------------------------------------------------------------
+# xlite_sabi — abi3 binding module, the sole Python binding. Registers torch
+# ops/classes through torch's dispatcher and never touches the Python C-API,
+# so one .abi3.so loads on any CPython >= 3.11. setup.py's abi3 retag detects
+# the .abi3.so suffix and rewrites the wheel tag to cp311-abi3; the pure-Python
+# xlite/_C.py shim re-exports its names so `from xlite._C import ...` is
+# unchanged.
+# ---------------------------------------------------------------------------
+Python3_add_library(xlite_sabi MODULE
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/_C.cpp
+    USE_SABI 3.11
+    WITH_SOABI)
+
+target_compile_options(xlite_sabi PRIVATE
+    -std=c++17 -O3 -Wall -Werror -fPIC
+)
+
+# Host side of XLITE_BENCH_TIMED for the SABI module: gates the bench_timed/
+# bench_mte/bench_vec/bench_cube wrapper entry points in _C.cpp.
+if(XLITE_BENCH_TIMED)
+    target_compile_definitions(xlite_sabi PRIVATE MICROBENCH_TIMED=1)
+endif()
+
+target_include_directories(xlite_sabi PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}        # generated aclrtlaunch_all.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc
+    ${TORCH_INCLUDE_DIRS}
+    ${ASCEND_CANN_PACKAGE_PATH}/include
+)
+
+# Do not link torch_python — it is CPython-bound and would re-introduce a
+# Python-version dependency. torch / torch_cpu / c10 are CPython-agnostic:
+# the torch::class_ / class_base symbols _C.cpp uses (custom-class
+# registration) are defined in libtorch_cpu, not libtorch_python, so the
+# abi3 module needs no Python-version-specific symbol. xlite provides the
+# op implementations, XRuntime, and the bridge layer (_CModel /
+# CModelAttnMeta / ...) in _C.cpp alongside the SABI registration.
+target_link_libraries(xlite_sabi PRIVATE
+    xlite
+    c10
+    torch
+    torch_cpu
+)
+
+set_target_properties(xlite_sabi PROPERTIES
+    LINK_FLAGS "-Wl,-rpath,\$ORIGIN:\$ORIGIN/lib:${TORCH_RPATH}"
+)
+
+install(TARGETS xlite_sabi
     LIBRARY DESTINATION ${CMAKE_INSTALL_PATH}/xlite
 )
 

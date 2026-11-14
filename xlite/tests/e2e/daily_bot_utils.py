@@ -29,9 +29,10 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 # ====================== 路径配置 ======================
 # 项目根目录
@@ -64,7 +65,7 @@ class Colors:
 
 
 # 日志文件路径
-LOG_FILE: Optional[Path] = None
+LOG_FILE: Path | None = None
 
 
 def setup_logging(report_dir: Path, log_prefix: str = "daily_bot"):
@@ -85,7 +86,7 @@ def setup_logging(report_dir: Path, log_prefix: str = "daily_bot"):
     LOG_FILE = report_dir / f"{log_prefix}_{timestamp}.log"
 
 
-def move_log_file(new_report_dir: Path) -> Optional[Path]:
+def move_log_file(new_report_dir: Path) -> Path | None:
     """
     将日志文件移动到新的报告目录
 
@@ -223,7 +224,7 @@ def set_machine_ip(ip: str):
 # yellow 环境的联网代理脚本路径；blue 环境可直接访问外网，无需 source
 PROXY_ENV_SCRIPT = "/home/env.sh"
 
-_PROXY_ENV_VARS: Optional[dict[str, str]] = None
+_PROXY_ENV_VARS: dict[str, str] | None = None
 
 
 def get_proxy_source_cmd() -> str:
@@ -287,7 +288,7 @@ def env_with_proxy() -> dict[str, str]:
 
 # ====================== 命令执行工具函数 ======================
 def run_command(
-    cmd: list[str], cwd: Optional[Path] = None, check: bool = True, show_output: bool = False
+    cmd: list[str], cwd: Path | None = None, check: bool = True, show_output: bool = False
 ) -> tuple[int, str, str]:
     """
     执行 shell 命令并返回结果
@@ -447,7 +448,7 @@ def get_xlite_lib_path() -> Path:
     return xlite_path
 
 
-def build_project(report_dir: Path) -> tuple[bool, Optional[Path]]:
+def build_project(report_dir: Path) -> tuple[bool, Path | None]:
     """
     在本地编译 xlite 项目，并将 wheel 包复制到报告目录
 
@@ -658,7 +659,7 @@ def get_vllm_ascend_version() -> str:
 
 
 # ====================== 环境检测函数 ======================
-def detect_model_device() -> Optional[str]:
+def detect_model_device() -> str | None:
     """
     检测环境中模型所在的设备名称
 
@@ -682,7 +683,7 @@ def detect_model_device() -> Optional[str]:
     return None
 
 
-def get_npu_smi_version() -> Optional[str]:
+def get_npu_smi_version() -> str | None:
     """
     获取 NPU-SMI 版本号
 
@@ -780,7 +781,7 @@ def load_metrics_json(json_path: Path) -> dict:
 
 
 # ====================== 通知发送函数 ======================
-def send_notification(message: str, receiver_id: Optional[str] = None):
+def send_notification(message: str, receiver_id: str | None = None):
     """
     发送通知到
 

@@ -75,22 +75,46 @@ def _get_torch_cmake_dir() -> str:
     return str(torch_site_path)
 
 
-def _get_pybind11_cmake_dir() -> str:
-    return subprocess.check_output([sys.executable, "-m", "pybind11", "--cmakedir"], text=True).strip()
-
-
 if _bdist_wheel is not None:
 
     class _ManylinuxTagBdistWheel(_bdist_wheel):
-        """Retag built wheel `linux_<arch>` -> `manylinux2014_<arch>` (filename
-        + `.dist-info/WHEEL` Tag) for PyPI upload. Arch-agnostic."""
+        """Retag built wheels: platform `linux_<arch>` -> `manylinux2014_<arch>`
+        for PyPI upload, and rewrite the CPython/ABI tag to `cp311-abi3` so a
+        single wheel installs on any CPython 3.11+.
+
+        The abi3 retag is content-driven: if the wheel ships an `.abi3.so`
+        extension (built via `Python3_add_library(... USE_SABI ...)`), the tag
+        is rewritten; detection is automatic so the daily bot's
+        `bdist_wheel` needs no flag.
+        """
+
+        # The abi3 floor. A module built with `USE_SABI 3.11` (Py_LIMITED_API
+        # 0x030B0000) loads on any CPython >= 3.11. Bump here only if the
+        # CMake USE_SABI version is raised.
+        _ABI3_PYTAG = "cp311"
+        _ABI3_ABITAG = "abi3"
+
+        @staticmethod
+        def _wheel_has_abi3_so(whl: Path) -> bool:
+            """True iff the wheel ships a `.abi3.so` extension module."""
+            with zipfile.ZipFile(whl, "r") as zin:
+                return any(name.endswith(".abi3.so") or ".abi3.so." in name for name in zin.namelist())
 
         @staticmethod
         def _retag_wheel(whl: Path) -> Path:
             name = whl.name
-            if "-linux_" not in name:
-                return whl
-            target = whl.with_name(name.replace("-linux_", "-manylinux2014_"))
+            # Filename stem rewrite:
+            #   <pkg>-<ver>-<pytag>-<abitag>-linux_<arch>.whl
+            # -> <pkg>-<ver>-cp311-abi3-manylinux2014_<arch>.whl
+            parts = name[: -len(".whl")].split("-")
+            # expected: [pkg, ver, pytag, abitag, plat]
+            if len(parts) >= 5:
+                parts[2] = _ManylinuxTagBdistWheel._ABI3_PYTAG
+                parts[3] = _ManylinuxTagBdistWheel._ABI3_ABITAG
+            stem = "-".join(parts)
+            stem = stem.replace("-linux_", "-manylinux2014_")
+            target = whl.with_name(stem + ".whl")
+
             with zipfile.ZipFile(whl, "r") as zin:
                 infos = zin.infolist()
                 entries = {it.filename: zin.read(it.filename) for it in infos}
@@ -100,7 +124,24 @@ if _bdist_wheel is not None:
             wheel_path = next((p for p in entries if p.endswith(".dist-info/WHEEL")), None)
             record_path = next((p for p in entries if p.endswith(".dist-info/RECORD")), None)
             if wheel_path is not None:
-                entries[wheel_path] = entries[wheel_path].replace(b"linux_", b"manylinux2014_")
+                tag_bytes = entries[wheel_path]
+                # WHEEL's Tag line is "<pytag>-<abitag>-<plat>". Replace the
+                # leading <pytag>-<abitag> with the abi3 tag and linux_ -> manylinux2014_.
+                lines = tag_bytes.decode("utf-8").splitlines(keepends=True)
+                for i, line in enumerate(lines):
+                    if line.startswith("Tag:"):
+                        # "Tag: cp312-cp312-linux_aarch64" -> "Tag: cp311-abi3-manylinux2014_aarch64"
+                        rest = line[len("Tag:") :].lstrip()
+                        plat = rest.split("-", 2)[-1] if rest.count("-") >= 2 else rest
+                        plat = plat.replace("linux_", "manylinux2014_")
+                        lines[i] = (
+                            f"Tag: {_ManylinuxTagBdistWheel._ABI3_PYTAG}-{_ManylinuxTagBdistWheel._ABI3_ABITAG}-{plat}"
+                        )
+                        if not lines[i].endswith("\n"):
+                            lines[i] += "\n"
+                        break
+                tag_bytes = "".join(lines).encode("utf-8")
+                entries[wheel_path] = tag_bytes
                 if record_path is not None:
                     new_hash = hashlib.sha256(entries[wheel_path]).hexdigest()
                     new_size = len(entries[wheel_path])
@@ -115,15 +156,25 @@ if _bdist_wheel is not None:
             with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zout:
                 for it in infos:
                     zout.writestr(it, entries[it.filename])
-            whl.unlink()
+            # An already-retagged wheel retags to itself; don't unlink the
+            # freshly written file in that case.
+            if target != whl:
+                whl.unlink()
             return target
 
         def run(self):
             super().run()
             dist_dir = Path(self.dist_dir)
             for whl in dist_dir.glob("*.whl"):
+                # Only retag this run's freshly built wheels (still tagged
+                # -linux_<arch>); skip already-retagged and unrelated wheels.
                 if "-linux_" not in whl.name:
                     continue
+                if not self._wheel_has_abi3_so(whl):
+                    raise SystemExit(
+                        f"bdist_wheel: {whl.name} has no .abi3.so — the SABI build did not "
+                        "produce a stable-ABI module; check that CMake built xlite_sabi.abi3.so."
+                    )
                 target = self._retag_wheel(whl)
                 print(f"bdist_wheel: retagged {whl.name} -> {target.name}")
 else:  # pragma: no cover
@@ -140,7 +191,7 @@ class CMakeBuild(build_ext):
         print(
             f"CMakeBuild: Building in {'editable' if is_editable else 'standard'} mode; installing to {install_prefix}"
         )
-        cmake_prefix_paths = ";".join([_get_pybind11_cmake_dir(), _get_torch_cmake_dir()])
+        cmake_prefix_paths = _get_torch_cmake_dir()
 
         configure_cmd = [
             "cmake",
@@ -222,7 +273,10 @@ class CMakeBuild(build_ext):
 setup(
     # version is dynamic in pyproject.toml; not passed here so the
     # setuptools_scm plugin infers it (and recovers from scm_version.json).
-    ext_modules=[Extension(name="xlite._C", sources=[])],
+    # Stub extension that only triggers the CMake build; the name must match the
+    # artifact CMake installs (xlite/xlite_sabi.abi3.so) so setuptools' inplace
+    # copy step finds it. py_limited_api makes the expected suffix .abi3.so.
+    ext_modules=[Extension(name="xlite.xlite_sabi", sources=[], py_limited_api=True)],
     cmdclass={
         "build_ext": CMakeBuild,
         "clean": CleanCommand,

@@ -50,7 +50,6 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 # 导入共享工具模块
 from daily_bot_utils import (
@@ -99,7 +98,7 @@ def run_aisbench_benchmark(
     timeout: int = 2 * 3600,
     retry: int = 3,
     vllm_timeout: int = 1800,
-) -> Optional[Path]:
+) -> Path | None:
     """
     执行精度基准测试脚本 (batch_aisbench.py)
 
@@ -186,7 +185,7 @@ def run_aisbench_benchmark(
 
 
 # ====================== 报告解析函数 ======================
-def _parse_accuracy(value: object) -> Optional[float]:
+def _parse_accuracy(value: object) -> float | None:
     """Parse a report accuracy cell into the tri-state the analysis works on.
 
     ``n/a``/empty = not run (None); ``nan`` = ran but produced no valid number (NaN);
@@ -392,7 +391,7 @@ def analyze_accuracy_within_run(metrics: dict) -> dict:
     analysis = {"timestamp": metrics.get("timestamp", ""), "warnings": []}
 
     # 按模型名称分组结果 (同模型多数据集时，分组键包含数据集名)，并记录各分组的数据集名
-    model_results: dict[str, dict[str, Optional[float]]] = {}  # {model_name: {backend: accuracy}}
+    model_results: dict[str, dict[str, float | None]] = {}  # {model_name: {backend: accuracy}}
     group_dataset: dict[str, str] = {}
     for result in metrics.get("results", []):
         model_name = _result_group_key(result)
@@ -463,7 +462,7 @@ def analyze_accuracy_within_run(metrics: dict) -> dict:
 
 
 # ====================== 报告生成函数 ======================
-def generate_accuracy_report(metrics: dict, analysis: dict, report_dir: Path) -> tuple[str, Optional[str]]:
+def generate_accuracy_report(metrics: dict, analysis: dict, report_dir: Path) -> tuple[str, str | None]:
     """
     生成精度测试报告 (HTML格式，用于通知消息)
 
@@ -497,7 +496,7 @@ def generate_accuracy_report(metrics: dict, analysis: dict, report_dir: Path) ->
 
     # 按模型名称分组结果 (同模型多数据集时，分组键包含数据集名)
     # 与 analyze_accuracy_within_run 一致: None = not run (表格记 n/a)、NaN = 已运行但无效 (红色 NaN)
-    model_results: dict[str, dict[str, Optional[float]]] = {}
+    model_results: dict[str, dict[str, float | None]] = {}
     for result in metrics.get("results", []):
         model_name = _result_group_key(result)
         backend = result["backend"]
@@ -568,7 +567,7 @@ def generate_accuracy_report(metrics: dict, analysis: dict, report_dir: Path) ->
     header_lines.append("")
 
     # ====== 第二条通知: 标题 + 警告详情 (仅在有警告时生成；NaN 项也要上报) ======
-    report_warnings: Optional[str] = None
+    report_warnings: str | None = None
     if total_warnings > 0:
         warning_lines = list(header_lines)
 
@@ -625,7 +624,7 @@ def generate_accuracy_report(metrics: dict, analysis: dict, report_dir: Path) ->
         for model_name in sorted(model_results.keys()):
             backends = model_results[model_name]
 
-            def format_accuracy(value: Optional[float], backend_name: str, model_name: str) -> str:
+            def format_accuracy(value: float | None, backend_name: str, model_name: str) -> str:
                 if value is None:
                     return "n/a"  # not run
                 if math.isnan(value):

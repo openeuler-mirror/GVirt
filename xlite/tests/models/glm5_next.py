@@ -27,7 +27,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -152,17 +152,17 @@ class ModelArgs:
     vision_rope_theta: float = 10000.0  # config.vision_config.rope_parameters["rope_theta"]
     image_token_id: int = 154854
     indexer_rope_interleave: bool = True
-    index_full_mask: Optional[list[bool]] = None
+    index_full_mask: list[bool] | None = None
     # layer dispatch
-    layer_types: Optional[list[str]] = None
-    kda_layers: Optional[list[int]] = None
-    full_attn_layers: Optional[list[int]] = None
+    layer_types: list[str] | None = None
+    kda_layers: list[int] | None = None
+    full_attn_layers: list[int] | None = None
     # quant / parallelism
     quantization: Literal["none", "w8a8", "w4a8"] = "w8a8"
     moe_ep_size: int = 16
     moe_tp_size: int = 1
     model_type: str = "glm5_next"
-    config_path: Optional[Path] = None
+    config_path: Path | None = None
 
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size

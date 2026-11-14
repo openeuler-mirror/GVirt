@@ -49,7 +49,6 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 # 导入共享工具模块
 from daily_bot_utils import (
@@ -180,7 +179,7 @@ def update_model_paths(device: str) -> bool:
         return False
 
 
-def run_benchmark(model_type: str = "moe", report_subdir: Optional[Path] = None) -> Optional[Path]:
+def run_benchmark(model_type: str = "moe", report_subdir: Path | None = None) -> Path | None:
     """
     执行基准测试脚本
 
@@ -240,7 +239,7 @@ def run_benchmark(model_type: str = "moe", report_subdir: Optional[Path] = None)
 
 
 # ====================== 离线 bench 测试执行函数 ======================
-def run_offline_bench(report_subdir: Optional[Path] = None) -> Optional[Path]:
+def run_offline_bench(report_subdir: Path | None = None) -> Path | None:
     """
     执行离线 bench 测试 (run.sh bench 模式)
 
@@ -490,9 +489,7 @@ def compare_offline_metrics(current: dict, baseline: dict) -> dict:
 
 
 # ====================== 离线 bench 历史报告查找函数 ======================
-def get_previous_offline_report(
-    input_len: int, output_len: int, batch_size: int
-) -> tuple[Optional[Path], Optional[str]]:
+def get_previous_offline_report(input_len: int, output_len: int, batch_size: int) -> tuple[Path | None, str | None]:
     """
     获取基线版本指定离线 bench 场景的报告文件路径
 
@@ -533,7 +530,7 @@ def get_previous_offline_report(
 def generate_offline_report(
     model_name: str,
     comparisons: list[dict],
-    report_dir: Optional[Path] = None,
+    report_dir: Path | None = None,
     model_index: int = 0,
     total_models: int = 1,
 ) -> str:
@@ -922,7 +919,7 @@ def compare_metrics(current: dict, baseline: dict) -> dict:
 def generate_model_report(
     model_name: str,
     model_comparisons: list[dict],
-    report_dir: Optional[Path] = None,
+    report_dir: Path | None = None,
     model_index: int = 0,
     total_models: int = 1,
 ) -> str:
@@ -1091,8 +1088,8 @@ def generate_model_report(
 
 
 def build_no_change_report(
-    report_dir: Optional[Path],
-    model_names: Optional[list[str]] = None,
+    report_dir: Path | None,
+    model_names: list[str] | None = None,
     is_offline: bool = False,
     failure_count: int = 0,
 ) -> str:
@@ -1150,7 +1147,7 @@ def build_no_change_report(
 
 
 # ====================== 历史报告查找函数 ======================
-def extract_model_info(report_path: Path) -> Optional[dict]:
+def extract_model_info(report_path: Path) -> dict | None:
     """
     从报告文件名中提取模型信息
 
@@ -1173,9 +1170,7 @@ def extract_model_info(report_path: Path) -> Optional[dict]:
     return None
 
 
-def get_previous_version_report(
-    model_name: str, input_len: int, output_len: int
-) -> tuple[Optional[Path], Optional[str]]:
+def get_previous_version_report(model_name: str, input_len: int, output_len: int) -> tuple[Path | None, str | None]:
     """
     获取基线版本指定模型的测试报告文件路径
 
@@ -1321,7 +1316,7 @@ _ONLINE_SERVER_READY_KEYWORD = "Application startup complete"
 _ONLINE_BENCH_COMPLETE_KEYWORD = "Request throughput (req/s)"
 
 
-def _bench_log_anomaly(content: str) -> Optional[str]:
+def _bench_log_anomaly(content: str) -> str | None:
     """
     检测一份在线压测日志是否为"假成功" (有完成关键字但压测实质失败)。
 
