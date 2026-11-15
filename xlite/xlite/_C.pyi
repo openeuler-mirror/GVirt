@@ -3627,8 +3627,10 @@ def dsa_cp_gather_mla(
     block_tables is int32 [rows >= batch, max_blocks]; its actual row stride
     is preserved, including when columns are narrowed from a persistent buffer.
     Request metadata describes the local queries; cached_lens includes the
-    prefix before this rank's shard. Top-K is int32 [queries, top_k].
-    Rows with causal length <= top_k use all causal tokens and ignore indices.
+    prefix before this rank's shard. Top-K is int32 [queries, top_k]; top_k
+    must be positive, at most 2048 (MAX_TOPK_NUM) and a multiple of 128, and
+    block_size a multiple of 32. Rows with causal length <= top_k use all
+    causal tokens and ignore indices.
     Longer rows require top_k distinct valid causal indices, as produced by
     the indexer. KV workspace is reused over bounded groups of queries.
     """
@@ -3953,13 +3955,14 @@ def indexer_topk(
         block_tables (torch.Tensor): 2-D ``[rows, cols]`` int32 (1-D = single row);
             ``stride[0]`` may exceed ``cols`` (persistent buffers accepted) and is
             narrowed to the lens-derived width, which also sizes the identity table.
-        n_heads (int): Number of heads (C8: multiple of 16, at most 128).
-        head_dim (int): Head dimension (128 for C8).
-        block_size (int): KV block size (must be <= 128).
-            C8 supports 16, 32, 64 or 128.
+        n_heads (int): Number of heads (multiple of 16, at most 64; enforced for all
+            dtypes — the kernel's L0C capacity bound).
+        head_dim (int): Head dimension (multiple of 16, at most 128 for all dtypes;
+            C8 additionally requires a multiple of 32).
+        block_size (int): KV block size (multiple of 16, at most 128, and must divide
+            4096, the kernel's KV-tile length).
         batch (int): Batch size.
         top_k (int): Number of top-k indices to select (must be <= 2048).
-            C8 requires a multiple of 32 in [32, 2048].
         k_scale_cache (Optional[torch.Tensor]): C8 per-key scales
             ``[blocks, block_size, 1, 1]``, fp16; None for floating-point inputs.
             May be pitched: the kernel reads each block's scales contiguously
@@ -4665,7 +4668,20 @@ def recurrent_gated_delta_rule_prefill_paged(
     k_dim: int,
     v_dim: int,
 ) -> None:
-    """Recurrent gated delta rule prefill over paged state (GDN)."""
+    """Recurrent gated delta rule prefill over native [P, Hv, V, K] pages.
+
+    Q/K are [T, Hk*K], value/out [T, Hv*V], beta/log-decay g [T, Hv], with T
+    the packed token total. Starts is contiguous INT32[B+1] and initial is
+    INT32[B]: a zero initial flag starts from zero state, nonzero continues
+    from the current page. Activations are contiguous FP32/FP16/BF16; state
+    has the same dtype or FP32; g may independently be FP32. Hk must divide
+    Hv with Hv <= 4096 (XLITE_GDN_GATE_CAP), K is a multiple of 16 up to 128,
+    V is 64 or 128. Token recurrence is sequential within each state tile
+    (not FLA chunked WY); only the final state is committed to the page.
+    INT32 page IDs <= 0 produce zero output and never access/update state;
+    empty segments leave the page untouched. Q/K must already be normalized.
+    The binding synchronizes.
+    """
     ...
 
 def conv1d_and_silu_prefill_paged(
