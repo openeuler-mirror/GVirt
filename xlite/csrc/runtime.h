@@ -304,6 +304,9 @@ public:
     uint32_t _maxTotalLens;
     uint32_t _maxQueryLen;  // max query length across the batch this step (1 = pure decode)
     uint32_t _tileSizeOfCachedKV;
+    // indexer_topk partitioning mode for this step (PickIndexerKvSplit):
+    // 0 = serial (batch, query tile) tasks, 1 = (tile, chunk) with cross-core relay.
+    uint8_t _indexerKvSplit = 0;
     XTensor _attnPosition;  // [batchedTokens] or [num_dims, batchedTokens] (mrope) int64, ref:
                             // v0/1 -> _position, v2 -> attnMeta.position
     std::vector<XTensor> _attnBlockTables;  // int32 2-D, per-kv-cache; v0/1 -> compact pack,

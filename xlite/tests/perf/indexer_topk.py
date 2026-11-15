@@ -16,7 +16,7 @@ inside the capture window. No checks, no syncs, no prints.
 
 Examples:
 
-    # defaults (bf16, topK 512/2048, default work set)
+    # defaults (bf16, topK 2048, default work set)
     msprof --delay=8 --duration=5 python tests/perf/indexer_topk.py
 
     # custom shapes: 3 decode batches with 8k/16k/32k cached tokens, topK 2048
@@ -24,6 +24,9 @@ Examples:
 
     # prefill-only, fp16
     python tests/perf/indexer_topk.py -D fp16 -K 512 -CL 0 0 -QL 4096 8192
+
+    # force one partitioning mode for before/after comparisons
+    python tests/perf/indexer_topk.py -S 1
 """
 
 import argparse
@@ -60,10 +63,15 @@ DEFAULT_WORK = [
     (1, [8265], [1]),
     (1, [12983], [1]),
     (1, [16384], [1]),  # decode, long cache
-    (1, [16384, 16384, 16384], [1, 1, 1]),
+    (3, [16384, 16384, 16384], [1, 1, 1]),
     (3, [8192, 12243, 3186], [1, 1, 1]),
+    (2, [16384, 16384], [1, 1]),  # 2-batch long-sequence decode
+    (2, [0, 0], [8192, 8192]),  # 2-batch long prefill
     (2, [8123, 0], [1, 3987]),  # mixed decode + prefill
     (2, [8123, 0], [1, 7196]),  # mixed decode + prefill
+    # few-tile/many-chunk decode: the serial mode would use one/few cores
+    (1, [131072], [1]),  # 1 tile, 33 KV chunks
+    (4, [32768, 32768, 32768, 32768], [1, 1, 1, 1]),  # 4 tiles, 9 KV chunks each
 ]
 DEFAULT_TOPK = [2048]
 
@@ -120,6 +128,15 @@ def parse_args():
     )
     parser.add_argument(
         "-N", "--num-duplicates", type=int, default=3, help="Number of times to duplicate the work set (default: 1)"
+    )
+    parser.add_argument(
+        "-S",
+        "--kv-split",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="indexer_topk partitioning mode: 0 = serial (batch, query tile) tasks, 1 = (tile, "
+        "chunk) tasks with the cross-core topK relay",
     )
     args = parser.parse_args()
 
@@ -195,7 +212,7 @@ def build_case(test_dtype, batch, cached_lens_list, query_len_list, topK):
     )
 
 
-def main(wait_time, test_dtype, work, topk_values):
+def main(wait_time, test_dtype, work, topk_values, kv_split):
     cases = []
     for batch, cached_lens_list, query_len_list in work:
         for topK in topk_values:
@@ -205,11 +222,11 @@ def main(wait_time, test_dtype, work, topk_values):
     if time_delta > 0:
         time.sleep(time_delta)
 
-    print(f"[INFO] Firing {len(cases)} indexer_topk kernel calls...")
+    print(f"[INFO] Firing {len(cases)} indexer_topk kernel calls (kv_split={kv_split})...")
     t0 = time.time_ns()
     for case in cases:
         for _ in range(args.num_duplicates):
-            indexer_topk(rt, *case)
+            indexer_topk(rt, *case, kv_split=kv_split)
     torch.npu.synchronize()
     t1 = time.time_ns()
     print(f"[INFO] Done. Total time: {(t1 - t0) / 1000:.3f} us")
@@ -224,4 +241,5 @@ if __name__ == "__main__":
         test_dtype=args.dtype,
         work=args.work,
         topk_values=args.topk,
+        kv_split=args.kv_split,
     )

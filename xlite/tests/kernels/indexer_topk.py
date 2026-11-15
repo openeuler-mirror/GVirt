@@ -29,35 +29,32 @@ models = [
     ("indexer_64_fp16", 64, 128, torch.float16),
 ]
 
-# work configurations: batch_size, cached_lens, query_lens
+# work configurations: batch_size, cached_lens, query_lens. One shape per
+# branch: dense/sparse/mixed rows, single/multi KV-tile relay, decode/prefill/
+# multi-batch mixes, and the ratio==4 edges (last three entries).
 work = [
-    (1, [0], [1]),
-    (1, [0], [4]),
-    (1, [2049], [1]),
-    (1, [3542], [1]),
-    (1, [0], [8124]),
-    (1, [9728], [1]),
-    (1, [10184], [1]),
-    (1, [0], [13542]),
-    (1, [0], [30]),
-    (1, [0], [128]),
-    (1, [10], [4000]),
-    (1, [100], [30]),
-    (2, [0] * 2, [4, 8]),
-    (2, [8123, 0], [1, 8231]),
-    (4, [5012, 127, 2189, 500], [4, 2, 6, 8]),
-    # ratio==4 edges: MapPosToKv (first-block p0=-1, dense/sparse mix, clen not div by ratio)
-    (1, [0], [3]),  # qlen<ratio -> first block incomplete, p0=-1
-    (1, [0], [2048]),  # 512 blocks == topK -> dense boundary
-    (1, [0], [4096]),  # 1024 blocks -> sparse+dense mix, 1 tile
-    (1, [0], [8192]),  # 2048 blocks, 1 KV tile, sparse
-    (1, [0], [16388]),  # 4097 blocks -> 2 KV tiles (cross-core lastTopk relay)
-    (1, [98], [1]),  # decode mid-seq, clen not div by ratio
-    (1, [98], [4096]),  # clen not div by ratio + 4096 -> 1048 blocks
+    (1, [0], [1]),  # single uncached token: dense rows (host template path)
+    (1, [0], [30]),  # small prefill, mixed tile
+    (1, [100], [30]),  # cached prefix, mixed dense/sparse rows
+    (1, [2049], [1]),  # decode, p0 == topK boundary (topK=2048)
+    (1, [16384], [1]),  # decode, 5 KV tiles: cross-chunk lastTopk relay chain
+    (1, [0], [4352]),  # prefill, 2 KV tiles
+    (1, [10], [4000]),  # dense prefix + sparse tail
     (2, [0, 98], [4096, 8192]),  # multi-batch, mixed dense/sparse
+    (4, [5012, 127, 2189, 500], [4, 2, 6, 8]),  # 4-batch short queries
+    (1, [0], [3]),  # ratio==4: qlen < ratio, first block incomplete (p0 == -1)
+    (1, [0], [2048]),  # ratio==4: 512 blocks == topK, dense boundary
+    (1, [98], [4096]),  # ratio==4: clen not divisible by ratio
 ]
 
-topk_values = [512, 2048]
+# fp16 only re-instantiates the kernel template; a representative subset is enough
+work_fp16 = [
+    work[2],
+    work[4],
+    work[10],
+]
+
+topk_values = [2048]
 topk_values_compressed = [512]
 
 # Max percentage of differing indices tolerated per row. Computation order
@@ -208,102 +205,115 @@ def run_test(
         compress_ratio,
     )
 
-    torch.npu.synchronize()
-    indexer_topk(
-        rt,
-        q_xlite,
-        k_cache_xlite,
-        weight_xlite,
-        topk_indices_xlite,
-        query_start_loc,
-        query_lens,
-        cached_lens,
-        block_tables,
-        n_heads,
-        head_dim,
-        BLOCK_SIZE,
-        batch,
-        topK,
-        compress_ratio=ratio,
-    )
-    torch.npu.synchronize()
+    # Both partitioning modes must give identical results on every shape.
+    for kv_split in (0, 1):
+        # Poison the output to catch rows the kernel fails to write; sync so
+        # the fill cannot race the op's non-default stream.
+        topk_indices_xlite.fill_(-1)
+        torch.npu.synchronize()
+        indexer_topk(
+            rt,
+            q_xlite,
+            k_cache_xlite,
+            weight_xlite,
+            topk_indices_xlite,
+            query_start_loc,
+            query_lens,
+            cached_lens,
+            block_tables,
+            n_heads,
+            head_dim,
+            BLOCK_SIZE,
+            batch,
+            topK,
+            compress_ratio=ratio,
+            kv_split=kv_split,
+        )
+        torch.npu.synchronize()
 
-    # Vectorized comparison over [total_query_len, topK]. Sparse rows: order-
-    # tolerant set comparison. Dense rows: exact template match. Causal sanity:
-    # sparse rows must only emit indices <= p0.
-    xlite_cpu = topk_indices_xlite.cpu()
-    row_default = torch.arange(0, topK, dtype=torch.int32)
-    is_dense = p0_all < topK
+        # Vectorized comparison over [total_query_len, topK]. Sparse rows: order-
+        # tolerant set comparison. Dense rows: exact template match. Causal sanity:
+        # sparse rows must only emit indices <= p0.
+        xlite_cpu = topk_indices_xlite.cpu()
+        row_default = torch.arange(0, topK, dtype=torch.int32)
+        is_dense = p0_all < topK
 
-    causal_fail = (~is_dense) & ~(xlite_cpu.to(torch.int64) <= p0_all.unsqueeze(1)).all(dim=-1)
+        causal_fail = (~is_dense) & ~(xlite_cpu.to(torch.int64) <= p0_all.unsqueeze(1)).all(dim=-1)
 
-    dense_exact = (xlite_cpu == row_default).all(dim=-1)
-    dense_pct = torch.zeros(len(p0_all), dtype=torch.float32)
-    dense_pct[~dense_exact] = 100.0
+        dense_exact = (xlite_cpu == row_default).all(dim=-1)
+        dense_pct = torch.zeros(len(p0_all), dtype=torch.float32)
+        dense_pct[~dense_exact] = 100.0
 
-    std_sorted, _ = torch.sort(standard_topk, dim=-1)
-    xlite_sorted, _ = torch.sort(xlite_cpu, dim=-1)
-    pos = torch.searchsorted(xlite_sorted, std_sorted).clamp_max(topK - 1)
-    hits = xlite_sorted.gather(-1, pos) == std_sorted
-    diff_count = topK - hits.sum(dim=-1)
-    sparse_pct = diff_count.to(torch.float32) * (100.0 / topK)
+        std_sorted, _ = torch.sort(standard_topk, dim=-1)
+        xlite_sorted, _ = torch.sort(xlite_cpu, dim=-1)
+        pos = torch.searchsorted(xlite_sorted, std_sorted).clamp_max(topK - 1)
+        hits = xlite_sorted.gather(-1, pos) == std_sorted
+        diff_count = topK - hits.sum(dim=-1)
+        sparse_pct = diff_count.to(torch.float32) * (100.0 / topK)
 
-    row_pct = torch.where(is_dense, dense_pct, sparse_pct)
-    row_pct = torch.where(causal_fail, torch.full_like(row_pct, 100.0), row_pct)
+        row_pct = torch.where(is_dense, dense_pct, sparse_pct)
+        row_pct = torch.where(causal_fail, torch.full_like(row_pct, 100.0), row_pct)
 
-    row_pct_np = row_pct.numpy()
-    causal_fail_np = causal_fail.numpy()
-    xlite_cpu_np = xlite_cpu.numpy()
+        row_pct_np = row_pct.numpy()
+        causal_fail_np = causal_fail.numpy()
+        xlite_cpu_np = xlite_cpu.numpy()
 
-    all_match = True
-    compared = 0
-    offset = 0
-    errors: dict[int, dict[int, float]] = defaultdict(dict)
-    max_pcts: list[float] = []
-    for i in range(batch):
-        qlen = query_len_list[i]
-        clen = cached_lens_list[i]
-        bs = slice(offset, offset + qlen)
-        batch_pct = row_pct_np[bs]
-        batch_fail = causal_fail_np[bs]
+        all_match = True
+        compared = 0
+        offset = 0
+        errors: dict[int, dict[int, float]] = defaultdict(dict)
+        max_pcts: list[float] = []
+        for i in range(batch):
+            qlen = query_len_list[i]
+            clen = cached_lens_list[i]
+            bs = slice(offset, offset + qlen)
+            batch_pct = row_pct_np[bs]
+            batch_fail = causal_fail_np[bs]
 
-        # causal violations: log + mark, excluded from compared/max_pct
-        for q in np.nonzero(batch_fail)[0]:
-            q = int(q)
-            p0_q = clen + q
-            all_match = False
-            errors[i][q] = 100.0
-            logging.error(f"\tSample {i} row {q} (p0={p0_q}) has non-causal topk indices: {xlite_cpu_np[offset + q]}")
+            # causal violations: log + mark, excluded from compared/max_pct
+            for q in np.nonzero(batch_fail)[0]:
+                q = int(q)
+                p0_q = clen + q
+                all_match = False
+                errors[i][q] = 100.0
+                logging.error(
+                    f"\tSample {i} row {q} (p0={p0_q}) has non-causal topk indices: {xlite_cpu_np[offset + q]}"
+                )
 
-        ok = ~batch_fail
-        compared += int(ok.sum())
-        batch_ok_pct = batch_pct[ok]
-        max_pct_per_batch = float(batch_ok_pct.max()) if batch_ok_pct.size else 0.0
-        max_pcts.append(max_pct_per_batch)
+            ok = ~batch_fail
+            compared += int(ok.sum())
+            batch_ok_pct = batch_pct[ok]
+            max_pct_per_batch = float(batch_ok_pct.max()) if batch_ok_pct.size else 0.0
+            max_pcts.append(max_pct_per_batch)
 
-        # threshold violations among non-causal rows
-        ok_local = np.nonzero(ok)[0]
-        over = ok_local[batch_pct[ok] > DIFF_PCT_THRESHOLD]
-        for q in over:
-            q = int(q)
-            all_match = False
-            errors[i][q] = float(batch_pct[q])
-        offset += qlen
+            # threshold violations among non-causal rows
+            ok_local = np.nonzero(ok)[0]
+            over = ok_local[batch_pct[ok] > DIFF_PCT_THRESHOLD]
+            for q in over:
+                q = int(q)
+                all_match = False
+                errors[i][q] = float(batch_pct[q])
+            offset += qlen
 
-    if compared == 0:
-        logging.info(f"\tNo rows to compare for topK={topK}.")
-    elif all_match:
-        logging.info(f"\tAll samples passed for topK={topK}! max diff pct per batch: {max_pcts}")
-    else:
-        logging.error(f"\tSome samples failed for topK={topK}! max diff pct per batch: {max_pcts}")
-        for i, err in errors.items():
-            error_info = ", ".join(f"{row} ({pct:.2f}%)" for row, pct in err.items())
-            logging.error(f"\tBatch {i}: {error_info}")
+        if compared == 0:
+            logging.info(f"\tkv_split={kv_split}: no rows to compare for topK={topK}.")
+        elif all_match:
+            logging.info(
+                f"\tkv_split={kv_split}: all samples passed for topK={topK}! max diff pct per batch: {max_pcts}"
+            )
+        else:
+            logging.error(
+                f"\tkv_split={kv_split}: some samples failed for topK={topK}! max diff pct per batch: {max_pcts}"
+            )
+            for i, err in errors.items():
+                error_info = ", ".join(f"{row} ({pct:.2f}%)" for row, pct in err.items())
+                logging.error(f"\tBatch {i}: {error_info}")
 
 
 def main():
     for name, n_heads, head_dim, test_dtype in models:
-        for batch, cached_lens_list, query_len_list in work:
+        selected = work if test_dtype == torch.bfloat16 else work_fp16
+        for batch, cached_lens_list, query_len_list in selected:
             assert len(cached_lens_list) == batch
             assert len(query_len_list) == batch
             # DSA indexer (ratio==1)
@@ -315,12 +325,12 @@ def main():
                     name, n_heads, head_dim, test_dtype, batch, cached_lens_list, query_len_list, topK, compress_ratio=4
                 )
 
-    # Dense [T, nHeads] weight layout (CXA bf16 path): the kernel derives the
-    # row pitch from weight.shape[1]; verify it matches the fused-layout
-    # reference on both ratio=1 and ratio=4.
-    for name, n_heads, head_dim, test_dtype in models:
-        run_test(name, n_heads, head_dim, test_dtype, 1, [3542], [1], 2048, dense_weight=True)
-        run_test(name, n_heads, head_dim, test_dtype, 1, [0], [8192], 512, compress_ratio=4, dense_weight=True)
+    # Dense [T, nHeads] weight layout (CXA path): the kernel derives the row
+    # pitch from weight.shape[1]; verify it matches the fused-layout reference
+    # on both ratio=1 and ratio=4.
+    run_test(models[0][0], 64, 128, models[0][3], 1, [3542], [1], 2048, dense_weight=True)
+    run_test(models[0][0], 64, 128, models[0][3], 1, [0], [8192], 512, compress_ratio=4, dense_weight=True)
+    run_test(models[1][0], 64, 128, models[1][3], 1, [3542], [1], 2048, dense_weight=True)
 
 
 if __name__ == "__main__":

@@ -10,9 +10,9 @@
 #define INDEXER_KV_TILE_LEN 4096
 #define AIV_TO_AIC 2u  // should be 2 for `KERNEL_TYPE_MIX_AIC_1_2`
 
-#if INDEXER_KV_TILE_LEN > MAX_INDEXER_KV_TILE_LEN
-#error "INDEXER_KV_TILE_LEN must not exceed MAX_INDEXER_KV_TILE_LEN"
-#endif
+static_assert(INDEXER_KV_TILE_LEN <= MAX_INDEXER_KV_TILE_LEN,
+              "INDEXER_KV_TILE_LEN must not exceed MAX_INDEXER_KV_TILE_LEN");
+static_assert(INDEXER_KV_TILE_LEN > MAX_TOPK_NUM, "KV tile must stay wider than MAX_TOPK_NUM");
 
 // WeightDtype is shared by head weights and converted QK values.
 template <typename Dtype, typename MatDtype, typename WeightDtype, typename ScoreDtype>
@@ -23,6 +23,13 @@ public:
     {
     }
 
+    // Hybrid partitioning, decided before launch by the host (auto_tuner's
+    // PickIndexerKvSplit) and passed down through the `kvSplit` launch parameter:
+    // `kvSplit=0` - one task = one (batch, query tile); the owning block walks all KV
+    // chunks sequentially, `lastTopk` stays core-local (MTE3->MTE2 fence, no sync flags).
+    // `kvSplit=1` - the sparse (tile, chunk) tasks cannot fill all blocks, so tasks split
+    // to (tile, chunk) granularity again and blocks relay the running topK across cores
+    // through the `sync` GM flags (software ring).
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc,
                                 GM_ADDR queryLens, GM_ADDR cachedLens, GM_ADDR blockTables,
                                 GM_ADDR scores, GM_ADDR lastTopk, GM_ADDR seqPositions,
@@ -31,7 +38,7 @@ public:
                                 uint32_t batch, uint32_t blockTableStride, uint32_t maxNumBlock,
                                 uint32_t topK, uint8_t skipDenseTopk, GM_ADDR kScaleCache = nullptr,
                                 uint32_t kScaleCacheStride = 0, uint32_t compressRatio = 1,
-                                uint32_t weightCols = 0)
+                                uint32_t weightCols = 0, uint8_t kvSplit = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -78,7 +85,7 @@ public:
                                         block_num * XLITE_MAX_M0 * tileSizeOfCachedKV);
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * AIV_TO_AIC + subBlockIdx;
         this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * AIV_TO_AIC + subBlockIdx;
-        // assert(this->tileSizeOfCachedKV >= this->topK);
+        this->kvSplit = kvSplit > 0;
 
 #ifdef __DAV_C220_CUBE__
         /*
@@ -168,7 +175,7 @@ public:
                                  MAX(1, maxSeqLen / tileSizeOfCachedKV) * tileSizeOfCachedKV;
         this->sortIndicesBytes = MIN(tileSizeOfCachedKV, maxSeqLen) * sizeof(uint32_t);
         this->sortIndicesRepeats = DIV_ROUND_UP(this->sortIndicesBytes, VECTOR_MAX_BYTESIZE);
-        // total sort & WaitPrevCore & SetNextCore use
+        // totalSort use
         uint64_t off = 0;
         this->totalSort = reinterpret_cast<__ubuf__ float *>(off);
         off += ROUND_UP(MAX_TOPK_NUM * 4 * sizeof(float) + UB_BANK_CONFLICT_OFFSET,
@@ -206,6 +213,7 @@ public:
 #endif
     }
 
+    // ---- cross-core relay (kvSplit=1 only): software ring over the `sync` GM flags ----
     __aicore__ inline void SetNextCore()
     {
         __ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull);
@@ -244,9 +252,8 @@ public:
     }
 
 #ifdef __DAV_C220_CUBE__
-    __aicore__ inline void RunAicIndexerScores(GlobalTensor<Dtype> query,
-                                               GlobalTensor<WeightDtype> weight, int queryLen,
-                                               __gm__ uint32_t *blockTable, int kvOffset, int kvLen,
+    __aicore__ inline void RunAicIndexerScores(int queryLen, __gm__ uint32_t *blockTable,
+                                               int kvOffset, int kvLen,
                                                GlobalTensor<ScoreDtype> scores)
     {
         constexpr int kBlockSize = 32 / sizeof(Dtype);
@@ -268,15 +275,6 @@ public:
         int wnBlockNum = wnBlockPad / NBLOCKSIZE;
         constexpr int weightBlockSize = 32 / sizeof(WeightDtype);
         int wkBlockNum = nHeads / weightBlockSize;
-
-        SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
-        WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
-        // copy q (queryTaskLen, nHeads, headDim) to L1
-        CopyGmToL1Nd2Nz(ql1Buf, query, nSize, headDim, headDim, nTotalBlockPad);
-        // copy weight [queryTaskLen, nHeads] to L1; weightCols is the GM row pitch.
-        CopyGmToL1Nd2Nz(wl1Buf, weight, wmSize, nHeads, weightCols, wmBlockPad);
-        SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
-        WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
 
         int kPingpong = 0;
         int curr = 0;
@@ -461,7 +459,8 @@ public:
         uint32_t topKCalcRepeatX2 = topKCalcRepeat * 2;
 
         int curr = 0;
-        bool waitCoreTriggered = false, totalSortOnHold = false;
+        bool totalSortOnHold = false;
+        bool lastChunkFenceWaited = false;
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);  // release `in[curr]`
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);  // release `lastSort[curr]`
@@ -554,10 +553,14 @@ public:
             } else {
                 MrgSort(mrgSortBuf1, mrgSortBuf0, sortRepeat, &localSort, topK);
                 pipe_barrier(PIPE_V);
-                if (!waitCoreTriggered) {
-                    WaitPrevCore();
-                    waitCoreTriggered = true;
-                    resetPrevCore = 1;
+                if (!lastChunkFenceWaited) {
+                    if (kvSplit) {
+                        WaitPrevCore();
+                        resetPrevCore = 1;
+                    } else {
+                        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
+                    }
+                    lastChunkFenceWaited = true;
                 }
                 // copy last intermediate sort results (score + index) to `lastSort[curr]`
                 wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + curr);  // acquire `lastSort[curr]`
@@ -580,7 +583,8 @@ public:
 
             // `totalSort`: merged topK results (score + index) for the current query position
             if (!isFinal) {
-                // copy `totalSort` (intermediate score+index results) to GM for next core to merge
+                // copy `totalSort` (intermediate score+index results) to GM; the next chunk
+                // call of the same tile (same core) merges it back via `lastSort[curr]`
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
                 totalSortOnHold = true;
@@ -588,9 +592,13 @@ public:
                                     MIN(topK, totalSortLen) * 2 * sizeof(uint32_t));
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);  // release `totalSort`
                 if (idx == queryLen - 1) {
-                    set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
-                    wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
-                    SetNextCore();
+                    if (kvSplit) {
+                        set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+                        wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+                        SetNextCore();
+                    } else {
+                        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5);
+                    }
                 }
             } else {
                 // aggregate topK indices from totalSort, sort them from smallest to largest
@@ -641,6 +649,65 @@ public:
             return pos;
         }
         return (pos + 1) / static_cast<int32_t>(compressRatio) - 1;
+    }
+
+    // Execute one (query tile, KV chunk) work item on this block: AIC computes one
+    // chunk's scores and notifies the block's AIVs via the ffts ping-pong; each AIV
+    // subblock merges its half of the query rows. Shared by both partitioning modes.
+    __aicore__ inline void RunTaskChunk(int batchIdx, int queryStart, int queryOffset,
+                                        int queryTaskOffset, int queryTaskLen, int queryPosBase,
+                                        __gm__ uint32_t *blockTable, int kvOffset, int kvLen,
+                                        int curr, const uint64_t *a2vSyncFlag,
+                                        const uint64_t *v2aSyncFlag)
+    {
+#ifdef __DAV_C220_CUBE__
+        (void)queryPosBase;
+        wait_flag_dev(v2aSyncFlag[curr]);
+        // kvSplit deals a tile's chunks to different blocks, so every work item reloads
+        // q/w into L1; the serial mode loads them once per tile, at its first chunk.
+        if (kvSplit || kvOffset == 0) {
+            uint32_t qOffset = queryTaskOffset * nHeads * headDim;
+            // head weights tail-aligned at (weightCols - nHeads).
+            uint32_t wOffset = queryTaskOffset * weightCols + (weightCols - nHeads);
+            int nSize = queryTaskLen * nHeads;
+            int nTotalBlockPad = ROUND_UP(nSize, NBLOCKSIZE);
+            int wmSize = queryTaskLen;
+            int wmBlockPad = ROUND_UP(wmSize, MBLOCKSIZE);
+
+            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID4);
+            // copy q (queryTaskLen, nHeads, headDim) to L1
+            CopyGmToL1Nd2Nz(ql1Buf, q[qOffset], nSize, headDim, headDim, nTotalBlockPad);
+            // copy weight [queryTaskLen, nHeads] to L1; weightCols is the GM row pitch.
+            CopyGmToL1Nd2Nz(wl1Buf, weight[wOffset], wmSize, nHeads, weightCols, wmBlockPad);
+            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
+            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
+        }
+        dbg_printf("block%d: {batch %d, query start loc %u, query [%u - %u), index k "
+                   "[%u - %u)} use %d buf\n",
+                   blockIdx, batchIdx, queryStart, queryOffset, queryOffset + queryTaskLen,
+                   kvOffset, kvOffset + kvLen, curr);
+        RunAicIndexerScores(queryTaskLen, blockTable, kvOffset, kvLen, scores[curr]);
+        ffts_cross_core_sync(PIPE_FIX, a2vSyncFlag[curr]);
+#else
+        int nWork = queryTaskLen;
+        int nWorkPerCore = DIV_ROUND_UP(nWork, 2);
+        int nWorkCurCore = nWorkPerCore;
+        int nWorkStart = subBlockIdx * nWorkCurCore;
+        if (nWorkStart + nWorkCurCore > nWork) {
+            nWorkCurCore = nWork - nWorkStart;
+        }
+        uint32_t outOffset = (queryTaskOffset + nWorkStart) * topK;
+        wait_flag_dev(a2vSyncFlag[curr]);
+        dbg_printf("block%d subblock%u: {batch %d, query start loc %u, query [%u - "
+                   "%u), index k [%u - %u)} use %d buf\n",
+                   blockIdx, subBlockIdx, batchIdx, queryStart, queryOffset + nWorkStart,
+                   queryOffset + nWorkStart + nWorkCurCore, kvOffset, kvOffset + kvLen, curr);
+        RunAivTopk((__gm__ ScoreDtype *)scores[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
+                   lastTopk + outOffset * 2, nWorkCurCore, kvOffset, kvLen, topK,
+                   topkIndices + outOffset, queryPosBase + nWorkStart, blockTable);
+        ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[curr]);
+#endif
     }
 
     __aicore__ inline void Run()
@@ -698,86 +765,107 @@ public:
                                     batchIdx * blockTableStride * sizeof(uint32_t));
 
             int queryNum = DIV_ROUND_UP(queryLen, queryTileSize);
-            // nKv = completed KV blocks visible to the last query token; kCache holds one row
-            // per block (compressed-block space when ratio>1, token space when ==1).
-            int nKv = MapPosToKv(cachedLen + queryLen - 1) + 1;
-            int kvNumMax = DIV_ROUND_UP(nKv, tileSizeOfCachedKV);
-            int taskNum = queryNum * kvNumMax;
-            for (int idx = 0; idx < taskNum;) {  // each loop handles a chunk of one sequence/batch
-                // tiling info for the indexer query matrix
-                int queryIdx = idx / kvNumMax;
-                int queryTaskLen = queryTileSize;
-                int queryOffset = queryIdx * queryTileSize;
-                if (queryOffset + queryTaskLen > queryLen) {
-                    queryTaskLen = queryLen - queryOffset;
-                }
-                int queryTaskOffset = queryStart + queryOffset;
-                int queryPosBase = cachedLen + queryOffset;
-                int queryPosEnd = queryPosBase + queryTaskLen - 1;  // inclusive (token space)
-                // KV-space causal boundary for the tile's last token; gates the dense/skip
-                // check and kvLen so the tile never reads KV past the valid range.
-                int queryPosEndKvBound = MapPosToKv(queryPosEnd);
-                // tiling info for the indexer key matrix
-                int kvIdx = idx % kvNumMax;
-                int kvOffset = kvIdx * tileSizeOfCachedKV;
+            if (kvSplit) {
+                // Chunk-level tasks: (query tile, KV chunk) pairs are dealt round-robin so
+                // idle blocks join in; consecutive chunks chain through the cross-core
+                // relay (WaitPrevCore/SetNextCore in RunAivTopk).
+                // nKv = completed KV blocks visible to the last query token; kCache holds
+                // one row per block (compressed-block space when ratio>1, token space
+                // when ==1).
+                int nKv = MapPosToKv(cachedLen + queryLen - 1) + 1;
+                int kvNumMax = DIV_ROUND_UP(nKv, tileSizeOfCachedKV);
+                int taskNum = queryNum * kvNumMax;
+                for (int idx = 0; idx < taskNum;) {
+                    int queryIdx = idx / kvNumMax;
+                    int queryTaskLen = queryTileSize;
+                    int queryOffset = queryIdx * queryTileSize;
+                    if (queryOffset + queryTaskLen > queryLen) {
+                        queryTaskLen = queryLen - queryOffset;
+                    }
+                    int queryTaskOffset = queryStart + queryOffset;
+                    int queryPosBase = cachedLen + queryOffset;
+                    int queryPosEnd = queryPosBase + queryTaskLen - 1;  // inclusive (token space)
+                    int queryPosEndKvBound = MapPosToKv(queryPosEnd);
+                    int kvIdx = idx % kvNumMax;
+                    int kvOffset = kvIdx * tileSizeOfCachedKV;
 #ifdef __DAV_C220_VEC__
-                if (assignedDefaultTopk && kvOffset == 0 &&
-                    MapPosToKv(queryPosBase) < (int32_t)topK) {
-                    __gm__ uint32_t *dst = this->topkIndices + queryTaskOffset * topK;
-                    for (int i = 0; i < queryTaskLen; i++) {
-                        if (MapPosToKv(queryPosBase + i) >= (int32_t)topK) {
-                            break;
+                    if (assignedDefaultTopk && kvOffset == 0 &&
+                        MapPosToKv(queryPosBase) < (int32_t)topK) {
+                        __gm__ uint32_t *dst = this->topkIndices + queryTaskOffset * topK;
+                        for (int i = 0; i < queryTaskLen; i++) {
+                            if (MapPosToKv(queryPosBase + i) >= (int32_t)topK) {
+                                break;
+                            }
+                            CopyUbufToGmAligned(dst + i * topK, this->defaultTopkIndices,
+                                                defaultTopkBytes);
                         }
-                        CopyUbufToGmAligned(dst + i * topK, this->defaultTopkIndices,
-                                            defaultTopkBytes);
+                    }
+#endif
+                    // skip dense tiles entirely or chunks past the tile's causal bound
+                    if (queryPosEndKvBound < (int32_t)topK || queryPosEndKvBound < kvOffset) {
+                        idx = NEXT_MULTIPLE(idx, kvNumMax);  // jump to the next query tile
+                        continue;
+                    }
+                    int kvLen = MIN(tileSizeOfCachedKV, queryPosEndKvBound - kvOffset + 1);
+                    idx++;
+                    totalIdx++;  // only increase the global task index when the task is valid
+                    if (totalIdx % block_num != block_idx) {
+                        continue;
+                    }
+                    RunTaskChunk(batchIdx, queryStart, queryOffset, queryTaskOffset, queryTaskLen,
+                                 queryPosBase, blockTable, kvOffset, kvLen, curr, a2vSyncFlag,
+                                 v2aSyncFlag);
+                    curr = 1 - curr;
+                }
+            } else {
+                for (int queryIdx = 0; queryIdx < queryNum; queryIdx++) {
+                    // each loop handles one (batch, query tile) task
+                    int queryTaskLen = queryTileSize;
+                    int queryOffset = queryIdx * queryTileSize;
+                    if (queryOffset + queryTaskLen > queryLen) {
+                        queryTaskLen = queryLen - queryOffset;
+                    }
+                    int queryTaskOffset = queryStart + queryOffset;
+                    int queryPosBase = cachedLen + queryOffset;
+                    int queryPosEnd = queryPosBase + queryTaskLen - 1;  // inclusive (token space)
+                    // KV-space causal boundary for the tile's last token; gates the dense/skip
+                    // check and kvLen so the tile never reads KV past the valid range. kCache
+                    // holds one row per block (compressed-block space when ratio>1, token
+                    // space when ==1), so the bound is in KV rows.
+                    int queryPosEndKvBound = MapPosToKv(queryPosEnd);
+#ifdef __DAV_C220_VEC__
+                    if (assignedDefaultTopk && MapPosToKv(queryPosBase) < (int32_t)topK) {
+                        __gm__ uint32_t *dst = this->topkIndices + queryTaskOffset * topK;
+                        for (int i = 0; i < queryTaskLen; i++) {
+                            if (MapPosToKv(queryPosBase + i) >= (int32_t)topK) {
+                                break;
+                            }
+                            CopyUbufToGmAligned(dst + i * topK, this->defaultTopkIndices,
+                                                defaultTopkBytes);
+                        }
+                    }
+#endif
+                    // skip dense tiles entirely (every token's causal boundary < topK)
+                    if (queryPosEndKvBound < (int32_t)topK) {
+                        continue;
+                    }
+                    totalIdx++;  // only increase the global task index when the task is valid
+                    if (totalIdx % block_num != block_idx) {
+                        continue;
+                    }
+                    // the owning block serially walks every KV chunk of this query tile,
+                    // bounded by the tile's causal boundary; AIC produces one chunk's
+                    // scores and notifies the block's AIVs (ffts ping-pong), AIVs merge
+                    // the running topK via `lastTopk` locally — cores are fully decoupled
+                    for (int kvOffset = 0; kvOffset <= queryPosEndKvBound;
+                         kvOffset += tileSizeOfCachedKV) {
+                        int kvLen = MIN(tileSizeOfCachedKV, queryPosEndKvBound - kvOffset + 1);
+                        RunTaskChunk(batchIdx, queryStart, queryOffset, queryTaskOffset,
+                                     queryTaskLen, queryPosBase, blockTable, kvOffset, kvLen, curr,
+                                     a2vSyncFlag, v2aSyncFlag);
+                        curr = 1 - curr;
                     }
                 }
-#endif
-                // per-chunk token position info, skip if this chunk's attention is dense
-                if (queryPosEndKvBound < (int32_t)topK || queryPosEndKvBound < kvOffset) {
-                    idx = NEXT_MULTIPLE(idx, kvNumMax);  // skip KV chunks; jump to next query chunk
-                    continue;
-                }
-                int kvLen = MIN(tileSizeOfCachedKV, queryPosEndKvBound - kvOffset + 1);
-                idx++;
-                totalIdx++;  // only increase the global task index when the current task is valid
-                if (totalIdx % block_num != block_idx) {
-                    continue;
-                }
-#ifdef __DAV_C220_CUBE__
-                uint32_t qOffset = queryTaskOffset * nHeads * headDim;
-                // head weights tail-aligned at (weightCols - nHeads).
-                uint32_t wOffset = queryTaskOffset * weightCols + (weightCols - nHeads);
-                dbg_printf("block%d: {batch %d, query start loc %u, query [%u - %u), index k [%u - "
-                           "%u)} use %d buf\n",
-                           blockIdx, batchIdx, queryStart, queryOffset, queryOffset + queryTaskLen,
-                           kvOffset, kvOffset + kvLen, curr);
-                wait_flag_dev(v2aSyncFlag[curr]);
-                RunAicIndexerScores(q[qOffset], weight[wOffset], queryTaskLen, blockTable, kvOffset,
-                                    kvLen, scores[curr]);
-                ffts_cross_core_sync(PIPE_FIX, a2vSyncFlag[curr]);
-#else
-                int nWork = queryTaskLen;
-                int nWorkPerCore = DIV_ROUND_UP(nWork, 2);
-                int nWorkCurCore = nWorkPerCore;
-                int nWorkStart = subBlockIdx * nWorkCurCore;
-                if (nWorkStart + nWorkCurCore > nWork) {
-                    nWorkCurCore = nWork - nWorkStart;
-                }
-                uint32_t outOffset = (queryTaskOffset + nWorkStart) * topK;
-                wait_flag_dev(a2vSyncFlag[curr]);
-                dbg_printf("block%d subblock%u: {batch %d, query start loc %u, query [%u - %u), "
-                           "index k [%u - %u)} use %d buf\n",
-                           blockIdx, subBlockIdx, batchIdx, queryStart, queryOffset + nWorkStart,
-                           queryOffset + nWorkStart + nWorkCurCore, kvOffset, kvOffset + kvLen,
-                           curr);
-                RunAivTopk(
-                    (__gm__ ScoreDtype *)scores[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
-                    lastTopk + outOffset * 2, nWorkCurCore, kvOffset, kvLen, topK,
-                    topkIndices + outOffset, queryPosBase + nWorkStart, blockTable);
-                ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[curr]);
-#endif
-                curr = 1 - curr;
             }
         }
 #ifdef __DAV_C220_CUBE__
@@ -827,6 +915,7 @@ private:
     uint32_t setNextGeneration;
     uint32_t waitPrevGeneration;
     int resetPrevCore;
+    bool kvSplit;  // true: split to (tile, chunk) tasks with cross-core relay
 
 #ifdef __DAV_C220_CUBE__
     LocalTensor<Dtype> ql1Buf;                            // event 4
@@ -861,13 +950,13 @@ private:
         GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,           \
         uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                    \
         uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,    \
-        uint32_t compressRatio, uint32_t weightCols)                                              \
+        uint32_t compressRatio, uint32_t weightCols, uint8_t kvSplit)                             \
     {                                                                                             \
         IndexerTopK<dtype, float, dtype, dtype> op;                                               \
         op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,     \
                 lastTopk, seqPositions, topkIndices, sync, kCacheStride, nHeads, headDim,         \
                 blockSize, batch, blockTableStride, maxNumBlock, topK, skipDenseTopk, nullptr, 0, \
-                compressRatio, weightCols);                                                       \
+                compressRatio, weightCols, kvSplit);                                              \
         op.Run();                                                                                 \
     }
 
@@ -879,12 +968,12 @@ private:
         uint32_t heads, uint32_t dim, uint32_t block_size, uint32_t batch,                        \
         uint32_t block_table_stride, uint32_t max_blocks, uint32_t topk, uint8_t skip_dense_topk, \
         GM_ADDR k_scale_cache, uint32_t k_scale_cache_stride, uint32_t compress_ratio,            \
-        uint32_t weight_cols)                                                                     \
+        uint32_t weight_cols, uint8_t kvSplit)                                                    \
     {                                                                                             \
         IndexerTopK<dtype, int32_t, half, float> op;                                              \
         op.Init(q, k_cache, weight, query_start_loc, query_lens, cached_lens, block_tables,       \
                 scores, last_topk, seq_positions, topk_indices, sync, k_cache_stride, heads, dim, \
                 block_size, batch, block_table_stride, max_blocks, topk, skip_dense_topk,         \
-                k_scale_cache, k_scale_cache_stride, compress_ratio, weight_cols);                \
+                k_scale_cache, k_scale_cache_stride, compress_ratio, weight_cols, kvSplit);       \
         op.Run();                                                                                 \
     }

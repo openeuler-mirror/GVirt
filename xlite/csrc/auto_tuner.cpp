@@ -267,3 +267,29 @@ uint32_t PickMinBlockNum(uint32_t coreNum, uint64_t totalRows)
     }
     return totalRows >= coreNum ? coreNum : static_cast<uint32_t>(totalRows);
 }
+
+uint8_t PickIndexerKvSplit(const std::vector<uint32_t> &cachedLens,
+                           const std::vector<uint32_t> &queryLens, uint32_t blockNum, uint32_t topK,
+                           uint32_t compressRatio)
+{
+    // Mirror of the kernel's MapPosToKv causal-boundary mapping: token pos for
+    // compressRatio<=1 (inclusive of own position), last completed-block index
+    // otherwise. Int32 math on purpose - the kernel compares the same values.
+    auto mapPosToKv = [compressRatio](int32_t pos) -> int32_t {
+        return compressRatio <= 1 ? pos : (pos + 1) / static_cast<int32_t>(compressRatio) - 1;
+    };
+    const uint32_t queryTileSize = MAX_INDEXER_Q_TILE_LEN;
+    uint64_t sparseTiles = 0;
+    for (size_t b = 0; b < queryLens.size(); b++) {
+        uint32_t queryLen = queryLens[b];
+        uint32_t cachedLen = cachedLens[b];
+        for (uint32_t qOffset = 0; qOffset < queryLen; qOffset += queryTileSize) {
+            uint32_t taskLen = std::min(queryTileSize, queryLen - qOffset);
+            int32_t p0End = mapPosToKv(static_cast<int32_t>(cachedLen + qOffset + taskLen - 1));
+            if (p0End >= static_cast<int32_t>(topK)) {
+                sparseTiles++;
+            }
+        }
+    }
+    return sparseTiles < blockNum ? 1 : 0;
+}

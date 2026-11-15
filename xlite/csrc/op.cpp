@@ -6,6 +6,7 @@
 #include "runtime.h"
 #include "ccl.h"
 #include "op.h"
+#include "auto_tuner.h"
 #include "dsa_cp_weight.h"
 #include "swizzle.h"
 #include "aclrtlaunch_all.h"
@@ -2637,7 +2638,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk,
-                        const XTensor &kScaleCache, uint32_t compressRatio)
+                        const XTensor &kScaleCache, uint32_t compressRatio, uint8_t kvSplit)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -2691,7 +2692,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                 topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr,
-                kScaleCacheStride, compressRatio, weightCols);
+                kScaleCacheStride, compressRatio, weightCols, kvSplit);
         }
         return;
     }
@@ -2711,7 +2712,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     launchKernel(rt.aicNum, rt.stream, q.ptr, kCache.ptr, weight.ptr, queryStartLoc.ptr, lens.ptr,
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                  topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
-                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio, weightCols);
+                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio, weightCols,
+                 kvSplit);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,

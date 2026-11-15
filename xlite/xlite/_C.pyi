@@ -3914,6 +3914,7 @@ def indexer_topk(
     *,
     k_scale_cache: Optional[torch.Tensor] = None,
     compress_ratio: int = 1,
+    kv_split: int = 0,
 ) -> None:
     """Fused indexer scores + top-k selection over cached keys.
 
@@ -3972,6 +3973,12 @@ def indexer_topk(
             query's own incomplete block (yields ``-1`` when that block is not yet
             complete). ``block_tables``/``cached_lens``/``lens`` stay token-grained;
             only the KV count and causal boundary move to compressed-block space.
+        kv_split (int): Partitioning mode (the serving path picks it per forward in
+            ``PrepareAttn``; standalone callers choose explicitly). ``0`` = one
+            (batch, query tile) task per block walking its KV chunks serially;
+            ``1`` = (tile, chunk) tasks with the cross-core topK relay. ``0`` only
+            fills the blocks when the sparse query-tile count reaches the launch
+            block count. Both modes produce identical results.
 
     Returns:
         None: ``topk_indices`` is written in place. The binding synchronizes.

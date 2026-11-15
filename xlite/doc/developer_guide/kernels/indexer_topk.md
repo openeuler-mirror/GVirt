@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-DSA indexer 的核心融合算子:在单个 kernel 内完成"indexer 得分计算 + 跨核全局 topk 选取"(AIC 算分数、AIV 做 topk,通过核间同步拼接)。数学语义(见 `csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init` 注释块 `scores = k * q` 与测试 `tests/kernels/indexer_topk.py` 的 `run_test` 参考实现,关键字 `torch.einsum("chd,td->cht"` / `scores.clamp(min=0)`):
+DSA indexer 的核心融合算子:在单个 kernel 内完成"indexer 得分计算 + topk 选取"(AIC 算分数、AIV 做 topk)。分核采用**混合策略,由 host 在算子下发前决策**(`csrc/auto_tuner.cpp` 的 `PickIndexerKvSplit`,模型路径在 `XRuntime::PrepareAttn` 每个 forward 执行一次,结果存 `rt._indexerKvSplit`,经 `uint8_t kvSplit` launch 参数传入 kernel):稀疏 query tile 数足以填满所有 block 时(`kvSplit=0`),一个 (batch, query tile) 任务整体归属一个 block,该 block 串行走完该 tile 的所有 KV tile,AIC 每算完一个 KV tile 的 scores 通知本 block 的 AIV,各 block 之间完全解耦;tile 填不满 block 时(`kvSplit=1`,典型如少 batch 长 cache 的 decode),退回 (tile, chunk) 粒度平铺分核 + 跨核接力,让空闲 block 也参与并把 chunk 间的 AIC/AIV 流水摊到多核。数学语义(见 `csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init` 注释块 `scores = k * q` 与测试 `tests/kernels/indexer_topk.py` 的 `run_test` 参考实现,关键字 `torch.einsum("chd,td->cht"` / `scores.clamp(min=0)`):
 
 ```plaintext
 scores[s,h,t]    = ReLU(sum_d q[s,h,d] * kCache[t,d])    # AIC 第一级 mmad + fixpipe ReLU
@@ -15,11 +15,11 @@ topkIndices[s,:] = TopK(index_score[s, :p0+1], topK)     # AIV,因果限定候�
 - **因果掩码**:每个 query token 只在先验及自身位置 `[0, p0]` 中选 topK(不含未来),通过按位置截断 `validKvLen` + 尾部 `FLOAT_MIN` 补齐实现(见下文)。`p0` 由 `MapPosToKv(pos)` 给出(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::MapPosToKv`):`compressRatio==1`(token 级 KV)时 `p0 = pos`(含自身);`compressRatio>1`(压缩块级 KV)时 `p0 = (pos+1)/ratio - 1`,即最后一个**已完成**压缩块的末 KV 索引,**排除 token 自身所在未完成块**(首块、`clen==0` 时为 `-1`,表示无有效 KV)。
 - **稀疏/稠密分流**:`p0 < topK` 的 token 走稠密注意力(全部先验位置都参加注意力,无需选路),kernel 不为其排序,直接输出**默认模板** `0...topK-1`(升序,覆盖 `[0, topK)`);下游消费时必须过滤掉 `> p0` 的索引——模板头部的前 `min(p0+1, topK)` 项恒为 `[0, p0]` 内的有效位置(`gather_sparse_kv_cache` 依赖此约定)。
 
-与 `indexer_scores` + `topk` 两算子组合相比,本算子把两步融合进同一 launch,并通过 `lastTopk` 环形接力避免中间大矩阵落盘。
+与 `indexer_scores` + `topk` 两算子组合相比,本算子把两步融合进同一 launch,并通过 `lastTopk`(KV tile 间的逐位置中转)避免中间大矩阵落盘。
 
 ## 输入输出参数
 
-Python 侧调用(`tests/kernels/indexer_topk.py`):
+Python 侧调用(`tests/kernels/indexer_topk.py`,两种 `kv_split` 全用例覆盖;模型路径由 PrepareAttn 自动决策,standalone 由调用方显式选择):
 
 ```python
 indexer_topk(
@@ -37,6 +37,7 @@ indexer_topk(
     block_size,
     batch,
     topK,
+    kv_split=0,  # 0 = serial query-tile mode, 1 = (tile, chunk) relay mode
 )
 ```
 
@@ -49,10 +50,10 @@ indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR querySta
                      GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,
                      uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,
                      uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,
-                     uint32_t compressRatio, uint32_t weightCols)
+                     uint32_t compressRatio, uint32_t weightCols, uint8_t kvSplit)
 ```
 
-C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_C8_FUNC_DEFINE`)签名不同:同样在 `sync` 后接收 `uint32_t k_cache_stride`,末四参为 `GM_ADDR k_scale_cache`、`uint32_t k_scale_cache_stride`、`uint32_t compress_ratio` 与 `uint32_t weight_cols`(因果边界语义与浮点路径相同,C8 同样支持压缩块级 KV)。
+C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_C8_FUNC_DEFINE`)签名不同:同样在 `sync` 后接收 `uint32_t k_cache_stride`,末五参为 `GM_ADDR k_scale_cache`、`uint32_t k_scale_cache_stride`、`uint32_t compress_ratio`、`uint32_t weight_cols` 与 `uint8_t kvSplit`(因果边界语义与浮点路径相同,C8 同样支持压缩块级 KV)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -63,11 +64,12 @@ C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` �
 | queryLens / cachedLens | 输入 | `[batch]` | int32 | 各 batch query / 已缓存长度;token 绝对位置 `pos = cachedLens[i] + 段内偏移`,经 `MapPosToKv` 映射为 KV 空间因果边界 `p0` |
 | blockTables | 输入 | `[rows >= batch, blockTableStride]` | int32 | 逻辑块 → 物理块映射;持久化缓冲,行跨度为分配跨度,仅每行 lens 推导的有效前缀被读取;行跨度 `blockTableStride` 仅用于行寻址 |
 | scores | workspace | `[2 * block_num * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN]` 视作 `[block_num][2][XLITE_MAX_M0 * 4096]` | fp16 / bf16 / fp32 | C8 使用 fp32;AIC→AIV 的得分中转缓冲,乒乓两份,每 block 一段(见下文布局) |
-| lastTopk | workspace | `[total_query_len, 2*topK]`(uint32 对) | uint32 | 跨核 topk 接力缓冲:处理非首 KV tile 的核把当前全局 topK 候选(值+索引对)写给下一个核 |
+| lastTopk | workspace | `[total_query_len, 2*topK]`(uint32 对) | uint32 | KV tile 间的 topk 中转缓冲:处理非末 KV tile 时,把该 query token 当前累积的全局 topK 候选(值+索引对)写出,下一个 KV tile 读回融合——`kvSplit=0` 时下一个 tile 属同一核(行独占,无竞争),`kvSplit=1` 时属于接办该 chunk 的下一个 block(经 `sync` 接力同步) |
+| sync | workspace | `[AIV_TO_AIC*block_num]` | int32 | 核间接力同步 flag 数组(每核 `AIV_TO_AIC=2` 个,对应 2 个 subblock),仅 `kvSplit=1` 模式使用;`kvSplit=0` 模式下分配与清零照常但 kernel 不触碰 |
+| kvSplit | — | 标量 | uint8 | 分核模式,host 下发前由 `PickIndexerKvSplit` 决策(模型路径:PrepareAttn 存 `rt._indexerKvSplit`;standalone 入口:外部显式传入 `kv_split`):`0` = 串行 tile 模式(稀疏 query tile 数 ≥ block_num),`1` = chunk 平铺 + 跨核接力模式(稀疏 query tile 数 < block_num) |
 | seqPositions | 输入 | `[max(max(blockSize*maxNumBlock, INIT_MIN_SEQ_POS), topK)]` | int32(uint32 语义) | `arange(...)` 恒等索引表,由 host 侧(`csrc/_C.cpp` `IndexerTopK` / `csrc/model.cpp` `XModel::Init`)预先生成;长度必须覆盖 kernel 侧推导的 `maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)`(host 侧 `XliteOpIndexerTopK` 不校验长度,由 `XModel::Init` 预生成保证覆盖)。`XModel::Init` 按 `MAX(INIT_MIN_SEQ_POS, ROUND_UP(max_seq_len, blockSize))` 一次性预生成。AIV 每个 subblock 搬入属于自己的一段,之后按 `kvOffset` 增量推进;同时它也是稠密行模板的来源——首个 `topK` 项即 `0...topK-1`(模板 writer 核整体搬入 UB `defaultTopkIndices`,见下文) |
 | topkIndices | 输出 | `[total_query_len, topK]` | int32(uint32 语义) | 每 query token 的 topK 索引,**按索引升序**(最小 id 在前)排列,所有行有效。`p0 >= topK` 的稀疏行是真实 topK(候选满 `topK` 个,全部落在 `[0, p0]`);`p0 < topK` 的稠密行是默认模板 `0...topK-1`,其中 `> p0` 的表项无效,下游必须过滤——模板头部的前 `min(p0+1, topK)` 项恒为有效位置(`gather_sparse_kv_cache` 依赖此约定做头部有效收集) |
 | kScaleCache | 输入(C8) | `[kvcache_block_num,blockSize,1,1]` | fp16 | 与 K cache 同分页布局;Python 参数为 `k_scale_cache`。DSV4 的 vllm 原生池把 K 与 scale 按页打包进同一分配(scale 视图带 storage_offset、stride[0] = 每 block 字节数/2),允许 pitch |
-| sync | workspace | `[AIV_TO_AIC*block_num]` | int32 | 核间环形同步 flag 数组(每核 `AIV_TO_AIC=2` 个,对应 2 个 subblock,`csrc/kernels/indexer_topk.h` 的 `AIV_TO_AIC` 宏,关键字 `#define AIV_TO_AIC 2u`) |
 | kCacheStride | — | 标量 | uint32 | kCache 的 dim-0 跨度(元素数);连续时等于 blockSize×headDim(C8 为 blockSize×128),非连续时由宿主传入真实跨距 |
 | kScaleCacheStride | — | 标量(C8) | uint32 | kScaleCache 的 dim-0 跨度(fp16 元素数);dense 池传 0,内核以 `MAX(kScaleCacheStride, blockSize)` 守护后退化为 block 内连续寻址。核内 scale 读取为 `kScaleCache + block*kScaleCacheStride`(块内连续),vllm 打包页的 storage_offset 常量偏移由基指针吸收 |
 | nHeads / headDim / blockSize / batch / topK / skipDenseTopk | — | 标量 | uint32 / uint8 | 测试配置:nHeads=64, headDim=128, blockSize=128, topK ∈ {512, 2048};约束 `topK <= MAX_TOPK_NUM=2048`、`kvLen <= MAX_INDEXER_KV_TILE_LEN=4096`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `assert(kvLen <= MAX_INDEXER_KV_TILE_LEN && topK <= MAX_TOPK_NUM)`)。`skipDenseTopk=1` 时不写稠密模板(旧行为,稠密行内容不定),默认 0 |
@@ -89,33 +91,35 @@ C8 使用 32 个 head、headDim=128,并要求 `block_size ∈ {16,32,64,128}`(�
 
 本算子是混合核(`KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2)`,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2)`):每个 block 配 1 个 AIC(Cube,算得分)+ 2 个 AIV(Vector,topk,`AIV_TO_AIC=2`,`csrc/kernels/indexer_topk.h` 的 `AIV_TO_AIC` 宏,关键字 `#define AIV_TO_AIC 2u`)。AIC 与 AIV 通过 `ffts_cross_core_sync` 组内同步(`mode=2`,flag 定义 `csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `a2vSyncFlag` / `v2aSyncFlag` flag 定义段;置位点关键字 `ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[0/1])` 与 `ffts_cross_core_sync(PIPE_FIX, a2vSyncFlag[curr])` 与 `ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[curr])`):flag 0/1 由 AIC 置位表示某乒乓 scores 缓冲就绪,flag 2/3 由 AIV 置位表示缓冲已消费完毕。
 
-### 任务划分、稠密/未来 chunk 跳过与 scores workspace 布局
+### 混合分核策略、稠密/未来 chunk 跳过与 scores workspace 布局
 
-`Run`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`)按 batch 枚举任务:
+**模式自判**(host 下发前,每个 forward 一次):`PickIndexerKvSplit`(`csrc/auto_tuner.cpp` 的 `PickIndexerKvSplit`)统计**稀疏 query tile 数** `sparseTiles`——对每个 24-token tile,若其末 token 因果边界 `p0End >= topK`(稀疏,`p0End` 复刻 kernel 的 `MapPosToKv`:ratio≤1 为 token 位置、否则为已完成压缩块边界)则计数加一;`kvSplit = sparseTiles < blockNum`。判据与 `kvSplit=0` 的并行单位严格对齐:串行模式一个 block 拿一整个 (batch, query tile) 任务,能填满所有 block 当且仅当稀疏 tile 数 ≥ block_num;**不能按 (tile, chunk) 任务数判**——少 tile 多 chunk 的长 cache decode(如 batch=1 cachedLen≥10 万)任务数足以过关,但串行模式只会用 1 个核。调用点:模型路径在 `XRuntime::PrepareAttn`(host 镜像 `rt._hostLens`/`rt._cachedLensHost` 上计算,无 D2H,结果存 `rt._indexerKvSplit`,DSA 取 ratio=1、CXA 取 indexer 层的 ratio=4),`csrc/op.cpp` 的 `XliteOpIndexerTopK` 只透传 launch(launch 用的 block 数即决策比较的 `rt.aicNum`);standalone 入口(`csrc/_C.cpp` 的 `IndexerTopK`)没有 PrepareAttn,由外部通过 `kv_split` 参数显式传入(测试 `tests/kernels/indexer_topk.py` 双模式全用例覆盖;perf 脚本 `tests/perf/indexer_topk.py` 用 `-S 0/1` 选择)。CP 路径(`ForwardAttnMLAV2DsaCp`)同样消费 `rt._indexerKvSplit`(按全局 lens 决策,CP 的 shard 切片只会减少本 rank 的 tile 数)。两种模式:
 
-- `queryTileSize = XLITE_MAX_M0 / nHeads`(nHeads=64 时为 2;若 nHeads > XLITE_MAX_M0 则退化为单 token per tile,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `int queryTileSize = XLITE_MAX_M0 / nHeads` / fallback `queryTileSize = 1`);
-- KV 块数以**因果边界**计:`nKv = MapPosToKv(cachedLen + queryLen - 1) + 1`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `int nKv = MapPosToKv(cachedLen + queryLen - 1) + 1`),`kvNumMax = DIV_ROUND_UP(nKv, tileSizeOfCachedKV)`,其中 `tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN=4096, SORT_BLOCK_SIZE=32)`(`csrc/kernels/indexer_topk.h` 的 `INDEXER_KV_TILE_LEN` 宏 与 `IndexerTopK::Init` 中 `tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN, SORT_BLOCK_SIZE)`,带编译期检查 `INDEXER_KV_TILE_LEN ≤ MAX_INDEXER_KV_TILE_LEN`,`csrc/kernels/indexer_topk.h` 的 `INDEXER_KV_TILE_LEN` 编译期断言,关键字 `#if INDEXER_KV_TILE_LEN > MAX_INDEXER_KV_TILE_LEN` / `#error`)。即 KV 维按 4096 切大 tile;`compressRatio>1` 时 kCache 每行对应一个压缩块,`MapPosToKv` 把 token 末位映射到压缩块空间;
-- 任务总数上界 `taskNum = queryNum * kvNumMax`,但**跳过的 chunk 不消耗全局任务号**:`totalIdx` 只在任务有效时递增,再按 `totalIdx % block_num == block_idx` 静态分配(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `totalIdx++; if (totalIdx % block_num != block_idx) continue;`),稠密/未来 chunk 不会在核间留下"空任务"空洞。
+- **`kvSplit=0`(串行 tile 模式,稀疏 query tile 数足以填满所有 block,prefill/大 batch)**:`Run`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`)按 batch 枚举任务,一个任务 = 一个 (batch, query tile),`totalIdx` 只对非稠密 tile 递增,再按 `totalIdx % block_num == block_idx` 静态分配(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `totalIdx++; if (totalIdx % block_num != block_idx) { continue; }`);分到任务的 block 在内层循环串行走完该 tile 的所有 KV tile(`for (int kvOffset = 0; kvOffset <= queryPosEndKvBound; kvOffset += tileSizeOfCachedKV)`),核间无任何同步与数据依赖;
+- **`kvSplit=1`(chunk 平铺模式,稀疏 query tile 数填不满 block,典型为少 batch 长 cache 的 decode)**:退回 `(query tile, KV tile)` 平铺任务,`kvNumMax = DIV_ROUND_UP(nKv, tileSizeOfCachedKV)`(`nKv = MapPosToKv(cachedLen + queryLen - 1) + 1`),任务按 `totalIdx % block_num` 轮转分核让空闲 block 参与,相邻 chunk 靠跨核接力传递 topK(见下文),chunk 间的 AIC/AIV 流水摊到多个 block 上;
+- `queryTileSize = MAX_INDEXER_Q_TILE_LEN=24`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `int queryTileSize = MAX_INDEXER_Q_TILE_LEN`),`queryNum = DIV_ROUND_UP(queryLen, queryTileSize)`;KV tile 大小 `tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN=4096, SORT_BLOCK_SIZE=32)`(`csrc/kernels/indexer_topk.h` 的 `INDEXER_KV_TILE_LEN` 宏 与 `IndexerTopK::Init` 中 `tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN, SORT_BLOCK_SIZE)`,带编译期检查 `INDEXER_KV_TILE_LEN ≤ MAX_INDEXER_KV_TILE_LEN`,`csrc/kernels/indexer_topk.h` 的 `INDEXER_KV_TILE_LEN` 编译期断言,关键字 `#if INDEXER_KV_TILE_LEN > MAX_INDEXER_KV_TILE_LEN` / `#error`)。`compressRatio>1` 时 kCache 每行对应一个压缩块,`MapPosToKv` 把 token 末位映射到压缩块空间;
 
-每个 (query chunk, KV chunk) 任务的**稠密模板写出与位置感知跳过**(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `assignedDefaultTopk` 模板写出 + `queryPosEndKvBound` 跳过段),`queryPosBase = cachedLen + queryOffset` 为该 chunk 首 token 的绝对位置,`queryPosEnd`(含)为末 token 位置,`queryPosEndKvBound = MapPosToKv(queryPosEnd)` 为其 KV 空间因果边界:
+每个 (batch, query tile) 任务的**稠密模板写出与跳过**(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `assignedDefaultTopk` 模板写出 + `queryPosEndKvBound` 跳过段),`queryPosBase = cachedLen + queryOffset` 为该 tile 首 token 的绝对位置,`queryPosEnd`(含)为末 token 位置,`queryPosEndKvBound = MapPosToKv(queryPosEnd)` 为其 KV 空间因果边界:
 
-1. **稠密行模板写出**:每个 AIV subblock 都会枚举到所有任务,但只有指定的模板 writer(`assignedDefaultTopk = !skipDenseTopk && blockIdx == block_num-1 && subBlockIdx == AIV_TO_AIC-1`,即最后一个核的 subblock 1,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `bool assignedDefaultTopk = !skipDenseTopk && blockIdx == block_num - 1 && subBlockIdx == AIV_TO_AIC - 1`)在 `kvOffset == 0 && MapPosToKv(queryPosBase) < topK` 时,把默认模板 `0...topK-1` 逐行复制到该 query chunk **稠密前缀**的各行(行内 `MapPosToKv(queryPosBase + i) >= topK` 即 `break`,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `if (MapPosToKv(queryPosBase + i) >= (int32_t)topK) { break; }`)——只写 `p0 < topK` 的行,混合 chunk 的稀疏行(归属其他核做真实 topk)不被覆盖。此检查在跳过判断**之前**进行,保证整块稠密的 chunk 也被覆盖;
-2. **稠密/未来 chunk 跳过**:`queryPosEndKvBound < topK`(整块稠密)或 `queryPosEndKvBound < kvOffset`(整块全未来)—— 直接 `idx = NEXT_MULTIPLE(idx, kvNumMax)` 跳过(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `if (queryPosEndKvBound < (int32_t)topK || queryPosEndKvBound < kvOffset) { idx = NEXT_MULTIPLE(idx, kvNumMax); continue; }`);
-3. 否则 `kvLen = MIN(tileSizeOfCachedKV, queryPosEndKvBound - kvOffset + 1)`:KV chunk 只需覆盖到 chunk 末 token 的因果边界为止(最后一个 KV tile 通常不满)。混合 chunk(稠密行与稀疏行并存)不跳过,其稠密行在 `RunAivTopk` 内直接跳过(模板已由 writer 写出,见下文)。
+1. **稠密行模板写出**:每个 AIV subblock 都会枚举到所有任务,但只有指定的模板 writer(`assignedDefaultTopk = !skipDenseTopk && blockIdx == block_num-1 && subBlockIdx == AIV_TO_AIC-1`,即最后一个核的 subblock 1,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `bool assignedDefaultTopk = !skipDenseTopk && blockIdx == block_num - 1 && subBlockIdx == AIV_TO_AIC - 1`)在 `MapPosToKv(queryPosBase) < topK` 时,把默认模板 `0...topK-1` 逐行复制到该 tile **稠密前缀**的各行(行内 `MapPosToKv(queryPosBase + i) >= topK` 即 `break`,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `if (MapPosToKv(queryPosBase + i) >= (int32_t)topK) { break; }`)——只写 `p0 < topK` 的行,混合 tile 的稀疏行(后续做真实 topk)不被覆盖。此检查在跳过判断**之前**进行,保证整块稠密的 tile 也被覆盖;`kvSplit=1` 的平铺展开下额外带 `kvOffset == 0` 守卫(tile 的 chunk0 任务时写,tile 级一次),`kvSplit=0` 的 tile 循环天然每 tile 一次;
+2. **稠密/未来 chunk 跳过**:`kvSplit=0` 时 `queryPosEndKvBound < topK`(整 tile 稠密,每个 token 的因果边界都 `< topK`)直接 `continue`,不消耗全局任务号(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `if (queryPosEndKvBound < (int32_t)topK) { continue; }`);`kvSplit=1` 时沿用平铺跳过 `queryPosEndKvBound < topK || queryPosEndKvBound < kvOffset` → `idx = NEXT_MULTIPLE(idx, kvNumMax)` 跳到下一个 query tile(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `idx = NEXT_MULTIPLE(idx, kvNumMax)`),稠密/未来 chunk 不消耗任务号,核间不留空任务空洞;
+3. `kvLen = MIN(tileSizeOfCachedKV, queryPosEndKvBound - kvOffset + 1)`:KV tile 只需覆盖到 tile 末 token 的因果边界为止(最后一个 KV tile 通常不满)。混合 tile(稠密行与稀疏行并存)的稠密行在 `RunAivTopk` 内直接跳过(模板已由 writer 写出,见下文)。
 
-`scores` workspace 布局(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `scores[0]`/`scores[1]` SetGlobalBuffer 段 `block_idx * XLITE_MAX_M0 * tileSizeOfCachedKV`):大小为 `[block_num][2][XLITE_MAX_M0 * 4096]` 的 dtype 数组,第 `b` 个核的第 `p` 份乒乓缓冲位于偏移 `(b + p*block_num) * XLITE_MAX_M0 * 4096`。每份缓冲按 `[queryTileSize 行, 4096 列]` 行主序存放(行距 `tileSizeOfCachedKV`),即一个 query tile × KV tile 的 index_score 矩阵。**同一 (batch, query tile) 的不同 KV tile 任务被顺序分配到不同核,由 AIV 通过 `lastTopk` 接力融合**,这是本算子区别于 `indexer_scores` 的关键。
+两种模式共用同一个 `(query tile, KV tile)` 执行体 `RunTaskChunk`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunTaskChunk`):AIC 侧 `kvSplit=1` 时每个工作项都重载 q/w 进 L1(chunk 散在不同 block,无法复用),`kvSplit=0` 时每 tile 只在其首个 chunk 加载一次(`if (kvSplit || kvOffset == 0) CopyQwToL1(...)`);AIV 侧两 subblock 均分 query 行。
+
+`scores` workspace 布局(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `scores[0]`/`scores[1]` SetGlobalBuffer 段 `block_idx * XLITE_MAX_M0 * tileSizeOfCachedKV`):大小为 `[block_num][2][XLITE_MAX_M0 * 4096]` 的 dtype 数组,第 `b` 个核的第 `p` 份乒乓缓冲位于偏移 `(b + p*block_num) * XLITE_MAX_M0 * 4096`。每份缓冲按 `[queryTileSize 行, 4096 列]` 行主序存放(行距 `tileSizeOfCachedKV`),即一个 query tile × KV tile 的 index_score 矩阵。AIV 持续经 `lastTopk` 在相邻 KV tile 间逐 token 传递累积 topK(见下文),这是本算子区别于 `indexer_scores` 的关键。
 
 ### AIC 侧:RunAicIndexerScores(两级 mmad + fixpipe ReLU)
 
 `RunAicIndexerScores`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAicIndexerScores`)与 `indexer_scores` 的两级 mmad 相同,差异在于:
 
+- q 与 weight 由 `CopyQwToL1`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::CopyQwToL1`,在 `RunTaskChunk` 内 `if (kvSplit || kvOffset == 0)` 时调用)搬入 L1:`kvSplit=0` 时同一 tile 的所有 KV tile 串行处理且共享同一 query tile,仅首个 chunk 加载一次;`kvSplit=1` 时 tile 的 chunk 散在不同 block,每个工作项都需重载(与旧版每任务搬一次等价);
 - KV 粒度是 blockSize(128)的物理 cache 块,一个 tile 内按 `mLoop = DIV_ROUND_UP(kvLen, blockSize)` 循环,通过 `blockTable[mIdx + mIdxStart]`(`mIdxStart = kvOffset/blockSize`)逐块取 K(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAicIndexerScores`,关键字 `int mIdxStart = kvOffset / blockSize` / `uint32_t block = blockTable[mIdx + mIdxStart]`);
-- weight 只在任务开始搬一次(`queryTaskLen, nHeads` → L1),因为一个 tile 内所有 KV 块共享同一 query tile;
 - 第一级 mmad 的 m 为 `blockSize`(结果暂存 L1 的 `kql1Buf`),第二级对 tile 内每个 query token 输出 `(1, mSize)` 行,写到 `scores[q * tileSizeOfCachedKV + mOffset]`;
 - **ReLU 融合进 L0C→L1 搬运**:第一级 per-head QK 得分在 `CopyL0CToL1` 下 L0C 时以 `reluEn=1` 过滤(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAicIndexerScores`,关键字 `CopyL0CToL1(..., 1.0f / 1024.0f, true)` C8 路径 / `CopyL0CToL1(..., /*reluEn=*/1)` 浮点路径;C8 路径以 `1/1024` 缩放取整),即每头得分先过 `max(x, 0)` 再进第二级加权求和——DSA indexer 定义中的负得分截断,不占额外向量指令;
 - L1/L0 布局与 `indexer_scores` 一致(kl1/ql1/wl1/kql1 乒乓,L0A/L0B 乒乓,L0C 单份),AIC 完成后 `ffts_cross_core_sync(PIPE_FIX, a2vSyncFlag[curr])` 通知 AIV(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `ffts_cross_core_sync(PIPE_FIX, a2vSyncFlag[curr])`)。
 
-### AIV 侧:RunAivTopk —— 逐位置因果 topk + 分块排序 + 归并 + 跨核接力
+### AIV 侧:RunAivTopk —— 逐位置因果 topk + 分块排序 + 归并 + 跨 KV tile 融合
 
 `RunAivTopk`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`)参数 `queryPosBase` 为该 subblock 分到的首 query token 的绝对位置。对 tile 内每个 query token(`nWorkPerCore = DIV_ROUND_UP(nWork, 2)`,2 个 subblock 均分 query 行,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `int nWorkPerCore = DIV_ROUND_UP(nWork, 2)`):
 
@@ -124,18 +128,18 @@ C8 使用 32 个 head、headDim=128,并要求 `block_size ∈ {16,32,64,128}`(�
 - `p0 = MapPosToKv(queryPosBase + idx)`,候选只含 `[kvOffset, kvOffset + validKvLen)`,其中 `validKvLen = MIN(p0 - kvOffset + 1, kvLen)`——同一 KV tile 内不同 query token 的有效长度随位置递增,"未来"位置(`> p0`)不进入排序,等价于因果掩码;`compressRatio>1` 时 `p0` 取已完成压缩块边界,故一个压缩块内所有 token 共享同一 `p0`(块内因果等价);
 - **稠密行跳过**:`p0 < topK` 的稠密行(混合 chunk 内)不进入排序,直接 `continue`——其默认模板已由模板 writer 在任务枚举阶段写出(见上文);`skipDenseTopk=1` 时旧有稠密行同样被跳过,内容不定(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `if (p0 < (int32_t)topK || validKvLen <= 0) { continue; }` 稠密行跳过);
 - `validKvLen <= 0`(该 token 的全部先验位置已在更早的 KV chunk 覆盖)同样直接 `continue`;
-- `isFirst = kvOffset <= 0`(首 KV tile,无需融合上一核结果);`isFinal = kvOffset + validKvLen > p0`(该 tile 覆盖到 token 自身位置,是末 tile,负责写出最终 topk)。
+- `isFirst = kvOffset <= 0`(tile 的首 KV tile,无需融合上一 tile 结果);`isFinal = kvOffset + validKvLen > p0`(该 tile 覆盖到 token 自身位置,是末 tile,负责写出最终 topk)。
 
 **UB 布局**(Init 中一次性排布为成员缓冲,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`(`__DAV_C220_VEC__` UB 布局段,关键字 `totalSort`/`mrgSortBuf1`/`sortIndices`/`defaultTopkIndices`/`in[2]`/`lastSort[2]`/`out[2]`/`mrgSortBuf0`),总大小受 `assert(off <= invoff)` 约束):
 
 | 缓冲 | 大小 | 用途 |
 |---|---|---|
-| `totalSort` | `MAX_TOPK_NUM*4*float` | 跨核融合后的全局 topK 候选(值+索引交错对,故 4 倍) |
+| `totalSort` | `MAX_TOPK_NUM*4*float` | 融合后的全局 topK 候选(值+索引交错对,故 4 倍) |
 | `mrgSortBuf1` | `MAX_INDEXER_KV_TILE_LEN*2*float` | vbitsort 归并工作区(与 `mrgSortBuf0` 分置两端避免 bank conflict) |
 | `sortIndices` | `MAX_INDEXER_KV_TILE_LEN` 个 u32 | 全局索引表(单份,非乒乓;见下) |
 | `defaultTopkIndices` | `topK` 个 u32 | 稠密行默认模板 `0...topK-1`(仅模板 writer 从 `seqPositions` 前 `topK` 项整体搬入一次) |
 | `in[2]` | 各 `MAX_INDEXER_KV_TILE_LEN` 个 WeightDtype | 乒乓:浮点路径搬入得分,C8 搬入 K scale |
-| `lastSort[2]` | 各 `MAX_TOPK_NUM*2*float` | 乒乓:上一核传来的 topK 候选 |
+| `lastSort[2]` | 各 `MAX_TOPK_NUM*2*float` | 乒乓:上一 KV tile 传来的 topK 候选 |
 | `out[2]` | 各 `MAX_TOPK_NUM` 个 u32 | 乒乓:最终结果搬出 |
 | `mrgSortBuf0` | `MAX_INDEXER_KV_TILE_LEN*2*float` | 计算区,置于 `UB_SIZE` 向下(高地址) |
 
@@ -150,23 +154,26 @@ C8 的 fp32 scores 直接搬入 `mrgSortBuf0`,`in[0]/in[1]` 交替暂存 fp16 K 
 1. **搬入 + 转 fp32**:tile 得分(`scores + idx*4096`,前 `validKvLen` 个)搬入并 `convert_input`(`csrc/kernels/kernel_macro.h` 的 `convert_input`)成 float;尾部 `[validKvLen, sortRepeat*SORT_BLOCK_SIZE)` 用带 mask 的 `vector_dup(FLOAT_MIN)` 补齐(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `vector_dup(mrgSortBuf0 + fullRepeat * calcPad, float(min)` 尾部补齐段)——无效位置以 `FLOAT_MIN` 参与排序,天然不会胜出;
 2. **块内排序**:`vbitsort(mrgSortBuf1, mrgSortBuf0, sortIndices, sortRepeat)` 按 `SORT_BLOCK_SIZE=32` 一组做位排序(值+原始索引成对输出,`sortRepeat = DIV_ROUND_UP(validKvLen, 32)`,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `int sortRepeat = DIV_ROUND_UP(validKvLen, SORT_BLOCK_SIZE)`);
 3. **归并截断**:`MrgSort`(`csrc/kernels/kernel_macro.h` 的 `MrgSort`)用 `vmrgsort4` 四路归并循环把所有 32 元素组归并成单个降序序列,`topK` 参数让归并尽早截断到 topK 宽度;首 tile 时以 `preferredDst = totalSort` 直接把结果写进 `totalSort`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `MrgSort(mrgSortBuf1, mrgSortBuf0, sortRepeat, &localSort, topK, totalSort)` 首 tile preferredDst=totalSort),省去一次中间缓冲拷贝;
-4. **与上一核候选融合**:
-   - 非 `isFirst`:先 `WaitPrevCore()` 等前一个核把它的全局候选写入本核的 `lastTopk` 段,搬入 `lastSort[curr]`(`lastSortLen = MIN(topK, kvOffset)` 对),`vmrgsort4(totalSort, {localSort, lastSort}, ...)` 二路归并(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `WaitPrevCore()` + `vmrgsort4(totalSort, addrs, totalSortLen | (lastSortLen << 16)` 二路归并段);
+4. **与上一 KV tile 候选融合**(读序按模式二选一,每 chunk 调用一次,`lastChunkFenceWaited` 守护):
+   - 非 `isFirst` 且 `kvSplit=0`:首个非首位置读前 `wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5)` 等待上一 chunk 调用(同核)里 `lastTopk` 的 MTE3 写完成;非 `isFirst` 且 `kvSplit=1`:首个非首位置前 `WaitPrevCore()` 自旋等待接办上一 chunk 的 block 完成并发布候选(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `if (kvSplit) { WaitPrevCore(); ... } else { wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5); }`);随后搬入 `lastSort[curr]`(`lastSortLen = MIN(topK, kvOffset)` 对),`vmrgsort4(totalSort, {localSort, lastSort}, ...)` 二路归并(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `vmrgsort4(totalSort, addrs, totalSortLen | (lastSortLen << 16)` 二路归并段);
    - `isFirst`:`totalSort` 已由步骤 3 直接得到;
-5. **中间结果传递**(`!isFinal`):把 `totalSort` 的前 `MIN(topK, totalSortLen)` 对(值,索引)写入 `lastTopk + idx*topK*2` 供下一核消费;最后一个 query 处理完后 `SetNextCore()` 唤醒下一核(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `CopyUbufToGmAligned(lastTopk + idx * topK * 2, totalSort` + `SetNextCore()`)。MTE3 异步读 `totalSort` 的释放等待用 `totalSortOnHold` 标记**推迟到下次真正要写它之前**(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `totalSortOnHold` 标记多处 `wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2)` / `set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2)`),避免空等;
+5. **中间结果传递**(`!isFinal`):把 `totalSort` 的前 `MIN(topK, totalSortLen)` 对(值,索引)写入 `lastTopk + idx*topK*2`,供下一个 KV tile 读回融合(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `CopyUbufToGmAligned(lastTopk + idx * topK * 2, totalSort`)。`kvSplit=0` 时本次调用写过 `lastTopk`(`wroteLastTopk`)则在调用末尾 `set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5)` 完成与下一调用 wait 的配对(见下文 fence 小节);`kvSplit=1` 时最后一个 query(`idx == queryLen - 1`)处理完后 `SetNextCore()` 唤醒接办下一 chunk 的 block(内置 `PipeBarrier<PIPE_ALL>()` 保证写完成),kernel 尾部按 `resetPrevCore` 标志 `ResetPrevCore()` 清零上一 block 的 flag 供下次 launch 复用。MTE3 异步读 `totalSort` 的释放等待用 `totalSortOnHold` 标记**推迟到下次真正要写它之前**(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `totalSortOnHold` 标记多处 `wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2)` / `set_flag(PIPE_MTE3, PIPE_V, EVENT_ID2)`),避免空等;
 6. **末 tile 收尾**(`isFinal`,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `isFinal` 末 tile 收尾段 `vreducev2(index0, ...)` / `vmuls(totalSort, ..., -1.0f` / `vbitsort + MrgSort` 按索引升序):`vreducev2` 从 `totalSort` 抽出索引载荷;由于 `vbitsort` 按 **float** 键比较(位 cast 的 int 仅在符号位为 0 时保序),而 topK id 可为任意 `[0, p0]` 值,这里将非负索引按位视作 float,乘 `-1` 作为排序键(其降序即 id 升序),对 topK 个候选走 `vbitsort + MrgSort` **按索引从小到大**排列,再 `vreducev2` 抽出原始索引,经 `out[curr]` 的 `CopyUbufToGmAligned` 写到 `topkIndices + idx*topK`。最终输出为**按索引升序**的 topK 位置列表(测试按集合比较稀疏行、稠密行按模板精确比较,`tests/kernels/indexer_topk.py`;`gather_sparse_kv_cache` 顺序无关地消费稀疏行——升序/降序/乱序均可,运行时检测连续段组 burst——稠密行则依赖模板头部 `[0, p0]` 有效这一约定)。
 
-### 核间环形同步(software pipe)
+### KV tile 间候选传递与定序(按模式)
 
-KV tile 顺序分布在 `block_num` 个核上,本算子用 **GM flag 数组 + generation 计数**实现单向环形链(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::SetNextCore` / `IndexerTopK::WaitPrevCore` / `IndexerTopK::ResetPrevCore`):
+`lastTopk` 的每一行(tile 内第 `idx` 个 query token)在 KV tile 间逐级融合,读写的定序按模式各走一条路径(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `kvSplit` 分支段):
 
-- `sync` 数组每核 `AIV_TO_AIC=2` 个 u32(`sync[blockIdx*AIV_TO_AIC + subBlockIdx]`,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `setNextSync = (__gm__ int32_t *)sync + blockIdx * AIV_TO_AIC + subBlockIdx` / `waitPrevSync = ...`),核 `i` 的 `setNextSync` 即核 `(i+1)%block_num` 的 `waitPrevSync`;
-- `SetNextCore()`:把 `setNextGeneration` 写入下一核的 flag(generation 每次递增,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::SetNextCore`);
-- `WaitPrevCore()`:自旋 `copy_gm_to_ubuf` 轮询上一核 flag 直到 `*val >= waitPrevGeneration`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::WaitPrevCore`);
-- `ResetPrevCore()`:核处理完属于自己的所有非首 tile 后,把上一核的 flag 清零,供下一次 launch 复用(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::ResetPrevCore`,在 `Run` 末尾按 `resetPrevCore` 标志执行,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `if (resetPrevCore) { ResetPrevCore(); }`)。
+**`kvSplit=0`(同核 + MTE3→MTE2 fence,EVENT_ID5)**:任务的 KV tile 串行处理全部发生在同一个 block 内,行只被所属核读写——核间完全解耦,无环形链/GM flag/generation。唯一需要显式保证的是**同核跨调用**的存储序:chunk `i` 调用经 MTE3 写 `lastTopk`,chunk `i+1` 调用经 MTE2 读回——MTE2 与 MTE3 是独立队列,必须由事件 fence 定序:
 
-由此形成软件流水:核 `i` 在做第 `k` 个 KV tile 的 topk 时,核 `i+1` 可以并行做第 `k+1` 个 tile 的得分计算(AIC)与排序,只在融合点同步。
+- **set**(写方,每 chunk 调用至多一次):本次调用写过 `lastTopk`(`wroteLastTopk`)时,调用末尾 `set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5)`,断言 MTE3 队列中此前所有写(含 `topkIndices` 搬出)完成;
+- **wait**(读方,每 chunk 调用至多一次):下一 chunk 调用在首个非 `isFirst` 位置读 `lastTopk` 前 `wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID5)`,插入 MTE2 队列,阻塞后续读直到上一调用的 set;
+- **1:1 配对证明**:chunk `i` 存在非 final 位置 ⟺ 存在 `p0 >= kvOffset_i + tileSizeOfCachedKV` 的位置 ⟺ chunk `i+1` 存在活跃且非 isFirst 的位置,谓词严格对偶;set/wait 逐 chunk 消费;tile 首 chunk 无 wait、末 chunk 无 set,跨任务也不残留。又因 `tileSizeOfCachedKV=4096 > MAX_TOPK_NUM=2048`(编译期 `static_assert`),非 final 位置恒为稀疏行(`p0 ≥ 4096 > topK`),不会出现"set 了但下一 chunk 走稠密跳过不 wait"的失配。两个 AIV subblock 各自独立走这套 fence(各自枚举自己的位置半区,谓词在半区内同样对偶)。
+
+**`kvSplit=1`(跨核接力,software ring)**:KV tile 顺序分布在多个 block 上,用 **GM flag 数组 + generation 计数**实现单向环形链(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::SetNextCore` / `IndexerTopK::WaitPrevCore` / `IndexerTopK::ResetPrevCore`):`sync` 数组每核 `AIV_TO_AIC=2` 个 u32(`sync[blockIdx*AIV_TO_AIC + subBlockIdx]`),核 `i` 的 set 槽即核 `(i+1)%block_num` 的 wait 槽;`SetNextCore()` 把递增的 generation 写入下一核的 flag(内置 `PipeBarrier<PIPE_ALL>` 保证此前 `lastTopk` 的 MTE3 写全部完成);**调用点必须先 `set_flag/wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0)` 等 MTE3 队列排空**——`SetNextCore` 的标量 `*val` 写在 UB 偏移 0,与 `totalSort` 起始地址别名,不等排空会污染尚未完成的 `lastTopk` 拷贝源;`WaitPrevCore()` 自旋 `copy_gm_to_ubuf` 轮询上一核 flag 直到 `*val >= waitPrevGeneration`——轮询成功即链上全部前驱写完成,天然涵盖"同核前序 chunk"的可见性,因此不需要 EVENT_ID5 fence;`ResetPrevCore()` 在 kernel 尾部把上一核的 flag 清零供下次 launch 复用。由此 chunk 间的 AIC/AIV 流水摊到多个 block:block `i` 的 AIC 算 chunk `j+1` 时,block `i+1` 的 AIV 融合 chunk `j`,只在融合点同步。
+
+`kvSplit=0` 下各 block 完全并行、互不等待:AIC 算 chunk `i+1` 的 scores 时,本 block 的 AIV 经 scores 乒乓并行融合 chunk `i` 的 topk。
 
 ### AIC/AIV 乒乓同步
 
-`Run` 主循环内(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 batch/task 主循环段 `for (int batchIdx = 0; batchIdx < batch; batchIdx++)`):AIC 消费 `v2aSyncFlag[curr]`(AIV 置位的"缓冲空闲"),写完 scores 后置 `a2vSyncFlag[curr]`;AIV 反之。两份 scores 乒乓使 AIC 写第 `curr+1` 个任务与 AIV 排序第 `curr` 个任务重叠。AIV 侧事件:MTE2 搬入用 EVENT_ID0/1(in)、2/3(lastSort),MTE3 搬出用 EVENT_ID0/1(out)、EVENT_ID2(lastTopk 写出/`totalSort` 释放);`sortIndices` 搬入用 EVENT_ID4、模板 writer 的 `defaultTopkIndices` 搬入用 EVENT_ID0(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `CopyGmToUbufAligned(this->defaultTopkIndices` / `CopyGmToUbufAligned(this->sortIndices` 模板/索引表搬入段)。循环末尾清空所有挂起 flag(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `RunAivTopk` 末尾 `wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3)` 起的清算段)并 `PipeBarrier<PIPE_ALL>()`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `Run` 末尾 `PipeBarrier<PIPE_ALL>()` / `if (resetPrevCore) ResetPrevCore()`)。
+`Run` 主循环内(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 batch/task 主循环段 `for (int batchIdx = 0; batchIdx < batch; batchIdx++)`):AIC 消费 `v2aSyncFlag[curr]`(AIV 置位的"缓冲空闲"),写完 scores 后置 `a2vSyncFlag[curr]`;AIV 反之。两份 scores 乒乓使 AIC 算下一个 KV tile 的 scores 与 AIV 融合当前 KV tile 的 topk 重叠。AIV 侧事件:MTE2 搬入用 EVENT_ID0/1(in)、2/3(lastSort),MTE3 搬出用 EVENT_ID0/1(out)、EVENT_ID2(lastTopk 写出/`totalSort` 释放);跨 chunk `lastTopk` 读写序按模式走 MTE3→MTE2 的 EVENT_ID5 fence(`kvSplit=0`)或 `sync` 接力链(`kvSplit=1`,见上节);`sortIndices` 搬入用 EVENT_ID4、模板 writer 的 `defaultTopkIndices` 搬入用 EVENT_ID0(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `CopyGmToUbufAligned(this->defaultTopkIndices` / `CopyGmToUbufAligned(this->sortIndices` 模板/索引表搬入段)。循环末尾清空所有挂起 flag(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `RunAivTopk` 末尾 `wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3)` 起的清算段)并 `PipeBarrier<PIPE_ALL>()`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `Run` 末尾 `PipeBarrier<PIPE_ALL>()`)。

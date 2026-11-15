@@ -275,68 +275,74 @@ def run_topk_test(
     lens = torch.tensor(query_lengths, dtype=torch.int32)
     cached_lens = torch.tensor(key_lengths, dtype=torch.int32) - lens
     query_start_loc = torch.tensor([0] + query_lengths, dtype=torch.int32).cumsum(0)[:-1].int()
-    output = torch.full((len(q8), topk), TOPK_FILL, dtype=torch.int32, device=device)
 
-    torch.npu.synchronize(device)
-    indexer_topk(
-        rt,
-        q8.reshape(-1, n_heads * HEAD_DIM).to(device),
-        k_cache,
-        scaled_weights.to(device),
-        output,
-        query_start_loc.to(device),
-        lens.to(device),
-        cached_lens.to(device),
-        block_table.to(device),
-        n_heads,
-        HEAD_DIM,
-        block_size,
-        len(query_lengths),
-        topk,
-        k_scale_cache=k_scale_cache,
-        compress_ratio=ratio,
-    )
-    torch.npu.synchronize(device)
-    actual = output.cpu()
+    # Both partitioning modes must give identical results on every shape; the
+    # output is refilled per run so unwritten rows cannot pass on stale data.
+    for kv_split in (0, 1):
+        output = torch.full((len(q8), topk), TOPK_FILL, dtype=torch.int32, device=device)
 
-    query_offset = key_offset = 0
-    for key_len, query_len, kv_len in zip(key_lengths, query_lengths, kv_lengths):
-        scores = score_reference(
-            q8[query_offset : query_offset + query_len],
-            k8[key_offset : key_offset + kv_len],
-            scaled_weights[query_offset : query_offset + query_len],
-            k_scale[key_offset : key_offset + kv_len],
+        torch.npu.synchronize(device)
+        indexer_topk(
+            rt,
+            q8.reshape(-1, n_heads * HEAD_DIM).to(device),
+            k_cache,
+            scaled_weights.to(device),
+            output,
+            query_start_loc.to(device),
+            lens.to(device),
+            cached_lens.to(device),
+            block_table.to(device),
             n_heads,
+            HEAD_DIM,
+            block_size,
+            len(query_lengths),
+            topk,
+            k_scale_cache=k_scale_cache,
+            compress_ratio=ratio,
+            kv_split=kv_split,
         )
-        for i in range(query_len):
-            visible = (key_len - query_len + i + 1) // ratio
-            if visible <= topk:
-                continue  # Dense rows do not use Top-K.
-            indices = actual[query_offset + i, :topk].long()
-            valid = indices[indices >= 0]
-            assert len(valid) == topk and len(valid.unique()) == topk, (
-                "Top-K count/uniqueness",
-                query_offset + i,
-                visible,
+        torch.npu.synchronize(device)
+        actual = output.cpu()
+
+        query_offset = key_offset = 0
+        for key_len, query_len, kv_len in zip(key_lengths, query_lengths, kv_lengths):
+            scores = score_reference(
+                q8[query_offset : query_offset + query_len],
+                k8[key_offset : key_offset + kv_len],
+                scaled_weights[query_offset : query_offset + query_len],
+                k_scale[key_offset : key_offset + kv_len],
+                n_heads,
             )
-            assert bool((valid < visible).all()), ("visibility violation", i, visible, valid.max())
-            excluded = torch.ones(visible, dtype=torch.bool)
-            excluded[valid] = False
-            if bool(excluded.any()):
-                gap = float(scores[i, :visible][excluded].max() - scores[i, valid].min())
-                # Allow FP32 reduction-order differences at the Top-K boundary.
-                tolerance = max(SCORE_ATOL, float(scores[i, :visible].abs().max()) * SCORE_RTOL)
-                assert gap <= tolerance, ("Top-K score boundary", gap, tolerance)
-        query_offset += query_len
-        key_offset += kv_len
-    logging.info(
-        "indexer_c8 Top-K case %d (block_size=%d, topK=%d, ratio=%d, packed=%s) passed",
-        case,
-        block_size,
-        topk,
-        ratio,
-        packed,
-    )
+            for i in range(query_len):
+                visible = (key_len - query_len + i + 1) // ratio
+                if visible <= topk:
+                    continue  # Dense rows do not use Top-K.
+                indices = actual[query_offset + i, :topk].long()
+                valid = indices[indices >= 0]
+                assert len(valid) == topk and len(valid.unique()) == topk, (
+                    "Top-K count/uniqueness",
+                    query_offset + i,
+                    visible,
+                )
+                assert bool((valid < visible).all()), ("visibility violation", i, visible, valid.max())
+                excluded = torch.ones(visible, dtype=torch.bool)
+                excluded[valid] = False
+                if bool(excluded.any()):
+                    gap = float(scores[i, :visible][excluded].max() - scores[i, valid].min())
+                    # Allow FP32 reduction-order differences at the Top-K boundary.
+                    tolerance = max(SCORE_ATOL, float(scores[i, :visible].abs().max()) * SCORE_RTOL)
+                    assert gap <= tolerance, ("Top-K score boundary", gap, tolerance)
+            query_offset += query_len
+            key_offset += kv_len
+        logging.info(
+            "indexer_c8 Top-K case %d (block_size=%d, topK=%d, ratio=%d, packed=%s, kv_split=%d) passed",
+            case,
+            block_size,
+            topk,
+            ratio,
+            packed,
+            kv_split,
+        )
 
 
 def main():
