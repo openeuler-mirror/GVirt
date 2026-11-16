@@ -31,6 +31,12 @@ enum class NormKind {
 
 // hardware
 #define UB_BLOCK_SIZE 32  // unified buffer block size in bytes
+// embed UB budget in bytes: [zero template | ping | pong] staging, dim elements
+// each. Equals UB_SIZE (192KB, kernel_macro.h) for the C220 arch embed_kernel
+// targets; defined here (not in kernel_macro.h) because host op.cpp cannot
+// include the device-only kernel_macro.h — kernel and host enforce this one
+// shared constant instead of two hand-kept copies.
+#define EMBED_UB_BUDGET 196608
 // performance tuning
 #define GM_UB_BURST_SIZE 16384  // 16KB, recommended burst size for GM <--> UB copy bandwidth-wise
 // gather_sparse_kv_cache tiling (top-k slots per chunk task, rotating buffer count)

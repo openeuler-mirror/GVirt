@@ -628,6 +628,19 @@ void XliteOpEmbed(XRuntime &rt, XTensor &in, XTensor &embed, uint32_t start, uin
         throw std::runtime_error(DBG_PREFIX + XT_STR(in) + " embed ids must be INT32 (got dtype " +
                                  std::to_string(static_cast<int>(in.dtype)) + ")");
     }
+    // The kernel's UB layout is [zero template | ping | pong], dim elements each,
+    // with per-row bursts of dim/16 32B blocks; both require dim % 16 == 0, and
+    // 3 rows must fit the UB budget (EMBED_UB_BUDGET in kernels/kernel_param.h,
+    // shared with the in-kernel assert so the two checks cannot drift; the
+    // assert compiles out under NDEBUG so the host check is the only real guard).
+    const uint32_t dim = embed.shape[1];
+    // 64-bit arithmetic: a huge dim would wrap a 32-bit dim * 6 and slip past
+    // the check.
+    if (dim % 16 != 0 || static_cast<uint64_t>(dim) * 3 * 2 > EMBED_UB_BUDGET) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(in) + XT_STR(embed) + " embed dim " +
+                                 std::to_string(dim) + " must be a multiple of 16 and at most " +
+                                 std::to_string(EMBED_UB_BUDGET / 6) + " rows-worth of UB");
+    }
     KERNEL_PTR_TYPE(embed_kernel) * launchKernel;
     if (EachXDtype(FP16, embed, out)) {
         launchKernel = aclrtlaunch_embed_kernel_float16_t;
