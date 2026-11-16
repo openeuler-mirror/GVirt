@@ -52,6 +52,10 @@ enum class NormKind {
 #define CXA_SVCK0 64
 
 // indexer
+// 24 is the measured optimum for the tile-flat tiers (decode-only and >4096-row
+// prefill): interleaved A/B on the default work set showed tile 25 regressing
+// 1.6-2.8% vs 24, so the macro keeps the legacy default. The 22/17 tiers for
+// chunked prefill / mixed batches are host-side overrides, still <= this macro.
 #define MAX_INDEXER_Q_TILE_LEN 24
 #define MAX_INDEXER_KV_TILE_LEN 4096
 #define INDEXER_C8_TILE_ROWS 32

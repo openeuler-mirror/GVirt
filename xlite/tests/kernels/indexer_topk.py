@@ -205,109 +205,127 @@ def run_test(
         compress_ratio,
     )
 
-    # Both partitioning modes must give identical results on every shape.
+    # Both partitioning modes and every host tile tier must give identical
+    # results on every shape. q_tile 0 = the compile-time default (no
+    # override); 1 = extreme small tile (many tail blocks); 17/22 = the
+    # chunked-prefill / mixed-batch host tiers; 24 = the macro ceiling. The
+    # work set's query lens are mostly non-multiples of 17/22/24, so the
+    # per-tile tail blocks are exercised throughout.
     for kv_split in (0, 1):
-        # Poison the output to catch rows the kernel fails to write; sync so
-        # the fill cannot race the op's non-default stream.
-        topk_indices_xlite.fill_(-1)
-        torch.npu.synchronize()
-        indexer_topk(
-            rt,
-            q_xlite,
-            k_cache_xlite,
-            weight_xlite,
-            topk_indices_xlite,
-            query_start_loc,
-            query_lens,
-            cached_lens,
-            block_tables,
-            n_heads,
-            head_dim,
-            BLOCK_SIZE,
-            batch,
-            topK,
-            compress_ratio=ratio,
-            kv_split=kv_split,
-        )
-        torch.npu.synchronize()
+        for q_tile in (0, 1, 17, 22, 24):
+            # Poison the output to catch rows the kernel fails to write; sync so
+            # the fill cannot race the op's non-default stream.
+            topk_indices_xlite.fill_(-1)
+            torch.npu.synchronize()
+            indexer_topk(
+                rt,
+                q_xlite,
+                k_cache_xlite,
+                weight_xlite,
+                topk_indices_xlite,
+                query_start_loc,
+                query_lens,
+                cached_lens,
+                block_tables,
+                n_heads,
+                head_dim,
+                BLOCK_SIZE,
+                batch,
+                topK,
+                compress_ratio=ratio,
+                kv_split=kv_split,
+                q_tile=q_tile,
+            )
+            torch.npu.synchronize()
 
-        # Vectorized comparison over [total_query_len, topK]. Sparse rows: order-
-        # tolerant set comparison. Dense rows: exact template match. Causal sanity:
-        # sparse rows must only emit indices <= p0.
-        xlite_cpu = topk_indices_xlite.cpu()
-        row_default = torch.arange(0, topK, dtype=torch.int32)
-        is_dense = p0_all < topK
+            # Vectorized comparison over [total_query_len, topK]. Sparse rows: order-
+            # tolerant set comparison. Dense rows: exact template match. Causal sanity:
+            # sparse rows must only emit indices <= p0.
+            xlite_cpu = topk_indices_xlite.cpu()
+            row_default = torch.arange(0, topK, dtype=torch.int32)
+            is_dense = p0_all < topK
 
-        causal_fail = (~is_dense) & ~(xlite_cpu.to(torch.int64) <= p0_all.unsqueeze(1)).all(dim=-1)
+            causal_fail = (~is_dense) & ~(xlite_cpu.to(torch.int64) <= p0_all.unsqueeze(1)).all(dim=-1)
 
-        dense_exact = (xlite_cpu == row_default).all(dim=-1)
-        dense_pct = torch.zeros(len(p0_all), dtype=torch.float32)
-        dense_pct[~dense_exact] = 100.0
+            dense_exact = (xlite_cpu == row_default).all(dim=-1)
+            dense_pct = torch.zeros(len(p0_all), dtype=torch.float32)
+            dense_pct[~dense_exact] = 100.0
 
-        std_sorted, _ = torch.sort(standard_topk, dim=-1)
-        xlite_sorted, _ = torch.sort(xlite_cpu, dim=-1)
-        pos = torch.searchsorted(xlite_sorted, std_sorted).clamp_max(topK - 1)
-        hits = xlite_sorted.gather(-1, pos) == std_sorted
-        diff_count = topK - hits.sum(dim=-1)
-        sparse_pct = diff_count.to(torch.float32) * (100.0 / topK)
+            std_sorted, _ = torch.sort(standard_topk, dim=-1)
+            xlite_sorted, _ = torch.sort(xlite_cpu, dim=-1)
+            pos = torch.searchsorted(xlite_sorted, std_sorted).clamp_max(topK - 1)
+            hits = xlite_sorted.gather(-1, pos) == std_sorted
+            diff_count = topK - hits.sum(dim=-1)
+            sparse_pct = diff_count.to(torch.float32) * (100.0 / topK)
 
-        row_pct = torch.where(is_dense, dense_pct, sparse_pct)
-        row_pct = torch.where(causal_fail, torch.full_like(row_pct, 100.0), row_pct)
+            row_pct = torch.where(is_dense, dense_pct, sparse_pct)
+            row_pct = torch.where(causal_fail, torch.full_like(row_pct, 100.0), row_pct)
 
-        row_pct_np = row_pct.numpy()
-        causal_fail_np = causal_fail.numpy()
-        xlite_cpu_np = xlite_cpu.numpy()
+            row_pct_np = row_pct.numpy()
+            causal_fail_np = causal_fail.numpy()
+            xlite_cpu_np = xlite_cpu.numpy()
 
-        all_match = True
-        compared = 0
-        offset = 0
-        errors: dict[int, dict[int, float]] = defaultdict(dict)
-        max_pcts: list[float] = []
-        for i in range(batch):
-            qlen = query_len_list[i]
-            clen = cached_lens_list[i]
-            bs = slice(offset, offset + qlen)
-            batch_pct = row_pct_np[bs]
-            batch_fail = causal_fail_np[bs]
+            all_match = True
+            compared = 0
+            offset = 0
+            errors: dict[int, dict[int, float]] = defaultdict(dict)
+            max_pcts: list[float] = []
+            for i in range(batch):
+                qlen = query_len_list[i]
+                clen = cached_lens_list[i]
+                bs = slice(offset, offset + qlen)
+                batch_pct = row_pct_np[bs]
+                batch_fail = causal_fail_np[bs]
 
-            # causal violations: log + mark, excluded from compared/max_pct
-            for q in np.nonzero(batch_fail)[0]:
-                q = int(q)
-                p0_q = clen + q
-                all_match = False
-                errors[i][q] = 100.0
-                logging.error(
-                    f"\tSample {i} row {q} (p0={p0_q}) has non-causal topk indices: {xlite_cpu_np[offset + q]}"
+                # causal violations: log + mark, excluded from compared/max_pct
+                for q in np.nonzero(batch_fail)[0]:
+                    q = int(q)
+                    p0_q = clen + q
+                    all_match = False
+                    errors[i][q] = 100.0
+                    logging.error(
+                        f"\tSample {i} row {q} (p0={p0_q}) has non-causal topk indices: {xlite_cpu_np[offset + q]}"
+                    )
+
+                ok = ~batch_fail
+                compared += int(ok.sum())
+                batch_ok_pct = batch_pct[ok]
+                max_pct_per_batch = float(batch_ok_pct.max()) if batch_ok_pct.size else 0.0
+                max_pcts.append(max_pct_per_batch)
+
+                # threshold violations among non-causal rows
+                ok_local = np.nonzero(ok)[0]
+                over = ok_local[batch_pct[ok] > DIFF_PCT_THRESHOLD]
+                for q in over:
+                    q = int(q)
+                    all_match = False
+                    errors[i][q] = float(batch_pct[q])
+                offset += qlen
+
+            if compared == 0:
+                logging.info(f"\tkv_split={kv_split}, q_tile={q_tile}: no rows to compare for topK={topK}.")
+            elif all_match:
+                logging.info(
+                    f"\tkv_split={kv_split}, q_tile={q_tile}: all samples passed for topK={topK}! "
+                    f"max diff pct per batch: {max_pcts}"
                 )
-
-            ok = ~batch_fail
-            compared += int(ok.sum())
-            batch_ok_pct = batch_pct[ok]
-            max_pct_per_batch = float(batch_ok_pct.max()) if batch_ok_pct.size else 0.0
-            max_pcts.append(max_pct_per_batch)
-
-            # threshold violations among non-causal rows
-            ok_local = np.nonzero(ok)[0]
-            over = ok_local[batch_pct[ok] > DIFF_PCT_THRESHOLD]
-            for q in over:
-                q = int(q)
-                all_match = False
-                errors[i][q] = float(batch_pct[q])
-            offset += qlen
-
-        if compared == 0:
-            logging.info(f"\tkv_split={kv_split}: no rows to compare for topK={topK}.")
-        elif all_match:
-            logging.info(
-                f"\tkv_split={kv_split}: all samples passed for topK={topK}! max diff pct per batch: {max_pcts}"
-            )
-        else:
-            logging.error(
-                f"\tkv_split={kv_split}: some samples failed for topK={topK}! max diff pct per batch: {max_pcts}"
-            )
-            for i, err in errors.items():
-                error_info = ", ".join(f"{row} ({pct:.2f}%)" for row, pct in err.items())
-                logging.error(f"\tBatch {i}: {error_info}")
+            else:
+                logging.error(
+                    f"\tkv_split={kv_split}, q_tile={q_tile}: some samples failed for topK={topK}! "
+                    f"max diff pct per batch: {max_pcts}"
+                )
+                for i, err in errors.items():
+                    error_info = ", ".join(f"{row} ({pct:.2f}%)" for row, pct in err.items())
+                    logging.error(f"\tBatch {i}: {error_info}")
+                # The tier-sweep contract above must fail the run, not just log
+                # (mirrors indexer_c8.py's asserts with a non-zero exit code).
+                raise AssertionError(
+                    f"kv_split={kv_split}, q_tile={q_tile}, topK={topK}: mismatched rows "
+                    + "; ".join(
+                        f"batch {i} (row (diff pct)): " + ", ".join(f"{row} ({pct:.2f}%)" for row, pct in err.items())
+                        for i, err in errors.items()
+                    )
+                )
 
 
 def main():
@@ -331,6 +349,43 @@ def main():
     run_test(models[0][0], 64, 128, models[0][3], 1, [3542], [1], 2048, dense_weight=True)
     run_test(models[0][0], 64, 128, models[0][3], 1, [0], [8192], 512, compress_ratio=4, dense_weight=True)
     run_test(models[1][0], 64, 128, models[1][3], 1, [3542], [1], 2048, dense_weight=True)
+
+    # q_tile above the kernel's build-time maximum must be rejected before any
+    # launch (the kernel's L1 q/w staging is macro-sized at build time).
+    n_heads, head_dim, topK = 64, 128, 2048
+    with torch.device("npu"):
+        q = torch.randn(1, n_heads * head_dim)
+        k_cache = torch.randn(1, BLOCK_SIZE, head_dim)
+        weight = torch.randn(1, head_dim + n_heads)
+        topk_indices = torch.empty(1, topK, dtype=torch.int32)
+    query_start_loc = torch.tensor([0], dtype=torch.int32)
+    lens = torch.tensor([1], dtype=torch.int32)
+    cached_lens = torch.tensor([0], dtype=torch.int32)
+    block_tables = torch.zeros(1, 1, dtype=torch.int32)
+    for bad_q_tile in (25, 26):
+        try:
+            indexer_topk(
+                rt,
+                q,
+                k_cache,
+                weight,
+                topk_indices,
+                query_start_loc,
+                lens,
+                cached_lens,
+                block_tables,
+                n_heads,
+                head_dim,
+                BLOCK_SIZE,
+                1,
+                topK,
+                q_tile=bad_q_tile,
+            )
+        except RuntimeError as e:
+            assert "qTile must be in" in str(e), f"unexpected error for q_tile={bad_q_tile}: {e}"
+        else:
+            raise AssertionError(f"q_tile={bad_q_tile} was not rejected")
+    logging.info("q_tile values above the build-time maximum are rejected")
 
 
 if __name__ == "__main__":
