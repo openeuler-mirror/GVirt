@@ -38,6 +38,7 @@ description: Generate or refresh operator implementation-principle docs in xlite
 
 ## 实现原理
 - 数据流(GM→UB/L1→计算→GM)、UB/L1/L0 内存布局与缓冲分配
+- 片上缓冲分配与占用汇总小节(必备,量化各存储级占用,规范见下文「片上缓冲容量说明」)
 - 分块/tiling 策略、多 block/AIC/AIV 并行与任务分配方式
 - 流水线同步(MTE2/MTE3/V/M pipe 的 set_flag/wait_flag、跨核 ffts_cross_core_sync/wait_flag_dev)
 - 关键指令与计算步骤(vconv/vgather/TransDataTo5HD/CalMmad 等)
@@ -54,6 +55,17 @@ description: Generate or refresh operator implementation-principle docs in xlite
 ```
 
 引用代码位置统一使用相对 `xlite/` 的路径 + 符号名(函数名/类名),**严禁使用行号**(`文件:行号`、`文件#L行号` 一律禁止)。正确写法:`csrc/kernels/add.h` 的 `Add` 类、`csrc/kernels/mla_v2.cpp` 的 `MlaV2::Compute`。
+
+## 片上缓冲容量说明(必备小节)
+
+每份算子文档的「实现原理」末尾必须包含 `### 片上缓冲分配与占用汇总` 小节,量化该算子的片上存储开销(范例:`doc/developer_guide/kernels/indexer_topk.md`)。
+
+- **表格**:按算子实际使用的存储级各建一张表——AIC 算子列 L1(A1)/L0A(A2)/L0B(B2)/L0C(CO1),AIV 算子列 UB,混合算子两者都要;未使用的存储级直接省略(纯向量算子只有 UB 表)。每行一个代码中的缓冲变量,按 `Init`/`InitBuffer` 中 `bufferAddr` 的排布顺序列出
+- **列**:变量、shape(每份)、dtype(模板参数名 + 各 dtype 路径的实例化映射)、乒乓个数(标注所属事件族)、单份大小(与代码一致的字节公式,如 `blockSize*headDim*sizeof(Dtype)`)、典型模型配置占用字节数(= 单份大小 × 乒乓个数,含对齐垫片时按槽位计)。两条 dtype 路径同取一组典型配置(具体值写在小节引言),使占用差异仅来自 dtype;UB 布局与 dtype 无关时单占用列即可
+- **合计行**:每张表末尾加粗「合计」行,给出该存储级总占用
+- **占用汇总表**:各表占用列之和 vs 硬件容量 + 占比;再以要点列出关键结论(哪级最紧、哪个缓冲是大头、断言/host 校验的容量来源)
+- **硬件容量基准**(910B/dav C220,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB、L0C 总容量 256KB 系 CO1/CO2 两区之和(mmad 累加可用的 CO1 区 **128KB**)、UB 192KB(`kernel_macro.h` 的 `UB_SIZE`)
+- **数值自检**:各表占用列之和必须与占用汇总表逐级严格一致,建议写一次性脚本复核后再提交
 
 ## 信息来源(按优先级)
 
@@ -83,6 +95,7 @@ description: Generate or refresh operator implementation-principle docs in xlite
    - 核对功能概述、参数表、dtype 列表是否仍准确(新增/删除参数、模式、约束必须同步)
    - **逐一核对所有代码位置引用**:确认文档中提到的函数名/类名在当前源码中仍存在;符号被改名/移位时改写引用指向新符号名,**严禁改用行号定位**(行号随增删行整体偏移,刷新一次即失效)。这是最易出错的一步,不能跳过
    - 代码已删除的概念(如已合并/移除的算子路径、宏改名)需改写或删除,不能残留旧名
+   - 缺「片上缓冲分配与占用汇总」小节或其数值与当前代码不符时,按「片上缓冲容量说明」补齐/更新(含合计行与占用汇总表)
 3. 若算子被删除,删文档并从 README 移除;若算子改名,重命名文档并全局搜旧名清理引用
 
 ### 一致性检查(收尾必做)
@@ -100,6 +113,9 @@ grep -rn "<已删除的算子/宏名>" *.md
 
 # 4. 禁止行号引用(以下应无输出;有输出即违规,必须改写为符号定位)
 grep -rnE '\.(h|cpp|cc):[0-9]+|#L[0-9]+' *.md
+
+# 5. 每份算子文档含片上缓冲容量小节(缺失的文档在下次刷新该算子时补齐)
+for f in $(ls *.md | grep -v '^README.md$'); do grep -q "片上缓冲分配与占用" "$f" || echo "missing-capacity: $f"; done
 ```
 
 ## 容易出错的点
@@ -108,3 +124,5 @@ grep -rnE '\.(h|cpp|cc):[0-9]+|#L[0-9]+' *.md
 - **dtype 实例化文件 vs 算子**:文件名匹配 `<name>_*.cpp` 时注意 `cast_float_bfloat16_t.cpp` 这类双 dtype 文件,不要误拆成两个算子
 - **shape 推断**:优先以 `_C.pyi` docstring 和测试代码为准,kernel 签名中的裸指针参数(如 `GM_ADDR q`)需结合 host 侧封装还原 shape
 - **文档语言**:文档为中文,代码注释是中英混合,统一用中文表述;术语(算子名、指令名、宏名)保留英文原文
+- **L0C 容量按 CO1 区计**:CANN 平台配置 `l0_c_size=262144` 是 L0C 总容量(CO1/CO2 两区之和),`TPosition::CO1` 的 mmad 累加缓冲只能用 CO1 区 **128KB**——容量说明中 L0C 的占用与占比一律按 CO1 128KB 计算,勿把配置文件的总量当可用容量(旁证:`csrc/kernels/cxa_aic_helper.h` 的 `svl0cBuf` = 128×256×4B 恰好顶满 CO1)
+- **容量小节必备**:存量文档缺「片上缓冲分配与占用汇总」小节时,刷新该算子必须按「片上缓冲容量说明」补齐,不能只改过时的参数/引用
