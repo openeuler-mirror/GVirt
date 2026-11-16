@@ -73,3 +73,37 @@ dtype 分派见 `csrc/op.cpp` 的 `XliteOpSoftmaxTopK`(dtype 分派分支):要�
 `Init`(`SoftmaxTopK::Init`)按 `nRoutedExperts` 上界分配:`socresIn`/`routingMapOut`/`weightsOut` 以 `pad = ROUND_UP(nRoutedExperts, 64) * 4` 字节定尺,bf16 额外有 `socresInTmp`/`weightsOutTmp`;`reduceTmp` 与 `weightsTopK` 各固定一个 `VECTOR_MAX_BYTESIZE`(256B),`indicesTopK` 则是 fp32 路径的末尾分配,其后无 off 增量。被排序触碰的 `indicesIn`/`calc` 及 `sortTmp`/`sortMrgTmp`(各 2 倍)按补齐宽度定尺(`idxPad = max(pad, ROUND_UP(nSortScores,64)*4)`);`numRoutedExperts >= 128` 时 `idxPad == pad`,UB 布局与旧版逐字节一致。
 
 同步:MTE2 搬入用 V↔MTE2 的 EVENT_ID0;搬出用 MTE3↔V 的 EVENT_ID0(位图)/EVENT_ID1(权重);S 管线消费 V 产出的 `indicesTopK` 前有 `set_flag(PIPE_V, PIPE_S)` / `wait_flag` 配对(`SelectTopK` 末尾 `set_flag(PIPE_V, PIPE_S, EVENT_ID0)` 与 `FillOutMap` 开头 `wait_flag`),保证标量读到的位图/权重已完成。循环结束统一 `wait_flag` 清算 + `pipe_barrier(PIPE_ALL)`(`SoftmaxTopK::Run` 末尾 drain 段)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`Init`(`csrc/kernels/softmax_topk.h` 的 `SoftmaxTopK::Init`)自偏移 0 起在 UB 上顺序累进排布:普通行缓冲以 `pad = ROUND_UP(nRoutedExperts, VECTOR_MAX_NUM_OF_FP32)*4` 定尺,被排序触碰的 `indicesIn`/`calc` 及 `sortTmp`/`sortMrgTmp` 按补齐宽度 `idxPad = MAX(pad, ROUND_UP(nSortScores,64)*4)` 定尺;计算与排序全程 fp32,bf16 仅多两个 Dtype 中转槽。硬件容量基准(910B/dav C220,NpuArch 2201):UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。dtype 记法:`Dtype` 为 scores/weightsMap 元素类型(fp32/bf16),`padDtype = ROUND_UP(nRoutedExperts, VECTOR_MAX_BYTESIZE/sizeof(Dtype))*sizeof(Dtype)`;`numTokens` 不参与定尺(token 维跨核交错)。典型配置:numRoutedExperts=64、topK=8、normTopKProb=True(GLM-4.7-Flash 门控,触发 <128 的补齐路径:`nSortScores=128`,`idxPad=512 > pad=256`);两条 dtype 路径同取该配置,占用差异仅来自 bf16 中转槽。
+
+**AIV UB(预算 `UB_SIZE=192KB`,每 subblock 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | fp32 占用(B) | bf16 占用(B) |
+|---|---|---|---|---|---|---|
+| `socresIn` | 64 float | float | 1 | `pad` | 256 | 256 |
+| `indicesIn` | 128 uint32(补齐到 nSortScores) | uint32 | 1 | `idxPad` | 512 | 512 |
+| `routingMapOut` | 2 uint32 | uint32 | 1 | `pad` | 256 | 256 |
+| `weightsOut` | 64 float | float | 1 | `pad` | 256 | 256 |
+| `calc` | 128 float(补齐到 nSortScores) | float | 1 | `idxPad` | 512 | 512 |
+| `reduceTmp` | 64 float 槽位 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 | 256 |
+| `sortTmp` | 256 float(128 值+索引交错对) | float | 1 | `2*idxPad` | 1024 | 1024 |
+| `sortMrgTmp` | 256 float(128 值+索引交错对) | float | 1 | `2*idxPad` | 1024 | 1024 |
+| `weightsTopK` | 64 float 槽位(topK=8 载荷) | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 | 256 |
+| `indicesTopK` | 64 uint32 槽位(topK=8 载荷) | uint32 | 1 | `pad`(fp32 路径为末尾槽) | 256 | 256 |
+| `socresInTmp` | 64 Dtype(仅 bf16) | Dtype | 1 | `padDtype` | — | 256 |
+| `weightsOutTmp` | 64 Dtype(仅 bf16,末尾槽) | Dtype | 1 | `padDtype` | — | 256 |
+| **合计** | | | | | **4608** | **5120** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | fp32 路径占用 | 占比 | bf16 路径占用 | 占比 |
+|---|---|---|---|---|---|
+| UB(每 AIV subblock) | 192 KB | 4608 B | 2.3% | 5120 B | 2.6% |
+
+要点:
+
+- **UB 极其宽裕(≤2.6%),唯一算得上"大头"的是排序工作区**:`sortTmp`/`sortMrgTmp` 各 `2*idxPad`、合计 2048 B,占总占用的 40%(bf16 路径 5120 B 口径;fp32 路径 4608 B 下为 44%)——值+索引成对排序的暂存宽度;
+- `idxPad > pad` 仅出现在 `numRoutedExperts < 128` 的补齐路径(64 专家时 512 vs 256);`numRoutedExperts >= 128` 时 `idxPad == pad`,布局回落到与历史版本逐字节一致;
+- 无 kernel 断言、无 host 容量校验(`csrc/op.cpp` 的 `XliteOpSoftmaxTopK` 只校验 dtype/BIT1),布局随 `numRoutedExperts` 线性缩放,现实专家数下远低于 192KB,容量风险不存在。

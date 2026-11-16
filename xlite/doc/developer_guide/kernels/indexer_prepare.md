@@ -133,3 +133,67 @@ Host 的 `RunIndexerPrepareC8` 启动一个 AIC/AIV 融合核：AIV 做 LN/RoPE�
 每个 AIV 处理半个 tile，K、Q 共用 69,568 字节 UB。AIC/AIV 通过跨核事件交接 GM 双缓冲。Runtime 复用一份 32 KiB Hadamard 矩阵；`[4,cores,32,128]` BF16 临时空间由内存池分配、归还，并计入 DummyRun，24 个 AIC 时为 768 KiB，不随 token 数继续增长。
 
 Python 接口见 `xlite/_C.pyi`；测试见 `tests/kernels/indexer_k_cache_c8.py` 和 `tests/kernels/indexer_c8.py`。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+本算子为纯向量核(`__DAV_C220_VEC__`,host 以 `rt.aivNum` 个 block launch,见 `csrc/op.cpp` 的 `XliteOpIndexerPrepare`),无 L1/L0 分配,片上缓冲全部位于 UB,每 AIV block 一份。两个核内函数在各自入口手工排布 UB 局部布局、顺序执行、互不重叠,峰值取两者较大:K 阶段 `norm_ropex_cache_muls`(`csrc/kernels/indexer_prepare.h` 的 `norm_ropex_cache_muls`)低地址区自 0 顺序累进、fp32 计算区自 `UB_SIZE - UB_BANKGROUP_ROW_SIZE = 196096` 向下排布,`assert(off <= invoff)` 保证两区不重叠;Q 阶段 `rope_complex_and_cache`(`csrc/kernels/rope_complex_and_cache.h` 的 `rope_complex_and_cache`,is_long 时执行)单区自 0 排布,`assert(off <= UB_SIZE)` 收尾。K 阶段槽位按 `UB_BANKGROUP_ROW_SIZE=512` 对齐并带 `UB_BANK_CONFLICT_OFFSET=256` 错位垫片(垫片计入槽位字节数),Q 阶段槽位按 `VECTOR_MAX_BYTESIZE=256` 对齐。硬件容量:AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank)。dtype 记法:`Dtype` 为 kw/q 元素类型(bf16/fp16 实例化,同为 2B,占用一致,下表单占用列),weight/bias/中间计算恒为 fp32。典型配置取测试模型 `indexer_128_64`(`tests/kernels/indexer_prepare.py`):index_head_dim(norm_dim)=128、index_n_heads=64、rope_head_dim(rope_dim)=64、block_size=128、topK=2048、is_long=1(scale_dim=index_n_heads=64,n_cols=calc_dim=192)、norm_in_fp32=1(kNorm/kNormBias 为 fp32)、启用 cache(needs_cache=1);运行期槽位按 n_rows=8192、48 个 AIV(n_rows_per_core=171、ub_pos_num=171)代入。C8 分支走独立融合核,其缓冲布局见 [indexer_prepare_c8.md](indexer_prepare_c8.md)。
+
+**K 阶段(norm_ropex_cache_muls)UB**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小(槽位) | 占用(B) |
+|---|---|---|---|---|---|
+| `ub_weight` | 128 float(norm_dim) | float | 1(常驻,LN 仿射) | `ROUND_UP(norm_dim*4+256, 512)` | 1024 |
+| `ub_bias` | 128 float(norm_dim) | float | 1(常驻,LN 仿射) | 同上 | 1024 |
+| `ub_pos` | ub_pos_num 个 uint64 | uint64 | 1(分批预取,S↔MTE2 事件0) | `ROUND_UP(ub_pos_num*8, 512)` | 1536 |
+| `ub_slot_mapping` | ub_pos_num 个 uint32 | uint32 | 1(分批预取) | `ROUND_UP(ub_pos_num*4, 512)` | 1024 |
+| `in`(in0/in1) | 192 个 Dtype(n_cols=calc_dim) | Dtype | 2(事件0/1) | `ROUND_UP(n_cols*sizeof(Dtype)+256, 512)` | 2048 |
+| `out`(out0/out1) | 192 个 Dtype(n_cols=calc_dim) | Dtype | 2(事件0/1,MTE3) | 同上 | 2048 |
+| `ub_freqs`(ub_freqs0/1) | 64 float(rope_dim) | float | 2(事件2/3) | `ROUND_UP(rope_dim*4+256, 512)` | 1024 |
+| `calc_even_cos` | 64 float(rope_dim) | float | 1(RoPE 中间) | 同上 | 512 |
+| `calc_even_sin` | 64 float(rope_dim) | float | 1(RoPE 中间) | 同上 | 512 |
+| `calc_odd_cos` | 64 float(rope_dim) | float | 1(RoPE 中间) | 同上 | 512 |
+| `calc_odd_sin` | 64 float(rope_dim) | float | 1(RoPE 中间) | 同上 | 512 |
+| `rope_scratch` | 64 float(rope_dim) | float | 1(RoPE 交错中转) | 同上 | 512 |
+| `vgather_indices` | 64 uint32(rope_dim) | uint32 | 1(常驻,Init 期填充) | 同上 | 512 |
+| `in_float` | 192 float(calc_dim) | float | 1 | `ROUND_UP(calc_dim*4+256, 512)` | 1024 |
+| `out_float` | 192 float(calc_dim) | float | 1 | 同上 | 1024 |
+| `calc_float` | 128 float(norm_dim) | float | 1 | `ROUND_UP(norm_dim*4+256, 512)` | 1024 |
+| `in_even` | 64 float(rope_dim) | float | 1 | `ROUND_UP(rope_dim*4+256, 512)` | 512 |
+| `in_odd` | 64 float(rope_dim) | float | 1 | 同上 | 512 |
+| `cos_float` | 64 float(rope_dim) | float | 1 | 同上 | 512 |
+| `sin_float` | 64 float(rope_dim) | float | 1 | 同上 | 512 |
+| **合计** | | | | | **17920** |
+
+**Q 阶段(is_long,rope_complex_and_cache)UB**(nLocalHeads=index_n_heads=64,ropeDim=rope_head_dim=64;cache/rotate 相关槽位 `vRemain`/`slotMappingUB`/`rotateFP32` 在本调用形态下 need_v_cache=false、doRotate=false,不分配)
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `inputs`(input0/input1) | (index_n_heads=64, ropeDim=64) | Dtype | 2(事件0/1) | `ROUND_UP(ropeDim*nLocalHeads*sizeof(Dtype), 256)` | 16384 |
+| `freqs`(freqs0/1) | 64 float(ropeDim) | float | 2(事件2/3) | `ROUND_UP(ropeDim*4, 256)` | 512 |
+| `outs`(out0/out1) | (64, 64) | Dtype | 2(事件0/1,MTE3) | 同 `inputs` | 16384 |
+| `inOutFP32` | (64, 64) fp32 | float | 1 | `ROUND_UP(ropeDim*4*nLocalHeads, 256)` | 16384 |
+| `x_even` | (64, 64) fp32 | float | 1(RoPE 中间) | 同上 | 16384 |
+| `x_odd` | (64, 64) fp32 | float | 1(RoPE 中间) | 同上 | 16384 |
+| `cos` | (64, 64) fp32 | float | 1(RoPE 中间) | 同上 | 16384 |
+| `sin` | (64, 64) fp32 | float | 1(RoPE 中间) | 同上 | 16384 |
+| `x_even_cos` | (64, 64) fp32 | float | 1(RoPE 中间) | 同上 | 16384 |
+| `x_odd_sin` | (64, 64) fp32 | float | 1(RoPE 中间) | 同上 | 16384 |
+| `x_even_sin` | (64, 64) fp32 | float | 1(RoPE 中间) | 同上 | 16384 |
+| `x_odd_cos` | (64, 64) fp32 | float | 1(RoPE 中间) | 同上 | 16384 |
+| `positionUB` | 256 个 uint64(maxCnt 固定) | uint64 | 1(分批预取,S↔MTE2 事件0) | `ROUND_UP(maxCnt*8, 256)` | 2048 |
+| 交错暂存 `interleavedFP32` | (64, 64) fp32(别名 `x_odd_cos`,rope 数学死区) | float | - | 别名复用,不占新槽 | 0 |
+| `vgatherIndicesUB` | flatGather 时 64×64、否则 64 个 uint32 | uint32 | 1(flatGather:第 0 行模板 + 每 head 一条 `vadds`;否则 Init 期填相对偏移表) | `ROUND_UP(ropeDim*nLocalHeads*4, 256)`(flatGather)/`ROUND_UP(ropeDim*4, 256)`(逐头) | 256 |
+| **合计** | | | | | **183040** |
+
+**占用汇总**(两阶段顺序执行、互不共存,取峰值 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | K 阶段占用 | Q 阶段占用(is_long) | 峰值占比 |
+|---|---|---|---|---|
+| UB(每 AIV block) | 192 KB | 17920 B | 183040 B | 93.1% |
+
+要点:
+
+- **Q 阶段(is_long)是 UB 峰值**:`inOutFP32` 与 8 个 RoPE fp32 中间缓冲(`x_even`/`x_odd`/`cos`/`sin`/`x_even_cos`/`x_odd_sin`/`x_even_sin`/`x_odd_cos`)共 9 份 `totalRopeFPBytes = ropeDim*4*index_n_heads = 16KB`(147456 B,占 80%),加上 `inputs`/`outs` 四个 8192B 乒乓槽,合计 183040 B、占 93.1%——占用随 index_n_heads 线性放大,是 head 数上的隐性 UB 约束;交错输出的暂存别名 `x_odd_cos` 不额外占 UB,`vgatherIndicesUB` 在 64 头上界配置下扁平表(64×64×4=16KB)超出剩余 UB(13824 B)而回退为 ropeDim 项相对偏移表(256 B),head 数较少、扁平表装得下时才走多 repeat `vgather` 单趟交错;
+- K 阶段仅 17920 B(9.1%):单行 192 列 Dtype 的行级流水,大头是 4 个 1024B 的 `in`/`out` 乒乓槽位与 3 个 1024B 的 fp32 行缓冲;短序列(is_long=0,scale_dim=0、calc_dim=128)时 `in`/`out` 槽收窄到 512B,K 阶段合计 15872 B,且无 Q 阶段,峰值即 K 阶段;
+- `ub_pos`/`ub_slot_mapping` 是 K 阶段仅有的随运行期变化的槽位:`ub_pos_num = MIN(n_rows_per_core, GM_UB_BURST_SIZE/8 = 2048)`,两槽上界 16384B/8192B;典型 8192 token、48 AIV 下仅 1536B/1024B;
+- 两阶段均为函数入口局部布局、函数返回即释放;`UB_BANK_CONFLICT_OFFSET=256` 垫片把 norm/calc 行槽顶到 1024B 槽位(bank group 错半行缓解 bank conflict),RoPE 中间槽按 512B 排布。

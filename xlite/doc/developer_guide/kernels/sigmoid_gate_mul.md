@@ -89,6 +89,35 @@ sigmoid 用 `1 / (1 + exp(-x))` 分解（`csrc/kernels/sigmoid_gate_mul.h` 的 `
 - 行内尾 tile：`calcNum = min(dim - col, tile)`，搬运与写回均用精确字节数 `calcNum * sizeof(Dtype)`，`CopyGmToUbufAligned`/`CopyUbufToGmAligned` 按 32B/2B/1B 对齐自动选择 DMA 原语；
 - repeat 数按 `DIV_ROUND_UP(calcNum, 64)` 计算，UB 中 padding 数据不参与写回。
 
+### 片上缓冲分配与占用汇总
+
+`sigmoid_gate_mul`(`csrc/kernels/sigmoid_gate_mul.h` 的 `sigmoid_gate_mul`)把 UB 排成「两个乒乓槽 + 共享尾区」:每槽内 `attnIn|gateIn|attnF|gateF|out` 五段按 `UB_BUF_ALIGN_SIZE=32` 对齐累进,槽后接共享的 `rawGate` 与 `ones`;`tile = ROUND_DOWN(min(dim,2048), VECTOR_MAX_NUM_OF_FP32=64)`(dim<64 时取 64),dim ≥ 2048 后 tile 封顶 2048,占用与行宽无关。硬件容量基准(910B/dav C220):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE=196608`);本算子为纯 AIV 向量算子,不使用 L1/L0A/L0B/L0C。dtype 记法:模板实参 `Dtype` 为 attn/gate/out 元素类型,fp16/bf16 两个实例均为 2B、占用不分列;片内计算全程 fp32。典型配置取 dim=4096(Qwen3.5-MoE 注意力输出门控,16 头×headDim 256,`tests/models/qwen3_5_moe.py`),tile=2048;`silu_gate_mul` 入口(见下文)以 attnFp32=true 启动同一模板,`attnIn` 槽改按 fp32 尺寸分配,两列同取该配置。
+
+**UB(预算 `UB_SIZE=192KB`;tile=2048,两 dtype 实例占用相同)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | sigmoid 入口占用(B) | silu_gate 入口占用(B) |
+|---|---|---|---|---|---|---|
+| `attnIn` | `(tile,)` | Dtype(silu_gate 入口为 float) | 2(事件0/1) | `ROUND_UP(tile*4,32)`(attnFp32)/ `ROUND_UP(tile*2,32)` | 8192 | 16384 |
+| `gateIn` | `(tile,)` | Dtype | 2(事件0/1) | `ROUND_UP(tile*2,32)` | 8192 | 8192 |
+| `attnF` | `(tile,)` | float | 2(事件0/1) | `ROUND_UP(tile*4,32)` | 16384 | 16384 |
+| `gateF` | `(tile,)` | float | 2(事件0/1) | 同上 | 16384 | 16384 |
+| `outBuf`(`out0`/`out1`) | `(tile,)` | Dtype | 2(事件0/1) | `ROUND_UP(tile*2,32)` | 8192 | 8192 |
+| `rawGate` | `(tile,)` | float | 1(共享,siluGate 通路暂存原始 gate) | 同 `attnF` | 8192 | 8192 |
+| `ones` | `(tile,)` | float | 1(共享,常量 1.0) | 同上 | 8192 | 8192 |
+| **合计** | | | | | **73728** | **81920** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | sigmoid 入口 | 占比 | silu_gate 入口 | 占比 |
+|---|---|---|---|---|---|
+| UB | 192 KB | 73728 B | 37.5% | 81920 B | 41.7% |
+
+要点:
+
+- **tile 封顶 2048 是 UB 预算的直接产物**:`maxTile=2048` 常量使两套乒乓槽加共享区合计 73728 B;host 侧(`csrc/op.cpp` 的 `XliteOpSigmoidGateMul`)不校验 dim,更大的行宽由内层 tile 循环按 2048 分块消化,占用不再增长——`maxTile` 常量即容量来源,无 kernel 断言。
+- **fp32 计算缓冲是大头**:`attnF`/`gateF`/`rawGate`/`ones` 四类 fp32 槽共 49152 B,sigmoid 入口下占 2/3;Dtype 原始槽(`attnIn`/`gateIn`/`out`)合计仅 24576 B——全程 fp32 计算的精度选择决定了占用结构。
+- 广播模式(gateDim==1)不改变布局:`gateF` 槽恒按 tile 预留(只写首元素),逐元素与广播两模式占用一致;`silu_gate_mul` 入口仅 `attnIn` 槽翻倍为 fp32 尺寸(+8192 B),其余槽位不变。
+
 ## SiLU gate 入口
 
 `silu_gate_mul(rt, normed, gate, out)` 计算 `out = normed * silu(gate)`。

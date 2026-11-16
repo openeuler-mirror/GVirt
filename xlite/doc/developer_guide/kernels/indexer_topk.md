@@ -179,3 +179,76 @@ C8 的 fp32 scores 直接搬入 `mrgSortBuf0`,`in[0]/in[1]` 交替暂存 fp16 K 
 ### AIC/AIV 乒乓同步
 
 `Run` 主循环内(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 batch/task 主循环段 `for (int batchIdx = 0; batchIdx < batch; batchIdx++)`):AIC 消费 `v2aSyncFlag[curr]`(AIV 置位的"缓冲空闲"),写完 scores 后置 `a2vSyncFlag[curr]`;AIV 反之。两份 scores 乒乓使 AIC 算下一个 KV tile 的 scores 与 AIV 融合当前 KV tile 的 topk 重叠。AIV 侧事件:MTE2 搬入用 EVENT_ID0/1(in)、2/3(lastSort),MTE3 搬出用 EVENT_ID0/1(out)、EVENT_ID2(lastTopk 写出/`totalSort` 释放);跨 chunk `lastTopk` 读写序按模式走 MTE3→MTE2 的 EVENT_ID5 fence(`kvSplit=0`)或 `sync` 接力链(`kvSplit=1`,见上节);`sortIndices` 搬入用 EVENT_ID4、模板 writer 的 `defaultTopkIndices` 搬入用 EVENT_ID0(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `CopyGmToUbufAligned(this->defaultTopkIndices` / `CopyGmToUbufAligned(this->sortIndices` 模板/索引表搬入段)。循环末尾清空所有挂起 flag(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `RunAivTopk` 末尾 `wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID3)` 起的清算段)并 `PipeBarrier<PIPE_ALL>()`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Run`,关键字 `Run` 末尾 `PipeBarrier<PIPE_ALL>()`)。
+
+### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
+
+`Init`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`)手动排布全部片上缓冲:AIC 侧(`__DAV_C220_CUBE__`)依次在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上累进 `bufferAddr` 偏移,L1 四个缓冲连续排布,L0A/L0B/L0C 三级物理独立、各自从偏移 0 重新起排;AIV 侧(`__DAV_C220_VEC__`)在 UB 上排布,低地址区自 0 顺序累进、`mrgSortBuf0` 钉在顶端,`assert(off <= invoff)` 保证低区不越界。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
+
+dtype 记法(模板实参,见 `INDEXER_TOPK_FUNC_DEFINE` / `INDEXER_TOPK_C8_FUNC_DEFINE`):`Dtype` 为 q/KCache 元素类型,`WeightDtype` 为 weight 与 per-head QK 得分类型,`MatDtype` 为 mmad 累加器类型——浮点路径为 `<fp16|bf16, float, fp16|bf16, fp16|bf16>`(2B/2B/4B),C8 路径为 `<int8_t, int32_t, half, float>`(1B/2B/4B);`WeightDtype` 在所有路径恒为 2B,故 UB 布局与 dtype 无关。下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布),单份大小列为与代码一致的字节数公式;占用列为典型模型配置下该变量的实际字节数(含乒乓份数)——两条路径同取 nHeads=64、headDim=128、blockSize=128,占用差异仅来自 dtype。
+
+**AIC L1(A1,容量 512KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 浮点占用(B) | C8 占用(B) |
+|---|---|---|---|---|---|---|
+| `kl1Buf` | `(blockSize, headDim)` | Dtype | 2(事件0/1) | `blockSize*headDim*sizeof(Dtype)` | 65536 | 32768 |
+| `kql1Buf` | `(blockSize, nHeads)` | WeightDtype | 2(事件2/3) | `blockSize*nHeads*sizeof(WeightDtype)` | 32768 | 32768 |
+| `ql1Buf` | `(24, nHeads, headDim)` | Dtype | 1(事件4) | `MAX_INDEXER_Q_TILE_LEN*nHeads*headDim*sizeof(Dtype)` | 393216 | 196608 |
+| `wl1Buf` | `(32, nHeads)` | WeightDtype | 1(事件4) | `ROUND_UP(MAX_INDEXER_Q_TILE_LEN,MBLOCKSIZE)*nHeads*sizeof(WeightDtype)` | 4096 | 4096 |
+| **合计** | | | | | **495616** | **266240** |
+
+**AIC L0A(A2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 浮点占用(B) | C8 占用(B) |
+|---|---|---|---|---|---|---|
+| `l0aBuf` | `(blockSize, headDim)` | Dtype | 1(事件4) | `blockSize*headDim*sizeof(Dtype)` | 32768 | 16384 |
+| `wl0aBuf` | `(16, nHeads)` | WeightDtype | 2(事件2/3) | `MBLOCKSIZE*nHeads*sizeof(WeightDtype)` | 4096 | 4096 |
+| **合计** | | | | | **36864** | **20480** |
+
+**AIC L0B(B2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 浮点占用(B) | C8 占用(B) |
+|---|---|---|---|---|---|---|
+| `l0bBuf` | `(nHeads, headDim)` | Dtype | 2(事件0/1) | `nHeads*headDim*sizeof(Dtype)` | 32768 | 16384 |
+| `kql0bBuf` | `(blockSize, nHeads)` | WeightDtype | 2(事件2/3) | `blockSize*nHeads*sizeof(WeightDtype)` | 32768 | 32768 |
+| **合计** | | | | | **65536** | **49152** |
+
+**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 浮点占用(B) | C8 占用(B) |
+|---|---|---|---|---|---|---|
+| `qkl0cBuf` | `(blockSize, nHeads)` | MatDtype | 2(事件0/1) | `blockSize*nHeads*sizeof(MatDtype)` | 65536 | 65536 |
+| `l0cBuf` | `(16, blockSize)` | float | 2(事件2/3) | `MBLOCKSIZE*blockSize*sizeof(float)` | 16384 | 16384 |
+| **合计** | | | | | **81920** | **81920** |
+
+**AIV UB(预算 `UB_SIZE=192KB`,每 subblock 一份)**
+
+低地址区各槽位按 `VECTOR_MAX_BYTESIZE=256B` 向上对齐推进;`totalSort` 槽位额外加 `UB_BANK_CONFLICT_OFFSET=256B` 垫片,使其后缓冲相对 512B bank group 行错开半行,与钉在 UB 顶端的 `mrgSortBuf0`(512B 对齐)错开以避免 bank conflict;`mrgSortBuf0` 起点 `invoff = UB_SIZE - ROUND_UP(MAX_INDEXER_KV_TILE_LEN*2*sizeof(float), UB_BANKGROUP_ROW_SIZE=512)` = 163840。占用与 dtype 无关(`WeightDtype` 恒 2B),下表占用按 topK=2048 计。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 大小(每份) | 占用(B) |
+|---|---|---|---|---|---|
+| `totalSort` | 8192 float(`MAX_TOPK_NUM*4`,值+索引交错对) | float | 1 | 32768 B | 33024(槽位,含垫片) |
+| `mrgSortBuf1` | 8192 float(`MAX_INDEXER_KV_TILE_LEN*2`) | float | 1 | 32768 B | 32768 |
+| `sortIndices` | 4096 uint32(`MAX_INDEXER_KV_TILE_LEN`) | uint32 | 1 | 16384 B | 16384 |
+| `defaultTopkIndices` | `topK` uint32 | uint32 | 1 | `topK*4` B(topK=2048 时 8192 B) | 8192 |
+| `in` | 4096 WeightDtype(`MAX_INDEXER_KV_TILE_LEN`) | WeightDtype | 2(事件0/1) | 8192 B | 16384 |
+| `lastSort` | 4096 float(`MAX_TOPK_NUM*2`,值+索引对) | float | 2(事件2/3) | 16384 B | 32768 |
+| `out` | 2048 uint32(`MAX_TOPK_NUM`) | uint32 | 2(事件0/1) | 8192 B | 16384 |
+| `mrgSortBuf0` | 8192 float(`MAX_INDEXER_KV_TILE_LEN*2`) | float | 1 | 32768 B | 32768 |
+| **合计** | | | | | **188672** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 浮点路径占用 | 占比 | C8 路径占用 | 占比 |
+|---|---|---|---|---|---|
+| L1 | 512 KB | 495616 B | 94.5% | 266240 B | 50.8% |
+| L0A | 64 KB | 36864 B | 56.3% | 20480 B | 31.3% |
+| L0B | 64 KB | 65536 B | 100% | 49152 B | 75% |
+| L0C(CO1) | 128 KB | 81920 B | 62.5% | 81920 B | 62.5% |
+| UB(每 AIV subblock) | 192 KB | 188672 B | 96.0% | 188672 B | 96.0% |
+
+要点:
+
+- **L0B 与 L1 是上限配置的实际卡点**:浮点路径 nHeads=64、blockSize=128 时 L0B 恰好占满 64KB(100%)、L1 达 94.5%、CO1 达 62.5%——断言注释 `Consider L0C capacity` 按 CO1=128KB 成立(blockSize 翻倍到 256 时 `qkl0cBuf+l0cBuf` 共 163840 B 溢出 CO1),但最先被卡住的仍是 L0B;
+- `ql1Buf`(query tile 全量 q)按 `MAX_INDEXER_Q_TILE_LEN=24` 编译期上限分配(浮点 393216 B),独占 L1 的 79.3%,是绝对大头;运行期 tile 由 host 按负载经 `qTileOverride` launch 参数传入(kernel 钳到 ≤24),L1 分配不随运行期 tile 缩小;C8 路径 q/K 为 1B,L1/L0A/L0B 占用更低,L0C 两路径相同(`MatDtype` 均 4B);
+- UB 布局与 dtype 无关(`WeightDtype` 恒 2B),低地址区合计 155904 B(topK=2048),加顶端 `mrgSortBuf0` 32768 B 共 188672 B,`[off, invoff)` 间余 7936 B 空隙;`defaultTopkIndices` 是唯一随运行期 `topK` 缩放的槽位,`topK` 超过 `MAX_TOPK_NUM=2048` 低区即越过 `invoff` 触发断言——这是 host 侧 `topK <= 2048` 校验的容量来源;
+- 跨核接力(`kvSplit=1`)的标量 `val`(`SetNextCore`/`WaitPrevCore`/`ResetPrevCore`)固定借用 UB 偏移 0 的 4 字节,与 `totalSort` 首元素别名(见上文 `kvSplit=1` 段),不占独立槽位。

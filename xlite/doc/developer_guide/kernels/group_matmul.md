@@ -91,3 +91,54 @@ int4 的搬运细节（在 matmul.h/kernel_macro.h 中）：`dtypeBits=4` 使 `k
 - 多一层"专家循环 + counts 前缀和偏移"的批处理，权重/scale 通过 device 指针数组间接寻址；
 - `coreOffset` 跨专家 tile 均衡；
 - m0/n0/k0 由 kernel 默认值决定（host 传 -1，`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`），即 `m0=128`、`n0=256`、`k0 = 512*8/dtypeBits`（`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `if (m0 == (uint64_t)-1)`；`hasDeqScale`/`hasBias` 只把 n0 钳到 256 上限，对默认值不生效，即反量化路径同为 n0=256）。
+
+### 片上缓冲分配与占用汇总（AIC L1/L0A/L0B/L0C）
+
+`group_matmul_kernel`（`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`）不自建片上缓冲，排布完全复用 `Matmul::Init`（`csrc/kernels/matmul.h` 的 `Matmul::Init`）：L1 上 `l1aBuf`/`l1bBuf` 两对乒乓自偏移 0 顺序累进，`l1DeqScaleBuf`（量化路径）逻辑位为 C1、偏移重置回 `l1bBuf[0]` 起点与其共享槽位；L0A（A2）/L0B（B2）/L0C（CO1）三级物理独立、各自从偏移 0 起排。本算子恒 `hasBias=false`，不使用 C2 Bias Table。硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`）：L0A 64KB、L0B 64KB、L1 512KB，L0C 总容量 256KB 为 CO1/CO2 两区之和，mmad 累加（`TPosition::CO1`）可用的 CO1 区为 **128KB**，下文 L0C 占用均按 CO1 128KB 计；`KERNEL_TYPE_AIC_ONLY`，不使用 UB。
+
+dtype 记法（模板实参，见宏 `GROUPMATMUL_FUNC_DEFINE`）：浮点路径 `<fp16|bf16|float, float, 同 Dtype>`，int8 路径 `<int8_t, int32_t, half>`（W8A8），int4 路径 `<int4b_t, int32_t, half>`（W4A8 MSD）。典型配置：host 固定传 -1（`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`），走 `Matmul::Init` 默认分块 m0=128、n0=256、k0=512×8/dtypeBits；占用只由分块决定，与 kM（每专家 token 数）、kN、kK、专家数及 `coreOffset` 均衡完全无关——专家循环复用同一套静态排布，专家维度只改变 `TaskTilesInit` 绑定的 GM 地址与 tile 数。默认 k0 随 dtype 反比缩放使全部四种位宽字节占用一致（单份 K 维深度 fp16/bf16 256、float 128、int8 512、int4 1024，k0×位宽恒 512B），占用列取单列；量化路径另有 fixpipe 用的 C2PIPE2GM 专用区（固定 2KB，CO1 之外）。下表 shape 为逻辑形状（L1/L0 内实际按 Nd2Nz/NZ 分形排布）。
+
+**AIC L1（A1/B1/C1，容量 512KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `l1aBuf` | `(m0, kDtileSize)`=`(128, 2×k0)` | Dtype | 2（事件0/1） | `m0*kDtileSize*sizeof(Dtype)` | 262144 |
+| `l1bBuf` | `(n0, k0)`=`(256, k0)` | Dtype | 2（事件2/3） | `n0*k0*sizeof(Dtype)` | 262144 |
+| `l1DeqScaleBuf` | `(n0,)`=`(256,)`，仅量化路径 | uint64_t | 1（事件5） | `n0*sizeof(uint64_t)` | 0（与 `l1bBuf[0]` 共享槽位） |
+| **合计** | | | | | **524288** |
+
+**AIC L0A（A2，容量 64KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `l0aBuf` | `(m0, kQtileSize)`=`(128, k0/4)` | Dtype | 2（事件0/1，kIdx2） | `m0*kQtileSize*sizeof(Dtype)` | 32768 |
+| **合计** | | | | | **32768** |
+
+**AIC L0B（B2，容量 64KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `l0bBuf` | `(n0, kQtileSize)`=`(256, k0/4)` | Dtype | 2（事件0/1，kIdx2） | `n0*kQtileSize*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0C（CO1 区，容量 128KB；总容量 256KB 含 CO2）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `l0cBuf` | `(m0, n0)`=`(128, 256)` | MatDtype | 1（事件0） | `m0*n0*sizeof(MatDtype)`（Mmad 分形累加，无显式分配字节数，按满 tile 计） | 131072 |
+| **合计** | | | | | **131072** |
+
+**占用汇总**（各表占用列之和 vs 硬件容量；字节数）：
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| L1 | 512 KB | 524288 B | 100% |
+| L0A | 64 KB | 32768 B | 50% |
+| L0B | 64 KB | 65536 B | 100% |
+| L0C（CO1） | 128 KB | 131072 B | 100% |
+
+要点：
+
+- **默认分块同时顶满 L1、L0B 与 L0C CO1**，与 [matmul.md](matmul.md) 完全相同（本算子是其批量驱动，排布零差异）；L0A 半满（m0 是 n0 的一半）；
+- 与 matmul 的唯一排布差异是 `hasBias=false`：无 `l1BiasBuf`、无 C2 链路；W8A8/W4A8 的 deqScale 借用 `l1bBuf[0]` 头部 2048 B 槽位，不新增 L1 占用，`n0 ≤ 256` 钳制的容量来源是 CO1 之外的 C2PIPE2GM fixpipe buffer（2KB）；
+- 占用与专家数/kM/kN/kK 解耦：INT4 路径 `kM` 翻倍（W4A8 low/high 交错）同样不改排布，只影响 tile 数与循环次数。

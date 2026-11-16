@@ -108,3 +108,70 @@ AIC 在 QK 写完后 `ffts_cross_core_sync(PIPE_FIX, config)`(flagIdx=0,inner-gr
 - softmax:`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`
 - M0 分档:`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0`;常量 `XLITE_MAX_M0=128`、`MAX_SOFTMAX_PINGPONG_LEN=10496`(`csrc/kernels/kernel_param.h`)
 - host launch:`csrc/op.cpp` 的 `XliteOpAttention`、路由 `csrc/model.cpp` 的 `ForwardAttnMHA`
+
+### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
+
+AIC 侧由 `AicHelper::Init`(`csrc/kernels/attention_aic_helper.h` 的 `AicHelper::Init`)静态排布:L1 上 `l1aBuf`(`TPosition::A1`)与 `l1bBuf`(`TPosition::B1`)同处 512KB 物理存储、`bufferAddr` 连续累进,各持两份乒乓;L0A/L0B/L0C 三级物理独立、各自从偏移 0 重新起排,唯 `l0aBuf[1]` 置于 `l0aSvBytes` 偏移处——QK 的 Q 固定占用 buf0,SV 阶段 buf0/buf1 乒乓,两阶段顺序执行故可复用同一 64KB。AIV 侧无 Init 静态布局:`RunAivSoftmaxLong`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`)在每次调用入口按运行期参数从偏移 0 排布 UB,函数退出即释放;超长行的中间 exp 走 GM 的 `expBuf`(qk workspace 尾部 4 行),不占 UB。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB。
+
+dtype 记法:`Dtype` 为 qkv/KV cache/qk 的元素类型,fp16 与 bf16 实例化(见上文)均为 2B,故 AIC 与 UB 占用均与 dtype 无关,下表只给单占用列。典型配置取 llama_7B_TP1 的 MHA:nHeads=nKVHeads=32、headSize=128、blockSize=128(`tests/kernels/attention.py` 的 `models` 列表);`AicHelper` 的 L1/L0 布局只依赖 headSize/blockSize/`XLITE_MAX_M0`/dtype,与 nHeads/nKVHeads 无关,该配置下 `cubeKvTile` 维持 blockSize=128 不收缩。AIV 侧 UB 仅 `max`/`sum` 两槽随行宽变化,下表按最长工作负载(`work` 列表的 `(2, [131071]*2, [1]*2)` decode,qk 行宽 `maxSeqLen=131072`、`outN=131072`)计。
+
+**AIC L1(A1/B1,容量 512KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l1aBuf` | `(128, MAX(headSize, cubeKvTile))`(QK 的 Q:`mBlockPad × headSize`;SV 的 A:`mBlockPad × kBlockPad`) | Dtype | 2(事件0/1,SV 阶段;QK 阶段固定 buf0,事件0) | `XLITE_MAX_M0*MAX(headSize,cubeKvTile)*sizeof(Dtype)` | 65536 |
+| `l1bBuf` | `(cubeKvTile, headSize)`(QK 的 K / SV 的 V tile) | Dtype | 2(事件2/3) | `cubeKvTile*headSize*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **131072** |
+
+**AIC L0A(A2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0aBuf` | `(128, cubeKvTile)`(QK 的 Q 固定 buf0:`(128, headSize)`) | Dtype | 2(槽位,SV 阶段事件0/1 乒乓,`l0aBuf[1]` 置于 `l0aSvBytes` 偏移) | `XLITE_MAX_M0*cubeKvTile*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0B(B2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0bBuf` | `(cubeKvTile, headSize)` | Dtype | 2(事件2/3) | `cubeKvTile*headSize*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0cBuf` | `(mBlockPad, nBlockPad)`,两维均 ≤ 128(QK:`mBlockPad × ROUND_UP(nSize,16)`;SV:`mBlockPad × headSize`) | float | 1(事件0) | `XLITE_MAX_M0*MAX(ROUND_UP(cubeKvTile,16),ROUND_UP(headSize,16))*sizeof(float)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIV UB(预算 `UB_SIZE=192KB`,每 subblock 一份;`RunAivSoftmaxLong` 运行期排布)**
+
+`RunAivSoftmaxLong` 把一行切成 `totalSubBlockNum = DIV_ROUND_UP(outN, MAX_SUB_CONTEXT_SIZE)` 段逐段处理,段长 `MAX_SUB_CONTEXT_SIZE = (VECTOR_MAX_REPEAT-1)*calcPad = 254*64 = 16256`(`calcPad = VECTOR_MAX_BYTESIZE/sizeof(float) = 64`);`totalSubBlockNum ≤ 65` 时 `calcDst` 用 `ReduceMaxV2`/`ReduceSumV2` 的 127×256B 工作区,更长行退回 `ReduceMax`/`ReduceSum` 的 4×256B 工作区(最长工作负载 131072 仍在前一档)。下表占用按 outN=131072(`totalSubBlockNum=9`)计:
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 大小(每份) | 占用(B) |
+|---|---|---|---|---|---|
+| `in` | 16256 个 Dtype(`MAX_SUB_CONTEXT_SIZE`) | Dtype | 1(事件0/1 流水) | `MAX_SUB_CONTEXT_SIZE*sizeof(Dtype)` | 32512 |
+| `out` | 16256 个 Dtype | Dtype | 1(事件0/1 流水) | `MAX_SUB_CONTEXT_SIZE*sizeof(Dtype)` | 32512 |
+| `calc` | 16256 个 float | float | 1 | `MAX_SUB_CONTEXT_SIZE*sizeof(float)` | 65024 |
+| `calcDst` | 127×256B(useV2 归约工作区) | float | 1 | `(VECTOR_MAX_REPEAT-1)/2*VECTOR_MAX_BYTESIZE` | 32512 |
+| `max` | (totalSubBlockNum+1)×256B(段 max 槽 + `totalMax` 尾槽) | float | 1 | `(totalSubBlockNum+1)*VECTOR_MAX_BYTESIZE` | 2560 |
+| `sum` | (totalSubBlockNum+1)×256B | float | 1 | `(totalSubBlockNum+1)*VECTOR_MAX_BYTESIZE` | 2560 |
+| `sink` | 256B(attnSink 标量槽,attention 系调用恒传 nullptr,槽位仍保留) | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| **合计** | | | | | **167936** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| L1 | 512 KB | 131072 B | 25.0% |
+| L0A | 64 KB | 65536 B | 100% |
+| L0B | 64 KB | 65536 B | 100% |
+| L0C(CO1) | 128 KB | 65536 B | 50.0% |
+| UB(每 AIV subblock) | 192 KB | 167936 B | 85.4% |
+
+要点:
+
+- **L0A 与 L0B 在 headSize=128、blockSize=128 时双双占满 64KB,是本算子最紧的两级**:`AicHelper::Init` 的 `cubeKvTile` 收缩循环(`2*cubeKvTile*headSize*sizeof(Dtype) ≤ ASCEND_L0_BYTES=64KB` 且 `2*XLITE_MAX_M0*cubeKvTile*sizeof(Dtype) ≤ 64KB`,关键字 `cubeKvTile`)是 L0 不溢出的唯一保证——headDim=256、blockSize=128 时 tile 减半到 64,两份 KV tile 才放得下 L0;
+- AIV UB 最紧(85.4%),大头是 `in`/`out`/`calc`/`calcDst` 四个 `MAX_SUB_CONTEXT_SIZE` 级别的常量槽(合计 162560B,占 96.8%);UB 占用仅 `max`/`sum` 的 `(totalSubBlockNum+1)*256B` 随行宽缓增,超长行经 GM `expBuf` 分段中转,不依赖编译期断言——`MAX_SUB_CONTEXT_SIZE` 分块本身即上限控制;
+- L1 仅占 25%(两份 `l1aBuf` + 两份 `l1bBuf` 各 32KB);`l0cBuf` 单份 64KB,QK 与 SV 串行复用同一 CO1 区;host 侧 `nHeads/nKvHeads ≤ XLITE_MAX_M0` 校验(`csrc/op.cpp` 的 `XliteOpAttention`)源自 `XliteFitM0ToHeads` 的 M0 tile 约束而非存储容量;
+- `GetOptimalM0` 分档与 `m0` 自适应只影响任务划分与 qk workspace 的 GM 占用,`AicHelper` 一律按 `XLITE_MAX_M0=128` 上限分配,片上占用不随 m0 档位变化。

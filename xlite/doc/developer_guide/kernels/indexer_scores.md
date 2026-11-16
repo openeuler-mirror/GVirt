@@ -102,3 +102,54 @@ query tile 划分:`queryTileSize = MAX_M0 / nHeads`(`csrc/kernels/indexer_scores
 ### 流水线同步
 
 全部用 `HardEvent` 计数事件配对(MTE1↔MTE2、M↔MTE1、FIX↔M、MTE1↔FIX),`Run` 开头预置 11 个 flag 使首个任务无需等待(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Run`,关键字 `Run` 起始处连续 11 个 `SetFlag<HardEvent::...>` 预置段),结尾逐一 `WaitFlag` 清算(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Run`,关键字 `Run` 末尾连续 `WaitFlag<HardEvent::MTE1_FIX>(EVENT_ID1)` 起的清算段)。mmad 结果写 GM 前经 `M_FIX`→`FIX_M` 配对保证 FIX 管线完成。
+
+### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C)
+
+`Init`(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Init`)手动排布全部片上缓冲:L1(`TPosition::A1`)上四个缓冲连续累进 `bufferAddr`,L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)三级物理独立、各自从偏移 0 重新起排。本算子为纯 Cube 核(`KERNEL_TASK_TYPE_AIC_ONLY`),无 AIV/UB 分配,实际使用的存储级即 L1/L0A/L0B/L0C 四级。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计。dtype 记法:`Dtype` 为 q/kCache/weight/scores 的元素类型(fp16/bf16 实例化,`l0cBuf` 固定 `LocalTensor<float>`);两条路径均为 2B、`k0=256/sizeof(Dtype)=128`,占用完全相同,下表只给单占用列。缓冲大小只依赖编译期上限(`MAX_M0=MAX_N0=128`、`k0`)与 nHeads/headDim/blockSize,与 batch、序列长度无关;典型配置取测试配置(`tests/kernels/indexer_scores.py`)nHeads=64、headDim=128、blockSize=128——此时 `queryTileSize=MAX_M0/nHeads=2`,两级 mmad 的分块上界 `mBlockPad`(`ROUND_UP(kvLen,MBLOCKSIZE)`≤blockSize)、`nBlockPad`(`ROUND_UP(queryTileSize*nHeads,NBLOCKSIZE)`)与 `wnBlockPad`(`ROUND_UP(kvLen,NBLOCKSIZE)`)均取满 128。
+
+**AIC L1(A1,容量 512KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `kl1Buf` | `(blockSize, headDim)` | Dtype | 2(事件0/1) | `blockSize*headDim*sizeof(Dtype)` | 65536 |
+| `ql1Buf` | `(MAX_N0, headDim)` | Dtype | 2(事件2/3) | `MAX_N0*headDim*sizeof(Dtype)` | 65536 |
+| `wl1Buf` | `(MAX_N0, nHeads)` | Dtype | 2(事件4/5) | `MAX_N0*nHeads*sizeof(Dtype)` | 32768 |
+| `kql1Buf` | `(blockSize, MAX_N0)` | Dtype | 2(事件0/1) | `blockSize*MAX_N0*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **229376** |
+
+**AIC L0A(A2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0aBuf` | `(MAX_M0, k0)` | Dtype | 2(事件0/1) | `MAX_M0*k0*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0B(B2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0bBuf` | `(MAX_N0, k0)` | Dtype | 2(事件0/1) | `MAX_N0*k0*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0cBuf` | 第一级 `(mBlockPad, nBlockPad)` / 第二级 `(MBLOCKSIZE, wnBlockPad)` | float | 1(无乒乓,两级 mmad 串行共享) | 峰值 `mBlockPad*nBlockPad*sizeof(float)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| L1 | 512 KB | 229376 B | 43.8% |
+| L0A | 64 KB | 65536 B | 100% |
+| L0B | 64 KB | 65536 B | 100% |
+| L0C(CO1) | 128 KB | 65536 B | 50% |
+
+要点:
+
+- **L0A/L0B 恰好占满 64KB**:`l0aBuf`/`l0bBuf` 按 `MAX_M0×k0 = MAX_N0×k0 = 128×128` 的编译期上限分配、与运行期形状无关,任何 2B dtype 下都是 100%——除 `assert(headDim <= k0)`、`assert(nHeads <= k0)`(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Init`)外,这两级是最先被卡住的容量约束;
+- `l0cBuf` 单份被两级 mmad 串行共享,峰值取第一级 `(mBlockPad, nBlockPad)=(128,128)` 的 fp32 累加(64KB,占 CO1 一半),第二级 `(MBLOCKSIZE=16, wnBlockPad=128)` 仅 8KB,远低于峰值,无需乒乓;
+- `kl1Buf`/`ql1Buf`/`kql1Buf` 三个 128×128 规格缓冲共 196608 B、占 L1 的 86%,是 L1 占用大头;`wl1Buf` 因 nHeads=64 只有 MAX_N0×64,单份减半为 16384 B;
+- 全部槽位尺寸由编译期上限(`MAX_M0`/`MAX_N0`/`k0`)与 nHeads/headDim/blockSize 决定,占用与 batch、KV 长度无关;fp16 与 bf16 同为 2B,占用一致。

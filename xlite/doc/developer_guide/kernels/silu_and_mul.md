@@ -87,3 +87,38 @@ bf16 采用不同的切分与布局：
 - 计算流程与 fp16 模板相同（clamp → vmuls(-1) → vexp → vadds(1) → vdiv → vmul），但显式插入 `vconv_bf162f32` 升精度、`vconv_f322bf16r` 降精度（`csrc/kernels/silu_and_mul_bfloat16_t.cpp` 的 `silu_and_mul_bfloat16_t` 函数体，关键字 `vconv_bf162f32` 与 `vconv_f322bf16r`）；
 - 尾部处理：`dim_split % 64 != 0` 时用 `SetMaskFromHighBit` + `vector_dup(0)` 把 fp32 缓冲尾部 padding 置零（`csrc/kernels/silu_and_mul_bfloat16_t.cpp` 的 `silu_and_mul_bfloat16_t` 函数体，关键字 `SetMaskFromHighBit`），随后恢复全 1 mask；搬运用 32B 取整的 burst_copy，最后一个 split 段按实际长度写回；
 - 同步：与 fp16 模板同构的 set_flag/wait_flag 双缓冲流水（EVENT_ID0/ID1）。
+
+### 片上缓冲分配与占用汇总
+
+两套实现各自静态划分 UB:fp16/float 通用模板(`csrc/kernels/silu_and_mul.h` 的 `silu_and_mul`)把 UB 按字节五等分,槽位即字节偏移、无对齐垫片;bf16 独立实现(`csrc/kernels/silu_and_mul_bfloat16_t.cpp` 的 `silu_and_mul_bfloat16_t`)按 `padded_dim = ROUND_UP(dim_split,64)` 动态排布,dim 超过 max_dim 时对半 split 缩减 dim_split。硬件容量基准(910B/dav C220):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE=196608`)。dtype 记法:`CalType` 为模板计算类型(fp16 实例 2B、float 实例 4B,但槽位按字节等分,占用与 CalType 无关);bf16 路径片内升 fp32 计算。典型配置同取测试上限用例 dim=6400(`tests/kernels/silu_and_mul.py`):fp16 模板 tokens_per_tile=38912/(6400×2)=3、float 模板 tokens_per_tile=1;bf16 变体 6400 ≤ max_dim=6554,split=1、padded_dim=6400。
+
+**UB(fp16/float 模板,预算 `UB_SIZE=192KB`;五等分与 dim、dtype 无关)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `ubuf0`/`ubuf2`(gate 半区) | `tokens_per_tile × dim` | CalType | 2(事件0/1) | `MAX_HIDDENSIZE_PER_PIECE=38912` B | 77824 |
+| `ubuf1`/`ubuf3`(up 半区) | 同上 | CalType | 2(事件0/1) | 38912 B | 77824 |
+| `cal_ubuf`(e^-x 等中间量) | 同上 | CalType | 1 | 38912 B | 38912 |
+| **合计** | | | | | **194560** |
+
+**UB(bf16 变体,预算 `UB_SIZE=192KB`;dim=6400、split=1、padded_dim=6400)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `x32_ub0`/`x32_ub1` | `2×padded_dim`(gate+up) | float | 2(事件0/1) | `2*padded_dim*4` | 102400 |
+| `tmp` | `padded_dim` | float | 1 | `padded_dim*4` | 25600 |
+| `output_ub` | `padded_dim` | bfloat16_t | 1 | `padded_dim*2` | 12800 |
+| `x32_ub0_bf16`/`x32_ub1_bf16` | `2×padded_dim` | bfloat16_t | 2(事件0/1) | `2*padded_dim*2` | 51200 |
+| **合计** | | | | | **192000** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | fp16/float 模板占用 | 占比 | bf16 变体占用 | 占比 |
+|---|---|---|---|---|---|
+| UB | 192 KB | 194560 B | 99.0% | 192000 B | 97.7% |
+
+要点:
+
+- **两套实现同时逼近 UB 顶格**(99.0% 与 97.7%):模板五等分后仅余 2048 B,bf16 变体在 dim=6400 时距上限余 4608 B;两套实现均无 host 侧 dim 校验、亦无 kernel 断言,容量约束完全隐含在划分常数中。
+- **模板的单行硬上限是 `dim*sizeof(CalType) ≤ 38912` B**(fp16 dim ≤ 19456、float dim ≤ 9728),否则 tokens_per_tile 归零;bf16 变体按每元素 30B(`5*sizeof(float)+5*sizeof(bfloat16_t)`)预算推导 max_dim=`DIV_ROUND_UP(UB_SIZE,30)`=6554,dim 超限时对半 split 自动兜底,dim_split 减半后布局线性缩小。
+- **bf16 路径的大头是 `x32` 双缓冲**(102400 B,53%):升精度到 fp32 计算是 bf16 的数值要求,占走近半 UB;fp16 模板则把预算均匀摊给 IO 双缓冲与中间量。

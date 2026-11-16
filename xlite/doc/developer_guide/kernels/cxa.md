@@ -143,3 +143,127 @@ dense 模式下每 batch 取 compress cache 子视图 `compressKCache[batchIdx *
 ### 校验
 
 tests/kernels/cxa.py 覆盖 5 种模型配置(base-swa、swa、c128a、c4a-ntok、c4a-topk)× 多种 batch/长度组合(含 131071 超长 cached_len、多 batch 混合长度),与 `sparse_attn` 参考实现对比容差 `atol=5e-5, rtol=5e-2`;每条 case 同时覆盖 sparse 与 dense 两种模式(dense 模式要求 query_len == 1 per batch,两侧复用同一份采样的 topk_indices),topk 场景中参考实现的绝对压缩索引被换算到 op 的压缩相对坐标(压缩 token j -> 索引 j,kernel 将其置于分数列 `swaSegWidth + j`)。
+
+### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
+
+`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::Init` 手动排布 AIC 侧全部片上缓冲:每级在 `TPosition::A1/A2/B2/CO1` 上累进 `bufferAddr`,且 **QK 段与 SV 段在同级的偏移各自从 0 重新起排**——`RunAic` 中 QK 与 SV 是串行阶段(`RunAicQK` 完全结束、FIX 把分数写回 scores workspace 之后才 `wait_flag_dev(1)` 进入 `RunAicSV`),两段物理上互斥复用同一块地址空间,该级实际占用取两段布局的较大者(下文各表按段分列,汇总按 max 聚合)。AIV 侧 `RunAivSoftmaxLong` / `RunAivSoftmaxPingPong`(`csrc/kernels/softmax_attn_aiv.h`)为函数内联排布:`off` 从 0 顺序累进,每槽按 `VECTOR_MAX_BYTESIZE=256B` 向上对齐。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 256KB(`l0_c_size=262144`)系 CO1/CO2 两区之和,mmad 累加(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`),每个 AIV subblock 各持一份独立 UB。
+
+dtype 记法:`CXA<Dtype>` 仅以 bfloat16_t 实例化(`csrc/kernels/cxa_bfloat16_t.cpp`),`Dtype`=bf16(2B),L0C mmad 累加器为 float(4B);AIV UB 布局随 `Dtype` 与运行期行宽缩放,单 dtype 无需分列。典型配置取 `tests/kernels/cxa.py` 的 c4a-topk 模型(nHeads=16、headDim=512、windowSize=128,即 `swaSegWidth = windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B = 272`、compressRatio=4、indexTopK=512、swaBlockSize=64、compressBlockSize=128)与 decode 工作负载 `(1, [4096], [1])`(sparse 由 lens 推导 `kvSize = ROUND_UP(4097/4, 4*CXA_SVCK0) = 1024`,`qkStride = 272+1024 = 1296`);tiling 常量为 `qkwn0=swaBlockSize=64`、`qkcn0=dense?MAX_N0:compressBlockSize=128`(dense 模式 host 传 `compressBlockSize=0`,helper 内改取 `MAX_N0=128`,与 sparse 取值一致)、`qkk0=256/sizeof(Dtype)=128`、`svn0=(swaBlockSize<=CXA_SVCK0)?256:128=256`、`svwk0=64`、`svck0=CXA_SVCK0=64`、`svwkMax=max(svwk0,svck0)=64`。下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布),占用 = 单份大小 × 乒乓个数。
+
+**AIC L1(A1,容量 512KB)——QK 段**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `ql1aBuf` | `(XLITE_MAX_M0, headDim)`=(128, 512) | bf16 | 1(事件0) | `XLITE_MAX_M0*headDim*sizeof(Dtype)` | 131072 |
+| `kl1bBuf` | `(max(qkwn0,qkcn0), 4*qkk0)`=(128, 512) | bf16 | 2(事件2/3) | `max(qkwn0,qkcn0)*4*qkk0*sizeof(Dtype)` | 262144 |
+| **合计** | | | | | **393216** |
+
+**AIC L1(A1)——SV 段(与 QK 段互斥复用)**
+
+`Init` 尾部(`__DAV_C220_CUBE__` 分支)用 host 提供的 `zeroGm` 把两份 `ktl1bBuf` 按 `kBlockPad×svn0` 预填零,避免上一 tile 残留 K 数据导致 mmad NaN。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `scoresl1aBuf` | `(XLITE_MAX_M0, 4*svwkMax)`=(128, 256) | bf16 | 2(事件0/1) | `XLITE_MAX_M0*4*svwkMax*sizeof(Dtype)` | 131072 |
+| `ktl1bBuf` | `(svn0, max(svwk0,2*svck0))`=(256, 128) | bf16 | 2(事件2/3) | `max(svwk0,2*svck0)*svn0*sizeof(Dtype)` | 131072 |
+| **合计** | | | | | **262144** |
+
+**AIC L0A(A2,容量 64KB)——QK 段**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `qkl0aBuf` | `(XLITE_MAX_M0, qkk0)`=(128, 128) | bf16 | 2(事件0/1) | `XLITE_MAX_M0*qkk0*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0A(A2)——SV 段(与 QK 段互斥复用)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `svl0aBuf` | `(XLITE_MAX_M0, svwkMax)`=(128, 64) | bf16 | 2(事件0/1) | `XLITE_MAX_M0*svwkMax*sizeof(Dtype)` | 32768 |
+| **合计** | | | | | **32768** |
+
+**AIC L0B(B2,容量 64KB)——QK 段**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `qkl0bBuf` | `(MAX_N0, qkk0)`=(128, 128) | bf16 | 2(事件0/1) | `MAX_N0*qkk0*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0B(B2)——SV 段(与 QK 段互斥复用)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `svl0bBuf` | `(svn0, svwkMax)`=(256, 64) | bf16 | 2(事件0/1) | `svn0*svwkMax*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)——QK 段**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `qkl0cBuf` | `(XLITE_MAX_M0, MAX_N0)`=(128, 128) | float | 1(事件0) | `XLITE_MAX_M0*MAX_N0*sizeof(float)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0C(CO1 区)——SV 段(与 QK 段互斥复用)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `svl0cBuf` | `(XLITE_MAX_M0, svn0)`=(128, 256) | float | 1(事件0) | `XLITE_MAX_M0*svn0*sizeof(float)` | 131072 |
+| **合计** | | | | | **131072** |
+
+**AIV UB(预算 `UB_SIZE=192KB`,每 subblock 一份)——`RunAivSoftmaxLong`(indexTopK==0 的无 topk 路径)**
+
+槽位按行宽分块 `MAX_SUB_CONTEXT_SIZE = (VECTOR_MAX_REPEAT-1)*(VECTOR_MAX_BYTESIZE/sizeof(float)) = 254*64 = 16256` 固定分配,长行按子块循环处理(故占用不随行宽增长);`calcDst` 取 `useV2`(`totalSubBlockNum <= 65` 恒真)分支的 `(VECTOR_MAX_REPEAT-1)/2*VECTOR_MAX_BYTESIZE`;`max`/`sum` 随子块数 `totalSubBlockNum+1` 增长(典型 `outN=1296` → 1 块 → 2 槽);`expBuf` 为 GM 侧中转(scores workspace 的高位行,`m0 > XLITE_MAX_M0-4` 时传空),不占 UB。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `in` | `MAX_SUB_CONTEXT_SIZE=16256` 个 Dtype | bf16 | 1(事件0,搬入) | `MAX_SUB_CONTEXT_SIZE*sizeof(Dtype)` | 32512 |
+| `out` | `MAX_SUB_CONTEXT_SIZE=16256` 个 Dtype | bf16 | 1(事件1,写出) | `MAX_SUB_CONTEXT_SIZE*sizeof(Dtype)` | 32512 |
+| `calc` | `MAX_SUB_CONTEXT_SIZE=16256` float | float | 1 | `MAX_SUB_CONTEXT_SIZE*sizeof(float)` | 65024 |
+| `calcDst` | `127*VECTOR_MAX_BYTESIZE`(归并暂存) | float | 1 | `(VECTOR_MAX_REPEAT-1)/2*VECTOR_MAX_BYTESIZE` | 32512 |
+| `max` | `(totalSubBlockNum+1)` 个 256B 槽 | float | 1 | `(totalSubBlockNum+1)*VECTOR_MAX_BYTESIZE` | 512 |
+| `sum` | 同上 | float | 1 | `(totalSubBlockNum+1)*VECTOR_MAX_BYTESIZE` | 512 |
+| `sink` | 1 个 fp32 标量广播槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| **合计** | | | | | **163840** |
+
+**AIV UB——`RunAivSoftmaxPingPong`(topk 路径,`indexTopK > 0`)**
+
+`len = MAX(outN, topK+swaSegWidth)`(典型 decode 行 `outN = qkStride = 1296`);`maxOut`/`sumOut` 仅 `saveMaxSum`(flash_cxa 传 max/sum 工作区,cxa 恒传 nullptr)时占用,此处为 0;`sink` 槽在 `attnSink` 非空时占用(cxa 恒传)。行内逐行处理,`in`/`out`/`indices` 乒乓与 GM 搬运重叠。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `in` | `len=1296` 个 Dtype | bf16 | 2(事件2/3) | `ROUND_UP(len*sizeof(Dtype),256)` | 5632 |
+| `out` | `len=1296` 个 Dtype | bf16 | 2(事件2/3) | `ROUND_UP(len*sizeof(Dtype),256)` | 5632 |
+| `cal` | `len=1296` float | float | 1 | `ROUND_UP(len*sizeof(float),256)` | 5376 |
+| `temp` | `(len/2)` float 量级的归约暂存 | float | 1 | `(DIV_ROUND_UP(len*4,256)/2)*256` | 2560 |
+| `maxOut` | —(saveMaxSum=false) | float | 2 | `VECTOR_MAX_BYTESIZE` | 0 |
+| `sumOut` | —(saveMaxSum=false) | float | 2 | `VECTOR_MAX_BYTESIZE` | 0 |
+| `indices` | `topK=512` 个 int32 | int32 | 2(事件0) | `ROUND_UP(topK*4,256)` | 4096 |
+| `inTopK` | `(topK+swaSegWidth)=784` 个 Dtype | bf16 | 1 | `ROUND_UP((topK+swaSegWidth)*sizeof(Dtype),256)` | 1792 |
+| `indicesFp32` | `topK=512` float | float | 1 | `ROUND_UP(topK*4,256)` | 2048 |
+| `cmp0` | 边界标量广播槽(kvOffset 基) | int32 | 1 | `VECTOR_MAX_BYTESIZE*2` | 512 |
+| `cmp1` | 边界标量广播槽(因果上界) | int32 | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `cmpFp320` | 边界 fp32 槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `cmpFp321` | 边界 fp32 槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `topkMask0` | `topK/8` 位 hit-mask | uint8 | 1 | `ROUND_UP(topK/8,256)` | 256 |
+| `topkMask1` | `topK/8` 位 hit-mask | uint8 | 1 | `ROUND_UP(topK/8,256)` | 256 |
+| `currIndices` | `topK=512` 个 int32 | int32 | 1 | `ROUND_UP(topK*4,256)` | 2048 |
+| `sink` | sink 标量广播槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| **合计** | | | | | **31232** |
+
+**占用汇总**(各表占用列 vs 硬件容量;L1/L0A/L0B/L0C 按 QK/SV 两段互斥取 max;字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| L1(取 QK/SV 较大者) | 512 KB | 393216 B(QK 段) | 75.0% |
+| L0A(取 QK/SV 较大者) | 64 KB | 65536 B(QK 段) | 100% |
+| L0B(取 QK/SV 较大者) | 64 KB | 65536 B(两段相等) | 100% |
+| L0C CO1(取 QK/SV 较大者) | 128 KB | 131072 B(SV 段) | 100% |
+| UB(Long 版,每 AIV subblock) | 192 KB | 163840 B | 83.3% |
+| UB(PingPong 版,每 AIV subblock) | 192 KB | 31232 B | 15.9% |
+
+要点:
+
+- **`svl0cBuf` = XLITE_MAX_M0(128)×svn0(256)×4B = 128KB,恰好顶满 CO1 区**——这是「L0C 配置 `l0_c_size=262144` 系 CO1/CO2 两区之和、mmad 累加(`TPosition::CO1`)只能用 CO1 128KB」的直接实证(swaBlockSize≤CXA_SVCK0=64 时 svn0=256);QK 段的 `qkl0cBuf`(64KB)与之各自从 CO1 偏移 0 起排,靠 QK/SV 串行互斥复用同一地址空间、同刻只有一段活跃——若按两段相加(192KB)计将超出 CO1,互斥复用是该布局容得下的前提;
+- **L0A/L0B 同样顶满 64KB**:QK 段 `qkl0aBuf`/`qkl0bBuf` 乒乓各 64KB,SV 段 `svl0bBuf` 乒乓(svn0=256、svwkMax=64)也恰 64KB;`CxaAicHelper::Init` 中 svn0 的自适应取值(swaBlockSize > CXA_SVCK0 时减半为 128,见代码注释「Halve svn0 … so it fits (64KB)」)正是为保 SV 段 L0B 不溢出;
+- **host 校验 `nHeads <= XLITE_MAX_M0=128` 的容量来源**:AIC 把一个 query token 的全部头(`mSize = queryTaskLen*nHeads` 行)装进 XLITE_MAX_M0 行的 L1 A/L0A 缓冲与 qk workspace(`csrc/op.cpp` 的 `XliteOpCXA` 校验;dense 模式直接 `m0 = nHeads`,一 token 一 tile);L1 的大头是 QK 段的 `ql1aBuf`+`kl1bBuf`(headDim=512 下 Q 整拷 128KB + K 四 tile 预取双缓冲 256KB,共 75%);
+- **AIV UB 双布局**:topk 路径按 `len` 动态排布(典型 decode 仅 31232B),无 topk 路径按 `MAX_SUB_CONTEXT_SIZE=16256` 固定分块(163840B、不随行宽增长、支持任意行宽);两版上限由 `csrc/kernels/softmax_attn_aiv.h` 的 `static_assert` 按 `MAX_SOFTMAX_PINGPONG_LEN=10496`/`MAX_TOPK_NUM=2048`/`MAX_SWA_SEG_WIDTH=4096` 编译期校验,行宽超 `MAX_SOFTMAX_PINGPONG_LEN` 由 Python 侧路由改走 flash_cxa(flash 的行宽 `swaSegWidth + tileSizeOfCachedKV` 另经 `csrc/op.cpp` 的 `XliteOpFlashCXA` 校验 ≤ 10496,另有 `swaSegWidth ≤ MAX_SWA_SEG_WIDTH` 前置校验)。

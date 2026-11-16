@@ -112,6 +112,48 @@ head 模式跳过整段。普通模式下(`csrc/kernels/hc_act.h` 的 `hc_act`,�
 
 MTE2(载入)/ V(计算)/ MTE3(写出)之间用事件对流水:`EVENT_ID0+curr` 管理 mixes(+残差)载入与 V 计算的交接(`csrc/kernels/hc_act.h` 的 `hc_act`,关键字 `wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr)` 与 `set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0 + curr)`),`EVENT_ID6+curr` 管理 y/pre 的转换与写出(`csrc/kernels/hc_act.h` 的 `hc_act`,关键字 `EVENT_ID6 + curr`),`EVENT_ID2/3+curr` 管理 comb 写出(`csrc/kernels/hc_act.h` 的 `hc_act`,关键字 `copy_ubuf_to_ubuf(combOut[curr], combAlign` 与 `CopyUbufToGmAligned(comb + process * combElems`)。启动时按需预置 `set_flag`(comb 仅非 head 模式,`csrc/kernels/hc_act.h` 的 `hc_act`,关键字 `set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0)` 启动预置段);`preSum=1` 的 pre sum 用 `EVENT_ID4` 做 V→S 事件往返,让标量核安全读取 `calcUb[h]`(`csrc/kernels/hc_act.h` 的 `hc_act`,关键字 `set_flag(PIPE_V, PIPE_S, EVENT_ID4)`/`wait_flag(PIPE_V, PIPE_S, EVENT_ID4)`)。head 模式不使用 EVENT_ID2/3,收尾 wait 也相应裁剪(`csrc/kernels/hc_act.h` 的 `hc_act`,关键字 `if (!headOnly)` 收尾 wait_flag 段),避免等待永远不会被置位的事件。每轮 token 处理完 `curr = 1 - curr` 翻转缓冲。
 
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`hc_act` 为单 AIV 向量核 kernel,片上缓冲全部在 UB 上:`csrc/kernels/hc_act.h` 的 `hc_act`(关键字 `mixesUb0` 起的 UB 分配段)自偏移 0 顺序累进排布——门控共享前缀(15 个槽)之后按 `preSum` 分配两互不重叠的尾部,末尾 `assert(off <= UB_SIZE)` 防溢出。硬件容量基准(910B/dav C220,NpuArch 2201):UB 取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV block 各持一份独立 UB、布局相同。
+
+dtype 记法(模板实参 `Dtype`,仅影响 `preSum=1` 时 `xResid`/`yOut`):唯一实例化 `hc_act_float`(`csrc/kernels/hc_act_float.cpp`)内部固定 `Dtype = bfloat16_t`(2B),门控 mixes/hcScale/hcBase/post/comb/pre 恒为 FP32,故单占用列;两列对应 `preSum` 两条路径,同取一组配置使占用差异仅来自路径本身。典型模型配置取 DeepSeek-V4(`csrc/model.cpp` 的 `XModel::ForwardHcPre` 调用 `XliteOpHcAct`):hcMult K=4、hidden=4096(dim)、sinkhornIters=20(不影响 UB,Sinkhorn 全在 `combAlign` 上原地迭代)、残差/输出 BF16、门控 FP32。K=4 时门控段各槽取整后均为 256B:mixes/calc/combOut/base 按 `ROUND_UP(mixHc*4, 256)`(mixHc=24),pre/post 段各缓冲按 `ROUND_UP(K*4, 256)`,`combAlign` 按 `ROUND_UP(K*hcMultAlign*4, 256)`(`hcMultAlign = ROUND_UP(K, 8) = 8`)。
+
+**AIV UB(容量 192KB,每 block 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 融合 preSum=1 占用(B) | 拆分 preSum=0 占用(B) |
+|---|---|---|---|---|---|---|
+| `mixesUb0/1` | mixHc=24 个 float | float | 2(事件 EVENT_ID0/1,MTE2 载入与 V 计算交接) | `ROUND_UP(mixHc*4,256)` = 256 B | 512 | 512 |
+| `calcUb` | 24 个 float 门控计算区 | float | 1 | 256 B | 256 | 256 |
+| `postOut0/1` | K 个 float(post gather 暂存) | float | 2(事件 EVENT_ID6/7,写出族) | `ROUND_UP(K*4,256)` = 256 B | 512 | 512 |
+| `combOut0/1` | mixHc 个 float(comb 写出缓冲) | float | 2(事件 EVENT_ID2/3,comb 写出族) | 256 B | 512 | 512 |
+| `combAlign` | `(K, hcMultAlign)` = (4, 8) 对齐 comb(Sinkhorn 原地迭代区) | float | 1 | `ROUND_UP(K*hcMultAlign*4,256)` = 256 B | 256 | 256 |
+| `baseUb` | 24 个 float 偏置 | float | 1 | 256 B | 256 | 256 |
+| `colBuf` | K 个 float 列和 scratch(列归一分母) | float | 1 | 256 B | 256 | 256 |
+| `scalarBuf` | K 个 float 行统计 scratch(vcmax/vcadd) | float | 1 | 256 B | 256 | 256 |
+| `brcbBuf` | K 个 float 的行广播展开(vbrcb) | float | 1 | 256 B | 256 | 256 |
+| `onesUb` | 1.0 常数(vdiv 实现 1/x) | float | 1 | 256 B | 256 | 256 |
+| `scaleUb` | 3 个 float 缩放 | float | 1 | 256 B | 256 | 256 |
+| `offRamp` | K 个 uint32(vgather 字节偏移斜坡) | uint32 | 1 | 256 B | 256 | 256 |
+| `inDtype0/1` | `(K, hidden)` = (4, 4096) 残差 | Dtype(bf16) | 2(事件 EVENT_ID0/1) | `ROUND_UP(K*hidden*2,32)` = 32768 B | 65536 | — |
+| `outDtype0/1` | `(hidden,)` = (4096,) y 行 | Dtype(bf16) | 2(事件 EVENT_ID6/7) | `ROUND_UP(hidden*2,32)` = 8192 B | 16384 | — |
+| `xFp32` | `(K, hidden)` 残差 fp32 副本 | float | 1 | `ROUND_UP(K*hidden*4,32)` = 65536 B | 65536 | — |
+| `yCalc` | 融合:`(hidden,)` 累加器;拆分:pre 的 vgather 暂存 | float | 1 | 融合 `ROUND_UP(hidden*4,32)` = 16384 B;拆分 256 B | 16384 | 256 |
+| `preOut0/1` | K 个 float(pre 写出缓冲) | float | 2(事件 EVENT_ID6/7,写出族) | `ROUND_UP(K*4,256)` = 256 B | — | 512 |
+| **合计** | | | | | **167680** | **4608** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 融合 preSum=1 占用 | 占比 | 拆分 preSum=0 占用 | 占比 |
+|---|---|---|---|---|---|
+| UB(每 AIV block) | 192 KB | 167680 B | 85.3% | 4608 B | 2.3% |
+
+要点:
+
+- 融合路径(`hc_act` op)UB 占 85.3%(余量 28928 B),大头是 `xFp32` 与 `inDtype0/1` 双缓冲(各 65536 B,合计占 78%)——即 `[K, hidden]` 整块残差的 fp32/bf16 两种形态,K=4、BF16 下总占用 ≈ `40*hidden + 3840`(B),`assert(off <= UB_SIZE)` 把 hidden 卡在约 4819 以内(hidden=4096 已接近);
+- 拆分路径(`hc_split_sinkhorn` op)仅占 2.3%(4608 B)——pre sum 的整块残差槽不在此路径分配,门控段 15 个 256B 小槽合计仅 3840 B,几乎不构成约束;
+- head 模式(`hc_head`)走 `preSum=1` 布局,占用同 167680 B:门控段槽位照常分配、仅使用被 `headOnly` 裁剪(comb 段不算),收尾 wait 裁剪不影响占用;
+- 容量来源是 kernel 内的 `assert(off <= UB_SIZE)`(`csrc/kernels/hc_act.h` 的 `hc_act`);`hcMult` 另受 `assert(hcMult >= 1 && hcMult <= 7)` 约束(K≥8 时 `1ULL << (hcMult*hcMult)` 位掩码溢出),host 侧对 hidden 无校验,靠模型配置(hidden=4096)保证。
+
 ## 关键代码位置
 
 - 模板入口:`csrc/kernels/hc_act.h` 的 `hc_act` 模板函数

@@ -141,3 +141,87 @@ Top-K kernel 本体逐 head 行独立打分(head-generic),heads=64 只需 host �
 ### 流水线同步
 
 核内 MTE2(搬入)↔ V(计算)↔ MTE3(写回)用 `set_flag/wait_flag` 同步;LN/量化归约结果由 S 管线读取前使用 V→S 事件。跨核沿用 Indexer 的 mode 2 握手:两个 AIV 完成 prepared 写入后,由 MTE3 发出事件 2/3;AIC 等待后做 Matmul,由 FIX 发出事件 0/1;AIV 等待后量化、写回。每组 AIC/AIV 初始最多准备两个 tile,消费当前 rotated tile 后才复用同一槽位,避免 Cube 覆盖尚未读取的数据。结束时排空本核流水。
+
+### 片上缓冲分配与占用汇总(AIV UB + AIC L1/L0A/L0B/L0C)
+
+本算子为混合核(`KERNEL_TYPE_MIX_AIC_1_2`,1 AIC : 2 AIV)。AIV 侧 `IndexerC8Buffers::Init`(`csrc/kernels/indexer_prepare_c8.h` 的 `IndexerC8Buffers::Init`)自偏移 0 顺序排布全部 UB 槽位,`assert(off <= UB_SIZE)` 收尾,每 AIV(向量 subblock)一份,K、Q 两阶段复用同一布局;AIC 侧复用 `Matmul<bfloat16_t, float, bfloat16_t>`(`csrc/kernels/matmul.h` 的 `Matmul::Init`,调用见 `csrc/kernels/indexer_prepare_c8.h` 的 `indexer_prepare_c8` cube 分支,固定 tile `(m0,n0,k0)=(INDEXER_C8_TILE_ROWS,128,128)=(32,128,128)`,`hasBias=hasDeqScale=false`):L1 上 `l1aBuf`(`TPosition::A1`)与 `l1bBuf`(`TPosition::B1`)同处 512KB 物理存储、`bufferAddr` 连续累进,各持两份乒乓,L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)三级物理独立、各自从偏移 0 重新起排。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank)。dtype 记法:仅 BF16 一种实例化;UB 槽位横跨 float/bfloat16_t/half/int32_t/int8_t/int64_t/uint32_t 多种类型,尺寸全部由 `dim=128`、`rope_dim=64`、`rows=INDEXER_C8_TILE_ROWS/2=16`(`csrc/kernels/kernel_param.h` 的 `INDEXER_C8_TILE_ROWS`)三个编译期常量决定,与 token 数、head 数、is_long、freqs 路径、block_size 均无关,单占用列即对全部配置成立。典型配置取 GLM-5.1 LI:heads=32、is_long=1(heads 只改变任务数与 `head_weight` 双缓冲的内容宽度,不改变任何槽位尺寸)。
+
+**AIV UB(IndexerC8Buffers,每 AIV 一份,预算 192KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `ub_weight` | (dim=128) | float | 1(常驻,LN 仿射) | `dim*sizeof(float)` | 512 |
+| `ub_bias` | (128) | float | 1(常驻,LN 仿射) | 同上 | 512 |
+| `x` | (rows=16, 128) | float | 1 | `rows*dim*sizeof(float)` | 8192 |
+| `tmp` | (16, 128) | float | 1(LN/RoPE/量化复用) | 同上 | 8192 |
+| `other` | (16, rope_dim=64) | float | 1(RoPE swap 载体) | `rows*rope_dim*sizeof(float)` | 4096 |
+| `trig` | (16, 64) | float | 1(freqs,fp32 路径) | 同上 | 4096 |
+| `cos` | (16, 64) | float | 1(RoPE) | 同上 | 4096 |
+| `sin` | (16, 64) | float | 1(RoPE) | 同上 | 4096 |
+| `bf` | (16, 128) | bfloat16_t | 1(MTE2 搬入/V↔MTE3 中转) | `rows*dim*sizeof(bfloat16_t)` | 4096 |
+| `trig_bf` | (16, 64) | bfloat16_t | 1(freqs bf16 路径与 BF16 舍入中转) | `rows*rope_dim*sizeof(bfloat16_t)` | 2048 |
+| `rounded` | (16, 128) | int32_t | 1(gather 偏移表底/量化取整) | `rows*dim*sizeof(int32_t)` | 8192 |
+| `half_values` | (16, 128) | half | 1 | `rows*dim*sizeof(half)` | 4096 |
+| `quant` | (16, 128) | int8_t | 1(量化输出) | `rows*dim*sizeof(int8_t)` | 2048 |
+| `stats` | 64 float(256B 槽) | float | 1(每行均值/方差/amax) | `VECTOR_MAX_BYTESIZE` | 256 |
+| `scale` | 64 float(256B 槽) | float | 1 | 同上 | 256 |
+| `factor` | 64 float(256B 槽) | float | 1 | 同上 | 256 |
+| `numerator` | 64 float(256B 槽) | float | 1 | 同上 | 256 |
+| `scale_half` | 128 half(256B 槽) | half | 1(scale FP16 中转) | 同上 | 256 |
+| `scale_scatter` | 16 个 32B 对齐散射槽 | half | 1(vbrcb 逐行 2B scale 散射) | `rows*UB_BUF_ALIGN_SIZE` | 512 |
+| `scaled_weights` | 128 half(256B 槽) | half | 1(Q 阶段) | `VECTOR_MAX_BYTESIZE` | 256 |
+| `position` | (rows=16) int64 | int64_t | 2(GM 双缓冲) | `rows*sizeof(int64_t)` | 256 |
+| `slot` | (16) int32 | int32_t | 2(GM 双缓冲) | `rows*sizeof(int32_t)` | 128 |
+| `head_weight` | (16) bfloat16_t | bfloat16_t | 2(GM 双缓冲) | `rows*sizeof(bfloat16_t)` | 64 |
+| `cos_indices` | (16, 64) uint32 | uint32 | 1(常驻,Init 期预计算) | `rows*rope_dim*sizeof(uint32_t)` | 4096 |
+| `sin_indices` | (16, 64) uint32 | uint32 | 1(常驻) | 同上 | 4096 |
+| `swap_indices` | (16, 64) uint32 | uint32 | 1(常驻) | 同上 | 4096 |
+| `row_indices` | 64 uint32(256B 槽) | uint32 | 1(常驻,行间归约汇集) | `VECTOR_MAX_BYTESIZE` | 256 |
+| `rope_sign` | 64 float(256B 槽) | float | 1(常驻 ±1 符号) | 同上 | 256 |
+| **合计** | | | | | **69568** |
+
+**AIC L1(A1/B1,容量 512KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l1aBuf` | `(m0=32, kDtileSize=2*k0=256)`(K 方向预取窗) | bfloat16_t | 2(事件0/1) | `m0*kDtileSize*sizeof(bfloat16_t)` | 32768 |
+| `l1bBuf` | `(n0=128, k0=128)`(Hadamard 矩阵 tile) | bfloat16_t | 2(事件2/3) | `n0*k0*sizeof(bfloat16_t)` | 65536 |
+| **合计** | | | | | **98304** |
+
+**AIC L0A(A2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0aBuf` | `(m0=32, kQtileSize=k0/4=32)` | bfloat16_t | 2(事件0/1) | `m0*kQtileSize*sizeof(bfloat16_t)` | 4096 |
+| **合计** | | | | | **4096** |
+
+**AIC L0B(B2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0bBuf` | `(n0=128, kQtileSize=32)` | bfloat16_t | 2(事件0/1) | `n0*kQtileSize*sizeof(bfloat16_t)` | 16384 |
+| **合计** | | | | | **16384** |
+
+**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0cBuf` | `(m0=32, n0=128)` | float | 1(事件0) | `m0*n0*sizeof(float)` | 16384 |
+| **合计** | | | | | **16384** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| AIV UB(每 AIV) | 192 KB | 69568 B | 35.4% |
+| AIC L1 | 512 KB | 98304 B | 18.8% |
+| AIC L0A | 64 KB | 4096 B | 6.3% |
+| AIC L0B | 64 KB | 16384 B | 25% |
+| AIC L0C(CO1) | 128 KB | 16384 B | 12.5% |
+
+要点:
+
+- **UB 布局是编译期定值**:`dim=128`、`rope_dim=64`、`rows=16` 三个常量决定全部 28 个槽位共 69568 B,与 token 数、head 数、is_long、freqs 的 fp32/bf16 路径、block_size 均无关——K、Q 阶段与两条 freqs 路径(`trig`/`trig_bf` 槽都已预留)复用同一布局;
+- AIC 侧 Hadamard 片形固定 `(32,128,128)`:L1 98304 B(18.8%)、L0C 16384 B(12.5%)均宽裕,片高上限来自 `INDEXER_C8_TILE_ROWS=32`;heads>32 由 chunked q-task 按 32 个 head 一块分解任务(见上文「多 head 支持」),不放大任何片上缓冲;
+- UB 大头是三个 `rows*dim*4=8192B` 的 fp32 槽(`x`/`tmp`/`rounded`)与九个 4096B 槽(`other`/`trig`/`cos`/`sin`/`bf`/`half_values` 及三个 vgather 索引表),合计 61440 B(88%);常驻的 `ub_weight`/`ub_bias` 与 8 个 256B 标量槽共约 3KB;
+- `position`/`slot`/`head_weight` 三个元数据槽随 GM 双缓冲保留两份(共 448B),是仅有的乒乓槽位;跨核交接(事件 2/3 由 AIV、0/1 由 AIC)与 `[4,cores,32,128]` GM 工作区不占 UB。

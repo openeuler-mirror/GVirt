@@ -57,3 +57,51 @@ kernel 分三个阶段（`csrc/kernels/permutation.cpp` 的 `permutation` 入口
 - 阶段 1/2 内部用 MTE2/MTE3 ↔ S 的 `set_flag`/`wait_flag` 保证搬运与标量读写顺序；
 - 阶段 3 用 `routing`/`row`/`scaleSlot` 双缓冲 + `PIPE_MTE3 → PIPE_MTE2` 的 EVENT_ID0/1 乒乓，使上一 token 的 MTE3 写回与下一 token 的位图读入重叠（`csrc/kernels/permutation.cpp` 的 `permutation3`，关键字 `routing[2]`、`row[2]`、`scaleSlot[2]`、`curr = 1 - curr`）；`scaleSlot` 与 `row` 一样按 `curr` 索引，确保相邻 token（不同 `curr`）的 scale 槽不交叠，由同一 `curr` flag 序列串行化 MTE2 载入与 MTE3 散射；
 - 三个阶段之间 `ffts_cross_core_sync(PIPE_MTE3, config)` + `wait_flag_dev(flag_id)` 全核同步（`csrc/kernels/permutation.cpp` 的 `permutation` 入口，关键字 `ffts_cross_core_sync`），保证 counts/starts 全部就绪后再进入下一阶段。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+三个阶段在各自函数入口用 `get_imm` 手工排布 UB（`csrc/kernels/permutation.cpp` 的 `permutation1` / `permutation2` / `permutation3`），阶段间以 `ffts_cross_core_sync` + `wait_flag_dev` 全核同步，同一 UB 地址空间被串行复用、每阶段从偏移 0 重新起排，占用取三阶段峰值而非求和。硬件容量基准（910B/dav C220，NpuArch 2201）：AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），各 AIV block 各持一份独立 UB、布局相同。dtype 记法：阶段 1/2 的缓冲与 dtype 无关（单占用列）；阶段 3 的 `row[]` 行缓冲按 `dim * elem_bytes` 缩放——BF16 路径 elem_bytes=2（行 14336 B）、INT8 路径（量化前置 dispatch）elem_bytes=1（行 7168 B），其余缓冲两条路径相同。典型配置（两路径同取）：n_routed_experts=256（DSV3 系 256 专家）、dim=7168、TOKEN_TILE=4096，占用差异仅来自 `elem_bytes`。
+
+**AIV UB——阶段 1：permutation1（计数与组内序号；与 dtype 无关）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `c` | `n_routed_experts` 个专家计数器 | uint32 | 1 | `n_routed_experts*4` | 1024 |
+| `routing` | `TOKEN_TILE × n_routed_experts` 位图 tile | uint8 位图 | 1 | `ROUND_UP(TOKEN_TILE*n_routed_experts/8, BLOCK_SIZE)` | 131072 |
+| `routing_count` | `TOKEN_TILE` 个组内序号 | uint32 | 1 | `TOKEN_TILE*4` | 16384 |
+| **合计** | | | | | **148480** |
+
+**AIV UB——阶段 2：permutation2（前缀和，仅 block 0；与 dtype 无关）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `c` | `n_routed_experts` 个计数（读回） | uint32 | 1 | `ROUND_UP(n_routed_experts*4, VECTOR_MAX_BYTESIZE)` | 1024 |
+| `s` | `n_routed_experts` 个排他前缀和 | uint32 | 1 | `ROUND_UP(n_routed_experts*4, VECTOR_MAX_BYTESIZE)` | 1024 |
+| `psum` | 1 个总和 | uint32 | 1 | `sizeof(uint32_t)` | 4 |
+| **合计** | | | | | **2052** |
+
+**AIV UB——阶段 3：permutation3（数据散射）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | BF16 占用(B) | INT8 占用(B) |
+|---|---|---|---|---|---|---|
+| `s` | `n_routed_experts` 个段起始偏移 | uint32 | 1 | `n_routed_experts*4` | 1024 | 1024 |
+| `routing[ping]` | 单 token 位图行（`n_routed_experts/8` B） | uint8 位图 | 2（事件0/1） | `ROUND_UP(n_routed_experts/8, BLOCK_SIZE)` | 64 | 64 |
+| `row[ping]` | 单 token 整行 `dim` 个元素 | uint8（按 `elem_bytes`） | 2（事件0/1） | `ROUND_UP(dim*elem_bytes, BLOCK_SIZE)` | 28672 | 14336 |
+| `scaleSlot[ping]` | 1 个 FP32 scale 搭带槽 | float（32B 对齐） | 2（事件0/1） | `BLOCK_SIZE` | 64 | 64 |
+| **合计** | | | | | **29824** | **15488** |
+
+**占用汇总**（三阶段串行复用同一 UB，占用取各阶段合计的峰值；字节数）：
+
+| 存储级 | 硬件容量 | 阶段 | 占用 | 占比 |
+|---|---|---|---|---|
+| UB | 192 KB | 阶段 1（峰值，与 dtype 无关） | 148480 B | 75.5% |
+| UB | 192 KB | 阶段 2（仅 block 0，与 dtype 无关） | 2052 B | 1.0% |
+| UB | 192 KB | 阶段 3（BF16） | 29824 B | 15.2% |
+| UB | 192 KB | 阶段 3（INT8） | 15488 B | 7.9% |
+
+要点：
+
+- **UB 峰值在阶段 1**：TOKEN_TILE=4096 的路由位图 tile（131072 B，E=256）占阶段 1 的 88%，是整个 kernel 的绝对大头；阶段 1 与 dtype 无关，两条路径峰值同为 148480 B（75.5%）；
+- 阶段 1 占用 = `n_routed_experts*4 + ROUND_UP(TOKEN_TILE*n_routed_experts/8, BLOCK_SIZE) + TOKEN_TILE*4`，随 n_routed_experts 线性增长（E 为 8 的倍数时约 516E+16384 B），TOKEN_TILE=4096 不变时 UB 隐含 E≤349，当前 E=256 尚余约 1/4 容量；
+- 阶段 3 的 `row[ping]` 双缓冲按 `dim*elem_bytes` 分档：BF16 每槽 14336 B、INT8 每槽 7168 B；`scaleSlot[ping]` 是 1 个 FP32 scale 的 32B 对齐搭带槽（`BLOCK_SIZE`），仅提供 `scale_in` 时使用；
+- kernel 内 `assert(sum <= max_expert_sorted)`（`csrc/kernels/permutation.cpp` 的 `permutation2`）校验的是 GM 排序缓冲区容量而非 UB；UB 布局无显式断言，容量约束隐含在 TOKEN_TILE 与专家数的取值中。

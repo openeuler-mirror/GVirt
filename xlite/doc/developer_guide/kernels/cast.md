@@ -73,3 +73,28 @@ t2 的偏移表达式统一写为 `max_num * (bf16 ? 2 : 4)`，即按源 dtype �
 
 - 尾 tile 的 actual_len 可能小于 tile_size 且非 32B 对齐：搬运 burst 数按 `DIV_ROUND_UP(actual_len * sizeof(dtype), BLOCK_SIZE)` 向上取整（DMA 粒度 32B），UB 尾部 padding 数据无效；
 - vconv 的 repeat 数同样按 actual_len 字节数折算取整，转换与写回都基于同一长度，GM 不会多写（最后一个 tile 的写回长度按取整后的字节数计，需保证输出缓冲区长度按 32B 块预留，实际使用中 length 为张量元素数，末尾多余字节落在本 tile 与下一 tile 之间时由 block 间不重叠保证正确性）。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+`cast_kernel`（`csrc/kernels/cast.h` 的 `cast_kernel` 模板函数）为纯 AIV 算子，片上缓冲只有 UB：以 `get_imm` 偏移排布两个单份缓冲，t1 在偏移 0、t2 紧随其后，大小由编译期常量 `max_num = MAX_REPEAT_TIMES*VECTOR_MAX_BYTESIZE/sizeof(float) = 16320` 决定，布局不随运行期 length 缩放。硬件容量基准（910B/dav C220，NpuArch 2201）：UB 192KB（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`）；无 L1/L0A/L0B/L0C 占用。dtype 记法：SrcType/TarType 为源/目标元素类型，两个实例化方向互为镜像（bf16→float 与 float→bf16），下表给两列，两方向布局总占用相同。
+
+**AIV UB（容量 192KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | bf16→fp32 占用（B） | fp32→bf16 占用（B） |
+|---|---|---|---|---|---|---|
+| `t1` | `max_num` 个源元素 | bfloat16_t / float | 1（MTE2↔V，事件 ID0） | `max_num*sizeof(SrcType)` | 32640 | 65280 |
+| `t2` | `max_num` 个目标元素 | float / bfloat16_t | 1（V↔MTE3，事件 ID0） | `max_num*sizeof(TarType)` | 65280 | 32640 |
+| **合计** | | | | | **97920** | **97920** |
+
+**占用汇总**（vs 硬件容量）：
+
+| 存储级 | 硬件容量 | 占用（B） | 占比 |
+|---|---|---|---|
+| UB | 192 KB | 97920 | 49.8% |
+
+要点：
+
+- **布局是编译期静态的**：总占用恒为 `6*max_num = 97920` B（49.8%），与运行期 length 无关，短张量时空间常驻闲置；
+- 容量上限来源是单次 vconv 的 repeat 能力：255 repeat × 256B ÷ 4B = 16320 个元素（见上文 tiling 策略），`max_num` 由此而来，与 muls 的 `MAX_MULS_CALC_NUM=16320` 同源；静态占用 97920 B ≤ 192KB 恒成立，无需运行期校验；
+- t2 偏移按源 dtype 计（`max_num*(bf16 ? 2 : 4)`，见上文 UB 内存布局）：bf16→fp32 方向 t2 直达布局末端；fp32→bf16 方向 t2 仅用 32640 B、末尾留有富余；
+- 两方向均为单缓冲（t1/t2 各 1 份，事件 ID0），重叠只来自迭代间 MTE2 搬入与 MTE3 搬出的跨流水并发。

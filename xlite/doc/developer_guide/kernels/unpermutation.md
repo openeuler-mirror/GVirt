@@ -50,3 +50,34 @@ token 维多 block 并行：`for (curr_token = block_idx; curr_token < n_tokens;
 - token 级：行计算（V）写回（MTE3）之间用 `PIPE_V → PIPE_MTE3` EVENT_ID0 同步；写回完成后再归还给下一轮的 V 阶段（`csrc/kernels/unpermutation.h` 的 `unpermutation` 模板，关键字 `set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0)`、`copy_ubuf_to_gm(output + curr_token`），配合初始 `set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0)`（`csrc/kernels/unpermutation.h` 的 `unpermutation` 模板，关键字 `set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0)`）形成跨 token 的读写重叠；
 - 权重换精度路径额外用 MTE2→V、V→S 的 EVENT_ID1 同步（`csrc/kernels/unpermutation.h` 的 `unpermutation` 模板，关键字 `set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1)`、`set_flag(PIPE_V, PIPE_S, EVENT_ID1)`）；
 - kernel 末尾 `wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0)` + `pipe_barrier(PIPE_ALL)` 收尾（`csrc/kernels/unpermutation.h` 的 `unpermutation` 模板，关键字 `pipe_barrier(PIPE_ALL)`）。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+`unpermutation` 模板（`csrc/kernels/unpermutation.h` 的 `unpermutation`）在函数入口用 `get_imm` 手工排布 UB，槽位按 `VECTOR_MAX_BYTESIZE`（256B）对齐推进：先 5 个 dim 级行缓冲（`row`/`rowf32`/`row1`/`row2`/`row3`），再位图行 `routing`，bfloat16 变体额外追加权重换精度缓冲 `w_float_addr`/`w_bf16_addr`；float 变体的权重直接从 GM 标量读取，无后两个槽位。硬件容量基准（910B/dav C220，NpuArch 2201）：AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），各 AIV block 各持一份独立 UB、布局相同。dtype 记法：数据通路（in/out/全部行缓冲）两条变体均按 bfloat16（2B）硬编码，`Dtype=bfloat16_t` 与 `Dtype=float` 的差异仅在权重读取路径（bf16 权重整行搬入并 `vconv_bf162f32` 升 FP32 vs GM 标量直读）。典型配置（两变体同取）：dim=7168、n_routed_experts=256（DSV3 系），占用差异仅来自权重槽位。
+
+**AIV UB（预算 `UB_SIZE=192KB`）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | bfloat16 变体占用(B) | float 变体占用(B) |
+|---|---|---|---|---|---|---|
+| `row` | `dim`（输入行） | bfloat16 | 1 | `ROUND_UP(dim*2, VECTOR_MAX_BYTESIZE)` | 14336 | 14336 |
+| `rowf32` | `dim`（升精度） | float | 1 | `ROUND_UP(dim*4, VECTOR_MAX_BYTESIZE)` | 28672 | 28672 |
+| `row1` | `dim`（乘权重） | float | 1 | `ROUND_UP(dim*4, VECTOR_MAX_BYTESIZE)` | 28672 | 28672 |
+| `row2` | `dim`（FP32 累加器） | float | 1 | `ROUND_UP(dim*4, VECTOR_MAX_BYTESIZE)` | 28672 | 28672 |
+| `row3` | `dim`（BF16 结果） | bfloat16 | 1 | `ROUND_UP(dim*2, VECTOR_MAX_BYTESIZE)` | 14336 | 14336 |
+| `routing` | 单 token 位图行（`n_routed_experts/8` B） | uint8 位图 | 1 | bf16 变体槽位 `ROUND_UP(n_routed_experts, VECTOR_MAX_BYTESIZE)`；float 变体为末槽实际字节 | 256 | 32 |
+| `w_float_addr` | `n_routed_experts` 个 FP32 权重 | float | 1 | `ROUND_UP(n_routed_experts*4, VECTOR_MAX_BYTESIZE)` | 1024 | —（无此槽） |
+| `w_bf16_addr` | `n_routed_experts` 个 bf16 权重（末槽） | bfloat16 | 1 | `n_routed_experts*2` | 512 | —（无此槽） |
+| **合计** | | | | | **116480** | **114720** |
+
+**占用汇总**（占用 vs 硬件容量；字节数）：
+
+| 存储级 | 硬件容量 | bfloat16 变体占用 | 占比 | float 变体占用 | 占比 |
+|---|---|---|---|---|---|
+| UB | 192 KB | 116480 B | 59.2% | 114720 B | 58.3% |
+
+要点：
+
+- **大头是 5 个 dim 级行缓冲**：2 个 BF16（各 14336 B）+ 3 个 FP32（各 28672 B）共 114688 B，占 bfloat16 变体占用的 98%，随 dim 线性增长（dim=7168 时约 59.2%；E=256、256B 对齐下隐含 dim 上界约 12K）；
+- 两变体布局仅差权重相关槽位 1760 B（`routing` 槽在 bf16 变体按 256B 对齐取 256 B + `w_float_addr` 1024 B + `w_bf16_addr` 512 B；float 变体 `routing` 为末槽按实际 32 B 计、无权重双槽）；
+- 无乒乓、无运行期容量断言：行缓冲单份串行复用，事件标志只做行内专家迭代的 MTE2/V 重叠（见上文「流水线同步」）；
+- `routing` 实际数据仅 `n_routed_experts/8` = 32 B，bfloat16 变体中被后继槽位的 256B 对齐推到整个槽位（见上文「UB 内存布局」）。

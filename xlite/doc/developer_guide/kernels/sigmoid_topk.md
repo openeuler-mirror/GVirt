@@ -79,3 +79,43 @@ dtype 分派见 `csrc/op.cpp` 的 `XliteOpSigmoidTopK`(dtype 分派分支,indice
 `Init`(`SigmoidTopK::Init`)按 `nRoutedExperts` 上界(`pad = ROUND_UP(N,64)*4` 字节)分配:`scoresIn`/`biasIn`/`routingMapOut`/`weightsOut`/`calc_unbiased`/`calc`/`reduceTmp` 各一份 pad;**被排序触碰的** `indicesIn`/`scores`/`indices` 用 `idxPad = max(pad, ROUND_UP(nSortScores,64)*4)`(`SigmoidTopK::Init` 内关键字 `idxPad`),`sortTmp`/`sortMrgTmp` 用 `2*idxPad`(对应上文 SelectTopK 的 128 候选下限);`groupScores`/`groupIndices`/`weightsTopK`/`indicesTopK` 各一个 256B 向量块;bf16 额外 `scoresInTmp`/`weightsOutTmp`。对 `nScores >= 128` 的所有配置 `idxPad == pad`,布局与历史版本逐字节一致。
 
 同步轨道:V↔MTE2 EVENT_ID0(得分搬入)、MTE3↔V EVENT_ID0/1(位图/权重搬出)、V↔S EVENT_ID0(排序结果供标量读,如组 top2、被选组拼接)。`CalcSigmoid` 中提前释放 MTE2 轨道实现 token 间搬入/计算重叠是本算子流水的一个特点(`SigmoidTopK::CalcSigmoid` 内 `set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0)` 提前释放段)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`Init`(`csrc/kernels/sigmoid_topk.h` 的 `SigmoidTopK::Init`)自偏移 0 起在 UB 上顺序累进排布:普通行缓冲以 `pad = ROUND_UP(numRoutedExperts, VECTOR_MAX_NUM_OF_FP32)*4` 定尺,被排序触碰的 `indicesIn`/`scores`/`indices` 及 `sortTmp`/`sortMrgTmp` 按 `idxPad = MAX(pad, ROUND_UP(nSortScores,64)*4)` 定尺;计算与排序全程 fp32,bf16 仅多两个 Dtype 中转槽。硬件容量基准(910B/dav C220,NpuArch 2201):UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。dtype 记法:`Dtype` 为 scores/weightsMap 元素类型(fp32/bf16),`padDtype = ROUND_UP(numRoutedExperts, VECTOR_MAX_BYTESIZE/sizeof(Dtype))*sizeof(Dtype)`;`bias` 恒为 fp32(`biasIn` 与 dtype 路径无关),`numTokens` 不参与定尺。典型配置:numRoutedExperts=256、nGroup=8、nTopkGroup=4、topK=8、带 bias(DeepSeek-V3 门控)——`nScores = nTopkGroup*nExpertsPerGroup = 128` 恰触 vmrgsort4 下限、`idxPad == pad`;两条 dtype 路径同取该配置,占用差异仅来自 bf16 中转槽。
+
+**AIV UB(预算 `UB_SIZE=192KB`,每 subblock 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | fp32 占用(B) | bf16 占用(B) |
+|---|---|---|---|---|---|---|
+| `scoresIn` | 256 float | float | 1 | `pad` | 1024 | 1024 |
+| `biasIn` | 256 float | float | 1 | `pad` | 1024 | 1024 |
+| `indicesIn` | 256 uint32 | uint32 | 1 | `idxPad` | 1024 | 1024 |
+| `routingMapOut` | 8 uint32(位图,按 pad 定尺) | uint32 | 1 | `pad` | 1024 | 1024 |
+| `weightsOut` | 256 float | float | 1 | `pad` | 1024 | 1024 |
+| `calc_unbiased` | 256 float | float | 1 | `pad` | 1024 | 1024 |
+| `calc` | 256 float | float | 1 | `pad` | 1024 | 1024 |
+| `scores` | 128 float(nScores 候选区) | float | 1 | `idxPad` | 1024 | 1024 |
+| `indices` | 128 uint32(nScores 候选区) | uint32 | 1 | `idxPad` | 1024 | 1024 |
+| `groupScores` | 64 float 槽位(8 个组得分) | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 | 256 |
+| `groupIndices` | 64 uint32 槽位(4 个被选组号) | uint32 | 1 | `VECTOR_MAX_BYTESIZE` | 256 | 256 |
+| `reduceTmp` | 256 float | float | 1 | `pad` | 1024 | 1024 |
+| `sortTmp` | 512 float(排序工作区) | float | 1 | `2*idxPad` | 2048 | 2048 |
+| `sortMrgTmp` | 512 float(排序工作区) | float | 1 | `2*idxPad` | 2048 | 2048 |
+| `weightsTopK` | 64 float 槽位(topK=8 载荷) | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 | 256 |
+| `indicesTopK` | 64 uint32 槽位(topK=8 载荷;fp32 路径为末尾槽,仅 bf16 路径其后还有 `scoresInTmp`/`weightsOutTmp`) | uint32 | 1 | `pad` | 1024 | 1024 |
+| `scoresInTmp` | 256 Dtype(仅 bf16) | Dtype | 1 | `padDtype` | — | 512 |
+| `weightsOutTmp` | 256 Dtype(仅 bf16,末尾槽) | Dtype | 1 | `padDtype` | — | 512 |
+| **合计** | | | | | **16128** | **17152** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | fp32 路径占用 | 占比 | bf16 路径占用 | 占比 |
+|---|---|---|---|---|---|
+| UB(每 AIV subblock) | 192 KB | 16128 B | 8.2% | 17152 B | 8.7% |
+
+要点:
+
+- **8 个 `pad` 定尺的行缓冲是占用主体**(合计 8192 B,占 fp32 路径的 51%),`sortTmp`/`sortMrgTmp` 各 2048 B 次之(合计 25%);分组路径特有的 `groupScores`/`groupIndices` 与 `weightsTopK` 三个 256B 向量块占比极小;
+- DeepSeek-V3 配置下 `nScores=128` 恰等于 vmrgsort4 归并下限,`idxPad == pad`;`nGroup==1` 且专家数 <128(如 GLM-4.7-Flash 的 64)时 `idxPad` 改由补齐宽度(512)接管定尺;
+- 无 kernel 断言、无 host 容量校验(`csrc/op.cpp` 的 `XliteOpSigmoidTopK` 只校验 dtype/BIT1),布局随 `numRoutedExperts` 线性缩放,现实专家数下占用 <9%,容量风险不存在。

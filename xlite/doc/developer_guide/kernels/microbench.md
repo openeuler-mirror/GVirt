@@ -237,6 +237,101 @@ sqrt 不在依赖链上，差分量是“mul 链上再加一条超越指令”�
   可见），数值自成基线；切换构建或增删 op 后须重新定标，不得与旧 per-TU 数或跨构建
   互比。
 
+### 3.8 片上缓冲分配与占用汇总
+
+五族实验按档位使用片上缓冲，来源有二：实验 3/4 的 AIV 档在 body 宏内以
+`__ubuf__` 指针直接钉在固定 UB 偏移上（`csrc/kernels/microbench.h` 的
+`BENCH_MTE_READ_BODY` / `BENCH_MTE_COPY_BODY` / `BENCH_VEC_BIN_BODY` /
+`BENCH_VEC_CARRIER_BODY`），实验 5 的 Cube 档复用 `csrc/kernels/matmul.h` 的
+`Matmul::Init`（`Matmul<half, float, half>`，见 3.7）按 tile 形状排布 L1/L0A/L0B/L0C。
+硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置）：L0A 64KB、L0B 64KB、
+L1 512KB，L0C 总容量 256KB 为 CO1/CO2 两区之和，mmad 累加缓冲（`TPosition::CO1`）
+可用的 CO1 区为 **128KB**；AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h`
+的 `UB_SIZE`，4KB×48 bank），每 AIV block 一份。
+
+**空档与标量档无片上缓冲**：实验 1（`empty_{aiv,aic,mix}`）与实验 2
+（`scalar_<op>_{aiv,aic}` 及其 timed 孪生）不分配任何 UB/L1/L0——`acc`/`x` 与计时槽
+`benchTicks[8]`（`BENCH_TICKS_DECL`）全部驻留寄存器，结果与 ticks 以标量 store 直写
+GM（UB 搬运 intrinsic 在 cube 通道不可用，见 3.3/3.7），MIX 档仅 EMPTY、同样无缓冲。
+
+**实验 3（MTE 档，AIV UB，预算 192KB；四变体互斥，占用与工作集 sz0 无关）**
+
+| 变体 | 缓冲（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|------|--------------|-------|----------|----------|-----------|
+| `mte_read_aiv` | `ring[2]`（UB 偏移 0 / `BENCH_MTE_TILE`） | uint8 | 2（双 tile 轮转，逐段无同步） | `BENCH_MTE_TILE=UB_SIZE/2` | 196608 |
+| `mte_write_aiv` | `pat`（UB 偏移 0） | uint8 | 1（计时段外填充一次） | `MIN(sz0, BENCH_MTE_TILE)`，满档 98304 | 98304 |
+| `mte_copy_aiv` | `buf[2]`（UB 偏移 0 / `BENCH_MTE_TILE`） | uint8 | 2（MTE2↔MTE3，flag 事件0/1） | 同 `ring` | 196608 |
+| `mte_chase_aiv` | `ptr`（UB 偏移 0） | uint8 | 1 | 64（每步一个 64B 块） | 64 |
+| **峰值占用（mte_read / mte_copy）** | | | | | **196608** |
+
+**实验 4（VEC 档，AIV UB；典型档位取最大 elems——4B 变体 16384、f16 变体 32768，bytes 同为 65536）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 二元链占用（B） | 载体占用（B） |
+|------|--------------|-------|----------|----------|------------------|---------------|
+| `dst` | elems 个 T（65536B，UB 偏移 0） | float / int32_t / half | 1 | `elems*sizeof(T)` | 65536 | 65536 |
+| `cst` | elems 个 T（65536B，UB 偏移 bytes） | 同上 | 1 | 同上 | 65536 | 65536 |
+| `tmp` | 255 repeat × 256B（UB 偏移 2*bytes） | float | 1（仅 sqrt_f32 / exp_f32） | `BENCH_VEC_TMP_BYTES=255*256` | —（不分配） | 65280 |
+| **合计** | | | | | **131072** | **196352** |
+
+**实验 5（Cube 档，AIC，复用 `Matmul<half,float,half>`；典型档位取缺省五档中 L1 最深的 (m0,n0,k0)=(128,128,256)，hasBias=hasDeqScale=false）**
+
+AIC L1（A1/B1，容量 512KB）：
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|------|---------------|-------|----------|----------|------------|
+| `l1aBuf` | `(m0, kDtileSize=2*k0=512)`（K 方向预取窗） | half | 2（事件0/1） | `m0*kDtileSize*sizeof(half)` | 262144 |
+| `l1bBuf` | `(n0, k0)` | half | 2（事件2/3） | `n0*k0*sizeof(half)` | 131072 |
+| **合计** | | | | | **393216** |
+
+AIC L0A（A2，容量 64KB）：
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|------|---------------|-------|----------|----------|------------|
+| `l0aBuf` | `(m0, kQtileSize=k0/4=64)` | half | 2（事件0/1） | `m0*kQtileSize*sizeof(half)` | 32768 |
+| **合计** | | | | | **32768** |
+
+AIC L0B（B2，容量 64KB）：
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|------|---------------|-------|----------|----------|------------|
+| `l0bBuf` | `(n0, kQtileSize=64)` | half | 2（事件0/1） | `n0*kQtileSize*sizeof(half)` | 32768 |
+| **合计** | | | | | **32768** |
+
+AIC L0C（CO1 区，容量 128KB；总容量 256KB 含 CO2）：
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|------|---------------|-------|----------|----------|------------|
+| `l0cBuf` | `(m0, n0)` | float | 1（事件0） | `4*m0*n0`（fp32 累加） | 65536 |
+| **合计** | | | | | **65536** |
+
+**占用汇总**（各档位峰值 vs 硬件容量；字节数）：
+
+| 存储级 | 硬件容量 | 档位 | 占用 | 占比 |
+|--------|----------|------|------|------|
+| AIV UB | 192 KB | MTE read / copy | 196608 B | 100% |
+| AIV UB | 192 KB | MTE write / chase | 98304 B / 64 B | 50% / <0.1% |
+| AIV UB | 192 KB | VEC 最大档（二元链 / 载体） | 131072 B / 196352 B | 66.7% / 99.9% |
+| AIC L1 | 512 KB | Cube (128,128,256) | 393216 B | 75% |
+| AIC L0A | 64 KB | 同上 | 32768 B | 50% |
+| AIC L0B | 64 KB | 同上 | 32768 B | 50% |
+| AIC L0C（CO1） | 128 KB | 同上 | 65536 B | 50% |
+
+要点：
+
+- **两族 AIV 档几乎钉满 UB**：`BENCH_MTE_TILE = UB_SIZE/2` 让 read/copy 的双 tile
+  乒乓恰好 2×96KB=192KB 顶满 UB；VEC 的 host 预算 `2*elems*sz + BENCH_VEC_TMP_BYTES
+  (65280) ≤ UB_SIZE`（`csrc/op.cpp` 的 `XliteOpBenchVec`）即由此而来——4B 上限
+  16384 elems、2B 上限 32768，两者 bytes 相同（65536），最大档仅余 256B；
+- Cube 档占用随 tile 参数线性走：`L1=4*k0*(2*m0+n0)`、`L0A=m0*k0`、`L0B=n0*k0`、
+  `L0C=4*m0*n0`（host 校验 L0A/L0B/L0C≤64KB、L1≤512KB，见 2.5）；缺省五档中
+  (128,128,256) 与 (64,256,256) 的 L1 最深（393216B，75%），m0=n0=128 的 tile 把
+  L0C 恰好顶到 64KB 校验上限——按 CO1 128KB 硬件容量仅 50%，host 校验口径严于硬件；
+- 空/标量/MIX 档无任何片上缓冲（见上文），全档位里只有 MTE/VEC/Cube 三族占 UB 或
+  L1/L0；
+- dtype 对 AIV 档占用无影响：MTE 工作集恒为字节 tile；VEC 默认档位按 repeat 阶梯
+  （1/4/16/64/256）×每 repeat 元素数取 elems，2B/4B 折算后 bytes 相同；Cube 档固定
+  half 输入 / fp32 累加 / half 输出。
+
 ## 4. 实测经验
 
 **测量有效性**

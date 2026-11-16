@@ -66,3 +66,32 @@ host 要求 `in.dtype` 为 FP16/BF16 且 `out.dtype` 为同 dtype 或 FP32(`csrc
 ### host 侧要点
 
 `XliteOpQkRmsNorm`(`csrc/op.cpp` 的 `XliteOpQkRmsNorm`):`useNorm` 时 qOut/kOut 都指向 `out.ptr`、variance 张量作为参数传入;`!useNorm` 时 qOut/kOut 改指向各自 variance 张量、variance 参数传 null,从而用同一个 kernel 签名表达两个阶段。qkNormFull 的完整三步编排(两次 variance-only + 一次 AllReduce + 一次 apply)见 [csrc/model.cpp](../../../csrc/model.cpp) 的 `XModel::ForwardAttnMHA` 中 `qkNormFull` 三步编排。
+
+### 片上缓冲分配与占用汇总
+
+`qk_rms_norm` 自身不新排版上缓冲:Q/K 两段背靠背调用 `norm<Dtype>`,每次调用在 `csrc/kernels/norm.h` 的 `norm<Dtype>` 内部从 UB 偏移 0 独立重排同一套布局(排布细节与容量要点见 [norm.md](norm.md) 的同名小节),两段空间先后复用、不叠加,峰值取 total_dim 较大的一段。硬件容量基准(910B/dav C220):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE=196608`);fp16/bf16 两个实例均为 2B,占用不分 dtype。典型配置取 MiniMax-M2(`tests/models/minimax_m2.py`,TP=1)的 qkNormFull apply 阶段:headDim=128、qHeads=48、kHeads=8,Q 段 total_dim=headDim×qHeads=6144、K 段 headDim×kHeads=1024,均带 variance 输入(useNorm=true)。
+
+**UB(经 `norm<Dtype>` 排布,预算 `UB_SIZE=192KB`)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | Q 段(6144)占用(B) | K 段(1024)占用(B) |
+|---|---|---|---|---|---|---|
+| `in` | `(total_dim,)` | Dtype | 2(事件0/1) | `ROUND_UP(total_dim*sizeof(Dtype),32)` | 24576 | 4096 |
+| `out` | `(total_dim,)` | Dtype | 2(事件0/1) | 同 `in`(useNorm 时分配) | 24576 | 4096 |
+| `in_variance_float` | `(total_dim,)` | float | 2(事件0/1) | `ROUND_UP(total_dim*4,32)`(apply 阶段 variance 输入时分配) | 49152 | 8192 |
+| `calc0` | `(total_dim,)` | float | 1 | `ROUND_UP(total_dim*4,32)` | 24576 | 4096 |
+| `calc1` | `(total_dim,)` | float | 1 | 同上 | 24576 | 4096 |
+| `weight_calc` | `(total_dim,)` | float | 1(加载一次) | 同上 | 24576 | 4096 |
+| `bias_calc` | `(total_dim,)` | float | 1(加载一次) | 同上 | 24576 | 4096 |
+| **合计** | | | | | **196608** | **32768** |
+
+**占用汇总**(各段占用 vs 硬件容量,峰值取较大段;字节数):
+
+| 存储级 | 硬件容量 | Q 段占用(峰值) | 占比 | K 段占用 | 占比 |
+|---|---|---|---|---|---|
+| UB | 192 KB | 196608 B | 100% | 32768 B | 16.7% |
+
+要点:
+
+- **峰值由 Q 段决定且恰好顶满**:apply 阶段(带 variance 输入)占用约 32×total_dim,headDim×qHeads=6144 时合计 196608 B、占满 UB——这是 qkNormFull apply 的段宽上限,再大(如 64 头×128=8192)Q 段需 262144 B,被 `norm<Dtype>` 的 `assert(off <= UB_SIZE)` 拒绝;host 侧(`csrc/op.cpp` 的 `XliteOpQkRmsNorm`)不限段宽,容量来源即该断言。
+- **两段空间不叠加**:coreOffset 接力只改变行分配起点,Q/K 两段先后各自从 0 重排同一 UB;K 段(total_dim=1024)仅 32768 B(16.7%),峰值恒由 Q 段决定。
+- plain qkNorm(无 variance 输入)比 apply 少 `in_variance_float` 的 49152 B:同 6144 段宽时 Q 段仅 147456 B(75%),显著低于 apply 阶段。

@@ -111,3 +111,38 @@ inout、kCache、vCache 三者必须同为 `float16_t` 或 `bfloat16_t`;cossin �
 ### 测试参考
 
 [tests/kernels/rope_and_cache.py](../../../tests/kernels/rope_and_cache.py):以 `use_fp32` 开关分别覆盖 FP32 cossin(默认)与 model-dtype cossin(已废弃)两条路径,fp16/bf16 × (head_dim, rot_dim) ∈ {(64,64), (128,128), (128,64)},batch 8 × seq 10,与 torch 的 NeoX 风格 `apply_rotary_emb` + Q 缩放 + cache 写入对比;另含 MroPE 三路位置交织用例、dim-0 pitched(非连续)cache 回归用例(K/V cache 为 `buf[::2]` 视图,dim-0 stride 为连续 pitch 的两倍,验证按 `slot/block_size*key_cache_stride + slot%block_size*kv_size` 的 stride 寻址),以及 2D MroPE position 非连续/超宽回归用例(pitched 列切片 `[3, 2N][:, :N]` 与列数超出 num_tokens 的 `[3, N+64]` 连续缓冲,验证按 dim-0 跨度定位 h/w 行)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+[csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `rope_and_cache` 在 kernel 主体入口处以标量偏移累进方式运行期排布全部 UB 缓冲(无独立 Init 成员缓冲):Q/K/V 与 cos/sin 暂存按 `PINGPONG_BUF_NUM=2` 组乒乓(事件 0/1),fp32 工作区随后,剩余空间整段留作 position/slot_mapping 分批暂存区,批大小 `iter_posslot_num` 由剩余空间自适应。本算子为纯向量核,仅使用 UB,硬件容量基准(910B/dav C220,NpuArch 2201):UB 192KB([csrc/kernels/kernel_macro.h](../../../csrc/kernels/kernel_macro.h) 的 `UB_SIZE`)。dtype 记法:`Dtype` 为 inout 模板实参(fp16/bf16,均 2B),UB 布局与 dtype 无关,不按 dtype 分列;模板布尔 `COSSIN_FP32` 的 true 分支(默认,FP32 cossin)与 legacy bf16 往返路径共用同一布局(条件 `COSSIN_FP32 || is_bf16`),legacy fp16 走更小的直接计算布局(见要点)。典型配置取 MroPE 回归用例的 Qwen3-VL-8B 形状([tests/kernels/rope_and_cache.py](../../../tests/kernels/rope_and_cache.py)):numHeads=8、numKvHeads=2、headDim=rotDim=128、blockSize=128、bf16;两列分别为标准单路 RoPE(pos_dim=1)与 MroPE 三路(pos_dim=3,即 Qwen3-VL-8B 实际形态),占用差异仅来自位置模式。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 单路占用(B) | MroPE 占用(B) |
+| --- | --- | --- | --- | --- | --- | --- |
+| `query_dtype_ubuf_addr`(Q 暂存) | (numHeads, headDim) = (8, 128) | Dtype | 2(事件0/1) | `numHeads*headDim*sizeof(Dtype)` = 2048 B | 4096 | 4096 |
+| `key_dtype_ubuf_addr`(K 暂存) | (numKvHeads, headDim) = (2, 128) | Dtype | 2(事件0/1) | `numKvHeads*headDim*sizeof(Dtype)` = 512 B | 1024 | 1024 |
+| `value_dtype_ubuf_addr`(V 中继) | (2, 128) | Dtype | 2(事件0/1) | 同 key | 1024 | 1024 |
+| `cos_dtype_ubuf_addr`/`sin_dtype_ubuf_addr`(cos/sin Dtype 暂存) | rotDim = 128 | Dtype | 各 2(事件0/1) | `ROUND_UP(rotDim*sizeof(Dtype),32B)` = 256 B | 1024 | 1024 |
+| `cos_mrope_h_ubuf_addr` 等 h/w 四组 Dtype 暂存(仅 MroPE) | rotDim | Dtype | 各 2(事件0/1) | 同上 | — | 2048 |
+| `query_calc_dtype_ubuf_addr`(bf16 往返 tmp) | MAX(q,kv) 宽 = 1024 | Dtype | 1 | `MAX(q_bytesize,kv_bytesize)` = 2048 B | 2048 | 2048 |
+| `query_fp32_ubuf_addr`(Q fp32) | (8, 128) | float | 2(事件0/1) | `ROUND_UP(q_size*4,32B)` = 4096 B | 8192 | 8192 |
+| `key_fp32_ubuf_addr`(K fp32) | (2, 128) | float | 2(事件0/1) | `ROUND_UP(kv_size*4,32B)` = 1024 B | 2048 | 2048 |
+| `cos_fp32_ubuf_addr`/`sin_fp32_ubuf_addr`(cos/sin fp32) | rotDim | float | 各 2(事件0/1) | `ROUND_UP(rotDim*4,32B)` = 512 B | 2048 | 2048 |
+| `cos_fp32_mrope_h_ubuf_addr` 等 h/w 四组 fp32(仅 MroPE) | rotDim | float | 各 2(事件0/1) | 同上 | — | 4096 |
+| `query_calc_fp32_ubuf`(Q 乘积工作区) | (8, 128) | float | 1 | `ROUND_UP(q_size*4,32B)` = 4096 B | 4096 | 4096 |
+| `key_calc_fp32_ubuf`(K 乘积工作区) | (2, 128) | float | 1 | `ROUND_UP(kv_size*4,32B)` = 1024 B | 1024 | 1024 |
+| `pos_int_ubuf_addr0`(position 批暂存,pos_dim 行) | 14160/5848 个 int64 × pos_dim 行 | int64 | 1 | `ROUND_UP(iter_posslot_num*8,32B)` | 113280 | 140352 |
+| `slot_int_ubuf_addr0`(slot_mapping 批暂存) | 14160/5848 个 int32 | int32 | 1 | `ROUND_UP(iter_posslot_num*4,32B)` | 56640 | 23392 |
+| **合计** | | | | | **196544** | **196512** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 标准单路占用 | 占比 | MroPE 三路占用 | 占比 |
+| --- | --- | --- | --- | --- | --- |
+| UB(每 AIV) | 192 KB | 196544 B | 99.97% | 196512 B | 99.95% |
+
+要点:
+
+- **尾部 params 暂存区是 UB 的绝对大头**:旋转固定区仅 26624 B(单路)/32768 B(MroPE),其余 169984/163840 B 全部给 position/slot_mapping 分批暂存,批大小按剩余空间自适应(单路 14160、MroPE 5848 个 token/批),总占用恒贴近 192KB(99.9%+);
+- 固定区内的大头是 fp32 域旋转工作区(`query_fp32_ubuf_addr`/`key_fp32_ubuf_addr` 乒乓与两个乘积工作区共 15360 B);FP32 路径下 Dtype cos/sin 暂存槽(单路 4 槽、MroPE 12 槽)与 bf16 往返 tmp 槽占位但空闲,仅 legacy model-dtype 路径使用;
+- **容量来源是 kernel 内断言**([csrc/kernels/rope_and_cache.h](../../../csrc/kernels/rope_and_cache.h) 的 `rope_and_cache`,关键字 `assert(params_start <= UB_SIZE)` 与 `assert(iter_posslot_num > 0)`),仅 debug 构建生效——host 侧不校验头数×headDim 的组合上界,固定区超限时先触发该断言;
+- 已废弃的 legacy fp16 直接计算路径布局更小(无 fp32 工作区,固定区单路 11264 B/MroPE 13312 B,尾区相应扩大),总占用同为 196544 B;legacy bf16 与 FP32 路径布局完全相同。

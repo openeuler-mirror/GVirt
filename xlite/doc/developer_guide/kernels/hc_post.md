@@ -69,3 +69,36 @@ term2 的总向量操作量为 `K*K` 次 `vaxpy`(每 dTile),K=4 时 16 次,远�
 - `EVENT_ID5`:标量表(post/comb)MTE2 → 标量核读取,每个 token 只在第一个 dTile(`d == 0`)等待一次(`csrc/kernels/hc_post.h` 的 `hc_post`,关键字 `if (d == 0)` 内的 `wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID5)`)。
 
 IO 槽 `curr` 在每个 dTile 末尾翻转(`curr = 1 - curr`,`csrc/kernels/hc_post.h` 的 `hc_post`,关键字 `curr = 1 - curr`),实现载入与写出的双缓冲重叠。kernel 末尾按对称顺序 wait 掉所有已 set 的事件(`csrc/kernels/hc_post.h` 的 `hc_post`,关键字 `wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3)` 收尾段)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`hc_post` 为单 AIV 向量核 kernel,片上缓冲全部在 UB 上:`csrc/kernels/hc_post.h` 的 `hc_post`(关键字 `postU` 起的 UB 分配段)自偏移 0 顺序累进排布,各槽按 `UB_BUF_ALIGN_SIZE`(32B)向上取整,末尾 `assert(off <= UB_SIZE)` 防溢出;`dTile = min(hidden, 2048)` 使 hidden 超过 2048 时按 tile 流式处理、占用不再随 hidden 增长。硬件容量基准(910B/dav C220,NpuArch 2201):UB 取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV block 各持一份独立 UB、布局相同。
+
+dtype 记法(模板实参 `Dtype`,为 x/residual/y 的类型):唯一实例化 `hc_post_bfloat16_t`(`csrc/kernels/hc_post_bfloat16_t.cpp`)固定 2B,门控 post/comb 恒为 FP32,故单占用列。典型模型配置取 DeepSeek-V4(`csrc/model.cpp` 的 `XModel::ForwardHcPost` 调用 `_c.hcMult`/`_c.hiddenSize`):hcMult K=4、hidden=4096(dim)→ dTile=2048、BF16、门控 FP32。
+
+**AIV UB(容量 192KB,每 block 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `postU` | K 个 float(post 门表,token 级) | float | 1 | `ROUND_UP(K*4,32)` = 32 B | 32 |
+| `combU` | `K*K` 个 float(comb 矩阵,token 级) | float | 1 | `ROUND_UP(K*K*4,32)` = 64 B | 64 |
+| `residualFp32` | `(K, dTile)` = (4, 2048) 残差 fp32 副本 | float | 1 | `ROUND_UP(K*dTile*4,32)` = 32768 B | 32768 |
+| `xFp32` | `(dTile,)` x 的 fp32 副本 | float | 1 | `ROUND_UP(dTile*4,32)` = 8192 B | 8192 |
+| `outFp32` | `(dTile,)` 输出 fp32 工作区 | float | 1 | `ROUND_UP(dTile*4,32)` = 8192 B | 8192 |
+| `inXDtype_0/1` | `(dTile,)` x 输入槽 | Dtype(bf16) | 2(事件 EVENT_ID0/1,MTE2 载入与 V 计算交接) | `ROUND_UP(dTile*sizeof(Dtype),32)` = 4096 B | 8192 |
+| `inResidDtype_0/1` | `(K, dTile)` 残差输入槽 | Dtype(bf16) | 2(事件 EVENT_ID0/1) | `ROUND_UP(K*dTile*sizeof(Dtype),32)` = 16384 B | 32768 |
+| `outDtype_0/1` | `(dTile,)` 输出槽 | Dtype(bf16) | 2(事件 EVENT_ID2/3,V 转换与 MTE3 写出交接) | `ROUND_UP(dTile*sizeof(Dtype),32)` = 4096 B | 8192 |
+| **合计** | | | | | **98400** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用(B) | 占比 |
+|---|---|---|---|
+| UB(每 AIV block) | 192 KB | 98400 | 50.0% |
+
+要点:
+
+- UB 是唯一使用的片上存储级,典型配置下占 50.0%(余量 98208 B);K=4、BF16 下总占用 = `48*dTile + 96`(B),随 `dTile = min(hidden, 2048)` 封顶,hidden 继续增大不增占用;
+- `residualFp32`(32768 B)与 `inResidDtype_0/1` 双缓冲(合计 32768 B)并列大头,各占总占用三分之一——都是 `[K, dTile]` 整块残差的 fp32/bf16 形态;
+- `dTile` 上限 2048 正是 UB 容量的产物:代码注释 `dTile<=2048: dual slot + residualFp32[H*dTile] (the big one) fits 192KB UB`(`csrc/kernels/hc_post.h` 的 `hc_post`)——若取 dTile=4096,总占用 196704 B 将以 96 B 之差越过 `UB_SIZE`,2048 是能装下的最大 2 的幂;
+- 容量来源是 kernel 内的 `assert(off <= UB_SIZE)`(`csrc/kernels/hc_post.h` 的 `hc_post`),与 `dTile` 的编译期钳制共同保证;hidden < 2048 时占用随 hidden 线性缩小(decode 单 token 等小包场景余量极大)。

@@ -53,3 +53,37 @@ Python 调用方式（`tests/kernels/experts_counts_sum.py` 中 `experts_counts_
 ### 约束
 
 整张计数矩阵须能放进单个 block 的 UB（Phase 2 一次性搬入 `ep_size * n_routed_experts * 4` 字节）；测试覆盖 ep_size ∈ {8,16}、n_routed_experts ∈ {160,256}（`tests/kernels/experts_counts_sum.py` 测试参数段，关键字 `for n_routed_experts in [160, 256]`、`for ep_size in [8, 16]`），即最大 1KB×16 行量级。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`experts_counts_sum_kernel`(`csrc/kernels/experts_counts_sum.cpp`)无 Init/InitBuffer,两个执行阶段各自从 UB 偏移 0 起就地排布两段缓冲、段间按 `VECTOR_MAX_BYTESIZE`(256B)对齐;Phase 1 与 Phase 2 布局先后复用同一 UB 区(程序顺序执行,两阶段的 `off` 各自从 0 重新起排),单 block 峰值取两布局之大者。硬件容量基准(910B/dav C220):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)。dtype 记法:全路径 uint32(int32 计数矩阵),无 dtype 分化,单占用列。典型模型配置:GLM-5.x 类 MoE,ep_size=16、n_routed_experts=160(每 EP 组 10 个专家)。
+
+**AIV UB(容量 192KB;Phase 1 / Phase 2 两布局先后复用同一区域)**
+
+Phase 1 布局(持有 DP 行的每个 block):
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `c_row` | n_routed_experts | uint32 | 1(串行,事件 EVENT_ID0) | `ROUND_UP(n_routed_experts*4, VECTOR_MAX_BYTESIZE)` B | 768 |
+| `ep_counts_row` | ep_size | uint32 | 1(串行,事件 EVENT_ID0) | `ROUND_UP(ep_size*4, VECTOR_MAX_BYTESIZE)` B | 256 |
+| **合计** | | | | | **1024** |
+
+Phase 2 布局(单 block(phase2Block)独占执行):
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `c` | (ep_size, n_routed_experts) | uint32 | 1(串行,事件 EVENT_ID0) | `ROUND_UP(ep_size*n_routed_experts*4, VECTOR_MAX_BYTESIZE)` B | 10240 |
+| `experts_counts` | n_routed_experts | uint32 | 1(串行,事件 EVENT_ID0) | `ROUND_UP(n_routed_experts*4, VECTOR_MAX_BYTESIZE)` B | 768 |
+| **合计** | | | | | **11008** |
+
+**占用汇总**(单 block 峰值 = max(Phase 1, Phase 2);字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB | 192 KB | 11008 B(Phase 2 布局) | 5.6% |
+
+要点:
+
+- **Phase 2 的 `c` 是占用大头**:整张计数矩阵一次性搬入(10240 B),占单 block 峰值的 93%;Phase 1 布局合计仅 1024 B,且两布局先后复用同一 UB 区、不叠加;
+- 无 assert;容量约束的唯一来源是上文「约束」小节的规模假设(`ep_size*n_routed_experts*4` 字节须放进单 block UB)——host 侧无对应校验,靠 MoE 规模兜底(测试覆盖的 16×256 int32 = 16KB 也仅占 UB 的 8%);
+- 全程标量归约,单缓冲 + EVENT_ID0 三管线握手串行复用,无乒乓双缓冲需求。

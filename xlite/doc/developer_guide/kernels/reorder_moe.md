@@ -58,3 +58,29 @@ host 侧不做 dtype 限制，dtype 通过 `elemBytes` 传入；测试覆盖 flo
 - `numPairs == 0`（本卡无本地专家）或 `pairStart >= numPairs`（block 多于 pair）时直接返回（`csrc/kernels/reorder_moe.cpp` 的 `reorder_moe_kernel`，关键字 `if (numPairs == 0)`、`if (pairStart >= numPairs)`）；
 - `cnt == 0` 的 pair 跳过搬运但照常推进游标（`csrc/kernels/reorder_moe.cpp` 的 `reorder_moe_kernel`，关键字 `if (cnt == 0)`）；
 - host 侧 `in.numel == 0 || localStart >= localEnd` 时直接返回不 launch（`csrc/op.cpp` 的 `XliteOpReorderMoE`，关键字 `in.numel == 0`、`localStart >= localEnd`）。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`reorder_moe_kernel`(`csrc/kernels/reorder_moe.cpp`)无 Init,进入 kernel 后从 UB 偏移 0 顺序排布三个偏移/计数表,余下空间对半分为数据中转乒乓缓冲 `dataBuf[2]`(`chunkBufSize = ROUND_DOWN((UB_SIZE - off)/2, 32B)`,让下一子块的 MTE2 装入与上一子块的 MTE3 写回重叠)——UB 占用按定义恒为 100%。各段按 `VECTOR_MAX_BYTESIZE`(256B)向上对齐,垫片按槽位字节计。dtype 记法:kernel 以 uint8 字节视角按 `elemBytes` 搬运,UB 布局与 dtype 无关,单占用列。硬件容量基准(910B/dav C220):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)。典型模型配置:GLM-5.x 类 MoE,EP=16(moe_ep_size=16)、n_routed_experts=160、本地专家区间 10 个(nLocalExperts=10)。
+
+**AIV UB(容量 192KB,每 block 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `countsBuf` | (moe_ep_size, n_routed_experts) | int32 | 1(串行,事件 EVENT_ID0) | `ROUND_UP(moe_ep_size*n_routed_experts*4, VECTOR_MAX_BYTESIZE)` B | 10240 |
+| `expertOffsets` | nLocalExperts | int32 | 1 | `ROUND_UP(nLocalExperts*4, VECTOR_MAX_BYTESIZE)` B | 256 |
+| `chunkOffsets` | moe_ep_size | int32 | 1 | `ROUND_UP(moe_ep_size*4, VECTOR_MAX_BYTESIZE)` B | 256 |
+| `dataBuf[2]` | 剩余 UB 的一半(uint8 流水段) | uint8 | 2(事件 EVENT_ID0/1) | `ROUND_DOWN((UB_SIZE-off)/2, 32B)` B | 185856(两半各 92928) |
+| **合计** | | | | | **196608** |
+
+**占用汇总**(字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB(每 block) | 192 KB | 196608 B | 100% |
+
+要点:
+
+- **UB 恒占满**:`dataBuf[2]` 的定义即"偏移表之后的剩余全部空间对半",始终是绝对大头(185856 B,占 94.5%);每半 `chunkBufSize` 同时是 GM↔UB 分块搬运的块长,行段总字节再大也只是多循环几轮;
+- 三个偏移表槽位(`countsBuf`/`expertOffsets`/`chunkOffsets`,合计 10752 B)随 moe_ep_size×n_routed_experts 与 nLocalExperts 线性增长,kernel 以 `assert(off <= UB_SIZE)` 拦截偏移表越界(否则剩余空间下溢 uint32 使搬运越界,debug 构建生效)、`assert(chunkBufSize >= BLOCK_SIZE)` 保证暂存半区非空,host 无等价校验;典型 MoE 规模(16×160 int32 = 10KB)距 192KB 很远,靠规模兜底;
+- 数据通路是双缓冲乒乓(split.cpp 协议,事件 EVENT_ID0/1):子块 k 装入 `dataBuf[k%2]`、隔一个子块后从 `dataBuf[(k-1)%2]` 写回,MTE2 装入与 MTE3 写回重叠;写回跨 pair 边界延迟(input 只读、output 只写、GM 不相交,事件标志独自守护 UB 复用,见上文「数据流」)。

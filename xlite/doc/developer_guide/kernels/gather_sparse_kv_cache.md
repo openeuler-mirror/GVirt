@@ -116,3 +116,32 @@ Decode 根据 `topkIndices` 收集所选 token，query 长度默认为 1。稀�
 **流水同步**:事件按缓冲编号配对——`(S, MTE2)`/`(MTE2, S)` EVENT_ID0..1 管理 `topks[b]` 的可用/释放,`(MTE2, MTE3)`/`(MTE3, MTE2)` EVENT_ID0..1 管理数据缓冲 `kBufs[b]/peBufs[b]` 的写完/复用,queryStartLoc/queryLens/cachedLens 三批元数据 staging 共用 EVENT_ID4(同批一次拷入);行间 `curr = (curr + 1) % GATHER_SPARSE_KV_CACHE_BUF_NUM` 轮转,chunk `i` 的拷入与 chunk `i-1` 的拷出重叠。kernel 结束前 drain 全部 2 个缓冲的 MTE2 事件。
 
 **在模型中的位置**:decode + DSA 且序列较长时(阈值 `XLITE_MLA_DENSE_THRESHOLD`,`csrc/model.cpp`),先本算子收集 dense cache,再以 `dense=True` 调 mla_v2;短序列或无 DSA 时直接走 paged mla_v2,不需要本算子。本算子自身支持 decode 与 small prefill(变长 query,每 query token 独占一行 dense cache)。cxa 的 dense 模式亦在 binding 层(`CXA`,`csrc/_C.cpp`)内部调用本算子(仅 K 通道,peCache 传空,走 nope 变体),把压缩 KV 的 top-k token 收集成连续 dense cache 后再进 cxa kernel。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`csrc/kernels/gather_sparse_kv_cache.h` 的 `gather_sparse_kv_cache` 在 kernel 主体内以 `off` 偏移累进排布:先 `GATHER_SPARSE_KV_CACHE_BUF_NUM=2` 份轮转的数据/下标缓冲(C8 路径每组前含反量化暂存并按 `UB_BANKGROUP_ROW_SIZE=512B` 对齐),再把剩余空间三等分给 queryStartLoc/queryLens/cachedLens 三批元数据窗口,窗口耗尽才回 GM 续载。本算子为纯向量核,仅使用 UB,硬件容量基准(910B/dav C220,NpuArch 2201):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)。dtype 记法:`Dtype` 为 paged cache 的 GM 元素类型(BF16 路径为 `bfloat16_t`,C8 路径为 `int8_t`),`OutDtype` 为 UB 数据缓冲与输出类型(C8 路径实例化为 `bfloat16_t`);`tokensPerTask` 为每任务槽位数,BF16 取 `GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP=32`、C8 取 `GATHER_SPARSE_KV_CACHE_C8_CNT_ONE_LOOP=16`(均定义于 `csrc/kernels/kernel_param.h`)。典型配置取 glm5:kvLoraRank=512、ropeHeadDim=64、blockSize=128(`tests/kernels/gather_sparse_kv_cache.py`),两条 dtype 路径同取该形状,占用差异仅来自路径。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | BF16 双通道占用(B) | C8 占用(B) |
+| --- | --- | --- | --- | --- | --- | --- |
+| `inputBuf`(仅 C8) | (16, 512) int8 + 每 token scale 行(groupNum=4 个 fp32,行距 32B) | int8/fp32 | 2(事件4/5) | `ROUND_UP(16*kvLoraRank + 16*scaleStride,256B)` = 8704 B | — | 17408 |
+| `halfBuf`(仅 C8) | (16, 512) | half | 2(事件4/5) | `16*kvLoraRank*sizeof(half)` = 16384 B | — | 32768 |
+| `xBuf`(仅 C8) | (16, 512) | float | 2(事件4/5) | `16*kvLoraRank*sizeof(float)` = 32768 B | — | 65536 |
+| `kBufs` | (tokensPerTask, kvLoraRank) = (32, 512)/(16, 512) | OutDtype(bf16) | 2(BF16 事件0/1;C8 与整组共用事件4/5) | `ROUND_UP(tokensPerTask*perKBytes,32B)` = 32768/16384 B | 65536 | 32768 |
+| `peBufs` | (32, 64)/(16, 64) | OutDtype(bf16) | 2(同上) | `ROUND_UP(tokensPerTask*perPeBytes,32B)` = 4096/2048 B | 8192 | 4096 |
+| `topks` | 32/16 个 uint32 | uint32 | 2(事件0/1;C8 经 V/S 链定序) | `ROUND_UP(tokensPerTask*4,32B)` = 128/64 B | 256 | 128 |
+| 第二组 512B 对齐垫片(仅 C8,`UB_BANKGROUP_ROW_SIZE`) | — | — | — | 448 B | — | 448 |
+| queryStartLoc/queryLens/cachedLens 三批元数据窗口 | 各 windowBytes/4 = 10216/3616 个 int32 | int32 | 各 1(共用事件4) | `ROUND_DOWN((UB_SIZE-off)/3,32B)` = 40864/14464 B | 122592 | 43392 |
+| **合计** | | | | | **196576** | **196544** |
+
+**占用汇总**(vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | BF16 双通道占用 | 占比 | C8 占用 | 占比 |
+| --- | --- | --- | --- | --- | --- |
+| UB(每 AIV) | 192 KB | 196576 B | 99.98% | 196544 B | 99.97% |
+
+要点:
+
+- **UB 被设计成吃满**:BF16 双通道的数据/下标缓冲仅 73984 B(即上文「UB 布局」段的约 74KB)、C8 缓冲组 153152 B,剩余空间被三批元数据窗口三等分吃干,总占用 196576/196544 B(99.98%/99.97%),余量仅 32/64 B——BF16 路径窗口排布后的断言 `off + BLOCK_SIZE <= UB_SIZE` 恰好压线通过;
+- BF16 路径的大头是 `kBufs`(2×32768 = 65536 B,占 33%):每任务 32 槽 × perKBytes=1024 B 的 K 通道暂存;C8 路径的大头是反量化暂存(`xBuf` 2×32768 + `halfBuf` 2×16384 + `inputBuf` 2×8704);
+- **容量来源是 kernel 断言(仅 debug 构建,release 由调用方保证)**:BF16 `assert(off + BLOCK_SIZE <= UB_SIZE && perKBytes % BLOCK_SIZE == 0 && ...)`、C8 `assert(off + 3 * BLOCK_SIZE <= UB_SIZE)`(在窗口分配前,保证剩余空间够三窗各 ≥1 块);「通道宽为 16 的倍数」的前置条件即 perKBytes/perPeBytes 32B 对齐的来源;
+- nope 变体编译期裁掉 PE 通道(`XLITE_GATHER_SPARSE_KV_CACHE_NOPE`),数据/下标缓冲降至 65792 B,窗口相应扩大到 43584 B/窗,总占用同为 196544 B。

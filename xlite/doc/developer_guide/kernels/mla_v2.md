@@ -139,6 +139,108 @@ SFA-C8 在 host 接受独立的 INT8 `kCache[numBlocks, blockSize, 1, kvLoraRank
 - host launch 与限制:`csrc/op.cpp` 的 `XliteOpMLAV2`(dense 校验关键字 `MAX_TOPK_NUM`);路由 `csrc/model.cpp` 的 `ForwardAttnMLAV2`(短序列分支)与 dense gather 路径(decode+DSA 长序列时启用,关键字 `XliteOpGatherSparseKVCache`,阈值 `XLITE_MLA_DENSE_THRESHOLD=280`,见 `csrc/model.cpp` 的 `XLITE_MLA_DENSE_THRESHOLD`)
 - 常量:`csrc/kernels/kernel_param.h`(`XLITE_MAX_M0`/`MAX_TOPK_NUM`/`MAX_SOFTMAX_PINGPONG_LEN`)
 
+### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
+
+AIC 侧 12 个 L1/L0 缓冲由共用的 `MlaAicHelper::Init`(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::Init`)手动排布:QK 组与 SV 组各自在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上从偏移 0 累进 `bufferAddr`,L0 三级物理独立、各自从偏移 0 重新起排;**QK 组与 SV 组复用同一物理空间**——`RunAicQK` 收尾等待 `FIX_M`/`M_MTE1`/`MTE1_MTE2` 全部排空后才切换 `RunAicSV`,两相位在核内严格串行,各存储级物理占用按两相位取 max;`Init` 还用 host 提供的 `zeroGm` 把两份 `aktl1bBuf` 预填零(见上文 nan bug 修复)。AIV 侧 UB 由 softmax 函数在每次调用入口自偏移 0 现场排布,topK=0(全量 `RunAivSoftmaxLong`)与 topK>0(`RunAivSoftmaxPingPong`)两条路径互斥,占用亦取 max。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
+
+dtype 记法:mla_v2 仅 BF16 单路径(`csrc/kernels/mla_v2_bfloat16_t.cpp`),`Dtype=bfloat16_t`(2B);几何常量(`MlaAicHelper::Init`)为 `qkk0=256/sizeof(Dtype)=128`、`qkn0=dense?MAX_N0:blockSize`、`svn0=256`、`svk0=64`。典型配置取 DeepSeek-V3 档(`tests/kernels/mla.py` 的 `models` 表):nHeads=16、kvLoraRank=512、ropeHeadDim=64、blockSize=128——AIC 缓冲大小只依赖 `XLITE_MAX_M0`/kvLoraRank/ropeHeadDim,与 nHeads 无关(dense 时 qkn0=MAX_N0=128,与 blockSize=128 同值);AIV 侧按短序列路径上限 maxSeqLen=8192(`tile_size_of_cached_kv` 默认值,超过即路由 flash_mla_v2)与 DSA topK=2048 代入,下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布)。
+
+**AIC L1(A1,容量 512KB;QK/SV 两相位自偏移 0 复用)**
+
+| 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|---|
+| `aqnl1aBuf` | QK | `(XLITE_MAX_M0, kvLoraRank)`=(128,512) | Dtype | 1(事件0) | `XLITE_MAX_M0*kvLoraRank*sizeof(Dtype)` | 131072 |
+| `aqrl1aBuf` | QK | `(XLITE_MAX_M0, ropeHeadDim)`=(128,64) | Dtype | 1(事件0) | `XLITE_MAX_M0*ropeHeadDim*sizeof(Dtype)` | 16384 |
+| `akl1bBuf` | QK | `(qkn0, 4*qkk0)`=(128,512) | Dtype | 2(事件4/5) | `qkn0*4*qkk0*sizeof(Dtype)` | 262144 |
+| `akrl1bBuf` | QK | `(qkn0, ropeHeadDim)`=(128,64) | Dtype | 2(事件2/3) | `qkn0*ropeHeadDim*sizeof(Dtype)` | 32768 |
+| **QK 相位小计** | | | | | | **442368** |
+| `aqkl1aBuf` | SV | `(XLITE_MAX_M0, 4*svk0)`=(128,256) | Dtype | 2(事件0/1) | `XLITE_MAX_M0*4*svk0*sizeof(Dtype)` | 131072 |
+| `aktl1bBuf` | SV | `(svn0, 2*svk0)`=(256,128) | Dtype | 2(事件4/5) | `svn0*2*svk0*sizeof(Dtype)` | 131072 |
+| **SV 相位小计** | | | | | | **262144** |
+| **合计(峰值 = max(两相位))** | | | | | | **442368** |
+
+**AIC L0A(A2,容量 64KB;两相位复用)**
+
+| 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|---|
+| `qkl0aBuf` | QK | `(XLITE_MAX_M0, qkk0)`=(128,128) | Dtype | 2(事件0/1) | `XLITE_MAX_M0*qkk0*sizeof(Dtype)` | 65536 |
+| **QK 相位小计** | | | | | | **65536** |
+| `svl0aBuf` | SV | `(XLITE_MAX_M0, svk0)`=(128,64) | Dtype | 2(事件0/1) | `XLITE_MAX_M0*svk0*sizeof(Dtype)` | 32768 |
+| **SV 相位小计** | | | | | | **32768** |
+| **合计(峰值 = max(两相位))** | | | | | | **65536** |
+
+**AIC L0B(B2,容量 64KB;两相位复用)**
+
+| 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|---|
+| `qkl0bBuf` | QK | `(MAX_N0, qkk0)`=(128,128) | Dtype | 2(事件0/1) | `MAX_N0*qkk0*sizeof(Dtype)` | 65536 |
+| **QK 相位小计** | | | | | | **65536** |
+| `svl0bBuf` | SV | `(svn0, svk0)`=(256,64) | Dtype | 2(事件0/1) | `svn0*svk0*sizeof(Dtype)` | 65536 |
+| **SV 相位小计** | | | | | | **65536** |
+| **合计(峰值 = max(两相位))** | | | | | | **65536** |
+
+**AIC L0C(CO1 区,容量 128KB,总容量 256KB 含 CO2;两相位复用)**
+
+| 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|---|
+| `qkl0cBuf` | QK | `(XLITE_MAX_M0, MAX_N0)`=(128,128) | float | 2(事件0/1) | `XLITE_MAX_M0*MAX_N0*sizeof(float)` | 131072 |
+| **QK 相位小计** | | | | | | **131072** |
+| `svl0cBuf` | SV | `(XLITE_MAX_M0, svn0)`=(128,256) | float | 1(事件0) | `XLITE_MAX_M0*svn0*sizeof(float)` | 131072 |
+| **SV 相位小计** | | | | | | **131072** |
+| **合计(峰值 = max(两相位))** | | | | | | **131072** |
+
+**AIV UB——全量 softmax 路径(topK=0,`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`;每 subblock 一份,预算 192KB)**
+
+in/out/calc/calcDst 按 `MAX_SUB_CONTEXT_SIZE=(VECTOR_MAX_REPEAT-1)*64=16256` 定长(与 outN 无关),仅 max/sum 随 `totalSubBlockNum=DIV_ROUND_UP(outN, 16256)` 缩放;mla_v2 的 outN ≤ maxSeqLen ≤ 8192 时 totalSubBlockNum 恒为 1;`sink` 槽为 `attnSink != nullptr` 条件分配,mla_v2 恒取默认 nullptr、占用为 0,不入表。
+
+| 变量 | shape(每份) | dtype | 份数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `in` | 16256(`MAX_SUB_CONTEXT_SIZE`) | Dtype | 1 | `MAX_SUB_CONTEXT_SIZE*sizeof(Dtype)` | 32512 |
+| `out` | 16256 | Dtype | 1 | `MAX_SUB_CONTEXT_SIZE*sizeof(Dtype)` | 32512 |
+| `calc` | 16256 | float | 1 | `MAX_SUB_CONTEXT_SIZE*sizeof(float)` | 65024 |
+| `calcDst` | 127 个 256B repeat 槽 | float | 1 | `(VECTOR_MAX_REPEAT-1)/2*VECTOR_MAX_BYTESIZE` | 32512 |
+| `max` | totalSubBlockNum+1=2 个 256B 槽 | float | 1 | `(totalSubBlockNum+1)*VECTOR_MAX_BYTESIZE` | 512 |
+| `sum` | 同上 | float | 1 | `(totalSubBlockNum+1)*VECTOR_MAX_BYTESIZE` | 512 |
+| **合计** | | | | | **163584** |
+
+**AIV UB——top-k softmax 路径(topK>0,`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`;按 len=MAX(outN, topK)=8192、topK=2048 代入)**
+
+mla_v2 的 maxBuf/sumBuf 传 nullptr(saveMaxSum=false),`maxOut`/`sumOut` 槽位不分配;swaSegWidth=0、attnSink 为空,相应槽位亦为 0。
+
+| 变量 | shape(每份) | dtype | 份数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `in1`/`in2` | `(len,)`=(8192,) | Dtype | 2(事件2/3) | `ROUND_UP(len*sizeof(Dtype),256)` | 32768 |
+| `out1`/`out2` | `(len,)` | Dtype | 2(事件2/3) | `ROUND_UP(len*sizeof(Dtype),256)` | 32768 |
+| `cal` | `(len,)` | float | 1 | `ROUND_UP(len*sizeof(float),256)` | 32768 |
+| `temp` | len/2 归约暂存 | float | 1 | `(DIV_ROUND_UP(len*sizeof(float),256)/2)*256` | 16384 |
+| `indices0`/`indices1` | `(topK,)`=(2048,) | int32 | 2(事件0) | `ROUND_UP(topK*sizeof(int32_t),256)` | 16384 |
+| `inTopK` | `(topK,)` | Dtype | 1 | `ROUND_UP(topK*sizeof(Dtype),256)` | 4096 |
+| `indicesFp32` | `(topK,)` | float | 1 | `ROUND_UP(topK*sizeof(float),256)` | 8192 |
+| `cmp0` | 2 个 256B repeat | int32 | 1 | `VECTOR_MAX_BYTESIZE*2` | 512 |
+| `cmp1` | 1 个 256B repeat | int32 | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `cmpFp320` | 1 个 256B repeat | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `cmpFp321` | 1 个 256B repeat | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `topkMask0`/`topkMask1` | `(topK/8,)`=(256,) | uint8 | 2 | `ROUND_UP(topK/8,256)` | 512 |
+| `currIndices` | `(topK,)` | int32 | 1 | `ROUND_UP(topK*sizeof(int32_t),256)` | 8192 |
+| **合计** | | | | | **153344** |
+
+**占用汇总**(各存储级按两相位/两路径取峰值 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用(B) | 占比 |
+|---|---|---|---|
+| L1 | 512 KB | 442368 | 84.4% |
+| L0A | 64 KB | 65536 | 100% |
+| L0B | 64 KB | 65536 | 100% |
+| L0C(CO1) | 128 KB | 131072 | 100% |
+| UB(每 AIV subblock,峰值取全量 softmax 布局) | 192 KB | 163584 | 83.2% |
+
+要点:
+
+- **L0 三级峰值全部顶满(100%)**:BF16 下 `qkk0=128`、`XLITE_MAX_M0=MAX_N0=128` 使 QK 相位 L0A/L0B 各恰 64KB、SV 相位 L0B 亦恰满 64KB(`svn0=256` 单份即 32768 B、双份顶满),两相位 L0C(CO1)各恰 128KB——M/N/K 任一维度增大都会先撞 L0;host 侧 `nHeads <= XLITE_MAX_M0` 校验(`csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `nHeads > XLITE_MAX_M0`)正是「单 token 全部头必须落进一个 M0 tile」的容量前提;
+- L1 峰值在 QK 相位 442368 B(84.4%),大头是双份 K 预取 `akl1bBuf`(262144 B,占 QK 相位 59%);SV 相位仅 262144 B(50%),与 QK 相位自偏移 0 复用同一物理 L1,无需按两组求和;
+- AIV UB 峰值在全量 softmax 路径:in/out/calc/calcDst 按 `MAX_SUB_CONTEXT_SIZE=16256` 定长合计 162560 B,加 max/sum 两槽共 163584 B(159.75KB,83.2%);top-k 路径 153344 B(78.0%)随运行期 len/topK 缩放;
+- top-k 路径的容量来源是 host 校验 `maxSeqLen <= MAX_SOFTMAX_PINGPONG_LEN=10496` 与 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpMLAV2`)。按该上限组合(len=10496、topK=2048)代入布局为 185600 B ≤ `UB_SIZE`(余 11008 B;旧上限 11776 的同组合实占 203520 B 越界,旧 static_assert 公式漏计 `indicesFp32` 槽位 8192 B 而误判通过——已随上限收紧到 10496 并补全断言公式一并修复);mla_v2 实际服务的短序列(maxSeqLen ≤ 8192,占 153344 B)尚有 43264 B 余量。
+
 ## DSA-CP MLA
 
 DSACP 面向 prefill，在 TP 组内按 query token 分担 Indexer 和主 Attention。

@@ -53,3 +53,33 @@ UB 使用两套缓冲，`512/64` 配置下在 Ascend A3 上每核共 12 KiB，�
 K 和 PE 使用连续 DMA；scale 行可能不足 32 字节，使用按字节长度的 DMA。组内计算使用向量指令，外层循环分配 token，内层循环逐组独立量化。
 
 `XliteOpMlaPrepare` 在 SFA-C8 模式使用融合内核，复用本文件中的 `mla_cache_c8_quant` 分组量化；RMSNorm 仍使用模型的 `normEps`。读取端见 [gather_sparse_kv_cache](gather_sparse_kv_cache.md)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`mla_cache_c8`(`csrc/kernels/mla_cache_c8.h` 的 `mla_cache_c8`)为纯 AIV kernel,在函数入口自 UB 偏移 0 为两套 token 级乒乓缓冲顺序累进 `__ubuf__` 指针:每套依次排布搬入行(`inputs`)、K/PE/scale 连续打包行(`packed`)、整行 fp32 数据(`xBuf`)、单组计算临时(`tmpBuf`/`amaxBufs`/`factorBufs`)与 fp16 中转行(`halfBuf`),每套末尾按 `UB_BANKGROUP_ROW_SIZE=512B` 行对齐垫片推进,尾部 `assert(off <= UB_SIZE)` 收口。硬件容量:AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每核一份。
+
+dtype 记法:仅 BF16 单路径(`csrc/kernels/mla_cache_c8_bfloat16_t.cpp`),`Dtype=bfloat16_t`(2B),latent INT8 / PE BF16 / scale FP32 由 `packed` 行内混排。典型配置取 `tests/kernels/mla_cache_c8.py` 的默认 `latentDim=512、ropeDim=64`(即模型 latent 档 `D=512、R=64`),`groupSize=128、groupNum=D/128=4`,每 token 打包行 `cacheBytes=D+2R+4×groupNum=656` B。
+
+| 变量 | shape(每套) | dtype | 乒乓套数 | 单套大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `inputs` | `(latentDim,)`=(512,) | Dtype | 2(事件0/1) | `ROUND_UP(latentDim*sizeof(Dtype),256)` | 2048 |
+| `packed` | 656 B 混合行(INT8 latent|BF16 PE|FP32 scale) | int8 视图 | 2(事件0/1) | `ROUND_UP(cacheBytes,256)` | 1536 |
+| `xBuf` | `(latentDim,)` | float | 2 | `ROUND_UP(latentDim*sizeof(float),32)` | 4096 |
+| `tmpBuf` | `(groupSize,)`=(128,) | float | 2 | `ROUND_UP(groupSize*sizeof(float),32)` | 1024 |
+| `amaxBufs` | 1 个 256B repeat | float | 2 | `VECTOR_REPEAT_BYTESIZE` | 512 |
+| `factorBufs` | 1 个 256B repeat | float | 2 | `VECTOR_REPEAT_BYTESIZE` | 512 |
+| `halfBuf` | `(latentDim,)` | half | 2 | `ROUND_UP(latentDim*sizeof(half),32)` | 2048 |
+| 套间 512B 行对齐垫片 | — | — | 2 | 各 256 B | 512 |
+| **合计** | | | | | **12288** |
+
+**占用汇总**(vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用(B) | 占比 |
+|---|---|---|---|
+| UB(每核) | 192 KB | 12288 | 6.25% |
+
+要点:
+
+- 两套乒乓各 5888 B(未对齐),加 2×256 B 行对齐垫片共 12288 B(恰 12 KiB,与上文「每核共 12 KiB」一致),仅占 UB 6.3%,非常宽裕;
+- 大头是整行 fp32 暂存 `xBuf`(每套 2048 B)与搬入/打包行 `inputs`/`packed`(每套 1024/768 B);latentDim 增大时线性部分约 18 B/维(`inputs`/`packed`/`xBuf`/`halfBuf` 两套共 2×(2+1+4+2) B);
+- 容量来源:kernel 内 `assert(off <= UB_SIZE)`(`csrc/kernels/mla_cache_c8.h` 的 `mla_cache_c8`);host 侧 `XliteOpMlaCacheC8`(`csrc/op.cpp` 的 `XliteOpMlaCacheC8`)校验 `latentDim%128==0`、`ropeDim*sizeof(Dtype)` 按 32B 对齐,但不设 D 的显式上界——更大的 latentDim 由该 assert 兜底。

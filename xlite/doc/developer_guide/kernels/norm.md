@@ -101,6 +101,51 @@ MTE2(搬入)/ V(计算)/ MTE3(搬出)三管线,事件标志协议:
 
 `csrc/op.cpp` 的 `XliteOpRmsNorm` / `XliteOpLayerNorm` / `XliteOpL2Norm` / `XliteOpAddAndRmsNorm`:`XliteOpRmsNorm` / `XliteOpLayerNorm` / `XliteOpL2Norm` / `XliteOpAddAndRmsNorm` 分别以不同 `kind`、`useNorm`、仿射参数组合 launch 同一个 `norm_<dtype>` kernel,grid 为 `PickMinBlockNum(rt.aivNum, in.shape[0])`(即 `min(aivNum, token_num)`,token 数少于核数时按 token 数收敛;`XliteOpRmsNorm`/`XliteOpLayerNorm`/`XliteOpL2Norm`/`XliteOpAddAndRmsNorm` 一致,见 `csrc/auto_tuner.h` 的 `PickMinBlockNum`),`outFp32 = (out.dtype == FP32)`。
 
+### 片上缓冲分配与占用汇总
+
+主路径 `norm<Dtype>` 与大维度分块路径 `rmsnorm_noaffine_tiled`(`csrc/kernels/norm.h` 的 `norm<Dtype>` / `rmsnorm_noaffine_tiled`)各自在函数入口把 UB 自偏移 0 顺序累进排布,容量唯一守卫是 kernel 断言 `assert(off <= UB_SIZE)`;host 侧(`csrc/op.cpp` 的 `XliteOpRmsNorm`)只校验 dtype、不限制 norm_dim。硬件容量基准(910B/dav C220,NpuArch 2201):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE=196608`,4KB×48 bank),本算子为纯 AIV 向量算子,不使用 L1/L0A/L0B/L0C。dtype 记法:模板实参 `Dtype` 为输入/输出元素类型,fp16/bf16 两个实例(`norm_float16_t` / `norm_bfloat16_t`)均为 2B,UB 布局相同、占用不分列;全部中间计算在 fp32 上。典型配置取两组:带仿射整行 RMSNorm(norm_dim=8192、cnt_per_token=1,即 `tests/kernels/rmsnorm.py` 的 `[64, 8192]` 用例)与逐 head qkNorm(headDim=128、cnt_per_token=8,total_dim=1024,即同测试 `DIM=128, CNT=8` 用例)。
+
+**UB(主路径 `norm<Dtype>`,预算 `UB_SIZE=192KB`)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | RMSNorm 8192 占用(B) | qkNorm 128×8 占用(B) |
+|---|---|---|---|---|---|---|
+| `in` | `(total_dim,)` | Dtype | 2(事件0/1) | `ROUND_UP(total_dim*sizeof(Dtype),32)` | 32768 | 4096 |
+| `out` | `(total_dim,)` | Dtype | 2(事件0/1) | 同 `in`(useNorm 且非 outFp32 时分配) | 32768 | 4096 |
+| `out_float` | `(total_dim,)` | float | 2(事件0/1) | `ROUND_UP(total_dim*4,32)`(outFp32 输出或 variance-only 时分配) | —(未分配) | —(未分配) |
+| `in_variance_float` | `(total_dim,)` | float | 2(事件0/1) | 同 `out_float`(仅 variance 输入非空时分配) | —(未分配) | —(未分配) |
+| `calc0` | `(total_dim,)` | float | 1 | `ROUND_UP(total_dim*4,32)` | 32768 | 4096 |
+| `calc1` | `(total_dim,)` | float | 1 | 同上 | 32768 | 4096 |
+| `weight_calc` | `(total_dim,)` | float | 1(加载一次) | 同上 | 32768 | 4096 |
+| `bias_calc` | `(total_dim,)` | float | 1(加载一次) | 同上 | 32768 | 4096 |
+| **合计** | | | | | **196608** | **24576** |
+
+`addInOut` 残差路径复用 `in` 槽暂存第二路输入,不新增槽位;`weight_calc`/`bias_calc` 不论仿射参数是否为空都常驻分配。variance 输入路径(rmsnorm_full 的 apply 阶段)额外分配 `in_variance_float` 两个 fp32 槽,总占用升至约 32×total_dim:total_dim=6144 时合计恰为 196608 B(100%,见 [qk_rms_norm.md](qk_rms_norm.md)),total_dim=8192 时为 262144 B、超出 UB 断言失败。
+
+**UB(大维度分块路径 `rmsnorm_noaffine_tiled`,预算 `UB_SIZE=192KB`;tileDim=8192,同取 norm_dim=8192、Dtype 2B、非 outFp32)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `in0`/`in1` | `(tileDim,)` | Dtype | 2(事件0/1) | `ROUND_UP(tileDim*sizeof(Dtype),32)` | 32768 |
+| `calc` | `(tileDim,)` | float | 1 | `ROUND_UP(tileDim*4,32)` | 32768 |
+| `out0`/`out1` | `(tileDim,)` | Dtype | 2(事件2/3) | 同 `in`(outFp32 时为 fp32 尺寸) | 32768 |
+| `scalar` | `(1,)` | float | 1 | `ROUND_UP(sizeof(float),32)` | 32 |
+| **合计** | | | | | **98336** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级(路径/形态) | 硬件容量 | 占用(B) | 占比 |
+|---|---|---|---|
+| UB(主路径,带仿射 RMSNorm 8192) | 192 KB | 196608 | 100% |
+| UB(主路径,逐 head qkNorm 128×8) | 192 KB | 24576 | 12.5% |
+| UB(大维度分块路径,norm_dim=8192) | 192 KB | 98336 | 50.0% |
+
+要点:
+
+- **带仿射整行 RMSNorm 是 UB 的顶格形态**:total_dim=8192 时主路径合计恰 196608 B(100%),四个 fp32 计算槽(`calc0`/`calc1`/`weight_calc`/`bias_calc`)占 131072 B(67%)是绝对大头——fp32 中间计算保证精度的直接代价;host 侧不限 norm_dim,超过 8192 的带仿射整行(如 total_dim=12288 时合计 294912 B)将由 `assert(off <= UB_SIZE)` 拒绝。
+- **variance 输入路径多两个 fp32 槽**:占用约 32×total_dim,段宽 6144(如 MiniMax-M2 qkNormFull Q 段 48 头×128)恰满 192KB,是 qkNormFull apply 的容量上限;不带 variance 输入的 plain qkNorm 同段宽仅 147456 B(75%)。
+- **大维度分块路径是 norm_dim>6144 无仿射 RMSNorm 的自动分流**:两遍扫描把 8192 维的占用压到 98336 B(50%),代价是第二遍重读 GM;outFp32 输出时 `out0`/`out1` 翻倍为 fp32 尺寸,合计 131104 B(66.7%)。
+- 逐 head 小段(128×8)仅占 12.5%,UB 余量充足;两 dtype 实例占用完全相同。
+
 ## 多组 FP32 输出
 
 `outFp32` 路径按 `cnt_per_token` 拷贝全部 head/group 的归一化结果。

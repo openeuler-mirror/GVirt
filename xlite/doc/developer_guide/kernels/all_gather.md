@@ -80,3 +80,30 @@ host 侧对应地把 launch 核数限制为 `max(rank, rank*2)`,并 `ROUND_DOWN(
 ### 回退路径
 
 无 `XcclComm`(单卡或未建立 IPC)、dtype 为 INT64、或张量不在共享池中时,host 侧先做 D2D 临时拷贝再走 kernel,或直接回退 HCCL 的 `HcclAllGather`(`csrc/op.cpp` 的 `XliteOpAllGather` 末尾 HCCL 回退,关键字 `HcclAllGather`)。`rankSize <= 1` 时退化为一次 `aclrtMemcpyAsync`(`csrc/op.cpp` 的 `XliteOpAllGather` 中 `rankSize <= 1` 分支)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`Init`(`csrc/kernels/all_gather.cpp` 的 `AllGather::Init`)手动排布全部片上缓冲:UB 上自偏移 0 起顺序累进,先给 `flagBuf` 一个 `UB_BUF_ALIGN_SIZE`(32B)对齐槽(实际只用 4 字节信号值),随后 `ubBuf[PINGPONG_BUF_NUM]` 两槽连续排布、每槽固定 `COPY_SIZE`(32768B);`inputBuf` / `outputBuf` / `ipcFlagBuf` 是 GM 侧 GlobalTensor,不占片上。硬件容量基准(910B/dav C220,NpuArch 2201):AIV UB 取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),kernel 为 `KERNEL_TYPE_MIX_AIV_1_0`(一核一 block),每个 AIV block 各持一份独立 UB、布局相同。
+
+dtype 记法(模板实参 `Dtype`,见 `ALLGATHER_FUNC_DEFINE` 实例化列表):`int8_t`/`int16_t`/`int32_t`/`float16_t`/`bfloat16_t`/`float`(BIT1 打包后复用 int8 变体)。UB 槽位大小是字节常量(`COPY_SIZE`、`UB_BUF_ALIGN_SIZE`),与 `Dtype` 无关,故单占用列;运行期入参 `copySize` 只决定每块搬运元素数 `copyCount = ROUND_DOWN(copySize, 32)/sizeof(Dtype)`,不改变槽位——host 侧默认即上限 `COPY_SIZE`,仅在 `corePerRank > 1` 且 `copySize*corePerRank > MAX_TOTAL_COPY_SIZE` 时向下钳到 `MAX_TOTAL_COPY_SIZE/corePerRank`(`csrc/op.cpp` 的 `XliteOpAllGather` 中 `copySize` 调整段)。下表占用按典型配置代入:TP=8(rankSize=8)、BF16、每 rank 张量 `[8192, 4096]`(count=33554432,DeepSeek-V4 TP 域 hidden 拼接规模)——占用与 rankSize/count/copySize 均无关,数值恒定。
+
+**AIV UB(容量 192KB,每 block 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `flagBuf` | 1 个 uint32(`SetIpcFlag`/`WaitIpcFlag` 的 4B 信号中转) | uint32 | 1(无乒乓,`PipeBarrier<PIPE_ALL>` 串行复用) | `UB_BUF_ALIGN_SIZE` = 32 B | 32 |
+| `ubBuf` | `COPY_SIZE/sizeof(Dtype)` 个元素(BF16 时 16384) | Dtype | 2(事件 EVENT_ID0/1,MTE3_MTE2↔MTE2_MTE3) | `COPY_SIZE` = 32768 B | 65536 |
+| **合计** | | | | | **65568** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用(B) | 占比 |
+|---|---|---|---|
+| UB(每 AIV block) | 192 KB | 65568 | 33.3% |
+
+要点:
+
+- UB 是唯一使用的片上存储级,占用恒 65568 B(33.3%,余量 131040 B),与 dtype、rankSize、count、运行期 `copySize` 均无关——本算子的压力全部落在 GM 间 IPC 直通读取上,片上缓冲极其宽松;
+- `ubBuf` 两份 32KB 乒乓(`Run` 的对端段搬运循环独占使用)是绝对大头,占 UB 占用的 99.95%;
+- `flagBuf` 实际只用 4 字节信号值,却按 `UB_BUF_ALIGN_SIZE`(32B)对齐占一整槽;
+- kernel 侧无容量断言;host 对 `copySize` 的钳制(`MAX_TOTAL_COPY_SIZE=12800`,`csrc/kernels/kernel_param.h` 的 `MAX_TOTAL_COPY_SIZE`)约束的是 `copySize*corePerRank` 的搬运粒度预算而非 UB 容量,且 host 从不调大 `copySize`(默认即 `COPY_SIZE` 上限),UB 槽位恒不被写溢。

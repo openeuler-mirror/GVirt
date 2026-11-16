@@ -83,3 +83,30 @@ log2phy | wInRow | wOutRow | rInRow | rOutRow
 ### 模型层位置
 
 `ForwardMoEGate` 之后、`ForwardMoEDispatch` 之前(`csrc/model.cpp` 的 EPLB 路径):仅当 `log2phy[layer]` 非空时执行,产出 `wPhy`/`rPhy` 供 Dispatch 按物理槽位索引权重;非 EPLB 时直接透传,零开销。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`remap_gate_outputs_kernel`(`csrc/kernels/remap_gate_outputs.cpp`)无 Init,UB 五段就地排布:`log2phy | wInRow | wOutRow | rInRow | rOutRow`,每段按 `VECTOR_MAX_BYTESIZE`(256B)向上取整(垫片按槽位字节计),使 `vector_dup` 清零的单次 256B repeat 不越界写相邻段(与 `permutation.cpp` 同模式)。dtype 记法:kernel 按 `elemBytes`(host 侧由 dtype 推断,BF16=2、FP32=4)做字节级拷贝,五段布局公式相同、仅 `wInRow`/`wOutRow` 两段随 elemBytes 缩放,给 BF16/FP32 两列占用。硬件容量基准(910B/dav C220):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)。典型模型配置:GLM-5.x 类 EPLB,nRoutedExperts=160、numRedundantExperts=32(totalPhysicalExperts=192)、BF16 权重;FP32 列同取 160/192 配置,占用差异仅来自 elemBytes。
+
+**AIV UB(容量 192KB,每 block 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | BF16 占用(B) | FP32 占用(B) |
+|---|---|---|---|---|---|---|
+| `log2phyUbuf` | nRoutedExperts | uint32 | 1(串行,事件 EVENT_ID0) | `ROUND_UP(nRoutedExperts*4, VECTOR_MAX_BYTESIZE)` B | 768 | 768 |
+| `wInRow` | nRoutedExperts×elemBytes 字节 | uint8(字节视角) | 1(串行,事件 EVENT_ID0) | `ROUND_UP(nRoutedExperts*elemBytes, VECTOR_MAX_BYTESIZE)` B | 512 | 768 |
+| `wOutRow` | totalPhysicalExperts×elemBytes 字节 | uint8(字节视角) | 1(串行,事件 EVENT_ID0) | `ROUND_UP(totalPhysicalExperts*elemBytes, VECTOR_MAX_BYTESIZE)` B | 512 | 768 |
+| `rInRow` | DIV_ROUND_UP(nRoutedExperts, 8) 字节 | uint8(BIT1 行) | 1(串行,事件 EVENT_ID0) | `ROUND_UP(DIV_ROUND_UP(nRoutedExperts, 8), VECTOR_MAX_BYTESIZE)` B | 256 | 256 |
+| `rOutRow` | DIV_ROUND_UP(totalPhysicalExperts, 8) 字节 | uint8(BIT1 行) | 1(串行,事件 EVENT_ID0) | `ROUND_UP(DIV_ROUND_UP(totalPhysicalExperts, 8), VECTOR_MAX_BYTESIZE)` B | 256 | 256 |
+| **合计** | | | | | **2304** | **2816** |
+
+**占用汇总**(字节数):
+
+| 存储级 | 硬件容量 | BF16 占用 | 占比 | FP32 占用 | 占比 |
+|---|---|---|---|---|---|
+| UB(每 block) | 192 KB | 2304 B | 1.2% | 2816 B | 1.4% |
+
+要点:
+
+- 行级缓冲,占用仅约 1%——token 维按 block 轮询逐行处理,UB 只需容下一行权重、一行位图与 `log2phy` 映射表,容量完全不是瓶颈;
+- `log2phyUbuf`+`wInRow`+`wOutRow` 三段合计 1792 B(BF16),约占 78%,是占用大头,随专家数线性增长,典型 160/192 规模远低于上限;
+- 无 assert;唯一的"额外"开销是每段 256B 槽位垫片(`rInRow` 实际 20 字节按 256 字节槽位计),这是 `vector_dup` 清零不越界的实现代价(见上文 UB 内存布局段)。

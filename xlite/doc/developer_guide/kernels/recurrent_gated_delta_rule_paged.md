@@ -75,6 +75,45 @@ state 与 g 可独立为 FP32(由 `stateFp32` / `gateFp32` launch 标志选择);
 
 initial 为零时忽略原页内容,从零状态开始;非零时从当前页继续。空段不改变页面。零或负页号输出零且不更新 state(vLLM 的 0 页为 null block,不解引用);有效正页号必须在页范围内,各请求的有效写入页不能重叠。decode raw-table 行的 `cached_lens <= 0` 视为 padding,不访问 state。所有 tensors 位于 Runtime 的 NPU;Python binding 同步,模型层 C++ launch 使用 Runtime stream 不额外同步。
 
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`RecurrentGatedDeltaRulePaged::Init`(`csrc/kernels/recurrent_gated_delta_rule_paged.h`)从 UB 偏移 0 顺序排布全部缓冲,decode 与 prefill 两个入口共用同一布局,`assert(off <= UB_SIZE)` 是容量断言。布局对维度定长:计算/中转缓冲按 host 上限 K=128、64 行 V tile(V≤128)分配,门控行按 `GATE_CAP = XLITE_GDN_GATE_CAP = 4096`(`csrc/gdn_metadata.h` 的 `XLITE_GDN_GATE_CAP`)个 FP32 元素分配——占用与头数/K/V 的具体取值无关,任意合法配置(如 Hk=16、Hv=32、K=128、V=128 的 GDN 模型)占用相同。硬件容量基准(910B/dav C220):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)。dtype 记法:模板 `Dtype` 为激活类型,FP32 路径 `<float>`、FP16/BF16 路径 `<half|bfloat16_t>`(2B,另增 fp16/bf16 转换暂存区);两路径同取上述定长布局,占用差异仅来自 dtype——FP32 路径下五个转换暂存区(`stateTmp`/`stateTmp2`/`qStage`/`kStage`/`vStage`)分配量为 0(`Init` 的 `std::is_same<Dtype, float>` 条件分支,指针与后继缓冲别名但从不使用),下表以 0 计入合计。
+
+**AIV UB(容量 192KB,每 block 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | FP32 占用(B) | FP16/BF16 占用(B) |
+|---|---|---|---|---|---|---|
+| `ioTmp` | 定长 512B 中转区(≤128 元素) | Dtype | 1(串行,事件 EVENT_ID0) | `512` B | 512 | 512 |
+| `stateTmp`/`stateTmp2` | (64, 128) | Dtype | 2(事件 EVENT_ID3/4,decode 状态乒乓;prefill 仅用 `stateTmp` 兼作门控 gather 暂存) | `64*128*sizeof(Dtype)` B | 0 | 32768 |
+| `qF`/`qF2` | kDim(≤128) | float | 2(事件 EVENT_ID0,prefill token 乒乓;decode 仅用 `qF`) | `512` B | 1024 | 1024 |
+| `kF`/`kF2` | kDim(≤128) | float | 2(同上) | `512` B | 1024 | 1024 |
+| `vF`/`vF2` | vDim(≤128) | float | 2(同上) | `512` B | 1024 | 1024 |
+| `stateF`/`stateF2` | (64, 128) | float | 2(事件 EVENT_ID3/4,decode 状态乒乓;prefill 单份驻留 `stateF`) | `64*128*4` B | 65536 | 65536 |
+| `product` | (64, 128) | float | 1 | `64*128*4` B | 32768 | 32768 |
+| `delta` | 64(每 V 行一个标量) | float | 1 | `256` B | 256 | 256 |
+| `outF` | vDim(≤128) | float | 1 | `512` B | 512 | 512 |
+| `reduceTail` | 64 | float | 1 | `256` B | 256 | 256 |
+| `deltaBlocks` | (64, 8)(每标量广播为 32B 块) | float | 1 | `64*32` B | 2048 | 2048 |
+| `qStage` | kDim(≤128) | Dtype | 1(事件 EVENT_ID0,prefill 预取中转) | `128*sizeof(Dtype)` B | 0 | 256 |
+| `kStage` | kDim(≤128) | Dtype | 1(同上) | `128*sizeof(Dtype)` B | 0 | 256 |
+| `vStage` | 64 | Dtype | 1(同上) | `64*sizeof(Dtype)` B | 0 | 128 |
+| `decayRow` | GATE_CAP | float | 1(prefill 批量门控行;decode 仅用首元素) | `GATE_CAP*4` B | 16384 | 16384 |
+| `betaRow` | GATE_CAP | float | 1(同上) | `GATE_CAP*4` B | 16384 | 16384 |
+| **合计** | | | | | **137728** | **171136** |
+
+**占用汇总**(字节数):
+
+| 存储级 | 硬件容量 | FP32 占用 | 占比 | FP16/BF16 占用 | 占比 |
+|---|---|---|---|---|---|
+| UB(每 block) | 192 KB | 137728 B | 70.1% | 171136 B | 87.0% |
+
+要点:
+
+- **UB 是唯一使用的存储级**(纯向量递推,无 cube),FP16/BF16 路径 87.0% 最紧:双份 64×128 FP32 state(`stateF`/`stateF2`,65536 B)+ `product`(32768 B)+ 双份 fp16 状态转换暂存(`stateTmp`/`stateTmp2`,32768 B)合计约 77%,是占用大头——这是 64 行 V tile + K=128 上限定长分配的直接结果,`assert(off <= UB_SIZE)` 即容量来源(源码注释"64 V rows keep even K=128 well below the A2 192 KiB UB limit"的落点);
+- `decayRow`/`betaRow` 各 16384 B(GATE_CAP=4096 个 FP32 元素)是第二大头,支撑 prefill 的批量门控预取;host 侧 prefill 约束 `Hv <= XLITE_GDN_GATE_CAP`(见上文约束段)正来自这对行缓冲;
+- FP32 路径省去全部转换暂存(比 FP16/BF16 少 33408 B,占 70.1%);FP16/BF16 增加 `stateTmp`×2 与 `qStage`/`kStage`/`vStage` 三段;
+- decode 的状态乒乓(EVENT_ID3/4)与 prefill 的 token 乒乓(EVENT_ID0)共用这一静态布局,占用不随执行阶段与请求规模变化。
+
 ## 验证
 
 `tests/kernels/recurrent_gated_delta_rule_paged.py` 验证 dtype、分组头、维度、raw-table 页选择和非法 descriptor;`tests/kernels/gdn_prefill_paged.py` 对独立 FP32 recurrence 校验 fresh/续算/ragged/空段、混合单/多 token、null 页、分组头、pitch 与跨阶段交接;`tests/models/gdn_paged.py` 验证小型混合模型的 V1/V2 metadata 和分段执行一致性。

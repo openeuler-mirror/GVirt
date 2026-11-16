@@ -76,3 +76,30 @@ fp16/bf16 输入均升精度到 fp32 计算（`csrc/kernels/add.h` 的 `add` 模
 - GM↔UB 搬运的 burst 数按 `DIV_ROUND_UP(y_numel * sizeof(Dtype), BLOCK_SIZE)` 向上取整（32B 对齐），末尾可能的越界部分只影响 UB 内无效数据，最终按同样取整字节数写出，不会越界写 GM（z 每行长度与 x/y 相同）；
 - 要求 `y_numel` 每行数据能放入 UB（单行整体处理，无行内分块）；
 - 尾部元素若不满足 256B repeat 对齐，vconv/vadd 按取整后的 repeat 数执行，UB 中的 padding 数据不参与正确性（写出长度同样按 32B 取整）。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+`add`（`csrc/kernels/add.h` 的 `add` 模板函数）为纯 AIV 算子，片上缓冲只有 UB：入口处以 `get_imm` 偏移把 4 个连续缓冲排成一段，自偏移 0 起依次为 t1_dtype/t2_dtype/t1_float/t2_float，每份大小随运行期 `y_numel` 缩放。硬件容量基准（910B/dav C220，NpuArch 2201）：UB 192KB（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank）；无 L1/L0A/L0B/L0C 占用。dtype 记法：Dtype 为 x/y/z 元素类型，fp16/bf16 均为 2B，UB 布局与 dtype 无关，下表单占用列。典型配置：残差累加场景取 DSV4 hiddenSize=4096（每次处理元素数 y_numel=4096）；占用随 y_numel 线性，上限 y_numel=16384（总占用 12×y_numel B ≤ 192KB）。
+
+**AIV UB（容量 192KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | y_numel=4096 占用（B） |
+|---|---|---|---|---|---|
+| `t1_dtype` | `y_numel` 个 Dtype | Dtype | 1（MTE2↔V，事件 ID0） | `y_numel*sizeof(Dtype)` | 8192 |
+| `t2_dtype` | `y_numel` 个 Dtype | Dtype | 1（MTE2↔V，事件 ID1） | `y_numel*sizeof(Dtype)` | 8192 |
+| `t1_float` | `y_numel` 个 float | float | 1（V 内部顺序复用，无独立事件） | `y_numel*sizeof(float)` | 16384 |
+| `t2_float` | `y_numel` 个 float | float | 1（V↔MTE3，事件 ID0） | `y_numel*sizeof(float)` | 16384 |
+| **合计** | | | | | **49152** |
+
+**占用汇总**（vs 硬件容量）：
+
+| 存储级 | 硬件容量 | 占用（B） | 占比 |
+|---|---|---|---|
+| UB | 192 KB | 49152 | 25.0% |
+
+要点：
+
+- **容量约束完全隐式，无 assert、无 host 校验**：总占用 `12*y_numel` B 须 ≤ 192KB，即 `y_numel <= 16384`；超限无任何保护，上文边界处理「单行整体处理，无行内分块」即指此约束；
+- fp16/bf16 同为 2B，占用与 dtype 无关；4 个缓冲各持 1 份、跨迭代轮转复用（非成对乒乓），流水重叠来自四段轮转而非乒乓份数；
+- 两个 fp32 缓冲（合计 32768 B）是占用大头，占合计的 2/3——升精度计算使 fp32 中转成为必要开销；
+- GM↔UB 搬运 burst 按 `DIV_ROUND_UP(y_numel*sizeof(Dtype), 32)` 取 32B 粒度，`y_numel` 非 16 对齐时实际占用略高于标称（见上文 UB 内存布局）。

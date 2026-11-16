@@ -100,6 +100,56 @@ host 侧按组流水,workspace 一次性按容量分配、逐组 `View` 复用:
 - NZ 分片须含完整 NZ 块(`csrc/dsa_cp_weight.h` 的 `DsaCpWeightStorageShape`:FRACTAL_NZ 按 `[列块, 行块, 16, C0]` 存储,`DSA_CP_NZ_ROWS=16`、列块 `C0` 为 32 字节对应元素数);
 - ND 非转置时直接 `XliteOpConcatCol` 按列拼接;非转置 NZ 与转置 ND 返回原 AllGather 结果的 View。
 
+### 片上缓冲分配与占用汇总(AIV UB)
+
+本算子族 5 个内部 kernel 各自独立 launch,UB 布局互不共存(launch 之间硬件自动回收),故按 kernel 分表。全部 kernel 为向量核(`KERNEL_TYPE_MIX_AIV_1_0`),无 L1/L0 分配;`dsa_cp_metadata` 与 `dsa_cp_gather_metadata` 为单核标量 kernel(纯标量 GM 读写,仅以 `DataCacheCleanAndInvalid` 维护 cache line 一致性),**无任何片上缓冲排布**;`dsa_cp_gather_mla` 链路的 MLA 段复用 `mla_v2` 算子(其 AIC L1/L0 与 AIV UB 布局见 [mla_v2](mla_v2.md),不在本文展开)。硬件容量基准(910B/dav C220,NpuArch 2201):AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`),每个 AIV subblock 各持一份独立 UB。典型配置取 `tests/kernels/mla.py` 的 `check_dsa_cp_gather_mla` 主配置:kvLoraRank=512、ropeHeadDim=64、blockSize=128、topK=2048、BF16(DeepSeek-V3.2 形状的 MLA,nHeads=64)。dtype 无关的搬运 kernel 按 dtype 字节宽整行搬运,占用与 dtype 无关。
+
+**UB——`dsa_cp_write_kv_cache_by_slot`(GM→UB→GM 单缓冲中转)**
+
+`tokenBytes` 为单行字节数(host launch 由 `input.shape[1] * 元素字节` 算出,`csrc/op.cpp` 的 `XliteOpDsaCpWriteKVCacheBySlot`);行宽超过 `UB_SIZE` 时按 192KB 分段循环。模型路径四个通道(latent K `kvLoraRank=512`、rope K Pe `ropeHeadDim=64`、indexer K、indexer scale)同核串行复用同一缓冲,下表代入最宽的 latent K 行。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `buffer` | `tokenBytes`(单行字节,latent K 行 = 512×2B) | uint8 | 1(事件0 单事件握手) | `MIN(UB_SIZE, 剩余行字节)` | 1024 |
+| **合计** | | | | | **1024** |
+
+**UB——`dsa_cp_reorder_wo`(GM→UB→GM 双半乒乓中转)**
+
+`blockBytes` 为一个 NZ 列块的行块字节(`csrc/op.cpp` 的 `XliteOpDsaCpGatherWeight`:`storageLen/columnBlocks*元素字节`,即 `rowBlocks*DSA_CP_NZ_ROWS*C0*sizeof(Dtype)`,bf16 下 = rowBlocks×512B);超过单侧暂存 `bufBytes = ROUND_DOWN(UB_SIZE/2, 32B)`(96KB)时按 96KB 分段循环。`buffer[0]`/`buffer[1]` 两半乒乓(split.cpp 协议):MTE2 装入任务 k+1 与 MTE3 写回任务 k 重叠,写回延迟跨任务边界(input 只读、output 只写、GM 不相交,事件标志 EVENT_ID0/1 独自守护半区复用,见上文数据流)。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `buffer[2]` | `MIN(bufBytes, blockBytes)` 的分段(示例代入:W^O 每 rank K 分片 1024 行、hiddenSize=7168 → rowBlocks=64 → blockBytes=32768,单段即足) | uint8 | 2(事件0/1) | `MIN(bufBytes, 剩余段字节)` | 65536(两半交替各 32768) |
+| **合计** | | | | | **65536** |
+
+**UB——`gather_sparse_kv_cache_per_query`(双份 chunk 乒乓 + 查询窗口)**
+
+`off` 从 0 起按 chunk 乒乓缓冲排布(每槽 `ROUND_UP` 到 `BLOCK_SIZE=32B`),剩余 UB 全部用作 `groupCachedLens` 的查询窗口(`queryWindowCapacity = (UB_SIZE-off)/sizeof(int32_t)`);窗口非空的下限由 kernel 断言保证(见要点)。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `kBufs` | `(CNT_ONE_LOOP=32, kvLoraRank=512)` | bf16 | 2(事件0/1) | `ROUND_UP(kvLoraRank*sizeof(Dtype)*CNT_ONE_LOOP, BLOCK_SIZE)` | 65536 |
+| `peBufs` | `(32, ropeHeadDim=64)` | bf16 | 2(事件0/1) | `ROUND_UP(ropeHeadDim*sizeof(Dtype)*CNT_ONE_LOOP, BLOCK_SIZE)` | 8192 |
+| `topkIndicesUb` | `CNT_ONE_LOOP=32` 个 int32 | int32 | 2(事件0/1) | `ROUND_UP(CNT_ONE_LOOP*sizeof(uint32_t), BLOCK_SIZE)` | 256 |
+| `groupCachedLensUb` | `(UB_SIZE-off)/4 = 30656` 个 int32(查询窗口) | int32 | 1(事件4) | `(UB_SIZE-off)/sizeof(int32_t)*sizeof(int32_t)` | 122624 |
+| **合计** | | | | | **196608** |
+
+**占用汇总**(各表占用 vs 硬件容量;三个 kernel 独立 launch、UB 互不共存,不跨 kernel 叠加;字节数):
+
+| kernel | 硬件容量 | 典型占用 | 占比 |
+|---|---|---|---|
+| `gather_sparse_kv_cache_per_query` UB | 192 KB | 196608 B(查询窗口吃满剩余 UB) | 100% |
+| `dsa_cp_write_kv_cache_by_slot` UB | 192 KB | 1024 B(latent K 行) | 0.5% |
+| `dsa_cp_reorder_wo` UB | 192 KB | MIN(196608, 2*blockBytes) B | ≤100% |
+| `dsa_cp_metadata` / `dsa_cp_gather_metadata` | — | 0(纯标量,无片上缓冲) | — |
+
+要点:
+
+- **查询窗口设计把 UB 恰好吃满**:`gather_sparse_kv_cache_per_query` 把双份 chunk 缓冲之外的剩余 UB 全部用作 `groupCachedLens` 查询窗口(典型 30656 个 int32),窗口越大、跨查询重载越少;窗口非空的下限由 kernel 断言 `off + BLOCK_SIZE <= UB_SIZE` 保证(至少 8 个 int32),host 侧还按任务数收缩 launch grid(`PickMinBlockNum`,任务 = groupLen×topkChunks);
+- **host 校验与 kernel 断言的容量来源**:host(`csrc/op.cpp` 的 `XliteOpDsaCpGatherMLA`)校验 `0 < topK <= MAX_TOPK_NUM=2048` 且 128 倍数、`blockSize` 为 `GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP=32` 的倍数、`nHeads <= XLITE_MAX_M0=128`(MLA tile 须容纳单 token 全部头);kernel(`csrc/kernels/gather_sparse_kv_cache_per_query.h`)断言 `kvLoraRank >= ropeHeadDim` 且 `perKBytes/perPeBytes % BLOCK_SIZE == 0`——保证 chunk 缓冲的 `ROUND_UP` 垫片恰为零、无对齐损耗;
+- **两个 metadata kernel 无片上缓冲的原因**:元数据只做标量 GM 读写且可能刚被上一层 DMA 更新,读前写后均以 `DataCacheCleanAndInvalid` 维护标量一致性,launch grid=1 单核串行,不排布任何 UB/L1/L0;
+- 两个纯搬运 kernel 中,`dsa_cp_write_kv_cache_by_slot` 仍为 UB 单缓冲:按 `UB_SIZE` 分段,行字节超过 192KB 的通道自动多段循环,同核多通道串行复用同一缓冲,MTE2 搬入与 MTE3 写出以单 `EVENT_ID0` 轮转握手;`dsa_cp_reorder_wo` 则如上表所述按 96KB 半区乒乓,双事件握手、写回跨任务边界延迟。
+
 ## 边界处理
 
 - `dsa_cp_metadata`:空交集行写零但不改变行序;`local_token_capacity` 可大于实际 shard 长度(AllGather padding 区),slot mapping 覆盖整个容量;
