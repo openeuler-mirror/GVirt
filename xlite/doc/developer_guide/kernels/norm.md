@@ -34,7 +34,7 @@ Python 侧入口:`rmsnorm / rmsnorm_with_bias / rmsnorm_variance_only / layernor
 | kcacheStride | 标量 | - | uint32_t | 写 cache 路径的 kcache dim-0 跨度(元素数),与 kcache/slot_mapping/block_size(默认传 nullptr/nullptr/0)配套;连续 cache 时等于 block_size × norm_dim × cnt_per_token(即 total_dim)的乘积,非连续时由宿主(如 mla_prepare 传 `MAX(kCache.stride[0], blockSize*kvLoraRank)`)传入,kernel 内层再做 `MAX(kcacheStride, block_size*total_dim)` 钳制 |
 | outFp32 | 标量 | - | bool | 输出是否为 fp32 |
 
-测试参考:[tests/kernels/rmsnorm.py](../../../tests/kernels/rmsnorm.py)(`[64, 8192]`、带 stride 的 `DIM=128, CNT=8`)、[tests/kernels/layernorm.py](../../../tests/kernels/layernorm.py)、[tests/kernels/l2norm.py](../../../tests/kernels/l2norm.py)、[tests/kernels/rmsnorm_full.py](../../../tests/kernels/rmsnorm_full.py)(variance-only + all_reduce + apply 三步)。
+测试参考:[tests/kernels/test_rmsnorm.py](../../../tests/kernels/test_rmsnorm.py)(`[64, 8192]`、带 stride 的 `DIM=128, CNT=8`)、[tests/kernels/layernorm.py](../../../tests/kernels/layernorm.py)、[tests/kernels/l2norm.py](../../../tests/kernels/l2norm.py)、[tests/kernels/rmsnorm_full.py](../../../tests/kernels/rmsnorm_full.py)(variance-only + all_reduce + apply 三步)。
 
 ## 支持的数据类型
 
@@ -103,7 +103,7 @@ MTE2(搬入)/ V(计算)/ MTE3(搬出)三管线,事件标志协议:
 
 ### 片上缓冲分配与占用汇总
 
-主路径 `norm<Dtype>` 与大维度分块路径 `rmsnorm_noaffine_tiled`(`csrc/kernels/norm.h` 的 `norm<Dtype>` / `rmsnorm_noaffine_tiled`)各自在函数入口把 UB 自偏移 0 顺序累进排布,容量唯一守卫是 kernel 断言 `assert(off <= UB_SIZE)`;host 侧(`csrc/op.cpp` 的 `XliteOpRmsNorm`)只校验 dtype、不限制 norm_dim。硬件容量基准(910B/dav C220,NpuArch 2201):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE=196608`,4KB×48 bank),本算子为纯 AIV 向量算子,不使用 L1/L0A/L0B/L0C。dtype 记法:模板实参 `Dtype` 为输入/输出元素类型,fp16/bf16 两个实例(`norm_float16_t` / `norm_bfloat16_t`)均为 2B,UB 布局相同、占用不分列;全部中间计算在 fp32 上。典型配置取两组:带仿射整行 RMSNorm(norm_dim=8192、cnt_per_token=1,即 `tests/kernels/rmsnorm.py` 的 `[64, 8192]` 用例)与逐 head qkNorm(headDim=128、cnt_per_token=8,total_dim=1024,即同测试 `DIM=128, CNT=8` 用例)。
+主路径 `norm<Dtype>` 与大维度分块路径 `rmsnorm_noaffine_tiled`(`csrc/kernels/norm.h` 的 `norm<Dtype>` / `rmsnorm_noaffine_tiled`)各自在函数入口把 UB 自偏移 0 顺序累进排布,容量唯一守卫是 kernel 断言 `assert(off <= UB_SIZE)`;host 侧(`csrc/op.cpp` 的 `XliteOpRmsNorm`)只校验 dtype、不限制 norm_dim。硬件容量基准(910B/dav C220,NpuArch 2201):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE=196608`,4KB×48 bank),本算子为纯 AIV 向量算子,不使用 L1/L0A/L0B/L0C。dtype 记法:模板实参 `Dtype` 为输入/输出元素类型,fp16/bf16 两个实例(`norm_float16_t` / `norm_bfloat16_t`)均为 2B,UB 布局相同、占用不分列;全部中间计算在 fp32 上。典型配置取两组:带仿射整行 RMSNorm(norm_dim=8192、cnt_per_token=1,即 `tests/kernels/test_rmsnorm.py` 的 `[64, 8192]` 用例)与逐 head qkNorm(headDim=128、cnt_per_token=8,total_dim=1024,即同测试 `DIM=128, CNT=8` 用例)。
 
 **UB(主路径 `norm<Dtype>`,预算 `UB_SIZE=192KB`)**
 

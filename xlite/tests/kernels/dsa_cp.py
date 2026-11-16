@@ -100,9 +100,9 @@ def test_dsa_cp_write_kv_cache_by_slot(runtime, dtype, width, pitched_input):
 def test_dsa_cp_reorder_wo(runtime, ranks, column_blocks, block_bytes):
     total = ranks * column_blocks * block_bytes
     torch.manual_seed(7)
-    inp = torch.randint(-128, 128, (total,), dtype=torch.int8)
+    inp = torch.randint(-128, 128, (total,), dtype=torch.int8, device="cpu")
     # A poisoned output catches skipped blocks and unwritten tail sub-chunks.
-    out = torch.full((total,), -35, dtype=torch.int8)
+    out = torch.full((total,), -35, dtype=torch.int8, device="cpu")
     expected = inp.reshape(ranks, column_blocks, block_bytes).transpose(0, 1).reshape(total)
     inp, out = inp.npu(), out.npu()
     torch.npu.synchronize()
@@ -123,7 +123,7 @@ def test_local_all_head_attention(runtime, heads, flash, sparse, lengths, cached
     max_seq = blocks * block_size
 
     def random(shape):
-        return (torch.randn(shape) * 0.05).bfloat16()
+        return (torch.randn(shape, device="cpu") * 0.05).bfloat16()
 
     q = random((total, heads, nope + rope))
     k = random((batch, max_seq, latent))
@@ -132,16 +132,16 @@ def test_local_all_head_attention(runtime, heads, flash, sparse, lengths, cached
     uv = random((heads, latent, value))
     q_absorb = torch.einsum("thd,hdl->thl", q[..., :nope].float(), uk.float()).bfloat16()
     scale = (nope + rope) ** -0.5
-    expected = torch.empty(total, heads, value)
+    expected = torch.empty(total, heads, value, device="cpu")
     top_k = 128 if sparse else 0
-    indices = torch.empty(total, top_k, dtype=torch.int32)
+    indices = torch.empty(total, top_k, dtype=torch.int32, device="cpu")
     for request, (start, length) in enumerate(zip(starts, lengths)):
         for t in range(length):
             end = cached[request] + t + 1
             first = max(0, end - top_k) if sparse else 0
             if sparse:
                 indices[start + t].fill_(end)
-                indices[start + t, : end - first] = torch.arange(first, end)
+                indices[start + t, : end - first] = torch.arange(first, end, device="cpu")
             scores = q_absorb[start + t].float() @ k[request, first:end].float().T
             scores += q[start + t, :, nope:].float() @ pe[request, first:end].float().T
             out = (torch.softmax(scores * scale, dim=-1) @ k[request, first:end].float()).bfloat16()

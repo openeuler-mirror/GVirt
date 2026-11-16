@@ -27,8 +27,8 @@ matmul_##dtype(x, y, z, m, n, k, nz, transpose, m0, n0, k0, swizzl, bias, deqSca
 
 Python 调用方式：
 
-- `matmul(rt, x, y, z, weight_nz, transpose)`（`tests/kernels/matmul.py` 的 `matmul(rt, x, y, z, ...)` 调用示例，关键字 `matmul(rt, x, y, z`）
-- `matmul_with_bias(rt, x, y, z, bias, weight_nz)`（`tests/kernels/matmul_with_bias.py` 的 `matmul_with_bias(...)` 调用示例，关键字 `matmul_with_bias(rt, x, y, z`）
+- `matmul(rt, x, y, z, weight_nz, transpose)`（`tests/kernels/test_matmul.py` 的 `matmul(rt, x, y, z, ...)` 调用示例，关键字 `matmul(rt, x, y, z`）
+- `matmul_with_bias(rt, x, y, z, bias, weight_nz)`（`tests/kernels/test_matmul_with_bias.py` 的 `matmul_with_bias(...)` 调用示例，关键字 `matmul_with_bias(rt, x, y, z`）
 - `matmul_dequant(rt, x, y, bias, scale, z, weight_nz, transpose)`（`tests/kernels/matmul_int8.py` 的 `matmul_dequant(...)` 调用示例，关键字 `matmul_dequant(rt, x, y_in`；`tests/kernels/matmul_int4.py` 的 `matmul_dequant(...)` 调用示例，关键字 `matmul_dequant(rt, x_int4_pack`）
 
 各接口的 `weight_nz` 参数已废弃并将被移除：传入值被忽略，NZ 权重布局由 `InitXTensor` 边界自动检测的 FRACTAL_NZ 存储格式决定（`csrc/xlite.h` 的 `IsNpuNzFormat`），matmul 类 op 据此选择 kernel 路径。
@@ -128,7 +128,7 @@ bias 从 L1 到 C2 的搬运以 64B 数据块为单位（`C2_DATABLOCK`），deq
 失效与重置：
 
 - `TaskTilesInit` 与 `RebindGm` 重置全部驻留键跟踪器（`mROffset/nROffset/kRAOffset/kRBOffset/biasROffset`，不含 `k4TileActualBlockNum`）——跟踪键是 tile 偏移而非 GM 基址，换批次（einsum 换头）后旧驻留键会对上一头的数据"假命中"；`k4TileActualBlockNum` 不重置亦无害：驻留键置 -1 后任何比对必 miss，miss 进入装载块时会先于一切拷贝无条件重写块数；
-- bias/deqScale 经 L1 中转的装载会覆写 `l1bBuf[0]` 头部（`l1BiasBuf`/`l1DeqScaleBuf` 与其共享槽位，见「片上缓冲分配与占用汇总」），装载后必须把 `nROffset[0]` 置失效，否则 B 后续命中 buf0 会把 bias 的 fp32 字节当 B 分形读出（回归锚点：`tests/kernels/matmul_with_bias.py` 的 `BIAS_RESIDENCY_SHAPES` 与 `tests/kernels/fused_quant_matmul_dequant.py` 的 residency 用例）；
+- bias/deqScale 经 L1 中转的装载会覆写 `l1bBuf[0]` 头部（`l1BiasBuf`/`l1DeqScaleBuf` 与其共享槽位，见「片上缓冲分配与占用汇总」），装载后必须把 `nROffset[0]` 置失效，否则 B 后续命中 buf0 会把 bias 的 fp32 字节当 B 分形读出（回归锚点：`tests/kernels/test_matmul_with_bias.py` 的 `BIAS_RESIDENCY_SHAPES` 与 `tests/kernels/fused_quant_matmul_dequant.py` 的 residency 用例）；
 - `!residency`（关闭）时驻留判据恒假，每次装载都执行，等价于无驻留的原始行为——A/B 键跟踪器不再写入；`biasROffset`/`nROffset[0]` 的维护性写入仍在，但不参与任何判断。
 
 ### 量化路径（int8 / int4）

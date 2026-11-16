@@ -23,6 +23,7 @@ If a local version of agent instructions is present as `AGENTS.local.md` and not
 ## Testing
 
 - `tests/kernels/` contains kernel correctness tests. Update relevant tests when modifying or adding kernels.
+- `tests/kernels/test_*.py` are migrated single-NPU tests collected by pytest (`pytest tests/kernels` = the stable gate; promotion bar and migration recipe in `doc/developer_guide/contributing.md`). Plain-name kernel scripts are legacy loop scripts run directly with `python`; write new kernel tests pytest-style.
 - `tests/funcs/`, `tests/models/`, and `tests/e2e/` contain functional, model, and end-to-end tests.
 - `tests/performance/` contains performance tooling.
 - `tests/perf/` corresponds to `tests/kernels/` for `msprof` related performance tests.

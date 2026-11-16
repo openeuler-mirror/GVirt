@@ -14,7 +14,7 @@
 | x_numel | 标量 | - | uint32_t | 矩阵行数（host 侧传入 `in1.shape[0]`，见 `csrc/op.cpp` 的 `XliteOpAdd`） |
 | y_numel | 标量 | - | uint32_t | 每行元素个数（host 侧传入 `in1.shape[1]`） |
 
-Python 调用方式（`tests/kernels/add.py` 的 `add(rt, x, y, z)` 调用）：`add(rt, x, y, z)`，要求 x/y/z dtype 一致（`EachXDtype` 检查，`csrc/op.cpp` 的 `XliteOpAdd`）。
+Python 调用方式（`tests/kernels/test_add.py` 的 `add(rt, x, y, z)` 调用）：`add(rt, x, y, z)`，要求 x/y/z dtype 一致（`EachXDtype` 检查，`csrc/op.cpp` 的 `XliteOpAdd`）。
 
 ## 支持的数据类型
 

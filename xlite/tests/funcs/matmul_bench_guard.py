@@ -42,7 +42,7 @@ def main(device: int) -> int:
 
     # Generate on the CPU and move to the device (simulator-compatible
     # pattern, see tests/sim_smoke.py). Smallest shape supported by the
-    # matmul kernel per tests/kernels/matmul.py.
+    # matmul kernel per tests/kernels/test_matmul.py.
     x = torch.randn(1, 32, dtype=torch.float16).to(f"npu:{device}")
     y = torch.randn(32, 32, dtype=torch.float16).to(f"npu:{device}")
     z = torch.empty(1, 32, dtype=torch.float16, device=f"npu:{device}")

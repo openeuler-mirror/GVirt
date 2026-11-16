@@ -126,7 +126,7 @@ def run_case(b, s, hidden, sinkhorn_iters):
     # accumulation orders differ, so near-zero outputs drift by fp32
     # accumulation noise (up to ~4.4e-4 abs at K=16384) — atol=1e-5 is
     # unsatisfiable across GEMM implementations (same cross-GEMM noise as
-    # tests/kernels/hc_head.py and matmul.py); 1e-3 keeps >2x margin while
+    # tests/kernels/hc_head.py and test_matmul.py); 1e-3 keeps >2x margin while
     # still catching real operand/tiling bugs (O(1) errors).
     # y is bf16 out: the mixes noise propagates through sigmoid -> pre and
     # occasionally flips the final fp32->bf16 rounding by 1 ulp; (1e-2, 1e-2)

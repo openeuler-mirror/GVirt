@@ -28,17 +28,17 @@ tests/run_sim.sh run       # run tests/sim_smoke.py under the simulator
 `run` accepts another test script:
 
 ```bash
-tests/run_sim.sh run tests/kernels/add.py
-tests/run_sim.sh run tests/kernels/muls.py
+tests/run_sim.sh run tests/kernels/test_add.py
+tests/run_sim.sh run tests/kernels/test_muls.py
 ```
 
 Keep test cases small: camodel is orders of magnitude slower than hardware.
-`tests/kernels/muls.py` performs >100 launches and can take longer than the
+`tests/kernels/test_muls.py` performs >100 launches and can take longer than the
 usual timeout.
 
 Existing kernel tests that create their inputs on the device
 (`torch.randn(..., dtype=torch.float16/bfloat16, device="npu:0")`, as
-`add.py` and `muls.py` do) go through the `torch-npu` aclnn op
+`test_add.py` and `test_muls.py` do) go through the `torch-npu` aclnn op
 `aclnnInplaceNormal` before any xlite kernel runs. Whether that op works on
 camodel depends on the CANN and `torch-npu` versions: it runs on CANN
 9.2.0-beta.1 with `torch-npu` 2.9.1, while on CANN 8.3.RC2 with `torch-npu`
