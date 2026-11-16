@@ -90,4 +90,4 @@ int4 的搬运细节（在 matmul.h/kernel_macro.h 中）：`dtypeBits=4` 使 `k
 - 无 bias（`Init(..., false, useDequant, ...)`，`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`，关键字 `matmul_op.Init(m0, n0, k0, false`）；
 - 多一层"专家循环 + counts 前缀和偏移"的批处理，权重/scale 通过 device 指针数组间接寻址；
 - `coreOffset` 跨专家 tile 均衡；
-- m0/n0/k0 由 kernel 默认值决定（host 传 -1，`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`），即 `m0=128`、`n0 = useDequant ? 128 : 256`、`k0 = 512*8/dtypeBits`（`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `if (m0 == (uint64_t)-1)`）。
+- m0/n0/k0 由 kernel 默认值决定（host 传 -1，`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`），即 `m0=128`、`n0=256`、`k0 = 512*8/dtypeBits`（`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `if (m0 == (uint64_t)-1)`；`hasDeqScale`/`hasBias` 只把 n0 钳到 256 上限，对默认值不生效，即反量化路径同为 n0=256）。

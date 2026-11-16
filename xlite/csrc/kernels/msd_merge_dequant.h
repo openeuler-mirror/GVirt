@@ -78,6 +78,10 @@ __aicore__ inline void msd_merge_dequant(GM_ADDR y_merged, GM_ADDR scaleBiasPtrs
     uint32_t counts_pad = ROUND_UP(numExperts * sizeof(uint32_t), 32);
     auto *end_addr = reinterpret_cast<UBA(int8_t)>(counts_buf + counts_pad / sizeof(uint32_t));
 
+    // Single-row layout: 24B/elem on n_pad + the counts slice; the host mirrors
+    // this as MSD_MERGE_DEQUANT_MAX_N (XliteOpMSDMergeDequant).
+    assert((uintptr_t)end_addr <= UB_SIZE);
+
     UBA(half) high_bufs[PINGPONG] = {high0, high1};
     UBA(half) low_bufs[PINGPONG] = {low0, low1};
     UBA(bfloat16_t) out_bufs[PINGPONG] = {out0, out1};

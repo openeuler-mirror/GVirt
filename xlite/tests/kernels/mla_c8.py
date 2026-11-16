@@ -19,7 +19,7 @@ from xlite._C import Runtime, mla_v2
 npu_id = 0
 tile_size = 8192
 
-MAX_SOFTMAX_PINGPONG_LEN = 11776
+MAX_SOFTMAX_PINGPONG_LEN = 10496
 MAX_DENSE_QUERY_LEN = 6
 
 

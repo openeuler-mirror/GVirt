@@ -81,7 +81,7 @@ mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
 | blockTableStride | 标量 | - | uint32 | blockTables 的行跨度(元素数),host 取 `blockTables.stride[0]`,仅用于 sparse 行寻址(dense 置 0) |
 | maxSeqLen | 标量 | - | uint32 | qk workspace 行宽与 dense 长度:sparse 时为 `blockTables.shape[1] * blockSize`(qk workspace 行宽;V2 的 `shape[1]` 已由 PrepareAttn 收窄到运行期宽度),dense 时为连续 cache 每批容量(Gather Decode 为 indexTopK，C8 完整展开为调用方分配的容量) |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
-| topK | 标量 | - | uint32 | DSA top-k;启用 Top-K 选择时，host 要求 `maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=11776` 且 `topK ≤ MAX_TOPK_NUM=2048`(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`/`MAX_TOPK_NUM`)。Python `dense=True` 仍要求 topK > 0，收集后以该值为 maxSeqLen、以 `topK=0` 调用内核；C8 完整展开保留原 topK 和索引 |
+| topK | 标量 | - | uint32 | DSA top-k;启用 Top-K 选择时，host 要求 `maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=10496` 且 `topK ≤ MAX_TOPK_NUM=2048`(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`/`MAX_TOPK_NUM`)。Python `dense=True` 仍要求 topK > 0，收集后以该值为 maxSeqLen、以 `topK=0` 调用内核；C8 完整展开保留原 topK 和索引 |
 | kCacheStride / peCacheStride | 标量 | - | uint32 | kCache / peCache 的 dim-0 跨度(元素数),块或 batch 基址 = 序号 × 跨度:sparse 为每物理块跨度(连续时等于 blockSize×kvLoraRank / blockSize×ropeHeadDim),dense 为每 batch 跨度(连续时等于 maxSeqLen×kvLoraRank / maxSeqLen×ropeHeadDim);非连续时由宿主传入真实跨距 |
 | dense | 标量 | - | uint32 | 1=dense cache(`[batch, maxSeqLen, ...]`,batch 起点 = b×kCacheStride,由 gather_sparse_kv_cache 收集,blockTable 不使用),0=paged(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `dense`) |
 | densePerQuery | 标量 | - | uint32 | dense 时选择缓存行布局：1=每 query 一行，0=每请求一行；SFA-C8 完整展开使用 0 |

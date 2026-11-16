@@ -54,7 +54,7 @@ flash_attention_<dtype>(input, kCache, vCache, qk, sv, max, sum, lastMax, lastSu
 | blockTables | 输入 | `[rows >= batch, blockTableStride]` | INT32 | 逻辑块→物理块映射;持久化缓冲,行跨度为分配跨度(`blockTables.stride[0]`),行宽为每步运行期宽度 `shape[1]`,仅每行 lens 推导的有效前缀被读取(同 attention) |
 | kCacheStride / vCacheStride | 标量 | - | uint32 | 同 attention:K/V cache 的 dim-0 跨度(元素数),host 传 `XTensor.stride[0]` |
 | nHeads / nKVHeads / headSize / blockSize / batch / blockTableStride | 标量 | - | uint32 | 同 attention(blockTableStride 为表行跨度,仅用于行寻址) |
-| tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 侧经 `csrc/op.h` 的 `static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN)` 保证 `MAX_KV_TILE_SIZE(8192) ≤ MAX_SOFTMAX_PINGPONG_LEN(11776)`,由 auto-tuner 在 8192 内选取 |
+| tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 侧经 `csrc/op.h` 的 `static_assert(MAX_KV_TILE_SIZE <= MAX_SOFTMAX_PINGPONG_LEN)` 保证 `MAX_KV_TILE_SIZE(8192) ≤ MAX_SOFTMAX_PINGPONG_LEN(10496)`,由 auto-tuner 在 8192 内选取 |
 | zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`AicHelper::Init` 用它预填零 L1B(见上文) |
 
 ## 支持的数据类型
@@ -75,7 +75,7 @@ host 校验 qkv/qk/kCache/vCache/output dtype 一致(`csrc/op.cpp` 的 `XliteOpF
 每个 (query tile, kvHead, kv tile) 任务的执行顺序在时间上错开为:
 
 1. AIC `RunAicQK`(复用 `AicHelper`,见 attention 文档;`kvOffset/kvLen` 表达 KV tile 窗口)→ `ffts_cross_core_sync(PIPE_FIX, flag0)` 通知 AIV;
-2. AIV 对 qk tile 做 `RunAivSoftmaxPingPong`(单趟版 softmax,行宽 tileSizeOfCachedKV ≤ 11776,UB 常量校验见 `csrc/kernels/softmax_attn_aiv.h` 的 `static_assert` UB 校验块,关键字 `UB_SIZE`),同时把每行局部 max/sum 存到 `max/sum` workspace → `ffts_cross_core_sync(PIPE_MTE3, flag2)`;
+2. AIV 对 qk tile 做 `RunAivSoftmaxPingPong`(单趟版 softmax,行宽 tileSizeOfCachedKV ≤ 10496,UB 常量校验见 `csrc/kernels/softmax_attn_aiv.h` 的 `static_assert` UB 校验块,关键字 `UB_SIZE`),同时把每行局部 max/sum 存到 `max/sum` workspace → `ffts_cross_core_sync(PIPE_MTE3, flag2)`;
 3. AIC `wait_flag_dev(2)` 等 softmax 完成,`RunAicSV`(gqaScatter=false,紧凑写 sv,行距 headSize)算出 `Σ softmax_local(qk)·V` → `ffts_cross_core_sync(PIPE_FIX, flag1)`;
 4. AIV `wait_flag_dev(1)` 等 SV 完成,`RunAivSoftmaxUpdate` 把 sv/max/sum 并入 output/lastMax/lastSum。
 

@@ -54,7 +54,7 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 | queryStartLoc / queryLens / cachedLens / blockTables | 输入 | `[batch]` / `[rows >= batch, blockTableStride]` | INT32 | 同 mla_v2(持久化表,仅每行有效前缀被读取)；dense 时不使用 blockTables |
 | nHeads / ropeHeadDim / kvLoraRank / blockSize / batch / blockTableStride | 标量 | - | uint32 | 同 mla_v2(blockTableStride 为表行跨度,仅用于行寻址) |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
-| tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN=11776`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`) |
+| tileSizeOfCachedKV | 标量 | - | uint32 | KV tile 长度,host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN=10496`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`) |
 | kCacheStride / peCacheStride | 标量 | - | uint32 | kCache / peCache 的 dim-0 跨度(元素数)：paged 为每物理块跨度，dense 为每请求跨度 |
 | dense | 标量 | - | uint32 | 0=paged(默认)，1=per-batch 连续缓存；两种布局都保留 Top-K 选择 |
 | zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`MlaAicHelper::Init` 用它预填零 L1B(见上文) |

@@ -55,16 +55,29 @@ enum class NormKind {
 #define MAX_INDEXER_Q_TILE_LEN 24
 #define MAX_INDEXER_KV_TILE_LEN 4096
 #define INDEXER_C8_TILE_ROWS 32
-// quant_cache_c8 row dim bound: 17B/elem UB footprint + scale staging; 64 | dim.
 #define QUANT_CACHE_C8_MAX_DIM 4096
-// quant_q_c8 row dim bound: 17B/elem UB footprint + five 64-lane staging bufs;
-// 64 | dim.
 #define QUANT_Q_C8_MAX_DIM 4096
 #if MAX_INDEXER_KV_TILE_LEN > INIT_MIN_SEQ_POS
 #error "MAX_INDEXER_KV_TILE_LEN must not exceed INIT_MIN_SEQ_POS"
 #endif
 #define MAX_TOPK_NUM 2048
-#define MAX_SOFTMAX_PINGPONG_LEN 11776
+// RunAivSoftmaxPingPong row bound: the softmax row len = MAX(outN, topK +
+// swaSegWidth) must stay within this for the worst-case feature mix
+// (saveMaxSum + topK + attnSink all on) to fit UB. The binding scenario is
+// SWA + topK (the row-sized buffers plus an inTopK holding topK +
+// MAX_SWA_SEG_WIDTH elements): at MAX_TOPK_NUM that layout is 195072B <=
+// UB_SIZE(196608B), 1536B slack (static_asserts in softmax_attn_aiv.h); the
+// no-SWA worst case is 186880B. Row-contract enforcement: flash_cxa checks
+// swaSegWidth + tileSizeOfCachedKV at the host, cxa's row is checked by the
+// Python layer (tests/kernels/cxa.py max_row), flash_mla_v2 / mla_v2 /
+// flash_attention check the tile / maxSeqLen at the host.
+#define MAX_SOFTMAX_PINGPONG_LEN 10496
+// SWA segment width bound: swaSegWidth = windowSize + XLITE_MAX_M0 +
+// K_BLOCK_SIZE_2B (cxa.h / flash_cxa.h). Host-rejects wider windows
+// (XliteOpCXA / XliteOpFlashCXA): the topK path's inTopK buffer holds
+// topK + swaSegWidth elements and must stay within the budget above.
+#define MAX_SWA_SEG_WIDTH 4096
+#define MSD_MERGE_DEQUANT_MAX_N 8064
 
 // muls
 #define MAX_MULS_CALC_NUM 16320

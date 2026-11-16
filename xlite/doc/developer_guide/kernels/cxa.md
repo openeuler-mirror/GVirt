@@ -63,7 +63,7 @@ Python 签名见 `xlite/_C.pyi` 的 `def cxa(...)`,kernel 侧入口见 `csrc/ker
 
 调度类型为 `KERNEL_TYPE_MIX_AIC_1_2`(`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `KERNEL_TYPE_MIX_AIC_1_2`)):1 个 AIC(cube 核)配 2 个 AIV(vector 核)混合调度,AIC 负责 QK/SV 两个 cube GEMM,AIV 负责 softmax;AIC 与 AIV 之间用 `ffts_cross_core_sync` / `wait_flag_dev`(inner-group 同步,flag 0 = AIC→AIV 的 QK 完成,flag 1 = AIV→AIC 的 softmax 完成)做跨核握手。
 
-host 侧约束(`csrc/op.cpp` 的 `XliteOpCXA`(关键字 `dense=True requires` 约束)):dense 模式要求 `compressRatio > 0` 且 `indexTopK > 0`(dense cache 长度)。host launch 末尾把 `rt._attnZeroBuffer.ptr` 作为 `zeroGm` 传给 kernel(`CXA_FUNC_DEFINE` 签名最后一参),`CxaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
+host 侧约束(`csrc/op.cpp` 的 `XliteOpCXA`(关键字 `dense=True requires` 约束)):dense 模式要求 `compressRatio > 0` 且 `indexTopK > 0`(dense cache 长度);`windowSize > 0` 时要求 `swaSegWidth = windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B ≤ MAX_SWA_SEG_WIDTH(4096)`(关键字 `swaSegWidth > MAX_SWA_SEG_WIDTH`):topK>0 路径的 PingPong softmax 需要宽 `topK + swaSegWidth` 的 `inTopK` 缓冲(见 softmax.md 的 UB 预算)。topK>0 的行宽合同 `outN = swaSegWidth + 逐行压缩宽 ≤ MAX_SOFTMAX_PINGPONG_LEN(10496)` 由 Python 层保证(`tests/kernels/cxa.py` 的 max_row 检查,超界路由 flash),host 无法校验(逐行、依赖 lens);topK==0 行走行宽容忍的 `RunAivSoftmaxLong`。host launch 末尾把 `rt._attnZeroBuffer.ptr` 作为 `zeroGm` 传给 kernel(`CXA_FUNC_DEFINE` 签名最后一参),`CxaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
 
 ## 实现原理
 
@@ -115,7 +115,7 @@ dense 模式下每 batch 取 compress cache 子视图 `compressKCache[batchIdx *
 
 **attn_sink 并入分母**(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `*sink = attnSink[headIdx]`)):在线 softmax 得到 row_max 后,从 GM 读 `attnSink[headIdx]` 到 UB(同处 `*sink = attnSink[headIdx]` 一行),与分数同样地做 `sink - max`(`vsub`,`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vsub(sink, sink, temp`))→ `vexp`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vexp(sink, sink`)),并把 `vexp(sink)` 加到 `ReduceSumV2` 的结果上(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vadd(temp, temp, sink`)),即分母 `s = Σ exp(sᵢ - max) + exp(sink - max)`;最后 `vdiv` 归一化(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`(关键字 `vdiv(cal, cal, temp`))只作用于分数部分,sink 不进入输出。
 
-`RunAivSoftmaxLong`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`)与 PingPong 版逻辑相同,区别在于 UB 布局:`Long` 版按 `MAX_SUB_CONTEXT_SIZE` 分子块支持超长行(上限见 `csrc/kernels/softmax_attn_aiv.h` 的 `static_assert`(关键字 `MAX_TOPK_NUM or MAX_SWA_SEG_WIDTH too large`),`MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH` 规模必须放进 UB);PingPong 版用双缓冲 in/out 加速常规长度。两版此前接收 `compressCap` 参数用于 dense 模式 clamp 压缩段因果长度,现已移除:dense 模式改由调用方 `outN` 被 `qkStride` 兜底(见 AIV 路径第 2 步)约束压缩段到 `maxSeqLen`。
+`RunAivSoftmaxLong`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`)与 PingPong 版逻辑相同,区别在于 UB 布局:`Long` 版按 `MAX_SUB_CONTEXT_SIZE` 分子块支持超长行(无 attnSink 时上限 subBlockNum ≤ 127 / n ≤ 2064512,启用 attnSink 时 126 / 2048256,见 `RunAivSoftmaxLong` 上方注释);PingPong 版(topK>0 路径)用双缓冲 in/out 加速常规长度,行宽须 ≤ `MAX_SOFTMAX_PINGPONG_LEN`(10496,UB 预算见 softmax.md 与 `softmax_attn_aiv.h` 的 static_assert 块)。两版此前接收 `compressCap` 参数用于 dense 模式 clamp 压缩段因果长度,现已移除:dense 模式改由调用方 `outN` 被 `qkStride` 兜底(见 AIV 路径第 2 步)约束压缩段到 `maxSeqLen`。
 
 ### CxaAicHelper(QK / SV cube 计算)
 

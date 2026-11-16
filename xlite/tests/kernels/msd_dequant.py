@@ -54,14 +54,18 @@ def msd_merge_dequant_ref(y_merged, scale_bias, per_token_scale):
     return merged.to(torch.bfloat16)
 
 
-# (m, n) test cases — m output rows, n columns. Small N (n < ~12288) to stay
-# within the kernel's UB layout (single-row UB buffer, no N-tiling).
+# (m, n) test cases — m output rows, n columns. Small N (n <= 8064,
+# MSD_MERGE_DEQUANT_MAX_N) to stay within the kernel's single-row UB layout
+# (24B/elem on n_pad + 32B counts slice, no N-tiling); the host rejects
+# larger n. [8, 8064] pins that bound: a lowered MSD_MERGE_DEQUANT_MAX_N or a
+# regressed UB layout fails this case (host rejection or numeric error).
 test_cases = [
     [8, 96],
     [40, 512],
     [200, 2048],
     [1, 2048],
     [8192, 6144],
+    [8, 8064],
 ]
 
 
