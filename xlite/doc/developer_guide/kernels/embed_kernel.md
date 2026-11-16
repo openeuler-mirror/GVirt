@@ -35,10 +35,12 @@ Python 接口:`embed(rt, weight, in_, out, start, end)`(`XliteOpEmbed`,见 `csrc
 
 ### UB 内存布局
 
-只占 UB 头部两小块(见 `csrc/kernels/embed_kernel.h` 的 `embed_kernel` 模板函数,关键字 `ub_addr`/`zero_ub_addr`):
+占 UB 头部三块、各 `dim` 个元素(见 `csrc/kernels/embed_kernel.h` 的 `embed_kernel` 模板函数,关键字 `zero_ub_addr`/`stage_ub_addr`):
 
-- `ub_addr`(偏移 0):单行 embedding 暂存,`dim` 个元素;
-- `zero_ub_addr`(偏移 `dim * 2` 字节):`vector_dup` 预填充的全零行,仅 `tp_size > 1` 时初始化(见 `csrc/kernels/embed_kernel.h` 的 `embed_kernel` 模板函数,关键字 `vector_dup(zero_ub_addr`)。
+- `zero_ub_addr`(偏移 0):`vector_dup` 预填充的全零行,仅 `tp_size > 1` 时初始化(见 `csrc/kernels/embed_kernel.h` 的 `embed_kernel` 模板函数,关键字 `vector_dup(zero_ub_addr`);
+- `stage_ub_addr[2]`(偏移 `dim * 2` / `dim * 4` 字节):ping-pong 双暂存,让第 `i+1` 行的 MTE2 读入与第 `i` 行的 MTE3 写出重叠。
+
+三块共 `3 * dim` 个元素,`dim % 16 == 0` 且容量约束由 host 侧 `XliteOpEmbed` 强制(`EMBED_UB_BUDGET` 定义于 `csrc/kernels/kernel_param.h`,host 检查与 kernel 内的 assert 共用同一常量、不会漂移;kernel 内的 assert 在 NDEBUG 下会被编译掉,host 检查是唯一守卫)。
 
 ### 数据流
 
@@ -46,10 +48,13 @@ Python 接口:`embed(rt, weight, in_, out, start, end)`(`XliteOpEmbed`,见 `csrc
 
 1. 标量单元直接从 GM 读 `row = y[index]`(逐元素 GM 标量读,无预取);
 2. **区间判断**:若 `row >= emb_end_idx || row < emb_start_idx`,把 UB 中的全零行 `copy_ubuf_to_gm` 到 `z + index * dim`;
-3. **正常路径**:`copy_gm_to_ubuf` 把权重第 `row - emb_start_idx` 行(长度 `dim`,一个 burst 序列,`len_burst = dim / 16`、`n_burst = 1`)搬入 `ub_addr`,再 `copy_ubuf_to_gm` 写到输出第 `index` 行。
+3. **正常路径**:`copy_gm_to_ubuf` 把权重第 `row - emb_start_idx` 行(长度 `dim`,一个 burst 序列,`len_burst = dim / 16`、`n_burst = 1`)搬入暂存,再 `copy_ubuf_to_gm` 写到输出第 `index` 行。
 
-搬运为 GM→UB→GM 中继(而非 GM 到 GM 直搬),两段搬运之间以 `pipe_barrier(PIPE_ALL)` 保证 MTE2 写入对 MTE3 可见(见 `csrc/kernels/embed_kernel.h` 的 `embed_kernel` 模板函数,关键字 `pipe_barrier(PIPE_ALL)`)。整个循环体内无向量计算,同步只用 pipe_barrier,不使用事件标志。
+行按 token id 离散聚集,单行搬运无法合并;搬运为 GM→UB→GM 中继(而非 GM 到 GM 直搬)。kernel 按每核行数二选一(见 `csrc/kernels/embed_kernel.h` 的 `embed_kernel` 模板函数,关键字 `PIPE_MIN_ROWS_PER_CORE`):
+
+- **小批量(每核 < 4 行,典型 decode batch)**:沿用逐行 `pipe_barrier(PIPE_ALL)` 串行循环 —— 每核行数不足以让下一行的读与当前行的写重叠,事件标志只增加每行固定开销;
+- **大批量(prefill / 大 decode batch)**:MTE2/MTE3 ping-pong 事件流水(与 `concat_kernel` 相同的模式):第 `i` 行读入 `stage[curr]` 的同时,把上一行从 `stage[1-curr]` 写出;`set_flag`/`wait_flag` 的 EVENT_ID0/1 链保证一个暂存半区只在两行之前的 MTE3 写完成后才被复用。910B2 实测 bf16 大批量场景 kernel 时长 −24% ~ −53%,小批量持平。
 
 ### 测试参考
 
-[tests/kernels/embed.py](../../../tests/kernels/embed.py):BATCH=64、VOCAB=32000、DIM=4096,fp16/bf16;多卡时与 `F.embedding` + 掩码置零 + `all_reduce` 的参考实现对比,单卡直接对比。
+[tests/kernels/embed.py](../../../tests/kernels/embed.py):BATCH=64/512、VOCAB=32000、DIM=4096,fp16/bf16(64 行走小批量串行路径,512 行走 ping-pong 流水路径);多卡时与 `F.embedding` + 掩码置零 + `all_reduce` 的参考实现对比,单卡直接对比。msprof 逐 kernel 计时见 [tests/perf/embed.py](../../../tests/perf/embed.py)。
