@@ -156,7 +156,7 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
         inDtypeArr[1] = ub.Alloc<Dtype>(hcMult * hidden);
         outDtypeArr[1] = ub.Alloc<Dtype>(hidden);
         xFp32 = ub.Alloc<float>(hcMult * hidden);  // [hcMult, hidden] residual as fp32
-        yCalc = ub.Alloc<float>(hidden);  // accumulator: Σ_h pre[h]*x
+        yCalc = ub.Alloc<float>(hidden);           // accumulator: Σ_h pre[h]*x
     } else {
         preOut[0] = ub.AllocBytesAs<float>(lenPrePost);
         preOut[1] = ub.AllocBytesAs<float>(lenPrePost);

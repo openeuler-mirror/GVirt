@@ -106,8 +106,8 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                                            : 0)};
     __ubuf__ Dtype *inTopK = ub.AllocBytesAs<Dtype>(
         topK != 0 ? ROUND_UP((topK + swaSegWidth) * sizeof(Dtype), VECTOR_MAX_BYTESIZE) : 0);
-    __ubuf__ float *indicesFp32 = ub.AllocBytesAs<float>(
-        topK != 0 ? ROUND_UP(topK * sizeof(float), VECTOR_MAX_BYTESIZE) : 0);
+    __ubuf__ float *indicesFp32 =
+        ub.AllocBytesAs<float>(topK != 0 ? ROUND_UP(topK * sizeof(float), VECTOR_MAX_BYTESIZE) : 0);
     __ubuf__ int32_t *cmp0 = ub.AllocBytesAs<int32_t>(topK != 0 ? VECTOR_MAX_BYTESIZE * 2 : 0);
     __ubuf__ int32_t *cmp1 = ub.AllocBytesAs<int32_t>(topK != 0 ? VECTOR_MAX_BYTESIZE : 0);
     __ubuf__ float *cmpFp320 = ub.AllocBytesAs<float>(topK != 0 ? VECTOR_MAX_BYTESIZE : 0);
@@ -118,8 +118,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
         ub.AllocBytesAs<uint8_t>(topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0);
     __ubuf__ int32_t *currIndices = ub.AllocBytesAs<int32_t>(
         topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0);
-    __ubuf__ float *sink =
-        ub.AllocBytesAs<float>(attnSink != nullptr ? VECTOR_MAX_BYTESIZE : 0);
+    __ubuf__ float *sink = ub.AllocBytesAs<float>(attnSink != nullptr ? VECTOR_MAX_BYTESIZE : 0);
 
     constexpr int calPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);

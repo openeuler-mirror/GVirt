@@ -74,8 +74,7 @@ public:
             ub.AllocBytesAs<Dtype>(std::is_same<Dtype, float>::value ? 0 : 128 * sizeof(Dtype));
         kStage =
             ub.AllocBytesAs<Dtype>(std::is_same<Dtype, float>::value ? 0 : 128 * sizeof(Dtype));
-        vStage =
-            ub.AllocBytesAs<Dtype>(std::is_same<Dtype, float>::value ? 0 : 64 * sizeof(Dtype));
+        vStage = ub.AllocBytesAs<Dtype>(std::is_same<Dtype, float>::value ? 0 : 64 * sizeof(Dtype));
         decayRow = ub.AllocBytesAs<float>(GATE_CAP * 4);
         betaRow = ub.AllocBytesAs<float>(GATE_CAP * 4);
     }

@@ -37,7 +37,7 @@ __aicore__ inline void hc_pre(__gm__ float *pre, __gm__ Dtype *xResid, __gm__ Dt
     // ub2ub target; scalar-read by vaxpy
     __ubuf__ float *preCalc = ub.Alloc<float>(hcMult, VECTOR_MAX_BYTESIZE);
     __ubuf__ float *xFp32 = ub.Alloc<float>(hcMult * hidden);  // [hcMult, hidden] residual as fp32
-    __ubuf__ float *yCalc = ub.Alloc<float>(hidden);  // accumulator: Σ_h pre[h]*x
+    __ubuf__ float *yCalc = ub.Alloc<float>(hidden);           // accumulator: Σ_h pre[h]*x
 
     const int vecRep = DIV_ROUND_UP(hidden, calcPad);  // vector repeats over hidden
     const int totalRep = hcMult * vecRep;              // fp32 repeats over [hcMult, hidden]

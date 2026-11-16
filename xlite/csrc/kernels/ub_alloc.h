@@ -33,10 +33,10 @@
 // asserts that the running offset stays within capacity (UB_SIZE), so an
 // oversized layout fails at the offending allocation instead of relying on a
 // manual final assert that is easy to forget or place too late.
-class UbAlloc {
+class UbAlloc
+{
 public:
-    __aicore__ inline explicit UbAlloc(uint64_t capacity = UB_SIZE)
-        : m_off(0), m_capacity(capacity)
+    __aicore__ inline explicit UbAlloc(uint64_t capacity = UB_SIZE) : m_off(0), m_capacity(capacity)
     {
     }
 
