@@ -69,14 +69,17 @@ for m, n in test_cases:
     # 输出为 [2m, n/2]: 同一 token 的低/高 4bit 写入相邻行 (row 2r / 2r+1)
     z = torch.empty(2 * m, n // 2, dtype=torch.int8, device=f"npu:{npu_devid}")
 
-    expected_z = msd_split_activation_int8(x)
+    # Compute the reference on CPU: the int32 arithmetic right shift dispatches
+    # torch_npu into GraphEngine compilation, whose initialization fails here,
+    # before any kernel work happens.
+    expected_z = msd_split_activation_int8(x.cpu())
 
     torch.npu.synchronize()
     unpack_activation(rt, x, z)
     torch.npu.synchronize()
 
     try:
-        torch.testing.assert_close(expected_z, z, atol=1, rtol=1 / 128)
+        torch.testing.assert_close(expected_z, z.cpu(), atol=1, rtol=1 / 128)
         print(f"unpack_activation [{m}, {n}] output check passed")
     except AssertionError as e:
         print(f"{e}")
