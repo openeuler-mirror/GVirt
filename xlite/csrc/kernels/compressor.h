@@ -28,6 +28,7 @@
 #include "kernel_param.h"
 #include "norm.h"
 #include "rope_complex_and_cache.h"
+#include "ub_alloc.h"
 
 using namespace AscendC;
 
@@ -95,30 +96,16 @@ __aicore__ inline void compressor_spill_prefill_to_state(
     constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
 
     const uint32_t rowStride = ROUND_UP(rowFloats, calcPad);
-    uint64_t off = 0;
-    __ubuf__ float *kvUb0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += SPILL_ROWS * rowStride * sizeof(float);
-    __ubuf__ float *kvUb1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += SPILL_ROWS * rowStride * sizeof(float);
-    __ubuf__ float *kvUb[2] = {kvUb0, kvUb1};
-    __ubuf__ float *scoreUb0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += SPILL_ROWS * rowStride * sizeof(float);
-    __ubuf__ float *scoreUb1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += SPILL_ROWS * rowStride * sizeof(float);
-    __ubuf__ float *scoreUb[2] = {scoreUb0, scoreUb1};
-    __ubuf__ float *apeUb0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += SPILL_ROWS * rowStride * sizeof(float);
-    __ubuf__ float *apeUb1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += SPILL_ROWS * rowStride * sizeof(float);
-    __ubuf__ float *apeUb[2] = {apeUb0, apeUb1};
-    __ubuf__ float *scoreOutUb0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += SPILL_ROWS * rowStride * sizeof(float);
-    __ubuf__ float *scoreOutUb1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += SPILL_ROWS * rowStride * sizeof(float);
-    __ubuf__ float *scoreOutUb[2] = {scoreOutUb0, scoreOutUb1};
-    __ubuf__ float *calcUb = reinterpret_cast<__ubuf__ float *>(off);
-    off += SPILL_ROWS * rowStride * sizeof(float);
-    assert(off <= UB_SIZE);
+    UbAlloc ub;
+    __ubuf__ float *kvUb[2] = {ub.Alloc<float>(SPILL_ROWS * rowStride),
+                               ub.Alloc<float>(SPILL_ROWS * rowStride)};
+    __ubuf__ float *scoreUb[2] = {ub.Alloc<float>(SPILL_ROWS * rowStride),
+                                  ub.Alloc<float>(SPILL_ROWS * rowStride)};
+    __ubuf__ float *apeUb[2] = {ub.Alloc<float>(SPILL_ROWS * rowStride),
+                                ub.Alloc<float>(SPILL_ROWS * rowStride)};
+    __ubuf__ float *scoreOutUb[2] = {ub.Alloc<float>(SPILL_ROWS * rowStride),
+                                     ub.Alloc<float>(SPILL_ROWS * rowStride)};
+    __ubuf__ float *calcUb = ub.Alloc<float>(SPILL_ROWS * rowStride);
 
     const uint32_t kvBlk = rowFloats * sizeof(float) / BLOCK_SIZE;  // 32B units per half-row
     const uint32_t repeat = DIV_ROUND_UP(rowFloats, calcPad);       // vadd repeats per half-row
@@ -248,33 +235,12 @@ __aicore__ inline void compressor_decode_token_state(
     const uint32_t repeat = DIV_ROUND_UP(full_dim, calcPad);
     const uint32_t tokBlk = full_dim * sizeof(float) / BLOCK_SIZE;
 
-    uint64_t off = 0;
-    __ubuf__ float *kvUb0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *kvUb1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *kvUb[2] = {kvUb0, kvUb1};
-    __ubuf__ float *scoreUb0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *scoreUb1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *scoreUb[2] = {scoreUb0, scoreUb1};
-    __ubuf__ float *apeUb0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *apeUb1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *apeUb[2] = {apeUb0, apeUb1};
-    __ubuf__ float *calcUb0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *calcUb1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *calcUb[2] = {calcUb0, calcUb1};
-    __ubuf__ float *outUb0 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *outUb1 = reinterpret_cast<__ubuf__ float *>(off);
-    off += full_dim * sizeof(float);
-    __ubuf__ float *outUb[2] = {outUb0, outUb1};
-    assert(off <= UB_SIZE);
+    UbAlloc ub;
+    __ubuf__ float *kvUb[2] = {ub.Alloc<float>(full_dim), ub.Alloc<float>(full_dim)};
+    __ubuf__ float *scoreUb[2] = {ub.Alloc<float>(full_dim), ub.Alloc<float>(full_dim)};
+    __ubuf__ float *apeUb[2] = {ub.Alloc<float>(full_dim), ub.Alloc<float>(full_dim)};
+    __ubuf__ float *calcUb[2] = {ub.Alloc<float>(full_dim), ub.Alloc<float>(full_dim)};
+    __ubuf__ float *outUb[2] = {ub.Alloc<float>(full_dim), ub.Alloc<float>(full_dim)};
 
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
@@ -491,35 +457,19 @@ __aicore__ inline void compressor_blocks_weighted_sum(
     bool useTiled = (8 * mergeSize + 4) * paddedHeadDim * sizeof(float) > (uint64_t)UB_SIZE;
 
     if (!useTiled) {
-        uint64_t off = 0;
-        __ubuf__ float *kvUb0 = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * paddedHeadDim * sizeof(float);
-        __ubuf__ float *kvUb1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * paddedHeadDim * sizeof(float);
-        __ubuf__ float *scoreUb0 = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * paddedHeadDim * sizeof(float);
-        __ubuf__ float *scoreUb1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * paddedHeadDim * sizeof(float);
-        __ubuf__ Dtype *kvOutUb0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += paddedHeadDim * sizeof(Dtype);
-        __ubuf__ Dtype *kvOutUb1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += paddedHeadDim * sizeof(Dtype);
-        __ubuf__ float *kvUb[2] = {kvUb0, kvUb1};
-        __ubuf__ float *scoreUb[2] = {scoreUb0, scoreUb1};
-        __ubuf__ Dtype *kvOutUb[2] = {kvOutUb0, kvOutUb1};
-        __ubuf__ float *kvCalcUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * paddedHeadDim * sizeof(float);
-        __ubuf__ float *scoreCalcUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * paddedHeadDim * sizeof(float);
-        __ubuf__ float *mxUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += paddedHeadDim * sizeof(float);
-        __ubuf__ float *smUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += paddedHeadDim * sizeof(float);
-        __ubuf__ float *tmpUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * paddedHeadDim * sizeof(float);
-        __ubuf__ float *apeUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * paddedHeadDim * sizeof(float);
-        assert(off <= UB_SIZE);
+        UbAlloc ub;
+        __ubuf__ float *kvUb[2] = {ub.Alloc<float>(mergeSize * paddedHeadDim),
+                                   ub.Alloc<float>(mergeSize * paddedHeadDim)};
+        __ubuf__ float *scoreUb[2] = {ub.Alloc<float>(mergeSize * paddedHeadDim),
+                                      ub.Alloc<float>(mergeSize * paddedHeadDim)};
+        __ubuf__ Dtype *kvOutUb[2] = {ub.Alloc<Dtype>(paddedHeadDim),
+                                      ub.Alloc<Dtype>(paddedHeadDim)};
+        __ubuf__ float *kvCalcUb = ub.Alloc<float>(mergeSize * paddedHeadDim);
+        __ubuf__ float *scoreCalcUb = ub.Alloc<float>(mergeSize * paddedHeadDim);
+        __ubuf__ float *mxUb = ub.Alloc<float>(paddedHeadDim);
+        __ubuf__ float *smUb = ub.Alloc<float>(paddedHeadDim);
+        __ubuf__ float *tmpUb = ub.Alloc<float>(mergeSize * paddedHeadDim);
+        __ubuf__ float *apeUb = ub.Alloc<float>(mergeSize * paddedHeadDim);
 
         const uint32_t repeat = DIV_ROUND_UP(head_dim, calcPad);
         float negInf = -3.4028235e+38f;
@@ -678,37 +628,19 @@ __aicore__ inline void compressor_blocks_weighted_sum(
     } else {
         const uint32_t slice = calcPad / 2;  // tiled compress column (32 floats)
         uint32_t nSlice = DIV_ROUND_UP(head_dim, slice);
-        uint64_t off = 0;
-        __ubuf__ float *kvUb0 = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * slice * sizeof(float);
-        __ubuf__ float *kvUb1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * slice * sizeof(float);
-        __ubuf__ float *kvUb[2] = {kvUb0, kvUb1};
-        __ubuf__ float *scoreUb0 = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * slice * sizeof(float);
-        __ubuf__ float *scoreUb1 = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * slice * sizeof(float);
-        __ubuf__ float *scoreUb[2] = {scoreUb0, scoreUb1};
-        __ubuf__ float *kvCalcUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * slice * sizeof(float);
-        __ubuf__ float *scoreCalcUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * slice * sizeof(float);
-        __ubuf__ float *kvOutF32Ub = reinterpret_cast<__ubuf__ float *>(off);
-        off += slice * sizeof(float);
-        __ubuf__ Dtype *kvOutUb0 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += slice * sizeof(Dtype);
-        __ubuf__ Dtype *kvOutUb1 = reinterpret_cast<__ubuf__ Dtype *>(off);
-        off += slice * sizeof(Dtype);
-        __ubuf__ Dtype *kvOutUb[2] = {kvOutUb0, kvOutUb1};
-        __ubuf__ float *mxUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += slice * sizeof(float);
-        __ubuf__ float *smUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += slice * sizeof(float);
-        __ubuf__ float *tmpUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * slice * sizeof(float);
-        __ubuf__ float *apeUb = reinterpret_cast<__ubuf__ float *>(off);
-        off += mergeSize * slice * sizeof(float);
-        assert(off <= UB_SIZE);  // head_dim=512, ratio=128: ~128KB <= 192KB
+        UbAlloc ub;
+        __ubuf__ float *kvUb[2] = {ub.Alloc<float>(mergeSize * slice),
+                                   ub.Alloc<float>(mergeSize * slice)};
+        __ubuf__ float *scoreUb[2] = {ub.Alloc<float>(mergeSize * slice),
+                                      ub.Alloc<float>(mergeSize * slice)};
+        __ubuf__ float *kvCalcUb = ub.Alloc<float>(mergeSize * slice);
+        __ubuf__ float *scoreCalcUb = ub.Alloc<float>(mergeSize * slice);
+        __ubuf__ float *kvOutF32Ub = ub.Alloc<float>(slice);
+        __ubuf__ Dtype *kvOutUb[2] = {ub.Alloc<Dtype>(slice), ub.Alloc<Dtype>(slice)};
+        __ubuf__ float *mxUb = ub.Alloc<float>(slice);
+        __ubuf__ float *smUb = ub.Alloc<float>(slice);
+        __ubuf__ float *tmpUb = ub.Alloc<float>(mergeSize * slice);
+        __ubuf__ float *apeUb = ub.Alloc<float>(mergeSize * slice);
 
         for (uint32_t sIdx = 0; sIdx < nSlice; sIdx++) {
             uint32_t c0 = sIdx * slice;

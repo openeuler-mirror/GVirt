@@ -7,6 +7,7 @@
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 #include "kernel_param.h"
+#include "ub_alloc.h"
 
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
@@ -84,56 +85,41 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
-    uint64_t off = 0;
-    __ubuf__ Dtype *in1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += ROUND_UP(len * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-    __ubuf__ Dtype *in2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += ROUND_UP(len * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-    __ubuf__ Dtype *in[PINGPONG_BUF_NUM] = {in1, in2};
-    __ubuf__ Dtype *out1 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += ROUND_UP(len * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-    __ubuf__ Dtype *out2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += ROUND_UP(len * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-    __ubuf__ Dtype *out[PINGPONG_BUF_NUM] = {out1, out2};
-    __ubuf__ float *cal = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += ROUND_UP(len * sizeof(float), VECTOR_MAX_BYTESIZE);
-    __ubuf__ float *temp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += (DIV_ROUND_UP(len * sizeof(float), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE;
-    __ubuf__ float *maxOut0 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += saveMaxSum ? VECTOR_MAX_BYTESIZE : 0;
-    __ubuf__ float *maxOut1 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += saveMaxSum ? VECTOR_MAX_BYTESIZE : 0;
-    __ubuf__ float *maxOut[PINGPONG_BUF_NUM] = {maxOut0, maxOut1};
-    __ubuf__ float *sumOut0 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += saveMaxSum ? VECTOR_MAX_BYTESIZE : 0;
-    __ubuf__ float *sumOut1 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += saveMaxSum ? VECTOR_MAX_BYTESIZE : 0;
-    __ubuf__ float *sumOut[PINGPONG_BUF_NUM] = {sumOut0, sumOut1};
-    __ubuf__ int32_t *indices0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
-    __ubuf__ int32_t *indices1 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
-    __ubuf__ int32_t *indices[PINGPONG_BUF_NUM] = {indices0, indices1};
-    __ubuf__ Dtype *inTopK = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP((topK + swaSegWidth) * sizeof(Dtype), VECTOR_MAX_BYTESIZE) : 0;
-    __ubuf__ float *indicesFp32 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK * sizeof(float), VECTOR_MAX_BYTESIZE) : 0;
-    __ubuf__ int32_t *cmp0 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
-    off += topK != 0 ? VECTOR_MAX_BYTESIZE * 2 : 0;
-    __ubuf__ int32_t *cmp1 = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
-    off += topK != 0 ? VECTOR_MAX_BYTESIZE : 0;
-    __ubuf__ float *cmpFp320 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += topK != 0 ? VECTOR_MAX_BYTESIZE : 0;
-    __ubuf__ float *cmpFp321 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += topK != 0 ? VECTOR_MAX_BYTESIZE : 0;
-    __ubuf__ uint8_t *topkMask0 = reinterpret_cast<__ubuf__ uint8_t *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0;
-    __ubuf__ uint8_t *topkMask1 = reinterpret_cast<__ubuf__ uint8_t *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0;
-    __ubuf__ int32_t *currIndices = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
-    __ubuf__ float *sink = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += attnSink != nullptr ? VECTOR_MAX_BYTESIZE : 0;
+    UbAlloc ub;
+    __ubuf__ Dtype *in[PINGPONG_BUF_NUM] = {ub.Alloc<Dtype>(len, VECTOR_MAX_BYTESIZE),
+                                            ub.Alloc<Dtype>(len, VECTOR_MAX_BYTESIZE)};
+    __ubuf__ Dtype *out[PINGPONG_BUF_NUM] = {ub.Alloc<Dtype>(len, VECTOR_MAX_BYTESIZE),
+                                             ub.Alloc<Dtype>(len, VECTOR_MAX_BYTESIZE)};
+    __ubuf__ float *cal = ub.Alloc<float>(len, VECTOR_MAX_BYTESIZE);
+    __ubuf__ float *temp = ub.AllocBytesAs<float>(
+        (DIV_ROUND_UP(len * sizeof(float), VECTOR_MAX_BYTESIZE) / 2) * VECTOR_MAX_BYTESIZE);
+    __ubuf__ float *maxOut[PINGPONG_BUF_NUM] = {
+        ub.AllocBytesAs<float>(saveMaxSum ? VECTOR_MAX_BYTESIZE : 0),
+        ub.AllocBytesAs<float>(saveMaxSum ? VECTOR_MAX_BYTESIZE : 0)};
+    __ubuf__ float *sumOut[PINGPONG_BUF_NUM] = {
+        ub.AllocBytesAs<float>(saveMaxSum ? VECTOR_MAX_BYTESIZE : 0),
+        ub.AllocBytesAs<float>(saveMaxSum ? VECTOR_MAX_BYTESIZE : 0)};
+    __ubuf__ int32_t *indices[PINGPONG_BUF_NUM] = {
+        ub.AllocBytesAs<int32_t>(topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE)
+                                           : 0),
+        ub.AllocBytesAs<int32_t>(topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE)
+                                           : 0)};
+    __ubuf__ Dtype *inTopK = ub.AllocBytesAs<Dtype>(
+        topK != 0 ? ROUND_UP((topK + swaSegWidth) * sizeof(Dtype), VECTOR_MAX_BYTESIZE) : 0);
+    __ubuf__ float *indicesFp32 = ub.AllocBytesAs<float>(
+        topK != 0 ? ROUND_UP(topK * sizeof(float), VECTOR_MAX_BYTESIZE) : 0);
+    __ubuf__ int32_t *cmp0 = ub.AllocBytesAs<int32_t>(topK != 0 ? VECTOR_MAX_BYTESIZE * 2 : 0);
+    __ubuf__ int32_t *cmp1 = ub.AllocBytesAs<int32_t>(topK != 0 ? VECTOR_MAX_BYTESIZE : 0);
+    __ubuf__ float *cmpFp320 = ub.AllocBytesAs<float>(topK != 0 ? VECTOR_MAX_BYTESIZE : 0);
+    __ubuf__ float *cmpFp321 = ub.AllocBytesAs<float>(topK != 0 ? VECTOR_MAX_BYTESIZE : 0);
+    __ubuf__ uint8_t *topkMask0 =
+        ub.AllocBytesAs<uint8_t>(topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0);
+    __ubuf__ uint8_t *topkMask1 =
+        ub.AllocBytesAs<uint8_t>(topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0);
+    __ubuf__ int32_t *currIndices = ub.AllocBytesAs<int32_t>(
+        topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0);
+    __ubuf__ float *sink =
+        ub.AllocBytesAs<float>(attnSink != nullptr ? VECTOR_MAX_BYTESIZE : 0);
 
     constexpr int calPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     constexpr int pad = VECTOR_MAX_BYTESIZE / sizeof(Dtype);
@@ -584,67 +570,45 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
 
     constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
     uint32_t repeat = DIV_ROUND_UP(headSize, calcPad);
-    uint32_t nBytes = ROUND_UP(headSize * sizeof(Dtype), VECTOR_MAX_BYTESIZE);
-    uint32_t nFloatBytes = ROUND_UP(headSize * sizeof(float), VECTOR_MAX_BYTESIZE);
-
     // UB buffer allocation for Ping-Pong buffering strategy
     // Ping-Pong buffering enables overlapping of computation and memory transfers
     // by using two sets of buffers that alternate between processing and I/O
-    uint64_t off = 0;
     __ubuf__ Dtype *svPrevUb[2], *svCurrUb[2], *svOutUb[2];
     __ubuf__ float *newSumOutUb[2], *newMaxOutUb[2];
     __ubuf__ float *maxPrevUb[2], *sumPrevUb[2], *maxCurrUb[2], *sumCurrUb[2];
     __ubuf__ float *scalePrevUb, *scaleCurrUb, *tempUb, *svPrevFloatUb, *svCurrFloatUb,
         *svOutFloatUb, *newSumUb, *newMaxUb, *sumPrevCalUb, *sumCurrCalUb;
 
+    UbAlloc ub;
     // Allocate SV (softmax-weighted value) data buffers in Dtype precision
     // Each Ping-Pong set contains: previous sv, current sv, and output sv
     for (int i = 0; i < 2; ++i) {
-        svPrevUb[i] = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += nBytes;
-        svCurrUb[i] = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += nBytes;
-        svOutUb[i] = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-        off += nBytes;
+        svPrevUb[i] = ub.Alloc<Dtype>(headSize, VECTOR_MAX_BYTESIZE);
+        svCurrUb[i] = ub.Alloc<Dtype>(headSize, VECTOR_MAX_BYTESIZE);
+        svOutUb[i] = ub.Alloc<Dtype>(headSize, VECTOR_MAX_BYTESIZE);
     }
     // Allocate statistics buffers: max values, sum values, scale factors
     // Each buffer is one VECTOR_MAX_BYTESIZE to hold a single scalar broadcast value
     for (int i = 0; i < 2; ++i) {
-        maxPrevUb[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += VECTOR_MAX_BYTESIZE;
-        sumPrevUb[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += VECTOR_MAX_BYTESIZE;
-        maxCurrUb[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += VECTOR_MAX_BYTESIZE;
-        sumCurrUb[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += VECTOR_MAX_BYTESIZE;
-        newSumOutUb[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += VECTOR_MAX_BYTESIZE;
-        newMaxOutUb[i] = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += VECTOR_MAX_BYTESIZE;
+        maxPrevUb[i] = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        sumPrevUb[i] = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        maxCurrUb[i] = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        sumCurrUb[i] = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        newSumOutUb[i] = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        newMaxOutUb[i] = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
     }
     // Single buffers for scale factors and temporary computation
-    scalePrevUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
-    scaleCurrUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
-    tempUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
-    newSumUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
-    newMaxUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
-    sumPrevCalUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
-    sumCurrCalUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
+    scalePrevUb = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    scaleCurrUb = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    tempUb = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    newSumUb = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    newMaxUb = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    sumPrevCalUb = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    sumCurrCalUb = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
     // Float32 buffers for high-precision computation of sv values
-    svPrevFloatUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += nFloatBytes;
-    svCurrFloatUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += nFloatBytes;
-    svOutFloatUb = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += nFloatBytes;
+    svPrevFloatUb = ub.Alloc<float>(headSize, VECTOR_MAX_BYTESIZE);
+    svCurrFloatUb = ub.Alloc<float>(headSize, VECTOR_MAX_BYTESIZE);
+    svOutFloatUb = ub.Alloc<float>(headSize, VECTOR_MAX_BYTESIZE);
 
     // Pipeline synchronization initialization using event flags
     // These flags coordinate between different pipeline stages to ensure correct execution order
@@ -838,28 +802,17 @@ inline __aicore__ void RunAivSoftmaxLong(
     const uint32_t MAX_SUB_CONTEXT_SIZE = maxRepeat * calcPad;
     uint32_t totalSubBlockNum = DIV_ROUND_UP(outN, MAX_SUB_CONTEXT_SIZE);
 
-    uint32_t off = 0;
-    auto *in = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += MAX_SUB_CONTEXT_SIZE * sizeof(Dtype);
-    auto *out = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-    off += MAX_SUB_CONTEXT_SIZE * sizeof(Dtype);
-    __ubuf__ float *calc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += MAX_SUB_CONTEXT_SIZE * sizeof(float);
-    __ubuf__ float *calcDst = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    int useV2 = 0;
-    if (totalSubBlockNum <= 65) {
-        useV2 = 1;
-        off += (VECTOR_MAX_REPEAT - 1) / 2 * VECTOR_MAX_BYTESIZE;
-        ;
-    } else {
-        off += DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) * VECTOR_MAX_BYTESIZE;
-    }
-    auto *max = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += (totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE;
-    auto *sum = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += (totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE;
-    __ubuf__ float *sink = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-    off += VECTOR_MAX_BYTESIZE;
+    UbAlloc ub;
+    auto *in = ub.Alloc<Dtype>(MAX_SUB_CONTEXT_SIZE);
+    auto *out = ub.Alloc<Dtype>(MAX_SUB_CONTEXT_SIZE);
+    __ubuf__ float *calc = ub.Alloc<float>(MAX_SUB_CONTEXT_SIZE);
+    int useV2 = (totalSubBlockNum <= 65) ? 1 : 0;
+    __ubuf__ float *calcDst = ub.AllocBytesAs<float>(
+        useV2 ? (VECTOR_MAX_REPEAT - 1) / 2 * VECTOR_MAX_BYTESIZE
+              : DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) * VECTOR_MAX_BYTESIZE);
+    auto *max = ub.AllocBytesAs<float>((totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE);
+    auto *sum = ub.AllocBytesAs<float>((totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE);
+    __ubuf__ float *sink = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);  // for MTE2 in
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);  // for MTE2 calc

@@ -8,6 +8,7 @@
 #pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
+#include "ub_alloc.h"
 
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
@@ -65,43 +66,28 @@ public:
         uint32_t idxPad = MAX(pad, sortPad);
         uint32_t padDtype =
             ROUND_UP(numRoutedExperts, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
-        uint64_t off = 0;
-        scoresIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += pad;
-        biasIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += pad;
-        indicesIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        off += idxPad;
-        routingMapOut = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        off += pad;
-        weightsOut = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += pad;
-        calc_unbiased = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += pad;
-        calc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += pad;
-        this->scores = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += idxPad;
-        this->indices = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        off += idxPad;
-        groupScores = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += VECTOR_MAX_BYTESIZE;
-        groupIndices = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
-        off += VECTOR_MAX_BYTESIZE;
-        reduceTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += pad;
-        sortTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += 2 * idxPad;
-        sortMrgTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += 2 * idxPad;
-        weightsTopK = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
-        off += VECTOR_MAX_BYTESIZE;
-        indicesTopK = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        UbAlloc ub;
+        scoresIn = ub.AllocBytesAs<float>(pad);
+        biasIn = ub.AllocBytesAs<float>(pad);
+        indicesIn = ub.AllocBytesAs<uint32_t>(idxPad);
+        routingMapOut = ub.AllocBytesAs<uint32_t>(pad);
+        weightsOut = ub.AllocBytesAs<float>(pad);
+        calc_unbiased = ub.AllocBytesAs<float>(pad);
+        calc = ub.AllocBytesAs<float>(pad);
+        this->scores = ub.AllocBytesAs<float>(idxPad);
+        this->indices = ub.AllocBytesAs<uint32_t>(idxPad);
+        groupScores = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        groupIndices = ub.AllocBytesAs<uint32_t>(VECTOR_MAX_BYTESIZE);
+        reduceTmp = ub.AllocBytesAs<float>(pad);
+        sortTmp = ub.AllocBytesAs<float>(2 * idxPad);
+        sortMrgTmp = ub.AllocBytesAs<float>(2 * idxPad);
+        weightsTopK = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
         if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            off += pad;
-            scoresInTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
-            off += padDtype;
-            weightsOutTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+            indicesTopK = ub.AllocBytesAs<uint32_t>(pad);
+            scoresInTmp = ub.AllocBytesAs<Dtype>(padDtype);
+            weightsOutTmp = ub.AllocBytesAs<Dtype>(pad);
+        } else {
+            indicesTopK = ub.AllocBytesAs<uint32_t>(pad);
         }
     }
 

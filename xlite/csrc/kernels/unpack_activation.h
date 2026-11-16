@@ -4,6 +4,7 @@
 #pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 
@@ -113,32 +114,16 @@ __aicore__ inline void unpack_activation(GM_ADDR act_packed, GM_ADDR act_out, ui
     uint32_t fp16_rep = DIV_ROUND_UP(k_pad, VECTOR_MAX_NUM_OF_FP16);
     uint32_t int16_rep = DIV_ROUND_UP(kh_pad, VECTOR_MAX_NUM_OF_INT16);
 
-    uintptr_t off = 0;
-    UBA(int8_t) in_buf_0 = reinterpret_cast<UBA(int8_t)>(off);
-    off += k_pad;
-    UBA(int8_t) in_buf_1 = reinterpret_cast<UBA(int8_t)>(off);
-    off += k_pad;
-    UBA(int8_t) low_and_buf = reinterpret_cast<UBA(int8_t)>(off);
-    off += k_pad;
-    UBA(half) work_fp16 = reinterpret_cast<UBA(half)>(off);
-    off += k_pad * sizeof(half);
-    UBA(half) vand_mask_buf = reinterpret_cast<UBA(half)>(off);
-    off += k_pad * sizeof(half);
-    UBA(half) fp16_buf = reinterpret_cast<UBA(half)>(off);
-    off += k_pad * sizeof(half);
-    UBA(int8_t) out_low_0 = reinterpret_cast<UBA(int8_t)>(off);
-    off += kh_pad;
-    UBA(int8_t) out_low_1 = reinterpret_cast<UBA(int8_t)>(off);
-    off += kh_pad;
-    UBA(int8_t) out_high_0 = reinterpret_cast<UBA(int8_t)>(off);
-    off += kh_pad;
-    UBA(int8_t) out_high_1 = reinterpret_cast<UBA(int8_t)>(off);
-    off += kh_pad;
-    assert(off <= UB_SIZE);
-
-    UBA(int8_t) in_bufs[PINGPONG_BUF_NUM] = {in_buf_0, in_buf_1};
-    UBA(int8_t) out_low_bufs[PINGPONG_BUF_NUM] = {out_low_0, out_low_1};
-    UBA(int8_t) out_high_bufs[PINGPONG_BUF_NUM] = {out_high_0, out_high_1};
+    UbAlloc ub;
+    UBA(int8_t) in_bufs[PINGPONG_BUF_NUM] = {ub.Alloc<int8_t>(k_pad), ub.Alloc<int8_t>(k_pad)};
+    UBA(int8_t) low_and_buf = ub.Alloc<int8_t>(k_pad);
+    UBA(half) work_fp16 = ub.Alloc<half>(k_pad);
+    UBA(half) vand_mask_buf = ub.Alloc<half>(k_pad);
+    UBA(half) fp16_buf = ub.Alloc<half>(k_pad);
+    UBA(int8_t)
+    out_low_bufs[PINGPONG_BUF_NUM] = {ub.Alloc<int8_t>(kh_pad), ub.Alloc<int8_t>(kh_pad)};
+    UBA(int8_t)
+    out_high_bufs[PINGPONG_BUF_NUM] = {ub.Alloc<int8_t>(kh_pad), ub.Alloc<int8_t>(kh_pad)};
 
     // vand mask: 0x0F0F per int16 word, int8 data is viewed as int16
     UBA(int16_t) vand_mask = reinterpret_cast<UBA(int16_t)>(vand_mask_buf);

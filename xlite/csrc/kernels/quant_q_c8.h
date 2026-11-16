@@ -5,6 +5,7 @@
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 #include "kernel_param.h"
+#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 
@@ -34,42 +35,26 @@ __aicore__ inline void quant_q_c8(GM_ADDR q, GM_ADDR headWeight, GM_ADDR q8, GM_
     uint32_t quantRepeat = DIV_ROUND_UP(dim, VECTOR_MAX_NUM_OF_FP16);
     float descale = rotateScale / float(127);
 
-    uintptr_t off = 0;
+    UbAlloc ub;
     __ubuf__ dtype *qRow[2];
-    qRow[0] = reinterpret_cast<__ubuf__ dtype *>(off);
-    off += ROUND_UP(dim * sizeof(dtype), VECTOR_MAX_BYTESIZE);
-    qRow[1] = reinterpret_cast<__ubuf__ dtype *>(off);
-    off += ROUND_UP(dim * sizeof(dtype), VECTOR_MAX_BYTESIZE);
+    qRow[0] = ub.Alloc<dtype>(dim, VECTOR_MAX_BYTESIZE);
+    qRow[1] = ub.Alloc<dtype>(dim, VECTOR_MAX_BYTESIZE);
     __ubuf__ dtype *headWeightHalf[2];
-    headWeightHalf[0] = reinterpret_cast<__ubuf__ dtype *>(off);
-    off += VECTOR_MAX_BYTESIZE;
-    headWeightHalf[1] = reinterpret_cast<__ubuf__ dtype *>(off);
-    off += VECTOR_MAX_BYTESIZE;
-    auto *qRowF32 = reinterpret_cast<__ubuf__ float *>(off);
-    off += ROUND_UP(dim * sizeof(float), VECTOR_MAX_BYTESIZE);
-    auto *absValues = reinterpret_cast<__ubuf__ float *>(off);
-    off += ROUND_UP(dim * sizeof(float), VECTOR_MAX_BYTESIZE);
-    auto *rounded = reinterpret_cast<__ubuf__ int32_t *>(off);
-    off += ROUND_UP(dim * sizeof(int32_t), VECTOR_MAX_BYTESIZE);
-    auto *halfValues = reinterpret_cast<__ubuf__ half *>(off);
-    off += ROUND_UP(dim * sizeof(half), VECTOR_MAX_BYTESIZE);
+    headWeightHalf[0] = ub.AllocBytesAs<dtype>(VECTOR_MAX_BYTESIZE);
+    headWeightHalf[1] = ub.AllocBytesAs<dtype>(VECTOR_MAX_BYTESIZE);
+    auto *qRowF32 = ub.Alloc<float>(dim, VECTOR_MAX_BYTESIZE);
+    auto *absValues = ub.Alloc<float>(dim, VECTOR_MAX_BYTESIZE);
+    auto *rounded = ub.Alloc<int32_t>(dim, VECTOR_MAX_BYTESIZE);
+    auto *halfValues = ub.Alloc<half>(dim, VECTOR_MAX_BYTESIZE);
     __ubuf__ int8_t *quant[2];
-    quant[0] = reinterpret_cast<__ubuf__ int8_t *>(off);
-    off += ROUND_UP(dim, VECTOR_MAX_BYTESIZE);
-    quant[1] = reinterpret_cast<__ubuf__ int8_t *>(off);
-    off += ROUND_UP(dim, VECTOR_MAX_BYTESIZE);
-    auto *headWeightF32 = reinterpret_cast<__ubuf__ float *>(off);
-    off += VECTOR_MAX_BYTESIZE;
-    auto *scaleF32 = reinterpret_cast<__ubuf__ float *>(off);
-    off += VECTOR_MAX_BYTESIZE;
-    auto *scaledWeightsF32 = reinterpret_cast<__ubuf__ float *>(off);
-    off += VECTOR_MAX_BYTESIZE;
+    quant[0] = ub.Alloc<int8_t>(dim, VECTOR_MAX_BYTESIZE);
+    quant[1] = ub.Alloc<int8_t>(dim, VECTOR_MAX_BYTESIZE);
+    auto *headWeightF32 = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    auto *scaleF32 = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    auto *scaledWeightsF32 = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
     __ubuf__ half *scaledWeightsF16[2];
-    scaledWeightsF16[0] = reinterpret_cast<__ubuf__ half *>(off);
-    off += VECTOR_MAX_BYTESIZE;
-    scaledWeightsF16[1] = reinterpret_cast<__ubuf__ half *>(off);
-    off += VECTOR_MAX_BYTESIZE;
-    assert(off <= UB_SIZE);
+    scaledWeightsF16[0] = ub.AllocBytesAs<half>(VECTOR_MAX_BYTESIZE);
+    scaledWeightsF16[1] = ub.AllocBytesAs<half>(VECTOR_MAX_BYTESIZE);
 
     __gm__ dtype *qGm = reinterpret_cast<__gm__ dtype *>(q);
     __gm__ dtype *headWeightGm = reinterpret_cast<__gm__ dtype *>(headWeight);

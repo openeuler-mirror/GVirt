@@ -4,6 +4,7 @@
 #pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 template <typename Dtype>
@@ -18,26 +19,12 @@ __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uin
     constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
 
     int actualLen = calcNum * sizeof(Dtype);
-    uint64_t len = ROUND_UP(actualLen, VECTOR_MAX_BYTESIZE);
-    uint64_t off = 0;
-    __ubuf__ Dtype *in1 = (__ubuf__ Dtype *)off;
-    off += len;
-    __ubuf__ Dtype *in2 = (__ubuf__ Dtype *)off;
-    off += len;
-    __ubuf__ Dtype *in[2] = {in1, in2};
-
-    __ubuf__ float *calc = (__ubuf__ float *)off;
-    if constexpr (std::is_same<Dtype, float>::value) {
-        off += len;
-    } else {
-        off += ROUND_UP(calcNum * sizeof(float), VECTOR_MAX_BYTESIZE);
-    }
-
-    __ubuf__ Dtype *out1 = (__ubuf__ Dtype *)off;
-    off += len;
-    __ubuf__ Dtype *out2 = (__ubuf__ Dtype *)off;
-    off += len;
-    __ubuf__ Dtype *out[2] = {out1, out2};
+    UbAlloc ub;
+    __ubuf__ Dtype *in[2] = {ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE),
+                            ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE)};
+    __ubuf__ float *calc = ub.Alloc<float>(calcNum, VECTOR_MAX_BYTESIZE);
+    __ubuf__ Dtype *out[2] = {ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE),
+                             ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE)};
 
     int repeat = DIV_ROUND_UP(calcNum, calcPad);
 
