@@ -109,8 +109,8 @@ def test_prepare(rt, count, latent_dim=512, rope_dim=64, norm_eps=1e-5, use_bias
         )
         expected = quantize(k0, pc.view(-1, rope_dim)[slots.long()])
     else:
-        rmsnorm_with_bias(rt, x, qw, qb, q0, norm_eps, q_rank)
-        rmsnorm_with_bias(rt, x, kw, kb, k0, norm_eps, latent_dim, 1, q_rank)
+        rmsnorm_with_bias(rt, x, qw, qb, q0, norm_eps, norm_dim=q_rank)
+        rmsnorm_with_bias(rt, x, kw, kb, k0, norm_eps, norm_dim=latent_dim, cnt_per_token=1, in_start_offset=q_rank)
         pe = x[:, q_rank + latent_dim :].float().cpu().reshape(count, rope_dim // 2, 2)
         trig = torch.view_as_real(freqs.cpu())
         # Match the kernel's separate FP32 multiply and add/subtract steps.
