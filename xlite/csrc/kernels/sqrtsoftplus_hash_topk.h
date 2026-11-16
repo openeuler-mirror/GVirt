@@ -76,7 +76,7 @@ public:
         scoresInTmp[0] = ub.AllocBytesAs<Dtype>(padNDtype);
         scoresInTmp[1] = ub.AllocBytesAs<Dtype>(padNDtype);
         scoresIn = ub.AllocBytesAs<float>(padN);
-        biasIn = ub.AllocBytesAs<float>(padN);  // shared across tokens
+        biasIn = ub.AllocBytesAs<float>(padN);            // shared across tokens
         indicesIn = ub.AllocBytesAs<uint32_t>(padSortN);  // identity 0..N-1
         tid2eidRow[0] = ub.AllocBytesAs<uint32_t>(padK);  // hash: [topK] row, ping-pong
         tid2eidRow[1] = ub.AllocBytesAs<uint32_t>(padK);

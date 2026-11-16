@@ -66,14 +66,18 @@ __aicore__ __inline__ void rope_complex_and_cache(
 
     int maxCnt = 256;
     UbAlloc ub;
-    UBA(Dtype) inputs[2] = {ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE)),
-                            ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE))};
-    UBA(float) freqs[2] = {ub.AllocBytesAs<float>(ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE)),
-                           ub.AllocBytesAs<float>(ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE))};
-    UBA(Dtype) outs[2] = {ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE)),
-                          ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE))};
-    UBA(Dtype) vRemain = ub.AllocBytesAs<Dtype>(
-        need_v_cache ? ROUND_UP(totalVRemainBytes, VECTOR_MAX_BYTESIZE) : 0);
+    UBA(Dtype)
+    inputs[2] = {ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE)),
+                 ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE))};
+    UBA(float)
+    freqs[2] = {ub.AllocBytesAs<float>(ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE)),
+                ub.AllocBytesAs<float>(ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE))};
+    UBA(Dtype)
+    outs[2] = {ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE)),
+               ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE))};
+    UBA(Dtype)
+    vRemain =
+        ub.AllocBytesAs<Dtype>(need_v_cache ? ROUND_UP(totalVRemainBytes, VECTOR_MAX_BYTESIZE) : 0);
 
     UBA(float) inOutFP32 = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
     UBA(float) x_even = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
@@ -84,17 +88,22 @@ __aicore__ __inline__ void rope_complex_and_cache(
     UBA(float) x_odd_sin = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
     UBA(float) x_even_sin = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
     UBA(float) x_odd_cos = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(uint64_t) positionUB =
+    UBA(uint64_t)
+    positionUB =
         ub.AllocBytesAs<uint64_t>(ROUND_UP(maxCnt * sizeof(uint64_t), VECTOR_MAX_BYTESIZE));
-    UBA(uint32_t) slotMappingUB = ub.AllocBytesAs<uint32_t>(
+    UBA(uint32_t)
+    slotMappingUB = ub.AllocBytesAs<uint32_t>(
         need_v_cache ? ROUND_UP(maxCnt * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0);
     // outInterleaved path: single-head scratch for interleaved [r0,i0,r1,i1,...]
     // (reused per head) + fixed vgather index table filled once on the scalar unit.
-    UBA(float) interleavedFP32Head = ub.AllocBytesAs<float>(
-        outInterleaved ? ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE) : 0);
-    UBA(uint32_t) vgatherIndicesUB = ub.AllocBytesAs<uint32_t>(
+    UBA(float)
+    interleavedFP32Head =
+        ub.AllocBytesAs<float>(outInterleaved ? ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE) : 0);
+    UBA(uint32_t)
+    vgatherIndicesUB = ub.AllocBytesAs<uint32_t>(
         outInterleaved ? ROUND_UP(ropeDim * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0);
-    UBA(float) rotateFP32 = ub.AllocBytesAs<float>(
+    UBA(float)
+    rotateFP32 = ub.AllocBytesAs<float>(
         (doRotate && fullHeadLoad) ? ROUND_UP(totalHeadFPBytes, VECTOR_MAX_BYTESIZE) : 0);
 
     int taskNum = nTokens;

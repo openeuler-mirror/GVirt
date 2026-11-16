@@ -21,10 +21,10 @@ __aicore__ void muls(__gm__ Dtype *input, float scale, __gm__ Dtype *output, uin
     int actualLen = calcNum * sizeof(Dtype);
     UbAlloc ub;
     __ubuf__ Dtype *in[2] = {ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE),
-                            ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE)};
+                             ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE)};
     __ubuf__ float *calc = ub.Alloc<float>(calcNum, VECTOR_MAX_BYTESIZE);
     __ubuf__ Dtype *out[2] = {ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE),
-                             ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE)};
+                              ub.Alloc<Dtype>(calcNum, VECTOR_MAX_BYTESIZE)};
 
     int repeat = DIV_ROUND_UP(calcNum, calcPad);
 
