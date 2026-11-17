@@ -3621,6 +3621,22 @@ def dsa_cp_write_kv_cache_by_slot(
     """
     ...
 
+def dsa_cp_reorder_wo(
+    rt: Runtime,
+    in_: torch.Tensor,
+    out: torch.Tensor,
+    ranks: int,
+    column_blocks: int,
+    block_bytes: int,
+) -> None:
+    """Reorder AllGathered NZ weights from [rank, N1, ...] into [N1, rank, ...].
+
+    Copies whole NZ blocks (block_bytes each) without casting; input and
+    output must be disjoint tensors covering ranks * column_blocks *
+    block_bytes bytes.
+    """
+    ...
+
 def dsa_cp_gather_mla(
     rt: Runtime,
     q_absorb: torch.Tensor,

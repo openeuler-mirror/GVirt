@@ -1624,6 +1624,16 @@ void DsaCpWriteKVCacheBySlot(XRuntime &rt, at::Tensor &input, at::Tensor &cache,
     rt.Synchronize();
 }
 
+void DsaCpReorderWo(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint32_t ranks,
+                    uint32_t columnBlocks, uint64_t blockBytes)
+{
+    XTensor inputXT, outputXT;
+    InitXTensor(inputXT, input);
+    InitXTensor(outputXT, output);
+    XliteOpDsaCpReorderWo(rt, inputXT, outputXT, ranks, columnBlocks, blockBytes);
+    rt.Synchronize();
+}
+
 void AllGather(XRuntime &rt, at::Tensor &out, at::Tensor &in, uint32_t commType = 0)
 {
     XTensor _in, _out;
@@ -4451,6 +4461,9 @@ TORCH_LIBRARY(xlite_sabi, m)
         .def("dsa_cp_write_kv_cache_by_slot", op<&DsaCpWriteKVCacheBySlot>,
              {torch::arg("rt"), torch::arg("input"), torch::arg("cache"),
               torch::arg("slot_mapping"), torch::arg("num_tokens"), torch::arg("block_size")})
+        .def("dsa_cp_reorder_wo", op<&DsaCpReorderWo>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("out"), torch::arg("ranks"),
+              torch::arg("column_blocks"), torch::arg("block_bytes")})
         .def("bench_empty", op<&BenchEmpty>,
              {torch::arg("rt"), torch::arg("variant"),
               torch::arg("block_num") = static_cast<int64_t>(0)})

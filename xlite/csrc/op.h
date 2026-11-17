@@ -28,6 +28,10 @@ void XliteOpDsaCpWriteKVCacheBySlot(XRuntime &rt, XTensor &input, XTensor &cache
 // Gather TP input-channel shards in their original format. The returned pool
 // tensor contains a full weight; the caller releases it after projection.
 XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool transposed);
+// Reorder AllGathered NZ weights from [rank, N1, ...] into [N1, rank, ...] at
+// whole-NZ-block granularity; exposed for kernel-level testing.
+void XliteOpDsaCpReorderWo(XRuntime &rt, XTensor &input, XTensor &output, uint32_t ranks,
+                           uint32_t columnBlocks, uint64_t blockBytes);
 void XliteOpAllGather(XRuntime &rt, XTensor &in, XTensor &out, enum commType type,
                       bool fetchOffset = false, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
                       uint32_t copySize = COPY_SIZE);
