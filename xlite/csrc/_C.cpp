@@ -3433,6 +3433,15 @@ struct Cast<uint64_t> {
         return static_cast<uint64_t>(v);
     }
 };
+template <>
+struct Cast<uint8_t> {
+    static uint8_t go(int64_t v)
+    {
+        TORCH_CHECK(v >= 0 && v <= static_cast<int64_t>(UINT8_MAX),
+                    "argument out of range for uint8: ", v);
+        return static_cast<uint8_t>(v);
+    }
+};
 // Cast<int>/Cast<long>: signed, same width or wider than int64 — no wrap risk,
 // and EinsumMhtHtdMhd uses `int T = -1, int D = -1` sentinels, so no guard.
 template <>
