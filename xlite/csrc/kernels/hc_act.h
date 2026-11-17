@@ -4,7 +4,6 @@
 #pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
-#include "ub_alloc.h"
 
 // hc_act: per-token Hyper-Connection gate (fp32) + optional merge (bf16).
 //   pre  = sigmoid(mixes[:, :hcMult]   * scalePre  + basePre)  + eps
@@ -113,55 +112,91 @@ __aicore__ inline void hc_act(__gm__ float *mixes, __gm__ float *hcBase, __gm__ 
     const uint64_t baseUbBytes = mixHc * sizeof(float);
     const uint64_t lenBaseUb = ROUND_UP(baseUbBytes, VECTOR_MAX_BYTESIZE);
 
-    UbAlloc ub;
-    __ubuf__ float *mixesUb[2] = {ub.AllocBytesAs<float>(lenBaseUb),
-                                  ub.AllocBytesAs<float>(lenBaseUb)};
-    __ubuf__ float *calcUb = ub.AllocBytesAs<float>(lenBaseUb);
+    uint64_t off = 0;
+    __ubuf__ float *mixesUb0 = (__ubuf__ float *)off;
+    off += lenBaseUb;
+    __ubuf__ float *mixesUb1 = (__ubuf__ float *)off;
+    off += lenBaseUb;
+    __ubuf__ float *mixesUb[2] = {mixesUb0, mixesUb1};
 
-    __ubuf__ float *postOut[2] = {ub.AllocBytesAs<float>(lenPrePost),
-                                  ub.AllocBytesAs<float>(lenPrePost)};
-    __ubuf__ float *combOut[2] = {ub.AllocBytesAs<float>(lenBaseUb),
-                                  ub.AllocBytesAs<float>(lenBaseUb)};
+    __ubuf__ float *calcUb = (__ubuf__ float *)off;
+    off += lenBaseUb;
+
+    __ubuf__ float *postOut0 = (__ubuf__ float *)off;
+    off += lenPrePost;
+    __ubuf__ float *postOut1 = (__ubuf__ float *)off;
+    off += lenPrePost;
+    __ubuf__ float *combOut0 = (__ubuf__ float *)off;
+    off += lenBaseUb;
+    __ubuf__ float *combOut1 = (__ubuf__ float *)off;
+    off += lenBaseUb;
+    __ubuf__ float *postOut[2] = {postOut0, postOut1};
+    __ubuf__ float *combOut[2] = {combOut0, combOut1};
 
     const uint32_t hcMultAlign = ROUND_UP(hcMult, BLOCK_SIZE / sizeof(float));    // hcMult=4 → 8
     const uint64_t combAlignBytes = hcMult * hcMultAlign * sizeof(float);         // 4*8*4 = 128B
     const uint64_t lenCombAlign = ROUND_UP(combAlignBytes, VECTOR_MAX_BYTESIZE);  // 256B
     const int combRep =
         DIV_ROUND_UP(hcMult * hcMultAlign, calcPad);  // whole-block vector repeats over combAlign
-    __ubuf__ float *combAlign = ub.AllocBytesAs<float>(lenCombAlign);
+    __ubuf__ float *combAlign = (__ubuf__ float *)off;
+    off += lenCombAlign;
 
-    __ubuf__ float *baseUb = ub.AllocBytesAs<float>(lenBaseUb);
+    __ubuf__ float *baseUb = (__ubuf__ float *)off;
+    off += lenBaseUb;
 
-    // colSum scratch (col-norm broadcast source)
-    __ubuf__ float *colBuf = ub.AllocBytesAs<float>(lenPrePost);
+    __ubuf__ float *colBuf = (__ubuf__ float *)off;  // colSum scratch (col-norm broadcast source)
+    off += lenPrePost;
 
-    __ubuf__ float *scalarBuf = ub.AllocBytesAs<float>(lenCombAlign);
-    __ubuf__ float *brcbBuf = ub.AllocBytesAs<float>(lenCombAlign);
+    __ubuf__ float *scalarBuf = (__ubuf__ float *)off;
+    off += lenCombAlign;
+    __ubuf__ float *brcbBuf = (__ubuf__ float *)off;
+    off += lenCombAlign;
 
-    // 1.0 for vdiv-based 1/x (avoids vrec)
-    __ubuf__ float *onesUb = ub.AllocBytesAs<float>(lenPrePost);
-    // {scalePre[,scalePost,scaleComb]} from GM
-    __ubuf__ float *scaleUb = ub.AllocBytesAs<float>(lenPrePost);
-    __ubuf__ uint32_t *offRamp = ub.AllocBytesAs<uint32_t>(lenPrePost);
+    __ubuf__ float *onesUb = (__ubuf__ float *)off;  // 1.0 for vdiv-based 1/x (avoids vrec)
+    off += lenPrePost;
+    __ubuf__ float *scaleUb = (__ubuf__ float *)off;  // {scalePre[,scalePost,scaleComb]} from GM
+    off += lenPrePost;
+    __ubuf__ uint32_t *offRamp = (__ubuf__ uint32_t *)off;
+    off += lenPrePost;
 
-    __ubuf__ float *preOut[2] = {nullptr, nullptr};
-    __ubuf__ Dtype *inDtypeArr[2] = {nullptr, nullptr};
-    __ubuf__ Dtype *outDtypeArr[2] = {nullptr, nullptr};
+    const uint64_t residDtypeLen = ROUND_UP(hcMult * hidden * sizeof(Dtype), UB_BUF_ALIGN_SIZE);
+    const uint64_t yDtypeLen = ROUND_UP(hidden * sizeof(Dtype), UB_BUF_ALIGN_SIZE);
+    const uint64_t residFp32Len = ROUND_UP(hcMult * hidden * sizeof(float), UB_BUF_ALIGN_SIZE);
+    const uint64_t mergeFp32Len = ROUND_UP(hidden * sizeof(float), UB_BUF_ALIGN_SIZE);
+    __ubuf__ float *preOut0 = nullptr;
+    __ubuf__ float *preOut1 = nullptr;
+    __ubuf__ Dtype *inDtype0 = nullptr;
+    __ubuf__ Dtype *inDtype1 = nullptr;
+    __ubuf__ Dtype *outDtype0 = nullptr;
+    __ubuf__ Dtype *outDtype1 = nullptr;
     __ubuf__ float *xFp32 = nullptr;
     __ubuf__ float *yCalc = nullptr;
     if (preSum) {
         // IO slot 0/1: residual [hcMult, hidden] bf16 in, y [hidden] bf16 out.
-        inDtypeArr[0] = ub.Alloc<Dtype>(hcMult * hidden);
-        outDtypeArr[0] = ub.Alloc<Dtype>(hidden);
-        inDtypeArr[1] = ub.Alloc<Dtype>(hcMult * hidden);
-        outDtypeArr[1] = ub.Alloc<Dtype>(hidden);
-        xFp32 = ub.Alloc<float>(hcMult * hidden);  // [hcMult, hidden] residual as fp32
-        yCalc = ub.Alloc<float>(hidden);           // accumulator: Σ_h pre[h]*x
+        inDtype0 = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += residDtypeLen;
+        outDtype0 = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += yDtypeLen;
+        inDtype1 = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += residDtypeLen;
+        outDtype1 = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += yDtypeLen;
+        xFp32 = (__ubuf__ float *)off;  // [hcMult, hidden] residual as fp32
+        off += residFp32Len;
+        yCalc = (__ubuf__ float *)off;  // accumulator: Σ_h pre[h]*x
+        off += mergeFp32Len;
     } else {
-        preOut[0] = ub.AllocBytesAs<float>(lenPrePost);
-        preOut[1] = ub.AllocBytesAs<float>(lenPrePost);
-        yCalc = ub.AllocBytesAs<float>(lenPrePost);  // vgather pre staging (-> ub2ub to preOut)
+        preOut0 = (__ubuf__ float *)off;
+        off += lenPrePost;
+        preOut1 = (__ubuf__ float *)off;
+        off += lenPrePost;
+        yCalc = (__ubuf__ float *)off;  // vgather pre staging (-> ub2ub to preOut)
+        off += lenPrePost;
     }
+    __ubuf__ float *preOut[2] = {preOut0, preOut1};
+    __ubuf__ Dtype *inDtypeArr[2] = {inDtype0, inDtype1};
+    __ubuf__ Dtype *outDtypeArr[2] = {outDtype0, outDtype1};
+    assert(off <= UB_SIZE);
 
     CopyGmToUbufAligned(baseUb, hcBase, baseUbBytes);
     CopyGmToUbufAligned(scaleUb, hcScale, headOnly ? sizeof(float) : 3 * sizeof(float));

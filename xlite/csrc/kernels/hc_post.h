@@ -4,7 +4,6 @@
 #pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
-#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 // hc_post: post-attn/FFN merge (restores the H axis hc_pre collapsed).
@@ -30,26 +29,45 @@ __aicore__ void hc_post(__gm__ Dtype *x, __gm__ float *post, __gm__ float *comb,
 
     const uint32_t postBytes = hcMult * sizeof(float);
     const uint32_t combBytes = hcMult * hcMult * sizeof(float);
+    const uint64_t postLen = ROUND_UP(postBytes, UB_BUF_ALIGN_SIZE);
+    const uint64_t combLen = ROUND_UP(combBytes, UB_BUF_ALIGN_SIZE);
+    const uint64_t fp32Len = ROUND_UP(dTile * sizeof(float), UB_BUF_ALIGN_SIZE);
+    const uint64_t dtypeLen = ROUND_UP(dTile * sizeof(Dtype), UB_BUF_ALIGN_SIZE);
+    const uint64_t residualFp32Len = ROUND_UP(hcMult * dTile * sizeof(float), UB_BUF_ALIGN_SIZE);
+    const uint64_t residualDtypeLen = ROUND_UP(hcMult * dTile * sizeof(Dtype), UB_BUF_ALIGN_SIZE);
 
-    UbAlloc ub;
-    __ubuf__ float *postU = ub.Alloc<float>(hcMult);
-    __ubuf__ float *combU = ub.Alloc<float>(hcMult * hcMult);
+    uint64_t off = 0;
+    __ubuf__ float *postU = (__ubuf__ float *)off;
+    off += postLen;
+    __ubuf__ float *combU = (__ubuf__ float *)off;
+    off += combLen;
 
-    __ubuf__ float *residualFp32 = ub.Alloc<float>(hcMult * dTile);
-    __ubuf__ float *xFp32 = ub.Alloc<float>(dTile);
-    __ubuf__ float *outFp32 = ub.Alloc<float>(dTile);
+    __ubuf__ float *residualFp32 = (__ubuf__ float *)off;
+    off += residualFp32Len;
+    __ubuf__ float *xFp32 = (__ubuf__ float *)off;
+    off += fp32Len;
+    __ubuf__ float *outFp32 = (__ubuf__ float *)off;
+    off += fp32Len;
 
-    __ubuf__ Dtype *inXDtypeArr[2];
-    __ubuf__ Dtype *inResidDtypeArr[2];
-    __ubuf__ Dtype *outDtypeArr[2];
     // IO slot 0
-    inXDtypeArr[0] = ub.Alloc<Dtype>(dTile);
-    inResidDtypeArr[0] = ub.Alloc<Dtype>(hcMult * dTile);
-    outDtypeArr[0] = ub.Alloc<Dtype>(dTile);
+    __ubuf__ Dtype *inXDtype_0 = (__ubuf__ Dtype *)off;
+    off += dtypeLen;
+    __ubuf__ Dtype *inResidDtype_0 = (__ubuf__ Dtype *)off;
+    off += residualDtypeLen;
+    __ubuf__ Dtype *outDtype_0 = (__ubuf__ Dtype *)off;
+    off += dtypeLen;
     // IO slot 1
-    inXDtypeArr[1] = ub.Alloc<Dtype>(dTile);
-    inResidDtypeArr[1] = ub.Alloc<Dtype>(hcMult * dTile);
-    outDtypeArr[1] = ub.Alloc<Dtype>(dTile);
+    __ubuf__ Dtype *inXDtype_1 = (__ubuf__ Dtype *)off;
+    off += dtypeLen;
+    __ubuf__ Dtype *inResidDtype_1 = (__ubuf__ Dtype *)off;
+    off += residualDtypeLen;
+    __ubuf__ Dtype *outDtype_1 = (__ubuf__ Dtype *)off;
+    off += dtypeLen;
+
+    __ubuf__ Dtype *inXDtypeArr[2] = {inXDtype_0, inXDtype_1};
+    __ubuf__ Dtype *inResidDtypeArr[2] = {inResidDtype_0, inResidDtype_1};
+    __ubuf__ Dtype *outDtypeArr[2] = {outDtype_0, outDtype_1};
+    assert(off <= UB_SIZE);
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);

@@ -8,7 +8,6 @@
 #pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
-#include "ub_alloc.h"
 
 // #define XLITE_KERNEL_DEBUG
 #include "debug.h"
@@ -70,34 +69,56 @@ public:
             ROUND_UP(nRoutedExperts, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
         // topK bufs padded to a full 256B block (ReduceSum/vbrcb/vreducev2 assume block-aligned).
         uint32_t padK = ROUND_UP(topK, VECTOR_MAX_NUM_OF_FP32) * sizeof(float);
-        UbAlloc ub;
+        uint64_t off = 0;
         // INPUT: MTE2 fills scoresInTmp[curr] (Dtype, ping-pong); V relays into the SINGLE fp32
         // scoresIn (V-private, no MTE touch). bias + identity indices copied ONCE at Run start.
-        scoresInTmp[0] = ub.AllocBytesAs<Dtype>(padNDtype);
-        scoresInTmp[1] = ub.AllocBytesAs<Dtype>(padNDtype);
-        scoresIn = ub.AllocBytesAs<float>(padN);
-        biasIn = ub.AllocBytesAs<float>(padN);            // shared across tokens
-        indicesIn = ub.AllocBytesAs<uint32_t>(padSortN);  // identity 0..N-1
-        tid2eidRow[0] = ub.AllocBytesAs<uint32_t>(padK);  // hash: [topK] row, ping-pong
-        tid2eidRow[1] = ub.AllocBytesAs<uint32_t>(padK);
-        inputIdsArr = ub.AllocBytesAs<uint32_t>(  // hash: prefetched window
-            ROUND_UP(HASH_INPUT_IDS_BATCH * sizeof(uint32_t), VECTOR_MAX_BYTESIZE));
-        calc = ub.AllocBytesAs<float>(padSortN);
-        calc_unbiased = ub.AllocBytesAs<float>(padN);
-        reduceTmp = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
-        sortTmp = ub.AllocBytesAs<float>(2 * padSortN);
-        sortMrgTmp = ub.AllocBytesAs<float>(2 * padSortN);
+        scoresInTmp[0] = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += padNDtype;
+        scoresInTmp[1] = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += padNDtype;
+        scoresIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += padN;
+        biasIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);  // shared across tokens
+        off += padN;
+        indicesIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);  // identity 0..N-1
+        off += padSortN;
+        tid2eidRow[0] =
+            reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);  // hash: [topK] row, ping-pong
+        off += padK;
+        tid2eidRow[1] = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += padK;
+        inputIdsArr =
+            reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);  // hash: prefetched window
+        off += ROUND_UP(HASH_INPUT_IDS_BATCH * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        calc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += padSortN;
+        calc_unbiased = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += padN;
+        reduceTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += VECTOR_MAX_BYTESIZE;
+        sortTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 2 * padSortN;
+        sortMrgTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 2 * padSortN;
         // COMPUTE (single, V/S-private; slot-reuse hazard handled at OUTPUT DMA stage).
-        weightsTopK = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
-        indicesTopK = ub.AllocBytesAs<uint32_t>(VECTOR_MAX_BYTESIZE);
-        weightsSparse = ub.AllocBytesAs<float>(padN);
+        weightsTopK = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += VECTOR_MAX_BYTESIZE;
+        indicesTopK = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += VECTOR_MAX_BYTESIZE;
+        weightsSparse = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += padN;
         // this-> — Init param `routingMap` (GM_ADDR) shadows this UB member.
-        this->routingMap = ub.AllocBytesAs<uint32_t>(padN);
+        this->routingMap = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += padN;
         // OUTPUT DMA staging (ping-pong): V relays compute -> [curr], MTE3 drains to GM.
-        weightsOut[0] = ub.AllocBytesAs<Dtype>(padNDtype);
-        weightsOut[1] = ub.AllocBytesAs<Dtype>(padNDtype);
-        routingMapOut[0] = ub.AllocBytesAs<uint32_t>(padN);
-        routingMapOut[1] = ub.AllocBytesAs<uint32_t>(padN);
+        weightsOut[0] = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += padNDtype;
+        weightsOut[1] = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += padNDtype;
+        routingMapOut[0] = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += padN;
+        routingMapOut[1] = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += padN;
     }
 
     __aicore__ inline void Run()

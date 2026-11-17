@@ -5,7 +5,6 @@
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 #include "kernel_param.h"
-#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 
@@ -36,24 +35,38 @@ __aicore__ inline void quant_cache_c8(GM_ADDR x, GM_ADDR slots, GM_ADDR kCache, 
     // Ping-pong UB layout (sections 256B-aligned): only the cross-pipe buffers
     // double (xRow/slotBuf are MTE2-written, quant/scaleF16 MTE3-read);
     // V-internal buffers stay single — the V pipe serializes rows.
-    UbAlloc ub;
+    uintptr_t off = 0;
     __ubuf__ dtype *xRow[2];
-    xRow[0] = ub.Alloc<dtype>(dim, VECTOR_MAX_BYTESIZE);
-    xRow[1] = ub.Alloc<dtype>(dim, VECTOR_MAX_BYTESIZE);
+    xRow[0] = reinterpret_cast<__ubuf__ dtype *>(off);
+    off += ROUND_UP(dim * sizeof(dtype), VECTOR_MAX_BYTESIZE);
+    xRow[1] = reinterpret_cast<__ubuf__ dtype *>(off);
+    off += ROUND_UP(dim * sizeof(dtype), VECTOR_MAX_BYTESIZE);
     __ubuf__ int32_t *slotBuf[2];
-    slotBuf[0] = ub.AllocBytesAs<int32_t>(VECTOR_MAX_BYTESIZE);
-    slotBuf[1] = ub.AllocBytesAs<int32_t>(VECTOR_MAX_BYTESIZE);
-    auto *xRowF32 = ub.Alloc<float>(dim, VECTOR_MAX_BYTESIZE);
-    auto *absValues = ub.Alloc<float>(dim, VECTOR_MAX_BYTESIZE);
-    auto *rounded = ub.Alloc<int32_t>(dim, VECTOR_MAX_BYTESIZE);
-    auto *halfValues = ub.Alloc<half>(dim, VECTOR_MAX_BYTESIZE);
+    slotBuf[0] = reinterpret_cast<__ubuf__ int32_t *>(off);
+    off += VECTOR_MAX_BYTESIZE;
+    slotBuf[1] = reinterpret_cast<__ubuf__ int32_t *>(off);
+    off += VECTOR_MAX_BYTESIZE;
+    auto *xRowF32 = reinterpret_cast<__ubuf__ float *>(off);
+    off += ROUND_UP(dim * sizeof(float), VECTOR_MAX_BYTESIZE);
+    auto *absValues = reinterpret_cast<__ubuf__ float *>(off);
+    off += ROUND_UP(dim * sizeof(float), VECTOR_MAX_BYTESIZE);
+    auto *rounded = reinterpret_cast<__ubuf__ int32_t *>(off);
+    off += ROUND_UP(dim * sizeof(int32_t), VECTOR_MAX_BYTESIZE);
+    auto *halfValues = reinterpret_cast<__ubuf__ half *>(off);
+    off += ROUND_UP(dim * sizeof(half), VECTOR_MAX_BYTESIZE);
     __ubuf__ int8_t *quant[2];
-    quant[0] = ub.Alloc<int8_t>(dim, VECTOR_MAX_BYTESIZE);
-    quant[1] = ub.Alloc<int8_t>(dim, VECTOR_MAX_BYTESIZE);
-    auto *scaleF32 = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    quant[0] = reinterpret_cast<__ubuf__ int8_t *>(off);
+    off += ROUND_UP(dim, VECTOR_MAX_BYTESIZE);
+    quant[1] = reinterpret_cast<__ubuf__ int8_t *>(off);
+    off += ROUND_UP(dim, VECTOR_MAX_BYTESIZE);
+    auto *scaleF32 = reinterpret_cast<__ubuf__ float *>(off);
+    off += VECTOR_MAX_BYTESIZE;
     __ubuf__ half *scaleF16[2];
-    scaleF16[0] = ub.AllocBytesAs<half>(VECTOR_MAX_BYTESIZE);
-    scaleF16[1] = ub.AllocBytesAs<half>(VECTOR_MAX_BYTESIZE);
+    scaleF16[0] = reinterpret_cast<__ubuf__ half *>(off);
+    off += VECTOR_MAX_BYTESIZE;
+    scaleF16[1] = reinterpret_cast<__ubuf__ half *>(off);
+    off += VECTOR_MAX_BYTESIZE;
+    assert(off <= UB_SIZE);
 
     __gm__ dtype *xGm = reinterpret_cast<__gm__ dtype *>(x);
     __gm__ int32_t *slotsGm = reinterpret_cast<__gm__ int32_t *>(slots);

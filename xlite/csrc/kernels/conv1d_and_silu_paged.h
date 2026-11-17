@@ -11,7 +11,6 @@
 #include "kernel_operator.h"
 #include "kernel_macro.h"
 #include "../gdn_metadata.h"
-#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 
@@ -71,26 +70,54 @@ public:
         this->stateBlockSize = stateBlockSize;
         this->aligned = aligned;
 
-        UbAlloc ub;
-        w_raw = ub.AllocBytesAs<Dtype>(kMaxWin * sizeof(Dtype));
-        s_raw = ub.AllocBytesAs<Dtype>(kRawLen * sizeof(Dtype));
-        s_raw2 = ub.AllocBytesAs<Dtype>(kRawLen * sizeof(Dtype));
-        w_f = ub.AllocBytesAs<float>(kMaxWin * sizeof(float));
-        s_f = ub.AllocBytesAs<float>(kRawLen * sizeof(float));
-        s_f2 = ub.AllocBytesAs<float>(kRawLen * sizeof(float));
-        win_f = ub.AllocBytesAs<float>(kMaxWin * sizeof(float));
-        acc_f = ub.AllocBytesAs<float>(kMaxWin * sizeof(float));
-        r_f = ub.AllocBytesAs<float>(kBlock * sizeof(float));
-        calc_buf = ub.AllocBytesAs<float>(kBlock * sizeof(float));
-        out_f = ub.AllocBytesAs<float>(kBlock * sizeof(float));
-        out_buf = ub.AllocBytesAs<Dtype>(kChanTile * sizeof(Dtype));
-        st_stage = ub.AllocBytesAs<Dtype>(kMaxWin * sizeof(Dtype));
-        off_win = ub.AllocBytesAs<uint32_t>(kMaxWin * sizeof(uint32_t));
-        off_k = ub.AllocBytesAs<uint32_t>(kBlock * sizeof(uint32_t));
-        y_f = ub.AllocBytesAs<float>(kPrefillWin * sizeof(float));
-        inp_raw = ub.AllocBytesAs<Dtype>(kPrefillT * kChanTile * sizeof(Dtype));
-        pre_acc = ub.AllocBytesAs<float>(kPrefillTile * sizeof(float));
-        pre_calc = ub.AllocBytesAs<float>(kPrefillTile * sizeof(float));
+        uint64_t off = 0;
+        w_raw = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += kMaxWin * sizeof(Dtype);
+        s_raw = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += kRawLen * sizeof(Dtype);
+        s_raw2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += kRawLen * sizeof(Dtype);
+        if (off % 32 != 0) {
+            off = (off + 31) / 32 * 32;
+        }
+        w_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kMaxWin * sizeof(float);
+        s_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kRawLen * sizeof(float);
+        s_f2 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kRawLen * sizeof(float);
+        win_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kMaxWin * sizeof(float);
+        acc_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kMaxWin * sizeof(float);
+        r_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kBlock * sizeof(float);
+        calc_buf = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kBlock * sizeof(float);
+        out_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kBlock * sizeof(float);
+        out_buf = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += kChanTile * sizeof(Dtype);
+        if (off % 32 != 0) {
+            off = (off + 31) / 32 * 32;
+        }
+        st_stage = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += kMaxWin * sizeof(Dtype);
+        if (off % 32 != 0) {
+            off = (off + 31) / 32 * 32;
+        }
+        off_win = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += kMaxWin * sizeof(uint32_t);
+        off_k = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += kBlock * sizeof(uint32_t);
+        y_f = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kPrefillWin * sizeof(float);
+        inp_raw = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += kPrefillT * kChanTile * sizeof(Dtype);
+        pre_acc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kPrefillTile * sizeof(float);
+        pre_calc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += kPrefillTile * sizeof(float);
     }
 
     __aicore__ inline void BuildRamps()
