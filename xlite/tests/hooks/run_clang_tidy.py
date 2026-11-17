@@ -7,6 +7,7 @@ build-time artifacts). Kernel sources under csrc/kernels and csrc/ascend.h are
 excluded (CCE intrinsics produce intentional warnings).
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -41,8 +42,10 @@ def ensure_build_tree() -> bool:
     # op.cpp includes are build-time artifacts, so a tree predating a kernel
     # change parses stale stubs and tidy dies on aclrtlaunch_* signature
     # errors. cmake no-ops here when everything is current.
+    # Numbered -j: a bare -j leaks unbounded MAKEFLAGS into the kernel sub-makes (see setup.py).
+    jobs = os.environ.get("MAX_JOBS") or os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL")
     build = subprocess.run(
-        ["cmake", "--build", str(build_dir), "-j"],
+        ["cmake", "--build", str(build_dir), "-j", jobs or str(min(os.cpu_count() or 4, 64))],
         capture_output=True,
         text=True,
     )
