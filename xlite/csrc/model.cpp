@@ -503,10 +503,9 @@ XTensor DsaCpTensorRows(const XTensor &tensor, size_t rowBegin, size_t rowEnd)
     // Non-owning view of contiguous rows; the caller retains the source buffer.
     auto shape = tensor.shape;
     shape[0] = rowEnd - rowBegin;
-    return XTensor(
-        shape, tensor.dtype,
-        reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(tensor.ptr) +
-                                 rowBegin * tensor.stride[0] * XDtypeBit(tensor.dtype) / 8));
+    return {shape, tensor.dtype,
+            reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(tensor.ptr) +
+                                     rowBegin * tensor.stride[0] * XDtypeBit(tensor.dtype) / 8)};
 }
 
 }  // namespace
@@ -546,8 +545,8 @@ void XModel::ForwardAttnMLAV2DsaCp(XRuntime &rt, uint32_t layer,
     auto hidden = DsaCpTensorRows(hiddenState, 0, shardLen);
     auto positionTokens = rt._attnPosition;
     if (positionTokens.dtype != INT64 ||
-        !(positionTokens.shape.size() == 1 ||
-          (positionTokens.shape.size() == 2 && positionTokens.shape[0] == 1)) ||
+        (positionTokens.shape.size() != 1 &&
+         (positionTokens.shape.size() != 2 || positionTokens.shape[0] != 1)) ||
         positionTokens.numel < rt.batchedTokens) {
         throw std::invalid_argument(
             "MLA DSA-CP requires INT64 positions shaped [N] or [1, N] covering all batch tokens");
@@ -742,7 +741,7 @@ void XModel::ForwardAttnMLAV2DsaCp(XRuntime &rt, uint32_t layer,
         }
         XliteOpEinsumMhtHtdMhd(rt, q, mlaWUKT[layer], qAbsorb, shardLen, _c.nHeads, _c.nopeHeadDim,
                                _c.kvLoraRank, dsaCpWUKTWeightNZ[layer],
-                               _c.nopeHeadDim + _c.ropeHeadDim);
+                               static_cast<int>(_c.nopeHeadDim + _c.ropeHeadDim));
 
         rt.PutTensor(q);
         // Run sparse prefill on gathered Top-K KV; retain the existing paged fallbacks.
@@ -755,7 +754,7 @@ void XModel::ForwardAttnMLAV2DsaCp(XRuntime &rt, uint32_t layer,
                                   _c.softmaxScale);
         } else {
             const size_t maxLen = rt._attnBlockTables[0].shape[1] * _c.blockSizes[0];
-            const size_t tile = std::min(maxLen, size_t(rt._tileSizeOfCachedKV));
+            const size_t tile = std::min(maxLen, static_cast<size_t>(rt._tileSizeOfCachedKV));
             auto &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, tile}, dtype, DBG_LOC);
             if (maxLen <= tile) {
                 XliteOpMLAV2(rt, qAbsorb, qPe, kvCache[layer][0], kvCache[layer][1], qk, *oAbsorb,
@@ -3278,8 +3277,9 @@ size_t XModel::DummyRun()
     if (_c.enableDsaCp && _c.maxBatch > 0) {
         // The largest prefill probe may take CP. Also cover head TP at the
         // small-batch boundary, with long history for paged/flash workspaces.
-        const uint32_t queryLen = std::min<uint64_t>(XLITE_DSA_CP_TP_TOKEN_THRESHOLD,
-                                                     std::min(_c.maxBatchedTokens, _c.maxSeqLen));
+        const uint32_t queryLen =
+            std::min<uint64_t>({static_cast<uint64_t>(XLITE_DSA_CP_TP_TOKEN_THRESHOLD),
+                                _c.maxBatchedTokens, _c.maxSeqLen});
         if (queryLen > 0) {
             maxSize = std::max(maxSize, runDecodeAs(1, queryLen));
         }

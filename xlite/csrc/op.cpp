@@ -77,9 +77,9 @@ void XliteOpDsaCpReorderWo(XRuntime &rt, XTensor &input, XTensor &output, uint32
 {
     if (!IsDummyRuntime(rt) && blockBytes > 0) {
         if (input.numel * XDtypeBit(input.dtype) / 8 <
-                uint64_t(ranks) * columnBlocks * blockBytes ||
+                static_cast<uint64_t>(ranks) * columnBlocks * blockBytes ||
             output.numel * XDtypeBit(output.dtype) / 8 <
-                uint64_t(ranks) * columnBlocks * blockBytes) {
+                static_cast<uint64_t>(ranks) * columnBlocks * blockBytes) {
             throw std::invalid_argument(
                 "DsaCpReorderWo: input/output too small for ranks*columnBlocks*blockBytes");
         }
@@ -1508,7 +1508,7 @@ void XliteOpDsaCpGatherMLA(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor 
     // Dense MLA pipelines one query's softmax with the next query's QK on
     // each cube core. Keep two queries per core in a group to enable that
     // overlap while bounding the expanded KV workspace.
-    const size_t groupCapacity = std::min<size_t>(shardLen, size_t(rt.aicNum) * 2);
+    const size_t groupCapacity = std::min<size_t>(shardLen, static_cast<size_t>(rt.aicNum) * 2);
     const uint32_t blockTableStride = static_cast<uint32_t>(blockTables.stride[0]);
     auto &groupQueryStartLoc = rt.GetTensor({groupCapacity}, INT32, DBG_LOC);
     auto &groupQueryLens = rt.GetTensor({groupCapacity}, INT32, DBG_LOC);
