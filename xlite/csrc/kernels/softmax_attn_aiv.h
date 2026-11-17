@@ -15,15 +15,49 @@
 using namespace AscendC;
 
 #if __DAV_C220_VEC__
-#define MAX_SWA_SEG_WIDTH 4096
+// UB budget for RunAivSoftmaxPingPong at the worst-case feature mix (all of
+// saveMaxSum / topK / attnSink on simultaneously). Each assert must mirror the
+// ub.Alloc* sequence in RunAivSoftmaxPingPong exactly:
+//   in[2] + out[2]     4 x ROUND_UP(len * sizeof(Dtype), VECTOR_MAX_BYTESIZE)
+//   cal (fp32)        ROUND_UP(len * sizeof(float), VECTOR_MAX_BYTESIZE)
+//   temp              (DIV_ROUND_UP(len * sizeof(float), VECTOR_MAX_BYTESIZE) / 2)
+//                        * VECTOR_MAX_BYTESIZE
+//   fixed slots x10    maxOut[2] + sumOut[2] (saveMaxSum) + cmp0 (2 slots) + cmp1
+//                        + cmpFp320 + cmpFp321 + sink (attnSink)
+//   indices[2] +
+//   currIndices       3 x ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE)
+//   inTopK            ROUND_UP((topK + swaSegWidth) * sizeof(Dtype), VECTOR_MAX_BYTESIZE)
+//   indicesFp32       ROUND_UP(topK * sizeof(float), VECTOR_MAX_BYTESIZE)
+//   topkMask[2]       2 x ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE)
+//
+// len = MAX(outN, topK + swaSegWidth), and BOTH terms can dominate:
+//   - no-SWA paths (flash_attention / flash_mla_v2 / mla_v2): outN is the
+//     row, host-checked against MAX_SOFTMAX_PINGPONG_LEN (the flash/mla
+//     entries check the tile / maxSeqLen); swaSegWidth = 0. The standalone
+//     softmax op is caller-routed (softmax vs softmax_long) and, with topK=0
+//     and saveMaxSum off, affords wider rows than this all-features bound.
+//   - SWA paths: outN = swaSegWidth + compress width and dominates whenever
+//     the compress width exceeds topK (always, for cxa, whose topK path
+//     requires ncCalcLen > indexTopK; flash_cxa tile 0 whenever the compress
+//     tile is wider than topK). The row outN <= MAX_SOFTMAX_PINGPONG_LEN is
+//     enforced by XliteOpFlashCXA (swaSegWidth + tileSizeOfCachedKV) for
+//     flash_cxa and by the Python layer for cxa (tests/kernels/cxa.py,
+//     max_row check); swaSegWidth <= MAX_SWA_SEG_WIDTH is enforced by
+//     XliteOpCXA / XliteOpFlashCXA.
+// Both scenarios are therefore asserted at len = MAX_SOFTMAX_PINGPONG_LEN
+// (the guard below keeps the topK + swaSegWidth term inside the same bound);
+// they differ only in inTopK (topK vs topK + MAX_SWA_SEG_WIDTH).
+static_assert(MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH <= MAX_SOFTMAX_PINGPONG_LEN,
+              "len = MAX(outN, topK + swaSegWidth): keep the topK+SWA term within the row bound");
 static_assert(ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) * 4 +
                       ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) +
                       (DIV_ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) /
                        2) *
                           VECTOR_MAX_BYTESIZE +
-                      VECTOR_MAX_BYTESIZE * 9 +
+                      VECTOR_MAX_BYTESIZE * 10 +
                       ROUND_UP(MAX_TOPK_NUM * sizeof(int32_t), VECTOR_MAX_BYTESIZE) * 3 +
                       ROUND_UP(MAX_TOPK_NUM * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) +
+                      ROUND_UP(MAX_TOPK_NUM * sizeof(float), VECTOR_MAX_BYTESIZE) +
                       ROUND_UP(MAX_TOPK_NUM / 8, VECTOR_MAX_BYTESIZE) * 2 <=
                   UB_SIZE,
               "MAX_SOFTMAX_PINGPONG_LEN or MAX_TOPK_NUM too large (calc in bfloat16_t)");
@@ -32,33 +66,34 @@ static_assert(ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float16_t), VECTOR_MAX_
                       (DIV_ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) /
                        2) *
                           VECTOR_MAX_BYTESIZE +
-                      VECTOR_MAX_BYTESIZE * 9 +
+                      VECTOR_MAX_BYTESIZE * 10 +
                       ROUND_UP(MAX_TOPK_NUM * sizeof(int32_t), VECTOR_MAX_BYTESIZE) * 3 +
                       ROUND_UP(MAX_TOPK_NUM * sizeof(float16_t), VECTOR_MAX_BYTESIZE) +
+                      ROUND_UP(MAX_TOPK_NUM * sizeof(float), VECTOR_MAX_BYTESIZE) +
                       ROUND_UP(MAX_TOPK_NUM / 8, VECTOR_MAX_BYTESIZE) * 2 <=
                   UB_SIZE,
               "MAX_SOFTMAX_PINGPONG_LEN or MAX_TOPK_NUM too large (calc in float16_t)");
 static_assert(
-    ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) * 4 +
-            ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float), VECTOR_MAX_BYTESIZE) +
-            (DIV_ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float), VECTOR_MAX_BYTESIZE) /
-             2) *
+    ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) * 4 +
+            ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) +
+            (DIV_ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) / 2) *
                 VECTOR_MAX_BYTESIZE +
             VECTOR_MAX_BYTESIZE * 10 +
             ROUND_UP(MAX_TOPK_NUM * sizeof(int32_t), VECTOR_MAX_BYTESIZE) * 3 +
             ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(bfloat16_t), VECTOR_MAX_BYTESIZE) +
+            ROUND_UP(MAX_TOPK_NUM * sizeof(float), VECTOR_MAX_BYTESIZE) +
             ROUND_UP(MAX_TOPK_NUM / 8, VECTOR_MAX_BYTESIZE) * 2 <=
         UB_SIZE,
     "MAX_TOPK_NUM or MAX_SWA_SEG_WIDTH too large (calc in bfloat16_t)");
 static_assert(
-    ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float16_t), VECTOR_MAX_BYTESIZE) * 4 +
-            ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float), VECTOR_MAX_BYTESIZE) +
-            (DIV_ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float), VECTOR_MAX_BYTESIZE) /
-             2) *
+    ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float16_t), VECTOR_MAX_BYTESIZE) * 4 +
+            ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) +
+            (DIV_ROUND_UP(MAX_SOFTMAX_PINGPONG_LEN * sizeof(float), VECTOR_MAX_BYTESIZE) / 2) *
                 VECTOR_MAX_BYTESIZE +
             VECTOR_MAX_BYTESIZE * 10 +
             ROUND_UP(MAX_TOPK_NUM * sizeof(int32_t), VECTOR_MAX_BYTESIZE) * 3 +
             ROUND_UP((MAX_TOPK_NUM + MAX_SWA_SEG_WIDTH) * sizeof(float16_t), VECTOR_MAX_BYTESIZE) +
+            ROUND_UP(MAX_TOPK_NUM * sizeof(float), VECTOR_MAX_BYTESIZE) +
             ROUND_UP(MAX_TOPK_NUM / 8, VECTOR_MAX_BYTESIZE) * 2 <=
         UB_SIZE,
     "MAX_TOPK_NUM or MAX_SWA_SEG_WIDTH too large (calc in float16_t)");
@@ -772,9 +807,15 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
 }
 
 /*
- * (VECTOR_MAX_REPEAT - 1) * VECTOR_MAX_BYTESIZE * 2 + VECTOR_MAX_BYTESIZE *
- * DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) + VECTOR_MAX_BYTESIZE * (subBlockNum + 1) * 2 < UB
- * SIZE(196608) float16_t or bfloat16_t: subBlockNum <= 127 float16_t or bfloat16_t: n <= 2064512
+ * UB capacity (192KB), mirroring the ub.Alloc* sequence below exactly:
+ *   in + out + calc   (VECTOR_MAX_REPEAT - 1) * VECTOR_MAX_BYTESIZE * 2
+ *   calcDst           VECTOR_MAX_BYTESIZE * DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad)
+ *   max + sum         VECTOR_MAX_BYTESIZE * (subBlockNum + 1) * 2
+ *   sink              VECTOR_MAX_BYTESIZE (attnSink != nullptr only)
+ * Without attnSink the budget is exactly UB_SIZE at subBlockNum = 127:
+ *   float16_t or bfloat16_t: subBlockNum <= 127, n <= 2064512
+ * With attnSink (cxa) the extra slot leaves no room at 127:
+ *   float16_t or bfloat16_t: subBlockNum <= 126, n <= 2048256
  */
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxLong(
@@ -811,7 +852,7 @@ inline __aicore__ void RunAivSoftmaxLong(
               : DIV_ROUND_UP(VECTOR_MAX_REPEAT - 1, calcPad) * VECTOR_MAX_BYTESIZE);
     auto *max = ub.AllocBytesAs<float>((totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE);
     auto *sum = ub.AllocBytesAs<float>((totalSubBlockNum + 1) * VECTOR_MAX_BYTESIZE);
-    __ubuf__ float *sink = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+    __ubuf__ float *sink = ub.AllocBytesAs<float>(attnSink != nullptr ? VECTOR_MAX_BYTESIZE : 0);
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);  // for MTE2 in
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);  // for MTE2 calc

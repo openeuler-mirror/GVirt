@@ -1173,6 +1173,22 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
         throw std::runtime_error(std::string(__func__) +
                                  ": dense=True requires indexTopK > 0 (dense cache length)");
     }
+    if (windowSize != 0) {
+        // The topK>0 path runs RunAivSoftmaxPingPong with an inTopK buffer of
+        // topK + swaSegWidth elements; keep the SWA segment inside the
+        // MAX_SWA_SEG_WIDTH budget (see kernel_param.h). The row width itself
+        // (swaSegWidth + per-row compress len) is enforced by the Python layer
+        // (tests/kernels/cxa.py max_row <= MAX_SOFTMAX_PINGPONG_LEN) and
+        // cannot be checked here (per-row, lens-dependent); topK==0 rows go
+        // through the row-tolerant RunAivSoftmaxLong instead.
+        uint32_t swaSegWidth = windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B;
+        if (swaSegWidth > MAX_SWA_SEG_WIDTH) {
+            throw std::runtime_error(std::string(__func__) + ": windowSize (" +
+                                     std::to_string(windowSize) + ") needs swaSegWidth (" +
+                                     std::to_string(swaSegWidth) + ") > MAX_SWA_SEG_WIDTH (" +
+                                     std::to_string(MAX_SWA_SEG_WIDTH) + ")");
+        }
+    }
     KERNEL_PTR_TYPE(cxa) * launchKernel;
     if (EachXDtype(BF16, q, swaKCache, compressKCache, scores, output)) {
         launchKernel = aclrtlaunch_cxa_bfloat16_t;
@@ -1318,6 +1334,26 @@ void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &comp
         throw std::runtime_error(std::string(__func__) + ": tile size of kv " +
                                  std::to_string(tileSizeOfCachedKV) + " > " +
                                  std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
+    }
+    if (windowSize != 0) {
+        // Tile 0 runs RunAivSoftmaxPingPong over the full [SWA | compress]
+        // row (outN = swaSegWidth + compress tile width, host-checked tile
+        // above), so the row must stay within MAX_SOFTMAX_PINGPONG_LEN and
+        // the SWA segment within MAX_SWA_SEG_WIDTH (see kernel_param.h);
+        // wider tiles must be shrunk by the caller.
+        uint32_t swaSegWidth = windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B;
+        if (swaSegWidth > MAX_SWA_SEG_WIDTH) {
+            throw std::runtime_error(std::string(__func__) + ": windowSize (" +
+                                     std::to_string(windowSize) + ") needs swaSegWidth (" +
+                                     std::to_string(swaSegWidth) + ") > MAX_SWA_SEG_WIDTH (" +
+                                     std::to_string(MAX_SWA_SEG_WIDTH) + ")");
+        }
+        if (swaSegWidth + tileSizeOfCachedKV > MAX_SOFTMAX_PINGPONG_LEN) {
+            throw std::runtime_error(std::string(__func__) + ": qk row width (swaSegWidth + tile " +
+                                     std::to_string(swaSegWidth + tileSizeOfCachedKV) + ") > " +
+                                     std::to_string(MAX_SOFTMAX_PINGPONG_LEN) +
+                                     ": shrink tile_size_of_cached_kv");
+        }
     }
     if (indexTopK > MAX_TOPK_NUM) {
         throw std::runtime_error(std::string(__func__) +
@@ -2234,6 +2270,13 @@ void XliteOpMSDMergeDequant(XRuntime &rt, XTensor &yMerged, XTensor &scaleBiasPt
         }
         uint32_t m = yMerged.shape[0] / 2;
         uint32_t n = yMerged.shape[1];
+        if (n > MSD_MERGE_DEQUANT_MAX_N) {
+            // Single-row UB layout is 24B/elem on n_pad + a 32B counts slice;
+            // beyond this the kernel would write past UB.
+            throw std::runtime_error(err_str + " n (=shape[1]) " + std::to_string(n) +
+                                     " exceeds the single-row UB budget " +
+                                     std::to_string(MSD_MERGE_DEQUANT_MAX_N));
+        }
         aclrtlaunch_msd_merge_dequant_int8_t(
             PickMinBlockNum(rt.aivNum, yMerged.shape[0] / 2), rt.stream, yMerged.ptr,
             scaleBiasPtrs.ptr, perTokenScale.ptr, out.ptr, nullptr, m, n, counts.ptr, start, end);

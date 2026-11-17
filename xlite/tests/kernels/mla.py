@@ -48,7 +48,7 @@ enable_flash = True
 tile_size = 8192
 
 BLOCK_SIZE = 128
-MAX_SOFTMAX_PINGPONG_LEN = 11776
+MAX_SOFTMAX_PINGPONG_LEN = 10496
 # dense (gather) path supports decode and small prefill; mirrors the model's
 # XLITE_SMALL_PREFILL_THRESHOLD gating (csrc/model.cpp).
 MAX_DENSE_QUERY_LEN = 6

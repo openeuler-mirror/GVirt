@@ -42,18 +42,18 @@ Python 调用方式（`tests/kernels/softmax.py` 的 `softmax(rt, y, size, ...)`
 4. **尾零**：outN > actualCalcLen 时用 `SetMaskFromHighBit` + `vector_dup` 把行尾补 0（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`，关键字 `SetMaskFromHighBit` / `vector_dup` 尾零段）；
 5. **MTE3**：整行 outN 个元素写回 `buf + idx*n`（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`，关键字 `copy_ubuf_to_gm` 写回段）。
 
-UB 布局：`in[2]`/`out[2]`（乒乓）+ FP32 计算缓冲 `cal`/`temp` + 可选 max/sum/topk 缓冲（本入口 saveMaxSum=false、topK=0，均不分配），长度上界由 `MAX_SOFTMAX_PINGPONG_LEN = 11776`（`csrc/kernels/kernel_param.h` 的 `MAX_SOFTMAX_PINGPONG_LEN` 宏)约束。
+UB 布局：`in[2]`/`out[2]`（乒乓）+ FP32 计算缓冲 `cal`/`temp` + 可选 max/sum/topk 缓冲（本入口 saveMaxSum=false、topK=0，均不分配），长度上界由 `MAX_SOFTMAX_PINGPONG_LEN = 10496`（`csrc/kernels/kernel_param.h` 的 `MAX_SOFTMAX_PINGPONG_LEN` 宏)约束。该值按最坏特性组合（saveMaxSum + topK + attnSink 同时启用）校准，且以 **SWA + topK 场景为绑定约束**（行宽缓冲之外再叠加 `topK + swaSegWidth` 宽的 `inTopK`）：`MAX_TOPK_NUM=2048`、`MAX_SWA_SEG_WIDTH=4096` 时 SWA 全开布局 195072B ≤ UB_SIZE(196608B)（无 SWA 全开 186880B），static_assert 见 `csrc/kernels/softmax_attn_aiv.h` 的 UB 预算注释块。SWA 场景的行宽 `outN = swaSegWidth + 压缩段宽` 由 host（flash_cxa：`swaSegWidth + tileSizeOfCachedKV`）或 Python 层（cxa：`tests/kernels/cxa.py` 的 max_row）保证 ≤ 10496，`swaSegWidth ≤ MAX_SWA_SEG_WIDTH` 由 `XliteOpCXA`/`XliteOpFlashCXA` 保证（此前断言以 topK+swaSegWidth=6144 为基准，未覆盖 outN 主导的常态，11776/11136 旧值在 SWA+topK 组合下越界）。
 
 流水线：`PIPE_V ↔ PIPE_MTE2` 的 EVENT_ID2/3 管输入乒乓，`PIPE_V → PIPE_MTE3 → PIPE_V` 的 EVENT_ID0 管输出写回与缓冲归还，使第 idx+1 行的 MTE2 搬入与第 idx 行的 MTE3 写回、V 计算重叠（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`，关键字 `EVENT_ID2` / `EVENT_ID3` / `EVENT_ID0` 同步段）。
 
 ### 长行路径：RunAivSoftmaxLong（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`）
 
-当行长大到单次放不下 UB（单子块上限 `MAX_SUB_CONTEXT_SIZE = (VECTOR_MAX_REPEAT-1) * 64` 个 fp32，即 255×64=16320；子块数 `subBlockNum = DIV_ROUND_UP(outN, MAX_SUB_CONTEXT_SIZE)`）时启用，两趟处理：
+当行长大到单次放不下 UB（单子块上限 `MAX_SUB_CONTEXT_SIZE = (VECTOR_MAX_REPEAT-1) * 64` 个 fp32，即 254×64=16256；子块数 `subBlockNum = DIV_ROUND_UP(outN, MAX_SUB_CONTEXT_SIZE)`）时启用，两趟处理：
 
 - **stage 1（max & 部分和）**（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`，关键字 `ReduceMaxV2` / `totalMax` / `totalSum` 的 stage1 段）：逐子块搬入→升精度→`ReduceMaxV2/ReduceMax` 求块内 max；多子块时维护 `max[]`/`sum[]` 数组与全局 `totalMax/totalSum`，新块 max 超过历史 max 时用 `exp(lastMax-totalMax)` 修正历史部分和（在线 softmax 合并），每块的 `exp(x-max)` 写入 GM `expBuf` 暂存（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`，关键字 `expBuf` 写入段）；
 - **stage 2（归一化）**（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`，关键字 `maxFlag` / `vdiv` 的 stage2 段）：逐子块从 expBuf 读回 fp32，`maxFlag[block]` 标记的块乘 `exp(curMax-totalMax)` 修正，`vdiv` 除以 totalSum，转回 dtype 写回原行；末尾子块的尾零与未覆盖子块的整块清零处理（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`，关键字 `vector_dup` 尾零/整块清零段）。
 
-UB 布局只保留单份 `in`/`out`（各 MAX_SUB_CONTEXT_SIZE）+ FP32 `calc`/`calcDst` + 每子块 max/sum 槽；stage1/stage2 内部各用 EVENT_ID0/1/3/4/5 做块间 MTE2/MTE3/V 握手（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`，关键字 `EVENT_ID0` / `EVENT_ID1` / `EVENT_ID3` / `EVENT_ID4` / `EVENT_ID5` 握手段）。测试覆盖至行长 2064512（`tests/kernels/softmax.py` 的 2064512 长行测试用例），与头文件注释的上限一致（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong` 上方注释，关键字 `subBlockNum <= 127` / `n <= 2064512`）。
+UB 布局只保留单份 `in`/`out`（各 MAX_SUB_CONTEXT_SIZE）+ FP32 `calc`/`calcDst` + 每子块 max/sum 槽 + 可选 sink 槽（attnSink 非空时才分配，见 `csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`，关键字 `sink`）；stage1/stage2 内部各用 EVENT_ID0/1/3/4/5 做块间 MTE2/MTE3/V 握手（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`，关键字 `EVENT_ID0` / `EVENT_ID1` / `EVENT_ID3` / `EVENT_ID4` / `EVENT_ID5` 握手段）。测试覆盖至行长 2064512（`tests/kernels/softmax.py` 的 2064512 长行测试用例），与头文件注释的上限一致（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong` 上方注释，关键字 `subBlockNum <= 127` / `n <= 2064512`；启用 attnSink 的 cxa 路径少一个 sink 槽的余量，上界收紧为 126 / 2048256）。
 
 ### 复用扩展（本入口未启用）
 

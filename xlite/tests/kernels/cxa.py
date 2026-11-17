@@ -54,7 +54,7 @@ logging.getLogger().setLevel(logging.INFO)
 rt = Runtime(0, size=3000)
 torch.npu.set_device(0)
 torch.npu.config.allow_internal_format = True
-MAX_SOFTMAX_PINGPONG_LEN = 11776
+MAX_SOFTMAX_PINGPONG_LEN = 10496
 
 # flash path: tiles the KV-len dimension, mirroring flash_mla_v2. Long rows that
 # exceed MAX_SOFTMAX_PINGPONG_LEN run via flash instead of being skipped.

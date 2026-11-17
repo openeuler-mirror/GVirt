@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-CXA 的 flash(online-softmax)变体,是 cxa 的长序列路径:当某行压缩 KV 总宽 `compressTotalLen = (cachedLen + queryLen) / compressRatio` 超过 PingPong UB 预算(`MAX_SOFTMAX_PINGPONG_LEN = 11776`,`csrc/kernels/kernel_param.h` 的 `MAX_SOFTMAX_PINGPONG_LEN` 宏)时,由 Python 侧 `enable_flash_attention=True` 路由进入(`csrc/_C.cpp` 的 `CXA` 的 `else if (enableFlashAttention && compressRatio != 0)` 分支)。它把 KV-len(压缩 token)维度切成 `tileSizeOfCachedKV` 宽的 tile,每 tile 上 AIC 算 `QK = (q · swaK^T) | (q · compressK^T)` 与 `sv = softmax_local(QK) · K^T`,AIV 用 online softmax 跨 tile 增量合并,最终 `output = softmax_causal(QK) · K^T`。支持 DSA top-k token 选择(`topkIndices`)。
+CXA 的 flash(online-softmax)变体,是 cxa 的长序列路径:当某行压缩 KV 总宽 `compressTotalLen = (cachedLen + queryLen) / compressRatio` 超过 PingPong UB 预算(`MAX_SOFTMAX_PINGPONG_LEN = 10496`,`csrc/kernels/kernel_param.h` 的 `MAX_SOFTMAX_PINGPONG_LEN` 宏)时,由 Python 侧 `enable_flash_attention=True` 路由进入(`csrc/_C.cpp` 的 `CXA` 的 `else if (enableFlashAttention && compressRatio != 0)` 分支)。它把 KV-len(压缩 token)维度切成 `tileSizeOfCachedKV` 宽的 tile,每 tile 上 AIC 算 `QK = (q · swaK^T) | (q · compressK^T)` 与 `sv = softmax_local(QK) · K^T`,AIV 用 online softmax 跨 tile 增量合并,最终 `output = softmax_causal(QK) · K^T`。支持 DSA top-k token 选择(`topkIndices`)。
 
 与 cxa(单遍)的关系:cxa 把整行 `[swaSegWidth, kvSize]` 分数一次性算进 softmax,行宽受 UB 预算限制;flash_cxa 把压缩段切成 `tileSizeOfCachedKV` 个 tile,SWA 段**只挂在第一个 KV tile**(`kvIdx == 0`)上,其余 tile 是纯压缩段。每个 tile 的 QK/SV/softmax 五级流水重叠,跨 tile 用 online softmax 合并 max/sum 与 output。数学上两者等价(容差 `atol=5e-5, rtol=5e-2`,见 `tests/kernels/cxa.py` 的 `assert_close`(关键字 `atol=5e-5, rtol=5e-02`))。
 
@@ -70,7 +70,7 @@ flash_cxa_<dtype>(q, swaKCache, compressKCache, swaBlockTables, compressBlockTab
 | query_start_loc / query_lens / cached_lens | 输入 | `[batch]` | INT32 | query 长度前缀和 / 当前 query 长度 / 已缓存长度 |
 | n_heads / head_dim / scale / window_size / compress_ratio / index_topk | 标量 | - | uint32/float | 同 cxa;flash 要求 `compressRatio != 0` |
 | topk_indices | 输入(可选) | `[totalQ, indexTopK]` | INT32 | DSA top-k 压缩索引;`indexTopK == 0` 时禁用 |
-| tile_size_of_cached_kv | 标量 | - | uint32 | KV-len(压缩 token)tile 宽度;host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN = 11776`(`csrc/op.cpp` 的 `XliteOpFlashCXA`(关键字 `tileSizeOfCachedKV > MAX_SOFTMAX_PINGPONG_LEN`)),默认 `MAX_KV_TILE_SIZE = 8192`(`csrc/auto_tuner.h` 的 `MAX_KV_TILE_SIZE` 宏) |
+| tile_size_of_cached_kv | 标量 | - | uint32 | KV-len(压缩 token)tile 宽度;host 要求 ≤ `MAX_SOFTMAX_PINGPONG_LEN = 10496`(`csrc/op.cpp` 的 `XliteOpFlashCXA`(关键字 `tileSizeOfCachedKV > MAX_SOFTMAX_PINGPONG_LEN`));`window_size > 0` 时还要求 `swaSegWidth + tileSizeOfCachedKV ≤ 10496`(tile 0 的 PingPong softmax 行宽 = SWA 段 + 压缩段,关键字 `swaSegWidth + tileSizeOfCachedKV > MAX_SOFTMAX_PINGPONG_LEN`)与 `swaSegWidth ≤ MAX_SWA_SEG_WIDTH(4096)`(topK 路径 `inTopK` 预算,关键字 `swaSegWidth > MAX_SWA_SEG_WIDTH`),默认 `MAX_KV_TILE_SIZE = 8192`(`csrc/auto_tuner.h` 的 `MAX_KV_TILE_SIZE` 宏) |
 | zeroGm | 标量 | - | GM | host 自动提供的零缓冲(`rt._attnZeroBuffer`),非 Python API 参数;`CxaAicHelper::Init` 用它预填零 L1B(见上文) |
 
 workspace 由 `csrc/_C.cpp` 的 `CXA`(关键字 `qkWidth = swaSegWidth + tileSizeOfCachedKV`,workspace 分配)分配:`qk`/`sv` 宽度分别为 `qkWidth = swaSegWidth + tileSizeOfCachedKV` 与 `headDim`,`max`/`sum` 各 `aivNum * XLITE_MAX_M0 * 2`,`lastMax`/`lastSum` 为 `[totalQ, nHeads]`,`sync` 为 `[1, aivNum]` 并 `Memset(0)`。

@@ -3382,8 +3382,13 @@ def msd_merge_dequant(
 
     Raises:
         RuntimeError: If dtypes/shapes are unsupported
-            (requires ``y_merged`` float16, ``scale_bias``/``per_token_scale``
-            float32, ``out`` bfloat16, and ``y_merged.shape[0]`` even).
+            (requires ``y_merged`` float16, ``scale_biases``/``per_token_scale``
+            float32, ``out`` bfloat16, and ``y_merged.shape[0]`` even), or if
+            ``n`` (``y_merged.shape[1]``) exceeds 8064
+            (``MSD_MERGE_DEQUANT_MAX_N``): the kernel processes a whole row in
+            UB at 24 bytes/element with no N-tiling, so wider rows are
+            rejected by the host (``XliteOpMSDMergeDequant`` in
+            ``csrc/op.cpp``).
     """
     ...
 
@@ -3555,13 +3560,13 @@ def mla_v2(
             paged mode. In dense mode this is the dense cache length
             (``index_topk``) and must be > 0. In paged mode with ``top_k > 0``,
             ``max_seq_len`` (block-table width narrowed by the lens) must not
-            exceed 11776 (``MAX_SOFTMAX_PINGPONG_LEN``) and ``top_k`` must be
+            exceed 10496 (``MAX_SOFTMAX_PINGPONG_LEN``) and ``top_k`` must be
             <= 2048 (``MAX_TOPK_NUM``).
         nz (bool): Whether to use nz weights.
         enable_flash_attention (bool): Whether to use the flash MLA v2 kernel
             (ignored when ``dense=True``).
         tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA v2;
-            must not exceed 11776 (``MAX_SOFTMAX_PINGPONG_LEN``).
+            must not exceed 10496 (``MAX_SOFTMAX_PINGPONG_LEN``).
         dense (bool): Whether to gather a contiguous dense KV cache (via
             ``topk_indices``) instead of walking the paged block-table layout.
 

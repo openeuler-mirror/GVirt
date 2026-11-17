@@ -53,6 +53,10 @@ __aicore__ inline void reorder_moe_kernel(GM_ADDR input, GM_ADDR output, GM_ADDR
     __ubuf__ int32_t *chunkOffsets = (__ubuf__ int32_t *)((uintptr_t)off);
     off += ROUND_UP(moeEpSize * sizeof(int32_t), VECTOR_MAX_BYTESIZE);
     __ubuf__ uint8_t *dataBuf = (__ubuf__ uint8_t *)((uintptr_t)off);
+    // The three offset tables above must leave room for the copy staging area;
+    // otherwise UB_SIZE - off would underflow uint32 and the staging copy would
+    // run past UB.
+    assert(off <= UB_SIZE);
     uint32_t dataBufSize = UB_SIZE - (uint32_t)off;
 
     copy_gm_to_ubuf(countsBuf, (__gm__ int32_t *)counts, 0, 1,

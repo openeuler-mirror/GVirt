@@ -38,7 +38,7 @@ fp16 变体的 CalType 也是 fp16，即 silu 的中间计算（exp、div 等）
 
 ### 数据流与 UB 布局
 
-UB 分成 5 等份，每份 `MAX_HIDDENSIZE_PER_PIECE = 38912` 个元素（= UB_SIZE 196608 / 5，`csrc/kernels/silu_and_mul.h` 的 `MAX_HIDDENSIZE_PER_PIECE` 宏定义与 `silu_and_mul` 函数体 UB 偏移分配段，关键字 `ubuf0`/`ubuf1`/`ubuf2`/`ubuf3`/`cal_ubuf`）：
+UB 分成 5 等份，每份 `MAX_HIDDENSIZE_PER_PIECE = 38912` 字节（≈ UB_SIZE 196608 / 5 向下取整到 128 的倍数；注意单位是字节而非元素，元素容量 = 38912 / sizeof(元素类型)，`csrc/kernels/silu_and_mul.h` 的 `MAX_HIDDENSIZE_PER_PIECE` 宏定义与 `silu_and_mul` 函数体 UB 偏移分配段，关键字 `ubuf0`/`ubuf1`/`ubuf2`/`ubuf3`/`cal_ubuf`）：
 
 | 缓冲区 | 作用 |
 |--------|------|

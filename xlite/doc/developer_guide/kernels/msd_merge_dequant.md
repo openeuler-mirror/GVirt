@@ -30,13 +30,13 @@ Python 入口 `msd_merge_dequant(rt, y_merged, scale_biases, counts, per_token_s
 | counts | 输入 | `[numExperts]` | uint32 | 每专家 token 数(未翻倍,与 out 行轴一致);按全局专家 id 索引,仅 `[startIdx, endIdx)` 有 token |
 | startIdx / endIdx | 标量 | - | uint32_t | 本次 pass 处理的专家范围(EP 分片);numExperts = endIdx - startIdx ≤ 8 |
 
-测试参考:[tests/kernels/msd_dequant.py](../../../tests/kernels/msd_dequant.py),单专家覆盖 `[8, 96]`、`[40, 512]`、`[200, 2048]`、`[1, 2048]`、`[8192, 6144]`;多专家覆盖 `(200, 4096, E=4 均分)`、`(200, 4096, E=8 倾斜 [80,40,20,18,15,12,10,5])`、`(8192, 4096, E=3 [4096,3072,1024])`(倾斜分片迫使每个 block 的跨步行序列内频繁切换专家);单/多专家用例均与纯 torch 参考对齐,另有 10 次重复 launch 的 bit 级确定性验证(运行间自比对,不与 torch 参考比较;压测 bias_buf 每行重载时 MTE2 覆写与 V 读的交错)。
+测试参考:[tests/kernels/msd_dequant.py](../../../tests/kernels/msd_dequant.py),单专家覆盖 `[8, 96]`、`[40, 512]`、`[200, 2048]`、`[1, 2048]`、`[8192, 6144]`、`[8, 8064]`(n=8064 钉住 host 上界 `MSD_MERGE_DEQUANT_MAX_N`:上限回退或 UB 布局回归时该用例失败);多专家覆盖 `(200, 4096, E=4 均分)`、`(200, 4096, E=8 倾斜 [80,40,20,18,15,12,10,5])`、`(8192, 4096, E=3 [4096,3072,1024])`(倾斜分片迫使每个 block 的跨步行序列内频繁切换专家);单/多专家用例均与纯 torch 参考对齐,另有 10 次重复 launch 的 bit 级确定性验证(运行间自比对,不与 torch 参考比较;压测 bias_buf 每行重载时 MTE2 覆写与 V 读的交错)。
 
 ## 支持的数据类型
 
 - `int8_t` 实例(算子语义为 fp16 输入 → bf16 输出;[msd_merge_dequant_int8_t.cpp](../../../csrc/kernels/msd_merge_dequant_int8_t.cpp))
 
-host 校验 `yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype == BF16`,且 yMerged 为 2D、行数为偶数(`csrc/op.cpp` 的 `XliteOpMSDMergeDequant`,关键字 `yMerged.shape[0] % 2`)。
+host 校验 `yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype == BF16`,且 yMerged 为 2D、行数为偶数(`csrc/op.cpp` 的 `XliteOpMSDMergeDequant`,关键字 `yMerged.shape[0] % 2`);n 超出单行 UB 预算 `MSD_MERGE_DEQUANT_MAX_N = 8064`(`csrc/kernels/kernel_param.h`)时抛错(kernel 侧另有 `assert(end_addr <= UB_SIZE)` 布局断言)。
 
 ## 实现原理
 
@@ -44,7 +44,7 @@ host 校验 `yMerged.dtype == FP16 && perTokenScale.dtype == FP32 && out.dtype =
 
 ### 分块与多 Block 并行
 
-- **无 n 切块**:整行一次搬入,`n_pad = ROUND_UP(n, 128)`;测试注释明确 n < ~12288 以内受 UB 单行布局约束(`tests/kernels/msd_dequant.py` 的 `test_cases` 注释,关键字 `n < ~12288`);
+- **无 n 切块**:整行一次搬入,`n_pad = ROUND_UP(n, 128)`;单行 UB 布局为 24B/元素(low/high fp16 ×2 + low_fp32/merged/bias fp32 ×3 + out bf16 ×2)+ 32B counts 切片,安全上界 `n ≤ MSD_MERGE_DEQUANT_MAX_N = 8064`(`csrc/kernels/kernel_param.h`;24×8064+32=193568 ≤ UB_SIZE 196608,再上一档 n_pad=8192 即越界),host 超界抛错、kernel 以布局末偏移断言兜底;
 - **多 Block 并行**:`for (row = block_idx; row < m; row += block_num)`(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `for (uint32_t row = block_idx`),行间轮转,low/high/out 三组缓冲 ping-pong。
 
 ### UB 内存布局(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`)

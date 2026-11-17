@@ -106,5 +106,5 @@ AIC 在 QK 写完后 `ffts_cross_core_sync(PIPE_FIX, config)`(flagIdx=0,inner-gr
 - 主类与任务调度:`csrc/kernels/attention.h` 的 `Attention::RunAic` / `Attention::RunAiv`
 - QK/SV GEMM 与 L1/L0 布局:`csrc/kernels/attention_aic_helper.h` 的 `AicHelper::Init` / `AicHelper::RunAicQK` / `AicHelper::RunAicSV`
 - softmax:`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`
-- M0 分档:`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0`;常量 `XLITE_MAX_M0=128`、`MAX_SOFTMAX_PINGPONG_LEN=11776`(`csrc/kernels/kernel_param.h`)
+- M0 分档:`csrc/kernels/kernel_macro.h` 的 `GetOptimalM0`;常量 `XLITE_MAX_M0=128`、`MAX_SOFTMAX_PINGPONG_LEN=10496`(`csrc/kernels/kernel_param.h`)
 - host launch:`csrc/op.cpp` 的 `XliteOpAttention`、路由 `csrc/model.cpp` 的 `ForwardAttnMHA`
