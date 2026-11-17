@@ -2693,10 +2693,16 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk,
-                        const XTensor &kScaleCache, uint32_t compressRatio, uint8_t kvSplit)
+                        const XTensor &kScaleCache, uint32_t compressRatio, uint8_t kvSplit,
+                        uint8_t qTile)
 {
     if (IsDummyRuntime(rt)) {
         return;
+    }
+    if (qTile > MAX_INDEXER_Q_TILE_LEN) {
+        throw std::runtime_error(std::string(__func__) + ": qTile must be in [0, " +
+                                 std::to_string(MAX_INDEXER_Q_TILE_LEN) + "], got " +
+                                 std::to_string(qTile));
     }
     blockTables.AtLeast2D();
     uint32_t blockTableStride = static_cast<uint32_t>(blockTables.stride[0]);
@@ -2747,7 +2753,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                 topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr,
-                kScaleCacheStride, compressRatio, weightCols, kvSplit);
+                kScaleCacheStride, compressRatio, weightCols, kvSplit, qTile);
         }
         return;
     }
@@ -2768,7 +2774,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                  topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
                  blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio, weightCols,
-                 kvSplit);
+                 kvSplit, qTile);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,

@@ -130,6 +130,15 @@ def parse_args():
         "-N", "--num-duplicates", type=int, default=3, help="Number of times to duplicate the work set (default: 1)"
     )
     parser.add_argument(
+        "-Q",
+        "--q-tile",
+        type=int,
+        default=0,
+        help="indexer_topk query-tile length override: 0 = the compile-time default "
+        "(the serving path picks it per forward in PrepareAttn; use this flag to "
+        "measure a fixed tier, e.g. -Q 17/22/24)",
+    )
+    parser.add_argument(
         "-S",
         "--kv-split",
         type=int,
@@ -212,7 +221,7 @@ def build_case(test_dtype, batch, cached_lens_list, query_len_list, topK):
     )
 
 
-def main(wait_time, test_dtype, work, topk_values, kv_split):
+def main(wait_time, test_dtype, work, topk_values, kv_split, q_tile):
     cases = []
     for batch, cached_lens_list, query_len_list in work:
         for topK in topk_values:
@@ -222,11 +231,11 @@ def main(wait_time, test_dtype, work, topk_values, kv_split):
     if time_delta > 0:
         time.sleep(time_delta)
 
-    print(f"[INFO] Firing {len(cases)} indexer_topk kernel calls (kv_split={kv_split})...")
+    print(f"[INFO] Firing {len(cases)} indexer_topk kernel calls (kv_split={kv_split}, q_tile={q_tile})...")
     t0 = time.time_ns()
     for case in cases:
         for _ in range(args.num_duplicates):
-            indexer_topk(rt, *case, kv_split=kv_split)
+            indexer_topk(rt, *case, kv_split=kv_split, q_tile=q_tile)
     torch.npu.synchronize()
     t1 = time.time_ns()
     print(f"[INFO] Done. Total time: {(t1 - t0) / 1000:.3f} us")
@@ -242,4 +251,5 @@ if __name__ == "__main__":
         work=args.work,
         topk_values=args.topk,
         kv_split=args.kv_split,
+        q_tile=args.q_tile,
     )

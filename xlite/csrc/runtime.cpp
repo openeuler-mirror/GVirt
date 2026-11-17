@@ -967,10 +967,13 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
             aicNum);
     }
 
-    // indexer_topk partitioning mode, decided once per forward from the host
-    // lens. CXA indexer layers are the compress_ratio==4 ones (block-space KV).
+    // indexer_topk query-tile length and partitioning mode, decided once per
+    // forward from the host lens (CXA indexer layers are the ratio==4 ones);
+    // the tile feeds the kv-split sparse-tile count for one task granularity.
+    uint32_t indexerRatio = attnMeta.attnType == XMODEL_ATTN_CXA ? 4 : 1;
+    _indexerQTile = PickIndexerQTile(_cachedLensHost, _hostLens, indexTopK, indexerRatio);
     _indexerKvSplit = PickIndexerKvSplit(_cachedLensHost, _hostLens, aicNum, indexTopK,
-                                         attnMeta.attnType == XMODEL_ATTN_CXA ? 4 : 1);
+                                         indexerRatio, _indexerQTile);
 
     size = batch * XDtypeBit(INT32) / 8;
 

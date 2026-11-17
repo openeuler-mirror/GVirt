@@ -264,13 +264,16 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
 // (PickIndexerKvSplit in PrepareAttn for model paths, explicit for the
 // standalone binding). 0 = serial (batch, query tile) tasks, 1 = (tile,
 // chunk) tasks with the cross-core topK relay.
+// qTile: query-tile length (PickIndexerQTile in PrepareAttn for model paths);
+// 0 = the compile-time macro default, > MAX_INDEXER_Q_TILE_LEN rejected (the
+// kernel's L1 q/w staging is macro-sized at build time).
 void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight, XTensor &scores,
                         XTensor &lastTopk, XTensor &seqPositions, XTensor &topkIndices,
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK,
                         uint8_t skipDenseTopk = 0, const XTensor &kScaleCache = XTensor(),
-                        uint32_t compressRatio = 1, uint8_t kvSplit = 0);
+                        uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0);
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output,
                  uint32_t calcOffset = 0, uint32_t calcNum = UINT32_MAX);
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,

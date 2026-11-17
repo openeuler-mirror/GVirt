@@ -268,24 +268,67 @@ uint32_t PickMinBlockNum(uint32_t coreNum, uint64_t totalRows)
     return totalRows >= coreNum ? coreNum : static_cast<uint32_t>(totalRows);
 }
 
+// Mirror of the kernel's MapPosToKv causal-boundary mapping (indexer_topk.h):
+// token pos for compressRatio<=1 (inclusive of own position), last
+// completed-block index otherwise. Int32 math on purpose - the kernel
+// compares the same values.
+static int32_t MapPosToKv(int32_t pos, uint32_t compressRatio)
+{
+    return compressRatio <= 1 ? pos : (pos + 1) / static_cast<int32_t>(compressRatio) - 1;
+}
+
+uint32_t PickIndexerQTile(const std::vector<uint32_t> &cachedLens,
+                          const std::vector<uint32_t> &queryLens, uint32_t topK,
+                          uint32_t compressRatio)
+{
+    // Largest prefill with real sparse work (crosses the dense boundary); decode
+    // rows and fully-dense prefills do not depend on the tile.
+    uint32_t maxSparseQueryLen = 0;
+    for (size_t b = 0; b < queryLens.size(); b++) {
+        uint32_t queryLen = queryLens[b];
+        if (queryLen <= 1) {
+            continue;
+        }
+        int32_t p0Start = MapPosToKv(static_cast<int32_t>(cachedLens[b]), compressRatio);
+        int32_t p0End =
+            MapPosToKv(static_cast<int32_t>(cachedLens[b] + queryLen - 1), compressRatio);
+        if (p0End >= static_cast<int32_t>(topK) && p0Start < p0End) {
+            maxSparseQueryLen = std::max(maxSparseQueryLen, queryLen);
+        }
+    }
+    // Measured on 910B (interleaved same-window A/B, medians, vs the macro
+    // default 24): tile 17 gains 6.9% on mixed batches and 3.2% on chunked
+    // prefill (non-overlapping distributions), while 2048-row prefill is
+    // flat at tile 22 (-0.6%, within noise). >4096-row prefill prefers a
+    // large tile: 17 is 2.95% slower than even tile 25. The tile-flat tiers
+    // (decode-only, >4096) keep the macro default 24: tile 25 regressed
+    // 1.6-2.8% there (default work set, non-overlapping distributions), so
+    // the ceiling tier stays at the legacy default.
+    if (maxSparseQueryLen == 0 || maxSparseQueryLen > 4096) {
+        return MAX_INDEXER_Q_TILE_LEN;
+    }
+    return maxSparseQueryLen <= 2048 ? 22 : 17;
+}
+
 uint8_t PickIndexerKvSplit(const std::vector<uint32_t> &cachedLens,
                            const std::vector<uint32_t> &queryLens, uint32_t blockNum, uint32_t topK,
-                           uint32_t compressRatio)
+                           uint32_t compressRatio, uint32_t queryTileSize)
 {
-    // Mirror of the kernel's MapPosToKv causal-boundary mapping: token pos for
-    // compressRatio<=1 (inclusive of own position), last completed-block index
-    // otherwise. Int32 math on purpose - the kernel compares the same values.
-    auto mapPosToKv = [compressRatio](int32_t pos) -> int32_t {
-        return compressRatio <= 1 ? pos : (pos + 1) / static_cast<int32_t>(compressRatio) - 1;
-    };
-    const uint32_t queryTileSize = MAX_INDEXER_Q_TILE_LEN;
+    // The tile is caller input, so guard it here: 0 would stall the walk loop
+    // below (qOffset += 0) and wrap p0End; treat 0 as the compile-time default
+    // and clamp above the macro like the kernel's Init does, so the sparse-tile
+    // count always reflects the real task granularity.
+    if (queryTileSize == 0 || queryTileSize > MAX_INDEXER_Q_TILE_LEN) {
+        queryTileSize = MAX_INDEXER_Q_TILE_LEN;
+    }
     uint64_t sparseTiles = 0;
     for (size_t b = 0; b < queryLens.size(); b++) {
         uint32_t queryLen = queryLens[b];
         uint32_t cachedLen = cachedLens[b];
         for (uint32_t qOffset = 0; qOffset < queryLen; qOffset += queryTileSize) {
             uint32_t taskLen = std::min(queryTileSize, queryLen - qOffset);
-            int32_t p0End = mapPosToKv(static_cast<int32_t>(cachedLen + qOffset + taskLen - 1));
+            int32_t p0End =
+                MapPosToKv(static_cast<int32_t>(cachedLen + qOffset + taskLen - 1), compressRatio);
             if (p0End >= static_cast<int32_t>(topK)) {
                 sparseTiles++;
             }

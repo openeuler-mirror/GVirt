@@ -2879,7 +2879,7 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
                  at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t headDim,
                  uint32_t blockSize, uint32_t batch, uint32_t topK,
                  const std::optional<at::Tensor> &kScaleCache = std::nullopt,
-                 uint32_t compressRatio = 1, uint8_t kvSplit = 0)
+                 uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0)
 {
     XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables,
         _ks;
@@ -2895,6 +2895,12 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     InitXTensor(_lens, lens, DBG_LOC);
     InitXTensor(_cachedLens, cachedLens, DBG_LOC);
     InitXTensor(_blockTables, blockTables, DBG_LOC, /*allowPitched=*/true);
+
+    if (qTile > MAX_INDEXER_Q_TILE_LEN) {
+        throw std::runtime_error(std::string(__func__) + ": qTile must be in [0, " +
+                                 std::to_string(MAX_INDEXER_Q_TILE_LEN) + "], got " +
+                                 std::to_string(qTile));
+    }
 
     uint32_t maxNumBlock =
         SliceBlockTableToLens(_blockTables, _lens, _cachedLens, blockSize, compressRatio);
@@ -2914,15 +2920,16 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     CHECK_ACL(aclrtMemcpy(ptr, size, host.data(), size, ACL_MEMCPY_HOST_TO_DEVICE));
     seqPositions.Init({len}, INT32, ptr);
 
-    XTensor &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
-                                   q.scalar_type() == at::kChar ? FP32 : XDtypeOf(q), DBG_LOC);
+    XTensor &scores =
+        rt.GetTensor({2 * rt.aicNum * MAX_INDEXER_Q_TILE_LEN, MAX_INDEXER_KV_TILE_LEN},
+                     q.scalar_type() == at::kChar ? FP32 : XDtypeOf(q), DBG_LOC);
     XTensor &lastTopk = rt.GetTensor({_q.shape[0], 2 * topK}, INT32, DBG_LOC);
     XTensor &sync = rt.GetTensor({1, rt.aivNum}, INT32, DBG_LOC);
     sync.Memset(0, rt.stream);
 
     XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, seqPositions, _topkIndices,
                        _queryStartLoc, _lens, _cachedLens, _blockTables, sync, nHeads, headDim,
-                       blockSize, batch, topK, 0, _ks, compressRatio, kvSplit);
+                       blockSize, batch, topK, 0, _ks, compressRatio, kvSplit, qTile);
     rt.Synchronize();
     rt.PutTensor(sync);
     rt.PutTensor(lastTopk);
@@ -3932,7 +3939,7 @@ PYBIND11_MODULE(_C, m)
           py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
           py::arg("block_size"), py::arg("batch"), py::arg("top_k"), py::kw_only(),
           py::arg("k_scale_cache") = py::none(), py::arg("compress_ratio") = 1,
-          py::arg("kv_split") = 0);
+          py::arg("kv_split") = 0, py::arg("q_tile") = 0);
     m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"),
           py::kw_only(), py::arg("calc_offset") = 0, py::arg("calc_num") = UINT32_MAX);
     m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),

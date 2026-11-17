@@ -3922,6 +3922,7 @@ def indexer_topk(
     k_scale_cache: Optional[torch.Tensor] = None,
     compress_ratio: int = 1,
     kv_split: int = 0,
+    q_tile: int = 0,
 ) -> None:
     """Fused indexer scores + top-k selection over cached keys.
 
@@ -3987,6 +3988,11 @@ def indexer_topk(
             ``1`` = (tile, chunk) tasks with the cross-core topK relay. ``0`` only
             fills the blocks when the sparse query-tile count reaches the launch
             block count. Both modes produce identical results.
+        q_tile (int): Query-tile length (rows per query tile). ``0`` = the
+            compile-time default (the serving path picks it per forward in
+            ``PrepareAttn``); values above the kernel's build-time maximum
+            (24) are rejected, and both partitioning modes produce identical
+            results for any valid tile.
 
     Returns:
         None: ``topk_indices`` is written in place. The binding synchronizes.

@@ -38,7 +38,8 @@ public:
                                 uint32_t batch, uint32_t blockTableStride, uint32_t maxNumBlock,
                                 uint32_t topK, uint8_t skipDenseTopk, GM_ADDR kScaleCache = nullptr,
                                 uint32_t kScaleCacheStride = 0, uint32_t compressRatio = 1,
-                                uint32_t weightCols = 0, uint8_t kvSplit = 0)
+                                uint32_t weightCols = 0, uint8_t kvSplit = 0,
+                                uint8_t qTileOverride = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -67,6 +68,10 @@ public:
         this->blockTableStride = blockTableStride;
         this->maxNumBlock = maxNumBlock;
         this->topK = topK;
+        // 0 = compile-time default; clamped to the macro because L1 staging
+        // (ql1Buf/wl1Buf) is macro-sized at build time.
+        this->queryTileSize =
+            qTileOverride > 0 ? MIN(qTileOverride, MAX_INDEXER_Q_TILE_LEN) : MAX_INDEXER_Q_TILE_LEN;
         this->skipDenseTopk = skipDenseTopk > 0;
         this->compressRatio = compressRatio > 0 ? compressRatio : 1;
         this->tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN, SORT_BLOCK_SIZE);
@@ -78,11 +83,13 @@ public:
         this->waitPrevGeneration = 1;
         this->resetPrevCore = 0;
 
+        // Per-block ping-pong score slots are qTile rows wide (the FIX stage
+        // writes one run of scores per query row); match the host allocation.
         this->scores[0].SetGlobalBuffer(((__gm__ ScoreDtype *)scores) +
-                                        block_idx * XLITE_MAX_M0 * tileSizeOfCachedKV);
+                                        block_idx * MAX_INDEXER_Q_TILE_LEN * tileSizeOfCachedKV);
         this->scores[1].SetGlobalBuffer(((__gm__ ScoreDtype *)scores) +
-                                        block_idx * XLITE_MAX_M0 * tileSizeOfCachedKV +
-                                        block_num * XLITE_MAX_M0 * tileSizeOfCachedKV);
+                                        block_idx * MAX_INDEXER_Q_TILE_LEN * tileSizeOfCachedKV +
+                                        block_num * MAX_INDEXER_Q_TILE_LEN * tileSizeOfCachedKV);
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * AIV_TO_AIC + subBlockIdx;
         this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * AIV_TO_AIC + subBlockIdx;
         this->kvSplit = kvSplit > 0;
@@ -748,7 +755,7 @@ public:
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID4);
 #endif
 
-        int queryTileSize = MAX_INDEXER_Q_TILE_LEN;
+        int queryTileSize = this->queryTileSize;
 
         int totalIdx = 0;
         int curr = 0;
@@ -915,7 +922,8 @@ private:
     uint32_t setNextGeneration;
     uint32_t waitPrevGeneration;
     int resetPrevCore;
-    bool kvSplit;  // true: split to (tile, chunk) tasks with cross-core relay
+    bool kvSplit;       // true: split to (tile, chunk) tasks with cross-core relay
+    int queryTileSize;  // runtime tile override (Init); see Init's qTileOverride
 
 #ifdef __DAV_C220_CUBE__
     LocalTensor<Dtype> ql1Buf;                            // event 4
@@ -950,13 +958,13 @@ private:
         GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,           \
         uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                    \
         uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,    \
-        uint32_t compressRatio, uint32_t weightCols, uint8_t kvSplit)                             \
+        uint32_t compressRatio, uint32_t weightCols, uint8_t kvSplit, uint8_t qTileOverride)      \
     {                                                                                             \
         IndexerTopK<dtype, float, dtype, dtype> op;                                               \
         op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,     \
                 lastTopk, seqPositions, topkIndices, sync, kCacheStride, nHeads, headDim,         \
                 blockSize, batch, blockTableStride, maxNumBlock, topK, skipDenseTopk, nullptr, 0, \
-                compressRatio, weightCols, kvSplit);                                              \
+                compressRatio, weightCols, kvSplit, qTileOverride);                               \
         op.Run();                                                                                 \
     }
 
@@ -968,12 +976,13 @@ private:
         uint32_t heads, uint32_t dim, uint32_t block_size, uint32_t batch,                        \
         uint32_t block_table_stride, uint32_t max_blocks, uint32_t topk, uint8_t skip_dense_topk, \
         GM_ADDR k_scale_cache, uint32_t k_scale_cache_stride, uint32_t compress_ratio,            \
-        uint32_t weight_cols, uint8_t kvSplit)                                                    \
+        uint32_t weight_cols, uint8_t kvSplit, uint8_t q_tile_override)                           \
     {                                                                                             \
         IndexerTopK<dtype, int32_t, half, float> op;                                              \
         op.Init(q, k_cache, weight, query_start_loc, query_lens, cached_lens, block_tables,       \
                 scores, last_topk, seq_positions, topk_indices, sync, k_cache_stride, heads, dim, \
                 block_size, batch, block_table_stride, max_blocks, topk, skip_dense_topk,         \
-                k_scale_cache, k_scale_cache_stride, compress_ratio, weight_cols, kvSplit);       \
+                k_scale_cache, k_scale_cache_stride, compress_ratio, weight_cols, kvSplit,        \
+                q_tile_override);                                                                 \
         op.Run();                                                                                 \
     }

@@ -307,6 +307,9 @@ public:
     // indexer_topk partitioning mode for this step (PickIndexerKvSplit):
     // 0 = serial (batch, query tile) tasks, 1 = (tile, chunk) with cross-core relay.
     uint8_t _indexerKvSplit = 0;
+    // indexer_topk query-tile length for this step (PickIndexerQTile);
+    // 0 = the compile-time macro default until the first PrepareAttn.
+    uint32_t _indexerQTile = 0;
     XTensor _attnPosition;  // [batchedTokens] or [num_dims, batchedTokens] (mrope) int64, ref:
                             // v0/1 -> _position, v2 -> attnMeta.position
     std::vector<XTensor> _attnBlockTables;  // int32 2-D, per-kv-cache; v0/1 -> compact pack,
